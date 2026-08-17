@@ -6,16 +6,16 @@
 
 ## 结论
 
-当前 `0.0.4` 候选版本应标记为 **Windows 部分兼容，尚未完成本插件的原生 Windows 验证**：
+当前 `0.0.4` 候选版本应标记为 **提供实验性 Windows 支持，尚未完成真实用户环境和主流 ACP 客户端的充分验证**：
 
 - 插件的安装、ACP stdio 桥接、路径处理，以及 `standard`、`code`、`cordis` 三个模式，
   从源码上具备 Windows 兼容性；默认模式是 `standard`。
 - `minimal` 模式不在原生 Windows 上提供。它装配的是 persistent Bash，上游默认执行文件是
   `/bin/bash`，没有像另外三个模式一样切换到 PowerShell；插件会在 win32 隐藏并拒绝该模式。
-- 上游 DSH 有原生 Windows CI 和官方 ACP 测试信号，但本仓库 CI 只跑 Ubuntu；这些证据不能
-  替代 `@dsh-enhanced/acp` 在干净 Windows 系统上的安装、配置组合和真实 stdio 握手验证。
+- 本仓库新增 Windows Server 2025 CI，覆盖完整插件测试、tarball 干净安装、配置组合和真实
+  stdio initialize；这些自动化证据仍不能替代真实 Windows 用户环境与主流 ACP 客户端验证。
 
-在补齐 Windows 冒烟之前，不宜在 README 或 npm 文案中写“完整支持 Windows”。
+在取得更广泛的真实客户端反馈之前，不宜在 README 或 npm 文案中写“完整支持 Windows”；遇到问题欢迎在开源仓库提交 issue 或 pull request。
 
 ## 分层核查
 
@@ -28,7 +28,7 @@
 | 工作目录 | 代码级兼容 | `session/new` 使用运行平台的 `node:path.isAbsolute()` 校验 cwd，没有手工拼 `/`；因此原生 Windows drive path 和 UNC path 由 Node 的 win32 路径规则判断。见[会话校验](../plugins/acp/src/index.ts)。 |
 | `standard` / `code` / `cordis` | 预期兼容 | 三个上游预设都在 win32 禁用 Bash tool、启用 PowerShell tool；DSH base 同样按平台选择 PowerShell sandbox 和 Windows ACL sandbox。见上游 [`standard`](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/apps/cli/config/agent-presets/standard/agent.cordis.yml#L44-L50)、[`code`](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/apps/cli/config/agent-presets/code/agent.cordis.yml#L51-L57)、[`cordis`](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/apps/cli/config/agent-presets/cordis/agent.cordis.yml#L45-L51) 与 [base patch](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/bundle/base/cordis.patch.yml#L163-L216)。 |
 | `minimal` | 原生 Windows 不提供 | 插件在 win32 从 ACP mode 列表隐藏并拒绝 `minimal`；见[模式表](../plugins/acp/src/control.ts)。上游 `minimal` 装配 `dsh-terminal-bash` 与 `dsh-tool-bash-persistent`，其 terminal 默认路径是 `/bin/bash`，对应组合测试也只在 Linux/macOS 运行。见 [`minimal` preset](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/apps/cli/config/agent-presets/minimal/agent.cordis.yml#L15-L38)、[Bash terminal 默认配置](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/terminal/terminal-bash/src/config.ts#L1-L50)和[平台门禁测试](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/packages/shell/tool-bash-persistent/tests/loader-composition.spec.ts#L66-L70)。安装 Git Bash 或 WSL 不能等价证明这套原生 DSH sandbox/PTY 组合受支持。 |
-| Windows 测试 | 本插件未验证 | 本仓库 workflow 只有 `ubuntu-latest`；见[当前 CI](../.github/workflows/ci.yml)。上游在 Windows Server 2025 + Node 24 上运行完整 Windows inventory，覆盖普通 ACP 单测和官方 built-bin stdio smoke；但 observational gates 允许失败，且 `windows-native` 不进入 required aggregate。见[上游 CI](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/.github/workflows/ci.yml#L437-L489)、[Windows gates](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/scripts/run-gates.ts#L429-L455)和 [built ACP smoke](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/scripts/run-gates.ts#L618-L642)。 |
+| Windows 测试 | 自动化覆盖，尚无真实客户端验证 | 本仓库在 Windows Server 2025 + Node 24 上运行完整插件测试，打包并安装到隔离 profile，拒绝 peer 警告，检查 `--dump-config` 并进行真实 stdio initialize；见[当前 CI](../.github/workflows/ci.yml)与[握手脚本](../plugins/acp/scripts/stdio-smoke.mjs)。上游还运行 Windows inventory 和官方 built-bin ACP smoke；见[上游 CI](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/.github/workflows/ci.yml#L437-L489)与 [built ACP smoke](https://github.com/deepseek-ai/deepseek-harness/blob/47f943859bef60e4160492346772ded9b24f765a/scripts/run-gates.ts#L618-L642)。 |
 
 ## 客户端启动边界
 
@@ -44,12 +44,10 @@ Windows npm-bin 启动配置，而不是在 ACP stdout 外包一层会打印提�
 
 ## 达到“已验证 Windows”还缺什么
 
-在原生 Windows 10/11 或 Windows Server、Node 24、pnpm 11 上至少执行：
+自动化 CI 已覆盖干净安装、配置组合、initialize 和模式策略。达到真实客户端“已验证 Windows”
+还需要在 Windows 10/11、Node 24、pnpm 11 上执行：
 
-1. 在隔离的 `DSH_HOME` 中安装 registry tarball，确认没有 missing-peer 警告。
-2. 执行 `dsh --profile acp --dump-config`，确认 base、PowerShell/Windows sandbox、ACP bundle
-   和 preset roster 组合成功。
-3. 由真实 ACP 客户端进程启动 `dsh --profile acp`，验证 initialize、newSession、prompt、cancel、
+1. 从 registry 安装发布版本，确认用户网络和 npm 配置下没有 missing-peer 警告。
+2. 由主流 ACP 客户端进程启动 `dsh --profile acp`，验证 initialize、newSession、prompt、cancel、
    closeSession 和 EOF 清理，且 stdout 每一行都是 JSON-RPC。
-4. 分别验证 `standard`、`code`、`cordis`，并确认 Windows 不展示且明确拒绝 `minimal`。
-5. 把上述流程加入本仓库 Windows CI，而不是只依赖上游官方 ACP 的测试。
+3. 分别实际运行 `standard`、`code`、`cordis`，并确认 Windows 不展示且明确拒绝 `minimal`。
