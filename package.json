@@ -1,0 +1,28 @@
+{
+  "name": "dsh-enhanced",
+  "version": "0.0.0",
+  "private": true,
+  "description": "A scalable monorepo for community DeepSeek Harness plugins.",
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "scripts": {
+    "build": "pnpm --recursive --if-present run build",
+    "check": "pnpm run validate && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run pack:check",
+    "create:plugin": "node ./scripts/create-plugin.mjs",
+    "lint": "oxlint --deny-warnings .",
+    "pack:check": "pnpm --recursive --filter './plugins/*' pack --dry-run",
+    "test": "pnpm --recursive --if-present run test",
+    "typecheck": "pnpm --recursive --if-present run typecheck",
+    "validate": "node ./scripts/validate-workspace.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "oxlint": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

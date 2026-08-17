@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-enhanced-hello
+      name: '@dsh-enhanced/hello'
