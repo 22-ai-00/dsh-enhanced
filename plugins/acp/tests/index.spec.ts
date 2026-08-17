@@ -8,7 +8,21 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
   version: string
   dependencies: Record<string, string>
   peerDependencies: Record<string, string>
+  peerDependenciesMeta?: Record<string, { optional?: boolean }>
+  devDependencies: Record<string, string>
 }
+
+const DSH_HOST_PACKAGES = [
+  '@deepseek-ai/cordis',
+  '@deepseek-ai/dsh-agent',
+  '@deepseek-ai/dsh-agent-default-model',
+  '@deepseek-ai/dsh-agent-presets',
+  '@deepseek-ai/dsh-cordis-host-runner',
+  '@deepseek-ai/dsh-llm',
+  '@deepseek-ai/dsh-session',
+  '@deepseek-ai/dsh-session-title',
+  '@deepseek-ai/dsh-user-approval',
+] as const
 
 describe('@dsh-enhanced/acp package contract', () => {
   it('uses the stable Cordis identity and native service injections', () => {
@@ -28,9 +42,21 @@ describe('@dsh-enhanced/acp package contract', () => {
     expect(bundle).toContain("name: '@deepseek-ai/dsh-cordis-host-runner'")
   })
 
-  it('publishes the audited 0.0.3 contract against the verified DSH release', () => {
-    expect(manifest.version).toBe('0.0.3')
+  it('prepares the install-safe 0.0.4 package revision', () => {
+    expect(manifest.version).toBe('0.0.4')
     expect(version).toBe(manifest.version)
+  })
+
+  it('leaves DSH host packages to the profile runtime fallback', () => {
+    for (const packageName of DSH_HOST_PACKAGES) {
+      expect(manifest.dependencies).not.toHaveProperty(packageName)
+      expect(manifest.peerDependencies[packageName]).toBeDefined()
+      expect(manifest.peerDependenciesMeta?.[packageName]).toEqual({ optional: true })
+      expect(manifest.devDependencies[packageName]).toBe('catalog:')
+    }
+  })
+
+  it('targets the verified DSH release and carries ACP runtime libraries', () => {
     expect(manifest.dependencies.zod).toBe('catalog:')
     expect(Object.values(manifest.peerDependencies)).not.toContain('>=0.1.0-rc.5 <0.2.0')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.1.0-rc.6 <0.2.0')

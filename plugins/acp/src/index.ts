@@ -57,7 +57,7 @@ import {
 } from './control.ts'
 
 export const name = 'dsh-enhanced-acp'
-export const version = '0.0.3'
+export const version = '0.0.4'
 export const inject = ['agentDefaultModel', 'agentPresets', 'agents', 'llm']
 
 export interface AcpConfig {

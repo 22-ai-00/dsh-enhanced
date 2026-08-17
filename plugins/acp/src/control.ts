@@ -62,6 +62,16 @@ const MODES: SessionModeState['availableModes'] = [
 
 const MODE_IDS = new Set(MODES.map(mode => mode.id))
 
+function modeAvailable(modeId: string, platform: NodeJS.Platform): boolean {
+  return platform !== 'win32' || modeId !== 'minimal'
+}
+
+function assertModeAvailable(modeId: string, platform: NodeJS.Platform): void {
+  if (!modeAvailable(modeId, platform)) {
+    throw new Error('minimal mode is not available on Windows because it requires persistent Bash')
+  }
+}
+
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -299,16 +309,18 @@ export async function setSessionConfigOption(
 export async function modeState(
   presets: NativeAgentPresetControl,
   agent: Agent,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<SessionModeState> {
   const currentModeId = presets.composedPreset(agent.ctx)
   if (currentModeId === undefined) throw new Error('the DSH session has no composed agent preset')
   if (!MODE_IDS.has(currentModeId)) {
     throw new Error(`unsupported DSH agent preset for ACP mode: ${currentModeId}`)
   }
+  assertModeAvailable(currentModeId, platform)
   const nativeModes = new Map((await presets.list()).map(preset => [preset.id, preset]))
   return {
     currentModeId,
-    availableModes: MODES.map((mode) => {
+    availableModes: MODES.filter(mode => modeAvailable(mode.id, platform)).map((mode) => {
       const native = nativeModes.get(mode.id)
       return {
         ...mode,
@@ -324,8 +336,10 @@ export async function setNativeMode(
   presets: NativeAgentPresetControl,
   agent: Agent,
   modeId: string,
+  platform: NodeJS.Platform = process.platform,
 ): Promise<{ agentPreset: string }> {
   if (!MODE_IDS.has(modeId)) throw new Error(`unknown mode: ${modeId}`)
+  assertModeAvailable(modeId, platform)
   if (agent.session.events.some(event => event.type === 'turn/start')) {
     throw new Error(`session "${agent.session.id}" has already started; its agent preset is fixed`)
   }

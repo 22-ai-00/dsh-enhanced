@@ -4,7 +4,7 @@
 
 ## 安装
 
-需要先安装 DSH。然后创建一个独立的 `acp` profile 并安装插件：
+需要先安装 DSH `0.1.0-rc.6` 或兼容版本。然后创建一个独立的 `acp` profile 并安装插件：
 
 ```sh
 dsh plugin --profile acp add @dsh-enhanced/acp
@@ -12,6 +12,8 @@ dsh --profile acp --dump-config
 ```
 
 第二条命令用于确认插件已经进入最终配置，不会启动 ACP 会话。
+
+DSH/Cordis 服务以及 patch 中使用的 `agent-presets`、`cordis-host-runner` 均由 DSH 安装闭包提供，插件不会在 profile 中重复安装这些宿主包。它们在 npm 清单中声明为可选 peer，仅表示需要由 DSH 运行时提供，并不代表相应能力可缺失。
 
 ## 连接 ACP 客户端
 
@@ -26,9 +28,11 @@ dsh --profile acp --dump-config
 
 具体配置入口和字段名由 ACP 客户端决定。DSH 启动后会占用 stdout 传输协议消息，因此不要在启动命令外再包装会向 stdout 输出内容的脚本。
 
+在 Windows 上，如果 ACP 客户端不能自动解析 npm 生成的命令 shim，请按该客户端的配置方式把命令改为 `dsh.cmd`。不要使用会向 stdout 输出额外文字的启动脚本。
+
 ## 功能
 
-- 提供 `standard`、`code`、`minimal` 和 `cordis` 四种 DSH Agent 模式。
+- Linux 和 macOS 提供 `standard`、`code`、`minimal` 和 `cordis` 四种 DSH Agent 模式。原生 Windows 提供 `standard`、`code` 和 `cordis`；依赖 persistent Bash 与 `/bin/bash` 的 `minimal` 会被隐藏并拒绝启用。
 - 使用 DSH 当前可用的模型和推理等级，并将它们提供给支持选择器的 ACP 客户端。
 - 向客户端传输回复、推理、工具调用与结果、计划、会话标题和 token 用量。
 - 沿用 DSH 的工具、沙箱、权限确认、取消和会话持久化机制。
@@ -59,7 +63,7 @@ Cordis 的 `config` 是整段替换。覆盖配置时，请在同一段中保留
 - 每个 profile 只能挂载一个占用 stdio 的 ACP server。
 - 输入支持文本和 resource link；resource link 会作为文本引用传给 DSH。
 - 不支持在单个 ACP 会话中动态注入 MCP server，请通过 DSH profile 配置 MCP。
-- 当前只提供四种内置 DSH Agent 模式，暂不暴露自定义预设。
+- 当前只提供内置 DSH Agent 模式，暂不暴露自定义预设；原生 Windows 不提供 Bash-only 的 `minimal`。
 - 裸 ACP 环境没有 DSH 浏览器页面，因此 `cordis` 模式只能使用 Host 侧能力，不能使用 Client half。
 
 ## 权限与数据
