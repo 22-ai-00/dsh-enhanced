@@ -28,7 +28,7 @@ dsh plugin --profile acp add @dsh-enhanced/acp
 dsh --profile acp --dump-config
 ```
 
-然后在 ACP 客户端中把 `dsh --profile acp` 配置为 stdio agent。客户端可在首轮前选择 DSH 的 `standard`、`code`、`minimal`、`cordis` Agent 模式，并使用 DSH 提供的模型、工具、权限和会话能力；原生 Windows 会隐藏依赖 `/bin/bash` 的 `minimal`。详见 [`@dsh-enhanced/acp`](plugins/acp)。
+然后在 ACP 客户端中把 `dsh --profile acp` 配置为 stdio agent。客户端可在首轮前选择 DSH 的 `standard`、`code`、`minimal`、`cordis` Agent 模式，并使用 DSH 提供的模型、工具、权限和会话能力；原生 Windows 会隐藏依赖 `/bin/bash` 的 `minimal`。Windows 支持目前为实验性，尚未经过真实用户环境和主流 ACP 客户端的充分测试，遇到问题欢迎提交 issue 或 pull request。详见 [`@dsh-enhanced/acp`](plugins/acp)。
 
 ## 开发
 

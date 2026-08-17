@@ -30,6 +30,8 @@ DSH/Cordis 服务以及 patch 中使用的 `agent-presets`、`cordis-host-runner
 
 在 Windows 上，如果 ACP 客户端不能自动解析 npm 生成的命令 shim，请按该客户端的配置方式把命令改为 `dsh.cmd`。不要使用会向 stdout 输出额外文字的启动脚本。
 
+Windows 支持目前为实验性，尚未在真实 Windows 用户环境和主流 ACP 客户端上完成充分测试。如果遇到问题，欢迎在 [GitHub 仓库](https://github.com/22-ai-00/dsh-enhanced)提交 issue 或 pull request。
+
 ## 功能
 
 - Linux 和 macOS 提供 `standard`、`code`、`minimal` 和 `cordis` 四种 DSH Agent 模式。原生 Windows 提供 `standard`、`code` 和 `cordis`；依赖 persistent Bash 与 `/bin/bash` 的 `minimal` 会被隐藏并拒绝启用。

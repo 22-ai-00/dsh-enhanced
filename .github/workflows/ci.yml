@@ -68,7 +68,11 @@ jobs:
       - name: Install DSH and packed plugin in a clean profile
         shell: pwsh
         run: |
-          npm install --global @deepseek-ai/dsh@0.1.0-rc.6
+          $pnpmGlobalBin = Join-Path $env:RUNNER_TEMP "pnpm-global-bin"
+          New-Item -ItemType Directory -Force $pnpmGlobalBin | Out-Null
+          $env:PATH = "$pnpmGlobalBin;$env:PATH"
+          pnpm config set global-bin-dir $pnpmGlobalBin
+          pnpm add --global @deepseek-ai/dsh@0.1.0-rc.6
           if ($LASTEXITCODE -ne 0) { throw "failed to install DSH" }
 
           $env:DSH_HOME = Join-Path $env:RUNNER_TEMP "dsh-home"
@@ -85,5 +89,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "failed to compose ACP profile" }
 
           $env:DSH_ACP_EXPECTED_VERSION = "0.0.4"
+          $env:DSH_ENTRY = Join-Path (pnpm root --global) "@deepseek-ai\dsh\lib\bin.js"
+          if (-not (Test-Path $env:DSH_ENTRY)) { throw "failed to resolve the DSH Node entrypoint" }
           node ./plugins/acp/scripts/stdio-smoke.mjs
           if ($LASTEXITCODE -ne 0) { throw "ACP stdio smoke failed" }
