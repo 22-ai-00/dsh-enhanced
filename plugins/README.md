@@ -2,6 +2,7 @@
 
 | 插件 | 包 | 状态 | 说明 |
 |---|---|---|---|
+| [acp](acp) | `@dsh-enhanced/acp` | 实验性 | 原生优先的 ACP stdio bridge，支持模式、模型、推理等级动态切换与完整 DSH 事件出口。 |
 | [hello](hello) | `@dsh-enhanced/hello` | 示例 | 最小可安装 bundle，用于验证仓库契约和开发链路。 |
 
 <!-- plugin-catalog:end -->

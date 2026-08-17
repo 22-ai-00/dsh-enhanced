@@ -3,11 +3,25 @@ packages:
   - packages/*
 
 catalog:
+  '@agentclientprotocol/sdk': 0.25.1
+  '@deepseek-ai/dsh-agent': 0.1.0-rc.6
+  '@deepseek-ai/dsh-agent-default-model': 0.1.0-rc.6
+  '@deepseek-ai/dsh-agent-loop': 0.1.0-rc.6
+  '@deepseek-ai/dsh-agent-loop-testkit': 0.1.0-rc.6
+  '@deepseek-ai/dsh-llm': 0.1.0-rc.6
+  '@deepseek-ai/dsh-plan-mode': 0.1.0-rc.6
+  '@deepseek-ai/dsh-session': 0.1.0-rc.6
+  '@deepseek-ai/dsh-session-title': 0.1.0-rc.6
+  '@deepseek-ai/dsh-system-prompt': 0.1.0-rc.6
+  '@deepseek-ai/dsh-tools': 0.1.0-rc.6
+  '@deepseek-ai/dsh-user-approval': 0.1.0-rc.6
+  '@deepseek-ai/schemastery': 3.18.1
   '@deepseek-ai/cordis': 4.0.1
   '@types/node': 22.20.0
   oxlint: 1.76.0
   typescript: 6.0.3
   vitest: 4.1.8
+  zod: 4.4.3
 
 linkWorkspacePackages: true
 

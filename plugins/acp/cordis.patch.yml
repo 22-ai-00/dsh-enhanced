@@ -1,0 +1,5 @@
+- insert:
+    - id: dsh-enhanced-acp
+      name: '@dsh-enhanced/acp'
+      config:
+        includeRawEvents: true
