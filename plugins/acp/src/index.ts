@@ -45,7 +45,7 @@ import {
 import { createUserMessage, errorChain, ReasoningEffortId } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
-import type {} from '@deepseek-ai/dsh-plan-mode'
+import type {} from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-user-approval'
 import { createSessionEventMapper, type SessionEventMapper } from './codec.ts'
@@ -57,7 +57,7 @@ import {
 } from './control.ts'
 
 export const name = 'dsh-enhanced-acp'
-export const inject = ['agentDefaultModel', 'agents', 'llm', 'planMode']
+export const inject = ['agentDefaultModel', 'agentPresets', 'agents', 'llm']
 
 export interface AcpConfig {
   /** Optional fixed provider route; must be paired with `model`. */
@@ -91,6 +91,7 @@ interface SessionRecord {
     turn: number | undefined
     endReason: TurnEndReason | undefined
   } | undefined
+  modeSwitch: Promise<void>
 }
 
 interface ContinuableDrain {
@@ -162,7 +163,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
   const agents = ctx.agents
   const defaultModel = ctx.agentDefaultModel
   const llm = ctx.llm
-  const planMode = ctx.planMode
+  const agentPresets = ctx.agentPresets
   const logger = ctx.logger
   const includeRawEvents = config.includeRawEvents ?? true
   const sessions = new Map<SessionId, SessionRecord>()
@@ -325,14 +326,20 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
       async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
         assertOpen()
         validateSessionParams(params)
-        const current = await initialSelection()
+        const [current, initialPreset] = await Promise.all([
+          initialSelection(),
+          agentPresets.resolve(),
+        ])
         const selection: ModelSelectionRef = { current, assembled: undefined }
         const sessionId = SessionId(randomUUID())
         const handle = await agents.create({
           sessionId,
-          meta: { cwd: params.cwd },
+          meta: { cwd: params.cwd, agentPreset: initialPreset.id },
           agentOptions: { provider: current.provider, model: current.model },
-          setup: (agentCtx) => { installModelSelection(agentCtx, selection) },
+          setup: async (agentCtx) => {
+            installModelSelection(agentCtx, selection)
+            await agentPresets.mount(agentCtx, initialPreset.id)
+          },
         })
         if (closed) {
           await handle.dispose()
@@ -344,12 +351,13 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
           selection,
           mapper: createSessionEventMapper({ includeRawEvents }),
           inflight: undefined,
+          modeSwitch: Promise.resolve(),
         }
         sessions.set(sessionId, record)
         try {
           return {
             sessionId,
-            modes: modeState(planMode, handle.agent),
+            modes: await modeState(agentPresets, handle.agent),
             configOptions: await buildSessionConfigOptions(llm, selection),
             _meta: {
               dsh: {
@@ -369,7 +377,9 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
         assertOpen()
         const record = requireSession(SessionId(params.sessionId))
         try {
-          const outcome = setNativeMode(planMode, record.agent, params.modeId)
+          const selected = record.modeSwitch.then(() => setNativeMode(agentPresets, record.agent, params.modeId))
+          record.modeSwitch = selected.then(() => undefined, () => undefined)
+          const outcome = await selected
           return { _meta: { dsh: { outcome } } }
         } catch (error: unknown) {
           throw invalidParams(error instanceof Error ? error.message : String(error))
@@ -400,6 +410,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
       async prompt(params: PromptRequest): Promise<PromptResponse> {
         assertOpen()
         const record = requireSession(SessionId(params.sessionId))
+        await record.modeSwitch
         if (record.inflight !== undefined) throw invalidParams('a prompt is already in flight for this session')
         if (promptHasUnsupportedContent(params.prompt)) {
           throw invalidParams('only text and resource_link prompt content is supported')
@@ -452,6 +463,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
         const sessionId = SessionId(params.sessionId)
         const record = requireSession(sessionId)
         sessions.delete(sessionId)
+        await record.modeSwitch
         record.agent.cancel({ kind: 'user' })
         settlePrompt(record, 'cancelled')
         await drainAndDispose([record])

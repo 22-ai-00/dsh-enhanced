@@ -90,19 +90,30 @@ async function makeHarness(): Promise<Harness> {
   const adapter = new MockAdapter()
   ctx.llm.registerAdapter(['mock'], adapter)
 
-  const modeStates = new WeakMap<Agent, boolean>()
+  const presetStates = new WeakMap<Agent['ctx'], string>()
   const modeSelections: string[] = []
   ctx.provide('agentDefaultModel', {
     currentSelection: () => ({ provider: 'mock', model: 'chat' }),
   } as never)
-  ctx.provide('planMode', {
-    get: (agent: Agent) => ({ active: modeStates.get(agent) ?? false }),
-    set: (agent: Agent, active: boolean) => {
-      modeStates.set(agent, active)
-      modeSelections.push(active ? 'plan' : 'default')
-      agent.session.append('plan/mode', { active })
-      return 'committed'
+  ctx.provide('agentPresets', {
+    defaultId: 'standard',
+    list: () => Promise.resolve([
+      { id: 'standard', name: '标准模式' },
+      { id: 'code', name: 'PTC 模式' },
+      { id: 'minimal', name: '极简模式' },
+      { id: 'cordis', name: '创造模式' },
+    ]),
+    resolve: (id?: string) => Promise.resolve({ id: id ?? 'standard' }),
+    mount: (agentCtx: Agent['ctx'], id?: string) => {
+      presetStates.set(agentCtx, id ?? 'standard')
+      return Promise.resolve({ id: id ?? 'standard' })
     },
+    recompose: (agentCtx: Agent['ctx'], id: string) => {
+      presetStates.set(agentCtx, id)
+      modeSelections.push(id)
+      return Promise.resolve({ id })
+    },
+    composedPreset: (agentCtx: Agent['ctx']) => presetStates.get(agentCtx),
   } as never)
 
   const agentToClient = new TransformStream<Uint8Array, Uint8Array>()
@@ -164,7 +175,15 @@ describe('native-first DSH ACP bridge', () => {
     })
 
     const session = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
-    expect(session.modes).toMatchObject({ currentModeId: 'default' })
+    expect(session.modes).toMatchObject({
+      currentModeId: 'standard',
+      availableModes: [
+        { id: 'standard' },
+        { id: 'code' },
+        { id: 'minimal' },
+        { id: 'cordis' },
+      ],
+    })
     expect(session.configOptions?.find(option => option.id === MODEL_CONFIG_ID)).toMatchObject({
       currentValue: modelValue('mock', 'chat'),
     })
@@ -178,7 +197,7 @@ describe('native-first DSH ACP bridge', () => {
     await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
     const { sessionId } = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
 
-    await harness.client.setSessionMode({ sessionId, modeId: 'plan' })
+    await harness.client.setSessionMode({ sessionId, modeId: 'minimal' })
     await harness.client.setSessionConfigOption({
       sessionId,
       configId: MODEL_CONFIG_ID,
@@ -189,7 +208,7 @@ describe('native-first DSH ACP bridge', () => {
       configId: REASONING_CONFIG_ID,
       value: reasoningValue('high'),
     })
-    expect(harness.modeSelections).toEqual(['plan'])
+    expect(harness.modeSelections).toEqual(['minimal'])
     expect(selected.configOptions.find(option => option.id === REASONING_CONFIG_ID)).toMatchObject({
       currentValue: reasoningValue('high'),
     })
@@ -201,7 +220,7 @@ describe('native-first DSH ACP bridge', () => {
       reasoningEffort: ReasoningEffortId('high'),
     })
     expect(harness.updates).toEqual(expect.arrayContaining([
-      expect.objectContaining({ sessionUpdate: 'current_mode_update', currentModeId: 'plan' }),
+      expect.objectContaining({ sessionUpdate: 'current_mode_update', currentModeId: 'minimal' }),
       expect.objectContaining({ sessionUpdate: 'agent_thought_chunk', content: { type: 'text', text: 'thinking' } }),
       expect.objectContaining({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text: 'answer-1' } }),
       expect.objectContaining({ sessionUpdate: 'usage_update', size: 64_000, used: 15 }),
@@ -215,6 +234,8 @@ describe('native-first DSH ACP bridge', () => {
     await harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'second' }] })
     expect(harness.adapter.requests[1]).toMatchObject({ provider: 'mock', model: 'chat' })
     expect(harness.adapter.requests[1]?.reasoningEffort).toBeUndefined()
+
+    await expect(harness.client.setSessionMode({ sessionId, modeId: 'code' })).rejects.toThrow(/already started/)
   })
 
   it('pushes refreshed ACP selectors when the native DSH model directory changes', async () => {

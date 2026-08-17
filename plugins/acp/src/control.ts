@@ -19,9 +19,16 @@ export type NativeLlmControl = Pick<
   'listProviders' | 'listModels' | 'resolveModelInfo' | 'resolveCallConfig'
 >
 
-export interface NativePlanModeControl {
-  get(agent: Agent): { active: boolean; pending?: boolean }
-  set(agent: Agent, active: boolean): 'committed' | 'queued' | 'cancelled' | 'noop'
+export interface NativeAgentPresetControl {
+  composedPreset(agentCtx: Agent['ctx']): string | undefined
+  list(): Promise<ReadonlyArray<{
+    id: string
+    name?: string
+    description?: string
+  }>>
+  mount(agentCtx: Agent['ctx'], id?: string): Promise<{ id: string }>
+  recompose(agentCtx: Agent['ctx'], id: string): Promise<{ id: string }>
+  resolve(id?: string): Promise<{ id: string }>
 }
 
 export interface ModelCatalogFailure {
@@ -32,16 +39,28 @@ export interface ModelCatalogFailure {
 
 const MODES: SessionModeState['availableModes'] = [
   {
-    id: 'default',
-    name: 'Default',
-    description: 'Normal DeepSeek Harness collaboration mode.',
+    id: 'standard',
+    name: 'Standard',
+    description: 'Full DSH coding agent with native tools, skills, plans, goals, subagents and workflows.',
   },
   {
-    id: 'plan',
-    name: 'Plan',
-    description: 'Native DSH plan mode; changes are queued safely at an active turn boundary.',
+    id: 'code',
+    name: 'PTC',
+    description: 'Standard capabilities presented through the DSH Code Mode TypeScript SDK.',
+  },
+  {
+    id: 'minimal',
+    name: 'Minimal',
+    description: 'Persistent bash and str_replace_editor only.',
+  },
+  {
+    id: 'cordis',
+    name: 'Creator',
+    description: 'Standard capabilities plus runtime inspection, plugin experiments and preset authoring.',
   },
 ]
+
+const MODE_IDS = new Set(MODES.map(mode => mode.id))
 
 function message(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -277,21 +296,40 @@ export async function setSessionConfigOption(
   return buildSessionConfigOptions(llm, selection)
 }
 
-export function modeState(planMode: NativePlanModeControl, agent: Agent): SessionModeState {
-  const state = planMode.get(agent)
+export async function modeState(
+  presets: NativeAgentPresetControl,
+  agent: Agent,
+): Promise<SessionModeState> {
+  const currentModeId = presets.composedPreset(agent.ctx)
+  if (currentModeId === undefined) throw new Error('the DSH session has no composed agent preset')
+  if (!MODE_IDS.has(currentModeId)) {
+    throw new Error(`unsupported DSH agent preset for ACP mode: ${currentModeId}`)
+  }
+  const nativeModes = new Map((await presets.list()).map(preset => [preset.id, preset]))
   return {
-    currentModeId: state.active ? 'plan' : 'default',
-    availableModes: MODES.map(mode => ({ ...mode })),
-    _meta: { dsh: state.pending === undefined ? {} : { pendingModeId: state.pending ? 'plan' : 'default' } },
+    currentModeId,
+    availableModes: MODES.map((mode) => {
+      const native = nativeModes.get(mode.id)
+      return {
+        ...mode,
+        ...(native?.name === undefined ? {} : { name: native.name }),
+        ...(native?.description === undefined ? {} : { description: native.description }),
+      }
+    }),
+    _meta: { dsh: { kind: 'agent-preset' } },
   }
 }
 
-export function setNativeMode(
-  planMode: NativePlanModeControl,
+export async function setNativeMode(
+  presets: NativeAgentPresetControl,
   agent: Agent,
   modeId: string,
-): 'committed' | 'queued' | 'cancelled' | 'noop' {
-  if (modeId === 'default') return planMode.set(agent, false)
-  if (modeId === 'plan') return planMode.set(agent, true)
-  throw new Error(`unknown mode: ${modeId}`)
+): Promise<{ agentPreset: string }> {
+  if (!MODE_IDS.has(modeId)) throw new Error(`unknown mode: ${modeId}`)
+  if (agent.session.events.some(event => event.type === 'turn/start')) {
+    throw new Error(`session "${agent.session.id}" has already started; its agent preset is fixed`)
+  }
+  const preset = await presets.recompose(agent.ctx, modeId)
+  agent.session.append('agent-preset/selected', { agentPreset: preset.id })
+  return { agentPreset: preset.id }
 }

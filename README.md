@@ -29,7 +29,7 @@ dsh plugin --profile acp add ./plugins/acp
 dsh --profile acp
 ```
 
-模式、模型和推理等级可由 ACP 客户端在当前对话中直接切换。源码 CLI 应使用 `pnpm --silent dsh --profile acp`，保持 ACP stdout 纯净。详见 [`@dsh-enhanced/acp`](plugins/acp)。
+ACP 客户端可在首轮前选择 DSH 的 `standard`、`code`、`minimal`、`cordis` Agent 预设；模型和推理等级可在当前对话的下一安全步骤动态生效。源码 CLI 应使用 `pnpm --silent dsh --profile acp`，保持 ACP stdout 纯净。详见 [`@dsh-enhanced/acp`](plugins/acp)。
 
 ## 开发
 
