@@ -167,7 +167,7 @@ describe('ACP native session controls', () => {
       resolve: id => Promise.resolve({ id: id ?? current }),
     }
 
-    await expect(modeState(presets, agent)).resolves.toMatchObject({
+    await expect(modeState(presets, agent, 'linux')).resolves.toMatchObject({
       currentModeId: 'standard',
       availableModes: [
         { id: 'standard', name: '标准模式', description: '标准描述' },
@@ -176,13 +176,13 @@ describe('ACP native session controls', () => {
         { id: 'cordis', name: '创造模式', description: '创造描述' },
       ],
     })
-    await expect(setNativeMode(presets, agent, 'minimal')).resolves.toEqual({ agentPreset: 'minimal' })
-    await expect(modeState(presets, agent)).resolves.toMatchObject({ currentModeId: 'minimal' })
+    await expect(setNativeMode(presets, agent, 'minimal', 'linux')).resolves.toEqual({ agentPreset: 'minimal' })
+    await expect(modeState(presets, agent, 'linux')).resolves.toMatchObject({ currentModeId: 'minimal' })
     expect(events).toEqual([{ type: 'agent-preset/selected', data: { agentPreset: 'minimal' } }])
-    await expect(setNativeMode(presets, agent, 'unknown')).rejects.toThrow(/unknown mode/)
+    await expect(setNativeMode(presets, agent, 'unknown', 'linux')).rejects.toThrow(/unknown mode/)
 
     events.push({ type: 'turn/start', data: { turn: 1 } })
-    await expect(setNativeMode(presets, agent, 'code')).rejects.toThrow(/already started/)
+    await expect(setNativeMode(presets, agent, 'code', 'linux')).rejects.toThrow(/already started/)
     expect(current).toBe('minimal')
   })
 
