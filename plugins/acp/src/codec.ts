@@ -168,10 +168,10 @@ export function createSessionEventMapper(
             _meta: rawMeta(event),
           }]
 
-        case 'plan/mode':
+        case 'agent-preset/selected':
           return [{
             sessionUpdate: 'current_mode_update',
-            currentModeId: event.data.active ? 'plan' : 'default',
+            currentModeId: event.data.agentPreset,
             _meta: rawMeta(event),
           }]
 

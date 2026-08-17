@@ -93,7 +93,7 @@ describe('DSH session event to ACP updates', () => {
         { content: 'Implement bridge', status: 'in_progress' },
       ],
     }))
-    const mode = mapper.map(event('plan/mode', { active: true }))
+    const mode = mapper.map(event('agent-preset/selected', { agentPreset: 'minimal' }))
     const title = mapper.map(event('session/title', {
       title: 'ACP integration',
       messageSeqs: [1],
@@ -108,7 +108,7 @@ describe('DSH session event to ACP updates', () => {
         { content: 'Implement bridge', status: 'in_progress', priority: 'medium' },
       ],
     })])
-    expect(mode).toEqual([expect.objectContaining({ sessionUpdate: 'current_mode_update', currentModeId: 'plan' })])
+    expect(mode).toEqual([expect.objectContaining({ sessionUpdate: 'current_mode_update', currentModeId: 'minimal' })])
     expect(title).toEqual([expect.objectContaining({
       sessionUpdate: 'session_info_update',
       title: 'ACP integration',

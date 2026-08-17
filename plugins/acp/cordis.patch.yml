@@ -3,3 +3,9 @@
       name: '@dsh-enhanced/acp'
       config:
         includeRawEvents: true
+    - id: cordis-host-runner
+      name: '@deepseek-ai/dsh-cordis-host-runner'
+    - id: agent-presets
+      name: '@deepseek-ai/dsh-agent-presets'
+      config:
+        default: standard

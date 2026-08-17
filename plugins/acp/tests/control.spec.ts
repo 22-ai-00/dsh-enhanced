@@ -17,8 +17,8 @@ import {
   reasoningValue,
   setNativeMode,
   setSessionConfigOption,
+  type NativeAgentPresetControl,
   type NativeLlmControl,
-  type NativePlanModeControl,
 } from '../src/control.ts'
 
 function llm(): NativeLlmControl {
@@ -141,20 +141,48 @@ describe('ACP native session controls', () => {
     await ctx.fiber.dispose()
   })
 
-  it('maps ACP default/plan modes to the DSH plan-mode service', () => {
-    const agent = {} as Agent
-    let active = false
-    const planMode: NativePlanModeControl = {
-      get: () => ({ active }),
-      set: (_agent, next) => {
-        active = next
-        return 'committed'
+  it('maps ACP modes to the four shipped DSH agent presets', async () => {
+    const events: unknown[] = []
+    const agent = {
+      ctx: {},
+      session: {
+        events,
+        append: (type: string, data: unknown) => events.push({ type, data }),
       },
+    } as unknown as Agent
+    let current = 'standard'
+    const presets: NativeAgentPresetControl = {
+      composedPreset: () => current,
+      list: () => Promise.resolve([
+        { id: 'standard', name: '标准模式', description: '标准描述' },
+        { id: 'code', name: 'PTO 模式', description: 'Code 描述' },
+        { id: 'minimal', name: '极简模式', description: '极简描述' },
+        { id: 'cordis', name: '创造模式', description: '创造描述' },
+      ]),
+      mount: (_agentCtx, id) => Promise.resolve({ id: id ?? current }),
+      recompose: (_agentCtx, id) => {
+        current = id
+        return Promise.resolve({ id })
+      },
+      resolve: id => Promise.resolve({ id: id ?? current }),
     }
 
-    expect(modeState(planMode, agent)).toMatchObject({ currentModeId: 'default' })
-    expect(setNativeMode(planMode, agent, 'plan')).toBe('committed')
-    expect(modeState(planMode, agent)).toMatchObject({ currentModeId: 'plan' })
-    expect(() => setNativeMode(planMode, agent, 'unknown')).toThrow(/unknown mode/)
+    await expect(modeState(presets, agent)).resolves.toMatchObject({
+      currentModeId: 'standard',
+      availableModes: [
+        { id: 'standard', name: '标准模式', description: '标准描述' },
+        { id: 'code', name: 'PTO 模式', description: 'Code 描述' },
+        { id: 'minimal', name: '极简模式', description: '极简描述' },
+        { id: 'cordis', name: '创造模式', description: '创造描述' },
+      ],
+    })
+    await expect(setNativeMode(presets, agent, 'minimal')).resolves.toEqual({ agentPreset: 'minimal' })
+    await expect(modeState(presets, agent)).resolves.toMatchObject({ currentModeId: 'minimal' })
+    expect(events).toEqual([{ type: 'agent-preset/selected', data: { agentPreset: 'minimal' } }])
+    await expect(setNativeMode(presets, agent, 'unknown')).rejects.toThrow(/unknown mode/)
+
+    events.push({ type: 'turn/start', data: { turn: 1 } })
+    await expect(setNativeMode(presets, agent, 'code')).rejects.toThrow(/already started/)
+    expect(current).toBe('minimal')
   })
 })
