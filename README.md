@@ -24,12 +24,11 @@ dsh plugin --profile web add ./plugins/hello
 首个实用插件是原生优先的 ACP bridge：
 
 ```sh
-pnpm build
-dsh plugin --profile acp add ./plugins/acp
-dsh --profile acp
+dsh plugin --profile acp add @dsh-enhanced/acp
+dsh --profile acp --dump-config
 ```
 
-ACP 客户端可在首轮前选择 DSH 的 `standard`、`code`、`minimal`、`cordis` Agent 预设；模型和推理等级可在当前对话的下一安全步骤动态生效。源码 CLI 应使用 `pnpm --silent dsh --profile acp`，保持 ACP stdout 纯净。详见 [`@dsh-enhanced/acp`](plugins/acp)。
+然后在 ACP 客户端中把 `dsh --profile acp` 配置为 stdio agent。客户端可在首轮前选择 DSH 的 `standard`、`code`、`minimal`、`cordis` Agent 模式，并使用 DSH 提供的模型、工具、权限和会话能力。详见 [`@dsh-enhanced/acp`](plugins/acp)。
 
 ## 开发
 

@@ -1,47 +1,80 @@
 # @dsh-enhanced/acp
 
-把 DSH 作为 [ACP](https://agentclientprotocol.com) stdio agent 使用，并保留 DSH 原生会话语义。
+让支持 [Agent Client Protocol（ACP）](https://agentclientprotocol.com) 的编辑器和客户端直接使用 DeepSeek Harness（DSH）。插件通过 stdio 提供 ACP 服务，并沿用 DSH 的 Agent、模型、工具、权限和会话能力。
 
-## 在 dsh 中使用
+## 安装
+
+需要先安装 DSH。然后创建一个独立的 `acp` profile 并安装插件：
 
 ```sh
-pnpm build
-dsh plugin --profile acp add ./plugins/acp
+dsh plugin --profile acp add @dsh-enhanced/acp
 dsh --profile acp --dump-config
 ```
 
-然后让 ACP 客户端启动：
+第二条命令用于确认插件已经进入最终配置，不会启动 ACP 会话。
 
-```sh
-dsh --profile acp
+## 连接 ACP 客户端
+
+在 ACP 客户端中添加一个 stdio agent：
+
+```json
+{
+  "command": "dsh",
+  "args": ["--profile", "acp"]
+}
 ```
 
-发布后把 `./plugins/acp` 换成 `@dsh-enhanced/acp`。使用 DSH 源码 CLI 时，在 DSH 仓库执行 `pnpm --silent dsh --profile acp`；`--silent` 可避免 pnpm 的脚本提示污染 ACP stdout。
+具体配置入口和字段名由 ACP 客户端决定。DSH 启动后会占用 stdout 传输协议消息，因此不要在启动命令外再包装会向 stdout 输出内容的脚本。
 
-## 能力
+## 功能
 
-- ACP 模式直接映射 DSH Agent 预设：`standard`、`code`（PTC）、`minimal`、`cordis`（创造模式）。切换会真实重组该会话的工具、提示词与能力，并记录 `agent-preset/selected`。
-- 遵循 DSH 原生约束：Agent 预设只可在首个 turn 开始前切换；会话开始后保持固定，避免历史工具调用与新预设不兼容。Plan 是预设内部的独立原生能力，不作为第五个 ACP Agent 模式伪装。
-- 模型与推理等级来自 DSH 实时 provider 目录；目录变化会推送新选择器。
-- 切换写入 DSH 原生会话选择引用，同一对话的下一个安全组装步骤立即生效；不会把一次步骤的 prompt 与 request 切到两个模型。
-- 输出文本、推理、工具调用/结果、Todo 计划、标题和 token 用量；默认还在 `_meta.dsh.event` 携带未映射的完整 DSH 持久事件。
-- 沿用 DSH 的权限请求、取消、工具、沙箱、模型配置与会话日志。
+- 提供 `standard`、`code`、`minimal` 和 `cordis` 四种 DSH Agent 模式。
+- 使用 DSH 当前可用的模型和推理等级，并将它们提供给支持选择器的 ACP 客户端。
+- 向客户端传输回复、推理、工具调用与结果、计划、会话标题和 token 用量。
+- 沿用 DSH 的工具、沙箱、权限确认、取消和会话持久化机制。
+- 默认通过 `_meta.dsh.event` 保留尚未映射为标准 ACP 消息的 DSH 会话事件。
 
-可在 profile 的 `cordis.patch.yml` 覆盖初始值：
+Agent 模式只能在会话第一条消息发送前选择，首轮开始后不能切换。Plan 是 DSH Agent 模式内部的能力，不会显示为单独的 ACP 模式。模型或推理等级的变更从下一次模型请求开始生效，不会修改正在执行的请求。
+
+## 配置
+
+插件默认使用 DSH profile 的模型设置。需要覆盖初始配置时，编辑 `~/.dsh/profiles/acp/cordis.patch.yml`：
 
 ```yaml
 - id: dsh-enhanced-acp
   config:
-    provider: deepseek-official
-    model: deepseek-v4-flash
-    reasoningEffort: high
-    includeRawEvents: true
+    includeRawEvents: false
 ```
 
-`config` 是整段替换；关闭原始事件时设置 `includeRawEvents: false`。
+可用配置：
 
-## 边界
+- `provider` 和 `model`：指定初始模型，必须同时设置；省略时使用 DSH 默认模型。
+- `reasoningEffort`：指定初始推理等级。
+- `includeRawEvents`：是否在 `_meta.dsh.event` 中发送未映射的 DSH 会话事件，默认为 `true`。
 
-ACP 占用 stdout，诊断应走 stderr；同一 profile 不要再挂载其他 ACP stdio server。输入仅支持 text 与 resource link，后者作为文本引用进入模型；会话级 MCP server 请通过 DSH 配置，不从 ACP 请求动态注入。当前仅发布四个内置预设为 ACP 模式；自定义预设将在后续扩展。
+Cordis 的 `config` 是整段替换。覆盖配置时，请在同一段中保留所有需要的字段。
 
-权限与数据：插件自身不额外访问网络或凭据，但 ACP 客户端获得该 DSH profile 已组合的 agent 能力；`cordis` 创造模式还可定义并运行进程内 Host 插件代码（裸 ACP 没有 DSH 浏览器页，Client half 不可用）。stdio 可包含提示词、推理、工具参数/结果、标题、用量、workspace 路径及原始会话事件；只连接可信客户端，敏感场景可关闭 `includeRawEvents`。
+## 限制
+
+- 每个 profile 只能挂载一个占用 stdio 的 ACP server。
+- 输入支持文本和 resource link；resource link 会作为文本引用传给 DSH。
+- 不支持在单个 ACP 会话中动态注入 MCP server，请通过 DSH profile 配置 MCP。
+- 当前只提供四种内置 DSH Agent 模式，暂不暴露自定义预设。
+- 裸 ACP 环境没有 DSH 浏览器页面，因此 `cordis` 模式只能使用 Host 侧能力，不能使用 Client half。
+
+## 权限与数据
+
+插件本身不额外读取文件或凭据，不主动访问网络、启动子进程或控制浏览器，也没有面向安装者执行的 install/postinstall 脚本。ACP 会话能够使用哪些资源，取决于 `acp` profile 中启用的 DSH 工具及其沙箱和授权配置；`cordis` 模式还可以定义并运行进程内 Host 插件代码。
+
+stdio 消息可能包含提示词、推理、工具参数与结果、会话标题、token 用量、workspace 路径和原始 DSH 会话事件。只连接可信的 ACP 客户端；不希望发送原始事件时，将 `includeRawEvents` 设为 `false`。
+
+## 本地开发
+
+在本仓库中测试未发布代码时，可以改为安装插件目录：
+
+```sh
+pnpm --filter @dsh-enhanced/acp build
+dsh plugin --profile acp add ./plugins/acp
+```
+
+使用 DSH 源码版 CLI 时，请在 DSH 仓库中使用 `pnpm --silent dsh --profile acp`，避免 pnpm 的提示信息污染 ACP stdout。
