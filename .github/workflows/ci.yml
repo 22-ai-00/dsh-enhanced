@@ -34,3 +34,56 @@ jobs:
 
       - name: Verify repository
         run: pnpm check
+
+  windows-acp-smoke:
+    runs-on: windows-2025
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test Windows mode policy
+        run: pnpm --filter @dsh-enhanced/acp test
+
+      - name: Pack ACP plugin
+        shell: pwsh
+        run: pnpm --filter @dsh-enhanced/acp pack --pack-destination $env:RUNNER_TEMP
+
+      - name: Install DSH and packed plugin in a clean profile
+        shell: pwsh
+        run: |
+          pnpm add --global @deepseek-ai/dsh@0.1.0-rc.6
+          if ($LASTEXITCODE -ne 0) { throw "failed to install DSH" }
+
+          $env:DSH_HOME = Join-Path $env:RUNNER_TEMP "dsh-home"
+          $tarball = Join-Path $env:RUNNER_TEMP "dsh-enhanced-acp-0.0.4.tgz"
+          $installOutput = (& dsh plugin --profile acp add $tarball 2>&1 | Out-String)
+          $installExit = $LASTEXITCODE
+          Write-Output $installOutput
+          if ($installExit -ne 0) { throw "failed to install packed ACP plugin" }
+          if ($installOutput -match "missing peer|Issues with peer dependencies") {
+            throw "packed ACP plugin emitted peer dependency warnings"
+          }
+
+          dsh --profile acp --dump-config | Out-File (Join-Path $env:RUNNER_TEMP "acp-config.txt")
+          if ($LASTEXITCODE -ne 0) { throw "failed to compose ACP profile" }
+
+          $env:DSH_ACP_EXPECTED_VERSION = "0.0.4"
+          node ./plugins/acp/scripts/stdio-smoke.mjs
+          if ($LASTEXITCODE -ne 0) { throw "ACP stdio smoke failed" }

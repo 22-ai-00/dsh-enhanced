@@ -185,4 +185,39 @@ describe('ACP native session controls', () => {
     await expect(setNativeMode(presets, agent, 'code')).rejects.toThrow(/already started/)
     expect(current).toBe('minimal')
   })
+
+  it('hides and rejects the Bash-only minimal mode on Windows', async () => {
+    const agent = {
+      ctx: {},
+      session: {
+        id: 'windows-session',
+        events: [],
+        append: () => undefined,
+      },
+    } as unknown as Agent
+    const presets: NativeAgentPresetControl = {
+      composedPreset: () => 'standard',
+      list: () => Promise.resolve([
+        { id: 'standard' },
+        { id: 'code' },
+        { id: 'minimal' },
+        { id: 'cordis' },
+      ]),
+      mount: (_agentCtx, id) => Promise.resolve({ id: id ?? 'standard' }),
+      recompose: (_agentCtx, id) => Promise.resolve({ id }),
+      resolve: id => Promise.resolve({ id: id ?? 'standard' }),
+    }
+
+    await expect(modeState(presets, agent, 'win32')).resolves.toMatchObject({
+      currentModeId: 'standard',
+      availableModes: [
+        { id: 'standard' },
+        { id: 'code' },
+        { id: 'cordis' },
+      ],
+    })
+    await expect(setNativeMode(presets, agent, 'minimal', 'win32')).rejects.toThrow(
+      /minimal.*not available on Windows/i,
+    )
+  })
 })
