@@ -21,6 +21,16 @@ dsh plugin --profile web add ./plugins/hello
 
 使用 DSH 源码版 CLI 时，把 `dsh` 换成 DSH 仓库根目录下的 `pnpm dsh`。
 
+首个实用插件是原生优先的 ACP bridge：
+
+```sh
+pnpm build
+dsh plugin --profile acp add ./plugins/acp
+dsh --profile acp
+```
+
+模式、模型和推理等级可由 ACP 客户端在当前对话中直接切换。源码 CLI 应使用 `pnpm --silent dsh --profile acp`，保持 ACP stdout 纯净。详见 [`@dsh-enhanced/acp`](plugins/acp)。
+
 ## 开发
 
 要求 Node.js 22.19+（或 24+）和 pnpm 11.7.0。
