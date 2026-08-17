@@ -1,0 +1,55 @@
+# Dependencies and package-manager state
+node_modules/
+.pnpm-store/
+.pnp.*
+
+# Build and test output
+lib/
+dist/
+build/
+coverage/
+*.tsbuildinfo
+*.tgz
+
+# Tool caches
+.cache/
+.eslintcache
+.oxlintcache
+.turbo/
+.vite/
+.vitest/
+
+# Local DSH profiles and runtime data
+.dsh/
+.dsh-home/
+profiles/
+sessions/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local
+
+# Logs and diagnostics
+*.log
+logs/
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editors and operating systems
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+*.swp
+*.swo
+
+# Temporary files
+tmp/
+temp/
+*.tmp

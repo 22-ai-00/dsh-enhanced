@@ -1,0 +1,16 @@
+packages:
+  - plugins/*
+  - packages/*
+
+catalog:
+  '@deepseek-ai/cordis': 4.0.1
+  '@types/node': 22.20.0
+  oxlint: 1.76.0
+  typescript: 6.0.3
+  vitest: 4.1.8
+
+linkWorkspacePackages: true
+
+# pnpm denies dependency build scripts unless they are reviewed here.
+allowBuilds:
+  esbuild: true
