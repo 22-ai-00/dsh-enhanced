@@ -2,8 +2,8 @@
 
 仓库初始化时对齐以下上游源码状态：
 
-- DeepSeek Harness：`0.1.0-rc.5`
-- npm 测试依赖：`0.1.0-rc.6`（`rc.5` 未发布；ACP 插件 peer 范围同时接受二者）
+- DeepSeek Harness 运行时与 npm 测试依赖：`0.1.0-rc.6`
+- 官方 ACP 行为复查基线：`@deepseek-ai/dsh-acp@0.1.0-rc.5`（上游源码提交 `47f943859bef60e4160492346772ded9b24f765a`）
 - `@deepseek-ai/cordis`：`4.0.1`
 - Node.js：`^22.19.0 || >=24.0.0`
 - pnpm：`11.7.0`

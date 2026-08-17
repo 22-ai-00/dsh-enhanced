@@ -32,7 +32,7 @@ dsh --profile acp --dump-config
 - 使用 DSH 当前可用的模型和推理等级，并将它们提供给支持选择器的 ACP 客户端。
 - 向客户端传输回复、推理、工具调用与结果、计划、会话标题和 token 用量。
 - 沿用 DSH 的工具、沙箱、权限确认、取消和会话持久化机制。
-- 默认通过 `_meta.dsh.event` 保留尚未映射为标准 ACP 消息的 DSH 会话事件。
+- 可选择通过 `_meta.dsh.event` 保留尚未映射为标准 ACP 消息的 DSH 会话事件；为减少默认数据暴露，此能力默认关闭。
 
 Agent 模式只能在会话第一条消息发送前选择，首轮开始后不能切换。Plan 是 DSH Agent 模式内部的能力，不会显示为单独的 ACP 模式。模型或推理等级的变更从下一次模型请求开始生效，不会修改正在执行的请求。
 
@@ -50,7 +50,7 @@ Agent 模式只能在会话第一条消息发送前选择，首轮开始后不�
 
 - `provider` 和 `model`：指定初始模型，必须同时设置；省略时使用 DSH 默认模型。
 - `reasoningEffort`：指定初始推理等级。
-- `includeRawEvents`：是否在 `_meta.dsh.event` 中发送未映射的 DSH 会话事件，默认为 `true`。
+- `includeRawEvents`：是否在 `_meta.dsh.event` 中发送未映射的 DSH 会话事件，默认为 `false`。
 
 Cordis 的 `config` 是整段替换。覆盖配置时，请在同一段中保留所有需要的字段。
 
@@ -66,7 +66,9 @@ Cordis 的 `config` 是整段替换。覆盖配置时，请在同一段中保留
 
 插件本身不额外读取文件或凭据，不主动访问网络、启动子进程或控制浏览器，也没有面向安装者执行的 install/postinstall 脚本。ACP 会话能够使用哪些资源，取决于 `acp` profile 中启用的 DSH 工具及其沙箱和授权配置；`cordis` 模式还可以定义并运行进程内 Host 插件代码。
 
-stdio 消息可能包含提示词、推理、工具参数与结果、会话标题、token 用量、workspace 路径和原始 DSH 会话事件。只连接可信的 ACP 客户端；不希望发送原始事件时，将 `includeRawEvents` 设为 `false`。
+stdio 消息可能包含提示词、推理、工具参数与结果、会话标题、token 用量和 workspace 路径；启用 `includeRawEvents` 后还可能包含原始 DSH 会话事件。只连接可信的 ACP 客户端，只在确有调试或兼容需要时启用原始事件。
+
+连接与会话生命周期实现参考了 DeepSeek Harness 官方 [`@deepseek-ai/dsh-acp`](https://github.com/deepseek-ai/deepseek-harness/tree/master/packages/acp/acp)，并保留其 MIT 许可归属。本插件在此基础上提供面向编辑器客户端的模式、模型、推理等级和富事件映射。
 
 ## 本地开发
 
