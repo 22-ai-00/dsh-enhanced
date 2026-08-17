@@ -27,6 +27,19 @@ const exit = new Promise((resolve, reject) => {
   child.once('exit', (code, signal) => resolve({ code, signal }))
 })
 
+async function terminateChild() {
+  if (child.exitCode !== null || child.signalCode !== null) return
+  if (process.platform === 'win32' && dshEntry === undefined && child.pid !== undefined) {
+    await new Promise((resolve) => {
+      const killer = spawn('taskkill.exe', ['/pid', String(child.pid), '/t', '/f'], { stdio: 'ignore' })
+      killer.once('error', resolve)
+      killer.once('exit', resolve)
+    })
+    return
+  }
+  child.kill('SIGKILL')
+}
+
 async function withTimeout(promise, label) {
   let timer
   try {
@@ -34,7 +47,7 @@ async function withTimeout(promise, label) {
       promise,
       new Promise((_, reject) => {
         timer = setTimeout(() => {
-          child.kill('SIGKILL')
+          void terminateChild()
           reject(new Error(`${label} timed out after ${timeoutMs}ms`))
         }, timeoutMs)
       }),
@@ -65,11 +78,11 @@ try {
     throw new Error(`unexpected ACP agent version: ${initialized.agentInfo.version ?? '<missing>'}`)
   }
 
-  child.kill('SIGKILL')
+  await terminateChild()
   await withTimeout(exit, 'DSH termination')
 
   process.stdout.write(`ACP initialize succeeded for ${initialized.agentInfo.name}@${initialized.agentInfo.version}\n`)
 } catch (error) {
-  child.kill('SIGKILL')
+  await terminateChild()
   throw error
 }

@@ -89,7 +89,5 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "failed to compose ACP profile" }
 
           $env:DSH_ACP_EXPECTED_VERSION = "0.0.4"
-          $env:DSH_ENTRY = Join-Path (pnpm root --global) "@deepseek-ai\dsh\lib\bin.js"
-          if (-not (Test-Path $env:DSH_ENTRY)) { throw "failed to resolve the DSH Node entrypoint" }
           node ./plugins/acp/scripts/stdio-smoke.mjs
           if ($LASTEXITCODE -ne 0) { throw "ACP stdio smoke failed" }
