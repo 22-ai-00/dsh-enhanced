@@ -1,7 +1,7 @@
 {
   "name": "@dsh-enhanced/acp",
-  "version": "0.1.0",
-  "description": "Native-first Agent Client Protocol bridge for DeepSeek Harness.",
+  "version": "0.0.2",
+  "description": "Use DeepSeek Harness as an Agent Client Protocol (ACP) stdio agent.",
   "license": "MIT",
   "type": "module",
   "main": "./lib/index.js",
