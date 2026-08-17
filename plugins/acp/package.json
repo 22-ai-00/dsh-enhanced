@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/acp",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Use DeepSeek Harness as an Agent Client Protocol (ACP) stdio agent.",
   "license": "MIT",
   "type": "module",
@@ -57,12 +57,12 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.5 <0.2.0",
-    "@deepseek-ai/dsh-agent-default-model": ">=0.1.0-rc.5 <0.2.0",
-    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.5 <0.2.0",
-    "@deepseek-ai/dsh-session": ">=0.1.0-rc.5 <0.2.0",
-    "@deepseek-ai/dsh-session-title": ">=0.1.0-rc.5 <0.2.0",
-    "@deepseek-ai/dsh-user-approval": ">=0.1.0-rc.5 <0.2.0"
+    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-agent-default-model": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-session": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-session-title": ">=0.1.0-rc.6 <0.2.0",
+    "@deepseek-ai/dsh-user-approval": ">=0.1.0-rc.6 <0.2.0"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
@@ -71,6 +71,7 @@
     "@deepseek-ai/dsh-agent-loop": "catalog:",
     "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
+    "@deepseek-ai/dsh-plan-mode": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
     "@deepseek-ai/dsh-session-title": "catalog:",
     "@deepseek-ai/dsh-system-prompt": "catalog:",

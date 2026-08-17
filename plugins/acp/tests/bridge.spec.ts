@@ -26,20 +26,40 @@ import * as AcpPlugin from '../src/index.ts'
 class MockAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
   private responses = 0
+  private catalogGate: {
+    started: ReturnType<typeof Promise.withResolvers<void>>
+    resume: ReturnType<typeof Promise.withResolvers<void>>
+  } | undefined
+
+  blockNextCatalog(): { started: Promise<void>; release: () => void } {
+    const started = Promise.withResolvers<void>()
+    const resume = Promise.withResolvers<void>()
+    this.catalogGate = { started, resume }
+    return {
+      started: started.promise,
+      release: () => resume.resolve(),
+    }
+  }
 
   override providerInfo(provider: string) {
     return { id: provider, name: 'Mock Provider' }
   }
 
-  override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return Promise.resolve([
+  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
+    const gate = this.catalogGate
+    if (gate !== undefined) {
+      this.catalogGate = undefined
+      gate.started.resolve()
+      await gate.resume.promise
+    }
+    return [
       { provider, id: 'chat', name: 'Chat' },
       { provider, id: 'reasoner', name: 'Reasoner' },
-    ])
+    ]
   }
 
-  override resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
-    return Promise.resolve({
+  override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
+    return {
       provider,
       id: model,
       name: model,
@@ -54,7 +74,7 @@ class MockAdapter extends LlmAdapter {
             },
           }
         : {}),
-    })
+    }
   }
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -80,6 +100,7 @@ interface Harness {
   adapter: MockAdapter
   updates: SessionNotification['update'][]
   modeSelections: string[]
+  closeClientTransport(): Promise<void>
   dispose(): Promise<void>
 }
 
@@ -146,6 +167,7 @@ async function makeHarness(): Promise<Harness> {
     adapter,
     updates,
     modeSelections,
+    closeClientTransport: () => clientWriter.close(),
     client: new ClientSideConnection(makeClient, clientStream),
     dispose: () => ctx.fiber.dispose(),
   }
@@ -167,7 +189,7 @@ describe('native-first DSH ACP bridge', () => {
     })
     expect(initialized).toMatchObject({
       protocolVersion: PROTOCOL_VERSION,
-      agentInfo: { name: 'dsh-enhanced-acp', version: '0.1.0' },
+      agentInfo: { name: 'dsh-enhanced-acp', version: '0.0.3' },
       agentCapabilities: {
         promptCapabilities: { image: false, audio: false, embeddedContext: false },
         _meta: { dsh: expect.objectContaining({ nativeSessionControls: true }) },
@@ -247,5 +269,64 @@ describe('native-first DSH ACP bridge', () => {
     await vi.waitFor(() => {
       expect(harness?.updates.some(update => update.sessionUpdate === 'config_option_update')).toBe(true)
     })
+  })
+
+  it('serializes concurrent model selections in request order', async () => {
+    harness = await makeHarness()
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const { sessionId } = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+    const reasoner = Promise.withResolvers<void>()
+    const started = Promise.withResolvers<void>()
+    const resolveCallConfig = harness.ctx.llm.resolveCallConfig.bind(harness.ctx.llm)
+    vi.spyOn(harness.ctx.llm, 'resolveCallConfig').mockImplementation(async (options) => {
+      if (options.model === 'reasoner') {
+        started.resolve()
+        await reasoner.promise
+      }
+      return resolveCallConfig(options)
+    })
+    const first = harness.client.setSessionConfigOption({
+      sessionId,
+      configId: MODEL_CONFIG_ID,
+      value: modelValue('mock', 'reasoner'),
+    })
+    await started.promise
+    const second = harness.client.setSessionConfigOption({
+      sessionId,
+      configId: MODEL_CONFIG_ID,
+      value: modelValue('mock', 'chat'),
+    })
+
+    reasoner.resolve()
+    await Promise.all([first, second])
+    await harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'uses last selection' }] })
+
+    expect(harness.adapter.requests[0]).toMatchObject({ provider: 'mock', model: 'chat' })
+  })
+
+  it('does not complete session/new after the ACP transport closes during selector assembly', async () => {
+    harness = await makeHarness()
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const create = harness.ctx.agents.create.bind(harness.ctx.agents)
+    let disposeCalls = 0
+    vi.spyOn(harness.ctx.agents, 'create').mockImplementation(async (options) => {
+      const handle = await create(options)
+      const dispose = handle.dispose.bind(handle)
+      handle.dispose = () => {
+        disposeCalls++
+        return dispose()
+      }
+      return handle
+    })
+    const catalog = harness.adapter.blockNextCatalog()
+    const pending = harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+    await catalog.started
+
+    await harness.closeClientTransport()
+    catalog.release()
+
+    await expect(pending).rejects.toThrow()
+    await vi.waitFor(() => { expect(harness?.ctx.agents.list()).toHaveLength(0) })
+    expect(disposeCalls).toBe(1)
   })
 })

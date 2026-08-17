@@ -2,7 +2,7 @@
     - id: dsh-enhanced-acp
       name: '@dsh-enhanced/acp'
       config:
-        includeRawEvents: true
+        includeRawEvents: false
     - id: cordis-host-runner
       name: '@deepseek-ai/dsh-cordis-host-runner'
     - id: agent-presets

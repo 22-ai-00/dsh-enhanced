@@ -57,6 +57,7 @@ import {
 } from './control.ts'
 
 export const name = 'dsh-enhanced-acp'
+export const version = '0.0.3'
 export const inject = ['agentDefaultModel', 'agentPresets', 'agents', 'llm']
 
 export interface AcpConfig {
@@ -76,7 +77,7 @@ export const Config: Schema<AcpConfig> = Schema.object({
   provider: Schema.string(),
   model: Schema.string(),
   reasoningEffort: Schema.string(),
-  includeRawEvents: Schema.boolean().default(true),
+  includeRawEvents: Schema.boolean().default(false),
 })
 
 interface SessionRecord {
@@ -154,6 +155,14 @@ function copySelection(selection: ModelSelection): ModelSelection {
   }
 }
 
+function onceAsync(action: () => Promise<void>): () => Promise<void> {
+  let pending: Promise<void> | undefined
+  return () => {
+    pending ??= Promise.resolve().then(action)
+    return pending
+  }
+}
+
 /** Mount one ACP server over the host's native DSH agent composition. */
 export function apply(ctx: Context, config: AcpConfig = {}): void {
   if ((config.provider === undefined) !== (config.model === undefined)) {
@@ -165,7 +174,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
   const llm = ctx.llm
   const agentPresets = ctx.agentPresets
   const logger = ctx.logger
-  const includeRawEvents = config.includeRawEvents ?? true
+  const includeRawEvents = config.includeRawEvents ?? false
   const sessions = new Map<SessionId, SessionRecord>()
   let closed = false
   let conn: AgentSideConnection
@@ -303,7 +312,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
       initialize(_params: InitializeRequest): Promise<InitializeResponse> {
         return Promise.resolve({
           protocolVersion: PROTOCOL_VERSION,
-          agentInfo: { name: 'dsh-enhanced-acp', version: '0.1.0' },
+          agentInfo: { name: 'dsh-enhanced-acp', version },
           agentCapabilities: {
             promptCapabilities: { image: false, audio: false, embeddedContext: false },
             sessionCapabilities: { close: {} },
@@ -347,7 +356,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
         }
         const record: SessionRecord = {
           agent: handle.agent,
-          dispose: () => handle.dispose(),
+          dispose: onceAsync(() => handle.dispose()),
           selection,
           mapper: createSessionEventMapper({ includeRawEvents }),
           inflight: undefined,
@@ -355,10 +364,17 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
         }
         sessions.set(sessionId, record)
         try {
+          const [modes, configOptions] = await Promise.all([
+            modeState(agentPresets, handle.agent),
+            buildSessionConfigOptions(llm, selection),
+          ])
+          if (closed || sessions.get(sessionId) !== record) {
+            throw internalError('connection closed during session/new')
+          }
           return {
             sessionId,
-            modes: await modeState(agentPresets, handle.agent),
-            configOptions: await buildSessionConfigOptions(llm, selection),
+            modes,
+            configOptions,
             _meta: {
               dsh: {
                 sessionHeader: handle.agent.session.header,
@@ -368,7 +384,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
           }
         } catch (error: unknown) {
           sessions.delete(sessionId)
-          await handle.dispose()
+          await record.dispose()
           throw error
         }
       },
