@@ -12,6 +12,7 @@ coverage/
 *.tgz
 
 # Tool caches
+.firecrawl/
 .cache/
 .eslintcache
 .oxlintcache

@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-enhanced-coding-subscription-provider
+      name: '@dsh-enhanced/coding-subscription-provider'
