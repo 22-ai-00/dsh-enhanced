@@ -1,18 +1,8 @@
 {
   "schemaVersion": 1,
   "current": {
-    "version": "0.1.0",
-    "releasedAt": "2026-08-18T13:19:18.825Z",
-    "packages": {
-      "@dsh-enhanced/acp": "0.1.0",
-      "@dsh-enhanced/coding-subscription-provider": "0.1.0",
-      "@dsh-enhanced/hello": "0.1.0",
-      "@dsh-enhanced/traex-acp-provider": "0.1.0"
-    }
-  },
-  "pending": {
     "version": "0.1.1",
-    "preparedAt": "2026-08-18T13:28:03.648Z",
+    "releasedAt": "2026-08-18T13:48:41.515Z",
     "packages": {
       "@dsh-enhanced/acp": "0.1.1",
       "@dsh-enhanced/coding-subscription-provider": "0.1.1",
@@ -20,6 +10,7 @@
       "@dsh-enhanced/traex-acp-provider": "0.1.1"
     }
   },
+  "pending": null,
   "history": [
     {
       "version": "0.1.0",
@@ -29,6 +20,16 @@
         "@dsh-enhanced/coding-subscription-provider": "0.1.0",
         "@dsh-enhanced/hello": "0.1.0",
         "@dsh-enhanced/traex-acp-provider": "0.1.0"
+      }
+    },
+    {
+      "version": "0.1.1",
+      "releasedAt": "2026-08-18T13:48:41.515Z",
+      "packages": {
+        "@dsh-enhanced/acp": "0.1.1",
+        "@dsh-enhanced/coding-subscription-provider": "0.1.1",
+        "@dsh-enhanced/hello": "0.1.1",
+        "@dsh-enhanced/traex-acp-provider": "0.1.1"
       }
     }
   ]
