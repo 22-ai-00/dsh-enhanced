@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { CodingSubscriptionAdapter, redactDiagnostic } from '../src/adapter.ts'
 import { SubscriptionAuthError } from '../src/auth.ts'
 import { Config } from '../src/config.ts'
+import type { RunCliTextOptions } from '../src/process.ts'
 import type { CliInvocation } from '../src/providers.ts'
 
 function request(): GenerateOptions {
@@ -121,7 +122,7 @@ describe('coding subscription LLM adapter', () => {
   })
 
   it('reports a preflight, not-submitted context when prompt serialization exceeds the byte limit', async () => {
-    let context: { phase?: string; promptSubmissionState?: string; outcome?: string } | undefined
+    let context: { phase?: string; promptSubmissionState?: string; outcome?: string; teardownState?: string } | undefined
     const runText = vi.fn(() => (async function* () { yield 'never' })())
     const config = Config()
     config.maxPromptBytes = 1
@@ -134,7 +135,12 @@ describe('coding subscription LLM adapter', () => {
       for await (const _chunk of adapter.stream(request())) { /* drain */ }
     })()).rejects.toThrow('configured limit')
     expect(runText).not.toHaveBeenCalled()
-    expect(context).toMatchObject({ phase: 'preflight', promptSubmissionState: 'not-submitted', outcome: 'preflight' })
+    expect(context).toMatchObject({
+      phase: 'preflight',
+      promptSubmissionState: 'not-submitted',
+      outcome: 'preflight',
+      teardownState: 'not-started',
+    })
   })
 
   it('reports an ok outcome once when the turn succeeds', async () => {
@@ -151,11 +157,12 @@ describe('coding subscription LLM adapter', () => {
 
   it('settles exactly once with aborted outcome when the consumer returns early after block-start', async () => {
     const calls: { outcome?: string; promptSubmissionState?: string }[] = []
+    const runText = vi.fn(() => (async function* (): AsyncIterable<string> {
+      await new Promise(resolve => setTimeout(resolve, 50))
+      yield 'late'
+    })())
     const adapter = new CodingSubscriptionAdapter(Config(), {
-      runText: () => (async function* (): AsyncIterable<string> {
-        await new Promise(resolve => setTimeout(resolve, 50))
-        yield 'late'
-      })(),
+      runText,
       verifyAuth: async () => {},
       onSettled: value => { calls.push(value) },
     })
@@ -163,7 +170,51 @@ describe('coding subscription LLM adapter', () => {
     await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start' } })
     await iterator.return?.()
     expect(calls).toHaveLength(1)
+    expect(runText).not.toHaveBeenCalled()
     // Nothing ran past block-start, so the prompt is provably not-submitted.
-    expect(calls[0]).toMatchObject({ outcome: 'aborted', promptSubmissionState: 'not-submitted' })
+    expect(calls[0]).toMatchObject({
+      outcome: 'aborted',
+      promptSubmissionState: 'not-submitted',
+      teardownState: 'not-started',
+    })
+  })
+
+  it('stops claiming not-submitted before invoking a runner that throws synchronously', async () => {
+    const calls: { outcome?: string; promptSubmissionState?: string }[] = []
+    const runText = vi.fn(() => { throw new Error('runner failed synchronously') })
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText,
+      verifyAuth: async () => {},
+      onSettled: value => { calls.push(value) },
+    })
+    const iterator = adapter.stream(request())[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start' } })
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'CLI_FAILED' })
+    expect(runText).toHaveBeenCalledOnce()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ outcome: 'io', promptSubmissionState: 'unknown' })
+  })
+
+  it('prefers a settled transport state over the conservative adapter state', async () => {
+    const calls: { phase?: string; outcome?: string; promptSubmissionState?: string }[] = []
+    const runText = vi.fn((_invocation: CliInvocation, options?: RunCliTextOptions) => {
+      options?.onSettled?.({
+        phase: 'spawn',
+        promptSubmissionState: 'not-submitted',
+        assistantTextObserved: false,
+        teardownState: 'not-started',
+      })
+      throw Object.assign(new Error('missing executable'), { code: 'ENOENT' })
+    })
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText,
+      verifyAuth: async () => {},
+      onSettled: value => { calls.push(value) },
+    })
+    const iterator = adapter.stream(request())[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start' } })
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'CLI_NOT_FOUND' })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ phase: 'spawn', outcome: 'not-found', promptSubmissionState: 'not-submitted' })
   })
 })

@@ -1,6 +1,6 @@
 import { createMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
-import { redactDiagnostic, TraexAcpAdapter } from '../src/adapter.ts'
+import { redactDiagnostic, TraexAcpAdapter, type TraexAcpTextRunner } from '../src/adapter.ts'
 import type { RunTraexAcpOptions, TraexAcpInvocation } from '../src/acp-client.ts'
 import { Config } from '../src/config.ts'
 
@@ -34,8 +34,10 @@ describe('TraeX ACP LLM adapter', () => {
 
   it('maps ACP text into a valid DSH stream with fixed safe server arguments', async () => {
     let invocation: TraexAcpInvocation | undefined
+    let runnerOptions: RunTraexAcpOptions | undefined
     const runText = vi.fn((received: TraexAcpInvocation, options?: RunTraexAcpOptions) => {
       invocation = received
+      runnerOptions = options
       return (async function* () {
         yield 'one'
         yield ' two'
@@ -64,6 +66,7 @@ describe('TraeX ACP LLM adapter', () => {
     ])
     expect(invocation?.args).not.toContain('--yolo')
     expect(invocation?.prompt).toContain('dsh-traex-acp-provider/v1')
+    expect(runnerOptions?.authProbeDurationMs).toBeTypeOf('number')
   })
 
   it('passes an explicit configured model through ACP rather than argv', async () => {
@@ -180,7 +183,13 @@ describe('TraeX ACP LLM adapter', () => {
   })
 
   it('reports an auth-phase, not-submitted context when the login probe fails', async () => {
-    let context: { phase?: string; promptSubmissionState?: string; assistantTextForwarded?: boolean } | undefined
+    let context: {
+      phase?: string
+      promptSubmissionState?: string
+      assistantTextForwarded?: boolean
+      teardownState?: string
+      metrics?: { authProbeDurationMs?: number }
+    } | undefined
     const adapter = new TraexAcpAdapter(Config(), {
       runText: () => (async function* () { yield 'never' })(),
       verifyAuth: () => Promise.reject(new Error('wrong source', { cause: 'auth' })),
@@ -193,7 +202,9 @@ describe('TraeX ACP LLM adapter', () => {
       phase: 'auth',
       promptSubmissionState: 'not-submitted',
       assistantTextForwarded: false,
+      teardownState: 'not-started',
     })
+    expect(context?.metrics?.authProbeDurationMs).toBeTypeOf('number')
   })
 
   it('carries assistantTextForwarded when a turn fails after text reached DSH', async () => {
@@ -215,7 +226,7 @@ describe('TraeX ACP LLM adapter', () => {
   })
 
   it('reports a preflight, not-submitted context when prompt serialization exceeds the byte limit', async () => {
-    let context: { phase?: string; promptSubmissionState?: string; outcome?: string } | undefined
+    let context: { phase?: string; promptSubmissionState?: string; outcome?: string; teardownState?: string } | undefined
     const runText = vi.fn(() => (async function* () { yield 'never' })())
     const config = Config()
     config.maxPromptBytes = 1
@@ -228,7 +239,12 @@ describe('TraeX ACP LLM adapter', () => {
       for await (const _chunk of adapter.stream(request())) { /* drain */ }
     })()).rejects.toThrow('configured limit')
     expect(runText).not.toHaveBeenCalled()
-    expect(context).toMatchObject({ phase: 'preflight', promptSubmissionState: 'not-submitted', outcome: 'preflight' })
+    expect(context).toMatchObject({
+      phase: 'preflight',
+      promptSubmissionState: 'not-submitted',
+      teardownState: 'not-started',
+      outcome: 'preflight',
+    })
   })
 
   it('reports an ok outcome once when the turn succeeds', async () => {
@@ -266,20 +282,119 @@ describe('TraeX ACP LLM adapter', () => {
   })
 
   it('settles exactly once with aborted outcome when the consumer returns early after block-start', async () => {
-    const calls: { outcome?: string; promptSubmissionState?: string }[] = []
+    const calls: { outcome?: string; promptSubmissionState?: string; teardownState?: string }[] = []
+    const runText = vi.fn(() => (async function* (): AsyncIterable<string> {
+      await new Promise(resolve => setTimeout(resolve, 50))
+      yield 'late'
+    })())
     const adapter = new TraexAcpAdapter(Config(), {
       verifyAuth: async () => {},
-      runText: () => (async function* (): AsyncIterable<string> {
-        await new Promise(resolve => setTimeout(resolve, 50))
-        yield 'late'
-      })(),
+      runText,
       onSettled: value => { calls.push(value) },
     })
     const iterator = adapter.stream(request())[Symbol.asyncIterator]()
     await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start' } })
     await iterator.return?.()
+    expect(runText).not.toHaveBeenCalled()
     expect(calls).toHaveLength(1)
     // Nothing ran past block-start, so the prompt is provably not-submitted.
-    expect(calls[0]).toMatchObject({ outcome: 'aborted', promptSubmissionState: 'not-submitted' })
+    expect(calls[0]).toMatchObject({
+      outcome: 'aborted',
+      promptSubmissionState: 'not-submitted',
+      teardownState: 'not-started',
+    })
+  })
+
+  it('uses unknown submission and teardown states when a runner throws synchronously', async () => {
+    const calls: { outcome?: string; promptSubmissionState?: string; teardownState?: string }[] = []
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText: () => { throw new Error('runner setup failed', { cause: 'protocol' }) },
+      onSettled: value => { calls.push(value) },
+    })
+    const iterator = adapter.stream(request())[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start' } })
+    await expect(iterator.next()).rejects.toMatchObject({ code: 'ACP_PROTOCOL_ERROR' })
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({
+      outcome: 'protocol',
+      promptSubmissionState: 'unknown',
+      teardownState: 'unknown',
+    })
+  })
+
+  function runnerEmittingCatalog(models: string[]): TraexAcpTextRunner {
+    return (_invocation, options) => (async function* () {
+      options?.onCatalogObserved?.({ currentValue: 'default', modelValues: models, observedAt: 1 })
+      yield 'hi'
+      options?.onStopReason?.('end_turn')
+    })()
+  }
+
+  it('records a non-authoritative catalog observation that peekObservedCatalog can read', async () => {
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText: runnerEmittingCatalog(['default', 'trae-fast']),
+    })
+    expect(adapter.peekObservedCatalog()).toBeUndefined()
+    for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    expect(adapter.peekObservedCatalog()?.observation.modelValues).toEqual(['default', 'trae-fast'])
+  })
+
+  it('never lets the observed catalog gate a request: an unobserved model still runs', async () => {
+    // The observation lists only 'default', but the deployer allowlist permits 'trae-fast'.
+    // The cache is non-authoritative, so resolveModel and stream must NOT reject on it.
+    const config = Config({ ...Config(), models: ['default', 'trae-fast'] } as never)
+    const runText = vi.fn(runnerEmittingCatalog(['default']))
+    const adapter = new TraexAcpAdapter(config, { verifyAuth: async () => {}, runText })
+    // Prime the cache with an observation that omits 'trae-fast'.
+    for await (const _chunk of adapter.stream(request('default'))) { /* drain */ }
+    expect(adapter.peekObservedCatalog()?.observation.modelValues).toEqual(['default'])
+    // resolveModel still resolves the allowlisted-but-unobserved model.
+    await expect(adapter.resolveModel('traex-agent', 'trae-fast')).resolves.toMatchObject({ id: 'trae-fast' })
+    // And a full stream for it runs to completion — the cache never blocked it.
+    const chunks = []
+    for await (const chunk of adapter.stream(request('trae-fast'))) chunks.push(chunk)
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish' })
+    expect(runText).toHaveBeenCalledTimes(2)
+  })
+
+  it('clears the observed catalog on shutdown', async () => {
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText: runnerEmittingCatalog(['default']),
+    })
+    for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    expect(adapter.peekObservedCatalog()).toBeDefined()
+    adapter.shutdown()
+    expect(adapter.peekObservedCatalog()).toBeUndefined()
+  })
+
+  it('invalidates a stale observation when a later auth probe fails', async () => {
+    let authOk = true
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: () => authOk ? Promise.resolve() : Promise.reject(new Error('logged out', { cause: 'auth' })),
+      runText: runnerEmittingCatalog(['default']),
+    })
+    for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    expect(adapter.peekObservedCatalog()).toBeDefined()
+    // The account logs out; the next probe fails and must drop the stale observation.
+    authOk = false
+    await expect(adapter.stream(request())[Symbol.asyncIterator]().next()).rejects.toMatchObject({ code: 'ACP_AUTH_REQUIRED' })
+    expect(adapter.peekObservedCatalog()).toBeUndefined()
+  })
+
+  it('evicts an observation once its TTL elapses', async () => {
+    let clock = 0
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText: runnerEmittingCatalog(['default']),
+      catalogCacheTtlMs: 1_000,
+      catalogClock: () => clock,
+    })
+    for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    expect(adapter.peekObservedCatalog()).toBeDefined()
+    clock = 1_000
+    expect(adapter.peekObservedCatalog()).toBeUndefined()
   })
 })

@@ -9,6 +9,7 @@ export interface SpawnedProcess {
   kill(signal?: NodeJS.Signals | number): boolean
   once(event: 'error' | 'close' | 'spawn', listener: (...args: any[]) => void): this
   removeListener?(event: 'error' | 'close' | 'spawn', listener: (...args: any[]) => void): this
+  unref?(): void
 }
 
 /** Whether the prompt argv was handed to the OS; the only safe basis for reasoning about replay. */
@@ -16,6 +17,21 @@ export type PromptSubmissionState = 'not-submitted' | 'submitted' | 'unknown'
 
 /** Coarse lifecycle phase a failure was observed in, transport-scoped (auth lives in the adapter). */
 export type CliLifecyclePhase = 'spawn' | 'initialize' | 'prompt' | 'stream' | 'terminal' | 'child-close'
+
+/** Progress of the bounded child teardown attempt; `timed-out` means close was not proven. */
+export type TeardownState = 'not-started' | 'in-progress' | 'completed' | 'timed-out'
+
+/** Latency metrics with named clock origins so they stay comparable across providers. */
+export interface CliLifecycleMetrics {
+  /** Spawn to the first accepted (recognized) protocol event. */
+  readonly spawnToFirstEventMs?: number
+  /** First recognized event to the first assistant text chunk. */
+  readonly eventToFirstTextMs?: number
+  /** Spawn to the successful terminal event. */
+  readonly spawnToTerminalMs?: number
+  /** Stop request to child-close teardown completion. */
+  readonly teardownDurationMs?: number
+}
 
 /**
  * Credential-free lifecycle facts for one CLI invocation. Diagnostic side-channel only:
@@ -25,9 +41,12 @@ export interface ProviderFailureContext {
   readonly phase: CliLifecyclePhase
   readonly promptSubmissionState: PromptSubmissionState
   readonly assistantTextObserved: boolean
+  readonly teardownState: TeardownState
   readonly terminalReason?: string
   readonly exitCode?: number | null
   readonly signal?: NodeJS.Signals | null
+  /** Explicit-clock-origin latency metrics; only measurable ones are present. */
+  readonly metrics?: CliLifecycleMetrics
 }
 
 export type SpawnProcess = (
@@ -107,6 +126,19 @@ export class CliProcessExitError extends Error {
   }
 }
 
+/** SIGKILL was requested, but ChildProcess never proved process/stdio closure. */
+export class CliTeardownTimeoutError extends Error {
+  readonly code = 'CLI_TEARDOWN_TIMEOUT'
+
+  constructor(
+    readonly provider: CliInvocation['provider'],
+    readonly timeoutMs: number,
+  ) {
+    super(`${provider} CLI did not close within ${timeoutMs}ms after SIGKILL`, { cause: 'process-exit' })
+    this.name = 'CliTeardownTimeoutError'
+  }
+}
+
 const defaults = {
   timeoutMs: 10 * 60_000,
   killGraceMs: 3_000,
@@ -159,7 +191,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
   const reportPreSpawn = (): void => {
     if (options.onSettled === undefined) return
     try {
-      options.onSettled({ phase: 'spawn', promptSubmissionState: 'not-submitted', assistantTextObserved: false })
+      options.onSettled({ phase: 'spawn', promptSubmissionState: 'not-submitted', assistantTextObserved: false, teardownState: 'not-started' })
     } catch {
       // A diagnostic sink must never change model-call settlement.
     }
@@ -193,24 +225,59 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
   let sawRecognizedEvent = false
   let sawAssistantText = false
   let sawSuccessTerminal = false
+  let terminalReason: 'success' | 'reported-failure' | 'invalid-terminal' | undefined
   let sawCursorAuthInit = false
+  let sawChildOutput = false
   let killTimer: ReturnType<typeof setTimeout> | undefined
+  let postKillTimer: ReturnType<typeof setTimeout> | undefined
   let resolveClosed: (() => void) | undefined
   const closed = new Promise<void>(resolve => { resolveClosed = resolve })
-  // Prompt lives in argv, so a delivered `spawn` event is the earliest proof the OS accepted it.
-  let promptSubmissionState: PromptSubmissionState = 'not-submitted'
+  let disposeStdout = (): void => {}
+  let disposeStderr = (): void => {}
+  // spawn() returned after receiving prompt argv, but only a later spawn/error event
+  // can prove whether the OS accepted or rejected it.
+  let promptSubmissionState: PromptSubmissionState = 'unknown'
   let sawSpawn = false
   let phase: CliLifecyclePhase = 'spawn'
+  // Teardown begins the moment `stop` fires and completes when ChildProcess `close` is settled.
+  let teardownState: TeardownState = 'not-started'
+  // Monotonic clock anchors (ms); each metric is reported only when both its ends are known.
+  // `spawn()` returning a ChildProcess does not prove the OS accepted it, so the spawn
+  // anchor is captured only from the corresponding child event below.
+  let spawnedAt: number | undefined
+  let firstEventAt: number | undefined
+  let firstTextAt: number | undefined
+  let terminalAt: number | undefined
+  let stopAt: number | undefined
+  let closeAt: number | undefined
+  let observedExitCode: number | null | undefined
+  let observedSignal: NodeJS.Signals | null | undefined
+
+  const buildMetrics = (): CliLifecycleMetrics | undefined => {
+    const metrics: Record<string, number> = {}
+    if (spawnedAt !== undefined && firstEventAt !== undefined && firstEventAt >= spawnedAt) {
+      metrics.spawnToFirstEventMs = firstEventAt - spawnedAt
+    }
+    if (firstEventAt !== undefined && firstTextAt !== undefined) metrics.eventToFirstTextMs = firstTextAt - firstEventAt
+    if (spawnedAt !== undefined && terminalAt !== undefined && terminalAt >= spawnedAt) {
+      metrics.spawnToTerminalMs = terminalAt - spawnedAt
+    }
+    if (stopAt !== undefined && closeAt !== undefined) metrics.teardownDurationMs = closeAt - stopAt
+    return Object.keys(metrics).length > 0 ? metrics : undefined
+  }
 
   const reportSettled = (error: Error | undefined): void => {
     if (options.onSettled === undefined) return
-    const exitError = error instanceof CliProcessExitError ? error : undefined
+    const metrics = buildMetrics()
     const context: ProviderFailureContext = {
       phase: error === undefined ? 'terminal' : phase,
       promptSubmissionState,
       assistantTextObserved: sawAssistantText,
-      ...(sawSuccessTerminal ? { terminalReason: 'success' } : {}),
-      ...(exitError ? { exitCode: exitError.exitCode, signal: exitError.signal } : {}),
+      teardownState,
+      ...(terminalReason !== undefined ? { terminalReason } : {}),
+      ...(observedExitCode !== undefined ? { exitCode: observedExitCode } : {}),
+      ...(observedSignal !== undefined ? { signal: observedSignal } : {}),
+      ...(metrics !== undefined ? { metrics } : {}),
     }
     try {
       options.onSettled(context)
@@ -223,23 +290,62 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     if (stopping || finished) return
     stopping = true
     terminationError = error
+    if (teardownState === 'not-started') teardownState = 'in-progress'
+    stopAt ??= performance.now()
     terminateProcessTree(child, 'SIGINT')
+    // An injected/embedded ChildProcess may emit close synchronously from kill().
+    // Do not arm escalation after that close already settled the request.
+    if (finished) return
     killTimer = setTimeout(() => {
       terminateProcessTree(child, 'SIGKILL')
+      // Apply the same guard when SIGKILL synchronously proves closure.
+      if (finished) return
       // SIGKILL being sent does not prove that the process (or its stdio) has
-      // closed. Settlement is deliberately deferred to ChildProcess `close`.
+      // closed. Give `close` one more bounded grace interval, then settle with
+      // an explicit live-process-risk state instead of hanging forever.
+      postKillTimer = setTimeout(() => {
+        phase = 'child-close'
+        teardownState = 'timed-out'
+        // Preserve the initiating model-call error (abort/timeout/protocol/limit)
+        // for routing and health classification. The distinct teardown risk lives
+        // in context; the fallback is only for defensive completeness.
+        close(terminationError ?? new CliTeardownTimeoutError(invocation.provider, limits.killGraceMs), false)
+      }, limits.killGraceMs)
     }, limits.killGraceMs)
   }
   const onAbort = () => stop(abortError('CLI execution aborted'))
   const timeout = setTimeout(() => stop(timeoutError(limits.timeoutMs)), limits.timeoutMs)
-  options.signal?.addEventListener('abort', onAbort, { once: true })
 
-  const close = (error?: Error) => {
-    if (finished) return
+  const cleanupChildTracking = (): void => {
+    child.removeListener?.('spawn', onSpawn)
+    child.removeListener?.('error', onError)
+    child.removeListener?.('close', onClose)
+    disposeStdout()
+    disposeStderr()
+  }
+
+  const close = (error?: Error, observedClose = true) => {
+    if (finished) {
+      // A post-deadline close only releases background tracking. The request and
+      // its diagnostic callback were already settled exactly once as timed-out.
+      if (observedClose && teardownState === 'timed-out') cleanupChildTracking()
+      return
+    }
     finished = true
     clearTimeout(timeout)
     if (killTimer) clearTimeout(killTimer)
+    if (postKillTimer) clearTimeout(postKillTimer)
     options.signal?.removeEventListener('abort', onAbort)
+    if (observedClose) {
+      // The child's stdio has now closed; any teardown started by `stop` has completed.
+      closeAt ??= performance.now()
+      if (teardownState === 'in-progress') teardownState = 'completed'
+      cleanupChildTracking()
+    } else {
+      // The request is bounded, while minimal background listeners keep draining
+      // pipes and observe a late close without ever reporting a second settlement.
+      child.unref?.()
+    }
     if (stderr) {
       try {
         options.onDiagnostic?.(stderr)
@@ -254,10 +360,18 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
   const onError = (error: Error) => {
     // Node guarantees `close` after a spawn `error`. Waiting for it also avoids
     // treating a kill-related error as proof that a live process has exited.
+    // Any spawn error before both a `spawn` event and any child output (ENOENT,
+    // EACCES, and every other pre-run failure alike) proves the OS never accepted
+    // the prompt argv, so replay stays safe: mark `not-submitted`. Once the child
+    // has spawned or produced output, submission is no longer disprovable and the
+    // state is left as-is (`submitted` or the default `unknown`).
+    if (!stopping && !sawSpawn && !sawChildOutput) promptSubmissionState = 'not-submitted'
     if (!terminationError) terminationError = error
     stopping = true
   }
   const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+    observedExitCode = code
+    observedSignal = signal
     if (terminationError) close(terminationError)
     else if (code !== 0 || signal !== null) {
       phase = 'child-close'
@@ -271,20 +385,25 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     }))
   }
   // A delivered `spawn` proves the OS accepted the prompt argv; before it, replay is still safe.
-  child.once('spawn', () => {
+  const onSpawn = () => {
     sawSpawn = true
+    spawnedAt ??= performance.now()
     promptSubmissionState = 'submitted'
     if (phase === 'spawn') phase = 'initialize'
-  })
+  }
+  child.once('spawn', onSpawn)
   child.once('error', onError)
   // Unlike `exit`, `close` fires after stdio is closed, so the final JSONL event
   // cannot be dropped while buffered stdout is still draining.
   child.once('close', onClose)
 
-  consumeLines(child.stdout, limits.maxLineBytes, line => {
+  disposeStdout = consumeLines(child.stdout, limits.maxLineBytes, line => {
     if (stopping || finished) return
-    // Output without an observed `spawn` proves the child ran but leaves submission unprovable.
-    if (!sawSpawn && promptSubmissionState === 'not-submitted') promptSubmissionState = 'unknown'
+    // Child output proves the process ran. On its own it never proves the prompt was
+    // submitted, so the state stays at its default `unknown` (never demoted to
+    // `not-submitted`): `onError` only sets `not-submitted` while `!sawChildOutput`, so
+    // any spawn error after this point leaves submission `unknown`, not `not-submitted`.
+    sawChildOutput = true
     const decoded = decodeJsonLine(line)
     if (decoded.kind === 'empty') return
     if (decoded.kind === 'malformed') {
@@ -296,6 +415,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     const parsed = parseProviderEvent(invocation.provider, decoded.event)
     if (!parsed) return
     sawRecognizedEvent = true
+    firstEventAt ??= performance.now()
     if (phase === 'spawn' || phase === 'initialize') phase = 'prompt'
     if (parsed.auth === 'subscription') sawCursorAuthInit = true
     else if (parsed.auth === 'other') {
@@ -303,19 +423,26 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
       return
     }
     if (parsed.outcome === 'failure') {
+      terminalReason = 'reported-failure'
+      phase = 'terminal'
       stop(new CliProtocolError(invocation.provider, 'REPORTED_FAILURE'))
       return
     }
     if (parsed.outcome === 'invalid') {
+      terminalReason = 'invalid-terminal'
+      phase = 'terminal'
       stop(new CliProtocolError(invocation.provider, 'INVALID_TERMINAL'))
       return
     }
     if (parsed.outcome === 'success') {
       sawSuccessTerminal = true
+      terminalReason = 'success'
+      terminalAt ??= performance.now()
       phase = 'terminal'
     }
     if (!parsed.text) return
     sawAssistantText = true
+    firstTextAt ??= performance.now()
     if (phase === 'prompt') phase = 'stream'
     if (parsed.terminal && (sawIncrementalText || sawAggregateText)) return
     if (parsed.terminal) sawAggregateText = true
@@ -327,11 +454,17 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     }
     queue.push(parsed.text)
   }, error => stop(error))
-  consumeLines(child.stderr, limits.maxLineBytes, line => {
+  disposeStderr = consumeLines(child.stderr, limits.maxLineBytes, line => {
     if (stopping || finished) return
+    sawChildOutput = true
     // Stderr is diagnostic only; never expose it as model output or retain it unbounded.
     stderr = appendBounded(stderr, line, limits.maxStderrBytes)
   }, error => stop(error))
+  options.signal?.addEventListener('abort', onAbort, { once: true })
+  // Close the race where the signal aborted after the pre-spawn check but before
+  // listener registration. Child and pipe lifecycle handlers are installed first,
+  // including for injected process implementations whose kill() settles synchronously.
+  if (options.signal?.aborted) onAbort()
 
   try {
     for await (const text of queue) yield text
@@ -532,11 +665,16 @@ function appendBounded(value: string, addition: string, limit: number): string {
 
 function byteLength(value: string): number { return Buffer.byteLength(value, 'utf8') }
 
-function consumeLines(stream: NodeJS.ReadableStream | null | undefined, maxLineBytes: number, onLine: (line: string) => void, onError: (error: Error) => void): void {
-  if (!stream) return
+function consumeLines(
+  stream: NodeJS.ReadableStream | null | undefined,
+  maxLineBytes: number,
+  onLine: (line: string) => void,
+  onError: (error: Error) => void,
+): () => void {
+  if (!stream) return () => {}
   let pending = ''
   stream.setEncoding('utf8')
-  stream.on('data', (chunk: string) => {
+  const onData = (chunk: string) => {
     pending += chunk
     while (true) {
       const newline = pending.indexOf('\n')
@@ -553,13 +691,20 @@ function consumeLines(stream: NodeJS.ReadableStream | null | undefined, maxLineB
       if (byteLength(line) > maxLineBytes) onError(lineLimitError(maxLineBytes))
       else onLine(line)
     }
-  })
-  stream.on('error', onError)
-  stream.on('end', () => {
+  }
+  const onEnd = () => {
     if (!pending) return
     if (byteLength(pending) > maxLineBytes) onError(lineLimitError(maxLineBytes))
     else onLine(pending)
-  })
+  }
+  stream.on('data', onData)
+  stream.on('error', onError)
+  stream.on('end', onEnd)
+  return () => {
+    stream.removeListener('data', onData)
+    stream.removeListener('error', onError)
+    stream.removeListener('end', onEnd)
+  }
 }
 
 function abortError(message: string): Error { return new Error(message, { cause: 'abort' }) }
