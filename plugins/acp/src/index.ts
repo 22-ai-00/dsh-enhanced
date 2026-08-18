@@ -55,10 +55,11 @@ import {
   setNativeMode,
   setSessionConfigOption,
 } from './control.ts'
+import { version } from './version.js'
 
 export const name = 'dsh-enhanced-acp'
-export const version = '0.0.4'
 export const inject = ['agentDefaultModel', 'agentPresets', 'agents', 'llm']
+export { version }
 
 export interface AcpConfig {
   /** Optional fixed provider route; must be paired with `model`. */

@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "current": null,
+  "pending": {
+    "version": "0.1.0",
+    "preparedAt": "2026-08-18T13:08:07.000Z",
+    "packages": {
+      "@dsh-enhanced/acp": "0.1.0",
+      "@dsh-enhanced/coding-subscription-provider": "0.1.0",
+      "@dsh-enhanced/hello": "0.1.0",
+      "@dsh-enhanced/traex-acp-provider": "0.1.0"
+    }
+  },
+  "history": []
+}

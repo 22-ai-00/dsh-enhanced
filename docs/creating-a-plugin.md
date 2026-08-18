@@ -24,7 +24,7 @@ pnpm create:plugin my-plugin
 
 ## 3. 实现 Cordis 插件
 
-入口通常导出 `name`、可选的 `inject` / `Config`，以及 `apply(ctx, config)`。遵循以下约束：
+入口通常导出 `name`、`version`、可选的 `inject` / `Config`，以及 `apply(ctx, config)`。生成的 `src/version.ts` 由仓库发版命令同步维护，不要在其他源码中重复硬编码包版本。遵循以下约束：
 
 - 用 `inject` 表达所需服务，让 Cordis 决定激活时机。
 - 可能因部署不同而变化的值进入 Schemastery `Config`，并在加载时校验。

@@ -1,12 +1,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { redactDiagnostic, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter } from './adapter.js'
 import { Config, normalizeConfig, type TraexAcpProviderConfig } from './config.js'
+import { version } from './version.js'
 
 export const name = 'dsh-enhanced-traex-acp-provider'
-export const version = '0.1.0'
 export const inject = ['llm']
 
-export { Config, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter }
+export { Config, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter, version }
 export { CatalogObservationCache, catalogCacheKey } from './catalog-cache.js'
 export { ACP_USAGE_DSH_MAPPING_GATE } from './acp-client.js'
 export type { CatalogCacheKeyParts, CachedCatalog } from './catalog-cache.js'

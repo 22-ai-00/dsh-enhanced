@@ -1,12 +1,12 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { CodingSubscriptionAdapter, enabledRoutes, redactDiagnostic } from './adapter.js'
 import { Config, normalizeConfig, type CodingSubscriptionProviderConfig } from './config.js'
+import { version } from './version.js'
 
 export const name = 'dsh-enhanced-coding-subscription-provider'
-export const version = '0.1.0'
 export const inject = ['llm']
 
-export { CodingSubscriptionAdapter, Config }
+export { CodingSubscriptionAdapter, Config, version }
 export type { CodingSubscriptionProviderConfig }
 
 export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): void {

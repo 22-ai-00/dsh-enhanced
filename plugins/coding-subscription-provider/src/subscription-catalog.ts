@@ -1,6 +1,7 @@
 import { execFile as nodeExecFile } from 'node:child_process'
 import { isAbsolute } from 'node:path'
 import { buildSubscriptionEnv } from './process.js'
+import { version } from './version.js'
 
 export interface SubscriptionCatalogInvocation {
   readonly command: string
@@ -121,7 +122,7 @@ export async function discoverGrokModels(
     params: {
       protocolVersion: 1,
       clientCapabilities: {},
-      clientInfo: { name: 'dsh-enhanced', title: 'DSH Enhanced', version: '0.1.0' },
+      clientInfo: { name: 'dsh-enhanced', title: 'DSH Enhanced', version },
     },
   })}\n`, options)
   const messages = parseJsonLines(result.stdout)

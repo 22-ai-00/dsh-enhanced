@@ -2,6 +2,7 @@ import { spawn as nodeSpawn } from 'node:child_process'
 import { isAbsolute } from 'node:path'
 import type { Readable, Writable } from 'node:stream'
 import { buildSubscriptionEnv } from './process.js'
+import { version } from './version.js'
 
 export interface CodexCatalogInvocation {
   readonly command: string
@@ -267,7 +268,7 @@ export async function discoverCodexModels(
       clientInfo: {
         name: 'dsh_enhanced',
         title: 'DSH Enhanced',
-        version: '0.1.0',
+        version,
       },
     },
   })
