@@ -88,6 +88,7 @@ for (const entry of entries) {
 
   const requiredPaths = [
     'src/index.ts',
+    'src/version.ts',
     'tests/index.spec.ts',
     'cordis.patch.yml',
     'tsconfig.json',
@@ -97,6 +98,13 @@ for (const entry of entries) {
   ]
   for (const required of requiredPaths) {
     if (!await exists(join(pluginRoot, required))) report(pluginRoot, `missing ${required}`)
+  }
+
+  const versionPath = join(pluginRoot, 'src', 'version.ts')
+  if (await exists(versionPath)) {
+    const versionSource = await readFile(versionPath, 'utf8')
+    const runtimeVersion = versionSource.match(/export const version = ['"]([^'"]+)['"]/)?.[1]
+    if (runtimeVersion !== manifest.version) report(versionPath, `runtime version must equal ${manifest.version}`)
   }
 
   const patchPath = normalize(join(pluginRoot, patchRef ?? ''))
@@ -137,6 +145,7 @@ const templateRequired = [
   'tsconfig.json.tpl',
   'tsconfig.build.json.tpl',
   'README.md.tpl',
+  'src/version.ts.tpl',
 ]
 for (const required of templateRequired) {
   const path = join(repoRoot, 'templates', 'plugin', required)

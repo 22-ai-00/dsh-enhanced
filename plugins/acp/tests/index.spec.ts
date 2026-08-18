@@ -42,8 +42,8 @@ describe('@dsh-enhanced/acp package contract', () => {
     expect(bundle).toContain("name: '@deepseek-ai/dsh-cordis-host-runner'")
   })
 
-  it('prepares the install-safe 0.0.4 package revision', () => {
-    expect(manifest.version).toBe('0.0.4')
+  it('keeps the runtime version synchronized with the package revision', () => {
+    expect(manifest.version).toMatch(/^\d+\.\d+\.\d+$/)
     expect(version).toBe(manifest.version)
   })
 

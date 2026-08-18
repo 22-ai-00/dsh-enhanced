@@ -29,6 +29,7 @@ DSH profile
 ```text
 plugins/<name>/
   src/index.ts
+  src/version.ts
   tests/index.spec.ts
   package.json
   cordis.patch.yml
@@ -50,4 +51,4 @@ plugins/<name>/
 
 本地开发可以把 `plugins/<name>` 目录链接进 profile。正式分发以独立 npm 包或预构建 tarball 为准。Git package 安装以仓库根为包边界，不适合作为多插件子目录的默认分发方式。
 
-仓库暂不自动发布到 npm：发布身份、npm scope 和 provenance 策略需要维护者明确后再接入。当前默认 scope `@dsh-enhanced` 只在生成器中集中定义，首次公开发布前可以一次性调整。
+仓库不由 CI 自动发布到 npm；维护者使用根目录的 `release:prepare`、npm 发布和 `release:record` 三阶段流程。`release-manifest.json` 记录当前成功版本、待发布版本、每个插件包版本和历史记录。整体发版默认递增已记录版本的补丁位，同时仍保留每个插件作为独立 npm 包安装、回滚和审计的边界。

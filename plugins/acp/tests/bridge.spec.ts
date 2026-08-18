@@ -189,7 +189,7 @@ describe('native-first DSH ACP bridge', () => {
     })
     expect(initialized).toMatchObject({
       protocolVersion: PROTOCOL_VERSION,
-      agentInfo: { name: 'dsh-enhanced-acp', version: '0.0.4' },
+      agentInfo: { name: 'dsh-enhanced-acp', version: AcpPlugin.version },
       agentCapabilities: {
         promptCapabilities: { image: false, audio: false, embeddedContext: false },
         _meta: { dsh: expect.objectContaining({ nativeSessionControls: true }) },

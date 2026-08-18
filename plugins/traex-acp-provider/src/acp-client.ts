@@ -28,6 +28,7 @@ import {
   zSessionConfigOption,
   zSetSessionConfigOptionResponse,
 } from '@agentclientprotocol/sdk/dist/schema/zod.gen.js'
+import { version } from './version.js'
 
 export interface TraexAcpInvocation {
   readonly command: string
@@ -607,7 +608,7 @@ export async function* runTraexAcpText(
         clientInfo: {
           name: 'dsh-enhanced-traex-acp-provider',
           title: 'DSH TraeX ACP Provider',
-          version: '0.1.0',
+          version,
         },
       }))
       throwIfFatal(fatal)

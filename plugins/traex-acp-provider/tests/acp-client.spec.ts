@@ -28,6 +28,7 @@ import {
   type TraexAcpInvocation,
 } from '../src/acp-client.ts'
 import * as acpClientModule from '../src/acp-client.ts'
+import { version } from '../src/version.ts'
 
 const safeArgs = [
   '--sandbox',
@@ -371,7 +372,7 @@ describe('TraeX ACP subprocess transport', () => {
       clientInfo: {
         name: 'dsh-enhanced-traex-acp-provider',
         title: 'DSH TraeX ACP Provider',
-        version: '0.1.0',
+        version,
       },
     }])
     expect(state.sessions).toEqual([{ cwd: process.cwd(), mcpServers: [] }])
