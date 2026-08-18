@@ -82,4 +82,88 @@ describe('coding subscription LLM adapter', () => {
     })
     expect(runText).not.toHaveBeenCalled()
   })
+
+  it('reports an auth-phase, not-submitted context when the login probe fails', async () => {
+    let context: unknown
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText: () => (async function* () { yield 'never' })(),
+      verifyAuth: () => Promise.reject(new SubscriptionAuthError('codex', 'not ChatGPT')),
+      onSettled: value => { context = value },
+    })
+    await expect(adapter.stream(request())[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      code: 'SUBSCRIPTION_AUTH_REQUIRED',
+    })
+    expect(context).toMatchObject({
+      route: 'codex-subscription',
+      phase: 'auth',
+      promptSubmissionState: 'not-submitted',
+      assistantTextForwarded: false,
+    })
+  })
+
+  it('carries assistantTextForwarded and the transport phase when a turn fails after text', async () => {
+    let context: { assistantTextForwarded?: boolean; phase?: string; promptSubmissionState?: string } | undefined
+    const runText = () => (async function* (): AsyncIterable<string> {
+      yield 'partial'
+      throw new Error('closed', { cause: 'protocol' })
+    })()
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText,
+      verifyAuth: async () => {},
+      onSettled: value => { context = value },
+    })
+    const chunks: unknown[] = []
+    await expect((async () => {
+      for await (const chunk of adapter.stream(request())) chunks.push(chunk)
+    })()).rejects.toMatchObject({ code: 'CLI_PROTOCOL_ERROR' })
+    expect(context?.assistantTextForwarded).toBe(true)
+    expect(context?.phase).toBe('stream')
+  })
+
+  it('reports a preflight, not-submitted context when prompt serialization exceeds the byte limit', async () => {
+    let context: { phase?: string; promptSubmissionState?: string; outcome?: string } | undefined
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const config = Config()
+    config.maxPromptBytes = 1
+    const adapter = new CodingSubscriptionAdapter(config, {
+      runText,
+      verifyAuth: async () => {},
+      onSettled: value => { context = value },
+    })
+    await expect((async () => {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    })()).rejects.toThrow('configured limit')
+    expect(runText).not.toHaveBeenCalled()
+    expect(context).toMatchObject({ phase: 'preflight', promptSubmissionState: 'not-submitted', outcome: 'preflight' })
+  })
+
+  it('reports an ok outcome once when the turn succeeds', async () => {
+    const calls: { outcome?: string; assistantTextForwarded?: boolean }[] = []
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText: () => (async function* () { yield 'done' })(),
+      verifyAuth: async () => {},
+      onSettled: value => { calls.push(value) },
+    })
+    for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ outcome: 'ok', assistantTextForwarded: true })
+  })
+
+  it('settles exactly once with aborted outcome when the consumer returns early after block-start', async () => {
+    const calls: { outcome?: string; promptSubmissionState?: string }[] = []
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText: () => (async function* (): AsyncIterable<string> {
+        await new Promise(resolve => setTimeout(resolve, 50))
+        yield 'late'
+      })(),
+      verifyAuth: async () => {},
+      onSettled: value => { calls.push(value) },
+    })
+    const iterator = adapter.stream(request())[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start' } })
+    await iterator.return?.()
+    expect(calls).toHaveLength(1)
+    // Nothing ran past block-start, so the prompt is provably not-submitted.
+    expect(calls[0]).toMatchObject({ outcome: 'aborted', promptSubmissionState: 'not-submitted' })
+  })
 })

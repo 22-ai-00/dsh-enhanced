@@ -17,6 +17,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
   buildTraexEnv,
   runTraexAcpText,
+  type CatalogObservation,
+  type ProviderFailureContext,
   type SpawnOptions,
   type SpawnProcess,
   type SpawnedProcess,
@@ -733,5 +735,92 @@ describe('TraeX ACP subprocess transport', () => {
     await expect(collect(invocation, { spawn })).resolves.toEqual(['answer'])
     expect(state.closedSessions).toEqual([])
     expect(state.wireMethods).not.toContain('session/close')
+  })
+
+  it('reports a submitted prompt state, a terminal reason, and a completed teardown on success', async () => {
+    const { spawn } = harness({ models: ['default', 'fast'] })
+    let context: ProviderFailureContext | undefined
+    await expect(collect({ ...invocation, model: 'fast' }, {
+      spawn,
+      onSettled: value => { context = value },
+    })).resolves.toEqual(['answer'])
+    expect(context).toMatchObject({
+      promptSubmissionState: 'submitted',
+      assistantTextObserved: true,
+      teardownState: 'completed',
+      terminalReason: 'end_turn',
+    })
+  })
+
+  it('keeps promptSubmissionState not-submitted when the model is rejected before prompt', async () => {
+    const { state, spawn } = harness({ models: ['default'] })
+    let context: ProviderFailureContext | undefined
+    await expect(collect({ ...invocation, model: 'unknown' }, {
+      spawn,
+      onSettled: value => { context = value },
+    })).rejects.toMatchObject({ cause: 'model' })
+    expect(state.prompts).toHaveLength(0)
+    expect(context).toMatchObject({ phase: 'model-catalog', promptSubmissionState: 'not-submitted' })
+  })
+
+  it('observes the session model catalog without gating the request', async () => {
+    const { spawn } = harness({ models: ['default', 'fast'] })
+    const observations: CatalogObservation[] = []
+    await expect(collect({ ...invocation, model: 'fast' }, {
+      spawn,
+      onCatalogObserved: value => { observations.push(value) },
+    })).resolves.toEqual(['answer'])
+    expect(observations[0]).toMatchObject({ currentValue: 'default', modelValues: ['default', 'fast'] })
+    expect(observations.at(-1)).toMatchObject({ currentValue: 'fast' })
+  })
+
+  it('still settles as an error when session/close fails after a successful turn', async () => {
+    const { state, spawn } = harness({
+      onCloseSession: () => Promise.reject(RequestError.internalError()),
+    })
+    let context: ProviderFailureContext | undefined
+    await expect(collect(invocation, { spawn, onSettled: value => { context = value } }))
+      .rejects.toMatchObject({ cause: 'protocol' })
+    // The successful turn is not downgraded silently: teardown ran, the child was reaped,
+    // the model turn is recorded as end_turn, yet the invocation still fails on cleanup.
+    expect(state.closedSessions).toContain('session-current')
+    expect(context).toMatchObject({
+      phase: 'close-session',
+      terminalReason: 'end_turn',
+      teardownState: 'completed',
+    })
+  })
+
+  it('reports a not-submitted context and never spawns when the signal is already aborted', async () => {
+    const { state, spawn } = harness()
+    const controller = new AbortController()
+    controller.abort()
+    let context: ProviderFailureContext | undefined
+    await expect(collect(invocation, { spawn, signal: controller.signal, onSettled: value => { context = value } }))
+      .rejects.toMatchObject({ cause: 'abort' })
+    expect(state.spawn).toBeUndefined()
+    expect(context).toMatchObject({ phase: 'initialize', promptSubmissionState: 'not-submitted' })
+  })
+
+  it('reports a not-submitted context when argument validation fails before spawn', async () => {
+    const spawn = vi.fn<SpawnProcess>()
+    let context: ProviderFailureContext | undefined
+    await expect(collect({ ...invocation, args: ['acp', 'serve', '--yolo'] }, {
+      spawn,
+      onSettled: value => { context = value },
+    })).rejects.toMatchObject({ cause: 'protocol' })
+    expect(spawn).toHaveBeenCalledTimes(0)
+    expect(context).toMatchObject({ phase: 'initialize', promptSubmissionState: 'not-submitted' })
+  })
+
+  it('reports settled context exactly once even when the diagnostic sink throws', async () => {
+    const { spawn } = harness()
+    const calls: ProviderFailureContext[] = []
+    await expect(collect(invocation, {
+      spawn,
+      onSettled: value => { calls.push(value); throw new Error('sink boom') },
+    })).resolves.toEqual(['answer'])
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ promptSubmissionState: 'submitted', terminalReason: 'end_turn' })
   })
 })

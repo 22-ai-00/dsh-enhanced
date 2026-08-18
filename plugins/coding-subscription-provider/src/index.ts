@@ -25,6 +25,15 @@ export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): v
         ctx.logger.warn(`${route} CLI wrote to stderr; content withheld (set logDiagnostics to inspect a redacted tail)`)
       }
     },
+    onSettled(context) {
+      // Credential-free lifecycle facts only; useful for diagnosing which phase a route settled in.
+      const detail = `phase=${context.phase} submission=${context.promptSubmissionState}`
+        + ` textForwarded=${context.assistantTextForwarded}`
+        + (context.exitCode !== undefined ? ` exit=${context.exitCode ?? 'null'}` : '')
+        + (context.signal != null ? ` signal=${context.signal}` : '')
+      if (context.outcome === 'ok') ctx.logger.debug(`${context.route} settled ok (${detail})`)
+      else ctx.logger.info(`${context.route} settled ${context.outcome} (${detail})`)
+    },
   })
   ctx.llm.registerAdapter(routes, adapter)
   ctx.effect(() => () => adapter.shutdown(), 'dsh-enhanced-coding-subscription-provider.processes')

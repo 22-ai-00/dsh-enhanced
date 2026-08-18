@@ -7,7 +7,12 @@ export interface TraexAcpProviderConfig {
   command: string
   /** Working directory exposed to the TraeX ACP session. */
   cwd: string
-  /** Advisory model ids shown by DSH. `default` preserves TraeX's active model. */
+  /**
+   * Deployer allowlist of model ids DSH may route here. `default` uses TraeX's
+   * active model; any other id must appear in BOTH this list AND the live ACP
+   * session model selector, or the request fails closed. This is a plugin
+   * policy, not a DSH requirement.
+   */
   models: string[]
   /** Whole ACP prompt deadline. */
   timeoutMs: number
