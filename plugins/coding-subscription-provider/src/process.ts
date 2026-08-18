@@ -7,8 +7,27 @@ export interface SpawnedProcess {
   readonly stderr?: NodeJS.ReadableStream | null
   readonly exitCode?: number | null
   kill(signal?: NodeJS.Signals | number): boolean
-  once(event: 'error' | 'close', listener: (...args: any[]) => void): this
-  removeListener?(event: 'error' | 'close', listener: (...args: any[]) => void): this
+  once(event: 'error' | 'close' | 'spawn', listener: (...args: any[]) => void): this
+  removeListener?(event: 'error' | 'close' | 'spawn', listener: (...args: any[]) => void): this
+}
+
+/** Whether the prompt argv was handed to the OS; the only safe basis for reasoning about replay. */
+export type PromptSubmissionState = 'not-submitted' | 'submitted' | 'unknown'
+
+/** Coarse lifecycle phase a failure was observed in, transport-scoped (auth lives in the adapter). */
+export type CliLifecyclePhase = 'spawn' | 'initialize' | 'prompt' | 'stream' | 'terminal' | 'child-close'
+
+/**
+ * Credential-free lifecycle facts for one CLI invocation. Diagnostic side-channel only:
+ * it never carries prompt text, stderr, tokens or argv, and never changes settlement.
+ */
+export interface ProviderFailureContext {
+  readonly phase: CliLifecyclePhase
+  readonly promptSubmissionState: PromptSubmissionState
+  readonly assistantTextObserved: boolean
+  readonly terminalReason?: string
+  readonly exitCode?: number | null
+  readonly signal?: NodeJS.Signals | null
 }
 
 export type SpawnProcess = (
@@ -28,6 +47,8 @@ export interface RunCliTextOptions {
   /** Names only. Values are copied from process.env; callers cannot pass secret values. */
   readonly extraEnvNames?: readonly string[]
   readonly onDiagnostic?: (diagnostic: string) => void
+  /** Receives credential-free lifecycle facts exactly once at settlement (success or failure); never affects the stream. */
+  readonly onSettled?: (context: ProviderFailureContext) => void
 }
 
 export type CliProtocolFailureReason =
@@ -134,14 +155,32 @@ export function buildSubscriptionEnv(extraEnvNames: readonly string[] = []): Nod
  */
 export async function* runCliText(invocation: CliInvocation, options: RunCliTextOptions = {}): AsyncIterable<string> {
   const limits = { ...defaults, ...options }
-  if (options.signal?.aborted) throw abortError('aborted before CLI spawn')
-  const child = (options.spawn ?? defaultSpawn)(invocation.command, invocation.args, {
-    cwd: invocation.cwd,
-    shell: false,
-    detached: process.platform !== 'win32',
-    stdio: ['ignore', 'pipe', 'pipe'],
-    env: buildSubscriptionEnv(options.extraEnvNames),
-  })
+  // Pre-spawn failures never handed the prompt argv to the OS: report not-submitted and stop.
+  const reportPreSpawn = (): void => {
+    if (options.onSettled === undefined) return
+    try {
+      options.onSettled({ phase: 'spawn', promptSubmissionState: 'not-submitted', assistantTextObserved: false })
+    } catch {
+      // A diagnostic sink must never change model-call settlement.
+    }
+  }
+  if (options.signal?.aborted) {
+    reportPreSpawn()
+    throw abortError('aborted before CLI spawn')
+  }
+  let child: SpawnedProcess
+  try {
+    child = (options.spawn ?? defaultSpawn)(invocation.command, invocation.args, {
+      cwd: invocation.cwd,
+      shell: false,
+      detached: process.platform !== 'win32',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: buildSubscriptionEnv(options.extraEnvNames),
+    })
+  } catch (error) {
+    reportPreSpawn()
+    throw error
+  }
   const queue = new TextQueue()
   let totalOutputBytes = 0
   let stderr = ''
@@ -158,6 +197,27 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
   let killTimer: ReturnType<typeof setTimeout> | undefined
   let resolveClosed: (() => void) | undefined
   const closed = new Promise<void>(resolve => { resolveClosed = resolve })
+  // Prompt lives in argv, so a delivered `spawn` event is the earliest proof the OS accepted it.
+  let promptSubmissionState: PromptSubmissionState = 'not-submitted'
+  let sawSpawn = false
+  let phase: CliLifecyclePhase = 'spawn'
+
+  const reportSettled = (error: Error | undefined): void => {
+    if (options.onSettled === undefined) return
+    const exitError = error instanceof CliProcessExitError ? error : undefined
+    const context: ProviderFailureContext = {
+      phase: error === undefined ? 'terminal' : phase,
+      promptSubmissionState,
+      assistantTextObserved: sawAssistantText,
+      ...(sawSuccessTerminal ? { terminalReason: 'success' } : {}),
+      ...(exitError ? { exitCode: exitError.exitCode, signal: exitError.signal } : {}),
+    }
+    try {
+      options.onSettled(context)
+    } catch {
+      // A diagnostic sink must never change model-call settlement.
+    }
+  }
 
   const stop = (error: Error) => {
     if (stopping || finished) return
@@ -187,6 +247,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
         // Diagnostics must never change model-call settlement.
       }
     }
+    reportSettled(error)
     queue.close(error)
     resolveClosed?.()
   }
@@ -198,8 +259,10 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
   }
   const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
     if (terminationError) close(terminationError)
-    else if (code !== 0 || signal !== null) close(new CliProcessExitError(invocation.provider, code, signal))
-    else close(validateProtocolSettlement(invocation.provider, {
+    else if (code !== 0 || signal !== null) {
+      phase = 'child-close'
+      close(new CliProcessExitError(invocation.provider, code, signal))
+    } else close(validateProtocolSettlement(invocation.provider, {
       sawValidJson,
       sawRecognizedEvent,
       sawAssistantText,
@@ -207,6 +270,12 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
       sawCursorAuthInit,
     }))
   }
+  // A delivered `spawn` proves the OS accepted the prompt argv; before it, replay is still safe.
+  child.once('spawn', () => {
+    sawSpawn = true
+    promptSubmissionState = 'submitted'
+    if (phase === 'spawn') phase = 'initialize'
+  })
   child.once('error', onError)
   // Unlike `exit`, `close` fires after stdio is closed, so the final JSONL event
   // cannot be dropped while buffered stdout is still draining.
@@ -214,6 +283,8 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
 
   consumeLines(child.stdout, limits.maxLineBytes, line => {
     if (stopping || finished) return
+    // Output without an observed `spawn` proves the child ran but leaves submission unprovable.
+    if (!sawSpawn && promptSubmissionState === 'not-submitted') promptSubmissionState = 'unknown'
     const decoded = decodeJsonLine(line)
     if (decoded.kind === 'empty') return
     if (decoded.kind === 'malformed') {
@@ -225,6 +296,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     const parsed = parseProviderEvent(invocation.provider, decoded.event)
     if (!parsed) return
     sawRecognizedEvent = true
+    if (phase === 'spawn' || phase === 'initialize') phase = 'prompt'
     if (parsed.auth === 'subscription') sawCursorAuthInit = true
     else if (parsed.auth === 'other') {
       stop(new CliSubscriptionAuthError('cursor', 'UNEXPECTED_AUTH_SOURCE'))
@@ -238,15 +310,19 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
       stop(new CliProtocolError(invocation.provider, 'INVALID_TERMINAL'))
       return
     }
-    if (parsed.outcome === 'success') sawSuccessTerminal = true
+    if (parsed.outcome === 'success') {
+      sawSuccessTerminal = true
+      phase = 'terminal'
+    }
     if (!parsed.text) return
     sawAssistantText = true
+    if (phase === 'prompt') phase = 'stream'
     if (parsed.terminal && (sawIncrementalText || sawAggregateText)) return
     if (parsed.terminal) sawAggregateText = true
     else sawIncrementalText = true
     totalOutputBytes += byteLength(parsed.text)
     if (totalOutputBytes > limits.maxOutputBytes) {
-      stop(new Error(`CLI output exceeded ${limits.maxOutputBytes} bytes`))
+      stop(outputLimitError(limits.maxOutputBytes))
       return
     }
     queue.push(parsed.text)
@@ -279,55 +355,78 @@ export function parseAssistantEvent(provider: CliInvocation['provider'], line: s
   return decoded.kind === 'json' && decoded.event ? parseProviderEvent(provider, decoded.event) : undefined
 }
 
+/**
+ * Recognizes one already-decoded JSON event into the normalized {@link ParsedEvent}.
+ * The layering is: `decodeJsonLine` (syntax) -> a per-provider decoder (shape) ->
+ * this dispatcher (routing) -> the stdout reducer in `runCliText` (text/terminal/auth).
+ * An unrecognized event returns `undefined` so the caller can fail closed on it.
+ */
 function parseProviderEvent(provider: CliInvocation['provider'], event: Record<string, unknown>): ParsedEvent | undefined {
-  if (provider === 'codex') {
-    const item = object(event.item)
-    if (event.type === 'item.completed' && item?.type === 'agent_message') return parsed(textOf(item.content) ?? textOf(item.text), false)
-    if (event.type === 'agent_message') return parsed(textOf(event.content) ?? textOf(event.text), false)
-    if (event.type === 'turn.completed') return known({ outcome: 'success' })
-    if (event.type === 'turn.failed' || event.type === 'error') return known({ outcome: 'failure' })
-    if (event.type === 'thread.started' || event.type === 'turn.started' || event.type === 'item.started'
-      || event.type === 'item.updated' || event.type === 'item.completed') return known()
+  return providerDecoders[provider](event)
+}
+
+type ProviderEventDecoder = (event: Record<string, unknown>) => ParsedEvent | undefined
+
+const providerDecoders: Record<CliInvocation['provider'], ProviderEventDecoder> = {
+  codex: decodeCodexEvent,
+  claude: decodeClaudeEvent,
+  cursor: decodeCursorEvent,
+  grok: decodeGrokEvent,
+}
+
+function decodeCodexEvent(event: Record<string, unknown>): ParsedEvent | undefined {
+  const item = object(event.item)
+  if (event.type === 'item.completed' && item?.type === 'agent_message') return parsed(textOf(item.content) ?? textOf(item.text), false)
+  if (event.type === 'agent_message') return parsed(textOf(event.content) ?? textOf(event.text), false)
+  if (event.type === 'turn.completed') return known({ outcome: 'success' })
+  if (event.type === 'turn.failed' || event.type === 'error') return known({ outcome: 'failure' })
+  if (event.type === 'thread.started' || event.type === 'turn.started' || event.type === 'item.started'
+    || event.type === 'item.updated' || event.type === 'item.completed') return known()
+  return undefined
+}
+
+function decodeClaudeEvent(event: Record<string, unknown>): ParsedEvent | undefined {
+  const inner = object(event.event)
+  if (event.type === 'stream_event' && inner?.type === 'content_block_delta') return parsed(textOf(object(inner.delta)?.text), false)
+  if (event.type === 'stream_event') return known()
+  if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content), true)
+  if (event.type === 'result') return parsed(textOf(event.result), true, resultOutcome(event))
+  if (knownType(event, ['system', 'user', 'tool_progress', 'tool_use_summary', 'auth_status', 'rate_limit_event'])) return known()
+  return undefined
+}
+
+function decodeCursorEvent(event: Record<string, unknown>): ParsedEvent | undefined {
+  if (event.type === 'system' && event.subtype === 'init') {
+    return known({ auth: event.apiKeySource === 'login' ? 'subscription' : 'other' })
   }
-  if (provider === 'claude') {
-    const inner = object(event.event)
-    if (event.type === 'stream_event' && inner?.type === 'content_block_delta') return parsed(textOf(object(inner.delta)?.text), false)
-    if (event.type === 'stream_event') return known()
-    if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content), true)
-    if (event.type === 'result') return parsed(textOf(event.result), true, resultOutcome(event))
-    if (knownType(event, ['system', 'user', 'tool_progress', 'tool_use_summary', 'auth_status', 'rate_limit_event'])) return known()
+  if (event.type === 'system') return known()
+  if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content) ?? textOf(event.text), false)
+  if (event.type === 'result') return parsed(textOf(event.result) ?? textOf(event.message), true, resultOutcome(event))
+  if (knownType(event, ['user', 'tool_call', 'tool_result'])) return known()
+  return undefined
+}
+
+function decodeGrokEvent(event: Record<string, unknown>): ParsedEvent | undefined {
+  if (event.type === 'streaming-messages-json' || event.type === 'message' || event.type === 'update') {
+    return parsed(textOf(event.text) ?? textOf(event.content) ?? textOf(object(event.delta)?.text) ?? textOf(event.message), false)
   }
-  if (provider === 'cursor') {
-    if (event.type === 'system' && event.subtype === 'init') {
-      return known({ auth: event.apiKeySource === 'login' ? 'subscription' : 'other' })
-    }
-    if (event.type === 'system') return known()
-    if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content) ?? textOf(event.text), false)
-    if (event.type === 'result') return parsed(textOf(event.result) ?? textOf(event.message), true, resultOutcome(event))
-    if (knownType(event, ['user', 'tool_call', 'tool_result'])) return known()
+  const anthropic = object(event.event)
+  if (event.type === 'stream_event' && anthropic?.type === 'content_block_delta') return parsed(textOf(object(anthropic.delta)?.text), false)
+  if (event.type === 'stream_event') return known()
+  if (event.type === 'content_block_delta') return parsed(textOf(object(event.delta)?.text), false)
+  const update = object(event.update)
+  if (event.sessionUpdate === 'agent_message_chunk') return parsed(textOf(event.content) ?? textOf(update?.text) ?? textOf(update?.content), false)
+  if (typeof event.sessionUpdate === 'string') return known()
+  if (update?.sessionUpdate === 'agent_message_chunk') return parsed(textOf(update.content), false)
+  if (typeof update?.sessionUpdate === 'string') return known()
+  const paramsUpdate = object(object(event.params)?.update)
+  if (event.method === 'session/update' && paramsUpdate?.sessionUpdate === 'agent_message_chunk') {
+    return parsed(textOf(paramsUpdate.content), false)
   }
-  if (provider === 'grok') {
-    if (event.type === 'streaming-messages-json' || event.type === 'message' || event.type === 'update') {
-      return parsed(textOf(event.text) ?? textOf(event.content) ?? textOf(object(event.delta)?.text) ?? textOf(event.message), false)
-    }
-    const anthropic = object(event.event)
-    if (event.type === 'stream_event' && anthropic?.type === 'content_block_delta') return parsed(textOf(object(anthropic.delta)?.text), false)
-    if (event.type === 'stream_event') return known()
-    if (event.type === 'content_block_delta') return parsed(textOf(object(event.delta)?.text), false)
-    const update = object(event.update)
-    if (event.sessionUpdate === 'agent_message_chunk') return parsed(textOf(event.content) ?? textOf(update?.text) ?? textOf(update?.content), false)
-    if (typeof event.sessionUpdate === 'string') return known()
-    if (update?.sessionUpdate === 'agent_message_chunk') return parsed(textOf(update.content), false)
-    if (typeof update?.sessionUpdate === 'string') return known()
-    const paramsUpdate = object(object(event.params)?.update)
-    if (event.method === 'session/update' && paramsUpdate?.sessionUpdate === 'agent_message_chunk') {
-      return parsed(textOf(paramsUpdate.content), false)
-    }
-    if (event.method === 'session/update') return known()
-    if (event.type === 'result') return parsed(textOf(event.result) ?? textOf(event.text), true, resultOutcome(event))
-    if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content) ?? textOf(event.text), false)
-    if (knownType(event, ['system', 'user', 'tool_call', 'tool_result'])) return known()
-  }
+  if (event.method === 'session/update') return known()
+  if (event.type === 'result') return parsed(textOf(event.result) ?? textOf(event.text), true, resultOutcome(event))
+  if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content) ?? textOf(event.text), false)
+  if (knownType(event, ['system', 'user', 'tool_call', 'tool_result'])) return known()
   return undefined
 }
 
@@ -443,7 +542,7 @@ function consumeLines(stream: NodeJS.ReadableStream | null | undefined, maxLineB
       const newline = pending.indexOf('\n')
       if (newline === -1) {
         if (byteLength(pending) > maxLineBytes) {
-          onError(new Error(`CLI line exceeded ${maxLineBytes} bytes`))
+          onError(lineLimitError(maxLineBytes))
           pending = ''
         }
         return
@@ -451,20 +550,22 @@ function consumeLines(stream: NodeJS.ReadableStream | null | undefined, maxLineB
       let line = pending.slice(0, newline)
       pending = pending.slice(newline + 1)
       if (line.endsWith('\r')) line = line.slice(0, -1)
-      if (byteLength(line) > maxLineBytes) onError(new Error(`CLI line exceeded ${maxLineBytes} bytes`))
+      if (byteLength(line) > maxLineBytes) onError(lineLimitError(maxLineBytes))
       else onLine(line)
     }
   })
   stream.on('error', onError)
   stream.on('end', () => {
     if (!pending) return
-    if (byteLength(pending) > maxLineBytes) onError(new Error(`CLI line exceeded ${maxLineBytes} bytes`))
+    if (byteLength(pending) > maxLineBytes) onError(lineLimitError(maxLineBytes))
     else onLine(pending)
   })
 }
 
 function abortError(message: string): Error { return new Error(message, { cause: 'abort' }) }
 function timeoutError(timeoutMs: number): Error { return new Error(`CLI execution timed out after ${timeoutMs}ms`, { cause: 'timeout' }) }
+function outputLimitError(maxOutputBytes: number): Error { return new Error(`CLI output exceeded ${maxOutputBytes} bytes`, { cause: 'output-limit' }) }
+function lineLimitError(maxLineBytes: number): Error { return new Error(`CLI line exceeded ${maxLineBytes} bytes`, { cause: 'line-limit' }) }
 
 function terminateProcessTree(child: SpawnedProcess, signal: NodeJS.Signals): void {
   if (process.platform !== 'win32' && child.pid !== undefined && child.pid > 0) {

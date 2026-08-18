@@ -81,7 +81,54 @@ export interface RunTraexAcpOptions {
   /** Receives the validated ACP terminal reason exactly once on success. */
   readonly onStopReason?: (reason: TraexSuccessfulStopReason) => void
   readonly onDiagnostic?: (diagnostic: string) => void
+  /** Receives credential-free lifecycle facts exactly once at settlement (success or failure); never affects settlement. */
+  readonly onSettled?: (context: ProviderFailureContext) => void
+  /** Receives a non-authoritative model catalog observation from a normal handshake. */
+  readonly onCatalogObserved?: (observation: CatalogObservation) => void
   readonly spawn?: SpawnProcess
+}
+
+/** Whether the prompt was handed to the ACP stream; the only safe basis for reasoning about replay. */
+export type PromptSubmissionState = 'not-submitted' | 'submitted' | 'unknown'
+
+/** Progress of the bounded teardown that must complete before a success settles. */
+export type TeardownState = 'not-started' | 'in-progress' | 'completed' | 'failed' | 'unknown'
+
+/** Lifecycle phase a failure was observed in, from handshake through teardown. */
+export type TraexLifecyclePhase =
+  | 'initialize'
+  | 'new-session'
+  | 'model-catalog'
+  | 'set-model'
+  | 'prompt'
+  | 'stream'
+  | 'terminal'
+  | 'close-session'
+  | 'child-close'
+
+/**
+ * Credential-free lifecycle facts for one ACP invocation. Diagnostic side-channel only:
+ * it never carries prompt text, stderr, tokens or tool/plan content, and never changes settlement.
+ */
+export interface ProviderFailureContext {
+  readonly phase: TraexLifecyclePhase
+  readonly promptSubmissionState: PromptSubmissionState
+  readonly assistantTextObserved: boolean
+  readonly teardownState: TeardownState
+  readonly terminalReason?: string
+  readonly exitCode?: number | null
+  readonly signal?: NodeJS.Signals | null
+}
+
+/**
+ * Non-authoritative snapshot of a model selector seen during a normal handshake. It exists
+ * for diagnostics/display only: it never gates a request, never feeds `resolveModel()`, and
+ * the catalog returned by the current `session/new` remains the sole execution authority.
+ */
+export interface CatalogObservation {
+  readonly currentValue: string
+  readonly modelValues: readonly string[]
+  readonly observedAt: number
 }
 
 export type TraexAcpFailure =
@@ -170,8 +217,26 @@ export async function* runTraexAcpText(
   invocation: TraexAcpInvocation,
   options: RunTraexAcpOptions = {},
 ): AsyncIterable<string> {
-  const limits = validate(invocation, options)
-  if (options.signal?.aborted) throw new TraexAcpError('abort')
+  // Pre-spawn failures never handed the prompt to the ACP stream: report not-submitted and stop.
+  const reportPreSpawn = (failedPhase: TraexLifecyclePhase): void => {
+    if (options.onSettled === undefined) return
+    try {
+      options.onSettled({ phase: failedPhase, promptSubmissionState: 'not-submitted', assistantTextObserved: false, teardownState: 'not-started' })
+    } catch {
+      // A diagnostic sink must never change model-call settlement.
+    }
+  }
+  let limits: ValidatedLimits
+  try {
+    limits = validate(invocation, options)
+  } catch (error) {
+    reportPreSpawn('initialize')
+    throw error
+  }
+  if (options.signal?.aborted) {
+    reportPreSpawn('initialize')
+    throw new TraexAcpError('abort')
+  }
 
   let child: SpawnedProcess
   try {
@@ -183,6 +248,7 @@ export async function* runTraexAcpText(
       env: buildTraexEnv(options.extraEnvNames),
     })
   } catch (error) {
+    reportPreSpawn('initialize')
     throw processFailure(error)
   }
 
@@ -203,6 +269,44 @@ export async function* runTraexAcpText(
   let shutdownPromise: Promise<void> | undefined
   const childClosed = new Promise<void>(resolve => { resolveClosed = resolve })
   const stderr = new BoundedBytes(limits.maxStderrBytes)
+  // Lifecycle facts reported through the optional diagnostic seam; never affect settlement.
+  let phase: TraexLifecyclePhase = 'initialize'
+  let promptSubmissionState: PromptSubmissionState = 'not-submitted'
+  let teardownState: TeardownState = 'not-started'
+  let terminalReason: string | undefined
+  let reportedContext = false
+
+  const reportSettled = (): void => {
+    if (options.onSettled === undefined || reportedContext) return
+    reportedContext = true
+    const context: ProviderFailureContext = {
+      phase,
+      promptSubmissionState,
+      assistantTextObserved: sawAssistantText,
+      teardownState,
+      ...(terminalReason !== undefined ? { terminalReason } : {}),
+      ...(closeResult !== undefined ? { exitCode: closeResult.code, signal: closeResult.signal } : {}),
+    }
+    try {
+      options.onSettled(context)
+    } catch {
+      // A diagnostic sink must never change model-call settlement.
+    }
+  }
+
+  const observeCatalog = (option: Extract<SessionConfigOption, { type: 'select' }>): void => {
+    if (options.onCatalogObserved === undefined) return
+    const observation: CatalogObservation = {
+      currentValue: option.currentValue,
+      modelValues: selectValues(option),
+      observedAt: Date.now(),
+    }
+    try {
+      options.onCatalogObserved(observation)
+    } catch {
+      // A non-authoritative observation must never change model-call settlement.
+    }
+  }
 
   const recordFailure = (error: TraexAcpError): void => {
     fatal ??= error
@@ -228,6 +332,7 @@ export async function* runTraexAcpText(
   const shutdown = (cancelSession: boolean): Promise<void> => {
     if (shutdownPromise !== undefined) return shutdownPromise
     terminating = true
+    teardownState = 'in-progress'
     shutdownPromise = (async () => {
       if (cancelSession && sessionId !== undefined && client !== undefined && !client.signal.aborted) {
         let cancelTimer: ReturnType<typeof setTimeout> | undefined
@@ -253,6 +358,7 @@ export async function* runTraexAcpText(
         killTimer.unref?.()
       }
       await childClosed
+      teardownState = 'completed'
     })()
     return shutdownPromise
   }
@@ -323,6 +429,7 @@ export async function* runTraexAcpText(
       }
       outputBytes = nextBytes
       sawAssistantText = true
+      if (phase === 'prompt') phase = 'stream'
       queue.push(text)
       return Promise.resolve()
     },
@@ -340,6 +447,7 @@ export async function* runTraexAcpText(
 
   const operation = (async (): Promise<void> => {
     try {
+      phase = 'initialize'
       const initialized = await client.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {},
@@ -357,15 +465,21 @@ export async function* runTraexAcpText(
         throw new TraexAcpError('auth')
       }
 
+      phase = 'new-session'
       const session = await client.newSession({ cwd: invocation.cwd, mcpServers: [] })
       sessionId = session.sessionId
       if (sessionId.length === 0) throw new TraexAcpError('protocol')
       throwIfFatal(fatal)
 
+      phase = 'model-catalog'
       const modelOption = validateModelCatalog(session.configOptions)
+      // Non-authoritative: only the selector observed on this handshake is recorded; it never
+      // gates the request. The catalog validated here remains the sole execution authority.
+      observeCatalog(modelOption)
 
       if (invocation.model !== undefined) {
         if (!selectValues(modelOption).includes(invocation.model)) throw new TraexAcpError('model')
+        phase = 'set-model'
         const updated = await client.setSessionConfigOption({
           sessionId,
           configId: modelOption.id,
@@ -375,9 +489,13 @@ export async function* runTraexAcpText(
         if (selected.id !== modelOption.id || selected.currentValue !== invocation.model) {
           throw new TraexAcpError('protocol')
         }
+        observeCatalog(selected)
         throwIfFatal(fatal)
       }
 
+      // The prompt is about to enter the ACP stream; from here replay is never safe.
+      phase = 'prompt'
+      promptSubmissionState = 'submitted'
       promptActive = true
       const result = await client.prompt({
         sessionId,
@@ -392,22 +510,30 @@ export async function* runTraexAcpText(
       }
       if (!sawAssistantText) throw new TraexAcpError('protocol')
       const stopReason = result.stopReason as TraexSuccessfulStopReason
+      phase = 'terminal'
+      terminalReason = stopReason
+      // Experimental PromptResponse.usage stays internal: the ACP/DSH token accounting口径
+      // is unverified, so it is neither mapped to DSH TokenUsage nor emitted as a usage chunk.
       try {
         options.onStopReason?.(stopReason)
       } catch {
         throw new TraexAcpError('protocol')
       }
       turnFinished = true
+      // Success still waits for bounded teardown; a close-session failure must not settle as success.
       if (initialized.agentCapabilities?.sessionCapabilities?.close !== undefined
         && initialized.agentCapabilities.sessionCapabilities.close !== null) {
+        phase = 'close-session'
         await client.closeSession({ sessionId })
         throwIfFatal(fatal)
       }
+      phase = 'child-close'
       await shutdown(false)
       throwIfFatal(fatal)
     } catch (error) {
       const normalized = fatal ?? normalizeFailure(error)
       recordFailure(normalized)
+      // Teardown still runs to reap the child; `phase` records if close-session was where it failed.
       await shutdown(true)
       throw normalized
     } finally {
@@ -421,6 +547,7 @@ export async function* runTraexAcpText(
           // Diagnostic consumers must not affect transport settlement.
         }
       }
+      reportSettled()
       operationFinished = true
     }
   })()

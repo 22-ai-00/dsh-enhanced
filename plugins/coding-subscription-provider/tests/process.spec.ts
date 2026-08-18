@@ -6,6 +6,7 @@ import {
   CliProcessExitError,
   parseAssistantText,
   runCliText,
+  type ProviderFailureContext,
   type SpawnProcess,
 } from '../src/process.ts'
 import { buildInvocation } from '../src/providers.ts'
@@ -15,6 +16,7 @@ class FakeChild extends EventEmitter {
   stderr = new PassThrough()
   kills: (NodeJS.Signals | number | undefined)[] = []
   kill(signal?: NodeJS.Signals | number): boolean { this.kills.push(signal); return true }
+  spawn(): void { this.emit('spawn') }
   finish(code: number | null = 0, signal: NodeJS.Signals | null = null): void { this.emit('close', code, signal) }
 }
 
@@ -166,7 +168,7 @@ describe('CLI process bridge', () => {
     await Promise.resolve()
     child.stdout.write('{"type":"assistant","message":"你好"}\n')
     child.finish()
-    await expect(result).rejects.toThrow('3 bytes')
+    await expect(result).rejects.toMatchObject({ message: expect.stringContaining('3 bytes'), cause: 'output-limit' })
   })
 
   it('rejects an oversized final line even when an earlier newline shares its chunk', async () => {
@@ -402,5 +404,104 @@ describe('CLI process bridge', () => {
     expect(child.kills).toContain('SIGINT')
     child.finish()
     await expect(closing).resolves.toMatchObject({ done: true })
+  })
+
+  it('reports submitted lifecycle context after a spawn event on a clean close', async () => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const result = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), onSettled: value => { context = value } },
+    ))
+    await Promise.resolve()
+    child.spawn()
+    child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","content":"hi"}}\n')
+    child.stdout.write('{"type":"turn.completed"}\n')
+    child.finish()
+    await expect(result).resolves.toEqual(['hi'])
+    expect(context).toMatchObject({
+      phase: 'terminal',
+      promptSubmissionState: 'submitted',
+      assistantTextObserved: true,
+      terminalReason: 'success',
+    })
+  })
+
+  it('keeps submission not-submitted when a spawn error precedes any spawn event', async () => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), onSettled: value => { context = value } },
+    ))
+    const spawnError = Object.assign(new Error('spawn failed'), { code: 'ENOENT' })
+    const rejected = expect(pending).rejects.toBe(spawnError)
+    await Promise.resolve()
+    child.emit('error', spawnError)
+    child.finish(null, null)
+    await rejected
+    expect(context).toMatchObject({ promptSubmissionState: 'not-submitted', assistantTextObserved: false })
+  })
+
+  it('records observed assistant text and exit status when a submitted turn fails at close', async () => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), onSettled: value => { context = value } },
+    ))
+    const rejected = expect(pending).rejects.toBeInstanceOf(CliProcessExitError)
+    await Promise.resolve()
+    child.spawn()
+    child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}\n')
+    child.finish(2, null)
+    await rejected
+    expect(context).toMatchObject({
+      phase: 'child-close',
+      promptSubmissionState: 'submitted',
+      assistantTextObserved: true,
+      exitCode: 2,
+      signal: null,
+    })
+  })
+
+  it('reports a not-submitted context when the signal is already aborted before spawn', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    let context: ProviderFailureContext | undefined
+    const spawn = vi.fn()
+    await expect(collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn: spawn as unknown as SpawnProcess, signal: controller.signal, onSettled: value => { context = value } },
+    ))).rejects.toThrow('before CLI spawn')
+    expect(spawn).not.toHaveBeenCalled()
+    expect(context).toMatchObject({ phase: 'spawn', promptSubmissionState: 'not-submitted', assistantTextObserved: false })
+  })
+
+  it('reports a not-submitted context when spawn throws synchronously', async () => {
+    let context: ProviderFailureContext | undefined
+    const spawn = (() => { throw Object.assign(new Error('no exec'), { code: 'ENOENT' }) }) as unknown as SpawnProcess
+    await expect(collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn, onSettled: value => { context = value } },
+    ))).rejects.toThrow('no exec')
+    expect(context).toMatchObject({ phase: 'spawn', promptSubmissionState: 'not-submitted' })
+  })
+
+  it('reports settled context exactly once even when the diagnostic sink throws', async () => {
+    const child = new FakeChild()
+    const calls: ProviderFailureContext[] = []
+    const result = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), onSettled: value => { calls.push(value); throw new Error('sink boom') } },
+    ))
+    await Promise.resolve()
+    child.spawn()
+    child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","content":"hi"}}\n')
+    child.stdout.write('{"type":"turn.completed"}\n')
+    child.finish()
+    await expect(result).resolves.toEqual(['hi'])
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ phase: 'terminal', terminalReason: 'success' })
   })
 })

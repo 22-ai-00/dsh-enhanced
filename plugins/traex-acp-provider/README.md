@@ -58,13 +58,13 @@ dsh --profile web --dump-config
 - `enabled` 默认 `false`；只在完成本机兼容性与登录检查后显式开启。
 - `command` 是单个可执行文件名或绝对路径；插件固定参数数组并使用 `shell: false`，不接受 shell 片段。
 - `cwd` 是 ACP `session/new` 的工作目录；相对路径按 DSH 进程启动目录解析。
-- `models` 是 DSH 显示的允许列表。非 `default` 值必须出现在 TraeX 会话返回的 ACP model selector 中，否则请求失败，不会静默换模型。
+- `models` 是部署者配置的允许列表（插件策略，非 DSH 要求）。`default` 使用 TraeX 当前模型；非 `default` 值必须同时出现在本列表和 TraeX 会话返回的 ACP model selector 中，否则请求失败，不会静默换模型。
 - `timeoutMs` 覆盖握手、建会话和整轮 prompt。取消或超时时先发 ACP `session/cancel`，再终止进程；超过 `killGraceMs` 后强制回收。
 - `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次调用前的 `traex login status`；只有精确报告 `Logged in using Trae` 才会进入 ACP，ChatGPT、API key、access token、未登录与未知输出全部拒绝。
 - `maxMessageBytes` 限制单条 NDJSON，`maxProtocolBytes` / `maxProtocolMessages` 限制整轮 ACP 输入，`maxOutputBytes` 限制助手文本；字节限制均按 UTF-8 计算。
 - `extraEnvNames` 只允许填写要从 DSH 启动环境继承的变量名，配置中不能写变量值或 secret。
 - API key/token、Authorization/private-key/database credential 以及 OpenAI/Codex 等 provider endpoint 变量，即使列入 `extraEnvNames` 也会被硬排除；代理 URL 中的 userinfo 会被删除，无法安全解析的含 `@` 代理值会被拒绝。
-- `logDiagnostics` 默认为 `false`，此时只记录“TraeX 写入 stderr”；启用后仅记录经过常见 token/key/邮箱规则脱敏的有界尾部，仍不适合输出业务秘密。
+- `logDiagnostics` 默认为 `false`，此时对 stderr 只记录“TraeX 写入 stderr”；启用后仅记录经过常见 token/key/邮箱规则脱敏的有界尾部，仍不适合输出业务秘密。独立于该开关，插件始终会在每次请求结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、teardown 状态），成功走 `debug`、非成功走 `info`；并在观测到模型目录时记录**模型数量**（不含任何 model id 原文）。这些行不含 prompt、stderr 原文、token 或 model id。
 
 ## 固定安全策略
 
@@ -88,7 +88,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 | 凭据 | 不读取 TraeX auth 文件、不实现登录、不刷新或上传 token；只让 TraeX 在本机用户配置目录中使用自己的缓存凭据。 |
 | 浏览器 | 插件不会打开浏览器；用户在插件外执行 TraeX login 时可能打开。 |
 | ACP 权限 | 所有 permission request 均拒绝；不暴露 client-side FS、terminal 或 MCP server。 |
-| 日志 | 不主动记录 prompt；stderr 有界且默认不输出内容。 |
+| 日志 | 不主动记录 prompt；stderr 有界且默认不输出内容。每次请求结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/teardown），并在观测目录时记录模型数量，均不含 prompt、stderr 原文、token 或 model id 原文。 |
 | 安装脚本 | 包内没有 install/postinstall 脚本，也不会安装或更新 TraeX。 |
 
 ## 协议与失败策略

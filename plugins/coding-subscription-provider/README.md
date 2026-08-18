@@ -87,7 +87,7 @@ dsh --profile web --dump-config
 - 启用 Grok 前先通过 browser/device flow 完成 `grok login`，再用 `grok inspect` 确认所选模型没有 `api_key` / `env_key` override；随后同时设置 `enabled: true` 与 `userVerifiedSubscription: true`。`inspect` 本身不报告 active credential，该确认是本机用户的显式声明，不是插件读取凭据后的推断。
 - `command` 是单个命令名或路径，插件固定参数数组并使用 `shell: false`，不接受 shell 片段。
 - `extraEnvNames` 只填写要额外继承的环境变量名，值只能来自启动 DSH 的环境，配置中不能直接写 secret。
-- `logDiagnostics` 默认只提示“CLI 写入了 stderr”，不记录内容；显式开启后才记录经过常见 key/token/邮箱规则脱敏的末尾 2,000 字符，仍不适合高敏感环境。
+- `logDiagnostics` 默认只提示“CLI 写入了 stderr”，不记录内容；显式开启后才记录经过常见 key/token/邮箱规则脱敏的末尾 2,000 字符，仍不适合高敏感环境。独立于该开关，插件始终会在每次调用结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、exit/signal），成功走 `debug`、非成功走 `info`；该行不含 prompt、stderr 原文或 token。
 
 加载后，在 DSH 的 provider/model 选择处选择上表中的 provider 和模型即可。真实订阅调用会消耗额度，自动化测试不会使用真实账号。
 
@@ -133,7 +133,7 @@ XAI_API_KEY
 | 凭据 | 不读取官方 auth 文件、不实现 OAuth、不刷新或上传 token。默认继承 `HOME`/配置目录，让官方 CLI 自己访问凭据。 |
 | 浏览器 | 插件不会打开浏览器；用户单独执行官方 login 时可能打开。 |
 | 安装脚本 | 本 npm 包没有 install/postinstall 脚本，也不会安装或更新四个官方 CLI。 |
-| 日志 | stderr 有界且默认不记录内容。选择 `logDiagnostics` 后会脱敏常见 key、Bearer token 和邮箱，但无法识别任意业务秘密；插件本身不主动记录 prompt。 |
+| 日志 | stderr 有界且默认不记录内容。选择 `logDiagnostics` 后会脱敏常见 key、Bearer token 和邮箱，但无法识别任意业务秘密；插件本身不主动记录 prompt。每次调用结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/exit/signal），不含 prompt、stderr 原文或 token。 |
 
 任务正文当前作为独立 argv 元素传给官方 CLI。它不会经过 shell，但仍受操作系统命令行长度限制，并且在某些系统上可能被同机高权限用户通过进程列表看到；敏感、多用户主机应增加 OS 级隔离。默认 prompt 上限因此保守设为 128 KiB。
 

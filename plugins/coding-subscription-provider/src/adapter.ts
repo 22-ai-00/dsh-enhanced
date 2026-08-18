@@ -12,7 +12,7 @@ import {
 import { verifySubscriptionAuth, type SubscriptionAuthVerifier } from './auth.js'
 import { configForProvider, type CodingSubscriptionProviderConfig } from './config.js'
 import { buildPrompt } from './prompt.js'
-import { runCliText, type RunCliTextOptions } from './process.js'
+import { runCliText, type ProviderFailureContext, type PromptSubmissionState, type RunCliTextOptions } from './process.js'
 import { buildInvocation, type CliInvocation, type ProviderId } from './providers.js'
 
 export type SubscriptionProviderRoute =
@@ -37,10 +37,40 @@ export const routeDefinitions: readonly RouteDefinition[] = [
 
 export type CliTextRunner = (invocation: CliInvocation, options?: RunCliTextOptions) => AsyncIterable<string>
 
+/**
+ * Full lifecycle facts the adapter can observe for one route: the transport context
+ * plus the `auth`/`preflight` phases (which precede spawn), a stable failure class, and
+ * whether text actually reached DSH. Credential-free and internal; never attached to `LlmError`.
+ */
+export interface RouteFailureContext extends Partial<Omit<ProviderFailureContext, 'phase'>> {
+  readonly route: SubscriptionProviderRoute
+  readonly phase: ProviderFailureContext['phase'] | 'auth' | 'preflight'
+  readonly assistantTextForwarded: boolean
+  /** Stable outcome class for diagnostics/health; `ok` on success. */
+  readonly outcome: RouteOutcome
+}
+
+/** Stable, credential-free outcome classes distinct enough for future health/cooldown routing. */
+export type RouteOutcome =
+  | 'ok'
+  | 'aborted'
+  | 'timeout'
+  | 'auth-required'
+  | 'not-found'
+  | 'protocol'
+  | 'process'
+  | 'output-limit'
+  | 'line-limit'
+  | 'io'
+  | 'preflight'
+  | 'failed'
+
 export interface AdapterDependencies {
   runText?: CliTextRunner
   verifyAuth?: SubscriptionAuthVerifier
   onDiagnostic?: (route: SubscriptionProviderRoute, diagnostic: string) => void
+  /** Receives credential-free lifecycle facts once per invocation (success or failure); never affects the stream. */
+  onSettled?: (context: RouteFailureContext) => void
 }
 
 const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
@@ -88,12 +118,29 @@ function cliFailure(definition: RouteDefinition, command: string, error: unknown
   )
 }
 
+/** Classify the original transport error into a stable, credential-free outcome for diagnostics. */
+function outcomeFor(error: unknown): RouteOutcome {
+  const cause = error instanceof Error ? error.cause : undefined
+  if (cause === 'abort') return 'aborted'
+  if (cause === 'timeout') return 'timeout'
+  if (cause === 'subscription-auth') return 'auth-required'
+  if (cause === 'protocol') return 'protocol'
+  if (cause === 'process-exit') return 'process'
+  if (cause === 'output-limit') return 'output-limit'
+  if (cause === 'line-limit') return 'line-limit'
+  if ((error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') return 'not-found'
+  // A bare stream error carries no recognized cause but is a local I/O fault, not a model failure.
+  if (error instanceof Error && cause === undefined && !(error instanceof LlmError)) return 'io'
+  return 'failed'
+}
+
 /** Experimental LLM-compatible facade over local, already-authenticated coding agents. */
 export class CodingSubscriptionAdapter extends LlmAdapter {
   private readonly cwd: string
   private readonly runText: CliTextRunner
   private readonly verifyAuth: SubscriptionAuthVerifier
   private readonly onDiagnostic: AdapterDependencies['onDiagnostic']
+  private readonly onSettled: AdapterDependencies['onSettled']
   private readonly lifecycle = new AbortController()
 
   constructor(
@@ -105,6 +152,16 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     this.runText = dependencies.runText ?? runCliText
     this.verifyAuth = dependencies.verifyAuth ?? verifySubscriptionAuth
     this.onDiagnostic = dependencies.onDiagnostic
+    this.onSettled = dependencies.onSettled
+  }
+
+  private reportSettled(context: RouteFailureContext): void {
+    if (this.onSettled === undefined) return
+    try {
+      this.onSettled(context)
+    } catch {
+      // A diagnostic sink must never change model-call settlement.
+    }
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -146,53 +203,100 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     const signal = options.signal === undefined
       ? this.lifecycle.signal
       : AbortSignal.any([options.signal, this.lifecycle.signal])
-    try {
-      await this.verifyAuth(definition.cli, {
-        command: profile.command,
-        cwd: this.cwd,
-        timeoutMs: this.config.authProbeTimeoutMs,
-        maxOutputBytes: this.config.maxAuthProbeBytes,
-        extraEnvNames: this.config.extraEnvNames,
-        signal,
-        ...(definition.cli === 'grok'
-          ? { userVerifiedSubscription: this.config.grok.userVerifiedSubscription }
-          : {}),
+    let assistantTextForwarded = false
+    let transportContext: ProviderFailureContext | undefined
+    // Track the best-known lifecycle facts so a single settled report fires on ANY exit,
+    // including a consumer that returns early after block-start or a text delta.
+    let phase: RouteFailureContext['phase'] = 'auth'
+    let promptSubmissionState: PromptSubmissionState = 'not-submitted'
+    let outcome: RouteOutcome = 'aborted'
+    let reported = false
+    const settle = (): void => {
+      if (reported) return
+      reported = true
+      this.reportSettled({
+        route: definition.route,
+        phase: transportContext?.phase ?? phase,
+        promptSubmissionState: transportContext?.promptSubmissionState ?? promptSubmissionState,
+        assistantTextObserved: transportContext?.assistantTextObserved ?? assistantTextForwarded,
+        assistantTextForwarded,
+        outcome,
+        ...(transportContext?.terminalReason !== undefined ? { terminalReason: transportContext.terminalReason } : {}),
+        ...(transportContext?.exitCode !== undefined ? { exitCode: transportContext.exitCode } : {}),
+        ...(transportContext?.signal !== undefined ? { signal: transportContext.signal } : {}),
       })
-    } catch (error: unknown) {
-      throw cliFailure(definition, profile.command, error)
-    }
-    const prompt = buildPrompt(options, this.config.maxPromptBytes)
-    const invocation = buildInvocation(definition.cli, {
-      cwd: this.cwd,
-      prompt,
-      model: options.model,
-      maxTurns: profile.maxTurns,
-      command: profile.command,
-    })
-    const runnerOptions: RunCliTextOptions = {
-      timeoutMs: this.config.timeoutMs,
-      killGraceMs: this.config.killGraceMs,
-      maxLineBytes: this.config.maxLineBytes,
-      maxOutputBytes: this.config.maxOutputBytes,
-      maxStderrBytes: this.config.maxStderrBytes,
-      extraEnvNames: this.config.extraEnvNames,
-      onDiagnostic: diagnostic => this.onDiagnostic?.(definition.route, diagnostic),
-      signal,
     }
 
-    let text = ''
-    yield { type: 'block-start', index: 0, blockType: 'text' }
     try {
-      for await (const delta of this.runText(invocation, runnerOptions)) {
-        if (delta.length === 0) continue
-        text += delta
-        yield { type: 'text-delta', index: 0, text: delta }
+      try {
+        await this.verifyAuth(definition.cli, {
+          command: profile.command,
+          cwd: this.cwd,
+          timeoutMs: this.config.authProbeTimeoutMs,
+          maxOutputBytes: this.config.maxAuthProbeBytes,
+          extraEnvNames: this.config.extraEnvNames,
+          signal,
+          ...(definition.cli === 'grok'
+            ? { userVerifiedSubscription: this.config.grok.userVerifiedSubscription }
+            : {}),
+        })
+      } catch (error: unknown) {
+        // Auth precedes spawn, so the prompt argv was never handed to the OS.
+        outcome = outcomeFor(error)
+        throw cliFailure(definition, profile.command, error)
       }
-    } catch (error: unknown) {
-      throw cliFailure(definition, profile.command, error)
+      // Preflight prompt serialization runs before spawn; a failure here is provably not-submitted.
+      phase = 'preflight'
+      let invocation: CliInvocation
+      try {
+        invocation = buildInvocation(definition.cli, {
+          cwd: this.cwd,
+          prompt: buildPrompt(options, this.config.maxPromptBytes),
+          model: options.model,
+          maxTurns: profile.maxTurns,
+          command: profile.command,
+        })
+      } catch (error: unknown) {
+        outcome = 'preflight'
+        throw error
+      }
+      const runnerOptions: RunCliTextOptions = {
+        timeoutMs: this.config.timeoutMs,
+        killGraceMs: this.config.killGraceMs,
+        maxLineBytes: this.config.maxLineBytes,
+        maxOutputBytes: this.config.maxOutputBytes,
+        maxStderrBytes: this.config.maxStderrBytes,
+        extraEnvNames: this.config.extraEnvNames,
+        onDiagnostic: diagnostic => this.onDiagnostic?.(definition.route, diagnostic),
+        onSettled: context => { transportContext = context },
+        signal,
+      }
+
+      // block-start alone runs nothing: prompt stays provably not-submitted until execution
+      // resumes toward the transport. Once iteration begins the transport owns the state and
+      // reports it via onSettled; if it never reports (early return mid-stream) we say unknown.
+      phase = 'stream'
+      let text = ''
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      try {
+        const deltas = this.runText(invocation, runnerOptions)
+        promptSubmissionState = 'unknown'
+        for await (const delta of deltas) {
+          if (delta.length === 0) continue
+          text += delta
+          assistantTextForwarded = true
+          yield { type: 'text-delta', index: 0, text: delta }
+        }
+      } catch (error: unknown) {
+        outcome = outcomeFor(error)
+        throw cliFailure(definition, profile.command, error)
+      }
+      outcome = 'ok'
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    } finally {
+      settle()
     }
-    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
-    yield { type: 'finish', reason: { kind: 'stop' } }
   }
 
   /** Abort every active/future subprocess when the owning Cordis fiber unloads. */

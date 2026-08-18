@@ -23,6 +23,19 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
         ctx.logger.warn(`${TRAEX_PROVIDER_ROUTE} wrote to stderr; content withheld (set logDiagnostics to inspect a redacted tail)`)
       }
     },
+    onSettled(context) {
+      // Credential-free lifecycle facts only; useful for diagnosing which phase a turn settled in.
+      const detail = `phase=${context.phase} submission=${context.promptSubmissionState}`
+        + ` textForwarded=${context.assistantTextForwarded}`
+        + (context.teardownState !== undefined ? ` teardown=${context.teardownState}` : '')
+      if (context.outcome === 'ok') ctx.logger.debug(`${TRAEX_PROVIDER_ROUTE} settled ok (${detail})`)
+      else ctx.logger.info(`${TRAEX_PROVIDER_ROUTE} settled ${context.outcome} (${detail})`)
+    },
+    onCatalogObserved(observation) {
+      // Non-authoritative and diagnostic-only. ACP model ids are not length- or
+      // control-char-bounded, so only the count is logged; raw ids are never emitted.
+      ctx.logger.debug(`${TRAEX_PROVIDER_ROUTE} observed ${observation.modelValues.length} model(s)`)
+    },
   })
   ctx.llm.registerAdapter([TRAEX_PROVIDER_ROUTE], adapter)
   ctx.effect(() => () => adapter.shutdown(), 'dsh-enhanced-traex-acp-provider.processes')

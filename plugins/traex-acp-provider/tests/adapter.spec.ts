@@ -178,4 +178,108 @@ describe('TraeX ACP LLM adapter', () => {
     })
     expect(runText).not.toHaveBeenCalled()
   })
+
+  it('reports an auth-phase, not-submitted context when the login probe fails', async () => {
+    let context: { phase?: string; promptSubmissionState?: string; assistantTextForwarded?: boolean } | undefined
+    const adapter = new TraexAcpAdapter(Config(), {
+      runText: () => (async function* () { yield 'never' })(),
+      verifyAuth: () => Promise.reject(new Error('wrong source', { cause: 'auth' })),
+      onSettled: value => { context = value },
+    })
+    await expect(adapter.stream(request())[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      code: 'ACP_AUTH_REQUIRED',
+    })
+    expect(context).toMatchObject({
+      phase: 'auth',
+      promptSubmissionState: 'not-submitted',
+      assistantTextForwarded: false,
+    })
+  })
+
+  it('carries assistantTextForwarded when a turn fails after text reached DSH', async () => {
+    let context: { assistantTextForwarded?: boolean; outcome?: string } | undefined
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText: () => (async function* (): AsyncIterable<string> {
+        yield 'partial'
+        throw new Error('transport failed', { cause: 'protocol' })
+      })(),
+      onSettled: value => { context = value },
+    })
+    const chunks: unknown[] = []
+    await expect((async () => {
+      for await (const chunk of adapter.stream(request())) chunks.push(chunk)
+    })()).rejects.toMatchObject({ code: 'ACP_PROTOCOL_ERROR' })
+    expect(context?.assistantTextForwarded).toBe(true)
+    expect(context?.outcome).toBe('protocol')
+  })
+
+  it('reports a preflight, not-submitted context when prompt serialization exceeds the byte limit', async () => {
+    let context: { phase?: string; promptSubmissionState?: string; outcome?: string } | undefined
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const config = Config()
+    config.maxPromptBytes = 1
+    const adapter = new TraexAcpAdapter(config, {
+      runText,
+      verifyAuth: async () => {},
+      onSettled: value => { context = value },
+    })
+    await expect((async () => {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    })()).rejects.toThrow('configured limit')
+    expect(runText).not.toHaveBeenCalled()
+    expect(context).toMatchObject({ phase: 'preflight', promptSubmissionState: 'not-submitted', outcome: 'preflight' })
+  })
+
+  it('reports an ok outcome once when the turn succeeds', async () => {
+    const calls: { outcome?: string; assistantTextForwarded?: boolean }[] = []
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText(_invocation, options) {
+        return (async function* () {
+          yield 'done'
+          options?.onStopReason?.('end_turn')
+        })()
+      },
+      onSettled: value => { calls.push(value) },
+    })
+    for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ outcome: 'ok', assistantTextForwarded: true })
+  })
+
+  it('reports settled with a not-submitted aborted context when the signal is already aborted', async () => {
+    const calls: { phase?: string; promptSubmissionState?: string; outcome?: string }[] = []
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const controller = new AbortController()
+    controller.abort()
+    const adapter = new TraexAcpAdapter(Config(), {
+      runText,
+      verifyAuth: async () => {},
+      onSettled: value => { calls.push(value) },
+    })
+    await expect(adapter.stream({ ...request(), signal: controller.signal })[Symbol.asyncIterator]().next())
+      .rejects.toThrow()
+    expect(runText).not.toHaveBeenCalled()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]).toMatchObject({ phase: 'auth', promptSubmissionState: 'not-submitted', outcome: 'aborted' })
+  })
+
+  it('settles exactly once with aborted outcome when the consumer returns early after block-start', async () => {
+    const calls: { outcome?: string; promptSubmissionState?: string }[] = []
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText: () => (async function* (): AsyncIterable<string> {
+        await new Promise(resolve => setTimeout(resolve, 50))
+        yield 'late'
+      })(),
+      onSettled: value => { calls.push(value) },
+    })
+    const iterator = adapter.stream(request())[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start' } })
+    await iterator.return?.()
+    expect(calls).toHaveLength(1)
+    // Nothing ran past block-start, so the prompt is provably not-submitted.
+    expect(calls[0]).toMatchObject({ outcome: 'aborted', promptSubmissionState: 'not-submitted' })
+  })
 })

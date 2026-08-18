@@ -11,6 +11,9 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import {
   runTraexAcpText,
+  type CatalogObservation,
+  type ProviderFailureContext,
+  type PromptSubmissionState,
   type RunTraexAcpOptions,
   type TraexAcpInvocation,
   type TraexSuccessfulStopReason,
@@ -26,10 +29,42 @@ export type TraexAcpTextRunner = (
   options?: RunTraexAcpOptions,
 ) => AsyncIterable<string>
 
+/**
+ * Full lifecycle facts the adapter can observe: the transport context plus the `auth`/`preflight`
+ * phases (which precede the ACP handshake), a stable failure class, and whether text reached DSH.
+ * Credential-free and internal; it is never attached to the thrown `LlmError`.
+ */
+export interface RouteFailureContext extends Partial<Omit<ProviderFailureContext, 'phase'>> {
+  readonly phase: ProviderFailureContext['phase'] | 'auth' | 'preflight'
+  readonly assistantTextForwarded: boolean
+  /** Stable outcome class for diagnostics/health; `ok` on success. */
+  readonly outcome: RouteOutcome
+}
+
+/** Stable, credential-free outcome classes distinct enough for future health/cooldown routing. */
+export type RouteOutcome =
+  | 'ok'
+  | 'aborted'
+  | 'timeout'
+  | 'auth-required'
+  | 'not-found'
+  | 'entitlement'
+  | 'model'
+  | 'refusal'
+  | 'protocol'
+  | 'process'
+  | 'output-limit'
+  | 'preflight'
+  | 'failed'
+
 export interface AdapterDependencies {
   runText?: TraexAcpTextRunner
   verifyAuth?: TraexAuthVerifier
   onDiagnostic?: (diagnostic: string) => void
+  /** Receives credential-free lifecycle facts once per invocation (success or failure); never affects the stream. */
+  onSettled?: (context: RouteFailureContext) => void
+  /** Receives non-authoritative model catalog observations for diagnostics/display only. */
+  onCatalogObserved?: (observation: CatalogObservation) => void
 }
 
 const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
@@ -82,12 +117,31 @@ function connectorFailure(command: string, error: unknown): Error {
   return new LlmError('TraeX ACP process failed', 'ACP_PROCESS_FAILED', { cause: error })
 }
 
+/** Classify the original transport error into a stable, credential-free outcome for diagnostics. */
+function outcomeFor(error: unknown): RouteOutcome {
+  const cause = error instanceof Error ? error.cause : undefined
+  const code = (error as (NodeJS.ErrnoException & { systemCode?: string }) | undefined)
+  if ((code?.systemCode ?? code?.code) === 'ENOENT') return 'not-found'
+  if (cause === 'abort') return 'aborted'
+  if (cause === 'timeout') return 'timeout'
+  if (cause === 'auth') return 'auth-required'
+  if (cause === 'entitlement') return 'entitlement'
+  if (cause === 'model') return 'model'
+  if (cause === 'refusal') return 'refusal'
+  if (cause === 'output-limit') return 'output-limit'
+  if (cause === 'protocol') return 'protocol'
+  if (cause === 'process') return 'process'
+  return 'failed'
+}
+
 /** Text-only DSH compatibility facade over a fresh, local TraeX ACP session. */
 export class TraexAcpAdapter extends LlmAdapter {
   private readonly cwd: string
   private readonly runText: TraexAcpTextRunner
   private readonly verifyAuth: TraexAuthVerifier
   private readonly onDiagnostic: AdapterDependencies['onDiagnostic']
+  private readonly onSettled: AdapterDependencies['onSettled']
+  private readonly onCatalogObserved: AdapterDependencies['onCatalogObserved']
   private readonly lifecycle = new AbortController()
 
   constructor(
@@ -99,6 +153,36 @@ export class TraexAcpAdapter extends LlmAdapter {
     this.runText = dependencies.runText ?? runTraexAcpText
     this.verifyAuth = dependencies.verifyAuth ?? verifyTraexAuth
     this.onDiagnostic = dependencies.onDiagnostic
+    this.onSettled = dependencies.onSettled
+    this.onCatalogObserved = dependencies.onCatalogObserved
+  }
+
+  private reportSettled(context: RouteFailureContext): void {
+    if (this.onSettled === undefined) return
+    try {
+      this.onSettled(context)
+    } catch {
+      // A diagnostic sink must never change model-call settlement.
+    }
+  }
+
+  /** Compose the adapter-owned forwarded flag and outcome onto the transport's lifecycle context. */
+  private routeFailureFrom(
+    context: ProviderFailureContext | undefined,
+    assistantTextForwarded: boolean,
+    outcome: RouteOutcome,
+  ): RouteFailureContext {
+    return {
+      phase: context?.phase ?? 'stream',
+      promptSubmissionState: context?.promptSubmissionState ?? 'unknown',
+      assistantTextObserved: context?.assistantTextObserved ?? assistantTextForwarded,
+      assistantTextForwarded,
+      outcome,
+      ...(context?.teardownState !== undefined ? { teardownState: context.teardownState } : {}),
+      ...(context?.terminalReason !== undefined ? { terminalReason: context.terminalReason } : {}),
+      ...(context?.exitCode !== undefined ? { exitCode: context.exitCode } : {}),
+      ...(context?.signal !== undefined ? { signal: context.signal } : {}),
+    }
   }
 
   override providerInfo(provider: string): LlmProviderInfo {
@@ -141,69 +225,112 @@ export class TraexAcpAdapter extends LlmAdapter {
     const signal = options.signal === undefined
       ? this.lifecycle.signal
       : AbortSignal.any([options.signal, this.lifecycle.signal])
-    if (signal.aborted) throw abortReason(signal)
 
-    try {
-      await this.verifyAuth({
-        command: this.config.command,
-        cwd: this.cwd,
-        timeoutMs: this.config.authProbeTimeoutMs,
-        maxOutputBytes: this.config.maxAuthProbeBytes,
-        extraEnvNames: this.config.extraEnvNames,
-        signal,
+    let assistantTextForwarded = false
+    let transportContext: ProviderFailureContext | undefined
+    // Track the best-known lifecycle facts so a single settled report fires on ANY exit,
+    // including the earliest pre-auth abort and a consumer that returns early.
+    let phase: RouteFailureContext['phase'] = 'auth'
+    let promptSubmissionState: PromptSubmissionState = 'not-submitted'
+    let outcome: RouteOutcome = 'aborted'
+    let reported = false
+    const settle = (): void => {
+      if (reported) return
+      reported = true
+      this.reportSettled({
+        ...this.routeFailureFrom(transportContext, assistantTextForwarded, outcome),
+        ...(transportContext === undefined ? { phase, promptSubmissionState } : {}),
       })
-    } catch (error: unknown) {
-      throw connectorFailure(this.config.command, error)
     }
 
-    const prompt = buildPrompt(options, this.config.maxPromptBytes)
-    const invocation: TraexAcpInvocation = {
-      command: this.config.command,
-      args: [
-        '--sandbox',
-        'read-only',
-        '--ask-for-approval',
-        'never',
-        'acp',
-        'serve',
-      ],
-      cwd: this.cwd,
-      prompt,
-      ...(options.model === 'default' ? {} : { model: options.model }),
-    }
-    let terminal: TraexSuccessfulStopReason | undefined
-    const runnerOptions: RunTraexAcpOptions = {
-      timeoutMs: this.config.timeoutMs,
-      killGraceMs: this.config.killGraceMs,
-      maxMessageBytes: this.config.maxMessageBytes,
-      maxProtocolBytes: this.config.maxProtocolBytes,
-      maxProtocolMessages: this.config.maxProtocolMessages,
-      maxOutputBytes: this.config.maxOutputBytes,
-      maxStderrBytes: this.config.maxStderrBytes,
-      extraEnvNames: this.config.extraEnvNames,
-      onStopReason: reason => { terminal = reason },
-      onDiagnostic: diagnostic => this.onDiagnostic?.(diagnostic),
-      signal,
-    }
-
-    let text = ''
-    yield { type: 'block-start', index: 0, blockType: 'text' }
     try {
-      for await (const delta of this.runText(invocation, runnerOptions)) {
-        if (delta.length === 0) continue
-        text += delta
-        yield { type: 'text-delta', index: 0, text: delta }
+      if (signal.aborted) throw abortReason(signal)
+
+      try {
+        await this.verifyAuth({
+          command: this.config.command,
+          cwd: this.cwd,
+          timeoutMs: this.config.authProbeTimeoutMs,
+          maxOutputBytes: this.config.maxAuthProbeBytes,
+          extraEnvNames: this.config.extraEnvNames,
+          signal,
+        })
+      } catch (error: unknown) {
+        // Auth precedes the ACP handshake, so the prompt never entered the stream.
+        outcome = outcomeFor(error)
+        throw connectorFailure(this.config.command, error)
       }
-    } catch (error: unknown) {
-      throw connectorFailure(this.config.command, error)
-    }
-    if (terminal === undefined) {
-      throw connectorFailure(this.config.command, new Error('TraeX ACP terminal metadata was missing', { cause: 'protocol' }))
-    }
-    yield { type: 'block-end', index: 0, block: { type: 'text', text } }
-    yield {
-      type: 'finish',
-      reason: terminal === 'end_turn' ? { kind: 'stop' } : { kind: 'max-tokens' },
+
+      // Preflight prompt serialization runs before the handshake; a failure here is provably not-submitted.
+      phase = 'preflight'
+      let invocation: TraexAcpInvocation
+      try {
+        invocation = {
+          command: this.config.command,
+          args: [
+            '--sandbox',
+            'read-only',
+            '--ask-for-approval',
+            'never',
+            'acp',
+            'serve',
+          ],
+          cwd: this.cwd,
+          prompt: buildPrompt(options, this.config.maxPromptBytes),
+          ...(options.model === 'default' ? {} : { model: options.model }),
+        }
+      } catch (error: unknown) {
+        outcome = 'preflight'
+        throw error
+      }
+      let terminal: TraexSuccessfulStopReason | undefined
+      const runnerOptions: RunTraexAcpOptions = {
+        timeoutMs: this.config.timeoutMs,
+        killGraceMs: this.config.killGraceMs,
+        maxMessageBytes: this.config.maxMessageBytes,
+        maxProtocolBytes: this.config.maxProtocolBytes,
+        maxProtocolMessages: this.config.maxProtocolMessages,
+        maxOutputBytes: this.config.maxOutputBytes,
+        maxStderrBytes: this.config.maxStderrBytes,
+        extraEnvNames: this.config.extraEnvNames,
+        onStopReason: reason => { terminal = reason },
+        onDiagnostic: diagnostic => this.onDiagnostic?.(diagnostic),
+        onSettled: context => { transportContext = context },
+        ...(this.onCatalogObserved !== undefined ? { onCatalogObserved: this.onCatalogObserved } : {}),
+        signal,
+      }
+
+      // block-start alone runs nothing: prompt stays provably not-submitted until execution
+      // resumes toward the transport. Once iteration begins the transport owns the state and
+      // reports it via onSettled; if it never reports (early return mid-stream) we say unknown.
+      phase = 'stream'
+      let text = ''
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      try {
+        const deltas = this.runText(invocation, runnerOptions)
+        promptSubmissionState = 'unknown'
+        for await (const delta of deltas) {
+          if (delta.length === 0) continue
+          text += delta
+          assistantTextForwarded = true
+          yield { type: 'text-delta', index: 0, text: delta }
+        }
+      } catch (error: unknown) {
+        outcome = outcomeFor(error)
+        throw connectorFailure(this.config.command, error)
+      }
+      if (terminal === undefined) {
+        outcome = 'protocol'
+        throw connectorFailure(this.config.command, new Error('TraeX ACP terminal metadata was missing', { cause: 'protocol' }))
+      }
+      outcome = 'ok'
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield {
+        type: 'finish',
+        reason: terminal === 'end_turn' ? { kind: 'stop' } : { kind: 'max-tokens' },
+      }
+    } finally {
+      settle()
     }
   }
 
