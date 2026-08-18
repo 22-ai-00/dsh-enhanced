@@ -51,4 +51,4 @@ plugins/<name>/
 
 本地开发可以把 `plugins/<name>` 目录链接进 profile。正式分发以独立 npm 包或预构建 tarball 为准。Git package 安装以仓库根为包边界，不适合作为多插件子目录的默认分发方式。
 
-仓库不由 CI 自动发布到 npm；维护者使用根目录的 `release:prepare`、npm 发布和 `release:record` 三阶段流程。`release-manifest.json` 记录当前成功版本、待发布版本、每个插件包版本和历史记录。整体发版默认递增已记录版本的补丁位，同时仍保留每个插件作为独立 npm 包安装、回滚和审计的边界。
+仓库不由 CI 自动发布到 npm；维护者使用根目录的 `release:prepare`、`release:publish` 和 `release:record` 三阶段流程。发布阶段必须使用 pnpm，让 workspace `catalog:` 依赖在上传前转换为实际版本；插件的 `prepublishOnly` 会拒绝直接使用 npm 发布。`release-manifest.json` 记录当前成功版本、待发布版本、每个插件包版本和历史记录。整体发版默认递增已记录版本的补丁位，同时仍保留每个插件作为独立 npm 包安装、回滚和审计的边界。
