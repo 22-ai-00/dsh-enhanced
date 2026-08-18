@@ -10,6 +10,7 @@ import {
   type Agent,
   type AnyMessage,
   type Client,
+  type PromptResponse,
   type SessionConfigOption,
   type SessionNotification,
   type StopReason,
@@ -44,6 +45,7 @@ export interface SpawnedProcess {
   readonly exitCode?: number | null
   readonly signalCode?: NodeJS.Signals | null
   kill(signal?: NodeJS.Signals | number): boolean
+  once(event: 'spawn', listener: () => void): this
   once(event: 'error', listener: (error: Error) => void): this
   once(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this
 }
@@ -85,13 +87,15 @@ export interface RunTraexAcpOptions {
   readonly onSettled?: (context: ProviderFailureContext) => void
   /** Receives a non-authoritative model catalog observation from a normal handshake. */
   readonly onCatalogObserved?: (observation: CatalogObservation) => void
+  /** Adapter-measured login-probe duration, forwarded so settled metrics stay in one place. */
+  readonly authProbeDurationMs?: number
   readonly spawn?: SpawnProcess
 }
 
 /** Whether the prompt was handed to the ACP stream; the only safe basis for reasoning about replay. */
 export type PromptSubmissionState = 'not-submitted' | 'submitted' | 'unknown'
 
-/** Progress of the bounded teardown that must complete before a success settles. */
+/** Progress of the bounded teardown attempt; `failed` means child close was not proven. */
 export type TeardownState = 'not-started' | 'in-progress' | 'completed' | 'failed' | 'unknown'
 
 /** Lifecycle phase a failure was observed in, from handshake through teardown. */
@@ -108,7 +112,8 @@ export type TraexLifecyclePhase =
 
 /**
  * Credential-free lifecycle facts for one ACP invocation. Diagnostic side-channel only:
- * it never carries prompt text, stderr, tokens or tool/plan content, and never changes settlement.
+ * it never carries prompt text, stderr, credentials, model ids or tool/plan content, and never
+ * changes settlement. It may carry aggregate numeric usage counts from a validated ACP response.
  */
 export interface ProviderFailureContext {
   readonly phase: TraexLifecyclePhase
@@ -118,7 +123,63 @@ export interface ProviderFailureContext {
   readonly terminalReason?: string
   readonly exitCode?: number | null
   readonly signal?: NodeJS.Signals | null
+  /** Explicit-clock-origin latency metrics; only measurable ones are present. */
+  readonly metrics?: TraexLifecycleMetrics
+  /** Raw ACP token counts kept for internal diagnostics; never mapped to DSH TokenUsage. */
+  readonly usage?: AcpUsageSnapshot
 }
+
+/** Latency metrics with named clock origins so they stay comparable across providers. */
+export interface TraexLifecycleMetrics {
+  /** Local login-status probe duration. */
+  readonly authProbeDurationMs?: number
+  /** Child `spawn` event to the first accepted ACP protocol message. */
+  readonly spawnToFirstProtocolMessageMs?: number
+  /** Prompt submission to the first assistant text chunk. */
+  readonly promptToFirstTextMs?: number
+  /** Prompt submission to the validated terminal stop reason. */
+  readonly promptToTerminalMs?: number
+  /** Bounded teardown attempt start to completion or timeout settlement. */
+  readonly teardownDurationMs?: number
+}
+
+/**
+ * Internal snapshot of ACP's experimental `PromptResponse.usage`. Field names mirror the ACP
+ * wire shape (cumulative "across all turns") and are NOT the DSH `TokenUsage` per-call,
+ * uncached-input contract, so this is never emitted as a DSH usage chunk without semantic verification.
+ */
+export interface AcpUsageSnapshot {
+  readonly inputTokens: number
+  readonly outputTokens: number
+  readonly totalTokens: number
+  readonly cachedReadTokens?: number
+  readonly cachedWriteTokens?: number
+  readonly thoughtTokens?: number
+}
+
+/**
+ * The explicit, unmet preconditions that must ALL be proven true before an `AcpUsageSnapshot` may be
+ * mapped to a DSH `TokenUsage` and emitted as a usage chunk. This is a verification gate, not a
+ * to-do list: until each item is confirmed against a real TraeX fixture or an official field
+ * contract, the snapshot stays an internal diagnostic and no usage chunk is emitted.
+ *
+ * Grounding (DSH contract, `@deepseek-ai/dsh-llm` `types.d.ts`):
+ *   - `inputTokens`/`outputTokens` are REQUIRED numbers and must be per-call, not cumulative.
+ *   - `inputTokens` must be UNCACHED input only; cache is reported separately.
+ *   - a real zero must be preserved; only genuinely-absent optionals stay undefined.
+ */
+export const ACP_USAGE_DSH_MAPPING_GATE: readonly string[] = Object.freeze([
+  // ACP usage is documented as cumulative "across all turns"; DSH TokenUsage is per-call. A single
+  // fresh session/one-turn invocation may make these coincide, but that must be proven, not assumed.
+  'per-call-vs-cumulative: prove the snapshot reflects THIS call, not a running total across turns',
+  // DSH inputTokens excludes cached input; ACP inputTokens may fold cache in. If it does, the cached
+  // portion must be subtracted out, which requires knowing ACP's exact accounting.
+  'uncached-input: prove ACP inputTokens excludes cache, or derive uncached input exactly',
+  // The cache split must line up field-for-field with DSH cacheReadTokens/cacheWriteTokens.
+  'cache-fields: prove cachedReadTokens/cachedWriteTokens match DSH cache-read/-write semantics',
+  // reasoningTokens has no confirmed ACP source; thoughtTokens is not proven equivalent.
+  'reasoning-mapping: prove (or decline) thoughtTokens -> DSH reasoningTokens equivalence',
+])
 
 /**
  * Non-authoritative snapshot of a model selector seen during a normal handshake. It exists
@@ -265,7 +326,6 @@ export async function* runTraexAcpText(
   let fatal: TraexAcpError | undefined
   let closeResult: { code: number | null; signal: NodeJS.Signals | null } | undefined
   let resolveClosed: (() => void) | undefined
-  let killTimer: ReturnType<typeof setTimeout> | undefined
   let shutdownPromise: Promise<void> | undefined
   const childClosed = new Promise<void>(resolve => { resolveClosed = resolve })
   const stderr = new BoundedBytes(limits.maxStderrBytes)
@@ -275,10 +335,35 @@ export async function* runTraexAcpText(
   let teardownState: TeardownState = 'not-started'
   let terminalReason: string | undefined
   let reportedContext = false
+  let usageSnapshot: AcpUsageSnapshot | undefined
+  const failureRaised = Promise.withResolvers<TraexAcpError>()
+  // Monotonic clock anchors (ms); each metric is only reported when both its ends are known.
+  let childSpawnedAt: number | undefined
+  let firstProtocolMessageAt: number | undefined
+  let promptAt: number | undefined
+  let firstTextAt: number | undefined
+  let terminalAt: number | undefined
+  let teardownStartedAt: number | undefined
+  let teardownSettledAt: number | undefined
+
+  const buildMetrics = (): TraexLifecycleMetrics | undefined => {
+    const metrics: Record<string, number> = {}
+    if (options.authProbeDurationMs !== undefined) metrics.authProbeDurationMs = options.authProbeDurationMs
+    if (childSpawnedAt !== undefined && firstProtocolMessageAt !== undefined) {
+      metrics.spawnToFirstProtocolMessageMs = firstProtocolMessageAt - childSpawnedAt
+    }
+    if (promptAt !== undefined && firstTextAt !== undefined) metrics.promptToFirstTextMs = firstTextAt - promptAt
+    if (promptAt !== undefined && terminalAt !== undefined) metrics.promptToTerminalMs = terminalAt - promptAt
+    if (teardownStartedAt !== undefined && teardownSettledAt !== undefined) {
+      metrics.teardownDurationMs = teardownSettledAt - teardownStartedAt
+    }
+    return Object.keys(metrics).length > 0 ? metrics : undefined
+  }
 
   const reportSettled = (): void => {
     if (options.onSettled === undefined || reportedContext) return
     reportedContext = true
+    const metrics = buildMetrics()
     const context: ProviderFailureContext = {
       phase,
       promptSubmissionState,
@@ -286,6 +371,8 @@ export async function* runTraexAcpText(
       teardownState,
       ...(terminalReason !== undefined ? { terminalReason } : {}),
       ...(closeResult !== undefined ? { exitCode: closeResult.code, signal: closeResult.signal } : {}),
+      ...(metrics !== undefined ? { metrics } : {}),
+      ...(usageSnapshot !== undefined ? { usage: usageSnapshot } : {}),
     }
     try {
       options.onSettled(context)
@@ -309,7 +396,18 @@ export async function* runTraexAcpText(
   }
 
   const recordFailure = (error: TraexAcpError): void => {
-    fatal ??= error
+    if (fatal !== undefined) return
+    fatal = error
+    failureRaised.resolve(error)
+  }
+
+  const awaitRpc = async <T>(rpc: Promise<T>): Promise<T> => {
+    const result = await Promise.race([
+      rpc.then(value => ({ kind: 'value' as const, value })),
+      failureRaised.promise.then(error => ({ kind: 'failure' as const, error })),
+    ])
+    if (result.kind === 'failure') throw result.error
+    return result.value
   }
 
   const signalChild = (signal: NodeJS.Signals): void => {
@@ -329,10 +427,27 @@ export async function* runTraexAcpText(
     }
   }
 
+  const waitForChildClose = (timeoutMs: number): Promise<boolean> => {
+    if (closeResult !== undefined) return Promise.resolve(true)
+    return new Promise(resolve => {
+      let settled = false
+      const finish = (closed: boolean): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        resolve(closed)
+      }
+      const timer = setTimeout(() => finish(false), timeoutMs)
+      timer.unref?.()
+      void childClosed.then(() => finish(true))
+    })
+  }
+
   const shutdown = (cancelSession: boolean): Promise<void> => {
     if (shutdownPromise !== undefined) return shutdownPromise
     terminating = true
     teardownState = 'in-progress'
+    teardownStartedAt ??= performance.now()
     shutdownPromise = (async () => {
       if (cancelSession && sessionId !== undefined && client !== undefined && !client.signal.aborted) {
         let cancelTimer: ReturnType<typeof setTimeout> | undefined
@@ -354,11 +469,21 @@ export async function* runTraexAcpText(
       }
       if (closeResult === undefined) {
         signalChild('SIGINT')
-        killTimer = setTimeout(() => signalChild('SIGKILL'), limits.killGraceMs)
-        killTimer.unref?.()
+        if (!await waitForChildClose(limits.killGraceMs)) {
+          signalChild('SIGKILL')
+          if (!await waitForChildClose(limits.killGraceMs)) {
+            // The request must still settle even if a broken process implementation never emits
+            // `close`. Keep the listeners/streams attached so a late close is drained and tracked,
+            // but do not report a second settlement.
+            teardownState = 'failed'
+            teardownSettledAt ??= performance.now()
+            recordFailure(new TraexAcpError('process'))
+            return
+          }
+        }
       }
-      await childClosed
       teardownState = 'completed'
+      teardownSettledAt ??= performance.now()
     })()
     return shutdownPromise
   }
@@ -369,14 +494,13 @@ export async function* runTraexAcpText(
   }
 
   child.once('error', error => stop(processFailure(error)))
+  child.once('spawn', () => { childSpawnedAt ??= performance.now() })
   child.once('close', (code, signal) => {
     closeResult = { code, signal }
-    if (killTimer !== undefined) clearTimeout(killTimer)
     resolveClosed?.()
     if (!terminating) {
-      recordFailure(code !== 0 || signal !== null
-        ? new TraexAcpError('process')
-        : new TraexAcpError('protocol'))
+      if (code !== 0 || signal !== null) recordFailure(new TraexAcpError('process'))
+      else if (!turnFinished) recordFailure(new TraexAcpError('protocol'))
     }
   })
 
@@ -389,6 +513,7 @@ export async function* runTraexAcpText(
     limits.maxProtocolBytes,
     limits.maxProtocolMessages,
     rpcGuard,
+    () => { firstProtocolMessageAt ??= performance.now() },
   )
   guardedStdout.once('error', (error: Error) => {
     stop(error instanceof TraexAcpError ? error : new TraexAcpError('protocol'))
@@ -429,6 +554,7 @@ export async function* runTraexAcpText(
       }
       outputBytes = nextBytes
       sawAssistantText = true
+      firstTextAt ??= performance.now()
       if (phase === 'prompt') phase = 'stream'
       queue.push(text)
       return Promise.resolve()
@@ -448,7 +574,7 @@ export async function* runTraexAcpText(
   const operation = (async (): Promise<void> => {
     try {
       phase = 'initialize'
-      const initialized = await client.initialize({
+      const initialized = await awaitRpc(client.initialize({
         protocolVersion: PROTOCOL_VERSION,
         clientCapabilities: {},
         clientInfo: {
@@ -456,7 +582,7 @@ export async function* runTraexAcpText(
           title: 'DSH TraeX ACP Provider',
           version: '0.1.0',
         },
-      })
+      }))
       throwIfFatal(fatal)
       if (initialized.protocolVersion !== PROTOCOL_VERSION || initialized.agentInfo?.name !== 'traex-acp') {
         throw new TraexAcpError('protocol')
@@ -466,7 +592,7 @@ export async function* runTraexAcpText(
       }
 
       phase = 'new-session'
-      const session = await client.newSession({ cwd: invocation.cwd, mcpServers: [] })
+      const session = await awaitRpc(client.newSession({ cwd: invocation.cwd, mcpServers: [] }))
       sessionId = session.sessionId
       if (sessionId.length === 0) throw new TraexAcpError('protocol')
       throwIfFatal(fatal)
@@ -480,11 +606,11 @@ export async function* runTraexAcpText(
       if (invocation.model !== undefined) {
         if (!selectValues(modelOption).includes(invocation.model)) throw new TraexAcpError('model')
         phase = 'set-model'
-        const updated = await client.setSessionConfigOption({
+        const updated = await awaitRpc(client.setSessionConfigOption({
           sessionId,
           configId: modelOption.id,
           value: invocation.model,
-        })
+        }))
         const selected = validateModelCatalog(updated.configOptions)
         if (selected.id !== modelOption.id || selected.currentValue !== invocation.model) {
           throw new TraexAcpError('protocol')
@@ -497,12 +623,19 @@ export async function* runTraexAcpText(
       phase = 'prompt'
       promptSubmissionState = 'submitted'
       promptActive = true
-      const result = await client.prompt({
+      promptAt = performance.now()
+      const result = await awaitRpc(client.prompt({
         sessionId,
         prompt: [{ type: 'text', text: invocation.prompt }],
-      })
+      }))
       promptActive = false
       throwIfFatal(fatal)
+      // The response itself is the terminal protocol event even when its reason represents a
+      // failed turn, or when later semantic checks (such as required text) fail.
+      phase = 'terminal'
+      terminalAt = performance.now()
+      terminalReason = result.stopReason
+      usageSnapshot = snapshotUsage(result.usage)
       if (result.stopReason === 'refusal') throw new TraexAcpError('refusal')
       if (result.stopReason === 'cancelled') throw new TraexAcpError('abort')
       if (!['end_turn', 'max_tokens', 'max_turn_requests'].includes(result.stopReason)) {
@@ -510,21 +643,19 @@ export async function* runTraexAcpText(
       }
       if (!sawAssistantText) throw new TraexAcpError('protocol')
       const stopReason = result.stopReason as TraexSuccessfulStopReason
-      phase = 'terminal'
-      terminalReason = stopReason
-      // Experimental PromptResponse.usage stays internal: the ACP/DSH token accounting口径
-      // is unverified, so it is neither mapped to DSH TokenUsage nor emitted as a usage chunk.
+      // Mark a validated completed turn before invoking an observer. A clean child close racing
+      // between terminal handling / closeSession and shutdown is no longer a premature EOF.
+      turnFinished = true
       try {
         options.onStopReason?.(stopReason)
       } catch {
         throw new TraexAcpError('protocol')
       }
-      turnFinished = true
       // Success still waits for bounded teardown; a close-session failure must not settle as success.
       if (initialized.agentCapabilities?.sessionCapabilities?.close !== undefined
         && initialized.agentCapabilities.sessionCapabilities.close !== null) {
         phase = 'close-session'
-        await client.closeSession({ sessionId })
+        await awaitRpc(client.closeSession({ sessionId }))
         throwIfFatal(fatal)
       }
       phase = 'child-close'
@@ -643,6 +774,39 @@ function validateModelCatalog(
 
 function selectValues(option: Extract<SessionConfigOption, { type: 'select' }>): string[] {
   return selectEntries(option).map(entry => entry.value)
+}
+
+/**
+ * Extract only the explicit numeric fields of ACP's experimental usage into an internal snapshot.
+ * `_meta` and any unknown keys are dropped; optional counts stay undefined when absent, and a real
+ * zero is preserved. This is a diagnostic record, never a DSH `TokenUsage` mapping.
+ */
+function snapshotUsage(usage: PromptResponse['usage']): AcpUsageSnapshot | undefined {
+  if (usage === undefined || usage === null) return undefined
+  if (!validTokenCount(usage.inputTokens)
+    || !validTokenCount(usage.outputTokens)
+    || !validTokenCount(usage.totalTokens)
+    || !validOptionalTokenCount(usage.cachedReadTokens)
+    || !validOptionalTokenCount(usage.cachedWriteTokens)
+    || !validOptionalTokenCount(usage.thoughtTokens)) {
+    throw new TraexAcpError('protocol')
+  }
+  return {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    totalTokens: usage.totalTokens,
+    ...(typeof usage.cachedReadTokens === 'number' ? { cachedReadTokens: usage.cachedReadTokens } : {}),
+    ...(typeof usage.cachedWriteTokens === 'number' ? { cachedWriteTokens: usage.cachedWriteTokens } : {}),
+    ...(typeof usage.thoughtTokens === 'number' ? { thoughtTokens: usage.thoughtTokens } : {}),
+  }
+}
+
+function validTokenCount(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
+}
+
+function validOptionalTokenCount(value: unknown): value is number | null | undefined {
+  return value === undefined || value === null || validTokenCount(value)
 }
 
 function selectEntries(option: Extract<SessionConfigOption, { type: 'select' }>) {
@@ -827,9 +991,25 @@ function validClientResponse(method: string, result: unknown): boolean {
   if (method === 'session/set_config_option') {
     return zSetSessionConfigOptionResponse.safeParse(result).success && validRawConfigOptions(result)
   }
-  if (method === 'session/prompt') return zPromptResponse.safeParse(result).success
+  if (method === 'session/prompt') return validPromptResponse(result)
   if (method === 'session/close') return zCloseSessionResponse.safeParse(result).success
   return false
+}
+
+function validPromptResponse(value: unknown): boolean {
+  if (!zPromptResponse.safeParse(value).success) return false
+  const response = jsonObject(value)
+  if (response === undefined || !own(response, 'usage') || response.usage === null || response.usage === undefined) {
+    return true
+  }
+  const usage = jsonObject(response.usage)
+  return usage !== undefined
+    && validTokenCount(usage.inputTokens)
+    && validTokenCount(usage.outputTokens)
+    && validTokenCount(usage.totalTokens)
+    && validOptionalTokenCount(usage.cachedReadTokens)
+    && validOptionalTokenCount(usage.cachedWriteTokens)
+    && validOptionalTokenCount(usage.thoughtTokens)
 }
 
 /** The SDK's generated initialize schema deliberately skips malformed optional fields. */
@@ -946,6 +1126,7 @@ class BoundedNdjsonTransform extends Transform {
     private readonly maxProtocolBytes: number,
     private readonly maxProtocolMessages: number,
     private readonly guard: AcpJsonRpcGuard,
+    private readonly onAcceptedMessage?: () => void,
   ) {
     super({ readableHighWaterMark: 64 * 1024, writableHighWaterMark: 64 * 1024 })
   }
@@ -1004,6 +1185,7 @@ class BoundedNdjsonTransform extends Transform {
     if (this.protocolMessages >= this.maxProtocolMessages) throw new TraexAcpError('output-limit')
     this.protocolMessages++
     this.guard.acceptIncoming(parseJsonObject(line))
+    this.onAcceptedMessage?.()
   }
 }
 

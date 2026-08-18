@@ -7,6 +7,9 @@ export const version = '0.1.0'
 export const inject = ['llm']
 
 export { Config, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter }
+export { CatalogObservationCache, catalogCacheKey } from './catalog-cache.js'
+export { ACP_USAGE_DSH_MAPPING_GATE } from './acp-client.js'
+export type { CatalogCacheKeyParts, CachedCatalog } from './catalog-cache.js'
 export type { TraexAcpProviderConfig }
 
 export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
@@ -28,6 +31,8 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
       const detail = `phase=${context.phase} submission=${context.promptSubmissionState}`
         + ` textForwarded=${context.assistantTextForwarded}`
         + (context.teardownState !== undefined ? ` teardown=${context.teardownState}` : '')
+        + (context.metrics !== undefined ? ` metrics=${JSON.stringify(context.metrics)}` : '')
+        + (context.usage !== undefined ? ` usage=${JSON.stringify(context.usage)}` : '')
       if (context.outcome === 'ok') ctx.logger.debug(`${TRAEX_PROVIDER_ROUTE} settled ok (${detail})`)
       else ctx.logger.info(`${TRAEX_PROVIDER_ROUTE} settled ${context.outcome} (${detail})`)
     },

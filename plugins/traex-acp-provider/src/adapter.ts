@@ -19,6 +19,7 @@ import {
   type TraexSuccessfulStopReason,
 } from './acp-client.js'
 import { verifyTraexAuth, type TraexAuthVerifier } from './auth.js'
+import { CatalogObservationCache, type CatalogCacheKeyParts, type CachedCatalog } from './catalog-cache.js'
 import type { TraexAcpProviderConfig } from './config.js'
 import { buildPrompt } from './prompt.js'
 
@@ -65,6 +66,10 @@ export interface AdapterDependencies {
   onSettled?: (context: RouteFailureContext) => void
   /** Receives non-authoritative model catalog observations for diagnostics/display only. */
   onCatalogObserved?: (observation: CatalogObservation) => void
+  /** How long a non-authoritative catalog observation may still be shown, in ms. */
+  catalogCacheTtlMs?: number
+  /** Injectable clock for the catalog cache; tests only. */
+  catalogClock?: () => number
 }
 
 const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
@@ -142,6 +147,7 @@ export class TraexAcpAdapter extends LlmAdapter {
   private readonly onDiagnostic: AdapterDependencies['onDiagnostic']
   private readonly onSettled: AdapterDependencies['onSettled']
   private readonly onCatalogObserved: AdapterDependencies['onCatalogObserved']
+  private readonly catalogCache: CatalogObservationCache
   private readonly lifecycle = new AbortController()
 
   constructor(
@@ -155,6 +161,44 @@ export class TraexAcpAdapter extends LlmAdapter {
     this.onDiagnostic = dependencies.onDiagnostic
     this.onSettled = dependencies.onSettled
     this.onCatalogObserved = dependencies.onCatalogObserved
+    this.catalogCache = new CatalogObservationCache({
+      ...(dependencies.catalogCacheTtlMs !== undefined ? { ttlMs: dependencies.catalogCacheTtlMs } : {}),
+      ...(dependencies.catalogClock !== undefined ? { now: dependencies.catalogClock } : {}),
+    })
+  }
+
+  /**
+   * Cache key parts built from NON-SENSITIVE identifiers only. The config revision is derived from
+   * the deployer model allowlist, never from environment variable values (which are secret and must
+   * not become a correlatable fingerprint).
+   */
+  private catalogKeyParts(): CatalogCacheKeyParts {
+    return {
+      route: TRAEX_PROVIDER_ROUTE,
+      command: this.config.command,
+      cwd: this.cwd,
+      configRevision: this.config.models.join(','),
+    }
+  }
+
+  /**
+   * Read the last observed catalog for THIS adapter's route, if still within TTL. Diagnostic /
+   * display only: this is deliberately not called by `resolveModel`, `listModels`, or request
+   * admission. The current `session/new` remains the sole execution authority.
+   */
+  peekObservedCatalog(): CachedCatalog | undefined {
+    return this.catalogCache.peek(this.catalogKeyParts())
+  }
+
+  /** Record a non-authoritative catalog observation and forward it to any diagnostic sink. */
+  private handleCatalogObserved(observation: CatalogObservation): void {
+    this.catalogCache.record(this.catalogKeyParts(), observation)
+    if (this.onCatalogObserved === undefined) return
+    try {
+      this.onCatalogObserved(observation)
+    } catch {
+      // A non-authoritative observation must never change model-call settlement.
+    }
   }
 
   private reportSettled(context: RouteFailureContext): void {
@@ -182,6 +226,8 @@ export class TraexAcpAdapter extends LlmAdapter {
       ...(context?.terminalReason !== undefined ? { terminalReason: context.terminalReason } : {}),
       ...(context?.exitCode !== undefined ? { exitCode: context.exitCode } : {}),
       ...(context?.signal !== undefined ? { signal: context.signal } : {}),
+      ...(context?.metrics !== undefined ? { metrics: context.metrics } : {}),
+      ...(context?.usage !== undefined ? { usage: context.usage } : {}),
     }
   }
 
@@ -232,6 +278,7 @@ export class TraexAcpAdapter extends LlmAdapter {
     // including the earliest pre-auth abort and a consumer that returns early.
     let phase: RouteFailureContext['phase'] = 'auth'
     let promptSubmissionState: PromptSubmissionState = 'not-submitted'
+    let authProbeDurationMs: number | undefined
     let outcome: RouteOutcome = 'aborted'
     let reported = false
     const settle = (): void => {
@@ -239,13 +286,19 @@ export class TraexAcpAdapter extends LlmAdapter {
       reported = true
       this.reportSettled({
         ...this.routeFailureFrom(transportContext, assistantTextForwarded, outcome),
-        ...(transportContext === undefined ? { phase, promptSubmissionState } : {}),
+        ...(transportContext === undefined ? {
+          phase,
+          promptSubmissionState,
+          teardownState: promptSubmissionState === 'not-submitted' ? 'not-started' : 'unknown',
+          ...(authProbeDurationMs !== undefined ? { metrics: { authProbeDurationMs } } : {}),
+        } : {}),
       })
     }
 
     try {
       if (signal.aborted) throw abortReason(signal)
 
+      const authStartedAt = performance.now()
       try {
         await this.verifyAuth({
           command: this.config.command,
@@ -257,8 +310,13 @@ export class TraexAcpAdapter extends LlmAdapter {
         })
       } catch (error: unknown) {
         // Auth precedes the ACP handshake, so the prompt never entered the stream.
+        // A stale catalog observation must not outlive an auth failure (the account or plan
+        // may have changed), so drop it here regardless of the eventual outcome.
+        this.catalogCache.invalidate(this.catalogKeyParts())
         outcome = outcomeFor(error)
         throw connectorFailure(this.config.command, error)
+      } finally {
+        authProbeDurationMs = performance.now() - authStartedAt
       }
 
       // Preflight prompt serialization runs before the handshake; a failure here is provably not-submitted.
@@ -296,7 +354,8 @@ export class TraexAcpAdapter extends LlmAdapter {
         onStopReason: reason => { terminal = reason },
         onDiagnostic: diagnostic => this.onDiagnostic?.(diagnostic),
         onSettled: context => { transportContext = context },
-        ...(this.onCatalogObserved !== undefined ? { onCatalogObserved: this.onCatalogObserved } : {}),
+        ...(authProbeDurationMs !== undefined ? { authProbeDurationMs } : {}),
+        onCatalogObserved: observation => this.handleCatalogObserved(observation),
         signal,
       }
 
@@ -307,8 +366,10 @@ export class TraexAcpAdapter extends LlmAdapter {
       let text = ''
       yield { type: 'block-start', index: 0, blockType: 'text' }
       try {
-        const deltas = this.runText(invocation, runnerOptions)
+        // Calling an injected runner may synchronously start work or throw. From immediately
+        // before that call, replay safety is unknown until the transport supplies exact facts.
         promptSubmissionState = 'unknown'
+        const deltas = this.runText(invocation, runnerOptions)
         for await (const delta of deltas) {
           if (delta.length === 0) continue
           text += delta
@@ -335,6 +396,9 @@ export class TraexAcpAdapter extends LlmAdapter {
   }
 
   shutdown(): void {
+    // A reload/unload drops every non-authoritative observation; a later run re-observes from a
+    // fresh handshake, which is the only execution authority anyway.
+    this.catalogCache.clear()
     if (!this.lifecycle.signal.aborted) {
       this.lifecycle.abort(new Error('TraeX ACP provider unloaded', { cause: 'abort' }))
     }

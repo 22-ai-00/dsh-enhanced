@@ -59,38 +59,94 @@ describe('CLI process bridge', () => {
   })
 
   it('interrupts then kills an aborted child', async () => {
-    const child = new FakeChild()
-    const controller = new AbortController()
-    const stream = runCliText(buildInvocation('cursor', { cwd: '/repo', prompt: 'x' }), { spawn: fakeSpawn(child), signal: controller.signal, killGraceMs: 1 })
-    const pending = collect(stream)
-    const rejected = expect(pending).rejects.toThrow('aborted')
-    await Promise.resolve()
-    controller.abort()
-    await new Promise(resolve => setTimeout(resolve, 5))
-    child.finish()
-    await rejected
-    expect(child.kills).toEqual(expect.arrayContaining(['SIGINT', 'SIGKILL']))
+    vi.useFakeTimers()
+    try {
+      const child = new FakeChild()
+      const controller = new AbortController()
+      const stream = runCliText(buildInvocation('cursor', { cwd: '/repo', prompt: 'x' }), { spawn: fakeSpawn(child), signal: controller.signal, killGraceMs: 1 })
+      const pending = collect(stream)
+      const rejected = expect(pending).rejects.toThrow('aborted')
+      await Promise.resolve()
+      controller.abort()
+      await vi.advanceTimersByTimeAsync(1)
+      expect(child.kills).toEqual(expect.arrayContaining(['SIGINT', 'SIGKILL']))
+      child.finish(null, 'SIGKILL')
+      await rejected
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
-  it('does not settle after SIGKILL until ChildProcess close proves teardown', async () => {
-    const child = new FakeChild()
-    const controller = new AbortController()
-    const pending = collect(runCliText(
-      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
-      { spawn: fakeSpawn(child), signal: controller.signal, killGraceMs: 1 },
-    ))
-    let settled = false
-    void pending.then(() => { settled = true }, () => { settled = true })
-    const rejected = expect(pending).rejects.toMatchObject({ cause: 'abort' })
-    await Promise.resolve()
-    controller.abort()
-    await new Promise(resolve => setTimeout(resolve, 5))
-    expect(child.kills).toEqual(expect.arrayContaining(['SIGINT', 'SIGKILL']))
-    expect(settled).toBe(false)
+  it('does not arm SIGKILL when SIGINT synchronously closes the child', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = new FakeChild()
+      child.kill = (signal?: NodeJS.Signals | number): boolean => {
+        child.kills.push(signal)
+        child.finish(null, signal === 'SIGINT' ? 'SIGINT' : null)
+        return true
+      }
+      const controller = new AbortController()
+      const calls: ProviderFailureContext[] = []
+      const pending = collect(runCliText(
+        buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+        { spawn: fakeSpawn(child), signal: controller.signal, killGraceMs: 10, onSettled: value => { calls.push(value) } },
+      ))
+      const rejected = expect(pending).rejects.toMatchObject({ cause: 'abort' })
+      await Promise.resolve()
+      child.spawn()
+      controller.abort()
+      await rejected
+      await vi.advanceTimersByTimeAsync(100)
+      expect(child.kills).toEqual(['SIGINT'])
+      expect(calls).toHaveLength(1)
+      expect(calls[0]).toMatchObject({ teardownState: 'completed', exitCode: null, signal: 'SIGINT' })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 
-    child.finish(null, 'SIGKILL')
-    await rejected
-    expect(settled).toBe(true)
+  it('settles with an explicit live-process risk when close never follows SIGKILL', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = new FakeChild()
+      const controller = new AbortController()
+      const calls: ProviderFailureContext[] = []
+      const pending = collect(runCliText(
+        buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+        { spawn: fakeSpawn(child), signal: controller.signal, killGraceMs: 10, onSettled: value => { calls.push(value) } },
+      ))
+      let settled = false
+      void pending.then(() => { settled = true }, () => { settled = true })
+      const rejected = expect(pending).rejects.toMatchObject({ cause: 'abort' })
+      await Promise.resolve()
+      child.spawn()
+      controller.abort()
+      await vi.advanceTimersByTimeAsync(10)
+      expect(child.kills).toEqual(expect.arrayContaining(['SIGINT', 'SIGKILL']))
+      expect(settled).toBe(false)
+      await vi.advanceTimersByTimeAsync(10)
+      await rejected
+      expect(settled).toBe(true)
+      expect(calls).toHaveLength(1)
+      expect(calls[0]).toMatchObject({
+        phase: 'child-close',
+        promptSubmissionState: 'submitted',
+        teardownState: 'timed-out',
+      })
+      expect(calls[0]?.exitCode).toBeUndefined()
+      expect(calls[0]?.signal).toBeUndefined()
+      expect(child.listenerCount('close')).toBe(1)
+      expect(child.stdout.listenerCount('data')).toBe(1)
+      expect(child.stderr.listenerCount('data')).toBe(1)
+      child.finish(null, 'SIGKILL')
+      expect(calls).toHaveLength(1)
+      expect(child.listenerCount('close')).toBe(0)
+      expect(child.stdout.listenerCount('data')).toBe(0)
+      expect(child.stderr.listenerCount('data')).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('waits for close after a child error and preserves the original error', async () => {
@@ -119,6 +175,26 @@ describe('CLI process bridge', () => {
     const spawn = vi.fn()
     await expect(collect(runCliText(buildInvocation('codex', { cwd: '/repo', prompt: 'x' }), { spawn: spawn as unknown as SpawnProcess, signal: controller.signal }))).rejects.toThrow('before CLI spawn')
     expect(spawn).not.toHaveBeenCalled()
+  })
+
+  it('does not miss an abort that occurs while spawn() is returning', async () => {
+    const child = new FakeChild()
+    const controller = new AbortController()
+    let context: ProviderFailureContext | undefined
+    const spawn = vi.fn(() => {
+      controller.abort()
+      return child
+    }) as unknown as SpawnProcess
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn, signal: controller.signal, killGraceMs: 100, onSettled: value => { context = value } },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({ cause: 'abort' })
+    await Promise.resolve()
+    expect(child.kills).toContain('SIGINT')
+    child.finish(null, 'SIGINT')
+    await rejected
+    expect(context).toMatchObject({ promptSubmissionState: 'unknown', teardownState: 'completed', signal: 'SIGINT' })
   })
 
   it('uses a minimal inherited environment and never lets API keys override subscriptions', () => {
@@ -188,7 +264,7 @@ describe('CLI process bridge', () => {
 
   it('returns timeout as an error and accepts a recognized Grok message plus clean close', async () => {
     const timedChild = new FakeChild()
-    const timed = collect(runCliText(buildInvocation('grok', { cwd: '/repo', prompt: 'x' }), { spawn: fakeSpawn(timedChild), timeoutMs: 1, killGraceMs: 1 }))
+    const timed = collect(runCliText(buildInvocation('grok', { cwd: '/repo', prompt: 'x' }), { spawn: fakeSpawn(timedChild), timeoutMs: 1, killGraceMs: 100 }))
     const timedOut = expect(timed).rejects.toThrow('timed out')
     await new Promise(resolve => setTimeout(resolve, 5))
     timedChild.finish()
@@ -276,6 +352,33 @@ describe('CLI process bridge', () => {
     child.stdout.write(line)
     child.finish()
     await rejected
+  })
+
+  it.each([
+    {
+      provider: 'codex' as const,
+      line: '{"type":"turn.failed"}\n',
+      terminalReason: 'reported-failure',
+    },
+    {
+      provider: 'claude' as const,
+      line: '{"type":"result","subtype":"mystery","is_error":false}\n',
+      terminalReason: 'invalid-terminal',
+    },
+  ])('records terminal context for $terminalReason', async ({ provider, line, terminalReason }) => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation(provider, { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), killGraceMs: 100, onSettled: value => { context = value } },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({ cause: 'protocol' })
+    await Promise.resolve()
+    child.spawn()
+    child.stdout.write(line)
+    child.finish(null, 'SIGINT')
+    await rejected
+    expect(context).toMatchObject({ phase: 'terminal', terminalReason })
   })
 
   it.each(['codex', 'claude', 'cursor'] as const)('requires a successful terminal result from %s', async provider => {
@@ -424,7 +527,58 @@ describe('CLI process bridge', () => {
       promptSubmissionState: 'submitted',
       assistantTextObserved: true,
       terminalReason: 'success',
+      teardownState: 'not-started',
     })
+    // A clean close never enters teardown, so no teardown metric; forward latency anchors exist.
+    expect(context?.metrics?.spawnToTerminalMs).toBeTypeOf('number')
+    expect(context?.metrics?.teardownDurationMs).toBeUndefined()
+  })
+
+  it('anchors spawn latency metrics to the child spawn event, not spawn() return', async () => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    let now = 0
+    const clock = vi.spyOn(performance, 'now').mockImplementation(() => now)
+    try {
+      const result = collect(runCliText(
+        buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+        { spawn: fakeSpawn(child), onSettled: value => { context = value } },
+      ))
+      await Promise.resolve()
+      now = 100
+      child.spawn()
+      now = 130
+      child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","content":"hi"}}\n')
+      now = 160
+      child.stdout.write('{"type":"turn.completed"}\n')
+      now = 170
+      child.finish()
+      await expect(result).resolves.toEqual(['hi'])
+      expect(context?.metrics).toMatchObject({
+        spawnToFirstEventMs: 30,
+        eventToFirstTextMs: 0,
+        spawnToTerminalMs: 60,
+      })
+    } finally {
+      clock.mockRestore()
+    }
+  })
+
+  it('omits spawn-anchored metrics when no spawn event was observed', async () => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), onSettled: value => { context = value } },
+    ))
+    const spawnError = Object.assign(new Error('spawn failed'), { code: 'ENOENT' })
+    const rejected = expect(pending).rejects.toBe(spawnError)
+    await Promise.resolve()
+    child.emit('error', spawnError)
+    child.finish(null, null)
+    await rejected
+    expect(context?.metrics?.spawnToFirstEventMs).toBeUndefined()
+    expect(context?.metrics?.spawnToTerminalMs).toBeUndefined()
   })
 
   it('keeps submission not-submitted when a spawn error precedes any spawn event', async () => {
@@ -441,6 +595,41 @@ describe('CLI process bridge', () => {
     child.finish(null, null)
     await rejected
     expect(context).toMatchObject({ promptSubmissionState: 'not-submitted', assistantTextObserved: false })
+  })
+
+  it('keeps submission not-submitted for a non-ENOENT pre-spawn error (e.g. EACCES)', async () => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), onSettled: value => { context = value } },
+    ))
+    const spawnError = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+    const rejected = expect(pending).rejects.toBe(spawnError)
+    await Promise.resolve()
+    child.emit('error', spawnError)
+    child.finish(null, null)
+    await rejected
+    expect(context).toMatchObject({ promptSubmissionState: 'not-submitted', assistantTextObserved: false })
+  })
+
+  it('leaves submission unknown when a spawn error follows child output', async () => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), onSettled: value => { context = value } },
+    ))
+    const rejected = expect(pending).rejects.toBeDefined()
+    await Promise.resolve()
+    // Child produced output but no `spawn` event was observed; a later error must not
+    // demote submission to not-submitted, because the prompt argv may have run.
+    child.stdout.write('{"type":"noise"}\n')
+    await Promise.resolve()
+    child.emit('error', Object.assign(new Error('late failure'), { code: 'EPIPE' }))
+    child.finish(null, null)
+    await rejected
+    expect(context).toMatchObject({ promptSubmissionState: 'unknown' })
   })
 
   it('records observed assistant text and exit status when a submitted turn fails at close', async () => {
@@ -486,6 +675,30 @@ describe('CLI process bridge', () => {
       { spawn, onSettled: value => { context = value } },
     ))).rejects.toThrow('no exec')
     expect(context).toMatchObject({ phase: 'spawn', promptSubmissionState: 'not-submitted' })
+  })
+
+  it('completes teardown and records a teardown metric when an abort tears the child down', async () => {
+    vi.useFakeTimers()
+    try {
+      const child = new FakeChild()
+      const controller = new AbortController()
+      let context: ProviderFailureContext | undefined
+      const pending = collect(runCliText(
+        buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+        { spawn: fakeSpawn(child), signal: controller.signal, killGraceMs: 1, onSettled: value => { context = value } },
+      ))
+      const rejected = expect(pending).rejects.toMatchObject({ cause: 'abort' })
+      await Promise.resolve()
+      child.spawn()
+      controller.abort()
+      await vi.advanceTimersByTimeAsync(1)
+      child.finish(null, 'SIGKILL')
+      await rejected
+      expect(context).toMatchObject({ teardownState: 'completed', exitCode: null, signal: 'SIGKILL' })
+      expect(context?.metrics?.teardownDurationMs).toBeTypeOf('number')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('reports settled context exactly once even when the diagnostic sink throws', async () => {

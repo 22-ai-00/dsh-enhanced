@@ -10,11 +10,13 @@ import {
   type InitializeRequest,
   type NewSessionRequest,
   type PromptRequest,
+  type PromptResponse,
   type SetSessionConfigOptionRequest,
   type StopReason,
 } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import {
+  ACP_USAGE_DSH_MAPPING_GATE,
   buildTraexEnv,
   runTraexAcpText,
   type CatalogObservation,
@@ -63,7 +65,9 @@ interface Script {
   readonly advertiseClose?: boolean
   readonly models?: readonly string[]
   readonly stopReason?: StopReason
+  readonly usage?: PromptResponse['usage']
   readonly closeOnSigint?: boolean
+  readonly closeOnSigkill?: boolean
   readonly initializeTitle?: string
   readonly malformedHandshake?: boolean
   readonly onPrompt?: (connection: AgentConnection, request: PromptRequest) => Promise<StopReason>
@@ -82,6 +86,7 @@ class FakeProcess extends EventEmitter implements SpawnedProcess {
   constructor(
     private readonly state: FakeState,
     private readonly closeOnSigint: boolean,
+    private readonly closeOnSigkill: boolean,
   ) {
     super()
     this.stdin.on('data', (chunk: Buffer) => {
@@ -105,7 +110,9 @@ class FakeProcess extends EventEmitter implements SpawnedProcess {
   kill(signal: NodeJS.Signals | number = 'SIGTERM'): boolean {
     const namedSignal = typeof signal === 'string' ? signal : 'SIGTERM'
     this.state.kills.push(namedSignal)
-    if (namedSignal === 'SIGKILL' || this.closeOnSigint) this.close(null, namedSignal)
+    if ((namedSignal === 'SIGKILL' && this.closeOnSigkill) || this.closeOnSigint) {
+      this.close(null, namedSignal)
+    }
     return true
   }
 
@@ -134,8 +141,9 @@ function harness(script: Script = {}): { state: FakeState; spawn: SpawnProcess }
   }
   const spawn: SpawnProcess = (command, args, options) => {
     state.spawn = { command, args: [...args], options }
-    const child = new FakeProcess(state, script.closeOnSigint ?? true)
+    const child = new FakeProcess(state, script.closeOnSigint ?? true, script.closeOnSigkill ?? true)
     state.child = child
+    queueMicrotask(() => child.emit('spawn'))
     const stream = ndJsonStream(
       Writable.toWeb(child.stdout),
       Readable.toWeb(child.stdin),
@@ -210,7 +218,7 @@ function harness(script: Script = {}): { state: FakeState; spawn: SpawnProcess }
               content: { type: 'text', text: 'answer' },
             },
           })
-          return { stopReason: script.stopReason ?? 'end_turn' }
+          return { stopReason: script.stopReason ?? 'end_turn', ...(script.usage !== undefined ? { usage: script.usage } : {}) }
         },
         cancel() {
           return Promise.resolve()
@@ -789,6 +797,31 @@ describe('TraeX ACP subprocess transport', () => {
       terminalReason: 'end_turn',
       teardownState: 'completed',
     })
+    expect(context?.metrics?.teardownDurationMs).toBeTypeOf('number')
+  })
+
+  it.each([
+    { stopReason: 'refusal' as const, cause: 'refusal' },
+    { stopReason: 'cancelled' as const, cause: 'abort' },
+  ])('records terminal metadata before a $stopReason failure settles', async ({ stopReason, cause }) => {
+    const { spawn } = harness({ stopReason })
+    let context: ProviderFailureContext | undefined
+    await expect(collect(invocation, { spawn, onSettled: value => { context = value } }))
+      .rejects.toMatchObject({ cause })
+    expect(context).toMatchObject({ phase: 'terminal', terminalReason: stopReason })
+    expect(context?.metrics?.promptToTerminalMs).toBeTypeOf('number')
+  })
+
+  it('records the validated terminal reason when missing assistant text makes the turn fail', async () => {
+    const { spawn } = harness({ onPrompt: async () => 'end_turn' })
+    let context: ProviderFailureContext | undefined
+    await expect(collect(invocation, { spawn, onSettled: value => { context = value } }))
+      .rejects.toMatchObject({ cause: 'protocol' })
+    expect(context).toMatchObject({
+      phase: 'terminal',
+      terminalReason: 'end_turn',
+      assistantTextObserved: false,
+    })
   })
 
   it('reports a not-submitted context and never spawns when the signal is already aborted', async () => {
@@ -822,5 +855,103 @@ describe('TraeX ACP subprocess transport', () => {
     })).resolves.toEqual(['answer'])
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({ promptSubmissionState: 'submitted', terminalReason: 'end_turn' })
+  })
+
+  it('reports latency metrics with named clock origins on a successful turn', async () => {
+    const { spawn } = harness()
+    let context: ProviderFailureContext | undefined
+    await expect(collect(invocation, { spawn, onSettled: value => { context = value } })).resolves.toEqual(['answer'])
+    expect(context?.metrics?.spawnToFirstProtocolMessageMs).toBeTypeOf('number')
+    expect(context?.metrics?.spawnToFirstProtocolMessageMs).toBeGreaterThanOrEqual(0)
+    expect(context?.metrics?.promptToFirstTextMs).toBeTypeOf('number')
+    expect(context?.metrics?.promptToTerminalMs).toBeTypeOf('number')
+    expect(context?.metrics?.teardownDurationMs).toBeTypeOf('number')
+  })
+
+  it('keeps a raw ACP usage snapshot without mapping it to DSH TokenUsage', async () => {
+    const { spawn } = harness({
+      usage: { inputTokens: 12, outputTokens: 34, totalTokens: 46, cachedReadTokens: 5, thoughtTokens: 0 },
+    })
+    let context: ProviderFailureContext | undefined
+    await expect(collect(invocation, { spawn, onSettled: value => { context = value } })).resolves.toEqual(['answer'])
+    // Field names mirror the ACP wire shape; a real zero is preserved, absent optionals stay undefined.
+    expect(context?.usage).toEqual({ inputTokens: 12, outputTokens: 34, totalTokens: 46, cachedReadTokens: 5, thoughtTokens: 0 })
+    expect(context?.usage).not.toHaveProperty('cachedWriteTokens')
+  })
+
+  it('documents an explicit, non-empty gate that blocks any DSH usage mapping', () => {
+    // The snapshot must never be emitted as a DSH usage chunk until every gate item is proven.
+    // This test pins the gate so it cannot be silently emptied or bypassed.
+    expect(ACP_USAGE_DSH_MAPPING_GATE.length).toBeGreaterThanOrEqual(4)
+    expect(ACP_USAGE_DSH_MAPPING_GATE.every(item => typeof item === 'string' && item.length > 0)).toBe(true)
+    expect(ACP_USAGE_DSH_MAPPING_GATE.join(' ')).toMatch(/uncached-input/)
+    expect(ACP_USAGE_DSH_MAPPING_GATE.join(' ')).toMatch(/per-call-vs-cumulative/)
+    // It is frozen so a caller cannot mutate the gate away at runtime.
+    expect(Object.isFrozen(ACP_USAGE_DSH_MAPPING_GATE)).toBe(true)
+  })
+
+  it.each([-1, 1.5, Number.NaN])('rejects an invalid ACP usage count: %s', async inputTokens => {
+    const { spawn } = harness({
+      usage: { inputTokens, outputTokens: 1, totalTokens: 1 },
+    })
+    let context: ProviderFailureContext | undefined
+    await expect(collect(invocation, { spawn, onSettled: value => { context = value } }))
+      .rejects.toMatchObject({ cause: 'protocol' })
+    expect(context?.usage).toBeUndefined()
+  })
+
+  it('accepts a clean child close racing after terminal validation and before shutdown', async () => {
+    const { state, spawn } = harness({ advertiseClose: false })
+    await expect(collect(invocation, {
+      spawn,
+      onStopReason() {
+        // Model the exact close-event race synchronously, before shutdown() can set terminating.
+        state.child?.emit('close', 0, null)
+      },
+    })).resolves.toEqual(['answer'])
+  })
+
+  it('settles a never-closing child after bounded SIGKILL wait and ignores a late close', async () => {
+    const { state, spawn } = harness({ closeOnSigint: false, closeOnSigkill: false })
+    const contexts: ProviderFailureContext[] = []
+    await expect(collect(invocation, {
+      spawn,
+      killGraceMs: 5,
+      onSettled: value => { contexts.push(value) },
+    })).rejects.toMatchObject({ cause: 'process' })
+    expect(state.kills).toEqual(['SIGINT', 'SIGKILL'])
+    expect(contexts).toHaveLength(1)
+    expect(contexts[0]).toMatchObject({ teardownState: 'failed', terminalReason: 'end_turn' })
+    expect(contexts[0]?.metrics?.teardownDurationMs).toBeTypeOf('number')
+
+    state.child?.close(0, null)
+    await new Promise(resolve => setImmediate(resolve))
+    expect(contexts).toHaveLength(1)
+  })
+
+  it('preserves the primary abort when bounded teardown also times out', async () => {
+    const started = Promise.withResolvers<void>()
+    const { state, spawn } = harness({
+      closeOnSigint: false,
+      closeOnSigkill: false,
+      onPrompt: async () => {
+        started.resolve()
+        return await new Promise<StopReason>(() => undefined)
+      },
+    })
+    const controller = new AbortController()
+    const contexts: ProviderFailureContext[] = []
+    const pending = collect(invocation, {
+      spawn,
+      signal: controller.signal,
+      killGraceMs: 5,
+      onSettled: value => { contexts.push(value) },
+    })
+    await started.promise
+    controller.abort()
+    await expect(pending).rejects.toMatchObject({ cause: 'abort' })
+    expect(contexts).toHaveLength(1)
+    expect(contexts[0]).toMatchObject({ promptSubmissionState: 'submitted', teardownState: 'failed' })
+    state.child?.close(0, null)
   })
 })

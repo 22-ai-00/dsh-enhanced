@@ -46,6 +46,7 @@ export interface RouteFailureContext extends Partial<Omit<ProviderFailureContext
   readonly route: SubscriptionProviderRoute
   readonly phase: ProviderFailureContext['phase'] | 'auth' | 'preflight'
   readonly assistantTextForwarded: boolean
+  readonly teardownState: ProviderFailureContext['teardownState']
   /** Stable outcome class for diagnostics/health; `ok` on success. */
   readonly outcome: RouteOutcome
 }
@@ -221,9 +222,11 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         assistantTextObserved: transportContext?.assistantTextObserved ?? assistantTextForwarded,
         assistantTextForwarded,
         outcome,
+        teardownState: transportContext?.teardownState ?? 'not-started',
         ...(transportContext?.terminalReason !== undefined ? { terminalReason: transportContext.terminalReason } : {}),
         ...(transportContext?.exitCode !== undefined ? { exitCode: transportContext.exitCode } : {}),
         ...(transportContext?.signal !== undefined ? { signal: transportContext.signal } : {}),
+        ...(transportContext?.metrics !== undefined ? { metrics: transportContext.metrics } : {}),
       })
     }
 
@@ -279,8 +282,10 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
       let text = ''
       yield { type: 'block-start', index: 0, blockType: 'text' }
       try {
-        const deltas = this.runText(invocation, runnerOptions)
+        // Calling an injected runner may itself perform work or throw synchronously, so
+        // stop claiming not-submitted immediately before control crosses that boundary.
         promptSubmissionState = 'unknown'
+        const deltas = this.runText(invocation, runnerOptions)
         for await (const delta of deltas) {
           if (delta.length === 0) continue
           text += delta

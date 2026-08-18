@@ -29,6 +29,16 @@ dsh --profile web --dump-config
 
 该实验性 route 默认关闭。确认本机版本、登录和 ACP 入口后设置 `enabled: true`，再在 DSH 的 provider/model 选择处选择 `traex-agent/default`。`default` 保留 TraeX 当前模型；配置其他模型 id 后，插件会通过 ACP 的 `category: model` 会话选项选择它，不会把模型拼进 shell 命令。
 
+## 快速开始（5 步）
+
+1. **确认 ACP 可用**：`traex acp serve --help` 能打开、`traex login status` 输出 `Logged in using Trae`。命令名是 `trae-cli` 时用它替换下面的 `traex`。
+2. **安装插件**：`dsh plugin --profile web add @dsh-enhanced/traex-acp-provider`。
+3. **开启 route**：本 route 默认关闭，需在配置里显式设 `enabled: true`（命令名不同则一并改 `command`）。
+4. **落盘检查**：`dsh --profile web --dump-config` 确认 `enabled` 与 `command` 生效。
+5. **选择模型调用**：在 DSH 里选 `traex-agent` + `default`（沿用 TraeX 当前模型）。要用具体模型，先把它加进 `models` 允许列表，且该 id 必须同时出现在 TraeX 会话的 model selector 中。
+
+每次调用会启动一个新的 `traex acp serve` 进程并消耗 TraeX 侧额度。遇到报错先看下文「协议与失败策略」的错误码表。
+
 ## 配置
 
 完整配置如下。Cordis `config` 会整段替换，覆盖时请保留仍需使用的字段：
@@ -59,12 +69,12 @@ dsh --profile web --dump-config
 - `command` 是单个可执行文件名或绝对路径；插件固定参数数组并使用 `shell: false`，不接受 shell 片段。
 - `cwd` 是 ACP `session/new` 的工作目录；相对路径按 DSH 进程启动目录解析。
 - `models` 是部署者配置的允许列表（插件策略，非 DSH 要求）。`default` 使用 TraeX 当前模型；非 `default` 值必须同时出现在本列表和 TraeX 会话返回的 ACP model selector 中，否则请求失败，不会静默换模型。
-- `timeoutMs` 覆盖握手、建会话和整轮 prompt。取消或超时时先发 ACP `session/cancel`，再终止进程；超过 `killGraceMs` 后强制回收。
+- `timeoutMs` 覆盖握手、建会话和整轮 prompt。取消或超时时先发 ACP `session/cancel` 和 `SIGINT`，等待 `killGraceMs` 后升级为 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时以 `teardown=failed` 错误结算，保留原始 abort/timeout 分类，并继续跟踪迟到的 `close`；不会伪称已完成回收。
 - `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次调用前的 `traex login status`；只有精确报告 `Logged in using Trae` 才会进入 ACP，ChatGPT、API key、access token、未登录与未知输出全部拒绝。
 - `maxMessageBytes` 限制单条 NDJSON，`maxProtocolBytes` / `maxProtocolMessages` 限制整轮 ACP 输入，`maxOutputBytes` 限制助手文本；字节限制均按 UTF-8 计算。
 - `extraEnvNames` 只允许填写要从 DSH 启动环境继承的变量名，配置中不能写变量值或 secret。
 - API key/token、Authorization/private-key/database credential 以及 OpenAI/Codex 等 provider endpoint 变量，即使列入 `extraEnvNames` 也会被硬排除；代理 URL 中的 userinfo 会被删除，无法安全解析的含 `@` 代理值会被拒绝。
-- `logDiagnostics` 默认为 `false`，此时对 stderr 只记录“TraeX 写入 stderr”；启用后仅记录经过常见 token/key/邮箱规则脱敏的有界尾部，仍不适合输出业务秘密。独立于该开关，插件始终会在每次请求结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、teardown 状态），成功走 `debug`、非成功走 `info`；并在观测到模型目录时记录**模型数量**（不含任何 model id 原文）。这些行不含 prompt、stderr 原文、token 或 model id。
+- `logDiagnostics` 默认为 `false`，此时对 stderr 只记录“TraeX 写入 stderr”；启用后仅记录经过常见 token/key/邮箱规则脱敏的有界尾部，仍不适合输出业务秘密。独立于该开关，插件始终会在每次请求结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、teardown 状态、能可靠测得的毫秒级延迟指标，以及 ACP 返回时的纯数值 usage 快照），成功走 `debug`、非成功走 `info`；并在观测到模型目录时只记录**模型数量**。这些行不含 prompt、stderr 原文、认证凭据或任何 model id 原文；usage 快照可能包含 ACP 报告的 token 数量，但不会映射或转发为 DSH `TokenUsage`。
 
 ## 固定安全策略
 
@@ -88,7 +98,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 | 凭据 | 不读取 TraeX auth 文件、不实现登录、不刷新或上传 token；只让 TraeX 在本机用户配置目录中使用自己的缓存凭据。 |
 | 浏览器 | 插件不会打开浏览器；用户在插件外执行 TraeX login 时可能打开。 |
 | ACP 权限 | 所有 permission request 均拒绝；不暴露 client-side FS、terminal 或 MCP server。 |
-| 日志 | 不主动记录 prompt；stderr 有界且默认不输出内容。每次请求结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/teardown），并在观测目录时记录模型数量，均不含 prompt、stderr 原文、token 或 model id 原文。 |
+| 日志 | 不主动记录 prompt；stderr 有界且默认不输出内容。每次请求结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/teardown、可测得的毫秒级延迟指标，以及 ACP 返回时的纯数值 usage 快照），并在观测目录时只记录模型数量。均不含 prompt、stderr 原文、认证凭据或 model id 原文；usage 快照可能包含 ACP 报告的 token 数量。 |
 | 安装脚本 | 包内没有 install/postinstall 脚本，也不会安装或更新 TraeX。 |
 
 ## 协议与失败策略
@@ -98,13 +108,32 @@ traex --sandbox read-only --ask-for-approval never acp serve
 - 只转发当前 session 的文本 `agent_message_chunk`；thought、plan、tool update 不会伪装成模型文本。
 - `end_turn`、`max_tokens`、`max_turn_requests` 是可完成终态；`refusal`、`cancelled`、断连、畸形/超限 NDJSON、无文本或缺少终态都会失败。
 - 不自动重试。外部 agent 可能已经读取上下文或产生服务端计费，自动重试会放大副作用。
+
+调用失败时返回的稳定 `LlmError` code 与排查：
+
+| 错误码 | 含义 | 处理 |
+|---|---|---|
+| `ACP_AUTH_REQUIRED` | 每次调用前的 `traex login status` 未精确报告 `Logged in using Trae` | 在同一 OS 用户下重新 `traex login`；ChatGPT/API key/access token/未登录都会被拒。 |
+| `ACP_ENTITLEMENT_REQUIRED` | 握手成功但当前 Trae 账号没有任何可用模型 | 确认账号权益/套餐，必要时在 TraeX 侧切换账号。 |
+| `ACP_MODEL_UNAVAILABLE` | 请求的模型不在本次 ACP 会话的 model selector 中 | 用 `default`，或确认该 model id 同时在 `models` 允许列表和 TraeX 当前 selector 里。 |
+| `MODEL_NOT_FOUND` | 请求的模型不在部署者 `models` 允许列表中 | 把该 id 加入 `models`（它仍需被 TraeX 会话提供）。 |
+| `ACP_REFUSAL` | TraeX 明确拒绝了本次请求 | 属模型侧决定，调整 prompt 后重试。 |
+| `ACP_TIMEOUT` | 握手+建会话+整轮 prompt 超过 `timeoutMs` | 简化 prompt 或调大 `timeoutMs`。 |
+| `ACP_OUTPUT_LIMIT` | 助手文本超过 `maxOutputBytes` | 调大 `maxOutputBytes` 或缩小任务。 |
+| `ACP_PROTOCOL_ERROR` | protocol/identity 不符、非法 envelope、无文本或缺终态 | 确认 TraeX 版本仍提供 ACP v1 + `traex-acp` identity；升级后握手变化时插件会拒绝而非猜测。 |
+| `ACP_PROCESS_FAILED` | 子进程非零退出或其他未归类失败 | 开 `logDiagnostics` 看脱敏 stderr；单独 `traex acp serve` 复现。 |
+| `CLI_NOT_FOUND` | 找不到可执行文件（`ENOENT`） | 核对 `command` 名称/路径及 `PATH`。 |
+| `INVALID_PROVIDER` | 选择了非 `traex-agent` 的 provider id | 只使用 `traex-agent`。 |
+
 - 认证不足会返回 `ACP_AUTH_REQUIRED`，无可用权益/模型分别映射为 `ACP_ENTITLEMENT_REQUIRED` / `ACP_MODEL_UNAVAILABLE`，明确拒绝映射为 `ACP_REFUSAL`；其他稳定错误包括 `ACP_PROTOCOL_ERROR`、`ACP_TIMEOUT`、`ACP_OUTPUT_LIMIT`、`ACP_PROCESS_FAILED` 和 `CLI_NOT_FOUND`。
+
+> 模型目录诊断：插件会在正常握手中观察 TraeX 的 model selector，并在内存里做一份**完全非权威**、带短 TTL 的缓存，仅供诊断/展示。它**不**参与模型解析、**不**放行或拒绝请求——每次调用仍以本次 `session/new` 返回的目录为唯一依据；auth 失败、reload 或版本变化时该缓存失效。日志只输出观察到的**模型数量**，不含 model id 原文。
 
 ## 已知限制
 
 - DSH `0.1.0-rc.6` 暴露的是 `LlmAdapter` seam，因此本版是 text-only 兼容层，不是完整 ACP UI。TraeX 的 plan、tool call、diff、permission UI、会话列表和富内容不会进入 DSH。
 - 每次 DSH 请求使用一个新的 TraeX 进程和 ACP session，不恢复外部历史；完整 DSH 对话会被序列化进 prompt。
-- 暂不转发图片、音频、DSH tool schema 或 TraeX token usage。
+- 暂不转发图片、音频、DSH tool schema 或 TraeX token usage。实验性的 ACP `PromptResponse.usage` 只保留显式数值字段用于内部诊断，不会映射或发送为 DSH usage chunk。
 - TraeX 是变化中的开发工具；本实现以本机 `traecli 0.200.19 (internal edition)` 的 ACP v1 握手与官方 ACP SDK `0.25.1` 为验证基线。升级后若 identity、模型 selector 或终态变化，插件会拒绝而不是猜测兼容。
 
 ## 兼容性与调研

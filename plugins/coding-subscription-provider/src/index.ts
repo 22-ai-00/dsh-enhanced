@@ -28,9 +28,10 @@ export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): v
     onSettled(context) {
       // Credential-free lifecycle facts only; useful for diagnosing which phase a route settled in.
       const detail = `phase=${context.phase} submission=${context.promptSubmissionState}`
-        + ` textForwarded=${context.assistantTextForwarded}`
+        + ` textForwarded=${context.assistantTextForwarded} teardown=${context.teardownState}`
         + (context.exitCode !== undefined ? ` exit=${context.exitCode ?? 'null'}` : '')
         + (context.signal != null ? ` signal=${context.signal}` : '')
+        + (context.metrics !== undefined ? ` metrics=${JSON.stringify(context.metrics)}` : '')
       if (context.outcome === 'ok') ctx.logger.debug(`${context.route} settled ok (${detail})`)
       else ctx.logger.info(`${context.route} settled ${context.outcome} (${detail})`)
     },

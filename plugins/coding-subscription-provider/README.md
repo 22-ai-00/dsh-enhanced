@@ -17,6 +17,18 @@
 
 安全默认值只启用 Codex 与 Cursor。Claude 因第三方分发政策边界默认关闭；Grok 因本地 per-model API Key 可覆盖 OAuth，默认关闭并要求用户先核验后显式确认。四条 connector 都包含在插件中。
 
+## 快速开始（5 步）
+
+以启用 Codex 为例，最短路径如下：
+
+1. **登录官方 CLI**（在运行 DSH 的同一 OS 用户下）：`codex login status` 应输出 `Logged in using ChatGPT`。没登录就先 `codex login`。
+2. **安装插件**：`dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider`。
+3. **确认命令可用**：`codex --version`。命令名不同就在配置里把 `codex.command` 改成实际路径。
+4. **开启并落盘配置**：在配置中保持 `codex.enabled: true`（默认已开），执行 `dsh --profile web --dump-config` 检查生效值。
+5. **选择模型调用**：在 DSH 的 provider/model 选择处选 `codex-subscription` + `default`（沿用 CLI 当前模型）。真实调用会消耗你的订阅额度。
+
+Claude / Grok 默认关闭，启用前请阅读下文「订阅认证优先」与「Claude 合规提示」。遇到报错先看下文「排查」表。
+
 ## 安装
 
 先分别安装需要的官方客户端，并由当前 OS 用户在客户端中完成登录。插件不会替用户打开登录页或接管 OAuth：
@@ -80,14 +92,14 @@ dsh --profile web --dump-config
 ```
 
 - `cwd` 是四个子进程看到的工作目录；相对路径按 DSH 进程启动目录解析。
-- `timeoutMs` 是单次调用总时限；取消或超时先发 `SIGINT`，经过 `killGraceMs` 再发 `SIGKILL`。
+- `timeoutMs` 是单次调用总时限；取消或超时先发 `SIGINT`，经过 `killGraceMs` 再发 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时请求以 `teardown=timed-out` 错误结算，保留原始 abort/timeout 分类，并在后台继续引流并跟踪迟到的 `close`；不会伪称子进程已回收。
 - `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次模型调用前的本地认证状态检查；探针输出不会进入日志或模型响应。
 - 三项输出限制和 prompt 限制都按 UTF-8 字节计算。
 - `maxTurns` 目前只映射到 Claude Code 和 Grok Build；Codex/Cursor 不会收到它们不支持的参数。
 - 启用 Grok 前先通过 browser/device flow 完成 `grok login`，再用 `grok inspect` 确认所选模型没有 `api_key` / `env_key` override；随后同时设置 `enabled: true` 与 `userVerifiedSubscription: true`。`inspect` 本身不报告 active credential，该确认是本机用户的显式声明，不是插件读取凭据后的推断。
 - `command` 是单个命令名或路径，插件固定参数数组并使用 `shell: false`，不接受 shell 片段。
 - `extraEnvNames` 只填写要额外继承的环境变量名，值只能来自启动 DSH 的环境，配置中不能直接写 secret。
-- `logDiagnostics` 默认只提示“CLI 写入了 stderr”，不记录内容；显式开启后才记录经过常见 key/token/邮箱规则脱敏的末尾 2,000 字符，仍不适合高敏感环境。独立于该开关，插件始终会在每次调用结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、exit/signal），成功走 `debug`、非成功走 `info`；该行不含 prompt、stderr 原文或 token。
+- `logDiagnostics` 默认只提示“CLI 写入了 stderr”，不记录内容；显式开启后才记录经过常见 key/token/邮箱规则脱敏的末尾 2,000 字符，仍不适合高敏感环境。独立于该开关，插件始终会在每次调用结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、teardown 状态、exit/signal，以及能可靠测得的毫秒级延迟指标），成功走 `debug`、非成功走 `info`。该行不含 prompt、argv、stderr 原文或认证凭据。
 
 加载后，在 DSH 的 provider/model 选择处选择上表中的 provider 和模型即可。真实订阅调用会消耗额度，自动化测试不会使用真实账号。
 
@@ -133,9 +145,34 @@ XAI_API_KEY
 | 凭据 | 不读取官方 auth 文件、不实现 OAuth、不刷新或上传 token。默认继承 `HOME`/配置目录，让官方 CLI 自己访问凭据。 |
 | 浏览器 | 插件不会打开浏览器；用户单独执行官方 login 时可能打开。 |
 | 安装脚本 | 本 npm 包没有 install/postinstall 脚本，也不会安装或更新四个官方 CLI。 |
-| 日志 | stderr 有界且默认不记录内容。选择 `logDiagnostics` 后会脱敏常见 key、Bearer token 和邮箱，但无法识别任意业务秘密；插件本身不主动记录 prompt。每次调用结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/exit/signal），不含 prompt、stderr 原文或 token。 |
+| 日志 | stderr 有界且默认不记录内容。选择 `logDiagnostics` 后会脱敏常见 key、Bearer token 和邮箱，但无法识别任意业务秘密；插件本身不主动记录 prompt。每次调用结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/teardown/exit/signal，以及可测得的毫秒级延迟指标），不含 prompt、argv、stderr 原文或认证凭据。 |
 
 任务正文当前作为独立 argv 元素传给官方 CLI。它不会经过 shell，但仍受操作系统命令行长度限制，并且在某些系统上可能被同机高权限用户通过进程列表看到；敏感、多用户主机应增加 OS 级隔离。默认 prompt 上限因此保守设为 128 KiB。
+
+## 排查
+
+调用失败时会返回稳定的 `LlmError` code。常见对应关系：
+
+| 错误码 | 含义 | 处理 |
+|---|---|---|
+| `SUBSCRIPTION_AUTH_REQUIRED` | 调用前的认证门禁未通过（未登录，或检测到 API key / 非订阅来源） | 在同一 OS 用户下重新 `login`；确认没有把 API key 写进 `extraEnvNames`；Grok 需另设 `userVerifiedSubscription: true`（见「订阅认证优先」）。 |
+| `CLI_NOT_FOUND` | 找不到可执行文件（`ENOENT`） | 核对该 provider 的 `command` 是否为正确的命令名/绝对路径，并确认它在 DSH 进程的 `PATH` 中。 |
+| `CLI_TIMEOUT` | 单次调用超过 `timeoutMs` | 简化 prompt，或调大 `timeoutMs`；确认官方 CLI 未卡在交互式提示上。 |
+| `CLI_PROTOCOL_ERROR` | 输出流没有可识别的 assistant 文本或缺少规定终态（含畸形/仅未知事件、Cursor 非 `login` 来源） | 手动跑一次官方 CLI 确认其正常输出；若为 CLI 版本漂移导致，见下文 fixture 采集。 |
+| `CLI_FAILED` | 子进程非零退出或其他未归类失败 | 开 `logDiagnostics` 看脱敏 stderr 尾部；单独运行官方 CLI 复现。 |
+| `INVALID_PROVIDER` | 选择了本插件未提供的 provider id | 只使用上表四个 `*-subscription` route。 |
+
+插件**不会**在失败后自动切换 provider 或重试。每次调用结算都会记录一条无凭据生命周期诊断（成功走 `debug`、失败走 `info`），可据此定位失败发生在哪个阶段。
+
+### 采集真实 CLI fixture（维护者）
+
+解析器按 `decode → 各 provider decoder → 归一化事件 → reducer` 分层，需要来自**明确 CLI 版本**的真实输出作为回归 golden。采集脚本已就绪：
+
+```sh
+node plugins/coding-subscription-provider/scripts/capture-cli-fixtures.mjs --help
+```
+
+脚本默认脱敏、需显式确认会消耗额度，产物落到 `tests/fixtures/<provider>/<version>/<scenario>.json`，`tests/fixtures.spec.ts` 在样本落地后自动激活。细节与脱敏清单见 [`tests/fixtures/README.md`](tests/fixtures/README.md)。
 
 ## 已知限制
 
