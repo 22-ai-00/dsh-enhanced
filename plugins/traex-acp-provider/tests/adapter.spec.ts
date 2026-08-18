@@ -1,13 +1,14 @@
-import { createMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { createMessage, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
 import { redactDiagnostic, TraexAcpAdapter, type TraexAcpTextRunner } from '../src/adapter.ts'
 import type { RunTraexAcpOptions, TraexAcpInvocation } from '../src/acp-client.ts'
 import { Config } from '../src/config.ts'
 
-function request(model = 'default'): GenerateOptions {
+function request(model = 'default', reasoningEffort?: string): GenerateOptions {
   return {
     provider: 'traex-agent',
     model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(reasoningEffort) }),
     system: 'Be concise.',
     messages: [createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] })],
   }
@@ -24,8 +25,62 @@ function failedTextStream(cause: string): AsyncIterable<string> {
 }
 
 describe('TraeX ACP LLM adapter', () => {
+  it('discovers the live ACP catalog and makes every returned model selectable', async () => {
+    const discoverModels = vi.fn(() => Promise.resolve({
+      currentValue: 'trae-fast',
+      modelValues: ['trae-fast', 'trae-pro'],
+      models: [
+        {
+          id: 'trae-fast',
+          name: 'Trae Fast',
+          reasoning: {
+            efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+            defaultEffort: 'high',
+          },
+        },
+        {
+          id: 'trae-pro',
+          name: 'Trae Pro',
+          reasoning: {
+            efforts: [{ id: 'low', name: 'Low' }, { id: 'ultra', name: 'Ultra' }],
+            defaultEffort: 'low',
+          },
+        },
+      ],
+      completeReasoning: true,
+      observedAt: 1,
+    }))
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      discoverModels,
+    } as never)
+
+    await expect(adapter.listModels('traex-agent')).resolves.toEqual([
+      expect.objectContaining({ provider: 'traex-agent', id: 'default' }),
+      expect.objectContaining({ provider: 'traex-agent', id: 'trae-fast', name: 'Trae Fast' }),
+      expect.objectContaining({ provider: 'traex-agent', id: 'trae-pro', name: 'Trae Pro' }),
+    ])
+    await expect(adapter.resolveModel('traex-agent', 'trae-pro')).resolves.toMatchObject({
+      id: 'trae-pro',
+      reasoning: {
+        efforts: [{ id: 'low', name: 'Low' }, { id: 'ultra', name: 'Ultra' }],
+        defaultEffort: 'low',
+      },
+    })
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+  })
+
   it('advertises configured text models and disables automatic retries', async () => {
-    const adapter = new TraexAcpAdapter(Config())
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      discoverModels: async () => ({
+        currentValue: 'default',
+        modelValues: ['default'],
+        models: [{ id: 'default', name: 'TraeX default' }],
+        completeReasoning: true,
+        observedAt: 1,
+      }),
+    })
     await expect(adapter.listModels('traex-agent')).resolves.toEqual([
       expect.objectContaining({ provider: 'traex-agent', id: 'default', inputModalities: ['text'] }),
     ])
@@ -90,10 +145,30 @@ describe('TraeX ACP LLM adapter', () => {
     expect(invocation?.args).not.toContain('model-x')
   })
 
+  it('passes the selected reasoning effort through the ACP invocation rather than argv', async () => {
+    let invocation: TraexAcpInvocation | undefined
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText(received, options) {
+        invocation = received
+        return (async function* () {
+          yield 'ok'
+          options?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+    for await (const _chunk of adapter.stream(request('gpt-5.6-sol', 'xhigh'))) {
+      // Drain the complete stream.
+    }
+    expect(invocation).toMatchObject({ model: 'gpt-5.6-sol', reasoningEffort: 'xhigh' })
+    expect(invocation?.args).not.toContain('xhigh')
+  })
+
   it.each([
     { cause: 'auth', code: 'ACP_AUTH_REQUIRED' },
     { cause: 'entitlement', code: 'ACP_ENTITLEMENT_REQUIRED' },
     { cause: 'model', code: 'ACP_MODEL_UNAVAILABLE' },
+    { cause: 'reasoning', code: 'UNSUPPORTED_REASONING_EFFORT' },
     { cause: 'refusal', code: 'ACP_REFUSAL' },
   ])('maps $cause transport failures to $code', async ({ cause, code }) => {
     const adapter = new TraexAcpAdapter(Config(), {
@@ -325,7 +400,13 @@ describe('TraeX ACP LLM adapter', () => {
 
   function runnerEmittingCatalog(models: string[]): TraexAcpTextRunner {
     return (_invocation, options) => (async function* () {
-      options?.onCatalogObserved?.({ currentValue: 'default', modelValues: models, observedAt: 1 })
+      options?.onCatalogObserved?.({
+        currentValue: 'default',
+        modelValues: models,
+        models: models.map(id => ({ id, name: id })),
+        completeReasoning: false,
+        observedAt: 1,
+      })
       yield 'hi'
       options?.onStopReason?.('end_turn')
     })()
@@ -342,15 +423,25 @@ describe('TraeX ACP LLM adapter', () => {
   })
 
   it('never lets the observed catalog gate a request: an unobserved model still runs', async () => {
-    // The observation lists only 'default', but the deployer allowlist permits 'trae-fast'.
-    // The cache is non-authoritative, so resolveModel and stream must NOT reject on it.
+    // The observation lists only 'default', but the deployer adds a 'trae-fast' advisory alias.
+    // The cache remains non-authoritative for execution, so stream must NOT reject on it.
     const config = Config({ ...Config(), models: ['default', 'trae-fast'] } as never)
     const runText = vi.fn(runnerEmittingCatalog(['default']))
-    const adapter = new TraexAcpAdapter(config, { verifyAuth: async () => {}, runText })
+    const adapter = new TraexAcpAdapter(config, {
+      verifyAuth: async () => {},
+      runText,
+      discoverModels: async () => ({
+        currentValue: 'default',
+        modelValues: ['default'],
+        models: [{ id: 'default', name: 'default' }],
+        completeReasoning: true,
+        observedAt: 1,
+      }),
+    })
     // Prime the cache with an observation that omits 'trae-fast'.
     for await (const _chunk of adapter.stream(request('default'))) { /* drain */ }
     expect(adapter.peekObservedCatalog()?.observation.modelValues).toEqual(['default'])
-    // resolveModel still resolves the allowlisted-but-unobserved model.
+    // resolveModel still resolves the configured-but-unobserved advisory alias.
     await expect(adapter.resolveModel('traex-agent', 'trae-fast')).resolves.toMatchObject({ id: 'trae-fast' })
     // And a full stream for it runs to completion — the cache never blocked it.
     const chunks = []

@@ -58,6 +58,51 @@ describe('CLI process bridge', () => {
     expect(parseAssistantText('grok', '{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"k"}}}')).toBe('k')
   })
 
+  it('accepts Grok 1.0.5 native streaming-json success events', async () => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation('grok', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), onSettled: value => { context = value } },
+    ))
+    await Promise.resolve()
+    child.spawn()
+    child.stdout.write('{"type":"available_commands","tools":[],"commands":[]}\n')
+    child.stdout.write('{"type":"text","data":"GROK_PROVIDER_"}\n')
+    child.stdout.write('{"type":"text","data":"OK"}\n')
+    child.stdout.write('{"type":"usage","stopReason":"end_turn","usage":{"input_tokens":1,"output_tokens":2}}\n')
+    child.stdout.write('{"type":"end","stopReason":"end_turn","num_turns":1}\n')
+    child.finish()
+
+    await expect(pending).resolves.toEqual(['GROK_PROVIDER_', 'OK'])
+    expect(context).toMatchObject({
+      phase: 'terminal',
+      assistantTextObserved: true,
+      terminalReason: 'success',
+      exitCode: 0,
+      signal: null,
+    })
+  })
+
+  it('fails closed when Grok 1.0.5 emits a native error event', async () => {
+    const child = new FakeChild()
+    const pending = collect(runCliText(
+      buildInvocation('grok', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), killGraceMs: 100 },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'CLI_PROTOCOL_ERROR',
+      reason: 'REPORTED_FAILURE',
+    })
+    await Promise.resolve()
+    child.spawn()
+    child.stdout.write('{"type":"error","message":"model request failed"}\n')
+    child.finish(1, null)
+
+    await rejected
+    expect(child.kills).toContain('SIGINT')
+  })
+
   it('interrupts then kills an aborted child', async () => {
     vi.useFakeTimers()
     try {

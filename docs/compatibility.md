@@ -7,6 +7,10 @@
 - `@deepseek-ai/cordis`：`4.0.1`
 - Node.js：`^22.19.0 || >=24.0.0`
 - pnpm：`11.7.0`
+- Codex App Server 协议：Codex CLI `0.147.0`（`initialize` + `model/list`，用于 `coding-subscription-provider` 的无 prompt 模型目录发现）
+- Claude Agent SDK 控制协议：Claude Code `2.1.218`（`initialize.models` 与逐模型 `supportedEffortLevels`）
+- Grok 协议：Grok Build `1.0.5`（目录使用 `initialize._meta.modelState`；headless 生成使用 `--verbatim`、显式空工具集过滤，以及原生 `streaming-json` 的 `text.data` / `end` / `error` 事件）
+- Cursor CLI 模型目录：官方 `--list-models` 接口（本机未安装，以有界 fixture 验证；未宣称支持 headless effort）
 
 DSH 尚处于预发布阶段，插件机制可能发生破坏性变化。`pnpm-workspace.yaml` 的 catalog 和各插件 `peerDependencies` 是实际依赖范围的源；本页记录人工验证过的 DSH 基线。
 

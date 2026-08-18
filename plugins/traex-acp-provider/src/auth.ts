@@ -38,7 +38,11 @@ export async function verifyTraexAuth(
   runCommand: AuthCommandRunner = runAuthCommand,
 ): Promise<void> {
   const result = await runCommand(options.command, ['login', 'status'], options)
-  if (result.exitCode !== 0 || result.signal !== null || result.stdout.trim() !== 'Logged in using Trae') {
+  const stdout = result.stdout.trim()
+  const stderr = result.stderr.trim()
+  const exactTraeStatus = (stdout === 'Logged in using Trae' && stderr.length === 0)
+    || (stderr === 'Logged in using Trae' && stdout.length === 0)
+  if (result.exitCode !== 0 || result.signal !== null || !exactTraeStatus) {
     throw new TraexAuthError()
   }
 }

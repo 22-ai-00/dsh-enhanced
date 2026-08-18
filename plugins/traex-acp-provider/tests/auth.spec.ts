@@ -20,6 +20,11 @@ describe('TraeX tool-account authentication gate', () => {
     expect(trae).toHaveBeenCalledWith('traex', ['login', 'status'], options)
   })
 
+  it('accepts the exact Trae login status on stderr from current TraeX builds', async () => {
+    const trae = vi.fn(() => Promise.resolve(result('', 'Logged in using Trae\n'))) as AuthCommandRunner
+    await expect(verifyTraexAuth(options, trae)).resolves.toBeUndefined()
+  })
+
   it.each([
     'Not logged in',
     'Logged in using ChatGPT',

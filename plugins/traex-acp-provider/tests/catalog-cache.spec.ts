@@ -14,10 +14,11 @@ function parts(overrides: Partial<CatalogCacheKeyParts> = {}): CatalogCacheKeyPa
 
 function observation(overrides: Partial<CatalogObservation> = {}): CatalogObservation {
   return {
-    currentValue: 'default',
-    modelValues: ['default', 'trae-fast'],
-    observedAt: 1000,
-    ...overrides,
+    currentValue: overrides.currentValue ?? 'default',
+    modelValues: overrides.modelValues ?? ['default', 'trae-fast'],
+    models: overrides.models ?? [{ id: 'default', name: 'default' }, { id: 'trae-fast', name: 'trae-fast' }],
+    completeReasoning: overrides.completeReasoning ?? false,
+    observedAt: overrides.observedAt ?? 1000,
   }
 }
 

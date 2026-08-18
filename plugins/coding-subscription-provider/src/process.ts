@@ -540,6 +540,15 @@ function decodeCursorEvent(event: Record<string, unknown>): ParsedEvent | undefi
 }
 
 function decodeGrokEvent(event: Record<string, unknown>): ParsedEvent | undefined {
+  if (event.type === 'text') {
+    return typeof event.data === 'string' ? parsed(event.data, false) : undefined
+  }
+  if (event.type === 'error') return known({ outcome: 'failure' })
+  if (event.type === 'end') {
+    return typeof event.stopReason === 'string' && event.stopReason.length > 0
+      ? known({ outcome: 'success' })
+      : known({ outcome: 'invalid' })
+  }
   if (event.type === 'streaming-messages-json' || event.type === 'message' || event.type === 'update') {
     return parsed(textOf(event.text) ?? textOf(event.content) ?? textOf(object(event.delta)?.text) ?? textOf(event.message), false)
   }

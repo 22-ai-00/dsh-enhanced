@@ -14,6 +14,8 @@ export interface InvocationOptions {
   readonly prompt: string
   /** `default` leaves model selection to the authenticated CLI subscription. */
   readonly model?: string
+  /** Provider-supported reasoning effort, encoded as one separate fixed argv value. */
+  readonly reasoningEffort?: string
   readonly maxTurns?: number
   /** Local executable override only; arguments remain fixed by this module. */
   readonly command?: string
@@ -53,8 +55,14 @@ export const providerPresets: Readonly<Record<ProviderId, ProviderPreset>> = {
     id: 'grok',
     command: 'grok',
     // `-p` consumes the following argv item, so buildInvocation inserts the task
-    // immediately after it before appending these fixed headless flags.
-    args: ['--output-format', 'streaming-json', '--permission-mode', 'dontAsk', '--no-auto-update', '--no-memory', '--no-subagents', '--disable-web-search'],
+    // immediately after it before appending these fixed headless flags. Grok treats
+    // an empty --tools value as no filter, so allow then deny its always-on MCP
+    // meta-tools to produce an actually empty tool set for this text-only route.
+    args: [
+      '--output-format', 'streaming-json', '--permission-mode', 'dontAsk',
+      '--no-auto-update', '--no-memory', '--no-subagents', '--disable-web-search', '--verbatim',
+      '--tools', 'search_tool', '--disallowed-tools', 'search_tool,use_tool',
+    ],
     output: 'ndjson',
   },
 }
@@ -66,6 +74,13 @@ export function buildInvocation(provider: ProviderId, options: InvocationOptions
     : [...preset.args]
 
   if (options.model && options.model !== 'default') args.push('--model', options.model)
+  if (provider === 'codex' && options.reasoningEffort) {
+    args.push('--config', `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`)
+  } else if (provider === 'claude' && options.reasoningEffort) {
+    args.push('--effort', options.reasoningEffort)
+  } else if (provider === 'grok' && options.reasoningEffort) {
+    args.push('--reasoning-effort', options.reasoningEffort)
+  }
   if (options.maxTurns !== undefined && (provider === 'claude' || provider === 'grok')) {
     args.push('--max-turns', String(options.maxTurns))
   }
