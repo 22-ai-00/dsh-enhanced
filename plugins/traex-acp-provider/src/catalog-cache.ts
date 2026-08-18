@@ -1,11 +1,10 @@
 import type { CatalogObservation } from './acp-client.js'
 
 /**
- * Completely NON-AUTHORITATIVE, in-memory cache of the last model catalog observed during a
- * normal ACP handshake. It exists for diagnostics and display only. Per the optimization research
- * (§3.2 P1), the cache MUST NOT:
+ * NON-AUTHORITATIVE, in-memory cache of the last model catalog observed during an ACP handshake.
+ * It exists for diagnostics and model-directory display only. Per the DSH catalog contract, it
+ * MUST NOT:
  *
- *   - participate in `resolveModel()` / `listModels()`;
  *   - gate, pre-validate, admit, or reject any request;
  *   - return `MODEL_NOT_FOUND` / `ACP_ENTITLEMENT_REQUIRED` from a stored value;
  *   - suppress or short-circuit a new `session/new`.
@@ -29,7 +28,7 @@ export interface CatalogCacheKeyParts {
   readonly cwd: string
   /**
    * A revision string for the non-sensitive configuration that affects catalog shape (e.g. the
-   * deployer model allowlist). Never derive this from environment variable values.
+   * deployer advisory model aliases). Never derive this from environment variable values.
    */
   readonly configRevision: string
 }
@@ -55,13 +54,14 @@ const DEFAULT_TTL_MS = 5 * 60_000
 export function catalogCacheKey(parts: CatalogCacheKeyParts): string {
   // A control-character-free join; the parts are all non-secret identifiers already.
   return [parts.route, parts.command, parts.cwd, parts.configRevision]
-    .map(part => part.replace(/[\u0000\u001f]/g, ' '))
+    .map(part => part.replaceAll('\u0000', ' ').replaceAll('\u001f', ' '))
     .join('\u0000')
 }
 
 /**
- * In-memory, per-adapter catalog observation cache. Purely a diagnostic side-channel: nothing in
- * this class is consulted by request admission, model resolution, or model listing.
+ * In-memory, per-adapter catalog observation cache. It may serve recently completed prompt-free
+ * discovery to model listing/resolution, but never authorizes execution; every request still
+ * performs a fresh `session/new` and validates the selected model/effort there.
  */
 export class CatalogObservationCache {
   private readonly ttlMs: number
@@ -81,8 +81,8 @@ export class CatalogObservationCache {
 
   /**
    * Read the last observation for a key IF it is still within TTL. Returns undefined when absent or
-   * expired (and drops the expired entry). This is for diagnostics/display; callers must NEVER use
-   * the result to admit, reject, or route a request.
+   * expired (and drops the expired entry). Callers may use it for metadata display, but must NEVER
+   * use the result to admit, reject, or route a request.
    */
   peek(parts: CatalogCacheKeyParts): CachedCatalog | undefined {
     const key = catalogCacheKey(parts)

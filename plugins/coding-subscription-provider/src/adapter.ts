@@ -2,6 +2,7 @@ import { resolve } from 'node:path'
 import {
   LlmAdapter,
   LlmError,
+  ReasoningEffortId,
   type GenerateOptions,
   type LlmModelInfo,
   type LlmProviderInfo,
@@ -10,10 +11,26 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { verifySubscriptionAuth, type SubscriptionAuthVerifier } from './auth.js'
+import {
+  discoverCodexModels,
+  type CodexCatalog,
+  type CodexCatalogInvocation,
+  type CodexCatalogModel,
+  type DiscoverCodexModelsOptions,
+} from './codex-catalog.js'
 import { configForProvider, type CodingSubscriptionProviderConfig } from './config.js'
 import { buildPrompt } from './prompt.js'
 import { runCliText, type ProviderFailureContext, type PromptSubmissionState, type RunCliTextOptions } from './process.js'
 import { buildInvocation, type CliInvocation, type ProviderId } from './providers.js'
+import {
+  discoverClaudeModels,
+  discoverCursorModels,
+  discoverGrokModels,
+  type DiscoverSubscriptionCatalogOptions,
+  type SubscriptionCatalog,
+  type SubscriptionCatalogInvocation,
+  type SubscriptionCatalogModel,
+} from './subscription-catalog.js'
 
 export type SubscriptionProviderRoute =
   | 'codex-subscription'
@@ -36,6 +53,14 @@ export const routeDefinitions: readonly RouteDefinition[] = [
 ]
 
 export type CliTextRunner = (invocation: CliInvocation, options?: RunCliTextOptions) => AsyncIterable<string>
+export type CodexCatalogDiscoverer = (
+  invocation: CodexCatalogInvocation,
+  options?: DiscoverCodexModelsOptions,
+) => Promise<CodexCatalog>
+export type SubscriptionCatalogDiscoverer = (
+  invocation: SubscriptionCatalogInvocation,
+  options?: DiscoverSubscriptionCatalogOptions,
+) => Promise<SubscriptionCatalog>
 
 /**
  * Full lifecycle facts the adapter can observe for one route: the transport context
@@ -68,11 +93,18 @@ export type RouteOutcome =
 
 export interface AdapterDependencies {
   runText?: CliTextRunner
+  discoverCodexModels?: CodexCatalogDiscoverer
+  discoverClaudeModels?: SubscriptionCatalogDiscoverer
+  discoverCursorModels?: SubscriptionCatalogDiscoverer
+  discoverGrokModels?: SubscriptionCatalogDiscoverer
   verifyAuth?: SubscriptionAuthVerifier
   onDiagnostic?: (route: SubscriptionProviderRoute, diagnostic: string) => void
   /** Receives credential-free lifecycle facts once per invocation (success or failure); never affects the stream. */
   onSettled?: (context: RouteFailureContext) => void
 }
+
+const CATALOG_TTL_MS = 5 * 60_000
+type NonCodexProvider = Exclude<ProviderId, 'codex'>
 
 const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
   mode: 'normal',
@@ -135,14 +167,41 @@ function outcomeFor(error: unknown): RouteOutcome {
   return 'failed'
 }
 
+function reasoningInfo(
+  model: CodexCatalogModel | SubscriptionCatalogModel | undefined,
+): Pick<LlmResolvedModelInfo, 'reasoning'> | Record<string, never> {
+  if (model?.reasoning === undefined) return {}
+  return {
+    reasoning: {
+      efforts: model.reasoning.efforts.map(effort => ({
+        id: ReasoningEffortId(effort.id),
+        name: effort.name,
+        ...(effort.description === undefined ? {} : { description: effort.description }),
+      })),
+      ...(model.reasoning.defaultEffort === undefined
+        ? {}
+        : { defaultEffort: ReasoningEffortId(model.reasoning.defaultEffort) }),
+    },
+  }
+}
+
 /** Experimental LLM-compatible facade over local, already-authenticated coding agents. */
 export class CodingSubscriptionAdapter extends LlmAdapter {
   private readonly cwd: string
   private readonly runText: CliTextRunner
+  private readonly discoverCodexModels: CodexCatalogDiscoverer
+  private readonly discoverClaudeModels: SubscriptionCatalogDiscoverer
+  private readonly discoverCursorModels: SubscriptionCatalogDiscoverer
+  private readonly discoverGrokModels: SubscriptionCatalogDiscoverer
   private readonly verifyAuth: SubscriptionAuthVerifier
   private readonly onDiagnostic: AdapterDependencies['onDiagnostic']
   private readonly onSettled: AdapterDependencies['onSettled']
   private readonly lifecycle = new AbortController()
+  private codexCatalogCache: { readonly catalog: CodexCatalog; readonly expiresAt: number } | undefined
+  private readonly subscriptionCatalogCache = new Map<NonCodexProvider, {
+    readonly catalog: SubscriptionCatalog
+    readonly expiresAt: number
+  }>()
 
   constructor(
     private readonly config: CodingSubscriptionProviderConfig,
@@ -151,6 +210,10 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     super()
     this.cwd = resolve(config.cwd)
     this.runText = dependencies.runText ?? runCliText
+    this.discoverCodexModels = dependencies.discoverCodexModels ?? discoverCodexModels
+    this.discoverClaudeModels = dependencies.discoverClaudeModels ?? discoverClaudeModels
+    this.discoverCursorModels = dependencies.discoverCursorModels ?? discoverCursorModels
+    this.discoverGrokModels = dependencies.discoverGrokModels ?? discoverGrokModels
     this.verifyAuth = dependencies.verifyAuth ?? verifySubscriptionAuth
     this.onDiagnostic = dependencies.onDiagnostic
     this.onSettled = dependencies.onSettled
@@ -174,28 +237,132 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     return noAutomaticRetry
   }
 
-  override listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    const definition = definitionFor(provider)
-    const profile = configForProvider(this.config, definition.cli)
-    return Promise.resolve(profile.models.map(model => ({
-      provider,
-      id: model,
-      name: model === 'default' ? `${definition.name} default` : model,
-      description: `${definition.maturity} local coding-agent delegation; authentication and billing remain in the official CLI`,
-      inputModalities: ['text'] as const,
-    })))
+  private async loadCodexCatalog(signal: AbortSignal = this.lifecycle.signal): Promise<CodexCatalog> {
+    if (signal.aborted) throw abortReason(signal)
+    const cached = this.codexCatalogCache
+    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.catalog
+    const definition = definitionFor('codex-subscription')
+    const profile = this.config.codex
+    try {
+      await this.verifyAuth('codex', {
+        command: profile.command,
+        cwd: this.cwd,
+        timeoutMs: this.config.authProbeTimeoutMs,
+        maxOutputBytes: this.config.maxAuthProbeBytes,
+        extraEnvNames: this.config.extraEnvNames,
+        signal,
+      })
+      const catalog = await this.discoverCodexModels({ command: profile.command, cwd: this.cwd }, {
+        signal,
+        timeoutMs: this.config.authProbeTimeoutMs,
+        killGraceMs: this.config.killGraceMs,
+        maxLineBytes: this.config.maxLineBytes,
+        maxOutputBytes: this.config.maxOutputBytes,
+        maxStderrBytes: this.config.maxStderrBytes,
+        extraEnvNames: this.config.extraEnvNames,
+        onDiagnostic: diagnostic => this.onDiagnostic?.(definition.route, diagnostic),
+      })
+      this.codexCatalogCache = { catalog, expiresAt: Date.now() + CATALOG_TTL_MS }
+      return catalog
+    } catch (error: unknown) {
+      this.codexCatalogCache = undefined
+      throw cliFailure(definition, profile.command, error)
+    }
   }
 
-  override resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
-    if (signal?.aborted) return Promise.reject(abortReason(signal))
+  private async loadSubscriptionCatalog(
+    provider: NonCodexProvider,
+    signal: AbortSignal = this.lifecycle.signal,
+  ): Promise<SubscriptionCatalog> {
+    if (signal.aborted) throw abortReason(signal)
+    const cached = this.subscriptionCatalogCache.get(provider)
+    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.catalog
+    const definition = routeDefinitions.find(candidate => candidate.cli === provider)!
+    const profile = configForProvider(this.config, provider)
+    const discoverer = provider === 'claude'
+      ? this.discoverClaudeModels
+      : provider === 'cursor'
+        ? this.discoverCursorModels
+        : this.discoverGrokModels
+    try {
+      await this.verifyAuth(provider, {
+        command: profile.command,
+        cwd: this.cwd,
+        timeoutMs: this.config.authProbeTimeoutMs,
+        maxOutputBytes: this.config.maxAuthProbeBytes,
+        extraEnvNames: this.config.extraEnvNames,
+        signal,
+        ...(provider === 'grok'
+          ? { userVerifiedSubscription: this.config.grok.userVerifiedSubscription }
+          : {}),
+      })
+      const catalog = await discoverer({ command: profile.command, cwd: this.cwd }, {
+        signal,
+        timeoutMs: this.config.authProbeTimeoutMs,
+        maxOutputBytes: this.config.maxAuthProbeBytes,
+        extraEnvNames: this.config.extraEnvNames,
+      })
+      this.subscriptionCatalogCache.set(provider, { catalog, expiresAt: Date.now() + CATALOG_TTL_MS })
+      return catalog
+    } catch (error: unknown) {
+      this.subscriptionCatalogCache.delete(provider)
+      throw cliFailure(definition, profile.command, error)
+    }
+  }
+
+  override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const definition = definitionFor(provider)
-    return Promise.resolve({
+    const profile = configForProvider(this.config, definition.cli)
+    const catalog = definition.cli === 'codex'
+      ? await this.loadCodexCatalog()
+      : await this.loadSubscriptionCatalog(definition.cli)
+    const defaultModel = catalog.models.find(model => model.id === catalog.defaultModel)
+    const entries = new Map<string, LlmModelInfo>()
+    for (const model of profile.models) {
+      entries.set(model, {
+        provider,
+        id: model,
+        name: model === 'default'
+          ? `${definition.name} default${defaultModel === undefined ? '' : ` (${defaultModel.name})`}`
+          : model,
+        description: `${definition.maturity} local coding-agent delegation; authentication and billing remain in the official CLI`,
+        inputModalities: ['text'],
+      })
+    }
+    for (const model of catalog.models) {
+      entries.set(model.id, {
+        provider,
+        id: model.id,
+        name: model.name,
+        ...(model.description === undefined ? {} : { description: model.description }),
+        inputModalities: ['text'],
+      })
+    }
+    return [...entries.values()]
+  }
+
+  override async resolveModel(provider: string, model: string, signal?: AbortSignal): Promise<LlmResolvedModelInfo> {
+    const effectiveSignal = signal === undefined
+      ? this.lifecycle.signal
+      : AbortSignal.any([signal, this.lifecycle.signal])
+    if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
+    const definition = definitionFor(provider)
+    const catalog = definition.cli === 'codex'
+      ? await this.loadCodexCatalog(effectiveSignal)
+      : await this.loadSubscriptionCatalog(definition.cli, effectiveSignal)
+    const catalogModel = model === 'default'
+      ? catalog.models.find(candidate => candidate.id === catalog.defaultModel)
+      : catalog.models.find(candidate => candidate.id === model)
+    return {
       provider,
       id: model,
-      name: model === 'default' ? `${definition.name} default` : model,
-      description: `${definition.maturity} local coding-agent delegation`,
+      name: model === 'default'
+        ? `${definition.name} default${catalogModel === undefined ? '' : ` (${catalogModel.name})`}`
+        : (catalogModel?.name ?? model),
+      description: catalogModel?.description ?? `${definition.maturity} local coding-agent delegation`,
       inputModalities: ['text'],
-    })
+      ...reasoningInfo(catalogModel),
+    }
   }
 
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -245,6 +412,8 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         })
       } catch (error: unknown) {
         // Auth precedes spawn, so the prompt argv was never handed to the OS.
+        if (definition.cli === 'codex') this.codexCatalogCache = undefined
+        else this.subscriptionCatalogCache.delete(definition.cli)
         outcome = outcomeFor(error)
         throw cliFailure(definition, profile.command, error)
       }
@@ -256,6 +425,9 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
           cwd: this.cwd,
           prompt: buildPrompt(options, this.config.maxPromptBytes),
           model: options.model,
+          ...(definition.cli !== 'cursor' && options.reasoningEffort !== undefined
+            ? { reasoningEffort: String(options.reasoningEffort) }
+            : {}),
           maxTurns: profile.maxTurns,
           command: profile.command,
         })
@@ -306,6 +478,8 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
 
   /** Abort every active/future subprocess when the owning Cordis fiber unloads. */
   shutdown(): void {
+    this.codexCatalogCache = undefined
+    this.subscriptionCatalogCache.clear()
     if (!this.lifecycle.signal.aborted) {
       this.lifecycle.abort(new Error('coding subscription provider unloaded', { cause: 'abort' }))
     }

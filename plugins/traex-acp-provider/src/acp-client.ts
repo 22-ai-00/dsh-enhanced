@@ -35,6 +35,15 @@ export interface TraexAcpInvocation {
   readonly cwd: string
   readonly prompt: string
   readonly model?: string
+  readonly reasoningEffort?: string
+  /** Internal transport mode used by the prompt-free catalog discovery wrapper. */
+  readonly operation?: 'prompt' | 'catalog'
+}
+
+export interface TraexAcpCatalogInvocation {
+  readonly command: string
+  readonly args: readonly string[]
+  readonly cwd: string
 }
 
 export interface SpawnedProcess {
@@ -104,6 +113,7 @@ export type TraexLifecyclePhase =
   | 'new-session'
   | 'model-catalog'
   | 'set-model'
+  | 'set-reasoning'
   | 'prompt'
   | 'stream'
   | 'terminal'
@@ -189,7 +199,28 @@ export const ACP_USAGE_DSH_MAPPING_GATE: readonly string[] = Object.freeze([
 export interface CatalogObservation {
   readonly currentValue: string
   readonly modelValues: readonly string[]
+  readonly models: readonly CatalogModel[]
+  /** True only when discovery inspected each model's post-selection reasoning selector. */
+  readonly completeReasoning: boolean
   readonly observedAt: number
+}
+
+export interface CatalogReasoningEffort {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+}
+
+export interface CatalogModelReasoning {
+  readonly efforts: readonly CatalogReasoningEffort[]
+  readonly defaultEffort?: string
+}
+
+export interface CatalogModel {
+  readonly id: string
+  readonly name: string
+  readonly description?: string
+  readonly reasoning?: CatalogModelReasoning
 }
 
 export type TraexAcpFailure =
@@ -199,6 +230,7 @@ export type TraexAcpFailure =
   | 'auth'
   | 'entitlement'
   | 'model'
+  | 'reasoning'
   | 'refusal'
   | 'process'
   | 'output-limit'
@@ -381,13 +413,8 @@ export async function* runTraexAcpText(
     }
   }
 
-  const observeCatalog = (option: Extract<SessionConfigOption, { type: 'select' }>): void => {
+  const observeCatalog = (observation: CatalogObservation): void => {
     if (options.onCatalogObserved === undefined) return
-    const observation: CatalogObservation = {
-      currentValue: option.currentValue,
-      modelValues: selectValues(option),
-      observedAt: Date.now(),
-    }
     try {
       options.onCatalogObserved(observation)
     } catch {
@@ -598,26 +625,105 @@ export async function* runTraexAcpText(
       throwIfFatal(fatal)
 
       phase = 'model-catalog'
-      const modelOption = validateModelCatalog(session.configOptions)
-      // Non-authoritative: only the selector observed on this handshake is recorded; it never
-      // gates the request. The catalog validated here remains the sole execution authority.
-      observeCatalog(modelOption)
+      const initialModelOption = validateModelCatalog(session.configOptions)
+      let activeModelOption = initialModelOption
+      let activeConfigOptions = session.configOptions
+      const initialReasoning = validateReasoningCatalog(activeConfigOptions)
+      observeCatalog(buildCatalogObservation(
+        initialModelOption,
+        initialReasoning === undefined
+          ? new Map()
+          : new Map([[initialModelOption.currentValue, catalogReasoning(initialReasoning)]]),
+        false,
+      ))
+
+      if (invocation.operation === 'catalog') {
+        const reasoningByModel = new Map<string, CatalogModelReasoning>()
+        const initialCurrentValue = initialModelOption.currentValue
+        for (const entry of selectEntries(initialModelOption)) {
+          if (activeModelOption.currentValue !== entry.value) {
+            const updated = await awaitRpc(client.setSessionConfigOption({
+              sessionId,
+              configId: initialModelOption.id,
+              value: entry.value,
+            }))
+            activeModelOption = validateModelCatalog(updated.configOptions)
+            activeConfigOptions = updated.configOptions
+            if (activeModelOption.id !== initialModelOption.id || activeModelOption.currentValue !== entry.value) {
+              throw new TraexAcpError('protocol')
+            }
+            throwIfFatal(fatal)
+          }
+          const reasoning = validateReasoningCatalog(activeConfigOptions)
+          if (reasoning !== undefined) reasoningByModel.set(entry.value, catalogReasoning(reasoning))
+        }
+        observeCatalog(buildCatalogObservation(
+          initialModelOption,
+          reasoningByModel,
+          true,
+          initialCurrentValue,
+        ))
+        // Catalog discovery is a successful no-prompt operation. Mark the session complete so a
+        // clean child close cannot be mistaken for premature EOF.
+        turnFinished = true
+        if (initialized.agentCapabilities?.sessionCapabilities?.close !== undefined
+          && initialized.agentCapabilities.sessionCapabilities.close !== null) {
+          phase = 'close-session'
+          await awaitRpc(client.closeSession({ sessionId }))
+          throwIfFatal(fatal)
+        }
+        phase = 'child-close'
+        await shutdown(false)
+        throwIfFatal(fatal)
+        return
+      }
 
       if (invocation.model !== undefined) {
-        if (!selectValues(modelOption).includes(invocation.model)) throw new TraexAcpError('model')
+        if (!selectValues(initialModelOption).includes(invocation.model)) throw new TraexAcpError('model')
         phase = 'set-model'
         const updated = await awaitRpc(client.setSessionConfigOption({
           sessionId,
-          configId: modelOption.id,
+          configId: initialModelOption.id,
           value: invocation.model,
         }))
-        const selected = validateModelCatalog(updated.configOptions)
-        if (selected.id !== modelOption.id || selected.currentValue !== invocation.model) {
+        activeModelOption = validateModelCatalog(updated.configOptions)
+        activeConfigOptions = updated.configOptions
+        if (activeModelOption.id !== initialModelOption.id || activeModelOption.currentValue !== invocation.model) {
           throw new TraexAcpError('protocol')
         }
-        observeCatalog(selected)
         throwIfFatal(fatal)
       }
+
+      if (invocation.reasoningEffort !== undefined) {
+        const reasoningOption = validateReasoningCatalog(activeConfigOptions)
+        if (reasoningOption === undefined || !selectValues(reasoningOption).includes(invocation.reasoningEffort)) {
+          throw new TraexAcpError('reasoning')
+        }
+        phase = 'set-reasoning'
+        const updated = await awaitRpc(client.setSessionConfigOption({
+          sessionId,
+          configId: reasoningOption.id,
+          value: invocation.reasoningEffort,
+        }))
+        activeModelOption = validateModelCatalog(updated.configOptions)
+        activeConfigOptions = updated.configOptions
+        const selectedReasoning = validateReasoningCatalog(activeConfigOptions)
+        if (activeModelOption.currentValue !== (invocation.model ?? initialModelOption.currentValue)
+          || selectedReasoning?.id !== reasoningOption.id
+          || selectedReasoning.currentValue !== invocation.reasoningEffort) {
+          throw new TraexAcpError('protocol')
+        }
+        throwIfFatal(fatal)
+      }
+
+      const activeReasoning = validateReasoningCatalog(activeConfigOptions)
+      observeCatalog(buildCatalogObservation(
+        activeModelOption,
+        activeReasoning === undefined
+          ? new Map()
+          : new Map([[activeModelOption.currentValue, catalogReasoning(activeReasoning)]]),
+        false,
+      ))
 
       // The prompt is about to enter the ACP stream; from here replay is never safe.
       phase = 'prompt'
@@ -696,6 +802,35 @@ export async function* runTraexAcpText(
   }
 }
 
+/**
+ * Perform a strict ACP initialize + session/new discovery without ever submitting a prompt.
+ * Every advertised model is selected inside the disposable session so model-specific reasoning
+ * efforts are captured exactly as TraeX exposes them.
+ */
+export async function discoverTraexAcpModels(
+  invocation: TraexAcpCatalogInvocation,
+  options: RunTraexAcpOptions = {},
+): Promise<CatalogObservation> {
+  let observation: CatalogObservation | undefined
+  const callerObserver = options.onCatalogObserved
+  for await (const text of runTraexAcpText({
+    ...invocation,
+    prompt: '',
+    operation: 'catalog',
+  }, {
+    ...options,
+    onCatalogObserved(value) {
+      observation = value
+      callerObserver?.(value)
+    },
+  })) {
+    // A catalog-only operation must never produce assistant text.
+    if (text.length > 0) throw new TraexAcpError('protocol')
+  }
+  if (observation === undefined || !observation.completeReasoning) throw new TraexAcpError('protocol')
+  return observation
+}
+
 /** Environment allowlist for the local Trae tool-account executable. */
 export function buildTraexEnv(extraEnvNames: readonly string[] = []): NodeJS.ProcessEnv {
   const result: NodeJS.ProcessEnv = {}
@@ -734,7 +869,14 @@ function validate(
     || invocation.args.some((value, index) => value !== SAFE_ARGS[index])) {
     throw new TraexAcpError('protocol')
   }
+  if (invocation.operation === 'catalog'
+    && (invocation.prompt.length !== 0 || invocation.model !== undefined || invocation.reasoningEffort !== undefined)) {
+    throw new TraexAcpError('protocol')
+  }
   if (invocation.model !== undefined && invocation.model.length === 0) {
+    throw new TraexAcpError('protocol')
+  }
+  if (invocation.reasoningEffort !== undefined && invocation.reasoningEffort.length === 0) {
     throw new TraexAcpError('protocol')
   }
   return {
@@ -770,6 +912,62 @@ function validateModelCatalog(
     throw new TraexAcpError('protocol')
   }
   return option
+}
+
+function validateReasoningCatalog(
+  options: readonly SessionConfigOption[] | null | undefined,
+): Extract<SessionConfigOption, { type: 'select' }> | undefined {
+  const matches = (options ?? []).filter((option): option is Extract<SessionConfigOption, { type: 'select' }> => (
+    option.type === 'select' && (option.category === 'thought_level' || option.id === 'reasoning_effort')
+  ))
+  if (matches.length === 0) return undefined
+  if (matches.length !== 1) throw new TraexAcpError('protocol')
+  const option = matches[0]!
+  const entries = selectEntries(option)
+  const values = entries.map(entry => entry.value)
+  if (option.currentValue.length === 0 || entries.length === 0
+    || !values.includes(option.currentValue) || new Set(values).size !== values.length
+    || entries.some(entry => entry.value.length === 0 || entry.name.length === 0)) {
+    throw new TraexAcpError('protocol')
+  }
+  return option
+}
+
+function catalogReasoning(
+  option: Extract<SessionConfigOption, { type: 'select' }>,
+): CatalogModelReasoning {
+  return {
+    efforts: selectEntries(option).map(entry => ({
+      id: entry.value,
+      name: entry.name,
+      ...(typeof entry.description === 'string' && entry.description.length > 0
+        ? { description: entry.description }
+        : {}),
+    })),
+    defaultEffort: option.currentValue,
+  }
+}
+
+function buildCatalogObservation(
+  modelOption: Extract<SessionConfigOption, { type: 'select' }>,
+  reasoningByModel: ReadonlyMap<string, CatalogModelReasoning>,
+  completeReasoning: boolean,
+  currentValue = modelOption.currentValue,
+): CatalogObservation {
+  return {
+    currentValue,
+    modelValues: selectValues(modelOption),
+    models: selectEntries(modelOption).map(entry => ({
+      id: entry.value,
+      name: entry.name,
+      ...(typeof entry.description === 'string' && entry.description.length > 0
+        ? { description: entry.description }
+        : {}),
+      ...(reasoningByModel.has(entry.value) ? { reasoning: reasoningByModel.get(entry.value)! } : {}),
+    })),
+    completeReasoning,
+    observedAt: Date.now(),
+  }
 }
 
 function selectValues(option: Extract<SessionConfigOption, { type: 'select' }>): string[] {
@@ -837,6 +1035,7 @@ function failureMessage(failure: TraexAcpFailure): string {
     auth: 'TraeX ACP requires an existing non-interactive login',
     entitlement: 'TraeX ACP did not expose an entitled model',
     model: 'TraeX ACP did not expose the requested model',
+    reasoning: 'TraeX ACP did not expose the requested reasoning effort',
     refusal: 'TraeX ACP refused the request',
     process: 'TraeX ACP process failed',
     'output-limit': 'TraeX ACP output exceeded its configured limit',

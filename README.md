@@ -21,14 +21,22 @@ dsh plugin --profile web add ./plugins/hello
 
 使用 DSH 源码版 CLI 时，把 `dsh` 换成 DSH 仓库根目录下的 `pnpm dsh`。
 
-首个实用插件是原生优先的 ACP bridge：
+## 插件一览
 
-```sh
-dsh plugin --profile acp add @dsh-enhanced/acp
-dsh --profile acp --dump-config
-```
+每个插件都是独立发布的 npm 包，只安装需要的能力即可：
 
-然后在 ACP 客户端中把 `dsh --profile acp` 配置为 stdio agent。客户端可在首轮前选择 DSH 的 `standard`、`code`、`minimal`、`cordis` Agent 模式，并使用 DSH 提供的模型、工具、权限和会话能力；原生 Windows 会隐藏依赖 `/bin/bash` 的 `minimal`。Windows 支持目前为实验性，尚未经过真实用户环境和主流 ACP 客户端的充分测试，遇到问题欢迎提交 issue 或 pull request。详见 [`@dsh-enhanced/acp`](plugins/acp)。
+| 插件 | 简要说明 | 快速安装 |
+|---|---|---|
+| [`@dsh-enhanced/acp`](plugins/acp) | 将 DSH 暴露为 ACP stdio agent，让支持 ACP 的编辑器使用 DSH 的 Agent、模型、工具、权限与会话能力。 | `dsh plugin --profile acp add @dsh-enhanced/acp` |
+| [`@dsh-enhanced/coding-subscription-provider`](plugins/coding-subscription-provider) | 接入本机已登录的 Codex、Claude Code、Cursor Agent 和 Grok Build；自动发现模型，并为 Codex、Claude、Grok 展示 reasoning effort。 | `dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider` |
+| [`@dsh-enhanced/traex-acp-provider`](plugins/traex-acp-provider) | 通过 ACP 调用本机已登录的 TraeX，并动态展示其模型与逐模型 reasoning effort。 | `dsh plugin --profile web add @dsh-enhanced/traex-acp-provider` |
+| [`@dsh-enhanced/hello`](plugins/hello) | 最小示例插件，用于验证 bundle 安装、Cordis patch、构建与日志链路。 | `dsh plugin --profile web add @dsh-enhanced/hello` |
+
+安装 Web provider 后运行 `dsh --profile web --dump-config` 检查最终配置，再执行 `dsh web`。Coding Subscription Provider 需要先安装并登录准备使用的官方 CLI；TraeX provider 还需要在配置中显式设置 `enabled: true`。各插件的完整配置、权限边界和排错方法见表内链接。
+
+ACP 插件使用独立的 `acp` profile。安装后运行 `dsh --profile acp --dump-config`，再在 ACP 客户端中把 `dsh --profile acp` 配置为 stdio agent。原生 Windows 支持目前为实验性，详见插件文档。
+
+新增、重命名、弃用或移除插件时，应同时维护本表和 [`plugins/README.md`](plugins/README.md) 的完整目录。
 
 ## 开发
 

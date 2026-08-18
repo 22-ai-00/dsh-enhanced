@@ -12,6 +12,7 @@ import {
   type PromptRequest,
   type PromptResponse,
   type SetSessionConfigOptionRequest,
+  type SessionConfigOption,
   type StopReason,
 } from '@agentclientprotocol/sdk'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -26,6 +27,7 @@ import {
   type SpawnedProcess,
   type TraexAcpInvocation,
 } from '../src/acp-client.ts'
+import * as acpClientModule from '../src/acp-client.ts'
 
 const safeArgs = [
   '--sandbox',
@@ -64,6 +66,9 @@ interface Script {
   readonly advertiseTraeSso?: boolean
   readonly advertiseClose?: boolean
   readonly models?: readonly string[]
+  readonly reasoningByModel?: Readonly<Record<string, readonly string[]>>
+  readonly defaultReasoningByModel?: Readonly<Record<string, string>>
+  readonly malformedReasoning?: boolean
   readonly stopReason?: StopReason
   readonly usage?: PromptResponse['usage']
   readonly closeOnSigint?: boolean
@@ -150,6 +155,42 @@ function harness(script: Script = {}): { state: FakeState; spawn: SpawnProcess }
     )
     state.connection = new AgentSideConnection(connection => {
       const models = script.models ?? ['default', 'fast']
+      let selectedModel = models[0] ?? ''
+      const selectedReasoning = new Map<string, string>()
+      const configOptions = (): SessionConfigOption[] => {
+        const options: SessionConfigOption[] = [{
+          id: 'model-choice',
+          name: 'Model',
+          category: 'model',
+          type: 'select',
+          currentValue: selectedModel,
+          options: models.map(value => ({ value, name: value })),
+        }]
+        const efforts = script.reasoningByModel?.[selectedModel]
+        if (efforts !== undefined && efforts.length > 0) {
+          options.push({
+            id: 'reasoning_effort',
+            name: 'Reasoning Effort',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: selectedReasoning.get(selectedModel)
+              ?? script.defaultReasoningByModel?.[selectedModel]
+              ?? efforts[0]!,
+            options: efforts.map(value => ({ value, name: value.charAt(0).toUpperCase() + value.slice(1) })),
+          })
+        }
+        if (script.malformedReasoning) {
+          options.push({
+            id: 'reasoning_effort',
+            name: 'Reasoning Effort',
+            category: 'thought_level',
+            type: 'select',
+            currentValue: 'low',
+            options: 'not-an-option-array',
+          } as never)
+        }
+        return options
+      }
       const agent: Agent = {
         initialize(request) {
           state.initialize.push(request)
@@ -165,7 +206,7 @@ function harness(script: Script = {}): { state: FakeState; spawn: SpawnProcess }
             agentInfo: {
               name: script.agentName ?? 'traex-acp',
               title: script.initializeTitle ?? 'TRAE CLI',
-              version: '0.200.19',
+              version: '0.201.1',
             },
             agentCapabilities: script.advertiseClose === false
               ? {}
@@ -183,27 +224,17 @@ function harness(script: Script = {}): { state: FakeState; spawn: SpawnProcess }
           if (script.authRequired) return Promise.reject(RequestError.authRequired())
           return Promise.resolve({
             sessionId: 'session-current',
-            configOptions: [{
-              id: 'model-choice',
-              name: 'Model',
-              category: 'model',
-              type: 'select',
-              currentValue: models[0] ?? '',
-              options: models.map(value => ({ value, name: value })),
-            }],
+            configOptions: configOptions(),
           })
         },
         setSessionConfigOption(request) {
           state.modelSelections.push(request)
+          if (request.configId === 'model-choice') selectedModel = request.value as string
+          if (request.configId === 'reasoning_effort') {
+            selectedReasoning.set(selectedModel, request.value as string)
+          }
           return Promise.resolve({
-            configOptions: [{
-              id: 'model-choice',
-              name: 'Model',
-              category: 'model',
-              type: 'select',
-              currentValue: request.value as string,
-              options: models.map(value => ({ value, name: value })),
-            }],
+            configOptions: configOptions(),
           })
         },
         async prompt(request) {
@@ -251,6 +282,54 @@ afterEach(() => {
 })
 
 describe('TraeX ACP subprocess transport', () => {
+  it('discovers every ACP model without submitting a prompt', async () => {
+    const discover = Reflect.get(acpClientModule, 'discoverTraexAcpModels') as (
+      invocation: Omit<TraexAcpInvocation, 'prompt' | 'model'>,
+      options: { spawn: SpawnProcess },
+    ) => Promise<CatalogObservation>
+    expect(discover).toBeTypeOf('function')
+    const { state, spawn } = harness({
+      models: ['trae-fast', 'trae-pro'],
+      reasoningByModel: {
+        'trae-fast': ['low', 'high'],
+        'trae-pro': ['low', 'medium', 'high', 'ultra'],
+      },
+      defaultReasoningByModel: { 'trae-fast': 'high', 'trae-pro': 'medium' },
+    })
+
+    await expect(discover({ command: 'traex', args: safeArgs, cwd: process.cwd() }, { spawn }))
+      .resolves.toMatchObject({
+        currentValue: 'trae-fast',
+        modelValues: ['trae-fast', 'trae-pro'],
+        models: [
+          {
+            id: 'trae-fast',
+            name: 'trae-fast',
+            reasoning: {
+              efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+              defaultEffort: 'high',
+            },
+          },
+          {
+            id: 'trae-pro',
+            name: 'trae-pro',
+            reasoning: {
+              efforts: [
+                { id: 'low', name: 'Low' },
+                { id: 'medium', name: 'Medium' },
+                { id: 'high', name: 'High' },
+                { id: 'ultra', name: 'Ultra' },
+              ],
+              defaultEffort: 'medium',
+            },
+          },
+        ],
+      })
+    expect(state.prompts).toHaveLength(0)
+    expect(state.closedSessions).toEqual(['session-current'])
+    expect(state.kills).toEqual(['SIGINT'])
+  })
+
   it('performs the v1 handshake, creates one session, selects a model, and emits only current-session agent text', async () => {
     const { state, spawn } = harness({
       onPrompt: async (connection, request) => {
@@ -308,6 +387,33 @@ describe('TraeX ACP subprocess transport', () => {
     expect(state.closedSessions).toEqual(['session-current'])
     expect(state.wireMethods).toContain('session/close')
     expect(state.kills).toEqual(['SIGINT'])
+  })
+
+  it('selects a requested reasoning effort through ACP before submitting the prompt', async () => {
+    const { state, spawn } = harness({
+      models: ['default', 'fast'],
+      reasoningByModel: { fast: ['low', 'high'] },
+      defaultReasoningByModel: { fast: 'low' },
+    })
+
+    await expect(collect({ ...invocation, model: 'fast', reasoningEffort: 'high' }, { spawn }))
+      .resolves.toEqual(['answer'])
+    expect(state.modelSelections).toEqual([
+      { sessionId: 'session-current', configId: 'model-choice', value: 'fast' },
+      { sessionId: 'session-current', configId: 'reasoning_effort', value: 'high' },
+    ])
+    expect(state.prompts).toHaveLength(1)
+  })
+
+  it('rejects an unavailable reasoning effort before submitting the prompt', async () => {
+    const { state, spawn } = harness({
+      models: ['fast'],
+      reasoningByModel: { fast: ['low', 'high'] },
+    })
+
+    await expect(collect({ ...invocation, model: 'fast', reasoningEffort: 'ultra' }, { spawn }))
+      .rejects.toMatchObject({ cause: 'reasoning' })
+    expect(state.prompts).toHaveLength(0)
   })
 
   it('advertises no client filesystem/terminal capabilities and always denies permissions', async () => {
@@ -408,6 +514,12 @@ describe('TraeX ACP subprocess transport', () => {
     const { state, spawn } = harness({ malformedHandshake: true })
     await expect(collect(invocation, { spawn })).rejects.toMatchObject({ cause: 'protocol' })
     expect(state.sessions).toHaveLength(0)
+    expect(state.prompts).toHaveLength(0)
+  })
+
+  it('rejects a malformed security-critical reasoning selector before prompting', async () => {
+    const { state, spawn } = harness({ malformedReasoning: true })
+    await expect(collect(invocation, { spawn })).rejects.toMatchObject({ cause: 'protocol' })
     expect(state.prompts).toHaveLength(0)
   })
 
@@ -519,7 +631,7 @@ describe('TraeX ACP subprocess transport', () => {
           id: initialize?.id,
           result: {
             protocolVersion: PROTOCOL_VERSION,
-            agentInfo: { name: 'traex-acp', version: '0.200.19' },
+            agentInfo: { name: 'traex-acp', version: '0.201.1' },
             authMethods: [{ id: 'trae-sso', name: 'Login with Trae' }],
           },
         })}\n`)

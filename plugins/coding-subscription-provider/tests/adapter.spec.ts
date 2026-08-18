@@ -1,4 +1,4 @@
-import { createMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { createMessage, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
 import { CodingSubscriptionAdapter, redactDiagnostic } from '../src/adapter.ts'
 import { SubscriptionAuthError } from '../src/auth.ts'
@@ -6,22 +6,136 @@ import { Config } from '../src/config.ts'
 import type { RunCliTextOptions } from '../src/process.ts'
 import type { CliInvocation } from '../src/providers.ts'
 
-function request(): GenerateOptions {
+function request(model = 'default', reasoningEffort?: string): GenerateOptions {
   return {
     provider: 'codex-subscription',
-    model: 'default',
+    model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(reasoningEffort) }),
     system: 'Be concise.',
     messages: [createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] })],
   }
 }
 
+function providerRequest(provider: string, model = 'default', reasoningEffort?: string): GenerateOptions {
+  return {
+    ...request(model, reasoningEffort),
+    provider,
+  }
+}
+
 describe('coding subscription LLM adapter', () => {
-  it('advertises configured text models and disables automatic retries', async () => {
-    const adapter = new CodingSubscriptionAdapter(Config())
+  it('discovers Codex models and exposes each model-specific reasoning effort', async () => {
+    const discoverCodexModels = vi.fn(() => Promise.resolve({
+      defaultModel: 'gpt-5.6-sol',
+      models: [
+        {
+          id: 'gpt-5.6-sol',
+          name: 'GPT-5.6-Sol',
+          description: 'Latest frontier agentic coding model.',
+          reasoning: {
+            efforts: [{ id: 'low', name: 'Low' }, { id: 'ultra', name: 'Ultra' }],
+            defaultEffort: 'low',
+          },
+          inputModalities: ['text', 'image'],
+        },
+        {
+          id: 'gpt-5.6-luna',
+          name: 'GPT-5.6-Luna',
+          reasoning: {
+            efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+            defaultEffort: 'high',
+          },
+          inputModalities: ['text', 'image'],
+        },
+      ],
+      observedAt: 1,
+    }))
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth: async () => {},
+      discoverCodexModels,
+    } as never)
+
     await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
       expect.objectContaining({ provider: 'codex-subscription', id: 'default', inputModalities: ['text'] }),
+      expect.objectContaining({ provider: 'codex-subscription', id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }),
+      expect.objectContaining({ provider: 'codex-subscription', id: 'gpt-5.6-luna', name: 'GPT-5.6-Luna' }),
     ])
+    await expect(adapter.resolveModel('codex-subscription', 'gpt-5.6-sol')).resolves.toMatchObject({
+      id: 'gpt-5.6-sol',
+      reasoning: {
+        efforts: [{ id: 'low', name: 'Low' }, { id: 'ultra', name: 'Ultra' }],
+        defaultEffort: 'low',
+      },
+    })
+    expect(discoverCodexModels).toHaveBeenCalledTimes(1)
     expect(adapter.providerRetryPolicy('codex-subscription')).toMatchObject({ mode: 'normal', maxRetries: 0 })
+  })
+
+  it('passes the selected Codex reasoning effort to the CLI invocation', async () => {
+    let invocation: CliInvocation | undefined
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText(received) {
+        invocation = received
+        return (async function* () { yield 'done' })()
+      },
+    })
+
+    for await (const _chunk of adapter.stream(request('gpt-5.6-sol', 'ultra'))) { /* drain */ }
+    expect(invocation?.args).toContain('model_reasoning_effort="ultra"')
+  })
+
+  it.each([
+    ['claude-subscription', 'claude', '--effort'],
+    ['grok-subscription', 'grok', '--reasoning-effort'],
+  ] as const)('passes selected reasoning effort through the %s adapter route', async (route, cli, flag) => {
+    let invocation: CliInvocation | undefined
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText(received) {
+        invocation = received
+        return (async function* () { yield 'done' })()
+      },
+    })
+
+    for await (const _chunk of adapter.stream(providerRequest(route, 'model-a', 'high'))) { /* drain */ }
+    expect(invocation).toMatchObject({ provider: cli })
+    expect(invocation?.args).toEqual(expect.arrayContaining([flag, 'high']))
+  })
+
+  it.each([
+    ['claude-subscription', 'discoverClaudeModels', 'claude-opus', ['low', 'high', 'max']],
+    ['grok-subscription', 'discoverGrokModels', 'grok-4.6', ['low', 'medium', 'high', 'xhigh']],
+    ['cursor-subscription', 'discoverCursorModels', 'composer-2', undefined],
+  ] as const)('discovers %s models and exposes available effort metadata', async (route, dependency, model, efforts) => {
+    const discover = vi.fn(() => Promise.resolve({
+      defaultModel: model,
+      models: [{
+        id: model,
+        name: model,
+        ...(efforts === undefined ? {} : {
+          reasoning: {
+            efforts: efforts.map(id => ({ id, name: id })),
+            defaultEffort: efforts[0],
+          },
+        }),
+        inputModalities: ['text'],
+      }],
+      observedAt: 1,
+    }))
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth: async () => {},
+      [dependency]: discover,
+    } as never)
+
+    await expect(adapter.listModels(route)).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'default' }),
+      expect.objectContaining({ id: model }),
+    ]))
+    const resolved = await adapter.resolveModel(route, model)
+    if (efforts === undefined) expect(resolved.reasoning).toBeUndefined()
+    else expect(resolved.reasoning?.efforts.map(effort => effort.id)).toEqual(efforts)
+    expect(discover).toHaveBeenCalledTimes(1)
   })
 
   it('maps CLI text into a valid DSH text stream', async () => {

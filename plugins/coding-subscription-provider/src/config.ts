@@ -6,7 +6,7 @@ export interface ProviderConfig {
   enabled: boolean
   /** Executable name or absolute path. No shell parsing is performed. */
   command: string
-  /** Advisory model ids shown by DSH. `default` preserves the CLI's own default. */
+  /** Static aliases shown by DSH; every provider also merges its live CLI catalog. */
   models: string[]
   /** Maximum coding-agent turns when the CLI exposes that control. */
   maxTurns: number
