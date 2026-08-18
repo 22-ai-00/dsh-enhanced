@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/hello",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A minimal installable DeepSeek Harness plugin bundle.",
   "license": "MIT",
   "type": "module",
@@ -23,6 +23,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "prepack": "pnpm run build",
+    "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },

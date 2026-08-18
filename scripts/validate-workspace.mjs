@@ -85,6 +85,9 @@ for (const entry of entries) {
   for (const script of ['build', 'test', 'typecheck']) {
     if (typeof manifest.scripts?.[script] !== 'string') report(manifestPath, `missing ${script} script`)
   }
+  if (manifest.scripts?.prepublishOnly !== 'node ../../scripts/require-pnpm-publish.mjs') {
+    report(manifestPath, 'prepublishOnly must reject publishing catalog dependencies with npm')
+  }
 
   const requiredPaths = [
     'src/index.ts',

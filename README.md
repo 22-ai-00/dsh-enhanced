@@ -68,13 +68,19 @@ pnpm release:prepare
 pnpm release:prepare -- 0.2.0
 ```
 
-`release:prepare` 会统一修改根包、所有 `plugins/*/package.json` 和插件运行时的 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。运行 `pnpm check`、提交版本变更并完成所有 npm 发布后，再执行：
+`release:prepare` 会统一修改根包、所有 `plugins/*/package.json` 和插件运行时的 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。运行 `pnpm check` 并提交版本变更后，只能从仓库根目录使用 pnpm 发布：
+
+```sh
+pnpm release:publish
+```
+
+不要在插件目录运行 `npm publish`：npm 不会把 workspace 的 `catalog:` 依赖转换成实际版本，最终包将无法在 DSH profile 中安装。每个插件的 `prepublishOnly` 会拦截这种误操作。确认所有包都已发布后，再执行：
 
 ```sh
 pnpm release:record
 ```
 
-该命令会校验所有插件仍与 pending 版本一致，然后更新 `current`、追加 `history` 并清空 `pending`。最后提交账本变更并在同一提交上创建对应 Git tag。若发版中途失败，保留 pending，修复后继续发布，不要提前执行 `release:record`。
+该命令会校验所有插件仍与 pending 版本一致，然后更新 `current`、追加 `history` 并清空 `pending`。最后提交账本变更并在同一提交上创建对应 Git tag。若发版中途失败，保留 pending，修复后重新运行 `pnpm release:publish`；pnpm 会跳过注册表中已有的同版本包。不要提前执行 `release:record`。
 
 ## 目录
 
