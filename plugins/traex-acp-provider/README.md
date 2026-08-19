@@ -60,7 +60,7 @@ dsh --profile web --dump-config
     maxProtocolMessages: 10000
     maxOutputBytes: 2097152
     maxStderrBytes: 32768
-    maxPromptBytes: 131072
+    maxPromptBytes: 4194304
     extraEnvNames: []
     logDiagnostics: false
 ```
@@ -72,6 +72,7 @@ dsh --profile web --dump-config
 - `timeoutMs` 覆盖握手、建会话和整轮 prompt。取消或超时时先发 ACP `session/cancel` 和 `SIGINT`，等待 `killGraceMs` 后升级为 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时以 `teardown=failed` 错误结算，保留原始 abort/timeout 分类，并继续跟踪迟到的 `close`；不会伪称已完成回收。
 - `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次调用及目录发现前的 `traex login status`；当前 TraeX 可能把精确文本 `Logged in using Trae` 单独写入 stdout 或 stderr，这两种形式都会被接受，混合输出、ChatGPT、API key、access token、未登录与未知输出全部拒绝。
 - `maxMessageBytes` 限制单条 NDJSON，`maxProtocolBytes` / `maxProtocolMessages` 限制整轮 ACP 输入，`maxOutputBytes` 限制助手文本；字节限制均按 UTF-8 计算。
+- `maxPromptBytes` 限制序列化后的 DSH 请求，默认 4 MiB。prompt 通过 ACP `session/prompt` 的文本块经 stdin 发送，**不作为 argv 元素**，因此这里不存在操作系统命令行长度限制；该上限只用于约束本机内存与 NDJSON 帧膨胀。真正的上下文边界由 TraeX 侧模型窗口决定。超限时在握手前失败，返回 DSH 标准的 `CONTEXT_WINDOW_EXCEEDED`，prompt 确定未进入 ACP 流；长对话若需要更大值可直接调高本项。
 - `extraEnvNames` 只允许填写要从 DSH 启动环境继承的变量名，配置中不能写变量值或 secret。
 - API key/token、Authorization/private-key/database credential 以及 OpenAI/Codex 等 provider endpoint 变量，即使列入 `extraEnvNames` 也会被硬排除；代理 URL 中的 userinfo 会被删除，无法安全解析的含 `@` 代理值会被拒绝。
 - `logDiagnostics` 默认为 `false`，此时对 stderr 只记录“TraeX 写入 stderr”；启用后仅记录经过常见 token/key/邮箱规则脱敏的有界尾部，仍不适合输出业务秘密。独立于该开关，插件始终会在每次请求结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、teardown 状态、能可靠测得的毫秒级延迟指标，以及 ACP 返回时的纯数值 usage 快照），成功走 `debug`、非成功走 `info`；并在观测到模型目录时只记录**模型数量**。这些行不含 prompt、stderr 原文、认证凭据或任何 model id 原文；usage 快照可能包含 ACP 报告的 token 数量，但不会映射或转发为 DSH `TokenUsage`。
@@ -124,10 +125,13 @@ traex --sandbox read-only --ask-for-approval never acp serve
 | `ACP_OUTPUT_LIMIT` | 助手文本超过 `maxOutputBytes` | 调大 `maxOutputBytes` 或缩小任务。 |
 | `ACP_PROTOCOL_ERROR` | protocol/identity 不符、非法 envelope、无文本或缺终态 | 确认 TraeX 版本仍提供 ACP v1 + `traex-acp` identity；升级后握手变化时插件会拒绝而非猜测。 |
 | `ACP_PROCESS_FAILED` | 子进程非零退出或其他未归类失败 | 开 `logDiagnostics` 看脱敏 stderr；单独 `traex acp serve` 复现。 |
+| `CONTEXT_WINDOW_EXCEEDED` | 序列化后的 DSH 请求超过 `maxPromptBytes`，在握手前失败 | 调大 `maxPromptBytes`，或压缩/清理对话历史；该上限只防本机内存膨胀，与 argv 长度无关。 |
+| `ACP_PROMPT_INVALID` | 请求中含无法序列化的内容（如图片或未知 content block） | 本 route 是 text-only 兼容层；改用纯文本，或换用支持该模态的 provider。 |
 | `CLI_NOT_FOUND` | 找不到可执行文件（`ENOENT`） | 核对 `command` 名称/路径及 `PATH`。 |
 | `INVALID_PROVIDER` | 选择了非 `traex-agent` 的 provider id | 只使用 `traex-agent`。 |
 
-- 认证不足会返回 `ACP_AUTH_REQUIRED`，无可用权益/模型分别映射为 `ACP_ENTITLEMENT_REQUIRED` / `ACP_MODEL_UNAVAILABLE`，明确拒绝映射为 `ACP_REFUSAL`；其他稳定错误包括 `ACP_PROTOCOL_ERROR`、`ACP_TIMEOUT`、`ACP_OUTPUT_LIMIT`、`ACP_PROCESS_FAILED` 和 `CLI_NOT_FOUND`。
+- 认证不足会返回 `ACP_AUTH_REQUIRED`，无可用权益/模型分别映射为 `ACP_ENTITLEMENT_REQUIRED` / `ACP_MODEL_UNAVAILABLE`，明确拒绝映射为 `ACP_REFUSAL`；其他稳定错误包括 `ACP_PROTOCOL_ERROR`、`ACP_TIMEOUT`、`ACP_OUTPUT_LIMIT`、`ACP_PROCESS_FAILED`、`CONTEXT_WINDOW_EXCEEDED`、`ACP_PROMPT_INVALID` 和 `CLI_NOT_FOUND`。
+- 握手前的 prompt 序列化失败（超限或含不支持的 content block）一律带稳定错误码抛出，不会退化为未分类失败；此时 prompt 确定未进入 ACP 流，重试安全。
 
 > 模型目录：`listModels` 会建立一个无 prompt 的临时 ACP 会话，依次选择本次目录中的每个模型，读取该模型实际返回的 reasoning selector，然后关闭会话。完整结果会在内存里做一份**非权威**、带短 TTL 的展示缓存；它不放行或拒绝执行。每次真实调用仍以新的 `session/new` 返回值为唯一执行依据，重新选择并核对模型与 effort；auth 失败、reload 或版本变化时缓存失效。日志只输出模型数量，不含 model id 原文。
 

@@ -80,7 +80,11 @@ export function buildPrompt(options: GenerateOptions, maxPromptBytes: number): s
   const prompt = `Act as a text model backend for DeepSeek Harness. The JSON request follows.\n${JSON.stringify(request)}`
   const size = Buffer.byteLength(prompt, 'utf8')
   if (size > maxPromptBytes) {
-    throw new Error(`serialized DSH request is ${size} bytes; configured limit is ${maxPromptBytes}`)
+    throw new Error(
+      `serialized DSH request is ${size} bytes; configured limit is ${maxPromptBytes}. `
+      + 'Raise `maxPromptBytes` for this plugin if the request is legitimately this large.',
+      { cause: 'prompt-limit' },
+    )
   }
   return prompt
 }
