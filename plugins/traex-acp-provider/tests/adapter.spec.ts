@@ -437,6 +437,25 @@ describe('TraeX ACP LLM adapter', () => {
     })
   })
 
+  it('surfaces an oversized prompt as a routable context-overflow code, never unclassified', async () => {
+    // Regression: preflight used to rethrow the bare serialization Error, so DSH displayed an
+    // UNKNOWN failure and the loop had no code to route on.
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const config = Config()
+    config.maxPromptBytes = 1
+    const adapter = new TraexAcpAdapter(config, { runText, verifyAuth: async () => {} })
+    await expect((async () => {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    })()).rejects.toMatchObject({ code: 'CONTEXT_WINDOW_EXCEEDED' })
+    expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('defaults maxPromptBytes well above a single argv-sized request', () => {
+    // The ACP transport sends the prompt over stdin, so the old 128 KiB argv-derived default
+    // rejected ordinary long conversations before the handshake even started.
+    expect(Config().maxPromptBytes).toBeGreaterThanOrEqual(1024 * 1024)
+  })
+
   it('reports an ok outcome once when the turn succeeds', async () => {
     const calls: { outcome?: string; assistantTextForwarded?: boolean }[] = []
     const adapter = new TraexAcpAdapter(Config(), {

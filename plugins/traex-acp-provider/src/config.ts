@@ -30,7 +30,12 @@ export interface TraexAcpProviderConfig {
   maxOutputBytes: number
   /** Maximum UTF-8 bytes retained from TraeX stderr. */
   maxStderrBytes: number
-  /** Maximum UTF-8 bytes in the serialized DSH request. */
+  /**
+   * Maximum UTF-8 bytes in the serialized DSH request. The prompt travels as an ACP
+   * `session/prompt` text block over stdin, never as an argv element, so no OS command-line
+   * length limit applies here. This bound only guards against unbounded local memory and
+   * NDJSON framing growth; TraeX still enforces its own model context window.
+   */
   maxPromptBytes: number
   /** Additional environment variable names inherited by the child process. */
   extraEnvNames: string[]
@@ -55,7 +60,7 @@ export const Config: Schema<TraexAcpProviderConfig> = Schema.object({
   maxProtocolMessages: Schema.natural().min(16).max(1_000_000).default(10_000),
   maxOutputBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(2 * 1024 * 1024),
   maxStderrBytes: Schema.natural().min(256).max(4 * 1024 * 1024).default(32 * 1024),
-  maxPromptBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(128 * 1024),
+  maxPromptBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(4 * 1024 * 1024),
   extraEnvNames: Schema.array(Schema.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
   logDiagnostics: Schema.boolean().default(false),
 }) as Schema<TraexAcpProviderConfig>

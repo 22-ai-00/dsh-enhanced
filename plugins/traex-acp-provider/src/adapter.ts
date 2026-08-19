@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import {
   CallId,
+  CONTEXT_WINDOW_EXCEEDED_CODE,
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
@@ -136,6 +137,20 @@ function connectorFailure(command: string, error: unknown): Error {
     return new LlmError('TraeX ACP returned an invalid or incomplete protocol exchange', 'ACP_PROTOCOL_ERROR', { cause: error })
   }
   return new LlmError('TraeX ACP process failed', 'ACP_PROCESS_FAILED', { cause: error })
+}
+
+/**
+ * Classify a pre-handshake serialization failure. An oversized request is reported with the
+ * canonical DSH context-overflow code so the loop can compact and retry instead of surfacing an
+ * unclassified failure; the prompt provably never entered the ACP stream.
+ */
+function preflightFailure(error: unknown): Error {
+  if (error instanceof Error && error.cause === 'prompt-limit') {
+    return new LlmError(error.message, CONTEXT_WINDOW_EXCEEDED_CODE, { cause: error })
+  }
+  return error instanceof Error
+    ? new LlmError(error.message, 'ACP_PROMPT_INVALID', { cause: error })
+    : new LlmError('TraeX ACP could not serialize the DSH request', 'ACP_PROMPT_INVALID', { cause: error })
 }
 
 /** Classify the original transport error into a stable, credential-free outcome for diagnostics. */
@@ -442,7 +457,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         }
       } catch (error: unknown) {
         outcome = 'preflight'
-        throw error
+        throw preflightFailure(error)
       }
       let terminal: TraexSuccessfulStopReason | undefined
       const runnerOptions: RunTraexAcpOptions = {

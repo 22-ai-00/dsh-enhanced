@@ -53,6 +53,18 @@ describe('DSH request serialization', () => {
     expect(() => buildPrompt(request(), 10)).toThrow(/configured limit/)
   })
 
+  it('marks an oversized prompt with a routable cause and an actionable remedy', () => {
+    // The bound exists only to cap local memory: the prompt travels as an ACP stdin text block,
+    // never as argv, so the failure must stay routable rather than surfacing unclassified.
+    expect(() => buildPrompt(request(), 10)).toThrow(/maxPromptBytes/)
+    try {
+      buildPrompt(request(), 10)
+      expect.unreachable('an oversized prompt must throw')
+    } catch (error) {
+      expect((error as Error).cause).toBe('prompt-limit')
+    }
+  })
+
   it('fails closed for unknown or extension content blocks', () => {
     const options = request()
     options.messages = [{
