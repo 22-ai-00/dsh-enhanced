@@ -124,6 +124,121 @@ describe('TraeX ACP LLM adapter', () => {
     expect(runnerOptions?.authProbeDurationMs).toBeTypeOf('number')
   })
 
+  it('maps a delegated ACP tool-call envelope into a continuing DSH tool step', async () => {
+    const options = request()
+    options.tools = [{
+      name: 'read',
+      description: 'Read a workspace file.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    }]
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText(_invocation, runnerOptions) {
+        return (async function* () {
+          yield '{"protocol":"dsh-tool-calls/v1","calls":['
+          yield '{"name":"read","arguments":{"path":"README.md"}}]}'
+          runnerOptions?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    const chunks = []
+    for await (const chunk of adapter.stream(options)) chunks.push(chunk)
+
+    const callDelta = chunks.find(chunk => chunk.type === 'tool-call-delta')
+    expect(callDelta).toMatchObject({
+      type: 'tool-call-delta',
+      index: 0,
+      name: 'read',
+      argumentsDelta: '{"path":"README.md"}',
+    })
+    if (callDelta?.type !== 'tool-call-delta') throw new Error('missing tool-call delta')
+    expect(chunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      callDelta,
+      {
+        type: 'block-end',
+        index: 0,
+        block: {
+          type: 'tool-call',
+          id: callDelta.id,
+          name: 'read',
+          arguments: '{"path":"README.md"}',
+        },
+      },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ])
+  })
+
+  it('keeps an ordinary final response as text when DSH tools are available', async () => {
+    const options = request()
+    options.tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText(_invocation, runnerOptions) {
+        return (async function* () {
+          yield 'task complete'
+          runnerOptions?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    const chunks = []
+    for await (const chunk of adapter.stream(options)) chunks.push(chunk)
+
+    expect(chunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'task complete' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'task complete' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+  })
+
+  it('records buffered final text as forwarded before yielding its first delta', async () => {
+    const options = request()
+    options.tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const settled: { assistantTextForwarded?: boolean }[] = []
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      onSettled: context => { settled.push(context) },
+      runText(_invocation, runnerOptions) {
+        return (async function* () {
+          yield 'task complete'
+          runnerOptions?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    const iterator = adapter.stream(options)[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'block-start', blockType: 'text' } })
+    await expect(iterator.next()).resolves.toMatchObject({ value: { type: 'text-delta', text: 'task complete' } })
+    await iterator.return?.()
+
+    expect(settled).toEqual([expect.objectContaining({ assistantTextForwarded: true })])
+  })
+
+  it('fails closed when an ACP tool envelope names an unavailable DSH tool', async () => {
+    const options = request()
+    options.tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText(_invocation, runnerOptions) {
+        return (async function* () {
+          yield '{"protocol":"dsh-tool-calls/v1","calls":[{"name":"bash","arguments":{"command":"pwd"}}]}'
+          runnerOptions?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    await expect((async () => {
+      for await (const _chunk of adapter.stream(options)) { /* drain */ }
+    })()).rejects.toMatchObject({ code: 'ACP_PROTOCOL_ERROR' })
+  })
+
   it('passes an explicit configured model through ACP rather than argv', async () => {
     const config = Config()
     config.models = ['default', 'model-x']

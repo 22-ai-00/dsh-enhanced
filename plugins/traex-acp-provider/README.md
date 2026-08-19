@@ -1,6 +1,6 @@
 # @dsh-enhanced/traex-acp-provider
 
-把同一台机器、同一 OS 用户已经登录的 TraeX / TRAE CLI 注册为 DeepSeek Harness 的 `traex-agent` provider。DSH 在这里是 **ACP client**：模型选择器会通过无 prompt 的临时 ACP 会话发现 TraeX 当前提供的模型及其逐模型 reasoning effort；每次模型请求仍会启动新的 `traex acp serve`、完成 ACP v1 握手、创建会话、再次校验模型/effort、发送 prompt，并只把 `agent_message_chunk` 文本映射回 DSH。
+把同一台机器、同一 OS 用户已经登录的 TraeX / TRAE CLI 注册为 DeepSeek Harness 的 `traex-agent` provider。DSH 在这里是 **ACP client**：模型选择器会通过无 prompt 的临时 ACP 会话发现 TraeX 当前提供的模型及其逐模型 reasoning effort；每次模型请求仍会启动新的 `traex acp serve`、完成 ACP v1 握手、创建会话、再次校验模型/effort 并发送 prompt。普通 `agent_message_chunk` 会映射为 DSH 文本；当请求带 DSH tool schema 时，TraeX 可以返回受控工具信封，插件把它转换成 DSH 原生 tool call，由 Harness 执行后进入下一 step。
 
 这不是订阅 OAuth 转接，也不是模型 API provider。认证、模型供应、网络请求和可能产生的费用均由本机 TraeX 负责；插件不读取或托管 token。仓库中的 [`@dsh-enhanced/acp`](../acp) 方向正好相反——它让 DSH 自己成为供编辑器调用的 ACP agent。
 
@@ -84,7 +84,7 @@ dsh --profile web --dump-config
 traex --sandbox read-only --ask-for-approval never acp serve
 ```
 
-不会传 `--yolo`、`bypass_permissions` 或任意用户追加参数。ACP client 不声明文件系统或 terminal capability；TraeX 发起的每个 `session/request_permission` 都返回 `cancelled`。这让兼容 provider 默认只能读取上下文并返回文本，不应修改项目或运行需要授权的操作。
+不会传 `--yolo`、`bypass_permissions` 或任意用户追加参数。ACP client 不声明文件系统或 terminal capability；TraeX 发起的每个 `session/request_permission` 都返回 `cancelled`。TraeX 子进程自身因此不能通过本插件修改项目或运行命令。模型请求的 DSH tool call 会返回 Harness，由 Harness 既有的工具注册、sandbox、权限和审计链决定是否执行；插件不会替它放行。
 
 安全仍取决于 TraeX 对其配置和沙箱的正确实现。不要把 prompt 约束当作操作系统隔离；处理不可信仓库时，仍应使用只读挂载、容器或独立 OS 账号。
 
@@ -98,6 +98,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 | 凭据 | 不读取 TraeX auth 文件、不实现登录、不刷新或上传 token；只让 TraeX 在本机用户配置目录中使用自己的缓存凭据。 |
 | 浏览器 | 插件不会打开浏览器；用户在插件外执行 TraeX login 时可能打开。 |
 | ACP 权限 | 所有 permission request 均拒绝；不暴露 client-side FS、terminal 或 MCP server。 |
+| DSH 工具 | 请求中的 tool schema 会进入模型隐藏的兼容协议；只接受本次实际声明的精确工具名和对象参数，随后映射为 DSH tool call。真正的读写、网络、子进程或外部服务权限仍由对应 DSH 工具及 Harness 策略控制。 |
 | 日志 | 不主动记录 prompt；stderr 有界且默认不输出内容。每次请求结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/teardown、可测得的毫秒级延迟指标，以及 ACP 返回时的纯数值 usage 快照），并在观测目录时只记录模型数量。均不含 prompt、stderr 原文、认证凭据或 model id 原文；usage 快照可能包含 ACP 报告的 token 数量。 |
 | 安装脚本 | 包内没有 install/postinstall 脚本，也不会安装或更新 TraeX。 |
 
@@ -105,7 +106,8 @@ traex --sandbox read-only --ask-for-approval never acp serve
 
 - 只接受 ACP protocol v1 和 `traex-acp` agent identity；版本或 identity 不符时 fail closed。
 - SDK 前的 wire guard 会追踪 JSON-RPC request id；非法 envelope、未知/重复 response id、未声明的 filesystem/terminal request 和未知 notification 都会终止该轮，不交给 SDK 宽松处理。
-- 只转发当前 session 的文本 `agent_message_chunk`；thought、plan、tool update 不会伪装成模型文本。
+- 只消费当前 session 的文本 `agent_message_chunk`；普通文本直接成为最终回复，严格匹配 `dsh-tool-calls/v1` 的信封会转换为 DSH tool call。thought、plan 和 TraeX 自己的 tool update 不会伪装成 DSH 输出。
+- 工具信封只允许调用本次 `GenerateOptions.tools` 中存在的精确名称，参数必须是 JSON 对象；未知工具、空调用或畸形信封以 `ACP_PROTOCOL_ERROR` fail closed。截断终态不会执行工具信封。
 - `end_turn`、`max_tokens`、`max_turn_requests` 是可完成终态；`refusal`、`cancelled`、断连、畸形/超限 NDJSON、无文本或缺少终态都会失败。
 - 不自动重试。外部 agent 可能已经读取上下文或产生服务端计费，自动重试会放大副作用。
 
@@ -131,9 +133,9 @@ traex --sandbox read-only --ask-for-approval never acp serve
 
 ## 已知限制
 
-- DSH `0.1.0-rc.6` 暴露的是 `LlmAdapter` seam，因此本版是 text-only 兼容层，不是完整 ACP UI。TraeX 的 plan、tool call、diff、permission UI、会话列表和富内容不会进入 DSH。
+- DSH `0.1.0-rc.6` 暴露的是 `LlmAdapter` seam，因此工具调用通过模型隐藏的严格 JSON 信封桥接，不是 TraeX 原生 tool update，也不是完整 ACP UI。TraeX 的 plan、diff、permission UI、会话列表和富内容不会进入 DSH。
 - 每次 DSH 请求使用一个新的 TraeX 进程和 ACP session，不恢复外部历史；完整 DSH 对话会被序列化进 prompt。
-- 暂不转发图片、音频、DSH tool schema 或 TraeX token usage。实验性的 ACP `PromptResponse.usage` 只保留显式数值字段用于内部诊断，不会映射或发送为 DSH usage chunk。
+- 暂不转发图片、音频或 TraeX token usage。DSH tool schema 会随每一步序列化，工具结果则通过下一步的完整 DSH 对话返回给模型；实验性的 ACP `PromptResponse.usage` 只保留显式数值字段用于内部诊断，不会映射或发送为 DSH usage chunk。
 - TraeX 是变化中的开发工具；本实现以本机 `traecli 0.201.1 (internal edition)` 的 ACP v1 握手、逐模型 reasoning selector 与官方 ACP SDK `0.25.1` 为验证基线。升级后若 identity、模型/effort selector 或终态变化，插件会拒绝而不是猜测兼容。
 
 ## 兼容性与调研
