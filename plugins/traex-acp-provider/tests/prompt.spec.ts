@@ -28,6 +28,27 @@ describe('DSH request serialization', () => {
     expect(prompt).not.toContain('private')
   })
 
+  it('delegates DSH tool schemas and requires an immediate tool-call envelope', () => {
+    const options = request()
+    options.tools = [{
+      name: 'read',
+      description: 'Read a workspace file.',
+      parameters: {
+        type: 'object',
+        properties: { path: { type: 'string' } },
+        required: ['path'],
+      },
+    }]
+
+    const prompt = buildPrompt(options, 100_000)
+
+    expect(prompt).toContain('dsh-tool-calls/v1')
+    expect(prompt).toContain('request the required tool now')
+    expect(prompt).toContain('"name":"read"')
+    expect(prompt).toContain('"description":"Read a workspace file."')
+    expect(prompt).toContain('"required":["path"]')
+  })
+
   it('enforces a UTF-8 prompt bound', () => {
     expect(() => buildPrompt(request(), 10)).toThrow(/configured limit/)
   })

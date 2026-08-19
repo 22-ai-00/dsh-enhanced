@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import {
+  CallId,
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
@@ -25,7 +27,7 @@ import {
 import { verifyTraexAuth, type TraexAuthVerifier } from './auth.js'
 import { CatalogObservationCache, type CatalogCacheKeyParts, type CachedCatalog } from './catalog-cache.js'
 import type { TraexAcpProviderConfig } from './config.js'
-import { buildPrompt } from './prompt.js'
+import { buildPrompt, parseDelegatedToolCalls } from './prompt.js'
 
 export const TRAEX_PROVIDER_ROUTE = 'traex-agent'
 
@@ -170,7 +172,7 @@ function reasoningInfo(model: CatalogModel | undefined): Pick<LlmResolvedModelIn
   }
 }
 
-/** Text-only DSH compatibility facade over a fresh, local TraeX ACP session. */
+/** DSH text/tool compatibility facade over a fresh, local TraeX ACP session. */
 export class TraexAcpAdapter extends LlmAdapter {
   private readonly cwd: string
   private readonly runText: TraexAcpTextRunner
@@ -465,7 +467,9 @@ export class TraexAcpAdapter extends LlmAdapter {
       // reports it via onSettled; if it never reports (early return mid-stream) we say unknown.
       phase = 'stream'
       let text = ''
-      yield { type: 'block-start', index: 0, blockType: 'text' }
+      const bufferForToolDelegation = (options.tools?.length ?? 0) > 0
+      const textDeltas: string[] = []
+      if (!bufferForToolDelegation) yield { type: 'block-start', index: 0, blockType: 'text' }
       try {
         // Calling an injected runner may synchronously start work or throw. From immediately
         // before that call, replay safety is unknown until the transport supplies exact facts.
@@ -474,8 +478,12 @@ export class TraexAcpAdapter extends LlmAdapter {
         for await (const delta of deltas) {
           if (delta.length === 0) continue
           text += delta
-          assistantTextForwarded = true
-          yield { type: 'text-delta', index: 0, text: delta }
+          if (bufferForToolDelegation) {
+            textDeltas.push(delta)
+          } else {
+            assistantTextForwarded = true
+            yield { type: 'text-delta', index: 0, text: delta }
+          }
         }
       } catch (error: unknown) {
         outcome = outcomeFor(error)
@@ -486,6 +494,38 @@ export class TraexAcpAdapter extends LlmAdapter {
         throw connectorFailure(this.config.command, new Error('TraeX ACP terminal metadata was missing', { cause: 'protocol' }))
       }
       outcome = 'ok'
+
+      if (bufferForToolDelegation && terminal === 'end_turn') {
+        let calls: ReturnType<typeof parseDelegatedToolCalls>
+        try {
+          calls = parseDelegatedToolCalls(text, options.tools ?? [])
+        } catch (error: unknown) {
+          outcome = 'protocol'
+          throw connectorFailure(this.config.command, error)
+        }
+        if (calls !== undefined) {
+          for (const [index, call] of calls.entries()) {
+            const id = CallId(`traex-${randomUUID()}`)
+            yield { type: 'block-start', index, blockType: 'tool-call' }
+            yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments }
+            yield {
+              type: 'block-end',
+              index,
+              block: { type: 'tool-call', id, name: call.name, arguments: call.arguments },
+            }
+          }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+      }
+
+      if (bufferForToolDelegation) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        for (const delta of textDeltas) {
+          assistantTextForwarded = true
+          yield { type: 'text-delta', index: 0, text: delta }
+        }
+      }
       yield { type: 'block-end', index: 0, block: { type: 'text', text } }
       yield {
         type: 'finish',
