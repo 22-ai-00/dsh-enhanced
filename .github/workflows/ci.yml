@@ -72,7 +72,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "failed to install DSH" }
 
           $env:DSH_HOME = Join-Path $env:RUNNER_TEMP "dsh-home"
-          $tarball = Join-Path $env:RUNNER_TEMP "dsh-enhanced-acp-0.0.4.tgz"
+          $acpPackage = Get-Content "./plugins/acp/package.json" | ConvertFrom-Json
+          $acpVersion = $acpPackage.version
+          $tarball = Join-Path $env:RUNNER_TEMP "dsh-enhanced-acp-$acpVersion.tgz"
           $installOutput = (& dsh plugin --profile acp add $tarball 2>&1 | Out-String)
           $installExit = $LASTEXITCODE
           Write-Output $installOutput
@@ -84,6 +86,6 @@ jobs:
           dsh --profile acp --dump-config | Out-File (Join-Path $env:RUNNER_TEMP "acp-config.txt")
           if ($LASTEXITCODE -ne 0) { throw "failed to compose ACP profile" }
 
-          $env:DSH_ACP_EXPECTED_VERSION = "0.0.4"
+          $env:DSH_ACP_EXPECTED_VERSION = $acpVersion
           node ./plugins/acp/scripts/stdio-smoke.mjs
           if ($LASTEXITCODE -ne 0) { throw "ACP stdio smoke failed" }
