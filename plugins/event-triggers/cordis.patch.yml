@@ -1,0 +1,15 @@
+- insert:
+    - id: dsh-enhanced-event-triggers
+      name: '@dsh-enhanced/event-triggers'
+      inject:
+        - assistantPolicy
+        - assistantAutomations
+      config:
+        databasePath: !!js dshHomePath('event-triggers/state.sqlite')
+        allowedFileRoots: []
+        allowedHttpHosts: []
+        triggers: []
+        pollerEnabled: false
+        pollIntervalMs: 5000
+        requestTimeoutMs: 10000
+        maxBodyBytes: 65536

@@ -1,0 +1,11 @@
+- insert:
+    - id: dsh-enhanced-assistant-health
+      name: '@dsh-enhanced/assistant-health'
+      inject:
+        - assistantPolicy
+      config:
+        requiredProviders:
+          - assistantPolicy
+          - personalMemory
+          - personalWiki
+          - assistantAutomations

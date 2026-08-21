@@ -1,0 +1,17 @@
+- insert:
+    - id: dsh-enhanced-assistant-automations
+      name: '@dsh-enhanced/assistant-automations'
+      inject:
+        - assistantPolicy
+      config:
+        databasePath: !!js dshHomePath('assistant-automations/state.sqlite')
+        runsPath: !!js dshHomePath('assistant-automations/runs')
+        schedulerEnabled: false
+        tickIntervalMs: 5000
+        dutyLeaseMs: 15000
+        taskLeaseMs: 30000
+        misfireGraceMs: 60000
+        maxCatchUp: 100
+        maxConcurrency: 1
+        maxArtifactBytes: 1048576
+        defaultProposalTtlMs: 900000

@@ -1,0 +1,15 @@
+- insert:
+    - id: dsh-enhanced-personal-memory
+      name: '@dsh-enhanced/personal-memory'
+      inject:
+        - assistantPolicy
+      config:
+        databasePath: !!js dshHomePath('personal-memory/memory.sqlite')
+        maxContentBytes: 4096
+        maxRecordsPerIdentity: 1000
+        searchLimit: 20
+        snapshotLimit: 20
+        snapshotMaxBytes: 8192
+        snapshotMaxTokens: 2048
+        defaultProposalTtlMs: 900000
+        maxImportRecords: 100

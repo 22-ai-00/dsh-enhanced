@@ -126,6 +126,17 @@ export class CliProcessExitError extends Error {
   }
 }
 
+/** Codex refused to run because its configured cwd is not an accepted repository. */
+export class CliWorkingDirectoryError extends Error {
+  readonly code = 'CLI_WORKING_DIRECTORY_ERROR'
+  readonly provider = 'codex'
+
+  constructor() {
+    super('codex CLI refused its configured working directory', { cause: 'working-directory' })
+    this.name = 'CliWorkingDirectoryError'
+  }
+}
+
 /** SIGKILL was requested, but ChildProcess never proved process/stdio closure. */
 export class CliTeardownTimeoutError extends Error {
   readonly code = 'CLI_TEARDOWN_TIMEOUT'
@@ -228,6 +239,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
   let terminalReason: 'success' | 'reported-failure' | 'invalid-terminal' | undefined
   let sawCursorAuthInit = false
   let sawChildOutput = false
+  let sawStdoutOutput = false
   let killTimer: ReturnType<typeof setTimeout> | undefined
   let postKillTimer: ReturnType<typeof setTimeout> | undefined
   let resolveClosed: (() => void) | undefined
@@ -375,7 +387,10 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     if (terminationError) close(terminationError)
     else if (code !== 0 || signal !== null) {
       phase = 'child-close'
-      close(new CliProcessExitError(invocation.provider, code, signal))
+      close(invocation.provider === 'codex' && code === 1 && signal === null && !sawStdoutOutput
+        && isCodexWorkingDirectoryRejection(stderr)
+        ? new CliWorkingDirectoryError()
+        : new CliProcessExitError(invocation.provider, code, signal))
     } else close(validateProtocolSettlement(invocation.provider, {
       sawValidJson,
       sawRecognizedEvent,
@@ -406,6 +421,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     sawChildOutput = true
     const decoded = decodeJsonLine(line)
     if (decoded.kind === 'empty') return
+    sawStdoutOutput = true
     if (decoded.kind === 'malformed') {
       stop(new CliProtocolError(invocation.provider, 'MALFORMED_JSON'))
       return
@@ -566,7 +582,10 @@ function decodeGrokEvent(event: Record<string, unknown>): ParsedEvent | undefine
     return parsed(textOf(paramsUpdate.content), false)
   }
   if (event.method === 'session/update') return known()
-  if (event.type === 'result') return parsed(textOf(event.result) ?? textOf(event.text), true, resultOutcome(event))
+  if (event.type === 'result') {
+    const outcome = resultOutcome(event)
+    return parsed(textOf(event.result) ?? textOf(event.text), true, outcome === 'success' ? undefined : outcome)
+  }
   if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content) ?? textOf(event.text), false)
   if (knownType(event, ['system', 'user', 'tool_call', 'tool_result'])) return known()
   return undefined
@@ -630,7 +649,7 @@ function validateProtocolSettlement(provider: CliInvocation['provider'], state: 
   if (!state.sawValidJson) return new CliProtocolError(provider, 'NO_JSON_EVENTS')
   if (!state.sawRecognizedEvent) return new CliProtocolError(provider, 'UNRECOGNIZED_EVENTS')
   if (!state.sawAssistantText) return new CliProtocolError(provider, 'NO_ASSISTANT_TEXT')
-  if ((provider === 'codex' || provider === 'claude' || provider === 'cursor') && !state.sawSuccessTerminal) {
+  if ((provider === 'codex' || provider === 'claude' || provider === 'cursor' || provider === 'grok') && !state.sawSuccessTerminal) {
     return new CliProtocolError(provider, 'MISSING_SUCCESS_TERMINAL')
   }
   return undefined
@@ -653,6 +672,13 @@ function exitDescription(code: number | null, signal: NodeJS.Signals | null): st
   const parts = [`code=${code === null ? 'null' : String(code)}`]
   if (signal !== null) parts.push(`signal=${signal}`)
   return parts.join(', ')
+}
+
+function isCodexWorkingDirectoryRejection(diagnostic: string): boolean {
+  const expected = 'Not inside a trusted directory and --skip-git-repo-check was not specified.'
+  const allowed = new Set([expected, 'Reading additional input from stdin...'])
+  const lines = diagnostic.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
+  return lines.includes(expected) && lines.every(line => allowed.has(line))
 }
 
 function object(value: unknown): Record<string, unknown> | undefined {

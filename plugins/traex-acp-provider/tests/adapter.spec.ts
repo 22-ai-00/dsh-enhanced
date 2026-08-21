@@ -174,6 +174,46 @@ describe('TraeX ACP LLM adapter', () => {
     ])
   })
 
+  it('maps an envelope with a model progress preamble instead of leaking JSON as assistant text', async () => {
+    const options = request()
+    options.tools = [{
+      name: 'read',
+      description: 'Read a workspace file.',
+      parameters: { type: 'object' },
+    }]
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText(_invocation, runnerOptions) {
+        return (async function* () {
+          yield '我先读取关键文件，然后继续。\n\n'
+          yield '{"protocol":"dsh-tool-calls/v1","calls":['
+          yield '{"name":"read","arguments":{"path":"README.md"}}]}'
+          runnerOptions?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    const chunks = []
+    for await (const chunk of adapter.stream(options)) chunks.push(chunk)
+
+    expect(chunks.some(chunk => chunk.type === 'text-delta')).toBe(false)
+    expect(chunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      expect.objectContaining({
+        type: 'tool-call-delta',
+        index: 0,
+        name: 'read',
+        argumentsDelta: '{"path":"README.md"}',
+      }),
+      expect.objectContaining({
+        type: 'block-end',
+        index: 0,
+        block: expect.objectContaining({ type: 'tool-call', name: 'read', arguments: '{"path":"README.md"}' }),
+      }),
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ])
+  })
+
   it('keeps an ordinary final response as text when DSH tools are available', async () => {
     const options = request()
     options.tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]

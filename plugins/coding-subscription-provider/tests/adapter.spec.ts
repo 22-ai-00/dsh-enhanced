@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { CodingSubscriptionAdapter, redactDiagnostic } from '../src/adapter.ts'
 import { SubscriptionAuthError } from '../src/auth.ts'
 import { Config } from '../src/config.ts'
-import type { RunCliTextOptions } from '../src/process.ts'
+import { CliWorkingDirectoryError, type RunCliTextOptions } from '../src/process.ts'
 import type { CliInvocation } from '../src/providers.ts'
 
 function request(model = 'default', reasoningEffort?: string): GenerateOptions {
@@ -196,6 +196,47 @@ describe('coding subscription LLM adapter', () => {
       code: 'SUBSCRIPTION_AUTH_REQUIRED',
     })
     expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('returns actionable guidance when Codex refuses the configured cwd', async () => {
+    const config = Config({ cwd: '/workspace-parent' } as never)
+    let context: unknown
+    const runText = (invocation: CliInvocation, options?: RunCliTextOptions) => (async function* (): AsyncIterable<string> {
+      expect(invocation.cwd).toBe('/workspace-parent')
+      yield* []
+      options?.onSettled?.({
+        phase: 'child-close',
+        promptSubmissionState: 'submitted',
+        assistantTextObserved: false,
+        teardownState: 'not-started',
+        exitCode: 1,
+        signal: null,
+      })
+      throw new CliWorkingDirectoryError()
+    })()
+    const adapter = new CodingSubscriptionAdapter(config, {
+      runText,
+      verifyAuth: async () => {},
+      onSettled: value => { context = value },
+    })
+
+    await expect((async () => {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    })()).rejects.toMatchObject({
+      code: 'CLI_WORKING_DIRECTORY',
+      message: expect.stringContaining('config.cwd to a Git repository'),
+    })
+    expect(context).toMatchObject({
+      route: 'codex-subscription',
+      phase: 'child-close',
+      outcome: 'working-directory',
+      promptSubmissionState: 'submitted',
+      assistantTextObserved: false,
+      assistantTextForwarded: false,
+      teardownState: 'not-started',
+      exitCode: 1,
+      signal: null,
+    })
   })
 
   it('reports an auth-phase, not-submitted context when the login probe fails', async () => {

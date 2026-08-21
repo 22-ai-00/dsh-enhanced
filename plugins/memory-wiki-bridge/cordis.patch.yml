@@ -1,0 +1,10 @@
+- insert:
+    - id: dsh-enhanced-memory-wiki-bridge
+      name: '@dsh-enhanced/memory-wiki-bridge'
+      inject:
+        - personalMemory
+        - personalWiki
+      config:
+        maxSources: 20
+        maxSynthesisBytes: 16384
+        defaultProposalTtlMs: 900000

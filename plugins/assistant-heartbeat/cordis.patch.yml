@@ -1,0 +1,9 @@
+- insert:
+    - id: dsh-enhanced-assistant-heartbeat
+      name: '@dsh-enhanced/assistant-heartbeat'
+      inject:
+        - assistantPolicy
+        - assistantAutomations
+      config:
+        heartbeats: []
+        maxScratchBytes: 2048

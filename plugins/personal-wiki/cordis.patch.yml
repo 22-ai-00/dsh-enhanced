@@ -1,0 +1,15 @@
+- insert:
+    - id: dsh-enhanced-personal-wiki
+      name: '@dsh-enhanced/personal-wiki'
+      inject:
+        - assistantPolicy
+      config:
+        vaultRoot: !!js dshHomePath('personal-wiki/vault')
+        databasePath: !!js dshHomePath('personal-wiki/state.sqlite')
+        maxPageBytes: 1048576
+        searchLimit: 20
+        maxSnippetBytes: 2048
+        readMaxBytes: 8192
+        readMaxParagraphs: 40
+        lintLimit: 200
+        defaultProposalTtlMs: 900000
