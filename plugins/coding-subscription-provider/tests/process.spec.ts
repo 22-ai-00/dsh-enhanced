@@ -84,6 +84,23 @@ describe('CLI process bridge', () => {
     })
   })
 
+  it('requires Grok native end even after a legacy successful result', async () => {
+    const child = new FakeChild()
+    const pending = collect(runCliText(
+      buildInvocation('grok', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child) },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'CLI_PROTOCOL_ERROR',
+      reason: 'MISSING_SUCCESS_TERMINAL',
+    })
+    await Promise.resolve()
+    child.stdout.write('{"type":"result","subtype":"success","is_error":false,"result":"legacy answer"}\n')
+    child.finish()
+
+    await rejected
+  })
+
   it('fails closed when Grok 1.0.5 emits a native error event', async () => {
     const child = new FakeChild()
     const pending = collect(runCliText(
@@ -307,7 +324,7 @@ describe('CLI process bridge', () => {
     await rejected
   })
 
-  it('returns timeout as an error and accepts a recognized Grok message plus clean close', async () => {
+  it('returns timeout as an error and accepts a recognized Grok message plus successful end', async () => {
     const timedChild = new FakeChild()
     const timed = collect(runCliText(buildInvocation('grok', { cwd: '/repo', prompt: 'x' }), { spawn: fakeSpawn(timedChild), timeoutMs: 1, killGraceMs: 100 }))
     const timedOut = expect(timed).rejects.toThrow('timed out')
@@ -320,6 +337,7 @@ describe('CLI process bridge', () => {
     const normal = collect(runCliText(buildInvocation('grok', { cwd: '/repo', prompt: 'x' }), { spawn: fakeSpawn(normalChild) }))
     await Promise.resolve()
     normalChild.stdout.write('{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok"}}\n')
+    normalChild.stdout.write('{"type":"end","stopReason":"end_turn"}\n')
     normalChild.finish()
     await expect(normal).resolves.toEqual(['ok'])
     expect(normalChild.kills).toEqual([])
@@ -338,6 +356,96 @@ describe('CLI process bridge', () => {
     const rejected = expect(pending).rejects.toBeInstanceOf(CliProcessExitError)
     await Promise.resolve()
     child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}\n')
+    child.finish(code, signal)
+    await rejected
+  })
+
+  it('classifies the Codex non-repository cwd rejection without exposing stderr', async () => {
+    const child = new FakeChild()
+    const diagnostics: string[] = []
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/workspace-parent', prompt: 'x' }),
+      { spawn: fakeSpawn(child), onDiagnostic: value => { diagnostics.push(value) } },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'CLI_WORKING_DIRECTORY_ERROR',
+      cause: 'working-directory',
+      provider: 'codex',
+      message: 'codex CLI refused its configured working directory',
+    })
+    await Promise.resolve()
+    child.spawn()
+    child.stderr.write('Reading additional input from stdin...\n')
+    child.stderr.write('Not inside a trusted directory and --skip-git-repo-check was not specified.\n')
+    child.finish(1, null)
+    await rejected
+    expect(diagnostics).toEqual([
+      'Reading additional input from stdin...\nNot inside a trusted directory and --skip-git-repo-check was not specified.',
+    ])
+  })
+
+  it.each([
+    {
+      name: 'an ambiguous null-code close',
+      provider: 'codex' as const,
+      code: null as number | null,
+      signal: null as NodeJS.Signals | null,
+      diagnostic: 'Not inside a trusted directory and --skip-git-repo-check was not specified.\n',
+    },
+    {
+      name: 'a different nonzero exit code',
+      provider: 'codex' as const,
+      code: 2 as number | null,
+      signal: null as NodeJS.Signals | null,
+      diagnostic: 'Not inside a trusted directory and --skip-git-repo-check was not specified.\n',
+    },
+    {
+      name: 'a signalled exit',
+      provider: 'codex' as const,
+      code: 1 as number | null,
+      signal: 'SIGTERM' as NodeJS.Signals | null,
+      diagnostic: 'Not inside a trusted directory and --skip-git-repo-check was not specified.\n',
+    },
+    {
+      name: 'the same text from another provider',
+      provider: 'claude' as const,
+      code: 1 as number | null,
+      signal: null as NodeJS.Signals | null,
+      diagnostic: 'Not inside a trusted directory and --skip-git-repo-check was not specified.\n',
+    },
+    {
+      name: 'only the diagnostic prefix',
+      provider: 'codex' as const,
+      code: 1 as number | null,
+      signal: null as NodeJS.Signals | null,
+      diagnostic: 'Not inside a trusted directory.\n',
+    },
+    {
+      name: 'the diagnostic mixed with an unrelated failure',
+      provider: 'codex' as const,
+      code: 1 as number | null,
+      signal: null as NodeJS.Signals | null,
+      diagnostic: 'Not inside a trusted directory and --skip-git-repo-check was not specified.\nwrapper failed for another reason\n',
+    },
+    {
+      name: 'the diagnostic after stdout protocol output',
+      provider: 'codex' as const,
+      code: 1 as number | null,
+      signal: null as NodeJS.Signals | null,
+      stdout: '{"type":"thread.started"}\n',
+      diagnostic: 'Not inside a trusted directory and --skip-git-repo-check was not specified.\n',
+    },
+  ])('keeps $name as a generic process exit', async ({ provider, code, signal, stdout, diagnostic }) => {
+    const child = new FakeChild()
+    const pending = collect(runCliText(
+      buildInvocation(provider, { cwd: '/workspace-parent', prompt: 'x' }),
+      { spawn: fakeSpawn(child) },
+    ))
+    const rejected = expect(pending).rejects.toBeInstanceOf(CliProcessExitError)
+    await Promise.resolve()
+    child.spawn()
+    if (stdout !== undefined) child.stdout.write(stdout)
+    child.stderr.write(diagnostic)
     child.finish(code, signal)
     await rejected
   })
@@ -426,7 +534,7 @@ describe('CLI process bridge', () => {
     expect(context).toMatchObject({ phase: 'terminal', terminalReason })
   })
 
-  it.each(['codex', 'claude', 'cursor'] as const)('requires a successful terminal result from %s', async provider => {
+  it.each(['codex', 'claude', 'cursor', 'grok'] as const)('requires a successful terminal result from %s', async provider => {
     const child = new FakeChild()
     const pending = collect(runCliText(
       buildInvocation(provider, { cwd: '/repo', prompt: 'x' }),
@@ -442,6 +550,8 @@ describe('CLI process bridge', () => {
     } else if (provider === 'cursor') {
       child.stdout.write('{"type":"system","subtype":"init","apiKeySource":"login"}\n')
       child.stdout.write('{"type":"assistant","message":"partial"}\n')
+    } else if (provider === 'grok') {
+      child.stdout.write('{"type":"text","data":"partial"}\n')
     } else {
       child.stdout.write('{"type":"stream_event","event":{"type":"content_block_delta","delta":{"text":"partial"}}}\n')
     }

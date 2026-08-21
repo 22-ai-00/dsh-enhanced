@@ -1,0 +1,75 @@
+{
+  "name": "@dsh-enhanced/event-triggers",
+  "version": "0.1.0",
+  "description": "Durable bounded file, HTTP/JSON, and HMAC webhook triggers for DSH automations.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "directory": "plugins/event-triggers"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh-plugin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "catalog:"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@dsh-enhanced/assistant-automations": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/credentials-keychain": ">=0.1.0 <0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": { "optional": true },
+    "@dsh-enhanced/assistant-automations": { "optional": true },
+    "@dsh-enhanced/assistant-policy": { "optional": true },
+    "@dsh-enhanced/credentials-keychain": { "optional": true }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "catalog:",
+    "@dsh-enhanced/assistant-automations": "workspace:*",
+    "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@dsh-enhanced/credentials-keychain": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

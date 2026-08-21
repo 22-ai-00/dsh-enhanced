@@ -1,0 +1,25 @@
+- insert:
+    - id: dsh-enhanced-assistant-delivery
+      name: '@dsh-enhanced/assistant-delivery'
+      inject:
+        - assistantPolicy
+      config:
+        databasePath: !!js dshHomePath('assistant-delivery/state.sqlite')
+        spoolPath: !!js dshHomePath('assistant-delivery/spool')
+        schedulerEnabled: true
+        tickIntervalMs: 1000
+        leaseMs: 30000
+        maxAttempts: 5
+        maxConcurrency: 4
+        maxTextBytes: 65536
+        retryBaseMs: 1000
+        retryMaxMs: 300000
+        pairingTtlMs: 600000
+        pairingMaxAttempts: 5
+        defaultWorkspace: !!js dshHomePath('assistant-workspace')
+        defaultAgentPreset: standard
+        policyRef: owner-dm
+        agentProvider: deepseek-official
+        agentModel: deepseek-v4-flash
+        agentMaxOutputTokens: 8192
+        modelPickerTtlMs: 900000

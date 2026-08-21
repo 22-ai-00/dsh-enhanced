@@ -1,0 +1,20 @@
+- insert:
+    - id: dsh-enhanced-lark-channel
+      name: '@dsh-enhanced/lark-channel'
+      inject:
+        - assistantDelivery
+      config:
+        enabled: false
+        account: primary
+        tenant: replace-with-tenant-key
+        appId: cli_0000000000000000
+        credentialHandle: lark-app-secret
+        credentialPurpose: connect
+        credentialLeaseMs: 86400000
+        domain: feishu
+        requireMentionInGroups: true
+        showProgress: true
+        statusReactions: true
+        maxTextBytes: 65536
+        staleAfterMs: 300000
+        handshakeTimeoutMs: 15000

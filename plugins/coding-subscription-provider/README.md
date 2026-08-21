@@ -23,7 +23,7 @@
 
 1. **登录官方 CLI**（在运行 DSH 的同一 OS 用户下）：`codex login status` 应输出 `Logged in using ChatGPT`。没登录就先 `codex login`。
 2. **安装插件**：`dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider`。
-3. **确认命令可用**：`codex --version`。命令名不同就在配置里把 `codex.command` 改成实际路径。
+3. **确认命令与工作目录**：`codex --version`。命令名不同就在 `~/.dsh/profiles/web/cordis.patch.yml` 里把 `codex.command` 改成实际路径；同时把 `cwd` 指向要处理的 Git 仓库（相对路径按 DSH 进程启动目录解析）。
 4. **开启并落盘配置**：在配置中保持 `codex.enabled: true`（默认已开），执行 `dsh --profile web --dump-config` 检查生效值。
 5. **选择模型与 effort**：在 DSH 的 provider/model 选择处选 route，再从当前账号的实时模型列表中选择模型及其 reasoning effort；也可选 `default` 沿用 CLI 当前模型。加载目录只执行初始化/列举，不会提交 prompt；真实生成调用会消耗你的订阅额度。
 
@@ -92,7 +92,7 @@ dsh --profile web --dump-config
       userVerifiedSubscription: false
 ```
 
-- `cwd` 是四个子进程看到的工作目录；相对路径按 DSH 进程启动目录解析。
+- `cwd` 是四个子进程看到的工作目录；相对路径按 DSH 进程启动目录解析，不是按 Web 会话显示的项目目录解析。Codex `exec` 要求这里是 Git 仓库；插件不会静默追加 `--skip-git-repo-check` 绕过该检查。Web profile 可在 `~/.dsh/profiles/web/cordis.patch.yml` 中覆盖此值，修改后需重启 DSH。
 - `timeoutMs` 是单次调用总时限；取消或超时先发 `SIGINT`，经过 `killGraceMs` 再发 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时请求以 `teardown=timed-out` 错误结算，保留原始 abort/timeout 分类，并在后台继续引流并跟踪迟到的 `close`；不会伪称子进程已回收。
 - `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制认证状态检查和无 prompt 模型目录发现；探针输出不会进入日志或模型响应。
 - 三项输出限制和 prompt 限制都按 UTF-8 字节计算。
@@ -159,6 +159,7 @@ XAI_API_KEY
 |---|---|---|
 | `SUBSCRIPTION_AUTH_REQUIRED` | 调用前的认证门禁未通过（未登录，或检测到 API key / 非订阅来源） | 在同一 OS 用户下重新 `login`；确认没有把 API key 写进 `extraEnvNames`；Grok 需另设 `userVerifiedSubscription: true`（见「订阅认证优先」）。 |
 | `CLI_NOT_FOUND` | 找不到可执行文件（`ENOENT`） | 核对该 provider 的 `command` 是否为正确的命令名/绝对路径，并确认它在 DSH 进程的 `PATH` 中。 |
+| `CLI_WORKING_DIRECTORY` | Codex 拒绝了配置的工作目录，因为它不是可接受的 Git 仓库 | 把 profile 中的 `cwd` 改为目标 Git 仓库的绝对路径并重启 DSH；不要只根据 Web 会话显示的 cwd 推断子进程 cwd。 |
 | `CLI_TIMEOUT` | 单次调用超过 `timeoutMs` | 简化 prompt，或调大 `timeoutMs`；确认官方 CLI 未卡在交互式提示上。 |
 | `CLI_PROTOCOL_ERROR` | 输出流没有可识别的 assistant 文本或缺少规定终态（含畸形/仅未知事件、Cursor 非 `login` 来源） | 手动跑一次官方 CLI 确认其正常输出；若为 CLI 版本漂移导致，见下文 fixture 采集。 |
 | `CLI_FAILED` | 子进程非零退出或其他未归类失败 | 开 `logDiagnostics` 看脱敏 stderr 尾部；单独运行官方 CLI 复现。 |
@@ -178,7 +179,7 @@ node plugins/coding-subscription-provider/scripts/capture-cli-fixtures.mjs --hel
 
 ## 已知限制
 
-- DSH `0.1.0-rc.6` 只有 `LlmAdapter` provider 接缝；本版因此是兼容适配，不是完整的 Agent Runtime。
+- DSH `0.1.0-rc.8` 只有 `LlmAdapter` provider 接缝；本版因此是兼容适配，不是完整的 Agent Runtime。
 - DSH tool schema 不会映射成外部 CLI 的 tool call；`temperature`、`stop`、`maxTokens` 等参数只能进入任务约束，不能保证与原生模型 API 等价。
 - 暂不转发图片，也不提供供应商 token usage；provider 元数据声明为 text-only。
 - Codex JSONL 当前主要提供事件级文本；解析器允许已识别事件旁出现向后兼容扩展，但若整条流只有未知/畸形事件、没有 assistant 文本或缺少规定终态，会返回 `CLI_PROTOCOL_ERROR`，不会产生空成功。
@@ -194,7 +195,7 @@ Anthropic 的技术文档允许 `claude -p` 使用订阅登录，但其法律与
 ## 兼容性与调研
 
 - Node.js `^22.19.0 || >=24.0.0`
-- DeepSeek Harness / `@deepseek-ai/dsh-llm` `>=0.1.0-rc.6 <0.2.0`
+- DeepSeek Harness / `@deepseek-ai/dsh-llm` `>=0.1.0-rc.8 <0.2.0`
 - Cordis `^4.0.1`
 - Codex CLI `0.147.0`（已验证；模型目录基于官方 [Codex App Server](https://developers.openai.com/codex/app-server) 的 `model/list`）
 - Claude Code `2.1.218`（已验证；目录字段遵循官方 [Agent SDK `supportedModels()`](https://code.claude.com/docs/en/agent-sdk/typescript)）

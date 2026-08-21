@@ -82,6 +82,7 @@ export type RouteOutcome =
   | 'aborted'
   | 'timeout'
   | 'auth-required'
+  | 'working-directory'
   | 'not-found'
   | 'protocol'
   | 'process'
@@ -134,6 +135,13 @@ function cliFailure(definition: RouteDefinition, command: string, error: unknown
       { cause: error },
     )
   }
+  if (error instanceof Error && error.cause === 'working-directory') {
+    return new LlmError(
+      `${definition.name} refused the configured working directory; set config.cwd to a Git repository (relative paths resolve from the DSH process directory) and restart DSH`,
+      'CLI_WORKING_DIRECTORY',
+      { cause: error },
+    )
+  }
   if (error instanceof Error && error.cause === 'protocol') {
     return new LlmError(`${definition.name} returned an unrecognized or incomplete event stream`, 'CLI_PROTOCOL_ERROR', { cause: error })
   }
@@ -157,6 +165,7 @@ function outcomeFor(error: unknown): RouteOutcome {
   if (cause === 'abort') return 'aborted'
   if (cause === 'timeout') return 'timeout'
   if (cause === 'subscription-auth') return 'auth-required'
+  if (cause === 'working-directory') return 'working-directory'
   if (cause === 'protocol') return 'protocol'
   if (cause === 'process-exit') return 'process'
   if (cause === 'output-limit') return 'output-limit'

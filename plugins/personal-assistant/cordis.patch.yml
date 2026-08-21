@@ -1,0 +1,40 @@
+- insert:
+    - id: dsh-enhanced-personal-assistant
+      name: '@dsh-enhanced/personal-assistant'
+      config:
+        assistantPolicy:
+          databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
+          rules: []
+          budgets: []
+        personalMemory:
+          databasePath: !!js dshHomePath('personal-memory/memory.sqlite')
+          maxContentBytes: 4096
+          maxRecordsPerIdentity: 1000
+          searchLimit: 20
+          snapshotLimit: 20
+          snapshotMaxBytes: 8192
+          snapshotMaxTokens: 2048
+          defaultProposalTtlMs: 900000
+          maxImportRecords: 100
+        personalWiki:
+          vaultRoot: !!js dshHomePath('personal-wiki/vault')
+          databasePath: !!js dshHomePath('personal-wiki/state.sqlite')
+          maxPageBytes: 1048576
+          searchLimit: 20
+          maxSnippetBytes: 2048
+          readMaxBytes: 8192
+          readMaxParagraphs: 40
+          lintLimit: 200
+          defaultProposalTtlMs: 900000
+        assistantAutomations:
+          databasePath: !!js dshHomePath('assistant-automations/state.sqlite')
+          runsPath: !!js dshHomePath('assistant-automations/runs')
+          schedulerEnabled: false
+          tickIntervalMs: 5000
+          dutyLeaseMs: 15000
+          taskLeaseMs: 30000
+          misfireGraceMs: 60000
+          maxCatchUp: 100
+          maxConcurrency: 1
+          maxArtifactBytes: 1048576
+          defaultProposalTtlMs: 900000

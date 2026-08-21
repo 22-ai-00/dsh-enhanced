@@ -1,0 +1,11 @@
+- insert:
+    - id: dsh-enhanced-credentials-keychain
+      name: '@dsh-enhanced/credentials-keychain'
+      inject:
+        - assistantPolicy
+      config:
+        databasePath: !!js dshHomePath('credentials-keychain/ledger.sqlite')
+        defaultLeaseMs: 300000
+        maxSecretBytes: 65536
+        providerTimeoutMs: 5000
+        handles: []

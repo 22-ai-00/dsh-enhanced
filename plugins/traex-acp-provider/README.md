@@ -108,8 +108,9 @@ traex --sandbox read-only --ask-for-approval never acp serve
 - 只接受 ACP protocol v1 和 `traex-acp` agent identity；版本或 identity 不符时 fail closed。
 - SDK 前的 wire guard 会追踪 JSON-RPC request id；非法 envelope、未知/重复 response id、未声明的 filesystem/terminal request 和未知 notification 都会终止该轮，不交给 SDK 宽松处理。
 - 只消费当前 session 的文本 `agent_message_chunk`；普通文本直接成为最终回复，严格匹配 `dsh-tool-calls/v1` 的信封会转换为 DSH tool call。thought、plan 和 TraeX 自己的 tool update 不会伪装成 DSH 输出。
-- 工具信封只允许调用本次 `GenerateOptions.tools` 中存在的精确名称，参数必须是 JSON 对象；未知工具、空调用或畸形信封以 `ACP_PROTOCOL_ERROR` fail closed。截断终态不会执行工具信封。
+- 工具信封只允许调用本次 `GenerateOptions.tools` 中存在的精确名称，参数必须是 JSON 对象；未知工具、空调用或畸形信封以 `ACP_PROTOCOL_ERROR` fail closed。截断终态不会执行工具信封。若模型误在合法信封前附加一小段进度说明，插件会只提取并隐藏该信封，避免原始 JSON 泄漏到对话界面；不含协议标记的普通 JSON 仍按文本处理。
 - `end_turn`、`max_tokens`、`max_turn_requests` 是可完成终态；`refusal`、`cancelled`、断连、畸形/超限 NDJSON、无文本或缺少终态都会失败。
+- TraeX 可能仍在 stderr 记录 `unsupported call` 一类内部工具路由告警；这是其内部工具未向本兼容层开放，不等同于 DSH 工具失败。插件会要求模型只返回 `dsh-tool-calls/v1` 信封；若调用仍失败，生命周期日志会同时给出 phase、terminal、exitCode 和 signal，便于区分终态缺失、协议校验与进程退出。
 - 不自动重试。外部 agent 可能已经读取上下文或产生服务端计费，自动重试会放大副作用。
 
 调用失败时返回的稳定 `LlmError` code 与排查：
@@ -137,7 +138,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 
 ## 已知限制
 
-- DSH `0.1.0-rc.6` 暴露的是 `LlmAdapter` seam，因此工具调用通过模型隐藏的严格 JSON 信封桥接，不是 TraeX 原生 tool update，也不是完整 ACP UI。TraeX 的 plan、diff、permission UI、会话列表和富内容不会进入 DSH。
+- DSH `0.1.0-rc.8` 暴露的是 `LlmAdapter` seam，因此工具调用通过模型隐藏的严格 JSON 信封桥接，不是 TraeX 原生 tool update，也不是完整 ACP UI。TraeX 的 plan、diff、permission UI、会话列表和富内容不会进入 DSH。
 - 每次 DSH 请求使用一个新的 TraeX 进程和 ACP session，不恢复外部历史；完整 DSH 对话会被序列化进 prompt。
 - 暂不转发图片、音频或 TraeX token usage。DSH tool schema 会随每一步序列化，工具结果则通过下一步的完整 DSH 对话返回给模型；实验性的 ACP `PromptResponse.usage` 只保留显式数值字段用于内部诊断，不会映射或发送为 DSH usage chunk。
 - TraeX 是变化中的开发工具；本实现以本机 `traecli 0.201.1 (internal edition)` 的 ACP v1 握手、逐模型 reasoning selector 与官方 ACP SDK `0.25.1` 为验证基线。升级后若 identity、模型/effort selector 或终态变化，插件会拒绝而不是猜测兼容。
@@ -145,7 +146,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 ## 兼容性与调研
 
 - Node.js `^22.19.0 || >=24.0.0`
-- DeepSeek Harness / `@deepseek-ai/dsh-llm` `>=0.1.0-rc.6 <0.2.0`
+- DeepSeek Harness / `@deepseek-ai/dsh-llm` `>=0.1.0-rc.8 <0.2.0`
 - Cordis `^4.0.1`
 - Agent Client Protocol SDK `0.25.1`，protocol version `1`
 

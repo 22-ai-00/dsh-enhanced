@@ -31,6 +31,9 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
       const detail = `phase=${context.phase} submission=${context.promptSubmissionState}`
         + ` textForwarded=${context.assistantTextForwarded}`
         + (context.teardownState !== undefined ? ` teardown=${context.teardownState}` : '')
+        + (context.terminalReason !== undefined ? ` terminal=${context.terminalReason}` : '')
+        + (context.exitCode !== undefined ? ` exitCode=${String(context.exitCode)}` : '')
+        + (context.signal !== undefined ? ` signal=${String(context.signal)}` : '')
         + (context.metrics !== undefined ? ` metrics=${JSON.stringify(context.metrics)}` : '')
         + (context.usage !== undefined ? ` usage=${JSON.stringify(context.usage)}` : '')
       if (context.outcome === 'ok') ctx.logger.debug(`${TRAEX_PROVIDER_ROUTE} settled ok (${detail})`)

@@ -56,7 +56,7 @@ export function buildPrompt(options: GenerateOptions, maxPromptBytes: number): s
     protocol: 'dsh-traex-acp-provider/v1',
     instruction: tools.length === 0
       ? 'Continue the conversation as the assistant. Return only the next assistant response. Do not modify files or execute commands.'
-      : `Continue the conversation as the assistant. Do not modify files or execute commands inside TraeX. Tools can only be used through DSH. If the task requires a tool, request the required tool now instead of merely describing a plan, claiming future work, asking for confirmation, or stopping early. For a tool request, return exactly one JSON object matching constraints.tools.responseFormat, with no Markdown or other text. When no tool is needed and the task is complete, return only the final assistant response as normal text.`,
+      : `Continue the conversation as the assistant. Do not modify files or execute commands inside TraeX and do not invoke TraeX-native tools; they are unavailable in this backend session. Tools can only be used through DSH. If the task requires a tool, request the required tool now instead of merely describing a plan, claiming future work, asking for confirmation, or stopping early. For a tool request, return exactly one JSON object matching constraints.tools.responseFormat. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. When no tool is needed and the task is complete, return only the final assistant response as normal text.`,
     system: options.system ?? null,
     conversation: options.messages.map(serializeMessage),
     constraints: {
@@ -99,15 +99,13 @@ function jsonPayload(value: string): string {
   return fenced?.[1]?.trim() ?? trimmed
 }
 
-/** Decode the model-hidden tool envelope; ordinary assistant text returns `undefined`. */
-export function parseDelegatedToolCalls(
-  response: string,
+function parsedToolEnvelope(
+  candidate: string,
   tools: readonly ToolSchema[],
 ): readonly DelegatedToolCall[] | undefined {
-  if (tools.length === 0) return undefined
   let value: unknown
   try {
-    value = JSON.parse(jsonPayload(response)) as unknown
+    value = JSON.parse(jsonPayload(candidate)) as unknown
   } catch {
     return undefined
   }
@@ -122,4 +120,43 @@ export function parseDelegatedToolCalls(
     }
     return { name: call.name, arguments: JSON.stringify(call.arguments) }
   })
+}
+
+function embeddedToolEnvelope(response: string): string | undefined {
+  let searchFrom = 0
+  while (searchFrom < response.length) {
+    const protocolIndex = response.indexOf(`"protocol"`, searchFrom)
+    if (protocolIndex < 0) return undefined
+    const start = response.lastIndexOf('{', protocolIndex)
+    if (start < 0) return undefined
+    let depth = 0
+    let quoted = false
+    let escaped = false
+    for (let index = start; index < response.length; index += 1) {
+      const character = response[index]!
+      if (quoted) {
+        if (escaped) escaped = false
+        else if (character === '\\') escaped = true
+        else if (character === '"') quoted = false
+        continue
+      }
+      if (character === '"') quoted = true
+      else if (character === '{') depth += 1
+      else if (character === '}' && --depth === 0) return response.slice(start, index + 1)
+    }
+    searchFrom = protocolIndex + 10
+  }
+  return undefined
+}
+
+/** Decode the model-hidden tool envelope; ordinary assistant text returns `undefined`. */
+export function parseDelegatedToolCalls(
+  response: string,
+  tools: readonly ToolSchema[],
+): readonly DelegatedToolCall[] | undefined {
+  if (tools.length === 0) return undefined
+  const exact = parsedToolEnvelope(response, tools)
+  if (exact !== undefined) return exact
+  const embedded = embeddedToolEnvelope(response)
+  return embedded === undefined ? undefined : parsedToolEnvelope(embedded, tools)
 }

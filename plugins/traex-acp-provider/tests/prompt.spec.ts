@@ -1,6 +1,6 @@
 import { createMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
-import { buildPrompt } from '../src/prompt.ts'
+import { buildPrompt, parseDelegatedToolCalls } from '../src/prompt.ts'
 
 function request(): GenerateOptions {
   return {
@@ -43,10 +43,34 @@ describe('DSH request serialization', () => {
     const prompt = buildPrompt(options, 100_000)
 
     expect(prompt).toContain('dsh-tool-calls/v1')
+    expect(prompt).toContain('do not invoke TraeX-native tools')
+    expect(prompt).toContain('The first output character must be {')
     expect(prompt).toContain('request the required tool now')
     expect(prompt).toContain('"name":"read"')
     expect(prompt).toContain('"description":"Read a workspace file."')
     expect(prompt).toContain('"required":["path"]')
+  })
+
+  it('recovers a valid tool envelope accidentally wrapped in a progress preamble', () => {
+    const tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const response = '我先读取关键源码，然后继续分析。\n\n'
+      + '{"protocol":"dsh-tool-calls/v1","calls":[{"name":"read","arguments":{"path":"README.md"}}]}'
+
+    expect(parseDelegatedToolCalls(response, tools)).toEqual([
+      { name: 'read', arguments: '{"path":"README.md"}' },
+    ])
+  })
+
+  it('does not reinterpret ordinary prose containing unrelated JSON as a tool request', () => {
+    const tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    expect(parseDelegatedToolCalls('Result: {"status":"ok"}', tools)).toBeUndefined()
+  })
+
+  it('fails closed for an embedded envelope that names an unavailable tool', () => {
+    const tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const response = '准备执行。\n'
+      + '{"protocol":"dsh-tool-calls/v1","calls":[{"name":"bash","arguments":{"command":"pwd"}}]}'
+    expect(() => parseDelegatedToolCalls(response, tools)).toThrow(/unavailable DSH tool/)
   })
 
   it('enforces a UTF-8 prompt bound', () => {
