@@ -55,7 +55,7 @@ interface DshDeliveryRuntimeOptions {
 
 interface ModelCommandReply {
   text: string
-  format?: 'model-picker' | 'plain'
+  format?: 'markdown' | 'model-picker' | 'plain'
   modelPicker?: ModelPickerIntent
   fallbackText?: string
 }
@@ -488,7 +488,11 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         await progressQueue
         return { outcome: 'not-processed', failureCode: 'agent-turn-incomplete', retryable: false }
       }
-      if (output.text !== '') this.options.reply(agent, envelope.eventId, { text: output.text })
+      // Agent answers are authored as Markdown (tables, bold, inline code), so request Markdown
+      // rendering; sending them as plain text shows the raw `|---|` and `**` syntax to the user.
+      if (output.text !== '') {
+        this.options.reply(agent, envelope.eventId, { text: output.text, format: 'markdown' })
+      }
       publishProgress({ kind: 'completed' })
       await progressQueue
       return { outcome: 'processed' }

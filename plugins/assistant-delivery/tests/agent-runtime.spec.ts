@@ -18,7 +18,9 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src/agent-runtime.ts'
 import { AssistantDeliveryService } from '../src/service.ts'
-import type { DeliveryAdapter, DeliveryProgressIntent, InboundEnvelope, OutboundIntent } from '../src/types.ts'
+import type {
+  DeliveryAdapter, DeliveryProgressIntent, InboundEnvelope, OutboundFormat, OutboundIntent,
+} from '../src/types.ts'
 
 const roots: string[] = []
 
@@ -76,6 +78,7 @@ async function runtimeHarness(
   root: string,
   saved: Map<string, SavedSession>,
   defaultRoute = { provider: 'mock', model: 'delivery-model' },
+  channelFormats: readonly OutboundFormat[] = ['plain', 'model-picker'],
 ) {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
@@ -111,7 +114,7 @@ async function runtimeHarness(
   const sends: OutboundIntent[] = []
   const progresses: DeliveryProgressIntent[] = []
   const channel: DeliveryAdapter = { channel: 'lark', account: 'bot-1',
-    capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain', 'model-picker'] }, start: async () => {},
+    capabilities: { reconcileUnknownSend: false, receipts: [], formats: channelFormats }, start: async () => {},
     progress: async intent => { progresses.push(intent) },
     send: async intent => { sends.push(intent); return { outcome: 'accepted', providerMessageId: `om_${sends.length}` } } }
   await ctx.assistantDelivery.registerAdapter(channel)
@@ -133,6 +136,22 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(modelPickerOperationId({ ...conversation, chat: 'oc_other' }, 'same-event')).not.toBe(first)
   })
 
+  test('asks for Markdown rendering when the channel declares that capability', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-markdown-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const f = await runtimeHarness(root, saved, undefined, ['plain', 'markdown', 'model-picker'])
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-md', 'first'))
+    await drive(f.service)
+
+    // Answers are authored as Markdown, so a capable channel must be told to render them.
+    expect(f.sends.map(value => value.text)).toEqual(['reply-1'])
+    expect(f.sends[0]?.format).toBe('markdown')
+  })
+
   test('persists one owner session, resumes across turns/restart, and deduplicates provider events', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-agent-'))
     roots.push(root)
@@ -148,6 +167,9 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(first.llm.requests[0]!.messages.at(-1)?.source).toEqual({ kind: 'delivery', channel: 'lark',
       account: 'bot-1', eventId: 'evt-1', trust: 'untrusted' })
     expect(first.sends.map(value => value.text)).toEqual(['reply-1'])
+    // This adapter does not declare `markdown`, so the answer degrades to plain text rather than
+    // being dropped by the coordinator as an unsupported format.
+    expect(first.sends[0]?.format).toBe('plain')
     expect(first.sends[0]?.replyToEventId).toBe('evt-1')
     // The mock provider emits no reasoning, so the phase label is what keeps the surface non-empty.
     expect(first.progresses.map(value => value.update.kind)).toEqual(['started', 'step', 'completed'])

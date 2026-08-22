@@ -16,6 +16,7 @@ import { DshDeliveryRuntime } from './agent-runtime.js'
 import { registerDeliveryTools } from './tools.js'
 import type {
   ConversationBinding,
+  ConversationRef,
   DeliveryAdapter,
   ExternalPrincipalKey,
   InboundEnvelope,
@@ -541,7 +542,7 @@ export class AssistantDeliveryService extends Service {
   private replyCommand(bindingInput: Readonly<ConversationBinding>, input: {
     idempotencyKey: string
     text: string
-    format?: 'model-picker' | 'plain'
+    format?: 'markdown' | 'model-picker' | 'plain'
     modelPicker?: ModelPickerIntent
     replyToEventId: string
   }): OutboxRecord {
@@ -568,6 +569,20 @@ export class AssistantDeliveryService extends Service {
     })
   }
 
+  /**
+   * Answers are authored as Markdown, but the coordinator drops an intent whose format the adapter
+   * does not declare (`unsupported-format`). Ask for Markdown only where the channel renders it and
+   * degrade to plain text elsewhere, so a reply is never lost to a capability mismatch.
+   */
+  private replyFormat(
+    conversation: Readonly<ConversationRef>,
+    requested: 'markdown' | 'model-picker' | 'plain' | undefined,
+  ): 'markdown' | 'model-picker' | 'plain' | undefined {
+    if (requested !== 'markdown') return requested
+    const adapter = this.registry.get(conversation.channel, conversation.account)
+    return adapter?.capabilities.formats.includes('markdown') === true ? 'markdown' : 'plain'
+  }
+
   reply(agent: Agent | undefined, input: {
     idempotencyKey: string
     text: string
@@ -585,7 +600,7 @@ export class AssistantDeliveryService extends Service {
     if (decision.effect !== 'allow') throw policyDenied(decision)
     return this.deliveryStore.enqueue({ idempotencyKey: input.idempotencyKey, bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
-      format: input.format ?? 'plain',
+      format: this.replyFormat(binding.conversation, input.format) ?? 'plain',
       ...(input.modelPicker === undefined ? {} : { modelPicker: input.modelPicker }),
       ...(input.replyToEventId === undefined ? {} : { replyToEventId: input.replyToEventId }) })
   }

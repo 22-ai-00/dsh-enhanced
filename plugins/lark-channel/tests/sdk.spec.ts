@@ -22,10 +22,23 @@ describe('Lark SDK boundary', () => {
     expect(renderLarkMessage({ text: 'hello' })).toEqual({
       msgType: 'text', content: JSON.stringify({ text: 'hello' }),
     })
-    expect(renderLarkMessage({ markdown: '**hello**' })).toEqual({
-      msgType: 'interactive',
-      content: JSON.stringify({ schema: '2.0', body: { elements: [{ tag: 'markdown', content: '**hello**' }] } }),
-    })
+    // Answers carry authored Markdown (tables, lists, code), so they render as a card and rely on
+    // wide screen mode; a plain-text send would show the raw `|---|` and `**` syntax instead.
+    const answer = renderLarkMessage({ markdown: '**hello**' })
+    expect(answer.msgType).toBe('interactive')
+    const answerCard = JSON.parse(answer.content) as {
+      schema: string
+      config: Record<string, unknown>
+      header?: unknown
+      body: { elements: Array<Record<string, unknown>> }
+    }
+    expect(answerCard.schema).toBe('2.0')
+    expect(answerCard.config).toEqual({ wide_screen_mode: true })
+    // Lark already shows the bot identity above the bubble, so a reply must not add its own header.
+    expect(answerCard.header).toBeUndefined()
+    expect(answerCard.body.elements).toEqual([
+      { tag: 'markdown', content: '**hello**', text_align: 'left' },
+    ])
     expect(renderLarkMessage({ approval: {
       title: 'Approval required', body: 'Send the reviewed result?',
       approveValue: { approval: 'signed-approve' }, rejectValue: { approval: 'signed-reject' },

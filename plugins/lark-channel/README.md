@@ -199,6 +199,7 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 - 执行进度使用飞书原生 `/open-apis/im/v1/message_cot` 展示：`showProgress: false` 可关闭。该接口不在固定版 Node SDK 的高层 API 中，因此作为可降级展示使用；创建或更新失败只记录 channel health，不会重跑任务或影响最终 Outbox 回复。
 - 进度映射只接受 Delivery 的强类型事件：开始、步骤说明、脱敏工具名、工具成功/失败、待办快照和终态；`assistant/chunk`（包括流式 `reasoning-delta`）、工具 arguments、工具 output、系统提示和错误详情不会进入飞书载荷。步骤说明优先取 `assistant/message` 已定稿的 `reasoning` 块（助手自己对该步的说明，不是流式片段）；**并非所有 provider 都会产出 reasoning**——订阅制 CLI 只声明 effort 能力、实际仅回传 `text`，ACP 的 thought 通道到 DSH reasoning 的映射尚未实现，因此 `step/start` 另外映射为中性阶段文案，保证这些 provider 也不会出现空面板。同一次运行的每条步骤/待办各用独立 `messageId` 追加，避免互相覆盖。
 - 回合失败时除 `RUN_ERROR` 外还会在面板正文写入一行「任务未完成」，附带上游错误码（如 `ACP_PROTOCOL_ERROR`）：provider 可能在产出任何内容前就失败，只发 `RUN_ERROR` 会让面板停在首行、看起来像卡住。只透传短错误码，provider 的原始错误消息可能包含 prompt 或上游载荷，不出边界。
+- Agent 回答按 Markdown 渲染：回答本身是 Markdown（表格、加粗、行内代码），以 `plain` 文本发送会把 `|---|`、`**` 等原始语法直接暴露给用户。Delivery 仅在渠道 adapter 声明了 `markdown` 能力时才请求该格式，否则降级为 `plain`——coordinator 会把 adapter 未声明的格式判为 `unsupported-format` 并丢弃整条消息，因此降级是为了保证回复不会因能力不匹配而丢失。回答卡片保持内容优先：不额外加 header（飞书已在气泡上方显示机器人名称与头像，再加会重复），只用一个 `markdown` 组件承载正文，并通过 `wide_screen_mode` 避免 Markdown 表格在宽屏下折行。
 - `messageId` 是稳定 inbound event id；delivery 的 `(channel, account, eventId)` 唯一约束承担跨重启去重。
 - 单聊按 account/tenant/user/chat 绑定；群聊以根消息 id 作为显式 thread，避免不同发言人或话题串线。
 - plain text 使用飞书文本消息；Markdown 使用 schema 2.0 卡片。请求携带由 delivery idempotency key 单向哈希得到的 provider UUID。
