@@ -26,6 +26,7 @@ import {
   type LarkTransportErrorCode,
   type LarkTransportHandlers,
 } from './types.js'
+import { installLarkCardCallbackBridge } from './ws-card-callback.js'
 
 const LARK_PROGRESS_API = '/open-apis/im/v1/message_cot'
 
@@ -39,6 +40,13 @@ export interface OfficialLarkTransportOptions {
 interface ErrorShape {
   code?: unknown
   response?: { status?: unknown; headers?: Record<string, unknown> }
+}
+
+function providerFailureCode(code: unknown): LarkTransportErrorCode | undefined {
+  if (code === 99991400 || code === 99991663) return 'permission_denied'
+  if (code === 230020) return 'rate_limited'
+  if (code === 200530) return 'format_error'
+  return undefined
 }
 
 const silentLogger: Logger = {
@@ -64,6 +72,8 @@ export function classifyLarkSdkFailure(error: unknown): { code: LarkTransportErr
   }
   if (status === 401 || status === 403) return { code: 'permission_denied' }
   if (status !== undefined && status >= 400 && status < 500) return { code: 'format_error' }
+  const providerCode = providerFailureCode(shape.code)
+  if (providerCode !== undefined) return { code: providerCode }
   if (shape.code === 'ETIMEDOUT' || shape.code === 'ECONNABORTED') return { code: 'send_timeout' }
   return { code: 'unknown' }
 }
@@ -102,88 +112,101 @@ export function writeLarkProgressRequest(handle: LarkProgressHandle, events: rea
   }
 }
 
-export interface LarkModelPickerControlNames {
-  form: string
-  provider: string
-  model: string
-  effort: string
-  confirm: string
-}
-
-export function modelPickerControlNames(input: Pick<
-  import('./types.js').LarkModelPickerCard,
-  'confirmValue' | 'initialProvider' | 'initialModel'
->): LarkModelPickerControlNames {
-  const state = createHash('sha256')
-    .update(input.confirmValue.modelPicker)
-    .update('\0')
-    .update(input.initialProvider ?? '')
-    .update('\0')
-    .update(input.initialModel ?? '')
-    .digest('hex')
-    .slice(0, 16)
-  return {
-    form: `dsh_model_picker_${state}`,
-    provider: `provider_${state}`,
-    model: `model_${state}`,
-    effort: `effort_${state}`,
-    confirm: `confirm_${state}`,
-  }
-}
-
-export function parseModelPickerControlName(name: string | undefined): {
-  kind: 'confirm' | 'effort' | 'model' | 'provider'
-  state: string
-} | undefined {
-  if (name === undefined) return undefined
-  const match = /^(confirm|effort|model|provider)_([a-f0-9]{16})$/u.exec(name)
-  if (match === null) return undefined
-  return { kind: match[1] as 'confirm' | 'effort' | 'model' | 'provider', state: match[2]! }
-}
+export const LARK_MODEL_PICKER_CONTROLS = Object.freeze({
+  provider: 'model_provider',
+  model: 'model_route',
+  effort: 'model_effort',
+  confirm: 'model_confirm',
+})
 
 export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive' | 'text'; content: string } {
   if ('text' in input) return { msgType: 'text', content: JSON.stringify({ text: input.text }) }
   if ('modelPicker' in input) {
     const picker = input.modelPicker
-    const controls = modelPickerControlNames(picker)
+    const callback = (action: import('./model-picker.js').LarkModelPickerCallbackAction) => picker.callbackValues[action]
     const select = (
       name: string,
       placeholder: string,
       options: readonly { value: string; label: string }[],
       initial: string | undefined,
-      callback: { modelPicker: string } | undefined,
-    ) => ({
-      tag: 'select_static',
-      name,
-      required: true,
+      action: import('./model-picker.js').LarkModelPickerCallbackAction,
+    ) => {
+      const value = callback(action)
+      // Lark resolves `initial_option` against the option's displayed text, not its
+      // callback value, so a route-shaped or synthetic initial value never matches and
+      // the client silently falls back to the first option. Address the selection by its
+      // 1-based `initial_index`, and only add the textual form when that label identifies
+      // exactly one option, because `initial_option` overrides `initial_index`. An initial
+      // value absent from `options` preselects nothing.
+      const selected = initial === undefined
+        ? -1
+        : options.findIndex(option => option.value === initial)
+      const label = selected < 0 ? undefined : options[selected]!.label
+      const unambiguous = label !== undefined
+        && options.filter(option => option.label === label).length === 1
+      return {
+        tag: 'select_static',
+        name,
+        width: 'fill',
+        placeholder: { tag: 'plain_text', content: placeholder },
+        options: options.map(option => ({
+          text: { tag: 'plain_text', content: option.label },
+          value: option.value,
+        })),
+        value,
+        behaviors: [{ type: 'callback', value }],
+        ...(selected < 0 ? {} : { initial_index: selected + 1 }),
+        ...(unambiguous ? { initial_option: label } : {}),
+      }
+    }
+    const confirmValue = callback('confirm')
+    // Layout follows the card style guide: header carries "what this is" (title + subtitle + icon),
+    // each of the three selects sits in its own bordered surface so the groups read as blocks
+    // instead of a flat run of markdown labels, and the single primary button is the only focus.
+    const field = (label: string, hint: string, control: object, last = false) => ({
+      tag: 'interactive_container',
+      behaviors: [],
       width: 'fill',
-      placeholder: { tag: 'plain_text', content: placeholder },
-      options: options.map(option => ({
-        text: { tag: 'plain_text', content: option.label },
-        value: option.value,
-      })),
-      ...(callback === undefined ? {} : { behaviors: [{ type: 'callback', value: callback }] }),
-      ...(initial === undefined ? {} : { initial_option: initial }),
+      corner_radius: '8px',
+      has_border: true,
+      border_color: 'blue-100',
+      background_style: 'blue-50',
+      padding: '12px 12px 12px 12px',
+      direction: 'vertical',
+      vertical_spacing: '4px',
+      // A trailing container keeps no bottom margin, so the card does not end on dead space.
+      margin: last ? '0px 0px 12px 0px' : '0px 0px 8px 0px',
+      elements: [
+        { tag: 'markdown', content: `**<font color='blue'>${label}</font>**`, text_align: 'left' },
+        { tag: 'markdown', content: `<font color='grey'>${hint}</font>`, text_size: 'notation', text_align: 'left' },
+        control,
+      ],
     })
     return {
       msgType: 'interactive',
       content: JSON.stringify({
         schema: '2.0',
         config: { update_multi: true, enable_forward_interaction: false },
-        header: { template: 'blue', title: { tag: 'plain_text', content: picker.title } },
-        body: { elements: [
-          { tag: 'markdown', content: picker.body },
-          { tag: 'form', name: controls.form, elements: [
-            { tag: 'markdown', content: '**分组 / Provider**' },
-            select(controls.provider, '请选择模型分组', picker.providerOptions, picker.initialProvider, picker.confirmValue),
-            { tag: 'markdown', content: '**模型**' },
-            select(controls.model, '请选择模型', picker.modelOptions, picker.initialModel, picker.confirmValue),
-            { tag: 'markdown', content: '**Effort 程度**' },
-            select(controls.effort, '请选择 effort', picker.effortOptions, picker.initialEffort, undefined),
-            { tag: 'button', name: controls.confirm, type: 'primary', width: 'fill',
-              text: { tag: 'plain_text', content: '确认选择' }, form_action_type: 'submit',
-              behaviors: [{ type: 'callback', value: picker.confirmValue }] },
-          ] },
+        header: {
+          template: 'blue',
+          title: { tag: 'plain_text', content: picker.title },
+          subtitle: { tag: 'plain_text', content: picker.body },
+          icon: { tag: 'standard_icon', token: 'myai_colorful' },
+        },
+        body: { padding: '12px 12px 20px 12px', elements: [
+          field('分组 / Provider', '先选分组，模型与 effort 会随之更新', select(
+            LARK_MODEL_PICKER_CONTROLS.provider, '请选择模型分组',
+            picker.providerOptions, picker.initialProvider, 'provider')),
+          field('模型', '该分组下当前可用的模型', select(
+            LARK_MODEL_PICKER_CONTROLS.model, '请选择模型',
+            picker.modelOptions, picker.initialModel, 'model')),
+          field('Effort 程度', '仅对支持 effort 档位的模型生效', select(
+            LARK_MODEL_PICKER_CONTROLS.effort, '请选择 effort',
+            picker.effortOptions, picker.initialEffort, 'effort'), true),
+          { tag: 'button', name: LARK_MODEL_PICKER_CONTROLS.confirm, type: 'primary', width: 'fill',
+            icon: { tag: 'standard_icon', token: 'done_outlined' },
+            text: { tag: 'plain_text', content: '确认选择' }, value: confirmValue,
+            behaviors: [{ type: 'callback', value: confirmValue }] },
         ] },
       }),
     }
@@ -208,15 +231,6 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
   }
 }
 
-export function extractLarkFormValue(raw: unknown): Readonly<Record<string, unknown>> | undefined {
-  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) return undefined
-  const action = (raw as { action?: unknown }).action
-  if (action === null || typeof action !== 'object' || Array.isArray(action)) return undefined
-  const formValue = (action as { form_value?: unknown }).form_value
-  if (formValue === null || typeof formValue !== 'object' || Array.isArray(formValue)) return undefined
-  return { ...(formValue as Record<string, unknown>) }
-}
-
 function asLarkMessage(message: NormalizedMessage): LarkMessage {
   return {
     messageId: message.messageId,
@@ -236,11 +250,15 @@ function asLarkMessage(message: NormalizedMessage): LarkMessage {
 }
 
 function providerError(result: { code: number | undefined; msg: string | undefined }): LarkTransportError {
-  if (result.code === 99991400 || result.code === 99991663) {
+  const classified = providerFailureCode(result.code)
+  if (classified === 'permission_denied') {
     return new LarkTransportError('permission_denied', 'Lark rejected the application credential or permission')
   }
-  if (result.code === 230020 || /rate|frequency|too many/iu.test(result.msg ?? '')) {
+  if (classified === 'rate_limited' || /rate|frequency|too many/iu.test(result.msg ?? '')) {
     return new LarkTransportError('rate_limited', 'Lark rate limited the message')
+  }
+  if (classified === 'format_error') {
+    return new LarkTransportError('format_error', 'Lark rejected the message card format')
   }
   return new LarkTransportError('unknown', `Lark rejected the message with code ${String(result.code ?? 'missing')}`)
 }
@@ -272,9 +290,8 @@ export class OfficialLarkTransport implements LarkTransport {
       },
       'card.action.trigger': async (raw: unknown) => {
         if (this.handlers === undefined) return
-        const action = normalizeCardAction(raw as unknown as RawCardActionEvent, { includeRaw: true })
+        const action = normalizeCardAction(raw as unknown as RawCardActionEvent)
         if (action === null) return
-        const formValue = extractLarkFormValue(action.raw)
         return await this.handlers.cardAction({
           messageId: action.messageId,
           chatId: action.chatId,
@@ -283,7 +300,6 @@ export class OfficialLarkTransport implements LarkTransport {
           tag: action.action.tag,
           ...(action.action.name === undefined ? {} : { name: action.action.name }),
           ...(action.action.option === undefined ? {} : { option: action.action.option }),
-          ...(formValue === undefined ? {} : { formValue }),
         })
       },
     })
@@ -301,6 +317,7 @@ export class OfficialLarkTransport implements LarkTransport {
       onReconnecting: () => this.handlers?.reconnecting(),
       onReconnected: () => this.handlers?.reconnected(),
     })
+    installLarkCardCallbackBridge(this.ws)
   }
 
   subscribe(handlers: LarkTransportHandlers): () => void {

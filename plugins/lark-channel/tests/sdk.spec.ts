@@ -2,11 +2,20 @@ import { describe, expect, test } from 'vitest'
 import {
   classifyLarkSdkFailure,
   createLarkProgressRequest,
-  extractLarkFormValue,
   larkRequestUuid,
   renderLarkMessage,
   writeLarkProgressRequest,
 } from '../src/sdk.ts'
+
+/** The picker nests each control in its own container, so element lookups walk the whole tree. */
+function cardElements(elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  return elements.flatMap(element => {
+    const nested = element.elements
+    return Array.isArray(nested)
+      ? [element, ...cardElements(nested as Array<Record<string, unknown>>)]
+      : [element]
+  })
+}
 
 describe('Lark SDK boundary', () => {
   test('renders plain text and bounded Markdown as provider-native content', () => {
@@ -36,7 +45,7 @@ describe('Lark SDK boundary', () => {
     })
   })
 
-  test('renders a schema 2.0 model form with provider, model, and effort dropdowns plus submit', () => {
+  test('renders schema 2.0 model selectors as independent callbacks without a CardKit form', () => {
     const rendered = renderLarkMessage({ modelPicker: {
       title: '选择模型',
       body: '当前：codex-subscription/default',
@@ -46,7 +55,12 @@ describe('Lark SDK boundary', () => {
       initialProvider: 'codex-subscription',
       initialModel: 'codex-subscription/default',
       initialEffort: 'high',
-      confirmValue: { modelPicker: 'signed-model-picker' },
+      callbackValues: {
+        provider: { modelPicker: 'signed-provider' },
+        model: { modelPicker: 'signed-model' },
+        effort: { modelPicker: 'signed-effort' },
+        confirm: { modelPicker: 'signed-confirm' },
+      },
     } })
     expect(rendered.msgType).toBe('interactive')
     const card = JSON.parse(rendered.content) as {
@@ -56,68 +70,102 @@ describe('Lark SDK boundary', () => {
     }
     expect(card.schema).toBe('2.0')
     expect(card.config).toEqual({ update_multi: true, enable_forward_interaction: false })
-    const form = card.body.elements.find(element => element.tag === 'form') as {
-      name: string
-      elements: Array<Record<string, unknown>>
-    }
-    const selects = form.elements.filter(element => element.tag === 'select_static')
+    expect(cardElements(card.body.elements).some(element => element.tag === 'form')).toBe(false)
+    const selects = cardElements(card.body.elements).filter(element => element.tag === 'select_static')
     const names = selects.map(element => element.name)
-    expect(form.name).toMatch(/^dsh_model_picker_[a-f0-9]{16}$/u)
-    expect(names).toEqual([
-      expect.stringMatching(/^provider_[a-f0-9]{16}$/u),
-      expect.stringMatching(/^model_[a-f0-9]{16}$/u),
-      expect.stringMatching(/^effort_[a-f0-9]{16}$/u),
+    expect(names).toEqual(['model_provider', 'model_route', 'model_effort'])
+    expect(selects).toEqual([
+      expect.objectContaining({
+        name: 'model_provider', value: { modelPicker: 'signed-provider' },
+        behaviors: [{ type: 'callback', value: { modelPicker: 'signed-provider' } }],
+        initial_index: 1, initial_option: 'Codex',
+      }),
+      expect.objectContaining({
+        name: 'model_route', value: { modelPicker: 'signed-model' },
+        behaviors: [{ type: 'callback', value: { modelPicker: 'signed-model' } }],
+        initial_index: 1, initial_option: 'Default',
+      }),
+      expect.objectContaining({
+        name: 'model_effort', value: { modelPicker: 'signed-effort' },
+        behaviors: [{ type: 'callback', value: { modelPicker: 'signed-effort' } }],
+        initial_index: 2, initial_option: 'High',
+      }),
     ])
-    expect(new Set([form.name, ...names]).size).toBe(4)
-    expect(selects.slice(0, 2))
-      .toEqual(expect.arrayContaining([
-        expect.objectContaining({
-          name: names[0], behaviors: [{ type: 'callback', value: { modelPicker: 'signed-model-picker' } }],
-        }),
-        expect.objectContaining({
-          name: names[1], behaviors: [{ type: 'callback', value: { modelPicker: 'signed-model-picker' } }],
-        }),
-      ]))
-    expect(form.elements.at(-1)).toMatchObject({
-      tag: 'button', name: expect.stringMatching(/^confirm_[a-f0-9]{16}$/u), form_action_type: 'submit',
-      behaviors: [{ type: 'callback', value: { modelPicker: 'signed-model-picker' } }],
+    const confirm = cardElements(card.body.elements).find(element => element.tag === 'button')
+    expect(confirm).toMatchObject({
+      tag: 'button', name: 'model_confirm',
+      value: { modelPicker: 'signed-confirm' },
+      behaviors: [{ type: 'callback', value: { modelPicker: 'signed-confirm' } }],
     })
+    expect(confirm).not.toHaveProperty('form_action_type')
+    expect(confirm).not.toHaveProperty('action_type')
+    expect(confirm).not.toHaveProperty('form_name')
   })
 
-  test('isolates model form state across picker operations and cascading routes', () => {
-    const renderNames = (token: string, provider: string, model: string) => {
+  test('preselects the current option by index because Lark matches initial_option on the label', () => {
+    const select = (initialModel: string | undefined) => {
       const rendered = renderLarkMessage({ modelPicker: {
-        title: '选择模型', body: '当前模型',
-        providerOptions: [{ value: provider, label: provider }],
-        modelOptions: [{ value: `${provider}/${model}`, label: model }],
-        effortOptions: [{ value: '__default__', label: '默认' }],
-        initialProvider: provider,
-        initialModel: `${provider}/${model}`,
+        title: '选择模型',
+        body: '当前：relay/auto/fast-max',
+        providerOptions: [{ value: 'relay', label: 'Relay' }],
+        modelOptions: [
+          { value: 'relay/auto/fast', label: 'fast' },
+          { value: 'relay/auto/fast-max', label: 'fast-max' },
+          { value: 'relay/opensource/oss-chat', label: 'oss-chat' },
+        ],
+        effortOptions: [{ value: '__default__', label: '默认（该模型无 effort 档位）' }],
+        initialProvider: 'relay',
+        ...(initialModel === undefined ? {} : { initialModel }),
         initialEffort: '__default__',
-        confirmValue: { modelPicker: token },
+        callbackValues: {
+          provider: { modelPicker: 'signed-provider' },
+          model: { modelPicker: 'signed-model' },
+          effort: { modelPicker: 'signed-effort' },
+          confirm: { modelPicker: 'signed-confirm' },
+        },
       } })
       const card = JSON.parse(rendered.content) as { body: { elements: Array<Record<string, unknown>> } }
-      const form = card.body.elements.find(element => element.tag === 'form') as {
-        name: string
-        elements: Array<{ name?: string }>
-      }
-      return [form.name, ...form.elements.flatMap(element => element.name === undefined ? [] : [element.name])]
+      return cardElements(card.body.elements).find(element => element.name === 'model_route')!
     }
 
-    const first = renderNames('signed-model-picker-1', 'provider-a', 'model-a')
-    expect(renderNames('signed-model-picker-1', 'provider-a', 'model-a')).toEqual(first)
-    expect(renderNames('signed-model-picker-2', 'provider-a', 'model-a')).not.toEqual(first)
-    expect(renderNames('signed-model-picker-1', 'provider-b', 'model-b')).not.toEqual(first)
+    // The route-shaped callback value is never a valid `initial_option`; the label is.
+    const current = select('relay/auto/fast-max')
+    expect(current).toMatchObject({ initial_index: 2, initial_option: 'fast-max' })
+    expect(current.initial_option).not.toBe('relay/auto/fast-max')
+
+    // A synthetic or stale initial value must not silently preselect the first option.
+    const missing = select('relay/retired-model')
+    expect(missing).not.toHaveProperty('initial_index')
+    expect(missing).not.toHaveProperty('initial_option')
+    const absent = select(undefined)
+    expect(absent).not.toHaveProperty('initial_index')
+    expect(absent).not.toHaveProperty('initial_option')
   })
 
-  test('strictly extracts named form values from the pinned SDK raw callback', () => {
-    expect(extractLarkFormValue({ action: { form_value: {
-      provider: 'codex-subscription', model: 'codex-subscription/default', effort: 'high',
-    } } })).toEqual({
-      provider: 'codex-subscription', model: 'codex-subscription/default', effort: 'high',
-    })
-    expect(extractLarkFormValue({ action: { form_value: [] } })).toBeUndefined()
-    expect(extractLarkFormValue({ action: { value: {} } })).toBeUndefined()
+  test('keeps duplicate labels addressable by index without an ambiguous initial_option', () => {
+    const rendered = renderLarkMessage({ modelPicker: {
+      title: '选择模型',
+      body: '当前：mirror/default',
+      providerOptions: [{ value: 'mirror', label: 'Mirror' }],
+      modelOptions: [
+        { value: 'mirror/primary/default', label: 'default' },
+        { value: 'mirror/secondary/default', label: 'default' },
+      ],
+      effortOptions: [{ value: '__default__', label: '默认' }],
+      initialProvider: 'mirror',
+      initialModel: 'mirror/secondary/default',
+      initialEffort: '__default__',
+      callbackValues: {
+        provider: { modelPicker: 'signed-provider' },
+        model: { modelPicker: 'signed-model' },
+        effort: { modelPicker: 'signed-effort' },
+        confirm: { modelPicker: 'signed-confirm' },
+      },
+    } })
+    const card = JSON.parse(rendered.content) as { body: { elements: Array<Record<string, unknown>> } }
+    const model = cardElements(card.body.elements).find(element => element.name === 'model_route')!
+    expect(model).toMatchObject({ initial_index: 2 })
+    expect(model).not.toHaveProperty('initial_option')
   })
 
   test('derives a deterministic provider idempotency uuid without exposing the source key', () => {
@@ -152,6 +200,7 @@ describe('Lark SDK boundary', () => {
       .toMatchObject({ code: 'rate_limited', retryAfterMs: 2_000 })
     expect(classifyLarkSdkFailure({ response: { status: 403 } })).toMatchObject({ code: 'permission_denied' })
     expect(classifyLarkSdkFailure({ code: 'ETIMEDOUT' })).toMatchObject({ code: 'send_timeout' })
+    expect(classifyLarkSdkFailure({ code: 200530 })).toMatchObject({ code: 'format_error' })
     expect(classifyLarkSdkFailure(new Error('provider details'))).toMatchObject({ code: 'unknown' })
   })
 })
