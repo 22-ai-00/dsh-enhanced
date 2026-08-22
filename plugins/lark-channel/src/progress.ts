@@ -41,11 +41,18 @@ function updateEvents(
   update: DeliveryProgressUpdate,
   chatId: string,
   sequence: number,
+  step: number,
 ): LarkProgressEvent[] {
   if (update.kind === 'started') return [
     progressEvent('RUN_STARTED', { threadId: chatId, runId: `delivery-${sequence}` }),
     ...textEvents(`status-${sequence}`, '正在分析请求并制定执行步骤…'),
   ]
+  if (update.kind === 'step') {
+    // A reasoning-only turn produces no tool or todo event, so this is the only content the panel
+    // would ever get. Each step needs its own messageId: reusing one id would make every later
+    // step overwrite the previous bubble instead of appending a new one.
+    return update.text === '' ? [] : textEvents(`step-${sequence}-${step}`, update.text)
+  }
   if (update.kind === 'tool-started') {
     const callId = bounded(update.callId, 256)
     const toolName = bounded(update.toolName, 240)
@@ -68,18 +75,30 @@ function updateEvents(
   })]
   if (update.kind === 'todos') {
     const text = todoText(update)
-    return text === '' ? [] : textEvents(`todos-${sequence}`, text)
+    return text === '' ? [] : textEvents(`todos-${sequence}-${step}`, text)
   }
   if (update.kind === 'completed') return [progressEvent('RUN_FINISHED', {
     threadId: chatId, runId: `delivery-${sequence}`, status: 'done',
   })]
-  return [progressEvent('RUN_ERROR', { message: '任务未完成', code: 'TASK_FAILED' })]
+  // A failed turn may have produced no step at all (the provider can fail before any output), so
+  // state the failure in the panel body too; RUN_ERROR alone leaves the surface on its opening line.
+  const code = update.code === undefined ? undefined : bounded(update.code, 80)
+  return [
+    ...textEvents(`failed-${sequence}-${step}`,
+      code === undefined ? '任务未完成' : `任务未完成（${code}）`),
+    progressEvent('RUN_ERROR', {
+      message: code === undefined ? '任务未完成' : `任务未完成：${code}`,
+      code: 'TASK_FAILED',
+    }),
+  ]
 }
 
 interface LiveProgress {
   handle: LarkProgressHandle
   chatId: string
   sequence: number
+  /** Monotonic per-run counter that keeps each appended step/todo bubble on its own messageId. */
+  step: number
 }
 
 /** Serial, best-effort renderer for Feishu's native agent progress message. */
@@ -112,16 +131,16 @@ export class LarkProgressPresenter {
         replyTo: intent.eventId,
         hidden: false,
       })
-      const run = { handle, chatId: intent.target.conversation.chat, sequence: ++this.sequence }
+      const run = { handle, chatId: intent.target.conversation.chat, sequence: ++this.sequence, step: 0 }
       this.runs.set(key, run)
-      await this.transport.writeProgress(handle, updateEvents(intent.update, run.chatId, run.sequence))
+      await this.transport.writeProgress(handle, updateEvents(intent.update, run.chatId, run.sequence, run.step))
       return
     }
     const run = this.runs.get(key)
     if (run === undefined) return
     const terminal = intent.update.kind === 'completed' || intent.update.kind === 'failed'
     try {
-      const events = updateEvents(intent.update, run.chatId, run.sequence)
+      const events = updateEvents(intent.update, run.chatId, run.sequence, ++run.step)
       if (events.length > 0) await this.transport.writeProgress(run.handle, events)
     } finally {
       if (terminal) this.runs.delete(key)
