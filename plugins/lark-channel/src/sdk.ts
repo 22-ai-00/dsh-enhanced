@@ -225,9 +225,19 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
       ] },
     }),
   }
+  // An answer card stays content-first: Lark already shows the bot name and avatar above the
+  // bubble, so a header here would duplicate the sender identity and add weight to every reply.
+  // `wide_screen_mode` is what keeps authored Markdown tables from wrapping into unreadable rows.
   return {
     msgType: 'interactive',
-    content: JSON.stringify({ schema: '2.0', body: { elements: [{ tag: 'markdown', content: input.markdown }] } }),
+    content: JSON.stringify({
+      schema: '2.0',
+      config: { wide_screen_mode: true },
+      body: {
+        padding: '12px 16px 12px 16px',
+        elements: [{ tag: 'markdown', content: input.markdown, text_align: 'left' }],
+      },
+    }),
   }
 }
 
