@@ -4,7 +4,7 @@
 
 默认是 `enabled: false`，所以安装包不会立刻读取凭据或联网。
 
-启用后，合法的新消息完成鉴权、去重并进入持久 Inbox 后，机器人会在原消息上添加 `Get`；普通 Agent 任务同时创建一条飞书原生执行进度消息，只展示阶段、工具名和显式待办状态；最终答复发送成功后再在原消息上添加 `DONE`。进度与 reaction 都是 best-effort 展示层，最终答复仍由 Delivery Outbox 保证。插件不会发送模型原始 CoT、`reasoning-delta`、工具参数或工具原始结果。
+启用后，合法的新消息完成鉴权、去重并进入持久 Inbox 后，机器人会在原消息上添加 `Get`；普通 Agent 任务同时创建一条飞书原生执行进度消息，只展示阶段、步骤说明、工具名和显式待办状态；最终答复发送成功后再在原消息上添加 `DONE`。进度与 reaction 都是 best-effort 展示层，最终答复仍由 Delivery Outbox 保证。插件不会发送流式 `reasoning-delta`、工具参数或工具原始结果。
 
 ## 最快启用：跨平台 setup wizard
 
@@ -40,7 +40,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 - `im:message.reactions:write_only`：在原消息上添加 `Get` / `DONE` 状态；
 - `im:message:send_as_bot`：发送及回复消息；
 - `im.message.receive_v1`：消息事件；
-- `card.action.trigger`：处理审批卡片按钮、模型选择级联刷新和最终表单提交。
+- `card.action.trigger`：处理审批卡片按钮、模型选择级联刷新和最终确认按钮。
 
 事件与回调由官方一键创建流程预置为 WebSocket 长连接，不需要公网 callback URL。实现依据是飞书开放平台的[一键创建飞书智能体应用](https://open.larkoffice.com/document/mcp_open_tools/integrating-agents-with-feishu/overview)和官方 Node SDK 的[`registerApp` 文档](https://github.com/larksuite/node-sdk/blob/main/README.zh.md#%E4%B8%80%E9%94%AE%E5%88%9B%E5%BB%BA%E5%BA%94%E7%94%A8)。
 
@@ -108,7 +108,7 @@ schtasks.exe /Run /TN "DSH profile web"
 
 服务启动后，可以先在飞书里私聊机器人发送 `/model`。机器人会返回一张飞书卡片，依次选择“分组 / Provider”“模型”“Effort 程度”，再点击“确认选择”；选择 provider 时，同一张卡片会立即刷新为该分组的模型，选择模型时又会刷新为该模型实际支持的 effort。没有独立 effort 档位的模型只显示“默认（该模型无 effort 档位）”。系统确认后会发一条文字回复，下一条普通消息开始使用新选择，原上下文保留。目录来自当前 Host 实际注册的 provider/model，不消耗一次模型调用。若目录中的异常字段或飞书卡片格式错误导致卡片未被接受，机器人会立即改发完整纯文本目录，可继续使用 `/model use <provider/model>`，不会静默重试后进入死信。
 
-飞书的多个静态选择器本身彼此独立，所以插件在 provider/model 选择器上注册签名 callback，并通过长连接回调返回 `{ card: { type: "raw", data: ... } }` 更新同一张 schema 2.0 卡片。每次 `/model` 以及每次 provider/model 级联状态都会生成独立的表单控件命名空间，避免客户端把历史卡片中的临时选择复用到新卡片；目录按 operation 保存在 Delivery SQLite，Host 短暂重启后仍能恢复。最终提交时还会在 adapter 与 Delivery 两层拒绝不匹配的分组/模型，并校验目标模型支持的 effort。选择“默认（由模型决定）”不会固定 reasoning effort。`/model use <provider/model>` 仍可作为文字后备，`/model reset` 恢复部署默认模型，`/new` 轮换到新 session 但保留该聊天的模型与 effort。Web 会话里可调用 `assistant_health` 查看 `larkChannel.state`，正常应为 `connected`。
+飞书的多个静态选择器本身彼此独立，所以插件在 provider、model、effort 选择器上分别注册签名 callback，并通过长连接回调返回 `{ card: { type: "raw", data: ... } }` 更新同一张 schema 2.0 卡片。固定的官方 Node SDK 会忽略 `type=card` 长连接帧，transport 因此在其边界补充分片合并、callback 分发和 ACK 兼容桥。每次级联状态都带持久化 revision；旧卡片回调只会重绘当前权威状态，不会覆盖较新的选择。目录按 operation 保存在 Delivery SQLite，Host 短暂重启后仍能恢复。最终确认时还会在 adapter 与 Delivery 两层拒绝不匹配的分组/模型，并校验目标模型支持的 effort。选择“默认（由模型决定）”不会固定 reasoning effort。`/model use <provider/model>` 仍可作为文字后备，`/model reset` 恢复部署默认模型，`/new` 轮换到新 session 但保留该聊天的模型与 effort。Web 会话里可调用 `assistant_health` 查看 `larkChannel.state`，正常应为 `connected`。
 
 例如本机已安装并登录 `@dsh-enhanced/coding-subscription-provider` 的 Codex CLI 时：
 
@@ -161,7 +161,7 @@ LARK_APP_SECRET='...' dsh --profile web
 1. 在[飞书开放平台](https://open.feishu.cn/app)创建“企业自建应用”，在“凭证与基础信息”复制 `App ID` 和 `App Secret`。
 2. 在“添加应用能力”中开启“机器人”。
 3. 在“权限管理”中开通接收/发送单聊和群聊消息，并添加最小 reaction 写权限 `im:message.reactions:write_only`；如果控制台为接收事件提示额外权限，也一并按最小范围开通。
-4. 在“事件与回调/事件订阅”中选择“使用长连接接收事件”，添加 [`im.message.receive_v1`](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)。使用审批卡片或 `/model` 选择表单时，还要把“回调订阅方式”设为长连接并添加 `card.action.trigger`；普通消息 onboarding 不依赖这个可选回调。
+4. 在“事件与回调/事件订阅”中选择“使用长连接接收事件”，添加 [`im.message.receive_v1`](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)。使用审批卡片或 `/model` 选择卡片时，还要把“回调订阅方式”设为长连接并添加 `card.action.trigger`；普通消息 onboarding 不依赖这个可选回调。
 5. 创建并发布应用版本，把可用范围至少包含你自己；未发布或不在可用范围时，飞书客户端可能搜索不到机器人或不会投递事件。
 
 这一节只适用于手工输入 `--app-id` 的路径。一键选择/创建路径会在飞书确认页预置机器人、最小权限、消息事件与卡片回调；选择已有应用时这些配置只做增量添加，不会删除其现有权限。若企业策略要求管理员审批，仍需由企业管理员在飞书侧完成该审批。运行时不需要公网 callback URL；官方 Node SDK 的[长连接说明](https://github.com/larksuite/node-sdk/blob/main/README.zh.md#%E4%BD%BF%E7%94%A8%E9%95%BF%E9%93%BE%E6%A8%A1%E5%BC%8F%E5%A4%84%E7%90%86%E4%BA%8B%E4%BB%B6)也说明本地环境只需能访问公网。
@@ -197,12 +197,13 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 - 只有合法、非重复且状态为 `queued` 的入站消息会异步添加 `Get`；未授权、死信或 provider 重放不会重复 reaction。精确表情类型为大小写敏感的 `Get` 和 `DONE`。
 - Agent 的最终回复会显式携带原始飞书 `messageId`，先成功回复该消息，再添加 `DONE`。发送失败、无最终回复、任务失败或取消均不会添加 `DONE`；首版保留 `Get`，不会为了替换表情再申请 reaction 读取权限。
 - 执行进度使用飞书原生 `/open-apis/im/v1/message_cot` 展示：`showProgress: false` 可关闭。该接口不在固定版 Node SDK 的高层 API 中，因此作为可降级展示使用；创建或更新失败只记录 channel health，不会重跑任务或影响最终 Outbox 回复。
-- 进度映射只接受 Delivery 的强类型事件：开始、脱敏工具名、工具成功/失败、待办快照和终态；`assistant/chunk`（包括原始 reasoning）、工具 arguments、工具 output、系统提示和错误详情不会进入飞书载荷。
+- 进度映射只接受 Delivery 的强类型事件：开始、步骤说明、脱敏工具名、工具成功/失败、待办快照和终态；`assistant/chunk`（包括流式 `reasoning-delta`）、工具 arguments、工具 output、系统提示和错误详情不会进入飞书载荷。步骤说明优先取 `assistant/message` 已定稿的 `reasoning` 块（助手自己对该步的说明，不是流式片段）；**并非所有 provider 都会产出 reasoning**——订阅制 CLI 只声明 effort 能力、实际仅回传 `text`，ACP 的 thought 通道到 DSH reasoning 的映射尚未实现，因此 `step/start` 另外映射为中性阶段文案，保证这些 provider 也不会出现空面板。同一次运行的每条步骤/待办各用独立 `messageId` 追加，避免互相覆盖。
+- 回合失败时除 `RUN_ERROR` 外还会在面板正文写入一行「任务未完成」，附带上游错误码（如 `ACP_PROTOCOL_ERROR`）：provider 可能在产出任何内容前就失败，只发 `RUN_ERROR` 会让面板停在首行、看起来像卡住。只透传短错误码，provider 的原始错误消息可能包含 prompt 或上游载荷，不出边界。
 - `messageId` 是稳定 inbound event id；delivery 的 `(channel, account, eventId)` 唯一约束承担跨重启去重。
 - 单聊按 account/tenant/user/chat 绑定；群聊以根消息 id 作为显式 thread，避免不同发言人或话题串线。
 - plain text 使用飞书文本消息；Markdown 使用 schema 2.0 卡片。请求携带由 delivery idempotency key 单向哈希得到的 provider UUID。
 - `approval` intent 使用 schema 2.0 双按钮卡片。每个按钮值由 app secret 做 HMAC 签名并绑定 operation、proposal/version、expiry、binding、decision 与 chat；回调重新取 provider actor/chat 后交给 Delivery/Policy，篡改、过期、跨 chat 和重复决策均失败关闭。
-- `model-picker` intent 使用 schema 2.0 表单卡片和三个命名的 `select_static`。provider/model 变化会通过 `card.action.trigger` 返回 `{ card: { type: 'raw', data: card } }` 形式的过滤后同卡更新；模型列表只来自当前 provider，effort 列表只来自当前模型。表单和控件名由签名 token + 当前 route 派生，隔离不同操作与级联状态。卡片设置 `update_multi: true`；提交按钮一次带回同一状态命名空间下的全部 `form_value`。签名绑定 operation、expiry、binding 与 chat，adapter 先拒绝过期状态和 provider/model 错配，Delivery 再核对 owner/Policy 与实时模型能力，成功选择写入 SQLite 并通过持久 Outbox 回复确认；卡片 4xx 会自动降级为文字目录。
+- `model-picker` intent 使用 schema 2.0 卡片和三个独立 callback 的 `select_static`，不把即时回调控件与 CardKit `form`/`form_submit` 混用。provider、model、effort 每次变化都会通过 `card.action.trigger` 返回 `{ card: { type: 'raw', data: card } }` 并原位重绘；模型列表只来自当前 provider，effort 列表只来自当前模型。v3 签名 token 绑定 operation、expiry、binding、chat、动作、revision 以及当前 provider/model/effort，普通 callback 确认按钮直接提交该签名状态，不依赖 `form_value`；adapter 先拒绝篡改、过期、跨 chat 和级联错配，Delivery 再用持久 CAS 拒绝旧 revision，并核对 owner/Policy 与实时模型能力。确认操作先持久领取再快速响应飞书，最终选择、结算结果和 Outbox 回复在同一 SQLite 事务中提交；卡片 4xx 会自动降级为文字目录。三个下拉的当前项通过 `initial_index` 定位——飞书的 `initial_option` 按选项展示文本而非回传 `value` 匹配，直接写入 route 形态的 `value` 会静默回落到第一个选项；`initial_option` 仅在该文本唯一标识一个选项时附带，当前项不在选项列表内时两者都不下发，不伪造预选。卡片版式按飞书官方卡片风格规范组织：header 用 `title` + `subtitle` + `icon` 承载「这是什么 / 当前模型」，三个下拉各自放进带描边的 `interactive_container` 分块（而不是平铺 markdown 标签），每块含一行灰色 `notation` 说明，末尾只保留一个 `primary` 按钮作为唯一焦点。升级后应重新发送 `/model`，旧 v1/v2 卡片不会继续生效。
 - 权限/格式错误是确定未发送；限流和未连接可以安全重试；网络超时或未知 SDK 错误进入 `unknown_after_send`，不会盲目重发。
 - 当前飞书 API 没有为该发送 UUID 暴露可靠查询/对账接口，因此 adapter 明确声明 `reconcileUnknownSend: false`、无 delivered/read receipt。
 
@@ -216,7 +217,7 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 - **子进程：**运行时只使用 credential provider 的固定无 shell 命令。setup wizard 在 macOS 调用 `/usr/bin/security` 与 launchd，在 Linux 调用 `/usr/bin/secret-tool`、`/usr/bin/systemd-ask-password` 与 `systemctl --user`，Windows 调用固定 PowerShell DPAPI 命令与 Task Scheduler；自动生成的 Secret 只通过标准输入传递且缓冲区随后清零，不作为 argv 传递。所有平台都会调用 `dsh --dump-config` 验证 profile；常驻配置只包含解析后的程序路径和最小环境，不复制 ambient token/password。
 - **浏览器：**setup wizard 会输出飞书官方的短期设备授权链接与二维码，但不会自动操控浏览器；由用户在飞书中选择已有应用或创建新应用，并查看、确认权限增量。
 - **消息数据：**标准化文本、provider message id、chat/user/thread id，以及最多 10 个受限附件描述符会进入 delivery SQLite；raw 事件、token 和下载 URL 不保存，provider file key 只作为隔离账本中的不可信引用，不进入模型正文。
-- **进度数据：**仅发送有长度上限的工具名、显式待办文本和固定状态文案；不发送原始思维链、工具参数/结果、凭据或内部错误详情。原生进度 API 与 reaction API 失败均按展示降级处理。
+- **进度数据：**仅发送有长度上限的工具名、已定稿的步骤说明、显式待办文本和固定状态文案；不发送流式思维链片段、工具参数/结果、凭据或内部错误详情。原生进度 API 与 reaction API 失败均按展示降级处理。
 - **群消息：**默认必须直接提及机器人；`@all` 不等于提及机器人。最终授权始终由 delivery/policy 决定。
 
 ## 当前边界

@@ -43,6 +43,11 @@ export interface ModelRouteRef {
   reasoningEffort?: string
 }
 
+/** The authoritative, durable selection shown by one model-picker operation. */
+export interface ModelPickerState extends ModelRouteRef {
+  revision: number
+}
+
 /** A durable provider/model override scoped to one canonical external conversation. */
 export interface ConversationModelSelection extends ModelRouteRef {
   updatedAt: number
@@ -210,14 +215,26 @@ export type AdapterReconcileResult =
   | { outcome: 'not-sent' }
   | { outcome: 'unknown' }
 
-/** Safe, user-visible execution progress. It intentionally has no raw reasoning, tool arguments, or tool output. */
+/**
+ * Safe, user-visible execution progress. It intentionally has no tool arguments or tool output.
+ *
+ * `step` carries the assistant's own already-published summary of what it is doing — the durable
+ * `reasoning` block of an `assistant/message`, or the neutral phase label of a step for providers
+ * that never emit reasoning at all. Turns that call no tool and write no todo would otherwise leave
+ * the channel's progress surface with nothing between `started` and the terminal update.
+ *
+ * `failed` carries the short failure *code* only. The human-readable provider message may quote the
+ * prompt or upstream payloads, so it stays behind this boundary; the code is what makes a failed
+ * turn legible instead of leaving the surface stuck on its opening line.
+ */
 export type DeliveryProgressUpdate =
   | { kind: 'started' }
+  | { kind: 'step'; text: string }
   | { kind: 'tool-started'; callId: string; toolName: string }
   | { kind: 'tool-finished'; callId: string; failed: boolean }
   | { kind: 'todos'; todos: readonly DeliveryProgressTodo[] }
   | { kind: 'completed' }
-  | { kind: 'failed' }
+  | { kind: 'failed'; code?: string }
 
 export interface DeliveryProgressTodo {
   content: string

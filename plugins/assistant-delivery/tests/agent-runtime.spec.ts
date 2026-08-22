@@ -15,8 +15,8 @@ import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
-import { deliveryProgressFromSessionEvent } from '../src/agent-runtime.ts'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src/agent-runtime.ts'
 import { AssistantDeliveryService } from '../src/service.ts'
 import type { DeliveryAdapter, DeliveryProgressIntent, InboundEnvelope, OutboundIntent } from '../src/types.ts'
 
@@ -126,6 +126,13 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
 }
 
 describe('real rc.8 delivery Agent runtime', () => {
+  test('namespaces model-picker operations by conversation as well as provider event id', () => {
+    const first = modelPickerOperationId(conversation, 'same-event')
+    expect(modelPickerOperationId(conversation, 'same-event')).toBe(first)
+    expect(modelPickerOperationId({ ...conversation, account: 'bot-2' }, 'same-event')).not.toBe(first)
+    expect(modelPickerOperationId({ ...conversation, chat: 'oc_other' }, 'same-event')).not.toBe(first)
+  })
+
   test('persists one owner session, resumes across turns/restart, and deduplicates provider events', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-agent-'))
     roots.push(root)
@@ -142,7 +149,10 @@ describe('real rc.8 delivery Agent runtime', () => {
       account: 'bot-1', eventId: 'evt-1', trust: 'untrusted' })
     expect(first.sends.map(value => value.text)).toEqual(['reply-1'])
     expect(first.sends[0]?.replyToEventId).toBe('evt-1')
-    expect(first.progresses.map(value => value.update.kind)).toEqual(['started', 'completed'])
+    // The mock provider emits no reasoning, so the phase label is what keeps the surface non-empty.
+    expect(first.progresses.map(value => value.update.kind)).toEqual(['started', 'step', 'completed'])
+    expect(first.progresses.filter(value => value.update.kind === 'step')
+      .map(value => value.update.kind === 'step' ? value.update.text : '')).toEqual(['正在处理请求…'])
     expect(first.progresses.every(value => value.eventId === 'evt-1')).toBe(true)
 
     const secondMessage = message('evt-2', 'second')
@@ -201,6 +211,45 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(serialized).not.toContain('private chain of thought')
     expect(serialized).not.toContain('must-not-leak')
     expect(serialized).not.toContain('sensitive tool result')
+  })
+
+  test('turns the settled reasoning of an assistant message into one step update', () => {
+    const event = (value: object) => value as SessionEvent
+    // Providers differ: some emit no reasoning at all, so a step phase label always lands first.
+    expect(deliveryProgressFromSessionEvent(event({
+      type: 'step/start', data: { turn: 1, step: 1 },
+    }))).toEqual({ kind: 'step', text: '正在处理请求…' })
+    expect(deliveryProgressFromSessionEvent(event({
+      type: 'step/start', data: { turn: 1, step: 3 },
+    }))).toEqual({ kind: 'step', text: '正在继续处理（第 3 步）…' })
+    // The durable reasoning block is the assistant's own settled summary, so a turn with no tool
+    // call and no todo still reports what it did instead of leaving the panel empty.
+    expect(deliveryProgressFromSessionEvent(event({
+      type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [
+        { type: 'reasoning', text: '  先确认当前目录  ' },
+        { type: 'reasoning', text: '再核对分组顺序' },
+        { type: 'text', text: '这是最终回复，不应出现在进度里' },
+      ] } },
+    }))).toEqual({ kind: 'step', text: '先确认当前目录\n再核对分组顺序' })
+    // A reply-only message contributes no step, and the visible answer never leaks into progress.
+    const replyOnly = deliveryProgressFromSessionEvent(event({
+      type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [
+        { type: 'text', text: '这是最终回复，不应出现在进度里' },
+      ] } },
+    }))
+    expect(replyOnly).toBeUndefined()
+    expect(deliveryProgressFromSessionEvent(event({
+      type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [
+        { type: 'reasoning', text: '   ' },
+      ] } },
+    }))).toBeUndefined()
+    // Streaming deltas stay private; only the settled block is surfaced.
+    expect(JSON.stringify(deliveryProgressFromSessionEvent(event({
+      type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [
+        { type: 'reasoning', text: '可见的步骤说明' },
+        { type: 'text', text: '最终回复文本' },
+      ] } },
+    })))).not.toContain('最终回复文本')
   })
 
   test('/new rotates generation without deleting the persisted old session', async () => {
@@ -358,7 +407,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     await drive(fixture.service)
     const picker = fixture.sends.at(-1)!
 
-    await expect(fixture.service.settleModelSelection({
+    const mismatchCallback = {
       operationId: picker.modelPicker!.operationId,
       callbackEventId: 'card-callback-mismatch',
       callbackChatId: conversation.chat,
@@ -368,13 +417,74 @@ describe('real rc.8 delivery Agent runtime', () => {
       modelProvider: 'mock',
       model: 'delivery-model',
       reasoningEffort: 'high',
-    })).resolves.toEqual({ status: 'rejected', reason: 'provider-model-mismatch' })
+      expectedRevision: 0,
+    } as const
+    expect(fixture.service.settleModelSelection(mismatchCallback)).toEqual({ status: 'pending' })
+    await fixture.service.whenIdle()
+    expect(fixture.service.settleModelSelection(mismatchCallback))
+      .toEqual({ status: 'rejected', reason: 'provider-model-mismatch' })
     await drive(fixture.service)
     expect(fixture.sends.at(-1)?.text).toContain('分组 alternate 与模型 mock/delivery-model 不匹配')
+    expect(fixture.sends.filter(send => send.text.includes('分组 alternate 与模型'))).toHaveLength(1)
 
-    await expect(fixture.service.settleModelSelection({
-      operationId: picker.modelPicker!.operationId,
+    await fixture.service.acceptInbound(message('evt-picker-valid', '/model', 'command'))
+    await drive(fixture.service)
+    const validPicker = fixture.sends.at(-1)!
+
+    const selectionCallback = {
+      operationId: validPicker.modelPicker!.operationId,
       callbackEventId: 'card-callback-1',
+      callbackChatId: conversation.chat,
+      bindingId: validPicker.bindingId,
+      principal,
+      provider: 'alternate',
+      modelProvider: 'alternate',
+      model: 'precise',
+      reasoningEffort: 'high',
+      expectedRevision: 0,
+    } as const
+    expect(fixture.service.settleModelSelection(selectionCallback)).toEqual({ status: 'pending' })
+    await fixture.service.whenIdle()
+    const selected = fixture.service.settleModelSelection(selectionCallback)
+    expect(selected).toMatchObject({ status: 'selected', selection: {
+      provider: 'alternate', model: 'precise', reasoningEffort: 'high',
+    } })
+    expect(fixture.service.settleModelSelection(selectionCallback)).toEqual(selected)
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('已切换到 alternate/precise，effort：high')
+    expect(fixture.sends.filter(send => send.text.includes('已切换到 alternate/precise'))).toHaveLength(1)
+
+    await fixture.service.acceptInbound(message('evt-after-card', 'use the card selection'))
+    await drive(fixture.service)
+    expect(fixture.alternate.requests.at(-1)).toMatchObject({
+      provider: 'alternate', model: 'precise', reasoningEffort: 'high',
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('rechecks policy after live model resolution before committing a card selection', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-model-card-policy-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-picker-policy', '/model', 'command'))
+    await drive(fixture.service)
+    const picker = fixture.sends.at(-1)!
+
+    const originalResolve = fixture.alternate.resolveModel.bind(fixture.alternate)
+    let releaseResolve!: () => void
+    let markResolveStarted!: () => void
+    const resolveGate = new Promise<void>(resolve => { releaseResolve = resolve })
+    const resolveStarted = new Promise<void>(resolve => { markResolveStarted = resolve })
+    fixture.alternate.resolveModel = async (provider, model) => {
+      markResolveStarted()
+      await resolveGate
+      return await originalResolve(provider, model)
+    }
+    const selectionCallback = {
+      operationId: picker.modelPicker!.operationId,
+      callbackEventId: 'card-callback-policy',
       callbackChatId: conversation.chat,
       bindingId: picker.bindingId,
       principal,
@@ -382,17 +492,58 @@ describe('real rc.8 delivery Agent runtime', () => {
       modelProvider: 'alternate',
       model: 'precise',
       reasoningEffort: 'high',
-    })).resolves.toMatchObject({ status: 'selected', selection: {
-      provider: 'alternate', model: 'precise', reasoningEffort: 'high',
-    } })
-    await drive(fixture.service)
-    expect(fixture.sends.at(-1)?.text).toContain('已切换到 alternate/precise，effort：high')
+      expectedRevision: 0,
+    } as const
+    const sentBeforeConfirmation = fixture.sends.length
+    const authorize = vi.spyOn(fixture.ctx.assistantPolicy, 'authorize')
+    expect(fixture.service.settleModelSelection(selectionCallback)).toEqual({ status: 'pending' })
+    await resolveStarted
+    fixture.ctx.assistantPolicy.setEmergencyStop({ enabled: true, actor: 'test', reason: 'test revocation race' })
+    releaseResolve()
+    await fixture.service.whenIdle()
+    expect(authorize).toHaveBeenCalledOnce()
+    fixture.ctx.assistantPolicy.setEmergencyStop({ enabled: false, actor: 'test', reason: 'test complete' })
 
-    await fixture.service.acceptInbound(message('evt-after-card', 'use the card selection'))
+    expect(fixture.service.settleModelSelection(selectionCallback))
+      .toEqual({ status: 'rejected', reason: 'authorization-revoked' })
     await drive(fixture.service)
-    expect(fixture.alternate.requests.at(-1)).toMatchObject({
-      provider: 'alternate', model: 'precise', reasoningEffort: 'high',
-    })
+    expect(fixture.sends).toHaveLength(sentBeforeConfirmation)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('bounds a model resolver that ignores cancellation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-model-card-timeout-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-picker-timeout', '/model', 'command'))
+    await drive(fixture.service)
+    const picker = fixture.sends.at(-1)!
+    fixture.alternate.resolveModel = async () => await new Promise<never>(() => {})
+    const selectionCallback = {
+      operationId: picker.modelPicker!.operationId,
+      callbackEventId: 'card-callback-timeout',
+      callbackChatId: conversation.chat,
+      bindingId: picker.bindingId,
+      principal,
+      provider: 'alternate',
+      modelProvider: 'alternate',
+      model: 'precise',
+      reasoningEffort: 'high',
+      expectedRevision: 0,
+    } as const
+
+    vi.useFakeTimers()
+    try {
+      expect(fixture.service.settleModelSelection(selectionCallback)).toEqual({ status: 'pending' })
+      await vi.advanceTimersByTimeAsync(30_001)
+      await fixture.service.whenIdle()
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(fixture.service.settleModelSelection(selectionCallback))
+      .toEqual({ status: 'rejected', reason: 'model-unavailable' })
     await fixture.ctx.fiber.restart()
   })
 })

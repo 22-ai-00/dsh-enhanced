@@ -37,11 +37,12 @@ interface DshDeliveryRuntimeOptions {
   model: string
   maxOutputTokens: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
-  setModelSelection(
-    conversation: ConversationRef,
-    route: ModelRouteRef,
-  ): ConversationModelSelection
-  clearModelSelection(conversation: ConversationRef): boolean
+  beginModelCommand(conversation: ConversationRef): number
+  commitModelCommand(input: {
+    conversation: ConversationRef
+    expectedEpoch: number
+    route?: ModelRouteRef
+  }): { applied: false } | { applied: true; selection?: ConversationModelSelection }
   modelPickerTtlMs: number
   progress(
     binding: Readonly<ConversationBinding>,
@@ -70,8 +71,30 @@ function boundedProgressText(value: string): string {
 /**
  * Convert one durable session fact into a deliberately narrow, user-visible progress update.
  * Raw reasoning chunks, tool arguments, result content, and error details never cross this boundary.
+ *
+ * The `reasoning` block of a durable `assistant/message` is the assistant's own settled summary of
+ * the step, not a streaming fragment, so it is the one reasoning form safe to surface. Only some
+ * providers emit it at all: subscription CLIs declare an effort capability but still return text
+ * only, and the ACP thought channel is not mapped to DSH reasoning yet. `step/start` therefore also
+ * yields a neutral phase label, so a turn reports progress even on providers that never reason
+ * out loud.
  */
 export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryProgressUpdate | undefined {
+  if (event.type === 'step/start') {
+    const step = Number(event.data.step)
+    return {
+      kind: 'step',
+      text: Number.isSafeInteger(step) && step > 1 ? `正在继续处理（第 ${step} 步）…` : '正在处理请求…',
+    }
+  }
+  if (event.type === 'assistant/message') {
+    const reasoning = event.data.message.content
+      .filter(value => value.type === 'reasoning')
+      .map(value => (value.type === 'reasoning' ? value.text.trim() : ''))
+      .filter(text => text !== '')
+      .join('\n')
+    return reasoning === '' ? undefined : { kind: 'step', text: boundedProgressText(reasoning) }
+  }
   if (event.type === 'tool/call') {
     return {
       kind: 'tool-started',
@@ -120,6 +143,18 @@ function displayName(value: string): string {
   return [...value].slice(0, 120).join('')
 }
 
+export function modelPickerOperationId(conversation: Readonly<ConversationRef>, eventId: string): string {
+  return `model-picker-${createHash('sha256').update(JSON.stringify({
+    channel: conversation.channel,
+    account: conversation.account,
+    tenant: conversation.tenant,
+    kind: conversation.kind,
+    chat: conversation.chat,
+    thread: conversation.thread ?? null,
+    eventId,
+  })).digest('hex').slice(0, 32)}`
+}
+
 function toModelRoute(route: ModelRouteRef): ModelRouteRef {
   return {
     provider: route.provider,
@@ -140,6 +175,7 @@ function agentSelection(route: ModelRouteRef) {
 
 async function modelCatalog(
   llm: LlmRuntime,
+  conversation: ConversationRef,
   current: ModelRouteRef,
   isDefault: boolean,
   eventId: string,
@@ -212,7 +248,7 @@ async function modelCatalog(
     text: `当前模型：${routeLabel(current)}${isDefault ? '（默认）' : ''}`,
     format: 'model-picker',
     modelPicker: {
-      operationId: `model-picker-${createHash('sha256').update(eventId).digest('hex').slice(0, 32)}`,
+      operationId: modelPickerOperationId(conversation, eventId),
       expiresAt,
       current,
       providers: [...visibleProviders.values()],
@@ -237,6 +273,7 @@ async function runModelCommand(
   if (argument === '') {
     return modelCatalog(
       llm,
+      conversation,
       route,
       current === undefined,
       eventId,
@@ -245,7 +282,10 @@ async function runModelCommand(
     )
   }
   if (argument === 'reset') {
-    const changed = options.clearModelSelection(conversation)
+    const epoch = options.beginModelCommand(conversation)
+    const committed = options.commitModelCommand({ conversation, expectedEpoch: epoch })
+    if (!committed.applied) return { text: '模型选择已被更晚的操作取代，请重新发送 /model。' }
+    const changed = current !== undefined
     return { text: changed
       ? `已恢复默认模型 ${routeLabel(defaults)}。\n下一条消息起生效，上下文保留。`
       : `本会话已在使用默认模型 ${routeLabel(defaults)}。` }
@@ -259,6 +299,7 @@ async function runModelCommand(
   if (!llm.listProviders().some(provider => provider.id === selected.provider)) {
     return { text: `没有注册 provider “${selected.provider}”。发送 /model 查看当前可用模型。` }
   }
+  const epoch = options.beginModelCommand(conversation)
   try {
     await llm.resolveModelInfo(selected.provider, selected.model, signal)
   } catch (error) {
@@ -271,7 +312,8 @@ async function runModelCommand(
   }
   const changed = current?.provider !== selected.provider || current.model !== selected.model
   if (!changed && current.reasoningEffort === undefined) return { text: `本会话已在使用 ${routeLabel(selected)}。` }
-  options.setModelSelection(conversation, selected)
+  const committed = options.commitModelCommand({ conversation, expectedEpoch: epoch, route: selected })
+  if (!committed.applied) return { text: '模型选择已被更晚的操作取代，请重新发送 /model。' }
   return { text: `已切换到 ${routeLabel(selected)}。\n下一条消息起生效，上下文保留。` }
 }
 
@@ -290,9 +332,13 @@ function sessionId(conversation: InboundEnvelope['conversation'], generation: nu
   return SessionId(`delivery-${hash}-g${generation}`)
 }
 
-function finalAssistant(events: readonly SessionEvent[], from: number): { text: string; completed: boolean } {
+function finalAssistant(
+  events: readonly SessionEvent[],
+  from: number,
+): { text: string; completed: boolean; failureCode?: string } {
   let text = ''
   let completed = false
+  let failureCode: string | undefined
   for (const event of events.slice(from)) {
     if (event.type === 'assistant/message') {
       text = event.data.message.content.filter(block => block.type === 'text')
@@ -302,9 +348,14 @@ function finalAssistant(events: readonly SessionEvent[], from: number): { text: 
       const reason = event.data.reason
       completed = typeof reason === 'object' && reason !== null && 'kind' in reason
         && ['completed', 'max-tokens'].includes((reason as { kind: string }).kind)
+      // Keep only the short upstream code: the provider message can quote the prompt or payload.
+      const error = typeof reason === 'object' && reason !== null && 'error' in reason
+        ? (reason as { error?: { code?: unknown } }).error
+        : undefined
+      failureCode = completed || typeof error?.code !== 'string' ? undefined : error.code
     }
   }
-  return { text, completed }
+  return { text, completed, ...(failureCode === undefined ? {} : { failureCode }) }
 }
 
 export class DshDeliveryRuntime implements DeliveryInboundRuntime {
@@ -433,7 +484,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       const output = finalAssistant(agent.session.events, from)
       await sessions.flush(agent.session)
       if (!output.completed) {
-        publishProgress({ kind: 'failed' })
+        publishProgress({ kind: 'failed', ...(output.failureCode === undefined ? {} : { code: output.failureCode }) })
         await progressQueue
         return { outcome: 'not-processed', failureCode: 'agent-turn-incomplete', retryable: false }
       }
