@@ -21,6 +21,8 @@ import type {
   InboundEnvelope,
   InboxRecord,
   ModelPickerIntent,
+  ModelPickerState,
+  ModelRouteRef,
   OutboxRecord,
   PairingChallenge,
 } from './types.js'
@@ -106,6 +108,47 @@ function externalId(principal: ExternalPrincipalKey): string {
   return `${principal.channel}/${principal.account}/${principal.tenant}/${principal.user}`
 }
 
+function pickerIncludesRoute(picker: Readonly<ModelPickerIntent>, route: Readonly<ModelRouteRef>): boolean {
+  const model = picker.models.find(candidate => candidate.provider === route.provider && candidate.id === route.model)
+  return model !== undefined && (route.reasoningEffort === undefined || model.effortIds.includes(route.reasoningEffort))
+}
+
+type ModelSelectionResult =
+  | { status: 'pending' }
+  | { status: 'rejected'; reason: 'authorization-revoked' | 'invalid-effort' | 'model-unavailable' | 'provider-model-mismatch' | 'provider-unavailable' | 'selection-superseded' }
+  | { status: 'selected'; selection: ModelRouteRef }
+
+interface ModelSelectionPayload {
+  callbackEventId: string
+  callbackChatId: string
+  bindingId: string
+  principal: ExternalPrincipalKey
+  provider: string
+  modelProvider: string
+  model: string
+  reasoningEffort: string | null
+  expectedRevision: number
+}
+
+function isModelSelectionPayload(value: unknown): value is ModelSelectionPayload {
+  if (value === null || typeof value !== 'object') return false
+  const payload = value as Partial<ModelSelectionPayload>
+  const principal = payload.principal as Partial<ExternalPrincipalKey> | undefined
+  return typeof payload.callbackEventId === 'string'
+    && typeof payload.callbackChatId === 'string'
+    && typeof payload.bindingId === 'string'
+    && principal !== undefined
+    && typeof principal.channel === 'string'
+    && typeof principal.account === 'string'
+    && typeof principal.tenant === 'string'
+    && typeof principal.user === 'string'
+    && typeof payload.provider === 'string'
+    && typeof payload.modelProvider === 'string'
+    && typeof payload.model === 'string'
+    && (payload.reasoningEffort === null || typeof payload.reasoningEffort === 'string')
+    && Number.isSafeInteger(payload.expectedRevision)
+}
+
 export class AssistantDeliveryService extends Service {
   static Config = configSchema
 
@@ -117,6 +160,8 @@ export class AssistantDeliveryService extends Service {
   private readonly config: Required<Config>
   private readonly ownerId = `assistant-delivery-${randomUUID()}`
   private readonly bindingFlights = new Map<string, Promise<ConversationBinding>>()
+  private modelSelectionFlight: Promise<void> | undefined
+  private modelSelectionRetryTimer: ReturnType<typeof setTimeout> | undefined
   private runtime: DeliveryInboundRuntime | undefined
   private timer: ReturnType<typeof setInterval> | undefined
   private active = true
@@ -152,15 +197,14 @@ export class AssistantDeliveryService extends Service {
     this.inbound = new InboundCoordinator({ store: this.deliveryStore, processor: () => this.runtime,
       ownerId: this.ownerId, leaseMs: config.leaseMs, maxAttempts: config.maxAttempts,
       maxConcurrency: config.maxConcurrency, retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs })
-    ctx.inject(['agents', 'sessions', 'llm'], runtimeCtx => this.registerInboundRuntime(new DshDeliveryRuntime(
-      runtimeCtx,
-      policy,
-      { workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
+    ctx.inject(['agents', 'sessions', 'llm'], runtimeCtx => {
+      const unregister = this.registerInboundRuntime(new DshDeliveryRuntime(runtimeCtx, policy, {
+        workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
         modelPickerTtlMs: config.modelPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
-        setModelSelection: (conversation, route) => this.deliveryStore.setModelSelection(conversation, route),
-        clearModelSelection: conversation => this.deliveryStore.clearModelSelection(conversation),
+        beginModelCommand: conversation => this.deliveryStore.beginModelCommand(conversation),
+        commitModelCommand: input => this.deliveryStore.commitModelCommand(input),
         progress: async (binding, eventId, update) => {
           const adapter = this.registry.get(binding.conversation.channel, binding.conversation.account)
           await adapter?.progress?.({
@@ -184,8 +228,10 @@ export class AssistantDeliveryService extends Service {
           ...(reply.format === undefined ? {} : { format: reply.format }),
           ...(reply.modelPicker === undefined ? {} : { modelPicker: reply.modelPicker }),
         }) },
-      },
-    )))
+      }))
+      void this.drainModelSelectionSettlements()
+      return unregister
+    })
     ctx.inject(['tools'], toolsCtx => registerDeliveryTools(toolsCtx, this))
     if (config.schedulerEnabled) this.start()
     ctx.effect(() => async () => {
@@ -263,7 +309,7 @@ export class AssistantDeliveryService extends Service {
       payloadHash: settlement.payloadHash, result }) as ReturnType<AssistantPolicyService['decideProposal']>
   }
 
-  async settleModelSelection(input: {
+  settleModelSelection(input: {
     operationId: string
     callbackEventId: string
     callbackChatId: string
@@ -273,10 +319,8 @@ export class AssistantDeliveryService extends Service {
     modelProvider: string
     model: string
     reasoningEffort?: string
-  }): Promise<
-    | { status: 'rejected'; reason: 'invalid-effort' | 'model-unavailable' | 'provider-model-mismatch' | 'provider-unavailable' }
-    | { status: 'selected'; selection: ReturnType<DeliveryStore['setModelSelection']> }
-  > {
+    expectedRevision: number
+  }): ModelSelectionResult {
     this.assertActive()
     const binding = this.deliveryStore.getBinding(input.bindingId)
     const current = this.deliveryStore.getPrincipal(input.principal)
@@ -285,48 +329,71 @@ export class AssistantDeliveryService extends Service {
       || JSON.stringify(binding.principal) !== JSON.stringify(current.principal)) {
       throw new AssistantDeliveryError('missing-binding', 'model callback principal or chat does not own the active binding')
     }
+    const picker = this.deliveryStore.getModelPicker(input.operationId, input.bindingId)
+    const expected: ModelPickerState = {
+      revision: input.expectedRevision,
+      provider: input.modelProvider,
+      model: input.model,
+      ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
+    }
+    if (picker === undefined || !pickerIncludesRoute(picker, expected)) {
+      throw new AssistantDeliveryError('missing-binding', 'model picker confirmation is unavailable or invalid')
+    }
     const authorization = this.policy.authorize({ subject: { kind: 'external', id: externalId(current.principal) },
       action: 'ingest', resource: { kind: 'message', id: `model-selection:${binding.id}` },
       context: { initiator: 'external' } },
     { idempotencyKey: `model-selection:${input.operationId}:${input.callbackEventId}` })
     if (authorization.effect !== 'allow') throw policyDenied(authorization)
-    const enqueueReply = (text: string) => this.deliveryStore.enqueue({
-      idempotencyKey: `model-selection:${input.callbackEventId}:reply`,
-      bindingId: binding.id,
-      target: { conversation: binding.conversation, principal: binding.principal },
-      text,
-      format: 'plain',
-    })
-    if (input.provider !== input.modelProvider) {
-      enqueueReply(`分组 ${input.provider} 与模型 ${input.modelProvider}/${input.model} 不匹配，请重新发送 /model。`)
-      return { status: 'rejected', reason: 'provider-model-mismatch' }
-    }
-    const llm = this.ctx.get('llm')
-    if (llm === undefined || !llm.listProviders().some(provider => provider.id === input.provider)) {
-      enqueueReply(`模型分组 ${input.provider} 当前不可用，请重新发送 /model。`)
-      return { status: 'rejected', reason: 'provider-unavailable' }
-    }
-    let resolved: Awaited<ReturnType<typeof llm.resolveModelInfo>>
-    try {
-      resolved = await llm.resolveModelInfo(input.provider, input.model)
-    } catch {
-      enqueueReply(`模型 ${input.provider}/${input.model} 当前不可用，请重新发送 /model。`)
-      return { status: 'rejected', reason: 'model-unavailable' }
-    }
-    if (input.reasoningEffort !== undefined
-      && !resolved.reasoning?.efforts.some(effort => String(effort.id) === input.reasoningEffort)) {
-      enqueueReply(`模型 ${input.provider}/${input.model} 不支持 effort “${input.reasoningEffort}”，请重新发送 /model。`)
-      return { status: 'rejected', reason: 'invalid-effort' }
-    }
-    const selection = this.deliveryStore.setModelSelection(binding.conversation, {
+    const payload: ModelSelectionPayload = {
+      callbackEventId: input.callbackEventId,
+      callbackChatId: input.callbackChatId,
+      bindingId: input.bindingId,
+      principal: current.principal,
       provider: input.provider,
+      modelProvider: input.modelProvider,
       model: input.model,
-      ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
+      reasoningEffort: input.reasoningEffort ?? null,
+      expectedRevision: input.expectedRevision,
+    }
+    const settlement = this.deliveryStore.beginModelSelectionSettlement({
+      operationId: input.operationId,
+      bindingId: input.bindingId,
+      expected,
+      payload,
+      createIfMissing: Date.now() < picker.expiresAt,
     })
-    enqueueReply(`已切换到 ${input.provider}/${input.model}${input.reasoningEffort === undefined
-      ? '，effort：默认'
-      : `，effort：${input.reasoningEffort}`}。下一条消息起生效，上下文保留。`)
-    return { status: 'selected', selection }
+    if (settlement.result !== undefined) return settlement.result as ModelSelectionResult
+    void this.drainModelSelectionSettlements()
+    return { status: 'pending' }
+  }
+
+  advanceModelPickerForCallback(input: {
+    operationId: string
+    callbackChatId: string
+    bindingId: string
+    principal: ExternalPrincipalKey
+    expected: ModelPickerState
+    next: ModelRouteRef
+  }): { applied: boolean; state: ModelPickerState } {
+    this.assertActive()
+    const binding = this.deliveryStore.getBinding(input.bindingId)
+    const current = this.deliveryStore.getPrincipal(input.principal)
+    if (binding?.status !== 'active' || current?.status !== 'active'
+      || binding.conversation.chat !== input.callbackChatId
+      || JSON.stringify(binding.principal) !== JSON.stringify(current.principal)) {
+      throw new AssistantDeliveryError('missing-binding', 'model callback principal or chat does not own the active binding')
+    }
+    const picker = this.deliveryStore.getModelPicker(input.operationId, input.bindingId)
+    if (picker === undefined || Date.now() >= picker.expiresAt
+      || !pickerIncludesRoute(picker, input.expected) || !pickerIncludesRoute(picker, input.next)) {
+      throw new AssistantDeliveryError('missing-binding', 'model picker catalog or route is unavailable')
+    }
+    return this.deliveryStore.advanceModelPicker({
+      operationId: input.operationId,
+      bindingId: input.bindingId,
+      expected: input.expected,
+      next: input.next,
+    })
   }
 
   getModelPickerForCallback(input: {
@@ -343,7 +410,8 @@ export class AssistantDeliveryService extends Service {
       || JSON.stringify(binding.principal) !== JSON.stringify(current.principal)) {
       throw new AssistantDeliveryError('missing-binding', 'model callback principal or chat does not own the active binding')
     }
-    return this.deliveryStore.getModelPicker(input.operationId, input.bindingId)
+    const picker = this.deliveryStore.getModelPicker(input.operationId, input.bindingId)
+    return picker === undefined || Date.now() >= picker.expiresAt ? undefined : picker
   }
 
   resolveDeadLetter(input: {
@@ -539,12 +607,13 @@ export class AssistantDeliveryService extends Service {
   async tick(): Promise<void> {
     this.assertActive()
     await this.inbound.tick()
+    await this.drainModelSelectionSettlements()
     await this.outbound.tick()
   }
 
   async whenIdle(): Promise<void> {
     this.assertActive()
-    await Promise.all([this.inbound.whenIdle(), this.outbound.whenIdle()])
+    await Promise.all([this.inbound.whenIdle(), this.outbound.whenIdle(), this.modelSelectionFlight])
   }
 
   start(): void {
@@ -599,8 +668,188 @@ export class AssistantDeliveryService extends Service {
 
   private async stopInternal(): Promise<void> {
     if (this.timer !== undefined) clearInterval(this.timer)
+    if (this.modelSelectionRetryTimer !== undefined) clearTimeout(this.modelSelectionRetryTimer)
     this.timer = undefined
-    await Promise.all([this.inbound.stop(), this.outbound.stop()])
+    this.modelSelectionRetryTimer = undefined
+    await Promise.all([this.inbound.stop(), this.outbound.stop(), this.modelSelectionFlight])
+  }
+
+  private drainModelSelectionSettlements(): Promise<void> {
+    if (this.modelSelectionRetryTimer !== undefined) {
+      clearTimeout(this.modelSelectionRetryTimer)
+      this.modelSelectionRetryTimer = undefined
+    }
+    if (this.modelSelectionFlight !== undefined) {
+      return this.modelSelectionFlight.then(() => this.drainModelSelectionSettlements())
+    }
+    const flight = this.runModelSelectionSettlements()
+      .finally(() => { if (this.modelSelectionFlight === flight) this.modelSelectionFlight = undefined })
+    this.modelSelectionFlight = flight
+    return flight
+  }
+
+  private async runModelSelectionSettlements(): Promise<void> {
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) return
+    while (this.active) {
+      const claims = this.deliveryStore.claimModelSelectionSettlements({
+        ownerId: this.ownerId,
+        leaseMs: this.config.leaseMs,
+        limit: this.config.maxConcurrency,
+      })
+      if (claims.length === 0) {
+        const next = this.deliveryStore.nextModelSelectionClaimAt()
+        if (next !== undefined && this.modelSelectionRetryTimer === undefined) {
+          const delay = Math.max(1, Math.min(2_147_483_647, next - Date.now()))
+          this.modelSelectionRetryTimer = setTimeout(() => {
+            this.modelSelectionRetryTimer = undefined
+            if (this.active) void this.drainModelSelectionSettlements()
+          }, delay)
+          this.modelSelectionRetryTimer.unref?.()
+        }
+        return
+      }
+      await Promise.allSettled(claims.map(async claim => {
+        const finishWithoutReply = (result: ModelSelectionResult) =>
+          this.deliveryStore.completeModelSelectionSettlement({
+            operationId: claim.operationId,
+            payloadHash: claim.payloadHash,
+            result,
+            ownerId: this.ownerId,
+            fencingToken: claim.fencingToken,
+          }) as ModelSelectionResult
+        const payload = claim.payload
+        if (!isModelSelectionPayload(payload) || payload.bindingId !== claim.bindingId) {
+          finishWithoutReply({ status: 'rejected', reason: 'authorization-revoked' })
+          return
+        }
+        const ownsBinding = (binding: ConversationBinding | undefined): binding is ConversationBinding => {
+          const principal = this.deliveryStore.getPrincipal(payload.principal)
+          return binding?.status === 'active'
+            && principal?.status === 'active'
+            && binding.conversation.chat === payload.callbackChatId
+            && JSON.stringify(binding.principal) === JSON.stringify(principal.principal)
+        }
+        // The callback claim already consumed any authorization budget. Workers
+        // re-evaluate current rules/emergency-stop without charging it again.
+        const authorized = (binding: ConversationBinding) => this.policy.evaluate({
+          subject: { kind: 'external', id: externalId(payload.principal) },
+          action: 'ingest',
+          resource: { kind: 'message', id: `model-selection:${binding.id}` },
+          context: { initiator: 'external' },
+        }).effect === 'allow'
+        const complete = (
+          binding: ConversationBinding,
+          result: ModelSelectionResult,
+          text: string,
+          selection?: ModelRouteRef,
+        ) => {
+          const reply = (content: string) => ({
+            idempotencyKey: `model-selection:${payload.callbackEventId}:reply`,
+            bindingId: binding.id,
+            target: { conversation: binding.conversation, principal: binding.principal },
+            text: content,
+            format: 'plain' as const,
+          })
+          const superseded: ModelSelectionResult = { status: 'rejected', reason: 'selection-superseded' }
+          return this.deliveryStore.completeModelSelectionSettlement({
+            operationId: claim.operationId,
+            payloadHash: claim.payloadHash,
+            result,
+            ...(selection === undefined ? {} : { selection: { conversation: binding.conversation, route: selection } }),
+            reply: reply(text),
+            superseded: {
+              result: superseded,
+              reply: reply('该模型选择已被更晚的操作取代，未更改当前模型。'),
+            },
+            ownerId: this.ownerId,
+            fencingToken: claim.fencingToken,
+          }) as ModelSelectionResult
+        }
+        const initialBinding = this.deliveryStore.getBinding(claim.bindingId)
+        if (!ownsBinding(initialBinding) || !authorized(initialBinding)) {
+          finishWithoutReply({ status: 'rejected', reason: 'authorization-revoked' })
+          return
+        }
+        if (payload.provider !== payload.modelProvider) {
+          complete(initialBinding, { status: 'rejected', reason: 'provider-model-mismatch' },
+            `分组 ${payload.provider} 与模型 ${payload.modelProvider}/${payload.model} 不匹配，请重新发送 /model。`)
+          return
+        }
+        if (!llm.listProviders().some(provider => provider.id === payload.provider)) {
+          complete(initialBinding, { status: 'rejected', reason: 'provider-unavailable' },
+            `模型分组 ${payload.provider} 当前不可用，请重新发送 /model。`)
+          return
+        }
+        let leaseLost = false
+        const renewLease = () => {
+          try {
+            if (!this.deliveryStore.renewModelSelectionSettlement({
+              operationId: claim.operationId,
+              ownerId: this.ownerId,
+              fencingToken: claim.fencingToken,
+              leaseMs: this.config.leaseMs,
+            })) leaseLost = true
+          } catch {
+            leaseLost = true
+          }
+        }
+        const heartbeat = setInterval(renewLease, Math.max(1, Math.floor(this.config.leaseMs / 3)))
+        heartbeat.unref?.()
+        const resolveController = new AbortController()
+        let resolveTimeout: ReturnType<typeof setTimeout> | undefined
+        const deadline = new Promise<never>((_resolve, reject) => {
+          resolveTimeout = setTimeout(() => {
+            const error = new Error('model selection resolution timed out')
+            resolveController.abort(error)
+            reject(error)
+          }, this.config.leaseMs)
+        })
+        let resolved: Awaited<ReturnType<typeof llm.resolveModelInfo>> | undefined
+        try {
+          resolved = await Promise.race([
+            llm.resolveModelInfo(payload.provider, payload.model, resolveController.signal),
+            deadline,
+          ])
+        } catch {
+          // Model availability is persisted below, after refreshing authority.
+        } finally {
+          if (resolveTimeout !== undefined) clearTimeout(resolveTimeout)
+          clearInterval(heartbeat)
+        }
+        renewLease()
+        if (leaseLost) return
+        const binding = this.deliveryStore.getBinding(claim.bindingId)
+        if (!ownsBinding(binding)) {
+          finishWithoutReply({ status: 'rejected', reason: 'authorization-revoked' })
+          return
+        }
+        if (!authorized(binding)) {
+          finishWithoutReply({ status: 'rejected', reason: 'authorization-revoked' })
+          return
+        }
+        if (resolved === undefined) {
+          complete(binding, { status: 'rejected', reason: 'model-unavailable' },
+            `模型 ${payload.provider}/${payload.model} 当前不可用，请重新发送 /model。`)
+          return
+        }
+        if (payload.reasoningEffort !== null
+          && !resolved.reasoning?.efforts.some(effort => String(effort.id) === payload.reasoningEffort)) {
+          complete(binding, { status: 'rejected', reason: 'invalid-effort' },
+            `模型 ${payload.provider}/${payload.model} 不支持 effort “${payload.reasoningEffort}”，请重新发送 /model。`)
+          return
+        }
+        const selection: ModelRouteRef = {
+          provider: payload.provider,
+          model: payload.model,
+          ...(payload.reasoningEffort === null ? {} : { reasoningEffort: payload.reasoningEffort }),
+        }
+        complete(binding, { status: 'selected', selection },
+          `已切换到 ${payload.provider}/${payload.model}${payload.reasoningEffort === null
+            ? '，effort：默认'
+            : `，effort：${payload.reasoningEffort}`}。下一条消息起生效，上下文保留。`, selection)
+      }))
+    }
   }
 
   private assertActive(): void {

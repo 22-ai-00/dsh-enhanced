@@ -5,17 +5,22 @@ import type {
   DeliveryAdapterContext,
   DeliveryProgressIntent,
   ModelPickerIntent,
+  ModelPickerState,
+  ModelRouteRef,
   OutboundIntent,
 } from '@dsh-enhanced/assistant-delivery'
 import { LarkApprovalError, signLarkApprovalAction, verifyLarkApprovalAction } from './approval.js'
 import {
   LarkModelPickerError,
+  parseLarkModelPickerCallback,
   signLarkModelPickerAction,
   verifyLarkModelPickerAction,
+  type LarkModelPickerActionPayload,
+  type LarkModelPickerCallbackValue,
 } from './model-picker.js'
 import { normalizeLarkMessage } from './normalize.js'
 import { LarkProgressPresenter } from './progress.js'
-import { modelPickerControlNames, parseModelPickerControlName, renderLarkMessage } from './sdk.js'
+import { renderLarkMessage } from './sdk.js'
 import {
   LarkTransportError,
   type LarkChannelHealth,
@@ -50,6 +55,7 @@ export interface LarkAdapterOptions {
     modelProvider: string
     model: string
     reasoningEffort?: string
+    expectedRevision: number
   }): unknown | Promise<unknown>
   loadModelPicker?(input: {
     operationId: string
@@ -57,6 +63,14 @@ export interface LarkAdapterOptions {
     bindingId: string
     principal: { channel: string; account: string; tenant: string; user: string }
   }): ModelPickerIntent | undefined | Promise<ModelPickerIntent | undefined>
+  advanceModelPicker?(input: {
+    operationId: string
+    callbackChatId: string
+    bindingId: string
+    principal: { channel: string; account: string; tenant: string; user: string }
+    expected: ModelPickerState
+    next: ModelRouteRef
+  }): { applied: boolean; state: ModelPickerState } | Promise<{ applied: boolean; state: ModelPickerState }>
 }
 
 function failureCode(code: string): string {
@@ -100,11 +114,27 @@ function routeParts(route: string): { provider: string; model: string } | undefi
   return { provider: route.slice(0, separator), model: route.slice(separator + 1) }
 }
 
-function modelPickerCard(
+function defaultEffortOption(effortIds: readonly string[]): string {
+  let value = '__default__'
+  while (effortIds.includes(value)) value += '_'
+  return value
+}
+
+interface ResolvedModelPicker {
+  modelsByProvider: Map<string, ModelPickerIntent['models'][number][]>
+  provider: string
+  providerModels: ModelPickerIntent['models'][number][]
+  route: string
+  selectedModel: ModelPickerIntent['models'][number]
+  linkedEfforts: Array<{ value: string; label: string }>
+  defaultEffort: string
+  initialEffort: string
+}
+
+function resolveModelPicker(
   picker: Readonly<ModelPickerIntent>,
-  confirmValue: { modelPicker: string },
-  preferred: { provider?: string; route?: string } = {},
-): import('./types.js').LarkModelPickerCard {
+  preferred: { provider?: string; route?: string; effort?: string | null } = {},
+): ResolvedModelPicker {
   const modelsByProvider = new Map<string, ModelPickerIntent['models'][number][]>()
   for (const model of picker.models) {
     const models = modelsByProvider.get(model.provider) ?? []
@@ -123,10 +153,44 @@ function modelPickerCard(
   const effortNames = new Map(picker.efforts.map(effort => [effort.id, effort.name]))
   const linkedEfforts = (selectedModel.effortIds ?? [])
     .flatMap(id => effortNames.has(id) ? [{ value: id, label: effortNames.get(id)! }] : [])
-  const initialEffort = route === currentRoute && picker.current.reasoningEffort !== undefined
-    && linkedEfforts.some(effort => effort.value === picker.current.reasoningEffort)
-    ? picker.current.reasoningEffort
-    : '__default__'
+  const defaultEffort = defaultEffortOption(linkedEfforts.map(effort => effort.value))
+  const preferredEffort = preferred.effort
+  const initialEffort = preferredEffort === null
+    ? defaultEffort
+    : preferredEffort !== undefined && linkedEfforts.some(effort => effort.value === preferredEffort)
+      ? preferredEffort
+      : route === currentRoute && picker.current.reasoningEffort !== undefined
+        && linkedEfforts.some(effort => effort.value === picker.current.reasoningEffort)
+        ? picker.current.reasoningEffort
+        : defaultEffort
+  return { modelsByProvider, provider, providerModels, route, selectedModel,
+    linkedEfforts, defaultEffort, initialEffort }
+}
+
+function resolvedModelRoute(resolved: ResolvedModelPicker): ModelRouteRef {
+  return { provider: resolved.provider, model: resolved.selectedModel.id,
+    ...(resolved.initialEffort === resolved.defaultEffort ? {} : { reasoningEffort: resolved.initialEffort }) }
+}
+
+function modelPickerCard(
+  picker: Readonly<ModelPickerIntent>,
+  secret: string,
+  capability: Pick<LarkModelPickerActionPayload, 'operationId' | 'bindingId' | 'expiresAt' | 'chatId' | 'revision'>,
+  preferred: { provider?: string; route?: string; effort?: string | null } = {},
+): import('./types.js').LarkModelPickerCard {
+  const { modelsByProvider, provider, providerModels, route, selectedModel, linkedEfforts,
+    defaultEffort, initialEffort } = resolveModelPicker(picker, preferred)
+  const currentRoute = `${picker.current.provider}/${picker.current.model}`
+  const signedState = {
+    version: 3 as const,
+    ...capability,
+    provider,
+    model: selectedModel.id,
+    effort: initialEffort === defaultEffort ? null : initialEffort,
+  }
+  const callbackValue = (action: import('./model-picker.js').LarkModelPickerCallbackAction) => ({
+    modelPicker: signLarkModelPickerAction(secret, { ...signedState, action }),
+  })
   const currentEffort = picker.current.reasoningEffort === undefined ? '' : `，effort：${picker.current.reasoningEffort}`
   return {
     title: '选择会话模型',
@@ -136,7 +200,7 @@ function modelPickerCard(
       .map(value => ({ value: value.id, label: value.name })),
     modelOptions: providerModels.map(model => ({ value: `${model.provider}/${model.id}`, label: model.name })),
     effortOptions: [
-      { value: '__default__', label: linkedEfforts.length === 0
+      { value: defaultEffort, label: linkedEfforts.length === 0
         ? '默认（该模型无 effort 档位）'
         : '默认（由模型决定）' },
       ...linkedEfforts,
@@ -144,7 +208,12 @@ function modelPickerCard(
     initialProvider: provider,
     initialModel: route,
     initialEffort,
-    confirmValue,
+    callbackValues: {
+      provider: callbackValue('provider'),
+      model: callbackValue('model'),
+      effort: callbackValue('effort'),
+      confirm: callbackValue('confirm'),
+    },
   }
 }
 
@@ -174,6 +243,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly settleApproval: LarkAdapterOptions['settleApproval']
   private readonly settleModelSelection: LarkAdapterOptions['settleModelSelection']
   private readonly loadModelPicker: LarkAdapterOptions['loadModelPicker']
+  private readonly advanceModelPicker: LarkAdapterOptions['advanceModelPicker']
   private readonly statusReactions: boolean
   private readonly progressPresenter: LarkProgressPresenter
   private state: LarkChannelHealth['state'] = 'disconnected'
@@ -191,6 +261,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.settleApproval = options.settleApproval
     this.settleModelSelection = options.settleModelSelection
     this.loadModelPicker = options.loadModelPicker
+    this.advanceModelPicker = options.advanceModelPicker
     this.statusReactions = options.statusReactions ?? true
     this.progressPresenter = new LarkProgressPresenter(
       transport,
@@ -282,21 +353,22 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         rejectValue: { approval: signLarkApprovalAction(this.approvalSecret, { ...common, decision: 'rejected' }) },
       } }
     } else if (intent.format === 'model-picker') {
-      if (intent.modelPicker === undefined || this.approvalSecret === undefined || this.settleModelSelection === undefined) {
+      if (intent.modelPicker === undefined || this.approvalSecret === undefined
+        || this.settleModelSelection === undefined || this.loadModelPicker === undefined
+        || this.advanceModelPicker === undefined) {
         return { outcome: 'not-sent', failureCode: 'lark-model-picker-unavailable', retryable: false }
       }
       if (this.now() >= intent.modelPicker.expiresAt) {
         return { outcome: 'not-sent', failureCode: 'lark-model-picker-expired', retryable: false }
       }
       const picker = intent.modelPicker
-      const confirmValue = { modelPicker: signLarkModelPickerAction(this.approvalSecret, {
-          version: 1,
-          operationId: picker.operationId,
-          bindingId: intent.bindingId,
-          expiresAt: picker.expiresAt,
-          chatId: conversation.chat,
-        }) }
-      input = { modelPicker: modelPickerCard(picker, confirmValue) }
+      input = { modelPicker: modelPickerCard(picker, this.approvalSecret, {
+        operationId: picker.operationId,
+        bindingId: intent.bindingId,
+        expiresAt: picker.expiresAt,
+        chatId: conversation.chat,
+        revision: 0,
+      }) }
     } else {
       input = intent.format === 'markdown' ? { markdown: intent.text } : { text: intent.text }
     }
@@ -358,13 +430,13 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private async handleCardAction(action: import('./types.js').LarkCardAction): Promise<unknown> {
     try {
       const value = action.value
-      if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 1) {
+      if (value === null || typeof value !== 'object' || Array.isArray(value)) {
         throw new LarkApprovalError('invalid', 'Lark card action value is invalid')
       }
       if (typeof (value as { modelPicker?: unknown }).modelPicker === 'string') {
-        return await this.handleModelPickerAction(action, (value as { modelPicker: string }).modelPicker)
+        return await this.handleModelPickerAction(action, parseLarkModelPickerCallback(value))
       }
-      if (typeof (value as { approval?: unknown }).approval !== 'string'
+      if (Object.keys(value).length !== 1 || typeof (value as { approval?: unknown }).approval !== 'string'
         || this.approvalSecret === undefined || this.settleApproval === undefined) {
         throw new LarkApprovalError('invalid', 'Lark approval action value is invalid')
       }
@@ -396,84 +468,125 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
 
   private async handleModelPickerAction(
     action: import('./types.js').LarkCardAction,
-    token: string,
+    callback: LarkModelPickerCallbackValue,
   ): Promise<unknown> {
     if (this.approvalSecret === undefined || this.settleModelSelection === undefined) {
       throw new LarkModelPickerError('invalid', 'Lark model picker callback is unavailable')
     }
+    const token = callback.modelPicker
     const payload = verifyLarkModelPickerAction(this.approvalSecret, token, this.now())
     if (payload.chatId !== action.chatId) throw new LarkModelPickerError('invalid', 'Lark model picker chat does not match')
-    const control = parseModelPickerControlName(action.name)
-    if (action.tag === 'select_static' && (control?.kind === 'provider' || control?.kind === 'model')) {
+    if (payload.action !== 'confirm') {
       const selectedOption = action.option
-        ?? (action.name === undefined ? undefined : action.formValue?.[action.name])
-      if (this.loadModelPicker === undefined || typeof selectedOption !== 'string') {
+      if (this.loadModelPicker === undefined || this.advanceModelPicker === undefined
+        || typeof selectedOption !== 'string') {
         throw new LarkModelPickerError('invalid', 'Lark model picker navigation is unavailable')
       }
-      const picker = await this.loadModelPicker({
+      if (action.tag !== 'select_static') {
+        throw new LarkModelPickerError('invalid', 'Lark model picker navigation action is invalid')
+      }
+      let picker: ModelPickerIntent | undefined
+      try {
+        picker = await this.loadModelPicker({
+          operationId: payload.operationId,
+          callbackChatId: action.chatId,
+          bindingId: payload.bindingId,
+          principal: { channel: 'lark', account: this.account, tenant: this.config.tenant, user: action.operatorId },
+        })
+      } catch (error) {
+        this.recordPresentationFailure(error)
+        return { toast: { type: 'warning', content: '模型选择已结束，请重新发送 /model' } }
+      }
+      if (picker === undefined || picker.operationId !== payload.operationId || picker.expiresAt !== payload.expiresAt) {
+        return { toast: { type: 'warning', content: '模型选择已结束，请重新发送 /model' } }
+      }
+      const capability = {
         operationId: payload.operationId,
+        bindingId: payload.bindingId,
+        expiresAt: payload.expiresAt,
+        chatId: payload.chatId,
+      }
+      let preferred: { provider?: string; route?: string; effort?: string | null }
+      if (payload.action === 'provider') {
+        if (!picker.providers.some(provider => provider.id === selectedOption)
+          || !picker.models.some(model => model.provider === selectedOption)) {
+          throw new LarkModelPickerError('invalid', 'Lark model picker provider is unavailable')
+        }
+        preferred = {
+          provider: selectedOption,
+          effort: null,
+        }
+      } else if (payload.action === 'model') {
+        const selected = routeParts(selectedOption)
+        if (selected === undefined || selected.provider !== payload.provider
+          || !picker.models.some(model => model.provider === selected.provider && model.id === selected.model)) {
+          throw new LarkModelPickerError('invalid', 'Lark model picker model is unavailable')
+        }
+        preferred = {
+          provider: selected.provider,
+          route: selectedOption,
+          effort: null,
+        }
+      } else {
+        const selectedModel = picker.models.find(model => model.provider === payload.provider && model.id === payload.model)
+        const defaultEffort = selectedModel === undefined ? undefined : defaultEffortOption(selectedModel.effortIds)
+        if (selectedModel === undefined || (selectedOption !== defaultEffort && !selectedModel.effortIds.includes(selectedOption))) {
+          throw new LarkModelPickerError('invalid', 'Lark model picker effort is unavailable')
+        }
+        preferred = {
+          provider: payload.provider,
+          route: `${payload.provider}/${payload.model}`,
+          effort: selectedOption === defaultEffort ? null : selectedOption,
+        }
+      }
+      const next = resolvedModelRoute(resolveModelPicker(picker, preferred))
+      let advanced: { applied: boolean; state: ModelPickerState }
+      try {
+        advanced = await this.advanceModelPicker({
+          operationId: payload.operationId,
+          callbackChatId: action.chatId,
+          bindingId: payload.bindingId,
+          principal: { channel: 'lark', account: this.account, tenant: this.config.tenant, user: action.operatorId },
+          expected: { revision: payload.revision, provider: payload.provider, model: payload.model,
+            ...(payload.effort === null ? {} : { reasoningEffort: payload.effort }) },
+          next,
+        })
+      } catch (error) {
+        this.recordPresentationFailure(error)
+        return { toast: { type: 'warning', content: '模型选择已结束，请重新发送 /model' } }
+      }
+      const state = advanced.state
+      return callbackCard(modelPickerCard(picker, this.approvalSecret, {
+        ...capability, revision: state.revision,
+      }, {
+        provider: state.provider,
+        route: `${state.provider}/${state.model}`,
+        effort: state.reasoningEffort ?? null,
+      }))
+    }
+    if (action.tag !== 'button') {
+      throw new LarkModelPickerError('invalid', 'Lark model picker confirmation action is invalid')
+    }
+    const callbackEventId = createHash('sha256')
+      .update(`${action.messageId}\0${action.operatorId}\0${token}`)
+      .digest('hex')
+    try {
+      await this.settleModelSelection({
+        operationId: payload.operationId,
+        callbackEventId,
         callbackChatId: action.chatId,
         bindingId: payload.bindingId,
         principal: { channel: 'lark', account: this.account, tenant: this.config.tenant, user: action.operatorId },
+        provider: payload.provider,
+        modelProvider: payload.provider,
+        model: payload.model,
+        expectedRevision: payload.revision,
+        ...(payload.effort === null ? {} : { reasoningEffort: payload.effort }),
       })
-      if (picker === undefined || picker.expiresAt !== payload.expiresAt) {
-        throw new LarkModelPickerError('invalid', 'Lark model picker catalog is unavailable')
-      }
-      if (control.kind === 'provider') {
-        if (!picker.providers.some(provider => provider.id === selectedOption)) {
-          throw new LarkModelPickerError('invalid', 'Lark model picker provider is unavailable')
-        }
-        return callbackCard(modelPickerCard(picker, { modelPicker: token }, { provider: selectedOption }))
-      }
-      const selected = routeParts(selectedOption)
-      if (selected === undefined || !picker.models.some(model => model.provider === selected.provider && model.id === selected.model)) {
-        throw new LarkModelPickerError('invalid', 'Lark model picker model is unavailable')
-      }
-      return callbackCard(modelPickerCard(picker, { modelPicker: token }, {
-        provider: selected.provider,
-        route: selectedOption,
-      }))
+      return { toast: { type: 'success', content: '模型切换已受理' } }
+    } catch (error) {
+      this.recordPresentationFailure(error)
+      return { toast: { type: 'warning', content: '卡片状态已更新，请重新发送 /model' } }
     }
-    if (action.tag !== 'button' || control?.kind !== 'confirm') {
-      throw new LarkModelPickerError('invalid', 'Lark model picker action is invalid')
-    }
-    const form = action.formValue
-    const provider = form?.[`provider_${control.state}`]
-    const route = form?.[`model_${control.state}`]
-    const effort = form?.[`effort_${control.state}`]
-    if (typeof provider !== 'string' || typeof route !== 'string' || typeof effort !== 'string') {
-      throw new LarkModelPickerError('invalid', 'Lark model picker form is incomplete')
-    }
-    const selected = routeParts(route)
-    if (selected === undefined) {
-      throw new LarkModelPickerError('invalid', 'Lark model picker route is invalid')
-    }
-    if (selected.provider !== provider) {
-      throw new LarkModelPickerError('invalid', 'Lark model picker provider does not match the selected model')
-    }
-    const expectedControls = modelPickerControlNames({
-      confirmValue: { modelPicker: token },
-      initialProvider: provider,
-      initialModel: route,
-    })
-    if (action.name !== expectedControls.confirm) {
-      throw new LarkModelPickerError('invalid', 'Lark model picker form state is stale')
-    }
-    const modelProvider = selected.provider
-    const model = selected.model
-    const callbackEventId = createHash('sha256')
-      .update(`${action.messageId}\0${action.operatorId}\0${token}\0${provider}\0${model}\0${effort}`)
-      .digest('hex')
-    await this.settleModelSelection({
-      operationId: payload.operationId,
-      callbackEventId,
-      callbackChatId: action.chatId,
-      bindingId: payload.bindingId,
-      principal: { channel: 'lark', account: this.account, tenant: this.config.tenant, user: action.operatorId },
-      provider,
-      modelProvider,
-      model,
-      ...(effort === '__default__' ? {} : { reasoningEffort: effort }),
-    })
   }
 }

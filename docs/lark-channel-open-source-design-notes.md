@@ -16,7 +16,7 @@
 | [飞书官方 Node SDK](https://github.com/larksuite/node-sdk) | `WSClient` 长连接、`EventDispatcher`、typed OpenAPI client | 当前生产 transport；凭据生命周期仍由 Keychain lease 和 Cordis disposer 管理 |
 | [官方 `@larksuite/channel`](https://github.com/larksuite/channel-sdk-node) | 自动重连、keepalive、消息归一化、按 chat 串行、富媒体和卡片；`registerApp` 一键授权 | `registerApp` 已用于 onboarding；高层 channel 作为未来富媒体/keepalive 迁移候选，不引入其内存 policy/dedup 作为第二真源 |
 | [`omdsh-dev/dsh-lark`](https://github.com/omdsh-dev/dsh-lark) | `/model` 展示宿主目录、交互式选择、`/new` 保持模型选择、后台服务监管 | 独立实现为 Delivery 通用 typed intent；选择写入 Delivery SQLite，飞书只渲染受限卡片并转交签名回调 |
-| [飞书卡片交互组件](https://open.feishu.cn/document/common-capabilities/message-card/add-card-interaction/interaction-module?lang=zh-CN) | 表单、静态下拉框、提交按钮及命名字段 | schema 2.0 卡片把三个 `select_static` 放在同一 `form`，提交时读取 `action.form_value` |
+| [飞书卡片交互组件](https://open.feishu.cn/document/common-capabilities/message-card/add-card-interaction/interaction-module?lang=zh-CN) | 静态下拉框、按钮与 callback behavior | schema 2.0 卡片让 provider/model/effort 各自即时 callback 并原位重绘，不混用 `form_submit` |
 | [OpenClaw 飞书插件](https://github.com/openclaw/openclaw/tree/main/extensions/feishu) | channel 作为可安装扩展，不把飞书协议揉进 Agent 核心 | 保持 `lark-channel`、`assistant-delivery`、Policy/Memory 等包可独立发布与组合 |
 
 ## `/model` 的实现取舍
@@ -27,9 +27,9 @@
 4. 覆盖以 canonical conversation 的 SHA-256 key 写入 SQLite，不绑定某一 generation，因此 `/new` 清上下文但保留模型偏好。
 5. 切换只改变下一次 `agents.resume()` 的 model selection，不修改 session id，也不把控制命令写入模型上下文；显式 effort 会随 provider/model 一起传给下一轮。
 
-社区 `dsh-lark` 的交互式模型选择证明了卡片体验的价值，但本仓库没有开放任意 card JSON。Delivery 现在只接受有界的 typed `model-picker` intent；Lark adapter 把它渲染为 provider、model、effort 三下拉表单。由于三项是静态选项，模型标签包含 provider 前缀，提交后还会校验 provider/model 对应关系。
+社区 `dsh-lark` 的交互式模型选择证明了卡片体验的价值，但本仓库没有开放任意 card JSON。Delivery 现在只接受有界的 typed `model-picker` intent；Lark adapter 把它渲染为 provider、model、effort 三个彼此独立的静态选择器和一个普通确认按钮。模型标签包含 provider 前缀，确认后还会校验 provider/model 对应关系。
 
-提交 capability 用 app secret 做 HMAC 签名，并绑定 operation、binding、chat 与 expiry；SDK 边界从原始回调严格提取 `action.form_value`。Delivery 随后重新核对 active binding、owner principal、chat、Policy，并用实时 `resolveModelInfo()` 验证模型和 effort。成功后把选择写入 schema v4 SQLite，再通过 durable Outbox 发送确认。文字 `/model use` 和 `/model reset` 继续作为渠道无关后备。
+提交 capability 用 app secret 做 HMAC 签名，并绑定 operation、binding、chat、expiry、动作、revision 与当前 provider/model/effort；SDK 边界只接收 `action.option` 和签名 callback value，不依赖控件名或 `action.form_value`。固定的 Node SDK 版本会忽略 `type=card` 长连接帧，因此 transport 在 SDK 边界补充分片合并、EventDispatcher 分发和 ACK 兼容桥。Delivery 用 schema v5 SQLite CAS 保存权威 revision，旧卡片回调只能重绘当前状态。确认回调在第一次异步模型探测前持久领取 operation 并立即响应飞书，带租约和 fencing token 的 worker 会在启动与 tick 时恢复未完成任务；提交前再次核对 active binding、owner principal、chat、Policy，并用实时 `resolveModelInfo()` 验证模型和 effort。选择、结算结果和 durable Outbox 确认在同一事务中提交。文字 `/model use` 和 `/model reset` 继续作为渠道无关后备。
 
 ## Reaction 与执行进度的实现取舍
 

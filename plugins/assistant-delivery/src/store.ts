@@ -15,6 +15,7 @@ import type {
   InboxRecord,
   OutboundIntent,
   ModelPickerIntent,
+  ModelPickerState,
   ModelRouteRef,
   OutboxRecord,
   PairingChallenge,
@@ -94,6 +95,31 @@ interface ModelSelectionRow {
   version: number
 }
 
+interface ModelPickerStateRow {
+  binding_id: string
+  revision: number
+  provider: string
+  model: string
+  reasoning_effort: string | null
+}
+
+interface ModelSelectionSettlementRow {
+  binding_id: string
+  conversation_hash: string
+  command_epoch: number
+  payload_hash: string
+  status: 'completed' | 'pending' | 'processing'
+  result_json: string | null
+  attempt_count: number
+  claimed_by: string | null
+  lease_until: number | null
+}
+
+interface ModelSelectionSettlementCompletionRow extends ModelSelectionSettlementRow {
+  binding_status: ConversationBinding['status']
+  principal_status: DeliveryPrincipal['status']
+}
+
 interface InboxRow {
   id: string
   channel: string
@@ -156,6 +182,35 @@ function modelRoutePart(value: string, field: 'effort' | 'model' | 'provider'): 
     : normalized.length <= (field === 'effort' ? 128 : 512) && !/[\s\p{Cc}]/u.test(normalized)
   if (!valid) throw new DeliveryStoreError('invalid-binding', `${field} is invalid`)
   return normalized
+}
+
+function canonicalModelPickerState(input: ModelPickerState): ModelPickerState {
+  if (!Number.isSafeInteger(input.revision) || input.revision < 0) {
+    throw new DeliveryStoreError('invalid-binding', 'model picker revision is invalid')
+  }
+  const provider = modelRoutePart(input.provider, 'provider')
+  const model = modelRoutePart(input.model, 'model')
+  const reasoningEffort = input.reasoningEffort === undefined
+    ? undefined
+    : modelRoutePart(input.reasoningEffort, 'effort')
+  return { revision: input.revision, provider, model,
+    ...(reasoningEffort === undefined ? {} : { reasoningEffort }) }
+}
+
+function canonicalModelRoute(input: ModelRouteRef): ModelRouteRef {
+  const state = canonicalModelPickerState({ ...input, revision: 0 })
+  return { provider: state.provider, model: state.model,
+    ...(state.reasoningEffort === undefined ? {} : { reasoningEffort: state.reasoningEffort }) }
+}
+
+function modelPickerStateFromRow(row: ModelPickerStateRow): ModelPickerState {
+  return { revision: row.revision, provider: row.provider, model: row.model,
+    ...(row.reasoning_effort === null ? {} : { reasoningEffort: row.reasoning_effort }) }
+}
+
+function sameModelPickerState(left: ModelPickerState, right: ModelPickerState): boolean {
+  return left.revision === right.revision && left.provider === right.provider && left.model === right.model
+    && left.reasoningEffort === right.reasoningEffort
 }
 
 function pairingFromRow(row: PairingRow): PairingChallenge {
@@ -838,6 +893,37 @@ export class DeliveryStore {
     `).run(conversationHash(conversation), conversationJson(conversation)).changes === 1
   }
 
+  beginModelCommand(input: ConversationRef): number {
+    this.assertOpen()
+    const conversation = canonicalConversation(input)
+    return this.transaction(() => this.advanceModelCommandEpoch(conversation))
+  }
+
+  commitModelCommand(input: {
+    conversation: ConversationRef
+    expectedEpoch: number
+    route?: ModelRouteRef
+  }): { applied: false } | { applied: true; selection?: ConversationModelSelection } {
+    this.assertOpen()
+    if (!Number.isSafeInteger(input.expectedEpoch) || input.expectedEpoch < 1) {
+      throw new DeliveryStoreError('version-conflict', 'model command epoch is invalid')
+    }
+    const conversation = canonicalConversation(input.conversation)
+    const route = input.route === undefined ? undefined : canonicalModelRoute(input.route)
+    return this.transaction(() => {
+      const current = this.database.prepare(`
+        SELECT epoch FROM conversation_model_epochs
+        WHERE conversation_hash = ? AND conversation_json = ?
+      `).get(conversationHash(conversation), conversationJson(conversation)) as { epoch: number } | undefined
+      if (current?.epoch !== input.expectedEpoch) return { applied: false }
+      if (route === undefined) {
+        this.clearModelSelection(conversation)
+        return { applied: true }
+      }
+      return { applied: true, selection: this.setModelSelection(conversation, route) }
+    })
+  }
+
   rotateBinding(input: { bindingId: string; expectedVersion: number; sessionId: string }): ConversationBinding {
     this.assertOpen()
     const current = this.getBinding(input.bindingId)
@@ -1246,6 +1332,78 @@ export class DeliveryStore {
     return row === undefined ? undefined : outboxFromRow(row).intent.modelPicker
   }
 
+  getModelPickerState(operationId: string, bindingId: string): ModelPickerState | undefined {
+    this.assertOpen()
+    const operation = validateBindingText(operationId, 'operationId', 512)
+    const binding = validateBindingText(bindingId, 'bindingId', 256)
+    const row = this.database.prepare(`
+      SELECT binding_id, revision, provider, model, reasoning_effort
+      FROM model_picker_states WHERE operation_id = ? AND binding_id = ?
+    `).get(operation, binding) as ModelPickerStateRow | undefined
+    return row === undefined ? undefined : modelPickerStateFromRow(row)
+  }
+
+  advanceModelPicker(input: {
+    operationId: string
+    bindingId: string
+    expected: ModelPickerState
+    next: ModelRouteRef
+  }): { applied: boolean; state: ModelPickerState } {
+    this.assertOpen()
+    const operationId = validateBindingText(input.operationId, 'operationId', 512)
+    const bindingId = validateBindingText(input.bindingId, 'bindingId', 256)
+    const expected = canonicalModelPickerState(input.expected)
+    const next = canonicalModelRoute(input.next)
+    const binding = this.getBinding(bindingId)
+    if (binding?.status !== 'active') {
+      throw new DeliveryStoreError('invalid-binding', 'model picker requires an active binding')
+    }
+    return this.transaction(() => {
+      const settlement = this.database.prepare(`
+        SELECT operation_id FROM model_selection_settlements WHERE operation_id = ?
+      `).get(operationId)
+      if (settlement !== undefined) {
+        throw new DeliveryStoreError('idempotency-conflict', 'model picker is already being settled')
+      }
+      const row = this.database.prepare(`
+        SELECT binding_id, revision, provider, model, reasoning_effort
+        FROM model_picker_states WHERE operation_id = ?
+      `).get(operationId) as ModelPickerStateRow | undefined
+      if (row === undefined) {
+        if (expected.revision !== 0) {
+          throw new DeliveryStoreError('version-conflict', 'model picker state does not exist at the expected revision')
+        }
+        const now = this.now()
+        this.database.prepare(`
+          INSERT INTO model_picker_states (
+            operation_id, binding_id, revision, provider, model, reasoning_effort, created_at, updated_at
+          ) VALUES (?, ?, 1, ?, ?, ?, ?, ?)
+        `).run(operationId, bindingId, next.provider, next.model, next.reasoningEffort ?? null, now, now)
+        return { applied: true, state: { ...next, revision: 1 } }
+      }
+      if (row.binding_id !== bindingId) {
+        throw new DeliveryStoreError('idempotency-conflict', 'model picker operation belongs to another binding')
+      }
+      const current = modelPickerStateFromRow(row)
+      if (!sameModelPickerState(current, expected)) return { applied: false, state: current }
+      if (current.revision >= Number.MAX_SAFE_INTEGER) {
+        throw new DeliveryStoreError('version-conflict', 'model picker revision is exhausted')
+      }
+      const now = this.now()
+      const revision = current.revision + 1
+      const changed = this.database.prepare(`
+        UPDATE model_picker_states
+        SET revision = ?, provider = ?, model = ?, reasoning_effort = ?, updated_at = ?
+        WHERE operation_id = ? AND binding_id = ? AND revision = ?
+      `).run(revision, next.provider, next.model, next.reasoningEffort ?? null,
+        now, operationId, bindingId, current.revision)
+      if (changed.changes !== 1) {
+        throw new DeliveryStoreError('version-conflict', 'model picker state changed during navigation')
+      }
+      return { applied: true, state: { ...next, revision } }
+    })
+  }
+
   listOutbox(input: { bindingId?: string; limit?: number } = {}): OutboxRecord[] {
     this.assertOpen()
     const limit = Math.max(1, Math.min(100, input.limit ?? 20))
@@ -1590,21 +1748,299 @@ export class DeliveryStore {
     return JSON.parse(resultJson) as unknown
   }
 
+  beginModelSelectionSettlement(input: {
+    operationId: string
+    bindingId: string
+    expected: ModelPickerState
+    payload: unknown
+    createIfMissing?: boolean
+  }): {
+    payloadHash: string
+    replayed: boolean
+    status: 'completed' | 'pending'
+    result?: unknown
+  } {
+    this.assertOpen()
+    const operationId = validateBindingText(input.operationId, 'operationId', 512)
+    const bindingId = validateBindingText(input.bindingId, 'bindingId', 256)
+    const expected = canonicalModelPickerState(input.expected)
+    const payloadJson = JSON.stringify({ bindingId, expected, payload: input.payload })
+    if (payloadJson === undefined || payloadJson.length > 16_384) {
+      throw new DeliveryStoreError('conflict', 'model selection settlement payload is invalid or too large')
+    }
+    const payloadHash = digest(payloadJson)
+    const binding = this.getBinding(bindingId)
+    if (binding?.status !== 'active') {
+      throw new DeliveryStoreError('invalid-binding', 'model selection requires an active binding')
+    }
+    return this.transaction(() => {
+      const existing = this.database.prepare(`
+        SELECT binding_id, conversation_hash, command_epoch, payload_hash, status, result_json,
+          attempt_count, claimed_by, lease_until
+        FROM model_selection_settlements WHERE operation_id = ?
+      `).get(operationId) as ModelSelectionSettlementRow | undefined
+      if (existing !== undefined) {
+        if (existing.binding_id !== bindingId || existing.payload_hash !== payloadHash) {
+          throw new DeliveryStoreError('idempotency-conflict', 'model selection operation was reused with a different payload')
+        }
+        return { payloadHash, replayed: true,
+          status: existing.status === 'completed' ? 'completed' as const : 'pending' as const,
+          ...(existing.result_json === null ? {} : { result: JSON.parse(existing.result_json) as unknown }) }
+      }
+      if (input.createIfMissing === false) {
+        throw new DeliveryStoreError('not-found', 'expired model selection has no pending settlement to resume')
+      }
+      const row = this.database.prepare(`
+        SELECT binding_id, revision, provider, model, reasoning_effort
+        FROM model_picker_states WHERE operation_id = ?
+      `).get(operationId) as ModelPickerStateRow | undefined
+      if (row === undefined) {
+        if (expected.revision !== 0) {
+          throw new DeliveryStoreError('version-conflict', 'model picker state does not exist at the expected revision')
+        }
+      } else {
+        if (row.binding_id !== bindingId) {
+          throw new DeliveryStoreError('idempotency-conflict', 'model picker operation belongs to another binding')
+        }
+        if (!sameModelPickerState(modelPickerStateFromRow(row), expected)) {
+          throw new DeliveryStoreError('version-conflict', 'model picker confirmation used a stale revision')
+        }
+      }
+      const now = this.now()
+      const commandEpoch = this.advanceModelCommandEpoch(binding.conversation)
+      this.database.prepare(`
+        INSERT INTO model_selection_settlements (
+          operation_id, binding_id, conversation_hash, command_epoch, payload_hash,
+          payload_json, status, result_json, outbox_id, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'pending', NULL, NULL, ?, ?)
+      `).run(operationId, bindingId, conversationHash(binding.conversation), commandEpoch,
+        payloadHash, payloadJson, now, now)
+      return { payloadHash, replayed: false, status: 'pending' as const }
+    })
+  }
+
+  claimModelSelectionSettlements(input: {
+    ownerId: string
+    leaseMs: number
+    limit?: number
+  }): Array<{
+    operationId: string
+    bindingId: string
+    payloadHash: string
+    payload: unknown
+    fencingToken: number
+  }> {
+    this.assertOpen()
+    const ownerId = validateBindingText(input.ownerId, 'ownerId', 256)
+    if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1) {
+      throw new DeliveryStoreError('conflict', 'model selection lease is invalid')
+    }
+    const limit = input.limit ?? 10
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+      throw new DeliveryStoreError('conflict', 'model selection claim limit is invalid')
+    }
+    const now = this.now()
+    return this.transaction(() => {
+      this.database.prepare(`
+        UPDATE model_selection_settlements
+        SET status = 'pending', claimed_by = NULL, lease_until = NULL, updated_at = ?
+        WHERE status = 'processing' AND lease_until <= ?
+      `).run(now, now)
+      const rows = this.database.prepare(`
+        SELECT operation_id, binding_id, payload_hash, payload_json, attempt_count
+        FROM model_selection_settlements
+        WHERE status = 'pending'
+        ORDER BY created_at, operation_id LIMIT ?
+      `).all(limit) as unknown as Array<{
+        operation_id: string
+        binding_id: string
+        payload_hash: string
+        payload_json: string
+        attempt_count: number
+      }>
+      const claims: Array<{
+        operationId: string
+        bindingId: string
+        payloadHash: string
+        payload: unknown
+        fencingToken: number
+      }> = []
+      for (const row of rows) {
+        const fencingToken = row.attempt_count + 1
+        const changed = this.database.prepare(`
+          UPDATE model_selection_settlements
+          SET status = 'processing', attempt_count = ?, claimed_by = ?, lease_until = ?, updated_at = ?
+          WHERE operation_id = ? AND status = 'pending'
+        `).run(fencingToken, ownerId, now + input.leaseMs, now, row.operation_id)
+        if (changed.changes !== 1) continue
+        const stored = JSON.parse(row.payload_json) as { payload?: unknown }
+        claims.push({ operationId: row.operation_id, bindingId: row.binding_id,
+          payloadHash: row.payload_hash, payload: stored.payload, fencingToken })
+      }
+      return claims
+    })
+  }
+
+  nextModelSelectionClaimAt(): number | undefined {
+    this.assertOpen()
+    const row = this.database.prepare(`
+      SELECT status, lease_until FROM model_selection_settlements
+      WHERE status IN ('pending', 'processing')
+      ORDER BY CASE WHEN status = 'pending' THEN 0 ELSE lease_until END, created_at
+      LIMIT 1
+    `).get() as { status: 'pending' | 'processing'; lease_until: number | null } | undefined
+    if (row === undefined) return undefined
+    return row.status === 'pending' ? this.now() : row.lease_until ?? this.now()
+  }
+
+  renewModelSelectionSettlement(input: {
+    operationId: string
+    ownerId: string
+    fencingToken: number
+    leaseMs: number
+  }): boolean {
+    this.assertOpen()
+    const operationId = validateBindingText(input.operationId, 'operationId', 512)
+    const ownerId = validateBindingText(input.ownerId, 'ownerId', 256)
+    if (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1
+      || !Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1) {
+      throw new DeliveryStoreError('stale-fence', 'model selection lease renewal is invalid')
+    }
+    const now = this.now()
+    return this.database.prepare(`
+      UPDATE model_selection_settlements SET lease_until = ?, updated_at = ?
+      WHERE operation_id = ? AND status = 'processing' AND claimed_by = ?
+        AND attempt_count = ? AND lease_until > ?
+    `).run(now + input.leaseMs, now, operationId, ownerId, input.fencingToken, now).changes === 1
+  }
+
+  completeModelSelectionSettlement(input: {
+    operationId: string
+    payloadHash: string
+    result: unknown
+    selection?: { conversation: ConversationRef; route: ModelRouteRef }
+    reply?: OutboundIntent
+    superseded?: { result: unknown; reply?: OutboundIntent }
+    ownerId?: string
+    fencingToken?: number
+  }): unknown {
+    this.assertOpen()
+    const operationId = validateBindingText(input.operationId, 'operationId', 512)
+    if (!/^[a-f0-9]{64}$/u.test(input.payloadHash)) {
+      throw new DeliveryStoreError('conflict', 'model selection payload hash is invalid')
+    }
+    const resultJson = JSON.stringify(input.result)
+    if (resultJson === undefined || resultJson.length > 16_384) {
+      throw new DeliveryStoreError('conflict', 'model selection settlement result is invalid or too large')
+    }
+    const supersededResultJson = input.superseded === undefined ? resultJson : JSON.stringify(input.superseded.result)
+    if (supersededResultJson === undefined || supersededResultJson.length > 16_384) {
+      throw new DeliveryStoreError('conflict', 'superseded model selection result is invalid or too large')
+    }
+    const ownerId = input.ownerId === undefined ? undefined : validateBindingText(input.ownerId, 'ownerId', 256)
+    if ((ownerId === undefined) !== (input.fencingToken === undefined)
+      || (input.fencingToken !== undefined && (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1))) {
+      throw new DeliveryStoreError('stale-fence', 'model selection completion fence is invalid')
+    }
+    return this.transaction(() => {
+      const current = this.database.prepare(`
+        SELECT settlement.binding_id, settlement.conversation_hash, settlement.command_epoch,
+          settlement.payload_hash, settlement.status, settlement.result_json,
+          settlement.attempt_count, settlement.claimed_by, settlement.lease_until,
+          binding.status AS binding_status, principal.status AS principal_status
+        FROM model_selection_settlements AS settlement
+        JOIN conversation_bindings AS binding ON binding.id = settlement.binding_id
+        JOIN delivery_principals AS principal ON principal.id = binding.principal_id
+        WHERE settlement.operation_id = ?
+      `).get(operationId) as ModelSelectionSettlementCompletionRow | undefined
+      if (current?.payload_hash !== input.payloadHash) {
+        throw new DeliveryStoreError('version-conflict', 'model selection settlement does not match the pending operation')
+      }
+      if (current.status === 'completed') {
+        if (current.result_json === null) {
+          throw new DeliveryStoreError('version-conflict', 'completed model selection settlement has no result')
+        }
+        return JSON.parse(current.result_json) as unknown
+      }
+      if (ownerId !== undefined && (current.status !== 'processing' || current.claimed_by !== ownerId
+        || current.attempt_count !== input.fencingToken || current.lease_until === null
+        || current.lease_until <= this.now())) {
+        throw new DeliveryStoreError('stale-fence', 'model selection completion lost its lease')
+      }
+      if (ownerId === undefined && current.status !== 'pending') {
+        throw new DeliveryStoreError('version-conflict', 'model selection settlement is already being processed')
+      }
+      const epoch = this.database.prepare(`
+        SELECT epoch FROM conversation_model_epochs WHERE conversation_hash = ?
+      `).get(current.conversation_hash) as { epoch: number } | undefined
+      const superseded = epoch?.epoch !== current.command_epoch
+      const reply = superseded && input.superseded !== undefined ? input.superseded.reply : input.reply
+      const completedResultJson = superseded ? supersededResultJson : resultJson
+      if ((reply !== undefined || (!superseded && input.selection !== undefined))
+        && (current.binding_status !== 'active' || current.principal_status !== 'active')) {
+        throw new DeliveryStoreError('unauthorized-principal', 'model selection authority was revoked before completion')
+      }
+      if (reply !== undefined && reply.bindingId !== current.binding_id) {
+        throw new DeliveryStoreError('conflict', 'model selection reply does not belong to the settlement binding')
+      }
+      if (!superseded && input.selection !== undefined) {
+        if (reply === undefined) {
+          throw new DeliveryStoreError('conflict', 'model selection cannot commit without a durable reply')
+        }
+        if (conversationJson(input.selection.conversation) !== conversationJson(reply.target.conversation)) {
+          throw new DeliveryStoreError('conflict', 'model selection route and reply target different conversations')
+        }
+        this.setModelSelection(input.selection.conversation, input.selection.route)
+      }
+      const outbox = reply === undefined ? undefined : this.enqueue(reply)
+      const now = this.now()
+      const changed = this.database.prepare(`
+        UPDATE model_selection_settlements
+        SET status = 'completed', result_json = ?, outbox_id = ?, claimed_by = NULL,
+          lease_until = NULL, updated_at = ?
+        WHERE operation_id = ? AND payload_hash = ? AND status = ?
+      `).run(completedResultJson, outbox?.id ?? null, now, operationId, input.payloadHash, current.status)
+      if (changed.changes !== 1) {
+        throw new DeliveryStoreError('version-conflict', 'model selection settlement changed before completion')
+      }
+      return JSON.parse(completedResultJson) as unknown
+    })
+  }
+
   close(): void {
     if (this.closed) return
     this.closed = true
     this.database.close()
   }
 
-  private transaction(operation: () => void): void {
+  private transaction<T>(operation: () => T): T {
     this.database.exec('BEGIN IMMEDIATE')
     try {
-      operation()
+      const result = operation()
       this.database.exec('COMMIT')
+      return result
     } catch (error) {
       this.database.exec('ROLLBACK')
       throw error
     }
+  }
+
+  private advanceModelCommandEpoch(conversation: ConversationRef): number {
+    const hash = conversationHash(conversation)
+    const json = conversationJson(conversation)
+    const now = this.now()
+    this.database.prepare(`
+      INSERT INTO conversation_model_epochs (conversation_hash, conversation_json, epoch, updated_at)
+      VALUES (?, ?, 1, ?)
+      ON CONFLICT(conversation_hash) DO UPDATE SET
+        conversation_json = excluded.conversation_json,
+        epoch = conversation_model_epochs.epoch + 1,
+        updated_at = excluded.updated_at
+    `).run(hash, json, now)
+    return (this.database.prepare(`
+      SELECT epoch FROM conversation_model_epochs
+      WHERE conversation_hash = ? AND conversation_json = ?
+    `).get(hash, json) as { epoch: number }).epoch
   }
 
   private assertOpen(): void {

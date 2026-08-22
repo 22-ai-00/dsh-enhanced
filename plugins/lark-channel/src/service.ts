@@ -147,6 +147,7 @@ export class LarkChannelService extends Service {
       settleApproval: value => delivery.settleApproval(value),
       settleModelSelection: value => delivery.settleModelSelection(value),
       loadModelPicker: value => delivery.getModelPickerForCallback(value),
+      advanceModelPicker: value => delivery.advanceModelPickerForCallback(value),
     })
     this.adapter = adapter
     let unregister: (() => Promise<void>) | undefined

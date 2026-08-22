@@ -167,6 +167,31 @@ describe('policy ledger', () => {
     ledger.close()
   })
 
+  test('replays the same reservation after rollover instead of charging a new period', async () => {
+    const path = await temporaryDatabase()
+    let now = 59_999
+    const ledger = new PolicyLedger({ path, now: () => now })
+    const input = {
+      scope: 'agent:primary',
+      metric: 'background-turns',
+      limit: 1,
+      amount: 1,
+      periodMs: 60_000,
+      idempotencyKey: 'durable-operation',
+    }
+    const created = ledger.reserve(input)
+    ledger.finalize(created.reservationId, 1)
+    now = 60_001
+
+    expect(ledger.reserve(input)).toMatchObject({
+      reservationId: created.reservationId,
+      status: 'finalized',
+      periodStart: 0,
+      replayed: true,
+    })
+    ledger.close()
+  })
+
   test('persists emergency stop state and requires an actor and reason', async () => {
     const path = await temporaryDatabase()
     const first = new PolicyLedger({ path, now: () => 40_000 })

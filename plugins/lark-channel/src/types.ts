@@ -47,7 +47,7 @@ export interface LarkModelPickerCard {
   initialProvider?: string
   initialModel?: string
   initialEffort?: string
-  confirmValue: { modelPicker: string }
+  callbackValues: Readonly<Record<'confirm' | 'effort' | 'model' | 'provider', { modelPicker: string }>>
 }
 
 export interface LarkSelectOption {
@@ -121,7 +121,6 @@ export interface LarkCardAction {
   tag?: string
   name?: string
   option?: string
-  formValue?: Readonly<Record<string, unknown>>
 }
 
 export interface LarkTransport {
