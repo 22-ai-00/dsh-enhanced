@@ -58,7 +58,7 @@ budgets:
     scope: subject
 ```
 
-每次带预算的授权必须提供幂等键。策略先在 SQLite 短事务中预留，再立即计入固定收费；进程在两步之间崩溃最多造成保守占额，不会超额。可变成本消费者使用 `reserve()`，完成后调用 `finalize()`，失败调用 `release()`。`scope` 可为 `global`、`subject` 或 `workspace`，同样由配置决定。
+每次带预算的授权必须提供幂等键。策略先在 SQLite 短事务中预留，再立即计入固定收费；进程在两步之间崩溃最多造成保守占额，不会超额。同一业务操作即使跨过预算周期仍重放原 reservation，不会重复扣费；换 scope、metric、period 或 amount 继续失败关闭。可变成本消费者使用 `reserve()`，完成后调用 `finalize()`，失败调用 `release()`。`scope` 可为 `global`、`subject` 或 `workspace`，同样由配置决定。
 
 ## 服务 API
 

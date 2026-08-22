@@ -2,7 +2,50 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 4
+export const deliverySchemaVersion = 5
+
+const modelPickerStateSchema = `
+  CREATE TABLE conversation_model_epochs (
+    conversation_hash TEXT PRIMARY KEY,
+    conversation_json TEXT NOT NULL,
+    epoch INTEGER NOT NULL CHECK (epoch >= 1),
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE model_picker_states (
+    operation_id TEXT PRIMARY KEY,
+    binding_id TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    provider TEXT NOT NULL,
+    model TEXT NOT NULL,
+    reasoning_effort TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (binding_id) REFERENCES conversation_bindings(id)
+  ) STRICT;
+
+  CREATE TABLE model_selection_settlements (
+    operation_id TEXT PRIMARY KEY,
+    binding_id TEXT NOT NULL,
+    conversation_hash TEXT NOT NULL,
+    command_epoch INTEGER NOT NULL CHECK (command_epoch >= 1),
+    payload_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'completed')),
+    result_json TEXT,
+    outbox_id TEXT,
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    claimed_by TEXT,
+    lease_until INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (binding_id) REFERENCES conversation_bindings(id),
+    FOREIGN KEY (conversation_hash) REFERENCES conversation_model_epochs(conversation_hash),
+    FOREIGN KEY (outbox_id) REFERENCES outbox_messages(id)
+  ) STRICT;
+  CREATE INDEX model_selection_claim
+    ON model_selection_settlements(status, lease_until, created_at, operation_id);
+`
 
 export class DeliveryDatabaseError extends Error {
   constructor(readonly code: 'invalid-path' | 'schema-too-new', message: string) {
@@ -47,13 +90,22 @@ function migrate(database: DatabaseSync): void {
       PRAGMA user_version = 4;
       COMMIT;
     `)
-    return
+    version = 4
   }
   if (version === 3) {
     database.exec(`
       BEGIN IMMEDIATE;
       ALTER TABLE conversation_model_selections ADD COLUMN reasoning_effort TEXT;
       PRAGMA user_version = 4;
+      COMMIT;
+    `)
+    version = 4
+  }
+  if (version === 4) {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ${modelPickerStateSchema}
+      PRAGMA user_version = 5;
       COMMIT;
     `)
     return
@@ -235,6 +287,8 @@ function migrate(database: DatabaseSync): void {
       updated_at INTEGER NOT NULL
     ) STRICT;
 
+    ${modelPickerStateSchema}
+
     CREATE TABLE delivery_duty_lease (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
       owner_id TEXT NOT NULL,
@@ -243,7 +297,7 @@ function migrate(database: DatabaseSync): void {
       updated_at INTEGER NOT NULL
     ) STRICT;
 
-    PRAGMA user_version = 4;
+    PRAGMA user_version = 5;
     COMMIT;
   `)
 }

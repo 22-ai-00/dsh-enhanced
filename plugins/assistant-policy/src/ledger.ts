@@ -230,7 +230,6 @@ export class PolicyLedger {
       if (existing !== undefined) {
         const sameInput = existing.scope === input.scope
           && existing.metric === input.metric
-          && existing.period_start === periodStart
           && existing.period_ms === input.periodMs
           && existing.amount === input.amount
         if (!sameInput) {

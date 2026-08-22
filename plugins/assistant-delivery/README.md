@@ -27,7 +27,7 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载依赖。`schedulerEnabled`
 | `spoolPath` | `$DSH_HOME/assistant-delivery/spool` | 预留的私有附件隔离目录，必须为绝对路径 |
 | `schedulerEnabled` | `true` | 启用 Inbox/Outbox 后台 pump |
 | `tickIntervalMs` | `1000` | pump 周期 |
-| `leaseMs` | `30000` | 单次 Inbox/Outbox claim 租约 |
+| `leaseMs` | `30000` | 单次 Inbox/Outbox/模型确认 claim 租约，也是模型确认实时解析的 deadline |
 | `maxAttempts` | `5` | 可证明未产生副作用的最大尝试数；未知发送不自动转 dead |
 | `maxConcurrency` | `4` | 跨 binding 并发数；同一 binding 始终串行 |
 | `maxTextBytes` | `65536` | 单条入站/出站正文 UTF-8 上限 |
@@ -122,7 +122,7 @@ rules:
 
 延迟审批使用 `enqueueApproval()` 写入同一 Outbox，intent 只允许固定的 operation/proposal/version/expiry/title 字段。渠道签名后的点击仍必须回到 `settleApproval()`；它重新核对 active binding、principal、chat、proposal version 和 operation id，重复点击只会得到同一持久化结果。
 
-模型选择同样不开放任意渠道 payload。`model-picker` intent 只允许有界的 provider/model/effort 目录和有效的 model→effort 引用；目录与 operation 一起保存在 Outbox，渠道可在 Host 重启后按 operation 恢复同一份选择目录。渠道回调必须关联 operation、binding、chat 和 expiry，再调用 `settleModelSelection()` 走实时模型解析、Policy 与持久 Outbox 确认。
+模型选择同样不开放任意渠道 payload。`model-picker` intent 只允许有界的 provider/model/effort 目录和有效的 model→effort 引用；目录与 operation 一起保存在 Outbox，渠道可在 Host 重启后按 operation 恢复同一份选择目录。schema v5 另外保存每个 operation 的选择 revision 和确认结算：渠道联动回调通过 CAS 前进，旧 revision 只能读取当前状态；确认先持久领取 operation，带租约和 fencing token 的 worker 在启动与 tick 时恢复未完成任务，并在实时模型解析后重新校验 active principal、binding 与 Policy。最终模型选择、结算结果与确认 Outbox 在同一事务中提交，因此重启、慢解析与重复回调不会重复应用选择。
 
 ## 故障语义
 

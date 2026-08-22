@@ -26,8 +26,9 @@ describe('delivery SQLite boundary', () => {
       .map(row => row.name)
     expect(tables).toEqual(expect.arrayContaining([
       'conversation_bindings', 'delivery_attachments', 'delivery_duty_lease', 'delivery_principals',
-      'delivery_receipts', 'conversation_model_selections', 'inbox_attempts', 'inbox_messages', 'outbox_attempts', 'outbox_messages',
-      'pairing_challenges',
+      'delivery_receipts', 'conversation_model_epochs', 'conversation_model_selections',
+      'inbox_attempts', 'inbox_messages', 'outbox_attempts', 'outbox_messages',
+      'model_picker_states', 'model_selection_settlements', 'pairing_challenges',
     ]))
     const modelColumns = (database.prepare('PRAGMA table_info(conversation_model_selections)').all() as { name: string }[])
       .map(row => row.name)
@@ -78,6 +79,29 @@ describe('delivery SQLite boundary', () => {
       .toEqual({ name: 'conversation_model_selections' })
     expect((migrated.prepare('PRAGMA table_info(conversation_model_selections)').all() as { name: string }[])
       .map(row => row.name)).toContain('reasoning_effort')
+    migrated.close()
+  })
+
+  test('adds durable model-picker state when migrating schema v4', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v4-schema-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const raw = new DatabaseSync(path)
+    raw.exec(`
+      CREATE TABLE existing_delivery_state (id TEXT PRIMARY KEY) STRICT;
+      INSERT INTO existing_delivery_state (id) VALUES ('kept');
+      PRAGMA user_version = 4;
+    `)
+    raw.close()
+
+    const migrated = openDeliveryDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
+    expect(migrated.prepare('SELECT id FROM existing_delivery_state').get()).toEqual({ id: 'kept' })
+    const tables = (migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all() as { name: string }[])
+      .map(row => row.name)
+    expect(tables).toEqual(expect.arrayContaining([
+      'conversation_model_epochs', 'model_picker_states', 'model_selection_settlements',
+    ]))
     migrated.close()
   })
 })
