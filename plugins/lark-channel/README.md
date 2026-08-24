@@ -13,13 +13,13 @@
 ```sh
 cd /path/to/dsh-enhanced
 pnpm --filter @dsh-enhanced/lark-channel build
-pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
+pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app --allow-agent-tools
 ```
 
 如果 Web profile 已按本仓库的本地源码方式安装，也可以直接运行：
 
 ```sh
-~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup --profile web --create-app
+~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup --profile web --create-app --allow-agent-tools
 ```
 
 向导会依次：
@@ -30,7 +30,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 4. 用真实凭据建立一次临时长连接；
 5. 显示一次性 `DSH-CONNECT-...` 短语，等待你私聊机器人并原样发送；
 6. 从这条单聊取得应用作用域下的准确 `open_id`，只把该身份配为 owner；
-7. 更新 `web/cordis.patch.yml`，启用 channel，添加精确 ingress/reply/credential 规则，并运行 `dsh --profile web --dump-config` 自检；
+7. 更新 `web/cordis.patch.yml`，启用 channel，添加精确 ingress/reply/credential 规则；只有显式传入 `--allow-agent-tools` 时，才为当前 preset/workspace 添加 Bash（Windows 为 Pwsh）和 `read`/`glob`/`grep` 精确规则；随后运行 `dsh --profile web --dump-config` 自检；
 8. 安装并启动该 profile 的用户级常驻服务：macOS 使用 launchd，Linux 使用 systemd，Windows 使用 best-effort Task Scheduler；均以 `dsh --profile web --no-open` 运行。
 
 一键模式使用官方的 OAuth 2.0 Device Authorization Grant。只传 `--create-app` 时，官方确认页会同时提供“选择已有应用”和“创建新应用”；与 `--app-id` 组合时则锁定更新该已有应用。两种方式都会先展示权限、事件和回调的增量，只有你确认后才会生效。向导始终不传 `createOnly`，并使用 `addons.preset: false`，不采用官方默认智能体模板中与本 channel 无关的文档、Wiki、群管理、批量消息等权限。确认页只申请：
@@ -61,9 +61,11 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 单独使用 `--app-id` 的手工路径会通过当前系统的安全输入读取 App Secret，适合已自行完成控制台配置的应用。通常应使用官方授权路径；省略 `--create-app` 和 `--app-id` 时，向导会询问 App ID，直接回车即进入一键选择/创建。
 
-重复执行会更新同一个 account 的受管配置，不重复添加规则或 handle。profile 校验失败时会在进程内恢复原内容；不会保留备份文件。
+重复执行会更新同一个 account 的受管配置，不重复添加规则或 handle。Agent 工具策略是显式三态：不传参数会保留现状，`--allow-agent-tools` 写入固定的精确白名单，`--disable-agent-tools` 删除向导管理的这些规则；普通重跑不会意外授权或撤权。profile 校验失败时会在进程内恢复原内容；不会保留备份文件。
 
 飞书授权只是建立应用凭据和 owner 绑定；`lark-channel` 本身仍是运行在 DSH Host 内的插件。因为这里安装到 `web` profile，默认由向导在后台常驻这个 profile，不需要保持浏览器打开，也不需要再手动执行 `dsh web`。
+
+升级前已经存在的 conversation binding 会继续固定旧 preset/workspace（旧安装常见 preset 为 `primary`），新 binding 则使用 Delivery 当前配置的默认身份。带 `--allow-agent-tools` 重跑向导时会按完整 preset+workspace 保留精确 legacy 规则，同时把主规则更新到当前默认身份；不会使用 preset、workspace 或工具通配符。
 
 已完成飞书配置、只需安装或重启常驻服务时运行：
 
@@ -212,6 +214,10 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 
 ## 安全与权限
 
+`--allow-agent-tools` 是高权限显式开关。它只生成 Delivery 当前/兼容的精确 preset+绝对 workspace、`external` initiator 和 `bash|pwsh`、`read`、`glob`、`grep` 规则，不生成 `tool:*`；带 `*` 的 workspace 会被拒绝，避免被 Policy 当作模式。Bash/Pwsh 本身仍可启动进程并读写其 sandbox 允许的内容；若该 session 使用 `danger-full-access` 且 approval 为 `never`，飞书中获准的外部会话等同获得很宽的本机命令权限。请按需要选择更窄的 DSH permission preset，并保持飞书 owner/应用范围最小。
+
+当前 Policy tool guard 不携带 principal 或 conversation kind，只能把规则收窄到 preset/workspace/initiator。Delivery 会先拒绝未配对 principal，但同一 lane 中已经获准的 external 会话（包括 owner 在群内 @ 机器人）仍共享这组工具规则；因此这不是“仅 owner 私聊”的强隔离承诺。
+
 - **网络：**仅访问所选 `domain` 的飞书/Lark OpenAPI、token 服务和 WebSocket endpoint；没有通用 HTTP 工具。
 - **凭据：**优先通过 `credentials-keychain` handle 获取；兼容模式只读取 `appSecretEnv` 指定的一项。值不写数据库、不进入 tool、health、route、日志或异常文本。`appId` 不是 secret。
 - **文件系统：**运行时无业务文件读写；setup wizard 会原子更新所选 profile patch，通过 `assistant-delivery` 的本地控制面写入精确 owner，并以 `0600` 写入用户级 LaunchAgent plist、在 `$DSH_HOME/logs` 创建 Host 日志。官方 SDK 依赖的 `protobufjs` postinstall 只打印版本建议，仓库显式设为 `allowBuilds: false`，运行不需要安装脚本。
@@ -239,6 +245,7 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 - **`caller is not allowlisted for this credential handle`：**这是旧版默认导出丢失稳定 Cordis plugin identity 导致的错误；更新并重新 build `lark-channel`，再执行 `--install-service`，不要把 credential consumer allowlist 改宽。
 - **显示 `connected-with-gap`：**连接曾中断；飞书没有可持久化 replay cursor，检查这段时间是否有漏处理消息。
 - **收到消息但无回复：**先发送 `/model`，选择一个目录中可用且已登录的 route；再看 `assistant_health`。未授权身份会 fail-closed，不会自动成为 owner。
+- **能回复但提示没有 Bash/文件搜索：**先升级并重启 `assistant-delivery`，确认 session 的 preset 在 create/resume 时已挂载；需要执行时用 `--allow-agent-tools` 重跑向导，或手工添加 exact preset/workspace/tool Policy。只执行 `--install-service` 会重启，不会改工具授权。
 - **有最终回复但没有 `Get` / `DONE`：**旧应用通常缺少 `im:message.reactions:write_only`。重新运行 `dsh-lark-setup --profile web --create-app`，在官方页面选择当前 App ID，确认权限增量并发布应用版本。reaction 失败不会阻断回答。
 - **看不到执行进度但能正常回答：**确认 profile 中 `showProgress: true`。原生进度接口是可降级能力，租户或应用类型不支持时最终回答仍会正常发送；查看 `assistant_health` 的 `larkChannel.lastErrorCode` 和 Host 错误日志定位权限/接口问题。
 - **能看到模型卡片但下拉框不联动或确认后无回复：**确认应用已订阅 `card.action.trigger` 且回调方式是长连接；运行 `dsh-lark-setup --profile web --create-app --app-id <当前 App ID>` 会锁定该应用并以增量方式补齐回调。确认授权、发布应用版本、重启插件后，请重新发送一次 `/model`，不要继续使用升级前已打开的旧卡片。若实时目录已经变化或 effort 不受模型支持，机器人会要求重新发送 `/model`。

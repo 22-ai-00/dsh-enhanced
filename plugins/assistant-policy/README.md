@@ -30,7 +30,7 @@ dsh --profile web --dump-config
         actions: [execute]
         resource:
           kind: tool
-          id: fs_*
+          id: read
         context:
           initiators: [foreground]
     budgets: []
@@ -79,7 +79,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 - 文件系统：创建一个 SQLite 数据库及 WAL/SHM 辅助文件；新目录权限 `0700`，主数据库 `0600`。数据库使用 WAL、`busy_timeout`、外键、FULL synchronous 和前向 schema 版本。
 - 网络：无。
 - 子进程：无。
-- 凭据：不读取或保存凭据值。审计按敏感 key/value、命令授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。
+- 凭据：不读取或保存凭据值。审计按敏感 key/value、shell `command`、授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。
 - 浏览器：无。
 - 安装脚本：无。
 

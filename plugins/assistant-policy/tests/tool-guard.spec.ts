@@ -152,6 +152,11 @@ describe('DSH rc.8 tool guard', () => {
         action: 'execute',
         outcome: 'allowed',
         reasonCode: 'rule-allow',
+        details: {
+          callId: 'call-1',
+          rootCallId: 'call-1',
+          arguments: { command: '[REDACTED]' },
+        },
       }),
     ])
     await fixture.ctx.fiber.restart()
@@ -173,6 +178,28 @@ describe('DSH rc.8 tool guard', () => {
     expect(guard(execution(owner))).toContain('default-deny')
     unbind()
     expect(guard(execution(owner))).toBeUndefined()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('limits an external shell grant to the exact preset, workspace, and tool', async () => {
+    const fixture = await service([{
+      id: 'allow-external-standard-bash',
+      effect: 'allow',
+      subject: { kind: 'agent', id: 'standard', workspace: '/work/assistant' },
+      actions: ['execute'],
+      resource: { kind: 'tool', id: 'bash' },
+      context: { initiators: ['external'] },
+    }])
+    const owner = agent({ cwd: '/work/assistant', preset: 'standard' })
+    const external = fixture.service.bindInitiator(owner, 'external')
+    const guard = createPolicyToolGuard(fixture.service)
+
+    expect(guard(execution(owner))).toBeUndefined()
+    expect(guard({ ...execution(owner), name: 'future_sensitive_tool' })).toContain('default-deny')
+    expect(guard(execution(agent({ cwd: '/work/other', preset: 'standard' })))).toContain('default-deny')
+    expect(guard(execution(agent({ cwd: '/work/assistant', preset: 'primary' })))).toContain('default-deny')
+    external()
+    expect(guard(execution(owner))).toContain('default-deny')
     await fixture.ctx.fiber.restart()
   })
 

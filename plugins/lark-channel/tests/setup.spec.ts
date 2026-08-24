@@ -38,6 +38,10 @@ describe('Lark onboarding wizard inputs', () => {
     const parse = parseArgs as (argv: string[]) => unknown
 
     expect(parse(['--profile', 'web', '--domain', 'feishu'])).toMatchObject({ profile: 'web', domain: 'feishu' })
+    expect(parse([])).toMatchObject({ agentTools: 'preserve' })
+    expect(parse(['--allow-agent-tools'])).toMatchObject({ agentTools: 'enable' })
+    expect(parse(['--disable-agent-tools'])).toMatchObject({ agentTools: 'disable' })
+    expect(() => parse(['--allow-agent-tools', '--disable-agent-tools'])).toThrow(/mutually exclusive/i)
     expect(parse(['--create-app', '--app-name', 'My DSH'])).toMatchObject({
       createApp: true,
       appName: 'My DSH',
@@ -50,6 +54,7 @@ describe('Lark onboarding wizard inputs', () => {
     })
     expect(parse(['--no-service'])).toMatchObject({ manageService: false })
     expect(() => parse(['--install-service', '--no-service'])).toThrow(/install-service.*no-service/i)
+    expect(() => parse(['--install-service', '--allow-agent-tools'])).toThrow(/install-service.*agent-tools/i)
     expect(parse(['--create-app', '--app-id', 'cli_0123456789abcdef'])).toMatchObject({
       createApp: true,
       appId: 'cli_0123456789abcdef',

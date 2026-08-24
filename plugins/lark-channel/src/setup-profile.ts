@@ -1,5 +1,15 @@
+import { createHash } from 'node:crypto'
 import { isAbsolute, join, win32 } from 'node:path'
-import { isMap, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
+import {
+  isMap,
+  isScalar,
+  isSeq,
+  parseDocument,
+  type Document,
+  type Node,
+  type YAMLMap,
+  type YAMLSeq,
+} from 'yaml'
 
 export interface LarkProfileSetupInput {
   profilePatch: string
@@ -13,15 +23,31 @@ export interface LarkProfileSetupInput {
   keychainAccount: string
   credentialProvider?: 'linux-secret-service' | 'macos-keychain' | 'windows-dpapi'
   credentialPath?: string
+  agentTools?: 'disable' | 'enable' | 'preserve'
 }
 
 const setupKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const providerKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
+const presetIdPattern = /^[a-z0-9][a-z0-9-]*$/u
+const managedAgentTools = ['bash', 'pwsh', 'read', 'glob', 'grep'] as const
+
+interface AgentIdentity {
+  preset: string
+  workspace: string
+}
 
 function requireSetupKey(value: string, field: string): string {
   const normalized = value.trim()
   if (!setupKeyPattern.test(normalized)) throw new Error(`lark-channel setup: invalid ${field}`)
   return normalized
+}
+
+function requireAccount(value: string): string {
+  const account = requireSetupKey(value, 'account')
+  if (account.includes('-legacy-')) {
+    throw new Error('lark-channel setup: invalid account (reserved "-legacy-" segment)')
+  }
+  return account
 }
 
 function requireProviderKey(value: string, field: string): string {
@@ -61,6 +87,143 @@ function upsertById(document: Document, values: YAMLSeq, value: Record<string, u
   else values.items[index] = node
 }
 
+function isLiteralAbsolutePath(value: unknown): value is string {
+  return typeof value === 'string'
+    && (isAbsolute(value) || win32.isAbsolute(value))
+    && !value.includes('*')
+    && !value.includes('\0')
+}
+
+function sequenceEquals(node: Node | null | undefined, expected: readonly string[]): boolean {
+  if (!isSeq(node) || node.items.length !== expected.length) return false
+  return node.items.every((item, index) => isScalar(item) && item.value === expected[index])
+}
+
+function managedReplyIdentities(rules: YAMLSeq, account: string): AgentIdentity[] {
+  const base = `lark-owner-reply-${account}`
+  const identities = new Map<string, AgentIdentity>()
+  for (const item of rules.items) {
+    if (!isMap(item)) continue
+    const id = item.get('id')
+    if (id !== base && (typeof id !== 'string' || !id.startsWith(`${base}-legacy-`))) continue
+    const resource = item.get('resource', true) as Node | undefined
+    const context = item.get('context', true) as Node | undefined
+    const subject = item.get('subject', true) as Node | undefined
+    if (item.get('effect') !== 'allow'
+      || !isMap(subject)
+      || !isMap(resource)
+      || !isMap(context)
+      || subject.get('kind') !== 'agent'
+      || resource.get('kind') !== 'message'
+      || resource.get('id') !== '*'
+      || !sequenceEquals(item.get('actions', true) as Node | undefined, ['reply'])
+      || !sequenceEquals(context.get('initiators', true) as Node | undefined, ['external'])) {
+      throw new Error(`lark-channel setup: managed reply rule ${String(id)} is invalid`)
+    }
+    const preset = subject.get('id')
+    const workspace = subject.get('workspace')
+    if (typeof preset !== 'string' || !presetIdPattern.test(preset) || !isLiteralAbsolutePath(workspace)) {
+      throw new Error(`lark-channel setup: managed reply rule ${String(id)} has an invalid Agent identity`)
+    }
+    identities.set(`${preset}\0${workspace}`, { preset, workspace })
+  }
+  return [...identities.values()]
+}
+
+function removeManagedReplyRules(rules: YAMLSeq, account: string): void {
+  const base = `lark-owner-reply-${account}`
+  for (let index = rules.items.length - 1; index >= 0; index -= 1) {
+    const item = rules.items[index]
+    if (!isMap(item)) continue
+    const id = item.get('id')
+    if (id === base || (typeof id === 'string' && id.startsWith(`${base}-legacy-`))) {
+      rules.items.splice(index, 1)
+    }
+  }
+}
+
+function legacyIdentitySuffix(identity: AgentIdentity): string {
+  const digest = createHash('sha256')
+    .update(identity.preset)
+    .update('\0')
+    .update(identity.workspace)
+    .digest('hex')
+    .slice(0, 16)
+  return `-legacy-${identity.preset}-${digest}`
+}
+
+function configuredAgentIdentity(rows: YAMLSeq, dshHome: string): { preset: string; workspace: string } {
+  const delivery = findRow(rows, 'dsh-enhanced-assistant-delivery')
+  if (delivery === undefined) {
+    throw new Error('lark-channel setup: dsh-enhanced-assistant-delivery profile row is required')
+  }
+  const config = asMap(delivery.get('config', true) as Node, 'assistant-delivery config')
+  const preset = config.get('defaultAgentPreset')
+  if (typeof preset !== 'string' || !presetIdPattern.test(preset)) {
+    throw new Error('lark-channel setup: assistant-delivery defaultAgentPreset is invalid')
+  }
+  const configuredWorkspace = config.get('defaultWorkspace')
+  const defaultExpression = /^dshHomePath\((['"])assistant-workspace\1\)$/u
+  const defaultWorkspace = !isAbsolute(dshHome) && win32.isAbsolute(dshHome)
+    ? win32.join(dshHome, 'assistant-workspace')
+    : join(dshHome, 'assistant-workspace')
+  const workspace = typeof configuredWorkspace === 'string' && defaultExpression.test(configuredWorkspace)
+    ? defaultWorkspace
+    : configuredWorkspace
+  if (!isLiteralAbsolutePath(workspace)) {
+    throw new Error('lark-channel setup: assistant-delivery defaultWorkspace is invalid')
+  }
+  return { preset, workspace }
+}
+
+function upsertExternalReplyRule(
+  document: Document,
+  rules: YAMLSeq,
+  input: { account: string; identity: AgentIdentity; legacy?: boolean },
+): void {
+  const suffix = input.legacy ? legacyIdentitySuffix(input.identity) : ''
+  upsertById(document, rules, {
+    id: `lark-owner-reply-${input.account}${suffix}`,
+    effect: 'allow',
+    subject: { kind: 'agent', id: input.identity.preset, workspace: input.identity.workspace },
+    actions: ['reply'],
+    resource: { kind: 'message', id: '*' },
+    context: { initiators: ['external'] },
+  })
+}
+
+function upsertExternalToolRules(
+  document: Document,
+  rules: YAMLSeq,
+  input: { account: string; identity: AgentIdentity; tools: readonly string[]; legacy?: boolean },
+): void {
+  const suffix = input.legacy ? legacyIdentitySuffix(input.identity) : ''
+  for (const tool of input.tools) {
+    upsertById(document, rules, {
+      id: `lark-owner-tool-${tool}-${input.account}${suffix}`,
+      effect: 'allow',
+      subject: { kind: 'agent', id: input.identity.preset, workspace: input.identity.workspace },
+      actions: ['execute'],
+      resource: { kind: 'tool', id: tool },
+      context: { initiators: ['external'] },
+    })
+  }
+}
+
+function removeExternalToolRules(rules: YAMLSeq, account: string): void {
+  for (let index = rules.items.length - 1; index >= 0; index -= 1) {
+    const item = rules.items[index]
+    if (!isMap(item)) continue
+    const id = item.get('id')
+    if (typeof id !== 'string') continue
+    const managed = managedAgentTools.some(tool => {
+      const base = `lark-owner-tool-${tool}-${account}`
+      return id === base || id.startsWith(`${base}-legacy-`)
+    })
+    if (managed) rules.items.splice(index, 1)
+  }
+}
+
 function setDefaults(map: YAMLMap, defaults: Readonly<Record<string, unknown>>): void {
   for (const [key, value] of Object.entries(defaults)) {
     if (!map.has(key)) map.set(key, value)
@@ -70,7 +233,7 @@ function setDefaults(map: YAMLMap, defaults: Readonly<Record<string, unknown>>):
 export function configureLarkProfilePatch(input: LarkProfileSetupInput): string {
   const appId = input.appId.trim()
   if (!/^cli_[0-9a-fA-F]{16}$/u.test(appId)) throw new Error('lark-channel setup: invalid appId')
-  const account = requireSetupKey(input.account, 'account')
+  const account = requireAccount(input.account)
   const tenant = requireSetupKey(input.tenant, 'tenant')
   const ownerUserId = requireProviderKey(input.ownerUserId, 'ownerUserId')
   const keychainService = requireProviderKey(input.keychainService, 'keychainService')
@@ -78,6 +241,10 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   const credentialProvider = input.credentialProvider ?? 'macos-keychain'
   if (!['linux-secret-service', 'macos-keychain', 'windows-dpapi'].includes(credentialProvider)) {
     throw new Error('lark-channel setup: invalid credentialProvider')
+  }
+  const agentToolsMode = input.agentTools ?? 'preserve'
+  if (!['disable', 'enable', 'preserve'].includes(agentToolsMode)) {
+    throw new Error('lark-channel setup: invalid agentTools mode')
   }
   const credentialHandle = `lark-app-secret-${account}`
 
@@ -94,6 +261,12 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   const policy = asMap(personalConfig.get('assistantPolicy', true) as Node, 'assistantPolicy config')
   const rules = asSequence(policy.get('rules', true) as Node, 'assistantPolicy rules')
   const principalId = `lark/${account}/${tenant}/${ownerUserId}`
+  const agent = configuredAgentIdentity(rows, input.dshHome)
+  const legacyAgents = managedReplyIdentities(rules, account)
+    .filter(identity => identity.preset !== agent.preset || identity.workspace !== agent.workspace)
+  const agentTools = credentialProvider === 'windows-dpapi'
+    ? ['pwsh', 'read', 'glob', 'grep']
+    : ['bash', 'read', 'glob', 'grep']
 
   upsertById(document, rules, {
     id: `lark-channel-credential-${account}`,
@@ -111,14 +284,32 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
     resource: { kind: 'message', id: '*' },
     context: { initiators: ['external'] },
   })
-  upsertById(document, rules, {
-    id: `lark-owner-reply-${account}`,
-    effect: 'allow',
-    subject: { kind: 'agent', id: 'primary', workspace: join(input.dshHome, 'assistant-workspace') },
-    actions: ['reply'],
-    resource: { kind: 'message', id: '*' },
-    context: { initiators: ['external'] },
-  })
+  if (agentToolsMode === 'disable') removeExternalToolRules(rules, account)
+  if (agentToolsMode === 'enable') {
+    removeExternalToolRules(rules, account)
+    upsertExternalToolRules(document, rules, {
+      account,
+      identity: agent,
+      tools: agentTools,
+    })
+    for (const legacyAgent of legacyAgents) {
+      upsertExternalToolRules(document, rules, {
+        account,
+        identity: legacyAgent,
+        tools: agentTools,
+        legacy: true,
+      })
+    }
+  }
+  removeManagedReplyRules(rules, account)
+  upsertExternalReplyRule(document, rules, { account, identity: agent })
+  for (const legacyAgent of legacyAgents) {
+    upsertExternalReplyRule(document, rules, {
+      account,
+      identity: legacyAgent,
+      legacy: true,
+    })
+  }
 
   const credentialsRow = ensureRow(document, rows, 'dsh-enhanced-credentials-keychain')
   const credentials = asMap(credentialsRow.get('config', true) as Node, 'credentials-keychain config')

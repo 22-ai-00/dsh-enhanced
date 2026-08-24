@@ -1,6 +1,9 @@
 import { Context } from '@deepseek-ai/cordis'
+import Loader from '@deepseek-ai/cordis-plugin-loader'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import {
   LlmAdapter,
   ReasoningEffortId,
@@ -11,8 +14,9 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { SessionPreparation, type SessionEvent, type SessionHeader, type SessionId } from '@deepseek-ai/dsh-session'
+import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -23,6 +27,26 @@ import type {
 } from '../src/types.ts'
 
 const roots: string[] = []
+const PRESET_TOOLS = ['bash', 'read', 'grep', 'glob'] as const
+
+const presetToolsPlugin = {
+  name: 'assistant-delivery-test-tools',
+  inject: ['tools'],
+  apply(ctx: Context) {
+    for (const name of PRESET_TOOLS) {
+      ctx.tools.register(defineTool({
+        name,
+        description: `${name} preset fixture`,
+        parameters: {},
+        output: {
+          schema: { type: 'object', additionalProperties: false, properties: {} },
+          render: () => [],
+        },
+        async execute() { return {} },
+      }))
+    }
+  },
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
@@ -79,9 +103,39 @@ async function runtimeHarness(
   saved: Map<string, SavedSession>,
   defaultRoute = { provider: 'mock', model: 'delivery-model' },
   channelFormats: readonly OutboundFormat[] = ['plain', 'model-picker'],
+  workspace = root,
+  presetRoot?: string,
+  agentPreset = 'primary',
+  provideAgentPresets = true,
 ) {
   const ctx = new Context()
-  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
+  if (presetRoot !== undefined) await ctx.plugin(Loader)
+  await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' }, tools: { mode: 'native' } })
+  if (presetRoot === undefined && provideAgentPresets) {
+    const presetResolve = vi.fn(async (id?: string) => ({ id: id ?? agentPreset }))
+    const presetMount = vi.fn(async (agentCtx: Agent['ctx'], id?: string) => {
+      agentCtx.tools.register(defineTool({
+        name: 'preset_probe',
+        description: 'Visible only when the delivery Agent mounts its configured preset.',
+        parameters: {},
+        output: {
+          schema: { type: 'object', additionalProperties: false,
+            properties: { mounted: { type: 'boolean', required: true } } },
+          render: (_args, output) => [{ type: 'text', text: JSON.stringify(output) }],
+        },
+        async execute() { return { mounted: true } },
+      }))
+      return { id: id ?? agentPreset }
+    })
+    ctx.provide('agentPresets' as never, { resolve: presetResolve, mount: presetMount } as never)
+  } else if (presetRoot !== undefined) {
+    ctx.loader.builtins['assistant-delivery-test-tools'] = presetToolsPlugin
+    await ctx.plugin(AgentPresets, {
+      default: agentPreset,
+      roots: [{ path: presetRoot, trust: 'system' }],
+      includeUserRoot: false,
+    })
+  }
   ctx.on('session/flush', session => {
     saved.set(String(session.id), structuredClone({ header: session.header, events: session.events }))
   })
@@ -100,11 +154,11 @@ async function runtimeHarness(
       resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
     { id: 'owner-ingest', effect: 'allow', subject: { kind: 'external', id: 'lark/bot-1/tenant-a/ou_owner' },
       actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
-    { id: 'agent-reply', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root },
+    { id: 'agent-reply', effect: 'allow', subject: { kind: 'agent', id: agentPreset, workspace },
       actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
   ] })
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
-    schedulerEnabled: false, defaultWorkspace: root, defaultAgentPreset: 'primary', agentProvider: defaultRoute.provider,
+    schedulerEnabled: false, defaultWorkspace: workspace, defaultAgentPreset: agentPreset, agentProvider: defaultRoute.provider,
     agentModel: defaultRoute.model })
   const llm = new ReplyAdapter()
   ctx.llm.registerAdapter(['mock'], llm)
@@ -194,6 +248,146 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(restarted.llm.requests).toHaveLength(1)
     expect(JSON.stringify(restarted.llm.requests[0]!.messages)).toContain('second')
     expect(restarted.sends.map(value => value.text)).toEqual(['reply-1'])
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('mounts the durable preset before fresh and restarted Agent requests', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-preset-'))
+    roots.push(root)
+    const presetRoot = join(root, 'presets')
+    await mkdir(join(presetRoot, 'standard'), { recursive: true })
+    await writeFile(join(presetRoot, 'standard', 'agent.cordis.yml'), [
+      '- id: tools',
+      '  name: cordis:assistant-delivery-test-tools',
+      '',
+    ].join('\n'))
+    const saved = new Map<string, SavedSession>()
+    const first = await runtimeHarness(root, saved, undefined, undefined, root, presetRoot, 'standard')
+    const firstPublished: Array<string | undefined> = []
+    first.ctx.on('agent/created', ({ agent }) => {
+      firstPublished.push(first.ctx.agentPresets.composedPreset(agent.ctx))
+    })
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await first.service.acceptInbound(message('evt-preset-first', 'first'))
+    expect(firstPublished).toEqual(['standard'])
+    await drive(first.service)
+    expect(firstPublished).toEqual(['standard', 'standard'])
+    expect(first.llm.requests[0]?.tools?.map(tool => tool.name))
+      .toEqual(expect.arrayContaining([...PRESET_TOOLS]))
+    await first.ctx.fiber.restart()
+
+    const restarted = await runtimeHarness(root, saved, undefined, undefined, root, presetRoot, 'standard')
+    const restartedPublished: Array<string | undefined> = []
+    restarted.ctx.on('agent/created', ({ agent }) => {
+      restartedPublished.push(restarted.ctx.agentPresets.composedPreset(agent.ctx))
+    })
+    await restarted.service.acceptInbound(message('evt-preset-resume', 'after restart'))
+    await drive(restarted.service)
+    expect(restartedPublished).toEqual(['standard'])
+    expect(restarted.llm.requests[0]?.tools?.map(tool => tool.name))
+      .toEqual(expect.arrayContaining([...PRESET_TOOLS]))
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('keeps headless global-tool composition working when no AgentPresets roster is installed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-headless-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', false)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-headless', 'hello'))
+    await drive(fixture.service)
+
+    expect(fixture.llm.requests).toHaveLength(1)
+    expect(fixture.llm.requests[0]?.tools?.map(tool => tool.name)).not.toContain('preset_probe')
+    expect([...saved.values()][0]?.header.agentPreset).toBe('primary')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('rolls back an unpublished binding when preset mounting fails and can retry the same event', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-preset-failure-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const mount = vi.spyOn(fixture.ctx.agentPresets, 'mount')
+      .mockRejectedValueOnce(new Error('preset fixture unavailable'))
+    const inbound = message('evt-preset-failure', 'hello')
+
+    await expect(fixture.service.acceptInbound(inbound)).rejects.toThrow(/preset fixture unavailable/u)
+    expect(mount).toHaveBeenCalledOnce()
+    await expect(fixture.service.acceptInbound(inbound)).resolves.toMatchObject({ duplicate: true, status: 'queued' })
+    await drive(fixture.service)
+
+    expect(fixture.llm.requests).toHaveLength(1)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('creates a missing configured workspace before starting its first Agent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-workspace-'))
+    roots.push(root)
+    const workspace = join(root, 'missing', 'assistant-workspace')
+    const saved = new Map<string, SavedSession>()
+    const fixture = await runtimeHarness(root, saved, undefined, undefined, workspace)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-workspace', 'hello'))
+    await drive(fixture.service)
+    await expect(access(workspace)).resolves.toBeUndefined()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('does not silently recreate a deleted durable workspace before a cold Agent resume', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-resume-workspace-'))
+    roots.push(root)
+    const workspace = join(root, 'workspace')
+    const saved = new Map<string, SavedSession>()
+    const first = await runtimeHarness(root, saved, undefined, undefined, workspace)
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await first.service.acceptInbound(message('evt-resume-workspace-first', 'first'))
+    await drive(first.service)
+    await first.ctx.fiber.restart()
+    await rm(workspace, { recursive: true, force: true })
+
+    const restarted = await runtimeHarness(root, saved, undefined, undefined, workspace)
+    await restarted.service.acceptInbound(message('evt-resume-workspace-second', 'second'))
+    await drive(restarted.service)
+
+    await expect(access(workspace)).rejects.toThrow()
+    expect(restarted.llm.requests).toHaveLength(0)
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('dead-letters a durable Agent identity mismatch without retrying it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-identity-mismatch-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const first = await runtimeHarness(root, saved)
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await first.service.acceptInbound(message('evt-identity-first', 'first'))
+    await drive(first.service)
+    await first.ctx.fiber.restart()
+    for (const [id, session] of saved) {
+      saved.set(id, { ...session, header: { ...session.header, cwd: join(root, 'tampered-workspace') } })
+    }
+
+    const restarted = await runtimeHarness(root, saved)
+    const inbound = message('evt-identity-mismatch', 'second')
+    await restarted.service.acceptInbound(inbound)
+    await drive(restarted.service)
+
+    expect(restarted.llm.requests).toHaveLength(0)
+    await expect(restarted.service.acceptInbound(inbound)).resolves.toMatchObject({
+      duplicate: true,
+      status: 'dead_letter',
+    })
     await restarted.ctx.fiber.restart()
   })
 

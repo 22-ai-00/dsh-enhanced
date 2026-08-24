@@ -54,6 +54,7 @@
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-agent-presets": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-session": ">=0.1.0-rc.8 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
@@ -61,15 +62,18 @@
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": { "optional": true },
     "@deepseek-ai/dsh-agent": { "optional": true },
+    "@deepseek-ai/dsh-agent-presets": { "optional": true },
     "@deepseek-ai/dsh-llm": { "optional": true },
     "@deepseek-ai/dsh-session": { "optional": true },
     "@dsh-enhanced/assistant-policy": { "optional": true }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
+    "@deepseek-ai/cordis-plugin-loader": "catalog:",
     "@deepseek-ai/dsh-agent": "catalog:",
     "@deepseek-ai/dsh-agent-loop": "catalog:",
     "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
+    "@deepseek-ai/dsh-agent-presets": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",

@@ -6,7 +6,7 @@
 
 ## 兼容性与安装顺序
 
-- DSH / Agent / LLM / Session：`>=0.1.0-rc.8 <0.2.0`
+- DSH / Agent / Agent Presets / LLM / Session：`>=0.1.0-rc.8 <0.2.0`
 - Cordis：`^4.0.1`
 - `@dsh-enhanced/assistant-policy`：`>=0.1.0 <0.2.0`，硬依赖
 - 真实多轮恢复还要求 profile 已配置官方 `ctx.sessionPersistence` provider；缺失时新建空 session 可以成功，但冷 resume 会进入有界失败/死信路径。
@@ -17,7 +17,7 @@ dsh plugin --profile headless add @dsh-enhanced/assistant-delivery
 dsh --profile headless --dump-config
 ```
 
-Patch 通过 `inject: [assistantPolicy]` 固定加载依赖。`schedulerEnabled` 默认开启，因此生产环境必须由 launchd、systemd 或 Docker restart policy 监管 DSH 进程。
+Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent runtime 另外等待 `agents`、`sessions` 与 `llm` 就绪。Web profile 提供 `agentPresets` 时会解析并挂载 session preset；不带 roster 的 headless profile 保留宿主全局工具组合。`schedulerEnabled` 默认开启，因此生产环境必须由 launchd、systemd 或 Docker restart policy 监管 DSH 进程。
 
 ## 配置
 
@@ -33,14 +33,14 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载依赖。`schedulerEnabled`
 | `maxTextBytes` | `65536` | 单条入站/出站正文 UTF-8 上限 |
 | `retryBaseMs` / `retryMaxMs` | `1000` / `300000` | 指数退避边界；adapter 的 Retry-After 是下限 |
 | `pairingTtlMs` / `pairingMaxAttempts` | `600000` / `5` | 一次性本地配对时效与尝试上限 |
-| `defaultWorkspace` | `$DSH_HOME/assistant-workspace` | owner DM 新 session 的绝对工作区 |
-| `defaultAgentPreset` | `standard` | 新 session 使用的 preset；该内置 preset 提供 Bash、文件、检索、Skills 等完整编码能力 |
+| `defaultWorkspace` | `$DSH_HOME/assistant-workspace` | 新 session 的绝对工作区；fresh create 前自动创建缺失目录 |
+| `defaultAgentPreset` | `standard` | 新 session 解析并挂载的 preset；该内置 preset 提供 Bash、文件、检索、Skills 等完整编码能力 |
 | `policyRef` | `owner-dm` | 固化在 binding 上的策略引用标签 |
 | `agentProvider` / `agentModel` | `deepseek-official` / `deepseek-v4-flash` | 渠道 Agent 的部署默认模型；会话可用 `/model` 覆盖 |
 | `agentMaxOutputTokens` | `8192` | 单轮模型输出上限 |
 | `modelPickerTtlMs` | `900000` | `/model` 选择卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 
-所有可变部署值都经过 Schemastery 校验。SQLite 使用 `WAL`、`synchronous=FULL`、foreign keys、busy timeout 和 forward-only schema；目录/数据库权限分别收窄为 `0700` / `0600`，未来 schema 会拒绝打开。
+所有可变部署值都经过 Schemastery 校验。每个 binding 会持久固定 workspace 与已解析的 preset id；有 roster 时，fresh create 和 cold resume 都在 Agent 发布前挂载该 preset，不能把 session header 中的 `agentPreset` 当成已经完成组合。fresh create 的新 workspace 使用 `0700` 请求模式，已有目录的权限不会被改写；cold resume 只验证持久 workspace 仍是目录，不会在仓库被删除或网络盘掉线时悄悄创建一个空目录。SQLite 使用 `WAL`、`synchronous=FULL`、foreign keys、busy timeout 和 forward-only schema；私有目录/数据库权限分别收窄为 `0700` / `0600`，未来 schema 会拒绝打开。
 
 ## Policy 最小示例
 
@@ -62,9 +62,15 @@ rules:
     context: { initiators: [external] }
   - id: owner-channel-reply
     effect: allow
-    subject: { kind: agent, id: primary, workspace: "/absolute/workspace" }
+    subject: { kind: agent, id: standard, workspace: "/absolute/workspace" }
     actions: [reply]
     resource: { kind: message, id: "*" }
+    context: { initiators: [external] }
+  - id: owner-channel-bash
+    effect: allow
+    subject: { kind: agent, id: standard, workspace: "/absolute/workspace" }
+    actions: [execute]
+    resource: { kind: tool, id: bash }
     context: { initiators: [external] }
   - id: one-automation-send
     effect: allow
@@ -73,6 +79,8 @@ rules:
     resource: { kind: message, id: "binding_*" }
     context: { initiators: [background] }
 ```
+
+工具可见性和执行授权是两道独立门：preset mount 决定 `bash`、`read`、`glob`、`grep` 是否进入 Agent 工具目录，Policy 再按精确 preset、workspace、initiator 和工具名决定能否调用。不要为 external 的 `execute/tool` 规则使用工具 id `"*"`；message ingress/reply 使用 `resource.id: "*"` 是预期行为。`policyRef` 目前只是 binding 上的审计标签，不会把规则自动收窄为 DM；`external` Agent 规则会覆盖同一 preset/workspace 下已经通过 Delivery ingress 的外部会话，包括群内 @ 场景。
 
 `issuePairing()`、`linkPrincipal()`、`resolveDeadLetter()` 是可信本地控制面 API，不注册为模型工具。配对 code 只返回一次，数据库只保存随机 salt 的 scrypt hash；空 allowlist 不会把第一位来信者设成 owner。跨平台 principal 必须分别配对后再由 owner 显式 link。
 
@@ -99,7 +107,7 @@ rules:
 { "kind": "delivery", "channel": "lark", "account": "my-bot", "eventId": "...", "trust": "untrusted" }
 ```
 
-真实 principal、tenant、token 不注入 prompt。每个 binding 的 session id 由 conversation + generation 确定生成；`/new` 新建下一 generation 并保留旧 session。lookup/create 进程内 single-flight，SQLite unique constraint 是最终冲突边界。
+真实 principal、tenant、token 不注入 prompt。每个 binding 的 session id 由 conversation + generation 确定生成；`/new` 新建下一 generation 并保留旧 session。有 roster 时，binding 中的 preset 会在每次 create/resume 时重新解析并挂载到 Agent scope，因此 Web profile 可以继续关闭全局 Bash/FS，而渠道 Agent 仍获得自己的 preset 工具；无 roster 的 headless profile 则沿用宿主全局组合。lookup/create 进程内 single-flight，SQLite unique constraint 是最终冲突边界。
 
 渠道控制命令在进入 Agent 前处理，因此默认模型未安装或临时不可用时，仍可自助恢复：
 
@@ -136,9 +144,9 @@ rules:
 
 ## 权限与数据边界
 
-- **文件系统：**读写配置的 SQLite 与私有 spool 目录；不读任意 workspace 文件。
+- **文件系统：**读写配置的 SQLite 与私有 spool 目录，并在 fresh Agent create 前创建缺失的 workspace；cold resume 只验证原目录仍存在。Delivery 本身不读取任意 workspace 文件。挂载 preset 后，获 Policy 允许的文件工具可在 DSH 文件权限边界内读取 workspace。
 - **网络：**本包自身无网络访问；网络权限属于注册的渠道 adapter。
-- **进程/浏览器：**无 subprocess、shell 或 browser 权限。
+- **进程/浏览器：**Delivery 本身不启动 subprocess、shell 或 browser；它挂载的 preset 可以暴露 Bash/Pwsh，真正执行由宿主 sandbox、approval 与 Policy 三层共同约束。
 - **凭据：**不接收、存储或输出 provider token；adapter 必须通过 SecretRef/后续 credentials service 获取。
 - **数据：**Inbox/Outbox 会保存消息正文、外部 identity 和 route，属于 PII。入站附件只登记最多 10 个受限 provider descriptor，状态固定为 `metadata`，不会自动下载；工具与 Policy audit 只暴露状态或 hash。当前版本不自动清理历史，请依部署的数据保留策略备份/轮换私有数据库。
 

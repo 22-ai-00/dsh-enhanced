@@ -201,6 +201,7 @@ export class AssistantDeliveryService extends Service {
     ctx.inject(['agents', 'sessions', 'llm'], runtimeCtx => {
       const unregister = this.registerInboundRuntime(new DshDeliveryRuntime(runtimeCtx, policy, {
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
+        getAgentPresets: () => runtimeCtx.get('agentPresets'),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
         modelPickerTtlMs: config.modelPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),

@@ -1,6 +1,13 @@
 import { createHash } from 'node:crypto'
+import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
-import { installModelSelection, type Agent, type AgentHandle } from '@deepseek-ai/dsh-agent'
+import {
+  installModelSelection,
+  type Agent,
+  type AgentHandle,
+  type ModelSelection,
+} from '@deepseek-ai/dsh-agent'
+import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage, ReasoningEffortId, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -32,6 +39,7 @@ declare module '@deepseek-ai/dsh-llm' {
 interface DshDeliveryRuntimeOptions {
   workspace: string
   agentPreset: string
+  getAgentPresets(): Pick<AgentPresets, 'mount' | 'resolve'> | undefined
   policyRef: string
   provider: string
   model: string
@@ -63,6 +71,8 @@ interface ModelCommandReply {
 const MAX_CATALOG_MODELS = 50
 const MAX_PROGRESS_TODOS = 20
 const MAX_PROGRESS_TEXT_CHARS = 240
+
+class DurableAgentIdentityError extends Error {}
 
 function boundedProgressText(value: string): string {
   return [...value].slice(0, MAX_PROGRESS_TEXT_CHARS).join('')
@@ -332,6 +342,38 @@ function sessionId(conversation: InboundEnvelope['conversation'], generation: nu
   return SessionId(`delivery-${hash}-g${generation}`)
 }
 
+async function ensureWorkspace(workspace: string): Promise<void> {
+  try {
+    await mkdir(workspace, { recursive: true, mode: 0o700 })
+  } catch (error) {
+    throw new Error(`assistant-delivery: failed to ensure workspace "${workspace}": ${String(error)}`, {
+      cause: error,
+    })
+  }
+}
+
+async function requireWorkspace(workspace: string): Promise<void> {
+  try {
+    const metadata = await stat(workspace)
+    if (!metadata.isDirectory()) throw new Error('path is not a directory')
+  } catch (error) {
+    throw new Error(`assistant-delivery: durable workspace "${workspace}" is unavailable: ${String(error)}`, {
+      cause: error,
+    })
+  }
+}
+
+function causedByDurableIdentity(error: unknown): boolean {
+  let current = error
+  const visited = new Set<unknown>()
+  while (current instanceof Error && !visited.has(current)) {
+    if (current instanceof DurableAgentIdentityError) return true
+    visited.add(current)
+    current = current.cause
+  }
+  return false
+}
+
 function finalAssistant(
   events: readonly SessionEvent[],
   from: number,
@@ -365,6 +407,26 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     private readonly options: DshDeliveryRuntimeOptions,
   ) {}
 
+  private async setupAgent(
+    agentCtx: Agent['ctx'],
+    workspace: string,
+    presetId: string,
+    selected: ModelSelection,
+    agentPresets: Pick<AgentPresets, 'mount'> | undefined,
+  ): Promise<void> {
+    const agent = agentCtx.agent
+    if (agent === undefined) throw new Error('assistant-delivery: unpublished Agent identity is missing')
+    if (agent.session.header.cwd !== workspace || agent.session.header.agentPreset !== presetId) {
+      throw new DurableAgentIdentityError(
+        'assistant-delivery: durable Agent identity does not match its conversation binding',
+      )
+    }
+    const unbind = this.policy.bindInitiator(agent, 'external')
+    agentCtx.effect(() => unbind, 'assistant-delivery.external-initiator')
+    installModelSelection(agentCtx, { current: selected, assembled: undefined })
+    await agentPresets?.mount(agentCtx, presetId)
+  }
+
   async createSession(input: {
     envelope: Readonly<InboundEnvelope>
     generation: number
@@ -375,28 +437,28 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     const sessions = this.ctx.get('sessions')
     if (agents === undefined || sessions === undefined) throw new Error('assistant-delivery: agents and sessions services are required')
     const id = sessionId(input.envelope.conversation, input.generation)
+    const workspace = input.previous?.workspace ?? this.options.workspace
+    const requestedPreset = input.previous?.agentPreset ?? this.options.agentPreset
+    const agentPresets = this.options.getAgentPresets()
+    const presetId = agentPresets === undefined
+      ? requestedPreset
+      : (await agentPresets.resolve(requestedPreset)).id
+    await ensureWorkspace(workspace)
     const selected = agentSelection(toModelRoute(this.options.getModelSelection(input.envelope.conversation)
       ?? { provider: this.options.provider, model: this.options.model }))
     let handle: AgentHandle | undefined
-    let unbind: (() => void) | undefined
     try {
       handle = await agents.create({ sessionId: id,
-        meta: { cwd: input.previous?.workspace ?? this.options.workspace,
-          agentPreset: input.previous?.agentPreset ?? this.options.agentPreset },
+        meta: { cwd: workspace, agentPreset: presetId },
         agentOptions: { provider: selected.provider, model: selected.model,
           maxTokens: this.options.maxOutputTokens }, signal: input.signal,
-        setup: agentCtx => {
-          if (agentCtx.agent === undefined) throw new Error('assistant-delivery: unpublished Agent identity is missing')
-          unbind = this.policy.bindInitiator(agentCtx.agent, 'external')
-          installModelSelection(agentCtx, { current: selected,
-            assembled: undefined })
+        setup: async agentCtx => {
+          await this.setupAgent(agentCtx, workspace, presetId, selected, agentPresets)
         } })
       await sessions.flush(handle.agent.session)
-      return { sessionId: String(id), workspace: input.previous?.workspace ?? this.options.workspace,
-        agentPreset: input.previous?.agentPreset ?? this.options.agentPreset,
+      return { sessionId: String(id), workspace, agentPreset: presetId,
         policyRef: input.previous?.policyRef ?? this.options.policyRef }
     } finally {
-      unbind?.()
       await handle?.dispose()
     }
   }
@@ -443,7 +505,6 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     const selected = agentSelection(toModelRoute(this.options.getModelSelection(envelope.conversation)
       ?? { provider: this.options.provider, model: this.options.model }))
     let handle: AgentHandle | undefined
-    let unbind: (() => void) | undefined
     let dispatched = false
     let removeAbort: (() => void) | undefined
     let removeProgress: (() => void) | undefined
@@ -455,14 +516,16 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         .catch(() => {})
     }
     try {
+      const agentPresets = this.options.getAgentPresets()
+      const presetId = agentPresets === undefined
+        ? binding.agentPreset
+        : (await agentPresets.resolve(binding.agentPreset)).id
+      await requireWorkspace(binding.workspace)
       handle = await agents.resume({ resumeSessionId: SessionId(binding.sessionId), signal,
         agentOptions: { provider: selected.provider, model: selected.model,
           maxTokens: this.options.maxOutputTokens },
-        setup: agentCtx => {
-          if (agentCtx.agent === undefined) throw new Error('assistant-delivery: unpublished Agent identity is missing')
-          unbind = this.policy.bindInitiator(agentCtx.agent, 'external')
-          installModelSelection(agentCtx, { current: selected,
-            assembled: undefined })
+        setup: async agentCtx => {
+          await this.setupAgent(agentCtx, binding.workspace, presetId, selected, agentPresets)
         } })
       const agent = handle.agent
       const from = agent.session.events.length
@@ -502,11 +565,13 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         await progressQueue
         throw new Error(`assistant-delivery: Agent turn became ambiguous: ${String(error)}`, { cause: error })
       }
+      if (causedByDurableIdentity(error)) {
+        return { outcome: 'not-processed', failureCode: 'agent-identity-mismatch', retryable: false }
+      }
       return { outcome: 'not-processed', failureCode: 'agent-resume-failed', retryable: true }
     } finally {
       removeAbort?.()
       removeProgress?.()
-      unbind?.()
       await handle?.dispose()
     }
   }

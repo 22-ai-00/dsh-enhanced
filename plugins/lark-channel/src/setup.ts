@@ -30,6 +30,7 @@ export interface LarkSetupArgs {
   timeoutMs: number
   installServiceOnly: boolean
   manageService: boolean
+  agentTools: 'disable' | 'enable' | 'preserve'
   help: boolean
 }
 
@@ -53,6 +54,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     timeoutMs: 300_000,
     installServiceOnly: false,
     manageService: true,
+    agentTools: 'preserve',
     help: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
@@ -70,6 +72,12 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     else if (option === '--create-app') result.createApp = true
     else if (option === '--install-service') result.installServiceOnly = true
     else if (option === '--no-service') result.manageService = false
+    else if (option === '--allow-agent-tools' || option === '--disable-agent-tools') {
+      if (result.agentTools !== 'preserve') {
+        throw new Error('lark-channel setup: --allow-agent-tools and --disable-agent-tools are mutually exclusive')
+      }
+      result.agentTools = option === '--allow-agent-tools' ? 'enable' : 'disable'
+    }
     else if (option === '--app-name') result.appName = argumentValue(argv, index++, option)
     else if (option === '--timeout-ms') result.timeoutMs = Number(argumentValue(argv, index++, option))
     else throw new Error(`lark-channel setup: unknown option: ${option}`)
@@ -85,6 +93,9 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
   }
   if (result.installServiceOnly && (result.createApp || result.appId !== undefined)) {
     throw new Error('lark-channel setup: --install-service cannot be combined with application setup options')
+  }
+  if (result.installServiceOnly && result.agentTools !== 'preserve') {
+    throw new Error('lark-channel setup: --install-service cannot be combined with agent-tools options')
   }
   const appNameHasControlCharacter = [...result.appName]
     .some(character => character.codePointAt(0)! <= 31 || character.codePointAt(0) === 127)
@@ -235,6 +246,8 @@ Options:
   --app-id <cli_...>      Existing app id; combine with --create-app to update it
   --install-service       Only install/restart the profile's resident service
   --no-service            Configure Lark without installing a resident service
+  --allow-agent-tools     Allow exact shell/read/search tools for external Agent turns
+  --disable-agent-tools   Remove setup-managed external Agent tool rules
   --timeout-ms <ms>      Owner DM wait, 30000..900000 (default: 300000)
   -h, --help             Show this help
 
@@ -541,6 +554,7 @@ export async function runLarkSetup(argv: readonly string[] = process.argv.slice(
     keychainService,
     keychainAccount: args.account,
     credentialProvider,
+    agentTools: args.agentTools,
     ...(credentialPath === undefined ? {} : { credentialPath }),
   })
 

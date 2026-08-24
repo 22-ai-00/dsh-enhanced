@@ -12,6 +12,9 @@ catalogs:
     '@deepseek-ai/cordis':
       specifier: 4.0.1
       version: 4.0.1
+    '@deepseek-ai/cordis-plugin-loader':
+      specifier: 1.0.2
+      version: 1.0.2
     '@deepseek-ai/dsh-agent':
       specifier: 0.1.0-rc.8
       version: 0.1.0-rc.8
@@ -263,6 +266,9 @@ importers:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
         version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/cordis-plugin-loader':
+        specifier: 'catalog:'
+        version: 1.0.2(@deepseek-ai/cordis@4.0.1)
       '@deepseek-ai/dsh-agent':
         specifier: 'catalog:'
         version: 0.1.0-rc.8(163ec746819ca45896bc0b506439513f)
@@ -272,6 +278,9 @@ importers:
       '@deepseek-ai/dsh-agent-loop-testkit':
         specifier: 'catalog:'
         version: 0.1.0-rc.8(24ed038910298de3ab00586464773123)
+      '@deepseek-ai/dsh-agent-presets':
+        specifier: 'catalog:'
+        version: 0.1.0-rc.8(078d130fd1a2763f24d365bab71e219e)
       '@deepseek-ai/dsh-llm':
         specifier: 'catalog:'
         version: 0.1.0-rc.8(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))
