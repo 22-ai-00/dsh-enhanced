@@ -1,5 +1,6 @@
 import { resolve } from 'node:path'
 import {
+  CONTEXT_WINDOW_EXCEEDED_CODE,
   LlmAdapter,
   LlmError,
   ReasoningEffortId,
@@ -157,6 +158,14 @@ function cliFailure(definition: RouteDefinition, command: string, error: unknown
     'CLI_FAILED',
     { cause: error },
   )
+}
+
+/** Report a local prompt bound through DSH's canonical overflow path so compaction can retry it. */
+function preflightFailure(error: unknown): Error {
+  if (error instanceof Error && error.cause === 'prompt-limit') {
+    return new LlmError(error.message, CONTEXT_WINDOW_EXCEEDED_CODE, { cause: error })
+  }
+  return error instanceof Error ? error : new Error('coding subscription provider could not serialize the DSH request')
 }
 
 /** Classify the original transport error into a stable, credential-free outcome for diagnostics. */
@@ -384,7 +393,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     let transportContext: ProviderFailureContext | undefined
     // Track the best-known lifecycle facts so a single settled report fires on ANY exit,
     // including a consumer that returns early after block-start or a text delta.
-    let phase: RouteFailureContext['phase'] = 'auth'
+    let phase: RouteFailureContext['phase'] = 'preflight'
     let promptSubmissionState: PromptSubmissionState = 'not-submitted'
     let outcome: RouteOutcome = 'aborted'
     let reported = false
@@ -407,6 +416,25 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     }
 
     try {
+      if (signal.aborted) throw abortReason(signal)
+      // Build and bound the argv locally before any auth probe or generation subprocess starts.
+      let invocation: CliInvocation
+      try {
+        invocation = buildInvocation(definition.cli, {
+          cwd: this.cwd,
+          prompt: buildPrompt(options, this.config.maxPromptBytes),
+          model: options.model,
+          ...(definition.cli !== 'cursor' && options.reasoningEffort !== undefined
+            ? { reasoningEffort: String(options.reasoningEffort) }
+            : {}),
+          maxTurns: profile.maxTurns,
+          command: profile.command,
+        })
+      } catch (error: unknown) {
+        outcome = 'preflight'
+        throw preflightFailure(error)
+      }
+      phase = 'auth'
       try {
         await this.verifyAuth(definition.cli, {
           command: profile.command,
@@ -425,24 +453,6 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         else this.subscriptionCatalogCache.delete(definition.cli)
         outcome = outcomeFor(error)
         throw cliFailure(definition, profile.command, error)
-      }
-      // Preflight prompt serialization runs before spawn; a failure here is provably not-submitted.
-      phase = 'preflight'
-      let invocation: CliInvocation
-      try {
-        invocation = buildInvocation(definition.cli, {
-          cwd: this.cwd,
-          prompt: buildPrompt(options, this.config.maxPromptBytes),
-          model: options.model,
-          ...(definition.cli !== 'cursor' && options.reasoningEffort !== undefined
-            ? { reasoningEffort: String(options.reasoningEffort) }
-            : {}),
-          maxTurns: profile.maxTurns,
-          command: profile.command,
-        })
-      } catch (error: unknown) {
-        outcome = 'preflight'
-        throw error
       }
       const runnerOptions: RunCliTextOptions = {
         timeoutMs: this.config.timeoutMs,

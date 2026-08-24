@@ -151,6 +151,8 @@ XAI_API_KEY
 
 任务正文当前作为独立 argv 元素传给官方 CLI。它不会经过 shell，但仍受操作系统命令行长度限制，并且在某些系统上可能被同机高权限用户通过进程列表看到；敏感、多用户主机应增加 OS 级隔离。默认 prompt 上限因此保守设为 128 KiB。
 
+DSH 的 skill catalog 更新是完整替换。序列化兼容 prompt 时，若最新目录明确带有 replacement 标记，插件只发送最新目录，不再重复发送它已经取代的旧目录；durable session 历史不会被改写。裁剪后仍超过 `maxPromptBytes` 时，插件返回标准 `CONTEXT_WINDOW_EXCEEDED`；宿主启用了自动 compaction 时，可据此先压缩历史再重试。
+
 ## 排查
 
 调用失败时会返回稳定的 `LlmError` code。常见对应关系：
@@ -160,6 +162,7 @@ XAI_API_KEY
 | `SUBSCRIPTION_AUTH_REQUIRED` | 调用前的认证门禁未通过（未登录，或检测到 API key / 非订阅来源） | 在同一 OS 用户下重新 `login`；确认没有把 API key 写进 `extraEnvNames`；Grok 需另设 `userVerifiedSubscription: true`（见「订阅认证优先」）。 |
 | `CLI_NOT_FOUND` | 找不到可执行文件（`ENOENT`） | 核对该 provider 的 `command` 是否为正确的命令名/绝对路径，并确认它在 DSH 进程的 `PATH` 中。 |
 | `CLI_WORKING_DIRECTORY` | Codex 拒绝了配置的工作目录，因为它不是可接受的 Git 仓库 | 把 profile 中的 `cwd` 改为目标 Git 仓库的绝对路径并重启 DSH；不要只根据 Web 会话显示的 cwd 推断子进程 cwd。 |
+| `CONTEXT_WINDOW_EXCEEDED` | 去除已被替换的旧 skill catalog 后，序列化请求仍超过 `maxPromptBytes` | 若宿主已启用自动 compaction，可等待其压缩并重试；否则手动缩短/压缩历史或 skill 描述。只有确认 OS 命令行上限足够时才调大 `maxPromptBytes`。 |
 | `CLI_TIMEOUT` | 单次调用超过 `timeoutMs` | 简化 prompt，或调大 `timeoutMs`；确认官方 CLI 未卡在交互式提示上。 |
 | `CLI_PROTOCOL_ERROR` | 输出流没有可识别的 assistant 文本或缺少规定终态（含畸形/仅未知事件、Cursor 非 `login` 来源） | 手动跑一次官方 CLI 确认其正常输出；若为 CLI 版本漂移导致，见下文 fixture 采集。 |
 | `CLI_FAILED` | 子进程非零退出或其他未归类失败 | 开 `logDiagnostics` 看脱敏 stderr 尾部；单独运行官方 CLI 复现。 |

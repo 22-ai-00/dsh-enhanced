@@ -1,4 +1,9 @@
-import { createMessage, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import {
+  CONTEXT_WINDOW_EXCEEDED_CODE,
+  createMessage,
+  ReasoningEffortId,
+  type GenerateOptions,
+} from '@deepseek-ai/dsh-llm'
 import { describe, expect, it, vi } from 'vitest'
 import { CodingSubscriptionAdapter, redactDiagnostic } from '../src/adapter.ts'
 import { SubscriptionAuthError } from '../src/auth.ts'
@@ -279,22 +284,53 @@ describe('coding subscription LLM adapter', () => {
   it('reports a preflight, not-submitted context when prompt serialization exceeds the byte limit', async () => {
     let context: { phase?: string; promptSubmissionState?: string; outcome?: string; teardownState?: string } | undefined
     const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const verifyAuth = vi.fn(async () => {})
     const config = Config()
     config.maxPromptBytes = 1
     const adapter = new CodingSubscriptionAdapter(config, {
       runText,
-      verifyAuth: async () => {},
+      verifyAuth,
       onSettled: value => { context = value },
     })
     await expect((async () => {
       for await (const _chunk of adapter.stream(request())) { /* drain */ }
-    })()).rejects.toThrow('configured limit')
+    })()).rejects.toMatchObject({
+      code: CONTEXT_WINDOW_EXCEEDED_CODE,
+      message: expect.stringContaining('configured limit'),
+    })
+    expect(verifyAuth).not.toHaveBeenCalled()
     expect(runText).not.toHaveBeenCalled()
     expect(context).toMatchObject({
       phase: 'preflight',
       promptSubmissionState: 'not-submitted',
       outcome: 'preflight',
       teardownState: 'not-started',
+    })
+  })
+
+  it('honors an already-aborted request before prompt serialization or any subprocess boundary', async () => {
+    let context: { phase?: string; promptSubmissionState?: string; outcome?: string } | undefined
+    const verifyAuth = vi.fn(async () => {})
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const controller = new AbortController()
+    const reason = new Error('cancelled before preflight', { cause: 'abort' })
+    controller.abort(reason)
+    const config = Config()
+    config.maxPromptBytes = 1
+    const adapter = new CodingSubscriptionAdapter(config, {
+      verifyAuth,
+      runText,
+      onSettled: value => { context = value },
+    })
+
+    await expect(adapter.stream({ ...request(), signal: controller.signal })[Symbol.asyncIterator]().next())
+      .rejects.toBe(reason)
+    expect(verifyAuth).not.toHaveBeenCalled()
+    expect(runText).not.toHaveBeenCalled()
+    expect(context).toMatchObject({
+      phase: 'preflight',
+      promptSubmissionState: 'not-submitted',
+      outcome: 'aborted',
     })
   })
 
