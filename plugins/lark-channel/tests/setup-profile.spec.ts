@@ -18,6 +18,10 @@ const fixture = `
     personalMemory: { databasePath: /tmp/memory.sqlite }
     personalWiki: { vaultRoot: /tmp/wiki, databasePath: /tmp/wiki.sqlite }
     assistantAutomations: { databasePath: /tmp/automations.sqlite, runsPath: /tmp/runs }
+- id: dsh-enhanced-assistant-delivery
+  config:
+    defaultWorkspace: !!js dshHomePath('assistant-workspace')
+    defaultAgentPreset: standard
 `
 
 describe('Lark Web-profile onboarding patch', () => {
@@ -35,6 +39,7 @@ describe('Lark Web-profile onboarding patch', () => {
       ownerUserId: 'ou_owner',
       keychainService: 'dsh/lark/web/primary',
       keychainAccount: 'primary',
+      agentTools: 'enable',
     })
 
     expect(output).toContain('keep-user-rule')
@@ -64,6 +69,105 @@ describe('Lark Web-profile onboarding patch', () => {
       showProgress: true,
       statusReactions: true,
     })
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+      .config.assistantPolicy.rules
+    expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-reply-primary')).toMatchObject({
+      subject: { kind: 'agent', id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' },
+      actions: ['reply'],
+      resource: { kind: 'message', id: '*' },
+      context: { initiators: ['external'] },
+    })
+    const toolRules = rules.filter((rule: { id: string }) => rule.id.startsWith('lark-owner-tool-'))
+    expect(toolRules.map((rule: { resource: { id: string } }) => rule.resource.id)).toEqual([
+      'bash', 'read', 'glob', 'grep',
+    ])
+    expect(toolRules).toEqual(toolRules.map((rule: object) => expect.objectContaining({
+      ...rule,
+      subject: { kind: 'agent', id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' },
+      actions: ['execute'],
+      context: { initiators: ['external'] },
+    })))
+    expect(toolRules.some((rule: { subject: { id: string }; resource: { id: string } }) =>
+      rule.subject.id === '*' || rule.resource.id === '*')).toBe(false)
+  })
+
+  test('keeps exact primary rules when upgrading an existing binding to a standard default', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const legacyFixture = fixture.replace('      budgets: []', `
+        - id: lark-owner-reply-primary
+          effect: allow
+          subject: { kind: agent, id: primary, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [reply]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [external] }
+      budgets: []`)
+    const input = {
+      profilePatch: legacyFixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const preserved = configure(input)
+    const output = configure({ ...input, profilePatch: preserved, agentTools: 'enable' })
+    const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+      .config.assistantPolicy.rules
+
+    expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-reply-primary'))
+      .toMatchObject({ subject: { id: 'standard' } })
+    expect(rules.find((rule: { id: string }) => rule.id.startsWith('lark-owner-reply-primary-legacy-primary-')))
+      .toMatchObject({ subject: { id: 'primary' }, actions: ['reply'] })
+    for (const tool of ['bash', 'read', 'glob', 'grep']) {
+      expect(rules.find((rule: { id: string }) =>
+        rule.id.startsWith(`lark-owner-tool-${tool}-primary-legacy-primary-`)))
+        .toMatchObject({ subject: { id: 'primary' }, resource: { kind: 'tool', id: tool } })
+    }
+  })
+
+  test('preserves the complete preset and workspace identity of legacy bindings', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const oldWorkspace = '/Users/test/.dsh/old-assistant-workspace'
+    const legacyFixture = fixture.replace('      budgets: []', `
+        - id: lark-owner-reply-primary
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: ${oldWorkspace} }
+          actions: [reply]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [external] }
+      budgets: []`)
+    const output = configure({
+      profilePatch: legacyFixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+    const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+      .config.assistantPolicy.rules
+    const legacyReplies = rules.filter((rule: { id: string }) =>
+      rule.id.startsWith('lark-owner-reply-primary-legacy-standard-'))
+    const legacyTools = rules.filter((rule: { id: string }) =>
+      rule.id.startsWith('lark-owner-tool-') && rule.id.includes('-primary-legacy-standard-'))
+
+    expect(legacyReplies).toHaveLength(1)
+    expect(legacyReplies[0]).toMatchObject({
+      subject: { kind: 'agent', id: 'standard', workspace: oldWorkspace },
+      actions: ['reply'],
+    })
+    expect(legacyTools).toHaveLength(4)
+    expect(legacyTools.every((rule: { subject: { workspace: string } }) =>
+      rule.subject.workspace === oldWorkspace)).toBe(true)
   })
 
   test('is idempotent when the wizard is run again for the same account', () => {
@@ -78,11 +182,98 @@ describe('Lark Web-profile onboarding patch', () => {
       ownerUserId: 'ou_owner',
       keychainService: 'dsh/lark/web/primary',
       keychainAccount: 'primary',
+      agentTools: 'enable',
     }
     const once = configure(input)
     const twice = configure({ ...input, profilePatch: once })
 
     expect(twice).toBe(once)
+  })
+
+  test('preserves managed Agent tool rules by default and removes them only when explicitly disabled', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const input = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const untouched = configure(input)
+    expect(untouched).not.toContain('lark-owner-tool-')
+
+    const enabled = configure({ ...input, agentTools: 'enable' })
+    expect(configure({ ...input, profilePatch: enabled })).toBe(enabled)
+
+    const disabled = configure({ ...input, profilePatch: enabled, agentTools: 'disable' })
+    expect(disabled).not.toContain('lark-owner-tool-')
+    expect(disabled).toContain('keep-user-rule')
+    expect(configure({ ...input, profilePatch: disabled, agentTools: 'disable' })).toBe(disabled)
+  })
+
+  test('scopes reply and tool rules to the Delivery-configured workspace', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const output = configure({
+      profilePatch: fixture.replace(
+        "!!js dshHomePath('assistant-workspace')",
+        '/srv/dsh-owner-workspace',
+      ),
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+    const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+      .config.assistantPolicy.rules
+
+    expect(rules.filter((rule: { id: string }) => rule.id.startsWith('lark-owner-'))
+      .every((rule: { subject?: { kind?: string; workspace?: string } }) =>
+        rule.subject?.kind !== 'agent' || rule.subject.workspace === '/srv/dsh-owner-workspace')).toBe(true)
+  })
+
+  test('rejects wildcard workspaces instead of turning them into Policy patterns', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    expect(() => configure({
+      profilePatch: fixture.replace(
+        "!!js dshHomePath('assistant-workspace')",
+        '/srv/*/assistant-workspace',
+      ),
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })).toThrow(/defaultWorkspace is invalid/u)
+  })
+
+  test('reserves the legacy rule-id segment so two account names cannot collide', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    expect(() => configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary-legacy-standard',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })).toThrow(/reserved "-legacy-" segment/u)
   })
 
   test('writes the native Linux Secret Service locator selected by onboarding', () => {
@@ -98,6 +289,7 @@ describe('Lark Web-profile onboarding patch', () => {
       credentialProvider: 'linux-secret-service',
       keychainService: 'dsh/lark/web/primary',
       keychainAccount: 'primary',
+      agentTools: 'enable',
     })
 
     const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
@@ -124,6 +316,7 @@ describe('Lark Web-profile onboarding patch', () => {
       credentialPath,
       keychainService: 'dsh/lark/web/primary',
       keychainAccount: 'primary',
+      agentTools: 'enable',
     })
 
     const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
@@ -132,6 +325,38 @@ describe('Lark Web-profile onboarding patch', () => {
       provider: 'windows-dpapi',
       path: credentialPath,
     })])
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+      .config.assistantPolicy.rules
+    expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-tool-pwsh-primary'))
+      .toMatchObject({ resource: { kind: 'tool', id: 'pwsh' } })
+    expect(rules.some((rule: { id: string }) => rule.id === 'lark-owner-tool-bash-primary')).toBe(false)
     expect(output).not.toContain('client_secret')
+  })
+
+  test('rebuilds managed tools for the current platform without leaving Bash and Pwsh together', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    }
+    const posix = configure(common)
+    const windows = configure({
+      ...common,
+      profilePatch: posix,
+      dshHome: 'C:\\Users\\test\\.dsh',
+      credentialProvider: 'windows-dpapi',
+      credentialPath: 'C:\\Users\\test\\.dsh\\credentials-keychain\\lark-primary.clixml',
+    })
+
+    expect(windows).toContain('lark-owner-tool-pwsh-primary')
+    expect(windows).not.toContain('lark-owner-tool-bash-primary')
   })
 })

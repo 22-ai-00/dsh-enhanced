@@ -1,5 +1,5 @@
 const redacted = '[REDACTED]'
-const sensitiveKey = /(?:api[-_]?key|authorization|cookie|credential|cwd|file[-_]?path|password|path|private[-_]?key|secret|token)/iu
+const sensitiveKey = /(?:api[-_]?key|authorization|command|cookie|credential|cwd|file[-_]?path|password|path|private[-_]?key|secret|token)/iu
 const sensitiveValue = /(?:authorization\s*:|bearer\s+[a-z0-9._~-]+|\b(?:ghp|github_pat|sk|xox[baprs])[-_][a-z0-9_-]+)/iu
 
 export function redactAuditValue(value: unknown, depth = 0): unknown {
