@@ -5,6 +5,10 @@ export type PolicySubjectKind = 'agent' | 'background' | 'external'
 export type PolicyResourceKind =
   | 'automation'
   | 'credential'
+  // Learned behavioural guidance. Kept in this closed vocabulary so adopting or
+  // retiring a rule is governed by the same default-deny rules as any other
+  // resource, and can never be authorized by the evolution plugin itself.
+  | 'evolution'
   | 'filesystem'
   | 'memory'
   | 'message'

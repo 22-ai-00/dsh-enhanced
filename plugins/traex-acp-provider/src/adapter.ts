@@ -29,6 +29,7 @@ import { verifyTraexAuth, type TraexAuthVerifier } from './auth.js'
 import { CatalogObservationCache, type CatalogCacheKeyParts, type CachedCatalog } from './catalog-cache.js'
 import type { TraexAcpProviderConfig } from './config.js'
 import { buildPrompt, parseDelegatedToolCalls } from './prompt.js'
+import { resolveTrustedSessionCwd, TrustedSessionCwdError, type LiveSessionLookup } from './session-cwd.js'
 
 export const TRAEX_PROVIDER_ROUTE = 'traex-agent'
 
@@ -84,6 +85,8 @@ export interface AdapterDependencies {
   catalogCacheTtlMs?: number
   /** Injectable clock for the catalog cache; tests only. */
   catalogClock?: () => number
+  /** Host-owned live session lookup used to bind local ACP cwd to a loop request. */
+  liveSessions?: LiveSessionLookup
 }
 
 const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
@@ -107,6 +110,13 @@ function abortReason(signal: AbortSignal): Error {
 
 function connectorFailure(command: string, error: unknown): Error {
   if (error instanceof Error && error.cause === 'abort') return error
+  if (error instanceof TrustedSessionCwdError) {
+    return new LlmError(
+      'TraeX ACP requires a live loop-owned session whose canonical cwd matches the configured local workspace',
+      'LOCAL_SESSION_CWD_REQUIRED',
+      { cause: error },
+    )
+  }
   const candidate = error as (NodeJS.ErrnoException & { systemCode?: string }) | undefined
   const code = candidate?.systemCode ?? candidate?.code
   if (code === 'ENOENT') {
@@ -197,6 +207,7 @@ export class TraexAcpAdapter extends LlmAdapter {
   private readonly onSettled: AdapterDependencies['onSettled']
   private readonly onCatalogObserved: AdapterDependencies['onCatalogObserved']
   private readonly catalogCache: CatalogObservationCache
+  private readonly liveSessions: LiveSessionLookup | undefined
   private readonly lifecycle = new AbortController()
 
   constructor(
@@ -215,6 +226,11 @@ export class TraexAcpAdapter extends LlmAdapter {
       ...(dependencies.catalogCacheTtlMs !== undefined ? { ttlMs: dependencies.catalogCacheTtlMs } : {}),
       ...(dependencies.catalogClock !== undefined ? { now: dependencies.catalogClock } : {}),
     })
+    this.liveSessions = dependencies.liveSessions
+  }
+
+  private trustedCwd(request: GenerateOptions): string {
+    return resolveTrustedSessionCwd({ request, configuredCwd: this.cwd, sessions: this.liveSessions })
   }
 
   /**
@@ -289,10 +305,17 @@ export class TraexAcpAdapter extends LlmAdapter {
     return noAutomaticRetry
   }
 
-  private async loadCatalog(signal: AbortSignal = this.lifecycle.signal): Promise<CatalogObservation> {
+  /**
+   * Explicit activation/readiness boundary.  Normal DSH catalog and resolution
+   * methods never call this because they do not carry a loop-owned session.
+   */
+  async probeReadiness(signal: AbortSignal = this.lifecycle.signal): Promise<CatalogObservation> {
+    const effectiveSignal = signal === this.lifecycle.signal
+      ? signal
+      : AbortSignal.any([signal, this.lifecycle.signal])
+    if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
     const cached = this.peekObservedCatalog()?.observation
     if (cached?.completeReasoning === true) return cached
-    if (signal.aborted) throw abortReason(signal)
     try {
       await this.verifyAuth({
         command: this.config.command,
@@ -300,7 +323,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         timeoutMs: this.config.authProbeTimeoutMs,
         maxOutputBytes: this.config.maxAuthProbeBytes,
         extraEnvNames: this.config.extraEnvNames,
-        signal,
+        signal: effectiveSignal,
       })
       const catalog = await this.discoverModels({
         command: this.config.command,
@@ -323,7 +346,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         maxStderrBytes: this.config.maxStderrBytes,
         extraEnvNames: this.config.extraEnvNames,
         onDiagnostic: diagnostic => this.onDiagnostic?.(diagnostic),
-        signal,
+        signal: effectiveSignal,
       })
       this.handleCatalogObserved(catalog)
       return catalog
@@ -335,8 +358,8 @@ export class TraexAcpAdapter extends LlmAdapter {
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     ensureProvider(provider)
-    const catalog = await this.loadCatalog()
-    const active = catalog.models.find(model => model.id === catalog.currentValue)
+    const catalog = this.peekObservedCatalog()?.observation
+    const active = catalog?.models.find(model => model.id === catalog.currentValue)
     const entries = new Map<string, LlmModelInfo>()
     for (const model of this.config.models) {
       entries.set(model, {
@@ -349,7 +372,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         inputModalities: ['text'],
       })
     }
-    for (const model of catalog.models) {
+    for (const model of catalog?.models ?? []) {
       entries.set(model.id, {
         provider,
         id: model.id,
@@ -367,10 +390,10 @@ export class TraexAcpAdapter extends LlmAdapter {
       ? this.lifecycle.signal
       : AbortSignal.any([signal, this.lifecycle.signal])
     if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
-    const catalog = await this.loadCatalog(effectiveSignal)
+    const catalog = this.peekObservedCatalog()?.observation
     const catalogModel = model === 'default'
-      ? catalog.models.find(entry => entry.id === catalog.currentValue)
-      : catalog.models.find(entry => entry.id === model)
+      ? catalog?.models.find(entry => entry.id === catalog.currentValue)
+      : catalog?.models.find(entry => entry.id === model)
     return {
       provider,
       id: model,
@@ -415,11 +438,19 @@ export class TraexAcpAdapter extends LlmAdapter {
     try {
       if (signal.aborted) throw abortReason(signal)
 
+      let cwd: string
+      try {
+        cwd = this.trustedCwd(options)
+      } catch (error: unknown) {
+        outcome = 'preflight'
+        throw connectorFailure(this.config.command, error)
+      }
+
       const authStartedAt = performance.now()
       try {
         await this.verifyAuth({
           command: this.config.command,
-          cwd: this.cwd,
+          cwd,
           timeoutMs: this.config.authProbeTimeoutMs,
           maxOutputBytes: this.config.maxAuthProbeBytes,
           extraEnvNames: this.config.extraEnvNames,
@@ -450,7 +481,7 @@ export class TraexAcpAdapter extends LlmAdapter {
             'acp',
             'serve',
           ],
-          cwd: this.cwd,
+          cwd,
           prompt: buildPrompt(options, this.config.maxPromptBytes),
           ...(options.model === 'default' ? {} : { model: options.model }),
           ...(options.reasoningEffort === undefined ? {} : { reasoningEffort: String(options.reasoningEffort) }),
@@ -489,6 +520,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         // Calling an injected runner may synchronously start work or throw. From immediately
         // before that call, replay safety is unknown until the transport supplies exact facts.
         promptSubmissionState = 'unknown'
+        invocation = { ...invocation, cwd: this.trustedCwd(options) }
         const deltas = this.runText(invocation, runnerOptions)
         for await (const delta of deltas) {
           if (delta.length === 0) continue
@@ -558,6 +590,38 @@ export class TraexAcpAdapter extends LlmAdapter {
     if (!this.lifecycle.signal.aborted) {
       this.lifecycle.abort(new Error('TraeX ACP provider unloaded', { cause: 'abort' }))
     }
+  }
+}
+
+export interface TraexReadinessProbeOptions {
+  /** Whole activation-only readiness deadline. */
+  readonly timeoutMs?: number
+  readonly signal?: AbortSignal
+}
+
+/**
+ * Explicit deployment activation probe.  This is the sole public static-cwd
+ * exception: ordinary adapter list/resolve operations remain process-free and
+ * a model stream must bind every other local subprocess to a live loop session.
+ */
+export async function probeTraexReadiness(
+  config: TraexAcpProviderConfig,
+  options: TraexReadinessProbeOptions = {},
+  dependencies: AdapterDependencies = {},
+): Promise<CatalogObservation> {
+  if (options.timeoutMs !== undefined
+    && (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1 || options.timeoutMs > 60_000)) {
+    throw new RangeError('TraeX readiness timeoutMs must be an integer from 1 to 60000')
+  }
+  const timeoutSignal = options.timeoutMs === undefined ? undefined : AbortSignal.timeout(options.timeoutMs)
+  const signal = options.signal === undefined
+    ? (timeoutSignal ?? new AbortController().signal)
+    : (timeoutSignal === undefined ? options.signal : AbortSignal.any([options.signal, timeoutSignal]))
+  const adapter = new TraexAcpAdapter(config, dependencies)
+  try {
+    return await adapter.probeReadiness(signal)
+  } finally {
+    adapter.shutdown()
   }
 }
 

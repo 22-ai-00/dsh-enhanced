@@ -5,6 +5,7 @@ packages:
 catalog:
   '@agentclientprotocol/sdk': 0.25.1
   '@deepseek-ai/dsh-agent': 0.1.0-rc.8
+  '@deepseek-ai/dsh-attachment': 0.1.0-rc.8
   '@deepseek-ai/dsh-agent-default-model': 0.1.0-rc.8
   '@deepseek-ai/dsh-agent-loop': 0.1.0-rc.8
   '@deepseek-ai/dsh-agent-loop-testkit': 0.1.0-rc.8

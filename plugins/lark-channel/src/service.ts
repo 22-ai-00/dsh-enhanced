@@ -145,6 +145,7 @@ export class LarkChannelService extends Service {
       showProgress: config.showProgress,
       statusReactions: config.statusReactions,
       settleApproval: value => delivery.settleApproval(value),
+      recoverApprovalSettlement: value => delivery.recoverApprovalSettlement(value),
       settleModelSelection: value => delivery.settleModelSelection(value),
       loadModelPicker: value => delivery.getModelPickerForCallback(value),
       advanceModelPicker: value => delivery.advanceModelPickerForCallback(value),

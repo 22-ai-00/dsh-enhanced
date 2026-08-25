@@ -2,7 +2,6 @@ import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AutomationSchedule } from './schedule.js'
 import type { AssistantAutomationsService } from './service.js'
-import type { AutomationDefinition, MisfirePolicy } from './types.js'
 
 const proposalOutput = {
   schema: {
@@ -47,62 +46,28 @@ function schedule(args: {
   return { kind: 'cron', expression: args.cron, timezone: args.timezone }
 }
 
-function misfire(kind: 'bounded-replay' | 'latest' | 'skip', limit?: number): MisfirePolicy {
-  if (kind !== 'bounded-replay') return { kind }
-  if (limit === undefined) throw new Error('bounded-replay requires misfire_limit')
-  return { kind, limit }
-}
-
 export function registerAutomationTools(ctx: Context, service: AssistantAutomationsService): void {
   ctx.tools.register(defineTool({
     name: 'automation_create',
     description: 'Propose one immutable, approval-gated background automation. This never creates it directly.',
     parameters: {
-      automation_id: { type: 'string', required: true }, principal: { type: 'string', required: true },
-      idempotency_key: { type: 'string', required: true }, ttl_ms: { type: 'integer' },
+      automation_id: { type: 'string', required: true },
       name: { type: 'string', required: true }, prompt: { type: 'string', required: true },
       schedule_kind: { type: 'string', required: true, enum: ['at', 'every', 'cron'] },
       at: { type: 'string' }, anchor_at: { type: 'string' }, interval_ms: { type: 'integer' },
       cron: { type: 'string' }, timezone: { type: 'string' },
-      workspace: { type: 'string', required: true }, agent_preset: { type: 'string', required: true },
-      provider: { type: 'string', required: true }, model: { type: 'string', required: true },
       allowed_tools: { type: 'array', required: true, items: { type: 'string' } },
-      timeout_ms: { type: 'integer', required: true }, max_output_tokens: { type: 'integer', required: true },
-      max_tool_calls: { type: 'integer', required: true },
-      misfire_kind: { type: 'string', required: true, enum: ['skip', 'latest', 'bounded-replay'] },
-      misfire_limit: { type: 'integer' },
-      overlap: { type: 'string', required: true, enum: ['skip', 'queue-one', 'cancel-previous'] },
-      retry_safety: { type: 'string', required: true, enum: ['never', 'idempotent'] },
-      max_retries: { type: 'integer', required: true }, budget_id: { type: 'string' },
-      budget_amount: { type: 'integer' }, delivery_binding_id: { type: 'string' },
     },
     output: proposalOutput,
     async execute(args, exec) {
-      const definition: AutomationDefinition = {
+      const definition = {
         name: args.name,
         prompt: args.prompt,
         schedule: schedule(args),
-        workspace: args.workspace,
-        agentPreset: args.agent_preset,
-        provider: args.provider,
-        model: args.model,
         allowedTools: args.allowed_tools,
-        timeoutMs: args.timeout_ms,
-        maxOutputTokens: args.max_output_tokens,
-        maxToolCalls: args.max_tool_calls,
-        misfire: misfire(args.misfire_kind, args.misfire_limit),
-        overlap: args.overlap,
-        retrySafety: args.retry_safety,
-        maxRetries: args.max_retries,
-        principal: args.principal,
-        ...(args.budget_id === undefined ? {} : { budgetId: args.budget_id }),
-        ...(args.budget_amount === undefined ? {} : { budgetAmount: args.budget_amount }),
-        ...(args.delivery_binding_id === undefined ? {} : { deliveryBindingId: args.delivery_binding_id }),
       }
       const value = service.propose(exec.agent, {
-        idempotencyKey: args.idempotency_key,
-        principal: args.principal,
-        ...(args.ttl_ms === undefined ? {} : { ttlMs: args.ttl_ms }),
+        idempotencyKey: `automation-create:${String(exec.rootCallId)}:${String(exec.callId)}`,
         mutation: { op: 'create', automationId: args.automation_id, definition },
       })
       return {
@@ -149,15 +114,12 @@ export function registerAutomationTools(ctx: Context, service: AssistantAutomati
     parameters: {
       automation_id: { type: 'string', required: true },
       operation: { type: 'string', required: true, enum: ['pause', 'resume', 'delete'] },
-      expected_version: { type: 'integer', required: true }, principal: { type: 'string', required: true },
-      idempotency_key: { type: 'string', required: true }, ttl_ms: { type: 'integer' },
+      expected_version: { type: 'integer', required: true },
     },
     output: proposalOutput,
     async execute(args, exec) {
       const value = service.propose(exec.agent, {
-        idempotencyKey: args.idempotency_key,
-        principal: args.principal,
-        ...(args.ttl_ms === undefined ? {} : { ttlMs: args.ttl_ms }),
+        idempotencyKey: `automation-manage:${String(exec.rootCallId)}:${String(exec.callId)}`,
         mutation: { op: args.operation, automationId: args.automation_id, expectedVersion: args.expected_version },
       })
       return { proposalId: value.proposalId, status: value.status, version: value.version,
@@ -204,6 +166,35 @@ export function registerAutomationTools(ctx: Context, service: AssistantAutomati
           ...(value.run.sessionId === undefined ? {} : { sessionId: value.run.sessionId }),
           outputPreview: value.run.outputPreview,
         },
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'automation_pending',
+    description: 'List automation proposals still awaiting approval, so an already-requested change is not proposed twice.',
+    parameters: { limit: { type: 'integer' } },
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: {
+        pending: { type: 'array', required: true, items: {
+          type: 'object', additionalProperties: false, properties: {
+            proposalId: { type: 'string', required: true },
+            automationId: { type: 'string', required: true },
+            operation: { type: 'string', required: true },
+            expiresAt: { type: 'integer', required: true },
+            version: { type: 'integer', required: true },
+            attachedToPolicy: { type: 'boolean', required: true },
+          },
+        } },
+      } },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args, exec) {
+      return {
+        pending: service.listPendingProposals(
+          exec.agent,
+          ...(args.limit === undefined ? [] : [args.limit]),
+        ),
       }
     },
   }))

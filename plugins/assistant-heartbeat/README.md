@@ -13,7 +13,7 @@ dsh --profile web --dump-config
 
 默认 `heartbeats: []`，不会创建任务或调用模型。启用前需要给后台主体 `assistant-heartbeat` 的 automation `reconcile` 明确授权，也要给目标 Agent 的 `inspect` / `update` 最小规则。
 
-每项配置包含固定的 `workspace`、`agentPreset`、model、IANA timezone、`[activeStartHour, activeEndHour)`、整除 60 的分钟间隔、工具白名单和逐次 token/tool/timeout 上限。要把非空结果发到消息通道，还必须显式配置 `deliveryBindingId`；建议同时配置 Policy `budgetId`/`budgetAmount` 形成周期成本硬停止。
+每项配置包含固定的 `workspace`、`agentPreset`、model、IANA timezone、`[activeStartHour, activeEndHour)`、工具白名单和逐次 token/tool/timeout 上限。≤60 分钟的间隔保持原有“整除 60”约束；大于 60 分钟时只接受整小时且必须精确整除 active window，生成明确的本地小时 cron 列表，而不是无效的 `*/120` minute cron。例如 `08:00–22:00` 加 `120` 分钟精确产生 08、10、12、14、16、18、20 共 7 次。要把非空结果发到消息通道，还必须显式配置 `deliveryBindingId`；建议同时配置 Policy `budgetId`/`budgetAmount` 形成周期成本硬停止。
 
 scratch 为空或 `enabled: false` 时，对应 automation 被持久化为 paused，不调用模型；忙时依赖 Automations 的 `queue-one` 合并。模型只有在确有用户可见事项时输出内容；空输出和精确的 `HEARTBEAT_OK` 由 Automations 的持久 delivery 边界标为 `suppressed`，不会进入消息 outbox。导出的 `shouldDeliverHeartbeatOutput` 仅用于调用方预览，不是安全边界。
 

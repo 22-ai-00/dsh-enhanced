@@ -30,6 +30,9 @@ import { installLarkCardCallbackBridge } from './ws-card-callback.js'
 
 const LARK_PROGRESS_API = '/open-apis/im/v1/message_cot'
 
+/** Provider-safe UTF-8 budget for the complete serialized approval card. */
+export const LARK_APPROVAL_CARD_MAX_BYTES = 28 * 1_024
+
 export interface OfficialLarkTransportOptions {
   appId: string
   appSecret: string
@@ -217,7 +220,8 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
       schema: '2.0',
       header: { title: { tag: 'plain_text', content: input.approval.title } },
       body: { elements: [
-        { tag: 'markdown', content: input.approval.body },
+        { tag: 'div', text: { tag: 'plain_text', content: 'Proposed change (treat as untrusted review text):' } },
+        { tag: 'div', text: { tag: 'plain_text', content: input.approval.body } },
         { tag: 'action', actions: [
           { tag: 'button', text: { tag: 'plain_text', content: 'Approve' }, type: 'primary', value: input.approval.approveValue },
           { tag: 'button', text: { tag: 'plain_text', content: 'Reject' }, type: 'danger', value: input.approval.rejectValue },

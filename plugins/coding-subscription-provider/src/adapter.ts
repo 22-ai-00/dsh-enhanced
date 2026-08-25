@@ -1,8 +1,10 @@
 import { resolve } from 'node:path'
 import {
   CONTEXT_WINDOW_EXCEEDED_CODE,
+  EMPTY_RESPONSE_CODE,
   LlmAdapter,
   LlmError,
+  QUOTA_EXCEEDED_CODE,
   ReasoningEffortId,
   type GenerateOptions,
   type LlmModelInfo,
@@ -19,10 +21,20 @@ import {
   type CodexCatalogModel,
   type DiscoverCodexModelsOptions,
 } from './codex-catalog.js'
-import { configForProvider, type CodingSubscriptionProviderConfig } from './config.js'
+import { CodexCredentialStore } from './codex-direct-auth.js'
+import {
+  runCodexDirectResponses,
+  type CodexDirectResponsesDependencies,
+} from './codex-direct-responses.js'
+import {
+  configForProvider,
+  type CodexProviderConfig,
+  type CodingSubscriptionProviderConfig,
+} from './config.js'
 import { buildPrompt } from './prompt.js'
 import { runCliText, type ProviderFailureContext, type PromptSubmissionState, type RunCliTextOptions } from './process.js'
 import { buildInvocation, type CliInvocation, type ProviderId } from './providers.js'
+import { resolveTrustedSessionCwd, TrustedSessionCwdError, type LiveSessionLookup } from './session-cwd.js'
 import {
   discoverClaudeModels,
   discoverCursorModels,
@@ -62,6 +74,7 @@ export type SubscriptionCatalogDiscoverer = (
   invocation: SubscriptionCatalogInvocation,
   options?: DiscoverSubscriptionCatalogOptions,
 ) => Promise<SubscriptionCatalog>
+export type CodexDirectRunner = typeof runCodexDirectResponses
 
 /**
  * Full lifecycle facts the adapter can observe for one route: the transport context
@@ -99,10 +112,17 @@ export interface AdapterDependencies {
   discoverClaudeModels?: SubscriptionCatalogDiscoverer
   discoverCursorModels?: SubscriptionCatalogDiscoverer
   discoverGrokModels?: SubscriptionCatalogDiscoverer
+  runCodexDirect?: CodexDirectRunner
+  codexCredentials?: Pick<CodexCredentialStore, 'requestResponses'>
+  attachments?: CodexDirectResponsesDependencies['attachments']
+  /** Resolve the optional host attachment service at operation time. */
+  getAttachments?: () => CodexDirectResponsesDependencies['attachments']
   verifyAuth?: SubscriptionAuthVerifier
   onDiagnostic?: (route: SubscriptionProviderRoute, diagnostic: string) => void
   /** Receives credential-free lifecycle facts once per invocation (success or failure); never affects the stream. */
   onSettled?: (context: RouteFailureContext) => void
+  /** Host-owned live session lookup used to bind local process cwd to a loop request. */
+  liveSessions?: LiveSessionLookup
 }
 
 const CATALOG_TTL_MS = 5 * 60_000
@@ -129,6 +149,13 @@ function abortReason(signal: AbortSignal): Error {
 
 function cliFailure(definition: RouteDefinition, command: string, error: unknown): Error {
   if (error instanceof Error && error.cause === 'abort') return error
+  if (error instanceof TrustedSessionCwdError) {
+    return new LlmError(
+      `${definition.name} requires a live loop-owned session whose canonical cwd matches the configured local workspace`,
+      'LOCAL_SESSION_CWD_REQUIRED',
+      { cause: error },
+    )
+  }
   if (error instanceof Error && error.cause === 'subscription-auth') {
     return new LlmError(
       `${definition.name} refused the request because a subscription-compatible login could not be verified`,
@@ -160,6 +187,105 @@ function cliFailure(definition: RouteDefinition, command: string, error: unknown
   )
 }
 
+export const CODEX_DIRECT_PROVIDER_HTTP_CODE = 'CODEX_DIRECT_PROVIDER_HTTP'
+export const CODEX_DIRECT_PROVIDER_FAILURE_CODE = 'CODEX_DIRECT_PROVIDER_FAILURE'
+export const CODEX_DIRECT_CONTENT_FILTER_CODE = 'CODEX_DIRECT_CONTENT_FILTER'
+export const CODEX_DIRECT_TRANSPORT_ERROR_CODE = 'CODEX_DIRECT_TRANSPORT_ERROR'
+
+function directFailure(definition: RouteDefinition, error: unknown): Error {
+  if (error instanceof LlmError) return error
+  if (error instanceof Error && error.cause === 'abort') return error
+  if (error instanceof TrustedSessionCwdError) {
+    return new LlmError(
+      `${definition.name} requires a live loop-owned session whose canonical cwd matches the configured local workspace`,
+      'LOCAL_SESSION_CWD_REQUIRED',
+      { cause: error },
+    )
+  }
+  const cause = error instanceof Error ? error.cause : undefined
+  const status = validHttpStatus(error)
+  if (cause === 'subscription-auth') {
+    return new LlmError(
+      'Codex private Responses could not use the local ChatGPT session',
+      'SUBSCRIPTION_AUTH_REQUIRED',
+      status === undefined ? undefined : { status },
+    )
+  }
+  if (cause === 'timeout') {
+    return new LlmError('Codex private Responses request timed out', 'CLI_TIMEOUT')
+  }
+  if (cause === 'protocol') {
+    return new LlmError(
+      'Codex private Responses returned an unrecognized or incomplete stream',
+      'CLI_PROTOCOL_ERROR',
+    )
+  }
+  if (cause === 'provider-http') {
+    return new LlmError(
+      'Codex private Responses provider request failed',
+      CODEX_DIRECT_PROVIDER_HTTP_CODE,
+      status === undefined ? undefined : { status },
+    )
+  }
+  if (cause === 'context-window') {
+    return new LlmError(
+      'Codex private Responses exceeded the model context window',
+      CONTEXT_WINDOW_EXCEEDED_CODE,
+    )
+  }
+  if (cause === 'quota') {
+    return new LlmError('Codex private Responses account quota was exhausted', QUOTA_EXCEEDED_CODE)
+  }
+  if (cause === 'provider-failure') {
+    return new LlmError(
+      'Codex private Responses reported a provider failure',
+      CODEX_DIRECT_PROVIDER_FAILURE_CODE,
+    )
+  }
+  if (cause === 'content-filter') {
+    return new LlmError('Codex private Responses output was filtered', CODEX_DIRECT_CONTENT_FILTER_CODE)
+  }
+  if (cause === 'empty-response') {
+    return new LlmError('Codex private Responses returned no visible output', EMPTY_RESPONSE_CODE)
+  }
+  if (cause === 'transport') {
+    return new LlmError('Codex private Responses transport failed', CODEX_DIRECT_TRANSPORT_ERROR_CODE)
+  }
+  return new LlmError(
+    'Codex private Responses request failed',
+    'CODEX_DIRECT_RESPONSES_FAILED',
+    { cause: error },
+  )
+}
+
+function validHttpStatus(error: unknown): number | undefined {
+  if (typeof error !== 'object' || error === null) return undefined
+  const status = (error as { readonly status?: unknown }).status
+  return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
+    ? status
+    : undefined
+}
+
+/** Stable code for a request that needs tool calls this text-only route cannot make. */
+export const TOOL_CALLS_UNSUPPORTED_CODE = 'tool_calls_unsupported'
+
+/**
+ * Refuse a request that supplies tool schemas.
+ *
+ * These routes drive local coding CLIs that only return assistant text; they
+ * cannot emit a `tool-call` block. Silently dropping `options.tools` would let an
+ * unattended automation appear to run while never invoking its allowlisted tools,
+ * so the request fails loudly and names the working alternative instead.
+ */
+function toolCallsUnsupported(definition: RouteDefinition): LlmError {
+  return new LlmError(
+    `${definition.name} is a text-only route and cannot perform tool calls. `
+    + 'Use a provider that emits tool calls (for example @dsh-enhanced/traex-acp-provider) '
+    + 'for agent or automation work that requires tools.',
+    TOOL_CALLS_UNSUPPORTED_CODE,
+  )
+}
+
 /** Report a local prompt bound through DSH's canonical overflow path so compaction can retry it. */
 function preflightFailure(error: unknown): Error {
   if (error instanceof Error && error.cause === 'prompt-limit') {
@@ -170,6 +296,7 @@ function preflightFailure(error: unknown): Error {
 
 /** Classify the original transport error into a stable, credential-free outcome for diagnostics. */
 function outcomeFor(error: unknown): RouteOutcome {
+  if (error instanceof TrustedSessionCwdError) return 'working-directory'
   const cause = error instanceof Error ? error.cause : undefined
   if (cause === 'abort') return 'aborted'
   if (cause === 'timeout') return 'timeout'
@@ -203,6 +330,20 @@ function reasoningInfo(
   }
 }
 
+function directReasoningInfo(
+  profile: CodexProviderConfig,
+): Pick<LlmResolvedModelInfo, 'reasoning'> {
+  return {
+    reasoning: {
+      efforts: profile.directReasoningEfforts.map(effort => ({
+        id: ReasoningEffortId(effort),
+        name: effort,
+      })),
+      defaultEffort: ReasoningEffortId(profile.directDefaultReasoningEffort),
+    },
+  }
+}
+
 /** Experimental LLM-compatible facade over local, already-authenticated coding agents. */
 export class CodingSubscriptionAdapter extends LlmAdapter {
   private readonly cwd: string
@@ -211,9 +352,13 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
   private readonly discoverClaudeModels: SubscriptionCatalogDiscoverer
   private readonly discoverCursorModels: SubscriptionCatalogDiscoverer
   private readonly discoverGrokModels: SubscriptionCatalogDiscoverer
+  private readonly runCodexDirect: CodexDirectRunner
+  private readonly codexCredentials: Pick<CodexCredentialStore, 'requestResponses'>
+  private readonly getAttachments: () => CodexDirectResponsesDependencies['attachments']
   private readonly verifyAuth: SubscriptionAuthVerifier
   private readonly onDiagnostic: AdapterDependencies['onDiagnostic']
   private readonly onSettled: AdapterDependencies['onSettled']
+  private readonly liveSessions: LiveSessionLookup | undefined
   private readonly lifecycle = new AbortController()
   private codexCatalogCache: { readonly catalog: CodexCatalog; readonly expiresAt: number } | undefined
   private readonly subscriptionCatalogCache = new Map<NonCodexProvider, {
@@ -232,9 +377,17 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     this.discoverClaudeModels = dependencies.discoverClaudeModels ?? discoverClaudeModels
     this.discoverCursorModels = dependencies.discoverCursorModels ?? discoverCursorModels
     this.discoverGrokModels = dependencies.discoverGrokModels ?? discoverGrokModels
+    this.runCodexDirect = dependencies.runCodexDirect ?? runCodexDirectResponses
+    this.codexCredentials = dependencies.codexCredentials ?? new CodexCredentialStore()
+    this.getAttachments = dependencies.getAttachments ?? (() => dependencies.attachments)
     this.verifyAuth = dependencies.verifyAuth ?? verifySubscriptionAuth
     this.onDiagnostic = dependencies.onDiagnostic
     this.onSettled = dependencies.onSettled
+    this.liveSessions = dependencies.liveSessions
+  }
+
+  private trustedCwd(request: GenerateOptions): string {
+    return resolveTrustedSessionCwd({ request, configuredCwd: this.cwd, sessions: this.liveSessions })
   }
 
   private reportSettled(context: RouteFailureContext): void {
@@ -248,29 +401,45 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
 
   override providerInfo(provider: string): LlmProviderInfo {
     const definition = definitionFor(provider)
-    return { id: provider, name: definition.name }
+    return {
+      id: provider,
+      name: definition.cli === 'codex' && this.config.codex.transport === 'direct-responses'
+        ? 'Codex Subscription (private Responses, experimental)'
+        : definition.name,
+    }
   }
 
   override providerRetryPolicy(_provider: string): ResolvedRetryPolicy {
     return noAutomaticRetry
   }
 
-  private async loadCodexCatalog(signal: AbortSignal = this.lifecycle.signal): Promise<CodexCatalog> {
-    if (signal.aborted) throw abortReason(signal)
+  private peekCodexCatalog(): CodexCatalog | undefined {
     const cached = this.codexCatalogCache
     if (cached !== undefined && cached.expiresAt > Date.now()) return cached.catalog
+    this.codexCatalogCache = undefined
+    return undefined
+  }
+
+  private peekSubscriptionCatalog(provider: NonCodexProvider): SubscriptionCatalog | undefined {
+    const cached = this.subscriptionCatalogCache.get(provider)
+    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.catalog
+    this.subscriptionCatalogCache.delete(provider)
+    return undefined
+  }
+
+  /**
+   * Observe the advisory CLI catalog only after stream has bound this operation to a
+   * canonical live-session cwd.  The caller owns the auth probe and must revalidate
+   * the session immediately before crossing this subprocess boundary.
+   */
+  private async observeCodexCatalog(cwd: string, signal: AbortSignal): Promise<CodexCatalog> {
+    if (signal.aborted) throw abortReason(signal)
+    const cached = this.peekCodexCatalog()
+    if (cached !== undefined) return cached
     const definition = definitionFor('codex-subscription')
     const profile = this.config.codex
     try {
-      await this.verifyAuth('codex', {
-        command: profile.command,
-        cwd: this.cwd,
-        timeoutMs: this.config.authProbeTimeoutMs,
-        maxOutputBytes: this.config.maxAuthProbeBytes,
-        extraEnvNames: this.config.extraEnvNames,
-        signal,
-      })
-      const catalog = await this.discoverCodexModels({ command: profile.command, cwd: this.cwd }, {
+      const catalog = await this.discoverCodexModels({ command: profile.command, cwd }, {
         signal,
         timeoutMs: this.config.authProbeTimeoutMs,
         killGraceMs: this.config.killGraceMs,
@@ -284,18 +453,18 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
       return catalog
     } catch (error: unknown) {
       this.codexCatalogCache = undefined
-      throw cliFailure(definition, profile.command, error)
+      throw error
     }
   }
 
-  private async loadSubscriptionCatalog(
+  private async observeSubscriptionCatalog(
     provider: NonCodexProvider,
-    signal: AbortSignal = this.lifecycle.signal,
+    cwd: string,
+    signal: AbortSignal,
   ): Promise<SubscriptionCatalog> {
     if (signal.aborted) throw abortReason(signal)
-    const cached = this.subscriptionCatalogCache.get(provider)
-    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.catalog
-    const definition = routeDefinitions.find(candidate => candidate.cli === provider)!
+    const cached = this.peekSubscriptionCatalog(provider)
+    if (cached !== undefined) return cached
     const profile = configForProvider(this.config, provider)
     const discoverer = provider === 'claude'
       ? this.discoverClaudeModels
@@ -303,18 +472,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         ? this.discoverCursorModels
         : this.discoverGrokModels
     try {
-      await this.verifyAuth(provider, {
-        command: profile.command,
-        cwd: this.cwd,
-        timeoutMs: this.config.authProbeTimeoutMs,
-        maxOutputBytes: this.config.maxAuthProbeBytes,
-        extraEnvNames: this.config.extraEnvNames,
-        signal,
-        ...(provider === 'grok'
-          ? { userVerifiedSubscription: this.config.grok.userVerifiedSubscription }
-          : {}),
-      })
-      const catalog = await discoverer({ command: profile.command, cwd: this.cwd }, {
+      const catalog = await discoverer({ command: profile.command, cwd }, {
         signal,
         timeoutMs: this.config.authProbeTimeoutMs,
         maxOutputBytes: this.config.maxAuthProbeBytes,
@@ -324,30 +482,49 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
       return catalog
     } catch (error: unknown) {
       this.subscriptionCatalogCache.delete(provider)
-      throw cliFailure(definition, profile.command, error)
+      throw error
     }
+  }
+
+  private observedCatalog(provider: ProviderId): CodexCatalog | SubscriptionCatalog | undefined {
+    return provider === 'codex'
+      ? this.peekCodexCatalog()
+      : this.peekSubscriptionCatalog(provider)
+  }
+
+  private observeCatalog(provider: ProviderId, cwd: string, signal: AbortSignal): Promise<CodexCatalog | SubscriptionCatalog> {
+    return provider === 'codex'
+      ? this.observeCodexCatalog(cwd, signal)
+      : this.observeSubscriptionCatalog(provider, cwd, signal)
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const definition = definitionFor(provider)
     const profile = configForProvider(this.config, definition.cli)
-    const catalog = definition.cli === 'codex'
-      ? await this.loadCodexCatalog()
-      : await this.loadSubscriptionCatalog(definition.cli)
-    const defaultModel = catalog.models.find(model => model.id === catalog.defaultModel)
+    const directCodex = definition.cli === 'codex' && this.config.codex.transport === 'direct-responses'
+    const catalog = directCodex ? undefined : this.observedCatalog(definition.cli)
+    const attachments = directCodex ? this.getAttachments() : undefined
+    const inputModalities: LlmModelInfo['inputModalities'] = directCodex && attachments !== undefined
+      ? ['text', 'image']
+      : ['text']
+    const defaultModel = catalog?.models.find(model => model.id === catalog.defaultModel)
     const entries = new Map<string, LlmModelInfo>()
     for (const model of profile.models) {
       entries.set(model, {
         provider,
         id: model,
-        name: model === 'default'
+        name: directCodex && model === 'default'
+          ? `Codex Subscription (private Responses) default (${this.config.codex.directModel})`
+          : model === 'default'
           ? `${definition.name} default${defaultModel === undefined ? '' : ` (${defaultModel.name})`}`
           : model,
-        description: `${definition.maturity} local coding-agent delegation; authentication and billing remain in the official CLI`,
-        inputModalities: ['text'],
+        description: directCodex
+          ? 'experimental direct private Codex Responses transport using the local ChatGPT session'
+          : `${definition.maturity} local coding-agent delegation; authentication and billing remain in the official CLI`,
+        inputModalities,
       })
     }
-    for (const model of catalog.models) {
+    for (const model of catalog?.models ?? []) {
       entries.set(model.id, {
         provider,
         id: model.id,
@@ -365,21 +542,25 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
       : AbortSignal.any([signal, this.lifecycle.signal])
     if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
     const definition = definitionFor(provider)
-    const catalog = definition.cli === 'codex'
-      ? await this.loadCodexCatalog(effectiveSignal)
-      : await this.loadSubscriptionCatalog(definition.cli, effectiveSignal)
+    const directCodex = definition.cli === 'codex' && this.config.codex.transport === 'direct-responses'
+    const catalog = directCodex ? undefined : this.observedCatalog(definition.cli)
     const catalogModel = model === 'default'
-      ? catalog.models.find(candidate => candidate.id === catalog.defaultModel)
-      : catalog.models.find(candidate => candidate.id === model)
+      ? catalog?.models.find(candidate => candidate.id === catalog.defaultModel)
+      : catalog?.models.find(candidate => candidate.id === model)
+    const attachments = directCodex ? this.getAttachments() : undefined
     return {
       provider,
       id: model,
-      name: model === 'default'
+      name: directCodex && model === 'default'
+        ? `Codex Subscription (private Responses) default (${this.config.codex.directModel})`
+        : model === 'default'
         ? `${definition.name} default${catalogModel === undefined ? '' : ` (${catalogModel.name})`}`
         : (catalogModel?.name ?? model),
-      description: catalogModel?.description ?? `${definition.maturity} local coding-agent delegation`,
-      inputModalities: ['text'],
-      ...reasoningInfo(catalogModel),
+      description: catalogModel?.description ?? (directCodex
+        ? 'experimental direct private Codex Responses transport using the local ChatGPT session'
+        : `${definition.maturity} local coding-agent delegation`),
+      inputModalities: directCodex && attachments !== undefined ? ['text', 'image'] : ['text'],
+      ...(directCodex ? directReasoningInfo(this.config.codex) : reasoningInfo(catalogModel)),
     }
   }
 
@@ -417,11 +598,74 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
 
     try {
       if (signal.aborted) throw abortReason(signal)
+      const directCodex = definition.cli === 'codex' && this.config.codex.transport === 'direct-responses'
+      // Refuse tool work before any subprocess starts: this route cannot emit a
+      // tool call, and a silent drop would look like a successful empty run.
+      if (!directCodex && options.tools !== undefined && options.tools.length > 0) {
+        outcome = 'preflight'
+        throw toolCallsUnsupported(definition)
+      }
+      let cwd: string
+      try {
+        cwd = this.trustedCwd(options)
+      } catch (error: unknown) {
+        outcome = outcomeFor(error)
+        throw cliFailure(definition, profile.command, error)
+      }
+      if (directCodex) {
+        const timeoutSignal = AbortSignal.timeout(this.config.timeoutMs)
+        const directSignal = AbortSignal.any([signal, timeoutSignal])
+        phase = 'stream'
+        try {
+          // Revalidate immediately before the first credential/file/network seam.
+          this.trustedCwd(options)
+          promptSubmissionState = 'unknown'
+          // `maxTokens` is a host-local Agent Loop budget. The private Codex
+          // request has no max_output_tokens field, so do not hand this hint to
+          // the direct runner (which deliberately rejects unsupported controls).
+          const { maxTokens: hostMaxTokens, ...directInput } = options
+          void hostMaxTokens
+          const directOptions: GenerateOptions = {
+            ...directInput,
+            model: options.model === 'default' ? this.config.codex.directModel : options.model,
+            signal: directSignal,
+          }
+          const attachments = this.getAttachments()
+          const chunks = this.runCodexDirect(directOptions, {
+            request: (body, requestSignal) => this.codexCredentials.requestResponses(body, requestSignal),
+            maxRequestBytes: this.config.codex.maxRequestBytes,
+            maxRequestImageBytes: this.config.codex.maxRequestImageBytes,
+            ...(attachments === undefined ? {} : { attachments }),
+          })
+          for await (const chunk of chunks) {
+            if (chunk.type === 'text-delta' && chunk.text.length > 0) assistantTextForwarded = true
+            yield chunk
+          }
+          outcome = 'ok'
+          return
+        } catch (error: unknown) {
+          if (signal.aborted) {
+            outcome = 'aborted'
+            throw abortReason(signal)
+          }
+          if (error instanceof Error && error.cause === 'prompt-limit') {
+            phase = 'preflight'
+            promptSubmissionState = 'not-submitted'
+            outcome = 'preflight'
+            throw preflightFailure(error)
+          }
+          const failure = timeoutSignal.aborted && !signal.aborted
+            ? new Error('Codex direct Responses request timed out', { cause: 'timeout' })
+            : error
+          outcome = outcomeFor(failure)
+          throw directFailure(definition, failure)
+        }
+      }
       // Build and bound the argv locally before any auth probe or generation subprocess starts.
       let invocation: CliInvocation
       try {
         invocation = buildInvocation(definition.cli, {
-          cwd: this.cwd,
+          cwd,
           prompt: buildPrompt(options, this.config.maxPromptBytes),
           model: options.model,
           ...(definition.cli !== 'cursor' && options.reasoningEffort !== undefined
@@ -438,7 +682,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
       try {
         await this.verifyAuth(definition.cli, {
           command: profile.command,
-          cwd: this.cwd,
+          cwd,
           timeoutMs: this.config.authProbeTimeoutMs,
           maxOutputBytes: this.config.maxAuthProbeBytes,
           extraEnvNames: this.config.extraEnvNames,
@@ -451,6 +695,18 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         // Auth precedes spawn, so the prompt argv was never handed to the OS.
         if (definition.cli === 'codex') this.codexCatalogCache = undefined
         else this.subscriptionCatalogCache.delete(definition.cli)
+        outcome = outcomeFor(error)
+        throw cliFailure(definition, profile.command, error)
+      }
+
+      // Dynamic model metadata remains advisory, but discovering it is still local
+      // process authority.  Bind the discovery to the live canonical session cwd and
+      // recheck after auth so a stale/replaced session cannot reach the catalog process.
+      phase = 'preflight'
+      try {
+        cwd = this.trustedCwd(options)
+        await this.observeCatalog(definition.cli, cwd, signal)
+      } catch (error: unknown) {
         outcome = outcomeFor(error)
         throw cliFailure(definition, profile.command, error)
       }
@@ -476,6 +732,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         // Calling an injected runner may itself perform work or throw synchronously, so
         // stop claiming not-submitted immediately before control crosses that boundary.
         promptSubmissionState = 'unknown'
+        invocation = { ...invocation, cwd: this.trustedCwd(options) }
         const deltas = this.runText(invocation, runnerOptions)
         for await (const delta of deltas) {
           if (delta.length === 0) continue

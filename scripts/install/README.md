@@ -18,6 +18,48 @@
 ./scripts/install/install-local.sh --profile personal-web
 ```
 
+## 部署模式
+
+默认 `--mode standard` 保持保守行为：安装核心和消息能力，但不授权后台任务，也不启用
+Automations scheduler。
+
+`--mode supervised-growth` 是显式选择的受监督成长模式。它额外安装
+`@dsh-enhanced/assistant-evolution`，并要求可运行的飞书 onboarding 与常驻服务：
+
+```sh
+./scripts/install/install-local.sh --mode supervised-growth --lark configure
+```
+
+在飞书 onboarding 完成后，安装器会调用 `dsh-supervised-growth-setup`。该激活器只接受一条与
+当前 Lark account/tenant 以及 Delivery 的默认 workspace/preset **完全匹配**的活动 owner 私聊
+binding；找不到时会提示 owner 再私聊机器人，并在有界超时后不改 profile。多个匹配 binding 会拒绝，
+不会猜测收件人。
+
+激活器从 DSH 的**有效组合配置**（而不是可能为空的用户 patch）解析 Delivery/Automations 的实际
+SQLite 路径；写入后再次 `dsh --dump-config`，逐项验证最终 route、budget、heartbeat 和精确 Policy
+规则仍未被高优先级 layer 覆盖。它还会重读已选 binding 的版本、状态和 route，并进行有界的 TraeX
+登录/只读 model catalog readiness probe；找不到 CLI、未登录、没有可用模型或 Host 重启后未通过健康
+检查时，会恢复原 profile 和原常驻服务，不会报告已启用。
+
+overlay 将 Delivery 前台路由设为 `traex-agent/default`，并创建一个精确 owner 的 heartbeat：08:00–22:00
+每 120 分钟恰好 7 次；仅允许先 `evolution_review`、随后最多一次 `evolution_propose`，每轮最多 2 次
+工具调用、512 输出 token。它使用 `automation-runs` 的 workspace 日预算（每天最多 7 次、每次固定
+计 1），不把 512 输出 token 误称为总 token 上限。审批卡只能由固定的 Evolution 背景主体投递到
+该 owner binding；proposal 仍必须由 owner 审批。scratch 明确禁止 decide/apply、修改代码、凭据、
+Policy 或既有 automation；没有候选时只能输出 `HEARTBEAT_OK`。overlay 不授予 bash、read、文件系统、
+网络或凭据权限。
+
+为防止 scheduler 静默启动遗留任务，Automations DB 中**任何**已有 active job（包括旧
+`assistant-heartbeat` 高权限任务）都会默认阻止激活且不写配置。确认这些任务可以在 scheduler 开启后继续运行时，显式传入：
+
+```sh
+./scripts/install/install-local.sh --mode supervised-growth --lark configure --ack-existing-automations
+```
+
+该确认不会自动恢复、修改或新增它们，但不会阻止 scheduler 领取这些仍为 active 的任务。此模式不能与 `--lark skip` 或
+`--no-service` 一起使用。Windows 的 Task Scheduler 没有本实现可验证的 running/crash health gate，
+因此 supervised-growth 在 Windows fail closed；标准安装仍保持原来的 best-effort 行为。
+
 ## npm 安装
 
 全部包发布后，可以在没有本仓库 checkout 的机器上运行：
@@ -72,7 +114,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/ma
 
 ## 安装集合
 
-两个安装器安装以下十个顶层 bundle：
+`standard` 模式安装以下十个顶层 bundle：
 
 1. `coding-subscription-provider`
 2. `traex-acp-provider`
@@ -84,6 +126,9 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/ma
 8. `assistant-heartbeat`
 9. `event-triggers`
 10. `assistant-health`
+
+`supervised-growth` 在此基础上额外安装 `assistant-evolution`，并在精确 owner onboarding 成功后运行
+上述受限激活器。
 
 `personal-assistant` 会携带 Policy、Memory、Wiki 和 Automations 四个核心包，因此安装器不再把它们作为顶层 bundle 重复挂载。`acp` 只能安装到专用 ACP profile，`hello` 是示例插件，两者不会进入 Web 个人助理集合。安装 provider 不会自动启用 Claude；未安装或未登录的本地 CLI 也不会由安装器强制打开。
 

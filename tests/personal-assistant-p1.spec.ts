@@ -47,7 +47,10 @@ describe('personal assistant P1 composition', () => {
       { id: 'event-ingest', effect: 'allow', subject: { kind: 'external', id: 'event-triggers:file' },
         actions: ['ingest'], resource: { kind: 'automation', id: 'event-task' }, context: { initiators: ['external'] } },
     ] })
-    await ctx.plugin(PersonalMemoryService, { databasePath: join(root, 'memory.sqlite') })
+    await ctx.plugin(PersonalMemoryService, {
+      databasePath: join(root, 'memory.sqlite'),
+      approvalMode: 'delivery-or-headless',
+    })
     await ctx.plugin(PersonalWikiService, { vaultRoot: join(root, 'wiki'), databasePath: join(root, 'wiki.sqlite') })
     await ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'),
       runsPath: join(root, 'runs'), schedulerEnabled: false })

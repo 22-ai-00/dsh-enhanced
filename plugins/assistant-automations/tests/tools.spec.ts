@@ -8,7 +8,7 @@ import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantAutomationsService } from '../src/service.ts'
 
 const roots: string[] = []
@@ -34,10 +34,18 @@ async function harness() {
   const root = await mkdtemp(join(tmpdir(), 'assistant-automations-tools-'))
   roots.push(root)
   const ctx = new Context()
+  const prepareAgentApproval = vi.fn((_agent: Agent | undefined, input: { sourceId: string }) => ({
+    sourceId: input.sourceId,
+    bindingId: 'binding-owner',
+    workspace: '/work/alpha',
+    principal: 'lark/main/tenant/owner',
+  }))
+  ctx.provide('assistantDelivery' as never, { prepareAgentApproval } as never)
   await ctx.plugin(SystemPrompt)
   await ctx.plugin(ToolRuntime)
   await ctx.plugin(AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
+    budgets: [{ id: 'proposal-budget', metric: 'automation-runs', limit: 100, periodMs: 60_000, scope: 'subject' }],
     rules: [
       {
         id: 'automation-service', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: '/work/alpha' },
@@ -55,8 +63,14 @@ async function harness() {
   })
   await ctx.plugin(AssistantAutomationsService, {
     databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false,
+    proposalDefaults: {
+      provider: 'trusted-provider', model: 'trusted-model', allowedTools: ['allowed_tool'],
+      timeoutMs: 30_000, maxOutputTokens: 256, maxToolCalls: 1,
+      misfireKind: 'latest', misfireLimit: 1, overlap: 'skip', retrySafety: 'never', maxRetries: 0,
+      budgetId: 'proposal-budget', budgetAmount: 1,
+    },
   })
-  return { ctx, agent: agent() }
+  return { ctx, agent: agent(), prepareAgentApproval }
 }
 
 function call(name: string, arguments_: Record<string, unknown>, current?: Agent) {
@@ -69,21 +83,67 @@ function call(name: string, arguments_: Record<string, unknown>, current?: Agent
 
 function createArgs() {
   return {
-    automation_id: 'auto-review', principal: 'owner:lark:123', idempotency_key: 'tool:create:review',
+    automation_id: 'auto-review',
     name: 'Review', prompt: 'Review safely.', schedule_kind: 'at', at: '2030-01-01T00:00:00.000Z',
-    workspace: '/work/alpha', agent_preset: 'primary', provider: 'mock', model: 'model', allowed_tools: [],
-    timeout_ms: 60_000, max_output_tokens: 512, max_tool_calls: 0, misfire_kind: 'latest',
-    overlap: 'skip', retry_safety: 'never', max_retries: 0,
+    allowed_tools: [],
   }
 }
 
 describe('assistant automations rc.8 tools', () => {
-  test('registers exactly five bounded automation tools without schedule name collisions', async () => {
+  test('registers exactly six bounded automation tools without schedule name collisions', async () => {
     const { ctx } = await harness()
     expect(ctx.tools.schemas().map(schema => schema.name).filter(name => name.startsWith('automation_')).sort())
-      .toEqual(['automation_create', 'automation_history', 'automation_list', 'automation_manage', 'automation_run'])
+      .toEqual([
+        'automation_create', 'automation_history', 'automation_list',
+        'automation_manage', 'automation_pending', 'automation_run',
+      ])
     expect(ctx.tools.schemas().some(schema => schema.name.startsWith('schedule_'))).toBe(false)
+    const createParameters = ctx.tools.schemas().find(schema => schema.name === 'automation_create')!.parameters.properties
+    expect(Object.keys(createParameters as object).sort()).toEqual([
+      'allowed_tools', 'anchor_at', 'at', 'automation_id', 'cron', 'interval_ms',
+      'name', 'prompt', 'schedule_kind', 'timezone',
+    ])
+    const manageParameters = ctx.tools.schemas().find(schema => schema.name === 'automation_manage')!.parameters.properties
+    expect(Object.keys(manageParameters as object).sort()).toEqual(['automation_id', 'expected_version', 'operation'])
     await ctx.fiber.restart()
+  })
+
+  test('does not expose model authority fields and ignores attempted extras before deriving trusted config', async () => {
+    const fixture = await harness()
+    for (const [field, value] of Object.entries({
+      principal: 'attacker', workspace: '/work/attacker', agent_preset: 'root', provider: 'attacker',
+      model: 'attacker', delivery_binding_id: 'binding-attacker', budget_id: 'attacker', budget_amount: 1,
+      timeout_ms: 1, max_output_tokens: 1, max_tool_calls: 999, misfire_kind: 'skip', misfire_limit: 999,
+      overlap: 'cancel-previous', retry_safety: 'idempotent', max_retries: 10,
+    })) {
+      const ignored = await fixture.ctx.tools.execute(call('automation_create', {
+        ...createArgs(), automation_id: `auto-rejected-${field}`, [field]: value,
+      }, fixture.agent))
+      expect(ignored.isError, field).toBe(false)
+    }
+
+    const proposed = await fixture.ctx.tools.execute(call('automation_create', createArgs(), fixture.agent))
+    expect(proposed.isError).toBe(false)
+    const proposal = proposed.isError ? undefined : proposed.value as { proposalId: string }
+    fixture.ctx.assistantAutomations.decideProposal({
+      proposalId: proposal!.proposalId,
+      principal: 'lark/main/tenant/owner',
+      expectedVersion: 1,
+      decision: 'approved',
+      reason: 'reviewed',
+    })
+    expect(fixture.ctx.assistantAutomations.list(fixture.agent)[0]?.definition).toEqual({
+      name: 'Review', prompt: 'Review safely.', schedule: { kind: 'at', at: '2030-01-01T00:00:00.000Z' },
+      workspace: '/work/alpha', agentPreset: 'primary', provider: 'trusted-provider', model: 'trusted-model',
+      allowedTools: [], timeoutMs: 30_000, maxOutputTokens: 256, maxToolCalls: 1,
+      misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0,
+      principal: 'lark/main/tenant/owner', budgetId: 'proposal-budget', budgetAmount: 1,
+      deliveryBindingId: 'binding-owner',
+    })
+    expect(fixture.prepareAgentApproval).toHaveBeenCalledWith(fixture.agent, {
+      sourceId: 'dsh-enhanced-assistant-automations',
+    })
+    await fixture.ctx.fiber.restart()
   })
 
   test('create and manage return proposals; list remains read-only and bounded', async () => {
@@ -94,7 +154,7 @@ describe('assistant automations rc.8 tools', () => {
     expect((await fixture.ctx.tools.execute(call('automation_list', {}, fixture.agent))).value).toEqual({ automations: [] })
     const proposal = proposed.isError ? undefined : proposed.value as { proposalId: string; version: number }
     fixture.ctx.assistantAutomations.decideProposal({
-      proposalId: proposal!.proposalId, principal: 'owner:lark:123', expectedVersion: 1,
+      proposalId: proposal!.proposalId, principal: 'lark/main/tenant/owner', expectedVersion: 1,
       decision: 'approved', reason: 'reviewed',
     })
     const listed = await fixture.ctx.tools.execute(call('automation_list', {}, fixture.agent))
@@ -105,7 +165,6 @@ describe('assistant automations rc.8 tools', () => {
     }] })
     const managed = await fixture.ctx.tools.execute(call('automation_manage', {
       automation_id: 'auto-review', operation: 'pause', expected_version: 1,
-      principal: 'owner:lark:123', idempotency_key: 'tool:pause:review',
     }, fixture.agent))
     expect(managed.isError ? undefined : managed.value).toMatchObject({ status: 'pending', mutation: { op: 'pause' } })
     await fixture.ctx.fiber.restart()
@@ -115,7 +174,7 @@ describe('assistant automations rc.8 tools', () => {
     const fixture = await harness()
     const proposed = await fixture.ctx.tools.execute(call('automation_create', createArgs(), fixture.agent))
     const proposal = proposed.isError ? undefined : proposed.value as { proposalId: string }
-    fixture.ctx.assistantAutomations.decideProposal({ proposalId: proposal!.proposalId, principal: 'owner:lark:123',
+    fixture.ctx.assistantAutomations.decideProposal({ proposalId: proposal!.proposalId, principal: 'lark/main/tenant/owner',
       expectedVersion: 1, decision: 'approved', reason: 'reviewed' })
     const run = await fixture.ctx.tools.execute(call('automation_run', {
       automation_id: 'auto-review', idempotency_key: 'dry:review',
@@ -139,15 +198,16 @@ describe('assistant automations rc.8 tools', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('all five tools fail closed without a trusted Agent', async () => {
+  test('all six tools fail closed without a trusted Agent', async () => {
     const { ctx } = await harness()
     for (const [name, args] of [
       ['automation_list', {}],
       ['automation_history', {}],
       ['automation_create', createArgs()],
       ['automation_manage', { automation_id: 'x', operation: 'pause', expected_version: 1,
-        principal: 'owner', idempotency_key: 'x' }],
+      }],
       ['automation_run', { automation_id: 'x', idempotency_key: 'x' }],
+      ['automation_pending', {}],
     ] as const) {
       const result = await ctx.tools.execute(call(name, args))
       expect(result.isError).toBe(true)

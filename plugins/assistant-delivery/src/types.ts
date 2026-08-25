@@ -140,6 +140,7 @@ export interface ApprovalIntent {
   expectedVersion: number
   expiresAt: number
   title: string
+  diffHash: string
 }
 
 export interface ModelPickerIntent {

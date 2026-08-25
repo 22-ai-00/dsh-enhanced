@@ -1,3 +1,5 @@
+import type { ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
+
 export type MemoryOwner = 'agent' | 'user'
 export type MemoryScope = 'user-global' | 'workspace'
 export type MemoryKind = 'experience' | 'fact' | 'instruction' | 'preference'
@@ -97,6 +99,7 @@ export interface MemoryProposalInput {
   idempotencyKey: string
   requester: string
   principal: string
+  dispatch?: Readonly<ApprovalDispatchRoute>
   ttlMs: number
   mutation: MemoryMutation
 }
@@ -134,6 +137,13 @@ export interface StoredMemoryProposal {
   expiresAt: number
   version: number
   resultMemoryId?: string
+}
+
+export interface StoredMemoryProposalIntent extends MemoryProposalInput {
+  proposalId: string
+  mutationHash: string
+  createdAt: number
+  updatedAt: number
 }
 
 export interface MemoryExportRecord {

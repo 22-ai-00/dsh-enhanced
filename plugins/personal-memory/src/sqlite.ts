@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const memorySchemaVersion = 1
+export const memorySchemaVersion = 2
 
 export class MemoryDatabaseError extends Error {
   constructor(
@@ -24,8 +24,9 @@ function migrate(database: DatabaseSync): void {
   }
   if (row.user_version === memorySchemaVersion) return
 
-  database.exec(`
-    BEGIN IMMEDIATE;
+  if (row.user_version === 0) {
+    database.exec(`
+      BEGIN IMMEDIATE;
 
     CREATE TABLE schema_meta (
       key TEXT PRIMARY KEY,
@@ -83,6 +84,35 @@ function migrate(database: DatabaseSync): void {
       version INTEGER NOT NULL DEFAULT 1
     ) STRICT;
 
+    CREATE INDEX memory_proposals_reconcile
+      ON memory_proposals(status, updated_at, id);
+
+    CREATE TABLE memory_proposal_intents (
+      id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      requester TEXT NOT NULL,
+      principal TEXT NOT NULL,
+      mutation_hash TEXT NOT NULL,
+      mutation_json TEXT NOT NULL,
+      ttl_ms INTEGER NOT NULL CHECK (ttl_ms > 0),
+      dispatch_source_id TEXT,
+      dispatch_binding_id TEXT,
+      dispatch_workspace TEXT,
+      dispatch_principal TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      CHECK (
+        (dispatch_source_id IS NULL AND dispatch_binding_id IS NULL
+          AND dispatch_workspace IS NULL AND dispatch_principal IS NULL)
+        OR
+        (dispatch_source_id IS NOT NULL AND dispatch_binding_id IS NOT NULL
+          AND dispatch_workspace IS NOT NULL AND dispatch_principal IS NOT NULL)
+      )
+    ) STRICT;
+
+    CREATE INDEX memory_proposal_intents_reconcile
+      ON memory_proposal_intents(updated_at, id);
+
     CREATE TABLE memory_audit (
       sequence INTEGER PRIMARY KEY AUTOINCREMENT,
       idempotency_key TEXT NOT NULL UNIQUE,
@@ -93,8 +123,43 @@ function migrate(database: DatabaseSync): void {
       occurred_at INTEGER NOT NULL
     ) STRICT;
 
-    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '1');
-    PRAGMA user_version = 1;
+      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '2');
+      PRAGMA user_version = 2;
+      COMMIT;
+    `)
+    return
+  }
+
+  database.exec(`
+    BEGIN IMMEDIATE;
+    CREATE INDEX memory_proposals_reconcile
+      ON memory_proposals(status, updated_at, id);
+    CREATE TABLE memory_proposal_intents (
+      id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      requester TEXT NOT NULL,
+      principal TEXT NOT NULL,
+      mutation_hash TEXT NOT NULL,
+      mutation_json TEXT NOT NULL,
+      ttl_ms INTEGER NOT NULL CHECK (ttl_ms > 0),
+      dispatch_source_id TEXT,
+      dispatch_binding_id TEXT,
+      dispatch_workspace TEXT,
+      dispatch_principal TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      CHECK (
+        (dispatch_source_id IS NULL AND dispatch_binding_id IS NULL
+          AND dispatch_workspace IS NULL AND dispatch_principal IS NULL)
+        OR
+        (dispatch_source_id IS NOT NULL AND dispatch_binding_id IS NOT NULL
+          AND dispatch_workspace IS NOT NULL AND dispatch_principal IS NOT NULL)
+      )
+    ) STRICT;
+    CREATE INDEX memory_proposal_intents_reconcile
+      ON memory_proposal_intents(updated_at, id);
+    UPDATE schema_meta SET value = '2' WHERE key = 'schema-version';
+    PRAGMA user_version = 2;
     COMMIT;
   `)
 }

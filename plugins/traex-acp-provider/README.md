@@ -1,6 +1,8 @@
 # @dsh-enhanced/traex-acp-provider
 
-把同一台机器、同一 OS 用户已经登录的 TraeX / TRAE CLI 注册为 DeepSeek Harness 的 `traex-agent` provider。DSH 在这里是 **ACP client**：模型选择器会通过无 prompt 的临时 ACP 会话发现 TraeX 当前提供的模型及其逐模型 reasoning effort；每次模型请求仍会启动新的 `traex acp serve`、完成 ACP v1 握手、创建会话、再次校验模型/effort 并发送 prompt。普通 `agent_message_chunk` 会映射为 DSH 文本；当请求带 DSH tool schema 时，TraeX 可以返回受控工具信封，插件把它转换成 DSH 原生 tool call，由 Harness 执行后进入下一 step。
+把同一台机器、同一 OS 用户已经登录的 TraeX / TRAE CLI 注册为 DeepSeek Harness 的 `traex-agent` provider。DSH 在这里是 **ACP client**：每次模型请求都会在校验 live Agent session 工作区后启动新的 `traex acp serve`、完成 ACP v1 握手、创建会话、校验模型/effort，并把握手目录作为非权威展示缓存。普通 `agent_message_chunk` 会映射为 DSH 文本；当请求带 DSH tool schema 时，TraeX 可以返回受控工具信封，插件把它转换成 DSH 原生 tool call，由 Harness 执行后进入下一 step。
+
+启用时，插件会在同一个 `LlmRuntime` 上通过 `@dsh-enhanced/llm-route-capabilities` 发布 `traex-agent` 的 `toolCalls: bridge`，并随 Cordis fiber 撤回。Delivery/Automations 因而能在启动模型前区分这条受控桥接 route 与 text-only coding subscription，而不依赖 rc.8 会丢弃的自定义 model metadata。
 
 这不是订阅 OAuth 转接，也不是模型 API provider。认证、模型供应、网络请求和可能产生的费用均由本机 TraeX 负责；插件不读取或托管 token。仓库中的 [`@dsh-enhanced/acp`](../acp) 方向正好相反——它让 DSH 自己成为供编辑器调用的 ACP agent。
 
@@ -27,7 +29,7 @@ dsh plugin --profile web add @dsh-enhanced/traex-acp-provider
 dsh --profile web --dump-config
 ```
 
-该实验性 route 默认关闭。确认本机版本、登录和 ACP 入口后设置 `enabled: true`，再在 DSH 的 provider/model 选择处选择 `traex-agent`。模型选择器会列出 TraeX 当前 ACP 会话返回的全部模型；`default` 是额外保留的别名，沿用 TraeX 当前模型。具体模型和 effort 都通过 ACP session config option 选择，不会拼进 shell 命令。
+该实验性 route 默认关闭。确认本机版本、登录和 ACP 入口后设置 `enabled: true`，再在 DSH 的 provider/model 选择处选择 `traex-agent`。启动时模型选择器先显示配置别名；完成一次安全调用后会合并该 ACP 会话观察到的全部模型。`default` 沿用 TraeX 当前模型。具体模型和 effort 都通过 ACP session config option 选择，不会拼进 shell 命令。
 
 ## 快速开始（5 步）
 
@@ -35,7 +37,7 @@ dsh --profile web --dump-config
 2. **安装插件**：`dsh plugin --profile web add @dsh-enhanced/traex-acp-provider`。
 3. **开启 route**：本 route 默认关闭，需在配置里显式设 `enabled: true`（命令名不同则一并改 `command`）。
 4. **落盘检查**：`dsh --profile web --dump-config` 确认 `enabled` 与 `command` 生效。
-5. **选择模型调用**：在 DSH 里选 `traex-agent`，等待模型目录加载后选择 `default`（沿用 TraeX 当前模型）或任一实时发现的具体模型；支持 reasoning 的模型还会显示它自己的 effort 选项。
+5. **选择模型调用**：在 DSH 里先选 `traex-agent/default`（沿用 TraeX 当前模型）；完成一次调用后，可再选择该 live ACP session 已观察到的具体模型与 effort。
 
 每次调用会启动一个新的 `traex acp serve` 进程并消耗 TraeX 侧额度。遇到报错先看下文「协议与失败策略」的错误码表。
 
@@ -67,10 +69,12 @@ dsh --profile web --dump-config
 
 - `enabled` 默认 `false`；只在完成本机兼容性与登录检查后显式开启。
 - `command` 是单个可执行文件名或绝对路径；插件固定参数数组并使用 `shell: false`，不接受 shell 片段。
-- `cwd` 是 ACP `session/new` 的工作目录；相对路径按 DSH 进程启动目录解析。
+- `cwd` 是 ACP `session/new` 允许使用的工作目录；相对路径按 DSH 进程启动目录解析。每个**带 prompt 的调用**必须是 DSH Agent Loop 在本进程标记且深冻结的请求；插件用其 live `sessionId` 从 host `sessions` 服务读 header cwd，双方 `realpath` 后必须与配置 cwd 完全一致。缺失、过期、伪造、未标记、cwd mismatch 或 symlink escape 都会在 `traex login status` 和 ACP 启动前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝；ACP 收到的是 canonical live-session cwd。
+- `listModels` / `resolveModel` 没有 `GenerateOptions` 或 live session identity，因此只读取配置与已观察的短 TTL 内存缓存，**绝不认证或启动 ACP 子进程**。普通运行时的目录只由已经通过 live session + canonical cwd 校验的 `stream` 握手观察。
+- 部署工具若要在启用 route 前主动验证本机登录和完整目录，必须显式调用包导出的 `probeTraexReadiness`。这是单独的 activation-only static-cwd 权限边界，不会被普通 DSH 模型查询隐式触发；调用完成后始终 shutdown 临时 adapter。
 - `models` 是实时 ACP 目录以外需要额外展示的非权威别名列表，默认只有 `default`。它不是执行允许列表；每次请求都会在新的 ACP 会话里重新验证具体模型和 reasoning effort，不可用时失败且不会静默换模型或 effort。
 - `timeoutMs` 覆盖握手、建会话和整轮 prompt。取消或超时时先发 ACP `session/cancel` 和 `SIGINT`，等待 `killGraceMs` 后升级为 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时以 `teardown=failed` 错误结算，保留原始 abort/timeout 分类，并继续跟踪迟到的 `close`；不会伪称已完成回收。
-- `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次调用及目录发现前的 `traex login status`；当前 TraeX 可能把精确文本 `Logged in using Trae` 单独写入 stdout 或 stderr，这两种形式都会被接受，混合输出、ChatGPT、API key、access token、未登录与未知输出全部拒绝。
+- `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次 live-session 调用以及显式 readiness probe 的 `traex login status`；当前 TraeX 可能把精确文本 `Logged in using Trae` 单独写入 stdout 或 stderr，这两种形式都会被接受，混合输出、ChatGPT、API key、access token、未登录与未知输出全部拒绝。
 - `maxMessageBytes` 限制单条 NDJSON，`maxProtocolBytes` / `maxProtocolMessages` 限制整轮 ACP 输入，`maxOutputBytes` 限制助手文本；字节限制均按 UTF-8 计算。
 - `maxPromptBytes` 限制序列化后的 DSH 请求，默认 4 MiB。prompt 通过 ACP `session/prompt` 的文本块经 stdin 发送，**不作为 argv 元素**，因此这里不存在操作系统命令行长度限制；该上限只用于约束本机内存与 NDJSON 帧膨胀。真正的上下文边界由 TraeX 侧模型窗口决定。超限时在握手前失败，返回 DSH 标准的 `CONTEXT_WINDOW_EXCEEDED`，prompt 确定未进入 ACP 流；长对话若需要更大值可直接调高本项。
 - `extraEnvNames` 只允许填写要从 DSH 启动环境继承的变量名，配置中不能写变量值或 secret。
@@ -93,9 +97,9 @@ traex --sandbox read-only --ask-for-approval never acp serve
 
 | 能力 | 行为 |
 |---|---|
-| 文件系统 | 把规范化后的 `cwd` 发送给 TraeX，并强制 read-only sandbox；插件本身不提供 ACP 文件读写接口。TraeX 可以读取工作区以完成任务。 |
+| 文件系统 | 对 prompt-bearing 调用，只把经过 live-loop session 身份和 canonical `realpath` 精确校验的 cwd 发送给 TraeX，并强制 read-only sandbox；普通模型查询不启动进程。显式 `probeTraexReadiness` 是由部署者主动进入的 static-cwd activation 边界。插件本身不提供 ACP 文件读写接口。 |
 | 网络 | 插件本身不直连模型服务；TraeX 会连接自己的认证、推理、更新或遥测服务。 |
-| 子进程 | 每次请求直接启动一个 TraeX ACP stdio 子进程，`shell: false`。打开/刷新模型目录也会启动一个无 prompt 的临时 ACP 会话，依次读取各模型的 reasoning selector 后关闭。取消时先走 ACP，再回收进程组；Windows 后代进程回收为 best-effort。 |
+| 子进程 | 每次经过 live-session 校验的请求直接启动一个 TraeX ACP stdio 子进程，`shell: false`，并从同一握手观察目录。只有部署者显式调用 `probeTraexReadiness` 时才另开无 prompt 临时 ACP 会话。取消时先走 ACP，再回收进程组；Windows 后代进程回收为 best-effort。 |
 | 凭据 | 不读取 TraeX auth 文件、不实现登录、不刷新或上传 token；只让 TraeX 在本机用户配置目录中使用自己的缓存凭据。 |
 | 浏览器 | 插件不会打开浏览器；用户在插件外执行 TraeX login 时可能打开。 |
 | ACP 权限 | 所有 permission request 均拒绝；不暴露 client-side FS、terminal 或 MCP server。 |
@@ -118,6 +122,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 | 错误码 | 含义 | 处理 |
 |---|---|---|
 | `ACP_AUTH_REQUIRED` | 每次调用前的 `traex login status` 未精确报告 `Logged in using Trae` | 在同一 OS 用户下重新 `traex login`；ChatGPT/API key/access token/未登录都会被拒。 |
+| `LOCAL_SESSION_CWD_REQUIRED` | 请求没有匹配的 live loop session，或其 canonical cwd 与配置 cwd 不完全一致 | 从真实 DSH Agent Loop 发起调用；确认 session header cwd 与插件 `cwd` 指向同一 realpath，且不要通过 symlink 跨出该目录。 |
 | `ACP_ENTITLEMENT_REQUIRED` | 握手成功但当前 Trae 账号没有任何可用模型 | 确认账号权益/套餐，必要时在 TraeX 侧切换账号。 |
 | `ACP_MODEL_UNAVAILABLE` | 请求的模型不在本次 ACP 会话的 model selector 中 | 刷新模型列表或用 `default`；账号权益或 TraeX 目录可能已经变化。 |
 | `UNSUPPORTED_REASONING_EFFORT` | 所选 effort 不属于该模型当前返回的 reasoning selector | 重新选择该模型实际显示的 effort；不同模型支持集可以不同。 |
@@ -134,7 +139,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 - 认证不足会返回 `ACP_AUTH_REQUIRED`，无可用权益/模型分别映射为 `ACP_ENTITLEMENT_REQUIRED` / `ACP_MODEL_UNAVAILABLE`，明确拒绝映射为 `ACP_REFUSAL`；其他稳定错误包括 `ACP_PROTOCOL_ERROR`、`ACP_TIMEOUT`、`ACP_OUTPUT_LIMIT`、`ACP_PROCESS_FAILED`、`CONTEXT_WINDOW_EXCEEDED`、`ACP_PROMPT_INVALID` 和 `CLI_NOT_FOUND`。
 - 握手前的 prompt 序列化失败（超限或含不支持的 content block）一律带稳定错误码抛出，不会退化为未分类失败；此时 prompt 确定未进入 ACP 流，重试安全。
 
-> 模型目录：`listModels` 会建立一个无 prompt 的临时 ACP 会话，依次选择本次目录中的每个模型，读取该模型实际返回的 reasoning selector，然后关闭会话。完整结果会在内存里做一份**非权威**、带短 TTL 的展示缓存；它不放行或拒绝执行。每次真实调用仍以新的 `session/new` 返回值为唯一执行依据，重新选择并核对模型与 effort；auth 失败、reload 或版本变化时缓存失效。日志只输出模型数量，不含 model id 原文。
+> 模型目录：普通 `listModels` / `resolveModel` 只合并配置与最后一次安全 ACP 握手得到的**非权威**、短 TTL 展示缓存，不做 I/O。每次真实调用仍以自己的 `session/new` 返回值为唯一执行依据，重新选择并核对模型与 effort；auth 失败、reload 或 TTL 到期时缓存失效。部署激活可单独调用 `probeTraexReadiness` 做 prompt-free 完整目录探测；这不会改变普通运行时查询的权限边界。日志只输出模型数量，不含 model id 原文。
 
 ## 已知限制
 

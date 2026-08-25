@@ -49,10 +49,22 @@ function stubAgent(options: { cwd?: string; preset?: string } = {}) {
   return { agent, injections }
 }
 
-async function harness(options: { allow?: boolean; maxImportRecords?: number } = {}) {
+async function harness(options: {
+  allow?: boolean
+  approvalMode?: 'delivery-or-headless' | 'delivery-required'
+  maxImportRecords?: number
+  delivery?: {
+    prepareAgentApproval: (agent: Agent | undefined, input: { sourceId: string }) => {
+      sourceId: string
+      bindingId: string
+      workspace: string
+      principal: string
+    }
+  }
+} = {}) {
   const ctx = new Context()
   const databasePaths = await paths()
-  new AssistantPolicyService(ctx, {
+  const policy = new AssistantPolicyService(ctx, {
     databasePath: databasePaths.policy,
     rules: options.allow === false ? [] : [{
       id: 'allow-memory-service',
@@ -63,15 +75,18 @@ async function harness(options: { allow?: boolean; maxImportRecords?: number } =
       context: { initiators: ['foreground'] },
     }],
   })
+  if (options.delivery !== undefined) ctx.provide('assistantDelivery', options.delivery as never)
   const service = new PersonalMemoryService(ctx, {
     databasePath: databasePaths.memory,
+    approvalMode: options.approvalMode
+      ?? (options.delivery === undefined ? 'delivery-or-headless' : 'delivery-required'),
     snapshotLimit: 10,
     snapshotMaxBytes: 1_024,
     snapshotMaxTokens: 256,
     defaultProposalTtlMs: 60_000,
     ...(options.maxImportRecords === undefined ? {} : { maxImportRecords: options.maxImportRecords }),
   })
-  return { ctx, service }
+  return { ctx, policy, service }
 }
 
 function addInput(content: string, idempotencyKey = `add:${content}`) {
@@ -94,6 +109,131 @@ function addInput(content: string, idempotencyKey = `add:${content}`) {
 }
 
 describe('personal memory Cordis service', () => {
+  test('derives approval authority from the exact active delivery route and dispatches it durably', async () => {
+    const calls: Array<{ agent: Agent | undefined; sourceId: string }> = []
+    const route = {
+      sourceId: 'dsh-enhanced-personal-memory',
+      bindingId: 'binding-owner-dm',
+      workspace: '/work/alpha',
+      principal: 'lark/main/tenant/owner',
+    }
+    const { ctx, policy, service } = await harness({
+      delivery: {
+        prepareAgentApproval(agent, input) {
+          calls.push({ agent, sourceId: input.sourceId })
+          return route
+        },
+      },
+    })
+    const { agent } = stubAgent({ cwd: '/work/alpha', preset: 'primary' })
+    const { principal: _principal, ...input } = addInput('Delivery-bound memory')
+
+    const proposal = service.propose(agent, input)
+
+    expect(calls).toEqual([{ agent, sourceId: 'dsh-enhanced-personal-memory' }])
+    expect(policy.listPendingApprovalDispatches()).toEqual([
+      expect.objectContaining({
+        proposalId: proposal.policyProposalId,
+        sourceId: route.sourceId,
+        bindingId: route.bindingId,
+        workspace: route.workspace,
+        principal: route.principal,
+        requester: 'agent:primary',
+        action: 'memory.add',
+        resource: { kind: 'memory', id: proposal.proposalId },
+        summary: proposal.summary,
+        diff: proposal.diff,
+        proposalVersion: 1,
+        state: 'pending',
+      }),
+    ])
+    expect(() => service.propose(agent, {
+      ...addInput('Authority substitution', 'delivery:authority-substitution'),
+      principal: 'lark/main/tenant/attacker',
+    })).toThrowError(expect.objectContaining<Partial<PersonalMemoryError>>({
+      code: 'unauthorized-principal',
+    }))
+    await ctx.fiber.restart()
+  })
+
+  test('fails closed without an owner binding while preserving explicit headless authority', async () => {
+    const bound = await harness({
+      delivery: {
+        prepareAgentApproval() {
+          throw new Error('no authenticated owner binding')
+        },
+      },
+    })
+    const { agent } = stubAgent({ cwd: '/work/alpha', preset: 'primary' })
+    const { principal: _principal, ...modelInput } = addInput('Cannot choose a principal')
+    const importJson = JSON.stringify({
+      format: 'dsh-personal-memory',
+      version: 1,
+      records: [{
+        identity: modelInput.mutation.identity,
+        entry: modelInput.mutation.op === 'add' ? modelInput.mutation.entry : undefined,
+      }],
+    })
+
+    expect(() => bound.service.propose(agent, modelInput)).toThrow(/owner binding/i)
+    expect(() => bound.service.proposeImport(agent, {
+      json: importJson,
+      idempotencyKey: 'import:no-owner-binding',
+    })).toThrow(/owner binding/i)
+    expect(() => bound.service.propose(agent, addInput('No fallback with Delivery present')))
+      .toThrow(/owner binding/i)
+    await bound.ctx.fiber.restart()
+
+    const headless = await harness()
+    expect(() => headless.service.propose(agent, modelInput))
+      .toThrowError(expect.objectContaining<Partial<PersonalMemoryError>>({
+        code: 'missing-approval-route',
+      }))
+    expect(headless.service.propose(agent, addInput('Trusted headless import')).status).toBe('pending')
+    await headless.ctx.fiber.restart()
+
+    const production = await harness({ approvalMode: 'delivery-required' })
+    expect(() => production.service.propose(agent, addInput('No availability downgrade')))
+      .toThrowError(expect.objectContaining<Partial<PersonalMemoryError>>({
+        code: 'missing-approval-route',
+      }))
+    await production.ctx.fiber.restart()
+  })
+
+  test('derives the same Delivery authority for model-originated imports', async () => {
+    const route = {
+      sourceId: 'dsh-enhanced-personal-memory',
+      bindingId: 'binding-import-owner',
+      workspace: '/work/alpha',
+      principal: 'lark/main/tenant/import-owner',
+    }
+    const { ctx, policy, service } = await harness({
+      delivery: { prepareAgentApproval: () => route },
+    })
+    const { agent } = stubAgent({ cwd: '/work/alpha', preset: 'primary' })
+    const mutation = addInput('Imported through owner route').mutation
+    const batch = service.proposeImport(agent, {
+      json: JSON.stringify({
+        format: 'dsh-personal-memory',
+        version: 1,
+        records: [{
+          identity: mutation.identity,
+          entry: mutation.op === 'add' ? mutation.entry : undefined,
+        }],
+      }),
+      idempotencyKey: 'import:delivery-owner',
+    })
+
+    expect(batch.proposals).toHaveLength(1)
+    expect(policy.listPendingApprovalDispatches()).toEqual([
+      expect.objectContaining({
+        proposalId: batch.proposals[0]!.policyProposalId,
+        ...route,
+      }),
+    ])
+    await ctx.fiber.restart()
+  })
+
   test('registers ctx.personalMemory and exposes approval-gated operations without a store handle', async () => {
     const { ctx, service } = await harness()
     const { agent } = stubAgent({ cwd: '/work/alpha', preset: 'primary' })
@@ -153,10 +293,18 @@ describe('personal memory Cordis service', () => {
   })
 
   test('rejects absent, relative, and invalid bounded configuration', async () => {
+    expect(() => PersonalMemoryService.Config({
+      databasePath: '/tmp/memory.sqlite',
+      reconcileIntervalMs: 2_147_483_648,
+    })).toThrow()
     for (const config of [
       undefined,
       { databasePath: 'relative.sqlite' },
       { databasePath: '/tmp/memory.sqlite', snapshotLimit: 0 },
+      { databasePath: '/tmp/memory.sqlite', reconcileIntervalMs: -1 },
+      { databasePath: '/tmp/memory.sqlite', reconcileIntervalMs: 2_147_483_648 },
+      { databasePath: '/tmp/memory.sqlite', reconcileLimit: 1_001 },
+      { databasePath: '/tmp/memory.sqlite', approvalMode: 'unsafe-auto' },
     ]) {
       const ctx = new Context()
       expect(() => new PersonalMemoryService(ctx, config as never)).toThrow(/personal-memory|absolute|snapshot/i)

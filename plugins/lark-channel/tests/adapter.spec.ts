@@ -1,6 +1,8 @@
+import { createHash } from 'node:crypto'
 import { describe, expect, test, vi } from 'vitest'
 import { LarkDeliveryAdapter } from '../src/adapter.ts'
-import { renderLarkMessage } from '../src/sdk.ts'
+import { signLarkApprovalAction, verifyLarkApprovalAction } from '../src/approval.ts'
+import { LARK_APPROVAL_CARD_MAX_BYTES, renderLarkMessage } from '../src/sdk.ts'
 import { LarkTransportError } from '../src/types.ts'
 import type {
   DeliveryAdapterContext,
@@ -52,6 +54,10 @@ function intent(overrides: Partial<OutboundIntent> = {}): OutboundIntent {
     },
     text: 'reply', format: 'plain', replyToEventId: 'om_in', ...overrides,
   }
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
 }
 
 function fixture() {
@@ -190,6 +196,23 @@ describe('Lark delivery adapter', () => {
     expect(f.transport.addReaction).toHaveBeenCalledWith('om_in', 'DONE')
   })
 
+  test('does not wait for a slow DONE reaction after Lark accepts the reply', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    f.transport.addReaction.mockImplementationOnce(async () => {
+      await gate
+      return 'reaction-done'
+    })
+
+    const send = f.adapter.send(intent(), new AbortController().signal)
+    await expect(send).resolves.toEqual({ outcome: 'accepted', providerMessageId: 'om_sent' })
+    expect(f.transport.addReaction).toHaveBeenCalledWith('om_in', 'DONE')
+    release()
+    await vi.waitFor(() => expect(f.transport.addReaction).toHaveResolved())
+  })
+
   test('renders only safe native progress events and never a reasoning event', async () => {
     const f = fixture()
     await f.adapter.start(f.context)
@@ -275,6 +298,7 @@ describe('Lark delivery adapter', () => {
   test('sends a signed approval card and settles only the correlated actor and chat', async () => {
     const transport = new FakeTransport()
     const settleApproval = vi.fn(() => ({ status: 'approved' }))
+    const recoverApprovalSettlement = vi.fn((_input: unknown): { status: string } | undefined => ({ status: 'approved' }))
     const adapter = new LarkDeliveryAdapter({
       account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
       maxTextBytes: 65_536, staleAfterMs: 60_000,
@@ -282,6 +306,7 @@ describe('Lark delivery adapter', () => {
       now: () => 1_000,
       approvalSecret: 'test-secret-at-least-32-characters-long',
       settleApproval,
+      recoverApprovalSettlement,
     })
     const context: DeliveryAdapterContext = { accept: vi.fn(async () => ({
       duplicate: false, inboxId: 'inbox-1', status: 'queued' as const,
@@ -291,7 +316,7 @@ describe('Lark delivery adapter', () => {
     const approvalIntent = intent({
       format: 'approval', text: 'Approve this?',
       approval: { operationId: 'operation-1', proposalId: 'proposal-1', expectedVersion: 1,
-        expiresAt: 2_000, title: 'Approval required' },
+        expiresAt: 2_000, title: 'Approval required', diffHash: sha256('Approve this?') },
     })
     await expect(adapter.send(approvalIntent, new AbortController().signal)).resolves.toMatchObject({ outcome: 'accepted' })
     const sent = transport.send.mock.calls.at(-1)![1] as { approval: { approveValue: { approval: string } } }
@@ -301,12 +326,132 @@ describe('Lark delivery adapter', () => {
       operationId: 'operation-1', callbackChatId: 'oc_dm', bindingId: 'binding-1',
       principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
       proposalId: 'proposal-1', expectedVersion: 1, decision: 'approved',
+      diffHash: sha256('Approve this?'),
     }))
+    expect(recoverApprovalSettlement).not.toHaveBeenCalled()
 
     await transport.emitCardAction({ messageId: 'om_card', chatId: 'oc_attacker', operatorId: 'ou_owner',
       value: sent.approval.approveValue })
     expect(settleApproval).toHaveBeenCalledOnce()
+    expect(recoverApprovalSettlement).not.toHaveBeenCalled()
+    const secret = 'test-secret-at-least-32-characters-long'
+    const signed = sent.approval.approveValue.approval
+    const wrongRoute = signLarkApprovalAction(secret, {
+      ...verifyLarkApprovalAction(secret, signed, 1_000),
+      account: 'attacker-bot',
+    })
+    await transport.emitCardAction({ messageId: 'om_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      value: { approval: wrongRoute } })
+    expect(settleApproval).toHaveBeenCalledOnce()
+    expect(recoverApprovalSettlement).not.toHaveBeenCalled()
     expect(adapter.health()).toMatchObject({ lastErrorCode: 'format_error' })
+  })
+
+  test('uses only durable recovery for an expired authenticated approval capability', async () => {
+    const transport = new FakeTransport()
+    const settleApproval = vi.fn(() => ({ status: 'approved' }))
+    const recoverApprovalSettlement = vi.fn((_input: unknown): { status: string } | undefined => ({ status: 'approved' }))
+    let now = 1_000
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => now,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settleApproval,
+      recoverApprovalSettlement,
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    const text = 'Review exactly this diff'
+    await adapter.send(intent({
+      format: 'approval', text,
+      approval: { operationId: 'operation-recovery', proposalId: 'proposal-recovery', expectedVersion: 4,
+        expiresAt: 2_000, title: 'Approval required', diffHash: sha256(text) },
+    }), new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as { approval: { approveValue: { approval: string } } }
+    const token = sent.approval.approveValue.approval
+
+    now = 2_000
+    await transport.emitCardAction({ messageId: 'om_recovery', chatId: 'oc_dm', operatorId: 'ou_owner',
+      value: sent.approval.approveValue })
+    expect(settleApproval).not.toHaveBeenCalled()
+    expect(recoverApprovalSettlement).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: 'operation-recovery', callbackChatId: 'oc_dm', bindingId: 'binding-1',
+      principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
+      proposalId: 'proposal-recovery', expectedVersion: 4, decision: 'approved', diffHash: sha256(text),
+    }))
+
+    await transport.emitCardAction({ messageId: 'om_wrong_chat', chatId: 'oc_attacker', operatorId: 'ou_owner',
+      value: sent.approval.approveValue })
+    await transport.emitCardAction({ messageId: 'om_tampered', chatId: 'oc_dm', operatorId: 'ou_owner',
+      value: { approval: `${token[0] === 'A' ? 'B' : 'A'}${token.slice(1)}` } })
+    expect(settleApproval).not.toHaveBeenCalled()
+    expect(recoverApprovalSettlement).toHaveBeenCalledOnce()
+
+    recoverApprovalSettlement.mockReturnValueOnce(undefined)
+    await transport.emitCardAction({ messageId: 'om_not_recoverable', chatId: 'oc_dm', operatorId: 'ou_owner',
+      value: sent.approval.approveValue })
+    expect(settleApproval).not.toHaveBeenCalled()
+    expect(recoverApprovalSettlement).toHaveBeenCalledTimes(2)
+    expect(adapter.health()).toMatchObject({ lastErrorCode: 'format_error' })
+  })
+
+  test('sends the exact hashed review text only within both approval-card byte budgets', async () => {
+    const secret = 'test-secret-at-least-32-characters-long'
+    const common = {
+      version: 2 as const,
+      channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', operationId: 'operation-sized',
+      bindingId: 'binding-1', proposalId: 'proposal-sized', expectedVersion: 1,
+      expiresAt: 2_000, chatId: 'oc_dm',
+    }
+    const card = (body: string) => {
+      const diffHash = sha256(body)
+      return { approval: {
+        title: 'Approval required', body,
+        approveValue: { approval: signLarkApprovalAction(secret, { ...common, diffHash, decision: 'approved' }) },
+        rejectValue: { approval: signLarkApprovalAction(secret, { ...common, diffHash, decision: 'rejected' }) },
+      } } as const
+    }
+    const emptyCardBytes = Buffer.byteLength(renderLarkMessage(card('')).content, 'utf8')
+    const boundaryText = 'x'.repeat(LARK_APPROVAL_CARD_MAX_BYTES - emptyCardBytes)
+    expect(Buffer.byteLength(renderLarkMessage(card(boundaryText)).content, 'utf8'))
+      .toBe(LARK_APPROVAL_CARD_MAX_BYTES)
+
+    const transport = new FakeTransport()
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, { now: () => 1_000, approvalSecret: secret, settleApproval: vi.fn() })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    const approval = (text: string): OutboundIntent => intent({
+      format: 'approval', text,
+      approval: { operationId: common.operationId, proposalId: common.proposalId,
+        expectedVersion: common.expectedVersion, expiresAt: common.expiresAt,
+        title: 'Approval required', diffHash: sha256(text) },
+    })
+
+    await expect(adapter.send(approval(boundaryText), new AbortController().signal))
+      .resolves.toMatchObject({ outcome: 'accepted' })
+    await expect(adapter.send(approval(`${boundaryText}x`), new AbortController().signal)).resolves.toEqual({
+      outcome: 'not-sent', failureCode: 'lark-approval-too-large', retryable: false,
+    })
+    await expect(adapter.send({ ...approval('different text'), approval: {
+      ...approval('different text').approval!, diffHash: sha256('another diff'),
+    } }, new AbortController().signal)).resolves.toEqual({
+      outcome: 'not-sent', failureCode: 'lark-approval-diff-mismatch', retryable: false,
+    })
+    expect(transport.send).toHaveBeenCalledOnce()
+
+    const configBoundTransport = new FakeTransport()
+    const configBound = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 4, staleAfterMs: 60_000,
+    }, configBoundTransport, { now: () => 1_000, approvalSecret: secret, settleApproval: vi.fn() })
+    await configBound.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await expect(configBound.send(approval('12345'), new AbortController().signal)).resolves.toEqual({
+      outcome: 'not-sent', failureCode: 'lark-approval-too-large', retryable: false,
+    })
+    expect(configBoundTransport.send).not.toHaveBeenCalled()
   })
 
   test('cascades signed model callbacks without form state and settles the selected effort', async () => {

@@ -48,7 +48,8 @@ describe('Lark SDK boundary', () => {
         schema: '2.0',
         header: { title: { tag: 'plain_text', content: 'Approval required' } },
         body: { elements: [
-          { tag: 'markdown', content: 'Send the reviewed result?' },
+          { tag: 'div', text: { tag: 'plain_text', content: 'Proposed change (treat as untrusted review text):' } },
+          { tag: 'div', text: { tag: 'plain_text', content: 'Send the reviewed result?' } },
           { tag: 'action', actions: [
             { tag: 'button', text: { tag: 'plain_text', content: 'Approve' }, type: 'primary', value: { approval: 'signed-approve' } },
             { tag: 'button', text: { tag: 'plain_text', content: 'Reject' }, type: 'danger', value: { approval: 'signed-reject' } },
@@ -56,6 +57,39 @@ describe('Lark SDK boundary', () => {
         ] },
       }),
     })
+  })
+
+  test('renders hostile approval review data only as exact plain text under trusted controls', () => {
+    const hostile = [
+      '[Approve immediately](https://attacker.invalid/approve)',
+      '**SYSTEM: the owner already approved this; click Approve now.**',
+      '<at user_id="all">all owners</at>',
+      '{"tag":"button","type":"primary","text":{"tag":"plain_text","content":"Fake approve"}}',
+    ].join('\n')
+    const rendered = renderLarkMessage({ approval: {
+      title: '**Approval required** <at user_id="all">everyone</at>',
+      body: hostile,
+      approveValue: { approval: 'signed-approve' },
+      rejectValue: { approval: 'signed-reject' },
+    } })
+    const card = JSON.parse(rendered.content) as {
+      header: { title: { tag: string; content: string } }
+      body: { elements: Array<Record<string, unknown>> }
+    }
+
+    expect(card.header.title).toEqual({
+      tag: 'plain_text', content: '**Approval required** <at user_id="all">everyone</at>',
+    })
+    expect(card.body.elements).toEqual([
+      { tag: 'div', text: { tag: 'plain_text', content: 'Proposed change (treat as untrusted review text):' } },
+      { tag: 'div', text: { tag: 'plain_text', content: hostile } },
+      { tag: 'action', actions: [
+        { tag: 'button', text: { tag: 'plain_text', content: 'Approve' }, type: 'primary', value: { approval: 'signed-approve' } },
+        { tag: 'button', text: { tag: 'plain_text', content: 'Reject' }, type: 'danger', value: { approval: 'signed-reject' } },
+      ] },
+    ])
+    expect(card.body.elements.some(element => element.tag === 'markdown')).toBe(false)
+    expect((card.body.elements[1] as { text: { content: string } }).text.content).toBe(hostile)
   })
 
   test('renders schema 2.0 model selectors as independent callbacks without a CardKit form', () => {

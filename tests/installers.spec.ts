@@ -74,8 +74,25 @@ describe('one-click installers', () => {
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'lark-channel'))
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-health'))
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-policy'))
+    expect(result.stdout).not.toContain('部署模式：')
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'acp'))
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'hello'))
+  })
+
+  test('explicit standard is byte-for-byte the default dry-run and does not mount Evolution', async () => {
+    const implicitHome = await temporaryDshHome()
+    const explicitHome = await temporaryDshHome()
+
+    const implicit = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], implicitHome)
+    const explicit = runInstaller(localInstaller, ['--dry-run', '--mode', 'standard', '--lark', 'skip'], explicitHome)
+
+    expect(implicit.status, implicit.stderr).toBe(0)
+    expect(explicit.status, explicit.stderr).toBe(0)
+    expect(explicit.stdout.replace(explicitHome, '<DSH_HOME>')).toBe(
+      implicit.stdout.replace(implicitHome, '<DSH_HOME>'),
+    )
+    expect(explicit.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-evolution'))
+    expect(explicit.stdout).not.toContain('dsh-supervised-growth-setup')
   })
 
   test('npm installer pins DSH and applies one release selector to every published bundle', async () => {
@@ -92,6 +109,56 @@ describe('one-click installers', () => {
     expect(result.stdout).toContain('@dsh-enhanced/lark-channel@0.2.0')
     expect(result.stdout).not.toContain('@dsh-enhanced/acp@')
     expect(result.stdout).not.toContain('@dsh-enhanced/hello@')
+  })
+
+  test('supervised-growth explicitly installs Evolution then invokes the audited activator after Lark onboarding', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--mode', 'supervised-growth', '--lark', 'configure',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('部署模式：supervised-growth')
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-evolution'))
+    expect(result.stdout).toContain('dsh-lark-setup --profile web')
+    expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000')
+    expect(result.stdout).not.toContain('overlay：未应用')
+  })
+
+  test('supervised-growth passes an explicit acknowledgement only to its activator', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--mode', 'supervised-growth', '--lark', 'configure', '--ack-existing-automations',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000 --ack-existing-automations')
+  })
+
+  test('supervised-growth refuses to run without an owner onboarding path', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--mode', 'supervised-growth', '--lark', 'skip',
+    ], dshHome)
+
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('supervised-growth 需要飞书 onboarding')
+    expect(result.stdout).not.toContain('dsh plugin')
+  })
+
+  test('rejects an unknown deployment mode before planning installation', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--mode', 'unbounded', '--lark', 'skip',
+    ], dshHome)
+
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('--mode 只能是 standard 或 supervised-growth')
+    expect(result.stdout).not.toContain('dsh plugin')
   })
 
   test('local installer replaces an incompatible DSH and executes build, install, and validation', async () => {
@@ -144,6 +211,64 @@ printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
     expect(log).toContain('pnpm build')
     expect(log).toContain('dsh plugin --profile web add')
     expect(log).toContain('dsh --profile web --dump-config')
+  })
+
+  test('supervised-growth invokes the installed activator only after the installed Lark setup completes', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'dsh-home')
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'commands.log')
+    await mkdir(fakeBin, { recursive: true })
+    await configureExistingLark(dshHome)
+    await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "\${1:-}" == 'prefix' ]]; then printf '%s\\n' "$FAKE_PREFIX"; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; exit 0; fi
+printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
+`)
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.0-rc.8\\n'; exit 0; fi
+printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
+if [[ "\${1:-}" == 'plugin' ]]; then
+  bin="$DSH_HOME/profiles/web/node_modules/.bin"
+  mkdir -p "$bin"
+  cat > "$bin/dsh-lark-setup" <<'EOF'
+#!/bin/bash
+printf 'lark-setup %s\\n' "$*" >> "$INSTALL_LOG"
+EOF
+  cat > "$bin/dsh-supervised-growth-setup" <<'EOF'
+#!/bin/bash
+printf 'supervised-setup %s\\n' "$*" >> "$INSTALL_LOG"
+printf 'supervised growth activated\\n'
+EOF
+  chmod 755 "$bin/dsh-lark-setup" "$bin/dsh-supervised-growth-setup"
+fi
+`)
+
+    const result = spawnSync('/bin/bash', [localInstaller, '--mode', 'supervised-growth', '--lark', 'keep', '--yes'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        DSH_HOME: dshHome,
+        INSTALL_LOG: logPath,
+        FAKE_PREFIX: root,
+      },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('supervised growth activated')
+    const log = await readFile(logPath, 'utf8')
+    const larkSetup = log.indexOf('lark-setup --profile web --install-service')
+    const activator = log.indexOf('supervised-setup --profile web --timeout-ms 300000')
+    expect(larkSetup).toBeGreaterThanOrEqual(0)
+    expect(activator).toBeGreaterThan(larkSetup)
   })
 
   test('auto mode keeps an existing enabled Feishu bot and only restarts its service', async () => {

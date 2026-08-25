@@ -3,3 +3,7 @@
 此目录存放两个或更多插件复用的普通 TypeScript 库。共享包不得声明 `dsh.bundle`，因此用户安装它时不会向 profile 注入 patch 层。
 
 只有出现真实的第二个消费者后才提取共享包。发布型共享包使用与插件相同的构建、测试和 pack 检查，但由消费插件决定把它列为 dependency 还是 peerDependency。
+
+| 包 | 用途 |
+| --- | --- |
+| [`@dsh-enhanced/llm-route-capabilities`](llm-route-capabilities) | 在精确的 DSH `LlmRuntime` 上发布和查询 provider/model 工具调用能力，不会激活 Cordis 插件。 |

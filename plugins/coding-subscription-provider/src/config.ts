@@ -12,6 +12,23 @@ export interface ProviderConfig {
   maxTurns: number
 }
 
+export type CodexTransport = 'cli' | 'direct-responses'
+
+export interface CodexProviderConfig extends ProviderConfig {
+  /** Execution path. The private Responses transport must be selected explicitly. */
+  transport: CodexTransport
+  /** Concrete backend model used when DSH selects the `default` alias. */
+  directModel: string
+  /** Reasoning efforts accepted by the configured direct private Responses model. */
+  directReasoningEfforts: string[]
+  /** Reasoning effort materialized by DSH when a direct request omits one. */
+  directDefaultReasoningEffort: string
+  /** Maximum serialized private Responses request bytes, including base64 images. */
+  maxRequestBytes: number
+  /** Maximum accumulated base64 image payload before older images are offloaded. */
+  maxRequestImageBytes: number
+}
+
 export interface GrokProviderConfig extends ProviderConfig {
   /** User attests that `grok inspect` shows session OAuth and no model API-key override. */
   userVerifiedSubscription: boolean
@@ -40,7 +57,7 @@ export interface CodingSubscriptionProviderConfig {
   extraEnvNames: string[]
   /** Include a redacted tail of CLI stderr in host logs. */
   logDiagnostics: boolean
-  codex: ProviderConfig
+  codex: CodexProviderConfig
   claude: ProviderConfig
   cursor: ProviderConfig
   grok: GrokProviderConfig
@@ -48,6 +65,31 @@ export interface CodingSubscriptionProviderConfig {
 
 const modelId = Schema.string().min(1).pattern(/\S/)
 const command = Schema.string().min(1).pattern(/\S/)
+
+const codexProviderSchema = Schema.object({
+  enabled: Schema.boolean().default(true),
+  command: command.default('codex'),
+  models: Schema.array(modelId).min(1).default(['default']),
+  maxTurns: Schema.natural().min(1).max(100).default(1),
+  transport: Schema.union(['cli', 'direct-responses'] as const).default('cli'),
+  directModel: modelId.default('gpt-5.6-sol'),
+  directReasoningEfforts: Schema.array(modelId).min(1)
+    .default(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
+  directDefaultReasoningEffort: modelId.default('low'),
+  maxRequestBytes: Schema.natural().min(1_024).max(128 * 1024 * 1024).default(32 * 1024 * 1024),
+  maxRequestImageBytes: Schema.natural().min(1_024).max(96 * 1024 * 1024).default(24 * 1024 * 1024),
+}).default({
+  enabled: true,
+  command: 'codex',
+  models: ['default'],
+  maxTurns: 1,
+  transport: 'cli',
+  directModel: 'gpt-5.6-sol',
+  directReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+  directDefaultReasoningEffort: 'low',
+  maxRequestBytes: 32 * 1024 * 1024,
+  maxRequestImageBytes: 24 * 1024 * 1024,
+}) as Schema<CodexProviderConfig>
 
 function providerSchema(defaultCommand: string, defaultEnabled = true): Schema<ProviderConfig> {
   return Schema.object({
@@ -89,7 +131,7 @@ export const Config: Schema<CodingSubscriptionProviderConfig> = Schema.object({
   maxPromptBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(128 * 1024),
   extraEnvNames: Schema.array(Schema.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
   logDiagnostics: Schema.boolean().default(false),
-  codex: providerSchema('codex'),
+  codex: codexProviderSchema,
   // Public third-party subscription delegation has an Anthropic policy caveat.
   claude: providerSchema('claude', false),
   cursor: providerSchema('cursor-agent'),
@@ -108,6 +150,15 @@ export function normalizeConfig(config?: CodingSubscriptionProviderConfig): Codi
   }
   if (normalized.grok.enabled && !normalized.grok.userVerifiedSubscription) {
     throw new Error('grok.userVerifiedSubscription must be true after verifying session OAuth and model configuration')
+  }
+  if (normalized.codex.maxRequestImageBytes > normalized.codex.maxRequestBytes) {
+    throw new Error('codex.maxRequestImageBytes must not exceed codex.maxRequestBytes')
+  }
+  if (new Set(normalized.codex.directReasoningEfforts).size !== normalized.codex.directReasoningEfforts.length) {
+    throw new Error('duplicate reasoning effort in codex.directReasoningEfforts')
+  }
+  if (!normalized.codex.directReasoningEfforts.includes(normalized.codex.directDefaultReasoningEffort)) {
+    throw new Error('codex.directDefaultReasoningEffort must be present in codex.directReasoningEfforts')
   }
   return normalized
 }

@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { isAbsolute } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import { redactAuditValue } from './redaction.js'
-import { openPolicyDatabase, PolicyDatabaseError } from './sqlite.js'
+import { legacyApprovalIntentHash, openPolicyDatabase, PolicyDatabaseError } from './sqlite.js'
 
 export type PolicyLedgerErrorCode =
   | 'budget-exhausted'
@@ -25,6 +26,14 @@ export interface PolicyLedgerOptions {
   path: string
   now?: () => number
 }
+
+/** Shared byte contract for Policy, Delivery, and channel approval rendering. */
+export const APPROVAL_DISPLAY_BUDGET = Object.freeze({
+  maxTextBytes: 64 * 1_024,
+  maxSummaryBytes: 120,
+  renderingReserveBytes: 4 * 1_024,
+  maxDiffBytes: 60 * 1_024,
+})
 
 export interface BudgetReservationInput {
   scope: string
@@ -60,6 +69,31 @@ export interface ApprovalProposalInput {
   diff: string
   summary: string
   ttlMs: number
+  dispatch?: Readonly<ApprovalDispatchRoute>
+}
+
+/**
+ * Durable-domain creation input with an absolute deadline. Unlike `ttlMs`, the
+ * deadline cannot move forward when a process restarts or loses a cross-database
+ * commit acknowledgement.
+ */
+export interface ApprovalProposalRecoveryInput {
+  idempotencyKey: string
+  requester: string
+  principal: string
+  action: string
+  resource: { kind: string; id: string }
+  diff: string
+  summary: string
+  notAfter: number
+  dispatch?: Readonly<ApprovalDispatchRoute>
+}
+
+export interface ApprovalDispatchRoute {
+  sourceId: string
+  bindingId: string
+  workspace: string
+  principal: string
 }
 
 export type ApprovalProposalStatus = 'approved' | 'expired' | 'pending' | 'rejected'
@@ -73,12 +107,99 @@ export interface ApprovalProposalResult {
   replayed: boolean
 }
 
+export type ApprovalProposalRecoveryResult =
+  | Readonly<{ kind: 'proposal'; proposal: ApprovalProposalResult }>
+  | Readonly<{
+      kind: 'abandoned'
+      idempotencyKey: string
+      notAfter: number
+      abandonedAt: number
+      replayed: boolean
+    }>
+
 export interface ApprovalDecisionInput {
   proposalId: string
   principal: string
   expectedVersion: number
   decision: 'approved' | 'rejected'
   reason: string
+}
+
+/**
+ * Terminal-decision snapshot of one proposal, exposed so the domain that owns the
+ * pending operation can discover the decision and commit it through its own gate.
+ * Policy never calls back into a domain, so this read seam is the only supported
+ * way to close that loop.
+ */
+export interface ApprovalProposalSnapshot {
+  proposalId: string
+  requester: string
+  principal: string
+  action: string
+  resource: { kind: string; id: string }
+  summary: string
+  status: ApprovalProposalStatus
+  diffHash: string
+  expiresAt: number
+  version: number
+  decidedBy: string | undefined
+  decisionReason: string | undefined
+}
+
+/**
+ * Exact, authority-scoped identity used by a domain to recover a proposal whose
+ * Policy commit may have succeeded before the domain persisted its proposal ID.
+ * This lookup is deliberately read-only and does not accept proposal content or
+ * TTL, so it can never create, replay, or extend a proposal.
+ */
+export interface ApprovalProposalLookupInput {
+  idempotencyKey: string
+  requester: string
+  principal: string
+  action: string
+  resource: { kind: string; id: string }
+}
+
+export type ApprovalDispatchState = 'enqueued' | 'pending'
+
+/** Stable high-water mark for a pending-dispatch scan. */
+export interface ApprovalDispatchCursor {
+  createdAt: number
+  proposalId: string
+}
+
+/**
+ * Immutable, policy-derived payload and route for one durable approval delivery.
+ * Callers can choose when to enqueue it, but cannot substitute display content.
+ */
+export interface ApprovalDispatchSnapshot {
+  proposalId: string
+  sourceId: string
+  bindingId: string
+  workspace: string
+  principal: string
+  requester: string
+  action: string
+  resource: { kind: string; id: string }
+  summary: string
+  diff: string
+  diffHash: string
+  payloadHash: string
+  expiresAt: number
+  proposalVersion: number
+  state: ApprovalDispatchState
+  createdAt: number
+  enqueuedAt: number | undefined
+  version: number
+}
+
+export interface ApprovalDispatchResult {
+  proposalId: string
+  state: 'enqueued'
+  payloadHash: string
+  enqueuedAt: number
+  version: number
+  replayed: boolean
 }
 
 export interface AuditInput {
@@ -130,6 +251,7 @@ interface ProposalRow {
   resource_kind: string
   resource_id: string
   diff_hash: string
+  diff_text: string | null
   summary: string
   status: ApprovalProposalStatus
   created_at: number
@@ -139,8 +261,113 @@ interface ProposalRow {
   version: number
 }
 
+interface DispatchRow {
+  proposal_id: string
+  source_id: string
+  binding_id: string
+  workspace: string
+  dispatch_principal: string
+  state: ApprovalDispatchState
+  payload_hash: string
+  dispatch_created_at: number
+  enqueued_at: number | null
+  dispatch_version: number
+  proposal_version: number
+  requester: string
+  proposal_principal: string
+  action: string
+  resource_kind: string
+  resource_id: string
+  diff_hash: string
+  diff_text: string | null
+  summary: string
+  status: ApprovalProposalStatus
+  expires_at: number
+  current_proposal_version: number
+}
+
+const textLimits = Object.freeze({
+  id: 512,
+  action: 256,
+  resourceId: 4_096,
+  workspace: 4_096,
+  summary: APPROVAL_DISPLAY_BUDGET.maxSummaryBytes,
+  diff: APPROVAL_DISPLAY_BUDGET.maxDiffBytes,
+  reason: 2_048,
+})
+
 function requireText(value: string, field: string): void {
   if (value.trim() === '') throw new PolicyLedgerError('invalid-input', `${field} must not be empty`)
+}
+
+function requireBoundedText(
+  value: string,
+  field: string,
+  maxBytes: number,
+  options: { allowEmpty?: boolean } = {},
+): void {
+  if (!options.allowEmpty) requireText(value, field)
+  if (Buffer.byteLength(value, 'utf8') > maxBytes) {
+    throw new PolicyLedgerError('invalid-input', `${field} must not exceed ${maxBytes} UTF-8 bytes`)
+  }
+}
+
+function dispatchPayloadHash(input: {
+  proposalId: string
+  route: ApprovalDispatchRoute
+  requester: string
+  action: string
+  resourceKind: string
+  resourceId: string
+  summary: string
+  diff: string
+  diffHash: string
+  expiresAt: number
+  proposalVersion: number
+}): string {
+  const canonicalPayload = JSON.stringify([
+    input.proposalId,
+    input.route.sourceId,
+    input.route.bindingId,
+    input.route.workspace,
+    input.route.principal,
+    input.requester,
+    input.action,
+    input.resourceKind,
+    input.resourceId,
+    input.summary,
+    input.diff,
+    input.diffHash,
+    input.expiresAt,
+    input.proposalVersion,
+  ])
+  return createHash('sha256').update(canonicalPayload).digest('hex')
+}
+
+/**
+ * Canonical identity of an abandoned recovery attempt. The raw diff participates
+ * in the digest but is never persisted in a tombstone.
+ */
+function approvalRecoveryIntentHash(input: ApprovalProposalRecoveryInput): string {
+  const dispatch = input.dispatch
+  const canonicalIntent = JSON.stringify([
+    'approval-recovery-intent-v1',
+    input.idempotencyKey,
+    input.notAfter,
+    input.requester,
+    input.principal,
+    input.action,
+    input.resource.kind,
+    input.resource.id,
+    input.diff,
+    input.summary,
+    dispatch === undefined ? 0 : 1,
+    dispatch?.sourceId ?? null,
+    dispatch?.bindingId ?? null,
+    dispatch?.workspace ?? null,
+    dispatch?.principal ?? null,
+  ])
+  return createHash('sha256').update(canonicalIntent).digest('hex')
 }
 
 function requirePositive(value: number, field: string): void {
@@ -403,16 +630,166 @@ export class PolicyLedger {
     return this.getEmergencyStop()
   }
 
+  #validateProposalContent(
+    input: Omit<ApprovalProposalInput, 'ttlMs'> | Omit<ApprovalProposalRecoveryInput, 'notAfter'>,
+  ): string {
+    requireBoundedText(input.idempotencyKey, 'idempotencyKey', textLimits.id)
+    requireBoundedText(input.requester, 'requester', textLimits.id)
+    requireBoundedText(input.principal, 'principal', textLimits.id)
+    requireBoundedText(input.action, 'action', textLimits.action)
+    requireBoundedText(input.resource.kind, 'resource.kind', textLimits.action)
+    requireBoundedText(input.resource.id, 'resource.id', textLimits.resourceId)
+    requireBoundedText(input.summary, 'summary', textLimits.summary)
+    requireBoundedText(input.diff, 'diff', textLimits.diff, { allowEmpty: true })
+    if (input.dispatch !== undefined) {
+      requireBoundedText(input.dispatch.sourceId, 'dispatch.sourceId', textLimits.id)
+      requireBoundedText(input.dispatch.bindingId, 'dispatch.bindingId', textLimits.id)
+      requireBoundedText(input.dispatch.workspace, 'dispatch.workspace', textLimits.workspace)
+      requireBoundedText(input.dispatch.principal, 'dispatch.principal', textLimits.id)
+      if (!isAbsolute(input.dispatch.workspace)) {
+        throw new PolicyLedgerError('invalid-path', 'dispatch.workspace must be absolute')
+      }
+      if (input.dispatch.principal !== input.principal) {
+        throw new PolicyLedgerError('unauthorized', 'dispatch route is bound to another principal')
+      }
+    }
+    return createHash('sha256').update(input.diff).digest('hex')
+  }
+
+  #proposalByIdempotencyKey(idempotencyKey: string): ProposalRow | undefined {
+    return this.#database.prepare(`
+      SELECT id, idempotency_key, requester, principal, action, resource_kind,
+             resource_id, diff_hash, diff_text, summary, status, created_at, expires_at, decided_by,
+             decision_reason, version
+      FROM approval_proposals WHERE idempotency_key = ?
+    `).get(idempotencyKey) as unknown as ProposalRow | undefined
+  }
+
+  #assertExistingProposalMatches(
+    existing: ProposalRow,
+    input: Omit<ApprovalProposalInput, 'ttlMs'> | Omit<ApprovalProposalRecoveryInput, 'notAfter'>,
+    diffHash: string,
+    expiryMatches: boolean,
+  ): void {
+    const existingDispatch = this.#database.prepare(`
+      SELECT source_id, binding_id, workspace, principal, state, payload_hash, proposal_version
+      FROM approval_dispatches WHERE proposal_id = ?
+    `).get(existing.id) as {
+      source_id: string
+      binding_id: string
+      workspace: string
+      principal: string
+      state: ApprovalDispatchState
+      payload_hash: string
+      proposal_version: number
+    } | undefined
+    const sameDispatch = input.dispatch === undefined
+      ? existingDispatch === undefined
+      : existingDispatch !== undefined
+        && existingDispatch.source_id === input.dispatch.sourceId
+        && existingDispatch.binding_id === input.dispatch.bindingId
+        && existingDispatch.workspace === input.dispatch.workspace
+        && existingDispatch.principal === input.dispatch.principal
+    const sameDiff = input.dispatch === undefined
+      ? existingDispatch === undefined && existing.diff_hash === diffHash
+      : existingDispatch !== undefined
+        && existing.diff_hash === diffHash
+        && (existing.diff_text === null || existing.diff_text === input.diff)
+        && existingDispatch.payload_hash === dispatchPayloadHash({
+          proposalId: existing.id,
+          route: input.dispatch,
+          requester: input.requester,
+          action: input.action,
+          resourceKind: input.resource.kind,
+          resourceId: input.resource.id,
+          summary: input.summary,
+          diff: input.diff,
+          diffHash,
+          expiresAt: existing.expires_at,
+          proposalVersion: existingDispatch.proposal_version,
+        })
+    const sameInput = existing.requester === input.requester
+      && existing.principal === input.principal
+      && existing.action === input.action
+      && existing.resource_kind === input.resource.kind
+      && existing.resource_id === input.resource.id
+      && sameDiff
+      && existing.summary === input.summary
+      && expiryMatches
+      && sameDispatch
+    if (!sameInput) {
+      throw new PolicyLedgerError('idempotency-conflict', 'idempotency key was used for another proposal')
+    }
+  }
+
+  #insertProposal(
+    input: Omit<ApprovalProposalInput, 'ttlMs'> | Omit<ApprovalProposalRecoveryInput, 'notAfter'>,
+    diffHash: string,
+    createdAt: number,
+    expiresAt: number,
+  ): ApprovalProposalResult {
+    const id = randomUUID()
+    this.#database.prepare(`
+      INSERT INTO approval_proposals(
+        id, idempotency_key, requester, principal, action, resource_kind,
+        resource_id, diff_hash, diff_text, summary, status, created_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+    `).run(
+      id,
+      input.idempotencyKey,
+      input.requester,
+      input.principal,
+      input.action,
+      input.resource.kind,
+      input.resource.id,
+      diffHash,
+      input.dispatch === undefined ? null : input.diff,
+      input.summary,
+      createdAt,
+      expiresAt,
+    )
+    if (input.dispatch !== undefined) {
+      const payloadHash = dispatchPayloadHash({
+        proposalId: id,
+        route: input.dispatch,
+        requester: input.requester,
+        action: input.action,
+        resourceKind: input.resource.kind,
+        resourceId: input.resource.id,
+        summary: input.summary,
+        diff: input.diff,
+        diffHash,
+        expiresAt,
+        proposalVersion: 1,
+      })
+      this.#database.prepare(`
+        INSERT INTO approval_dispatches(
+          proposal_id, source_id, binding_id, workspace, principal,
+          state, payload_hash, created_at, proposal_version
+        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, 1)
+      `).run(
+        id,
+        input.dispatch.sourceId,
+        input.dispatch.bindingId,
+        input.dispatch.workspace,
+        input.dispatch.principal,
+        payloadHash,
+        createdAt,
+      )
+    }
+    return {
+      proposalId: id,
+      status: 'pending',
+      diffHash,
+      expiresAt,
+      version: 1,
+      replayed: false,
+    }
+  }
+
   propose(input: ApprovalProposalInput): ApprovalProposalResult {
-    requireText(input.idempotencyKey, 'idempotencyKey')
-    requireText(input.requester, 'requester')
-    requireText(input.principal, 'principal')
-    requireText(input.action, 'action')
-    requireText(input.resource.kind, 'resource.kind')
-    requireText(input.resource.id, 'resource.id')
-    requireText(input.summary, 'summary')
+    const diffHash = this.#validateProposalContent(input)
     requirePeriod(input.ttlMs)
-    const diffHash = createHash('sha256').update(input.diff).digest('hex')
     const now = this.#now()
     const expiresAt = now + input.ttlMs
     if (!Number.isSafeInteger(expiresAt)) {
@@ -420,61 +797,100 @@ export class PolicyLedger {
     }
 
     return this.#transaction(() => {
-      const existing = this.#database.prepare(`
-        SELECT id, idempotency_key, requester, principal, action, resource_kind,
-               resource_id, diff_hash, summary, status, created_at, expires_at, decided_by,
-               decision_reason, version
-        FROM approval_proposals WHERE idempotency_key = ?
-      `).get(input.idempotencyKey) as unknown as ProposalRow | undefined
+      const tombstone = this.#database.prepare(`
+        SELECT idempotency_key FROM approval_idempotency_tombstones WHERE idempotency_key = ?
+      `).get(input.idempotencyKey) as { idempotency_key: string } | undefined
+      if (tombstone !== undefined) {
+        throw new PolicyLedgerError('idempotency-conflict', 'proposal idempotency key was permanently abandoned')
+      }
+      const existing = this.#proposalByIdempotencyKey(input.idempotencyKey)
       if (existing !== undefined) {
-        const sameInput = existing.requester === input.requester
-          && existing.principal === input.principal
-          && existing.action === input.action
-          && existing.resource_kind === input.resource.kind
-          && existing.resource_id === input.resource.id
-          && existing.diff_hash === diffHash
-          && existing.summary === input.summary
-          && existing.expires_at - existing.created_at === input.ttlMs
-        if (!sameInput) {
-          throw new PolicyLedgerError('idempotency-conflict', 'idempotency key was used for another proposal')
-        }
+        this.#assertExistingProposalMatches(
+          existing,
+          input,
+          diffHash,
+          existing.expires_at - existing.created_at === input.ttlMs,
+        )
         return this.#proposalResult(existing, true)
       }
+      return this.#insertProposal(input, diffHash, now, expiresAt)
+    })
+  }
 
-      const id = randomUUID()
-      this.#database.prepare(`
-        INSERT INTO approval_proposals(
-          id, idempotency_key, requester, principal, action, resource_kind,
-          resource_id, diff_hash, summary, status, created_at, expires_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-      `).run(
-        id,
-        input.idempotencyKey,
-        input.requester,
-        input.principal,
-        input.action,
-        input.resource.kind,
-        input.resource.id,
-        diffHash,
-        input.summary,
-        now,
-        expiresAt,
-      )
-      return {
-        proposalId: id,
-        status: 'pending',
-        diffHash,
-        expiresAt,
-        version: 1,
-        replayed: false,
+  /**
+   * Atomically recover an existing exact proposal, create it under an immutable
+   * absolute deadline, or permanently abandon the idempotency key after that
+   * deadline. `BEGIN IMMEDIATE` serializes this decision across Policy processes,
+   * closing the lookup-then-create orphan-card race.
+   */
+  recoverOrCreateProposal(input: ApprovalProposalRecoveryInput): ApprovalProposalRecoveryResult {
+    const diffHash = this.#validateProposalContent(input)
+    if (!Number.isSafeInteger(input.notAfter) || input.notAfter < 0) {
+      throw new PolicyLedgerError('invalid-input', 'proposal notAfter must be a non-negative safe integer')
+    }
+    const intentHash = approvalRecoveryIntentHash(input)
+    return this.#transaction(() => {
+      const existing = this.#proposalByIdempotencyKey(input.idempotencyKey)
+      if (existing !== undefined) {
+        this.#assertExistingProposalMatches(existing, input, diffHash, existing.expires_at === input.notAfter)
+        return Object.freeze({
+          kind: 'proposal' as const,
+          proposal: this.#proposalResult(existing, true),
+        })
       }
+      const tombstone = this.#database.prepare(`
+        SELECT idempotency_key, not_after, abandoned_at, intent_hash
+        FROM approval_idempotency_tombstones WHERE idempotency_key = ?
+      `).get(input.idempotencyKey) as {
+        idempotency_key: string
+        not_after: number
+        abandoned_at: number
+        intent_hash: string
+      } | undefined
+      if (tombstone !== undefined) {
+        if (tombstone.intent_hash === legacyApprovalIntentHash || tombstone.intent_hash !== intentHash) {
+          throw new PolicyLedgerError(
+            'idempotency-conflict',
+            'idempotency key was abandoned for another or unverifiable proposal intent',
+          )
+        }
+        return Object.freeze({
+          kind: 'abandoned' as const,
+          idempotencyKey: tombstone.idempotency_key,
+          notAfter: tombstone.not_after,
+          abandonedAt: tombstone.abandoned_at,
+          replayed: true,
+        })
+      }
+      // Sample only after BEGIN IMMEDIATE has acquired the write lock. A value
+      // read before lock acquisition could become stale while another Policy
+      // process holds the transaction across the absolute deadline.
+      const now = this.#now()
+      if (now >= input.notAfter) {
+        this.#database.prepare(`
+          INSERT INTO approval_idempotency_tombstones(
+            idempotency_key, not_after, abandoned_at, intent_hash
+          ) VALUES (?, ?, ?, ?)
+        `).run(input.idempotencyKey, input.notAfter, now, intentHash)
+        return Object.freeze({
+          kind: 'abandoned' as const,
+          idempotencyKey: input.idempotencyKey,
+          notAfter: input.notAfter,
+          abandonedAt: now,
+          replayed: false,
+        })
+      }
+      return Object.freeze({
+        kind: 'proposal' as const,
+        proposal: this.#insertProposal(input, diffHash, now, input.notAfter),
+      })
     })
   }
 
   decideProposal(input: ApprovalDecisionInput): ApprovalProposalResult {
-    requireText(input.proposalId, 'proposalId')
-    requireText(input.principal, 'principal')
-    requireText(input.reason, 'reason')
+    requireBoundedText(input.proposalId, 'proposalId', textLimits.id)
+    requireBoundedText(input.principal, 'principal', textLimits.id)
+    requireBoundedText(input.reason, 'reason', textLimits.reason)
     if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion <= 0) {
       throw new PolicyLedgerError('invalid-input', 'expectedVersion must be a positive safe integer')
     }
@@ -499,17 +915,174 @@ export class PolicyLedger {
 
       const now = this.#now()
       const status: ApprovalProposalStatus = now >= proposal.expires_at ? 'expired' : input.decision
+      const decidedBy = status === 'expired' ? 'system:expiry' : input.principal
+      const decisionReason = status === 'expired' ? 'expired' : input.reason
       this.#database.prepare(`
         UPDATE approval_proposals
-        SET status = ?, decided_at = ?, decided_by = ?, decision_reason = ?, version = version + 1
+        SET status = ?, decided_at = ?, decided_by = ?, decision_reason = ?,
+            diff_text = NULL, version = version + 1
         WHERE id = ? AND version = ?
-      `).run(status, now, input.principal, input.reason, proposal.id, proposal.version)
+      `).run(status, now, decidedBy, decisionReason, proposal.id, proposal.version)
       return this.#proposalResult({
         ...proposal,
         status,
-        decided_by: input.principal,
-        decision_reason: input.reason,
+        decided_by: decidedBy,
+        decision_reason: decisionReason,
         version: proposal.version + 1,
+      }, false)
+    })
+  }
+
+  /**
+   * Read one proposal's current status without deciding it. A domain reconciler
+   * uses this to learn that its own pending operation was already approved or
+   * rejected elsewhere, then commits that outcome itself.
+   */
+  getProposal(proposalId: string): ApprovalProposalSnapshot | undefined {
+    requireBoundedText(proposalId, 'proposalId', textLimits.id)
+    const row = this.#database.prepare(`
+      SELECT id, idempotency_key, requester, principal, action, resource_kind,
+             resource_id, diff_hash, diff_text, summary, status, created_at, expires_at, decided_by,
+             decision_reason, version
+      FROM approval_proposals WHERE id = ?
+    `).get(proposalId) as unknown as ProposalRow | undefined
+    if (row === undefined) return undefined
+    return Object.freeze({
+      proposalId: row.id,
+      requester: row.requester,
+      principal: row.principal,
+      action: row.action,
+      resource: Object.freeze({ kind: row.resource_kind, id: row.resource_id }),
+      summary: row.summary,
+      status: row.status,
+      diffHash: row.diff_hash,
+      expiresAt: row.expires_at,
+      version: row.version,
+      decidedBy: row.decided_by ?? undefined,
+      decisionReason: row.decision_reason ?? undefined,
+    })
+  }
+
+  /**
+   * Recover an existing proposal by its immutable scoped idempotency identity.
+   * A mismatch is indistinguishable from absence; callers may subsequently try
+   * `propose`, whose normal idempotency conflict check remains fail-closed.
+   */
+  getProposalByIdempotencyKey(input: ApprovalProposalLookupInput): ApprovalProposalSnapshot | undefined {
+    requireBoundedText(input.idempotencyKey, 'idempotencyKey', textLimits.id)
+    requireBoundedText(input.requester, 'requester', textLimits.id)
+    requireBoundedText(input.principal, 'principal', textLimits.id)
+    requireBoundedText(input.action, 'action', textLimits.action)
+    requireBoundedText(input.resource.kind, 'resource.kind', textLimits.action)
+    requireBoundedText(input.resource.id, 'resource.id', textLimits.resourceId)
+    const row = this.#database.prepare(`
+      SELECT id, idempotency_key, requester, principal, action, resource_kind,
+             resource_id, diff_hash, diff_text, summary, status, created_at, expires_at, decided_by,
+             decision_reason, version
+      FROM approval_proposals
+      WHERE idempotency_key = ? AND requester = ? AND principal = ? AND action = ?
+        AND resource_kind = ? AND resource_id = ?
+    `).get(
+      input.idempotencyKey,
+      input.requester,
+      input.principal,
+      input.action,
+      input.resource.kind,
+      input.resource.id,
+    ) as unknown as ProposalRow | undefined
+    if (row === undefined) return undefined
+    return Object.freeze({
+      proposalId: row.id,
+      requester: row.requester,
+      principal: row.principal,
+      action: row.action,
+      resource: Object.freeze({ kind: row.resource_kind, id: row.resource_id }),
+      summary: row.summary,
+      status: row.status,
+      diffHash: row.diff_hash,
+      expiresAt: row.expires_at,
+      version: row.version,
+      decidedBy: row.decided_by ?? undefined,
+      decisionReason: row.decision_reason ?? undefined,
+    })
+  }
+
+  listPendingApprovalDispatches(limit = 100, after?: Readonly<ApprovalDispatchCursor>): ApprovalDispatchSnapshot[] {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
+      throw new PolicyLedgerError('invalid-input', 'approval dispatch limit must be between 1 and 100')
+    }
+    if (after !== undefined) {
+      if (after === null || typeof after !== 'object' || Array.isArray(after)
+        || Object.keys(after).length !== 2
+        || !Object.hasOwn(after, 'createdAt') || !Object.hasOwn(after, 'proposalId')
+        || !Number.isSafeInteger(after.createdAt) || after.createdAt < 0
+        || typeof after.proposalId !== 'string') {
+        throw new PolicyLedgerError('invalid-input', 'approval dispatch cursor is invalid')
+      }
+      requireBoundedText(after.proposalId, 'approval dispatch cursor proposalId', textLimits.id)
+    }
+    const cursorCreatedAt = after?.createdAt ?? null
+    const cursorProposalId = after?.proposalId ?? ''
+    const rows = this.#database.prepare(`
+      SELECT d.proposal_id, d.source_id, d.binding_id, d.workspace,
+             d.principal AS dispatch_principal, d.state, d.payload_hash,
+             d.created_at AS dispatch_created_at, d.enqueued_at,
+             d.version AS dispatch_version, d.proposal_version, p.requester,
+             p.principal AS proposal_principal, p.action, p.resource_kind,
+             p.resource_id, p.diff_hash, p.diff_text, p.summary, p.status,
+             p.expires_at, p.version AS current_proposal_version
+      FROM approval_dispatches d
+      JOIN approval_proposals p ON p.id = d.proposal_id
+      WHERE d.state = 'pending' AND p.status = 'pending' AND p.expires_at > ?
+        AND (? IS NULL OR d.created_at > ? OR (d.created_at = ? AND d.proposal_id > ?))
+      ORDER BY d.created_at ASC, d.proposal_id ASC
+      LIMIT ?
+    `).all(this.#now(), cursorCreatedAt, cursorCreatedAt, cursorCreatedAt, cursorProposalId, limit) as unknown as DispatchRow[]
+    return rows.map(row => this.#dispatchSnapshot(row))
+  }
+
+  markApprovalDispatchEnqueued(
+    proposalId: string,
+    expectedVersion: number,
+  ): ApprovalDispatchResult {
+    requireBoundedText(proposalId, 'proposalId', textLimits.id)
+    if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
+      throw new PolicyLedgerError('invalid-input', 'expectedVersion must be a positive safe integer')
+    }
+    return this.#transaction(() => {
+      const dispatch = this.#dispatch(proposalId)
+      if (dispatch.state === 'enqueued') {
+        return this.#dispatchResult(dispatch, true)
+      }
+      if (dispatch.dispatch_version !== expectedVersion) {
+        throw new PolicyLedgerError('version-conflict', 'approval dispatch version changed')
+      }
+      const now = this.#now()
+      if (dispatch.status !== 'pending' || dispatch.expires_at <= now) {
+        throw new PolicyLedgerError('invalid-state', 'approval proposal is no longer pending')
+      }
+      this.#dispatchSnapshot(dispatch)
+      const result = this.#database.prepare(`
+        UPDATE approval_dispatches
+        SET state = 'enqueued', enqueued_at = ?, version = version + 1
+        WHERE proposal_id = ? AND state = 'pending' AND version = ?
+      `).run(now, proposalId, expectedVersion)
+      if (Number(result.changes) !== 1) {
+        throw new PolicyLedgerError('version-conflict', 'approval dispatch version changed')
+      }
+      const cleared = this.#database.prepare(`
+        UPDATE approval_proposals SET diff_text = NULL
+        WHERE id = ? AND status = 'pending' AND version = ? AND diff_text IS NOT NULL
+      `).run(proposalId, dispatch.proposal_version)
+      if (Number(cleared.changes) !== 1) {
+        throw new PolicyLedgerError('invalid-state', 'approval dispatch diff could not be cleared')
+      }
+      return this.#dispatchResult({
+        ...dispatch,
+        state: 'enqueued',
+        enqueued_at: now,
+        dispatch_version: dispatch.dispatch_version + 1,
+        diff_text: null,
       }, false)
     })
   }
@@ -529,7 +1102,7 @@ export class PolicyLedger {
       const expire = this.#database.prepare(`
         UPDATE approval_proposals
         SET status = 'expired', decided_at = ?, decided_by = 'system:expiry',
-            decision_reason = 'expired', version = version + 1
+            decision_reason = 'expired', diff_text = NULL, version = version + 1
         WHERE id = ? AND status = 'pending'
       `)
       let changed = 0
@@ -541,12 +1114,98 @@ export class PolicyLedger {
   #proposal(id: string): ProposalRow {
     const proposal = this.#database.prepare(`
       SELECT id, idempotency_key, requester, principal, action, resource_kind,
-             resource_id, diff_hash, summary, status, created_at, expires_at, decided_by,
+             resource_id, diff_hash, diff_text, summary, status, created_at, expires_at, decided_by,
              decision_reason, version
       FROM approval_proposals WHERE id = ?
     `).get(id) as unknown as ProposalRow | undefined
     if (proposal === undefined) throw new PolicyLedgerError('not-found', 'approval proposal was not found')
     return proposal
+  }
+
+  #dispatch(proposalId: string): DispatchRow {
+    const dispatch = this.#database.prepare(`
+      SELECT d.proposal_id, d.source_id, d.binding_id, d.workspace,
+             d.principal AS dispatch_principal, d.state, d.payload_hash,
+             d.created_at AS dispatch_created_at, d.enqueued_at,
+             d.version AS dispatch_version, d.proposal_version, p.requester,
+             p.principal AS proposal_principal, p.action, p.resource_kind,
+             p.resource_id, p.diff_hash, p.diff_text, p.summary, p.status,
+             p.expires_at, p.version AS current_proposal_version
+      FROM approval_dispatches d
+      JOIN approval_proposals p ON p.id = d.proposal_id
+      WHERE d.proposal_id = ?
+    `).get(proposalId) as unknown as DispatchRow | undefined
+    if (dispatch === undefined) {
+      throw new PolicyLedgerError('not-found', 'approval dispatch was not found')
+    }
+    return dispatch
+  }
+
+  #dispatchSnapshot(row: DispatchRow): ApprovalDispatchSnapshot {
+    if (row.diff_text === null) {
+      throw new PolicyLedgerError('invalid-state', 'approval dispatch is missing its immutable diff')
+    }
+    if (row.dispatch_principal !== row.proposal_principal) {
+      throw new PolicyLedgerError('invalid-state', 'approval dispatch principal does not match proposal')
+    }
+    if (row.current_proposal_version !== row.proposal_version) {
+      throw new PolicyLedgerError('invalid-state', 'approval dispatch proposal version changed')
+    }
+    const expectedPayloadHash = dispatchPayloadHash({
+      proposalId: row.proposal_id,
+      route: {
+        sourceId: row.source_id,
+        bindingId: row.binding_id,
+        workspace: row.workspace,
+        principal: row.dispatch_principal,
+      },
+      requester: row.requester,
+      action: row.action,
+      resourceKind: row.resource_kind,
+      resourceId: row.resource_id,
+      summary: row.summary,
+      diff: row.diff_text,
+      diffHash: row.diff_hash,
+      expiresAt: row.expires_at,
+      proposalVersion: row.proposal_version,
+    })
+    if (row.payload_hash !== expectedPayloadHash) {
+      throw new PolicyLedgerError('invalid-state', 'approval dispatch payload hash does not match proposal')
+    }
+    return Object.freeze({
+      proposalId: row.proposal_id,
+      sourceId: row.source_id,
+      bindingId: row.binding_id,
+      workspace: row.workspace,
+      principal: row.proposal_principal,
+      requester: row.requester,
+      action: row.action,
+      resource: Object.freeze({ kind: row.resource_kind, id: row.resource_id }),
+      summary: row.summary,
+      diff: row.diff_text,
+      diffHash: row.diff_hash,
+      payloadHash: row.payload_hash,
+      expiresAt: row.expires_at,
+      proposalVersion: row.proposal_version,
+      state: row.state,
+      createdAt: row.dispatch_created_at,
+      enqueuedAt: row.enqueued_at ?? undefined,
+      version: row.dispatch_version,
+    })
+  }
+
+  #dispatchResult(row: DispatchRow, replayed: boolean): ApprovalDispatchResult {
+    if (row.state !== 'enqueued' || row.enqueued_at === null) {
+      throw new PolicyLedgerError('invalid-state', 'approval dispatch is not enqueued')
+    }
+    return Object.freeze({
+      proposalId: row.proposal_id,
+      state: 'enqueued',
+      payloadHash: row.payload_hash,
+      enqueuedAt: row.enqueued_at,
+      version: row.dispatch_version,
+      replayed,
+    })
   }
 
   #proposalResult(proposal: ProposalRow, replayed: boolean): ApprovalProposalResult {

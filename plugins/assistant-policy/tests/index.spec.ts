@@ -19,6 +19,13 @@ describe('dsh-enhanced-assistant-policy', () => {
     expect(version).toBe(manifest.version)
     expect(entrypoint).not.toHaveProperty('PolicyLedger')
     expect(entrypoint).not.toHaveProperty('PolicyLedgerError')
+    expect(entrypoint.APPROVAL_DISPLAY_BUDGET).toEqual({
+      maxTextBytes: 64 * 1_024,
+      maxSummaryBytes: 120,
+      renderingReserveBytes: 4 * 1_024,
+      maxDiffBytes: 60 * 1_024,
+    })
+    expect(Object.isFrozen(entrypoint.APPROVAL_DISPLAY_BUDGET)).toBe(true)
   })
 
   it('ships a private DSH-home database default and the verified host peers', () => {

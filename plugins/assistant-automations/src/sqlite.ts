@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const automationSchemaVersion = 2
+export const automationSchemaVersion = 4
 
 export class AutomationDatabaseError extends Error {
   constructor(readonly code: 'invalid-path' | 'schema-too-new', message: string) {
@@ -12,15 +12,15 @@ export class AutomationDatabaseError extends Error {
 }
 
 function migrate(database: DatabaseSync): void {
-  const row = database.prepare('PRAGMA user_version').get() as { user_version: number }
-  if (row.user_version > automationSchemaVersion) {
+  let version = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+  if (version > automationSchemaVersion) {
     throw new AutomationDatabaseError(
       'schema-too-new',
-      `automation schema ${row.user_version} is newer than supported schema ${automationSchemaVersion}`,
+      `automation schema ${version} is newer than supported schema ${automationSchemaVersion}`,
     )
   }
-  if (row.user_version === automationSchemaVersion) return
-  if (row.user_version === 0) {
+  if (version === automationSchemaVersion) return
+  if (version === 0) {
     database.exec(`
     BEGIN IMMEDIATE;
     CREATE TABLE automation_definitions (
@@ -111,8 +111,14 @@ function migrate(database: DatabaseSync): void {
       usage_json TEXT NOT NULL,
       delivery_status TEXT,
       delivery_ref TEXT,
+      evidence_status TEXT NOT NULL CHECK (evidence_status IN ('pending', 'recorded', 'suppressed')),
+      evidence_json TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
+      CHECK (
+        (evidence_status IN ('pending', 'recorded') AND evidence_json IS NOT NULL)
+        OR (evidence_status = 'suppressed' AND evidence_json IS NULL)
+      ),
       FOREIGN KEY (occurrence_id) REFERENCES automation_occurrences(id),
       FOREIGN KEY (automation_id) REFERENCES automation_definitions(id),
       FOREIGN KEY (task_id) REFERENCES automation_tasks(id),
@@ -133,10 +139,12 @@ function migrate(database: DatabaseSync): void {
       idempotency_key TEXT NOT NULL UNIQUE,
       requester TEXT NOT NULL,
       principal TEXT NOT NULL,
+      dispatch_json TEXT CHECK (dispatch_json IS NULL OR json_valid(dispatch_json)),
       change_hash TEXT NOT NULL,
       change_json TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('pending', 'approved', 'rejected', 'expired', 'conflicted')),
       expires_at INTEGER NOT NULL,
+      ttl_ms INTEGER NOT NULL CHECK (ttl_ms > 0),
       result_automation_id TEXT,
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
@@ -153,26 +161,98 @@ function migrate(database: DatabaseSync): void {
       FOREIGN KEY (automation_id) REFERENCES automation_definitions(id)
     ) STRICT;
 
-    PRAGMA user_version = 2;
+    PRAGMA user_version = 4;
     COMMIT;
     `)
     return
   }
-  database.exec(`
-    BEGIN IMMEDIATE;
-    ALTER TABLE automation_definitions ADD COLUMN system_owner TEXT;
-    CREATE TABLE automation_system_reconciles (
-      idempotency_key TEXT PRIMARY KEY,
-      system_owner TEXT NOT NULL,
-      automation_id TEXT NOT NULL,
-      input_hash TEXT NOT NULL,
-      result_json TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
-      FOREIGN KEY (automation_id) REFERENCES automation_definitions(id)
-    ) STRICT;
-    PRAGMA user_version = 2;
-    COMMIT;
-  `)
+  if (version === 1) {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE automation_definitions ADD COLUMN system_owner TEXT;
+      CREATE TABLE automation_system_reconciles (
+        idempotency_key TEXT PRIMARY KEY,
+        system_owner TEXT NOT NULL,
+        automation_id TEXT NOT NULL,
+        input_hash TEXT NOT NULL,
+        result_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY (automation_id) REFERENCES automation_definitions(id)
+      ) STRICT;
+      PRAGMA user_version = 2;
+      COMMIT;
+    `)
+    version = 2
+  }
+  if (version === 2) {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE automation_runs ADD COLUMN evidence_status TEXT NOT NULL DEFAULT 'suppressed'
+        CHECK (evidence_status IN ('pending', 'recorded', 'suppressed'));
+      ALTER TABLE automation_runs ADD COLUMN evidence_json TEXT;
+      WITH evidence_eligible(id) AS (
+        SELECT run.id
+        FROM automation_runs AS run
+        JOIN automation_definitions AS definition ON definition.id = run.automation_id
+        WHERE run.status IN ('succeeded', 'failed', 'timed_out')
+          AND json_valid(definition.definition_json)
+          AND json_type(definition.definition_json, '$.name') = 'text'
+          AND length(CAST(json_extract(definition.definition_json, '$.name') AS BLOB)) BETWEEN 1 AND 500
+          AND json_type(definition.definition_json, '$.workspace') = 'text'
+          AND length(CAST(json_extract(definition.definition_json, '$.workspace') AS BLOB)) BETWEEN 1 AND 4096
+          AND json_type(definition.definition_json, '$.agentPreset') = 'text'
+          AND length(CAST(json_extract(definition.definition_json, '$.agentPreset') AS BLOB)) BETWEEN 1 AND 200
+      )
+      UPDATE automation_runs AS run
+      SET evidence_status = CASE
+            WHEN run.id IN (SELECT id FROM evidence_eligible) THEN 'pending'
+            ELSE 'suppressed'
+          END,
+          evidence_json = CASE
+            WHEN run.id IN (SELECT id FROM evidence_eligible) THEN (
+              SELECT json_object(
+                'situation', 'automation:' || run.automation_id,
+                'outcome', CASE WHEN run.status = 'succeeded' THEN 'succeeded' ELSE 'failed' END,
+                'detail', 'automation "' || json_extract(definition_json, '$.name') || '": run ' || run.status,
+                'idempotencyKey', 'automation-run:' || run.id,
+                'occurredAt', run.created_at,
+                'workspace', json_extract(definition_json, '$.workspace'),
+                'agentPreset', json_extract(definition_json, '$.agentPreset'),
+                'automationId', run.automation_id,
+                'runId', run.id
+              )
+              FROM automation_definitions
+              WHERE id = run.automation_id
+            )
+            ELSE NULL
+          END;
+      PRAGMA user_version = 3;
+      COMMIT;
+    `)
+    version = 3
+  }
+  if (version === 3) {
+    const proposalsTable = database.prepare(`
+      SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'automation_proposals'
+    `).get() as { present: number } | undefined
+    if (proposalsTable === undefined) {
+      // Some narrow rc.8 test/repair databases contain only the execution tables.
+      // They cannot host proposals, but may still be opened read-only by AutomationStore.
+      database.exec('PRAGMA user_version = 4')
+    } else {
+      database.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE automation_proposals ADD COLUMN dispatch_json TEXT
+          CHECK (dispatch_json IS NULL OR json_valid(dispatch_json));
+        ALTER TABLE automation_proposals ADD COLUMN ttl_ms INTEGER;
+        UPDATE automation_proposals
+        SET ttl_ms = expires_at - created_at
+        WHERE ttl_ms IS NULL AND expires_at > created_at;
+        PRAGMA user_version = 4;
+        COMMIT;
+      `)
+    }
+  }
 }
 
 export function openAutomationDatabase(path: string): DatabaseSync {

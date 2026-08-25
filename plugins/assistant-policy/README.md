@@ -20,6 +20,7 @@ dsh --profile web --dump-config
   name: '@dsh-enhanced/assistant-policy'
   config:
     databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
+    proposalMaintenanceIntervalMs: 15000
     rules:
       - id: allow-primary-workspace-read
         effect: allow
@@ -67,7 +68,11 @@ budgets:
 - `evaluate(request)`：只评估，不写审计；紧急停止优先于所有规则。
 - `authorize(request, options)`：执行预算检查并追加脱敏审计。
 - `reserve` / `finalize` / `release`：策略配置约束下的可变成本预算。
-- `propose` / `decideProposal`：绑定 principal、版本 CAS、TTL 与幂等键的持久审批提案；只保存完整 diff 的 SHA-256，不保存 diff 原文。
+- `propose` / `decideProposal`：绑定 principal、版本 CAS、TTL 与幂等键的持久审批提案。所有提案永久保存 diff SHA-256；只有携带 `dispatch` 的 pending 提案会临时保存 immutable diff 原文，路由与提案在同一个 SQLite 事务中落盘。路由 principal 必须与提案 principal 完全一致、workspace 必须为绝对路径。无路由提案和 v1 legacy 提案只凭 hash 安全重放，绝不会在重放时补建路由。
+- `getProposal`：只读地返回某个提案的当前状态（含终态与决定者）。`getProposalByIdempotencyKey` 用完整的 requester、principal、action 和 resource scope 做只读诊断；它绝不创建、重放或延长提案。
+- `recoverOrCreateProposal`：业务域跨 SQLite 恢复时使用的原子入口。调用方提交不可移动的绝对 `notAfter`；Policy 在 `BEGIN IMMEDIATE` 中选择“恢复 exact 既有提案 / 创建一次 / 过期后永久 tombstone 幂等键”。tombstone 的 SHA-256 intent hash 固定绑定 deadline、requester、principal、action、resource、diff、summary 以及 dispatch presence/route，但不保存 diff 明文；v4 遗留 tombstone 缺少可验证 identity，迁移后只会阻止复用，任何 recovery 都失败关闭。因此多个进程不能在 lookup 与 create 之间制造孤儿审批卡，也不能借重启获得新 TTL。本插件**从不回调**业务域，方向永远是域读取 Policy 后通过自己的 gate 提交。
+- `listPendingApprovalDispatches` / `markApprovalDispatchEnqueued`：向 Delivery 提供有界、可 CAS 的 durable approval outbox。展示用的 summary、diff、action、resource、版本与过期时间只能从 policy 已持久化的 canonical proposal 派生，调用方不能替换卡片文案。终态或已过期提案不会被列出。
+- `validateApprovalSettlement(snapshot, expectation)`：跨 Memory / Wiki / Automations / Evolution 共用的纯函数提交门。它逐字段核对 immutable proposal、重新计算 diff SHA-256，并要求终态版本恰好为原版本 `+1`；approved/rejected 必须由绑定 principal 决定，expired 必须由 `system:expiry` 决定。缺失或冲突会抛出稳定的 `ApprovalSettlementConflict`，业务域应 fail closed。
 - `setEmergencyStop` / `getEmergencyStop`：持久紧急停止。
 - `queryAudit`：按 sequence 有界分页，单次最多 100 条。
 - `bindInitiator(agent, initiator)`：供受信调度器在 agent 生命周期内标记 `background`；释放后恢复前一层绑定。
@@ -83,7 +88,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 - 浏览器：无。
 - 安装脚本：无。
 
-审批表会保留用于向 owner 展示的 requester、principal、action、resource id 与人工 summary，但不保存原始 diff。审计是 append-only；当前版本不会自动删除记录，部署者应根据自己的隐私与合规周期备份或轮换整个数据库。SQLite 提供单机多连接并发安全，不承诺多主机共享文件系统上的一致性。
+审批展示预算由包根的 frozen `APPROVAL_DISPLAY_BUDGET` 统一公开：Delivery 默认文本上限 64 KiB，summary 最多 120 UTF-8 bytes，diff 最多 60 KiB，预留 4 KiB 给渠道渲染。原始 diff 只在 routed dispatch 仍为 pending 时存在；成功 enqueue、批准、拒绝或过期都会在同一状态事务中清除，v2→v3 迁移也会清除无路由、已 enqueue 和终态记录的遗留原文。业务域仍不得把 credential、token 或其他秘密写进 diff。`proposalMaintenanceIntervalMs` 默认每 15 秒有界地过期 stale proposal，设为 `0` 可关闭，最大值为 `2147483647`。审计是 append-only；当前版本不会自动删除记录，部署者应根据自己的隐私与合规周期备份或轮换整个数据库。SQLite 提供单机多连接并发安全，不承诺多主机共享文件系统上的一致性。
 
 ## 兼容性
 

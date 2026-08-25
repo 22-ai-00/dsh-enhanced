@@ -1,6 +1,17 @@
-import { createMessage, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { Context } from '@deepseek-ai/cordis'
+import LlmRuntime, { createMessage, deepFreeze, markAgentLoopRequest, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { realpathSync } from 'node:fs'
+import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { redactDiagnostic, TraexAcpAdapter, type TraexAcpTextRunner } from '../src/adapter.ts'
+import {
+  probeTraexReadiness,
+  redactDiagnostic,
+  TraexAcpAdapter as RawTraexAcpAdapter,
+  type AdapterDependencies,
+  type TraexAcpTextRunner,
+} from '../src/adapter.ts'
 import type { RunTraexAcpOptions, TraexAcpInvocation } from '../src/acp-client.ts'
 import { Config } from '../src/config.ts'
 
@@ -11,6 +22,35 @@ function request(model = 'default', reasoningEffort?: string): GenerateOptions {
     ...(reasoningEffort === undefined ? {} : { reasoningEffort: ReasoningEffortId(reasoningEffort) }),
     system: 'Be concise.',
     messages: [createMessage({ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'hello' }] })],
+  }
+}
+
+const TEST_SESSION_ID = 'session-live' as NonNullable<GenerateOptions['sessionId']>
+
+function loopOwnedRequest(options: GenerateOptions): GenerateOptions {
+  return markAgentLoopRequest(deepFreeze({ ...options, sessionId: TEST_SESSION_ID }))
+}
+
+/** See the coding provider suite for why normal tests use this loop-owned fixture. */
+class TraexAcpAdapter extends RawTraexAcpAdapter {
+  constructor(
+    config: ConstructorParameters<typeof RawTraexAcpAdapter>[0],
+    dependencies: AdapterDependencies = {},
+  ) {
+    super(config, {
+      ...dependencies,
+      liveSessions: dependencies.liveSessions ?? {
+        get(sessionId) {
+          return sessionId === TEST_SESSION_ID
+            ? { id: TEST_SESSION_ID, header: { cwd: resolve(config.cwd) } }
+            : undefined
+        },
+      },
+    })
+  }
+
+  override stream(options: GenerateOptions) {
+    return super.stream(loopOwnedRequest(options))
   }
 }
 
@@ -25,8 +65,228 @@ function failedTextStream(cause: string): AsyncIterable<string> {
 }
 
 describe('TraeX ACP LLM adapter', () => {
+  it('keeps the static-cwd catalog subprocess behind an explicit activation readiness boundary', async () => {
+    const catalog = {
+      currentValue: 'default',
+      modelValues: ['default'],
+      models: [{ id: 'default', name: 'TraeX default' }],
+      completeReasoning: true,
+      observedAt: 1,
+    } as const
+    const verifyAuth = vi.fn(async () => {})
+    const discoverModels = vi.fn(async () => catalog)
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+
+    await expect(probeTraexReadiness(Config(), {}, { verifyAuth, discoverModels, runText }))
+      .resolves.toEqual(catalog)
+
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+    expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('rejects an unmarked request before auth or ACP spawn even when its session id names a live session', async () => {
+    const verifyAuth = vi.fn(async () => {})
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const adapter = new RawTraexAcpAdapter(Config(), {
+      verifyAuth,
+      runText,
+      liveSessions: {
+        get: () => ({ id: 'session-live', header: { cwd: process.cwd() } }),
+      },
+    } as never)
+    const unmarked = deepFreeze({ ...request(), sessionId: 'session-live' as NonNullable<GenerateOptions['sessionId']> })
+
+    await expect(adapter.stream(unmarked)[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' },
+    })
+    expect(verifyAuth).not.toHaveBeenCalled()
+    expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('rechecks the live session cwd after auth and before handing authority to the ACP runner', async () => {
+    const verifyAuth = vi.fn(async () => {})
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    let lookupCount = 0
+    const adapter = new RawTraexAcpAdapter(Config(), {
+      verifyAuth,
+      runText,
+      liveSessions: {
+        get: () => {
+          lookupCount += 1
+          return lookupCount === 1
+            ? { id: 'session-live', header: { cwd: process.cwd() } }
+            : undefined
+        },
+      },
+    } as never)
+    const loopOwned = markAgentLoopRequest(deepFreeze({
+      ...request(), sessionId: 'session-live' as NonNullable<GenerateOptions['sessionId']>,
+    }))
+
+    const iterator = adapter.stream(loopOwned)[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toEqual({ value: { type: 'block-start', index: 0, blockType: 'text' }, done: false })
+    await expect(iterator.next()).rejects.toMatchObject({ failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } })
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('rejects every invalid live-session shape before auth or ACP spawn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-adapter-cwd-'))
+    try {
+      const workspace = join(root, 'workspace')
+      const other = join(root, 'other')
+      const escape = join(workspace, 'escape')
+      await Promise.all([mkdir(workspace), mkdir(other)])
+      await symlink(other, escape)
+      const loopOwned = (sessionId: string) => markAgentLoopRequest(deepFreeze({
+        ...request(), sessionId: sessionId as NonNullable<GenerateOptions['sessionId']>,
+      }))
+      const invalidCases = [
+        { name: 'missing identity', options: markAgentLoopRequest(deepFreeze(request())), get: () => undefined },
+        { name: 'stale session', options: loopOwned('session-stale'), get: () => undefined },
+        {
+          name: 'forged session result',
+          options: loopOwned('session-claimed'),
+          get: () => ({ id: 'session-other', header: { cwd: workspace } }),
+        },
+        {
+          name: 'unmarked request',
+          options: deepFreeze({ ...request(), sessionId: 'session-live' as NonNullable<GenerateOptions['sessionId']> }),
+          get: () => ({ id: 'session-live', header: { cwd: workspace } }),
+        },
+        {
+          name: 'mismatched cwd',
+          options: loopOwned('session-live'),
+          get: () => ({ id: 'session-live', header: { cwd: other } }),
+        },
+        {
+          name: 'symlink escape',
+          options: loopOwned('session-live'),
+          get: () => ({ id: 'session-live', header: { cwd: escape } }),
+        },
+      ]
+
+      for (const invalid of invalidCases) {
+        const verifyAuth = vi.fn(async () => {})
+        const runText = vi.fn(() => (async function* () { yield 'never' })())
+        const adapter = new RawTraexAcpAdapter(Config({ cwd: workspace } as never), {
+          verifyAuth,
+          runText,
+          liveSessions: { get: invalid.get } as never,
+        })
+        await expect(adapter.stream(invalid.options)[Symbol.asyncIterator]().next(), invalid.name)
+          .rejects.toMatchObject({ failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } })
+        expect(verifyAuth, invalid.name).not.toHaveBeenCalled()
+        expect(runText, invalid.name).not.toHaveBeenCalled()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.each(['resolveModel', 'listModels'] as const)(
+    'keeps the prepareCall %s path process-free before a mismatched workspace is rejected',
+    async operation => {
+      const root = await mkdtemp(join(tmpdir(), 'traex-prepare-cwd-'))
+      try {
+        const workspace = join(root, 'workspace')
+        const other = join(root, 'other')
+        await Promise.all([mkdir(workspace), mkdir(other)])
+        const verifyAuth = vi.fn(async () => {})
+        const discoverModels = vi.fn(async () => ({
+          currentValue: 'default',
+          modelValues: ['default'],
+          models: [{ id: 'default', name: 'TraeX default' }],
+          completeReasoning: true,
+          observedAt: 1,
+        }))
+        const runText = vi.fn(() => (async function* () { yield 'never' })())
+        const adapter = new RawTraexAcpAdapter(Config({ cwd: workspace } as never), {
+          verifyAuth,
+          discoverModels,
+          runText,
+          liveSessions: {
+            get: () => ({ id: TEST_SESSION_ID, header: { cwd: other } }),
+          },
+        } as never)
+
+        // This mirrors the real loop order: resolveModel happens before the
+        // immutable, loop-marked request reaches stream.  Neither that lookup nor
+        // listModels may borrow the provider's static cwd for local process work.
+        let preparedStream: ((options: GenerateOptions) => AsyncIterable<unknown>) | undefined
+        let runtimeContext: Context | undefined
+        if (operation === 'resolveModel') {
+          runtimeContext = new Context()
+          await runtimeContext.plugin(LlmRuntime)
+          runtimeContext.llm.registerAdapter(['traex-agent'], adapter)
+          const prepared = await runtimeContext.llm.prepareCall({ provider: 'traex-agent', model: 'default' })
+          preparedStream = prepared.stream
+        } else {
+          await adapter.listModels('traex-agent')
+        }
+        const options = markAgentLoopRequest(deepFreeze({
+          ...request(),
+          sessionId: TEST_SESSION_ID,
+        }))
+        const stream = preparedStream === undefined ? adapter.stream(options) : preparedStream(options)
+        const first = stream[Symbol.asyncIterator]().next()
+        if (preparedStream === undefined) {
+          await expect(first).rejects.toMatchObject({ failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } })
+        } else {
+          await expect(first).resolves.toMatchObject({
+            value: { type: 'finish', reason: { kind: 'error', failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } } },
+          })
+        }
+
+        expect(verifyAuth).not.toHaveBeenCalled()
+        expect(discoverModels).not.toHaveBeenCalled()
+        expect(runText).not.toHaveBeenCalled()
+        await runtimeContext?.fiber.dispose()
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+  )
+
+  it('passes the canonical live-session cwd to both auth and the ACP runner', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-adapter-cwd-'))
+    try {
+      const workspace = join(root, 'workspace')
+      const alias = join(root, 'workspace-alias')
+      await mkdir(workspace)
+      await symlink(workspace, alias)
+      const verifyAuth = vi.fn(async () => {})
+      let invocation: TraexAcpInvocation | undefined
+      const adapter = new RawTraexAcpAdapter(Config({ cwd: alias } as never), {
+        verifyAuth,
+        runText(received, options) {
+          invocation = received
+          return (async function* () {
+            yield 'ok'
+            options?.onStopReason?.('end_turn')
+          })()
+        },
+        liveSessions: {
+          get: () => ({ id: 'session-live', header: { cwd: workspace } }),
+        } as never,
+      })
+      const loopOwned = markAgentLoopRequest(deepFreeze({
+        ...request(), sessionId: 'session-live' as NonNullable<GenerateOptions['sessionId']>,
+      }))
+
+      for await (const _chunk of adapter.stream(loopOwned)) { /* drain */ }
+
+      const canonical = realpathSync.native(workspace)
+      expect(verifyAuth).toHaveBeenCalledWith(expect.objectContaining({ cwd: canonical }))
+      expect(invocation).toMatchObject({ cwd: canonical })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('discovers the live ACP catalog and makes every returned model selectable', async () => {
-    const discoverModels = vi.fn(() => Promise.resolve({
+    const catalog = {
       currentValue: 'trae-fast',
       modelValues: ['trae-fast', 'trae-pro'],
       models: [
@@ -49,12 +309,23 @@ describe('TraeX ACP LLM adapter', () => {
       ],
       completeReasoning: true,
       observedAt: 1,
-    }))
+    }
+    const discoverModels = vi.fn(() => Promise.resolve(catalog))
     const adapter = new TraexAcpAdapter(Config(), {
       verifyAuth: async () => {},
       discoverModels,
+      runText: (_invocation: TraexAcpInvocation, options?: RunTraexAcpOptions) => (async function* () {
+        options?.onCatalogObserved?.(catalog)
+        yield 'observed'
+        options?.onStopReason?.('end_turn')
+      })(),
     } as never)
 
+    await expect(adapter.listModels('traex-agent')).resolves.toEqual([
+      expect.objectContaining({ provider: 'traex-agent', id: 'default' }),
+    ])
+    expect(discoverModels).not.toHaveBeenCalled()
+    for await (const _chunk of adapter.stream(request())) { /* observe the live ACP catalog */ }
     await expect(adapter.listModels('traex-agent')).resolves.toEqual([
       expect.objectContaining({ provider: 'traex-agent', id: 'default' }),
       expect.objectContaining({ provider: 'traex-agent', id: 'trae-fast', name: 'Trae Fast' }),
@@ -67,7 +338,7 @@ describe('TraeX ACP LLM adapter', () => {
         defaultEffort: 'low',
       },
     })
-    expect(discoverModels).toHaveBeenCalledTimes(1)
+    expect(discoverModels).not.toHaveBeenCalled()
   })
 
   it('advertises configured text models and disables automatic retries', async () => {

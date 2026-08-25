@@ -9,7 +9,12 @@ import type {
   ModelRouteRef,
   OutboundIntent,
 } from '@dsh-enhanced/assistant-delivery'
-import { LarkApprovalError, signLarkApprovalAction, verifyLarkApprovalAction } from './approval.js'
+import {
+  LarkApprovalError,
+  signLarkApprovalAction,
+  verifyLarkApprovalAction,
+  verifyLarkApprovalActionForRecovery,
+} from './approval.js'
 import {
   LarkModelPickerError,
   parseLarkModelPickerCallback,
@@ -20,7 +25,7 @@ import {
 } from './model-picker.js'
 import { normalizeLarkMessage } from './normalize.js'
 import { LarkProgressPresenter } from './progress.js'
-import { renderLarkMessage } from './sdk.js'
+import { LARK_APPROVAL_CARD_MAX_BYTES, renderLarkMessage } from './sdk.js'
 import {
   LarkTransportError,
   type LarkChannelHealth,
@@ -29,22 +34,26 @@ import {
   type LarkTransport,
 } from './types.js'
 
+export interface LarkApprovalSettlementInput {
+  operationId: string
+  callbackEventId: string
+  callbackChatId: string
+  bindingId: string
+  principal: { channel: string; account: string; tenant: string; user: string }
+  proposalId: string
+  expectedVersion: number
+  diffHash: string
+  decision: 'approved' | 'rejected'
+  reason: string
+}
+
 export interface LarkAdapterOptions {
   now?: () => number
   showProgress?: boolean
   statusReactions?: boolean
   approvalSecret?: string
-  settleApproval?(input: {
-    operationId: string
-    callbackEventId: string
-    callbackChatId: string
-    bindingId: string
-    principal: { channel: string; account: string; tenant: string; user: string }
-    proposalId: string
-    expectedVersion: number
-    decision: 'approved' | 'rejected'
-    reason: string
-  }): unknown | Promise<unknown>
+  settleApproval?(input: LarkApprovalSettlementInput): unknown | Promise<unknown>
+  recoverApprovalSettlement?(input: LarkApprovalSettlementInput): unknown | undefined | Promise<unknown | undefined>
   settleModelSelection?(input: {
     operationId: string
     callbackEventId: string
@@ -241,6 +250,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly now: () => number
   private readonly approvalSecret: string | undefined
   private readonly settleApproval: LarkAdapterOptions['settleApproval']
+  private readonly recoverApprovalSettlement: LarkAdapterOptions['recoverApprovalSettlement']
   private readonly settleModelSelection: LarkAdapterOptions['settleModelSelection']
   private readonly loadModelPicker: LarkAdapterOptions['loadModelPicker']
   private readonly advanceModelPicker: LarkAdapterOptions['advanceModelPicker']
@@ -259,6 +269,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.now = options.now ?? Date.now
     this.approvalSecret = options.approvalSecret
     this.settleApproval = options.settleApproval
+    this.recoverApprovalSettlement = options.recoverApprovalSettlement
     this.settleModelSelection = options.settleModelSelection
     this.loadModelPicker = options.loadModelPicker
     this.advanceModelPicker = options.advanceModelPicker
@@ -334,17 +345,27 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       if (intent.approval === undefined || this.approvalSecret === undefined || this.settleApproval === undefined) {
         return { outcome: 'not-sent', failureCode: 'lark-approval-unavailable', retryable: false }
       }
+      if (Buffer.byteLength(intent.text, 'utf8') > this.config.maxTextBytes) {
+        return { outcome: 'not-sent', failureCode: 'lark-approval-too-large', retryable: false }
+      }
+      if (createHash('sha256').update(intent.text).digest('hex') !== intent.approval.diffHash) {
+        return { outcome: 'not-sent', failureCode: 'lark-approval-diff-mismatch', retryable: false }
+      }
       if (this.now() >= intent.approval.expiresAt) {
         return { outcome: 'not-sent', failureCode: 'lark-approval-expired', retryable: false }
       }
       const common = {
-        version: 1 as const,
+        version: 2 as const,
+        channel: conversation.channel,
+        account: conversation.account,
+        tenant: conversation.tenant,
         operationId: intent.approval.operationId,
         bindingId: intent.bindingId,
         proposalId: intent.approval.proposalId,
         expectedVersion: intent.approval.expectedVersion,
         expiresAt: intent.approval.expiresAt,
         chatId: conversation.chat,
+        diffHash: intent.approval.diffHash,
       }
       input = { approval: {
         title: intent.approval.title,
@@ -352,6 +373,9 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         approveValue: { approval: signLarkApprovalAction(this.approvalSecret, { ...common, decision: 'approved' }) },
         rejectValue: { approval: signLarkApprovalAction(this.approvalSecret, { ...common, decision: 'rejected' }) },
       } }
+      if (Buffer.byteLength(renderLarkMessage(input).content, 'utf8') > LARK_APPROVAL_CARD_MAX_BYTES) {
+        return { outcome: 'not-sent', failureCode: 'lark-approval-too-large', retryable: false }
+      }
     } else if (intent.format === 'model-picker') {
       if (intent.modelPicker === undefined || this.approvalSecret === undefined
         || this.settleModelSelection === undefined || this.loadModelPicker === undefined
@@ -400,7 +424,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       return { outcome: 'unknown', failureCode: 'invalid-provider-result' }
     }
     if (this.statusReactions && intent.replyToEventId !== undefined) {
-      await this.addReaction(intent.replyToEventId, 'DONE')
+      void this.addReaction(intent.replyToEventId, 'DONE')
     }
     return { outcome: 'accepted', providerMessageId: result.messageId }
   }
@@ -437,16 +461,27 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         return await this.handleModelPickerAction(action, parseLarkModelPickerCallback(value))
       }
       if (Object.keys(value).length !== 1 || typeof (value as { approval?: unknown }).approval !== 'string'
-        || this.approvalSecret === undefined || this.settleApproval === undefined) {
+        || this.approvalSecret === undefined) {
         throw new LarkApprovalError('invalid', 'Lark approval action value is invalid')
       }
       const token = (value as { approval: string }).approval
-      const payload = verifyLarkApprovalAction(this.approvalSecret, token, this.now())
-      if (payload.chatId !== action.chatId) throw new LarkApprovalError('invalid', 'Lark approval chat does not match')
+      let expired = false
+      let payload: import('./approval.js').LarkApprovalActionPayload
+      try {
+        payload = verifyLarkApprovalAction(this.approvalSecret, token, this.now())
+      } catch (error) {
+        if (!(error instanceof LarkApprovalError) || error.code !== 'expired') throw error
+        payload = verifyLarkApprovalActionForRecovery(this.approvalSecret, token)
+        expired = true
+      }
+      if (payload.channel !== this.channel || payload.account !== this.account
+        || payload.tenant !== this.config.tenant || payload.chatId !== action.chatId) {
+        throw new LarkApprovalError('invalid', 'Lark approval route does not match')
+      }
       const callbackEventId = createHash('sha256')
         .update(`${action.messageId}\0${action.operatorId}\0${token}`)
         .digest('hex')
-      await this.settleApproval({
+      const settlement = {
         operationId: payload.operationId,
         callbackEventId,
         callbackChatId: action.chatId,
@@ -454,9 +489,21 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         principal: { channel: 'lark', account: this.account, tenant: this.config.tenant, user: action.operatorId },
         proposalId: payload.proposalId,
         expectedVersion: payload.expectedVersion,
+        diffHash: payload.diffHash,
         decision: payload.decision,
         reason: `Lark owner ${payload.decision}`,
-      })
+      }
+      if (expired) {
+        if (this.recoverApprovalSettlement === undefined
+          || await this.recoverApprovalSettlement(settlement) === undefined) {
+          throw new LarkApprovalError('invalid', 'expired Lark approval settlement is not recoverable')
+        }
+      } else {
+        if (this.settleApproval === undefined) {
+          throw new LarkApprovalError('invalid', 'Lark approval settlement is unavailable')
+        }
+        await this.settleApproval(settlement)
+      }
     } catch (error) {
       if (error instanceof LarkApprovalError || error instanceof LarkModelPickerError) {
         this.lastErrorCode = 'format_error'

@@ -146,9 +146,7 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
       operation: { type: 'string', required: true, enum: ['add', 'replace', 'remove'] },
       owner: { type: 'string', required: true, enum: ['agent', 'user'] },
       scope: { type: 'string', required: true, enum: ['user-global', 'workspace'] },
-      principal: { type: 'string', required: true },
       idempotency_key: { type: 'string', required: true },
-      ttl_ms: { type: 'integer' },
       memory_id: { type: 'string' },
       expected_version: { type: 'integer' },
       entry: {
@@ -187,8 +185,6 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
       }
       const proposal = service.propose(exec.agent, {
         idempotencyKey: args.idempotency_key,
-        principal: args.principal,
-        ...(args.ttl_ms === undefined ? {} : { ttlMs: args.ttl_ms }),
         mutation,
       })
       return {

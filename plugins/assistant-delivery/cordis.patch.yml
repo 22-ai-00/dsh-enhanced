@@ -21,5 +21,7 @@
         policyRef: owner-dm
         agentProvider: deepseek-official
         agentModel: deepseek-v4-flash
+        toolCapableProviders:
+          - deepseek-official
         agentMaxOutputTokens: 8192
         modelPickerTtlMs: 900000

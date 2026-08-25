@@ -13,3 +13,6 @@
         readMaxParagraphs: 40
         lintLimit: 200
         defaultProposalTtlMs: 900000
+        toolProposalAuthority: curated
+        reconcileIntervalMs: 15000
+        reconcileLimit: 50

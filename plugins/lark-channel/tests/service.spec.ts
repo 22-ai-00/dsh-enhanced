@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, test, vi } from 'vitest'
+import { signLarkApprovalAction } from '../src/approval.ts'
 import { LarkChannelService } from '../src/service.ts'
 import type { DeliveryAdapter, DeliveryAdapterContext } from '@dsh-enhanced/assistant-delivery'
 import type { LarkTransport, LarkTransportHandlers } from '../src/types.ts'
@@ -43,6 +44,47 @@ describe('Lark Cordis service', () => {
     expect(JSON.stringify(service.health())).not.toContain('super-secret')
     await ctx.fiber.restart()
     expect(unregister).toHaveBeenCalledOnce()
+  })
+
+  test('wires expired authenticated callbacks to delivery settlement recovery', async () => {
+    const ctx = new Context()
+    const secret = 'super-secret-value-for-approval-recovery'
+    let handlers: LarkTransportHandlers | undefined
+    const channel = transport()
+    channel.subscribe = vi.fn((value: LarkTransportHandlers) => {
+      handlers = value
+      return () => { handlers = undefined }
+    })
+    const settleApproval = vi.fn()
+    const recoverApprovalSettlement = vi.fn(() => ({ status: 'approved' as const }))
+    ctx.provide('assistantDelivery', {
+      settleApproval,
+      recoverApprovalSettlement,
+      registerAdapter: async (adapter: DeliveryAdapter) => {
+        const dispose = await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+        return async () => { await dispose?.() }
+      },
+    })
+    const service = new LarkChannelService(ctx, {
+      enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET',
+    }, { env: { LARK_APP_SECRET: secret }, createTransport: () => channel })
+    await service.whenReady()
+    const expiresAt = Date.now() - 1
+    const token = signLarkApprovalAction(secret, {
+      version: 2, channel: 'lark', account: 'primary', tenant: 'tenant-a', operationId: 'operation-recovery',
+      bindingId: 'binding-1', proposalId: 'proposal-1', expectedVersion: 1, expiresAt,
+      chatId: 'oc_owner', diffHash: 'a'.repeat(64), decision: 'approved',
+    })
+
+    await handlers?.cardAction({ messageId: 'om_card', chatId: 'oc_owner', operatorId: 'ou_owner',
+      value: { approval: token } })
+    expect(settleApproval).not.toHaveBeenCalled()
+    expect(recoverApprovalSettlement).toHaveBeenCalledWith(expect.objectContaining({
+      operationId: 'operation-recovery', callbackChatId: 'oc_owner', bindingId: 'binding-1',
+      proposalId: 'proposal-1', expectedVersion: 1, diffHash: 'a'.repeat(64), decision: 'approved',
+    }))
+    await ctx.fiber.restart()
   })
 
   test('fails closed for missing delivery service or missing/empty secret', () => {

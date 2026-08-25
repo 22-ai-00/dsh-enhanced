@@ -11,6 +11,7 @@ import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
 import { createUserMessage, ReasoningEffortId, type LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { resolveLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import type { InboundProcessResult } from './coordinator.js'
 import type { DeliveryInboundRuntime } from './service.js'
 import { DeliveryStoreError } from './store.js'
@@ -43,6 +44,7 @@ interface DshDeliveryRuntimeOptions {
   policyRef: string
   provider: string
   model: string
+  toolCapableProviders: ReadonlySet<string>
   maxOutputTokens: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
   beginModelCommand(conversation: ConversationRef): number
@@ -73,6 +75,43 @@ const MAX_PROGRESS_TODOS = 20
 const MAX_PROGRESS_TEXT_CHARS = 240
 
 class DurableAgentIdentityError extends Error {}
+
+class ToolCapabilityAdmissionError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly model: string,
+    readonly presetId: string,
+  ) {
+    super(`assistant-delivery: ${provider}/${model} cannot execute the tools mounted by preset ${presetId}`)
+    this.name = 'ToolCapabilityAdmissionError'
+  }
+}
+
+function requireToolCapability(
+  llm: LlmRuntime,
+  provider: string,
+  model: string,
+  presetId: string,
+  toolCount: number,
+  declaredToolCapableProviders: ReadonlySet<string>,
+): void {
+  if (toolCount === 0) return
+  const capability = resolveLlmRouteCapability(llm, provider, model)
+  if (capability?.toolCalls === 'native' || capability?.toolCalls === 'bridge') return
+  // A provider-owned `none` declaration is authoritative and overrides a host
+  // allowlist entry. The allowlist exists only for audited upstream adapters
+  // that predate this registry.
+  if (capability === undefined && declaredToolCapableProviders.has(provider)) return
+  throw new ToolCapabilityAdmissionError(provider, model, presetId)
+}
+
+function toolCapabilityReply(error: ToolCapabilityAdmissionError): ModelCommandReply {
+  return {
+    text: `当前模型 ${error.provider}/${error.model} 无法执行 preset “${error.presetId}” 暴露的工具。`
+      + '请发送 /model 切换到支持工具调用的 provider，或改用不挂载工具的 preset。',
+    format: 'plain',
+  }
+}
 
 function boundedProgressText(value: string): string {
   return [...value].slice(0, MAX_PROGRESS_TEXT_CHARS).join('')
@@ -526,6 +565,16 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           maxTokens: this.options.maxOutputTokens },
         setup: async agentCtx => {
           await this.setupAgent(agentCtx, binding.workspace, presetId, selected, agentPresets)
+          const llm = this.ctx.get('llm')
+          if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
+          requireToolCapability(
+            llm,
+            selected.provider,
+            selected.model,
+            presetId,
+            agentCtx.tools.schemas(agentCtx.agent).length,
+            this.options.toolCapableProviders,
+          )
         } })
       const agent = handle.agent
       const from = agent.session.events.length
@@ -567,6 +616,14 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       if (causedByDurableIdentity(error)) {
         return { outcome: 'not-processed', failureCode: 'agent-identity-mismatch', retryable: false }
+      }
+      if (error instanceof ToolCapabilityAdmissionError) {
+        try {
+          this.options.replyCommand(binding, envelope.eventId, toolCapabilityReply(error))
+          return { outcome: 'processed' }
+        } catch {
+          return { outcome: 'not-processed', failureCode: 'tool-capability-notice-failed', retryable: true }
+        }
       }
       return { outcome: 'not-processed', failureCode: 'agent-resume-failed', retryable: true }
     } finally {

@@ -18,6 +18,10 @@ DSH_ENHANCED_PLUGIN_SLUGS=(
   'assistant-health'
 )
 
+DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
+  'assistant-evolution'
+)
+
 dsh_enhanced_usage() {
   local source_mode="$1"
   cat <<EOF
@@ -27,6 +31,9 @@ Install the complete dsh-enhanced Web personal-assistant deployment set.
 
 Options:
   --profile <name>          DSH profile (default: web)
+  --mode <mode>             standard or supervised-growth (default: standard)
+  --ack-existing-automations
+                            Acknowledge active jobs may run when its scheduler is enabled
   --lark <mode>             auto, keep, configure, or skip (default: auto)
   --dsh-version <version>   DSH version to ensure (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
   --no-service              Do not install or restart the macOS resident service
@@ -255,16 +262,35 @@ dsh_enhanced_apply_lark() {
   esac
 }
 
+dsh_enhanced_apply_supervised_growth() {
+  local profile="$1"
+  local dsh_home="$2"
+  local acknowledge="$3"
+  local dry_run="$4"
+  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-supervised-growth-setup"
+  local args=(--profile "$profile" --timeout-ms 300000)
+  if [[ "$acknowledge" == '1' ]]; then args+=(--ack-existing-automations); fi
+
+  printf '\nsupervised-growth：飞书 onboarding 完成后，正在运行有界且可审计的激活器。\n'
+  if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
+    dsh_enhanced_fail 1 "找不到安装后的 dsh-supervised-growth-setup：$setup_bin"
+    return $?
+  fi
+  dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
+}
+
 dsh_enhanced_install() {
   local source_mode="$1"
   local repo_root="$2"
   shift 2
 
   local profile="${DSH_ENHANCED_PROFILE:-web}"
+  local deployment_mode='standard'
   local lark_mode='auto'
   local dsh_version="${DSH_VERSION:-$DSH_ENHANCED_DEFAULT_DSH_VERSION}"
   local plugin_version="${DSH_ENHANCED_VERSION:-latest}"
   local manage_service='1'
+  local ack_existing_automations='0'
   local assume_yes='0'
   local dry_run='0'
 
@@ -273,6 +299,11 @@ dsh_enhanced_install() {
       --profile)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--profile 需要一个值。'; return $?; }
         profile="$2"
+        shift 2
+        ;;
+      --mode)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--mode 需要一个值。'; return $?; }
+        deployment_mode="$2"
         shift 2
         ;;
       --lark)
@@ -296,6 +327,10 @@ dsh_enhanced_install() {
         ;;
       --no-service)
         manage_service='0'
+        shift
+        ;;
+      --ack-existing-automations)
+        ack_existing_automations='1'
         shift
         ;;
       --yes)
@@ -325,6 +360,22 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 '--lark 只能是 auto、keep、configure 或 skip。'
     return $?
   esac
+  case "$deployment_mode" in standard|supervised-growth) ;; *)
+    dsh_enhanced_fail 2 '--mode 只能是 standard 或 supervised-growth。'
+    return $?
+  esac
+  if [[ "$deployment_mode" == 'supervised-growth' && "$lark_mode" == 'skip' ]]; then
+    dsh_enhanced_fail 2 'supervised-growth 需要飞书 onboarding；不能与 --lark skip 一起使用。'
+    return $?
+  fi
+  if [[ "$deployment_mode" == 'supervised-growth' && "$manage_service" != '1' ]]; then
+    dsh_enhanced_fail 2 'supervised-growth 需要常驻服务；不能与 --no-service 一起使用。'
+    return $?
+  fi
+  if [[ "$deployment_mode" == 'standard' && "$ack_existing_automations" == '1' ]]; then
+    dsh_enhanced_fail 2 '--ack-existing-automations 仅适用于 --mode supervised-growth。'
+    return $?
+  fi
   if [[ -z "$dsh_version" || "$dsh_version" == -* ]]; then
     dsh_enhanced_fail 2 'DSH 版本值不合法。'
     return $?
@@ -348,6 +399,9 @@ dsh_enhanced_install() {
 
   printf '安装来源：%s\n' "$source_mode"
   printf '目标 profile：%s\n' "$profile"
+  if [[ "$deployment_mode" != 'standard' ]]; then
+    printf '部署模式：%s\n' "$deployment_mode"
+  fi
   printf 'DSH_HOME：%s\n\n' "$dsh_home"
 
   if [[ "$dry_run" != '1' ]]; then
@@ -380,6 +434,20 @@ dsh_enhanced_install() {
       targets+=("@dsh-enhanced/$slug@$plugin_version")
     fi
   done
+  if [[ "$deployment_mode" == 'supervised-growth' ]]; then
+    for slug in "${DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS[@]}"; do
+      if [[ "$source_mode" == 'local' ]]; then
+        local plugin_path="$repo_root/plugins/$slug"
+        if [[ ! -f "$plugin_path/package.json" ]]; then
+          dsh_enhanced_fail 1 "缺少本地插件：$plugin_path"
+          return $?
+        fi
+        targets+=("$plugin_path")
+      else
+        targets+=("@dsh-enhanced/$slug@$plugin_version")
+      fi
+    done
+  fi
 
   printf '\n将安装以下顶层 bundle（core 由 personal-assistant 提供）：\n'
   printf '  - %s\n' "${targets[@]}"
@@ -392,7 +460,6 @@ dsh_enhanced_install() {
     dsh --profile "$profile" --dump-config >/dev/null
     printf 'profile 配置校验通过。\n'
   fi
-
   local patch_path="$dsh_home/profiles/$profile/cordis.patch.yml"
   local lark_configured='0'
   if dsh_enhanced_lark_is_configured "$patch_path"; then lark_configured='1'; fi
@@ -412,6 +479,9 @@ dsh_enhanced_install() {
     fi
   fi
   dsh_enhanced_apply_lark "$lark_mode" "$profile" "$dsh_home" "$lark_configured" "$manage_service" "$dry_run" || return $?
+  if [[ "$deployment_mode" == 'supervised-growth' ]]; then
+    dsh_enhanced_apply_supervised_growth "$profile" "$dsh_home" "$ack_existing_automations" "$dry_run" || return $?
+  fi
 
   printf '\n安装流程完成。\n'
   printf '检查配置：dsh --profile %s --dump-config\n' "$profile"

@@ -22,7 +22,42 @@ describe('event trigger configuration', () => {
     })
     expect(value.triggers.map(item => item.kind)).toEqual(['file', 'http-json', 'webhook'])
     expect(value.pollIntervalMs).toBe(5_000)
+    expect(value.pollConcurrency).toBe(8)
     expect(value.maxBodyBytes).toBe(65_536)
+    expect(value.allowedHttpOrigins).toEqual(['https://api.example.com'])
+    expect(value.ipv6Mode).toBe('deny')
+  })
+
+  test('requires an explicit native-network assertion before enabling public IPv6', () => {
+    expect(normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite', ipv6Mode: 'native-only', triggers: [],
+    }).ipv6Mode).toBe('native-only')
+    expect(() => normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite', ipv6Mode: 'nat64' as never, triggers: [],
+    })).toThrow(/configuration|ipv6/i)
+  })
+
+  test('requires a non-default port to be listed as an exact HTTPS origin', () => {
+    const trigger = { id: 'api', kind: 'http-json' as const, automationId: 'a',
+      url: 'https://api.example.com:8443/state', pointer: '', fireWhen: 'changed' as const,
+      debounceMs: 0, cooldownMs: 0, maxFires: 1 }
+    expect(() => normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite', allowedHttpHosts: ['api.example.com'], triggers: [trigger],
+    })).toThrow(/origin|allowlist/i)
+    expect(normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite', allowedHttpOrigins: ['https://api.example.com:8443'], triggers: [trigger],
+    }).allowedHttpOrigins).toEqual(['https://api.example.com:8443'])
+  })
+
+  test.each([
+    'http://api.example.com',
+    'https://user@api.example.com',
+    'https://api.example.com/path',
+    'https://api.example.com?query=1',
+  ])('rejects an invalid HTTP origin %s', origin => {
+    expect(() => normalizeEventTriggersConfig({
+      databasePath: '/state/events.sqlite', allowedHttpOrigins: [origin], triggers: [],
+    })).toThrow(/origin/i)
   })
 
   test.each([

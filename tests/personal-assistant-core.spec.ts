@@ -67,6 +67,9 @@ describe('four-core personal assistant composition', () => {
     await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
     await ctx.plugin(AssistantPolicyService, {
       databasePath: join(root, 'policy.sqlite'),
+      budgets: [
+        { id: 'core-automation-runs', metric: 'automation-runs', limit: 10, periodMs: 60_000, scope: 'subject' },
+      ],
       rules: [
         { id: 'foreground-memory', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: '/work/alpha' },
           actions: ['propose', 'search', 'snapshot'], resource: { kind: 'memory', id: '*' }, context: { initiators: ['foreground'] } },
@@ -86,10 +89,20 @@ describe('four-core personal assistant composition', () => {
           actions: ['ingest'], resource: { kind: 'automation', id: 'auto-context' }, context: { initiators: ['external'] } },
       ],
     })
-    await ctx.plugin(PersonalMemoryService, { databasePath: join(root, 'memory.sqlite') })
+    await ctx.plugin(PersonalMemoryService, {
+      databasePath: join(root, 'memory.sqlite'),
+      approvalMode: 'delivery-or-headless',
+    })
     await ctx.plugin(PersonalWikiService, { vaultRoot: join(root, 'wiki'), databasePath: join(root, 'wiki.sqlite') })
     await ctx.plugin(AssistantAutomationsService, {
       databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false,
+      proposalDefaults: {
+        provider: 'mock', model: 'core-model', allowedTools: ['memory_search', 'wiki_search'],
+        timeoutMs: 60_000, maxOutputTokens: 512, maxToolCalls: 2,
+        misfireKind: 'latest', misfireLimit: 1, overlap: 'skip', retrySafety: 'never', maxRetries: 0,
+        budgetId: 'core-automation-runs', budgetAmount: 1,
+      },
+      toolCapableProviders: ['mock'],
     })
     const adapter = new CoreAdapter()
     ctx.llm.registerAdapter(['mock'], adapter)

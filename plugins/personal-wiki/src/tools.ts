@@ -18,18 +18,17 @@ function renderUntrustedJson(tag: string, value: unknown): string {
 function pageInput(args: {
   title: string
   type: typeof TYPE[number]
-  authority: typeof AUTHORITY[number]
   status: typeof STATUS[number]
   tags: string[]
   aliases: string[]
   sources: WikiSource[]
   derived_from?: string[]
   body: string
-}): WikiPageInput {
+}, authority: typeof AUTHORITY[number]): WikiPageInput {
   return {
     title: args.title,
     type: args.type,
-    authority: args.authority,
+    authority,
     status: args.status,
     tags: args.tags,
     aliases: args.aliases,
@@ -39,7 +38,11 @@ function pageInput(args: {
   }
 }
 
-export function registerWikiTools(ctx: Context, service: PersonalWikiService): void {
+export function registerWikiTools(
+  ctx: Context,
+  service: PersonalWikiService,
+  options: { proposalAuthority: typeof AUTHORITY[number] },
+): void {
   ctx.tools.register(defineTool({
     name: 'wiki_search',
     description: 'Search the personal Markdown wiki with bounded, CJK-aware paragraph retrieval.',
@@ -135,14 +138,11 @@ export function registerWikiTools(ctx: Context, service: PersonalWikiService): v
     description: 'Propose one complete wiki page create or revision-CAS update. The tool never commits without owner approval.',
     parameters: {
       operation: { type: 'string', required: true, enum: ['create', 'update'] },
-      principal: { type: 'string', required: true },
       idempotency_key: { type: 'string', required: true },
-      ttl_ms: { type: 'integer' },
       page_id: { type: 'string' },
       expected_revision: { type: 'string' },
       title: { type: 'string', required: true },
       type: { type: 'string', required: true, enum: TYPE },
-      authority: { type: 'string', required: true, enum: AUTHORITY },
       status: { type: 'string', required: true, enum: STATUS },
       tags: { type: 'array', required: true, items: { type: 'string' } },
       aliases: { type: 'array', required: true, items: { type: 'string' } },
@@ -170,7 +170,7 @@ export function registerWikiTools(ctx: Context, service: PersonalWikiService): v
       render: (_args, value) => [{ type: 'text', text: renderUntrustedJson('wiki_proposal_results', value) }],
     },
     async execute(args, exec) {
-      const input = pageInput(args)
+      const input = pageInput(args, options.proposalAuthority)
       let mutation: WikiUpsertMutation
       if (args.operation === 'create') {
         if (args.page_id !== undefined || args.expected_revision !== undefined) {
@@ -185,8 +185,6 @@ export function registerWikiTools(ctx: Context, service: PersonalWikiService): v
       }
       const proposal = service.propose(exec.agent, {
         idempotencyKey: args.idempotency_key,
-        principal: args.principal,
-        ...(args.ttl_ms === undefined ? {} : { ttlMs: args.ttl_ms }),
         mutation,
       })
       return {

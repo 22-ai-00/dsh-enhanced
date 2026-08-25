@@ -56,6 +56,7 @@
     "@deepseek-ai/dsh-agent": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-skill": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.8 <0.2.0",
+    "@dsh-enhanced/assistant-delivery": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
@@ -63,6 +64,7 @@
     "@deepseek-ai/dsh-agent": { "optional": true },
     "@deepseek-ai/dsh-skill": { "optional": true },
     "@deepseek-ai/dsh-tools": { "optional": true },
+    "@dsh-enhanced/assistant-delivery": { "optional": true },
     "@dsh-enhanced/assistant-policy": { "optional": true }
   },
   "devDependencies": {
@@ -73,6 +75,7 @@
     "@deepseek-ai/dsh-skill": "catalog:",
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
+    "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",

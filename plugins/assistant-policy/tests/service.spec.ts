@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantPolicyService } from '../src/service.ts'
 import type { PolicyRequest } from '../src/types.ts'
 
@@ -15,6 +15,7 @@ async function databasePath() {
 }
 
 afterEach(async () => {
+  vi.useRealTimers()
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -120,6 +121,11 @@ describe('assistant policy Cordis service', () => {
       amount: 1,
       idempotencyKey: 'turn-1',
     })
+    expect(service.getBudgetConfig('turns')).toEqual({
+      id: 'turns', metric: 'turns', limit: 2, periodMs: 60_000, scope: 'subject',
+    })
+    expect(Object.isFrozen(service.getBudgetConfig('turns'))).toBe(true)
+    expect(service.getBudgetConfig('missing')).toBeUndefined()
     expect(service.finalize(reservation.reservationId, 1).status).toBe('finalized')
 
     const proposal = service.propose({
@@ -131,7 +137,17 @@ describe('assistant policy Cordis service', () => {
       diff: '+ fact',
       summary: 'Remember a fact',
       ttlMs: 60_000,
+      dispatch: {
+        sourceId: 'lark-primary',
+        bindingId: 'owner-binding',
+        workspace: '/work/alpha',
+        principal: 'owner',
+      },
     })
+    const [dispatch] = service.listPendingApprovalDispatches()
+    expect(dispatch).toMatchObject({ proposalId: proposal.proposalId, summary: 'Remember a fact' })
+    expect(service.markApprovalDispatchEnqueued(proposal.proposalId, dispatch!.version))
+      .toMatchObject({ state: 'enqueued', replayed: false })
     expect(service.decideProposal({
       proposalId: proposal.proposalId,
       principal: 'owner',
@@ -143,6 +159,7 @@ describe('assistant policy Cordis service', () => {
       'budget.reserve',
       'budget.finalize',
       'approval.propose',
+      'approval.dispatch.enqueue',
       'approval.decide',
     ])
     await ctx.fiber.restart()
@@ -247,5 +264,56 @@ describe('assistant policy Cordis service', () => {
     await ctx.fiber.restart()
 
     expect(() => service.evaluate(request)).toThrow(/disposed/i)
+  })
+
+  test('expires stale proposals on the bounded maintenance interval and clears it on disposal', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(100_000)
+    const ctx = new Context()
+    const service = new AssistantPolicyService(ctx, {
+      databasePath: await databasePath(),
+      rules: [],
+      proposalMaintenanceIntervalMs: 1_000,
+    })
+    const proposal = service.propose({
+      idempotencyKey: 'timer-expiry',
+      requester: 'agent:primary',
+      principal: 'owner',
+      action: 'memory.add',
+      resource: { kind: 'memory', id: 'fact-1' },
+      diff: '+ fact',
+      summary: 'Remember a fact',
+      ttlMs: 500,
+    })
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(service.getProposal(proposal.proposalId)?.status).toBe('expired')
+
+    await ctx.fiber.restart()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  test('allows proposal maintenance to be explicitly disabled', async () => {
+    vi.useFakeTimers()
+    const ctx = new Context()
+    new AssistantPolicyService(ctx, {
+      databasePath: await databasePath(),
+      rules: [],
+      proposalMaintenanceIntervalMs: 0,
+    })
+
+    expect(vi.getTimerCount()).toBe(0)
+    await ctx.fiber.restart()
+  })
+
+  test('rejects proposal maintenance intervals above the platform timer ceiling', async () => {
+    const ctx = new Context()
+    const path = await databasePath()
+    expect(() => new AssistantPolicyService(ctx, {
+      databasePath: path,
+      rules: [],
+      proposalMaintenanceIntervalMs: 2_147_483_648,
+    })).toThrow(/assistant-policy.*configuration/i)
+    await ctx.fiber.restart()
   })
 })

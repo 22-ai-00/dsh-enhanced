@@ -47,7 +47,7 @@ describe('automation SQLite store', () => {
     expect((await stat(join(fixture.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(fixture.path)).mode & 0o777).toBe(0o600)
     const database = new DatabaseSync(fixture.path, { readOnly: true })
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 2 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 })
     expect(database.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all())
       .toEqual(expect.arrayContaining([

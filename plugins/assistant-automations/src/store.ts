@@ -12,7 +12,10 @@ import { AutomationDatabaseError, openAutomationDatabase } from './sqlite.js'
 import type {
   AutomationDefinition,
   AutomationDeliveryStatus,
+  AutomationEvidenceAttribution,
+  AutomationEvidenceStatus,
   AutomationOccurrence,
+  AutomationOutcomeEvidence,
   AutomationRecord,
   AutomationRun,
   AutomationRunStatus,
@@ -118,6 +121,8 @@ interface RunRow {
   usage_json: string
   delivery_status: string | null
   delivery_ref: string | null
+  evidence_status: AutomationEvidenceStatus
+  evidence_json: string | null
   created_at: number
   updated_at: number
 }
@@ -225,7 +230,7 @@ export function normalizeAutomationDefinition(
     name: text(input['name'], 'name', 500),
     prompt: text(input['prompt'], 'prompt', maxPromptBytes),
     schedule: validateSchedule(input['schedule']),
-    workspace: input['workspace'] as string,
+    workspace: text(input['workspace'], 'workspace', 4_096),
     agentPreset: text(input['agentPreset'], 'agentPreset', 200),
     provider: text(input['provider'], 'provider', 200),
     model: text(input['model'], 'model', 500),
@@ -265,6 +270,26 @@ function deliveryStatus(value: string | null): AutomationDeliveryStatus | undefi
   throw new AutomationStoreError('invalid-state', 'automation run has an invalid delivery status')
 }
 
+function evidenceStatus(value: string): AutomationEvidenceStatus {
+  if (value === 'pending' || value === 'recorded' || value === 'suppressed') return value
+  throw new AutomationStoreError('invalid-state', 'automation run has an invalid evidence status')
+}
+
+function parseEvidence(row: RunRow): AutomationOutcomeEvidence | undefined {
+  const status = evidenceStatus(row.evidence_status)
+  if (status === 'suppressed') {
+    if (row.evidence_json !== null) {
+      throw new AutomationStoreError('invalid-state', 'suppressed automation evidence must not carry a payload')
+    }
+    return undefined
+  }
+  if (row.evidence_json === null || Buffer.byteLength(row.evidence_json, 'utf8') > 16_384) {
+    throw new AutomationStoreError('invalid-state', 'pending automation evidence must be bounded JSON')
+  }
+  const value = JSON.parse(row.evidence_json) as AutomationOutcomeEvidence
+  return Object.freeze(value)
+}
+
 function occurrence(row: OccurrenceRow): AutomationOccurrence {
   return Object.freeze({
     id: row.id,
@@ -298,6 +323,7 @@ function task(row: TaskRow): AutomationTask {
 
 function run(row: RunRow): AutomationRun {
   const status = deliveryStatus(row.delivery_status)
+  const evidence = parseEvidence(row)
   return Object.freeze({
     id: row.id,
     occurrenceId: row.occurrence_id,
@@ -311,6 +337,8 @@ function run(row: RunRow): AutomationRun {
     usage: Object.freeze(JSON.parse(row.usage_json) as Record<string, unknown>),
     ...(status === undefined ? {} : { deliveryStatus: status }),
     ...(row.delivery_ref === null ? {} : { deliveryRef: row.delivery_ref }),
+    evidenceStatus: evidenceStatus(row.evidence_status),
+    ...(evidence === undefined ? {} : { evidence }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   })
@@ -323,6 +351,56 @@ function duty(row: DutyRow, acquired: boolean): DutyLease {
     fencingToken: row.fencing_token,
     leaseUntil: row.lease_until,
   })
+}
+
+function normalizeEvidenceAttribution(
+  value: AutomationEvidenceAttribution | undefined,
+): AutomationEvidenceAttribution {
+  if (value === undefined) return Object.freeze({})
+  const sessionId = value.sessionId === undefined ? undefined : text(value.sessionId, 'evidence.sessionId', 500)
+  const ruleId = value.ruleId === undefined ? undefined : text(value.ruleId, 'evidence.ruleId', 200)
+  const guidanceVersion = value.guidanceVersion === undefined
+    ? undefined
+    : safeInteger(value.guidanceVersion, 'evidence.guidanceVersion', 1, 1_000_000_000)
+  if ((ruleId === undefined) !== (guidanceVersion === undefined)) {
+    throw new AutomationStoreError(
+      'invalid-definition',
+      'evidence ruleId and guidanceVersion must be supplied together',
+    )
+  }
+  return Object.freeze({
+    ...(sessionId === undefined ? {} : { sessionId }),
+    ...(ruleId === undefined ? {} : { ruleId, guidanceVersion: guidanceVersion! }),
+  })
+}
+
+function buildOutcomeEvidence(input: {
+  automation: AutomationRecord
+  runId: string
+  outcome: AutomationRunStatus
+  occurredAt: number
+  attribution: AutomationEvidenceAttribution
+}): { status: AutomationEvidenceStatus; json: string | null } {
+  if (input.outcome === 'cancelled' || input.outcome === 'unknown') {
+    return { status: 'suppressed', json: null }
+  }
+  const evidence: AutomationOutcomeEvidence = {
+    situation: `automation:${input.automation.id}`,
+    outcome: input.outcome === 'succeeded' ? 'succeeded' : 'failed',
+    detail: `automation "${input.automation.definition.name}": run ${input.outcome}`,
+    idempotencyKey: `automation-run:${input.runId}`,
+    occurredAt: input.occurredAt,
+    workspace: input.automation.definition.workspace,
+    agentPreset: input.automation.definition.agentPreset,
+    automationId: input.automation.id,
+    runId: input.runId,
+    ...input.attribution,
+  }
+  const json = JSON.stringify(evidence)
+  if (Buffer.byteLength(json, 'utf8') > 16_384) {
+    throw new AutomationStoreError('invalid-definition', 'automation evidence exceeds 16384 bytes')
+  }
+  return { status: 'pending', json }
 }
 
 export function stableOccurrenceId(
@@ -848,6 +926,7 @@ export class AutomationStore {
     artifactRef?: string
     outputPreview: string
     usage: Readonly<Record<string, unknown>>
+    evidenceAttribution?: AutomationEvidenceAttribution
   }): AutomationRun {
     if (!Number.isSafeInteger(input.now)) throw new AutomationStoreError('invalid-definition', 'now must be a safe integer')
     const preview = typeof input.outputPreview === 'string' && Buffer.byteLength(input.outputPreview, 'utf8') <= 8_192
@@ -857,6 +936,7 @@ export class AutomationStore {
     if (usageJson === undefined || Buffer.byteLength(usageJson, 'utf8') > 16_384) {
       throw new AutomationStoreError('invalid-definition', 'usage must be bounded JSON')
     }
+    const evidenceAttribution = normalizeEvidenceAttribution(input.evidenceAttribution)
     return this.transaction(() => {
       const existing = this.database.prepare('SELECT * FROM automation_runs WHERE task_id = ?').get(input.taskId) as RunRow | undefined
       if (existing !== undefined) {
@@ -878,18 +958,29 @@ export class AutomationStore {
       `).get(row.id, row.attempt_count, input.fencingToken) as AttemptRow | undefined
       if (attempt === undefined) throw new AutomationStoreError('stale-fence', 'winning attempt was not found')
       const runId = `run-${row.id}`
+      const automation = this.get(row.automation_id)
+      if (automation === undefined) throw new AutomationStoreError('invalid-state', 'automation definition was not found')
+      const evidence = buildOutcomeEvidence({
+        automation,
+        runId,
+        outcome: input.outcome,
+        occurredAt: input.now,
+        attribution: evidenceAttribution,
+      })
       const deliveryStatus = input.outcome === 'succeeded'
-        && this.get(row.automation_id)?.definition.deliveryBindingId !== undefined
+        && automation.definition.deliveryBindingId !== undefined
         ? 'pending'
         : null
       this.database.prepare(`
         INSERT INTO automation_runs(
           id, occurrence_id, automation_id, task_id, attempt_id, status, session_id, artifact_ref,
-          output_preview, usage_json, delivery_status, delivery_ref, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+          output_preview, usage_json, delivery_status, delivery_ref, evidence_status, evidence_json,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
       `).run(
         runId, row.occurrence_id, row.automation_id, row.id, attempt.id, input.outcome,
-        input.sessionId ?? null, input.artifactRef ?? null, preview, usageJson, deliveryStatus, input.now, input.now,
+        input.sessionId ?? null, input.artifactRef ?? null, preview, usageJson, deliveryStatus,
+        evidence.status, evidence.json, input.now, input.now,
       )
       this.database.prepare(`
         UPDATE automation_attempts
@@ -903,6 +994,47 @@ export class AutomationStore {
       `).run(input.outcome, input.outcome === 'succeeded' ? null : input.outcome, input.now, row.occurrence_id)
       return run(this.database.prepare('SELECT * FROM automation_runs WHERE id = ?').get(runId) as unknown as RunRow)
     })
+  }
+
+  listPendingEvidence(limit: number): AutomationRun[] {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1_000) {
+      throw new AutomationStoreError('invalid-definition', 'evidence limit must be between 1 and 1000')
+    }
+    return (this.database.prepare(`
+      SELECT * FROM automation_runs WHERE evidence_status = 'pending' ORDER BY updated_at, id LIMIT ?
+    `).all(limit) as unknown as RunRow[]).map(run)
+  }
+
+  deferRunEvidence(input: { runId: string; expectedStatus: 'pending'; now: number }): AutomationRun {
+    if (!Number.isSafeInteger(input.now)) throw new AutomationStoreError('invalid-definition', 'now must be a safe integer')
+    const changed = this.database.prepare(`
+      UPDATE automation_runs SET updated_at = MAX(updated_at + 1, ?)
+      WHERE id = ? AND evidence_status = ?
+    `).run(input.now, input.runId, input.expectedStatus)
+    if (changed.changes !== 1) {
+      const current = this.database.prepare('SELECT * FROM automation_runs WHERE id = ?').get(input.runId) as RunRow | undefined
+      if (current?.evidence_status === 'recorded') return run(current)
+      throw new AutomationStoreError('version-conflict', 'run evidence state changed before deferral')
+    }
+    return run(this.database.prepare('SELECT * FROM automation_runs WHERE id = ?').get(input.runId) as unknown as RunRow)
+  }
+
+  completeRunEvidence(input: {
+    runId: string
+    expectedStatus: 'pending'
+    now: number
+  }): AutomationRun {
+    if (!Number.isSafeInteger(input.now)) throw new AutomationStoreError('invalid-definition', 'now must be a safe integer')
+    const changed = this.database.prepare(`
+      UPDATE automation_runs SET evidence_status = 'recorded', updated_at = ?
+      WHERE id = ? AND evidence_status = ?
+    `).run(input.now, input.runId, input.expectedStatus)
+    if (changed.changes !== 1) {
+      const current = this.database.prepare('SELECT * FROM automation_runs WHERE id = ?').get(input.runId) as RunRow | undefined
+      if (current?.evidence_status === 'recorded') return run(current)
+      throw new AutomationStoreError('version-conflict', 'run evidence state changed before completion')
+    }
+    return run(this.database.prepare('SELECT * FROM automation_runs WHERE id = ?').get(input.runId) as unknown as RunRow)
   }
 
   listPendingDeliveries(limit: number): AutomationRun[] {

@@ -16,6 +16,9 @@ import {
 import { SessionPreparation, type SessionEvent, type SessionHeader, type SessionId } from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import {
+  registerLlmRouteCapability,
+} from '@dsh-enhanced/llm-route-capabilities'
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -107,6 +110,8 @@ async function runtimeHarness(
   presetRoot?: string,
   agentPreset = 'primary',
   provideAgentPresets = true,
+  toolCapableProviders: readonly string[] = ['mock', 'alternate'],
+  presetToolMode: 'probe' | 'empty' = 'probe',
 ) {
   const ctx = new Context()
   if (presetRoot !== undefined) await ctx.plugin(Loader)
@@ -114,6 +119,10 @@ async function runtimeHarness(
   if (presetRoot === undefined && provideAgentPresets) {
     const presetResolve = vi.fn(async (id?: string) => ({ id: id ?? agentPreset }))
     const presetMount = vi.fn(async (agentCtx: Agent['ctx'], id?: string) => {
+      if (presetToolMode === 'empty') {
+        agentCtx.tools.restrict({ deny: agentCtx.tools.schemas().map(schema => schema.name) })
+        return { id: id ?? agentPreset }
+      }
       agentCtx.tools.register(defineTool({
         name: 'preset_probe',
         description: 'Visible only when the delivery Agent mounts its configured preset.',
@@ -159,7 +168,7 @@ async function runtimeHarness(
   ] })
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
     schedulerEnabled: false, defaultWorkspace: workspace, defaultAgentPreset: agentPreset, agentProvider: defaultRoute.provider,
-    agentModel: defaultRoute.model })
+    agentModel: defaultRoute.model, toolCapableProviders: [...toolCapableProviders] })
   const llm = new ReplyAdapter()
   ctx.llm.registerAdapter(['mock'], llm)
   const alternate = new ReplyAdapter('Alternate provider', ['fast', 'precise'])
@@ -305,6 +314,93 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(fixture.llm.requests).toHaveLength(1)
     expect(fixture.llm.requests[0]?.tools?.map(tool => tool.name)).not.toContain('preset_probe')
     expect([...saved.values()][0]?.header.agentPreset).toBe('primary')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('rejects a text-only coding subscription before provider execution but keeps session creation durable', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-text-only-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await runtimeHarness(root, saved, {
+      provider: 'codex-subscription', model: 'default',
+    }, undefined, root, undefined, 'primary', true, ['codex-subscription'])
+    const codex = new ReplyAdapter('Codex subscription')
+    fixture.ctx.llm.registerAdapter(['codex-subscription'], codex)
+    registerLlmRouteCapability(fixture.ctx.llm, {
+      provider: 'codex-subscription', toolCalls: 'none',
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    const inbound = message('evt-codex-tools', 'use the preset tool')
+    await fixture.service.acceptInbound(inbound)
+    expect(saved.size).toBe(1)
+    await drive(fixture.service)
+
+    expect(codex.requests).toHaveLength(0)
+    expect(fixture.sends.at(-1)?.text).toContain('codex-subscription/default')
+    expect(fixture.sends.at(-1)?.text).toContain('primary')
+    expect(fixture.sends.at(-1)?.text).toContain('/model')
+    await expect(fixture.service.acceptInbound(inbound))
+      .resolves.toMatchObject({ duplicate: true, status: 'processed' })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('accepts a TraeX bridge declaration for a tool-bearing preset', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-traex-bridge-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), {
+      provider: 'traex-agent', model: 'default',
+    }, undefined, root, undefined, 'primary', true, [])
+    const trae = new ReplyAdapter('TraeX bridge')
+    fixture.ctx.llm.registerAdapter(['traex-agent'], trae)
+    registerLlmRouteCapability(fixture.ctx.llm, { provider: 'traex-agent', toolCalls: 'bridge' })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-traex-tools', 'hello'))
+    await drive(fixture.service)
+
+    expect(trae.requests).toHaveLength(1)
+    expect(trae.requests[0]?.tools?.map(tool => tool.name)).toContain('preset_probe')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('fails closed for an undeclared provider when the mounted preset has tools', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-unknown-tools-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), {
+      provider: 'unknown-route', model: 'model',
+    }, undefined, root, undefined, 'primary', true, [])
+    const unknown = new ReplyAdapter('Unknown route')
+    fixture.ctx.llm.registerAdapter(['unknown-route'], unknown)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-unknown-tools', 'hello'))
+    await drive(fixture.service)
+
+    expect(unknown.requests).toHaveLength(0)
+    expect(fixture.sends.at(-1)?.text).toContain('unknown-route/model')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('allows an undeclared provider when the final Agent scope exposes no tools', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-empty-tools-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), {
+      provider: 'unknown-route', model: 'model',
+    }, undefined, root, undefined, 'primary', true, [], 'empty')
+    const unknown = new ReplyAdapter('Unknown route')
+    fixture.ctx.llm.registerAdapter(['unknown-route'], unknown)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-empty-tools', 'hello'))
+    await drive(fixture.service)
+
+    expect(unknown.requests).toHaveLength(1)
+    expect(unknown.requests[0]?.tools ?? []).toEqual([])
     await fixture.ctx.fiber.restart()
   })
 

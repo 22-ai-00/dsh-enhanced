@@ -24,6 +24,10 @@
 
 因此，不需要一次安装十二个包。多数个人使用场景从一个 core meta-bundle 开始；要飞书时变为三个包，之后只按需求增加 P1。`browser-playwright`、二进制附件下载/上传、PDF/DOCX/Web ingest、第二消息渠道和向量检索仍是明确延期项，而不是“已经可靠”的能力。
 
+延迟审批的提交闭环已补齐：Policy 增加只读 `getProposal`，Memory、Wiki 与 Automations 各自通过 `reconcileProposals()` 轮询自己待决提案的终态，再用与前台 `decideProposal` 完全相同的事务/写入路径提交。方向仍是「域读取 Policy」，Policy 不回调任何域；pending 永不被当作批准，重复 reconcile 幂等，冲突降级为 `conflicted` 而不丢弃决定。Automations 的该定时器独立于 scheduler，因此 `schedulerEnabled: false` 时批准一个 automation 仍会生效。
+
+无人值守的成本上限也已收紧：不上报 usage 的 provider（本机 CLI 与 ACP 订阅类 route）按全额预留结算，而不是按 0 结算，否则周期预算的 `spent_amount` 永远为 0、永不触顶。相应地，`coding-subscription-provider` 的四条 text-only route 在收到非空 `tools` 时会以 `tool_calls_unsupported` 明确失败，不再静默丢弃工具——静默丢弃会让 automation 看起来成功却从未调用白名单工具。需要工具的主动执行应使用 `traex-acp-provider`。
+
 当前实现的运行边界也需要明确：Lark 默认关闭；Policy 默认拒绝，需要部署者显式放行；Lark 官方长连接没有可验证的 replay cursor/backfill，插件只报告 reconnect gap；provider 接受后断线而无法对账的发送保持 `unknown_after_send`，不会盲目重发；附件第一版只保存有界元数据，不自动下载不可信二进制；持久服务仍需要单机 supervisor，macOS onboarding 已能自动安装 launchd，Linux/容器仍需 systemd/Docker 等部署层。
 
 ## 一页结论

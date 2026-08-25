@@ -27,8 +27,8 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent
 | `spoolPath` | `$DSH_HOME/assistant-delivery/spool` | 预留的私有附件隔离目录，必须为绝对路径 |
 | `schedulerEnabled` | `true` | 启用 Inbox/Outbox 后台 pump |
 | `tickIntervalMs` | `1000` | pump 周期 |
-| `leaseMs` | `30000` | 单次 Inbox/Outbox/模型确认 claim 租约，也是模型确认实时解析的 deadline |
-| `maxAttempts` | `5` | 可证明未产生副作用的最大尝试数；未知发送不自动转 dead |
+| `leaseMs` | `30000` | 单次 Inbox/Outbox/模型确认 claim 租约，也是模型确认实时解析的 deadline；运行中的 Inbox turn 与 Outbox send 都会周期续租 |
+| `maxAttempts` | `5` | 发送与 unknown 对账各自的自动尝试上限；owner 显式 retry 会在不重置审计计数的前提下再授予一次尝试；无对账能力的 unknown 保持待人工处理 |
 | `maxConcurrency` | `4` | 跨 binding 并发数；同一 binding 始终串行 |
 | `maxTextBytes` | `65536` | 单条入站/出站正文 UTF-8 上限 |
 | `retryBaseMs` / `retryMaxMs` | `1000` / `300000` | 指数退避边界；adapter 的 Retry-After 是下限 |
@@ -37,6 +37,7 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent
 | `defaultAgentPreset` | `standard` | 新 session 解析并挂载的 preset；该内置 preset 提供 Bash、文件、检索、Skills 等完整编码能力 |
 | `policyRef` | `owner-dm` | 固化在 binding 上的策略引用标签 |
 | `agentProvider` / `agentModel` | `deepseek-official` / `deepseek-v4-flash` | 渠道 Agent 的部署默认模型；会话可用 `/model` 覆盖 |
+| `toolCapableProviders` | `[deepseek-official]` | 尚未发布 registry metadata 的上游原生工具 provider 审计列表；未知 provider + 非空工具 fail closed |
 | `agentMaxOutputTokens` | `8192` | 单轮模型输出上限 |
 | `modelPickerTtlMs` | `900000` | `/model` 选择卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 
@@ -93,7 +94,7 @@ rules:
 - `start({ accept, receipt })` 必须等 `accept()` 成功返回后才 ack/cursor；此时 event 已经持久化。
 - `send(intent, signal)` 只能返回 `accepted`、可证明 `not-sent` 或 `unknown`。HTTP 200/平台 request accepted 只叫 `accepted`，不能伪装成 delivered/read。
 - 429/明确 5xx 未发送应给出 `retryable` 与可选 `retryAfterMs`；永久 4xx 进入 dead。
-- 请求可能已到平台但 response 丢失时返回 `unknown`。若声明 `reconcileUnknownSend` capability，必须实现对账；否则记录保持 `unknown_after_send`。
+- 请求可能已到平台但 response 丢失时返回 `unknown`。若声明 `reconcileUnknownSend` capability，必须实现对账，并使用独立的有界对账 attempt；连续无法判定达到上限后进入 dead，释放同 lane 后续消息。未声明该能力时记录保持 `unknown_after_send`，不会被领取为空对账 attempt，直到 owner 显式 retry/cancel。
 - receipt 必须带同一个 channel、account、provider message id；状态只允许单调 `accepted→delivered→read`。
 - adapter 的 socket、timer、SDK client 和 listener 必须由 `start()` disposer 释放。
 
@@ -121,6 +122,8 @@ rules:
 
 卡片提交后，Delivery 会再次核对 active binding、精确 principal/chat 和 Policy，并用实时 `resolveModelInfo()` 验证 provider/model 及该模型支持的 effort；通过后把三项选择按 canonical conversation 持久化到 Delivery SQLite。选择从下一条普通消息生效，保留当前 session 上下文，跨 `/new` 和 Host 重启仍有效。卡片可选择“默认（由模型决定）”；`/model use` 保留为无卡片渠道和排错时的文字后备，`/model reset` 删除会话覆盖并恢复 `agentProvider` / `agentModel`。模型目录按宿主约定是建议性的，最终调用是否成功仍由对应 adapter 和账号认证决定。
 
+普通消息真正 resume Agent 时，Delivery 会在 preset 挂载完成后检查最终 scoped tool schemas。非空工具要求 provider 通过 `@dsh-enhanced/llm-route-capabilities` 声明 `native`/`bridge`，或位于部署审计的 `toolCapableProviders`（默认仅 `deepseek-official`）；显式 `none` 永远覆盖列表。Codex 等 text-only route 因此会在 `followup()`、认证和子进程之前返回可操作的 `/model` 提示并把该确定性消息结算为已处理；fresh session 创建本身不执行模型，仍可先持久建立 binding。最终工具为空时不要求能力声明。
+
 只注册两个模型工具：
 
 - `delivery_reply`：只能回复当前 Agent session 已验证的 binding，不能传 channel/account/chat/user。
@@ -128,7 +131,9 @@ rules:
 
 普通 Agent 回复、Automation 结果和未来 Heartbeat 都必须 enqueue 到同一 Outbox。相同 `idempotencyKey` + 相同不可变 intent 返回同一行；同 key 改正文或 route 会冲突。
 
-延迟审批使用 `enqueueApproval()` 写入同一 Outbox，intent 只允许固定的 operation/proposal/version/expiry/title 字段。渠道签名后的点击仍必须回到 `settleApproval()`；它重新核对 active binding、principal、chat、proposal version 和 operation id，重复点击只会得到同一持久化结果。
+延迟审批由 domain 先通过 `prepareAgentApproval()` 从当前 Agent 的 active owner binding 派生不可伪造的 source/binding/workspace/principal route，再把该 route 随 Policy proposal 持久化；background Agent 可由可信 runner 使用 `bindAgentApprovalRoute()` 临时绑定 automation definition 中的 immutable `deliveryBindingId`，该绑定不会注册为模型工具。Delivery tick 会在发送前领取 Policy dispatch，以 `approval-card:<proposalId>` / `approval:<proposalId>` 写入同一 Outbox，再用 CAS 标记已入队；若进程在两步之间退出，重放仍命中同一 intent。schema v6 另以带版本 fence 的持久 `(createdAt, proposalId)` 高水位分页扫描 pending dispatch：无效 route 不会被伪标为已入队，但也不能用一个 poison page 永久饿死后续审批；扫描到尾后回绕重试这些条目，Host 重启与并发 scanner 都不会倒退覆盖新游标。
+
+`enqueueApproval()` 只接受固定的 operation/proposal/version/expiry/title/diffHash 字段，并重新核对 active owner、精确 workspace/principal、Policy pending snapshot、展示标题和正文 SHA-256，调用方不能替换审批卡片展示内容。渠道签名后的点击仍必须回到 `settleApproval()`；它从 Outbox 取回持久 operation tuple，并再次核对 active owner binding、principal/chat、proposal version/expiry/diffHash 与 Policy pending snapshot，重复点击只会得到同一持久化结果。若 Policy 已提交而 Delivery 在写回结果前退出，只有此前已经落盘的同一 settlement 且当前 Policy 为精确同一终态时才能通过 `recoverApprovalSettlement()` 补全；该恢复路径不会新建 settlement，也不会决定 pending/expired proposal。
 
 模型选择同样不开放任意渠道 payload。`model-picker` intent 只允许有界的 provider/model/effort 目录和有效的 model→effort 引用；目录与 operation 一起保存在 Outbox，渠道可在 Host 重启后按 operation 恢复同一份选择目录。schema v5 另外保存每个 operation 的选择 revision 和确认结算：渠道联动回调通过 CAS 前进，旧 revision 只能读取当前状态；确认先持久领取 operation，带租约和 fencing token 的 worker 在启动与 tick 时恢复未完成任务，并在实时模型解析后重新校验 active principal、binding 与 Policy。最终模型选择、结算结果与确认 Outbox 在同一事务中提交，因此重启、慢解析与重复回调不会重复应用选择。
 
@@ -138,6 +143,8 @@ rules:
 - Outbox：`pending→attempting→accepted→delivered→read`，另有 `retry_wait`、`dead`、`unknown_after_send`。
 - attempt 与 receipt 都是独立追加账本；不同 binding 可并行，同一 binding 保序。
 - claim/complete 带 owner + fencing token；过期 worker 不能提交新 owner 的结果。
+- 运行中的 Inbox/Outbox claim 每隔约三分之一租期按精确 owner + fencing token 续租；续租失败会 abort Agent/adapter signal，过期 worker 即使随后返回成功也不能提交结果。
+- `maxAttempts` 只限制自动 claim；owner 对 dead letter/unknown 的显式 retry 把状态 CAS 回 `queued`/`pending` 并获得一次新 claim，`attempt_count` 与 attempt ledger 不回绕。
 - Agent dispatch 前写 `dispatch-started` marker。此后进程崩溃会进入 `dispatch-ambiguous` dead letter，避免自动产生第二个 turn；这会牺牲一次自动重放，需要 owner 审阅后显式 retry。
 - 当前 rc.8 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。
 - Outbox adapter 抛异常一律视为可能已发送；不会按照普通 5xx 重试。

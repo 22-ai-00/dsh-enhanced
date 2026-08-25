@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
+import { APPROVAL_DISPLAY_BUDGET } from '@dsh-enhanced/assistant-policy'
 import { MemoryDatabaseError, openMemoryDatabase } from './sqlite.js'
 import { tokenizeMemory } from './tokenize.js'
 import type {
@@ -11,6 +12,7 @@ import type {
   MemoryIdentity,
   MemoryKind,
   MemoryMutation,
+  MemoryProposalInput,
   MemoryProposalStatus,
   MemoryRecord,
   MemorySearchHit,
@@ -21,6 +23,7 @@ import type {
   MemorySnapshotRequest,
   MemoryTrust,
   StoredMemoryProposal,
+  StoredMemoryProposalIntent,
 } from './types.js'
 
 export type MemoryStoreErrorCode =
@@ -91,6 +94,32 @@ interface ProposalRow {
   version: number
 }
 
+interface ProposalIntentRow {
+  id: string
+  idempotency_key: string
+  requester: string
+  principal: string
+  mutation_hash: string
+  mutation_json: string
+  ttl_ms: number
+  dispatch_source_id: string | null
+  dispatch_binding_id: string | null
+  dispatch_workspace: string | null
+  dispatch_principal: string | null
+  created_at: number
+  updated_at: number
+}
+
+export interface PrepareMemoryProposalIntentInput extends MemoryProposalInput {
+  proposalId: string
+  mutationHash: string
+}
+
+export type PrepareMemoryProposalStateResult =
+  | Readonly<{ kind: 'proposal'; proposal: StoredMemoryProposal }>
+  | Readonly<{ kind: 'intent'; intent: StoredMemoryProposalIntent; replayed: boolean }>
+  | Readonly<{ kind: 'conflict' }>
+
 export interface SaveMemoryProposalInput {
   proposalId: string
   policyProposalId: string
@@ -103,11 +132,16 @@ export interface SaveMemoryProposalInput {
   version: number
 }
 
-export interface SettleMemoryProposalInput {
-  proposalId: string
-  policyStatus: 'approved' | 'expired' | 'rejected'
-  policyVersion: number
-}
+export type SettleMemoryProposalInput =
+  | {
+    proposalId: string
+    policyStatus: 'approved' | 'expired' | 'rejected'
+    policyVersion: number
+  }
+  | {
+    proposalId: string
+    policyStatus: 'conflicted'
+  }
 
 export interface SettleMemoryProposalResult {
   proposal: StoredMemoryProposal
@@ -190,6 +224,31 @@ function contentHash(content: string): string {
 
 export function hashMemoryMutation(mutation: MemoryMutation): string {
   return createHash('sha256').update(JSON.stringify(mutation)).digest('hex')
+}
+
+export function missingPolicyProposalId(
+  proposalId: string,
+  ttlMs: number,
+  dispatch: MemoryProposalInput['dispatch'],
+): string {
+  const canonicalDispatch = dispatch === undefined
+    ? null
+    : {
+      sourceId: dispatch.sourceId,
+      bindingId: dispatch.bindingId,
+      workspace: dispatch.workspace,
+      principal: dispatch.principal,
+    }
+  const fingerprint = createHash('sha256').update(JSON.stringify({
+    proposalId,
+    ttlMs,
+    dispatch: canonicalDispatch,
+  })).digest('hex')
+  return `missing-policy:${fingerprint}`
+}
+
+export function isMissingPolicyProposalId(proposalId: string): boolean {
+  return proposalId.startsWith('missing-policy:')
 }
 
 export class MemoryStore {
@@ -277,8 +336,11 @@ export class MemoryStore {
         SUM(CASE WHEN status = 'active' AND expires_at IS NOT NULL AND expires_at <= ? THEN 1 ELSE 0 END) AS expired_records
       FROM memory_records
     `).get(now, now) as { active_records: number | null; removed_records: number | null; expired_records: number | null }
-    const proposals = this.#database.prepare("SELECT COUNT(*) AS count FROM memory_proposals WHERE status = 'pending'")
-      .get() as { count: number }
+    const proposals = this.#database.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM memory_proposals WHERE status = 'pending')
+        + (SELECT COUNT(*) FROM memory_proposal_intents) AS count
+    `).get() as { count: number }
     return {
       activeRecords: row.active_records ?? 0,
       removedRecords: row.removed_records ?? 0,
@@ -432,6 +494,151 @@ export class MemoryStore {
     })
   }
 
+  prepareProposalIntent(
+    input: PrepareMemoryProposalIntentInput,
+  ): PrepareMemoryProposalStateResult {
+    const mutationJson = JSON.stringify(input.mutation)
+    const diff = JSON.stringify(input.mutation, null, 2)
+    if (input.proposalId.trim() === '' || input.idempotencyKey.trim() === ''
+      || input.requester.trim() === '' || input.principal.trim() === ''
+      || !/^[0-9a-f]{64}$/u.test(input.mutationHash)
+      || !Number.isSafeInteger(input.ttlMs) || input.ttlMs <= 0
+      || Buffer.byteLength(`personal-memory:${input.idempotencyKey}`, 'utf8') > 512
+      || Buffer.byteLength(input.requester, 'utf8') > 512
+      || Buffer.byteLength(input.principal, 'utf8') > 512
+      || Buffer.byteLength(diff, 'utf8') > APPROVAL_DISPLAY_BUDGET.maxDiffBytes) {
+      throw new MemoryStoreError('invalid-entry', 'proposal intent fields are invalid')
+    }
+    if (input.dispatch !== undefined
+      && (input.dispatch.sourceId.trim() === '' || input.dispatch.bindingId.trim() === ''
+        || !isAbsolute(input.dispatch.workspace) || input.dispatch.principal !== input.principal
+        || Buffer.byteLength(input.dispatch.sourceId, 'utf8') > 512
+        || Buffer.byteLength(input.dispatch.bindingId, 'utf8') > 512
+        || Buffer.byteLength(input.dispatch.workspace, 'utf8') > 4_096
+        || Buffer.byteLength(input.dispatch.principal, 'utf8') > 512)) {
+      throw new MemoryStoreError('invalid-entry', 'proposal intent dispatch route is invalid')
+    }
+    return this.#transaction(() => {
+      // The proposal and its creation intent live in separate tables. Resolve
+      // both under the same write lock so another process cannot attach a local
+      // proposal between an absence check and this intent insert.
+      const proposalByKey = this.#proposalByIdempotencyKey(input.idempotencyKey)
+      const proposalById = this.#proposal(input.proposalId)
+      if (proposalByKey !== undefined || proposalById !== undefined) {
+        const existing = proposalByKey ?? proposalById!
+        // A proposal is authoritative over any crash-era residue. Delete both
+        // possible aliases before returning/raising outside the transaction so
+        // poison work cannot permanently occupy the reconcile lane.
+        this.#database.prepare(`
+          DELETE FROM memory_proposal_intents WHERE id = ? OR idempotency_key = ?
+        `).run(input.proposalId, input.idempotencyKey)
+        const sameRow = proposalByKey === undefined || proposalById === undefined
+          || proposalByKey.id === proposalById.id
+        if (!sameRow || !this.#proposalMatchesPrepareInput(existing, input, mutationJson)) {
+          return Object.freeze({ kind: 'conflict' as const })
+        }
+        return Object.freeze({ kind: 'proposal' as const, proposal: this.#toProposal(existing) })
+      }
+
+      const intentByKey = this.#proposalIntentByIdempotencyKey(input.idempotencyKey)
+      const intentById = this.#proposalIntent(input.proposalId)
+      if (intentByKey !== undefined || intentById !== undefined) {
+        const existing = intentByKey ?? intentById!
+        const sameRow = intentByKey === undefined || intentById === undefined
+          || intentByKey.id === intentById.id
+        if (!sameRow || !this.#intentMatchesPrepareInput(existing, input, mutationJson)) {
+          return Object.freeze({ kind: 'conflict' as const })
+        }
+        return Object.freeze({
+          kind: 'intent' as const,
+          intent: this.#toProposalIntent(existing),
+          replayed: true,
+        })
+      }
+
+      // Keep the mutation preflight in the same transaction as the absence
+      // checks. Final application still repeats every CAS/duplicate check.
+      const preflight = this.normalizeMutation(input.mutation)
+      if (JSON.stringify(preflight) !== mutationJson) {
+        throw new MemoryStoreError('invalid-entry', 'proposal mutation is not canonical')
+      }
+      const now = this.#now()
+      if (!Number.isSafeInteger(now) || !Number.isSafeInteger(now + input.ttlMs)) {
+        throw new MemoryStoreError('invalid-entry', 'proposal intent deadline exceeds the safe timestamp range')
+      }
+      this.#database.prepare(`
+        INSERT INTO memory_proposal_intents(
+          id, idempotency_key, requester, principal, mutation_hash, mutation_json, ttl_ms,
+          dispatch_source_id, dispatch_binding_id, dispatch_workspace, dispatch_principal,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        input.proposalId,
+        input.idempotencyKey,
+        input.requester,
+        input.principal,
+        input.mutationHash,
+        mutationJson,
+        input.ttlMs,
+        input.dispatch?.sourceId ?? null,
+        input.dispatch?.bindingId ?? null,
+        input.dispatch?.workspace ?? null,
+        input.dispatch?.principal ?? null,
+        now,
+        now,
+      )
+      return Object.freeze({
+        kind: 'intent' as const,
+        intent: this.#toProposalIntent(this.#requiredProposalIntent(input.proposalId)),
+        replayed: false,
+      })
+    })
+  }
+
+  getProposalIntent(proposalId: string): StoredMemoryProposalIntent | undefined {
+    const row = this.#proposalIntent(proposalId)
+    return row === undefined ? undefined : this.#toProposalIntent(row)
+  }
+
+  listProposalIntents(limit: number): StoredMemoryProposalIntent[] {
+    this.#validateProposalListLimit(limit)
+    const rows = this.#database.prepare(`
+      SELECT * FROM memory_proposal_intents ORDER BY updated_at, id LIMIT ?
+    `).all(limit) as unknown as ProposalIntentRow[]
+    return rows.map(row => this.#toProposalIntent(row))
+  }
+
+  deferProposalIntent(proposalId: string): void {
+    const now = this.#now()
+    this.#database.prepare(`
+      UPDATE memory_proposal_intents
+      SET updated_at = CASE WHEN updated_at >= ? THEN updated_at + 1 ELSE ? END
+      WHERE id = ?
+    `).run(now, now, proposalId)
+  }
+
+  /** Fail closed after Policy atomically abandons or rejects exact recovery. */
+  conflictProposalIntent(proposalId: string): { proposal: StoredMemoryProposal; replayed: boolean } {
+    return this.#transaction(() => {
+      const existing = this.#proposal(proposalId)
+      if (existing !== undefined) {
+        // A prior cross-process attach may have won after this worker loaded the
+        // intent. Its proposal is authoritative; remove only the same-key
+        // residue so it cannot be retried forever.
+        this.#database.prepare(`
+          DELETE FROM memory_proposal_intents WHERE id = ? AND idempotency_key = ?
+        `).run(existing.id, existing.idempotency_key)
+        return { proposal: this.#toProposal(existing), replayed: true }
+      }
+      const intent = this.#requiredProposalIntent(proposalId)
+      const expiresAt = intent.created_at + intent.ttl_ms
+      if (!Number.isSafeInteger(expiresAt)) {
+        throw new MemoryStoreError('invalid-entry', 'proposal intent expiry exceeds the safe timestamp range')
+      }
+      return this.#materializeProposalIntentConflict(intent, expiresAt, this.#now())
+    })
+  }
+
   saveProposal(input: SaveMemoryProposalInput): { proposal: StoredMemoryProposal; replayed: boolean } {
     if (!Number.isSafeInteger(input.expiresAt) || !Number.isSafeInteger(input.version) || input.version <= 0) {
       throw new MemoryStoreError('invalid-entry', 'proposal expiry and version must be safe integers')
@@ -446,6 +653,7 @@ export class MemoryStore {
           && existing.mutation_hash === input.mutationHash
           && existing.expires_at === input.expiresAt
         if (!same) throw new MemoryStoreError('idempotency-conflict', 'proposal key was used for another mutation')
+        this.#database.prepare('DELETE FROM memory_proposal_intents WHERE id = ?').run(input.proposalId)
         return { proposal: this.#toProposal(existing), replayed: true }
       }
       const now = this.#now()
@@ -467,6 +675,7 @@ export class MemoryStore {
         now,
         input.version,
       )
+      this.#database.prepare('DELETE FROM memory_proposal_intents WHERE id = ?').run(input.proposalId)
       return { proposal: this.#toProposal(this.#requiredProposal(input.proposalId)), replayed: false }
     })
   }
@@ -474,6 +683,28 @@ export class MemoryStore {
   getProposal(proposalId: string): StoredMemoryProposal | undefined {
     const row = this.#proposal(proposalId)
     return row === undefined ? undefined : this.#toProposal(row)
+  }
+
+  /**
+   * List proposals still pending locally, oldest first. A reconciler pairs these
+   * with the policy decision to commit approvals that were decided out of band.
+   */
+  listPendingProposals(limit: number): StoredMemoryProposal[] {
+    this.#validateProposalListLimit(limit)
+    const rows = this.#database.prepare(`
+      SELECT * FROM memory_proposals WHERE status = 'pending'
+      ORDER BY updated_at, id LIMIT ?
+    `).all(limit) as unknown as ProposalRow[]
+    return rows.map(row => this.#toProposal(row))
+  }
+
+  deferPendingProposal(proposalId: string): void {
+    const now = this.#now()
+    this.#database.prepare(`
+      UPDATE memory_proposals
+      SET updated_at = CASE WHEN updated_at >= ? THEN updated_at + 1 ELSE ? END
+      WHERE id = ? AND status = 'pending'
+    `).run(now, now, proposalId)
   }
 
   settleProposal(input: SettleMemoryProposalInput): SettleMemoryProposalResult {
@@ -491,15 +722,25 @@ export class MemoryStore {
         if (current.status !== 'pending') {
           return { proposal: this.#toProposal(current), ...this.#proposalRecord(current), replayed: true }
         }
+        const version = input.policyStatus === 'conflicted'
+          ? current.version + 1
+          : input.policyVersion
+        if (!Number.isSafeInteger(version) || version <= current.version) {
+          throw new MemoryStoreError('invalid-entry', 'settlement version must advance the proposal')
+        }
         this.#database.prepare(`
           UPDATE memory_proposals SET status = ?, updated_at = ?, version = ?
           WHERE id = ? AND status = 'pending'
-        `).run(input.policyStatus, this.#now(), input.policyVersion, input.proposalId)
+        `).run(input.policyStatus, this.#now(), version, input.proposalId)
         return {
           proposal: this.#toProposal(this.#requiredProposal(input.proposalId)),
           replayed: false,
         }
       })
+    }
+
+    if (!Number.isSafeInteger(input.policyVersion) || input.policyVersion <= existing.version) {
+      throw new MemoryStoreError('invalid-entry', 'settlement version must advance the proposal')
     }
 
     try {
@@ -773,6 +1014,129 @@ export class MemoryStore {
       SELECT * FROM memory_records
       WHERE id = ? AND owner = ? AND scope = ? AND workspace = ? AND agent_preset = ?
     `).get(id, identity.owner, identity.scope, identity.workspace, identity.agentPreset) as unknown as RecordRow | undefined
+  }
+
+  #validateProposalListLimit(limit: number): void {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1_000) {
+      throw new MemoryStoreError('invalid-entry', 'proposal list limit must be between 1 and 1000')
+    }
+  }
+
+  #proposalIntent(id: string): ProposalIntentRow | undefined {
+    return this.#database.prepare('SELECT * FROM memory_proposal_intents WHERE id = ?')
+      .get(id) as unknown as ProposalIntentRow | undefined
+  }
+
+  #proposalIntentByIdempotencyKey(key: string): ProposalIntentRow | undefined {
+    return this.#database.prepare('SELECT * FROM memory_proposal_intents WHERE idempotency_key = ?')
+      .get(key) as unknown as ProposalIntentRow | undefined
+  }
+
+  #requiredProposalIntent(id: string): ProposalIntentRow {
+    const intent = this.#proposalIntent(id)
+    if (intent === undefined) throw new MemoryStoreError('not-found', 'memory proposal intent was not found')
+    return intent
+  }
+
+  #materializeProposalIntentConflict(
+    intent: ProposalIntentRow,
+    expiresAt: number,
+    now: number,
+  ): { proposal: StoredMemoryProposal; replayed: false } {
+    const dispatch = intent.dispatch_source_id === null
+      ? undefined
+      : {
+        sourceId: intent.dispatch_source_id,
+        bindingId: intent.dispatch_binding_id!,
+        workspace: intent.dispatch_workspace!,
+        principal: intent.dispatch_principal!,
+      }
+    this.#database.prepare(`
+      INSERT INTO memory_proposals(
+        id, policy_proposal_id, idempotency_key, requester, principal,
+        mutation_hash, mutation_json, status, expires_at, created_at, updated_at, version
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, 'conflicted', ?, ?, ?, 2)
+    `).run(
+      intent.id,
+      missingPolicyProposalId(intent.id, intent.ttl_ms, dispatch),
+      intent.idempotency_key,
+      intent.requester,
+      intent.principal,
+      intent.mutation_hash,
+      intent.mutation_json,
+      expiresAt,
+      intent.created_at,
+      now,
+    )
+    this.#database.prepare('DELETE FROM memory_proposal_intents WHERE id = ?').run(intent.id)
+    return { proposal: this.#toProposal(this.#requiredProposal(intent.id)), replayed: false }
+  }
+
+  #intentDispatchMatches(
+    row: ProposalIntentRow,
+    dispatch: MemoryProposalInput['dispatch'],
+  ): boolean {
+    if (dispatch === undefined) return row.dispatch_source_id === null
+      && row.dispatch_binding_id === null
+      && row.dispatch_workspace === null
+      && row.dispatch_principal === null
+    return row.dispatch_source_id === dispatch.sourceId
+      && row.dispatch_binding_id === dispatch.bindingId
+      && row.dispatch_workspace === dispatch.workspace
+      && row.dispatch_principal === dispatch.principal
+  }
+
+  #proposalMatchesPrepareInput(
+    row: ProposalRow,
+    input: PrepareMemoryProposalIntentInput,
+    mutationJson: string,
+  ): boolean {
+    return row.id === input.proposalId
+      && row.idempotency_key === input.idempotencyKey
+      && row.requester === input.requester
+      && row.principal === input.principal
+      && row.mutation_json === mutationJson
+      && (row.mutation_hash === input.mutationHash
+        || row.mutation_hash === hashMemoryMutation(input.mutation))
+  }
+
+  #intentMatchesPrepareInput(
+    row: ProposalIntentRow,
+    input: PrepareMemoryProposalIntentInput,
+    mutationJson: string,
+  ): boolean {
+    return row.id === input.proposalId
+      && row.idempotency_key === input.idempotencyKey
+      && row.requester === input.requester
+      && row.principal === input.principal
+      && row.mutation_json === mutationJson
+      && (row.mutation_hash === input.mutationHash
+        || row.mutation_hash === hashMemoryMutation(input.mutation))
+      && row.ttl_ms === input.ttlMs
+      && this.#intentDispatchMatches(row, input.dispatch)
+  }
+
+  #toProposalIntent(row: ProposalIntentRow): StoredMemoryProposalIntent {
+    const dispatch = row.dispatch_source_id === null
+      ? undefined
+      : Object.freeze({
+        sourceId: row.dispatch_source_id,
+        bindingId: row.dispatch_binding_id!,
+        workspace: row.dispatch_workspace!,
+        principal: row.dispatch_principal!,
+      })
+    return Object.freeze({
+      proposalId: row.id,
+      idempotencyKey: row.idempotency_key,
+      requester: row.requester,
+      principal: row.principal,
+      mutationHash: row.mutation_hash,
+      mutation: Object.freeze(JSON.parse(row.mutation_json) as MemoryMutation),
+      ttlMs: row.ttl_ms,
+      ...(dispatch === undefined ? {} : { dispatch }),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    })
   }
 
   #proposal(id: string): ProposalRow | undefined {

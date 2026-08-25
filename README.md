@@ -2,7 +2,7 @@
 
 `dsh-enhanced` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的多插件仓库。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle。
 
-仓库目前包含两类能力：面向编码场景的 ACP/模型 provider，以及基于 DSH `0.1.0-rc.8` 自研的个人助理套件。个人助理提供审批与预算、长期记忆、Markdown Wiki、冷启动可恢复自动化、持久消息投递和飞书长连接；这些包仍标记为实验性，适合先在受监督的单机 profile 中使用。
+仓库目前包含两类能力：面向编码场景的 ACP/模型 provider，以及基于 DSH `0.1.0-rc.8` 自研的个人助理套件。个人助理提供审批与预算、长期记忆、Markdown Wiki、冷启动可恢复自动化、持久消息投递、飞书长连接和审批门控的行为 guidance 演化；这些包仍标记为实验性，适合先在受监督的单机 profile 中使用。
 
 ## 在 dsh 中使用
 
@@ -44,6 +44,14 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/ma
 ```
 
 两个安装器、飞书复用/覆盖选项、实际安装清单和 macOS/Linux/Windows 差异见[安装脚本文档](scripts/install)。
+
+默认 `standard` 模式仍保持 scheduler 和成长行为关闭。需要显式启用有 owner 飞书审批、每日预算和受限主动巡检的部署时使用：
+
+```sh
+./scripts/install/install-local.sh --mode supervised-growth --lark configure
+```
+
+该模式默认把带工具的 Agent 固定到声明 `bridge` 能力的 TraeX route。默认 Codex CLI transport 仍是 text-only；只有显式切换到实验性的 `direct-responses` transport，Codex subscription route 才声明原生工具调用，并在 attachment service 可用时声明图片输入。成长结果只形成按 workspace/preset 隔离的顾问性 guidance，采用和退役都必须经 owner 审批，不会自行改写代码、凭据、Policy 或部署配置。
 
 如果希望逐项控制，CLI/Web 个人助理可以先安装核心 meta-bundle，它会组合 Policy、Memory、Wiki 和 Automations：
 
@@ -89,6 +97,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 | [`@dsh-enhanced/assistant-heartbeat`](plugins/assistant-heartbeat) | 复用 Automations 的 active-hours 主动巡检和成本硬停止。 | 按需安装 |
 | [`@dsh-enhanced/event-triggers`](plugins/event-triggers) | 持久化 file、受限 HTTPS/JSON 和 HMAC webhook 事件触发。 | 按需安装 |
 | [`@dsh-enhanced/memory-wiki-bridge`](plugins/memory-wiki-bridge) | 在 Memory 与 Wiki 之间生成可追溯、需审批的晋升提案。 | 按需安装 |
+| [`@dsh-enhanced/assistant-evolution`](plugins/assistant-evolution) | 基于可信 automation 结果提出按作用域隔离的行为 guidance，经飞书 owner 审批后注入后续 session；不自我扩权或修改代码。 | `supervised-growth` 模式安装 |
 | [`@dsh-enhanced/assistant-health`](plugins/assistant-health) | 聚合各 provider 的脱敏 liveness/readiness 与运维诊断。 | 按需安装 |
 | [`@dsh-enhanced/hello`](plugins/hello) | 最小示例插件，用于验证 bundle 安装、Cordis patch、构建与日志链路。 | `dsh plugin --profile web add @dsh-enhanced/hello` |
 
@@ -128,7 +137,7 @@ pnpm release:prepare
 pnpm release:prepare -- 0.2.0
 ```
 
-`release:prepare` 会统一修改根包、所有 `plugins/*/package.json` 和插件运行时的 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。运行 `pnpm check` 并提交版本变更后，只能从仓库根目录使用 pnpm 发布：
+`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。运行 `pnpm check` 并提交版本变更后，只能从仓库根目录使用 pnpm 发布：
 
 ```sh
 pnpm release:publish

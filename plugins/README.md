@@ -29,6 +29,8 @@
 
 | [memory-wiki-bridge](memory-wiki-bridge) | `@dsh-enhanced/memory-wiki-bridge` | 实验性 | 只通过公开 service 生成带稳定 provenance 的 Memory↔Wiki 审批提案。 |
 
+| [assistant-evolution](assistant-evolution) | `@dsh-enhanced/assistant-evolution` | 实验性 | 审批门控的行为自演化：观察结果、按证据提出行为规则、经 owner 批准后作为顾问性上下文注入；不能自我批准、不能扩权、不能原地改写。 |
+
 | [assistant-health](assistant-health) | `@dsh-enhanced/assistant-health` | 实验性 | 聚合 provider 自有 health seam 的脱敏 liveness/readiness/详细报告。 |
 
 <!-- plugin-catalog:end -->
