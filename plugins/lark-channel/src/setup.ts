@@ -137,6 +137,7 @@ export function createLarkRegistrationOptions(input: LarkRegistrationOptionsInpu
         'im:message.p2p_msg:readonly',
         'im:message.reactions:write_only',
         'im:message:send_as_bot',
+        'im:resource',
       ] },
       events: { items: { tenant: ['im.message.receive_v1'] } },
       callbacks: { items: ['card.action.trigger'] },
@@ -528,7 +529,7 @@ export async function runLarkSetup(argv: readonly string[] = process.argv.slice(
     if (appId === undefined || !/^cli_[0-9a-fA-F]{16}$/u.test(appId)) {
       throw new Error('lark-channel setup: invalid App ID')
     }
-    process.stdout.write(`请确认已有应用已开启机器人、im:message 权限、长连接事件 im.message.receive_v1，且版本已发布。\n`
+    process.stdout.write(`请确认已有应用已开启机器人、im:message 与 im:resource 权限、长连接事件 im.message.receive_v1，且版本已发布。\n`
       + `控制台：https://open.feishu.cn/app\n`)
     storeSecret(credentialProvider, keychainService, args.account, credentialPath)
   }
@@ -541,6 +542,7 @@ export async function runLarkSetup(argv: readonly string[] = process.argv.slice(
     appSecret,
     domain: resolvedDomain,
     handshakeTimeoutMs: 15_000,
+    imageDownloadTimeoutMs: 30_000,
   })
   const owner = await discoverOwner(transport, phrase, args.account, args.tenant, args.timeoutMs)
   const updatedPatch = configureLarkProfilePatch({

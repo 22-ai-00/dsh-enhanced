@@ -8,11 +8,36 @@ import {
   type ModelSelection,
 } from '@deepseek-ai/dsh-agent'
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
-import { createUserMessage, ReasoningEffortId, type LlmRuntime } from '@deepseek-ai/dsh-llm'
-import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
-import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import {
+  contentHasImage,
+  createUserMessage,
+  ReasoningEffortId,
+  type ContentBlock,
+  type LlmRuntime,
+} from '@deepseek-ai/dsh-llm'
+import type { PermissionPresetService } from '@deepseek-ai/dsh-permission-presets'
+import { effectiveSandboxMode, setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
+import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import {
+  effectiveApprovalPolicy,
+  setApprovalPolicy,
+  type ApprovalService,
+} from '@deepseek-ai/dsh-user-approval'
+import {
+  approvalReviewerOf,
+  setApprovalReviewer,
+  type ApprovalReviewer,
+  type AssistantPolicyService,
+} from '@dsh-enhanced/assistant-policy'
 import { resolveLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
-import type { InboundProcessResult } from './coordinator.js'
+import type {
+  InboundPrepareContext,
+  InboundPrepareResult,
+  InboundProcessResult,
+  MarkInboundDispatching,
+  PreparedInboundMessage,
+} from './coordinator.js'
+import type { InboundImageMaterializer } from './inbound-images.js'
 import type { DeliveryInboundRuntime } from './service.js'
 import { DeliveryStoreError } from './store.js'
 import type {
@@ -47,6 +72,15 @@ interface DshDeliveryRuntimeOptions {
   toolCapableProviders: ReadonlySet<string>
   maxOutputTokens: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
+  imageMaterializer: Pick<InboundImageMaterializer, 'materialize'>
+  isInboundAuthorized(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): boolean
+  isPermissionController(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): boolean
   beginModelCommand(conversation: ConversationRef): number
   commitModelCommand(input: {
     conversation: ConversationRef
@@ -74,6 +108,8 @@ const MAX_CATALOG_MODELS = 50
 const MAX_PROGRESS_TODOS = 20
 const MAX_PROGRESS_TEXT_CHARS = 240
 
+type InboundAuthorizationState = 'authorized' | 'revoked' | 'check-failed'
+
 class DurableAgentIdentityError extends Error {}
 
 class ToolCapabilityAdmissionError extends Error {
@@ -84,6 +120,16 @@ class ToolCapabilityAdmissionError extends Error {
   ) {
     super(`assistant-delivery: ${provider}/${model} cannot execute the tools mounted by preset ${presetId}`)
     this.name = 'ToolCapabilityAdmissionError'
+  }
+}
+
+class ImageCapabilityAdmissionError extends Error {
+  constructor(
+    readonly provider: string,
+    readonly model: string,
+  ) {
+    super(`assistant-delivery: ${provider}/${model} does not declare image input support`)
+    this.name = 'ImageCapabilityAdmissionError'
   }
 }
 
@@ -110,6 +156,26 @@ function toolCapabilityReply(error: ToolCapabilityAdmissionError): ModelCommandR
     text: `当前模型 ${error.provider}/${error.model} 无法执行 preset “${error.presetId}” 暴露的工具。`
       + '请发送 /model 切换到支持工具调用的 provider，或改用不挂载工具的 preset。',
     format: 'plain',
+  }
+}
+
+function imageCapabilityReply(error: ImageCapabilityAdmissionError): ModelCommandReply {
+  return {
+    text: `当前模型 ${error.provider}/${error.model} 不支持图片输入。`
+      + '请发送 /model 切换到明确支持图片的模型后重新发送图片。',
+    format: 'plain',
+  }
+}
+
+async function requireImageCapability(
+  llm: LlmRuntime,
+  provider: string,
+  model: string,
+  signal: AbortSignal,
+): Promise<void> {
+  const info = await llm.resolveModelInfo(provider, model, signal)
+  if (info.inputModalities?.includes('image') !== true) {
+    throw new ImageCapabilityAdmissionError(provider, model)
   }
 }
 
@@ -182,6 +248,129 @@ function modelCommand(envelope: Readonly<InboundEnvelope>): string | undefined {
   if (envelope.kind !== 'command') return undefined
   const line = envelope.text.trim()
   return line === '/model' || line.startsWith('/model ') ? line.slice('/model'.length).trim() : undefined
+}
+
+function permissionCommand(envelope: Readonly<InboundEnvelope>): string | undefined {
+  if (envelope.kind !== 'command') return undefined
+  const line = envelope.text.trim()
+  for (const name of ['/permissions', '/permission']) {
+    if (line === name || line.startsWith(`${name} `)) return line.slice(name.length).trim()
+  }
+  return undefined
+}
+
+type PermissionCommandAction =
+  | { kind: 'show' }
+  | { kind: 'warn-full' }
+  | { kind: 'switch'; level: 'ask' | 'auto' | 'full' }
+  | { kind: 'invalid' }
+
+function parsePermissionCommand(argument: string): PermissionCommandAction {
+  const tokens = argument === '' ? [] : argument.split(/\s+/u)
+  if (tokens.length === 0) return { kind: 'show' }
+  if (tokens.length === 1 && tokens[0] === 'ask') return { kind: 'switch', level: 'ask' }
+  if (tokens.length === 1 && tokens[0] === 'auto') return { kind: 'switch', level: 'auto' }
+  if (tokens.length === 1 && tokens[0] === 'full') return { kind: 'warn-full' }
+  if (tokens.length === 2 && tokens[0] === 'full' && tokens[1] === 'confirm') {
+    return { kind: 'switch', level: 'full' }
+  }
+  return { kind: 'invalid' }
+}
+
+type PermissionPresets = Pick<PermissionPresetService, 'current' | 'names' | 'resolve' | 'set'>
+
+interface PermissionPresetTargets {
+  workspace: string
+  full: string
+}
+
+function permissionPresetTargets(service: PermissionPresets): Partial<PermissionPresetTargets> {
+  let workspace: string | undefined
+  let full: string | undefined
+  for (const name of service.names) {
+    const spec = service.resolve(name)
+    if (workspace === undefined && spec.sandbox === 'workspace-write' && spec.approval === 'ask') workspace = name
+    if (full === undefined && spec.sandbox === 'danger-full-access' && spec.approval === 'never') full = name
+  }
+  return {
+    ...(workspace === undefined ? {} : { workspace }),
+    ...(full === undefined ? {} : { full }),
+  }
+}
+
+function missingPermissionBundle(targets: Partial<PermissionPresetTargets>): string | undefined {
+  if (targets.workspace === undefined) return 'workspace-write + ask'
+  return targets.full === undefined ? 'danger-full-access + never' : undefined
+}
+
+function currentPermissionLevel(
+  service: PermissionPresets,
+  targets: PermissionPresetTargets,
+  events: readonly SessionEvent[],
+): 'ask' | 'auto' | 'full' | 'custom' {
+  const current = service.current(events)
+  if (current === targets.full) {
+    return effectiveSandboxMode(events) === 'danger-full-access'
+      && effectiveApprovalPolicy(events) === 'never'
+      && approvalReviewerOf(events) === 'none'
+      ? 'full'
+      : 'custom'
+  }
+  if (current !== targets.workspace) return 'custom'
+  if (approvalReviewerOf(events) !== 'auto-review') return 'ask'
+  return effectiveSandboxMode(events) === 'workspace-write'
+    && effectiveApprovalPolicy(events) === 'ask'
+    ? 'auto'
+    : 'custom'
+}
+
+function ensureSandboxMode(
+  session: Session,
+  mode: Parameters<typeof setSandboxMode>[1],
+): void {
+  if (effectiveSandboxMode(session.events) !== mode) setSandboxMode(session, mode)
+}
+
+function ensureApprovalPolicy(
+  session: Session,
+  policy: Parameters<typeof setApprovalPolicy>[1],
+): void {
+  if (effectiveApprovalPolicy(session.events) !== policy) setApprovalPolicy(session, policy)
+}
+
+function permissionLevelLabel(level: 'ask' | 'auto' | 'full' | 'custom'): string {
+  if (level === 'ask') return '请求批准（ask）'
+  if (level === 'auto') return '帮我批准（auto）'
+  if (level === 'full') return '完全访问权限（full）'
+  return '自定义安全组合（custom）'
+}
+
+function permissionOverview(level: 'ask' | 'auto' | 'full' | 'custom'): ModelCommandReply {
+  return {
+    text: [
+      `当前权限：${permissionLevelLabel(level)}`,
+      '',
+      '三档说明：',
+      '- 请求批准（ask）：仅可写工作区；需要授权时由你确认。',
+      '- 帮我批准（auto）：仅可写工作区；由自动审核器处理授权请求。',
+      '- 完全访问权限（full）：🟠 Host sandbox 可访问网络及任意文件，且不再请求批准；管理员 Policy 硬门仍生效。',
+      '',
+      '切换：/permission ask、/permission auto、/permission full confirm',
+    ].join('\n'),
+    format: 'plain',
+  }
+}
+
+const PERMISSION_USAGE: ModelCommandReply = {
+  text: '用法：/permission、/permission ask、/permission auto、/permission full confirm',
+  format: 'plain',
+}
+
+const PERMISSION_FULL_WARNING: ModelCommandReply = {
+  text: '🟠 危险：full 会启用 danger-full-access，可访问网络及任意文件，并关闭批准请求。'
+    + '管理员 Policy 的显式拒绝、紧急停止、身份和预算硬门仍生效。'
+    + '如确需切换，请明确发送 /permission full confirm。当前权限未改变。',
+  format: 'plain',
 }
 
 function routeLabel(route: ModelRouteRef): string {
@@ -440,6 +629,8 @@ function finalAssistant(
 }
 
 export class DshDeliveryRuntime implements DeliveryInboundRuntime {
+  readonly dispatchControl = 'explicit' as const
+
   constructor(
     private readonly ctx: Context,
     private readonly policy: AssistantPolicyService,
@@ -464,6 +655,218 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     agentCtx.effect(() => unbind, 'assistant-delivery.external-initiator')
     installModelSelection(agentCtx, { current: selected, assembled: undefined })
     await agentPresets?.mount(agentCtx, presetId)
+  }
+
+  private async runPermissionCommand(
+    argument: string,
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    markDispatching: MarkInboundDispatching,
+  ): Promise<InboundProcessResult> {
+    let dispatchMarked = false
+    const markPermissionDispatch = (): void => {
+      signal.throwIfAborted()
+      if (dispatchMarked) return
+      markDispatching()
+      dispatchMarked = true
+    }
+    const checkController = (): InboundAuthorizationState => {
+      try {
+        return this.options.isPermissionController(binding, envelope) ? 'authorized' : 'revoked'
+      } catch {
+        return 'check-failed'
+      }
+    }
+    const authorizationFailure = (
+      state: Exclude<InboundAuthorizationState, 'authorized'>,
+      committed = false,
+    ): InboundProcessResult => state === 'revoked'
+      ? { outcome: 'not-processed', failureCode: 'permission-authorization-revoked', retryable: false }
+      : { outcome: 'not-processed', failureCode: 'permission-authorization-check-failed', retryable: !committed }
+    const reply = (input: ModelCommandReply, committed = false): InboundProcessResult => {
+      const authorization = checkController()
+      if (authorization !== 'authorized') return authorizationFailure(authorization, committed)
+      markPermissionDispatch()
+      signal.throwIfAborted()
+      try {
+        this.options.replyCommand(binding, envelope.eventId, input)
+        return { outcome: 'processed' }
+      } catch {
+        return { outcome: 'not-processed', failureCode: 'permission-command-reply-failed', retryable: !committed }
+      }
+    }
+
+    const initialAuthorization = checkController()
+    if (initialAuthorization !== 'authorized') return authorizationFailure(initialAuthorization)
+    const action = parsePermissionCommand(argument)
+    if (action.kind === 'invalid') return reply(PERMISSION_USAGE)
+    if (action.kind === 'warn-full') return reply(PERMISSION_FULL_WARNING)
+
+    const agents = this.ctx.get('agents')
+    const sessions = this.ctx.get('sessions')
+    const permissionPresets = this.ctx.get('permissionPresets') as PermissionPresets | undefined
+    const approval = this.ctx.get('approval') as ApprovalService | undefined
+    if (agents === undefined || sessions === undefined || permissionPresets === undefined || approval === undefined) {
+      return reply({ text: '权限服务不可用，当前权限未改变。', format: 'plain' })
+    }
+
+    let partialTargets: Partial<PermissionPresetTargets>
+    try {
+      partialTargets = permissionPresetTargets(permissionPresets)
+    } catch {
+      return reply({ text: '权限服务不可用，无法安全解析权限组合；当前权限未改变。', format: 'plain' })
+    }
+    const afterResolutionAuthorization = checkController()
+    if (afterResolutionAuthorization !== 'authorized') return authorizationFailure(afterResolutionAuthorization)
+    const missingBundle = missingPermissionBundle(partialTargets)
+    if (missingBundle !== undefined) {
+      return reply({ text: `权限配置缺少 ${missingBundle} 组合，已拒绝切换。`, format: 'plain' })
+    }
+    const targets = partialTargets as PermissionPresetTargets
+
+    const selected = agentSelection(toModelRoute(this.options.getModelSelection(envelope.conversation)
+      ?? { provider: this.options.provider, model: this.options.model }))
+    let handle: AgentHandle | undefined
+    let mutationAttempted = false
+    let flushAttempted = false
+    let compensateToAsk: (() => Promise<void>) | undefined
+    try {
+      const agentPresets = this.options.getAgentPresets()
+      const presetId = agentPresets === undefined
+        ? binding.agentPreset
+        : (await agentPresets.resolve(binding.agentPreset)).id
+      signal.throwIfAborted()
+      await requireWorkspace(binding.workspace)
+      signal.throwIfAborted()
+      handle = await agents.resume({
+        resumeSessionId: SessionId(binding.sessionId),
+        signal,
+        agentOptions: {
+          provider: selected.provider,
+          model: selected.model,
+          maxTokens: this.options.maxOutputTokens,
+        },
+        setup: async agentCtx => {
+          await this.setupAgent(agentCtx, binding.workspace, presetId, selected, agentPresets)
+        },
+      })
+      signal.throwIfAborted()
+      const afterResumeAuthorization = checkController()
+      if (afterResumeAuthorization !== 'authorized') return authorizationFailure(afterResumeAuthorization)
+
+      const agent = handle.agent
+      const session = agent.session
+      compensateToAsk = async (): Promise<void> => {
+        // Try the bundle first for its audit marker, then independently force
+        // both execution knobs through their canonical writers. This remains
+        // fail-closed even when a preset observer throws partway through.
+        // Every operation is best-effort because the original mutation has
+        // already become ambiguous.
+        try {
+          permissionPresets.set(session, targets.workspace)
+        } catch {}
+        try {
+          ensureSandboxMode(session, 'workspace-write')
+        } catch {}
+        try {
+          ensureApprovalPolicy(session, 'ask')
+        } catch {}
+        try {
+          setApprovalReviewer(session, 'user')
+        } catch {}
+        try {
+          await sessions.flush(session)
+        } catch {}
+      }
+      if (action.kind === 'show') {
+        return reply(permissionOverview(currentPermissionLevel(permissionPresets, targets, session.events)))
+      }
+
+      const beforeMutationAuthorization = checkController()
+      if (beforeMutationAuthorization !== 'authorized') return authorizationFailure(beforeMutationAuthorization)
+      const beforeLevel = currentPermissionLevel(permissionPresets, targets, session.events)
+      markPermissionDispatch()
+      signal.throwIfAborted()
+      const fencedAuthorization = checkController()
+      if (fencedAuthorization !== 'authorized') return authorizationFailure(fencedAuthorization)
+      mutationAttempted = true
+      if (action.level === 'full') {
+        // Never expose a durable danger-full-access + ask window: close both
+        // reviewer and approval first, then widen the sandbox through the preset.
+        setApprovalReviewer(session, 'none')
+        ensureApprovalPolicy(session, 'never')
+        permissionPresets.set(session, targets.full)
+        // Preset setters intentionally omit overrides that equal deployment
+        // defaults. Persist the exact execution facts anyway so full access
+        // cannot depend on an implicit default or a future default change.
+        ensureSandboxMode(session, 'danger-full-access')
+      } else {
+        // Confinement comes first when leaving full access. The preset setter
+        // writes sandbox before approval; only then may the reviewer be enabled.
+        permissionPresets.set(session, targets.workspace)
+        // Legacy/seeded sessions may have no explicit knob events even when
+        // their effective defaults match this preset. Materialize both facts
+        // before enabling either reviewer so auto is a coherent, replayable
+        // ask + workspace-write state rather than an inference from defaults.
+        ensureSandboxMode(session, 'workspace-write')
+        ensureApprovalPolicy(session, 'ask')
+        const reviewer: ApprovalReviewer = action.level === 'auto' ? 'auto-review' : 'user'
+        setApprovalReviewer(session, reviewer)
+      }
+      flushAttempted = true
+      const flushed = await sessions.flush(session)
+      signal.throwIfAborted()
+      if (!flushed) {
+        await compensateToAsk()
+        signal.throwIfAborted()
+        return {
+          outcome: 'not-processed',
+          failureCode: 'permission-command-flush-failed',
+          retryable: false,
+        }
+      }
+      const finalAuthorization = checkController()
+      if (finalAuthorization !== 'authorized') {
+        await compensateToAsk()
+        signal.throwIfAborted()
+        return authorizationFailure(finalAuthorization, true)
+      }
+      const afterLevel = currentPermissionLevel(permissionPresets, targets, session.events)
+      if (afterLevel !== action.level) {
+        await compensateToAsk()
+        signal.throwIfAborted()
+        return { outcome: 'not-processed', failureCode: 'permission-command-mutation-failed', retryable: false }
+      }
+      return reply({
+        text: beforeLevel === afterLevel
+          ? `当前已是 ${permissionLevelLabel(afterLevel)}。`
+          : `已切换到 ${permissionLevelLabel(afterLevel)}。`,
+        format: 'plain',
+      }, true)
+    } catch (error) {
+      if (mutationAttempted) {
+        await compensateToAsk?.()
+        if (signal.aborted) throw signal.reason
+        return {
+          outcome: 'not-processed',
+          failureCode: flushAttempted ? 'permission-command-flush-failed' : 'permission-command-mutation-failed',
+          retryable: false,
+        }
+      }
+      if (signal.aborted) throw error
+      const finalAuthorization = checkController()
+      if (finalAuthorization !== 'authorized') return authorizationFailure(finalAuthorization)
+      if (causedByDurableIdentity(error)) {
+        return { outcome: 'not-processed', failureCode: 'permission-session-mismatch', retryable: false }
+      }
+      return reply({
+        text: '权限命令未完成；当前权限保持或收紧，未确认任何权限提升。',
+        format: 'plain',
+      })
+    } finally {
+      await handle?.dispose()
+    }
   }
 
   async createSession(input: {
@@ -502,12 +905,72 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     }
   }
 
+  async prepare(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    context: Readonly<InboundPrepareContext>,
+  ): Promise<InboundPrepareResult> {
+    const imageCount = (envelope.attachments ?? [])
+      .filter(attachment => attachment.resourceType === 'image').length
+    if (envelope.kind === 'command') {
+      return { outcome: 'prepared', message: { imageAttachments: [] } }
+    }
+    const selected = toModelRoute(this.options.getModelSelection(envelope.conversation)
+      ?? { provider: this.options.provider, model: this.options.model })
+    if (imageCount === 0) {
+      return { outcome: 'prepared', message: { imageAttachments: [], modelRoute: selected } }
+    }
+    if (!this.options.isInboundAuthorized(binding, envelope)) {
+      return { outcome: 'not-processed', failureCode: 'image-authorization-revoked', retryable: false }
+    }
+
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) {
+      return { outcome: 'not-processed', failureCode: 'model-directory-unavailable', retryable: true }
+    }
+    try {
+      await requireImageCapability(llm, selected.provider, selected.model, signal)
+    } catch (error) {
+      if (signal.aborted) throw error
+      if (!(error instanceof ImageCapabilityAdmissionError)) {
+        return { outcome: 'not-processed', failureCode: 'image-model-unavailable', retryable: true }
+      }
+      try {
+        this.options.replyCommand(binding, envelope.eventId, imageCapabilityReply(error))
+      } catch {
+        return { outcome: 'not-processed', failureCode: 'image-capability-notice-failed', retryable: true }
+      }
+      return { outcome: 'not-processed', failureCode: 'model-image-input-unsupported', retryable: false }
+    }
+
+    const result = await this.options.imageMaterializer.materialize({
+      ...context,
+      binding,
+      envelope,
+      signal,
+    })
+    return result.outcome === 'ready'
+      ? { outcome: 'prepared', message: { imageAttachments: result.imageAttachments, modelRoute: selected } }
+      : { outcome: 'not-processed', failureCode: result.failureCode, retryable: result.retryable,
+          ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }) }
+  }
+
   async process(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
     signal: AbortSignal,
+    prepared?: Readonly<PreparedInboundMessage>,
+    markDispatching?: MarkInboundDispatching,
   ): Promise<InboundProcessResult> {
     if (envelope.kind === 'command' && envelope.text.trim() === '/new') return { outcome: 'processed' }
+    const permissions = permissionCommand(envelope)
+    if (permissions !== undefined) {
+      if (markDispatching === undefined) {
+        return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+      }
+      return await this.runPermissionCommand(permissions, binding, envelope, signal, markDispatching)
+    }
     const command = modelCommand(envelope)
     if (command !== undefined) {
       const llm = this.ctx.get('llm')
@@ -536,13 +999,50 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         return modelCommandFailure(error)
       }
     }
+    const imageDescriptorCount = (envelope.attachments ?? [])
+      .filter(attachment => attachment.resourceType === 'image').length
+    const imageAttachments = prepared?.imageAttachments ?? []
+    const checkAuthorization = (): InboundAuthorizationState => {
+      try {
+        return this.options.isInboundAuthorized(binding, envelope) ? 'authorized' : 'revoked'
+      } catch {
+        return 'check-failed'
+      }
+    }
+    const preDispatchAuthorizationFailure = (): InboundProcessResult | undefined => {
+      const authorization = checkAuthorization()
+      if (authorization === 'authorized') return undefined
+      return authorization === 'revoked'
+        ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
+        : { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: true }
+    }
+    if (imageAttachments.length !== imageDescriptorCount
+      || (imageDescriptorCount > 0 && prepared?.modelRoute === undefined)) {
+      return { outcome: 'not-processed', failureCode: 'image-preparation-missing', retryable: false }
+    }
+    if (imageDescriptorCount > 0) {
+      const authorizationFailure = preDispatchAuthorizationFailure()
+      if (authorizationFailure !== undefined) return authorizationFailure
+    }
+    const content: ContentBlock[] = [
+      ...(envelope.text === '' ? [] : [{ type: 'text' as const, text: envelope.text }]),
+      ...imageAttachments.map(attachment => ({ type: 'image' as const, attachment })),
+    ]
+    if (content.length === 0) {
+      return { outcome: 'not-processed', failureCode: 'inbound-content-empty', retryable: false }
+    }
+    if (markDispatching === undefined) {
+      return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+    }
     const agents = this.ctx.get('agents')
     const sessions = this.ctx.get('sessions')
     if (agents === undefined || sessions === undefined) {
       return { outcome: 'not-processed', failureCode: 'agent-runtime-unavailable', retryable: true }
     }
-    const selected = agentSelection(toModelRoute(this.options.getModelSelection(envelope.conversation)
-      ?? { provider: this.options.provider, model: this.options.model }))
+    const selectedRoute = toModelRoute(prepared?.modelRoute
+      ?? this.options.getModelSelection(envelope.conversation)
+      ?? { provider: this.options.provider, model: this.options.model })
+    const selected = agentSelection(selectedRoute)
     let handle: AgentHandle | undefined
     let dispatched = false
     let removeAbort: (() => void) | undefined
@@ -550,7 +1050,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let progressQueue = Promise.resolve()
     const publishProgress = (update: DeliveryProgressUpdate): void => {
       progressQueue = progressQueue
-        .then(() => this.options.progress(binding, envelope.eventId, update))
+        .then(async () => {
+          if (checkAuthorization() !== 'authorized') return
+          await this.options.progress(binding, envelope.eventId, update)
+        })
         // Progress is presentation-only: its provider failure must never retry an Agent turn.
         .catch(() => {})
     }
@@ -577,6 +1080,16 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           )
         } })
       const agent = handle.agent
+      const llm = this.ctx.get('llm')
+      if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
+      if (agent.session.deriveMessages().some(message => contentHasImage(message.content))
+        || imageAttachments.length > 0) {
+        await requireImageCapability(llm, selected.provider, selected.model, signal)
+      }
+      if (imageDescriptorCount > 0) {
+        const authorizationFailure = preDispatchAuthorizationFailure()
+        if (authorizationFailure !== undefined) return authorizationFailure
+      }
       const from = agent.session.events.length
       removeProgress = this.ctx.on('session/event', (session, event) => {
         if (session !== agent.session) return
@@ -587,14 +1100,26 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       const abort = () => agent.cancel({ kind: 'hook', reason: 'assistant-delivery-signal' })
       signal.addEventListener('abort', abort, { once: true })
       removeAbort = () => signal.removeEventListener('abort', abort)
-      agent.followup(createUserMessage({ content: [{ type: 'text', text: envelope.text }], source: {
+      const authorizationFailure = preDispatchAuthorizationFailure()
+      if (authorizationFailure !== undefined) return authorizationFailure
+      markDispatching()
+      // Once the durable marker exists, even a synchronous followup failure is ambiguous:
+      // implementations may enqueue before throwing, so no retry is safe.
+      dispatched = true
+      agent.followup(createUserMessage({ content, source: {
         kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId,
         trust: 'untrusted',
       } }))
-      dispatched = true
       await agent.whenIdle()
       const output = finalAssistant(agent.session.events, from)
       await sessions.flush(agent.session)
+      const finalAuthorization = checkAuthorization()
+      if (finalAuthorization !== 'authorized') {
+        await progressQueue
+        return finalAuthorization === 'revoked'
+          ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
+          : { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: false }
+      }
       if (!output.completed) {
         publishProgress({ kind: 'failed', ...(output.failureCode === undefined ? {} : { code: output.failureCode }) })
         await progressQueue
@@ -616,6 +1141,14 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       if (causedByDurableIdentity(error)) {
         return { outcome: 'not-processed', failureCode: 'agent-identity-mismatch', retryable: false }
+      }
+      if (error instanceof ImageCapabilityAdmissionError) {
+        try {
+          this.options.replyCommand(binding, envelope.eventId, imageCapabilityReply(error))
+          return { outcome: 'processed' }
+        } catch {
+          return { outcome: 'not-processed', failureCode: 'image-capability-notice-failed', retryable: true }
+        }
       }
       if (error instanceof ToolCapabilityAdmissionError) {
         try {

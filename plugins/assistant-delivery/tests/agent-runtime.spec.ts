@@ -4,6 +4,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import { AttachmentId, type AttachmentStore, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import type { PresetSpec } from '@deepseek-ai/dsh-permission-presets'
 import {
   LlmAdapter,
   ReasoningEffortId,
@@ -13,12 +15,20 @@ import {
   type LlmResolvedModelInfo,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
-import { SessionPreparation, type SessionEvent, type SessionHeader, type SessionId } from '@deepseek-ai/dsh-session'
+import {
+  SessionPreparation,
+  type Session,
+  type SessionEvent,
+  type SessionHeader,
+  type SessionId,
+} from '@deepseek-ai/dsh-session'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { effectiveApprovalPolicy, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
+import { approvalReviewerOf, AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import {
   registerLlmRouteCapability,
 } from '@dsh-enhanced/llm-route-capabilities'
+import { createHash } from 'node:crypto'
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,7 +36,7 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src/agent-runtime.ts'
 import { AssistantDeliveryService } from '../src/service.ts'
 import type {
-  DeliveryAdapter, DeliveryProgressIntent, InboundEnvelope, OutboundFormat, OutboundIntent,
+  ConversationBinding, DeliveryAdapter, DeliveryProgressIntent, InboundEnvelope, OutboundFormat, OutboundIntent,
 } from '../src/types.ts'
 
 const roots: string[] = []
@@ -57,12 +67,90 @@ afterEach(async () => {
 
 interface SavedSession { header: SessionHeader; events: readonly SessionEvent[] }
 
+interface PermissionHarnessOptions {
+  providePresets?: boolean
+  provideApproval?: boolean
+  presets?: Record<string, PresetSpec>
+  onResolve?(): void
+  leaseMs?: number
+}
+
+const testPermissionPresets = {
+  'guarded-dynamic-id': {
+    sandbox: 'workspace-write',
+    approval: 'ask',
+    name: 'Guarded workspace',
+  },
+  'unlocked-dynamic-id': {
+    sandbox: 'danger-full-access',
+    approval: 'never',
+    name: 'Unrestricted host',
+  },
+} as const satisfies Record<string, PresetSpec>
+
+function lastPermissionPreset(events: readonly SessionEvent[]): string | undefined {
+  return events.findLast(event => event.type === 'permission/preset')?.data.preset
+}
+
+function sandboxModeOf(event: SessionEvent): PresetSpec['sandbox'] | undefined {
+  const candidate = event as unknown as { type: string; data?: { mode?: unknown } }
+  return candidate.type === 'sandbox/mode'
+    && (candidate.data?.mode === 'workspace-write' || candidate.data?.mode === 'danger-full-access')
+    ? candidate.data.mode
+    : undefined
+}
+
+function lastSandboxMode(events: readonly SessionEvent[]): PresetSpec['sandbox'] | undefined {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const mode = sandboxModeOf(events[index]!)
+    if (mode !== undefined) return mode
+  }
+  return undefined
+}
+
+function permissionPresetFixture(options: PermissionHarnessOptions) {
+  const presets: Readonly<Record<string, PresetSpec>> = options.presets ?? testPermissionPresets
+  const names = Object.keys(presets)
+  const resolve = vi.fn((name: string): PresetSpec => {
+    options.onResolve?.()
+    const preset = presets[name]
+    if (preset === undefined) throw new Error(`unknown test permission preset: ${name}`)
+    return preset
+  })
+  const current = (events: readonly SessionEvent[]): string => {
+    const sandbox = lastSandboxMode(events) ?? 'workspace-write'
+    const approval = effectiveApprovalPolicy(events) ?? 'ask'
+    const selected = lastPermissionPreset(events)
+    if (selected !== undefined) {
+      const preset = presets[selected]
+      if (preset?.sandbox === sandbox && preset.approval === approval) return selected
+    }
+    return names.find(name => presets[name]?.sandbox === sandbox && presets[name]?.approval === approval) ?? 'custom'
+  }
+  const set = vi.fn((session: Session, name: string): void => {
+    const preset = resolve(name)
+    if (current(session.events) !== name) session.append('permission/preset', { preset: name })
+    if ((lastSandboxMode(session.events) ?? 'workspace-write') !== preset.sandbox) {
+      const appendSandbox = session.append as unknown as (
+        type: 'sandbox/mode',
+        data: { mode: PresetSpec['sandbox'] },
+      ) => void
+      appendSandbox.call(session, 'sandbox/mode', { mode: preset.sandbox })
+    }
+    if ((effectiveApprovalPolicy(session.events) ?? 'ask') !== preset.approval) {
+      setApprovalPolicy(session, preset.approval)
+    }
+  })
+  return { names, resolve, current, set }
+}
+
 class ReplyAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
 
   constructor(
     private readonly providerName = 'Mock provider',
     private readonly models: readonly string[] = ['delivery-model'],
+    private readonly inputModalities: NonNullable<LlmModelInfo['inputModalities']> = ['text'],
   ) {
     super()
   }
@@ -72,12 +160,12 @@ class ReplyAdapter extends LlmAdapter {
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
-    return this.models.map(model => ({ provider, id: model, name: model }))
+    return this.models.map(model => ({ provider, id: model, name: model, inputModalities: this.inputModalities }))
   }
 
   override async resolveModel(provider: string, model: string): Promise<LlmResolvedModelInfo> {
     const effortIds = model === 'fast' ? ['low'] : model === 'precise' ? ['high'] : ['low', 'high']
-    return { provider, id: model, name: model, reasoning: {
+    return { provider, id: model, name: model, inputModalities: this.inputModalities, reasoning: {
       efforts: effortIds.map(id => ({ id: ReasoningEffortId(id), name: id === 'low' ? 'Low' : 'High' })),
       defaultEffort: ReasoningEffortId(effortIds[0]!),
     } }
@@ -96,6 +184,18 @@ class ReplyAdapter extends LlmAdapter {
 
 const principal = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', user: 'ou_owner' }
 const conversation = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', kind: 'dm' as const, chat: 'oc_owner' }
+const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+
+function imageRef(id = 'delivery-image'): ImageAttachmentRef {
+  return {
+    attachmentId: AttachmentId(`memory:${id}`),
+    mediaType: 'image/png',
+    bytes: png.byteLength,
+    width: 1,
+    height: 1,
+    name: 'photo.png',
+  }
+}
 
 function message(eventId: string, text: string, kind: 'command' | 'text' = 'text'): InboundEnvelope {
   return { channel: 'lark', account: 'bot-1', eventId, occurredAt: Date.now(), principal, conversation, kind, text }
@@ -112,6 +212,12 @@ async function runtimeHarness(
   provideAgentPresets = true,
   toolCapableProviders: readonly string[] = ['mock', 'alternate'],
   presetToolMode: 'probe' | 'empty' = 'probe',
+  image?: {
+    attachments?: AttachmentStore
+    inputModalities?: LlmModelInfo['inputModalities']
+    readInboundImage: NonNullable<DeliveryAdapter['readInboundImage']>
+  },
+  permissions?: PermissionHarnessOptions,
 ) {
   const ctx = new Context()
   if (presetRoot !== undefined) await ctx.plugin(Loader)
@@ -166,10 +272,28 @@ async function runtimeHarness(
     { id: 'agent-reply', effect: 'allow', subject: { kind: 'agent', id: agentPreset, workspace },
       actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
   ] })
+  const permissionPresets = permissions === undefined || permissions.providePresets === false
+    ? undefined
+    : permissionPresetFixture(permissions)
+  if (permissionPresets !== undefined) {
+    ctx.provide('permissionPresets' as never, permissionPresets as never)
+  }
+  if (permissions !== undefined && permissions.provideApproval !== false) {
+    ctx.provide('approval' as never, {
+      config: { policy: 'ask' },
+      setPolicy(agent: Agent, policy: 'ask' | 'never') {
+        if ((effectiveApprovalPolicy(agent.session.events) ?? 'ask') !== policy) {
+          setApprovalPolicy(agent.session, policy)
+        }
+      },
+    } as never)
+  }
+  if (image?.attachments !== undefined) ctx.provide('attachments', image.attachments)
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
     schedulerEnabled: false, defaultWorkspace: workspace, defaultAgentPreset: agentPreset, agentProvider: defaultRoute.provider,
-    agentModel: defaultRoute.model, toolCapableProviders: [...toolCapableProviders] })
-  const llm = new ReplyAdapter()
+    agentModel: defaultRoute.model, toolCapableProviders: [...toolCapableProviders],
+    ...(permissions?.leaseMs === undefined ? {} : { leaseMs: permissions.leaseMs }) })
+  const llm = new ReplyAdapter('Mock provider', ['delivery-model'], image?.inputModalities ?? ['text'])
   ctx.llm.registerAdapter(['mock'], llm)
   const alternate = new ReplyAdapter('Alternate provider', ['fast', 'precise'])
   ctx.llm.registerAdapter(['alternate'], alternate)
@@ -177,11 +301,19 @@ async function runtimeHarness(
   const sends: OutboundIntent[] = []
   const progresses: DeliveryProgressIntent[] = []
   const channel: DeliveryAdapter = { channel: 'lark', account: 'bot-1',
-    capabilities: { reconcileUnknownSend: false, receipts: [], formats: channelFormats }, start: async () => {},
+    capabilities: { reconcileUnknownSend: false, receipts: [], formats: channelFormats,
+      ...(image === undefined ? {} : { inboundImages: true }) }, start: async () => {},
+    ...(image === undefined ? {} : { readInboundImage: image.readInboundImage }),
     progress: async intent => { progresses.push(intent) },
-    send: async intent => { sends.push(intent); return { outcome: 'accepted', providerMessageId: `om_${sends.length}` } } }
+    send: async intent => {
+      sends.push(intent)
+      return {
+        outcome: 'accepted',
+        providerMessageId: `om_${createHash('sha256').update(intent.idempotencyKey).digest('hex').slice(0, 32)}`,
+      }
+    } }
   await ctx.assistantDelivery.registerAdapter(channel)
-  return { ctx, llm, alternate, progresses, sends, service: ctx.assistantDelivery }
+  return { ctx, llm, alternate, permissionPresets, progresses, sends, service: ctx.assistantDelivery }
 }
 
 async function drive(service: AssistantDeliveryService): Promise<void> {
@@ -189,6 +321,77 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
   await service.whenIdle()
   await service.tick()
   await service.whenIdle()
+}
+
+function runtimeStore(service: AssistantDeliveryService): {
+  getActiveBinding(conversation: Readonly<ConversationBinding['conversation']>): ConversationBinding | undefined
+  getPrincipal(principal: Readonly<ConversationBinding['principal']>): { id: string; version: number } | undefined
+  getInbox(id: string): { status: string; failureCode?: string; leaseUntil?: number } | undefined
+  markInboxDispatching(input: unknown): unknown
+  renewInboxClaim(input: { inboxId: string; ownerId: string; fencingToken: number; leaseMs: number }): boolean
+  revokePrincipal(id: string, expectedVersion: number): unknown
+  rotateBinding(input: { bindingId: string; expectedVersion: number; sessionId: string }): ConversationBinding
+} {
+  return (service as unknown as { deliveryStore: ReturnType<typeof runtimeStore> }).deliveryStore
+}
+
+async function permissionRuntimeHarness(
+  root: string,
+  saved: Map<string, SavedSession>,
+  permissions: PermissionHarnessOptions,
+) {
+  return await runtimeHarness(
+    root,
+    saved,
+    undefined,
+    undefined,
+    root,
+    undefined,
+    'primary',
+    true,
+    ['mock', 'alternate'],
+    'probe',
+    undefined,
+    permissions,
+  )
+}
+
+function activeSessionEvents(service: AssistantDeliveryService, saved: Map<string, SavedSession>): readonly SessionEvent[] {
+  const binding = runtimeStore(service).getActiveBinding(conversation)
+  if (binding === undefined) throw new Error('active test binding is missing')
+  const session = saved.get(binding.sessionId)
+  if (session === undefined) throw new Error('active test session is missing')
+  return session.events
+}
+
+function expectSafeAskPermission(
+  permissionPresets: ReturnType<typeof permissionPresetFixture>,
+  events: readonly SessionEvent[],
+): void {
+  expect(permissionPresets.current(events)).toBe('guarded-dynamic-id')
+  expect(lastSandboxMode(events)).toBe('workspace-write')
+  expect(effectiveApprovalPolicy(events) ?? 'ask').toBe('ask')
+  expect(approvalReviewerOf(events)).toBe('user')
+}
+
+function attachmentFixture() {
+  const saved = imageRef()
+  const saveImages = vi.fn(async () => [saved] as const)
+  const attachments = {
+    imageLimits: {
+      maxImageBytes: 1_024,
+      maxImagesPerMessage: 4,
+      maxMessageImageBytes: 4_096,
+      maxImagePixels: 1_000_000,
+      maxImageDimension: 1_000,
+      mediaTypes: ['image/png'] as const,
+    },
+    saveImages,
+    validateImage: vi.fn(async () => {}),
+    saveImage: vi.fn(async () => saved),
+    readImage: vi.fn(async () => ({ ref: saved, data: png })),
+  } as unknown as AttachmentStore
+  return { attachments, saveImages, saved }
 }
 
 describe('real rc.8 delivery Agent runtime', () => {
@@ -258,6 +461,246 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(JSON.stringify(restarted.llm.requests[0]!.messages)).toContain('second')
     expect(restarted.sends.map(value => value.text)).toEqual(['reply-1'])
     await restarted.ctx.fiber.restart()
+  })
+
+  test.each(['principal', 'binding'] as const)(
+    'rechecks the exact active %s after Agent idle before publishing a final reply or terminal progress',
+    async revocation => {
+      const root = await mkdtemp(join(tmpdir(), `assistant-delivery-idle-${revocation}-`))
+      roots.push(root)
+      const fixture = await runtimeHarness(root, new Map())
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      const accepted = await fixture.service.acceptInbound(message(`evt-idle-${revocation}`, 'long task result'))
+      const store = runtimeStore(fixture.service)
+      const binding = store.getActiveBinding(conversation)!
+      const owner = store.getPrincipal(principal)!
+      let sawRunning = false
+      let progressCountAtRevocation = -1
+      fixture.ctx.on('agent/status', ({ status }) => {
+        if (status === 'running') {
+          sawRunning = true
+          return
+        }
+        if (!sawRunning || progressCountAtRevocation >= 0) return
+        progressCountAtRevocation = fixture.progresses.length
+        if (revocation === 'principal') store.revokePrincipal(owner.id, owner.version)
+        else store.rotateBinding({
+          bindingId: binding.id,
+          expectedVersion: binding.version,
+          sessionId: `replacement-${binding.sessionId}`,
+        })
+      })
+
+      await drive(fixture.service)
+
+      expect(progressCountAtRevocation).toBeGreaterThanOrEqual(0)
+      expect(fixture.progresses).toHaveLength(progressCountAtRevocation)
+      expect(fixture.sends).toEqual([])
+      expect(store.getInbox(accepted.inboxId)).toMatchObject({
+        status: 'dead_letter',
+        failureCode: 'processor-ambiguous',
+      })
+      await fixture.ctx.fiber.restart()
+    },
+  )
+
+  test('rechecks full authorization immediately before every queued progress publication', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-progress-authorization-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    let progressCountAtRevocation = -1
+    fixture.ctx.on('session/event', (_session, event) => {
+      if (event.type !== 'step/start' || progressCountAtRevocation >= 0) return
+      progressCountAtRevocation = fixture.progresses.length
+      fixture.ctx.assistantPolicy.setEmergencyStop({
+        enabled: true,
+        actor: 'test',
+        reason: 'revoke progress publication during the active turn',
+      })
+    })
+    const accepted = await fixture.service.acceptInbound(message('evt-progress-revoked', 'long task'))
+
+    await drive(fixture.service)
+
+    expect(progressCountAtRevocation).toBeGreaterThanOrEqual(0)
+    expect(fixture.progresses).toHaveLength(progressCountAtRevocation)
+    expect(fixture.sends).toEqual([])
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'processor-ambiguous',
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('retries an authorization callback failure before dispatch without marking or following up', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-authorization-check-failed-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const accepted = await fixture.service.acceptInbound(message('evt-authorization-check-failed', 'do not dispatch'))
+    const store = runtimeStore(fixture.service)
+    const markDispatching = vi.spyOn(store, 'markInboxDispatching')
+    vi.spyOn(fixture.ctx.assistantPolicy, 'evaluate').mockImplementation(() => {
+      throw new Error('authorization store unavailable')
+    })
+
+    await drive(fixture.service)
+
+    expect(markDispatching).not.toHaveBeenCalled()
+    expect(fixture.llm.requests).toEqual([])
+    expect(fixture.progresses).toEqual([])
+    expect(fixture.sends).toEqual([])
+    expect(store.getInbox(accepted.inboxId)).toMatchObject({
+      status: 'retry_wait',
+      failureCode: 'inbound-authorization-check-failed',
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('materializes a pure Lark image into an ImageBlock and resumes it without provider re-download', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-image-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const attachment = attachmentFixture()
+    const readInboundImage = vi.fn(async () => ({
+      outcome: 'downloaded' as const,
+      data: png,
+      mediaType: 'image/png' as const,
+    }))
+    const imageOptions = {
+      attachments: attachment.attachments,
+      inputModalities: ['text', 'image'] as const,
+      readInboundImage,
+    }
+    const first = await runtimeHarness(
+      root, saved, undefined, undefined, root, undefined, 'primary', true,
+      ['mock', 'alternate'], 'probe', imageOptions,
+    )
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const inbound: InboundEnvelope = {
+      ...message('evt-image', ''),
+      attachments: [{ resourceType: 'image', providerRef: 'img_private_do_not_prompt', fileName: 'photo.png' }],
+    }
+
+    await first.service.acceptInbound(inbound)
+    await drive(first.service)
+
+    expect(readInboundImage).toHaveBeenCalledOnce()
+    expect(readInboundImage).toHaveBeenCalledWith({
+      eventId: 'evt-image',
+      attachment: inbound.attachments![0],
+      maxBytes: 1_024,
+    }, expect.any(AbortSignal))
+    expect(attachment.saveImages).toHaveBeenCalledOnce()
+    expect(attachment.saveImages).toHaveBeenCalledWith([
+      { data: png, mediaType: 'image/png', name: 'photo.png' },
+    ])
+    const imageMessage = first.llm.requests[0]?.messages.at(-1)
+    expect(imageMessage?.content).toEqual([{ type: 'image', attachment: attachment.saved }])
+    expect(JSON.stringify(first.llm.requests[0])).not.toContain('img_private_do_not_prompt')
+    expect(JSON.stringify([...saved.values()])).not.toContain('img_private_do_not_prompt')
+    expect(JSON.stringify([...saved.values()])).toContain(String(attachment.saved.attachmentId))
+    await first.ctx.fiber.restart()
+
+    const restarted = await runtimeHarness(
+      root, saved, undefined, undefined, root, undefined, 'primary', true,
+      ['mock', 'alternate'], 'probe', imageOptions,
+    )
+    await restarted.service.acceptInbound(message('evt-image-followup', 'what was in that image?'))
+    await drive(restarted.service)
+
+    expect(readInboundImage).toHaveBeenCalledOnce()
+    expect(JSON.stringify(restarted.llm.requests[0]?.messages)).toContain(String(attachment.saved.attachmentId))
+    expect(JSON.stringify(restarted.llm.requests[0]?.messages)).not.toContain('img_private_do_not_prompt')
+
+    await restarted.service.acceptInbound(message('evt-image-switch', '/model use alternate/fast', 'command'))
+    await drive(restarted.service)
+    expect(restarted.sends.at(-1)?.text).toContain('已切换到 alternate/fast')
+    await restarted.service.acceptInbound(message('evt-image-after-switch', 'continue with the old image'))
+    await drive(restarted.service)
+    expect(restarted.alternate.requests).toHaveLength(0)
+    expect(restarted.sends.at(-1)?.text).toContain('不支持图片输入')
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('rejects image input before download for text-only models and skips image I/O for commands', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-image-text-only-'))
+    roots.push(root)
+    const attachment = attachmentFixture()
+    const readInboundImage = vi.fn(async () => ({
+      outcome: 'downloaded' as const,
+      data: png,
+      mediaType: 'image/png' as const,
+    }))
+    const fixture = await runtimeHarness(
+      root, new Map(), undefined, undefined, root, undefined, 'primary', true,
+      ['mock', 'alternate'], 'probe', {
+        attachments: attachment.attachments,
+        inputModalities: ['text'],
+        readInboundImage,
+      },
+    )
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound({
+      ...message('evt-image-text-only', ''),
+      attachments: [{ resourceType: 'image', providerRef: 'img_text_only' }],
+    })
+    await drive(fixture.service)
+    expect(readInboundImage).not.toHaveBeenCalled()
+    expect(attachment.saveImages).not.toHaveBeenCalled()
+    expect(fixture.llm.requests).toHaveLength(0)
+    expect(fixture.sends.at(-1)?.text).toContain('不支持图片输入')
+    expect(fixture.sends.at(-1)?.text).toContain('/model')
+
+    await fixture.service.acceptInbound({
+      ...message('evt-image-command', '/model', 'command'),
+      attachments: [{ resourceType: 'image', providerRef: 'img_command' }],
+    })
+    await drive(fixture.service)
+    expect(readInboundImage).not.toHaveBeenCalled()
+    expect(attachment.saveImages).not.toHaveBeenCalled()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('retries without downloading when no AttachmentStore is installed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-image-no-store-'))
+    roots.push(root)
+    const readInboundImage = vi.fn(async () => ({
+      outcome: 'downloaded' as const,
+      data: png,
+      mediaType: 'image/png' as const,
+    }))
+    const fixture = await runtimeHarness(
+      root, new Map(), undefined, undefined, root, undefined, 'primary', true,
+      ['mock', 'alternate'], 'probe', {
+        inputModalities: ['text', 'image'],
+        readInboundImage,
+      },
+    )
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const inbound = {
+      ...message('evt-image-no-store', ''),
+      attachments: [{ resourceType: 'image' as const, providerRef: 'img_no_store' }],
+    }
+
+    await fixture.service.acceptInbound(inbound)
+    await drive(fixture.service)
+
+    expect(readInboundImage).not.toHaveBeenCalled()
+    expect(fixture.llm.requests).toHaveLength(0)
+    await expect(fixture.service.acceptInbound(inbound)).resolves.toMatchObject({
+      duplicate: true,
+      status: 'retry_wait',
+    })
+    await fixture.ctx.fiber.restart()
   })
 
   test('mounts the durable preset before fresh and restarted Agent requests', async () => {
@@ -579,6 +1022,416 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(saved.size).toBe(before.size + 1)
     expect([...before].every(id => saved.has(id))).toBe(true)
     expect(fixture.llm.requests).toHaveLength(1)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/permissions reports all three levels and folds an auto reviewer after restart without an Agent turn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-fold-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const first = await permissionRuntimeHarness(root, saved, {})
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await first.service.acceptInbound(message('evt-permissions-show', '/permissions', 'command'))
+    await drive(first.service)
+    expect(first.llm.requests).toHaveLength(0)
+    expect(first.alternate.requests).toHaveLength(0)
+    expect(first.sends.at(-1)?.text).toContain('当前权限：请求批准（ask）')
+    expect(first.sends.at(-1)?.text).toContain('请求批准（ask）')
+    expect(first.sends.at(-1)?.text).toContain('帮我批准（auto）')
+    expect(first.sends.at(-1)?.text).toContain('完全访问权限（full）')
+
+    const bindingBefore = runtimeStore(first.service).getActiveBinding(conversation)!
+    await first.service.acceptInbound(message('evt-permission-auto', '/permission auto', 'command'))
+    await drive(first.service)
+    const events = activeSessionEvents(first.service, saved)
+    expect(approvalReviewerOf(events)).toBe('auto-review')
+    expect(runtimeStore(first.service).getActiveBinding(conversation)?.sessionId).toBe(bindingBefore.sessionId)
+    expect([...saved.keys()]).toEqual([bindingBefore.sessionId])
+    expect(first.sends.at(-1)?.text).toContain('已切换到 帮我批准（auto）')
+    expect(first.llm.requests).toHaveLength(0)
+    await first.ctx.fiber.restart()
+
+    const restarted = await permissionRuntimeHarness(root, saved, {})
+    await restarted.service.acceptInbound(message('evt-permissions-restart', '/permission', 'command'))
+    await drive(restarted.service)
+    expect(restarted.sends.at(-1)?.text).toContain('当前权限：帮我批准（auto）')
+    expect(restarted.llm.requests).toHaveLength(0)
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('/permission full requires confirmation and persists crash-safe upgrade and downgrade event order', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-full-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await permissionRuntimeHarness(root, saved, {})
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-permission-full-warning', '/permission full', 'command'))
+    await drive(fixture.service)
+    const beforeConfirm = activeSessionEvents(fixture.service, saved)
+    expect(fixture.sends.at(-1)?.text).toContain('🟠')
+    expect(fixture.sends.at(-1)?.text).toContain('danger-full-access')
+    expect(fixture.sends.at(-1)?.text).toContain('任意文件')
+    expect(fixture.sends.at(-1)?.text).toContain('网络')
+    expect(fixture.sends.at(-1)?.text).toContain('/permission full confirm')
+    expect(fixture.llm.requests).toHaveLength(0)
+
+    await fixture.service.acceptInbound(message('evt-permission-full-confirm', '/permissions full confirm', 'command'))
+    await drive(fixture.service)
+    const upgraded = activeSessionEvents(fixture.service, saved)
+    const upgradeEvents = upgraded.slice(beforeConfirm.length)
+    const reviewerNone = upgradeEvents.findIndex(event => event.type === 'assistant-policy/approval-reviewer'
+      && event.data.reviewer === 'none')
+    const approvalNever = upgradeEvents.findIndex(event => event.type === 'approval/policy'
+      && event.data.policy === 'never')
+    const sandboxDanger = upgradeEvents.findIndex(event => sandboxModeOf(event) === 'danger-full-access')
+    expect(reviewerNone).toBeGreaterThanOrEqual(0)
+    expect(approvalNever).toBeGreaterThan(reviewerNone)
+    expect(sandboxDanger).toBeGreaterThan(approvalNever)
+    expect(lastPermissionPreset(upgraded)).toBe('unlocked-dynamic-id')
+    expect(approvalReviewerOf(upgraded)).toBe('none')
+    expect(fixture.sends.at(-1)?.text).toContain('已切换到 完全访问权限（full）')
+
+    const beforeDowngrade = upgraded.length
+    await fixture.service.acceptInbound(message('evt-permission-ask', '/permission ask', 'command'))
+    await drive(fixture.service)
+    const downgraded = activeSessionEvents(fixture.service, saved)
+    const downgradeEvents = downgraded.slice(beforeDowngrade)
+    const sandboxWorkspace = downgradeEvents.findIndex(event => sandboxModeOf(event) === 'workspace-write')
+    const reviewerUser = downgradeEvents.findIndex(event => event.type === 'assistant-policy/approval-reviewer'
+      && event.data.reviewer === 'user')
+    expect(sandboxWorkspace).toBeGreaterThanOrEqual(0)
+    expect(reviewerUser).toBeGreaterThan(sandboxWorkspace)
+    expect(lastPermissionPreset(downgraded)).toBe('guarded-dynamic-id')
+    expect(approvalReviewerOf(downgraded)).toBe('user')
+    expect(fixture.llm.requests).toHaveLength(0)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/permission fences a held flush so lease loss cannot retry full ahead of a later ask', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-lease-fence-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await permissionRuntimeHarness(root, saved, { leaseMs: 1_000 })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-permission-lease-seed', '/permission full', 'command'))
+    await drive(fixture.service)
+
+    const sessions = fixture.ctx.sessions
+    const originalFlush = sessions.flush.bind(sessions)
+    let releaseFlush!: () => void
+    let markFlushStarted!: () => void
+    const flushGate = new Promise<void>(resolve => { releaseFlush = resolve })
+    const flushStarted = new Promise<void>(resolve => { markFlushStarted = resolve })
+    const flush = vi.spyOn(sessions, 'flush').mockImplementationOnce(async session => {
+      markFlushStarted()
+      await flushGate
+      return await originalFlush(session)
+    })
+    const store = runtimeStore(fixture.service)
+    const renew = vi.spyOn(store, 'renewInboxClaim').mockReturnValue(false)
+    const full = await fixture.service.acceptInbound(
+      message('evt-permission-lease-full', '/permission full confirm', 'command'),
+    )
+
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval'] })
+    try {
+      await fixture.service.tick()
+      await flushStarted
+      expect(store.getInbox(full.inboxId)).toMatchObject({
+        status: 'claimed',
+        failureCode: 'dispatch-started',
+      })
+
+      await vi.advanceTimersByTimeAsync(334)
+      expect(renew).toHaveBeenCalled()
+      const ask = await fixture.service.acceptInbound(
+        message('evt-permission-lease-ask', '/permission ask', 'command'),
+      )
+      releaseFlush()
+      await fixture.service.whenIdle()
+
+      const leaseUntil = store.getInbox(full.inboxId)?.leaseUntil
+      if (leaseUntil === undefined) throw new Error('held permission inbox is missing its lease deadline')
+      vi.useRealTimers()
+      await new Promise(resolve => setTimeout(resolve, Math.max(1, leaseUntil - Date.now() + 5)))
+      await fixture.service.tick()
+      await fixture.service.whenIdle()
+      expect(store.getInbox(full.inboxId)).toMatchObject({
+        status: 'dead_letter',
+        failureCode: 'dispatch-ambiguous',
+      })
+      expect(store.getInbox(ask.inboxId)).toMatchObject({ status: 'processed' })
+      expectSafeAskPermission(fixture.permissionPresets!, activeSessionEvents(fixture.service, saved))
+    } finally {
+      releaseFlush()
+      vi.useRealTimers()
+      renew.mockRestore()
+      flush.mockRestore()
+      await fixture.ctx.fiber.restart()
+    }
+  })
+
+  test('/permission compensates full to ask in memory when both the mutation and compensation flush return false', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-flush-false-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await permissionRuntimeHarness(root, saved, {})
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-permission-flush-seed', '/permission full', 'command'))
+    await drive(fixture.service)
+    const binding = runtimeStore(fixture.service).getActiveBinding(conversation)!
+    const persistedBefore = saved.get(binding.sessionId)!.events
+    const logsAtFlush: SessionEvent[][] = []
+    const flush = vi.spyOn(fixture.ctx.sessions, 'flush')
+      .mockImplementationOnce(async session => {
+        logsAtFlush.push([...session.events])
+        return false
+      })
+      .mockImplementationOnce(async session => {
+        logsAtFlush.push([...session.events])
+        return false
+      })
+    const accepted = await fixture.service.acceptInbound(
+      message('evt-permission-flush-false', '/permission full confirm', 'command'),
+    )
+    await drive(fixture.service)
+
+    const transition = logsAtFlush[0]!.slice(persistedBefore.length).filter(event => [
+      'assistant-policy/approval-reviewer',
+      'approval/policy',
+      'permission/preset',
+      'sandbox/mode',
+    ].includes(event.type))
+    expect(transition.map(event => event.type)).toEqual([
+      'assistant-policy/approval-reviewer',
+      'approval/policy',
+      'permission/preset',
+      'sandbox/mode',
+    ])
+    expect(transition[0]?.data).toEqual({ reviewer: 'none' })
+    expect(transition[1]?.data).toEqual({ policy: 'never' })
+    expect(transition[3]?.data).toEqual({ mode: 'danger-full-access' })
+    expect(flush).toHaveBeenCalledTimes(2)
+    expectSafeAskPermission(fixture.permissionPresets!, logsAtFlush[1]!)
+    expect(fixture.sends).toHaveLength(1)
+    expect(fixture.sends[0]?.text).toContain('🟠')
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'processor-ambiguous',
+    })
+    expect(saved.get(binding.sessionId)?.events).toEqual(persistedBefore)
+    flush.mockRestore()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/permission compensates full to ask in memory when both durability flush attempts throw', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-flush-throw-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await permissionRuntimeHarness(root, saved, {})
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-permission-throw-seed', '/permission full', 'command'))
+    await drive(fixture.service)
+
+    const logsAtFlush: SessionEvent[][] = []
+    const flush = vi.spyOn(fixture.ctx.sessions, 'flush')
+      .mockImplementationOnce(async session => {
+        logsAtFlush.push([...session.events])
+        throw new Error('primary durability unavailable')
+      })
+      .mockImplementationOnce(async session => {
+        logsAtFlush.push([...session.events])
+        throw new Error('compensation durability unavailable')
+      })
+    const accepted = await fixture.service.acceptInbound(
+      message('evt-permission-flush-throw', '/permission full confirm', 'command'),
+    )
+    await drive(fixture.service)
+    flush.mockRestore()
+
+    expect(logsAtFlush).toHaveLength(2)
+    expect(lastSandboxMode(logsAtFlush[0]!)).toBe('danger-full-access')
+    expectSafeAskPermission(fixture.permissionPresets!, logsAtFlush[1]!)
+    expect(fixture.sends).toHaveLength(1)
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'processor-ambiguous',
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/permission compensates to ask when the full preset mutation throws after appending', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-mutation-throw-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await permissionRuntimeHarness(root, saved, {})
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-permission-mutation-seed', '/permission full', 'command'))
+    await drive(fixture.service)
+
+    const setPreset = fixture.permissionPresets!.set
+    const setPresetNormally = setPreset.getMockImplementation()
+    if (setPresetNormally === undefined) throw new Error('permission preset test setter is missing')
+    setPreset.mockImplementationOnce((session, name) => {
+      setPresetNormally(session, name)
+      throw new Error('preset observer failed after append')
+    })
+    const accepted = await fixture.service.acceptInbound(
+      message('evt-permission-mutation-throw', '/permission full confirm', 'command'),
+    )
+    await drive(fixture.service)
+
+    expect(setPreset.mock.calls.map(([, name]) => name)).toEqual([
+      'unlocked-dynamic-id',
+      'guarded-dynamic-id',
+    ])
+    expectSafeAskPermission(fixture.permissionPresets!, activeSessionEvents(fixture.service, saved))
+    expect(fixture.sends).toHaveLength(1)
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'processor-ambiguous',
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/permission compensates a failed auto downgrade to ask before its second best-effort flush', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-auto-compensate-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await permissionRuntimeHarness(root, saved, {})
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-permission-auto-full', '/permission full confirm', 'command'))
+    await drive(fixture.service)
+    expect(approvalReviewerOf(activeSessionEvents(fixture.service, saved))).toBe('none')
+    const sentBeforeDowngrade = fixture.sends.length
+
+    const logsAtFlush: SessionEvent[][] = []
+    const flush = vi.spyOn(fixture.ctx.sessions, 'flush')
+      .mockImplementationOnce(async session => {
+        logsAtFlush.push([...session.events])
+        return false
+      })
+      .mockImplementationOnce(async session => {
+        logsAtFlush.push([...session.events])
+        return false
+      })
+    const accepted = await fixture.service.acceptInbound(
+      message('evt-permission-auto-failed', '/permission auto', 'command'),
+    )
+    await drive(fixture.service)
+    flush.mockRestore()
+
+    expect(logsAtFlush).toHaveLength(2)
+    expect(approvalReviewerOf(logsAtFlush[0]!)).toBe('auto-review')
+    expectSafeAskPermission(fixture.permissionPresets!, logsAtFlush[1]!)
+    expect(fixture.sends).toHaveLength(sentBeforeDowngrade)
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'processor-ambiguous',
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/permission rejects invalid input and fails closed when a required service or bundle is missing', async () => {
+    const invalidRoot = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-invalid-'))
+    roots.push(invalidRoot)
+    const invalidSaved = new Map<string, SavedSession>()
+    const invalid = await permissionRuntimeHarness(invalidRoot, invalidSaved, {})
+    const invalidPairing = invalid.service.issuePairing('test', principal)
+    invalid.service.confirmPairing({ challengeId: invalidPairing.challenge.id, principal, code: invalidPairing.code })
+    await invalid.service.acceptInbound(message('evt-permission-invalid', '/permissions full now', 'command'))
+    await drive(invalid.service)
+    expect(invalid.sends.at(-1)?.text).toContain('用法：/permission')
+    expect(invalid.llm.requests).toHaveLength(0)
+    expect(activeSessionEvents(invalid.service, invalidSaved)
+      .filter(event => event.type === 'assistant-policy/approval-reviewer')).toEqual([])
+    await invalid.ctx.fiber.restart()
+
+    const noServiceRoot = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-no-service-'))
+    roots.push(noServiceRoot)
+    const noServiceSaved = new Map<string, SavedSession>()
+    const noService = await permissionRuntimeHarness(noServiceRoot, noServiceSaved, { providePresets: false })
+    const noServicePairing = noService.service.issuePairing('test', principal)
+    noService.service.confirmPairing({ challengeId: noServicePairing.challenge.id,
+      principal, code: noServicePairing.code })
+    await noService.service.acceptInbound(message('evt-permission-no-service', '/permission auto', 'command'))
+    await drive(noService.service)
+    expect(noService.sends.at(-1)?.text).toContain('权限服务不可用')
+    expect(noService.llm.requests).toHaveLength(0)
+    await noService.ctx.fiber.restart()
+
+    const noBundleRoot = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-no-bundle-'))
+    roots.push(noBundleRoot)
+    const noBundleSaved = new Map<string, SavedSession>()
+    const noBundle = await permissionRuntimeHarness(noBundleRoot, noBundleSaved, {
+      presets: { 'only-safe-dynamic': testPermissionPresets['guarded-dynamic-id'] },
+    })
+    const noBundlePairing = noBundle.service.issuePairing('test', principal)
+    noBundle.service.confirmPairing({ challengeId: noBundlePairing.challenge.id,
+      principal, code: noBundlePairing.code })
+    await noBundle.service.acceptInbound(message('evt-permission-no-bundle', '/permission full confirm', 'command'))
+    await drive(noBundle.service)
+    expect(noBundle.sends.at(-1)?.text).toContain('缺少 danger-full-access + never')
+    expect(activeSessionEvents(noBundle.service, noBundleSaved)
+      .filter(event => event.type === 'assistant-policy/approval-reviewer')).toEqual([])
+    await noBundle.ctx.fiber.restart()
+
+    const noApprovalRoot = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-no-approval-'))
+    roots.push(noApprovalRoot)
+    const noApprovalSaved = new Map<string, SavedSession>()
+    const noApproval = await permissionRuntimeHarness(noApprovalRoot, noApprovalSaved, { provideApproval: false })
+    const noApprovalPairing = noApproval.service.issuePairing('test', principal)
+    noApproval.service.confirmPairing({ challengeId: noApprovalPairing.challenge.id,
+      principal, code: noApprovalPairing.code })
+    await noApproval.service.acceptInbound(message('evt-permission-no-approval', '/permission full confirm', 'command'))
+    await drive(noApproval.service)
+    expect(noApproval.sends.at(-1)?.text).toContain('权限服务不可用')
+    expect(activeSessionEvents(noApproval.service, noApprovalSaved)
+      .filter(event => event.type === 'assistant-policy/approval-reviewer')).toEqual([])
+    await noApproval.ctx.fiber.restart()
+  })
+
+  test('/permission rechecks the exact owner after bundle resolution and writes nothing after revocation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-permissions-revoked-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    let revokeOnResolve = false
+    let revoked = false
+    let fixture!: Awaited<ReturnType<typeof permissionRuntimeHarness>>
+    const permissions: PermissionHarnessOptions = { onResolve: () => {
+      if (!revokeOnResolve || revoked) return
+      const store = runtimeStore(fixture.service)
+      const owner = store.getPrincipal(principal)!
+      store.revokePrincipal(owner.id, owner.version)
+      revoked = true
+    } }
+    fixture = await permissionRuntimeHarness(root, saved, permissions)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const accepted = await fixture.service.acceptInbound(message('evt-permission-revoked', '/permission auto', 'command'))
+    const sessionId = runtimeStore(fixture.service).getActiveBinding(conversation)!.sessionId
+    revokeOnResolve = true
+    await drive(fixture.service)
+
+    expect(revoked).toBe(true)
+    expect(fixture.sends).toEqual([])
+    expect(fixture.llm.requests).toHaveLength(0)
+    expect(saved.get(sessionId)?.events
+      .filter(event => event.type === 'assistant-policy/approval-reviewer')).toEqual([])
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'permission-authorization-revoked',
+    })
     await fixture.ctx.fiber.restart()
   })
 

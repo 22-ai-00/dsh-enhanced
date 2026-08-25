@@ -26,13 +26,20 @@ describe('dsh-enhanced-assistant-policy', () => {
       maxDiffBytes: 60 * 1_024,
     })
     expect(Object.isFrozen(entrypoint.APPROVAL_DISPLAY_BUDGET)).toBe(true)
+    expect(entrypoint.isAutoReviewEscalation).toBeTypeOf('function')
+    expect(entrypoint.AUTO_REVIEW_APPROVAL_REASON).toContain('ask-review')
+    expect(entrypoint.HUMAN_APPROVAL_REASON).toContain('ask-human')
   })
 
   it('ships a private DSH-home database default and the verified host peers', () => {
     expect(bundle).toContain("dshHomePath('assistant-policy/policy.sqlite')")
+    expect(bundle).toContain('toolDefaultEffect: deny')
+    expect(bundle).toContain('autoReview:')
+    expect(bundle).toContain('enabled: true')
     expect(bundle).toContain('rules: []')
     expect(bundle).toContain('budgets: []')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-llm']).toBe('>=0.1.0-rc.8 <0.2.0')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-tools']).toBe('>=0.1.0-rc.8 <0.2.0')
   })
 

@@ -6,9 +6,9 @@
 >
 > 本文是开发清单，不是社区插件安装清单。前期生态审查见[《DSH 个人助理插件生态研究与建设清单》](./dsh-personal-assistant-plugin-landscape.md)。
 
-## 当前实现状态（2026-08-21）
+## 当前实现状态（2026-08-25）
 
-路线图已经在本仓库落成 **12 个完全自研、独立发布的 bundle**。它们没有把下文列出的社区插件加入运行时依赖；社区源码只作为固定 commit 的设计与失败语义参考。当前包仍标记为“实验性”，适合先在单机、受监督的个人 profile 中试运行，尚未宣称完成公开 npm 发布或长期生产 soak。
+路线图相关能力已经在本仓库落成一组完全自研、独立发布的 bundle。它们没有把下文列出的社区插件加入运行时依赖；社区源码只作为固定 commit 的设计与失败语义参考。当前包仍标记为“实验性”，适合先在单机、受监督的个人 profile 中试运行，尚未宣称完成公开 npm 发布或长期生产 soak。
 
 最简单的启用方式如下：
 
@@ -22,13 +22,13 @@
 | Memory 与 Wiki 受控互相晋升 | 再加 `@dsh-enhanced/memory-wiki-bridge` | 可选；只产生审批提案，不自动双向同步 |
 | 汇总各插件就绪状态 | 再加 `@dsh-enhanced/assistant-health` | 可选；只检测，不自动修复 |
 
-因此，不需要一次安装十二个包。多数个人使用场景从一个 core meta-bundle 开始；要飞书时变为三个包，之后只按需求增加 P1。`browser-playwright`、二进制附件下载/上传、PDF/DOCX/Web ingest、第二消息渠道和向量检索仍是明确延期项，而不是“已经可靠”的能力。
+因此，不需要一次安装全部包。多数个人使用场景从一个 core meta-bundle 开始；要飞书时变为三个包，之后只按需求增加 P1。`browser-playwright`、非图片附件下载/上传、PDF/DOCX/Web ingest、第二消息渠道和向量检索仍是明确延期项，而不是“已经可靠”的能力；飞书光栅图片入站已经走受限下载、AttachmentStore 和 typed ImageBlock。
 
 延迟审批的提交闭环已补齐：Policy 增加只读 `getProposal`，Memory、Wiki 与 Automations 各自通过 `reconcileProposals()` 轮询自己待决提案的终态，再用与前台 `decideProposal` 完全相同的事务/写入路径提交。方向仍是「域读取 Policy」，Policy 不回调任何域；pending 永不被当作批准，重复 reconcile 幂等，冲突降级为 `conflicted` 而不丢弃决定。Automations 的该定时器独立于 scheduler，因此 `schedulerEnabled: false` 时批准一个 automation 仍会生效。
 
-无人值守的成本上限也已收紧：不上报 usage 的 provider（本机 CLI 与 ACP 订阅类 route）按全额预留结算，而不是按 0 结算，否则周期预算的 `spent_amount` 永远为 0、永不触顶。相应地，`coding-subscription-provider` 的四条 text-only route 在收到非空 `tools` 时会以 `tool_calls_unsupported` 明确失败，不再静默丢弃工具——静默丢弃会让 automation 看起来成功却从未调用白名单工具。需要工具的主动执行应使用 `traex-acp-provider`。
+无人值守的成本上限也已收紧：不上报 usage 的 provider（本机 CLI 与 ACP 订阅类 route）按全额预留结算，而不是按 0 结算，否则周期预算的 `spent_amount` 永远为 0、永不触顶。`coding-subscription-provider` 的 Claude、Cursor、Grok 与默认 Codex CLI route 在收到非空 `tools` 时会以 `tool_calls_unsupported` 明确失败，不再静默丢弃工具；显式 opt-in 的 Codex direct route 与 `traex-acp-provider` 则能把原生工具调用交回 DSH Agent Loop / Policy 执行。
 
-当前实现的运行边界也需要明确：Lark 默认关闭；Policy 默认拒绝，需要部署者显式放行；Lark 官方长连接没有可验证的 replay cursor/backfill，插件只报告 reconnect gap；provider 接受后断线而无法对账的发送保持 `unknown_after_send`，不会盲目重发；附件第一版只保存有界元数据，不自动下载不可信二进制；持久服务仍需要单机 supervisor，macOS onboarding 已能自动安装 launchd，Linux/容器仍需 systemd/Docker 等部署层。
+当前实现的运行边界也需要明确：Lark 默认关闭；Policy 默认拒绝，需要部署者显式放行；Lark 官方长连接没有可验证的 replay cursor/backfill，插件只报告 reconnect gap；provider 接受后断线而无法对账的发送保持 `unknown_after_send`，不会盲目重发；只有经授权且目标模型声明图片能力的光栅图片会受限下载到 AttachmentStore，其余附件仍只保存有界元数据；持久服务仍需要单机 supervisor，macOS onboarding 已能自动安装 launchd，Linux/容器仍需 systemd/Docker 等部署层。
 
 ## 一页结论
 
@@ -364,7 +364,7 @@ vault/
 
 ### 职责与公开边界
 
-这是唯一的消息核心，不含任何厂商 SDK。它拥有：external principal/pairing、conversation→DSH session binding、durable inbox、durable outbox、adapter registry、delivery receipts、attachment metadata 和 dead-letter；提供 `ctx.assistantDelivery`。Lark 只注册 adapter，Automations 只 enqueue，Policy 只做授权。
+这是唯一的消息核心，不含任何厂商 SDK。它拥有：external principal/pairing、conversation→DSH session binding、durable inbox、durable outbox、adapter registry、delivery receipts、隔离附件描述符及授权图片引用和 dead-letter；提供 `ctx.assistantDelivery`。Lark 只注册 adapter，Automations 只 enqueue，Policy 只做授权。
 
 内部不要把 `platform:chat:thread` 字符串当核心身份。至少用 typed `ExternalPrincipalKey`、`ConversationRef`、`ConversationBinding`、`DeliveryTarget` 和 `DeliveryReceipt`；跨平台账号合并必须显式由 owner 批准。空 allowlist 表示**无人可用**，不能把第一个来信者静默设为 owner。
 
@@ -377,7 +377,7 @@ vault/
 ### MVP
 
 - Adapter contract：`start(accept/receipt)`、`send`、capabilities、可选 `reconcileUnknownSend`，每个 adapter 的 timer/socket 都返回 disposer。
-- Owner DM、单账户、纯文本；本地一次性 pairing code 有 5–10 分钟 TTL、重放保护和显式 owner route。
+- Owner DM、单账户、文本及受限光栅图片入站；本地一次性 pairing code 有 5–10 分钟 TTL、重放保护和显式 owner route。
 - Inbox 先持久化 `(channel, account, eventId)` 唯一行再 ack；状态 `received→authorized→queued→claimed→processed|retry_wait|dead_letter`，同 binding 串行、不同 binding 并行，lease 可回收。
 - 稳定 conversation binding，`/new` 只递增 generation，不删除旧 session；lookup→resume→create 做 single-flight，resume 失败不静默覆盖历史。
 - Outbox 在联网前写入唯一 `idempotencyKey`；状态区分 `pending/attempting/accepted/delivered/read/retry_wait/dead/unknown_after_send`，attempt 单独记录。
@@ -402,7 +402,7 @@ vault/
 
 ### 权限面
 
-需要本地 SQLite/spool、Agent/Session 恢复与创建、平台 adapter 的间接网络能力、可选 attachment metadata。消息正文设 retention/size 上限并支持 redaction；token/secret 永不进入 inbox/outbox/UI。外部消息和附件始终标成不可信来源。
+需要本地 SQLite/spool、Agent/Session 恢复与创建、平台 adapter 的间接网络能力和可选 AttachmentStore。消息正文设 retention/size 上限并支持 redaction；token/secret 永不进入 inbox/outbox/UI。外部消息和附件始终标成不可信来源，只有授权图片会在 capability 与配额门通过后物化为不可变引用。
 
 ### 测试与验收
 

@@ -1,4 +1,5 @@
-import type { DeliveryStore } from './store.js'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import { DeliveryStoreError, type DeliveryStore } from './store.js'
 import type {
   AdapterReconcileResult,
   AdapterSendResult,
@@ -6,11 +7,59 @@ import type {
   DeliveryAdapterContext,
   ConversationBinding,
   InboundEnvelope,
+  ModelRouteRef,
   OutboxRecord,
 } from './types.js'
 
 function adapterKey(channel: string, account: string): string {
   return JSON.stringify([channel, account])
+}
+
+function samePrincipal(
+  left: Readonly<ConversationBinding['principal']>,
+  right: Readonly<ConversationBinding['principal']>,
+): boolean {
+  return left.channel === right.channel
+    && left.account === right.account
+    && left.tenant === right.tenant
+    && left.user === right.user
+}
+
+function sameConversation(
+  left: Readonly<ConversationBinding['conversation']>,
+  right: Readonly<ConversationBinding['conversation']>,
+): boolean {
+  return left.channel === right.channel
+    && left.account === right.account
+    && left.tenant === right.tenant
+    && left.kind === right.kind
+    && left.chat === right.chat
+    && left.thread === right.thread
+}
+
+function bindingChangedBeforeDispatch(
+  claimed: Readonly<ConversationBinding>,
+  current: Readonly<ConversationBinding>,
+  envelope: Readonly<InboundEnvelope>,
+): boolean {
+  return current.id !== claimed.id
+    || current.version !== claimed.version
+    || current.sessionId !== claimed.sessionId
+    || current.generation !== claimed.generation
+    || !samePrincipal(current.principal, claimed.principal)
+    || !samePrincipal(current.principal, envelope.principal)
+    || !sameConversation(current.conversation, claimed.conversation)
+    || !sameConversation(current.conversation, envelope.conversation)
+}
+
+function dispatchAuthorizationFailure(error: unknown):
+  | 'authorization-revoked-before-dispatch'
+  | 'binding-changed-before-dispatch'
+  | undefined {
+  if (!(error instanceof DeliveryStoreError)) return undefined
+  if (error.code === 'unauthorized-principal') return 'authorization-revoked-before-dispatch'
+  if (error.code === 'invalid-binding') return 'binding-changed-before-dispatch'
+  return undefined
 }
 
 const adapterDisposeGraceMs = 5_000
@@ -298,8 +347,29 @@ export class DeliveryCoordinator {
       }
       return
     }
-    if (this.options.store.getBinding(record.intent.bindingId)?.status !== 'active') {
+    const binding = this.options.store.getBinding(record.intent.bindingId)
+    if (binding?.status !== 'active') {
       this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'binding-revoked', retryable: false })
+      return
+    }
+    if (!sameConversation(binding.conversation, record.intent.target.conversation)
+      || !samePrincipal(binding.principal, record.intent.target.principal)) {
+      this.finish(record, fencingToken, {
+        outcome: 'not-sent', failureCode: 'binding-target-mismatch', retryable: false,
+      })
+      return
+    }
+    let authorized: boolean
+    try {
+      authorized = this.options.store.isAuthorizedPrincipal(binding.principal)
+    } catch {
+      this.finish(record, fencingToken, {
+        outcome: 'not-sent', failureCode: 'principal-authorization-check-failed', retryable: true,
+      })
+      return
+    }
+    if (!authorized) {
+      this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'principal-revoked', retryable: false })
       return
     }
     try {
@@ -365,9 +435,48 @@ export type InboundProcessResult =
   | { outcome: 'processed' }
   | { outcome: 'not-processed'; failureCode: string; retryable: boolean; retryAfterMs?: number }
 
+export type InboundNotProcessedResult = Extract<InboundProcessResult, { outcome: 'not-processed' }>
+
+/** Durable inputs admitted before an Agent turn becomes dispatch-ambiguous. */
+export interface PreparedInboundMessage {
+  imageAttachments: readonly ImageAttachmentRef[]
+  /** Exact route admitted for this claimed turn; runtimes may omit it when they do no LLM dispatch. */
+  modelRoute?: Readonly<ModelRouteRef>
+}
+
+/** Identifies the live inbox claim that owns preparation side effects. */
+export interface InboundPrepareContext {
+  inboxId: string
+  ownerId: string
+  fencingToken: number
+}
+
+export type InboundPrepareResult =
+  | { outcome: 'prepared'; message: Readonly<PreparedInboundMessage> }
+  | InboundNotProcessedResult
+
+export type MarkInboundDispatching = () => void
+
 export interface InboundMessageProcessor {
-  process(binding: Readonly<ConversationBinding>, envelope: Readonly<InboundEnvelope>, signal: AbortSignal):
-  Promise<InboundProcessResult>
+  /**
+   * Lets the processor place the durable marker immediately before its first external dispatch.
+   * Explicit processors must let gate errors abort dispatch and must never dispatch after a gate error.
+   */
+  readonly dispatchControl?: 'explicit'
+  /** Prepare durable inputs without dispatching the turn to the external Agent runtime. */
+  prepare?(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    context: Readonly<InboundPrepareContext>,
+  ): Promise<InboundPrepareResult>
+  process(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    prepared?: Readonly<PreparedInboundMessage>,
+    markDispatching?: MarkInboundDispatching,
+  ): Promise<InboundProcessResult>
 }
 
 interface InboundCoordinatorOptions {
@@ -474,17 +583,171 @@ export class InboundCoordinator {
         outcome: 'retry_wait', failureCode: 'processor-unavailable', retryAt: this.now() + this.options.retryBaseMs })
       return
     }
+    let prepared: Readonly<PreparedInboundMessage> | undefined
+    if (processor.prepare !== undefined) {
+      let preparation: InboundPrepareResult
+      try {
+        preparation = await processor.prepare(binding, envelope, signal, {
+          inboxId,
+          ownerId: this.options.ownerId,
+          fencingToken,
+        })
+      } catch {
+        if (signal.aborted) return
+        this.finishInbound(inboxId, fencingToken, {
+          outcome: 'not-processed', failureCode: 'prepare-threw', retryable: true,
+        })
+        return
+      }
+      if (signal.aborted) return
+      if (preparation.outcome !== 'prepared') {
+        this.finishInbound(inboxId, fencingToken, preparation)
+        return
+      }
+      prepared = preparation.message
+    }
+    if (signal.aborted) return
+    const currentBinding = this.options.store.getBinding(binding.id)
+    if (currentBinding === undefined || currentBinding.status !== 'active') {
+      this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
+        outcome: 'dead_letter', failureCode: 'binding-revoked' })
+      return
+    }
+    if (bindingChangedBeforeDispatch(binding, currentBinding, envelope)) {
+      this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
+        outcome: 'dead_letter', failureCode: 'binding-changed-before-dispatch' })
+      return
+    }
+    if (!this.options.store.isAuthorizedPrincipal(currentBinding.principal)) {
+      this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
+        outcome: 'dead_letter', failureCode: 'authorization-revoked-before-dispatch' })
+      return
+    }
+    const explicitDispatch = processor.dispatchControl === 'explicit'
+    const dispatchBinding = {
+      id: currentBinding.id,
+      version: currentBinding.version,
+      sessionId: currentBinding.sessionId,
+      generation: currentBinding.generation,
+      conversation: { ...currentBinding.conversation },
+      principal: { ...currentBinding.principal },
+    }
+    let dispatchMarked = false
+    let dispatchGateFailed = false
+    let dispatchGateBindingFailure:
+      | 'authorization-revoked-before-dispatch'
+      | 'binding-changed-before-dispatch'
+      | 'binding-revoked'
+      | undefined
+    let dispatchGateOpen = explicitDispatch
+    const markDispatching: MarkInboundDispatching | undefined = explicitDispatch
+      ? () => {
+          if (!dispatchGateOpen || dispatchGateFailed) {
+            throw new Error('assistant-delivery inbound dispatch gate is closed')
+          }
+          if (signal.aborted) throw signal.reason
+          if (dispatchMarked) return
+          let latestBinding: ConversationBinding | undefined
+          try {
+            latestBinding = this.options.store.getBinding(currentBinding.id)
+          } catch (error) {
+            dispatchGateFailed = true
+            throw error
+          }
+          let authorized: boolean
+          try {
+            authorized = this.options.store.isAuthorizedPrincipal(dispatchBinding.principal)
+          } catch (error) {
+            dispatchGateFailed = true
+            throw error
+          }
+          if (!authorized) {
+            dispatchGateFailed = true
+            dispatchGateBindingFailure = 'authorization-revoked-before-dispatch'
+            throw new Error('assistant-delivery inbound authorization was revoked before dispatch')
+          }
+          if (latestBinding === undefined || latestBinding.status !== 'active') {
+            dispatchGateFailed = true
+            dispatchGateBindingFailure = 'binding-revoked'
+            throw new Error('assistant-delivery inbound binding was revoked before dispatch')
+          }
+          if (bindingChangedBeforeDispatch(currentBinding, latestBinding, envelope)) {
+            dispatchGateFailed = true
+            dispatchGateBindingFailure = 'binding-changed-before-dispatch'
+            throw new Error('assistant-delivery inbound binding changed before dispatch')
+          }
+          try {
+            this.options.store.markInboxDispatching({
+              inboxId, ownerId: this.options.ownerId, fencingToken, binding: dispatchBinding,
+            })
+          } catch (error) {
+            dispatchGateFailed = true
+            dispatchGateBindingFailure = dispatchAuthorizationFailure(error) ?? dispatchGateBindingFailure
+            throw error
+          }
+          dispatchMarked = true
+        }
+      : undefined
+    if (!explicitDispatch) {
+      try {
+        this.options.store.markInboxDispatching({
+          inboxId, ownerId: this.options.ownerId, fencingToken, binding: dispatchBinding,
+        })
+        dispatchMarked = true
+      } catch (error) {
+        const failureCode = dispatchAuthorizationFailure(error)
+        if (failureCode !== undefined) {
+          this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
+            outcome: 'dead_letter', failureCode })
+        }
+        // No processor call happened, so lease recovery remains the authority on
+        // whether a stale or failed marker is safe to retry.
+        return
+      }
+    }
     let result: InboundProcessResult
     try {
-      this.options.store.markInboxDispatching({ inboxId, ownerId: this.options.ownerId, fencingToken })
-      result = await processor.process(binding, envelope, signal)
+      result = await processor.process(currentBinding, envelope, signal, prepared, markDispatching)
     } catch {
+      dispatchGateOpen = false
       if (signal.aborted) return
+      if (explicitDispatch && !dispatchMarked) {
+        if (dispatchGateBindingFailure !== undefined) {
+          this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
+            outcome: 'dead_letter', failureCode: dispatchGateBindingFailure })
+          return
+        }
+        this.finishInbound(inboxId, fencingToken, {
+          outcome: 'not-processed', failureCode: 'processor-threw-before-dispatch', retryable: true,
+        })
+        return
+      }
       this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
         outcome: 'dead_letter', failureCode: 'processor-ambiguous' })
       return
     }
+    dispatchGateOpen = false
     if (signal.aborted) return
+    if (dispatchGateBindingFailure !== undefined) {
+      this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
+        outcome: 'dead_letter', failureCode: dispatchGateBindingFailure })
+      return
+    }
+    if (dispatchGateFailed) {
+      this.finishInbound(inboxId, fencingToken, {
+        outcome: 'not-processed', failureCode: 'processor-threw-before-dispatch', retryable: true,
+      })
+      return
+    }
+    if (dispatchMarked && result.outcome !== 'processed') {
+      this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
+        outcome: 'dead_letter', failureCode: 'processor-ambiguous' })
+      return
+    }
+    this.finishInbound(inboxId, fencingToken, result)
+  }
+
+  private finishInbound(inboxId: string, fencingToken: number, result: InboundProcessResult): void {
     if (result.outcome === 'processed') {
       this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken, outcome: 'processed' })
       return

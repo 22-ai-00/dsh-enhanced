@@ -3,6 +3,13 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import Schema from '@deepseek-ai/schemastery'
 import type { ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
+import { registerAutoReviewAnswerer, type AutoReviewConfig } from './auto-review.js'
+import { getApprovalReviewer } from './approval-reviewer.js'
+import {
+  AUTO_REVIEW_APPROVAL_REASON,
+  HUMAN_APPROVAL_REASON,
+  classifyToolRisk,
+} from './tool-risk.js'
 import { compilePolicy, evaluatePolicy } from './evaluator.js'
 import {
   PolicyLedger,
@@ -41,6 +48,8 @@ export interface PolicyBudgetConfig {
 
 export interface Config {
   databasePath: string
+  toolDefaultEffect?: 'deny' | 'allow'
+  autoReview?: AutoReviewConfig
   rules?: PolicyRule[]
   budgets?: PolicyBudgetConfig[]
   proposalMaintenanceIntervalMs?: number
@@ -102,6 +111,14 @@ const ruleSchema = Schema.object({
 
 const configSchema = Schema.object({
   databasePath: Schema.string().required(),
+  toolDefaultEffect: Schema.union(['deny', 'allow'] as const).default('deny'),
+  autoReview: Schema.union([Schema.object({
+    enabled: Schema.boolean().default(true),
+    provider: Schema.string().min(1),
+    model: Schema.string().min(1),
+    timeoutMs: Schema.number().step(1).min(1).max(300_000).default(30_000),
+    maxTokens: Schema.number().step(1).min(1).max(4_096).default(512),
+  })]),
   proposalMaintenanceIntervalMs: Schema.number().step(1).min(0).max(2_147_483_647).default(15_000),
   rules: Schema.array(ruleSchema).default([]),
   budgets: Schema.array(Schema.object({
@@ -143,6 +160,7 @@ export class AssistantPolicyService extends Service {
   private readonly policy: CompiledPolicy
   private readonly ledger: PolicyLedger
   private readonly budgets: ReadonlyMap<string, PolicyBudgetConfig>
+  private readonly toolDefaultEffect: 'deny' | 'allow'
   private readonly initiators = new WeakMap<Agent, BoundInitiator>()
   private active = true
 
@@ -156,10 +174,12 @@ export class AssistantPolicyService extends Service {
     }
     this.policy = compilePolicy(config.rules ?? [])
     this.budgets = compileBudgets(config.budgets ?? [])
+    this.toolDefaultEffect = config.toolDefaultEffect ?? 'deny'
     this.ledger = new PolicyLedger({
       path: config.databasePath,
       ...(options.now === undefined ? {} : { now: options.now }),
     })
+    registerAutoReviewAnswerer(ctx, config.autoReview)
 
     ctx.effect(() => () => {
       this.active = false
@@ -180,6 +200,22 @@ export class AssistantPolicyService extends Service {
       }, 'assistant-policy.proposal-maintenance')
     }
     ctx.inject(['tools'], (toolsCtx) => {
+      toolsCtx.on('tools/pre-execute', async (execution, next) => {
+        const agent = execution.agent
+        const workspace = agent?.session.header.cwd
+        if (agent === undefined || workspace === undefined || !isAbsolute(workspace)) return next()
+        if (getApprovalReviewer(agent.session) === 'none') return next()
+        const risk = classifyToolRisk({
+          name: execution.name,
+          arguments: execution.arguments,
+          workspace,
+        })
+        if (risk === 'allow' || risk === 'defer-native-approval') return next()
+        return {
+          kind: 'ask',
+          reason: risk === 'ask-review' ? AUTO_REVIEW_APPROVAL_REASON : HUMAN_APPROVAL_REASON,
+        }
+      })
       toolsCtx.tools.guard(createPolicyToolGuard(this))
     })
   }
@@ -447,14 +483,30 @@ export class AssistantPolicyService extends Service {
       resource: { kind: 'tool', id: execution.name },
       context: { initiator: this.initiators.get(agent)?.value ?? 'foreground' },
     }
-    return this.authorize(request, {
-      idempotencyKey: `tool:${String(execution.rootCallId)}:${String(execution.callId)}`,
-      auditDetails: {
+    let decision = this.evaluate(request)
+    if (decision.reasonCode === 'default-deny' && this.toolDefaultEffect === 'allow') {
+      decision = { effect: 'allow', reasonCode: 'tool-default-allow', ruleId: undefined }
+    }
+    if (decision.effect === 'allow' && decision.budget !== undefined) {
+      decision = this.consumeAuthorizationBudget(
+        request.subject,
+        decision,
+        `tool:${String(execution.rootCallId)}:${String(execution.callId)}`,
+      )
+    }
+    this.ledger.appendAudit({
+      actor: `${request.subject.kind}:${request.subject.id}`,
+      action: request.action,
+      resource: request.resource,
+      outcome: decision.effect === 'allow' ? 'allowed' : 'denied',
+      reasonCode: decision.reasonCode,
+      details: {
         callId: execution.callId,
         rootCallId: execution.rootCallId,
         arguments: execution.arguments,
       },
     })
+    return decision
   }
 
   private auditAgentIdentityFailure(

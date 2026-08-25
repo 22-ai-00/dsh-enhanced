@@ -819,8 +819,15 @@ class ResponseStreamProcessor {
     if (this.#createdResponseId !== undefined && this.#createdResponseId !== responseId) {
       throw protocolError('Codex private Responses changed its response id')
     }
-    if (response.end_turn !== undefined && typeof response.end_turn !== 'boolean') {
+    if (
+      response.end_turn !== undefined
+      && response.end_turn !== null
+      && typeof response.end_turn !== 'boolean'
+    ) {
       throw protocolError('Codex private Responses end-turn flag is invalid')
+    }
+    if (response.end_turn === false) {
+      throw protocolError('Codex private Responses requested an unsupported follow-up turn')
     }
 
     let incomplete = false
@@ -836,7 +843,7 @@ class ResponseStreamProcessor {
     }
 
     let terminalOutput: unknown[] | undefined
-    if (response.output !== undefined) {
+    if (response.output !== undefined && response.output !== null) {
       if (!Array.isArray(response.output) || !isLosslessJson(response.output)) {
         throw protocolError('Codex private Responses terminal output is invalid')
       }

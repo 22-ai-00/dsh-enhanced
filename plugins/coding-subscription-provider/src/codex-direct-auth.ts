@@ -4,10 +4,18 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
-import { version } from './version.js'
 
 export const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
 export const CODEX_OAUTH_REFRESH_URL = 'https://auth.openai.com/oauth/token'
+/**
+ * Private Responses routing is version-gated independently of this plugin's
+ * package version. These compatibility identifiers describe this reconstructed
+ * dialect; the deliberately minimal user agent is not byte-identical to the
+ * platform/terminal-qualified value emitted by the official Codex binary.
+ */
+export const CODEX_WIRE_ORIGINATOR = 'codex_cli_rs'
+export const CODEX_WIRE_CLIENT_VERSION = '0.149.1'
+export const CODEX_WIRE_USER_AGENT = `${CODEX_WIRE_ORIGINATOR}/${CODEX_WIRE_CLIENT_VERSION}`
 
 const CODEX_OAUTH_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 const MAX_AUTH_FILE_BYTES = 1024 * 1024
@@ -112,22 +120,28 @@ export class CodexCredentialStore {
     throwIfCallerAborted(signal)
     const original = await readCredentialFile(this.#authFile)
     const sessionId = randomUUID()
-    const first = await this.#postResponses(body, original, sessionId, signal)
+    const threadId = randomUUID()
+    const first = await this.#postResponses(body, original, sessionId, threadId, signal)
     if (first.status !== 401) return first
     discardBody(first)
     throwIfCallerAborted(signal)
 
     const onDisk = await readCredentialFile(this.#authFile)
+    if (onDisk.accountId !== original.accountId) {
+      throw new CodexDirectAuthError('Codex authentication account changed during unauthorized recovery')
+    }
     const credentials = credentialsChanged(original, onDisk)
       ? onDisk
       : await waitForSignal(this.#refreshOnce(original), signal)
-    return this.#postResponses(body, credentials, sessionId, signal)
+    assertSameAccount(original, credentials)
+    return this.#postResponses(body, credentials, sessionId, threadId, signal)
   }
 
   async #postResponses(
     body: string,
     credentials: CredentialSnapshot,
     sessionId: string,
+    threadId: string,
     signal: AbortSignal,
   ): Promise<Response> {
     throwIfCallerAborted(signal)
@@ -138,9 +152,12 @@ export class CodexCredentialStore {
       'content-type': 'application/json',
       accept: 'text/event-stream',
       'openai-beta': 'responses=v1',
-      originator: 'dsh-enhanced',
-      version,
-      session_id: sessionId,
+      originator: CODEX_WIRE_ORIGINATOR,
+      version: CODEX_WIRE_CLIENT_VERSION,
+      'user-agent': CODEX_WIRE_USER_AGENT,
+      'session-id': sessionId,
+      'thread-id': threadId,
+      'x-client-request-id': threadId,
     }))
     throwIfCallerAborted(signal)
     try {
@@ -246,7 +263,7 @@ export class CodexCredentialStore {
 
     for (let attempt = 0; attempt < MAX_PERSIST_ATTEMPTS; attempt += 1) {
       const current = await readCredentialFile(this.#authFile)
-      if (credentialsChanged(snapshot, current)) return current
+      if (credentialsChanged(snapshot, current)) return assertSameAccount(snapshot, current)
 
       const tokens: CredentialTokens = {
         ...current.document.tokens,
@@ -295,7 +312,7 @@ export class CodexCredentialStore {
         }
 
         const beforeRename = await readCredentialFile(this.#authFile)
-        if (credentialsChanged(snapshot, beforeRename)) return beforeRename
+        if (credentialsChanged(snapshot, beforeRename)) return assertSameAccount(snapshot, beforeRename)
         if (!sameFingerprint(current.fingerprint, beforeRename.fingerprint)) continue
 
         await assertTrustedParent(this.#authFile)
@@ -313,7 +330,7 @@ export class CodexCredentialStore {
         await rename(temporary, this.#authFile)
         temporaryExists = false
         await syncDirectory(directory)
-        return readCredentialFile(this.#authFile)
+        return assertSameAccount(snapshot, await readCredentialFile(this.#authFile))
       } catch (error: unknown) {
         if (error instanceof CodexDirectAuthError) throw error
         throw new CodexDirectAuthError('Could not securely update the Codex authentication file')
@@ -581,6 +598,16 @@ function credentialsChanged(left: CredentialSnapshot, right: CredentialSnapshot)
     || left.refreshToken !== right.refreshToken
     || left.idToken !== right.idToken
     || left.accountId !== right.accountId
+}
+
+function assertSameAccount(
+  expected: CredentialSnapshot,
+  candidate: CredentialSnapshot,
+): CredentialSnapshot {
+  if (candidate.accountId !== expected.accountId) {
+    throw new CodexDirectAuthError('Codex authentication account changed during unauthorized recovery')
+  }
+  return candidate
 }
 
 function refreshFlightKey(path: string, snapshot: CredentialSnapshot): string {

@@ -189,6 +189,48 @@ describe('Codex private Responses transport', () => {
     expect(cancelled).toHaveBeenCalledTimes(1)
   })
 
+  it('treats nullable completed fields as absent and replays authoritative done items', async () => {
+    const doneItem = {
+      type: 'message',
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'nullable private terminal' }],
+    }
+    const dependencies = directDependencies(sse([
+      { type: 'response.output_item.done', item: doneItem },
+      {
+        type: 'response.completed',
+        response: { id: 'resp-nullable-terminal', output: null, end_turn: null },
+      },
+    ]))
+
+    const chunks = await collect(runCodexDirectResponses(request([user('hello')]), dependencies))
+
+    expect(chunks).toContainEqual({
+      type: 'finish',
+      reason: { kind: 'stop' },
+      replayState: {
+        response: expect.objectContaining({
+          responseId: 'resp-nullable-terminal',
+          output: [doneItem],
+        }),
+      },
+    })
+  })
+
+  it('fails closed when a completed response explicitly requires a follow-up turn', async () => {
+    const output = [{
+      type: 'message', id: 'msg-needs-follow-up', role: 'assistant',
+      content: [{ type: 'output_text', text: 'Partial answer' }],
+    }]
+    const dependencies = directDependencies(sse([{
+      type: 'response.completed',
+      response: { ...completedResponse(output), end_turn: false },
+    }]))
+
+    await expect(collect(runCodexDirectResponses(request([user('hello')]), dependencies)))
+      .rejects.toMatchObject({ cause: 'protocol' })
+  })
+
   it('accepts the official private function-call done shape and preserves it exactly for replay', async () => {
     const doneItem = {
       type: 'function_call',

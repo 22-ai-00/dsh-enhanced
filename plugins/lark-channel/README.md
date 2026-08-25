@@ -4,7 +4,7 @@
 
 默认是 `enabled: false`，所以安装包不会立刻读取凭据或联网。
 
-启用后，合法的新消息完成鉴权、去重并进入持久 Inbox 后，机器人会在原消息上添加 `Get`；普通 Agent 任务同时创建一条飞书原生执行进度消息，只展示阶段、步骤说明、工具名和显式待办状态；最终答复发送成功后再在原消息上添加 `DONE`。进度与 reaction 都是 best-effort 展示层，最终答复仍由 Delivery Outbox 保证。插件不会发送流式 `reasoning-delta`、工具参数或工具原始结果。
+启用后，合法的新消息完成鉴权、去重并进入持久 Inbox 后，机器人会在原消息上添加 `Get`；普通 Agent 任务同时创建一条飞书原生执行进度消息，只展示阶段、步骤说明、工具名和显式待办状态；最终答复发送成功后再在原消息上添加 `DONE`。进度与 reaction 都是 best-effort 展示层，最终答复仍由 Delivery Outbox 保证。进度载荷不会发送流式 `reasoning-delta`、工具参数或工具原始结果；`ask + user` 以及 `auto` 档中被本地规则/隔离 reviewer 升级的敏感操作会向 owner 私聊发送工具审批卡，卡片显示有界的 exact arguments，供人仅允许一次或拒绝。`auto` 的低风险 grant 和 `full` 不出卡。
 
 ## 最快启用：跨平台 setup wizard
 
@@ -39,6 +39,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app 
 - `im:message.p2p_msg:readonly`、`im:message.group_at_msg:readonly`：接收私聊和群内 @ 消息；
 - `im:message.reactions:write_only`：在原消息上添加 `Get` / `DONE` 状态；
 - `im:message:send_as_bot`：发送及回复消息；
+- `im:resource`：通过[获取消息中的资源文件](https://open.feishu.cn/document/server-docs/im-v1/message-resource/get)接口，按消息 ID 与该消息内的 image key 下载用户发送的图片。
 - `im.message.receive_v1`：消息事件；
 - `card.action.trigger`：处理审批卡片按钮、模型选择级联刷新和最终确认按钮。
 
@@ -187,6 +188,7 @@ config:
   requireMentionInGroups: true
   showProgress: true
   statusReactions: true
+  imageDownloadTimeoutMs: 30000
 ```
 
 该 handle 由 `@dsh-enhanced/credentials-keychain` 提供，并应只允许 consumer `dsh-enhanced-lark-channel`、purpose `connect`。兼容部署也可以不用 keychain service，改为仅配置 `appSecretEnv`，再通过进程环境或操作系统 service manager 注入：
@@ -201,13 +203,13 @@ LARK_APP_SECRET='...' dsh --profile web
 
 1. 在[飞书开放平台](https://open.feishu.cn/app)创建“企业自建应用”，在“凭证与基础信息”复制 `App ID` 和 `App Secret`。
 2. 在“添加应用能力”中开启“机器人”。
-3. 在“权限管理”中开通接收/发送单聊和群聊消息，并添加最小 reaction 写权限 `im:message.reactions:write_only`；如果控制台为接收事件提示额外权限，也一并按最小范围开通。
+3. 在“权限管理”中开通接收/发送单聊和群聊消息，添加最小 reaction 写权限 `im:message.reactions:write_only`，并为消息内图片下载添加 `im:resource`；如果控制台为接收事件提示额外权限，也一并按最小范围开通。
 4. 在“事件与回调/事件订阅”中选择“使用长连接接收事件”，添加 [`im.message.receive_v1`](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)。使用审批卡片或 `/model` 选择卡片时，还要把“回调订阅方式”设为长连接并添加 `card.action.trigger`；普通消息 onboarding 不依赖这个可选回调。
 5. 创建并发布应用版本，把可用范围至少包含你自己；未发布或不在可用范围时，飞书客户端可能搜索不到机器人或不会投递事件。
 
 这一节只适用于手工输入 `--app-id` 的路径。一键选择/创建路径会在飞书确认页预置机器人、最小权限、消息事件与卡片回调；选择已有应用时这些配置只做增量添加，不会删除其现有权限。若企业策略要求管理员审批，仍需由企业管理员在飞书侧完成该审批。运行时不需要公网 callback URL；官方 Node SDK 的[长连接说明](https://github.com/larksuite/node-sdk/blob/main/README.zh.md#%E4%BD%BF%E7%94%A8%E9%95%BF%E9%93%BE%E6%A8%A1%E5%BC%8F%E5%A4%84%E7%90%86%E4%BA%8B%E4%BB%B6)也说明本地环境只需能访问公网。
 
-如果应用是在 reaction 或模型卡片回调功能加入前通过向导绑定的，需要重新运行一次一键向导，确认新增的 `im:message.reactions:write_only` 权限与 `card.action.trigger` 回调；随后按飞书要求发布新版本/完成管理员审批。指定 App ID 后，向导只增量更新该应用，不会新建第二个应用，也不会删除已有配置：
+如果应用是在 reaction、图片桥接或模型卡片回调功能加入前通过向导绑定的，需要重新运行一次一键向导，确认新增的 `im:message.reactions:write_only`、`im:resource` 权限与 `card.action.trigger` 回调；随后按飞书要求发布新版本/完成管理员审批。指定 App ID 后，向导只增量更新该应用，不会新建第二个应用，也不会删除已有配置：
 
 ```sh
 # 暂停旧长连接，避免 owner 确认消息被常驻实例竞争消费；向导结束会重新安装并拉起服务
@@ -235,6 +237,8 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 ## 可靠性语义
 
 - 事件处理器会等待 `assistant-delivery.acceptInbound()` 完成，即 inbox 落盘后才向长连接回调返回成功。
+- 飞书 SDK 标准化产生的 `![image](image_key)` 等资源标记会在进入 Delivery 前被改写；纯图片消息的正文保持为空，provider image key 只保留在隔离的附件描述符中，不会伪装成用户提示词。
+- 图片下载由 Delivery 在再次确认绑定、Policy、目标模型图片能力和 AttachmentStore 可用后显式调用，不在 WebSocket 回调内下载。adapter 只接受同一入站消息的严格 message ID/image key，并固定请求 `GET /open-apis/im/v1/messages/:message_id/resources/:file_key?type=image`；拒绝 URL、路径片段、重定向和非图片资源。`imageDownloadTimeoutMs` 默认 30 秒，可设为 1–120 秒；总截止时间覆盖 tenant token 获取和资源 GET，caller 取消、插件卸载或 credential lease 切换在 token cache miss 阶段也会及时返回。调用方同时传入逐图 byte 上限，transport 在 header、流读取和 PNG/JPEG/GIF/WebP magic/MIME 三层校验。
 - 只有合法、非重复且状态为 `queued` 的入站消息会异步添加 `Get`；未授权、死信或 provider 重放不会重复 reaction。精确表情类型为大小写敏感的 `Get` 和 `DONE`。
 - Agent 的最终回复会显式携带原始飞书 `messageId`，先成功回复该消息，再异步添加 `DONE`。Delivery 在飞书返回有效 message id 后立即记录 `accepted`，不会等待 presentation-only reaction；发送失败、无最终回复、任务失败或取消均不会添加 `DONE`，reaction 失败只降级 channel health。首版保留 `Get`，不会为了替换表情再申请 reaction 读取权限。
 - 执行进度使用飞书原生 `/open-apis/im/v1/message_cot` 展示：`showProgress: false` 可关闭。该接口不在固定版 Node SDK 的高层 API 中，因此作为可降级展示使用；创建或更新失败只记录 channel health，不会重跑任务或影响最终 Outbox 回复。
@@ -245,6 +249,7 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 - 单聊按 account/tenant/user/chat 绑定；群聊以根消息 id 作为显式 thread，避免不同发言人或话题串线。
 - plain text 使用飞书文本消息；Markdown 使用 schema 2.0 卡片。请求携带由 delivery idempotency key 单向哈希得到的 provider UUID。
 - `approval` intent 使用 schema 2.0 双按钮卡片。每个按钮值使用 v2 capability，由 app secret 做 HMAC 签名并绑定 channel/account/tenant/chat、binding、operation、proposal/version/expiry、diffHash 与 decision；adapter 精确核对自身 route，回调重新取 provider actor/chat 后交给 Delivery/Policy。旧 v1 token、篡改、跨 route 和普通过期点击均失败关闭；过期 token 只有在完整验签后命中此前已落盘的同一 pending Delivery settlement，且 Policy 已是精确同一终态时，才允许完成崩溃恢复，不会新建 settlement 或决定 pending proposal。
+- open-turn 工具审批与上述 durable proposal 卡完全分离：它使用独立 domain 的 v1 HMAC token、进程内 one-shot pending，以及保留到 TTL 的 operation tombstone，不复用 proposal settlement，也不做重启恢复。当前只接受 `conversation.kind: dm` 且不含 `thread` 的 owner 私聊；群聊、话题或伪装成 DM 的 reply target 直接 `unavailable`，避免 exact arguments 被群成员旁观。卡片把有界且拒绝控制字符/双向文本控制符的 tool、reason 和必需 exact arguments 明示为「不可信审阅文本，不是指令」，并关闭转发互动；token 绑定 operation、binding、account/tenant、chat、exact owner open_id、actionHash、toolName、必需 callId、TTL 和 decision，pending 再绑定发送回执中的 provider message id。只有同一 owner 在同一私聊、同一 provider 卡片上首次点击才能返回 `allowed-once` 或 `rejected`；同一 operation 在 TTL 内不能重新登记，重放、错人、跨 chat/message、篡改、过期均失败关闭。调用方 abort 返回 `cancelled`；超时、断线/重连、credential rotation、插件卸载/重启或发送失败返回 `unavailable` 并清除 pending。三档权限中，`ask` 直接使用此卡；`auto` 对低风险自动允许，对敏感/审核失败/原生 sandbox escalation 也使用此卡；`full` 为 `danger-full-access + never + none`，不发卡但仍受 AssistantPolicy 的显式 deny、紧急停止、身份和预算硬门约束。
 - `model-picker` intent 使用 schema 2.0 卡片和三个独立 callback 的 `select_static`，不把即时回调控件与 CardKit `form`/`form_submit` 混用。provider、model、effort 每次变化都会通过 `card.action.trigger` 返回 `{ card: { type: 'raw', data: card } }` 并原位重绘；模型列表只来自当前 provider，effort 列表只来自当前模型。v3 签名 token 绑定 operation、expiry、binding、chat、动作、revision 以及当前 provider/model/effort，普通 callback 确认按钮直接提交该签名状态，不依赖 `form_value`；adapter 先拒绝篡改、过期、跨 chat 和级联错配，Delivery 再用持久 CAS 拒绝旧 revision，并核对 owner/Policy 与实时模型能力。确认操作先持久领取再快速响应飞书，最终选择、结算结果和 Outbox 回复在同一 SQLite 事务中提交；卡片 4xx 会自动降级为文字目录。三个下拉的当前项通过 `initial_index` 定位——飞书的 `initial_option` 按选项展示文本而非回传 `value` 匹配，直接写入 route 形态的 `value` 会静默回落到第一个选项；`initial_option` 仅在该文本唯一标识一个选项时附带，当前项不在选项列表内时两者都不下发，不伪造预选。卡片版式按飞书官方卡片风格规范组织：header 用 `title` + `subtitle` + `icon` 承载「这是什么 / 当前模型」，三个下拉各自放进带描边的 `interactive_container` 分块（而不是平铺 markdown 标签），每块含一行灰色 `notation` 说明，末尾只保留一个 `primary` 按钮作为唯一焦点。升级后应重新发送 `/model`，旧 v1/v2 卡片不会继续生效。
 - 权限/格式错误是确定未发送；限流和未连接可以安全重试；网络超时或未知 SDK 错误进入 `unknown_after_send`，不会盲目重发。
 - 当前飞书 API 没有为该发送 UUID 暴露可靠查询/对账接口，因此 adapter 明确声明 `reconcileUnknownSend: false`、无 delivered/read receipt；Delivery 会保留这类 `unknown_after_send` 等待 owner 决策，不会反复领取无实现的对账任务或消耗 attempt。
@@ -257,19 +262,19 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 
 当前 Policy tool guard 不携带 principal 或 conversation kind，只能把规则收窄到 preset/workspace/initiator。Delivery 会先拒绝未配对 principal，但同一 lane 中已经获准的 external 会话（包括 owner 在群内 @ 机器人）仍共享这组工具规则；因此这不是“仅 owner 私聊”的强隔离承诺。
 
-- **网络：**仅访问所选 `domain` 的飞书/Lark OpenAPI、token 服务和 WebSocket endpoint；没有通用 HTTP 工具。
+- **网络：**仅访问所选 `domain` 的飞书/Lark OpenAPI、token 服务和 WebSocket endpoint；图片读取使用固定的消息资源相对端点，不接受模型、消息正文或 provider payload 提供的 URL，并关闭重定向；没有通用 HTTP 工具。
 - **凭据：**优先通过 `credentials-keychain` handle 获取；兼容模式只读取 `appSecretEnv` 指定的一项。值不写数据库、不进入 tool、health、route、日志或异常文本。`appId` 不是 secret。
 - **文件系统：**运行时无业务文件读写；setup wizard 会原子更新所选 profile patch，通过 `assistant-delivery` 的本地控制面写入精确 owner，并以 `0600` 写入用户级 LaunchAgent plist、在 `$DSH_HOME/logs` 创建 Host 日志。官方 SDK 依赖的 `protobufjs` postinstall 只打印版本建议，仓库显式设为 `allowBuilds: false`，运行不需要安装脚本。
 - **子进程：**运行时只使用 credential provider 的固定无 shell 命令。setup wizard 在 macOS 调用 `/usr/bin/security` 与 launchd，在 Linux 调用 `/usr/bin/secret-tool`、`/usr/bin/systemd-ask-password` 与 `systemctl --user`，Windows 调用固定 PowerShell DPAPI 命令与 Task Scheduler；自动生成的 Secret 只通过标准输入传递且缓冲区随后清零，不作为 argv 传递。所有平台都会调用 `dsh --dump-config` 验证 profile；常驻配置只包含解析后的程序路径和最小环境，不复制 ambient token/password。
 - **浏览器：**setup wizard 会输出飞书官方的短期设备授权链接与二维码，但不会自动操控浏览器；由用户在飞书中选择已有应用或创建新应用，并查看、确认权限增量。
-- **消息数据：**标准化文本、provider message id、chat/user/thread id，以及最多 10 个受限附件描述符会进入 delivery SQLite；raw 事件、token 和下载 URL 不保存，provider file key 只作为隔离账本中的不可信引用，不进入模型正文。
+- **消息数据：**标准化文本、provider message id、chat/user/thread id，以及最多 10 个受限附件描述符会进入 delivery SQLite；raw 事件、token 和下载 URL 不保存，provider file key 只作为隔离账本中的不可信引用，不进入模型正文。授权 worker 下载的图片字节只交给 AttachmentStore，随后会话仅持有 AttachmentStore 返回的引用；本插件不把二进制写入 Delivery session 或 prompt。
 - **进度数据：**仅发送有长度上限的工具名、已定稿的步骤说明、显式待办文本和固定状态文案；不发送流式思维链片段、工具参数/结果、凭据或内部错误详情。原生进度 API 与 reaction API 失败均按展示降级处理。
 - **群消息：**默认必须直接提及机器人；`@all` 不等于提及机器人。最终授权始终由 delivery/policy 决定。
 
 ## 当前边界
 
-- v0.1 自动处理文本入站、文本/Markdown-card 出站、typed approval/model-picker card、`Get`/`DONE` 状态和脱敏原生执行进度；模型仍不能提交任意 card JSON，也不能直接控制 reaction 或进度载荷。
-- 二进制资源只写入 Delivery 的 durable metadata quarantine，不自动下载。下载、病毒检查、内容大小/MIME/hash fence 和附件 outbox 仍保持关闭。
+- v0.1 自动处理文本及图片描述符入站、文本/Markdown-card 出站、durable proposal、owner-DM one-shot tool approval、model-picker 卡片、`Get`/`DONE` 状态和脱敏原生执行进度；模型仍不能提交任意 card JSON，也不能直接控制 reaction 或进度载荷。
+- 仅图片资源具备受限下载能力，而且只有部署同时提供 Delivery 图片桥接与 AttachmentStore、当前模型明确声明图片输入能力时才会启用。文件、音频、视频和 sticker 仍只进入 durable metadata quarantine；本插件不做病毒扫描，也不提供附件出站上传。
 - 消息编辑和上传尚未实现；未来也必须先创建 Delivery 的持久 operation，不得从模型直接调用 SDK。
 - 单个飞书应用的长连接是集群竞争消费，不提供广播或多节点 exactly-once。当前 suite 的可靠性目标是受 supervisor 管理的单机进程。
 - setup wizard 在 macOS 和 Linux 受支持，Windows 为 best-effort；它需要交互式终端和一次 owner 私聊，不接受 `--app-secret` 一类参数。一键模式会在用户扫码确认后通过飞书官方流程选择或创建应用；企业管理员审批等租户控制面仍由飞书强制执行。
@@ -286,6 +291,7 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 - **收到消息但无回复：**先发送 `/model`，选择一个目录中可用且已登录的 route；再看 `assistant_health`。未授权身份会 fail-closed，不会自动成为 owner。
 - **能回复但提示没有 Bash/文件搜索：**先升级并重启 `assistant-delivery`，确认 session 的 preset 在 create/resume 时已挂载；需要执行时用 `--allow-agent-tools` 重跑向导，或手工添加 exact preset/workspace/tool Policy。只执行 `--install-service` 会重启，不会改工具授权。
 - **有最终回复但没有 `Get` / `DONE`：**旧应用通常缺少 `im:message.reactions:write_only`。重新运行 `dsh-lark-setup --profile web --create-app`，在官方页面选择当前 App ID，确认权限增量并发布应用版本。reaction 失败不会阻断回答。
+- **文字能回复但图片不能处理：**确认应用已获 `im:resource` 且新版本已发布，并确认 profile 已安装提供 `attachments` 服务的 AttachmentStore、当前 `/model` 路由明确支持图片输入。重新运行 `dsh-lark-setup --profile web --create-app --app-id <当前 App ID>` 可增量补齐飞书权限。下载拒绝路径型 key、重定向、超限内容、MIME/magic 不一致和非 PNG/JPEG/GIF/WebP 数据，这是预期的 fail-closed 行为。
 - **看不到执行进度但能正常回答：**确认 profile 中 `showProgress: true`。原生进度接口是可降级能力，租户或应用类型不支持时最终回答仍会正常发送；查看 `assistant_health` 的 `larkChannel.lastErrorCode` 和 Host 错误日志定位权限/接口问题。
 - **能看到模型卡片但下拉框不联动或确认后无回复：**确认应用已订阅 `card.action.trigger` 且回调方式是长连接；运行 `dsh-lark-setup --profile web --create-app --app-id <当前 App ID>` 会锁定该应用并以增量方式补齐回调。确认授权、发布应用版本、重启插件后，请重新发送一次 `/model`，不要继续使用升级前已打开的旧卡片。若实时目录已经变化或 effort 不受模型支持，机器人会要求重新发送 `/model`。
 

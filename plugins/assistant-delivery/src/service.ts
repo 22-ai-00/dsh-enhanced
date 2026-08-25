@@ -3,11 +3,16 @@ import { isAbsolute } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import Schema from '@deepseek-ai/schemastery'
-import type {
-  ApprovalDispatchRoute,
-  AssistantPolicyService,
-  PolicyDecision,
+import {
+  approvalReviewerOf,
+  isAutoReviewEscalation,
+  type ApprovalReviewer,
+  type ApprovalDispatchRoute,
+  type AssistantPolicyService,
+  type PolicyDecision,
 } from '@dsh-enhanced/assistant-policy'
 import {
   DeliveryAdapterRegistry,
@@ -17,12 +22,14 @@ import {
 } from './coordinator.js'
 import { DeliveryStore, DeliveryStoreError } from './store.js'
 import { DshDeliveryRuntime } from './agent-runtime.js'
+import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
 import { externalPrincipalId } from './canonical.js'
 import type {
   ConversationBinding,
   ConversationRef,
   DeliveryAdapter,
+  DeliveryToolApprovalRequest,
   ExternalPrincipalKey,
   InboundEnvelope,
   InboxRecord,
@@ -55,6 +62,7 @@ export interface Config {
   toolCapableProviders?: string[]
   agentMaxOutputTokens?: number
   modelPickerTtlMs?: number
+  toolApprovalTtlMs?: number
 }
 
 export interface DeliveryInboundRuntime extends InboundMessageProcessor {
@@ -103,6 +111,7 @@ const configSchema = Schema.object({
   ).default(['deepseek-official']),
   agentMaxOutputTokens: Schema.number().step(1).min(1).default(8_192),
   modelPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
+  toolApprovalTtlMs: Schema.number().step(1).min(1_000).max(300_000).default(300_000),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' {
@@ -169,6 +178,126 @@ function isModelSelectionPayload(value: unknown): value is ModelSelectionPayload
     && Number.isSafeInteger(payload.expectedRevision)
 }
 
+const toolApprovalArgumentBytes = 16 * 1024
+const toolApprovalIdentityBytes = 512
+const toolApprovalReasonBytes = 2 * 1024
+const permissionEventTypes = [
+  'permission/preset',
+  'sandbox/mode',
+  'approval/policy',
+  'assistant-policy/approval-reviewer',
+] as const
+const approvalOutcomes = ['allowed-once', 'rejected', 'cancelled', 'unavailable'] as const
+
+function currentPermissionEvents(agent: Agent): ReadonlyArray<unknown> {
+  const latest = new Map<string, unknown>()
+  for (const event of agent.session.events) {
+    const type = String(event.type)
+    if (!(permissionEventTypes as readonly string[]).includes(type)) continue
+    latest.set(type, { seq: event.seq, type, data: event.data })
+  }
+  return permissionEventTypes.map(type => latest.get(type) ?? null)
+}
+
+function signalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true
+}
+
+interface ToolApprovalAuthority {
+  adapter: DeliveryAdapter
+  binding: ConversationBinding
+  policyEmergencyVersion: number
+  reviewRoute: 'auto-escalation' | 'user'
+  routeKind: 'delegated' | 'direct'
+  routeToken?: symbol
+  actionHash: string
+  arguments: string
+  callId: string
+}
+
+interface ToolApprovalCallFact {
+  seq: number
+  name: string
+  arguments: string
+  hashIdentity: readonly unknown[]
+}
+
+type ToolApprovalRoute =
+  | { state: 'none' | 'invalid' }
+  | { state: 'bound'; binding: ConversationBinding; kind: 'delegated' | 'direct'; token?: symbol }
+
+function sameToolApprovalAuthority(
+  left: Readonly<ToolApprovalAuthority>,
+  right: Readonly<ToolApprovalAuthority> | undefined,
+): boolean {
+  return right !== undefined
+    && right.adapter === left.adapter
+    && right.binding.id === left.binding.id
+    && right.binding.version === left.binding.version
+    && right.binding.generation === left.binding.generation
+    && right.policyEmergencyVersion === left.policyEmergencyVersion
+    && right.reviewRoute === left.reviewRoute
+    && right.routeKind === left.routeKind
+    && right.routeToken === left.routeToken
+    && right.actionHash === left.actionHash
+}
+
+function serializeCodeDispatchArguments(value: unknown): string | undefined {
+  try {
+    const serialized = JSON.stringify(value)
+    return typeof serialized === 'string' ? serialized : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function exactToolApprovalCall(
+  events: readonly SessionEvent[],
+  openTurn: SessionEvent<'turn/start'>,
+  callId: string,
+  toolName: string,
+): ToolApprovalCallFact | undefined {
+  const matches: ToolApprovalCallFact[] = []
+  let settled = false
+  for (const event of events) {
+    if (event.seq <= openTurn.seq) continue
+    if (event.type === 'tool/call'
+      && event.data.turn === openTurn.data.turn
+      && String(event.data.callId) === callId) {
+      matches.push({
+        seq: event.seq,
+        name: event.data.name,
+        arguments: event.data.arguments,
+        hashIdentity: ['tool/call', event.seq, event.data.turn, event.data.step,
+          callId, event.data.name, event.data.arguments],
+      })
+    }
+    if (event.type === 'tool/code-dispatch-start' && String(event.data.subCallId) === callId) {
+      const rootCallId = String(event.data.rootCallId)
+      const parentCallId = String(event.data.parentCallId)
+      const argumentsJson = serializeCodeDispatchArguments(event.data.arguments)
+      if (argumentsJson === undefined
+        || Buffer.byteLength(rootCallId) > toolApprovalIdentityBytes
+        || Buffer.byteLength(parentCallId) > toolApprovalIdentityBytes) return undefined
+      matches.push({
+        seq: event.seq,
+        name: event.data.name,
+        arguments: argumentsJson,
+        hashIdentity: ['tool/code-dispatch-start', event.seq, rootCallId, parentCallId,
+          callId, event.data.name, argumentsJson],
+      })
+    }
+    if (event.type === 'tool/result'
+      && String(event.data.message.source.callId) === callId) settled = true
+    if (event.type === 'tool/code-dispatch'
+      && String(event.data.subCallId) === callId) settled = true
+  }
+  const exact = matches.length === 1 ? matches[0] : undefined
+  if (exact === undefined || settled || exact.name !== toolName
+    || Buffer.byteLength(exact.arguments) > toolApprovalArgumentBytes) return undefined
+  return exact
+}
+
 export class AssistantDeliveryService extends Service {
   static Config = configSchema
 
@@ -181,6 +310,7 @@ export class AssistantDeliveryService extends Service {
   private readonly ownerId = `assistant-delivery-${randomUUID()}`
   private readonly bindingFlights = new Map<string, Promise<ConversationBinding>>()
   private readonly agentApprovalBindings = new WeakMap<Agent, { bindingId: string; token: symbol }>()
+  private readonly toolApprovalControllers = new Set<AbortController>()
   private modelSelectionFlight: Promise<void> | undefined
   private modelSelectionRetryTimer: ReturnType<typeof setTimeout> | undefined
   private runtime: DeliveryInboundRuntime | undefined
@@ -215,6 +345,12 @@ export class AssistantDeliveryService extends Service {
         this.deliveryStore.recordReceipt(receipt)
       },
     })
+    const imageMaterializer = new InboundImageMaterializer({
+      store: this.deliveryStore,
+      registry: this.registry,
+      getAttachments: () => ctx.get('attachments'),
+      isAuthorized: (binding, envelope) => this.isInboundAuthorized(binding, envelope),
+    })
     this.outbound = new DeliveryCoordinator({ store: this.deliveryStore, registry: this.registry,
       ownerId: this.ownerId, leaseMs: config.leaseMs, maxAttempts: config.maxAttempts,
       maxConcurrency: config.maxConcurrency, retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs })
@@ -229,6 +365,9 @@ export class AssistantDeliveryService extends Service {
         toolCapableProviders: new Set(config.toolCapableProviders),
         modelPickerTtlMs: config.modelPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
+        imageMaterializer,
+        isInboundAuthorized: (binding, envelope) => this.isInboundAuthorized(binding, envelope),
+        isPermissionController: (binding, envelope) => this.isPermissionController(binding, envelope),
         beginModelCommand: conversation => this.deliveryStore.beginModelCommand(conversation),
         commitModelCommand: input => this.deliveryStore.commitModelCommand(input),
         progress: async (binding, eventId, update) => {
@@ -258,10 +397,15 @@ export class AssistantDeliveryService extends Service {
       void this.drainModelSelectionSettlements()
       return unregister
     })
+    ctx.inject(['approval'], approvalCtx => approvalCtx.on('approval/request', (request, next) =>
+      this.requestToolApproval(approvalCtx, request, next)))
     ctx.inject(['tools'], toolsCtx => registerDeliveryTools(toolsCtx, this))
     if (config.schedulerEnabled) this.start()
     ctx.effect(() => async () => {
       this.active = false
+      for (const controller of this.toolApprovalControllers) {
+        controller.abort(new Error('assistant-delivery is stopping'))
+      }
       await this.stopInternal()
       await this.registry.stop()
       this.deliveryStore.close()
@@ -567,6 +711,280 @@ export class AssistantDeliveryService extends Service {
     return { ...this.deliveryStore.health(), adapters: this.registry.size() }
   }
 
+  private isInboundAuthorized(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): boolean {
+    if (!this.active) return false
+    const current = this.deliveryStore.getBinding(binding.id)
+    const active = this.deliveryStore.getActiveBinding(envelope.conversation)
+    const principal = this.deliveryStore.getPrincipal(envelope.principal)
+    const envelopePrincipal = externalPrincipalId(envelope.principal)
+    if (current?.status !== 'active'
+      || active?.id !== current.id
+      || current.version !== binding.version
+      || current.sessionId !== binding.sessionId
+      || current.generation !== binding.generation
+      || principal?.status !== 'active'
+      || externalPrincipalId(current.principal) !== envelopePrincipal
+      || externalPrincipalId(binding.principal) !== envelopePrincipal
+      || JSON.stringify(current.conversation) !== JSON.stringify(envelope.conversation)
+      || envelope.channel !== current.conversation.channel
+      || envelope.account !== current.conversation.account) {
+      return false
+    }
+    return this.policy.evaluate({
+      subject: { kind: 'external', id: envelopePrincipal },
+      action: 'ingest',
+      resource: { kind: 'message', id: `inbound:${envelope.channel}/${envelope.account}` },
+      context: { initiator: 'external' },
+    }).effect === 'allow'
+  }
+
+  private isPermissionController(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): boolean {
+    if (!this.isInboundAuthorized(binding, envelope)) return false
+    const principal = this.deliveryStore.getPrincipal(binding.principal)
+    return principal?.status === 'active' && principal.role === 'owner'
+  }
+
+  private hasActivePrincipal(binding: Readonly<ConversationBinding>): boolean {
+    return this.deliveryStore.getPrincipal(binding.principal)?.status === 'active'
+  }
+
+  private toolApprovalRoute(agent: Agent): ToolApprovalRoute {
+    const direct = this.deliveryStore.getBindingBySession(String(agent.session.id))
+    const delegatedEntry = this.agentApprovalBindings.get(agent)
+    const delegated = delegatedEntry === undefined
+      ? undefined
+      : this.deliveryStore.getBinding(delegatedEntry.bindingId)
+    if (direct === undefined && delegatedEntry === undefined) return { state: 'none' }
+    if ((delegatedEntry !== undefined && delegated === undefined)
+      || (direct !== undefined && delegated !== undefined && direct.id !== delegated.id)) {
+      return { state: 'invalid' }
+    }
+    const binding = direct ?? delegated
+    if (binding?.status !== 'active') return { state: 'invalid' }
+    return direct === undefined
+      ? { state: 'bound', binding, kind: 'delegated', token: delegatedEntry!.token }
+      : { state: 'bound', binding, kind: 'direct' }
+  }
+
+  private resolveToolApprovalAuthority(ctx: Context, request: Readonly<ApprovalRequest>): ToolApprovalAuthority | undefined {
+    if (!this.active || request.callId === undefined) return undefined
+    const emergencyStop = this.policy.getEmergencyStop()
+    if (emergencyStop.enabled) return undefined
+    const agents = ctx.get('agents')
+    const sessions = ctx.get('sessions')
+    const agent = request.agent
+    const events = agent.session.events
+    const reviewer = approvalReviewerOf(events)
+    const reviewRoute = reviewer === 'user'
+      ? 'user'
+      : reviewer === 'auto-review' && isAutoReviewEscalation(request)
+        ? 'auto-escalation'
+        : undefined
+    const sessionId = String(agent.session.id)
+    const route = this.toolApprovalRoute(agent)
+    if (route.state !== 'bound') return undefined
+    const { binding } = route
+    if (agents === undefined || sessions === undefined
+      || String(agent.id) !== sessionId
+      || agents.get(agent.id) !== agent
+      || sessions.get(agent.id) !== agent.session
+      || (route.kind === 'direct' && binding.sessionId !== sessionId)
+      || agent.session.header.cwd !== binding.workspace
+      || agent.session.header.agentPreset !== binding.agentPreset
+      || binding.conversation.kind !== 'dm'
+      || reviewRoute === undefined) {
+      return undefined
+    }
+    const active = this.deliveryStore.getActiveBinding(binding.conversation)
+    const owner = this.deliveryStore.getPrincipal(binding.principal)
+    if (active?.id !== binding.id || active.version !== binding.version
+      || active.sessionId !== binding.sessionId || active.generation !== binding.generation
+      || JSON.stringify(active.principal) !== JSON.stringify(binding.principal)
+      || JSON.stringify(active.conversation) !== JSON.stringify(binding.conversation)
+      || owner?.status !== 'active' || owner.role !== 'owner'
+      || JSON.stringify(owner.principal) !== JSON.stringify(binding.principal)) {
+      return undefined
+    }
+    const callId = String(request.callId)
+    if (Buffer.byteLength(callId) > toolApprovalIdentityBytes
+      || Buffer.byteLength(request.toolName) > toolApprovalIdentityBytes
+      || (request.reason !== undefined && Buffer.byteLength(request.reason) > toolApprovalReasonBytes)) {
+      return undefined
+    }
+    const openTurn = events.findLast(event => event.type === 'turn/start' || event.type === 'turn/end')
+    if (openTurn?.type !== 'turn/start') return undefined
+    const call = exactToolApprovalCall(events, openTurn, callId, request.toolName)
+    if (call === undefined) return undefined
+    const decided = new Set(events.filter(event => event.type === 'approval/decided')
+      .map(event => String(event.data.id)))
+    const asked = events.filter((event): event is SessionEvent<'approval/asked'> => event.type === 'approval/asked'
+      && event.seq > call.seq
+      && event.seq > openTurn.seq
+      && event.data.toolName === request.toolName
+      && event.data.callId !== undefined
+      && String(event.data.callId) === callId
+      && event.data.reason === request.reason
+      && !decided.has(String(event.data.id)))
+    if (asked.length !== 1) return undefined
+    const ask = asked[0]!
+    const requestHeader = events.findLast(event => event.type === 'request/header')
+    const adapter = this.registry.get(binding.conversation.channel, binding.conversation.account)
+    if (adapter?.capabilities.toolApprovals !== true || adapter.requestToolApproval === undefined) return undefined
+    const header = agent.session.header
+    const actionHash = createHash('sha256').update(JSON.stringify([
+      'assistant-delivery/tool-approval',
+      3,
+      ['binding', binding.id, binding.version, binding.generation, binding.sessionId,
+        binding.workspace, binding.agentPreset, binding.policyRef,
+        [binding.conversation.channel, binding.conversation.account, binding.conversation.tenant,
+          binding.conversation.kind, binding.conversation.chat, binding.conversation.thread ?? null],
+        [binding.principal.channel, binding.principal.account, binding.principal.tenant, binding.principal.user]],
+      ['owner', owner.id, owner.version, owner.role, owner.status, owner.linkedToId ?? null,
+        [owner.principal.channel, owner.principal.account, owner.principal.tenant, owner.principal.user]],
+      ['session', header.version, sessionId, header.createdAt, header.cwd ?? null,
+        header.parentSession ?? null, header.seedLength ?? null, header.origin ?? null,
+        header.delegationDepth ?? null, header.agentPreset ?? null],
+      ['route-kind', route.kind],
+      ['review-route', reviewRoute],
+      ['turn', openTurn.seq, openTurn.data.turn],
+      ['call', ...call.hashIdentity],
+      ['ask', ask.seq, String(ask.data.id), ask.data.toolName, String(ask.data.callId), ask.data.reason ?? null],
+      ['request-route', requestHeader === undefined ? null : [requestHeader.seq,
+        requestHeader.data.header.config.provider, requestHeader.data.header.config.model,
+        requestHeader.data.header.config.reasoningEffort ?? null]],
+      ['reviewer', reviewer],
+      ['policy-emergency-stop', emergencyStop.version, emergencyStop.enabled],
+      ['permission-events', currentPermissionEvents(agent)],
+    ])).digest('hex')
+    return { adapter, binding, reviewRoute, routeKind: route.kind,
+      ...(route.token === undefined ? {} : { routeToken: route.token }),
+      policyEmergencyVersion: emergencyStop.version,
+      actionHash, arguments: call.arguments, callId }
+  }
+
+  private async requestToolApproval(
+    ctx: Context,
+    request: Readonly<ApprovalRequest>,
+    next: () => Promise<ApprovalOutcome>,
+  ): Promise<ApprovalOutcome> {
+    let initialRoute: ToolApprovalRoute
+    try {
+      initialRoute = this.toolApprovalRoute(request.agent)
+    } catch {
+      return 'unavailable'
+    }
+    if (initialRoute.state === 'none') return next()
+    let reviewer: ApprovalReviewer
+    try {
+      reviewer = approvalReviewerOf(request.agent.session.events)
+    } catch {
+      return 'unavailable'
+    }
+    const reviewRoute = reviewer === 'user'
+      ? 'user'
+      : reviewer === 'auto-review' && isAutoReviewEscalation(request)
+        ? 'auto-escalation'
+        : undefined
+    if (reviewRoute === undefined) return reviewer === 'auto-review' ? next() : 'unavailable'
+    if (initialRoute.state !== 'bound') return 'unavailable'
+    if (signalAborted(request.signal)) return 'cancelled'
+    let authority: ToolApprovalAuthority | undefined
+    try {
+      authority = this.resolveToolApprovalAuthority(ctx, request)
+    } catch {
+      return 'unavailable'
+    }
+    if (authority === undefined || authority.binding.id !== initialRoute.binding.id) return 'unavailable'
+    const sessions = ctx.get('sessions')
+    if (sessions === undefined) return 'unavailable'
+    try {
+      if (!await sessions.flush(request.agent.session)) return 'unavailable'
+    } catch {
+      return 'unavailable'
+    }
+    if (signalAborted(request.signal)) return 'cancelled'
+    let persisted: ToolApprovalAuthority | undefined
+    try {
+      persisted = this.resolveToolApprovalAuthority(ctx, request)
+    } catch {
+      return 'unavailable'
+    }
+    if (!sameToolApprovalAuthority(authority, persisted)) return 'unavailable'
+
+    const operationId = `tool-approval:${randomUUID()}`
+    const expiresAt = Date.now() + this.config.toolApprovalTtlMs
+    const controller = new AbortController()
+    let requestCancelled = false
+    const onRequestAbort = () => {
+      requestCancelled = true
+      controller.abort(request.signal?.reason)
+    }
+    request.signal?.addEventListener('abort', onRequestAbort, { once: true })
+    const aborted = new Promise<ApprovalOutcome>(resolve => {
+      controller.signal.addEventListener('abort', () => {
+        resolve(requestCancelled ? 'cancelled' : 'unavailable')
+      }, { once: true })
+    })
+    const timeout = setTimeout(() => {
+      controller.abort(new Error('assistant-delivery tool approval timed out'))
+    }, this.config.toolApprovalTtlMs)
+    timeout.unref?.()
+    this.toolApprovalControllers.add(controller)
+    const adapterRequest: DeliveryToolApprovalRequest = Object.freeze({
+      operationId,
+      bindingId: authority.binding.id,
+      target: Object.freeze({
+        conversation: Object.freeze({ ...authority.binding.conversation }),
+        principal: Object.freeze({ ...authority.binding.principal }),
+      }),
+      expiresAt,
+      actionHash: authority.actionHash,
+      toolName: request.toolName,
+      callId: authority.callId,
+      ...(request.reason === undefined ? {} : { reason: request.reason }),
+      arguments: authority.arguments,
+    })
+    let outcome: ApprovalOutcome
+    try {
+      const answer = Promise.resolve()
+        .then(() => authority!.adapter.requestToolApproval!(adapterRequest, controller.signal))
+        .then<ApprovalOutcome, ApprovalOutcome>(value => value, () => 'unavailable')
+      outcome = await Promise.race([answer, aborted])
+    } finally {
+      clearTimeout(timeout)
+      request.signal?.removeEventListener('abort', onRequestAbort)
+      this.toolApprovalControllers.delete(controller)
+    }
+    if (signalAborted(request.signal)) return 'cancelled'
+    if (controller.signal.aborted || !this.active || Date.now() >= expiresAt) return 'unavailable'
+    let current: ToolApprovalAuthority | undefined
+    try {
+      current = this.resolveToolApprovalAuthority(ctx, request)
+    } catch {
+      return 'unavailable'
+    }
+    if (current === undefined || !sameToolApprovalAuthority(authority, current)) return 'unavailable'
+    if (outcome === 'allowed-once') {
+      try {
+        // The tool guard ran before the native tool raised this approval. Do not
+        // consume its budget a second time, but do re-check the mutable hard stop
+        // as close as possible to releasing the owner's one-shot grant.
+        const emergencyStop = this.policy.getEmergencyStop()
+        if (emergencyStop.enabled) return 'rejected'
+        if (emergencyStop.version !== current.policyEmergencyVersion) return 'unavailable'
+      } catch {
+        return 'unavailable'
+      }
+    }
+    return (approvalOutcomes as readonly unknown[]).includes(outcome) ? outcome : 'unavailable'
+  }
+
   async acceptInbound(envelope: InboundEnvelope): Promise<{
     duplicate: boolean
     inboxId: string
@@ -618,7 +1036,7 @@ export class AssistantDeliveryService extends Service {
   }): OutboxRecord {
     this.assertActive()
     const binding = this.deliveryStore.getBinding(input.bindingId)
-    if (binding === undefined || binding.status !== 'active') {
+    if (binding === undefined || binding.status !== 'active' || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding does not exist or is revoked')
     }
     if (binding.workspace !== input.workspace) {
@@ -629,6 +1047,9 @@ export class AssistantDeliveryService extends Service {
     resource: { kind: 'message', id: binding.id }, context: { initiator: 'background' } },
     { idempotencyKey: `message-send:${input.idempotencyKey}` })
     if (decision.effect !== 'allow') throw policyDenied(decision)
+    if (!this.hasActivePrincipal(binding)) {
+      throw new AssistantDeliveryError('missing-binding', 'delivery binding principal is no longer active')
+    }
     return this.deliveryStore.enqueue({ idempotencyKey: input.idempotencyKey, bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
       format: input.format ?? 'plain' })
@@ -682,7 +1103,8 @@ export class AssistantDeliveryService extends Service {
   }): OutboxRecord {
     this.assertActive()
     const binding = this.deliveryStore.getBinding(bindingInput.id)
-    if (binding === undefined || binding.status !== 'active' || binding.sessionId !== bindingInput.sessionId) {
+    if (binding === undefined || binding.status !== 'active' || binding.sessionId !== bindingInput.sessionId
+      || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'control command binding does not exist or is no longer active')
     }
     const decision = this.policy.authorize({
@@ -692,6 +1114,9 @@ export class AssistantDeliveryService extends Service {
       context: { initiator: 'external' },
     }, { idempotencyKey: `message-reply:${input.idempotencyKey}` })
     if (decision.effect !== 'allow') throw policyDenied(decision)
+    if (!this.hasActivePrincipal(binding)) {
+      throw new AssistantDeliveryError('missing-binding', 'control command binding principal is no longer active')
+    }
     return this.deliveryStore.enqueue({
       idempotencyKey: input.idempotencyKey,
       bindingId: binding.id,
@@ -728,12 +1153,16 @@ export class AssistantDeliveryService extends Service {
     const binding = agent === undefined ? undefined : this.deliveryStore.getBindingBySession(String(agent.session.id))
     if (agent === undefined || binding === undefined || binding.status !== 'active'
       || agent.session.header.cwd !== binding.workspace
-      || agent.session.header.agentPreset !== binding.agentPreset) {
+      || agent.session.header.agentPreset !== binding.agentPreset
+      || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'Agent session is not bound to an active delivery route')
     }
     const decision = this.policy.authorizeAgent(agent, 'reply', { kind: 'message', id: binding.id },
       { idempotencyKey: `message-reply:${input.idempotencyKey}` })
     if (decision.effect !== 'allow') throw policyDenied(decision)
+    if (!this.hasActivePrincipal(binding)) {
+      throw new AssistantDeliveryError('missing-binding', 'Agent delivery principal is no longer active')
+    }
     return this.deliveryStore.enqueue({ idempotencyKey: input.idempotencyKey, bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
       format: this.replyFormat(binding.conversation, input.format) ?? 'plain',
@@ -838,11 +1267,12 @@ export class AssistantDeliveryService extends Service {
     const promise = (async () => {
       const current = this.deliveryStore.getActiveBinding(envelope.conversation)
       if (current !== undefined) return current
-      const created = await runtime.createSession({ envelope, generation: 1, signal: new AbortController().signal })
+      const generation = this.deliveryStore.nextBindingGeneration(envelope.conversation)
+      const created = await runtime.createSession({ envelope, generation, signal: new AbortController().signal })
       this.assertActive()
       return this.deliveryStore.createBinding({ conversation: envelope.conversation, principal: envelope.principal,
         workspace: created.workspace, agentPreset: created.agentPreset, sessionId: created.sessionId,
-        policyRef: created.policyRef })
+        policyRef: created.policyRef, expectedGeneration: generation })
     })().finally(() => this.bindingFlights.delete(key))
     this.bindingFlights.set(key, promise)
     return promise
@@ -858,7 +1288,11 @@ export class AssistantDeliveryService extends Service {
       const current = this.deliveryStore.getActiveBinding(envelope.conversation)
       if (current === undefined) throw new AssistantDeliveryError('missing-binding', 'active binding disappeared during /new')
       if (current.id !== previous.id) return current
-      const created = await runtime.createSession({ envelope, generation: current.generation + 1,
+      const generation = this.deliveryStore.nextBindingGeneration(envelope.conversation)
+      if (generation !== current.generation + 1) {
+        throw new AssistantDeliveryError('runtime-conflict', 'binding generation changed before /new session creation')
+      }
+      const created = await runtime.createSession({ envelope, generation,
         previous: current, signal: new AbortController().signal })
       this.assertActive()
       return this.deliveryStore.rotateBinding({ bindingId: current.id, expectedVersion: current.version,

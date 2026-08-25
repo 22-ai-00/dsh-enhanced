@@ -17,7 +17,7 @@
 
 安全默认值只启用 Codex 与 Cursor。Claude 因第三方分发政策边界默认关闭；Grok 因本地 per-model API Key 可覆盖 OAuth，默认关闭并要求用户先核验后显式确认。四条 connector 都包含在插件中。
 
-## 快速开始（5 步）
+## 快速开始（CLI transport，5 步）
 
 以启用 Codex 为例，最短路径如下：
 
@@ -29,9 +29,11 @@
 
 Claude / Grok 默认关闭，启用前请阅读下文「订阅认证优先」与「Claude 合规提示」。遇到报错先看下文「排查」表。
 
+如果只使用显式 opt-in 的 Codex `direct-responses`，生成和模型目录都不会启动 Codex CLI/App Server，也不要求 `codex` 可执行文件存在；但运行 DSH 的同一 POSIX 用户必须已经拥有安全的 `CODEX_HOME/auth.json` 或 `~/.codex/auth.json`。这通常由官方 Codex 登录流程产生，插件自身不提供登录 UI。
+
 ## 安装
 
-先分别安装需要的官方客户端，并由当前 OS 用户在客户端中完成登录。插件不会替用户打开登录页或接管 OAuth：
+CLI transport 先分别安装需要的官方客户端，并由当前 OS 用户在客户端中完成登录。Codex direct 可跳过客户端安装，但仍要求上述安全 auth 文件。插件不会替用户打开登录页或接管初始登录：
 
 ```sh
 codex login status
@@ -148,6 +150,7 @@ XAI_API_KEY
 
 - Codex CLI 模式只有 `codex login status` 精确报告 `Logged in using ChatGPT` 才运行，并以 `--ignore-user-config` 禁止真实生成被本地配置改路由到其他 API。模型发现会另启短生命周期 App Server，强制 `model_provider="openai"`，只执行 `initialize` 与 `model/list`，不会创建 thread 或 turn。
 - Codex direct 模式不运行 `codex login status` 或 App Server，而是安全读取 `CODEX_HOME/auth.json`；未设置 `CODEX_HOME` 时读取 `~/.codex/auth.json`。认证路径在启动时固定为绝对路径；文件及其父目录必须由当前 POSIX 用户拥有，父目录不能向 group/other 开放写权限，文件必须是单链接普通文件、不能是 symlink、不能向 group/other 开放权限，并且 `auth_mode` 必须是 `chatgpt`。读取有字节上限并校验前后元数据一致。凭据只用于固定的 Codex Responses 请求；插件不会向调用方暴露 bearer token。
+- direct 请求使用与固定官方快照核对过的 `session-id`、`thread-id` 和 `x-client-request-id` 兼容头；originator/version/user-agent 属于本插件固定的 reconstruction dialect 标识，并不冒充官方二进制逐字节相同的 OS/终端 user-agent。
 - direct 请求收到 401 时，插件会先重新读取磁盘以复用其他进程已刷新的 session；仍是原 token 时，才向固定 OAuth token endpoint 发起一次 refresh。同一进程内相同认证身份共享一次刷新；写回采用元数据 CAS、同目录 `0600` 临时文件、`fsync` 和原子 rename。随后原请求只重试一次；其他 HTTP 状态不会触发刷新。插件自身并发写受 CAS 保护，但无法强制不遵循同一约定的外部 Codex 进程参与原子比较写，因此跨进程冲突处理是 best-effort。错误与诊断不记录 token。
 - Claude 只有 `auth status --json` 报告 first-party `claude.ai` / `oauth_token` 才运行；目录发现只发送 Agent SDK `initialize` 控制帧并读取 `models`，不发送 user message。这是订阅 OAuth 来源的强启发式，不代表插件能证明具体套餐 entitlement。
 - Cursor 先要求 `status` 成功，再以 `--list-models` 发现目录；本次生成仍要求 `stream-json` 的 `system/init.apiKeySource` 为 `login`，`env`、`flag` 或缺失字段都会中止。

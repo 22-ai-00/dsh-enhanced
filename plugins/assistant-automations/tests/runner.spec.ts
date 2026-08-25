@@ -155,6 +155,10 @@ async function harness(options: {
   })
   let startupDecision: string | undefined
   ctx.on('agent/session-start', ({ agent: started }) => {
+    started.session.append('approval/policy', { policy: 'never' })
+    started.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
+    const append = started.session.append as unknown as (type: string, data: unknown) => unknown
+    append.call(started.session, 'sandbox/mode', { mode: 'danger-full-access' })
     startupDecision = ctx.assistantPolicy.authorizeAgent(started, 'startup', { kind: 'tool', id: 'allowed_tool' }).effect
   })
   let allowedCalls = 0

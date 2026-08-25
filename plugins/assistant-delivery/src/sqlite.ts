@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 6
+export const deliverySchemaVersion = 7
 
 const approvalDispatchCursorSchema = `
   CREATE TABLE approval_dispatch_cursor (
@@ -126,6 +126,47 @@ function migrate(database: DatabaseSync): void {
       BEGIN IMMEDIATE;
       ${approvalDispatchCursorSchema}
       PRAGMA user_version = 6;
+      COMMIT;
+    `)
+    version = 6
+  }
+  if (version === 6) {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      CREATE TABLE delivery_attachments_v7 (
+        id TEXT PRIMARY KEY,
+        owner_kind TEXT NOT NULL CHECK (owner_kind IN ('inbox', 'outbox')),
+        owner_id TEXT NOT NULL,
+        ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+        media_type TEXT NOT NULL,
+        size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+        sha256 TEXT NOT NULL,
+        spool_ref TEXT,
+        resource_kind TEXT,
+        provider_ref TEXT,
+        file_name TEXT,
+        status TEXT NOT NULL CHECK (status IN ('metadata', 'quarantined', 'ready', 'expired')),
+        expires_at INTEGER,
+        created_at INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO delivery_attachments_v7 (
+        id, owner_kind, owner_id, ordinal, media_type, size_bytes, sha256, spool_ref,
+        resource_kind, provider_ref, file_name, status, expires_at, created_at
+      )
+      SELECT attachment.id, attachment.owner_kind, attachment.owner_id,
+        ROW_NUMBER() OVER (
+          PARTITION BY attachment.owner_kind, attachment.owner_id
+          ORDER BY attachment.rowid
+        ) - 1,
+        attachment.media_type, attachment.size_bytes, attachment.sha256, attachment.spool_ref,
+        attachment.resource_kind, attachment.provider_ref, attachment.file_name, attachment.status,
+        attachment.expires_at, attachment.created_at
+      FROM delivery_attachments AS attachment;
+      DROP TABLE delivery_attachments;
+      ALTER TABLE delivery_attachments_v7 RENAME TO delivery_attachments;
+      CREATE UNIQUE INDEX delivery_attachment_owner_ordinal
+        ON delivery_attachments(owner_kind, owner_id, ordinal);
+      PRAGMA user_version = 7;
       COMMIT;
     `)
     return
@@ -285,6 +326,7 @@ function migrate(database: DatabaseSync): void {
       id TEXT PRIMARY KEY,
       owner_kind TEXT NOT NULL CHECK (owner_kind IN ('inbox', 'outbox')),
       owner_id TEXT NOT NULL,
+      ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
       media_type TEXT NOT NULL,
       size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
       sha256 TEXT NOT NULL,
@@ -296,6 +338,8 @@ function migrate(database: DatabaseSync): void {
       expires_at INTEGER,
       created_at INTEGER NOT NULL
     ) STRICT;
+    CREATE UNIQUE INDEX delivery_attachment_owner_ordinal
+      ON delivery_attachments(owner_kind, owner_id, ordinal);
 
     CREATE TABLE approval_settlements (
       operation_id TEXT PRIMARY KEY,
@@ -319,7 +363,7 @@ function migrate(database: DatabaseSync): void {
 
     ${approvalDispatchCursorSchema}
 
-    PRAGMA user_version = 6;
+    PRAGMA user_version = 7;
     COMMIT;
   `)
 }

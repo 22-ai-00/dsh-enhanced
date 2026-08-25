@@ -316,4 +316,23 @@ describe('assistant policy Cordis service', () => {
     })).toThrow(/assistant-policy.*configuration/i)
     await ctx.fiber.restart()
   })
+
+  test('rejects invalid tool defaults and auto-review resource bounds', async () => {
+    for (const config of [
+      { toolDefaultEffect: 'prompt' },
+      { autoReview: { timeoutMs: 0 } },
+      { autoReview: { maxTokens: 4_097 } },
+      { autoReview: { provider: '' } },
+      { autoReview: { model: '' } },
+    ]) {
+      const ctx = new Context()
+      const path = await databasePath()
+      expect(() => new AssistantPolicyService(ctx, {
+        databasePath: path,
+        rules: [],
+        ...config,
+      } as never)).toThrow(/assistant-policy.*configuration/i)
+      await ctx.fiber.restart()
+    }
+  })
 })

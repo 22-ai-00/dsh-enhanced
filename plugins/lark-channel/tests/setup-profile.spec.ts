@@ -68,6 +68,7 @@ describe('Lark Web-profile onboarding patch', () => {
       credentialHandle: 'lark-app-secret-primary',
       showProgress: true,
       statusReactions: true,
+      imageDownloadTimeoutMs: 30_000,
     })
     const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
       .config.assistantPolicy.rules

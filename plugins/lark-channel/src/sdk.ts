@@ -1,7 +1,9 @@
 import { createHash } from 'node:crypto'
+import { Readable } from 'node:stream'
 import {
   AppType,
   Client,
+  defaultHttpInstance,
   Domain,
   EventDispatcher,
   LoggerLevel,
@@ -9,6 +11,8 @@ import {
   normalize,
   normalizeCardAction,
   type BotIdentity,
+  type HttpInstance,
+  type HttpRequestOptions,
   type Logger,
   type NormalizedMessage,
   type RawMessageEvent,
@@ -29,6 +33,295 @@ import {
 import { installLarkCardCallbackBridge } from './ws-card-callback.js'
 
 const LARK_PROGRESS_API = '/open-apis/im/v1/message_cot'
+const LARK_MESSAGE_RESOURCE_API = '/open-apis/im/v1/messages'
+const LARK_ERROR_BODY_MAX_BYTES = 16 * 1_024
+const larkResourceIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,255}$/u
+
+export type LarkImageMediaType = 'image/gif' | 'image/jpeg' | 'image/png' | 'image/webp'
+
+type LarkResponseHeaders = Readonly<Record<string, unknown>> | { get(name: string): unknown }
+
+interface LarkImageResourceResponse {
+  data: Readable
+  headers: LarkResponseHeaders
+}
+
+class LarkImageResponseValidationError extends Error {}
+
+function imageResponseValidationError(message: string): LarkImageResponseValidationError {
+  return new LarkImageResponseValidationError(message)
+}
+
+function assertResourceIdentifier(value: string, field: string): string {
+  if (!larkResourceIdentifier.test(value)) {
+    throw new Error(`lark-channel: invalid ${field} identifier`)
+  }
+  return value
+}
+
+export function createLarkImageResourceRequest(
+  messageId: string,
+  fileKey: string,
+  options: { signal: AbortSignal; timeoutMs: number; maxBytes: number },
+) {
+  const message = assertResourceIdentifier(messageId, 'message')
+  const resource = assertResourceIdentifier(fileKey, 'image resource')
+  if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 1
+    || !Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1) {
+    throw new Error('lark-channel: invalid image resource request limits')
+  }
+  return {
+    method: 'GET' as const,
+    url: `${LARK_MESSAGE_RESOURCE_API}/${encodeURIComponent(message)}/resources/${encodeURIComponent(resource)}`,
+    params: { type: 'image' },
+    responseType: 'stream' as const,
+    timeout: options.timeoutMs,
+    signal: options.signal,
+    maxRedirects: 0,
+    maxContentLength: options.maxBytes,
+    maxBodyLength: options.maxBytes,
+    $return_headers: true,
+  }
+}
+
+function responseHeader(
+  headers: LarkResponseHeaders,
+  name: string,
+): unknown {
+  if ('get' in headers && typeof headers.get === 'function') return headers.get(name)
+  const record = headers as Readonly<Record<string, unknown>>
+  const expected = name.toLowerCase()
+  for (const [header, value] of Object.entries(record)) {
+    if (header.toLowerCase() === expected) return value
+  }
+  return undefined
+}
+
+function declaredContentLength(headers: LarkImageResourceResponse['headers']): number | undefined {
+  const value = responseHeader(headers, 'content-length')
+  if (value === undefined) return undefined
+  const text = Array.isArray(value) ? value[0] : value
+  if ((typeof text !== 'string' && typeof text !== 'number') || !/^\d+$/u.test(String(text))) {
+    throw imageResponseValidationError('lark-channel: invalid image resource content length')
+  }
+  const length = Number(text)
+  if (!Number.isSafeInteger(length)) {
+    throw imageResponseValidationError('lark-channel: invalid image resource content length')
+  }
+  return length
+}
+
+function imageMediaType(data: Uint8Array): LarkImageMediaType | undefined {
+  if (data.length >= 8
+    && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47
+    && data[4] === 0x0d && data[5] === 0x0a && data[6] === 0x1a && data[7] === 0x0a) return 'image/png'
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) return 'image/jpeg'
+  if (data.length >= 6) {
+    const signature = Buffer.from(data.subarray(0, 6)).toString('ascii')
+    if (signature === 'GIF87a' || signature === 'GIF89a') return 'image/gif'
+  }
+  if (data.length >= 12
+    && Buffer.from(data.subarray(0, 4)).toString('ascii') === 'RIFF'
+    && Buffer.from(data.subarray(8, 12)).toString('ascii') === 'WEBP') return 'image/webp'
+  return undefined
+}
+
+function declaredImageMediaType(headers: LarkImageResourceResponse['headers']): LarkImageMediaType | undefined {
+  const value = responseHeader(headers, 'content-type')
+  if (value === undefined) return undefined
+  if (typeof value !== 'string') {
+    throw imageResponseValidationError('lark-channel: invalid image resource content type')
+  }
+  const mediaType = value.split(';', 1)[0]!.trim().toLowerCase()
+  if (mediaType === 'application/octet-stream') return undefined
+  if (mediaType === 'image/gif' || mediaType === 'image/jpeg'
+    || mediaType === 'image/png' || mediaType === 'image/webp') return mediaType
+  throw imageResponseValidationError('lark-channel: unsupported image resource content type')
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new Error('lark-channel: image resource request aborted')
+}
+
+type HttpRequestOptionsWithSignal<D> = HttpRequestOptions<D> & { signal?: AbortSignal }
+
+function boundedHttpOptions<D>(
+  options: HttpRequestOptions<D> | undefined,
+  hardTimeoutMs: number,
+  lifecycleSignal: AbortSignal,
+): HttpRequestOptionsWithSignal<D> {
+  const source = options as HttpRequestOptionsWithSignal<D> | undefined
+  const requestedTimeout = source?.timeout
+  const timeout = typeof requestedTimeout === 'number' && Number.isFinite(requestedTimeout) && requestedTimeout > 0
+    ? Math.min(requestedTimeout, hardTimeoutMs)
+    : hardTimeoutMs
+  const hardTimeoutSignal = AbortSignal.timeout(hardTimeoutMs)
+  const signal = source?.signal === undefined
+    ? AbortSignal.any([hardTimeoutSignal, lifecycleSignal])
+    : AbortSignal.any([source.signal, hardTimeoutSignal, lifecycleSignal])
+  return { ...source, timeout, signal }
+}
+
+function asSdkHttpResult<R>(request: Promise<unknown>): Promise<R> {
+  // The SDK's HttpInstance contract describes its response-interceptor output
+  // as R. Axios 1.19 leaves that conditional generic unresolved for arbitrary
+  // R even though defaultHttpInstance installs exactly that interceptor.
+  return request as Promise<R>
+}
+
+/**
+ * The SDK's token manager calls `httpInstance.post()` before the resource
+ * request exists, so request-local Axios limits cannot cover a cache miss.
+ * Keep the dedicated image client's entire HTTP stack bounded instead.
+ */
+function boundedImageHttpInstance(hardTimeoutMs: number, lifecycleSignal: AbortSignal): HttpInstance {
+  if (!Number.isSafeInteger(hardTimeoutMs) || hardTimeoutMs < 1) {
+    throw new Error('lark-channel: invalid image HTTP timeout')
+  }
+  return {
+    request<T = unknown, R = T, D = unknown>(options: HttpRequestOptions<D>): Promise<R> {
+      return asSdkHttpResult<R>(
+        defaultHttpInstance.request<T, R, D>(boundedHttpOptions(options, hardTimeoutMs, lifecycleSignal)),
+      )
+    },
+    get<T = unknown, R = T, D = unknown>(url: string, options?: HttpRequestOptions<D>): Promise<R> {
+      return asSdkHttpResult<R>(
+        defaultHttpInstance.get<T, R, D>(url, boundedHttpOptions(options, hardTimeoutMs, lifecycleSignal)),
+      )
+    },
+    delete<T = unknown, R = T, D = unknown>(url: string, options?: HttpRequestOptions<D>): Promise<R> {
+      return asSdkHttpResult<R>(
+        defaultHttpInstance.delete<T, R, D>(url, boundedHttpOptions(options, hardTimeoutMs, lifecycleSignal)),
+      )
+    },
+    head<T = unknown, R = T, D = unknown>(url: string, options?: HttpRequestOptions<D>): Promise<R> {
+      return asSdkHttpResult<R>(
+        defaultHttpInstance.head<T, R, D>(url, boundedHttpOptions(options, hardTimeoutMs, lifecycleSignal)),
+      )
+    },
+    options<T = unknown, R = T, D = unknown>(url: string, options?: HttpRequestOptions<D>): Promise<R> {
+      return asSdkHttpResult<R>(
+        defaultHttpInstance.options<T, R, D>(url, boundedHttpOptions(options, hardTimeoutMs, lifecycleSignal)),
+      )
+    },
+    post<T = unknown, R = T, D = unknown>(url: string, data?: D, options?: HttpRequestOptions<D>): Promise<R> {
+      return asSdkHttpResult<R>(
+        defaultHttpInstance.post<T, R, D>(url, data, boundedHttpOptions(options, hardTimeoutMs, lifecycleSignal)),
+      )
+    },
+    put<T = unknown, R = T, D = unknown>(url: string, data?: D, options?: HttpRequestOptions<D>): Promise<R> {
+      return asSdkHttpResult<R>(
+        defaultHttpInstance.put<T, R, D>(url, data, boundedHttpOptions(options, hardTimeoutMs, lifecycleSignal)),
+      )
+    },
+    patch<T = unknown, R = T, D = unknown>(url: string, data?: D, options?: HttpRequestOptions<D>): Promise<R> {
+      return asSdkHttpResult<R>(
+        defaultHttpInstance.patch<T, R, D>(url, data, boundedHttpOptions(options, hardTimeoutMs, lifecycleSignal)),
+      )
+    },
+  }
+}
+
+function awaitImageResourceRequest(
+  signal: AbortSignal,
+  request: () => Promise<LarkImageResourceResponse>,
+): Promise<LarkImageResourceResponse> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (complete: () => void): boolean => {
+      if (settled) return false
+      settled = true
+      signal.removeEventListener('abort', abort)
+      complete()
+      return true
+    }
+    const abort = () => { finish(() => reject(abortReason(signal))) }
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) {
+      abort()
+      return
+    }
+    let pending: Promise<LarkImageResourceResponse>
+    try {
+      pending = request()
+    } catch (error) {
+      finish(() => reject(error))
+      return
+    }
+    void pending.then(response => {
+      if (!finish(() => resolve(response)) && response.data instanceof Readable) response.data.destroy()
+    }, error => {
+      // The outer abort is authoritative. This rejection handler intentionally
+      // consumes a later Axios/token failure so credential-bearing request
+      // metadata can never surface as an unhandled rejection.
+      finish(() => reject(error))
+    })
+  })
+}
+
+export async function readLarkImageResourceResponse(
+  response: LarkImageResourceResponse,
+  options: { maxBytes: number; signal: AbortSignal },
+): Promise<{ data: Uint8Array; mediaType: LarkImageMediaType }> {
+  if (!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1) {
+    response.data.destroy()
+    throw imageResponseValidationError('lark-channel: invalid image resource byte limit')
+  }
+  if (options.signal.aborted) {
+    response.data.destroy()
+    throw abortReason(options.signal)
+  }
+  let declaredLength: number | undefined
+  let declaredType: LarkImageMediaType | undefined
+  try {
+    declaredLength = declaredContentLength(response.headers)
+    declaredType = declaredImageMediaType(response.headers)
+  } catch (error) {
+    response.data.destroy()
+    throw error
+  }
+  if (declaredLength !== undefined && declaredLength > options.maxBytes) {
+    response.data.destroy()
+    throw imageResponseValidationError('lark-channel: image resource exceeds its byte limit')
+  }
+  const chunks: Buffer[] = []
+  let bytes = 0
+  const abort = () => response.data.destroy(abortReason(options.signal))
+  options.signal.addEventListener('abort', abort, { once: true })
+  try {
+    for await (const value of response.data) {
+      if (options.signal.aborted) throw abortReason(options.signal)
+      if (!(value instanceof Uint8Array)) {
+        throw imageResponseValidationError('lark-channel: invalid image resource stream chunk')
+      }
+      bytes += value.byteLength
+      if (bytes > options.maxBytes) {
+        response.data.destroy()
+        throw imageResponseValidationError('lark-channel: image resource exceeds its byte limit')
+      }
+      chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength))
+    }
+  } catch (error) {
+    if (options.signal.aborted) throw abortReason(options.signal)
+    throw error
+  } finally {
+    options.signal.removeEventListener('abort', abort)
+  }
+  if (options.signal.aborted) throw abortReason(options.signal)
+  if (declaredLength !== undefined && declaredLength !== bytes) {
+    throw new Error('lark-channel: image resource length does not match its response header')
+  }
+  const data = new Uint8Array(Buffer.concat(chunks, bytes))
+  const detectedType = imageMediaType(data)
+  if (detectedType === undefined) {
+    throw imageResponseValidationError('lark-channel: image resource has an unsupported byte signature')
+  }
+  if (declaredType !== undefined && declaredType !== detectedType) {
+    throw imageResponseValidationError('lark-channel: image resource content type does not match its bytes')
+  }
+  if (options.signal.aborted) throw abortReason(options.signal)
+  return { data, mediaType: detectedType }
+}
 
 /** Provider-safe UTF-8 budget for the complete serialized approval card. */
 export const LARK_APPROVAL_CARD_MAX_BYTES = 28 * 1_024
@@ -38,16 +331,18 @@ export interface OfficialLarkTransportOptions {
   appSecret: string
   domain: 'feishu' | 'lark'
   handshakeTimeoutMs: number
+  imageDownloadTimeoutMs: number
 }
 
 interface ErrorShape {
   code?: unknown
-  response?: { status?: unknown; headers?: Record<string, unknown> }
+  response?: { status?: unknown; headers?: LarkResponseHeaders; data?: unknown }
 }
 
 function providerFailureCode(code: unknown): LarkTransportErrorCode | undefined {
-  if (code === 99991400 || code === 99991663) return 'permission_denied'
-  if (code === 230020) return 'rate_limited'
+  if (code === 99991400 || code === 230020) return 'rate_limited'
+  if (code === 230027 || code === 234009 || code === 99991663
+    || code === 99991672 || code === 99991676 || code === 99991679) return 'permission_denied'
   if (code === 200530) return 'format_error'
   return undefined
 }
@@ -60,10 +355,19 @@ const silentLogger: Logger = {
   trace() {},
 }
 
-function retryAfter(headers: Record<string, unknown> | undefined): number | undefined {
-  const value = headers?.['retry-after']
-  const seconds = typeof value === 'string' ? Number(value) : typeof value === 'number' ? value : Number.NaN
-  return Number.isFinite(seconds) && seconds >= 0 ? Math.ceil(seconds * 1_000) : undefined
+const MAX_RETRY_AFTER_MS = 24 * 60 * 60 * 1_000
+
+function retryAfter(headers: LarkResponseHeaders | undefined): number | undefined {
+  const value = headers === undefined ? undefined : responseHeader(headers, 'retry-after')
+  const delaySeconds = typeof value === 'number' && Number.isSafeInteger(value)
+    ? value
+    : typeof value === 'string' && /^\d+$/.test(value.trim())
+      ? Number(value.trim())
+      : Number.NaN
+  const delayMs = delaySeconds * 1_000
+  return Number.isSafeInteger(delayMs) && delayMs >= 0 && delayMs <= MAX_RETRY_AFTER_MS
+    ? delayMs
+    : undefined
 }
 
 export function classifyLarkSdkFailure(error: unknown): { code: LarkTransportErrorCode; retryAfterMs?: number } {
@@ -73,12 +377,78 @@ export function classifyLarkSdkFailure(error: unknown): { code: LarkTransportErr
     const delay = retryAfter(shape.response?.headers)
     return { code: 'rate_limited', ...(delay === undefined ? {} : { retryAfterMs: delay }) }
   }
+  const responseData = shape.response?.data
+  const responseCode = responseData !== null && typeof responseData === 'object' && !Array.isArray(responseData)
+    ? (responseData as { code?: unknown }).code
+    : undefined
+  const providerCode = providerFailureCode(responseCode) ?? providerFailureCode(shape.code)
+  if (providerCode !== undefined) {
+    const delay = providerCode === 'rate_limited' ? retryAfter(shape.response?.headers) : undefined
+    return { code: providerCode, ...(delay === undefined ? {} : { retryAfterMs: delay }) }
+  }
   if (status === 401 || status === 403) return { code: 'permission_denied' }
   if (status !== undefined && status >= 400 && status < 500) return { code: 'format_error' }
-  const providerCode = providerFailureCode(shape.code)
-  if (providerCode !== undefined) return { code: providerCode }
   if (shape.code === 'ETIMEDOUT' || shape.code === 'ECONNABORTED') return { code: 'send_timeout' }
   return { code: 'unknown' }
+}
+
+async function streamedProviderFailureCode(stream: Readable, signal: AbortSignal): Promise<unknown> {
+  if (signal.aborted) {
+    stream.destroy()
+    return undefined
+  }
+  const chunks: Buffer[] = []
+  let bytes = 0
+  let exceeded = false
+  const abort = () => stream.destroy()
+  signal.addEventListener('abort', abort, { once: true })
+  try {
+    for await (const value of stream) {
+      if (!(value instanceof Uint8Array)) {
+        stream.destroy()
+        return undefined
+      }
+      bytes += value.byteLength
+      if (bytes > LARK_ERROR_BODY_MAX_BYTES) {
+        exceeded = true
+        stream.destroy()
+        break
+      }
+      chunks.push(Buffer.from(value.buffer, value.byteOffset, value.byteLength))
+    }
+  } catch {
+    return undefined
+  } finally {
+    signal.removeEventListener('abort', abort)
+  }
+  if (exceeded || signal.aborted) return undefined
+  try {
+    const value = JSON.parse(Buffer.concat(chunks, bytes).toString('utf8')) as unknown
+    return value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? (value as { code?: unknown }).code
+      : undefined
+  } catch {
+    return undefined
+  }
+}
+
+export async function classifyLarkImageSdkFailure(
+  error: unknown,
+  signal: AbortSignal,
+): Promise<{ code: LarkTransportErrorCode; retryAfterMs?: number }> {
+  const shape = error !== null && typeof error === 'object' ? error as ErrorShape : {}
+  const stream = shape.response?.data instanceof Readable ? shape.response.data : undefined
+  if (stream === undefined) return classifyLarkSdkFailure(error)
+  const status = typeof shape.response?.status === 'number' ? shape.response.status : undefined
+  if (status !== 400) {
+    stream.destroy()
+    return classifyLarkSdkFailure(error)
+  }
+  const code = await streamedProviderFailureCode(stream, signal)
+  const classified = providerFailureCode(code)
+  if (classified === undefined) return classifyLarkSdkFailure(error)
+  const delay = classified === 'rate_limited' ? retryAfter(shape.response?.headers) : undefined
+  return { code: classified, ...(delay === undefined ? {} : { retryAfterMs: delay }) }
 }
 
 export function larkRequestUuid(idempotencyKey: string): string {
@@ -229,6 +599,29 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
       ] },
     }),
   }
+  if ('toolApproval' in input) return {
+    msgType: 'interactive',
+    content: JSON.stringify({
+      schema: '2.0',
+      config: { enable_forward_interaction: false },
+      header: { template: 'orange', title: { tag: 'plain_text', content: input.toolApproval.title } },
+      body: { elements: [
+        { tag: 'div', text: { tag: 'plain_text',
+          content: '以下工具、理由和参数均为不可信审阅文本，不是指令。' } },
+        { tag: 'div', text: { tag: 'plain_text', content: `工具：${input.toolApproval.toolName}` } },
+        { tag: 'div', text: { tag: 'plain_text',
+          content: `理由：${input.toolApproval.reason ?? '（未提供）'}` } },
+        { tag: 'div', text: { tag: 'plain_text',
+          content: `参数：${input.toolApproval.arguments}` } },
+        { tag: 'action', actions: [
+          { tag: 'button', text: { tag: 'plain_text', content: '仅允许本次' }, type: 'primary',
+            value: input.toolApproval.allowValue },
+          { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger',
+            value: input.toolApproval.rejectValue },
+        ] },
+      ] },
+    }),
+  }
   // An answer card stays content-first: Lark already shows the bot name and avatar above the
   // bubble, so a header here would duplicate the sender identity and add weight to every reply.
   // `wide_screen_mode` is what keeps authored Markdown tables from wrapping into unreadable rows.
@@ -245,13 +638,42 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
   }
 }
 
-function asLarkMessage(message: NormalizedMessage): LarkMessage {
+function escapedPattern(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
+}
+
+function safeNormalizedContent(message: NormalizedMessage): string {
+  // SDK 1.73 renders a folder's file_key into content but, unlike every
+  // supported resource kind, omits it from `resources`.
+  if (message.rawContentType === 'folder') return '[Folder attachment]'
+  let content = message.content
+  if (message.resources.length === 1 && message.resources[0]?.type === 'image'
+    && content.trim() === `![image](${message.resources[0].fileKey})`) return ''
+  for (const resource of message.resources) {
+    const key = resource.fileKey
+    if (resource.type === 'image') {
+      content = content.replaceAll(`![image](${key})`, '[Image attachment]')
+    } else {
+      const tag = resource.type
+      content = content.replace(new RegExp(
+        `<${tag}\\b[^>]*\\bkey="${escapedPattern(key)}"[^>]*/>`,
+        'gu',
+      ), `[${tag[0]!.toUpperCase()}${tag.slice(1)} attachment]`)
+    }
+    // Defense in depth for future SDK renderings: a provider capability key
+    // is never user-facing text and must not cross into the model prompt.
+    content = content.replaceAll(key, '[redacted-resource]')
+  }
+  return content.trim()
+}
+
+export function toSafeLarkMessage(message: NormalizedMessage): LarkMessage {
   return {
     messageId: message.messageId,
     chatId: message.chatId,
     chatType: message.chatType,
     senderId: message.senderId,
-    content: message.content,
+    content: safeNormalizedContent(message),
     rawContentType: message.rawContentType,
     resources: message.resources,
     mentionAll: message.mentionAll,
@@ -279,9 +701,12 @@ function providerError(result: { code: number | undefined; msg: string | undefin
 
 export class OfficialLarkTransport implements LarkTransport {
   private readonly client: Client
+  private readonly imageClient: Client
   private readonly dispatcher: EventDispatcher
   private readonly ws: WSClient
   private readonly handshakeTimeoutMs: number
+  private readonly imageDownloadTimeoutMs: number
+  private readonly lifecycleController = new AbortController()
   private handlers: LarkTransportHandlers | undefined
   private identity: BotIdentity | undefined
   private pendingHandshake: { resolve(): void; reject(error: Error): void } | undefined
@@ -291,7 +716,13 @@ export class OfficialLarkTransport implements LarkTransport {
     const shared = { appId: options.appId, appSecret: options.appSecret, domain,
       logger: silentLogger, loggerLevel: LoggerLevel.error, source: 'dsh-enhanced-lark-channel' }
     this.handshakeTimeoutMs = options.handshakeTimeoutMs
+    this.imageDownloadTimeoutMs = options.imageDownloadTimeoutMs
     this.client = new Client({ ...shared, appType: AppType.SelfBuild })
+    this.imageClient = new Client({
+      ...shared,
+      appType: AppType.SelfBuild,
+      httpInstance: boundedImageHttpInstance(options.imageDownloadTimeoutMs, this.lifecycleController.signal),
+    })
     this.dispatcher = new EventDispatcher({ logger: silentLogger, loggerLevel: LoggerLevel.error })
     this.dispatcher.register({
       'im.message.receive_v1': async raw => {
@@ -300,7 +731,7 @@ export class OfficialLarkTransport implements LarkTransport {
           botIdentity: this.identity,
           stripBotMentions: true,
         })
-        await this.handlers.message(asLarkMessage(message))
+        await this.handlers.message(toSafeLarkMessage(message))
       },
       'card.action.trigger': async (raw: unknown) => {
         if (this.handlers === undefined) return
@@ -376,8 +807,71 @@ export class OfficialLarkTransport implements LarkTransport {
   }
 
   async disconnect(): Promise<void> {
+    this.lifecycleController.abort(new Error('lark-channel: transport stopped'))
     this.pendingHandshake?.reject(new LarkTransportError('not_connected', 'Lark transport stopped'))
     this.ws.close({ force: true })
+  }
+
+  async downloadMessageImage(
+    messageId: string,
+    fileKey: string,
+    options: { maxBytes: number; signal: AbortSignal },
+  ): Promise<{ data: Uint8Array; mediaType: LarkImageMediaType }> {
+    const timeoutSignal = AbortSignal.timeout(this.imageDownloadTimeoutMs)
+    const signal = AbortSignal.any([options.signal, timeoutSignal, this.lifecycleController.signal])
+    let response: LarkImageResourceResponse
+    try {
+      response = await awaitImageResourceRequest(signal, async () => await this.imageClient.request<LarkImageResourceResponse>(
+        createLarkImageResourceRequest(messageId, fileKey, {
+          maxBytes: options.maxBytes, timeoutMs: this.imageDownloadTimeoutMs, signal,
+        }),
+      ))
+    } catch (error) {
+      if (options.signal.aborted) {
+        throw new LarkTransportError('not_connected', 'Lark image resource request was cancelled')
+      }
+      if (this.lifecycleController.signal.aborted) {
+        throw new LarkTransportError('not_connected', 'Lark image resource request was cancelled')
+      }
+      if (timeoutSignal.aborted) {
+        throw new LarkTransportError('send_timeout', 'Lark image resource request timed out')
+      }
+      const classified = await classifyLarkImageSdkFailure(error, signal)
+      if (options.signal.aborted || this.lifecycleController.signal.aborted) {
+        throw new LarkTransportError('not_connected', 'Lark image resource request was cancelled')
+      }
+      if (timeoutSignal.aborted) {
+        throw new LarkTransportError('send_timeout', 'Lark image resource request timed out')
+      }
+      throw new LarkTransportError(classified.code, 'Lark image resource request failed', classified.retryAfterMs)
+    }
+    try {
+      const image = await readLarkImageResourceResponse(response, { maxBytes: options.maxBytes, signal })
+      if (options.signal.aborted || this.lifecycleController.signal.aborted) {
+        throw new LarkTransportError('not_connected', 'Lark image resource request was cancelled')
+      }
+      if (timeoutSignal.aborted) {
+        throw new LarkTransportError('send_timeout', 'Lark image resource request timed out')
+      }
+      return image
+    } catch (error) {
+      if (options.signal.aborted) {
+        throw new LarkTransportError('not_connected', 'Lark image resource request was cancelled')
+      }
+      if (this.lifecycleController.signal.aborted) {
+        throw new LarkTransportError('not_connected', 'Lark image resource request was cancelled')
+      }
+      if (timeoutSignal.aborted) {
+        throw new LarkTransportError('send_timeout', 'Lark image resource request timed out')
+      }
+      const classified = error instanceof LarkImageResponseValidationError
+        ? { code: 'format_error' as const }
+        : classifyLarkSdkFailure(error)
+      const message = classified.code === 'format_error'
+        ? 'Lark image resource response failed validation'
+        : 'Lark image resource response could not be read'
+      throw new LarkTransportError(classified.code, message, classified.retryAfterMs)
+    }
   }
 
   async addReaction(messageId: string, emojiType: string): Promise<string> {

@@ -1,3 +1,5 @@
+import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
+
 export interface ExternalPrincipalKey {
   channel: string
   account: string
@@ -87,6 +89,8 @@ export interface DeliveryAttachment {
   mediaType?: string
   sizeBytes?: number
   contentSha256?: string
+  /** Complete durable image reference; `spool_ref` is only its private JSON persistence slot. */
+  imageRef?: ImageAttachmentRef
   status: 'expired' | 'metadata' | 'quarantined' | 'ready'
   expiresAt?: number
   createdAt: number
@@ -216,6 +220,35 @@ export type AdapterReconcileResult =
   | { outcome: 'not-sent' }
   | { outcome: 'unknown' }
 
+export interface InboundImageReadInput {
+  eventId: string
+  attachment: Readonly<InboundAttachmentDescriptor>
+  maxBytes: number
+}
+
+export type AdapterInboundImageReadResult =
+  | { outcome: 'downloaded'; data: Uint8Array; mediaType: ImageMediaType }
+  | { outcome: 'not-downloaded'; failureCode: string; retryable: boolean; retryAfterMs?: number }
+
+/** One open-turn, one-shot tool approval routed to the authenticated conversation owner. */
+export interface DeliveryToolApprovalRequest {
+  operationId: string
+  bindingId: string
+  target: DeliveryTarget
+  expiresAt: number
+  /** SHA-256 over the exact session, call identity, tool name, arguments, and permission state. */
+  actionHash: string
+  toolName: string
+  /** Exact call identity from the current open Session turn. */
+  callId: string
+  /** Bounded, untrusted display text; never interpreted as instructions. */
+  reason?: string
+  /** Exact bounded JSON argument text already recorded by the Session. */
+  arguments: string
+}
+
+export type DeliveryToolApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+
 /**
  * Safe, user-visible execution progress. It intentionally has no tool arguments or tool output.
  *
@@ -262,8 +295,19 @@ export interface DeliveryAdapter {
     reconcileUnknownSend: boolean
     receipts: readonly ReceiptStatus[]
     formats: readonly OutboundFormat[]
+    inboundImages?: boolean
+    toolApprovals?: boolean
   }>
   start(context: DeliveryAdapterContext): Promise<void | (() => void | Promise<void>)>
+  readInboundImage?(
+    input: Readonly<InboundImageReadInput>,
+    signal: AbortSignal,
+  ): Promise<AdapterInboundImageReadResult>
+  /** Open-turn and deliberately non-durable; abort/restart/disconnect always fail closed. */
+  requestToolApproval?(
+    input: Readonly<DeliveryToolApprovalRequest>,
+    signal: AbortSignal,
+  ): Promise<DeliveryToolApprovalOutcome>
   /** Best-effort UI only; implementations must not treat it as task state or a durable reply. */
   progress?(intent: Readonly<DeliveryProgressIntent>): Promise<void>
   send(intent: Readonly<OutboundIntent>, signal: AbortSignal): Promise<AdapterSendResult>

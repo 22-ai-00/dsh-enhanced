@@ -18,3 +18,4 @@
         maxTextBytes: 65536
         staleAfterMs: 300000
         handshakeTimeoutMs: 15000
+        imageDownloadTimeoutMs: 30000
