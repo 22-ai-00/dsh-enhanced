@@ -96,6 +96,27 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/ma
 
 `--no-service` 只跳过常驻服务安装/重启，不跳过插件和 profile 校验。`--dry-run` 打印完整安装计划但不修改机器。
 
+## Agent 工具授权
+
+安装器默认 `--agent-tools allow`，让飞书里的外部会话可以调用 `bash`（Windows 为 `pwsh`）、`read`、`glob`、`grep` 和 `skill` 这几个精确工具。其中 `skill` 是标准 DSH base 的 `tool-skill` row 注册的模型侧工具，Agent 要靠它发现并加载 `ctx.skills` 中的技能。
+
+这个默认值是必需的，而不是可选优化：AssistantPolicy 的 tool guard 对工具执行**默认拒绝**，未被显式授权的工具会以 `default-deny` 被拒。因此漏掉授权时，模型在飞书里会认为自己没有任何可用技能，从而退回纯文本回答。
+
+```sh
+# 默认：授权上述精确工具，技能可直接使用
+./scripts/install/install-local.sh
+
+# 只安装/升级，不改动已有工具规则
+./scripts/install/install-local.sh --agent-tools preserve
+
+# 移除安装器托管的外部 Agent 工具规则
+./scripts/install/install-local.sh --agent-tools disable
+```
+
+授权只生成 Delivery 当前/兼容的精确 preset + 绝对 workspace + `external` initiator 规则，不生成 `tool:*` 通配。它不额外提权：被加载技能内部的命令仍受同一 sandbox / approval / Policy 管线约束。但 Bash/Pwsh 本身可以启动进程，若该 session 使用 `danger-full-access` 且 approval 为 `never`，获准的外部会话等同获得很宽的本机命令权限——需要更严格隔离时改用 `--agent-tools preserve` 或 `disable`，并选择更窄的 DSH permission preset。
+
+`--lark skip` 不修改任何 channel 配置，因此该模式下工具授权固定为 `preserve`；显式传入其他值会直接报错而不是静默忽略。
+
 ## 一键重启
 
 修改本地插件后运行：
