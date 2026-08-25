@@ -231,6 +231,7 @@ describe('assistant delivery Cordis service', () => {
     })
     expect(config.defaultAgentPreset).toBe('standard')
     expect(config.toolCapableProviders).toEqual(['deepseek-official'])
+    expect(config.unknownRouteToolCalls).toBe('allow')
     expect(config.toolApprovalTtlMs).toBe(300_000)
     expect(() => AssistantDeliveryService.Config({
       databasePath: '/tmp/delivery.sqlite',

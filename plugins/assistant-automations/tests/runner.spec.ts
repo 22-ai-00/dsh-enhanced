@@ -90,6 +90,7 @@ async function harness(options: {
   backgroundProposal?: boolean
   budgetMetric?: string
   toolCapableProviders?: readonly string[]
+  unknownRouteToolCalls?: 'allow' | 'deny'
   presetTool?: string
   requestedTools?: readonly string[]
 } = {}) {
@@ -190,6 +191,7 @@ async function harness(options: {
     runner: new DshAutomationRunner(ctx, ctx.assistantPolicy, {
       allowUnbudgetedExecution: options.allowUnbudgetedExecution ?? true,
       toolCapableProviders: options.toolCapableProviders ?? ['mock'],
+      unknownRouteToolCalls: options.unknownRouteToolCalls ?? 'deny',
     }),
   }
 }
@@ -261,7 +263,7 @@ describe('fresh rc.8 automation Agent runner', () => {
   })
 
   test('rejects an undeclared tool-bearing route before followup and conservatively finalizes after Agent submission', async () => {
-    const fixture = await harness({ toolCapableProviders: [] })
+    const fixture = await harness({ toolCapableProviders: [], unknownRouteToolCalls: 'deny' })
     const release = vi.spyOn(fixture.ctx.assistantPolicy, 'release')
     const finalize = vi.spyOn(fixture.ctx.assistantPolicy, 'finalize')
     const running = fixture.runner.run(input(definition({
@@ -272,6 +274,17 @@ describe('fresh rc.8 automation Agent runner', () => {
     expect(fixture.adapter.requests).toHaveLength(0)
     expect(release).not.toHaveBeenCalled()
     expect(finalize).toHaveBeenCalledWith(expect.any(String), 100)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('admits a route that publishes no capability so gateway providers can run tool-bearing automations', async () => {
+    const fixture = await harness({ toolCapableProviders: [], unknownRouteToolCalls: 'allow' })
+
+    await expect(fixture.runner.run(input(definition())))
+      .resolves.toMatchObject({ outcome: 'succeeded' })
+    // Two requests: the tool-bearing round plus its followup, which is only
+    // reachable once the route is admitted at all.
+    expect(fixture.adapter.requests).toHaveLength(2)
     await fixture.ctx.fiber.restart()
   })
 

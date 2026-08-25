@@ -43,7 +43,8 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent
 | `defaultAgentPreset` | `standard` | 新 session 解析并挂载的 preset；该内置 preset 提供 Bash、文件、检索、Skills 等完整编码能力 |
 | `policyRef` | `owner-dm` | 固化在 binding 上的策略引用标签 |
 | `agentProvider` / `agentModel` | `deepseek-official` / `deepseek-v4-flash` | 渠道 Agent 的部署默认模型；会话可用 `/model` 覆盖 |
-| `toolCapableProviders` | `[deepseek-official]` | 尚未发布 registry metadata 的上游原生工具 provider 审计列表；未知 provider + 非空工具 fail closed |
+| `toolCapableProviders` | `[deepseek-official]` | 尚未发布 registry metadata 的上游原生工具 provider 审计列表；在 `unknownRouteToolCalls: deny` 下作为白名单生效 |
+| `unknownRouteToolCalls` | `allow` | 未发布任何工具能力声明的 route 如何准入；`deny` 切换为严格白名单。provider 显式声明 `none` 时两种取值都 fail closed |
 | `agentMaxOutputTokens` | `8192` | 单轮模型输出上限 |
 | `modelPickerTtlMs` | `900000` | `/model` 选择卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 | `toolApprovalTtlMs` | `300000` | 当前 open turn 的即时工具审批有效期；范围 1 秒至 5 分钟 |
@@ -141,7 +142,7 @@ rules:
 
 权限命令在第一次 reviewer/policy/sandbox mutation 前还必须先取得 Inbox 的 durable dispatch claim；每个异步边界后都复核 abort 与租约。若续租失败、flush 结果不确定或较新的权限命令已经接管，旧命令会补偿回安全的 `ask` 并进入 `processor-ambiguous` dead letter，不会把过期的 `full` 自动重放到新状态之上。
 
-普通消息真正 resume Agent 时，Delivery 会在 preset 挂载完成后检查最终 scoped tool schemas。非空工具要求 provider 通过 `@dsh-enhanced/llm-route-capabilities` 声明 `native`/`bridge`，或位于部署审计的 `toolCapableProviders`（默认仅 `deepseek-official`）；显式 `none` 永远覆盖列表。Claude、Cursor、Grok 和 Codex CLI 等 text-only route 因此会在 `followup()`、认证和子进程之前返回可操作的 `/model` 提示；显式 opt-in 的 Codex direct route 声明 `native`，可把 function call 交回同一个 DSH Agent Loop 执行。fresh session 创建本身不执行模型，仍可先持久建立 binding。最终工具为空时不要求能力声明。
+普通消息真正 resume Agent 时，Delivery 会在 preset 挂载完成后检查最终 scoped tool schemas。非空工具时，provider 通过 `@dsh-enhanced/llm-route-capabilities` 声明 `native`/`bridge` 即放行。DSH 的 `generate` 契约对所有 adapter 都接受 `tools`，因此工具调用是 adapter 基线能力：未发布任何声明的 route（pi-ai 等内置/网关 provider 从不发布 registry metadata）默认按 `unknownRouteToolCalls: allow` 准入，避免整类可用 route 被误拒。需要严格白名单的部署设为 `deny`，此时只放行 `toolCapableProviders`。provider 显式声明 `none` 时始终 fail closed，不受上述任何一项影响。Claude、Cursor、Grok 和 Codex CLI 等 text-only route 因此会在 `followup()`、认证和子进程之前返回可操作的 `/model` 提示；显式 opt-in 的 Codex direct route 声明 `native`，可把 function call 交回同一个 DSH Agent Loop 执行。fresh session 创建本身不执行模型，仍可先持久建立 binding。最终工具为空时不要求能力声明。
 
 只注册两个模型工具：
 

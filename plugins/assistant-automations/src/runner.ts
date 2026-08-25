@@ -90,6 +90,13 @@ export interface DshAutomationRunnerOptions {
   readonly allowUnbudgetedExecution?: boolean
   /** Audited native-tool routes whose upstream adapters do not publish registry metadata yet. */
   readonly toolCapableProviders?: readonly string[]
+  /**
+   * How to admit a route that publishes no tool-call capability at all. The DSH
+   * `generate` contract accepts `tools` for every adapter, so `allow` matches
+   * that baseline; `deny` opts a deployment into strict allowlisting. A
+   * provider-owned `none` declaration always fails closed either way.
+   */
+  readonly unknownRouteToolCalls?: 'allow' | 'deny'
 }
 
 function requireToolCapability(
@@ -99,11 +106,20 @@ function requireToolCapability(
   presetId: string,
   toolCount: number,
   declaredToolCapableProviders: ReadonlySet<string>,
+  unknownRouteToolCalls: 'allow' | 'deny',
 ): void {
   if (toolCount === 0) return
   const capability = resolveLlmRouteCapability(llm, provider, model)
   if (capability?.toolCalls === 'native' || capability?.toolCalls === 'bridge') return
-  if (capability === undefined && declaredToolCapableProviders.has(provider)) return
+  // A provider-owned declaration is authoritative in both directions: an
+  // explicit `none` still fails closed even when the route is allowlisted or
+  // unknown routes are admitted. Only routes with no declaration at all reach
+  // the host policy, and the DSH `generate` contract accepts `tools` for every
+  // adapter, so admitting them matches the adapter baseline.
+  if (capability?.toolCalls !== 'none') {
+    if (declaredToolCapableProviders.has(provider)) return
+    if (unknownRouteToolCalls === 'allow') return
+  }
   throw new Error(
     `assistant-automations: provider ${provider}/${model} has no tool-call capability for preset ${presetId}`,
   )
@@ -112,6 +128,7 @@ function requireToolCapability(
 export class DshAutomationRunner implements AutomationRunner {
   private readonly allowUnbudgetedExecution: boolean
   private readonly toolCapableProviders: ReadonlySet<string>
+  private readonly unknownRouteToolCalls: 'allow' | 'deny'
 
   constructor(
     private readonly ctx: Context,
@@ -120,6 +137,7 @@ export class DshAutomationRunner implements AutomationRunner {
   ) {
     this.allowUnbudgetedExecution = options.allowUnbudgetedExecution ?? false
     this.toolCapableProviders = new Set(options.toolCapableProviders ?? ['deepseek-official'])
+    this.unknownRouteToolCalls = options.unknownRouteToolCalls ?? 'allow'
   }
 
   async run(input: AutomationRunnerInput): Promise<AutomationRunnerResult> {
@@ -233,6 +251,7 @@ export class DshAutomationRunner implements AutomationRunner {
             presetId,
             finalSchemas.length,
             this.toolCapableProviders,
+            this.unknownRouteToolCalls,
           )
           agentCtx.tools.guard((execution) => {
             if (!allowed.has(execution.name)) return 'assistant-automations: tool is outside the immutable allowlist'

@@ -2,7 +2,7 @@
 
 面向个人助理的单机、冷启动可恢复调度器。它把 automation 定义、稳定 occurrence、task、attempt、run 和 duty lease 写入 SQLite；进程重启后从账本继续，而不是把内存 timer 当作事实源。每次执行创建一个新的 DSH rc.8 Agent，固定 workspace、preset 身份、provider/model、输出预算、工具白名单和工具调用上限。
 
-执行前会先解析并挂载 automation 固定的 Agent preset，再在该 Agent 的最终工具平面上校验 immutable allowlist；preset 只提供 scoped tool 时也能被正确发现，preset 额外暴露未批准工具则整次 setup fail closed。最终工具集合非空时，provider 必须通过 `@dsh-enhanced/llm-route-capabilities` 声明 `native`/`bridge`，或位于部署审计的 `toolCapableProviders` 列表；provider 明确声明 `none` 时始终拒绝，并且发生在 followup 和任何模型调用之前。
+执行前会先解析并挂载 automation 固定的 Agent preset，再在该 Agent 的最终工具平面上校验 immutable allowlist；preset 只提供 scoped tool 时也能被正确发现，preset 额外暴露未批准工具则整次 setup fail closed。最终工具集合非空时，provider 通过 `@dsh-enhanced/llm-route-capabilities` 声明 `native`/`bridge` 即放行；未发布任何声明的 route 默认按 `unknownRouteToolCalls: allow` 准入，设为 `deny` 则只放行 `toolCapableProviders`。provider 明确声明 `none` 时始终拒绝，并且发生在 followup 和任何模型调用之前。
 
 ## 安装
 
@@ -99,7 +99,8 @@ terminal run 还会在同一 SQLite 事务中写入不可变、有限大小的�
 | `reconcileLimit` | `50` | 每轮 reconcile 检查的本地待决提案上限 |
 | `allowUnbudgetedExecution` | `false` | 是否允许无人值守 execution 不绑定 Policy budget；默认 fail closed |
 | `proposalDefaults` | 见 patch | 模型提案使用的可信 provider/model、工具上限、execution bounds、策略和必填 budget |
-| `toolCapableProviders` | `[deepseek-official]` | 尚未发布 registry metadata 的上游原生工具 provider 审计列表；未知 provider + 非空工具 fail closed |
+| `toolCapableProviders` | `[deepseek-official]` | 尚未发布 registry metadata 的上游原生工具 provider 审计列表；在 `unknownRouteToolCalls: deny` 下作为白名单生效 |
+| `unknownRouteToolCalls` | `allow` | 未发布任何工具能力声明的 route 如何准入；`deny` 切换为严格白名单。provider 显式声明 `none` 时两种取值都 fail closed |
 
 ## 延迟审批的提交闭环
 

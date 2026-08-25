@@ -218,6 +218,7 @@ async function runtimeHarness(
     readInboundImage: NonNullable<DeliveryAdapter['readInboundImage']>
   },
   permissions?: PermissionHarnessOptions,
+  unknownRouteToolCalls?: 'allow' | 'deny',
 ) {
   const ctx = new Context()
   if (presetRoot !== undefined) await ctx.plugin(Loader)
@@ -292,6 +293,7 @@ async function runtimeHarness(
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
     schedulerEnabled: false, defaultWorkspace: workspace, defaultAgentPreset: agentPreset, agentProvider: defaultRoute.provider,
     agentModel: defaultRoute.model, toolCapableProviders: [...toolCapableProviders],
+    ...(unknownRouteToolCalls === undefined ? {} : { unknownRouteToolCalls }),
     ...(permissions?.leaseMs === undefined ? {} : { leaseMs: permissions.leaseMs }) })
   const llm = new ReplyAdapter('Mock provider', ['delivery-model'], image?.inputModalities ?? ['text'])
   ctx.llm.registerAdapter(['mock'], llm)
@@ -809,22 +811,61 @@ describe('real rc.8 delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('fails closed for an undeclared provider when the mounted preset has tools', async () => {
+  test('admits a provider that publishes no capability so gateway routes stay usable with tools', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-unknown-tools-'))
     roots.push(root)
     const fixture = await runtimeHarness(root, new Map(), {
-      provider: 'unknown-route', model: 'model',
+      provider: 'super-relay', model: 'model_hub/es1_orange_o48',
     }, undefined, root, undefined, 'primary', true, [])
-    const unknown = new ReplyAdapter('Unknown route')
-    fixture.ctx.llm.registerAdapter(['unknown-route'], unknown)
+    const relay = new ReplyAdapter('Gateway relay')
+    fixture.ctx.llm.registerAdapter(['super-relay'], relay)
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
 
     await fixture.service.acceptInbound(message('evt-unknown-tools', 'hello'))
     await drive(fixture.service)
 
+    expect(relay.requests).toHaveLength(1)
+    expect(relay.requests[0]?.tools?.map(tool => tool.name)).toContain('preset_probe')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('fails closed for a provider that publishes no capability when the host opts into strict admission', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-strict-tools-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), {
+      provider: 'unknown-route', model: 'model',
+    }, undefined, root, undefined, 'primary', true, [], 'probe', undefined, undefined, 'deny')
+    const unknown = new ReplyAdapter('Unknown route')
+    fixture.ctx.llm.registerAdapter(['unknown-route'], unknown)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-strict-tools', 'hello'))
+    await drive(fixture.service)
+
     expect(unknown.requests).toHaveLength(0)
     expect(fixture.sends.at(-1)?.text).toContain('unknown-route/model')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('keeps a provider-owned none declaration authoritative even under permissive admission', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-none-decl-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), {
+      provider: 'text-only-route', model: 'model',
+    }, undefined, root, undefined, 'primary', true, ['text-only-route'])
+    const textOnly = new ReplyAdapter('Text only route')
+    fixture.ctx.llm.registerAdapter(['text-only-route'], textOnly)
+    registerLlmRouteCapability(fixture.ctx.llm, { provider: 'text-only-route', toolCalls: 'none' })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-none-decl', 'hello'))
+    await drive(fixture.service)
+
+    expect(textOnly.requests).toHaveLength(0)
+    expect(fixture.sends.at(-1)?.text).toContain('text-only-route/model')
     await fixture.ctx.fiber.restart()
   })
 

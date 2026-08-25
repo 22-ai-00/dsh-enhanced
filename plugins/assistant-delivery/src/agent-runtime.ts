@@ -70,6 +70,7 @@ interface DshDeliveryRuntimeOptions {
   provider: string
   model: string
   toolCapableProviders: ReadonlySet<string>
+  unknownRouteToolCalls: 'allow' | 'deny'
   maxOutputTokens: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
   imageMaterializer: Pick<InboundImageMaterializer, 'materialize'>
@@ -140,20 +141,28 @@ function requireToolCapability(
   presetId: string,
   toolCount: number,
   declaredToolCapableProviders: ReadonlySet<string>,
+  unknownRouteToolCalls: 'allow' | 'deny',
 ): void {
   if (toolCount === 0) return
   const capability = resolveLlmRouteCapability(llm, provider, model)
   if (capability?.toolCalls === 'native' || capability?.toolCalls === 'bridge') return
-  // A provider-owned `none` declaration is authoritative and overrides a host
-  // allowlist entry. The allowlist exists only for audited upstream adapters
-  // that predate this registry.
-  if (capability === undefined && declaredToolCapableProviders.has(provider)) return
+  // A provider-owned declaration is authoritative in both directions: an
+  // explicit `none` still fails closed even when the route is allowlisted or
+  // unknown routes are admitted.
+  if (capability?.toolCalls === 'none') throw new ToolCapabilityAdmissionError(provider, model, presetId)
+  // Only routes with no declaration at all reach the host policy. The DSH
+  // `generate` contract accepts `tools` for every adapter, so tool calling is
+  // the adapter baseline rather than an opt-in: gateway and built-in providers
+  // (pi-ai and friends) never publish registry metadata, and denying them by
+  // default made every such route unusable behind a tool-mounting preset.
+  if (declaredToolCapableProviders.has(provider)) return
+  if (unknownRouteToolCalls === 'allow') return
   throw new ToolCapabilityAdmissionError(provider, model, presetId)
 }
 
 function toolCapabilityReply(error: ToolCapabilityAdmissionError): ModelCommandReply {
   return {
-    text: `当前模型 ${error.provider}/${error.model} 无法执行 preset “${error.presetId}” 暴露的工具。`
+    text: `当前模型 ${error.provider}/${error.model} 已声明不支持工具调用，无法执行 preset “${error.presetId}” 暴露的工具。`
       + '请发送 /model 切换到支持工具调用的 provider，或改用不挂载工具的 preset。',
     format: 'plain',
   }
@@ -1077,6 +1086,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
             presetId,
             agentCtx.tools.schemas(agentCtx.agent).length,
             this.options.toolCapableProviders,
+            this.options.unknownRouteToolCalls,
           )
         } })
       const agent = handle.agent
