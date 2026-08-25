@@ -218,6 +218,25 @@ function migrate(database: DatabaseSync): void {
   }
 }
 
+const walRetryWait = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
+
+function enableWal(database: DatabaseSync): void {
+  const deadline = Date.now() + 5_000
+  while (true) {
+    try {
+      const row = database.prepare('PRAGMA journal_mode = WAL').get() as { journal_mode: string }
+      if (row.journal_mode.toLowerCase() !== 'wal') {
+        throw new Error(`evolution database refused WAL mode: ${row.journal_mode}`)
+      }
+      return
+    } catch (error) {
+      const retryable = error instanceof Error && /database is (?:busy|locked)/i.test(error.message)
+      if (!retryable || Date.now() >= deadline) throw error
+      Atomics.wait(walRetryWait, 0, 0, 10)
+    }
+  }
+}
+
 export function openEvolutionDatabase(path: string): DatabaseSync {
   if (path !== ':memory:' && !isAbsolute(path)) {
     throw new EvolutionDatabaseError('invalid-path', 'evolution database path must be absolute')
@@ -230,7 +249,7 @@ export function openEvolutionDatabase(path: string): DatabaseSync {
     database.exec('PRAGMA synchronous = FULL')
     migrate(database)
     if (path !== ':memory:') {
-      database.exec('PRAGMA journal_mode = WAL')
+      enableWal(database)
       chmodSync(path, 0o600)
     }
     return database

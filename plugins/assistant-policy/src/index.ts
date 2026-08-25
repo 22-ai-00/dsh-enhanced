@@ -4,6 +4,17 @@ import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-policy'
 export { AssistantPolicyService, Config, version }
+export {
+  APPROVAL_REVIEWERS,
+  approvalReviewerOf,
+  foldApprovalReviewer,
+  getApprovalReviewer,
+  setApprovalReviewer,
+} from './approval-reviewer.js'
+export type { ApprovalReviewer } from './approval-reviewer.js'
+export { isAutoReviewEscalation } from './auto-review.js'
+export type { AutoReviewAssessment, AutoReviewConfig } from './auto-review.js'
+export { AUTO_REVIEW_APPROVAL_REASON, HUMAN_APPROVAL_REASON } from './tool-risk.js'
 export type { PolicyBudgetConfig } from './service.js'
 export { APPROVAL_DISPLAY_BUDGET } from './ledger.js'
 export { ApprovalSettlementConflict, validateApprovalSettlement } from './settlement.js'

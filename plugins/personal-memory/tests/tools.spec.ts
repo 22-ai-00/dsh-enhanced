@@ -26,6 +26,10 @@ function agent(): Agent {
     cwd: '/work/alpha',
     agentPreset: 'primary',
   })
+  session.append('approval/policy', { policy: 'never' })
+  session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
+  const append = session.append as unknown as (type: string, data: unknown) => unknown
+  append.call(session, 'sandbox/mode', { mode: 'danger-full-access' })
   const inbox = new Inbox(session, { inserted() {}, discarded() {}, claimed() {} })
   return {
     id,

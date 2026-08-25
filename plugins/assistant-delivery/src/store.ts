@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from 'node:crypto'
 import { isAbsolute } from 'node:path'
 import type { DatabaseSync, StatementSync } from 'node:sqlite'
+import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { canonicalConversation, canonicalPrincipal, canonicalTarget } from './canonical.js'
 import { openDeliveryDatabase } from './sqlite.js'
 import type {
@@ -51,6 +52,11 @@ interface DeliveryStoreOptions {
   codeGenerator?: () => string
   maxTextBytes?: number
 }
+
+type InboundDispatchBindingSnapshot = Pick<
+  ConversationBinding,
+  'conversation' | 'generation' | 'id' | 'principal' | 'sessionId' | 'version'
+>
 
 export interface ApprovalDispatchCursor {
   createdAt: number
@@ -163,6 +169,100 @@ interface OutboxRow {
   failure_code: string | null
   created_at: number
   updated_at: number
+}
+
+interface AttachmentRow {
+  id: string
+  owner_kind: 'inbox' | 'outbox'
+  owner_id: string
+  ordinal: number
+  media_type: string
+  size_bytes: number
+  sha256: string
+  spool_ref: string | null
+  resource_kind: DeliveryAttachment['resourceType'] | null
+  provider_ref: string | null
+  file_name: string | null
+  status: DeliveryAttachment['status']
+  expires_at: number | null
+  created_at: number
+}
+
+const imageMediaTypes = new Set<ImageMediaType>(['image/png', 'image/jpeg', 'image/webp', 'image/gif'])
+
+function invalidImageRef(): never {
+  throw new DeliveryStoreError('conflict', 'inbound image reference is invalid')
+}
+
+function canonicalImageRef(input: unknown): ImageAttachmentRef {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) invalidImageRef()
+  const value = input as Record<string, unknown>
+  const required = ['attachmentId', 'mediaType', 'bytes', 'width', 'height']
+  if (required.some(key => !Object.hasOwn(value, key))
+    || Object.keys(value).some(key => ![...required, 'name'].includes(key))
+    || typeof value.attachmentId !== 'string'
+    || value.attachmentId.length < 1 || value.attachmentId.length > 512
+    || /\p{Cc}/u.test(value.attachmentId)
+    || typeof value.mediaType !== 'string'
+    || !imageMediaTypes.has(value.mediaType as ImageMediaType)
+    || !Number.isSafeInteger(value.bytes) || (value.bytes as number) < 1
+    || !Number.isSafeInteger(value.width) || (value.width as number) < 1
+    || !Number.isSafeInteger(value.height) || (value.height as number) < 1
+    || (value.name !== undefined && (typeof value.name !== 'string' || value.name.length < 1
+      || value.name.length > 255 || value.name === '.' || value.name === '..' || /[\\/\p{Cc}]/u.test(value.name)))) {
+    invalidImageRef()
+  }
+  return {
+    attachmentId: value.attachmentId as ImageAttachmentRef['attachmentId'],
+    mediaType: value.mediaType as ImageMediaType,
+    bytes: value.bytes as number,
+    width: value.width as number,
+    height: value.height as number,
+    ...(value.name === undefined ? {} : { name: value.name as string }),
+  }
+}
+
+function persistedImageRef(row: AttachmentRow): ImageAttachmentRef {
+  if (row.spool_ref === null || !/^[a-f0-9]{64}$/u.test(row.sha256)) invalidImageRef()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(row.spool_ref)
+  } catch {
+    invalidImageRef()
+  }
+  const ref = canonicalImageRef(parsed)
+  if (row.media_type !== ref.mediaType || row.size_bytes !== ref.bytes) invalidImageRef()
+  return ref
+}
+
+function sameImageRef(left: ImageAttachmentRef, right: ImageAttachmentRef): boolean {
+  return left.attachmentId === right.attachmentId
+    && left.mediaType === right.mediaType
+    && left.bytes === right.bytes
+    && left.width === right.width
+    && left.height === right.height
+    && left.name === right.name
+}
+
+function attachmentFromRow(row: AttachmentRow): DeliveryAttachment {
+  const imageRef = row.status === 'ready' && row.resource_kind === 'image'
+    ? persistedImageRef(row)
+    : undefined
+  return {
+    id: row.id,
+    ownerKind: row.owner_kind,
+    ownerId: row.owner_id,
+    resourceType: row.resource_kind ?? 'file',
+    providerRef: row.provider_ref ?? '',
+    ...(row.file_name === null ? {} : { fileName: row.file_name }),
+    ...(row.media_type === '' ? {} : { mediaType: row.media_type }),
+    ...(row.status === 'metadata' && row.size_bytes === 0 ? {} : { sizeBytes: row.size_bytes }),
+    ...(row.status === 'metadata' ? {} : { contentSha256: row.sha256 }),
+    ...(imageRef === undefined ? {} : { imageRef }),
+    status: row.status,
+    ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
+    createdAt: row.created_at,
+  }
 }
 
 function digest(value: string): string {
@@ -784,53 +884,84 @@ export class DeliveryStore {
     agentPreset: string
     sessionId: string
     policyRef: string
+    expectedGeneration?: number
   }): ConversationBinding {
     this.assertOpen()
     const target = canonicalTarget({ conversation: input.conversation, principal: input.principal })
-    const principal = this.getPrincipal(target.principal)
-    if (principal?.status !== 'active') {
-      throw new DeliveryStoreError('unauthorized-principal', 'binding principal is not active')
-    }
     if (!isAbsolute(input.workspace)) throw new DeliveryStoreError('invalid-binding', 'binding workspace must be absolute')
     const workspace = validateBindingText(input.workspace, 'workspace', 4_096)
     const agentPreset = validateBindingText(input.agentPreset, 'agentPreset', 128)
     const sessionId = validateBindingText(input.sessionId, 'sessionId', 512)
     const policyRef = validateBindingText(input.policyRef, 'policyRef', 256)
-    const hash = conversationHash(target.conversation)
-    const existing = this.getActiveBinding(target.conversation)
-    if (existing !== undefined) {
-      if (principalHash(existing.principal) !== principalHash(target.principal)) {
-        throw new DeliveryStoreError('conflict', 'conversation is already bound to another principal')
-      }
-      return existing
+    if (input.expectedGeneration !== undefined
+      && (!Number.isSafeInteger(input.expectedGeneration) || input.expectedGeneration < 1)) {
+      throw new DeliveryStoreError('invalid-binding', 'binding expectedGeneration is invalid')
     }
+    const hash = conversationHash(target.conversation)
+    const canonicalConversationJson = conversationJson(target.conversation)
+    const canonicalPrincipalJson = principalJson(target.principal)
+    const canonicalPrincipalHash = principalHash(target.principal)
     const now = this.now()
     const id = `binding_${randomUUID()}`
-    try {
+    return this.transaction(() => {
+      const principalRow = this.database.prepare(`
+        SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals
+        WHERE key_hash = ? AND principal_json = ? AND status = 'active'
+      `).get(canonicalPrincipalHash, canonicalPrincipalJson) as PrincipalRow | undefined
+      if (principalRow === undefined) {
+        throw new DeliveryStoreError('unauthorized-principal', 'binding principal is not active')
+      }
+      const principal = principalFromRow(principalRow)
+      const existingRow = this.database.prepare(`
+        ${bindingSelect}
+        WHERE conversation_hash = ? AND conversation_json = ? AND status = 'active'
+      `).get(hash, canonicalConversationJson) as BindingRow | undefined
+      if (existingRow !== undefined) {
+        const existing = bindingFromRow(existingRow)
+        if (principalHash(existing.principal) !== canonicalPrincipalHash) {
+          throw new DeliveryStoreError('conflict', 'conversation is already bound to another principal')
+        }
+        if (input.expectedGeneration !== undefined && existing.generation !== input.expectedGeneration) {
+          throw new DeliveryStoreError('version-conflict', 'binding generation changed before creation')
+        }
+        return existing
+      }
+      const generation = this.nextBindingGenerationByHash(hash)
+      if (input.expectedGeneration !== undefined && generation !== input.expectedGeneration) {
+        throw new DeliveryStoreError('version-conflict', 'binding generation changed before creation')
+      }
       this.database.prepare(`
         INSERT INTO conversation_bindings (
           id, conversation_hash, conversation_json, principal_id, principal_json, workspace, agent_preset,
           session_id, generation, policy_ref, status, created_at, updated_at, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'active', ?, ?, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 1)
       `).run(
         id,
         hash,
-        conversationJson(target.conversation),
+        canonicalConversationJson,
         principal.id,
-        principalJson(target.principal),
+        canonicalPrincipalJson,
         workspace,
         agentPreset,
         sessionId,
+        generation,
         policyRef,
         now,
         now,
       )
-    } catch (error) {
-      const winner = this.getActiveBinding(target.conversation)
-      if (winner !== undefined && principalHash(winner.principal) === principalHash(target.principal)) return winner
-      throw error
-    }
-    return this.getBinding(id)!
+      return this.getBinding(id)!
+    })
+  }
+
+  /**
+   * Snapshot the generation a newly-created session must use.  `createBinding`
+   * revalidates this value under `BEGIN IMMEDIATE` when passed as
+   * `expectedGeneration`, so a concurrent generation change fails closed.
+   */
+  nextBindingGeneration(input: ConversationRef): number {
+    this.assertOpen()
+    return this.nextBindingGenerationByHash(conversationHash(canonicalConversation(input)))
   }
 
   getActiveBinding(input: ConversationRef): ConversationBinding | undefined {
@@ -954,14 +1085,18 @@ export class DeliveryStore {
 
   rotateBinding(input: { bindingId: string; expectedVersion: number; sessionId: string }): ConversationBinding {
     this.assertOpen()
-    const current = this.getBinding(input.bindingId)
-    if (current === undefined || current.status !== 'active' || current.version !== input.expectedVersion) {
-      throw new DeliveryStoreError('version-conflict', 'active binding version changed or does not exist')
-    }
     const sessionId = validateBindingText(input.sessionId, 'sessionId', 512)
     const now = this.now()
     const id = `binding_${randomUUID()}`
-    this.transaction(() => {
+    return this.transaction(() => {
+      const current = this.getBinding(input.bindingId)
+      if (current === undefined || current.status !== 'active' || current.version !== input.expectedVersion) {
+        throw new DeliveryStoreError('version-conflict', 'active binding version changed or does not exist')
+      }
+      const generation = this.nextBindingGenerationByHash(conversationHash(current.conversation))
+      if (generation !== current.generation + 1) {
+        throw new DeliveryStoreError('version-conflict', 'binding generation changed before rotation')
+      }
       const updated = this.database.prepare(`
         UPDATE conversation_bindings SET status = 'revoked', updated_at = ?, version = version + 1
         WHERE id = ? AND status = 'active' AND version = ?
@@ -983,13 +1118,13 @@ export class DeliveryStore {
         current.workspace,
         current.agentPreset,
         sessionId,
-        current.generation + 1,
+        generation,
         current.policyRef,
         now,
         now,
       )
+      return this.getBinding(id)!
     })
-    return this.getBinding(id)!
   }
 
   acceptInbound(input: InboundEnvelope): { duplicate: boolean; record: InboxRecord } {
@@ -1015,16 +1150,17 @@ export class DeliveryStore {
             attempt_count, received_at, updated_at
           ) VALUES (?, ?, ?, ?, ?, ?, 'received', 0, ?, ?)
         `).run(id, envelope.channel, envelope.account, envelope.eventId, hash, json, now, now)
-        for (const attachment of envelope.attachments ?? []) {
+        for (const [ordinal, attachment] of (envelope.attachments ?? []).entries()) {
           const descriptorHash = digest(JSON.stringify(attachment))
           this.database.prepare(`
             INSERT INTO delivery_attachments (
-              id, owner_kind, owner_id, media_type, size_bytes, sha256, spool_ref,
+              id, owner_kind, owner_id, ordinal, media_type, size_bytes, sha256, spool_ref,
               resource_kind, provider_ref, file_name, status, expires_at, created_at
-            ) VALUES (?, 'inbox', ?, ?, ?, ?, NULL, ?, ?, ?, 'metadata', NULL, ?)
+            ) VALUES (?, 'inbox', ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'metadata', NULL, ?)
           `).run(
-            `attachment_${digest(`${id}:${attachment.providerRef}`).slice(0, 40)}`,
+            `attachment_${digest(`${id}:${ordinal}:${attachment.providerRef}`).slice(0, 40)}`,
             id,
+            ordinal,
             attachment.mediaType ?? '',
             attachment.sizeBytes ?? 0,
             descriptorHash,
@@ -1047,29 +1183,124 @@ export class DeliveryStore {
   listAttachments(input: { ownerKind: 'inbox' | 'outbox'; ownerId: string }): DeliveryAttachment[] {
     this.assertOpen()
     const rows = this.database.prepare(`
-      SELECT id, owner_kind, owner_id, media_type, size_bytes, sha256, spool_ref,
+      SELECT id, owner_kind, owner_id, ordinal, media_type, size_bytes, sha256, spool_ref,
         resource_kind, provider_ref, file_name, status, expires_at, created_at
-      FROM delivery_attachments WHERE owner_kind = ? AND owner_id = ? ORDER BY rowid
-    `).all(input.ownerKind, input.ownerId) as unknown as Array<{
-      id: string; owner_kind: 'inbox' | 'outbox'; owner_id: string; media_type: string
-      size_bytes: number; sha256: string; spool_ref: string | null
-      resource_kind: DeliveryAttachment['resourceType'] | null; provider_ref: string | null
-      file_name: string | null; status: DeliveryAttachment['status']; expires_at: number | null; created_at: number
-    }>
-    return rows.map(row => ({
-      id: row.id,
-      ownerKind: row.owner_kind,
-      ownerId: row.owner_id,
-      resourceType: row.resource_kind ?? 'file',
-      providerRef: row.provider_ref ?? '',
-      ...(row.file_name === null ? {} : { fileName: row.file_name }),
-      ...(row.media_type === '' ? {} : { mediaType: row.media_type }),
-      ...(row.status === 'metadata' && row.size_bytes === 0 ? {} : { sizeBytes: row.size_bytes }),
-      ...(row.status === 'metadata' ? {} : { contentSha256: row.sha256 }),
-      status: row.status,
-      ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
-      createdAt: row.created_at,
-    }))
+      FROM delivery_attachments WHERE owner_kind = ? AND owner_id = ? ORDER BY ordinal
+    `).all(input.ownerKind, input.ownerId) as unknown as AttachmentRow[]
+    return rows.map(attachmentFromRow)
+  }
+
+  /**
+   * Return complete durable image references in the provider descriptor order.
+   * `undefined` means the image descriptors have not been materialized yet.
+   */
+  listReadyInboundImageRefs(inboxId: string): readonly ImageAttachmentRef[] | undefined {
+    this.assertOpen()
+    const rows = this.database.prepare(`
+      SELECT id, owner_kind, owner_id, ordinal, media_type, size_bytes, sha256, spool_ref,
+        resource_kind, provider_ref, file_name, status, expires_at, created_at
+      FROM delivery_attachments
+      WHERE owner_kind = 'inbox' AND owner_id = ? AND resource_kind = 'image'
+      ORDER BY ordinal
+    `).all(inboxId) as unknown as AttachmentRow[]
+    if (rows.length === 0) return []
+    if (rows.every(row => row.status === 'metadata')) return undefined
+    if (rows.some(row => row.status !== 'ready')) {
+      throw new DeliveryStoreError('conflict', 'inbound images have inconsistent materialization state')
+    }
+    return rows.map(persistedImageRef)
+  }
+
+  /** Atomically persist one ordered image batch while the caller still owns the live inbox lease. */
+  commitInboundImageRefs(input: {
+    inboxId: string
+    ownerId: string
+    fencingToken: number
+    images: readonly { ref: ImageAttachmentRef; contentSha256: string }[]
+  }): readonly ImageAttachmentRef[] {
+    this.assertOpen()
+    if (typeof input.inboxId !== 'string' || input.inboxId.length < 1 || input.inboxId.length > 256
+      || typeof input.ownerId !== 'string' || input.ownerId.length < 1 || input.ownerId.length > 256
+      || /\p{Cc}/u.test(input.inboxId) || /\p{Cc}/u.test(input.ownerId)
+      || !Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1) {
+      throw new DeliveryStoreError('stale-fence', 'inbound image commit has an invalid fence')
+    }
+    if (!Array.isArray(input.images)) {
+      throw new DeliveryStoreError('conflict', 'inbound image reference batch is invalid')
+    }
+    const now = this.now()
+    return this.transaction(() => {
+      const claim = this.database.prepare(`
+        SELECT binding.status AS binding_status, principal.status AS principal_status
+        FROM inbox_messages AS inbox
+        LEFT JOIN conversation_bindings AS binding ON binding.id = inbox.binding_id
+        LEFT JOIN delivery_principals AS principal ON principal.id = binding.principal_id
+        WHERE inbox.id = ? AND inbox.status = 'claimed' AND inbox.claimed_by = ?
+          AND inbox.fencing_token = ? AND inbox.lease_until > ?
+      `).get(input.inboxId, input.ownerId, input.fencingToken, now) as {
+        binding_status: ConversationBinding['status'] | null
+        principal_status: DeliveryPrincipal['status'] | null
+      } | undefined
+      if (claim === undefined) {
+        throw new DeliveryStoreError('stale-fence', 'inbound image commit has a stale fence')
+      }
+      if (claim.binding_status !== 'active' || claim.principal_status !== 'active') {
+        throw new DeliveryStoreError('unauthorized-principal', 'inbound image authority was revoked before commit')
+      }
+
+      const rows = this.database.prepare(`
+        SELECT id, owner_kind, owner_id, ordinal, media_type, size_bytes, sha256, spool_ref,
+          resource_kind, provider_ref, file_name, status, expires_at, created_at
+        FROM delivery_attachments
+        WHERE owner_kind = 'inbox' AND owner_id = ? AND resource_kind = 'image'
+        ORDER BY ordinal
+      `).all(input.inboxId) as unknown as AttachmentRow[]
+      if (rows.length !== input.images.length) {
+        throw new DeliveryStoreError('conflict', 'inbound image reference count does not match its descriptors')
+      }
+      const images = input.images.map(image => {
+        if (image === null || typeof image !== 'object' || Array.isArray(image)
+          || !Object.hasOwn(image, 'ref') || !Object.hasOwn(image, 'contentSha256')
+          || Object.keys(image).some(key => !['ref', 'contentSha256'].includes(key))
+          || typeof image.contentSha256 !== 'string' || !/^[a-f0-9]{64}$/u.test(image.contentSha256)) {
+          invalidImageRef()
+        }
+        return { ref: canonicalImageRef(image.ref), contentSha256: image.contentSha256 }
+      })
+
+      if (rows.every(row => row.status === 'ready')) {
+        const persisted = rows.map(persistedImageRef)
+        if (persisted.some((ref, index) => !sameImageRef(ref, images[index]!.ref)
+          || rows[index]!.sha256 !== images[index]!.contentSha256)) {
+          throw new DeliveryStoreError('conflict', 'inbound image references are immutable')
+        }
+        return persisted
+      }
+      if (rows.some(row => row.status !== 'metadata')) {
+        throw new DeliveryStoreError('conflict', 'inbound images have inconsistent materialization state')
+      }
+
+      for (const [index, row] of rows.entries()) {
+        const image = images[index]!
+        const changed = this.database.prepare(`
+          UPDATE delivery_attachments
+          SET media_type = ?, size_bytes = ?, sha256 = ?, spool_ref = ?, status = 'ready'
+          WHERE id = ? AND owner_kind = 'inbox' AND owner_id = ? AND resource_kind = 'image'
+            AND status = 'metadata'
+        `).run(
+          image.ref.mediaType,
+          image.ref.bytes,
+          image.contentSha256,
+          JSON.stringify(image.ref),
+          row.id,
+          input.inboxId,
+        )
+        if (changed.changes !== 1) {
+          throw new DeliveryStoreError('conflict', 'inbound image batch changed during commit')
+        }
+      }
+      return images.map(image => image.ref)
+    })
   }
 
   queueInbox(inboxId: string, bindingId: string): InboxRecord {
@@ -1322,15 +1553,78 @@ export class DeliveryStore {
     return this.getInbox(input.inboxId)!
   }
 
-  markInboxDispatching(input: { inboxId: string; ownerId: string; fencingToken: number }): InboxRecord {
+  markInboxDispatching(input: {
+    inboxId: string
+    ownerId: string
+    fencingToken: number
+    binding: Readonly<InboundDispatchBindingSnapshot>
+  }): InboxRecord {
     this.assertOpen()
+    let bindingId: string
+    let sessionId: string
+    let bindingConversationJson: string
+    let bindingPrincipalJson: string
+    try {
+      bindingId = validateBindingText(input.binding.id, 'binding.id', 256)
+      sessionId = validateBindingText(input.binding.sessionId, 'binding.sessionId', 512)
+      bindingConversationJson = conversationJson(input.binding.conversation)
+      bindingPrincipalJson = principalJson(input.binding.principal)
+    } catch {
+      throw new DeliveryStoreError('invalid-binding', 'inbox dispatch binding snapshot is invalid')
+    }
+    if (!Number.isSafeInteger(input.binding.version) || input.binding.version < 1
+      || !Number.isSafeInteger(input.binding.generation) || input.binding.generation < 1) {
+      throw new DeliveryStoreError('invalid-binding', 'inbox dispatch binding snapshot is invalid')
+    }
     const now = this.now()
-    const changed = this.database.prepare(`
-      UPDATE inbox_messages SET failure_code = 'dispatch-started', updated_at = ?
-      WHERE id = ? AND status = 'claimed' AND claimed_by = ? AND fencing_token = ? AND lease_until > ?
-    `).run(now, input.inboxId, input.ownerId, input.fencingToken, now)
-    if (changed.changes !== 1) throw new DeliveryStoreError('stale-fence', 'inbox dispatch marker has a stale fence')
-    return this.getInbox(input.inboxId)!
+    return this.transaction(() => {
+      const changed = this.database.prepare(`
+        UPDATE inbox_messages AS inbox SET failure_code = 'dispatch-started', updated_at = ?
+        WHERE inbox.id = ? AND inbox.status = 'claimed' AND inbox.claimed_by = ?
+          AND inbox.fencing_token = ? AND inbox.lease_until > ? AND inbox.binding_id = ?
+          AND EXISTS (
+            SELECT 1 FROM conversation_bindings AS binding
+            JOIN delivery_principals AS principal ON principal.id = binding.principal_id
+            WHERE binding.id = inbox.binding_id AND binding.id = ? AND binding.status = 'active'
+              AND binding.version = ? AND binding.session_id = ? AND binding.generation = ?
+              AND binding.conversation_json = ? AND binding.principal_json = ?
+              AND principal.status = 'active' AND principal.key_hash = ? AND principal.principal_json = ?
+          )
+      `).run(
+        now,
+        input.inboxId,
+        input.ownerId,
+        input.fencingToken,
+        now,
+        bindingId,
+        bindingId,
+        input.binding.version,
+        sessionId,
+        input.binding.generation,
+        bindingConversationJson,
+        bindingPrincipalJson,
+        principalHash(input.binding.principal),
+        bindingPrincipalJson,
+      )
+      if (changed.changes === 1) return this.getInbox(input.inboxId)!
+
+      const claim = this.database.prepare(`
+        SELECT binding_id FROM inbox_messages
+        WHERE id = ? AND status = 'claimed' AND claimed_by = ? AND fencing_token = ? AND lease_until > ?
+      `).get(input.inboxId, input.ownerId, input.fencingToken, now)
+      if (claim === undefined) {
+        throw new DeliveryStoreError('stale-fence', 'inbox dispatch marker has a stale fence')
+      }
+      const principal = this.database.prepare(`
+        SELECT status FROM delivery_principals WHERE key_hash = ? AND principal_json = ?
+      `).get(principalHash(input.binding.principal), bindingPrincipalJson) as {
+        status: DeliveryPrincipal['status']
+      } | undefined
+      if (principal?.status !== 'active') {
+        throw new DeliveryStoreError('unauthorized-principal', 'inbox dispatch principal is not active')
+      }
+      throw new DeliveryStoreError('invalid-binding', 'inbox dispatch binding snapshot is no longer active')
+    })
   }
 
   renewInboxClaim(input: {
@@ -1843,16 +2137,24 @@ export class DeliveryStore {
   revokePrincipal(id: string, expectedVersion: number): DeliveryPrincipal {
     this.assertOpen()
     const now = this.now()
-    const result = this.database.prepare(`
-      UPDATE delivery_principals SET status = 'revoked', updated_at = ?, version = version + 1
-      WHERE id = ? AND version = ?
-    `).run(now, id, expectedVersion)
-    if (result.changes !== 1) throw new DeliveryStoreError('version-conflict', 'principal version changed or does not exist')
-    const row = this.database.prepare(`
-      SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
-      FROM delivery_principals WHERE id = ?
-    `).get(id) as unknown as PrincipalRow
-    return principalFromRow(row)
+    return this.transaction(() => {
+      const result = this.database.prepare(`
+        UPDATE delivery_principals SET status = 'revoked', updated_at = ?, version = version + 1
+        WHERE id = ? AND version = ?
+      `).run(now, id, expectedVersion)
+      if (result.changes !== 1) {
+        throw new DeliveryStoreError('version-conflict', 'principal version changed or does not exist')
+      }
+      this.database.prepare(`
+        UPDATE conversation_bindings SET status = 'revoked', updated_at = ?, version = version + 1
+        WHERE principal_id = ? AND status = 'active'
+      `).run(now, id)
+      const row = this.database.prepare(`
+        SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals WHERE id = ?
+      `).get(id) as unknown as PrincipalRow
+      return principalFromRow(row)
+    })
   }
 
   linkPrincipal(input: {
@@ -2301,6 +2603,18 @@ export class DeliveryStore {
       SELECT epoch FROM conversation_model_epochs
       WHERE conversation_hash = ? AND conversation_json = ?
     `).get(hash, json) as { epoch: number }).epoch
+  }
+
+  private nextBindingGenerationByHash(hash: string): number {
+    const row = this.database.prepare(`
+      SELECT COALESCE(MAX(generation), 0) AS maximum FROM conversation_bindings
+      WHERE conversation_hash = ?
+    `).get(hash) as { maximum: number }
+    const generation = row.maximum + 1
+    if (!Number.isSafeInteger(generation) || generation < 1) {
+      throw new DeliveryStoreError('conflict', 'conversation binding generation is exhausted')
+    }
+    return generation
   }
 
   private assertOpen(): void {

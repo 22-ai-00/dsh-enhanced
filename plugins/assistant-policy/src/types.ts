@@ -83,6 +83,7 @@ export type DecisionReasonCode =
   | 'missing-workspace'
   | 'rule-allow'
   | 'rule-deny'
+  | 'tool-default-allow'
 
 export interface PolicyDecision {
   effect: PolicyEffect

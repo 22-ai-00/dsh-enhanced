@@ -84,7 +84,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 | 插件 | 简要说明 | 快速安装 |
 |---|---|---|
 | [`@dsh-enhanced/acp`](plugins/acp) | 将 DSH 暴露为 ACP stdio agent，让支持 ACP 的编辑器使用 DSH 的 Agent、模型、工具、权限与会话能力。 | `dsh plugin --profile acp add @dsh-enhanced/acp` |
-| [`@dsh-enhanced/coding-subscription-provider`](plugins/coding-subscription-provider) | 接入本机已登录的 Codex、Claude Code、Cursor Agent 和 Grok Build；自动发现模型，并为 Codex、Claude、Grok 展示 reasoning effort。 | `dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider` |
+| [`@dsh-enhanced/coding-subscription-provider`](plugins/coding-subscription-provider) | 接入本机已登录的 Codex、Claude Code、Cursor Agent 和 Grok Build；Codex 另有显式 opt-in 的私有 Responses 直连，可原生返回工具调用并消费图片。 | `dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider` |
 | [`@dsh-enhanced/traex-acp-provider`](plugins/traex-acp-provider) | 通过 ACP 调用本机已登录的 TraeX，并动态展示其模型与逐模型 reasoning effort。 | `dsh plugin --profile web add @dsh-enhanced/traex-acp-provider` |
 | [`@dsh-enhanced/personal-assistant`](plugins/personal-assistant) | 个人助理核心 meta-bundle，一次组合 Policy、Memory、Wiki 和 Automations，不包含消息通道。 | `dsh plugin --profile web add @dsh-enhanced/personal-assistant` |
 | [`@dsh-enhanced/assistant-policy`](plugins/assistant-policy) | 默认拒绝的授权、审批提案、硬预算和脱敏审计边界。 | 通常由 `personal-assistant` 安装 |
@@ -101,11 +101,11 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 | [`@dsh-enhanced/assistant-health`](plugins/assistant-health) | 聚合各 provider 的脱敏 liveness/readiness 与运维诊断。 | 按需安装 |
 | [`@dsh-enhanced/hello`](plugins/hello) | 最小示例插件，用于验证 bundle 安装、Cordis patch、构建与日志链路。 | `dsh plugin --profile web add @dsh-enhanced/hello` |
 
-安装 Web provider 后运行 `dsh --profile web --dump-config` 检查最终配置，再执行 `dsh web`。Coding Subscription Provider 需要先安装并登录准备使用的官方 CLI；TraeX provider 还需要在配置中显式设置 `enabled: true`。各插件的完整配置、权限边界和排错方法见表内链接。
+安装 Web provider 后运行 `dsh --profile web --dump-config` 检查最终配置，再执行 `dsh web`。Coding Subscription Provider 的 CLI transport 需要先安装并登录相应官方客户端；显式启用 Codex `direct-responses` 时，生成不需要 Codex 可执行文件，但要求同一 POSIX 用户已有符合安全权限约束的 `CODEX_HOME/auth.json` 或 `~/.codex/auth.json`。TraeX provider 还需要在配置中显式设置 `enabled: true`。各插件的完整配置、权限边界和排错方法见表内链接。
 
 ACP 插件使用独立的 `acp` profile。安装后运行 `dsh --profile acp --dump-config`，再在 ACP 客户端中把 `dsh --profile acp` 配置为 stdio agent。原生 Windows 支持目前为实验性，详见插件文档。
 
-个人助理为什么这样拆分、哪些社区实现只作为设计参考，以及目前仍未实现的浏览器/RPA、二进制附件处理和资料 ingest，见[自研插件路线图](docs/dsh-personal-assistant-self-built-plugin-roadmap.md)。新增、重命名、弃用或移除插件时，应同时维护本表和 [`plugins/README.md`](plugins/README.md) 的完整目录。
+个人助理为什么这样拆分、哪些社区实现只作为设计参考，以及目前仍未实现的浏览器/RPA、非图片附件下载/上传和资料 ingest，见[自研插件路线图](docs/dsh-personal-assistant-self-built-plugin-roadmap.md)。新增、重命名、弃用或移除插件时，应同时维护本表和 [`plugins/README.md`](plugins/README.md) 的完整目录。
 
 ## 开发
 

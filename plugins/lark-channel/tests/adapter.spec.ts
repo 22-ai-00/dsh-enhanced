@@ -31,6 +31,11 @@ class FakeTransport implements LarkTransport {
   }))
   readonly writeProgress = vi.fn(async (_handle: { cotId: string; messageId: string },
     _events: readonly { eventType: string; content: string; timestamp: string }[]) => {})
+  readonly downloadMessageImage = vi.fn(async (_messageId: string, _fileKey: string,
+    _options: { maxBytes: number; signal: AbortSignal }) => ({
+    data: new Uint8Array(Buffer.from('89504e470d0a1a0a', 'hex')),
+    mediaType: 'image/png' as const,
+  }))
   subscribe(handlers: LarkTransportHandlers): () => void {
     if (this.handlers !== undefined) throw new Error('duplicate handlers')
     this.handlers = handlers
@@ -124,6 +129,79 @@ function modelPickerElement(card: Record<string, unknown>, name: string): Record
 }
 
 describe('Lark delivery adapter', () => {
+  test('exposes an image-only, message-bound inbound resource reader', async () => {
+    const f = fixture()
+    expect(f.adapter.capabilities.inboundImages).toBe(true)
+    const signal = new AbortController().signal
+    await expect(f.adapter.readInboundImage({
+      eventId: 'om_in',
+      attachment: { resourceType: 'image', providerRef: 'img_v3_safe', fileName: 'provider-name.png' },
+      maxBytes: 1_024,
+    }, signal)).resolves.toEqual({
+      outcome: 'downloaded',
+      data: new Uint8Array(Buffer.from('89504e470d0a1a0a', 'hex')),
+      mediaType: 'image/png',
+    })
+    expect(f.transport.downloadMessageImage).toHaveBeenCalledWith('om_in', 'img_v3_safe', {
+      maxBytes: 1_024,
+      signal,
+    })
+
+    await expect(f.adapter.readInboundImage({
+      eventId: 'om_in',
+      attachment: { resourceType: 'file', providerRef: 'file_safe' },
+      maxBytes: 1_024,
+    }, signal)).resolves.toMatchObject({ outcome: 'not-downloaded', retryable: false })
+    await expect(f.adapter.readInboundImage({
+      eventId: 'om_in',
+      attachment: { resourceType: 'image', providerRef: '../private' },
+      maxBytes: 1_024,
+    }, signal)).resolves.toMatchObject({ outcome: 'not-downloaded', retryable: false })
+    expect(f.transport.downloadMessageImage).toHaveBeenCalledTimes(1)
+  })
+
+  test('does not advertise inbound images when a custom transport has no callable resource reader', () => {
+    const channel = new FakeTransport()
+    Object.defineProperty(channel, 'downloadMessageImage', { value: null })
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, channel)
+    expect(adapter.capabilities.inboundImages).toBe(false)
+  })
+
+  test('maps image download cancellation, permission, throttling, and unknown failures without provider details', async () => {
+    const f = fixture()
+    const input = {
+      eventId: 'om_in', attachment: { resourceType: 'image' as const, providerRef: 'img_v3_safe' }, maxBytes: 1_024,
+    }
+    const aborted = new AbortController()
+    aborted.abort(new Error('secret cancellation reason'))
+    await expect(f.adapter.readInboundImage(input, aborted.signal)).resolves.toEqual({
+      outcome: 'not-downloaded', failureCode: 'lark-image-aborted', retryable: true,
+    })
+    expect(f.transport.downloadMessageImage).not.toHaveBeenCalled()
+
+    f.transport.downloadMessageImage.mockRejectedValueOnce(
+      new LarkTransportError('permission_denied', 'provider secret detail'),
+    )
+    await expect(f.adapter.readInboundImage(input, new AbortController().signal)).resolves.toEqual({
+      outcome: 'not-downloaded', failureCode: 'lark-image-permission-denied', retryable: false,
+    })
+
+    f.transport.downloadMessageImage.mockRejectedValueOnce(
+      new LarkTransportError('rate_limited', 'provider secret detail', 2_000),
+    )
+    await expect(f.adapter.readInboundImage(input, new AbortController().signal)).resolves.toEqual({
+      outcome: 'not-downloaded', failureCode: 'lark-image-rate-limited', retryable: true, retryAfterMs: 2_000,
+    })
+
+    f.transport.downloadMessageImage.mockRejectedValueOnce(new Error('img_v3_do-not-leak'))
+    const unknown = await f.adapter.readInboundImage(input, new AbortController().signal)
+    expect(unknown).toEqual({ outcome: 'not-downloaded', failureCode: 'lark-image-unknown', retryable: true })
+    expect(JSON.stringify(unknown)).not.toContain('img_v3_do-not-leak')
+  })
+
   test('persists inbound through delivery before the provider listener resolves', async () => {
     const f = fixture()
     let release!: () => void

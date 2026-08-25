@@ -7,6 +7,7 @@ import { DeliveryStore } from '../src/store.ts'
 import type {
   AdapterReconcileResult,
   AdapterSendResult,
+  ConversationBinding,
   DeliveryAdapter,
   DeliveryAdapterContext,
   OutboundIntent,
@@ -147,6 +148,52 @@ describe('adapter registry and delivery coordinator', () => {
     f.store.close()
   })
 
+  test('does not send a pending outbox after revoking its exact principal', async () => {
+    const f = await fixture()
+    const row = f.store.enqueue(f.makeIntent('pending-principal-revoked'))
+    const send = vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: 'om_forbidden' }))
+    await f.registry.register(adapter({ send }))
+    const principal = f.store.getPrincipal(f.binding.principal)!
+
+    f.store.revokePrincipal(principal.id, principal.version)
+    await f.coordinator.tick()
+    await f.coordinator.whenIdle()
+
+    expect(send).not.toHaveBeenCalled()
+    expect(f.store.getOutbox(row.id)).toMatchObject({ status: 'dead', failureCode: 'binding-revoked' })
+    await f.registry.stop()
+    f.store.close()
+  })
+
+  test.each([
+    ['inactive principal', (f: Awaited<ReturnType<typeof fixture>>) => {
+      vi.spyOn(f.store, 'isAuthorizedPrincipal').mockReturnValue(false)
+    }, 'principal-revoked'],
+    ['changed target', (f: Awaited<ReturnType<typeof fixture>>) => {
+      const original = f.store.getBinding.bind(f.store)
+      vi.spyOn(f.store, 'getBinding').mockImplementation(id => {
+        const binding = original(id)
+        return binding?.id === f.binding.id
+          ? { ...binding, conversation: { ...binding.conversation, chat: 'oc_changed_after_enqueue' } }
+          : binding
+      })
+    }, 'binding-target-mismatch'],
+  ] as const)('fails closed before send when the claimed outbox has an %s', async (_scenario, mutate, failureCode) => {
+    const f = await fixture()
+    const row = f.store.enqueue(f.makeIntent(`outbox-gate-${failureCode}`))
+    const send = vi.fn(async () => ({ outcome: 'accepted' as const, providerMessageId: 'om_forbidden' }))
+    await f.registry.register(adapter({ send }))
+    mutate(f)
+
+    await f.coordinator.tick()
+    await f.coordinator.whenIdle()
+
+    expect(send).not.toHaveBeenCalled()
+    expect(f.store.getOutbox(row.id)).toMatchObject({ status: 'dead', failureCode })
+    await f.registry.stop()
+    f.store.close()
+  })
+
   test('treats thrown sends as ambiguous and reconciles instead of resending', async () => {
     const f = await fixture()
     const row = f.store.enqueue(f.makeIntent('ambiguous'))
@@ -237,6 +284,838 @@ describe('adapter registry and delivery coordinator', () => {
       release()
       await coordinator.stop()
       f.store.close()
+    }
+  })
+
+  test('prepares inbound data before the dispatch marker and passes it to the processor', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('prepared-inbound').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-prepared-inbound', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'with image',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const order: string[] = []
+    const prepared = Object.freeze({ imageAttachments: Object.freeze([]) })
+    const prepare = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      context: { inboxId: string; ownerId: string; fencingToken: number },
+    ) => {
+      order.push('prepare')
+      expect(context).toEqual({ inboxId: record.id, ownerId: 'inbound-worker', fencingToken: 1 })
+      expect(f.store.getInbox(record.id)).toMatchObject({ status: 'claimed' })
+      expect(f.store.getInbox(record.id)).not.toHaveProperty('failureCode')
+      return { outcome: 'prepared' as const, message: prepared }
+    })
+    const originalMark = f.store.markInboxDispatching.bind(f.store)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching').mockImplementation(input => {
+      order.push('mark')
+      return originalMark(input)
+    })
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      message?: unknown,
+    ) => {
+      order.push('process')
+      expect(message).toBe(prepared)
+      expect(f.store.getInbox(record.id)).toMatchObject({ status: 'claimed', failureCode: 'dispatch-started' })
+      return { outcome: 'processed' as const }
+    })
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000, now: () => 1_000, random: () => 0 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(order).toEqual(['prepare', 'mark', 'process'])
+      expect(prepare).toHaveBeenCalledOnce()
+      expect(mark).toHaveBeenCalledOnce()
+      expect(process).toHaveBeenCalledOnce()
+      expect(f.store.getInbox(record.id)).toMatchObject({ status: 'processed' })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('retries a retryable preparation failure without marking dispatch', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('prepare-retry').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-prepare-retry', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'retry preparation',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const prepare = vi.fn(async () => ({ outcome: 'not-processed' as const,
+      failureCode: 'image-download-temporary', retryable: true, retryAfterMs: 500 }))
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000, now: () => 1_000, random: () => 0 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(process).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'retry_wait', failureCode: 'image-download-temporary', nextAttemptAt: 1_500,
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('dead-letters a permanent preparation failure without marking dispatch', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('prepare-dead').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-prepare-dead', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'bad image',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const prepare = vi.fn(async () => ({ outcome: 'not-processed' as const,
+      failureCode: 'image-format-invalid', retryable: false }))
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000, now: () => 1_000, random: () => 0 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(process).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', failureCode: 'image-format-invalid',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('retries a thrown preparation safely without marking dispatch ambiguous', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('prepare-throw').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-prepare-throw', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'throw before dispatch',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const prepare = vi.fn(async () => { throw new Error('temporary private detail') })
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000, now: () => 1_000, random: () => 0 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(process).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'retry_wait', failureCode: 'prepare-threw', nextAttemptAt: 1_100,
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('dead-letters a binding revoked during preparation before marking dispatch', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('prepare-revoked-binding').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-prepare-revoked-binding', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'rotate during preparation',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const prepare = vi.fn(async () => {
+      f.store.rotateBinding({ bindingId: f.binding.id, expectedVersion: f.binding.version, sessionId: 'session-2' })
+      return { outcome: 'prepared' as const, message: { imageAttachments: [] } }
+    })
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(process).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', failureCode: 'binding-revoked',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('rejects an explicit dispatch gate when setup revokes its binding', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-setup-revoked-binding').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-setup-revoked-binding', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'rotate during setup',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    let externalDispatchStarted = false
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      f.store.rotateBinding({ bindingId: f.binding.id, expectedVersion: f.binding.version, sessionId: 'session-2' })
+      markDispatching!()
+      externalDispatchStarted = true
+      return { outcome: 'processed' as const }
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(externalDispatchStarted).toBe(false)
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', failureCode: 'binding-revoked',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('rejects an explicit dispatch gate when setup changes its active binding route', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-setup-changed-binding').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-setup-changed-binding', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'change during setup',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const originalGetBinding = f.store.getBinding.bind(f.store)
+    let setupChangedBinding = false
+    vi.spyOn(f.store, 'getBinding').mockImplementation(id => {
+      const current = originalGetBinding(id)
+      return setupChangedBinding && current?.id === f.binding.id
+        ? { ...current, version: current.version + 1, sessionId: 'session-changed' }
+        : current
+    })
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    let externalDispatchStarted = false
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      setupChangedBinding = true
+      markDispatching!()
+      externalDispatchStarted = true
+      return { outcome: 'processed' as const }
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(externalDispatchStarted).toBe(false)
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', failureCode: 'binding-changed-before-dispatch',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('rejects an explicit dispatch gate when setup revokes its principal authorization', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-setup-revoked-principal').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-setup-revoked-principal', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'revoke during setup',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const principal = f.store.getPrincipal(f.binding.principal)!
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    let externalDispatchStarted = false
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      f.store.revokePrincipal(principal.id, principal.version)
+      markDispatching!()
+      externalDispatchStarted = true
+      return { outcome: 'processed' as const }
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(externalDispatchStarted).toBe(false)
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', failureCode: 'authorization-revoked-before-dispatch',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test.each([
+    ['rotates the binding', (f: Awaited<ReturnType<typeof fixture>>) => {
+      f.store.rotateBinding({ bindingId: f.binding.id, expectedVersion: f.binding.version, sessionId: 'session-2' })
+    }, 'binding-changed-before-dispatch'],
+    ['revokes the principal', (f: Awaited<ReturnType<typeof fixture>>) => {
+      const principal = f.store.getPrincipal(f.binding.principal)!
+      f.store.revokePrincipal(principal.id, principal.version)
+    }, 'authorization-revoked-before-dispatch'],
+  ] as const)(
+    'fails closed when a concurrent writer %s after precheck but inside the dispatch marker',
+    async (_scenario, mutate, failureCode) => {
+      const f = await fixture()
+      const target = f.makeIntent(`atomic-marker-${failureCode}`).target
+      const record = f.store.acceptInbound({
+        channel: 'lark', account: 'bot-1', eventId: `evt-atomic-marker-${failureCode}`, occurredAt: 1,
+        principal: target.principal, conversation: target.conversation, kind: 'text', text: 'must not dispatch',
+      }).record
+      f.store.queueInbox(record.id, f.binding.id)
+      const originalMark = f.store.markInboxDispatching.bind(f.store)
+      vi.spyOn(f.store, 'markInboxDispatching').mockImplementation(input => {
+        mutate(f)
+        return originalMark(input)
+      })
+      const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+      const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ process }),
+        ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+        retryBaseMs: 100, retryMaxMs: 10_000 })
+
+      try {
+        await coordinator.tick()
+        await coordinator.whenIdle()
+        expect(process).not.toHaveBeenCalled()
+        expect(f.store.getInbox(record.id)).toMatchObject({ status: 'dead_letter', failureCode })
+        expect(f.store.getInbox(record.id)?.failureCode).not.toBe('dispatch-started')
+      } finally {
+        await coordinator.stop()
+        f.store.close()
+      }
+    },
+  )
+
+  test.each([
+    ['version', (binding: ConversationBinding) => ({ ...binding, version: binding.version + 1 })],
+    ['session', (binding: ConversationBinding) => ({ ...binding, sessionId: 'session-changed' })],
+    ['generation', (binding: ConversationBinding) => ({ ...binding, generation: binding.generation + 1 })],
+    ['principal', (binding: ConversationBinding) => ({ ...binding,
+      principal: { ...binding.principal, user: 'ou_changed' } })],
+    ['conversation', (binding: ConversationBinding) => ({ ...binding,
+      conversation: { ...binding.conversation, chat: 'oc_changed' } })],
+  ] as const)('dead-letters a binding whose %s changes during preparation', async (_field, mutate) => {
+    const f = await fixture()
+    const target = f.makeIntent('prepare-changed-binding').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: `evt-prepare-changed-binding-${_field}`, occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'change during preparation',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const originalGetBinding = f.store.getBinding.bind(f.store)
+    let prepared = false
+    vi.spyOn(f.store, 'getBinding').mockImplementation(id => {
+      const current = originalGetBinding(id)
+      return prepared && current?.id === f.binding.id ? mutate(current) : current
+    })
+    const prepare = vi.fn(async () => {
+      prepared = true
+      return { outcome: 'prepared' as const, message: { imageAttachments: [] } }
+    })
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(process).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', failureCode: 'binding-changed-before-dispatch',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('recovers lease loss during preparation as safe retry instead of dispatch ambiguity', async () => {
+    vi.useFakeTimers()
+    const f = await fixture()
+    const target = f.makeIntent('prepare-lease-lost').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-prepare-lease-lost', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'lease lost before dispatch',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    vi.spyOn(f.store, 'renewInboxClaim').mockReturnValue(false)
+    let observedSignal: AbortSignal | undefined
+    const prepare = vi.fn(async (_binding: unknown, _envelope: unknown, signal: AbortSignal) => {
+      observedSignal = signal
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }))
+      throw signal.reason
+    })
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await vi.advanceTimersByTimeAsync(34)
+      expect(observedSignal?.aborted).toBe(true)
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(process).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({ status: 'claimed' })
+      expect(f.store.getInbox(record.id)).not.toHaveProperty('failureCode')
+      f.setNow(1_100)
+      expect(f.store.recoverInbox({ maxAttempts: 3 })).toEqual([
+        expect.objectContaining({ status: 'retry_wait', failureCode: 'lease-expired' }),
+      ])
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('keeps processor throws ambiguous after preparation has been marked for dispatch', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('process-throw').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-process-throw', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'throw after dispatch',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const prepare = vi.fn(async () => ({ outcome: 'prepared' as const, message: { imageAttachments: [] } }))
+    const process = vi.fn(async () => { throw new Error('possibly dispatched') })
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(prepare).toHaveBeenCalledOnce()
+      expect(process).toHaveBeenCalledOnce()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', failureCode: 'processor-ambiguous',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('retries an explicit processor throw before its dispatch gate is marked', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-pre-dispatch-throw').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-pre-dispatch-throw', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'fail before followup',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      expect(markDispatching).toBeTypeOf('function')
+      throw new Error('local setup failed')
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000, now: () => 1_000, random: () => 0 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'retry_wait', failureCode: 'processor-threw-before-dispatch', nextAttemptAt: 1_100,
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('keeps an explicit processor throw ambiguous after its dispatch gate is marked', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-post-dispatch-throw').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-post-dispatch-throw', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'fail after followup',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      markDispatching!()
+      expect(f.store.getInbox(record.id)).toMatchObject({ failureCode: 'dispatch-started' })
+      throw new Error('possibly dispatched')
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).toHaveBeenCalledOnce()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', failureCode: 'processor-ambiguous',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('marks an explicit dispatch gate at most once', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-idempotent-gate').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-idempotent-gate', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'one dispatch marker',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      markDispatching!()
+      markDispatching!()
+      return { outcome: 'processed' as const }
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).toHaveBeenCalledOnce()
+      expect(f.store.getInbox(record.id)).toMatchObject({ status: 'processed' })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('rejects a retained explicit dispatch gate after the processor settles', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-late-gate').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-late-gate', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'late gate',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    let retainedGate: (() => void) | undefined
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      retainedGate = markDispatching
+      markDispatching!()
+      return { outcome: 'processed' as const }
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(() => retainedGate!()).toThrow(/gate is closed/i)
+      expect(mark).toHaveBeenCalledOnce()
+      expect(f.store.getInbox(record.id)).toMatchObject({ status: 'processed' })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('settles an explicit processed result without requiring a dispatch marker', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-local-processed').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-local-processed', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'command', text: '/local',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({ status: 'processed' })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('settles an explicit not-processed result without requiring a dispatch marker', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-local-failure').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-local-failure', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'local failure',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const process = vi.fn(async () => ({ outcome: 'not-processed' as const,
+      failureCode: 'local-prerequisite-unavailable', retryable: true }))
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000, now: () => 1_000, random: () => 0 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'retry_wait', failureCode: 'local-prerequisite-unavailable', nextAttemptAt: 1_100,
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('dead-letters an explicit retryable result after dispatch is marked without replaying it', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-post-dispatch-not-processed').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-post-dispatch-not-processed', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'retry after dispatch',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      markDispatching!()
+      return { outcome: 'not-processed' as const,
+        failureCode: 'processor-requested-retry', retryable: true }
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000, now: () => 1_000, random: () => 0 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      f.setNow(1_100)
+      await coordinator.tick()
+      await coordinator.whenIdle()
+
+      expect(mark).toHaveBeenCalledOnce()
+      expect(process).toHaveBeenCalledOnce()
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'dead_letter', attemptCount: 1, failureCode: 'processor-ambiguous',
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('throws from an explicit gate whose durable marker write fails', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('explicit-marker-failure').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-explicit-marker-failure', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'marker failure',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const mark = vi.spyOn(f.store, 'markInboxDispatching').mockImplementation(() => { throw new Error('marker failed') })
+    let continuedAfterGate = false
+    const process = vi.fn(async (
+      _binding: unknown,
+      _envelope: unknown,
+      _signal: AbortSignal,
+      _prepared?: unknown,
+      markDispatching?: () => void,
+    ) => {
+      markDispatching!()
+      continuedAfterGate = true
+      return { outcome: 'processed' as const }
+    })
+    const coordinator = new InboundCoordinator({ store: f.store,
+      processor: () => ({ dispatchControl: 'explicit' as const, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000, now: () => 1_000, random: () => 0 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(mark).toHaveBeenCalledOnce()
+      expect(continuedAfterGate).toBe(false)
+      expect(f.store.getInbox(record.id)).toMatchObject({
+        status: 'retry_wait', failureCode: 'processor-threw-before-dispatch', nextAttemptAt: 1_100,
+      })
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('does not call the processor when the dispatch marker loses its fence', async () => {
+    const f = await fixture()
+    const target = f.makeIntent('marker-fence-lost').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-marker-fence-lost', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'stale marker',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const prepare = vi.fn(async () => ({ outcome: 'prepared' as const, message: { imageAttachments: [] } }))
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    vi.spyOn(f.store, 'markInboxDispatching').mockImplementation(() => { throw new Error('stale fence') })
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+
+    try {
+      await coordinator.tick()
+      await coordinator.whenIdle()
+      expect(prepare).toHaveBeenCalledOnce()
+      expect(process).not.toHaveBeenCalled()
+      expect(f.store.getInbox(record.id)).toMatchObject({ status: 'claimed' })
+      expect(f.store.getInbox(record.id)).not.toHaveProperty('failureCode')
+      f.setNow(1_100)
+      expect(f.store.recoverInbox({ maxAttempts: 3 })).toEqual([
+        expect.objectContaining({ status: 'retry_wait', failureCode: 'lease-expired' }),
+      ])
+    } finally {
+      await coordinator.stop()
+      f.store.close()
+    }
+  })
+
+  test('ignores preparation that settles after bounded shutdown', async () => {
+    vi.useFakeTimers()
+    const f = await fixture()
+    const target = f.makeIntent('late-prepare').target
+    const record = f.store.acceptInbound({
+      channel: 'lark', account: 'bot-1', eventId: 'evt-late-prepare', occurredAt: 1,
+      principal: target.principal, conversation: target.conversation, kind: 'text', text: 'late preparation',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const prepare = vi.fn(async () => {
+      await gate
+      return { outcome: 'prepared' as const, message: { imageAttachments: [] } }
+    })
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    const mark = vi.spyOn(f.store, 'markInboxDispatching')
+    const finish = vi.spyOn(f.store, 'finishInbox')
+    const coordinator = new InboundCoordinator({ store: f.store, processor: () => ({ prepare, process }),
+      ownerId: 'inbound-worker', leaseMs: 100, maxAttempts: 3, maxConcurrency: 1,
+      retryBaseMs: 100, retryMaxMs: 10_000 })
+    const stopping = (async () => {
+      await coordinator.tick()
+      return coordinator.stop()
+    })()
+    let closed = false
+
+    try {
+      await vi.advanceTimersByTimeAsync(100)
+      await stopping
+      expect(mark).not.toHaveBeenCalled()
+      expect(finish).not.toHaveBeenCalled()
+      f.store.close()
+      closed = true
+      release()
+      await Promise.resolve()
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(mark).not.toHaveBeenCalled()
+      expect(finish).not.toHaveBeenCalled()
+      expect(process).not.toHaveBeenCalled()
+    } finally {
+      release()
+      await stopping
+      if (!closed) f.store.close()
     }
   })
 

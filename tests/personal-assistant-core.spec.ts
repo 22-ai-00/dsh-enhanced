@@ -65,6 +65,12 @@ describe('four-core personal assistant composition', () => {
     roots.push(root)
     const ctx = new Context()
     await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
+    ctx.on('agent/session-start', ({ agent }) => {
+      agent.session.append('approval/policy', { policy: 'never' })
+      agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
+      const append = agent.session.append as unknown as (type: string, data: unknown) => unknown
+      append.call(agent.session, 'sandbox/mode', { mode: 'danger-full-access' })
+    })
     await ctx.plugin(AssistantPolicyService, {
       databasePath: join(root, 'policy.sqlite'),
       budgets: [

@@ -4,7 +4,7 @@ import { CallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService, setApprovalReviewer } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,6 +26,10 @@ function agent(): Agent {
     cwd: '/work/alpha',
     agentPreset: 'primary',
   })
+  setApprovalReviewer(session, 'none')
+  session.append('approval/policy', { policy: 'never' })
+  const append = session.append as unknown as (type: string, data: unknown) => unknown
+  append.call(session, 'sandbox/mode', { mode: 'danger-full-access' })
   const inbox = new Inbox(session, { inserted() {}, discarded() {}, claimed() {} })
   return {
     id,

@@ -13,12 +13,22 @@ describe('lark-channel bundle contract', () => {
   test('accepts only a secret environment name and rejects plaintext-looking config fields', () => {
     expect(Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET' }))
       .toMatchObject({ appSecretEnv: 'LARK_APP_SECRET', enabled: false, requireMentionInGroups: true,
-        showProgress: true, statusReactions: true })
+        showProgress: true, statusReactions: true, imageDownloadTimeoutMs: 30_000 })
     expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'not-valid' }))
       .toThrow()
     expect(() => Config({
       account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET', appSecret: 'plaintext',
     } as never)).toThrow()
+  })
+
+  test('bounds the image resource request timeout independently from the websocket handshake', () => {
+    expect(Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', imageDownloadTimeoutMs: 45_000 }))
+      .toMatchObject({ imageDownloadTimeoutMs: 45_000 })
+    expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', imageDownloadTimeoutMs: 999 })).toThrow()
+    expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', imageDownloadTimeoutMs: 120_001 })).toThrow()
   })
 
   test('accepts one credential handle instead of environment access but never both', () => {

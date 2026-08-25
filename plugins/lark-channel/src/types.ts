@@ -38,6 +38,15 @@ export interface LarkApprovalCard {
   rejectValue: { approval: string }
 }
 
+export interface LarkToolApprovalCard {
+  title: string
+  toolName: string
+  reason?: string
+  arguments: string
+  allowValue: { toolApproval: string }
+  rejectValue: { toolApproval: string }
+}
+
 export interface LarkModelPickerCard {
   title: string
   body: string
@@ -60,6 +69,7 @@ export type LarkSendInput =
   | { markdown: string }
   | { modelPicker: LarkModelPickerCard }
   | { text: string }
+  | { toolApproval: LarkToolApprovalCard }
 
 export interface LarkSendOptions {
   replyTo?: string
@@ -81,6 +91,11 @@ export interface LarkProgressEvent {
   eventType: string
   content: string
   timestamp: string
+}
+
+export interface LarkInboundImage {
+  data: Uint8Array
+  mediaType: 'image/gif' | 'image/jpeg' | 'image/png' | 'image/webp'
 }
 
 export type LarkTransportErrorCode =
@@ -130,6 +145,11 @@ export interface LarkTransport {
   addReaction(messageId: string, emojiType: string): Promise<string>
   createProgress(chatId: string, options: { replyTo: string; hidden: boolean }): Promise<LarkProgressHandle>
   writeProgress(handle: LarkProgressHandle, events: readonly LarkProgressEvent[]): Promise<void>
+  downloadMessageImage?(
+    messageId: string,
+    fileKey: string,
+    options: { maxBytes: number; signal: AbortSignal },
+  ): Promise<LarkInboundImage>
   send(chatId: string, input: LarkSendInput, options?: LarkSendOptions): Promise<LarkSendResult>
 }
 

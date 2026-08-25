@@ -98,9 +98,16 @@ describe('Lark inbound normalization', () => {
       content: '', resources: [{ type: 'image', fileKey: 'image_secret_key' }], rawContentType: 'image',
     }), 100_100)
     expect(result).toMatchObject({ outcome: 'accept', envelope: {
-      text: '[External attachment metadata: 1 item]',
+      text: '',
       attachments: [{ resourceType: 'image', providerRef: 'image_secret_key' }],
     } })
     expect((result as { envelope: { text: string } }).envelope.text).not.toContain('image_secret_key')
+  })
+
+  test('rejects path-like provider message and resource capabilities before persistence', () => {
+    expect(() => normalizeLarkMessage(config, message({ messageId: '../om_1' }), 100_100)).toThrow(/messageId/i)
+    expect(() => normalizeLarkMessage(config, message({
+      resources: [{ type: 'image', fileKey: 'https://example.invalid/private' }],
+    }), 100_100)).toThrow(/resource\.fileKey/i)
   })
 })

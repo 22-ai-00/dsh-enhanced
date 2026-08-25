@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto'
 import type {
   AdapterSendResult,
+  AdapterInboundImageReadResult,
   DeliveryAdapter,
   DeliveryAdapterContext,
   DeliveryProgressIntent,
+  DeliveryToolApprovalOutcome,
+  DeliveryToolApprovalRequest,
   ModelPickerIntent,
   ModelPickerState,
   ModelRouteRef,
   OutboundIntent,
+  InboundImageReadInput,
 } from '@dsh-enhanced/assistant-delivery'
 import {
   LarkApprovalError,
@@ -26,6 +30,12 @@ import {
 import { normalizeLarkMessage } from './normalize.js'
 import { LarkProgressPresenter } from './progress.js'
 import { LARK_APPROVAL_CARD_MAX_BYTES, renderLarkMessage } from './sdk.js'
+import {
+  LarkToolApprovalError,
+  signLarkToolApprovalAction,
+  verifyLarkToolApprovalAction,
+  type LarkToolApprovalActionPayload,
+} from './tool-approval.js'
 import {
   LarkTransportError,
   type LarkChannelHealth,
@@ -80,6 +90,55 @@ export interface LarkAdapterOptions {
     expected: ModelPickerState
     next: ModelRouteRef
   }): { applied: boolean; state: ModelPickerState } | Promise<{ applied: boolean; state: ModelPickerState }>
+}
+
+interface PendingToolApproval {
+  readonly payload: Omit<LarkToolApprovalActionPayload, 'decision'>
+  readonly signal: AbortSignal
+  readonly abort: () => void
+  readonly resolve: (outcome: DeliveryToolApprovalOutcome) => void
+  earlyAction?: { messageId: string; decision: 'allowed-once' | 'rejected' }
+  providerMessageId?: string
+}
+
+interface ToolApprovalTombstone {
+  readonly expiresAt: number
+  timer?: ReturnType<typeof setTimeout>
+}
+
+const LARK_TOOL_APPROVAL_REASON_MAX_BYTES = 2 * 1_024
+const LARK_TOOL_APPROVAL_ARGUMENTS_MAX_BYTES = 16 * 1_024
+const LARK_TOOL_APPROVAL_MAX_TIMER_MS = 2_147_483_647
+const larkCallbackIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,255}$/u
+const larkProviderMessageIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
+
+function hasUsableApprovalSecret(secret: string | undefined): secret is string {
+  return secret !== undefined && Buffer.byteLength(secret, 'utf8') >= 16
+}
+
+function boundedReviewText(value: string | undefined, maxBytes: number): boolean {
+  return value === undefined || (Buffer.byteLength(value, 'utf8') <= maxBytes
+    && !/(?:\p{Cc}|\p{Bidi_Control})/u.test(
+      value.replaceAll('\n', '').replaceAll('\r', '').replaceAll('\t', ''),
+    ))
+}
+
+function sameToolApprovalPayload(
+  left: Omit<LarkToolApprovalActionPayload, 'decision'>,
+  right: LarkToolApprovalActionPayload,
+): boolean {
+  return left.version === right.version
+    && left.channel === right.channel
+    && left.account === right.account
+    && left.tenant === right.tenant
+    && left.operationId === right.operationId
+    && left.bindingId === right.bindingId
+    && left.chatId === right.chatId
+    && left.ownerUser === right.ownerUser
+    && left.actionHash === right.actionHash
+    && left.toolName === right.toolName
+    && left.callId === right.callId
+    && left.expiresAt === right.expiresAt
 }
 
 function failureCode(code: string): string {
@@ -241,11 +300,7 @@ function callbackCard(card: import('./types.js').LarkModelPickerCard): Readonly<
 export class LarkDeliveryAdapter implements DeliveryAdapter {
   readonly channel = 'lark'
   readonly account: string
-  readonly capabilities = Object.freeze({
-    reconcileUnknownSend: false,
-    receipts: [] as const,
-    formats: ['plain', 'markdown', 'approval', 'model-picker'] as const,
-  })
+  readonly capabilities: DeliveryAdapter['capabilities']
 
   private readonly now: () => number
   private readonly approvalSecret: string | undefined
@@ -256,6 +311,8 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly advanceModelPicker: LarkAdapterOptions['advanceModelPicker']
   private readonly statusReactions: boolean
   private readonly progressPresenter: LarkProgressPresenter
+  private readonly pendingToolApprovals = new Map<string, PendingToolApproval>()
+  private readonly toolApprovalTombstones = new Map<string, ToolApprovalTombstone>()
   private state: LarkChannelHealth['state'] = 'disconnected'
   private gapGeneration = 0
   private lastErrorCode: LarkChannelHealth['lastErrorCode']
@@ -266,6 +323,13 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     options: LarkAdapterOptions = {},
   ) {
     this.account = config.account
+    this.capabilities = Object.freeze({
+      reconcileUnknownSend: false,
+      receipts: [] as const,
+      formats: ['plain', 'markdown', 'approval', 'model-picker'] as const,
+      inboundImages: typeof transport.downloadMessageImage === 'function',
+      toolApprovals: hasUsableApprovalSecret(options.approvalSecret),
+    })
     this.now = options.now ?? Date.now
     this.approvalSecret = options.approvalSecret
     this.settleApproval = options.settleApproval
@@ -296,11 +360,18 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       },
       cardAction: async action => this.handleCardAction(action),
       reconnecting: () => {
+        this.cancelPendingToolApprovals('unavailable')
         this.gapGeneration += 1
         this.state = 'reconnecting'
       },
       reconnected: () => { this.state = 'connected-with-gap' },
-      error: error => { this.lastErrorCode = error.code },
+      error: error => {
+        this.lastErrorCode = error.code
+        if (error.code === 'not_connected') {
+          this.state = 'disconnected'
+          this.cancelPendingToolApprovals('unavailable')
+        }
+      },
     })
     try {
       await this.transport.connect()
@@ -308,6 +379,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     } catch (error) {
       unsubscribe()
       this.state = 'disconnected'
+      this.cancelPendingToolApprovals('unavailable', true)
       await this.transport.disconnect().catch(() => {})
       throw error
     }
@@ -317,6 +389,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       active = false
       unsubscribe()
       this.state = 'disconnected'
+      this.cancelPendingToolApprovals('unavailable', true)
       await this.transport.disconnect()
     }
   }
@@ -332,6 +405,175 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   async progress(intent: Readonly<DeliveryProgressIntent>): Promise<void> {
     if (!this.matchesTarget(intent.target)) return
     await this.progressPresenter.publish(intent)
+  }
+
+  async requestToolApproval(
+    input: Readonly<DeliveryToolApprovalRequest>,
+    signal: AbortSignal,
+  ): Promise<DeliveryToolApprovalOutcome> {
+    if (signal.aborted) return 'cancelled'
+    if (!hasUsableApprovalSecret(this.approvalSecret)
+      || (this.state !== 'connected' && this.state !== 'connected-with-gap')
+      || !this.matchesTarget(input.target)
+      || !larkCallbackIdentifier.test(input.target.conversation.chat)
+      || !larkCallbackIdentifier.test(input.target.principal.user)
+      || input.target.conversation.kind !== 'dm'
+      || input.target.conversation.thread !== undefined
+      || typeof input.callId !== 'string'
+      || typeof input.arguments !== 'string'
+      || !boundedReviewText(input.reason, LARK_TOOL_APPROVAL_REASON_MAX_BYTES)
+      || !boundedReviewText(input.arguments, LARK_TOOL_APPROVAL_ARGUMENTS_MAX_BYTES)) {
+      return 'unavailable'
+    }
+    let now: number
+    try {
+      now = this.now()
+    } catch {
+      return 'unavailable'
+    }
+    if (!Number.isSafeInteger(now) || now < 0 || !Number.isSafeInteger(input.expiresAt)
+      || !Number.isSafeInteger(input.expiresAt - now) || now >= input.expiresAt) {
+      return 'unavailable'
+    }
+    const previousTombstone = this.toolApprovalTombstones.get(input.operationId)
+    if (previousTombstone !== undefined) {
+      if (now < previousTombstone.expiresAt) return 'unavailable'
+      const expiredPending = this.pendingToolApprovals.get(input.operationId)
+      if (expiredPending !== undefined) this.settleToolApproval(expiredPending, 'unavailable')
+      this.deleteToolApprovalTombstone(input.operationId, previousTombstone)
+    }
+    const payload: Omit<LarkToolApprovalActionPayload, 'decision'> = {
+      version: 1,
+      channel: this.channel,
+      account: this.account,
+      tenant: this.config.tenant,
+      operationId: input.operationId,
+      bindingId: input.bindingId,
+      chatId: input.target.conversation.chat,
+      ownerUser: input.target.principal.user,
+      actionHash: input.actionHash,
+      toolName: input.toolName,
+      callId: input.callId,
+      expiresAt: input.expiresAt,
+    }
+    let card: Extract<import('./types.js').LarkSendInput, { toolApproval: unknown }>
+    try {
+      card = { toolApproval: {
+        title: '工具调用需要确认',
+        toolName: input.toolName,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
+        arguments: input.arguments,
+        allowValue: { toolApproval: signLarkToolApprovalAction(
+          this.approvalSecret,
+          { ...payload, decision: 'allowed-once' },
+        ) },
+        rejectValue: { toolApproval: signLarkToolApprovalAction(
+          this.approvalSecret,
+          { ...payload, decision: 'rejected' },
+        ) },
+      } }
+      if (Buffer.byteLength(renderLarkMessage(card).content, 'utf8') > LARK_APPROVAL_CARD_MAX_BYTES) {
+        return 'unavailable'
+      }
+    } catch {
+      return 'unavailable'
+    }
+
+    let resolve!: (outcome: DeliveryToolApprovalOutcome) => void
+    const outcome = new Promise<DeliveryToolApprovalOutcome>(settle => { resolve = settle })
+    let pending!: PendingToolApproval
+    const abort = () => { this.settleToolApproval(pending, 'cancelled') }
+    pending = { payload, signal, abort, resolve }
+    const tombstone: ToolApprovalTombstone = { expiresAt: input.expiresAt }
+    this.pendingToolApprovals.set(input.operationId, pending)
+    this.toolApprovalTombstones.set(input.operationId, tombstone)
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) {
+      this.settleToolApproval(pending, 'cancelled')
+      return outcome
+    }
+    this.armToolApprovalTombstone(input.operationId, tombstone)
+    if (this.pendingToolApprovals.get(input.operationId) !== pending) return outcome
+
+    const sendOptions: LarkSendOptions = {
+      requestKey: `tool-approval:${input.operationId}:${input.actionHash}`,
+    }
+    let sending: Promise<Awaited<ReturnType<LarkTransport['send']>>>
+    try {
+      sending = Promise.resolve(this.transport.send(input.target.conversation.chat, card, sendOptions))
+    } catch (error) {
+      this.recordPresentationFailure(error)
+      this.settleToolApproval(pending, 'unavailable')
+      return outcome
+    }
+    void sending.then(result => {
+      if (this.pendingToolApprovals.get(input.operationId) !== pending) return
+      if (!larkProviderMessageIdentifier.test(result.messageId)) {
+        this.settleToolApproval(pending, 'unavailable')
+        return
+      }
+      pending.providerMessageId = result.messageId
+      const earlyAction = pending.earlyAction
+      delete pending.earlyAction
+      if (earlyAction?.messageId === result.messageId) {
+        this.settleToolApproval(pending, earlyAction.decision)
+      }
+    }, error => {
+      this.recordPresentationFailure(error)
+      this.settleToolApproval(pending, 'unavailable')
+    })
+    return outcome
+  }
+
+  async readInboundImage(
+    input: Readonly<InboundImageReadInput>,
+    signal: AbortSignal,
+  ): Promise<AdapterInboundImageReadResult> {
+    if (input.attachment.resourceType !== 'image') {
+      return { outcome: 'not-downloaded', failureCode: 'lark-image-type-unsupported', retryable: false }
+    }
+    const identifier = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,255}$/u
+    if (!identifier.test(input.eventId) || !identifier.test(input.attachment.providerRef)
+      || !Number.isSafeInteger(input.maxBytes) || input.maxBytes < 1) {
+      return { outcome: 'not-downloaded', failureCode: 'lark-image-reference-invalid', retryable: false }
+    }
+    if (signal.aborted) {
+      return { outcome: 'not-downloaded', failureCode: 'lark-image-aborted', retryable: true }
+    }
+    const download = this.transport.downloadMessageImage
+    if (typeof download !== 'function') {
+      return { outcome: 'not-downloaded', failureCode: 'lark-image-download-unavailable', retryable: false }
+    }
+    try {
+      const image = await download.call(
+        this.transport,
+        input.eventId,
+        input.attachment.providerRef,
+        { maxBytes: input.maxBytes, signal },
+      )
+      if (signal.aborted) {
+        return { outcome: 'not-downloaded', failureCode: 'lark-image-aborted', retryable: true }
+      }
+      return {
+        outcome: 'downloaded',
+        data: image.data,
+        mediaType: image.mediaType,
+      }
+    } catch (error) {
+      if (signal.aborted) {
+        return { outcome: 'not-downloaded', failureCode: 'lark-image-aborted', retryable: true }
+      }
+      const code = error instanceof LarkTransportError ? error.code : 'unknown'
+      const retryable = code !== 'format_error' && code !== 'permission_denied' && code !== 'target_revoked'
+      return {
+        outcome: 'not-downloaded',
+        failureCode: `lark-image-${code.replaceAll('_', '-')}`,
+        retryable,
+        ...(error instanceof LarkTransportError && error.retryAfterMs !== undefined
+          ? { retryAfterMs: error.retryAfterMs }
+          : {}),
+      }
+    }
   }
 
   async send(intent: Readonly<OutboundIntent>, signal: AbortSignal): Promise<AdapterSendResult> {
@@ -439,6 +681,66 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       && principal.tenant === this.config.tenant
   }
 
+  private armToolApprovalTombstone(operationId: string, tombstone: ToolApprovalTombstone): void {
+    const expire = () => {
+      if (this.toolApprovalTombstones.get(operationId) !== tombstone) return
+      let remaining: number
+      try {
+        remaining = tombstone.expiresAt - this.now()
+      } catch {
+        const pending = this.pendingToolApprovals.get(operationId)
+        if (pending !== undefined) this.settleToolApproval(pending, 'unavailable')
+        tombstone.timer = setTimeout(expire, 1_000)
+        tombstone.timer.unref()
+        return
+      }
+      if (!Number.isSafeInteger(remaining)) {
+        const pending = this.pendingToolApprovals.get(operationId)
+        if (pending !== undefined) this.settleToolApproval(pending, 'unavailable')
+        tombstone.timer = setTimeout(expire, 1_000)
+        tombstone.timer.unref()
+        return
+      }
+      if (remaining <= 0) {
+        const pending = this.pendingToolApprovals.get(operationId)
+        if (pending !== undefined) this.settleToolApproval(pending, 'unavailable')
+        this.deleteToolApprovalTombstone(operationId, tombstone)
+        return
+      }
+      tombstone.timer = setTimeout(expire, Math.min(remaining, LARK_TOOL_APPROVAL_MAX_TIMER_MS))
+      tombstone.timer.unref()
+    }
+    expire()
+  }
+
+  private deleteToolApprovalTombstone(operationId: string, tombstone: ToolApprovalTombstone): boolean {
+    if (this.toolApprovalTombstones.get(operationId) !== tombstone) return false
+    this.toolApprovalTombstones.delete(operationId)
+    if (tombstone.timer !== undefined) clearTimeout(tombstone.timer)
+    return true
+  }
+
+  private settleToolApproval(pending: PendingToolApproval, outcome: DeliveryToolApprovalOutcome): boolean {
+    if (this.pendingToolApprovals.get(pending.payload.operationId) !== pending) return false
+    this.pendingToolApprovals.delete(pending.payload.operationId)
+    pending.signal.removeEventListener('abort', pending.abort)
+    pending.resolve(outcome)
+    return true
+  }
+
+  private cancelPendingToolApprovals(
+    outcome: 'cancelled' | 'unavailable',
+    clearTombstones = false,
+  ): void {
+    for (const pending of this.pendingToolApprovals.values()) {
+      this.settleToolApproval(pending, outcome)
+    }
+    if (!clearTombstones) return
+    for (const [operationId, tombstone] of this.toolApprovalTombstones) {
+      this.deleteToolApprovalTombstone(operationId, tombstone)
+    }
+  }
+
   private async addReaction(messageId: string, emojiType: 'DONE' | 'Get'): Promise<void> {
     try {
       await this.transport.addReaction(messageId, emojiType)
@@ -456,6 +758,12 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       const value = action.value
       if (value === null || typeof value !== 'object' || Array.isArray(value)) {
         throw new LarkApprovalError('invalid', 'Lark card action value is invalid')
+      }
+      if (typeof (value as { toolApproval?: unknown }).toolApproval === 'string') {
+        if (Object.keys(value).length !== 1) {
+          throw new LarkToolApprovalError('invalid', 'Lark tool approval action value is invalid')
+        }
+        return this.handleToolApprovalAction(action, (value as { toolApproval: string }).toolApproval)
       }
       if (typeof (value as { modelPicker?: unknown }).modelPicker === 'string') {
         return await this.handleModelPickerAction(action, parseLarkModelPickerCallback(value))
@@ -505,12 +813,50 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         await this.settleApproval(settlement)
       }
     } catch (error) {
-      if (error instanceof LarkApprovalError || error instanceof LarkModelPickerError) {
+      if (error instanceof LarkApprovalError || error instanceof LarkModelPickerError
+        || error instanceof LarkToolApprovalError) {
         this.lastErrorCode = 'format_error'
         return
       }
       throw error
     }
+  }
+
+  private handleToolApprovalAction(
+    action: import('./types.js').LarkCardAction,
+    token: string,
+  ): Readonly<Record<string, unknown>> {
+    if (!hasUsableApprovalSecret(this.approvalSecret) || action.tag !== 'button'
+      || !larkProviderMessageIdentifier.test(action.messageId)) {
+      throw new LarkToolApprovalError('invalid', 'Lark tool approval callback is unavailable')
+    }
+    const payload = verifyLarkToolApprovalAction(this.approvalSecret, token, this.now())
+    if (payload.channel !== this.channel || payload.account !== this.account
+      || payload.tenant !== this.config.tenant || payload.chatId !== action.chatId
+      || payload.ownerUser !== action.operatorId) {
+      throw new LarkToolApprovalError('invalid', 'Lark tool approval route does not match')
+    }
+    const pending = this.pendingToolApprovals.get(payload.operationId)
+    if (pending === undefined || !sameToolApprovalPayload(pending.payload, payload)) {
+      throw new LarkToolApprovalError('invalid', 'Lark tool approval request does not match')
+    }
+    if (pending.providerMessageId === undefined) {
+      const earlyAction = pending.earlyAction
+      if (earlyAction !== undefined && (earlyAction.messageId !== action.messageId
+        || earlyAction.decision !== payload.decision)) {
+        throw new LarkToolApprovalError('invalid', 'Lark tool approval request does not match')
+      }
+      pending.earlyAction = { messageId: action.messageId, decision: payload.decision }
+      return { toast: { type: 'info', content: '正在确认工具审批卡片' } }
+    }
+    if (pending.providerMessageId !== action.messageId) {
+      throw new LarkToolApprovalError('invalid', 'Lark tool approval request does not match')
+    }
+    if (!this.settleToolApproval(pending, payload.decision)) {
+      throw new LarkToolApprovalError('invalid', 'Lark tool approval request is no longer pending')
+    }
+    return { toast: { type: payload.decision === 'allowed-once' ? 'success' : 'info',
+      content: payload.decision === 'allowed-once' ? '已仅允许本次工具调用' : '已拒绝工具调用' } }
   }
 
   private async handleModelPickerAction(

@@ -11,6 +11,7 @@ import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import {
   AssistantPolicyService,
+  setApprovalReviewer,
   type ApprovalDispatchRoute,
   type ApprovalProposalSnapshot,
 } from '@dsh-enhanced/assistant-policy'
@@ -70,6 +71,10 @@ function agent(options: { id?: string; cwd?: string; preset?: string } = {}): Ag
     cwd: options.cwd ?? WORKSPACE,
     agentPreset: options.preset ?? PRESET,
   })
+  setApprovalReviewer(session, 'none')
+  session.append('approval/policy', { policy: 'never' })
+  const append = session.append as unknown as (type: string, data: unknown) => unknown
+  append.call(session, 'sandbox/mode', { mode: 'danger-full-access' })
   return {
     id,
     options: {},

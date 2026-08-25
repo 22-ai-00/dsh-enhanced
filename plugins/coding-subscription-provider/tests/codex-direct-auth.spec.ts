@@ -96,9 +96,15 @@ describe('Codex direct credential store', () => {
     expect(new Headers(init?.headers).get('chatgpt-account-id')).toBe('account-1')
     expect(new Headers(init?.headers).get('accept')).toBe('text/event-stream')
     expect(new Headers(init?.headers).get('openai-beta')).toBe('responses=v1')
-    expect(new Headers(init?.headers).get('originator')).toBe('dsh-enhanced')
-    expect(new Headers(init?.headers).get('user-agent')).toBe(attributionHeaders()['user-agent'])
-    expect(new Headers(init?.headers).get('session_id')).toMatch(/^[0-9a-f-]{36}$/u)
+    expect(new Headers(init?.headers).get('originator')).toBe('codex_cli_rs')
+    expect(new Headers(init?.headers).get('version')).toBe('0.149.1')
+    expect(new Headers(init?.headers).get('user-agent')).toBe('codex_cli_rs/0.149.1')
+    const headers = new Headers(init?.headers)
+    expect(headers.get('session-id')).toMatch(/^[0-9a-f-]{36}$/u)
+    expect(headers.get('thread-id')).toMatch(/^[0-9a-f-]{36}$/u)
+    expect(headers.get('x-client-request-id')).toBe(headers.get('thread-id'))
+    expect(headers.get('session-id')).not.toBe(headers.get('thread-id'))
+    expect(headers.has('session_id')).toBe(false)
   })
 
   it('fixes a relative auth path to an absolute path when the store is constructed', async () => {
@@ -304,6 +310,73 @@ describe('Codex direct credential store', () => {
       },
     })
     expect((await lstat(authFile)).mode & 0o777).toBe(0o600)
+  })
+
+  it('fails closed without replaying a rejected request after the auth file switches accounts', async () => {
+    const authFile = await authFixture()
+    const submittedBodies: string[] = []
+    const fetcher = vi.fn(async (input: string | URL, init?: RequestInit) => {
+      if (String(input) !== CODEX_RESPONSES_URL) throw new Error('account switches must not trigger OAuth refresh')
+      submittedBodies.push(String(init?.body))
+      if (submittedBodies.length === 1) {
+        await writeFile(authFile, JSON.stringify(credentialDocument({
+          tokens: {
+            access_token: 'access-account-2',
+            refresh_token: 'refresh-account-2',
+            id_token: 'id-account-2',
+            account_id: 'account-2',
+          },
+        })), { mode: 0o600 })
+        return new Response('', { status: 401 })
+      }
+      return new Response('', { status: 200 })
+    })
+    const store = new CodexCredentialStore({ authFile, fetch: fetcher, refreshTimeoutMs: 1_000 })
+    const body = '{"model":"gpt-private"}'
+
+    await expect(store.requestResponses(body, new AbortController().signal)).rejects.toMatchObject({
+      cause: 'subscription-auth',
+    })
+
+    expect(fetcher).toHaveBeenCalledTimes(1)
+    expect(submittedBodies).toEqual([body])
+  })
+
+  it('fails closed when the auth file switches accounts after OAuth refresh has started', async () => {
+    const authFile = await authFixture()
+    let releaseRefresh!: () => void
+    const refreshGate = new Promise<void>(resolve => { releaseRefresh = resolve })
+    let responsesAttempts = 0
+    let refreshAttempts = 0
+    const fetcher = vi.fn(async (input: string | URL) => {
+      if (String(input) === CODEX_OAUTH_REFRESH_URL) {
+        refreshAttempts += 1
+        await refreshGate
+        return new Response(JSON.stringify({ access_token: 'access-refreshed-a' }), { status: 200 })
+      }
+      responsesAttempts += 1
+      return new Response('', { status: responsesAttempts === 1 ? 401 : 200 })
+    })
+    const store = new CodexCredentialStore({ authFile, fetch: fetcher, refreshTimeoutMs: 5_000 })
+    const request = store.requestResponses('{"model":"gpt-private"}', new AbortController().signal)
+
+    try {
+      await vi.waitFor(() => expect(refreshAttempts).toBe(1))
+      await writeFile(authFile, JSON.stringify(credentialDocument({
+        tokens: {
+          access_token: 'access-account-2',
+          refresh_token: 'refresh-account-2',
+          id_token: 'id-account-2',
+          account_id: 'account-2',
+        },
+      })), { mode: 0o600 })
+    } finally {
+      releaseRefresh()
+    }
+
+    await expect(request).rejects.toMatchObject({ cause: 'subscription-auth' })
+    expect(responsesAttempts).toBe(1)
+    expect(refreshAttempts).toBe(1)
   })
 
   it('does not refresh or replay a rejected request for any status other than 401', async () => {
@@ -533,14 +606,19 @@ describe('Codex direct credential store', () => {
 
   it('reuses the session id for its single retry and returns a second 401 without refreshing again', async () => {
     const authFile = await authFixture()
-    const responseSessionIds: string[] = []
+    const responseIdentities: Array<{ sessionId: string; threadId: string; requestId: string }> = []
     let refreshAttempts = 0
     const fetcher = vi.fn(async (input: string | URL, init?: RequestInit) => {
       if (String(input) === CODEX_OAUTH_REFRESH_URL) {
         refreshAttempts += 1
         return new Response(JSON.stringify({ access_token: 'access-new' }), { status: 200 })
       }
-      responseSessionIds.push(new Headers(init?.headers).get('session_id') ?? '')
+      const headers = new Headers(init?.headers)
+      responseIdentities.push({
+        sessionId: headers.get('session-id') ?? '',
+        threadId: headers.get('thread-id') ?? '',
+        requestId: headers.get('x-client-request-id') ?? '',
+      })
       return new Response('', { status: 401 })
     })
     const store = new CodexCredentialStore({ authFile, fetch: fetcher, refreshTimeoutMs: 1_000 })
@@ -548,8 +626,9 @@ describe('Codex direct credential store', () => {
     await expect(store.requestResponses('{}', new AbortController().signal)).resolves.toMatchObject({ status: 401 })
 
     expect(refreshAttempts).toBe(1)
-    expect(responseSessionIds).toHaveLength(2)
-    expect(responseSessionIds[0]).toBe(responseSessionIds[1])
+    expect(responseIdentities).toHaveLength(2)
+    expect(responseIdentities[0]).toEqual(responseIdentities[1])
+    expect(responseIdentities[0]!.requestId).toBe(responseIdentities[0]!.threadId)
   })
 
   it.each([400, 401])('classifies OAuth HTTP %i as subscription authentication failure', async (status) => {

@@ -89,6 +89,7 @@ describe('Lark onboarding wizard inputs', () => {
           'im:message.p2p_msg:readonly',
           'im:message.reactions:write_only',
           'im:message:send_as_bot',
+          'im:resource',
         ] },
         events: { items: { tenant: ['im.message.receive_v1'] } },
         callbacks: { items: ['card.action.trigger'] },

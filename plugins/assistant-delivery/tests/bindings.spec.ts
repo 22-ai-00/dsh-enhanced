@@ -27,6 +27,31 @@ function authorize(store: DeliveryStore): void {
 }
 
 describe('conversation bindings', () => {
+  test('re-pairs a revoked principal with the next durable conversation generation', async () => {
+    const { store, tick } = await fixture()
+    authorize(store)
+    const first = store.createBinding({ conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'session-1', policyRef: 'owner-dm' })
+    const owner = store.getPrincipal(principal)!
+    store.revokePrincipal(owner.id, owner.version)
+    tick()
+    authorize(store)
+
+    expect(store.nextBindingGeneration(conversation)).toBe(2)
+    const second = store.createBinding({ conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'session-2', policyRef: 'owner-dm', expectedGeneration: 2 })
+
+    expect(second).toMatchObject({ generation: 2, sessionId: 'session-2', status: 'active' })
+    expect(store.listBindings(conversation)).toEqual([
+      second,
+      expect.objectContaining({ id: first.id, generation: 1, status: 'revoked' }),
+    ])
+    expect(() => store.createBinding({ conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'stale-session', policyRef: 'owner-dm', expectedGeneration: 1 }))
+      .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    store.close()
+  })
+
   test('requires an active paired principal and absolute workspace', async () => {
     const { store } = await fixture()
     const input = { conversation, principal, workspace: '/work/alpha', agentPreset: 'primary', sessionId: 'session-1', policyRef: 'owner-dm' }

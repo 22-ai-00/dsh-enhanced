@@ -25,3 +25,4 @@
           - deepseek-official
         agentMaxOutputTokens: 8192
         modelPickerTtlMs: 900000
+        toolApprovalTtlMs: 300000

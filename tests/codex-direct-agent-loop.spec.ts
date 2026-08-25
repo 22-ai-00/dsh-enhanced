@@ -2,7 +2,11 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import ApprovalService from '@deepseek-ai/dsh-user-approval'
+import {
+  AssistantPolicyService,
+  AUTO_REVIEW_APPROVAL_REASON,
+} from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -142,6 +146,7 @@ describe('Codex direct private Responses Agent Loop', () => {
         systemPrompt: { persona: '' },
         tools: { mode: 'native' },
       })
+      await ctx.plugin(ApprovalService, { policy: 'ask' })
       await ctx.plugin(AssistantPolicyService, {
         databasePath: join(root, 'policy.sqlite'),
         rules: [{
@@ -177,6 +182,31 @@ describe('Codex direct private Responses Agent Loop', () => {
           toolExecutions += 1
           return { echoed: (argumentsValue as { value: string }).value }
         },
+      })
+
+      const approvalRequests: Array<{
+        sessionId: string
+        toolName: string
+        callId: string | undefined
+        reason: string | undefined
+        arguments: string | undefined
+      }> = []
+      ctx.on('approval/request', (request) => {
+        if (String(request.agent.session.id) !== 'codex-direct-agent-loop-session'
+          || request.toolName !== 'approved_tool'
+          || String(request.callId) !== 'call-exact-42') {
+          return Promise.resolve('rejected')
+        }
+        const call = request.agent.session.events.findLast(event => event.type === 'tool/call'
+          && String(event.data.callId) === 'call-exact-42')
+        approvalRequests.push({
+          sessionId: String(request.agent.session.id),
+          toolName: request.toolName,
+          callId: request.callId === undefined ? undefined : String(request.callId),
+          reason: request.reason,
+          arguments: call?.type === 'tool/call' ? call.data.arguments : undefined,
+        })
+        return Promise.resolve('allowed-once')
       })
 
       const submittedBodies: Array<Record<string, unknown>> = []
@@ -217,6 +247,13 @@ describe('Codex direct private Responses Agent Loop', () => {
         output: 'Codex used the approved tool exactly once.',
       })
       expect(requestResponses).toHaveBeenCalledTimes(2)
+      expect(approvalRequests).toEqual([{
+        sessionId: 'codex-direct-agent-loop-session',
+        toolName: 'approved_tool',
+        callId: 'call-exact-42',
+        reason: AUTO_REVIEW_APPROVAL_REASON,
+        arguments: '{"value":"from-codex"}',
+      }])
       expect(toolExecutions).toBe(1)
 
       const secondInput = submittedBodies[1]?.input as Array<Record<string, unknown>>

@@ -4,5 +4,10 @@
       config:
         databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
         proposalMaintenanceIntervalMs: 15000
+        toolDefaultEffect: deny
+        autoReview:
+          enabled: true
+          timeoutMs: 30000
+          maxTokens: 512
         rules: []
         budgets: []

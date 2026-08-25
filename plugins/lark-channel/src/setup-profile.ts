@@ -395,6 +395,7 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
     maxTextBytes: 65_536,
     staleAfterMs: 300_000,
     handshakeTimeoutMs: 15_000,
+    imageDownloadTimeoutMs: 30_000,
   }
   for (const [key, value] of Object.entries(channelConfig)) channel.set(key, value)
 

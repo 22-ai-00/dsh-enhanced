@@ -1,6 +1,9 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DeliveryStore } from '../src/store.ts'
 import type { InboundEnvelope } from '../src/types.ts'
@@ -14,15 +17,16 @@ afterEach(async () => {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-inbox-'))
   roots.push(root)
+  const path = join(root, 'delivery.sqlite')
   let now = 1_000
-  const store = new DeliveryStore({ path: join(root, 'delivery.sqlite'), now: () => now, codeGenerator: () => 'PAIR1234' })
+  const store = new DeliveryStore({ path, now: () => now, codeGenerator: () => 'PAIR1234' })
   const principal = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', user: 'ou_owner' }
   const conversation = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', kind: 'dm' as const, chat: 'oc_owner' }
   const issued = store.issuePairing(principal, { ttlMs: 5_000, maxAttempts: 3 })
   store.confirmPairing({ challengeId: issued.challenge.id, principal, code: issued.code })
   const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
     sessionId: 'session-1', policyRef: 'owner-dm' })
-  return { binding, principal, conversation, store, setNow(value: number) { now = value } }
+  return { binding, path, principal, conversation, store, setNow(value: number) { now = value } }
 }
 
 function envelope(eventId: string, value: Awaited<ReturnType<typeof fixture>>, text = 'hello'): InboundEnvelope {
@@ -38,6 +42,17 @@ function addBinding(value: Awaited<ReturnType<typeof fixture>>, index: number) {
   const binding = value.store.createBinding({ conversation, principal, workspace: `/work/batch-${index}`,
     agentPreset: 'primary', sessionId: `session-batch-${index}`, policyRef: 'owner-dm' })
   return { binding, conversation, principal }
+}
+
+function imageRef(id: string, overrides: Partial<ImageAttachmentRef> = {}): ImageAttachmentRef {
+  return {
+    attachmentId: AttachmentId(`sha256:${id}`),
+    mediaType: 'image/png',
+    bytes: 8,
+    width: 1,
+    height: 1,
+    ...overrides,
+  }
 }
 
 describe('durable inbox', () => {
@@ -87,6 +102,256 @@ describe('durable inbox', () => {
     })).toMatchObject({ duplicate: true, record: { id: accepted.record.id } })
     expect(f.store.listAttachments({ ownerKind: 'inbox', ownerId: accepted.record.id })).toHaveLength(2)
     f.store.close()
+  })
+
+  test('keeps repeated provider image references as distinct ordered attachment rows', async () => {
+    const f = await fixture()
+    const accepted = f.store.acceptInbound({
+      ...envelope('evt-repeated-image', f),
+      attachments: [
+        { resourceType: 'image', providerRef: 'image_same', fileName: 'first.png' },
+        { resourceType: 'image', providerRef: 'image_same', fileName: 'second.png' },
+      ],
+    })
+
+    const attachments = f.store.listAttachments({ ownerKind: 'inbox', ownerId: accepted.record.id })
+    expect(attachments).toMatchObject([
+      { providerRef: 'image_same', fileName: 'first.png', status: 'metadata' },
+      { providerRef: 'image_same', fileName: 'second.png', status: 'metadata' },
+    ])
+    expect(attachments[0]!.id).not.toBe(attachments[1]!.id)
+    f.store.close()
+  })
+
+  test('preserves provider attachment order after rowid changes, VACUUM, and reopen', async () => {
+    const f = await fixture()
+    const accepted = f.store.acceptInbound({
+      ...envelope('evt-durable-attachment-order', f),
+      attachments: [
+        { resourceType: 'image', providerRef: 'image_1', fileName: 'first.png' },
+        { resourceType: 'image', providerRef: 'image_2', fileName: 'second.png' },
+        { resourceType: 'image', providerRef: 'image_3', fileName: 'third.png' },
+      ],
+    }).record
+    f.store.close()
+
+    const database = new DatabaseSync(f.path)
+    database.prepare('UPDATE delivery_attachments SET rowid = rowid + 100 WHERE owner_id = ?').run(accepted.id)
+    database.prepare(`UPDATE delivery_attachments SET rowid = CASE provider_ref
+      WHEN 'image_1' THEN 3 WHEN 'image_2' THEN 1 WHEN 'image_3' THEN 2 END
+      WHERE owner_id = ?`).run(accepted.id)
+    database.exec('VACUUM')
+    database.close()
+
+    const reopened = new DeliveryStore({ path: f.path })
+    expect(reopened.listAttachments({ ownerKind: 'inbox', ownerId: accepted.id }).map(item => item.providerRef))
+      .toEqual(['image_1', 'image_2', 'image_3'])
+    reopened.close()
+  })
+
+  test('atomically commits complete ordered image references under the current inbox fence and reuses them after restart', async () => {
+    const f = await fixture()
+    const accepted = f.store.acceptInbound({
+      ...envelope('evt-ready-images', f),
+      attachments: [
+        { resourceType: 'file', providerRef: 'file_1' },
+        { resourceType: 'image', providerRef: 'image_1' },
+        { resourceType: 'image', providerRef: 'image_2' },
+      ],
+    }).record
+    f.store.queueInbox(accepted.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    const refs = [imageRef('one', {
+      attachmentId: AttachmentId('opaque:tenant/id+one=@~'),
+      name: 'one.png',
+    }), imageRef('two')]
+
+    expect(f.store.listReadyInboundImageRefs(accepted.id)).toBeUndefined()
+    expect(f.store.commitInboundImageRefs({
+      inboxId: accepted.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      images: [
+        { ref: refs[0]!, contentSha256: 'a'.repeat(64) },
+        { ref: refs[1]!, contentSha256: 'b'.repeat(64) },
+      ],
+    })).toEqual(refs)
+    expect(f.store.listReadyInboundImageRefs(accepted.id)).toEqual(refs)
+    expect(f.store.listAttachments({ ownerKind: 'inbox', ownerId: accepted.id })).toMatchObject([
+      { resourceType: 'file', status: 'metadata' },
+      { resourceType: 'image', status: 'ready', mediaType: 'image/png', sizeBytes: 8,
+        contentSha256: 'a'.repeat(64), imageRef: refs[0] },
+      { resourceType: 'image', status: 'ready', mediaType: 'image/png', sizeBytes: 8,
+        contentSha256: 'b'.repeat(64), imageRef: refs[1] },
+    ])
+
+    f.store.close()
+    const reopened = new DeliveryStore({ path: f.path })
+    expect(reopened.listReadyInboundImageRefs(accepted.id)).toEqual(refs)
+    reopened.close()
+  })
+
+  test('rejects a stale image commit fence without partially updating attachment metadata', async () => {
+    const f = await fixture()
+    const accepted = f.store.acceptInbound({
+      ...envelope('evt-stale-images', f),
+      attachments: [
+        { resourceType: 'image', providerRef: 'image_1' },
+        { resourceType: 'image', providerRef: 'image_2' },
+      ],
+    }).record
+    f.store.queueInbox(accepted.id, f.binding.id)
+    const stale = f.store.claimInbox({ ownerId: 'worker-old', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.setNow(1_100)
+    f.store.recoverInbox({ maxAttempts: 3 })
+    const current = f.store.claimInbox({ ownerId: 'worker-current', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+
+    expect(() => f.store.commitInboundImageRefs({
+      inboxId: accepted.id,
+      ownerId: 'worker-old',
+      fencingToken: stale.fencingToken,
+      images: [
+        { ref: imageRef('one'), contentSha256: 'a'.repeat(64) },
+        { ref: imageRef('two'), contentSha256: 'b'.repeat(64) },
+      ],
+    })).toThrowError(expect.objectContaining({ code: 'stale-fence' }))
+    expect(f.store.listReadyInboundImageRefs(accepted.id)).toBeUndefined()
+    expect(f.store.listAttachments({ ownerKind: 'inbox', ownerId: accepted.id }))
+      .toMatchObject([{ status: 'metadata' }, { status: 'metadata' }])
+
+    expect(f.store.commitInboundImageRefs({
+      inboxId: accepted.id,
+      ownerId: 'worker-current',
+      fencingToken: current.fencingToken,
+      images: [
+        { ref: imageRef('one'), contentSha256: 'a'.repeat(64) },
+        { ref: imageRef('two'), contentSha256: 'b'.repeat(64) },
+      ],
+    })).toHaveLength(2)
+    f.store.close()
+  })
+
+  test('rejects image publication when the claimed inbox binding is revoked before commit', async () => {
+    const f = await fixture()
+    const accepted = f.store.acceptInbound({
+      ...envelope('evt-binding-revoked-images', f),
+      attachments: [
+        { resourceType: 'image', providerRef: 'image_1' },
+        { resourceType: 'image', providerRef: 'image_2' },
+      ],
+    }).record
+    f.store.queueInbox(accepted.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.rotateBinding({ bindingId: f.binding.id, expectedVersion: f.binding.version, sessionId: 'session-2' })
+
+    expect(() => f.store.commitInboundImageRefs({
+      inboxId: accepted.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      images: [
+        { ref: imageRef('one'), contentSha256: 'a'.repeat(64) },
+        { ref: imageRef('two'), contentSha256: 'b'.repeat(64) },
+      ],
+    })).toThrowError(expect.objectContaining({ code: 'unauthorized-principal' }))
+    expect(f.store.listAttachments({ ownerKind: 'inbox', ownerId: accepted.id }))
+      .toMatchObject([{ status: 'metadata' }, { status: 'metadata' }])
+    f.store.close()
+  })
+
+  test('rejects image publication when the claimed inbox principal is revoked before commit', async () => {
+    const f = await fixture()
+    const accepted = f.store.acceptInbound({
+      ...envelope('evt-principal-revoked-images', f),
+      attachments: [
+        { resourceType: 'image', providerRef: 'image_1' },
+        { resourceType: 'image', providerRef: 'image_2' },
+      ],
+    }).record
+    f.store.queueInbox(accepted.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    const principal = f.store.getPrincipal(f.principal)!
+    f.store.revokePrincipal(principal.id, principal.version)
+
+    expect(() => f.store.commitInboundImageRefs({
+      inboxId: accepted.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      images: [
+        { ref: imageRef('one'), contentSha256: 'a'.repeat(64) },
+        { ref: imageRef('two'), contentSha256: 'b'.repeat(64) },
+      ],
+    })).toThrowError(expect.objectContaining({ code: 'unauthorized-principal' }))
+    expect(f.store.listAttachments({ ownerKind: 'inbox', ownerId: accepted.id }))
+      .toMatchObject([{ status: 'metadata' }, { status: 'metadata' }])
+    f.store.close()
+  })
+
+  test('rejects an incomplete or malformed image-reference batch before updating any row', async () => {
+    const f = await fixture()
+    const accepted = f.store.acceptInbound({
+      ...envelope('evt-invalid-image-batch', f),
+      attachments: [
+        { resourceType: 'image', providerRef: 'image_1' },
+        { resourceType: 'image', providerRef: 'image_2' },
+      ],
+    }).record
+    f.store.queueInbox(accepted.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+
+    expect(() => f.store.commitInboundImageRefs({
+      inboxId: accepted.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      images: [{ ref: imageRef('one'), contentSha256: 'a'.repeat(64) }],
+    })).toThrowError(expect.objectContaining({ code: 'conflict' }))
+    expect(() => f.store.commitInboundImageRefs({
+      inboxId: accepted.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      images: [
+        { ref: imageRef('one'), contentSha256: 'a'.repeat(64) },
+        { ref: imageRef('two', { name: '../secret.png' }), contentSha256: 'b'.repeat(64) },
+      ],
+    })).toThrowError(expect.objectContaining({ code: 'conflict' }))
+    expect(() => f.store.commitInboundImageRefs({
+      inboxId: accepted.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      images: [
+        { ref: imageRef('one'), contentSha256: 'a'.repeat(64) },
+        { ref: imageRef('two', { attachmentId: AttachmentId('opaque:\nsecret') }),
+          contentSha256: 'b'.repeat(64) },
+      ],
+    })).toThrowError(expect.objectContaining({ code: 'conflict' }))
+    expect(f.store.listAttachments({ ownerKind: 'inbox', ownerId: accepted.id }))
+      .toMatchObject([{ status: 'metadata' }, { status: 'metadata' }])
+    f.store.close()
+  })
+
+  test('strictly rejects a corrupted persisted image reference instead of treating spool_ref as a path', async () => {
+    const f = await fixture()
+    const accepted = f.store.acceptInbound({
+      ...envelope('evt-corrupt-image-ref', f),
+      attachments: [{ resourceType: 'image', providerRef: 'image_1' }],
+    }).record
+    f.store.queueInbox(accepted.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.commitInboundImageRefs({
+      inboxId: accepted.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      images: [{ ref: imageRef('one'), contentSha256: 'a'.repeat(64) }],
+    })
+    f.store.close()
+
+    const database = new DatabaseSync(f.path)
+    database.prepare("UPDATE delivery_attachments SET spool_ref = '/tmp/not-an-attachment-ref' WHERE owner_id = ?")
+      .run(accepted.id)
+    database.close()
+    const reopened = new DeliveryStore({ path: f.path })
+    expect(() => reopened.listReadyInboundImageRefs(accepted.id))
+      .toThrowError(expect.objectContaining({ code: 'conflict' }))
+    reopened.close()
   })
 
   test('rejects unbounded or malformed attachment descriptors without partial inbox state', async () => {
@@ -172,7 +437,7 @@ describe('durable inbox', () => {
       inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken, leaseMs: 100,
     })).toBe(false)
     expect(() => f.store.markInboxDispatching({
-      inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken,
+      inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken, binding: f.binding,
     })).toThrowError(expect.objectContaining({ code: 'stale-fence' }))
     expect(() => f.store.finishInbox({
       inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken, outcome: 'processed',
@@ -209,12 +474,76 @@ describe('durable inbox', () => {
     const record = f.store.acceptInbound(envelope('evt-ambiguous', f)).record
     f.store.queueInbox(record.id, f.binding.id)
     const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
-    f.store.markInboxDispatching({ inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken })
+    f.store.markInboxDispatching({
+      inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken, binding: f.binding,
+    })
     f.setNow(1_100)
     expect(f.store.recoverInbox({ maxAttempts: 3 })).toEqual([
       expect.objectContaining({ id: record.id, status: 'dead_letter', failureCode: 'dispatch-ambiguous' }),
     ])
     expect(f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 3 })).toEqual([])
+    f.store.close()
+  })
+
+  test('atomically rejects a dispatch marker whose exact binding snapshot was rotated', async () => {
+    const f = await fixture()
+    const record = f.store.acceptInbound(envelope('evt-marker-rotated-binding', f)).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+
+    f.store.rotateBinding({ bindingId: f.binding.id, expectedVersion: f.binding.version, sessionId: 'session-2' })
+    expect(() => f.store.markInboxDispatching({
+      inboxId: record.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      binding: f.binding,
+    })).toThrowError(expect.objectContaining({ code: 'invalid-binding' }))
+    expect(f.store.getInbox(record.id)).toMatchObject({ status: 'claimed' })
+    expect(f.store.getInbox(record.id)).not.toHaveProperty('failureCode')
+    f.store.close()
+  })
+
+  test('atomically rejects a dispatch marker after its exact principal is revoked', async () => {
+    const f = await fixture()
+    const record = f.store.acceptInbound(envelope('evt-marker-revoked-principal', f)).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    const principal = f.store.getPrincipal(f.binding.principal)!
+
+    f.store.revokePrincipal(principal.id, principal.version)
+    expect(() => f.store.markInboxDispatching({
+      inboxId: record.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      binding: f.binding,
+    })).toThrowError(expect.objectContaining({ code: 'unauthorized-principal' }))
+    expect(f.store.getInbox(record.id)).toMatchObject({ status: 'claimed' })
+    expect(f.store.getInbox(record.id)).not.toHaveProperty('failureCode')
+    f.store.close()
+  })
+
+  test('revoking a principal revokes only all of that exact principal active bindings', async () => {
+    const f = await fixture()
+    const secondForOwner = f.store.createBinding({
+      conversation: { ...f.conversation, chat: 'oc_owner_second' },
+      principal: f.principal,
+      workspace: '/work/owner-second',
+      agentPreset: 'primary',
+      sessionId: 'session-owner-second',
+      policyRef: 'owner-dm',
+    })
+    const other = addBinding(f, 42)
+    const principal = f.store.getPrincipal(f.principal)!
+
+    f.store.revokePrincipal(principal.id, principal.version)
+
+    expect(f.store.getBinding(f.binding.id)).toMatchObject({
+      status: 'revoked', version: f.binding.version + 1,
+    })
+    expect(f.store.getBinding(secondForOwner.id)).toMatchObject({
+      status: 'revoked', version: secondForOwner.version + 1,
+    })
+    expect(f.store.getBinding(other.binding.id)).toEqual(other.binding)
     f.store.close()
   })
 
