@@ -2,6 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -12,6 +13,7 @@ import type { DeliveryAdapter, InboundEnvelope } from '../src/index.ts'
 const roots: string[] = []
 
 afterEach(async () => {
+  vi.useRealTimers()
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -24,9 +26,19 @@ function foreground(sessionId: string): Agent {
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
 }
 
-async function harness(allow = true) {
-  const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-service-'))
-  roots.push(root)
+function foregroundWithHeader(sessionId: string, cwd: string, agentPreset: string): Agent {
+  const id = SessionId(sessionId)
+  const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd, agentPreset })
+  return { id, options: {}, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
+    ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
+    runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
+}
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+async function mountHarness(root: string, allow = true) {
   const ctx = new Context()
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: allow ? [
     { id: 'local-pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' },
@@ -35,14 +47,29 @@ async function harness(allow = true) {
     { id: 'external-owner', effect: 'allow', subject: { kind: 'external', id: 'lark/bot-1/tenant-a/ou_owner' },
       actions: ['approval.decide', 'pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' },
       context: { initiators: ['external'] } },
+    { id: 'external-linked', effect: 'allow', subject: { kind: 'external', id: 'lark/bot-1/tenant-a/ou_linked' },
+      actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' },
+      context: { initiators: ['external'] } },
     { id: 'background-send', effect: 'allow', subject: { kind: 'background', id: 'automation-1', workspace: '/work/alpha' },
       actions: ['approval.send', 'send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } },
     { id: 'foreground-message', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: '/work/alpha' },
+      actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground'] } },
+    { id: 'forged-cwd-would-pass-policy', effect: 'allow',
+      subject: { kind: 'agent', id: 'primary', workspace: '/work/forged' },
+      actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground'] } },
+    { id: 'forged-preset-would-pass-policy', effect: 'allow',
+      subject: { kind: 'agent', id: 'forged', workspace: '/work/alpha' },
       actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground'] } },
   ] : [] })
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
     schedulerEnabled: false })
   return { ctx, root, service: ctx.assistantDelivery }
+}
+
+async function harness(allow = true) {
+  const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-service-'))
+  roots.push(root)
+  return mountHarness(root, allow)
 }
 
 const principal = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', user: 'ou_owner' }
@@ -57,6 +84,12 @@ describe('assistant delivery Cordis service', () => {
       spoolPath: '/tmp/spool',
     })
     expect(config.defaultAgentPreset).toBe('standard')
+    expect(config.toolCapableProviders).toEqual(['deepseek-official'])
+    expect(() => AssistantDeliveryService.Config({
+      databasePath: '/tmp/delivery.sqlite',
+      spoolPath: '/tmp/spool',
+      toolCapableProviders: ['bad route'],
+    })).toThrow(/toolCapableProviders|pattern|invalid/i)
   })
 
   test('fails closed without policy and rejects unsafe configuration', async () => {
@@ -106,6 +139,33 @@ describe('assistant delivery Cordis service', () => {
     await denied.ctx.fiber.restart()
   })
 
+  test('dead-letters a second authorized principal instead of entering another principal binding', async () => {
+    const { ctx, service } = await harness()
+    for (const candidate of [principal, { ...principal, user: 'ou_linked' }]) {
+      const challenge = service.issuePairing('test', candidate)
+      service.confirmPairing({ challengeId: challenge.challenge.id, principal: candidate, code: challenge.code })
+    }
+    const createSession = vi.fn(async () => ({ sessionId: 'group-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-group' }))
+    service.registerInboundRuntime({ createSession, process: async () => ({ outcome: 'processed' }) })
+    const group = { ...conversation, kind: 'group' as const, chat: 'oc_shared_group', thread: 'omt_shared_thread' }
+    const first = await service.acceptInbound({ ...envelope, eventId: 'evt-group-owner', conversation: group })
+    const second = await service.acceptInbound({ ...envelope, eventId: 'evt-group-second', conversation: group,
+      principal: { ...principal, user: 'ou_linked' } })
+
+    expect(first.status).toBe('queued')
+    expect(second.status).toBe('dead_letter')
+    expect(createSession).toHaveBeenCalledOnce()
+    const rawStore = (service as unknown as { deliveryStore: {
+      getInbox(id: string): { status: string; failureCode?: string; bindingId?: string }
+    } }).deliveryStore
+    expect(rawStore.getInbox(second.inboxId)).toMatchObject({
+      status: 'dead_letter', failureCode: 'binding-principal-mismatch',
+    })
+    expect(rawStore.getInbox(second.inboxId)).not.toHaveProperty('bindingId')
+    await ctx.fiber.restart()
+  })
+
   test('builds outbound targets only from an existing binding and policy-gates background and reply sends', async () => {
     const { ctx, service } = await harness()
     const challenge = service.issuePairing('test', principal)
@@ -116,6 +176,9 @@ describe('assistant delivery Cordis service', () => {
     const binding = service.history(foreground('delivery-session-1'), {}).binding
     expect(service.enqueueBackground({ sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
       idempotencyKey: 'automation:1', text: 'done' })).toMatchObject({ status: 'pending', intent: { target: { conversation } } })
+    expect(() => service.enqueueBackground({ sourceId: 'automation-1', workspace: '/work/other', bindingId: binding.id,
+      idempotencyKey: 'automation:cross-workspace', text: 'no' }))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
     expect(service.reply(foreground('delivery-session-1'), { idempotencyKey: 'reply:1', text: 'reply' }))
       .toMatchObject({ status: 'pending', intent: { bindingId: binding.id } })
     expect(service.reply(foreground('delivery-session-1'), {
@@ -124,6 +187,32 @@ describe('assistant delivery Cordis service', () => {
     expect(() => service.enqueueBackground({ sourceId: 'forged', workspace: '/work/alpha', bindingId: binding.id,
       idempotencyKey: 'forged', text: 'no' })).toThrowError(expect.objectContaining({ code: 'policy-denied' }))
     expect((service as unknown as Record<string, unknown>)['store']).toBeUndefined()
+    await ctx.fiber.restart()
+  })
+
+  test('rejects forged Agent headers for reply and history even when Policy would allow the forged subject', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
+    await service.acceptInbound(envelope)
+    const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const forgedAgents = [
+      foregroundWithHeader('delivery-session-1', '/work/forged', 'primary'),
+      foregroundWithHeader('delivery-session-1', '/work/alpha', 'forged'),
+    ]
+    for (const agent of forgedAgents) {
+      expect(ctx.assistantPolicy.authorizeAgent(agent, 'reply', { kind: 'message', id: binding.id }))
+        .toMatchObject({ effect: 'allow' })
+      expect(ctx.assistantPolicy.authorizeAgent(agent, 'history', { kind: 'message', id: binding.id }))
+        .toMatchObject({ effect: 'allow' })
+      expect(() => service.reply(agent, { idempotencyKey: `forged-reply:${agent.session.header.agentPreset}`,
+        text: 'must not send' })).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+      expect(() => service.history(agent, {}))
+        .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    }
+    expect(service.history(foreground('delivery-session-1'), {}).outbox).toHaveLength(0)
     await ctx.fiber.restart()
   })
 
@@ -142,6 +231,48 @@ describe('assistant delivery Cordis service', () => {
     expect(() => service.registerAdapter(adapter)).toThrow(/disposed/i)
   })
 
+  test('ignores a retained adapter receipt callback after the delivery store is closed', async () => {
+    const { ctx, service } = await harness()
+    let retainedContext: Parameters<NonNullable<DeliveryAdapter['start']>>[0] | undefined
+    await service.registerAdapter({
+      channel: 'lark',
+      account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: ['delivered'], formats: ['plain'] },
+      start: async context => { retainedContext = context },
+      send: async () => ({ outcome: 'accepted', providerMessageId: 'om_late_receipt' }),
+    })
+
+    await ctx.fiber.restart()
+
+    await expect(retainedContext!.receipt({
+      channel: 'lark',
+      account: 'bot-1',
+      providerMessageId: 'om_late_receipt',
+      status: 'delivered',
+      occurredAt: Date.now(),
+    })).resolves.toBeUndefined()
+  })
+
+  test('fences a late session creation before it can write to a closed delivery store', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const createSession = vi.fn(async () => {
+      await gate
+      return { sessionId: 'late-session', workspace: '/work/alpha', agentPreset: 'primary', policyRef: 'owner-dm' }
+    })
+    service.registerInboundRuntime({ createSession, process: async () => ({ outcome: 'processed' }) })
+    const acceptance = service.acceptInbound({ ...envelope, eventId: 'evt-late-session' })
+    await vi.waitFor(() => expect(createSession).toHaveBeenCalledOnce())
+
+    await ctx.fiber.restart()
+    release()
+
+    await expect(acceptance).rejects.toMatchObject({ code: 'disposed' })
+  })
+
   test('correlates delayed approval decisions to an exact binding, principal, version, and operation id', async () => {
     const { ctx, service } = await harness()
     const challenge = service.issuePairing('test', principal)
@@ -150,23 +281,380 @@ describe('assistant delivery Cordis service', () => {
       agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
     await service.acceptInbound(envelope)
     const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const diff = 'send one reviewed status'
     const proposal = ctx.assistantPolicy.propose({ idempotencyKey: 'approval-1', requester: 'automation:test',
       principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
-      diff: 'send one reviewed status', summary: 'Send reviewed status', ttlMs: 5_000 })
+      diff, summary: 'Send reviewed status', ttlMs: 5_000 })
     expect(service.enqueueApproval({ sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
-      idempotencyKey: 'approval-card-1', text: 'Approve sending the status?', approval: {
+      idempotencyKey: 'approval-card-1', text: diff, approval: {
         operationId: 'card-click-1', proposalId: proposal.proposalId, expectedVersion: 1,
-        expiresAt: proposal.expiresAt, title: 'Approval required',
+        expiresAt: proposal.expiresAt, title: 'Send reviewed status', diffHash: proposal.diffHash,
       } })).toMatchObject({ intent: { format: 'approval', approval: { proposalId: proposal.proposalId } } })
     const input = { operationId: 'card-click-1', callbackEventId: 'card-event-1', callbackChatId: 'oc_owner', bindingId: binding.id,
-      principal, proposalId: proposal.proposalId, expectedVersion: 1, decision: 'approved' as const, reason: 'owner approved' }
+      principal, proposalId: proposal.proposalId, expectedVersion: 1, diffHash: proposal.diffHash,
+      decision: 'approved' as const, reason: 'owner approved' }
+    expect(() => service.settleApproval({ ...input, operationId: 'missing-operation' }))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    expect(() => service.settleApproval({ ...input, diffHash: 'b'.repeat(64) }))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
     expect(service.settleApproval(input)).toMatchObject({ status: 'approved', version: 2, replayed: false })
     expect(service.settleApproval(input)).toMatchObject({ status: 'approved', version: 2 })
+    const getProposal = vi.spyOn(ctx.assistantPolicy, 'getProposal').mockReturnValueOnce(undefined)
+    expect(service.recoverApprovalSettlement(input)).toBeUndefined()
+    expect(getProposal).toHaveBeenCalledWith(proposal.proposalId)
+    getProposal.mockRestore()
     expect(() => service.settleApproval({ ...input, decision: 'rejected' }))
       .toThrowError(expect.objectContaining({ code: 'idempotency-conflict' }))
     expect(() => service.settleApproval({ ...input, operationId: 'card-click-other-chat', callbackChatId: 'oc_attacker' }))
       .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
     await ctx.fiber.restart()
+  })
+
+  test('does not create a Delivery recovery settlement after Policy was already terminal', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
+    await service.acceptInbound(envelope)
+    const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const diff = 'already decided before the card callback'
+    const proposal = ctx.assistantPolicy.propose({ idempotencyKey: 'approval-preterminal', requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
+      diff, summary: 'Already terminal', ttlMs: 5_000 })
+    const input = { operationId: 'approval-preterminal-operation', callbackEventId: 'approval-preterminal-event',
+      callbackChatId: conversation.chat, bindingId: binding.id, principal, proposalId: proposal.proposalId,
+      expectedVersion: proposal.version, diffHash: proposal.diffHash, decision: 'approved' as const,
+      reason: 'owner approved exact change' }
+    service.enqueueApproval({ sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+      idempotencyKey: 'approval-preterminal-card', text: diff, approval: { operationId: input.operationId,
+        proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
+        title: 'Already terminal', diffHash: proposal.diffHash } })
+    ctx.assistantPolicy.decideProposal({ proposalId: proposal.proposalId,
+      principal: 'lark/bot-1/tenant-a/ou_owner', expectedVersion: proposal.version,
+      decision: input.decision, reason: input.reason })
+
+    expect(() => service.settleApproval(input))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    expect(service.recoverApprovalSettlement(input)).toBeUndefined()
+    await ctx.fiber.restart()
+  })
+
+  test('recovers an exact approval settlement after Policy committed but Delivery restarted before completion', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(10_000)
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-approval-recovery-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    first.service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
+    await first.service.acceptInbound(envelope)
+    const binding = first.service.history(foreground('delivery-session-1'), {}).binding
+    const diff = 'persist the exact reviewed change'
+    const proposal = first.ctx.assistantPolicy.propose({ idempotencyKey: 'approval-crash-recovery', requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
+      diff, summary: 'Persist reviewed change', ttlMs: 5_000 })
+    const input = { operationId: 'approval-crash-operation', callbackEventId: 'approval-crash-event',
+      callbackChatId: conversation.chat, bindingId: binding.id, principal, proposalId: proposal.proposalId,
+      expectedVersion: proposal.version, diffHash: proposal.diffHash, decision: 'approved' as const,
+      reason: 'owner approved exact change' }
+    first.service.enqueueApproval({ sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+      idempotencyKey: 'approval-crash-card', text: diff, approval: { operationId: input.operationId,
+        proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
+        title: 'Persist reviewed change', diffHash: proposal.diffHash } })
+    const rawStore = (first.service as unknown as { deliveryStore: {
+      beginApprovalSettlement(input: { operationId: string; payload: unknown }): unknown
+    } }).deliveryStore
+    rawStore.beginApprovalSettlement({ operationId: input.operationId, payload: {
+      callbackEventId: input.callbackEventId, callbackChatId: input.callbackChatId, bindingId: input.bindingId,
+      principal, proposalId: input.proposalId, expectedVersion: input.expectedVersion,
+      diffHash: input.diffHash, decision: input.decision, reason: input.reason,
+    } })
+    expect(first.ctx.assistantPolicy.decideProposal({ proposalId: input.proposalId,
+      principal: 'lark/bot-1/tenant-a/ou_owner', expectedVersion: input.expectedVersion,
+      decision: input.decision, reason: input.reason })).toMatchObject({ status: 'approved', replayed: false })
+    await first.ctx.fiber.restart()
+
+    vi.setSystemTime(proposal.expiresAt + 1)
+    const restarted = await mountHarness(root)
+    expect(() => restarted.service.settleApproval(input))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    expect(restarted.service.recoverApprovalSettlement(input))
+      .toMatchObject({ status: 'approved', version: 2, replayed: true })
+    expect(restarted.service.recoverApprovalSettlement(input))
+      .toMatchObject({ status: 'approved', version: 2, replayed: true })
+    await restarted.ctx.fiber.restart()
+    vi.useRealTimers()
+  })
+
+  test('recovery-only approval settlement cannot create state or decide a pending or expiry terminal proposal', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(20_000)
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
+    await service.acceptInbound(envelope)
+    const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const diff = 'reviewed change that expires before a decision'
+    const proposal = ctx.assistantPolicy.propose({ idempotencyKey: 'approval-expiry-recovery', requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
+      diff, summary: 'Expiry recovery', ttlMs: 100 })
+    const input = { operationId: 'approval-expiry-operation', callbackEventId: 'approval-expiry-event',
+      callbackChatId: conversation.chat, bindingId: binding.id, principal, proposalId: proposal.proposalId,
+      expectedVersion: proposal.version, diffHash: proposal.diffHash, decision: 'approved' as const,
+      reason: 'owner approved too late' }
+    service.enqueueApproval({ sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+      idempotencyKey: 'approval-expiry-card', text: diff, approval: { operationId: input.operationId,
+        proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
+        title: 'Expiry recovery', diffHash: proposal.diffHash } })
+
+    expect(service.recoverApprovalSettlement(input)).toBeUndefined()
+    const rawStore = (service as unknown as { deliveryStore: {
+      beginApprovalSettlement(input: { operationId: string; payload: unknown; createIfMissing?: boolean }): unknown
+    } }).deliveryStore
+    expect(() => rawStore.beginApprovalSettlement({ operationId: input.operationId, payload: {
+      callbackEventId: input.callbackEventId, callbackChatId: input.callbackChatId, bindingId: input.bindingId,
+      principal, proposalId: input.proposalId, expectedVersion: input.expectedVersion,
+      diffHash: input.diffHash, decision: input.decision, reason: input.reason,
+    }, createIfMissing: false })).toThrowError(expect.objectContaining({ code: 'not-found' }))
+
+    rawStore.beginApprovalSettlement({ operationId: input.operationId, payload: {
+      callbackEventId: input.callbackEventId, callbackChatId: input.callbackChatId, bindingId: input.bindingId,
+      principal, proposalId: input.proposalId, expectedVersion: input.expectedVersion,
+      diffHash: input.diffHash, decision: input.decision, reason: input.reason,
+    } })
+    vi.setSystemTime(proposal.expiresAt + 1)
+    expect(ctx.assistantPolicy.decideProposal({ proposalId: proposal.proposalId,
+      principal: 'lark/bot-1/tenant-a/ou_owner', expectedVersion: proposal.version,
+      decision: input.decision, reason: input.reason })).toMatchObject({ status: 'expired' })
+    expect(service.recoverApprovalSettlement(input)).toBeUndefined()
+    await ctx.fiber.restart()
+    vi.useRealTimers()
+  })
+
+  test('fails closed when a pending Delivery settlement disagrees with the terminal Policy decision', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
+    await service.acceptInbound(envelope)
+    const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const diff = 'reviewed change with conflicting terminal decision'
+    const proposal = ctx.assistantPolicy.propose({ idempotencyKey: 'approval-terminal-conflict', requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
+      diff, summary: 'Conflicting terminal decision', ttlMs: 5_000 })
+    const input = { operationId: 'approval-terminal-conflict-operation', callbackEventId: 'approval-conflict-event',
+      callbackChatId: conversation.chat, bindingId: binding.id, principal, proposalId: proposal.proposalId,
+      expectedVersion: proposal.version, diffHash: proposal.diffHash, decision: 'approved' as const,
+      reason: 'owner approved' }
+    service.enqueueApproval({ sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+      idempotencyKey: 'approval-terminal-conflict-card', text: diff, approval: { operationId: input.operationId,
+        proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
+        title: 'Conflicting terminal decision', diffHash: proposal.diffHash } })
+    const rawStore = (service as unknown as { deliveryStore: {
+      beginApprovalSettlement(input: { operationId: string; payload: unknown }): unknown
+    } }).deliveryStore
+    rawStore.beginApprovalSettlement({ operationId: input.operationId, payload: {
+      callbackEventId: input.callbackEventId, callbackChatId: input.callbackChatId, bindingId: input.bindingId,
+      principal, proposalId: input.proposalId, expectedVersion: input.expectedVersion,
+      diffHash: input.diffHash, decision: input.decision, reason: input.reason,
+    } })
+    ctx.assistantPolicy.decideProposal({ proposalId: input.proposalId, principal: 'lark/bot-1/tenant-a/ou_owner',
+      expectedVersion: input.expectedVersion, decision: 'rejected', reason: 'owner rejected instead' })
+
+    expect(() => service.settleApproval(input))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    await ctx.fiber.restart()
+  })
+
+  test('derives approval routes only from an active owner binding and authentic Agent header', async () => {
+    const { ctx, service } = await harness()
+    expect(() => service.prepareAgentApproval(foreground('unbound'), { sourceId: 'automation-1' }))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
+    await service.acceptInbound(envelope)
+    expect(service.prepareAgentApproval(foreground('delivery-session-1'), { sourceId: 'automation-1' }))
+      .toEqual(expect.objectContaining({ sourceId: 'automation-1', workspace: '/work/alpha',
+        principal: 'lark/bot-1/tenant-a/ou_owner' }))
+    const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const background = foregroundWithHeader('heartbeat-session', '/work/alpha', 'primary')
+    const unbind = service.bindAgentApprovalRoute(background, { bindingId: binding.id })
+    expect(service.prepareAgentApproval(background, { sourceId: 'automation-1' }))
+      .toEqual(expect.objectContaining({ bindingId: binding.id, sourceId: 'automation-1' }))
+    unbind()
+    expect(() => service.prepareAgentApproval(background, { sourceId: 'automation-1' }))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    expect(() => service.bindAgentApprovalRoute(
+      foregroundWithHeader('forged-heartbeat', '/work/forged', 'primary'), { bindingId: binding.id },
+    )).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    expect(() => service.prepareAgentApproval(
+      foregroundWithHeader('delivery-session-1', '/work/forged', 'primary'), { sourceId: 'automation-1' },
+    )).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    expect(() => service.prepareAgentApproval(
+      foregroundWithHeader('delivery-session-1', '/work/alpha', 'forged'), { sourceId: 'automation-1' },
+    )).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    await ctx.fiber.restart()
+  })
+
+  test('rejects linked or revoked principals as approval owners', async () => {
+    const { ctx, service } = await harness()
+    const ownerChallenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: ownerChallenge.challenge.id, principal, code: ownerChallenge.code })
+    const linked = { ...principal, user: 'ou_linked' }
+    const linkedChallenge = service.issuePairing('test', linked)
+    const linkedRecord = service.confirmPairing({ challengeId: linkedChallenge.challenge.id, principal: linked,
+      code: linkedChallenge.code })
+    service.linkPrincipal({ operatorId: 'test', owner: principal, linked, expectedLinkedVersion: linkedRecord.version })
+    const rawStore = (service as unknown as { deliveryStore: {
+      createBinding(input: Record<string, unknown>): unknown
+      getPrincipal(input: typeof principal): { id: string; version: number }
+      revokePrincipal(id: string, version: number): unknown
+    } }).deliveryStore
+    rawStore.createBinding({ conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'session-owner', policyRef: 'owner-dm' })
+    rawStore.createBinding({ conversation: { ...conversation, chat: 'oc_linked' }, principal: linked,
+      workspace: '/work/alpha', agentPreset: 'primary', sessionId: 'session-linked', policyRef: 'owner-dm' })
+    expect(() => service.prepareAgentApproval(foreground('session-linked'), { sourceId: 'automation-1' }))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    const owner = rawStore.getPrincipal(principal)
+    rawStore.revokePrincipal(owner.id, owner.version)
+    expect(() => service.prepareAgentApproval(foreground('session-owner'), { sourceId: 'automation-1' }))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    await ctx.fiber.restart()
+  })
+
+  test('validates approval cards against the immutable Policy proposal', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
+    await service.acceptInbound(envelope)
+    const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const diff = 'review exact diff'
+    const proposal = ctx.assistantPolicy.propose({ idempotencyKey: 'canonical-approval', requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
+      diff, summary: 'Review exact diff', ttlMs: 5_000 })
+    const canonical = { sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+      idempotencyKey: 'canonical-card', text: diff, approval: { operationId: `approval:${proposal.proposalId}`,
+        proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
+        title: 'Review exact diff', diffHash: proposal.diffHash } }
+    expect(() => service.enqueueApproval({ ...canonical, workspace: '/work/other' })).toThrow()
+    for (const changed of [
+      { ...canonical, text: 'misleading diff', idempotencyKey: 'canonical-card-text' },
+      { ...canonical, idempotencyKey: 'canonical-card-title', approval: { ...canonical.approval, title: 'Misleading' } },
+      { ...canonical, idempotencyKey: 'canonical-card-hash', approval: { ...canonical.approval, diffHash: sha256('other') } },
+      { ...canonical, idempotencyKey: 'canonical-card-version', approval: { ...canonical.approval, expectedVersion: 2 } },
+      { ...canonical, idempotencyKey: 'canonical-card-expiry', approval: { ...canonical.approval, expiresAt: proposal.expiresAt + 1 } },
+    ]) expect(() => service.enqueueApproval(changed)).toThrow()
+    expect(service.enqueueApproval(canonical)).toMatchObject({ intent: { approval: canonical.approval } })
+    await ctx.fiber.restart()
+  })
+
+  test('drains Policy approval dispatches idempotently and does not let one bad route starve the batch', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
+    await service.acceptInbound(envelope)
+    const binding = service.history(foreground('delivery-session-1'), {}).binding
+    ctx.assistantPolicy.propose({ idempotencyKey: 'bad-dispatch', requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
+      diff: 'bad', summary: 'Bad route', ttlMs: 5_000,
+      dispatch: { sourceId: 'automation-1', workspace: '/work/other', bindingId: binding.id,
+        principal: 'lark/bot-1/tenant-a/ou_owner' } })
+    const good = ctx.assistantPolicy.propose({ idempotencyKey: 'good-dispatch', requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
+      diff: 'good', summary: 'Good route', ttlMs: 5_000,
+      dispatch: { sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
+        principal: 'lark/bot-1/tenant-a/ou_owner' } })
+    const mark = vi.spyOn(ctx.assistantPolicy, 'markApprovalDispatchEnqueued')
+      .mockImplementationOnce(() => { throw new Error('simulated crash after durable enqueue') })
+    await service.tick()
+    await service.whenIdle()
+    expect(service.history(foreground('delivery-session-1'), {}).outbox.filter(row =>
+      row.intent.idempotencyKey === `approval-card:${good.proposalId}`)).toHaveLength(1)
+    expect(ctx.assistantPolicy.listPendingApprovalDispatches().map(row => row.proposalId)).toContain(good.proposalId)
+    mark.mockRestore()
+    await service.tick()
+    expect(service.history(foreground('delivery-session-1'), {}).outbox.filter(row =>
+      row.intent.idempotencyKey === `approval-card:${good.proposalId}`)).toHaveLength(1)
+    expect(ctx.assistantPolicy.listPendingApprovalDispatches().map(row => row.proposalId)).not.toContain(good.proposalId)
+    await ctx.fiber.restart()
+  })
+
+  test('persists a fair dispatch cursor across restart so a poison first page cannot starve later approvals', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(30_000)
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-dispatch-fairness-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    first.service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
+      agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
+    await first.service.acceptInbound(envelope)
+    const binding = first.service.history(foreground('delivery-session-1'), {}).binding
+    const poison = Array.from({ length: 100 }, (_, index) => first.ctx.assistantPolicy.propose({
+      idempotencyKey: `poison-dispatch-${index}`,
+      requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner',
+      action: 'send',
+      resource: { kind: 'message', id: `${binding.id}:poison:${index}` },
+      diff: `poison ${index}`,
+      summary: `Poison dispatch ${index}`,
+      ttlMs: 60_000,
+      dispatch: { sourceId: 'automation-1', workspace: `/work/poison-${index}`, bindingId: binding.id,
+        principal: 'lark/bot-1/tenant-a/ou_owner' },
+    }))
+    vi.setSystemTime(30_001)
+    const good = first.ctx.assistantPolicy.propose({
+      idempotencyKey: 'fair-dispatch-101',
+      requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner',
+      action: 'send',
+      resource: { kind: 'message', id: `${binding.id}:good` },
+      diff: 'the later valid approval',
+      summary: 'Later valid approval',
+      ttlMs: 60_000,
+      dispatch: { sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+        principal: 'lark/bot-1/tenant-a/ou_owner' },
+    })
+
+    await first.service.tick()
+    expect(first.ctx.assistantPolicy.listPendingApprovalDispatches(100)
+      .map(row => row.proposalId)).toEqual(expect.arrayContaining(poison.map(row => row.proposalId)))
+    expect(first.ctx.assistantPolicy.listPendingApprovalDispatches(100, {
+      createdAt: 30_000,
+      proposalId: poison.map(row => row.proposalId).sort().at(-1)!,
+    }).map(row => row.proposalId)).toContain(good.proposalId)
+    await first.ctx.fiber.restart()
+
+    const restarted = await mountHarness(root)
+    const enqueue = vi.spyOn(restarted.service, 'enqueueApproval')
+    await restarted.service.tick()
+    expect(restarted.ctx.assistantPolicy.listPendingApprovalDispatches(100)
+      .map(row => row.proposalId)).not.toContain(good.proposalId)
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: `approval-card:${good.proposalId}`,
+    }))
+
+    enqueue.mockClear()
+    await restarted.service.tick()
+    expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({
+      idempotencyKey: `approval-card:${poison[0]!.proposalId}`,
+    }))
+    await restarted.ctx.fiber.restart()
+    vi.useRealTimers()
   })
 
   test('requires an explicit policy-gated operator decision before retrying an ambiguous send', async () => {

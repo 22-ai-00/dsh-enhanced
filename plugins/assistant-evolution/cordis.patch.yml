@@ -1,0 +1,20 @@
+- insert:
+    - id: dsh-enhanced-assistant-evolution
+      name: '@dsh-enhanced/assistant-evolution'
+      inject:
+        - assistantPolicy
+      # assistantDelivery is optional and discovered dynamically for owner routes.
+      config:
+        databasePath: !!js dshHomePath('assistant-evolution/evolution.sqlite')
+        evaluationWindow: 20
+        minSample: 5
+        adoptFailureRate: 0.4
+        retireFailureRate: 0.4
+        maxCandidates: 10
+        maxEvidenceSamples: 8
+        maxInjectedRules: 12
+        maxGuidanceBytes: 4096
+        maxRuleGuidanceBytes: 2048
+        defaultProposalTtlMs: 900000
+        reconcileIntervalMs: 15000
+        reconcileLimit: 50

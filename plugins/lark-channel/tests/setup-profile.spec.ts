@@ -89,6 +89,24 @@ describe('Lark Web-profile onboarding patch', () => {
     })))
     expect(toolRules.some((rule: { subject: { id: string }; resource: { id: string } }) =>
       rule.subject.id === '*' || rule.resource.id === '*')).toBe(false)
+    const approvalRules = rules.filter((rule: { id: string }) => rule.id.startsWith('lark-owner-approval-'))
+    expect(approvalRules).toHaveLength(4)
+    expect(approvalRules.map((rule: { subject: { id: string } }) => rule.subject.id).sort()).toEqual([
+      'dsh-enhanced-assistant-evolution',
+      'dsh-enhanced-assistant-automations',
+      'dsh-enhanced-personal-memory',
+      'dsh-enhanced-personal-wiki',
+    ].sort())
+    expect(approvalRules).toEqual(approvalRules.map((rule: object) => expect.objectContaining({
+      ...rule,
+      subject: expect.objectContaining({
+        kind: 'background',
+        workspace: '/Users/test/.dsh/assistant-workspace',
+        principal: 'lark/primary/personal/ou_owner',
+      }),
+      actions: ['approval.send'],
+      context: { initiators: ['background'] },
+    })))
   })
 
   test('keeps exact primary rules when upgrading an existing binding to a standard default', () => {
@@ -188,6 +206,23 @@ describe('Lark Web-profile onboarding patch', () => {
     const twice = configure({ ...input, profilePatch: once })
 
     expect(twice).toBe(once)
+  })
+
+  test('uses component-safe principal encoding for owner and approval rules', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const output = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou/owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    })
+    expect(output).toContain('lark/primary/personal/ou%2Fowner')
+    expect(output).not.toContain('principal: lark/primary/personal/ou/owner')
   })
 
   test('preserves managed Agent tool rules by default and removes them only when explicitly disabled', () => {

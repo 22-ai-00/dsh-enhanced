@@ -5,8 +5,18 @@ import {
   canonicalTarget,
   DeliveryValidationError,
 } from '../src/canonical.ts'
+import { externalPrincipalId } from '../src/index.ts'
 
 describe('typed delivery identities', () => {
+  test('percent-encodes each external principal component without changing legacy-safe ids', () => {
+    expect(externalPrincipalId({ channel: 'lark', account: 'bot-1', tenant: 'tenant-a', user: 'ou_owner' }))
+      .toBe('lark/bot-1/tenant-a/ou_owner')
+    expect(externalPrincipalId({ channel: 'lark', account: 'a/b', tenant: 'c', user: 'd' }))
+      .not.toBe(externalPrincipalId({ channel: 'lark', account: 'a', tenant: 'b', user: 'c/d' }))
+    expect(externalPrincipalId({ channel: 'lark', account: 'a/b', tenant: 'c', user: 'd' }))
+      .toBe('lark/a%2Fb/c/d')
+  })
+
   test('canonicalizes principal, conversation, and target without compound-string parsing', () => {
     expect(canonicalPrincipal({ channel: ' lark ', account: 'bot-1', tenant: 'tenant-a', user: 'ou_123' })).toEqual({
       channel: 'lark', account: 'bot-1', tenant: 'tenant-a', user: 'ou_123',

@@ -3,6 +3,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
+import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantPolicyService, PolicyDecision } from '@dsh-enhanced/assistant-policy'
 import { MemoryProposalManager } from './proposals.js'
 import { MemoryStore } from './store.js'
@@ -22,6 +23,7 @@ import type {
 
 export interface Config {
   databasePath: string
+  approvalMode?: 'delivery-or-headless' | 'delivery-required'
   maxContentBytes?: number
   maxRecordsPerIdentity?: number
   searchLimit?: number
@@ -30,6 +32,14 @@ export interface Config {
   snapshotMaxTokens?: number
   defaultProposalTtlMs?: number
   maxImportRecords?: number
+  /**
+   * Poll interval for committing proposals that were approved out of band, for
+   * example on an approval card after the originating turn ended. `0` disables
+   * the timer; `reconcileProposals()` can still be driven by a trusted host.
+   */
+  reconcileIntervalMs?: number
+  /** Maximum locally pending proposals inspected per reconcile pass. */
+  reconcileLimit?: number
 }
 
 export interface ServiceSearchRequest {
@@ -40,7 +50,8 @@ export interface ServiceSearchRequest {
 
 export interface ServiceProposalInput {
   idempotencyKey: string
-  principal: string
+  /** Trusted headless fallback. Agent-facing calls derive this from Delivery. */
+  principal?: string
   ttlMs?: number
   mutation: MemoryMutation
 }
@@ -48,7 +59,8 @@ export interface ServiceProposalInput {
 export interface ServiceImportInput {
   json: string
   idempotencyKey: string
-  principal: string
+  /** Trusted headless fallback. Agent-facing calls derive this from Delivery. */
+  principal?: string
   ttlMs?: number
 }
 
@@ -57,6 +69,7 @@ export type PersonalMemoryErrorCode =
   | 'identity-mismatch'
   | 'invalid-import'
   | 'missing-identity'
+  | 'missing-approval-route'
   | 'not-found'
   | 'policy-denied'
   | 'unauthorized-principal'
@@ -70,6 +83,8 @@ export class PersonalMemoryError extends Error {
 
 const configSchema = Schema.object({
   databasePath: Schema.string().required(),
+  approvalMode: Schema.union(['delivery-or-headless', 'delivery-required'] as const)
+    .default('delivery-required'),
   maxContentBytes: Schema.number().step(1).min(1).default(4_096),
   maxRecordsPerIdentity: Schema.number().step(1).min(1).default(1_000),
   searchLimit: Schema.number().step(1).min(1).max(100).default(20),
@@ -78,6 +93,12 @@ const configSchema = Schema.object({
   snapshotMaxTokens: Schema.number().step(1).min(1).default(2_048),
   defaultProposalTtlMs: Schema.number().step(1).min(1).default(900_000),
   maxImportRecords: Schema.number().step(1).min(1).max(1_000).default(100),
+  reconcileIntervalMs: Schema.number()
+    .step(1)
+    .min(0)
+    .max(2_147_483_647)
+    .default(15_000),
+  reconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' {
@@ -90,12 +111,15 @@ function decisionError(decision: PolicyDecision): PersonalMemoryError {
   return new PersonalMemoryError('policy-denied', `personal-memory policy denied operation: ${decision.reasonCode}`)
 }
 
+const APPROVAL_SOURCE_ID = 'dsh-enhanced-personal-memory'
+
 export class PersonalMemoryService extends Service {
   static Config = configSchema
 
   private readonly memoryStore: MemoryStore
   private readonly proposals: MemoryProposalManager
   private readonly policy: AssistantPolicyService
+  private delivery: Pick<AssistantDeliveryService, 'prepareAgentApproval'> | undefined
   private readonly config: Required<Config>
   private readonly sessionSnapshots = new WeakMap<Agent, MemorySnapshot>()
   private active = true
@@ -112,6 +136,7 @@ export class PersonalMemoryService extends Service {
     if (policy === undefined) throw new Error('personal-memory: assistantPolicy service is required')
     this.config = config
     this.policy = policy
+    this.delivery = ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     this.memoryStore = new MemoryStore({
       path: config.databasePath,
       maxContentBytes: config.maxContentBytes,
@@ -119,10 +144,32 @@ export class PersonalMemoryService extends Service {
     })
     this.proposals = new MemoryProposalManager(this.memoryStore, policy)
 
+    ctx.inject(['assistantDelivery'], (deliveryCtx) => {
+      const delivery = deliveryCtx.get('assistantDelivery') as AssistantDeliveryService
+      this.delivery = delivery
+      return () => {
+        if (this.delivery === delivery) this.delivery = undefined
+      }
+    })
+
     ctx.effect(() => () => {
       this.active = false
       this.memoryStore.close()
     }, 'personal-memory.database')
+    if (config.reconcileIntervalMs > 0) {
+      ctx.effect(() => {
+        const timer = setInterval(() => {
+          // A reconcile pass must never take the service down; the next tick retries.
+          try {
+            this.reconcileProposals()
+          } catch {
+            // Intentionally ignored: the authoritative state stays in the ledger.
+          }
+        }, config.reconcileIntervalMs)
+        timer.unref?.()
+        return () => clearInterval(timer)
+      }, 'personal-memory.reconcile')
+    }
     ctx.on('agent/session-start', ({ agent }) => {
       this.injectSessionSnapshot(agent)
     })
@@ -172,6 +219,7 @@ export class PersonalMemoryService extends Service {
     this.assertActive()
     const context = this.agentContext(agent)
     this.assertMutationIdentity(context, input.mutation)
+    const approval = this.resolveApprovalRoute(agent, context, input.principal)
     const decision = this.policy.authorizeAgent(agent, 'propose', {
       kind: 'memory', id: input.mutation.op,
     }, { idempotencyKey: `memory-propose:${input.idempotencyKey}` })
@@ -179,7 +227,8 @@ export class PersonalMemoryService extends Service {
     return this.proposals.propose({
       idempotencyKey: input.idempotencyKey,
       requester: `agent:${context.agentPreset}`,
-      principal: input.principal,
+      principal: approval.principal,
+      ...(approval.dispatch === undefined ? {} : { dispatch: approval.dispatch }),
       ttlMs: input.ttlMs ?? this.config.defaultProposalTtlMs,
       mutation: input.mutation,
     })
@@ -188,6 +237,16 @@ export class PersonalMemoryService extends Service {
   decideProposal(input: MemoryProposalDecisionInput): MemoryProposalResult {
     this.assertActive()
     return this.proposals.decide(input)
+  }
+
+  /**
+   * Commit proposals whose policy decision settled after the originating turn.
+   * Without this, an approval granted on a chat card would leave the memory
+   * proposal pending forever. Safe to call repeatedly.
+   */
+  reconcileProposals(limit?: number): MemoryProposalResult[] {
+    this.assertActive()
+    return this.proposals.reconcile(limit ?? this.config.reconcileLimit)
   }
 
   exportJson(agent: Agent | undefined): string {
@@ -239,7 +298,7 @@ export class PersonalMemoryService extends Service {
     }
     const proposals = mutations.map((mutation, index) => this.propose(agent, {
       idempotencyKey: `${input.idempotencyKey}:${index}`,
-      principal: input.principal,
+      ...(input.principal === undefined ? {} : { principal: input.principal }),
       ...(input.ttlMs === undefined ? {} : { ttlMs: input.ttlMs }),
       mutation,
     }))
@@ -297,6 +356,50 @@ export class PersonalMemoryService extends Service {
     if (identity.owner === 'agent' && identity.agentPreset !== context.agentPreset) {
       throw new PersonalMemoryError('identity-mismatch', 'agent memory must target the current agent preset')
     }
+  }
+
+  private resolveApprovalRoute(
+    agent: Agent | undefined,
+    context: MemoryAgentContext,
+    explicitPrincipal: string | undefined,
+  ): {
+    principal: string
+    dispatch?: ReturnType<AssistantDeliveryService['prepareAgentApproval']>
+  } {
+    if (this.delivery === undefined) {
+      if (this.config.approvalMode === 'delivery-required') {
+        throw new PersonalMemoryError(
+          'missing-approval-route',
+          'memory proposal requires an authenticated Delivery owner route',
+        )
+      }
+      if (explicitPrincipal === undefined || explicitPrincipal.trim() === '') {
+        throw new PersonalMemoryError(
+          'missing-approval-route',
+          'memory proposal requires an authenticated Delivery route or an explicit trusted headless principal',
+        )
+      }
+      return { principal: explicitPrincipal }
+    }
+    const dispatch = this.delivery.prepareAgentApproval(agent, {
+      sourceId: APPROVAL_SOURCE_ID,
+    })
+    if (dispatch.sourceId !== APPROVAL_SOURCE_ID
+      || dispatch.workspace !== context.workspace
+      || dispatch.bindingId.trim() === ''
+      || dispatch.principal.trim() === '') {
+      throw new PersonalMemoryError(
+        'missing-approval-route',
+        'memory proposal Delivery route does not match the current agent workspace',
+      )
+    }
+    if (explicitPrincipal !== undefined && explicitPrincipal !== dispatch.principal) {
+      throw new PersonalMemoryError(
+        'unauthorized-principal',
+        'memory proposal principal does not match the authenticated Delivery owner',
+      )
+    }
+    return { principal: dispatch.principal, dispatch }
   }
 
   private agentContext(agent: Agent | undefined): MemoryAgentContext {

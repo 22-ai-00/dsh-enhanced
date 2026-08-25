@@ -65,6 +65,45 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app 
 
 飞书授权只是建立应用凭据和 owner 绑定；`lark-channel` 本身仍是运行在 DSH Host 内的插件。因为这里安装到 `web` profile，默认由向导在后台常驻这个 profile，不需要保持浏览器打开，也不需要再手动执行 `dsh web`。
 
+## 可选：受监督成长激活器
+
+`dsh-supervised-growth-setup --profile web` 仅在完成上述 Lark onboarding 后使用。它只读取
+Delivery/Automations 的本地 SQLite 控制面，不解析或执行任何模型输入；先等待一条与 profile 中
+account、tenant、默认 workspace 和 preset 完全一致的活动 owner 私聊 binding。没有匹配时会要求
+owner 再发一条普通私聊并有界轮询，超时或存在多个匹配时都不修改 profile。
+
+激活器随后检查活动 automation：**任何**已有 active job（包括旧 `assistant-heartbeat` job）都会默认
+阻止启用。scheduler 一旦开启会加载全部 durable row，不能按 owner 名称猜测旧 heartbeat 是否安全。
+确认这些任务可在 scheduler 开启后继续运行时才显式传入 `--ack-existing-automations`；该确认不会恢复、
+创建或改写 job 定义，但不会阻止其被 scheduler 领取。
+
+通过检查后，激活器基于 `dsh --dump-config` 的有效组合树写入完整受管 overlay，而不是假定用户 raw
+patch 已含 meta-bundle 的 config。Delivery/Automations DB 路径也从有效树读取。原子写入后它会再次
+dump 并验证 scheduler、TraeX cwd/route、`automation-runs` budget、heartbeat 和每条受管 Policy rule；
+若 home/profile 高优先级 layer 覆盖了其中任一项，立即恢复原 patch。它在写入前和重启前都会重读同一
+owner binding 的完整 route/status/version；版本变化、撤销或多 binding 均 fail closed。
+
+在重启 Host 前，激活器调用 TraeX provider 唯一的 installer-only readiness probe：固定 read-only ACP
+catalog handshake 会验证可执行文件、登录和至少一个可用模型，但不会发送模型 prompt。普通
+`listModels`/`resolveModel` 不使用这个静态 cwd 例外；实际模型执行仍要求 live loop session 的 canonical
+cwd 与配置 workspace 完全一致。restart 后还必须通过 resident running health gate，否则会恢复原 profile
+和旧服务。Windows Task Scheduler 没有这个实现可验证的健康信号，supervised-growth 因而在 Windows
+拒绝激活，不伪装为常驻成功。
+
+overlay 仅允许精确 workspace/preset 的后台 heartbeat 在 08:00–22:00 每 120 分钟运行一次（恰好每日
+7 次）：先 `evolution_review`，才可最多一次 `evolution_propose`；每轮最多 2 次工具调用和 512 输出
+token。Policy budget 的 metric 是 `automation-runs`，每天最多 7 次、每次固定计 1；512 仅是输出上限，
+不是不可证明的总 token 预算。pending Evolution proposal 的审批卡只可由固定 Evolution 背景主体投递到
+这个 exact owner binding，owner approval 仍是唯一 apply 门。scratch 明确禁止 decide/apply、修改代码、
+凭据、Policy 或既有 automation；无候选时精确输出 `HEARTBEAT_OK`。overlay 不授予 shell、文件系统、
+网络或凭据权限。
+
+```sh
+~/.dsh/profiles/web/node_modules/.bin/dsh-supervised-growth-setup --profile web
+# 仅当确认已有活动任务可以在 scheduler 开启后继续运行时：
+~/.dsh/profiles/web/node_modules/.bin/dsh-supervised-growth-setup --profile web --ack-existing-automations
+```
+
 升级前已经存在的 conversation binding 会继续固定旧 preset/workspace（旧安装常见 preset 为 `primary`），新 binding 则使用 Delivery 当前配置的默认身份。带 `--allow-agent-tools` 重跑向导时会按完整 preset+workspace 保留精确 legacy 规则，同时把主规则更新到当前默认身份；不会使用 preset、workspace 或工具通配符。
 
 已完成飞书配置、只需安装或重启常驻服务时运行：
@@ -197,7 +236,7 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 
 - 事件处理器会等待 `assistant-delivery.acceptInbound()` 完成，即 inbox 落盘后才向长连接回调返回成功。
 - 只有合法、非重复且状态为 `queued` 的入站消息会异步添加 `Get`；未授权、死信或 provider 重放不会重复 reaction。精确表情类型为大小写敏感的 `Get` 和 `DONE`。
-- Agent 的最终回复会显式携带原始飞书 `messageId`，先成功回复该消息，再添加 `DONE`。发送失败、无最终回复、任务失败或取消均不会添加 `DONE`；首版保留 `Get`，不会为了替换表情再申请 reaction 读取权限。
+- Agent 的最终回复会显式携带原始飞书 `messageId`，先成功回复该消息，再异步添加 `DONE`。Delivery 在飞书返回有效 message id 后立即记录 `accepted`，不会等待 presentation-only reaction；发送失败、无最终回复、任务失败或取消均不会添加 `DONE`，reaction 失败只降级 channel health。首版保留 `Get`，不会为了替换表情再申请 reaction 读取权限。
 - 执行进度使用飞书原生 `/open-apis/im/v1/message_cot` 展示：`showProgress: false` 可关闭。该接口不在固定版 Node SDK 的高层 API 中，因此作为可降级展示使用；创建或更新失败只记录 channel health，不会重跑任务或影响最终 Outbox 回复。
 - 进度映射只接受 Delivery 的强类型事件：开始、步骤说明、脱敏工具名、工具成功/失败、待办快照和终态；`assistant/chunk`（包括流式 `reasoning-delta`）、工具 arguments、工具 output、系统提示和错误详情不会进入飞书载荷。步骤说明优先取 `assistant/message` 已定稿的 `reasoning` 块（助手自己对该步的说明，不是流式片段）；**并非所有 provider 都会产出 reasoning**——订阅制 CLI 只声明 effort 能力、实际仅回传 `text`，ACP 的 thought 通道到 DSH reasoning 的映射尚未实现，因此 `step/start` 另外映射为中性阶段文案，保证这些 provider 也不会出现空面板。同一次运行的每条步骤/待办各用独立 `messageId` 追加，避免互相覆盖。
 - 回合失败时除 `RUN_ERROR` 外还会在面板正文写入一行「任务未完成」，附带上游错误码（如 `ACP_PROTOCOL_ERROR`）：provider 可能在产出任何内容前就失败，只发 `RUN_ERROR` 会让面板停在首行、看起来像卡住。只透传短错误码，provider 的原始错误消息可能包含 prompt 或上游载荷，不出边界。
@@ -205,10 +244,10 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 - `messageId` 是稳定 inbound event id；delivery 的 `(channel, account, eventId)` 唯一约束承担跨重启去重。
 - 单聊按 account/tenant/user/chat 绑定；群聊以根消息 id 作为显式 thread，避免不同发言人或话题串线。
 - plain text 使用飞书文本消息；Markdown 使用 schema 2.0 卡片。请求携带由 delivery idempotency key 单向哈希得到的 provider UUID。
-- `approval` intent 使用 schema 2.0 双按钮卡片。每个按钮值由 app secret 做 HMAC 签名并绑定 operation、proposal/version、expiry、binding、decision 与 chat；回调重新取 provider actor/chat 后交给 Delivery/Policy，篡改、过期、跨 chat 和重复决策均失败关闭。
+- `approval` intent 使用 schema 2.0 双按钮卡片。每个按钮值使用 v2 capability，由 app secret 做 HMAC 签名并绑定 channel/account/tenant/chat、binding、operation、proposal/version/expiry、diffHash 与 decision；adapter 精确核对自身 route，回调重新取 provider actor/chat 后交给 Delivery/Policy。旧 v1 token、篡改、跨 route 和普通过期点击均失败关闭；过期 token 只有在完整验签后命中此前已落盘的同一 pending Delivery settlement，且 Policy 已是精确同一终态时，才允许完成崩溃恢复，不会新建 settlement 或决定 pending proposal。
 - `model-picker` intent 使用 schema 2.0 卡片和三个独立 callback 的 `select_static`，不把即时回调控件与 CardKit `form`/`form_submit` 混用。provider、model、effort 每次变化都会通过 `card.action.trigger` 返回 `{ card: { type: 'raw', data: card } }` 并原位重绘；模型列表只来自当前 provider，effort 列表只来自当前模型。v3 签名 token 绑定 operation、expiry、binding、chat、动作、revision 以及当前 provider/model/effort，普通 callback 确认按钮直接提交该签名状态，不依赖 `form_value`；adapter 先拒绝篡改、过期、跨 chat 和级联错配，Delivery 再用持久 CAS 拒绝旧 revision，并核对 owner/Policy 与实时模型能力。确认操作先持久领取再快速响应飞书，最终选择、结算结果和 Outbox 回复在同一 SQLite 事务中提交；卡片 4xx 会自动降级为文字目录。三个下拉的当前项通过 `initial_index` 定位——飞书的 `initial_option` 按选项展示文本而非回传 `value` 匹配，直接写入 route 形态的 `value` 会静默回落到第一个选项；`initial_option` 仅在该文本唯一标识一个选项时附带，当前项不在选项列表内时两者都不下发，不伪造预选。卡片版式按飞书官方卡片风格规范组织：header 用 `title` + `subtitle` + `icon` 承载「这是什么 / 当前模型」，三个下拉各自放进带描边的 `interactive_container` 分块（而不是平铺 markdown 标签），每块含一行灰色 `notation` 说明，末尾只保留一个 `primary` 按钮作为唯一焦点。升级后应重新发送 `/model`，旧 v1/v2 卡片不会继续生效。
 - 权限/格式错误是确定未发送；限流和未连接可以安全重试；网络超时或未知 SDK 错误进入 `unknown_after_send`，不会盲目重发。
-- 当前飞书 API 没有为该发送 UUID 暴露可靠查询/对账接口，因此 adapter 明确声明 `reconcileUnknownSend: false`、无 delivered/read receipt。
+- 当前飞书 API 没有为该发送 UUID 暴露可靠查询/对账接口，因此 adapter 明确声明 `reconcileUnknownSend: false`、无 delivered/read receipt；Delivery 会保留这类 `unknown_after_send` 等待 owner 决策，不会反复领取无实现的对账任务或消耗 attempt。
 
 官方长连接会自动重连，但不提供可持久化 replay cursor 或历史补拉接口。本包记录 `reconnecting` / `connected-with-gap` 与 `gapGeneration`；它依赖飞书 redelivery 和 delivery inbox 去重，不宣称断线期间零丢失。若未来出现官方 cursor/backfill contract，应先加入崩溃与重放测试再启用。
 

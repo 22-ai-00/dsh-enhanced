@@ -7,7 +7,10 @@
 - `@deepseek-ai/cordis`：`4.0.1`
 - Node.js：`^22.19.0 || >=24.0.0`
 - pnpm：`11.7.0`
-- Codex CLI `0.147.0`：App Server 的 `initialize` + `model/list` 用于 `coding-subscription-provider` 的无 prompt 模型目录发现；生成走 JSONL。工作目录诊断仅在进程以 code `1` 退出、没有 stdout 协议输出，且 stderr 含完整行 `Not inside a trusted directory and --skip-git-repo-check was not specified.`（可伴随 stdin 提示）时专门映射，其他退出保持通用分类。
+- Codex CLI `0.147.0`：`coding-subscription-provider` 默认 `transport: cli`；App Server 的 `initialize` + `model/list` 用于无 prompt 模型目录发现，生成走 JSONL。工作目录诊断仅在进程以 code `1` 退出、没有 stdout 协议输出，且 stderr 含完整行 `Not inside a trusted directory and --skip-git-repo-check was not specified.`（可伴随 stdin 提示）时专门映射，其他退出保持通用分类。
+- Codex private Responses（实验性、未承诺兼容）：只有显式设置 `transport: direct-responses` 才启用。该路径绕过 Codex CLI / App Server，从当前 OS 用户的 `CODEX_HOME/auth.json`（未设置时为 `~/.codex/auth.json`）读取 ChatGPT session，并固定请求 `https://chatgpt.com/backend-api/codex/responses`；401 时至多刷新一次。插件自身的写回使用变更检测和同目录原子替换，但与不遵循同一 CAS 约定的外部进程（包括未来版本的官方 Codex）并发写同一文件时只能 best-effort 避免覆盖。auth 安全检查依赖 POSIX 所有权、链接数和权限位，当前不支持 Windows。请求/事件形状、认证文件布局、OAuth client、header、endpoint 与模型 id 都是对当前私有实现的观测，不属于 OpenAI 对第三方集成公开承诺的稳定 API，可能随时变化或失效，不应宣传为官方支持。升级本路径时必须重新核对 auth 安全约束、SSE 终态、原始 `call_id`、并行 function calls、encrypted reasoning replay、usage 记账与 request/response 字节上限。
+- Codex private wire 的 clean-room 核验快照：OpenAI `openai/codex` 提交 `d52478c52ef09f001142a4b82339467c3880877f`（2026-08-25），重点核对 request shape、lean SSE、`output_item.done`、即时 `response.completed`、`ultra`→`max`、失败码与 refresh body；外部参考仓库固定为 `b-nnett/grok-bot-0.18-reconstructed` 提交 `a9f633e09d49a85829b8236331b9e21f7e612634`。这两者都不是对本插件未来兼容性的保证。
+- `@deepseek-ai/dsh-attachment@0.1.0-rc.8`：是 `coding-subscription-provider` 的可选 peer，并与 `dsh-llm@0.1.0-rc.8` 的 attachment peer 基线一致。只有该服务可用时，Codex direct 模式才声明并接受 `text + image` 输入；不支持音频、视频或任意文件。
 - Claude Agent SDK 控制协议：Claude Code `2.1.218`（`initialize.models` 与逐模型 `supportedEffortLevels`）
 - Grok 协议：Grok Build `1.0.5`（目录使用 `initialize._meta.modelState`；headless 生成使用 `--verbatim`、显式空工具集过滤，以及原生 `streaming-json` 的 `text.data` / `end` / `error` 事件）
 - Cursor CLI 模型目录：官方 `--list-models` 接口（本机未安装，以有界 fixture 验证；未宣称支持 headless effort）

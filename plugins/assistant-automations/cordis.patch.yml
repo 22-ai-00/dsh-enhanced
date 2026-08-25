@@ -15,3 +15,22 @@
         maxConcurrency: 1
         maxArtifactBytes: 1048576
         defaultProposalTtlMs: 900000
+        reconcileIntervalMs: 15000
+        reconcileLimit: 50
+        allowUnbudgetedExecution: false
+        proposalDefaults:
+          provider: deepseek-official
+          model: deepseek-chat
+          allowedTools: []
+          timeoutMs: 60000
+          maxOutputTokens: 512
+          maxToolCalls: 0
+          misfireKind: latest
+          misfireLimit: 1
+          overlap: skip
+          retrySafety: never
+          maxRetries: 0
+          budgetId: assistant-automations-proposals
+          budgetAmount: 1
+        toolCapableProviders:
+          - deepseek-official

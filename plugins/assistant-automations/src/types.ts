@@ -1,4 +1,5 @@
 import type { AutomationSchedule } from './schedule.js'
+import type { ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
 
 export type MisfirePolicy =
   | { kind: 'skip' }
@@ -100,6 +101,36 @@ export interface DutyLease {
 
 export type AutomationRunStatus = 'cancelled' | 'failed' | 'succeeded' | 'timed_out' | 'unknown'
 export type AutomationDeliveryStatus = 'enqueued' | 'pending' | 'suppressed'
+export type AutomationEvidenceStatus = 'pending' | 'recorded' | 'suppressed'
+
+/**
+ * Immutable evidence captured in the same transaction as a terminal run.
+ *
+ * The automation id is the stable learning situation. The human-editable name
+ * appears only in `detail`, so renaming a schedule cannot split its history.
+ */
+export interface AutomationOutcomeEvidence {
+  situation: string
+  outcome: 'succeeded' | 'failed'
+  detail: string
+  idempotencyKey: string
+  occurredAt: number
+  workspace: string
+  agentPreset: string
+  automationId: string
+  runId: string
+  /** Present only when the runner confirmed the Agent session it created. */
+  sessionId?: string
+  /** Trusted infrastructure attribution read from a durable post-injection receipt. */
+  ruleId?: string
+  guidanceVersion?: number
+}
+
+export interface AutomationEvidenceAttribution {
+  sessionId?: string
+  ruleId?: string
+  guidanceVersion?: number
+}
 
 export interface AutomationRun {
   id: string
@@ -114,6 +145,8 @@ export interface AutomationRun {
   usage: Readonly<Record<string, unknown>>
   deliveryStatus?: AutomationDeliveryStatus
   deliveryRef?: string
+  evidenceStatus: AutomationEvidenceStatus
+  evidence?: AutomationOutcomeEvidence
   createdAt: number
   updatedAt: number
 }
@@ -130,11 +163,14 @@ export interface StoredAutomationProposal {
   idempotencyKey: string
   requester: string
   principal: string
+  dispatch?: Readonly<ApprovalDispatchRoute>
   requestHash: string
   changeHash: string
   mutation: AutomationMutation
   status: AutomationProposalStatus
   expiresAt: number
+  ttlMs: number
+  createdAt: number
   version: number
   resultAutomationId?: string
 }
@@ -143,6 +179,7 @@ export interface AutomationProposalInput {
   idempotencyKey: string
   requester: string
   principal: string
+  dispatch?: Readonly<ApprovalDispatchRoute>
   ttlMs: number
   mutation: AutomationMutation
 }

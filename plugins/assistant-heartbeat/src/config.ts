@@ -65,7 +65,9 @@ const heartbeatSchema = Schema.object({
   timezone: Schema.string().required(),
   activeStartHour: Schema.number().step(1).min(0).max(23).default(8),
   activeEndHour: Schema.number().step(1).min(1).max(24).default(22),
-  intervalMinutes: Schema.number().step(1).min(1).max(60).default(30),
+  // Values above one hour are represented as an explicit local-hour list in
+  // cron, never as an invalid `*/120` minute field.
+  intervalMinutes: Schema.number().step(1).min(1).max(24 * 60).default(30),
   principal: Schema.string().required(),
   allowedTools: Schema.array(Schema.string()).default([]),
   timeoutMs: Schema.number().step(1).min(1_000).max(3_600_000).default(60_000),
@@ -103,8 +105,17 @@ function normalizeProfile(value: HeartbeatConfig): NormalizedHeartbeatConfig {
   if (parsed.activeStartHour >= parsed.activeEndHour) {
     throw new Error('assistant-heartbeat: active hours must be a non-wrapping [start, end) range')
   }
-  if (60 % parsed.intervalMinutes !== 0) {
-    throw new Error('assistant-heartbeat: intervalMinutes must divide 60')
+  if (parsed.intervalMinutes <= 60) {
+    if (60 % parsed.intervalMinutes !== 0) {
+      throw new Error('assistant-heartbeat: intervalMinutes must divide 60')
+    }
+  } else {
+    const activeWindowMinutes = (parsed.activeEndHour - parsed.activeStartHour) * 60
+    if (parsed.intervalMinutes % 60 !== 0
+      || parsed.intervalMinutes > activeWindowMinutes
+      || activeWindowMinutes % parsed.intervalMinutes !== 0) {
+      throw new Error('assistant-heartbeat: intervalMinutes above 60 must be an exact whole-hour divisor of the active window')
+    }
   }
   try {
     new Intl.DateTimeFormat('en', { timeZone: parsed.timezone }).format(0)
@@ -155,6 +166,12 @@ export function normalizeHeartbeatConfig(input: Config): NormalizedConfig {
 }
 
 function cron(profile: NormalizedHeartbeatConfig): string {
+  if (profile.intervalMinutes > 60) {
+    const stepHours = profile.intervalMinutes / 60
+    const hours: number[] = []
+    for (let hour = profile.activeStartHour; hour < profile.activeEndHour; hour += stepHours) hours.push(hour)
+    return `0 ${hours.join(',')} * * *`
+  }
   const minute = profile.intervalMinutes === 60 ? '0' : `*/${profile.intervalMinutes}`
   const lastHour = profile.activeEndHour - 1
   const hour = profile.activeStartHour === lastHour ? String(lastHour) : `${profile.activeStartHour}-${lastHour}`

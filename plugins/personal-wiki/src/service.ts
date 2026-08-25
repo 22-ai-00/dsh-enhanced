@@ -3,7 +3,12 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type SkillRegistry from '@deepseek-ai/dsh-skill'
 import Schema from '@deepseek-ai/schemastery'
-import type { AssistantPolicyService, PolicyDecision } from '@dsh-enhanced/assistant-policy'
+import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import type {
+  ApprovalDispatchRoute,
+  AssistantPolicyService,
+  PolicyDecision,
+} from '@dsh-enhanced/assistant-policy'
 import { WikiProposalManager, WikiProposalStore } from './proposals.js'
 import { registerWikiTools } from './tools.js'
 import type {
@@ -27,17 +32,29 @@ export interface Config {
   readMaxParagraphs?: number
   lintLimit?: number
   defaultProposalTtlMs?: number
+  /** Trusted classification applied to every model-originated wiki_upsert. */
+  toolProposalAuthority?: 'curated' | 'derived'
+  /**
+   * Poll interval for committing proposals that were approved out of band, for
+   * example on an approval card after the originating turn ended. `0` disables
+   * the timer; `reconcileProposals()` can still be driven by a trusted host.
+   */
+  reconcileIntervalMs?: number
+  /** Maximum locally pending proposals inspected per reconcile pass. */
+  reconcileLimit?: number
 }
 
 export interface WikiServiceProposalInput {
   idempotencyKey: string
-  principal: string
+  /** Trusted headless fallback. Model-facing tools never accept this field. */
+  principal?: string
   ttlMs?: number
   mutation: WikiUpsertMutation
 }
 
 export type PersonalWikiErrorCode =
   | 'disposed'
+  | 'missing-approval-route'
   | 'missing-identity'
   | 'not-found'
   | 'policy-denied'
@@ -61,6 +78,8 @@ Use Personal Wiki for durable, human-readable research, project, person, concept
 
 Keep curated Markdown as truth. A derived page must cite direct curated evidence and must not summarize another derived page.`
 
+export const PERSONAL_WIKI_APPROVAL_SOURCE = 'dsh-enhanced-personal-wiki'
+
 const configSchema = Schema.object({
   vaultRoot: Schema.string().required(),
   databasePath: Schema.string().required(),
@@ -71,6 +90,9 @@ const configSchema = Schema.object({
   readMaxParagraphs: Schema.number().step(1).min(1).max(1_000).default(40),
   lintLimit: Schema.number().step(1).min(1).max(10_000).default(200),
   defaultProposalTtlMs: Schema.number().step(1).min(1).default(900_000),
+  toolProposalAuthority: Schema.union(['curated', 'derived'] as const).default('curated'),
+  reconcileIntervalMs: Schema.number().step(1).min(0).default(15_000),
+  reconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' {
@@ -91,6 +113,7 @@ export class PersonalWikiService extends Service {
   private readonly proposals: WikiProposalManager
   private readonly policy: AssistantPolicyService
   private readonly config: Required<Config>
+  private approvalDelivery: Pick<AssistantDeliveryService, 'prepareAgentApproval'> | undefined
   private active = true
 
   constructor(ctx: Context, input: Config) {
@@ -108,15 +131,40 @@ export class PersonalWikiService extends Service {
     if (policy === undefined) throw new Error('personal-wiki: assistantPolicy service is required')
     this.config = config
     this.policy = policy
+    this.approvalDelivery = ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     this.vault = new WikiVault({ root: config.vaultRoot, maxPageBytes: config.maxPageBytes })
     this.proposalStore = new WikiProposalStore({ path: config.databasePath })
     this.proposals = new WikiProposalManager(this.vault, this.proposalStore, policy)
+
+    ctx.inject(['assistantDelivery'], deliveryCtx => {
+      const delivery = deliveryCtx.get('assistantDelivery') as AssistantDeliveryService
+      this.approvalDelivery = delivery
+      return () => {
+        if (this.approvalDelivery === delivery) this.approvalDelivery = undefined
+      }
+    })
 
     ctx.effect(() => () => {
       this.active = false
       this.proposalStore.close()
     }, 'personal-wiki.database')
-    ctx.inject(['tools'], toolsCtx => registerWikiTools(toolsCtx, this))
+    if (config.reconcileIntervalMs > 0) {
+      ctx.effect(() => {
+        const timer = setInterval(() => {
+          // A reconcile pass must never take the service down; the next tick retries.
+          try {
+            this.reconcileProposals()
+          } catch {
+            // Intentionally ignored: the authoritative state stays in the ledger.
+          }
+        }, config.reconcileIntervalMs)
+        timer.unref?.()
+        return () => clearInterval(timer)
+      }, 'personal-wiki.reconcile')
+    }
+    ctx.inject(['tools'], toolsCtx => registerWikiTools(toolsCtx, this, {
+      proposalAuthority: config.toolProposalAuthority,
+    }))
     ctx.inject(['skills'], (skillsCtx) => {
       const skills = skillsCtx.get('skills') as SkillRegistry | undefined
       if (skills === undefined) return
@@ -159,18 +207,30 @@ export class PersonalWikiService extends Service {
 
   propose(agent: Agent | undefined, input: WikiServiceProposalInput): WikiProposalResult {
     const identity = this.authorize(agent, 'propose', input.mutation.op, `wiki-propose:${input.idempotencyKey}`)
+    const approval = this.prepareApproval(agent, identity.workspace, input.principal)
     return this.proposals.propose({
       idempotencyKey: input.idempotencyKey,
       requester: `agent:${identity.agentPreset}`,
-      principal: input.principal,
+      principal: approval.principal,
       ttlMs: input.ttlMs ?? this.config.defaultProposalTtlMs,
       mutation: input.mutation,
+      ...(approval.dispatch === undefined ? {} : { dispatch: approval.dispatch }),
     })
   }
 
   decideProposal(input: WikiProposalDecisionInput): WikiProposalResult {
     this.assertActive()
     return this.proposals.decide(input)
+  }
+
+  /**
+   * Commit proposals whose policy decision settled after the originating turn.
+   * Without this, an approval granted on a chat card would leave the wiki
+   * proposal pending forever. Safe to call repeatedly.
+   */
+  reconcileProposals(limit?: number): WikiProposalResult[] {
+    this.assertActive()
+    return this.proposals.reconcile(limit ?? this.config.reconcileLimit)
   }
 
   getProposal(proposalId: string, principal: string): WikiProposalResult | undefined {
@@ -209,6 +269,40 @@ export class PersonalWikiService extends Service {
     )
     if (decision.effect !== 'allow') throw policyError(decision)
     return { workspace, agentPreset }
+  }
+
+  private prepareApproval(
+    agent: Agent | undefined,
+    workspace: string,
+    explicitPrincipal: string | undefined,
+  ): { principal: string; dispatch?: Readonly<ApprovalDispatchRoute> } {
+    const delivery = this.approvalDelivery
+    if (delivery === undefined) {
+      if (explicitPrincipal === undefined || explicitPrincipal.trim() === '') {
+        throw new PersonalWikiError(
+          'missing-approval-route',
+          'wiki proposal requires an authenticated owner approval route',
+        )
+      }
+      return { principal: explicitPrincipal }
+    }
+    const route = delivery.prepareAgentApproval(agent, { sourceId: PERSONAL_WIKI_APPROVAL_SOURCE })
+    if (route.sourceId !== PERSONAL_WIKI_APPROVAL_SOURCE
+      || route.workspace !== workspace
+      || route.bindingId.trim() === ''
+      || route.principal.trim() === '') {
+      throw new PersonalWikiError(
+        'missing-approval-route',
+        'wiki approval route does not match the exact agent workspace',
+      )
+    }
+    if (explicitPrincipal !== undefined && explicitPrincipal !== route.principal) {
+      throw new PersonalWikiError(
+        'unauthorized-principal',
+        'wiki proposal principal does not match the authenticated owner route',
+      )
+    }
+    return { principal: route.principal, dispatch: route }
   }
 
   private assertActive(): void {

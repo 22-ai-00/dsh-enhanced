@@ -29,6 +29,7 @@ describe('delivery SQLite boundary', () => {
       'delivery_receipts', 'conversation_model_epochs', 'conversation_model_selections',
       'inbox_attempts', 'inbox_messages', 'outbox_attempts', 'outbox_messages',
       'model_picker_states', 'model_selection_settlements', 'pairing_challenges',
+      'approval_dispatch_cursor',
     ]))
     const modelColumns = (database.prepare('PRAGMA table_info(conversation_model_selections)').all() as { name: string }[])
       .map(row => row.name)
@@ -102,6 +103,21 @@ describe('delivery SQLite boundary', () => {
     expect(tables).toEqual(expect.arrayContaining([
       'conversation_model_epochs', 'model_picker_states', 'model_selection_settlements',
     ]))
+    migrated.close()
+  })
+
+  test('adds the durable approval dispatch cursor when migrating schema v5', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v5-schema-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const raw = new DatabaseSync(path)
+    raw.exec(`PRAGMA user_version = 5`)
+    raw.close()
+
+    const migrated = openDeliveryDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
+    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'approval_dispatch_cursor'").get())
+      .toEqual({ name: 'approval_dispatch_cursor' })
     migrated.close()
   })
 })

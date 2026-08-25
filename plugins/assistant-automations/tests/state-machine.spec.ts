@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { AutomationStore, AutomationStoreError } from '../src/store.ts'
 
@@ -15,8 +16,9 @@ async function fixture(start = Date.parse('2026-08-21T10:00:00.000Z')) {
   let now = start
   const root = await mkdtemp(join(tmpdir(), 'assistant-automations-state-'))
   roots.push(root)
-  const store = new AutomationStore({ path: join(root, 'state.sqlite'), now: () => now })
-  return { store, now: () => now, setNow: (value: number) => { now = value } }
+  const path = join(root, 'state.sqlite')
+  const store = new AutomationStore({ path, now: () => now })
+  return { root, path, store, now: () => now, setNow: (value: number) => { now = value } }
 }
 
 function definition(overrides: Record<string, unknown> = {}) {
@@ -147,10 +149,139 @@ describe('task recovery and overlap', () => {
       outcome: 'succeeded' as const, sessionId: 'session-1', artifactRef: 'runs/run.json',
       outputPreview: 'done', usage: { outputTokens: 2 },
     }
-    expect(store.completeTask(input)).toMatchObject({ status: 'succeeded', outputPreview: 'done' })
-    expect(store.completeTask(input)).toMatchObject({ status: 'succeeded', outputPreview: 'done' })
+    expect(store.completeTask(input)).toMatchObject({
+      status: 'succeeded', outputPreview: 'done', evidenceStatus: 'pending',
+      evidence: {
+        situation: 'automation:auto-complete', outcome: 'succeeded',
+        detail: 'automation "State machine": run succeeded',
+        idempotencyKey: expect.stringMatching(/^automation-run:run-/),
+        occurredAt: 1_200, workspace: '/work/alpha', agentPreset: 'primary',
+        automationId: 'auto-complete', runId: expect.stringMatching(/^run-/),
+      },
+    })
+    expect(store.completeTask(input)).toMatchObject({ status: 'succeeded', evidenceStatus: 'pending' })
     expect(store.listRuns({ automationId: 'auto-complete', limit: 10 })).toHaveLength(1)
     store.close()
+  })
+
+  test.each(['cancelled', 'unknown'] as const)(
+    'atomically suppresses %s evidence instead of creating a retryable observation',
+    async outcome => {
+      const { store } = await fixture()
+      const task = due(store, `auto-${outcome}`)
+      const duty = store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+      store.claimTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: 1_100, leaseMs: 1_000 })
+      store.startTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: 1_101, leaseMs: 1_000, sessionId: 'session-1' })
+
+      const run = store.completeTask({
+        taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: 1_200, outcome, outputPreview: '', usage: {},
+      })
+
+      expect(run).toMatchObject({ status: outcome, evidenceStatus: 'suppressed' })
+      expect(run).not.toHaveProperty('evidence')
+      expect(store.listPendingEvidence(10)).toEqual([])
+      store.close()
+    },
+  )
+
+  test('durably rotates a failing evidence row behind its pending peers', async () => {
+    const value = await fixture()
+    for (const automationId of ['auto-evidence-a', 'auto-evidence-b']) {
+      value.store.createApproved({
+        automationId,
+        idempotencyKey: `create:${automationId}`,
+        definition: definition({ schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' } }),
+      })
+      value.store.createManual({ automationId, requestId: 'one', dryRun: false })
+    }
+    const duty = value.store.acquireDuty({ ownerId: 'owner-a', now: value.now(), leaseMs: 10_000 })
+    for (let index = 0; index < 2; index += 1) {
+      const claimed = value.store.claimNextTask({
+        ownerId: 'owner-a', fencingToken: duty.fencingToken, now: value.now(), leaseMs: 1_000,
+      })!
+      value.store.startTask({
+        taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: value.now(), leaseMs: 1_000, sessionId: `session-${index}`,
+      })
+      value.store.completeTask({
+        taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: value.now(), outcome: 'succeeded', outputPreview: 'done', usage: {},
+      })
+    }
+
+    const first = value.store.listPendingEvidence(1)[0]!
+    value.store.deferRunEvidence({ runId: first.id, expectedStatus: 'pending', now: value.now() })
+
+    expect(value.store.listPendingEvidence(1)[0]?.id).not.toBe(first.id)
+    value.store.close()
+  })
+
+  test('migrates v2 run rows into the durable evidence lane without losing terminal history', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-v2-'))
+    roots.push(root)
+    const path = join(root, 'state.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE automation_definitions (
+        id TEXT PRIMARY KEY, definition_json TEXT NOT NULL
+      ) STRICT;
+      CREATE TABLE automation_runs (
+        id TEXT PRIMARY KEY, occurrence_id TEXT NOT NULL UNIQUE, automation_id TEXT NOT NULL,
+        task_id TEXT NOT NULL UNIQUE, attempt_id TEXT NOT NULL UNIQUE,
+        status TEXT NOT NULL, session_id TEXT, artifact_ref TEXT, output_preview TEXT NOT NULL,
+        usage_json TEXT NOT NULL, delivery_status TEXT, delivery_ref TEXT,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO automation_definitions(id, definition_json) VALUES
+        ('legacy-auto', '{"name":"Legacy name","workspace":"/work/legacy","agentPreset":"legacy"}'),
+        ('legacy-oversized', json_object(
+          'name', 'Oversized legacy', 'workspace', '/' || printf('%.*c', 20000, 'x'), 'agentPreset', 'legacy'
+        )),
+        ('legacy-malformed', 'not-json');
+      INSERT INTO automation_runs VALUES
+        ('legacy-success', 'occ-1', 'legacy-auto', 'task-1', 'attempt-1', 'succeeded',
+         'synthetic-session', NULL, 'done', '{}', NULL, NULL, 1000, 1000),
+        ('legacy-failed', 'occ-2', 'legacy-auto', 'task-2', 'attempt-2', 'failed',
+         NULL, NULL, '', '{}', NULL, NULL, 1001, 1001),
+        ('legacy-timeout', 'occ-3', 'legacy-auto', 'task-3', 'attempt-3', 'timed_out',
+         NULL, NULL, '', '{}', NULL, NULL, 1002, 1002),
+        ('legacy-cancel', 'occ-4', 'legacy-auto', 'task-4', 'attempt-4', 'cancelled',
+         NULL, NULL, '', '{}', NULL, NULL, 1003, 1003),
+        ('legacy-unknown', 'occ-5', 'legacy-auto', 'task-5', 'attempt-5', 'unknown',
+         NULL, NULL, '', '{}', NULL, NULL, 1004, 1004),
+        ('legacy-oversized', 'occ-6', 'legacy-oversized', 'task-6', 'attempt-6', 'succeeded',
+         NULL, NULL, '', '{}', NULL, NULL, 1005, 1005),
+        ('legacy-malformed', 'occ-7', 'legacy-malformed', 'task-7', 'attempt-7', 'succeeded',
+         NULL, NULL, '', '{}', NULL, NULL, 1006, 1006);
+      PRAGMA user_version = 2;
+    `)
+    legacy.close()
+
+    const migrated = new AutomationStore({ path })
+    const runs = migrated.listRuns({ limit: 10 })
+    expect(runs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: 'legacy-success', evidenceStatus: 'pending', evidence: {
+          situation: 'automation:legacy-auto', outcome: 'succeeded',
+          detail: 'automation "Legacy name": run succeeded',
+          idempotencyKey: 'automation-run:legacy-success', occurredAt: 1000,
+          workspace: '/work/legacy', agentPreset: 'legacy', automationId: 'legacy-auto',
+          runId: 'legacy-success',
+        },
+      }),
+      expect.objectContaining({ id: 'legacy-failed', evidenceStatus: 'pending' }),
+      expect.objectContaining({ id: 'legacy-timeout', evidenceStatus: 'pending' }),
+      expect.objectContaining({ id: 'legacy-cancel', evidenceStatus: 'suppressed' }),
+      expect.objectContaining({ id: 'legacy-unknown', evidenceStatus: 'suppressed' }),
+      expect.objectContaining({ id: 'legacy-oversized', evidenceStatus: 'suppressed' }),
+      expect.objectContaining({ id: 'legacy-malformed', evidenceStatus: 'suppressed' }),
+    ]))
+    expect(runs.filter(run => run.evidenceStatus === 'suppressed').every(run => run.evidence === undefined)).toBe(true)
+    expect(migrated.listPendingEvidence(10)).toHaveLength(3)
+    migrated.close()
   })
 
   test('atomically records pending delivery only for successful delivery-bound runs', async () => {

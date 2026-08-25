@@ -5,6 +5,7 @@
         - assistantPolicy
       config:
         databasePath: !!js dshHomePath('personal-memory/memory.sqlite')
+        approvalMode: delivery-required
         maxContentBytes: 4096
         maxRecordsPerIdentity: 1000
         searchLimit: 20
@@ -13,3 +14,5 @@
         snapshotMaxTokens: 2048
         defaultProposalTtlMs: 900000
         maxImportRecords: 100
+        reconcileIntervalMs: 15000
+        reconcileLimit: 50

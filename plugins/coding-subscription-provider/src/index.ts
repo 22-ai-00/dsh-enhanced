@@ -1,10 +1,17 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { CodingSubscriptionAdapter, enabledRoutes, redactDiagnostic } from './adapter.js'
+import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import {
+  CodingSubscriptionAdapter,
+  enabledRoutes,
+  redactDiagnostic,
+  type AdapterDependencies,
+} from './adapter.js'
 import { Config, normalizeConfig, type CodingSubscriptionProviderConfig } from './config.js'
+import type { LiveSessionLookup } from './session-cwd.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-coding-subscription-provider'
-export const inject = ['llm']
+export const inject = ['llm', 'sessions']
 
 export { CodingSubscriptionAdapter, Config, version }
 export type { CodingSubscriptionProviderConfig }
@@ -18,6 +25,12 @@ export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): v
   }
 
   const adapter = new CodingSubscriptionAdapter(config, {
+    // A local CLI must only run for a live, loop-owned session.  Do not derive
+    // this from model-visible request data or the configured provider cwd.
+    liveSessions: ctx.get('sessions') as LiveSessionLookup,
+    // Attachments are optional and may load/unload after this plugin. Resolve
+    // the service for each operation instead of retaining a stale instance.
+    getAttachments: () => ctx.get('attachments') as AdapterDependencies['attachments'],
     onDiagnostic(route, diagnostic) {
       if (config.logDiagnostics) {
         ctx.logger.warn(`${route} CLI diagnostic: ${redactDiagnostic(diagnostic)}`)
@@ -36,7 +49,25 @@ export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): v
       else ctx.logger.info(`${context.route} settled ${context.outcome} (${detail})`)
     },
   })
-  ctx.llm.registerAdapter(routes, adapter)
-  ctx.effect(() => () => adapter.shutdown(), 'dsh-enhanced-coding-subscription-provider.processes')
+  const capabilityDisposers: Array<() => void> = []
+  try {
+    for (const provider of routes) {
+      capabilityDisposers.push(registerLlmRouteCapability(ctx.llm, {
+        provider,
+        toolCalls: provider === 'codex-subscription' && config.codex.transport === 'direct-responses'
+          ? 'native'
+          : 'none',
+      }))
+    }
+    ctx.llm.registerAdapter(routes, adapter)
+  } catch (error) {
+    for (const dispose of capabilityDisposers.reverse()) dispose()
+    adapter.shutdown()
+    throw error
+  }
+  ctx.effect(() => () => {
+    for (const dispose of [...capabilityDisposers].reverse()) dispose()
+    adapter.shutdown()
+  }, 'dsh-enhanced-coding-subscription-provider.processes')
   ctx.logger.info(`Coding subscription providers registered: ${routes.join(', ')}`)
 }

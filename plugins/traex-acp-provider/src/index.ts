@@ -1,15 +1,18 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { redactDiagnostic, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter } from './adapter.js'
+import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { probeTraexReadiness, redactDiagnostic, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter } from './adapter.js'
 import { Config, normalizeConfig, type TraexAcpProviderConfig } from './config.js'
+import type { LiveSessionLookup } from './session-cwd.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-traex-acp-provider'
-export const inject = ['llm']
+export const inject = ['llm', 'sessions']
 
-export { Config, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter, version }
+export { Config, probeTraexReadiness, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter, version }
 export { CatalogObservationCache, catalogCacheKey } from './catalog-cache.js'
 export { ACP_USAGE_DSH_MAPPING_GATE } from './acp-client.js'
 export type { CatalogCacheKeyParts, CachedCatalog } from './catalog-cache.js'
+export type { TraexReadinessProbeOptions } from './adapter.js'
 export type { TraexAcpProviderConfig }
 
 export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
@@ -19,6 +22,9 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
     return
   }
   const adapter = new TraexAcpAdapter(config, {
+    // A local ACP subprocess must be bound to a live loop session, never a
+    // prompt-selected or static workspace path.
+    liveSessions: ctx.get('sessions') as LiveSessionLookup,
     onDiagnostic(diagnostic) {
       if (config.logDiagnostics) {
         ctx.logger.warn(`${TRAEX_PROVIDER_ROUTE} diagnostic: ${redactDiagnostic(diagnostic)}`)
@@ -45,7 +51,20 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
       ctx.logger.debug(`${TRAEX_PROVIDER_ROUTE} observed ${observation.modelValues.length} model(s)`)
     },
   })
-  ctx.llm.registerAdapter([TRAEX_PROVIDER_ROUTE], adapter)
-  ctx.effect(() => () => adapter.shutdown(), 'dsh-enhanced-traex-acp-provider.processes')
+  const unregisterCapability = registerLlmRouteCapability(ctx.llm, {
+    provider: TRAEX_PROVIDER_ROUTE,
+    toolCalls: 'bridge',
+  })
+  try {
+    ctx.llm.registerAdapter([TRAEX_PROVIDER_ROUTE], adapter)
+  } catch (error) {
+    unregisterCapability()
+    adapter.shutdown()
+    throw error
+  }
+  ctx.effect(() => () => {
+    unregisterCapability()
+    adapter.shutdown()
+  }, 'dsh-enhanced-traex-acp-provider.processes')
   ctx.logger.info(`TraeX ACP provider registered: ${TRAEX_PROVIDER_ROUTE}`)
 }

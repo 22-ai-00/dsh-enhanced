@@ -8,11 +8,17 @@ import {
   PolicyLedger,
   PolicyLedgerError,
   type ApprovalDecisionInput,
+  type ApprovalDispatchResult,
+  type ApprovalDispatchSnapshot,
   type ApprovalProposalInput,
+  type ApprovalProposalLookupInput,
+  type ApprovalProposalRecoveryInput,
+  type ApprovalProposalRecoveryResult,
   type ApprovalProposalResult,
   type AuditEvent,
   type BudgetReservationInput,
   type BudgetReservationResult,
+  type ApprovalProposalSnapshot,
   type EmergencyStopState,
 } from './ledger.js'
 import type {
@@ -37,6 +43,7 @@ export interface Config {
   databasePath: string
   rules?: PolicyRule[]
   budgets?: PolicyBudgetConfig[]
+  proposalMaintenanceIntervalMs?: number
 }
 
 export interface PolicyBudgetReservationInput {
@@ -59,6 +66,7 @@ const subjectKindSchema = Schema.union(['agent', 'background', 'external', '*'] 
 const resourceKindSchema = Schema.union([
   'automation',
   'credential',
+  'evolution',
   'filesystem',
   'memory',
   'message',
@@ -94,6 +102,7 @@ const ruleSchema = Schema.object({
 
 const configSchema = Schema.object({
   databasePath: Schema.string().required(),
+  proposalMaintenanceIntervalMs: Schema.number().step(1).min(0).max(2_147_483_647).default(15_000),
   rules: Schema.array(ruleSchema).default([]),
   budgets: Schema.array(Schema.object({
     id: Schema.string().min(1).required(),
@@ -156,6 +165,20 @@ export class AssistantPolicyService extends Service {
       this.active = false
       this.ledger.close()
     }, 'assistant-policy.database')
+    if ((config.proposalMaintenanceIntervalMs ?? 15_000) > 0) {
+      ctx.effect(() => {
+        const timer = setInterval(() => {
+          if (!this.active) return
+          try {
+            this.ledger.expireProposals(100)
+          } catch {
+            // Maintenance is conservative and retried on the next bounded tick.
+          }
+        }, config.proposalMaintenanceIntervalMs ?? 15_000)
+        timer.unref()
+        return () => clearInterval(timer)
+      }, 'assistant-policy.proposal-maintenance')
+    }
     ctx.inject(['tools'], (toolsCtx) => {
       toolsCtx.tools.guard(createPolicyToolGuard(this))
     })
@@ -185,6 +208,12 @@ export class AssistantPolicyService extends Service {
       details: options.auditDetails ?? {},
     })
     return decision
+  }
+
+  /** Read-only declaration lookup for consumers that must prove metric compatibility before reserving. */
+  getBudgetConfig(budgetId: string): Readonly<PolicyBudgetConfig> | undefined {
+    this.assertActive()
+    return this.budgets.get(budgetId)
   }
 
   reserve(input: PolicyBudgetReservationInput): BudgetReservationResult {
@@ -260,6 +289,73 @@ export class AssistantPolicyService extends Service {
   expireProposals(limit = 100): number {
     this.assertActive()
     return this.ledger.expireProposals(limit)
+  }
+
+  /**
+   * Read one proposal's current status without deciding it. Policy deliberately
+   * never calls back into a domain, so a domain reconciler polls this seam and
+   * then commits the decided outcome through its own approval gate.
+   */
+  getProposal(proposalId: string): ApprovalProposalSnapshot | undefined {
+    this.assertActive()
+    return this.ledger.getProposal(proposalId)
+  }
+
+  /**
+   * Read-only recovery for the cross-database window where Policy committed a
+   * proposal but the owning domain did not persist its proposal ID.
+   */
+  getProposalByIdempotencyKey(input: ApprovalProposalLookupInput): ApprovalProposalSnapshot | undefined {
+    this.assertActive()
+    return this.ledger.getProposalByIdempotencyKey(input)
+  }
+
+  /**
+   * Atomic cross-database recovery/creation under an absolute deadline. Once the
+   * deadline passes without a proposal, Policy tombstones the idempotency key so
+   * another process cannot create an orphan approval dispatch later.
+   */
+  recoverOrCreateProposal(input: ApprovalProposalRecoveryInput): ApprovalProposalRecoveryResult {
+    this.assertActive()
+    const result = this.ledger.recoverOrCreateProposal(input)
+    this.ledger.appendAudit({
+      actor: input.requester,
+      action: 'approval.recover-or-create',
+      resource: { kind: 'approval-idempotency', id: input.idempotencyKey },
+      outcome: result.kind === 'proposal' ? result.proposal.status : 'abandoned',
+      reasonCode: result.kind === 'proposal'
+        ? (result.proposal.replayed ? 'idempotent-recovery' : 'proposal-created')
+        : (result.replayed ? 'abandonment-replay' : 'deadline-elapsed'),
+      details: result.kind === 'proposal'
+        ? { proposalId: result.proposal.proposalId, expiresAt: result.proposal.expiresAt }
+        : { notAfter: result.notAfter, abandonedAt: result.abandonedAt },
+    })
+    return result
+  }
+
+  listPendingApprovalDispatches(
+    limit = 100,
+    after?: Readonly<import('./ledger.js').ApprovalDispatchCursor>,
+  ): ApprovalDispatchSnapshot[] {
+    this.assertActive()
+    return this.ledger.listPendingApprovalDispatches(limit, after)
+  }
+
+  markApprovalDispatchEnqueued(
+    proposalId: string,
+    expectedVersion: number,
+  ): ApprovalDispatchResult {
+    this.assertActive()
+    const result = this.ledger.markApprovalDispatchEnqueued(proposalId, expectedVersion)
+    this.ledger.appendAudit({
+      actor: 'system:approval-dispatch',
+      action: 'approval.dispatch.enqueue',
+      resource: { kind: 'approval-proposal', id: proposalId },
+      outcome: result.state,
+      reasonCode: result.replayed ? 'idempotent-replay' : 'enqueued',
+      details: { payloadHash: result.payloadHash, dispatchVersion: result.version },
+    })
+    return result
   }
 
   setEmergencyStop(input: { enabled: boolean; actor: string; reason: string }): EmergencyStopState {

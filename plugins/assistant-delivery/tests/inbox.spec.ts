@@ -30,6 +30,16 @@ function envelope(eventId: string, value: Awaited<ReturnType<typeof fixture>>, t
     conversation: value.conversation, kind: 'text', text, metadata: { source: 'websocket' } }
 }
 
+function addBinding(value: Awaited<ReturnType<typeof fixture>>, index: number) {
+  const principal = { ...value.principal, user: `ou_batch_${index}` }
+  const issued = value.store.issuePairing(principal, { ttlMs: 5_000, maxAttempts: 3 })
+  value.store.confirmPairing({ challengeId: issued.challenge.id, principal, code: issued.code })
+  const conversation = { ...value.conversation, chat: `oc_batch_${index}` }
+  const binding = value.store.createBinding({ conversation, principal, workspace: `/work/batch-${index}`,
+    agentPreset: 'primary', sessionId: `session-batch-${index}`, policyRef: 'owner-dm' })
+  return { binding, conversation, principal }
+}
+
 describe('durable inbox', () => {
   test('deduplicates exact provider events and conflicts on changed payload', async () => {
     const f = await fixture()
@@ -139,6 +149,61 @@ describe('durable inbox', () => {
     f.store.close()
   })
 
+  test('renews only the current unexpired inbox claim', async () => {
+    const f = await fixture()
+    const record = f.store.acceptInbound(envelope('evt-renew', f)).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+
+    f.setNow(1_050)
+    expect(f.store.renewInboxClaim({
+      inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken, leaseMs: 100,
+    })).toBe(true)
+    expect(f.store.getInbox(record.id)).toMatchObject({ status: 'claimed', leaseUntil: 1_150 })
+    expect(f.store.renewInboxClaim({
+      inboxId: record.id, ownerId: 'worker-b', fencingToken: claim.fencingToken, leaseMs: 100,
+    })).toBe(false)
+    expect(f.store.renewInboxClaim({
+      inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken + 1, leaseMs: 100,
+    })).toBe(false)
+
+    f.setNow(1_150)
+    expect(f.store.renewInboxClaim({
+      inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken, leaseMs: 100,
+    })).toBe(false)
+    expect(() => f.store.markInboxDispatching({
+      inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken,
+    })).toThrowError(expect.objectContaining({ code: 'stale-fence' }))
+    expect(() => f.store.finishInbox({
+      inboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken, outcome: 'processed',
+    })).toThrowError(expect.objectContaining({ code: 'stale-fence' }))
+    expect(f.store.recoverInbox({ maxAttempts: 3 })).toEqual([
+      expect.objectContaining({ id: record.id, status: 'retry_wait', failureCode: 'lease-expired' }),
+    ])
+    f.store.close()
+  })
+
+  test('claims one explicit operator retry after automatic attempts are exhausted', async () => {
+    const f = await fixture()
+    const record = f.store.acceptInbound(envelope('evt-operator-retry', f)).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const first = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
+    f.store.finishInbox({ inboxId: record.id, ownerId: 'worker-a', fencingToken: first.fencingToken,
+      outcome: 'retry_wait', failureCode: 'temporary', retryAt: 1_100 })
+    f.setNow(1_100)
+    expect(f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 1 })).toEqual([])
+    expect(f.store.getInbox(record.id)).toMatchObject({ status: 'dead_letter', attemptCount: 1,
+      failureCode: 'attempts-exhausted' })
+
+    expect(f.store.resolveInbox({ inboxId: record.id, expectedAttemptCount: 1, resolution: 'retry' }))
+      .toMatchObject({ status: 'queued', attemptCount: 1 })
+    const retried = f.store.claimInbox({ ownerId: 'worker-c', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
+    expect(retried).toMatchObject({ fencingToken: 2, record: { id: record.id, status: 'claimed', attemptCount: 2 } })
+    expect(() => f.store.finishInbox({ inboxId: record.id, ownerId: 'worker-a', fencingToken: first.fencingToken,
+      outcome: 'processed' })).toThrowError(expect.objectContaining({ code: 'stale-fence' }))
+    f.store.close()
+  })
+
   test('never replays a claim whose external Agent dispatch may already have started', async () => {
     const f = await fixture()
     const record = f.store.acceptInbound(envelope('evt-ambiguous', f)).record
@@ -150,6 +215,54 @@ describe('durable inbox', () => {
       expect.objectContaining({ id: record.id, status: 'dead_letter', failureCode: 'dispatch-ambiguous' }),
     ])
     expect(f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 3 })).toEqual([])
+    f.store.close()
+  })
+
+  test('bounds expired inbox recovery to the requested database batch', async () => {
+    const f = await fixture()
+    const records = Array.from({ length: 3 }, (_, index) => {
+      const route = addBinding(f, index)
+      const record = f.store.acceptInbound({ ...envelope(`evt-expired-${index}`, f),
+        principal: route.principal, conversation: route.conversation }).record
+      f.store.queueInbox(record.id, route.binding.id)
+      return record
+    })
+    expect(f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 3, maxAttempts: 3 })).toHaveLength(3)
+    f.setNow(1_100)
+
+    expect(f.store.recoverInbox({ maxAttempts: 3, limit: 2 })).toHaveLength(2)
+    expect(records.map(record => f.store.getInbox(record.id)?.status)).toEqual([
+      'retry_wait', 'retry_wait', 'claimed',
+    ])
+    expect(f.store.recoverInbox({ maxAttempts: 3, limit: 2 })).toHaveLength(1)
+    f.store.close()
+  })
+
+  test('bounds exhausted inbox cleanup performed by a claim call', async () => {
+    const f = await fixture()
+    const records = Array.from({ length: 3 }, (_, index) => {
+      const route = addBinding(f, index)
+      const record = f.store.acceptInbound({ ...envelope(`evt-exhausted-${index}`, f),
+        principal: route.principal, conversation: route.conversation }).record
+      f.store.queueInbox(record.id, route.binding.id)
+      return record
+    })
+    const claims = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 3, maxAttempts: 1 })
+    for (const claim of claims) {
+      f.store.finishInbox({ inboxId: claim.record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken,
+        outcome: 'retry_wait', failureCode: 'temporary', retryAt: 1_100 })
+    }
+    f.setNow(1_100)
+
+    expect(f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 1,
+      maintenanceLimit: 2 })).toEqual([])
+    expect(records.map(record => f.store.getInbox(record.id)?.status)).toEqual([
+      'dead_letter', 'dead_letter', 'retry_wait',
+    ])
+    expect(f.store.claimInbox({ ownerId: 'worker-c', leaseMs: 100, limit: 1, maxAttempts: 1,
+      maintenanceLimit: 2 })).toEqual([])
+    expect(f.store.getInbox(records[2]!.id)).toMatchObject({ status: 'dead_letter',
+      failureCode: 'attempts-exhausted' })
     f.store.close()
   })
 

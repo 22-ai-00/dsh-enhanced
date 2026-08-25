@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { isAbsolute, join, win32 } from 'node:path'
+import { externalPrincipalId } from '@dsh-enhanced/assistant-delivery'
 import {
   isMap,
   isScalar,
@@ -30,6 +31,12 @@ const setupKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const providerKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
 const presetIdPattern = /^[a-z0-9][a-z0-9-]*$/u
 const managedAgentTools = ['bash', 'pwsh', 'read', 'glob', 'grep'] as const
+const managedApprovalSources = [
+  'dsh-enhanced-personal-memory',
+  'dsh-enhanced-personal-wiki',
+  'dsh-enhanced-assistant-automations',
+  'dsh-enhanced-assistant-evolution',
+] as const
 
 interface AgentIdentity {
   preset: string
@@ -224,6 +231,28 @@ function removeExternalToolRules(rules: YAMLSeq, account: string): void {
   }
 }
 
+function upsertApprovalRules(
+  document: Document,
+  rules: YAMLSeq,
+  input: { account: string; workspace: string; principal: string },
+): void {
+  for (const sourceId of managedApprovalSources) {
+    upsertById(document, rules, {
+      id: `lark-owner-approval-${sourceId}-${input.account}`,
+      effect: 'allow',
+      subject: {
+        kind: 'background',
+        id: sourceId,
+        workspace: input.workspace,
+        principal: input.principal,
+      },
+      actions: ['approval.send'],
+      resource: { kind: 'message', id: '*' },
+      context: { initiators: ['background'] },
+    })
+  }
+}
+
 function setDefaults(map: YAMLMap, defaults: Readonly<Record<string, unknown>>): void {
   for (const [key, value] of Object.entries(defaults)) {
     if (!map.has(key)) map.set(key, value)
@@ -260,7 +289,7 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   const personalConfig = asMap(personalAssistant.get('config', true) as Node, 'personal-assistant config')
   const policy = asMap(personalConfig.get('assistantPolicy', true) as Node, 'assistantPolicy config')
   const rules = asSequence(policy.get('rules', true) as Node, 'assistantPolicy rules')
-  const principalId = `lark/${account}/${tenant}/${ownerUserId}`
+  const principalId = externalPrincipalId({ channel: 'lark', account, tenant, user: ownerUserId })
   const agent = configuredAgentIdentity(rows, input.dshHome)
   const legacyAgents = managedReplyIdentities(rules, account)
     .filter(identity => identity.preset !== agent.preset || identity.workspace !== agent.workspace)
@@ -276,6 +305,7 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
     resource: { kind: 'credential', id: credentialHandle },
     context: { initiators: ['background'] },
   })
+  upsertApprovalRules(document, rules, { account, workspace: agent.workspace, principal: principalId })
   upsertById(document, rules, {
     id: `lark-owner-ingress-${account}`,
     effect: 'allow',

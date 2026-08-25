@@ -7,9 +7,12 @@
       config:
         databasePath: !!js dshHomePath('event-triggers/state.sqlite')
         allowedFileRoots: []
+        allowedHttpOrigins: []
         allowedHttpHosts: []
         triggers: []
         pollerEnabled: false
         pollIntervalMs: 5000
+        pollConcurrency: 8
         requestTimeoutMs: 10000
         maxBodyBytes: 65536
+        ipv6Mode: deny

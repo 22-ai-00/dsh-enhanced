@@ -2,6 +2,7 @@ import { isAbsolute, relative, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
 
 export type FireWhen = 'changed' | 'truthy'
+export type Ipv6Mode = 'deny' | 'native-only'
 
 interface TriggerBase {
   id: string
@@ -39,12 +40,20 @@ export type EventTriggerConfig = FileTriggerConfig | HttpJsonTriggerConfig | Web
 export interface Config {
   databasePath: string
   allowedFileRoots?: string[]
+  allowedHttpOrigins?: string[]
+  /** @deprecated Use allowedHttpOrigins. Legacy hosts authorize HTTPS port 443 only. */
   allowedHttpHosts?: string[]
   triggers?: EventTriggerConfig[]
   pollerEnabled?: boolean
   pollIntervalMs?: number
+  pollConcurrency?: number
   requestTimeoutMs?: number
   maxBodyBytes?: number
+  /**
+   * IPv6 is denied unless the operator asserts that the egress network is native-only
+   * and cannot translate network-specific prefixes to IPv4 destinations.
+   */
+  ipv6Mode?: Ipv6Mode
 }
 
 export type NormalizedTrigger =
@@ -56,11 +65,14 @@ export interface NormalizedConfig {
   databasePath: string
   triggers: readonly NormalizedTrigger[]
   allowedFileRoots: readonly string[]
+  allowedHttpOrigins: readonly string[]
   allowedHttpHosts: readonly string[]
   pollerEnabled: boolean
   pollIntervalMs: number
+  pollConcurrency: number
   requestTimeoutMs: number
   maxBodyBytes: number
+  ipv6Mode: Ipv6Mode
 }
 
 const base = {
@@ -100,12 +112,15 @@ const triggerSchema = Schema.union([
 export const ConfigSchema = Schema.object({
   databasePath: Schema.string().required(),
   allowedFileRoots: Schema.array(Schema.string()).default([]),
+  allowedHttpOrigins: Schema.array(Schema.string()).default([]),
   allowedHttpHosts: Schema.array(Schema.string()).default([]),
   triggers: Schema.array(triggerSchema).default([]),
   pollerEnabled: Schema.boolean().default(false),
   pollIntervalMs: Schema.number().step(1).min(1_000).max(3_600_000).default(5_000),
+  pollConcurrency: Schema.number().step(1).min(1).max(32).default(8),
   requestTimeoutMs: Schema.number().step(1).min(100).max(300_000).default(10_000),
   maxBodyBytes: Schema.number().step(1).min(1).max(16_777_216).default(65_536),
+  ipv6Mode: Schema.union(['deny', 'native-only'] as const).default('deny'),
 }) as Schema<Config>
 
 function id(value: string, field: string): string {
@@ -122,6 +137,16 @@ function contained(path: string, roots: readonly string[]): boolean {
     const child = relative(root, target)
     return child === '' || (!child.startsWith('..') && !isAbsolute(child))
   })
+}
+
+function httpOrigin(value: string): string {
+  let url: URL
+  try { url = new URL(value.normalize('NFC').trim()) } catch { throw new Error('event-triggers: invalid HTTP origin') }
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== ''
+    || url.pathname !== '/' || url.search !== '' || url.hash !== '') {
+    throw new Error('event-triggers: HTTP origins must be exact HTTPS origins without credentials, path, query, or fragment')
+  }
+  return url.origin
 }
 
 export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
@@ -143,6 +168,10 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
   if (hosts.some(host => !/^[a-z0-9.-]+$/u.test(host))) {
     throw new Error('event-triggers: HTTP allowlist contains an invalid hostname')
   }
+  const origins = [...new Set([
+    ...hosts.map(host => `https://${host}`),
+    ...parsed.allowedHttpOrigins.map(httpOrigin),
+  ])]
   const triggers = parsed.triggers.map(raw => {
     const trigger = { ...raw, id: id(raw.id, 'trigger id'), automationId: id(raw.automationId, 'automationId') }
     if (trigger.kind === 'file') {
@@ -155,8 +184,8 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
       let url: URL
       try { url = new URL(trigger.url) } catch { throw new Error('event-triggers: invalid HTTP URL') }
       if (url.protocol !== 'https:') throw new Error('event-triggers: HTTP sensors require HTTPS')
-      if (url.username !== '' || url.password !== '' || !hosts.includes(url.hostname.toLowerCase())) {
-        throw new Error('event-triggers: HTTP sensor host is not allowlisted')
+      if (url.username !== '' || url.password !== '' || !origins.includes(url.origin)) {
+        throw new Error('event-triggers: HTTP sensor host/origin is not allowlisted')
       }
       if (trigger.pointer !== '' && !trigger.pointer.startsWith('/')) {
         throw new Error('event-triggers: JSON pointer must be empty or start with /')
@@ -173,10 +202,13 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
     databasePath: parsed.databasePath,
     pollerEnabled: parsed.pollerEnabled,
     pollIntervalMs: parsed.pollIntervalMs,
+    pollConcurrency: parsed.pollConcurrency,
     requestTimeoutMs: parsed.requestTimeoutMs,
     maxBodyBytes: parsed.maxBodyBytes,
+    ipv6Mode: parsed.ipv6Mode,
     allowedFileRoots: Object.freeze(roots),
     allowedHttpHosts: Object.freeze(hosts),
+    allowedHttpOrigins: Object.freeze(origins),
     triggers: Object.freeze(triggers),
   })
 }

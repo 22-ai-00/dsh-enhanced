@@ -52,6 +52,16 @@ interface DeliveryStoreOptions {
   maxTextBytes?: number
 }
 
+export interface ApprovalDispatchCursor {
+  createdAt: number
+  proposalId: string
+}
+
+export interface ApprovalDispatchCursorState {
+  version: number
+  after?: ApprovalDispatchCursor
+}
+
 interface PairingRow {
   id: string
   principal_json: string
@@ -285,6 +295,14 @@ function validateBindingText(value: string, field: string, max: number): string 
   return normalized
 }
 
+function boundedMaintenanceLimit(value: number | undefined, fallback: number, label: string): number {
+  const limit = value ?? fallback
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+    throw new DeliveryStoreError('conflict', `invalid ${label} maintenance limit`)
+  }
+  return limit
+}
+
 function inboxFromRow(row: InboxRow): InboxRecord {
   return {
     id: row.id,
@@ -466,7 +484,9 @@ function canonicalIntent(input: OutboundIntent, binding: ConversationBinding, ma
   if (format === 'approval') {
     const value = input.approval
     if (value === undefined || value === null || typeof value !== 'object' || Array.isArray(value)
-      || Object.keys(value).some(field => !['operationId', 'proposalId', 'expectedVersion', 'expiresAt', 'title'].includes(field))) {
+      || Object.keys(value).some(field => ![
+        'operationId', 'proposalId', 'expectedVersion', 'expiresAt', 'title', 'diffHash',
+      ].includes(field)) || Object.keys(value).length !== 6) {
       throw new DeliveryStoreError('invalid-intent', 'approval intent shape is invalid')
     }
     let operationId: string
@@ -480,11 +500,12 @@ function canonicalIntent(input: OutboundIntent, binding: ConversationBinding, ma
       throw new DeliveryStoreError('invalid-intent', 'approval intent text is invalid')
     }
     if (!Number.isSafeInteger(value.expectedVersion) || value.expectedVersion < 1
-      || !Number.isSafeInteger(value.expiresAt) || value.expiresAt < 1) {
+      || !Number.isSafeInteger(value.expiresAt) || value.expiresAt < 1
+      || typeof value.diffHash !== 'string' || !/^[a-f0-9]{64}$/u.test(value.diffHash)) {
       throw new DeliveryStoreError('invalid-intent', 'approval intent version or expiry is invalid')
     }
     approval = { operationId, proposalId, expectedVersion: value.expectedVersion,
-      expiresAt: value.expiresAt, title }
+      expiresAt: value.expiresAt, title, diffHash: value.diffHash }
   } else if (input.approval !== undefined) {
     throw new DeliveryStoreError('invalid-intent', 'approval payload requires approval format')
   }
@@ -831,6 +852,13 @@ export class DeliveryStore {
       .all(conversationHash(input)) as unknown as BindingRow[]).map(bindingFromRow)
   }
 
+  /** Read-only operator query.  Callers must apply their own exact route checks. */
+  listActiveBindings(): ConversationBinding[] {
+    this.assertOpen()
+    return (this.database.prepare(`${bindingSelect} WHERE status = 'active' ORDER BY created_at, id`)
+      .all() as unknown as BindingRow[]).map(bindingFromRow)
+  }
+
   getBindingBySession(sessionId: string): ConversationBinding | undefined {
     this.assertOpen()
     const row = this.database.prepare(`${bindingSelect} WHERE session_id = ?`).get(sessionId) as BindingRow | undefined
@@ -1117,6 +1145,63 @@ export class DeliveryStore {
     }
   }
 
+  getApprovalDispatchCursor(): ApprovalDispatchCursorState {
+    this.assertOpen()
+    const row = this.database.prepare(`
+      SELECT after_created_at, after_proposal_id, version
+      FROM approval_dispatch_cursor WHERE singleton = 1
+    `).get() as { after_created_at: number | null; after_proposal_id: string | null; version: number } | undefined
+    if (row === undefined) return { version: 0 }
+    return {
+      version: row.version,
+      ...(row.after_created_at === null || row.after_proposal_id === null
+        ? {}
+        : { after: { createdAt: row.after_created_at, proposalId: row.after_proposal_id } }),
+    }
+  }
+
+  advanceApprovalDispatchCursor(input: {
+    expectedVersion: number
+    after?: Readonly<ApprovalDispatchCursor>
+  }): ApprovalDispatchCursorState {
+    this.assertOpen()
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 0) {
+      throw new DeliveryStoreError('stale-fence', 'approval dispatch cursor fence is invalid')
+    }
+    let after: ApprovalDispatchCursor | undefined
+    if (input.after !== undefined) {
+      if (!Number.isSafeInteger(input.after.createdAt) || input.after.createdAt < 0) {
+        throw new DeliveryStoreError('stale-fence', 'approval dispatch cursor time is invalid')
+      }
+      after = { createdAt: input.after.createdAt,
+        proposalId: validateBindingText(input.after.proposalId, 'proposalId', 256) }
+    }
+    return this.transaction(() => {
+      const current = this.getApprovalDispatchCursor()
+      if (current.version !== input.expectedVersion) {
+        throw new DeliveryStoreError('stale-fence', 'approval dispatch cursor changed')
+      }
+      const now = this.now()
+      const values = [after?.createdAt ?? null, after?.proposalId ?? null]
+      const changed = current.version === 0
+        ? this.database.prepare(`
+          INSERT INTO approval_dispatch_cursor (
+            singleton, after_created_at, after_proposal_id, version, updated_at
+          ) VALUES (1, ?, ?, 1, ?)
+          ON CONFLICT(singleton) DO NOTHING
+        `).run(...values, now)
+        : this.database.prepare(`
+          UPDATE approval_dispatch_cursor
+          SET after_created_at = ?, after_proposal_id = ?, version = version + 1, updated_at = ?
+          WHERE singleton = 1 AND version = ?
+        `).run(...values, now, input.expectedVersion)
+      if (changed.changes !== 1) {
+        throw new DeliveryStoreError('stale-fence', 'approval dispatch cursor changed')
+      }
+      return this.getApprovalDispatchCursor()
+    })
+  }
+
   deadLetterInbox(inboxId: string, failureCode: string): InboxRecord {
     this.assertOpen()
     const failure = validateBindingText(failureCode, 'failureCode', 256)
@@ -1139,6 +1224,7 @@ export class DeliveryStore {
     leaseMs: number
     limit: number
     maxAttempts: number
+    maintenanceLimit?: number
   }): { record: InboxRecord; fencingToken: number }[] {
     this.assertOpen()
     const ownerId = validateBindingText(input.ownerId, 'ownerId', 256)
@@ -1149,19 +1235,24 @@ export class DeliveryStore {
     if (!Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1 || input.maxAttempts > 100) {
       throw new DeliveryStoreError('conflict', 'invalid inbox max attempts')
     }
+    const maintenanceLimit = boundedMaintenanceLimit(input.maintenanceLimit, input.limit, 'inbox')
     const now = this.now()
     const claims: { record: InboxRecord; fencingToken: number }[] = []
     this.transaction(() => {
       this.database.prepare(`
         UPDATE inbox_messages SET status = 'dead_letter', failure_code = 'attempts-exhausted',
           next_attempt_at = NULL, updated_at = ?
-        WHERE status = 'retry_wait' AND next_attempt_at <= ? AND attempt_count >= ?
-      `).run(now, now, input.maxAttempts)
+        WHERE rowid IN (
+          SELECT rowid FROM inbox_messages
+          WHERE status = 'retry_wait' AND next_attempt_at <= ? AND attempt_count >= ?
+          ORDER BY rowid LIMIT ?
+        )
+      `).run(now, now, input.maxAttempts, maintenanceLimit)
       const candidates = this.database.prepare(`
         SELECT candidate.id FROM inbox_messages AS candidate
         WHERE candidate.status IN ('queued', 'retry_wait')
           AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at <= ?)
-          AND candidate.attempt_count < ?
+          AND (candidate.status = 'queued' OR candidate.attempt_count < ?)
           AND candidate.binding_id IS NOT NULL
           AND NOT EXISTS (
             SELECT 1 FROM inbox_messages AS earlier
@@ -1211,7 +1302,7 @@ export class DeliveryStore {
       const changed = this.database.prepare(`
         UPDATE inbox_messages SET status = ?, next_attempt_at = ?, claimed_by = NULL, fencing_token = NULL,
           lease_until = NULL, failure_code = ?, updated_at = ?
-        WHERE id = ? AND status = 'claimed' AND claimed_by = ? AND fencing_token = ?
+        WHERE id = ? AND status = 'claimed' AND claimed_by = ? AND fencing_token = ? AND lease_until > ?
       `).run(
         input.outcome,
         input.outcome === 'retry_wait' ? input.retryAt! : null,
@@ -1220,6 +1311,7 @@ export class DeliveryStore {
         input.inboxId,
         input.ownerId,
         input.fencingToken,
+        now,
       )
       if (changed.changes !== 1) throw new DeliveryStoreError('stale-fence', 'inbox completion has a stale fence')
       this.database.prepare(`
@@ -1235,30 +1327,51 @@ export class DeliveryStore {
     const now = this.now()
     const changed = this.database.prepare(`
       UPDATE inbox_messages SET failure_code = 'dispatch-started', updated_at = ?
-      WHERE id = ? AND status = 'claimed' AND claimed_by = ? AND fencing_token = ?
-    `).run(now, input.inboxId, input.ownerId, input.fencingToken)
+      WHERE id = ? AND status = 'claimed' AND claimed_by = ? AND fencing_token = ? AND lease_until > ?
+    `).run(now, input.inboxId, input.ownerId, input.fencingToken, now)
     if (changed.changes !== 1) throw new DeliveryStoreError('stale-fence', 'inbox dispatch marker has a stale fence')
     return this.getInbox(input.inboxId)!
   }
 
-  recoverInbox(input: { maxAttempts: number }): InboxRecord[] {
+  renewInboxClaim(input: {
+    inboxId: string
+    ownerId: string
+    fencingToken: number
+    leaseMs: number
+  }): boolean {
     this.assertOpen()
+    const ownerId = validateBindingText(input.ownerId, 'ownerId', 256)
+    if (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1
+      || !Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1) {
+      throw new DeliveryStoreError('stale-fence', 'inbox lease renewal is invalid')
+    }
+    const now = this.now()
+    return this.database.prepare(`
+      UPDATE inbox_messages SET lease_until = ?, updated_at = ?
+      WHERE id = ? AND status = 'claimed' AND claimed_by = ? AND fencing_token = ? AND lease_until > ?
+    `).run(now + input.leaseMs, now, input.inboxId, ownerId, input.fencingToken, now).changes === 1
+  }
+
+  recoverInbox(input: { maxAttempts: number; limit?: number }): InboxRecord[] {
+    this.assertOpen()
+    const limit = boundedMaintenanceLimit(input.limit, 100, 'inbox recovery')
     const now = this.now()
     const recovered: string[] = []
     this.transaction(() => {
       const rows = this.database.prepare(`
         SELECT id, attempt_count, failure_code FROM inbox_messages
-        WHERE status = 'claimed' AND lease_until <= ? ORDER BY rowid
-      `).all(now) as unknown as { id: string; attempt_count: number; failure_code: string | null }[]
+        WHERE status = 'claimed' AND lease_until <= ? ORDER BY rowid LIMIT ?
+      `).all(now, limit) as unknown as { id: string; attempt_count: number; failure_code: string | null }[]
       for (const row of rows) {
         const ambiguous = row.failure_code === 'dispatch-started'
         const exhausted = row.attempt_count >= input.maxAttempts
-        this.database.prepare(`
+        const changed = this.database.prepare(`
           UPDATE inbox_messages SET status = ?, next_attempt_at = ?, claimed_by = NULL,
             fencing_token = NULL, lease_until = NULL, failure_code = ?, updated_at = ?
           WHERE id = ? AND status = 'claimed' AND lease_until <= ?
         `).run(ambiguous || exhausted ? 'dead_letter' : 'retry_wait', ambiguous || exhausted ? null : now,
           ambiguous ? 'dispatch-ambiguous' : 'lease-expired', now, row.id, now)
+        if (changed.changes !== 1) continue
         this.database.prepare(`
           UPDATE inbox_attempts SET status = 'lost', failure_code = 'lease-expired', finished_at = ?
           WHERE inbox_id = ? AND status = 'claimed'
@@ -1319,6 +1432,17 @@ export class DeliveryStore {
     this.assertOpen()
     const row = this.database.prepare(`${outboxSelect} WHERE id = ?`).get(id) as OutboxRow | undefined
     return row === undefined ? undefined : outboxFromRow(row)
+  }
+
+  getApprovalIntent(operationId: string, bindingId: string): NonNullable<OutboundIntent['approval']> | undefined {
+    this.assertOpen()
+    const operation = validateBindingText(operationId, 'operationId', 256)
+    const binding = validateBindingText(bindingId, 'bindingId', 256)
+    const row = this.database.prepare(`${outboxSelect}
+      WHERE json_extract(intent_json, '$.bindingId') = ?
+        AND json_extract(intent_json, '$.approval.operationId') = ?
+      ORDER BY created_at DESC, id DESC LIMIT 1`).get(binding, operation) as OutboxRow | undefined
+    return row === undefined ? undefined : outboxFromRow(row).intent.approval
   }
 
   getModelPicker(operationId: string, bindingId: string): ModelPickerIntent | undefined {
@@ -1419,6 +1543,11 @@ export class DeliveryStore {
     leaseMs: number
     limit: number
     maxAttempts: number
+    /** Undefined preserves the legacy store-level behavior; an empty list parks every unknown lane. */
+    unknownReconcileRoutes?: readonly Readonly<{ channel: string; account: string }>[]
+    /** Locally active work that must not be reclaimed even if its durable lease was externally lost. */
+    excludeIds?: readonly string[]
+    maintenanceLimit?: number
   }): { record: OutboxRecord; fencingToken: number; mode: 'reconcile' | 'send' }[] {
     this.assertOpen()
     const ownerId = validateBindingText(input.ownerId, 'ownerId', 256)
@@ -1429,20 +1558,92 @@ export class DeliveryStore {
     if (!Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1 || input.maxAttempts > 100) {
       throw new DeliveryStoreError('conflict', 'invalid outbox max attempts')
     }
+    if ((input.unknownReconcileRoutes?.length ?? 0) > 100 || (input.excludeIds?.length ?? 0) > 100) {
+      throw new DeliveryStoreError('conflict', 'outbox claim routes and exclusions must be bounded')
+    }
+    const maintenanceLimit = boundedMaintenanceLimit(input.maintenanceLimit, input.limit, 'outbox')
+    const routes = input.unknownReconcileRoutes?.map(route => ({
+      channel: validateBindingText(route.channel, 'channel', 128),
+      account: validateBindingText(route.account, 'account', 128),
+    }))
+    const excludeIds = input.excludeIds?.map(id => validateBindingText(id, 'outboxId', 256)) ?? []
+    const routeClause = routes === undefined
+      ? ''
+      : routes.length === 0
+        ? "AND candidate.status <> 'unknown_after_send'"
+        : `AND (candidate.status <> 'unknown_after_send' OR (${routes
+          .map(() => '(candidate.channel = ? AND candidate.account = ?)').join(' OR ')}))`
+    const excludeClause = excludeIds.length === 0
+      ? ''
+      : `AND candidate.id NOT IN (${excludeIds.map(() => '?').join(', ')})`
+    const routeParameters = routes?.flatMap(route => [route.channel, route.account]) ?? []
     const now = this.now()
     const claims: { record: OutboxRecord; fencingToken: number; mode: 'reconcile' | 'send' }[] = []
     this.transaction(() => {
       this.database.prepare(`
         UPDATE outbox_messages SET status = 'dead', failure_code = 'attempts-exhausted',
           next_attempt_at = NULL, updated_at = ?
-        WHERE status = 'retry_wait' AND next_attempt_at <= ? AND attempt_count >= ?
-      `).run(now, now, input.maxAttempts)
+        WHERE rowid IN (
+          SELECT candidate.rowid FROM outbox_messages AS candidate
+          WHERE candidate.status = 'retry_wait' AND candidate.next_attempt_at <= ?
+            AND (
+              SELECT COUNT(*) FROM outbox_attempts AS history
+              WHERE history.outbox_id = candidate.id AND history.operation = 'send'
+            ) >= ?
+          ORDER BY candidate.rowid LIMIT ?
+        )
+      `).run(now, now, input.maxAttempts, maintenanceLimit)
+      this.database.prepare(`
+        UPDATE outbox_messages SET status = 'dead', failure_code = 'reconcile-attempts-exhausted',
+          next_attempt_at = NULL, updated_at = ?
+        WHERE rowid IN (
+          SELECT candidate.rowid FROM outbox_messages AS candidate
+          WHERE candidate.status = 'unknown_after_send'
+            AND (
+              SELECT COUNT(*) FROM outbox_attempts AS history
+              WHERE history.outbox_id = candidate.id AND history.operation = 'reconcile'
+            ) >= ?
+          ORDER BY candidate.rowid LIMIT ?
+        )
+      `).run(now, input.maxAttempts, maintenanceLimit)
+      this.database.prepare(`
+        UPDATE outbox_messages SET status = 'dead', failure_code = CASE
+            WHEN status = 'unknown_after_send' THEN 'binding-revoked-unknown'
+            ELSE 'binding-revoked'
+          END,
+          next_attempt_at = NULL, updated_at = ?
+        WHERE rowid IN (
+          SELECT candidate.rowid FROM outbox_messages AS candidate
+          WHERE candidate.status IN ('pending', 'retry_wait', 'unknown_after_send')
+            AND NOT EXISTS (
+              SELECT 1 FROM conversation_bindings AS binding
+              WHERE binding.id = candidate.binding_id AND binding.status = 'active'
+            )
+          ORDER BY candidate.rowid LIMIT ?
+        )
+      `).run(now, maintenanceLimit)
       const candidates = this.database.prepare(`
         SELECT candidate.id, candidate.status FROM outbox_messages AS candidate
         WHERE candidate.status IN ('pending', 'retry_wait', 'unknown_after_send')
           AND candidate.claimed_by IS NULL
           AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at <= ?)
-          AND candidate.attempt_count < ?
+          AND (
+            candidate.status = 'pending'
+            OR (candidate.status = 'retry_wait' AND (
+              SELECT COUNT(*) FROM outbox_attempts AS history
+              WHERE history.outbox_id = candidate.id AND history.operation = 'send'
+            ) < ?)
+            OR (candidate.status = 'unknown_after_send' AND (
+              SELECT COUNT(*) FROM outbox_attempts AS history
+              WHERE history.outbox_id = candidate.id AND history.operation = 'reconcile'
+            ) < ?)
+          )
+          AND EXISTS (
+            SELECT 1 FROM conversation_bindings AS binding
+            WHERE binding.id = candidate.binding_id AND binding.status = 'active'
+          )
+          ${routeClause}
+          ${excludeClause}
           AND NOT EXISTS (
             SELECT 1 FROM outbox_messages AS earlier
             WHERE earlier.lane_hash = candidate.lane_hash
@@ -1453,8 +1654,11 @@ export class DeliveryStore {
             SELECT 1 FROM outbox_messages AS active
             WHERE active.lane_hash = candidate.lane_hash AND active.status = 'attempting'
           )
-        ORDER BY candidate.rowid LIMIT ?
-      `).all(now, input.maxAttempts, input.limit) as unknown as { id: string; status: OutboxRecord['status'] }[]
+        ORDER BY candidate.rowid
+        LIMIT ?
+      `).all(now, input.maxAttempts, input.maxAttempts, ...routeParameters, ...excludeIds, input.limit) as unknown as {
+        id: string; status: OutboxRecord['status']
+      }[]
       for (const candidate of candidates) {
         const current = this.getOutbox(candidate.id)!
         const mode = candidate.status === 'unknown_after_send' ? 'reconcile' : 'send'
@@ -1474,6 +1678,25 @@ export class DeliveryStore {
       }
     })
     return claims
+  }
+
+  renewOutboxClaim(input: {
+    outboxId: string
+    ownerId: string
+    fencingToken: number
+    leaseMs: number
+  }): boolean {
+    this.assertOpen()
+    const ownerId = validateBindingText(input.ownerId, 'ownerId', 256)
+    if (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1
+      || !Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1) {
+      throw new DeliveryStoreError('stale-fence', 'outbox lease renewal is invalid')
+    }
+    const now = this.now()
+    return this.database.prepare(`
+      UPDATE outbox_messages SET lease_until = ?, updated_at = ?
+      WHERE id = ? AND status = 'attempting' AND claimed_by = ? AND fencing_token = ? AND lease_until > ?
+    `).run(now + input.leaseMs, now, input.outboxId, ownerId, input.fencingToken, now).changes === 1
   }
 
   finishOutbox(input: {
@@ -1506,7 +1729,7 @@ export class DeliveryStore {
         UPDATE outbox_messages SET status = ?, provider_message_id = COALESCE(?, provider_message_id),
           next_attempt_at = ?, claimed_by = NULL, fencing_token = NULL, lease_until = NULL,
           failure_code = ?, updated_at = ?
-        WHERE id = ? AND status = 'attempting' AND claimed_by = ? AND fencing_token = ?
+        WHERE id = ? AND status = 'attempting' AND claimed_by = ? AND fencing_token = ? AND lease_until > ?
       `).run(
         input.outcome,
         providerMessageId,
@@ -1516,6 +1739,7 @@ export class DeliveryStore {
         input.outboxId,
         input.ownerId,
         input.fencingToken,
+        now,
       )
       if (changed.changes !== 1) throw new DeliveryStoreError('stale-fence', 'outbox completion has a stale fence')
       this.database.prepare(`
@@ -1527,20 +1751,22 @@ export class DeliveryStore {
     return this.getOutbox(input.outboxId)!
   }
 
-  recoverOutbox(input: { maxAttempts: number }): OutboxRecord[] {
+  recoverOutbox(input: { maxAttempts: number; limit?: number }): OutboxRecord[] {
     this.assertOpen()
+    const limit = boundedMaintenanceLimit(input.limit, 100, 'outbox recovery')
     const now = this.now()
     const recovered: string[] = []
     this.transaction(() => {
       const rows = this.database.prepare(`
-        SELECT id FROM outbox_messages WHERE status = 'attempting' AND lease_until <= ? ORDER BY rowid
-      `).all(now) as unknown as { id: string }[]
+        SELECT id FROM outbox_messages WHERE status = 'attempting' AND lease_until <= ? ORDER BY rowid LIMIT ?
+      `).all(now, limit) as unknown as { id: string }[]
       for (const row of rows) {
-        this.database.prepare(`
+        const changed = this.database.prepare(`
           UPDATE outbox_messages SET status = 'unknown_after_send', claimed_by = NULL, fencing_token = NULL,
             lease_until = NULL, next_attempt_at = NULL, failure_code = 'attempt-lease-expired', updated_at = ?
           WHERE id = ? AND status = 'attempting' AND lease_until <= ?
         `).run(now, row.id, now)
+        if (changed.changes !== 1) continue
         this.database.prepare(`
           UPDATE outbox_attempts SET status = 'unknown_after_send', failure_code = 'attempt-lease-expired', finished_at = ?
           WHERE outbox_id = ? AND status = 'attempting'
@@ -1549,8 +1775,16 @@ export class DeliveryStore {
       }
       this.database.prepare(`
         UPDATE outbox_messages SET status = 'dead', failure_code = 'attempts-exhausted', next_attempt_at = NULL,
-          updated_at = ? WHERE status = 'retry_wait' AND next_attempt_at <= ? AND attempt_count >= ?
-      `).run(now, now, input.maxAttempts)
+          updated_at = ? WHERE rowid IN (
+            SELECT candidate.rowid FROM outbox_messages AS candidate
+            WHERE candidate.status = 'retry_wait' AND candidate.next_attempt_at <= ?
+              AND (
+                SELECT COUNT(*) FROM outbox_attempts AS history
+                WHERE history.outbox_id = candidate.id AND history.operation = 'send'
+              ) >= ?
+            ORDER BY candidate.rowid LIMIT ?
+          )
+      `).run(now, now, input.maxAttempts, limit)
     })
     return recovered.map(id => this.getOutbox(id)!)
   }
@@ -1678,24 +1912,32 @@ export class DeliveryStore {
     resolution: 'cancel' | 'retry'
   }): OutboxRecord {
     this.assertOpen()
-    const current = this.getOutbox(input.outboxId)
-    if (current === undefined || !['dead', 'unknown_after_send'].includes(current.status)
-      || current.attemptCount !== input.expectedAttemptCount) {
-      throw new DeliveryStoreError('version-conflict', 'outbox attempt count or resolvable state changed')
-    }
-    const now = this.now()
-    const changed = this.database.prepare(`
-      UPDATE outbox_messages SET status = ?, failure_code = ?, next_attempt_at = NULL,
-        claimed_by = NULL, fencing_token = NULL, lease_until = NULL, updated_at = ?
-      WHERE id = ? AND status = ? AND attempt_count = ?
-    `).run(input.resolution === 'retry' ? 'pending' : 'dead',
-      input.resolution === 'retry' ? null : 'operator-cancelled', now,
-      input.outboxId, current.status, input.expectedAttemptCount)
-    if (changed.changes !== 1) throw new DeliveryStoreError('version-conflict', 'resolvable outbox changed')
-    return this.getOutbox(input.outboxId)!
+    return this.transaction(() => {
+      const current = this.getOutbox(input.outboxId)
+      if (current === undefined || !['dead', 'unknown_after_send'].includes(current.status)
+        || current.attemptCount !== input.expectedAttemptCount) {
+        throw new DeliveryStoreError('version-conflict', 'outbox attempt count or resolvable state changed')
+      }
+      if (input.resolution === 'retry') {
+        const binding = this.getBinding(current.intent.bindingId)
+        if (binding?.status !== 'active') {
+          throw new DeliveryStoreError('conflict', 'resolvable outbox has no active binding')
+        }
+      }
+      const now = this.now()
+      const changed = this.database.prepare(`
+        UPDATE outbox_messages SET status = ?, failure_code = ?, next_attempt_at = NULL,
+          claimed_by = NULL, fencing_token = NULL, lease_until = NULL, updated_at = ?
+        WHERE id = ? AND status = ? AND attempt_count = ?
+      `).run(input.resolution === 'retry' ? 'pending' : 'dead',
+        input.resolution === 'retry' ? null : 'operator-cancelled', now,
+        input.outboxId, current.status, input.expectedAttemptCount)
+      if (changed.changes !== 1) throw new DeliveryStoreError('version-conflict', 'resolvable outbox changed')
+      return this.getOutbox(input.outboxId)!
+    })
   }
 
-  beginApprovalSettlement(input: { operationId: string; payload: unknown }): {
+  beginApprovalSettlement(input: { operationId: string; payload: unknown; createIfMissing?: boolean }): {
     payloadHash: string
     replayed: boolean
     result?: unknown
@@ -1707,22 +1949,40 @@ export class DeliveryStore {
       throw new DeliveryStoreError('conflict', 'approval settlement payload is invalid or too large')
     }
     const payloadHash = digest(payloadJson)
-    const existing = this.database.prepare(`
-      SELECT payload_hash, status, result_json FROM approval_settlements WHERE operation_id = ?
-    `).get(operationId) as { payload_hash: string; status: 'completed' | 'pending'; result_json: string | null } | undefined
-    if (existing !== undefined) {
-      if (existing.payload_hash !== payloadHash) {
+    const selectSettlement = this.database.prepare(`
+      SELECT payload_hash, payload_json, status, result_json FROM approval_settlements WHERE operation_id = ?
+    `)
+    const readSettlement = () => selectSettlement.get(operationId) as {
+      payload_hash: string
+      payload_json: string
+      status: 'completed' | 'pending'
+      result_json: string | null
+    } | undefined
+    const replay = (existing: ReturnType<typeof readSettlement>) => {
+      if (existing === undefined) {
+        throw new DeliveryStoreError('version-conflict', 'approval settlement winner disappeared')
+      }
+      if (existing.payload_hash !== payloadHash || existing.payload_json !== payloadJson) {
         throw new DeliveryStoreError('idempotency-conflict', 'approval operation id was reused with a different payload')
       }
       return { payloadHash, replayed: true,
         ...(existing.result_json === null ? {} : { result: JSON.parse(existing.result_json) as unknown }) }
     }
+    const existing = readSettlement()
+    if (existing !== undefined) {
+      return replay(existing)
+    }
+    if (input.createIfMissing === false) {
+      throw new DeliveryStoreError('not-found', 'approval settlement has no durable operation to recover')
+    }
     const now = this.now()
-    this.database.prepare(`
+    const inserted = this.database.prepare(`
       INSERT INTO approval_settlements (
         operation_id, payload_hash, payload_json, status, result_json, created_at, updated_at
       ) VALUES (?, ?, ?, 'pending', NULL, ?, ?)
+      ON CONFLICT(operation_id) DO NOTHING
     `).run(operationId, payloadHash, payloadJson, now, now)
+    if (inserted.changes !== 1) return replay(readSettlement())
     return { payloadHash, replayed: false }
   }
 

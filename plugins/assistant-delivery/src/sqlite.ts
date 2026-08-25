@@ -2,7 +2,18 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 5
+export const deliverySchemaVersion = 6
+
+const approvalDispatchCursorSchema = `
+  CREATE TABLE approval_dispatch_cursor (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    after_created_at INTEGER CHECK (after_created_at IS NULL OR after_created_at >= 0),
+    after_proposal_id TEXT,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    updated_at INTEGER NOT NULL,
+    CHECK ((after_created_at IS NULL) = (after_proposal_id IS NULL))
+  ) STRICT;
+`
 
 const modelPickerStateSchema = `
   CREATE TABLE conversation_model_epochs (
@@ -106,6 +117,15 @@ function migrate(database: DatabaseSync): void {
       BEGIN IMMEDIATE;
       ${modelPickerStateSchema}
       PRAGMA user_version = 5;
+      COMMIT;
+    `)
+    version = 5
+  }
+  if (version === 5) {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ${approvalDispatchCursorSchema}
+      PRAGMA user_version = 6;
       COMMIT;
     `)
     return
@@ -297,7 +317,9 @@ function migrate(database: DatabaseSync): void {
       updated_at INTEGER NOT NULL
     ) STRICT;
 
-    PRAGMA user_version = 5;
+    ${approvalDispatchCursorSchema}
+
+    PRAGMA user_version = 6;
     COMMIT;
   `)
 }

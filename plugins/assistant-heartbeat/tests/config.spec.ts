@@ -32,11 +32,22 @@ describe('heartbeat configuration', () => {
     expect(definition.prompt).toContain('HEARTBEAT_OK')
   })
 
+  test('enumerates an exact seven-run 08–22 supervised cadence for a 120-minute interval', () => {
+    const normalized = normalizeHeartbeatConfig({ heartbeats: [profile({ intervalMinutes: 120 })] })
+    const definition = heartbeatDefinition(normalized.heartbeats[0]!, 'Review bounded growth.', 'supervised')
+    expect(definition.schedule).toEqual({
+      kind: 'cron', expression: '0 8,10,12,14,16,18,20 * * *', timezone: 'Asia/Shanghai',
+    })
+  })
+
   test.each([
     { scratchPath: 'relative.md' },
     { workspace: 'relative' },
     { activeStartHour: 22, activeEndHour: 8 },
     { intervalMinutes: 7 },
+    { intervalMinutes: 90 },
+    { intervalMinutes: 180 },
+    { intervalMinutes: 900 },
     { timezone: 'Mars/Olympus' },
     { budgetId: undefined, budgetAmount: 10 },
     { allowedTools: ['memory_search', 'memory_search'] },

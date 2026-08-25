@@ -10,6 +10,7 @@ export * from './types.js'
 export { LarkDeliveryAdapter } from './adapter.js'
 export * from './approval.js'
 export * from './setup-profile.js'
+export * from './supervised-growth-profile.js'
 export * from './launchd.js'
 export * from './resident.js'
 export * from './systemd.js'
@@ -25,6 +26,13 @@ export {
   parseLarkSetupArgs,
   runLarkSetup,
 } from './setup.js'
+export {
+  assertSupervisedGrowthAutomationGuard,
+  commitSupervisedGrowthPatch,
+  parseSupervisedGrowthSetupArgs,
+  runSupervisedGrowthSetup,
+  selectUniqueOwnerBinding,
+} from './supervised-growth-setup.js'
 
 export function apply(ctx: Context, config: import('./config.js').Config): void {
   const normalized = Config(config)

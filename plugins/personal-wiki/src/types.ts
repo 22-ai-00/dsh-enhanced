@@ -1,3 +1,5 @@
+import type { ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
+
 export type WikiPageType = 'concept' | 'decision' | 'meta' | 'person' | 'project' | 'question' | 'source'
 export type WikiPageAuthority = 'curated' | 'derived'
 export type WikiPageStatus = 'active' | 'archived' | 'draft'
@@ -123,6 +125,7 @@ export interface WikiProposalInput {
   principal: string
   ttlMs: number
   mutation: WikiUpsertMutation
+  dispatch?: Readonly<ApprovalDispatchRoute>
 }
 
 export interface WikiProposalDecisionInput {
@@ -158,5 +161,8 @@ export interface StoredWikiProposal {
   status: WikiProposalStatus
   expiresAt: number
   version: number
+  /** Present for schema-v2+ intents to bind trusted request replays to the original TTL. */
+  ttlMs?: number
+  dispatch?: Readonly<ApprovalDispatchRoute>
   resultPageId?: string
 }

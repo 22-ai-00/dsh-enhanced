@@ -5,7 +5,7 @@ import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import {
   AssistantAutomationsError,
   AssistantAutomationsService,
@@ -35,19 +35,47 @@ function agent(options: { cwd?: string; preset?: string } = {}): Agent {
 
 function definition(): AutomationDefinition {
   return {
-    name: 'Future review', prompt: 'Review safely.', schedule: { kind: 'at', at: '2030-01-01T00:00:00.000Z' },
+    name: 'Future review', prompt: 'Review safely.', schedule: { kind: 'at' as const, at: '2030-01-01T00:00:00.000Z' },
     workspace: '/work/alpha', agentPreset: 'primary', provider: 'mock', model: 'mock-model', allowedTools: [],
     timeoutMs: 60_000, maxOutputTokens: 512, maxToolCalls: 0, misfire: { kind: 'latest' }, overlap: 'skip',
     retrySafety: 'never', maxRetries: 0, principal: 'owner:lark:123',
   }
 }
 
-async function harness(allow = true) {
+function proposedDefinition(overrides: Record<string, unknown> = {}) {
+  return {
+    name: 'Future review', prompt: 'Review safely.', schedule: { kind: 'at' as const, at: '2030-01-01T00:00:00.000Z' },
+    allowedTools: [],
+    ...overrides,
+  }
+}
+
+const proposalDefaults = {
+  provider: 'trusted-provider', model: 'trusted-model', allowedTools: ['evolution_review'],
+  timeoutMs: 30_000, maxOutputTokens: 256, maxToolCalls: 1,
+  misfireKind: 'latest' as const, misfireLimit: 1, overlap: 'skip' as const,
+  retrySafety: 'never' as const, maxRetries: 0,
+  budgetId: 'growth-budget', budgetAmount: 1,
+}
+
+async function harness(allow = true, options: {
+  deliveryRoute?: false | { sourceId: string; bindingId: string; workspace: string; principal: string }
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-automations-service-'))
   roots.push(root)
   const ctx = new Context()
+  const prepareAgentApproval = vi.fn(() => options.deliveryRoute === false
+    ? (() => { throw new Error('disabled') })()
+    : options.deliveryRoute ?? {
+        sourceId: 'dsh-enhanced-assistant-automations', bindingId: 'binding-owner',
+        workspace: '/work/alpha', principal: 'lark/main/tenant/owner',
+      })
+  if (options.deliveryRoute !== false) {
+    ctx.provide('assistantDelivery' as never, { prepareAgentApproval } as never)
+  }
   await ctx.plugin(AssistantPolicyService, {
     databasePath: join(root, 'policy.sqlite'),
+    budgets: [{ id: 'growth-budget', metric: 'automation-runs', limit: 100, periodMs: 60_000, scope: 'subject' }],
     rules: allow ? [
       {
         id: 'allow-agent-automations', effect: 'allow',
@@ -67,23 +95,121 @@ async function harness(allow = true) {
   })
   await ctx.plugin(AssistantAutomationsService, {
     databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false,
+    proposalDefaults,
+    allowUnbudgetedExecution: true,
   })
-  return { ctx, root, service: ctx.assistantAutomations }
+  return { ctx, root, service: ctx.assistantAutomations, prepareAgentApproval }
 }
 
 describe('assistant automations Cordis service', () => {
+  test('defaults audited route capabilities, requires hard budgets, and exposes bounded trusted proposal defaults', () => {
+    const config = AssistantAutomationsService.Config({
+      databasePath: '/tmp/automations.sqlite',
+      runsPath: '/tmp/runs',
+    })
+    expect(config.toolCapableProviders).toEqual(['deepseek-official'])
+    expect(config.allowUnbudgetedExecution).toBe(false)
+    expect(config.proposalDefaults).toEqual({
+      provider: 'deepseek-official', model: 'deepseek-chat', allowedTools: [],
+      timeoutMs: 60_000, maxOutputTokens: 512, maxToolCalls: 0,
+      misfireKind: 'latest', misfireLimit: 1, overlap: 'skip', retrySafety: 'never', maxRetries: 0,
+      budgetId: 'assistant-automations-proposals', budgetAmount: 1,
+    })
+    expect(() => AssistantAutomationsService.Config({
+      databasePath: '/tmp/automations.sqlite',
+      runsPath: '/tmp/runs',
+      toolCapableProviders: ['bad route'],
+    })).toThrow(/toolCapableProviders|pattern|invalid/i)
+    expect(() => AssistantAutomationsService.Config({
+      databasePath: '/tmp/automations.sqlite', runsPath: '/tmp/runs',
+      proposalDefaults: { ...proposalDefaults, budgetId: '' },
+    })).toThrow(/proposalDefaults|budgetId|pattern|invalid/i)
+  })
+
+  test('derives create authority from the authenticated Delivery route and trusted config', async () => {
+    const fixture = await harness()
+    const current = agent({ cwd: '/work/alpha', preset: 'primary' })
+    const proposal = fixture.service.propose(current, {
+      idempotencyKey: 'service:trusted-create',
+      mutation: {
+        op: 'create', automationId: 'auto-review',
+        definition: proposedDefinition({
+          workspace: '/work/attacker', agentPreset: 'attacker', provider: 'attacker', model: 'attacker',
+          timeoutMs: 1, maxOutputTokens: 1, maxToolCalls: 999, principal: 'attacker',
+          budgetId: 'attacker', budgetAmount: 1, deliveryBindingId: 'attacker',
+        }),
+      } as never,
+    })
+    expect(fixture.prepareAgentApproval).toHaveBeenCalledWith(current, {
+      sourceId: 'dsh-enhanced-assistant-automations',
+    })
+    fixture.service.decideProposal({ proposalId: proposal.proposalId, principal: 'lark/main/tenant/owner',
+      expectedVersion: 1, decision: 'approved', reason: 'reviewed' })
+    expect(fixture.service.list(current)[0]?.definition).toEqual({
+      name: 'Future review', prompt: 'Review safely.', schedule: { kind: 'at', at: '2030-01-01T00:00:00.000Z' },
+      workspace: '/work/alpha', agentPreset: 'primary', provider: 'trusted-provider', model: 'trusted-model',
+      allowedTools: [], timeoutMs: 30_000, maxOutputTokens: 256, maxToolCalls: 1,
+      misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0,
+      principal: 'lark/main/tenant/owner', budgetId: 'growth-budget', budgetAmount: 1,
+      deliveryBindingId: 'binding-owner',
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('enforces the configured tool subset and exact Delivery/headless route', async () => {
+    const routed = await harness()
+    const current = agent({ cwd: '/work/alpha', preset: 'primary' })
+    expect(() => routed.service.propose(current, {
+      idempotencyKey: 'service:forged-principal', principal: 'attacker',
+      mutation: { op: 'create', automationId: 'forged', definition: proposedDefinition() } as never,
+    })).toThrowError(expect.objectContaining({ code: 'unauthorized-principal' }))
+    expect(() => routed.service.propose(current, {
+      idempotencyKey: 'service:extra-tool',
+      mutation: { op: 'create', automationId: 'extra-tool', definition: proposedDefinition({
+        allowedTools: ['evolution_review', 'shell'],
+      }) } as never,
+    })).toThrow(/allowed.*tool|tool.*allow/i)
+    await routed.ctx.fiber.restart()
+
+    const mismatched = await harness(true, { deliveryRoute: {
+      sourceId: 'dsh-enhanced-assistant-automations', bindingId: 'binding-owner',
+      workspace: '/work/other', principal: 'lark/main/tenant/owner',
+    } })
+    expect(() => mismatched.service.propose(current, {
+      idempotencyKey: 'service:wrong-workspace',
+      mutation: { op: 'create', automationId: 'wrong-workspace', definition: proposedDefinition() } as never,
+    })).toThrow(/approval route|workspace/i)
+    await mismatched.ctx.fiber.restart()
+
+    const headless = await harness(true, { deliveryRoute: false })
+    expect(() => headless.service.propose(current, {
+      idempotencyKey: 'service:missing-headless-principal',
+      mutation: { op: 'create', automationId: 'missing-principal', definition: proposedDefinition() } as never,
+    })).toThrow(/approval route|principal/i)
+    const pending = headless.service.propose(current, {
+      idempotencyKey: 'service:headless', principal: 'headless:owner',
+      mutation: { op: 'create', automationId: 'headless', definition: proposedDefinition() } as never,
+    })
+    headless.service.decideProposal({ proposalId: pending.proposalId, principal: 'headless:owner',
+      expectedVersion: 1, decision: 'approved', reason: 'headless review' })
+    expect(headless.service.list(current)[0]?.definition).toMatchObject({
+      workspace: '/work/alpha', agentPreset: 'primary', principal: 'headless:owner',
+    })
+    await headless.ctx.fiber.restart()
+  })
+
   test('registers ctx.assistantAutomations and exposes only approval-gated mutations', async () => {
     const { ctx, service } = await harness()
     const current = agent({ cwd: '/work/alpha', preset: 'primary' })
     const proposal = service.propose(current, {
-      idempotencyKey: 'service:create', principal: 'owner:lark:123',
-      mutation: { op: 'create', automationId: 'auto-review', definition: definition() },
+      idempotencyKey: 'service:create',
+      mutation: { op: 'create', automationId: 'auto-review', definition: proposedDefinition() } as never,
     })
     expect(service.health()).toEqual({ activeAutomations: 0, pausedAutomations: 0,
       pendingTasks: 0, runningTasks: 0, failedRuns: 0, unknownRuns: 0 })
     expect(service.list(current)).toEqual([])
     const approved = service.decideProposal({
-      proposalId: proposal.proposalId, principal: 'owner:lark:123', expectedVersion: 1,
+      proposalId: proposal.proposalId, principal: 'lark/main/tenant/owner', expectedVersion: 1,
       decision: 'approved', reason: 'reviewed',
     })
     expect(approved).toMatchObject({ status: 'approved', automation: { id: 'auto-review' } })
@@ -95,8 +221,8 @@ describe('assistant automations Cordis service', () => {
 
   test('fails closed for denied, absent, relative, or incomplete Agent identity', async () => {
     const denied = await harness(false)
-    const input = { idempotencyKey: 'denied', principal: 'owner:lark:123',
-      mutation: { op: 'create' as const, automationId: 'auto-review', definition: definition() } }
+    const input = { idempotencyKey: 'denied',
+      mutation: { op: 'create' as const, automationId: 'auto-review', definition: proposedDefinition() } }
     expect(() => denied.service.propose(agent({ cwd: '/work/alpha', preset: 'primary' }), input))
       .toThrowError(expect.objectContaining<Partial<AssistantAutomationsError>>({ code: 'policy-denied' }))
     expect(() => denied.service.list(undefined))
@@ -112,9 +238,9 @@ describe('assistant automations Cordis service', () => {
   test('authorizes external ingestion explicitly and deduplicates the source event', async () => {
     const { ctx, service } = await harness()
     const current = agent({ cwd: '/work/alpha', preset: 'primary' })
-    const proposal = service.propose(current, { idempotencyKey: 'event-create', principal: 'owner:lark:123',
-      mutation: { op: 'create', automationId: 'auto-review', definition: definition() } })
-    service.decideProposal({ proposalId: proposal.proposalId, principal: 'owner:lark:123', expectedVersion: 1,
+    const proposal = service.propose(current, { idempotencyKey: 'event-create',
+      mutation: { op: 'create', automationId: 'auto-review', definition: proposedDefinition() } as never })
+    service.decideProposal({ proposalId: proposal.proposalId, principal: 'lark/main/tenant/owner', expectedVersion: 1,
       decision: 'approved', reason: 'reviewed' })
     const first = service.ingestExternal({ sourceId: 'event-test', automationId: 'auto-review',
       eventId: 'webhook:1', occurredAt: 123_000 })

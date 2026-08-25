@@ -1,12 +1,33 @@
-import {
+import { Context } from '@deepseek-ai/cordis'
+import LlmRuntime, {
   CONTEXT_WINDOW_EXCEEDED_CODE,
+  EMPTY_RESPONSE_CODE,
+  QUOTA_EXCEEDED_CODE,
+  CallId,
   createMessage,
+  deepFreeze,
+  errorChain,
+  markAgentLoopRequest,
   ReasoningEffortId,
   type GenerateOptions,
 } from '@deepseek-ai/dsh-llm'
+import { realpathSync } from 'node:fs'
+import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
-import { CodingSubscriptionAdapter, redactDiagnostic } from '../src/adapter.ts'
+import {
+  CodingSubscriptionAdapter as RawCodingSubscriptionAdapter,
+  redactDiagnostic,
+  TOOL_CALLS_UNSUPPORTED_CODE,
+  type AdapterDependencies,
+} from '../src/adapter.ts'
 import { SubscriptionAuthError } from '../src/auth.ts'
+import { CodexDirectAuthError } from '../src/codex-direct-auth.ts'
+import {
+  CodexDirectResponsesError,
+  type CodexDirectResponsesDependencies,
+} from '../src/codex-direct-responses.ts'
 import { Config } from '../src/config.ts'
 import { CliWorkingDirectoryError, type RunCliTextOptions } from '../src/process.ts'
 import type { CliInvocation } from '../src/providers.ts'
@@ -28,7 +49,308 @@ function providerRequest(provider: string, model = 'default', reasoningEffort?: 
   }
 }
 
+const TEST_SESSION_ID = 'session-live' as NonNullable<GenerateOptions['sessionId']>
+
+function loopOwnedRequest(options: GenerateOptions): GenerateOptions {
+  return markAgentLoopRequest(deepFreeze({ ...options, sessionId: TEST_SESSION_ID }))
+}
+
+/**
+ * Normal adapter behavior tests exercise the same immutable loop envelope that
+ * the host dispatches.  Security-negative cases intentionally use the raw
+ * adapter below so they cannot be accidentally normalized by the test fixture.
+ */
+class CodingSubscriptionAdapter extends RawCodingSubscriptionAdapter {
+  constructor(
+    config: ConstructorParameters<typeof RawCodingSubscriptionAdapter>[0],
+    dependencies: AdapterDependencies = {},
+  ) {
+    super(config, {
+      // Normal stream tests must never fall through to a real local catalog
+      // subprocess.  Individual catalog tests override the matching discoverer.
+      discoverCodexModels: async () => configuredCatalog(config.codex.models),
+      discoverClaudeModels: async () => configuredCatalog(config.claude.models),
+      discoverCursorModels: async () => configuredCatalog(config.cursor.models),
+      discoverGrokModels: async () => configuredCatalog(config.grok.models),
+      ...dependencies,
+      liveSessions: dependencies.liveSessions ?? {
+        get(sessionId) {
+          return sessionId === TEST_SESSION_ID
+            ? { id: TEST_SESSION_ID, header: { cwd: resolve(config.cwd) } }
+            : undefined
+        },
+      },
+    })
+  }
+
+  override stream(options: GenerateOptions) {
+    return super.stream(loopOwnedRequest(options))
+  }
+}
+
+function configuredCatalog(models: readonly string[]) {
+  return {
+    ...(models[0] === undefined ? {} : { defaultModel: models[0] }),
+    models: models.map(id => ({ id, name: id, inputModalities: ['text'] as const })),
+    observedAt: 1,
+  }
+}
+
+function rejectedDirectStream(error: unknown): AsyncIterable<never> {
+  return (async function* () {
+    yield* []
+    throw error
+  })()
+}
+
 describe('coding subscription LLM adapter', () => {
+  it('rejects an unmarked request before auth or CLI spawn even when its session id names a live session', async () => {
+    const verifyAuth = vi.fn(async () => {})
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const adapter = new RawCodingSubscriptionAdapter(Config(), {
+      verifyAuth,
+      runText,
+      liveSessions: {
+        get: () => ({ id: 'session-live', header: { cwd: process.cwd() } }),
+      },
+    } as never)
+    const unmarked = deepFreeze({ ...request(), sessionId: 'session-live' as NonNullable<GenerateOptions['sessionId']> })
+
+    await expect(adapter.stream(unmarked)[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' },
+    })
+    expect(verifyAuth).not.toHaveBeenCalled()
+    expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('settles a bare TrustedSessionCwdError as working-directory without relying on Error.cause', async () => {
+    const settled: Array<{ outcome?: string; phase?: string }> = []
+    const adapter = new RawCodingSubscriptionAdapter(Config(), {
+      liveSessions: {
+        get: () => ({ id: TEST_SESSION_ID, header: { cwd: process.cwd() } }),
+      },
+      onSettled: (context: { outcome?: string; phase?: string }) => { settled.push(context) },
+    } as never)
+    const unmarked = deepFreeze({ ...request(), sessionId: TEST_SESSION_ID })
+
+    await expect(adapter.stream(unmarked)[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' },
+    })
+    expect(settled).toEqual([
+      expect.objectContaining({ outcome: 'working-directory', phase: 'preflight' }),
+    ])
+  })
+
+  it('rechecks the live session cwd after auth and before handing authority to the CLI runner', async () => {
+    const verifyAuth = vi.fn(async () => {})
+    const discoverCodexModels = vi.fn(async () => configuredCatalog(['default']))
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    let lookupCount = 0
+    const adapter = new RawCodingSubscriptionAdapter(Config(), {
+      verifyAuth,
+      discoverCodexModels,
+      runText,
+      liveSessions: {
+        get: () => {
+          lookupCount += 1
+          return lookupCount === 1
+            ? { id: 'session-live', header: { cwd: process.cwd() } }
+            : undefined
+        },
+      },
+    } as never)
+    const loopOwned = markAgentLoopRequest(deepFreeze({
+      ...request(), sessionId: 'session-live' as NonNullable<GenerateOptions['sessionId']>,
+    }))
+
+    const iterator = adapter.stream(loopOwned)[Symbol.asyncIterator]()
+    await expect(iterator.next()).rejects.toMatchObject({ failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } })
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(discoverCodexModels).not.toHaveBeenCalled()
+    expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('rejects every invalid live-session shape before auth or CLI spawn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'coding-subscription-adapter-cwd-'))
+    try {
+      const workspace = join(root, 'workspace')
+      const other = join(root, 'other')
+      const escape = join(workspace, 'escape')
+      await Promise.all([mkdir(workspace), mkdir(other)])
+      await symlink(other, escape)
+      const loopOwned = (sessionId: string) => markAgentLoopRequest(deepFreeze({
+        ...request(), sessionId: sessionId as NonNullable<GenerateOptions['sessionId']>,
+      }))
+      const invalidCases = [
+        { name: 'missing identity', options: markAgentLoopRequest(deepFreeze(request())), get: () => undefined },
+        { name: 'stale session', options: loopOwned('session-stale'), get: () => undefined },
+        {
+          name: 'forged session result',
+          options: loopOwned('session-claimed'),
+          get: () => ({ id: 'session-other', header: { cwd: workspace } }),
+        },
+        {
+          name: 'unmarked request',
+          options: deepFreeze({ ...request(), sessionId: 'session-live' as NonNullable<GenerateOptions['sessionId']> }),
+          get: () => ({ id: 'session-live', header: { cwd: workspace } }),
+        },
+        {
+          name: 'mismatched cwd',
+          options: loopOwned('session-live'),
+          get: () => ({ id: 'session-live', header: { cwd: other } }),
+        },
+        {
+          name: 'symlink escape',
+          options: loopOwned('session-live'),
+          get: () => ({ id: 'session-live', header: { cwd: escape } }),
+        },
+      ]
+
+      for (const invalid of invalidCases) {
+        const verifyAuth = vi.fn(async () => {})
+        const runText = vi.fn(() => (async function* () { yield 'never' })())
+        const adapter = new RawCodingSubscriptionAdapter(Config({ cwd: workspace } as never), {
+          verifyAuth,
+          runText,
+          liveSessions: { get: invalid.get } as never,
+        })
+        await expect(adapter.stream(invalid.options)[Symbol.asyncIterator]().next(), invalid.name)
+          .rejects.toMatchObject({ failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } })
+        expect(verifyAuth, invalid.name).not.toHaveBeenCalled()
+        expect(runText, invalid.name).not.toHaveBeenCalled()
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it.each(['resolveModel', 'listModels'] as const)(
+    'keeps the prepareCall %s path process-free before a mismatched workspace is rejected',
+    async operation => {
+      const root = await mkdtemp(join(tmpdir(), 'coding-subscription-prepare-cwd-'))
+      try {
+        const workspace = join(root, 'workspace')
+        const other = join(root, 'other')
+        await Promise.all([mkdir(workspace), mkdir(other)])
+        const verifyAuth = vi.fn(async () => {})
+        const discoverCodexModels = vi.fn(async () => ({
+          defaultModel: 'default',
+          models: [{ id: 'default', name: 'Codex default', inputModalities: ['text'] as const }],
+          observedAt: 1,
+        }))
+        const runText = vi.fn(() => (async function* () { yield 'never' })())
+        const adapter = new RawCodingSubscriptionAdapter(Config({ cwd: workspace } as never), {
+          verifyAuth,
+          discoverCodexModels,
+          runText,
+          liveSessions: {
+            get: () => ({ id: TEST_SESSION_ID, header: { cwd: other } }),
+          },
+        } as never)
+
+        // dsh-agent-loop calls resolveModel from prepareCall before it creates the
+        // loop-owned GenerateOptions passed to stream.  listModels is another
+        // control-plane read that must have the same no-process property.
+        let preparedStream: ((options: GenerateOptions) => AsyncIterable<unknown>) | undefined
+        let runtimeContext: Context | undefined
+        if (operation === 'resolveModel') {
+          runtimeContext = new Context()
+          await runtimeContext.plugin(LlmRuntime)
+          runtimeContext.llm.registerAdapter(['codex-subscription'], adapter)
+          const prepared = await runtimeContext.llm.prepareCall({
+            provider: 'codex-subscription',
+            model: 'default',
+          })
+          preparedStream = prepared.stream
+        } else {
+          await adapter.listModels('codex-subscription')
+        }
+        const options = markAgentLoopRequest(deepFreeze({
+          ...request(),
+          sessionId: TEST_SESSION_ID,
+        }))
+        const stream = preparedStream === undefined ? adapter.stream(options) : preparedStream(options)
+        const first = stream[Symbol.asyncIterator]().next()
+        if (preparedStream === undefined) {
+          await expect(first).rejects.toMatchObject({ failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } })
+        } else {
+          await expect(first).resolves.toMatchObject({
+            value: { type: 'finish', reason: { kind: 'error', failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } } },
+          })
+        }
+
+        expect(verifyAuth).not.toHaveBeenCalled()
+        expect(discoverCodexModels).not.toHaveBeenCalled()
+        expect(runText).not.toHaveBeenCalled()
+        await runtimeContext?.fiber.dispose()
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    },
+  )
+
+  it.each([
+    'codex-subscription',
+    'claude-subscription',
+    'cursor-subscription',
+    'grok-subscription',
+  ] as const)('keeps ordinary list/resolve reads process-free for %s', async provider => {
+    const verifyAuth = vi.fn(async () => {})
+    const discoverCodexModels = vi.fn(async () => configuredCatalog(['codex-live']))
+    const discoverClaudeModels = vi.fn(async () => configuredCatalog(['claude-live']))
+    const discoverCursorModels = vi.fn(async () => configuredCatalog(['cursor-live']))
+    const discoverGrokModels = vi.fn(async () => configuredCatalog(['grok-live']))
+    const adapter = new RawCodingSubscriptionAdapter(Config(), {
+      verifyAuth,
+      discoverCodexModels,
+      discoverClaudeModels,
+      discoverCursorModels,
+      discoverGrokModels,
+    })
+
+    await adapter.listModels(provider)
+    await adapter.resolveModel(provider, 'default')
+
+    expect(verifyAuth).not.toHaveBeenCalled()
+    for (const discover of [discoverCodexModels, discoverClaudeModels, discoverCursorModels, discoverGrokModels]) {
+      expect(discover).not.toHaveBeenCalled()
+    }
+  })
+
+  it('passes the canonical live-session cwd to both auth and the CLI runner', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'coding-subscription-adapter-cwd-'))
+    try {
+      const workspace = join(root, 'workspace')
+      const alias = join(root, 'workspace-alias')
+      await mkdir(workspace)
+      await symlink(workspace, alias)
+      const verifyAuth = vi.fn(async () => {})
+      let invocation: CliInvocation | undefined
+      const adapter = new RawCodingSubscriptionAdapter(Config({ cwd: alias } as never), {
+        verifyAuth,
+        discoverCodexModels: async () => configuredCatalog(['default']),
+        runText(received) {
+          invocation = received
+          return (async function* () { yield 'ok' })()
+        },
+        liveSessions: {
+          get: () => ({ id: 'session-live', header: { cwd: workspace } }),
+        } as never,
+      })
+      const loopOwned = markAgentLoopRequest(deepFreeze({
+        ...request(), sessionId: 'session-live' as NonNullable<GenerateOptions['sessionId']>,
+      }))
+
+      for await (const _chunk of adapter.stream(loopOwned)) { /* drain */ }
+
+      const canonical = realpathSync.native(workspace)
+      expect(verifyAuth).toHaveBeenCalledWith('codex', expect.objectContaining({ cwd: canonical }))
+      expect(invocation).toMatchObject({ cwd: canonical })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('discovers Codex models and exposes each model-specific reasoning effort', async () => {
     const discoverCodexModels = vi.fn(() => Promise.resolve({
       defaultModel: 'gpt-5.6-sol',
@@ -58,8 +380,14 @@ describe('coding subscription LLM adapter', () => {
     const adapter = new CodingSubscriptionAdapter(Config(), {
       verifyAuth: async () => {},
       discoverCodexModels,
+      runText: () => (async function* () { yield 'observed' })(),
     } as never)
 
+    await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
+      expect.objectContaining({ provider: 'codex-subscription', id: 'default', inputModalities: ['text'] }),
+    ])
+    expect(discoverCodexModels).not.toHaveBeenCalled()
+    for await (const _chunk of adapter.stream(request())) { /* observe the session-bound catalog */ }
     await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
       expect.objectContaining({ provider: 'codex-subscription', id: 'default', inputModalities: ['text'] }),
       expect.objectContaining({ provider: 'codex-subscription', id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }),
@@ -74,6 +402,120 @@ describe('coding subscription LLM adapter', () => {
     })
     expect(discoverCodexModels).toHaveBeenCalledTimes(1)
     expect(adapter.providerRetryPolicy('codex-subscription')).toMatchObject({ mode: 'normal', maxRetries: 0 })
+  })
+
+  it('exposes configured direct reasoning on a cold prepareCall and materializes its default without I/O', async () => {
+    const config = Config({
+      codex: {
+        transport: 'direct-responses',
+        directModel: 'gpt-direct-cold',
+        directReasoningEfforts: ['low', 'high', 'ultra'],
+        directDefaultReasoningEffort: 'low',
+      },
+    } as never)
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const verifyAuth = vi.fn(async () => {})
+    const discoverCodexModels = vi.fn(async () => configuredCatalog(['never']))
+    const requestResponses = vi.fn(async () => new Response('never'))
+    const received: GenerateOptions[] = []
+    const runCodexDirect = vi.fn((options: GenerateOptions) => (async function* () {
+      received.push(options)
+      yield { type: 'finish', reason: { kind: 'stop' } } as const
+    })())
+    const adapter = new RawCodingSubscriptionAdapter(config, {
+      runText,
+      verifyAuth,
+      discoverCodexModels,
+      codexCredentials: { requestResponses },
+      runCodexDirect,
+      liveSessions: {
+        get: () => ({ id: TEST_SESSION_ID, header: { cwd: process.cwd() } }),
+      },
+    } as never)
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['codex-subscription'], adapter)
+
+    const explicit = await ctx.llm.prepareCall({
+      provider: 'codex-subscription',
+      model: 'default',
+      reasoningEffort: ReasoningEffortId('ultra'),
+    })
+    expect(explicit.config.reasoningEffort).toBe('ultra')
+
+    const prepared = await ctx.llm.prepareCall({ provider: 'codex-subscription', model: 'default' })
+    expect(prepared.config.reasoningEffort).toBe('low')
+    const defaultReasoningEffort = prepared.config.reasoningEffort
+    if (defaultReasoningEffort === undefined) throw new Error('expected a configured direct reasoning default')
+    expect(prepared.adapterDefaults).toEqual({ reasoningEffort: true })
+    expect(runCodexDirect).not.toHaveBeenCalled()
+    expect(requestResponses).not.toHaveBeenCalled()
+    expect(verifyAuth).not.toHaveBeenCalled()
+    expect(discoverCodexModels).not.toHaveBeenCalled()
+    expect(runText).not.toHaveBeenCalled()
+
+    const dispatched = markAgentLoopRequest(deepFreeze({
+      ...request(),
+      reasoningEffort: defaultReasoningEffort,
+      sessionId: TEST_SESSION_ID,
+    }))
+    const chunks = []
+    for await (const chunk of prepared.stream(dispatched)) chunks.push(chunk)
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(received).toHaveLength(1)
+    expect(received[0]).toMatchObject({ model: 'gpt-direct-cold', reasoningEffort: 'low' })
+    expect(verifyAuth).not.toHaveBeenCalled()
+    expect(discoverCodexModels).not.toHaveBeenCalled()
+    expect(runText).not.toHaveBeenCalled()
+
+    await ctx.fiber.dispose()
+  })
+
+  it('uses private Responses display metadata and resolves the default alias to the concrete direct model name', async () => {
+    const config = Config({
+      codex: { transport: 'direct-responses', directModel: 'gpt-private-display' },
+    } as never)
+    const adapter = new CodingSubscriptionAdapter(config)
+
+    expect(adapter.providerInfo('codex-subscription').name).toContain('private Responses')
+    expect(adapter.providerInfo('codex-subscription').name).not.toContain('local CLI')
+    await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
+      expect.objectContaining({
+        id: 'default',
+        name: expect.stringContaining('gpt-private-display'),
+      }),
+    ])
+    await expect(adapter.resolveModel('codex-subscription', 'default')).resolves.toMatchObject({
+      name: expect.stringContaining('gpt-private-display'),
+      reasoning: {
+        efforts: [
+          { id: 'low', name: 'low' },
+          { id: 'medium', name: 'medium' },
+          { id: 'high', name: 'high' },
+          { id: 'xhigh', name: 'xhigh' },
+          { id: 'max', name: 'max' },
+          { id: 'ultra', name: 'ultra' },
+        ],
+        defaultEffort: 'low',
+      },
+    })
+  })
+
+  it('keeps CLI display and reasoning metadata independent from direct-only configuration', async () => {
+    const config = Config({
+      codex: {
+        transport: 'cli',
+        directModel: 'must-not-appear',
+        directReasoningEfforts: ['low', 'ultra'],
+        directDefaultReasoningEffort: 'ultra',
+      },
+    } as never)
+    const adapter = new CodingSubscriptionAdapter(config)
+
+    expect(adapter.providerInfo('codex-subscription').name).toContain('local CLI')
+    const resolved = await adapter.resolveModel('codex-subscription', 'default')
+    expect(resolved.name).not.toContain('must-not-appear')
+    expect(resolved.reasoning).toBeUndefined()
   })
 
   it('passes the selected Codex reasoning effort to the CLI invocation', async () => {
@@ -131,8 +573,14 @@ describe('coding subscription LLM adapter', () => {
     const adapter = new CodingSubscriptionAdapter(Config(), {
       verifyAuth: async () => {},
       [dependency]: discover,
+      runText: () => (async function* () { yield 'observed' })(),
     } as never)
 
+    await expect(adapter.listModels(route)).resolves.toEqual([
+      expect.objectContaining({ id: 'default' }),
+    ])
+    expect(discover).not.toHaveBeenCalled()
+    for await (const _chunk of adapter.stream(providerRequest(route))) { /* observe the session-bound catalog */ }
     await expect(adapter.listModels(route)).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'default' }),
       expect.objectContaining({ id: model }),
@@ -162,6 +610,353 @@ describe('coding subscription LLM adapter', () => {
     expect(invocation).toMatchObject({ provider: 'codex', command: 'codex', cwd: process.cwd() })
     expect(invocation?.args.join(' ')).toContain('dsh-coding-subscription-provider/v1')
     expect(invocation?.args).not.toContain('--max-turns')
+  })
+
+  it('keeps the default CLI route isolated from every direct Responses seam', async () => {
+    const requestResponses = vi.fn(async () => new Response('never'))
+    const runCodexDirect = vi.fn(() => (async function* () {
+      yield { type: 'finish', reason: { kind: 'stop' } } as const
+    })())
+    const runText = vi.fn(() => (async function* () { yield 'cli only' })())
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      codexCredentials: { requestResponses },
+      runCodexDirect,
+      runText,
+      verifyAuth: async () => {},
+    })
+
+    const chunks = []
+    for await (const chunk of adapter.stream(request())) chunks.push(chunk)
+
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(runText).toHaveBeenCalledOnce()
+    expect(runCodexDirect).not.toHaveBeenCalled()
+    expect(requestResponses).not.toHaveBeenCalled()
+  })
+
+  it('refuses a tool-calling request before spawning any process', async () => {
+    // These routes only return assistant text. Dropping `tools` silently would let
+    // an unattended automation look like it ran while never invoking a tool, so the
+    // request has to fail loudly and name a route that can perform tool calls.
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const verifyAuth = vi.fn(async () => {})
+    const adapter = new CodingSubscriptionAdapter(Config(), { runText, verifyAuth })
+    const withTools: GenerateOptions = {
+      ...request(),
+      tools: [{
+        name: 'allowed_tool',
+        description: 'A tool the caller expects to be callable.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+      }],
+    }
+
+    await expect(adapter.stream(withTools)[Symbol.asyncIterator]().next()).rejects.toMatchObject({
+      failure: { code: TOOL_CALLS_UNSUPPORTED_CODE },
+    })
+    expect(runText).not.toHaveBeenCalled()
+    expect(verifyAuth).not.toHaveBeenCalled()
+  })
+
+  it('uses the opt-in Codex direct transport for image/tool capable requests without invoking CLI seams', async () => {
+    const config = Config()
+    config.codex.transport = 'direct-responses'
+    config.codex.directModel = 'gpt-direct-test'
+    const verifyAuth = vi.fn(async () => {})
+    const discoverCodexModels = vi.fn(async () => configuredCatalog(['default']))
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const runCodexDirect = vi.fn((_received: GenerateOptions) => (async function* () {
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' } as const
+      yield {
+        type: 'tool-call-delta', index: 0, id: CallId('call-direct'), name: 'allowed_tool', argumentsDelta: '{}',
+      } as const
+      yield {
+        type: 'block-end', index: 0,
+        block: { type: 'tool-call', id: CallId('call-direct'), name: 'allowed_tool', arguments: '{}' },
+      } as const
+      yield { type: 'finish', reason: { kind: 'tool-calls' } } as const
+    })())
+    const adapter = new CodingSubscriptionAdapter(config, {
+      verifyAuth,
+      discoverCodexModels,
+      runText,
+      runCodexDirect,
+      attachments: {
+        readImage: async ref => ({ ref, data: new Uint8Array([1, 2, 3]) }),
+      },
+    })
+    const withTools: GenerateOptions = {
+      ...request(),
+      tools: [{
+        name: 'allowed_tool',
+        description: 'Allowed by the DSH policy layer.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+      }],
+    }
+
+    await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
+      expect.objectContaining({ id: 'default', inputModalities: ['text', 'image'] }),
+    ])
+    await expect(adapter.resolveModel('codex-subscription', 'default')).resolves.toMatchObject({
+      id: 'default',
+      inputModalities: ['text', 'image'],
+    })
+    const chunks = []
+    for await (const chunk of adapter.stream(withTools)) chunks.push(chunk)
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'tool-calls' } })
+    expect(runCodexDirect).toHaveBeenCalledTimes(1)
+    expect(runCodexDirect.mock.calls[0]?.[0]).toMatchObject({ model: 'gpt-direct-test', tools: withTools.tools })
+    expect(verifyAuth).not.toHaveBeenCalled()
+    expect(discoverCodexModels).not.toHaveBeenCalled()
+    expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('looks up the optional attachment store once per operation instead of retaining a stale snapshot', async () => {
+    const config = Config({ codex: { transport: 'direct-responses' } } as never)
+    const firstStore = {
+      readImage: async (ref: never, _signal?: AbortSignal) => ({ ref, data: new Uint8Array([1]) }),
+    }
+    const secondStore = {
+      readImage: async (ref: never, _signal?: AbortSignal) => ({ ref, data: new Uint8Array([2]) }),
+    }
+    let current: CodexDirectResponsesDependencies['attachments']
+    const getAttachments = vi.fn(() => current)
+    const receivedAttachments: Array<CodexDirectResponsesDependencies['attachments']> = []
+    const runCodexDirect = vi.fn((_options: GenerateOptions, dependencies: CodexDirectResponsesDependencies) => {
+      receivedAttachments.push(dependencies.attachments)
+      current = secondStore as never
+      return (async function* () {
+        yield { type: 'finish', reason: { kind: 'stop' } } as const
+      })()
+    })
+    const adapter = new CodingSubscriptionAdapter(config, { getAttachments, runCodexDirect } as never)
+
+    await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
+      expect.objectContaining({ inputModalities: ['text'] }),
+    ])
+    expect(getAttachments).toHaveBeenCalledOnce()
+
+    current = firstStore as never
+    getAttachments.mockClear()
+    await expect(adapter.resolveModel('codex-subscription', 'default')).resolves.toMatchObject({
+      inputModalities: ['text', 'image'],
+    })
+    expect(getAttachments).toHaveBeenCalledOnce()
+
+    current = firstStore as never
+    getAttachments.mockClear()
+    for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    expect(getAttachments).toHaveBeenCalledOnce()
+    expect(receivedAttachments).toEqual([firstStore])
+
+    current = undefined
+    getAttachments.mockClear()
+    await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
+      expect.objectContaining({ inputModalities: ['text'] }),
+    ])
+    expect(getAttachments).toHaveBeenCalledOnce()
+  })
+
+  it('treats Agent Loop maxTokens as a host-local budget and omits it from the private request', async () => {
+    const config = Config({
+      codex: { transport: 'direct-responses', directModel: 'gpt-direct-budget' },
+    } as never)
+    let serialized = ''
+    const requestResponses = vi.fn(async (body: string) => {
+      serialized = body
+      const events = [
+        {
+          type: 'response.output_item.done',
+          item: {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'budgeted' }],
+          },
+        },
+        { type: 'response.completed', response: { id: 'resp-budget' } },
+      ]
+      return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    })
+    const verifyAuth = vi.fn(async () => {})
+    const discoverCodexModels = vi.fn(async () => configuredCatalog(['never']))
+    const runText = vi.fn(() => (async function* () { yield 'never' })())
+    const adapter = new CodingSubscriptionAdapter(config, {
+      codexCredentials: { requestResponses },
+      verifyAuth,
+      discoverCodexModels,
+      runText,
+    })
+
+    const chunks = []
+    for await (const chunk of adapter.stream({ ...request(), maxTokens: 321 })) chunks.push(chunk)
+
+    expect(chunks.at(-1)).toMatchObject({ type: 'finish', reason: { kind: 'stop' } })
+    expect(requestResponses).toHaveBeenCalledOnce()
+    const body = JSON.parse(serialized) as Record<string, unknown>
+    expect(body).not.toHaveProperty('max_output_tokens')
+    expect(body).not.toHaveProperty('maxTokens')
+    expect(verifyAuth).not.toHaveBeenCalled()
+    expect(discoverCodexModels).not.toHaveBeenCalled()
+    expect(runText).not.toHaveBeenCalled()
+  })
+
+  it('continues to reject an explicit direct temperature before the request seam', async () => {
+    const config = Config({ codex: { transport: 'direct-responses' } } as never)
+    const requestResponses = vi.fn(async () => new Response('never'))
+    const adapter = new CodingSubscriptionAdapter(config, {
+      codexCredentials: { requestResponses },
+    })
+
+    await expect(adapter.stream({ ...request(), temperature: 0 })[Symbol.asyncIterator]().next())
+      .rejects.toMatchObject({ failure: { code: 'CLI_PROTOCOL_ERROR' } })
+    expect(requestResponses).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['empty-response', EMPTY_RESPONSE_CODE, 'Codex private Responses returned no visible output'],
+    ['context-window', CONTEXT_WINDOW_EXCEEDED_CODE, 'Codex private Responses exceeded the model context window'],
+    ['quota', QUOTA_EXCEEDED_CODE, 'Codex private Responses account quota was exhausted'],
+    ['provider-failure', 'CODEX_DIRECT_PROVIDER_FAILURE', 'Codex private Responses reported a provider failure'],
+    ['content-filter', 'CODEX_DIRECT_CONTENT_FILTER', 'Codex private Responses output was filtered'],
+  ] as const)('maps direct %s to a stable redacted DSH failure', async (cause, code, message) => {
+    const config = Config({ codex: { transport: 'direct-responses' } } as never)
+    const providerSecret = `provider-secret-${cause}`
+    const runCodexDirect = () => rejectedDirectStream(new CodexDirectResponsesError(providerSecret, cause))
+    const adapter = new CodingSubscriptionAdapter(config, { runCodexDirect })
+    let caught: unknown
+
+    try {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    } catch (error: unknown) {
+      caught = error
+    }
+
+    expect(caught).toMatchObject({ failure: { code, message } })
+    expect(errorChain(caught)).not.toContain(providerSecret)
+  })
+
+  it.each([
+    [new CodexDirectResponsesError('provider-secret-http', 'provider-http', 503), 503],
+    [new CodexDirectAuthError('auth-secret-http', 'provider-http', 429), 429],
+  ] as const)('preserves a valid typed direct HTTP status without exposing its source message', async (error, status) => {
+    const config = Config({ codex: { transport: 'direct-responses' } } as never)
+    const runCodexDirect = () => rejectedDirectStream(error)
+    const adapter = new CodingSubscriptionAdapter(config, { runCodexDirect })
+    let caught: unknown
+
+    try {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    } catch (failure: unknown) {
+      caught = failure
+    }
+
+    expect(caught).toMatchObject({
+      failure: {
+        code: 'CODEX_DIRECT_PROVIDER_HTTP',
+        message: 'Codex private Responses provider request failed',
+        status,
+      },
+    })
+    expect(errorChain(caught)).not.toContain(error.message)
+  })
+
+  it('retains subscription-auth status while keeping its established DSH code', async () => {
+    const config = Config({ codex: { transport: 'direct-responses' } } as never)
+    const error = new CodexDirectResponsesError('provider-secret-auth', 'subscription-auth', 401)
+    const adapter = new CodingSubscriptionAdapter(config, {
+      runCodexDirect: () => rejectedDirectStream(error),
+    })
+    let caught: unknown
+
+    try {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    } catch (failure: unknown) {
+      caught = failure
+    }
+
+    expect(caught).toMatchObject({ failure: { code: 'SUBSCRIPTION_AUTH_REQUIRED', status: 401 } })
+    expect(errorChain(caught)).not.toContain(error.message)
+  })
+
+  it.each([
+    ['timeout', 'CLI_TIMEOUT', 'Codex private Responses request timed out'],
+    ['protocol', 'CLI_PROTOCOL_ERROR', 'Codex private Responses returned an unrecognized or incomplete stream'],
+    ['transport', 'CODEX_DIRECT_TRANSPORT_ERROR', 'Codex private Responses transport failed'],
+  ] as const)('retains the direct %s failure class', async (cause, code, message) => {
+    const config = Config({ codex: { transport: 'direct-responses' } } as never)
+    const error = new CodexDirectAuthError(`redacted ${cause}`, cause)
+    const adapter = new CodingSubscriptionAdapter(config, {
+      runCodexDirect: () => rejectedDirectStream(error),
+    })
+
+    await expect((async () => {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    })()).rejects.toMatchObject({ failure: { code, message } })
+  })
+
+  it('preserves an auth refresh 429 through the public LlmRuntime finish failure', async () => {
+    const config = Config({ codex: { transport: 'direct-responses' } } as never)
+    const requestResponses = vi.fn(async () => {
+      throw new CodexDirectAuthError('Codex OAuth token refresh failed', 'provider-http', 429)
+    })
+    const adapter = new RawCodingSubscriptionAdapter(config, {
+      codexCredentials: { requestResponses },
+      liveSessions: {
+        get: () => ({ id: TEST_SESSION_ID, header: { cwd: process.cwd() } }),
+      },
+    } as never)
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    ctx.llm.registerAdapter(['codex-subscription'], adapter)
+    const prepared = await ctx.llm.prepareCall({ provider: 'codex-subscription', model: 'default' })
+    const reasoningEffort = prepared.config.reasoningEffort
+    if (reasoningEffort === undefined) throw new Error('expected a configured direct reasoning default')
+    const chunks = []
+
+    for await (const chunk of prepared.stream(loopOwnedRequest({ ...request(), reasoningEffort }))) chunks.push(chunk)
+
+    expect(chunks.at(-1)).toEqual({
+      type: 'finish',
+      reason: {
+        kind: 'error',
+        failure: {
+          code: 'CODEX_DIRECT_PROVIDER_HTTP',
+          message: 'Codex private Responses provider request failed',
+          status: 429,
+        },
+      },
+    })
+    expect(requestResponses).toHaveBeenCalledOnce()
+    await ctx.fiber.dispose()
+  })
+
+  it('drops an invalid typed HTTP status instead of constructing an invalid LlmError', async () => {
+    const config = Config({ codex: { transport: 'direct-responses' } } as never)
+    const error = new CodexDirectAuthError('redacted invalid status', 'provider-http', 700)
+    const adapter = new CodingSubscriptionAdapter(config, {
+      runCodexDirect: () => rejectedDirectStream(error),
+    })
+    let caught: unknown
+
+    try {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    } catch (failure: unknown) {
+      caught = failure
+    }
+
+    expect(caught).toMatchObject({ failure: { code: 'CODEX_DIRECT_PROVIDER_HTTP' } })
+    expect(caught).not.toMatchObject({ failure: { status: expect.anything() } })
+  })
+
+  it('still serves a request that supplies an empty tool list', async () => {
+    const runText = vi.fn(() => (async function* () { yield 'text only' })())
+    const adapter = new CodingSubscriptionAdapter(Config(), { runText, verifyAuth: async () => {} })
+    const chunks = []
+    for await (const chunk of adapter.stream({ ...request(), tools: [] })) chunks.push(chunk)
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(runText).toHaveBeenCalledTimes(1)
   })
 
   it('redacts common secrets before diagnostics are logged', () => {
@@ -204,10 +999,10 @@ describe('coding subscription LLM adapter', () => {
   })
 
   it('returns actionable guidance when Codex refuses the configured cwd', async () => {
-    const config = Config({ cwd: '/workspace-parent' } as never)
+    const config = Config()
     let context: unknown
     const runText = (invocation: CliInvocation, options?: RunCliTextOptions) => (async function* (): AsyncIterable<string> {
-      expect(invocation.cwd).toBe('/workspace-parent')
+      expect(invocation.cwd).toBe(process.cwd())
       yield* []
       options?.onSettled?.({
         phase: 'child-close',
@@ -305,6 +1100,33 @@ describe('coding subscription LLM adapter', () => {
       promptSubmissionState: 'not-submitted',
       outcome: 'preflight',
       teardownState: 'not-started',
+    })
+  })
+
+  it('maps a direct Responses request-size refusal to the compaction-aware preflight failure', async () => {
+    let context: { phase?: string; promptSubmissionState?: string; outcome?: string } | undefined
+    const config = Config()
+    config.codex.transport = 'direct-responses'
+    const requestResponses = vi.fn(async () => new Response('never'))
+    const runCodexDirect = vi.fn(() => rejectedDirectStream(
+      new Error('Codex private Responses request exceeds the configured request limit', {
+        cause: 'prompt-limit',
+      }),
+    ))
+    const adapter = new CodingSubscriptionAdapter(config, {
+      runCodexDirect,
+      codexCredentials: { requestResponses },
+      onSettled: value => { context = value },
+    })
+
+    await expect((async () => {
+      for await (const _chunk of adapter.stream(request())) { /* drain */ }
+    })()).rejects.toMatchObject({ code: CONTEXT_WINDOW_EXCEEDED_CODE })
+    expect(requestResponses).not.toHaveBeenCalled()
+    expect(context).toMatchObject({
+      phase: 'preflight',
+      promptSubmissionState: 'not-submitted',
+      outcome: 'preflight',
     })
   })
 

@@ -8,6 +8,7 @@ import type { AssistantPolicyService, PolicyDecision } from '@dsh-enhanced/assis
 import { AutomationArtifactStore } from './artifacts.js'
 import {
   AutomationCoordinator,
+  type AutomationOutcomeRecorder,
   type AutomationRunner,
   type AutomationRunnerInput,
 } from './coordinator.js'
@@ -23,7 +24,36 @@ import type {
   AutomationProposalResult,
   AutomationRecord,
   AutomationRun,
+  MisfirePolicy,
+  OverlapPolicy,
+  RetrySafety,
 } from './types.js'
+
+export interface AutomationProposalDefaults {
+  provider: string
+  model: string
+  /** Maximum tool set from which a model may request an immutable subset. */
+  allowedTools: string[]
+  timeoutMs: number
+  maxOutputTokens: number
+  maxToolCalls: number
+  misfireKind: MisfirePolicy['kind']
+  misfireLimit: number
+  overlap: OverlapPolicy
+  retrySafety: RetrySafety
+  maxRetries: number
+  budgetId: string
+  budgetAmount: number
+}
+
+export type AutomationProposalMutation =
+  | {
+      op: 'create'
+      automationId: string
+      definition: Pick<AutomationDefinition, 'allowedTools' | 'name' | 'prompt' | 'schedule'>
+        & Partial<AutomationDefinition>
+    }
+  | Exclude<AutomationMutation, { op: 'create' }>
 
 export interface Config {
   databasePath: string
@@ -37,13 +67,41 @@ export interface Config {
   maxConcurrency?: number
   maxArtifactBytes?: number
   defaultProposalTtlMs?: number
+  /**
+   * Poll interval for committing proposals that were approved out of band, for
+   * example on an approval card after the originating turn ended. This runs even
+   * when `schedulerEnabled` is false, because approving a paused automation must
+   * still take effect. `0` disables the timer.
+   */
+  reconcileIntervalMs?: number
+  /** Maximum locally pending proposals inspected per reconcile pass. */
+  reconcileLimit?: number
+  /** Safe default: every unattended occurrence must reserve a configured Policy budget. */
+  allowUnbudgetedExecution?: boolean
+  /** Trusted authority and execution bounds used for model-proposed definitions. */
+  proposalDefaults?: AutomationProposalDefaults
+  /** Audited native-tool routes whose upstream adapters do not publish registry metadata yet. */
+  toolCapableProviders?: string[]
 }
 
 export interface AutomationServiceProposalInput {
   idempotencyKey: string
-  principal: string
-  ttlMs?: number
-  mutation: AutomationMutation
+  /** Headless-only compatibility. When Delivery is present this must exactly match its owner. */
+  principal?: string
+  mutation: AutomationProposalMutation
+}
+
+/**
+ * Bounded view of one proposal awaiting a decision. Deliberately excludes the
+ * prompt, principal, and any host path so it is safe to surface to a model.
+ */
+export interface PendingAutomationProposal {
+  proposalId: string
+  automationId: string
+  operation: AutomationMutation['op']
+  expiresAt: number
+  version: number
+  attachedToPolicy: boolean
 }
 
 export interface SystemAutomationReconcileInput {
@@ -56,7 +114,9 @@ export interface SystemAutomationReconcileInput {
 
 export type AssistantAutomationsErrorCode =
   | 'disposed'
+  | 'invalid-proposal'
   | 'missing-identity'
+  | 'missing-approval-route'
   | 'policy-denied'
   | 'unauthorized-principal'
 
@@ -66,6 +126,44 @@ export class AssistantAutomationsError extends Error {
     this.name = 'AssistantAutomationsError'
   }
 }
+
+const proposalDefaults = Object.freeze<AutomationProposalDefaults>({
+  provider: 'deepseek-official',
+  model: 'deepseek-chat',
+  allowedTools: [],
+  timeoutMs: 60_000,
+  maxOutputTokens: 512,
+  maxToolCalls: 0,
+  misfireKind: 'latest',
+  misfireLimit: 1,
+  overlap: 'skip',
+  retrySafety: 'never',
+  maxRetries: 0,
+  budgetId: 'assistant-automations-proposals',
+  budgetAmount: 1,
+})
+
+const routeText = Schema.string().pattern(/^[^\s\p{Cc}]{1,500}$/u)
+const boundedId = Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/u)
+const proposalDefaultsSchema = Schema.object({
+  provider: routeText.required(),
+  model: routeText.required(),
+  allowedTools: Schema.array(boundedId).max(100).required(),
+  timeoutMs: Schema.number().step(1).min(1_000).max(86_400_000).required(),
+  maxOutputTokens: Schema.number().step(1).min(1).max(1_000_000).required(),
+  maxToolCalls: Schema.number().step(1).min(0).max(10_000).required(),
+  misfireKind: Schema.union([
+    Schema.const('skip'), Schema.const('latest'), Schema.const('bounded-replay'),
+  ]).required(),
+  misfireLimit: Schema.number().step(1).min(1).max(100).required(),
+  overlap: Schema.union([
+    Schema.const('skip'), Schema.const('queue-one'), Schema.const('cancel-previous'),
+  ]).required(),
+  retrySafety: Schema.union([Schema.const('never'), Schema.const('idempotent')]).required(),
+  maxRetries: Schema.number().step(1).min(0).max(10).required(),
+  budgetId: boundedId.required(),
+  budgetAmount: Schema.number().step(1).min(1).max(10_000_000).required(),
+}).default(proposalDefaults)
 
 const configSchema = Schema.object({
   databasePath: Schema.string().required(),
@@ -79,6 +177,13 @@ const configSchema = Schema.object({
   maxConcurrency: Schema.number().step(1).min(1).max(100).default(1),
   maxArtifactBytes: Schema.number().step(1).min(128).max(16 * 1024 * 1024).default(1_048_576),
   defaultProposalTtlMs: Schema.number().step(1).min(1).default(900_000),
+  reconcileIntervalMs: Schema.number().step(1).min(0).default(15_000),
+  reconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
+  allowUnbudgetedExecution: Schema.boolean().default(false),
+  proposalDefaults: proposalDefaultsSchema,
+  toolCapableProviders: Schema.array(
+    Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u),
+  ).default(['deepseek-official']),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' {
@@ -132,6 +237,7 @@ export class AssistantAutomationsService extends Service {
   private readonly policy: AssistantPolicyService
   private readonly coordinator: AutomationCoordinator
   private readonly config: Required<Config>
+  private approvalDelivery: Pick<AssistantDeliveryService, 'prepareAgentApproval'> | undefined
   private active = true
 
   constructor(ctx: Context, input: Config) {
@@ -145,15 +251,22 @@ export class AssistantAutomationsService extends Service {
     if (!isAbsolute(config.databasePath) || !isAbsolute(config.runsPath)) {
       throw new Error('assistant-automations: databasePath and runsPath must be absolute paths')
     }
+    if (new Set(config.proposalDefaults.allowedTools).size !== config.proposalDefaults.allowedTools.length) {
+      throw new Error('assistant-automations: invalid configuration: proposalDefaults.allowedTools contains a duplicate')
+    }
     const policy = ctx.get('assistantPolicy') as AssistantPolicyService | undefined
     if (policy === undefined) throw new Error('assistant-automations: assistantPolicy service is required')
     this.config = config
     this.policy = policy
+    this.approvalDelivery = ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     this.store = new AutomationStore({ path: config.databasePath })
     this.proposalStore = new AutomationProposalStore({ path: config.databasePath })
     this.proposals = new AutomationProposalManager(this.store, this.proposalStore, policy)
     const artifacts = new AutomationArtifactStore({ rootPath: config.runsPath, maxBytes: config.maxArtifactBytes })
-    const runner = new PolicyBoundRunner(policy, new DshAutomationRunner(ctx, policy))
+    const runner = new PolicyBoundRunner(policy, new DshAutomationRunner(ctx, policy, {
+      allowUnbudgetedExecution: config.allowUnbudgetedExecution,
+      toolCapableProviders: config.toolCapableProviders,
+    }))
     this.coordinator = new AutomationCoordinator({
       store: this.store,
       artifacts,
@@ -168,10 +281,36 @@ export class AssistantAutomationsService extends Service {
     })
     ctx.inject(['assistantDelivery'], deliveryCtx => {
       const delivery = deliveryCtx.get('assistantDelivery') as AssistantDeliveryService
+      this.approvalDelivery = delivery
       this.coordinator.setDeliveryDispatcher(delivery)
-      return () => this.coordinator.setDeliveryDispatcher(undefined)
+      return () => {
+        if (this.approvalDelivery === delivery) this.approvalDelivery = undefined
+        this.coordinator.setDeliveryDispatcher(undefined)
+      }
+    })
+    // Optional: when a learning plugin is composed, finished runs become evidence.
+    // The binding is one-way and structural, so the scheduler works identically
+    // whether or not assistant-evolution is installed.
+    ctx.inject(['assistantEvolution'], evolutionCtx => {
+      const recorder = evolutionCtx.get('assistantEvolution') as AutomationOutcomeRecorder
+      this.coordinator.setOutcomeRecorder(recorder)
+      return () => this.coordinator.setOutcomeRecorder(undefined)
     })
     if (config.schedulerEnabled) this.coordinator.start()
+    if (config.reconcileIntervalMs > 0) {
+      ctx.effect(() => {
+        const timer = setInterval(() => {
+          // A reconcile pass must never take the service down; the next tick retries.
+          try {
+            this.reconcileProposals()
+          } catch {
+            // Intentionally ignored: the authoritative state stays in the ledger.
+          }
+        }, config.reconcileIntervalMs)
+        timer.unref?.()
+        return () => clearInterval(timer)
+      }, 'assistant-automations.reconcile')
+    }
     ctx.inject(['tools'], toolsCtx => registerAutomationTools(toolsCtx, this))
     ctx.effect(() => async () => {
       this.active = false
@@ -183,18 +322,103 @@ export class AssistantAutomationsService extends Service {
 
   propose(agent: Agent | undefined, input: AutomationServiceProposalInput): AutomationProposalResult {
     const identity = this.authorizeAgent(agent, 'propose', input.mutation.automationId, `automation-propose:${input.idempotencyKey}`)
+    const approval = this.resolveApprovalRoute(agent, identity, input.principal)
+    let mutation: AutomationMutation
+    if (input.mutation.op === 'create') {
+      const requestedTools = input.mutation.definition.allowedTools
+      if (!Array.isArray(requestedTools)
+        || requestedTools.some(tool => typeof tool !== 'string'
+          || !this.config.proposalDefaults.allowedTools.includes(tool))
+        || new Set(requestedTools).size !== requestedTools.length) {
+        throw new AssistantAutomationsError(
+          'invalid-proposal',
+          'automation proposal allowed tools must be a unique subset of proposalDefaults.allowedTools',
+        )
+      }
+      const defaults = this.config.proposalDefaults
+      const misfire: MisfirePolicy = defaults.misfireKind === 'bounded-replay'
+        ? { kind: 'bounded-replay', limit: defaults.misfireLimit }
+        : { kind: defaults.misfireKind }
+      mutation = {
+        op: 'create',
+        automationId: input.mutation.automationId,
+        definition: {
+          name: input.mutation.definition.name,
+          prompt: input.mutation.definition.prompt,
+          schedule: input.mutation.definition.schedule,
+          workspace: identity.workspace,
+          agentPreset: identity.agentPreset,
+          provider: defaults.provider,
+          model: defaults.model,
+          allowedTools: requestedTools,
+          timeoutMs: defaults.timeoutMs,
+          maxOutputTokens: defaults.maxOutputTokens,
+          maxToolCalls: defaults.maxToolCalls,
+          misfire,
+          overlap: defaults.overlap,
+          retrySafety: defaults.retrySafety,
+          maxRetries: defaults.maxRetries,
+          principal: approval.principal,
+          budgetId: defaults.budgetId,
+          budgetAmount: defaults.budgetAmount,
+          ...(approval.dispatch === undefined ? {} : { deliveryBindingId: approval.dispatch.bindingId }),
+        },
+      }
+    } else {
+      const current = this.store.get(input.mutation.automationId)
+      if (current !== undefined && (current.definition.workspace !== identity.workspace
+        || current.definition.agentPreset !== identity.agentPreset
+        || current.definition.principal !== approval.principal
+        || current.definition.deliveryBindingId !== approval.dispatch?.bindingId)) {
+        throw new AssistantAutomationsError(
+          'missing-approval-route',
+          'automation lifecycle proposal does not match the immutable owner route',
+        )
+      }
+      mutation = input.mutation
+    }
     return this.proposals.propose({
       idempotencyKey: input.idempotencyKey,
       requester: `agent:${identity.agentPreset}`,
-      principal: input.principal,
-      ttlMs: input.ttlMs ?? this.config.defaultProposalTtlMs,
-      mutation: input.mutation,
+      principal: approval.principal,
+      ...(approval.dispatch === undefined ? {} : { dispatch: approval.dispatch }),
+      ttlMs: this.config.defaultProposalTtlMs,
+      mutation,
     })
   }
 
   decideProposal(input: AutomationProposalDecisionInput): AutomationProposalResult {
     this.assertActive()
     return this.proposals.decide(input)
+  }
+
+  /**
+   * Commit proposals whose policy decision settled after the originating turn.
+   * Without this, an approval granted on a chat card would leave the automation
+   * proposal pending forever. Safe to call repeatedly.
+   */
+  reconcileProposals(limit?: number): AutomationProposalResult[] {
+    this.assertActive()
+    return this.proposals.reconcile(limit ?? this.config.reconcileLimit)
+  }
+
+  /**
+   * List proposals still awaiting a decision, so a turn can tell the owner what
+   * it already asked for instead of silently re-proposing the same change.
+   *
+   * Bounded metadata only: no prompts, principals, or host paths.
+   */
+  listPendingProposals(agent: Agent | undefined, limit?: number): PendingAutomationProposal[] {
+    this.authorizeAgent(agent, 'inspect', 'pending-proposals')
+    const bounded = Math.min(limit ?? this.config.reconcileLimit, this.config.reconcileLimit)
+    return this.proposalStore.listPending(bounded).map(proposal => Object.freeze({
+      proposalId: proposal.proposalId,
+      automationId: proposal.mutation.automationId,
+      operation: proposal.mutation.op,
+      expiresAt: proposal.expiresAt,
+      version: proposal.version,
+      attachedToPolicy: proposal.policyProposalId !== undefined,
+    }))
   }
 
   getProposal(proposalId: string, principal: string): AutomationProposalResult | undefined {
@@ -347,6 +571,45 @@ export class AssistantAutomationsService extends Service {
     )
     if (decision.effect !== 'allow') throw policyError(decision)
     return { workspace, agentPreset }
+  }
+
+  private resolveApprovalRoute(
+    agent: Agent | undefined,
+    identity: { workspace: string; agentPreset: string },
+    explicitPrincipal: string | undefined,
+  ): {
+      principal: string
+      dispatch?: ReturnType<AssistantDeliveryService['prepareAgentApproval']>
+    } {
+    const delivery = this.approvalDelivery
+    if (delivery === undefined) {
+      if (explicitPrincipal === undefined || explicitPrincipal.trim() === '') {
+        throw new AssistantAutomationsError(
+          'missing-approval-route',
+          'automation proposal requires an authenticated Delivery route or explicit trusted headless principal',
+        )
+      }
+      return { principal: explicitPrincipal }
+    }
+    const dispatch = delivery.prepareAgentApproval(agent, {
+      sourceId: 'dsh-enhanced-assistant-automations',
+    })
+    if (dispatch.sourceId !== 'dsh-enhanced-assistant-automations'
+      || dispatch.workspace !== identity.workspace
+      || dispatch.bindingId.trim() === ''
+      || dispatch.principal.trim() === '') {
+      throw new AssistantAutomationsError(
+        'missing-approval-route',
+        'automation proposal Delivery approval route does not match the current Agent workspace',
+      )
+    }
+    if (explicitPrincipal !== undefined && explicitPrincipal !== dispatch.principal) {
+      throw new AssistantAutomationsError(
+        'unauthorized-principal',
+        'automation proposal principal does not match the authenticated Delivery owner',
+      )
+    }
+    return { principal: dispatch.principal, dispatch }
   }
 
   private assertActive(): void {

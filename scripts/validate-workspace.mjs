@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pluginsRoot = join(repoRoot, 'plugins')
+const packagesRoot = join(repoRoot, 'packages')
 const errors = []
 const packageNames = new Set()
 const rowIds = new Set()
@@ -140,6 +141,74 @@ for (const entry of entries) {
   }
 }
 
+const packageEntries = (await readdir(packagesRoot, { withFileTypes: true }))
+  .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
+  .sort((left, right) => left.name.localeCompare(right.name))
+
+for (const entry of packageEntries) {
+  const packageRoot = join(packagesRoot, entry.name)
+  const manifestPath = join(packageRoot, 'package.json')
+  if (!await exists(manifestPath)) {
+    report(packageRoot, 'missing package.json')
+    continue
+  }
+
+  let manifest
+  try {
+    manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+  } catch (error) {
+    report(manifestPath, `invalid JSON: ${error.message}`)
+    continue
+  }
+
+  const expectedSuffix = `/${entry.name}`
+  if (typeof manifest.name !== 'string' || !manifest.name.endsWith(expectedSuffix)) {
+    report(manifestPath, `package name must end with ${expectedSuffix}`)
+  } else if (packageNames.has(manifest.name)) {
+    report(manifestPath, `duplicate package name ${manifest.name}`)
+  } else {
+    packageNames.add(manifest.name)
+  }
+
+  if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(manifest.version ?? '')) {
+    report(manifestPath, 'version must be valid semver without build metadata')
+  }
+  if (manifest.type !== 'module') report(manifestPath, 'type must be module')
+  if (manifest.private === true) report(manifestPath, 'shared packages must be publishable, not private')
+  if (manifest.dsh?.bundle !== undefined) {
+    report(manifestPath, 'ordinary shared packages must not declare dsh.bundle')
+  }
+
+  for (const required of ['lib', 'README.md', 'LICENSE']) {
+    if (!includesFile(manifest.files, required)) report(manifestPath, `files must include ${required}`)
+  }
+  for (const script of ['build', 'test', 'typecheck']) {
+    if (typeof manifest.scripts?.[script] !== 'string') report(manifestPath, `missing ${script} script`)
+  }
+  if (manifest.scripts?.prepublishOnly !== 'node ../../scripts/require-pnpm-publish.mjs') {
+    report(manifestPath, 'prepublishOnly must reject publishing catalog dependencies with npm')
+  }
+
+  for (const required of [
+    'src/index.ts',
+    'src/version.ts',
+    'tests/index.spec.ts',
+    'tsconfig.json',
+    'tsconfig.build.json',
+    'README.md',
+    'LICENSE',
+  ]) {
+    if (!await exists(join(packageRoot, required))) report(packageRoot, `missing ${required}`)
+  }
+
+  const versionPath = join(packageRoot, 'src', 'version.ts')
+  if (await exists(versionPath)) {
+    const versionSource = await readFile(versionPath, 'utf8')
+    const runtimeVersion = versionSource.match(/export const version = ['"]([^'"]+)['"]/)?.[1]
+    if (runtimeVersion !== manifest.version) report(versionPath, `runtime version must equal ${manifest.version}`)
+  }
+}
+
 const templateRequired = [
   'package.json.tpl',
   'cordis.patch.yml.tpl',
@@ -161,4 +230,4 @@ if (errors.length > 0) {
   process.exit(1)
 }
 
-console.log(`Validated ${entries.length} plugin package(s).`)
+console.log(`Validated ${entries.length} plugin package(s) and ${packageEntries.length} shared package(s).`)

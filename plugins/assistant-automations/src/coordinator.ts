@@ -38,6 +38,37 @@ export interface AutomationDeliveryDispatcher {
   }): { id: string; status: string }
 }
 
+/**
+ * Optional one-way sink for finished-run outcomes, used to feed behavioural
+ * learning. Structural interface rather than a service import, so the scheduler
+ * stays independent of whether any learning plugin is installed.
+ */
+export interface AutomationOutcomeRecorder {
+  recordAutomationOutcome(input: {
+    situation: string
+    outcome: 'succeeded' | 'failed'
+    detail: string
+    idempotencyKey: string
+    occurredAt: number
+    workspace?: string
+    agentPreset?: string
+    automationId?: string
+    runId?: string
+    sessionId?: string
+    ruleId?: string
+    guidanceVersion?: number
+  }): void
+  /** Query an authoritative receipt written only after guidance was injected. */
+  captureAutomationExposure?(input: {
+    workspace: string
+    agentPreset: string
+    automationId: string
+    sessionId: string
+  }): Promise<{ ruleId: string; guidanceVersion: number } | undefined>
+    | { ruleId: string; guidanceVersion: number }
+    | undefined
+}
+
 export class AutomationRunnerAmbiguousError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options)
@@ -69,6 +100,15 @@ function preview(value: string, maximumBytes = 8_192): string {
   return bytes.subarray(0, maximumBytes).toString('utf8').replace(/\uFFFD$/u, '')
 }
 
+function boundedText(value: unknown, maximumBytes: number): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const normalized = value.normalize('NFC').trim()
+  if (normalized === '' || Buffer.byteLength(normalized, 'utf8') > maximumBytes) return undefined
+  return normalized
+}
+
+const exposureReceiptTimeoutMs = 2_000
+
 export class AutomationCoordinator {
   private readonly store: AutomationStore
   private readonly artifacts: AutomationArtifactStore
@@ -83,6 +123,7 @@ export class AutomationCoordinator {
   private readonly tickIntervalMs: number
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>()
   private delivery: AutomationDeliveryDispatcher | undefined
+  private outcomeRecorder: AutomationOutcomeRecorder | undefined
   private fencingToken: number | undefined
   private timer: ReturnType<typeof setInterval> | undefined
   private stopped = false
@@ -116,6 +157,7 @@ export class AutomationCoordinator {
     if (this.stopped) throw new Error('assistant-automations coordinator is stopped')
     const now = this.now()
     if (!this.ensureDuty(now)) return
+    this.dispatchPendingEvidence()
     this.dispatchPendingDeliveries()
     this.store.recoverExpiredTasks({ now, limit: this.maxCatchUp })
     this.store.materializeDue({ now, misfireGraceMs: this.misfireGraceMs, maxCatchUp: this.maxCatchUp })
@@ -135,6 +177,17 @@ export class AutomationCoordinator {
 
   setDeliveryDispatcher(delivery: AutomationDeliveryDispatcher | undefined): void {
     this.delivery = delivery
+  }
+
+  /**
+   * Attach an optional sink for finished-run outcomes.
+   *
+   * Kept optional and one-way so the scheduler never depends on a learning
+   * plugin: if no recorder is attached, or the recorder throws, runs proceed
+   * unchanged. Evidence collection must never be able to break execution.
+   */
+  setOutcomeRecorder(recorder: AutomationOutcomeRecorder | undefined): void {
+    this.outcomeRecorder = recorder
   }
 
   async whenIdle(): Promise<void> {
@@ -254,33 +307,109 @@ export class AutomationCoordinator {
       }
     } finally {
       clearTimeout(timeout)
+    }
+    try {
+      const evidenceSessionId = result.sessionId === freshSessionId ? freshSessionId : undefined
+      const exposure = evidenceSessionId === undefined
+        ? undefined
+        : await this.getExposure(automation, evidenceSessionId)
+      const outcome: AutomationRunStatus = timedOut
+        ? 'timed_out'
+        : controller.signal.aborted ? 'cancelled' : result.outcome
+      const outputPreview = preview(result.output)
+      const artifactRef = this.artifacts.write(occurrence.id, {
+        occurrenceId: occurrence.id,
+        automationId: automation.id,
+        taskId: started.id,
+        outcome,
+        sessionId: result.sessionId ?? freshSessionId,
+        output: result.output,
+        usage: result.usage,
+      })
+      const run = this.store.completeTask({
+        taskId: started.id,
+        ownerId: this.ownerId,
+        fencingToken: fence,
+        now: this.now(),
+        outcome,
+        sessionId: result.sessionId ?? freshSessionId,
+        artifactRef,
+        outputPreview,
+        usage: result.usage,
+        ...(evidenceSessionId === undefined
+          ? {}
+          : {
+              evidenceAttribution: {
+                sessionId: evidenceSessionId,
+                ...(exposure === undefined ? {} : exposure),
+              },
+            }),
+      })
+      this.dispatchRunDelivery(run)
+      this.dispatchRunEvidence(run)
+    } finally {
       clearInterval(heartbeat)
     }
-    const outcome: AutomationRunStatus = timedOut
-      ? 'timed_out'
-      : controller.signal.aborted ? 'cancelled' : result.outcome
-    const outputPreview = preview(result.output)
-    const artifactRef = this.artifacts.write(occurrence.id, {
-      occurrenceId: occurrence.id,
-      automationId: automation.id,
-      taskId: started.id,
-      outcome,
-      sessionId: result.sessionId ?? freshSessionId,
-      output: result.output,
-      usage: result.usage,
-    })
-    const run = this.store.completeTask({
-      taskId: started.id,
-      ownerId: this.ownerId,
-      fencingToken: fence,
-      now: this.now(),
-      outcome,
-      sessionId: result.sessionId ?? freshSessionId,
-      artifactRef,
-      outputPreview,
-      usage: result.usage,
-    })
-    this.dispatchRunDelivery(run)
+  }
+
+  private async getExposure(
+    automation: AutomationRecord,
+    actualSessionId: string,
+  ): Promise<{ ruleId: string; guidanceVersion: number } | undefined> {
+    const recorder = this.outcomeRecorder
+    if (recorder?.captureAutomationExposure === undefined) return undefined
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      const captured = await Promise.race([
+        Promise.resolve(recorder.captureAutomationExposure({
+          workspace: automation.definition.workspace,
+          agentPreset: automation.definition.agentPreset,
+          automationId: automation.id,
+          sessionId: actualSessionId,
+        })),
+        new Promise<undefined>(resolve => {
+          timeout = setTimeout(() => resolve(undefined), exposureReceiptTimeoutMs)
+        }),
+      ])
+      if (captured === undefined) return undefined
+      const ruleId = boundedText(captured.ruleId, 200)
+      if (
+        ruleId === undefined
+        || !Number.isSafeInteger(captured.guidanceVersion)
+        || captured.guidanceVersion < 1
+        || captured.guidanceVersion > 1_000_000_000
+      ) {
+        return undefined
+      }
+      return { ruleId, guidanceVersion: captured.guidanceVersion }
+    } catch {
+      return undefined
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout)
+    }
+  }
+
+  private dispatchPendingEvidence(): void {
+    if (this.outcomeRecorder === undefined) return
+    for (const run of this.store.listPendingEvidence(100)) this.dispatchRunEvidence(run)
+  }
+
+  private dispatchRunEvidence(run: AutomationRun): void {
+    const recorder = this.outcomeRecorder
+    if (recorder === undefined || run.evidenceStatus !== 'pending' || run.evidence === undefined) return
+    try {
+      recorder.recordAutomationOutcome(run.evidence)
+      this.store.completeRunEvidence({ runId: run.id, expectedStatus: 'pending', now: this.now() })
+    } catch {
+      // Evidence is an outbox lane: the run remains terminal and a later leader
+      // tick repeats the same recorder idempotency key. Move a poison row behind
+      // its peers so a bounded batch cannot starve newer evidence indefinitely.
+      try {
+        this.store.deferRunEvidence({ runId: run.id, expectedStatus: 'pending', now: this.now() })
+      } catch {
+        // A concurrent settlement or store shutdown already owns the next step.
+      }
+    }
   }
 
   private dispatchPendingDeliveries(): void {

@@ -3,5 +3,6 @@
       name: '@dsh-enhanced/assistant-policy'
       config:
         databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
+        proposalMaintenanceIntervalMs: 15000
         rules: []
         budgets: []

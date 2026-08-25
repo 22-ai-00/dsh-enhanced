@@ -38,6 +38,23 @@ async function writeJson(path, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
+async function publishableEntries(root) {
+  const entries = []
+  for (const directory of ['plugins', 'packages']) {
+    let children
+    try {
+      children = await readdir(join(root, directory), { withFileTypes: true })
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue
+      throw error
+    }
+    for (const child of children) {
+      if (child.isDirectory() && !child.name.startsWith('.')) entries.push({ directory, name: child.name })
+    }
+  }
+  return entries.sort((left, right) => `${left.directory}/${left.name}`.localeCompare(`${right.directory}/${right.name}`))
+}
+
 async function prepare(root, requestedVersion) {
   const ledgerPath = join(root, 'release-manifest.json')
   const ledger = await readJson(ledgerPath)
@@ -52,12 +69,10 @@ async function prepare(root, requestedVersion) {
   }
   const rootManifestPath = join(root, 'package.json')
   const rootManifest = await readJson(rootManifestPath)
-  const pluginEntries = (await readdir(join(root, 'plugins'), { withFileTypes: true }))
-    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
-    .sort((left, right) => left.name.localeCompare(right.name))
-  const plugins = await Promise.all(pluginEntries.map(async entry => {
-    const path = join(root, 'plugins', entry.name, 'package.json')
-    const versionPath = join(root, 'plugins', entry.name, 'src', 'version.ts')
+  const packageEntries = await publishableEntries(root)
+  const workspacePackages = await Promise.all(packageEntries.map(async entry => {
+    const path = join(root, entry.directory, entry.name, 'package.json')
+    const versionPath = join(root, entry.directory, entry.name, 'src', 'version.ts')
     return {
       path,
       manifest: await readJson(path),
@@ -68,14 +83,14 @@ async function prepare(root, requestedVersion) {
 
   rootManifest.version = version
   const packages = {}
-  for (const plugin of plugins) {
-    const versionMatch = plugin.versionSource.match(/export const version = ['"]([^'"]+)['"]/)
-    if (!versionMatch || versionMatch[1] !== plugin.manifest.version) {
-      throw new Error(`${plugin.manifest.name} src/version.ts must match package.json`)
+  for (const workspacePackage of workspacePackages) {
+    const versionMatch = workspacePackage.versionSource.match(/export const version = ['"]([^'"]+)['"]/)
+    if (!versionMatch || versionMatch[1] !== workspacePackage.manifest.version) {
+      throw new Error(`${workspacePackage.manifest.name} src/version.ts must match package.json`)
     }
-    plugin.manifest.version = version
-    plugin.versionSource = plugin.versionSource.replace(versionMatch[0], `export const version = '${version}'`)
-    packages[plugin.manifest.name] = version
+    workspacePackage.manifest.version = version
+    workspacePackage.versionSource = workspacePackage.versionSource.replace(versionMatch[0], `export const version = '${version}'`)
+    packages[workspacePackage.manifest.name] = version
   }
   ledger.pending = {
     version,
@@ -84,8 +99,8 @@ async function prepare(root, requestedVersion) {
   }
 
   await writeJson(rootManifestPath, rootManifest)
-  await Promise.all(plugins.map(plugin => writeJson(plugin.path, plugin.manifest)))
-  await Promise.all(plugins.map(plugin => writeFile(plugin.versionPath, plugin.versionSource)))
+  await Promise.all(workspacePackages.map(workspacePackage => writeJson(workspacePackage.path, workspacePackage.manifest)))
+  await Promise.all(workspacePackages.map(workspacePackage => writeFile(workspacePackage.versionPath, workspacePackage.versionSource)))
   await writeJson(ledgerPath, ledger)
   console.log(`Prepared release ${version}`)
 }
@@ -99,15 +114,14 @@ async function record(root) {
   if (rootManifest.version !== ledger.pending.version) {
     throw new Error(`Root package is ${rootManifest.version}, expected ${ledger.pending.version}`)
   }
-  const pluginEntries = (await readdir(join(root, 'plugins'), { withFileTypes: true }))
-    .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
-  for (const entry of pluginEntries) {
-    const manifest = await readJson(join(root, 'plugins', entry.name, 'package.json'))
+  const packageEntries = await publishableEntries(root)
+  for (const entry of packageEntries) {
+    const manifest = await readJson(join(root, entry.directory, entry.name, 'package.json'))
     const expectedVersion = ledger.pending.packages[manifest.name]
     if (manifest.version !== expectedVersion) {
       throw new Error(`${manifest.name} is ${manifest.version}, expected ${expectedVersion}`)
     }
-    const versionSource = await readFile(join(root, 'plugins', entry.name, 'src', 'version.ts'), 'utf8')
+    const versionSource = await readFile(join(root, entry.directory, entry.name, 'src', 'version.ts'), 'utf8')
     const runtimeVersion = versionSource.match(/export const version = ['"]([^'"]+)['"]/)?.[1]
     if (runtimeVersion !== expectedVersion) {
       throw new Error(`${manifest.name} runtime version is ${runtimeVersion ?? 'missing'}, expected ${expectedVersion}`)

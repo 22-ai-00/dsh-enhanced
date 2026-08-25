@@ -17,7 +17,7 @@ async function readJson(path: string) {
   return JSON.parse(await readFile(path, 'utf8'))
 }
 
-async function createRepository(currentVersion = '0.1.0') {
+async function createRepository(currentVersion = '0.1.0', withLibrary = false) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-enhanced-release-'))
   temporaryRoots.push(root)
   await mkdir(join(root, 'plugins', 'example', 'src'), { recursive: true })
@@ -34,11 +34,23 @@ async function createRepository(currentVersion = '0.1.0') {
     join(root, 'plugins', 'example', 'src', 'version.ts'),
     `export const version = '${currentVersion}'\n`,
   )
+  if (withLibrary) {
+    await mkdir(join(root, 'packages', 'shared', 'src'), { recursive: true })
+    await writeJson(join(root, 'packages', 'shared', 'package.json'), {
+      name: '@fixture/shared',
+      version: currentVersion,
+    })
+    await writeFile(
+      join(root, 'packages', 'shared', 'src', 'version.ts'),
+      `export const version = '${currentVersion}'\n`,
+    )
+  }
   const current = {
     version: currentVersion,
     releasedAt: '2026-08-18T00:00:00.000Z',
     packages: {
       '@fixture/example': currentVersion,
+      ...(withLibrary ? { '@fixture/shared': currentVersion } : {}),
     },
   }
   await writeJson(join(root, 'release-manifest.json'), {
@@ -113,6 +125,31 @@ describe('release version workflow', () => {
     const ledger = await readJson(join(root, 'release-manifest.json'))
     expect(ledger.pending.version).toBe('1.0.0')
     expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('1.0.0')
+  })
+
+  test('versions ordinary publishable packages together with plugins', async () => {
+    const root = await createRepository('0.1.0', true)
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status, result.stderr).toBe(0)
+    expect((await readJson(join(root, 'packages', 'shared', 'package.json'))).version).toBe('0.1.1')
+    expect(await readFile(join(root, 'packages', 'shared', 'src', 'version.ts'), 'utf8'))
+      .toBe("export const version = '0.1.1'\n")
+    const ledger = await readJson(join(root, 'release-manifest.json'))
+    expect(ledger.pending.packages).toMatchObject({
+      '@fixture/example': '0.1.1',
+      '@fixture/shared': '0.1.1',
+    })
+  })
+
+  test('root pack and publish commands include ordinary packages', async () => {
+    const manifest = await readJson(join(repoRoot, 'package.json'))
+
+    expect(manifest.scripts['pack:check']).toContain("--filter './packages/*'")
+    expect(manifest.scripts['release:publish']).toContain("--filter './packages/*'")
+    expect(manifest.scripts.test).toContain('pnpm run build:packages')
+    expect(manifest.scripts.typecheck).toContain('pnpm run build:packages')
   })
 
   test('status shows the recorded version and next default patch', async () => {

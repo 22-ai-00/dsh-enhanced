@@ -42,6 +42,20 @@ export function canonicalPrincipal(input: ExternalPrincipalKey): ExternalPrincip
   }
 }
 
+/**
+ * Stable Policy identity for one typed external principal.
+ *
+ * Components are encoded independently before joining so a provider-owned `/`
+ * can never move a value across component boundaries. Legacy-safe identifiers
+ * retain their existing representation.
+ */
+export function externalPrincipalId(input: ExternalPrincipalKey): string {
+  const principal = canonicalPrincipal(input)
+  return [principal.channel, principal.account, principal.tenant, principal.user]
+    .map(component => encodeURIComponent(component))
+    .join('/')
+}
+
 export function canonicalConversation(input: ConversationRef): ConversationRef {
   const value = exactObject(input, ['channel', 'account', 'tenant', 'kind', 'chat', 'thread'], 'invalid-conversation')
   if (value.kind !== 'dm' && value.kind !== 'group') {

@@ -80,11 +80,9 @@ describe('durable Lark approval composition', () => {
     const binding = ctx.assistantDelivery.history(agent('approval-session'), {}).binding
     const proposal = ctx.assistantPolicy.propose({ idempotencyKey: 'proposal-1', requester: 'automation-1',
       principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
-      diff: 'send the reviewed result', summary: 'Send result', ttlMs: 60_000 })
-    ctx.assistantDelivery.enqueueApproval({ sourceId: 'automation-1', workspace: '/work/alpha',
-      bindingId: binding.id, idempotencyKey: 'approval-outbox-1', text: 'Send the reviewed result?',
-      approval: { operationId: 'operation-1', proposalId: proposal.proposalId, expectedVersion: proposal.version,
-        expiresAt: proposal.expiresAt, title: 'Approval required' } })
+      diff: 'send the reviewed result', summary: 'Send result', ttlMs: 60_000,
+      dispatch: { sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
+        principal: 'lark/bot-1/tenant-a/ou_owner' } })
     await ctx.assistantDelivery.tick()
     await ctx.assistantDelivery.whenIdle()
     const card = transport.send.mock.calls[0]![1] as { approval: { approveValue: { approval: string } } }

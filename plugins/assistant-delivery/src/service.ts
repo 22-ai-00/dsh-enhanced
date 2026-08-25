@@ -1,19 +1,24 @@
 import { chmodSync, mkdirSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import Schema from '@deepseek-ai/schemastery'
-import type { AssistantPolicyService, PolicyDecision } from '@dsh-enhanced/assistant-policy'
+import type {
+  ApprovalDispatchRoute,
+  AssistantPolicyService,
+  PolicyDecision,
+} from '@dsh-enhanced/assistant-policy'
 import {
   DeliveryAdapterRegistry,
   DeliveryCoordinator,
   InboundCoordinator,
   type InboundMessageProcessor,
 } from './coordinator.js'
-import { DeliveryStore } from './store.js'
+import { DeliveryStore, DeliveryStoreError } from './store.js'
 import { DshDeliveryRuntime } from './agent-runtime.js'
 import { registerDeliveryTools } from './tools.js'
+import { externalPrincipalId } from './canonical.js'
 import type {
   ConversationBinding,
   ConversationRef,
@@ -46,6 +51,8 @@ export interface Config {
   policyRef?: string
   agentProvider?: string
   agentModel?: string
+  /** Audited native-tool routes whose upstream adapters do not publish registry metadata yet. */
+  toolCapableProviders?: string[]
   agentMaxOutputTokens?: number
   modelPickerTtlMs?: number
 }
@@ -91,6 +98,9 @@ const configSchema = Schema.object({
   policyRef: Schema.string().min(1).default('owner-dm'),
   agentProvider: Schema.string().min(1).default('deepseek-official'),
   agentModel: Schema.string().min(1).default('deepseek-v4-flash'),
+  toolCapableProviders: Schema.array(
+    Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u),
+  ).default(['deepseek-official']),
   agentMaxOutputTokens: Schema.number().step(1).min(1).default(8_192),
   modelPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
 }) as Schema<Config>
@@ -103,10 +113,6 @@ declare module '@deepseek-ai/cordis' {
 
 function policyDenied(decision: PolicyDecision): AssistantDeliveryError {
   return new AssistantDeliveryError('policy-denied', `assistant-delivery policy denied operation: ${decision.reasonCode}`)
-}
-
-function externalId(principal: ExternalPrincipalKey): string {
-  return `${principal.channel}/${principal.account}/${principal.tenant}/${principal.user}`
 }
 
 function pickerIncludesRoute(picker: Readonly<ModelPickerIntent>, route: Readonly<ModelRouteRef>): boolean {
@@ -129,6 +135,19 @@ interface ModelSelectionPayload {
   model: string
   reasoningEffort: string | null
   expectedRevision: number
+}
+
+interface ApprovalSettlementInput {
+  operationId: string
+  callbackEventId: string
+  callbackChatId: string
+  bindingId: string
+  principal: ExternalPrincipalKey
+  proposalId: string
+  expectedVersion: number
+  diffHash: string
+  decision: 'approved' | 'rejected'
+  reason: string
 }
 
 function isModelSelectionPayload(value: unknown): value is ModelSelectionPayload {
@@ -161,6 +180,7 @@ export class AssistantDeliveryService extends Service {
   private readonly config: Required<Config>
   private readonly ownerId = `assistant-delivery-${randomUUID()}`
   private readonly bindingFlights = new Map<string, Promise<ConversationBinding>>()
+  private readonly agentApprovalBindings = new WeakMap<Agent, { bindingId: string; token: symbol }>()
   private modelSelectionFlight: Promise<void> | undefined
   private modelSelectionRetryTimer: ReturnType<typeof setTimeout> | undefined
   private runtime: DeliveryInboundRuntime | undefined
@@ -190,7 +210,10 @@ export class AssistantDeliveryService extends Service {
         const result = await this.acceptInbound(envelope)
         return { duplicate: result.duplicate, inboxId: result.inboxId, status: result.status }
       },
-      receipt: async receipt => { this.deliveryStore.recordReceipt(receipt) },
+      receipt: async receipt => {
+        if (!this.active) return
+        this.deliveryStore.recordReceipt(receipt)
+      },
     })
     this.outbound = new DeliveryCoordinator({ store: this.deliveryStore, registry: this.registry,
       ownerId: this.ownerId, leaseMs: config.leaseMs, maxAttempts: config.maxAttempts,
@@ -203,6 +226,7 @@ export class AssistantDeliveryService extends Service {
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         getAgentPresets: () => runtimeCtx.get('agentPresets'),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
+        toolCapableProviders: new Set(config.toolCapableProviders),
         modelPickerTtlMs: config.modelPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
         beginModelCommand: conversation => this.deliveryStore.beginModelCommand(conversation),
@@ -255,7 +279,7 @@ export class AssistantDeliveryService extends Service {
 
   confirmPairing(input: { challengeId: string; principal: ExternalPrincipalKey; code: string }) {
     this.assertActive()
-    const decision = this.policy.authorize({ subject: { kind: 'external', id: externalId(input.principal) },
+    const decision = this.policy.authorize({ subject: { kind: 'external', id: externalPrincipalId(input.principal) },
       action: 'pair.confirm', resource: { kind: 'message', id: 'pairing' }, context: { initiator: 'external' } })
     if (decision.effect !== 'allow') throw policyDenied(decision)
     return this.deliveryStore.confirmPairing(input)
@@ -274,37 +298,123 @@ export class AssistantDeliveryService extends Service {
     return this.deliveryStore.linkPrincipal(input)
   }
 
-  settleApproval(input: {
-    operationId: string
-    callbackEventId: string
-    callbackChatId: string
-    bindingId: string
-    principal: ExternalPrincipalKey
-    proposalId: string
-    expectedVersion: number
-    decision: 'approved' | 'rejected'
-    reason: string
-  }): ReturnType<AssistantPolicyService['decideProposal']> {
-    this.assertActive()
+  private validateApprovalSettlement(input: ApprovalSettlementInput): {
+    approval: NonNullable<OutboxRecord['intent']['approval']>
+    payload: Omit<ApprovalSettlementInput, 'operationId'>
+    principal: string
+  } {
     const binding = this.deliveryStore.getBinding(input.bindingId)
     const current = this.deliveryStore.getPrincipal(input.principal)
-    if (binding?.status !== 'active' || current?.status !== 'active'
+    if (binding?.status !== 'active' || current?.status !== 'active' || current.role !== 'owner'
       || binding.conversation.chat !== input.callbackChatId
-      || JSON.stringify(binding.principal) !== JSON.stringify(current.principal)) {
+      || JSON.stringify(binding.principal) !== JSON.stringify(current.principal)
+      || JSON.stringify(binding.principal) !== JSON.stringify(input.principal)) {
       throw new AssistantDeliveryError('missing-binding', 'approval callback principal or chat does not own the active binding')
     }
-    const payload = { callbackEventId: input.callbackEventId, callbackChatId: input.callbackChatId, bindingId: input.bindingId,
-      principal: current.principal, proposalId: input.proposalId, expectedVersion: input.expectedVersion,
-      decision: input.decision, reason: input.reason }
-    const settlement = this.deliveryStore.beginApprovalSettlement({ operationId: input.operationId, payload })
+    const approval = this.deliveryStore.getApprovalIntent(input.operationId, input.bindingId)
+    if (approval === undefined
+      || approval.proposalId !== input.proposalId
+      || approval.expectedVersion !== input.expectedVersion
+      || approval.diffHash !== input.diffHash) {
+      throw new AssistantDeliveryError('missing-binding', 'approval callback does not match a persisted approval operation')
+    }
+    return {
+      approval,
+      principal: externalPrincipalId(current.principal),
+      payload: { callbackEventId: input.callbackEventId, callbackChatId: input.callbackChatId,
+        bindingId: input.bindingId, principal: current.principal, proposalId: input.proposalId,
+        expectedVersion: input.expectedVersion, diffHash: input.diffHash,
+        decision: input.decision, reason: input.reason },
+    }
+  }
+
+  settleApproval(input: ApprovalSettlementInput): ReturnType<AssistantPolicyService['decideProposal']> {
+    this.assertActive()
+    const { approval, payload, principal } = this.validateApprovalSettlement(input)
+    if (Date.now() >= approval.expiresAt) {
+      throw new AssistantDeliveryError('missing-binding', 'approval callback expired before settlement')
+    }
+    let settlement: ReturnType<DeliveryStore['beginApprovalSettlement']> | undefined
+    try {
+      settlement = this.deliveryStore.beginApprovalSettlement({ operationId: input.operationId, payload,
+        createIfMissing: false })
+    } catch (error) {
+      if (!(error instanceof DeliveryStoreError) || error.code !== 'not-found') throw error
+    }
+    const proposal = this.policy.getProposal(input.proposalId)
+    const immutableProposalMatches = (candidate: ReturnType<AssistantPolicyService['getProposal']>) =>
+      candidate !== undefined
+        && candidate.principal === principal
+        && candidate.expiresAt === approval.expiresAt
+        && candidate.diffHash === approval.diffHash
+        && candidate.summary === approval.title
+    const pendingDecision = proposal !== undefined
+      && immutableProposalMatches(proposal)
+      && proposal.status === 'pending'
+      && Date.now() < proposal.expiresAt
+      && proposal.version === approval.expectedVersion
+    const terminalReplay = (candidate: ReturnType<AssistantPolicyService['getProposal']>) =>
+      candidate !== undefined
+        && immutableProposalMatches(candidate)
+        && approval.expectedVersion < Number.MAX_SAFE_INTEGER
+        && candidate.version === approval.expectedVersion + 1
+        && candidate.status === input.decision
+        && candidate.decidedBy === principal
+        && candidate.decisionReason === input.reason
+    const terminalDecision = terminalReplay(proposal)
+    if (!pendingDecision && !terminalDecision) {
+      throw new AssistantDeliveryError('missing-binding', 'approval proposal no longer matches the persisted operation')
+    }
+    if (settlement === undefined) {
+      if (!pendingDecision) {
+        throw new AssistantDeliveryError('missing-binding', 'terminal approval has no prior durable settlement')
+      }
+      settlement = this.deliveryStore.beginApprovalSettlement({ operationId: input.operationId, payload })
+    }
+    if (settlement.result !== undefined) {
+      if (!terminalReplay(this.policy.getProposal(input.proposalId))) {
+        throw new AssistantDeliveryError('missing-binding', 'completed approval no longer matches Policy')
+      }
+      return settlement.result as ReturnType<AssistantPolicyService['decideProposal']>
+    }
+    if (pendingDecision) {
+      const authorization = this.policy.authorize({ subject: { kind: 'external', id: principal },
+        action: 'approval.decide', resource: { kind: 'message', id: input.bindingId },
+        context: { initiator: 'external' } }, { idempotencyKey: `approval-callback:${input.operationId}` })
+      if (authorization.effect !== 'allow') throw policyDenied(authorization)
+    }
+    const result = this.policy.decideProposal({ proposalId: input.proposalId, principal,
+      expectedVersion: input.expectedVersion, decision: input.decision, reason: input.reason })
+    return this.deliveryStore.completeApprovalSettlement({ operationId: input.operationId,
+      payloadHash: settlement.payloadHash, result }) as ReturnType<AssistantPolicyService['decideProposal']>
+  }
+
+  recoverApprovalSettlement(input: ApprovalSettlementInput): ReturnType<AssistantPolicyService['decideProposal']> | undefined {
+    this.assertActive()
+    const { approval, payload, principal } = this.validateApprovalSettlement(input)
+    let settlement: ReturnType<DeliveryStore['beginApprovalSettlement']>
+    try {
+      settlement = this.deliveryStore.beginApprovalSettlement({ operationId: input.operationId, payload,
+        createIfMissing: false })
+    } catch (error) {
+      if (error instanceof DeliveryStoreError && error.code === 'not-found') return undefined
+      throw error
+    }
+    const proposal = this.policy.getProposal(input.proposalId)
+    const exactTerminal = proposal !== undefined
+      && proposal.principal === principal
+      && proposal.expiresAt === approval.expiresAt
+      && proposal.diffHash === approval.diffHash
+      && proposal.summary === approval.title
+      && approval.expectedVersion < Number.MAX_SAFE_INTEGER
+      && proposal.version === approval.expectedVersion + 1
+      && proposal.status === input.decision
+      && proposal.decidedBy === principal
+      && proposal.decisionReason === input.reason
+    if (!exactTerminal) return undefined
     if (settlement.result !== undefined) {
       return settlement.result as ReturnType<AssistantPolicyService['decideProposal']>
     }
-    const principal = externalId(current.principal)
-    const authorization = this.policy.authorize({ subject: { kind: 'external', id: principal },
-      action: 'approval.decide', resource: { kind: 'message', id: input.bindingId },
-      context: { initiator: 'external' } }, { idempotencyKey: `approval-callback:${input.operationId}` })
-    if (authorization.effect !== 'allow') throw policyDenied(authorization)
     const result = this.policy.decideProposal({ proposalId: input.proposalId, principal,
       expectedVersion: input.expectedVersion, decision: input.decision, reason: input.reason })
     return this.deliveryStore.completeApprovalSettlement({ operationId: input.operationId,
@@ -341,7 +451,7 @@ export class AssistantDeliveryService extends Service {
     if (picker === undefined || !pickerIncludesRoute(picker, expected)) {
       throw new AssistantDeliveryError('missing-binding', 'model picker confirmation is unavailable or invalid')
     }
-    const authorization = this.policy.authorize({ subject: { kind: 'external', id: externalId(current.principal) },
+    const authorization = this.policy.authorize({ subject: { kind: 'external', id: externalPrincipalId(current.principal) },
       action: 'ingest', resource: { kind: 'message', id: `model-selection:${binding.id}` },
       context: { initiator: 'external' } },
     { idempotencyKey: `model-selection:${input.operationId}:${input.callbackEventId}` })
@@ -472,7 +582,7 @@ export class AssistantDeliveryService extends Service {
       record = this.deliveryStore.deadLetterInbox(record.id, 'unauthorized-principal')
       return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
     }
-    const decision = this.policy.authorize({ subject: { kind: 'external', id: externalId(envelope.principal) },
+    const decision = this.policy.authorize({ subject: { kind: 'external', id: externalPrincipalId(envelope.principal) },
       action: 'ingest', resource: { kind: 'message', id: `inbound:${envelope.channel}/${envelope.account}` },
       context: { initiator: 'external' } }, { idempotencyKey: `message-inbound:${record.id}` })
     if (decision.effect !== 'allow') {
@@ -486,6 +596,10 @@ export class AssistantDeliveryService extends Service {
         return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
       }
       binding = await this.ensureBinding(envelope)
+    }
+    if (externalPrincipalId(binding.principal) !== externalPrincipalId(envelope.principal)) {
+      record = this.deliveryStore.deadLetterInbox(record.id, 'binding-principal-mismatch')
+      return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
     }
     if (envelope.kind === 'command' && envelope.text.trim() === '/new') {
       binding = await this.rotateBinding(envelope, binding)
@@ -507,8 +621,11 @@ export class AssistantDeliveryService extends Service {
     if (binding === undefined || binding.status !== 'active') {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding does not exist or is revoked')
     }
+    if (binding.workspace !== input.workspace) {
+      throw new AssistantDeliveryError('missing-binding', 'delivery workspace does not match the active binding')
+    }
     const decision = this.policy.authorize({ subject: { kind: 'background', id: input.sourceId,
-      workspace: input.workspace, principal: externalId(binding.principal) }, action: 'send',
+      workspace: input.workspace, principal: externalPrincipalId(binding.principal) }, action: 'send',
     resource: { kind: 'message', id: binding.id }, context: { initiator: 'background' } },
     { idempotencyKey: `message-send:${input.idempotencyKey}` })
     if (decision.effect !== 'allow') throw policyDenied(decision)
@@ -530,8 +647,24 @@ export class AssistantDeliveryService extends Service {
     if (binding === undefined || binding.status !== 'active') {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding does not exist or is revoked')
     }
+    if (binding.workspace !== input.workspace) {
+      throw new AssistantDeliveryError('missing-binding', 'delivery workspace does not match the active binding')
+    }
+    const owner = this.deliveryStore.getPrincipal(binding.principal)
+    const principal = externalPrincipalId(binding.principal)
+    const proposal = this.policy.getProposal(input.approval.proposalId)
+    if (owner?.status !== 'active' || owner.role !== 'owner'
+      || proposal === undefined || proposal.status !== 'pending' || Date.now() >= proposal.expiresAt
+      || proposal.principal !== principal
+      || proposal.version !== input.approval.expectedVersion
+      || proposal.expiresAt !== input.approval.expiresAt
+      || proposal.summary !== input.approval.title
+      || proposal.diffHash !== input.approval.diffHash
+      || createHash('sha256').update(input.text).digest('hex') !== proposal.diffHash) {
+      throw new AssistantDeliveryError('missing-binding', 'approval card does not match its active owner and Policy proposal')
+    }
     const decision = this.policy.authorize({ subject: { kind: 'background', id: input.sourceId,
-      workspace: input.workspace, principal: externalId(binding.principal) }, action: 'approval.send',
+      workspace: input.workspace, principal }, action: 'approval.send',
     resource: { kind: 'message', id: binding.id }, context: { initiator: 'background' } },
     { idempotencyKey: `message-approval:${input.idempotencyKey}` })
     if (decision.effect !== 'allow') throw policyDenied(decision)
@@ -593,7 +726,9 @@ export class AssistantDeliveryService extends Service {
   }): OutboxRecord {
     this.assertActive()
     const binding = agent === undefined ? undefined : this.deliveryStore.getBindingBySession(String(agent.session.id))
-    if (binding === undefined || binding.status !== 'active') {
+    if (agent === undefined || binding === undefined || binding.status !== 'active'
+      || agent.session.header.cwd !== binding.workspace
+      || agent.session.header.agentPreset !== binding.agentPreset) {
       throw new AssistantDeliveryError('missing-binding', 'Agent session is not bound to an active delivery route')
     }
     const decision = this.policy.authorizeAgent(agent, 'reply', { kind: 'message', id: binding.id },
@@ -613,17 +748,66 @@ export class AssistantDeliveryService extends Service {
   } {
     this.assertActive()
     const binding = agent === undefined ? undefined : this.deliveryStore.getBindingBySession(String(agent.session.id))
-    if (binding === undefined) throw new AssistantDeliveryError('missing-binding', 'Agent session has no delivery binding')
+    if (agent === undefined || binding === undefined || binding.status !== 'active'
+      || agent.session.header.cwd !== binding.workspace
+      || agent.session.header.agentPreset !== binding.agentPreset) {
+      throw new AssistantDeliveryError('missing-binding', 'Agent session has no active matching delivery binding')
+    }
     const decision = this.policy.authorizeAgent(agent, 'history', { kind: 'message', id: binding.id })
     if (decision.effect !== 'allow') throw policyDenied(decision)
     const query = input.limit === undefined ? { bindingId: binding.id } : { bindingId: binding.id, limit: input.limit }
     return { binding, inbox: this.deliveryStore.listInbox(query), outbox: this.deliveryStore.listOutbox(query) }
   }
 
+  bindAgentApprovalRoute(agent: Agent | undefined, input: { bindingId: string }): () => void {
+    this.assertActive()
+    const binding = this.deliveryStore.getBinding(input.bindingId)
+    const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+    if (agent === undefined || binding?.status !== 'active' || owner?.status !== 'active' || owner.role !== 'owner'
+      || agent.session.header.cwd !== binding.workspace
+      || agent.session.header.agentPreset !== binding.agentPreset) {
+      throw new AssistantDeliveryError('missing-binding', 'Agent identity does not match an active owner approval route')
+    }
+    const direct = this.deliveryStore.getBindingBySession(String(agent.session.id))
+    if (direct !== undefined && direct.id !== binding.id) {
+      throw new AssistantDeliveryError('missing-binding', 'Agent session is already bound to another approval route')
+    }
+    const token = Symbol('assistant-delivery.approval-binding')
+    this.agentApprovalBindings.set(agent, { bindingId: binding.id, token })
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      if (this.agentApprovalBindings.get(agent)?.token === token) this.agentApprovalBindings.delete(agent)
+    }
+  }
+
+  prepareAgentApproval(agent: Agent | undefined, input: { sourceId: string }): ApprovalDispatchRoute {
+    this.assertActive()
+    const sourceId = input.sourceId.trim()
+    const direct = agent === undefined ? undefined : this.deliveryStore.getBindingBySession(String(agent.session.id))
+    const delegatedId = agent === undefined ? undefined : this.agentApprovalBindings.get(agent)?.bindingId
+    const delegated = delegatedId === undefined ? undefined : this.deliveryStore.getBinding(delegatedId)
+    if (direct !== undefined && delegated !== undefined && direct.id !== delegated.id) {
+      throw new AssistantDeliveryError('missing-binding', 'Agent approval routes conflict')
+    }
+    const binding = direct ?? delegated
+    const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(sourceId)
+      || binding?.status !== 'active' || owner?.status !== 'active' || owner.role !== 'owner'
+      || agent?.session.header.cwd !== binding.workspace
+      || agent.session.header.agentPreset !== binding.agentPreset) {
+      throw new AssistantDeliveryError('missing-binding', 'Agent session has no authenticated active owner approval route')
+    }
+    return Object.freeze({ sourceId, bindingId: binding.id, workspace: binding.workspace,
+      principal: externalPrincipalId(binding.principal) })
+  }
+
   async tick(): Promise<void> {
     this.assertActive()
     await this.inbound.tick()
     await this.drainModelSelectionSettlements()
+    this.drainApprovalDispatches()
     await this.outbound.tick()
   }
 
@@ -655,6 +839,7 @@ export class AssistantDeliveryService extends Service {
       const current = this.deliveryStore.getActiveBinding(envelope.conversation)
       if (current !== undefined) return current
       const created = await runtime.createSession({ envelope, generation: 1, signal: new AbortController().signal })
+      this.assertActive()
       return this.deliveryStore.createBinding({ conversation: envelope.conversation, principal: envelope.principal,
         workspace: created.workspace, agentPreset: created.agentPreset, sessionId: created.sessionId,
         policyRef: created.policyRef })
@@ -675,6 +860,7 @@ export class AssistantDeliveryService extends Service {
       if (current.id !== previous.id) return current
       const created = await runtime.createSession({ envelope, generation: current.generation + 1,
         previous: current, signal: new AbortController().signal })
+      this.assertActive()
       return this.deliveryStore.rotateBinding({ bindingId: current.id, expectedVersion: current.version,
         sessionId: created.sessionId })
     })().finally(() => this.bindingFlights.delete(key))
@@ -688,6 +874,46 @@ export class AssistantDeliveryService extends Service {
     this.timer = undefined
     this.modelSelectionRetryTimer = undefined
     await Promise.all([this.inbound.stop(), this.outbound.stop(), this.modelSelectionFlight])
+  }
+
+  private drainApprovalDispatches(): void {
+    const cursor = this.deliveryStore.getApprovalDispatchCursor()
+    const dispatches = this.policy.listPendingApprovalDispatches(100, cursor.after)
+    for (const dispatch of dispatches) {
+      try {
+        this.enqueueApproval({
+          sourceId: dispatch.sourceId,
+          workspace: dispatch.workspace,
+          bindingId: dispatch.bindingId,
+          idempotencyKey: `approval-card:${dispatch.proposalId}`,
+          text: dispatch.diff,
+          approval: {
+            operationId: `approval:${dispatch.proposalId}`,
+            proposalId: dispatch.proposalId,
+            expectedVersion: dispatch.proposalVersion,
+            expiresAt: dispatch.expiresAt,
+            title: dispatch.summary,
+            diffHash: dispatch.diffHash,
+          },
+        })
+        this.policy.markApprovalDispatchEnqueued(dispatch.proposalId, dispatch.version)
+      } catch {
+        // One invalid/revoked route must not starve later durable dispatches.
+      }
+    }
+    const last = dispatches.at(-1)
+    const after = dispatches.length === 100 && last !== undefined
+      ? { createdAt: last.createdAt, proposalId: last.proposalId }
+      : undefined
+    if (after === undefined && cursor.after === undefined) return
+    try {
+      this.deliveryStore.advanceApprovalDispatchCursor({ expectedVersion: cursor.version,
+        ...(after === undefined ? {} : { after }) })
+    } catch (error) {
+      // Another Host sharing the same durable Delivery DB won the scan fence.
+      if (error instanceof DeliveryStoreError && error.code === 'stale-fence') return
+      throw error
+    }
   }
 
   private drainModelSelectionSettlements(): Promise<void> {
@@ -749,7 +975,7 @@ export class AssistantDeliveryService extends Service {
         // The callback claim already consumed any authorization budget. Workers
         // re-evaluate current rules/emergency-stop without charging it again.
         const authorized = (binding: ConversationBinding) => this.policy.evaluate({
-          subject: { kind: 'external', id: externalId(payload.principal) },
+          subject: { kind: 'external', id: externalPrincipalId(payload.principal) },
           action: 'ingest',
           resource: { kind: 'message', id: `model-selection:${binding.id}` },
           context: { initiator: 'external' },
