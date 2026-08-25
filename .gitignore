@@ -26,6 +26,9 @@ coverage/
 profiles/
 sessions/
 
+# Local agent scratch notes
+.superpowers/
+
 # Local configuration and credentials
 .env
 .env.*
