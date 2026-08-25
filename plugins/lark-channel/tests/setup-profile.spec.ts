@@ -80,7 +80,7 @@ describe('Lark Web-profile onboarding patch', () => {
     })
     const toolRules = rules.filter((rule: { id: string }) => rule.id.startsWith('lark-owner-tool-'))
     expect(toolRules.map((rule: { resource: { id: string } }) => rule.resource.id)).toEqual([
-      'bash', 'read', 'glob', 'grep',
+      'bash', 'read', 'glob', 'grep', 'skill',
     ])
     expect(toolRules).toEqual(toolRules.map((rule: object) => expect.objectContaining({
       ...rule,
@@ -141,7 +141,7 @@ describe('Lark Web-profile onboarding patch', () => {
       .toMatchObject({ subject: { id: 'standard' } })
     expect(rules.find((rule: { id: string }) => rule.id.startsWith('lark-owner-reply-primary-legacy-primary-')))
       .toMatchObject({ subject: { id: 'primary' }, actions: ['reply'] })
-    for (const tool of ['bash', 'read', 'glob', 'grep']) {
+    for (const tool of ['bash', 'read', 'glob', 'grep', 'skill']) {
       expect(rules.find((rule: { id: string }) =>
         rule.id.startsWith(`lark-owner-tool-${tool}-primary-legacy-primary-`)))
         .toMatchObject({ subject: { id: 'primary' }, resource: { kind: 'tool', id: tool } })
@@ -184,7 +184,7 @@ describe('Lark Web-profile onboarding patch', () => {
       subject: { kind: 'agent', id: 'standard', workspace: oldWorkspace },
       actions: ['reply'],
     })
-    expect(legacyTools).toHaveLength(4)
+    expect(legacyTools).toHaveLength(5)
     expect(legacyTools.every((rule: { subject: { workspace: string } }) =>
       rule.subject.workspace === oldWorkspace)).toBe(true)
   })
@@ -394,5 +394,45 @@ describe('Lark Web-profile onboarding patch', () => {
 
     expect(windows).toContain('lark-owner-tool-pwsh-primary')
     expect(windows).not.toContain('lark-owner-tool-bash-primary')
+    expect(windows).toContain('lark-owner-tool-skill-primary')
+  })
+
+  test('authorizes the DSH skill tool so external turns can load skills', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu' as const,
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const rule = (parse(enabled) as { id: string; config: { assistantPolicy: { rules: {
+      id: string
+      effect: string
+      subject: { kind: string; id: string; workspace: string }
+      actions: string[]
+      resource: { kind: string; id: string }
+      context: { initiators: string[] }
+    }[] } } }[])
+      .find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .config.assistantPolicy.rules
+      .find(item => item.id === 'lark-owner-tool-skill-primary')
+
+    expect(rule).toMatchObject({
+      effect: 'allow',
+      subject: { kind: 'agent', id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' },
+      actions: ['execute'],
+      resource: { kind: 'tool', id: 'skill' },
+      context: { initiators: ['external'] },
+    })
+
+    const disabled = configure({ ...common, profilePatch: enabled, agentTools: 'disable' })
+    expect(disabled).not.toContain('lark-owner-tool-skill-primary')
   })
 })
