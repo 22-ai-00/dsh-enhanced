@@ -35,6 +35,7 @@ Options:
   --ack-existing-automations
                             Acknowledge active jobs may run when its scheduler is enabled
   --lark <mode>             auto, keep, configure, or skip (default: auto)
+  --agent-tools <mode>      allow, preserve, or disable (default: allow)
   --dsh-version <version>   DSH version to ensure (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
   --no-service              Do not install or restart the macOS resident service
   --yes                     Choose the safe default without the installer menu
@@ -53,6 +54,13 @@ Feishu modes:
   keep       Keep the current bot and only restart its resident service.
   configure  Select an existing app or create a new app, then overwrite the channel binding.
   skip       Preserve any current channel configuration and do no Feishu/service work.
+
+Agent tool modes:
+  allow      Authorize the exact shell/read/search/skill tools for external Agent
+             turns. Required for the agent to load DSH skills in Feishu, because
+             AssistantPolicy denies unlisted tools by default.
+  preserve   Leave any existing setup-managed tool rules exactly as they are.
+  disable    Remove the setup-managed external Agent tool rules.
 EOF
 }
 
@@ -215,7 +223,13 @@ dsh_enhanced_apply_lark() {
   local configured="$4"
   local manage_service="$5"
   local dry_run="$6"
+  local agent_tools="${7:-preserve}"
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-lark-setup"
+  local agent_tools_flag=()
+  case "$agent_tools" in
+    allow) agent_tools_flag=(--allow-agent-tools) ;;
+    disable) agent_tools_flag=(--disable-agent-tools) ;;
+  esac
 
   case "$mode" in
     keep)
@@ -224,11 +238,17 @@ dsh_enhanced_apply_lark() {
         return $?
       fi
       printf '\n飞书处理：保留当前应用配置。\n'
+      if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
+        dsh_enhanced_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
+        return $?
+      fi
+      # --install-service cannot be combined with agent-tools options, so the
+      # tool grant is refreshed as its own bounded step before any restart.
+      if [[ ${#agent_tools_flag[@]} -gt 0 ]]; then
+        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --no-service \
+          "${agent_tools_flag[@]}" || return $?
+      fi
       if [[ "$manage_service" == '1' ]]; then
-        if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
-          dsh_enhanced_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
-          return $?
-        fi
         dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --install-service
       else
         printf '已按 --no-service 跳过常驻服务重启。\n'
@@ -247,9 +267,9 @@ dsh_enhanced_apply_lark() {
         fi
       fi
       if [[ "$manage_service" == '1' ]]; then
-        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile"
+        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
       else
-        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --no-service
+        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --no-service "${agent_tools_flag[@]+"${agent_tools_flag[@]}"}"
       fi
       ;;
     skip)
@@ -287,6 +307,8 @@ dsh_enhanced_install() {
   local profile="${DSH_ENHANCED_PROFILE:-web}"
   local deployment_mode='standard'
   local lark_mode='auto'
+  local agent_tools_mode='allow'
+  local agent_tools_explicit='0'
   local dsh_version="${DSH_VERSION:-$DSH_ENHANCED_DEFAULT_DSH_VERSION}"
   local plugin_version="${DSH_ENHANCED_VERSION:-latest}"
   local manage_service='1'
@@ -309,6 +331,12 @@ dsh_enhanced_install() {
       --lark)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--lark 需要一个值。'; return $?; }
         lark_mode="$2"
+        shift 2
+        ;;
+      --agent-tools)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--agent-tools 需要一个值。'; return $?; }
+        agent_tools_mode="$2"
+        agent_tools_explicit='1'
         shift 2
         ;;
       --dsh-version)
@@ -364,6 +392,17 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 '--mode 只能是 standard 或 supervised-growth。'
     return $?
   esac
+  case "$agent_tools_mode" in allow|preserve|disable) ;; *)
+    dsh_enhanced_fail 2 '--agent-tools 只能是 allow、preserve 或 disable。'
+    return $?
+  esac
+  if [[ "$lark_mode" == 'skip' ]]; then
+    if [[ "$agent_tools_explicit" == '1' && "$agent_tools_mode" != 'preserve' ]]; then
+      dsh_enhanced_fail 2 '--lark skip 不修改任何 channel 配置；--agent-tools 只能是 preserve。'
+      return $?
+    fi
+    agent_tools_mode='preserve'
+  fi
   if [[ "$deployment_mode" == 'supervised-growth' && "$lark_mode" == 'skip' ]]; then
     dsh_enhanced_fail 2 'supervised-growth 需要飞书 onboarding；不能与 --lark skip 一起使用。'
     return $?
@@ -402,8 +441,8 @@ dsh_enhanced_install() {
   if [[ "$deployment_mode" != 'standard' ]]; then
     printf '部署模式：%s\n' "$deployment_mode"
   fi
+  printf 'Agent 工具授权：%s\n' "$agent_tools_mode"
   printf 'DSH_HOME：%s\n\n' "$dsh_home"
-
   if [[ "$dry_run" != '1' ]]; then
     dsh_enhanced_require_node || return $?
   fi
@@ -478,7 +517,7 @@ dsh_enhanced_install() {
       return $?
     fi
   fi
-  dsh_enhanced_apply_lark "$lark_mode" "$profile" "$dsh_home" "$lark_configured" "$manage_service" "$dry_run" || return $?
+  dsh_enhanced_apply_lark "$lark_mode" "$profile" "$dsh_home" "$lark_configured" "$manage_service" "$dry_run" "$agent_tools_mode" || return $?
   if [[ "$deployment_mode" == 'supervised-growth' ]]; then
     dsh_enhanced_apply_supervised_growth "$profile" "$dsh_home" "$ack_existing_automations" "$dry_run" || return $?
   fi

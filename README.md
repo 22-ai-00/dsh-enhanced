@@ -45,6 +45,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/ma
 
 两个安装器、飞书复用/覆盖选项、实际安装清单和 macOS/Linux/Windows 差异见[安装脚本文档](scripts/install)。
 
+安装器默认 `--agent-tools allow`，为飞书外部会话授权 `bash`（Windows 为 `pwsh`）、`read`、`glob`、`grep` 和 `skill` 这几个精确工具。`skill` 必须授权，Agent 才能在飞书里发现并加载 DSH 技能——AssistantPolicy 对工具执行默认拒绝，漏掉授权时模型会认为自己没有可用技能而退回纯文本。需要更严格隔离时用 `--agent-tools preserve` 保留现状，或 `--agent-tools disable` 移除这些规则。
+
 默认 `standard` 模式仍保持 scheduler 和成长行为关闭。需要显式启用有 owner 飞书审批、每日预算和受限主动巡检的部署时使用：
 
 ```sh
