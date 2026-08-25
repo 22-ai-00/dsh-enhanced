@@ -82,6 +82,13 @@ export interface Config {
   proposalDefaults?: AutomationProposalDefaults
   /** Audited native-tool routes whose upstream adapters do not publish registry metadata yet. */
   toolCapableProviders?: string[]
+  /**
+   * How to admit a route that publishes no tool-call capability at all. The DSH
+   * `generate` contract accepts `tools` for every adapter, so `allow` matches
+   * that baseline; `deny` opts a deployment into strict allowlisting. A
+   * provider-owned `none` declaration always fails closed either way.
+   */
+  unknownRouteToolCalls?: 'allow' | 'deny'
 }
 
 export interface AutomationServiceProposalInput {
@@ -184,6 +191,7 @@ const configSchema = Schema.object({
   toolCapableProviders: Schema.array(
     Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u),
   ).default(['deepseek-official']),
+  unknownRouteToolCalls: Schema.union(['allow', 'deny'] as const).default('allow'),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' {
@@ -266,6 +274,7 @@ export class AssistantAutomationsService extends Service {
     const runner = new PolicyBoundRunner(policy, new DshAutomationRunner(ctx, policy, {
       allowUnbudgetedExecution: config.allowUnbudgetedExecution,
       toolCapableProviders: config.toolCapableProviders,
+      unknownRouteToolCalls: config.unknownRouteToolCalls ?? 'allow',
     }))
     this.coordinator = new AutomationCoordinator({
       store: this.store,
