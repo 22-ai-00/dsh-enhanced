@@ -11,9 +11,16 @@ interface PolicyRuleShape {
   context: { initiators: string[] }
 }
 
-// Mirrors `deniedExternalTools` in src/setup-profile.ts. Kept as an explicit
-// literal so widening the denylist has to be a deliberate test change.
-const EXPECTED_DENIED_TOOLS = [
+// Mirrors `deniedExternalTools` in src/setup-profile.ts, which is intentionally
+// empty: the grant denies nothing at the Policy layer. Kept as an explicit
+// literal so re-introducing a denial has to be a deliberate test change.
+const EXPECTED_DENIED_TOOLS: readonly string[] = []
+
+// Ids emitted by earlier releases, as either allow or deny. Upgrading must drop
+// all of them: a stale deny would keep overriding the wildcard.
+const RETIRED_TOOL_IDS = [
+  'bash', 'pwsh', 'read', 'glob', 'grep', 'skill',
+  'memory_search', 'wiki_search', 'wiki_read',
   'memory_manage', 'wiki_upsert', 'wiki_lint',
   'automation_create', 'automation_manage', 'automation_run',
   'evolution_propose', 'knowledge_pin', 'knowledge_promote',
@@ -443,7 +450,7 @@ describe('Lark Web-profile onboarding patch', () => {
       .toHaveLength(EXPECTED_DENIED_TOOLS.length * 2)
   })
 
-  test('retires per-tool rules from an enumerated-allowlist profile on upgrade', () => {
+  test('retires per-tool allow and deny rules left by earlier releases on upgrade', () => {
     const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
     const common = {
       profilePatch: fixture,
@@ -457,8 +464,9 @@ describe('Lark Web-profile onboarding patch', () => {
       keychainAccount: 'primary',
     }
     // Stand in for a profile written by an earlier release: rename the wildcard
-    // rule into the per-tool ids that version emitted, then upgrade.
-    const RETIRED = ['bash', 'read', 'glob', 'grep', 'skill', 'memory_search']
+    // rule into the per-tool ids those versions emitted, then upgrade. Half are
+    // given effect deny to reproduce the denylist release, whose leftovers would
+    // otherwise keep overriding the wildcard.
     const enabled = configure({ ...common, agentTools: 'enable' })
     const wildcardLine = enabled.split('\n')
       .find(line => line.includes('- id: lark-owner-tool-*-primary') && !line.includes('legacy'))
@@ -467,17 +475,28 @@ describe('Lark Web-profile onboarding patch', () => {
     const wildcardRule = block.slice(0, block.indexOf('\n        - id: ', wildcardLine!.length))
     const legacyPatch = enabled.replace(
       wildcardRule,
-      RETIRED.map(tool => wildcardRule
-        .replace('lark-owner-tool-*-primary', `lark-owner-tool-${tool}-primary`)
-        .replace(/(\n\s+kind: tool\n\s+id: )'?\*'?/, `$1${tool}`)).join('\n'),
+      RETIRED_TOOL_IDS.map((tool, index) => {
+        const renamed = wildcardRule
+          .replace('lark-owner-tool-*-primary', `lark-owner-tool-${tool}-primary`)
+          .replace(/(\n\s+kind: tool\n\s+id: )'?\*'?/, `$1${tool}`)
+        return index % 2 === 0 ? renamed : renamed.replace('effect: allow', 'effect: deny')
+      }).join('\n'),
     )
     expect(legacyPatch).toContain('lark-owner-tool-bash-primary')
+    expect(legacyPatch).toContain('lark-owner-tool-memory_manage-primary')
+    expect(legacyPatch).toContain('effect: deny')
 
     const upgraded = configure({ ...common, profilePatch: legacyPatch, agentTools: 'enable' })
-    for (const retired of ['bash', 'read', 'glob', 'grep', 'skill', 'memory_search']) {
+    for (const retired of RETIRED_TOOL_IDS) {
       expect(upgraded).not.toContain(`lark-owner-tool-${retired}-primary`)
     }
-    expect(upgraded).toContain('lark-owner-tool-')
+    // Only the wildcard survives, and it carries no residual denial.
+    const survivingTools = (parse(upgraded) as { id: string; config: { assistantPolicy: { rules: PolicyRuleShape[] } } }[])
+      .find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .config.assistantPolicy.rules
+      .filter(rule => rule.id.startsWith('lark-owner-tool-'))
+    expect(survivingTools.map(rule => rule.resource.id)).toEqual(['*'])
+    expect(survivingTools.every(rule => rule.effect === 'allow')).toBe(true)
 
     // The upgrade must stay fully revocable.
     const disabled = configure({ ...common, profilePatch: upgraded, agentTools: 'disable' })
@@ -537,7 +556,14 @@ describe('Lark Web-profile onboarding patch', () => {
     ]) {
       expect(decide(tool)).toBe('allow')
     }
-    for (const tool of EXPECTED_DENIED_TOOLS) expect(decide(tool)).toBe('deny')
+    // Nothing is denied at this layer, including the durable-state mutators.
+    for (const tool of [
+      'memory_manage', 'wiki_upsert', 'automation_run', 'evolution_propose',
+      'knowledge_pin', 'heartbeat_scratch_update',
+    ]) {
+      expect(decide(tool)).toBe('allow')
+    }
+    expect(toolRules.filter(item => item.effect === 'deny')).toEqual([])
 
     const disabled = configure({ ...common, profilePatch: enabled, agentTools: 'disable' })
     expect(disabled).not.toContain('lark-owner-tool-')
