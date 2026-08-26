@@ -30,41 +30,40 @@ export interface LarkProfileSetupInput {
 const setupKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const providerKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
 const presetIdPattern = /^[a-z0-9][a-z0-9-]*$/u
-// The grant is expressed as one wildcard allow plus an explicit denylist rather
-// than an enumerated allowlist. Tools are registered dynamically by whichever
-// plugins and skills a deployment mounts, so any name list is stale the moment a
-// new tool appears: the agent then reports a refusal the owner cannot fix from
-// the chat, and every addition needs a setup release. Risk is already judged by
-// behaviour in `assistant-policy`'s `tools/pre-execute` reviewer, which inspects
-// arguments and still routes writes, network access and dangerous commands to
-// approval, so this rule decides reachability, not privilege.
+// The grant is expressed as one wildcard allow rather than an enumerated
+// allowlist. Tools are registered dynamically by whichever plugins and skills a
+// deployment mounts, so any name list is stale the moment a new tool appears:
+// the agent then reports a refusal the owner cannot fix from the chat, and every
+// addition needs a setup release. Risk is already judged by behaviour in
+// `assistant-policy`'s `tools/pre-execute` reviewer, which inspects arguments and
+// still routes writes, network access and dangerous commands to approval, so this
+// rule decides reachability, not privilege.
 //
 // `TOOL_WILDCARD` keeps the rule bound to the exact preset, absolute workspace
 // and `external` initiator; only the tool id is a pattern.
 const TOOL_WILDCARD = '*'
 
-// Durable-state mutators that must not be reachable from an external turn even
-// when the reviewer would have asked. Policy evaluates `deny` ahead of `allow`
-// at any specificity, so these override the wildcard.
-const deniedExternalTools = [
-  'memory_manage',
-  'wiki_upsert',
-  'wiki_lint',
-  'automation_create',
-  'automation_manage',
-  'automation_run',
-  'evolution_propose',
-  'knowledge_pin',
-  'knowledge_promote',
-  'heartbeat_scratch_update',
-] as const
+// No tool is denied at the Policy layer: the grant is reachability-only and the
+// owner opted into an unrestricted surface. Risk is still judged per call by
+// `assistant-policy`'s `tools/pre-execute` reviewer, which classifies from the
+// arguments and routes writes, network access and dangerous commands to
+// approval, so an unlisted tool is reachable but not unreviewed.
+//
+// Populating this list again re-denies those ids: Policy resolves `deny` ahead
+// of `allow` at any specificity, so entries here override the wildcard.
+const deniedExternalTools: readonly string[] = []
 
-// Per-tool ids emitted by earlier releases that used an enumerated allowlist.
-// Removal must still recognise them, otherwise upgrading leaves stale allow
-// rules that `--agent-tools disable` can no longer revoke.
+// Per-tool ids emitted by earlier releases: first the enumerated allowlist, then
+// the denylist that replaced it. Removal must still recognise both. A stale
+// allow rule is one `--agent-tools disable` can no longer revoke, and a stale
+// deny rule keeps overriding the wildcard and blocking the tool it names.
 const retiredToolRuleIds = [
   'bash', 'pwsh', 'read', 'glob', 'grep', 'skill',
   'memory_search', 'wiki_search', 'wiki_read',
+  'memory_manage', 'wiki_upsert', 'wiki_lint',
+  'automation_create', 'automation_manage', 'automation_run',
+  'evolution_propose', 'knowledge_pin', 'knowledge_promote',
+  'heartbeat_scratch_update',
 ] as const
 
 const managedToolRuleSuffixes = [
