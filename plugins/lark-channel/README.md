@@ -258,9 +258,9 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 
 ## 安全与权限
 
-`--allow-agent-tools` 是高权限显式开关。它只生成 Delivery 当前/兼容的精确 preset+绝对 workspace、`external` initiator 和 `bash|pwsh`、`read`、`glob`、`grep`、`skill` 规则，不生成 `tool:*`；带 `*` 的 workspace 会被拒绝，避免被 Policy 当作模式。Bash/Pwsh 本身仍可启动进程并读写其 sandbox 允许的内容；若该 session 使用 `danger-full-access` 且 approval 为 `never`，飞书中获准的外部会话等同获得很宽的本机命令权限。请按需要选择更窄的 DSH permission preset，并保持飞书 owner/应用范围最小。
+`--allow-agent-tools` 是高权限显式开关。它只生成 Delivery 当前/兼容的精确 preset+绝对 workspace、`external` initiator 和 `bash|pwsh`、`read`、`glob`、`grep`、`skill` 以及个人助理自身的只读检索工具（`memory_search`、`wiki_search`、`wiki_read`）规则，不生成 `tool:*`；带 `*` 的 workspace 会被拒绝，避免被 Policy 当作模式。Bash/Pwsh 本身仍可启动进程并读写其 sandbox 允许的内容；若该 session 使用 `danger-full-access` 且 approval 为 `never`，飞书中获准的外部会话等同获得很宽的本机命令权限。请按需要选择更窄的 DSH permission preset，并保持飞书 owner/应用范围最小。
 
-`skill` 是标准 DSH base 的 `tool-skill` row 注册的模型侧工具，它让 Agent 能发现并加载 `ctx.skills` 里的技能（含 `skill-filesystem` 提供的本机 SKILL.md）。不授权该工具时，AssistantPolicy 的 tool guard 会以 `default-deny` 拒绝调用，模型在飞书里只能看到自己没有可用技能，从而退回纯文本回答；技能加载本身不额外提权，被加载技能内部的命令仍受同一 sandbox / approval / Policy 管线约束。
+`skill` 是标准 DSH base 的 `tool-skill` row 注册的模型侧工具，它让 Agent 能发现并加载 `ctx.skills` 里的技能（含 `skill-filesystem` 提供的本机 SKILL.md）。不授权该工具时，AssistantPolicy 的 tool guard 会以 `default-deny` 拒绝调用，模型在飞书里只能看到自己没有可用技能，从而退回纯文本回答。会改写状态的 `memory_manage`、`wiki_upsert`、`wiki_lint` 不在授权范围内，仍必须走 owner 审批；技能加载本身不额外提权，被加载技能内部的命令仍受同一 sandbox / approval / Policy 管线约束。
 
 当前 Policy tool guard 不携带 principal 或 conversation kind，只能把规则收窄到 preset/workspace/initiator。Delivery 会先拒绝未配对 principal，但同一 lane 中已经获准的 external 会话（包括 owner 在群内 @ 机器人）仍共享这组工具规则；因此这不是“仅 owner 私聊”的强隔离承诺。
 
