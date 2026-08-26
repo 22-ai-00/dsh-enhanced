@@ -77,6 +77,26 @@ describe('one-click installers', () => {
     expect(result.stdout).not.toContain('部署模式：')
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'acp'))
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'hello'))
+    expect(result.stdout).toContain('Agent 工具授权：allow')
+    expect(result.stdout).toContain(
+      `${join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')} `
+      + '--profile web --refresh-agent-policy --allow-agent-tools',
+    )
+  })
+
+  test('lark skip can explicitly disable managed foreground capability without touching channel onboarding', async () => {
+    const dshHome = await temporaryDshHome()
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--agent-tools', 'disable',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Agent 工具授权：disable')
+    expect(result.stdout).toContain(
+      `${join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')} `
+      + '--profile web --refresh-agent-policy --disable-agent-tools',
+    )
+    expect(result.stdout).not.toContain('--install-service')
   })
 
   test('explicit standard is byte-for-byte the default dry-run and does not mount Evolution', async () => {
@@ -88,8 +108,8 @@ describe('one-click installers', () => {
 
     expect(implicit.status, implicit.stderr).toBe(0)
     expect(explicit.status, explicit.stderr).toBe(0)
-    expect(explicit.stdout.replace(explicitHome, '<DSH_HOME>')).toBe(
-      implicit.stdout.replace(implicitHome, '<DSH_HOME>'),
+    expect(explicit.stdout.replaceAll(explicitHome, '<DSH_HOME>')).toBe(
+      implicit.stdout.replaceAll(implicitHome, '<DSH_HOME>'),
     )
     expect(explicit.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-evolution'))
     expect(explicit.stdout).not.toContain('dsh-supervised-growth-setup')
@@ -109,6 +129,37 @@ describe('one-click installers', () => {
     expect(result.stdout).toContain('@dsh-enhanced/lark-channel@0.2.0')
     expect(result.stdout).not.toContain('@dsh-enhanced/acp@')
     expect(result.stdout).not.toContain('@dsh-enhanced/hello@')
+  })
+
+  test('refuses incompatible stored permission defaults before changing the installation', async () => {
+    for (const preset of ['read-only', 'unrecognized-local-preset']) {
+      const dshHome = await temporaryDshHome()
+      const settingsPath = join(dshHome, 'settings.yaml')
+      await writeFile(settingsPath, `permission:\n  defaultPreset: ${preset}\n`, 'utf8')
+      const before = await readFile(settingsPath, 'utf8')
+
+      const result = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], dshHome)
+
+      expect(result.status).toBe(2)
+      expect(result.stderr).toContain(`permission.defaultPreset=${preset}`)
+      expect(result.stderr).toContain('不会覆盖用户设置')
+      expect(result.stdout).not.toContain('dsh plugin')
+      expect(await readFile(settingsPath, 'utf8')).toBe(before)
+    }
+  })
+
+  test('preserves every supported stored permission default', async () => {
+    for (const preset of ['workspace-write', 'auto', 'danger-full-access']) {
+      const dshHome = await temporaryDshHome()
+      const settingsPath = join(dshHome, 'settings.yaml')
+      await writeFile(settingsPath, `permission:\n  defaultPreset: ${preset}\n`, 'utf8')
+      const before = await readFile(settingsPath, 'utf8')
+
+      const result = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], dshHome)
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(await readFile(settingsPath, 'utf8')).toBe(before)
+    }
   })
 
   test('supervised-growth explicitly installs Evolution then invokes the audited activator after Lark onboarding', async () => {
@@ -167,6 +218,11 @@ describe('one-click installers', () => {
     const fakeBin = join(root, 'bin')
     const logPath = join(root, 'commands.log')
     await mkdir(fakeBin, { recursive: true })
+    const setupDirectory = join(dshHome, 'profiles', 'web', 'node_modules', '.bin')
+    await mkdir(setupDirectory, { recursive: true })
+    await writeExecutable(join(setupDirectory, 'dsh-lark-setup'), `#!/bin/bash
+printf 'lark-setup %s\n' "$*" >> "$INSTALL_LOG"
+`)
     await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
 exit 0
@@ -211,6 +267,7 @@ printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
     expect(log).toContain('pnpm build')
     expect(log).toContain('dsh plugin --profile web add')
     expect(log).toContain('dsh --profile web --dump-config')
+    expect(log).toContain('lark-setup --profile web --refresh-agent-policy --allow-agent-tools')
   })
 
   test('supervised-growth invokes the installed activator only after the installed Lark setup completes', async () => {
@@ -279,7 +336,27 @@ fi
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('飞书处理：保留当前应用配置')
-    expect(result.stdout).toContain('dsh-lark-setup --profile web --install-service')
+    const larkSetup = join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')
+    const refreshAgentTools = `${larkSetup} --profile web --refresh-agent-policy --allow-agent-tools`
+    const installService = `${larkSetup} --profile web --install-service`
+    expect(result.stdout).toContain(refreshAgentTools)
+    expect(result.stdout).toContain(installService)
+    expect(result.stdout.indexOf(installService)).toBeGreaterThan(result.stdout.indexOf(refreshAgentTools))
+  })
+
+  test('fresh configure mode allows all agent tools and keeps service installation enabled by default', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, ['--dry-run', '--lark', 'configure'], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    const larkSetup = join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')
+    const setupCommands = result.stdout
+      .split('\n')
+      .filter(line => line.includes('dsh-lark-setup'))
+    expect(setupCommands).toEqual([
+      `  $ ${larkSetup} --profile web --allow-agent-tools`,
+    ])
   })
 
   test('explicit configure mode reruns onboarding and can avoid installing a service', async () => {

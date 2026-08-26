@@ -1,4 +1,8 @@
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
+import {
+  permissionDispatchRecoveryFromFailureCode,
+  type PermissionDispatchRecovery,
+} from './session-commands.js'
 import { DeliveryStoreError, type DeliveryStore } from './store.js'
 import type {
   AdapterReconcileResult,
@@ -442,6 +446,8 @@ export interface PreparedInboundMessage {
   imageAttachments: readonly ImageAttachmentRef[]
   /** Exact route admitted for this claimed turn; runtimes may omit it when they do no LLM dispatch. */
   modelRoute?: Readonly<ModelRouteRef>
+  /** Durable reconciliation mode for a permission command interrupted after its dispatch fence. */
+  permissionDispatchRecovery?: PermissionDispatchRecovery
 }
 
 /** Identifies the live inbox claim that owns preparation side effects. */
@@ -449,6 +455,8 @@ export interface InboundPrepareContext {
   inboxId: string
   ownerId: string
   fencingToken: number
+  /** Present only when the Inbox itself proves an interrupted permission dispatch. */
+  permissionDispatchRecovery?: PermissionDispatchRecovery
 }
 
 export type InboundPrepareResult =
@@ -514,7 +522,14 @@ export class InboundCoordinator {
       const abort = new AbortController()
       const stopHeartbeat = this.startLeaseHeartbeat(claim.record.id, claim.fencingToken, abort)
       let entry!: ActiveOperation
-      const promise = this.process(claim.record.id, claim.record.bindingId, claim.record.envelope, claim.fencingToken, abort.signal)
+      const promise = this.process(
+        claim.record.id,
+        claim.record.bindingId,
+        claim.record.envelope,
+        claim.fencingToken,
+        abort.signal,
+        permissionDispatchRecoveryFromFailureCode(claim.record.failureCode),
+      )
         .catch(() => {})
         .finally(() => {
           stopHeartbeat()
@@ -528,6 +543,19 @@ export class InboundCoordinator {
   async stop(): Promise<void> {
     this.stopping = true
     await abortAndBoundedDrain(this.active, this.options.leaseMs, new Error('assistant-delivery is stopping'))
+  }
+
+  /** Abort and drain exact claims that a durable command fence made terminal. */
+  async cancelUndispatchedClaims(inboxIds: readonly string[], command: 'new' | 'stop'): Promise<void> {
+    const operations = [...new Set(inboxIds)]
+      .map(inboxId => this.active.get(inboxId))
+      .filter((entry): entry is ActiveOperation => entry !== undefined)
+    if (operations.length === 0) return
+    const reason = new Error(`assistant-delivery: inbox preparation cancelled by /${command}`)
+    for (const operation of operations) {
+      if (!operation.abort.signal.aborted) operation.abort.abort(reason)
+    }
+    await Promise.all(operations.map(operation => operation.promise))
   }
 
   async whenIdle(): Promise<void> {
@@ -564,6 +592,7 @@ export class InboundCoordinator {
     envelope: InboundEnvelope,
     fencingToken: number,
     signal: AbortSignal,
+    permissionDispatchRecovery?: PermissionDispatchRecovery,
   ): Promise<void> {
     const binding = bindingId === undefined ? undefined : this.options.store.getBinding(bindingId)
     if (binding?.status === 'revoked') {
@@ -591,6 +620,7 @@ export class InboundCoordinator {
           inboxId,
           ownerId: this.options.ownerId,
           fencingToken,
+          ...(permissionDispatchRecovery === undefined ? {} : { permissionDispatchRecovery }),
         })
       } catch {
         if (signal.aborted) return
@@ -740,6 +770,10 @@ export class InboundCoordinator {
       return
     }
     if (dispatchMarked && result.outcome !== 'processed') {
+      if (permissionDispatchRecoveryFromFailureCode(result.failureCode) !== undefined) {
+        this.finishInbound(inboxId, fencingToken, result)
+        return
+      }
       this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
         outcome: 'dead_letter', failureCode: 'processor-ambiguous' })
       return

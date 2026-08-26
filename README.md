@@ -45,7 +45,9 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/ma
 
 两个安装器、飞书复用/覆盖选项、实际安装清单和 macOS/Linux/Windows 差异见[安装脚本文档](scripts/install)。
 
-安装器默认 `--agent-tools allow`，为飞书外部会话授权 `bash`（Windows 为 `pwsh`）、`read`、`glob`、`grep` 和 `skill` 这几个精确工具。`skill` 必须授权，Agent 才能在飞书里发现并加载 DSH 技能——AssistantPolicy 对工具执行默认拒绝，漏掉授权时模型会认为自己没有可用技能而退回纯文本。需要更严格隔离时用 `--agent-tools preserve` 保留现状，或 `--agent-tools disable` 移除这些规则。
+`personal-assistant` bundle 自带本地 Web/direct `foreground` capability grant，直接安装后即可使用 profile 中**已经挂载**的技能、工具和插件动作。安装器默认 `--agent-tools allow`，会把该规则物化为可管理的 profile override，并为 Delivery 当前/兼容的精确外部身份补齐独立规则；除了动态 `tool: *`，它们也覆盖 memory、wiki、automation 等插件工具内部的二次 Policy 动作。规则不会安装或挂载新能力，也不会放宽 `background` 任务；显式 deny、紧急停止、sandbox、reviewer 和预算硬门仍独立生效。需要更严格隔离时用 `--agent-tools disable` 撤销受管 grant，或用 `--agent-tools preserve` 保留当前配置。
+
+owner 可在飞书中发送 `/permissions` 打开三档权限卡片（不支持卡片时显示等价文字），也可用 `/permission ask`、`/permission auto` 或二次确认的 `/permission full confirm` 切换。工具可达性与这三档执行权限是两层独立控制：`full` 关闭逐次审批并放开 sandbox，但仍受显式 Policy deny、紧急停止、身份校验和预算硬门约束。
 
 默认 `standard` 模式仍保持 scheduler 和成长行为关闭。需要显式启用有 owner 飞书审批、每日预算和受限主动巡检的部署时使用：
 
@@ -64,7 +66,7 @@ dsh plugin --profile web add ./plugins/personal-assistant
 dsh --profile web --dump-config
 ```
 
-默认配置是安全关闭状态：Policy 没有规则时拒绝受控写操作，后台 scheduler 也默认关闭。请按 [`personal-assistant` 文档](plugins/personal-assistant)和四个核心插件的 README，把 agent preset、绝对 workspace、工具范围与预算收窄到自己的真实环境后再开启无人值守任务。
+默认配置面向本机单用户：没有既有用户设置时选择 `danger-full-access`，并允许 `foreground` Agent 访问 profile 已挂载的能力；后台 scheduler 仍默认关闭，`background` 与外部身份仍默认拒绝。该默认值权限很高，请按 [`personal-assistant` 文档](plugins/personal-assistant)和四个核心插件的 README，在不需要完全控制时切回 `workspace-write`/`auto`，或用显式 Policy deny、精确身份与预算进一步收窄。
 
 需要通过飞书聊天时，再追加 Delivery、系统 Keychain 和 Lark adapter：
 
@@ -77,7 +79,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 
 最后一个命令使用飞书官方设备授权流程，输出确认链接和终端二维码。确认页允许选择已有应用或创建新应用；选择已有应用时只展示并添加本 channel 所需的最小权限、消息事件和卡片回调，不删除原有权限。若要锁定更新某个已有应用（例如补齐 `card.action.trigger`），可追加 `--app-id cli_...`。App Secret 自动写入 macOS Keychain、Linux Secret Service 或当前用户的 Windows DPAPI 文件，不进入命令参数或 profile。向导还会通过一次 owner 私聊完成精确身份绑定、启用 Web profile，并通过 launchd、systemd user service 或 Windows Task Scheduler 保持常驻；Windows 路径为 best-effort。详细步骤见 [`lark-channel` 文档](plugins/lark-channel)。
 
-连接后，合法的新消息持久入队会收到 `Get` reaction，普通 Agent 任务会显示不含原始 CoT/工具敏感数据的执行进度，最终回复发送成功后原消息再收到 `DONE`。私聊发送 `/model`，机器人会返回带“分组、模型、effort”三个下拉框的选择卡片；点击确认后，选择按聊天持久化，下一条消息生效且保留上下文。`/model use <provider/model>` 仍是文字后备。即使原默认模型 route 已失效，`/model` 也不依赖 LLM 生成，可以直接完成恢复。
+连接后，合法的新消息持久入队会收到 `Get` reaction，普通 Agent 任务会显示不含原始 CoT/工具敏感数据的执行进度，最终回复发送成功后原消息再收到 `DONE`。同一私聊或群聊稳定 lane 会持续 resume 同一个 DSH session；`/status` 可核对代次与上下文，`/stop` 只停止当前任务并保留上下文，`/new` 才原子切换到空白的下一代 session。私聊发送 `/model`，机器人会返回带“分组、模型、effort”三个下拉框的选择卡片；点击确认后，选择按聊天持久化，下一条消息生效且保留上下文。`/model use <provider/model>` 仍是文字后备。即使原默认模型 route 已失效，`/model` 也不依赖 LLM 生成，可以直接完成恢复。
 
 ## 插件一览
 

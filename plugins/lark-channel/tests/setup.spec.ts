@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'vitest'
-import { mkdtemp, symlink, writeFile } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import * as lark from '../src/index.ts'
 
@@ -18,7 +20,2125 @@ const directMessage = {
   createTime: Date.now(),
 }
 
+function effectiveDeliveryProfile(databasePath: string): string {
+  return `
+- id: dsh-enhanced-assistant-delivery
+  name: '@dsh-enhanced/assistant-delivery'
+  config:
+    databasePath: ${JSON.stringify(databasePath)}
+`
+}
+
+function effectiveLarkDeliveryProfile(databasePath: string): string {
+  return `${effectiveDeliveryProfile(databasePath)}
+- id: dsh-enhanced-lark-channel
+  name: '@dsh-enhanced/lark-channel'
+  config:
+    enabled: true
+    account: primary
+    tenant: personal
+`
+}
+
+function asEffectiveProfile(profilePatch: string): string {
+  const rows = [
+    ['dsh-enhanced-personal-assistant', '@dsh-enhanced/personal-assistant'],
+    ['dsh-enhanced-assistant-delivery', '@dsh-enhanced/assistant-delivery'],
+    ['dsh-enhanced-credentials-keychain', '@dsh-enhanced/credentials-keychain'],
+    ['dsh-enhanced-lark-channel', '@dsh-enhanced/lark-channel'],
+  ] as const
+  let effective = profilePatch
+  for (const [id, name] of rows) {
+    effective = effective.replace(
+      new RegExp(`(^- id: ${id}\\n)(?!  name:)`, 'mu'),
+      `$1  name: '${name}'\n`,
+    )
+  }
+  return effective
+}
+
+function baseAssistantProfile(dshHome: string, databasePath: string): string {
+  return `
+- id: dsh-enhanced-personal-assistant
+  config:
+    assistantPolicy:
+      databasePath: ${JSON.stringify(join(dshHome, 'assistant-policy/policy.sqlite'))}
+      rules: []
+    personalMemory:
+      databasePath: ${JSON.stringify(join(dshHome, 'personal-memory/memory.sqlite'))}
+    personalWiki:
+      vaultRoot: ${JSON.stringify(join(dshHome, 'personal-wiki/vault'))}
+      databasePath: ${JSON.stringify(join(dshHome, 'personal-wiki/state.sqlite'))}
+    assistantAutomations:
+      databasePath: ${JSON.stringify(join(dshHome, 'assistant-automations/state.sqlite'))}
+      runsPath: ${JSON.stringify(join(dshHome, 'assistant-automations/runs'))}
+- id: dsh-enhanced-assistant-delivery
+  config:
+    databasePath: ${JSON.stringify(databasePath)}
+    spoolPath: ${JSON.stringify(join(dshHome, 'assistant-delivery/spool'))}
+    defaultWorkspace: ${JSON.stringify(join(dshHome, 'assistant-workspace'))}
+    defaultAgentPreset: standard
+`
+}
+
+function configuredLarkProfile(input: {
+  dshHome: string
+  databasePath: string
+  ownerUserId?: string
+  profile?: string
+  version?: string
+  agentTools?: 'disable' | 'enable'
+}): string {
+  const profile = input.profile ?? 'web'
+  const version = input.version ?? '22222222222222222222222222222222'
+  return lark.configureLarkProfilePatch({
+    profilePatch: baseAssistantProfile(input.dshHome, input.databasePath),
+    dshHome: input.dshHome,
+    appId: 'cli_0123456789abcdef',
+    account: 'primary',
+    tenant: 'personal',
+    domain: 'feishu',
+    ownerUserId: input.ownerUserId ?? 'ou_new',
+    keychainService: `dsh/lark/${profile}/primary/versions/${version}`,
+    keychainAccount: 'primary',
+    credentialProvider: 'macos-keychain',
+    agentTools: input.agentTools ?? 'disable',
+  })
+}
+
+function inheritedLarkEffectiveProfile(input: {
+  profilePatch: string
+  dshHome: string
+  ownerUserId?: string
+}): string {
+  return asEffectiveProfile(lark.configureLarkProfilePatch({
+    profilePatch: input.profilePatch,
+    dshHome: input.dshHome,
+    appId: 'cli_0123456789abcdef',
+    account: 'primary',
+    tenant: 'personal',
+    domain: 'feishu',
+    ownerUserId: input.ownerUserId ?? 'ou_owner',
+    keychainService: 'dsh/lark/web/primary/versions/22222222222222222222222222222222',
+    keychainAccount: 'primary',
+    credentialProvider: 'macos-keychain',
+    agentTools: 'preserve',
+  }))
+}
+
 describe('Lark onboarding wizard inputs', () => {
+  test('serializes the complete profile setup transaction with a crash-safe SQLite lock', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-setup-lock-'))
+    const patchPath = join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    const { withProfileSetupLock } = await import('../src/setup.ts')
+    const events: string[] = []
+    let releaseFirst!: () => void
+    let firstEntered!: () => void
+    const entered = new Promise<void>(resolve => { firstEntered = resolve })
+    const hold = new Promise<void>(resolve => { releaseFirst = resolve })
+
+    const first = withProfileSetupLock(patchPath, async () => {
+      events.push('first-enter')
+      firstEntered()
+      await hold
+      events.push('first-exit')
+    }, { timeoutMs: 1_000, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 })
+    await entered
+    let secondEntered = false
+    const second = withProfileSetupLock(patchPath, async () => {
+      secondEntered = true
+      events.push('second-enter')
+    }, { timeoutMs: 1_000, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 })
+
+    await new Promise(resolve => setTimeout(resolve, 25))
+    expect(secondEntered).toBe(false)
+    releaseFirst()
+    await Promise.all([first, second])
+    expect(events).toEqual(['first-enter', 'first-exit', 'second-enter'])
+  })
+
+  test('bounds profile lock contention instead of composing from a stale snapshot', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-setup-lock-timeout-'))
+    const patchPath = join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    const { withProfileSetupLock } = await import('../src/setup.ts')
+    let releaseFirst!: () => void
+    let firstEntered!: () => void
+    const entered = new Promise<void>(resolve => { firstEntered = resolve })
+    const hold = new Promise<void>(resolve => { releaseFirst = resolve })
+    const first = withProfileSetupLock(patchPath, async () => {
+      firstEntered()
+      await hold
+    }, { timeoutMs: 1_000, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 })
+    await entered
+    try {
+      await expect(withProfileSetupLock(patchPath, async () => {}, {
+        timeoutMs: 30,
+        pollMs: 5,
+        staleMs: 2_000,
+        heartbeatMs: 100,
+      })).rejects.toThrow(/another setup.*profile/iu)
+    } finally {
+      releaseFirst()
+      await first
+    }
+  })
+
+  test('recovers the setup lock immediately after its holder is killed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-killed-sqlite-lock-'))
+    const patchPath = join(root, 'cordis.patch.yml')
+    const lockPath = `${patchPath}.lark-setup-lock.sqlite`
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    const child = spawn(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      `import { DatabaseSync } from 'node:sqlite'
+const database = new DatabaseSync(process.argv[1])
+database.exec('BEGIN IMMEDIATE')
+process.stdout.write('ready\\n')
+setInterval(() => {}, 1000)`,
+      lockPath,
+    ], { stdio: ['ignore', 'pipe', 'pipe'] })
+    await new Promise<void>((resolve, reject) => {
+      child.once('error', reject)
+      child.stdout.once('data', () => resolve())
+      child.once('exit', code => {
+        if (code !== null) reject(new Error(`lock holder exited before readiness: ${code}`))
+      })
+    })
+    child.kill('SIGKILL')
+    await new Promise<void>(resolve => child.once('exit', () => resolve()))
+    const { withProfileSetupLock } = await import('../src/setup.ts')
+    let ran = false
+
+    await withProfileSetupLock(patchPath, async () => { ran = true }, {
+      timeoutMs: 1_000,
+      pollMs: 5,
+      staleMs: 100,
+      heartbeatMs: 10,
+    })
+
+    expect(ran).toBe(true)
+  })
+
+  test('recovers a hard crash after candidate rename by rolling back before the next setup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-candidate-crash-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const originalPatch = 'original-profile\n'
+    const updatedPatch = 'candidate-profile\n'
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const setupModule = await import('../src/setup.ts') as Record<string, unknown>
+    const createLocator = setupModule.createVersionedCredentialLocator as (
+      input: Record<string, unknown>,
+    ) => unknown
+    const persistJournal = setupModule.persistLarkSetupJournal as (input: Record<string, unknown>) => Promise<void>
+    const recoverJournal = setupModule.recoverLarkSetupJournal as (input: Record<string, unknown>) => Promise<void>
+    expect(persistJournal).toBeTypeOf('function')
+    expect(recoverJournal).toBeTypeOf('function')
+    const staged = createLocator({
+      provider: 'macos-keychain', dshHome, profile: 'web', account: 'primary',
+      version: '22222222222222222222222222222222',
+    })
+    const removed: unknown[] = []
+    let pairCalls = 0
+    await persistJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'candidate',
+      originalPatch,
+      updatedPatch,
+      databasePath: join(dshHome, 'assistant-delivery/state.sqlite'),
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      stagedCredential: staged,
+      installService: false,
+    })
+    // Exact durable state left when the process is killed after rename and
+    // before profile validation / Delivery handoff.
+    await writeFile(patchPath, updatedPatch, 'utf8')
+
+    await recoverJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        pairPrincipal() { pairCalls += 1 },
+        removeCredential(locator: unknown) { removed.push(locator) },
+      },
+    })
+
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    expect(pairCalls).toBe(0)
+    expect(removed).toEqual([staged])
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test.each(['before-handoff', 'after-handoff'] as const)(
+    'recovers a validated hard crash %s by idempotently converging profile and owner',
+    async crashPoint => {
+      const root = await mkdtemp(join(tmpdir(), 'lark-validated-crash-'))
+      const dshHome = join(root, 'dsh-home')
+      const profileDirectory = join(dshHome, 'profiles', 'web')
+      await mkdir(profileDirectory, { recursive: true })
+      const patchPath = join(profileDirectory, 'cordis.patch.yml')
+      const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+      const originalPatch = baseAssistantProfile(dshHome, databasePath)
+      const updatedPatch = configuredLarkProfile({ dshHome, databasePath })
+      await writeFile(patchPath, updatedPatch, 'utf8')
+      const setupModule = await import('../src/setup.ts') as Record<string, unknown>
+      const createLocator = setupModule.createVersionedCredentialLocator as (
+        input: Record<string, unknown>,
+      ) => unknown
+      const persistJournal = setupModule.persistLarkSetupJournal as (input: Record<string, unknown>) => Promise<void>
+      const recoverJournal = setupModule.recoverLarkSetupJournal as (input: Record<string, unknown>) => Promise<void>
+      const previous = createLocator({
+        provider: 'macos-keychain', dshHome, profile: 'web', account: 'primary',
+        version: '11111111111111111111111111111111',
+      })
+      const staged = createLocator({
+        provider: 'macos-keychain', dshHome, profile: 'web', account: 'primary',
+        version: '22222222222222222222222222222222',
+      })
+      const target = { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' }
+      let deliveryOwner = crashPoint === 'after-handoff' ? 'ou_new' : 'ou_old'
+      const removed: unknown[] = []
+      let installCalls = 0
+      await persistJournal({
+        patchPath,
+        dshHome,
+        profile: 'web',
+        operation: 'full',
+        phase: 'validated',
+        originalPatch,
+        updatedPatch,
+        databasePath,
+        principal: target,
+        stagedCredential: staged,
+        previousCredential: previous,
+        installService: true,
+      })
+
+      await recoverJournal({
+        patchPath,
+        dshHome,
+        profile: 'web',
+        profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+        operations: {
+          readEffectiveProfile() {
+            return asEffectiveProfile(updatedPatch)
+          },
+          pairPrincipal(input: { principal: { user: string } }) { deliveryOwner = input.principal.user },
+          removeCredential(locator: unknown) { removed.push(locator) },
+          installService() { installCalls += 1 },
+        },
+      })
+
+      expect(await readFile(patchPath, 'utf8')).toBe(updatedPatch)
+      expect(deliveryOwner).toBe('ou_new')
+      expect(removed).toEqual([previous])
+      expect(removed).not.toContainEqual(staged)
+      expect(installCalls).toBe(1)
+      await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+        .rejects.toMatchObject({ code: 'ENOENT' })
+    },
+  )
+
+  test('refuses validated recovery when the effective Delivery database drifted from the journal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-recovery-database-drift-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const originalPatch = 'original-profile\n'
+    const updatedPatch = 'candidate-profile\n'
+    const journalDatabasePath = join(dshHome, 'delivery-a.sqlite')
+    const effectiveDatabasePath = join(dshHome, 'delivery-b.sqlite')
+    await writeFile(patchPath, updatedPatch, 'utf8')
+    const { createVersionedCredentialLocator, persistLarkSetupJournal, recoverLarkSetupJournal } =
+      await import('../src/setup.ts')
+    const staged = createVersionedCredentialLocator({
+      provider: 'macos-keychain', dshHome, profile: 'web', account: 'primary',
+      version: '22222222222222222222222222222222',
+    })
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'validated',
+      originalPatch,
+      updatedPatch,
+      databasePath: journalDatabasePath,
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      stagedCredential: staged,
+      installService: false,
+    })
+    let pairCalls = 0
+
+    await expect(recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() { return effectiveDeliveryProfile(effectiveDatabasePath) },
+        pairPrincipal() { pairCalls += 1 },
+        removeCredential() {},
+      },
+    })).rejects.toThrow(/effective assistant-delivery database changed.*journal/iu)
+
+    expect(pairCalls).toBe(0)
+    expect(await readFile(patchPath, 'utf8')).toBe(updatedPatch)
+    expect(JSON.parse(await readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')))
+      .toMatchObject({ phase: 'validated', databasePath: journalDatabasePath })
+  })
+
+  test('refuses validated recovery when effective Lark no longer represents the journal owner', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-recovery-owner-drift-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = baseAssistantProfile(dshHome, databasePath)
+    const stagedService = 'dsh/lark/web/primary/versions/22222222222222222222222222222222'
+    const updatedPatch = lark.configureLarkProfilePatch({
+      profilePatch: originalPatch,
+      dshHome,
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_new',
+      keychainService: stagedService,
+      keychainAccount: 'primary',
+      credentialProvider: 'macos-keychain',
+      agentTools: 'disable',
+    })
+    const disabledEffectiveProfile = asEffectiveProfile(updatedPatch).replace('enabled: true', 'enabled: false')
+    await writeFile(patchPath, updatedPatch, 'utf8')
+    const { createVersionedCredentialLocator, persistLarkSetupJournal, recoverLarkSetupJournal } =
+      await import('../src/setup.ts')
+    const staged = createVersionedCredentialLocator({
+      provider: 'macos-keychain', dshHome, profile: 'web', account: 'primary',
+      version: '22222222222222222222222222222222',
+    })
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'validated',
+      originalPatch,
+      updatedPatch,
+      databasePath,
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      stagedCredential: staged,
+      installService: false,
+    })
+    let pairCalls = 0
+
+    await expect(recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() { return disabledEffectiveProfile },
+        pairPrincipal() { pairCalls += 1 },
+        removeCredential() {},
+      },
+    })).rejects.toThrow(/effective Lark.*journal owner/iu)
+
+    expect(pairCalls).toBe(0)
+    expect(await readFile(patchPath, 'utf8')).toBe(updatedPatch)
+    expect(JSON.parse(await readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')))
+      .toMatchObject({ phase: 'validated', databasePath })
+  })
+
+  test('rolls back before pairing when the effective Delivery database changes during validation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-validation-database-drift-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databaseA = join(dshHome, 'delivery-a.sqlite')
+    const databaseB = join(dshHome, 'delivery-b.sqlite')
+    const originalPatch = baseAssistantProfile(dshHome, databaseA)
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    let reads = 0
+    let pairCalls = 0
+    const removed: unknown[] = []
+
+    await expect(executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() {
+          reads += 1
+          return effectiveDeliveryProfile(reads === 1 ? databaseA : databaseB)
+        },
+        storeCredential() {},
+        readCredential() { return 'secret' },
+        discoverOwner() {
+          return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' }
+        },
+        validateProfile() {},
+        pairPrincipal() { pairCalls += 1 },
+        removeCredential(locator) { removed.push(locator) },
+      },
+    })).rejects.toThrow(/effective assistant-delivery database changed during validation/iu)
+
+    expect(pairCalls).toBe(0)
+    expect(removed).toHaveLength(1)
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test.each([
+    'wrong-lark-package',
+    'disabled-credentials-package',
+    'wrong-credentials-package',
+    'missing-enabled-agent-rule',
+  ] as const)('rolls back before pairing when effective validation has %s', async drift => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-effective-binding-drift-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = baseAssistantProfile(dshHome, databasePath)
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--allow-agent-tools',
+    ])
+    let pairCalls = 0
+    const removed: unknown[] = []
+
+    await expect(executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() {
+          const current = readFileSync(patchPath, 'utf8')
+          let effective = asEffectiveProfile(current)
+          if (!current.includes('dsh-enhanced-lark-channel')) return effective
+          if (drift === 'wrong-lark-package') {
+            effective = effective.replace("name: '@dsh-enhanced/lark-channel'", "name: '@example/other-lark'")
+          } else if (drift === 'disabled-credentials-package') {
+            effective = effective.replace(
+              "- id: dsh-enhanced-credentials-keychain\n  name: '@dsh-enhanced/credentials-keychain'",
+              "- id: dsh-enhanced-credentials-keychain\n  name: '@dsh-enhanced/credentials-keychain'\n  disabled: true",
+            )
+          } else if (drift === 'wrong-credentials-package') {
+            effective = effective.replace(
+              "name: '@dsh-enhanced/credentials-keychain'",
+              "name: '@example/shared-credentials'",
+            )
+          } else {
+            effective = effective.replace('id: lark-owner-tool-*-primary', 'id: removed-owner-tool-primary')
+          }
+          return effective
+        },
+        storeCredential() {},
+        readCredential() { return 'secret' },
+        discoverOwner() {
+          return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' }
+        },
+        validateProfile() {},
+        pairPrincipal() { pairCalls += 1 },
+        removeCredential(locator) { removed.push(locator) },
+      },
+    })).rejects.toThrow(/effective (?:Lark binding|Agent policy)/iu)
+
+    expect(pairCalls).toBe(0)
+    expect(removed).toHaveLength(1)
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('treats an absent staged credential as an idempotent staging recovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-staging-before-store-crash-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    const { createVersionedCredentialLocator, persistLarkSetupJournal, recoverLarkSetupJournal } =
+      await import('../src/setup.ts')
+    const staged = createVersionedCredentialLocator({
+      provider: 'macos-keychain', dshHome, profile: 'web', account: 'primary',
+      version: '22222222222222222222222222222222',
+    })
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'staging',
+      originalPatch: 'original-profile\n',
+      databasePath: join(dshHome, 'assistant-delivery/state.sqlite'),
+      account: 'primary',
+      stagedCredential: staged,
+      installService: false,
+    })
+
+    await recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        removeCredential() {
+          throw Object.assign(new Error('credential is already absent'), { code: 'not-found' })
+        },
+      },
+    })
+
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('does not block paired recovery when the previous credential was already retired', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-paired-after-delete-crash-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = baseAssistantProfile(dshHome, databasePath)
+    const updatedPatch = configuredLarkProfile({ dshHome, databasePath })
+    await writeFile(patchPath, updatedPatch, 'utf8')
+    const { createVersionedCredentialLocator, persistLarkSetupJournal, recoverLarkSetupJournal } =
+      await import('../src/setup.ts')
+    const previous = createVersionedCredentialLocator({
+      provider: 'macos-keychain', dshHome, profile: 'web', account: 'primary',
+      version: '11111111111111111111111111111111',
+    })
+    const staged = createVersionedCredentialLocator({
+      provider: 'macos-keychain', dshHome, profile: 'web', account: 'primary',
+      version: '22222222222222222222222222222222',
+    })
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'paired',
+      originalPatch,
+      updatedPatch,
+      databasePath,
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      stagedCredential: staged,
+      previousCredential: previous,
+      installService: false,
+    })
+    let pairCalls = 0
+
+    await recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() {
+          return asEffectiveProfile(updatedPatch)
+        },
+        pairPrincipal() { pairCalls += 1 },
+        removeCredential() {
+          throw Object.assign(new Error('credential is already absent'), { code: 'not-found' })
+        },
+      },
+    })
+
+    expect(pairCalls).toBe(1)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('keeps rollback direction after owner handoff fails and staged cleanup is interrupted', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-handoff-aborting-crash-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const seed = baseAssistantProfile(dshHome, join(dshHome, 'assistant-delivery/state.sqlite'))
+    const originalPatch = lark.configureLarkProfilePatch({
+      profilePatch: seed,
+      dshHome,
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_original',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      credentialProvider: 'macos-keychain',
+      agentTools: 'disable',
+    })
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const { executeLarkSetupProfileTransaction, recoverLarkSetupJournal } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    let stagedWasDeleted = false
+
+    await expect(executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() {
+          return asEffectiveProfile(readFileSync(patchPath, 'utf8'))
+        },
+        storeCredential() {},
+        readCredential() { return 'staged-secret' },
+        discoverOwner() {
+          return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' }
+        },
+        validateProfile() {},
+        pairPrincipal() { throw new Error('handoff rejected') },
+        removeCredential() {
+          stagedWasDeleted = true
+          throw Object.assign(new Error('simulated crash after credential deletion'), { code: 'EIO' })
+        },
+      },
+    })).rejects.toThrow(/rollback completed.*cleanup failed/iu)
+
+    expect(stagedWasDeleted).toBe(true)
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    expect(JSON.parse(await readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')))
+      .toMatchObject({ phase: 'aborting' })
+    let recoveryPairCalls = 0
+    await recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        pairPrincipal() { recoveryPairCalls += 1 },
+        removeCredential() {
+          throw Object.assign(new Error('credential is already absent'), { code: 'not-found' })
+        },
+      },
+    })
+
+    expect(recoveryPairCalls).toBe(0)
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('replays a validated refresh forward instead of silently rolling it back', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-refresh-validated-crash-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = configuredLarkProfile({
+      dshHome,
+      databasePath,
+      ownerUserId: 'ou_owner',
+      agentTools: 'disable',
+    })
+    const updatedPatch = lark.refreshLarkAgentPolicyPatch({
+      profilePatch: originalPatch,
+      dshHome,
+      agentTools: 'enable',
+    })
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const { persistLarkSetupJournal, recoverLarkSetupJournal } = await import('../src/setup.ts')
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'refresh',
+      phase: 'validated',
+      originalPatch,
+      updatedPatch,
+      installService: false,
+    })
+
+    await recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() { return asEffectiveProfile(updatedPatch) },
+      },
+    })
+
+    expect(await readFile(patchPath, 'utf8')).toBe(updatedPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('rolls back validated refresh recovery when effective policy no longer matches the candidate', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-refresh-recovery-policy-drift-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = configuredLarkProfile({
+      dshHome,
+      databasePath,
+      ownerUserId: 'ou_owner',
+      agentTools: 'disable',
+    })
+    const updatedPatch = lark.refreshLarkAgentPolicyPatch({
+      profilePatch: originalPatch,
+      dshHome,
+      agentTools: 'enable',
+    })
+    await writeFile(patchPath, updatedPatch, 'utf8')
+    const { persistLarkSetupJournal, recoverLarkSetupJournal } = await import('../src/setup.ts')
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'refresh',
+      phase: 'validated',
+      originalPatch,
+      updatedPatch,
+      installService: false,
+    })
+    const driftedEffective = asEffectiveProfile(updatedPatch)
+      .replace('id: lark-owner-tool-*-primary', 'id: removed-owner-tool-primary')
+
+    await expect(recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operations: {
+        readEffectiveProfile() { return driftedEffective },
+      },
+    })).rejects.toThrow(/effective Agent policy does not match/iu)
+
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('rolls back validated refresh recovery when its candidate contains a malformed reserved row', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-refresh-recovery-raw-integrity-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = configuredLarkProfile({ dshHome, databasePath, ownerUserId: 'ou_owner' })
+    const updatedPatch = `${originalPatch}
+- id: dsh-enhanced-lark-channel
+  config: { enabled: true, account: primary }
+`
+    await writeFile(patchPath, updatedPatch, 'utf8')
+    const { persistLarkSetupJournal, recoverLarkSetupJournal } = await import('../src/setup.ts')
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'refresh',
+      phase: 'validated',
+      originalPatch,
+      updatedPatch,
+      installService: false,
+    })
+
+    await expect(recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operations: {
+        readEffectiveProfile() { return asEffectiveProfile(originalPatch) },
+      },
+    })).rejects.toThrow(/duplicate reserved row.*lark-channel/iu)
+
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('recovers an abandoned journal before staging the next full setup credential', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-entry-recovery-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const seed = baseAssistantProfile(dshHome, join(dshHome, 'assistant-delivery/state.sqlite'))
+    const originalPatch = lark.configureLarkProfilePatch({
+      profilePatch: seed,
+      dshHome,
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_original',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      credentialProvider: 'macos-keychain',
+      agentTools: 'disable',
+    })
+    const crashedPatch = 'candidate-left-by-killed-process\n'
+    await writeFile(patchPath, crashedPatch, 'utf8')
+    const setupModule = await import('../src/setup.ts') as Record<string, unknown>
+    const createLocator = setupModule.createVersionedCredentialLocator as (
+      input: Record<string, unknown>,
+    ) => unknown
+    const persistJournal = setupModule.persistLarkSetupJournal as (input: Record<string, unknown>) => Promise<void>
+    const execute = setupModule.executeLarkSetupProfileTransaction as (input: Record<string, unknown>) => Promise<void>
+    const abandoned = createLocator({
+      provider: 'macos-keychain', dshHome, profile: 'web', account: 'primary',
+      version: '11111111111111111111111111111111',
+    })
+    await persistJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'candidate',
+      originalPatch,
+      updatedPatch: crashedPatch,
+      databasePath: join(dshHome, 'assistant-delivery/state.sqlite'),
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_abandoned' },
+      stagedCredential: abandoned,
+      installService: false,
+    })
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    const events: string[] = []
+
+    await execute({
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() {
+          return asEffectiveProfile(readFileSync(patchPath, 'utf8'))
+        },
+        storeCredential() { events.push('new-credential-staged') },
+        readCredential() { return 'new-secret' },
+        discoverOwner() {
+          return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' }
+        },
+        validateProfile() {},
+        pairPrincipal() { events.push('new-owner-paired') },
+        removeCredential(locator: unknown) {
+          events.push(JSON.stringify(locator) === JSON.stringify(abandoned)
+            ? 'abandoned-credential-removed'
+            : 'previous-credential-removed')
+        },
+      },
+    })
+
+    expect(events[0]).toBe('abandoned-credential-removed')
+    expect(events[1]).toBe('new-credential-staged')
+    expect(await readFile(patchPath, 'utf8')).toContain('lark/primary/personal/ou_new')
+  })
+
+  test('recovers an abandoned candidate before install-service validates or restarts the Host', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-install-recovery-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const originalPatch = 'active-profile\n'
+    const crashedPatch = 'unvalidated-candidate\n'
+    await writeFile(patchPath, crashedPatch, 'utf8')
+    const { persistLarkSetupJournal } = await import('../src/setup.ts')
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'refresh',
+      phase: 'candidate',
+      originalPatch,
+      updatedPatch: crashedPatch,
+      installService: false,
+    })
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    let validated = ''
+    let installCalls = 0
+    try {
+      const run = lark.runLarkSetup as unknown as (
+        argv: readonly string[],
+        runtime: Record<string, unknown>,
+      ) => Promise<void>
+      await run(['--profile', 'web', '--install-service'], {
+        profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+        validateProfile() { validated = readFileSync(patchPath, 'utf8') },
+        readEffectiveProfile() {
+          return effectiveDeliveryProfile(join(dshHome, 'assistant-delivery/state.sqlite'))
+        },
+        installResidentService() {
+          installCalls += 1
+          return { kind: 'launchd', statusCommand: 'status', logCommand: 'log' }
+        },
+      })
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+
+    expect(validated).toBe(originalPatch)
+    expect(installCalls).toBe(1)
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('recovers an abandoned candidate before refresh reads the profile snapshot', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-refresh-recovery-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const originalPatch = configuredLarkProfile({
+      dshHome,
+      databasePath: join(dshHome, 'assistant-delivery/state.sqlite'),
+      ownerUserId: 'ou_owner',
+    })
+    const crashedPatch = 'unvalidated-candidate\n'
+    await writeFile(patchPath, crashedPatch, 'utf8')
+    const { persistLarkSetupJournal } = await import('../src/setup.ts')
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'refresh',
+      phase: 'candidate',
+      originalPatch,
+      updatedPatch: crashedPatch,
+      installService: false,
+    })
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    let validateCalls = 0
+    try {
+      const run = lark.runLarkSetup as unknown as (
+        argv: readonly string[],
+        runtime: Record<string, unknown>,
+      ) => Promise<void>
+      await run(['--profile', 'web', '--refresh-agent-policy', '--disable-agent-tools'], {
+        profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+        validateProfile() { validateCalls += 1 },
+        readEffectiveProfile() {
+          return asEffectiveProfile(readFileSync(patchPath, 'utf8'))
+        },
+      })
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+
+    expect(validateCalls).toBe(1)
+    expect(await readFile(patchPath, 'utf8')).toContain('dsh-enhanced-lark-channel')
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('runs policy refresh inside the same profile transaction lock', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-refresh-lock-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    const fakeBin = join(root, 'bin')
+    await mkdir(profileDirectory, { recursive: true })
+    await mkdir(fakeBin, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const originalPatch = `
+- id: dsh-enhanced-personal-assistant
+  config:
+    assistantPolicy: { rules: [] }
+- id: dsh-enhanced-assistant-delivery
+  config:
+    databasePath: ${join(dshHome, 'assistant-delivery/state.sqlite')}
+    defaultWorkspace: ${join(dshHome, 'assistant-workspace')}
+    defaultAgentPreset: standard
+- id: dsh-enhanced-lark-channel
+  config:
+    enabled: true
+    account: primary
+    tenant: personal
+    appId: cli_0123456789abcdef
+`
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const dsh = join(fakeBin, 'dsh')
+    await writeFile(dsh, '#!/bin/sh\nexit 0\n', 'utf8')
+    await chmod(dsh, 0o755)
+    const { withProfileSetupLock } = await import('../src/setup.ts')
+    let releaseFirst!: () => void
+    let firstEntered!: () => void
+    const entered = new Promise<void>(resolve => { firstEntered = resolve })
+    const hold = new Promise<void>(resolve => { releaseFirst = resolve })
+    const first = withProfileSetupLock(patchPath, async () => {
+      firstEntered()
+      await hold
+    }, { timeoutMs: 1_000, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 })
+    await entered
+    const previousHome = process.env.DSH_HOME
+    const previousPath = process.env.PATH
+    process.env.DSH_HOME = dshHome
+    process.env.PATH = `${fakeBin}:${previousPath ?? ''}`
+    try {
+      const run = lark.runLarkSetup as unknown as (
+        argv: readonly string[],
+        runtime: { profileLockOptions: { timeoutMs: number; pollMs: number; staleMs: number; heartbeatMs: number } },
+      ) => Promise<void>
+      await expect(run(
+        ['--profile', 'web', '--refresh-agent-policy', '--allow-agent-tools'],
+        { profileLockOptions: { timeoutMs: 30, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 } },
+      )).rejects.toThrow(/another setup.*profile/iu)
+      expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    } finally {
+      releaseFirst()
+      await first
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+  })
+
+  test('does not restart a resident Host from an in-flight candidate profile', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-install-service-lock-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    await writeFile(patchPath, 'active-profile\n', 'utf8')
+    const { withProfileSetupLock } = await import('../src/setup.ts')
+    let releaseSetup!: () => void
+    let setupEntered!: () => void
+    const entered = new Promise<void>(resolve => { setupEntered = resolve })
+    const hold = new Promise<void>(resolve => { releaseSetup = resolve })
+    const setup = withProfileSetupLock(patchPath, async () => {
+      setupEntered()
+      await hold
+    }, { timeoutMs: 1_000, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 })
+    await entered
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    try {
+      const run = lark.runLarkSetup as unknown as (
+        argv: readonly string[],
+        runtime: { profileLockOptions: { timeoutMs: number; pollMs: number; staleMs: number; heartbeatMs: number } },
+      ) => Promise<void>
+      await expect(run(
+        ['--profile', 'web', '--install-service'],
+        { profileLockOptions: { timeoutMs: 30, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 } },
+      )).rejects.toThrow(/another setup.*profile/iu)
+      expect(await readFile(patchPath, 'utf8')).toBe('active-profile\n')
+    } finally {
+      releaseSetup()
+      await setup
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+  })
+
+  test.each([
+    'macos-keychain',
+    'linux-secret-service',
+    'windows-dpapi',
+  ] as const)('uses a unique staged %s locator for same-account reconfiguration', async provider => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-staged-credential-'))
+    const { createVersionedCredentialLocator } = await import('../src/setup.ts')
+    const first = createVersionedCredentialLocator({
+      provider,
+      dshHome: root,
+      profile: 'web',
+      account: 'primary',
+      version: '11111111111111111111111111111111',
+    })
+    const second = createVersionedCredentialLocator({
+      provider,
+      dshHome: root,
+      profile: 'web',
+      account: 'primary',
+      version: '22222222222222222222222222222222',
+    })
+
+    expect(second).not.toEqual(first)
+    expect(JSON.stringify(second)).not.toContain('generated-secret-value')
+    if (provider === 'windows-dpapi') {
+      expect(second).toMatchObject({ provider, path: expect.stringContaining('22222222222222222222222222222222') })
+    } else {
+      expect(second).toMatchObject({
+        provider,
+        service: 'dsh/lark/web/primary/versions/22222222222222222222222222222222',
+        account: 'primary',
+      })
+    }
+  })
+
+  test('recognizes an old credential as setup-owned only with the exact private handle shape', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-managed-credential-shape-'))
+    const dshHome = join(root, 'dsh-home')
+    const { findManagedLarkCredentialLocator } = await import('../src/setup.ts')
+    const profile = (consumers: string, purposes = '[connect]', maxLeaseMs = '86400000') => `
+- id: dsh-enhanced-lark-channel
+  config:
+    enabled: true
+    account: primary
+    credentialHandle: lark-app-secret-primary
+- id: dsh-enhanced-credentials-keychain
+  config:
+    handles:
+      - id: lark-app-secret-primary
+        consumers: ${consumers}
+        purposes: ${purposes}
+        maxLeaseMs: ${maxLeaseMs}
+        provider: macos-keychain
+        service: dsh/lark/web/primary/versions/11111111111111111111111111111111
+        account: primary
+`
+    const inspect = (profilePatch: string) => findManagedLarkCredentialLocator({
+      profilePatch, dshHome, profile: 'web',
+    })
+
+    expect(inspect(profile('[dsh-enhanced-lark-channel]'))).toMatchObject({
+      provider: 'macos-keychain',
+      service: 'dsh/lark/web/primary/versions/11111111111111111111111111111111',
+    })
+    expect(inspect(profile('[dsh-enhanced-lark-channel, another-consumer]'))).toBeUndefined()
+    expect(inspect(profile('[dsh-enhanced-lark-channel]', '[connect, export]'))).toBeUndefined()
+    expect(inspect(profile('[dsh-enhanced-lark-channel]', '[connect]', '1'))).toBeUndefined()
+    expect(inspect(`${profile('[dsh-enhanced-lark-channel]')}
+      - id: lark-app-secret-primary
+        consumers: [dsh-enhanced-lark-channel]
+        purposes: [connect]
+        maxLeaseMs: 86400000
+        provider: macos-keychain
+        service: dsh/lark/web/primary/versions/22222222222222222222222222222222
+        account: primary
+`)).toBeUndefined()
+    expect(inspect(`${profile('[dsh-enhanced-lark-channel]')}
+      - id: user-backup-secret
+        consumers: [user-plugin]
+        purposes: [connect]
+        maxLeaseMs: 86400000
+        provider: macos-keychain
+        service: dsh/lark/web/primary/versions/11111111111111111111111111111111
+        account: primary
+`)).toBeUndefined()
+
+    const windowsPath = join(dshHome, 'credentials-keychain',
+      'lark-web-primary-11111111111111111111111111111111.clixml')
+    const windowsProfile = `
+- id: dsh-enhanced-lark-channel
+  config:
+    enabled: true
+    account: primary
+    credentialHandle: lark-app-secret-primary
+- id: dsh-enhanced-credentials-keychain
+  config:
+    handles:
+      - id: lark-app-secret-primary
+        consumers: [dsh-enhanced-lark-channel]
+        purposes: [connect]
+        maxLeaseMs: 86400000
+        provider: windows-dpapi
+        path: ${JSON.stringify(windowsPath)}
+      - id: user-backup-secret
+        consumers: [user-plugin]
+        purposes: [connect]
+        maxLeaseMs: 86400000
+        provider: windows-dpapi
+        path: ${JSON.stringify(windowsPath)}
+`
+    expect(inspect(windowsProfile)).toBeUndefined()
+  })
+
+  test.each([
+    'macos-keychain',
+    'linux-secret-service',
+    'windows-dpapi',
+  ] as const)('keeps the old %s credential when candidate validation fails', async provider => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-credential-validation-'))
+    const patchPath = join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    const { commitValidatedLarkOwnerSetup, createVersionedCredentialLocator } = await import('../src/setup.ts')
+    const previous = createVersionedCredentialLocator({
+      provider, dshHome: root, profile: 'web', account: 'primary', version: '11111111111111111111111111111111',
+    })
+    const staged = createVersionedCredentialLocator({
+      provider, dshHome: root, profile: 'web', account: 'primary', version: '22222222222222222222222222222222',
+    })
+    const removed: unknown[] = []
+
+    await expect(commitValidatedLarkOwnerSetup({
+      patchPath,
+      originalPatch: 'original-profile\n',
+      updatedPatch: 'candidate-profile\n',
+      profile: 'web',
+      databasePath: join(root, 'state.sqlite'),
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      credentialTransition: { previous, staged },
+      operations: {
+        validateProfile() { throw new Error('candidate rejected') },
+        pairPrincipal() { throw new Error('must not pair') },
+        removeCredential(locator) { removed.push(locator) },
+      },
+    })).rejects.toThrow(/candidate rejected/u)
+
+    expect(await readFile(patchPath, 'utf8')).toBe('original-profile\n')
+    expect(removed).toEqual([staged])
+    expect(removed).not.toContainEqual(previous)
+  })
+
+  test.each([
+    'macos-keychain',
+    'linux-secret-service',
+    'windows-dpapi',
+  ] as const)('keeps the old %s credential when owner handoff fails', async provider => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-credential-handoff-'))
+    const patchPath = join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    const { commitValidatedLarkOwnerSetup, createVersionedCredentialLocator } = await import('../src/setup.ts')
+    const previous = createVersionedCredentialLocator({
+      provider, dshHome: root, profile: 'web', account: 'primary', version: '11111111111111111111111111111111',
+    })
+    const staged = createVersionedCredentialLocator({
+      provider, dshHome: root, profile: 'web', account: 'primary', version: '22222222222222222222222222222222',
+    })
+    const removed: unknown[] = []
+
+    await expect(commitValidatedLarkOwnerSetup({
+      patchPath,
+      originalPatch: 'original-profile\n',
+      updatedPatch: 'candidate-profile\n',
+      profile: 'web',
+      databasePath: join(root, 'state.sqlite'),
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      credentialTransition: { previous, staged },
+      operations: {
+        validateProfile() {},
+        pairPrincipal() { throw new Error('handoff rejected') },
+        removeCredential(locator) { removed.push(locator) },
+      },
+    })).rejects.toThrow(/handoff rejected/u)
+
+    expect(await readFile(patchPath, 'utf8')).toBe('original-profile\n')
+    expect(removed).toEqual([staged])
+    expect(removed).not.toContainEqual(previous)
+  })
+
+  test('does not let a stale rollback overwrite a newer profile commit', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-stale-rollback-'))
+    const patchPath = join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    const { commitValidatedLarkOwnerSetup, createVersionedCredentialLocator } = await import('../src/setup.ts')
+    const staged = createVersionedCredentialLocator({
+      provider: 'macos-keychain',
+      dshHome: root,
+      profile: 'web',
+      account: 'primary',
+      version: '22222222222222222222222222222222',
+    })
+    const removed: unknown[] = []
+
+    await expect(commitValidatedLarkOwnerSetup({
+      patchPath,
+      originalPatch: 'original-profile\n',
+      updatedPatch: 'candidate-profile\n',
+      profile: 'web',
+      databasePath: join(root, 'state.sqlite'),
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      credentialTransition: { staged },
+      operations: {
+        validateProfile() {
+          writeFileSync(patchPath, 'newer-profile\n', 'utf8')
+          throw new Error('candidate rejected')
+        },
+        pairPrincipal() { throw new Error('must not pair') },
+        removeCredential(locator) { removed.push(locator) },
+      },
+    })).rejects.toThrow(/rollback refused.*changed concurrently/iu)
+
+    expect(await readFile(patchPath, 'utf8')).toBe('newer-profile\n')
+    expect(removed).toEqual([])
+  })
+
+  test('does not hand off the owner when an external writer replaces the validated candidate', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-external-profile-writer-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = baseAssistantProfile(dshHome, databasePath)
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    let pairCalls = 0
+    const removed: unknown[] = []
+
+    await expect(executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() { return effectiveDeliveryProfile(databasePath) },
+        storeCredential() {},
+        readCredential() { return 'secret' },
+        discoverOwner() {
+          return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' }
+        },
+        validateProfile() { writeFileSync(patchPath, 'newer-profile\n', 'utf8') },
+        pairPrincipal() { pairCalls += 1 },
+        removeCredential(locator) { removed.push(locator) },
+      },
+    })).rejects.toThrow(/rollback refused.*changed concurrently/iu)
+
+    expect(pairCalls).toBe(0)
+    expect(removed).toEqual([])
+    expect(await readFile(patchPath, 'utf8')).toBe('newer-profile\n')
+    expect(JSON.parse(await readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')))
+      .toMatchObject({ phase: 'candidate' })
+  })
+
+  test.each([
+    'macos-keychain',
+    'linux-secret-service',
+    'windows-dpapi',
+  ] as const)('retires the previous %s credential only after profile and owner commit', async provider => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-credential-success-'))
+    const patchPath = join(root, 'cordis.patch.yml')
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    const { commitValidatedLarkOwnerSetup, createVersionedCredentialLocator } = await import('../src/setup.ts')
+    const previous = createVersionedCredentialLocator({
+      provider, dshHome: root, profile: 'web', account: 'primary', version: '11111111111111111111111111111111',
+    })
+    const staged = createVersionedCredentialLocator({
+      provider, dshHome: root, profile: 'web', account: 'primary', version: '22222222222222222222222222222222',
+    })
+    const events: string[] = []
+
+    await commitValidatedLarkOwnerSetup({
+      patchPath,
+      originalPatch: 'original-profile\n',
+      updatedPatch: 'candidate-profile\n',
+      profile: 'web',
+      databasePath: join(root, 'state.sqlite'),
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      credentialTransition: { previous, staged },
+      operations: {
+        validateProfile() { events.push('validated') },
+        pairPrincipal() { events.push('paired') },
+        removeCredential(locator) {
+          expect(locator).toEqual(previous)
+          events.push('old-credential-removed')
+        },
+      },
+    })
+
+    expect(await readFile(patchPath, 'utf8')).toBe('candidate-profile\n')
+    expect(events).toEqual(['validated', 'paired', 'old-credential-removed'])
+  })
+
+  test('keeps concurrent full setup runs from splitting the profile owner and Delivery owner', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-full-transaction-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const seed = baseAssistantProfile(dshHome, join(dshHome, 'assistant-delivery/state.sqlite'))
+    const originalPatch = lark.configureLarkProfilePatch({
+      profilePatch: seed,
+      dshHome,
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_original',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      credentialProvider: 'macos-keychain',
+      agentTools: 'disable',
+    })
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const setupModule = await import('../src/setup.ts') as Record<string, unknown>
+    const execute = setupModule.executeLarkSetupProfileTransaction as (input: Record<string, unknown>) => Promise<void>
+    expect(execute).toBeTypeOf('function')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--allow-agent-tools',
+    ])
+    const events: string[] = []
+    let deliveryOwner = 'ou_original'
+    let releaseFirst!: () => void
+    let firstDiscovering!: () => void
+    const firstEntered = new Promise<void>(resolve => { firstDiscovering = resolve })
+    const firstHold = new Promise<void>(resolve => { releaseFirst = resolve })
+    const lockOptions = { timeoutMs: 1_000, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 }
+    const createOperations = (name: 'first' | 'second', owner: string) => ({
+      readEffectiveProfile() {
+        return asEffectiveProfile(readFileSync(patchPath, 'utf8'))
+      },
+      storeCredential(locator: unknown) {
+        events.push(`${name}:credential-staged`)
+        expect(JSON.stringify(locator)).toContain('/versions/')
+      },
+      readCredential() { return `${name}-secret` },
+      async discoverOwner() {
+        events.push(`${name}:discover-owner`)
+        if (name === 'first') {
+          firstDiscovering()
+          await firstHold
+        }
+        return { channel: 'lark', account: 'primary', tenant: 'personal', user: owner }
+      },
+      validateProfile() { events.push(`${name}:validated`) },
+      pairPrincipal(input: { principal: { user: string } }) {
+        const currentPatch = readFileSync(patchPath, 'utf8')
+        expect(currentPatch).toContain(`lark/primary/personal/${input.principal.user}`)
+        deliveryOwner = input.principal.user
+        events.push(`${name}:paired`)
+      },
+      removeCredential() { events.push(`${name}:credential-retired`) },
+      afterCommit() { events.push(`${name}:resident-installed`) },
+    })
+    const common = {
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: lockOptions,
+    }
+    const first = execute({ ...common, operations: createOperations('first', 'ou_first') })
+    await firstEntered
+    const second = execute({ ...common, operations: createOperations('second', 'ou_second') })
+    await new Promise(resolve => setTimeout(resolve, 25))
+    expect(events).not.toContain('second:credential-staged')
+    releaseFirst()
+    await Promise.all([first, second])
+
+    const finalPatch = await readFile(patchPath, 'utf8')
+    expect(finalPatch).toContain('lark/primary/personal/ou_second')
+    expect(deliveryOwner).toBe('ou_second')
+    expect(events.indexOf('first:resident-installed')).toBeLessThan(events.indexOf('second:credential-staged'))
+    expect(events.indexOf('second:validated')).toBeLessThan(events.indexOf('second:paired'))
+    expect(events.at(-1)).toBe('second:resident-installed')
+  })
+
+  test('refuses an inherited Lark profile backed by the same Delivery database even when its raw patch has no row', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-cross-profile-sequential-'))
+    const dshHome = join(root, 'dsh-home')
+    const databasePath = join(dshHome, 'assistant-delivery/shared.sqlite')
+    const webDirectory = join(dshHome, 'profiles', 'web')
+    const fooDirectory = join(dshHome, 'profiles', 'foo')
+    await mkdir(webDirectory, { recursive: true })
+    await mkdir(fooDirectory, { recursive: true })
+    const webPatchPath = join(webDirectory, 'cordis.patch.yml')
+    const fooPatchPath = join(fooDirectory, 'cordis.patch.yml')
+    const base = baseAssistantProfile(dshHome, databasePath)
+    await writeFile(webPatchPath, base, 'utf8')
+    await writeFile(fooPatchPath, base, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'foo', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    let storeCalls = 0
+    let pairCalls = 0
+
+    await expect(executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath: fooPatchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile(profile) {
+          return profile === 'web'
+            ? effectiveLarkDeliveryProfile(databasePath)
+            : effectiveDeliveryProfile(databasePath)
+        },
+        storeCredential() { storeCalls += 1 },
+        readCredential() { return 'secret' },
+        discoverOwner() {
+          return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_foo' }
+        },
+        validateProfile() {},
+        pairPrincipal() { pairCalls += 1 },
+        removeCredential() {},
+      },
+    })).rejects.toThrow(/profile web already owns Lark.*same assistant-delivery database/iu)
+
+    expect(storeCalls).toBe(0)
+    expect(pairCalls).toBe(0)
+    expect(await readFile(fooPatchPath, 'utf8')).toBe(base)
+  })
+
+  test('fails closed when another real profile cannot prove whether it inherited Lark', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-cross-profile-unverifiable-'))
+    const dshHome = join(root, 'dsh-home')
+    const databasePath = join(dshHome, 'assistant-delivery/shared.sqlite')
+    const webDirectory = join(dshHome, 'profiles', 'web')
+    const fooDirectory = join(dshHome, 'profiles', 'foo')
+    await mkdir(webDirectory, { recursive: true })
+    await mkdir(fooDirectory, { recursive: true })
+    const base = baseAssistantProfile(dshHome, databasePath)
+    await writeFile(join(webDirectory, 'cordis.patch.yml'), base, 'utf8')
+    const fooPatchPath = join(fooDirectory, 'cordis.patch.yml')
+    await writeFile(fooPatchPath, base, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'foo', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    let storeCalls = 0
+
+    await expect(executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath: fooPatchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile(profile) {
+          if (profile === 'web') throw new Error('profile composition failed')
+          return effectiveDeliveryProfile(databasePath)
+        },
+        storeCredential() { storeCalls += 1 },
+        readCredential() { return 'secret' },
+        discoverOwner() {
+          return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_foo' }
+        },
+        validateProfile() {},
+        pairPrincipal() {},
+        removeCredential() {},
+      },
+    })).rejects.toThrow(/cannot verify effective Lark ownership in profile web/iu)
+
+    expect(storeCalls).toBe(0)
+    expect(await readFile(fooPatchPath, 'utf8')).toBe(base)
+  })
+
+  test('serializes different profiles through canonical aliases of their shared Delivery database', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-cross-profile-concurrent-'))
+    const dshHome = join(root, 'dsh-home')
+    const realDatabasePath = join(dshHome, 'assistant-delivery/shared.sqlite')
+    const aliasDatabasePath = join(dshHome, 'delivery-alias.sqlite')
+    const webDirectory = join(dshHome, 'profiles', 'web')
+    const fooDirectory = join(dshHome, 'profiles', 'foo')
+    await mkdir(dirname(realDatabasePath), { recursive: true })
+    await mkdir(webDirectory, { recursive: true })
+    await mkdir(fooDirectory, { recursive: true })
+    await writeFile(realDatabasePath, '', 'utf8')
+    await symlink(realDatabasePath, aliasDatabasePath)
+    const webPatchPath = join(webDirectory, 'cordis.patch.yml')
+    const fooPatchPath = join(fooDirectory, 'cordis.patch.yml')
+    const webBase = baseAssistantProfile(dshHome, realDatabasePath)
+    const fooBase = baseAssistantProfile(dshHome, aliasDatabasePath)
+    await writeFile(webPatchPath, webBase, 'utf8')
+    await writeFile(fooPatchPath, fooBase, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = (profile: string) => lark.parseLarkSetupArgs([
+      '--profile', profile, '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    let releaseFirst!: () => void
+    let firstEntered!: () => void
+    const entered = new Promise<void>(resolve => { firstEntered = resolve })
+    const hold = new Promise<void>(resolve => { releaseFirst = resolve })
+    const events: string[] = []
+    const operations = (name: 'web' | 'foo') => ({
+      readEffectiveProfile(profile: string) {
+        const profilePatch = readFileSync(
+          profile === 'web' ? webPatchPath : fooPatchPath,
+          'utf8',
+        )
+        const databasePath = profile === 'web' ? realDatabasePath : aliasDatabasePath
+        return profilePatch.includes('dsh-enhanced-lark-channel')
+          ? asEffectiveProfile(profilePatch)
+          : effectiveDeliveryProfile(databasePath)
+      },
+      storeCredential() { events.push(`${name}:staged`) },
+      readCredential() { return `${name}-secret` },
+      async discoverOwner() {
+        if (name === 'web') {
+          firstEntered()
+          await hold
+        }
+        return { channel: 'lark' as const, account: 'primary', tenant: 'personal', user: `ou_${name}` }
+      },
+      validateProfile() {},
+      pairPrincipal() { events.push(`${name}:paired`) },
+      removeCredential() {},
+    })
+    const common = {
+      dshHome,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' as const },
+      credentialProvider: 'macos-keychain' as const,
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 },
+    }
+    const first = executeLarkSetupProfileTransaction({
+      ...common, args: args('web'), patchPath: webPatchPath, operations: operations('web'),
+    })
+    await entered
+    const second = executeLarkSetupProfileTransaction({
+      ...common, args: args('foo'), patchPath: fooPatchPath, operations: operations('foo'),
+    }).then(() => undefined, error => error as Error)
+    await new Promise(resolve => setTimeout(resolve, 25))
+    expect(events).not.toContain('foo:staged')
+    releaseFirst()
+    await first
+    expect(await second).toMatchObject({ message: expect.stringMatching(/profile web already owns Lark/iu) })
+
+    expect(events).toEqual(['web:staged', 'web:paired'])
+    expect(await readFile(webPatchPath, 'utf8')).toContain('lark/primary/personal/ou_web')
+    expect(await readFile(fooPatchPath, 'utf8')).toBe(fooBase)
+  })
+
+  test('pairs against the effective custom Delivery database and permits an isolated profile database', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-custom-delivery-database-'))
+    const dshHome = join(root, 'dsh-home')
+    const webDatabasePath = join(dshHome, 'delivery-web.sqlite')
+    const fooDatabasePath = join(dshHome, 'custom', 'delivery-foo.sqlite')
+    const webDirectory = join(dshHome, 'profiles', 'web')
+    const fooDirectory = join(dshHome, 'profiles', 'foo')
+    await mkdir(webDirectory, { recursive: true })
+    await mkdir(fooDirectory, { recursive: true })
+    const webBase = baseAssistantProfile(dshHome, webDatabasePath)
+    const fooBase = baseAssistantProfile(dshHome, fooDatabasePath)
+    const webPatchPath = join(webDirectory, 'cordis.patch.yml')
+    await writeFile(webPatchPath, lark.configureLarkProfilePatch({
+      profilePatch: webBase,
+      dshHome,
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_web',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      credentialProvider: 'macos-keychain',
+      agentTools: 'disable',
+    }), 'utf8')
+    const fooPatchPath = join(fooDirectory, 'cordis.patch.yml')
+    await writeFile(fooPatchPath, fooBase, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'foo', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    let pairedDatabasePath = ''
+
+    await executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath: fooPatchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile(profile) {
+          if (profile === 'web') return asEffectiveProfile(readFileSync(webPatchPath, 'utf8'))
+          const current = readFileSync(fooPatchPath, 'utf8')
+          return current.includes('dsh-enhanced-lark-channel')
+            ? asEffectiveProfile(current)
+            : `- id: dsh-enhanced-assistant-delivery\n  name: '@dsh-enhanced/assistant-delivery'\n  config:\n    databasePath: !!js dshHomePath('custom/delivery-foo.sqlite')\n`
+        },
+        storeCredential() {},
+        readCredential() { return 'secret' },
+        discoverOwner() {
+          return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_foo' }
+        },
+        validateProfile() {},
+        pairPrincipal(input) { pairedDatabasePath = input.databasePath },
+        removeCredential() {},
+      },
+    })
+
+    expect(pairedDatabasePath).toBe(fooDatabasePath)
+    expect(await readFile(fooPatchPath, 'utf8')).toContain('lark/primary/personal/ou_foo')
+  })
+
+  test('refreshes an existing profile policy without entering application or owner onboarding', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-policy-refresh-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    const fakeBin = join(root, 'bin')
+    await mkdir(profileDirectory, { recursive: true })
+    await mkdir(fakeBin, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    await writeFile(patchPath, `
+- id: dsh-enhanced-personal-assistant
+  config:
+    assistantPolicy:
+      databasePath: ${join(dshHome, 'assistant-policy/policy.sqlite')}
+      rules:
+        - id: lark-owner-ingress-secondary
+          effect: allow
+          subject: { kind: external, id: lark/secondary/personal/ou_owner }
+          actions: [approval.decide, ingest]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [external] }
+        - id: lark-owner-reply-secondary
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: ${join(dshHome, 'assistant-workspace')} }
+          actions: [reply]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [external] }
+    personalMemory:
+      databasePath: ${join(dshHome, 'personal-memory/memory.sqlite')}
+    personalWiki:
+      vaultRoot: ${join(dshHome, 'personal-wiki/vault')}
+      databasePath: ${join(dshHome, 'personal-wiki/state.sqlite')}
+    assistantAutomations:
+      databasePath: ${join(dshHome, 'assistant-automations/state.sqlite')}
+      runsPath: ${join(dshHome, 'assistant-automations/runs')}
+- id: dsh-enhanced-assistant-delivery
+  config:
+    databasePath: ${join(dshHome, 'assistant-delivery/state.sqlite')}
+    spoolPath: ${join(dshHome, 'assistant-delivery/spool')}
+    defaultWorkspace: ${join(dshHome, 'assistant-workspace')}
+    defaultAgentPreset: standard
+- id: dsh-enhanced-lark-channel
+  config:
+    enabled: true
+    account: secondary
+    tenant: personal
+    appId: cli_0123456789abcdef
+`, 'utf8')
+    const dsh = join(fakeBin, 'dsh')
+    await writeFile(dsh, '#!/bin/sh\nexit 0\n', 'utf8')
+    await chmod(dsh, 0o755)
+    const previousHome = process.env.DSH_HOME
+    const previousPath = process.env.PATH
+    process.env.DSH_HOME = dshHome
+    process.env.PATH = `${fakeBin}:${previousPath ?? ''}`
+    try {
+      const run = lark.runLarkSetup as unknown as (
+        argv: readonly string[], runtime: Record<string, unknown>,
+      ) => Promise<void>
+      await run(['--profile', 'web', '--refresh-agent-policy', '--allow-agent-tools'], {
+        readEffectiveProfile() {
+          return asEffectiveProfile(readFileSync(patchPath, 'utf8'))
+        },
+      })
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+
+    const output = await readFile(patchPath, 'utf8')
+    expect(output).toContain('appId: cli_0123456789abcdef')
+    expect(output).toContain('lark-owner-reply-secondary')
+    expect(output).toContain('lark-owner-tool-*-secondary')
+    expect(output).toContain('principal: lark/secondary/personal/ou_owner')
+    expect(output).toContain('dsh-enhanced-foreground-capability-*')
+  })
+
+  test('refreshes an effective-only enabled Lark owner without materializing or deleting raw channel credentials', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-refresh-effective-only-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = baseAssistantProfile(dshHome, databasePath)
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    try {
+      const run = lark.runLarkSetup as unknown as (
+        argv: readonly string[], runtime: Record<string, unknown>,
+      ) => Promise<void>
+      await run(['--profile', 'web', '--refresh-agent-policy', '--allow-agent-tools'], {
+        validateProfile() {},
+        readEffectiveProfile() {
+          return inheritedLarkEffectiveProfile({
+            profilePatch: readFileSync(patchPath, 'utf8'),
+            dshHome,
+          })
+        },
+      })
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+
+    const output = await readFile(patchPath, 'utf8')
+    expect(output).toContain('lark-owner-tool-*-primary')
+    expect(output).toContain('principal: lark/primary/personal/ou_owner')
+    expect(output).not.toMatch(/^- id: dsh-enhanced-lark-channel$/mu)
+    expect(output).not.toMatch(/^- id: dsh-enhanced-credentials-keychain$/mu)
+  })
+
+  test('uses effective disabled Lark semantics and preserves raw channel credentials during refresh', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-refresh-effective-disabled-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = configuredLarkProfile({
+      dshHome,
+      databasePath,
+      ownerUserId: 'ou_owner',
+      agentTools: 'enable',
+    })
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    try {
+      const run = lark.runLarkSetup as unknown as (
+        argv: readonly string[], runtime: Record<string, unknown>,
+      ) => Promise<void>
+      await run(['--profile', 'web', '--refresh-agent-policy', '--allow-agent-tools'], {
+        validateProfile() {},
+        readEffectiveProfile() {
+          return asEffectiveProfile(readFileSync(patchPath, 'utf8'))
+            .replace('enabled: true', 'enabled: false')
+        },
+      })
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+
+    const output = await readFile(patchPath, 'utf8')
+    expect(output).not.toContain('lark-owner-tool-*-primary')
+    expect(output).not.toContain('lark-owner-reply-primary')
+    expect(output).toContain('enabled: true')
+    expect(output).toContain('dsh/lark/web/primary/versions/22222222222222222222222222222222')
+  })
+
+  test.each([
+    'duplicate-lark',
+    'disabled-lark',
+    'dynamic-disabled-lark',
+    'wrong-package-lark',
+    'wrong-package-credentials',
+  ] as const)('fails closed before effective semantic replacement for raw %s integrity', async corruption => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-refresh-raw-integrity-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const validPatch = configuredLarkProfile({
+      dshHome,
+      databasePath,
+      ownerUserId: 'ou_owner',
+      agentTools: 'disable',
+    })
+    let corruptedPatch = validPatch
+    if (corruption === 'duplicate-lark') {
+      corruptedPatch += `
+- id: dsh-enhanced-lark-channel
+  config: { enabled: true, account: primary }
+`
+    } else if (corruption === 'disabled-lark') {
+      corruptedPatch = validPatch.replace(
+        '- id: dsh-enhanced-lark-channel\n',
+        '- id: dsh-enhanced-lark-channel\n  disabled: true\n',
+      )
+    } else if (corruption === 'dynamic-disabled-lark') {
+      corruptedPatch = validPatch.replace(
+        '- id: dsh-enhanced-lark-channel\n',
+        "- id: dsh-enhanced-lark-channel\n  disabled: !!js process.env('LARK_DISABLED')\n",
+      )
+    } else if (corruption === 'wrong-package-lark') {
+      corruptedPatch = validPatch.replace(
+        '- id: dsh-enhanced-lark-channel\n',
+        "- id: dsh-enhanced-lark-channel\n  name: '@example/other-lark'\n",
+      )
+    } else {
+      corruptedPatch = validPatch.replace(
+        '- id: dsh-enhanced-credentials-keychain\n',
+        "- id: dsh-enhanced-credentials-keychain\n  name: '@example/shared-credentials'\n",
+      )
+    }
+    await writeFile(patchPath, corruptedPatch, 'utf8')
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    let validateCalls = 0
+    try {
+      const run = lark.runLarkSetup as unknown as (
+        argv: readonly string[], runtime: Record<string, unknown>,
+      ) => Promise<void>
+      await expect(run(['--profile', 'web', '--refresh-agent-policy', '--disable-agent-tools'], {
+        validateProfile() { validateCalls += 1 },
+        readEffectiveProfile() { return asEffectiveProfile(validPatch) },
+      })).rejects.toThrow(
+        /(?:managed profile row.*(?:duplicated|shadowed|disabled|invalid)|duplicate reserved row|conflicting package|must not be disabled)/iu,
+      )
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+
+    expect(validateCalls).toBe(0)
+    expect(await readFile(patchPath, 'utf8')).toBe(corruptedPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test.each(['enable-missing-rule', 'disable-retained-rules'] as const)(
+    'rolls back policy refresh when effective validation reports %s',
+    async mode => {
+      const root = await mkdtemp(join(tmpdir(), 'lark-refresh-effective-policy-'))
+      const dshHome = join(root, 'dsh-home')
+      const profileDirectory = join(dshHome, 'profiles', 'web')
+      await mkdir(profileDirectory, { recursive: true })
+      const patchPath = join(profileDirectory, 'cordis.patch.yml')
+      const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+      const originalPatch = configuredLarkProfile({
+        dshHome,
+        databasePath,
+        ownerUserId: 'ou_owner',
+        agentTools: mode === 'disable-retained-rules' ? 'enable' : 'disable',
+      })
+      await writeFile(patchPath, originalPatch, 'utf8')
+      const previousHome = process.env.DSH_HOME
+      process.env.DSH_HOME = dshHome
+      try {
+        const run = lark.runLarkSetup as unknown as (
+          argv: readonly string[], runtime: Record<string, unknown>,
+        ) => Promise<void>
+        await expect(run([
+          '--profile', 'web', '--refresh-agent-policy',
+          mode === 'disable-retained-rules' ? '--disable-agent-tools' : '--allow-agent-tools',
+        ], {
+          validateProfile() {},
+          readEffectiveProfile() {
+            const current = readFileSync(patchPath, 'utf8')
+            if (current === originalPatch) return asEffectiveProfile(current)
+            if (mode === 'disable-retained-rules') return asEffectiveProfile(originalPatch)
+            return asEffectiveProfile(current)
+              .replace('id: lark-owner-tool-*-primary', 'id: removed-owner-tool-primary')
+          },
+        })).rejects.toThrow(/effective Agent policy does not match/iu)
+      } finally {
+        if (previousHome === undefined) delete process.env.DSH_HOME
+        else process.env.DSH_HOME = previousHome
+      }
+
+      expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+      await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+        .rejects.toMatchObject({ code: 'ENOENT' })
+    },
+  )
+
+  test('does not mutate Delivery pairing state when candidate profile validation fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-validated-owner-commit-'))
+    const profileDirectory = join(root, 'dsh-home', 'profiles', 'web')
+    const fakeBin = join(root, 'bin')
+    await mkdir(profileDirectory, { recursive: true })
+    await mkdir(fakeBin, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(root, 'dsh-home', 'assistant-delivery', 'state.sqlite')
+    await mkdir(join(root, 'dsh-home', 'assistant-delivery'), { recursive: true })
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    await writeFile(databasePath, 'original-delivery-state\n', 'utf8')
+    const dsh = join(fakeBin, 'dsh')
+    await writeFile(dsh, '#!/bin/sh\necho invalid-candidate >&2\nexit 1\n', 'utf8')
+    await chmod(dsh, 0o755)
+    const previousPath = process.env.PATH
+    process.env.PATH = `${fakeBin}:${previousPath ?? ''}`
+    try {
+      const commit = (await import('../src/setup.ts') as Record<string, unknown>)
+        .commitValidatedLarkOwnerSetup as (input: unknown) => Promise<void>
+      expect(commit).toBeTypeOf('function')
+      await expect(commit({
+        patchPath,
+        originalPatch: 'original-profile\n',
+        updatedPatch: 'candidate-profile\n',
+        profile: 'web',
+        databasePath,
+        principal: { channel: 'lark', account: 'secondary', tenant: 'personal', user: 'ou_new' },
+      })).rejects.toThrow(/DSH rejected.*invalid-candidate/iu)
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+    expect(await readFile(patchPath, 'utf8')).toBe('original-profile\n')
+    expect(await readFile(databasePath, 'utf8')).toBe('original-delivery-state\n')
+  })
+
+  test('restores the original profile when the validated Delivery owner handoff fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-owner-handoff-rollback-'))
+    const profileDirectory = join(root, 'dsh-home', 'profiles', 'web')
+    const fakeBin = join(root, 'bin')
+    await mkdir(profileDirectory, { recursive: true })
+    await mkdir(fakeBin, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(root, 'dsh-home', 'assistant-delivery', 'state.sqlite')
+    await mkdir(join(root, 'dsh-home', 'assistant-delivery'), { recursive: true })
+    await writeFile(patchPath, 'original-profile\n', 'utf8')
+    await writeFile(databasePath, 'not-a-sqlite-database\n', 'utf8')
+    const dsh = join(fakeBin, 'dsh')
+    await writeFile(dsh, '#!/bin/sh\nexit 0\n', 'utf8')
+    await chmod(dsh, 0o755)
+    const previousPath = process.env.PATH
+    process.env.PATH = `${fakeBin}:${previousPath ?? ''}`
+    try {
+      const { commitValidatedLarkOwnerSetup } = await import('../src/setup.ts')
+      await expect(commitValidatedLarkOwnerSetup({
+        patchPath,
+        originalPatch: 'original-profile\n',
+        updatedPatch: 'candidate-profile\n',
+        profile: 'web',
+        databasePath,
+        principal: { channel: 'lark', account: 'secondary', tenant: 'personal', user: 'ou_new' },
+      })).rejects.toThrow()
+    } finally {
+      if (previousPath === undefined) delete process.env.PATH
+      else process.env.PATH = previousPath
+    }
+    expect(await readFile(patchPath, 'utf8')).toBe('original-profile\n')
+  })
+
   test('recognizes only the exact one-time phrase from a direct message', () => {
     const match = (lark as Record<string, unknown>).matchOwnerHandshake
     expect(match).toBeTypeOf('function')
@@ -42,6 +2162,21 @@ describe('Lark onboarding wizard inputs', () => {
     expect(parse(['--allow-agent-tools'])).toMatchObject({ agentTools: 'enable' })
     expect(parse(['--disable-agent-tools'])).toMatchObject({ agentTools: 'disable' })
     expect(() => parse(['--allow-agent-tools', '--disable-agent-tools'])).toThrow(/mutually exclusive/i)
+    expect(parse(['--profile', 'web', '--refresh-agent-policy', '--allow-agent-tools'])).toMatchObject({
+      profile: 'web',
+      refreshAgentPolicy: true,
+      agentTools: 'enable',
+    })
+    expect(() => parse(['--refresh-agent-policy'])).toThrow(/refresh-agent-policy.*agent-tools/i)
+    expect(() => parse([
+      '--refresh-agent-policy', '--allow-agent-tools', '--create-app',
+    ])).toThrow(/refresh-agent-policy.*create-app/i)
+    expect(() => parse([
+      '--refresh-agent-policy', '--allow-agent-tools', '--no-service',
+    ])).toThrow(/refresh-agent-policy.*no-service/i)
+    expect(() => parse([
+      '--refresh-agent-policy', '--allow-agent-tools', '--app-id', 'cli_0123456789abcdef',
+    ])).toThrow(/refresh-agent-policy.*app-id/i)
     expect(parse(['--create-app', '--app-name', 'My DSH'])).toMatchObject({
       createApp: true,
       appName: 'My DSH',

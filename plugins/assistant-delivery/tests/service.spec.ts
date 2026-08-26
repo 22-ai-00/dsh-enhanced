@@ -22,7 +22,8 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { AssistantDeliveryService } from '../src/service.ts'
+import { AssistantDeliveryService, type DeliveryInboundRuntime } from '../src/service.ts'
+import { DeliveryStore } from '../src/store.ts'
 import type { ConversationBinding, ConversationRef, DeliveryAdapter, InboundEnvelope } from '../src/index.ts'
 
 const roots: string[] = []
@@ -56,6 +57,7 @@ function sha256(value: string): string {
 interface MountHarnessOptions {
   approval?: boolean
   flush?: false | ((session: Session) => void | Promise<void>)
+  permissionReplyBudget?: number
   reviewer?: DeliveryReviewerAdapter
   reviewerMountOrder?: 'before-policy' | 'after-delivery'
   toolApprovalTtlMs?: number
@@ -122,6 +124,27 @@ async function mountHarness(root: string, allow = true, options: MountHarnessOpt
     { id: 'external-linked', effect: 'allow', subject: { kind: 'external', id: 'lark/bot-1/tenant-a/ou_linked' },
       actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' },
       context: { initiators: ['external'] } },
+    { id: 'external-other-account', effect: 'allow',
+      subject: { kind: 'external', id: 'lark/bot-2/tenant-a/ou_owner' },
+      actions: options.permissionReplyBudget === undefined ? ['pair.confirm'] : ['pair.confirm', 'ingest'],
+      resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+    { id: 'external-other-connector', effect: 'allow',
+      subject: { kind: 'external', id: 'slack/bot-1/tenant-a/ou_owner' },
+      actions: ['pair.confirm'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+    { id: 'external-owner-agent-reply', effect: 'allow', subject: {
+      kind: 'agent', id: 'primary', workspace: '/work/alpha', principal: 'lark/bot-1/tenant-a/ou_owner',
+    }, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] },
+    ...(options.permissionReplyBudget === undefined
+      ? {}
+      : { budget: { id: 'permission-replies', amount: 1 } }) },
+    ...(options.permissionReplyBudget === undefined ? [] : [{
+      id: 'external-other-account-agent-reply', effect: 'allow' as const, subject: {
+        kind: 'agent' as const, id: 'primary', workspace: '/work/alpha',
+        principal: 'lark/bot-2/tenant-a/ou_owner',
+      }, actions: ['reply'], resource: { kind: 'message' as const, id: '*' },
+      context: { initiators: ['external' as const] },
+      budget: { id: 'permission-replies', amount: 1 },
+    }]),
     { id: 'background-send', effect: 'allow', subject: { kind: 'background', id: 'automation-1', workspace: '/work/alpha' },
       actions: ['approval.send', 'send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } },
     { id: 'foreground-message', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: '/work/alpha' },
@@ -133,6 +156,13 @@ async function mountHarness(root: string, allow = true, options: MountHarnessOpt
       subject: { kind: 'agent', id: 'forged', workspace: '/work/alpha' },
       actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground'] } },
   ] : [],
+  ...(options.permissionReplyBudget === undefined ? {} : { budgets: [{
+    id: 'permission-replies',
+    metric: 'replies',
+    limit: options.permissionReplyBudget,
+    periodMs: 60_000,
+    scope: 'global' as const,
+  }] }),
   ...(options.reviewer === undefined ? {} : {
     autoReview: { provider: 'delivery-reviewer', model: 'review-model' },
   }) })
@@ -186,6 +216,16 @@ const principal = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', user:
 const conversation = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', kind: 'dm' as const, chat: 'oc_owner' }
 const envelope: InboundEnvelope = { channel: 'lark', account: 'bot-1', eventId: 'evt-1', occurredAt: 1,
   principal, conversation, kind: 'text', text: 'hello' }
+
+function runtimeStoreFromService(service: AssistantDeliveryService) {
+  return (service as unknown as { deliveryStore: {
+    acceptInbound(input: InboundEnvelope): { duplicate: boolean; record: { id: string; status: string } }
+    getActiveBinding(input: ConversationRef): ConversationBinding | undefined
+    getInbox(id: string): { id: string; status: string; bindingId?: string; failureCode?: string } | undefined
+    getInboxByProviderEvent(channel: string, account: string, eventId: string):
+      { id: string; status: string; bindingId?: string; failureCode?: string } | undefined
+  } }).deliveryStore
+}
 
 async function boundApprovalHarness(options: MountHarnessOptions & {
   sessionId?: string
@@ -287,6 +327,537 @@ describe('assistant delivery Cordis service', () => {
     await ctx.fiber.restart()
   })
 
+  test('/stop interrupts the live binding before joining its strictly serialized Inbox lane', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    let markStarted!: () => void
+    let release!: () => void
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const cancelActive = vi.fn(() => {
+      release()
+      return true
+    })
+    const runtime = {
+      createSession: async () => ({ sessionId: 'delivery-session-stop', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      cancelActive,
+      process: vi.fn(async (_binding: Readonly<ConversationBinding>, input: Readonly<InboundEnvelope>) => {
+        if (input.eventId === 'evt-long-running') {
+          markStarted()
+          await gate
+        }
+        return { outcome: 'processed' as const }
+      }),
+    }
+    service.registerInboundRuntime(runtime)
+    await service.acceptInbound({ ...envelope, eventId: 'evt-long-running', text: 'keep working' })
+    await service.tick()
+    await started
+
+    try {
+      const stopped = await service.acceptInbound({
+        ...envelope,
+        eventId: 'evt-stop',
+        kind: 'command',
+        text: '/stop',
+      })
+      expect(stopped.status).toBe('queued')
+      expect(cancelActive).toHaveBeenCalledOnce()
+      expect(cancelActive).toHaveBeenCalledWith(
+        expect.objectContaining({ sessionId: 'delivery-session-stop', generation: 1 }),
+        'stop',
+      )
+    } finally {
+      release()
+    }
+    await service.whenIdle()
+    await ctx.fiber.restart()
+  })
+
+  test.each(['/stop', '/new'])('%s marks a live permission dispatch before asking the runtime to abort', async command => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    let markStarted!: () => void
+    let release!: () => void
+    const started = new Promise<void>(resolve => { markStarted = resolve })
+    const gate = new Promise<void>(resolve => { release = resolve })
+    let permissionInboxId = ''
+    let markerSeenByCancel: string | undefined
+    service.registerInboundRuntime({
+      dispatchControl: 'explicit',
+      createSession: async ({ generation }) => ({
+        sessionId: `delivery-session-permission-cancel-${generation}`,
+        workspace: '/work/alpha',
+        agentPreset: 'primary',
+        policyRef: 'owner-dm',
+      }),
+      cancelActive: async () => {
+        markerSeenByCancel = runtimeStoreFromService(service).getInbox(permissionInboxId)?.failureCode
+        release()
+        return true
+      },
+      process: async (_binding, input, _signal, _prepared, markDispatching) => {
+        if (input.eventId === 'evt-live-permission') {
+          markDispatching?.()
+          markStarted()
+          await gate
+        }
+        return { outcome: 'processed' as const }
+      },
+    })
+    const permission = await service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-live-permission',
+      kind: 'command',
+      text: '/permission full confirm',
+    })
+    permissionInboxId = permission.inboxId
+    await service.tick()
+    await started
+
+    await service.acceptInbound({
+      ...envelope,
+      eventId: `evt-${command.slice(1)}-permission-cancel`,
+      kind: 'command',
+      text: command,
+    })
+
+    expect(markerSeenByCancel).toBe('permission-cancelled-recovery')
+    await service.whenIdle()
+    await ctx.fiber.restart()
+  })
+
+  test('/stop fences older queued work so only the stop acknowledgement enters the runtime lane', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const process = vi.fn(async (..._args: Parameters<DeliveryInboundRuntime['process']>) => (
+      { outcome: 'processed' as const }
+    ))
+    let releaseDrain!: () => void
+    const drain = new Promise<void>(resolve => { releaseDrain = resolve })
+    let markCancelStarted!: () => void
+    const cancelStarted = new Promise<void>(resolve => { markCancelStarted = resolve })
+    service.registerInboundRuntime({
+      createSession: async () => ({ sessionId: 'delivery-session-stop-fence', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      cancelActive: async () => {
+        markCancelStarted()
+        await drain
+        return false
+      },
+      process,
+    } as DeliveryInboundRuntime)
+
+    const first = await service.acceptInbound({ ...envelope, eventId: 'evt-before-stop-1', text: 'first' })
+    const second = await service.acceptInbound({ ...envelope, eventId: 'evt-before-stop-2', text: 'second' })
+    const racedBeforeStopResult = service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-raced-before-stop',
+      text: 'must be fenced even if accept has not queued it yet',
+    })
+    const stopResult = service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-stop-fence',
+      kind: 'command',
+      text: '/stop',
+    })
+    await cancelStarted
+    const followingResult = service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-after-stop-fence',
+      text: 'work after stop',
+    })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(runtimeStoreFromService(service).getInboxByProviderEvent('lark', 'bot-1', 'evt-after-stop-fence'))
+      .toMatchObject({ status: 'received' })
+    releaseDrain()
+    const [racedBeforeStop, stop, following] = await Promise.all([
+      racedBeforeStopResult,
+      stopResult,
+      followingResult,
+    ])
+
+    expect(service.history(foreground('delivery-session-stop-fence'), {}).inbox).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: first.inboxId, status: 'dead_letter',
+        failureCode: 'user-stopped-before-dispatch' }),
+      expect.objectContaining({ id: second.inboxId, status: 'dead_letter',
+        failureCode: 'user-stopped-before-dispatch' }),
+      expect.objectContaining({ id: racedBeforeStop.inboxId, status: 'dead_letter',
+        failureCode: 'user-stopped-before-dispatch' }),
+      expect.objectContaining({ id: stop.inboxId, status: 'queued' }),
+      expect.objectContaining({ id: following.inboxId, status: 'queued' }),
+    ]))
+    await service.tick()
+    await service.whenIdle()
+    await service.tick()
+    await service.whenIdle()
+    expect(process).toHaveBeenCalledTimes(2)
+    expect(process.mock.calls[0]?.[0]).toMatchObject({ sessionId: 'delivery-session-stop-fence' })
+    expect(process.mock.calls[0]?.[1]).toMatchObject({ eventId: 'evt-stop-fence' })
+    expect(process.mock.calls[1]?.[1]).toMatchObject({ eventId: 'evt-after-stop-fence' })
+    await ctx.fiber.restart()
+  })
+
+  test('/new waits for old-generation drain and fences following messages onto the new binding', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    let releaseDrain!: () => void
+    const drain = new Promise<void>(resolve => { releaseDrain = resolve })
+    let markCancelStarted!: () => void
+    const cancelStarted = new Promise<void>(resolve => { markCancelStarted = resolve })
+    const createSession = vi.fn(async ({ generation }: { generation: number }) => ({
+      sessionId: `delivery-session-generation-${generation}`,
+      workspace: '/work/alpha',
+      agentPreset: 'primary',
+      policyRef: 'owner-dm',
+    }))
+    const runtime = {
+      createSession,
+      cancelActive: vi.fn(async () => {
+        markCancelStarted()
+        await drain
+        return true
+      }),
+      process: vi.fn(async () => ({ outcome: 'processed' as const })),
+    }
+    service.registerInboundRuntime(runtime as DeliveryInboundRuntime)
+    await service.acceptInbound({ ...envelope, eventId: 'evt-generation-1', text: 'generation one' })
+
+    const newResult = service.acceptInbound({ ...envelope, eventId: 'evt-new-drain', kind: 'command', text: '/new' })
+    await cancelStarted
+    const duplicateNewResult = service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-new-drain',
+      kind: 'command',
+      text: '/new',
+    })
+    const followingResult = service.acceptInbound({ ...envelope, eventId: 'evt-after-new', text: 'new generation work' })
+    await Promise.resolve()
+    expect(createSession).toHaveBeenCalledTimes(1)
+    expect(runtimeStoreFromService(service).getInboxByProviderEvent('lark', 'bot-1', 'evt-after-new'))
+      .toMatchObject({ status: 'received' })
+
+    releaseDrain()
+    const [rotated, duplicate, following] = await Promise.all([newResult, duplicateNewResult, followingResult])
+    const active = runtimeStoreFromService(service).getActiveBinding(conversation)!
+    expect(active).toMatchObject({ generation: 2, sessionId: 'delivery-session-generation-2' })
+    expect(runtimeStoreFromService(service).getInbox(rotated.inboxId)).toMatchObject({
+      status: 'queued', bindingId: active.id,
+    })
+    expect(runtimeStoreFromService(service).getInbox(following.inboxId)).toMatchObject({
+      status: 'queued', bindingId: active.id,
+    })
+    expect([rotated.duplicate, duplicate.duplicate].sort()).toEqual([false, true])
+    expect(duplicate.inboxId).toBe(rotated.inboxId)
+    expect(createSession).toHaveBeenCalledTimes(2)
+    await ctx.fiber.restart()
+  })
+
+  test('/new commits rotation and its exact command Inbox atomically across an after-commit crash and reopen', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-new-atomic-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const createSession = vi.fn(async ({ generation }: { generation: number }) => ({
+      sessionId: `delivery-session-atomic-${generation}`,
+      workspace: '/work/alpha',
+      agentPreset: 'primary',
+      policyRef: 'owner-dm',
+    }))
+    first.service.registerInboundRuntime({
+      createSession,
+      cancelActive: async () => false,
+      process: async () => ({ outcome: 'processed' }),
+    })
+    await first.service.acceptInbound({ ...envelope, eventId: 'evt-atomic-seed' })
+
+    const original = DeliveryStore.prototype.rotateBindingAndQueueCommand
+    const crash = vi.spyOn(DeliveryStore.prototype, 'rotateBindingAndQueueCommand')
+      .mockImplementationOnce(function (this: DeliveryStore, input) {
+        original.call(this, input)
+        throw new Error('test failpoint: process crashed immediately after the atomic commit')
+      })
+    const command = { ...envelope, eventId: 'evt-new-atomic', kind: 'command' as const, text: '/new' }
+    await expect(first.service.acceptInbound(command)).rejects.toThrow(/failpoint/)
+    crash.mockRestore()
+
+    const committed = runtimeStoreFromService(first.service).getActiveBinding(conversation)!
+    expect(committed).toMatchObject({ generation: 2, sessionId: 'delivery-session-atomic-2' })
+    expect(runtimeStoreFromService(first.service).getInboxByProviderEvent('lark', 'bot-1', 'evt-new-atomic'))
+      .toMatchObject({ status: 'queued', bindingId: committed.id })
+    await first.ctx.fiber.restart()
+
+    const reopened = await mountHarness(root)
+    const replayCreate = vi.fn(async () => ({
+      sessionId: 'must-not-create-generation-3',
+      workspace: '/work/alpha',
+      agentPreset: 'primary',
+      policyRef: 'owner-dm',
+    }))
+    reopened.service.registerInboundRuntime({
+      createSession: replayCreate,
+      process: async () => ({ outcome: 'processed' }),
+    })
+    const replay = await reopened.service.acceptInbound(command)
+    expect(replay).toMatchObject({ duplicate: true, status: 'queued' })
+    expect(runtimeStoreFromService(reopened.service).getActiveBinding(conversation)).toMatchObject({
+      generation: 2,
+      sessionId: 'delivery-session-atomic-2',
+    })
+    expect(replayCreate).not.toHaveBeenCalled()
+    expect(createSession).toHaveBeenCalledTimes(2)
+    await reopened.ctx.fiber.restart()
+  })
+
+  test('/new uses one exact-command grammar from admission through atomic rotation', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({
+      createSession: async ({ generation }) => ({ sessionId: `delivery-session-grammar-${generation}`,
+        workspace: '/work/alpha', agentPreset: 'primary', policyRef: 'owner-dm' }),
+      cancelActive: async () => false,
+      process: async () => ({ outcome: 'processed' }),
+    })
+    await service.acceptInbound({ ...envelope, eventId: 'evt-grammar-generation-1', text: 'generation one' })
+
+    const reset = await service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-new-shared-grammar',
+      kind: 'command',
+      text: '/new \u00a0',
+    })
+
+    const store = runtimeStoreFromService(service)
+    const active = store.getActiveBinding(conversation)!
+    expect(active).toMatchObject({ generation: 2, sessionId: 'delivery-session-grammar-2' })
+    expect(store.getInbox(reset.inboxId)).toMatchObject({ status: 'queued', bindingId: active.id })
+    await ctx.fiber.restart()
+  })
+
+  test('recovers a durable pre-commit /new after reopen without provider retransmission', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-new-precommit-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    let markCancelStarted!: () => void
+    const cancelStarted = new Promise<void>(resolve => { markCancelStarted = resolve })
+    const abandonedDrain = new Promise<void>(() => {})
+    first.service.registerInboundRuntime({
+      createSession: async () => ({ sessionId: 'delivery-session-precommit-1', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      cancelActive: async () => {
+        markCancelStarted()
+        await abandonedDrain
+        return false
+      },
+      process: async () => ({ outcome: 'processed' }),
+    })
+    const oldWork = await first.service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-before-precommit-new',
+      text: 'old generation queued work',
+    })
+    const resetEnvelope = {
+      ...envelope,
+      eventId: 'evt-precommit-new',
+      kind: 'command' as const,
+      text: '/new \u00a0',
+    }
+    void first.service.acceptInbound(resetEnvelope)
+    await cancelStarted
+    const strandedEnvelope = {
+      ...envelope,
+      eventId: 'evt-stranded-after-precommit-new',
+      text: 'already received behind the blocked reset',
+    }
+    void first.service.acceptInbound(strandedEnvelope)
+    await Promise.resolve()
+    const firstStore = runtimeStoreFromService(first.service)
+    const reset = firstStore.getInboxByProviderEvent('lark', 'bot-1', resetEnvelope.eventId)!
+    const stranded = firstStore.getInboxByProviderEvent('lark', 'bot-1', strandedEnvelope.eventId)!
+    expect(reset.status).toBe('received')
+    expect(stranded.status).toBe('received')
+    await first.ctx.fiber.restart()
+
+    const reopened = await mountHarness(root)
+    const createSession = vi.fn(async ({ generation }: { generation: number }) => ({
+      sessionId: `delivery-session-precommit-${generation}`,
+      workspace: '/work/alpha',
+      agentPreset: 'primary',
+      policyRef: 'owner-dm',
+    }))
+    const process = vi.fn(async (..._args: Parameters<DeliveryInboundRuntime['process']>) => (
+      { outcome: 'processed' as const }
+    ))
+    reopened.service.registerInboundRuntime({
+      createSession,
+      cancelActive: async () => false,
+      process,
+    })
+    const following = await reopened.service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-after-precommit-new',
+      text: 'must enter the recovered generation',
+    })
+
+    const store = runtimeStoreFromService(reopened.service)
+    const active = store.getActiveBinding(conversation)!
+    expect(active).toMatchObject({ generation: 2, sessionId: 'delivery-session-precommit-2' })
+    expect(store.getInbox(reset.id)).toMatchObject({ status: 'queued', bindingId: active.id })
+    expect(store.getInbox(stranded.id)).toMatchObject({ status: 'queued', bindingId: active.id })
+    expect(store.getInbox(following.inboxId)).toMatchObject({ status: 'queued', bindingId: active.id })
+    expect(store.getInbox(oldWork.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'new-session-before-dispatch',
+    })
+    expect(createSession).toHaveBeenCalledOnce()
+    for (let index = 0; index < 3; index += 1) {
+      await reopened.service.tick()
+      await reopened.service.whenIdle()
+    }
+    expect(process.mock.calls.map(call => call[1].eventId)).toEqual([
+      'evt-precommit-new',
+      'evt-stranded-after-precommit-new',
+      'evt-after-precommit-new',
+    ])
+    await reopened.ctx.fiber.restart()
+  })
+
+  test('recovers a durable pre-commit /stop after reopen without provider retransmission', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-stop-precommit-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    let markCancelStarted!: () => void
+    const cancelStarted = new Promise<void>(resolve => { markCancelStarted = resolve })
+    const abandonedDrain = new Promise<void>(() => {})
+    first.service.registerInboundRuntime({
+      createSession: async () => ({ sessionId: 'delivery-session-stop-precommit', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      cancelActive: async () => {
+        markCancelStarted()
+        await abandonedDrain
+        return false
+      },
+      process: async () => ({ outcome: 'processed' }),
+    })
+    const oldWork = await first.service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-before-precommit-stop',
+      text: 'queued work that stop must fence',
+    })
+    const stopEnvelope = {
+      ...envelope,
+      eventId: 'evt-precommit-stop',
+      kind: 'command' as const,
+      text: '/stop',
+    }
+    void first.service.acceptInbound(stopEnvelope)
+    await cancelStarted
+    const strandedEnvelope = {
+      ...envelope,
+      eventId: 'evt-stranded-after-precommit-stop',
+      text: 'already received behind the blocked stop',
+    }
+    void first.service.acceptInbound(strandedEnvelope)
+    await Promise.resolve()
+    const firstStore = runtimeStoreFromService(first.service)
+    const stop = firstStore.getInboxByProviderEvent('lark', 'bot-1', stopEnvelope.eventId)!
+    const stranded = firstStore.getInboxByProviderEvent('lark', 'bot-1', strandedEnvelope.eventId)!
+    expect(stop.status).toBe('received')
+    expect(stranded.status).toBe('received')
+    await first.ctx.fiber.restart()
+
+    const reopened = await mountHarness(root)
+    const process = vi.fn(async (..._args: Parameters<DeliveryInboundRuntime['process']>) => (
+      { outcome: 'processed' as const }
+    ))
+    reopened.service.registerInboundRuntime({
+      createSession: async () => { throw new Error('existing session must be preserved by recovered /stop') },
+      cancelActive: async () => false,
+      process,
+    })
+    const following = await reopened.service.acceptInbound({
+      ...envelope,
+      eventId: 'evt-after-precommit-stop',
+      text: 'must remain behind the recovered stop',
+    })
+
+    const store = runtimeStoreFromService(reopened.service)
+    const active = store.getActiveBinding(conversation)!
+    expect(active).toMatchObject({ generation: 1, sessionId: 'delivery-session-stop-precommit' })
+    expect(store.getInbox(stop.id)).toMatchObject({ status: 'queued', bindingId: active.id })
+    expect(store.getInbox(stranded.id)).toMatchObject({ status: 'queued', bindingId: active.id })
+    expect(store.getInbox(following.inboxId)).toMatchObject({ status: 'queued', bindingId: active.id })
+    expect(store.getInbox(oldWork.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'user-stopped-before-dispatch',
+    })
+    for (let index = 0; index < 3; index += 1) {
+      await reopened.service.tick()
+      await reopened.service.whenIdle()
+    }
+    expect(process.mock.calls.map(call => call[1].eventId)).toEqual([
+      'evt-precommit-stop',
+      'evt-stranded-after-precommit-stop',
+      'evt-after-precommit-stop',
+    ])
+    await reopened.ctx.fiber.restart()
+  })
+
+  test('/new aborts an earlier claimed preparation before the fresh generation is admitted', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    let markPrepareStarted!: () => void
+    const prepareStarted = new Promise<void>(resolve => { markPrepareStarted = resolve })
+    let prepareSignal: AbortSignal | undefined
+    let generation = 0
+    service.registerInboundRuntime({
+      dispatchControl: 'explicit',
+      createSession: async () => ({ sessionId: `delivery-session-prepare-${++generation}`, workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      cancelActive: async () => false,
+      prepare: async (_binding, _input, signal) => {
+        prepareSignal = signal
+        markPrepareStarted()
+        await new Promise<void>(resolve => {
+          if (signal.aborted) resolve()
+          else signal.addEventListener('abort', () => resolve(), { once: true })
+        })
+        return { outcome: 'not-processed' as const, failureCode: 'preparation-cancelled', retryable: false }
+      },
+      process: vi.fn(async () => ({ outcome: 'processed' as const })),
+    })
+    await service.acceptInbound({ ...envelope, eventId: 'evt-preparing-old', text: 'prepare an image' })
+    const oldTick = service.tick()
+    await prepareStarted
+
+    try {
+      const rotated = await service.acceptInbound({
+        ...envelope,
+        eventId: 'evt-new-aborts-prepare',
+        kind: 'command',
+        text: '/new',
+      })
+      expect(rotated.status).toBe('queued')
+      expect(prepareSignal?.aborted).toBe(true)
+      expect(runtimeStoreFromService(service).getActiveBinding(conversation)).toMatchObject({ generation: 2 })
+    } finally {
+      await ctx.fiber.restart()
+      await oldTick
+    }
+  })
+
   test('persists and dead-letters unknown or policy-denied senders before acknowledgement', async () => {
     const denied = await harness(false)
     const readInboundImage = vi.fn(async () => ({ outcome: 'downloaded' as const,
@@ -357,6 +928,177 @@ describe('assistant delivery Cordis service', () => {
     expect(() => service.enqueueBackground({ sourceId: 'forged', workspace: '/work/alpha', bindingId: binding.id,
       idempotencyKey: 'forged', text: 'no' })).toThrowError(expect.objectContaining({ code: 'policy-denied' }))
     expect((service as unknown as Record<string, unknown>)['store']).toBeUndefined()
+    await ctx.fiber.restart()
+  })
+
+  test('policy-gates control replies by the binding exact external principal', async () => {
+    const { ctx, service } = await harness()
+    const candidates = [
+      { principal, conversation },
+      {
+        principal: { ...principal, account: 'bot-2' },
+        conversation: { ...conversation, account: 'bot-2', chat: 'oc_other_account' },
+      },
+      {
+        principal: { ...principal, channel: 'slack' },
+        conversation: { ...conversation, channel: 'slack', chat: 'D_other_connector' },
+      },
+    ] as const
+    for (const candidate of candidates) {
+      const challenge = service.issuePairing('test', candidate.principal)
+      service.confirmPairing({
+        challengeId: challenge.challenge.id,
+        principal: candidate.principal,
+        code: challenge.code,
+      })
+    }
+    const rawStore = (service as unknown as { deliveryStore: {
+      createBinding(input: {
+        conversation: ConversationRef
+        principal: typeof principal
+        workspace: string
+        agentPreset: string
+        sessionId: string
+        policyRef: string
+      }): ConversationBinding
+    } }).deliveryStore
+    const bindings = candidates.map((candidate, index) => rawStore.createBinding({
+      conversation: candidate.conversation,
+      principal: candidate.principal,
+      workspace: '/work/alpha',
+      agentPreset: 'primary',
+      sessionId: `control-reply-session-${index}`,
+      policyRef: 'owner-dm',
+    }))
+    const replyCommand = (service as unknown as { replyCommand(binding: ConversationBinding, input: {
+      idempotencyKey: string
+      text: string
+      replyToEventId: string
+    }): unknown }).replyCommand.bind(service)
+
+    expect(replyCommand(bindings[0]!, {
+      idempotencyKey: 'control-reply-owner', text: 'owner reply', replyToEventId: 'evt-owner',
+    })).toMatchObject({ status: 'pending' })
+    for (const [index, binding] of bindings.slice(1).entries()) {
+      expect(() => replyCommand(binding, {
+        idempotencyKey: `control-reply-other-${index}`,
+        text: 'must not queue',
+        replyToEventId: `evt-other-${index}`,
+      })).toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    }
+    await ctx.fiber.restart()
+  })
+
+  test('scopes permission reply budget and Outbox idempotency by Inbox across accounts sharing an event id', async () => {
+    const { ctx, service } = await harness(true, { permissionReplyBudget: 2 })
+    const secondPrincipal = { ...principal, account: 'bot-2' }
+    const secondConversation = { ...conversation, account: 'bot-2', chat: 'oc_owner_bot_2' }
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({
+      createSession: async ({ envelope: input }) => ({
+        sessionId: `delivery-session-${input.account}`,
+        workspace: '/work/alpha',
+        agentPreset: 'primary',
+        policyRef: 'owner-dm',
+      }),
+      process: async () => ({ outcome: 'processed' }),
+    })
+    const eventId = 'evt-shared-permission-budget'
+    const envelopes = [
+      { ...envelope, eventId, kind: 'command' as const, text: '/permissions' },
+      {
+        ...envelope,
+        account: secondPrincipal.account,
+        eventId,
+        principal: secondPrincipal,
+        conversation: secondConversation,
+        kind: 'command' as const,
+        text: '/permissions',
+      },
+    ]
+    const store = runtimeStoreFromService(service)
+    const internal = service as unknown as {
+      deliveryStore: { handoffOwner(input: typeof principal): unknown }
+      authorizePermissionReply(binding: ConversationBinding, input: InboundEnvelope): boolean
+      replyCommand(binding: ConversationBinding, input: {
+        idempotencyKey: string
+        text: string
+        replyToEventId: string
+      }): { intent: { idempotencyKey: string } }
+    }
+    const accepted: Awaited<ReturnType<typeof service.acceptInbound>>[] = []
+    const replies: { intent: { idempotencyKey: string } }[] = []
+    for (const [index, input] of envelopes.entries()) {
+      if (index === 1) internal.deliveryStore.handoffOwner(secondPrincipal)
+      accepted.push(await service.acceptInbound(input))
+      const binding = store.getActiveBinding(input.conversation)!
+      expect(internal.authorizePermissionReply(binding, input)).toBe(true)
+      replies.push(internal.replyCommand(binding, {
+        idempotencyKey: `inbound:${eventId}:reply`,
+        text: `permission reply ${index}`,
+        replyToEventId: eventId,
+      }))
+    }
+
+    expect(replies.map(reply => reply.intent.idempotencyKey)).toEqual([
+      `inbound:${accepted[0]!.inboxId}:reply`,
+      `inbound:${accepted[1]!.inboxId}:reply`,
+    ])
+    const exhausted = {
+      ...envelopes[1]!,
+      eventId: 'evt-permission-budget-exhausted',
+    }
+    await service.acceptInbound(exhausted)
+    expect(internal.authorizePermissionReply(store.getActiveBinding(secondConversation)!, exhausted)).toBe(false)
+    await ctx.fiber.restart()
+  })
+
+  test('scopes ordinary Agent replies by Inbox across accounts sharing an event id', async () => {
+    const { ctx, service } = await harness(true, { permissionReplyBudget: 2 })
+    const secondPrincipal = { ...principal, account: 'bot-2' }
+    const secondConversation = { ...conversation, account: 'bot-2', chat: 'oc_agent_reply_bot_2' }
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({
+      createSession: async ({ envelope: input }) => ({
+        sessionId: `agent-reply-session-${input.account}`,
+        workspace: '/work/alpha',
+        agentPreset: 'primary',
+        policyRef: 'owner-dm',
+      }),
+      process: async () => ({ outcome: 'processed' }),
+    })
+    const eventId = 'evt-shared-agent-reply'
+    const envelopes = [
+      { ...envelope, eventId },
+      {
+        ...envelope,
+        account: secondPrincipal.account,
+        eventId,
+        principal: secondPrincipal,
+        conversation: secondConversation,
+      },
+    ]
+    const internal = service as unknown as {
+      deliveryStore: { handoffOwner(input: typeof principal): unknown }
+    }
+    const accepted: Awaited<ReturnType<typeof service.acceptInbound>>[] = []
+    const replies: { intent: { idempotencyKey: string } }[] = []
+    for (const [index, input] of envelopes.entries()) {
+      if (index === 1) internal.deliveryStore.handoffOwner(secondPrincipal)
+      accepted.push(await service.acceptInbound(input))
+      replies.push(service.reply(foreground(`agent-reply-session-${input.account}`), {
+        idempotencyKey: `inbound:${eventId}:reply`,
+        text: `agent reply ${index}`,
+        replyToEventId: eventId,
+      }))
+    }
+
+    expect(replies.map(reply => reply.intent.idempotencyKey)).toEqual([
+      `inbound:${accepted[0]!.inboxId}:reply`,
+      `inbound:${accepted[1]!.inboxId}:reply`,
+    ])
     await ctx.fiber.restart()
   })
 

@@ -90,6 +90,84 @@ describe('owner pairing', () => {
     store.close()
   })
 
+  test('ordinary pairing cannot reactivate a former owner after a trusted handoff', async () => {
+    const { store } = await fixture({ codes: ['REPAIR12'] })
+    const replacement = { channel: 'lark', account: 'bot-2', tenant: 'tenant-b', user: 'ou_replacement' }
+    const first = store.handoffOwner(principal)
+    const second = store.handoffOwner(replacement)
+    expect(store.getPrincipal(principal)).toMatchObject({ id: first.id, role: 'owner', status: 'revoked' })
+    expect(store.getPrincipal(replacement)).toMatchObject({ id: second.id, role: 'owner', status: 'active' })
+
+    const issued = store.issuePairing(principal, { ttlMs: 5_000, maxAttempts: 1 })
+    expect(() => store.confirmPairing({ challengeId: issued.challenge.id, principal, code: issued.code }))
+      .toThrowError(expect.objectContaining<Partial<DeliveryStoreError>>({ code: 'unauthorized-principal' }))
+    expect(store.getPrincipal(principal)).toMatchObject({ id: first.id, role: 'owner', status: 'revoked' })
+    expect(store.isAuthorizedPrincipal(principal)).toBe(false)
+    expect(store.getPrincipal(replacement)).toMatchObject({ id: second.id, role: 'owner', status: 'active' })
+    expect(() => store.confirmPairing({ challengeId: issued.challenge.id, principal, code: issued.code }))
+      .toThrowError(expect.objectContaining<Partial<DeliveryStoreError>>({ code: 'pairing-replayed' }))
+    store.close()
+  })
+
+  test('re-pairing an existing linked principal never promotes it to owner', async () => {
+    const { store } = await fixture({ codes: ['OWNER123', 'LINKED12', 'RELINK12'] })
+    const ownerCode = store.issuePairing(principal, { ttlMs: 5_000, maxAttempts: 3 })
+    const owner = store.confirmPairing({ challengeId: ownerCode.challenge.id, principal, code: ownerCode.code })
+    const telegram = { channel: 'telegram', account: 'bot-tg', tenant: 'personal', user: 'tg_repair' }
+    const linkedCode = store.issuePairing(telegram, { ttlMs: 5_000, maxAttempts: 3 })
+    const candidate = store.confirmPairing({ challengeId: linkedCode.challenge.id, principal: telegram,
+      code: linkedCode.code })
+    const linked = store.linkPrincipal({ owner: principal, linked: telegram, expectedLinkedVersion: candidate.version })
+    store.revokePrincipal(linked.id, linked.version)
+
+    const repair = store.issuePairing(telegram, { ttlMs: 5_000, maxAttempts: 3 })
+    expect(store.confirmPairing({ challengeId: repair.challenge.id, principal: telegram, code: repair.code }))
+      .toMatchObject({ id: linked.id, role: 'linked', status: 'active', linkedToId: owner.id })
+    expect(store.getPrincipal(principal)).toMatchObject({ id: owner.id, role: 'owner', status: 'active' })
+    store.close()
+  })
+
+  test('ordinary pairing cannot reactivate a link rooted in a retired owner', async () => {
+    const { store } = await fixture({ codes: ['LINKED12', 'REPAIR12'] })
+    const replacement = { channel: 'lark', account: 'bot-2', tenant: 'tenant-b', user: 'ou_replacement' }
+    const linkedPrincipal = { channel: 'telegram', account: 'bot-tg', tenant: 'personal', user: 'tg_retired' }
+    const formerOwner = store.handoffOwner(principal)
+    const linkedCode = store.issuePairing(linkedPrincipal, { ttlMs: 5_000, maxAttempts: 3 })
+    const candidate = store.confirmPairing({
+      challengeId: linkedCode.challenge.id,
+      principal: linkedPrincipal,
+      code: linkedCode.code,
+    })
+    const linked = store.linkPrincipal({
+      owner: principal,
+      linked: linkedPrincipal,
+      expectedLinkedVersion: candidate.version,
+    })
+    const activeOwner = store.handoffOwner(replacement)
+    expect(store.getPrincipal(principal)).toMatchObject({ id: formerOwner.id, status: 'revoked' })
+    expect(store.getPrincipal(linkedPrincipal)).toMatchObject({
+      id: linked.id,
+      role: 'linked',
+      status: 'revoked',
+      linkedToId: formerOwner.id,
+    })
+
+    const repair = store.issuePairing(linkedPrincipal, { ttlMs: 5_000, maxAttempts: 3 })
+    expect(() => store.confirmPairing({
+      challengeId: repair.challenge.id,
+      principal: linkedPrincipal,
+      code: repair.code,
+    })).toThrowError(expect.objectContaining<Partial<DeliveryStoreError>>({ code: 'unauthorized-principal' }))
+    expect(store.getPrincipal(linkedPrincipal)).toMatchObject({ id: linked.id, status: 'revoked' })
+    expect(store.getPrincipal(replacement)).toMatchObject({ id: activeOwner.id, status: 'active' })
+    expect(() => store.confirmPairing({
+      challengeId: repair.challenge.id,
+      principal: linkedPrincipal,
+      code: repair.code,
+    })).toThrowError(expect.objectContaining<Partial<DeliveryStoreError>>({ code: 'pairing-replayed' }))
+    store.close()
+  })
+
   test('links cross-platform principals only through an explicit owner operation', async () => {
     const { store } = await fixture({ codes: ['OWNER123', 'LINKED12'] })
     const ownerCode = store.issuePairing(principal, { ttlMs: 5_000, maxAttempts: 3 })

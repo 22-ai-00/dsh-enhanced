@@ -30,7 +30,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app 
 4. 用真实凭据建立一次临时长连接；
 5. 显示一次性 `DSH-CONNECT-...` 短语，等待你私聊机器人并原样发送；
 6. 从这条单聊取得应用作用域下的准确 `open_id`，只把该身份配为 owner；
-7. 更新 `web/cordis.patch.yml`，启用 channel，添加精确 ingress/reply/credential 规则；只有显式传入 `--allow-agent-tools` 时，才为当前 preset/workspace 添加 Bash（Windows 为 Pwsh）和 `read`/`glob`/`grep` 精确规则；随后运行 `dsh --profile web --dump-config` 自检；
+7. 更新 `web/cordis.patch.yml`，启用 channel，添加精确 ingress/reply/credential 规则；显式传入 `--allow-agent-tools` 时，为本地 `foreground` Agent 添加跨 preset/workspace 的通用 capability 规则，同时为 Delivery 当前及兼容 preset、绝对 workspace、canonical owner principal、`external` initiator 添加精确主体的通用 capability 与工具规则；它们同时覆盖动态工具和插件内部二次 Policy 动作，不放宽 `background`；随后运行 `dsh --profile web --dump-config` 自检；
 8. 安装并启动该 profile 的用户级常驻服务：macOS 使用 launchd，Linux 使用 systemd，Windows 使用 best-effort Task Scheduler；均以 `dsh --profile web --no-open` 运行。
 
 一键模式使用官方的 OAuth 2.0 Device Authorization Grant。只传 `--create-app` 时，官方确认页会同时提供“选择已有应用”和“创建新应用”；与 `--app-id` 组合时则锁定更新该已有应用。两种方式都会先展示权限、事件和回调的增量，只有你确认后才会生效。向导始终不传 `createOnly`，并使用 `addons.preset: false`，不采用官方默认智能体模板中与本 channel 无关的文档、Wiki、群管理、批量消息等权限。确认页只申请：
@@ -62,7 +62,27 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app 
 
 单独使用 `--app-id` 的手工路径会通过当前系统的安全输入读取 App Secret，适合已自行完成控制台配置的应用。通常应使用官方授权路径；省略 `--create-app` 和 `--app-id` 时，向导会询问 App ID，直接回车即进入一键选择/创建。
 
-重复执行会更新同一个 account 的受管配置，不重复添加规则或 handle。Agent 工具策略是显式三态：不传参数会保留现状，`--allow-agent-tools` 写入固定的精确白名单，`--disable-agent-tools` 删除向导管理的这些规则；普通重跑不会意外授权或撤权。profile 校验失败时会在进程内恢复原内容；不会保留备份文件。
+重复执行会更新同一个 account 的受管配置，不重复添加规则或 handle。Agent 能力策略是显式三态：不传参数会保留现状，`--allow-agent-tools` 写入本地 foreground 与精确 Delivery 主体两类通用 capability 可达性规则（并保留外部主体的工具级 allow/deny），`--disable-agent-tools` 删除向导为该 account 管理的这些规则；普通重跑不会意外授权或撤权。profile 校验失败时会在进程内恢复原内容；不会保留备份文件。
+
+### 只刷新 Agent Policy
+
+更新 capability 规则不需要重走 onboarding；Web/direct-only profile 即使没有启用飞书，也使用同一个非交互刷新模式：
+
+```sh
+# 写入/刷新本地 foreground；若飞书已启用，同时刷新精确 Delivery 能力规则
+~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup \
+  --profile web \
+  --refresh-agent-policy \
+  --allow-agent-tools
+
+# 删除 setup 托管的 foreground；若飞书已启用，同时删除该 account 的 Agent 能力规则
+~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup \
+  --profile web \
+  --refresh-agent-policy \
+  --disable-agent-tools
+```
+
+`--refresh-agent-policy` 必须与上述 allow/disable 之一搭配，除 `--profile` 外只可选带 `--account`。本地 foreground 规则独立于 Lark row，总能在已安装的 personal-assistant profile 中刷新；只有 profile 已启用 Lark 时才同时重建精确 Delivery 规则，传入 account 时也必须与该 account 精确相同。该模式不读 App Secret，不发起设备授权，不修改 App、credential handle、owner、conversation binding 或其他 channel 配置，也不安装/重启常驻服务。它原子写入 profile 后立即运行 `dsh --dump-config` 校验；校验失败会原子恢复原 patch。
 
 飞书授权只是建立应用凭据和 owner 绑定；`lark-channel` 本身仍是运行在 DSH Host 内的插件。因为这里安装到 `web` profile，默认由向导在后台常驻这个 profile，不需要保持浏览器打开，也不需要再手动执行 `dsh web`。
 
@@ -105,7 +125,7 @@ token。Policy budget 的 metric 是 `automation-runs`，每天最多 7 次、�
 ~/.dsh/profiles/web/node_modules/.bin/dsh-supervised-growth-setup --profile web --ack-existing-automations
 ```
 
-升级前已经存在的 conversation binding 会继续固定旧 preset/workspace（旧安装常见 preset 为 `primary`），新 binding 则使用 Delivery 当前配置的默认身份。带 `--allow-agent-tools` 重跑向导时会按完整 preset+workspace 保留精确 legacy 规则，同时把主规则更新到当前默认身份；不会使用 preset、workspace 或工具通配符。
+升级前已经存在的 conversation binding 会继续固定旧 preset/workspace（旧安装常见 preset 为 `primary`），新 binding 则使用 Delivery 当前配置的默认身份。执行上述 `--refresh-agent-policy --allow-agent-tools` 时会按完整 preset+workspace 保留精确 legacy 规则，同时把主规则更新到当前默认身份；refresh 会清除所有历史 account id 的 setup-managed external reply/capability/tool 规则，再只为当前 account 的 canonical owner principal 重建。Delivery 外部规则的 principal、preset、workspace 始终精确，capability 的 action/resource 使用 `*` 以覆盖该身份已挂载的动态工具及插件内部 Policy 动作；外部工具级规则仍用工具 id `*` 并可配置显式 deny。本地 `foreground` 规则则有意对 preset/workspace 使用 `*`，以支持 Web/direct 中的用户切换。
 
 已完成飞书配置、只需安装或重启常驻服务时运行：
 
@@ -148,7 +168,9 @@ schtasks.exe /Run /TN "DSH profile web"
 
 如果确实希望自己管理进程，在首次向导中加 `--no-service`，然后手动运行 `dsh --profile web --no-open`。不要同时启动前台和 LaunchAgent 两份相同 profile，否则 Web 端口与飞书长连接会发生竞争。
 
-服务启动后，可以先在飞书里私聊机器人发送 `/model`。机器人会返回一张飞书卡片，依次选择“分组 / Provider”“模型”“Effort 程度”，再点击“确认选择”；选择 provider 时，同一张卡片会立即刷新为该分组的模型，选择模型时又会刷新为该模型实际支持的 effort。没有独立 effort 档位的模型只显示“默认（该模型无 effort 档位）”。系统确认后会发一条文字回复，下一条普通消息开始使用新选择，原上下文保留。目录来自当前 Host 实际注册的 provider/model，不消耗一次模型调用。若目录中的异常字段或飞书卡片格式错误导致卡片未被接受，机器人会立即改发完整纯文本目录，可继续使用 `/model use <provider/model>`，不会静默重试后进入死信。
+服务启动后，同一私聊或稳定群聊 lane 会持续恢复同一个 DSH session。`/status`（或 `/session`）显示当前代次与上下文统计；`/stop` 只停止正在执行的任务并保留该 session；`/new`（或 `/clear`）才停止旧任务并原子切换到空白的下一代 session；`/compact` 在宿主发布原生命令时压缩当前上下文。未知 slash 命令不会进入模型。
+
+可以先在飞书里私聊机器人发送 `/model`。机器人会返回一张飞书卡片，依次选择“分组 / Provider”“模型”“Effort 程度”，再点击“确认选择”；选择 provider 时，同一张卡片会立即刷新为该分组的模型，选择模型时又会刷新为该模型实际支持的 effort。没有独立 effort 档位的模型只显示“默认（该模型无 effort 档位）”。系统确认后会发一条文字回复，下一条普通消息开始使用新选择，原上下文保留。目录来自当前 Host 实际注册的 provider/model，不消耗一次模型调用。若目录中的异常字段或飞书卡片格式错误导致卡片未被接受，机器人会立即改发完整纯文本目录，可继续使用 `/model use <provider/model>`，不会静默重试后进入死信。
 
 飞书的多个静态选择器本身彼此独立，所以插件在 provider、model、effort 选择器上分别注册签名 callback，并通过长连接回调返回 `{ card: { type: "raw", data: ... } }` 更新同一张 schema 2.0 卡片。固定的官方 Node SDK 会忽略 `type=card` 长连接帧，transport 因此在其边界补充分片合并、callback 分发和 ACK 兼容桥。每次级联状态都带持久化 revision；旧卡片回调只会重绘当前权威状态，不会覆盖较新的选择。目录按 operation 保存在 Delivery SQLite，Host 短暂重启后仍能恢复。最终确认时还会在 adapter 与 Delivery 两层拒绝不匹配的分组/模型，并校验目标模型支持的 effort。选择“默认（由模型决定）”不会固定 reasoning effort。`/model use <provider/model>` 仍可作为文字后备，`/model reset` 恢复部署默认模型，`/new` 轮换到新 session 但保留该聊天的模型与 effort。Web 会话里可调用 `assistant_health` 查看 `larkChannel.state`，正常应为 `connected`。
 
@@ -246,11 +268,12 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 - 回合失败时除 `RUN_ERROR` 外还会在面板正文写入一行「任务未完成」，附带上游错误码（如 `ACP_PROTOCOL_ERROR`）：provider 可能在产出任何内容前就失败，只发 `RUN_ERROR` 会让面板停在首行、看起来像卡住。只透传短错误码，provider 的原始错误消息可能包含 prompt 或上游载荷，不出边界。
 - Agent 回答按 Markdown 渲染：回答本身是 Markdown（表格、加粗、行内代码），以 `plain` 文本发送会把 `|---|`、`**` 等原始语法直接暴露给用户。Delivery 仅在渠道 adapter 声明了 `markdown` 能力时才请求该格式，否则降级为 `plain`——coordinator 会把 adapter 未声明的格式判为 `unsupported-format` 并丢弃整条消息，因此降级是为了保证回复不会因能力不匹配而丢失。回答卡片保持内容优先：不额外加 header（飞书已在气泡上方显示机器人名称与头像，再加会重复），只用一个 `markdown` 组件承载正文，并通过 `wide_screen_mode` 避免 Markdown 表格在宽屏下折行。
 - `messageId` 是稳定 inbound event id；delivery 的 `(channel, account, eventId)` 唯一约束承担跨重启去重。
-- 单聊按 account/tenant/user/chat 绑定；群聊以根消息 id 作为显式 thread，避免不同发言人或话题串线。
+- 单聊按 account/tenant/user/chat 绑定。群聊顶层消息没有 provider `root_id`，因此按发送者生成 `dsh-lark-top-sender/<sha256(open_id)>` 合成 thread；account/tenant/chat 仍是 conversation 的独立字段，同一群内同一发送者可连续复用 DSH session，不同发送者不会落入同一个 owner binding。飞书真实提供 `root_id` 时仍直接使用可寻址的根消息 id，使不同回复串彼此隔离；`dsh-lark-top-sender/` 是保留命名空间，provider root 命中时拒绝入站，避免两类 lane 碰撞。合成 thread 只用于 Delivery 持久化，不会作为飞书回复目标发送；当前消息回复继续使用真实 `messageId`，没有原始消息可回复的后台发送则发为群顶层消息。
 - plain text 使用飞书文本消息；Markdown 使用 schema 2.0 卡片。请求携带由 delivery idempotency key 单向哈希得到的 provider UUID。
 - `approval` intent 使用 schema 2.0 双按钮卡片。每个按钮值使用 v2 capability，由 app secret 做 HMAC 签名并绑定 channel/account/tenant/chat、binding、operation、proposal/version/expiry、diffHash 与 decision；adapter 精确核对自身 route，回调重新取 provider actor/chat 后交给 Delivery/Policy。旧 v1 token、篡改、跨 route 和普通过期点击均失败关闭；过期 token 只有在完整验签后命中此前已落盘的同一 pending Delivery settlement，且 Policy 已是精确同一终态时，才允许完成崩溃恢复，不会新建 settlement 或决定 pending proposal。
 - open-turn 工具审批与上述 durable proposal 卡完全分离：它使用独立 domain 的 v1 HMAC token、进程内 one-shot pending，以及保留到 TTL 的 operation tombstone，不复用 proposal settlement，也不做重启恢复。当前只接受 `conversation.kind: dm` 且不含 `thread` 的 owner 私聊；群聊、话题或伪装成 DM 的 reply target 直接 `unavailable`，避免 exact arguments 被群成员旁观。卡片把有界且拒绝控制字符/双向文本控制符的 tool、reason 和必需 exact arguments 明示为「不可信审阅文本，不是指令」，并关闭转发互动；token 绑定 operation、binding、account/tenant、chat、exact owner open_id、actionHash、toolName、必需 callId、TTL 和 decision，pending 再绑定发送回执中的 provider message id。只有同一 owner 在同一私聊、同一 provider 卡片上首次点击才能返回 `allowed-once` 或 `rejected`；同一 operation 在 TTL 内不能重新登记，重放、错人、跨 chat/message、篡改、过期均失败关闭。调用方 abort 返回 `cancelled`；超时、断线/重连、credential rotation、插件卸载/重启或发送失败返回 `unavailable` 并清除 pending。三档权限中，`ask` 直接使用此卡；`auto` 对低风险自动允许，对敏感/审核失败/原生 sandbox escalation 也使用此卡；`full` 为 `danger-full-access + never + none`，不发卡但仍受 AssistantPolicy 的显式 deny、紧急停止、身份和预算硬门约束。
 - `model-picker` intent 使用 schema 2.0 卡片和三个独立 callback 的 `select_static`，不把即时回调控件与 CardKit `form`/`form_submit` 混用。provider、model、effort 每次变化都会通过 `card.action.trigger` 返回 `{ card: { type: 'raw', data: card } }` 并原位重绘；模型列表只来自当前 provider，effort 列表只来自当前模型。v3 签名 token 绑定 operation、expiry、binding、chat、动作、revision 以及当前 provider/model/effort，普通 callback 确认按钮直接提交该签名状态，不依赖 `form_value`；adapter 先拒绝篡改、过期、跨 chat 和级联错配，Delivery 再用持久 CAS 拒绝旧 revision，并核对 owner/Policy 与实时模型能力。确认操作先持久领取再快速响应飞书，最终选择、结算结果和 Outbox 回复在同一 SQLite 事务中提交；卡片 4xx 会自动降级为文字目录。三个下拉的当前项通过 `initial_index` 定位——飞书的 `initial_option` 按选项展示文本而非回传 `value` 匹配，直接写入 route 形态的 `value` 会静默回落到第一个选项；`initial_option` 仅在该文本唯一标识一个选项时附带，当前项不在选项列表内时两者都不下发，不伪造预选。卡片版式按飞书官方卡片风格规范组织：header 用 `title` + `subtitle` + `icon` 承载「这是什么 / 当前模型」，三个下拉各自放进带描边的 `interactive_container` 分块（而不是平铺 markdown 标签），每块含一行灰色 `notation` 说明，末尾只保留一个 `primary` 按钮作为唯一焦点。升级后应重新发送 `/model`，旧 v1/v2 卡片不会继续生效。
+- `permission-picker` intent 使用独立 schema 2.0 三档卡片，当前档位显示勾选，full 使用 danger 样式和飞书原生二次确认。卡片关闭转发互动，三个按钮分别携带独立 HMAC capability；token 绑定 channel/account/tenant/chat、精确 owner、binding/version/session、权限状态指纹、目标档位与 TTL。adapter 先拒绝错人、跨 chat、篡改和过期，Delivery 再核对原 Outbox 及 provider message id、active owner/binding/session、Policy 和当前权限状态；通过后只把固定 `/permission` 命令送入同一 durable Inbox 串行路径，不在 adapter 内直接改权限。旧卡、复制卡和晚到的相反选择都不能覆盖新状态；卡片格式 4xx、缺少签名或结算能力时退回完整文字说明。
 - 权限/格式错误是确定未发送；限流和未连接可以安全重试；网络超时或未知 SDK 错误进入 `unknown_after_send`，不会盲目重发。
 - 当前飞书 API 没有为该发送 UUID 暴露可靠查询/对账接口，因此 adapter 明确声明 `reconcileUnknownSend: false`、无 delivered/read receipt；Delivery 会保留这类 `unknown_after_send` 等待 owner 决策，不会反复领取无实现的对账任务或消耗 attempt。
 
@@ -258,25 +281,21 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 
 ## 安全与权限
 
-`--allow-agent-tools` 是高权限显式开关。它生成一条 `tool: *` 的 allow 规则，绑定 Delivery 当前/兼容的精确 preset + 绝对 workspace + `external` initiator，**不再附带任何 deny 规则**——外部会话可达该 preset 暴露的全部工具，包括会改写持久状态的`memory_manage`、`wiki_upsert`、`automation_*` 等。
+`--allow-agent-tools` 是高权限显式开关。它为本地 Web/direct `foreground` 写入跨 preset/workspace 的通用 capability allow，并为 Delivery 当前/兼容的精确 canonical owner principal + preset + 绝对 workspace + `external` initiator 写入通用 capability 与工具级规则。默认不附带工具 deny：这些身份可达已挂载的动态 skill/插件工具，也能通过 `memory.search`、`wiki.read`、`automation.propose` 等插件内部二次 Policy 检查。`background` initiator 始终不在这两类规则中。
 
-这里用通配放行而非逐个枚举工具名，是因为工具由部署实际挂载的插件与技能动态注册：任何名单在新工具出现的那一刻就已过期，表现为 Agent 在飞书里报「工具被拒绝」而 owner 无法在对话中解决，且每加一个工具都要发一次 setup 版本。
+这里用通配 action/resource 而非逐个枚举工具名或插件动作，是因为两者都由部署实际挂载的插件与技能动态注册：任何静态名单在新能力出现的那一刻就已过期，表现为 Agent 已看到工具却被 `default-deny`，或工具进入插件后又被二次 Policy 门拒绝。
 
-这条规则决定的是**可达性**，不是**权限**：真正的风险判断在 `assistant-policy` 的 `tools/pre-execute` 审查器，它按行为检查实参，写文件、访问网络和危险命令仍会送去审批（上述写类工具均被判为 `ask-review`）。但请注意：若该 session 的 approval reviewer 为 `none`，该层审查会被跳过，此时通配放行等同于无限制工具执行。
+这组规则决定的是 Policy 层**可达性**，不是插件安装或挂载：未安装/未挂载的技能与插件不会自动出现。模型工具仍经过 sandbox、approval reviewer 和 `assistant-policy` 的 `tools/pre-execute`；插件内部动作仍经过各自的身份、参数、预算与业务硬门。显式 deny、紧急停止与这些硬门不被通配 allow 绕过；在 `ask` / `auto` 档，写文件、访问网络和危险命令仍可能进入审批。
 
-若要重新收紧，在 `src/setup-profile.ts` 的 `deniedExternalTools` 中填入工具名即可；Policy 中 deny 优先于 allow，填入的工具会立即覆盖通配规则。
+owner 可用 `/permissions` 查看当前档位，并用 `/permission ask`、`/permission auto` 或二次确认的 `/permission full confirm` 切换。`full` 为 `danger-full-access + never + none`，会关闭逐次审批并放开 sandbox，但显式 Policy deny、紧急停止、身份校验和预算硬门仍然生效。若要收紧具体工具，应配置显式 deny 或改用更窄的 allow 规则；deny 优先于上述通配 allow。
 
-主体侧不放宽：`subject.id` 与 `subject.workspace` 始终是精确值，带 `*` 的 workspace 会被拒绝，避免被 Policy 当作模式。Bash/Pwsh 本身仍可启动进程并读写其 sandbox 允许的内容；若该 session 使用 `danger-full-access` 且 approval 为 `never`，飞书中获准的外部会话等同获得很宽的本机命令权限。请按需要选择更窄的 DSH permission preset，并保持飞书 owner/应用范围最小。
+Delivery 外部主体侧不放宽：`subject.id` 与 `subject.workspace` 始终是精确值；只有本地 `foreground` 规则为支持 Web/direct 切换而对两者使用 `*`，并由 `initiator: foreground` 隔离。Bash/Pwsh 本身仍可启动进程并读写其 sandbox 允许的内容；选择 `full` 后应把飞书 owner/应用范围保持在最小，并按需配置显式 deny、紧急停止和预算。
 
-这里用通配放行而非逐个枚举工具名，是因为工具由部署实际挂载的插件与技能动态注册：任何名单在新工具出现的那一刻就已过期，表现为 Agent 在飞书里报「工具被拒绝」而 owner 无法在对话中解决，且每加一个工具都要发一次 setup 版本。真正的风险判断在 `assistant-policy` 的 `tools/pre-execute` 审查器，它按**行为**检查实参，仍会把写文件、访问网络和危险命令送去审批——所以这条规则决定的是「可达性」，不是「权限」。
+`skill` 是标准 DSH base 的 `tool-skill` row 注册的模型侧工具，它让 Agent 能发现并加载 `ctx.skills` 里的技能（含 `skill-filesystem` 提供的本机 SKILL.md）。它由上面的通用 capability/工具规则覆盖，无需单独授权。技能加载本身不额外提权，被加载技能内部的命令仍受同一 sandbox / approval / Policy 管线约束。
 
-主体侧不放宽：`subject.id` 与 `subject.workspace` 始终是精确值，带 `*` 的 workspace 会被拒绝，避免被 Policy 当作模式。Bash/Pwsh 本身仍可启动进程并读写其 sandbox 允许的内容；若该 session 使用 `danger-full-access` 且 approval 为 `never`，飞书中获准的外部会话等同获得很宽的本机命令权限。请按需要选择更窄的 DSH permission preset，并保持飞书 owner/应用范围最小。
+若外部会话报告某个工具被拒，先查 `~/.dsh/assistant-policy/policy.sqlite` 的 `audit_events`：`reason_code` 为 `default-deny` 说明该会话没有匹配到 allow 规则，通常是 principal、preset 或 workspace 与 Delivery 实际绑定不一致，运行 `~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools` 即可对齐；为 `rule-deny` 说明命中了显式 deny。注意这两者都不是审批拦截：审批由 `tools/pre-execute` 审查器发起，不写入 `audit_events` 的 denied 记录。
 
-`skill` 是标准 DSH base 的 `tool-skill` row 注册的模型侧工具，它让 Agent 能发现并加载 `ctx.skills` 里的技能（含 `skill-filesystem` 提供的本机 SKILL.md）。它由上面的 `tool: *` 规则覆盖，无需单独授权。技能加载本身不额外提权，被加载技能内部的命令仍受同一 sandbox / approval / Policy 管线约束。
-
-若外部会话报告某个工具被拒，先查 `~/.dsh/assistant-policy/policy.sqlite` 的 `audit_events`：`reason_code` 为 `default-deny` 说明该会话没有匹配到 allow 规则，通常是 preset 或 workspace 与 Delivery 实际使用的不一致，重跑 `--allow-agent-tools` 即可对齐；为 `rule-deny` 说明命中了 `deniedExternalTools`（默认为空，仅在你主动填入后才会出现）。注意这两者都不是审批拦截：审批由 `tools/pre-execute` 审查器发起，不写入 `audit_events` 的 denied 记录。
-
-当前 Policy tool guard 不携带 principal 或 conversation kind，只能把规则收窄到 preset/workspace/initiator。Delivery 会先拒绝未配对 principal，但同一 lane 中已经获准的 external 会话（包括 owner 在群内 @ 机器人）仍共享这组工具规则；因此这不是“仅 owner 私聊”的强隔离承诺。
+Policy tool guard 和插件内部 `authorizeAgent()` 都携带 Delivery 绑定的 canonical principal；Lark setup 生成的 external reply/capability/tool 规则只匹配当前 account 的精确 owner。其他 connector、Lark account 或 principal 即使使用相同 preset/workspace 也不会继承该授权。owner 在群内 @ 机器人时仍沿用同一 principal，因此这不是“仅 owner 私聊”的限制。
 
 - **网络：**仅访问所选 `domain` 的飞书/Lark OpenAPI、token 服务和 WebSocket endpoint；图片读取使用固定的消息资源相对端点，不接受模型、消息正文或 provider payload 提供的 URL，并关闭重定向；没有通用 HTTP 工具。
 - **凭据：**优先通过 `credentials-keychain` handle 获取；兼容模式只读取 `appSecretEnv` 指定的一项。值不写数据库、不进入 tool、health、route、日志或异常文本。`appId` 不是 secret。
@@ -289,7 +308,7 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 
 ## 当前边界
 
-- v0.1 自动处理文本及图片描述符入站、文本/Markdown-card 出站、durable proposal、owner-DM one-shot tool approval、model-picker 卡片、`Get`/`DONE` 状态和脱敏原生执行进度；模型仍不能提交任意 card JSON，也不能直接控制 reaction 或进度载荷。
+- v0.1 自动处理文本及图片描述符入站、文本/Markdown-card 出站、durable proposal、owner-DM one-shot tool approval、model-picker 与 permission-picker 卡片、`Get`/`DONE` 状态和脱敏原生执行进度；模型仍不能提交任意 card JSON，也不能直接控制 reaction 或进度载荷。
 - 仅图片资源具备受限下载能力，而且只有部署同时提供 Delivery 图片桥接与 AttachmentStore、当前模型明确声明图片输入能力时才会启用。文件、音频、视频和 sticker 仍只进入 durable metadata quarantine；本插件不做病毒扫描，也不提供附件出站上传。
 - 消息编辑和上传尚未实现；未来也必须先创建 Delivery 的持久 operation，不得从模型直接调用 SDK。
 - 单个飞书应用的长连接是集群竞争消费，不提供广播或多节点 exactly-once。当前 suite 的可靠性目标是受 supervisor 管理的单机进程。
@@ -305,7 +324,9 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 - **`caller is not allowlisted for this credential handle`：**这是旧版默认导出丢失稳定 Cordis plugin identity 导致的错误；更新并重新 build `lark-channel`，再执行 `--install-service`，不要把 credential consumer allowlist 改宽。
 - **显示 `connected-with-gap`：**连接曾中断；飞书没有可持久化 replay cursor，检查这段时间是否有漏处理消息。
 - **收到消息但无回复：**先发送 `/model`，选择一个目录中可用且已登录的 route；再看 `assistant_health`。未授权身份会 fail-closed，不会自动成为 owner。
-- **能回复但提示没有 Bash/文件搜索：**先升级并重启 `assistant-delivery`，确认 session 的 preset 在 create/resume 时已挂载；需要执行时用 `--allow-agent-tools` 重跑向导，或手工添加 exact preset/workspace/tool Policy。只执行 `--install-service` 会重启，不会改工具授权。
+- **能回复但提示技能/插件工具被拒绝：**先确认对应技能或插件已经安装并挂载到当前 profile，再升级并重启 `assistant-delivery`，确认 session 的 preset 在 create/resume 时已挂载；需要执行时运行 `~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools`，或手工添加 exact preset/workspace/initiator 的 capability 与工具 Policy。刷新命令不会重启服务；只执行 `--install-service` 会重启，不会改能力可达性规则。
+- **没有弹出审批卡，却反复显示 `the user rejected tool`：**旧 native full session 可能只有 `danger-full-access + never` 而缺少 AssistantPolicy reviewer，导致 reviewer 保守回落为 `user`、工具进入 `ask-review`，又被 `approval=never` 在展示前自动拒绝；这不代表用户点过“拒绝”。升级构建并重启 `assistant-policy` 所在 profile；AssistantPolicy 会在已有 session 扫描、新建和执行门前全局迁移 Web/direct 与 Delivery 的精确 legacy full 状态，持久补齐 `reviewer=none`，Delivery create/resume 另做提前检查。非 full 的 `never` 状态会返回 `[approval-disabled] ... no user approval was requested`，不再错误归因。若随后出现 `default-deny`，运行 `~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools` 刷新 foreground/Delivery capability 可达性规则；不要把 `run_code` 在 ask/auto 档无条件白名单化，它仍是 bash-equivalent 执行面。
+- **权限卡片未显示或点击后提示失效：**卡片只在 active owner 私聊中提供，并绑定原 chat、原卡 message id、binding/session、权限状态和 15 分钟默认有效期；群聊、过期卡、`/new` 后旧卡或期间已用文字切档都会退回/提示重发 `/permissions`。点击 Toast“已受理”后，以机器人随后发送的“已切换”回复为准；同一卡片想改选另一档时请重新打开。
 - **有最终回复但没有 `Get` / `DONE`：**旧应用通常缺少 `im:message.reactions:write_only`。重新运行 `dsh-lark-setup --profile web --create-app`，在官方页面选择当前 App ID，确认权限增量并发布应用版本。reaction 失败不会阻断回答。
 - **文字能回复但图片不能处理：**确认应用已获 `im:resource` 且新版本已发布，并确认 profile 已安装提供 `attachments` 服务的 AttachmentStore、当前 `/model` 路由明确支持图片输入。重新运行 `dsh-lark-setup --profile web --create-app --app-id <当前 App ID>` 可增量补齐飞书权限。下载拒绝路径型 key、重定向、超限内容、MIME/magic 不一致和非 PNG/JPEG/GIF/WebP 数据，这是预期的 fail-closed 行为。
 - **看不到执行进度但能正常回答：**确认 profile 中 `showProgress: true`。原生进度接口是可降级能力，租户或应用类型不支持时最终回答仍会正常发送；查看 `assistant_health` 的 `larkChannel.lastErrorCode` 和 Host 错误日志定位权限/接口问题。

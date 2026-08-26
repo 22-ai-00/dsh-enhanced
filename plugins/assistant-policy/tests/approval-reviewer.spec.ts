@@ -24,6 +24,11 @@ function appendSandboxMode(current: Session, mode: 'workspace-write' | 'danger-f
   append.call(current, 'sandbox/mode', { mode })
 }
 
+function appendPermissionPreset(current: Session, preset: string): void {
+  const append = current.append as unknown as (type: string, data: unknown) => unknown
+  append.call(current, 'permission/preset', { preset })
+}
+
 describe('durable approval reviewer', () => {
   test('folds the last event and replays it from a restored event log', () => {
     const original = session()
@@ -98,5 +103,57 @@ describe('durable approval reviewer', () => {
     const appendSandbox = invalidSandbox.append as unknown as (type: string, data: unknown) => unknown
     appendSandbox.call(invalidSandbox, 'sandbox/mode', { mode: 'host-write' })
     expect(getApprovalReviewer(invalidSandbox)).toBe('user')
+  })
+
+  test('uses the latest official three-level preset as reviewer intent without a custom event', () => {
+    const current = session()
+    appendSandboxMode(current, 'workspace-write')
+    current.append('approval/policy', { policy: 'ask' })
+
+    appendPermissionPreset(current, 'auto')
+    expect(foldApprovalReviewer(current.events)).toBeUndefined()
+    expect(getApprovalReviewer(current)).toBe('auto-review')
+
+    appendPermissionPreset(current, 'workspace-write')
+    expect(getApprovalReviewer(current)).toBe('user')
+
+    current.append('approval/policy', { policy: 'never' })
+    appendSandboxMode(current, 'danger-full-access')
+    appendPermissionPreset(current, 'danger-full-access')
+    expect(getApprovalReviewer(current)).toBe('none')
+    expect(current.events.some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
+  })
+
+  test('folds official preset and legacy reviewer events in durable log order', () => {
+    const current = session()
+    appendSandboxMode(current, 'workspace-write')
+    current.append('approval/policy', { policy: 'ask' })
+
+    setApprovalReviewer(current, 'auto-review')
+    appendPermissionPreset(current, 'workspace-write')
+    expect(getApprovalReviewer(current)).toBe('user')
+
+    setApprovalReviewer(current, 'auto-review')
+    expect(getApprovalReviewer(current)).toBe('auto-review')
+
+    appendPermissionPreset(current, 'auto')
+    setApprovalReviewer(current, 'user')
+    appendPermissionPreset(current, 'auto')
+    expect(getApprovalReviewer(current)).toBe('auto-review')
+  })
+
+  test('fails closed when official reviewer intent and execution knobs are incoherent', () => {
+    const auto = session()
+    appendPermissionPreset(auto, 'auto')
+    expect(getApprovalReviewer(auto)).toBe('user')
+    auto.append('approval/policy', { policy: 'ask' })
+    appendSandboxMode(auto, 'danger-full-access')
+    expect(getApprovalReviewer(auto)).toBe('user')
+
+    const full = session()
+    appendPermissionPreset(full, 'danger-full-access')
+    full.append('approval/policy', { policy: 'never' })
+    appendSandboxMode(full, 'workspace-write')
+    expect(getApprovalReviewer(full)).toBe('user')
   })
 })

@@ -61,11 +61,40 @@ describe('Lark inbound normalization', () => {
     })
   })
 
-  test('uses root or message identity as a deterministic group thread fallback', () => {
+  test('uses a stable per-sender synthetic thread for standalone group messages', () => {
     expect(normalizeLarkMessage(config, message({ chatType: 'group', mentionedBot: true, rootId: 'om_root' }), 100_100))
       .toMatchObject({ outcome: 'accept', envelope: { conversation: { thread: 'om_root' } } })
-    expect(normalizeLarkMessage(config, message({ chatType: 'group', mentionedBot: true }), 100_100))
-      .toMatchObject({ outcome: 'accept', envelope: { conversation: { thread: 'om_1' } } })
+    const first = normalizeLarkMessage(config, message({
+      messageId: 'om_top_1', chatType: 'group', mentionedBot: true,
+    }), 100_100)
+    const second = normalizeLarkMessage(config, message({
+      messageId: 'om_top_2', chatType: 'group', mentionedBot: true,
+    }), 100_100)
+    const otherSender = normalizeLarkMessage(config, message({
+      messageId: 'om_top_3', chatType: 'group', mentionedBot: true, senderId: 'ou_other',
+    }), 100_100)
+    const firstConversation = (first as { envelope: { conversation: { thread: string } } }).envelope.conversation
+    const secondConversation = (second as { envelope: { conversation: { thread: string } } }).envelope.conversation
+    const otherConversation = (otherSender as { envelope: { conversation: { thread: string } } }).envelope.conversation
+    expect(firstConversation).toMatchObject({ kind: 'group', chat: 'oc_1' })
+    expect(firstConversation.thread).toMatch(/^dsh-lark-top-sender\/[A-Za-z0-9_-]{43}$/u)
+    expect(secondConversation).toEqual(firstConversation)
+    expect(otherConversation.thread).not.toBe(firstConversation.thread)
+  })
+
+  test('keeps real reply roots provider-addressable and disjoint from the synthetic namespace', () => {
+    const first = normalizeLarkMessage(config, message({
+      messageId: 'om_reply_1', chatType: 'group', mentionedBot: true, rootId: 'om_root_1',
+    }), 100_100)
+    const second = normalizeLarkMessage(config, message({
+      messageId: 'om_reply_2', chatType: 'group', mentionedBot: true, rootId: 'om_root_2',
+    }), 100_100)
+    expect(first).toMatchObject({ outcome: 'accept', envelope: { conversation: { thread: 'om_root_1' } } })
+    expect(second).toMatchObject({ outcome: 'accept', envelope: { conversation: { thread: 'om_root_2' } } })
+    expect(() => normalizeLarkMessage(config, message({
+      messageId: 'om_reply_reserved', chatType: 'group', mentionedBot: true,
+      rootId: `dsh-lark-top-sender/${'a'.repeat(43)}`,
+    }), 100_100)).toThrow(/rootId.*reserved namespace/iu)
   })
 
   test('drops stale/empty messages and rejects malformed or oversized provider data', () => {

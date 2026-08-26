@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, test, vi } from 'vitest'
-import { LarkDeliveryAdapter } from '../src/adapter.ts'
+import { LarkDeliveryAdapter, type LarkAdapterOptions } from '../src/adapter.ts'
 import { signLarkApprovalAction, verifyLarkApprovalAction } from '../src/approval.ts'
 import { LARK_APPROVAL_CARD_MAX_BYTES, renderLarkMessage } from '../src/sdk.ts'
 import { LarkTransportError } from '../src/types.ts'
@@ -97,6 +97,22 @@ const modelPicker = {
   efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
 } as const
 
+const permissionPicker = {
+  operationId: 'permission-picker-1',
+  issuedAt: 1_000,
+  expiresAt: 2_000,
+  current: 'full',
+  expectedStateHash: 'a'.repeat(64),
+  emergencyStopVersion: 0,
+  bindingVersion: 7,
+  sessionId: 'session-1',
+} as const
+
+const unavailablePermissionPickerOptions: LarkAdapterOptions[] = [
+  { settlePermissionSelection: vi.fn() },
+  { approvalSecret: 'test-secret-at-least-32-characters-long' },
+]
+
 function durablePickerAdvance() {
   let current: ModelPickerState | undefined
   return vi.fn((input: { expected: ModelPickerState; next: Omit<ModelPickerState, 'revision'> }) => {
@@ -169,6 +185,16 @@ describe('Lark delivery adapter', () => {
     }, channel)
     expect(adapter.capabilities.inboundImages).toBe(false)
   })
+
+  test.each(unavailablePermissionPickerOptions)(
+    'does not advertise permission cards without both signing and settlement support', options => {
+      const adapter = new LarkDeliveryAdapter({
+        account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+        maxTextBytes: 65_536, staleAfterMs: 60_000,
+      }, new FakeTransport(), options)
+      expect(adapter.capabilities.formats).not.toContain('permission-picker')
+    },
+  )
 
   test('maps image download cancellation, permission, throttling, and unknown failures without provider details', async () => {
     const f = fixture()
@@ -260,6 +286,22 @@ describe('Lark delivery adapter', () => {
     await f.adapter.send(group, new AbortController().signal)
     expect(f.transport.send).toHaveBeenLastCalledWith('oc_group', { markdown: '**done**' }, {
       replyTo: 'om_in', replyInThread: true, requestKey: 'reply-1',
+    })
+  })
+
+  test('keeps a synthetic top-level group lane top-level even when Delivery supplies its inbound event id', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    const group = intent({ target: {
+      principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
+      conversation: {
+        channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', kind: 'group', chat: 'oc_group',
+        thread: `dsh-lark-top-sender/${'a'.repeat(43)}`,
+      },
+    } })
+    await expect(f.adapter.send(group, new AbortController().signal)).resolves.toMatchObject({ outcome: 'accepted' })
+    expect(f.transport.send).toHaveBeenLastCalledWith('oc_group', { text: 'reply' }, {
+      requestKey: 'reply-1',
     })
   })
 
@@ -748,6 +790,159 @@ describe('Lark delivery adapter', () => {
       replyTo: 'om_in', requestKey: 'reply-1:model-picker-fallback',
     })
     expect(transport.addReaction).toHaveBeenCalledWith('om_in', 'DONE')
+  })
+
+  test('sends signed permission choices and settles each exact owner button with all bound state', async () => {
+    const transport = new FakeTransport()
+    const settlePermissionSelection = vi.fn(() => ({ status: 'queued' as const }))
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_100,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settlePermissionSelection,
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+
+    expect(adapter.capabilities.formats).toContain('permission-picker')
+    await expect(adapter.send(intent({
+      format: 'permission-picker', text: '请选择权限模式', permissionPicker,
+    }), new AbortController().signal)).resolves.toEqual({
+      outcome: 'accepted', providerMessageId: 'om_sent',
+    })
+    const sent = transport.send.mock.calls.at(-1)![1] as {
+      permissionPicker: import('../src/types.ts').LarkPermissionPickerCard
+    }
+    expect(sent.permissionPicker).toMatchObject({
+      title: '选择权限模式', body: '当前：完全访问权限（full）。请选择新档位。', current: 'full',
+    })
+    const callbacks = sent.permissionPicker.callbackValues
+    expect(Object.keys(callbacks).sort()).toEqual(['ask', 'auto', 'full'])
+    expect(new Set(Object.values(callbacks).map(value => value.permissionPicker)).size).toBe(3)
+    expect(Object.values(callbacks).every(value => value.permissionPicker.length > 64)).toBe(true)
+
+    for (const targetLevel of ['ask', 'auto', 'full'] as const) {
+      await expect(transport.emitCardAction({
+        messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+        tag: 'button', value: callbacks[targetLevel],
+      })).resolves.toEqual({ toast: { type: 'success', content: '权限切换已受理' } })
+    }
+    expect(settlePermissionSelection).toHaveBeenCalledTimes(3)
+    for (const [index, targetLevel] of (['ask', 'auto', 'full'] as const).entries()) {
+      const token = callbacks[targetLevel].permissionPicker
+      expect(settlePermissionSelection).toHaveBeenNthCalledWith(index + 1, {
+        operationId: 'permission-picker-1',
+        callbackEventId: sha256(`om_sent\0ou_owner\0${token}`),
+        callbackChatId: 'oc_dm',
+        cardMessageId: 'om_sent',
+        bindingId: 'binding-1',
+        bindingVersion: 7,
+        sessionId: 'session-1',
+        principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
+        issuedAt: 1_000,
+        expiresAt: 2_000,
+        expectedStateHash: 'a'.repeat(64),
+        emergencyStopVersion: 0,
+        targetLevel,
+      })
+    }
+  })
+
+  test('rejects wrong permission-card owner, chat, button, message id, tampering, and expiry with a visible warning', async () => {
+    const transport = new FakeTransport()
+    const settlePermissionSelection = vi.fn()
+    let now = 1_100
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => now,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settlePermissionSelection,
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await adapter.send(intent({
+      format: 'permission-picker', text: '请选择权限模式', permissionPicker,
+    }), new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as {
+      permissionPicker: import('../src/types.ts').LarkPermissionPickerCard
+    }
+    const valid = sent.permissionPicker.callbackValues.full
+    const invalidActions: LarkCardAction[] = [
+      { messageId: 'om_permission_card', chatId: 'oc_dm', operatorId: 'ou_attacker', tag: 'button', value: valid },
+      { messageId: 'om_permission_card', chatId: 'oc_attacker', operatorId: 'ou_owner', tag: 'button', value: valid },
+      { messageId: 'om_permission_card', chatId: 'oc_dm', operatorId: 'ou_owner', tag: 'select_static', value: valid },
+      { messageId: '../bad-message', chatId: 'oc_dm', operatorId: 'ou_owner', tag: 'button', value: valid },
+      { messageId: 'om_permission_card', chatId: 'oc_dm', operatorId: 'ou_owner', tag: 'button',
+        value: { permissionPicker: `${valid.permissionPicker.slice(0, -1)}x` } },
+    ]
+    for (const action of invalidActions) {
+      await expect(transport.emitCardAction(action)).resolves.toEqual({
+        toast: { type: 'warning', content: '权限卡片无效或已失效，请重新发送 /permission' },
+      })
+    }
+    now = permissionPicker.expiresAt
+    await expect(transport.emitCardAction({
+      messageId: 'om_permission_card', chatId: 'oc_dm', operatorId: 'ou_owner', tag: 'button', value: valid,
+    })).resolves.toEqual({
+      toast: { type: 'warning', content: '权限卡片已过期，请重新发送 /permission' },
+    })
+    expect(settlePermissionSelection).not.toHaveBeenCalled()
+    expect(adapter.health()).toMatchObject({ lastErrorCode: 'format_error' })
+  })
+
+  test('shows a warning when permission selection settlement is stale', async () => {
+    const transport = new FakeTransport()
+    const settlePermissionSelection = vi.fn(() => { throw new Error('stale permission fingerprint') })
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_100,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settlePermissionSelection,
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await adapter.send(intent({
+      format: 'permission-picker', text: '请选择权限模式', permissionPicker,
+    }), new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as {
+      permissionPicker: import('../src/types.ts').LarkPermissionPickerCard
+    }
+
+    await expect(transport.emitCardAction({
+      messageId: 'om_permission_card', chatId: 'oc_dm', operatorId: 'ou_owner', tag: 'button',
+      value: sent.permissionPicker.callbackValues.auto,
+    })).resolves.toEqual({
+      toast: { type: 'warning', content: '权限卡片状态已更新，请重新发送 /permission' },
+    })
+    expect(adapter.health()).toMatchObject({ lastErrorCode: 'unknown' })
+  })
+
+  test('falls back to the exact permission text when Lark rejects the permission-picker card format', async () => {
+    const transport = new FakeTransport()
+    transport.send.mockRejectedValueOnce(new LarkTransportError('format_error', 'invalid card'))
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_100,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settlePermissionSelection: vi.fn(),
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+
+    await expect(adapter.send(intent({
+      format: 'permission-picker', text: '完整的三档权限文字说明', permissionPicker,
+    }), new AbortController().signal)).resolves.toEqual({
+      outcome: 'accepted', providerMessageId: 'om_sent',
+    })
+    expect(transport.send).toHaveBeenCalledTimes(2)
+    expect(transport.send.mock.calls[1]?.[1]).toEqual({ text: '完整的三档权限文字说明' })
+    expect(transport.send.mock.calls[1]?.[2]).toEqual({
+      replyTo: 'om_in', requestKey: 'reply-1:permission-picker-fallback',
+    })
   })
 
   test('fails closed on route/account/tenant mismatch and invalid provider result', async () => {

@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DeliveryStore } from '../src/store.ts'
 import type { DeliveryReceipt, OutboundIntent } from '../src/types.ts'
@@ -15,14 +16,15 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-outbox-'))
   roots.push(root)
   let now = 1_000
-  const store = new DeliveryStore({ path: join(root, 'delivery.sqlite'), now: () => now, codeGenerator: () => 'PAIR1234' })
+  const databasePath = join(root, 'delivery.sqlite')
+  const store = new DeliveryStore({ path: databasePath, now: () => now, codeGenerator: () => 'PAIR1234' })
   const principal = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', user: 'ou_owner' }
   const conversation = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', kind: 'dm' as const, chat: 'oc_owner' }
   const issued = store.issuePairing(principal, { ttlMs: 5_000, maxAttempts: 3 })
   store.confirmPairing({ challengeId: issued.challenge.id, principal, code: issued.code })
   const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
     sessionId: 'session-1', policyRef: 'owner-dm' })
-  return { binding, principal, conversation, store, setNow(value: number) { now = value } }
+  return { binding, databasePath, principal, conversation, store, setNow(value: number) { now = value } }
 }
 
 function intent(key: string, f: Awaited<ReturnType<typeof fixture>>, text = 'hello'): OutboundIntent {
@@ -120,6 +122,102 @@ describe('durable outbox', () => {
       modelPicker: { ...modelPicker.modelPicker!, models: [{
         provider: 'codex-subscription', id: 'default', name: 'Default', effortIds: ['missing'],
       }] } })).toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    f.store.close()
+  })
+
+  test('stores only a typed permission-picker intent and retrieves its accepted provider message', async () => {
+    const f = await fixture()
+    const permissionPicker: OutboundIntent = {
+      ...intent('permission-picker:one', f, '请选择权限模式'),
+      format: 'permission-picker',
+      permissionPicker: {
+        operationId: 'permission-picker-1',
+        issuedAt: 1_000,
+        expiresAt: 10_000,
+        current: 'full',
+        expectedStateHash: 'a'.repeat(64),
+        emergencyStopVersion: 0,
+        bindingVersion: f.binding.version,
+        sessionId: f.binding.sessionId,
+      },
+    }
+    const record = f.store.enqueue(permissionPicker)
+    const claim = f.store.claimOutbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.finishOutbox({ outboxId: record.id, ownerId: 'worker-a', fencingToken: claim.fencingToken,
+      outcome: 'accepted', providerMessageId: 'om_permission_picker' })
+
+    expect(f.store.getPermissionPicker('permission-picker-1', f.binding.id)).toEqual(permissionPicker.permissionPicker)
+    expect(f.store.getPermissionPicker('permission-picker-1', 'another-binding')).toBeUndefined()
+    expect(f.store.getPermissionPickerRecord('permission-picker-1', f.binding.id)).toMatchObject({
+      id: record.id,
+      status: 'accepted',
+      providerMessageId: 'om_permission_picker',
+      intent: permissionPicker,
+    })
+
+    expect(() => f.store.enqueue({ ...intent('permission-picker:missing', f), format: 'permission-picker' }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueue({ ...intent('permission-picker:forged', f),
+      permissionPicker: permissionPicker.permissionPicker! }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueue({ ...permissionPicker, idempotencyKey: 'permission-picker:mixed-approval',
+      approval: {
+        operationId: 'approval-1', proposalId: 'proposal-1', expectedVersion: 1,
+        expiresAt: 10_000, title: 'Approval required', diffHash: 'b'.repeat(64),
+      } }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueue({ ...permissionPicker, idempotencyKey: 'permission-picker:mixed-model',
+      modelPicker: {} as NonNullable<OutboundIntent['modelPicker']> }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueue({ ...permissionPicker, idempotencyKey: 'permission-picker:bad-time',
+      permissionPicker: { ...permissionPicker.permissionPicker!, issuedAt: 10_000 } }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueue({ ...permissionPicker, idempotencyKey: 'permission-picker:bad-current',
+      permissionPicker: { ...permissionPicker.permissionPicker!, current: 'unlocked' as 'full' } }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueue({ ...permissionPicker, idempotencyKey: 'permission-picker:bad-hash',
+      permissionPicker: { ...permissionPicker.permissionPicker!, expectedStateHash: 'forged' } }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueue({ ...permissionPicker, idempotencyKey: 'permission-picker:bad-emergency-version',
+      permissionPicker: { ...permissionPicker.permissionPicker!, emergencyStopVersion: -1 } }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueue({ ...permissionPicker, idempotencyKey: 'permission-picker:stale-binding',
+      permissionPicker: { ...permissionPicker.permissionPicker!, bindingVersion: f.binding.version + 1 } }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.enqueue({ ...permissionPicker, idempotencyKey: 'permission-picker:wrong-session',
+      permissionPicker: { ...permissionPicker.permissionPicker!, sessionId: 'another-session' } }))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    f.store.close()
+  })
+
+  test('fails closed when a persisted permission-picker payload diverges from its immutable intent hash', async () => {
+    const f = await fixture()
+    const permissionPicker: OutboundIntent = {
+      ...intent('permission-picker:tampered', f, '请选择权限模式'),
+      format: 'permission-picker',
+      permissionPicker: {
+        operationId: 'permission-picker-tampered',
+        issuedAt: 1_000,
+        expiresAt: 10_000,
+        current: 'ask',
+        expectedStateHash: 'a'.repeat(64),
+        emergencyStopVersion: 0,
+        bindingVersion: f.binding.version,
+        sessionId: f.binding.sessionId,
+      },
+    }
+    const record = f.store.enqueue(permissionPicker)
+    const database = new DatabaseSync(f.databasePath)
+    database.prepare('UPDATE outbox_messages SET intent_json = ? WHERE id = ?').run(JSON.stringify({
+      ...permissionPicker,
+      permissionPicker: { ...permissionPicker.permissionPicker, expectedStateHash: 'b'.repeat(64) },
+    }), record.id)
+    database.close()
+
+    expect(() => f.store.getPermissionPickerRecord('permission-picker-tampered', f.binding.id))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.getPermissionPicker('permission-picker-tampered', f.binding.id))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
     f.store.close()
   })
 

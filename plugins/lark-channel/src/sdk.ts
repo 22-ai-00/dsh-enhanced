@@ -492,8 +492,73 @@ export const LARK_MODEL_PICKER_CONTROLS = Object.freeze({
   confirm: 'model_confirm',
 })
 
+export const LARK_PERMISSION_PICKER_CONTROLS = Object.freeze({
+  ask: 'permission_ask',
+  auto: 'permission_auto',
+  full: 'permission_full',
+})
+
 export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive' | 'text'; content: string } {
   if ('text' in input) return { msgType: 'text', content: JSON.stringify({ text: input.text }) }
+  if ('permissionPicker' in input) {
+    const picker = input.permissionPicker
+    const level = (
+      key: import('./types.js').LarkPermissionLevel,
+      label: string,
+      description: string,
+    ) => {
+      const current = picker.current === key
+      const value = picker.callbackValues[key]
+      const full = key === 'full'
+      return {
+        tag: 'interactive_container',
+        behaviors: [],
+        width: 'fill',
+        corner_radius: '8px',
+        has_border: true,
+        border_color: full ? 'orange-200' : current ? 'blue-200' : 'grey-200',
+        background_style: full ? 'orange-50' : current ? 'blue-50' : 'grey-50',
+        padding: '12px 12px 12px 12px',
+        direction: 'vertical',
+        vertical_spacing: '6px',
+        margin: '0px 0px 8px 0px',
+        elements: [
+          { tag: 'div', text: { tag: 'plain_text', content: `${current ? '✓ ' : ''}${label}` } },
+          { tag: 'div', text: { tag: 'plain_text', content: description } },
+          {
+            tag: 'button',
+            name: LARK_PERMISSION_PICKER_CONTROLS[key],
+            type: full ? 'danger' : current ? 'primary' : 'default',
+            width: 'fill',
+            text: { tag: 'plain_text', content: current ? '✓ 当前档位' : '选择此档位' },
+            value,
+            behaviors: [{ type: 'callback', value }],
+            ...(full ? { confirm: {
+              title: { tag: 'plain_text', content: '确认开启完全访问权限？' },
+              text: { tag: 'plain_text', content: '开启后可访问互联网和电脑上的任何文件，并关闭逐次审批。' },
+            } } : {}),
+          },
+        ],
+      }
+    }
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: { enable_forward_interaction: false },
+        header: {
+          template: 'blue',
+          title: { tag: 'plain_text', content: picker.title },
+          subtitle: { tag: 'plain_text', content: picker.body },
+        },
+        body: { padding: '12px 12px 12px 12px', elements: [
+          level('ask', '请求批准（ask）', '编辑外部文件和使用互联网时始终询问'),
+          level('auto', '帮我批准（auto）', '仅对检测到的风险操作请求批准'),
+          level('full', '完全访问权限（full）', '不受限制地访问互联网和电脑上的任何文件，并关闭逐次审批'),
+        ] },
+      }),
+    }
+  }
   if ('modelPicker' in input) {
     const picker = input.modelPicker
     const callback = (action: import('./model-picker.js').LarkModelPickerCallbackAction) => picker.callbackValues[action]

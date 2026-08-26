@@ -27,7 +27,15 @@ import {
   type LarkModelPickerActionPayload,
   type LarkModelPickerCallbackValue,
 } from './model-picker.js'
+import { isLarkTopLevelSenderThread } from './group-thread.js'
 import { normalizeLarkMessage } from './normalize.js'
+import {
+  LarkPermissionPickerError,
+  parseLarkPermissionPickerCallback,
+  signLarkPermissionPickerAction,
+  verifyLarkPermissionPickerAction,
+  type LarkPermissionPickerActionPayload,
+} from './permission-picker.js'
 import { LarkProgressPresenter } from './progress.js'
 import { LARK_APPROVAL_CARD_MAX_BYTES, renderLarkMessage } from './sdk.js'
 import {
@@ -75,6 +83,21 @@ export interface LarkAdapterOptions {
     model: string
     reasoningEffort?: string
     expectedRevision: number
+  }): unknown | Promise<unknown>
+  settlePermissionSelection?(input: {
+    operationId: string
+    callbackEventId: string
+    callbackChatId: string
+    cardMessageId: string
+    bindingId: string
+    bindingVersion: number
+    sessionId: string
+    principal: { channel: string; account: string; tenant: string; user: string }
+    issuedAt: number
+    expiresAt: number
+    expectedStateHash: string
+    emergencyStopVersion: number
+    targetLevel: 'ask' | 'auto' | 'full'
   }): unknown | Promise<unknown>
   loadModelPicker?(input: {
     operationId: string
@@ -158,6 +181,45 @@ function modelPickerFallbackText(intent: Readonly<OutboundIntent>): string {
     '切换：/model use <provider/model>',
     '恢复默认：/model reset',
   ].join('\n')
+}
+
+function permissionPickerCard(
+  intent: NonNullable<OutboundIntent['permissionPicker']>,
+  secret: string,
+  capability: Pick<LarkPermissionPickerActionPayload,
+    'channel' | 'account' | 'tenant' | 'bindingId' | 'chatId' | 'ownerUser'>,
+): import('./types.js').LarkPermissionPickerCard {
+  const current = intent.current === 'ask'
+    ? '请求批准（ask）'
+    : intent.current === 'auto'
+      ? '帮我批准（auto）'
+      : intent.current === 'full'
+        ? '完全访问权限（full）'
+        : '自定义安全组合（custom）'
+  const callbackValue = (level: LarkPermissionPickerActionPayload['level']) => ({
+    permissionPicker: signLarkPermissionPickerAction(secret, {
+      version: 2,
+      ...capability,
+      operationId: intent.operationId,
+      bindingVersion: intent.bindingVersion,
+      sessionId: intent.sessionId,
+      issuedAt: intent.issuedAt,
+      expiresAt: intent.expiresAt,
+      expectedStateHash: intent.expectedStateHash,
+      emergencyStopVersion: intent.emergencyStopVersion,
+      level,
+    }),
+  })
+  return {
+    title: '选择权限模式',
+    body: `当前：${current}。请选择新档位。`,
+    current: intent.current,
+    callbackValues: {
+      ask: callbackValue('ask'),
+      auto: callbackValue('auto'),
+      full: callbackValue('full'),
+    },
+  }
 }
 
 function sendFailure(error: unknown): AdapterSendResult {
@@ -307,6 +369,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly settleApproval: LarkAdapterOptions['settleApproval']
   private readonly recoverApprovalSettlement: LarkAdapterOptions['recoverApprovalSettlement']
   private readonly settleModelSelection: LarkAdapterOptions['settleModelSelection']
+  private readonly settlePermissionSelection: LarkAdapterOptions['settlePermissionSelection']
   private readonly loadModelPicker: LarkAdapterOptions['loadModelPicker']
   private readonly advanceModelPicker: LarkAdapterOptions['advanceModelPicker']
   private readonly statusReactions: boolean
@@ -323,10 +386,14 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     options: LarkAdapterOptions = {},
   ) {
     this.account = config.account
+    const permissionPickerAvailable = hasUsableApprovalSecret(options.approvalSecret)
+      && options.settlePermissionSelection !== undefined
     this.capabilities = Object.freeze({
       reconcileUnknownSend: false,
       receipts: [] as const,
-      formats: ['plain', 'markdown', 'approval', 'model-picker'] as const,
+      formats: permissionPickerAvailable
+        ? ['plain', 'markdown', 'approval', 'model-picker', 'permission-picker'] as const
+        : ['plain', 'markdown', 'approval', 'model-picker'] as const,
       inboundImages: typeof transport.downloadMessageImage === 'function',
       toolApprovals: hasUsableApprovalSecret(options.approvalSecret),
     })
@@ -335,6 +402,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.settleApproval = options.settleApproval
     this.recoverApprovalSettlement = options.recoverApprovalSettlement
     this.settleModelSelection = options.settleModelSelection
+    this.settlePermissionSelection = options.settlePermissionSelection
     this.loadModelPicker = options.loadModelPicker
     this.advanceModelPicker = options.advanceModelPicker
     this.statusReactions = options.statusReactions ?? true
@@ -618,6 +686,26 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       if (Buffer.byteLength(renderLarkMessage(input).content, 'utf8') > LARK_APPROVAL_CARD_MAX_BYTES) {
         return { outcome: 'not-sent', failureCode: 'lark-approval-too-large', retryable: false }
       }
+    } else if (intent.format === 'permission-picker') {
+      if (intent.permissionPicker === undefined || this.approvalSecret === undefined
+        || this.settlePermissionSelection === undefined) {
+        return { outcome: 'not-sent', failureCode: 'lark-permission-picker-unavailable', retryable: false }
+      }
+      if (this.now() >= intent.permissionPicker.expiresAt) {
+        return { outcome: 'not-sent', failureCode: 'lark-permission-picker-expired', retryable: false }
+      }
+      input = { permissionPicker: permissionPickerCard(
+        intent.permissionPicker,
+        this.approvalSecret,
+        {
+          channel: conversation.channel,
+          account: conversation.account,
+          tenant: conversation.tenant,
+          bindingId: intent.bindingId,
+          chatId: conversation.chat,
+          ownerUser: intent.target.principal.user,
+        },
+      ) }
     } else if (intent.format === 'model-picker') {
       if (intent.modelPicker === undefined || this.approvalSecret === undefined
         || this.settleModelSelection === undefined || this.loadModelPicker === undefined
@@ -638,25 +726,39 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     } else {
       input = intent.format === 'markdown' ? { markdown: intent.text } : { text: intent.text }
     }
+    // A synthetic lane represents all standalone group messages from one
+    // sender. Replying to the inbound event would make Lark create a provider
+    // thread; the user's next reply would then carry a real rootId and be
+    // normalized into a different Delivery conversation/session. Keep this
+    // lane top-level so later standalone messages retain the same context.
+    const syntheticTopLevelGroup = conversation.kind === 'group'
+      && isLarkTopLevelSenderThread(conversation.thread)
+    const providerReplyTarget = syntheticTopLevelGroup
+      ? undefined
+      : (intent.replyToEventId
+        ?? (conversation.kind === 'group' ? conversation.thread : undefined))
     const options: LarkSendOptions = {
       requestKey: intent.idempotencyKey,
-      ...(intent.replyToEventId === undefined && conversation.kind !== 'group'
-        ? {}
-        : { replyTo: intent.replyToEventId ?? conversation.thread }),
-      ...(conversation.kind === 'group' ? { replyInThread: true } : {}),
+      ...(providerReplyTarget === undefined ? {} : { replyTo: providerReplyTarget }),
+      ...(conversation.kind === 'group' && providerReplyTarget !== undefined ? { replyInThread: true } : {}),
     }
     let result: Awaited<ReturnType<LarkTransport['send']>>
     try {
       result = await this.transport.send(conversation.chat, input, options)
     } catch (error) {
-      if (!(error instanceof LarkTransportError) || error.code !== 'format_error'
-        || intent.format !== 'model-picker' || intent.modelPicker === undefined) {
+      if (!(error instanceof LarkTransportError) || error.code !== 'format_error') {
         return sendFailure(error)
       }
+      const fallback = intent.format === 'permission-picker' && intent.permissionPicker !== undefined
+        ? { text: intent.text, suffix: 'permission-picker-fallback' }
+        : intent.format === 'model-picker' && intent.modelPicker !== undefined
+          ? { text: modelPickerFallbackText(intent), suffix: 'model-picker-fallback' }
+          : undefined
+      if (fallback === undefined) return sendFailure(error)
       try {
-        result = await this.transport.send(conversation.chat, { text: modelPickerFallbackText(intent) }, {
+        result = await this.transport.send(conversation.chat, { text: fallback.text }, {
           ...options,
-          requestKey: `${intent.idempotencyKey}:model-picker-fallback`,
+          requestKey: `${intent.idempotencyKey}:${fallback.suffix}`,
         })
       } catch (fallbackError) {
         return sendFailure(fallbackError)
@@ -765,6 +867,9 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         }
         return this.handleToolApprovalAction(action, (value as { toolApproval: string }).toolApproval)
       }
+      if (Object.prototype.hasOwnProperty.call(value, 'permissionPicker')) {
+        return await this.handlePermissionPickerAction(action, parseLarkPermissionPickerCallback(value))
+      }
       if (typeof (value as { modelPicker?: unknown }).modelPicker === 'string') {
         return await this.handleModelPickerAction(action, parseLarkModelPickerCallback(value))
       }
@@ -813,12 +918,64 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         await this.settleApproval(settlement)
       }
     } catch (error) {
+      if (error instanceof LarkPermissionPickerError) {
+        this.lastErrorCode = 'format_error'
+        return { toast: { type: 'warning', content: error.code === 'expired'
+          ? '权限卡片已过期，请重新发送 /permission'
+          : '权限卡片无效或已失效，请重新发送 /permission' } }
+      }
       if (error instanceof LarkApprovalError || error instanceof LarkModelPickerError
         || error instanceof LarkToolApprovalError) {
         this.lastErrorCode = 'format_error'
         return
       }
       throw error
+    }
+  }
+
+  private async handlePermissionPickerAction(
+    action: import('./types.js').LarkCardAction,
+    callback: import('./permission-picker.js').LarkPermissionPickerCallbackValue,
+  ): Promise<unknown> {
+    if (!hasUsableApprovalSecret(this.approvalSecret) || this.settlePermissionSelection === undefined
+      || action.tag !== 'button' || !larkProviderMessageIdentifier.test(action.messageId)) {
+      throw new LarkPermissionPickerError('invalid', 'Lark permission picker callback is unavailable')
+    }
+    const token = callback.permissionPicker
+    const payload = verifyLarkPermissionPickerAction(this.approvalSecret, token, this.now())
+    if (payload.channel !== this.channel || payload.account !== this.account
+      || payload.tenant !== this.config.tenant || payload.chatId !== action.chatId
+      || payload.ownerUser !== action.operatorId) {
+      throw new LarkPermissionPickerError('invalid', 'Lark permission picker route does not match')
+    }
+    const callbackEventId = createHash('sha256')
+      .update(`${action.messageId}\0${action.operatorId}\0${token}`)
+      .digest('hex')
+    try {
+      await this.settlePermissionSelection({
+        operationId: payload.operationId,
+        callbackEventId,
+        callbackChatId: action.chatId,
+        cardMessageId: action.messageId,
+        bindingId: payload.bindingId,
+        bindingVersion: payload.bindingVersion,
+        sessionId: payload.sessionId,
+        principal: {
+          channel: payload.channel,
+          account: payload.account,
+          tenant: payload.tenant,
+          user: payload.ownerUser,
+        },
+        issuedAt: payload.issuedAt,
+        expiresAt: payload.expiresAt,
+        expectedStateHash: payload.expectedStateHash,
+        emergencyStopVersion: payload.emergencyStopVersion,
+        targetLevel: payload.level,
+      })
+      return { toast: { type: 'success', content: '权限切换已受理' } }
+    } catch (error) {
+      this.recordPresentationFailure(error)
+      return { toast: { type: 'warning', content: '权限卡片状态已更新，请重新发送 /permission' } }
     }
   }
 

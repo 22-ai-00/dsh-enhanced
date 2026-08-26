@@ -394,6 +394,124 @@ describe('durable inbox', () => {
     f.store.close()
   })
 
+  test('durably fences every earlier undispatched Inbox while preserving an already-dispatched turn', async () => {
+    const f = await fixture()
+    const active = f.store.acceptInbound(envelope('evt-active', f)).record
+    const queued = f.store.acceptInbound(envelope('evt-queued', f)).record
+    const acceptedButUnbound = f.store.acceptInbound(envelope('evt-accepted-unbound', f)).record
+    const stop = f.store.acceptInbound(envelope('evt-stop', f, '/stop')).record
+    f.store.queueInbox(active.id, f.binding.id)
+    f.store.queueInbox(queued.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.markInboxDispatching({
+      inboxId: active.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      binding: f.binding,
+    })
+
+    expect(f.store.cancelUndispatchedInboxBefore({
+      bindingId: f.binding.id,
+      beforeInboxId: stop.id,
+      failureCode: 'user-stopped-before-dispatch',
+    })).toEqual({
+      cancelled: 2,
+      dispatching: 1,
+      claimedInboxIds: [],
+      dispatchingInboxIds: [active.id],
+    })
+    f.store.close()
+    const reopened = new DeliveryStore({ path: f.path })
+    expect(reopened.getInbox(active.id)).toMatchObject({
+      status: 'claimed',
+      failureCode: 'dispatch-started',
+    })
+    expect(reopened.getInbox(queued.id)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'user-stopped-before-dispatch',
+    })
+    expect(reopened.getInbox(acceptedButUnbound.id)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'user-stopped-before-dispatch',
+    })
+    expect(reopened.getInbox(stop.id)).toMatchObject({ status: 'received' })
+    reopened.close()
+  })
+
+  test.each([
+    ['/permission full confirm', '/stop'],
+    ['/permissions', '/new'],
+  ])('durably marks an interrupted %s dispatch for cancelled recovery before %s', async (permission, command) => {
+    const f = await fixture()
+    const dispatched = f.store.acceptInbound({
+      ...envelope(`evt-${command.slice(1)}-permission`, f, permission),
+      kind: 'command',
+    }).record
+    const boundary = f.store.acceptInbound({
+      ...envelope(`evt-${command.slice(1)}-boundary`, f, command),
+      kind: 'command',
+    }).record
+    f.store.queueInbox(dispatched.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
+    f.store.markInboxDispatching({
+      inboxId: dispatched.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      binding: f.binding,
+    })
+
+    f.store.cancelUndispatchedInboxBefore({
+      bindingId: f.binding.id,
+      beforeInboxId: boundary.id,
+      failureCode: command === '/new' ? 'new-session-before-dispatch' : 'user-stopped-before-dispatch',
+    })
+    expect(f.store.getInbox(dispatched.id)).toMatchObject({
+      status: 'claimed',
+      failureCode: 'permission-cancelled-recovery',
+    })
+    f.store.close()
+
+    const reopened = new DeliveryStore({ path: f.path })
+    expect(reopened.recoverInbox({ maxAttempts: 1 })).toEqual([
+      expect.objectContaining({
+        id: dispatched.id,
+        status: 'retry_wait',
+        failureCode: 'permission-cancelled-recovery',
+      }),
+    ])
+    reopened.close()
+  })
+
+  test('invalidates an earlier claimed Inbox that has not crossed its dispatch gate', async () => {
+    const f = await fixture()
+    const claimed = f.store.acceptInbound(envelope('evt-claimed', f)).record
+    const stop = f.store.acceptInbound(envelope('evt-stop', f, '/stop')).record
+    f.store.queueInbox(claimed.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+
+    expect(f.store.cancelUndispatchedInboxBefore({
+      bindingId: f.binding.id,
+      beforeInboxId: stop.id,
+      failureCode: 'user-stopped-before-dispatch',
+    })).toEqual({
+      cancelled: 1,
+      dispatching: 0,
+      claimedInboxIds: [claimed.id],
+      dispatchingInboxIds: [],
+    })
+    expect(f.store.getInbox(claimed.id)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'user-stopped-before-dispatch',
+    })
+    expect(() => f.store.markInboxDispatching({
+      inboxId: claimed.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      binding: f.binding,
+    })).toThrowError(expect.objectContaining({ code: 'stale-fence' }))
+    f.store.close()
+  })
+
   test('recovers expired claims and rejects stale completion fencing', async () => {
     const f = await fixture()
     const record = f.store.acceptInbound(envelope('evt-1', f)).record
@@ -483,6 +601,208 @@ describe('durable inbox', () => {
     ])
     expect(f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 3 })).toEqual([])
     f.store.close()
+  })
+
+  test('reopens and retries only an exact permission command interrupted after its dispatch fence', async () => {
+    const f = await fixture()
+    const record = f.store.acceptInbound({
+      ...envelope('evt-permission-crash', f, '/permission full confirm'),
+      kind: 'command',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
+    f.store.markInboxDispatching({
+      inboxId: record.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      binding: f.binding,
+    })
+    f.store.close()
+
+    const reopened = new DeliveryStore({ path: f.path })
+    expect(reopened.recoverInbox({ maxAttempts: 1 })).toEqual([
+      expect.objectContaining({
+        id: record.id,
+        status: 'retry_wait',
+        failureCode: 'permission-dispatch-recovery',
+      }),
+    ])
+    const recovered = reopened.claimInbox({
+      ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 1,
+    })[0]!
+    expect(recovered.record).toMatchObject({
+      id: record.id,
+      status: 'claimed',
+      failureCode: 'permission-dispatch-recovery',
+      attemptCount: 2,
+    })
+    reopened.markInboxDispatching({
+      inboxId: record.id,
+      ownerId: 'worker-b',
+      fencingToken: recovered.fencingToken,
+      binding: f.binding,
+    })
+    expect(reopened.getInbox(record.id)).toMatchObject({
+      status: 'claimed',
+      failureCode: 'permission-dispatch-recovery',
+    })
+    reopened.close()
+  })
+
+  test.each([
+    ['success', '已切换到完全访问权限。'],
+    ['failure', '权限切换失败；已安全恢复为 ask。'],
+  ])('cold reopen uses a durable %s permission reply as the terminal Inbox witness', async (_kind, text) => {
+    const f = await fixture()
+    const eventId = `evt-permission-outbox-witness-${_kind}`
+    const record = f.store.acceptInbound({
+      ...envelope(eventId, f, '/permission full confirm'),
+      kind: 'command',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.markInboxDispatching({
+      inboxId: record.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      binding: f.binding,
+    })
+    f.store.enqueue({
+      idempotencyKey: `inbound:${eventId}:reply`,
+      bindingId: f.binding.id,
+      target: { conversation: f.conversation, principal: f.principal },
+      text,
+      format: 'plain',
+      replyToEventId: eventId,
+    })
+    f.store.close()
+
+    const reopened = new DeliveryStore({ path: f.path })
+    expect(reopened.recoverInbox({ maxAttempts: 3 })).toEqual([
+      expect.objectContaining({ id: record.id, status: 'processed' }),
+    ])
+    expect(reopened.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 3 }))
+      .toEqual([])
+    reopened.close()
+  })
+
+  test('does not accept a background Outbox row as a permission terminal reply witness', async () => {
+    const f = await fixture()
+    const eventId = 'evt-permission-background-impostor'
+    const record = f.store.acceptInbound({
+      ...envelope(eventId, f, '/permission full confirm'),
+      kind: 'command',
+    }).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.markInboxDispatching({
+      inboxId: record.id,
+      ownerId: 'worker-a',
+      fencingToken: claim.fencingToken,
+      binding: f.binding,
+    })
+    const impostorIntent = {
+      idempotencyKey: `inbound:${record.id}:reply`,
+      bindingId: f.binding.id,
+      target: { conversation: f.conversation, principal: f.principal },
+      text: 'unrelated background message',
+      format: 'plain' as const,
+    }
+    expect(() => f.store.enqueue(impostorIntent)).toThrowError(expect.objectContaining({
+      code: 'invalid-intent',
+    }))
+    const historicalImpostor = f.store.enqueue({
+      ...impostorIntent,
+      idempotencyKey: `background:${record.id}`,
+    })
+    f.store.close()
+
+    // Simulate a row written by an older build before the inbound reply
+    // namespace became reserved. Recovery must still inspect its intent rather
+    // than trusting the key alone.
+    const database = new DatabaseSync(f.path)
+    database.prepare('UPDATE outbox_messages SET idempotency_key = ? WHERE id = ?')
+      .run(`inbound:${record.id}:reply`, historicalImpostor.id)
+    database.close()
+
+    const reopened = new DeliveryStore({ path: f.path })
+    expect(reopened.recoverInbox({ maxAttempts: 3 })).toEqual([
+      expect.objectContaining({
+        id: record.id,
+        status: 'retry_wait',
+        failureCode: 'permission-dispatch-recovery',
+      }),
+    ])
+    reopened.close()
+  })
+
+  test('cold recovery scopes permission terminal witnesses by durable Inbox identity', async () => {
+    const f = await fixture()
+    const secondPrincipal = { ...f.principal, account: 'bot-2' }
+    const secondConversation = { ...f.conversation, account: 'bot-2', chat: 'oc_owner_bot_2' }
+    const issued = f.store.issuePairing(secondPrincipal, { ttlMs: 5_000, maxAttempts: 3 })
+    f.store.confirmPairing({ challengeId: issued.challenge.id, principal: secondPrincipal, code: issued.code })
+    const secondBinding = f.store.createBinding({
+      conversation: secondConversation,
+      principal: secondPrincipal,
+      workspace: '/work/bot-2',
+      agentPreset: 'primary',
+      sessionId: 'session-bot-2',
+      policyRef: 'owner-dm',
+    })
+    const eventId = 'evt-shared-provider-permission'
+    const records = [
+      {
+        binding: f.binding,
+        record: f.store.acceptInbound({
+          ...envelope(eventId, f, '/permissions'),
+          kind: 'command',
+        }).record,
+      },
+      {
+        binding: secondBinding,
+        record: f.store.acceptInbound({
+          ...envelope(eventId, f, '/permissions'),
+          account: secondPrincipal.account,
+          principal: secondPrincipal,
+          conversation: secondConversation,
+          kind: 'command',
+        }).record,
+      },
+    ]
+    for (const [index, item] of records.entries()) {
+      f.store.queueInbox(item.record.id, item.binding.id)
+      const claim = f.store.claimInbox({
+        ownerId: `worker-${index}`,
+        leaseMs: 100,
+        limit: 1,
+        maxAttempts: 1,
+      })[0]!
+      f.store.markInboxDispatching({
+        inboxId: item.record.id,
+        ownerId: `worker-${index}`,
+        fencingToken: claim.fencingToken,
+        binding: item.binding,
+      })
+      f.store.enqueue({
+        idempotencyKey: `inbound:${item.record.id}:reply`,
+        bindingId: item.binding.id,
+        target: { conversation: item.binding.conversation, principal: item.binding.principal },
+        text: `terminal reply ${index}`,
+        format: 'plain',
+        replyToEventId: eventId,
+      })
+    }
+    f.store.close()
+
+    const reopened = new DeliveryStore({ path: f.path })
+    expect(reopened.recoverInbox({ maxAttempts: 1 })).toEqual([
+      expect.objectContaining({ id: records[0]!.record.id, status: 'processed' }),
+      expect.objectContaining({ id: records[1]!.record.id, status: 'processed' }),
+    ])
+    expect(reopened.claimInbox({ ownerId: 'worker-reopen', leaseMs: 100, limit: 2, maxAttempts: 1 }))
+      .toEqual([])
+    reopened.close()
   })
 
   test('atomically rejects a dispatch marker whose exact binding snapshot was rotated', async () => {

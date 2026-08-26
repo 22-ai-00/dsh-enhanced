@@ -117,7 +117,14 @@ for (const entry of entries) {
   const packagePattern = new RegExp(`name:\\s*['"]?${escapeRegExp(manifest.name)}['"]?(?:\\s|$)`)
   if (!packagePattern.test(patch)) report(patchPath, `patch must mount ${manifest.name}`)
 
-  const idMatch = patch.match(/- id:\s*['"]?([a-z0-9-]+)['"]?\s*$/m)
+  // A bundle may patch existing Host rows before mounting its own package.
+  // Bind the stable plugin id to the row whose name is this manifest, rather
+  // than assuming the first `- id` in the patch is always the mounted row.
+  const mountedRowPattern = new RegExp(
+    `- id:\\s*['"]?([a-z0-9-]+)['"]?\\s*\\n\\s+name:\\s*['"]?${escapeRegExp(manifest.name)}['"]?\\s*$`,
+    'm',
+  )
+  const idMatch = patch.match(mountedRowPattern)
   if (!idMatch) {
     report(patchPath, 'patch must declare a stable kebab-case row id')
   } else if (rowIds.has(idMatch[1])) {

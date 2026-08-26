@@ -2,7 +2,18 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 7
+export const deliverySchemaVersion = 8
+
+const deliveryInstanceSchema = `
+  CREATE TABLE delivery_instance (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    instance_id TEXT NOT NULL UNIQUE CHECK (
+      length(instance_id) = 32 AND instance_id NOT GLOB '*[^0-9a-f]*'
+    )
+  ) STRICT;
+  INSERT INTO delivery_instance (singleton, instance_id)
+    VALUES (1, lower(hex(randomblob(16))));
+`
 
 const approvalDispatchCursorSchema = `
   CREATE TABLE approval_dispatch_cursor (
@@ -169,10 +180,20 @@ function migrate(database: DatabaseSync): void {
       PRAGMA user_version = 7;
       COMMIT;
     `)
+    version = 7
+  }
+  if (version === 7) {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ${deliveryInstanceSchema}
+      PRAGMA user_version = 8;
+      COMMIT;
+    `)
     return
   }
   database.exec(`
     BEGIN IMMEDIATE;
+    ${deliveryInstanceSchema}
     CREATE TABLE delivery_principals (
       id TEXT PRIMARY KEY,
       key_hash TEXT NOT NULL UNIQUE,
@@ -363,7 +384,7 @@ function migrate(database: DatabaseSync): void {
 
     ${approvalDispatchCursorSchema}
 
-    PRAGMA user_version = 7;
+    PRAGMA user_version = 8;
     COMMIT;
   `)
 }

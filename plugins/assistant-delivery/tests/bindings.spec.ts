@@ -17,8 +17,9 @@ async function fixture() {
   const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-binding-'))
   roots.push(root)
   let now = 1_000
-  const store = new DeliveryStore({ path: join(root, 'delivery.sqlite'), now: () => now, codeGenerator: () => 'PAIR1234' })
-  return { store, tick() { now += 1 } }
+  const path = join(root, 'delivery.sqlite')
+  const store = new DeliveryStore({ path, now: () => now, codeGenerator: () => 'PAIR1234' })
+  return { path, store, tick() { now += 1 } }
 }
 
 function authorize(store: DeliveryStore): void {
@@ -27,6 +28,27 @@ function authorize(store: DeliveryStore): void {
 }
 
 describe('conversation bindings', () => {
+  test('persists a random database instance namespace and rotates it when the database is rebuilt', async () => {
+    const { path, store } = await fixture()
+    const first = store.instanceId()
+    expect(first).toMatch(/^[0-9a-f]{32}$/u)
+    store.close()
+
+    const reopened = new DeliveryStore({ path })
+    expect(reopened.instanceId()).toBe(first)
+    reopened.close()
+
+    await Promise.all([
+      rm(path, { force: true }),
+      rm(`${path}-shm`, { force: true }),
+      rm(`${path}-wal`, { force: true }),
+    ])
+    const rebuilt = new DeliveryStore({ path })
+    expect(rebuilt.instanceId()).toMatch(/^[0-9a-f]{32}$/u)
+    expect(rebuilt.instanceId()).not.toBe(first)
+    rebuilt.close()
+  })
+
   test('re-pairs a revoked principal with the next durable conversation generation', async () => {
     const { store, tick } = await fixture()
     authorize(store)

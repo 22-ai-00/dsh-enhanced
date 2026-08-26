@@ -12,6 +12,7 @@ import {
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import {
+  KNOWN_SESSION_EVENT_TYPES,
   SessionPreparation,
   type SessionEvent,
   type SessionHeader,
@@ -223,6 +224,15 @@ async function installAgentRuntime(ctx: Context, saved: Map<string, SavedSession
     saved.set(String(session.id), structuredClone({ header: session.header, events: session.events }))
   })
   ctx.provide('sessionPersistence' as never, {
+    coordinator: {
+      assertEventsSupported(_meta: SessionHeader, events: readonly SessionEvent[]) {
+        for (const event of events) {
+          if (KNOWN_SESSION_EVENT_TYPES.has(event.type) || event.ignorable === true) continue
+          throw new Error(`unknown required session event type: ${event.type}`)
+        }
+      },
+    },
+    list: async () => [...saved.values()].map(value => structuredClone(value.header)),
     prepare: async (id: SessionId) => {
       const stored = saved.get(String(id))
       if (stored === undefined) throw new Error(`session not found: ${id}`)

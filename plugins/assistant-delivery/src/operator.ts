@@ -13,12 +13,7 @@ export interface LocalPairingInput {
 export function pairPrincipalLocally(input: LocalPairingInput): DeliveryPrincipal {
   const store = new DeliveryStore({ path: input.databasePath })
   try {
-    const issued = store.issuePairing(input.principal, { ttlMs: 60_000, maxAttempts: 1 })
-    return store.confirmPairing({
-      challengeId: issued.challenge.id,
-      principal: input.principal,
-      code: issued.code,
-    })
+    return store.handoffOwner(input.principal)
   } finally {
     store.close()
   }

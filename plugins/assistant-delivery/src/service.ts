@@ -24,7 +24,8 @@ import { DeliveryStore, DeliveryStoreError } from './store.js'
 import { DshDeliveryRuntime } from './agent-runtime.js'
 import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
-import { externalPrincipalId } from './canonical.js'
+import { canonicalConversation, externalPrincipalId } from './canonical.js'
+import { isExactDeliveryCommand, parseDeliveryCommand } from './session-commands.js'
 import type {
   ConversationBinding,
   ConversationRef,
@@ -38,6 +39,7 @@ import type {
   ModelRouteRef,
   OutboxRecord,
   PairingChallenge,
+  PermissionPickerIntent,
 } from './types.js'
 
 export interface Config {
@@ -69,6 +71,7 @@ export interface Config {
   unknownRouteToolCalls?: 'allow' | 'deny'
   agentMaxOutputTokens?: number
   modelPickerTtlMs?: number
+  permissionPickerTtlMs?: number
   toolApprovalTtlMs?: number
 }
 
@@ -79,6 +82,11 @@ export interface DeliveryInboundRuntime extends InboundMessageProcessor {
     previous?: Readonly<ConversationBinding>
     signal: AbortSignal
   }): Promise<{ sessionId: string; workspace: string; agentPreset: string; policyRef: string }>
+  /** Immediate, process-local control path; it must never wait behind the binding's Inbox lane. */
+  cancelActive?(
+    binding: Readonly<ConversationBinding>,
+    cause: 'new' | 'stop',
+  ): boolean | Promise<boolean>
 }
 
 export type AssistantDeliveryErrorCode =
@@ -119,6 +127,7 @@ const configSchema = Schema.object({
   unknownRouteToolCalls: Schema.union(['allow', 'deny'] as const).default('allow'),
   agentMaxOutputTokens: Schema.number().step(1).min(1).default(8_192),
   modelPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
+  permissionPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   toolApprovalTtlMs: Schema.number().step(1).min(1_000).max(300_000).default(300_000),
 }) as Schema<Config>
 
@@ -317,6 +326,7 @@ export class AssistantDeliveryService extends Service {
   private readonly config: Required<Config>
   private readonly ownerId = `assistant-delivery-${randomUUID()}`
   private readonly bindingFlights = new Map<string, Promise<ConversationBinding>>()
+  private readonly conversationTransitions = new Map<string, Promise<void>>()
   private readonly agentApprovalBindings = new WeakMap<Agent, { bindingId: string; token: symbol }>()
   private readonly toolApprovalControllers = new Set<AbortController>()
   private modelSelectionFlight: Promise<void> | undefined
@@ -367,16 +377,19 @@ export class AssistantDeliveryService extends Service {
       maxConcurrency: config.maxConcurrency, retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs })
     ctx.inject(['agents', 'sessions', 'llm'], runtimeCtx => {
       const unregister = this.registerInboundRuntime(new DshDeliveryRuntime(runtimeCtx, policy, {
+        sessionNamespace: this.deliveryStore.instanceId(),
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         getAgentPresets: () => runtimeCtx.get('agentPresets'),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
         toolCapableProviders: new Set(config.toolCapableProviders),
         unknownRouteToolCalls: config.unknownRouteToolCalls ?? 'allow',
         modelPickerTtlMs: config.modelPickerTtlMs,
+        permissionPickerTtlMs: config.permissionPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
         imageMaterializer,
         isInboundAuthorized: (binding, envelope) => this.isInboundAuthorized(binding, envelope),
         isPermissionController: (binding, envelope) => this.isPermissionController(binding, envelope),
+        authorizePermissionReply: (binding, envelope) => this.authorizePermissionReply(binding, envelope),
         beginModelCommand: conversation => this.deliveryStore.beginModelCommand(conversation),
         commitModelCommand: input => this.deliveryStore.commitModelCommand(input),
         progress: async (binding, eventId, update) => {
@@ -388,12 +401,13 @@ export class AssistantDeliveryService extends Service {
             update,
           })
         },
-        replyCommand: (binding, eventId, reply) => { this.replyCommand(binding, {
-          idempotencyKey: `inbound:${eventId}:reply`,
+        replyCommand: (binding, eventId, reply, idempotencyKey) => { this.replyCommand(binding, {
+          idempotencyKey: idempotencyKey ?? this.inboundReplyIdempotencyKey(binding, eventId),
           text: reply.text,
           replyToEventId: eventId,
           ...(reply.format === undefined ? {} : { format: reply.format }),
           ...(reply.modelPicker === undefined ? {} : { modelPicker: reply.modelPicker }),
+          ...(reply.permissionPicker === undefined ? {} : { permissionPicker: reply.permissionPicker }),
         }) },
         reply: (agent, eventId, reply) => { this.reply(agent, {
           idempotencyKey: `inbound:${eventId}:reply`,
@@ -401,6 +415,7 @@ export class AssistantDeliveryService extends Service {
           replyToEventId: eventId,
           ...(reply.format === undefined ? {} : { format: reply.format }),
           ...(reply.modelPicker === undefined ? {} : { modelPicker: reply.modelPicker }),
+          ...(reply.permissionPicker === undefined ? {} : { permissionPicker: reply.permissionPicker }),
         }) },
       }))
       void this.drainModelSelectionSettlements()
@@ -679,6 +694,128 @@ export class AssistantDeliveryService extends Service {
     return picker === undefined || Date.now() >= picker.expiresAt ? undefined : picker
   }
 
+  async settlePermissionSelection(input: {
+    operationId: string
+    callbackEventId: string
+    callbackChatId: string
+    cardMessageId: string
+    bindingId: string
+    bindingVersion: number
+    sessionId: string
+    principal: ExternalPrincipalKey
+    issuedAt: number
+    expiresAt: number
+    expectedStateHash: string
+    emergencyStopVersion: number
+    targetLevel: 'ask' | 'auto' | 'full'
+  }): Promise<{ duplicate: boolean; inboxId: string; status: InboxRecord['status'] }> {
+    this.assertActive()
+    if (!/^[A-Za-z0-9][A-Za-z0-9._@:-]{0,255}$/u.test(input.callbackEventId)
+      || !/^[A-Za-z0-9][A-Za-z0-9._@/-]{0,511}$/u.test(input.cardMessageId)
+      || !/^[a-f0-9]{64}$/u.test(input.expectedStateHash)
+      || !Number.isSafeInteger(input.bindingVersion) || input.bindingVersion < 1
+      || !Number.isSafeInteger(input.emergencyStopVersion) || input.emergencyStopVersion < 0
+      || !Number.isSafeInteger(input.issuedAt) || input.issuedAt < 1
+      || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= input.issuedAt
+      || (input.targetLevel !== 'ask' && input.targetLevel !== 'auto' && input.targetLevel !== 'full')) {
+      throw new AssistantDeliveryError('missing-binding', 'permission picker callback shape is invalid')
+    }
+    const resolveController = () => {
+      const emergencyStop = this.policy.getEmergencyStop()
+      const binding = this.deliveryStore.getBinding(input.bindingId)
+      const principal = this.deliveryStore.getPrincipal(input.principal)
+      const active = binding === undefined ? undefined : this.deliveryStore.getActiveBinding(binding.conversation)
+      if (binding?.status !== 'active' || active?.id !== binding.id
+        || principal?.status !== 'active' || principal.role !== 'owner') return undefined
+      const record = this.deliveryStore.getPermissionPickerRecord(input.operationId, input.bindingId)
+      const picker = record?.intent.permissionPicker
+      if (record === undefined || picker === undefined
+        || binding.version !== input.bindingVersion || picker.bindingVersion !== input.bindingVersion
+        || binding.sessionId !== input.sessionId || picker.sessionId !== input.sessionId
+        || binding.conversation.kind !== 'dm' || binding.conversation.chat !== input.callbackChatId
+        || externalPrincipalId(binding.principal) !== externalPrincipalId(input.principal)
+        || externalPrincipalId(record.intent.target.principal) !== externalPrincipalId(input.principal)
+        || JSON.stringify(record.intent.target.conversation) !== JSON.stringify(binding.conversation)
+        || picker.operationId !== input.operationId
+        || picker.issuedAt !== input.issuedAt || picker.expiresAt !== input.expiresAt
+        || picker.expectedStateHash !== input.expectedStateHash
+        || picker.emergencyStopVersion !== input.emergencyStopVersion
+        || emergencyStop.enabled || emergencyStop.version !== picker.emergencyStopVersion
+        || Date.now() >= picker.expiresAt
+        || !['accepted', 'delivered', 'read'].includes(record.status)
+        || record.providerMessageId !== input.cardMessageId) return undefined
+      return { binding, picker, principal }
+    }
+    const controller = resolveController()
+    if (controller === undefined) {
+      throw new AssistantDeliveryError('missing-binding', 'permission picker no longer owns the active session')
+    }
+    const { binding, picker, principal } = controller
+    const command = input.targetLevel === 'full'
+      ? '/permission full confirm'
+      : `/permission ${input.targetLevel}`
+    const envelope: InboundEnvelope = {
+      channel: binding.conversation.channel,
+      account: binding.conversation.account,
+      eventId: input.cardMessageId,
+      occurredAt: picker.issuedAt,
+      principal: { ...principal.principal },
+      conversation: { ...binding.conversation },
+      kind: 'command',
+      text: command,
+      metadata: {
+        'permission-picker-operation': picker.operationId,
+        'permission-picker-state': picker.expectedStateHash,
+        'permission-picker-expires-at': String(picker.expiresAt),
+        'permission-picker-emergency-version': String(picker.emergencyStopVersion),
+        'permission-picker-callback': input.callbackEventId,
+      },
+    }
+    if (!this.isPermissionController(binding, envelope)) {
+      throw new AssistantDeliveryError('missing-binding', 'permission picker owner authorization was revoked')
+    }
+    const accepted = this.deliveryStore.acceptInbound(envelope)
+    let inbox = accepted.record
+    if (inbox.status === 'dead_letter') {
+      throw new AssistantDeliveryError('runtime-conflict', 'permission picker selection previously failed')
+    }
+    if (!['received', 'authorized'].includes(inbox.status)) {
+      return { duplicate: accepted.duplicate, inboxId: inbox.id, status: inbox.status }
+    }
+    return await this.runConversationTransition(binding.conversation, async () => {
+      await this.recoverPendingInbound(envelope, inbox.id)
+      inbox = this.deliveryStore.getInbox(inbox.id)!
+      if (inbox.status === 'dead_letter') {
+        throw new AssistantDeliveryError('runtime-conflict', 'permission picker selection previously failed')
+      }
+      if (!['received', 'authorized'].includes(inbox.status)) {
+        return { duplicate: accepted.duplicate, inboxId: inbox.id, status: inbox.status }
+      }
+      const current = resolveController()
+      if (current === undefined || !this.isPermissionController(current.binding, envelope)) {
+        inbox = this.deliveryStore.deadLetterInbox(inbox.id, 'permission-session-superseded')
+        throw new AssistantDeliveryError('missing-binding', 'permission picker no longer owns the active session')
+      }
+      if (!this.authorizePermissionReply(current.binding, envelope)) {
+        inbox = this.deliveryStore.deadLetterInbox(inbox.id, 'permission-reply-authorization-denied')
+        throw new AssistantDeliveryError('policy-denied', 'permission picker terminal reply authorization was denied')
+      }
+      const decision = this.policy.authorize({
+        subject: { kind: 'external', id: externalPrincipalId(input.principal) },
+        action: 'ingest',
+        resource: { kind: 'message', id: `inbound:${envelope.channel}/${envelope.account}` },
+        context: { initiator: 'external' },
+      }, { idempotencyKey: `message-inbound:${inbox.id}` })
+      if (decision.effect !== 'allow' || !this.isPermissionController(current.binding, envelope)) {
+        inbox = this.deliveryStore.deadLetterInbox(inbox.id,
+          decision.effect !== 'allow' ? `policy-${decision.reasonCode}` : 'permission-authorization-revoked')
+        throw new AssistantDeliveryError('policy-denied', 'permission picker owner authorization was revoked')
+      }
+      inbox = this.deliveryStore.queueInbox(inbox.id, current.binding.id)
+      return { duplicate: accepted.duplicate, inboxId: inbox.id, status: inbox.status }
+    })
+  }
+
   resolveDeadLetter(input: {
     operatorId: string
     kind: 'inbox' | 'outbox'
@@ -756,7 +893,66 @@ export class AssistantDeliveryService extends Service {
   ): boolean {
     if (!this.isInboundAuthorized(binding, envelope)) return false
     const principal = this.deliveryStore.getPrincipal(binding.principal)
-    return principal?.status === 'active' && principal.role === 'owner'
+    if (principal?.status !== 'active' || principal.role !== 'owner') return false
+    // A permission mutation and its mandatory terminal reply are one control
+    // operation. Prove the exact bound Agent can reply before accepting a card
+    // callback or allowing the runtime to append any permission event.
+    return this.policy.evaluate({
+      subject: {
+        kind: 'agent',
+        id: binding.agentPreset,
+        workspace: binding.workspace,
+        principal: externalPrincipalId(binding.principal),
+      },
+      action: 'reply',
+      resource: { kind: 'message', id: binding.id },
+      context: { initiator: 'external' },
+    }).effect === 'allow'
+  }
+
+  private authorizePermissionReply(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): boolean {
+    if (!this.isPermissionController(binding, envelope)) return false
+    const decision = this.policy.authorize({
+      subject: {
+        kind: 'agent',
+        id: binding.agentPreset,
+        workspace: binding.workspace,
+        principal: externalPrincipalId(binding.principal),
+      },
+      action: 'reply',
+      resource: { kind: 'message', id: binding.id },
+      context: { initiator: 'external' },
+    }, { idempotencyKey: `message-reply:${this.inboundReplyIdempotencyKey(binding, envelope.eventId)}` })
+    return decision.effect === 'allow' && this.isPermissionController(binding, envelope)
+  }
+
+  /**
+   * Provider event ids are scoped to an adapter account, while Outbox and the
+   * Policy ledger share one database-wide idempotency namespace. Anchor every
+   * command reply to the accepted Inbox row, whose id is stable across reopen.
+   */
+  private inboundReplyIdempotencyKey(
+    binding: Readonly<ConversationBinding>,
+    eventId: string,
+  ): string {
+    const inbox = this.deliveryStore.getInboxByProviderEvent(
+      binding.conversation.channel,
+      binding.conversation.account,
+      eventId,
+    )
+    if (inbox === undefined
+      || (inbox.bindingId !== undefined && inbox.bindingId !== binding.id)
+      || externalPrincipalId(inbox.envelope.principal) !== externalPrincipalId(binding.principal)
+      || JSON.stringify(inbox.envelope.conversation) !== JSON.stringify(binding.conversation)) {
+      throw new AssistantDeliveryError(
+        'missing-binding',
+        'control reply does not belong to a durable Inbox on the active binding',
+      )
+    }
+    return `inbound:${inbox.id}:reply`
   }
 
   private hasActivePrincipal(binding: Readonly<ConversationBinding>): boolean {
@@ -985,7 +1181,10 @@ export class AssistantDeliveryService extends Service {
         // consume its budget a second time, but do re-check the mutable hard stop
         // as close as possible to releasing the owner's one-shot grant.
         const emergencyStop = this.policy.getEmergencyStop()
-        if (emergencyStop.enabled) return 'rejected'
+        // The owner granted this call; a later hard-stop is a Policy veto, not
+        // a user rejection. `rejected` is reserved for the signed reject action
+        // because upstream otherwise renders the false claim "the user rejected".
+        if (emergencyStop.enabled) return 'unavailable'
         if (emergencyStop.version !== current.policyEmergencyVersion) return 'unavailable'
       } catch {
         return 'unavailable'
@@ -1016,23 +1215,102 @@ export class AssistantDeliveryService extends Service {
       record = this.deliveryStore.deadLetterInbox(record.id, `policy-${decision.reasonCode}`)
       return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
     }
-    let binding = this.deliveryStore.getActiveBinding(envelope.conversation)
-    if (binding === undefined) {
-      if (this.runtime === undefined) {
-        record = this.deliveryStore.deadLetterInbox(record.id, 'runtime-unavailable')
+    const sessionCommand = parseDeliveryCommand(envelope)
+    if (isExactDeliveryCommand(sessionCommand, 'new', 'clear')) {
+      return await this.runConversationTransition(envelope.conversation, async () => {
+        await this.recoverPendingInbound(envelope, record.id)
+        // A provider retry can arrive while the first copy is waiting for the
+        // old generation to drain. Re-read after acquiring the transition:
+        // once that copy queued the command, its rotation is already complete
+        // and this duplicate must not create yet another generation.
+        const currentRecord = this.deliveryStore.getInbox(record.id)!
+        if (!['received', 'authorized'].includes(currentRecord.status)) {
+          return {
+            duplicate: accepted.duplicate,
+            inboxId: currentRecord.id,
+            status: currentRecord.status,
+          }
+        }
+        record = currentRecord
+        const binding = await this.bindingForInbound(envelope, record.id)
+        if (binding === undefined) {
+          const failed = this.deliveryStore.getInbox(record.id)!
+          return { duplicate: accepted.duplicate, inboxId: failed.id, status: failed.status }
+        }
+        // First invalidate all old work that cannot have crossed the Agent
+        // dispatch gate. Then cancel and drain any turn that did cross it.
+        // Rotation is last, so no fresh generation can execute beside the old.
+        const fence = this.deliveryStore.cancelUndispatchedInboxBefore({
+          bindingId: binding.id,
+          beforeInboxId: record.id,
+          failureCode: 'new-session-before-dispatch',
+        })
+        await this.runtime?.cancelActive?.(binding, 'new')
+        await this.inbound.cancelUndispatchedClaims(fence.claimedInboxIds, 'new')
+        const rotated = await this.rotateBinding(envelope, binding, record.id)
+        record = this.deliveryStore.getInbox(record.id)!
+        if (record.status !== 'queued' || record.bindingId !== rotated.id) {
+          throw new AssistantDeliveryError(
+            'runtime-conflict',
+            'new-session binding committed without its command Inbox',
+          )
+        }
         return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
+      })
+    }
+    if (isExactDeliveryCommand(sessionCommand, 'stop')) {
+      return await this.runConversationTransition(envelope.conversation, async () => {
+        await this.recoverPendingInbound(envelope, record.id)
+        const currentRecord = this.deliveryStore.getInbox(record.id)!
+        if (!['received', 'authorized'].includes(currentRecord.status)) {
+          return {
+            duplicate: accepted.duplicate,
+            inboxId: currentRecord.id,
+            status: currentRecord.status,
+          }
+        }
+        record = currentRecord
+        const binding = await this.bindingForInbound(envelope, record.id)
+        if (binding === undefined) {
+          const failed = this.deliveryStore.getInbox(record.id)!
+          return { duplicate: accepted.duplicate, inboxId: failed.id, status: failed.status }
+        }
+        const fence = this.deliveryStore.cancelUndispatchedInboxBefore({
+          bindingId: binding.id,
+          beforeInboxId: record.id,
+          failureCode: 'user-stopped-before-dispatch',
+        })
+        // Holding the transition while the live turn drains prevents a later
+        // message from overtaking the durable stop acknowledgement.
+        await this.runtime?.cancelActive?.(binding, 'stop')
+        await this.inbound.cancelUndispatchedClaims(fence.claimedInboxIds, 'stop')
+        record = this.deliveryStore.queueInbox(record.id, binding.id)
+        return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
+      })
+    }
+
+    // All accept-side binding decisions join this short conversation lock.
+    // It serializes only durable admission (not Agent execution), and makes a
+    // queued `/stop` or `/new` an unambiguous boundary for later arrivals.
+    return await this.runConversationTransition(envelope.conversation, async () => {
+      await this.recoverPendingInbound(envelope, record.id)
+      const currentRecord = this.deliveryStore.getInbox(record.id)!
+      if (!['received', 'authorized'].includes(currentRecord.status)) {
+        return {
+          duplicate: accepted.duplicate,
+          inboxId: currentRecord.id,
+          status: currentRecord.status,
+        }
       }
-      binding = await this.ensureBinding(envelope)
-    }
-    if (externalPrincipalId(binding.principal) !== externalPrincipalId(envelope.principal)) {
-      record = this.deliveryStore.deadLetterInbox(record.id, 'binding-principal-mismatch')
+      record = currentRecord
+      const binding = await this.bindingForInbound(envelope, record.id)
+      if (binding === undefined) {
+        const failed = this.deliveryStore.getInbox(record.id)!
+        return { duplicate: accepted.duplicate, inboxId: failed.id, status: failed.status }
+      }
+      record = this.deliveryStore.queueInbox(record.id, binding.id)
       return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
-    }
-    if (envelope.kind === 'command' && envelope.text.trim() === '/new') {
-      binding = await this.rotateBinding(envelope, binding)
-    }
-    record = this.deliveryStore.queueInbox(record.id, binding.id)
-    return { duplicate: accepted.duplicate, inboxId: record.id, status: record.status }
+    })
   }
 
   enqueueBackground(input: {
@@ -1106,8 +1384,9 @@ export class AssistantDeliveryService extends Service {
   private replyCommand(bindingInput: Readonly<ConversationBinding>, input: {
     idempotencyKey: string
     text: string
-    format?: 'markdown' | 'model-picker' | 'plain'
+    format?: 'markdown' | 'model-picker' | 'permission-picker' | 'plain'
     modelPicker?: ModelPickerIntent
+    permissionPicker?: PermissionPickerIntent
     replyToEventId: string
   }): OutboxRecord {
     this.assertActive()
@@ -1116,23 +1395,36 @@ export class AssistantDeliveryService extends Service {
       || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'control command binding does not exist or is no longer active')
     }
+    const legacyInboundKey = `inbound:${input.replyToEventId}:reply`
+    const idempotencyKey = input.idempotencyKey === legacyInboundKey
+      ? this.inboundReplyIdempotencyKey(binding, input.replyToEventId)
+      : input.idempotencyKey
     const decision = this.policy.authorize({
-      subject: { kind: 'agent', id: binding.agentPreset, workspace: binding.workspace },
+      subject: {
+        kind: 'agent',
+        id: binding.agentPreset,
+        workspace: binding.workspace,
+        principal: externalPrincipalId(binding.principal),
+      },
       action: 'reply',
       resource: { kind: 'message', id: binding.id },
       context: { initiator: 'external' },
-    }, { idempotencyKey: `message-reply:${input.idempotencyKey}` })
+    }, { idempotencyKey: `message-reply:${idempotencyKey}` })
     if (decision.effect !== 'allow') throw policyDenied(decision)
     if (!this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'control command binding principal is no longer active')
     }
+    const format = this.replyFormat(binding.conversation, input.format) ?? 'plain'
     return this.deliveryStore.enqueue({
-      idempotencyKey: input.idempotencyKey,
+      idempotencyKey,
       bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal },
       text: input.text,
-      format: input.format ?? 'plain',
+      format,
       ...(input.modelPicker === undefined ? {} : { modelPicker: input.modelPicker }),
+      ...(format !== 'permission-picker' || input.permissionPicker === undefined
+        ? {}
+        : { permissionPicker: input.permissionPicker }),
       replyToEventId: input.replyToEventId,
     })
   }
@@ -1144,8 +1436,12 @@ export class AssistantDeliveryService extends Service {
    */
   private replyFormat(
     conversation: Readonly<ConversationRef>,
-    requested: 'markdown' | 'model-picker' | 'plain' | undefined,
-  ): 'markdown' | 'model-picker' | 'plain' | undefined {
+    requested: 'markdown' | 'model-picker' | 'permission-picker' | 'plain' | undefined,
+  ): 'markdown' | 'model-picker' | 'permission-picker' | 'plain' | undefined {
+    if (requested === 'permission-picker') {
+      const adapter = this.registry.get(conversation.channel, conversation.account)
+      return adapter?.capabilities.formats.includes('permission-picker') === true ? requested : 'plain'
+    }
     if (requested !== 'markdown') return requested
     const adapter = this.registry.get(conversation.channel, conversation.account)
     return adapter?.capabilities.formats.includes('markdown') === true ? 'markdown' : 'plain'
@@ -1154,8 +1450,9 @@ export class AssistantDeliveryService extends Service {
   reply(agent: Agent | undefined, input: {
     idempotencyKey: string
     text: string
-    format?: 'markdown' | 'model-picker' | 'plain'
+    format?: 'markdown' | 'model-picker' | 'permission-picker' | 'plain'
     modelPicker?: ModelPickerIntent
+    permissionPicker?: PermissionPickerIntent
     replyToEventId?: string
   }): OutboxRecord {
     this.assertActive()
@@ -1166,16 +1463,25 @@ export class AssistantDeliveryService extends Service {
       || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'Agent session is not bound to an active delivery route')
     }
+    let idempotencyKey = input.idempotencyKey
+    if (input.replyToEventId !== undefined
+      && input.idempotencyKey === `inbound:${input.replyToEventId}:reply`) {
+      idempotencyKey = this.inboundReplyIdempotencyKey(binding, input.replyToEventId)
+    }
     const decision = this.policy.authorizeAgent(agent, 'reply', { kind: 'message', id: binding.id },
-      { idempotencyKey: `message-reply:${input.idempotencyKey}` })
+      { idempotencyKey: `message-reply:${idempotencyKey}` })
     if (decision.effect !== 'allow') throw policyDenied(decision)
     if (!this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'Agent delivery principal is no longer active')
     }
-    return this.deliveryStore.enqueue({ idempotencyKey: input.idempotencyKey, bindingId: binding.id,
+    const format = this.replyFormat(binding.conversation, input.format) ?? 'plain'
+    return this.deliveryStore.enqueue({ idempotencyKey, bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
-      format: this.replyFormat(binding.conversation, input.format) ?? 'plain',
+      format,
       ...(input.modelPicker === undefined ? {} : { modelPicker: input.modelPicker }),
+      ...(format !== 'permission-picker' || input.permissionPicker === undefined
+        ? {}
+        : { permissionPicker: input.permissionPicker }),
       ...(input.replyToEventId === undefined ? {} : { replyToEventId: input.replyToEventId }) })
   }
 
@@ -1287,7 +1593,106 @@ export class AssistantDeliveryService extends Service {
     return promise
   }
 
-  private async rotateBinding(envelope: InboundEnvelope, previous: ConversationBinding): Promise<ConversationBinding> {
+  private async bindingForInbound(
+    envelope: InboundEnvelope,
+    inboxId: string,
+  ): Promise<ConversationBinding | undefined> {
+    let binding = this.deliveryStore.getActiveBinding(envelope.conversation)
+    if (binding === undefined) {
+      if (this.runtime === undefined) {
+        this.deliveryStore.deadLetterInbox(inboxId, 'runtime-unavailable')
+        return undefined
+      }
+      binding = await this.ensureBinding(envelope)
+    }
+    if (externalPrincipalId(binding.principal) !== externalPrincipalId(envelope.principal)) {
+      this.deliveryStore.deadLetterInbox(inboxId, 'binding-principal-mismatch')
+      return undefined
+    }
+    return binding
+  }
+
+  /**
+   * Finish admissions that survived a process exit before their queue/rotate
+   * commit. The provider need not retransmit them: any later message in the
+   * same conversation first drives every older received row forward in its
+   * original durable Inbox order. This includes ordinary messages that were
+   * already persisted behind a blocked `/stop` or `/new` transition.
+   */
+  private async recoverPendingInbound(
+    boundary: InboundEnvelope,
+    beforeInboxId: string,
+  ): Promise<void> {
+    while (true) {
+      const pending = this.deliveryStore.findPendingInboundBefore({
+        conversation: boundary.conversation,
+        principal: boundary.principal,
+        beforeInboxId,
+      })
+      if (pending === undefined) return
+      if (!this.deliveryStore.isAuthorizedPrincipal(pending.envelope.principal)) {
+        this.deliveryStore.deadLetterInbox(pending.id, 'unauthorized-principal')
+        continue
+      }
+      const decision = this.policy.authorize({
+        subject: { kind: 'external', id: externalPrincipalId(pending.envelope.principal) },
+        action: 'ingest',
+        resource: { kind: 'message', id: `inbound:${pending.envelope.channel}/${pending.envelope.account}` },
+        context: { initiator: 'external' },
+      }, { idempotencyKey: `message-inbound:${pending.id}` })
+      if (decision.effect !== 'allow') {
+        this.deliveryStore.deadLetterInbox(pending.id, `policy-${decision.reasonCode}`)
+        continue
+      }
+      const command = parseDeliveryCommand(pending.envelope)
+      const reset = isExactDeliveryCommand(command, 'new', 'clear')
+      const stop = isExactDeliveryCommand(command, 'stop')
+      const binding = await this.bindingForInbound(pending.envelope, pending.id)
+      if (binding === undefined) continue
+      if (!reset && !stop) {
+        this.deliveryStore.queueInbox(pending.id, binding.id)
+        continue
+      }
+      const fence = this.deliveryStore.cancelUndispatchedInboxBefore({
+        bindingId: binding.id,
+        beforeInboxId: pending.id,
+        failureCode: reset ? 'new-session-before-dispatch' : 'user-stopped-before-dispatch',
+      })
+      const cancellationCommand = reset ? 'new' : 'stop'
+      await this.runtime?.cancelActive?.(binding, cancellationCommand)
+      await this.inbound.cancelUndispatchedClaims(fence.claimedInboxIds, cancellationCommand)
+      if (reset) {
+        await this.rotateBinding(pending.envelope, binding, pending.id)
+      } else {
+        this.deliveryStore.queueInbox(pending.id, binding.id)
+      }
+    }
+  }
+
+  private async runConversationTransition<T>(
+    conversation: ConversationRef,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const key = JSON.stringify(canonicalConversation(conversation))
+    const previous = this.conversationTransitions.get(key) ?? Promise.resolve()
+    let release!: () => void
+    const own = new Promise<void>(resolve => { release = resolve })
+    const fence = previous.catch(() => {}).then(() => own)
+    this.conversationTransitions.set(key, fence)
+    await previous.catch(() => {})
+    try {
+      return await task()
+    } finally {
+      release()
+      if (this.conversationTransitions.get(key) === fence) this.conversationTransitions.delete(key)
+    }
+  }
+
+  private async rotateBinding(
+    envelope: InboundEnvelope,
+    previous: ConversationBinding,
+    commandInboxId: string,
+  ): Promise<ConversationBinding> {
     const key = `${JSON.stringify(envelope.conversation)}:/new:${envelope.eventId}`
     const existing = this.bindingFlights.get(key)
     if (existing !== undefined) return existing
@@ -1304,8 +1709,12 @@ export class AssistantDeliveryService extends Service {
       const created = await runtime.createSession({ envelope, generation,
         previous: current, signal: new AbortController().signal })
       this.assertActive()
-      return this.deliveryStore.rotateBinding({ bindingId: current.id, expectedVersion: current.version,
-        sessionId: created.sessionId })
+      return this.deliveryStore.rotateBindingAndQueueCommand({
+        bindingId: current.id,
+        expectedVersion: current.version,
+        sessionId: created.sessionId,
+        inboxId: commandInboxId,
+      }).binding
     })().finally(() => this.bindingFlights.delete(key))
     this.bindingFlights.set(key, promise)
     return promise
