@@ -125,7 +125,9 @@ async function fixture(
     sandboxMode?: 'workspace-write' | 'danger-full-access' | 'missing'
     settleExactCall?: boolean
     exactArguments?: Record<string, unknown>
+    exactToolName?: 'bash' | 'run_code'
     policy?: Pick<Config, 'toolDefaultEffect' | 'rules' | 'budgets'>
+    toolMode?: 'code' | 'native'
     userIntent?: string
   } = {},
 ): Promise<Fixture> {
@@ -136,7 +138,7 @@ async function fixture(
   await ctx.plugin(SystemPrompt)
   if (options.lateLlm !== true) await ctx.plugin(LlmRuntime)
   await ctx.plugin(ApprovalService, { policy: 'ask' })
-  await ctx.plugin(ToolRuntime)
+  await ctx.plugin(ToolRuntime, { mode: options.toolMode ?? 'native' })
   const adapter = new ReviewerAdapter(scripts)
   if (options.lateLlm !== true) ctx.llm.registerAdapter(['main', 'fixed-reviewer'], adapter)
   await ctx.plugin(AssistantPolicyService, {
@@ -155,13 +157,14 @@ async function fixture(
     appendSandboxMode(agent, options.sandboxMode ?? 'workspace-write')
   }
   const callId = CallId('exact-review-call')
+  const exactToolName = options.exactToolName ?? 'bash'
   if (options.historicalExactCall === true) {
     agent.session.append('turn/start', { turn: 1 })
     agent.session.append('tool/call', {
       turn: 1,
       step: 1,
       callId,
-      name: 'bash',
+      name: exactToolName,
       arguments: JSON.stringify(options.exactArguments ?? { command: 'node script.js' }),
     })
     agent.session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
@@ -217,7 +220,7 @@ async function fixture(
       turn,
       step: 1,
       callId,
-      name: 'bash',
+      name: exactToolName,
       arguments: JSON.stringify(options.exactArguments ?? { command: 'git status --short' }),
     })
     if (options.duplicateExactCall === true) {
@@ -225,7 +228,7 @@ async function fixture(
         turn,
         step: 1,
         callId,
-        name: 'bash',
+        name: exactToolName,
         arguments: JSON.stringify(options.exactArguments ?? { command: 'git status --short' }),
       })
     }
@@ -262,7 +265,7 @@ async function fixture(
     get fallbackEscalations() { return fallbackEscalations },
     request: (signal = new AbortController().signal) => ctx.approval.request({
       agent,
-      toolName: 'bash',
+      toolName: exactToolName,
       callId,
       reason: AUTO_REVIEW_APPROVAL_REASON,
       signal,
@@ -499,6 +502,34 @@ describe('isolated automatic approval reviewer', () => {
       expect(current.fallbackEscalations, command).toEqual([true])
       expect(executions, command).toBe(0)
     }
+  })
+
+  test('routes run_code to human approval in auto mode without invoking the model reviewer', async () => {
+    const arguments_ = {
+      code: 'return 42',
+      description: 'Return one local constant.',
+    }
+    const current = await fixture([assessment()], {
+      exactArguments: arguments_,
+      exactToolName: 'run_code',
+      policy: { toolDefaultEffect: 'allow', rules: [] },
+      toolMode: 'code',
+      userIntent: 'Run the provided local code once.',
+    })
+
+    const result = await current.ctx.tools.execute({
+      callId: current.callId,
+      name: 'run_code',
+      arguments: arguments_,
+      signal: new AbortController().signal,
+      agent: current.agent,
+    })
+
+    expect(result.isError).toBe(true)
+    expect(JSON.stringify(result.content)).toContain('the user rejected tool')
+    expect(current.adapter.requests).toHaveLength(0)
+    expect(current.fallbackCalls).toBe(1)
+    expect(current.fallbackEscalations).toEqual([true])
   })
 
   test('does not model-review ask-human reasons even when invoked directly', async () => {

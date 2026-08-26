@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { mkdir, stat } from 'node:fs/promises'
 import type { Context } from '@deepseek-ai/cordis'
+import type { CommandDescriptor, CommandRuntime } from '@deepseek-ai/dsh-commands'
 import {
   installModelSelection,
   type Agent,
@@ -26,6 +27,7 @@ import {
 import {
   approvalReviewerOf,
   setApprovalReviewer,
+  waitForApprovalReviewerSessionEventReady,
   type ApprovalReviewer,
   type AssistantPolicyService,
 } from '@dsh-enhanced/assistant-policy'
@@ -33,12 +35,21 @@ import { resolveLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import type {
   InboundPrepareContext,
   InboundPrepareResult,
+  InboundNotProcessedResult,
   InboundProcessResult,
   MarkInboundDispatching,
   PreparedInboundMessage,
 } from './coordinator.js'
+import { externalPrincipalId } from './canonical.js'
 import type { InboundImageMaterializer } from './inbound-images.js'
 import type { DeliveryInboundRuntime } from './service.js'
+import {
+  isExactDeliveryCommand,
+  parseDeliveryCommand,
+  permissionDispatchRecoveryCode,
+  type ParsedDeliveryCommand,
+  type PermissionDispatchRecovery,
+} from './session-commands.js'
 import { DeliveryStoreError } from './store.js'
 import type {
   ConversationBinding,
@@ -48,6 +59,8 @@ import type {
   InboundEnvelope,
   ModelPickerIntent,
   ModelRouteRef,
+  PermissionPickerIntent,
+  PermissionPickerLevel,
 } from './types.js'
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -63,6 +76,7 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 interface DshDeliveryRuntimeOptions {
+  sessionNamespace: string
   workspace: string
   agentPreset: string
   getAgentPresets(): Pick<AgentPresets, 'mount' | 'resolve'> | undefined
@@ -72,6 +86,7 @@ interface DshDeliveryRuntimeOptions {
   toolCapableProviders: ReadonlySet<string>
   unknownRouteToolCalls: 'allow' | 'deny'
   maxOutputTokens: number
+  permissionPickerTtlMs: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
   imageMaterializer: Pick<InboundImageMaterializer, 'materialize'>
   isInboundAuthorized(
@@ -79,6 +94,11 @@ interface DshDeliveryRuntimeOptions {
     envelope: Readonly<InboundEnvelope>,
   ): boolean
   isPermissionController(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): boolean
+  /** Durably reserve the exact terminal reply authorization before permission state can change. */
+  authorizePermissionReply(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
   ): boolean
@@ -94,15 +114,40 @@ interface DshDeliveryRuntimeOptions {
     eventId: string,
     update: DeliveryProgressUpdate,
   ): Promise<void>
-  replyCommand(binding: Readonly<ConversationBinding>, eventId: string, input: ModelCommandReply): void
+  replyCommand(
+    binding: Readonly<ConversationBinding>,
+    eventId: string,
+    input: ModelCommandReply,
+    idempotencyKey?: string,
+  ): void
   reply(agent: Agent, eventId: string, input: ModelCommandReply): void
 }
 
 interface ModelCommandReply {
   text: string
-  format?: 'markdown' | 'model-picker' | 'plain'
+  format?: 'markdown' | 'model-picker' | 'permission-picker' | 'plain'
   modelPicker?: ModelPickerIntent
+  permissionPicker?: PermissionPickerIntent
   fallbackText?: string
+}
+
+const SAFE_NATIVE_COMMANDS = new Set(['compact'])
+
+class UserSessionCancellation extends Error {
+  constructor(readonly command: 'new' | 'stop') {
+    super(`assistant-delivery: session task cancelled by /${command}`)
+    this.name = 'UserSessionCancellation'
+  }
+}
+
+interface ActiveSessionControl {
+  controller: AbortController
+  command?: 'new' | 'stop'
+  cancelRequested: Promise<void>
+  replySafe: Promise<void>
+  removeOuterAbort(): void
+  resolveCancelRequested(): void
+  resolveReplySafe(): void
 }
 
 const MAX_CATALOG_MODELS = 50
@@ -112,6 +157,13 @@ const MAX_PROGRESS_TEXT_CHARS = 240
 type InboundAuthorizationState = 'authorized' | 'revoked' | 'check-failed'
 
 class DurableAgentIdentityError extends Error {}
+
+class ApprovalReviewerReaderUnavailableError extends Error {
+  constructor(cause: unknown) {
+    super('assistant-delivery: approval reviewer persistence reader is not proven', { cause })
+    this.name = 'ApprovalReviewerReaderUnavailableError'
+  }
+}
 
 class ToolCapabilityAdmissionError extends Error {
   constructor(
@@ -232,7 +284,11 @@ export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryP
       ? block.toolCallId
       : event.data.message.source?.callId
     if (callId === undefined) return undefined
-    return { kind: 'tool-finished', callId: String(callId), failed: event.data.error !== undefined }
+    return {
+      kind: 'tool-finished',
+      callId: String(callId),
+      failed: event.data.error !== undefined || (block?.type === 'tool-result' && block.isError === true),
+    }
   }
   if (event.type === 'todo/write') {
     return { kind: 'todos', todos: event.data.todos.slice(0, MAX_PROGRESS_TODOS).map(todo => ({
@@ -253,19 +309,14 @@ function parseModelRoute(value: string): ModelRouteRef | undefined {
   return { provider, model }
 }
 
-function modelCommand(envelope: Readonly<InboundEnvelope>): string | undefined {
-  if (envelope.kind !== 'command') return undefined
-  const line = envelope.text.trim()
-  return line === '/model' || line.startsWith('/model ') ? line.slice('/model'.length).trim() : undefined
+function modelCommand(command: ParsedDeliveryCommand | undefined): string | undefined {
+  return command?.name === 'model' ? command.rawInput.trim() : undefined
 }
 
-function permissionCommand(envelope: Readonly<InboundEnvelope>): string | undefined {
-  if (envelope.kind !== 'command') return undefined
-  const line = envelope.text.trim()
-  for (const name of ['/permissions', '/permission']) {
-    if (line === name || line.startsWith(`${name} `)) return line.slice(name.length).trim()
-  }
-  return undefined
+function permissionCommand(command: ParsedDeliveryCommand | undefined): string | undefined {
+  return command?.name === 'permission' || command?.name === 'permissions'
+    ? command.rawInput.trim()
+    : undefined
 }
 
 type PermissionCommandAction =
@@ -286,30 +337,89 @@ function parsePermissionCommand(argument: string): PermissionCommandAction {
   return { kind: 'invalid' }
 }
 
+const PERMISSION_PICKER_OPERATION_METADATA = 'permission-picker-operation'
+const PERMISSION_PICKER_STATE_METADATA = 'permission-picker-state'
+const PERMISSION_PICKER_EXPIRY_METADATA = 'permission-picker-expires-at'
+const PERMISSION_PICKER_EMERGENCY_VERSION_METADATA = 'permission-picker-emergency-version'
+
+function permissionPickerGuard(envelope: Readonly<InboundEnvelope>):
+{ operationId: string; expectedStateHash: string; expiresAt: number; emergencyStopVersion: number } | 'invalid' | undefined {
+  const operationId = envelope.metadata?.[PERMISSION_PICKER_OPERATION_METADATA]
+  const expectedStateHash = envelope.metadata?.[PERMISSION_PICKER_STATE_METADATA]
+  const expiresAtText = envelope.metadata?.[PERMISSION_PICKER_EXPIRY_METADATA]
+  const emergencyStopVersionText = envelope.metadata?.[PERMISSION_PICKER_EMERGENCY_VERSION_METADATA]
+  if (operationId === undefined && expectedStateHash === undefined && expiresAtText === undefined
+    && emergencyStopVersionText === undefined) return undefined
+  if (operationId === undefined || expectedStateHash === undefined || expiresAtText === undefined
+    || emergencyStopVersionText === undefined
+    || !/^permission-picker-[a-f0-9]{32}$/u.test(operationId)
+    || !/^[a-f0-9]{64}$/u.test(expectedStateHash)
+    || !/^[1-9][0-9]{0,15}$/u.test(expiresAtText)
+    || !/^(?:0|[1-9][0-9]{0,15})$/u.test(emergencyStopVersionText)) return 'invalid'
+  const expiresAt = Number(expiresAtText)
+  const emergencyStopVersion = Number(emergencyStopVersionText)
+  if (!Number.isSafeInteger(expiresAt) || !Number.isSafeInteger(emergencyStopVersion)) return 'invalid'
+  return { operationId, expectedStateHash, expiresAt, emergencyStopVersion }
+}
+
 type PermissionPresets = Pick<PermissionPresetService, 'current' | 'names' | 'resolve' | 'set'>
 
 interface PermissionPresetTargets {
-  workspace: string
+  ask: string
+  auto: string
   full: string
+  tableFingerprint: string
 }
 
 function permissionPresetTargets(service: PermissionPresets): Partial<PermissionPresetTargets> {
-  let workspace: string | undefined
-  let full: string | undefined
+  const workspace: string[] = []
+  const full: string[] = []
+  const table: Array<readonly [string, string, string]> = []
   for (const name of service.names) {
     const spec = service.resolve(name)
-    if (workspace === undefined && spec.sandbox === 'workspace-write' && spec.approval === 'ask') workspace = name
-    if (full === undefined && spec.sandbox === 'danger-full-access' && spec.approval === 'never') full = name
+    table.push([name, spec.sandbox, spec.approval])
+    if (spec.sandbox === 'workspace-write' && spec.approval === 'ask') workspace.push(name)
+    if (spec.sandbox === 'danger-full-access' && spec.approval === 'never') full.push(name)
   }
+  if (workspace.length > 2 || full.length > 1) {
+    throw new Error('ambiguous permission preset table')
+  }
+  const ask = workspace[0]
+  const auto = workspace[1] ?? ask
   return {
-    ...(workspace === undefined ? {} : { workspace }),
-    ...(full === undefined ? {} : { full }),
+    ...(ask === undefined ? {} : { ask, auto: auto! }),
+    ...(full[0] === undefined ? {} : { full: full[0] }),
+    tableFingerprint: createHash('sha256').update(JSON.stringify(table)).digest('hex'),
   }
 }
 
 function missingPermissionBundle(targets: Partial<PermissionPresetTargets>): string | undefined {
-  if (targets.workspace === undefined) return 'workspace-write + ask'
+  if (targets.ask === undefined || targets.auto === undefined) return 'workspace-write + ask'
   return targets.full === undefined ? 'danger-full-access + never' : undefined
+}
+
+function explicitSandboxMode(events: readonly SessionEvent[]): 'workspace-write' | 'danger-full-access' | undefined {
+  const event = events.findLast(candidate => candidate.type === 'sandbox/mode')
+  if (event?.data.mode === 'workspace-write' || event?.data.mode === 'danger-full-access') return event.data.mode
+  return undefined
+}
+
+function explicitApprovalPolicy(events: readonly SessionEvent[]): 'ask' | 'never' | undefined {
+  const event = events.findLast(candidate => candidate.type === 'approval/policy')
+  if (event?.data.policy === 'ask' || event?.data.policy === 'never') return event.data.policy
+  return undefined
+}
+
+async function appendApprovalReviewer(
+  session: Session,
+  reviewer: ApprovalReviewer,
+): Promise<boolean> {
+  try {
+    await waitForApprovalReviewerSessionEventReady(session)
+    return setApprovalReviewer(session, reviewer)
+  } catch (error) {
+    throw new ApprovalReviewerReaderUnavailableError(error)
+  }
 }
 
 function currentPermissionLevel(
@@ -325,26 +435,53 @@ function currentPermissionLevel(
       ? 'full'
       : 'custom'
   }
-  if (current !== targets.workspace) return 'custom'
-  if (approvalReviewerOf(events) !== 'auto-review') return 'ask'
-  return effectiveSandboxMode(events) === 'workspace-write'
-    && effectiveApprovalPolicy(events) === 'ask'
-    ? 'auto'
-    : 'custom'
+  if (effectiveSandboxMode(events) !== 'workspace-write' || effectiveApprovalPolicy(events) !== 'ask') return 'custom'
+  const reviewer = approvalReviewerOf(events)
+  if (targets.ask === targets.auto && current === targets.ask) return reviewer === 'auto-review' ? 'auto' : 'ask'
+  if (current === targets.ask) return reviewer === 'user' ? 'ask' : 'custom'
+  if (current === targets.auto) return reviewer === 'auto-review' ? 'auto' : 'custom'
+  return 'custom'
+}
+
+function canonicalPresetReviewer(name: string): ApprovalReviewer | undefined {
+  if (name === 'workspace-write') return 'user'
+  if (name === 'auto') return 'auto-review'
+  if (name === 'danger-full-access') return 'none'
+  return undefined
+}
+
+async function ensurePermissionReviewer(
+  session: Session,
+  preset: string,
+  reviewer: ApprovalReviewer,
+): Promise<void> {
+  if (approvalReviewerOf(session.events) === reviewer) return
+  if (canonicalPresetReviewer(preset) === reviewer) {
+    // PermissionPresetService deliberately makes a net-zero selection a no-op.
+    // Re-append its official event when an older legacy reviewer event would
+    // otherwise remain newer and incorrectly win the durable fold.
+    session.append('permission/preset', { preset })
+    return
+  }
+  await appendApprovalReviewer(session, reviewer)
 }
 
 function ensureSandboxMode(
   session: Session,
   mode: Parameters<typeof setSandboxMode>[1],
 ): void {
-  if (effectiveSandboxMode(session.events) !== mode) setSandboxMode(session, mode)
+  if (explicitSandboxMode(session.events) === mode) return
+  setSandboxMode(session, mode)
+  if (explicitSandboxMode(session.events) !== mode) session.append('sandbox/mode', { mode })
 }
 
 function ensureApprovalPolicy(
   session: Session,
   policy: Parameters<typeof setApprovalPolicy>[1],
 ): void {
-  if (effectiveApprovalPolicy(session.events) !== policy) setApprovalPolicy(session, policy)
+  if (explicitApprovalPolicy(session.events) === policy) return
+  setApprovalPolicy(session, policy)
+  if (explicitApprovalPolicy(session.events) !== policy) session.append('approval/policy', { policy })
 }
 
 function permissionLevelLabel(level: 'ask' | 'auto' | 'full' | 'custom'): string {
@@ -354,19 +491,51 @@ function permissionLevelLabel(level: 'ask' | 'auto' | 'full' | 'custom'): string
   return '自定义安全组合（custom）'
 }
 
-function permissionOverview(level: 'ask' | 'auto' | 'full' | 'custom'): ModelCommandReply {
+export function permissionStateHash(events: readonly SessionEvent[], tableFingerprint = ''): string {
+  const facts = events
+    .filter(event => [
+      'permission/preset',
+      'sandbox/mode',
+      'approval/policy',
+      'assistant-policy/approval-reviewer',
+    ].includes(String(event.type)))
+    .map(event => ({ seq: event.seq, type: String(event.type), data: event.data }))
+  return createHash('sha256')
+    .update('assistant-delivery:permission-state:v2\0')
+    .update(JSON.stringify([tableFingerprint, facts]))
+    .digest('hex')
+}
+
+export function permissionPickerOperationId(conversation: Readonly<ConversationRef>, eventId: string): string {
+  return `permission-picker-${createHash('sha256').update(JSON.stringify({
+    channel: conversation.channel,
+    account: conversation.account,
+    tenant: conversation.tenant,
+    kind: conversation.kind,
+    chat: conversation.chat,
+    thread: conversation.thread ?? null,
+    eventId,
+  })).digest('hex').slice(0, 32)}`
+}
+
+function permissionOverview(level: PermissionPickerLevel, picker?: PermissionPickerIntent): ModelCommandReply {
+  const text = [
+    `当前权限：${permissionLevelLabel(level)}`,
+    '',
+    '三档说明：',
+    '- 请求批准（ask）：仅可写工作区；需要授权时由你确认。',
+    '- 帮我批准（auto）：仅可写工作区；由自动审核器处理授权请求。',
+    '- 完全访问权限（full）：🟠 Host sandbox 可访问网络及任意文件，且不再请求批准；管理员 Policy 硬门仍生效。',
+    '',
+    '档位只控制运行权限，不会安装或挂载技能/插件；已挂载工具还必须有 Policy 可达规则。',
+    'full 仍不绕过显式 Policy 拒绝、紧急停止、身份和预算硬门。',
+    '',
+    '切换：/permission ask、/permission auto、/permission full confirm',
+  ].join('\n')
   return {
-    text: [
-      `当前权限：${permissionLevelLabel(level)}`,
-      '',
-      '三档说明：',
-      '- 请求批准（ask）：仅可写工作区；需要授权时由你确认。',
-      '- 帮我批准（auto）：仅可写工作区；由自动审核器处理授权请求。',
-      '- 完全访问权限（full）：🟠 Host sandbox 可访问网络及任意文件，且不再请求批准；管理员 Policy 硬门仍生效。',
-      '',
-      '切换：/permission ask、/permission auto、/permission full confirm',
-    ].join('\n'),
-    format: 'plain',
+    text,
+    format: picker === undefined ? 'plain' : 'permission-picker',
+    ...(picker === undefined ? {} : { permissionPicker: picker, fallbackText: text }),
   }
 }
 
@@ -574,8 +743,15 @@ function modelCommandFailure(error: unknown): InboundProcessResult {
   }
 }
 
-function sessionId(conversation: InboundEnvelope['conversation'], generation: number): SessionId {
-  const hash = createHash('sha256').update(JSON.stringify({ conversation, generation })).digest('hex').slice(0, 32)
+function sessionId(
+  namespace: string,
+  conversation: InboundEnvelope['conversation'],
+  generation: number,
+): SessionId {
+  const hash = createHash('sha256')
+    .update(JSON.stringify({ namespace, conversation, generation }))
+    .digest('hex')
+    .slice(0, 32)
   return SessionId(`delivery-${hash}-g${generation}`)
 }
 
@@ -611,22 +787,80 @@ function causedByDurableIdentity(error: unknown): boolean {
   return false
 }
 
+function causedByUserCancellation(error: unknown): boolean {
+  let current = error
+  const visited = new Set<unknown>()
+  while (current instanceof Error && !visited.has(current)) {
+    if (current instanceof UserSessionCancellation) return true
+    visited.add(current)
+    current = current.cause
+  }
+  return false
+}
+
+function errorChainHasName(error: unknown, expected: string): boolean {
+  let current = error
+  const visited = new Set<unknown>()
+  while (current instanceof Error && !visited.has(current)) {
+    if (current.name === expected) return true
+    visited.add(current)
+    current = current.cause
+  }
+  return false
+}
+
+function assertAdoptableUnstartedSession(
+  session: Session,
+  workspace: string,
+  presetId: string,
+): void {
+  if (session.header.cwd !== workspace || session.header.agentPreset !== presetId) {
+    throw new DurableAgentIdentityError(
+      'assistant-delivery: durable orphan session identity does not match the requested generation',
+    )
+  }
+  if (session.events.some(event => event.type === 'turn/start' || event.type === 'user/message')
+    || session.deriveMessages().length > 0) {
+    throw new DurableAgentIdentityError(
+      'assistant-delivery: refusing to adopt a deterministic session that already started a user turn',
+    )
+  }
+}
+
+function sessionResumeFailureCode(error: unknown): string {
+  if (causedByDurableIdentity(error)) return 'agent-identity-mismatch'
+  if (errorChainHasName(error, 'SessionFormatUnsupportedError')) return 'session-format-unsupported'
+  if (errorChainHasName(error, 'SessionPersistenceCorruptionError')) return 'session-persistence-corrupt'
+  return 'session-resume-unavailable'
+}
+
+function sessionFingerprint(value: string): string {
+  return createHash('sha256').update(value).digest('hex').slice(0, 8)
+}
+
 function finalAssistant(
   events: readonly SessionEvent[],
   from: number,
-): { text: string; completed: boolean; failureCode?: string } {
+  expectedTurn: number | undefined,
+): { text: string; completed: boolean; stopped: boolean; failureCode?: string } {
+  if (expectedTurn === undefined) return { text: '', completed: false, stopped: false }
   let text = ''
   let completed = false
+  let stopped = false
   let failureCode: string | undefined
   for (const event of events.slice(from)) {
-    if (event.type === 'assistant/message') {
+    if (event.type === 'assistant/message' && event.data.turn === expectedTurn) {
       text = event.data.message.content.filter(block => block.type === 'text')
         .map(block => block.type === 'text' ? block.text : '').join('')
     }
-    if (event.type === 'turn/end') {
+    if (event.type === 'turn/end' && event.data.turn === expectedTurn) {
       const reason = event.data.reason
       completed = typeof reason === 'object' && reason !== null && 'kind' in reason
         && ['completed', 'max-tokens'].includes((reason as { kind: string }).kind)
+      stopped = typeof reason === 'object' && reason !== null
+        && (reason as { kind?: unknown }).kind === 'aborted'
+        && typeof (reason as { reason?: unknown }).reason === 'object'
+        && (reason as { reason?: { kind?: unknown } }).reason?.kind === 'user'
       // Keep only the short upstream code: the provider message can quote the prompt or payload.
       const error = typeof reason === 'object' && reason !== null && 'error' in reason
         ? (reason as { error?: { code?: unknown } }).error
@@ -634,11 +868,12 @@ function finalAssistant(
       failureCode = completed || typeof error?.code !== 'string' ? undefined : error.code
     }
   }
-  return { text, completed, ...(failureCode === undefined ? {} : { failureCode }) }
+  return { text, completed, stopped, ...(failureCode === undefined ? {} : { failureCode }) }
 }
 
 export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   readonly dispatchControl = 'explicit' as const
+  private readonly activeSessionControls = new Map<string, ActiveSessionControl>()
 
   constructor(
     private readonly ctx: Context,
@@ -646,10 +881,133 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     private readonly options: DshDeliveryRuntimeOptions,
   ) {}
 
+  async cancelActive(binding: Readonly<ConversationBinding>, command: 'new' | 'stop'): Promise<boolean> {
+    const sessionId = binding.sessionId
+    const control = this.activeSessionControls.get(sessionId)
+    const agents = this.ctx.get('agents')
+    const agent = agents?.get(SessionId(sessionId))
+    const activeAgent = agent !== undefined && agent.status !== 'idle'
+    if (control === undefined && !activeAgent) return false
+    if (control !== undefined) {
+      // A generation boundary is stronger than a stop acknowledgement. Never
+      // let a later `/stop` downgrade an in-flight `/new` cancellation.
+      control.command = control.command === 'new' || command === 'new' ? 'new' : 'stop'
+      control.resolveCancelRequested()
+      if (!control.controller.signal.aborted) {
+        control.controller.abort(new UserSessionCancellation(control.command))
+      }
+    }
+    // rc.8 `whenIdle()` follows every later wakeup. Waiting on it here lets an
+    // unrelated followup keep `/stop` or `/new` alive forever. Clear pending
+    // input and wait only for Delivery's exact reply-scheduling boundary.
+    if (activeAgent) agent.cancel({ kind: 'user' })
+    if (control !== undefined) await control.replySafe
+    return true
+  }
+
+  private beginSessionControl(sessionId: string, outer: AbortSignal): ActiveSessionControl {
+    if (this.activeSessionControls.has(sessionId)) {
+      throw new Error(`assistant-delivery: session ${sessionFingerprint(sessionId)} is already processing an inbound`)
+    }
+    const controller = new AbortController()
+    let resolveCancelRequested!: () => void
+    let resolveReplySafe!: () => void
+    const cancelRequested = new Promise<void>(resolve => { resolveCancelRequested = resolve })
+    const replySafe = new Promise<void>(resolve => { resolveReplySafe = resolve })
+    const abort = (): void => controller.abort(outer.reason)
+    outer.addEventListener('abort', abort, { once: true })
+    if (outer.aborted) abort()
+    const control: ActiveSessionControl = {
+      controller,
+      cancelRequested,
+      replySafe,
+      removeOuterAbort: () => outer.removeEventListener('abort', abort),
+      resolveCancelRequested,
+      resolveReplySafe,
+    }
+    this.activeSessionControls.set(sessionId, control)
+    return control
+  }
+
+  private endSessionControl(sessionId: string, control: ActiveSessionControl): void {
+    control.removeOuterAbort()
+    control.resolveReplySafe()
+    if (this.activeSessionControls.get(sessionId) === control) this.activeSessionControls.delete(sessionId)
+  }
+
+  private async disposeAfterReplyBoundary(sessionId: string, handle: AgentHandle | undefined): Promise<void> {
+    const control = this.activeSessionControls.get(sessionId)
+    control?.resolveReplySafe()
+    if (handle === undefined) return
+    const disposal = Promise.resolve().then(() => handle.dispose())
+    const disposition = control === undefined
+      ? await disposal.then(() => 'disposed' as const)
+      : await Promise.race([
+          disposal.then(() => 'disposed' as const),
+          control.cancelRequested.then(() => 'cancelled' as const),
+        ])
+    if (disposition === 'cancelled') {
+      // The Delivery turn is already cancelled and cannot enqueue another
+      // reply. Teardown remains owned, but a third-party disposer must not
+      // hold the conversation transition or its fresh generation hostage.
+      void disposal.catch(error => {
+        this.ctx.logger.warn(
+          `assistant-delivery: cancelled session disposer failed for ${sessionFingerprint(sessionId)}: ${String(error)}`,
+        )
+      })
+      return
+    }
+  }
+
+  /** Wait for only the turn that claims Delivery's exact message identity. */
+  private followupTurn(
+    agent: Agent,
+    message: ReturnType<typeof createUserMessage>,
+  ): Promise<number | undefined> {
+    return new Promise((resolve, reject) => {
+      let claimedTurn: number | undefined
+      let settled = false
+      const cleanup = (): void => {
+        removeClaimed()
+        removeDiscarded()
+        removeSessionEvent()
+      }
+      const settle = (turn: number | undefined): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve(turn)
+      }
+      const fail = (error: unknown): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      }
+      const removeClaimed = this.ctx.on('agent/inbox/claimed', event => {
+        if (event.agent === agent && event.message.id === message.id) claimedTurn = event.turn
+      })
+      const removeDiscarded = this.ctx.on('agent/inbox/discarded', event => {
+        if (event.agent === agent && event.message.id === message.id) settle(undefined)
+      })
+      const removeSessionEvent = this.ctx.on('session/event', (session, event) => {
+        if (session === agent.session && event.type === 'turn/end' && event.data.turn === claimedTurn) {
+          settle(claimedTurn)
+        }
+      })
+      try {
+        agent.followup(message)
+      } catch (error) {
+        fail(error)
+      }
+    })
+  }
+
   private async setupAgent(
     agentCtx: Agent['ctx'],
     workspace: string,
     presetId: string,
+    principal: string,
     selected: ModelSelection,
     agentPresets: Pick<AgentPresets, 'mount'> | undefined,
   ): Promise<void> {
@@ -660,10 +1018,19 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         'assistant-delivery: durable Agent identity does not match its conversation binding',
       )
     }
-    const unbind = this.policy.bindInitiator(agent, 'external')
+    const unbind = this.policy.bindInitiator(agent, 'external', principal)
     agentCtx.effect(() => unbind, 'assistant-delivery.external-initiator')
     installModelSelection(agentCtx, { current: selected, assembled: undefined })
     await agentPresets?.mount(agentCtx, presetId)
+  }
+
+  private async reconcileNativeFullPermissionReviewer(session: Session): Promise<void> {
+    const result = await this.policy.reconcileNativeFullReviewer(session)
+    if (result === 'unavailable') {
+      throw new ApprovalReviewerReaderUnavailableError(
+        new Error('assistant-policy: native full reviewer reconciliation is unavailable'),
+      )
+    }
   }
 
   private async runPermissionCommand(
@@ -672,6 +1039,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     envelope: Readonly<InboundEnvelope>,
     signal: AbortSignal,
     markDispatching: MarkInboundDispatching,
+    recovery?: PermissionDispatchRecovery,
   ): Promise<InboundProcessResult> {
     let dispatchMarked = false
     const markPermissionDispatch = (): void => {
@@ -683,6 +1051,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     const checkController = (): InboundAuthorizationState => {
       try {
         return this.options.isPermissionController(binding, envelope) ? 'authorized' : 'revoked'
+      } catch {
+        return 'check-failed'
+      }
+    }
+    const checkEmergencyStopVersion = (expected: number | undefined): InboundAuthorizationState => {
+      if (expected === undefined) return 'authorized'
+      try {
+        const emergencyStop = this.policy.getEmergencyStop()
+        return !emergencyStop.enabled && emergencyStop.version === expected ? 'authorized' : 'revoked'
       } catch {
         return 'check-failed'
       }
@@ -702,21 +1079,63 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         this.options.replyCommand(binding, envelope.eventId, input)
         return { outcome: 'processed' }
       } catch {
+        if (input.format === 'permission-picker' && input.fallbackText !== undefined) {
+          try {
+            this.options.replyCommand(binding, envelope.eventId, { text: input.fallbackText, format: 'plain' })
+            return { outcome: 'processed' }
+          } catch {}
+        }
         return { outcome: 'not-processed', failureCode: 'permission-command-reply-failed', retryable: !committed }
       }
     }
+    const retryPermissionRecovery = (
+      mode: PermissionDispatchRecovery = recovery ?? 'failure-notice',
+    ): InboundProcessResult => ({
+      outcome: 'not-processed',
+      failureCode: permissionDispatchRecoveryCode(mode),
+      retryable: true,
+    })
+    const preservePermissionRecovery = (
+      result: InboundProcessResult,
+      mode: PermissionDispatchRecovery,
+    ): InboundProcessResult => result.outcome === 'processed' ? result : retryPermissionRecovery(mode)
+    const authorizeTerminalReply = (): boolean => {
+      try {
+        return this.options.authorizePermissionReply(binding, envelope)
+      } catch {
+        return false
+      }
+    }
 
-    const initialAuthorization = checkController()
-    if (initialAuthorization !== 'authorized') return authorizationFailure(initialAuthorization)
     const action = parsePermissionCommand(argument)
-    if (action.kind === 'invalid') return reply(PERMISSION_USAGE)
-    if (action.kind === 'warn-full') return reply(PERMISSION_FULL_WARNING)
+    if (recovery === undefined) {
+      const initialAuthorization = checkController()
+      if (initialAuthorization !== 'authorized') return authorizationFailure(initialAuthorization)
+      if (!authorizeTerminalReply()) {
+        return {
+          outcome: 'not-processed',
+          failureCode: 'permission-reply-authorization-denied',
+          retryable: false,
+        }
+      }
+    }
+    if (recovery === undefined && action.kind === 'invalid') return reply(PERMISSION_USAGE)
+    if (recovery === undefined && action.kind === 'warn-full') return reply(PERMISSION_FULL_WARNING)
+    const parsedPickerGuard = permissionPickerGuard(envelope)
+    if (parsedPickerGuard === 'invalid' && recovery === undefined) {
+      return reply({ text: '权限卡片来源无效；当前权限未改变。请重新发送 /permissions。', format: 'plain' })
+    }
+    const pickerGuard = parsedPickerGuard === 'invalid' ? undefined : parsedPickerGuard
+    if (pickerGuard !== undefined && Date.now() >= pickerGuard.expiresAt && recovery === undefined) {
+      return reply({ text: '权限卡片已过期；当前权限未改变。请重新发送 /permissions。', format: 'plain' })
+    }
 
     const agents = this.ctx.get('agents')
     const sessions = this.ctx.get('sessions')
     const permissionPresets = this.ctx.get('permissionPresets') as PermissionPresets | undefined
     const approval = this.ctx.get('approval') as ApprovalService | undefined
     if (agents === undefined || sessions === undefined || permissionPresets === undefined || approval === undefined) {
+      if (recovery !== undefined) return retryPermissionRecovery(recovery)
       return reply({ text: '权限服务不可用，当前权限未改变。', format: 'plain' })
     }
 
@@ -724,12 +1143,16 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     try {
       partialTargets = permissionPresetTargets(permissionPresets)
     } catch {
+      if (recovery !== undefined) return retryPermissionRecovery(recovery)
       return reply({ text: '权限服务不可用，无法安全解析权限组合；当前权限未改变。', format: 'plain' })
     }
-    const afterResolutionAuthorization = checkController()
-    if (afterResolutionAuthorization !== 'authorized') return authorizationFailure(afterResolutionAuthorization)
+    if (recovery === undefined) {
+      const afterResolutionAuthorization = checkController()
+      if (afterResolutionAuthorization !== 'authorized') return authorizationFailure(afterResolutionAuthorization)
+    }
     const missingBundle = missingPermissionBundle(partialTargets)
     if (missingBundle !== undefined) {
+      if (recovery !== undefined) return retryPermissionRecovery(recovery)
       return reply({ text: `权限配置缺少 ${missingBundle} 组合，已拒绝切换。`, format: 'plain' })
     }
     const targets = partialTargets as PermissionPresetTargets
@@ -738,8 +1161,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       ?? { provider: this.options.provider, model: this.options.model }))
     let handle: AgentHandle | undefined
     let mutationAttempted = false
-    let flushAttempted = false
-    let compensateToAsk: (() => Promise<void>) | undefined
+    let compensateToAsk: (() => Promise<boolean>) | undefined
     try {
       const agentPresets = this.options.getAgentPresets()
       const presetId = agentPresets === undefined
@@ -757,23 +1179,33 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           maxTokens: this.options.maxOutputTokens,
         },
         setup: async agentCtx => {
-          await this.setupAgent(agentCtx, binding.workspace, presetId, selected, agentPresets)
+          await this.setupAgent(
+            agentCtx,
+            binding.workspace,
+            presetId,
+            externalPrincipalId(binding.principal),
+            selected,
+            agentPresets,
+          )
         },
       })
       signal.throwIfAborted()
-      const afterResumeAuthorization = checkController()
-      if (afterResumeAuthorization !== 'authorized') return authorizationFailure(afterResumeAuthorization)
+      if (recovery === undefined) {
+        const afterResumeAuthorization = checkController()
+        if (afterResumeAuthorization !== 'authorized') return authorizationFailure(afterResumeAuthorization)
+      }
 
       const agent = handle.agent
       const session = agent.session
-      compensateToAsk = async (): Promise<void> => {
+      await this.reconcileNativeFullPermissionReviewer(session)
+      compensateToAsk = async (): Promise<boolean> => {
         // Try the bundle first for its audit marker, then independently force
         // both execution knobs through their canonical writers. This remains
         // fail-closed even when a preset observer throws partway through.
         // Every operation is best-effort because the original mutation has
         // already become ambiguous.
         try {
-          permissionPresets.set(session, targets.workspace)
+          permissionPresets.set(session, targets.ask)
         } catch {}
         try {
           ensureSandboxMode(session, 'workspace-write')
@@ -781,39 +1213,171 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         try {
           ensureApprovalPolicy(session, 'ask')
         } catch {}
+        let reviewerReady = true
         try {
-          setApprovalReviewer(session, 'user')
-        } catch {}
+          await ensurePermissionReviewer(session, targets.ask, 'user')
+        } catch {
+          reviewerReady = false
+        }
         try {
-          await sessions.flush(session)
-        } catch {}
+          const flushed = await sessions.flush(session)
+          return reviewerReady
+            && flushed
+            && currentPermissionLevel(permissionPresets, targets, session.events) === 'ask'
+        } catch {
+          return false
+        }
+      }
+      const recoveryReply = (
+        input: ModelCommandReply,
+        mode: PermissionDispatchRecovery,
+      ): InboundProcessResult => {
+        if (!authorizeTerminalReply()) return retryPermissionRecovery(mode)
+        return preservePermissionRecovery(reply(input, true), mode)
+      }
+      const reportPermissionFailure = (safeAskPersisted: boolean): InboundProcessResult => {
+        if (!safeAskPersisted) return retryPermissionRecovery('failure-notice')
+        return preservePermissionRecovery(reply({
+          text: '权限切换失败；已安全恢复并持久化为请求批准（ask）。请重新发送 /permissions 核对。',
+          format: 'plain',
+        }, true), 'failure-notice')
+      }
+      const reportCommittedReplyFailure = (safeAskPersisted: boolean): InboundProcessResult => {
+        if (!safeAskPersisted) return retryPermissionRecovery('failure-notice')
+        const authorization = checkController()
+        if (authorization !== 'authorized') return retryPermissionRecovery('failure-notice')
+        signal.throwIfAborted()
+        try {
+          this.options.replyCommand(binding, envelope.eventId, {
+            text: '权限切换的成功回复入队失败；为避免静默保留新权限，已安全恢复并持久化为请求批准（ask）。请重新发送 /permissions 核对。',
+            format: 'plain',
+          }, `inbound:${envelope.eventId}:reply`)
+          return { outcome: 'processed' }
+        } catch {
+          return retryPermissionRecovery('failure-notice')
+        }
+      }
+      if (recovery === 'cancelled' || recovery === 'failure-notice') {
+        mutationAttempted = true
+        const safeAskPersisted = await compensateToAsk()
+        signal.throwIfAborted()
+        if (!safeAskPersisted) return retryPermissionRecovery(recovery)
+        return recoveryReply({
+          text: recovery === 'cancelled'
+            ? '权限切换已停止；已安全恢复并持久化为请求批准（ask）。'
+            : '权限切换未完成；已安全恢复并持久化为请求批准（ask）。请重新发送 /permissions 核对。',
+          format: 'plain',
+        }, recovery)
+      }
+      if (recovery === 'commit' && action.kind !== 'switch') {
+        mutationAttempted = true
+        const safeAskPersisted = await compensateToAsk()
+        signal.throwIfAborted()
+        if (!safeAskPersisted) return retryPermissionRecovery('commit')
+        return recoveryReply({
+          text: '权限恢复记录无效；已安全保持并持久化为请求批准（ask）。请重新选择。',
+          format: 'plain',
+        }, 'commit')
+      }
+      if (action.kind === 'invalid' || action.kind === 'warn-full') {
+        return retryPermissionRecovery(recovery ?? 'failure-notice')
+      }
+      const currentStateHash = permissionStateHash(session.events, targets.tableFingerprint)
+      const beforeLevel = currentPermissionLevel(permissionPresets, targets, session.events)
+      const recoveredCommittedTarget = recovery === 'commit'
+        && action.kind === 'switch'
+        && beforeLevel === action.level
+      if (recovery === 'commit' && action.kind === 'switch') {
+        if (recoveredCommittedTarget) {
+          if (!authorizeTerminalReply()) {
+            mutationAttempted = true
+            await compensateToAsk()
+            signal.throwIfAborted()
+            return retryPermissionRecovery('commit')
+          }
+          const recoveredReply = reply({
+            text: `已恢复确认：当前为 ${permissionLevelLabel(beforeLevel)}。`,
+            format: 'plain',
+          }, true)
+          if (recoveredReply.outcome === 'processed') return recoveredReply
+          mutationAttempted = true
+          await compensateToAsk()
+          signal.throwIfAborted()
+          return retryPermissionRecovery('commit')
+        }
+        // The dispatch fence may have been written before the first permission
+        // event. Only an already-durable target proves that replay is a
+        // terminal reconciliation. Otherwise converge to ask; never recreate
+        // a possibly cancelled elevation from the original command text. This
+        // recovery decision deliberately precedes picker TTL/state checks:
+        // stale callback metadata must not strand a partial permission state.
+        mutationAttempted = true
+        const safeAskPersisted = await compensateToAsk()
+        signal.throwIfAborted()
+        if (!safeAskPersisted) return retryPermissionRecovery('commit')
+        return recoveryReply({
+          text: '权限切换在确认持久化前中断；已安全保持并持久化为请求批准（ask）。请重新选择。',
+          format: 'plain',
+        }, 'commit')
+      }
+      if (pickerGuard !== undefined && !recoveredCommittedTarget
+        && currentStateHash !== pickerGuard.expectedStateHash) {
+        return reply({ text: '权限卡片已过期或状态已变化；当前权限未改变。请重新发送 /permissions。', format: 'plain' })
       }
       if (action.kind === 'show') {
-        return reply(permissionOverview(currentPermissionLevel(permissionPresets, targets, session.events)))
+        const level = currentPermissionLevel(permissionPresets, targets, session.events)
+        const emergencyStop = this.policy.getEmergencyStop()
+        if (emergencyStop.enabled) return authorizationFailure('revoked')
+        const issuedAt = Date.now()
+        const picker: PermissionPickerIntent | undefined = envelope.conversation.kind !== 'dm'
+          ? undefined
+          : {
+              operationId: permissionPickerOperationId(envelope.conversation, envelope.eventId),
+              issuedAt,
+              expiresAt: issuedAt + this.options.permissionPickerTtlMs,
+              current: level,
+              expectedStateHash: permissionStateHash(session.events, targets.tableFingerprint),
+              emergencyStopVersion: emergencyStop.version,
+              bindingVersion: binding.version,
+              sessionId: binding.sessionId,
+            }
+        return reply(permissionOverview(level, picker))
       }
 
+      if (pickerGuard !== undefined && !recoveredCommittedTarget && Date.now() >= pickerGuard.expiresAt) {
+        return reply({ text: '权限卡片已过期；当前权限未改变。请重新发送 /permissions。', format: 'plain' })
+      }
       const beforeMutationAuthorization = checkController()
       if (beforeMutationAuthorization !== 'authorized') return authorizationFailure(beforeMutationAuthorization)
-      const beforeLevel = currentPermissionLevel(permissionPresets, targets, session.events)
       markPermissionDispatch()
       signal.throwIfAborted()
       const fencedAuthorization = checkController()
       if (fencedAuthorization !== 'authorized') return authorizationFailure(fencedAuthorization)
+      const emergencyFence = checkEmergencyStopVersion(pickerGuard?.emergencyStopVersion)
+      if (emergencyFence !== 'authorized') return authorizationFailure(emergencyFence)
+      // A callback can enter the durable Inbox just before its deadline and
+      // then wait on workspace/preset/session I/O. Recheck at the final fence,
+      // immediately before any permission event is appended.
+      if (pickerGuard !== undefined && Date.now() >= pickerGuard.expiresAt) {
+        return reply({ text: '权限卡片已过期；当前权限未改变。请重新发送 /permissions。', format: 'plain' })
+      }
       mutationAttempted = true
       if (action.level === 'full') {
-        // Never expose a durable danger-full-access + ask window: close both
-        // reviewer and approval first, then widen the sandbox through the preset.
-        setApprovalReviewer(session, 'none')
+        // Close approval before widening the sandbox. Canonical full derives
+        // reviewer=none from its official preset; legacy dynamic bundles add
+        // their compatibility reviewer only after both execution knobs match.
         ensureApprovalPolicy(session, 'never')
         permissionPresets.set(session, targets.full)
         // Preset setters intentionally omit overrides that equal deployment
         // defaults. Persist the exact execution facts anyway so full access
         // cannot depend on an implicit default or a future default change.
         ensureSandboxMode(session, 'danger-full-access')
+        await ensurePermissionReviewer(session, targets.full, 'none')
       } else {
         // Confinement comes first when leaving full access. The preset setter
         // writes sandbox before approval; only then may the reviewer be enabled.
-        permissionPresets.set(session, targets.workspace)
+        const target = action.level === 'auto' ? targets.auto : targets.ask
+        permissionPresets.set(session, target)
         // Legacy/seeded sessions may have no explicit knob events even when
         // their effective defaults match this preset. Materialize both facts
         // before enabling either reviewer so auto is a coherent, replayable
@@ -821,49 +1385,75 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         ensureSandboxMode(session, 'workspace-write')
         ensureApprovalPolicy(session, 'ask')
         const reviewer: ApprovalReviewer = action.level === 'auto' ? 'auto-review' : 'user'
-        setApprovalReviewer(session, reviewer)
+        await ensurePermissionReviewer(session, target, reviewer)
       }
-      flushAttempted = true
+      const afterReviewerEmergencyFence = checkEmergencyStopVersion(pickerGuard?.emergencyStopVersion)
+      if (afterReviewerEmergencyFence !== 'authorized') {
+        await compensateToAsk()
+        signal.throwIfAborted()
+        return retryPermissionRecovery('failure-notice')
+      }
       const flushed = await sessions.flush(session)
       signal.throwIfAborted()
       if (!flushed) {
-        await compensateToAsk()
+        const safeAskPersisted = await compensateToAsk()
         signal.throwIfAborted()
-        return {
-          outcome: 'not-processed',
-          failureCode: 'permission-command-flush-failed',
-          retryable: false,
-        }
+        return reportPermissionFailure(safeAskPersisted)
       }
       const finalAuthorization = checkController()
-      if (finalAuthorization !== 'authorized') {
+      const finalEmergencyFence = checkEmergencyStopVersion(pickerGuard?.emergencyStopVersion)
+      if (finalAuthorization !== 'authorized' || finalEmergencyFence !== 'authorized') {
         await compensateToAsk()
         signal.throwIfAborted()
-        return authorizationFailure(finalAuthorization, true)
+        return retryPermissionRecovery('failure-notice')
       }
       const afterLevel = currentPermissionLevel(permissionPresets, targets, session.events)
       if (afterLevel !== action.level) {
-        await compensateToAsk()
+        const safeAskPersisted = await compensateToAsk()
         signal.throwIfAborted()
-        return { outcome: 'not-processed', failureCode: 'permission-command-mutation-failed', retryable: false }
+        return reportPermissionFailure(safeAskPersisted)
       }
-      return reply({
+      const successReply = reply({
         text: beforeLevel === afterLevel
           ? `当前已是 ${permissionLevelLabel(afterLevel)}。`
           : `已切换到 ${permissionLevelLabel(afterLevel)}。`,
         format: 'plain',
       }, true)
+      if (successReply.outcome === 'processed') return successReply
+      const safeAskPersisted = await compensateToAsk()
+      signal.throwIfAborted()
+      return reportCommittedReplyFailure(safeAskPersisted)
     } catch (error) {
+      if (recovery !== undefined) {
+        if (mutationAttempted) await compensateToAsk?.()
+        return retryPermissionRecovery(recovery)
+      }
       if (mutationAttempted) {
-        await compensateToAsk?.()
-        if (signal.aborted) throw signal.reason
-        return {
-          outcome: 'not-processed',
-          failureCode: flushAttempted ? 'permission-command-flush-failed' : 'permission-command-mutation-failed',
-          retryable: false,
+        const safeAskPersisted = await compensateToAsk?.() ?? false
+        if (signal.aborted || causedByUserCancellation(error)) {
+          return {
+            outcome: 'not-processed',
+            failureCode: permissionDispatchRecoveryCode('cancelled'),
+            retryable: true,
+          }
         }
+        if (errorChainHasName(error, 'ApprovalReviewerReaderUnavailableError')) {
+          return retryPermissionRecovery('failure-notice')
+        }
+        if (!safeAskPersisted) return retryPermissionRecovery('failure-notice')
+        return preservePermissionRecovery(reply({
+          text: '权限切换失败；已安全恢复并持久化为请求批准（ask）。请重新发送 /permissions 核对。',
+          format: 'plain',
+        }, true), 'failure-notice')
       }
       if (signal.aborted) throw error
+      if (errorChainHasName(error, 'ApprovalReviewerReaderUnavailableError')) {
+        return {
+          outcome: 'not-processed',
+          failureCode: 'permission-reviewer-reader-unavailable',
+          retryable: true,
+        }
+      }
       const finalAuthorization = checkController()
       if (finalAuthorization !== 'authorized') return authorizationFailure(finalAuthorization)
       if (causedByDurableIdentity(error)) {
@@ -874,7 +1464,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         format: 'plain',
       })
     } finally {
-      await handle?.dispose()
+      await this.disposeAfterReplyBoundary(binding.sessionId, handle)
     }
   }
 
@@ -887,7 +1477,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     const agents = this.ctx.get('agents')
     const sessions = this.ctx.get('sessions')
     if (agents === undefined || sessions === undefined) throw new Error('assistant-delivery: agents and sessions services are required')
-    const id = sessionId(input.envelope.conversation, input.generation)
+    const id = sessionId(this.options.sessionNamespace, input.envelope.conversation, input.generation)
     const workspace = input.previous?.workspace ?? this.options.workspace
     const requestedPreset = input.previous?.agentPreset ?? this.options.agentPreset
     const agentPresets = this.options.getAgentPresets()
@@ -897,16 +1487,54 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     await ensureWorkspace(workspace)
     const selected = agentSelection(toModelRoute(this.options.getModelSelection(input.envelope.conversation)
       ?? { provider: this.options.provider, model: this.options.model }))
+    const setup = async (agentCtx: Agent['ctx']): Promise<void> => {
+      await this.setupAgent(
+        agentCtx,
+        workspace,
+        presetId,
+        externalPrincipalId(input.envelope.principal),
+        selected,
+        agentPresets,
+      )
+    }
     let handle: AgentHandle | undefined
+    let adopted = false
     try {
-      handle = await agents.create({ sessionId: id,
-        meta: { cwd: workspace, agentPreset: presetId },
-        agentOptions: { provider: selected.provider, model: selected.model,
-          maxTokens: this.options.maxOutputTokens }, signal: input.signal,
-        setup: async agentCtx => {
-          await this.setupAgent(agentCtx, workspace, presetId, selected, agentPresets)
-        } })
-      await sessions.flush(handle.agent.session)
+      const agentOptions = {
+        provider: selected.provider,
+        model: selected.model,
+        maxTokens: this.options.maxOutputTokens,
+      }
+      const persistence = this.ctx.get('sessionPersistence') as undefined | {
+        list(signal?: AbortSignal): Promise<readonly { id: SessionId }[]>
+      }
+      const persisted = persistence === undefined
+        ? false
+        : (await persistence.list(input.signal)).some(header => String(header.id) === String(id))
+      if (persisted) {
+        handle = await agents.resume({
+          resumeSessionId: id,
+          agentOptions,
+          signal: input.signal,
+          setup,
+        })
+        adopted = true
+      }
+      if (handle === undefined) {
+        handle = await agents.create({
+          sessionId: id,
+          meta: { cwd: workspace, agentPreset: presetId },
+          agentOptions,
+          signal: input.signal,
+          setup,
+        })
+      }
+      const session = handle.agent.session
+      if (adopted) assertAdoptableUnstartedSession(session, workspace, presetId)
+      await this.reconcileNativeFullPermissionReviewer(session)
+      if (!await sessions.flush(session)) {
+        throw new Error('assistant-delivery: newly created Agent session was not durable')
+      }
       return { sessionId: String(id), workspace, agentPreset: presetId,
         policyRef: input.previous?.policyRef ?? this.options.policyRef }
     } finally {
@@ -923,7 +1551,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     const imageCount = (envelope.attachments ?? [])
       .filter(attachment => attachment.resourceType === 'image').length
     if (envelope.kind === 'command') {
-      return { outcome: 'prepared', message: { imageAttachments: [] } }
+      return { outcome: 'prepared', message: {
+        imageAttachments: [],
+        ...(context.permissionDispatchRecovery === undefined
+          ? {}
+          : { permissionDispatchRecovery: context.permissionDispatchRecovery }),
+      } }
     }
     const selected = toModelRoute(this.options.getModelSelection(envelope.conversation)
       ?? { provider: this.options.provider, model: this.options.model })
@@ -965,22 +1598,304 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           ...(result.retryAfterMs === undefined ? {} : { retryAfterMs: result.retryAfterMs }) }
   }
 
-  async process(
+  private replySessionCommand(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    reply: ModelCommandReply,
+    signal: AbortSignal,
+    markDispatching: MarkInboundDispatching | undefined,
+  ): InboundProcessResult {
+    if (markDispatching === undefined) {
+      return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+    }
+    signal.throwIfAborted()
+    markDispatching()
+    signal.throwIfAborted()
+    this.options.replyCommand(binding, envelope.eventId, reply)
+    return { outcome: 'processed' }
+  }
+
+  private sessionHelp(native: readonly CommandDescriptor[]): string {
+    const lines = [
+      '会话命令：',
+      '- /new（/clear）：开始空白新会话；旧会话保留。',
+      '- /stop：停止当前任务；当前会话与已完成上下文保留。',
+      '- /status（/session）：查看当前 session、上下文与模型。',
+      '- /model：查看或切换模型；上下文保留。',
+      '- /permission：查看或切换运行权限。',
+      '- /help：显示当前实际可用命令。',
+    ]
+    const visible = native.filter(command => SAFE_NATIVE_COMMANDS.has(command.name))
+    if (visible.length > 0) {
+      lines.push('', 'DSH / 当前 preset 命令：')
+      for (const command of visible) lines.push(`- /${command.name}：${command.description}`)
+    }
+    return lines.join('\n')
+  }
+
+  private async runSessionCommand(
+    command: ParsedDeliveryCommand,
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
     signal: AbortSignal,
+    markDispatching: MarkInboundDispatching | undefined,
+  ): Promise<InboundProcessResult> {
+    const args = command.rawInput.trim()
+    const local = new Set(['clear', 'help', 'new', 'session', 'status', 'stop'])
+    if (local.has(command.name) && args !== '') {
+      return this.replySessionCommand(binding, envelope, {
+        text: `/${command.name} 不接受参数。发送 /help 查看用法。`,
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    const agents = this.ctx.get('agents')
+    const sessions = this.ctx.get('sessions')
+    if (agents === undefined || sessions === undefined) {
+      return { outcome: 'not-processed', failureCode: 'agent-runtime-unavailable', retryable: true }
+    }
+    const selectedRoute = toModelRoute(this.options.getModelSelection(envelope.conversation)
+      ?? { provider: this.options.provider, model: this.options.model })
+    const selected = agentSelection(selectedRoute)
+    let handle: AgentHandle | undefined
+    let resumed = false
+    let nativeDispatchStarted = false
+    const authorizationFailure = (): InboundNotProcessedResult | undefined => {
+      try {
+        return this.options.isInboundAuthorized(binding, envelope)
+          ? undefined
+          : { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
+      } catch {
+        return { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: true }
+      }
+    }
+    try {
+      const agentPresets = this.options.getAgentPresets()
+      const presetId = agentPresets === undefined
+        ? binding.agentPreset
+        : (await agentPresets.resolve(binding.agentPreset)).id
+      await requireWorkspace(binding.workspace)
+      handle = await agents.resume({
+        resumeSessionId: SessionId(binding.sessionId),
+        signal,
+        agentOptions: {
+          provider: selected.provider,
+          model: selected.model,
+          maxTokens: this.options.maxOutputTokens,
+        },
+        setup: async agentCtx => {
+          await this.setupAgent(
+            agentCtx,
+            binding.workspace,
+            presetId,
+            externalPrincipalId(binding.principal),
+            selected,
+            agentPresets,
+          )
+        },
+      })
+      resumed = true
+      signal.throwIfAborted()
+      const agent = handle.agent
+      const commands = this.ctx.get('commands') as CommandRuntime | undefined
+      const native = commands?.list(agent) ?? []
+      const revoked = authorizationFailure()
+      if (revoked !== undefined) return revoked
+      if (command.name === 'help') {
+        return this.replySessionCommand(binding, envelope, {
+          text: this.sessionHelp(native),
+          format: 'plain',
+        }, signal, markDispatching)
+      }
+      if (command.name === 'status' || command.name === 'session') {
+        const messages = agent.session.deriveMessages().length
+        const turns = agent.session.events.filter(event => event.type === 'turn/end').length
+        return this.replySessionCommand(binding, envelope, {
+          text: [
+            '当前会话',
+            `- 第 ${binding.generation} 代（${sessionFingerprint(binding.sessionId)}）`,
+            `- 状态：${agent.status === 'idle' ? '空闲' : '运行中'}`,
+            `- 上下文消息：${messages}`,
+            `- 已记录轮次：${turns}`,
+            `- 模型：${routeLabel(selectedRoute)}`,
+            '',
+            '/new 会开始空白新 session 并保留旧会话；/stop 只停止当前任务，不清空上下文。',
+          ].join('\n'),
+          format: 'plain',
+        }, signal, markDispatching)
+      }
+      const descriptor = SAFE_NATIVE_COMMANDS.has(command.name)
+        ? native.find(candidate => candidate.name === command.name)
+        : undefined
+      if (commands === undefined || descriptor === undefined) {
+        return this.replySessionCommand(binding, envelope, {
+          text: `未知命令 /${command.name}。发送 /help 查看当前实际可用命令。`,
+          format: 'plain',
+        }, signal, markDispatching)
+      }
+      if ((envelope.attachments?.length ?? 0) > 0) {
+        return this.replySessionCommand(binding, envelope, {
+          text: `当前渠道暂不支持为 /${command.name} 附带文件或图片。`,
+          format: 'plain',
+        }, signal, markDispatching)
+      }
+      if (markDispatching === undefined) {
+        return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+      }
+      signal.throwIfAborted()
+      const preExecutionAuthorization = authorizationFailure()
+      if (preExecutionAuthorization !== undefined) return preExecutionAuthorization
+      markDispatching()
+      nativeDispatchStarted = true
+      const execution = await commands.execute(agent, envelope.text, [], signal)
+      signal.throwIfAborted()
+      if (execution === undefined) {
+        return {
+          outcome: 'not-processed',
+          failureCode: 'native-command-unresolved-after-dispatch',
+          retryable: false,
+        }
+      }
+      if (!await sessions.flush(agent.session)) {
+        return {
+          outcome: 'not-processed',
+          failureCode: 'command-session-flush-failed',
+          retryable: false,
+        }
+      }
+      signal.throwIfAborted()
+      const finalAuthorization = authorizationFailure()
+      if (finalAuthorization !== undefined) return { ...finalAuthorization, retryable: false }
+      const result = execution.result
+      this.options.replyCommand(binding, envelope.eventId, {
+        text: result?.text ?? (result?.kind === 'error'
+          ? `/${command.name} 未完成。`
+          : `/${command.name} 已完成。`),
+        format: 'plain',
+      })
+      return { outcome: 'processed' }
+    } catch (error) {
+      if (signal.aborted || causedByUserCancellation(error)) throw error
+      if (nativeDispatchStarted) {
+        this.ctx.logger.warn(
+          `assistant-delivery: native command /${command.name} became ambiguous for session `
+          + sessionFingerprint(binding.sessionId),
+        )
+        return {
+          outcome: 'not-processed',
+          failureCode: 'native-command-execution-ambiguous',
+          retryable: false,
+        }
+      }
+      if (resumed) {
+        return {
+          outcome: 'not-processed',
+          failureCode: 'session-command-runtime-failed',
+          retryable: true,
+        }
+      }
+      const failureCode = sessionResumeFailureCode(error)
+      this.ctx.logger.warn(
+        `assistant-delivery: ${failureCode} for session ${sessionFingerprint(binding.sessionId)}`,
+      )
+      try {
+        return this.replySessionCommand(binding, envelope, {
+          text: [
+            '当前会话暂时无法恢复；原历史未删除。',
+            `- 会话：第 ${binding.generation} 代（${sessionFingerprint(binding.sessionId)}）`,
+            `- 诊断：${failureCode}`,
+            '',
+            '请先修复或升级对应 DSH 插件后重试；也可发送 /new 开始空白新会话，旧会话仍会保留。',
+          ].join('\n'),
+          format: 'plain',
+        }, signal, markDispatching)
+      } catch {
+        return {
+          outcome: 'not-processed',
+          failureCode: 'session-diagnostic-reply-failed',
+          retryable: failureCode !== 'agent-identity-mismatch' && failureCode !== 'session-persistence-corrupt',
+        }
+      }
+    } finally {
+      await this.disposeAfterReplyBoundary(binding.sessionId, handle)
+    }
+  }
+
+  async process(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    outerSignal: AbortSignal,
     prepared?: Readonly<PreparedInboundMessage>,
     markDispatching?: MarkInboundDispatching,
   ): Promise<InboundProcessResult> {
-    if (envelope.kind === 'command' && envelope.text.trim() === '/new') return { outcome: 'processed' }
-    const permissions = permissionCommand(envelope)
+    const sessionCommand = parseDeliveryCommand(envelope)
+    if (envelope.kind === 'command' && sessionCommand === undefined) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '命令格式无效。命令必须以小写 /name 开头，并使用普通空格分隔参数；发送 /help 查看用法。',
+        format: 'plain',
+      }, outerSignal, markDispatching)
+    }
+    if (isExactDeliveryCommand(sessionCommand, 'new', 'clear')) {
+      return this.replySessionCommand(binding, envelope, {
+        text: `已开始新会话（第 ${binding.generation} 代，${sessionFingerprint(binding.sessionId)}）；`
+          + '旧会话已保留。新 session 的对话上下文为空。',
+        format: 'plain',
+      }, outerSignal, markDispatching)
+    }
+    if (isExactDeliveryCommand(sessionCommand, 'stop')) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '已处理停止请求；当前 session 与已完成上下文保留。',
+        format: 'plain',
+      }, outerSignal, markDispatching)
+    }
+    const control = this.beginSessionControl(binding.sessionId, outerSignal)
+    try {
+      return await this.processControlled(
+        binding,
+        envelope,
+        control.controller.signal,
+        sessionCommand,
+        prepared,
+        markDispatching,
+      )
+    } catch (error) {
+      if (control.command !== undefined && causedByUserCancellation(error)) {
+        return permissionCommand(sessionCommand) === undefined
+          ? { outcome: 'processed' }
+          : {
+              outcome: 'not-processed',
+              failureCode: permissionDispatchRecoveryCode('cancelled'),
+              retryable: true,
+            }
+      }
+      throw error
+    } finally {
+      this.endSessionControl(binding.sessionId, control)
+    }
+  }
+
+  private async processControlled(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    sessionCommand: ParsedDeliveryCommand | undefined,
+    prepared?: Readonly<PreparedInboundMessage>,
+    markDispatching?: MarkInboundDispatching,
+  ): Promise<InboundProcessResult> {
+    const permissions = permissionCommand(sessionCommand)
     if (permissions !== undefined) {
       if (markDispatching === undefined) {
         return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
       }
-      return await this.runPermissionCommand(permissions, binding, envelope, signal, markDispatching)
+      return await this.runPermissionCommand(
+        permissions,
+        binding,
+        envelope,
+        signal,
+        markDispatching,
+        prepared?.permissionDispatchRecovery,
+      )
     }
-    const command = modelCommand(envelope)
+    const command = modelCommand(sessionCommand)
     if (command !== undefined) {
       const llm = this.ctx.get('llm')
       if (llm === undefined) {
@@ -995,6 +1910,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         this.options.replyCommand(binding, envelope.eventId, reply)
         return { outcome: 'processed' }
       } catch (error) {
+        if (signal.aborted || causedByUserCancellation(error)) throw error
         if (reply?.format === 'model-picker' && reply.fallbackText !== undefined
           && error instanceof DeliveryStoreError
           && (error.code === 'invalid-intent' || error.code === 'invalid-binding')) {
@@ -1007,6 +1923,9 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         }
         return modelCommandFailure(error)
       }
+    }
+    if (sessionCommand !== undefined) {
+      return await this.runSessionCommand(sessionCommand, binding, envelope, signal, markDispatching)
     }
     const imageDescriptorCount = (envelope.attachments ?? [])
       .filter(attachment => attachment.resourceType === 'image').length
@@ -1056,8 +1975,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let dispatched = false
     let removeAbort: (() => void) | undefined
     let removeProgress: (() => void) | undefined
+    let progressOpen = true
     let progressQueue = Promise.resolve()
     const publishProgress = (update: DeliveryProgressUpdate): void => {
+      if (!progressOpen) return
       progressQueue = progressQueue
         .then(async () => {
           if (checkAuthorization() !== 'authorized') return
@@ -1076,7 +1997,14 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         agentOptions: { provider: selected.provider, model: selected.model,
           maxTokens: this.options.maxOutputTokens },
         setup: async agentCtx => {
-          await this.setupAgent(agentCtx, binding.workspace, presetId, selected, agentPresets)
+          await this.setupAgent(
+            agentCtx,
+            binding.workspace,
+            presetId,
+            externalPrincipalId(binding.principal),
+            selected,
+            agentPresets,
+          )
           const llm = this.ctx.get('llm')
           if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
           requireToolCapability(
@@ -1090,6 +2018,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           )
         } })
       const agent = handle.agent
+      await this.reconcileNativeFullPermissionReviewer(agent.session)
+      signal.throwIfAborted()
       const llm = this.ctx.get('llm')
       if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
       if (agent.session.deriveMessages().some(message => contentHasImage(message.content))
@@ -1107,32 +2037,44 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         if (update !== undefined) publishProgress(update)
       })
       publishProgress({ kind: 'started' })
-      const abort = () => agent.cancel({ kind: 'hook', reason: 'assistant-delivery-signal' })
+      const abort = () => {
+        const command = this.activeSessionControls.get(binding.sessionId)?.command
+        agent.cancel(command === undefined
+          ? { kind: 'hook', reason: 'assistant-delivery-signal' }
+          : { kind: 'user' })
+      }
       signal.addEventListener('abort', abort, { once: true })
       removeAbort = () => signal.removeEventListener('abort', abort)
+      signal.throwIfAborted()
       const authorizationFailure = preDispatchAuthorizationFailure()
       if (authorizationFailure !== undefined) return authorizationFailure
       markDispatching()
       // Once the durable marker exists, even a synchronous followup failure is ambiguous:
       // implementations may enqueue before throwing, so no retry is safe.
       dispatched = true
-      agent.followup(createUserMessage({ content, source: {
+      const message = createUserMessage({ content, source: {
         kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId,
         trust: 'untrusted',
-      } }))
-      await agent.whenIdle()
-      const output = finalAssistant(agent.session.events, from)
-      await sessions.flush(agent.session)
+      } })
+      const deliveryTurn = await this.followupTurn(agent, message)
+      const output = finalAssistant(agent.session.events, from, deliveryTurn)
+      if (!await sessions.flush(agent.session)) {
+        publishProgress({ kind: 'failed', code: 'session-persistence-unavailable' })
+        return { outcome: 'not-processed', failureCode: 'session-flush-failed', retryable: false }
+      }
+      const cancelled = this.activeSessionControls.get(binding.sessionId)?.command
+      if (cancelled !== undefined || output.stopped) {
+        publishProgress({ kind: 'failed', code: cancelled === 'new' ? 'new-session' : 'user-stopped' })
+        return { outcome: 'processed' }
+      }
       const finalAuthorization = checkAuthorization()
       if (finalAuthorization !== 'authorized') {
-        await progressQueue
         return finalAuthorization === 'revoked'
           ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
           : { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: false }
       }
       if (!output.completed) {
         publishProgress({ kind: 'failed', ...(output.failureCode === undefined ? {} : { code: output.failureCode }) })
-        await progressQueue
         return { outcome: 'not-processed', failureCode: 'agent-turn-incomplete', retryable: false }
       }
       // Agent answers are authored as Markdown (tables, bold, inline code), so request Markdown
@@ -1141,12 +2083,18 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         this.options.reply(agent, envelope.eventId, { text: output.text, format: 'markdown' })
       }
       publishProgress({ kind: 'completed' })
-      await progressQueue
       return { outcome: 'processed' }
     } catch (error) {
+      if (causedByUserCancellation(error)) {
+        if (handle !== undefined && !await sessions.flush(handle.agent.session)) {
+          return { outcome: 'not-processed', failureCode: 'session-flush-failed', retryable: false }
+        }
+        const command = this.activeSessionControls.get(binding.sessionId)?.command
+        publishProgress({ kind: 'failed', code: command === 'new' ? 'new-session' : 'user-stopped' })
+        return { outcome: 'processed' }
+      }
       if (dispatched) {
         publishProgress({ kind: 'failed' })
-        await progressQueue
         throw new Error(`assistant-delivery: Agent turn became ambiguous: ${String(error)}`, { cause: error })
       }
       if (causedByDurableIdentity(error)) {
@@ -1168,11 +2116,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           return { outcome: 'not-processed', failureCode: 'tool-capability-notice-failed', retryable: true }
         }
       }
+      this.ctx.logger.warn(
+        `assistant-delivery: ${sessionResumeFailureCode(error)} for session ${sessionFingerprint(binding.sessionId)}`,
+      )
       return { outcome: 'not-processed', failureCode: 'agent-resume-failed', retryable: true }
     } finally {
       removeAbort?.()
       removeProgress?.()
-      await handle?.dispose()
+      progressOpen = false
+      await this.disposeAfterReplyBoundary(binding.sessionId, handle)
     }
   }
 }

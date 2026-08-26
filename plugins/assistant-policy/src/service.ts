@@ -1,10 +1,18 @@
 import { isAbsolute } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { PermissionPresetService } from '@deepseek-ai/dsh-permission-presets'
+import type { Session } from '@deepseek-ai/dsh-session'
 import Schema from '@deepseek-ai/schemastery'
 import type { ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
 import { registerAutoReviewAnswerer, type AutoReviewConfig } from './auto-review.js'
-import { getApprovalReviewer } from './approval-reviewer.js'
+import {
+  approvalPermissionFingerprint,
+  approvalPermissionStateOf,
+  getApprovalReviewer,
+  setApprovalReviewer,
+} from './approval-reviewer.js'
+import { registerApprovalReviewerSessionEvent } from './session-event-registration.js'
 import {
   AUTO_REVIEW_APPROVAL_REASON,
   HUMAN_APPROVAL_REASON,
@@ -137,8 +145,57 @@ declare module '@deepseek-ai/cordis' {
 }
 
 interface BoundInitiator {
-  readonly value: PolicyInitiator
+  readonly initiator: PolicyInitiator
+  readonly principal?: string
   readonly token: symbol
+}
+
+export type NativeFullReviewerReconciliation = 'not-applicable' | 'ready' | 'unavailable'
+
+const NATIVE_FULL_ADOPTIONS_GLOBAL_KEY = '__dshEnhancedAssistantPolicyNativeFullAdoptionsV1__'
+const NATIVE_FULL_UNSETTLED_GLOBAL_KEY = '__dshEnhancedAssistantPolicyNativeFullUnsettledV1__'
+
+interface NativeFullUnsettledState {
+  readonly fingerprint: string
+  readonly phase: 'compensating' | 'widened'
+}
+
+interface AssistantPolicySharedGlobal {
+  [NATIVE_FULL_ADOPTIONS_GLOBAL_KEY]?: WeakMap<Session, Promise<NativeFullReviewerReconciliation>>
+  [NATIVE_FULL_UNSETTLED_GLOBAL_KEY]?: WeakMap<Session, NativeFullUnsettledState>
+}
+
+/**
+ * One process-wide barrier, including across HMR module copies. A service-local
+ * map lets a replacement instance observe reviewer=none and execute before the
+ * older instance's durability barrier settles.
+ */
+function sharedNativeFullAdoptions(): WeakMap<Session, Promise<NativeFullReviewerReconciliation>> {
+  const shared = globalThis as unknown as AssistantPolicySharedGlobal
+  const current = shared[NATIVE_FULL_ADOPTIONS_GLOBAL_KEY]
+  if (current !== undefined) return current
+  const created = new WeakMap<Session, Promise<NativeFullReviewerReconciliation>>()
+  Object.defineProperty(shared, NATIVE_FULL_ADOPTIONS_GLOBAL_KEY, {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: created,
+  })
+  return created
+}
+
+function sharedNativeFullUnsettled(): WeakMap<Session, NativeFullUnsettledState> {
+  const shared = globalThis as unknown as AssistantPolicySharedGlobal
+  const current = shared[NATIVE_FULL_UNSETTLED_GLOBAL_KEY]
+  if (current !== undefined) return current
+  const created = new WeakMap<Session, NativeFullUnsettledState>()
+  Object.defineProperty(shared, NATIVE_FULL_UNSETTLED_GLOBAL_KEY, {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: created,
+  })
+  return created
 }
 
 function denial(reasonCode: PolicyDecision['reasonCode']): PolicyDecision {
@@ -162,10 +219,16 @@ export class AssistantPolicyService extends Service {
   private readonly budgets: ReadonlyMap<string, PolicyBudgetConfig>
   private readonly toolDefaultEffect: 'deny' | 'allow'
   private readonly initiators = new WeakMap<Agent, BoundInitiator>()
+  private readonly nativeFullAdoptions = sharedNativeFullAdoptions()
+  private readonly nativeFullUnsettled = sharedNativeFullUnsettled()
+  private readonly reviewerEventRegistration: ReturnType<typeof registerApprovalReviewerSessionEvent>
+  private readonly policyContext: Context
   private active = true
 
   constructor(ctx: Context, input: Config, options: AssistantPolicyServiceOptions = {}) {
     super(ctx, 'assistantPolicy')
+    this.policyContext = ctx
+    this.reviewerEventRegistration = registerApprovalReviewerSessionEvent(ctx)
     let config: Config
     try {
       config = AssistantPolicyService.Config(input)
@@ -180,6 +243,18 @@ export class AssistantPolicyService extends Service {
       ...(options.now === undefined ? {} : { now: options.now }),
     })
     registerAutoReviewAnswerer(ctx, config.autoReview)
+
+    // PermissionPresetService predates AssistantPolicy's third permission
+    // dimension. Repair exact legacy native-full sessions at creation/resume,
+    // and keep the same promise as a tool-dispatch barrier so concurrent calls
+    // cannot observe reviewer=none before its durable flush settles.
+    ctx.inject(['sessions', 'permissionPresets'], (permissionCtx) => {
+      const adopt = (session: Session): void => {
+        void this.ensureNativeFullReviewer(permissionCtx, session)
+      }
+      permissionCtx.on('session/created', adopt)
+      for (const session of permissionCtx.sessions.list()) adopt(session)
+    })
 
     ctx.effect(() => () => {
       this.active = false
@@ -204,13 +279,37 @@ export class AssistantPolicyService extends Service {
         const agent = execution.agent
         const workspace = agent?.session.header.cwd
         if (agent === undefined || workspace === undefined || !isAbsolute(workspace)) return next()
+        const adoption = await this.ensureNativeFullReviewer(toolsCtx, agent.session)
+        if (adoption === 'unavailable') {
+          return {
+            kind: 'deny',
+            reason: 'assistant-policy: full-access reviewer migration could not be persisted; no tool was executed',
+          }
+        }
+        // `ready` only certifies the compatibility write's durability. A Web
+        // permission change can win after that promise resolves but before
+        // this continuation runs, so authorization must always fold the live
+        // three-dimensional state again at the final synchronous boundary.
         if (getApprovalReviewer(agent.session) === 'none') return next()
         const risk = classifyToolRisk({
           name: execution.name,
           arguments: execution.arguments,
           workspace,
         })
-        if (risk === 'allow' || risk === 'defer-native-approval') return next()
+        if (risk === 'allow') return next()
+        const permission = approvalPermissionStateOf(agent.session.events)
+        const configuredApproval = toolsCtx.get('approval')?.config.policy
+        const approval = permission.approvalPolicyEvent
+          ? permission.approvalPolicy
+          : configuredApproval
+        if (approval === 'never') {
+          return {
+            kind: 'deny',
+            reason: 'assistant-policy: [approval-disabled] approval is disabled by session policy; '
+              + 'no user approval was requested',
+          }
+        }
+        if (risk === 'defer-native-approval') return next()
         return {
           kind: 'ask',
           reason: risk === 'ask-review' ? AUTO_REVIEW_APPROVAL_REASON : HUMAN_APPROVAL_REASON,
@@ -218,6 +317,160 @@ export class AssistantPolicyService extends Service {
       })
       toolsCtx.tools.guard(createPolicyToolGuard(this))
     })
+  }
+
+  /**
+   * Join or initiate the one process-wide durability barrier for an exact
+   * legacy native-full session. `ready` means its reviewer state crossed the
+   * shared flush barrier; `not-applicable` means no compatibility event was
+   * required; `unavailable` is fail-closed after persistence/compensation
+   * could not establish a usable terminal state.
+   */
+  async reconcileNativeFullReviewer(session: Session): Promise<NativeFullReviewerReconciliation> {
+    if (!this.active) return 'unavailable'
+    return await this.ensureNativeFullReviewer(this.policyContext, session)
+  }
+
+  private nativeFullCandidate(ctx: Context, session: Session): boolean {
+    const state = approvalPermissionStateOf(session.events)
+    if (state.reviewerEvent
+      || !state.sandboxModeEvent || state.sandboxMode !== 'danger-full-access'
+      || !state.approvalPolicyEvent || state.approvalPolicy !== 'never') return false
+    const selected = session.events.findLast(event => event.type === 'permission/preset')?.data.preset
+    if (typeof selected !== 'string' || selected === '') return false
+    const presets = ctx.get('permissionPresets') as PermissionPresetService | undefined
+    if (presets === undefined) return false
+    try {
+      const spec = presets.resolve(selected)
+      return spec.sandbox === 'danger-full-access'
+        && spec.approval === 'never'
+        && presets.current(session.events) === selected
+    } catch {
+      return false
+    }
+  }
+
+  private async ensureNativeFullReviewer(
+    ctx: Context,
+    session: Session,
+  ): Promise<NativeFullReviewerReconciliation> {
+    const inFlight = this.nativeFullAdoptions.get(session)
+    if (inFlight !== undefined) return await inFlight
+    const unsettled = this.nativeFullUnsettled.get(session)
+    if (unsettled !== undefined) {
+      if (approvalPermissionFingerprint(session.events) !== unsettled.fingerprint) {
+        // A later permission operation owns the session now. Never compensate
+        // over its new state merely because an older migration was ambiguous.
+        this.nativeFullUnsettled.delete(session)
+      } else {
+        const sessions = ctx.get('sessions')
+        if (sessions === undefined) return 'unavailable'
+        const recovery = Promise.resolve().then(async (): Promise<NativeFullReviewerReconciliation> => {
+          try {
+            await this.reviewerEventRegistration.assertReady()
+            if (approvalPermissionFingerprint(session.events) !== unsettled.fingerprint) {
+              this.nativeFullUnsettled.delete(session)
+              return 'unavailable'
+            }
+            let compensation = unsettled
+            if (unsettled.phase === 'widened') {
+              setApprovalReviewer(session, 'user')
+              compensation = {
+                fingerprint: approvalPermissionFingerprint(session.events),
+                phase: 'compensating',
+              }
+              this.nativeFullUnsettled.set(session, compensation)
+            }
+            if (await sessions.flush(session)
+              && approvalPermissionFingerprint(session.events) === compensation.fingerprint
+              && getApprovalReviewer(session) === 'user') {
+              this.nativeFullUnsettled.delete(session)
+            }
+          } catch {
+            // Keep the exact unsettled fingerprint for a later reader/flush retry.
+          }
+          // A caller that observed an ambiguous widening must retry after the
+          // conservative terminal state is durably established.
+          return 'unavailable'
+        })
+        this.nativeFullAdoptions.set(session, recovery)
+        try {
+          return await recovery
+        } finally {
+          if (this.nativeFullAdoptions.get(session) === recovery) {
+            this.nativeFullAdoptions.delete(session)
+          }
+        }
+      }
+    }
+    if (getApprovalReviewer(session) === 'none') return 'ready'
+    if (!this.nativeFullCandidate(ctx, session)) return 'not-applicable'
+    const sessions = ctx.get('sessions')
+    if (sessions === undefined) return 'unavailable'
+
+    const adoption = Promise.resolve().then(async (): Promise<NativeFullReviewerReconciliation> => {
+      try {
+        await this.reviewerEventRegistration.assertReady()
+      } catch {
+        return 'unavailable'
+      }
+      let expectedPermission: string | undefined
+      try {
+        if (!setApprovalReviewer(session, 'none') && getApprovalReviewer(session) !== 'none') {
+          return 'unavailable'
+        }
+        expectedPermission = approvalPermissionFingerprint(session.events)
+        this.nativeFullUnsettled.set(session, {
+          fingerprint: expectedPermission,
+          phase: 'widened',
+        })
+        if (await sessions.flush(session)) {
+          // A Web permission change may race the durability barrier. Never let
+          // the old full-state migration authorize a call after a newer
+          // downgrade or reviewer selection has won.
+          if (approvalPermissionFingerprint(session.events) === expectedPermission
+            && getApprovalReviewer(session) === 'none') {
+            this.nativeFullUnsettled.delete(session)
+            return 'ready'
+          }
+          this.nativeFullUnsettled.delete(session)
+          return 'not-applicable'
+        }
+      } catch {
+        // Fall through to the conservative in-memory compensation below.
+      }
+      // A newer Web/picker choice owns the state now. The failed older
+      // migration must deny its tool, but must not append reviewer=user over
+      // that newer choice merely because its own flush acknowledgement failed.
+      if (expectedPermission !== undefined
+        && approvalPermissionFingerprint(session.events) !== expectedPermission) {
+        this.nativeFullUnsettled.delete(session)
+        return 'unavailable'
+      }
+      try {
+        setApprovalReviewer(session, 'user')
+        const compensation: NativeFullUnsettledState = {
+          fingerprint: approvalPermissionFingerprint(session.events),
+          phase: 'compensating',
+        }
+        this.nativeFullUnsettled.set(session, compensation)
+        // The first flush may have thrown after committing reviewer=none.
+        // Best-effort a second barrier so a cold resume cannot observe only
+        // the widening half of this compatibility migration.
+        if (await sessions.flush(session)
+          && approvalPermissionFingerprint(session.events) === compensation.fingerprint
+          && getApprovalReviewer(session) === 'user') {
+          this.nativeFullUnsettled.delete(session)
+        }
+      } catch {}
+      return 'unavailable'
+    })
+    this.nativeFullAdoptions.set(session, adoption)
+    try {
+      return await adoption
+    } finally {
+      if (this.nativeFullAdoptions.get(session) === adoption) this.nativeFullAdoptions.delete(session)
+    }
   }
 
   private assertActive(): void {
@@ -426,10 +679,14 @@ export class AssistantPolicyService extends Service {
     }
   }
 
-  bindInitiator(agent: Agent, initiator: PolicyInitiator): () => void {
+  bindInitiator(agent: Agent, initiator: PolicyInitiator, principal?: string): () => void {
     this.assertActive()
     const previous = this.initiators.get(agent)
-    const binding = { value: initiator, token: Symbol('assistant-policy-initiator') }
+    const binding: BoundInitiator = {
+      initiator,
+      ...(principal === undefined ? {} : { principal }),
+      token: Symbol('assistant-policy-initiator'),
+    }
     this.initiators.set(agent, binding)
     let active = true
     return () => {
@@ -457,11 +714,17 @@ export class AssistantPolicyService extends Service {
     if (preset === undefined || preset === '') {
       return this.auditAgentIdentityFailure(action, resource, 'missing-agent-preset')
     }
+    const authority = this.initiators.get(agent)
     return this.authorize({
-      subject: { kind: 'agent', id: preset, workspace },
+      subject: {
+        kind: 'agent',
+        id: preset,
+        workspace,
+        ...(authority?.principal === undefined ? {} : { principal: authority.principal }),
+      },
       action,
       resource,
-      context: { initiator: this.initiators.get(agent)?.value ?? 'foreground' },
+      context: { initiator: authority?.initiator ?? 'foreground' },
     }, options)
   }
 
@@ -477,11 +740,17 @@ export class AssistantPolicyService extends Service {
     if (preset === undefined || preset === '') {
       return this.auditToolIdentityFailure(execution, 'missing-agent-preset')
     }
+    const authority = this.initiators.get(agent)
     const request: PolicyRequest = {
-      subject: { kind: 'agent', id: preset, workspace },
+      subject: {
+        kind: 'agent',
+        id: preset,
+        workspace,
+        ...(authority?.principal === undefined ? {} : { principal: authority.principal }),
+      },
       action: 'execute',
       resource: { kind: 'tool', id: execution.name },
-      context: { initiator: this.initiators.get(agent)?.value ?? 'foreground' },
+      context: { initiator: authority?.initiator ?? 'foreground' },
     }
     let decision = this.evaluate(request)
     if (decision.reasonCode === 'default-deny' && this.toolDefaultEffect === 'allow') {

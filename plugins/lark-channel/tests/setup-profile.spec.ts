@@ -5,7 +5,7 @@ import * as lark from '../src/index.ts'
 interface PolicyRuleShape {
   id: string
   effect: 'allow' | 'deny'
-  subject: { kind: string; id: string; workspace: string }
+  subject: { kind: string; id: string; workspace: string; principal?: string }
   actions: string[]
   resource: { kind: string; id: string }
   context: { initiators: string[] }
@@ -50,6 +50,1566 @@ const fixture = `
 `
 
 describe('Lark Web-profile onboarding patch', () => {
+  test('refreshes the foreground capability grant without requiring a configured Lark channel', () => {
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const enabled = refresh({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'enable',
+    })
+    const rows = parse(enabled, {
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+    })
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+      .config.assistantPolicy.rules
+    expect(rules.find((rule: { id: string }) => rule.id === 'dsh-enhanced-foreground-capability-*'))
+      .toMatchObject({
+        effect: 'allow',
+        subject: { kind: 'agent', id: '*', workspace: '*' },
+        actions: ['*'],
+        resource: { kind: '*', id: '*' },
+        context: { initiators: ['foreground'] },
+      })
+    expect(enabled).not.toContain('lark-owner-capability-')
+    expect(refresh({ profilePatch: enabled, dshHome: '/Users/test/.dsh', agentTools: 'enable' }))
+      .toBe(enabled)
+
+    const disabled = refresh({
+      profilePatch: enabled,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'disable',
+    })
+    expect(disabled).not.toContain('dsh-enhanced-foreground-capability-')
+    expect(disabled).toContain('keep-user-rule')
+  })
+
+  test('refreshes only managed Agent capability rules from the existing channel binding', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    expect(refresh).toBeTypeOf('function')
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    })
+    const before = parse(configured, {
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+    })
+
+    const enabled = refresh({
+      profilePatch: configured,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'enable',
+    })
+    const after = parse(enabled, {
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+    })
+    const beforeChannel = before.find((row: { id: string }) => row.id === 'dsh-enhanced-lark-channel')
+    const afterChannel = after.find((row: { id: string }) => row.id === 'dsh-enhanced-lark-channel')
+    const beforeCredentials = before.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain')
+    const afterCredentials = after.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain')
+    expect(afterChannel).toEqual(beforeChannel)
+    expect(afterCredentials).toEqual(beforeCredentials)
+
+    const rules = after.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+      .config.assistantPolicy.rules
+    expect(rules.find((rule: { id: string }) => rule.id === 'dsh-enhanced-foreground-capability-*'))
+      .toBeDefined()
+    expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-capability-*-secondary'))
+      .toMatchObject({ subject: { id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' } })
+    expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-tool-*-secondary'))
+      .toBeDefined()
+    expect(refresh({ profilePatch: enabled, dshHome: '/Users/test/.dsh', agentTools: 'enable' }))
+      .toBe(enabled)
+
+    expect(() => refresh({
+      profilePatch: configured,
+      dshHome: '/Users/test/.dsh',
+      account: 'primary',
+      agentTools: 'enable',
+    })).toThrow(/configured account.*secondary/i)
+
+    const disabled = refresh({
+      profilePatch: enabled,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'disable',
+    })
+    expect(disabled).not.toContain('dsh-enhanced-foreground-capability-')
+    expect(disabled).not.toContain('lark-foreground-capability-')
+    expect(disabled).not.toContain('lark-owner-capability-')
+    expect(disabled).not.toContain('lark-owner-tool-')
+    expect(disabled).toContain('lark-owner-reply-secondary')
+
+    const channelDisabled = enabled.replace(
+      /(id: dsh-enhanced-lark-channel[\s\S]*?\n\s+enabled:) true/u,
+      '$1 false',
+    )
+    expect(channelDisabled).not.toBe(enabled)
+    const disabledChannelRefresh = refresh({
+      profilePatch: channelDisabled,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'disable',
+    })
+    expect(disabledChannelRefresh).not.toContain('lark-owner-capability-')
+    expect(disabledChannelRefresh).not.toContain('lark-owner-tool-')
+    expect(disabledChannelRefresh).not.toContain('lark-owner-reply-')
+  })
+
+  test('refresh sweeps setup-managed external rules for every retired account id', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    })
+    const polluted = configured.replace('      budgets: []', `
+        - id: lark-owner-reply-retired
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [reply]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [external] }
+        - id: lark-owner-capability-*-retired
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: ["*"]
+          resource: { kind: "*", id: "*" }
+          context: { initiators: [external] }
+        - id: lark-owner-tool-*-retired
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [execute]
+          resource: { kind: tool, id: "*" }
+          context: { initiators: [external] }
+      budgets: []`)
+    expect(polluted).toContain('lark-owner-tool-*-retired')
+
+    const enabled = refresh({
+      profilePatch: polluted,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'enable',
+    })
+    expect(enabled).not.toContain('lark-owner-reply-retired')
+    expect(enabled).not.toContain('lark-owner-capability-*-retired')
+    expect(enabled).not.toContain('lark-owner-tool-*-retired')
+    expect(enabled).toContain('lark-owner-reply-secondary')
+    expect(enabled).toContain('lark-owner-tool-*-secondary')
+
+    const disabled = refresh({
+      profilePatch: polluted,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'disable',
+    })
+    expect(disabled).not.toContain('lark-owner-reply-retired')
+    expect(disabled).not.toContain('lark-owner-capability-*-retired')
+    expect(disabled).not.toContain('lark-owner-tool-*-retired')
+    expect(disabled).toContain('lark-owner-reply-secondary')
+    expect(disabled).not.toContain('lark-owner-tool-*-secondary')
+
+    const channelDisabled = polluted.replace(
+      /(id: dsh-enhanced-lark-channel[\s\S]*?\n\s+enabled:) true/u,
+      '$1 false',
+    )
+    const disabledChannel = refresh({
+      profilePatch: channelDisabled,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'disable',
+    })
+    expect(disabledChannel).not.toContain('lark-owner-reply-')
+    expect(disabledChannel).not.toContain('lark-owner-capability-')
+    expect(disabledChannel).not.toContain('lark-owner-tool-')
+  })
+
+  test('removes stale managed account grants when Lark is reconfigured to another account', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const primary = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_primary',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+    const secondary = configure({
+      profilePatch: primary,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_fedcba9876543210',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    })
+    expect(secondary).not.toContain('lark-owner-capability-*-primary')
+    expect(secondary).not.toContain('lark-owner-tool-*-primary')
+    expect(secondary).not.toContain('lark-owner-ingress-primary')
+    expect(secondary).not.toContain('lark-owner-reply-primary')
+    expect(secondary).not.toContain('lark-owner-approval-dsh-enhanced-personal-memory-primary')
+    expect(secondary).not.toContain('lark-channel-credential-primary')
+    expect(secondary).not.toContain('id: lark-app-secret-primary')
+    expect(secondary).toContain('lark-owner-capability-*-secondary')
+    expect(secondary).toContain('lark-owner-tool-*-secondary')
+
+    const disabled = configure({
+      profilePatch: secondary,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_fedcba9876543210',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+      agentTools: 'disable',
+    })
+    expect(disabled).not.toContain('dsh-enhanced-foreground-capability-*')
+    expect(disabled).not.toContain('lark-owner-capability-')
+    expect(disabled).not.toContain('lark-owner-tool-')
+  })
+
+  test('sweeps every structurally managed retired fixed grant and credential handle', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const secondaryInput = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    }
+    const secondary = configure({ profilePatch: fixture, ...secondaryInput })
+    const polluted = secondary
+      .replace('      budgets: []', `
+        - id: lark-channel-credential-primary
+          effect: allow
+          subject: { kind: background, id: dsh-enhanced-lark-channel }
+          actions: [credential.use]
+          resource: { kind: credential, id: lark-app-secret-primary }
+          context: { initiators: [background] }
+        - id: lark-owner-ingress-primary
+          effect: allow
+          subject: { kind: external, id: lark/primary/personal/ou_primary }
+          actions: [approval.decide, ingest]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [external] }
+        - id: lark-owner-approval-dsh-enhanced-personal-memory-primary
+          effect: allow
+          subject:
+            kind: background
+            id: dsh-enhanced-personal-memory
+            workspace: /Users/test/.dsh/assistant-workspace
+            principal: lark/primary/personal/ou_primary
+          actions: [approval.send]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [background] }
+        - id: custom-lark-channel-credential-user-defined
+          effect: allow
+          subject: { kind: background, id: local-user-plugin }
+          actions: [read]
+          resource: { kind: memory, id: private }
+          context: { initiators: [foreground] }
+        - id: custom-lark-owner-ingress-user-defined
+          effect: deny
+          subject: { kind: external, id: local:user-defined }
+          actions: [send]
+          resource: { kind: message, id: private }
+          context: { initiators: [foreground] }
+        - id: custom-lark-owner-approval-dsh-enhanced-personal-memory-user-defined
+          effect: deny
+          subject: { kind: background, id: local-user-plugin }
+          actions: [read]
+          resource: { kind: memory, id: private }
+          context: { initiators: [foreground] }
+      budgets: []`)
+      .replace('    handles:\n', `    handles:
+      - id: lark-app-secret-primary
+        consumers: [dsh-enhanced-lark-channel]
+        purposes: [connect]
+        maxLeaseMs: 86400000
+        provider: macos-keychain
+        service: dsh/lark/web/primary
+        account: primary
+      - id: custom-lark-app-secret-user-defined
+        consumers: [local-user-plugin]
+        purposes: [read]
+        maxLeaseMs: 1000
+        provider: macos-keychain
+        service: local/user/plugin
+        account: user-defined
+`)
+    expect(polluted).toContain('lark-owner-ingress-primary')
+    expect(polluted).toContain('id: lark-app-secret-primary')
+
+    const assertRetiredSweep = (profilePatch: string, currentAccount: string): void => {
+      expect(profilePatch).not.toContain('lark-channel-credential-primary')
+      expect(profilePatch).not.toContain('lark-owner-ingress-primary')
+      expect(profilePatch).not.toContain('lark-owner-approval-dsh-enhanced-personal-memory-primary')
+      expect(profilePatch).not.toContain('id: lark-app-secret-primary')
+      expect(profilePatch).toContain(`lark-channel-credential-${currentAccount}`)
+      expect(profilePatch).toContain(`lark-owner-ingress-${currentAccount}`)
+      expect(profilePatch).toContain(`id: lark-app-secret-${currentAccount}`)
+      expect(profilePatch).toContain('custom-lark-channel-credential-user-defined')
+      expect(profilePatch).toContain('custom-lark-owner-ingress-user-defined')
+      expect(profilePatch).toContain('custom-lark-owner-approval-dsh-enhanced-personal-memory-user-defined')
+      expect(profilePatch).toContain('id: custom-lark-app-secret-user-defined')
+    }
+
+    // Same-account setup and policy refresh used to leave every retired fixed
+    // rule and handle untouched because there was no account transition.
+    assertRetiredSweep(configure({ profilePatch: polluted, ...secondaryInput }), 'secondary')
+    assertRetiredSweep(refresh({
+      profilePatch: polluted,
+      dshHome: secondaryInput.dshHome,
+      agentTools: 'enable',
+    }), 'secondary')
+
+    // A later secondary -> tertiary migration must also remove primary debris;
+    // cleaning only the immediately previous account is insufficient.
+    const tertiary = configure({
+      profilePatch: polluted,
+      ...secondaryInput,
+      appId: 'cli_fedcba9876543210',
+      account: 'tertiary',
+      ownerUserId: 'ou_tertiary',
+      keychainService: 'dsh/lark/web/tertiary',
+      keychainAccount: 'tertiary',
+      agentTools: 'disable',
+    })
+    assertRetiredSweep(tertiary, 'tertiary')
+    expect(tertiary).not.toContain('lark-channel-credential-secondary')
+    expect(tertiary).not.toContain('lark-owner-ingress-secondary')
+    expect(tertiary).not.toContain('id: lark-app-secret-secondary')
+  })
+
+  test('fails closed on dangerous ambiguous retired fixed grants and handles', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    }
+    const configured = configure({ profilePatch: fixture, ...common })
+    const malformedRule = configured.replace('      budgets: []', `
+        - id: lark-owner-ingress-primary
+          effect: allow
+          subject: { kind: external, id: lark/primary/personal/ou_primary }
+          actions: [approval.decide, ingest]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [external, foreground] }
+      budgets: []`)
+    const changedPlaneRule = configured.replace('      budgets: []', `
+        - id: lark-owner-ingress-primary
+          effect: allow
+          subject: { kind: external, id: "*" }
+          actions: [execute]
+          resource: { kind: tool, id: "*" }
+          context: { initiators: [external] }
+      budgets: []`)
+    const malformedHandle = configured.replace('    handles:\n', `    handles:
+      - id: lark-app-secret-primary
+        consumers: [dsh-enhanced-lark-channel, local-user-plugin]
+        purposes: [connect]
+        maxLeaseMs: 86400000
+        provider: macos-keychain
+        service: dsh/lark/web/primary
+        account: primary
+`)
+
+    for (const profilePatch of [malformedRule, changedPlaneRule, malformedHandle]) {
+      expect(() => configure({ profilePatch, ...common, agentTools: 'disable' }))
+        .toThrow(/retired (?:fixed rule|credential handle).*ambiguous/iu)
+      expect(() => refresh({
+        profilePatch,
+        dshHome: common.dshHome,
+        agentTools: 'disable',
+      })).toThrow(/retired (?:fixed rule|credential handle).*ambiguous/iu)
+    }
+  })
+
+  test('fails closed when a current setup credential handle is shared or duplicated', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    }
+    const configured = configure({ profilePatch: fixture, ...common })
+    const handlePattern = /(id: lark-app-secret-secondary\n\s+consumers:\n\s+- dsh-enhanced-lark-channel)/u
+    const shared = configured.replace(handlePattern, '$1\n          - local-user-plugin')
+    const duplicated = configured.replace(
+      /(\s+- id: lark-app-secret-secondary[\s\S]*?\n\s+account: secondary)/u,
+      '$1$1',
+    )
+    expect(shared).not.toBe(configured)
+    expect(duplicated).not.toBe(configured)
+
+    for (const [name, profilePatch] of Object.entries({ shared, duplicated })) {
+      expect(() => configure({ profilePatch, ...common, agentTools: 'disable' }), name)
+        .toThrow(/current credential handle lark-app-secret-secondary.*(?:ambiguous|duplicate)/iu)
+      expect(() => refresh({
+        profilePatch,
+        dshHome: common.dshHome,
+        agentTools: 'disable',
+      }), name).toThrow(/current credential handle lark-app-secret-secondary.*(?:ambiguous|duplicate)/iu)
+    }
+  })
+
+  test('fails closed on duplicate current setup-managed fixed rule ids', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    }
+    const configured = configure({ profilePatch: fixture, ...common })
+    const duplicateRules = {
+      ingress: `
+        - id: lark-owner-ingress-secondary
+          effect: allow
+          subject: { kind: external, id: lark/secondary/personal/ou_attacker }
+          actions: [approval.decide, ingest]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [external] }`,
+      credential: `
+        - id: lark-channel-credential-secondary
+          effect: allow
+          subject: { kind: background, id: dsh-enhanced-lark-channel }
+          actions: [credential.use]
+          resource: { kind: credential, id: lark-app-secret-secondary }
+          context: { initiators: [background] }`,
+      approval: `
+        - id: lark-owner-approval-dsh-enhanced-personal-memory-secondary
+          effect: allow
+          subject:
+            kind: background
+            id: dsh-enhanced-personal-memory
+            workspace: /Users/test/.dsh/assistant-workspace
+            principal: lark/secondary/personal/ou_attacker
+          actions: [approval.send]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [background] }`,
+    }
+
+    for (const [name, duplicate] of Object.entries(duplicateRules)) {
+      const profilePatch = configured.replace('      budgets: []', `${duplicate}\n      budgets: []`)
+      expect(profilePatch).not.toBe(configured)
+      expect(() => configure({ profilePatch, ...common }), name)
+        .toThrow(/duplicate managed fixed rule/iu)
+      expect(() => refresh({
+        profilePatch,
+        dshHome: common.dshHome,
+        agentTools: 'disable',
+      }), name).toThrow(/duplicate managed fixed rule/iu)
+    }
+  })
+
+  test('rejects shadowed or disabled managed Lark and credential profile rows', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    }
+    const configured = configure({ profilePatch: fixture, ...common })
+    const annotate = (profilePatch: string, id: string, fields: string): string => profilePatch.replace(
+      `- id: ${id}\n`,
+      `- id: ${id}\n${fields}`,
+    )
+    const explicitlyActive = annotate(
+      annotate(
+        configured,
+        'dsh-enhanced-lark-channel',
+        "  name: '@dsh-enhanced/lark-channel'\n  disabled: false\n",
+      ),
+      'dsh-enhanced-credentials-keychain',
+      "  name: '@dsh-enhanced/credentials-keychain'\n  disabled: false\n",
+    )
+    expect(() => configure({ profilePatch: explicitlyActive, ...common })).not.toThrow()
+
+    const invalidRows = {
+      larkName: annotate(
+        configured,
+        'dsh-enhanced-lark-channel',
+        "  name: '@user/wrong-lark-package'\n",
+      ),
+      larkDisabled: annotate(configured, 'dsh-enhanced-lark-channel', '  disabled: true\n'),
+      larkExpression: annotate(
+        configured,
+        'dsh-enhanced-lark-channel',
+        "  disabled: !!js process.env.DISABLE_LARK\n",
+      ),
+      credentialName: annotate(
+        configured,
+        'dsh-enhanced-credentials-keychain',
+        "  name: '@user/wrong-credential-package'\n",
+      ),
+      credentialDisabled: annotate(
+        configured,
+        'dsh-enhanced-credentials-keychain',
+        '  disabled: true\n',
+      ),
+    }
+    expect(Object.values(invalidRows).every(profilePatch => profilePatch !== configured)).toBe(true)
+
+    for (const [name, profilePatch] of Object.entries(invalidRows)) {
+      expect(() => configure({ profilePatch, ...common }), name)
+        .toThrow(/managed profile row.*(?:shadowed|disabled|invalid)/iu)
+      expect(() => refresh({
+        profilePatch,
+        dshHome: common.dshHome,
+        agentTools: 'disable',
+      }), name).toThrow(/managed profile row.*(?:shadowed|disabled|invalid)/iu)
+    }
+  })
+
+  test('fails closed instead of rebuilding Agent grants from a wildcard or noncanonical ingress principal', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    }
+    const configured = configure({ profilePatch: fixture, ...common })
+    const ingressPattern = /(id: lark-owner-ingress-secondary[\s\S]*?\n\s+id:) lark\/secondary\/personal\/ou_secondary/u
+    const malformedIngresses = [
+      'lark/secondary/*/*',
+      'lark/secondary/%ZZ/ou_secondary',
+      'lark/secondary/personal/ou%2fsecondary',
+      'lark/secondary/personal/ou%252Fsecondary',
+    ].map(principal => configured.replace(ingressPattern, `$1 ${principal}`))
+    expect(malformedIngresses.every(profilePatch => profilePatch !== configured)).toBe(true)
+
+    for (const profilePatch of malformedIngresses) {
+      expect(() => configure({ profilePatch, ...common, agentTools: 'enable' }))
+        .toThrow(/fixed rule lark-owner-ingress-secondary.*ambiguous/iu)
+      expect(() => refresh({
+        profilePatch,
+        dshHome: common.dshHome,
+        agentTools: 'enable',
+      })).toThrow(/fixed rule lark-owner-ingress-secondary.*ambiguous/iu)
+    }
+  })
+
+  test('refuses to implicitly migrate deny-only retired rules to another account', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const primary = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_primary',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+    const denyOnly = primary
+      .replace(/(id: lark-owner-capability-\*-primary\n\s+effect:) allow/u, '$1 deny')
+      .replace(/(id: lark-owner-tool-\*-primary\n\s+effect:) allow/u, '$1 deny')
+    expect(denyOnly).toContain('effect: deny')
+
+    const migrate = (agentTools?: 'disable'): string => configure({
+      profilePatch: denyOnly,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_fedcba9876543210',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+      ...(agentTools === undefined ? {} : { agentTools }),
+    })
+    expect(() => migrate()).toThrow(/cannot preserve.*enable or disable/iu)
+
+    const secondary = migrate('disable')
+    expect(secondary).not.toContain('lark-owner-capability-*-secondary')
+    expect(secondary).not.toContain('lark-owner-tool-*-secondary')
+    // Disable revokes allows but retains denies: deleting these could expose a
+    // similarly scoped non-reserved/global allow.
+    expect(secondary).toMatch(/id: lark-owner-capability-\*-primary\n\s+effect: deny/u)
+    expect(secondary).toMatch(/id: lark-owner-tool-\*-primary\n\s+effect: deny/u)
+  })
+
+  test('fails closed when preserving a historical wildcard grant with managed mutator denies', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const primary = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_primary',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+    const historicalDeniedTools = [
+      'memory_manage',
+      'wiki_upsert',
+      'wiki_lint',
+      'automation_create',
+      'automation_manage',
+      'automation_run',
+      'evolution_propose',
+      'knowledge_pin',
+      'knowledge_promote',
+      'heartbeat_scratch_update',
+    ] as const
+    const historical = primary.replace('      budgets: []', `${historicalDeniedTools.map(tool => `
+        - id: lark-owner-tool-${tool}-primary
+          effect: deny
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [execute]
+          resource: { kind: tool, id: ${tool} }
+          context: { initiators: [external] }`).join('')}
+      budgets: []`)
+    expect(historical).toContain('lark-owner-tool-memory_manage-primary')
+
+    const migrationInput = {
+      profilePatch: historical,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_fedcba9876543210',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    }
+    expect(() => configure(migrationInput)).toThrow(/cannot preserve.*enable or disable/iu)
+
+    const secondary = configure({ ...migrationInput, agentTools: 'disable' })
+    expect(secondary).not.toContain('lark-owner-capability-*-secondary')
+    expect(secondary).not.toContain('lark-owner-tool-*-secondary')
+    expect(secondary).toMatch(/id: lark-owner-tool-memory_manage-primary\n\s+effect: deny/u)
+  })
+
+  test('preserve keeps a same-account managed deny that overrides a global allow', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const restricted = enabled
+      .replace(/(id: lark-owner-tool-\*-primary\n\s+effect:) allow/u, '$1 deny')
+      .replace('      budgets: []', `
+        - id: user-global-external-tool-allow
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [execute]
+          resource: { kind: tool, id: "*" }
+          context: { initiators: [external] }
+      budgets: []`)
+    expect(restricted).toContain('user-global-external-tool-allow')
+    expect(restricted).toMatch(/id: lark-owner-tool-\*-primary\n\s+effect: deny/u)
+
+    const preserved = configure({ ...common, profilePatch: restricted })
+    const rows = parse(preserved) as {
+      id: string
+      config: { assistantPolicy: { rules: PolicyRuleShape[] } }
+    }[]
+    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .config.assistantPolicy.rules
+    const matching = rules.filter(rule =>
+      rule.subject.kind === 'agent'
+      && rule.subject.id === 'standard'
+      && rule.subject.workspace === '/Users/test/.dsh/assistant-workspace'
+      && rule.actions.includes('execute')
+      && rule.context.initiators.includes('external')
+      && rule.resource.kind === 'tool'
+      && rule.resource.id === '*')
+    expect(matching.some(rule => rule.id === 'user-global-external-tool-allow'
+      && rule.effect === 'allow')).toBe(true)
+    expect(matching.some(rule => rule.id === 'lark-owner-tool-*-primary'
+      && rule.effect === 'deny')).toBe(true)
+    expect(matching.some(rule => rule.effect === 'deny') ? 'deny' : 'allow').toBe('deny')
+
+    for (const disabled of [
+      configure({ ...common, profilePatch: restricted, agentTools: 'disable' }),
+      refresh({ profilePatch: restricted, dshHome: common.dshHome, agentTools: 'disable' }),
+    ]) {
+      const disabledRows = parse(disabled) as {
+        id: string
+        config: { assistantPolicy: { rules: PolicyRuleShape[] } }
+      }[]
+      const disabledRules = disabledRows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+        .config.assistantPolicy.rules
+      expect(disabledRules).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'user-global-external-tool-allow', effect: 'allow' }),
+        expect.objectContaining({ id: 'lark-owner-tool-*-primary', effect: 'deny' }),
+      ]))
+    }
+  })
+
+  test('fails closed when same-account managed allows target a different owner principal', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    }
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const foreignOwner = enabled
+      .replace(
+        /(id: lark-owner-capability-\*-secondary[\s\S]*?\n\s+principal:) lark\/secondary\/personal\/ou_owner/u,
+        '$1 lark/secondary/personal/ou_attacker',
+      )
+      .replace(
+        /(id: lark-owner-tool-\*-secondary[\s\S]*?\n\s+principal:) lark\/secondary\/personal\/ou_owner/u,
+        '$1 lark/secondary/personal/ou_attacker',
+      )
+    expect(foreignOwner).not.toBe(enabled)
+
+    expect(() => configure({ ...common, profilePatch: foreignOwner }))
+      .toThrow(/managed Agent rule.*different owner principal/iu)
+  })
+
+  test('fails closed on duplicate setup-managed external Agent rule ids', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const common = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable' as const,
+    }
+    const configured = configure({ profilePatch: fixture, ...common })
+    const rows = parse(configured, {
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+    }) as {
+      id: string
+      config: { assistantPolicy?: { rules: PolicyRuleShape[] } }
+    }[]
+    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .config.assistantPolicy!.rules
+    const wildcard = rules.find(rule => rule.id === 'lark-owner-tool-*-primary')
+    expect(wildcard).toBeDefined()
+    rules.push(structuredClone(wildcard!))
+
+    expect(() => configure({ ...common, profilePatch: JSON.stringify(rows) }))
+      .toThrow(/duplicate managed Agent rule lark-owner-tool-\*-primary/iu)
+  })
+
+  test('fails closed on duplicate restrictive setup-managed foreground rule ids', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const common = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const configured = configure({ profilePatch: fixture, ...common, agentTools: 'enable' })
+    const rows = parse(configured, {
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+    }) as {
+      id: string
+      config: { assistantPolicy?: { rules: PolicyRuleShape[] } }
+    }[]
+    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .config.assistantPolicy!.rules
+    const foreground = rules.find(rule => rule.id === 'dsh-enhanced-foreground-capability-*')
+    expect(foreground).toBeDefined()
+    foreground!.effect = 'deny'
+    rules.push(structuredClone(foreground!))
+
+    expect(() => configure({ profilePatch: JSON.stringify(rows), ...common }))
+      .toThrow(/duplicate managed foreground rule dsh-enhanced-foreground-capability-\*/iu)
+  })
+
+  test('does not preserve principal-less Agent allows when the configured owner ingress is missing', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const common = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_new',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const configured = configure({ profilePatch: fixture, ...common, agentTools: 'enable' })
+    const rows = parse(configured, {
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+    }) as {
+      id: string
+      config: { assistantPolicy?: { rules: PolicyRuleShape[] } }
+    }[]
+    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .config.assistantPolicy!.rules
+    const ingressIndex = rules.findIndex(rule => rule.id === 'lark-owner-ingress-primary')
+    expect(ingressIndex).toBeGreaterThanOrEqual(0)
+    rules.splice(ingressIndex, 1)
+    for (const rule of rules) {
+      if (rule.id === 'lark-owner-capability-*-primary' || rule.id === 'lark-owner-tool-*-primary') {
+        delete rule.subject.principal
+      }
+    }
+
+    expect(() => configure({ profilePatch: JSON.stringify(rows), ...common }))
+      .toThrow(/canonical owner ingress/iu)
+  })
+
+  test('explicit enable fails closed when the configured owner ingress is missing', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable' as const,
+    }
+    const configured = configure(common)
+    const rows = parse(configured, {
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+    }) as {
+      id: string
+      config: { assistantPolicy?: { rules: PolicyRuleShape[] } }
+    }[]
+    const rules = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .config.assistantPolicy!.rules
+    const ingressIndex = rules.findIndex(rule => rule.id === 'lark-owner-ingress-primary')
+    expect(ingressIndex).toBeGreaterThanOrEqual(0)
+    rules.splice(ingressIndex, 1)
+
+    expect(() => refresh({
+      profilePatch: JSON.stringify(rows),
+      dshHome: common.dshHome,
+      agentTools: 'enable',
+    })).toThrow(/canonical owner ingress/iu)
+  })
+
+  test('does not preserve a stale owner grant when the Lark row was previously removed', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const stale = fixture.replace('      budgets: []', `
+        - id: lark-owner-ingress-primary
+          effect: allow
+          subject: { kind: external, id: lark/primary/personal/ou_retired }
+          actions: [approval.decide, ingest]
+          resource: { kind: message, id: "*" }
+          context: { initiators: [external] }
+        - id: lark-owner-tool-bash-primary
+          effect: allow
+          subject:
+            kind: agent
+            id: standard
+            workspace: /Users/test/.dsh/assistant-workspace
+            principal: lark/primary/personal/ou_retired
+          actions: [execute]
+          resource: { kind: tool, id: bash }
+          context: { initiators: [external] }
+      budgets: []`)
+
+    expect(() => configure({
+      profilePatch: stale,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    })).toThrow(/changing the Lark owner binding/iu)
+  })
+
+  test('principal-scopes a legacy per-tool allow during same-owner preserve', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const configured = configure(common)
+    const legacy = configured.replace('      budgets: []', `
+        - id: lark-owner-tool-bash-primary
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [execute]
+          resource: { kind: tool, id: bash }
+          context: { initiators: [external] }
+      budgets: []`)
+    expect(legacy).toContain('lark-owner-tool-bash-primary')
+
+    const preserved = configure({ ...common, profilePatch: legacy })
+    const rows = parse(preserved) as {
+      id: string
+      config: { assistantPolicy: { rules: PolicyRuleShape[] } }
+    }[]
+    const legacyRule = rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .config.assistantPolicy.rules
+      .find(rule => rule.id === 'lark-owner-tool-bash-primary')
+    expect(legacyRule).toMatchObject({
+      effect: 'allow',
+      subject: {
+        kind: 'agent',
+        id: 'standard',
+        workspace: '/Users/test/.dsh/assistant-workspace',
+        principal: 'lark/primary/personal/ou_owner',
+      },
+      actions: ['execute'],
+      resource: { kind: 'tool', id: 'bash' },
+      context: { initiators: ['external'] },
+    })
+  })
+
+  test('account migration refuses to drop a managed deny beside a global allow', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const primary = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_primary',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+    const restricted = primary
+      .replace(/(id: lark-owner-tool-\*-primary\n\s+effect:) allow/u, '$1 deny')
+      .replace('      budgets: []', `
+        - id: user-global-external-tool-allow
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [execute]
+          resource: { kind: tool, id: "*" }
+          context: { initiators: [external] }
+      budgets: []`)
+
+    expect(() => configure({
+      profilePatch: restricted,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_fedcba9876543210',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    })).toThrow(/cannot preserve.*enable or disable/iu)
+  })
+
+  test('does not preserve foreign-principal or one-sided wildcard grants', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const primary = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_primary',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+    const migrate = (profilePatch: string): string => configure({
+      profilePatch,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_fedcba9876543210',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    })
+    const foreign = primary
+      .replace(
+        /(id: lark-owner-capability-\*-primary[\s\S]*?\n\s+principal:) lark\/primary\/personal\/ou_primary/u,
+        '$1 slack/primary/personal/ou_primary',
+      )
+      .replace(
+        /(id: lark-owner-tool-\*-primary[\s\S]*?\n\s+principal:) lark\/primary\/personal\/ou_primary/u,
+        '$1 slack/primary/personal/ou_primary',
+      )
+    expect(foreign).toContain('principal: slack/primary/personal/ou_primary')
+    expect(() => migrate(foreign)).toThrow(/managed Agent rule.*malformed/iu)
+
+    const capabilityStart = primary.indexOf('        - id: lark-owner-capability-*-primary')
+    const capabilityEnd = primary.indexOf('\n        - id: ', capabilityStart + 1)
+    expect(capabilityStart).toBeGreaterThanOrEqual(0)
+    expect(capabilityEnd).toBeGreaterThan(capabilityStart)
+    const toolOnly = primary.slice(0, capabilityStart) + primary.slice(capabilityEnd + 1)
+    expect(toolOnly).not.toContain('lark-owner-capability-*-primary')
+    expect(toolOnly).toContain('lark-owner-tool-*-primary')
+    expect(() => migrate(toolOnly)).toThrow(/cannot preserve.*enable or disable/iu)
+  })
+
+  test('global stale cleanup preserves similarly named user rules outside reserved ids', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    })
+    const withUserRules = configured.replace('      budgets: []', `
+        - id: user-lark-owner-tool-*-user-defined
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [read]
+          resource: { kind: memory, id: private }
+          context: { initiators: [foreground] }
+        - id: user-lark-owner-reply-user-defined
+          effect: deny
+          subject: { kind: external, id: local:user-defined }
+          actions: [send]
+          resource: { kind: message, id: private }
+          context: { initiators: [foreground] }
+      budgets: []`)
+
+    const refreshed = refresh({
+      profilePatch: withUserRules,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'enable',
+    })
+    expect(refreshed).toContain('user-lark-owner-tool-*-user-defined')
+    expect(refreshed).toContain('user-lark-owner-reply-user-defined')
+  })
+
+  test('reserved Lark setup namespaces fail closed even when their suffix cannot be parsed', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    for (const id of [
+      'lark-owner-tool-*-*',
+      'lark-owner-tool-evil-primary',
+      'lark-owner-ingress-*',
+      'lark-owner-approval-unknown-primary',
+      'lark-channel-credential-*',
+      'dsh-enhanced-foreground-capability-unknown',
+      'lark-foreground-tool-unknown',
+    ]) {
+      const polluted = fixture.replace('      budgets: []', `
+        - id: ${id}
+          effect: allow
+          subject: { kind: agent, id: "*", workspace: "*", principal: "*" }
+          actions: ["*"]
+          resource: { kind: "*", id: "*" }
+          context: { initiators: [external] }
+      budgets: []`)
+      expect(() => refresh({
+        profilePatch: polluted,
+        dshHome: common.dshHome,
+        agentTools: 'disable',
+      })).toThrow(/(?:reserved|managed|fixed).*(?:malformed|ambiguous)/iu)
+      expect(() => configure({ ...common, profilePatch: polluted, agentTools: 'disable' }))
+        .toThrow(/(?:reserved|managed|fixed).*(?:malformed|ambiguous)/iu)
+    }
+  })
+
+  test('explicit Agent policy changes fail closed on malformed effective managed grants', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const malformed = enabled.replace(
+      /(id: lark-owner-tool-\*-primary[\s\S]*?context:\n\s+)initiators:\n\s+- external/u,
+      '$1initiators: [external, foreground]',
+    )
+    expect(malformed).not.toBe(enabled)
+
+    for (const agentTools of ['enable', 'disable'] as const) {
+      expect(() => configure({ ...common, profilePatch: malformed, agentTools }))
+        .toThrow(/managed Agent rule.*malformed/iu)
+      expect(() => refresh({
+        profilePatch: malformed,
+        dshHome: '/Users/test/.dsh',
+        agentTools,
+      })).toThrow(/managed Agent rule.*malformed/iu)
+    }
+  })
+
+  test('explicit Agent policy changes also reject malformed grants from a retired exact principal', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+      agentTools: 'enable',
+    })
+    const polluted = configured.replace('      budgets: []', `
+        - id: lark-owner-tool-*-retired
+          effect: allow
+          subject:
+            kind: agent
+            id: standard
+            workspace: /Users/test/.dsh/assistant-workspace
+            principal: lark/retired/personal/ou_retired
+          actions: [execute]
+          resource: { kind: tool, id: "*" }
+          context: { initiators: [external, foreground] }
+      budgets: []`)
+
+    for (const agentTools of ['enable', 'disable'] as const) {
+      expect(() => refresh({
+        profilePatch: polluted,
+        dshHome: '/Users/test/.dsh',
+        agentTools,
+      })).toThrow(/lark-owner-tool-\*-retired.*malformed/iu)
+    }
+  })
+
+  test('canonical managed principals stay attributable after current subject identity is widened', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const malformedProfiles = [
+      enabled.replace(
+        /(id: lark-owner-tool-\*-primary[\s\S]*?subject:\n[\s\S]*?\n\s+id:) standard/u,
+        '$1 "*"',
+      ),
+      enabled.replace(
+        /(id: lark-owner-tool-\*-primary[\s\S]*?subject:\n[\s\S]*?\n\s+workspace:) \/Users\/test\/\.dsh\/assistant-workspace/u,
+        '$1 "*"',
+      ),
+    ]
+    expect(malformedProfiles.every(profile => profile !== enabled)).toBe(true)
+
+    for (const profilePatch of malformedProfiles) {
+      expect(() => refresh({
+        profilePatch,
+        dshHome: '/Users/test/.dsh',
+        agentTools: 'disable',
+      })).toThrow(/lark-owner-tool-\*-primary.*malformed/iu)
+      expect(() => configure({ ...common, profilePatch, agentTools: 'enable' }))
+        .toThrow(/lark-owner-tool-\*-primary.*malformed/iu)
+    }
+  })
+
+  test('legacy current managed grants stay attributable after subject identity is widened', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const legacy = enabled.replace(
+      /(id: lark-owner-tool-\*-primary[\s\S]*?\n\s+principal:) lark\/primary\/personal\/ou_owner/u,
+      '$1-placeholder removed',
+    ).replace(/\n\s+principal:-placeholder removed/u, '')
+    expect(legacy).not.toContain('principal:-placeholder removed')
+    const malformedProfiles = [
+      legacy.replace(
+        /(id: lark-owner-tool-\*-primary[\s\S]*?subject:\n[\s\S]*?\n\s+id:) standard/u,
+        '$1 "*"',
+      ),
+      legacy.replace(
+        /(id: lark-owner-tool-\*-primary[\s\S]*?subject:\n[\s\S]*?\n\s+workspace:) \/Users\/test\/\.dsh\/assistant-workspace/u,
+        '$1 "*"',
+      ),
+    ]
+    expect(malformedProfiles.every(profile => profile !== legacy)).toBe(true)
+    for (const profilePatch of malformedProfiles) {
+      expect(() => refresh({ profilePatch, dshHome: '/Users/test/.dsh', agentTools: 'disable' }))
+        .toThrow(/lark-owner-tool-\*-primary.*malformed/iu)
+    }
+  })
+
+  test('canonical retired principals stay attributable after id or workspace is widened', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+      agentTools: 'enable',
+    })
+    const retiredRule = (subjectId: string, workspace: string): string => configured.replace('      budgets: []', `
+        - id: lark-owner-tool-*-retired
+          effect: allow
+          subject:
+            kind: agent
+            id: "${subjectId}"
+            workspace: "${workspace}"
+            principal: lark/retired/personal/ou_retired
+          actions: [execute]
+          resource: { kind: tool, id: "*" }
+          context: { initiators: [external] }
+      budgets: []`)
+
+    for (const profilePatch of [
+      retiredRule('*', '/Users/test/.dsh/assistant-workspace'),
+      retiredRule('standard', '*'),
+    ]) {
+      expect(() => refresh({
+        profilePatch,
+        dshHome: '/Users/test/.dsh',
+        agentTools: 'disable',
+      })).toThrow(/lark-owner-tool-\*-retired.*malformed/iu)
+    }
+  })
+
+  test('retired legacy managed grants remain attributable when their context is widened', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+      agentTools: 'enable',
+    })
+    const polluted = configured.replace('      budgets: []', `
+        - id: lark-owner-tool-*-retired
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [execute]
+          resource: { kind: tool, id: "*" }
+          context: { initiators: [external, foreground] }
+      budgets: []`)
+    expect(() => refresh({
+      profilePatch: polluted,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'disable',
+    })).toThrow(/lark-owner-tool-\*-retired.*malformed/iu)
+  })
+
+  test('legacy managed grants remain attributable when action and resource planes are widened', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    })
+    const broadenedRule = (account: string): string => `
+        - id: lark-owner-tool-*-${account}
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: ["*"]
+          resource: { kind: "*", id: "*" }
+          context: { initiators: [external] }`
+    for (const profilePatch of [
+      configured.replace('      budgets: []', `${broadenedRule('primary')}
+      budgets: []`),
+      configured.replace('      budgets: []', `${broadenedRule('retired')}
+      budgets: []`),
+    ]) {
+      expect(() => refresh({
+        profilePatch,
+        dshHome: '/Users/test/.dsh',
+        agentTools: 'disable',
+      })).toThrow(/lark-owner-tool-\*-(primary|retired).*malformed/iu)
+    }
+  })
+
+  test('reserved capability ids cannot be repurposed into wildcard tool grants', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    })
+    const polluted = configured.replace('      budgets: []', `
+        - id: lark-owner-capability-*-retired
+          effect: allow
+          subject:
+            kind: agent
+            id: standard
+            workspace: /Users/test/.dsh/assistant-workspace
+            principal: "*"
+          actions: [execute]
+          resource: { kind: tool, id: "*" }
+          context: { initiators: [external] }
+      budgets: []`)
+    expect(() => refresh({
+      profilePatch: polluted,
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'disable',
+    })).toThrow(/lark-owner-capability-\*-retired.*malformed/iu)
+  })
+
+  test('retired legacy matcher widenings cannot survive explicit disable', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    })
+    const exactSubject = `subject:
+            kind: agent
+            id: standard
+            workspace: /Users/test/.dsh/assistant-workspace`
+    const variants = [
+      `${exactSubject}
+          actions: [exec*]
+          resource: { kind: to*, id: "*" }`,
+      `subject: { kind: "*", id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [execute]
+          resource: { kind: tool, id: "*" }`,
+      `actions: [execute]
+          resource: { kind: tool, id: "*" }`,
+      `${exactSubject}
+            principal: "*"
+          actions: [execute]
+          resource: { kind: tool, id: "*" }`,
+      `${exactSubject}
+          resource: { kind: tool, id: "*" }`,
+      `${exactSubject}
+          actions: [execute]`,
+    ]
+    for (const variant of variants) {
+      const polluted = configured.replace('      budgets: []', `
+        - id: lark-owner-tool-*-retired
+          effect: allow
+          ${variant}
+          context: { initiators: [external] }
+      budgets: []`)
+      expect(() => refresh({
+        profilePatch: polluted,
+        dshHome: '/Users/test/.dsh',
+        agentTools: 'disable',
+      })).toThrow(/lark-owner-tool-\*-retired.*malformed/iu)
+    }
+  })
+
+  test('reserved legacy ids fail closed across initiator mutations', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const configured = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    })
+    const rule = (context: string): string => configured.replace('      budgets: []', `
+        - id: lark-owner-tool-*-retired
+          effect: allow
+          subject: { kind: agent, id: standard, workspace: /Users/test/.dsh/assistant-workspace }
+          actions: [execute]
+          resource: { kind: tool, id: "*" }${context}
+      budgets: []`)
+    for (const profilePatch of [
+      rule(''),
+      rule('\n          context: { initiators: [] }'),
+      rule('\n          context: { initiators: [external, foreground] }'),
+    ]) {
+      expect(() => refresh({ profilePatch, dshHome: '/Users/test/.dsh', agentTools: 'disable' }))
+        .toThrow(/lark-owner-tool-\*-retired.*malformed/iu)
+    }
+
+    expect(() => refresh({
+      profilePatch: rule('\n          context: { initiators: [foreground] }'),
+      dshHome: '/Users/test/.dsh',
+      agentTools: 'disable',
+    })).toThrow(/lark-owner-tool-\*-retired.*malformed/iu)
+  })
+
+  test('account migration fails closed on a malformed stale managed reply grant', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const primary = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_primary',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+    const malformed = primary.replace(
+      /(id: lark-owner-reply-primary[\s\S]*?context:\n\s+)initiators:\n\s+- external/u,
+      '$1initiators: [external, foreground]',
+    )
+    expect(malformed).not.toBe(primary)
+    const migrate = (agentTools?: 'disable'): string => configure({
+      profilePatch: malformed,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_fedcba9876543210',
+      account: 'secondary',
+      tenant: 'next-tenant',
+      domain: 'feishu',
+      ownerUserId: 'ou_secondary',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+      ...(agentTools === undefined ? {} : { agentTools }),
+    })
+    expect(() => migrate()).toThrow(/lark-owner-reply-primary.*malformed/iu)
+    expect(() => migrate('disable')).toThrow(/lark-owner-reply-primary.*malformed/iu)
+  })
+
   test('preserves existing policy while adding exact owner, credential, and enabled-channel config', () => {
     const configure = (lark as Record<string, unknown>).configureLarkProfilePatch
     expect(configure).toBeTypeOf('function')
@@ -98,7 +1658,12 @@ describe('Lark Web-profile onboarding patch', () => {
     const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
       .config.assistantPolicy.rules
     expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-reply-primary')).toMatchObject({
-      subject: { kind: 'agent', id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' },
+      subject: {
+        kind: 'agent',
+        id: 'standard',
+        workspace: '/Users/test/.dsh/assistant-workspace',
+        principal: 'lark/primary/personal/ou_owner',
+      },
       actions: ['reply'],
       resource: { kind: 'message', id: '*' },
       context: { initiators: ['external'] },
@@ -115,7 +1680,12 @@ describe('Lark Web-profile onboarding patch', () => {
       .toEqual(EXPECTED_DENIED_TOOLS)
     expect(toolRules).toEqual(toolRules.map((rule: object) => expect.objectContaining({
       ...rule,
-      subject: { kind: 'agent', id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' },
+      subject: {
+        kind: 'agent',
+        id: 'standard',
+        workspace: '/Users/test/.dsh/assistant-workspace',
+        principal: 'lark/primary/personal/ou_owner',
+      },
       actions: ['execute'],
       context: { initiators: ['external'] },
     })))
@@ -281,6 +1851,174 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(disabled).not.toContain('lark-owner-tool-')
     expect(disabled).toContain('keep-user-rule')
     expect(configure({ ...input, profilePatch: disabled, agentTools: 'disable' })).toBe(disabled)
+  })
+
+  test('does not widen denied or narrowed foreground rules in preserve mode', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const denied = enabled.replace(
+      /(id: dsh-enhanced-foreground-capability-\*\n\s+effect:) allow/u,
+      '$1 deny',
+    )
+    const narrowed = enabled.replace(
+      /(id: dsh-enhanced-foreground-capability-\*[\s\S]*?\n\s+actions:\n\s+-) "\*"/u,
+      '$1 execute',
+    )
+    expect(denied).not.toBe(enabled)
+    expect(narrowed).not.toBe(enabled)
+
+    const foregroundRule = (profilePatch: string): PolicyRuleShape => {
+      const rows = parse(configure({ ...common, profilePatch })) as {
+        id: string
+        config: { assistantPolicy: { rules: PolicyRuleShape[] } }
+      }[]
+      return rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+        .config.assistantPolicy.rules
+        .find(rule => rule.id === 'dsh-enhanced-foreground-capability-*')!
+    }
+    expect(foregroundRule(denied)).toMatchObject({ effect: 'deny', actions: ['*'] })
+    expect(foregroundRule(narrowed)).toMatchObject({ effect: 'allow', actions: ['execute'] })
+
+    const disabledRule = (profilePatch: string): PolicyRuleShape | undefined => {
+      const rows = parse(configure({ ...common, profilePatch, agentTools: 'disable' })) as {
+        id: string
+        config: { assistantPolicy: { rules: PolicyRuleShape[] } }
+      }[]
+      return rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+        .config.assistantPolicy.rules
+        .find(rule => rule.id === 'dsh-enhanced-foreground-capability-*')!
+    }
+    expect(disabledRule(denied)).toMatchObject({ effect: 'deny', actions: ['*'] })
+    expect(disabledRule(narrowed)).toBeUndefined()
+
+    const refreshedRule = (profilePatch: string): PolicyRuleShape | undefined => {
+      const rows = parse(refresh({ profilePatch, dshHome: common.dshHome, agentTools: 'disable' })) as {
+        id: string
+        config: { assistantPolicy: { rules: PolicyRuleShape[] } }
+      }[]
+      return rows.find(row => row.id === 'dsh-enhanced-personal-assistant')!
+        .config.assistantPolicy.rules
+        .find(rule => rule.id === 'dsh-enhanced-foreground-capability-*')
+    }
+    expect(refreshedRule(denied)).toMatchObject({ effect: 'deny', actions: ['*'] })
+    expect(refreshedRule(narrowed)).toBeUndefined()
+  })
+
+  test('fails closed when a reserved foreground allow can escape its local initiator', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const initiatorPattern = /(id: dsh-enhanced-foreground-capability-\*[\s\S]*?context:\n\s+)initiators:\n\s+- foreground/u
+    const variants = {
+      external: enabled.replace(initiatorPattern, '$1initiators: [external]'),
+      mixed: enabled.replace(initiatorPattern, '$1initiators: [external, foreground]'),
+      principal: enabled.replace(
+        /(id: dsh-enhanced-foreground-capability-\*[\s\S]*?\n\s+workspace: "\*")/u,
+        '$1\n            principal: "*"',
+      ),
+    }
+    expect(Object.values(variants).every(profilePatch => profilePatch !== enabled)).toBe(true)
+
+    for (const [name, profilePatch] of Object.entries(variants)) {
+      expect(() => configure({ ...common, profilePatch }), name)
+        .toThrow(/managed foreground rule.*(?:unsafe|malformed)/iu)
+      expect(() => refresh({ profilePatch, dshHome: common.dshHome, agentTools: 'disable' }), name)
+        .toThrow(/managed foreground rule.*(?:unsafe|malformed)/iu)
+    }
+  })
+
+  test('explicit enable retires a legacy foreground deny before installing full control', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const configured = configure(common)
+    const legacyDeny = configured.replace('      budgets: []', `
+        - id: lark-foreground-tool-primary
+          effect: deny
+          subject: { kind: agent, id: "*", workspace: "*" }
+          actions: [execute]
+          resource: { kind: tool, id: "*" }
+          context: { initiators: [foreground] }
+      budgets: []`)
+    expect(legacyDeny).toContain('lark-foreground-tool-primary')
+
+    for (const enabled of [
+      configure({ ...common, profilePatch: legacyDeny, agentTools: 'enable' }),
+      refresh({ profilePatch: legacyDeny, dshHome: common.dshHome, agentTools: 'enable' }),
+    ]) {
+      expect(enabled).not.toContain('lark-foreground-tool-primary')
+      expect(enabled).toMatch(/id: dsh-enhanced-foreground-capability-\*\n\s+effect: allow/u)
+    }
+  })
+
+  test('explicit enable will not remove a reserved deny that also protects external requests', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const crossPlaneDeny = enabled
+      .replace(
+        /(id: dsh-enhanced-foreground-capability-\*\n\s+effect:) allow/u,
+        '$1 deny',
+      )
+      .replace(
+        /(id: dsh-enhanced-foreground-capability-\*[\s\S]*?context:\n\s+initiators:\n\s+-) foreground/u,
+        '$1 external',
+      )
+    expect(crossPlaneDeny).not.toBe(enabled)
+
+    expect(() => configure({ ...common, profilePatch: crossPlaneDeny, agentTools: 'enable' }))
+      .toThrow(/foreground deny.*external.*refusing/iu)
+    expect(() => refresh({
+      profilePatch: crossPlaneDeny,
+      dshHome: common.dshHome,
+      agentTools: 'enable',
+    })).toThrow(/foreground deny.*external.*refusing/iu)
+    expect(configure({ ...common, profilePatch: crossPlaneDeny, agentTools: 'disable' }))
+      .toContain('dsh-enhanced-foreground-capability-*')
   })
 
   test('scopes reply and tool rules to the Delivery-configured workspace', () => {
@@ -524,11 +2262,77 @@ describe('Lark Web-profile onboarding patch', () => {
     const wildcard = rules.find(item => item.id === 'lark-owner-tool-*-primary')
     expect(wildcard).toMatchObject({
       effect: 'allow',
-      subject: { kind: 'agent', id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' },
+      subject: {
+        kind: 'agent',
+        id: 'standard',
+        workspace: '/Users/test/.dsh/assistant-workspace',
+        principal: 'lark/primary/personal/ou_owner',
+      },
       actions: ['execute'],
       resource: { kind: 'tool', id: '*' },
       context: { initiators: ['external'] },
     })
+
+    const foreground = rules.find(item => item.id === 'dsh-enhanced-foreground-capability-*')
+    expect(foreground).toMatchObject({
+      effect: 'allow',
+      subject: { kind: 'agent', id: '*', workspace: '*' },
+      actions: ['*'],
+      resource: { kind: '*', id: '*' },
+      context: { initiators: ['foreground'] },
+    })
+    const externalCapabilities = rules.find(item => item.id === 'lark-owner-capability-*-primary')
+    expect(externalCapabilities).toMatchObject({
+      effect: 'allow',
+      subject: {
+        kind: 'agent',
+        id: 'standard',
+        workspace: '/Users/test/.dsh/assistant-workspace',
+        principal: 'lark/primary/personal/ou_owner',
+      },
+      actions: ['*'],
+      resource: { kind: '*', id: '*' },
+      context: { initiators: ['external'] },
+    })
+    const capabilityRules = rules.filter(item => item.resource.id === '*')
+    const capabilityDecision = (input: {
+      preset: string
+      workspace: string
+      principal?: string
+      initiator: 'background' | 'external' | 'foreground'
+      action: string
+      resourceKind: string
+    }): 'allow' | 'deny' => {
+      const matched = capabilityRules.filter(item =>
+        (item.subject.id === '*' || item.subject.id === input.preset)
+        && (item.subject.workspace === '*' || item.subject.workspace === input.workspace)
+        && (item.subject.principal === undefined || item.subject.principal === input.principal)
+        && (item.actions.includes('*') || item.actions.includes(input.action))
+        && item.context.initiators.includes(input.initiator)
+        && (item.resource.kind === '*' || item.resource.kind === input.resourceKind))
+      if (matched.some(item => item.effect === 'deny')) return 'deny'
+      return matched.some(item => item.effect === 'allow') ? 'allow' : 'deny'
+    }
+    expect(capabilityDecision({
+      preset: 'cordis', workspace: '/Users/test/project', initiator: 'foreground',
+      action: 'search', resourceKind: 'memory',
+    })).toBe('allow')
+    expect(capabilityDecision({
+      preset: 'standard', workspace: '/Users/test/.dsh/assistant-workspace', initiator: 'external',
+      principal: 'lark/primary/personal/ou_owner', action: 'search', resourceKind: 'memory',
+    })).toBe('allow')
+    expect(capabilityDecision({
+      preset: 'standard', workspace: '/Users/test/.dsh/assistant-workspace', initiator: 'external',
+      principal: 'lark/secondary/personal/ou_owner', action: 'search', resourceKind: 'memory',
+    })).toBe('deny')
+    expect(capabilityDecision({
+      preset: 'standard', workspace: '/Users/test/.dsh/assistant-workspace', initiator: 'external',
+      principal: 'slack/primary/personal/ou_owner', action: 'search', resourceKind: 'memory',
+    })).toBe('deny')
+    expect(capabilityDecision({
+      preset: 'standard', workspace: '/Users/test/.dsh/assistant-workspace', initiator: 'background',
+      action: 'search', resourceKind: 'memory',
+    })).toBe('deny')
 
     // Resolve a tool the way AssistantPolicy does, so this proves reachability
     // rather than restating the emitter's own shape. Deny wins over allow at any
@@ -536,10 +2340,11 @@ describe('Lark Web-profile onboarding patch', () => {
     // real evaluator is internal to assistant-policy and must not be imported
     // across package boundaries.
     const toolRules = rules.filter(item => item.resource.kind === 'tool')
-    const decide = (tool: string): 'allow' | 'deny' => {
+    const decide = (tool: string, principal = 'lark/primary/personal/ou_owner'): 'allow' | 'deny' => {
       const matched = toolRules.filter(item =>
         item.subject.id === 'standard'
         && item.subject.workspace === '/Users/test/.dsh/assistant-workspace'
+        && item.subject.principal === principal
         && item.actions.includes('execute')
         && item.context.initiators.includes('external')
         && (item.resource.id === '*' || item.resource.id === tool))
@@ -556,6 +2361,8 @@ describe('Lark Web-profile onboarding patch', () => {
     ]) {
       expect(decide(tool)).toBe('allow')
     }
+    expect(decide('bash', 'lark/secondary/personal/ou_owner')).toBe('deny')
+    expect(decide('bash', 'slack/primary/personal/ou_owner')).toBe('deny')
     // Nothing is denied at this layer, including the durable-state mutators.
     for (const tool of [
       'memory_manage', 'wiki_upsert', 'automation_run', 'evolution_propose',
@@ -567,5 +2374,8 @@ describe('Lark Web-profile onboarding patch', () => {
 
     const disabled = configure({ ...common, profilePatch: enabled, agentTools: 'disable' })
     expect(disabled).not.toContain('lark-owner-tool-')
+    expect(disabled).not.toContain('dsh-enhanced-foreground-capability-')
+    expect(disabled).not.toContain('lark-foreground-capability-')
+    expect(disabled).not.toContain('lark-owner-capability-')
   })
 })

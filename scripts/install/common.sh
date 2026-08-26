@@ -56,9 +56,9 @@ Feishu modes:
   skip       Preserve any current channel configuration and do no Feishu/service work.
 
 Agent tool modes:
-  allow      Authorize the exact shell/read/search/skill tools for external Agent
-             turns. Required for the agent to load DSH skills in Feishu, because
-             AssistantPolicy denies unlisted tools by default.
+  allow      Authorize all tools mounted for local foreground Agents and for the
+             exact preset/workspace/external Delivery identity, including dynamic
+             skill/plugin tools. This is reachability, not installation.
   preserve   Leave any existing setup-managed tool rules exactly as they are.
   disable    Remove the setup-managed external Agent tool rules.
 EOF
@@ -185,6 +185,60 @@ dsh_enhanced_lark_is_configured() {
   ' "$patch_path"
 }
 
+dsh_enhanced_validate_permission_default() {
+  local settings_path="$1"
+  [[ -f "$settings_path" ]] || return 0
+  local preset
+  preset="$(awk '
+    BEGIN { in_permission = 0; permission_count = 0; value_count = 0; invalid = 0; value = "" }
+    /^[[:space:]]*($|#)/ { next }
+    /^[^[:space:]]/ {
+      in_permission = 0
+      if ($0 ~ /^permission[[:space:]]*:[[:space:]]*($|#)/) {
+        permission_count += 1
+        in_permission = 1
+        next
+      }
+      if ($0 ~ /^permission[[:space:]]*:/ || $0 ~ /^["\047]permission["\047][[:space:]]*:/) invalid = 1
+      next
+    }
+    in_permission && /^[[:space:]]+defaultPreset[[:space:]]*:[[:space:]]*/ {
+      value_count += 1
+      line = $0
+      sub(/^[[:space:]]+defaultPreset[[:space:]]*:[[:space:]]*/, "", line)
+      sub(/[[:space:]]+#.*$/, "", line)
+      sub(/^[[:space:]]+/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      value = line
+    }
+    in_permission && /^[[:space:]]+["\047]defaultPreset["\047][[:space:]]*:/ { invalid = 1 }
+    END {
+      if (invalid || permission_count > 1 || value_count > 1 || (value_count == 1 && value == "")) {
+        print "__unparseable__"
+      } else if (value_count == 0) {
+        print "__absent__"
+      } else {
+        if ((value ~ /^".*"$/) || (value ~ /^\047.*\047$/)) value = substr(value, 2, length(value) - 2)
+        print value
+      }
+    }
+  ' "$settings_path")" || {
+    dsh_enhanced_fail 2 "无法读取现有权限设置：$settings_path；不会覆盖用户设置。"
+    return $?
+  }
+  case "$preset" in
+    __absent__|workspace-write|auto|danger-full-access) return 0 ;;
+    __unparseable__)
+      dsh_enhanced_fail 2 "无法安全解析 $settings_path 中的 permission.defaultPreset；不会覆盖用户设置。"
+      return $?
+      ;;
+    *)
+      dsh_enhanced_fail 2 "现有 permission.defaultPreset=$preset 不受三档配置支持；不会覆盖用户设置。请先显式改为 workspace-write、auto 或 danger-full-access。"
+      return $?
+      ;;
+  esac
+}
+
 dsh_enhanced_choose_lark_mode() {
   local configured="$1"
   if [[ "$configured" == '1' ]]; then
@@ -242,10 +296,10 @@ dsh_enhanced_apply_lark() {
         dsh_enhanced_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
         return $?
       fi
-      # --install-service cannot be combined with agent-tools options, so the
-      # tool grant is refreshed as its own bounded step before any restart.
+      # Refresh only the policy layer from the existing channel binding before
+      # any restart; this path never reopens app/credential/owner onboarding.
       if [[ ${#agent_tools_flag[@]} -gt 0 ]]; then
-        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --no-service \
+        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --refresh-agent-policy \
           "${agent_tools_flag[@]}" || return $?
       fi
       if [[ "$manage_service" == '1' ]]; then
@@ -274,6 +328,17 @@ dsh_enhanced_apply_lark() {
       ;;
     skip)
       printf '\n飞书处理：本次跳过；现有配置不会被修改。\n'
+      if [[ ${#agent_tools_flag[@]} -gt 0 ]]; then
+        if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
+          dsh_enhanced_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
+          return $?
+        fi
+        # Agent reachability is independent of channel onboarding. In skip
+        # mode this only edits installer-managed Policy rules; it does not
+        # enable or alter the Lark row and never installs/restarts a service.
+        dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --refresh-agent-policy \
+          "${agent_tools_flag[@]}" || return $?
+      fi
       ;;
     *)
       dsh_enhanced_fail 2 "不支持的飞书模式：$mode"
@@ -308,7 +373,6 @@ dsh_enhanced_install() {
   local deployment_mode='standard'
   local lark_mode='auto'
   local agent_tools_mode='allow'
-  local agent_tools_explicit='0'
   local dsh_version="${DSH_VERSION:-$DSH_ENHANCED_DEFAULT_DSH_VERSION}"
   local plugin_version="${DSH_ENHANCED_VERSION:-latest}"
   local manage_service='1'
@@ -336,7 +400,6 @@ dsh_enhanced_install() {
       --agent-tools)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--agent-tools 需要一个值。'; return $?; }
         agent_tools_mode="$2"
-        agent_tools_explicit='1'
         shift 2
         ;;
       --dsh-version)
@@ -396,13 +459,6 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 '--agent-tools 只能是 allow、preserve 或 disable。'
     return $?
   esac
-  if [[ "$lark_mode" == 'skip' ]]; then
-    if [[ "$agent_tools_explicit" == '1' && "$agent_tools_mode" != 'preserve' ]]; then
-      dsh_enhanced_fail 2 '--lark skip 不修改任何 channel 配置；--agent-tools 只能是 preserve。'
-      return $?
-    fi
-    agent_tools_mode='preserve'
-  fi
   if [[ "$deployment_mode" == 'supervised-growth' && "$lark_mode" == 'skip' ]]; then
     dsh_enhanced_fail 2 'supervised-growth 需要飞书 onboarding；不能与 --lark skip 一起使用。'
     return $?
@@ -435,6 +491,7 @@ dsh_enhanced_install() {
       return $?
     fi
   fi
+  dsh_enhanced_validate_permission_default "$dsh_home/settings.yaml" || return $?
 
   printf '安装来源：%s\n' "$source_mode"
   printf '目标 profile：%s\n' "$profile"

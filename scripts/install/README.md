@@ -81,7 +81,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/ma
 
 默认 `--lark auto`：
 
-- profile 已经启用飞书时，交互菜单默认保留当前 App，只重启常驻服务；
+- profile 已经启用飞书时，交互菜单默认保留当前 App，先按 `--agent-tools` 选择非交互刷新托管 Policy，再重启常驻服务；
 - 尚未配置时，默认进入现有 `dsh-lark-setup` 向导；
 - 选择“重新配置”后，可以输入已有 App ID，也可以直接回车打开飞书官方页面，在页面选择已有应用或创建新应用；成功后覆盖当前 channel 绑定；
 - App Secret 只通过安全输入或飞书官方设备授权取得，不进入脚本参数、profile 或日志。
@@ -94,28 +94,40 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/ma
 ./scripts/install/install-local.sh --lark skip
 ```
 
-`--no-service` 只跳过常驻服务安装/重启，不跳过插件和 profile 校验。`--dry-run` 打印完整安装计划但不修改机器。
-
-## Agent 工具授权
-
-安装器默认 `--agent-tools allow`，让飞书里的外部会话可以调用 `bash`（Windows 为 `pwsh`）、`read`、`glob`、`grep` 和 `skill` 这几个精确工具。其中 `skill` 是标准 DSH base 的 `tool-skill` row 注册的模型侧工具，Agent 要靠它发现并加载 `ctx.skills` 中的技能。
-
-这个默认值是必需的，而不是可选优化：AssistantPolicy 的 tool guard 对工具执行**默认拒绝**，未被显式授权的工具会以 `default-deny` 被拒。因此漏掉授权时，模型在飞书里会认为自己没有任何可用技能，从而退回纯文本回答。
+`--lark keep` 不重走 App/owner onboarding；`--lark skip` 也不会启用或修改 channel。当 Agent 能力模式为默认 `allow` 或显式 `disable` 时，两种路径都会先在已安装 profile 中调用对应的非交互 Policy 命令：
 
 ```sh
-# 默认：授权上述精确工具，技能可直接使用
+# --agent-tools allow（默认）
+~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
+
+# --agent-tools disable
+~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup --profile web --refresh-agent-policy --disable-agent-tools
+```
+
+该刷新子命令只编辑 setup 托管的 Policy 规则，原子写入后运行有效 profile 校验，失败则原子回滚；它不读 App Secret、不发起设备授权、不修改 App/credential/owner/binding，也不自行重启服务。未启用 Lark 时只处理 Web/direct foreground 规则；已启用时再处理精确 Delivery 规则。刷新成功后，安装器的 keep 路径才独立执行常驻服务重启；skip 路径不安装或重启服务。`--agent-tools preserve` 则跳过 Policy 刷新。
+
+`--no-service` 只跳过常驻服务安装/重启，不跳过插件和 profile 校验。`--dry-run` 打印完整安装计划但不修改机器。
+
+## Agent 能力授权
+
+`personal-assistant` bundle 已内置本地 Web/direct `foreground` grant，确保直接 `dsh plugin add` 后即可使用 profile 已挂载的能力。安装器默认 `--agent-tools allow`，会把该 grant 物化为可管理的 profile override，并生成 Delivery 外部身份的精确规则；前者允许用户自由切换 preset 与 workspace，后者仍固定精确 preset、绝对 workspace 和 `external` initiator。通配 action/resource 除覆盖标准 `skill` 及技能/插件动态注册的工具，还覆盖 `memory.search`、`wiki.read`、`automation.propose` 等插件内部二次 Policy 动作。`background` initiator 不因此放宽。
+
+这些明确 grant 是必需的，而不是可选优化：AssistantPolicy 对没有匹配规则的工具预执行和插件内部 `authorizeAgent()` 都以 `default-deny` 拒绝。bundle 内置规则负责 direct-install 的本地 foreground；安装器刷新负责可撤销地协调该规则，并在已启用 Lark 时补齐精确 external 身份。两条路径都不会把 default-deny 改成全局 default-allow。
+
+```sh
+# 默认：授权本地 foreground；有活动 Lark 时也授权精确外部身份访问已挂载能力
 ./scripts/install/install-local.sh
 
-# 只安装/升级，不改动已有工具规则
+# 只安装/升级，不改动已有能力规则
 ./scripts/install/install-local.sh --agent-tools preserve
 
-# 移除安装器托管的外部 Agent 工具规则
+# 移除安装器托管的 foreground，并在有活动 Lark 时移除 Delivery Agent 能力规则
 ./scripts/install/install-local.sh --agent-tools disable
 ```
 
-授权只生成 Delivery 当前/兼容的精确 preset + 绝对 workspace + `external` initiator 规则，不生成 `tool:*` 通配。它不额外提权：被加载技能内部的命令仍受同一 sandbox / approval / Policy 管线约束。但 Bash/Pwsh 本身可以启动进程，若该 session 使用 `danger-full-access` 且 approval 为 `never`，获准的外部会话等同获得很宽的本机命令权限——需要更严格隔离时改用 `--agent-tools preserve` 或 `disable`，并选择更窄的 DSH permission preset。
+这些 capability 规则只建立 Policy 层的**可达性**，不会安装技能、安装插件或挂载尚未进入 profile 的能力。模型工具仍经过 session sandbox、approval reviewer 和 `tools/pre-execute`，插件内部动作仍经过该插件的身份、参数、预算与业务硬门，显式 Policy deny 和紧急停止始终优先。personal-assistant 把原生 Permission selector 完整设为 ask/auto/full；没有用户设置的新安装默认 `danger-full-access`。安装器绝不改写已有 `settings.yaml`：`workspace-write`、`auto`、`danger-full-access` 原样保留，`read-only`、未知或无法安全解析的 `permission.defaultPreset` 会在任何安装动作前明确失败，要求用户自行选择。owner 也可在飞书发送 `/permissions` 查看或切换档位；full 仍受显式 Policy deny、紧急停止、身份和预算硬门约束。
 
-`--lark skip` 不修改任何 channel 配置，因此该模式下工具授权固定为 `preserve`；显式传入其他值会直接报错而不是静默忽略。
+`--lark skip` 不修改任何 channel 配置，但能力 Policy 与 channel onboarding 相互独立：默认 `allow` 仍会写入 Web/direct foreground 规则，显式 `disable` 会移除托管规则，`preserve` 才完全不改 Policy；该路径不会安装或重启 Lark 服务。
 
 ## 一键重启
 

@@ -519,6 +519,87 @@ describe('Lark SDK boundary', () => {
     expect((card.body.elements[1] as { text: { content: string } }).text.content).toBe(hostile)
   })
 
+  test('renders a three-level permission picker with a native warning before full access', () => {
+    const hostileTitle = '**选择权限** <at user_id="all">everyone</at>'
+    const hostileBody = '[do not trust this](https://attacker.invalid)'
+    const rendered = renderLarkMessage({ permissionPicker: {
+      title: hostileTitle,
+      body: hostileBody,
+      current: 'auto',
+      callbackValues: {
+        ask: { permissionPicker: 'signed-ask' },
+        auto: { permissionPicker: 'signed-auto' },
+        full: { permissionPicker: 'signed-full' },
+      },
+    } })
+    expect(rendered.msgType).toBe('interactive')
+    const card = JSON.parse(rendered.content) as {
+      schema: string
+      config: { enable_forward_interaction: boolean }
+      header: {
+        title: { tag: string; content: string }
+        subtitle: { tag: string; content: string }
+      }
+      body: { elements: Array<Record<string, unknown>> }
+    }
+    expect(card.schema).toBe('2.0')
+    expect(card.config).toEqual({ enable_forward_interaction: false })
+    expect(card.header.title).toEqual({ tag: 'plain_text', content: hostileTitle })
+    expect(card.header.subtitle).toEqual({ tag: 'plain_text', content: hostileBody })
+
+    const elements = cardElements(card.body.elements)
+    expect(elements.some(element => element.tag === 'markdown')).toBe(false)
+    const blocks = elements.filter(element => element.tag === 'interactive_container')
+    expect(blocks).toHaveLength(3)
+    expect(blocks.map(block => (block.elements as Array<{ text: { content: string } }>)[0]?.text.content))
+      .toEqual(['请求批准（ask）', '✓ 帮我批准（auto）', '完全访问权限（full）'])
+
+    const buttons = elements.filter(element => element.tag === 'button')
+    expect(buttons).toEqual([
+      expect.objectContaining({
+        name: 'permission_ask', type: 'default',
+        value: { permissionPicker: 'signed-ask' },
+        behaviors: [{ type: 'callback', value: { permissionPicker: 'signed-ask' } }],
+      }),
+      expect.objectContaining({
+        name: 'permission_auto', type: 'primary',
+        value: { permissionPicker: 'signed-auto' },
+        behaviors: [{ type: 'callback', value: { permissionPicker: 'signed-auto' } }],
+      }),
+      expect.objectContaining({
+        name: 'permission_full', type: 'danger',
+        value: { permissionPicker: 'signed-full' },
+        behaviors: [{ type: 'callback', value: { permissionPicker: 'signed-full' } }],
+        confirm: {
+          title: { tag: 'plain_text', content: '确认开启完全访问权限？' },
+          text: { tag: 'plain_text', content: '开启后可访问互联网和电脑上的任何文件，并关闭逐次审批。' },
+        },
+      }),
+    ])
+    expect(JSON.stringify(blocks[2])).toContain('不受限制')
+    expect(JSON.stringify(blocks[2])).toContain('orange')
+  })
+
+  test('renders a custom permission state without marking any standard level as current', () => {
+    const rendered = renderLarkMessage({ permissionPicker: {
+      title: '选择权限',
+      body: '当前：自定义组合',
+      current: 'custom',
+      callbackValues: {
+        ask: { permissionPicker: 'signed-ask' },
+        auto: { permissionPicker: 'signed-auto' },
+        full: { permissionPicker: 'signed-full' },
+      },
+    } })
+    const card = JSON.parse(rendered.content) as { body: { elements: Array<Record<string, unknown>> } }
+    const elements = cardElements(card.body.elements)
+    const blocks = elements.filter(element => element.tag === 'interactive_container')
+    expect(blocks.map(block => (block.elements as Array<{ text: { content: string } }>)[0]?.text.content))
+      .toEqual(['请求批准（ask）', '帮我批准（auto）', '完全访问权限（full）'])
+    expect(elements.filter(element => element.tag === 'button').map(button => button.type))
+      .toEqual(['default', 'default', 'danger'])
+  })
+
   test('renders schema 2.0 model selectors as independent callbacks without a CardKit form', () => {
     const rendered = renderLarkMessage({ modelPicker: {
       title: '选择模型',

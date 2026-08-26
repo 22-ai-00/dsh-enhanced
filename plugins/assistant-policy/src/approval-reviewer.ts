@@ -1,5 +1,6 @@
 import type { Session, SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-user-approval'
+import { assertApprovalReviewerSessionEventReady } from './session-event-registration.js'
 
 export const APPROVAL_REVIEWERS = ['user', 'auto-review', 'none'] as const
 
@@ -82,15 +83,37 @@ export function approvalPermissionFingerprint(events: readonly SessionEvent[]): 
 export function hasCoherentFullAccess(events: readonly SessionEvent[]): boolean {
   const state = approvalPermissionStateOf(events)
   return state.approvalPolicyEvent && state.approvalPolicy === 'never'
-    && state.reviewerEvent && state.reviewer === 'none'
+    && reviewerIntentOf(events) === 'none'
     && state.sandboxModeEvent && state.sandboxMode === 'danger-full-access'
 }
 
 export function hasCoherentAutoReview(events: readonly SessionEvent[]): boolean {
   const state = approvalPermissionStateOf(events)
   return state.approvalPolicyEvent && state.approvalPolicy === 'ask'
-    && state.reviewerEvent && state.reviewer === 'auto-review'
+    && reviewerIntentOf(events) === 'auto-review'
     && state.sandboxModeEvent && state.sandboxMode === 'workspace-write'
+}
+
+/**
+ * Resolve reviewer intent from the latest durable selector event. The official
+ * three-level bundle uses stable preset ids; every other preset is treated as
+ * human-reviewed unless a later legacy reviewer event explicitly says
+ * otherwise. That default is intentionally fail-closed and lets old logs and
+ * third-party one-workspace-preset bundles keep using the compatibility event.
+ */
+function reviewerIntentOf(events: readonly SessionEvent[]): ApprovalReviewer {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]!
+    if (event.type === 'assistant-policy/approval-reviewer') {
+      return isApprovalReviewer(event.data.reviewer) ? event.data.reviewer : 'user'
+    }
+    if (event.type !== 'permission/preset') continue
+    const preset = event.data.preset
+    if (preset === 'auto') return 'auto-review'
+    if (preset === 'danger-full-access') return 'none'
+    return 'user'
+  }
+  return 'user'
 }
 
 /** Return the last valid reviewer event, without applying approval-policy compatibility. */
@@ -121,8 +144,8 @@ export function setApprovalReviewer(session: Session, reviewer: ApprovalReviewer
   if (!isApprovalReviewer(reviewer)) {
     throw new TypeError('approval reviewer must be one of "user", "auto-review", or "none"')
   }
-  const folded = foldApprovalReviewer(session.events)
-  if (folded === reviewer || (folded === undefined && approvalReviewerOf(session.events) === reviewer)) return false
+  if (reviewerIntentOf(session.events) === reviewer) return false
+  assertApprovalReviewerSessionEventReady(session)
   session.append('assistant-policy/approval-reviewer', { reviewer })
   return true
 }

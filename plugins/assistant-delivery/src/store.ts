@@ -3,6 +3,13 @@ import { isAbsolute } from 'node:path'
 import type { DatabaseSync, StatementSync } from 'node:sqlite'
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import { canonicalConversation, canonicalPrincipal, canonicalTarget } from './canonical.js'
+import {
+  isExactDeliveryCommand,
+  isPermissionDeliveryCommand,
+  parseDeliveryCommand,
+  permissionDispatchRecoveryCode,
+  permissionDispatchRecoveryFromFailureCode,
+} from './session-commands.js'
 import { openDeliveryDatabase } from './sqlite.js'
 import type {
   ConversationBinding,
@@ -20,6 +27,7 @@ import type {
   ModelRouteRef,
   OutboxRecord,
   PairingChallenge,
+  PermissionPickerIntent,
 } from './types.js'
 
 export type DeliveryStoreErrorCode =
@@ -554,7 +562,8 @@ Record<string, string> | undefined {
 
 function canonicalIntent(input: OutboundIntent, binding: ConversationBinding, maxTextBytes: number): OutboundIntent {
   const allowed = [
-    'idempotencyKey', 'bindingId', 'target', 'text', 'format', 'approval', 'modelPicker', 'replyToEventId', 'metadata',
+    'idempotencyKey', 'bindingId', 'target', 'text', 'format', 'approval', 'modelPicker', 'permissionPicker',
+    'replyToEventId', 'metadata',
   ]
   if (input === null || typeof input !== 'object' || Array.isArray(input) || Object.keys(input).some(key => !allowed.includes(key))) {
     throw new DeliveryStoreError('invalid-intent', 'outbound intent shape is invalid')
@@ -577,7 +586,8 @@ function canonicalIntent(input: OutboundIntent, binding: ConversationBinding, ma
     throw new DeliveryStoreError('invalid-intent', 'outbound text exceeds its byte budget')
   }
   const format = input.format ?? 'plain'
-  if (format !== 'plain' && format !== 'markdown' && format !== 'approval' && format !== 'model-picker') {
+  if (format !== 'plain' && format !== 'markdown' && format !== 'approval' && format !== 'model-picker'
+    && format !== 'permission-picker') {
     throw new DeliveryStoreError('invalid-intent', 'outbound format is invalid')
   }
   let approval: OutboundIntent['approval']
@@ -615,6 +625,12 @@ function canonicalIntent(input: OutboundIntent, binding: ConversationBinding, ma
   } else if (input.modelPicker !== undefined) {
     throw new DeliveryStoreError('invalid-intent', 'model picker payload requires model-picker format')
   }
+  let permissionPicker: PermissionPickerIntent | undefined
+  if (format === 'permission-picker') {
+    permissionPicker = canonicalPermissionPicker(input.permissionPicker, binding)
+  } else if (input.permissionPicker !== undefined) {
+    throw new DeliveryStoreError('invalid-intent', 'permission picker payload requires permission-picker format')
+  }
   let replyToEventId: string | undefined
   if (input.replyToEventId !== undefined) {
     try {
@@ -627,8 +643,58 @@ function canonicalIntent(input: OutboundIntent, binding: ConversationBinding, ma
   return { idempotencyKey, bindingId, target, text: input.text, format,
     ...(approval === undefined ? {} : { approval }),
     ...(modelPicker === undefined ? {} : { modelPicker }),
+    ...(permissionPicker === undefined ? {} : { permissionPicker }),
     ...(replyToEventId === undefined ? {} : { replyToEventId }),
     ...(metadata === undefined ? {} : { metadata }) }
+}
+
+function canonicalPermissionPicker(
+  input: PermissionPickerIntent | undefined,
+  binding: ConversationBinding,
+): PermissionPickerIntent {
+  if (input === undefined || input === null || typeof input !== 'object' || Array.isArray(input)
+    || Object.keys(input).some(field => ![
+      'operationId', 'issuedAt', 'expiresAt', 'current', 'expectedStateHash', 'emergencyStopVersion',
+      'bindingVersion', 'sessionId',
+    ].includes(field)) || Object.keys(input).length !== 8) {
+    throw new DeliveryStoreError('invalid-intent', 'permission picker intent shape is invalid')
+  }
+  let operationId: string
+  let sessionId: string
+  try {
+    operationId = validateBindingText(input.operationId, 'operationId', 256)
+    sessionId = validateBindingText(input.sessionId, 'sessionId', 512)
+  } catch {
+    throw new DeliveryStoreError('invalid-intent', 'permission picker identifier is invalid')
+  }
+  if (!Number.isSafeInteger(input.issuedAt) || input.issuedAt < 1
+    || !Number.isSafeInteger(input.expiresAt) || input.expiresAt < 1
+    || input.issuedAt >= input.expiresAt) {
+    throw new DeliveryStoreError('invalid-intent', 'permission picker lifetime is invalid')
+  }
+  if (input.current !== 'ask' && input.current !== 'auto' && input.current !== 'full' && input.current !== 'custom') {
+    throw new DeliveryStoreError('invalid-intent', 'permission picker current level is invalid')
+  }
+  if (typeof input.expectedStateHash !== 'string' || !/^[a-f0-9]{64}$/u.test(input.expectedStateHash)) {
+    throw new DeliveryStoreError('invalid-intent', 'permission picker state hash is invalid')
+  }
+  if (!Number.isSafeInteger(input.emergencyStopVersion) || input.emergencyStopVersion < 0) {
+    throw new DeliveryStoreError('invalid-intent', 'permission picker emergency-stop version is invalid')
+  }
+  if (!Number.isSafeInteger(input.bindingVersion) || input.bindingVersion < 1
+    || input.bindingVersion !== binding.version || sessionId !== binding.sessionId) {
+    throw new DeliveryStoreError('invalid-intent', 'permission picker binding snapshot is invalid')
+  }
+  return {
+    operationId,
+    issuedAt: input.issuedAt,
+    expiresAt: input.expiresAt,
+    current: input.current,
+    expectedStateHash: input.expectedStateHash,
+    emergencyStopVersion: input.emergencyStopVersion,
+    bindingVersion: input.bindingVersion,
+    sessionId,
+  }
 }
 
 function canonicalModelPicker(input: ModelPickerIntent | undefined): ModelPickerIntent {
@@ -719,6 +785,7 @@ function getPairingStatement(database: DatabaseSync): StatementSync {
 
 export class DeliveryStore {
   private readonly database: DatabaseSync
+  private readonly databaseInstanceId: string
   private readonly now: () => number
   private readonly codeGenerator: () => string
   private readonly maxTextBytes: number
@@ -729,6 +796,20 @@ export class DeliveryStore {
     this.now = options.now ?? Date.now
     this.codeGenerator = options.codeGenerator ?? (() => randomBytes(5).toString('hex').toUpperCase())
     this.maxTextBytes = options.maxTextBytes ?? 65_536
+    const instance = this.database.prepare(`
+      SELECT instance_id FROM delivery_instance WHERE singleton = 1
+    `).get() as { instance_id: string } | undefined
+    if (instance === undefined || !/^[0-9a-f]{32}$/u.test(instance.instance_id)) {
+      this.database.close()
+      this.closed = true
+      throw new DeliveryStoreError('conflict', 'delivery database instance namespace is missing or invalid')
+    }
+    this.databaseInstanceId = instance.instance_id
+  }
+
+  instanceId(): string {
+    this.assertOpen()
+    return this.databaseInstanceId
   }
 
   issuePairing(
@@ -845,13 +926,44 @@ export class DeliveryStore {
           FROM delivery_principals WHERE id = ?
         `).get(id) as unknown as PrincipalRow)
       } else {
-        this.database.prepare(`
-          UPDATE delivery_principals SET status = 'active', updated_at = ?, version = version + 1 WHERE id = ?
-        `).run(now, existing.id)
-        result = principalFromRow(this.database.prepare(`
-          SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
-          FROM delivery_principals WHERE id = ?
-        `).get(existing.id) as unknown as PrincipalRow)
+        const anotherOwner = existing.role === 'owner' && existing.status === 'revoked'
+          ? this.database.prepare(`
+            SELECT id FROM delivery_principals
+            WHERE role = 'owner' AND status = 'active' AND id <> ? LIMIT 1
+          `).get(existing.id) as { id: string } | undefined
+          : undefined
+        const linkedOwner = existing.role === 'linked'
+          && existing.status === 'revoked'
+          && existing.linked_to_id !== null
+          ? this.database.prepare(`
+            SELECT id FROM delivery_principals
+            WHERE id = ? AND role = 'owner' AND status = 'active'
+          `).get(existing.linked_to_id) as { id: string } | undefined
+          : undefined
+        const retiredLink = existing.role === 'linked'
+          && existing.status === 'revoked'
+          && linkedOwner === undefined
+        if (anotherOwner !== undefined || retiredLink) {
+          // A trusted local handoff is the only operation allowed to rotate
+          // owner authority. A linked identity may only be reactivated while
+          // its explicit root is still the active owner. Consuming this
+          // otherwise-valid challenge prevents replay without restoring stale
+          // authority from a retired owner or legacy orphan.
+          failure = new DeliveryStoreError(
+            'unauthorized-principal',
+            retiredLink
+              ? 'ordinary pairing cannot reactivate a link without its active owner'
+              : 'ordinary pairing cannot reactivate a former owner while another owner is active',
+          )
+        } else {
+          this.database.prepare(`
+            UPDATE delivery_principals SET status = 'active', updated_at = ?, version = version + 1 WHERE id = ?
+          `).run(now, existing.id)
+          result = principalFromRow(this.database.prepare(`
+            SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+            FROM delivery_principals WHERE id = ?
+          `).get(existing.id) as unknown as PrincipalRow)
+        }
       }
       this.database.prepare("UPDATE pairing_challenges SET status = 'consumed', updated_at = ? WHERE id = ?")
         .run(now, row.id)
@@ -859,6 +971,95 @@ export class DeliveryStore {
     if (failure !== undefined) throw failure
     if (result === undefined) throw new DeliveryStoreError('conflict', 'pairing transaction produced no principal')
     return result
+  }
+
+  /**
+   * Trusted local owner rotation. Unlike an ordinary pairing, this promotes
+   * the exact replacement principal and retires every previous active owner in
+   * one SQLite transaction, so setup can never leave two active owners or turn
+   * the newly discovered owner into a merely linked identity.
+   */
+  handoffOwner(input: ExternalPrincipalKey): DeliveryPrincipal {
+    this.assertOpen()
+    const principal = canonicalPrincipal(input)
+    const json = principalJson(principal)
+    const hash = digest(json)
+    const now = this.now()
+    return this.transaction(() => {
+      let replacement = this.database.prepare(`
+        SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals WHERE key_hash = ? AND principal_json = ?
+      `).get(hash, json) as PrincipalRow | undefined
+      const activeOwners = this.database.prepare(`
+        SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals WHERE role = 'owner' AND status = 'active'
+      `).all() as unknown as PrincipalRow[]
+
+      if (replacement === undefined) {
+        const id = `principal_${randomUUID()}`
+        this.database.prepare(`
+          INSERT INTO delivery_principals (
+            id, key_hash, principal_json, role, status, linked_to_id, created_at, updated_at, version
+          ) VALUES (?, ?, ?, 'owner', 'active', NULL, ?, ?, 1)
+        `).run(id, hash, json, now, now)
+        replacement = this.database.prepare(`
+          SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+          FROM delivery_principals WHERE id = ?
+        `).get(id) as unknown as PrincipalRow
+      } else if (replacement.role !== 'owner'
+        || replacement.status !== 'active'
+        || replacement.linked_to_id !== null) {
+        this.database.prepare(`
+          UPDATE delivery_principals
+          SET role = 'owner', status = 'active', linked_to_id = NULL, updated_at = ?, version = version + 1
+          WHERE id = ?
+        `).run(now, replacement.id)
+      }
+
+      // Revoke every linked identity not explicitly rooted in the replacement.
+      // This covers both legacy NULL orphans and identities whose former owner
+      // was revoked before the handoff. Exclude the replacement (which may
+      // itself have arrived as an orphan) before promoting it above.
+      this.database.prepare(`
+        UPDATE conversation_bindings
+        SET status = 'revoked', updated_at = ?, version = version + 1
+        WHERE status = 'active' AND principal_id IN (
+          SELECT id FROM delivery_principals
+          WHERE role = 'linked' AND status = 'active' AND id <> ?
+            AND (linked_to_id IS NULL OR linked_to_id <> ?)
+        )
+      `).run(now, replacement.id, replacement.id)
+      this.database.prepare(`
+        UPDATE delivery_principals
+        SET status = 'revoked', updated_at = ?, version = version + 1
+        WHERE role = 'linked' AND status = 'active' AND id <> ?
+          AND (linked_to_id IS NULL OR linked_to_id <> ?)
+      `).run(now, replacement.id, replacement.id)
+
+      for (const owner of activeOwners) {
+        if (owner.id === replacement.id) continue
+        this.database.prepare(`
+          UPDATE delivery_principals
+          SET status = 'revoked', updated_at = ?, version = version + 1
+          WHERE id = ? AND role = 'owner' AND status = 'active'
+        `).run(now, owner.id)
+        this.database.prepare(`
+          UPDATE conversation_bindings
+          SET status = 'revoked', updated_at = ?, version = version + 1
+          WHERE principal_id = ? AND status = 'active'
+        `).run(now, owner.id)
+      }
+      // A challenge issued before the handoff must not be able to reactivate a
+      // retired owner after setup has returned successfully.
+      this.database.prepare(`
+        UPDATE pairing_challenges SET status = 'expired', updated_at = ? WHERE status = 'active'
+      `).run(now)
+      const result = this.database.prepare(`
+        SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals WHERE id = ?
+      `).get(replacement.id) as unknown as PrincipalRow
+      return principalFromRow(result)
+    })
   }
 
   isAuthorizedPrincipal(input: ExternalPrincipalKey): boolean {
@@ -1127,6 +1328,96 @@ export class DeliveryStore {
     })
   }
 
+  /**
+   * Consume one exact `/new` Inbox while rotating its binding.
+   *
+   * The Inbox transition is part of the same SQLite commit as revoking the
+   * previous binding and inserting its successor. Consequently a provider
+   * replay can observe either the entirely old state or the entirely new
+   * state, never a rotated binding paired with an unconsumed command.
+   */
+  rotateBindingAndQueueCommand(input: {
+    bindingId: string
+    expectedVersion: number
+    sessionId: string
+    inboxId: string
+  }): { binding: ConversationBinding; inbox: InboxRecord } {
+    this.assertOpen()
+    const bindingId = validateBindingText(input.bindingId, 'bindingId', 256)
+    const inboxId = validateBindingText(input.inboxId, 'inboxId', 256)
+    const sessionId = validateBindingText(input.sessionId, 'sessionId', 512)
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+      throw new DeliveryStoreError('version-conflict', 'active binding version is invalid')
+    }
+    const now = this.now()
+    const nextBindingId = `binding_${randomUUID()}`
+    return this.transaction(() => {
+      const current = this.getBinding(bindingId)
+      const command = this.getInbox(inboxId)
+      if (current === undefined || current.status !== 'active' || current.version !== input.expectedVersion) {
+        throw new DeliveryStoreError('version-conflict', 'active binding version changed or does not exist')
+      }
+      if (command === undefined) {
+        throw new DeliveryStoreError('not-found', 'new-session command Inbox was not found')
+      }
+      if (!['received', 'authorized'].includes(command.status)
+        || !isExactDeliveryCommand(parseDeliveryCommand(command.envelope), 'new', 'clear')) {
+        throw new DeliveryStoreError('conflict', 'Inbox is not an unconsumed exact new-session command')
+      }
+      if (conversationHash(command.envelope.conversation) !== conversationHash(current.conversation)
+        || principalHash(command.envelope.principal) !== principalHash(current.principal)) {
+        throw new DeliveryStoreError('conflict', 'new-session command does not belong to the binding')
+      }
+      const generation = this.nextBindingGenerationByHash(conversationHash(current.conversation))
+      if (generation !== current.generation + 1) {
+        throw new DeliveryStoreError('version-conflict', 'binding generation changed before rotation')
+      }
+      const principal = this.getPrincipal(current.principal)
+      if (principal?.status !== 'active') {
+        throw new DeliveryStoreError('unauthorized-principal', 'binding principal is not active')
+      }
+      const revoked = this.database.prepare(`
+        UPDATE conversation_bindings SET status = 'revoked', updated_at = ?, version = version + 1
+        WHERE id = ? AND status = 'active' AND version = ?
+      `).run(now, current.id, input.expectedVersion)
+      if (revoked.changes !== 1) {
+        throw new DeliveryStoreError('version-conflict', 'active binding version changed')
+      }
+      this.database.prepare(`
+        INSERT INTO conversation_bindings (
+          id, conversation_hash, conversation_json, principal_id, principal_json, workspace, agent_preset,
+          session_id, generation, policy_ref, status, created_at, updated_at, version
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 1)
+      `).run(
+        nextBindingId,
+        conversationHash(current.conversation),
+        conversationJson(current.conversation),
+        principal.id,
+        principalJson(current.principal),
+        current.workspace,
+        current.agentPreset,
+        sessionId,
+        generation,
+        current.policyRef,
+        now,
+        now,
+      )
+      const queued = this.database.prepare(`
+        UPDATE inbox_messages
+        SET status = 'queued', binding_id = ?, next_attempt_at = NULL, failure_code = NULL,
+          claimed_by = NULL, fencing_token = NULL, lease_until = NULL, updated_at = ?
+        WHERE id = ? AND status IN ('received', 'authorized')
+      `).run(nextBindingId, now, inboxId)
+      if (queued.changes !== 1) {
+        throw new DeliveryStoreError('conflict', 'new-session command queue transition lost a race')
+      }
+      return {
+        binding: this.getBinding(nextBindingId)!,
+        inbox: this.getInbox(inboxId)!,
+      }
+    })
+  }
+
   acceptInbound(input: InboundEnvelope): { duplicate: boolean; record: InboxRecord } {
     this.assertOpen()
     const envelope = canonicalEnvelope(input, this.maxTextBytes)
@@ -1335,6 +1626,117 @@ export class DeliveryStore {
     return this.getInbox(inboxId)!
   }
 
+  /**
+   * Establish a durable command boundary before `/stop` or `/new` is queued.
+   *
+   * Every earlier record in the same binding that has not crossed the exact
+   * dispatch marker becomes terminal in one transaction. A normal claim
+   * carrying `dispatch-started` is deliberately left live because the external
+   * Agent may have observed it already. Exact permission commands instead get
+   * a durable cancelled-recovery marker before the runtime is asked to abort.
+   */
+  cancelUndispatchedInboxBefore(input: {
+    bindingId: string
+    beforeInboxId: string
+    failureCode: string
+  }): {
+    cancelled: number
+    dispatching: number
+    claimedInboxIds: string[]
+    dispatchingInboxIds: string[]
+  } {
+    this.assertOpen()
+    const bindingId = validateBindingText(input.bindingId, 'bindingId', 256)
+    const beforeInboxId = validateBindingText(input.beforeInboxId, 'beforeInboxId', 256)
+    const failureCode = validateBindingText(input.failureCode, 'failureCode', 256)
+    const boundary = this.getInbox(beforeInboxId)
+    const binding = this.getBinding(bindingId)
+    if (boundary === undefined || binding === undefined || binding.status !== 'active') {
+      throw new DeliveryStoreError('not-found', 'inbox cancellation boundary or active binding was not found')
+    }
+    if (conversationHash(boundary.envelope.conversation) !== conversationHash(binding.conversation)
+      || principalHash(boundary.envelope.principal) !== principalHash(binding.principal)) {
+      throw new DeliveryStoreError('conflict', 'inbox cancellation boundary does not belong to the binding')
+    }
+    const bindingConversationJson = conversationJson(binding.conversation)
+    const bindingPrincipalJson = principalJson(binding.principal)
+    const now = this.now()
+    return this.transaction(() => {
+      const boundaryRow = this.database.prepare('SELECT rowid FROM inbox_messages WHERE id = ?')
+        .get(beforeInboxId) as { rowid: number } | undefined
+      if (boundaryRow === undefined) {
+        throw new DeliveryStoreError('not-found', 'inbox cancellation boundary was not found')
+      }
+      const dispatchingRows = this.database.prepare(`
+        SELECT id, envelope_json FROM inbox_messages
+        WHERE rowid < ? AND status = 'claimed' AND failure_code = 'dispatch-started'
+          AND (binding_id = ? OR (
+            json_extract(envelope_json, '$.conversation') = json(?)
+            AND json_extract(envelope_json, '$.principal') = json(?)
+          ))
+        ORDER BY rowid
+      `).all(boundaryRow.rowid, bindingId, bindingConversationJson, bindingPrincipalJson) as unknown as {
+        id: string
+        envelope_json: string
+      }[]
+      for (const row of dispatchingRows) {
+        let permission = false
+        try {
+          permission = isPermissionDeliveryCommand(JSON.parse(row.envelope_json) as InboundEnvelope)
+        } catch {}
+        if (!permission) continue
+        const marked = this.database.prepare(`
+          UPDATE inbox_messages SET failure_code = 'permission-cancelled-recovery', updated_at = ?
+          WHERE id = ? AND status = 'claimed' AND failure_code = 'dispatch-started'
+        `).run(now, row.id)
+        if (marked.changes !== 1) {
+          throw new DeliveryStoreError('conflict', 'permission cancellation marker lost its dispatch fence')
+        }
+      }
+      const claimedRows = this.database.prepare(`
+        SELECT id FROM inbox_messages
+        WHERE rowid < ? AND status = 'claimed' AND failure_code IS NULL
+          AND (binding_id = ? OR (
+            json_extract(envelope_json, '$.conversation') = json(?)
+            AND json_extract(envelope_json, '$.principal') = json(?)
+          ))
+        ORDER BY rowid
+      `).all(boundaryRow.rowid, bindingId, bindingConversationJson, bindingPrincipalJson) as unknown as { id: string }[]
+      this.database.prepare(`
+        UPDATE inbox_attempts SET status = 'dead_letter', failure_code = ?, finished_at = ?
+        WHERE status = 'claimed' AND inbox_id IN (
+          SELECT id FROM inbox_messages
+          WHERE rowid < ? AND status = 'claimed' AND failure_code IS NULL
+            AND (binding_id = ? OR (
+              json_extract(envelope_json, '$.conversation') = json(?)
+              AND json_extract(envelope_json, '$.principal') = json(?)
+            ))
+        )
+      `).run(failureCode, now, boundaryRow.rowid, bindingId, bindingConversationJson, bindingPrincipalJson)
+      const cancelled = this.database.prepare(`
+        UPDATE inbox_messages SET status = 'dead_letter', failure_code = ?, next_attempt_at = NULL,
+          claimed_by = NULL, fencing_token = NULL, lease_until = NULL, updated_at = ?
+        WHERE rowid < ?
+          AND (binding_id = ? OR (
+            json_extract(envelope_json, '$.conversation') = json(?)
+            AND json_extract(envelope_json, '$.principal') = json(?)
+          ))
+          AND (status IN ('received', 'authorized', 'queued', 'retry_wait')
+            OR (status = 'claimed' AND failure_code IS NULL))
+      `).run(failureCode, now, boundaryRow.rowid, bindingId, bindingConversationJson, bindingPrincipalJson)
+      const cancelledCount = Number(cancelled.changes)
+      if (!Number.isSafeInteger(cancelledCount)) {
+        throw new DeliveryStoreError('conflict', 'inbox cancellation count is outside the safe integer range')
+      }
+      return {
+        cancelled: cancelledCount,
+        dispatching: dispatchingRows.length,
+        claimedInboxIds: claimedRows.map(row => row.id),
+        dispatchingInboxIds: dispatchingRows.map(row => row.id),
+      }
+    })
+  }
+
   getInbox(id: string): InboxRecord | undefined {
     this.assertOpen()
     const row = this.database.prepare(`${inboxSelect} WHERE id = ?`).get(id) as InboxRow | undefined
@@ -1345,6 +1747,31 @@ export class DeliveryStore {
     this.assertOpen()
     const row = this.database.prepare(`${inboxSelect} WHERE channel = ? AND account = ? AND event_id = ?`)
       .get(channel, account, eventId) as InboxRow | undefined
+    return row === undefined ? undefined : inboxFromRow(row)
+  }
+
+  /** Return the oldest durable admission that did not finish before another Inbox. */
+  findPendingInboundBefore(input: {
+    conversation: ConversationRef
+    principal: ExternalPrincipalKey
+    beforeInboxId: string
+  }): InboxRecord | undefined {
+    this.assertOpen()
+    const target = canonicalTarget({ conversation: input.conversation, principal: input.principal })
+    const beforeInboxId = validateBindingText(input.beforeInboxId, 'beforeInboxId', 256)
+    const boundary = this.database.prepare('SELECT rowid FROM inbox_messages WHERE id = ?')
+      .get(beforeInboxId) as { rowid: number } | undefined
+    if (boundary === undefined) throw new DeliveryStoreError('not-found', 'inbound recovery boundary Inbox was not found')
+    const row = this.database.prepare(`${inboxSelect}
+      WHERE rowid < ? AND status IN ('received', 'authorized')
+        AND json_extract(envelope_json, '$.conversation') = json(?)
+        AND json_extract(envelope_json, '$.principal') = json(?)
+      ORDER BY rowid LIMIT 1
+    `).get(
+      boundary.rowid,
+      conversationJson(target.conversation),
+      principalJson(target.principal),
+    ) as InboxRow | undefined
     return row === undefined ? undefined : inboxFromRow(row)
   }
 
@@ -1476,6 +1903,11 @@ export class DeliveryStore {
         WHERE rowid IN (
           SELECT rowid FROM inbox_messages
           WHERE status = 'retry_wait' AND next_attempt_at <= ? AND attempt_count >= ?
+            AND (failure_code IS NULL OR failure_code NOT IN (
+              'permission-dispatch-recovery',
+              'permission-cancelled-recovery',
+              'permission-failure-notice-recovery'
+            ))
           ORDER BY rowid LIMIT ?
         )
       `).run(now, now, input.maxAttempts, maintenanceLimit)
@@ -1483,7 +1915,11 @@ export class DeliveryStore {
         SELECT candidate.id FROM inbox_messages AS candidate
         WHERE candidate.status IN ('queued', 'retry_wait')
           AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at <= ?)
-          AND (candidate.status = 'queued' OR candidate.attempt_count < ?)
+          AND (candidate.status = 'queued' OR candidate.attempt_count < ? OR candidate.failure_code IN (
+            'permission-dispatch-recovery',
+            'permission-cancelled-recovery',
+            'permission-failure-notice-recovery'
+          ))
           AND candidate.binding_id IS NOT NULL
           AND NOT EXISTS (
             SELECT 1 FROM inbox_messages AS earlier
@@ -1502,7 +1938,13 @@ export class DeliveryStore {
         const fencingToken = current.attemptCount + 1
         const changed = this.database.prepare(`
           UPDATE inbox_messages SET status = 'claimed', claimed_by = ?, fencing_token = ?, lease_until = ?,
-            attempt_count = attempt_count + 1, next_attempt_at = NULL, failure_code = NULL, updated_at = ?
+            attempt_count = attempt_count + 1, next_attempt_at = NULL,
+            failure_code = CASE WHEN failure_code IN (
+              'permission-dispatch-recovery',
+              'permission-cancelled-recovery',
+              'permission-failure-notice-recovery'
+            ) THEN failure_code ELSE NULL END,
+            updated_at = ?
           WHERE id = ? AND status IN ('queued', 'retry_wait')
         `).run(ownerId, fencingToken, now + input.leaseMs, now, current.id)
         if (changed.changes !== 1) continue
@@ -1579,7 +2021,11 @@ export class DeliveryStore {
     const now = this.now()
     return this.transaction(() => {
       const changed = this.database.prepare(`
-        UPDATE inbox_messages AS inbox SET failure_code = 'dispatch-started', updated_at = ?
+        UPDATE inbox_messages AS inbox SET failure_code = CASE WHEN failure_code IN (
+          'permission-dispatch-recovery',
+          'permission-cancelled-recovery',
+          'permission-failure-notice-recovery'
+        ) THEN failure_code ELSE 'dispatch-started' END, updated_at = ?
         WHERE inbox.id = ? AND inbox.status = 'claimed' AND inbox.claimed_by = ?
           AND inbox.fencing_token = ? AND inbox.lease_until > ? AND inbox.binding_id = ?
           AND EXISTS (
@@ -1653,18 +2099,65 @@ export class DeliveryStore {
     const recovered: string[] = []
     this.transaction(() => {
       const rows = this.database.prepare(`
-        SELECT id, attempt_count, failure_code FROM inbox_messages
+        SELECT id, event_id, binding_id, attempt_count, failure_code, envelope_json FROM inbox_messages
         WHERE status = 'claimed' AND lease_until <= ? ORDER BY rowid LIMIT ?
-      `).all(now, limit) as unknown as { id: string; attempt_count: number; failure_code: string | null }[]
+      `).all(now, limit) as unknown as {
+        id: string
+        event_id: string
+        binding_id: string | null
+        attempt_count: number
+        failure_code: string | null
+        envelope_json: string
+      }[]
       for (const row of rows) {
-        const ambiguous = row.failure_code === 'dispatch-started'
-        const exhausted = row.attempt_count >= input.maxAttempts
+        let interruptedPermission = false
+        if (row.failure_code === 'dispatch-started') {
+          try {
+            interruptedPermission = isPermissionDeliveryCommand(JSON.parse(row.envelope_json) as InboundEnvelope)
+          } catch {}
+        }
+        const existingPermissionRecovery = permissionDispatchRecoveryFromFailureCode(row.failure_code ?? undefined)
+        const permissionCommand = interruptedPermission || existingPermissionRecovery !== undefined
+        const terminalOutbox = !permissionCommand || row.binding_id === null
+          ? undefined
+          : this.database.prepare(`
+              SELECT id FROM outbox_messages
+              WHERE idempotency_key IN (?, ?) AND binding_id = ?
+                AND json_valid(intent_json)
+                AND json_extract(intent_json, '$.replyToEventId') = ?
+            `).get(
+              `inbound:${row.id}:reply`,
+              `inbound:${row.event_id}:reply`,
+              row.binding_id,
+              row.event_id,
+            )
+        if (terminalOutbox !== undefined) {
+          const changed = this.database.prepare(`
+            UPDATE inbox_messages SET status = 'processed', next_attempt_at = NULL, claimed_by = NULL,
+              fencing_token = NULL, lease_until = NULL, failure_code = NULL, updated_at = ?
+            WHERE id = ? AND status = 'claimed' AND lease_until <= ?
+          `).run(now, row.id, now)
+          if (changed.changes !== 1) continue
+          this.database.prepare(`
+            UPDATE inbox_attempts SET status = 'processed', failure_code = NULL, finished_at = ?
+            WHERE inbox_id = ? AND status = 'claimed'
+          `).run(now, row.id)
+          recovered.push(row.id)
+          continue
+        }
+        const permissionRecovery = interruptedPermission
+          ? permissionDispatchRecoveryCode('commit')
+          : existingPermissionRecovery === undefined
+            ? undefined
+            : permissionDispatchRecoveryCode(existingPermissionRecovery)
+        const ambiguous = row.failure_code === 'dispatch-started' && permissionRecovery === undefined
+        const exhausted = row.attempt_count >= input.maxAttempts && permissionRecovery === undefined
         const changed = this.database.prepare(`
           UPDATE inbox_messages SET status = ?, next_attempt_at = ?, claimed_by = NULL,
             fencing_token = NULL, lease_until = NULL, failure_code = ?, updated_at = ?
           WHERE id = ? AND status = 'claimed' AND lease_until <= ?
         `).run(ambiguous || exhausted ? 'dead_letter' : 'retry_wait', ambiguous || exhausted ? null : now,
-          ambiguous ? 'dispatch-ambiguous' : 'lease-expired', now, row.id, now)
+          ambiguous ? 'dispatch-ambiguous' : permissionRecovery ?? 'lease-expired', now, row.id, now)
         if (changed.changes !== 1) continue
         this.database.prepare(`
           UPDATE inbox_attempts SET status = 'lost', failure_code = 'lease-expired', finished_at = ?
@@ -1683,6 +2176,28 @@ export class DeliveryStore {
       throw new DeliveryStoreError('invalid-intent', 'outbound intent requires an active binding')
     }
     const intent = canonicalIntent(input, binding, this.maxTextBytes)
+    if (intent.idempotencyKey.startsWith('inbound:') && intent.idempotencyKey.endsWith(':reply')) {
+      const replyEventId = intent.replyToEventId
+      const inbox = replyEventId === undefined
+        ? undefined
+        : this.getInboxByProviderEvent(
+            binding.conversation.channel,
+            binding.conversation.account,
+            replyEventId,
+          )
+      const currentKey = inbox === undefined ? undefined : `inbound:${inbox.id}:reply`
+      const legacyKey = replyEventId === undefined ? undefined : `inbound:${replyEventId}:reply`
+      if (inbox === undefined
+        || inbox.bindingId !== binding.id
+        || conversationHash(inbox.envelope.conversation) !== conversationHash(binding.conversation)
+        || principalHash(inbox.envelope.principal) !== principalHash(binding.principal)
+        || (intent.idempotencyKey !== currentKey && intent.idempotencyKey !== legacyKey)) {
+        throw new DeliveryStoreError(
+          'invalid-intent',
+          'inbound reply idempotency namespace requires the exact bound Inbox event',
+        )
+      }
+    }
     const json = JSON.stringify(intent)
     const hash = digest(json)
     const existing = this.database.prepare(`${outboxSelect} WHERE idempotency_key = ?`)
@@ -1748,6 +2263,30 @@ export class DeliveryStore {
         AND json_extract(intent_json, '$.modelPicker.operationId') = ?
       ORDER BY created_at DESC, id DESC LIMIT 1`).get(binding, operation) as OutboxRow | undefined
     return row === undefined ? undefined : outboxFromRow(row).intent.modelPicker
+  }
+
+  getPermissionPicker(operationId: string, bindingId: string): PermissionPickerIntent | undefined {
+    return this.getPermissionPickerRecord(operationId, bindingId)?.intent.permissionPicker
+  }
+
+  getPermissionPickerRecord(operationId: string, bindingId: string): OutboxRecord | undefined {
+    this.assertOpen()
+    const operation = validateBindingText(operationId, 'operationId', 256)
+    const bindingKey = validateBindingText(bindingId, 'bindingId', 256)
+    const row = this.database.prepare(`${outboxSelect}
+      WHERE binding_id = ? AND json_valid(intent_json)
+        AND json_extract(intent_json, '$.permissionPicker.operationId') = ?
+      ORDER BY created_at DESC, id DESC LIMIT 1`).get(bindingKey, operation) as OutboxRow | undefined
+    if (row === undefined) return undefined
+    const binding = this.getBinding(bindingKey)
+    if (binding === undefined) throw new DeliveryStoreError('invalid-intent', 'permission picker binding does not exist')
+    const record = outboxFromRow(row)
+    const intent = canonicalIntent(record.intent, binding, this.maxTextBytes)
+    if (intent.format !== 'permission-picker' || intent.permissionPicker?.operationId !== operation
+      || digest(JSON.stringify(intent)) !== record.intentHash) {
+      throw new DeliveryStoreError('invalid-intent', 'persisted permission picker intent is invalid')
+    }
+    return { ...record, intent }
   }
 
   getModelPickerState(operationId: string, bindingId: string): ModelPickerState | undefined {

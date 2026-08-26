@@ -132,11 +132,12 @@ export interface OutboundIntent {
   format?: OutboundFormat
   approval?: ApprovalIntent
   modelPicker?: ModelPickerIntent
+  permissionPicker?: PermissionPickerIntent
   replyToEventId?: string
   metadata?: Readonly<Record<string, string>>
 }
 
-export type OutboundFormat = 'approval' | 'markdown' | 'model-picker' | 'plain'
+export type OutboundFormat = 'approval' | 'markdown' | 'model-picker' | 'permission-picker' | 'plain'
 
 export interface ApprovalIntent {
   operationId: string
@@ -145,6 +146,21 @@ export interface ApprovalIntent {
   expiresAt: number
   title: string
   diffHash: string
+}
+
+export type PermissionPickerLevel = 'ask' | 'auto' | 'full' | 'custom'
+
+/** The exact permission state and binding snapshot represented by one durable picker card. */
+export interface PermissionPickerIntent {
+  operationId: string
+  issuedAt: number
+  expiresAt: number
+  current: PermissionPickerLevel
+  expectedStateHash: string
+  /** AssistantPolicy emergency-stop revision observed when the card was issued. */
+  emergencyStopVersion: number
+  bindingVersion: number
+  sessionId: string
 }
 
 export interface ModelPickerIntent {

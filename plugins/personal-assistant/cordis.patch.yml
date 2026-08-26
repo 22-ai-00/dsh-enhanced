@@ -1,10 +1,42 @@
+- id: permission
+  name: '@deepseek-ai/dsh-permission-presets'
+  config:
+    presets:
+      workspace-write:
+        sandbox: workspace-write
+        approval: ask
+        name: 请求批准
+      auto:
+        sandbox: workspace-write
+        approval: ask
+        name: 帮我批准
+      danger-full-access:
+        sandbox: danger-full-access
+        approval: never
+        name: 完全访问权限
+    defaultPreset: danger-full-access
+
 - insert:
     - id: dsh-enhanced-personal-assistant
       name: '@dsh-enhanced/personal-assistant'
       config:
         assistantPolicy:
           databasePath: !!js dshHomePath('assistant-policy/policy.sqlite')
-          rules: []
+          rules:
+            - id: dsh-enhanced-foreground-capability-*
+              effect: allow
+              subject:
+                kind: agent
+                id: '*'
+                workspace: '*'
+              actions:
+                - '*'
+              resource:
+                kind: '*'
+                id: '*'
+              context:
+                initiators:
+                  - foreground
           budgets: []
         personalMemory:
           databasePath: !!js dshHomePath('personal-memory/memory.sqlite')

@@ -59,6 +59,15 @@ export interface LarkModelPickerCard {
   callbackValues: Readonly<Record<'confirm' | 'effort' | 'model' | 'provider', { modelPicker: string }>>
 }
 
+export type LarkPermissionLevel = 'ask' | 'auto' | 'full'
+
+export interface LarkPermissionPickerCard {
+  title: string
+  body: string
+  current: LarkPermissionLevel | 'custom'
+  callbackValues: Readonly<Record<LarkPermissionLevel, { permissionPicker: string }>>
+}
+
 export interface LarkSelectOption {
   value: string
   label: string
@@ -68,6 +77,7 @@ export type LarkSendInput =
   | { approval: LarkApprovalCard }
   | { markdown: string }
   | { modelPicker: LarkModelPickerCard }
+  | { permissionPicker: LarkPermissionPickerCard }
   | { text: string }
   | { toolApproval: LarkToolApprovalCard }
 

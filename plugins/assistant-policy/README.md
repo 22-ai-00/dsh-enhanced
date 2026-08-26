@@ -46,19 +46,23 @@ dsh --profile web --dump-config
 
 ## 三档即时审批
 
-三档选择由标准 `sandbox/mode`、`approval/policy` 与本插件的 durable `assistant-policy/approval-reviewer` 事件共同决定；`permission/preset` 只记录所选 bundle 的用户意图，不替代三项执行状态的逐项核验：
+生产三档由标准 `permission/preset`、`sandbox/mode` 与 `approval/policy` 共同决定：官方 id `workspace-write` / `auto` / `danger-full-access` 分别映射 reviewer `user` / `auto-review` / `none`，而且日志中更晚的官方选择会覆盖更早的旧 reviewer 事件。`assistant-policy/approval-reviewer` 仍保留为旧 session、单 workspace preset 或第三方动态 id 的兼容事实；无论意图来自哪一种事件，执行状态仍逐项核验：
 
 - **请求批准**：`sandbox/mode: workspace-write` + `approval/policy: ask` + reviewer `user`。低风险精确 allowlist 直接继续，其余动作交给人工。
 - **帮我批准**：`sandbox/mode: workspace-write` + `approval/policy: ask` + reviewer `auto-review`。只有本地归为 `ask-review` 的未知或可能低风险动作才会进入隔离 LLM reviewer；本地明确识别出的网络、凭据、后台、破坏性、提权和复杂 shell 始终交给人工。
-- **完全访问权限**：只有显式且同时生效的 `sandbox/mode: danger-full-access` + `approval/policy: never` + reviewer `none` 才会绕过参数级即时风险门。单独的 `never`、缺少 sandbox 事件、事件畸形或三者暂时不一致都会失败关闭并继续产生 ask（随后由 `never` 确定性拒绝），绝不会把 headless 的“不询问”误解成 full。`tools.guard()` 的显式 deny、紧急停止、身份和预算检查仍然单调生效；若希望未匹配工具也可执行，需要显式配置 `toolDefaultEffect: allow`。
+- **完全访问权限**：只有显式且同时生效的 `sandbox/mode: danger-full-access` + `approval/policy: never` + reviewer `none` 才会绕过参数级即时风险门。单独的 `never`、缺少 sandbox 事件、事件畸形或三者暂时不一致都会失败关闭，绝不会把 headless 的“不询问”误解成 full；此时敏感工具直接返回稳定的 `[approval-disabled]` 诊断，并明确说明没有向用户展示审批，不再制造 `the user rejected tool` 的错误归因。`tools.guard()` 的显式 deny、紧急停止、身份和预算检查仍然单调生效；若希望未匹配工具也可执行，需要显式配置 `toolDefaultEffect: allow`。
 
-包根导出 `approvalReviewerOf(events)`、`getApprovalReviewer(session)` 和 `setApprovalReviewer(session, reviewer)`，reviewer 值仅允许 `user | auto-review | none`。setter 会校验输入，并在值未变化时避免追加重复事件。auto 与 full 都要求各自的三项状态显式完整；缺少 reviewer/approval/sandbox、孤立 `never`、显式但畸形的事件或顺序暂时不一致的事件只会折回 `user`，不会从部署默认值猜测或扩大权限。切换三档的命令层应按安全顺序写入完整状态；full 只有在最后一项也落盘后才生效，退出 full 则应先收窄 sandbox。
+包根导出 `approvalReviewerOf(events)`、`getApprovalReviewer(session)` 和兼容 setter `setApprovalReviewer(session, reviewer)`；setter 只接受 `user | auto-review | none`。auto 与 full 都要求 preset 意图、显式 approval 和显式 sandbox 完整一致；缺项、畸形事件或切换中的中间状态只会折回 `user`。因此 Web 的 full→auto、ask→auto，以及 Delivery auto→Web ask 都由最新官方 preset 直接串行折叠，不再依赖另写 custom reviewer。
+
+canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要迁移写入。仅对旧版/第三方的非 canonical full preset，插件仍在 live session 扫描、`session/created` 和工具执行屏障做严格兼容迁移；它要求显式 full bundle、sandbox 与 approval 完全一致且没有 reviewer，失败则收窄并拒绝本次工具。
+
+`assistant-policy/approval-reviewer` 是 required session event。DSH rc.8 尚无公开事件注册 API，而且独立安装/软链接插件时，插件和 DSH Host 可能各自加载一份 `@deepseek-ai/dsh-session`。本包会同步校验 format v0，并在插件本地目录与从真实 Host 入口解析出的目录不同的情况下同时做精确、进程生命周期内单调注册；npm/pnpm bin 会先解析软链接，不依赖固定安装路径。注册不能在插件卸载或 HMR 时删除，否则 persistence 的关机 drain 和已有 session 冷恢复可能再次把事件判为 unknown。若无法从真实入口解析 Host copy，或已解析到的 copy 在格式、导出形态、同步加载能力上不兼容，插件都会 fail fast，拒绝仅修改本地目录并要求同步更新兼容层。
 
 参数级风险门不是宽泛的字符串前缀判断，也不声称实现了完整 shell parser：
 
 - `read` / `read_image` 只有一个可证明位于 workspace 内且不带 credential-sensitive 标记的本地路径时可继续；`glob` / `grep` 只接受已知参数形态，并对 search root、glob/include 做同样的词法范围检查。workspace 外、`.env`、`.ssh`、`.codex/auth.json` 等敏感目标、URL、缺失路径或未知参数一律交人工；
 - `pwd`、受限 `ls`、`git status --short` 等少量精确 argv 形态可继续；其 `workdir` 与 `ls` 路径操作数仍必须位于非 credential 的 workspace 范围内，未知或畸形 bash 参数失败关闭；
-- 简单但未分类的命令（例如 `pnpm test`）与未知工具进入 `ask-review`；
+- 简单但未分类的命令（例如 `pnpm test`）与未知工具进入 `ask-review`。`run_code` 例外：当前 worker runtime 是 bash-equivalent 的便利执行环境，不是 OS 安全边界，代码可触达 Node/进程能力，因此在 ask/auto 档始终进入 `ask-human`，不会交给模型自动批准；仅显式完整的 full 档会按其“不再请求批准”的语义直接继续；
 - 网络（包括内置 `web_search` / `web_fetch`）、credential 痕迹、后台执行（包括 `bash.run_in_background: true`）、破坏性操作、提权、workspace 外写入，以及包含管道、重定向、替换、引号等需要真实 shell 解析的命令进入 `ask-human`；`npx`、`npm exec`、`pnpm/yarn dlx` 与 `git submodule update` 也按潜在下载/远端执行直接归入这一档；
 - `pwsh` 在具备独立严格解析器前一律进入 `ask-human`；
 - `bash` / `pwsh` / `write` / `edit` 已携带 DSH rc.8 合法的 `sandbox_permissions: workspace-write | danger-full-access` 和非空 `justification` 时交还工具自身的原生审批，避免弹两次；Codex 风格的 `require_escalated` 或其他畸形升级参数仍交人工。
@@ -112,7 +116,7 @@ budgets:
 - `validateApprovalSettlement(snapshot, expectation)`：跨 Memory / Wiki / Automations / Evolution 共用的纯函数提交门。它逐字段核对 immutable proposal、重新计算 diff SHA-256，并要求终态版本恰好为原版本 `+1`；approved/rejected 必须由绑定 principal 决定，expired 必须由 `system:expiry` 决定。缺失或冲突会抛出稳定的 `ApprovalSettlementConflict`，业务域应 fail closed。
 - `setEmergencyStop` / `getEmergencyStop`：持久紧急停止。
 - `queryAudit`：按 sequence 有界分页，单次最多 100 条。
-- `bindInitiator(agent, initiator)`：供受信调度器在 agent 生命周期内标记 `background`；释放后恢复前一层绑定。
+- `bindInitiator(agent, initiator, principal?)`：供受信调度器在 Agent 生命周期内绑定 initiator；外部调度器同时传入 canonical principal 后，`authorizeAgent()` 与工具 guard 会把它作为 Agent subject 的精确 principal。释放后恢复前一层绑定。
 
 DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件的 proposal 是跨 turn、可重启恢复的审批状态，不把两者混为一个授权凭证。
 

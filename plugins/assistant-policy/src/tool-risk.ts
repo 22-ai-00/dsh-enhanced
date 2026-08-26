@@ -309,6 +309,10 @@ export function classifyToolRisk(input: Readonly<ToolRiskInput>): ToolRiskClassi
   }
   if (escalation === 'invalid') return 'ask-human'
   if (NETWORK_TOOLS.has(input.name)) return 'ask-human'
+  // `run_code` executes arbitrary worker code and is not an OS sandbox. Its
+  // source cannot be reduced to the narrow argv grammar below, so auto review
+  // must never grant it without a human decision.
+  if (input.name === 'run_code') return 'ask-human'
   if (input.name === 'bash') return classifyBash(argumentsRecord, input.workspace)
   // PowerShell has materially different quoting, invocation and background
   // semantics. Until it has its own strict parser, never send it to the LLM

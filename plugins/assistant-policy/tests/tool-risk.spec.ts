@@ -211,4 +211,8 @@ describe('parameter-aware tool risk classification', () => {
   test('asks for unknown non-built-in tools', () => {
     expect(classifyToolRisk({ name: 'future_external_tool', arguments: {}, workspace })).toBe('ask-review')
   })
+
+  test('reserves the bash-equivalent run_code transport for human approval', () => {
+    expect(classifyToolRisk({ name: 'run_code', arguments: {}, workspace })).toBe('ask-human')
+  })
 })
