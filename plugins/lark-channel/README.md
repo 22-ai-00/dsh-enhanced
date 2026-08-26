@@ -258,9 +258,15 @@ launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 
 ## 安全与权限
 
-`--allow-agent-tools` 是高权限显式开关。它只生成 Delivery 当前/兼容的精确 preset+绝对 workspace、`external` initiator 和 `bash|pwsh`、`read`、`glob`、`grep`、`skill` 以及个人助理自身的只读检索工具（`memory_search`、`wiki_search`、`wiki_read`）规则，不生成 `tool:*`；带 `*` 的 workspace 会被拒绝，避免被 Policy 当作模式。Bash/Pwsh 本身仍可启动进程并读写其 sandbox 允许的内容；若该 session 使用 `danger-full-access` 且 approval 为 `never`，飞书中获准的外部会话等同获得很宽的本机命令权限。请按需要选择更窄的 DSH permission preset，并保持飞书 owner/应用范围最小。
+`--allow-agent-tools` 是高权限显式开关。它生成一条 `tool: *` 的 allow 规则，绑定 Delivery 当前/兼容的精确 preset + 绝对 workspace + `external` initiator，再叠加一组 deny 规则挡住会改写持久状态的工具（`memory_manage`、`wiki_upsert`、`wiki_lint`、`automation_*`、`evolution_propose`、`knowledge_pin`、`knowledge_promote`、`heartbeat_scratch_update`）；Policy 中 deny 优先于 allow，因此这些工具在外部会话里始终不可达。
 
-`skill` 是标准 DSH base 的 `tool-skill` row 注册的模型侧工具，它让 Agent 能发现并加载 `ctx.skills` 里的技能（含 `skill-filesystem` 提供的本机 SKILL.md）。不授权该工具时，AssistantPolicy 的 tool guard 会以 `default-deny` 拒绝调用，模型在飞书里只能看到自己没有可用技能，从而退回纯文本回答。会改写状态的 `memory_manage`、`wiki_upsert`、`wiki_lint` 不在授权范围内，仍必须走 owner 审批；技能加载本身不额外提权，被加载技能内部的命令仍受同一 sandbox / approval / Policy 管线约束。
+这里用通配放行而非逐个枚举工具名，是因为工具由部署实际挂载的插件与技能动态注册：任何名单在新工具出现的那一刻就已过期，表现为 Agent 在飞书里报「工具被拒绝」而 owner 无法在对话中解决，且每加一个工具都要发一次 setup 版本。真正的风险判断在 `assistant-policy` 的 `tools/pre-execute` 审查器，它按**行为**检查实参，仍会把写文件、访问网络和危险命令送去审批——所以这条规则决定的是「可达性」，不是「权限」。
+
+主体侧不放宽：`subject.id` 与 `subject.workspace` 始终是精确值，带 `*` 的 workspace 会被拒绝，避免被 Policy 当作模式。Bash/Pwsh 本身仍可启动进程并读写其 sandbox 允许的内容；若该 session 使用 `danger-full-access` 且 approval 为 `never`，飞书中获准的外部会话等同获得很宽的本机命令权限。请按需要选择更窄的 DSH permission preset，并保持飞书 owner/应用范围最小。
+
+`skill` 是标准 DSH base 的 `tool-skill` row 注册的模型侧工具，它让 Agent 能发现并加载 `ctx.skills` 里的技能（含 `skill-filesystem` 提供的本机 SKILL.md）。它由上面的 `tool: *` 规则覆盖，无需单独授权。技能加载本身不额外提权，被加载技能内部的命令仍受同一 sandbox / approval / Policy 管线约束。
+
+若外部会话报告某个工具被拒，先查 `~/.dsh/assistant-policy/policy.sqlite` 的 `audit_events`：`reason_code` 为 `rule-deny` 说明命中了上面的 deny 清单（预期行为）；为 `default-deny` 说明该会话根本没有匹配到 allow 规则，通常是 preset 或 workspace 与 Delivery 实际使用的不一致，此时重跑 `--allow-agent-tools` 即可对齐。
 
 当前 Policy tool guard 不携带 principal 或 conversation kind，只能把规则收窄到 preset/workspace/initiator。Delivery 会先拒绝未配对 principal，但同一 lane 中已经获准的 external 会话（包括 owner 在群内 @ 机器人）仍共享这组工具规则；因此这不是“仅 owner 私聊”的强隔离承诺。
 
