@@ -30,7 +30,13 @@ export interface LarkProfileSetupInput {
 const setupKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const providerKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
 const presetIdPattern = /^[a-z0-9][a-z0-9-]*$/u
-const managedAgentTools = ['bash', 'pwsh', 'read', 'glob', 'grep', 'skill'] as const
+// Read-only retrieval tools the personal assistant registers for itself.
+// The mutating counterparts (`memory_manage`, `wiki_upsert`, `wiki_lint`)
+// stay unauthorized so they keep flowing through owner approval.
+const managedAssistantReadTools = ['memory_search', 'wiki_search', 'wiki_read'] as const
+const managedAgentTools = [
+  'bash', 'pwsh', 'read', 'glob', 'grep', 'skill', ...managedAssistantReadTools,
+] as const
 const managedApprovalSources = [
   'dsh-enhanced-personal-memory',
   'dsh-enhanced-personal-wiki',
@@ -294,8 +300,8 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   const legacyAgents = managedReplyIdentities(rules, account)
     .filter(identity => identity.preset !== agent.preset || identity.workspace !== agent.workspace)
   const agentTools = credentialProvider === 'windows-dpapi'
-    ? ['pwsh', 'read', 'glob', 'grep', 'skill']
-    : ['bash', 'read', 'glob', 'grep', 'skill']
+    ? ['pwsh', 'read', 'glob', 'grep', 'skill', ...managedAssistantReadTools]
+    : ['bash', 'read', 'glob', 'grep', 'skill', ...managedAssistantReadTools]
 
   upsertById(document, rules, {
     id: `lark-channel-credential-${account}`,

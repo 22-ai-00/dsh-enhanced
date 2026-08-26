@@ -80,7 +80,7 @@ describe('Lark Web-profile onboarding patch', () => {
     })
     const toolRules = rules.filter((rule: { id: string }) => rule.id.startsWith('lark-owner-tool-'))
     expect(toolRules.map((rule: { resource: { id: string } }) => rule.resource.id)).toEqual([
-      'bash', 'read', 'glob', 'grep', 'skill',
+      'bash', 'read', 'glob', 'grep', 'skill', 'memory_search', 'wiki_search', 'wiki_read',
     ])
     expect(toolRules).toEqual(toolRules.map((rule: object) => expect.objectContaining({
       ...rule,
@@ -141,7 +141,7 @@ describe('Lark Web-profile onboarding patch', () => {
       .toMatchObject({ subject: { id: 'standard' } })
     expect(rules.find((rule: { id: string }) => rule.id.startsWith('lark-owner-reply-primary-legacy-primary-')))
       .toMatchObject({ subject: { id: 'primary' }, actions: ['reply'] })
-    for (const tool of ['bash', 'read', 'glob', 'grep', 'skill']) {
+    for (const tool of ['bash', 'read', 'glob', 'grep', 'skill', 'memory_search', 'wiki_search', 'wiki_read']) {
       expect(rules.find((rule: { id: string }) =>
         rule.id.startsWith(`lark-owner-tool-${tool}-primary-legacy-primary-`)))
         .toMatchObject({ subject: { id: 'primary' }, resource: { kind: 'tool', id: tool } })
@@ -184,7 +184,7 @@ describe('Lark Web-profile onboarding patch', () => {
       subject: { kind: 'agent', id: 'standard', workspace: oldWorkspace },
       actions: ['reply'],
     })
-    expect(legacyTools).toHaveLength(5)
+    expect(legacyTools).toHaveLength(8)
     expect(legacyTools.every((rule: { subject: { workspace: string } }) =>
       rule.subject.workspace === oldWorkspace)).toBe(true)
   })
@@ -395,6 +395,35 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(windows).toContain('lark-owner-tool-pwsh-primary')
     expect(windows).not.toContain('lark-owner-tool-bash-primary')
     expect(windows).toContain('lark-owner-tool-skill-primary')
+  })
+
+  test('authorizes read-only assistant retrieval but never its mutating counterparts', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const enabled = configure({
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu' as const,
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+    const toolIds = (parse(enabled) as { id: string; config: { assistantPolicy: { rules: {
+      id: string
+      resource: { kind: string; id: string }
+    }[] } } }[])
+      .find(row => row.id === 'dsh-enhanced-personal-assistant')!
+      .config.assistantPolicy.rules
+      .filter(item => item.id.startsWith('lark-owner-tool-') && item.resource.kind === 'tool')
+      .map(item => item.resource.id)
+
+    expect(toolIds).toEqual(expect.arrayContaining(['memory_search', 'wiki_search', 'wiki_read']))
+    for (const mutating of ['memory_manage', 'wiki_upsert', 'wiki_lint']) {
+      expect(toolIds).not.toContain(mutating)
+    }
   })
 
   test('authorizes the DSH skill tool so external turns can load skills', () => {
