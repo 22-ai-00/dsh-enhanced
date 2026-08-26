@@ -2,6 +2,24 @@ import { describe, expect, test } from 'vitest'
 import { parse } from 'yaml'
 import * as lark from '../src/index.ts'
 
+interface PolicyRuleShape {
+  id: string
+  effect: 'allow' | 'deny'
+  subject: { kind: string; id: string; workspace: string }
+  actions: string[]
+  resource: { kind: string; id: string }
+  context: { initiators: string[] }
+}
+
+// Mirrors `deniedExternalTools` in src/setup-profile.ts. Kept as an explicit
+// literal so widening the denylist has to be a deliberate test change.
+const EXPECTED_DENIED_TOOLS = [
+  'memory_manage', 'wiki_upsert', 'wiki_lint',
+  'automation_create', 'automation_manage', 'automation_run',
+  'evolution_propose', 'knowledge_pin', 'knowledge_promote',
+  'heartbeat_scratch_update',
+] as const
+
 const fixture = `
 - id: dsh-enhanced-personal-assistant
   config:
@@ -79,17 +97,24 @@ describe('Lark Web-profile onboarding patch', () => {
       context: { initiators: ['external'] },
     })
     const toolRules = rules.filter((rule: { id: string }) => rule.id.startsWith('lark-owner-tool-'))
-    expect(toolRules.map((rule: { resource: { id: string } }) => rule.resource.id)).toEqual([
-      'bash', 'read', 'glob', 'grep', 'skill', 'memory_search', 'wiki_search', 'wiki_read',
-    ])
+    expect(toolRules.filter((rule: { effect: string }) => rule.effect === 'allow'))
+      .toEqual([expect.objectContaining({
+        id: 'lark-owner-tool-*-primary',
+        effect: 'allow',
+        resource: { kind: 'tool', id: '*' },
+      })])
+    expect(toolRules.filter((rule: { effect: string }) => rule.effect === 'deny')
+      .map((rule: { resource: { id: string } }) => rule.resource.id))
+      .toEqual(EXPECTED_DENIED_TOOLS)
     expect(toolRules).toEqual(toolRules.map((rule: object) => expect.objectContaining({
       ...rule,
       subject: { kind: 'agent', id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' },
       actions: ['execute'],
       context: { initiators: ['external'] },
     })))
-    expect(toolRules.some((rule: { subject: { id: string }; resource: { id: string } }) =>
-      rule.subject.id === '*' || rule.resource.id === '*')).toBe(false)
+    // The subject stays exact; only the tool id may be a pattern.
+    expect(toolRules.some((rule: { subject: { id: string; workspace: string } }) =>
+      rule.subject.id === '*' || rule.subject.workspace.includes('*'))).toBe(false)
     const approvalRules = rules.filter((rule: { id: string }) => rule.id.startsWith('lark-owner-approval-'))
     expect(approvalRules).toHaveLength(4)
     expect(approvalRules.map((rule: { subject: { id: string } }) => rule.subject.id).sort()).toEqual([
@@ -141,7 +166,7 @@ describe('Lark Web-profile onboarding patch', () => {
       .toMatchObject({ subject: { id: 'standard' } })
     expect(rules.find((rule: { id: string }) => rule.id.startsWith('lark-owner-reply-primary-legacy-primary-')))
       .toMatchObject({ subject: { id: 'primary' }, actions: ['reply'] })
-    for (const tool of ['bash', 'read', 'glob', 'grep', 'skill', 'memory_search', 'wiki_search', 'wiki_read']) {
+    for (const tool of ['*', ...EXPECTED_DENIED_TOOLS]) {
       expect(rules.find((rule: { id: string }) =>
         rule.id.startsWith(`lark-owner-tool-${tool}-primary-legacy-primary-`)))
         .toMatchObject({ subject: { id: 'primary' }, resource: { kind: 'tool', id: tool } })
@@ -184,7 +209,7 @@ describe('Lark Web-profile onboarding patch', () => {
       subject: { kind: 'agent', id: 'standard', workspace: oldWorkspace },
       actions: ['reply'],
     })
-    expect(legacyTools).toHaveLength(8)
+    expect(legacyTools).toHaveLength(1 + EXPECTED_DENIED_TOOLS.length)
     expect(legacyTools.every((rule: { subject: { workspace: string } }) =>
       rule.subject.workspace === oldWorkspace)).toBe(true)
   })
@@ -363,13 +388,16 @@ describe('Lark Web-profile onboarding patch', () => {
     })])
     const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
       .config.assistantPolicy.rules
-    expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-tool-pwsh-primary'))
-      .toMatchObject({ resource: { kind: 'tool', id: 'pwsh' } })
-    expect(rules.some((rule: { id: string }) => rule.id === 'lark-owner-tool-bash-primary')).toBe(false)
+    // The grant is one platform-agnostic wildcard, so no per-shell rule exists.
+    expect(rules.find((rule: { id: string }) => rule.id === 'lark-owner-tool-*-primary'))
+      .toMatchObject({ effect: 'allow', resource: { kind: 'tool', id: '*' } })
+    for (const shell of ['bash', 'pwsh']) {
+      expect(rules.some((rule: { id: string }) => rule.id === `lark-owner-tool-${shell}-primary`)).toBe(false)
+    }
     expect(output).not.toContain('client_secret')
   })
 
-  test('rebuilds managed tools for the current platform without leaving Bash and Pwsh together', () => {
+  test('rebuilds managed tool rules across a platform change without leaving stale per-tool rules', () => {
     const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
     const common = {
       profilePatch: fixture,
@@ -392,41 +420,30 @@ describe('Lark Web-profile onboarding patch', () => {
       credentialPath: 'C:\\Users\\test\\.dsh\\credentials-keychain\\lark-primary.clixml',
     })
 
-    expect(windows).toContain('lark-owner-tool-pwsh-primary')
-    expect(windows).not.toContain('lark-owner-tool-bash-primary')
-    expect(windows).toContain('lark-owner-tool-skill-primary')
-  })
-
-  test('authorizes read-only assistant retrieval but never its mutating counterparts', () => {
-    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
-    const enabled = configure({
-      profilePatch: fixture,
-      dshHome: '/Users/test/.dsh',
-      appId: 'cli_0123456789abcdef',
-      account: 'primary',
-      tenant: 'personal',
-      domain: 'feishu' as const,
-      ownerUserId: 'ou_owner',
-      keychainService: 'dsh/lark/web/primary',
-      keychainAccount: 'primary',
-      agentTools: 'enable',
-    })
-    const toolIds = (parse(enabled) as { id: string; config: { assistantPolicy: { rules: {
+    // Replatforming rebuilds the grant; the wildcard carries every tool, so no
+    // per-shell or per-tool allow rule may survive the rewrite.
+    expect(windows).toContain('lark-owner-tool-*-primary')
+    for (const stale of ['bash', 'pwsh', 'skill', 'read', 'glob', 'grep', 'memory_search']) {
+      expect(windows).not.toContain(`lark-owner-tool-${stale}-primary`)
+    }
+    const rules = (parse(windows) as { id: string; config: { assistantPolicy: { rules: {
       id: string
-      resource: { kind: string; id: string }
+      effect: string
     }[] } } }[])
       .find(row => row.id === 'dsh-enhanced-personal-assistant')!
       .config.assistantPolicy.rules
-      .filter(item => item.id.startsWith('lark-owner-tool-') && item.resource.kind === 'tool')
-      .map(item => item.resource.id)
-
-    expect(toolIds).toEqual(expect.arrayContaining(['memory_search', 'wiki_search', 'wiki_read']))
-    for (const mutating of ['memory_manage', 'wiki_upsert', 'wiki_lint']) {
-      expect(toolIds).not.toContain(mutating)
-    }
+      .filter(rule => rule.id.startsWith('lark-owner-tool-'))
+    // The DSH home changes with the platform, so the previous absolute workspace
+    // becomes a legacy identity and keeps its own wildcard plus denials.
+    const allow = rules.filter(rule => rule.effect === 'allow')
+    expect(allow).toHaveLength(2)
+    expect(allow.filter(rule => rule.id === 'lark-owner-tool-*-primary')).toHaveLength(1)
+    expect(allow.filter(rule => rule.id.startsWith('lark-owner-tool-*-primary-legacy-'))).toHaveLength(1)
+    expect(rules.filter(rule => rule.effect === 'deny'))
+      .toHaveLength(EXPECTED_DENIED_TOOLS.length * 2)
   })
 
-  test('authorizes the DSH skill tool so external turns can load skills', () => {
+  test('retires per-tool rules from an enumerated-allowlist profile on upgrade', () => {
     const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
     const common = {
       profilePatch: fixture,
@@ -439,29 +456,90 @@ describe('Lark Web-profile onboarding patch', () => {
       keychainService: 'dsh/lark/web/primary',
       keychainAccount: 'primary',
     }
-
+    // Stand in for a profile written by an earlier release: rename the wildcard
+    // rule into the per-tool ids that version emitted, then upgrade.
+    const RETIRED = ['bash', 'read', 'glob', 'grep', 'skill', 'memory_search']
     const enabled = configure({ ...common, agentTools: 'enable' })
-    const rule = (parse(enabled) as { id: string; config: { assistantPolicy: { rules: {
-      id: string
-      effect: string
-      subject: { kind: string; id: string; workspace: string }
-      actions: string[]
-      resource: { kind: string; id: string }
-      context: { initiators: string[] }
-    }[] } } }[])
+    const wildcardLine = enabled.split('\n')
+      .find(line => line.includes('- id: lark-owner-tool-*-primary') && !line.includes('legacy'))
+    expect(wildcardLine).toBeDefined()
+    const block = enabled.slice(enabled.indexOf(wildcardLine!))
+    const wildcardRule = block.slice(0, block.indexOf('\n        - id: ', wildcardLine!.length))
+    const legacyPatch = enabled.replace(
+      wildcardRule,
+      RETIRED.map(tool => wildcardRule
+        .replace('lark-owner-tool-*-primary', `lark-owner-tool-${tool}-primary`)
+        .replace(/(\n\s+kind: tool\n\s+id: )'?\*'?/, `$1${tool}`)).join('\n'),
+    )
+    expect(legacyPatch).toContain('lark-owner-tool-bash-primary')
+
+    const upgraded = configure({ ...common, profilePatch: legacyPatch, agentTools: 'enable' })
+    for (const retired of ['bash', 'read', 'glob', 'grep', 'skill', 'memory_search']) {
+      expect(upgraded).not.toContain(`lark-owner-tool-${retired}-primary`)
+    }
+    expect(upgraded).toContain('lark-owner-tool-')
+
+    // The upgrade must stay fully revocable.
+    const disabled = configure({ ...common, profilePatch: upgraded, agentTools: 'disable' })
+    expect(disabled).not.toContain('lark-owner-tool-')
+  })
+
+  test('resolves every preset tool through the wildcard while denying durable mutators', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const common = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu' as const,
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+    }
+    const enabled = configure({ ...common, agentTools: 'enable' })
+    const rules = (parse(enabled) as { id: string; config: { assistantPolicy: { rules: PolicyRuleShape[] } } }[])
       .find(row => row.id === 'dsh-enhanced-personal-assistant')!
       .config.assistantPolicy.rules
-      .find(item => item.id === 'lark-owner-tool-skill-primary')
 
-    expect(rule).toMatchObject({
+    const wildcard = rules.find(item => item.id === 'lark-owner-tool-*-primary')
+    expect(wildcard).toMatchObject({
       effect: 'allow',
       subject: { kind: 'agent', id: 'standard', workspace: '/Users/test/.dsh/assistant-workspace' },
       actions: ['execute'],
-      resource: { kind: 'tool', id: 'skill' },
+      resource: { kind: 'tool', id: '*' },
       context: { initiators: ['external'] },
     })
 
+    // Resolve a tool the way AssistantPolicy does, so this proves reachability
+    // rather than restating the emitter's own shape. Deny wins over allow at any
+    // specificity, and only the tool id is ever a pattern. Kept local because the
+    // real evaluator is internal to assistant-policy and must not be imported
+    // across package boundaries.
+    const toolRules = rules.filter(item => item.resource.kind === 'tool')
+    const decide = (tool: string): 'allow' | 'deny' => {
+      const matched = toolRules.filter(item =>
+        item.subject.id === 'standard'
+        && item.subject.workspace === '/Users/test/.dsh/assistant-workspace'
+        && item.actions.includes('execute')
+        && item.context.initiators.includes('external')
+        && (item.resource.id === '*' || item.resource.id === tool))
+      if (matched.some(item => item.effect === 'deny')) return 'deny'
+      return matched.some(item => item.effect === 'allow') ? 'allow' : 'deny'
+    }
+
+    // Host tools, the skill loader, assistant retrieval, and a tool no release
+    // of this package has ever heard of all resolve without a setup change.
+    for (const tool of [
+      'bash', 'pwsh', 'read', 'glob', 'grep', 'skill',
+      'memory_search', 'wiki_search', 'wiki_read',
+      'lark_doc_read', 'some_future_plugin_tool',
+    ]) {
+      expect(decide(tool)).toBe('allow')
+    }
+    for (const tool of EXPECTED_DENIED_TOOLS) expect(decide(tool)).toBe('deny')
+
     const disabled = configure({ ...common, profilePatch: enabled, agentTools: 'disable' })
-    expect(disabled).not.toContain('lark-owner-tool-skill-primary')
+    expect(disabled).not.toContain('lark-owner-tool-')
   })
 })

@@ -30,12 +30,45 @@ export interface LarkProfileSetupInput {
 const setupKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const providerKeyPattern = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
 const presetIdPattern = /^[a-z0-9][a-z0-9-]*$/u
-// Read-only retrieval tools the personal assistant registers for itself.
-// The mutating counterparts (`memory_manage`, `wiki_upsert`, `wiki_lint`)
-// stay unauthorized so they keep flowing through owner approval.
-const managedAssistantReadTools = ['memory_search', 'wiki_search', 'wiki_read'] as const
-const managedAgentTools = [
-  'bash', 'pwsh', 'read', 'glob', 'grep', 'skill', ...managedAssistantReadTools,
+// The grant is expressed as one wildcard allow plus an explicit denylist rather
+// than an enumerated allowlist. Tools are registered dynamically by whichever
+// plugins and skills a deployment mounts, so any name list is stale the moment a
+// new tool appears: the agent then reports a refusal the owner cannot fix from
+// the chat, and every addition needs a setup release. Risk is already judged by
+// behaviour in `assistant-policy`'s `tools/pre-execute` reviewer, which inspects
+// arguments and still routes writes, network access and dangerous commands to
+// approval, so this rule decides reachability, not privilege.
+//
+// `TOOL_WILDCARD` keeps the rule bound to the exact preset, absolute workspace
+// and `external` initiator; only the tool id is a pattern.
+const TOOL_WILDCARD = '*'
+
+// Durable-state mutators that must not be reachable from an external turn even
+// when the reviewer would have asked. Policy evaluates `deny` ahead of `allow`
+// at any specificity, so these override the wildcard.
+const deniedExternalTools = [
+  'memory_manage',
+  'wiki_upsert',
+  'wiki_lint',
+  'automation_create',
+  'automation_manage',
+  'automation_run',
+  'evolution_propose',
+  'knowledge_pin',
+  'knowledge_promote',
+  'heartbeat_scratch_update',
+] as const
+
+// Per-tool ids emitted by earlier releases that used an enumerated allowlist.
+// Removal must still recognise them, otherwise upgrading leaves stale allow
+// rules that `--agent-tools disable` can no longer revoke.
+const retiredToolRuleIds = [
+  'bash', 'pwsh', 'read', 'glob', 'grep', 'skill',
+  'memory_search', 'wiki_search', 'wiki_read',
+] as const
+
+const managedToolRuleSuffixes = [
+  TOOL_WILDCARD, ...deniedExternalTools, ...retiredToolRuleIds,
 ] as const
 const managedApprovalSources = [
   'dsh-enhanced-personal-memory',
@@ -208,14 +241,26 @@ function upsertExternalReplyRule(
 function upsertExternalToolRules(
   document: Document,
   rules: YAMLSeq,
-  input: { account: string; identity: AgentIdentity; tools: readonly string[]; legacy?: boolean },
+  input: { account: string; identity: AgentIdentity; legacy?: boolean },
 ): void {
   const suffix = input.legacy ? legacyIdentitySuffix(input.identity) : ''
-  for (const tool of input.tools) {
+  const subject = { kind: 'agent', id: input.identity.preset, workspace: input.identity.workspace }
+  // One reachability grant for every tool the mounted preset exposes.
+  upsertById(document, rules, {
+    id: `lark-owner-tool-${TOOL_WILDCARD}-${input.account}${suffix}`,
+    effect: 'allow',
+    subject,
+    actions: ['execute'],
+    resource: { kind: 'tool', id: TOOL_WILDCARD },
+    context: { initiators: ['external'] },
+  })
+  // Emitted after the grant so a partially written patch never leaves the
+  // wildcard in place without its denials.
+  for (const tool of deniedExternalTools) {
     upsertById(document, rules, {
       id: `lark-owner-tool-${tool}-${input.account}${suffix}`,
-      effect: 'allow',
-      subject: { kind: 'agent', id: input.identity.preset, workspace: input.identity.workspace },
+      effect: 'deny',
+      subject,
       actions: ['execute'],
       resource: { kind: 'tool', id: tool },
       context: { initiators: ['external'] },
@@ -229,7 +274,7 @@ function removeExternalToolRules(rules: YAMLSeq, account: string): void {
     if (!isMap(item)) continue
     const id = item.get('id')
     if (typeof id !== 'string') continue
-    const managed = managedAgentTools.some(tool => {
+    const managed = managedToolRuleSuffixes.some(tool => {
       const base = `lark-owner-tool-${tool}-${account}`
       return id === base || id.startsWith(`${base}-legacy-`)
     })
@@ -299,10 +344,6 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   const agent = configuredAgentIdentity(rows, input.dshHome)
   const legacyAgents = managedReplyIdentities(rules, account)
     .filter(identity => identity.preset !== agent.preset || identity.workspace !== agent.workspace)
-  const agentTools = credentialProvider === 'windows-dpapi'
-    ? ['pwsh', 'read', 'glob', 'grep', 'skill', ...managedAssistantReadTools]
-    : ['bash', 'read', 'glob', 'grep', 'skill', ...managedAssistantReadTools]
-
   upsertById(document, rules, {
     id: `lark-channel-credential-${account}`,
     effect: 'allow',
@@ -323,18 +364,9 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   if (agentToolsMode === 'disable') removeExternalToolRules(rules, account)
   if (agentToolsMode === 'enable') {
     removeExternalToolRules(rules, account)
-    upsertExternalToolRules(document, rules, {
-      account,
-      identity: agent,
-      tools: agentTools,
-    })
+    upsertExternalToolRules(document, rules, { account, identity: agent })
     for (const legacyAgent of legacyAgents) {
-      upsertExternalToolRules(document, rules, {
-        account,
-        identity: legacyAgent,
-        tools: agentTools,
-        legacy: true,
-      })
+      upsertExternalToolRules(document, rules, { account, identity: legacyAgent, legacy: true })
     }
   }
   removeManagedReplyRules(rules, account)
