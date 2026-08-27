@@ -1,63 +1,222 @@
-  name: Release
+name: Release
 
-  on:
-    push:
-      tags: ['v*']
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing stable release tag to retry (for example, v1.2.3)
+        required: true
+        type: string
 
-  permissions:
-    contents: write
+concurrency:
+  group: npm-release
+  cancel-in-progress: false
 
-  concurrency:
-    group: release-${{ github.ref }}
-    cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm-release
+    outputs:
+      source_commit: ${{ steps.release_source.outputs.source_commit }}
+    permissions:
+      contents: read
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
 
-  jobs:
-    publish:
-      runs-on: ubuntu-latest
-      timeout-minutes: 20
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
 
-      steps:
-        - name: Check out main
-          uses: actions/checkout@v6
-          with:
-            ref: main
-            fetch-depth: 0
+      - name: Verify tag is current main
+        id: release_source
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must be a stable semantic version in the form vX.Y.Z: ${RELEASE_TAG}" >&2
+            exit 1
+          fi
+          auth_header="$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic ${auth_header}" fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          checkout_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+          main_commit="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+          if [[ "${checkout_commit}" != "${tag_commit}" ]]; then
+            echo "Checked-out commit ${checkout_commit} does not match ${RELEASE_TAG} (${tag_commit})." >&2
+            exit 1
+          fi
+          if [[ "${tag_commit}" != "${main_commit}" ]]; then
+            echo "Release tag ${RELEASE_TAG} (${tag_commit}) is not current origin/main (${main_commit})." >&2
+            exit 1
+          fi
+          echo "RELEASE_SOURCE_COMMIT=${main_commit}" >> "${GITHUB_ENV}"
+          echo "source_commit=${main_commit}" >> "${GITHUB_OUTPUT}"
 
-        - name: Install pnpm
-          uses: pnpm/action-setup@v4
-          with:
-            version: 11.7.0
-            run_install: false
+      - name: Install pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.7.0
+          run_install: false
 
-        - name: Set up Node.js
-          uses: actions/setup-node@v6
-          with:
-            cache: pnpm
-            registry-url: https://registry.npmjs.org
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
 
-        - name: Install dependencies
-          run: pnpm install --frozen-lockfile
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
 
-        - name: Verify repository
-          run: pnpm check
+      - name: Verify repository
+        run: pnpm check
 
-        - name: Publish packages
-          run: pnpm release:publish
-          env:
-            NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Verify release tag and pending versions
+        run: node ./scripts/release-version.mjs verify-tag "${RELEASE_TAG}"
 
-        - name: Record release
-          run: pnpm release:record
+      - name: Verify npm credentials
+        shell: bash
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo 'NPM_TOKEN is not configured.' >&2
+            exit 1
+          fi
+          npm whoami --registry=https://registry.npmjs.org
 
-        - name: Commit release manifest
-          run: |
-            if git diff --quiet; then
-              echo "No manifest changes to commit."
-              exit 0
-            fi
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            version="${GITHUB_REF_NAME#v}"
-            git add -A
-            git commit -m "chore(release): record v${version}"
-            git push origin main
+      - name: Recheck release source and tracked tree
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth_header="$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic ${auth_header}" fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          current_tag="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          current_main="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+          if [[ "${current_tag}" != "${RELEASE_SOURCE_COMMIT}" ]]; then
+            echo "Release tag ${RELEASE_TAG} moved from ${RELEASE_SOURCE_COMMIT} to ${current_tag}; refusing to publish." >&2
+            exit 1
+          fi
+          if [[ "${current_main}" != "${RELEASE_SOURCE_COMMIT}" ]]; then
+            echo "origin/main advanced from ${RELEASE_SOURCE_COMMIT} to ${current_main}; refusing to publish." >&2
+            exit 1
+          fi
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo 'Tracked files changed after verification; refusing to publish.' >&2
+            git status --short --untracked-files=no >&2
+            exit 1
+          fi
+
+      - name: Publish packages
+        run: pnpm release:publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  record:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+      EXPECTED_RELEASE_SOURCE_COMMIT: ${{ needs.publish.outputs.source_commit }}
+
+    steps:
+      - name: Check out release tag
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && format('refs/tags/{0}', inputs.tag) || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version-file: .node-version
+
+      - name: Verify release source
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth_header="$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic ${auth_header}" fetch --no-tags origin \
+            +refs/heads/main:refs/remotes/origin/main \
+            "+refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}"
+          tag_commit="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
+          checkout_commit="$(git rev-parse --verify 'HEAD^{commit}')"
+          main_commit="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+          if [[ -z "${EXPECTED_RELEASE_SOURCE_COMMIT:-}" ]]; then
+            echo 'Publish job did not provide its verified source commit; refusing to record.' >&2
+            exit 1
+          fi
+          if [[ "${checkout_commit}" != "${tag_commit}" ]]; then
+            echo "Checked-out commit ${checkout_commit} does not match ${RELEASE_TAG} (${tag_commit}); refusing to record." >&2
+            exit 1
+          fi
+          if [[ "${tag_commit}" != "${main_commit}" ]]; then
+            echo "Release tag ${RELEASE_TAG} (${tag_commit}) is not current origin/main (${main_commit}); refusing to record." >&2
+            exit 1
+          fi
+          if [[ "${tag_commit}" != "${EXPECTED_RELEASE_SOURCE_COMMIT}" ]]; then
+            echo "Release source changed after publish from ${EXPECTED_RELEASE_SOURCE_COMMIT} to ${tag_commit}; refusing to record." >&2
+            exit 1
+          fi
+          echo "RELEASE_SOURCE_COMMIT=${EXPECTED_RELEASE_SOURCE_COMMIT}" >> "${GITHUB_ENV}"
+
+      - name: Record release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          node ./scripts/release-version.mjs verify-tag "${RELEASE_TAG}"
+          node ./scripts/release-version.mjs record
+          changed_files="$(git diff --name-only)"
+          if [[ "${changed_files}" != 'release-manifest.json' ]]; then
+            echo 'Record step must change only release-manifest.json.' >&2
+            printf 'Changed files:\n%s\n' "${changed_files:-<none>}" >&2
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- release-manifest.json
+          if [[ "$(git diff --cached --name-only)" != 'release-manifest.json' ]]; then
+            echo 'Refusing to commit files other than release-manifest.json.' >&2
+            exit 1
+          fi
+          git commit -m "chore(release): record ${RELEASE_TAG}"
+
+      - name: Push release record to main
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          auth_header="$(printf 'x-access-token:%s' "${GITHUB_TOKEN}" | base64 | tr -d '\n')"
+          git -c http.extraheader="AUTHORIZATION: basic ${auth_header}" \
+            fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          current_main="$(git rev-parse --verify 'refs/remotes/origin/main^{commit}')"
+          if [[ "${current_main}" != "${RELEASE_SOURCE_COMMIT}" ]]; then
+            echo "origin/main advanced from ${RELEASE_SOURCE_COMMIT} to ${current_main}; refusing to push the release record." >&2
+            exit 1
+          fi
+          git -c http.extraheader="AUTHORIZATION: basic ${auth_header}" \
+            push "https://github.com/${GITHUB_REPOSITORY}.git" HEAD:main
