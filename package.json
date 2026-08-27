@@ -52,6 +52,7 @@
     "@types/node": "catalog:",
     "oxlint": "catalog:",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "yaml": "2.9.0"
   }
 }

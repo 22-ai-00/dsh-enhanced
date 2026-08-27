@@ -88,6 +88,7 @@
     "@deepseek-ai/dsh-agent": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
+    "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",

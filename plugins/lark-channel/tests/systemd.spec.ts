@@ -27,10 +27,32 @@ describe('DSH profile systemd user service', () => {
     })
 
     expect(unit).toContain('ExecStart="/usr/bin/node" --disable-warning=ExperimentalWarning "/home/test/.local/bin/dsh" --profile web --no-open')
+    expect(unit).toContain('WorkingDirectory=/home/test/.dsh/profiles/web')
     expect(unit).toContain('Environment="DSH_HOME=/home/test/.dsh"')
     expect(unit).toContain('Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"')
     expect(unit).toContain('Restart=on-failure')
     expect(unit).not.toMatch(/TOKEN|SECRET|PASSWORD/u)
+  })
+
+  test('writes literal dynamic values in syntax accepted by systemd 252', () => {
+    const unit = createSystemdUserUnit({
+      unitName: 'dsh-profile-web.service',
+      unitPath: '/home/test/.config/systemd/user/dsh-profile-web.service',
+      dshHome: '/home/test user/quote"/slash\\/100%/.dsh',
+      profile: 'web',
+      profileDirectory: '/home/test user/quote"/slash\\/100%/.dsh/profiles/web',
+      nodePath: '/home/test user/quote"/slash\\/100%/bin/node',
+      dshPath: '/home/test user/quote"/slash\\/100%/bin/dsh',
+      path: '/home/test user/quote"/slash\\/100%/bin:/usr/bin:/bin',
+    })
+
+    expect(unit).toContain(String.raw`WorkingDirectory=/home/test user/quote"/slash\/100%%/.dsh/profiles/web` + '\n')
+    expect(unit).not.toContain('WorkingDirectory="')
+    expect(unit).toContain(String.raw`Environment="DSH_HOME=/home/test user/quote\"/slash\\/100%%/.dsh"`)
+    expect(unit).toContain(String.raw`Environment="PATH=/home/test user/quote\"/slash\\/100%%/bin:/usr/bin:/bin"`)
+    expect(unit).toContain(String.raw`ExecStart="/home/test user/quote\"/slash\\/100%%/bin/node" --disable-warning=ExperimentalWarning "/home/test user/quote\"/slash\\/100%%/bin/dsh"`)
+    expect(unit).toContain('Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"')
+    expect(unit).toContain('Environment="XDG_RUNTIME_DIR=%t"')
   })
 
   test('atomically installs, enables, restarts, and verifies the user unit', async () => {

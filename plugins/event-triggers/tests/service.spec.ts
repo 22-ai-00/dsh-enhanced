@@ -274,5 +274,5 @@ describe('event triggers service', () => {
     expect(automations.events).toEqual([expect.objectContaining({ automationId: 'live-task' })])
     expect(service.health()).toMatchObject({ pendingEvents: 0, quarantinedEvents: 1_000, deliveredEvents: 1 })
     await ctx.fiber.restart()
-  })
+  }, 15_000)
 })

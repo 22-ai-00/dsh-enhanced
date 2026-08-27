@@ -50,6 +50,17 @@ function unitQuote(value: string): string {
   return `"${value.replace(/\\/gu, '\\\\').replace(/"/gu, '\\"')}"`
 }
 
+function unitLiteralQuote(value: string): string {
+  return unitQuote(value.replace(/%/gu, '%%'))
+}
+
+function unitWorkingDirectory(value: string): string {
+  if (value.includes('\0') || /[\r\n]/u.test(value)) throw new Error('lark-channel setup: invalid systemd value')
+  // systemd 252 parses this directive as one raw path: quotes and C escapes would become literal path characters.
+  const escaped = value.replace(/%/gu, '%%')
+  return /[\t \\]$/u.test(escaped) ? `${escaped}/` : escaped
+}
+
 function findExecutable(command: string, pathValue = process.env.PATH): string {
   for (const directory of (pathValue ?? '').split(delimiter)) {
     if (directory === '' || !isAbsolute(directory)) continue
@@ -91,12 +102,12 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=${unitQuote(input.profileDirectory)}
-Environment=${unitQuote(`DSH_HOME=${input.dshHome}`)}
-Environment=${unitQuote(`PATH=${input.path}`)}
+WorkingDirectory=${unitWorkingDirectory(input.profileDirectory)}
+Environment=${unitLiteralQuote(`DSH_HOME=${input.dshHome}`)}
+Environment=${unitLiteralQuote(`PATH=${input.path}`)}
 Environment=${unitQuote('DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus')}
 Environment=${unitQuote('XDG_RUNTIME_DIR=%t')}
-ExecStart=${unitQuote(input.nodePath)} --disable-warning=ExperimentalWarning ${unitQuote(input.dshPath)} --profile ${input.profile} --no-open
+ExecStart=${unitLiteralQuote(input.nodePath)} --disable-warning=ExperimentalWarning ${unitLiteralQuote(input.dshPath)} --profile ${input.profile} --no-open
 Restart=on-failure
 RestartSec=2
 
