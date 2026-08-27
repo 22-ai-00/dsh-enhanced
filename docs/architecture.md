@@ -6,8 +6,8 @@ DSH 当前把可安装插件定义为 profile bundle：包的 `dsh.bundle.patch`
 
 这一边界带来三个结果：
 
-- 插件可以独立版本化、安装、回滚和审计。
-- 一个插件失败不会要求发布所有其他插件。
+- 插件可以独立安装、回滚和审计；当前仓库级 release 会统一推进所有包的版本。
+- 每个插件保持独立 npm 包边界，但一次整体发版仍会校验并发布全部包；中途失败按下文的同 tag 重试协议恢复。
 - 共享实现可以进入 `packages/*`，但共享库没有 `dsh.bundle`，不会意外激活。
 
 ## 层次
@@ -51,4 +51,10 @@ plugins/<name>/
 
 本地开发可以把 `plugins/<name>` 目录链接进 profile。正式分发以独立 npm 包或预构建 tarball 为准。Git package 安装以仓库根为包边界，不适合作为多插件子目录的默认分发方式。
 
-发布由 CI 自动完成：维护者在本地用根目录的 `release:prepare` 写入待发布版本并合入 `main`，随后推送 `v*` 标签触发 GitHub Actions（`.github/workflows/release.yml`）自动执行 `release:publish` 与 `release:record`，并把更新后的 `release-manifest.json` 回推 `main`。发布阶段必须使用 pnpm，让 workspace `catalog:` 依赖在上传前转换为实际版本；插件的 `prepublishOnly` 会拒绝直接使用 npm 发布。发布凭据来自仓库 Secret `NPM_TOKEN`（npm automation token），一次配置即可持续发布。`release-manifest.json` 记录当前成功版本、待发布版本、每个插件包版本和历史记录。整体发版默认递增已记录版本的补丁位，同时仍保留每个插件作为独立 npm 包安装、回滚和审计的边界。
+发布由 tag 驱动的 CI 自动完成。维护者先用根目录的 `release:prepare` 统一更新仓库版本和 `release-manifest.json` 的 `pending`，验证后合入 `main`；发布标签必须严格为 `vX.Y.Z`，必须从当时的 `origin/main` HEAD 创建，而且版本必须等于 `pending`。GitHub Actions（`.github/workflows/release.yml`）检出这个精确 tag，而不是移动中的分支，并在发布前要求 tag peeled commit 仍等于当前 `origin/main` HEAD。它还会验证 current/history/pending 的账本顺序、根版本、pending 包集合与全部 `plugins/*` / `packages/*` 目录一一对应，且每个包的 manifest 和运行时版本都一致；`src/version.ts` 只允许单一稳定字面量导出。任一条件不满足都会 fail closed。
+
+发布阶段必须使用 pnpm，让 workspace `catalog:` 依赖在上传前转换为实际版本；插件的 `prepublishOnly` 会拒绝直接使用 npm 发布。当前新包首次发布以 GitHub Environment `npm-release` 中的 `NPM_TOKEN` 作为 bootstrap 凭据，该 secret 应是有期限、最小包范围的 granular access token；environment 必须配置 required reviewers 和允许的部署分支/标签。workflow 在发布前验证 token 非空并执行 `npm whoami`。新包完成首次发布和 npm 侧配置后，可以迁移到 trusted publishing/OIDC，但当前流程不擅自启用 OIDC。publish job 只有仓库只读权限，持有写权限的 record job 不安装依赖且拿不到 npm token；本地 record 脚本执行步骤也不注入仓库写 token。
+
+`release:publish` 紧前会再次检查 tag、`origin/main` 和 tracked index/worktree；未跟踪构建产物不影响发布，但任何 staged/unstaged tracked 改动都会拒绝。发布成功后，`release:record` 复用同一套版本与包集合校验，只更新 `release-manifest.json`：提升 `current`、追加 `history` 并清空 `pending`。workflow 只提交这个账本文件，并在推送前再次确认 `origin/main` 没有从发布源码提交前进。按下述 immutable tag ruleset 部署后，tag 会稳定指向发布源码，而账本记录位于其后的独立提交；workflow 自身不创建也不移动 tag。
+
+这些远端复核只能缩小 TOCTOU 窗口，不能证明检查与 npm registry 写入之间具有原子性。仓库必须为 `v*` 配置 immutable tag ruleset（禁止删除和 force-update），发布期间冻结 `main` 合入，或让所有 main 写入者共享一个会实际阻塞写入的互斥机制；protected environment 的审批只能约束 job/secret 使用，不能单独锁定分支。递归 npm 发布也不是原子事务；暂时性失败应通过 Actions rerun，或用 `workflow_dispatch` 输入同一个现有 tag 重试，不能创建替代 tag 或改变 pending/source。整体发版统一推进版本，同时仍保留每个包作为独立 npm 安装、回滚和审计边界。
