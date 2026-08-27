@@ -400,7 +400,7 @@ fi
   test('restart command rebuilds and kickstarts web without installation or onboarding', async () => {
     const dshHome = await temporaryDshHome()
 
-    const result = runRestart([], dshHome)
+    const result = runRestart([], dshHome, 'darwin')
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('pnpm build')
@@ -413,7 +413,7 @@ fi
   test('restart command accepts the profile as its only optional argument', async () => {
     const dshHome = await temporaryDshHome()
 
-    const result = runRestart(['personal-web'], dshHome)
+    const result = runRestart(['personal-web'], dshHome, 'darwin')
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('pnpm build')
