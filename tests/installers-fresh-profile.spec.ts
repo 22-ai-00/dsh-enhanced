@@ -46,19 +46,12 @@ describe('fresh local installer profile', () => {
     temporaryRoots.push(root)
     const dshHome = join(root, 'dsh-home')
     const fakeBin = join(root, 'bin')
-    const buildMarker = join(root, 'lark-built')
     await mkdir(fakeBin, { recursive: true })
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 set -euo pipefail
 if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; exit 0; fi
 if [[ "\${1:-}" == 'install' ]]; then exit 0; fi
-if [[ "\${1:-}" == 'build' ]]; then
-  if [[ ! -f "$BUILD_MARKER" ]]; then
-    PATH="$REAL_PATH" pnpm --dir "$REPO_ROOT" --filter @dsh-enhanced/lark-channel run build
-    touch "$BUILD_MARKER"
-  fi
-  exit 0
-fi
+if [[ "\${1:-}" == 'build' ]]; then exit 0; fi
 exec env PATH="$REAL_PATH" pnpm "$@"
 `)
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
@@ -154,11 +147,9 @@ PROFILE
     const testEnvironment = {
       PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
       DSH_HOME: dshHome,
-      BUILD_MARKER: buildMarker,
       REAL_NODE: process.execPath,
       REAL_PATH: process.env.PATH ?? '',
-      REPO_ROOT: repoRoot,
-      LARK_SETUP: join(repoRoot, 'plugins', 'lark-channel', 'lib', 'setup.js'),
+      LARK_SETUP: join(repoRoot, 'plugins', 'lark-channel', 'bin', 'dsh-lark-setup.js'),
     }
     const result = spawnSync('/bin/bash', installerArguments, {
       cwd: repoRoot,
