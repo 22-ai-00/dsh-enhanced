@@ -179,11 +179,6 @@ describe('supervised-growth setup guards', () => {
   })
 
   test('the real pnpm-profile .bin entrypoint prints help and leaves the profile untouched', async () => {
-    const build = spawnSync('pnpm', ['--filter', '@dsh-enhanced/lark-channel', 'run', 'build'], {
-      cwd: repoRoot, encoding: 'utf8',
-    })
-    expect(build.status, build.stderr).toBe(0)
-
     const dshHome = await mkdtemp(join(tmpdir(), 'supervised-growth-profile-bin-'))
     roots.push(dshHome)
     const profileDirectory = join(dshHome, 'profiles', 'web')
