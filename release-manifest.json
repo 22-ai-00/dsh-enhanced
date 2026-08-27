@@ -10,7 +10,30 @@
       "@dsh-enhanced/traex-acp-provider": "0.1.2"
     }
   },
-  "pending": null,
+  "pending": {
+    "version": "0.1.3",
+    "preparedAt": "2026-08-27T04:58:32.761Z",
+    "packages": {
+      "@dsh-enhanced/llm-route-capabilities": "0.1.3",
+      "@dsh-enhanced/acp": "0.1.3",
+      "@dsh-enhanced/assistant-automations": "0.1.3",
+      "@dsh-enhanced/assistant-delivery": "0.1.3",
+      "@dsh-enhanced/assistant-evolution": "0.1.3",
+      "@dsh-enhanced/assistant-health": "0.1.3",
+      "@dsh-enhanced/assistant-heartbeat": "0.1.3",
+      "@dsh-enhanced/assistant-policy": "0.1.3",
+      "@dsh-enhanced/coding-subscription-provider": "0.1.3",
+      "@dsh-enhanced/credentials-keychain": "0.1.3",
+      "@dsh-enhanced/event-triggers": "0.1.3",
+      "@dsh-enhanced/hello": "0.1.3",
+      "@dsh-enhanced/lark-channel": "0.1.3",
+      "@dsh-enhanced/memory-wiki-bridge": "0.1.3",
+      "@dsh-enhanced/personal-assistant": "0.1.3",
+      "@dsh-enhanced/personal-memory": "0.1.3",
+      "@dsh-enhanced/personal-wiki": "0.1.3",
+      "@dsh-enhanced/traex-acp-provider": "0.1.3"
+    }
+  },
   "history": [
     {
       "version": "0.1.0",
