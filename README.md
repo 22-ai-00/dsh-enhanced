@@ -141,19 +141,28 @@ pnpm release:prepare
 pnpm release:prepare -- 0.2.0
 ```
 
-`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。运行 `pnpm check` 并提交版本变更后，只能从仓库根目录使用 pnpm 发布：
+`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。运行 `pnpm check` 并把版本变更提交、合入 `main` 后，通过推送标签触发 CI 发布：
+
+```sh
+git tag v0.1.3
+git push origin v0.1.3
+```
+
+推送 `v*` 标签会触发 GitHub Actions（[`.github/workflows/release.yml`](.github/workflows/release.yml)）：它在 `main` 上重新校验（`pnpm check`），然后从仓库根目录用 pnpm 发布：
 
 ```sh
 pnpm release:publish
 ```
 
-不要在插件目录运行 `npm publish`：npm 不会把 workspace 的 `catalog:` 依赖转换成实际版本，最终包将无法在 DSH profile 中安装。每个插件的 `prepublishOnly` 会拦截这种误操作。确认所有包都已发布后，再执行：
+不要在插件目录运行 `npm publish`：npm 不会把 workspace 的 `catalog:` 依赖转换成实际版本，最终包将无法在 DSH profile 中安装。每个插件的 `prepublishOnly` 会拦截这种误操作。发布成功后，同一 workflow 会执行：
 
 ```sh
 pnpm release:record
 ```
 
-该命令会校验所有插件仍与 pending 版本一致，然后更新 `current`、追加 `history` 并清空 `pending`。最后提交账本变更并在同一提交上创建对应 Git tag。若发版中途失败，保留 pending，修复后重新运行 `pnpm release:publish`；pnpm 会跳过注册表中已有的同版本包。不要提前执行 `release:record`。
+该命令会校验所有插件仍与 pending 版本一致，然后更新 `current`、追加 `history` 并清空 `pending`，最后由 CI 把账本变更提交回 `main`。若发版中途失败，保留 pending，修复后重新推送标签或重跑 workflow；pnpm 会跳过注册表中已有的同版本包。
+
+发布凭据来自仓库 Secret `NPM_TOKEN`：在 npmjs.com 生成 **automation** access token（免 2FA），存入 GitHub 仓库 Secrets 命名为 `NPM_TOKEN`，其账号需对全部 `@dsh-enhanced/*` 包有发布权限。一次配置后即可持续自动发布，无需每次手动授权。
 
 ## 目录
 
