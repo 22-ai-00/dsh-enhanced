@@ -125,6 +125,36 @@ describe('durable outbox', () => {
     f.store.close()
   })
 
+  test('persists and validates the exact delivered model-picker record across reopen', async () => {
+    const f = await fixture()
+    const modelPicker: OutboundIntent = {
+      ...intent('model-picker:delivered', f, '请选择模型'),
+      format: 'model-picker',
+      modelPicker: {
+        operationId: 'model-picker-delivered',
+        expiresAt: 10_000,
+        current: { provider: 'codex-subscription', model: 'default' },
+        providers: [{ id: 'codex-subscription', name: 'Codex' }],
+        models: [{ provider: 'codex-subscription', id: 'default', name: 'Default', effortIds: [] }],
+        efforts: [],
+      },
+    }
+    const queued = f.store.enqueue(modelPicker)
+    const claim = f.store.claimOutbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.finishOutbox({ outboxId: queued.id, ownerId: 'worker-a', fencingToken: claim.fencingToken,
+      outcome: 'accepted', providerMessageId: 'om_model_picker' })
+    expect(f.store.getModelPickerRecord('model-picker-delivered', f.binding.id)).toMatchObject({
+      id: queued.id, status: 'accepted', providerMessageId: 'om_model_picker', intent: modelPicker,
+    })
+
+    f.store.close()
+    const reopened = new DeliveryStore({ path: f.databasePath, now: () => 2_000 })
+    expect(reopened.getModelPickerRecord('model-picker-delivered', f.binding.id)).toMatchObject({
+      id: queued.id, status: 'accepted', providerMessageId: 'om_model_picker', intent: modelPicker,
+    })
+    reopened.close()
+  })
+
   test('stores only a typed permission-picker intent and retrieves its accepted provider message', async () => {
     const f = await fixture()
     const permissionPicker: OutboundIntent = {
@@ -217,6 +247,35 @@ describe('durable outbox', () => {
     expect(() => f.store.getPermissionPickerRecord('permission-picker-tampered', f.binding.id))
       .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
     expect(() => f.store.getPermissionPicker('permission-picker-tampered', f.binding.id))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    f.store.close()
+  })
+
+  test('fails closed when a persisted model-picker payload diverges from its immutable intent hash', async () => {
+    const f = await fixture()
+    const modelPicker: OutboundIntent = {
+      ...intent('model-picker:tampered', f, '请选择模型'),
+      format: 'model-picker',
+      modelPicker: {
+        operationId: 'model-picker-tampered',
+        expiresAt: 10_000,
+        current: { provider: 'codex-subscription', model: 'default' },
+        providers: [{ id: 'codex-subscription', name: 'Codex' }],
+        models: [{ provider: 'codex-subscription', id: 'default', name: 'Default', effortIds: [] }],
+        efforts: [],
+      },
+    }
+    const record = f.store.enqueue(modelPicker)
+    const database = new DatabaseSync(f.databasePath)
+    database.prepare('UPDATE outbox_messages SET intent_json = ? WHERE id = ?').run(JSON.stringify({
+      ...modelPicker,
+      modelPicker: { ...modelPicker.modelPicker, expiresAt: 20_000 },
+    }), record.id)
+    database.close()
+
+    expect(() => f.store.getModelPickerRecord('model-picker-tampered', f.binding.id))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(() => f.store.getModelPicker('model-picker-tampered', f.binding.id))
       .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
     f.store.close()
   })

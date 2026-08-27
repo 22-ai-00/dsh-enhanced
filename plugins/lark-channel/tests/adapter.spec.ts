@@ -31,6 +31,8 @@ class FakeTransport implements LarkTransport {
   }))
   readonly writeProgress = vi.fn(async (_handle: { cotId: string; messageId: string },
     _events: readonly { eventType: string; content: string; timestamp: string }[]) => {})
+  readonly updateRawCard = vi.fn(async (_messageId: string, _card: Readonly<Record<string, unknown>>,
+    _signal: AbortSignal) => {})
   readonly downloadMessageImage = vi.fn(async (_messageId: string, _fileKey: string,
     _options: { maxBytes: number; signal: AbortSignal }) => ({
     data: new Uint8Array(Buffer.from('89504e470d0a1a0a', 'hex')),
@@ -127,17 +129,13 @@ function durablePickerAdvance() {
 }
 
 function modelPickerElements(card: Record<string, unknown>): Array<Record<string, unknown>> {
-  const body = card.body as { elements: Array<Record<string, unknown>> }
-  // Each select now sits inside its own bordered container, so walk the tree rather than
-  // assuming the controls are direct children of body.
-  const flatten = (elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> =>
-    elements.flatMap(element => {
-      const nested = element.elements
-      return Array.isArray(nested)
-        ? [element, ...flatten(nested as Array<Record<string, unknown>>)]
-        : [element]
-    })
-  return flatten(body.elements)
+  const flatten = (value: unknown): Array<Record<string, unknown>> => {
+    if (Array.isArray(value)) return value.flatMap(flatten)
+    if (value === null || typeof value !== 'object') return []
+    const record = value as Record<string, unknown>
+    return [record, ...Object.values(record).flatMap(flatten)]
+  }
+  return flatten(card)
 }
 
 function modelPickerElement(card: Record<string, unknown>, name: string): Record<string, unknown> {
@@ -576,7 +574,7 @@ describe('Lark delivery adapter', () => {
 
   test('cascades signed model callbacks without form state and settles the selected effort', async () => {
     const transport = new FakeTransport()
-    const settleModelSelection = vi.fn(() => ({ status: 'selected' as const }))
+    const settleModelSelection = vi.fn(() => ({ status: 'pending' as const }))
     const loadModelPicker = vi.fn(() => modelPicker)
     const advanceModelPicker = durablePickerAdvance()
     const adapter = new LarkDeliveryAdapter({
@@ -611,8 +609,15 @@ describe('Lark delivery adapter', () => {
     expect(modelPickerElements(sentCard).some(element => element.tag === 'form')).toBe(false)
     const initialProvider = modelPickerElement(sentCard, 'model_provider')
 
+    loadModelPicker.mockRejectedValueOnce(new Error('model card message does not match'))
+    await expect(transport.emitCardAction({
+      messageId: 'om_copied_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'select_static', option: 'claude-subscription', value: initialProvider.value,
+    })).resolves.toEqual({ toast: { type: 'warning', content: '模型选择已结束，请重新发送 /model' } })
+    expect(advanceModelPicker).not.toHaveBeenCalled()
+
     const providerUpdate = await transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
       tag: 'select_static', option: 'claude-subscription',
       value: initialProvider.value,
     }) as { card: { type: string; data: Record<string, unknown> } }
@@ -637,7 +642,7 @@ describe('Lark delivery adapter', () => {
     })
 
     const modelUpdate = await transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
       tag: 'select_static', option: 'claude-subscription/opus',
       value: providerModel.value,
     }) as { card: { type: string; data: Record<string, unknown> } }
@@ -653,17 +658,17 @@ describe('Lark delivery adapter', () => {
       ],
     })
     expect(loadModelPicker).toHaveBeenCalledWith(expect.objectContaining({
-      operationId: 'model-picker-1', callbackChatId: 'oc_dm', bindingId: 'binding-1',
+      operationId: 'model-picker-1', callbackChatId: 'oc_dm', cardMessageId: 'om_sent', bindingId: 'binding-1',
     }))
 
     const effortUpdate = await transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
       tag: 'select_static', option: 'high', value: modelEffort.value,
     }) as { card: { type: string; data: Record<string, unknown> } }
     const effortConfirm = modelPickerElement(effortUpdate.card.data, 'model_confirm')
 
     const staleUpdate = await transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
       tag: 'select_static', option: 'codex-subscription', value: initialProvider.value,
     }) as { card: { data: Record<string, unknown> } }
     expect(modelPickerElement(staleUpdate.card.data, 'model_route')).toMatchObject({
@@ -673,49 +678,339 @@ describe('Lark delivery adapter', () => {
     expect(modelPickerElement(staleUpdate.card.data, 'model_effort'))
       .toMatchObject({ initial_index: 3, initial_option: 'High' })
 
-    await expect(transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+    const confirmed = await transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
       tag: 'button', value: effortConfirm.value,
-    })).resolves.toEqual({ toast: { type: 'success', content: '模型切换已受理' } })
+    })
+    expect(confirmed).toEqual({ toast: { type: 'info', content: '模型选择已提交，正在验证' } })
     expect(settleModelSelection).toHaveBeenCalledWith(expect.objectContaining({
       operationId: 'model-picker-1', callbackChatId: 'oc_dm', bindingId: 'binding-1',
+      cardMessageId: 'om_sent',
       principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
       provider: 'claude-subscription', modelProvider: 'claude-subscription', model: 'opus', reasoningEffort: 'high',
       expectedRevision: 3,
     }))
     expect(advanceModelPicker).toHaveBeenCalledTimes(4)
+    expect(advanceModelPicker).toHaveBeenCalledWith(expect.objectContaining({ cardMessageId: 'om_sent' }))
+
+    const settleCalls = settleModelSelection.mock.calls.length
+    settleModelSelection.mockRejectedValueOnce(new Error('model card message does not match'))
+    await expect(transport.emitCardAction({
+      messageId: 'om_copied_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'button', value: effortConfirm.value,
+    })).resolves.toEqual({ toast: { type: 'warning', content: '卡片状态已更新，请重新发送 /model' } })
+    expect(settleModelSelection).toHaveBeenCalledTimes(settleCalls + 1)
+    expect(settleModelSelection).toHaveBeenLastCalledWith(expect.objectContaining({
+      cardMessageId: 'om_copied_card',
+    }))
+
+    await transport.emitCardAction({
+      messageId: '../bad-message', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'button', value: effortConfirm.value,
+    })
+    expect(settleModelSelection).toHaveBeenCalledTimes(settleCalls + 1)
 
     advanceModelPicker.mockRejectedValueOnce(new Error('selection already settled'))
     await expect(transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
       tag: 'select_static', option: 'codex-subscription', value: initialProvider.value,
     })).resolves.toEqual({ toast: { type: 'warning', content: '模型选择已结束，请重新发送 /model' } })
 
     loadModelPicker.mockImplementationOnce(() => { throw new Error('binding revoked') })
     await expect(transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
       tag: 'select_static', option: 'codex-subscription', value: initialProvider.value,
     })).resolves.toEqual({ toast: { type: 'warning', content: '模型选择已结束，请重新发送 /model' } })
 
     await transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
       tag: 'button', value: {
         ...(effortConfirm.value as Record<string, unknown>), modelPicker: 'tampered-token',
       },
     })
-    expect(settleModelSelection).toHaveBeenCalledTimes(1)
+    expect(settleModelSelection).toHaveBeenCalledTimes(settleCalls + 1)
     expect(adapter.health()).toMatchObject({ lastErrorCode: 'format_error' })
 
     await transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_attacker', operatorId: 'ou_owner',
+      messageId: 'om_sent', chatId: 'oc_attacker', operatorId: 'ou_owner',
       tag: 'button', value: effortConfirm.value,
     })
-    expect(settleModelSelection).toHaveBeenCalledTimes(1)
+    expect(settleModelSelection).toHaveBeenCalledTimes(settleCalls + 1)
+  })
+
+  test('keeps a successful submission ACK and falls back to signed route IDs when labels cannot be loaded', async () => {
+    const transport = new FakeTransport()
+    const settleModelSelection = vi.fn(() => ({ status: 'pending' as const }))
+    const loadModelPicker = vi.fn(() => {
+      throw new Error('catalog unavailable after settlement')
+    })
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_000,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settleModelSelection,
+      loadModelPicker,
+      advanceModelPicker: durablePickerAdvance(),
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await adapter.send(intent({ format: 'model-picker', text: '请选择模型', modelPicker }),
+      new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as {
+      modelPicker: import('../src/types.ts').LarkModelPickerCard
+    }
+    const submitted = await transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'button', value: sent.modelPicker.callbackValues.confirm,
+    })
+
+    expect(submitted).toEqual({ toast: { type: 'info', content: '模型选择已提交，正在验证' } })
+    expect(settleModelSelection).toHaveBeenCalledOnce()
+    expect(loadModelPicker).toHaveBeenCalledOnce()
+  })
+
+  test.each([
+    {
+      status: 'selected' as const,
+      settlement: { status: 'selected' as const, selection: {
+        provider: 'claude-subscription', model: 'opus', reasoningEffort: 'high',
+      } },
+      toast: { type: 'success', content: '模型已切换' },
+      template: 'green',
+      title: '模型切换成功',
+      detail: '已完成验证；下一条消息起生效，并保留当前上下文。',
+      displayed: ['Claude', 'Opus', 'High'],
+    },
+    {
+      status: 'rejected' as const,
+      settlement: { status: 'rejected' as const, reason: 'model-unavailable' as const },
+      toast: { type: 'warning', content: '模型切换未生效' },
+      template: 'orange',
+      title: '模型切换未生效',
+      detail: '所选模型当前不可用，模型未切换。请重新发送 /model。',
+      displayed: ['Codex', 'Default', 'Low'],
+    },
+  ])('actively updates the exact original card to a read-only $status result',
+    async ({ settlement, template, title, detail, displayed }) => {
+    const transport = new FakeTransport()
+    const settleModelSelection = vi.fn(() => ({ status: 'pending' as const }))
+    let releaseFinal!: (value: typeof settlement) => void
+    const final = new Promise<typeof settlement>(resolve => { releaseFinal = resolve })
+    const awaitModelSelection = vi.fn(async () => await final)
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_000,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settleModelSelection,
+      awaitModelSelection,
+      loadModelPicker: vi.fn(() => modelPicker),
+      advanceModelPicker: durablePickerAdvance(),
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await adapter.send(intent({ format: 'model-picker', text: '请选择模型', modelPicker }),
+      new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as {
+      modelPicker: import('../src/types.ts').LarkModelPickerCard
+    }
+    const action = {
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'button', value: sent.modelPicker.callbackValues.confirm,
+    } as const
+    const submitted = await transport.emitCardAction(action)
+    expect(submitted).toEqual({ toast: { type: 'info', content: '模型选择已提交，正在验证' } })
+    expect(transport.updateRawCard).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(transport.updateRawCard).toHaveBeenCalledOnce())
+    const [pendingMessageId, pendingCard] = transport.updateRawCard.mock.calls[0]!
+    expect(pendingMessageId).toBe('om_sent')
+    expect(pendingCard).toMatchObject({
+      header: { template: 'blue', title: { content: '模型选择已提交' } },
+    })
+    expect(awaitModelSelection).toHaveBeenCalledOnce()
+    releaseFinal(settlement)
+    await vi.waitFor(() => expect(transport.updateRawCard).toHaveBeenCalledTimes(2))
+    const [messageId, result, signal] = transport.updateRawCard.mock.calls[1]!
+    expect(messageId).toBe('om_sent')
+    expect(signal.aborted).toBe(false)
+    expect(result).toMatchObject({
+      header: { template, title: { content: title }, subtitle: { content: detail } },
+    })
+    const tags = modelPickerElements(result).map(element => element.tag)
+    expect(tags).not.toContain('select_static')
+    expect(tags).not.toContain('button')
+    expect(tags).not.toContain('form')
+    const serialized = JSON.stringify(result)
+    for (const value of displayed) expect(serialized).toContain(value)
+    expect(serialized).not.toContain('正在验证')
+    expect(serialized).not.toContain('"behaviors"')
+    expect(serialized).not.toContain('"value"')
+    expect(serialized).not.toContain('"callback"')
+    expect(settleModelSelection).toHaveBeenCalledOnce()
+    expect(awaitModelSelection).toHaveBeenCalledWith(
+      expect.objectContaining({ operationId: 'model-picker-1', cardMessageId: 'om_sent' }),
+      expect.any(AbortSignal),
+    )
+  })
+
+  test('resolves the pending callback before a synchronously available final result can patch the card', async () => {
+    const transport = new FakeTransport()
+    const order: string[] = []
+    transport.updateRawCard.mockImplementation(async (_messageId, card) => {
+      const title = (card.header as { title: { content: string } }).title.content
+      order.push(title === '模型选择已提交' ? 'pending-patch' : 'final-patch')
+    })
+    const awaitModelSelection = vi.fn(async () => {
+      order.push('watcher')
+      return { status: 'selected' as const, selection: {
+        provider: 'codex-subscription', model: 'default', reasoningEffort: 'low',
+      } }
+    })
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_000,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settleModelSelection: vi.fn(() => ({ status: 'pending' as const })),
+      awaitModelSelection,
+      loadModelPicker: vi.fn(() => modelPicker),
+      advanceModelPicker: durablePickerAdvance(),
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await adapter.send(intent({ format: 'model-picker', text: '请选择模型', modelPicker }),
+      new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as {
+      modelPicker: import('../src/types.ts').LarkModelPickerCard
+    }
+    const confirmation = transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'button', value: sent.modelPicker.callbackValues.confirm,
+    }).then(result => { order.push('ack'); return result })
+
+    await expect(confirmation).resolves.toEqual({ toast: { type: 'info', content: '模型选择已提交，正在验证' } })
+    expect(order).toEqual(['ack'])
+    expect(awaitModelSelection).not.toHaveBeenCalled()
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await vi.waitFor(() => expect(transport.updateRawCard).toHaveBeenCalledTimes(2))
+    expect(order).toEqual(['ack', 'pending-patch', 'watcher', 'final-patch'])
+  })
+
+  test.each([
+    { status: 'selected' as const, selection: { provider: 'codex-subscription', model: 'default' } },
+    { status: 'rejected' as const, reason: 'model-unavailable' as const },
+  ])('does not start a background update for a synchronous $status replay', async settlement => {
+    const transport = new FakeTransport()
+    const awaitModelSelection = vi.fn()
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_000,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settleModelSelection: vi.fn(() => settlement),
+      awaitModelSelection,
+      loadModelPicker: vi.fn(() => modelPicker),
+      advanceModelPicker: durablePickerAdvance(),
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await adapter.send(intent({ format: 'model-picker', text: '请选择模型', modelPicker }),
+      new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as {
+      modelPicker: import('../src/types.ts').LarkModelPickerCard
+    }
+    await expect(transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'button', value: sent.modelPicker.callbackValues.confirm,
+    })).resolves.toMatchObject({ card: { type: 'raw' } })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    expect(awaitModelSelection).not.toHaveBeenCalled()
+    expect(transport.updateRawCard).not.toHaveBeenCalled()
+  })
+
+  test('continues to the final card when the pending card update fails', async () => {
+    const transport = new FakeTransport()
+    transport.updateRawCard.mockRejectedValueOnce(new LarkTransportError('permission_denied', 'provider detail'))
+    const settlement = { status: 'selected' as const, selection: {
+      provider: 'codex-subscription', model: 'default', reasoningEffort: 'low',
+    } }
+    const settleModelSelection = vi.fn(() => ({ status: 'pending' as const }))
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_000,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settleModelSelection,
+      awaitModelSelection: vi.fn(async () => settlement),
+      loadModelPicker: vi.fn(() => modelPicker),
+      advanceModelPicker: durablePickerAdvance(),
+    })
+    await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await adapter.send(intent({ format: 'model-picker', text: '请选择模型', modelPicker }),
+      new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as {
+      modelPicker: import('../src/types.ts').LarkModelPickerCard
+    }
+    await expect(transport.emitCardAction({
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'button', value: sent.modelPicker.callbackValues.confirm,
+    })).resolves.toEqual({ toast: { type: 'info', content: '模型选择已提交，正在验证' } })
+    await vi.waitFor(() => expect(transport.updateRawCard).toHaveBeenCalledTimes(2))
+    expect(transport.updateRawCard.mock.calls[0]![1]).toMatchObject({
+      header: { template: 'blue', title: { content: '模型选择已提交' } },
+    })
+    expect(transport.updateRawCard.mock.calls[1]![1]).toMatchObject({
+      header: { template: 'green', title: { content: '模型切换成功' } },
+    })
+    await vi.waitFor(() => expect(adapter.health()).toMatchObject({ lastErrorCode: 'permission_denied' }))
+    expect(settleModelSelection).toHaveBeenCalledOnce()
+  })
+
+  test('cancels a pending final card update on adapter stop', async () => {
+    const transport = new FakeTransport()
+    let waiterSignal: AbortSignal | undefined
+    let releaseFinal!: () => void
+    const final = new Promise<{ status: 'selected'; selection: { provider: string; model: string } }>(resolve => {
+      releaseFinal = () => resolve({ status: 'selected', selection: { provider: 'codex-subscription', model: 'default' } })
+    })
+    const adapter = new LarkDeliveryAdapter({
+      account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
+      maxTextBytes: 65_536, staleAfterMs: 60_000,
+    }, transport, {
+      now: () => 1_000,
+      approvalSecret: 'test-secret-at-least-32-characters-long',
+      settleModelSelection: vi.fn(() => ({ status: 'pending' as const })),
+      awaitModelSelection: vi.fn(async (_input, signal) => { waiterSignal = signal; return await final }),
+      loadModelPicker: vi.fn(() => modelPicker),
+      advanceModelPicker: durablePickerAdvance(),
+    })
+    const dispose = await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext)
+    await adapter.send(intent({ format: 'model-picker', text: '请选择模型', modelPicker }),
+      new AbortController().signal)
+    const sent = transport.send.mock.calls.at(-1)![1] as {
+      modelPicker: import('../src/types.ts').LarkModelPickerCard
+    }
+    await transport.emitCardAction({ messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
+      tag: 'button', value: sent.modelPicker.callbackValues.confirm })
+    await vi.waitFor(() => expect(waiterSignal).toBeDefined())
+    await dispose?.()
+    expect(waiterSignal?.aborted).toBe(true)
+    releaseFinal()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(transport.updateRawCard).toHaveBeenCalledOnce()
+    expect(transport.updateRawCard.mock.calls[0]![1]).toMatchObject({
+      header: { template: 'blue', title: { content: '模型选择已提交' } },
+    })
   })
 
   test('keeps a real __default__ effort distinct from the UI default choice', async () => {
     const transport = new FakeTransport()
-    const settleModelSelection = vi.fn(() => ({ status: 'selected' as const }))
+    const settleModelSelection = vi.fn(() => ({ status: 'selected' as const, selection: {
+      provider: 'custom', model: 'model', reasoningEffort: '__default__',
+    } }))
     const advanceModelPicker = durablePickerAdvance()
     const collidingPicker = {
       operationId: 'model-picker-default-effort',
@@ -747,11 +1042,11 @@ describe('Lark delivery adapter', () => {
     expect(new Set(options.map(option => option.value)).size).toBe(2)
     const literal = options.find(option => option.text.content === 'Literal __default__ effort')!
     const update = await transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner',
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner',
       tag: 'select_static', option: literal.value, value: effort.value,
     }) as { card: { data: Record<string, unknown> } }
     await transport.emitCardAction({
-      messageId: 'om_model_card', chatId: 'oc_dm', operatorId: 'ou_owner', tag: 'button',
+      messageId: 'om_sent', chatId: 'oc_dm', operatorId: 'ou_owner', tag: 'button',
       value: modelPickerElement(update.card.data, 'model_confirm').value,
     })
     expect(settleModelSelection).toHaveBeenCalledWith(expect.objectContaining({

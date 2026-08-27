@@ -37,6 +37,9 @@ import type {
   ModelPickerIntent,
   ModelPickerState,
   ModelRouteRef,
+  ModelSelectionResult,
+  ModelSelectionSettlementInput,
+  ModelSelectionTerminalResult,
   OutboxRecord,
   PairingChallenge,
   PermissionPickerIntent,
@@ -146,14 +149,10 @@ function pickerIncludesRoute(picker: Readonly<ModelPickerIntent>, route: Readonl
   return model !== undefined && (route.reasoningEffort === undefined || model.effortIds.includes(route.reasoningEffort))
 }
 
-type ModelSelectionResult =
-  | { status: 'pending' }
-  | { status: 'rejected'; reason: 'authorization-revoked' | 'invalid-effort' | 'model-unavailable' | 'provider-model-mismatch' | 'provider-unavailable' | 'selection-superseded' }
-  | { status: 'selected'; selection: ModelRouteRef }
-
 interface ModelSelectionPayload {
   callbackEventId: string
   callbackChatId: string
+  cardMessageId: string
   bindingId: string
   principal: ExternalPrincipalKey
   provider: string
@@ -162,6 +161,16 @@ interface ModelSelectionPayload {
   reasoningEffort: string | null
   expectedRevision: number
 }
+
+interface ModelSelectionWaiter {
+  readonly resolve: (result: ModelSelectionTerminalResult | undefined) => void
+  readonly abort: () => void
+  pollTimer?: ReturnType<typeof setTimeout>
+  deadlineTimer?: ReturnType<typeof setTimeout>
+}
+
+const MODEL_SELECTION_WAIT_POLL_MS = 500
+const MODEL_SELECTION_WAIT_TIMEOUT_MS = 120_000
 
 interface ApprovalSettlementInput {
   operationId: string
@@ -182,6 +191,7 @@ function isModelSelectionPayload(value: unknown): value is ModelSelectionPayload
   const principal = payload.principal as Partial<ExternalPrincipalKey> | undefined
   return typeof payload.callbackEventId === 'string'
     && typeof payload.callbackChatId === 'string'
+    && typeof payload.cardMessageId === 'string'
     && typeof payload.bindingId === 'string'
     && principal !== undefined
     && typeof principal.channel === 'string'
@@ -329,6 +339,7 @@ export class AssistantDeliveryService extends Service {
   private readonly conversationTransitions = new Map<string, Promise<void>>()
   private readonly agentApprovalBindings = new WeakMap<Agent, { bindingId: string; token: symbol }>()
   private readonly toolApprovalControllers = new Set<AbortController>()
+  private readonly modelSelectionWaiters = new Map<string, Set<ModelSelectionWaiter>>()
   private modelSelectionFlight: Promise<void> | undefined
   private modelSelectionRetryTimer: ReturnType<typeof setTimeout> | undefined
   private runtime: DeliveryInboundRuntime | undefined
@@ -427,6 +438,7 @@ export class AssistantDeliveryService extends Service {
     if (config.schedulerEnabled) this.start()
     ctx.effect(() => async () => {
       this.active = false
+      this.cancelModelSelectionWaiters()
       for (const controller of this.toolApprovalControllers) {
         controller.abort(new Error('assistant-delivery is stopping'))
       }
@@ -589,18 +601,7 @@ export class AssistantDeliveryService extends Service {
       payloadHash: settlement.payloadHash, result }) as ReturnType<AssistantPolicyService['decideProposal']>
   }
 
-  settleModelSelection(input: {
-    operationId: string
-    callbackEventId: string
-    callbackChatId: string
-    bindingId: string
-    principal: ExternalPrincipalKey
-    provider: string
-    modelProvider: string
-    model: string
-    reasoningEffort?: string
-    expectedRevision: number
-  }): ModelSelectionResult {
+  settleModelSelection(input: ModelSelectionSettlementInput): ModelSelectionResult {
     this.assertActive()
     const binding = this.deliveryStore.getBinding(input.bindingId)
     const current = this.deliveryStore.getPrincipal(input.principal)
@@ -609,13 +610,18 @@ export class AssistantDeliveryService extends Service {
       || JSON.stringify(binding.principal) !== JSON.stringify(current.principal)) {
       throw new AssistantDeliveryError('missing-binding', 'model callback principal or chat does not own the active binding')
     }
-    const picker = this.deliveryStore.getModelPicker(input.operationId, input.bindingId)
+    const record = this.deliveryStore.getModelPickerRecord(input.operationId, input.bindingId)
     const expected: ModelPickerState = {
       revision: input.expectedRevision,
       provider: input.modelProvider,
       model: input.model,
       ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
     }
+    if (record === undefined || !['accepted', 'delivered', 'read'].includes(record.status)
+      || record.providerMessageId !== input.cardMessageId) {
+      throw new AssistantDeliveryError('missing-binding', 'model picker confirmation is unavailable or invalid')
+    }
+    const picker = record.intent.modelPicker
     if (picker === undefined || !pickerIncludesRoute(picker, expected)) {
       throw new AssistantDeliveryError('missing-binding', 'model picker confirmation is unavailable or invalid')
     }
@@ -627,6 +633,7 @@ export class AssistantDeliveryService extends Service {
     const payload: ModelSelectionPayload = {
       callbackEventId: input.callbackEventId,
       callbackChatId: input.callbackChatId,
+      cardMessageId: input.cardMessageId,
       bindingId: input.bindingId,
       principal: current.principal,
       provider: input.provider,
@@ -647,9 +654,105 @@ export class AssistantDeliveryService extends Service {
     return { status: 'pending' }
   }
 
+  async awaitModelSelection(
+    input: ModelSelectionSettlementInput,
+    signal: AbortSignal,
+  ): Promise<ModelSelectionTerminalResult | undefined> {
+    this.assertActive()
+    const expected: ModelPickerState = {
+      revision: input.expectedRevision,
+      provider: input.modelProvider,
+      model: input.model,
+      ...(input.reasoningEffort === undefined ? {} : { reasoningEffort: input.reasoningEffort }),
+    }
+    const payload: ModelSelectionPayload = {
+      callbackEventId: input.callbackEventId,
+      callbackChatId: input.callbackChatId,
+      cardMessageId: input.cardMessageId,
+      bindingId: input.bindingId,
+      principal: input.principal,
+      provider: input.provider,
+      modelProvider: input.modelProvider,
+      model: input.model,
+      reasoningEffort: input.reasoningEffort ?? null,
+      expectedRevision: input.expectedRevision,
+    }
+    const read = () => this.deliveryStore.getModelSelectionSettlement({
+      operationId: input.operationId, bindingId: input.bindingId, expected, payload,
+    })
+    const current = read()
+    if (current?.result !== undefined) return current.result as ModelSelectionTerminalResult
+    if (current === undefined) {
+      throw new AssistantDeliveryError('missing-binding', 'model selection settlement does not exist')
+    }
+    if (signal.aborted) return undefined
+    return await new Promise<ModelSelectionTerminalResult | undefined>((resolve, reject) => {
+      let settled = false
+      const finish = (result: ModelSelectionTerminalResult | undefined) => {
+        if (settled) return
+        settled = true
+        if (waiter.pollTimer !== undefined) clearTimeout(waiter.pollTimer)
+        if (waiter.deadlineTimer !== undefined) clearTimeout(waiter.deadlineTimer)
+        signal.removeEventListener('abort', waiter.abort)
+        const waiters = this.modelSelectionWaiters.get(input.operationId)
+        waiters?.delete(waiter)
+        if (waiters?.size === 0) this.modelSelectionWaiters.delete(input.operationId)
+        resolve(result)
+      }
+      const waiter: ModelSelectionWaiter = { abort: () => finish(undefined), resolve: finish }
+      const fail = (error: unknown) => {
+        if (settled) return
+        settled = true
+        if (waiter.pollTimer !== undefined) clearTimeout(waiter.pollTimer)
+        if (waiter.deadlineTimer !== undefined) clearTimeout(waiter.deadlineTimer)
+        signal.removeEventListener('abort', waiter.abort)
+        const currentWaiters = this.modelSelectionWaiters.get(input.operationId)
+        currentWaiters?.delete(waiter)
+        if (currentWaiters?.size === 0) this.modelSelectionWaiters.delete(input.operationId)
+        reject(error)
+      }
+      const poll = () => {
+        if (settled) return
+        if (signal.aborted || !this.active) {
+          finish(undefined)
+          return
+        }
+        try {
+          const latest = read()
+          if (latest?.result !== undefined) {
+            finish(latest.result as ModelSelectionTerminalResult)
+            return
+          }
+          waiter.pollTimer = setTimeout(poll, MODEL_SELECTION_WAIT_POLL_MS)
+          waiter.pollTimer.unref?.()
+        } catch (error) {
+          fail(error)
+        }
+      }
+      const waiters = this.modelSelectionWaiters.get(input.operationId) ?? new Set<ModelSelectionWaiter>()
+      waiters.add(waiter)
+      this.modelSelectionWaiters.set(input.operationId, waiters)
+      signal.addEventListener('abort', waiter.abort, { once: true })
+      waiter.deadlineTimer = setTimeout(() => finish(undefined), MODEL_SELECTION_WAIT_TIMEOUT_MS)
+      waiter.deadlineTimer.unref?.()
+      try {
+        const raced = read()
+        if (raced?.result !== undefined) finish(raced.result as ModelSelectionTerminalResult)
+        else if (signal.aborted || !this.active) finish(undefined)
+        else {
+          waiter.pollTimer = setTimeout(poll, MODEL_SELECTION_WAIT_POLL_MS)
+          waiter.pollTimer.unref?.()
+        }
+      } catch (error) {
+        fail(error)
+      }
+    })
+  }
+
   advanceModelPickerForCallback(input: {
     operationId: string
     callbackChatId: string
+    cardMessageId: string
     bindingId: string
     principal: ExternalPrincipalKey
     expected: ModelPickerState
@@ -663,7 +766,12 @@ export class AssistantDeliveryService extends Service {
       || JSON.stringify(binding.principal) !== JSON.stringify(current.principal)) {
       throw new AssistantDeliveryError('missing-binding', 'model callback principal or chat does not own the active binding')
     }
-    const picker = this.deliveryStore.getModelPicker(input.operationId, input.bindingId)
+    const record = this.deliveryStore.getModelPickerRecord(input.operationId, input.bindingId)
+    if (record === undefined || !['accepted', 'delivered', 'read'].includes(record.status)
+      || record.providerMessageId !== input.cardMessageId) {
+      throw new AssistantDeliveryError('missing-binding', 'model picker catalog or route is unavailable')
+    }
+    const picker = record.intent.modelPicker
     if (picker === undefined || Date.now() >= picker.expiresAt
       || !pickerIncludesRoute(picker, input.expected) || !pickerIncludesRoute(picker, input.next)) {
       throw new AssistantDeliveryError('missing-binding', 'model picker catalog or route is unavailable')
@@ -679,6 +787,7 @@ export class AssistantDeliveryService extends Service {
   getModelPickerForCallback(input: {
     operationId: string
     callbackChatId: string
+    cardMessageId: string
     bindingId: string
     principal: ExternalPrincipalKey
   }): ModelPickerIntent | undefined {
@@ -690,7 +799,10 @@ export class AssistantDeliveryService extends Service {
       || JSON.stringify(binding.principal) !== JSON.stringify(current.principal)) {
       throw new AssistantDeliveryError('missing-binding', 'model callback principal or chat does not own the active binding')
     }
-    const picker = this.deliveryStore.getModelPicker(input.operationId, input.bindingId)
+    const record = this.deliveryStore.getModelPickerRecord(input.operationId, input.bindingId)
+    if (record === undefined || !['accepted', 'delivered', 'read'].includes(record.status)
+      || record.providerMessageId !== input.cardMessageId) return undefined
+    const picker = record.intent.modelPicker
     return picker === undefined || Date.now() >= picker.expiresAt ? undefined : picker
   }
 
@@ -1725,7 +1837,23 @@ export class AssistantDeliveryService extends Service {
     if (this.modelSelectionRetryTimer !== undefined) clearTimeout(this.modelSelectionRetryTimer)
     this.timer = undefined
     this.modelSelectionRetryTimer = undefined
+    this.cancelModelSelectionWaiters()
     await Promise.all([this.inbound.stop(), this.outbound.stop(), this.modelSelectionFlight])
+  }
+
+  private resolveModelSelectionWaiters(
+    operationId: string,
+    result: ModelSelectionTerminalResult,
+  ): void {
+    const waiters = this.modelSelectionWaiters.get(operationId)
+    if (waiters === undefined) return
+    for (const waiter of waiters) waiter.resolve(result)
+  }
+
+  private cancelModelSelectionWaiters(): void {
+    for (const waiters of this.modelSelectionWaiters.values()) {
+      for (const waiter of waiters) waiter.resolve(undefined)
+    }
   }
 
   private drainApprovalDispatches(): void {
@@ -1804,14 +1932,17 @@ export class AssistantDeliveryService extends Service {
         return
       }
       await Promise.allSettled(claims.map(async claim => {
-        const finishWithoutReply = (result: ModelSelectionResult) =>
-          this.deliveryStore.completeModelSelectionSettlement({
+        const finishWithoutReply = (result: ModelSelectionTerminalResult) => {
+          const completed = this.deliveryStore.completeModelSelectionSettlement({
             operationId: claim.operationId,
             payloadHash: claim.payloadHash,
             result,
             ownerId: this.ownerId,
             fencingToken: claim.fencingToken,
-          }) as ModelSelectionResult
+          }) as ModelSelectionTerminalResult
+          this.resolveModelSelectionWaiters(claim.operationId, completed)
+          return completed
+        }
         const payload = claim.payload
         if (!isModelSelectionPayload(payload) || payload.bindingId !== claim.bindingId) {
           finishWithoutReply({ status: 'rejected', reason: 'authorization-revoked' })
@@ -1834,7 +1965,7 @@ export class AssistantDeliveryService extends Service {
         }).effect === 'allow'
         const complete = (
           binding: ConversationBinding,
-          result: ModelSelectionResult,
+          result: ModelSelectionTerminalResult,
           text: string,
           selection?: ModelRouteRef,
         ) => {
@@ -1846,7 +1977,7 @@ export class AssistantDeliveryService extends Service {
             format: 'plain' as const,
           })
           const superseded: ModelSelectionResult = { status: 'rejected', reason: 'selection-superseded' }
-          return this.deliveryStore.completeModelSelectionSettlement({
+          const completed = this.deliveryStore.completeModelSelectionSettlement({
             operationId: claim.operationId,
             payloadHash: claim.payloadHash,
             result,
@@ -1858,7 +1989,9 @@ export class AssistantDeliveryService extends Service {
             },
             ownerId: this.ownerId,
             fencingToken: claim.fencingToken,
-          }) as ModelSelectionResult
+          }) as ModelSelectionTerminalResult
+          this.resolveModelSelectionWaiters(claim.operationId, completed)
+          return completed
         }
         const initialBinding = this.deliveryStore.getBinding(claim.bindingId)
         if (!ownsBinding(initialBinding) || !authorized(initialBinding)) {

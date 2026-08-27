@@ -85,6 +85,22 @@ describe('TraeX ACP LLM adapter', () => {
     expect(runText).not.toHaveBeenCalled()
   })
 
+  it('enforces the public readiness deadline when auth ignores cancellation', async () => {
+    let receivedSignal: AbortSignal | undefined
+    const discoverModels = vi.fn()
+    const pending = probeTraexReadiness(Config(), { timeoutMs: 20 }, {
+      verifyAuth: options => {
+        receivedSignal = options.signal
+        return new Promise<void>(() => {})
+      },
+      discoverModels,
+    })
+
+    await expect(pending).rejects.toMatchObject({ code: 'ACP_TIMEOUT' })
+    expect(receivedSignal?.aborted).toBe(true)
+    expect(discoverModels).not.toHaveBeenCalled()
+  })
+
   it('rejects an unmarked request before auth or ACP spawn even when its session id names a live session', async () => {
     const verifyAuth = vi.fn(async () => {})
     const runText = vi.fn(() => (async function* () { yield 'never' })())
@@ -185,9 +201,9 @@ describe('TraeX ACP LLM adapter', () => {
     }
   })
 
-  it.each(['resolveModel', 'listModels'] as const)(
-    'keeps the prepareCall %s path process-free before a mismatched workspace is rejected',
-    async operation => {
+  it(
+    'keeps the prepareCall resolveModel path process-free before a mismatched workspace is rejected',
+    async () => {
       const root = await mkdtemp(join(tmpdir(), 'traex-prepare-cwd-'))
       try {
         const workspace = join(root, 'workspace')
@@ -211,38 +227,26 @@ describe('TraeX ACP LLM adapter', () => {
           },
         } as never)
 
-        // This mirrors the real loop order: resolveModel happens before the
-        // immutable, loop-marked request reaches stream.  Neither that lookup nor
-        // listModels may borrow the provider's static cwd for local process work.
-        let preparedStream: ((options: GenerateOptions) => AsyncIterable<unknown>) | undefined
-        let runtimeContext: Context | undefined
-        if (operation === 'resolveModel') {
-          runtimeContext = new Context()
-          await runtimeContext.plugin(LlmRuntime)
-          runtimeContext.llm.registerAdapter(['traex-agent'], adapter)
-          const prepared = await runtimeContext.llm.prepareCall({ provider: 'traex-agent', model: 'default' })
-          preparedStream = prepared.stream
-        } else {
-          await adapter.listModels('traex-agent')
-        }
+        // This mirrors the real loop order: resolveModel happens before the immutable,
+        // loop-marked request reaches stream. Resolution must not borrow the provider's
+        // static cwd for local process work; listModels has its own prompt-free boundary.
+        const runtimeContext = new Context()
+        await runtimeContext.plugin(LlmRuntime)
+        runtimeContext.llm.registerAdapter(['traex-agent'], adapter)
+        const prepared = await runtimeContext.llm.prepareCall({ provider: 'traex-agent', model: 'default' })
         const options = markAgentLoopRequest(deepFreeze({
           ...request(),
           sessionId: TEST_SESSION_ID,
         }))
-        const stream = preparedStream === undefined ? adapter.stream(options) : preparedStream(options)
-        const first = stream[Symbol.asyncIterator]().next()
-        if (preparedStream === undefined) {
-          await expect(first).rejects.toMatchObject({ failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } })
-        } else {
-          await expect(first).resolves.toMatchObject({
-            value: { type: 'finish', reason: { kind: 'error', failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } } },
-          })
-        }
+        const first = prepared.stream(options)[Symbol.asyncIterator]().next()
+        await expect(first).resolves.toMatchObject({
+          value: { type: 'finish', reason: { kind: 'error', failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } } },
+        })
 
         expect(verifyAuth).not.toHaveBeenCalled()
         expect(discoverModels).not.toHaveBeenCalled()
         expect(runText).not.toHaveBeenCalled()
-        await runtimeContext?.fiber.dispose()
+        await runtimeContext.fiber.dispose()
       } finally {
         await rm(root, { recursive: true, force: true })
       }
@@ -285,7 +289,7 @@ describe('TraeX ACP LLM adapter', () => {
     }
   })
 
-  it('discovers the live ACP catalog and makes every returned model selectable', async () => {
+  it('discovers the complete ACP catalog on the first list and reuses it for resolution', async () => {
     const catalog = {
       currentValue: 'trae-fast',
       modelValues: ['trae-fast', 'trae-pro'],
@@ -310,27 +314,25 @@ describe('TraeX ACP LLM adapter', () => {
       completeReasoning: true,
       observedAt: 1,
     }
+    const verifyAuth = vi.fn(async () => {})
     const discoverModels = vi.fn(() => Promise.resolve(catalog))
     const adapter = new TraexAcpAdapter(Config(), {
-      verifyAuth: async () => {},
+      verifyAuth,
       discoverModels,
-      runText: (_invocation: TraexAcpInvocation, options?: RunTraexAcpOptions) => (async function* () {
-        options?.onCatalogObserved?.(catalog)
-        yield 'observed'
-        options?.onStopReason?.('end_turn')
-      })(),
     } as never)
 
-    await expect(adapter.listModels('traex-agent')).resolves.toEqual([
-      expect.objectContaining({ provider: 'traex-agent', id: 'default' }),
-    ])
-    expect(discoverModels).not.toHaveBeenCalled()
-    for await (const _chunk of adapter.stream(request())) { /* observe the live ACP catalog */ }
     await expect(adapter.listModels('traex-agent')).resolves.toEqual([
       expect.objectContaining({ provider: 'traex-agent', id: 'default' }),
       expect.objectContaining({ provider: 'traex-agent', id: 'trae-fast', name: 'Trae Fast' }),
       expect.objectContaining({ provider: 'traex-agent', id: 'trae-pro', name: 'Trae Pro' }),
     ])
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(discoverModels).toHaveBeenCalledWith({
+      command: 'traex',
+      args: ['--sandbox', 'read-only', '--ask-for-approval', 'never', 'acp', 'serve'],
+      cwd: process.cwd(),
+    }, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+
     await expect(adapter.resolveModel('traex-agent', 'trae-pro')).resolves.toMatchObject({
       id: 'trae-pro',
       reasoning: {
@@ -338,7 +340,190 @@ describe('TraeX ACP LLM adapter', () => {
         defaultEffort: 'low',
       },
     })
-    expect(discoverModels).not.toHaveBeenCalled()
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+  })
+
+  it('bounds auth and catalog discovery with one short model-list deadline', async () => {
+    const catalog = {
+      currentValue: 'default',
+      modelValues: ['default'],
+      models: [{ id: 'default', name: 'TraeX default' }],
+      completeReasoning: true,
+      observedAt: 1,
+    } as const
+    const deferred = Promise.withResolvers<typeof catalog>()
+    let authSignal: AbortSignal | undefined
+    let discoverySignal: AbortSignal | undefined
+    let discoveryTimeoutMs: number | undefined
+    const verifyAuth = vi.fn(async options => { authSignal = options.signal })
+    const discoverModels = vi.fn((_invocation, options) => {
+      discoverySignal = options?.signal
+      discoveryTimeoutMs = options?.timeoutMs
+      // Deliberately ignore cancellation: the adapter boundary must still settle listModels.
+      return deferred.promise
+    })
+    const config = { ...Config(), authProbeTimeoutMs: 100 }
+    const adapter = new TraexAcpAdapter(config, { verifyAuth, discoverModels })
+
+    await expect(adapter.listModels('traex-agent')).resolves.toEqual([
+      expect.objectContaining({ id: 'default' }),
+    ])
+
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+    expect(discoverySignal).toBe(authSignal)
+    expect(discoverySignal?.aborted).toBe(true)
+    expect(discoveryTimeoutMs).toBe(config.authProbeTimeoutMs)
+    expect(adapter.peekObservedCatalog()).toBeUndefined()
+
+    // Let the ignored dependency finish; a late result must not repopulate the timed-out cache.
+    deferred.resolve(catalog)
+    await Promise.resolve()
+    expect(adapter.peekObservedCatalog()).toBeUndefined()
+  })
+
+  it('single-flights concurrent cold model-list discovery', async () => {
+    const catalog = {
+      currentValue: 'trae-fast',
+      modelValues: ['trae-fast', 'trae-pro'],
+      models: [
+        { id: 'trae-fast', name: 'Trae Fast' },
+        { id: 'trae-pro', name: 'Trae Pro' },
+      ],
+      completeReasoning: true,
+      observedAt: 1,
+    } as const
+    const deferred = Promise.withResolvers<typeof catalog>()
+    const verifyAuth = vi.fn(async () => {})
+    const discoverModels = vi.fn(() => deferred.promise)
+    const adapter = new TraexAcpAdapter(Config(), { verifyAuth, discoverModels })
+
+    const pending = [
+      adapter.listModels('traex-agent'),
+      adapter.listModels('traex-agent'),
+      adapter.listModels('traex-agent'),
+    ]
+    await vi.waitFor(() => {
+      expect(verifyAuth).toHaveBeenCalledTimes(1)
+      expect(discoverModels).toHaveBeenCalledTimes(1)
+    })
+    deferred.resolve(catalog)
+
+    const results = await Promise.all(pending)
+    for (const models of results) {
+      expect(models).toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: 'trae-fast' }),
+        expect.objectContaining({ id: 'trae-pro' }),
+      ]))
+    }
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+  })
+
+  it('reuses a complete catalog within TTL and refreshes it after expiry', async () => {
+    let clock = 0
+    let discovery = 0
+    const catalogs = [
+      {
+        currentValue: 'trae-first',
+        modelValues: ['trae-first'],
+        models: [{ id: 'trae-first', name: 'Trae First' }],
+        completeReasoning: true,
+        observedAt: 1,
+      },
+      {
+        currentValue: 'trae-second',
+        modelValues: ['trae-second'],
+        models: [{ id: 'trae-second', name: 'Trae Second' }],
+        completeReasoning: true,
+        observedAt: 2,
+      },
+    ] as const
+    const verifyAuth = vi.fn(async () => {})
+    const discoverModels = vi.fn(async () => catalogs[discovery++]!)
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth,
+      discoverModels,
+      catalogCacheTtlMs: 1_000,
+      catalogClock: () => clock,
+    })
+
+    await expect(adapter.listModels('traex-agent')).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'trae-first' }),
+    ]))
+    clock = 999
+    await expect(adapter.listModels('traex-agent')).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'trae-first' }),
+    ]))
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+
+    clock = 1_000
+    const refreshed = await adapter.listModels('traex-agent')
+    expect(refreshed).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'trae-second' }),
+    ]))
+    expect(refreshed).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'trae-first' }),
+    ]))
+    expect(verifyAuth).toHaveBeenCalledTimes(2)
+    expect(discoverModels).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not let a failed concurrent readiness probe erase a newer complete catalog', async () => {
+    const catalog = {
+      currentValue: 'trae-pro',
+      modelValues: ['trae-pro'],
+      models: [{ id: 'trae-pro', name: 'Trae Pro' }],
+      completeReasoning: true,
+      observedAt: 1,
+    } as const
+    const first = Promise.withResolvers<typeof catalog>()
+    const second = Promise.withResolvers<typeof catalog>()
+    const discoverModels = vi
+      .fn()
+      .mockImplementationOnce(() => first.promise)
+      .mockImplementationOnce(() => second.promise)
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      discoverModels,
+    })
+
+    const successful = adapter.probeReadiness()
+    const failing = adapter.probeReadiness()
+    await vi.waitFor(() => { expect(discoverModels).toHaveBeenCalledTimes(2) })
+    first.resolve(catalog)
+    await expect(successful).resolves.toBe(catalog)
+    second.reject(new Error('late failure', { cause: 'process' }))
+    await expect(failing).rejects.toMatchObject({ code: 'ACP_PROCESS_FAILED' })
+
+    expect(adapter.peekObservedCatalog()?.observation).toBe(catalog)
+  })
+
+  it('never forwards secret-bearing model-discovery diagnostics', async () => {
+    const verifyAuth = vi.fn(async () => {})
+    const discoverModels = vi.fn(async (_invocation, options) => {
+      options?.onDiagnostic?.('Authorization: Bearer top-secret token=other-secret someone@example.com')
+      throw new Error('token=top-secret someone@example.com', { cause: 'process' })
+    })
+    const onDiagnostic = vi.fn()
+    const config = Config({ ...Config(), models: ['default', 'configured-safe'] } as never)
+    const adapter = new TraexAcpAdapter(config, { verifyAuth, discoverModels, onDiagnostic })
+
+    await expect(adapter.listModels('traex-agent')).resolves.toEqual([
+      expect.objectContaining({ id: 'default' }),
+      expect.objectContaining({ id: 'configured-safe' }),
+    ])
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+    expect(onDiagnostic.mock.calls.map(call => call[0])).toEqual([
+      'TraeX model catalog discovery wrote to stderr; content withheld',
+      'TraeX model catalog refresh failed; using configured model aliases',
+    ])
+    expect(onDiagnostic.mock.calls.flat().join(' ')).not.toContain('top-secret')
+    expect(onDiagnostic.mock.calls.flat().join(' ')).not.toContain('other-secret')
+    expect(onDiagnostic.mock.calls.flat().join(' ')).not.toContain('someone@example.com')
   })
 
   it('advertises configured text models and disables automatic retries', async () => {
@@ -393,6 +578,32 @@ describe('TraeX ACP LLM adapter', () => {
     expect(invocation?.args).not.toContain('--yolo')
     expect(invocation?.prompt).toContain('dsh-traex-acp-provider/v1')
     expect(runnerOptions?.authProbeDurationMs).toBeTypeOf('number')
+  })
+
+  it('redacts secret-bearing stream diagnostics at the adapter boundary', async () => {
+    const onDiagnostic = vi.fn()
+    const runText: TraexAcpTextRunner = (_invocation, options) => (async function* () {
+      options?.onDiagnostic?.(
+        'Authorization: Bearer stream-secret token=another-secret user@example.com',
+      )
+      yield 'ok'
+      options?.onStopReason?.('end_turn')
+    })()
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText,
+      onDiagnostic,
+    })
+
+    for await (const _chunk of adapter.stream(request())) { /* drain */ }
+
+    expect(onDiagnostic).toHaveBeenCalledOnce()
+    const diagnostic = String(onDiagnostic.mock.calls[0]?.[0])
+    expect(diagnostic).toContain('[redacted]')
+    expect(diagnostic).toContain('[redacted-email]')
+    expect(diagnostic).not.toContain('stream-secret')
+    expect(diagnostic).not.toContain('another-secret')
+    expect(diagnostic).not.toContain('user@example.com')
   })
 
   it('maps a delegated ACP tool-call envelope into a continuing DSH tool step', async () => {
@@ -654,6 +865,32 @@ describe('TraeX ACP LLM adapter', () => {
     expect(receivedSignal?.aborted).toBe(true)
   })
 
+  it('aborts and clears an in-flight model-list discovery on shutdown', async () => {
+    let receivedSignal: AbortSignal | undefined
+    const discoverModels = vi.fn((_invocation, options) => {
+      receivedSignal = options?.signal
+      // Ignore cancellation deliberately: the adapter-owned boundary must still settle callers.
+      return new Promise<never>(() => {})
+    })
+    const onDiagnostic = vi.fn()
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      discoverModels,
+      onDiagnostic,
+    })
+
+    const pending = adapter.listModels('traex-agent')
+    await vi.waitFor(() => { expect(discoverModels).toHaveBeenCalledTimes(1) })
+    adapter.shutdown()
+
+    await expect(pending).resolves.toEqual([
+      expect.objectContaining({ id: 'default' }),
+    ])
+    expect(receivedSignal?.aborted).toBe(true)
+    expect(adapter.peekObservedCatalog()).toBeUndefined()
+    expect(onDiagnostic).not.toHaveBeenCalled()
+  })
+
   it('redacts credential and identity shapes from diagnostics', () => {
     const redacted = redactDiagnostic('Authorization: Bearer abc123 token=secret someone@example.com')
     expect(redacted).not.toContain('abc123')
@@ -867,6 +1104,64 @@ describe('TraeX ACP LLM adapter', () => {
     expect(adapter.peekObservedCatalog()?.observation.modelValues).toEqual(['default', 'trae-fast'])
   })
 
+  it('preserves a complete list catalog and its TTL across a later partial stream observation', async () => {
+    let clock = 0
+    const completeCatalog = {
+      currentValue: 'default',
+      modelValues: ['default', 'trae-pro'],
+      models: [
+        { id: 'default', name: 'TraeX default' },
+        {
+          id: 'trae-pro',
+          name: 'Trae Pro',
+          reasoning: {
+            efforts: [{ id: 'high', name: 'High' }],
+            defaultEffort: 'high',
+          },
+        },
+      ],
+      completeReasoning: true,
+      observedAt: 1,
+    } as const
+    const discoverModels = vi.fn(async () => completeCatalog)
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      discoverModels,
+      runText: runnerEmittingCatalog(['default']),
+      catalogCacheTtlMs: 1_000,
+      catalogClock: () => clock,
+    })
+
+    await expect(adapter.listModels('traex-agent')).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'trae-pro' }),
+    ]))
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+
+    clock = 900
+    for await (const _chunk of adapter.stream(request())) { /* observe an incomplete live catalog */ }
+    expect(adapter.peekObservedCatalog()).toMatchObject({
+      recordedAt: 0,
+      observation: {
+        completeReasoning: true,
+        modelValues: ['default', 'trae-pro'],
+      },
+    })
+    await expect(adapter.resolveModel('traex-agent', 'trae-pro')).resolves.toMatchObject({
+      reasoning: {
+        efforts: [{ id: 'high', name: 'High' }],
+        defaultEffort: 'high',
+      },
+    })
+    await expect(adapter.listModels('traex-agent')).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'trae-pro' }),
+    ]))
+    expect(discoverModels).toHaveBeenCalledTimes(1)
+
+    // The partial stream did not renew the complete entry's age. Its original TTL still applies.
+    clock = 1_000
+    expect(adapter.peekObservedCatalog()).toBeUndefined()
+  })
+
   it('never lets the observed catalog gate a request: an unobserved model still runs', async () => {
     // The observation lists only 'default', but the deployer adds a 'trae-fast' advisory alias.
     // The cache remains non-authoritative for execution, so stream must NOT reject on it.
@@ -903,6 +1198,32 @@ describe('TraeX ACP LLM adapter', () => {
     for await (const _chunk of adapter.stream(request())) { /* drain */ }
     expect(adapter.peekObservedCatalog()).toBeDefined()
     adapter.shutdown()
+    expect(adapter.peekObservedCatalog()).toBeUndefined()
+  })
+
+  it('ignores a late stream catalog observation after shutdown', async () => {
+    let observeCatalog: RunTraexAcpOptions['onCatalogObserved']
+    const adapter = new TraexAcpAdapter(Config(), {
+      verifyAuth: async () => {},
+      runText(_invocation, options) {
+        observeCatalog = options?.onCatalogObserved
+        return (async function* () {
+          yield 'ok'
+          options?.onStopReason?.('end_turn')
+        })()
+      },
+    })
+
+    for await (const _chunk of adapter.stream(request())) { /* capture the observer */ }
+    adapter.shutdown()
+    observeCatalog?.({
+      currentValue: 'late',
+      modelValues: ['late'],
+      models: [{ id: 'late', name: 'Late' }],
+      completeReasoning: false,
+      observedAt: 2,
+    })
+
     expect(adapter.peekObservedCatalog()).toBeUndefined()
   })
 

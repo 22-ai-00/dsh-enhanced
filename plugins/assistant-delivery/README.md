@@ -150,7 +150,7 @@ rules:
 
 `/model` 从宿主 `ctx.llm` 的实时 provider/model 目录生成受限的 typed `model-picker` intent，不发起模型生成；每个模型会显式关联它自己的 `effortIds`，而不是共享全局 effort 并集。支持它的渠道可以据此显示“分组、模型、effort”三级联动选择和确认按钮，不支持它的渠道会把该 intent 明确拒绝而不会降级为任意卡片 JSON。持久 selection 会先投影为不含 `updatedAt/version` 的纯路由再进入严格 intent 边界；如果目录中的异常数据仍使卡片校验失败，系统会立即退回完整纯文本目录，确定性校验错误不会重试。某个 provider 或模型能力解析失败不影响其他项，最多载入 20 个 provider、50 个模型、每模型 20 档 effort，并且全目录最多 20 个不同 effort id。
 
-卡片提交后，Delivery 会再次核对 active binding、精确 principal/chat 和 Policy，并用实时 `resolveModelInfo()` 验证 provider/model 及该模型支持的 effort；通过后把三项选择按 canonical conversation 持久化到 Delivery SQLite。选择从下一条普通消息生效，保留当前 session 上下文，跨 `/new` 和 Host 重启仍有效。卡片可选择“默认（由模型决定）”；`/model use` 保留为无卡片渠道和排错时的文字后备，`/model reset` 删除会话覆盖并恢复 `agentProvider` / `agentModel`。模型目录按宿主约定是建议性的，最终调用是否成功仍由对应 adapter 和账号认证决定。
+卡片提交后，Delivery 会再次核对 active binding、精确 principal/chat、原始 provider message id 和 Policy，并用实时 `resolveModelInfo()` 验证 provider/model 及该模型支持的 effort；通过后把三项选择按 canonical conversation 持久化到 Delivery SQLite。渠道可以等待该 durable settlement：同实例由完成通知即时唤醒，共享数据库的另一实例完成时由有界轮询感知，从而把原卡更新成不可交互的最终结果。选择从下一条普通消息生效，保留当前 session 上下文，跨 `/new` 和 Host 重启仍有效。卡片可选择“默认（由模型决定）”；`/model use` 保留为无卡片渠道和排错时的文字后备，`/model reset` 删除会话覆盖并恢复 `agentProvider` / `agentModel`。模型目录按宿主约定是建议性的，最终调用是否成功仍由对应 adapter 和账号认证决定。
 
 `/permissions`（别名 `/permission`）只允许当前 active binding 的精确 owner 使用，命令本身不会进入 Agent 或触发 LLM。支持 typed `permission-picker` 的私聊渠道会显示“请求批准（ask）/帮我批准（auto）/完全访问权限（full）”三档卡片并标出当前档位；不支持卡片或渲染失败时自动退回含同等信息的文字命令。前两档都使用 `workspace-write + ask`，区别是持久 reviewer 为 `user` 或 `auto-review`。`full` 使用 `danger-full-access + never + none`，可访问网络及任意文件；卡片按钮带原生风险确认，文字入口则由 `/permission full` 显示橙色警告，必须再次发送 `/permission full confirm` 才切换。
 

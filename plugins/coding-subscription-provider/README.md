@@ -13,7 +13,7 @@
 | `cursor-subscription` | `cursor-agent` | beta | `default` |
 | `grok-subscription` | `grok` | beta | `default` |
 
-在默认 CLI 模式中，`default` 不会传 `--model`，因此保留官方 CLI 当前选择。`listModels` / `resolveModel` 始终是无进程的纯读取：启动后先显示配置中的静态别名；一次经过 live session 校验的调用观察到 CLI 目录后，再合并该 5 分钟缓存。不需要把每个模型手写进配置。目录是提示性的发现信息，不会阻止用户配置新模型，最终可用性仍由官方 CLI 校验。Codex direct 模式不启动 App Server、也不发现动态目录；其中 `default` 会明确映射到 `codex.directModel`。
+在默认 CLI 模式中，`default` 不会传 `--model`，因此保留官方 CLI 当前选择。模型选择器首次调用 `listModels` 或 5 分钟缓存过期时，会先执行已有订阅认证门禁，再从配置的 `cwd` 发起一次无 prompt、有界、只读的目录刷新；并发列表请求会共用同一次刷新。刷新成功后返回静态别名与完整动态目录，失败则安全降级到 `models` 中的静态项并记录无凭据诊断。`resolveModel` 仍只读取配置与有效内存缓存，不启动进程。不需要把每个模型手写进配置；目录是提示性的发现信息，不会阻止用户配置新模型，最终可用性仍由官方 CLI 校验。Codex direct 模式不启动 App Server、也不发现动态目录；其中 `default` 会明确映射到 `codex.directModel`。
 
 安全默认值只启用 Codex 与 Cursor。Claude 因第三方分发政策边界默认关闭；Grok 因本地 per-model API Key 可覆盖 OAuth，默认关闭并要求用户先核验后显式确认。四条 connector 都包含在插件中。
 
@@ -25,7 +25,7 @@
 2. **安装插件**：`dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider`。
 3. **确认命令与工作目录**：`codex --version`。命令名不同就在 `~/.dsh/profiles/web/cordis.patch.yml` 里把 `codex.command` 改成实际路径；同时把 `cwd` 指向要处理的 Git 仓库（相对路径按 DSH 进程启动目录解析）。
 4. **开启并落盘配置**：在配置中保持 `codex.enabled: true`（默认已开），执行 `dsh --profile web --dump-config` 检查生效值。
-5. **选择模型与 effort**：首次可直接选配置中的 `default` 沿用 CLI 当前模型；经过一次 live-session 调用后，模型选择器会合并本次安全观察到的模型及 reasoning effort。目录初始化发生在 session/workspace 校验之后、提交 prompt 之前；真实生成调用会消耗你的订阅额度。
+5. **选择模型与 effort**：打开模型选择器时，`listModels` 会先通过认证门禁并进行无 prompt 目录刷新，随后合并当前模型及 reasoning effort；若刷新失败仍可选择配置中的 `default`。目录刷新不创建 thread/session/turn，也不提交用户消息；真实生成调用才会消耗你的订阅推理额度。
 
 Claude / Grok 默认关闭，启用前请阅读下文「订阅认证优先」与「Claude 合规提示」。遇到报错先看下文「排查」表。
 
@@ -119,16 +119,16 @@ codex:
 - `codex.directReasoningEfforts` 是 direct route 向 DSH 暴露的可选 effort 列表，`codex.directDefaultReasoningEffort` 是调用未指定 effort 时由 DSH 物化的默认值，并且必须属于前一列表。当前默认暴露 `low` 到 `ultra`；私有 wire 会按官方 Codex 当前行为把 `ultra` 规范化为 `max`，这同样不是稳定承诺。
 - `codex.maxRequestBytes` 限制序列化后的完整 direct 请求（包括 base64 图片），`codex.maxRequestImageBytes` 限制请求内累计图片负载，且后者不能大于前者。默认分别为 32 MiB 与 24 MiB；两项只影响 direct 模式。
 - `cwd` 是 CLI 子进程允许使用的工作目录，也是 direct 模式的本地 session 授权边界；相对路径按 DSH 进程启动目录解析，不是按 Web 会话显示的项目目录解析。对每个**带 prompt 的生成调用**，插件只接受 DSH Agent Loop 在本进程标记且深冻结的请求，使用其 live `sessionId` 从 host `sessions` 服务取 header cwd，对二者做 `realpath` 后要求与配置 cwd 完全相等。缺失、过期、伪造、未标记、路径不匹配或 symlink escape 都会在认证、网络请求或 CLI 启动前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝；CLI 模式收到的是该 canonical session cwd。Codex `exec` 要求这里是 Git 仓库；插件不会静默追加 `--skip-git-repo-check` 绕过该检查。Web profile 可在 `~/.dsh/profiles/web/cordis.patch.yml` 中覆盖此值，修改后需重启 DSH。
-- `listModels` / `resolveModel` 没有 `GenerateOptions` 或 live session identity，因此只读取配置和已经安全观察到的内存缓存，**绝不做认证、目录发现或启动子进程**。目录刷新只发生在 `stream` 已校验 live session、canonical cwd 并完成认证之后；认证后还会再次读取 session，阻止过期/替换 session 启动目录进程。
+- CLI transport 的 `listModels` 在目录缓存冷启动或 5 分钟过期时，会使用配置的 `cwd` 先执行已有认证门禁，再启动一次无 prompt、有界的只读目录探针；它不需要 live session identity，也不会创建生成 turn。相同 provider 的并发请求共享一次 in-flight 刷新；失败只返回配置中的静态 `models` 并记录无凭据分类诊断。生成调用从不触发或等待目录刷新，只执行自身认证和两次 live-session cwd 校验。`resolveModel` 始终是纯缓存/配置读取，不执行认证、目录发现或子进程。Codex `direct-responses` 的 `listModels` 同样保持纯静态且不启动 CLI/App Server。
 - `timeoutMs` 是单次调用总时限；取消或超时先发 `SIGINT`，经过 `killGraceMs` 再发 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时请求以 `teardown=timed-out` 错误结算，保留原始 abort/timeout 分类，并在后台继续引流并跟踪迟到的 `close`；不会伪称子进程已回收。
-- `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制 CLI 模式 live-session 调用中的认证状态检查和无 prompt 模型目录发现；探针输出不会进入日志或模型响应。Codex direct 请求使用总调用的 `timeoutMs`，不运行这些 CLI 探针。
+- `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制 CLI 模式中 `listModels` 与生成调用使用的认证状态检查，以及 `listModels` 的无 prompt 模型目录发现；Codex 目录还受 `killGraceMs`、`maxLineBytes`、`maxOutputBytes`、`maxStderrBytes` 约束。探针输出不会进入模型响应。Codex direct 请求使用总调用的 `timeoutMs`，不运行这些 CLI 探针。
 - 三项输出限制和 prompt 限制都按 UTF-8 字节计算。
 - `maxTurns` 目前只映射到 Claude Code 和 Grok Build；Codex/Cursor 不会收到它们不支持的参数。
-- `models` 是启动时即可展示的静态别名列表；CLI route 会在一次安全调用观察目录后合并动态条目，Codex direct 模式只使用静态别名。通常保留 `[default]` 即可。
+- `models` 是目录探针不可用时仍可展示的静态别名列表；CLI route 会在 `listModels` 的安全刷新后合并动态条目，Codex direct 模式只使用静态别名。通常保留 `[default]` 即可。
 - 启用 Grok 前先通过 browser/device flow 完成 `grok login`，确认 `grok models` 报告已登录，再用 `grok inspect` 确认所选模型没有 `api_key` / `env_key` override；随后同时设置 `enabled: true` 与 `userVerifiedSubscription: true`。`inspect` 本身不报告 active credential，该确认是本机用户的显式声明，不是插件读取凭据后的推断。
 - `command` 是单个命令名或路径，CLI 模式固定参数数组并使用 `shell: false`，不接受 shell 片段；Codex direct 模式不使用该字段。
 - `extraEnvNames` 只填写要额外继承的环境变量名，值只能来自启动 DSH 的环境，配置中不能直接写 secret。
-- `logDiagnostics` 默认只提示“CLI 写入了 stderr”，不记录内容；显式开启后才记录经过常见 key/token/邮箱规则脱敏的末尾 2,000 字符，仍不适合高敏感环境。独立于该开关，插件始终会在每次调用结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、teardown 状态、exit/signal，以及能可靠测得的毫秒级延迟指标），成功走 `debug`、非成功走 `info`。该行不含 prompt、argv、stderr 原文或认证凭据。
+- 目录探针的 stderr 始终只生成固定的无凭据提示，原文不会传给诊断 sink。其他 CLI 的 stderr 在 adapter 诊断边界先经过常见 key/token/邮箱规则脱敏；`logDiagnostics` 默认仍只提示“CLI 写入了 stderr”，显式开启后才记录脱敏后的末尾 2,000 字符，仍不适合高敏感环境。独立于该开关，插件始终会在每次调用结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、teardown 状态、exit/signal，以及能可靠测得的毫秒级延迟指标），成功走 `debug`、非成功走 `info`。该行不含 prompt、argv、stderr 原文或认证凭据。
 
 加载后，在 DSH 的 provider/model 选择处选择上表中的 provider 和模型即可。真实订阅调用会消耗额度，自动化测试不会使用真实账号。
 
@@ -174,13 +174,13 @@ XAI_API_KEY
 
 | 能力 | 行为 |
 |---|---|
-| 文件系统 | CLI 模式把经过 live-loop session 身份和 canonical `realpath` 精确校验的 cwd 交给外部 CLI；普通 `listModels` / `resolveModel` 不启动进程。Codex CLI 使用 read-only sandbox；Claude 禁用内置 tools；Grok 1.0.5 使用 allowlist + denylist 形成空生成工具集；Cursor/Grok 的最终强度仍取决于客户端版本、用户配置和 OS 隔离。Codex direct 不把 cwd 交给模型进程，但会读取并可能以 CAS + 原子替换更新 `CODEX_HOME/auth.json` 或 `~/.codex/auth.json`；与不使用同一 CAS 的外部写者并发时只能 best-effort 避免覆盖。图片字节只通过宿主提供的 attachment service 读取。 |
+| 文件系统 | CLI 模式把经过 live-loop session 身份和 canonical `realpath` 精确校验的 cwd 交给带 prompt 的外部 CLI；`listModels` 的无 prompt 认证/目录探针使用配置的 `cwd`，不创建 turn，`resolveModel` 不启动进程。Codex CLI 使用 read-only sandbox；Claude 禁用内置 tools；Grok 1.0.5 使用 allowlist + denylist 形成空生成工具集；Cursor/Grok 的最终强度仍取决于客户端版本、用户配置和 OS 隔离。Codex direct 不把 cwd 交给模型进程，但会读取并可能以 CAS + 原子替换更新 `CODEX_HOME/auth.json` 或 `~/.codex/auth.json`；与不使用同一 CAS 的外部写者并发时只能 best-effort 避免覆盖。图片字节只通过宿主提供的 attachment service 读取。 |
 | 网络 | CLI 模式下插件本身不请求模型端点，官方 CLI 会连接各自的登录、推理、更新或遥测服务。Codex direct 由插件固定请求 `https://chatgpt.com/backend-api/codex/responses`，仅在 401 刷新时请求 `https://auth.openai.com/oauth/token`；不能把凭据用于任意 URL。请求正文会把对话、tool schema/tool result，以及可用时的图片发送给该私有后端。 |
-| 子进程 | CLI 模式仅直接启动配置的单个可执行文件，`shell: false`；目录发现会短暂启动同一可执行文件的 App Server、SDK/ACP 初始化或列表模式。POSIX 上为生成调用建立进程组并整体取消；Windows 只能 best-effort 终止直接子进程。官方 CLI 仍可能自行创建脱离进程组的后代。Codex direct 不启动 Codex CLI 或 App Server。 |
+| 子进程 | CLI 模式仅直接启动配置的单个可执行文件，`shell: false`；冷启动或过期的 `listModels` 会在认证通过后短暂启动同一可执行文件的 App Server、SDK/ACP 初始化或列表模式，且不会提交 prompt 或创建生成 turn。POSIX 上为生成调用建立进程组并整体取消；Windows 只能 best-effort 终止直接子进程。官方 CLI 仍可能自行创建脱离进程组的后代。`resolveModel` 和 Codex direct 的模型列表不启动 Codex CLI 或 App Server。 |
 | 凭据 | CLI 模式不读取官方 auth 文件、不实现 OAuth，由官方客户端访问凭据。Codex direct 会按上述 POSIX 文件约束直接读取 ChatGPT session，在 401 时至多刷新一次，并以插件自身的 CAS + 原子替换流程写回；它不接受 API key fallback，也不把 token 写入响应或日志。 |
 | 浏览器 | 插件不会打开浏览器；用户单独执行官方 login 时可能打开。 |
 | 安装脚本 | 本 npm 包没有 install/postinstall 脚本，也不会安装或更新四个官方 CLI。 |
-| 日志 | stderr 有界且默认不记录内容。选择 `logDiagnostics` 后会脱敏常见 key、Bearer token 和邮箱，但无法识别任意业务秘密；插件本身不主动记录 prompt。每次调用结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/teardown/exit/signal，以及可测得的毫秒级延迟指标），不含 prompt、argv、stderr 原文或认证凭据。 |
+| 日志 | stderr 有界且默认不记录内容；目录探针的 stderr 原文永不传给诊断 sink，只报告固定无凭据提示。其他 CLI 选择 `logDiagnostics` 后会脱敏常见 key、Bearer token 和邮箱，但无法识别任意业务秘密；插件本身不主动记录 prompt。每次调用结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/teardown/exit/signal，以及可测得的毫秒级延迟指标），不含 prompt、argv、stderr 原文或认证凭据。 |
 
 CLI 模式的任务正文作为独立 argv 元素传给官方 CLI。它不会经过 shell，但仍受操作系统命令行长度限制，并且在某些系统上可能被同机高权限用户通过进程列表看到；敏感、多用户主机应增加 OS 级隔离。默认 prompt 上限因此保守设为 128 KiB。Codex direct 不把 prompt 放进进程 argv，而是受独立的 `codex.maxRequestBytes` 限制。
 

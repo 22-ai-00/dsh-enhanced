@@ -3758,6 +3758,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(first.service.getModelPickerForCallback({
       operationId: catalogReply.modelPicker!.operationId,
       callbackChatId: conversation.chat,
+      cardMessageId: replyProviderMessageId(first.service, 'evt-model-list'),
       bindingId: catalogReply.bindingId,
       principal,
     })).toEqual(catalogReply.modelPicker)
@@ -3867,11 +3868,38 @@ describe('real rc.8 delivery Agent runtime', () => {
     await fixture.service.acceptInbound(message('evt-picker', '/model', 'command'))
     await drive(fixture.service)
     const picker = fixture.sends.at(-1)!
+    const pickerMessageId = replyProviderMessageId(fixture.service, 'evt-picker')
+    const copiedCard = {
+      operationId: picker.modelPicker!.operationId,
+      callbackEventId: 'card-callback-copied',
+      callbackChatId: conversation.chat,
+      cardMessageId: 'om_copied_card',
+      bindingId: picker.bindingId,
+      principal,
+      provider: 'alternate',
+      modelProvider: 'alternate',
+      model: 'precise',
+      reasoningEffort: 'high',
+      expectedRevision: 0,
+    } as const
+    expect(fixture.service.getModelPickerForCallback({
+      operationId: copiedCard.operationId, callbackChatId: copiedCard.callbackChatId,
+      cardMessageId: copiedCard.cardMessageId, bindingId: copiedCard.bindingId, principal,
+    })).toBeUndefined()
+    expect(() => fixture.service.advanceModelPickerForCallback({
+      operationId: copiedCard.operationId, callbackChatId: copiedCard.callbackChatId,
+      cardMessageId: copiedCard.cardMessageId, bindingId: copiedCard.bindingId, principal,
+      expected: { revision: 0, provider: 'mock', model: 'delivery-model' },
+      next: { provider: 'alternate', model: 'precise', reasoningEffort: 'high' },
+    })).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    expect(() => fixture.service.settleModelSelection(copiedCard))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
 
     const mismatchCallback = {
       operationId: picker.modelPicker!.operationId,
       callbackEventId: 'card-callback-mismatch',
       callbackChatId: conversation.chat,
+      cardMessageId: pickerMessageId,
       bindingId: picker.bindingId,
       principal,
       provider: 'alternate',
@@ -3881,12 +3909,19 @@ describe('real rc.8 delivery Agent runtime', () => {
       expectedRevision: 0,
     } as const
     expect(fixture.service.settleModelSelection(mismatchCallback)).toEqual({ status: 'pending' })
+    const rejectedWait = fixture.service.awaitModelSelection(
+      mismatchCallback, new AbortController().signal,
+    )
     await fixture.service.whenIdle()
+    expect(await rejectedWait).toEqual({ status: 'rejected', reason: 'provider-model-mismatch' })
     expect(fixture.service.settleModelSelection(mismatchCallback))
       .toEqual({ status: 'rejected', reason: 'provider-model-mismatch' })
+    const persistedRejected = fixture.service.settleModelSelection(mismatchCallback)
+    expect(persistedRejected).toEqual({ status: 'rejected', reason: 'provider-model-mismatch' })
     await drive(fixture.service)
     expect(fixture.sends.at(-1)?.text).toContain('分组 alternate 与模型 mock/delivery-model 不匹配')
     expect(fixture.sends.filter(send => send.text.includes('分组 alternate 与模型'))).toHaveLength(1)
+    expect(fixture.service.settleModelSelection(mismatchCallback)).toEqual(persistedRejected)
 
     await fixture.service.acceptInbound(message('evt-picker-valid', '/model', 'command'))
     await drive(fixture.service)
@@ -3896,6 +3931,7 @@ describe('real rc.8 delivery Agent runtime', () => {
       operationId: validPicker.modelPicker!.operationId,
       callbackEventId: 'card-callback-1',
       callbackChatId: conversation.chat,
+      cardMessageId: replyProviderMessageId(fixture.service, 'evt-picker-valid'),
       bindingId: validPicker.bindingId,
       principal,
       provider: 'alternate',
@@ -3905,7 +3941,13 @@ describe('real rc.8 delivery Agent runtime', () => {
       expectedRevision: 0,
     } as const
     expect(fixture.service.settleModelSelection(selectionCallback)).toEqual({ status: 'pending' })
+    const selectedWait = fixture.service.awaitModelSelection(
+      selectionCallback, new AbortController().signal,
+    )
     await fixture.service.whenIdle()
+    expect(await selectedWait).toMatchObject({ status: 'selected', selection: {
+      provider: 'alternate', model: 'precise', reasoningEffort: 'high',
+    } })
     const selected = fixture.service.settleModelSelection(selectionCallback)
     expect(selected).toMatchObject({ status: 'selected', selection: {
       provider: 'alternate', model: 'precise', reasoningEffort: 'high',
@@ -3921,6 +3963,110 @@ describe('real rc.8 delivery Agent runtime', () => {
       provider: 'alternate', model: 'precise', reasoningEffort: 'high',
     })
     await fixture.ctx.fiber.restart()
+  })
+
+  test('binds model navigation and selected replay to the original card across restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-model-card-restart-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const first = await runtimeHarness(root, saved)
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const cardEventId = 'evt-picker-restart'
+    await first.service.acceptInbound(message(cardEventId, '/model', 'command'))
+    await drive(first.service)
+    const picker = first.sends.at(-1)!
+    const cardMessageId = replyProviderMessageId(first.service, cardEventId)
+    const bindingId = picker.bindingId
+    await first.ctx.fiber.restart()
+
+    const reopened = await runtimeHarness(root, saved)
+    const callbackBase = {
+      operationId: picker.modelPicker!.operationId,
+      callbackChatId: conversation.chat,
+      bindingId,
+      principal,
+    } as const
+    expect(reopened.service.getModelPickerForCallback({
+      ...callbackBase, cardMessageId: 'om_copied_card',
+    })).toBeUndefined()
+    expect(() => reopened.service.advanceModelPickerForCallback({
+      ...callbackBase,
+      cardMessageId: 'om_copied_card',
+      expected: { revision: 0, provider: 'mock', model: 'delivery-model' },
+      next: { provider: 'alternate', model: 'precise', reasoningEffort: 'high' },
+    })).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    const advanced = reopened.service.advanceModelPickerForCallback({
+      ...callbackBase,
+      cardMessageId,
+      expected: { revision: 0, provider: 'mock', model: 'delivery-model' },
+      next: { provider: 'alternate', model: 'precise', reasoningEffort: 'high' },
+    })
+    expect(advanced).toMatchObject({ applied: true, state: {
+      revision: 1, provider: 'alternate', model: 'precise', reasoningEffort: 'high',
+    } })
+    const selectionCallback = {
+      ...callbackBase,
+      callbackEventId: 'card-callback-restart',
+      cardMessageId,
+      provider: 'alternate',
+      modelProvider: 'alternate',
+      model: 'precise',
+      reasoningEffort: 'high',
+      expectedRevision: 1,
+    } as const
+    expect(reopened.service.settleModelSelection(selectionCallback)).toEqual({ status: 'pending' })
+    await reopened.service.whenIdle()
+    const selected = reopened.service.settleModelSelection(selectionCallback)
+    expect(selected).toMatchObject({ status: 'selected', selection: {
+      provider: 'alternate', model: 'precise', reasoningEffort: 'high',
+    } })
+    await reopened.ctx.fiber.restart()
+
+    const replayed = await runtimeHarness(root, saved)
+    expect(replayed.service.settleModelSelection(selectionCallback)).toEqual(selected)
+    expect(() => replayed.service.settleModelSelection({
+      ...selectionCallback, cardMessageId: 'om_copied_card', callbackEventId: 'card-callback-copied',
+    })).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    await replayed.ctx.fiber.restart()
+  })
+
+  test('binds a rejected model-selection replay to the original card across restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-model-card-rejected-restart-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const first = await runtimeHarness(root, saved)
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const cardEventId = 'evt-picker-rejected-restart'
+    await first.service.acceptInbound(message(cardEventId, '/model', 'command'))
+    await drive(first.service)
+    const picker = first.sends.at(-1)!
+    const rejectedCallback = {
+      operationId: picker.modelPicker!.operationId,
+      callbackEventId: 'card-callback-rejected-restart',
+      callbackChatId: conversation.chat,
+      cardMessageId: replyProviderMessageId(first.service, cardEventId),
+      bindingId: picker.bindingId,
+      principal,
+      provider: 'alternate',
+      modelProvider: 'mock',
+      model: 'delivery-model',
+      reasoningEffort: 'high',
+      expectedRevision: 0,
+    } as const
+    expect(first.service.settleModelSelection(rejectedCallback)).toEqual({ status: 'pending' })
+    await first.service.whenIdle()
+    const rejected = first.service.settleModelSelection(rejectedCallback)
+    expect(rejected).toEqual({ status: 'rejected', reason: 'provider-model-mismatch' })
+    await first.ctx.fiber.restart()
+
+    const reopened = await runtimeHarness(root, saved)
+    expect(reopened.service.settleModelSelection(rejectedCallback)).toEqual(rejected)
+    expect(() => reopened.service.settleModelSelection({
+      ...rejectedCallback, cardMessageId: 'om_copied_card', callbackEventId: 'card-callback-copied-rejected',
+    })).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    await reopened.ctx.fiber.restart()
   })
 
   test('rechecks policy after live model resolution before committing a card selection', async () => {
@@ -3947,6 +4093,7 @@ describe('real rc.8 delivery Agent runtime', () => {
       operationId: picker.modelPicker!.operationId,
       callbackEventId: 'card-callback-policy',
       callbackChatId: conversation.chat,
+      cardMessageId: replyProviderMessageId(fixture.service, 'evt-picker-policy'),
       bindingId: picker.bindingId,
       principal,
       provider: 'alternate',
@@ -3986,6 +4133,7 @@ describe('real rc.8 delivery Agent runtime', () => {
       operationId: picker.modelPicker!.operationId,
       callbackEventId: 'card-callback-timeout',
       callbackChatId: conversation.chat,
+      cardMessageId: replyProviderMessageId(fixture.service, 'evt-picker-timeout'),
       bindingId: picker.bindingId,
       principal,
       provider: 'alternate',

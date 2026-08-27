@@ -170,9 +170,9 @@ schtasks.exe /Run /TN "DSH profile web"
 
 服务启动后，同一私聊或稳定群聊 lane 会持续恢复同一个 DSH session。`/status`（或 `/session`）显示当前代次与上下文统计；`/stop` 只停止正在执行的任务并保留该 session；`/new`（或 `/clear`）才停止旧任务并原子切换到空白的下一代 session；`/compact` 在宿主发布原生命令时压缩当前上下文。未知 slash 命令不会进入模型。
 
-可以先在飞书里私聊机器人发送 `/model`。机器人会返回一张飞书卡片，依次选择“分组 / Provider”“模型”“Effort 程度”，再点击“确认选择”；选择 provider 时，同一张卡片会立即刷新为该分组的模型，选择模型时又会刷新为该模型实际支持的 effort。没有独立 effort 档位的模型只显示“默认（该模型无 effort 档位）”。系统确认后会发一条文字回复，下一条普通消息开始使用新选择，原上下文保留。目录来自当前 Host 实际注册的 provider/model，不消耗一次模型调用。若目录中的异常字段或飞书卡片格式错误导致卡片未被接受，机器人会立即改发完整纯文本目录，可继续使用 `/model use <provider/model>`，不会静默重试后进入死信。
+可以先在飞书里私聊机器人发送 `/model`。机器人会返回一张飞书卡片，依次选择“分组 / Provider”“模型”“Effort 程度”，再点击“确认选择”；选择 provider 时，同一张卡片会立即刷新为该分组的模型，选择模型时又会刷新为该模型实际支持的 effort。没有独立 effort 档位的模型只显示“默认（该模型无 effort 档位）”。确认后原卡会立即进入不可交互的验证态，后台完成校验后再原位更新为成功或失败结果，同时保留文字结果通知；成功选择从下一条普通消息起生效，原上下文保留。目录来自当前 Host 实际注册的 provider/model，不消耗一次模型调用。若目录中的异常字段或飞书卡片格式错误导致卡片未被接受，机器人会立即改发完整纯文本目录，可继续使用 `/model use <provider/model>`，不会静默重试后进入死信。
 
-飞书的多个静态选择器本身彼此独立，所以插件在 provider、model、effort 选择器上分别注册签名 callback，并通过长连接回调返回 `{ card: { type: "raw", data: ... } }` 更新同一张 schema 2.0 卡片。固定的官方 Node SDK 会忽略 `type=card` 长连接帧，transport 因此在其边界补充分片合并、callback 分发和 ACK 兼容桥。每次级联状态都带持久化 revision；旧卡片回调只会重绘当前权威状态，不会覆盖较新的选择。目录按 operation 保存在 Delivery SQLite，Host 短暂重启后仍能恢复。最终确认时还会在 adapter 与 Delivery 两层拒绝不匹配的分组/模型，并校验目标模型支持的 effort。选择“默认（由模型决定）”不会固定 reasoning effort。`/model use <provider/model>` 仍可作为文字后备，`/model reset` 恢复部署默认模型，`/new` 轮换到新 session 但保留该聊天的模型与 effort。Web 会话里可调用 `assistant_health` 查看 `larkChannel.state`，正常应为 `connected`。
+飞书的多个静态选择器本身彼此独立，所以插件在 provider、model、effort 选择器上分别注册签名 callback，并通过长连接回调返回 `{ card: { type: "raw", data: ... } }` 更新同一张 schema 2.0 卡片。固定的官方 Node SDK 会忽略 `type=card` 长连接帧，transport 因此在其边界补充分片合并、callback 分发和 ACK 兼容桥。每次级联状态都带持久化 revision；旧卡片回调只会重绘当前权威状态，不会覆盖较新的选择。目录按 operation 保存在 Delivery SQLite，Host 短暂重启后仍能恢复。最终确认还会精确绑定已投递卡片的 provider message id；callback ACK 只确认受理，随后用同一 HTTP PATCH 链先锁定为只读验证态，再在 durable settlement 完成后更新为只读终态。最终确认时还会在 adapter 与 Delivery 两层拒绝不匹配的分组/模型，并校验目标模型支持的 effort。选择“默认（由模型决定）”不会固定 reasoning effort。`/model use <provider/model>` 仍可作为文字后备，`/model reset` 恢复部署默认模型，`/new` 轮换到新 session 但保留该聊天的模型与 effort。Web 会话里可调用 `assistant_health` 查看 `larkChannel.state`，正常应为 `connected`。
 
 例如本机已安装并登录 `@dsh-enhanced/coding-subscription-provider` 的 Codex CLI 时：
 

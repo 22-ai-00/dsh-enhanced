@@ -34,6 +34,7 @@ import { installLarkCardCallbackBridge } from './ws-card-callback.js'
 
 const LARK_PROGRESS_API = '/open-apis/im/v1/message_cot'
 const LARK_MESSAGE_RESOURCE_API = '/open-apis/im/v1/messages'
+const LARK_MESSAGE_API = '/open-apis/im/v1/messages'
 const LARK_ERROR_BODY_MAX_BYTES = 16 * 1_024
 const larkResourceIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@-]{0,255}$/u
 
@@ -485,6 +486,20 @@ export function writeLarkProgressRequest(handle: LarkProgressHandle, events: rea
   }
 }
 
+export function createLarkRawCardUpdateRequest(
+  messageId: string,
+  card: Readonly<Record<string, unknown>>,
+  signal: AbortSignal,
+) {
+  const message = assertResourceIdentifier(messageId, 'message')
+  return {
+    method: 'PATCH' as const,
+    url: `${LARK_MESSAGE_API}/${encodeURIComponent(message)}`,
+    data: { content: JSON.stringify(card) },
+    signal,
+  }
+}
+
 export const LARK_MODEL_PICKER_CONTROLS = Object.freeze({
   provider: 'model_provider',
   model: 'model_route',
@@ -556,6 +571,79 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
           level('auto', '帮我批准（auto）', '仅对检测到的风险操作请求批准'),
           level('full', '完全访问权限（full）', '不受限制地访问互联网和电脑上的任何文件，并关闭逐次审批'),
         ] },
+      }),
+    }
+  }
+  if ('modelSelectionResult' in input) {
+    const result = input.modelSelectionResult
+    const presentation = result.status === 'pending'
+      ? {
+          template: 'blue',
+          color: 'blue',
+          background: 'blue-50',
+          title: '模型选择已提交',
+          subtitle: '正在验证；验证成功后将从下一条消息生效，并保留当前上下文。',
+          summary: '模型选择已提交，正在验证中',
+        }
+      : result.status === 'selected'
+        ? {
+            template: 'green',
+            color: 'green',
+            background: 'green-50',
+            title: '模型切换成功',
+            subtitle: '已完成验证；下一条消息起生效，并保留当前上下文。',
+            summary: '模型切换成功',
+          }
+        : {
+            template: 'orange',
+            color: 'orange',
+            background: 'orange-50',
+            title: '模型切换未生效',
+            subtitle: result.explanation,
+            summary: '模型切换未生效',
+          }
+    const field = (label: string, value: string) => ({
+      tag: 'column',
+      width: 'weighted',
+      weight: 1,
+      background_style: presentation.background,
+      padding: '12px 12px 12px 12px',
+      direction: 'vertical',
+      vertical_spacing: '4px',
+      elements: [
+        { tag: 'markdown', content: `**<font color='${presentation.color}'>${label}</font>**`, text_align: 'left' },
+        { tag: 'div', text: { tag: 'plain_text', content: value } },
+      ],
+    })
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: {
+          compact_width: false,
+          update_multi: true,
+          enable_forward_interaction: false,
+          summary: { content: presentation.summary },
+        },
+        header: {
+          template: presentation.template,
+          title: { tag: 'plain_text', content: presentation.title },
+          subtitle: { tag: 'plain_text', content: presentation.subtitle },
+          icon: { tag: 'standard_icon', token: 'myai_colorful' },
+        },
+        body: {
+          padding: '12px 12px 16px 12px',
+          elements: [{
+            tag: 'column_set',
+            flex_mode: 'flow',
+            horizontal_spacing: '8px',
+            columns: [
+              field('Provider', result.provider),
+              field('模型', result.model),
+              field('Effort', result.effort),
+            ],
+          }],
+        },
       }),
     }
   }
@@ -995,6 +1083,30 @@ export class OfficialLarkTransport implements LarkTransport {
       if (error instanceof LarkTransportError) throw error
       const classified = classifyLarkSdkFailure(error)
       throw new LarkTransportError(classified.code, 'Lark progress update failed', classified.retryAfterMs)
+    }
+  }
+
+  async updateRawCard(
+    messageId: string,
+    card: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted || this.lifecycleController.signal.aborted) {
+      throw new LarkTransportError('not_connected', 'Lark card update was cancelled')
+    }
+    const combined = AbortSignal.any([signal, this.lifecycleController.signal])
+    try {
+      const response = await this.client.request<{ code?: number; msg?: string }>(
+        createLarkRawCardUpdateRequest(messageId, card, combined),
+      )
+      if (response.code !== undefined && response.code !== 0) {
+        throw providerError({ code: response.code, msg: response.msg })
+      }
+    } catch (error) {
+      if (error instanceof LarkTransportError) throw error
+      if (combined.aborted) throw new LarkTransportError('not_connected', 'Lark card update was cancelled')
+      const classified = classifyLarkSdkFailure(error)
+      throw new LarkTransportError(classified.code, 'Lark card update failed', classified.retryAfterMs)
     }
   }
 
