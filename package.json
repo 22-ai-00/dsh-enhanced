@@ -20,8 +20,8 @@
     "release:publish": "pnpm --recursive --filter './plugins/*' --filter './packages/*' publish --no-git-checks",
     "release:record": "node ./scripts/release-version.mjs record",
     "release:status": "node ./scripts/release-version.mjs status",
-    "test": "pnpm run build:packages && vitest run tests && pnpm --recursive --if-present run test",
-    "typecheck": "pnpm run build:packages && pnpm --recursive --if-present run typecheck",
+    "test": "pnpm run build && vitest run tests && pnpm --recursive --if-present run test",
+    "typecheck": "pnpm run build && pnpm --recursive --if-present run typecheck",
     "validate": "node ./scripts/validate-workspace.mjs"
   },
   "devDependencies": {

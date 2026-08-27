@@ -7,8 +7,8 @@
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
   "bin": {
-    "dsh-lark-setup": "./lib/setup.js",
-    "dsh-supervised-growth-setup": "./lib/supervised-growth-setup.js"
+    "dsh-lark-setup": "./bin/dsh-lark-setup.js",
+    "dsh-supervised-growth-setup": "./bin/dsh-supervised-growth-setup.js"
   },
   "exports": {
     ".": {
@@ -19,6 +19,7 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "bin",
     "lib",
     "cordis.patch.yml",
     "README.md",

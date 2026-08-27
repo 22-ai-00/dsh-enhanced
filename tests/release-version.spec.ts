@@ -653,8 +653,8 @@ describe('release version workflow', () => {
 
     expect(manifest.scripts['pack:check']).toContain("--filter './packages/*'")
     expect(manifest.scripts['release:publish']).toContain("--filter './packages/*'")
-    expect(manifest.scripts.test).toContain('pnpm run build:packages')
-    expect(manifest.scripts.typecheck).toContain('pnpm run build:packages')
+    expect(manifest.scripts.test).toMatch(/^pnpm run build &&/)
+    expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
   })
 
   test('status shows the recorded version and next default patch', async () => {
