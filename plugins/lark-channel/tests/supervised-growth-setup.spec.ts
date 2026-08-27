@@ -194,7 +194,7 @@ describe('supervised-growth setup guards', () => {
     await symlink(join(repoRoot, 'plugins', 'lark-channel'), join(nodeModules, '@dsh-enhanced', 'lark-channel'), 'dir')
     await mkdir(join(nodeModules, '.bin'))
     const binary = join(nodeModules, '.bin', 'dsh-supervised-growth-setup')
-    await symlink('../@dsh-enhanced/lark-channel/lib/supervised-growth-setup.js', binary, 'file')
+    await symlink('../@dsh-enhanced/lark-channel/bin/dsh-supervised-growth-setup.js', binary, 'file')
 
     const result = spawnSync(binary, ['--help'], {
       cwd: repoRoot,
