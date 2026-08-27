@@ -1,0 +1,63 @@
+  name: Release
+
+  on:
+    push:
+      tags: ['v*']
+
+  permissions:
+    contents: write
+
+  concurrency:
+    group: release-${{ github.ref }}
+    cancel-in-progress: false
+
+  jobs:
+    publish:
+      runs-on: ubuntu-latest
+      timeout-minutes: 20
+
+      steps:
+        - name: Check out main
+          uses: actions/checkout@v6
+          with:
+            ref: main
+            fetch-depth: 0
+
+        - name: Install pnpm
+          uses: pnpm/action-setup@v4
+          with:
+            version: 11.7.0
+            run_install: false
+
+        - name: Set up Node.js
+          uses: actions/setup-node@v6
+          with:
+            cache: pnpm
+            registry-url: https://registry.npmjs.org
+
+        - name: Install dependencies
+          run: pnpm install --frozen-lockfile
+
+        - name: Verify repository
+          run: pnpm check
+
+        - name: Publish packages
+          run: pnpm release:publish
+          env:
+            NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+        - name: Record release
+          run: pnpm release:record
+
+        - name: Commit release manifest
+          run: |
+            if git diff --quiet; then
+              echo "No manifest changes to commit."
+              exit 0
+            fi
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            version="${GITHUB_REF_NAME#v}"
+            git add -A
+            git commit -m "chore(release): record v${version}"
+            git push origin main
