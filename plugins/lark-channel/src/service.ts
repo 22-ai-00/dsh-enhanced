@@ -148,6 +148,7 @@ export class LarkChannelService extends Service {
       settleApproval: value => delivery.settleApproval(value),
       recoverApprovalSettlement: value => delivery.recoverApprovalSettlement(value),
       settleModelSelection: value => delivery.settleModelSelection(value),
+      awaitModelSelection: (value, signal) => delivery.awaitModelSelection(value, signal),
       settlePermissionSelection: value => delivery.settlePermissionSelection(value),
       loadModelPicker: value => delivery.getModelPickerForCallback(value),
       advanceModelPicker: value => delivery.advanceModelPickerForCallback(value),

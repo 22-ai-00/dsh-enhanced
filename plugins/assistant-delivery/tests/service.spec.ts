@@ -24,7 +24,13 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantDeliveryService, type DeliveryInboundRuntime } from '../src/service.ts'
 import { DeliveryStore } from '../src/store.ts'
-import type { ConversationBinding, ConversationRef, DeliveryAdapter, InboundEnvelope } from '../src/index.ts'
+import type {
+  ConversationBinding,
+  ConversationRef,
+  DeliveryAdapter,
+  InboundEnvelope,
+  ModelSelectionSettlementInput,
+} from '../src/index.ts'
 
 const roots: string[] = []
 
@@ -217,14 +223,8 @@ const conversation = { channel: 'lark', account: 'bot-1', tenant: 'tenant-a', ki
 const envelope: InboundEnvelope = { channel: 'lark', account: 'bot-1', eventId: 'evt-1', occurredAt: 1,
   principal, conversation, kind: 'text', text: 'hello' }
 
-function runtimeStoreFromService(service: AssistantDeliveryService) {
-  return (service as unknown as { deliveryStore: {
-    acceptInbound(input: InboundEnvelope): { duplicate: boolean; record: { id: string; status: string } }
-    getActiveBinding(input: ConversationRef): ConversationBinding | undefined
-    getInbox(id: string): { id: string; status: string; bindingId?: string; failureCode?: string } | undefined
-    getInboxByProviderEvent(channel: string, account: string, eventId: string):
-      { id: string; status: string; bindingId?: string; failureCode?: string } | undefined
-  } }).deliveryStore
+function runtimeStoreFromService(service: AssistantDeliveryService): DeliveryStore {
+  return (service as unknown as { deliveryStore: DeliveryStore }).deliveryStore
 }
 
 async function boundApprovalHarness(options: MountHarnessOptions & {
@@ -264,6 +264,66 @@ async function boundApprovalHarness(options: MountHarnessOptions & {
 }
 
 describe('assistant delivery Cordis service', () => {
+  test.each([
+    { label: 'selected', result: { status: 'selected' as const, selection: {
+      provider: 'alternate', model: 'precise', reasoningEffort: 'high',
+    } } },
+    { label: 'rejected', result: { status: 'rejected' as const, reason: 'model-unavailable' as const } },
+  ])('observes a durable $label settlement completed through another store connection', async ({ label, result }) => {
+    const { ctx, root, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const firstStore = runtimeStoreFromService(service)
+    const binding = firstStore.createBinding({
+      conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: `cross-instance-${label}`, policyRef: 'owner-dm',
+    })
+    const input: ModelSelectionSettlementInput = {
+      operationId: `picker-cross-instance-${label}`,
+      callbackEventId: `callback-cross-instance-${label}`,
+      callbackChatId: conversation.chat,
+      cardMessageId: `om_cross_instance_${label}`,
+      bindingId: binding.id,
+      principal,
+      provider: 'alternate',
+      modelProvider: 'alternate',
+      model: 'precise',
+      reasoningEffort: 'high',
+      expectedRevision: 0,
+    }
+    const expected = { revision: 0, provider: input.modelProvider, model: input.model, reasoningEffort: 'high' }
+    const payload = {
+      callbackEventId: input.callbackEventId, callbackChatId: input.callbackChatId,
+      cardMessageId: input.cardMessageId, bindingId: input.bindingId, principal: input.principal,
+      provider: input.provider, modelProvider: input.modelProvider, model: input.model,
+      reasoningEffort: input.reasoningEffort!, expectedRevision: input.expectedRevision,
+    }
+    firstStore.beginModelSelectionSettlement({
+      operationId: input.operationId, bindingId: binding.id, expected, payload,
+    })
+    const waited = service.awaitModelSelection(input, new AbortController().signal)
+    const secondStore = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    try {
+      const pending = secondStore.beginModelSelectionSettlement({
+        operationId: input.operationId, bindingId: binding.id, expected, payload,
+      })
+      secondStore.completeModelSelectionSettlement({
+        operationId: input.operationId, payloadHash: pending.payloadHash, result,
+        ...(result.status === 'selected' ? {
+          selection: { conversation, route: result.selection },
+          reply: {
+            idempotencyKey: `model-selection:${input.callbackEventId}:reply`,
+            bindingId: binding.id, target: { conversation, principal }, text: 'selected', format: 'plain' as const,
+          },
+        } : {}),
+      })
+      await expect(waited).resolves.toEqual(result)
+    } finally {
+      secondStore.close()
+      await ctx.fiber.restart()
+    }
+  })
+
   test('defaults external sessions to the shipped standard preset', () => {
     const config = AssistantDeliveryService.Config({
       databasePath: '/tmp/delivery.sqlite',

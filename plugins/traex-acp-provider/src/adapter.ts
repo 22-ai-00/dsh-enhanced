@@ -76,6 +76,7 @@ export interface AdapterDependencies {
   runText?: TraexAcpTextRunner
   discoverModels?: TraexAcpCatalogDiscoverer
   verifyAuth?: TraexAuthVerifier
+  /** Receives bounded stderr tails or fixed, credential-free adapter diagnostics. */
   onDiagnostic?: (diagnostic: string) => void
   /** Receives credential-free lifecycle facts once per invocation (success or failure); never affects the stream. */
   onSettled?: (context: RouteFailureContext) => void
@@ -98,6 +99,9 @@ const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
   jitterRatio: 0.1,
 })
 
+const CATALOG_FALLBACK_DIAGNOSTIC = 'TraeX model catalog refresh failed; using configured model aliases'
+const CATALOG_STDERR_DIAGNOSTIC = 'TraeX model catalog discovery wrote to stderr; content withheld'
+
 function ensureProvider(provider: string): void {
   if (provider !== TRAEX_PROVIDER_ROUTE) {
     throw new LlmError(`unknown TraeX ACP provider: ${provider}`, 'INVALID_PROVIDER')
@@ -105,7 +109,32 @@ function ensureProvider(provider: string): void {
 }
 
 function abortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error ? signal.reason : new Error('TraeX request aborted', { cause: 'abort' })
+  if (signal.reason instanceof Error) {
+    if (signal.reason.name === 'TimeoutError') {
+      return new Error('TraeX request timed out', { cause: 'timeout' })
+    }
+    if (signal.reason.name !== 'AbortError') return signal.reason
+  }
+  return new Error('TraeX request aborted', { cause: 'abort' })
+}
+
+/** Settle at the adapter boundary even if an injected dependency fails to observe cancellation. */
+function waitForAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortReason(signal))
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => { reject(abortReason(signal)) }
+    signal.addEventListener('abort', onAbort, { once: true })
+    void operation.then(
+      value => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      error => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 function connectorFailure(command: string, error: unknown): Error {
@@ -209,6 +238,7 @@ export class TraexAcpAdapter extends LlmAdapter {
   private readonly catalogCache: CatalogObservationCache
   private readonly liveSessions: LiveSessionLookup | undefined
   private readonly lifecycle = new AbortController()
+  private catalogRefreshInFlight: Promise<CatalogObservation | undefined> | undefined
 
   constructor(
     private readonly config: TraexAcpProviderConfig,
@@ -257,13 +287,57 @@ export class TraexAcpAdapter extends LlmAdapter {
 
   /** Record a non-authoritative catalog observation and forward it to any diagnostic sink. */
   private handleCatalogObserved(observation: CatalogObservation): void {
-    this.catalogCache.record(this.catalogKeyParts(), observation)
+    // An ignored/late transport callback must not resurrect state after provider unload.
+    if (this.lifecycle.signal.aborted) return
+    // A normal stream only observes the active model's reasoning selector. Do not let that partial
+    // view downgrade a still-live complete discovery result or renew its TTL. Once the complete
+    // entry expires, peek evicts it and a later partial observation may be recorded normally.
+    const existing = this.peekObservedCatalog()?.observation
+    if (existing?.completeReasoning !== true || observation.completeReasoning) {
+      this.catalogCache.record(this.catalogKeyParts(), observation)
+    }
     if (this.onCatalogObserved === undefined) return
     try {
       this.onCatalogObserved(observation)
     } catch {
       // A non-authoritative observation must never change model-call settlement.
     }
+  }
+
+  private reportDiagnostic(diagnostic: string): void {
+    if (this.onDiagnostic === undefined) return
+    try {
+      this.onDiagnostic(diagnostic)
+    } catch {
+      // A diagnostic sink must never change model listing or call settlement.
+    }
+  }
+
+  /**
+   * A cold model picker may issue several list calls at once. Share one prompt-free readiness
+   * probe so those callers do not start duplicate login checks or ACP discovery sessions.
+   */
+  private refreshCatalogForList(): Promise<CatalogObservation | undefined> {
+    const current = this.catalogRefreshInFlight
+    if (current !== undefined) return current
+
+    // Model pickers must never inherit the generation deadline (10 minutes by default). One short
+    // signal starts before auth and bounds auth + prompt-free ACP discovery as a whole. The same
+    // value is also wired into the transport's own timer so cancellation performs normal teardown.
+    const deadline = AbortSignal.timeout(this.config.authProbeTimeoutMs)
+    const signal = AbortSignal.any([this.lifecycle.signal, deadline])
+    const pending = this.probeReadinessWithin(signal, this.config.authProbeTimeoutMs)
+      .catch(() => {
+        // Never surface local auth/process details through `/model`, and never let a transient
+        // discovery failure hide the deployer's configured aliases. Shutdown is intentionally quiet.
+        if (!this.lifecycle.signal.aborted) this.reportDiagnostic(CATALOG_FALLBACK_DIAGNOSTIC)
+        return undefined
+      })
+    this.catalogRefreshInFlight = pending
+    void pending.then(() => {
+      if (this.catalogRefreshInFlight === pending) this.catalogRefreshInFlight = undefined
+    })
+    return pending
   }
 
   private reportSettled(context: RouteFailureContext): void {
@@ -306,26 +380,36 @@ export class TraexAcpAdapter extends LlmAdapter {
   }
 
   /**
-   * Explicit activation/readiness boundary.  Normal DSH catalog and resolution
-   * methods never call this because they do not carry a loop-owned session.
+   * Prompt-free readiness boundary used by activation checks and cold/stale model listing.
+   * It is intentionally restricted to login plus a read-only/no-approval ACP discovery session;
+   * model resolution remains process-free and real calls still require a loop-owned session.
    */
   async probeReadiness(signal: AbortSignal = this.lifecycle.signal): Promise<CatalogObservation> {
     const effectiveSignal = signal === this.lifecycle.signal
       ? signal
       : AbortSignal.any([signal, this.lifecycle.signal])
+    return this.probeReadinessWithin(effectiveSignal, this.config.timeoutMs)
+  }
+
+  private async probeReadinessWithin(
+    effectiveSignal: AbortSignal,
+    discoveryTimeoutMs: number,
+  ): Promise<CatalogObservation> {
     if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
-    const cached = this.peekObservedCatalog()?.observation
+    const cacheAtStart = this.peekObservedCatalog()
+    const cached = cacheAtStart?.observation
     if (cached?.completeReasoning === true) return cached
     try {
-      await this.verifyAuth({
+      await waitForAbort(this.verifyAuth({
         command: this.config.command,
         cwd: this.cwd,
         timeoutMs: this.config.authProbeTimeoutMs,
         maxOutputBytes: this.config.maxAuthProbeBytes,
         extraEnvNames: this.config.extraEnvNames,
         signal: effectiveSignal,
-      })
-      const catalog = await this.discoverModels({
+      }), effectiveSignal)
+      if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
+      const catalog = await waitForAbort(this.discoverModels({
         command: this.config.command,
         args: [
           '--sandbox',
@@ -337,7 +421,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         ],
         cwd: this.cwd,
       }, {
-        timeoutMs: this.config.timeoutMs,
+        timeoutMs: discoveryTimeoutMs,
         killGraceMs: this.config.killGraceMs,
         maxMessageBytes: this.config.maxMessageBytes,
         maxProtocolBytes: this.config.maxProtocolBytes,
@@ -345,20 +429,31 @@ export class TraexAcpAdapter extends LlmAdapter {
         maxOutputBytes: this.config.maxOutputBytes,
         maxStderrBytes: this.config.maxStderrBytes,
         extraEnvNames: this.config.extraEnvNames,
-        onDiagnostic: diagnostic => this.onDiagnostic?.(diagnostic),
+        // Directory discovery never forwards child stderr, even if bounded. Its contents may
+        // include credentials or identity; callers receive only this fixed diagnostic.
+        onDiagnostic: () => {
+          if (!effectiveSignal.aborted) this.reportDiagnostic(CATALOG_STDERR_DIAGNOSTIC)
+        },
         signal: effectiveSignal,
-      })
+      }), effectiveSignal)
+      if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
       this.handleCatalogObserved(catalog)
       return catalog
     } catch (error: unknown) {
-      this.catalogCache.invalidate(this.catalogKeyParts())
+      // Do not let a slower concurrent probe erase a newer successful observation.
+      if (this.peekObservedCatalog() === cacheAtStart) {
+        this.catalogCache.invalidate(this.catalogKeyParts())
+      }
       throw connectorFailure(this.config.command, error)
     }
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     ensureProvider(provider)
-    const catalog = this.peekObservedCatalog()?.observation
+    const cached = this.peekObservedCatalog()?.observation
+    const catalog = cached?.completeReasoning === true
+      ? cached
+      : await this.refreshCatalogForList()
     const active = catalog?.models.find(model => model.id === catalog.currentValue)
     const entries = new Map<string, LlmModelInfo>()
     for (const model of this.config.models) {
@@ -501,7 +596,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         maxStderrBytes: this.config.maxStderrBytes,
         extraEnvNames: this.config.extraEnvNames,
         onStopReason: reason => { terminal = reason },
-        onDiagnostic: diagnostic => this.onDiagnostic?.(diagnostic),
+        onDiagnostic: diagnostic => this.reportDiagnostic(redactDiagnostic(diagnostic)),
         onSettled: context => { transportContext = context },
         ...(authProbeDurationMs !== undefined ? { authProbeDurationMs } : {}),
         onCatalogObserved: observation => this.handleCatalogObserved(observation),
@@ -586,10 +681,11 @@ export class TraexAcpAdapter extends LlmAdapter {
   shutdown(): void {
     // A reload/unload drops every non-authoritative observation; a later run re-observes from a
     // fresh handshake, which is the only execution authority anyway.
-    this.catalogCache.clear()
     if (!this.lifecycle.signal.aborted) {
       this.lifecycle.abort(new Error('TraeX ACP provider unloaded', { cause: 'abort' }))
     }
+    this.catalogRefreshInFlight = undefined
+    this.catalogCache.clear()
   }
 }
 
@@ -600,9 +696,9 @@ export interface TraexReadinessProbeOptions {
 }
 
 /**
- * Explicit deployment activation probe.  This is the sole public static-cwd
- * exception: ordinary adapter list/resolve operations remain process-free and
- * a model stream must bind every other local subprocess to a live loop session.
+ * Explicit deployment activation probe. Model listing may use this same safe static-cwd,
+ * prompt-free boundary to populate its short-lived display cache; model resolution remains
+ * process-free and a real model stream must bind to a live loop session.
  */
 export async function probeTraexReadiness(
   config: TraexAcpProviderConfig,

@@ -10,6 +10,9 @@ import type {
   ModelPickerIntent,
   ModelPickerState,
   ModelRouteRef,
+  ModelSelectionResult,
+  ModelSelectionSettlementInput,
+  ModelSelectionTerminalResult,
   OutboundIntent,
   InboundImageReadInput,
 } from '@dsh-enhanced/assistant-delivery'
@@ -72,18 +75,11 @@ export interface LarkAdapterOptions {
   approvalSecret?: string
   settleApproval?(input: LarkApprovalSettlementInput): unknown | Promise<unknown>
   recoverApprovalSettlement?(input: LarkApprovalSettlementInput): unknown | undefined | Promise<unknown | undefined>
-  settleModelSelection?(input: {
-    operationId: string
-    callbackEventId: string
-    callbackChatId: string
-    bindingId: string
-    principal: { channel: string; account: string; tenant: string; user: string }
-    provider: string
-    modelProvider: string
-    model: string
-    reasoningEffort?: string
-    expectedRevision: number
-  }): unknown | Promise<unknown>
+  settleModelSelection?(input: ModelSelectionSettlementInput): ModelSelectionResult | Promise<ModelSelectionResult>
+  awaitModelSelection?(
+    input: ModelSelectionSettlementInput,
+    signal: AbortSignal,
+  ): ModelSelectionTerminalResult | undefined | Promise<ModelSelectionTerminalResult | undefined>
   settlePermissionSelection?(input: {
     operationId: string
     callbackEventId: string
@@ -102,12 +98,14 @@ export interface LarkAdapterOptions {
   loadModelPicker?(input: {
     operationId: string
     callbackChatId: string
+    cardMessageId: string
     bindingId: string
     principal: { channel: string; account: string; tenant: string; user: string }
   }): ModelPickerIntent | undefined | Promise<ModelPickerIntent | undefined>
   advanceModelPicker?(input: {
     operationId: string
     callbackChatId: string
+    cardMessageId: string
     bindingId: string
     principal: { channel: string; account: string; tenant: string; user: string }
     expected: ModelPickerState
@@ -347,8 +345,47 @@ function modelPickerCard(
   }
 }
 
-function callbackCard(card: import('./types.js').LarkModelPickerCard): Readonly<Record<string, unknown>> {
-  const rendered = renderLarkMessage({ modelPicker: card })
+function modelSelectionRejectionMessage(reason: Extract<ModelSelectionResult, { status: 'rejected' }>['reason']): string {
+  switch (reason) {
+    case 'authorization-revoked': return '当前账号或会话授权已失效，模型未切换。请重新发送 /model。'
+    case 'invalid-effort': return '所选 effort 当前不可用，模型未切换。请重新发送 /model。'
+    case 'model-unavailable': return '所选模型当前不可用，模型未切换。请重新发送 /model。'
+    case 'provider-model-mismatch': return '模型与 provider 不匹配，模型未切换。请重新发送 /model。'
+    case 'provider-unavailable': return '所选 provider 当前不可用，模型未切换。请重新发送 /model。'
+    case 'selection-superseded': return '该模型选择已被更晚的操作取代，未更改当前模型。'
+  }
+  return '模型切换未生效，请重新发送 /model。'
+}
+
+function modelSelectionResultCard(
+  result: ModelSelectionResult,
+  payload: Pick<LarkModelPickerActionPayload, 'provider' | 'model' | 'effort'>,
+  picker: Readonly<ModelPickerIntent> | undefined,
+): import('./types.js').LarkModelSelectionResultCard {
+  const route = result.status === 'selected'
+    ? { ...result.selection, effort: result.selection.reasoningEffort ?? null }
+    : payload
+  const provider = picker?.providers.find(value => value.id === route.provider)?.name ?? route.provider
+  const selectedModel = picker?.models.find(value =>
+    value.provider === route.provider && value.id === route.model)
+  const model = selectedModel?.name ?? route.model
+  const effort = route.effort === null
+    ? selectedModel?.effortIds.length === 0
+      ? '默认（该模型无 effort 档位）'
+      : '默认（由模型决定）'
+    : picker?.efforts.find(value => value.id === route.effort)?.name ?? route.effort
+  const routeCard = { provider, model, effort }
+  return result.status === 'rejected'
+    ? { status: 'rejected', explanation: modelSelectionRejectionMessage(result.reason), ...routeCard }
+    : { status: result.status, ...routeCard }
+}
+
+function callbackCard(input: import('./types.js').LarkSendInput): Readonly<Record<string, unknown>> {
+  return { card: { type: 'raw', data: rawCard(input) } }
+}
+
+function rawCard(input: import('./types.js').LarkSendInput): Readonly<Record<string, unknown>> {
+  const rendered = renderLarkMessage(input)
   if (rendered.msgType !== 'interactive') {
     throw new LarkModelPickerError('invalid', 'model picker callback did not render a card')
   }
@@ -356,7 +393,15 @@ function callbackCard(card: import('./types.js').LarkModelPickerCard): Readonly<
   if (value === null || typeof value !== 'object' || Array.isArray(value)) {
     throw new LarkModelPickerError('invalid', 'model picker callback card is invalid')
   }
-  return { card: { type: 'raw', data: value as Readonly<Record<string, unknown>> } }
+  return value as Readonly<Record<string, unknown>>
+}
+
+const MODEL_SELECTION_FINAL_UPDATE_TIMEOUT_MS = 120_000
+
+interface PendingModelSelectionUpdate {
+  readonly controller: AbortController
+  start?: ReturnType<typeof setImmediate>
+  deadline?: ReturnType<typeof setTimeout>
 }
 
 export class LarkDeliveryAdapter implements DeliveryAdapter {
@@ -369,6 +414,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly settleApproval: LarkAdapterOptions['settleApproval']
   private readonly recoverApprovalSettlement: LarkAdapterOptions['recoverApprovalSettlement']
   private readonly settleModelSelection: LarkAdapterOptions['settleModelSelection']
+  private readonly awaitModelSelection: LarkAdapterOptions['awaitModelSelection']
   private readonly settlePermissionSelection: LarkAdapterOptions['settlePermissionSelection']
   private readonly loadModelPicker: LarkAdapterOptions['loadModelPicker']
   private readonly advanceModelPicker: LarkAdapterOptions['advanceModelPicker']
@@ -376,6 +422,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly progressPresenter: LarkProgressPresenter
   private readonly pendingToolApprovals = new Map<string, PendingToolApproval>()
   private readonly toolApprovalTombstones = new Map<string, ToolApprovalTombstone>()
+  private readonly modelSelectionUpdates = new Map<string, PendingModelSelectionUpdate>()
   private state: LarkChannelHealth['state'] = 'disconnected'
   private gapGeneration = 0
   private lastErrorCode: LarkChannelHealth['lastErrorCode']
@@ -402,6 +449,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.settleApproval = options.settleApproval
     this.recoverApprovalSettlement = options.recoverApprovalSettlement
     this.settleModelSelection = options.settleModelSelection
+    this.awaitModelSelection = options.awaitModelSelection
     this.settlePermissionSelection = options.settlePermissionSelection
     this.loadModelPicker = options.loadModelPicker
     this.advanceModelPicker = options.advanceModelPicker
@@ -458,6 +506,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       unsubscribe()
       this.state = 'disconnected'
       this.cancelPendingToolApprovals('unavailable', true)
+      this.cancelModelSelectionUpdates()
       await this.transport.disconnect()
     }
   }
@@ -855,6 +904,67 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.lastErrorCode = error instanceof LarkTransportError ? error.code : 'unknown'
   }
 
+  private cancelModelSelectionUpdates(): void {
+    for (const pending of this.modelSelectionUpdates.values()) {
+      if (pending.start !== undefined) clearImmediate(pending.start)
+      if (pending.deadline !== undefined) clearTimeout(pending.deadline)
+      pending.controller.abort(new Error('lark-channel: model selection presentation stopped'))
+    }
+    this.modelSelectionUpdates.clear()
+  }
+
+  private startModelSelectionFinalUpdate(
+    input: ModelSelectionSettlementInput,
+    payload: Pick<LarkModelPickerActionPayload, 'provider' | 'model' | 'effort'>,
+    picker: Readonly<ModelPickerIntent> | undefined,
+  ): void {
+    const awaitModelSelection = this.awaitModelSelection
+    const updateRawCard = this.transport.updateRawCard?.bind(this.transport)
+    if (awaitModelSelection === undefined || updateRawCard === undefined
+      || this.modelSelectionUpdates.has(input.callbackEventId)) return
+    const controller = new AbortController()
+    const pending: PendingModelSelectionUpdate = { controller }
+    this.modelSelectionUpdates.set(input.callbackEventId, pending)
+    // Card callback ACKs are sent after this handler resolves. Start the
+    // independent PATCH lifecycle in the next macrotask, then serialize the
+    // pending and terminal replacements on one chain so provider-side request
+    // reordering cannot restore the pending card over the terminal result.
+    pending.start = setImmediate(() => {
+      delete pending.start
+      if (controller.signal.aborted || this.modelSelectionUpdates.get(input.callbackEventId) !== pending) return
+      pending.deadline = setTimeout(() => {
+        controller.abort(new Error('lark-channel: model selection final update timed out'))
+      }, MODEL_SELECTION_FINAL_UPDATE_TIMEOUT_MS)
+      pending.deadline.unref?.()
+      void updateRawCard(input.cardMessageId, rawCard({
+        modelSelectionResult: modelSelectionResultCard({ status: 'pending' }, payload, picker),
+      }), controller.signal)
+        .catch(error => {
+          if (!controller.signal.aborted) this.recordPresentationFailure(error)
+        })
+        .then(async () => {
+          if (controller.signal.aborted) return undefined
+          return await awaitModelSelection(input, controller.signal)
+        })
+        .then(async result => {
+          if (result === undefined || controller.signal.aborted) return
+          await updateRawCard(input.cardMessageId, rawCard({
+            modelSelectionResult: modelSelectionResultCard(result, payload, picker),
+          }), controller.signal)
+        })
+        .catch(error => {
+          if (!controller.signal.aborted) this.recordPresentationFailure(error)
+        })
+        .finally(() => {
+          if (pending.deadline !== undefined) clearTimeout(pending.deadline)
+          if (this.modelSelectionUpdates.get(input.callbackEventId) === pending) {
+            this.modelSelectionUpdates.delete(input.callbackEventId)
+          }
+        })
+    })
+    pending.start.unref?.()
+  }
+
   private async handleCardAction(action: import('./types.js').LarkCardAction): Promise<unknown> {
     try {
       const value = action.value
@@ -1020,7 +1130,8 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     action: import('./types.js').LarkCardAction,
     callback: LarkModelPickerCallbackValue,
   ): Promise<unknown> {
-    if (this.approvalSecret === undefined || this.settleModelSelection === undefined) {
+    if (this.approvalSecret === undefined || this.settleModelSelection === undefined
+      || !larkProviderMessageIdentifier.test(action.messageId)) {
       throw new LarkModelPickerError('invalid', 'Lark model picker callback is unavailable')
     }
     const token = callback.modelPicker
@@ -1040,6 +1151,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         picker = await this.loadModelPicker({
           operationId: payload.operationId,
           callbackChatId: action.chatId,
+          cardMessageId: action.messageId,
           bindingId: payload.bindingId,
           principal: { channel: 'lark', account: this.account, tenant: this.config.tenant, user: action.operatorId },
         })
@@ -1095,6 +1207,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         advanced = await this.advanceModelPicker({
           operationId: payload.operationId,
           callbackChatId: action.chatId,
+          cardMessageId: action.messageId,
           bindingId: payload.bindingId,
           principal: { channel: 'lark', account: this.account, tenant: this.config.tenant, user: action.operatorId },
           expected: { revision: payload.revision, provider: payload.provider, model: payload.model,
@@ -1106,13 +1219,13 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         return { toast: { type: 'warning', content: '模型选择已结束，请重新发送 /model' } }
       }
       const state = advanced.state
-      return callbackCard(modelPickerCard(picker, this.approvalSecret, {
+      return callbackCard({ modelPicker: modelPickerCard(picker, this.approvalSecret, {
         ...capability, revision: state.revision,
       }, {
         provider: state.provider,
         route: `${state.provider}/${state.model}`,
         effort: state.reasoningEffort ?? null,
-      }))
+      }) })
     }
     if (action.tag !== 'button') {
       throw new LarkModelPickerError('invalid', 'Lark model picker confirmation action is invalid')
@@ -1121,10 +1234,11 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       .update(`${action.messageId}\0${action.operatorId}\0${token}`)
       .digest('hex')
     try {
-      await this.settleModelSelection({
+      const settlementInput: ModelSelectionSettlementInput = {
         operationId: payload.operationId,
         callbackEventId,
         callbackChatId: action.chatId,
+        cardMessageId: action.messageId,
         bindingId: payload.bindingId,
         principal: { channel: 'lark', account: this.account, tenant: this.config.tenant, user: action.operatorId },
         provider: payload.provider,
@@ -1132,8 +1246,40 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         model: payload.model,
         expectedRevision: payload.revision,
         ...(payload.effort === null ? {} : { reasoningEffort: payload.effort }),
-      })
-      return { toast: { type: 'success', content: '模型切换已受理' } }
+      }
+      const settlement = await this.settleModelSelection(settlementInput)
+      let picker: ModelPickerIntent | undefined
+      if (this.loadModelPicker !== undefined) {
+        try {
+          picker = await this.loadModelPicker({
+            operationId: payload.operationId,
+            callbackChatId: action.chatId,
+            cardMessageId: action.messageId,
+            bindingId: payload.bindingId,
+            principal: {
+              channel: 'lark',
+              account: this.account,
+              tenant: this.config.tenant,
+              user: action.operatorId,
+            },
+          })
+        } catch {
+          // Settlement already succeeded. Catalog labels are optional presentation data,
+          // so keep the ACK successful and render the signed IDs instead.
+        }
+      }
+      if (settlement.status === 'pending') {
+        this.startModelSelectionFinalUpdate(settlementInput, payload, picker)
+      }
+      if (settlement.status === 'pending') {
+        return { toast: { type: 'info', content: '模型选择已提交，正在验证' } }
+      }
+      return {
+        toast: settlement.status === 'selected'
+          ? { type: 'success', content: '模型已切换' }
+          : { type: 'warning', content: '模型切换未生效' },
+        ...callbackCard({ modelSelectionResult: modelSelectionResultCard(settlement, payload, picker) }),
+      }
     } catch (error) {
       this.recordPresentationFailure(error)
       return { toast: { type: 'warning', content: '卡片状态已更新，请重新发送 /model' } }

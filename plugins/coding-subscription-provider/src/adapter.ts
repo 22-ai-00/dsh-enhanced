@@ -123,10 +123,14 @@ export interface AdapterDependencies {
   onSettled?: (context: RouteFailureContext) => void
   /** Host-owned live session lookup used to bind local process cwd to a loop request. */
   liveSessions?: LiveSessionLookup
+  /** Injectable monotonic-enough wall clock for deterministic catalog-cache tests. */
+  now?: () => number
 }
 
 const CATALOG_TTL_MS = 5 * 60_000
+const CATALOG_STDERR_DIAGNOSTIC = 'model catalog probe wrote to stderr; content withheld'
 type NonCodexProvider = Exclude<ProviderId, 'codex'>
+type ModelCatalog = CodexCatalog | SubscriptionCatalog
 
 const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
   mode: 'normal',
@@ -359,12 +363,14 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
   private readonly onDiagnostic: AdapterDependencies['onDiagnostic']
   private readonly onSettled: AdapterDependencies['onSettled']
   private readonly liveSessions: LiveSessionLookup | undefined
+  private readonly now: () => number
   private readonly lifecycle = new AbortController()
   private codexCatalogCache: { readonly catalog: CodexCatalog; readonly expiresAt: number } | undefined
   private readonly subscriptionCatalogCache = new Map<NonCodexProvider, {
     readonly catalog: SubscriptionCatalog
     readonly expiresAt: number
   }>()
+  private readonly catalogRefreshes = new Map<ProviderId, Promise<ModelCatalog>>()
 
   constructor(
     private readonly config: CodingSubscriptionProviderConfig,
@@ -384,6 +390,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     this.onDiagnostic = dependencies.onDiagnostic
     this.onSettled = dependencies.onSettled
     this.liveSessions = dependencies.liveSessions
+    this.now = dependencies.now ?? Date.now
   }
 
   private trustedCwd(request: GenerateOptions): string {
@@ -415,22 +422,21 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
 
   private peekCodexCatalog(): CodexCatalog | undefined {
     const cached = this.codexCatalogCache
-    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.catalog
+    if (cached !== undefined && cached.expiresAt > this.now()) return cached.catalog
     this.codexCatalogCache = undefined
     return undefined
   }
 
   private peekSubscriptionCatalog(provider: NonCodexProvider): SubscriptionCatalog | undefined {
     const cached = this.subscriptionCatalogCache.get(provider)
-    if (cached !== undefined && cached.expiresAt > Date.now()) return cached.catalog
+    if (cached !== undefined && cached.expiresAt > this.now()) return cached.catalog
     this.subscriptionCatalogCache.delete(provider)
     return undefined
   }
 
   /**
-   * Observe the advisory CLI catalog only after stream has bound this operation to a
-   * canonical live-session cwd.  The caller owns the auth probe and must revalidate
-   * the session immediately before crossing this subprocess boundary.
+   * Observe the advisory Codex CLI catalog with bounded, prompt-free control-plane I/O.
+   * Authentication is owned by `refreshCatalog`; this method only performs discovery.
    */
   private async observeCodexCatalog(cwd: string, signal: AbortSignal): Promise<CodexCatalog> {
     if (signal.aborted) throw abortReason(signal)
@@ -447,9 +453,16 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         maxOutputBytes: this.config.maxOutputBytes,
         maxStderrBytes: this.config.maxStderrBytes,
         extraEnvNames: this.config.extraEnvNames,
-        onDiagnostic: diagnostic => this.onDiagnostic?.(definition.route, diagnostic),
+        onDiagnostic: () => {
+          try {
+            this.onDiagnostic?.(definition.route, CATALOG_STDERR_DIAGNOSTIC)
+          } catch {
+            // A diagnostic sink must never affect catalog discovery.
+          }
+        },
       })
-      this.codexCatalogCache = { catalog, expiresAt: Date.now() + CATALOG_TTL_MS }
+      if (signal.aborted) throw abortReason(signal)
+      this.codexCatalogCache = { catalog, expiresAt: this.now() + CATALOG_TTL_MS }
       return catalog
     } catch (error: unknown) {
       this.codexCatalogCache = undefined
@@ -478,7 +491,8 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         maxOutputBytes: this.config.maxAuthProbeBytes,
         extraEnvNames: this.config.extraEnvNames,
       })
-      this.subscriptionCatalogCache.set(provider, { catalog, expiresAt: Date.now() + CATALOG_TTL_MS })
+      if (signal.aborted) throw abortReason(signal)
+      this.subscriptionCatalogCache.set(provider, { catalog, expiresAt: this.now() + CATALOG_TTL_MS })
       return catalog
     } catch (error: unknown) {
       this.subscriptionCatalogCache.delete(provider)
@@ -492,17 +506,73 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
       : this.peekSubscriptionCatalog(provider)
   }
 
-  private observeCatalog(provider: ProviderId, cwd: string, signal: AbortSignal): Promise<CodexCatalog | SubscriptionCatalog> {
+  private observeCatalog(provider: ProviderId, cwd: string, signal: AbortSignal): Promise<ModelCatalog> {
     return provider === 'codex'
       ? this.observeCodexCatalog(cwd, signal)
       : this.observeSubscriptionCatalog(provider, cwd, signal)
+  }
+
+  /**
+   * Refresh one CLI catalog after the existing subscription-auth gate. Concurrent
+   * list callers share the complete auth + discovery operation, so a cold picker
+   * cannot fan out local probes. Generation never enters or waits on this path.
+   */
+  private refreshCatalog(
+    provider: ProviderId,
+    cwd: string,
+  ): Promise<ModelCatalog> {
+    const refreshSignal = this.lifecycle.signal
+    if (refreshSignal.aborted) return Promise.reject(abortReason(refreshSignal))
+    const cached = this.observedCatalog(provider)
+    if (cached !== undefined) return Promise.resolve(cached)
+    const active = this.catalogRefreshes.get(provider)
+    if (active !== undefined) return active
+
+    const profile = configForProvider(this.config, provider)
+    let refresh!: Promise<ModelCatalog>
+    refresh = (async () => {
+      await this.verifyAuth(provider, {
+        command: profile.command,
+        cwd,
+        timeoutMs: this.config.authProbeTimeoutMs,
+        maxOutputBytes: this.config.maxAuthProbeBytes,
+        extraEnvNames: this.config.extraEnvNames,
+        signal: refreshSignal,
+        ...(provider === 'grok'
+          ? { userVerifiedSubscription: this.config.grok.userVerifiedSubscription }
+          : {}),
+      })
+      if (refreshSignal.aborted) throw abortReason(refreshSignal)
+      return this.observeCatalog(provider, cwd, refreshSignal)
+    })().finally(() => {
+      if (this.catalogRefreshes.get(provider) === refresh) this.catalogRefreshes.delete(provider)
+    })
+    this.catalogRefreshes.set(provider, refresh)
+    return refresh
+  }
+
+  private reportCatalogRefreshFailure(definition: RouteDefinition, error: unknown): void {
+    if (this.lifecycle.signal.aborted) return
+    const diagnostic = `model catalog refresh failed; outcome=${outcomeFor(error)}; using configured models`
+    try {
+      this.onDiagnostic?.(definition.route, diagnostic)
+    } catch {
+      // A diagnostic sink must never turn advisory catalog failure into listModels failure.
+    }
   }
 
   override async listModels(provider: string): Promise<readonly LlmModelInfo[]> {
     const definition = definitionFor(provider)
     const profile = configForProvider(this.config, definition.cli)
     const directCodex = definition.cli === 'codex' && this.config.codex.transport === 'direct-responses'
-    const catalog = directCodex ? undefined : this.observedCatalog(definition.cli)
+    let catalog: ModelCatalog | undefined
+    if (!directCodex && !this.lifecycle.signal.aborted) {
+      try {
+        catalog = await this.refreshCatalog(definition.cli, this.cwd)
+      } catch (error: unknown) {
+        this.reportCatalogRefreshFailure(definition, error)
+      }
+    }
     const attachments = directCodex ? this.getAttachments() : undefined
     const inputModalities: LlmModelInfo['inputModalities'] = directCodex && attachments !== undefined
       ? ['text', 'image']
@@ -615,11 +685,9 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
       if (directCodex) {
         const timeoutSignal = AbortSignal.timeout(this.config.timeoutMs)
         const directSignal = AbortSignal.any([signal, timeoutSignal])
-        phase = 'stream'
         try {
           // Revalidate immediately before the first credential/file/network seam.
           this.trustedCwd(options)
-          promptSubmissionState = 'unknown'
           // `maxTokens` is a host-local Agent Loop budget. The private Codex
           // request has no max_output_tokens field, so do not hand this hint to
           // the direct runner (which deliberately rejects unsupported controls).
@@ -632,7 +700,11 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
           }
           const attachments = this.getAttachments()
           const chunks = this.runCodexDirect(directOptions, {
-            request: (body, requestSignal) => this.codexCredentials.requestResponses(body, requestSignal),
+            request: (body, requestSignal) => {
+              phase = 'stream'
+              promptSubmissionState = 'unknown'
+              return this.codexCredentials.requestResponses(body, requestSignal)
+            },
             maxRequestBytes: this.config.codex.maxRequestBytes,
             maxRequestImageBytes: this.config.codex.maxRequestImageBytes,
             ...(attachments === undefined ? {} : { attachments }),
@@ -699,13 +771,12 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         throw cliFailure(definition, profile.command, error)
       }
 
-      // Dynamic model metadata remains advisory, but discovering it is still local
-      // process authority.  Bind the discovery to the live canonical session cwd and
-      // recheck after auth so a stale/replaced session cannot reach the catalog process.
+      // Revalidate the authority boundary after auth so a stale/replaced session
+      // cannot reach the generation process. Catalog discovery belongs exclusively
+      // to listModels and never delays a generation request.
       phase = 'preflight'
       try {
         cwd = this.trustedCwd(options)
-        await this.observeCatalog(definition.cli, cwd, signal)
       } catch (error: unknown) {
         outcome = outcomeFor(error)
         throw cliFailure(definition, profile.command, error)
@@ -717,7 +788,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         maxOutputBytes: this.config.maxOutputBytes,
         maxStderrBytes: this.config.maxStderrBytes,
         extraEnvNames: this.config.extraEnvNames,
-        onDiagnostic: diagnostic => this.onDiagnostic?.(definition.route, diagnostic),
+        onDiagnostic: diagnostic => this.onDiagnostic?.(definition.route, redactDiagnostic(diagnostic)),
         onSettled: context => { transportContext = context },
         signal,
       }
@@ -754,11 +825,12 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
 
   /** Abort every active/future subprocess when the owning Cordis fiber unloads. */
   shutdown(): void {
-    this.codexCatalogCache = undefined
-    this.subscriptionCatalogCache.clear()
     if (!this.lifecycle.signal.aborted) {
       this.lifecycle.abort(new Error('coding subscription provider unloaded', { cause: 'abort' }))
     }
+    this.codexCatalogCache = undefined
+    this.subscriptionCatalogCache.clear()
+    this.catalogRefreshes.clear()
   }
 }
 

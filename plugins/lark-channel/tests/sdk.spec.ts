@@ -4,6 +4,7 @@ import { describe, expect, test, vi } from 'vitest'
 import {
   classifyLarkSdkFailure,
   classifyLarkImageSdkFailure,
+  createLarkRawCardUpdateRequest,
   createLarkImageResourceRequest,
   createLarkProgressRequest,
   larkRequestUuid,
@@ -13,15 +14,14 @@ import {
   toSafeLarkMessage,
   writeLarkProgressRequest,
 } from '../src/sdk.ts'
+import type { LarkModelSelectionResultCard } from '../src/types.ts'
 
-/** The picker nests each control in its own container, so element lookups walk the whole tree. */
-function cardElements(elements: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
-  return elements.flatMap(element => {
-    const nested = element.elements
-    return Array.isArray(nested)
-      ? [element, ...cardElements(nested as Array<Record<string, unknown>>)]
-      : [element]
-  })
+/** Walk every Card 2.0 container so readonly assertions cannot miss nested controls. */
+function cardElements(value: unknown): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) return value.flatMap(cardElements)
+  if (value === null || typeof value !== 'object') return []
+  const record = value as Record<string, unknown>
+  return [record, ...Object.values(record).flatMap(cardElements)]
 }
 
 async function settleBeforeTestDeadline<T>(promise: Promise<T>, timeoutMs = 250): Promise<T> {
@@ -657,6 +657,70 @@ describe('Lark SDK boundary', () => {
     expect(confirm).not.toHaveProperty('form_name')
   })
 
+  test.each([
+    {
+      status: 'pending' as const, template: 'blue', title: '模型选择已提交', summary: '模型选择已提交，正在验证中',
+      subtitle: '正在验证；验证成功后将从下一条消息生效，并保留当前上下文。',
+    },
+    {
+      status: 'selected' as const, template: 'green', title: '模型切换成功', summary: '模型切换成功',
+      subtitle: '已完成验证；下一条消息起生效，并保留当前上下文。',
+    },
+    {
+      status: 'rejected' as const, template: 'orange', title: '模型切换未生效', summary: '模型切换未生效',
+      subtitle: '所选模型当前不可用，模型未切换。请重新发送 /model。',
+    },
+  ])('renders a read-only $status model selection result', ({ status, template, title, summary, subtitle }) => {
+    const modelSelectionResult: LarkModelSelectionResultCard = status === 'rejected' ? {
+      status, provider: 'Claude', model: 'Opus', effort: 'High', explanation: subtitle,
+    } : {
+      status,
+      provider: 'Claude',
+      model: 'Opus',
+      effort: 'High',
+    }
+    const rendered = renderLarkMessage({ modelSelectionResult })
+    expect(rendered.msgType).toBe('interactive')
+    const card = JSON.parse(rendered.content) as {
+      schema: string
+      config: {
+        compact_width: boolean
+        update_multi: boolean
+        enable_forward_interaction: boolean
+        summary: { content: string }
+      }
+      header: {
+        template: string
+        title: { tag: string; content: string }
+        subtitle: { tag: string; content: string }
+      }
+      body: { elements: Array<Record<string, unknown>> }
+    }
+    expect(card.schema).toBe('2.0')
+    expect(card.config).toEqual({
+      compact_width: false,
+      update_multi: true,
+      enable_forward_interaction: false,
+      summary: { content: summary },
+    })
+    expect(card.header).toMatchObject({
+      template,
+      title: { tag: 'plain_text', content: title },
+      subtitle: { tag: 'plain_text', content: subtitle },
+    })
+    const serialized = JSON.stringify(card)
+    expect(serialized).toContain('Claude')
+    expect(serialized).toContain('Opus')
+    expect(serialized).toContain('High')
+    const tags = cardElements(card).map(element => element.tag)
+    expect(tags).not.toContain('select_static')
+    expect(tags).not.toContain('button')
+    expect(tags).not.toContain('form')
+    expect(serialized).not.toContain('"behaviors"')
+    expect(serialized).not.toContain('"value"')
+    expect(serialized).not.toContain('"callback"')
+  })
+
   test('preselects the current option by index because Lark matches initial_option on the label', () => {
     const select = (initialModel: string | undefined) => {
       const rendered = renderLarkMessage({ modelPicker: {
@@ -748,6 +812,63 @@ describe('Lark SDK boundary', () => {
         }],
       },
     })
+  })
+
+  test('updates the exact original message with a raw Card 2.0 payload', async () => {
+    const signal = new AbortController().signal
+    const card = { schema: '2.0', header: { title: { tag: 'plain_text', content: 'done' } } }
+    expect(createLarkRawCardUpdateRequest('om_original', card, signal)).toEqual({
+      method: 'PATCH',
+      url: '/open-apis/im/v1/messages/om_original',
+      data: { content: JSON.stringify(card) },
+      signal,
+    })
+    expect(() => createLarkRawCardUpdateRequest('../copied', card, signal)).toThrow(/identifier/i)
+
+    const request = vi.spyOn(Client.prototype, 'request').mockResolvedValue({ code: 0 })
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000,
+    })
+    try {
+      await expect(transport.updateRawCard('om_original', card, signal)).resolves.toBeUndefined()
+      const requestInput = request.mock.calls[0]![0] as {
+        method: string
+        url: string
+        data: { content: string }
+        signal: AbortSignal
+      }
+      expect(requestInput).toMatchObject({
+        method: 'PATCH', url: '/open-apis/im/v1/messages/om_original',
+        data: { content: JSON.stringify(card) },
+      })
+      expect(requestInput.signal.aborted).toBe(false)
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
+  })
+
+  test('maps card update failures to fixed errors and cancels after disconnect', async () => {
+    const request = vi.spyOn(Client.prototype, 'request').mockRejectedValue(
+      Object.assign(new Error('provider secret detail'), { response: { status: 403 } }),
+    )
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000,
+    })
+    const card = { schema: '2.0' }
+    try {
+      await expect(transport.updateRawCard('om_original', card, new AbortController().signal))
+        .rejects.toMatchObject({ code: 'permission_denied', message: 'Lark card update failed' })
+      await transport.disconnect()
+      await expect(transport.updateRawCard('om_original', card, new AbortController().signal))
+        .rejects.toMatchObject({ code: 'not_connected', message: 'Lark card update was cancelled' })
+      expect(request).toHaveBeenCalledOnce()
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
   })
 
   test('classifies only demonstrably unsent failures as retryable/permanent', () => {

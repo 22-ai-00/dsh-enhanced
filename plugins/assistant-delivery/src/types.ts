@@ -189,6 +189,36 @@ export interface ModelPickerEffort {
   name: string
 }
 
+export type ModelSelectionRejectionReason =
+  | 'authorization-revoked'
+  | 'invalid-effort'
+  | 'model-unavailable'
+  | 'provider-model-mismatch'
+  | 'provider-unavailable'
+  | 'selection-superseded'
+
+export type ModelSelectionResult =
+  | { status: 'pending' }
+  | { status: 'rejected'; reason: ModelSelectionRejectionReason }
+  | { status: 'selected'; selection: ModelRouteRef }
+
+export type ModelSelectionTerminalResult = Exclude<ModelSelectionResult, { status: 'pending' }>
+
+/** Exact, replay-safe identity for one durable model-picker confirmation. */
+export interface ModelSelectionSettlementInput {
+  operationId: string
+  callbackEventId: string
+  callbackChatId: string
+  cardMessageId: string
+  bindingId: string
+  principal: ExternalPrincipalKey
+  provider: string
+  modelProvider: string
+  model: string
+  reasoningEffort?: string
+  expectedRevision: number
+}
+
 export type OutboxStatus =
   | 'accepted'
   | 'attempting'

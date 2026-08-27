@@ -59,6 +59,17 @@ export interface LarkModelPickerCard {
   callbackValues: Readonly<Record<'confirm' | 'effort' | 'model' | 'provider', { modelPicker: string }>>
 }
 
+interface LarkModelSelectionRoute {
+  provider: string
+  model: string
+  effort: string
+}
+
+export type LarkModelSelectionResultCard =
+  | ({ status: 'pending' } & LarkModelSelectionRoute)
+  | ({ status: 'selected' } & LarkModelSelectionRoute)
+  | ({ status: 'rejected'; explanation: string } & LarkModelSelectionRoute)
+
 export type LarkPermissionLevel = 'ask' | 'auto' | 'full'
 
 export interface LarkPermissionPickerCard {
@@ -77,6 +88,7 @@ export type LarkSendInput =
   | { approval: LarkApprovalCard }
   | { markdown: string }
   | { modelPicker: LarkModelPickerCard }
+  | { modelSelectionResult: LarkModelSelectionResultCard }
   | { permissionPicker: LarkPermissionPickerCard }
   | { text: string }
   | { toolApproval: LarkToolApprovalCard }
@@ -155,6 +167,12 @@ export interface LarkTransport {
   addReaction(messageId: string, emojiType: string): Promise<string>
   createProgress(chatId: string, options: { replyTo: string; hidden: boolean }): Promise<LarkProgressHandle>
   writeProgress(handle: LarkProgressHandle, events: readonly LarkProgressEvent[]): Promise<void>
+  /** Replace the exact bot-authored card message. Presentation failure must not affect durable state. */
+  updateRawCard?(
+    messageId: string,
+    card: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+  ): Promise<void>
   downloadMessageImage?(
     messageId: string,
     fileKey: string,

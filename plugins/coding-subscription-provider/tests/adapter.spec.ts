@@ -224,9 +224,9 @@ describe('coding subscription LLM adapter', () => {
     }
   })
 
-  it.each(['resolveModel', 'listModels'] as const)(
-    'keeps the prepareCall %s path process-free before a mismatched workspace is rejected',
-    async operation => {
+  it(
+    'keeps the prepareCall resolveModel path process-free before a mismatched workspace is rejected',
+    async () => {
       const root = await mkdtemp(join(tmpdir(), 'coding-subscription-prepare-cwd-'))
       try {
         const workspace = join(root, 'workspace')
@@ -249,40 +249,27 @@ describe('coding subscription LLM adapter', () => {
         } as never)
 
         // dsh-agent-loop calls resolveModel from prepareCall before it creates the
-        // loop-owned GenerateOptions passed to stream.  listModels is another
-        // control-plane read that must have the same no-process property.
-        let preparedStream: ((options: GenerateOptions) => AsyncIterable<unknown>) | undefined
-        let runtimeContext: Context | undefined
-        if (operation === 'resolveModel') {
-          runtimeContext = new Context()
-          await runtimeContext.plugin(LlmRuntime)
-          runtimeContext.llm.registerAdapter(['codex-subscription'], adapter)
-          const prepared = await runtimeContext.llm.prepareCall({
-            provider: 'codex-subscription',
-            model: 'default',
-          })
-          preparedStream = prepared.stream
-        } else {
-          await adapter.listModels('codex-subscription')
-        }
+        // loop-owned GenerateOptions passed to stream. It must remain process-free.
+        const runtimeContext = new Context()
+        await runtimeContext.plugin(LlmRuntime)
+        runtimeContext.llm.registerAdapter(['codex-subscription'], adapter)
+        const prepared = await runtimeContext.llm.prepareCall({
+          provider: 'codex-subscription',
+          model: 'default',
+        })
         const options = markAgentLoopRequest(deepFreeze({
           ...request(),
           sessionId: TEST_SESSION_ID,
         }))
-        const stream = preparedStream === undefined ? adapter.stream(options) : preparedStream(options)
-        const first = stream[Symbol.asyncIterator]().next()
-        if (preparedStream === undefined) {
-          await expect(first).rejects.toMatchObject({ failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } })
-        } else {
-          await expect(first).resolves.toMatchObject({
-            value: { type: 'finish', reason: { kind: 'error', failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } } },
-          })
-        }
+        const first = prepared.stream(options)[Symbol.asyncIterator]().next()
+        await expect(first).resolves.toMatchObject({
+          value: { type: 'finish', reason: { kind: 'error', failure: { code: 'LOCAL_SESSION_CWD_REQUIRED' } } },
+        })
 
         expect(verifyAuth).not.toHaveBeenCalled()
         expect(discoverCodexModels).not.toHaveBeenCalled()
         expect(runText).not.toHaveBeenCalled()
-        await runtimeContext?.fiber.dispose()
+        await runtimeContext.fiber.dispose()
       } finally {
         await rm(root, { recursive: true, force: true })
       }
@@ -294,7 +281,7 @@ describe('coding subscription LLM adapter', () => {
     'claude-subscription',
     'cursor-subscription',
     'grok-subscription',
-  ] as const)('keeps ordinary list/resolve reads process-free for %s', async provider => {
+  ] as const)('refreshes the cold %s catalog while keeping resolveModel process-free', async provider => {
     const verifyAuth = vi.fn(async () => {})
     const discoverCodexModels = vi.fn(async () => configuredCatalog(['codex-live']))
     const discoverClaudeModels = vi.fn(async () => configuredCatalog(['claude-live']))
@@ -308,13 +295,24 @@ describe('coding subscription LLM adapter', () => {
       discoverGrokModels,
     })
 
-    await adapter.listModels(provider)
+    const listed = await adapter.listModels(provider)
+    const callsAfterList = [
+      discoverCodexModels.mock.calls.length,
+      discoverClaudeModels.mock.calls.length,
+      discoverCursorModels.mock.calls.length,
+      discoverGrokModels.mock.calls.length,
+    ]
     await adapter.resolveModel(provider, 'default')
 
-    expect(verifyAuth).not.toHaveBeenCalled()
-    for (const discover of [discoverCodexModels, discoverClaudeModels, discoverCursorModels, discoverGrokModels]) {
-      expect(discover).not.toHaveBeenCalled()
-    }
+    expect(listed.map(model => model.id)).toContain(provider.replace('-subscription', '-live'))
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(callsAfterList.reduce((sum, count) => sum + count, 0)).toBe(1)
+    expect([
+      discoverCodexModels.mock.calls.length,
+      discoverClaudeModels.mock.calls.length,
+      discoverCursorModels.mock.calls.length,
+      discoverGrokModels.mock.calls.length,
+    ]).toEqual(callsAfterList)
   })
 
   it('passes the canonical live-session cwd to both auth and the CLI runner', async () => {
@@ -377,17 +375,42 @@ describe('coding subscription LLM adapter', () => {
       ],
       observedAt: 1,
     }))
+    const verifyAuth = vi.fn(async () => {})
+    const order: string[] = []
+    verifyAuth.mockImplementation(async () => { order.push('auth') })
+    discoverCodexModels.mockImplementation(async () => {
+      order.push('discover')
+      return {
+        defaultModel: 'gpt-5.6-sol',
+        models: [
+          {
+            id: 'gpt-5.6-sol',
+            name: 'GPT-5.6-Sol',
+            description: 'Latest frontier agentic coding model.',
+            reasoning: {
+              efforts: [{ id: 'low', name: 'Low' }, { id: 'ultra', name: 'Ultra' }],
+              defaultEffort: 'low',
+            },
+            inputModalities: ['text', 'image'],
+          },
+          {
+            id: 'gpt-5.6-luna',
+            name: 'GPT-5.6-Luna',
+            reasoning: {
+              efforts: [{ id: 'low', name: 'Low' }, { id: 'high', name: 'High' }],
+              defaultEffort: 'high',
+            },
+            inputModalities: ['text', 'image'],
+          },
+        ],
+        observedAt: 1,
+      }
+    })
     const adapter = new CodingSubscriptionAdapter(Config(), {
-      verifyAuth: async () => {},
+      verifyAuth,
       discoverCodexModels,
-      runText: () => (async function* () { yield 'observed' })(),
     } as never)
 
-    await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
-      expect.objectContaining({ provider: 'codex-subscription', id: 'default', inputModalities: ['text'] }),
-    ])
-    expect(discoverCodexModels).not.toHaveBeenCalled()
-    for await (const _chunk of adapter.stream(request())) { /* observe the session-bound catalog */ }
     await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
       expect.objectContaining({ provider: 'codex-subscription', id: 'default', inputModalities: ['text'] }),
       expect.objectContaining({ provider: 'codex-subscription', id: 'gpt-5.6-sol', name: 'GPT-5.6-Sol' }),
@@ -401,7 +424,166 @@ describe('coding subscription LLM adapter', () => {
       },
     })
     expect(discoverCodexModels).toHaveBeenCalledTimes(1)
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    expect(order).toEqual(['auth', 'discover'])
     expect(adapter.providerRetryPolicy('codex-subscription')).toMatchObject({ mode: 'normal', maxRetries: 0 })
+  })
+
+  it('deduplicates concurrent cold listModels refreshes', async () => {
+    let resolveCatalog!: (catalog: ReturnType<typeof configuredCatalog>) => void
+    const pendingCatalog = new Promise<ReturnType<typeof configuredCatalog>>(resolve => {
+      resolveCatalog = resolve
+    })
+    const verifyAuth = vi.fn(async () => {})
+    const discoverCodexModels = vi.fn(async () => pendingCatalog)
+    const adapter = new CodingSubscriptionAdapter(Config(), { verifyAuth, discoverCodexModels })
+
+    const first = adapter.listModels('codex-subscription')
+    const second = adapter.listModels('codex-subscription')
+    await vi.waitFor(() => expect(discoverCodexModels).toHaveBeenCalledTimes(1))
+    expect(verifyAuth).toHaveBeenCalledTimes(1)
+    resolveCatalog(configuredCatalog(['codex-live']))
+
+    const [firstModels, secondModels] = await Promise.all([first, second])
+    expect(firstModels.map(model => model.id)).toContain('codex-live')
+    expect(secondModels.map(model => model.id)).toContain('codex-live')
+    expect(discoverCodexModels).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not make a stream wait for an in-flight listModels refresh', async () => {
+    let resolveCatalog!: (catalog: ReturnType<typeof configuredCatalog>) => void
+    const pendingCatalog = new Promise<ReturnType<typeof configuredCatalog>>(resolve => {
+      resolveCatalog = resolve
+    })
+    const discoverCodexModels = vi.fn(async () => pendingCatalog)
+    const verifyAuth = vi.fn(async () => {})
+    const runText = vi.fn(() => (async function* () { yield 'generated without catalog' })())
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth,
+      discoverCodexModels,
+      runText,
+    })
+    const listed = adapter.listModels('codex-subscription')
+    await vi.waitFor(() => expect(discoverCodexModels).toHaveBeenCalledOnce())
+    const chunks = []
+    for await (const chunk of adapter.stream(request())) chunks.push(chunk)
+
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(runText).toHaveBeenCalledOnce()
+    expect(discoverCodexModels).toHaveBeenCalledOnce()
+    resolveCatalog(configuredCatalog(['codex-live']))
+    await expect(listed).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'codex-live' }),
+    ]))
+    expect(verifyAuth).toHaveBeenCalledTimes(2)
+  })
+
+  it('never starts catalog discovery for concurrent cold streams with different signals', async () => {
+    const discoverCodexModels = vi.fn(async () => new Promise<never>(() => {}))
+    const verifyAuth = vi.fn(async () => {})
+    const runText = vi.fn(() => (async function* () { yield 'generated' })())
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth,
+      discoverCodexModels,
+      runText,
+    })
+    const firstController = new AbortController()
+    const secondController = new AbortController()
+    const drain = async (signal: AbortSignal): Promise<void> => {
+      for await (const _chunk of adapter.stream({ ...request(), signal })) { /* drain */ }
+    }
+
+    await Promise.all([drain(firstController.signal), drain(secondController.signal)])
+
+    expect(discoverCodexModels).not.toHaveBeenCalled()
+    expect(verifyAuth).toHaveBeenCalledTimes(2)
+    expect(runText).toHaveBeenCalledTimes(2)
+  })
+
+  it('refreshes an expired catalog and reuses it before the five-minute TTL', async () => {
+    let now = 1_000
+    const verifyAuth = vi.fn(async () => {})
+    const discoverCodexModels = vi.fn()
+      .mockResolvedValueOnce(configuredCatalog(['codex-v1']))
+      .mockResolvedValueOnce(configuredCatalog(['codex-v2']))
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth,
+      discoverCodexModels,
+      now: () => now,
+    })
+
+    await expect(adapter.listModels('codex-subscription'))
+      .resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'codex-v1' })]))
+    now += 5 * 60_000 - 1
+    await expect(adapter.listModels('codex-subscription'))
+      .resolves.toEqual(expect.arrayContaining([expect.objectContaining({ id: 'codex-v1' })]))
+    now += 1
+    const refreshed = await adapter.listModels('codex-subscription')
+
+    expect(refreshed.map(model => model.id)).toContain('codex-v2')
+    expect(refreshed.map(model => model.id)).not.toContain('codex-v1')
+    expect(verifyAuth).toHaveBeenCalledTimes(2)
+    expect(discoverCodexModels).toHaveBeenCalledTimes(2)
+  })
+
+  it('falls back to configured models and emits a credential-free diagnostic when refresh fails', async () => {
+    const secret = 'sk-super-secret-catalog-value'
+    const diagnostics: string[] = []
+    const config = Config({ codex: { models: ['default', 'configured-model'] } } as never)
+    const adapter = new CodingSubscriptionAdapter(config, {
+      verifyAuth: async () => {},
+      discoverCodexModels: async () => {
+        throw new Error(`failed with ${secret}`)
+      },
+      onDiagnostic: (_route, diagnostic) => { diagnostics.push(diagnostic) },
+    })
+
+    await expect(adapter.listModels('codex-subscription')).resolves.toEqual([
+      expect.objectContaining({ id: 'default' }),
+      expect.objectContaining({ id: 'configured-model' }),
+    ])
+    expect(diagnostics).toEqual(['model catalog refresh failed; outcome=io; using configured models'])
+    expect(diagnostics.join(' ')).not.toContain(secret)
+  })
+
+  it('never forwards raw catalog stderr to the diagnostic sink', async () => {
+    const secret = 'arbitrary-business-secret-that-is-not-pattern-redactable'
+    const diagnostics: string[] = []
+    const discoverCodexModels = vi.fn(async (_invocation, options) => {
+      options?.onDiagnostic?.(`catalog stderr contained ${secret}`)
+      return configuredCatalog(['codex-live'])
+    })
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth: async () => {},
+      discoverCodexModels,
+      onDiagnostic: (_route, diagnostic) => { diagnostics.push(diagnostic) },
+    })
+
+    await expect(adapter.listModels('codex-subscription')).resolves.toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'codex-live' }),
+    ]))
+    expect(diagnostics).toEqual(['model catalog probe wrote to stderr; content withheld'])
+    expect(diagnostics.join(' ')).not.toContain(secret)
+  })
+
+  it('does not invoke advisory catalog discovery from a cold generation path', async () => {
+    const diagnostics: string[] = []
+    const discoverCodexModels = vi.fn(async () => { throw new Error('must not run') })
+    const runText = vi.fn(() => (async function* () { yield 'generated without catalog' })())
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth: async () => {},
+      discoverCodexModels,
+      runText,
+      onDiagnostic: (_route, diagnostic) => { diagnostics.push(diagnostic) },
+    })
+    const chunks = []
+
+    for await (const chunk of adapter.stream(request())) chunks.push(chunk)
+
+    expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+    expect(runText).toHaveBeenCalledOnce()
+    expect(discoverCodexModels).not.toHaveBeenCalled()
+    expect(diagnostics).toEqual([])
   })
 
   it('exposes configured direct reasoning on a cold prepareCall and materializes its default without I/O', async () => {
@@ -576,11 +758,6 @@ describe('coding subscription LLM adapter', () => {
       runText: () => (async function* () { yield 'observed' })(),
     } as never)
 
-    await expect(adapter.listModels(route)).resolves.toEqual([
-      expect.objectContaining({ id: 'default' }),
-    ])
-    expect(discover).not.toHaveBeenCalled()
-    for await (const _chunk of adapter.stream(providerRequest(route))) { /* observe the session-bound catalog */ }
     await expect(adapter.listModels(route)).resolves.toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'default' }),
       expect.objectContaining({ id: model }),
@@ -805,13 +982,41 @@ describe('coding subscription LLM adapter', () => {
   it('continues to reject an explicit direct temperature before the request seam', async () => {
     const config = Config({ codex: { transport: 'direct-responses' } } as never)
     const requestResponses = vi.fn(async () => new Response('never'))
+    let context: { phase?: string; promptSubmissionState?: string; teardownState?: string } | undefined
     const adapter = new CodingSubscriptionAdapter(config, {
       codexCredentials: { requestResponses },
+      onSettled: value => { context = value },
     })
 
     await expect(adapter.stream({ ...request(), temperature: 0 })[Symbol.asyncIterator]().next())
       .rejects.toMatchObject({ failure: { code: 'CLI_PROTOCOL_ERROR' } })
     expect(requestResponses).not.toHaveBeenCalled()
+    expect(context).toMatchObject({
+      phase: 'preflight',
+      promptSubmissionState: 'not-submitted',
+      teardownState: 'not-started',
+    })
+  })
+
+  it('advances direct lifecycle state when the credential request seam starts', async () => {
+    const config = Config({ codex: { transport: 'direct-responses' } } as never)
+    let context: { phase?: string; promptSubmissionState?: string; assistantTextForwarded?: boolean } | undefined
+    const requestResponses = vi.fn(async () => {
+      throw new CodexDirectAuthError('request seam failed', 'transport')
+    })
+    const adapter = new CodingSubscriptionAdapter(config, {
+      codexCredentials: { requestResponses },
+      onSettled: value => { context = value },
+    })
+
+    await expect(adapter.stream(request())[Symbol.asyncIterator]().next())
+      .rejects.toMatchObject({ failure: { code: 'CODEX_DIRECT_TRANSPORT_ERROR' } })
+    expect(requestResponses).toHaveBeenCalledOnce()
+    expect(context).toMatchObject({
+      phase: 'stream',
+      promptSubmissionState: 'unknown',
+      assistantTextForwarded: false,
+    })
   })
 
   it.each([
@@ -966,6 +1171,28 @@ describe('coding subscription LLM adapter', () => {
     expect(redacted).not.toContain('someone@example.com')
   })
 
+  it('redacts normal CLI diagnostics at the adapter sink boundary', async () => {
+    const raw = 'Authorization: Bearer abc123 token=xai-secret sk-adaptersecret someone@example.com'
+    const diagnostics: string[] = []
+    const runText = vi.fn((_invocation: CliInvocation, options?: RunCliTextOptions) => (async function* () {
+      options?.onDiagnostic?.(raw)
+      yield 'ok'
+    })())
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText,
+      verifyAuth: async () => {},
+      onDiagnostic: (_route, diagnostic) => { diagnostics.push(diagnostic) },
+    })
+
+    for await (const _chunk of adapter.stream(request())) { /* drain */ }
+
+    expect(diagnostics).toHaveLength(1)
+    expect(diagnostics[0]).not.toContain('abc123')
+    expect(diagnostics[0]).not.toContain('xai-secret')
+    expect(diagnostics[0]).not.toContain('sk-adaptersecret')
+    expect(diagnostics[0]).not.toContain('someone@example.com')
+  })
+
   it('propagates adapter shutdown into every active runner', async () => {
     let receivedSignal: AbortSignal | undefined
     const runText = (_invocation: CliInvocation, options?: { signal?: AbortSignal }) => {
@@ -984,6 +1211,34 @@ describe('coding subscription LLM adapter', () => {
     adapter.shutdown()
     await expect(pending).rejects.toThrow('stopped')
     expect(receivedSignal?.aborted).toBe(true)
+  })
+
+  it('aborts and clears an in-flight catalog refresh on shutdown', async () => {
+    let receivedSignal: AbortSignal | undefined
+    const discoverCodexModels = vi.fn((_invocation, options) => {
+      receivedSignal = options?.signal
+      return new Promise<never>((_resolve, reject) => {
+        receivedSignal?.addEventListener(
+          'abort',
+          () => reject(new Error('catalog stopped', { cause: 'abort' })),
+          { once: true },
+        )
+      })
+    })
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      verifyAuth: async () => {},
+      discoverCodexModels,
+    })
+    const pending = adapter.listModels('codex-subscription')
+    await vi.waitFor(() => expect(discoverCodexModels).toHaveBeenCalledOnce())
+
+    adapter.shutdown()
+
+    await expect(pending).resolves.toEqual([expect.objectContaining({ id: 'default' })])
+    expect(receivedSignal?.aborted).toBe(true)
+    await expect(adapter.listModels('codex-subscription'))
+      .resolves.toEqual([expect.objectContaining({ id: 'default' })])
+    expect(discoverCodexModels).toHaveBeenCalledOnce()
   })
 
   it('fails before spawning a model process when subscription auth is not verified', async () => {

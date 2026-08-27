@@ -2255,14 +2255,27 @@ export class DeliveryStore {
   }
 
   getModelPicker(operationId: string, bindingId: string): ModelPickerIntent | undefined {
+    return this.getModelPickerRecord(operationId, bindingId)?.intent.modelPicker
+  }
+
+  getModelPickerRecord(operationId: string, bindingId: string): OutboxRecord | undefined {
     this.assertOpen()
     const operation = validateBindingText(operationId, 'operationId', 256)
-    const binding = validateBindingText(bindingId, 'bindingId', 256)
+    const bindingKey = validateBindingText(bindingId, 'bindingId', 256)
     const row = this.database.prepare(`${outboxSelect}
-      WHERE json_extract(intent_json, '$.bindingId') = ?
+      WHERE binding_id = ? AND json_valid(intent_json)
         AND json_extract(intent_json, '$.modelPicker.operationId') = ?
-      ORDER BY created_at DESC, id DESC LIMIT 1`).get(binding, operation) as OutboxRow | undefined
-    return row === undefined ? undefined : outboxFromRow(row).intent.modelPicker
+      ORDER BY created_at DESC, id DESC LIMIT 1`).get(bindingKey, operation) as OutboxRow | undefined
+    if (row === undefined) return undefined
+    const binding = this.getBinding(bindingKey)
+    if (binding === undefined) throw new DeliveryStoreError('invalid-intent', 'model picker binding does not exist')
+    const record = outboxFromRow(row)
+    const intent = canonicalIntent(record.intent, binding, this.maxTextBytes)
+    if (intent.format !== 'model-picker' || intent.modelPicker?.operationId !== operation
+      || digest(JSON.stringify(intent)) !== record.intentHash) {
+      throw new DeliveryStoreError('invalid-intent', 'persisted model picker intent is invalid')
+    }
+    return { ...record, intent }
   }
 
   getPermissionPicker(operationId: string, bindingId: string): PermissionPickerIntent | undefined {
@@ -2918,6 +2931,35 @@ export class DeliveryStore {
         payloadHash, payloadJson, now, now)
       return { payloadHash, replayed: false, status: 'pending' as const }
     })
+  }
+
+  getModelSelectionSettlement(input: {
+    operationId: string
+    bindingId: string
+    expected: ModelPickerState
+    payload: unknown
+  }): { status: 'completed' | 'pending' | 'processing'; result?: unknown } | undefined {
+    this.assertOpen()
+    const operationId = validateBindingText(input.operationId, 'operationId', 512)
+    const bindingId = validateBindingText(input.bindingId, 'bindingId', 256)
+    const expected = canonicalModelPickerState(input.expected)
+    const payloadJson = JSON.stringify({ bindingId, expected, payload: input.payload })
+    if (payloadJson === undefined || payloadJson.length > 16_384) {
+      throw new DeliveryStoreError('conflict', 'model selection settlement payload is invalid or too large')
+    }
+    const row = this.database.prepare(`
+      SELECT binding_id, payload_hash, status, result_json
+      FROM model_selection_settlements WHERE operation_id = ?
+    `).get(operationId) as Pick<ModelSelectionSettlementRow,
+      'binding_id' | 'payload_hash' | 'status' | 'result_json'> | undefined
+    if (row === undefined) return undefined
+    if (row.binding_id !== bindingId || row.payload_hash !== digest(payloadJson)) {
+      throw new DeliveryStoreError('idempotency-conflict', 'model selection operation was reused with a different payload')
+    }
+    return {
+      status: row.status,
+      ...(row.result_json === null ? {} : { result: JSON.parse(row.result_json) as unknown }),
+    }
   }
 
   claimModelSelectionSettlements(input: {
