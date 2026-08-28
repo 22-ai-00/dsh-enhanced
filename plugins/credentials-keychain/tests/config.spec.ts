@@ -31,6 +31,15 @@ describe('credentials-keychain configuration', () => {
       path: 'C:\\Users\\test\\.dsh\\credentials-keychain\\lark-primary.clixml',
       consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
     }])
+    expect(normalizeHandles([{
+      id: 'linux-file', provider: 'linux-protected-file',
+      path: '/home/test/.dsh/credentials-keychain/lark-web-primary.secret',
+      consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
+    }])).toEqual([{
+      id: 'linux-file', provider: 'linux-protected-file',
+      path: '/home/test/.dsh/credentials-keychain/lark-web-primary.secret',
+      consumers: ['dsh-enhanced-lark-channel'], purposes: ['connect'], maxLeaseMs: 3_600_000,
+    }])
     for (const value of [
       { id: 'x', provider: 'environment', environmentName: 'LARK_SECRET', consumers: ['p'], purposes: ['use'],
         maxLeaseMs: 1_000, value: 'secret' },
@@ -40,6 +49,12 @@ describe('credentials-keychain configuration', () => {
         maxLeaseMs: 1_000 },
       { id: 'x', provider: 'windows-dpapi', path: 'relative.clixml', consumers: ['p'], purposes: ['use'],
         maxLeaseMs: 1_000 },
+      { id: 'x', provider: 'linux-protected-file', path: 'relative.secret', consumers: ['p'], purposes: ['use'],
+        maxLeaseMs: 1_000 },
+      { id: 'x', provider: 'linux-protected-file', path: '/private/../escaped.secret',
+        consumers: ['p'], purposes: ['use'], maxLeaseMs: 1_000 },
+      { id: 'x', provider: 'linux-protected-file', path: '/private/secret', consumers: ['p'], purposes: ['use'],
+        maxLeaseMs: 1_000, service: 'forbidden' },
     ]) expect(() => normalizeHandles([value as never])).toThrow()
   })
 

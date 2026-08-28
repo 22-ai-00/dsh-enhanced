@@ -1,9 +1,11 @@
 import { describe, expect, test } from 'vitest'
 import { spawn } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { chmod, mkdir, mkdtemp, readFile, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { PassThrough } from 'node:stream'
 import { pathToFileURL } from 'node:url'
 import * as lark from '../src/index.ts'
 
@@ -88,7 +90,7 @@ function configuredLarkProfile(input: {
   profile?: string
   version?: string
   agentTools?: 'disable' | 'enable'
-  credentialProvider?: 'macos-keychain' | 'linux-secret-service'
+  credentialProvider?: 'linux-protected-file' | 'macos-keychain' | 'linux-secret-service'
 }): string {
   const profile = input.profile ?? 'web'
   const version = input.version ?? '22222222222222222222222222222222'
@@ -103,6 +105,10 @@ function configuredLarkProfile(input: {
     keychainService: `dsh/lark/${profile}/primary/versions/${version}`,
     keychainAccount: 'primary',
     credentialProvider: input.credentialProvider ?? 'macos-keychain',
+    ...(input.credentialProvider === 'linux-protected-file'
+      ? { credentialPath: join(input.dshHome, 'credentials-keychain',
+        `lark-${profile}-primary-${version}.secret`) }
+      : {}),
     agentTools: input.agentTools ?? 'disable',
   })
 }
@@ -125,6 +131,18 @@ function inheritedLarkEffectiveProfile(input: {
     credentialProvider: 'macos-keychain',
     agentTools: 'preserve',
   }))
+}
+
+function linuxSecretServiceUnavailable(): unknown {
+  try {
+    lark.assertLinuxSecretServiceAvailable({
+      environment: {},
+      executableAvailable: () => false,
+    })
+  } catch (error) {
+    return error
+  }
+  throw new Error('expected Linux Secret Service preflight to fail')
 }
 
 describe('Lark onboarding wizard inputs', () => {
@@ -508,6 +526,53 @@ setInterval(() => {}, 1000)`,
 
     expect(pairCalls).toBe(0)
     expect(removed).toHaveLength(1)
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('does not remove a protected-file path when exclusive creation reports a collision', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-protected-transaction-collision-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = baseAssistantProfile(dshHome, databasePath)
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    const sentinel = 'existing-sentinel-must-survive'
+    let collisionPath = ''
+    let removeCalls = 0
+
+    await expect(executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'linux-protected-file',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() { return asEffectiveProfile(readFileSync(patchPath, 'utf8')) },
+        async storeCredential(locator) {
+          if (locator.provider !== 'linux-protected-file') throw new Error('unexpected credential provider')
+          collisionPath = locator.path
+          await mkdir(dirname(collisionPath), { recursive: true, mode: 0o700 })
+          await writeFile(collisionPath, sentinel, { encoding: 'utf8', mode: 0o600 })
+          throw Object.assign(new Error('exclusive credential creation failed'), { code: 'EEXIST' })
+        },
+        readCredential() { throw new Error('must not read a colliding credential') },
+        discoverOwner() { throw new Error('must not discover an owner after a credential collision') },
+        removeCredential() { removeCalls += 1 },
+      },
+    })).rejects.toThrow(/protected credential path collision/iu)
+
+    expect(removeCalls).toBe(0)
+    expect(await readFile(collisionPath, 'utf8')).toBe(sentinel)
     expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
     await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
@@ -1208,6 +1273,7 @@ setInterval(() => {}, 1000)`,
       ) => Promise<void>
       await run(['--profile', 'web', '--install-service'], {
         profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+        prepareResidentService() {},
         validateProfile() { validated = readFileSync(patchPath, 'utf8') },
         readEffectiveProfile() {
           return effectiveDeliveryProfile(join(dshHome, 'assistant-delivery/state.sqlite'))
@@ -1227,6 +1293,92 @@ setInterval(() => {}, 1000)`,
     expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
     await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
       .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('install-service finishes a paired protected-file migration with unavailable old Secret Service', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-install-paired-protected-recovery-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = configuredLarkProfile({
+      dshHome,
+      databasePath,
+      ownerUserId: 'ou_original',
+      credentialProvider: 'linux-secret-service',
+      version: '11111111111111111111111111111111',
+    })
+    const updatedPatch = configuredLarkProfile({
+      dshHome,
+      databasePath,
+      ownerUserId: 'ou_new',
+      credentialProvider: 'linux-protected-file',
+      version: '22222222222222222222222222222222',
+    })
+    await writeFile(patchPath, updatedPatch, 'utf8')
+    const { createVersionedCredentialLocator, persistLarkSetupJournal } = await import('../src/setup.ts')
+    const stagedCredential = createVersionedCredentialLocator({
+      provider: 'linux-protected-file',
+      dshHome,
+      profile: 'web',
+      account: 'primary',
+      version: '22222222222222222222222222222222',
+    })
+    const previousCredential = createVersionedCredentialLocator({
+      provider: 'linux-secret-service',
+      dshHome,
+      profile: 'web',
+      account: 'primary',
+      version: '11111111111111111111111111111111',
+    })
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'paired',
+      originalPatch,
+      updatedPatch,
+      databasePath,
+      account: 'primary',
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      stagedCredential,
+      previousCredential,
+      installService: true,
+    })
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    let installCalls = 0
+    try {
+      const run = lark.runLarkSetup as unknown as (
+        argv: readonly string[],
+        runtime: Record<string, unknown>,
+      ) => Promise<void>
+      await run(['--profile', 'web', '--install-service'], {
+        profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+        prepareResidentService() {},
+        validateProfile() {},
+        readEffectiveProfile() { return asEffectiveProfile(readFileSync(patchPath, 'utf8')) },
+        journalOperations: {
+          pairPrincipal() {},
+          removeCredential() { throw linuxSecretServiceUnavailable() },
+        },
+        installResidentService() {
+          installCalls += 1
+          return { kind: 'systemd', statusCommand: 'status', logCommand: 'log' }
+        },
+      })
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+
+    expect(installCalls).toBeGreaterThanOrEqual(1)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(`${patchPath}.lark-credential-cleanup.json`, 'utf8')))
+      .toMatchObject({ locators: [previousCredential] })
   })
 
   test('recovers an abandoned candidate before refresh reads the profile snapshot', async () => {
@@ -1363,11 +1515,17 @@ setInterval(() => {}, 1000)`,
     try {
       const run = lark.runLarkSetup as unknown as (
         argv: readonly string[],
-        runtime: { profileLockOptions: { timeoutMs: number; pollMs: number; staleMs: number; heartbeatMs: number } },
+        runtime: {
+          profileLockOptions: { timeoutMs: number; pollMs: number; staleMs: number; heartbeatMs: number }
+          prepareResidentService: () => void
+        },
       ) => Promise<void>
       await expect(run(
         ['--profile', 'web', '--install-service'],
-        { profileLockOptions: { timeoutMs: 30, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 } },
+        {
+          profileLockOptions: { timeoutMs: 30, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 },
+          prepareResidentService() {},
+        },
       )).rejects.toThrow(/another setup.*profile/iu)
       expect(await readFile(patchPath, 'utf8')).toBe('active-profile\n')
     } finally {
@@ -1379,6 +1537,7 @@ setInterval(() => {}, 1000)`,
   })
 
   test.each([
+    'linux-protected-file',
     'macos-keychain',
     'linux-secret-service',
     'windows-dpapi',
@@ -1402,8 +1561,9 @@ setInterval(() => {}, 1000)`,
 
     expect(second).not.toEqual(first)
     expect(JSON.stringify(second)).not.toContain('generated-secret-value')
-    if (provider === 'windows-dpapi') {
+    if (provider === 'windows-dpapi' || provider === 'linux-protected-file') {
       expect(second).toMatchObject({ provider, path: expect.stringContaining('22222222222222222222222222222222') })
+      expect((second as { path: string }).path).toMatch(provider === 'windows-dpapi' ? /\.clixml$/u : /\.secret$/u)
     } else {
       expect(second).toMatchObject({
         provider,
@@ -1411,6 +1571,178 @@ setInterval(() => {}, 1000)`,
         account: 'primary',
       })
     }
+  })
+
+  test('moves an unavailable abandoned Secret Service staging locator aside and lets headless setup continue', async () => {
+    const { createVersionedCredentialLocator, persistLarkSetupJournal } = await import('../src/setup.ts')
+    const root = await mkdtemp(join(tmpdir(), 'lark-headless-staging-recovery-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const originalPatch = baseAssistantProfile(dshHome, join(dshHome, 'assistant-delivery/state.sqlite'))
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const staged = createVersionedCredentialLocator({
+      provider: 'linux-secret-service',
+      dshHome,
+      profile: 'web',
+      account: 'primary',
+      version: '11111111111111111111111111111111',
+    })
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'staging',
+      originalPatch,
+      databasePath: join(dshHome, 'assistant-delivery/state.sqlite'),
+      account: 'primary',
+      stagedCredential: staged,
+      installService: false,
+    })
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    try {
+      await expect(lark.runLarkSetup([
+        '--profile', 'web', '--app-id', 'cli_0123456789abcdef', '--no-service',
+      ], {
+        preflightCredentialProvider() { return 'linux-protected-file' },
+        journalOperations: {
+          removeCredential() { throw linuxSecretServiceUnavailable() },
+        },
+        readEffectiveProfile() { throw new Error('advanced beyond abandoned staging recovery') },
+      })).rejects.toThrow('advanced beyond abandoned staging recovery')
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+    const cleanupPath = `${patchPath}.lark-credential-cleanup.json`
+    expect(JSON.parse(await readFile(cleanupPath, 'utf8'))).toMatchObject({
+      version: 1,
+      locators: [staged],
+    })
+
+    const removed: unknown[] = []
+    await expect(lark.retryDeferredLarkCredentialCleanup({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      removeCredential(locator) { removed.push(locator) },
+    })).resolves.toBe(0)
+    expect(removed).toEqual([staged])
+    await expect(readFile(cleanupPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('never defers cleanup for a Secret Service locator still referenced by the live profile', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-active-cleanup-debt-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = configuredLarkProfile({
+      dshHome,
+      databasePath,
+      credentialProvider: 'linux-secret-service',
+      version: '11111111111111111111111111111111',
+    })
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const { createVersionedCredentialLocator, persistLarkSetupJournal, recoverLarkSetupJournal } = await import('../src/setup.ts')
+    const staged = createVersionedCredentialLocator({
+      provider: 'linux-secret-service',
+      dshHome,
+      profile: 'web',
+      account: 'primary',
+      version: '11111111111111111111111111111111',
+    })
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'staging',
+      originalPatch,
+      databasePath,
+      account: 'primary',
+      stagedCredential: staged,
+      installService: false,
+    })
+
+    await expect(recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      allowDeferredSecretServiceCleanup: true,
+      operations: {
+        removeCredential() { throw linuxSecretServiceUnavailable() },
+      },
+    })).rejects.toThrow(/still referenced/iu)
+    expect(JSON.parse(await readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')))
+      .toMatchObject({ phase: 'staging', stagedCredential: staged })
+    await expect(readFile(`${patchPath}.lark-credential-cleanup.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('finishes a Secret Service to protected-file migration in one transaction when old cleanup is unavailable', async () => {
+    const { executeLarkSetupProfileTransaction, findManagedLarkCredentialLocator } = await import('../src/setup.ts')
+    const root = await mkdtemp(join(tmpdir(), 'lark-headless-provider-migration-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = configuredLarkProfile({
+      dshHome,
+      databasePath,
+      ownerUserId: 'ou_original',
+      credentialProvider: 'linux-secret-service',
+      version: '11111111111111111111111111111111',
+    })
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--disable-agent-tools',
+    ])
+    const events: string[] = []
+
+    await executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'linux-protected-file',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() { return asEffectiveProfile(readFileSync(patchPath, 'utf8')) },
+        storeCredential(locator) {
+          expect(locator).toMatchObject({ provider: 'linux-protected-file', path: expect.stringMatching(/\.secret$/u) })
+          events.push('stored')
+        },
+        readCredential() { return 'candidate-secret' },
+        discoverOwner() {
+          return { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' }
+        },
+        validateProfile() { events.push('validated') },
+        pairPrincipal() { events.push('paired') },
+        removeCredential(locator) {
+          expect(locator).toMatchObject({ provider: 'linux-secret-service' })
+          throw linuxSecretServiceUnavailable()
+        },
+        afterCommit() { events.push('resident-installed') },
+      },
+    })
+
+    expect(events).toEqual(['stored', 'validated', 'paired', 'resident-installed'])
+    expect(findManagedLarkCredentialLocator({ profilePatch: await readFile(patchPath, 'utf8'), dshHome, profile: 'web' }))
+      .toMatchObject({ provider: 'linux-protected-file', path: expect.stringMatching(/\.secret$/u) })
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+    expect(JSON.parse(await readFile(`${patchPath}.lark-credential-cleanup.json`, 'utf8')))
+      .toMatchObject({ locators: [expect.objectContaining({ provider: 'linux-secret-service' })] })
   })
 
   test('recognizes an old credential as setup-owned only with the exact private handle shape', async () => {
@@ -2364,7 +2696,13 @@ setInterval(() => {}, 1000)`,
     const parse = parseArgs as (argv: string[]) => unknown
 
     expect(parse(['--profile', 'web', '--domain', 'feishu'])).toMatchObject({ profile: 'web', domain: 'feishu' })
-    expect(parse([])).toMatchObject({ agentTools: 'preserve' })
+    expect(parse([])).toMatchObject({ agentTools: 'preserve', linuxCredentialProvider: 'auto' })
+    expect(parse(['--linux-credential-provider', 'secret-service']))
+      .toMatchObject({ linuxCredentialProvider: 'secret-service' })
+    expect(parse(['--linux-credential-provider', 'protected-file']))
+      .toMatchObject({ linuxCredentialProvider: 'protected-file' })
+    expect(() => parse(['--linux-credential-provider', 'unknown']))
+      .toThrow(/linux-credential-provider.*auto.*protected-file.*secret-service/iu)
     expect(parse(['--allow-agent-tools'])).toMatchObject({ agentTools: 'enable' })
     expect(parse(['--disable-agent-tools'])).toMatchObject({ agentTools: 'disable' })
     expect(() => parse(['--allow-agent-tools', '--disable-agent-tools'])).toThrow(/mutually exclusive/i)
@@ -2396,6 +2734,8 @@ setInterval(() => {}, 1000)`,
     expect(parse(['--no-service'])).toMatchObject({ manageService: false })
     expect(() => parse(['--install-service', '--no-service'])).toThrow(/install-service.*no-service/i)
     expect(() => parse(['--install-service', '--allow-agent-tools'])).toThrow(/install-service.*agent-tools/i)
+    expect(() => parse(['--install-service', '--linux-credential-provider', 'protected-file']))
+      .toThrow(/install-service.*linux-credential-provider/iu)
     expect(parse(['--create-app', '--app-id', 'cli_0123456789abcdef'])).toMatchObject({
       createApp: true,
       appId: 'cli_0123456789abcdef',
@@ -2586,6 +2926,134 @@ setInterval(() => {}, 1000)`,
       },
     })).toThrow(/no user D-Bus session.*not via sudo or a detached SSH session/iu)
     expect(runCalls).toBe(0)
+  })
+
+  test('automatically selects and preflights a private protected file on headless Linux', async () => {
+    const dshHome = await mkdtemp(join(tmpdir(), 'lark-headless-provider-'))
+    const selection = await lark.selectLarkCredentialProvider('linux-secret-service', {
+      dshHome,
+      mode: 'auto',
+      environment: {},
+      executableAvailable: () => false,
+      randomBytes(size) {
+        return Buffer.alloc(size, size)
+      },
+    })
+
+    expect(selection.provider).toBe('linux-protected-file')
+    expect(selection.fallbackReason).toBeDefined()
+    const directory = join(dshHome, 'credentials-keychain')
+    expect((await stat(directory)).mode & 0o777).toBe(0o700)
+    expect(await readdir(directory)).toEqual([])
+  })
+
+  test('never removes or overwrites a colliding protected-file canary path it did not create', async () => {
+    const dshHome = await mkdtemp(join(tmpdir(), 'lark-protected-canary-collision-'))
+    const directory = join(dshHome, 'credentials-keychain')
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+    const version = Buffer.alloc(16, 16).toString('hex')
+    const path = join(directory, `.lark-setup-preflight-${version}.secret`)
+    const sentinel = 'existing-sentinel-must-survive'
+    await writeFile(path, sentinel, { encoding: 'utf8', mode: 0o600 })
+
+    await expect(lark.assertLinuxProtectedFileAvailable({
+      dshHome,
+      randomBytes(size) { return Buffer.alloc(size, size) },
+    })).rejects.toMatchObject({ code: 'EEXIST' })
+    expect(await readFile(path, 'utf8')).toBe(sentinel)
+  })
+
+  test.each(['directory', 'file'] as const)('fails closed when protected-file %s permissions drift', async target => {
+    const dshHome = await mkdtemp(join(tmpdir(), `lark-protected-${target}-permissions-`))
+    const directory = join(dshHome, 'credentials-keychain')
+    await expect(lark.assertLinuxProtectedFileAvailable({
+      dshHome,
+      randomBytes(size) { return Buffer.alloc(size, size + 2) },
+      async afterStore(path) {
+        await chmod(target === 'directory' ? directory : path, target === 'directory' ? 0o755 : 0o644)
+      },
+    })).rejects.toThrow(/(?:security check|protected credential lookup failed)/iu)
+    expect(await readdir(directory)).toEqual([])
+  })
+
+  test('lets operators force either Linux backend before cloud authorization', async () => {
+    const requiredHome = await mkdtemp(join(tmpdir(), 'lark-required-secret-service-'))
+    await expect(lark.selectLarkCredentialProvider('linux-secret-service', {
+      dshHome: requiredHome,
+      mode: 'secret-service',
+      environment: {},
+      executableAvailable: () => false,
+    })).rejects.toThrow(/cannot find \/usr\/bin\/secret-tool/iu)
+
+    const protectedHome = await mkdtemp(join(tmpdir(), 'lark-required-protected-file-'))
+    await expect(lark.selectLarkCredentialProvider('linux-secret-service', {
+      dshHome: protectedHome,
+      mode: 'protected-file',
+      environment: {},
+      executableAvailable: () => false,
+      randomBytes(size) {
+        return Buffer.alloc(size, size + 1)
+      },
+    })).resolves.toMatchObject({ provider: 'linux-protected-file' })
+    expect(await readdir(join(protectedHome, 'credentials-keychain'))).toEqual([])
+  })
+
+  test('restores raw terminal mode and signal handlers after Ctrl-C', async () => {
+    const input = new PassThrough() as PassThrough & NodeJS.ReadStream
+    const output = new PassThrough() as PassThrough & NodeJS.WriteStream
+    const signals = new EventEmitter()
+    const modes: boolean[] = []
+    Object.assign(input, {
+      isTTY: true,
+      isRaw: false,
+      setRawMode(value: boolean) {
+        modes.push(value)
+        this.isRaw = value
+        return this
+      },
+    })
+    Object.assign(output, { isTTY: true })
+
+    const secret = lark.readSecretFromRawTerminal('secret: ', {
+      input,
+      output,
+      signals: signals as unknown as NonNullable<lark.RawSecretTerminalOptions['signals']>,
+    })
+    input.write(Buffer.from([3]))
+
+    await expect(secret).rejects.toThrow(/cancelled/iu)
+    expect(modes).toEqual([true, false])
+    expect(input.listenerCount('data')).toBe(0)
+    for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) expect(signals.listenerCount(signal)).toBe(0)
+  })
+
+  test('restores raw terminal mode when the process receives a termination signal', async () => {
+    const input = new PassThrough() as PassThrough & NodeJS.ReadStream
+    const output = new PassThrough() as PassThrough & NodeJS.WriteStream
+    const signals = new EventEmitter()
+    const modes: boolean[] = []
+    Object.assign(input, {
+      isTTY: true,
+      isRaw: false,
+      setRawMode(value: boolean) {
+        modes.push(value)
+        this.isRaw = value
+        return this
+      },
+    })
+    Object.assign(output, { isTTY: true })
+
+    const secret = lark.readSecretFromRawTerminal('secret: ', {
+      input,
+      output,
+      signals: signals as unknown as NonNullable<lark.RawSecretTerminalOptions['signals']>,
+    })
+    signals.emit('SIGTERM')
+
+    await expect(secret).rejects.toThrow(/SIGTERM/u)
+    expect(modes).toEqual([true, false])
+    expect(input.listenerCount('data')).toBe(0)
+    for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) expect(signals.listenerCount(signal)).toBe(0)
   })
 
   test('treats libsecret no-match clear as an idempotent cleanup success', async () => {
@@ -2847,6 +3315,26 @@ setInterval(() => {}, 1000)`,
       },
     })).rejects.toThrow('preflight stopped setup')
     expect(observedProvider).toBe((providerForPlatform as (platform: NodeJS.Platform) => unknown)(process.platform))
+  })
+
+  test.runIf(process.platform === 'linux')('prepares logout-persistent systemd before credential or cloud work', async () => {
+    const events: string[] = []
+    await expect(lark.runLarkSetup([
+      '--profile', 'web', '--create-app', '--app-id', 'cli_0123456789abcdef',
+    ], {
+      prepareResidentService() {
+        events.push('resident-preflight')
+        throw new Error('resident preflight stopped setup')
+      },
+      preflightCredentialProvider() {
+        events.push('credential-preflight')
+      },
+      readEffectiveProfile() {
+        events.push('profile-recovery')
+        throw new Error('must not recover')
+      },
+    })).rejects.toThrow('resident preflight stopped setup')
+    expect(events).toEqual(['resident-preflight'])
   })
 
   test('recognizes a package-bin symlink as the main CLI entry', async () => {

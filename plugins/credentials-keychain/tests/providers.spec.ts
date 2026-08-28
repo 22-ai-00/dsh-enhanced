@@ -1,4 +1,7 @@
-import { describe, expect, test, vi } from 'vitest'
+import { chmod, link, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { CredentialProviderError, readCredential, runCredentialCommand } from '../src/providers.ts'
 import type { CredentialCommandRunner, CredentialHandle } from '../src/types.ts'
 
@@ -14,6 +17,21 @@ const windows: CredentialHandle = {
   id: 'windows-secret', provider: 'windows-dpapi',
   path: 'C:\\Users\\test\\.dsh\\credentials-keychain\\lark-primary.clixml',
   consumers: ['plugin'], purposes: ['connect'], maxLeaseMs: 10_000,
+}
+
+const roots: string[] = []
+afterEach(async () => Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))))
+
+async function protectedFile(value: string | Buffer = 'protected-value\n') {
+  const root = await mkdtemp(join(tmpdir(), 'credentials-protected-file-'))
+  roots.push(root)
+  const path = join(root, 'lark.secret')
+  await writeFile(path, value, { mode: 0o600 })
+  const handle: CredentialHandle = {
+    id: 'linux-file', provider: 'linux-protected-file', path,
+    consumers: ['plugin'], purposes: ['connect'], maxLeaseMs: 10_000,
+  }
+  return { handle, path, root }
 }
 
 function runner(result = { code: 0, stdout: Buffer.from('secret-value\n'), stderr: Buffer.alloc(0) }) {
@@ -49,6 +67,71 @@ describe('credential providers', () => {
       env: { PATH: '/usr/bin:/bin', DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1/bus', XDG_RUNTIME_DIR: '/run/user/1' },
       timeoutMs: 1_000, maxOutputBytes: 1_025,
     })
+  })
+
+  test('reads a bounded Linux protected file without invoking a subprocess', async () => {
+    if (process.platform !== 'linux') return
+    const fixture = await protectedFile()
+    const run = runner()
+    const wipe = vi.spyOn(Buffer.prototype, 'fill')
+    try {
+      await expect(readCredential(fixture.handle, { env: { HOME: '/not-used', TOKEN: 'not-used' }, run,
+        timeoutMs: 1_000, maxSecretBytes: 1_024 })).resolves.toBe('protected-value')
+      expect(run).not.toHaveBeenCalled()
+      expect(wipe).toHaveBeenCalledWith(0)
+    } finally {
+      wipe.mockRestore()
+    }
+  })
+
+  test('rejects unsafe protected-file directories, files, links and oversized values', async () => {
+    if (process.platform !== 'linux') return
+    const unsafeDirectory = await protectedFile()
+    await chmod(unsafeDirectory.root, 0o755)
+    await expect(readCredential(unsafeDirectory.handle, { env: {}, run: runner(), timeoutMs: 1_000,
+      maxSecretBytes: 1_024 })).rejects.toEqual(expect.objectContaining({ code: 'provider-failed' }))
+
+    const unsafeFile = await protectedFile()
+    await chmod(unsafeFile.path, 0o644)
+    await expect(readCredential(unsafeFile.handle, { env: {}, run: runner(), timeoutMs: 1_000,
+      maxSecretBytes: 1_024 })).rejects.toEqual(expect.objectContaining({ code: 'provider-failed' }))
+
+    const hardLinked = await protectedFile()
+    await link(hardLinked.path, join(hardLinked.root, 'alias.secret'))
+    await expect(readCredential(hardLinked.handle, { env: {}, run: runner(), timeoutMs: 1_000,
+      maxSecretBytes: 1_024 })).rejects.toEqual(expect.objectContaining({ code: 'provider-failed' }))
+
+    const linkedDirectoryRoot = await mkdtemp(join(tmpdir(), 'credentials-protected-link-'))
+    roots.push(linkedDirectoryRoot)
+    const realDirectory = join(linkedDirectoryRoot, 'real')
+    const linkedDirectory = join(linkedDirectoryRoot, 'linked')
+    await mkdir(realDirectory, { mode: 0o700 })
+    await writeFile(join(realDirectory, 'lark.secret'), 'linked-secret', { mode: 0o600 })
+    await symlink(realDirectory, linkedDirectory, 'dir')
+    await expect(readCredential({ ...hardLinked.handle, path: join(linkedDirectory, 'lark.secret') }, {
+      env: {}, run: runner(), timeoutMs: 1_000, maxSecretBytes: 1_024,
+    })).rejects.toEqual(expect.objectContaining({ code: 'provider-failed' }))
+
+    const linkedFile = await protectedFile()
+    const target = join(linkedFile.root, 'target.secret')
+    await writeFile(target, 'linked-secret', { mode: 0o600 })
+    await rm(linkedFile.path)
+    await symlink(target, linkedFile.path)
+    await expect(readCredential(linkedFile.handle, { env: {}, run: runner(), timeoutMs: 1_000,
+      maxSecretBytes: 1_024 })).rejects.toEqual(expect.objectContaining({ code: 'provider-failed' }))
+
+    const oversized = await protectedFile('not-a-small-secret')
+    await expect(readCredential(oversized.handle, { env: {}, run: runner(), timeoutMs: 1_000,
+      maxSecretBytes: 4 })).rejects.toEqual(expect.objectContaining({ code: 'oversize' }))
+  })
+
+  test('keeps protected-file failures free of credential contents and paths', async () => {
+    if (process.platform !== 'linux') return
+    const fixture = await protectedFile('')
+    const failure = readCredential(fixture.handle, { env: {}, run: runner(), timeoutMs: 1_000,
+      maxSecretBytes: 1_024 })
+    await expect(failure).rejects.toEqual(expect.objectContaining({ code: 'not-found' }))
+    await expect(failure).rejects.not.toThrow(new RegExp(fixture.path, 'u'))
   })
 
   test('decrypts one fixed DPAPI file with a fixed no-shell PowerShell command', async () => {
