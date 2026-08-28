@@ -37,6 +37,7 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
       const detail = `phase=${context.phase} submission=${context.promptSubmissionState}`
         + ` textForwarded=${context.assistantTextForwarded}`
         + (context.teardownState !== undefined ? ` teardown=${context.teardownState}` : '')
+        + (context.reasoningEffortFallback === true ? ' reasoningFallback=true' : '')
         + (context.terminalReason !== undefined ? ` terminal=${context.terminalReason}` : '')
         + (context.exitCode !== undefined ? ` exitCode=${String(context.exitCode)}` : '')
         + (context.signal !== undefined ? ` signal=${String(context.signal)}` : '')

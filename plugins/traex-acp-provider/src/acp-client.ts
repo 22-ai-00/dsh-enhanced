@@ -131,6 +131,12 @@ export interface ProviderFailureContext {
   readonly promptSubmissionState: PromptSubmissionState
   readonly assistantTextObserved: boolean
   readonly teardownState: TeardownState
+  /**
+   * A stale caller-selected reasoning effort was absent from the fresh session selector, so the
+   * prompt used TraeX's current default instead. This adjustment happens before `session/prompt`
+   * and therefore never replays a submitted request.
+   */
+  readonly reasoningEffortFallback?: true
   readonly terminalReason?: string
   readonly exitCode?: number | null
   readonly signal?: NodeJS.Signals | null
@@ -367,6 +373,7 @@ export async function* runTraexAcpText(
   let promptSubmissionState: PromptSubmissionState = 'not-submitted'
   let teardownState: TeardownState = 'not-started'
   let terminalReason: string | undefined
+  let reasoningEffortFallback = false
   let reportedContext = false
   let usageSnapshot: AcpUsageSnapshot | undefined
   const failureRaised = Promise.withResolvers<TraexAcpError>()
@@ -402,6 +409,7 @@ export async function* runTraexAcpText(
       promptSubmissionState,
       assistantTextObserved: sawAssistantText,
       teardownState,
+      ...(reasoningEffortFallback ? { reasoningEffortFallback: true as const } : {}),
       ...(terminalReason !== undefined ? { terminalReason } : {}),
       ...(closeResult !== undefined ? { exitCode: closeResult.code, signal: closeResult.signal } : {}),
       ...(metrics !== undefined ? { metrics } : {}),
@@ -698,23 +706,28 @@ export async function* runTraexAcpText(
       if (invocation.reasoningEffort !== undefined) {
         const reasoningOption = validateReasoningCatalog(activeConfigOptions)
         if (reasoningOption === undefined || !selectValues(reasoningOption).includes(invocation.reasoningEffort)) {
-          throw new TraexAcpError('reasoning')
+          // A model selector can change after a user picked an effort (or after a cached directory
+          // populated DSH's default). This happens before the prompt boundary, so use the fresh
+          // session's current/default selector value instead of failing the whole task or replaying
+          // any model work. The final catalog observation records that current selector for later UI.
+          reasoningEffortFallback = true
+        } else {
+          phase = 'set-reasoning'
+          const updated = await awaitRpc(client.setSessionConfigOption({
+            sessionId,
+            configId: reasoningOption.id,
+            value: invocation.reasoningEffort,
+          }))
+          activeModelOption = validateModelCatalog(updated.configOptions)
+          activeConfigOptions = updated.configOptions
+          const selectedReasoning = validateReasoningCatalog(activeConfigOptions)
+          if (activeModelOption.currentValue !== (invocation.model ?? initialModelOption.currentValue)
+            || selectedReasoning?.id !== reasoningOption.id
+            || selectedReasoning.currentValue !== invocation.reasoningEffort) {
+            throw new TraexAcpError('protocol')
+          }
+          throwIfFatal(fatal)
         }
-        phase = 'set-reasoning'
-        const updated = await awaitRpc(client.setSessionConfigOption({
-          sessionId,
-          configId: reasoningOption.id,
-          value: invocation.reasoningEffort,
-        }))
-        activeModelOption = validateModelCatalog(updated.configOptions)
-        activeConfigOptions = updated.configOptions
-        const selectedReasoning = validateReasoningCatalog(activeConfigOptions)
-        if (activeModelOption.currentValue !== (invocation.model ?? initialModelOption.currentValue)
-          || selectedReasoning?.id !== reasoningOption.id
-          || selectedReasoning.currentValue !== invocation.reasoningEffort) {
-          throw new TraexAcpError('protocol')
-        }
-        throwIfFatal(fatal)
       }
 
       const activeReasoning = validateReasoningCatalog(activeConfigOptions)
