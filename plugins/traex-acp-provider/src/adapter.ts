@@ -13,6 +13,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { AgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
 import {
   discoverTraexAcpModels,
   runTraexAcpText,
@@ -88,6 +89,8 @@ export interface AdapterDependencies {
   catalogClock?: () => number
   /** Host-owned live session lookup used to bind local ACP cwd to a loop request. */
   liveSessions?: LiveSessionLookup
+  /** Scoped Host proof retained when LlmRuntime creates a legitimate adapter request clone. */
+  requestAttestor?: AgentLoopRequestAttestor
 }
 
 const noAutomaticRetry: ResolvedRetryPolicy = Object.freeze({
@@ -237,6 +240,7 @@ export class TraexAcpAdapter extends LlmAdapter {
   private readonly onCatalogObserved: AdapterDependencies['onCatalogObserved']
   private readonly catalogCache: CatalogObservationCache
   private readonly liveSessions: LiveSessionLookup | undefined
+  private readonly requestAttestor: AgentLoopRequestAttestor | undefined
   private readonly lifecycle = new AbortController()
   private catalogRefreshInFlight: Promise<CatalogObservation | undefined> | undefined
 
@@ -257,10 +261,16 @@ export class TraexAcpAdapter extends LlmAdapter {
       ...(dependencies.catalogClock !== undefined ? { now: dependencies.catalogClock } : {}),
     })
     this.liveSessions = dependencies.liveSessions
+    this.requestAttestor = dependencies.requestAttestor
   }
 
   private trustedCwd(request: GenerateOptions): string {
-    return resolveTrustedSessionCwd({ request, configuredCwd: this.cwd, sessions: this.liveSessions })
+    return resolveTrustedSessionCwd({
+      request,
+      configuredCwd: this.cwd,
+      sessions: this.liveSessions,
+      ...(this.requestAttestor === undefined ? {} : { attestor: this.requestAttestor }),
+    })
   }
 
   /**

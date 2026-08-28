@@ -1,5 +1,5 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { createAgentLoopRequestAttestor, registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import {
   CodingSubscriptionAdapter,
   enabledRoutes,
@@ -11,7 +11,7 @@ import type { LiveSessionLookup } from './session-cwd.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-coding-subscription-provider'
-export const inject = ['llm', 'sessions']
+export const inject = ['llm', 'sessions', 'agents']
 
 export { CodingSubscriptionAdapter, Config, version }
 export type { CodingSubscriptionProviderConfig }
@@ -24,10 +24,12 @@ export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): v
     return
   }
 
+  const requestAttestor = createAgentLoopRequestAttestor(ctx.agents, routes)
   const adapter = new CodingSubscriptionAdapter(config, {
     // A local CLI must only run for a live, loop-owned session.  Do not derive
     // this from model-visible request data or the configured provider cwd.
     liveSessions: ctx.get('sessions') as LiveSessionLookup,
+    requestAttestor,
     // Attachments are optional and may load/unload after this plugin. Resolve
     // the service for each operation instead of retaining a stale instance.
     getAttachments: () => ctx.get('attachments') as AdapterDependencies['attachments'],

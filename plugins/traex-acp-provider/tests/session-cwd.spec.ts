@@ -69,6 +69,51 @@ describe('TraeX live session cwd binding', () => {
     })).toThrow(/live loop session/i)
   })
 
+  it('accepts a frozen adapter clone attested against the exact live Session object', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-cwd-'))
+    roots.push(root)
+    const cloned = deepFreeze(request('session-live'))
+    let claimedSession: object | undefined
+    expect(resolveTrustedSessionCwd({
+      request: cloned,
+      configuredCwd: root,
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
+      attestor: {
+        claim(observed, session) {
+          expect(observed).toBe(cloned)
+          claimedSession = session
+          return true
+        },
+      },
+    })).toBe(realpathSync.native(root))
+    expect(claimedSession).toMatchObject({ id: 'session-live' })
+  })
+
+  it('does not let attestation authorize an auxiliary model call', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-cwd-'))
+    roots.push(root)
+    await expect(() => resolveTrustedSessionCwd({
+      request: deepFreeze({ ...request('session-live'), purpose: 'session-title' }),
+      configuredCwd: root,
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
+      attestor: { claim: () => true },
+    })).toThrow(/live loop session/i)
+  })
+
+  it('rejects an explicitly present undefined purpose even with a local loop marker', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-cwd-'))
+    roots.push(root)
+    const auxiliary = markAgentLoopRequest(deepFreeze({
+      ...request('session-live'),
+      purpose: undefined,
+    } as unknown as GenerateOptions))
+    await expect(() => resolveTrustedSessionCwd({
+      request: auxiliary,
+      configuredCwd: root,
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
+    })).toThrow(/live loop session/i)
+  })
+
   it('rejects a stale session identity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'traex-cwd-'))
     roots.push(root)

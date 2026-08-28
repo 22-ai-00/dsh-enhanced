@@ -1,4 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
+import AgentRegistry from '@deepseek-ai/dsh-agent'
 import LlmRuntime from '@deepseek-ai/dsh-llm'
 import { SessionStore } from '@deepseek-ai/dsh-session'
 import { resolveLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
@@ -8,13 +9,14 @@ import * as Plugin from '../src/index.ts'
 describe('dsh-enhanced-coding-subscription-provider', () => {
   it('exposes stable plugin and injection identity', () => {
     expect(Plugin.name).toBe('dsh-enhanced-coding-subscription-provider')
-    expect(Plugin.inject).toEqual(['llm', 'sessions'])
+    expect(Plugin.inject).toEqual(['llm', 'sessions', 'agents'])
   })
 
   it('registers enabled providers and releases them with its Cordis fiber', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
     const fiber = await ctx.plugin(Plugin, Plugin.Config())
     expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual([
       'codex-subscription',
@@ -35,6 +37,7 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
     const config = Plugin.Config()
     config.claude.enabled = false
     config.cursor.enabled = false
@@ -52,6 +55,7 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
     const config = Plugin.Config()
     config.codex.transport = 'direct-responses'
     config.cursor.enabled = false
@@ -68,6 +72,7 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
     const config = Plugin.Config()
     config.codex.transport = 'direct-responses'
     config.cursor.enabled = false

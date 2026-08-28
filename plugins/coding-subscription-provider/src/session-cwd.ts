@@ -1,6 +1,7 @@
 import { realpathSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
 import { isAgentLoopRequest, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import type { AgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
 
 export interface LiveSessionCwd {
   readonly id: NonNullable<GenerateOptions['sessionId']>
@@ -28,22 +29,25 @@ function canonicalDirectory(path: string): string {
 
 /**
  * Resolves the only cwd a local coding process may receive for this request.
- * The marker is process-local and the session lookup is live, so copied request
- * fields or a persisted/stale session id cannot select an arbitrary directory.
+ * A same-module marker or the Host-owned exact live-agent proof is mandatory;
+ * copied request fields or a persisted/stale session id cannot select a path.
  */
 export function resolveTrustedSessionCwd(input: {
   request: GenerateOptions
   configuredCwd: string
   sessions: LiveSessionLookup | undefined
+  attestor?: AgentLoopRequestAttestor
 }): string {
   const sessionId = input.request.sessionId
-  if (sessionId === undefined || !Object.isFrozen(input.request) || !isAgentLoopRequest(input.request)) {
+  if (sessionId === undefined || Object.hasOwn(input.request, 'purpose') || !Object.isFrozen(input.request)) {
     throw new TrustedSessionCwdError()
   }
   const session = input.sessions?.get(sessionId)
   if (session === undefined || session.id !== sessionId || typeof session.header.cwd !== 'string') {
     throw new TrustedSessionCwdError()
   }
+  const loopOwned = isAgentLoopRequest(input.request) || input.attestor?.claim(input.request, session) === true
+  if (!loopOwned) throw new TrustedSessionCwdError()
   const configuredCwd = canonicalDirectory(input.configuredCwd)
   const sessionCwd = canonicalDirectory(session.header.cwd)
   if (configuredCwd !== sessionCwd) throw new TrustedSessionCwdError()
