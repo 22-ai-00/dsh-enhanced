@@ -63,34 +63,37 @@ afterEach(async () => {
 })
 
 describe('one-click installers', () => {
-  test('local installer defaults to web and links the non-duplicating assistant deployment set', async () => {
+  test('local installer defaults to the safe core scenario with capability discovery and excludes optional bundles', async () => {
     const dshHome = await temporaryDshHome()
 
     const result = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('目标 profile：web')
+    expect(result.stdout).toContain('部署场景：core')
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'personal-assistant'))
-    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'lark-channel'))
-    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-health'))
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'plugin-control-plane'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'lark-channel'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-health'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-heartbeat'))
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-policy'))
     expect(result.stdout).not.toContain('部署模式：')
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'acp'))
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'hello'))
-    expect(result.stdout).toContain('Agent 工具授权：allow')
-    expect(result.stdout).toContain(
-      `${join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')} `
-      + '--profile web --refresh-agent-policy --allow-agent-tools',
-    )
+    expect(result.stdout).toContain('Agent 工具授权：preserve')
+    expect(result.stdout).toContain('权限默认值：保留现有 Settings')
+    expect(result.stdout).toContain('立即使用：dsh --profile web')
+    expect(result.stdout).not.toContain('dsh-lark-setup')
   })
 
   test('lark skip can explicitly disable managed foreground capability without touching channel onboarding', async () => {
     const dshHome = await temporaryDshHome()
     const result = runInstaller(localInstaller, [
-      '--dry-run', '--lark', 'skip', '--agent-tools', 'disable',
+      '--dry-run', '--scenario', 'lark', '--lark', 'skip', '--agent-tools', 'disable',
     ], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('部署场景：lark')
     expect(result.stdout).toContain('Agent 工具授权：disable')
     expect(result.stdout).toContain(
       `${join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')} `
@@ -126,7 +129,8 @@ describe('one-click installers', () => {
     expect(result.stdout).toContain('目标 profile：personal-web')
     expect(result.stdout).toContain('@deepseek-ai/dsh@0.1.0-rc.8')
     expect(result.stdout).toContain('@dsh-enhanced/personal-assistant@0.2.0')
-    expect(result.stdout).toContain('@dsh-enhanced/lark-channel@0.2.0')
+    expect(result.stdout).toContain('@dsh-enhanced/plugin-control-plane@0.2.0')
+    expect(result.stdout).not.toContain('@dsh-enhanced/lark-channel@0.2.0')
     expect(result.stdout).not.toContain('@dsh-enhanced/acp@')
     expect(result.stdout).not.toContain('@dsh-enhanced/hello@')
   })
@@ -267,7 +271,7 @@ printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
     expect(log).toContain('pnpm build')
     expect(log).toContain('dsh plugin --profile web add')
     expect(log).toContain('dsh --profile web --dump-config')
-    expect(log).toContain('lark-setup --profile web --refresh-agent-policy --allow-agent-tools')
+    expect(log).not.toContain('lark-setup')
   })
 
   test('supervised-growth invokes the installed activator only after the installed Lark setup completes', async () => {
@@ -337,14 +341,12 @@ fi
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('飞书处理：保留当前应用配置')
     const larkSetup = join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')
-    const refreshAgentTools = `${larkSetup} --profile web --refresh-agent-policy --allow-agent-tools`
     const installService = `${larkSetup} --profile web --install-service`
-    expect(result.stdout).toContain(refreshAgentTools)
     expect(result.stdout).toContain(installService)
-    expect(result.stdout.indexOf(installService)).toBeGreaterThan(result.stdout.indexOf(refreshAgentTools))
+    expect(result.stdout).not.toContain('--refresh-agent-policy')
   })
 
-  test('fresh configure mode allows all agent tools and keeps service installation enabled by default', async () => {
+  test('fresh configure mode preserves Agent tool reachability unless it is explicitly authorized', async () => {
     const dshHome = await temporaryDshHome()
 
     const result = runInstaller(localInstaller, ['--dry-run', '--lark', 'configure'], dshHome)
@@ -355,8 +357,31 @@ fi
       .split('\n')
       .filter(line => line.includes('dsh-lark-setup'))
     expect(setupCommands).toEqual([
-      `  $ ${larkSetup} --profile web --allow-agent-tools`,
+      `  $ ${larkSetup} --profile web`,
     ])
+  })
+
+  test('requires explicit confirmation before planning a danger-full-access default', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--permission', 'danger-full-access',
+    ], dshHome)
+
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('--confirm-dangerous-full-access')
+    expect(result.stdout).not.toContain('dsh plugin')
+  })
+
+  test('prints the bounded headless model route check only when requested', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model-route', 'verify',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain("dsh --profile headless Reply\\ with\\ exactly\\ DSH_ROUTE_READY")
   })
 
   test('explicit configure mode reruns onboarding and can avoid installing a service', async () => {

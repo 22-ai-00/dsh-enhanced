@@ -24,9 +24,14 @@ function progressEvent(eventType: string, content: object): LarkProgressEvent {
 
 function textEvents(messageId: string, text: string): LarkProgressEvent[] {
   return [
-    progressEvent('TEXT_MESSAGE_START', { messageId, role: 'assistant' }),
-    progressEvent('TEXT_MESSAGE_CONTENT', { messageId, delta: bounded(text) }),
-    progressEvent('TEXT_MESSAGE_END', { messageId }),
+    // `message_cot` embeds an event-specific JSON payload in its `content`
+    // string.  Those payloads are OpenAPI fields, not our TypeScript names:
+    // using messageId/delta is accepted as JSON but silently produces an empty
+    // text bubble in Feishu.  Keep the API's snake_case message_id and its
+    // content field all the way to the transport boundary.
+    progressEvent('TEXT_MESSAGE_START', { message_id: messageId, role: 'assistant' }),
+    progressEvent('TEXT_MESSAGE_CONTENT', { message_id: messageId, content: bounded(text) }),
+    progressEvent('TEXT_MESSAGE_END', { message_id: messageId }),
   ]
 }
 
@@ -44,7 +49,7 @@ function updateEvents(
   step: number,
 ): LarkProgressEvent[] {
   if (update.kind === 'started') return [
-    progressEvent('RUN_STARTED', { threadId: chatId, runId: `delivery-${sequence}` }),
+    progressEvent('RUN_STARTED', { thread_id: chatId, run_id: `delivery-${sequence}` }),
     ...textEvents(`status-${sequence}`, '正在分析请求并制定执行步骤…'),
   ]
   if (update.kind === 'step') {
@@ -58,17 +63,17 @@ function updateEvents(
     const toolName = bounded(update.toolName, 240)
     return [
       progressEvent('TOOL_CALL_START', {
-        toolCallId: callId,
+        tool_call_id: callId,
         icon: 'default',
         title: `正在使用 ${toolName}`,
-        toolCallName: toolName,
+        tool_call_name: toolName,
       }),
-      progressEvent('TOOL_CALL_END', { toolCallId: callId }),
+      progressEvent('TOOL_CALL_END', { tool_call_id: callId }),
     ]
   }
   if (update.kind === 'tool-finished') return [progressEvent('TOOL_CALL_RESULT', {
-    messageId: `result-${bounded(update.callId, 256)}`,
-    toolCallId: bounded(update.callId, 256),
+    message_id: `result-${bounded(update.callId, 256)}`,
+    tool_call_id: bounded(update.callId, 256),
     role: 'tool',
     content: { type: 'code', code: update.failed ? '执行失败' : '已完成' },
     ...(update.failed ? { error: 'TOOL_FAILED' } : {}),
@@ -78,7 +83,7 @@ function updateEvents(
     return text === '' ? [] : textEvents(`todos-${sequence}-${step}`, text)
   }
   if (update.kind === 'completed') return [progressEvent('RUN_FINISHED', {
-    threadId: chatId, runId: `delivery-${sequence}`, status: 'done',
+    thread_id: chatId, run_id: `delivery-${sequence}`, status: 'done',
   })]
   // A failed turn may have produced no step at all (the provider can fail before any output), so
   // state the failure in the panel body too; RUN_ERROR alone leaves the surface on its opening line.

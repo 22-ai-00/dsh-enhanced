@@ -20,7 +20,7 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 ## 默认安全状态
 
-- 原生 Permission selector 固定显示 `workspace-write`（请求批准）、`auto`（帮我批准）和 `danger-full-access`（完全访问）三项；前两项共享 `workspace-write + ask` 执行 bundle，但保留不同选择意图。没有用户层设置的新安装默认 `danger-full-access`。已有 `settings.yaml` 的 `permission.defaultPreset` 仍由 DSH Settings 用户层优先，不会被 bundle 强制覆盖。
+- 原生 Permission selector 固定显示 `workspace-write`（请求批准）、`auto`（帮我批准）和 `danger-full-access`（完全访问）三项；前两项共享 `workspace-write + ask` 执行 bundle，但保留不同选择意图。没有用户层设置的新安装默认 `workspace-write`。已有 `settings.yaml` 的 `permission.defaultPreset` 仍由 DSH Settings 用户层优先，不会被 bundle 强制覆盖。
 - policy 默认写入一条 `dsh-enhanced-foreground-capability-*`：本机 Web/direct 的 foreground Agent 可访问 profile 已挂载的全部技能、工具与插件动作，后续动态挂载也无需逐项补 allow；它不会安装尚未安装的插件，也不授权 background 或飞书 external 身份。显式 deny、紧急停止、身份/预算检查仍优先。`budgets` 默认留空。
 - automations scheduler 默认关闭；创建并审批 automation 后仍需由部署者显式启用 scheduler。
 - Memory、Wiki、Policy、Automations 使用各自的 DSH home 私有路径和独立真源。
@@ -30,7 +30,7 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 ## 权限与数据
 
-meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API、凭据、浏览器或安装脚本权限；四个子包的实际权限和数据边界分别见其 README。需要特别注意：为了符合本地默认完全控制的安装目标，没有用户层设置的新 session 会选择 `danger-full-access + never`，因此 Host sandbox 可不受限制地访问文件与网络，且工具调用不再逐次询问。这是有意启用的高风险默认值，而不是“安装能力不等于授权”的延伸含义；不需要完全控制时，请在原生 selector 中改回 `workspace-write` 或 `auto`。已有兼容的用户设置始终优先，安装器不会强制覆盖。
+meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API、凭据、浏览器或安装脚本权限；四个子包的实际权限和数据边界分别见其 README。新 session 从 `workspace-write + ask` 开始；若确实需要 `danger-full-access + never`，必须在原生 selector 中明确选择，或使用安装器的 `--permission danger-full-access --confirm-dangerous-full-access`。完全访问会允许 Host sandbox 访问任意文件与网络且不逐次询问；已有兼容的用户设置始终优先。
 
 ## 兼容性
 

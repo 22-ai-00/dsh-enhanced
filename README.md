@@ -25,7 +25,7 @@ dsh plugin --profile web add ./plugins/hello
 
 ## 最快搭建个人助理
 
-本地调试只需要一条命令，默认安装到 `web`、自动确保兼容的 DSH/pnpm、构建并链接本仓库插件，随后进入飞书保留或重新配置向导：
+本地调试只需要一条命令，默认安装到 `web`、自动确保兼容的 DSH/pnpm、构建并链接本仓库插件。首次非交互运行选择安全的本机核心场景，不创建飞书应用或常驻服务：
 
 ```sh
 ./scripts/install/install-local.sh
@@ -37,15 +37,9 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/restart.sh
 ```
 
-重启其他 profile 时只传一个参数，例如 `./scripts/install/restart.sh personal-web`。全部插件发布到 npm 后，可以在远程机器运行：
+重启其他 profile 时只传一个参数，例如 `./scripts/install/restart.sh personal-web`。远程安装器只接受固定发布标签和 SHA-256 校验，不再从 mutable `main` 取执行代码；场景选项、飞书复用和平台差异见[安装脚本文档](scripts/install)。
 
-```sh
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh)"
-```
-
-两个安装器、飞书复用/覆盖选项、实际安装清单和 macOS/Linux/Windows 差异见[安装脚本文档](scripts/install)。
-
-`personal-assistant` bundle 自带本地 Web/direct `foreground` capability grant，直接安装后即可使用 profile 中**已经挂载**的技能、工具和插件动作。安装器默认 `--agent-tools allow`，会把该规则物化为可管理的 profile override，并为 Delivery 当前/兼容的精确外部身份补齐独立规则；除了动态 `tool: *`，它们也覆盖 memory、wiki、automation 等插件工具内部的二次 Policy 动作。规则不会安装或挂载新能力，也不会放宽 `background` 任务；显式 deny、紧急停止、sandbox、reviewer 和预算硬门仍独立生效。需要更严格隔离时用 `--agent-tools disable` 撤销受管 grant，或用 `--agent-tools preserve` 保留当前配置。
+`personal-assistant` bundle 自带本地 Web/direct `foreground` capability grant，直接安装后即可使用 profile 中**已经挂载**的技能、工具和插件动作；工具仍走 `workspace-write + ask`、显式 deny、紧急停止、sandbox、reviewer 和预算硬门。安全核心还挂载只读的 `plugin_discover` / plan 工具，供 Agent 按能力找出内置、完整性固定的首方候选；它们不能下载、安装或重启 profile。安装器默认 `--agent-tools preserve`；飞书场景中需要外部 Agent 调用工具时，才显式使用 `--agent-tools allow`。规则不会安装或挂载新能力，也不会放宽 `background` 任务。
 
 owner 可在飞书中发送 `/permissions` 打开三档权限卡片（不支持卡片时显示等价文字），也可用 `/permission ask`、`/permission auto` 或二次确认的 `/permission full confirm` 切换。工具可达性与这三档执行权限是两层独立控制：`full` 关闭逐次审批并放开 sandbox，但仍受显式 Policy deny、紧急停止、身份校验和预算硬门约束。
 
@@ -66,7 +60,7 @@ dsh plugin --profile web add ./plugins/personal-assistant
 dsh --profile web --dump-config
 ```
 
-默认配置面向本机单用户：没有既有用户设置时选择 `danger-full-access`，并允许 `foreground` Agent 访问 profile 已挂载的能力；后台 scheduler 仍默认关闭，`background` 与外部身份仍默认拒绝。该默认值权限很高，请按 [`personal-assistant` 文档](plugins/personal-assistant)和四个核心插件的 README，在不需要完全控制时切回 `workspace-write`/`auto`，或用显式 Policy deny、精确身份与预算进一步收窄。
+默认配置面向本机单用户：没有既有用户设置时选择 `workspace-write + ask`，foreground Agent 只能访问 profile 已挂载的能力；后台 scheduler、`background` 与外部身份仍默认拒绝。完全访问必须在 selector 中明确选择，或用 `--permission danger-full-access --confirm-dangerous-full-access`；可继续用显式 Policy deny、精确身份与预算收窄。
 
 需要通过飞书聊天时，再追加 Delivery、系统 Keychain 和 Lark adapter：
 
@@ -103,6 +97,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 | [`@dsh-enhanced/memory-wiki-bridge`](plugins/memory-wiki-bridge) | 在 Memory 与 Wiki 之间生成可追溯、需审批的晋升提案。 | 按需安装 |
 | [`@dsh-enhanced/assistant-evolution`](plugins/assistant-evolution) | 基于可信 automation 结果提出按作用域隔离的行为 guidance，经飞书 owner 审批后注入后续 session；不自我扩权或修改代码。 | `supervised-growth` 模式安装 |
 | [`@dsh-enhanced/assistant-health`](plugins/assistant-health) | 聚合各 provider 的脱敏 liveness/readiness 与运维诊断。 | 按需安装 |
+| [`@dsh-enhanced/plugin-control-plane`](plugins/plugin-control-plane) | 按能力发现候选 bundle，生成 owner 审批计划，并通过隔离 staging + 完整性核对 + 原子 profile 切换启用。 | 按需安装 |
 | [`@dsh-enhanced/hello`](plugins/hello) | 最小示例插件，用于验证 bundle 安装、Cordis patch、构建与日志链路。 | `dsh plugin --profile web add @dsh-enhanced/hello` |
 
 安装 Web provider 后运行 `dsh --profile web --dump-config` 检查最终配置，再执行 `dsh web`。Coding Subscription Provider 的 CLI transport 需要先安装并登录相应官方客户端；显式启用 Codex `direct-responses` 时，生成不需要 Codex 可执行文件，但要求同一 POSIX 用户已有符合安全权限约束的 `CODEX_HOME/auth.json` 或 `~/.codex/auth.json`。TraeX provider 还需要在配置中显式设置 `enabled: true`。各插件的完整配置、权限边界和排错方法见表内链接。

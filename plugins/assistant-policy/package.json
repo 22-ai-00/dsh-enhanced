@@ -6,15 +6,23 @@
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
+  "bin": {
+    "dsh-permission-setup": "./bin/dsh-permission-setup.js"
+  },
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
       "default": "./lib/index.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
+    "./permission-setup": {
+      "types": "./lib/permission-setup.d.ts",
+      "default": "./lib/permission-setup.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
+    "bin",
     "lib",
     "cordis.patch.yml",
     "README.md",
@@ -49,7 +57,8 @@
     }
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "catalog:"
+    "@deepseek-ai/schemastery": "catalog:",
+    "yaml": "2.9.0"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

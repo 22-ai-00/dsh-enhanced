@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
-import { readFile, readdir, writeFile } from 'node:fs/promises'
+import { access, readFile, readdir, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -134,6 +135,34 @@ async function writeJson(path, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
+async function updatePinnedRemoteInstaller(root, version) {
+  try {
+    await access(join(root, 'scripts', 'install', 'common.sh'))
+    await access(join(root, 'scripts', 'install', 'install-npm.sh'))
+  } catch {
+    // Focused release-version tests intentionally build minimal repositories.
+    // Production repositories always carry both installer files.
+    return
+  }
+  const common = await readFile(join(root, 'scripts', 'install', 'common.sh'))
+  const hash = createHash('sha256').update(common).digest('hex')
+  const installerPath = join(root, 'scripts', 'install', 'install-npm.sh')
+  const installer = await readFile(installerPath, 'utf8')
+  const withReference = installer.replace(
+    /^DSH_ENHANCED_PINNED_RELEASE_REF='v\d+\.\d+\.\d+'$/m,
+    `DSH_ENHANCED_PINNED_RELEASE_REF='v${version}'`,
+  )
+  const pinned = withReference.replace(
+    /^DSH_ENHANCED_PINNED_COMMON_SHA256='[0-9a-f]{64}'$/m,
+    `DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`,
+  )
+  if (pinned === installer || !pinned.includes(`DSH_ENHANCED_PINNED_RELEASE_REF='v${version}'`)
+    || !pinned.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)) {
+    throw new Error('install-npm.sh must contain exactly one releasable pinned ref and SHA-256')
+  }
+  await writeFile(installerPath, pinned)
+}
+
 async function publishableEntries(root) {
   const entries = []
   for (const directory of ['plugins', 'packages']) {
@@ -219,6 +248,20 @@ async function validatePendingRelease(root, operation = 'verify') {
     }
   }
 
+  try {
+    const installer = await readFile(join(root, 'scripts', 'install', 'install-npm.sh'), 'utf8')
+    const common = await readFile(join(root, 'scripts', 'install', 'common.sh'))
+    const hash = createHash('sha256').update(common).digest('hex')
+    if (!installer.includes(`DSH_ENHANCED_PINNED_RELEASE_REF='v${pendingVersion}'`)
+      || !installer.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)) {
+      throw new Error('Pinned remote installer does not match the pending release version and common.sh digest')
+    }
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+      // Minimal release-version fixtures do not contain installer assets.
+    } else throw error
+  }
+
   return { ledger, ledgerPath, pendingVersion }
 }
 
@@ -291,6 +334,7 @@ async function prepare(root, requestedVersion) {
   await writeJson(rootManifestPath, rootManifest)
   await Promise.all(workspacePackages.map(workspacePackage => writeJson(workspacePackage.path, workspacePackage.manifest)))
   await Promise.all(workspacePackages.map(workspacePackage => writeFile(workspacePackage.versionPath, workspacePackage.versionSource)))
+  await updatePinnedRemoteInstaller(root, version)
   await writeJson(ledgerPath, ledger)
   console.log(`Prepared release ${version}`)
 }
