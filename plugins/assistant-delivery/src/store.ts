@@ -1253,6 +1253,45 @@ export class DeliveryStore {
     `).run(conversationHash(conversation), conversationJson(conversation)).changes === 1
   }
 
+  /**
+   * Remove one now-invalid persisted effort without replacing a newer model choice.
+   *
+   * Model capability directories are intentionally live data: an effort selected yesterday can
+   * disappear when a provider changes a model or account entitlement.  The compare-and-swap keeps
+   * a concurrently chosen provider/model/effort authoritative instead of silently applying this
+   * recovery to it.
+   */
+  clearStaleModelReasoningEffort(input: {
+    conversation: ConversationRef
+    expected: Pick<ConversationModelSelection, 'provider' | 'model' | 'reasoningEffort' | 'version'>
+  }): { applied: false } | { applied: true; selection: ConversationModelSelection } {
+    this.assertOpen()
+    const conversation = canonicalConversation(input.conversation)
+    const expected = canonicalModelRoute(input.expected)
+    const staleEffort = expected.reasoningEffort
+    if (staleEffort === undefined) return { applied: false }
+    const changed = this.database.prepare(`
+      UPDATE conversation_model_selections
+      SET reasoning_effort = NULL, updated_at = ?, version = version + 1
+      WHERE conversation_hash = ? AND conversation_json = ?
+        AND provider = ? AND model = ? AND reasoning_effort = ? AND version = ?
+    `).run(
+      this.now(),
+      conversationHash(conversation),
+      conversationJson(conversation),
+      expected.provider,
+      expected.model,
+      staleEffort,
+      input.expected.version,
+    )
+    if (changed.changes !== 1) return { applied: false }
+    const selection = this.getModelSelection(conversation)
+    if (selection === undefined || selection.reasoningEffort !== undefined) {
+      throw new DeliveryStoreError('conflict', 'stale reasoning effort recovery did not persist')
+    }
+    return { applied: true, selection }
+  }
+
   beginModelCommand(input: ConversationRef): number {
     this.assertOpen()
     const conversation = canonicalConversation(input)

@@ -41,7 +41,8 @@ import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src
 import { AssistantDeliveryService } from '../src/service.ts'
 import { DeliveryStore } from '../src/store.ts'
 import type {
-  ConversationBinding, DeliveryAdapter, DeliveryProgressIntent, InboundEnvelope, OutboundFormat, OutboundIntent,
+  ConversationBinding, ConversationModelSelection, ConversationRef, DeliveryAdapter, DeliveryProgressIntent,
+  InboundEnvelope, ModelRouteRef, OutboundFormat, OutboundIntent,
 } from '../src/types.ts'
 
 const roots: string[] = []
@@ -527,6 +528,8 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
 
 function runtimeStore(service: AssistantDeliveryService): {
   getActiveBinding(conversation: Readonly<ConversationBinding['conversation']>): ConversationBinding | undefined
+  getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
+  setModelSelection(conversation: ConversationRef, route: ModelRouteRef): ConversationModelSelection
   getPrincipal(principal: Readonly<ConversationBinding['principal']>): { id: string; version: number } | undefined
   getInbox(id: string): {
     status: string
@@ -3856,6 +3859,34 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(fixture.llm.requests).toHaveLength(1)
     expect(fixture.llm.requests[0]).toMatchObject({ provider: 'mock', model: 'delivery-model' })
     expect(fixture.alternate.requests).toHaveLength(0)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('clears a stale persisted reasoning effort before dispatch and uses the live model default', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-stale-effort-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const store = runtimeStore(fixture.service)
+    const stale = store.setModelSelection(conversation, {
+      provider: 'alternate', model: 'precise', reasoningEffort: 'max',
+    })
+    expect(stale).toMatchObject({ provider: 'alternate', model: 'precise', reasoningEffort: 'max' })
+
+    await fixture.service.acceptInbound(message('evt-stale-effort', 'continue with the selected model'))
+    await drive(fixture.service)
+
+    // `precise` only advertises high in this fixture. The stale max must never
+    // reach the Agent request, and DSH may then materialize the live default.
+    expect(fixture.alternate.requests).toHaveLength(1)
+    expect(fixture.alternate.requests[0]).toMatchObject({
+      provider: 'alternate', model: 'precise', reasoningEffort: 'high',
+    })
+    expect(store.getModelSelection(conversation)).toMatchObject({ provider: 'alternate', model: 'precise' })
+    expect(store.getModelSelection(conversation)?.reasoningEffort).toBeUndefined()
+    const inbox = runtimeStore(fixture.service).getInboxByProviderEvent('lark', 'bot-1', 'evt-stale-effort')
+    expect(inbox).toMatchObject({ status: 'processed' })
     await fixture.ctx.fiber.restart()
   })
 

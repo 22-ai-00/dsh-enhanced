@@ -88,6 +88,11 @@ interface DshDeliveryRuntimeOptions {
   maxOutputTokens: number
   permissionPickerTtlMs: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
+  /** Atomically remove a stale explicit effort without overwriting a newer model choice. */
+  clearStaleModelReasoningEffort(
+    conversation: ConversationRef,
+    expected: ConversationModelSelection,
+  ): { applied: false } | { applied: true; selection: ConversationModelSelection }
   imageMaterializer: Pick<InboundImageMaterializer, 'materialize'>
   isInboundAuthorized(
     binding: Readonly<ConversationBinding>,
@@ -589,6 +594,17 @@ function agentSelection(route: ModelRouteRef) {
   }
 }
 
+function errorHasCode(error: unknown, code: string): boolean {
+  let current = error
+  const visited = new Set<unknown>()
+  while (typeof current === 'object' && current !== null && !visited.has(current)) {
+    visited.add(current)
+    if ('code' in current && (current as { code?: unknown }).code === code) return true
+    current = current instanceof Error ? current.cause : undefined
+  }
+  return false
+}
+
 async function modelCatalog(
   llm: LlmRuntime,
   conversation: ConversationRef,
@@ -1022,6 +1038,45 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     agentCtx.effect(() => unbind, 'assistant-delivery.external-initiator')
     installModelSelection(agentCtx, { current: selected, assembled: undefined })
     await agentPresets?.mount(agentCtx, presetId)
+  }
+
+  /**
+   * DSH validates an explicit reasoning effort before calling an adapter. That is normally the
+   * right contract, but a persisted external-channel selection can outlive a provider's live
+   * model directory. Clear only that stale persisted effort before a prompt crosses the durable
+   * dispatch boundary; TraeX still rechecks the newly created ACP session afterwards.
+   */
+  private async resolveExecutionRoute(
+    conversation: ConversationRef,
+    persisted: ConversationModelSelection | undefined,
+    route: ModelRouteRef,
+    signal: AbortSignal,
+  ): Promise<{ route: ModelRouteRef } | { retry: true }> {
+    if (route.reasoningEffort === undefined) return { route }
+    const llm = this.ctx.get('llm')
+    if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
+    try {
+      await llm.resolveCallConfig({
+        provider: route.provider,
+        model: route.model,
+        reasoningEffort: ReasoningEffortId(route.reasoningEffort),
+      }, signal)
+      return { route }
+    } catch (error) {
+      if (signal.aborted || !errorHasCode(error, 'UNSUPPORTED_REASONING_EFFORT')) throw error
+      const fallback = { provider: route.provider, model: route.model }
+      // Do not turn an invalid model/default into a silent recovery. This is the same core
+      // preflight without the stale explicit effort, still before an Agent turn is dispatched.
+      await llm.resolveCallConfig(fallback, signal)
+      if (persisted === undefined) {
+        this.ctx.logger.warn(`assistant-delivery: using provider default after unsupported reasoning effort for ${route.provider}/${route.model}`)
+        return { route: fallback }
+      }
+      const recovered = this.options.clearStaleModelReasoningEffort(conversation, persisted)
+      if (!recovered.applied) return { retry: true }
+      this.ctx.logger.warn(`assistant-delivery: cleared stale reasoning effort for ${route.provider}/${route.model} before dispatch`)
+      return { route: toModelRoute(recovered.selection) }
+    }
   }
 
   private async reconcileNativeFullPermissionReviewer(session: Session): Promise<void> {
@@ -1967,9 +2022,20 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     if (agents === undefined || sessions === undefined) {
       return { outcome: 'not-processed', failureCode: 'agent-runtime-unavailable', retryable: true }
     }
-    const selectedRoute = toModelRoute(prepared?.modelRoute
-      ?? this.options.getModelSelection(envelope.conversation)
+    const persistedSelection = this.options.getModelSelection(envelope.conversation)
+    const requestedRoute = toModelRoute(persistedSelection
+      ?? prepared?.modelRoute
       ?? { provider: this.options.provider, model: this.options.model })
+    const resolvedRoute = await this.resolveExecutionRoute(
+      envelope.conversation,
+      persistedSelection,
+      requestedRoute,
+      signal,
+    )
+    if ('retry' in resolvedRoute) {
+      return { outcome: 'not-processed', failureCode: 'model-selection-changed-before-dispatch', retryable: true }
+    }
+    const selectedRoute = resolvedRoute.route
     const selected = agentSelection(selectedRoute)
     let handle: AgentHandle | undefined
     let dispatched = false
