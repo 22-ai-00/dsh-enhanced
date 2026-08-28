@@ -362,6 +362,7 @@ export class TraexAcpAdapter extends LlmAdapter {
       assistantTextForwarded,
       outcome,
       ...(context?.teardownState !== undefined ? { teardownState: context.teardownState } : {}),
+      ...(context?.reasoningEffortFallback === true ? { reasoningEffortFallback: true as const } : {}),
       ...(context?.terminalReason !== undefined ? { terminalReason: context.terminalReason } : {}),
       ...(context?.exitCode !== undefined ? { exitCode: context.exitCode } : {}),
       ...(context?.signal !== undefined ? { signal: context.signal } : {}),

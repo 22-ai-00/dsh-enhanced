@@ -116,6 +116,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 - 工具信封只允许调用本次 `GenerateOptions.tools` 中存在的精确名称，参数必须是 JSON 对象；未知工具、空调用或畸形信封以 `ACP_PROTOCOL_ERROR` fail closed。截断终态不会执行工具信封。若模型误在合法信封前附加一小段进度说明，插件会只提取并隐藏该信封，避免原始 JSON 泄漏到对话界面；不含协议标记的普通 JSON 仍按文本处理。
 - `end_turn`、`max_tokens`、`max_turn_requests` 是可完成终态；`refusal`、`cancelled`、断连、畸形/超限 NDJSON、无文本或缺少终态都会失败。
 - TraeX 可能仍在 stderr 记录 `unsupported call` 一类内部工具路由告警；这是其内部工具未向本兼容层开放，不等同于 DSH 工具失败。插件会要求模型只返回 `dsh-tool-calls/v1` 信封；若调用仍失败，生命周期日志会同时给出 phase、terminal、exitCode 和 signal，便于区分终态缺失、协议校验与进程退出。
+- 已保存的 effort 可能在切换模型、账号权益变化或目录更新后失效。此时插件在 `session/prompt` 前丢弃该陈旧值，使用本次 ACP session 返回的当前默认档位继续执行；不会重放 prompt 或重复计费，生命周期日志会标记 `reasoningFallback=true`。下次打开模型选择器会显示新目录。
 - 不自动重试。外部 agent 可能已经读取上下文或产生服务端计费，自动重试会放大副作用。
 
 调用失败时返回的稳定 `LlmError` code 与排查：
@@ -126,7 +127,6 @@ traex --sandbox read-only --ask-for-approval never acp serve
 | `LOCAL_SESSION_CWD_REQUIRED` | 请求没有匹配的 live loop session，或其 canonical cwd 与配置 cwd 不完全一致 | 从真实 DSH Agent Loop 发起调用；确认 session header cwd 与插件 `cwd` 指向同一 realpath，且不要通过 symlink 跨出该目录。 |
 | `ACP_ENTITLEMENT_REQUIRED` | 握手成功但当前 Trae 账号没有任何可用模型 | 确认账号权益/套餐，必要时在 TraeX 侧切换账号。 |
 | `ACP_MODEL_UNAVAILABLE` | 请求的模型不在本次 ACP 会话的 model selector 中 | 刷新模型列表或用 `default`；账号权益或 TraeX 目录可能已经变化。 |
-| `UNSUPPORTED_REASONING_EFFORT` | 所选 effort 不属于该模型当前返回的 reasoning selector | 重新选择该模型实际显示的 effort；不同模型支持集可以不同。 |
 | `ACP_REFUSAL` | TraeX 明确拒绝了本次请求 | 属模型侧决定，调整 prompt 后重试。 |
 | `ACP_TIMEOUT` | 握手+建会话+整轮 prompt 超过 `timeoutMs` | 简化 prompt 或调大 `timeoutMs`。 |
 | `ACP_OUTPUT_LIMIT` | 助手文本超过 `maxOutputBytes` | 调大 `maxOutputBytes` 或缩小任务。 |

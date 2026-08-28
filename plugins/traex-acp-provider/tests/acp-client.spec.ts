@@ -406,15 +406,39 @@ describe('TraeX ACP subprocess transport', () => {
     expect(state.prompts).toHaveLength(1)
   })
 
-  it('rejects an unavailable reasoning effort before submitting the prompt', async () => {
+  it('falls back to the fresh model default when a stored reasoning effort is unavailable', async () => {
     const { state, spawn } = harness({
       models: ['fast'],
       reasoningByModel: { fast: ['low', 'high'] },
+      defaultReasoningByModel: { fast: 'low' },
     })
+    let context: ProviderFailureContext | undefined
 
-    await expect(collect({ ...invocation, model: 'fast', reasoningEffort: 'ultra' }, { spawn }))
-      .rejects.toMatchObject({ cause: 'reasoning' })
-    expect(state.prompts).toHaveLength(0)
+    await expect(collect({ ...invocation, model: 'fast', reasoningEffort: 'ultra' }, {
+      spawn,
+      onSettled(received) { context = received },
+    })).resolves.toEqual(['answer'])
+    expect(state.modelSelections).toEqual([
+      { sessionId: 'session-current', configId: 'model-choice', value: 'fast' },
+    ])
+    expect(state.prompts).toHaveLength(1)
+    expect(context).toMatchObject({ reasoningEffortFallback: true, promptSubmissionState: 'submitted' })
+  })
+
+  it('falls back when the fresh model no longer exposes a reasoning selector', async () => {
+    const { state, spawn } = harness({ models: ['fast'] })
+    let context: ProviderFailureContext | undefined
+
+    await expect(collect({ ...invocation, model: 'fast', reasoningEffort: 'max' }, {
+      spawn,
+      onSettled(received) { context = received },
+    })).resolves.toEqual(['answer'])
+
+    expect(state.modelSelections).toEqual([
+      { sessionId: 'session-current', configId: 'model-choice', value: 'fast' },
+    ])
+    expect(state.prompts).toHaveLength(1)
+    expect(context).toMatchObject({ reasoningEffortFallback: true, promptSubmissionState: 'submitted' })
   })
 
   it('advertises no client filesystem/terminal capabilities and always denies permissions', async () => {
