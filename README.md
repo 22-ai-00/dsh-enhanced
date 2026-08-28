@@ -71,7 +71,7 @@ dsh plugin --profile web add ./plugins/lark-channel
 pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 ```
 
-最后一个命令使用飞书官方设备授权流程，输出确认链接和终端二维码。确认页允许选择已有应用或创建新应用；选择已有应用时只展示并添加本 channel 所需的最小权限、消息事件和卡片回调，不删除原有权限。若要锁定更新某个已有应用（例如补齐 `card.action.trigger`），可追加 `--app-id cli_...`。App Secret 自动写入 macOS Keychain、Linux Secret Service 或当前用户的 Windows DPAPI 文件，不进入命令参数或 profile。向导还会通过一次 owner 私聊完成精确身份绑定、启用 Web profile，并通过 launchd、systemd user service 或 Windows Task Scheduler 保持常驻；Windows 路径为 best-effort。详细步骤见 [`lark-channel` 文档](plugins/lark-channel)。
+最后一个命令使用飞书官方设备授权流程，输出确认链接和终端二维码。确认页允许选择已有应用或创建新应用；选择已有应用时只展示并添加本 channel 所需的最小权限、消息事件和卡片回调，不删除原有权限。若要锁定更新某个已有应用（例如补齐 `card.action.trigger`），可追加 `--app-id cli_...`。App Secret 自动写入 macOS Keychain、Linux Secret Service、无桌面 Linux 的当前用户 `0600` protected-file，或 Windows DPAPI 文件，不进入命令参数或 profile。Linux 默认先探测 Secret Service，纯 SSH/服务器会在 OAuth 前自动降级并验证 protected-file；内建 systemd 服务还会前置检查 user manager 与 logout persistence。向导随后通过一次 owner 私聊完成精确身份绑定并启用 Web profile；Windows 常驻路径为 best-effort。详细步骤与未加密文件边界见 [`lark-channel` 文档](plugins/lark-channel)。
 
 连接后，合法的新消息持久入队会收到 `Get` reaction，普通 Agent 任务会显示不含原始 CoT/工具敏感数据的执行进度，最终回复发送成功后原消息再收到 `DONE`。同一私聊或群聊稳定 lane 会持续 resume 同一个 DSH session；`/status` 可核对代次与上下文，`/stop` 只停止当前任务并保留上下文，`/new` 才原子切换到空白的下一代 session。私聊发送 `/model`，机器人会返回带“分组、模型、effort”三个下拉框的选择卡片；点击确认后，选择按聊天持久化，下一条消息生效且保留上下文。`/model use <provider/model>` 仍是文字后备。即使原默认模型 route 已失效，`/model` 也不依赖 LLM 生成，可以直接完成恢复。
 
@@ -90,7 +90,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
 | [`@dsh-enhanced/personal-wiki`](plugins/personal-wiki) | Markdown 为真源、支持中文检索和审批写入的个人知识库。 | 通常由 `personal-assistant` 安装 |
 | [`@dsh-enhanced/assistant-automations`](plugins/assistant-automations) | 带 occurrence/run 账本、租约 fencing 和隔离 Agent 的持久调度器。 | 通常由 `personal-assistant` 安装 |
 | [`@dsh-enhanced/assistant-delivery`](plugins/assistant-delivery) | 与厂商无关的持久 inbox/outbox、身份配对、会话绑定和投递恢复核心。 | `dsh plugin --profile web add @dsh-enhanced/assistant-delivery` |
-| [`@dsh-enhanced/credentials-keychain`](plugins/credentials-keychain) | 通过 OS Keychain/Secret Service 提供受 Policy 限制的凭据 handle。 | `dsh plugin --profile web add @dsh-enhanced/credentials-keychain` |
+| [`@dsh-enhanced/credentials-keychain`](plugins/credentials-keychain) | 通过 OS Keychain/Secret Service 或严格权限的 Linux protected-file 提供受 Policy 限制的凭据 handle。 | `dsh plugin --profile web add @dsh-enhanced/credentials-keychain` |
 | [`@dsh-enhanced/lark-channel`](plugins/lark-channel) | 飞书/Lark WebSocket 薄适配器，带官方一键选建应用、`Get`/`DONE` 状态、脱敏执行进度、模型卡片和跨平台常驻服务。 | `dsh plugin --profile web add @dsh-enhanced/lark-channel` |
 | [`@dsh-enhanced/assistant-heartbeat`](plugins/assistant-heartbeat) | 复用 Automations 的 active-hours 主动巡检和成本硬停止。 | 按需安装 |
 | [`@dsh-enhanced/event-triggers`](plugins/event-triggers) | 持久化 file、受限 HTTPS/JSON 和 HMAC webhook 事件触发。 | 按需安装 |

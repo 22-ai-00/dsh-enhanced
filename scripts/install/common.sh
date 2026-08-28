@@ -376,6 +376,138 @@ dsh_enhanced_check_web_port_available() {
   printf 'doctor：Web 端口 127.0.0.1:%s 可用。\n' "$port"
 }
 
+# A managed Linux channel promises to survive logout. Prepare that guarantee
+# before opening Feishu OAuth so a missing user manager or an administrator-only
+# linger policy cannot strand a successfully created cloud app. loginctl gets
+# one non-interactive, unprivileged attempt. sudo is only run after a TTY user
+# sees the exact fixed command and explicitly accepts it.
+dsh_enhanced_confirm_sudo_linger() {
+  local loginctl_path="$1"
+  local current_uid="$2"
+  local interaction_mode="${3:-detect}"
+  if [[ "$interaction_mode" != 'force' && ( ! -t 0 || ! -t 1 ) ]]; then
+    return 1
+  fi
+  printf '\nsystemd logout persistence 需要一次管理员授权。\n' >&2
+  printf '唯一的提权动作：sudo %q enable-linger %q\n' "$loginctl_path" "$current_uid" >&2
+  printf '现在通过 sudo 启用？[Y/n] ' >&2
+  local choice=''
+  if ! IFS= read -r choice; then return 1; fi
+  case "$choice" in
+    ''|y|Y|yes|YES|Yes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Never carry a PATH-selected executable across the sudo boundary. Common
+# systemd distributions install these commands in one of the two root-managed
+# system directories below. Other layouts can still use the printed manual
+# command, but the installer will not elevate an arbitrary user-controlled
+# path automatically.
+dsh_enhanced_trusted_system_command() {
+  local command_name="$1"
+  local candidate=''
+  for candidate in "/usr/bin/$command_name" "/bin/$command_name"; do
+    if [[ -f "$candidate" && -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+dsh_enhanced_prepare_linux_resident_service() {
+  local dry_run="$1"
+  local interaction_mode="${2:-detect}"
+  case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in
+    Linux|linux) ;;
+    *) return 0 ;;
+  esac
+  if [[ "$dry_run" == '1' ]]; then
+    printf 'systemd：将在飞书授权前验证 user manager，并在无需提权时自动启用 logout persistence（lingering）。\n'
+    return 0
+  fi
+
+  local loginctl_path
+  local systemctl_path
+  loginctl_path="$(command -v loginctl 2>/dev/null)" || {
+    dsh_enhanced_fail 1 '飞书常驻服务需要 systemd-logind（找不到 loginctl）；尚未开始飞书授权。'
+    return $?
+  }
+  systemctl_path="$(command -v systemctl 2>/dev/null)" || {
+    dsh_enhanced_fail 1 '飞书常驻服务需要 systemd user manager（找不到 systemctl）；尚未开始飞书授权。'
+    return $?
+  }
+  local current_uid
+  current_uid="${EUID:-}"
+  if ! [[ "$current_uid" =~ ^[0-9]+$ ]]; then
+    dsh_enhanced_fail 1 '无法确定将运行飞书服务的当前 Linux UID；尚未开始飞书授权。'
+    return $?
+  fi
+
+  local linger=''
+  linger="$("$loginctl_path" show-user "$current_uid" --property=Linger --value 2>/dev/null || true)"
+  if [[ "$linger" != 'yes' ]]; then
+    printf 'systemd：正在为当前用户尝试无提权启用 logout persistence（lingering）。\n'
+    if ! "$loginctl_path" --no-ask-password enable-linger "$current_uid" >/dev/null 2>&1; then
+      local privileged_loginctl_path=''
+      local sudo_path=''
+      privileged_loginctl_path="$(dsh_enhanced_trusted_system_command loginctl 2>/dev/null || true)"
+      sudo_path="$(dsh_enhanced_trusted_system_command sudo 2>/dev/null || true)"
+      if [[ -z "$privileged_loginctl_path" || -z "$sudo_path" ]]; then
+        dsh_enhanced_fail 1 '无法从受信任的系统目录自动执行 sudo/loginctl；请手工运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。尚未开始飞书授权。'
+        return $?
+      fi
+      if dsh_enhanced_confirm_sudo_linger "$privileged_loginctl_path" "$current_uid" "$interaction_mode"; then
+        printf 'systemd：正在执行上面显示的唯一提权动作；密码由 sudo 直接读取，不会进入安装器。\n'
+        if ! "$sudo_path" -- "$privileged_loginctl_path" enable-linger "$current_uid"; then
+          dsh_enhanced_fail 1 'sudo 未能启用 lingering；请运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。尚未开始飞书授权。'
+          return $?
+        fi
+      else
+        dsh_enhanced_fail 1 '系统要求管理员批准 lingering；请先运行 `sudo loginctl enable-linger "$(id -u)"`，再重新运行安装器。尚未开始飞书授权。'
+        return $?
+      fi
+    fi
+    linger="$("$loginctl_path" show-user "$current_uid" --property=Linger --value 2>/dev/null || true)"
+    if [[ "$linger" != 'yes' ]]; then
+      dsh_enhanced_fail 1 'loginctl 未确认 lingering 已启用；请运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。尚未开始飞书授权。'
+      return $?
+    fi
+    printf 'systemd：已为当前用户启用 logout persistence。\n'
+  fi
+
+  local standard_runtime_directory="/run/user/$current_uid"
+  local runtime_owner=''
+  if command -v stat >/dev/null 2>&1; then
+    runtime_owner="$(stat -c '%u' "$standard_runtime_directory" 2>/dev/null || true)"
+  fi
+  if [[ -z "${XDG_RUNTIME_DIR:-}"
+    && -d "$standard_runtime_directory"
+    && ! -L "$standard_runtime_directory"
+    && "$runtime_owner" == "$current_uid" ]]; then
+    XDG_RUNTIME_DIR="$standard_runtime_directory"
+    export XDG_RUNTIME_DIR
+  fi
+  local session_bus="$standard_runtime_directory/bus"
+  local session_bus_owner=''
+  if command -v stat >/dev/null 2>&1; then
+    session_bus_owner="$(stat -c '%u' "$session_bus" 2>/dev/null || true)"
+  fi
+  if [[ -z "${DBUS_SESSION_BUS_ADDRESS:-}"
+    && -S "$session_bus"
+    && ! -L "$session_bus"
+    && "$session_bus_owner" == "$current_uid" ]]; then
+    DBUS_SESSION_BUS_ADDRESS="unix:path=$standard_runtime_directory/bus"
+    export DBUS_SESSION_BUS_ADDRESS
+  fi
+  if ! "$systemctl_path" --user show-environment >/dev/null 2>&1; then
+    dsh_enhanced_fail 1 'systemd user manager 不可连接；请以目标普通用户直接登录（不要通过 sudo/su），确认 `systemctl --user show-environment` 成功后重试。尚未开始飞书授权。'
+    return $?
+  fi
+  printf 'systemd：user manager 与 logout persistence 已就绪。\n'
+}
+
 # The installer calls this before creating a brand-new profile and after it has
 # composed the final profile.  It deliberately never starts an Agent or sends a
 # model request; model readiness is an explicit separate choice.
@@ -415,12 +547,20 @@ dsh_enhanced_doctor() {
   fi
   case "$(uname -s)" in
     Linux)
+      if ! command -v systemctl >/dev/null 2>&1; then
+        dsh_enhanced_fail 1 'doctor：找不到 systemctl，无法验证 Linux 常驻服务。'
+        return $?
+      fi
       if ! systemctl --user is-active --quiet "dsh-profile-$profile.service"; then
         dsh_enhanced_fail 1 "doctor：systemd 服务 dsh-profile-$profile.service 未运行。"
         return $?
       fi
-      if command -v loginctl >/dev/null 2>&1 && ! loginctl show-user "${USER:-}" -p Linger --value 2>/dev/null | grep -qx 'yes'; then
-        dsh_enhanced_fail 1 "doctor：systemd user service 在注销后不会保持；运行 loginctl enable-linger ${USER:-<user>} 后重试。"
+      if ! command -v loginctl >/dev/null 2>&1; then
+        dsh_enhanced_fail 1 'doctor：找不到 loginctl，无法验证 Linux logout persistence。'
+        return $?
+      fi
+      if ! loginctl show-user "$EUID" --property=Linger --value 2>/dev/null | grep -qx 'yes'; then
+        dsh_enhanced_fail 1 'doctor：systemd user service 在注销后不会保持；运行 `sudo loginctl enable-linger "$(id -u)"` 后重试。'
         return $?
       fi
       ;;
@@ -908,6 +1048,13 @@ dsh_enhanced_install() {
     fi
   fi
   if [[ "$scenario" != 'core' ]]; then
+    if [[ "$lark_mode" == 'configure' && "$dry_run" != '1' && ( ! -t 0 || ! -t 1 ) ]]; then
+      dsh_enhanced_fail 1 '飞书向导需要交互式终端；尚未修改 lingering 或开始飞书授权。请直接运行脚本，或使用 --lark skip。'
+      return $?
+    fi
+    if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
+      dsh_enhanced_prepare_linux_resident_service "$dry_run" || return $?
+    fi
     dsh_enhanced_apply_lark "$lark_mode" "$profile" "$dsh_home" "$lark_configured" "$manage_service" "$dry_run" "$agent_tools_mode" || return $?
   fi
   if [[ "$deployment_mode" == 'supervised-growth' ]]; then
@@ -934,10 +1081,18 @@ dsh_enhanced_install() {
     printf '最终 profile 配置校验通过。\n'
   fi
   printf '安装后健康检查：\n'
+  local require_service='0'
+  if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
+    require_service='1'
+  fi
   if [[ "$dry_run" == '1' ]]; then
-    printf 'doctor：将验证 profile 可以组合；飞书服务可用 doctor.sh --require-service 复查。\n'
+    if [[ "$require_service" == '1' ]]; then
+      printf 'doctor：将验证 profile、飞书 channel、常驻服务与 Linux logout persistence。\n'
+    else
+      printf 'doctor：将验证 profile 可以组合；飞书服务可用 doctor.sh --require-service 复查。\n'
+    fi
   else
-    dsh_enhanced_doctor postflight "$profile" "$dsh_home" "$web_port" || return $?
+    dsh_enhanced_doctor postflight "$profile" "$dsh_home" "$web_port" "$require_service" || return $?
   fi
 
   printf '\n安装流程完成。\n'

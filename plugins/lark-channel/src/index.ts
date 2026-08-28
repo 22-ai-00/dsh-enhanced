@@ -21,14 +21,19 @@ export {
   createSecretServiceWriteRequest,
   createWindowsDpapiWriteRequest,
   assertLinuxSecretServiceAvailable,
+  assertLinuxProtectedFileAvailable,
   credentialProviderForPlatform,
   formatLarkSetupError,
   isMainEntry,
   matchOwnerHandshake,
   parseLarkSetupArgs,
   preflightLarkCredentialProvider,
+  readSecretFromRawTerminal,
+  retryDeferredLarkCredentialCleanup,
+  selectLarkCredentialProvider,
   runLarkSetup,
 } from './setup.js'
+export type { LarkSetupRuntime, RawSecretTerminalOptions } from './setup.js'
 export {
   assertSupervisedGrowthAutomationGuard,
   commitSupervisedGrowthPatch,

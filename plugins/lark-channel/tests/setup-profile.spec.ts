@@ -2107,6 +2107,56 @@ describe('Lark Web-profile onboarding patch', () => {
     })])
   })
 
+  test('writes only a versioned Linux protected-file locator for headless onboarding', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const credentialPath = '/home/test/.dsh/credentials-keychain/lark-web-primary-11111111111111111111111111111111.secret'
+    const output = configure({
+      profilePatch: fixture,
+      dshHome: '/home/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      credentialProvider: 'linux-protected-file',
+      credentialPath,
+      keychainService: 'dsh/lark/web/primary/versions/linux-protected-file',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+
+    const rows = parse(output, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
+    const credentials = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain')
+    expect(credentials.config.handles).toEqual([expect.objectContaining({
+      provider: 'linux-protected-file',
+      path: credentialPath,
+    })])
+    expect(credentials.config.handles[0]).not.toHaveProperty('service')
+    expect(credentials.config.handles[0]).not.toHaveProperty('account')
+    expect(output).not.toMatch(/client_secret|candidate-secret/u)
+  })
+
+  test.each([
+    'C:\\Users\\test\\lark.secret',
+    '/home/test/.dsh/credentials-keychain/../lark.secret',
+  ])('rejects a non-normalized POSIX protected-file path: %s', credentialPath => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    expect(() => configure({
+      profilePatch: fixture,
+      dshHome: '/home/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      credentialProvider: 'linux-protected-file',
+      credentialPath,
+      keychainService: 'dsh/lark/web/primary/versions/linux-protected-file',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })).toThrow(/invalid credentialPath/u)
+  })
+
   test('writes only a DPAPI encrypted-file locator for Windows onboarding', () => {
     const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
     const credentialPath = 'C:\\Users\\test\\.dsh\\credentials-keychain\\lark-primary.clixml'

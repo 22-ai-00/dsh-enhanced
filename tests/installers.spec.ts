@@ -293,6 +293,15 @@ exit 0
 if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; exit 0; fi
 printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
 `)
+    await writeExecutable(join(fakeBin, 'loginctl'), `#!/bin/bash
+printf 'loginctl %s\\n' "$*" >> "$INSTALL_LOG"
+if [[ "\${1:-}" == 'show-user' ]]; then printf 'yes\\n'; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'systemctl'), `#!/bin/bash
+printf 'systemctl %s\\n' "$*" >> "$INSTALL_LOG"
+exit 0
+`)
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '0.1.0-rc.8\\n'; exit 0; fi
 printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
@@ -326,10 +335,15 @@ fi
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('supervised growth activated')
     const log = await readFile(logPath, 'utf8')
+    expect(log).toContain('systemctl --user show-environment')
+    expect(log).toContain('systemctl --user is-active --quiet dsh-profile-web.service')
+    expect(log).toContain('loginctl show-user')
     const larkSetup = log.indexOf('lark-setup --profile web --install-service')
     const activator = log.indexOf('supervised-setup --profile web --timeout-ms 300000')
+    const serviceDoctor = log.indexOf('systemctl --user is-active --quiet dsh-profile-web.service')
     expect(larkSetup).toBeGreaterThanOrEqual(0)
     expect(activator).toBeGreaterThan(larkSetup)
+    expect(serviceDoctor).toBeGreaterThan(activator)
   })
 
   test('auto mode keeps an existing enabled Feishu bot and only restarts its service', async () => {
@@ -359,6 +373,146 @@ fi
     expect(setupCommands).toEqual([
       `  $ ${larkSetup} --profile web`,
     ])
+    expect(result.stdout).toContain('将在飞书授权前验证 user manager')
+    expect(result.stdout).toContain('常驻服务与 Linux logout persistence')
+  })
+
+  test('Linux service preflight enables lingering without sudo before checking the user manager', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const commandLog = join(root, 'commands.log')
+    const lingerState = join(root, 'linger-enabled')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'id'), `#!/bin/bash
+printf 'id %s\n' "$*" >> "$COMMAND_LOG"
+printf '424242\n'
+`)
+    await writeExecutable(join(fakeBin, 'loginctl'), `#!/bin/bash
+printf 'loginctl %s\n' "$*" >> "$COMMAND_LOG"
+if [[ "\${1:-}" == 'show-user' ]]; then
+  if [[ -f "$LINGER_STATE" ]]; then printf 'yes\n'; else printf 'no\n'; fi
+  exit 0
+fi
+if [[ "\${1:-}" == '--no-ask-password' && "\${2:-}" == 'enable-linger' ]]; then
+  touch "$LINGER_STATE"
+  exit 0
+fi
+exit 2
+`)
+    await writeExecutable(join(fakeBin, 'systemctl'), `#!/bin/bash
+printf 'systemctl %s\n' "$*" >> "$COMMAND_LOG"
+exit 0
+`)
+
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_prepare_linux_resident_service 0',
+      'installer-test', installerLibrary,
+    ], {
+      encoding: 'utf8',
+      env: {
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        COMMAND_LOG: commandLog,
+        LINGER_STATE: lingerState,
+        DSH_ENHANCED_PLATFORM_OVERRIDE: 'linux',
+      },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('已为当前用户启用 logout persistence')
+    expect(result.stdout).toContain('user manager 与 logout persistence 已就绪')
+    const log = await readFile(commandLog, 'utf8')
+    expect(log).toContain(`loginctl show-user ${process.geteuid?.() ?? process.getuid?.()}`)
+    expect(log).toContain('loginctl --no-ask-password enable-linger')
+    expect(log).toContain('systemctl --user show-environment')
+    expect(log).not.toContain('sudo')
+    expect(log).not.toContain('id -u')
+  })
+
+  test('Linux service preflight stops before OAuth when lingering needs explicit administrator approval', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const commandLog = join(root, 'commands.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'loginctl'), `#!/bin/bash
+printf 'loginctl %s\n' "$*" >> "$COMMAND_LOG"
+if [[ "\${1:-}" == 'show-user' ]]; then printf 'no\n'; exit 0; fi
+exit 1
+`)
+    await writeExecutable(join(fakeBin, 'systemctl'), `#!/bin/bash
+printf 'systemctl %s\n' "$*" >> "$COMMAND_LOG"
+exit 0
+`)
+
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_prepare_linux_resident_service 0',
+      'installer-test', installerLibrary,
+    ], {
+      encoding: 'utf8',
+      env: {
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        COMMAND_LOG: commandLog,
+        DSH_ENHANCED_PLATFORM_OVERRIDE: 'linux',
+      },
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('sudo loginctl enable-linger "$(id -u)"')
+    expect(result.stderr).toContain('尚未开始飞书授权')
+    const log = await readFile(commandLog, 'utf8')
+    expect(log).not.toContain('systemctl')
+  })
+
+  test('interactive Linux preflight explains and runs exactly one fixed sudo action after confirmation', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const commandLog = join(root, 'commands.log')
+    const lingerState = join(root, 'linger-enabled')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'loginctl'), `#!/bin/bash
+printf 'loginctl %s\n' "$*" >> "$COMMAND_LOG"
+if [[ "\${1:-}" == 'show-user' ]]; then
+  if [[ -f "$LINGER_STATE" ]]; then printf 'yes\n'; else printf 'no\n'; fi
+  exit 0
+fi
+if [[ "\${1:-}" == '--no-ask-password' ]]; then exit 1; fi
+if [[ "\${1:-}" == 'enable-linger' ]]; then touch "$LINGER_STATE"; exit 0; fi
+exit 2
+`)
+    await writeExecutable(join(fakeBin, 'systemctl'), `#!/bin/bash
+printf 'systemctl %s\n' "$*" >> "$COMMAND_LOG"
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'sudo'), `#!/bin/bash
+printf 'sudo %s\n' "$*" >> "$COMMAND_LOG"
+if [[ "\${1:-}" == '--' ]]; then shift; fi
+"$@"
+`)
+
+    const result = spawnSync('/bin/bash', [
+      '-c', `source "$1"
+dsh_enhanced_trusted_system_command() { printf '%s/%s\\n' "$FAKE_BIN" "$1"; }
+dsh_enhanced_prepare_linux_resident_service 0 force`,
+      'installer-test', installerLibrary,
+    ], {
+      encoding: 'utf8',
+      input: '\n',
+      env: {
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        COMMAND_LOG: commandLog,
+        LINGER_STATE: lingerState,
+        FAKE_BIN: fakeBin,
+        DSH_ENHANCED_PLATFORM_OVERRIDE: 'linux',
+      },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('唯一的提权动作')
+    expect(result.stderr).toContain('现在通过 sudo 启用？[Y/n]')
+    expect(result.stdout).toContain('密码由 sudo 直接读取，不会进入安装器')
+    const log = await readFile(commandLog, 'utf8')
+    expect(log).toContain(`sudo -- ${join(fakeBin, 'loginctl')} enable-linger`)
+    expect(log.match(/^sudo /gmu)).toHaveLength(1)
+    expect(log).toContain('systemctl --user show-environment')
   })
 
   test('requires explicit confirmation before planning a danger-full-access default', async () => {

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { isAbsolute, join, win32 } from 'node:path'
+import { isAbsolute, join, normalize, win32 } from 'node:path'
 import { externalPrincipalId } from '@dsh-enhanced/assistant-delivery'
 import {
   isMap,
@@ -22,7 +22,7 @@ export interface LarkProfileSetupInput {
   ownerUserId: string
   keychainService: string
   keychainAccount: string
-  credentialProvider?: 'linux-secret-service' | 'macos-keychain' | 'windows-dpapi'
+  credentialProvider?: 'linux-protected-file' | 'linux-secret-service' | 'macos-keychain' | 'windows-dpapi'
   credentialPath?: string
   agentTools?: 'disable' | 'enable' | 'preserve'
 }
@@ -1039,7 +1039,8 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
   const keychainService = requireProviderKey(input.keychainService, 'keychainService')
   const keychainAccount = requireProviderKey(input.keychainAccount, 'keychainAccount')
   const credentialProvider = input.credentialProvider ?? 'macos-keychain'
-  if (!['linux-secret-service', 'macos-keychain', 'windows-dpapi'].includes(credentialProvider)) {
+  if (!['linux-protected-file', 'linux-secret-service', 'macos-keychain', 'windows-dpapi']
+    .includes(credentialProvider)) {
     throw new Error('lark-channel setup: invalid credentialProvider')
   }
   const agentToolsMode = input.agentTools ?? 'preserve'
@@ -1204,10 +1205,12 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
     purposes: ['connect'],
     maxLeaseMs: 86_400_000,
   }
-  if (credentialProvider === 'windows-dpapi') {
+  if (credentialProvider === 'windows-dpapi' || credentialProvider === 'linux-protected-file') {
     const path = input.credentialPath
     if (path === undefined || path.length > 1_024 || path.includes('\0')
-      || (!isAbsolute(path) && !win32.isAbsolute(path))) {
+      || (credentialProvider === 'linux-protected-file'
+        ? (!isAbsolute(path) || normalize(path) !== path)
+        : (!isAbsolute(path) && !win32.isAbsolute(path)))) {
       throw new Error('lark-channel setup: invalid credentialPath')
     }
     upsertById(document, handleList, { ...commonHandle, provider: credentialProvider, path })

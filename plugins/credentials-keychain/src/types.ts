@@ -22,7 +22,17 @@ export interface WindowsDpapiCredentialHandle extends CredentialHandleBase {
   path: string
 }
 
-export type CredentialHandle = EnvironmentCredentialHandle | KeychainCredentialHandle | WindowsDpapiCredentialHandle
+export interface LinuxProtectedFileCredentialHandle extends CredentialHandleBase {
+  provider: 'linux-protected-file'
+  /** Absolute path to a current-user-owned 0600 file below a current-user-owned 0700 directory. */
+  path: string
+}
+
+export type CredentialHandle =
+  | EnvironmentCredentialHandle
+  | KeychainCredentialHandle
+  | LinuxProtectedFileCredentialHandle
+  | WindowsDpapiCredentialHandle
 
 export interface CredentialCommandInput {
   executable: string

@@ -26,7 +26,7 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app 
 
 1. 调用飞书官方 Node SDK 的 `registerApp`，显示十分钟有效的确认链接和终端二维码；
 2. 你在飞书中选择已有应用或创建新应用，并确认权限增量；
-3. 将返回的 `App Secret` 自动写入 macOS Keychain、Linux Secret Service 或当前 Windows 用户的 DPAPI 加密文件；Secret 不经过命令行参数、不写 profile、也不打印；
+3. 将返回的 `App Secret` 自动写入 macOS Keychain、Linux Secret Service、无桌面 Linux 的版本化 `0600` protected-file，或当前 Windows 用户的 DPAPI 加密文件；Secret 不经过命令行参数、不写 profile、也不打印；
 4. 用真实凭据建立一次临时长连接；
 5. 显示一次性 `DSH-CONNECT-...` 短语，等待你私聊机器人并原样发送；
 6. 从这条单聊取得应用作用域下的准确 `open_id`，只把该身份配为 owner；
@@ -148,7 +148,7 @@ tail -f ~/.dsh/logs/web-host.error.log
 launchctl bootout gui/$(id -u)/ai.deepseek.dsh.profile.web
 ```
 
-Linux 会创建私有的 `~/.config/systemd/user/dsh-profile-web.service`，只配置 DSH 所需路径以及 Secret Service 所需的用户 D-Bus/XDG 定位：
+Linux 会创建私有的 `~/.config/systemd/user/dsh-profile-web.service`，只配置 DSH 所需路径以及 Secret Service 可能需要的用户 D-Bus/XDG 定位。向导会在飞书 OAuth 前检查 systemd user manager，并尝试为当前用户启用 linger，确保 SSH 注销后服务仍然运行；若系统要求管理员授权，它会在修改飞书应用前停止并给出唯一需要执行的 `sudo loginctl enable-linger "$(id -u)"` 命令：
 
 ```sh
 systemctl --user status dsh-profile-web.service
@@ -156,11 +156,23 @@ journalctl --user -u dsh-profile-web.service -f
 systemctl --user restart dsh-profile-web.service
 ```
 
-Linux 一键向导需要当前用户桌面会话中可用且已解锁的 Secret Service，并提供 `/usr/bin/secret-tool`；手工输入已有 App Secret 时还需要 `/usr/bin/systemd-ask-password`。`--no-service` **只跳过** 成功后的 systemd 常驻安装，不会把向导的凭据 provider 改成 environment，也不能绕过 Secret Service。
+Linux 一键向导默认使用 `auto` 凭据模式：若当前登录会话存在可写且已解锁的 Secret Service，就继续使用系统钥匙环；纯 SSH、服务器、容器或 Secret Service 不可用时，会自动改用 `$DSH_HOME/credentials-keychain/lark-<profile>-<account>-<32hex>.secret` 版本化私有文件。向导会在飞书 OAuth **之前**确认已安装的 `credentials-keychain` 支持该 provider，并对实际选择的 backend 完成随机 canary 写入、读回和删除，因此不会在应用授权完成后才发现插件版本混装或本机无法保存凭据。安装器会同时安装匹配的两个插件版本。
+
+受保护文件的父目录固定为当前 UID 所有的 `0700`，文件固定为当前 UID 所有的 regular、单硬链接 `0600`；创建使用独占、拒绝跟随链接的版本化路径，写入和删除后同步父目录。它不会进入 profile、argv、环境变量或日志，Host 重启后由 `credentials-keychain` 直接读取同一路径。这个 fallback **没有额外的静态加密**：同一 UID、root 和能够读取该文件的备份系统仍可得到 App Secret。需要强制使用系统钥匙环或明确选择私有文件时，可以在首次完整向导中指定：
+
+```sh
+# Secret Service 不可用时直接失败，不自动降级
+dsh-lark-setup --profile web --linux-credential-provider secret-service
+
+# 即使桌面钥匙环可用也使用 0600 私有文件
+dsh-lark-setup --profile web --linux-credential-provider protected-file
+```
+
+手工输入已有 App Secret 时优先使用 `/usr/bin/systemd-ask-password`；该工具不存在但当前 stdin/stdout 是真实 TTY 时，向导会使用无回显 raw-terminal 后备，并在 Enter、Ctrl-C、SIGINT、SIGHUP 或 SIGTERM 后恢复终端模式。`--no-service` 只跳过 systemd 常驻安装；凭据仍按上述 `auto` 规则选择，进程需由用户自己的 supervisor 常驻。
 
 ### Linux Secret Service 排障
 
-若授权完成后看到 `setup failed and staged credential cleanup also failed`，这通常表示向导无法通过 `secret-tool` 暂存 App Secret，随后同一不可用的服务也无法清理暂存项；不是飞书 OAuth 或 systemd 服务安装失败。不要删除 `$DSH_HOME/profiles/<profile>/cordis.patch.yml.lark-setup.journal.json`：修复依赖后重跑向导会先自动恢复它。
+旧版若在授权完成后留下 `setup failed and staged credential cleanup also failed`，不要删除 `$DSH_HOME/profiles/<profile>/cordis.patch.yml.lark-setup.journal.json`。新版在确认这个 versioned locator 从未被 profile 激活后，会将清理义务原子转入 `cordis.patch.yml.lark-credential-cleanup.json`，清除阻塞事务并继续使用 protected-file 完成初始化；以后每次向导进入时都会 best-effort 重试 Secret Service 清理。不要手工删除或编辑 cleanup record。
 
 若看到 `profile and owner were committed, but previous credential cleanup is pending`，新的 profile、owner 和凭据已经生效，不能回滚；向导保留了同一个 journal，以便修复 Secret Service 后优先重试删除旧凭据。不要删除该 journal，也不要立即开始另一轮凭据旋转。
 
@@ -174,14 +186,14 @@ test -x /usr/bin/secret-tool
 test -n "${DBUS_SESSION_BUS_ADDRESS:-}" || test -S "${XDG_RUNTIME_DIR:-}/bus"
 ```
 
-新版向导会在飞书 OAuth **之前**临时存入、读回并清除一个随机的非生产 canary，以确认钥匙环确实可写；这项检查不会读取、写入或显示 App Secret。若出现钥匙环解锁对话框，先解锁再继续。随后以原来的 profile/account/tenant/agent-tools 参数重跑；已创建的应用可复用，避免创建第二个应用：
+新版向导会在飞书 OAuth **之前**临时存入、读回并清除一个随机的非生产 canary，以确认钥匙环确实可写；这项检查不会读取、写入或显示 App Secret。若出现钥匙环解锁对话框，先解锁即可；若无桌面 provider，默认会自动选择 protected-file，无需安装 GNOME Keyring。随后以原来的 profile/account/tenant/agent-tools 参数重跑；已创建的应用可复用，避免创建第二个应用：
 
 ```sh
 ~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup \
   --profile web --create-app --app-id cli_0123456789abcdef
 ```
 
-纯 SSH 服务器、容器或没有可持续 Secret Service 的系统不支持这个一键向导；不要仅加 `--no-service` 重试。此类部署应手工使用下文的 `appSecretEnv` 或 `credentials-keychain` 的 `environment` handle，并由 systemd/container/secret manager 注入值；同时需要显式完成等价的 owner 与 Policy 配置。当前向导也要求 FHS 的 `/usr/bin/secret-tool`、`/usr/bin/systemd-ask-password` 与 `/usr/bin/systemctl`；Nix、Guix 或其他非 FHS 系统请使用手工 environment 部署，直到这些组件获得协调支持。
+纯 SSH 和无桌面 Linux 已支持一键向导。若使用内建常驻服务，系统仍需 systemd/logind user manager 并允许为目标用户启用 linger；不具备这些组件的容器应加 `--no-service`，交给 Docker、s6、runit 等外部 supervisor 常驻。`secret-tool` 和 GNOME Keyring 只在强制 `secret-service` 或希望使用桌面钥匙环时需要。当前 systemd 安装仍要求可调用的 `systemctl`/`loginctl`；不符合该约束的 Nix、Guix 或精简容器请使用外部 supervisor。
 
 Windows 会把 DPAPI 加密的 PSCredential 保存到 `$DSH_HOME/credentials-keychain`，并创建当前用户的 `DSH profile web` 登录任务。该实现不会保存明文，但 Windows/Node/npm/Git Bash 组合差异较大，因此属于 best-effort，不作兼容承诺：
 
@@ -209,7 +221,7 @@ schtasks.exe /Run /TN "DSH profile web"
 
 `/model` 是 `assistant-delivery` 的渠道无关控制命令，不会被交给当前失效的 LLM；因此即使 profile 中的旧默认 route 已不存在，也能先切换再恢复正常对话。
 
-向导正式支持 macOS Keychain + launchd 和 Linux Secret Service + systemd user service。Windows DPAPI + Task Scheduler 已实现但仅为 best-effort。容器仍使用下文的手工 `credentialHandle` 或 `appSecretEnv` 配置，并由 Docker 等 supervisor 常驻 DSH Host。
+向导正式支持 macOS Keychain + launchd，以及 Linux Secret Service / protected-file + systemd user service；无 systemd 的 Linux 容器可以使用 protected-file 并由外部 supervisor 常驻。Windows DPAPI + Task Scheduler 已实现但仅为 best-effort。
 
 ## 安装
 
@@ -337,9 +349,9 @@ Delivery 外部主体侧不放宽：`subject.id` 与 `subject.workspace` 始终�
 Policy tool guard 和插件内部 `authorizeAgent()` 都携带 Delivery 绑定的 canonical principal；Lark setup 生成的 external reply/capability/tool 规则只匹配当前 account 的精确 owner。其他 connector、Lark account 或 principal 即使使用相同 preset/workspace 也不会继承该授权。owner 在群内 @ 机器人时仍沿用同一 principal，因此这不是“仅 owner 私聊”的限制。
 
 - **网络：**仅访问所选 `domain` 的飞书/Lark OpenAPI、token 服务和 WebSocket endpoint；图片读取使用固定的消息资源相对端点，不接受模型、消息正文或 provider payload 提供的 URL，并关闭重定向；没有通用 HTTP 工具。
-- **凭据：**优先通过 `credentials-keychain` handle 获取；兼容模式只读取 `appSecretEnv` 指定的一项。值不写数据库、不进入 tool、health、route、日志或异常文本。`appId` 不是 secret。
-- **文件系统：**运行时无业务文件读写；setup wizard 会原子更新所选 profile patch，通过 `assistant-delivery` 的本地控制面写入精确 owner，并以 `0600` 写入用户级 LaunchAgent plist、在 `$DSH_HOME/logs` 创建 Host 日志。官方 SDK 依赖的 `protobufjs` postinstall 只打印版本建议，仓库显式设为 `allowBuilds: false`，运行不需要安装脚本。
-- **子进程：**运行时只使用 credential provider 的固定无 shell 命令。setup wizard 在 macOS 调用 `/usr/bin/security` 与 launchd，在 Linux 调用 `/usr/bin/secret-tool`、`/usr/bin/systemd-ask-password` 与 `systemctl --user`，Windows 调用固定 PowerShell DPAPI 命令与 Task Scheduler；自动生成的 Secret 只通过标准输入传递且缓冲区随后清零，不作为 argv 传递。所有平台都会调用 `dsh --dump-config` 验证 profile；常驻配置只包含解析后的程序路径和最小环境，不复制 ambient token/password。
+- **凭据：**优先通过 `credentials-keychain` handle 获取；兼容模式只读取 `appSecretEnv` 指定的一项。值不写数据库、不进入 tool、health、route、日志或异常文本。Linux protected-file 未额外加密，同 UID、root 和可读备份能获得内容；runtime 对父目录/文件的 owner、类型、链接数、`0700`/`0600` 和大小进行复核。`appId` 不是 secret。
+- **文件系统：**运行时除 provider 读取受保护的 App Secret 外无业务文件读写；setup wizard 会原子更新所选 profile patch，通过 `assistant-delivery` 的本地控制面写入精确 owner，以版本化独占路径创建 Linux protected-file，并以 `0600` 写入用户级 LaunchAgent/systemd 配置、在 `$DSH_HOME/logs` 创建 Host 日志。官方 SDK 依赖的 `protobufjs` postinstall 只打印版本建议，仓库显式设为 `allowBuilds: false`，运行不需要安装脚本。
+- **子进程：**运行时只使用 credential provider 的固定无 shell 命令。setup wizard 在 macOS 调用 `/usr/bin/security` 与 launchd，在 Linux 按需调用 `/usr/bin/secret-tool`、`/usr/bin/systemd-ask-password`、`loginctl` 与 `systemctl --user`，Windows 调用固定 PowerShell DPAPI 命令与 Task Scheduler；自动生成的 Secret 只通过标准输入或 setup-owned protected-file 传递，不作为 argv。所有平台都会调用 `dsh --dump-config` 验证 profile；常驻配置只包含解析后的程序路径和最小环境，不复制 ambient token/password。
 - **浏览器：**setup wizard 会输出飞书官方的短期设备授权链接与二维码，但不会自动操控浏览器；由用户在飞书中选择已有应用或创建新应用，并查看、确认权限增量。
 - **消息数据：**标准化文本、provider message id、chat/user/thread id，以及最多 10 个受限附件描述符会进入 delivery SQLite；raw 事件、token 和下载 URL 不保存，provider file key 只作为隔离账本中的不可信引用，不进入模型正文。授权 worker 下载的图片字节只交给 AttachmentStore，随后会话仅持有 AttachmentStore 返回的引用；本插件不把二进制写入 Delivery session 或 prompt。
 - **进度数据：**仅发送有长度上限的工具名、已定稿的步骤说明、显式待办文本和固定状态文案；不发送流式思维链片段、工具参数/结果、凭据或内部错误详情。原生进度 API 与 reaction API 失败均按展示降级处理。

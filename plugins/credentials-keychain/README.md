@@ -1,6 +1,6 @@
 # @dsh-enhanced/credentials-keychain
 
-给可信 DSH 插件使用的凭据 handle 服务。配置只保存 locator 与 allowlist，值留在 macOS Keychain、Linux Secret Service、当前 Windows 用户的 DPAPI 加密文件或一个明确命名的进程环境变量中；每次使用都经过 `assistant-policy`、有界 lease 和不含 secret 的 SQLite 审计账本。
+给可信 DSH 插件使用的凭据 handle 服务。配置只保存 locator 与 allowlist，值留在 macOS Keychain、Linux Secret Service、无桌面 Linux 的 owner-protected 文件、当前 Windows 用户的 DPAPI 加密文件或一个明确命名的进程环境变量中；每次使用都经过 `assistant-policy`、有界 lease 和不含 secret 的 SQLite 审计账本。
 
 它不是密码管理器 UI，也不向 Agent 注册任何 tool。
 
@@ -61,6 +61,29 @@ handles:
 
 子进程只收到固定 `PATH`，以及宿主已有的 `DBUS_SESSION_BUS_ADDRESS` / `XDG_RUNTIME_DIR`。不继承 `HOME`、token、代理或完整环境。
 
+### 无桌面 Linux protected file
+
+纯 SSH、Ubuntu Server 和没有 Secret Service session 的 Linux 可以使用：
+
+```yaml
+- id: lark-app-secret
+  provider: linux-protected-file
+  path: /home/me/.dsh/credentials-keychain/lark-web-primary-0123456789abcdef0123456789abcdef.secret
+  consumers: [dsh-enhanced-lark-channel]
+  purposes: [connect]
+  maxLeaseMs: 86400000
+```
+
+这个 provider 不启动子进程，也不读取 locator 以外的文件。每次读取都要求：
+
+- locator 是规范化的绝对路径；直接父目录由当前 UID 持有且权限恰为 `0700`；
+- 文件由当前 UID 持有、权限恰为 `0600`、是 regular file 且只有一个硬链接；
+- 最终文件和直接父目录都不是符号链接，文件以 `O_NOFOLLOW` 打开，并且只读取配置的 `maxSecretBytes` 上限。
+
+不满足任一条件都会 fail closed，错误不包含路径或文件内容。`dsh-lark-setup` 只通过进程内有界 buffer 写入原子的随机版本 `0600` 文件，验证候选值后才把 locator 提交到 profile；secret 不进入 YAML、命令行参数、环境变量或日志。
+
+这是“仅当前 OS 用户可读”的兼容后端，不是静态加密：secret 在该 `0600` 文件中仍是明文，同一 UID 下的其他进程、root、主机备份和离线磁盘读取者可能获得它。需要抵御这些威胁时，应使用 Secret Service、外部 secret manager、全盘加密或独立服务账户。凭据文件不得放在同步目录、共享卷或权限/所有权语义不可靠的文件系统中。
+
 ### Environment
 
 ```yaml
@@ -98,9 +121,9 @@ handles:
 
 ## 权限与数据
 
-- **文件系统：**创建配置指定的绝对 SQLite 文件；父目录 `0700`、文件 `0600`、WAL/FULL、forward-only migration。账本只存 handle id、consumer、purpose、状态和时间，不存 locator 或值。
+- **文件系统：**创建配置指定的绝对 SQLite 文件；父目录 `0700`、文件 `0600`、WAL/FULL、forward-only migration。`linux-protected-file` 还会读取配置的绝对 locator，并执行上文的 owner/mode/type/link 检查。账本只存 handle id、consumer、purpose、状态和时间，不存 locator 或值。
 - **子进程：**仅 OS provider 的固定可执行文件与固定 argv 结构（macOS `security`、Linux `secret-tool`、Windows PowerShell DPAPI）；`shell: false`，5 秒默认超时，stdout/stderr 总量有界，错误文本不回传。
-- **环境：**environment provider 读取单个 allowlisted 名称；Linux provider只转交 D-Bus/XDG session 定位。
+- **环境：**environment provider 读取单个 allowlisted 名称；Linux provider 只转交 D-Bus/XDG session 定位。
 - **网络：**无。
 - **浏览器：**无。
 - **凭据：**值只进入可信 consumer callback。`health`、`listHandles`、`listLeases`、异常与 policy audit 均不含值。

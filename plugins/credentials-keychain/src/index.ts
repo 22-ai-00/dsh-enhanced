@@ -5,6 +5,7 @@ import { version } from './version.js'
 
 export const name = 'dsh-enhanced-credentials-keychain'
 export const inject = ['assistantPolicy']
+export { supportedCredentialProviders } from './capabilities.js'
 export { Config, CredentialLeaseAbortError, CredentialsKeychainService, version }
 export type { CredentialLeaseAbortCode } from './service.js'
 export * from './types.js'

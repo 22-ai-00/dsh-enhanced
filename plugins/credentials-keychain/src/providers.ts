@@ -1,4 +1,7 @@
 import { spawn } from 'node:child_process'
+import { constants } from 'node:fs'
+import { lstat, open } from 'node:fs/promises'
+import { dirname, isAbsolute, normalize } from 'node:path'
 import type {
   CredentialCommandInput,
   CredentialCommandResult,
@@ -38,6 +41,80 @@ function normalizeSecret(value: string | Buffer, maxSecretBytes: number): string
   return text
 }
 
+function errnoCode(error: unknown): string | undefined {
+  if (error === null || typeof error !== 'object' || !('code' in error)) return undefined
+  return typeof error.code === 'string' ? error.code : undefined
+}
+
+function protectedFileFailure(error: unknown): CredentialProviderError {
+  if (error instanceof CredentialProviderError) return error
+  if (errnoCode(error) === 'ENOENT') {
+    return new CredentialProviderError('not-found', 'credential value is missing')
+  }
+  return new CredentialProviderError('provider-failed', 'protected credential file is unavailable')
+}
+
+async function readLinuxProtectedFile(path: string, maxSecretBytes: number): Promise<string> {
+  if (process.platform !== 'linux' || !isAbsolute(path) || normalize(path) !== path) {
+    throw new CredentialProviderError('provider-failed', 'protected credential file is unavailable')
+  }
+  const currentUid = process.geteuid?.()
+  if (currentUid === undefined) {
+    throw new CredentialProviderError('provider-failed', 'protected credential file is unavailable')
+  }
+  let directory
+  try {
+    directory = await lstat(dirname(path))
+  } catch (error) {
+    throw protectedFileFailure(error)
+  }
+  if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== currentUid
+    || (directory.mode & 0o7777) !== 0o700) {
+    throw new CredentialProviderError('provider-failed', 'protected credential directory is unsafe')
+  }
+  let file
+  try {
+    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+  } catch (error) {
+    throw protectedFileFailure(error)
+  }
+  try {
+    const before = await file.stat()
+    if (!before.isFile() || before.uid !== currentUid || before.nlink !== 1
+      || (before.mode & 0o7777) !== 0o600) {
+      throw new CredentialProviderError('provider-failed', 'protected credential file is unsafe')
+    }
+    if (before.size > maxSecretBytes) {
+      throw new CredentialProviderError('oversize', 'credential provider output is too large')
+    }
+    const buffer = Buffer.alloc(maxSecretBytes + 1)
+    try {
+      let offset = 0
+      while (offset < buffer.byteLength) {
+        const result = await file.read(buffer, offset, buffer.byteLength - offset, offset)
+        if (result.bytesRead === 0) break
+        offset += result.bytesRead
+      }
+      const after = await file.stat()
+      if (offset > maxSecretBytes) {
+        throw new CredentialProviderError('oversize', 'credential provider output is too large')
+      }
+      if (offset !== after.size || after.dev !== before.dev || after.ino !== before.ino
+        || !after.isFile() || after.uid !== currentUid || after.nlink !== 1
+        || (after.mode & 0o7777) !== 0o600) {
+        throw new CredentialProviderError('provider-failed', 'protected credential file changed while being read')
+      }
+      return normalizeSecret(buffer.subarray(0, offset), maxSecretBytes)
+    } finally {
+      buffer.fill(0)
+    }
+  } catch (error) {
+    throw protectedFileFailure(error)
+  } finally {
+    await file.close().catch(() => {})
+  }
+}
+
 const windowsPowerShell = 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
 const windowsReadCommand = '$credential = Import-Clixml -LiteralPath $args[0]; [Console]::Out.Write($credential.GetNetworkCredential().Password)'
 
@@ -46,6 +123,9 @@ export async function readCredential(handle: CredentialHandle, options: ReadCred
     const value = options.env[handle.environmentName]
     if (value === undefined) throw new CredentialProviderError('not-found', 'credential value is missing')
     return normalizeSecret(value, options.maxSecretBytes)
+  }
+  if (handle.provider === 'linux-protected-file') {
+    return readLinuxProtectedFile(handle.path, options.maxSecretBytes)
   }
   let command: CredentialCommandInput
   if (handle.provider === 'macos-keychain') {

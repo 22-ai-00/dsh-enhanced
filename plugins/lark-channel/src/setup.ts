@@ -2,9 +2,9 @@
 
 import { createHash, randomBytes } from 'node:crypto'
 import { accessSync, constants, realpathSync } from 'node:fs'
-import { chmod, mkdir, open, readFile, readdir, rename, rm, unlink } from 'node:fs/promises'
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, isAbsolute, join, win32 } from 'node:path'
+import { basename, dirname, isAbsolute, join, normalize, win32 } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { createInterface } from 'node:readline/promises'
@@ -15,6 +15,7 @@ import * as QRCode from 'qrcode'
 import { isMap, isSeq, parseDocument, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 import { createOfficialLarkTransport } from './sdk.js'
 import { installDshResidentService } from './resident.js'
+import { prepareDshSystemdUserService } from './systemd.js'
 import { configureLarkProfilePatch, refreshLarkAgentPolicyPatch } from './setup-profile.js'
 import {
   assertRawManagedProfileIntegrity,
@@ -38,6 +39,7 @@ export interface LarkSetupArgs {
   installServiceOnly: boolean
   refreshAgentPolicy: boolean
   manageService: boolean
+  linuxCredentialProvider: 'auto' | 'protected-file' | 'secret-service'
   agentTools: 'disable' | 'enable' | 'preserve'
   help: boolean
 }
@@ -64,6 +66,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     installServiceOnly: false,
     refreshAgentPolicy: false,
     manageService: true,
+    linuxCredentialProvider: 'auto',
     agentTools: 'preserve',
     help: false,
   }
@@ -86,6 +89,9 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     else if (option === '--install-service') result.installServiceOnly = true
     else if (option === '--refresh-agent-policy') result.refreshAgentPolicy = true
     else if (option === '--no-service') result.manageService = false
+    else if (option === '--linux-credential-provider') {
+      result.linuxCredentialProvider = argumentValue(argv, index++, option) as LarkSetupArgs['linuxCredentialProvider']
+    }
     else if (option === '--allow-agent-tools' || option === '--disable-agent-tools') {
       if (result.agentTools !== 'preserve') {
         throw new Error('lark-channel setup: --allow-agent-tools and --disable-agent-tools are mutually exclusive')
@@ -105,7 +111,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
   if (!result.help && result.refreshAgentPolicy) {
     const incompatible = [
       '--domain', '--tenant', '--app-id', '--create-app', '--install-service',
-      '--no-service', '--app-name', '--timeout-ms',
+      '--no-service', '--linux-credential-provider', '--app-name', '--timeout-ms',
     ].find(option => argv.includes(option))
     if (incompatible !== undefined) {
       throw new Error(`lark-channel setup: --refresh-agent-policy cannot be combined with ${incompatible}`)
@@ -120,6 +126,9 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
   if (result.installServiceOnly && (result.createApp || result.appId !== undefined)) {
     throw new Error('lark-channel setup: --install-service cannot be combined with application setup options')
   }
+  if (result.installServiceOnly && argv.includes('--linux-credential-provider')) {
+    throw new Error('lark-channel setup: --install-service cannot be combined with --linux-credential-provider')
+  }
   if (result.installServiceOnly && result.agentTools !== 'preserve') {
     throw new Error('lark-channel setup: --install-service cannot be combined with agent-tools options')
   }
@@ -129,6 +138,9 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     throw new Error('lark-channel setup: app-name must be 1..64 characters without control characters')
   }
   if (result.domain !== 'feishu' && result.domain !== 'lark') throw new Error('lark-channel setup: domain must be feishu or lark')
+  if (!['auto', 'protected-file', 'secret-service'].includes(result.linuxCredentialProvider)) {
+    throw new Error('lark-channel setup: linux-credential-provider must be auto, protected-file, or secret-service')
+  }
   if (!Number.isSafeInteger(result.timeoutMs) || result.timeoutMs < 30_000 || result.timeoutMs > 900_000) {
     throw new Error('lark-channel setup: timeout-ms must be an integer from 30000 to 900000')
   }
@@ -184,13 +196,21 @@ export interface SecretWriteRequest {
   input: Buffer
 }
 
-export type SetupCredentialProvider = 'linux-secret-service' | 'macos-keychain' | 'windows-dpapi'
+export type SetupCredentialProvider =
+  | 'linux-protected-file'
+  | 'linux-secret-service'
+  | 'macos-keychain'
+  | 'windows-dpapi'
 
 export type SetupCredentialLocator =
   | {
     provider: 'linux-secret-service' | 'macos-keychain'
     service: string
     account: string
+  }
+  | {
+    provider: 'linux-protected-file'
+    path: string
   }
   | {
     provider: 'windows-dpapi'
@@ -221,6 +241,13 @@ export function createVersionedCredentialLocator(input: VersionedCredentialLocat
   const version = input.version ?? randomBytes(16).toString('hex')
   if (!credentialVersionPattern.test(version)) {
     throw new Error('lark-channel setup: invalid credential version')
+  }
+  if (input.provider === 'linux-protected-file') {
+    return {
+      provider: input.provider,
+      path: join(input.dshHome, 'credentials-keychain',
+        `lark-${input.profile}-${input.account}-${version}.secret`),
+    }
   }
   if (input.provider === 'windows-dpapi') {
     return {
@@ -324,6 +351,8 @@ Options:
   --install-service       Only install/restart the profile's resident service
   --refresh-agent-policy  Only refresh policy from the existing channel binding
   --no-service            Configure Lark without installing a resident service
+  --linux-credential-provider <mode>
+                          auto, protected-file, or secret-service (default: auto)
   --allow-agent-tools     Allow mounted foreground/external Agent capabilities
   --disable-agent-tools   Remove setup-managed Agent capability rules
   --timeout-ms <ms>      Owner DM wait, 30000..900000 (default: 300000)
@@ -331,7 +360,8 @@ Options:
 
 Without --create-app or --app-id, press Enter at the App ID prompt to select or create an app.
 App Secret is intentionally not accepted as an argument. It is stored in macOS Keychain,
-Linux Secret Service, or a per-user Windows DPAPI file.`
+Linux Secret Service (with an automatic private-file fallback for headless Linux),
+or a per-user Windows DPAPI file.`
 }
 
 function runSecurity(args: readonly string[], stdio: 'inherit' | 'pipe'): string {
@@ -408,8 +438,8 @@ function linuxSecretServiceDiagnostic(
   environment: NodeJS.ProcessEnv,
 ): LarkSetupDiagnosticError {
   const common = 'Run setup as the target logged-in user (not via sudo or a detached SSH session). '
-    + 'For a headless server or container, use the documented manual environment-provider deployment; '
-    + '--no-service does not change this wizard\'s credential provider.'
+    + 'For a headless server or container, use the default auto fallback or rerun with '
+    + '--linux-credential-provider protected-file.'
   if (commandErrorCode(result) === 'ENOENT') {
     return new LarkSetupDiagnosticError(
       `Linux Secret Service ${operation} cannot find ${linuxSecretTool}. Install libsecret-tools and a Secret Service provider, then retry. ${common}`,
@@ -566,6 +596,107 @@ export function preflightLarkCredentialProvider(provider: SetupCredentialProvide
   if (provider === 'linux-secret-service') assertLinuxSecretServiceAvailable()
 }
 
+export interface LarkCredentialProviderSelection {
+  provider: SetupCredentialProvider
+  /** Present only when Linux Secret Service was unavailable and setup selected its private-file fallback. */
+  fallbackReason?: unknown
+}
+
+export interface LarkCredentialProviderSelectionOptions extends LinuxSecretServicePreflightOptions {
+  dshHome: string
+  mode?: LarkSetupArgs['linuxCredentialProvider']
+}
+
+async function assertLinuxProtectedFileRuntimeSupported(): Promise<void> {
+  let providers: unknown
+  try {
+    const keychain = await import('@dsh-enhanced/credentials-keychain/capabilities')
+    providers = keychain.supportedCredentialProviders
+  } catch (error) {
+    throw new Error(
+      'lark-channel setup: cannot load a compatible credentials-keychain package; reinstall matching plugin versions',
+      { cause: error },
+    )
+  }
+  if (!Array.isArray(providers) || !providers.includes('linux-protected-file')) {
+    throw new Error(
+      'lark-channel setup: installed credentials-keychain does not support headless Linux; reinstall matching plugin versions',
+    )
+  }
+}
+
+/** Verifies that the headless backend can survive the same write/read/delete lifecycle as onboarding. */
+export async function assertLinuxProtectedFileAvailable(input: {
+  dshHome: string
+  randomBytes?: (size: number) => Buffer
+  afterStore?: (path: string) => void | Promise<void>
+}): Promise<void> {
+  if (!isAbsolute(input.dshHome)) throw new Error('lark-channel setup: DSH_HOME must be absolute')
+  const random = input.randomBytes ?? randomBytes
+  const path = join(input.dshHome, 'credentials-keychain',
+    `.lark-setup-preflight-${random(16).toString('hex')}.secret`)
+  const secret = random(32).toString('hex')
+  let stored = false
+  let primaryError: unknown
+  try {
+    await storeLinuxProtectedCredential(path, secret)
+    stored = true
+    await input.afterStore?.(path)
+    if (await readLinuxProtectedCredential(path) !== secret) {
+      throw new Error('lark-channel setup: Linux protected credential preflight readback did not match')
+    }
+  } catch (error) {
+    primaryError = error
+  }
+  if (stored) {
+    try {
+      await removeCredential({ provider: 'linux-protected-file', path })
+    } catch (cleanupError) {
+      if (primaryError !== undefined) {
+        throw new AggregateError(
+          [primaryError, cleanupError],
+          'lark-channel setup: Linux protected credential preflight and cleanup both failed',
+        )
+      }
+      throw cleanupError
+    }
+  }
+  if (primaryError !== undefined) throw primaryError
+}
+
+/**
+ * Prefers the desktop keyring but lets a headless Linux login continue without
+ * weakening the profile to an ambient environment variable. Unexpected setup
+ * errors remain fail-closed; only our static Secret Service diagnostics select
+ * the protected-file backend.
+ */
+export async function selectLarkCredentialProvider(
+  preferred: SetupCredentialProvider,
+  options: LarkCredentialProviderSelectionOptions,
+): Promise<LarkCredentialProviderSelection> {
+  const mode = options.mode ?? 'auto'
+  if (preferred !== 'linux-secret-service') {
+    if (mode !== 'auto') {
+      throw new Error('lark-channel setup: --linux-credential-provider is only valid on Linux')
+    }
+    return { provider: preferred }
+  }
+  if (mode === 'protected-file') {
+    await assertLinuxProtectedFileRuntimeSupported()
+    await assertLinuxProtectedFileAvailable(options)
+    return { provider: 'linux-protected-file' }
+  }
+  try {
+    assertLinuxSecretServiceAvailable(options)
+    return { provider: preferred }
+  } catch (error) {
+    if (mode === 'secret-service' || safeDiagnosticMessages(error).length === 0) throw error
+    await assertLinuxProtectedFileRuntimeSupported()
+    await assertLinuxProtectedFileAvailable(options)
+    return { provider: 'linux-protected-file', fallbackReason: error }
+  }
+}
+
 function safeDiagnosticMessages(error: unknown): string[] {
   const messages = new Set<string>()
   const visited = new Set<unknown>()
@@ -594,6 +725,251 @@ export function formatLarkSetupError(error: unknown): string {
   return diagnostics.length === 0 ? message : `${message}\n${diagnostics.map(value => `Hint: ${value}`).join('\n')}`
 }
 
+const protectedCredentialMaxBytes = 65_536
+
+function currentLinuxCredentialUid(): number {
+  const uid = process.getuid?.()
+  const effectiveUid = process.geteuid?.()
+  if (uid === undefined || effectiveUid === undefined || uid !== effectiveUid) {
+    throw new Error('lark-channel setup: Linux protected credentials require matching real and effective user IDs')
+  }
+  return uid
+}
+
+function linuxProtectedCredentialDirectory(path: string): string {
+  if (!isAbsolute(path) || normalize(path) !== path || path.length > 1_024
+    || path.includes('\0') || !path.endsWith('.secret')) {
+    throw new Error('lark-channel setup: invalid Linux protected credential path')
+  }
+  return dirname(path)
+}
+
+async function ensureLinuxProtectedCredentialDirectory(path: string): Promise<void> {
+  const directory = linuxProtectedCredentialDirectory(path)
+  await mkdir(directory, { recursive: true, mode: 0o700 })
+  let metadata = await lstat(directory)
+  const uid = currentLinuxCredentialUid()
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()
+    || metadata.uid !== uid) {
+    throw new Error('lark-channel setup: Linux protected credential directory is not private to the current user')
+  }
+  if ((metadata.mode & 0o7777) !== 0o700) {
+    await chmod(directory, 0o700)
+    metadata = await lstat(directory)
+    if (!metadata.isDirectory() || metadata.isSymbolicLink()
+      || metadata.uid !== uid || (metadata.mode & 0o7777) !== 0o700) {
+      throw new Error('lark-channel setup: Linux protected credential directory could not be secured')
+    }
+  }
+}
+
+async function assertLinuxProtectedCredentialDirectory(path: string): Promise<void> {
+  const directory = linuxProtectedCredentialDirectory(path)
+  const metadata = await lstat(directory)
+  const uid = currentLinuxCredentialUid()
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()
+    || metadata.uid !== uid || (metadata.mode & 0o7777) !== 0o700) {
+    throw new Error('lark-channel setup: Linux protected credential directory failed its security check')
+  }
+}
+
+async function storeLinuxProtectedCredential(path: string, secret: string): Promise<void> {
+  const value = Buffer.from(secret, 'utf8')
+  if (value.byteLength < 1 || value.byteLength > protectedCredentialMaxBytes || value.includes(0)) {
+    value.fill(0)
+    throw new Error('lark-channel setup: Linux protected credential value is invalid')
+  }
+  let file: Awaited<ReturnType<typeof open>> | undefined
+  let created = false
+  try {
+    await ensureLinuxProtectedCredentialDirectory(path)
+    // The locator contains a fresh random version, so an existing final item
+    // is a collision or interference. O_EXCL avoids following or replacing it.
+    file = await open(path,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+      0o600)
+    created = true
+    await file.chmod(0o600)
+    await file.writeFile(value)
+    await file.sync()
+    const metadata = await file.stat()
+    const uid = currentLinuxCredentialUid()
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+      || metadata.uid !== uid || (metadata.mode & 0o7777) !== 0o600
+      || metadata.size !== value.byteLength) {
+      throw new Error('lark-channel setup: Linux protected credential file failed its security check')
+    }
+    await file.close()
+    file = undefined
+    await syncDirectory(dirname(path))
+  } catch (error) {
+    try {
+      await file?.close()
+    } catch {}
+    file = undefined
+    if (created) {
+      try {
+        await unlink(path)
+        await syncDirectory(dirname(path))
+      } catch (cleanupError) {
+        if (fileSystemErrorCode(cleanupError) !== 'ENOENT') {
+          throw new AggregateError(
+            [error, cleanupError],
+            'lark-channel setup: Linux protected credential write and cleanup both failed',
+          )
+        }
+      }
+    }
+    throw error
+  } finally {
+    value.fill(0)
+    await file?.close()
+  }
+}
+
+async function readLinuxProtectedCredential(path: string): Promise<string> {
+  await assertLinuxProtectedCredentialDirectory(path)
+  let file: Awaited<ReturnType<typeof open>> | undefined
+  let value: Buffer | undefined
+  try {
+    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const before = await file.stat()
+    const uid = currentLinuxCredentialUid()
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1
+      || before.uid !== uid || (before.mode & 0o7777) !== 0o600
+      || before.size < 1 || before.size > protectedCredentialMaxBytes) {
+      throw new Error('lark-channel setup: Linux protected credential file failed its security check')
+    }
+    value = Buffer.alloc(protectedCredentialMaxBytes + 1)
+    let bytesRead = 0
+    while (bytesRead < value.byteLength) {
+      const result = await file.read(value, bytesRead, value.byteLength - bytesRead, bytesRead)
+      if (result.bytesRead === 0) break
+      bytesRead += result.bytesRead
+    }
+    const after = await file.stat()
+    if (bytesRead < 1 || bytesRead > protectedCredentialMaxBytes
+      || bytesRead !== after.size
+      || after.dev !== before.dev || after.ino !== before.ino
+      || !after.isFile() || after.nlink !== 1 || after.uid !== uid || (after.mode & 0o7777) !== 0o600
+      || value.subarray(0, bytesRead).includes(0)) {
+      throw new Error('lark-channel setup: Linux protected credential value is invalid')
+    }
+    return value.toString('utf8', 0, bytesRead)
+  } catch (error) {
+    throw new Error('lark-channel setup: Linux protected credential lookup failed', { cause: error })
+  } finally {
+    value?.fill(0)
+    await file?.close()
+  }
+}
+
+export interface RawSecretTerminalOptions {
+  input?: NodeJS.ReadStream
+  output?: NodeJS.WriteStream
+  signals?: {
+    once(event: 'SIGHUP' | 'SIGINT' | 'SIGTERM', listener: () => void): unknown
+    off(event: 'SIGHUP' | 'SIGINT' | 'SIGTERM', listener: () => void): unknown
+  }
+}
+
+export async function readSecretFromRawTerminal(
+  prompt: string,
+  options: RawSecretTerminalOptions = {},
+): Promise<string> {
+  const input = options.input ?? process.stdin
+  const output = options.output ?? process.stdout
+  const signals = options.signals ?? process
+  if (!input.isTTY || !output.isTTY || typeof input.setRawMode !== 'function') {
+    throw new Error('lark-channel setup: no secure interactive terminal is available for the App Secret')
+  }
+  output.write(prompt)
+  return new Promise<string>((resolve, reject) => {
+    const bytes: number[] = []
+    const wasRaw = input.isRaw
+    const wasPaused = input.isPaused()
+    let settled = false
+    const signalHandlers = new Map<'SIGHUP' | 'SIGINT' | 'SIGTERM', () => void>()
+    let onData: (chunk: Buffer | string) => void
+    const finish = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      let restorationError: unknown
+      try {
+        input.off('data', onData)
+        for (const [signal, listener] of signalHandlers) signals.off(signal, listener)
+        input.setRawMode(Boolean(wasRaw))
+        if (wasPaused) input.pause()
+      } catch (caught) {
+        restorationError = caught
+      } finally {
+        output.write('\n')
+      }
+      const secretBytes = Buffer.from(bytes)
+      const secret = secretBytes.toString('utf8')
+      secretBytes.fill(0)
+      bytes.fill(0)
+      if (restorationError !== undefined) {
+        reject(new Error('lark-channel setup: failed to restore terminal input mode', { cause: restorationError }))
+      } else if (error !== undefined) reject(error)
+      else if (secret.length === 0) reject(new Error('lark-channel setup: Linux could not read the App Secret securely'))
+      else resolve(secret)
+    }
+    onData = (chunk: Buffer | string): void => {
+      const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      try {
+        for (const byte of value) {
+          if (byte === 3) {
+            finish(new Error('lark-channel setup: App Secret input was cancelled'))
+            return
+          }
+          if (byte === 10 || byte === 13) {
+            finish()
+            return
+          }
+          if (byte === 8 || byte === 127) {
+            bytes.pop()
+            continue
+          }
+          if (byte < 32 || bytes.length >= protectedCredentialMaxBytes) {
+            finish(new Error('lark-channel setup: App Secret input is invalid or too large'))
+            return
+          }
+          bytes.push(byte)
+        }
+      } finally {
+        value.fill(0)
+      }
+    }
+    for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM'] as const) {
+      const listener = (): void => finish(new Error(`lark-channel setup: App Secret input interrupted by ${signal}`))
+      signalHandlers.set(signal, listener)
+      signals.once(signal, listener)
+    }
+    try {
+      input.setRawMode(true)
+      input.on('data', onData)
+      input.resume()
+    } catch (error) {
+      finish(new Error('lark-channel setup: could not enter secure terminal input mode', { cause: error }))
+    }
+  })
+}
+
+async function readLinuxManualSecret(): Promise<string> {
+  if (defaultLinuxSecretToolAvailable('/usr/bin/systemd-ask-password')) {
+    const prompt = spawnSync('/usr/bin/systemd-ask-password', ['飞书 App Secret：'], {
+      encoding: 'utf8', env: linuxCredentialEnv(), maxBuffer: 128 * 1024, stdio: ['inherit', 'pipe', 'inherit'],
+    })
+    const secret = typeof prompt.stdout === 'string' ? prompt.stdout.replace(/[\r\n]+$/u, '') : ''
+    if (prompt.status !== 0 || secret.length === 0) {
+      throw new Error('lark-channel setup: Linux could not read the App Secret securely')
+    }
+    return secret
+  }
+  return readSecretFromRawTerminal('\n飞书 App Secret（输入不会回显）：')
+}
+
 function executeSecretWrite(
   request: SecretWriteRequest,
   env: NodeJS.ProcessEnv,
@@ -616,28 +992,27 @@ function executeSecretWrite(
   }
 }
 
-function storeSecret(
+async function storeSecret(
   provider: SetupCredentialProvider,
   service: string,
   account: string,
   credentialPath?: string,
-): void {
+): Promise<void> {
   if (provider === 'macos-keychain') {
     process.stdout.write('\n请在 macOS Keychain 的安全提示中输入 App Secret（输入不会回显）：\n')
     runSecurity(['add-generic-password', '-U', '-a', account, '-s', service, '-w'], 'inherit')
     return
   }
-  if (provider === 'linux-secret-service') {
-    const prompt = spawnSync('/usr/bin/systemd-ask-password', ['飞书 App Secret：'], {
-      encoding: 'utf8', env: linuxCredentialEnv(), maxBuffer: 128 * 1024, stdio: ['inherit', 'pipe', 'inherit'],
-    })
-    const secret = typeof prompt.stdout === 'string' ? prompt.stdout.replace(/[\r\n]+$/u, '') : ''
-    if (prompt.status !== 0 || secret.length === 0) {
-      throw new Error('lark-channel setup: Linux could not read the App Secret securely')
+  if (provider === 'linux-secret-service' || provider === 'linux-protected-file') {
+    const secret = await readLinuxManualSecret()
+    if (provider === 'linux-protected-file') {
+      if (credentialPath === undefined) throw new Error('lark-channel setup: missing Linux protected credential path')
+      await storeLinuxProtectedCredential(credentialPath, secret)
+    } else {
+      const environment = linuxCredentialEnv()
+      executeSecretWrite(createSecretServiceWriteRequest(service, account, secret), environment,
+        result => linuxSecretServiceDiagnostic('credential store', result, environment))
     }
-    const environment = linuxCredentialEnv()
-    executeSecretWrite(createSecretServiceWriteRequest(service, account, secret), environment,
-      result => linuxSecretServiceDiagnostic('credential store', result, environment))
     return
   }
   if (credentialPath === undefined || (!isAbsolute(credentialPath) && !win32.isAbsolute(credentialPath))) {
@@ -650,13 +1025,13 @@ function storeSecret(
   if (result.status !== 0) throw new Error('lark-channel setup: Windows DPAPI operation failed')
 }
 
-function storeGeneratedSecret(
+async function storeGeneratedSecret(
   provider: SetupCredentialProvider,
   service: string,
   account: string,
   secret: string,
   credentialPath?: string,
-): void {
+): Promise<void> {
   if (provider === 'macos-keychain') {
     const request = createKeychainWriteRequest(service, account, secret)
     try {
@@ -676,18 +1051,23 @@ function storeGeneratedSecret(
       result => linuxSecretServiceDiagnostic('credential store', result, environment))
     return
   }
+  if (provider === 'linux-protected-file') {
+    if (credentialPath === undefined) throw new Error('lark-channel setup: missing Linux protected credential path')
+    await storeLinuxProtectedCredential(credentialPath, secret)
+    return
+  }
   if (credentialPath === undefined) throw new Error('lark-channel setup: missing DPAPI credential path')
   executeSecretWrite(createWindowsDpapiWriteRequest(credentialPath, secret), {
     PATH: 'C:\\Windows\\System32;C:\\Windows', SystemRoot: 'C:\\Windows',
   }, 'lark-channel setup: Windows DPAPI operation failed')
 }
 
-function readSecret(
+async function readSecret(
   provider: SetupCredentialProvider,
   service: string,
   account: string,
   credentialPath?: string,
-): string {
+): Promise<string> {
   let value = ''
   if (provider === 'macos-keychain') {
     value = runSecurity(['find-generic-password', '-w', '-a', account, '-s', service], 'pipe')
@@ -699,6 +1079,9 @@ function readSecret(
     })
     if (result.status !== 0) throw linuxSecretServiceDiagnostic('credential lookup', result, environment)
     value = typeof result.stdout === 'string' ? result.stdout.trimEnd() : ''
+  } else if (provider === 'linux-protected-file') {
+    if (credentialPath === undefined) throw new Error('lark-channel setup: missing Linux protected credential path')
+    value = await readLinuxProtectedCredential(credentialPath)
   } else {
     if (credentialPath === undefined) throw new Error('lark-channel setup: missing DPAPI credential path')
     const result = spawnSync(windowsPowerShell, [
@@ -737,7 +1120,7 @@ function exactYamlStringSequence(node: Node | undefined, expected: readonly stri
 }
 
 function exactManagedCredentialHandleShape(handle: YAMLMap, provider: SetupCredentialProvider): boolean {
-  const expectedKeys = provider === 'windows-dpapi'
+  const expectedKeys = provider === 'windows-dpapi' || provider === 'linux-protected-file'
     ? ['consumers', 'id', 'maxLeaseMs', 'path', 'provider', 'purposes']
     : ['account', 'consumers', 'id', 'maxLeaseMs', 'provider', 'purposes', 'service']
   const value = handle.toJSON() as Record<string, unknown>
@@ -749,7 +1132,9 @@ function exactManagedCredentialHandleShape(handle: YAMLMap, provider: SetupCrede
 
 function credentialHandleAliasesLocator(handle: unknown, locator: SetupCredentialLocator): boolean {
   if (!isMap(handle) || handle.get('provider') !== locator.provider) return false
-  if (locator.provider === 'windows-dpapi') return handle.get('path') === locator.path
+  if (locator.provider === 'windows-dpapi' || locator.provider === 'linux-protected-file') {
+    return handle.get('path') === locator.path
+  }
   return handle.get('service') === locator.service && handle.get('account') === locator.account
 }
 
@@ -786,7 +1171,10 @@ export function findManagedLarkCredentialLocator(
   const handle = matchingHandles[0]
   if (!isMap(handle)) return undefined
   const provider = handle.get('provider')
-  if ((provider !== 'macos-keychain' && provider !== 'linux-secret-service' && provider !== 'windows-dpapi')
+  if ((provider !== 'macos-keychain'
+      && provider !== 'linux-protected-file'
+      && provider !== 'linux-secret-service'
+      && provider !== 'windows-dpapi')
     || !exactManagedCredentialHandleShape(handle, provider)) return undefined
   if (provider === 'macos-keychain' || provider === 'linux-secret-service') {
     const service = handle.get('service')
@@ -804,16 +1192,18 @@ export function findManagedLarkCredentialLocator(
     if (handles.items.some(item => item !== handle && credentialHandleAliasesLocator(item, locator))) return undefined
     return locator
   }
-  if (provider === 'windows-dpapi') {
+  if (provider === 'windows-dpapi' || provider === 'linux-protected-file') {
     const path = handle.get('path')
     if (typeof path !== 'string') return undefined
     const directory = platformJoin(input.dshHome, 'credentials-keychain')
-    const legacyPath = platformJoin(directory, `lark-${input.profile}-${account}.clixml`)
+    const extension = provider === 'windows-dpapi' ? '.clixml' : '.secret'
+    const legacyPath = platformJoin(directory, `lark-${input.profile}-${account}${extension}`)
     const versionPrefix = platformJoin(directory, `lark-${input.profile}-${account}-`)
-    const version = path.startsWith(versionPrefix) && path.endsWith('.clixml')
-      ? path.slice(versionPrefix.length, -'.clixml'.length)
+    const version = path.startsWith(versionPrefix) && path.endsWith(extension)
+      ? path.slice(versionPrefix.length, -extension.length)
       : undefined
-    if (path !== legacyPath && (version === undefined || !credentialVersionPattern.test(version))) return undefined
+    const acceptsLegacy = provider === 'windows-dpapi' && path === legacyPath
+    if (!acceptsLegacy && (version === undefined || !credentialVersionPattern.test(version))) return undefined
     const locator: SetupCredentialLocator = { provider, path }
     if (handles.items.some(item => item !== handle && credentialHandleAliasesLocator(item, locator))) return undefined
     return locator
@@ -822,12 +1212,14 @@ export function findManagedLarkCredentialLocator(
 }
 
 async function removeCredential(locator: SetupCredentialLocator): Promise<void> {
-  if (locator.provider === 'windows-dpapi') {
+  if (locator.provider === 'windows-dpapi' || locator.provider === 'linux-protected-file') {
     try {
       await unlink(locator.path)
+      if (locator.provider === 'linux-protected-file') await syncDirectory(dirname(locator.path))
     } catch (error) {
       if (fileSystemErrorCode(error) !== 'ENOENT') {
-        throw new Error('lark-channel setup: Windows DPAPI credential cleanup failed', { cause: error })
+        const backend = locator.provider === 'windows-dpapi' ? 'Windows DPAPI' : 'Linux protected file'
+        throw new Error(`lark-channel setup: ${backend} credential cleanup failed`, { cause: error })
       }
     }
     return
@@ -1095,9 +1487,12 @@ export async function withProfileSetupLock<T>(
 async function atomicWrite(path: string, value: string): Promise<void> {
   const temporary = join(dirname(path),
     `.cordis.patch.yml.lark-setup-${process.pid}-${randomBytes(8).toString('hex')}`)
+  let created = false
   try {
-    const file = await open(temporary, 'w', 0o600)
+    const file = await open(temporary, 'wx', 0o600)
+    created = true
     try {
+      await file.chmod(0o600)
       await file.writeFile(value, 'utf8')
       await file.sync()
     } finally {
@@ -1106,7 +1501,7 @@ async function atomicWrite(path: string, value: string): Promise<void> {
     await rename(temporary, path)
     await syncDirectory(dirname(path))
   } catch (error) {
-    await rm(temporary, { force: true })
+    if (created) await rm(temporary, { force: true })
     throw error
   }
 }
@@ -1162,10 +1557,15 @@ export interface RecoverLarkSetupJournalInput {
   profile: string
   profileLockOptions?: ProfileSetupLockOptions
   operations?: RecoverLarkSetupJournalOperations
+  allowDeferredSecretServiceCleanup?: boolean
 }
 
 function setupJournalPath(patchPath: string): string {
   return `${patchPath}.lark-setup.journal.json`
+}
+
+function deferredCredentialCleanupPath(patchPath: string): string {
+  return `${patchPath}.lark-credential-cleanup.json`
 }
 
 function textSha256(value: string): string {
@@ -1178,8 +1578,14 @@ function escapeRegularExpression(value: string): string {
 
 function credentialLocatorEquals(left: SetupCredentialLocator, right: SetupCredentialLocator): boolean {
   if (left.provider !== right.provider) return false
-  if (left.provider === 'windows-dpapi' && right.provider === 'windows-dpapi') return left.path === right.path
-  if (left.provider === 'windows-dpapi' || right.provider === 'windows-dpapi') return false
+  if ((left.provider === 'windows-dpapi' && right.provider === 'windows-dpapi')
+    || (left.provider === 'linux-protected-file' && right.provider === 'linux-protected-file')) {
+    return left.path === right.path
+  }
+  if (left.provider === 'windows-dpapi'
+    || left.provider === 'linux-protected-file'
+    || right.provider === 'windows-dpapi'
+    || right.provider === 'linux-protected-file') return false
   return left.service === right.service && left.account === right.account
 }
 
@@ -1211,27 +1617,224 @@ function validateJournalCredentialLocator(input: {
     }
     return { provider: locator.provider, service: locator.service, account: locator.account }
   }
-  if (locator.provider === 'windows-dpapi') {
+  if (locator.provider === 'windows-dpapi' || locator.provider === 'linux-protected-file') {
     if (typeof locator.path !== 'string') {
-      throw new Error('lark-channel setup: setup journal DPAPI locator is invalid')
+      throw new Error('lark-channel setup: setup journal file credential locator is invalid')
     }
     const directory = platformJoin(input.dshHome, 'credentials-keychain')
     if (dirname(locator.path) !== directory) {
-      throw new Error('lark-channel setup: setup journal DPAPI locator is outside the credential directory')
+      throw new Error('lark-channel setup: setup journal file credential locator is outside the credential directory')
     }
     const name = locator.path.slice(directory.length + 1)
     const profile = escapeRegularExpression(input.profile)
     const account = input.stagedAccount === undefined
       ? '[A-Za-z0-9][A-Za-z0-9._-]{0,63}'
       : escapeRegularExpression(input.stagedAccount)
-    const versioned = new RegExp(`^lark-${profile}-${account}-[0-9a-f]{32}\\.clixml$`, 'u')
+    const extension = locator.provider === 'windows-dpapi' ? 'clixml' : 'secret'
+    const versioned = new RegExp(`^lark-${profile}-${account}-[0-9a-f]{32}\\.${extension}$`, 'u')
     const legacy = new RegExp(`^lark-${profile}-${account}\\.clixml$`, 'u')
-    if (!versioned.test(name) && (input.stagedAccount !== undefined || !legacy.test(name))) {
-      throw new Error('lark-channel setup: setup journal DPAPI locator is not setup-managed')
+    const acceptsLegacy = locator.provider === 'windows-dpapi'
+      && input.stagedAccount === undefined
+      && legacy.test(name)
+    if (!versioned.test(name) && !acceptsLegacy) {
+      throw new Error('lark-channel setup: setup journal file credential locator is not setup-managed')
     }
     return { provider: locator.provider, path: locator.path }
   }
   throw new Error('lark-channel setup: setup journal credential provider is invalid')
+}
+
+interface StoredDeferredCredentialCleanup {
+  version: 1
+  patchPath: string
+  dshHome: string
+  profile: string
+  locators: SetupCredentialLocator[]
+  sha256: string
+}
+
+function profileReferencesCredentialLocator(profilePatch: string, locator: SetupCredentialLocator): boolean {
+  const document = parseDocument(profilePatch, { uniqueKeys: true })
+  if (document.errors.length > 0 || !isSeq(document.contents)) {
+    throw new Error('lark-channel setup: cannot prove a deferred credential is inactive in an invalid profile')
+  }
+  const rows = document.contents.items.filter(item => isMap(item)
+    && (item.get('id') as unknown) === 'dsh-enhanced-credentials-keychain') as YAMLMap[]
+  for (const row of rows) {
+    const config = row.get('config', true) as Node | undefined
+    if (!isMap(config)) {
+      throw new Error('lark-channel setup: cannot prove a deferred credential is inactive in malformed credentials config')
+    }
+    const handles = config.get('handles', true) as Node | undefined
+    if (handles === undefined) continue
+    if (!isSeq(handles)) {
+      throw new Error('lark-channel setup: cannot prove a deferred credential is inactive in malformed handles config')
+    }
+    if (handles.items.some(handle => credentialHandleAliasesLocator(handle, locator))) return true
+  }
+  return false
+}
+
+function deferredCleanupChecksum(locators: readonly SetupCredentialLocator[]): string {
+  return textSha256(JSON.stringify(locators))
+}
+
+async function readDeferredCredentialCleanup(input: {
+  patchPath: string
+  dshHome: string
+  profile: string
+}): Promise<StoredDeferredCredentialCleanup | undefined> {
+  const path = deferredCredentialCleanupPath(input.patchPath)
+  let file: Awaited<ReturnType<typeof open>> | undefined
+  let buffer: Buffer | undefined
+  let text: string
+  try {
+    file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
+    const before = await file.stat()
+    const uid = currentLinuxCredentialUid()
+    if (!before.isFile() || before.nlink !== 1 || before.uid !== uid
+      || (before.mode & 0o7777) !== 0o600 || before.size < 1 || before.size > 1024 * 1024) {
+      throw new Error('lark-channel setup: deferred credential cleanup record failed its security check')
+    }
+    buffer = Buffer.alloc(1024 * 1024 + 1)
+    let bytesRead = 0
+    while (bytesRead < buffer.byteLength) {
+      const result = await file.read(buffer, bytesRead, buffer.byteLength - bytesRead, bytesRead)
+      if (result.bytesRead === 0) break
+      bytesRead += result.bytesRead
+    }
+    const after = await file.stat()
+    if (bytesRead !== after.size || after.dev !== before.dev || after.ino !== before.ino
+      || !after.isFile() || after.nlink !== 1 || after.uid !== uid || (after.mode & 0o7777) !== 0o600) {
+      throw new Error('lark-channel setup: deferred credential cleanup record changed while being read')
+    }
+    text = buffer.toString('utf8', 0, bytesRead)
+  } catch (error) {
+    if (fileSystemErrorCode(error) === 'ENOENT') return undefined
+    throw error
+  } finally {
+    buffer?.fill(0)
+    await file?.close()
+  }
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch (error) {
+    throw new Error('lark-channel setup: deferred credential cleanup record is not valid JSON', { cause: error })
+  }
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('lark-channel setup: deferred credential cleanup record is invalid')
+  }
+  const record = value as Partial<StoredDeferredCredentialCleanup>
+  const keys = Object.keys(record).sort()
+  if (keys.join('\0') !== ['dshHome', 'locators', 'patchPath', 'profile', 'sha256', 'version'].join('\0')
+    || record.version !== 1
+    || record.patchPath !== input.patchPath
+    || record.dshHome !== input.dshHome
+    || record.profile !== input.profile
+    || !Array.isArray(record.locators)
+    || record.locators.length < 1
+    || record.locators.length > 256) {
+    throw new Error('lark-channel setup: deferred credential cleanup record identity is invalid')
+  }
+  const locators = record.locators.map(locator => validateJournalCredentialLocator({
+    locator,
+    dshHome: input.dshHome,
+    profile: input.profile,
+  }))
+  if (record.sha256 !== deferredCleanupChecksum(locators)
+    || new Set(locators.map(locator => JSON.stringify(locator))).size !== locators.length) {
+    throw new Error('lark-channel setup: deferred credential cleanup record checksum or entries are invalid')
+  }
+  return { version: 1, ...input, locators, sha256: record.sha256 }
+}
+
+async function persistDeferredCredentialCleanup(input: {
+  patchPath: string
+  dshHome: string
+  profile: string
+  locators: readonly SetupCredentialLocator[]
+}): Promise<void> {
+  const identifiers = new Set<string>()
+  const locators = input.locators.map(locator => validateJournalCredentialLocator({
+    locator,
+    dshHome: input.dshHome,
+    profile: input.profile,
+  })).filter(locator => {
+    const identifier = JSON.stringify(locator)
+    if (identifiers.has(identifier)) return false
+    identifiers.add(identifier)
+    return true
+  })
+  const path = deferredCredentialCleanupPath(input.patchPath)
+  if (locators.length === 0) {
+    try {
+      await unlink(path)
+      await syncDirectory(dirname(path))
+    } catch (error) {
+      if (fileSystemErrorCode(error) !== 'ENOENT') throw error
+    }
+    return
+  }
+  if (locators.length > 256) throw new Error('lark-channel setup: too many deferred credential cleanup entries')
+  const record: StoredDeferredCredentialCleanup = {
+    version: 1,
+    patchPath: input.patchPath,
+    dshHome: input.dshHome,
+    profile: input.profile,
+    locators,
+    sha256: deferredCleanupChecksum(locators),
+  }
+  await atomicWrite(path, `${JSON.stringify(record)}\n`)
+}
+
+function canDeferSecretServiceCleanup(locator: SetupCredentialLocator, error: unknown): boolean {
+  return locator.provider === 'linux-secret-service' && safeDiagnosticMessages(error).length > 0
+}
+
+async function deferInactiveCredentialCleanup(input: {
+  patchPath: string
+  dshHome: string
+  profile: string
+  profilePatch: string
+  locator: SetupCredentialLocator
+}): Promise<void> {
+  if (profileReferencesCredentialLocator(input.profilePatch, input.locator)) {
+    throw new Error('lark-channel setup: refusing to defer cleanup for a credential still referenced by the profile')
+  }
+  const current = await readDeferredCredentialCleanup(input)
+  await persistDeferredCredentialCleanup({
+    patchPath: input.patchPath,
+    dshHome: input.dshHome,
+    profile: input.profile,
+    locators: [...(current?.locators ?? []), input.locator],
+  })
+}
+
+/** Best-effort retry for already proven-inactive credentials. Call while holding the profile lock. */
+export async function retryDeferredLarkCredentialCleanup(input: {
+  patchPath: string
+  dshHome: string
+  profile: string
+  removeCredential?: NonNullable<ValidatedLarkOwnerSetupOperations['removeCredential']>
+}): Promise<number> {
+  const pending = await readDeferredCredentialCleanup(input)
+  if (pending === undefined) return 0
+  const profilePatch = await readFile(input.patchPath, 'utf8')
+  const remove = input.removeCredential ?? removeCredential
+  const remaining: SetupCredentialLocator[] = []
+  for (const locator of pending.locators) {
+    if (profileReferencesCredentialLocator(profilePatch, locator)) {
+      throw new Error('lark-channel setup: a deferred credential cleanup entry became active; refusing cleanup')
+    }
+    try {
+      await removeCredentialIdempotently(locator, remove)
+    } catch {
+      remaining.push(locator)
+    }
+  }
+  await persistDeferredCredentialCleanup({ ...input, locators: remaining })
+  return remaining.length
 }
 
 function normalizeSetupJournalInput(input: PersistLarkSetupJournalInput): PersistLarkSetupJournalInput {
@@ -1895,6 +2498,27 @@ async function withDeliveryOwnerSetupLock<T>(
   return withProfileSetupLock(`${resourcePath}.lark-owner`, operation, options)
 }
 
+async function removeInactiveCredentialForRecovery(input: {
+  recovery: RecoverLarkSetupJournalInput
+  locator: SetupCredentialLocator
+  profilePatch: string
+  remove: NonNullable<ValidatedLarkOwnerSetupOperations['removeCredential']>
+}): Promise<void> {
+  try {
+    await removeCredentialIdempotently(input.locator, input.remove)
+  } catch (error) {
+    if (!input.recovery.allowDeferredSecretServiceCleanup
+      || !canDeferSecretServiceCleanup(input.locator, error)) throw error
+    await deferInactiveCredentialCleanup({
+      patchPath: input.recovery.patchPath,
+      dshHome: input.recovery.dshHome,
+      profile: input.recovery.profile,
+      profilePatch: input.profilePatch,
+      locator: input.locator,
+    })
+  }
+}
+
 async function recoverLarkSetupJournalRecordUnlocked(
   input: RecoverLarkSetupJournalInput,
   journal: StoredLarkSetupJournal,
@@ -1908,7 +2532,12 @@ async function recoverLarkSetupJournalRecordUnlocked(
     if (current !== journal.originalPatch) {
       throw new Error('lark-channel setup: staging journal conflicts with the live profile')
     }
-    await removeCredentialIdempotently(journal.stagedCredential!, remove)
+    await removeInactiveCredentialForRecovery({
+      recovery: input,
+      locator: journal.stagedCredential!,
+      profilePatch: current,
+      remove,
+    })
     await clearLarkSetupJournal(input.patchPath)
     return true
   }
@@ -1918,7 +2547,12 @@ async function recoverLarkSetupJournalRecordUnlocked(
       throw new Error('lark-channel setup: candidate recovery refused because the live profile diverged')
     }
     if (journal.stagedCredential !== undefined) {
-      await removeCredentialIdempotently(journal.stagedCredential, remove)
+      await removeInactiveCredentialForRecovery({
+        recovery: input,
+        locator: journal.stagedCredential,
+        profilePatch: journal.originalPatch,
+        remove,
+      })
     }
     await clearLarkSetupJournal(input.patchPath)
     return true
@@ -1935,7 +2569,20 @@ async function recoverLarkSetupJournalRecordUnlocked(
     if (journal.phase !== 'paired') await persistLarkSetupJournal(journalPersistInput(journal, 'paired'))
     if (journal.previousCredential !== undefined
       && !credentialLocatorEquals(journal.previousCredential, journal.stagedCredential!)) {
-      await retirePreviousCredential(journal.previousCredential, remove)
+      try {
+        await retirePreviousCredential(journal.previousCredential, remove)
+      } catch (error) {
+        const migratingToProtectedFile = journal.stagedCredential?.provider === 'linux-protected-file'
+        if ((!input.allowDeferredSecretServiceCleanup && !migratingToProtectedFile)
+          || !canDeferSecretServiceCleanup(journal.previousCredential, error)) throw error
+        await deferInactiveCredentialCleanup({
+          patchPath: input.patchPath,
+          dshHome: input.dshHome,
+          profile: input.profile,
+          profilePatch: journal.updatedPatch!,
+          locator: journal.previousCredential,
+        })
+      }
     }
     if (journal.installService) await install()
   }
@@ -1986,6 +2633,14 @@ async function recoverValidatedRefreshJournalUnlocked(
 }
 
 async function recoverLarkSetupJournalUnlocked(input: RecoverLarkSetupJournalInput): Promise<boolean> {
+  await retryDeferredLarkCredentialCleanup({
+    patchPath: input.patchPath,
+    dshHome: input.dshHome,
+    profile: input.profile,
+    ...(input.operations?.removeCredential === undefined
+      ? {}
+      : { removeCredential: input.operations.removeCredential }),
+  })
   const journal = await readLarkSetupJournal(input)
   if (journal === undefined) return false
   if (journal.operation === 'refresh' && journal.phase === 'validated') {
@@ -2209,6 +2864,24 @@ async function abortStagingJournal(input: {
       cause: input.setupError,
     })
   }
+  if (input.stagedCredential.provider === 'linux-protected-file'
+    && fileSystemErrorCode(input.setupError) === 'EEXIST') {
+    // O_EXCL proves this setup never created the colliding path. Removing it
+    // here would delete somebody else's file merely because our random locator
+    // collided (or was deliberately pre-created). Clear only our journal; the
+    // next invocation will generate a new versioned locator.
+    try {
+      await clearLarkSetupJournal(input.patchPath)
+    } catch (journalError) {
+      throw new AggregateError(
+        [input.setupError, journalError],
+        'lark-channel setup: protected credential path collided and setup journal cleanup also failed',
+      )
+    }
+    throw new Error('lark-channel setup: protected credential path collision; rerun setup', {
+      cause: input.setupError,
+    })
+  }
   try {
     await removeCredentialIdempotently(input.stagedCredential, input.remove)
     await clearLarkSetupJournal(input.patchPath)
@@ -2270,6 +2943,7 @@ export async function executeLarkSetupProfileTransaction(
         readEffectiveProfile,
         ...(input.operations.afterCommit === undefined ? {} : { installService: input.operations.afterCommit }),
       },
+      allowDeferredSecretServiceCleanup: input.credentialProvider === 'linux-protected-file',
     })
     const originalPatch = await readFile(input.patchPath, 'utf8')
     const effectiveProfile = await readEffectiveProfile(input.args.profile)
@@ -2299,7 +2973,8 @@ export async function executeLarkSetupProfileTransaction(
       profile: input.args.profile,
       account: input.args.account,
     })
-    if (stagedCredential.provider === 'windows-dpapi') {
+    if (stagedCredential.provider === 'windows-dpapi'
+      || stagedCredential.provider === 'linux-protected-file') {
       await mkdir(dirname(stagedCredential.path), { recursive: true, mode: 0o700 })
     }
     const transactionId = randomBytes(16).toString('hex')
@@ -2341,7 +3016,9 @@ export async function executeLarkSetupProfileTransaction(
         }
         const keychainService = stagedCredential.provider === 'windows-dpapi'
           ? `dsh/lark/${input.args.profile}/${input.args.account}/versions/windows-dpapi`
-          : stagedCredential.service
+          : stagedCredential.provider === 'linux-protected-file'
+            ? `dsh/lark/${input.args.profile}/${input.args.account}/versions/linux-protected-file`
+            : stagedCredential.service
         return {
           owner,
           updatedPatch: configureLarkProfilePatch({
@@ -2356,7 +3033,10 @@ export async function executeLarkSetupProfileTransaction(
             keychainAccount: input.args.account,
             credentialProvider: input.credentialProvider,
             agentTools: input.args.agentTools,
-            ...(stagedCredential.provider === 'windows-dpapi' ? { credentialPath: stagedCredential.path } : {}),
+            ...(stagedCredential.provider === 'windows-dpapi'
+                || stagedCredential.provider === 'linux-protected-file'
+              ? { credentialPath: stagedCredential.path }
+              : {}),
           }),
         }
       } catch (error) {
@@ -2459,7 +3139,19 @@ export async function executeLarkSetupProfileTransaction(
     // the idempotent exact-owner handoff and converges forward.
     await persistLarkSetupJournal({ ...candidateJournal, phase: 'paired' })
     if (previousCredential !== undefined && !credentialLocatorEquals(previousCredential, stagedCredential)) {
-      await retirePreviousCredential(previousCredential, remove)
+      try {
+        await retirePreviousCredential(previousCredential, remove)
+      } catch (error) {
+        if (input.credentialProvider !== 'linux-protected-file'
+          || !canDeferSecretServiceCleanup(previousCredential, error)) throw error
+        await deferInactiveCredentialCleanup({
+          patchPath: input.patchPath,
+          dshHome: input.dshHome,
+          profile: input.args.profile,
+          profilePatch: updatedPatch,
+          locator: previousCredential,
+        })
+      }
     }
     await input.operations.afterCommit?.()
     await clearLarkSetupJournal(input.patchPath)
@@ -2472,8 +3164,11 @@ export interface LarkSetupRuntime {
   validateProfile?: NonNullable<ValidatedLarkOwnerSetupOperations['validateProfile']>
   readEffectiveProfile?: (profile: string) => string | Promise<string>
   installResidentService?: typeof installDshResidentService
+  prepareResidentService?: typeof prepareDshSystemdUserService
   journalOperations?: RecoverLarkSetupJournalOperations
-  preflightCredentialProvider?: (provider: SetupCredentialProvider) => void | Promise<void>
+  preflightCredentialProvider?: (
+    provider: SetupCredentialProvider,
+  ) => SetupCredentialProvider | void | Promise<SetupCredentialProvider | void>
 }
 
 export async function runLarkSetup(
@@ -2491,6 +3186,7 @@ export async function runLarkSetup(
   const validate = runtime.validateProfile ?? validateProfile
   const readEffectiveProfile = runtime.readEffectiveProfile ?? dumpProfile
   const installResidentService = runtime.installResidentService ?? installDshResidentService
+  const prepareResidentService = runtime.prepareResidentService ?? prepareDshSystemdUserService
   const recoveryOperations: RecoverLarkSetupJournalOperations = {
     ...runtime.journalOperations,
     readEffectiveProfile: runtime.journalOperations?.readEffectiveProfile ?? readEffectiveProfile,
@@ -2580,6 +3276,10 @@ export async function runLarkSetup(
     return
   }
   if (args.installServiceOnly) {
+    if (process.platform === 'linux') {
+      const prepared = await prepareResidentService({ dshHome, profile: args.profile })
+      if (prepared?.enabledLinger) process.stdout.write('已为当前 Linux 用户启用 linger，注销 SSH 后服务仍会保持。\n')
+    }
     const service = await withProfileSetupLock(patchPath, async () => {
       await recoverLarkSetupJournalUnlocked({
         patchPath,
@@ -2614,8 +3314,29 @@ export async function runLarkSetup(
       + `状态：${service.statusCommand}\n日志：${service.logCommand}\n`)
     return
   }
-  const credentialProvider = credentialProviderForPlatform(process.platform)
-  await (runtime.preflightCredentialProvider ?? preflightLarkCredentialProvider)(credentialProvider)
+  const preferredCredentialProvider = credentialProviderForPlatform(process.platform)
+  if (process.platform === 'linux' && args.manageService) {
+    const prepared = await prepareResidentService({ dshHome, profile: args.profile })
+    if (prepared?.enabledLinger) process.stdout.write('已为当前 Linux 用户启用 linger，注销 SSH 后服务仍会保持。\n')
+  }
+  let credentialProvider: SetupCredentialProvider
+  if (runtime.preflightCredentialProvider === undefined) {
+    const selection = await selectLarkCredentialProvider(preferredCredentialProvider, {
+      dshHome,
+      mode: args.linuxCredentialProvider,
+    })
+    credentialProvider = selection.provider
+    if (selection.fallbackReason !== undefined) {
+      process.stdout.write('Linux Secret Service 当前不可用；向导已自动切换到当前用户 0600 私有凭据文件。'
+        + '该文件未额外加密，同一 UID 与 root 可读取，但不会进入 profile、命令参数、环境变量或日志。\n')
+    }
+  } else {
+    if (args.linuxCredentialProvider !== 'auto') {
+      throw new Error('lark-channel setup: an injected credential preflight cannot be combined with an explicit Linux provider')
+    }
+    credentialProvider = await runtime.preflightCredentialProvider(preferredCredentialProvider)
+      ?? preferredCredentialProvider
+  }
   // Resolve a prior crash before prompting the user or mutating a cloud app.
   // The mutation transaction repeats this check after registration to close
   // the gap against a different setup process that completed in the meantime.
@@ -2625,6 +3346,7 @@ export async function runLarkSetup(
       dshHome,
       profile: args.profile,
       operations: recoveryOperations,
+      allowDeferredSecretServiceCleanup: credentialProvider === 'linux-protected-file',
     })
     const databasePath = deliveryDatabasePathFromEffectiveProfile(await readEffectiveProfile(args.profile), dshHome)
     await withDeliveryOwnerSetupLock(databasePath, async () => {
@@ -2677,27 +3399,34 @@ export async function runLarkSetup(
     credentialProvider,
     ...(runtime.profileLockOptions === undefined ? {} : { profileLockOptions: runtime.profileLockOptions }),
     operations: {
-      storeCredential(locator) {
+      async storeCredential(locator) {
         const service = locator.provider === 'windows-dpapi'
           ? `dsh/lark/${args.profile}/${args.account}/versions/windows-dpapi`
-          : locator.service
-        const credentialPath = locator.provider === 'windows-dpapi' ? locator.path : undefined
+          : locator.provider === 'linux-protected-file'
+            ? `dsh/lark/${args.profile}/${args.account}/versions/linux-protected-file`
+            : locator.service
+        const credentialPath = locator.provider === 'windows-dpapi'
+          || locator.provider === 'linux-protected-file' ? locator.path : undefined
         if (generatedSecret === undefined) {
-          storeSecret(credentialProvider, service, args.account, credentialPath)
+          await storeSecret(credentialProvider, service, args.account, credentialPath)
         } else {
-          storeGeneratedSecret(credentialProvider, service, args.account, generatedSecret, credentialPath)
+          await storeGeneratedSecret(credentialProvider, service, args.account, generatedSecret, credentialPath)
         }
-        process.stdout.write(`候选凭据已安全暂存到 ${credentialProvider}；旧凭据仍保持有效。\n`)
+        process.stdout.write(`候选凭据已暂存到 ${credentialProvider}；旧凭据仍保持有效。\n`)
       },
       readCredential(locator) {
         const service = locator.provider === 'windows-dpapi'
           ? `dsh/lark/${args.profile}/${args.account}/versions/windows-dpapi`
-          : locator.service
+          : locator.provider === 'linux-protected-file'
+            ? `dsh/lark/${args.profile}/${args.account}/versions/linux-protected-file`
+            : locator.service
         return readSecret(
           credentialProvider,
           service,
           args.account,
-          locator.provider === 'windows-dpapi' ? locator.path : undefined,
+          locator.provider === 'windows-dpapi' || locator.provider === 'linux-protected-file'
+            ? locator.path
+            : undefined,
         )
       },
       readEffectiveProfile,

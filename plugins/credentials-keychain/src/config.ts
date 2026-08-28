@@ -1,5 +1,5 @@
 import Schema from '@deepseek-ai/schemastery'
-import { isAbsolute, win32 } from 'node:path'
+import { isAbsolute, normalize, win32 } from 'node:path'
 import type { CredentialHandle } from './types.js'
 
 export interface Config {
@@ -56,6 +56,14 @@ function credentialPath(value: unknown): string {
   return value
 }
 
+function linuxCredentialPath(value: unknown): string {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 1_024 || value.includes('\0')
+    || !isAbsolute(value) || normalize(value) !== value) {
+    throw new Error('credentials-keychain: invalid Linux protected file path')
+  }
+  return value
+}
+
 export function normalizeHandles(input: readonly CredentialHandle[]): CredentialHandle[] {
   if (!Array.isArray(input) || input.length > 256) throw new Error('credentials-keychain: handles must contain at most 256 values')
   const identifiers = new Set<string>()
@@ -88,13 +96,19 @@ export function normalizeHandles(input: readonly CredentialHandle[]): Credential
       const value = exact(raw, ['consumers', 'id', 'maxLeaseMs', 'path', 'provider', 'purposes'])
       return { ...common, provider: discriminator.provider, path: credentialPath(value.path) }
     }
+    if (discriminator.provider === 'linux-protected-file') {
+      const value = exact(raw, ['consumers', 'id', 'maxLeaseMs', 'path', 'provider', 'purposes'])
+      return { ...common, provider: discriminator.provider, path: linuxCredentialPath(value.path) }
+    }
     throw new Error('credentials-keychain: unsupported provider')
   })
 }
 
 const handleSchema = Schema.object({
   id: Schema.string().required(),
-  provider: Schema.union(['environment', 'linux-secret-service', 'macos-keychain', 'windows-dpapi'] as const).required(),
+  provider: Schema.union([
+    'environment', 'linux-protected-file', 'linux-secret-service', 'macos-keychain', 'windows-dpapi',
+  ] as const).required(),
   environmentName: Schema.string(),
   service: Schema.string(),
   account: Schema.string(),
