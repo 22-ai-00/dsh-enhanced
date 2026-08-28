@@ -61,7 +61,7 @@ Options:
                             Required together with --permission danger-full-access
   --model-route <mode>      auto, verify, or skip (default: auto; a verify call may incur model cost)
   --dsh-version <version>   DSH version to ensure (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
-  --no-service              Do not install or restart the macOS resident service
+  --no-service              Do not install or restart the platform resident service
   --yes                     Choose the safe default without the installer menu
   --dry-run                 Print the complete plan without changing the machine
   -h, --help                Show this help

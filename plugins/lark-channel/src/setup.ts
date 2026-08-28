@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { createHash, randomBytes } from 'node:crypto'
-import { realpathSync } from 'node:fs'
+import { accessSync, constants, realpathSync } from 'node:fs'
 import { chmod, mkdir, open, readFile, readdir, rename, rm, unlink } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, win32 } from 'node:path'
@@ -345,25 +345,272 @@ function runSecurity(args: readonly string[], stdio: 'inherit' | 'pipe'): string
   return typeof result.stdout === 'string' ? result.stdout.trimEnd() : ''
 }
 
-function linuxCredentialEnv(): Record<string, string> {
+function linuxCredentialEnv(environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
   return {
     PATH: '/usr/bin:/bin',
-    ...(process.env.DBUS_SESSION_BUS_ADDRESS === undefined
-      ? {} : { DBUS_SESSION_BUS_ADDRESS: process.env.DBUS_SESSION_BUS_ADDRESS }),
-    ...(process.env.XDG_RUNTIME_DIR === undefined ? {} : { XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR }),
+    ...(environment.DBUS_SESSION_BUS_ADDRESS === undefined
+      ? {} : { DBUS_SESSION_BUS_ADDRESS: environment.DBUS_SESSION_BUS_ADDRESS }),
+    ...(environment.XDG_RUNTIME_DIR === undefined ? {} : { XDG_RUNTIME_DIR: environment.XDG_RUNTIME_DIR }),
   }
 }
 
-function executeSecretWrite(request: SecretWriteRequest, env: NodeJS.ProcessEnv, failure: string): void {
+const linuxSecretTool = '/usr/bin/secret-tool'
+/** Bound every Secret Service client call, including transaction recovery. */
+const linuxSecretServiceTimeoutMs = 30_000
+
+export interface LinuxSecretServiceCommandResult {
+  status: number | null
+  signal: string | null
+  error?: unknown
+  stdout?: string
+  stderr?: string
+}
+
+export interface LinuxSecretServiceCommandInput {
+  executable: string
+  args: readonly string[]
+  environment: NodeJS.ProcessEnv
+  input?: Buffer
+  captureStdout?: boolean
+}
+
+export interface LinuxSecretServicePreflightOptions {
+  environment?: NodeJS.ProcessEnv
+  executableAvailable?: (path: string) => boolean
+  randomBytes?: (size: number) => Buffer
+  run?: (input: LinuxSecretServiceCommandInput) => LinuxSecretServiceCommandResult
+}
+
+/** A deliberately static diagnostic: never include a provider's stderr or a secret value. */
+class LarkSetupDiagnosticError extends Error {
+  constructor(readonly diagnostic: string) {
+    super(`lark-channel setup: ${diagnostic}`)
+    this.name = 'LarkSetupDiagnosticError'
+  }
+}
+
+function commandErrorCode(result: LinuxSecretServiceCommandResult | undefined): string | undefined {
+  const error = result?.error
+  if (error === null || typeof error !== 'object' || !('code' in error)) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
+}
+
+function hasLinuxSecretServiceSession(environment: NodeJS.ProcessEnv): boolean {
+  const dbus = environment.DBUS_SESSION_BUS_ADDRESS?.trim() ?? ''
+  const runtimeDirectory = environment.XDG_RUNTIME_DIR?.trim() ?? ''
+  return dbus !== '' || runtimeDirectory !== ''
+}
+
+function linuxSecretServiceDiagnostic(
+  operation: 'preflight' | 'credential store' | 'credential lookup' | 'credential cleanup',
+  result: LinuxSecretServiceCommandResult | undefined,
+  environment: NodeJS.ProcessEnv,
+): LarkSetupDiagnosticError {
+  const common = 'Run setup as the target logged-in user (not via sudo or a detached SSH session). '
+    + 'For a headless server or container, use the documented manual environment-provider deployment; '
+    + '--no-service does not change this wizard\'s credential provider.'
+  if (commandErrorCode(result) === 'ENOENT') {
+    return new LarkSetupDiagnosticError(
+      `Linux Secret Service ${operation} cannot find ${linuxSecretTool}. Install libsecret-tools and a Secret Service provider, then retry. ${common}`,
+    )
+  }
+  if (!hasLinuxSecretServiceSession(environment)) {
+    return new LarkSetupDiagnosticError(
+      `Linux Secret Service ${operation} has no user D-Bus session. Start from the target user's desktop/login session with DBUS_SESSION_BUS_ADDRESS or XDG_RUNTIME_DIR set. ${common}`,
+    )
+  }
+  const wasSignalled = result?.signal !== undefined && result.signal !== null
+  if (commandErrorCode(result) === 'ETIMEDOUT' || wasSignalled) {
+    return new LarkSetupDiagnosticError(
+      `Linux Secret Service ${operation} did not respond. Unlock or start a Secret Service provider such as GNOME Keyring, KWallet, or KeePassXC, then retry. ${common}`,
+    )
+  }
+  return new LarkSetupDiagnosticError(
+    `Linux Secret Service ${operation} failed. Ensure ${linuxSecretTool} is installed and an unlocked org.freedesktop.secrets provider is available in this user's session, then retry. ${common}`,
+  )
+}
+
+function defaultLinuxSecretToolAvailable(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function defaultLinuxSecretServiceCommand(input: LinuxSecretServiceCommandInput): LinuxSecretServiceCommandResult {
+  const result = spawnSync(input.executable, [...input.args], {
+    encoding: 'utf8',
+    env: input.environment,
+    timeout: linuxSecretServiceTimeoutMs,
+    maxBuffer: 128 * 1024,
+    ...(input.input === undefined ? {} : { input: input.input }),
+    stdio: [input.input === undefined ? 'ignore' : 'pipe', input.captureStdout ? 'pipe' : 'ignore', 'pipe'],
+  })
+  return {
+    status: result.status,
+    signal: result.signal,
+    ...(typeof result.stdout === 'string' ? { stdout: result.stdout } : {}),
+    ...(typeof result.stderr === 'string' ? { stderr: result.stderr } : {}),
+    ...(result.error === undefined ? {} : { error: result.error }),
+  }
+}
+
+function captureLinuxSecretServiceCommand(
+  run: NonNullable<LinuxSecretServicePreflightOptions['run']>,
+  input: LinuxSecretServiceCommandInput,
+): LinuxSecretServiceCommandResult {
+  try {
+    return run(input)
+  } catch (error) {
+    // Test seams and alternate runners may throw rather than return spawnSync's
+    // structured error. Preserve only the error code for static diagnostics;
+    // provider messages can contain secret material and must never be rendered.
+    return { status: null, signal: null, error }
+  }
+}
+
+/** libsecret reports a clear with no matching item as status 1 and no diagnostics. */
+export function isLinuxSecretServiceClearAbsent(result: LinuxSecretServiceCommandResult): boolean {
+  return result.status === 1
+    && result.signal === null
+    && result.error === undefined
+    && typeof result.stderr === 'string'
+    && result.stderr.trim() === ''
+}
+
+function verifyLinuxSecretServiceWriteCanary(input: {
+  environment: NodeJS.ProcessEnv
+  random: (size: number) => Buffer
+  run: (input: LinuxSecretServiceCommandInput) => LinuxSecretServiceCommandResult
+}): void {
+  const service = `dsh/lark/setup-preflight/${input.random(16).toString('hex')}`
+  const account = 'setup-probe'
+  const secret = input.random(32).toString('hex')
+  const write = createSecretServiceWriteRequest(service, account, secret)
+  let primaryError: unknown
+  try {
+    const stored = captureLinuxSecretServiceCommand(input.run, {
+      executable: linuxSecretTool,
+      args: write.args,
+      environment: input.environment,
+      input: write.input,
+    })
+    if (stored.status !== 0) {
+      throw linuxSecretServiceDiagnostic('credential store', stored, input.environment)
+    }
+    const read = captureLinuxSecretServiceCommand(input.run, {
+      executable: linuxSecretTool,
+      args: ['lookup', 'service', service, 'account', account],
+      environment: input.environment,
+      captureStdout: true,
+    })
+    if (read.status !== 0) {
+      throw linuxSecretServiceDiagnostic('credential lookup', read, input.environment)
+    }
+    if ((read.stdout ?? '').trimEnd() !== secret) {
+      throw new LarkSetupDiagnosticError(
+        'Linux Secret Service preflight could not read back its generated test credential. '
+          + 'Unlock or repair the Secret Service provider, then retry.',
+      )
+    }
+  } catch (error) {
+    primaryError = error
+  } finally {
+    write.input.fill(0)
+  }
+  const cleared = captureLinuxSecretServiceCommand(input.run, {
+    executable: linuxSecretTool,
+    args: ['clear', 'service', service, 'account', account],
+    environment: input.environment,
+  })
+  if (cleared.status !== 0 && !isLinuxSecretServiceClearAbsent(cleared)) {
+    const cleanupError = linuxSecretServiceDiagnostic('credential cleanup', cleared, input.environment)
+    if (primaryError !== undefined) {
+      throw new AggregateError(
+        [primaryError, cleanupError],
+        'lark-channel setup: Linux Secret Service preflight failed and canary cleanup also failed',
+      )
+    }
+    throw cleanupError
+  }
+  if (primaryError !== undefined) throw primaryError
+}
+
+/**
+ * Checks the Linux credential prerequisites before an OAuth flow changes a
+ * cloud app. It stores, reads, and clears a random non-production canary, and
+ * never reads, writes, or prints an application credential.
+ */
+export function assertLinuxSecretServiceAvailable(options: LinuxSecretServicePreflightOptions = {}): void {
+  const environment = linuxCredentialEnv(options.environment ?? process.env)
+  const available = options.executableAvailable ?? defaultLinuxSecretToolAvailable
+  if (!available(linuxSecretTool)) {
+    throw linuxSecretServiceDiagnostic('preflight', {
+      status: null, signal: null, error: { code: 'ENOENT' },
+    }, environment)
+  }
+  if (!hasLinuxSecretServiceSession(environment)) {
+    throw linuxSecretServiceDiagnostic('preflight', undefined, environment)
+  }
+  verifyLinuxSecretServiceWriteCanary({
+    environment,
+    random: options.randomBytes ?? randomBytes,
+    run: options.run ?? defaultLinuxSecretServiceCommand,
+  })
+}
+
+export function preflightLarkCredentialProvider(provider: SetupCredentialProvider): void {
+  if (provider === 'linux-secret-service') assertLinuxSecretServiceAvailable()
+}
+
+function safeDiagnosticMessages(error: unknown): string[] {
+  const messages = new Set<string>()
+  const visited = new Set<unknown>()
+  const walk = (current: unknown): void => {
+    if (current === null || typeof current !== 'object' || visited.has(current)) return
+    visited.add(current)
+    if (current instanceof LarkSetupDiagnosticError) {
+      messages.add(current.diagnostic)
+      return
+    }
+    if (current instanceof AggregateError) {
+      for (const nested of current.errors) walk(nested)
+      return
+    }
+    if (current instanceof Error) walk(current.cause)
+  }
+  walk(error)
+  return [...messages]
+}
+
+/** Adds only static, credential-safe diagnostics to AggregateError CLI output. */
+export function formatLarkSetupError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  if (!(error instanceof AggregateError)) return message
+  const diagnostics = safeDiagnosticMessages(error)
+  return diagnostics.length === 0 ? message : `${message}\n${diagnostics.map(value => `Hint: ${value}`).join('\n')}`
+}
+
+function executeSecretWrite(
+  request: SecretWriteRequest,
+  env: NodeJS.ProcessEnv,
+  failure: string | ((result: LinuxSecretServiceCommandResult) => Error),
+): void {
   try {
     const result = spawnSync(request.executable, request.args, {
       encoding: 'utf8',
       env,
+      ...(request.executable === linuxSecretTool ? { timeout: linuxSecretServiceTimeoutMs } : {}),
       input: request.input,
       maxBuffer: 128 * 1024,
       stdio: ['pipe', 'ignore', 'pipe'],
     })
-    if (result.status !== 0) throw new Error(failure)
+    if (result.status !== 0) {
+      throw typeof failure === 'string' ? new Error(failure) : failure(result)
+    }
   } finally {
     request.input.fill(0)
   }
@@ -388,8 +635,9 @@ function storeSecret(
     if (prompt.status !== 0 || secret.length === 0) {
       throw new Error('lark-channel setup: Linux could not read the App Secret securely')
     }
-    executeSecretWrite(createSecretServiceWriteRequest(service, account, secret), linuxCredentialEnv(),
-      'lark-channel setup: Linux Secret Service operation failed')
+    const environment = linuxCredentialEnv()
+    executeSecretWrite(createSecretServiceWriteRequest(service, account, secret), environment,
+      result => linuxSecretServiceDiagnostic('credential store', result, environment))
     return
   }
   if (credentialPath === undefined || (!isAbsolute(credentialPath) && !win32.isAbsolute(credentialPath))) {
@@ -423,8 +671,9 @@ function storeGeneratedSecret(
     return
   }
   if (provider === 'linux-secret-service') {
-    executeSecretWrite(createSecretServiceWriteRequest(service, account, secret), linuxCredentialEnv(),
-      'lark-channel setup: Linux Secret Service operation failed')
+    const environment = linuxCredentialEnv()
+    executeSecretWrite(createSecretServiceWriteRequest(service, account, secret), environment,
+      result => linuxSecretServiceDiagnostic('credential store', result, environment))
     return
   }
   if (credentialPath === undefined) throw new Error('lark-channel setup: missing DPAPI credential path')
@@ -443,10 +692,12 @@ function readSecret(
   if (provider === 'macos-keychain') {
     value = runSecurity(['find-generic-password', '-w', '-a', account, '-s', service], 'pipe')
   } else if (provider === 'linux-secret-service') {
-    const result = spawnSync('/usr/bin/secret-tool', ['lookup', 'service', service, 'account', account], {
-      encoding: 'utf8', env: linuxCredentialEnv(), maxBuffer: 128 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
+    const environment = linuxCredentialEnv()
+    const result = spawnSync(linuxSecretTool, ['lookup', 'service', service, 'account', account], {
+      encoding: 'utf8', env: environment, timeout: linuxSecretServiceTimeoutMs,
+      maxBuffer: 128 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
     })
-    if (result.status !== 0) throw new Error('lark-channel setup: Linux Secret Service lookup failed')
+    if (result.status !== 0) throw linuxSecretServiceDiagnostic('credential lookup', result, environment)
     value = typeof result.stdout === 'string' ? result.stdout.trimEnd() : ''
   } else {
     if (credentialPath === undefined) throw new Error('lark-channel setup: missing DPAPI credential path')
@@ -581,22 +832,29 @@ async function removeCredential(locator: SetupCredentialLocator): Promise<void> 
     }
     return
   }
-  const result = locator.provider === 'macos-keychain'
-    ? spawnSync('/usr/bin/security', [
-      'delete-generic-password', '-a', locator.account, '-s', locator.service,
-    ], {
-      encoding: 'utf8', env: { PATH: '/usr/bin:/bin' }, maxBuffer: 128 * 1024, stdio: ['ignore', 'ignore', 'pipe'],
-    })
-    : spawnSync('/usr/bin/secret-tool', [
+  if (locator.provider === 'linux-secret-service') {
+    const environment = linuxCredentialEnv()
+    const result = spawnSync(linuxSecretTool, [
       'clear', 'service', locator.service, 'account', locator.account,
     ], {
-      encoding: 'utf8', env: linuxCredentialEnv(), maxBuffer: 128 * 1024, stdio: ['ignore', 'ignore', 'pipe'],
+      encoding: 'utf8', env: environment, timeout: linuxSecretServiceTimeoutMs,
+      maxBuffer: 128 * 1024, stdio: ['ignore', 'ignore', 'pipe'],
     })
-  const missingMacosItem = locator.provider === 'macos-keychain' && result.status === 44
+    if (result.status !== 0 && !isLinuxSecretServiceClearAbsent(result)) {
+      throw linuxSecretServiceDiagnostic('credential cleanup', result, environment)
+    }
+    return
+  }
+  const result = spawnSync('/usr/bin/security', [
+    'delete-generic-password', '-a', locator.account, '-s', locator.service,
+  ], {
+    encoding: 'utf8', env: { PATH: '/usr/bin:/bin' }, maxBuffer: 128 * 1024, stdio: ['ignore', 'ignore', 'pipe'],
+  })
+  const missingMacosItem = result.status === 44
   const missingItemMessage = typeof result.stderr === 'string'
     && /(?:could not be found|not found|no matching|no such)/iu.test(result.stderr)
   if (result.status !== 0 && !missingMacosItem && !missingItemMessage) {
-    throw new Error(`lark-channel setup: ${locator.provider} credential cleanup failed`)
+    throw new Error('lark-channel setup: macos-keychain credential cleanup failed')
   }
 }
 
@@ -616,16 +874,35 @@ async function removeCredentialIdempotently(
   }
 }
 
-async function retirePreviousCredentialBestEffort(
+async function retirePreviousCredential(
   locator: SetupCredentialLocator,
   operation: NonNullable<ValidatedLarkOwnerSetupOperations['removeCredential']>,
 ): Promise<void> {
   try {
     await removeCredentialIdempotently(locator, operation)
+  } catch (error) {
+    // The profile and Delivery owner already reference the staged credential,
+    // so rollback is unsafe. Callers retain their paired journal and retry the
+    // exact old locator before allowing another credential rotation.
+    throw new AggregateError(
+      [error],
+      'lark-channel setup: profile and owner were committed, but previous credential cleanup is pending; repair the credential provider and rerun setup',
+    )
+  }
+}
+
+/**
+ * Compatibility behavior for the legacy non-journal commit helper below.
+ * Full onboarding uses retirePreviousCredential directly so it can retain its
+ * paired journal and retry the exact locator on the next invocation.
+ */
+async function retirePreviousCredentialBestEffort(
+  locator: SetupCredentialLocator,
+  operation: NonNullable<ValidatedLarkOwnerSetupOperations['removeCredential']>,
+): Promise<void> {
+  try {
+    await retirePreviousCredential(locator, operation)
   } catch {
-    // The profile and Delivery owner already reference the staged credential.
-    // Retaining an inactive old secret is safer than blocking all future setup
-    // recovery or falsely reporting that the committed rotation failed.
     process.stderr.write('lark-channel setup: previous credential cleanup failed after commit\n')
   }
 }
@@ -1658,7 +1935,7 @@ async function recoverLarkSetupJournalRecordUnlocked(
     if (journal.phase !== 'paired') await persistLarkSetupJournal(journalPersistInput(journal, 'paired'))
     if (journal.previousCredential !== undefined
       && !credentialLocatorEquals(journal.previousCredential, journal.stagedCredential!)) {
-      await retirePreviousCredentialBestEffort(journal.previousCredential, remove)
+      await retirePreviousCredential(journal.previousCredential, remove)
     }
     if (journal.installService) await install()
   }
@@ -1884,14 +2161,7 @@ export async function commitValidatedLarkOwnerSetup(input: ValidatedLarkOwnerSet
   }
   const previous = input.credentialTransition?.previous
   if (previous !== undefined && JSON.stringify(previous) !== JSON.stringify(input.credentialTransition?.staged)) {
-    try {
-      await remove(previous)
-    } catch {
-      // The profile and owner are already committed. Keep the now-inactive
-      // credential rather than reporting a false setup failure or rolling back
-      // a successful handoff; a later setup can retire the orphan safely.
-      process.stderr.write('lark-channel setup: previous credential cleanup failed after commit\n')
-    }
+    await retirePreviousCredentialBestEffort(previous, remove)
   }
 }
 
@@ -2189,7 +2459,7 @@ export async function executeLarkSetupProfileTransaction(
     // the idempotent exact-owner handoff and converges forward.
     await persistLarkSetupJournal({ ...candidateJournal, phase: 'paired' })
     if (previousCredential !== undefined && !credentialLocatorEquals(previousCredential, stagedCredential)) {
-      await retirePreviousCredentialBestEffort(previousCredential, remove)
+      await retirePreviousCredential(previousCredential, remove)
     }
     await input.operations.afterCommit?.()
     await clearLarkSetupJournal(input.patchPath)
@@ -2203,6 +2473,7 @@ export interface LarkSetupRuntime {
   readEffectiveProfile?: (profile: string) => string | Promise<string>
   installResidentService?: typeof installDshResidentService
   journalOperations?: RecoverLarkSetupJournalOperations
+  preflightCredentialProvider?: (provider: SetupCredentialProvider) => void | Promise<void>
 }
 
 export async function runLarkSetup(
@@ -2343,6 +2614,8 @@ export async function runLarkSetup(
       + `状态：${service.statusCommand}\n日志：${service.logCommand}\n`)
     return
   }
+  const credentialProvider = credentialProviderForPlatform(process.platform)
+  await (runtime.preflightCredentialProvider ?? preflightLarkCredentialProvider)(credentialProvider)
   // Resolve a prior crash before prompting the user or mutating a cloud app.
   // The mutation transaction repeats this check after registration to close
   // the gap against a different setup process that completed in the meantime.
@@ -2363,7 +2636,6 @@ export async function runLarkSetup(
       })
     }, runtime.profileLockOptions)
   }, runtime.profileLockOptions)
-  const credentialProvider = credentialProviderForPlatform(process.platform)
   let appId = args.appId
   let createApp = args.createApp
   if (appId === undefined && !createApp) {
@@ -2469,7 +2741,7 @@ export async function runLarkSetup(
 
 if (process.argv[1] !== undefined && isMainEntry(import.meta.url, process.argv[1])) {
   void runLarkSetup().catch(error => {
-    process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`)
+    process.stderr.write(`${formatLarkSetupError(error)}\n`)
     process.exitCode = 1
   })
 }

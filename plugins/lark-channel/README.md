@@ -156,7 +156,32 @@ journalctl --user -u dsh-profile-web.service -f
 systemctl --user restart dsh-profile-web.service
 ```
 
-Linux 一键凭据需要当前桌面会话中运行 Secret Service，并提供 `/usr/bin/secret-tool` 与 `/usr/bin/systemd-ask-password`。无桌面 Secret Service 的服务器或容器请使用 `--no-service`，并通过下文的 `environment` provider 和自己的 systemd/container secret injection 管理凭据。
+Linux 一键向导需要当前用户桌面会话中可用且已解锁的 Secret Service，并提供 `/usr/bin/secret-tool`；手工输入已有 App Secret 时还需要 `/usr/bin/systemd-ask-password`。`--no-service` **只跳过** 成功后的 systemd 常驻安装，不会把向导的凭据 provider 改成 environment，也不能绕过 Secret Service。
+
+### Linux Secret Service 排障
+
+若授权完成后看到 `setup failed and staged credential cleanup also failed`，这通常表示向导无法通过 `secret-tool` 暂存 App Secret，随后同一不可用的服务也无法清理暂存项；不是飞书 OAuth 或 systemd 服务安装失败。不要删除 `$DSH_HOME/profiles/<profile>/cordis.patch.yml.lark-setup.journal.json`：修复依赖后重跑向导会先自动恢复它。
+
+若看到 `profile and owner were committed, but previous credential cleanup is pending`，新的 profile、owner 和凭据已经生效，不能回滚；向导保留了同一个 journal，以便修复 Secret Service 后优先重试删除旧凭据。不要删除该 journal，也不要立即开始另一轮凭据旋转。
+
+在 Ubuntu/Debian 图形桌面上，以将运行 DSH 的普通登录用户打开终端（不要用 `sudo` 运行向导）执行：
+
+```sh
+sudo apt update
+sudo apt install --yes libsecret-tools gnome-keyring dbus-user-session
+# 完整注销并重新登录后，在新的图形终端执行以下无凭据检查：
+test -x /usr/bin/secret-tool
+test -n "${DBUS_SESSION_BUS_ADDRESS:-}" || test -S "${XDG_RUNTIME_DIR:-}/bus"
+```
+
+新版向导会在飞书 OAuth **之前**临时存入、读回并清除一个随机的非生产 canary，以确认钥匙环确实可写；这项检查不会读取、写入或显示 App Secret。若出现钥匙环解锁对话框，先解锁再继续。随后以原来的 profile/account/tenant/agent-tools 参数重跑；已创建的应用可复用，避免创建第二个应用：
+
+```sh
+~/.dsh/profiles/web/node_modules/.bin/dsh-lark-setup \
+  --profile web --create-app --app-id cli_0123456789abcdef
+```
+
+纯 SSH 服务器、容器或没有可持续 Secret Service 的系统不支持这个一键向导；不要仅加 `--no-service` 重试。此类部署应手工使用下文的 `appSecretEnv` 或 `credentials-keychain` 的 `environment` handle，并由 systemd/container/secret manager 注入值；同时需要显式完成等价的 owner 与 Policy 配置。当前向导也要求 FHS 的 `/usr/bin/secret-tool`、`/usr/bin/systemd-ask-password` 与 `/usr/bin/systemctl`；Nix、Guix 或其他非 FHS 系统请使用手工 environment 部署，直到这些组件获得协调支持。
 
 Windows 会把 DPAPI 加密的 PSCredential 保存到 `$DSH_HOME/credentials-keychain`，并创建当前用户的 `DSH profile web` 登录任务。该实现不会保存明文，但 Windows/Node/npm/Git Bash 组合差异较大，因此属于 best-effort，不作兼容承诺：
 
@@ -220,6 +245,20 @@ LARK_APP_SECRET='...' dsh --profile web
 ```
 
 `credentialHandle` 与 `appSecretEnv` 只能选一个；配置不接受 `appSecret` 等明文字段。handle 模式会把 adapter 的整个连接生命周期放在 credential lease callback 内。自然 TTL 到期会先清理旧连接，再申请新 lease 并重连；运维撤销或插件卸载会清理连接并停止续租，不能把 revoke 误当成 expiry 自动恢复。
+
+若以 `appSecretEnv: LARK_APP_SECRET` 配合 `dsh-lark-setup --install-service` 运行，生成的 user unit **不会**继承登录 shell 的 `LARK_APP_SECRET`，也不会替你保存它。请使用自己的 supervisor，或为目标 profile 显式创建只限当前用户读取的 systemd drop-in，例如：
+
+```sh
+install -d -m 700 ~/.config/dsh ~/.config/systemd/user/dsh-profile-web.service.d
+# 用编辑器创建 ~/.config/dsh/lark-web.env，内容为 LARK_APP_SECRET=...，并设为 0600；不要把 secret 放进 profile 或 shell history。
+chmod 600 ~/.config/dsh/lark-web.env
+cat > ~/.config/systemd/user/dsh-profile-web.service.d/secret.conf <<'EOF'
+[Service]
+EnvironmentFile=%h/.config/dsh/lark-web.env
+EOF
+systemctl --user daemon-reload
+systemctl --user restart dsh-profile-web.service
+```
 
 ## 已有飞书应用的手工配置
 
