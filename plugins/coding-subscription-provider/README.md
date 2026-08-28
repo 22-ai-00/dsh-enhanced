@@ -23,7 +23,7 @@
 
 1. **登录官方 CLI**（在运行 DSH 的同一 OS 用户下）：`codex login status` 应输出 `Logged in using ChatGPT`。没登录就先 `codex login`。
 2. **安装插件**：`dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider`。
-3. **确认命令与工作目录**：`codex --version`。命令名不同就在 `~/.dsh/profiles/web/cordis.patch.yml` 里把 `codex.command` 改成实际路径；同时把 `cwd` 指向要处理的 Git 仓库（相对路径按 DSH 进程启动目录解析）。
+3. **确认命令与工作目录**：`codex --version`。命令名不同就在 `~/.dsh/profiles/web/cordis.patch.yml` 里把 `codex.command` 改成实际路径。bundle 的 `cwd` 默认与标准 Delivery 一样指向 `$DSH_HOME/assistant-workspace`；Codex CLI 要求它是 Git 仓库。若改到其他仓库，必须同时把 Delivery `defaultWorkspace` 改到同一 realpath（相对路径按 DSH 进程启动目录解析）。
 4. **开启并落盘配置**：在配置中保持 `codex.enabled: true`（默认已开），执行 `dsh --profile web --dump-config` 检查生效值。
 5. **选择模型与 effort**：打开模型选择器时，`listModels` 会先通过认证门禁并进行无 prompt 目录刷新，随后合并当前模型及 reasoning effort；若刷新失败仍可选择配置中的 `default`。目录刷新不创建 thread/session/turn，也不提交用户消息；真实生成调用才会消耗你的订阅推理额度。
 
@@ -60,7 +60,7 @@ dsh --profile web --dump-config
 - id: dsh-enhanced-coding-subscription-provider
   name: '@dsh-enhanced/coding-subscription-provider'
   config:
-    cwd: .
+    cwd: !!js dshHomePath('assistant-workspace')
     timeoutMs: 600000
     authProbeTimeoutMs: 10000
     maxAuthProbeBytes: 32768
@@ -118,7 +118,7 @@ codex:
 - `codex.directModel` 是 direct 模式选择 `default` 时发送给后端的具体模型 id；显式选择其他模型时仍使用所选 id。这个默认值只是本插件的实验性配置，不代表私有后端长期保证该模型可用。
 - `codex.directReasoningEfforts` 是 direct route 向 DSH 暴露的可选 effort 列表，`codex.directDefaultReasoningEffort` 是调用未指定 effort 时由 DSH 物化的默认值，并且必须属于前一列表。当前默认暴露 `low` 到 `ultra`；私有 wire 会按官方 Codex 当前行为把 `ultra` 规范化为 `max`，这同样不是稳定承诺。
 - `codex.maxRequestBytes` 限制序列化后的完整 direct 请求（包括 base64 图片），`codex.maxRequestImageBytes` 限制请求内累计图片负载，且后者不能大于前者。默认分别为 32 MiB 与 24 MiB；两项只影响 direct 模式。
-- `cwd` 是 CLI 子进程允许使用的工作目录，也是 direct 模式的本地 session 授权边界；相对路径按 DSH 进程启动目录解析，不是按 Web 会话显示的项目目录解析。对每个**带 prompt 的生成调用**，插件只接受 DSH Agent Loop 在本进程标记且深冻结的请求，使用其 live `sessionId` 从 host `sessions` 服务取 header cwd，对二者做 `realpath` 后要求与配置 cwd 完全相等。缺失、过期、伪造、未标记、路径不匹配或 symlink escape 都会在认证、网络请求或 CLI 启动前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝；CLI 模式收到的是该 canonical session cwd。Codex `exec` 要求这里是 Git 仓库；插件不会静默追加 `--skip-git-repo-check` 绕过该检查。Web profile 可在 `~/.dsh/profiles/web/cordis.patch.yml` 中覆盖此值，修改后需重启 DSH。
+- `cwd` 是 CLI 子进程允许使用的工作目录，也是 direct 模式的本地 session 授权边界；bundle 默认使用 `$DSH_HOME/assistant-workspace`，与标准 Delivery 默认值一致。相对路径按 DSH 进程启动目录解析，不是按 Web 会话显示的项目目录解析。对每个**带 prompt 的普通对话调用**，插件要求深冻结的 DSH Agent Loop 请求；当模块 marker 因源码 link 或 adapter 克隆不可见时，Host `agents` 服务还会核对仍在运行的精确 Agent、registry/session 对象身份，并从 live Session header/messages 重建请求，只容许 rc.8 `forAdapter()` 删除跨 route `replayState`。随后对 live session cwd 与配置 cwd 做 `realpath` 并要求完全相等。缺失、过期、伪造、辅助/嵌套调用、请求变形、路径不匹配或 symlink escape 都会在认证、网络请求或 CLI 启动前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝；CLI 模式收到的是该 canonical session cwd。Cordis `config` 是整段替换，覆盖时必须保留 `cwd`；若改目录，还要同步修改 Delivery `defaultWorkspace`。Codex `exec` 要求这里是 Git 仓库；插件不会静默追加 `--skip-git-repo-check` 绕过该检查。修改后需重启 DSH。
 - CLI transport 的 `listModels` 在目录缓存冷启动或 5 分钟过期时，会使用配置的 `cwd` 先执行已有认证门禁，再启动一次无 prompt、有界的只读目录探针；它不需要 live session identity，也不会创建生成 turn。相同 provider 的并发请求共享一次 in-flight 刷新；失败只返回配置中的静态 `models` 并记录无凭据分类诊断。生成调用从不触发或等待目录刷新，只执行自身认证和两次 live-session cwd 校验。`resolveModel` 始终是纯缓存/配置读取，不执行认证、目录发现或子进程。Codex `direct-responses` 的 `listModels` 同样保持纯静态且不启动 CLI/App Server。
 - `timeoutMs` 是单次调用总时限；取消或超时先发 `SIGINT`，经过 `killGraceMs` 再发 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时请求以 `teardown=timed-out` 错误结算，保留原始 abort/timeout 分类，并在后台继续引流并跟踪迟到的 `close`；不会伪称子进程已回收。
 - `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制 CLI 模式中 `listModels` 与生成调用使用的认证状态检查，以及 `listModels` 的无 prompt 模型目录发现；Codex 目录还受 `killGraceMs`、`maxLineBytes`、`maxOutputBytes`、`maxStderrBytes` 约束。探针输出不会进入模型响应。Codex direct 请求使用总调用的 `timeoutMs`，不运行这些 CLI 探针。
@@ -243,7 +243,7 @@ Anthropic 的技术文档允许 `claude -p` 使用订阅登录，但其法律与
 ## 兼容性与调研
 
 - Node.js `^22.19.0 || >=24.0.0`
-- DeepSeek Harness / `@deepseek-ai/dsh-llm` `>=0.1.0-rc.8 <0.2.0`
+- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.1.0-rc.8 <0.2.0`
 - Cordis `^4.0.1`
 - Codex CLI `0.147.0`（已验证；模型目录基于官方 [Codex App Server](https://developers.openai.com/codex/app-server) 的 `model/list`）
 - Codex `direct-responses`（实验性私有协议；不是 OpenAI 面向第三方承诺的公开 API，兼容基线见 [compatibility.md](../../docs/compatibility.md)）

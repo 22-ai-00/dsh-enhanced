@@ -13,6 +13,7 @@ import {
   type ResolvedRetryPolicy,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import type { AgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
 import { verifySubscriptionAuth, type SubscriptionAuthVerifier } from './auth.js'
 import {
   discoverCodexModels,
@@ -123,6 +124,8 @@ export interface AdapterDependencies {
   onSettled?: (context: RouteFailureContext) => void
   /** Host-owned live session lookup used to bind local process cwd to a loop request. */
   liveSessions?: LiveSessionLookup
+  /** Scoped Host proof retained when LlmRuntime creates a legitimate adapter request clone. */
+  requestAttestor?: AgentLoopRequestAttestor
   /** Injectable monotonic-enough wall clock for deterministic catalog-cache tests. */
   now?: () => number
 }
@@ -363,6 +366,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
   private readonly onDiagnostic: AdapterDependencies['onDiagnostic']
   private readonly onSettled: AdapterDependencies['onSettled']
   private readonly liveSessions: LiveSessionLookup | undefined
+  private readonly requestAttestor: AgentLoopRequestAttestor | undefined
   private readonly now: () => number
   private readonly lifecycle = new AbortController()
   private codexCatalogCache: { readonly catalog: CodexCatalog; readonly expiresAt: number } | undefined
@@ -390,11 +394,17 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     this.onDiagnostic = dependencies.onDiagnostic
     this.onSettled = dependencies.onSettled
     this.liveSessions = dependencies.liveSessions
+    this.requestAttestor = dependencies.requestAttestor
     this.now = dependencies.now ?? Date.now
   }
 
   private trustedCwd(request: GenerateOptions): string {
-    return resolveTrustedSessionCwd({ request, configuredCwd: this.cwd, sessions: this.liveSessions })
+    return resolveTrustedSessionCwd({
+      request,
+      configuredCwd: this.cwd,
+      sessions: this.liveSessions,
+      ...(this.requestAttestor === undefined ? {} : { attestor: this.requestAttestor }),
+    })
   }
 
   private reportSettled(context: RouteFailureContext): void {

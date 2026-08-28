@@ -43,10 +43,17 @@
     "tool-calls"
   ],
   "peerDependencies": {
+    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.8 <0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
+    "@deepseek-ai/dsh-agent": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
     "@types/node": "catalog:",
     "typescript": "catalog:",

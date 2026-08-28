@@ -1,12 +1,12 @@
 import type { Context } from '@deepseek-ai/cordis'
-import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { createAgentLoopRequestAttestor, registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import { probeTraexReadiness, redactDiagnostic, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter } from './adapter.js'
 import { Config, normalizeConfig, type TraexAcpProviderConfig } from './config.js'
 import type { LiveSessionLookup } from './session-cwd.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-traex-acp-provider'
-export const inject = ['llm', 'sessions']
+export const inject = ['llm', 'sessions', 'agents']
 
 export { Config, probeTraexReadiness, TRAEX_PROVIDER_ROUTE, TraexAcpAdapter, version }
 export { CatalogObservationCache, catalogCacheKey } from './catalog-cache.js'
@@ -21,10 +21,12 @@ export function apply(ctx: Context, input?: TraexAcpProviderConfig): void {
     ctx.logger.warn('dsh-enhanced-traex-acp-provider: disabled until config.enabled is true')
     return
   }
+  const requestAttestor = createAgentLoopRequestAttestor(ctx.agents, [TRAEX_PROVIDER_ROUTE])
   const adapter = new TraexAcpAdapter(config, {
     // A local ACP subprocess must be bound to a live loop session, never a
     // prompt-selected or static workspace path.
     liveSessions: ctx.get('sessions') as LiveSessionLookup,
+    requestAttestor,
     onDiagnostic(diagnostic) {
       if (config.logDiagnostics) {
         ctx.logger.warn(`${TRAEX_PROVIDER_ROUTE} diagnostic: ${redactDiagnostic(diagnostic)}`)

@@ -1,5 +1,16 @@
 import { Context } from '@deepseek-ai/cordis'
-import LlmRuntime, { createMessage, deepFreeze, markAgentLoopRequest, ReasoningEffortId, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
+import LlmRuntime, {
+  createMessage,
+  deepFreeze,
+  isAgentLoopRequest,
+  LlmAdapter,
+  markAgentLoopRequest,
+  ReasoningEffortId,
+  type GenerateOptions,
+  type StreamChunk,
+} from '@deepseek-ai/dsh-llm'
+import { createAgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
 import { realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -284,6 +295,114 @@ describe('TraeX ACP LLM adapter', () => {
       const canonical = realpathSync.native(workspace)
       expect(verifyAuth).toHaveBeenCalledWith(expect.objectContaining({ cwd: canonical }))
       expect(invocation).toMatchObject({ cwd: canonical })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts the real forAdapter clone across isolated marker modules only inside the exact Host driver', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'traex-adapter-attestor-'))
+    try {
+      const workspace = join(root, 'workspace')
+      await mkdir(workspace)
+      const isolatedLlm = await import(
+        /* @vite-ignore */ `${import.meta.resolve('@deepseek-ai/dsh-llm')}?foreign-agent-loop-marker`,
+      ) as typeof import('@deepseek-ai/dsh-llm')
+      const ctx = new Context()
+      await ctx.plugin(AgentRegistry)
+      await ctx.plugin(LlmRuntime)
+
+      const historical = createMessage({
+        role: 'assistant',
+        source: {
+          kind: 'model',
+          provider: 'historical-route',
+          model: 'old-model',
+          replayState: { response: { id: 'old-response' } },
+        },
+        content: [{ type: 'text', text: 'old answer' }],
+      })
+      const user = createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'continue' }],
+      })
+      const session = {
+        id: TEST_SESSION_ID,
+        header: { cwd: workspace },
+        requestHeader: () => ({
+          config: { provider: 'traex-agent', model: 'default' },
+          system: 'Be concise.',
+        }),
+        deriveMessages: () => [historical, user],
+      } as unknown as Agent['session']
+      const agent = {
+        id: TEST_SESSION_ID,
+        session,
+        status: 'running',
+        ctx,
+      } as unknown as Agent
+      ctx.agents.register(agent)
+
+      const hostAttestor = createAgentLoopRequestAttestor(ctx.agents, ['traex-agent'])
+      const claims: Array<{ request: GenerateOptions; session: object; accepted: boolean }> = []
+      const adapter = new RawTraexAcpAdapter(Config({ cwd: workspace } as never), {
+        liveSessions: { get: id => id === TEST_SESSION_ID ? session : undefined },
+        requestAttestor: {
+          claim(observed, claimedSession) {
+            const accepted = hostAttestor.claim(observed, claimedSession)
+            claims.push({ request: observed, session: claimedSession, accepted })
+            return accepted
+          },
+        },
+        verifyAuth: vi.fn(async () => {}),
+        runText: vi.fn((_invocation, options) => (async function* () {
+          yield 'ok'
+          options?.onStopReason?.('end_turn')
+        })()),
+      })
+      class HistoricalAdapter extends LlmAdapter {
+        override async *stream(): AsyncIterable<StreamChunk> {
+          yield { type: 'finish', reason: { kind: 'stop' } }
+        }
+      }
+      ctx.llm.registerAdapter(['historical-route'], new HistoricalAdapter())
+      ctx.llm.registerAdapter(['traex-agent'], adapter)
+
+      const original = isolatedLlm.markAgentLoopRequest(isolatedLlm.deepFreeze({
+        provider: 'traex-agent',
+        model: 'default',
+        system: 'Be concise.',
+        messages: [historical, user],
+        sessionId: TEST_SESSION_ID,
+        signal: new AbortController().signal,
+      }))
+      expect(isolatedLlm.isAgentLoopRequest(original)).toBe(true)
+      expect(isAgentLoopRequest(original)).toBe(false)
+
+      const chunks = await ctx.agents.withInitiator(agent, async () => {
+        const result: StreamChunk[] = []
+        for await (const chunk of ctx.llm.stream(original)) result.push(chunk)
+        return result
+      })
+
+      expect(chunks.at(-1)).toEqual({ type: 'finish', reason: { kind: 'stop' } })
+      expect(claims).toHaveLength(2)
+      expect(claims.every(claim => claim.accepted)).toBe(true)
+      expect(claims.every(claim => claim.session === session)).toBe(true)
+      const cloned = claims[0]!.request
+      expect(claims[1]!.request).toBe(cloned)
+      expect(cloned).not.toBe(original)
+      expect(Object.isFrozen(cloned)).toBe(true)
+      expect(isAgentLoopRequest(cloned)).toBe(false)
+      expect(isolatedLlm.isAgentLoopRequest(cloned)).toBe(false)
+      expect(cloned.messages[0]!.source).toEqual({
+        kind: 'model',
+        provider: 'historical-route',
+        model: 'old-model',
+      })
+      expect(hostAttestor.claim(cloned, session)).toBe(false)
+      await ctx.fiber.dispose()
     } finally {
       await rm(root, { recursive: true, force: true })
     }

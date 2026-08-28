@@ -1,3 +1,5 @@
 - insert:
     - id: dsh-enhanced-traex-acp-provider
       name: '@dsh-enhanced/traex-acp-provider'
+      config:
+        cwd: !!js dshHomePath('assistant-workspace')

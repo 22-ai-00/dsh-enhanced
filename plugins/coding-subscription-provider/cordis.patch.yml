@@ -1,3 +1,5 @@
 - insert:
     - id: dsh-enhanced-coding-subscription-provider
       name: '@dsh-enhanced/coding-subscription-provider'
+      config:
+        cwd: !!js dshHomePath('assistant-workspace')
