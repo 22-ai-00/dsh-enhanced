@@ -89,6 +89,24 @@ describe('durable model-picker state', () => {
     reopened.close()
   })
 
+  test('clears only the exact persisted stale reasoning effort with a version fence', async () => {
+    const f = await fixture()
+    const stale = f.store.setModelSelection(f.conversation, {
+      provider: 'alternate', model: 'precise', reasoningEffort: 'max',
+    })
+    expect(f.store.clearStaleModelReasoningEffort({ conversation: f.conversation, expected: stale }))
+      .toMatchObject({ applied: true, selection: { provider: 'alternate', model: 'precise', version: 2 } })
+    expect(f.store.getModelSelection(f.conversation)?.reasoningEffort).toBeUndefined()
+
+    const newer = f.store.setModelSelection(f.conversation, {
+      provider: 'alternate', model: 'fast', reasoningEffort: 'low',
+    })
+    expect(f.store.clearStaleModelReasoningEffort({ conversation: f.conversation, expected: stale }))
+      .toEqual({ applied: false })
+    expect(f.store.getModelSelection(f.conversation)).toEqual(newer)
+    f.store.close()
+  })
+
   test('rolls selection back when the confirmation reply cannot be enqueued', async () => {
     const f = await fixture()
     f.store.enqueue(f.reply('model-selection:callback-conflict:reply', 'existing reply'))

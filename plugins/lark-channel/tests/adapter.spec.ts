@@ -352,6 +352,13 @@ describe('Lark delivery adapter', () => {
 
     expect(f.transport.createProgress).toHaveBeenCalledOnce()
     expect(f.transport.createProgress).toHaveBeenCalledWith('oc_dm', { replyTo: 'om_in', hidden: false })
+    const events = f.transport.writeProgress.mock.calls
+      .flatMap(call => call[1] as readonly { eventType: string; content: string }[])
+    const eventContent = (eventType: string): Record<string, unknown> => {
+      const event = events.find(candidate => candidate.eventType === eventType)
+      if (event === undefined) throw new Error(`missing progress event ${eventType}`)
+      return JSON.parse(event.content) as Record<string, unknown>
+    }
     const serialized = JSON.stringify(f.transport.writeProgress.mock.calls)
     expect(serialized).toContain('RUN_STARTED')
     expect(serialized).toContain('TOOL_CALL_START')
@@ -359,6 +366,20 @@ describe('Lark delivery adapter', () => {
     expect(serialized).toContain('RUN_FINISHED')
     expect(serialized).toContain('核对接口')
     expect(serialized).not.toContain('REASONING_')
+    // The OpenAPI request envelope is snake_case, but each event content is an
+    // AG-UI payload. Assert the latter independently so fields cannot regress
+    // into their outer-envelope spelling and become literal JSON in Feishu.
+    expect(eventContent('RUN_STARTED')).toEqual({ threadId: 'oc_dm', runId: 'delivery-1' })
+    expect(eventContent('TOOL_CALL_START')).toMatchObject({
+      toolCallId: 'call-1', toolCallName: 'web.search',
+    })
+    expect(eventContent('TOOL_CALL_END')).toEqual({ toolCallId: 'call-1' })
+    expect(eventContent('TOOL_CALL_RESULT')).toMatchObject({
+      messageId: 'result-call-1', toolCallId: 'call-1',
+    })
+    expect(eventContent('RUN_FINISHED')).toEqual({
+      threadId: 'oc_dm', runId: 'delivery-1', status: 'done',
+    })
   })
 
   test('renders a reasoning-only turn as its own step bubble per step', async () => {
@@ -376,20 +397,20 @@ describe('Lark delivery adapter', () => {
     const events = calls.flatMap(call => call[1] as readonly { eventType: string; content: string }[])
     const contents = events
       .filter(event => event.eventType === 'TEXT_MESSAGE_CONTENT')
-      .map(event => JSON.parse(event.content) as { message_id: string; content: string })
-    // Feishu accepts an arbitrary JSON string for the event but only renders
-    // its documented snake_case fields.  The former messageId/delta payload
-    // therefore created blank COT text blocks in the real client.
-    expect(contents.map(value => value.content)).toEqual([
+      .map(event => JSON.parse(event.content) as { messageId: string; delta: string })
+    // The event `content` string is an AG-UI payload. Its camelCase messageId
+    // and delta fields are distinct from the snake_case fields in the outer
+    // OpenAPI request envelope.
+    expect(contents.map(value => value.delta)).toEqual([
       '正在分析请求并制定执行步骤…', '先确认当前目录', '再核对分组顺序',
     ])
-    expect(contents.every(value => Object.hasOwn(value, 'message_id') && !Object.hasOwn(value, 'messageId'))).toBe(true)
-    expect(contents.every(value => !Object.hasOwn(value, 'delta'))).toBe(true)
-    // Distinct message_ids keep each step appended instead of overwriting the previous bubble.
-    const stepIds = contents.slice(1).map(value => value.message_id)
+    expect(contents.every(value => Object.hasOwn(value, 'messageId') && !Object.hasOwn(value, 'message_id'))).toBe(true)
+    expect(contents.every(value => Object.hasOwn(value, 'delta') && !Object.hasOwn(value, 'content'))).toBe(true)
+    // Distinct messageIds keep each step appended instead of overwriting the previous bubble.
+    const stepIds = contents.slice(1).map(value => value.messageId)
     expect(new Set(stepIds).size).toBe(stepIds.length)
     // An empty step writes nothing at all.
-    expect(JSON.stringify(calls)).not.toContain('"content":""')
+    expect(JSON.stringify(calls)).not.toContain('"delta":""')
   })
 
   test('states a failed turn in the panel body instead of leaving it on the opening line', async () => {

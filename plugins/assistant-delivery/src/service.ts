@@ -397,6 +397,8 @@ export class AssistantDeliveryService extends Service {
         modelPickerTtlMs: config.modelPickerTtlMs,
         permissionPickerTtlMs: config.permissionPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
+        clearStaleModelReasoningEffort: (conversation, expected) =>
+          this.deliveryStore.clearStaleModelReasoningEffort({ conversation, expected }),
         imageMaterializer,
         isInboundAuthorized: (binding, envelope) => this.isInboundAuthorized(binding, envelope),
         isPermissionController: (binding, envelope) => this.isPermissionController(binding, envelope),

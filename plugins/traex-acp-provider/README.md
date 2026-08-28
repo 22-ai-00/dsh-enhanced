@@ -73,7 +73,7 @@ dsh --profile web --dump-config
 - `listModels` 在缓存为空、过期或只有不完整的普通 stream 观察时，会通过当前 adapter 的 `probeReadiness` 执行 `traex login status` 和无 prompt 的 ACP discovery。它固定使用配置 cwd、read-only sandbox、`ask-for-approval=never`，不携带消息内容，不声明文件/terminal capability，并拒绝 permission request。并发查询 single-flight；完整目录在短 TTL 内复用，过期后刷新。发现失败时 `/model` 不会整体失败，而是安全回退到 `models` 配置别名，并只记录固定、无错误原文的诊断。
 - `resolveModel` 仍然 **不认证、不启动子进程**，只读取配置与当前短 TTL 内存缓存，保证 Agent Loop 的 `prepareCall` 路径 process-free。真实 `stream` 不信任该展示缓存；它继续要求 live session + canonical cwd，并以自己新建 ACP session 的目录重新权威校验模型与 effort。
 - 部署工具仍可在启用 route 前显式调用包导出的 `probeTraexReadiness`，主动验证本机登录和完整目录；调用完成后应 shutdown 临时 adapter。adapter shutdown 会 abort 尚未完成的目录发现、清除 single-flight 引用与缓存。
-- `models` 是实时 ACP 目录以外需要额外展示的非权威别名列表，默认只有 `default`。它不是执行允许列表；每次请求都会在新的 ACP 会话里重新验证具体模型和 reasoning effort，不可用时失败且不会静默换模型或 effort。
+- `models` 是实时 ACP 目录以外需要额外展示的非权威别名列表，默认只有 `default`。它不是执行允许列表；每次请求都会在新的 ACP 会话里重新验证具体模型，模型不可用时失败且不会静默换模型。若 DSH 已放行的 effort 在新会话的 selector 中消失，transport 会保留当前模型并使用该会话的默认档位，绝不重放 prompt。
 - `timeoutMs` 覆盖握手、建会话和整轮 prompt。取消或超时时先发 ACP `session/cancel` 和 `SIGINT`，等待 `killGraceMs` 后升级为 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时以 `teardown=failed` 错误结算，保留原始 abort/timeout 分类，并继续跟踪迟到的 `close`；不会伪称已完成回收。
 - `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制每次 live-session 调用以及显式 readiness probe 的 `traex login status`；`authProbeTimeoutMs` 同时作为 `listModels` 的 auth + discovery 整体短时限，目录查询不会沿用生成请求默认 10 分钟的 `timeoutMs`。当前 TraeX 可能把精确文本 `Logged in using Trae` 单独写入 stdout 或 stderr，这两种形式都会被接受，混合输出、ChatGPT、API key、access token、未登录与未知输出全部拒绝。
 - `maxMessageBytes` 限制单条 NDJSON，`maxProtocolBytes` / `maxProtocolMessages` 限制整轮 ACP 输入，`maxOutputBytes` 限制助手文本；字节限制均按 UTF-8 计算。
