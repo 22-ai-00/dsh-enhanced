@@ -88,6 +88,7 @@ function configuredLarkProfile(input: {
   profile?: string
   version?: string
   agentTools?: 'disable' | 'enable'
+  credentialProvider?: 'macos-keychain' | 'linux-secret-service'
 }): string {
   const profile = input.profile ?? 'web'
   const version = input.version ?? '22222222222222222222222222222222'
@@ -101,7 +102,7 @@ function configuredLarkProfile(input: {
     ownerUserId: input.ownerUserId ?? 'ou_new',
     keychainService: `dsh/lark/${profile}/primary/versions/${version}`,
     keychainAccount: 'primary',
-    credentialProvider: 'macos-keychain',
+    credentialProvider: input.credentialProvider ?? 'macos-keychain',
     agentTools: input.agentTools ?? 'disable',
   })
 }
@@ -680,6 +681,81 @@ setInterval(() => {}, 1000)`,
       .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  test('keeps a paired journal and retries pending previous credential cleanup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-paired-pending-cleanup-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = baseAssistantProfile(dshHome, databasePath)
+    const updatedPatch = configuredLarkProfile({
+      dshHome, databasePath, credentialProvider: 'linux-secret-service',
+    })
+    await writeFile(patchPath, updatedPatch, 'utf8')
+    const { createVersionedCredentialLocator, persistLarkSetupJournal, recoverLarkSetupJournal } =
+      await import('../src/setup.ts')
+    const previous = createVersionedCredentialLocator({
+      provider: 'linux-secret-service', dshHome, profile: 'web', account: 'primary',
+      version: '11111111111111111111111111111111',
+    })
+    const staged = createVersionedCredentialLocator({
+      provider: 'linux-secret-service', dshHome, profile: 'web', account: 'primary',
+      version: '22222222222222222222222222222222',
+    })
+    await persistLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      operation: 'full',
+      phase: 'paired',
+      originalPatch,
+      updatedPatch,
+      databasePath,
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_new' },
+      stagedCredential: staged,
+      previousCredential: previous,
+      installService: true,
+    })
+    const lockOptions = { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 }
+    let pairCalls = 0
+    let removeCalls = 0
+    let installCalls = 0
+    const operations = {
+      readEffectiveProfile() {
+        return asEffectiveProfile(updatedPatch)
+      },
+      pairPrincipal() { pairCalls += 1 },
+      removeCredential(locator: unknown) {
+        expect(locator).toEqual(previous)
+        removeCalls += 1
+        if (removeCalls === 1) throw new Error('Secret Service temporarily unavailable')
+      },
+      installService() { installCalls += 1 },
+    }
+
+    await expect(recoverLarkSetupJournal({
+      patchPath, dshHome, profile: 'web', profileLockOptions: lockOptions, operations,
+    })).rejects.toThrow(/profile and owner were committed.*cleanup is pending/iu)
+
+    expect(await readFile(patchPath, 'utf8')).toBe(updatedPatch)
+    expect(JSON.parse(await readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')))
+      .toMatchObject({ phase: 'paired', previousCredential: previous })
+    expect(pairCalls).toBe(1)
+    expect(removeCalls).toBe(1)
+    expect(installCalls).toBe(0)
+
+    await recoverLarkSetupJournal({
+      patchPath, dshHome, profile: 'web', profileLockOptions: lockOptions, operations,
+    })
+
+    expect(pairCalls).toBe(2)
+    expect(removeCalls).toBe(2)
+    expect(installCalls).toBe(1)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   test('keeps rollback direction after owner handoff fails and staged cleanup is interrupted', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lark-handoff-aborting-crash-'))
     const dshHome = join(root, 'dsh-home')
@@ -969,6 +1045,136 @@ setInterval(() => {}, 1000)`,
     expect(events[0]).toBe('abandoned-credential-removed')
     expect(events[1]).toBe('new-credential-staged')
     expect(await readFile(patchPath, 'utf8')).toContain('lark/primary/personal/ou_new')
+  })
+
+  test('retains the live paired journal when previous credential cleanup fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-live-pending-cleanup-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = lark.configureLarkProfilePatch({
+      profilePatch: baseAssistantProfile(dshHome, databasePath),
+      dshHome,
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_original',
+      keychainService: 'dsh/lark/web/primary',
+      keychainAccount: 'primary',
+      credentialProvider: 'macos-keychain',
+      agentTools: 'disable',
+    })
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const { executeLarkSetupProfileTransaction, recoverLarkSetupJournal } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    const lockOptions = { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 }
+    const previous = { provider: 'macos-keychain', service: 'dsh/lark/web/primary', account: 'primary' }
+    let pairCalls = 0
+    let removeCalls = 0
+    const removed: unknown[] = []
+    const operations = {
+      readEffectiveProfile() {
+        return asEffectiveProfile(readFileSync(patchPath, 'utf8'))
+      },
+      storeCredential() {},
+      readCredential() { return 'staged-secret' },
+      discoverOwner() {
+        return { channel: 'lark' as const, account: 'primary', tenant: 'personal', user: 'ou_new' }
+      },
+      validateProfile() {},
+      pairPrincipal() { pairCalls += 1 },
+      removeCredential(locator: unknown) {
+        removed.push(locator)
+        removeCalls += 1
+        if (removeCalls === 1) throw new Error('Secret Service temporarily unavailable')
+      },
+    }
+
+    await expect(executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'macos-keychain',
+      profileLockOptions: lockOptions,
+      operations,
+    })).rejects.toThrow(/profile and owner were committed.*cleanup is pending/iu)
+
+    expect(await readFile(patchPath, 'utf8')).toContain('lark/primary/personal/ou_new')
+    expect(JSON.parse(await readFile(`${patchPath}.lark-setup.journal.json`, 'utf8')))
+      .toMatchObject({ phase: 'paired', previousCredential: { provider: 'macos-keychain' } })
+    expect(pairCalls).toBe(1)
+    expect(removeCalls).toBe(1)
+    expect(removed).toEqual([previous])
+
+    await recoverLarkSetupJournal({
+      patchPath,
+      dshHome,
+      profile: 'web',
+      profileLockOptions: lockOptions,
+      operations,
+    })
+
+    expect(pairCalls).toBe(2)
+    expect(removeCalls).toBe(2)
+    expect(removed).toEqual([previous, previous])
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('clears an absent staged Linux credential after its store operation fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-staging-store-failure-'))
+    const dshHome = join(root, 'dsh-home')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    const databasePath = join(dshHome, 'assistant-delivery/state.sqlite')
+    const originalPatch = baseAssistantProfile(dshHome, databasePath)
+    await writeFile(patchPath, originalPatch, 'utf8')
+    const { executeLarkSetupProfileTransaction } = await import('../src/setup.ts')
+    const args = lark.parseLarkSetupArgs([
+      '--profile', 'web', '--account', 'primary', '--tenant', 'personal',
+      '--app-id', 'cli_0123456789abcdef', '--no-service', '--disable-agent-tools',
+    ])
+    let removeCalls = 0
+    const removed: unknown[] = []
+
+    await expect(executeLarkSetupProfileTransaction({
+      args,
+      dshHome,
+      patchPath,
+      application: { appId: 'cli_0123456789abcdef', domain: 'feishu' },
+      credentialProvider: 'linux-secret-service',
+      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 100, heartbeatMs: 10 },
+      operations: {
+        readEffectiveProfile() { return asEffectiveProfile(originalPatch) },
+        storeCredential() { throw new Error('Linux Secret Service store failed') },
+        readCredential() { throw new Error('must not read an unstored credential') },
+        discoverOwner() { throw new Error('must not discover an owner') },
+        removeCredential(locator) {
+          removed.push(locator)
+          removeCalls += 1
+          throw Object.assign(new Error('credential is already absent'), { code: 'not-found' })
+        },
+      },
+    })).rejects.toThrow('Linux Secret Service store failed')
+
+    expect(removeCalls).toBe(1)
+    expect(removed).toHaveLength(1)
+    expect(removed[0]).toMatchObject({
+      provider: 'linux-secret-service', account: 'primary',
+    })
+    expect((removed[0] as { service: string }).service)
+      .toMatch(/^dsh\/lark\/web\/primary\/versions\/[0-9a-f]{32}$/u)
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    await expect(readFile(`${patchPath}.lark-setup.journal.json`, 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   test('recovers an abandoned candidate before install-service validates or restarts the Host', async () => {
@@ -2281,6 +2487,366 @@ setInterval(() => {}, 1000)`,
     expect(windows.executable).toBe('C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe')
     expect(windows.args.join(' ')).not.toContain(secret)
     expect(windows.input.toString('utf8')).toBe(secret)
+  })
+
+  test('preflights Linux Secret Service by storing, reading, and clearing a generated canary', () => {
+    const preflight = (lark as Record<string, unknown>).assertLinuxSecretServiceAvailable
+    expect(preflight).toBeTypeOf('function')
+    const verify = preflight as (input: {
+      environment: NodeJS.ProcessEnv
+      executableAvailable: () => boolean
+      randomBytes: (size: number) => Buffer
+      run: (input: Record<string, unknown>) => { status: number; signal: null; stdout?: string; stderr?: string }
+    }) => void
+    const canary = Buffer.alloc(16, 16).toString('hex')
+    const secret = Buffer.alloc(32, 32).toString('hex')
+    const observed: Array<Record<string, unknown>> = []
+    verify({
+      environment: {
+        DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+        XDG_RUNTIME_DIR: '/run/user/1000',
+      },
+      executableAvailable: () => true,
+      randomBytes(size) {
+        return Buffer.alloc(size, size)
+      },
+      run(input) {
+        const copy = {
+          ...input,
+          args: [...input.args as string[]],
+          ...(input.input instanceof Buffer ? { input: input.input.toString('utf8') } : {}),
+        }
+        observed.push(copy)
+        if ((input.args as string[])[0] === 'lookup') {
+          return { status: 0, signal: null, stdout: secret }
+        }
+        return { status: 0, signal: null, stderr: '' }
+      },
+    })
+
+    expect(observed).toHaveLength(3)
+    expect(observed[0]).toMatchObject({
+      executable: '/usr/bin/secret-tool',
+      args: [
+        'store',
+        `--label=DSH Lark setup-preflight/${canary}`,
+        'service', `dsh/lark/setup-preflight/${canary}`, 'account', 'setup-probe',
+      ],
+      input: secret,
+      environment: {
+        PATH: '/usr/bin:/bin',
+        DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+        XDG_RUNTIME_DIR: '/run/user/1000',
+      },
+    })
+    expect(observed[1]).toMatchObject({
+      args: ['lookup', 'service', `dsh/lark/setup-preflight/${canary}`, 'account', 'setup-probe'],
+      captureStdout: true,
+    })
+    expect(observed[2]).toMatchObject({
+      args: ['clear', 'service', `dsh/lark/setup-preflight/${canary}`, 'account', 'setup-probe'],
+    })
+  })
+
+  test('rejects a missing Linux secret-tool before running a canary command', () => {
+    const preflight = (lark as Record<string, unknown>).assertLinuxSecretServiceAvailable
+    expect(preflight).toBeTypeOf('function')
+    let runCalls = 0
+
+    expect(() => (preflight as (input: {
+      environment: NodeJS.ProcessEnv
+      executableAvailable: () => boolean
+      run: () => never
+    }) => void)({
+      environment: { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' },
+      executableAvailable: () => false,
+      run() {
+        runCalls += 1
+        throw new Error('must not run')
+      },
+    })).toThrow(/cannot find \/usr\/bin\/secret-tool.*install libsecret-tools/iu)
+    expect(runCalls).toBe(0)
+  })
+
+  test('rejects a missing Linux user D-Bus session before running a canary command', () => {
+    const preflight = (lark as Record<string, unknown>).assertLinuxSecretServiceAvailable
+    expect(preflight).toBeTypeOf('function')
+    let runCalls = 0
+
+    expect(() => (preflight as (input: {
+      environment: NodeJS.ProcessEnv
+      executableAvailable: () => boolean
+      run: () => never
+    }) => void)({
+      environment: {},
+      executableAvailable: () => true,
+      run() {
+        runCalls += 1
+        throw new Error('must not run')
+      },
+    })).toThrow(/no user D-Bus session.*not via sudo or a detached SSH session/iu)
+    expect(runCalls).toBe(0)
+  })
+
+  test('treats libsecret no-match clear as an idempotent cleanup success', async () => {
+    const { isLinuxSecretServiceClearAbsent } = await import('../src/setup.ts')
+    expect(isLinuxSecretServiceClearAbsent({ status: 1, signal: null, stderr: '' })).toBe(true)
+    expect(isLinuxSecretServiceClearAbsent({
+      status: 1,
+      signal: null,
+      stderr: 'Cannot spawn a message bus',
+    })).toBe(false)
+    expect(isLinuxSecretServiceClearAbsent({
+      status: 1,
+      signal: null,
+      stderr: '',
+      error: { code: 'ENOENT' },
+    })).toBe(false)
+  })
+
+  test('does not report a cleanup failure when a failed canary store has no item to clear', () => {
+    const preflight = (lark as Record<string, unknown>).assertLinuxSecretServiceAvailable
+    const format = (lark as Record<string, unknown>).formatLarkSetupError
+    expect(preflight).toBeTypeOf('function')
+    expect(format).toBeTypeOf('function')
+    const verify = preflight as (input: {
+      environment: NodeJS.ProcessEnv
+      executableAvailable: () => boolean
+      randomBytes: (size: number) => Buffer
+      run: (input: { args: readonly string[] }) => { status: number; signal: null; stderr: string }
+    }) => void
+    const secret = 'failed-canary-secret-must-not-appear'
+    const canary = Buffer.alloc(16, 16).toString('hex')
+    const commands: string[] = []
+    let diagnostic: unknown
+    try {
+      verify({
+        environment: { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' },
+        executableAvailable: () => true,
+        randomBytes(size) {
+          return Buffer.alloc(size, size)
+        },
+        run(input) {
+          commands.push(input.args[0]!)
+          return input.args[0] === 'store'
+            ? { status: 1, signal: null, stderr: `provider unavailable: ${secret}` }
+            : { status: 1, signal: null, stderr: '' }
+        },
+      })
+    } catch (error) {
+      diagnostic = error
+    }
+    const output = (format as (error: unknown) => string)(diagnostic)
+
+    expect(commands).toEqual(['store', 'clear'])
+    expect(output).toContain('Linux Secret Service credential store failed')
+    expect(output).not.toContain('canary cleanup also failed')
+    expect(output).not.toContain(secret)
+    expect(output).not.toContain(canary)
+  })
+
+  test('renders a credential-safe diagnostic when Linux credential store and cleanup both fail', () => {
+    const preflight = (lark as Record<string, unknown>).assertLinuxSecretServiceAvailable
+    const format = (lark as Record<string, unknown>).formatLarkSetupError
+    expect(preflight).toBeTypeOf('function')
+    expect(format).toBeTypeOf('function')
+    const verify = preflight as (input: {
+      environment: NodeJS.ProcessEnv
+      executableAvailable: () => boolean
+      randomBytes: (size: number) => Buffer
+      run: () => { status: number; signal: null; stderr: string }
+    }) => void
+    const secret = 'must-not-appear-in-a-diagnostic'
+    let diagnostic: unknown
+    try {
+      verify({
+        environment: { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' },
+        executableAvailable: () => true,
+        randomBytes(size) {
+          return Buffer.alloc(size, size)
+        },
+        run() {
+          return { status: 1, signal: null, stderr: `provider error: ${secret}` }
+        },
+      })
+    } catch (error) {
+      diagnostic = error
+    }
+    const output = (format as (error: unknown) => string)(diagnostic)
+
+    expect(output).toContain('preflight failed and canary cleanup also failed')
+    expect(output).toContain('Linux Secret Service credential store failed')
+    expect(output).toContain('Linux Secret Service credential cleanup failed')
+    expect(output).not.toContain(secret)
+  })
+
+  test('preserves a static primary diagnostic when the canary cleanup runner throws', () => {
+    const preflight = (lark as Record<string, unknown>).assertLinuxSecretServiceAvailable
+    const format = (lark as Record<string, unknown>).formatLarkSetupError
+    expect(preflight).toBeTypeOf('function')
+    expect(format).toBeTypeOf('function')
+    const primarySecret = 'primary-provider-secret-output'
+    const cleanupSecret = 'cleanup-provider-secret-output'
+    let diagnostic: unknown
+    try {
+      (preflight as (input: {
+        environment: NodeJS.ProcessEnv
+        executableAvailable: () => boolean
+        randomBytes: (size: number) => Buffer
+        run: (input: { args: readonly string[] }) => { status: number; signal: null; stderr: string }
+      }) => void)({
+        environment: { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' },
+        executableAvailable: () => true,
+        randomBytes(size) {
+          return Buffer.alloc(size, size)
+        },
+        run(input) {
+          if (input.args[0] === 'clear') throw new Error(cleanupSecret)
+          return { status: 1, signal: null, stderr: primarySecret }
+        },
+      })
+    } catch (error) {
+      diagnostic = error
+    }
+    const output = (format as (error: unknown) => string)(diagnostic)
+
+    expect(output).toContain('preflight failed and canary cleanup also failed')
+    expect(output).toContain('Linux Secret Service credential store failed')
+    expect(output).toContain('Linux Secret Service credential cleanup failed')
+    expect(output).not.toContain(primarySecret)
+    expect(output).not.toContain(cleanupSecret)
+  })
+
+  test('clears and redacts the canary when Secret Service readback differs', () => {
+    const preflight = (lark as Record<string, unknown>).assertLinuxSecretServiceAvailable
+    expect(preflight).toBeTypeOf('function')
+    const returnedSecret = 'wrong-secret-must-not-appear'
+    const commands: string[] = []
+    let diagnostic: unknown
+    try {
+      (preflight as (input: {
+        environment: NodeJS.ProcessEnv
+        executableAvailable: () => boolean
+        randomBytes: (size: number) => Buffer
+        run: (input: { args: readonly string[] }) => {
+          status: number; signal: null; stdout?: string; stderr: string
+        }
+      }) => void)({
+        environment: { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' },
+        executableAvailable: () => true,
+        randomBytes(size) {
+          return Buffer.alloc(size, size)
+        },
+        run(input) {
+          commands.push(input.args[0]!)
+          return input.args[0] === 'lookup'
+            ? { status: 0, signal: null, stdout: returnedSecret, stderr: '' }
+            : { status: 0, signal: null, stderr: '' }
+        },
+      })
+    } catch (error) {
+      diagnostic = error
+    }
+    const output = diagnostic instanceof Error ? diagnostic.message : String(diagnostic)
+
+    expect(commands).toEqual(['store', 'lookup', 'clear'])
+    expect(output).toContain('could not read back its generated test credential')
+    expect(output).not.toContain(returnedSecret)
+    expect(output).not.toContain(Buffer.alloc(16, 16).toString('hex'))
+  })
+
+  test('cleans the canary after a timed-out Linux Secret Service operation', () => {
+    const preflight = (lark as Record<string, unknown>).assertLinuxSecretServiceAvailable
+    const format = (lark as Record<string, unknown>).formatLarkSetupError
+    expect(preflight).toBeTypeOf('function')
+    expect(format).toBeTypeOf('function')
+    const verify = preflight as (input: {
+      environment: NodeJS.ProcessEnv
+      executableAvailable: () => boolean
+      randomBytes: (size: number) => Buffer
+      run: (input: { args: readonly string[] }) => {
+        status: null; signal: 'SIGTERM'; error: { code: 'ETIMEDOUT' }; stderr: string
+      }
+    }) => void
+    const secret = 'timed-out-canary-must-not-appear'
+    const canary = Buffer.alloc(16, 16).toString('hex')
+    const commands: string[] = []
+    let diagnostic: unknown
+    try {
+      verify({
+        environment: { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' },
+        executableAvailable: () => true,
+        randomBytes(size) {
+          return Buffer.alloc(size, size)
+        },
+        run(input) {
+          commands.push(input.args[0]!)
+          return {
+            status: null,
+            signal: 'SIGTERM',
+            error: { code: 'ETIMEDOUT' },
+            stderr: `provider output: ${secret}`,
+          }
+        },
+      })
+    } catch (error) {
+      diagnostic = error
+    }
+    const output = (format as (error: unknown) => string)(diagnostic)
+
+    expect(commands).toEqual(['store', 'clear'])
+    expect(output).toContain('preflight failed and canary cleanup also failed')
+    expect(output).toContain('Linux Secret Service credential store did not respond')
+    expect(output).toContain('Linux Secret Service credential cleanup did not respond')
+    expect(output).not.toContain(secret)
+    expect(output).not.toContain(canary)
+  })
+
+  test('clears the canary when its Linux Secret Service lookup fails', () => {
+    const preflight = (lark as Record<string, unknown>).assertLinuxSecretServiceAvailable
+    expect(preflight).toBeTypeOf('function')
+    const verify = preflight as (input: {
+      environment: NodeJS.ProcessEnv
+      executableAvailable: () => boolean
+      randomBytes: (size: number) => Buffer
+      run: (input: { args: readonly string[] }) => { status: number; signal: null; stderr: string }
+    }) => void
+    const commands: string[] = []
+
+    expect(() => verify({
+      environment: { DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus' },
+      executableAvailable: () => true,
+      randomBytes(size) {
+        return Buffer.alloc(size, size)
+      },
+      run(input) {
+        commands.push(input.args[0]!)
+        return {
+          status: input.args[0] === 'lookup' ? 1 : 0,
+          signal: null,
+          stderr: '',
+        }
+      },
+    })).toThrow('Linux Secret Service credential lookup failed')
+    expect(commands).toEqual(['store', 'lookup', 'clear'])
+  })
+
+  test('runs credential preflight before journal recovery or cloud authorization', async () => {
+    const providerForPlatform = (lark as Record<string, unknown>).credentialProviderForPlatform
+    expect(providerForPlatform).toBeTypeOf('function')
+    let observedProvider: unknown
+    await expect(lark.runLarkSetup([
+      '--profile', 'web', '--create-app', '--app-id', 'cli_0123456789abcdef', '--no-service',
+    ], {
+      preflightCredentialProvider(provider) {
+        observedProvider = provider
+        throw new Error('preflight stopped setup')
+      },
+      readEffectiveProfile() {
+        throw new Error('profile recovery must not run before preflight')
+      },
+    })).rejects.toThrow('preflight stopped setup')
+    expect(observedProvider).toBe((providerForPlatform as (platform: NodeJS.Platform) => unknown)(process.platform))
   })
 
   test('recognizes a package-bin symlink as the main CLI entry', async () => {

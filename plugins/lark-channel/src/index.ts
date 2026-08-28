@@ -20,10 +20,13 @@ export {
   createLarkRegistrationOptions,
   createSecretServiceWriteRequest,
   createWindowsDpapiWriteRequest,
+  assertLinuxSecretServiceAvailable,
   credentialProviderForPlatform,
+  formatLarkSetupError,
   isMainEntry,
   matchOwnerHandshake,
   parseLarkSetupArgs,
+  preflightLarkCredentialProvider,
   runLarkSetup,
 } from './setup.js'
 export {
