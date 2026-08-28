@@ -2,7 +2,7 @@ import { mkdtemp, mkdir, readFile, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, test, vi } from 'vitest'
-import { createWindowsLauncher, installDshWindowsTask, windowsTaskPaths } from '../src/windows-task.ts'
+import { createWindowsLauncher, createWindowsTaskXml, installDshWindowsTask, windowsTaskPaths } from '../src/windows-task.ts'
 
 describe('DSH profile Windows scheduled task', () => {
   test('creates a secret-free launcher for one profile', () => {
@@ -43,12 +43,19 @@ describe('DSH profile Windows scheduled task', () => {
     expect(installed.target).toBe('DSH profile web')
     expect((await stat(paths.launcherPath)).mode & 0o777).toBe(0o600)
     expect(await readFile(paths.launcherPath, 'utf8')).not.toMatch(/TOKEN|SECRET|PASSWORD/u)
+    expect(await readFile(paths.taskXmlPath, 'utf8')).toContain('<RestartOnFailure>')
     expect(commands.map(command => [command.command, ...command.args])).toEqual([
-      ['schtasks.exe', '/Create', '/F', '/SC', 'ONLOGON', '/TN', 'DSH profile web', '/TR',
-        `cmd.exe /d /c "${paths.launcherPath}"`],
+      ['schtasks.exe', '/Create', '/F', '/TN', 'DSH profile web', '/XML', paths.taskXmlPath],
       ['schtasks.exe', '/End', '/TN', 'DSH profile web'],
       ['schtasks.exe', '/Run', '/TN', 'DSH profile web'],
       ['schtasks.exe', '/Query', '/TN', 'DSH profile web'],
     ])
+  })
+
+  test('uses a task XML restart policy without putting credentials into the task definition', () => {
+    const xml = createWindowsTaskXml(windowsTaskPaths({ dshHome: 'C:\\Users\\test\\.dsh', profile: 'web' }))
+    expect(xml).toContain('<LogonTrigger>')
+    expect(xml).toContain('<RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>')
+    expect(xml).not.toMatch(/TOKEN|SECRET|PASSWORD/u)
   })
 })

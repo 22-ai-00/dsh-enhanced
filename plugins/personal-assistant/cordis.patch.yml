@@ -14,7 +14,11 @@
         sandbox: danger-full-access
         approval: never
         name: 完全访问权限
-    defaultPreset: danger-full-access
+    # A fresh profile must be useful without silently granting the Host
+    # unrestricted filesystem/network access.  The owner can explicitly pick
+    # `danger-full-access` in DSH's native selector (or via the installer
+    # confirmation) after understanding the consequence.
+    defaultPreset: workspace-write
 
 - insert:
     - id: dsh-enhanced-personal-assistant

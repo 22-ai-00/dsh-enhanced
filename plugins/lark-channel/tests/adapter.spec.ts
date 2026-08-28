@@ -376,15 +376,20 @@ describe('Lark delivery adapter', () => {
     const events = calls.flatMap(call => call[1] as readonly { eventType: string; content: string }[])
     const contents = events
       .filter(event => event.eventType === 'TEXT_MESSAGE_CONTENT')
-      .map(event => JSON.parse(event.content) as { messageId: string; delta: string })
-    expect(contents.map(value => value.delta)).toEqual([
+      .map(event => JSON.parse(event.content) as { message_id: string; content: string })
+    // Feishu accepts an arbitrary JSON string for the event but only renders
+    // its documented snake_case fields.  The former messageId/delta payload
+    // therefore created blank COT text blocks in the real client.
+    expect(contents.map(value => value.content)).toEqual([
       '正在分析请求并制定执行步骤…', '先确认当前目录', '再核对分组顺序',
     ])
-    // Distinct messageIds keep each step appended instead of overwriting the previous bubble.
-    const stepIds = contents.slice(1).map(value => value.messageId)
+    expect(contents.every(value => Object.hasOwn(value, 'message_id') && !Object.hasOwn(value, 'messageId'))).toBe(true)
+    expect(contents.every(value => !Object.hasOwn(value, 'delta'))).toBe(true)
+    // Distinct message_ids keep each step appended instead of overwriting the previous bubble.
+    const stepIds = contents.slice(1).map(value => value.message_id)
     expect(new Set(stepIds).size).toBe(stepIds.length)
     // An empty step writes nothing at all.
-    expect(JSON.stringify(calls)).not.toContain('"delta":""')
+    expect(JSON.stringify(calls)).not.toContain('"content":""')
   })
 
   test('states a failed turn in the panel body instead of leaving it on the opening line', async () => {

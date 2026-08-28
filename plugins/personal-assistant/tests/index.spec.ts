@@ -41,12 +41,12 @@ describe('personal-assistant core meta-bundle', () => {
     expect(patch).not.toContain('@dsh-enhanced/lark-channel')
   })
 
-  test('replaces the native permission selector with ask, auto, and full and defaults fresh installs to full', () => {
+  test('replaces the native permission selector with ask, auto, and full and defaults fresh installs to workspace-write', () => {
     expect(patch).toMatch(/- id: permission\s+name: '@deepseek-ai\/dsh-permission-presets'/u)
     expect(patch).toMatch(/presets:\s+workspace-write:\s+sandbox: workspace-write\s+approval: ask\s+name: 请求批准/u)
     expect(patch).toMatch(/workspace-write:[\s\S]*?auto:\s+sandbox: workspace-write\s+approval: ask\s+name: 帮我批准/u)
     expect(patch).toMatch(/auto:[\s\S]*?danger-full-access:\s+sandbox: danger-full-access\s+approval: never/u)
-    expect(patch).toContain('defaultPreset: danger-full-access')
+    expect(patch).toContain('defaultPreset: workspace-write')
     expect(patch).not.toMatch(/^\s+read-only:/mu)
   })
 

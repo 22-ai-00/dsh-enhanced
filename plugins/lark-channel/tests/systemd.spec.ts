@@ -30,7 +30,9 @@ describe('DSH profile systemd user service', () => {
     expect(unit).toContain('WorkingDirectory=/home/test/.dsh/profiles/web')
     expect(unit).toContain('Environment="DSH_HOME=/home/test/.dsh"')
     expect(unit).toContain('Environment="DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus"')
-    expect(unit).toContain('Restart=on-failure')
+    expect(unit).toContain('StartLimitIntervalSec=0')
+    expect(unit).toContain('Restart=always')
+    expect(unit).toContain('TimeoutStopSec=30')
     expect(unit).not.toMatch(/TOKEN|SECRET|PASSWORD/u)
   })
 
@@ -77,7 +79,7 @@ describe('DSH profile systemd user service', () => {
     expect(installed.target).toBe('dsh-profile-web.service')
     expect(installed.logCommand).toBe('journalctl --user -u dsh-profile-web.service -f')
     expect((await stat(installed.unitPath)).mode & 0o777).toBe(0o600)
-    expect(await readFile(installed.unitPath, 'utf8')).toContain('Restart=on-failure')
+    expect(await readFile(installed.unitPath, 'utf8')).toContain('Restart=always')
     expect(commands.map(command => [command.command, ...command.args])).toEqual([
       ['/usr/bin/systemctl', '--user', 'daemon-reload'],
       ['/usr/bin/systemctl', '--user', 'enable', 'dsh-profile-web.service'],

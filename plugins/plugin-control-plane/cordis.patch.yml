@@ -1,0 +1,7 @@
+- insert:
+    - id: dsh-enhanced-plugin-control-plane
+      name: '@dsh-enhanced/plugin-control-plane'
+      config:
+        catalogPath: !!js dshHomePath('plugin-control/catalog.json')
+        statePath: !!js dshHomePath('plugin-control/plans')
+        proposalTtlMs: 900000

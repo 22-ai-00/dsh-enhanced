@@ -8,6 +8,7 @@ const profilePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 export interface WindowsTaskPaths {
   taskName: string
   launcherPath: string
+  taskXmlPath: string
   stdoutPath: string
   stderrPath: string
 }
@@ -66,9 +67,36 @@ export function windowsTaskPaths(input: { dshHome: string; profile: string }): W
   return {
     taskName: `DSH profile ${input.profile}`,
     launcherPath: join(serviceDirectory, `${input.profile}.cmd`),
+    taskXmlPath: join(serviceDirectory, `${input.profile}.task.xml`),
     stdoutPath: join(logsDirectory, `${input.profile}-host.log`),
     stderrPath: join(logsDirectory, `${input.profile}-host.error.log`),
   }
+}
+
+function xml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;')
+}
+
+/** A current-user task which restarts the launcher after abnormal exits. */
+export function createWindowsTaskXml(input: WindowsTaskPaths): string {
+  return `<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <Triggers><LogonTrigger><Enabled>true</Enabled></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable><ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>999</Count></RestartOnFailure>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>cmd.exe</Command><Arguments>/d /c &quot;${xml(input.launcherPath)}&quot;</Arguments></Exec></Actions>
+</Task>
+`
 }
 
 export function createWindowsLauncher(input: WindowsLauncherInput): string {
@@ -129,9 +157,10 @@ export async function installDshWindowsTask(
   await atomicWrite(paths.launcherPath, createWindowsLauncher({
     ...paths, dshHome: input.dshHome, profile: input.profile, profileDirectory, nodePath, dshPath,
   }))
+  await atomicWrite(paths.taskXmlPath, createWindowsTaskXml(paths))
   const run = options.run ?? defaultRun
   const create = run('schtasks.exe', [
-    '/Create', '/F', '/SC', 'ONLOGON', '/TN', paths.taskName, '/TR', `cmd.exe /d /c "${paths.launcherPath}"`,
+    '/Create', '/F', '/TN', paths.taskName, '/XML', paths.taskXmlPath,
   ])
   if (create.status !== 0) throw new Error('lark-channel setup: Windows scheduled task creation failed')
   run('schtasks.exe', ['/End', '/TN', paths.taskName])

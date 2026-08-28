@@ -17,6 +17,7 @@ async function pluginManifests() {
       const manifest = JSON.parse(await readFile(path, 'utf8')) as {
         name: string
         peerDependencies?: Record<string, string>
+        peerDependenciesMeta?: Record<string, { optional?: boolean }>
       }
       return { manifest, path }
     }))
@@ -41,6 +42,14 @@ describe('DSH compatibility baseline', () => {
     expect(peers.length).toBeGreaterThan(0)
     for (const peer of peers) {
       expect(peer, peer.path).toMatchObject({ range: `>=${baseline} <0.2.0` })
+    }
+  })
+
+  test('marks every plugin peer optional so profile pnpm never installs a second host runtime', async () => {
+    for (const { manifest, path } of await pluginManifests()) {
+      for (const peerName of Object.keys(manifest.peerDependencies ?? {})) {
+        expect(manifest.peerDependenciesMeta?.[peerName]?.optional, `${path}: ${peerName}`).toBe(true)
+      }
     }
   })
 

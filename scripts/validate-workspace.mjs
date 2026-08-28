@@ -89,6 +89,11 @@ for (const entry of entries) {
   if (manifest.scripts?.prepublishOnly !== 'node ../../scripts/require-pnpm-publish.mjs') {
     report(manifestPath, 'prepublishOnly must reject publishing catalog dependencies with npm')
   }
+  for (const peerName of Object.keys(manifest.peerDependencies ?? {})) {
+    if (manifest.peerDependenciesMeta?.[peerName]?.optional !== true) {
+      report(manifestPath, `peerDependenciesMeta.${peerName}.optional must be true so DSH supplies the host peer without pnpm duplicating it`)
+    }
+  }
 
   const requiredPaths = [
     'src/index.ts',
