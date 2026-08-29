@@ -20,6 +20,7 @@
   },
   "files": [
     "bin",
+    "docs",
     "lib",
     "cordis.patch.yml",
     "README.md",

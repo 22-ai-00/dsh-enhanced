@@ -1,5 +1,7 @@
 # 飞书连接与会话模型选择：开源方案研究记录
 
+> **历史研究。** 本文保存设计依据，不作为当前行为说明；当前配置、安全边界和使用方式见 [`lark-channel` README](../plugins/lark-channel/README.md) 与 [`assistant-delivery` README](../plugins/assistant-delivery/README.md)。
+
 本文记录 `lark-channel` / `assistant-delivery` 对飞书官方实现与社区项目的设计借鉴。结论用于独立实现边界与测试，不复制第三方源码。
 
 ## 结论

@@ -106,6 +106,7 @@ rules:
 - 429/明确 5xx 未发送应给出 `retryable` 与可选 `retryAfterMs`；永久 4xx 进入 dead。
 - 请求可能已到平台但 response 丢失时返回 `unknown`。若声明 `reconcileUnknownSend` capability，必须实现对账，并使用独立的有界对账 attempt；连续无法判定达到上限后进入 dead，释放同 lane 后续消息。未声明该能力时记录保持 `unknown_after_send`，不会被领取为空对账 attempt，直到 owner 显式 retry/cancel。
 - receipt 必须带同一个 channel、account、provider message id；状态只允许单调 `accepted→delivered→read`。
+- `progress()` 收到的工具参数/结果仅是最多 1500 字符的展示预览，并会脱敏常见 credential 字段与 token 形态；畸形或原始输入过大的参数只产生状态标记，不回显 raw text。它不包含任何 reasoning/thinking 内容或 provider 原始错误。adapter 仍必须按当前受众决定是否展示明细，群聊等共享受众应保持 status-only。
 - adapter 的 socket、timer、SDK client 和 listener 必须由 `start()` disposer 释放。
 
 内部身份始终是结构化的 `ExternalPrincipalKey`、`ConversationRef` 与 `ConversationBinding`，不会从 `platform:chat:thread` 字符串反解析路由。DM 不允许 thread；group 入口要求渠道提供显式且稳定的 thread，可以是真实 provider root，也可以是渠道命名空间内按 principal 派生的顶层合成 lane。binding 仍固定精确 principal，任何同 conversation 的另一 principal 都会在进入 session 前 dead-letter，不能共享既有 owner 上下文。Lark 顶层群消息使用按发送者派生的合成 lane，真实回复串继续按 `root_id` 隔离。

@@ -1512,27 +1512,62 @@ describe('real rc.8 delivery Agent runtime', () => {
     await restarted.ctx.fiber.restart()
   })
 
-  test('turns session events into safe progress without exposing reasoning, arguments, or tool output', () => {
+  test('turns session events into useful bounded progress while redacting reasoning and credentials', () => {
     const event = (value: object) => value as SessionEvent
     expect(deliveryProgressFromSessionEvent(event({
       type: 'assistant/chunk', data: { turn: 1, step: 1,
         chunk: { type: 'reasoning-delta', index: 0, text: 'private chain of thought' } },
     }))).toBeUndefined()
-    expect(deliveryProgressFromSessionEvent(event({
+    const started = deliveryProgressFromSessionEvent(event({
       type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-1', name: 'web.search',
-        arguments: '{"secret":"must-not-leak"}' },
-    }))).toEqual({ kind: 'tool-started', callId: 'call-1', toolName: 'web.search' })
-    expect(deliveryProgressFromSessionEvent(event({
+        arguments: '{"query":"release notes","api_key":"must-not-leak","refreshToken":"also-private","nested":{"awsSecretAccessKey":"private-too"}}' },
+    }))
+    expect(started).toMatchObject({ kind: 'tool-started', callId: 'call-1', toolName: 'web.search' })
+    expect(started?.kind === 'tool-started' ? started.argumentsPreview : '').toContain('release notes')
+    expect(started?.kind === 'tool-started' ? started.argumentsPreview : '').toContain('[REDACTED]')
+    expect(started?.kind === 'tool-started' ? started.argumentsPreview : '').not.toContain('also-private')
+    expect(started?.kind === 'tool-started' ? started.argumentsPreview : '').not.toContain('private-too')
+    const finished = deliveryProgressFromSessionEvent(event({
       type: 'tool/result', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1',
-          content: [{ type: 'text', text: 'sensitive tool result' }] }] } },
-    }))).toEqual({ kind: 'tool-finished', callId: 'call-1', failed: false })
+          content: [
+            { type: 'reasoning', text: 'hidden tool thought' },
+            { type: 'text', text: [
+              'Found 2 matching release notes',
+              'Authorization: Bearer secret-token',
+              'OPENAI_API_KEY=openai-private',
+              'AZURE_OPENAI_API_KEY="azure-private"',
+              "AWS_ACCESS_KEY_ID='aws-private'",
+              'myClientSecret="client-private"',
+              'someRefreshToken=refresh-private',
+              'credentials=credential-private',
+              'password="dangling-private\\',
+              '{"message":"password=\\"inner-password-private\\""}',
+              '{"message":"OPENAI_API_KEY=\\"inner-key-private\\""}',
+            ].join('\n') },
+          ] }] } },
+    }))
+    expect(finished).toMatchObject({ kind: 'tool-finished', callId: 'call-1', failed: false })
+    expect(finished?.kind === 'tool-finished' ? finished.resultPreview : '').toContain('Found 2 matching release notes')
+    expect(finished?.kind === 'tool-finished' ? finished.resultPreview : '').toContain('[REDACTED]')
+    expect(finished?.kind === 'tool-finished' ? finished.resultPreview : '')
+      .toContain('password=[REDACTED]')
+    expect(finished?.kind === 'tool-finished' ? finished.resultPreview : '')
+      .toContain('OPENAI_API_KEY=[REDACTED]')
+    for (const secret of [
+      'openai-private', 'azure-private', 'aws-private', 'client-private', 'refresh-private',
+      'credential-private', 'dangling-private', 'inner-password-private', 'inner-key-private',
+    ]) {
+      expect(finished?.kind === 'tool-finished' ? finished.resultPreview : '').not.toContain(secret)
+    }
+    expect(finished?.kind === 'tool-finished' ? finished.resultPreview : '').not.toContain('hidden tool thought')
     expect(deliveryProgressFromSessionEvent(event({
       type: 'tool/result', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-rejected' }, content: [{ type: 'tool-result',
           toolCallId: 'call-rejected', content: [{ type: 'text', text: 'the user rejected tool' }],
-          isError: true }] } },
-    }))).toEqual({ kind: 'tool-finished', callId: 'call-rejected', failed: true })
+          isError: true }] }, error: { name: 'ToolError', code: 'USER_REJECTED' } },
+    }))).toEqual({ kind: 'tool-finished', callId: 'call-rejected', failed: true,
+      resultPreview: 'the user rejected tool', code: 'USER_REJECTED' })
     expect(deliveryProgressFromSessionEvent(event({
       type: 'todo/write', data: { todos: [
         { content: '核对官方接口', status: 'completed' },
@@ -1546,17 +1581,18 @@ describe('real rc.8 delivery Agent runtime', () => {
       deliveryProgressFromSessionEvent(event({ type: 'assistant/chunk', data: { turn: 1, step: 1,
         chunk: { type: 'reasoning-delta', index: 0, text: 'private chain of thought' } } })),
       deliveryProgressFromSessionEvent(event({ type: 'tool/call', data: { turn: 1, step: 1,
-        callId: 'call-1', name: 'web.search', arguments: '{"secret":"must-not-leak"}' } })),
+        callId: 'call-1', name: 'web.search', arguments: '{"query":"release notes","api_key":"must-not-leak"}' } })),
       deliveryProgressFromSessionEvent(event({ type: 'tool/result', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1',
-          content: [{ type: 'text', text: 'sensitive tool result' }] }] } } })),
+          content: [{ type: 'text', text: 'Found release note; token=must-not-leak-too' }] }] } } })),
     ])
     expect(serialized).not.toContain('private chain of thought')
     expect(serialized).not.toContain('must-not-leak')
-    expect(serialized).not.toContain('sensitive tool result')
+    expect(serialized).toContain('release notes')
+    expect(serialized).toContain('Found release note')
   })
 
-  test('turns the settled reasoning of an assistant message into one step update', () => {
+  test('uses neutral phases and never exposes assembled or interrupted assistant reasoning', () => {
     const event = (value: object) => value as SessionEvent
     // Providers differ: some emit no reasoning at all, so a step phase label always lands first.
     expect(deliveryProgressFromSessionEvent(event({
@@ -1565,16 +1601,18 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(deliveryProgressFromSessionEvent(event({
       type: 'step/start', data: { turn: 1, step: 3 },
     }))).toEqual({ kind: 'step', text: '正在继续处理（第 3 步）…' })
-    // The durable reasoning block is the assistant's own settled summary, so a turn with no tool
-    // call and no todo still reports what it did instead of leaving the panel empty.
-    expect(deliveryProgressFromSessionEvent(event({
+    const assembled = {
       type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [
         { type: 'reasoning', text: '  先确认当前目录  ' },
         { type: 'reasoning', text: '再核对分组顺序' },
         { type: 'text', text: '这是最终回复，不应出现在进度里' },
       ] } },
-    }))).toEqual({ kind: 'step', text: '先确认当前目录\n再核对分组顺序' })
-    // A reply-only message contributes no step, and the visible answer never leaks into progress.
+    }
+    expect(deliveryProgressFromSessionEvent(event(assembled))).toBeUndefined()
+    expect(deliveryProgressFromSessionEvent(event({
+      ...assembled, data: { ...assembled.data, interrupted: true },
+    }))).toBeUndefined()
+    // A reply-only message also contributes no step; step/start keeps the panel informative.
     const replyOnly = deliveryProgressFromSessionEvent(event({
       type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [
         { type: 'text', text: '这是最终回复，不应出现在进度里' },
@@ -1586,13 +1624,105 @@ describe('real rc.8 delivery Agent runtime', () => {
         { type: 'reasoning', text: '   ' },
       ] } },
     }))).toBeUndefined()
-    // Streaming deltas stay private; only the settled block is surfaced.
-    expect(JSON.stringify(deliveryProgressFromSessionEvent(event({
-      type: 'assistant/message', data: { turn: 1, step: 1, message: { content: [
-        { type: 'reasoning', text: '可见的步骤说明' },
-        { type: 'text', text: '最终回复文本' },
-      ] } },
-    })))).not.toContain('最终回复文本')
+  })
+
+  test('keeps oversized tool previews bounded and tool arguments valid JSON', () => {
+    const event = (value: object) => value as SessionEvent
+    const started = deliveryProgressFromSessionEvent(event({
+      type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-large', name: 'memory_search',
+        arguments: JSON.stringify({ query: '\\\u0000'.repeat(2_000), token: 'do-not-expose' }) },
+    }))
+    expect(started?.kind).toBe('tool-started')
+    if (started?.kind !== 'tool-started' || started.argumentsPreview === undefined) {
+      throw new Error('missing tool argument preview')
+    }
+    expect([...started.argumentsPreview].length).toBeLessThanOrEqual(1_500)
+    expect(() => JSON.parse(started.argumentsPreview!)).not.toThrow()
+    expect(started.argumentsPreview).not.toContain('do-not-expose')
+
+    const finished = deliveryProgressFromSessionEvent(event({
+      type: 'tool/result', data: { turn: 1, step: 1,
+        message: { source: { callId: 'call-large' }, content: [{ type: 'tool-result', toolCallId: 'call-large',
+          content: [{ type: 'text', text: `result\n"token":"${'must-not-leak-'.repeat(300)}` }] }] } },
+    }))
+    expect(finished?.kind).toBe('tool-finished')
+    if (finished?.kind !== 'tool-finished' || finished.resultPreview === undefined) {
+      throw new Error('missing tool result preview')
+    }
+    expect([...finished.resultPreview].length).toBeLessThanOrEqual(1_500)
+    expect(finished.resultPreview).toContain('result')
+    expect(finished.resultPreview).toContain('[REDACTED]')
+    expect(finished.resultPreview).not.toContain('must-not-leak')
+  })
+
+  test('redacts structured values and fail-closes unquoted result credentials by line', () => {
+    const event = (value: object) => value as SessionEvent
+    const finished = deliveryProgressFromSessionEvent(event({
+      type: 'tool/result', data: { turn: 1, step: 1,
+        message: { source: { callId: 'call-result-secrets' }, content: [{ type: 'tool-result',
+          toolCallId: 'call-result-secrets', content: [
+            { type: 'text', text: '{"token":{"value":"nested-secret"},"summary":"kept"}' },
+            { type: 'text', text: 'Cookie: sid=first-secret; csrf=second-secret' },
+            { type: 'text', text: 'password: correct horse battery staple' },
+            { type: 'text', text: 'message: token=nested-line-secret' },
+            { type: 'text', text: 'safe=password=nested-equals-secret' },
+            { type: 'text', text: 'output: Cookie: sid=nested-cookie-secret' },
+            { type: 'text', text: 'message: "{\\"token\\":\\"escaped-scalar-secret\\"}"' },
+            { type: 'text', text: 'message: "{\\"token\\":{\\"value\\":\\"escaped-object-secret\\"}}"' },
+            { type: 'text', text: String.raw`password=\"abc\\\"escaped-inner-secret\"` },
+            { type: 'text', text: String.raw`message: "password=\"abc\\\"nested-inner-secret\""` },
+            { type: 'text', text: 'password="abc\\\rcr-only-secret"' },
+            ...[1, 2, 3, 4].map(count => {
+              const slashes = '\\'.repeat(count)
+              return { type: 'text' as const,
+                text: `message: "{${slashes}"token${slashes}":${slashes}"escaped-key-${count}-secret${slashes}"}"` }
+            }),
+            { type: 'text', text: String.raw`message: "{\'password\':\'single-key-secret\'}"` },
+          ] }] } },
+    }))
+    if (finished?.kind !== 'tool-finished' || finished.resultPreview === undefined) {
+      throw new Error('missing tool result preview')
+    }
+    expect(finished.resultPreview).toContain('"summary": "kept"')
+    expect(finished.resultPreview).toContain('Cookie: [REDACTED]')
+    expect(finished.resultPreview).toContain('password: [REDACTED]')
+    for (const secret of [
+      'nested-secret', 'first-secret', 'second-secret', 'correct', 'horse', 'battery', 'staple',
+      'nested-line-secret', 'nested-equals-secret', 'nested-cookie-secret',
+      'escaped-scalar-secret', 'escaped-object-secret',
+      'escaped-inner-secret', 'nested-inner-secret', 'cr-only-secret',
+      'escaped-key-1-secret', 'escaped-key-2-secret', 'escaped-key-3-secret',
+      'escaped-key-4-secret', 'single-key-secret',
+    ]) expect(finished.resultPreview).not.toContain(secret)
+  })
+
+  test('does not parse or echo an oversized result block', () => {
+    const event = (value: object) => value as SessionEvent
+    const finished = deliveryProgressFromSessionEvent(event({
+      type: 'tool/result', data: { turn: 1, step: 1,
+        message: { source: { callId: 'call-oversized-result' }, content: [{ type: 'tool-result',
+          toolCallId: 'call-oversized-result', content: [{ type: 'text', text: JSON.stringify({
+            summary: 'oversized-private', padding: 'x'.repeat(40_000),
+          }) }] }] } },
+    }))
+    expect(finished).toEqual({ kind: 'tool-finished', callId: 'call-oversized-result', failed: false,
+      resultPreview: '{"truncated":true}' })
+  })
+
+  test('does not echo raw empty, malformed, or oversized tool argument payloads', () => {
+    const event = (value: object) => value as SessionEvent
+    const preview = (argumentsValue: string) => {
+      const update = deliveryProgressFromSessionEvent(event({
+        type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-edge', name: 'edge',
+          arguments: argumentsValue },
+      }))
+      if (update?.kind !== 'tool-started') throw new Error('missing tool argument preview')
+      return update.argumentsPreview
+    }
+    expect(preview('')).toBe('{}')
+    expect(preview('{"password":"malformed-private\\')).toBe('{"invalidJson":true}')
+    expect(preview(`{"someRefreshToken":"oversized-private","padding":"${'x'.repeat(40_000)}"}`))
+      .toBe('{"truncated":true}')
   })
 
   test('/new rotates generation without deleting the persisted old session', async () => {

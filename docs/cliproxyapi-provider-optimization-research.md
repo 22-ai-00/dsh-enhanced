@@ -160,7 +160,7 @@ CLIProxyAPI 按失败原因设置不同范围和时长的 cooldown：未授权/�
 
 **落地顺序**：没有真实重复故障数据时，先做 failure context 和指标，再决定默认 TTL。
 
-**retry-after 约束（已核对契约）**：DSH `LlmErrorOptions.providerRetryAfterMs` 的语义是“**provider 请求的**等待时间”（[`index.d.ts:50-51`](../node_modules/@deepseek-ai/dsh-llm/lib/types/index.d.ts)，`LlmFailure` 同字段见 `types.d.ts:34`）。因此：
+**retry-after 约束（已核对契约）**：DSH `LlmErrorOptions.providerRetryAfterMs` 的语义是“**provider 请求的**等待时间”（上游固定提交的 [`LlmErrorOptions`](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/index.ts#L70-L76)；`LlmFailure` 同字段见 [`types.ts`](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/types.ts#L40-L50)）。因此：
 
 - 官方 CLI/ACP 明确返回可信 retry-after → 可映射进 `providerRetryAfterMs`；
 - 插件自设的 negative-cache TTL（如 5s）→ **不得**写入该字段，只留在内部 health/diagnostic；
@@ -225,7 +225,7 @@ interface ProviderFailureContext {
 
 > Provider and model metadata is a discovery surface, not a routing whitelist. …an adapter may accept model ids absent from `listModels()`; consumers must not reject a request because its model is unlisted.
 
-（[`dsh-llm/README.md:31`](../node_modules/@deepseek-ai/dsh-llm/README.md)、`README.md:35` 进一步说明 adapter “can describe an unlisted dynamic model”。）
+（上游固定提交的 [`dsh-llm` 模型发现契约](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/README.md#L35-L39)，其中进一步说明 adapter “can describe an unlisted dynamic model”。）
 
 因此：
 
@@ -243,7 +243,7 @@ CLIProxyAPI 的 usage record 含 provider、model、auth、latency、TTFT、失�
 - 核心 `QuotaState` 主要表达 exceeded/reason/recovery/backoff，不是所有 provider 的权威“剩余百分比”（[`types.go#L167-L195`](https://github.com/router-for-me/CLIProxyAPI/blob/d3a5988fc07d96f90cb1c2e3b2b7dfb9c2a310e0/sdk/cliproxy/auth/types.go#L167-L195)）。
 - README 明确从 v6.10.0 起不再内置统计功能，5h/7d dashboard 主要由外围项目提供。**因此不能承诺两个插件能获得所有订阅的权威 5 小时/7 天剩余额度。**
 
-ACP usage 不能直接映射为 DSH `TokenUsage`。DSH 契约（已核对 [`types.d.ts:116-129`](../node_modules/@deepseek-ai/dsh-llm/lib/types/types.d.ts)）要求：
+ACP usage 不能直接映射为 DSH `TokenUsage`。DSH 契约（已核对上游固定提交的 [`TokenUsage` 定义](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/types.ts#L128-L141)）要求：
 
 - `inputTokens`、`outputTokens` 是**必填 number**，不能用 `undefined`；
 - `inputTokens` 必须是 **uncached input only**，cache 单列为 `cacheReadTokens`/`cacheWriteTokens`；把 cache 折进总数的 provider 要自己减出来；
@@ -356,7 +356,7 @@ type TraexLifecycleSignal =
 
 cache key **只用非敏感、可验证的标识**，**不得 fingerprint 环境变量值**（明文或哈希都可能成为可关联标识）：adapter 实例 + provider route + normalized command + cwd + 非敏感配置 revision + 可验证的 executable version/identity。登录身份无法安全得知时，依靠短 TTL，并在 auth failure、配置/插件 reload、CLI version 变化时清空缓存。
 
-后续若要驱动 `listModels()`，必须**一起**实现 `llm/adapters-updated`、去抖、缓存代际、配置/reload 失效、auth/protocol failure 失效（[`dsh-llm/README.md:33`](../node_modules/@deepseek-ai/dsh-llm/README.md)）；这属于 §6 的 P2。
+后续若要驱动 `listModels()`，必须**一起**实现 `llm/adapters-updated`、去抖、缓存代际、配置/reload 失效、auth/protocol failure 失效（上游固定提交的 [`dsh-llm` topology event 契约](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/README.md#L35-L39)）；这属于 §6 的 P2。
 
 #### P1：保留协作式取消，但明确成功结算边界
 
@@ -497,7 +497,7 @@ CLIProxyAPI:
 
 ### 本项目
 
-- DSH LLM 契约（discovery surface / `TokenUsage` / adapters-updated）：`node_modules/@deepseek-ai/dsh-llm/README.md:31,33`、`lib/types/types.d.ts:116-129`
+- DSH LLM 契约（discovery surface / adapters-updated / `TokenUsage`）：上游固定提交的 [`dsh-llm` README](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/README.md#L35-L39)、[`TokenUsage` 源码定义](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/llm/llm/src/types.ts#L128-L141)
 - 编程订阅 README / 进程 / adapter：[README.md](../plugins/coding-subscription-provider/README.md)、[process.ts](../plugins/coding-subscription-provider/src/process.ts)（`spawn` 未监听见 L210）、[adapter.ts](../plugins/coding-subscription-provider/src/adapter.ts)（`resolveModel` 见 L131）
 - TraeX README / transport / adapter / config：[README.md:61](../plugins/traex-acp-provider/README.md)、[acp-client.ts](../plugins/traex-acp-provider/src/acp-client.ts)（`promptActive` L381、`sawAssistantText` L325、`validateModelCatalog` L499）、[adapter.ts:172](../plugins/traex-acp-provider/src/adapter.ts)、[config.ts:10](../plugins/traex-acp-provider/src/config.ts)
 - 第一手证据复核（配套）：[docs/cliproxyapi-provider-evidence-review.md](cliproxyapi-provider-evidence-review.md)

@@ -158,6 +158,22 @@ interface ActiveSessionControl {
 const MAX_CATALOG_MODELS = 50
 const MAX_PROGRESS_TODOS = 20
 const MAX_PROGRESS_TEXT_CHARS = 240
+const MAX_PROGRESS_TOOL_PREVIEW_CHARS = 1_500
+const MAX_PROGRESS_JSON_INPUT_CHARS = 32_768
+const MAX_PROGRESS_JSON_DEPTH = 16
+const MAX_PROGRESS_JSON_NODES = 500
+const MAX_PROGRESS_RESULT_BLOCKS = 100
+const REDACTED_PROGRESS_VALUE = '[REDACTED]'
+const TRUNCATED_PROGRESS_VALUE = '[TRUNCATED]'
+const PROGRESS_ASSIGNMENT_KEY = '([A-Za-z_][A-Za-z0-9_.-]{0,127})'
+const PROGRESS_ASSIGNMENT_START = new RegExp(
+  `(^|[^A-Za-z0-9_])(["']?)${PROGRESS_ASSIGNMENT_KEY}\\2(\\s*[:=]\\s*)`,
+  'giu',
+)
+const ESCAPED_QUOTED_PROGRESS_ASSIGNMENT_START = new RegExp(
+  `(^|[^A-Za-z0-9_])\\\\+(["'])${PROGRESS_ASSIGNMENT_KEY}\\\\+\\2(\\s*[:=]\\s*)`,
+  'giu',
+)
 
 type InboundAuthorizationState = 'authorized' | 'revoked' | 'check-failed'
 
@@ -249,16 +265,217 @@ function boundedProgressText(value: string): string {
   return [...value].slice(0, MAX_PROGRESS_TEXT_CHARS).join('')
 }
 
+function boundedProgressToolPreview(value: string): string {
+  const trimmed = value.trim()
+  const characters = [...trimmed]
+  return characters.length <= MAX_PROGRESS_TOOL_PREVIEW_CHARS
+    ? trimmed
+    : `${characters.slice(0, MAX_PROGRESS_TOOL_PREVIEW_CHARS - 1).join('')}…`
+}
+
+function redactProgressText(value: string): string {
+  const common = redactEscapedKeyProgressAssignments(value)
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?(?:-----END [^-]*PRIVATE KEY-----|$)/giu,
+      '[REDACTED PRIVATE KEY]')
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/giu, '$1[REDACTED]@')
+    .replace(/\b((?:proxy-)?authorization\s*[:=]\s*)(?:basic|bearer)\s+[^\s,;]+/giu,
+      '$1[REDACTED]')
+  return redactProgressAssignments(common)
+    .replace(/\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|(?:sk|xai)-[A-Za-z0-9_-]{8,})\b/gu,
+      REDACTED_PROGRESS_VALUE)
+    .replace(/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/gu,
+      REDACTED_PROGRESS_VALUE)
+}
+
+function isSensitiveProgressKey(key: string): boolean {
+  const words = key.normalize('NFKC')
+    .replace(/([a-z\d])([A-Z])/gu, '$1_$2')
+    .toLowerCase()
+    .split(/[^a-z\d]+/gu)
+    .filter(Boolean)
+  const joined = words.join('')
+  return words.some(word => [
+    'auth', 'authorization', 'bearer', 'cookie', 'cookies', 'credential', 'credentials',
+    'password', 'passwd', 'secret', 'session', 'token',
+  ].includes(word))
+    || ['apikey', 'accesskey', 'privatekey'].some(phrase => joined.includes(phrase))
+    || words.some((word, index) => ['api', 'access', 'private'].includes(word) && words[index + 1] === 'key')
+}
+
 /**
- * Convert one durable session fact into a deliberately narrow, user-visible progress update.
- * Raw reasoning chunks, tool arguments, result content, and error details never cross this boundary.
+ * Text credentials have no trustworthy terminator: quotes may be malformed or multiply escaped,
+ * while spaces, semicolons, and nested assignments can still belong to the value. Once a key is
+ * recognized, fail closed through the logical line instead of exposing an arbitrary suffix.
+ */
+function redactProgressAssignments(value: string): string {
+  let retainedIndex = 0
+  let redacted = ''
+  PROGRESS_ASSIGNMENT_START.lastIndex = 0
+  for (let match = PROGRESS_ASSIGNMENT_START.exec(value); match !== null;
+    match = PROGRESS_ASSIGNMENT_START.exec(value)) {
+    const key = match[3]
+    if (key === undefined || !isSensitiveProgressKey(key)) {
+      // The prefix regex consumes the separator of an innocent outer field. Resume inside that
+      // match so nested assignments on the same line remain visible to this scanner.
+      PROGRESS_ASSIGNMENT_START.lastIndex = match.index + 1
+      continue
+    }
+    const valueStart = match.index + match[0].length
+    const lineEnd = progressRedactionEnd(value, valueStart)
+    redacted += value.slice(retainedIndex, valueStart) + REDACTED_PROGRESS_VALUE
+    retainedIndex = lineEnd
+    PROGRESS_ASSIGNMENT_START.lastIndex = lineEnd
+  }
+  PROGRESS_ASSIGNMENT_START.lastIndex = 0
+  return redacted + value.slice(retainedIndex)
+}
+
+/** Escaped JSON keys inside a log string cannot be parsed as the outer text; fail closed by line. */
+function redactEscapedKeyProgressAssignments(value: string): string {
+  let retainedIndex = 0
+  let redacted = ''
+  ESCAPED_QUOTED_PROGRESS_ASSIGNMENT_START.lastIndex = 0
+  for (let match = ESCAPED_QUOTED_PROGRESS_ASSIGNMENT_START.exec(value); match !== null;
+    match = ESCAPED_QUOTED_PROGRESS_ASSIGNMENT_START.exec(value)) {
+    const key = match[3]
+    if (key === undefined || !isSensitiveProgressKey(key)) {
+      ESCAPED_QUOTED_PROGRESS_ASSIGNMENT_START.lastIndex = match.index + 1
+      continue
+    }
+    const valueStart = match.index + match[0].length
+    const lineEnd = progressRedactionEnd(value, valueStart)
+    redacted += value.slice(retainedIndex, valueStart) + REDACTED_PROGRESS_VALUE
+    retainedIndex = lineEnd
+    ESCAPED_QUOTED_PROGRESS_ASSIGNMENT_START.lastIndex = lineEnd
+  }
+  ESCAPED_QUOTED_PROGRESS_ASSIGNMENT_START.lastIndex = 0
+  return redacted + value.slice(retainedIndex)
+}
+
+function progressRedactionEnd(value: string, start: number): number {
+  let cursor = start
+  while (cursor < value.length) {
+    const carriageReturn = value.indexOf('\r', cursor)
+    const lineFeed = value.indexOf('\n', cursor)
+    const candidates = [carriageReturn, lineFeed].filter(index => index >= 0)
+    if (candidates.length === 0) return value.length
+    const boundary = Math.min(...candidates)
+    if (value[boundary - 1] !== '\\') return boundary
+    cursor = boundary + (value[boundary] === '\r' && value[boundary + 1] === '\n' ? 2 : 1)
+  }
+  return value.length
+}
+
+function redactProgressJson(
+  value: unknown,
+  state: { nodes: number },
+  depth = 0,
+): unknown {
+  state.nodes += 1
+  if (depth > MAX_PROGRESS_JSON_DEPTH || state.nodes > MAX_PROGRESS_JSON_NODES) {
+    return TRUNCATED_PROGRESS_VALUE
+  }
+  if (Array.isArray(value)) {
+    const items = value.slice(0, 100).map(item => redactProgressJson(item, state, depth + 1))
+    if (value.length > items.length) items.push(TRUNCATED_PROGRESS_VALUE)
+    return items
+  }
+  if (value !== null && typeof value === 'object') {
+    const entries = Object.entries(value).slice(0, 100).map(([key, item]) => [
+      key,
+      isSensitiveProgressKey(key)
+        ? REDACTED_PROGRESS_VALUE
+        : redactProgressJson(item, state, depth + 1),
+    ])
+    if (Object.keys(value).length > entries.length) entries.push(['…', TRUNCATED_PROGRESS_VALUE])
+    return Object.fromEntries(entries)
+  }
+  return typeof value === 'string' ? redactProgressText(value) : value
+}
+
+function progressArgumentsPlaceholder(value: string): string {
+  const characters = [...redactProgressText(value.slice(0, MAX_PROGRESS_JSON_INPUT_CHARS))]
+  let retained = Math.min(characters.length, MAX_PROGRESS_TOOL_PREVIEW_CHARS)
+  while (retained >= 0) {
+    const encoded = JSON.stringify({
+      truncated: true,
+      preview: characters.slice(0, retained).join(''),
+    })
+    if ([...encoded].length <= MAX_PROGRESS_TOOL_PREVIEW_CHARS) return encoded
+    retained = retained === 0 ? -1 : Math.floor(retained * 0.75)
+  }
+  return '{"truncated":true}'
+}
+
+function progressArgumentsPreview(value: string): string {
+  if (value.trim() === '') return '{}'
+  // Never publish raw malformed or oversized model output. Normal tool calls are valid JSON; when
+  // that invariant fails, a status marker is more useful than a best-effort secret scrubber.
+  if (value.length > MAX_PROGRESS_JSON_INPUT_CHARS) return '{"truncated":true}'
+  try {
+    const encoded = JSON.stringify(redactProgressJson(JSON.parse(value), { nodes: 0 }), null, 2)
+    if (encoded === undefined) return '{"invalidJson":true}'
+    return [...encoded].length <= MAX_PROGRESS_TOOL_PREVIEW_CHARS
+      ? encoded
+      : progressArgumentsPlaceholder(encoded)
+  } catch {
+    return '{"invalidJson":true}'
+  }
+}
+
+function redactProgressResultText(value: string): string {
+  if (value.length > MAX_PROGRESS_JSON_INPUT_CHARS) return '{"truncated":true}'
+  const trimmed = value.trim()
+  if ((trimmed.startsWith('{') && trimmed.endsWith('}'))
+    || (trimmed.startsWith('[') && trimmed.endsWith(']'))) {
+    try {
+      const encoded = JSON.stringify(redactProgressJson(JSON.parse(trimmed), { nodes: 0 }), null, 2)
+      if (encoded !== undefined) return encoded
+    } catch {
+      // Fall through to conservative line-oriented handling for JSON-like logs and fragments.
+    }
+  }
+  return redactProgressText(value)
+}
+
+function progressResultPreview(content: readonly ContentBlock[], depth = 0): string {
+  if (depth > 4) return TRUNCATED_PROGRESS_VALUE
+  const parts: string[] = []
+  let approximateLength = 0
+  const append = (value: string): void => {
+    if (approximateLength >= MAX_PROGRESS_TOOL_PREVIEW_CHARS * 2 || value === '') return
+    const retained = value.slice(0, MAX_PROGRESS_TOOL_PREVIEW_CHARS * 2 - approximateLength)
+    parts.push(retained)
+    approximateLength += retained.length
+  }
+  let blockCount = 0
+  for (const block of content) {
+    if (approximateLength >= MAX_PROGRESS_TOOL_PREVIEW_CHARS * 2) break
+    if (blockCount >= MAX_PROGRESS_RESULT_BLOCKS) {
+      append(TRUNCATED_PROGRESS_VALUE)
+      break
+    }
+    blockCount += 1
+    if (block.type === 'text') append(redactProgressResultText(block.text))
+    else if (block.type === 'image') append('[图片]')
+    else if (block.type === 'tool-call') {
+      append(`${block.name}\n${progressArgumentsPreview(block.arguments)}`)
+    } else if (block.type === 'tool-result') {
+      append(progressResultPreview(block.content, depth + 1))
+    }
+  }
+  return boundedProgressToolPreview(redactProgressText(parts.join('\n')))
+}
+
+/**
+ * Convert one durable session fact into a bounded, user-visible progress update.
+ * Reasoning/thinking content and provider error messages never cross this boundary. Tool calls/results
+ * contribute bounded previews with common credential shapes redacted; the channel still decides
+ * whether its current audience is private enough to render those previews.
  *
- * The `reasoning` block of a durable `assistant/message` is the assistant's own settled summary of
- * the step, not a streaming fragment, so it is the one reasoning form safe to surface. Only some
- * providers emit it at all: subscription CLIs declare an effort capability but still return text
- * only, and the ACP thought channel is not mapped to DSH reasoning yet. `step/start` therefore also
- * yields a neutral phase label, so a turn reports progress even on providers that never reason
- * out loud.
+ * A DSH `reasoning` block is explicitly thinking content and is not guaranteed to be a public
+ * summary, even after assembly into `assistant/message`. `step/start` therefore provides the only
+ * reasoning-independent phase label, so a turn reports progress without exposing hidden thought.
  */
 export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryProgressUpdate | undefined {
   if (event.type === 'step/start') {
@@ -269,18 +486,15 @@ export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryP
     }
   }
   if (event.type === 'assistant/message') {
-    const reasoning = event.data.message.content
-      .filter(value => value.type === 'reasoning')
-      .map(value => (value.type === 'reasoning' ? value.text.trim() : ''))
-      .filter(text => text !== '')
-      .join('\n')
-    return reasoning === '' ? undefined : { kind: 'step', text: boundedProgressText(reasoning) }
+    return undefined
   }
   if (event.type === 'tool/call') {
+    const argumentsPreview = progressArgumentsPreview(event.data.arguments)
     return {
       kind: 'tool-started',
       callId: String(event.data.callId),
       toolName: boundedProgressText(event.data.name),
+      ...(argumentsPreview === '' ? {} : { argumentsPreview }),
     }
   }
   if (event.type === 'tool/result') {
@@ -289,10 +503,16 @@ export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryP
       ? block.toolCallId
       : event.data.message.source?.callId
     if (callId === undefined) return undefined
+    const resultPreview = block?.type === 'tool-result'
+      ? progressResultPreview(block.content)
+      : ''
+    const code = event.data.error?.code
     return {
       kind: 'tool-finished',
       callId: String(callId),
       failed: event.data.error !== undefined || (block?.type === 'tool-result' && block.isError === true),
+      ...(resultPreview === '' ? {} : { resultPreview }),
+      ...(code === undefined ? {} : { code: boundedProgressText(code) }),
     }
   }
   if (event.type === 'todo/write') {
