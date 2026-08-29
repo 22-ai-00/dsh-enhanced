@@ -1472,7 +1472,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(started?.kind === 'tool-started' ? started.argumentsPreview : '').not.toContain('also-private')
     expect(started?.kind === 'tool-started' ? started.argumentsPreview : '').not.toContain('private-too')
     const finished = deliveryProgressFromSessionEvent(event({
-      type: 'tool/result', data: { turn: 1, step: 1,
+      type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1',
           content: [
             { type: 'reasoning', text: 'hidden tool thought' },
@@ -1506,7 +1506,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     }
     expect(finished?.kind === 'tool-finished' ? finished.resultPreview : '').not.toContain('hidden tool thought')
     expect(deliveryProgressFromSessionEvent(event({
-      type: 'tool/result', data: { turn: 1, step: 1,
+      type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-rejected' }, content: [{ type: 'tool-result',
           toolCallId: 'call-rejected', content: [{ type: 'text', text: 'the user rejected tool' }],
           isError: true }] }, error: { name: 'ToolError', code: 'USER_REJECTED' } },
@@ -1526,7 +1526,7 @@ describe('real rc.8 delivery Agent runtime', () => {
         chunk: { type: 'reasoning-delta', index: 0, text: 'private chain of thought' } } })),
       deliveryProgressFromSessionEvent(event({ type: 'tool/call', data: { turn: 1, step: 1,
         callId: 'call-1', name: 'web.search', arguments: '{"query":"release notes","api_key":"must-not-leak"}' } })),
-      deliveryProgressFromSessionEvent(event({ type: 'tool/result', data: { turn: 1, step: 1,
+      deliveryProgressFromSessionEvent(event({ type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1',
           content: [{ type: 'text', text: 'Found release note; token=must-not-leak-too' }] }] } } })),
     ])
@@ -1534,6 +1534,23 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(serialized).not.toContain('must-not-leak')
     expect(serialized).toContain('release notes')
     expect(serialized).toContain('Found release note')
+  })
+
+  test('projects only append-origin tool results into human progress', () => {
+    const event = (value: object) => value as SessionEvent
+    const data = { turn: 2, step: 1,
+      message: { source: { callId: 'call-before-compaction' }, content: [{ type: 'tool-result',
+        toolCallId: 'call-before-compaction', content: [{ type: 'text', text: 'durable result' }],
+        isError: false }] } }
+
+    expect(deliveryProgressFromSessionEvent(event({
+      type: 'tool/result', surfaceOp: { op: 'replace', start: 8, end: 8 },
+      sourceEventSeqs: [8], data,
+    }))).toBeUndefined()
+    expect(deliveryProgressFromSessionEvent(event({
+      type: 'tool/result', surfaceOp: 'append', data,
+    }))).toEqual({ kind: 'tool-finished', callId: 'call-before-compaction', failed: false,
+      resultPreview: 'durable result' })
   })
 
   test('uses neutral phases and never exposes assembled or interrupted assistant reasoning', () => {
@@ -1585,7 +1602,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(started.argumentsPreview).not.toContain('do-not-expose')
 
     const finished = deliveryProgressFromSessionEvent(event({
-      type: 'tool/result', data: { turn: 1, step: 1,
+      type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-large' }, content: [{ type: 'tool-result', toolCallId: 'call-large',
           content: [{ type: 'text', text: `result\n"token":"${'must-not-leak-'.repeat(300)}` }] }] } },
     }))
@@ -1602,7 +1619,7 @@ describe('real rc.8 delivery Agent runtime', () => {
   test('redacts structured values and fail-closes unquoted result credentials by line', () => {
     const event = (value: object) => value as SessionEvent
     const finished = deliveryProgressFromSessionEvent(event({
-      type: 'tool/result', data: { turn: 1, step: 1,
+      type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-result-secrets' }, content: [{ type: 'tool-result',
           toolCallId: 'call-result-secrets', content: [
             { type: 'text', text: '{"token":{"value":"nested-secret"},"summary":"kept"}' },
@@ -1643,7 +1660,7 @@ describe('real rc.8 delivery Agent runtime', () => {
   test('does not parse or echo an oversized result block', () => {
     const event = (value: object) => value as SessionEvent
     const finished = deliveryProgressFromSessionEvent(event({
-      type: 'tool/result', data: { turn: 1, step: 1,
+      type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-oversized-result' }, content: [{ type: 'tool-result',
           toolCallId: 'call-oversized-result', content: [{ type: 'text', text: JSON.stringify({
             summary: 'oversized-private', padding: 'x'.repeat(40_000),

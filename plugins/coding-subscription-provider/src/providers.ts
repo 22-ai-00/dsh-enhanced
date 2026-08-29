@@ -4,7 +4,7 @@ export type ProviderId = 'codex' | 'claude' | 'cursor' | 'grok'
 export interface ProviderPreset {
   readonly id: ProviderId
   readonly command: string
-  /** Arguments preceding the user task. They never contain credentials. */
+  /** Fixed CLI arguments. They never contain credentials or prompt content. */
   readonly args: readonly string[]
   readonly output: 'ndjson' | 'text'
 }
@@ -25,6 +25,10 @@ export interface CliInvocation {
   readonly provider: ProviderId
   readonly command: string
   readonly args: readonly string[]
+  /** Serialized DSH request. It is transported out-of-band and must never enter argv. */
+  readonly prompt: string
+  /** stdin everywhere except Grok on Windows, where `/dev/stdin` is unavailable. */
+  readonly promptTransport: 'stdin' | 'secure-temporary-file'
   readonly cwd: string
   readonly shell: false
 }
@@ -158,11 +162,9 @@ export const providerPresets: Readonly<Record<ProviderId, ProviderPreset>> = {
   grok: {
     id: 'grok',
     command: 'grok',
-    // `-p` consumes the following argv item, so buildInvocation inserts the task
-    // immediately after it before appending these fixed headless flags. Grok treats
-    // an empty --tools value as no filter, so allow then deny its always-on MCP
-    // meta-tools to produce an actually empty native tool set. DSH calls use
-    // the outer JSON bridge instead of Grok's internal executor.
+    // Grok treats an empty --tools value as no filter, so allow then deny its
+    // always-on MCP meta-tools to produce an actually empty native tool set. DSH
+    // calls use the outer JSON bridge instead of Grok's internal executor.
     args: [
       '--output-format', 'streaming-json', '--permission-mode', 'dontAsk',
       '--no-auto-update', '--no-memory', '--no-subagents', '--disable-web-search', '--verbatim',
@@ -172,10 +174,19 @@ export const providerPresets: Readonly<Record<ProviderId, ProviderPreset>> = {
   },
 }
 
-export function buildInvocation(provider: ProviderId, options: InvocationOptions): CliInvocation {
+export function buildInvocation(
+  provider: ProviderId,
+  options: InvocationOptions,
+  platform: NodeJS.Platform = process.platform,
+): CliInvocation {
   const preset = providerPresets[provider]
-  const args = provider === 'grok'
-    ? ['-p', options.prompt, ...preset.args]
+  const promptTransport = provider === 'grok' && platform === 'win32'
+    ? 'secure-temporary-file'
+    : 'stdin'
+  // Grok requires an explicit prompt-file source. POSIX can safely name its
+  // inherited stdin pipe; Windows receives a private file path in process.ts.
+  const args = provider === 'grok' && promptTransport === 'stdin'
+    ? ['--prompt-file', '/dev/stdin', ...preset.args]
     : [...preset.args]
 
   if (options.model && options.model !== 'default') args.push('--model', options.model)
@@ -190,6 +201,13 @@ export function buildInvocation(provider: ProviderId, options: InvocationOptions
     args.push('--max-turns', String(options.maxTurns))
   }
 
-  if (provider !== 'grok') args.push(options.prompt)
-  return { provider, command: options.command ?? preset.command, args, cwd: options.cwd, shell: false }
+  return {
+    provider,
+    command: options.command ?? preset.command,
+    args,
+    prompt: options.prompt,
+    promptTransport,
+    cwd: options.cwd,
+    shell: false,
+  }
 }

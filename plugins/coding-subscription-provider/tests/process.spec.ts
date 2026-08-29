@@ -1,4 +1,6 @@
 import { EventEmitter } from 'node:events'
+import { existsSync, readFileSync, statSync } from 'node:fs'
+import { dirname } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -9,9 +11,10 @@ import {
   type ProviderFailureContext,
   type SpawnProcess,
 } from '../src/process.ts'
-import { buildInvocation } from '../src/providers.ts'
+import { buildInvocation, type CliInvocation } from '../src/providers.ts'
 
 class FakeChild extends EventEmitter {
+  stdin: PassThrough | null = new PassThrough()
   stdout = new PassThrough()
   stderr = new PassThrough()
   kills: (NodeJS.Signals | number | undefined)[] = []
@@ -41,7 +44,133 @@ describe('CLI process bridge', () => {
     child.stderr.write('private diagnostic\n')
     child.finish()
     await expect(result).resolves.toEqual(['hello'])
-    expect(spawn).toHaveBeenCalledWith('codex', expect.any(Array), expect.objectContaining({ cwd: '/repo', shell: false, detached: process.platform !== 'win32' }))
+    expect(spawn).toHaveBeenCalledWith('codex', expect.any(Array), expect.objectContaining({
+      cwd: '/repo', shell: false, detached: process.platform !== 'win32', stdio: ['pipe', 'pipe', 'pipe'],
+    }))
+    expect(child.stdin?.read()?.toString()).toBe('x')
+  })
+
+  it('streams a prompt larger than the former 128 KiB limit through a real child stdin', async () => {
+    const prompt = `large-private-prompt:${'界'.repeat(96 * 1024)}`
+    expect(Buffer.byteLength(prompt, 'utf8')).toBeGreaterThan(128 * 1024)
+    const script = [
+      "let input = ''",
+      "process.stdin.setEncoding('utf8')",
+      "process.stdin.on('data', chunk => { input += chunk })",
+      "process.stdin.on('end', () => {",
+      "  const bytes = Buffer.byteLength(input, 'utf8')",
+      "  const transport = process.argv.includes(input) ? 'argv-leak' : 'stdin-only'",
+      "  process.stdout.write(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', content: `${bytes}:${transport}` } }) + '\\n')",
+      "  process.stdout.write(JSON.stringify({ type: 'turn.completed' }) + '\\n')",
+      '})',
+    ].join(';')
+    const invocation: CliInvocation = {
+      provider: 'codex',
+      command: process.execPath,
+      args: ['--eval', script],
+      prompt,
+      promptTransport: 'stdin',
+      cwd: process.cwd(),
+      shell: false,
+    }
+
+    expect(invocation.args.join('\0')).not.toContain(prompt)
+    await expect(collect(runCliText(invocation, { timeoutMs: 10_000 }))).resolves.toEqual([
+      `${Buffer.byteLength(prompt, 'utf8')}:stdin-only`,
+    ])
+  })
+
+  it('uses and removes a mode-0600 private prompt file for Grok Windows transport', async () => {
+    const prompt = 'windows-private-prompt-content'
+    const child = new FakeChild()
+    let promptPath: string | undefined
+    const spawn: SpawnProcess = (_command, args) => {
+      const promptFlag = args.indexOf('--prompt-file')
+      const value = args[promptFlag + 1]
+      if (promptFlag < 0 || value === undefined) throw new Error('missing prepared prompt path')
+      promptPath = value
+      expect(args.join('\0')).not.toContain(prompt)
+      expect(readFileSync(value, 'utf8')).toBe(prompt)
+      if (process.platform !== 'win32') expect(statSync(value).mode & 0o777).toBe(0o600)
+      queueMicrotask(() => {
+        child.spawn()
+        child.stdout.write('{"type":"text","data":"ok"}\n')
+        child.stdout.write('{"type":"end","stopReason":"end_turn"}\n')
+        child.finish()
+      })
+      return child
+    }
+
+    const invocation = buildInvocation('grok', { cwd: '/repo', prompt }, 'win32')
+    await expect(collect(runCliText(invocation, { spawn }))).resolves.toEqual(['ok'])
+    expect(promptPath).toBeDefined()
+    expect(existsSync(promptPath!)).toBe(false)
+    expect(existsSync(dirname(promptPath!))).toBe(false)
+    expect(child.stdin?.read()).toBeNull()
+  })
+
+  it('removes the Grok Windows prompt file when spawn throws before submission', async () => {
+    let promptPath: string | undefined
+    let context: ProviderFailureContext | undefined
+    const spawn: SpawnProcess = (_command, args) => {
+      const promptFlag = args.indexOf('--prompt-file')
+      promptPath = args[promptFlag + 1]
+      throw Object.assign(new Error('spawn failed'), { code: 'ENOENT' })
+    }
+    const invocation = buildInvocation('grok', { cwd: '/repo', prompt: 'private' }, 'win32')
+    await expect(collect(runCliText(invocation, {
+      spawn,
+      onSettled: value => { context = value },
+    }))).rejects.toThrow('spawn failed')
+    expect(promptPath).toBeDefined()
+    expect(existsSync(promptPath!)).toBe(false)
+    expect(existsSync(dirname(promptPath!))).toBe(false)
+    expect(context).toMatchObject({ phase: 'spawn', promptSubmissionState: 'not-submitted' })
+  })
+
+  it.each([
+    ['error', 'WRITE_FAILED'] as const,
+    ['close', 'CLOSED_EARLY'] as const,
+  ])('fails safely when prompt stdin emits %s', async (event, reason) => {
+    const secret = 'prompt-content-must-not-enter-errors'
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: secret }),
+      { spawn: fakeSpawn(child), killGraceMs: 100, onSettled: value => { context = value } },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'CLI_PROMPT_INPUT_ERROR',
+      cause: 'prompt-input',
+      reason,
+      message: expect.not.stringContaining(secret),
+    })
+    await Promise.resolve()
+    child.spawn()
+    if (event === 'error') child.stdin?.emit('error', new Error(`write failed: ${secret}`))
+    else child.stdin?.emit('close')
+    expect(child.kills).toContain('SIGINT')
+    child.finish(null, 'SIGINT')
+    await rejected
+    expect(context).toMatchObject({ phase: 'prompt', promptSubmissionState: 'unknown' })
+  })
+
+  it('fails before submission when a spawned child has no stdin pipe', async () => {
+    const child = new FakeChild()
+    child.stdin = null
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'private' }),
+      { spawn: fakeSpawn(child), killGraceMs: 100, onSettled: value => { context = value } },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'CLI_PROMPT_INPUT_ERROR', reason: 'MISSING_STDIN', cause: 'prompt-input',
+    })
+    await Promise.resolve()
+    child.spawn()
+    child.finish(null, 'SIGINT')
+    await rejected
+    expect(context).toMatchObject({ phase: 'prompt', promptSubmissionState: 'not-submitted' })
   })
 
   it('parses all supported streaming shapes', () => {
@@ -231,6 +360,7 @@ describe('CLI process bridge', () => {
       controller.abort()
       await vi.advanceTimersByTimeAsync(1)
       expect(child.kills).toEqual(expect.arrayContaining(['SIGINT', 'SIGKILL']))
+      expect(child.stdin?.destroyed).toBe(true)
       child.finish(null, 'SIGKILL')
       await rejected
     } finally {
@@ -355,7 +485,7 @@ describe('CLI process bridge', () => {
     expect(child.kills).toContain('SIGINT')
     child.finish(null, 'SIGINT')
     await rejected
-    expect(context).toMatchObject({ promptSubmissionState: 'unknown', teardownState: 'completed', signal: 'SIGINT' })
+    expect(context).toMatchObject({ promptSubmissionState: 'not-submitted', teardownState: 'completed', signal: 'SIGINT' })
   })
 
   it('uses a minimal inherited environment and never lets API keys override subscriptions', () => {
@@ -939,7 +1069,7 @@ describe('CLI process bridge', () => {
     expect(context).toMatchObject({ promptSubmissionState: 'not-submitted', assistantTextObserved: false })
   })
 
-  it('leaves submission unknown when a spawn error follows child output', async () => {
+  it('records submission when stdin finishes before an error even if the spawn event was missed', async () => {
     const child = new FakeChild()
     let context: ProviderFailureContext | undefined
     const pending = collect(runCliText(
@@ -948,14 +1078,14 @@ describe('CLI process bridge', () => {
     ))
     const rejected = expect(pending).rejects.toBeDefined()
     await Promise.resolve()
-    // Child produced output but no `spawn` event was observed; a later error must not
-    // demote submission to not-submitted, because the prompt argv may have run.
+    // Child output activates the defensive stdin fallback even though the reduced
+    // process shim omitted its spawn event. A full writable finish proves submission.
     child.stdout.write('{"type":"noise"}\n')
     await Promise.resolve()
     child.emit('error', Object.assign(new Error('late failure'), { code: 'EPIPE' }))
     child.finish(null, null)
     await rejected
-    expect(context).toMatchObject({ promptSubmissionState: 'unknown' })
+    expect(context).toMatchObject({ promptSubmissionState: 'submitted' })
   })
 
   it('records observed assistant text and exit status when a submitted turn fails at close', async () => {

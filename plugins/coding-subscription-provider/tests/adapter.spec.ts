@@ -19,6 +19,7 @@ import { join, resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import {
   CodingSubscriptionAdapter as RawCodingSubscriptionAdapter,
+  CLI_PROMPT_LIMIT_CODE,
   redactDiagnostic,
   type AdapterDependencies,
 } from '../src/adapter.ts'
@@ -768,6 +769,21 @@ describe('coding subscription LLM adapter', () => {
     expect(discover).toHaveBeenCalledTimes(1)
   })
 
+  it.each([
+    ['codex-subscription', 'codex', 128_001],
+    ['claude-subscription', 'claude', 128_002],
+    ['cursor-subscription', 'cursor', 128_003],
+    ['grok-subscription', 'grok', 128_004],
+  ] as const)('advertises the configured context capacity for %s', async (route, provider, contextWindow) => {
+    const config = Config()
+    config[provider].contextWindow = contextWindow
+    const adapter = new CodingSubscriptionAdapter(config)
+
+    await expect(adapter.resolveModel(route, 'default')).resolves.toMatchObject({
+      context: { contextWindow },
+    })
+  })
+
   it('maps CLI text into a valid DSH text stream', async () => {
     let invocation: CliInvocation | undefined
     const runText = vi.fn((received: CliInvocation) => {
@@ -785,7 +801,8 @@ describe('coding subscription LLM adapter', () => {
       { type: 'finish', reason: { kind: 'stop' } },
     ])
     expect(invocation).toMatchObject({ provider: 'codex', command: 'codex', cwd: process.cwd() })
-    expect(invocation?.args.join(' ')).toContain('dsh-coding-subscription-provider/v1')
+    expect(invocation?.prompt).toContain('dsh-coding-subscription-provider/v1')
+    expect(invocation?.args.join(' ')).not.toContain('dsh-coding-subscription-provider/v1')
     expect(invocation?.args).not.toContain('--max-turns')
   })
 
@@ -866,7 +883,8 @@ describe('coding subscription LLM adapter', () => {
     ])
     expect(verifyAuth).toHaveBeenCalledOnce()
     expect(runText).toHaveBeenCalledOnce()
-    expect(runText.mock.calls[0]?.[0].args.join(' ')).toContain('dsh-tool-calls/v1')
+    expect(runText.mock.calls[0]?.[0].prompt).toContain('dsh-tool-calls/v1')
+    expect(runText.mock.calls[0]?.[0].args.join(' ')).not.toContain('dsh-tool-calls/v1')
   })
 
   it('buffers an ordinary final response when tools are present so bridge JSON never leaks', async () => {
@@ -1510,7 +1528,7 @@ describe('coding subscription LLM adapter', () => {
     await expect((async () => {
       for await (const _chunk of adapter.stream(request())) { /* drain */ }
     })()).rejects.toMatchObject({
-      code: CONTEXT_WINDOW_EXCEEDED_CODE,
+      code: CLI_PROMPT_LIMIT_CODE,
       message: expect.stringContaining('configured limit'),
     })
     expect(verifyAuth).not.toHaveBeenCalled()

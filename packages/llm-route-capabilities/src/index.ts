@@ -1,5 +1,6 @@
 import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { deepFreeze, type GenerateOptions, type LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { types as nodeTypes } from 'node:util'
 import { version } from './version.js'
 
 /**
@@ -22,6 +23,15 @@ export type LlmRouteCapabilityDisposer = () => void
  */
 export interface AgentLoopRequestAttestor {
   claim(request: GenerateOptions, session: object): boolean
+
+  /**
+   * Claim the one rc.8 `dsh-compaction-basic` auxiliary call that belongs to
+   * the exact active Agent turn. The upstream compactor builds a mutable
+   * envelope, so a successful claim seals that plain-data envelope in place at
+   * this Host-owned provider-authority seam before validating its full shape.
+   * Implementations that do not explicitly support this proof omit the method.
+   */
+  claimCompaction?(request: GenerateOptions, session: object): boolean
 }
 
 type LiveAgentSession = NonNullable<ReturnType<AgentRegistry['get']>>['session']
@@ -40,6 +50,70 @@ interface RegistryState {
 const registrySymbol = Symbol.for('@dsh-enhanced/llm-route-capabilities/runtime-registry/v1')
 const providerPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u
 const modes = new Set<ToolCallMode>(['none', 'native', 'bridge'])
+const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+const MAX_COMPACTION_TOKENS = 8_192
+const compactionRequestKeys = new Set([
+  'provider',
+  'model',
+  'reasoningEffort',
+  'messages',
+  'system',
+  'tools',
+  'maxTokens',
+  'sessionId',
+  'purpose',
+  'signal',
+])
+const requiredCompactionRequestKeys = [
+  'provider',
+  'model',
+  'messages',
+  'maxTokens',
+  'sessionId',
+  'purpose',
+  'signal',
+] as const
+const instructionMessageKeys = new Set(['id', 'role', 'content', 'source'])
+const compactionStartKeys = new Set(['compactionId', 'sourceCommandId', 'turn'])
+const automaticCompactionStartKeys = new Set(['compactionId', 'turn'])
+
+/** Exact final user instruction emitted by @deepseek-ai/dsh-compaction-basic rc.8. */
+const RC8_COMPACTION_INSTRUCTION = [
+  'You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.',
+  '',
+  'Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.',
+  '',
+  '## Primary Request and Intent',
+  '- [the user\'s original and evolving goals; quote verbatim where the exact wording matters]',
+  '',
+  '## Key Technical Concepts',
+  '- [technologies, frameworks, patterns, and conventions in play]',
+  '',
+  '## Files and Code',
+  '- [exact path: why it matters, key changes or snippets]',
+  '',
+  '## Errors and Fixes',
+  '- [error: how it was resolved, plus any related user feedback]',
+  '',
+  '## Pending Jobs',
+  '- [explicitly requested work not yet completed]',
+  '',
+  '## Current Work',
+  '- [precisely what was in progress at this checkpoint]',
+  '',
+  '## Next Step',
+  '- [the single next action, directly in line with the most recent request, or "(none)"]',
+  '',
+  '## Critical Context',
+  '- [decisions and their rationale, constraints, user preferences, open questions, data needed to continue]',
+  '',
+  'Rules:',
+  '- Write concise English engineering prose. Preserve exact file paths, commands, error strings, identifiers, numeric values, function signatures, and syntax fragments.',
+  '- Capture user feedback and explicit instructions faithfully, especially corrections.',
+  '- Do NOT mention this summarization request or that the context was compacted.',
+  '- Output only the checkpoint text: do not call any tool or take any other action.',
+  '- If the conversation already contains a <compacted-summary> block, it is a PRIOR checkpoint. Do not copy it forward verbatim: preserve still-true facts, drop stale ones, and merge newer information into a single consolidated summary under the same structure.',
+].join('\n')
 
 function registryTarget(runtime: LlmRuntime): Record<PropertyKey, unknown> {
   return runtime as unknown as Record<PropertyKey, unknown>
@@ -108,6 +182,7 @@ function dataRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function plainDataKeys(value: object): string[] | undefined {
+  if (nodeTypes.isProxy(value)) return undefined
   if (Array.isArray(value)) {
     if (Object.getPrototypeOf(value) !== Array.prototype) return undefined
     const keys = Reflect.ownKeys(value)
@@ -197,6 +272,133 @@ function deeplyFrozen(value: unknown): boolean {
   return true
 }
 
+/**
+ * Validate the complete request graph without invoking getters before the
+ * attestor freezes an upstream-owned compaction envelope in place. The only
+ * exotic object admitted is the exact root `signal`; nested AbortSignals and
+ * every accessor/proxy-visible non-data shape fail closed.
+ */
+function plainCompactionRequestGraph(request: GenerateOptions, signal: AbortSignal): boolean {
+  const pending: Array<{ value: unknown; root?: boolean; signal?: boolean; leave?: boolean }> = [
+    { value: request, root: true },
+  ]
+  const active = new WeakSet<object>()
+  const complete = new WeakSet<object>()
+  while (pending.length > 0) {
+    const current = pending.pop()!
+    if (current.leave) {
+      active.delete(current.value as object)
+      complete.add(current.value as object)
+      continue
+    }
+    if (current.value === null || typeof current.value !== 'object') {
+      if (current.value === undefined || typeof current.value === 'symbol' || typeof current.value === 'function'
+        || (typeof current.value === 'number' && (!Number.isFinite(current.value) || Object.is(current.value, -0)))) return false
+      continue
+    }
+    if (current.value instanceof AbortSignal) {
+      if (current.signal !== true || current.value !== signal) return false
+      continue
+    }
+    if (active.has(current.value)) return false
+    if (complete.has(current.value)) continue
+    active.add(current.value)
+    pending.push({ value: current.value, leave: true })
+    const keys = plainDataKeys(current.value)
+    if (keys === undefined) return false
+    for (const key of keys) {
+      const descriptor = Object.getOwnPropertyDescriptor(current.value, key)
+      // plainDataKeys() has already established an enumerable data descriptor.
+      if (descriptor === undefined || !own(descriptor, 'value')) return false
+      pending.push({
+        value: descriptor.value,
+        signal: current.root === true && key === 'signal',
+      })
+    }
+  }
+  return true
+}
+
+function exactKeys(keys: readonly string[], expected: ReadonlySet<string>): boolean {
+  return keys.length === expected.size && keys.every(key => expected.has(key))
+}
+
+function exactCompactionInstruction(message: GenerateOptions['messages'][number]): boolean {
+  const keys = plainDataKeys(message)
+  return keys !== undefined
+    && exactKeys(keys, instructionMessageKeys)
+    && typeof message.id === 'string'
+    && uuidV4Pattern.test(message.id)
+    && sameData({ role: message.role, content: message.content, source: message.source }, {
+      role: 'user',
+      content: [{ type: 'text', text: RC8_COMPACTION_INSTRUCTION }],
+      source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
+    })
+}
+
+/** Require the rc.8 opening marker to be the live turn's latest durable fact. */
+function hasFreshCurrentTurnCompaction(session: LiveAgentSession): boolean {
+  const events = session.events as readonly unknown[]
+  let openTurn: number | undefined
+  let openCompaction: {
+    readonly event: object
+    readonly id: string
+    readonly turn: number | null
+    readonly automatic: boolean
+  } | undefined
+  for (const candidate of events) {
+    if (!dataRecord(candidate) || typeof candidate.type !== 'string') return false
+    const event = candidate
+    const data = event.data
+    if (!dataRecord(data)) return false
+    if (event.type === 'session/end-seed') {
+      openTurn = undefined
+      openCompaction = undefined
+      continue
+    }
+    if (event.type === 'turn/start') {
+      const turn = data.turn
+      if (openTurn !== undefined || openCompaction !== undefined
+        || !Number.isInteger(turn) || (turn as number) < 0) return false
+      openTurn = turn as number
+      continue
+    }
+    if (event.type === 'turn/end') {
+      if (openTurn === undefined || data.turn !== openTurn || openCompaction !== undefined) return false
+      openTurn = undefined
+      continue
+    }
+    if (event.type === 'compaction/start') {
+      const keys = plainDataKeys(data)
+      const turn = data.turn
+      if (openCompaction !== undefined
+        || keys === undefined || keys.some(key => !compactionStartKeys.has(key))
+        || !keys.includes('compactionId') || !keys.includes('turn')
+        || typeof data.compactionId !== 'string' || !uuidV4Pattern.test(data.compactionId)
+        || !(turn === null ? openTurn === undefined : Number.isInteger(turn) && turn === openTurn)
+        || (own(data, 'sourceCommandId')
+          && (typeof data.sourceCommandId !== 'string' || data.sourceCommandId.length === 0))) return false
+      openCompaction = {
+        event,
+        id: data.compactionId,
+        turn: turn as number | null,
+        automatic: exactKeys(keys, automaticCompactionStartKeys),
+      }
+      continue
+    }
+    if (event.type === 'compaction/end') {
+      if (openCompaction === undefined || data.compactionId !== openCompaction.id
+        || data.turn !== openCompaction.turn) return false
+      openCompaction = undefined
+    }
+  }
+  return openTurn !== undefined
+    && openCompaction !== undefined
+    && openCompaction.automatic
+    && openCompaction.turn === openTurn
+    && events.at(-1) === openCompaction.event
+}
+
 function sameLoopMessage(
   actual: GenerateOptions['messages'][number],
   expected: GenerateOptions['messages'][number],
@@ -244,6 +446,44 @@ function exactLoopEnvelope(
   return sameData(request, expected)
 }
 
+function exactCompactionEnvelope(
+  request: GenerateOptions,
+  session: LiveAgentSession,
+  ownedRoutes: ReadonlySet<string>,
+): boolean {
+  const keys = plainDataKeys(request)
+  if (keys === undefined || keys.some(key => !compactionRequestKeys.has(key))
+    || requiredCompactionRequestKeys.some(key => !keys.includes(key))
+    || request.purpose !== 'compaction'
+    || !ownedRoutes.has(request.provider)
+    || !providerPattern.test(request.provider)
+    || request.model.length === 0 || request.model.length > 512 || /[\s\p{Cc}]/u.test(request.model)
+    || !Number.isInteger(request.maxTokens) || request.maxTokens! <= 0 || request.maxTokens! > MAX_COMPACTION_TOKENS
+    || !own(request, 'signal') || !(request.signal instanceof AbortSignal) || request.signal.aborted
+    || !deeplyFrozen(request)) return false
+
+  const header = session.requestHeader()
+  if (header === undefined || request.provider !== header.config.provider || request.model !== header.config.model
+    || own(request, 'system') !== own(header, 'system') || !sameData(request.system, header.system)
+    || own(request, 'tools') !== own(header, 'tools') || !sameData(request.tools, header.tools)) return false
+
+  if (own(request, 'reasoningEffort')) {
+    if (!own(header.config, 'reasoningEffort') || request.reasoningEffort !== header.config.reasoningEffort) return false
+  }
+
+  const expectedMessages = session.deriveMessages()
+  const prefixLength = request.messages.length - 1
+  if (prefixLength <= 0 || prefixLength >= expectedMessages.length
+    || !request.messages.slice(0, prefixLength).every((message, index) => (
+      sameLoopMessage(message, expectedMessages[index]!, ownedRoutes)
+    ))) return false
+
+  const instruction = request.messages.at(-1)
+  return instruction !== undefined
+    && exactCompactionInstruction(instruction)
+    && request.messages.filter(exactCompactionInstruction).length === 1
+}
+
 /**
  * Preserve Agent Loop provenance across package duplication and transformations
  * owned by DSH's LLM runtime. DSH rc.8 keeps its request marker in a module-local
@@ -281,6 +521,33 @@ export function createAgentLoopRequestAttestor(
       } catch {
         // Service teardown or a malformed host facade fails closed at the
         // provider boundary and is reported as an unattested local request.
+        return false
+      }
+    },
+    claimCompaction(request: GenerateOptions, session: object): boolean {
+      try {
+        // Inspect only root data descriptors and cheap scalar/identity facts
+        // before touching the caller-owned nested graph or freezing it.
+        const keys = plainDataKeys(request)
+        if (keys === undefined || keys.some(key => !compactionRequestKeys.has(key))
+          || requiredCompactionRequestKeys.some(key => !keys.includes(key))
+          || request.purpose !== 'compaction'
+          || !own(request, 'signal') || !(request.signal instanceof AbortSignal) || request.signal.aborted
+          || request.sessionId === undefined) return false
+
+        const initiator = agents.currentInitiator()
+        if (initiator === undefined || initiator.status !== 'running'
+          || initiator.id !== request.sessionId
+          || agents.get(initiator.id) !== initiator
+          || initiator.session !== session
+          || initiator.session.id !== request.sessionId
+          || !hasFreshCurrentTurnCompaction(initiator.session)) return false
+
+        if (!plainCompactionRequestGraph(request, request.signal)) return false
+        deepFreeze(request)
+        return exactCompactionEnvelope(request, initiator.session, routes)
+      } catch {
+        // Never freeze or authorize a malformed/stale ambient auxiliary call.
         return false
       }
     },

@@ -2,6 +2,7 @@ import { createMessage, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { describe, expect, it } from 'vitest'
 import {
   buildPrompt,
+  CLI_PROMPT_LIMIT_CAUSE,
   DSH_TOOL_CALL_PROTOCOL,
   parseDelegatedToolCalls,
 } from '../src/prompt.ts'
@@ -153,7 +154,7 @@ describe('DSH request serialization', () => {
     } catch (error: unknown) {
       expect(error).toMatchObject({
         message: expect.stringMatching(/configured limit/),
-        cause: 'prompt-limit',
+        cause: CLI_PROMPT_LIMIT_CAUSE,
       })
     }
   })
@@ -257,6 +258,30 @@ describe('DSH request serialization', () => {
     expect(prompt).toContain('"name":"read"')
     expect(prompt).toContain('"description":"Read one workspace file."')
     expect(prompt).toContain('"required":["path"]')
+  })
+
+  it('keeps schemas but forbids tool delegation during an attested compaction request', () => {
+    const options = request()
+    options.purpose = 'compaction'
+    options.tools = [{
+      name: 'read',
+      description: 'Read one workspace file.',
+      parameters: { type: 'object' },
+    }]
+
+    const prompt = buildPrompt(options, 100_000)
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      instruction: string
+      constraints: { purpose: string; tools: { available: unknown[] } }
+    }
+
+    expect(payload.instruction).toContain('Produce only the requested compaction checkpoint')
+    expect(payload.instruction).toContain('Do not request or invoke any tool')
+    expect(payload.instruction).toContain('do not emit a DSH tool-call JSON envelope')
+    expect(payload.constraints).toMatchObject({
+      purpose: 'compaction',
+      tools: { available: [{ name: 'read' }] },
+    })
   })
 
   it('decodes exact one-or-many DSH tool calls without accepting a model call id', () => {

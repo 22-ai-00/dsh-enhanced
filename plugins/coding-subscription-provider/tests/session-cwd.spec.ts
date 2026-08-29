@@ -61,6 +61,38 @@ describe('coding subscription live session cwd binding', () => {
       .toThrow(/live loop session/i)
   })
 
+  it.each([null, 42, '', 'x'.repeat(513)])('rejects a malformed session identity without lookup', async (sessionId) => {
+    const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cwd-'))
+    roots.push(root)
+    let lookedUp = false
+    await expect(() => resolveTrustedSessionCwd({
+      request: { ...request(), sessionId } as unknown as GenerateOptions,
+      configuredCwd: root,
+      sessions: { get: () => { lookedUp = true; return undefined } },
+    })).toThrow(/live loop session/i)
+    expect(lookedUp).toBe(false)
+  })
+
+  it('rejects identity accessors without invoking caller code', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cwd-'))
+    roots.push(root)
+    const accessor = request('session-live')
+    let getterRead = false
+    Object.defineProperty(accessor, 'sessionId', {
+      enumerable: true,
+      get() {
+        getterRead = true
+        return 'session-live'
+      },
+    })
+    await expect(() => resolveTrustedSessionCwd({
+      request: accessor,
+      configuredCwd: root,
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
+    })).toThrow(/live loop session/i)
+    expect(getterRead).toBe(false)
+  })
+
   it('rejects an unmarked request even when it names a live matching session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cwd-'))
     roots.push(root)
@@ -91,15 +123,67 @@ describe('coding subscription live session cwd binding', () => {
     expect(claimedSession).toMatchObject({ id: 'session-live' })
   })
 
-  it('does not let attestation authorize an auxiliary model call', async () => {
+  it('does not let either attestation method authorize a session-title call', async () => {
     const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cwd-'))
     roots.push(root)
     await expect(() => resolveTrustedSessionCwd({
       request: deepFreeze({ ...request('session-live'), purpose: 'session-title' }),
       configuredCwd: root,
       sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
+      attestor: { claim: () => true, claimCompaction: () => true },
+    })).toThrow(/live loop session/i)
+  })
+
+  it('accepts compaction only through the explicit claim that seals its envelope', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cwd-'))
+    roots.push(root)
+    const compaction = {
+      ...request('session-live'),
+      purpose: 'compaction' as const,
+      signal: new AbortController().signal,
+    }
+    let ordinaryClaimed = false
+    expect(resolveTrustedSessionCwd({
+      request: compaction,
+      configuredCwd: root,
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
+      attestor: {
+        claim: () => {
+          ordinaryClaimed = true
+          return true
+        },
+        claimCompaction(observed) {
+          expect(observed).toBe(compaction)
+          deepFreeze(observed)
+          return true
+        },
+      },
+    })).toBe(realpathSync.native(root))
+    expect(ordinaryClaimed).toBe(false)
+    expect(Object.isFrozen(compaction)).toBe(true)
+  })
+
+  it('rejects compaction when only ordinary claim approves it or its auxiliary claim does not seal it', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cwd-'))
+    roots.push(root)
+    const unsealed = {
+      ...request('session-live'),
+      purpose: 'compaction' as const,
+      signal: new AbortController().signal,
+    }
+    await expect(() => resolveTrustedSessionCwd({
+      request: unsealed,
+      configuredCwd: root,
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
       attestor: { claim: () => true },
     })).toThrow(/live loop session/i)
+    await expect(() => resolveTrustedSessionCwd({
+      request: unsealed,
+      configuredCwd: root,
+      sessions: sessions({ 'session-live': { id: 'session-live', cwd: root } }),
+      attestor: { claim: () => false, claimCompaction: () => true },
+    })).toThrow(/live loop session/i)
+    expect(Object.isFrozen(unsealed)).toBe(false)
   })
 
   it('rejects an explicitly present undefined purpose even with a local loop marker', async () => {
