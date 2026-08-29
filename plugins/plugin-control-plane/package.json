@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/plugin-control-plane",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "A proposal-only capability catalog and isolated plugin activation control plane for DSH.",
   "license": "MIT",
   "type": "module",
