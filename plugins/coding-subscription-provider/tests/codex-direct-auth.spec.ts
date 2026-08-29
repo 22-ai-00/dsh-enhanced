@@ -23,8 +23,14 @@ import {
   CodexDirectAuthError,
   CodexCredentialStore,
 } from '../src/codex-direct-auth.ts'
+import type { CodexDirectRequestRouting } from '../src/codex-direct-responses.ts'
 
 const roots: string[] = []
+const STABLE_ROUTING = Object.freeze({
+  sessionId: `dshc_${'1'.repeat(32)}`,
+  threadId: `dshth_${'2'.repeat(32)}`,
+  promptCacheKey: `pck_${'3'.repeat(24)}`,
+}) satisfies CodexDirectRequestRouting
 
 function credentialDocument(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -107,6 +113,68 @@ describe('Codex direct credential store', () => {
     expect(headers.has('session_id')).toBe(false)
   })
 
+  it('uses caller-supplied stable routing and aligns x-client-request-id with the thread id', async () => {
+    const authFile = await authFixture()
+    const fetcher = vi.fn(async (_input: string | URL, _init?: RequestInit) => new Response('ok'))
+    const store = new CodexCredentialStore({ authFile, fetch: fetcher, refreshTimeoutMs: 1_000 })
+
+    await expect(store.requestResponses('{}', new AbortController().signal, STABLE_ROUTING))
+      .resolves.toMatchObject({ status: 200 })
+
+    const headers = new Headers(fetcher.mock.calls[0]![1]?.headers)
+    expect(headers.get('session-id')).toBe(STABLE_ROUTING.sessionId)
+    expect(headers.get('thread-id')).toBe(STABLE_ROUTING.threadId)
+    expect(headers.get('x-client-request-id')).toBe(STABLE_ROUTING.threadId)
+    expect(headers.has('session_id')).toBe(false)
+  })
+
+  it('keeps routing stable for the same conversation and isolated across conversations', async () => {
+    const authFile = await authFixture()
+    const identities: string[][] = []
+    const fetcher = vi.fn(async (_input: string | URL, init?: RequestInit) => {
+      const headers = new Headers(init?.headers)
+      identities.push([
+        headers.get('session-id') ?? '',
+        headers.get('thread-id') ?? '',
+        headers.get('x-client-request-id') ?? '',
+      ])
+      return new Response('ok')
+    })
+    const store = new CodexCredentialStore({ authFile, fetch: fetcher, refreshTimeoutMs: 1_000 })
+    const otherRouting = Object.freeze({
+      sessionId: `dshc_${'4'.repeat(32)}`,
+      threadId: `dshth_${'5'.repeat(32)}`,
+      promptCacheKey: `pck_${'6'.repeat(24)}`,
+    }) satisfies CodexDirectRequestRouting
+
+    await store.requestResponses('{}', new AbortController().signal, STABLE_ROUTING)
+    await store.requestResponses('{}', new AbortController().signal, STABLE_ROUTING)
+    await store.requestResponses('{}', new AbortController().signal, otherRouting)
+
+    expect(identities[1]).toEqual(identities[0])
+    expect(identities[2]).not.toEqual(identities[0])
+  })
+
+  it.each([
+    ['session id', { ...STABLE_ROUTING, sessionId: 'unsafe\nraw-session-secret' }],
+    ['thread id', { ...STABLE_ROUTING, threadId: 'x'.repeat(65) }],
+    ['prompt cache key', { ...STABLE_ROUTING, promptCacheKey: 'unsafe\tprompt-secret' }],
+  ] as const)('rejects an unsafe or oversized routing %s before network I/O', async (_name, routing) => {
+    const authFile = await authFixture()
+    const fetcher = vi.fn(async () => new Response('never'))
+    const store = new CodexCredentialStore({ authFile, fetch: fetcher, refreshTimeoutMs: 1_000 })
+
+    const failure = await captureFailure(store.requestResponses(
+      '{}',
+      new AbortController().signal,
+      routing,
+    ))
+
+    expect(failure).toMatchObject({ cause: 'protocol' })
+    expect(reachableErrorText(failure)).not.toMatch(/raw-session-secret|prompt-secret/u)
+    expect(fetcher).not.toHaveBeenCalled()
+  })
+
   it('fixes a relative auth path to an absolute path when the store is constructed', async () => {
     const authFile = await authFixture()
     const elsewhere = await temporaryRoot()
@@ -123,6 +191,29 @@ describe('Codex direct credential store', () => {
       process.chdir(originalCwd)
     }
 
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
+  it('accepts a stable canonical auth directory beneath an aliased home path', async () => {
+    const root = await temporaryRoot()
+    const actualHome = join(root, 'actual-home')
+    const linkedHome = join(root, 'linked-home')
+    const authParent = join(actualHome, '.codex')
+    await mkdir(authParent, { recursive: true, mode: 0o700 })
+    await writeFile(
+      join(authParent, 'auth.json'),
+      JSON.stringify(credentialDocument()),
+      { mode: 0o600 },
+    )
+    await symlink(actualHome, linkedHome, 'dir')
+    const fetcher = vi.fn(async () => new Response('ok'))
+    const store = new CodexCredentialStore({
+      authFile: join(linkedHome, '.codex', 'auth.json'),
+      fetch: fetcher,
+    })
+
+    await expect(store.requestResponses('{}', new AbortController().signal))
+      .resolves.toMatchObject({ status: 200 })
     expect(fetcher).toHaveBeenCalledTimes(1)
   })
 
@@ -604,7 +695,7 @@ describe('Codex direct credential store', () => {
     })
   }, 10_000)
 
-  it('reuses the session id for its single retry and returns a second 401 without refreshing again', async () => {
+  it('reuses the complete supplied routing for its single retry and returns a second 401 without refreshing again', async () => {
     const authFile = await authFixture()
     const responseIdentities: Array<{ sessionId: string; threadId: string; requestId: string }> = []
     let refreshAttempts = 0
@@ -623,12 +714,17 @@ describe('Codex direct credential store', () => {
     })
     const store = new CodexCredentialStore({ authFile, fetch: fetcher, refreshTimeoutMs: 1_000 })
 
-    await expect(store.requestResponses('{}', new AbortController().signal)).resolves.toMatchObject({ status: 401 })
+    await expect(store.requestResponses('{}', new AbortController().signal, STABLE_ROUTING))
+      .resolves.toMatchObject({ status: 401 })
 
     expect(refreshAttempts).toBe(1)
     expect(responseIdentities).toHaveLength(2)
     expect(responseIdentities[0]).toEqual(responseIdentities[1])
-    expect(responseIdentities[0]!.requestId).toBe(responseIdentities[0]!.threadId)
+    expect(responseIdentities[0]).toEqual({
+      sessionId: STABLE_ROUTING.sessionId,
+      threadId: STABLE_ROUTING.threadId,
+      requestId: STABLE_ROUTING.threadId,
+    })
   })
 
   it.each([400, 401])('classifies OAuth HTTP %i as subscription authentication failure', async (status) => {

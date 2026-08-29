@@ -10,7 +10,7 @@ describe('configuration', () => {
       models: ['default'],
       contextWindow: 128_000,
       transport: 'cli',
-      directModel: 'gpt-5.6-sol',
+      directModel: 'gpt-5.6-terra',
       directReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
       directDefaultReasoningEffort: 'low',
       maxRequestBytes: 32 * 1024 * 1024,
@@ -29,7 +29,7 @@ describe('configuration', () => {
     expect(config.logDiagnostics).toBe(false)
   })
 
-  it('accepts only the explicit private Codex transport modes and valid request bounds', () => {
+  it('accepts only the supported Codex transport modes and valid request bounds', () => {
     expect(Config({ codex: { transport: 'direct-responses' } } as never).codex.transport)
       .toBe('direct-responses')
     expect(() => Config({ codex: { transport: 'private-magic' } } as never)).toThrow()

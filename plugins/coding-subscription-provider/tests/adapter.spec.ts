@@ -27,6 +27,7 @@ import { SubscriptionAuthError } from '../src/auth.ts'
 import { CodexDirectAuthError } from '../src/codex-direct-auth.ts'
 import {
   CodexDirectResponsesError,
+  type CodexDirectRequestRouting,
   type CodexDirectResponsesDependencies,
 } from '../src/codex-direct-responses.ts'
 import { Config } from '../src/config.ts'
@@ -1114,6 +1115,69 @@ describe('coding subscription LLM adapter', () => {
       expect.objectContaining({ inputModalities: ['text'] }),
     ])
     expect(getAttachments).toHaveBeenCalledOnce()
+  })
+
+  it('forwards one stable pseudonymous direct routing identity per attested session', async () => {
+    const config = Config({
+      codex: { transport: 'direct-responses', directModel: 'gpt-direct-routing' },
+    } as never)
+    const sessionA = 'private-session-a-user-and-conversation' as NonNullable<GenerateOptions['sessionId']>
+    const sessionB = 'private-session-b-user-and-conversation' as NonNullable<GenerateOptions['sessionId']>
+    const calls: Array<{ body: Record<string, unknown>; routing: CodexDirectRequestRouting }> = []
+    const requestResponses = vi.fn(async (
+      body: string,
+      _signal: AbortSignal,
+      routing?: CodexDirectRequestRouting,
+    ) => {
+      if (routing === undefined) throw new Error('missing direct routing')
+      calls.push({ body: JSON.parse(body) as Record<string, unknown>, routing })
+      const events = [
+        {
+          type: 'response.output_item.done',
+          item: {
+            type: 'message',
+            role: 'assistant',
+            content: [{ type: 'output_text', text: 'routed' }],
+          },
+        },
+        { type: 'response.completed', response: { id: 'resp-routing' } },
+      ]
+      return new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(''), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      })
+    })
+    const adapter = new RawCodingSubscriptionAdapter(config, {
+      codexCredentials: { requestResponses },
+      liveSessions: {
+        get: (sessionId: NonNullable<GenerateOptions['sessionId']>) => sessionId === sessionA || sessionId === sessionB
+          ? { id: sessionId, header: { cwd: process.cwd() } }
+          : undefined,
+      },
+    } as never)
+    const loopRequest = (
+      sessionId: NonNullable<GenerateOptions['sessionId']>,
+      messages: GenerateOptions['messages'],
+    ) => markAgentLoopRequest(deepFreeze({ ...request(), sessionId, messages }))
+    const firstMessages = request().messages
+    const secondMessages = [...firstMessages, createMessage({
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{ type: 'text', text: 'second turn' }],
+    })]
+
+    for await (const _chunk of adapter.stream(loopRequest(sessionA, firstMessages))) { /* drain */ }
+    for await (const _chunk of adapter.stream(loopRequest(sessionA, secondMessages))) { /* drain */ }
+    for await (const _chunk of adapter.stream(loopRequest(sessionB, firstMessages))) { /* drain */ }
+
+    expect(calls).toHaveLength(3)
+    expect(calls[1]!.routing).toEqual(calls[0]!.routing)
+    expect(calls[1]!.body.prompt_cache_key).toBe(calls[0]!.body.prompt_cache_key)
+    expect(calls[2]!.routing.sessionId).not.toBe(calls[0]!.routing.sessionId)
+    expect(calls[2]!.routing.threadId).not.toBe(calls[0]!.routing.threadId)
+    expect(calls[2]!.routing.promptCacheKey).not.toBe(calls[0]!.routing.promptCacheKey)
+    expect(calls.map(call => call.body.prompt_cache_key)).toEqual(calls.map(call => call.routing.promptCacheKey))
+    expect(JSON.stringify(calls)).not.toMatch(/private-session-[ab]-user-and-conversation/u)
   })
 
   it('treats Agent Loop maxTokens as a host-local budget and omits it from the private request', async () => {

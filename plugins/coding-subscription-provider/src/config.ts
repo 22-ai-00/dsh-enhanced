@@ -17,7 +17,7 @@ export interface ProviderConfig {
 export type CodexTransport = 'cli' | 'direct-responses'
 
 export interface CodexProviderConfig extends ProviderConfig {
-  /** Execution path. The private Responses transport must be selected explicitly. */
+  /** Execution path. The shipped bundle selects direct Responses; bare schema use stays compatible. */
   transport: CodexTransport
   /** Concrete backend model used when DSH selects the `default` alias. */
   directModel: string
@@ -75,7 +75,7 @@ const codexProviderSchema = Schema.object({
   maxTurns: Schema.natural().min(1).max(100).default(1),
   contextWindow: Schema.natural().min(1_024).max(16 * 1024 * 1024).default(128_000),
   transport: Schema.union(['cli', 'direct-responses'] as const).default('cli'),
-  directModel: modelId.default('gpt-5.6-sol'),
+  directModel: modelId.default('gpt-5.6-terra'),
   directReasoningEfforts: Schema.array(modelId).min(1)
     .default(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']),
   directDefaultReasoningEffort: modelId.default('low'),
@@ -88,7 +88,7 @@ const codexProviderSchema = Schema.object({
   maxTurns: 1,
   contextWindow: 128_000,
   transport: 'cli',
-  directModel: 'gpt-5.6-sol',
+  directModel: 'gpt-5.6-terra',
   directReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   directDefaultReasoningEffort: 'low',
   maxRequestBytes: 32 * 1024 * 1024,

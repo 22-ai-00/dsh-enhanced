@@ -7,6 +7,7 @@ import {
   type StreamChunk,
   type TokenUsage,
 } from '@deepseek-ai/dsh-llm'
+import { createHash, randomUUID } from 'node:crypto'
 
 const DEFAULT_MAX_REQUEST_BYTES = 32 * 1024 * 1024
 const DEFAULT_MAX_REQUEST_IMAGE_BYTES = 24 * 1024 * 1024
@@ -14,8 +15,21 @@ const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
 const DEFAULT_MAX_SSE_EVENT_BYTES = 1024 * 1024
 const MAX_PROVIDER_ID_BYTES = 4 * 1024
 const MAX_CALL_ID_BYTES = 4 * 1024
+const MAX_WIRE_ITEM_ID_CHARS = 64
 const MAX_TOOL_NAME_BYTES = 1024
 const MAX_JSON_DEPTH = 64
+const CONVERSATION_SCOPE_DOMAIN = 'dsh-enhanced/codex-direct/conversation/v1'
+const PROMPT_CACHE_KEY_DOMAIN = 'dsh-enhanced/codex-direct/prompt-cache/v1'
+const THREAD_SCOPE_DOMAIN = 'dsh-enhanced/codex-direct/thread/v1'
+const HARMONY_TOKEN_NAMES = ['start', 'end', 'channel', 'message', 'constrain', 'return', 'call'] as const
+const FORMAT_CHARACTER = /\p{Cf}/gu
+const HARMONY_CONTROL_TOKEN = new RegExp(
+  `<\\p{Cf}*\\|\\p{Cf}*(?:${HARMONY_TOKEN_NAMES
+    .map(name => [...name].join('\\p{Cf}*'))
+    .join('|')})\\p{Cf}*\\|\\p{Cf}*>`,
+  'giu',
+)
+const FULLWIDTH_PIPE = '\uff5c'
 
 type ImageBlock = Extract<ContentBlock, { type: 'image' }>
 type ImageAttachmentRef = ImageBlock['attachment']
@@ -27,8 +41,19 @@ export interface CodexDirectImageReader {
   ): Promise<{ readonly data: Uint8Array; readonly ref: ImageAttachmentRef }>
 }
 
+/** Provider routing metadata derived only from an attested, pseudonymized Host session. */
+export interface CodexDirectRequestRouting {
+  readonly sessionId: string
+  readonly threadId: string
+  readonly promptCacheKey: string
+}
+
 /** The sole authenticated capability accepted by this transport. */
-export type CodexResponsesRequester = (body: string, signal: AbortSignal) => Promise<Response>
+export type CodexResponsesRequester = (
+  body: string,
+  signal: AbortSignal,
+  routing: CodexDirectRequestRouting,
+) => Promise<Response>
 
 export interface CodexDirectResponsesDependencies {
   readonly request: CodexResponsesRequester
@@ -45,6 +70,7 @@ export interface CodexDirectResponsesDependencies {
 export interface CodexResponsesRequest {
   readonly model: string
   readonly instructions: string
+  readonly prompt_cache_key: string
   readonly input: readonly unknown[]
   readonly stream: true
   readonly store: false
@@ -157,7 +183,8 @@ export async function* runCodexDirectResponses(
   }
 
   const toolNames = validateToolSchemas(options)
-  const request = await buildRequest(options, dependencies, limits.maxRequestImageBytes, signal)
+  const built = await buildRequest(options, dependencies, limits.maxRequestImageBytes, signal)
+  const { request, routing } = built
   let serialized: string
   try {
     serialized = JSON.stringify(request)
@@ -171,7 +198,7 @@ export async function* runCodexDirectResponses(
     )
   }
 
-  const response = await dependencies.request(serialized, signal)
+  const response = await dependencies.request(serialized, signal, routing)
   if (signal.aborted) {
     cancelBody(response.body)
     throwIfAborted(signal)
@@ -192,7 +219,11 @@ export async function* runCodexDirectResponses(
     )
   }
   const contentType = response.headers.get('content-type')?.toLowerCase() ?? ''
-  if (!contentType.startsWith('text/event-stream')) {
+  // The ChatGPT Codex gateway currently omits Content-Type on otherwise valid
+  // SSE responses. Keep rejecting an explicitly different media type, while
+  // allowing the strict, bounded SSE parser below to authenticate a missing
+  // header from the event framing and terminal response shape.
+  if (contentType !== '' && !contentType.startsWith('text/event-stream')) {
     cancelBody(response.body)
     throw protocolError('Codex private Responses returned a non-SSE response')
   }
@@ -238,18 +269,24 @@ async function buildRequest(
   dependencies: CodexDirectResponsesDependencies,
   maxRequestImageBytes: number,
   signal: AbortSignal,
-): Promise<CodexResponsesRequest> {
+): Promise<{
+  readonly request: CodexResponsesRequest
+  readonly routing: CodexDirectRequestRouting
+}> {
   const input = await buildInput(options, dependencies.attachments, maxRequestImageBytes, signal)
   const tools = options.tools?.map(tool => ({
     type: 'function',
     name: tool.name,
-    description: tool.description,
-    parameters: tool.parameters,
+    description: neutralizeHarmonyText(tool.description),
+    parameters: neutralizeHarmonyStructure(tool.parameters),
     strict: false,
   }))
-  return {
+  const instructions = neutralizeHarmonyText(options.system ?? '')
+  const routing = deriveRequestRouting(options.sessionId, instructions, tools ?? [])
+  const request: CodexResponsesRequest = {
     model: options.model,
-    instructions: options.system ?? '',
+    instructions,
+    prompt_cache_key: routing.promptCacheKey,
     input,
     ...(tools === undefined || tools.length === 0 ? {} : { tools }),
     tool_choice: 'auto',
@@ -264,6 +301,54 @@ async function buildRequest(
           summary: 'auto',
         },
   }
+  return { request, routing }
+}
+
+function deriveRequestRouting(
+  sessionId: GenerateOptions['sessionId'],
+  instructions: string,
+  tools: readonly Record<string, unknown>[],
+): CodexDirectRequestRouting {
+  // Production adapters only reach this point with an attested SessionId. A
+  // random seed preserves the standalone runner's low-level compatibility
+  // without manufacturing a stable identity when no Host session exists.
+  const sessionSeed = sessionId === undefined ? randomUUID() : String(sessionId)
+  const sessionScope = `dshc_${domainHash(CONVERSATION_SCOPE_DOMAIN, [sessionSeed]).slice(0, 32)}`
+  const canonicalTools = [...tools]
+    .sort((left, right) => compareCodePoints(String(left.name), String(right.name)))
+  const promptCacheKey = `pck_${domainHash(PROMPT_CACHE_KEY_DOMAIN, [
+    sessionScope,
+    instructions,
+    canonicalJson(canonicalTools),
+  ]).slice(0, 24)}`
+  const threadId = `dshth_${domainHash(THREAD_SCOPE_DOMAIN, [sessionScope]).slice(0, 32)}`
+  return Object.freeze({ sessionId: sessionScope, threadId, promptCacheKey })
+}
+
+function compareCodePoints(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+function domainHash(domain: string, values: readonly string[]): string {
+  const hash = createHash('sha256').update(domain).update('\0')
+  for (const value of values) {
+    hash.update(String(Buffer.byteLength(value, 'utf8'))).update(':').update(value).update('\0')
+  }
+  return hash.digest('hex')
+}
+
+function canonicalJson(value: unknown): string {
+  const serialized = JSON.stringify(canonicalJsonValue(value))
+  if (serialized === undefined) throw protocolError('Codex private Responses cache prefix is not serializable')
+  return serialized
+}
+
+function canonicalJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalJsonValue)
+  if (!isRecord(value)) return value
+  const canonical: Record<string, unknown> = {}
+  for (const key of Object.keys(value).sort()) canonical[key] = canonicalJsonValue(value[key])
+  return canonical
 }
 
 async function buildInput(
@@ -277,7 +362,7 @@ async function buildInput(
   for (const message of messages) {
     const replay = matchingReplay(message, options.provider, options.model)
     if (replay !== undefined) {
-      input.push(...replay.output)
+      input.push(...prepareReplayInput(replay.output))
       continue
     }
     await appendGenericMessage(input, message, attachments, signal)
@@ -315,6 +400,116 @@ function matchingReplay(message: Message, provider: string, model: string): Repl
   return response as unknown as ReplayResponse
 }
 
+/**
+ * Rebuild provider output before replaying it. With `store: false`, reasoning
+ * and function-call item ids are not durable server references. Keeping the
+ * raw items in replayState preserves lossless Host projection, while this
+ * outbound copy contains only fields accepted as fresh Responses input.
+ */
+function prepareReplayInput(output: readonly unknown[]): unknown[] {
+  const prepared: unknown[] = []
+  for (const value of output) {
+    const item = requireRecord(value, 'replay output item')
+    switch (item.type) {
+      case 'reasoning': {
+        if (typeof item.encrypted_content !== 'string' || item.encrypted_content.length === 0) break
+        const summary = Array.isArray(item.summary)
+          ? item.summary.map(value => {
+              const part = requireRecord(value, 'replay reasoning summary')
+              if (part.type !== 'summary_text') throw protocolError('Replay reasoning summary type is unsupported')
+              return {
+                type: 'summary_text',
+                text: neutralizeHarmonyText(requireString(part.text, 'replay reasoning summary text')),
+              }
+            })
+          : []
+        prepared.push({
+          type: 'reasoning',
+          encrypted_content: item.encrypted_content,
+          summary,
+        })
+        break
+      }
+      case 'message': {
+        if (item.role !== 'assistant' || !Array.isArray(item.content)) {
+          throw protocolError('Replay message content is invalid')
+        }
+        const content = item.content.map(value => {
+          const part = requireRecord(value, 'replay message content')
+          if (part.type === 'output_text') {
+            return { type: 'output_text', text: neutralizeHarmonyText(requireString(part.text, 'replay output text')) }
+          }
+          if (part.type === 'refusal') {
+            return { type: 'output_text', text: neutralizeHarmonyText(requireString(part.refusal, 'replay refusal')) }
+          }
+          throw protocolError('Replay message content type is unsupported')
+        })
+        const message: Record<string, unknown> = {
+          type: 'message',
+          role: 'assistant',
+          status: normalizeReplayMessageStatus(item.status),
+          content,
+        }
+        if (typeof item.id === 'string' && [...item.id].length <= MAX_WIRE_ITEM_ID_CHARS) message.id = item.id
+        if (typeof item.phase === 'string' && item.phase.length > 0) message.phase = item.phase
+        prepared.push(message)
+        break
+      }
+      case 'function_call':
+        prepared.push({
+          type: 'function_call',
+          call_id: wireCallId(requireBoundedString(item.call_id, 'replay function call id', MAX_CALL_ID_BYTES)),
+          name: requireBoundedString(item.name, 'replay function name', MAX_TOOL_NAME_BYTES),
+          arguments: neutralizeHarmonyText(requireString(item.arguments, 'replay function arguments')),
+        })
+        break
+      default:
+        throw protocolError('Replay output item type is unsupported')
+    }
+  }
+  const finalItem = prepared.at(-1)
+  if (isRecord(finalItem) && finalItem.type === 'reasoning') {
+    prepared.push({ role: 'assistant', content: '' })
+  }
+  return prepared
+}
+
+function normalizeReplayMessageStatus(value: unknown): 'completed' | 'incomplete' {
+  return value === 'incomplete' ? 'incomplete' : 'completed'
+}
+
+function wireCallId(value: string): string {
+  const normalized = requireBoundedString(value.trim(), 'function call id', MAX_CALL_ID_BYTES)
+  if ([...normalized].length <= MAX_WIRE_ITEM_ID_CHARS) return normalized
+  return `call_${createHash('sha256').update(normalized).digest('hex').slice(0, 32)}`
+}
+
+function neutralizeHarmonyText(value: string): string {
+  if (!value.includes('<') || !value.includes('|')) return value
+  return value.replace(HARMONY_CONTROL_TOKEN, match => {
+    const visible = match.replace(FORMAT_CHARACTER, '')
+    return `<${FULLWIDTH_PIPE}${visible.slice(2, -2)}${FULLWIDTH_PIPE}>`
+  })
+}
+
+function neutralizeHarmonyStructure(value: unknown, depth = 0): unknown {
+  if (typeof value === 'string') return neutralizeHarmonyText(value)
+  if (value === null || typeof value === 'boolean' || typeof value === 'number') return value
+  if (depth >= MAX_JSON_DEPTH) throw protocolError('Codex private Responses tool parameters exceed maximum depth')
+  if (Array.isArray(value)) return value.map(item => neutralizeHarmonyStructure(item, depth + 1))
+  if (!isRecord(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw protocolError('Codex private Responses received invalid tool parameters')
+  }
+  const normalized: Record<string, unknown> = {}
+  for (const [key, item] of Object.entries(value)) {
+    if (neutralizeHarmonyText(key) !== key) {
+      throw protocolError('Codex private Responses tool parameter keys contain a reserved token')
+    }
+    normalized[key] = neutralizeHarmonyStructure(item, depth + 1)
+  }
+  return normalized
+}
+
 async function appendGenericMessage(
   input: unknown[],
   message: Message,
@@ -332,15 +527,15 @@ async function appendGenericMessage(
       switch (block.type) {
         case 'text':
         case 'reasoning':
-          content.push({ type: 'input_text', text: block.text })
+          content.push({ type: 'output_text', text: neutralizeHarmonyText(block.text) })
           break
         case 'tool-call':
           flush()
           input.push({
             type: 'function_call',
-            call_id: String(block.id),
+            call_id: wireCallId(String(block.id)),
             name: block.name,
-            arguments: block.arguments,
+            arguments: neutralizeHarmonyText(block.arguments),
           })
           break
         case 'image':
@@ -365,7 +560,7 @@ async function appendGenericMessage(
     switch (block.type) {
       case 'text':
       case 'reasoning':
-        content.push({ type: 'input_text', text: block.text })
+        content.push({ type: 'input_text', text: neutralizeHarmonyText(block.text) })
         break
       case 'image':
         if (message.role === 'system') {
@@ -377,7 +572,7 @@ async function appendGenericMessage(
         flush()
         input.push({
           type: 'function_call_output',
-          call_id: String(block.toolCallId),
+          call_id: wireCallId(String(block.toolCallId)),
           output: await functionOutput(block.content, block.isError === true, attachments, signal),
         })
         break
@@ -401,7 +596,7 @@ async function functionOutput(
     switch (block.type) {
       case 'text':
       case 'reasoning':
-        parts.push({ type: 'input_text', text: block.text })
+        parts.push({ type: 'input_text', text: neutralizeHarmonyText(block.text) })
         break
       case 'image':
         parts.push(await inputImage(block.attachment, attachments, signal))

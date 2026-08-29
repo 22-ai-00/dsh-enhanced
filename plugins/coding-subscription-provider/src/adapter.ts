@@ -692,10 +692,10 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
           }
           const attachments = this.getAttachments()
           const chunks = this.runCodexDirect(directOptions, {
-            request: (body, requestSignal) => {
+            request: (body, requestSignal, routing) => {
               phase = 'stream'
               promptSubmissionState = 'unknown'
-              return this.codexCredentials.requestResponses(body, requestSignal)
+              return this.codexCredentials.requestResponses(body, requestSignal, routing)
             },
             maxRequestBytes: this.config.codex.maxRequestBytes,
             maxRequestImageBytes: this.config.codex.maxRequestImageBytes,
