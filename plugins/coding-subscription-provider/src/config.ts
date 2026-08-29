@@ -10,6 +10,8 @@ export interface ProviderConfig {
   models: string[]
   /** Maximum coding-agent turns when the CLI exposes that control. */
   maxTurns: number
+  /** Advertised route context capacity in tokens; independent of tool availability. */
+  contextWindow: number
 }
 
 export type CodexTransport = 'cli' | 'direct-responses'
@@ -71,6 +73,7 @@ const codexProviderSchema = Schema.object({
   command: command.default('codex'),
   models: Schema.array(modelId).min(1).default(['default']),
   maxTurns: Schema.natural().min(1).max(100).default(1),
+  contextWindow: Schema.natural().min(1_024).max(16 * 1024 * 1024).default(128_000),
   transport: Schema.union(['cli', 'direct-responses'] as const).default('cli'),
   directModel: modelId.default('gpt-5.6-sol'),
   directReasoningEfforts: Schema.array(modelId).min(1)
@@ -83,6 +86,7 @@ const codexProviderSchema = Schema.object({
   command: 'codex',
   models: ['default'],
   maxTurns: 1,
+  contextWindow: 128_000,
   transport: 'cli',
   directModel: 'gpt-5.6-sol',
   directReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
@@ -97,11 +101,13 @@ function providerSchema(defaultCommand: string, defaultEnabled = true): Schema<P
     command: command.default(defaultCommand),
     models: Schema.array(modelId).min(1).default(['default']),
     maxTurns: Schema.natural().min(1).max(100).default(1),
+    contextWindow: Schema.natural().min(1_024).max(16 * 1024 * 1024).default(128_000),
   }).default({
     enabled: defaultEnabled,
     command: defaultCommand,
     models: ['default'],
     maxTurns: 1,
+    contextWindow: 128_000,
   }) as Schema<ProviderConfig>
 }
 
@@ -110,12 +116,14 @@ const grokProviderSchema = Schema.object({
   command: command.default('grok'),
   models: Schema.array(modelId).min(1).default(['default']),
   maxTurns: Schema.natural().min(1).max(100).default(1),
+  contextWindow: Schema.natural().min(1_024).max(16 * 1024 * 1024).default(128_000),
   userVerifiedSubscription: Schema.boolean().default(false),
 }).default({
   enabled: false,
   command: 'grok',
   models: ['default'],
   maxTurns: 1,
+  contextWindow: 128_000,
   userVerifiedSubscription: false,
 }) as Schema<GrokProviderConfig>
 
@@ -128,7 +136,7 @@ export const Config: Schema<CodingSubscriptionProviderConfig> = Schema.object({
   maxLineBytes: Schema.natural().min(1_024).max(16 * 1024 * 1024).default(256 * 1024),
   maxOutputBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(2 * 1024 * 1024),
   maxStderrBytes: Schema.natural().min(256).max(4 * 1024 * 1024).default(32 * 1024),
-  maxPromptBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(128 * 1024),
+  maxPromptBytes: Schema.natural().min(1_024).max(64 * 1024 * 1024).default(4 * 1024 * 1024),
   extraEnvNames: Schema.array(Schema.string().pattern(/^[A-Za-z_][A-Za-z0-9_]*$/)).default([]),
   logDiagnostics: Schema.boolean().default(false),
   codex: codexProviderSchema,

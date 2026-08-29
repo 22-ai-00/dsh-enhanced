@@ -1,8 +1,12 @@
 import { spawn as nodeSpawn } from 'node:child_process'
+import { chmod, mkdtemp, open, rmdir, unlink } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import type { CliInvocation } from './providers.js'
 
 export interface SpawnedProcess {
   readonly pid?: number
+  readonly stdin?: NodeJS.WritableStream | null
   readonly stdout?: NodeJS.ReadableStream | null
   readonly stderr?: NodeJS.ReadableStream | null
   readonly exitCode?: number | null
@@ -12,7 +16,7 @@ export interface SpawnedProcess {
   unref?(): void
 }
 
-/** Whether the prompt argv was handed to the OS; the only safe basis for reasoning about replay. */
+/** Whether prompt input reached the child; the only safe basis for reasoning about replay. */
 export type PromptSubmissionState = 'not-submitted' | 'submitted' | 'unknown'
 
 /** Coarse lifecycle phase a failure was observed in, transport-scoped (auth lives in the adapter). */
@@ -52,7 +56,7 @@ export interface ProviderFailureContext {
 export type SpawnProcess = (
   command: string,
   args: readonly string[],
-  options: { cwd: string; shell: false; detached: boolean; stdio: readonly ['ignore', 'pipe', 'pipe']; env: NodeJS.ProcessEnv },
+  options: { cwd: string; shell: false; detached: boolean; stdio: readonly ['pipe', 'pipe', 'pipe']; env: NodeJS.ProcessEnv },
 ) => SpawnedProcess
 
 export interface RunCliTextOptions {
@@ -152,6 +156,21 @@ export class CliTeardownTimeoutError extends Error {
   }
 }
 
+export type CliPromptInputFailureReason = 'MISSING_STDIN' | 'WRITE_FAILED' | 'CLOSED_EARLY' | 'FILE_PREPARE_FAILED' | 'FILE_CLEANUP_FAILED'
+
+/** Prompt transport failed without embedding any request content in the error. */
+export class CliPromptInputError extends Error {
+  readonly code = 'CLI_PROMPT_INPUT_ERROR'
+
+  constructor(
+    readonly provider: CliInvocation['provider'],
+    readonly reason: CliPromptInputFailureReason,
+  ) {
+    super(promptInputErrorMessage(provider, reason), { cause: 'prompt-input' })
+    this.name = 'CliPromptInputError'
+  }
+}
+
 const defaults = {
   timeoutMs: 10 * 60_000,
   killGraceMs: 3_000,
@@ -192,6 +211,64 @@ export function buildSubscriptionEnv(extraEnvNames: readonly string[] = []): Nod
   return env
 }
 
+interface PreparedPromptTransport {
+  readonly args: readonly string[]
+  readonly cleanup: () => Promise<void>
+}
+
+async function preparePromptTransport(invocation: CliInvocation): Promise<PreparedPromptTransport> {
+  if (invocation.promptTransport === 'stdin') {
+    return { args: invocation.args, cleanup: async () => {} }
+  }
+
+  let directory: string | undefined
+  let promptPath: string | undefined
+  try {
+    directory = await mkdtemp(join(tmpdir(), 'dsh-coding-prompt-'))
+    // mkdtemp is private on supported platforms; chmod makes the contract explicit
+    // for unusual umasks and for tests that exercise the Windows transport on POSIX.
+    await chmod(directory, 0o700)
+    promptPath = join(directory, 'prompt.txt')
+    const handle = await open(promptPath, 'wx', 0o600)
+    try {
+      await handle.writeFile(invocation.prompt, { encoding: 'utf8' })
+    } finally {
+      await handle.close()
+    }
+  } catch {
+    if (promptPath !== undefined) await unlink(promptPath).catch(() => {})
+    if (directory !== undefined) await rmdir(directory).catch(() => {})
+    throw new CliPromptInputError(invocation.provider, 'FILE_PREPARE_FAILED')
+  }
+
+  let fileCleaned = false
+  let directoryCleaned = false
+  const cleanup = async (): Promise<void> => {
+    if (!fileCleaned) {
+      try {
+        await unlink(promptPath)
+        fileCleaned = true
+      } catch (error) {
+        if (isNotFoundError(error)) fileCleaned = true
+        else throw new CliPromptInputError(invocation.provider, 'FILE_CLEANUP_FAILED')
+      }
+    }
+    if (!directoryCleaned) {
+      try {
+        await rmdir(directory)
+        directoryCleaned = true
+      } catch (error) {
+        if (isNotFoundError(error)) directoryCleaned = true
+        else throw new CliPromptInputError(invocation.provider, 'FILE_CLEANUP_FAILED')
+      }
+    }
+  }
+  return {
+    args: ['--prompt-file', promptPath, ...invocation.args],
+    cleanup,
+  }
+}
+
 /**
  * Starts one local, already-authenticated coding CLI and yields only assistant text.
  * It never reads credential files or accepts credential values in config. An explicitly
@@ -200,7 +277,7 @@ export function buildSubscriptionEnv(extraEnvNames: readonly string[] = []): Nod
  */
 export async function* runCliText(invocation: CliInvocation, options: RunCliTextOptions = {}): AsyncIterable<string> {
   const limits = { ...defaults, ...options }
-  // Pre-spawn failures never handed the prompt argv to the OS: report not-submitted and stop.
+  // Pre-spawn failures never handed prompt input to the child: report not-submitted and stop.
   const reportPreSpawn = (): void => {
     if (options.onSettled === undefined) return
     try {
@@ -213,18 +290,43 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     reportPreSpawn()
     throw abortError('aborted before CLI spawn')
   }
-  let child: SpawnedProcess
+  let prepared: PreparedPromptTransport
   try {
-    child = (options.spawn ?? defaultSpawn)(invocation.command, invocation.args, {
-      cwd: invocation.cwd,
-      shell: false,
-      detached: process.platform !== 'win32',
-      stdio: ['ignore', 'pipe', 'pipe'],
-      env: buildSubscriptionEnv(options.extraEnvNames),
-    })
+    prepared = await preparePromptTransport(invocation)
   } catch (error) {
     reportPreSpawn()
     throw error
+  }
+  // Creating a private Grok prompt file is asynchronous. Close the abort race
+  // before spawning and remove the file before returning control to the caller.
+  if (options.signal?.aborted) {
+    let cleanupError: Error | undefined
+    try {
+      await prepared.cleanup()
+    } catch (error) {
+      cleanupError = error as Error
+    }
+    reportPreSpawn()
+    throw cleanupError ?? abortError('aborted before CLI spawn')
+  }
+  let child: SpawnedProcess
+  try {
+    child = (options.spawn ?? defaultSpawn)(invocation.command, prepared.args, {
+      cwd: invocation.cwd,
+      shell: false,
+      detached: process.platform !== 'win32',
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: buildSubscriptionEnv(options.extraEnvNames),
+    })
+  } catch (error) {
+    let cleanupError: Error | undefined
+    try {
+      await prepared.cleanup()
+    } catch (cleanupFailure) {
+      cleanupError = cleanupFailure as Error
+    }
+    reportPreSpawn()
+    throw cleanupError ?? error
   }
   const queue = new TextQueue()
   let totalOutputBytes = 0
@@ -245,11 +347,18 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
   let postKillTimer: ReturnType<typeof setTimeout> | undefined
   let resolveClosed: (() => void) | undefined
   const closed = new Promise<void>(resolve => { resolveClosed = resolve })
+  let disposeStdin = (): void => {}
   let disposeStdout = (): void => {}
   let disposeStderr = (): void => {}
-  // spawn() returned after receiving prompt argv, but only a later spawn/error event
-  // can prove whether the OS accepted or rejected it.
-  let promptSubmissionState: PromptSubmissionState = 'unknown'
+  // Prompt input is not submitted until either the whole stdin stream flushes or
+  // the OS accepts Grok's private prompt-file path. Partial stdin writes are unknown.
+  // A temporary-file path already entered spawn argv when spawn() returned, so
+  // its state is unknown until a spawn/error event. stdin carries no prompt argv
+  // and remains provably not-submitted until the first write attempt.
+  let promptSubmissionState: PromptSubmissionState = invocation.promptTransport === 'secure-temporary-file'
+    ? 'unknown'
+    : 'not-submitted'
+  let promptInputStarted = false
   let sawSpawn = false
   let phase: CliLifecyclePhase = 'spawn'
   // Teardown begins the moment `stop` fires and completes when ChildProcess `close` is settled.
@@ -305,6 +414,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     terminationError = error
     if (teardownState === 'not-started') teardownState = 'in-progress'
     stopAt ??= performance.now()
+    destroyWritable(child.stdin)
     terminateProcessTree(child, 'SIGINT')
     // An injected/embedded ChildProcess may emit close synchronously from kill().
     // Do not arm escalation after that close already settled the request.
@@ -333,6 +443,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     child.removeListener?.('spawn', onSpawn)
     child.removeListener?.('error', onError)
     child.removeListener?.('close', onClose)
+    disposeStdin()
     disposeStdout()
     disposeStderr()
   }
@@ -341,7 +452,12 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     if (finished) {
       // A post-deadline close only releases background tracking. The request and
       // its diagnostic callback were already settled exactly once as timed-out.
-      if (observedClose && teardownState === 'timed-out') cleanupChildTracking()
+      if (observedClose && teardownState === 'timed-out') {
+        cleanupChildTracking()
+        // A Windows child may have kept the prompt file open past the teardown
+        // deadline. Retry deletion once actual process/stdio closure is observed.
+        void prepared.cleanup().catch(() => {})
+      }
       return
     }
     finished = true
@@ -366,25 +482,34 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
         // Diagnostics must never change model-call settlement.
       }
     }
-    reportSettled(error)
-    queue.close(error)
-    resolveClosed?.()
+    const settleAfterPromptCleanup = async (): Promise<void> => {
+      let settledError = error
+      try {
+        await prepared.cleanup()
+      } catch (cleanupError) {
+        if (settledError === undefined) {
+          phase = 'child-close'
+          settledError = cleanupError as Error
+        }
+      }
+      reportSettled(settledError)
+      queue.close(settledError)
+      resolveClosed?.()
+    }
+    void settleAfterPromptCleanup()
   }
   const onError = (error: Error) => {
     // Node guarantees `close` after a spawn `error`. Waiting for it also avoids
     // treating a kill-related error as proof that a live process has exited.
     // Any spawn error before both a `spawn` event and any child output (ENOENT,
-    // EACCES, and every other pre-run failure alike) proves the OS never accepted
-    // the prompt argv, so replay stays safe: mark `not-submitted`. Once the child
-    // has spawned or produced output, submission is no longer disprovable and the
-    // state is left as-is (`submitted` or the default `unknown`).
+    // EACCES, and every other pre-run failure alike) proves prompt input was never
+    // attempted, so replay stays safe. Once the child has spawned or produced
+    // output, submission is no longer disprovable.
     if (!stopping && !sawSpawn && !sawChildOutput) promptSubmissionState = 'not-submitted'
     if (!terminationError) terminationError = error
     stopping = true
   }
-  const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
-    observedExitCode = code
-    observedSignal = signal
+  const settleChildClose = (code: number | null, signal: NodeJS.Signals | null): void => {
     if (terminationError) close(terminationError)
     else if (code !== 0 || signal !== null) {
       phase = 'child-close'
@@ -399,12 +524,85 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
       sawCursorAuthInit,
     }))
   }
-  // A delivered `spawn` proves the OS accepted the prompt argv; before it, replay is still safe.
+  const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+    observedExitCode = code
+    observedSignal = signal
+    if (finished) {
+      settleChildClose(code, signal)
+      return
+    }
+    // Writable `finish` is queued on nextTick for Node streams. Give it that one
+    // bounded turn, then fail closed if a reduced process shim closed without ever
+    // completing or explicitly failing its stdin lifecycle.
+    process.nextTick(() => {
+      if (!terminationError && invocation.promptTransport === 'stdin'
+        && promptInputStarted && promptSubmissionState !== 'submitted') {
+        phase = 'prompt'
+        close(new CliPromptInputError(invocation.provider, 'CLOSED_EARLY'))
+        return
+      }
+      settleChildClose(code, signal)
+    })
+  }
+
+  const startPromptSubmission = (): void => {
+    if (promptInputStarted || stopping || finished) return
+    promptInputStarted = true
+    phase = 'prompt'
+    if (invocation.promptTransport === 'secure-temporary-file') {
+      // The spawn event proves the private path was handed to the child. Keep the
+      // file until child-close so Windows cannot race path opening against cleanup.
+      promptSubmissionState = 'submitted'
+      disposeStdin = closeUnusedWritable(child.stdin)
+      return
+    }
+
+    const input = child.stdin
+    if (!input) {
+      stop(new CliPromptInputError(invocation.provider, 'MISSING_STDIN'))
+      return
+    }
+    promptSubmissionState = 'unknown'
+    let inputSettled = false
+    const onInputFinish = (): void => {
+      if (inputSettled) return
+      inputSettled = true
+      promptSubmissionState = 'submitted'
+    }
+    const onInputError = (): void => {
+      if (inputSettled) return
+      inputSettled = true
+      if (stopping || finished) return
+      stop(new CliPromptInputError(invocation.provider, 'WRITE_FAILED'))
+    }
+    const onInputClose = (): void => {
+      if (inputSettled) return
+      inputSettled = true
+      if (stopping || finished) return
+      stop(new CliPromptInputError(invocation.provider, 'CLOSED_EARLY'))
+    }
+    input.once('finish', onInputFinish)
+    // Keep absorbing any follow-up stream errors until child-close cleanup.
+    input.on('error', onInputError)
+    input.once('close', onInputClose)
+    disposeStdin = () => {
+      input.removeListener('finish', onInputFinish)
+      input.removeListener('error', onInputError)
+      input.removeListener('close', onInputClose)
+    }
+    try {
+      input.end(invocation.prompt)
+    } catch {
+      onInputError()
+    }
+  }
+
+  // A delivered `spawn` is the first point at which prompt transport may begin.
   const onSpawn = () => {
     sawSpawn = true
     spawnedAt ??= performance.now()
-    promptSubmissionState = 'submitted'
     if (phase === 'spawn') phase = 'initialize'
+    startPromptSubmission()
   }
   child.once('spawn', onSpawn)
   child.once('error', onError)
@@ -414,11 +612,13 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
 
   disposeStdout = consumeLines(child.stdout, limits.maxLineBytes, line => {
     if (stopping || finished) return
-    // Child output proves the process ran. On its own it never proves the prompt was
-    // submitted, so the state stays at its default `unknown` (never demoted to
-    // `not-submitted`): `onError` only sets `not-submitted` while `!sawChildOutput`, so
-    // any spawn error after this point leaves submission `unknown`, not `not-submitted`.
+    // Real ChildProcess always emits `spawn` before output. Starting here as a
+    // defensive fallback also supports embedders that provide a reduced process shim.
+    startPromptSubmission()
+    // Child output proves the process ran. Without a full stdin finish or accepted
+    // prompt-file path, replay safety is unknown.
     sawChildOutput = true
+    if (promptSubmissionState === 'not-submitted') promptSubmissionState = 'unknown'
     const decoded = decodeJsonLine(line)
     if (decoded.kind === 'empty') return
     if (sawSuccessTerminal) {
@@ -487,7 +687,9 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
   }, error => stop(error))
   disposeStderr = consumeLines(child.stderr, limits.maxLineBytes, line => {
     if (stopping || finished) return
+    startPromptSubmission()
     sawChildOutput = true
+    if (promptSubmissionState === 'not-submitted') promptSubmissionState = 'unknown'
     // Stderr is diagnostic only; never expose it as model output or retain it unbounded.
     stderr = appendBounded(stderr, line, limits.maxStderrBytes)
   }, error => stop(error))
@@ -817,6 +1019,17 @@ function protocolErrorMessage(provider: CliInvocation['provider'], reason: CliPr
   return `${provider} CLI ${descriptions[reason]}`
 }
 
+function promptInputErrorMessage(provider: CliInvocation['provider'], reason: CliPromptInputFailureReason): string {
+  const descriptions: Record<CliPromptInputFailureReason, string> = {
+    MISSING_STDIN: 'did not expose a writable stdin pipe',
+    WRITE_FAILED: 'failed while receiving prompt input',
+    CLOSED_EARLY: 'closed before prompt input completed',
+    FILE_PREPARE_FAILED: 'could not prepare its private prompt file',
+    FILE_CLEANUP_FAILED: 'could not remove its private prompt file',
+  }
+  return `${provider} CLI ${descriptions[reason]}`
+}
+
 function exitDescription(code: number | null, signal: NodeJS.Signals | null): string {
   const parts = [`code=${code === null ? 'null' : String(code)}`]
   if (signal !== null) parts.push(`signal=${signal}`)
@@ -848,6 +1061,32 @@ function appendBounded(value: string, addition: string, limit: number): string {
 }
 
 function byteLength(value: string): number { return Buffer.byteLength(value, 'utf8') }
+
+function isNotFoundError(error: unknown): boolean {
+  return error !== null && typeof error === 'object' && 'code' in error && error.code === 'ENOENT'
+}
+
+function closeUnusedWritable(stream: NodeJS.WritableStream | null | undefined): () => void {
+  if (!stream) return () => {}
+  const onError = (): void => {}
+  stream.on('error', onError)
+  try {
+    stream.end()
+  } catch {
+    // The prompt lives in the private file; failure to close an unused stdin pipe
+    // neither loses nor exposes it. Keep absorbing a later stream error.
+  }
+  return () => { stream.removeListener('error', onError) }
+}
+
+function destroyWritable(stream: NodeJS.WritableStream | null | undefined): void {
+  try {
+    const destroyable = stream as (NodeJS.WritableStream & { destroy?: () => void }) | null | undefined
+    destroyable?.destroy?.()
+  } catch {
+    // Process-tree termination remains the authoritative teardown path.
+  }
+}
 
 function consumeLines(
   stream: NodeJS.ReadableStream | null | undefined,

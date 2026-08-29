@@ -34,7 +34,7 @@ import {
   type CodexProviderConfig,
   type CodingSubscriptionProviderConfig,
 } from './config.js'
-import { buildPrompt, parseDelegatedToolCalls } from './prompt.js'
+import { buildPrompt, CLI_PROMPT_LIMIT_CAUSE, parseDelegatedToolCalls } from './prompt.js'
 import { runCliText, type ProviderFailureContext, type PromptSubmissionState, type RunCliTextOptions } from './process.js'
 import { buildInvocation, type CliInvocation, type ProviderId } from './providers.js'
 import { resolveTrustedSessionCwd, TrustedSessionCwdError, type LiveSessionLookup } from './session-cwd.js'
@@ -200,6 +200,7 @@ export const CODEX_DIRECT_PROVIDER_HTTP_CODE = 'CODEX_DIRECT_PROVIDER_HTTP'
 export const CODEX_DIRECT_PROVIDER_FAILURE_CODE = 'CODEX_DIRECT_PROVIDER_FAILURE'
 export const CODEX_DIRECT_CONTENT_FILTER_CODE = 'CODEX_DIRECT_CONTENT_FILTER'
 export const CODEX_DIRECT_TRANSPORT_ERROR_CODE = 'CODEX_DIRECT_TRANSPORT_ERROR'
+export const CLI_PROMPT_LIMIT_CODE = 'CLI_PROMPT_LIMIT'
 
 function directFailure(definition: RouteDefinition, error: unknown): Error {
   if (error instanceof LlmError) return error
@@ -275,8 +276,11 @@ function validHttpStatus(error: unknown): number | undefined {
     : undefined
 }
 
-/** Report a local prompt bound through DSH's canonical overflow path so compaction can retry it. */
+/** Keep local serialization safety limits distinct from a model context refusal. */
 function preflightFailure(error: unknown): Error {
+  if (error instanceof Error && error.cause === CLI_PROMPT_LIMIT_CAUSE) {
+    return new LlmError(error.message, CLI_PROMPT_LIMIT_CODE, { cause: error })
+  }
   if (error instanceof Error && error.cause === 'prompt-limit') {
     return new LlmError(error.message, CONTEXT_WINDOW_EXCEEDED_CODE, { cause: error })
   }
@@ -604,6 +608,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
       : AbortSignal.any([signal, this.lifecycle.signal])
     if (effectiveSignal.aborted) throw abortReason(effectiveSignal)
     const definition = definitionFor(provider)
+    const profile = configForProvider(this.config, definition.cli)
     const directCodex = definition.cli === 'codex' && this.config.codex.transport === 'direct-responses'
     const catalog = directCodex ? undefined : this.observedCatalog(definition.cli)
     const catalogModel = model === 'default'
@@ -622,6 +627,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         ? 'experimental direct private Codex Responses transport using the local ChatGPT session'
         : `${definition.maturity} local coding-agent delegation`),
       inputModalities: directCodex && attachments !== undefined ? ['text', 'image'] : ['text'],
+      context: { contextWindow: profile.contextWindow },
       ...(directCodex ? directReasoningInfo(this.config.codex) : reasoningInfo(catalogModel)),
     }
   }

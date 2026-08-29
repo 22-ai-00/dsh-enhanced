@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { Config, normalizeConfig } from '../src/config.ts'
+import { Config, configForProvider, normalizeConfig } from '../src/config.ts'
 
 describe('configuration', () => {
   it('materializes safe local-subscription defaults', () => {
@@ -8,6 +8,7 @@ describe('configuration', () => {
       enabled: true,
       command: 'codex',
       models: ['default'],
+      contextWindow: 128_000,
       transport: 'cli',
       directModel: 'gpt-5.6-sol',
       directReasoningEfforts: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
@@ -20,6 +21,10 @@ describe('configuration', () => {
     expect(config.grok.command).toBe('grok')
     expect(config.claude.enabled).toBe(false)
     expect(config.grok).toMatchObject({ enabled: false, userVerifiedSubscription: false })
+    expect(config.maxPromptBytes).toBe(4 * 1024 * 1024)
+    expect(['codex', 'claude', 'cursor', 'grok'].map(provider => (
+      configForProvider(config, provider as 'codex' | 'claude' | 'cursor' | 'grok').contextWindow
+    ))).toEqual([128_000, 128_000, 128_000, 128_000])
     expect(config.extraEnvNames).toEqual([])
     expect(config.logDiagnostics).toBe(false)
   })
@@ -36,6 +41,9 @@ describe('configuration', () => {
 
   it('rejects empty model lists and invalid environment names', () => {
     expect(() => Config({ codex: { models: [] } } as never)).toThrow()
+    expect(() => Config({ cursor: { contextWindow: 0 } } as never)).toThrow()
+    expect(() => Config({ cursor: { contextWindow: 1_023 } } as never)).toThrow()
+    expect(Config({ cursor: { contextWindow: 200_000 } } as never).cursor.contextWindow).toBe(200_000)
     expect(() => Config({ extraEnvNames: ['API-KEY'] } as never)).toThrow()
   })
 

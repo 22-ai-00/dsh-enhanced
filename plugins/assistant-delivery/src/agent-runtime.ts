@@ -18,7 +18,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import type { PermissionPresetService } from '@deepseek-ai/dsh-permission-presets'
 import { effectiveSandboxMode, setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
-import { SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
+import { isAppendSurfaceEvent, SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
   effectiveApprovalPolicy,
   setApprovalPolicy,
@@ -484,6 +484,10 @@ export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryP
     }
   }
   if (event.type === 'tool/result') {
+    // Replacement copies belong only to the model-visible surface (for example after compaction).
+    // Human progress is an append-origin transcript, so projecting a replacement would make an
+    // old tool result look like a tool invocation from the active turn.
+    if (!isAppendSurfaceEvent(event)) return undefined
     const block = event.data.message.content.find(value => value.type === 'tool-result')
     const callId = block?.type === 'tool-result'
       ? block.toolCallId

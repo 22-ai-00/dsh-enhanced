@@ -2,7 +2,10 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
+import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
+import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
+import TokenMeter from '@deepseek-ai/dsh-token-meter'
 import * as SkillTool from '@deepseek-ai/dsh-tool-skill'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import {
@@ -25,6 +28,7 @@ import type {
 } from '../plugins/coding-subscription-provider/src/providers.ts'
 import type { AutomationRunnerInput } from '../plugins/assistant-automations/src/coordinator.ts'
 import { DshAutomationRunner } from '../plugins/assistant-automations/src/runner.ts'
+import { createAgentLoopRequestAttestor } from '../packages/llm-route-capabilities/src/index.ts'
 
 const routes = [
   { provider: 'codex-subscription', cli: 'codex' },
@@ -51,6 +55,7 @@ interface SerializedBlock {
 }
 
 interface DelegatedRequest {
+  readonly instruction: string
   readonly conversation: readonly {
     readonly role: string
     readonly content: readonly SerializedBlock[]
@@ -63,6 +68,7 @@ interface DelegatedRequest {
         readonly parameters: unknown
       }[]
     }
+    readonly purpose: string | null
   }
 }
 
@@ -81,8 +87,7 @@ afterEach(async () => {
 })
 
 function delegatedRequest(invocation: CliInvocation): DelegatedRequest {
-  const prompt = invocation.provider === 'grok' ? invocation.args[1] : invocation.args.at(-1)
-  if (prompt === undefined) throw new Error(`missing delegated prompt for ${invocation.provider}`)
+  const prompt = invocation.prompt
   const start = prompt.indexOf('{')
   if (start < 0) throw new Error(`missing delegated JSON request for ${invocation.provider}`)
   return JSON.parse(prompt.slice(start)) as DelegatedRequest
@@ -459,7 +464,6 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
           context: { initiators: ['background' as const] },
         })),
       })
-
       const executionLifecycle: string[] = []
       for (const name of ['ordered_first', 'ordered_second'] as const) {
         ctx.tools.register({
@@ -888,6 +892,214 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
       expect(finalPrompt).not.toContain(`data:image/png;base64,${ONE_PIXEL_PNG_BASE64}`)
       expect(finalPrompt).not.toContain(JSON.stringify(attachmentData))
       expect(finalPrompt).not.toContain('long-tool-image-name-'.repeat(20))
+    } finally {
+      adapter?.shutdown()
+      await ctx.fiber.restart()
+    }
+  })
+
+  test('uses the real rc.8 compaction pipeline to prune, summarize, checkpoint, and resume a CLI tool loop', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cli-compaction-'))
+    roots.push(root)
+    const ctx = new Context()
+    let adapter: CodingSubscriptionAdapter | undefined
+
+    try {
+      await mountAgentLoopTestDependencies(ctx, {
+        systemPrompt: { persona: '' },
+        tools: { mode: 'native' },
+      })
+      await ctx.plugin(TokenMeter)
+      await ctx.plugin(ToolResultPruner, {
+        thresholdChars: 8_192,
+        headChars: 4_096,
+        tailChars: 1_024,
+      })
+      await ctx.plugin(BasicCompactionEngine, {
+        thresholdRatio: 0.5,
+        retainTokens: 0,
+        maxTokens: 256,
+        compactionRetries: 0,
+        maxOverflowRetries: 1,
+      })
+      await ctx.plugin(ApprovalService, { policy: 'ask' })
+      await ctx.plugin(AssistantPolicyService, {
+        databasePath: join(root, 'policy.sqlite'),
+        rules: ['large_context_tool', 'small_context_tool'].map(name => ({
+          id: `allow-${name}`,
+          effect: 'allow' as const,
+          subject: { kind: 'agent' as const, id: 'primary', workspace: root },
+          actions: ['execute' as const],
+          resource: { kind: 'tool' as const, id: name },
+          context: { initiators: ['background' as const] },
+        })),
+      })
+      let observedSession: ReturnType<typeof ctx.sessions.get>
+      ctx.on('session/event', (session) => {
+        if (String(session.id) === 'session-cli-agent-loop-codex') observedSession = session
+      })
+
+      const largePayload = `large-result-start:${'x'.repeat(30_000)}:large-result-end`
+      const smallPayload = `small-result-observed:${'s'.repeat(5_000)}:small-result-end`
+      let largeExecutions = 0
+      let smallExecutions = 0
+      for (const name of ['large_context_tool', 'small_context_tool'] as const) {
+        ctx.tools.register({
+          name,
+          description: name === 'large_context_tool'
+            ? 'Return a deliberately large result that forces context maintenance.'
+            : 'Return a small result after the large result has been observed.',
+          parameters: { type: 'object', properties: {}, additionalProperties: false },
+          output: {
+            schema: {
+              type: 'object',
+              properties: { payload: { type: 'string' } },
+              required: ['payload'],
+              additionalProperties: false,
+            },
+            render: (_arguments, value) => [{ type: 'text', text: value.payload }],
+          },
+          async execute() {
+            if (name === 'large_context_tool') {
+              largeExecutions += 1
+              return { payload: largePayload }
+            }
+            smallExecutions += 1
+            return { payload: smallPayload }
+          },
+        })
+      }
+
+      ctx.on('approval/request', request => Promise.resolve(
+        String(request.agent.session.id) === 'session-cli-agent-loop-codex'
+          && ['large_context_tool', 'small_context_tool'].includes(request.toolName)
+          ? 'allowed-once'
+          : 'rejected',
+      ))
+
+      const summaryRequests: DelegatedRequest[] = []
+      const normalRequests: DelegatedRequest[] = []
+      const runText = vi.fn((invocation: CliInvocation) => {
+        const request = delegatedRequest(invocation)
+        if (request.constraints.purpose === 'compaction') {
+          summaryRequests.push(request)
+          return (async function* () {
+            yield [
+              '## Primary Request and Intent',
+              '- Continue the two-tool context-maintenance regression.',
+              '',
+              '## Key Technical Concepts',
+              '- DSH tool replay and compaction.',
+              '',
+              '## Files and Code',
+              '- (none)',
+              '',
+              '## Errors and Fixes',
+              '- The large result was observed and safely pruned.',
+              '',
+              '## Pending Jobs',
+              '- Finish after the small tool result.',
+              '',
+              '## Current Work',
+              '- The large tool call completed.',
+              '',
+              '## Next Step',
+              '- Observe the small tool result and answer.',
+              '',
+              '## Critical Context',
+              '- Preserve DSH-owned tool execution.',
+            ].join('\n')
+          })()
+        }
+
+        normalRequests.push(request)
+        const transcript = blocks(request)
+        return (async function* () {
+          if (normalRequests.length === 1) {
+            yield JSON.stringify({
+              protocol: DSH_TOOL_CALL_PROTOCOL,
+              calls: [{ name: 'large_context_tool', arguments: {} }],
+            })
+            return
+          }
+          if (normalRequests.length === 2) {
+            const largeResult = transcript.find(block => block.type === 'tool-result')
+            const rendered = JSON.stringify(largeResult?.content)
+            if (!rendered.includes('large-result-start:')
+              || !rendered.includes(':large-result-end')
+              || !rendered.includes('tool result middle pruned')) {
+              throw new Error('the second model step did not receive the safely pruned large tool result')
+            }
+            yield JSON.stringify({
+              protocol: DSH_TOOL_CALL_PROTOCOL,
+              calls: [{ name: 'small_context_tool', arguments: {} }],
+            })
+            return
+          }
+          const serialized = JSON.stringify(request.conversation)
+          if (!serialized.includes('<compacted-summary>')
+            || !serialized.includes('small-result-observed')) {
+            throw new Error('the resumed model step did not receive the checkpoint and retained tool result')
+          }
+          yield 'compaction-resume-complete'
+        })()
+      })
+
+      const config = CodingSubscriptionConfig()
+      config.cwd = root
+      config.timeoutMs = 10_000
+      config.codex.transport = 'cli'
+      config.codex.contextWindow = 4_096
+      const requestAttestor = createAgentLoopRequestAttestor(ctx.agents, ['codex-subscription'])
+      adapter = new CodingSubscriptionAdapter(config, {
+        liveSessions: ctx.sessions,
+        requestAttestor,
+        runText,
+        verifyAuth: async () => {},
+      })
+      ctx.llm.registerAdapter(['codex-subscription'], adapter)
+      await ctx.plugin(AgentLoop, { agents: [] })
+
+      const runner = new DshAutomationRunner(ctx, ctx.assistantPolicy, {
+        allowUnbudgetedExecution: true,
+      })
+      const result = await runner.run(automationInput(root, 'codex-subscription', 'codex', {
+        prompt: 'Call large_context_tool, then small_context_tool, then finish.',
+        allowedTools: ['large_context_tool', 'small_context_tool'],
+        maxToolCalls: 2,
+      }))
+
+      expect({
+        result,
+        normalRequestCount: normalRequests.length,
+        summaryRequestCount: summaryRequests.length,
+        eventTypes: observedSession?.events.map(event => event.type),
+        turnEnds: observedSession?.events.filter(event => event.type === 'turn/end'),
+      }).toMatchObject({
+        result: { outcome: 'succeeded', output: 'compaction-resume-complete' },
+        normalRequestCount: 3,
+        summaryRequestCount: 1,
+        eventTypes: expect.any(Array),
+        turnEnds: [expect.objectContaining({
+          data: expect.objectContaining({ reason: { kind: 'completed' } }),
+        })],
+      })
+      expect(largeExecutions).toBe(1)
+      expect(smallExecutions).toBe(1)
+      expect(normalRequests).toHaveLength(3)
+      expect(summaryRequests).toHaveLength(1)
+      expect(summaryRequests[0]?.instruction).toContain('Do not request or invoke any tool')
+      expect(summaryRequests[0]?.constraints.tools.available.map(tool => tool.name).sort()).toEqual([
+        'large_context_tool',
+        'small_context_tool',
+      ])
+      expect(summaryRequests[0]?.conversation.some(message =>
+        JSON.stringify(message.content).includes('tool result middle pruned'))).toBe(true)
+
+      expect(observedSession?.events.filter(event => event.type === 'compaction/prune')).toHaveLength(1)
+      expect(observedSession?.events.filter(event => event.type === 'compaction/start')).toHaveLength(1)
+      expect(observedSession?.events.filter(event => event.type === 'compaction/end')).toHaveLength(1)
+      expect(JSON.stringify(observedSession?.deriveMessages())).toContain('<compacted-summary>')
     } finally {
       adapter?.shutdown()
       await ctx.fiber.restart()

@@ -1,6 +1,7 @@
 import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepseek-ai/dsh-llm'
 
 export const DSH_TOOL_CALL_PROTOCOL = 'dsh-tool-calls/v1'
+export const CLI_PROMPT_LIMIT_CAUSE = 'cli-prompt-limit'
 
 const MAX_DELEGATED_TOOL_CALLS = 64
 const MAX_DELEGATED_JSON_DEPTH = 64
@@ -139,11 +140,14 @@ function effectiveMessages(messages: readonly Message[]): readonly Message[] {
 /** Serialize one provider-neutral DSH call into a stateless coding-agent task. */
 export function buildPrompt(options: GenerateOptions, maxPromptBytes: number): string {
   const tools = options.tools ?? []
+  const instruction = options.purpose === 'compaction'
+    ? 'Produce only the requested compaction checkpoint as normal assistant text. Do not request or invoke any tool, and do not emit a DSH tool-call JSON envelope. Tool schemas remain present only so the host can verify that this auxiliary request is an exact projection of the active Agent Loop request.'
+    : tools.length === 0
+    ? 'Continue the conversation as the assistant. Return only the next assistant response. Do not modify files or execute commands.'
+    : `Continue the conversation as the assistant. Do not modify files, read files, execute commands, or invoke tools inside the coding CLI; treat CLI-native tools as unavailable in this backend session. Tools can only be used through DSH. If the task requires a tool, request the required tool now instead of describing a plan, claiming future work, asking for confirmation, or stopping early. For a tool request, return exactly one JSON object matching constraints.tools.responseFormat. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. Do not supply a tool-call id; DSH assigns the trusted call id. When no tool is needed and the task is complete, return only the final assistant response as normal text.`
   const request = {
     protocol: 'dsh-coding-subscription-provider/v1',
-    instruction: tools.length === 0
-      ? 'Continue the conversation as the assistant. Return only the next assistant response. Do not modify files or execute commands.'
-      : `Continue the conversation as the assistant. Do not modify files, read files, execute commands, or invoke tools inside the coding CLI; treat CLI-native tools as unavailable in this backend session. Tools can only be used through DSH. If the task requires a tool, request the required tool now instead of describing a plan, claiming future work, asking for confirmation, or stopping early. For a tool request, return exactly one JSON object matching constraints.tools.responseFormat. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. Do not supply a tool-call id; DSH assigns the trusted call id. When no tool is needed and the task is complete, return only the final assistant response as normal text.`,
+    instruction,
     system: options.system ?? null,
     conversation: effectiveMessages(options.messages).map(serializeMessage),
     constraints: {
@@ -171,9 +175,9 @@ export function buildPrompt(options: GenerateOptions, maxPromptBytes: number): s
   const size = Buffer.byteLength(prompt, 'utf8')
   if (size > maxPromptBytes) {
     throw new Error(
-      `serialized DSH request is ${size} bytes; configured limit is ${maxPromptBytes}. `
-      + 'Raise `maxPromptBytes` for this plugin if the request is legitimately this large.',
-      { cause: 'prompt-limit' },
+      `serialized DSH request is ${size} bytes; configured limit is ${maxPromptBytes} (local input safety bound). `
+      + 'Shorten or compact the conversation, or raise `maxPromptBytes` only after reviewing local memory limits.',
+      { cause: CLI_PROMPT_LIMIT_CAUSE },
     )
   }
   return prompt
