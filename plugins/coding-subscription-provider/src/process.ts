@@ -226,7 +226,7 @@ async function preparePromptTransport(invocation: CliInvocation): Promise<Prepar
   try {
     directory = await mkdtemp(join(tmpdir(), 'dsh-coding-prompt-'))
     // mkdtemp is private on supported platforms; chmod makes the contract explicit
-    // for unusual umasks and for tests that exercise the Windows transport on POSIX.
+    // for unusual umasks and for cross-platform transport tests running on POSIX.
     await chmod(directory, 0o700)
     promptPath = join(directory, 'prompt.txt')
     const handle = await open(promptPath, 'wx', 0o600)
@@ -454,7 +454,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
       // its diagnostic callback were already settled exactly once as timed-out.
       if (observedClose && teardownState === 'timed-out') {
         cleanupChildTracking()
-        // A Windows child may have kept the prompt file open past the teardown
+        // A child may have kept the prompt file open past the teardown
         // deadline. Retry deletion once actual process/stdio closure is observed.
         void prepared.cleanup().catch(() => {})
       }
@@ -551,7 +551,7 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     phase = 'prompt'
     if (invocation.promptTransport === 'secure-temporary-file') {
       // The spawn event proves the private path was handed to the child. Keep the
-      // file until child-close so Windows cannot race path opening against cleanup.
+      // file until child-close so the child cannot race path opening against cleanup.
       promptSubmissionState = 'submitted'
       disposeStdin = closeUnusedWritable(child.stdin)
       return
@@ -1038,7 +1038,11 @@ function exitDescription(code: number | null, signal: NodeJS.Signals | null): st
 
 function isCodexWorkingDirectoryRejection(diagnostic: string): boolean {
   const expected = 'Not inside a trusted directory and --skip-git-repo-check was not specified.'
-  const allowed = new Set([expected, 'Reading additional input from stdin...'])
+  const allowed = new Set([
+    expected,
+    'Reading additional input from stdin...',
+    'Reading prompt from stdin...',
+  ])
   const lines = diagnostic.split(/\r?\n/).map(line => line.trim()).filter(Boolean)
   return lines.includes(expected) && lines.every(line => allowed.has(line))
 }

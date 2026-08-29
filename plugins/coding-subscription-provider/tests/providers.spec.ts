@@ -18,20 +18,33 @@ describe('provider presets', () => {
       prompt: 'review', promptTransport: 'stdin',
       args: [
         'exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+        '--skip-git-repo-check',
         ...codexDisabledNativeFeatureArgs,
         ...codexNativeBoundaryConfigArgs,
         '--sandbox', 'read-only',
+        '-',
       ],
     })
   })
 
-  it.each(['codex', 'claude', 'cursor', 'grok'] as const)('never places the %s prompt in argv', provider => {
+  it.each(['codex', 'claude', 'cursor'] as const)('keeps the %s prompt on stdin and out of argv', provider => {
     const prompt = `private prompt for ${provider}`
     const invocation = buildInvocation(provider, { cwd: '/repo', prompt }, 'linux')
     expect(invocation.prompt).toBe(prompt)
     expect(invocation.args).not.toContain(prompt)
     expect(invocation.args.join('\0')).not.toContain(prompt)
     expect(invocation.promptTransport).toBe('stdin')
+  })
+
+  it.each(['linux', 'darwin', 'win32'] as const)('uses a private Grok prompt file on %s without putting content in argv', platform => {
+    const prompt = `private prompt for grok on ${platform}`
+    const invocation = buildInvocation('grok', { cwd: '/repo', prompt }, platform)
+    expect(invocation.prompt).toBe(prompt)
+    expect(invocation.promptTransport).toBe('secure-temporary-file')
+    expect(invocation.args).not.toContain(prompt)
+    expect(invocation.args.join('\0')).not.toContain(prompt)
+    expect(invocation.args).not.toContain('--prompt-file')
+    expect(invocation.args).not.toContain('/dev/stdin')
   })
 
   it('pins every Codex native executor and skill-injection feature once', () => {
@@ -85,7 +98,6 @@ describe('provider presets', () => {
     const invocation = buildInvocation('grok', { cwd: '/repo', prompt: 'hi', model: 'grok-code', maxTurns: 3, command: '/opt/grok' }, 'linux')
     expect(invocation.command).toBe('/opt/grok')
     expect(invocation.args).toEqual([
-      '--prompt-file', '/dev/stdin',
       '--output-format', 'streaming-json',
       '--permission-mode', 'dontAsk',
       '--no-auto-update', '--no-memory', '--no-subagents', '--disable-web-search', '--verbatim',
@@ -95,13 +107,6 @@ describe('provider presets', () => {
     expect(buildInvocation('codex', { cwd: '/repo', prompt: 'hi', model: 'default' }).args).not.toContain('--model')
     expect(buildInvocation('codex', { cwd: '/repo', prompt: 'hi', maxTurns: 3 }).args).not.toContain('--max-turns')
     expect(buildInvocation('cursor', { cwd: '/repo', prompt: 'hi', maxTurns: 3 }).args).not.toContain('--max-turns')
-  })
-
-  it('selects a private prompt-file transport for Grok on Windows without putting content in argv', () => {
-    const invocation = buildInvocation('grok', { cwd: 'C:\\repo', prompt: 'private' }, 'win32')
-    expect(invocation.promptTransport).toBe('secure-temporary-file')
-    expect(invocation.args).not.toContain('private')
-    expect(invocation.args).not.toContain('--prompt-file')
   })
 
   it('passes Codex reasoning effort as a fixed config override without shell interpolation', () => {
@@ -114,11 +119,13 @@ describe('provider presets', () => {
 
     expect(invocation.args).toEqual([
       'exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+      '--skip-git-repo-check',
       ...codexDisabledNativeFeatureArgs,
       ...codexNativeBoundaryConfigArgs,
       '--sandbox', 'read-only',
       '--model', 'gpt-5.6-sol',
       '--config', 'model_reasoning_effort="xhigh"',
+      '-',
     ])
     expect(invocation.shell).toBe(false)
   })

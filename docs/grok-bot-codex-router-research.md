@@ -13,7 +13,7 @@
 
 不过，该仓库的 Codex 请求没有经过 Codex CLI 或 Codex App Server。它读取 `~/.codex/auth.json`，自行刷新凭据，并直接调用 `https://chatgpt.com/backend-api/codex/responses`。这不是官方文档承诺的公共集成面；仓库本身还是非官方逆向重构，明确没有授予 reconstructed source 的上游源码许可。因此只能 clean-room 借鉴协议与架构，不能复制实现。
 
-> **后续决策（覆盖本报告最初的“不采用”建议）：** 用户明确要求落地同类直连。本项目现已把它实现为默认关闭、必须显式选择 `transport: direct-responses` 的实验路径，并用 OpenAI Codex 当前源码和 fixtures 独立核对 private wire，而不是复制该重构仓库。默认 CLI 路径不变；私有 endpoint、auth 文件布局和 OAuth 刷新仍可能随时失效。
+> **后续决策（覆盖本报告最初的“不采用”建议）：** 用户明确要求落地同类直连。本项目已用 OpenAI Codex 当前源码和 fixtures 独立核对 private wire，并由发布 bundle 默认选择 `transport: direct-responses`；CLI 保留为显式 fallback。私有 endpoint、auth 文件布局和 OAuth 刷新仍可能变化。
 
 对当前项目，推荐顺序是：
 
@@ -90,7 +90,7 @@ Codex 没有直连临时 MCP server。Coordinator 先取 Grok Bot MCP schemas，
 
 ## 与改造前 DSH 项目的差异
 
-以下是本报告形成时的代码快照；后续 `direct-responses` 实现已经改变这些结论，而默认 CLI transport 仍保持原边界。当时 route 的 text-only 是适配器选择，不是 Codex 模型能力：
+以下是本报告形成时的代码快照；后续默认 `direct-responses` 实现已经改变这些结论。当时 route 的 text-only 是适配器选择，不是 Codex 模型能力：
 
 - `coding-subscription-provider` 在注册时把所有 route 声明为 `toolCalls: 'none'`：`plugins/coding-subscription-provider/src/index.ts`。
 - prompt serializer 遇到 DSH image block 直接报错：`plugins/coding-subscription-provider/src/prompt.ts`。
@@ -132,7 +132,7 @@ OpenAI 官方文档明确说明 GPT-5.3-Codex 支持图片输入、文本输出�
 | exact `call_id` continuation | 必须保留 | 绑定 session、provider、principal、schema digest 和 durable call event |
 | SSE typed event projector | 借鉴设计 | 加入 deadline、AbortSignal、reader cancel、字节/事件上限和完整终态校验 |
 | 多 step usage 累计 | 借鉴设计 | 继续使用 DSH disjoint token accounting；活动统计不冒充账单 |
-| Codex 私有 backend 直连 | 已按用户决策实验性采用 | 独立 clean-room 实现；显式 opt-in；固定 endpoint；有界 POSIX auth 读取、单次 401 refresh、CAS 写回和稳定错误分类；默认 CLI 不变 |
+| Codex 私有 backend 直连 | 已按用户决策作为 bundle 默认 | 独立 clean-room 实现；固定 endpoint；有界 POSIX auth 读取、单次 401 refresh、CAS 写回和稳定错误分类；CLI 显式 fallback |
 | provider 内部执行全部工具 | 不采用 | 输出 DSH `tool-call`，让 Agent Loop/Policy 执行 |
 | Claude loopback MCP 拓扑 | 仅借鉴骨架 | 若使用，需精确 allowlist、Host/Content-Type、deadline、并发和租约；annotation 不能授权 |
 | 基于名称猜测 destructive/read-only | 不采用 | 使用 DSH Policy 中的声明式 authority 与审批规则 |
@@ -212,4 +212,4 @@ App Server 值得做 spike，但不应直接替换 A：
 
 当前项目已经 clean-room 借鉴 typed function-call 编排、exact `call_id`、usage、encrypted reasoning replay 和 provider-specific transport，并按用户决策采用私有认证与 endpoint；但没有采用 provider-owned tool execution、字符串多模态或启发式授权。工具仍回到 DSH Agent Loop / Policy，图片仍走 typed attachment seam。
 
-当前实际落地点是显式 opt-in 的 `direct-responses`，默认 CLI 行为不变。后续若公开 Responses 订阅接口或稳定 App Server handoff 能覆盖同一能力，应优先迁移；在此之前必须把这条私有路径视为可随时中断的兼容实验，而不是 OpenAI 官方支持的第三方集成。
+当前实际落地点是发布 bundle 默认的 `direct-responses`，CLI 为显式 fallback。后续若公开 Responses 订阅接口或稳定 App Server handoff 能覆盖同一能力，应优先迁移。

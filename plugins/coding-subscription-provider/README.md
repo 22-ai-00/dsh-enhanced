@@ -1,267 +1,101 @@
 # @dsh-enhanced/coding-subscription-provider
 
-将同一台机器、同一 OS 用户已经登录的 Codex、Claude Code、Cursor Agent 与 Grok Build 注册为 DeepSeek Harness 可选择的模型 provider。默认情况下，四条 route 会在经过 live Agent session 工作区校验的调用中，通过官方 CLI 的无 prompt 控制面观察当前账号可见模型；Codex、Claude 与 Grok 还会暴露逐模型 reasoning effort。调用消耗哪个套餐、是否允许额外用量，仍由对应官方客户端和账号决定。
+把同一台机器、同一 OS 用户已经登录的 Codex、Claude Code、Cursor Agent 与 Grok Build 注册为 DeepSeek Harness provider。发布 bundle 默认让 Codex 直接使用本机 ChatGPT/Codex 订阅的 Responses 通道；Codex CLI 是显式 fallback，其他 provider 使用各自的官方 CLI。
 
-这是一个实验性的 **LLM 兼容层**。默认 `cli` transport 会把完整对话和本次 Agent 的精确 tool schema 序列化为一次本地 coding-agent 任务，取回普通文本或受控工具信封；Codex 另有必须显式开启的 `direct-responses` transport，可绕过 Codex CLI / App Server，流式返回文本、原生 function tool call，并在 attachment service 可用时发送图片。现有 API Key / OpenAI-compatible provider 是另一条路径，本插件不重复实现。
+这是实验性的订阅兼容层。实际消耗哪个套餐、是否允许额外用量，仍由对应账号和上游服务决定。
 
-provider/model route 只提供推理，不是能力授权边界：同一 Agent/preset 下，所有 route 获得完全相同的 DSH 工具与 skill catalog，并共用 ToolRuntime、Policy、审批和审计。route 只决定如何生成 token 及如何把工具请求桥接回 Host，不会增删 Agent 能力。
+## 能力契约
 
-四条 CLI route 都向 DSH 声明 `toolCalls: bridge`。当 Agent 挂载工具时，CLI 只能返回严格的 `dsh-tool-calls/v1` JSON 信封；插件按本次 schema 快照校验工具名、对象参数、字段和调用数量，丢弃模型提供 call id 的尝试，并为每次调用生成新的 Host call id，再输出标准 DSH `tool-call` chunks。真正的执行、参数校验、Policy、审批、预算、审计和 tool result 回填都由同一个 DSH Agent Loop 完成。普通最终回答仍是文本；带协议标记的混合文本、Markdown fence、未知工具或畸形信封会以 `CLI_PROTOCOL_ERROR` fail closed，不会被接受为成功回复，也不会由本插件当作本地工具执行。
+模型 route 只负责提供推理 token，不是能力授权边界。同一 Agent/preset 下，所有模型都获得完全相同的 DSH 工具和 skill catalog，并共用 ToolRuntime、Policy、审批与审计；切换模型不会增删能力。
 
-## 当前 provider
+Codex direct 使用原生 function call，CLI route 使用严格的 `dsh-tool-calls/v1` 信封，但两者都只把工具请求交还 DSH Host。provider 自身不执行工具，也不能绕过策略。
 
-| DSH provider | 默认命令 | 成熟度 | 默认模型 |
+## Provider
+
+| DSH provider | 发布 bundle 默认 transport | 默认模型 | 状态 |
 |---|---|---|---|
-| `codex-subscription` | `codex` | stable | `default` |
-| `claude-subscription` | `claude` | experimental | `default` |
-| `cursor-subscription` | `cursor-agent` | beta | `default` |
-| `grok-subscription` | `grok` | beta | `default` |
+| `codex-subscription` | `direct-responses`（CLI fallback: `codex`） | `default` → `gpt-5.6-terra` | route stable；private wire 实验性 |
+| `claude-subscription` | `claude` CLI | `default` | experimental，默认关闭 |
+| `cursor-subscription` | `cursor-agent` CLI | `default` | beta |
+| `grok-subscription` | `grok` CLI | `default` | beta，默认关闭 |
 
-在默认 CLI 模式中，`default` 不会传 `--model`，因此保留官方 CLI 当前选择。模型选择器首次调用 `listModels` 或 5 分钟缓存过期时，会先执行已有订阅认证门禁，再从配置的 `cwd` 发起一次无 prompt、有界、只读的目录刷新；并发列表请求会共用同一次刷新。刷新成功后返回静态别名与完整动态目录，失败则安全降级到 `models` 中的静态项并记录无凭据诊断。`resolveModel` 仍只读取配置与有效内存缓存，不启动进程。不需要把每个模型手写进配置；目录是提示性的发现信息，不会阻止用户配置新模型，最终可用性仍由官方 CLI 校验。Codex direct 模式不启动 App Server、也不发现动态目录；其中 `default` 会明确映射到 `codex.directModel`。
+安全默认值只启用 Codex 与 Cursor。Claude 存在第三方分发政策边界；Grok 需要用户先确认没有 per-model API Key 覆盖订阅登录，再显式启用。
 
-安全默认值只启用 Codex 与 Cursor。Claude 因第三方分发政策边界默认关闭；Grok 因本地 per-model API Key 可覆盖 OAuth，默认关闭并要求用户先核验后显式确认。四条 connector 都包含在插件中。
+## 快速开始
 
-## 快速开始（CLI transport，5 步）
-
-以启用 Codex 为例，最短路径如下：
-
-1. **登录官方 CLI**（在运行 DSH 的同一 OS 用户下）：`codex login status` 应输出 `Logged in using ChatGPT`。没登录就先 `codex login`。
-2. **安装插件**：`dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider`。
-3. **确认命令与工作目录**：`codex --version`。命令名不同就在 `~/.dsh/profiles/web/cordis.patch.yml` 里把 `codex.command` 改成实际路径。bundle 的 `cwd` 默认与标准 Delivery 一样指向 `$DSH_HOME/assistant-workspace`；Codex CLI 要求它是 Git 仓库。若改到其他仓库，必须同时把 Delivery `defaultWorkspace` 改到同一 realpath（相对路径按 DSH 进程启动目录解析）。
-4. **开启并落盘配置**：在配置中保持 `codex.enabled: true`（默认已开），执行 `dsh --profile web --dump-config` 检查生效值。
-5. **选择模型与 effort**：打开模型选择器时，`listModels` 会先通过认证门禁并进行无 prompt 目录刷新，随后合并当前模型及 reasoning effort；若刷新失败仍可选择配置中的 `default`。目录刷新不创建 thread/session/turn，也不提交用户消息；真实生成调用才会消耗你的订阅推理额度。
-
-Claude / Grok 默认关闭，启用前请阅读下文「订阅认证优先」与「Claude 合规提示」。遇到报错先看下文「排查」表。
-
-如果只使用显式 opt-in 的 Codex `direct-responses`，生成和模型目录都不会启动 Codex CLI/App Server，也不要求 `codex` 可执行文件存在；但运行 DSH 的同一 POSIX 用户必须已经拥有安全的 `CODEX_HOME/auth.json` 或 `~/.codex/auth.json`。这通常由官方 Codex 登录流程产生，插件自身不提供登录 UI。
-
-## 安装
-
-CLI transport 先分别安装需要的官方客户端，并由当前 OS 用户在客户端中完成登录。Codex direct 可跳过客户端安装，但仍要求上述安全 auth 文件。插件不会替用户打开登录页或接管初始登录：
-
-```sh
-codex login status
-claude auth status --json
-cursor-agent status
-grok inspect
-grok models
-```
-
-随后安装 DSH bundle：
+1. 在运行 DSH 的同一 OS 用户下完成 ChatGPT/Codex 登录。Codex direct 需要安全的 `CODEX_HOME/auth.json`，未设置 `CODEX_HOME` 时读取 `~/.codex/auth.json`。
+2. 安装并检查 bundle：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider
 dsh --profile web --dump-config
 ```
 
-只需安装准备使用的客户端；其余 provider 可以在配置中关闭。若系统上的命令名不同，应配置准确的可执行文件路径。例如某些 Grok Build 安装可能暴露 `agent`，但这个名称也可能属于 Cursor 或其他程序，必须先用 `--version` 核实，不能盲目复用。
+3. 在 provider/model 选择器中选择 `codex-subscription` / `default`；它会使用 `gpt-5.6-terra`。真实调用会消耗订阅额度。
 
-## 配置
+发布 bundle 已配置 `codex.transport: direct-responses`，不要求 `codex` 可执行文件，也不会启动 CLI 或 App Server。插件不提供登录 UI；需要重新登录时可单独使用官方客户端。
 
-下面展示完整配置。Cordis patch 覆盖不是深合并；修改嵌套 provider 时，建议保留该 provider 的完整对象。
+## 最小配置
 
-```yaml
-- id: dsh-enhanced-coding-subscription-provider
-  name: '@dsh-enhanced/coding-subscription-provider'
-  config:
-    cwd: !!js dshHomePath('assistant-workspace')
-    timeoutMs: 600000
-    authProbeTimeoutMs: 10000
-    maxAuthProbeBytes: 32768
-    killGraceMs: 3000
-    maxLineBytes: 262144
-    maxOutputBytes: 2097152
-    maxStderrBytes: 32768
-    maxPromptBytes: 4194304
-    extraEnvNames: []
-    logDiagnostics: false
-    codex:
-      enabled: true
-      transport: cli
-      command: codex
-      models: [default]
-      maxTurns: 1
-      contextWindow: 128000
-      directModel: gpt-5.6-sol
-      directReasoningEfforts: [low, medium, high, xhigh, max, ultra]
-      directDefaultReasoningEffort: low
-      maxRequestBytes: 33554432
-      maxRequestImageBytes: 25165824
-    claude:
-      enabled: false
-      command: claude
-      models: [default]
-      maxTurns: 1
-      contextWindow: 128000
-    cursor:
-      enabled: true
-      command: cursor-agent
-      models: [default]
-      maxTurns: 1
-      contextWindow: 128000
-    grok:
-      enabled: false
-      command: grok
-      models: [default]
-      maxTurns: 1
-      contextWindow: 128000
-      userVerifiedSubscription: false
-```
-
-如需试用 Codex 私有直连，只把 Codex 的 transport 显式改为下列值；不要把它当成默认或稳定路径：
+通常无需覆盖默认配置。若要显式固定 Codex direct：
 
 ```yaml
 codex:
   enabled: true
   transport: direct-responses
+  directModel: gpt-5.6-terra
+```
+
+若私有 Responses 协议漂移或当前平台不支持 direct，可显式回退到 CLI：
+
+```yaml
+codex:
+  enabled: true
+  transport: cli
+  command: codex
   models: [default]
-  contextWindow: 128000
-  directModel: gpt-5.6-sol
-  directReasoningEfforts: [low, medium, high, xhigh, max, ultra]
-  directDefaultReasoningEffort: low
-  maxRequestBytes: 33554432
-  maxRequestImageBytes: 25165824
 ```
 
-- `codex.transport` 默认为 `cli`，维持官方 Codex CLI 的认证、沙箱和模型目录路径。只有显式设置为 `direct-responses` 才会启用下文说明的私有 Responses 协议；该模式绕过 Codex CLI 与 App Server，`command`、`maxTurns` 和 CLI 动态模型目录不参与生成。
-- `codex.directModel` 是 direct 模式选择 `default` 时发送给后端的具体模型 id；显式选择其他模型时仍使用所选 id。这个默认值只是本插件的实验性配置，不代表私有后端长期保证该模型可用。
-- `codex.directReasoningEfforts` 是 direct route 向 DSH 暴露的可选 effort 列表，`codex.directDefaultReasoningEffort` 是调用未指定 effort 时由 DSH 物化的默认值，并且必须属于前一列表。当前默认暴露 `low` 到 `ultra`；私有 wire 会按官方 Codex 当前行为把 `ultra` 规范化为 `max`，这同样不是稳定承诺。
-- `codex.maxRequestBytes` 限制序列化后的完整 direct 请求（包括 base64 图片），`codex.maxRequestImageBytes` 限制请求内累计图片负载，且后者不能大于前者。默认分别为 32 MiB 与 24 MiB；两项只影响 direct 模式。
-- 每个 provider 的 `contextWindow` 是向 Host 声明的 route 上下文容量，单位为 token，默认 `128000`。Host 用它在接近容量时主动 compaction；它不改变工具、skill 或输出权限，也不等同于下面的本地输入字节上限。按实际模型容量调整时，应保持同一 provider 下静态别名与动态模型的保守共同上限。
-- `cwd` 是 CLI 工作目录和本地 session 授权边界；bundle 默认与 Delivery 一样使用 `$DSH_HOME/assistant-workspace`。普通对话必须能从仍在运行的精确 Agent/registry/session 重建。唯一允许的辅助请求是同 route、严格证明属于当前 turn 的 rc.8 compaction；它必须保持原 system/tools 与 live surface 前缀，并只追加 canonical instruction。`session-title`、其他嵌套请求以及伪造、过期、空闲、变形或 symlink escape 均在启动 CLI 前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝。插件还要求 live session cwd 与配置值的 `realpath` 完全相同；修改该值时须同步 Delivery `defaultWorkspace` 并重启。Codex `exec` 还要求目录是 Git 仓库，插件不会追加 `--skip-git-repo-check`。更完整的 rc.8 约束见[兼容基线](../../docs/compatibility.md)。
-- CLI transport 的 `listModels` 在目录缓存冷启动或 5 分钟过期时，会使用配置的 `cwd` 先执行已有认证门禁，再启动一次无 prompt、有界的只读目录探针；它不需要 live session identity，也不会创建生成 turn。相同 provider 的并发请求共享一次 in-flight 刷新；失败只返回配置中的静态 `models` 并记录无凭据分类诊断。生成调用从不触发或等待目录刷新，只执行自身认证和两次 live-session cwd 校验。`resolveModel` 始终是纯缓存/配置读取，不执行认证、目录发现或子进程。Codex `direct-responses` 的 `listModels` 同样保持纯静态且不启动 CLI/App Server。
-- `timeoutMs` 是单次调用总时限；取消或超时先发 `SIGINT`，经过 `killGraceMs` 再发 `SIGKILL`，再等待一个等长窗口确认 `close`。仍未关闭时请求以 `teardown=timed-out` 错误结算，保留原始 abort/timeout 分类，并在后台继续引流并跟踪迟到的 `close`；不会伪称子进程已回收。
-- `authProbeTimeoutMs` / `maxAuthProbeBytes` 限制 CLI 模式中 `listModels` 与生成调用使用的认证状态检查，以及 `listModels` 的无 prompt 模型目录发现；Codex 目录还受 `killGraceMs`、`maxLineBytes`、`maxOutputBytes`、`maxStderrBytes` 约束。探针输出不会进入模型响应。Codex direct 请求使用总调用的 `timeoutMs`，不运行这些 CLI 探针。
-- 三项输出限制和 `maxPromptBytes` 都按 UTF-8 字节计算。`maxPromptBytes` 默认 4 MiB，是进程内序列化与输入的本地内存安全边界；超过时返回 `CLI_PROMPT_LIMIT`，不是模型的 `CONTEXT_WINDOW_EXCEEDED`。只有核对本机资源后才应调大。
-- `maxTurns` 目前只映射到 Claude Code 和 Grok Build；Codex/Cursor 不会收到它们不支持的参数。
-- `models` 是目录探针不可用时仍可展示的静态别名列表；CLI route 会在 `listModels` 的安全刷新后合并动态条目，Codex direct 模式只使用静态别名。通常保留 `[default]` 即可。
-- 启用 Grok 前先通过 browser/device flow 完成 `grok login`，确认 `grok models` 报告已登录，再用 `grok inspect` 确认所选模型没有 `api_key` / `env_key` override；随后同时设置 `enabled: true` 与 `userVerifiedSubscription: true`。`inspect` 本身不报告 active credential，该确认是本机用户的显式声明，不是插件读取凭据后的推断。
-- `command` 是单个命令名或路径，CLI 模式固定参数数组并使用 `shell: false`，不接受 shell 片段；Codex direct 模式不使用该字段。
-- `extraEnvNames` 只填写要额外继承的环境变量名，值只能来自启动 DSH 的环境，配置中不能直接写 secret。
-- 目录探针的 stderr 始终只生成固定的无凭据提示，原文不会传给诊断 sink。其他 CLI 的 stderr 在 adapter 诊断边界先经过常见 key/token/邮箱规则脱敏；`logDiagnostics` 默认仍只提示“CLI 写入了 stderr”，显式开启后才记录脱敏后的末尾 2,000 字符，仍不适合高敏感环境。独立于该开关，插件始终会在每次调用结算时记录一条**无凭据**的生命周期诊断（阶段、prompt 是否提交、结果分类、teardown 状态、exit/signal，以及能可靠测得的毫秒级延迟指标），成功走 `debug`、非成功走 `info`。该行不含 prompt、argv、stderr 原文或认证凭据。
+CLI fallback 要求同一 OS 用户已经执行 `codex login`，且 `codex login status` 精确报告 ChatGPT 登录。Windows 当前必须使用 CLI，因为 direct auth 的所有权、链接数和权限检查依赖 POSIX 语义。
 
-加载后，在 DSH 的 provider/model 选择处选择上表中的 provider 和模型即可。真实订阅调用会消耗额度，自动化测试不会使用真实账号。
-
-### 订阅认证优先
-
-CLI 子进程默认只继承运行客户端所需的最小环境，例如 `PATH`、`HOME`、XDG、代理/CA、`CODEX_HOME`、`CLAUDE_CONFIG_DIR` 和 `GROK_HOME`。以下 API 凭据即使写入 `extraEnvNames` 也不会传递：
-
-```text
-CODEX_API_KEY
-OPENAI_API_KEY
-ANTHROPIC_API_KEY
-ANTHROPIC_AUTH_TOKEN
-CLAUDE_CODE_OAUTH_TOKEN
-CURSOR_API_KEY
-XAI_API_KEY
-```
-
-已知的自定义 base URL、Claude Bedrock/Vertex/Foundry 切换变量也会被排除；上述变量即使出现在 `extraEnvNames` 也不会传递。插件在每次调用前或调用初始化阶段执行 fail-closed 门禁：
-
-- Codex CLI 模式只有 `codex login status` 精确报告 `Logged in using ChatGPT` 才运行，并以 `--ignore-user-config` 禁止真实生成被本地配置改路由到其他 API。模型发现会另启短生命周期 App Server，强制 `model_provider="openai"`，只执行 `initialize` 与 `model/list`，不会创建 thread 或 turn。
-- Codex direct 模式不运行 `codex login status` 或 App Server，而是安全读取 `CODEX_HOME/auth.json`；未设置 `CODEX_HOME` 时读取 `~/.codex/auth.json`。认证路径在启动时固定为绝对路径；文件及其父目录必须由当前 POSIX 用户拥有，父目录不能向 group/other 开放写权限，文件必须是单链接普通文件、不能是 symlink、不能向 group/other 开放权限，并且 `auth_mode` 必须是 `chatgpt`。读取有字节上限并校验前后元数据一致。凭据只用于固定的 Codex Responses 请求；插件不会向调用方暴露 bearer token。
-- direct 请求使用与固定官方快照核对过的 `session-id`、`thread-id` 和 `x-client-request-id` 兼容头；originator/version/user-agent 属于本插件固定的 reconstruction dialect 标识，并不冒充官方二进制逐字节相同的 OS/终端 user-agent。
-- direct 请求收到 401 时，插件会先重新读取磁盘以复用其他进程已刷新的 session；仍是原 token 时，才向固定 OAuth token endpoint 发起一次 refresh。同一进程内相同认证身份共享一次刷新；写回采用元数据 CAS、同目录 `0600` 临时文件、`fsync` 和原子 rename。随后原请求只重试一次；其他 HTTP 状态不会触发刷新。插件自身并发写受 CAS 保护，但无法强制不遵循同一约定的外部 Codex 进程参与原子比较写，因此跨进程冲突处理是 best-effort。错误与诊断不记录 token。
-- Claude 只有 `auth status --json` 报告 first-party `claude.ai` / `oauth_token` 才运行；目录发现只发送 Agent SDK `initialize` 控制帧并读取 `models`，不发送 user message。这是订阅 OAuth 来源的强启发式，不代表插件能证明具体套餐 entitlement。
-- Cursor 先要求 `status` 成功，再以 `--list-models` 发现目录；本次生成仍要求 `stream-json` 的 `system/init.apiKeySource` 为 `login`，`env`、`flag` 或缺失字段都会中止。
-- Grok 目录发现只发送 ACP `initialize` 并读取 `_meta.modelState`，不创建 session 或提交 prompt。headless 生成暂时无法独立证明 effective credential，因此仍必须由本机用户核对配置并设置 `userVerifiedSubscription: true`。
-
-认证不满足时返回 `SUBSCRIPTION_AUTH_REQUIRED`，不会静默改走 API provider。API Key 调用继续使用 DSH 已有的独立 provider。
-
-> **兼容性警告：** `direct-responses` 使用的是 ChatGPT/Codex 当前的非公开、私有风格协议，不是 OpenAI 面向第三方承诺稳定性的公开 API。endpoint、认证文件、header、模型 id 与 SSE 事件都可能在没有兼容期的情况下变化或失效；该模式必须视为可随时中断的实验功能，不能宣传为 OpenAI 官方支持的集成。默认 `cli` 不依赖这条私有协议。
-
-## 默认执行策略
-
-- Codex CLI（默认）：`codex exec --json --ephemeral --ignore-user-config --ignore-rules [固定 --disable/--config 清单] --sandbox read-only`，任务正文经 stdin 输入。固定清单按已验证的 Codex 0.147 关闭 shell/JS REPL/apply-patch 开关、view-image、hooks、code-mode host、goals/memory、multi-agent、apps/plugins/tool-suggest、browser/computer/image、web-search、skill/MCP dependency 和相关发现/elicitation 路径；同时以 `project_doc_max_bytes=0`、`skills.include_instructions=false`、`skills.bundled.enabled=false`、`orchestrator.skills.enabled=false` 等覆盖禁止 AGENTS、核心/orchestrator skill 以及 apps/permissions/environment/collaboration 指令注入，并关闭 update-plan/request-user-input。`shell_tool=false` 是 unified-exec 选择前的总开关；`tool_search=false` 且 MCP/apps/plugins 均关闭后，defer-only 组合开关也不能单独暴露工具。选择具体模型时追加 `--model <id>`，选择 effort 时追加 `--config model_reasoning_effort="<effort>"`。这些参数是降低原生能力暴露面的启动边界，不是 OS 强隔离；0.147 没有关闭模型目录所声明 `apply_patch` 的独立总开关，read-only sandbox 与解析器 fail-closed 仍是兜底。
-- Codex direct（显式 opt-in）：不启动 CLI/App Server，固定向 `https://chatgpt.com/backend-api/codex/responses` 发送有界 SSE 请求。DSH tool schema 会映射为原生 function tools；插件只保留并返回后端给出的 tool name、原始 arguments 与 `call_id`，**不会自行执行工具**。实际工具调用由 DSH Agent Loop 交给 Policy 鉴权后执行，再以相同 `call_id` 的 tool result 进入下一轮模型请求。开启 attachment service 时可把 DSH image block 投影为图片输入；没有该服务时 provider 只声明 text。
-- Claude Code：`-p --output-format stream-json --include-partial-messages --safe-mode --permission-mode dontAsk --tools "" --no-session-persistence`，任务正文经 stdin 输入；选择 effort 时追加 `--effort <level>`。
-- Cursor Agent：`--print --output-format stream-json --mode=ask`，任务正文经 stdin 输入且不传 `--force`。Ask 模式仍可能允许只读搜索，因此它不是“纯 token endpoint”或强沙箱；只有通过上述严格信封返回的调用才会被认作 DSH 工具调用。
-- Grok Build（POSIX）：`--prompt-file /dev/stdin --output-format streaming-json --permission-mode dontAsk --no-auto-update --no-memory --no-subagents --disable-web-search --verbatim --tools search_tool --disallowed-tools search_tool,use_tool`。Windows 没有 `/dev/stdin`，插件会改用 OS 用户临时目录内独占创建、继承该用户 Windows ACL 的私有 prompt 文件，并在子进程关闭后清理；POSIX 上请求目录 `0700`、文件 `0600`。`--verbatim` 保留 DSH 的原始 prompt，工具过滤把原生生成工具集收敛为空；选择 effort 时追加 `--reasoning-effort <level>`。解析器按官方原生流读取 `text.data`，以 `end` 确认成功终态、以 `error` 拒绝失败终态。
-
-每次调用都是独立任务，不恢复外部 CLI session。插件不会在失败后自动切换 provider；Codex direct 仅为认证 401 做上述单次刷新与单次原请求重试，不对模型或工具轮次做通用重试。
+Cordis patch 覆盖不是深合并；手工覆盖嵌套 provider 时，请保留该 provider 所需的完整对象。完整配置、认证门禁、模型目录、超时、输入上限和协议说明见[详细参考](../../docs/coding-subscription-provider-reference.md)。
 
 ## 权限与数据边界
 
-| 能力 | 行为 |
+| 权限 | 插件行为 |
 |---|---|
-| 文件系统 | CLI 模式把经过 live-loop session 身份和 canonical `realpath` 精确校验的 cwd 交给带 prompt 的外部 CLI；`listModels` 的无 prompt 认证/目录探针使用配置的 `cwd`，不创建 turn，`resolveModel` 不启动进程。Codex CLI 忽略用户配置与仓库规则、关闭已知原生能力并使用 read-only sandbox；Claude 禁用内置 tools；Grok 1.0.5 使用 allowlist + denylist 形成空生成工具集；Cursor 固定 `--mode=ask` 且绝不传 `--force`，但仍可能做只读搜索。最终强度仍取决于客户端版本、用户配置和 OS 隔离。Codex direct 不把 cwd 交给模型进程，但会读取并可能以 CAS + 原子替换更新 `CODEX_HOME/auth.json` 或 `~/.codex/auth.json`；与不使用同一 CAS 的外部写者并发时只能 best-effort 避免覆盖。图片字节只通过宿主提供的 attachment service 读取。 |
-| 网络 | CLI 模式下插件本身不请求模型端点，官方 CLI 会连接各自的登录、推理、更新或遥测服务。Codex direct 由插件固定请求 `https://chatgpt.com/backend-api/codex/responses`，仅在 401 刷新时请求 `https://auth.openai.com/oauth/token`；不能把凭据用于任意 URL。请求正文会把对话、tool schema/tool result，以及可用时的图片发送给该私有后端。 |
-| 子进程 | CLI 模式仅直接启动配置的单个可执行文件，`shell: false`；冷启动或过期的 `listModels` 会在认证通过后短暂启动同一可执行文件的 App Server、SDK/ACP 初始化或列表模式，且不会提交 prompt 或创建生成 turn。POSIX 上为生成调用建立进程组并整体取消；Windows 只能 best-effort 终止直接子进程。官方 CLI 仍可能自行创建脱离进程组的后代。`resolveModel` 和 Codex direct 的模型列表不启动 Codex CLI 或 App Server。 |
-| 凭据 | CLI 模式不读取官方 auth 文件、不实现 OAuth，由官方客户端访问凭据。Codex direct 会按上述 POSIX 文件约束直接读取 ChatGPT session，在 401 时至多刷新一次，并以插件自身的 CAS + 原子替换流程写回；它不接受 API key fallback，也不把 token 写入响应或日志。 |
+| 文件系统 | Codex direct 读取安全的 auth 文件，并可能在 401 刷新后以 CAS + 同目录原子替换写回；图片仅经宿主 attachment service 读取。CLI 模式校验 live session 与 canonical cwd 后把该 cwd 交给外部客户端；Codex CLI 使用 read-only sandbox。 |
+| 网络 | Codex direct 固定请求 `https://chatgpt.com/backend-api/codex/responses`，仅在 401 刷新时请求 `https://auth.openai.com/oauth/token`。CLI 模式由官方客户端连接其登录、推理、更新或遥测服务。 |
+| 子进程 | direct 不启动 Codex CLI/App Server。CLI 模式使用 `shell: false` 启动配置的单个客户端；模型目录探针不会提交 prompt。POSIX 取消整个进程组，Windows 只能 best-effort 终止直接子进程。 |
+| 凭据 | direct 只接受本机 ChatGPT session，不回退 API Key，也不向响应或日志暴露 token。CLI 凭据由官方客户端管理；已知 API Key、第三方 base URL 和云路由变量不会传给子进程。 |
 | 浏览器 | 插件不会打开浏览器；用户单独执行官方 login 时可能打开。 |
-| DSH 工具 | 所有 route 获得同一 Agent scope 的工具与 skill catalog，并共用 Host 执行器、Policy、审批和审计。CLI route 只接受严格 `dsh-tool-calls/v1` 信封；检测到 provider 原生 tool lifecycle 后会请求中止并以 `CLI_PROTOCOL_ERROR` 拒绝该轮。Codex direct 使用原生 function tools，但也只把调用交还同一个 DSH Agent Loop。 |
-| 安装脚本 | 本 npm 包没有 install/postinstall 脚本，也不会安装或更新四个官方 CLI。 |
-| 日志 | stderr 有界且默认不记录内容；目录探针的 stderr 原文永不传给诊断 sink，只报告固定无凭据提示。其他 CLI 选择 `logDiagnostics` 后会脱敏常见 key、Bearer token 和邮箱，但无法识别任意业务秘密；插件本身不主动记录 prompt。每次调用结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/teardown/exit/signal，以及可测得的毫秒级延迟指标），不含 prompt、argv、stderr 原文或认证凭据。 |
+| DSH 工具 | 所有 route 接收相同工具/skill catalog，并共用 Host 执行器、Policy、审批和审计。provider 只返回工具请求，不在本机直接执行。 |
+| 安装脚本 | npm 包没有 install/postinstall 脚本，也不会安装或更新任何官方 CLI。 |
+| 日志 | 插件不主动记录 prompt 或 argv；目录探针 stderr 原文不进入诊断。可选 stderr 诊断有界并按常见规则脱敏，但无法识别任意业务秘密，高敏环境应保持关闭。 |
 
-CLI 模式从不把任务正文放进 argv：Codex、Claude 与 Cursor 使用 stdin，Grok 在 POSIX 使用 `--prompt-file /dev/stdin`，Windows 使用上述私有临时文件。这样不受单个 argv 的约 128 KiB 平台限制，也不会把 prompt 直接暴露在普通进程参数中；同机高权限用户仍可能检查进程内存、管道或文件，因此敏感、多用户主机仍需 OS 级隔离。Codex direct 也不使用进程 argv，而是受独立的 `codex.maxRequestBytes` 限制。
-
-DSH 的 skill catalog 更新是完整替换。CLI 模式序列化兼容 prompt 时，若最新目录明确带有 replacement 标记，插件只发送最新目录，不再重复发送它已经取代的旧目录；durable session 历史不会被改写。Host 根据 route 的 `contextWindow` 主动 compaction；严格验证通过的压缩请求保持原 system/tools 与消息前缀，只追加 rc.8 canonical instruction，并明确要求 CLI 输出普通 checkpoint 文本、不得调用工具或输出工具信封。序列化结果仍超过 4 MiB 本地边界时返回 `CLI_PROMPT_LIMIT`。Codex direct 则发送 typed Responses input，并对完整 JSON 请求和累计图片负载分别做字节限制。
+Codex direct 会把对话、tool schema、tool result，以及 attachment service 提供的图片发送到固定私有后端。CLI transport 会把任务正文写入 stdin 或私有 prompt 文件，不写入 argv；同机高权限用户仍可能检查进程内存、管道或文件，敏感多用户主机应使用容器或独立 OS 账号隔离。
 
 ## 排查
 
-调用失败时会返回稳定的 `LlmError` code。常见对应关系：
-
-| 错误码 | 含义 | 处理 |
+| 错误码 | 常见原因 | 处理 |
 |---|---|---|
-| `SUBSCRIPTION_AUTH_REQUIRED` | 调用前的认证门禁未通过（未登录，或检测到 API key / 非订阅来源） | 在同一 OS 用户下重新 `login`；CLI 模式确认没有把 API key 写进 `extraEnvNames`；Codex direct 还要确认 auth 文件是当前用户拥有的普通文件且权限不向 group/other 开放；Grok 需另设 `userVerifiedSubscription: true`（见「订阅认证优先」）。 |
-| `LOCAL_SESSION_CWD_REQUIRED` | 请求没有匹配的 live loop session，或其 canonical cwd 与配置 cwd 不完全一致 | 从真实 DSH Agent Loop 发起调用；确认 session header cwd 与插件配置的 `cwd` 指向同一 realpath，且不要通过 symlink 跨出该目录。 |
-| `CLI_NOT_FOUND` | 找不到可执行文件（`ENOENT`） | 核对该 provider 的 `command` 是否为正确的命令名/绝对路径，并确认它在 DSH 进程的 `PATH` 中。 |
-| `CLI_WORKING_DIRECTORY` | Codex 拒绝了配置的工作目录，因为它不是可接受的 Git 仓库 | 把 profile 中的 `cwd` 改为目标 Git 仓库的绝对路径并重启 DSH；不要只根据 Web 会话显示的 cwd 推断子进程 cwd。 |
-| `CLI_PROMPT_LIMIT` | 序列化后的 CLI 输入超过 `maxPromptBytes` 本地内存安全边界 | 先确认 `contextWindow` 与 Host compaction 已正确配置；再缩短历史、skill 描述或 tool schema。只有核对本机资源后才调大 `maxPromptBytes`。 |
-| `CONTEXT_WINDOW_EXCEEDED` | 模型或 Codex direct 明确报告上下文窗口不足 | 让 Host compaction 后重试，或缩短历史；不要用调大 `maxPromptBytes` 掩盖真实模型容量。 |
-| `CLI_TIMEOUT` | 单次 CLI 或 Codex direct 调用超过 `timeoutMs` | 简化 prompt，或调大 `timeoutMs`；CLI 模式还应确认官方客户端未卡在交互式提示上。 |
-| `CLI_PROTOCOL_ERROR` | CLI 输出或 Codex private SSE 不符合当前有界协议（含畸形事件、字段冲突、缺失终态、provider 原生工具事件、混合/越权 DSH 工具信封） | CLI 工具调用必须只返回精确 `dsh-tool-calls/v1` 对象；否则可手动复现并采集 fixture。direct 模式优先怀疑私有协议漂移。 |
-| `CLI_FAILED` | 子进程非零退出或其他未归类失败 | 开 `logDiagnostics` 看脱敏 stderr 尾部；单独运行官方 CLI 复现。 |
-| `QUOTA` | Codex direct 明确返回 `insufficient_quota` | 检查当前 ChatGPT/Codex 账号的可用额度；插件不会自动切换 provider。 |
-| `EMPTY_RESPONSE` | direct 请求成功终止但没有文本、reasoning 或可执行 tool call | 重试前先检查私有协议是否发生变化；该错误不会伪装成空成功。 |
-| `CODEX_DIRECT_PROVIDER_HTTP` | Responses 或 refresh endpoint 返回非认证类 HTTP 错误 | 查看 `failure.status`（如 429/503），按服务状态处理；不会触发通用自动重试。 |
-| `CODEX_DIRECT_PROVIDER_FAILURE` | private SSE 明确报告未细分的 provider failure | 私有后端拒绝了本轮；诊断使用固定脱敏文案，不透传 provider message。 |
-| `CODEX_DIRECT_CONTENT_FILTER` | private SSE 明确报告内容过滤 | 调整输入；插件不会把过滤结果当作普通空输出。 |
-| `CODEX_DIRECT_TRANSPORT_ERROR` | 固定 endpoint 的 fetch/连接失败 | 检查网络、代理和 TLS；凭据与 prompt 不会写入错误。 |
-| `CODEX_DIRECT_RESPONSES_FAILED` | 其他未归类的 direct 请求失败 | 确认 `transport` 是有意开启；私有协议可能已变化，不能假定稳定兼容。 |
-| `INVALID_PROVIDER` | 选择了本插件未提供的 provider id | 只使用上表四个 `*-subscription` route。 |
+| `SUBSCRIPTION_AUTH_REQUIRED` | 未登录、登录来源不符或 auth 文件权限不安全 | 用运行 DSH 的同一 OS 用户重新登录；direct 检查 auth 文件所有者与权限。 |
+| `LOCAL_SESSION_CWD_REQUIRED` | 请求不属于 live Agent Loop，或 cwd 的 canonical path 不一致 | 对齐 provider `cwd` 与 Delivery `defaultWorkspace`，重启后从真实会话重试。 |
+| `CLI_NOT_FOUND` | CLI fallback 找不到客户端 | 检查 `command` 和 DSH 进程的 `PATH`。 |
+| `CLI_WORKING_DIRECTORY` | CLI 仍拒绝当前非 Git 工作目录 | 检查 Codex 版本与脱敏诊断，确认固定 fallback 参数生效。 |
+| `CLI_PROMPT_LIMIT` / `CONTEXT_WINDOW_EXCEEDED` | 本地序列化上限或模型上下文容量不足 | 先确认 `contextWindow` 与 Host compaction，再缩短历史或 schema。 |
+| `CLI_TIMEOUT` | direct 或 CLI 调用超过总时限 | 检查网络/交互阻塞，必要时调整 `timeoutMs`。 |
+| `CLI_PROTOCOL_ERROR` | CLI 输出或 Codex private Responses 事件发生协议漂移 | 采集脱敏 fixture；direct 可暂时切换到 CLI fallback。 |
+| `CLI_FAILED` | CLI 非零退出且未命中专用分类 | 开启有界脱敏诊断，并在同一 OS 用户下单独复现官方 CLI。 |
+| `QUOTA` / `CODEX_DIRECT_PROVIDER_HTTP` | 订阅额度不足或上游服务错误 | 检查账号额度、HTTP 状态和服务状态；插件不会自动切换 provider。 |
 
-插件**不会**在失败后自动切换 provider，也不做通用模型重试；唯一例外是 Codex direct 的 401 认证刷新后原请求单次重试。每次调用结算都会记录一条无凭据生命周期诊断（成功走 `debug`、失败走 `info`），可据此定位失败发生在哪个阶段。
+完整错误码、CLI fixture 采集方法和已知限制见[详细参考](../../docs/coding-subscription-provider-reference.md#排查参考)。
 
-### 采集真实 CLI fixture（维护者）
+## 文档
 
-解析器按 `decode → 各 provider decoder → 归一化事件 → reducer` 分层，需要来自**明确 CLI 版本**的真实输出作为回归 golden。采集脚本已就绪：
+- [详细配置、认证、协议与限制](../../docs/coding-subscription-provider-reference.md)
+- [兼容基线](../../docs/compatibility.md)
+- [Codex 路由调研](../../docs/grok-bot-codex-router-research.md)
+- [插件生态与 Hermes/OpenClaw 对比](../../docs/dsh-personal-assistant-plugin-landscape.md)
 
-```sh
-node plugins/coding-subscription-provider/scripts/capture-cli-fixtures.mjs --help
-```
-
-脚本默认脱敏、需显式确认会消耗额度，产物落到 `tests/fixtures/<provider>/<version>/<scenario>.json`，`tests/fixtures.spec.ts` 在样本落地后自动激活。细节与脱敏清单见 [`tests/fixtures/README.md`](tests/fixtures/README.md)。
-
-## 已知限制
-
-- DSH `0.1.0-rc.8` 只有 `LlmAdapter` provider 接缝；本版因此是兼容适配，不是完整的 Agent Runtime。
-- 默认 Codex CLI、Claude、Cursor 和 Grok route 都发布 `toolCalls: bridge`，并看到同一个 Agent Loop 传入的工具 schema 与 skill catalog；Codex direct 通过原生 function schema 承载同一工具集合。模型 route 之间没有工具/skill allowlist 差异，并共用执行器和 Policy；不同模型只可能在工具选择质量、上下文容量或 CLI 沙箱实现上有差异。工具模式会缓冲本轮 CLI 文本，直到成功终态和信封校验完成，因此不会逐 token 展示工具信封。
-- 只有显式 opt-in 的 Codex direct route 发布 `toolCalls: native`。它只负责把原生 function call 交还 DSH；工具选择、参数审批、执行和结果回传仍受 Agent Loop / Policy 控制，provider 本身没有绕开策略执行本机工具的权限。
-- Codex direct 只有在可选 attachment service 实际可用时才声明 `text + image`；否则仍为 text-only。音频、视频和任意文件都不支持。其图片与完整 JSON 请求有独立字节上限。
-- Codex direct 的 auth 文件安全检查依赖 POSIX 所有权、链接数和权限位，因此当前不支持 Windows；Windows 仍使用默认 CLI transport。
-- CLI 路径不提供供应商 token usage；`assistant-automations` 的周期 token 预算会按全额预留结算，详见该插件 README。Codex direct 会读取私有 Responses 终态中的 usage，但该字段同样属于不稳定协议。
-- CLI 模式下，`temperature`、`stop`、`maxTokens` 等参数只能进入任务约束，不能保证与原生模型 API 等价。当前私有 Codex request schema 没有 `temperature` 或 `max_output_tokens`：direct route 对显式 `temperature` 和非空 `stop` fail closed；DSH Agent Loop 的 `maxTokens` 只作为宿主本地预算消费，不发送到私有 wire。
-- CLI JSONL 采用已验证事件白名单；任何未知/畸形事件、没有 assistant 文本或缺少规定终态都会返回 `CLI_PROTOCOL_ERROR`。协议漂移会明确失败，不能夹带新的 provider-native executor 事件。
-- Codex 的 read-only sandbox、Claude/Grok 的空 native tool set、Cursor 的 Ask 模式和兼容 prompt 都不是 OS 级强隔离。需要处理不可信仓库时，应在容器、只读挂载或独立 OS 账号中运行 DSH。
-- 插件没有远程共享、公共 HTTP 代理、token 导入或浏览器抓取能力。Codex direct 只封装一个固定私有 endpoint 与固定 refresh endpoint，不是可配置的通用认证代理。
-- Cursor 目前只自动发现模型。其官方 headless CLI 尚未暴露可验证的 effort 参数；Max Mode/Thinking 变体不会伪装成 DSH effort，待上游提供机器可用控制面后再接入。
-- Codex CLI 模式的 App Server、Claude SDK control 与 Grok ACP 只用于模型目录发现；这些生成路径仍使用各自一次性 CLI。Codex direct 不使用 App Server，也不做动态模型发现。Grok effective credential 绑定、动态 CLI 版本探测和持久外部会话属于后续阶段。
-
-### Claude 合规提示
-
-Anthropic 的技术文档允许 `claude -p` 使用订阅登录，但其法律与合规页面同时限制第三方产品代用户提供 Claude.ai 登录或路由 Free/Pro/Max 凭据。因此 Claude connector 只作为同机同用户的 experimental 委托：不提供登录、不托管 token、不做多租户。公开或商业部署前应自行取得适用授权；否则使用 DSH 已有的官方 API Key provider。
-
-## 兼容性与调研
-
-- Node.js `^22.19.0 || >=24.0.0`
-- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.1.0-rc.8 <0.2.0`
-- Cordis `^4.0.1`
-- Codex CLI `0.147.0`（已验证；模型目录基于官方 [Codex App Server](https://developers.openai.com/codex/app-server) 的 `model/list`）
-- Codex `direct-responses`（实验性私有协议；不是 OpenAI 面向第三方承诺的公开 API，兼容基线见 [compatibility.md](../../docs/compatibility.md)）
-- `@deepseek-ai/dsh-attachment` `>=0.1.0-rc.8 <0.2.0`（可选；Codex direct 图片输入依赖该服务）
-- Claude Code `2.1.218`（已验证；目录字段遵循官方 [Agent SDK `supportedModels()`](https://code.claude.com/docs/en/agent-sdk/typescript)）
-- Grok Build `1.0.5`（已验证；目录与 effort 来自 ACP `initialize` 的 `modelState`，生成事件遵循官方 [headless `streaming-json`](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md#streaming-json)）
-- Cursor CLI：目录入口使用官方 [`--list-models`](https://cursor.com/changelog/cli-jan-08-2026)；当前环境未安装 Cursor，仓库也尚无目标版本的真实脱敏 fixture，因此生成路径仍是未验证的实验性兼容，不列入已验证基线
-
-进一步阅读：[Codex 路由调研](../../docs/grok-bot-codex-router-research.md)、[插件生态与 Hermes/OpenClaw 对比](../../docs/dsh-personal-assistant-plugin-landscape.md)、[兼容基线](../../docs/compatibility.md)。
+运行与发布验证统一使用仓库根目录的 `pnpm check`。

@@ -3,3 +3,6 @@
       name: '@dsh-enhanced/coding-subscription-provider'
       config:
         cwd: !!js dshHomePath('assistant-workspace')
+        codex:
+          transport: direct-responses
+          directModel: gpt-5.6-terra

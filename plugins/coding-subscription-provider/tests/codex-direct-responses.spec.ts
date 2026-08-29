@@ -10,6 +10,7 @@ import { apply as applyLlmInvariant } from '@deepseek-ai/dsh-llm/invariant'
 import { describe, expect, it, vi, type Mock } from 'vitest'
 import {
   runCodexDirectResponses,
+  type CodexDirectRequestRouting,
   type CodexDirectResponsesDependencies,
   type CodexResponsesRequester,
 } from '../src/codex-direct-responses.ts'
@@ -68,6 +69,10 @@ function sse(
   return new Response(body, { status: 200, headers: { 'content-type': 'text/event-stream; charset=utf-8' } })
 }
 
+function responseWithoutContentType(body: string): Response {
+  return new Response(new TextEncoder().encode(body), { status: 200 })
+}
+
 function directDependencies(
   response: Response,
   overrides: Partial<Omit<CodexDirectResponsesDependencies, 'request'>> = {},
@@ -84,6 +89,19 @@ async function collect(stream: AsyncIterable<StreamChunk>): Promise<StreamChunk[
   const chunks: StreamChunk[] = []
   for await (const chunk of stream) chunks.push(chunk)
   return chunks
+}
+
+async function captureDirectRequest(options: GenerateOptions): Promise<{
+  readonly body: Record<string, unknown>
+  readonly routing: CodexDirectRequestRouting
+}> {
+  const dependencies = directDependencies(sse([{
+    type: 'response.completed', response: completedResponse(),
+  }]))
+  await collect(runCodexDirectResponses(options, dependencies))
+  const call = dependencies.request.mock.calls[0]
+  if (call === undefined) throw new Error('expected one direct request')
+  return { body: JSON.parse(call[0]) as Record<string, unknown>, routing: call[2] }
 }
 
 async function installActualLlmInvariant(source: AsyncIterable<StreamChunk>): Promise<AsyncIterable<StreamChunk>> {
@@ -474,7 +492,10 @@ describe('Codex private Responses transport', () => {
       type: 'response.completed', response: completedResponse(),
     }]))
     await collect(runCodexDirectResponses(request([assistant]), secondDependencies))
-    expect(JSON.parse(secondDependencies.request.mock.calls[0]![0] as string).input).toEqual([synthesized])
+    expect(JSON.parse(secondDependencies.request.mock.calls[0]![0] as string).input).toEqual([{
+      ...synthesized,
+      status: 'completed',
+    }])
   })
 
   it('lets an authoritative completed event supersede a preliminary failed event', async () => {
@@ -573,7 +594,11 @@ describe('Codex private Responses transport', () => {
       type: 'response.completed', response: completedResponse(),
     }]))
     await collect(runCodexDirectResponses(request([assistant]), secondDependencies))
-    expect(JSON.parse(secondDependencies.request.mock.calls[0]![0] as string).input).toEqual(output)
+    expect(JSON.parse(secondDependencies.request.mock.calls[0]![0] as string).input).toEqual([
+      output[0],
+      { ...output[1], status: 'completed' },
+      output[2],
+    ])
   })
 
   it('fails closed on private active-item overlap and optional identity disagreements', async () => {
@@ -617,9 +642,111 @@ describe('Codex private Responses transport', () => {
       type: 'response.completed', response: completedResponse(),
     }]))
     await collect(runCodexDirectResponses(request([user('hello')]), dependencies))
-    expect(JSON.parse(dependencies.request.mock.calls[0]![0] as string)).toMatchObject({
+    const [serialized, , routing] = dependencies.request.mock.calls[0]!
+    const body = JSON.parse(serialized) as Record<string, unknown>
+    expect(body).toMatchObject({
       tool_choice: 'auto', parallel_tool_calls: true, reasoning: null,
+      prompt_cache_key: routing.promptCacheKey,
     })
+    expect(routing.sessionId).toMatch(/^dshc_[0-9a-f]{32}$/u)
+    expect(routing.threadId).toMatch(/^dshth_[0-9a-f]{32}$/u)
+    expect(routing.promptCacheKey).toMatch(/^pck_[0-9a-f]{24}$/u)
+    expect(routing.promptCacheKey.length).toBeLessThanOrEqual(64)
+    expect(body).not.toHaveProperty('prompt_cache_retention')
+    expect(body).not.toHaveProperty('prompt_cache_options')
+  })
+
+  it('keeps pseudonymous routing stable across turns without placing the Host session id on the wire', async () => {
+    const rawSessionId = 'delivery-private-user-and-conversation-g7' as NonNullable<GenerateOptions['sessionId']>
+    const tools = [{
+      name: 'read_file',
+      description: 'Read a file',
+      parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] },
+    }]
+    const first = await captureDirectRequest(request([user('first turn')], {
+      sessionId: rawSessionId,
+      tools,
+    }))
+    const second = await captureDirectRequest(request([user('first turn'), user('second turn')], {
+      sessionId: rawSessionId,
+      tools,
+    }))
+
+    expect(second.routing).toEqual(first.routing)
+    expect(second.body.prompt_cache_key).toBe(first.body.prompt_cache_key)
+    expect(first.routing).toEqual({
+      sessionId: 'dshc_743037ea2fbb87c80d4be6676b1e09c6',
+      threadId: 'dshth_7ddcf9fb51c8ac2a4de6f28cf4826914',
+      promptCacheKey: 'pck_fc12a1e4f3e2da0191777fe6',
+    })
+    expect(JSON.stringify([first.body, first.routing, second.body, second.routing]))
+      .not.toContain(rawSessionId)
+  })
+
+  it('canonicalizes tool ordering and object keys when deriving the prompt cache key', async () => {
+    const sessionId = 'session-canonical-tools' as NonNullable<GenerateOptions['sessionId']>
+    const first = await captureDirectRequest(request([user('hello')], {
+      sessionId,
+      tools: [
+        {
+          name: 'zeta',
+          description: 'Z',
+          parameters: {
+            type: 'object',
+            properties: { beta: { type: 'number' }, alpha: { type: 'string' } },
+            required: ['alpha'],
+          },
+        },
+        { name: 'alpha', description: 'A', parameters: { type: 'object' } },
+      ],
+    }))
+    const reordered = await captureDirectRequest(request([user('hello again')], {
+      sessionId,
+      tools: [
+        { name: 'alpha', description: 'A', parameters: { type: 'object' } },
+        {
+          name: 'zeta',
+          description: 'Z',
+          parameters: {
+            properties: { alpha: { type: 'string' }, beta: { type: 'number' } },
+            required: ['alpha'],
+            type: 'object',
+          },
+        },
+      ],
+    }))
+
+    expect(reordered.routing.promptCacheKey).toBe(first.routing.promptCacheKey)
+    expect(reordered.routing.sessionId).toBe(first.routing.sessionId)
+    expect(reordered.routing.threadId).toBe(first.routing.threadId)
+  })
+
+  it('isolates conversations and rotates only the cache identity when the static prefix changes', async () => {
+    const sessionA = 'session-a' as NonNullable<GenerateOptions['sessionId']>
+    const sessionB = 'session-b' as NonNullable<GenerateOptions['sessionId']>
+    const tools = [{ name: 'inspect', description: 'Inspect', parameters: { type: 'object' } }]
+    const base = await captureDirectRequest(request([user('hello')], { sessionId: sessionA, tools }))
+    const otherConversation = await captureDirectRequest(request([user('hello')], {
+      sessionId: sessionB,
+      tools,
+    }))
+    const changedInstructions = await captureDirectRequest(request([user('hello')], {
+      sessionId: sessionA,
+      system: 'Use a different static prefix.',
+      tools,
+    }))
+    const changedTools = await captureDirectRequest(request([user('hello')], {
+      sessionId: sessionA,
+      tools: [{ name: 'inspect', description: 'Inspect safely', parameters: { type: 'object' } }],
+    }))
+
+    expect(otherConversation.routing.sessionId).not.toBe(base.routing.sessionId)
+    expect(otherConversation.routing.threadId).not.toBe(base.routing.threadId)
+    expect(otherConversation.routing.promptCacheKey).not.toBe(base.routing.promptCacheKey)
+    expect(changedInstructions.routing.sessionId).toBe(base.routing.sessionId)
+    expect(changedInstructions.routing.threadId).toBe(base.routing.threadId)
+    expect(changedInstructions.routing.promptCacheKey).not.toBe(base.routing.promptCacheKey)
+    expect(changedTools.routing.promptCacheKey).not.toBe(base.routing.promptCacheKey)
   })
 
   it('maps the catalog ultra reasoning effort to max on the private wire', async () => {
@@ -715,11 +842,12 @@ describe('Codex private Responses transport', () => {
     }), dependencies))
 
     expect(dependencies.request).toHaveBeenCalledTimes(1)
-    const [serialized, signal] = dependencies.request.mock.calls[0] as [string, AbortSignal]
+    const [serialized, signal, routing] = dependencies.request.mock.calls[0]!
     expect(signal).toBeInstanceOf(AbortSignal)
     expect(JSON.parse(serialized)).toEqual({
       model: 'gpt-5.6-sol',
       instructions: 'Keep it short.',
+      prompt_cache_key: routing.promptCacheKey,
       input: [
         {
           role: 'user',
@@ -730,7 +858,7 @@ describe('Codex private Responses transport', () => {
         },
         {
           role: 'assistant',
-          content: [{ type: 'input_text', text: 'I will read it.' }],
+          content: [{ type: 'output_text', text: 'I will read it.' }],
         },
         { type: 'function_call', call_id: 'call-7', name: 'read_file', arguments: '{"path":"README.md"' },
         { type: 'function_call_output', call_id: 'call-7', output: 'contents' },
@@ -749,6 +877,157 @@ describe('Codex private Responses transport', () => {
       include: ['reasoning.encrypted_content'],
       reasoning: { effort: 'high', summary: 'auto' },
     })
+  })
+
+  it('serializes generic assistant fallback text as Responses output_text', async () => {
+    const assistant = createMessage({
+      role: 'assistant',
+      source: { kind: 'model', provider: 'codex-subscription', model: 'another-model' },
+      content: [{ type: 'text', text: 'A durable fallback answer' }],
+    })
+    const dependencies = directDependencies(sse([{
+      type: 'response.completed', response: completedResponse(),
+    }]))
+
+    await collect(runCodexDirectResponses(request([assistant]), dependencies))
+
+    expect(JSON.parse(dependencies.request.mock.calls[0]![0] as string).input).toEqual([{
+      role: 'assistant',
+      content: [{ type: 'output_text', text: 'A durable fallback answer' }],
+    }])
+  })
+
+  it('maps matching long Host call ids to one deterministic wire-safe id without mutating Host messages', async () => {
+    const originalCallId = 'host-call-' + 'x'.repeat(80)
+    const hostCallId = CallId(originalCallId)
+    const assistant = createMessage({
+      role: 'assistant',
+      source: { kind: 'model', provider: 'codex-subscription', model: 'another-model' },
+      content: [{
+        type: 'tool-call', id: hostCallId, name: 'read_file', arguments: '{"path":"README.md"}',
+      }],
+    })
+    const toolResult = createMessage({
+      role: 'user',
+      source: { kind: 'tool', callId: hostCallId },
+      content: [{
+        type: 'tool-result', toolCallId: hostCallId, isError: false,
+        content: [{ type: 'text', text: 'contents' }],
+      }],
+    })
+    const dependencies = directDependencies(sse([{
+      type: 'response.completed', response: completedResponse(),
+    }]))
+
+    await collect(runCodexDirectResponses(request([assistant, toolResult], {
+      tools: [{ name: 'read_file', description: 'Read', parameters: {} }],
+    }), dependencies))
+
+    const input = JSON.parse(dependencies.request.mock.calls[0]![0] as string).input
+    expect(input).toEqual([
+      {
+        type: 'function_call',
+        call_id: 'call_279df958e60d19230c7975b02f9c25be',
+        name: 'read_file',
+        arguments: '{"path":"README.md"}',
+      },
+      {
+        type: 'function_call_output',
+        call_id: 'call_279df958e60d19230c7975b02f9c25be',
+        output: 'contents',
+      },
+    ])
+    expect(input[0].call_id).toMatch(/^call_[0-9a-f]{32}$/)
+    expect(assistant.content).toEqual([{
+      type: 'tool-call', id: hostCallId, name: 'read_file', arguments: '{"path":"README.md"}',
+    }])
+    expect(toolResult.content).toEqual([{
+      type: 'tool-result', toolCallId: hostCallId, isError: false,
+      content: [{ type: 'text', text: 'contents' }],
+    }])
+  })
+
+  it('neutralizes literal and Unicode-Cf-obfuscated Harmony tokens in every outbound text surface', async () => {
+    const obscured = `<\u200d|\u200d${[...'message'].join('\u200d')}\u200d|\u200d>`
+    const tainted = `literal <|start|>; obscured ${obscured}`
+    const neutralized = 'literal <｜start｜>; obscured <｜message｜>'
+    const callId = CallId('call-harmony')
+    const messages: GenerateOptions['messages'] = [
+      user(tainted),
+      createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'codex-subscription', model: 'another-model' },
+        content: [
+          { type: 'text', text: tainted },
+          { type: 'tool-call', id: callId, name: 'inspect', arguments: JSON.stringify({ value: tainted }) },
+        ],
+      }),
+      createMessage({
+        role: 'user',
+        source: { kind: 'tool', callId },
+        content: [{
+          type: 'tool-result', toolCallId: callId, isError: false,
+          content: [{ type: 'text', text: tainted }],
+        }],
+      }),
+    ]
+    const dependencies = directDependencies(sse([{
+      type: 'response.completed', response: completedResponse(),
+    }]))
+
+    await collect(runCodexDirectResponses(request(messages, {
+      system: tainted,
+      tools: [{
+        name: 'inspect',
+        description: tainted,
+        parameters: {
+          type: 'object',
+          description: tainted,
+          properties: { value: { type: 'string', const: tainted } },
+        },
+      }],
+    }), dependencies))
+
+    const body = JSON.parse(dependencies.request.mock.calls[0]![0] as string)
+    expect(body.instructions).toBe(neutralized)
+    expect(body.input).toEqual([
+      { role: 'user', content: [{ type: 'input_text', text: neutralized }] },
+      { role: 'assistant', content: [{ type: 'output_text', text: neutralized }] },
+      {
+        type: 'function_call', call_id: 'call-harmony', name: 'inspect',
+        arguments: JSON.stringify({ value: neutralized }),
+      },
+      { type: 'function_call_output', call_id: 'call-harmony', output: neutralized },
+    ])
+    expect(body.tools).toEqual([{
+      type: 'function',
+      name: 'inspect',
+      description: neutralized,
+      parameters: {
+        type: 'object',
+        description: neutralized,
+        properties: { value: { type: 'string', const: neutralized } },
+      },
+      strict: false,
+    }])
+    expect(JSON.stringify(body)).not.toContain('<|start|>')
+    expect(JSON.stringify(body)).not.toContain('\u200d')
+  })
+
+  it('rejects Harmony tokens in tool-schema object keys before network I/O', async () => {
+    const dependencies = directDependencies(sse([]))
+
+    await expect(collect(runCodexDirectResponses(request([user('hello')], {
+      tools: [{
+        name: 'inspect',
+        description: 'Inspect',
+        parameters: {
+          type: 'object',
+          properties: { '<|start|>': { type: 'string' } },
+        },
+      }],
+    }), dependencies))).rejects.toMatchObject({ cause: 'protocol' })
+    expect(dependencies.request).not.toHaveBeenCalled()
   })
 
   it('encodes tool-result errors and empty results using only standard function output fields', async () => {
@@ -860,7 +1139,27 @@ describe('Codex private Responses transport', () => {
     const valid = directDependencies(terminal)
 
     await collect(runCodexDirectResponses(request([assistant]), valid))
-    expect(JSON.parse(valid.request.mock.calls[0]![0] as string).input).toEqual(nativeOutput)
+    expect(JSON.parse(valid.request.mock.calls[0]![0] as string).input).toEqual([
+      {
+        type: 'reasoning',
+        encrypted_content: 'encrypted-reasoning',
+        summary: [],
+      },
+      {
+        type: 'message',
+        id: 'msg_1',
+        role: 'assistant',
+        status: 'completed',
+        phase: 'final_answer',
+        content: [{ type: 'output_text', text: 'Answer' }],
+      },
+      {
+        type: 'function_call',
+        call_id: 'call-1',
+        name: 'read_file',
+        arguments: '{"path":"a"}',
+      },
+    ])
 
     const mismatched = createMessage({
       role: 'assistant',
@@ -872,8 +1171,136 @@ describe('Codex private Responses transport', () => {
     expect(JSON.parse(fallback.request.mock.calls[0]![0] as string).input).toEqual([
       {
         role: 'assistant',
-        content: [{ type: 'input_text', text: 'Edited durable answer' }],
+        content: [{ type: 'output_text', text: 'Edited durable answer' }],
       },
+    ])
+  })
+
+  it('removes ephemeral reasoning and function ids from replay while retaining safe message metadata', async () => {
+    const nativeOutput = [
+      {
+        type: 'reasoning',
+        id: 'rs-ephemeral',
+        encrypted_content: 'encrypted-reasoning',
+        summary: [{ type: 'summary_text', text: 'Reviewed' }],
+      },
+      {
+        type: 'message',
+        id: 'msg-short',
+        role: 'assistant',
+        status: 'incomplete',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'Calling a tool', annotations: [{ opaque: true }] }],
+      },
+      {
+        type: 'function_call',
+        id: 'fc-ephemeral',
+        call_id: 'call-clean-replay',
+        name: 'read_file',
+        arguments: '{"path":"README.md"}',
+        status: 'completed',
+      },
+    ]
+    const assistant = createMessage({
+      role: 'assistant',
+      source: {
+        kind: 'model',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-sol',
+        replayState: {
+          response: {
+            kind: 'codex-private-responses',
+            version: 3,
+            provider: 'codex-subscription',
+            model: 'gpt-5.6-sol',
+            responseId: 'resp-clean-replay',
+            output: nativeOutput,
+            blockOrder: [
+              'reasoning:@output:0:0',
+              'text:@output:1:0',
+              'tool:@output:2',
+            ],
+          },
+        },
+      },
+      content: [
+        { type: 'reasoning', text: 'Reviewed' },
+        { type: 'text', text: 'Calling a tool' },
+        {
+          type: 'tool-call', id: CallId('call-clean-replay'), name: 'read_file',
+          arguments: '{"path":"README.md"}',
+        },
+      ],
+    })
+    const dependencies = directDependencies(sse([{
+      type: 'response.completed', response: completedResponse(),
+    }]))
+
+    await collect(runCodexDirectResponses(request([assistant]), dependencies))
+
+    expect(JSON.parse(dependencies.request.mock.calls[0]![0] as string).input).toEqual([
+      {
+        type: 'reasoning',
+        encrypted_content: 'encrypted-reasoning',
+        summary: [{ type: 'summary_text', text: 'Reviewed' }],
+      },
+      {
+        type: 'message',
+        id: 'msg-short',
+        role: 'assistant',
+        status: 'incomplete',
+        phase: 'commentary',
+        content: [{ type: 'output_text', text: 'Calling a tool' }],
+      },
+      {
+        type: 'function_call',
+        call_id: 'call-clean-replay',
+        name: 'read_file',
+        arguments: '{"path":"README.md"}',
+      },
+    ])
+  })
+
+  it('appends an empty assistant item after reasoning-only replay', async () => {
+    const nativeOutput = [{
+      type: 'reasoning',
+      id: 'rs-reasoning-only',
+      encrypted_content: 'encrypted-reasoning',
+      summary: [{ type: 'summary_text', text: 'Reasoned safely' }],
+    }]
+    const assistant = createMessage({
+      role: 'assistant',
+      source: {
+        kind: 'model',
+        provider: 'codex-subscription',
+        model: 'gpt-5.6-sol',
+        replayState: {
+          response: {
+            kind: 'codex-private-responses',
+            version: 3,
+            provider: 'codex-subscription',
+            model: 'gpt-5.6-sol',
+            responseId: 'resp-reasoning-only',
+            output: nativeOutput,
+            blockOrder: ['reasoning:@output:0:0'],
+          },
+        },
+      },
+      content: [{ type: 'reasoning', text: 'Reasoned safely' }],
+    })
+    const dependencies = directDependencies(sse([{
+      type: 'response.completed', response: completedResponse(),
+    }]))
+
+    await collect(runCodexDirectResponses(request([assistant]), dependencies))
+
+    expect(JSON.parse(dependencies.request.mock.calls[0]![0] as string).input).toEqual([
+      {
+        type: 'reasoning',
+        encrypted_content: 'encrypted-reasoning',
+        summary: [{ type: 'summary_text', text: 'Reasoned safely' }],
+      },
+      { role: 'assistant', content: '' },
     ])
   })
 
@@ -918,7 +1345,12 @@ describe('Codex private Responses transport', () => {
 
     await collect(runCodexDirectResponses(request([assistant]), dependencies))
 
-    expect(JSON.parse(dependencies.request.mock.calls[0]![0] as string).input).toEqual(nativeOutput)
+    expect(JSON.parse(dependencies.request.mock.calls[0]![0] as string).input).toEqual([{
+      type: 'function_call',
+      call_id: 'call-native',
+      name: 'read_file',
+      arguments: '{"path":"README.md"}',
+    }])
   })
 
   it('streams split CRLF SSE into mixed text and tool blocks in first-seen order', async () => {
@@ -1861,6 +2293,7 @@ describe('Codex private Responses transport', () => {
   })
 
   it('keeps interleaved parallel calls correlated and preserves malformed arguments as raw strings', async () => {
+    const sessionId = 'session-parallel-tool-loop' as NonNullable<GenerateOptions['sessionId']>
     const first = {
       type: 'function_call', id: 'fc-first', call_id: 'call-first', name: 'read_file',
       arguments: '{malformed', status: 'completed',
@@ -1885,6 +2318,7 @@ describe('Codex private Responses transport', () => {
     ]))
 
     const chunks = await collect(runCodexDirectResponses(request([user('parallel')], {
+      sessionId,
       tools: [{ name: 'read_file', description: 'Read', parameters: {} }],
     }), dependencies))
     const assembler = new BlockAssembler()
@@ -1902,7 +2336,7 @@ describe('Codex private Responses transport', () => {
       { type: 'response.completed', response: completedResponse() },
       '[DONE]',
     ]))
-    await collect(runCodexDirectResponses(request([createMessage({
+    const replayAssistant = createMessage({
       role: 'assistant',
       source: {
         kind: 'model',
@@ -1911,10 +2345,33 @@ describe('Codex private Responses transport', () => {
         replayState: finish.replayState,
       },
       content: assembler.blocks(),
-    })], {
+    })
+    const firstToolResult = createMessage({
+      role: 'user',
+      source: { kind: 'tool', callId: CallId('call-first') },
+      content: [{
+        type: 'tool-result',
+        toolCallId: CallId('call-first'),
+        isError: false,
+        content: [{ type: 'text', text: 'first contents' }],
+      }],
+    })
+    await collect(runCodexDirectResponses(request([replayAssistant, firstToolResult], {
+      sessionId,
       tools: [{ name: 'read_file', description: 'Read', parameters: {} }],
     }), replayDependencies))
-    expect(JSON.parse(replayDependencies.request.mock.calls[0]![0] as string).input).toEqual([first, second])
+    expect(JSON.parse(replayDependencies.request.mock.calls[0]![0] as string).input).toEqual([
+      {
+        type: 'function_call', call_id: 'call-first', name: 'read_file', arguments: '{malformed',
+      },
+      {
+        type: 'function_call', call_id: 'call-second', name: 'read_file', arguments: '{"path":"b"}',
+      },
+      { type: 'function_call_output', call_id: 'call-first', output: 'first contents' },
+    ])
+    expect(replayDependencies.request.mock.calls[0]![2]).toEqual(dependencies.request.mock.calls[0]![2])
+    expect(JSON.parse(replayDependencies.request.mock.calls[0]![0]).prompt_cache_key)
+      .toBe(JSON.parse(dependencies.request.mock.calls[0]![0]).prompt_cache_key)
   })
 
   it('fails closed on unsupported options, oversized requests, HTTP errors, and non-SSE responses', async () => {
@@ -1937,6 +2394,78 @@ describe('Codex private Responses transport', () => {
     const notSse = directDependencies(new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } }))
     await expect(collect(runCodexDirectResponses(request([user('hello')]), notSse)))
       .rejects.toMatchObject({ cause: 'protocol' })
+  })
+
+  it('accepts a strict terminal SSE body when the successful Codex response omits Content-Type', async () => {
+    const doneItem = {
+      type: 'message',
+      id: 'msg-missing-content-type',
+      role: 'assistant',
+      status: 'completed',
+      content: [{ type: 'output_text', text: 'headerless SSE', annotations: [] }],
+    }
+    const response = responseWithoutContentType([
+      { type: 'response.output_item.done', output_index: 0, item: doneItem },
+      {
+        type: 'response.completed',
+        response: {
+          id: 'resp-missing-content-type',
+          status: 'completed',
+          output: [doneItem],
+          usage: { input_tokens: 2, output_tokens: 2, total_tokens: 4 },
+        },
+      },
+    ].map(event => `data: ${JSON.stringify(event)}\n\n`).join(''))
+
+    expect(response.headers.get('content-type')).toBeNull()
+    const chunks = await collect(runCodexDirectResponses(
+      request([user('hello')]),
+      directDependencies(response),
+    ))
+
+    expect(chunks).toContainEqual({
+      type: 'block-end',
+      index: 0,
+      block: { type: 'text', text: 'headerless SSE' },
+    })
+    expect(chunks.at(-1)).toMatchObject({
+      type: 'finish',
+      reason: { kind: 'stop' },
+      replayState: {
+        response: {
+          responseId: 'resp-missing-content-type',
+          output: [doneItem],
+        },
+      },
+    })
+  })
+
+  it.each([
+    ['a non-SSE body', '{}'],
+    [
+      'SSE with no terminal event',
+      [
+        `data: ${JSON.stringify({
+          type: 'response.output_item.added',
+          output_index: 0,
+          item: { type: 'message', role: 'assistant', id: 'msg-no-terminal', content: [] },
+        })}\n\n`,
+        `data: ${JSON.stringify({
+          type: 'response.output_text.delta',
+          output_index: 0,
+          content_index: 0,
+          delta: 'partial',
+        })}\n\n`,
+      ].join(''),
+    ],
+  ] as const)('fails closed on HTTP 200 without Content-Type when the body is %s', async (_label, body) => {
+    const response = responseWithoutContentType(body)
+
+    expect(response.headers.get('content-type')).toBeNull()
+    await expect(collect(runCodexDirectResponses(
+      request([user('hello')]),
+      directDependencies(response),
+    ))).rejects.toMatchObject({ cause: 'protocol' })
   })
 
   it.each([

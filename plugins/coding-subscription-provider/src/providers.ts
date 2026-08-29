@@ -27,7 +27,7 @@ export interface CliInvocation {
   readonly args: readonly string[]
   /** Serialized DSH request. It is transported out-of-band and must never enter argv. */
   readonly prompt: string
-  /** stdin everywhere except Grok on Windows, where `/dev/stdin` is unavailable. */
+  /** Grok consumes a private prompt file; every other CLI consumes stdin. */
   readonly promptTransport: 'stdin' | 'secure-temporary-file'
   readonly cwd: string
   readonly shell: false
@@ -138,6 +138,10 @@ export const providerPresets: Readonly<Record<ProviderId, ProviderPreset>> = {
     // these best-effort launch boundaries.
     args: [
       'exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+      // The cwd has already been reconstructed from the live Host session and
+      // compared by canonical realpath.  The standard assistant workspace is
+      // intentionally not required to be a Git repository.
+      '--skip-git-repo-check',
       ...codexDisabledNativeFeatureArgs,
       ...codexNativeBoundaryConfigArgs,
       '--sandbox', 'read-only',
@@ -177,17 +181,16 @@ export const providerPresets: Readonly<Record<ProviderId, ProviderPreset>> = {
 export function buildInvocation(
   provider: ProviderId,
   options: InvocationOptions,
-  platform: NodeJS.Platform = process.platform,
+  _platform: NodeJS.Platform = process.platform,
 ): CliInvocation {
   const preset = providerPresets[provider]
-  const promptTransport = provider === 'grok' && platform === 'win32'
+  // Grok 1.0.5 reopens its --prompt-file path instead of consuming the inherited
+  // stdin stream. `/dev/stdin` can therefore fail with ENXIO under child_process,
+  // so use the same private-file transport on every supported platform.
+  const promptTransport = provider === 'grok'
     ? 'secure-temporary-file'
     : 'stdin'
-  // Grok requires an explicit prompt-file source. POSIX can safely name its
-  // inherited stdin pipe; Windows receives a private file path in process.ts.
-  const args = provider === 'grok' && promptTransport === 'stdin'
-    ? ['--prompt-file', '/dev/stdin', ...preset.args]
-    : [...preset.args]
+  const args = [...preset.args]
 
   if (options.model && options.model !== 'default') args.push('--model', options.model)
   if (provider === 'codex' && options.reasoningEffort) {
@@ -200,6 +203,10 @@ export function buildInvocation(
   if (options.maxTurns !== undefined && (provider === 'claude' || provider === 'grok')) {
     args.push('--max-turns', String(options.maxTurns))
   }
+  // Use the documented positional sentinel even though some Codex releases
+  // also infer stdin when PROMPT is omitted.  Keeping it last prevents a future
+  // parser change from treating a following option as prompt content.
+  if (provider === 'codex') args.push('-')
 
   return {
     provider,

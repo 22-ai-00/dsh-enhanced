@@ -33,6 +33,10 @@ async function collect(iterable: AsyncIterable<string>): Promise<string[]> {
   return values
 }
 
+async function waitForBridge(child: FakeChild): Promise<void> {
+  await vi.waitFor(() => expect(child.listenerCount('close')).toBeGreaterThan(0))
+}
+
 describe('CLI process bridge', () => {
   it('spawns shell-free and streams Codex agent messages only', async () => {
     const child = new FakeChild()
@@ -80,10 +84,12 @@ describe('CLI process bridge', () => {
     ])
   })
 
-  it('uses and removes a mode-0600 private prompt file for Grok Windows transport', async () => {
-    const prompt = 'windows-private-prompt-content'
+  it.each(['linux', 'darwin', 'win32'] as const)('keeps a private Grok prompt file through child close on %s, then removes it', async platform => {
+    const prompt = `${platform}-private-prompt-content`
     const child = new FakeChild()
     let promptPath: string | undefined
+    let markPrepared: (() => void) | undefined
+    const prepared = new Promise<void>(resolve => { markPrepared = resolve })
     const spawn: SpawnProcess = (_command, args) => {
       const promptFlag = args.indexOf('--prompt-file')
       const value = args[promptFlag + 1]
@@ -91,25 +97,33 @@ describe('CLI process bridge', () => {
       promptPath = value
       expect(args.join('\0')).not.toContain(prompt)
       expect(readFileSync(value, 'utf8')).toBe(prompt)
-      if (process.platform !== 'win32') expect(statSync(value).mode & 0o777).toBe(0o600)
       queueMicrotask(() => {
         child.spawn()
         child.stdout.write('{"type":"text","data":"ok"}\n')
         child.stdout.write('{"type":"end","stopReason":"end_turn"}\n')
-        child.finish()
+        markPrepared?.()
       })
       return child
     }
 
-    const invocation = buildInvocation('grok', { cwd: '/repo', prompt }, 'win32')
-    await expect(collect(runCliText(invocation, { spawn }))).resolves.toEqual(['ok'])
+    const invocation = buildInvocation('grok', { cwd: '/repo', prompt }, platform)
+    const pending = collect(runCliText(invocation, { spawn }))
+    await prepared
     expect(promptPath).toBeDefined()
+    expect(existsSync(promptPath!)).toBe(true)
+    expect(existsSync(dirname(promptPath!))).toBe(true)
+    if (process.platform !== 'win32') {
+      expect(statSync(promptPath!).mode & 0o777).toBe(0o600)
+      expect(statSync(dirname(promptPath!)).mode & 0o777).toBe(0o700)
+    }
+    child.finish()
+    await expect(pending).resolves.toEqual(['ok'])
     expect(existsSync(promptPath!)).toBe(false)
     expect(existsSync(dirname(promptPath!))).toBe(false)
     expect(child.stdin?.read()).toBeNull()
   })
 
-  it('removes the Grok Windows prompt file when spawn throws before submission', async () => {
+  it('removes the Grok prompt file when spawn throws before submission', async () => {
     let promptPath: string | undefined
     let context: ProviderFailureContext | undefined
     const spawn: SpawnProcess = (_command, args) => {
@@ -271,7 +285,7 @@ describe('CLI process bridge', () => {
       cause: 'protocol',
       reason: 'NATIVE_TOOL_EVENT',
     })
-    await Promise.resolve()
+    await waitForBridge(child)
     child.spawn()
     for (const line of lines) child.stdout.write(line)
     await Promise.resolve()
@@ -293,7 +307,7 @@ describe('CLI process bridge', () => {
       buildInvocation('grok', { cwd: '/repo', prompt: 'x' }),
       { spawn: fakeSpawn(child), onSettled: value => { context = value } },
     ))
-    await Promise.resolve()
+    await waitForBridge(child)
     child.spawn()
     child.stdout.write('{"type":"available_commands","tools":[],"commands":[]}\n')
     child.stdout.write('{"type":"text","data":"GROK_PROVIDER_"}\n')
@@ -322,7 +336,7 @@ describe('CLI process bridge', () => {
       code: 'CLI_PROTOCOL_ERROR',
       reason: 'MISSING_SUCCESS_TERMINAL',
     })
-    await Promise.resolve()
+    await waitForBridge(child)
     child.stdout.write('{"type":"result","subtype":"success","is_error":false,"result":"legacy answer"}\n')
     child.finish()
 
@@ -339,7 +353,7 @@ describe('CLI process bridge', () => {
       code: 'CLI_PROTOCOL_ERROR',
       reason: 'REPORTED_FAILURE',
     })
-    await Promise.resolve()
+    await waitForBridge(child)
     child.spawn()
     child.stdout.write('{"type":"error","message":"model request failed"}\n')
     child.finish(1, null)
@@ -557,6 +571,8 @@ describe('CLI process bridge', () => {
     const timedChild = new FakeChild()
     const timed = collect(runCliText(buildInvocation('grok', { cwd: '/repo', prompt: 'x' }), { spawn: fakeSpawn(timedChild), timeoutMs: 1, killGraceMs: 100 }))
     const timedOut = expect(timed).rejects.toThrow('timed out')
+    await waitForBridge(timedChild)
+    timedChild.spawn()
     await new Promise(resolve => setTimeout(resolve, 5))
     timedChild.finish()
     await timedOut
@@ -564,7 +580,7 @@ describe('CLI process bridge', () => {
 
     const normalChild = new FakeChild()
     const normal = collect(runCliText(buildInvocation('grok', { cwd: '/repo', prompt: 'x' }), { spawn: fakeSpawn(normalChild) }))
-    await Promise.resolve()
+    await waitForBridge(normalChild)
     normalChild.stdout.write('{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ok"}}\n')
     normalChild.stdout.write('{"type":"end","stopReason":"end_turn"}\n')
     normalChild.finish()
@@ -611,6 +627,59 @@ describe('CLI process bridge', () => {
     expect(diagnostics).toEqual([
       'Reading additional input from stdin...\nNot inside a trusted directory and --skip-git-repo-check was not specified.',
     ])
+  })
+
+  it('classifies the current Codex non-repository rejection from a real stdin child', async () => {
+    const prompt = `private-large-prompt:${'界'.repeat(64 * 1024)}`
+    const providerInvocation = buildInvocation('codex', {
+      cwd: process.cwd(),
+      prompt,
+      model: 'gpt-5.6-terra',
+    })
+    const script = [
+      "const args = process.argv.slice(1)",
+      "const required = ['exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules', '--sandbox', 'read-only']",
+      "let input = ''",
+      "process.stdin.setEncoding('utf8')",
+      "process.stdin.on('data', chunk => { input += chunk })",
+      "process.stdin.on('end', () => {",
+      "  if (required.some(value => !args.includes(value)) || Buffer.byteLength(input, 'utf8') <= 128 * 1024) {",
+      "    process.stderr.write('fixture did not receive the full provider argv and large stdin prompt\\n')",
+      "    process.exitCode = 64",
+      "    return",
+      "  }",
+      "  process.stderr.write('Reading prompt from stdin...\\n')",
+      "  process.stderr.write('Not inside a trusted directory and --skip-git-repo-check was not specified.\\n')",
+      "  process.exitCode = 1",
+      "})",
+    ].join(';')
+    const invocation: CliInvocation = {
+      ...providerInvocation,
+      command: process.execPath,
+      args: ['--eval', script, '--', ...providerInvocation.args],
+    }
+    const diagnostics: string[] = []
+    let context: ProviderFailureContext | undefined
+
+    expect(invocation.args.join('\0')).not.toContain(prompt)
+    await expect(collect(runCliText(invocation, {
+      timeoutMs: 10_000,
+      onDiagnostic: value => { diagnostics.push(value) },
+      onSettled: value => { context = value },
+    }))).rejects.toMatchObject({
+      code: 'CLI_WORKING_DIRECTORY_ERROR',
+      cause: 'working-directory',
+      provider: 'codex',
+    })
+    expect(diagnostics).toEqual([
+      'Reading prompt from stdin...\nNot inside a trusted directory and --skip-git-repo-check was not specified.',
+    ])
+    expect(context).toMatchObject({
+      phase: 'child-close',
+      promptSubmissionState: 'submitted',
+      exitCode: 1,
+      signal: null,
+    })
   })
 
   it.each([
@@ -763,7 +832,7 @@ describe('CLI process bridge', () => {
       code: 'CLI_PROTOCOL_ERROR',
       reason: 'UNKNOWN_EVENT',
     })
-    await Promise.resolve()
+    await waitForBridge(child)
     child.stdout.write(line)
     child.finish(null, 'SIGINT')
     await rejected
@@ -824,7 +893,7 @@ describe('CLI process bridge', () => {
       code: 'CLI_PROTOCOL_ERROR',
       reason: 'MISSING_SUCCESS_TERMINAL',
     })
-    await Promise.resolve()
+    await waitForBridge(child)
     if (provider === 'codex') {
       child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}\n')
     } else if (provider === 'cursor') {
@@ -940,7 +1009,7 @@ describe('CLI process bridge', () => {
       cause: 'protocol',
       reason,
     })
-    await Promise.resolve()
+    await waitForBridge(child)
     if (provider === 'cursor') child.stdout.write('{"type":"system","subtype":"init","apiKeySource":"login"}\n')
     child.stdout.write('{"type":"assistant","message":"partial"}\n')
     child.stdout.write(`${result}\n`)

@@ -16,6 +16,7 @@
 
 ## Provider 调研
 
+- [Coding subscription provider 详细参考](coding-subscription-provider-reference.md)：完整配置、认证门禁、传输协议、错误码与已知限制。
 - [CLIProxyAPI 第一手证据复核](cliproxyapi-provider-evidence-review.md)：两个 provider 的上游证据与可采用边界。
 - [CLIProxyAPI Provider 优化调研](cliproxyapi-provider-optimization-research.md)：更完整的历史方案与实现建议。
 - [Grok Bot Codex 路由调研](grok-bot-codex-router-research.md)：Codex 路由模式的历史研究。

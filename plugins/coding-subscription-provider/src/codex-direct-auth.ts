@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { attributionHeaders } from '@deepseek-ai/dsh-llm'
+import type { CodexDirectRequestRouting } from './codex-direct-responses.js'
 
 export const CODEX_RESPONSES_URL = 'https://chatgpt.com/backend-api/codex/responses'
 export const CODEX_OAUTH_REFRESH_URL = 'https://auth.openai.com/oauth/token'
@@ -24,6 +25,7 @@ const MAX_TOKEN_BYTES = 64 * 1024
 const MAX_ACCOUNT_ID_BYTES = 4 * 1024
 const BEARER_PREFIX = 'Bearer '
 const MAX_ACCESS_TOKEN_BYTES = MAX_TOKEN_BYTES - Buffer.byteLength(BEARER_PREFIX, 'utf8')
+const MAX_ROUTING_ID_BYTES = 64
 const MAX_AUTH_READ_ATTEMPTS = 3
 const MAX_PERSIST_ATTEMPTS = 3
 
@@ -116,12 +118,15 @@ export class CodexCredentialStore {
     this.#now = options.now ?? (() => new Date())
   }
 
-  async requestResponses(body: string, signal: AbortSignal): Promise<Response> {
+  async requestResponses(
+    body: string,
+    signal: AbortSignal,
+    routing?: CodexDirectRequestRouting,
+  ): Promise<Response> {
     throwIfCallerAborted(signal)
+    const requestRouting = resolveRequestRouting(routing)
     const original = await readCredentialFile(this.#authFile)
-    const sessionId = randomUUID()
-    const threadId = randomUUID()
-    const first = await this.#postResponses(body, original, sessionId, threadId, signal)
+    const first = await this.#postResponses(body, original, requestRouting, signal)
     if (first.status !== 401) return first
     discardBody(first)
     throwIfCallerAborted(signal)
@@ -134,14 +139,13 @@ export class CodexCredentialStore {
       ? onDisk
       : await waitForSignal(this.#refreshOnce(original), signal)
     assertSameAccount(original, credentials)
-    return this.#postResponses(body, credentials, sessionId, threadId, signal)
+    return this.#postResponses(body, credentials, requestRouting, signal)
   }
 
   async #postResponses(
     body: string,
     credentials: CredentialSnapshot,
-    sessionId: string,
-    threadId: string,
+    routing: CodexDirectRequestRouting,
     signal: AbortSignal,
   ): Promise<Response> {
     throwIfCallerAborted(signal)
@@ -155,9 +159,11 @@ export class CodexCredentialStore {
       originator: CODEX_WIRE_ORIGINATOR,
       version: CODEX_WIRE_CLIENT_VERSION,
       'user-agent': CODEX_WIRE_USER_AGENT,
-      'session-id': sessionId,
-      'thread-id': threadId,
-      'x-client-request-id': threadId,
+      'session-id': routing.sessionId,
+      'thread-id': routing.threadId,
+      // Match the current Codex client contract: request correlation follows
+      // the thread identity, while cache affinity lives in prompt_cache_key.
+      'x-client-request-id': routing.threadId,
     }))
     throwIfCallerAborted(signal)
     try {
@@ -409,10 +415,18 @@ async function assertTrustedParent(path: string): Promise<void> {
     const before = await lstat(parent, { bigint: true })
     assertSecureParent(before)
     const canonical = await realpath(parent)
+    const canonicalStat = await lstat(canonical, { bigint: true })
+    assertSecureParent(canonicalStat)
     const after = await lstat(parent, { bigint: true })
     assertSecureParent(after)
-    if (canonical !== resolve(parent) || before.dev !== after.dev || before.ino !== after.ino) {
-      throw new CodexDirectAuthError('Codex authentication parent must not contain symbolic links')
+    // An administrator-owned home-directory alias (for example /home/user ->
+    // /data/home/user) is common on managed hosts.  The immediate auth parent
+    // must still be a real, current-user-owned, non-writable directory; pinning
+    // its canonical inode before and after inspection prevents the alias from
+    // redirecting this operation to a different directory.
+    if (before.dev !== canonicalStat.dev || before.ino !== canonicalStat.ino
+      || before.dev !== after.dev || before.ino !== after.ino) {
+      throw new CodexDirectAuthError('Codex authentication parent changed while it was inspected')
     }
   } catch (error: unknown) {
     if (error instanceof CodexDirectAuthError) throw error
@@ -591,6 +605,36 @@ function createValidatedHeaders(
     if (error instanceof CodexDirectAuthError) throw error
     throw new CodexDirectAuthError('Could not construct safe Codex request headers', 'protocol')
   }
+}
+
+function resolveRequestRouting(
+  routing: CodexDirectRequestRouting | undefined,
+): CodexDirectRequestRouting {
+  if (routing === undefined) {
+    const sessionId = randomUUID()
+    const threadId = randomUUID()
+    return Object.freeze({ sessionId, threadId, promptCacheKey: threadId })
+  }
+  return Object.freeze({
+    sessionId: requireHeaderValue(
+      routing.sessionId,
+      'request session identifier',
+      MAX_ROUTING_ID_BYTES,
+      'protocol',
+    ),
+    threadId: requireHeaderValue(
+      routing.threadId,
+      'request thread identifier',
+      MAX_ROUTING_ID_BYTES,
+      'protocol',
+    ),
+    promptCacheKey: requireHeaderValue(
+      routing.promptCacheKey,
+      'prompt cache identifier',
+      MAX_ROUTING_ID_BYTES,
+      'protocol',
+    ),
+  })
 }
 
 function credentialsChanged(left: CredentialSnapshot, right: CredentialSnapshot): boolean {
