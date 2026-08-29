@@ -34,6 +34,8 @@
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-permission-presets": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
+    "@deepseek-ai/dsh-skill": "catalog:",
+    "@deepseek-ai/dsh-tool-skill": "catalog:",
     "@deepseek-ai/dsh-user-approval": "catalog:",
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-delivery": "workspace:*",

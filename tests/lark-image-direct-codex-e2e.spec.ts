@@ -10,7 +10,6 @@ import {
   type SessionId,
 } from '@deepseek-ai/dsh-session'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import { Buffer } from 'node:buffer'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -161,7 +160,6 @@ describe('Lark image to Direct Codex', () => {
         defaultAgentPreset: 'standard',
         agentProvider: 'codex-subscription',
         agentModel: 'default',
-        toolCapableProviders: ['codex-subscription'],
       })
       const codingConfig = CodingSubscriptionConfig()
       codingConfig.cwd = root
@@ -177,7 +175,6 @@ describe('Lark image to Direct Codex', () => {
         discoverCodexModels: forbiddenCliCall,
       })
       ctx.llm.registerAdapter(['codex-subscription'], codingAdapter)
-      registerLlmRouteCapability(ctx.llm, { provider: 'codex-subscription', toolCalls: 'native' })
       await ctx.plugin(AgentLoop, { agents: [] })
 
       const lark = new LarkDeliveryAdapter({

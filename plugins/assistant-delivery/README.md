@@ -44,8 +44,6 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent
 | `defaultAgentPreset` | `standard` | 新 session 解析并挂载的 preset；该内置 preset 提供 Bash、文件、检索、Skills 等完整编码能力 |
 | `policyRef` | `owner-dm` | 固化在 binding 上的策略引用标签 |
 | `agentProvider` / `agentModel` | `deepseek-official` / `deepseek-v4-flash` | 渠道 Agent 的部署默认模型；会话可用 `/model` 覆盖 |
-| `toolCapableProviders` | `[deepseek-official]` | 尚未发布 registry metadata 的上游原生工具 provider 审计列表；在 `unknownRouteToolCalls: deny` 下作为白名单生效 |
-| `unknownRouteToolCalls` | `allow` | 未发布任何工具能力声明的 route 如何准入；`deny` 切换为严格白名单。provider 显式声明 `none` 时两种取值都 fail closed |
 | `agentMaxOutputTokens` | `8192` | 单轮模型输出上限 |
 | `modelPickerTtlMs` | `900000` | `/model` 选择卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 | `permissionPickerTtlMs` | `900000` | `/permissions` 三档权限卡片的签名提交有效期；范围 1 分钟至 24 小时 |
@@ -165,7 +163,7 @@ rules:
 
 权限命令在第一次 reviewer/policy/sandbox mutation 前还必须先取得 Inbox 的 durable dispatch/recovery marker；每个异步边界后都复核 abort 与租约。若进程退出、续租失败、flush 未确认、依赖尚未就绪或回复入队失败，该 marker 会绕过普通 `maxAttempts`，在原 binding 串行 lane 中继续恢复，直到确认已持久化目标并补发成功终态，或安全收敛到 ask 后补发失败/取消终态。`/stop` 和 `/new` 会在 abort 前把正在执行的权限命令原子改标为 cancelled recovery；旧命令不会以 `processor-ambiguous` 终止，也不会从原始文本重新制造一次可能已取消的 full 提权。
 
-普通消息真正 resume Agent 时，Delivery 会在 preset 挂载完成后检查最终 scoped tool schemas。非空工具时，provider 通过 `@dsh-enhanced/llm-route-capabilities` 声明 `native`/`bridge` 即放行。DSH 的 `generate` 契约对所有 adapter 都接受 `tools`，因此工具调用是 adapter 基线能力：未发布任何声明的 route（pi-ai 等内置/网关 provider 从不发布 registry metadata）默认按 `unknownRouteToolCalls: allow` 准入，避免整类可用 route 被误拒。需要严格白名单的部署设为 `deny`，此时只放行 `toolCapableProviders`。provider 显式声明 `none` 时始终 fail closed，不受上述任何一项影响。Claude、Cursor、Grok 和 Codex CLI 等 text-only route 因此会在 `followup()`、认证和子进程之前返回可操作的 `/model` 提示；显式 opt-in 的 Codex direct route 声明 `native`，可把 function call 交回同一个 DSH Agent Loop 执行。fresh session 创建本身不执行模型，仍可先持久建立 binding。最终工具为空时不要求能力声明。
+普通消息真正 resume Agent 时，Delivery 先解析并挂载 binding 固定的 preset，再把该 Agent 的最终 scoped tool schemas 原样交给当前 provider/model。工具和 Skills 属于 Agent/preset，模型切换不会改变它们的可见集合，Delivery 也不维护 provider 工具白名单或部署侧能力名单。协议元数据缺失、`native` 和 `bridge` 都会放行；只有 adapter 主动声明 `toolCalls: none` 且最终 scope 非空时，才会在 prompt 发送前因“未实现统一 DSH tool-call 协议”失败关闭。这个检查描述 adapter 的传输实现，不是模型权限或能力分级；实际工具执行仍逐次经过 ToolRuntime、Policy、sandbox、审批、身份与预算检查。fresh session 创建本身不执行模型，仍可先持久建立 binding。
 
 只注册两个模型工具：
 

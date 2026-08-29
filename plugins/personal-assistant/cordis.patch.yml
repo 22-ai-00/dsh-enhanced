@@ -81,5 +81,3 @@
           defaultProposalTtlMs: 900000
           reconcileIntervalMs: 15000
           reconcileLimit: 50
-          toolCapableProviders:
-            - deepseek-official

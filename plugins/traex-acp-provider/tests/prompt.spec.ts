@@ -28,6 +28,84 @@ describe('DSH request serialization', () => {
     expect(prompt).not.toContain('private')
   })
 
+  it('projects nested tool-result images to bounded metadata text without reading image bytes', () => {
+    const options = request()
+    const callId = 'call-image-result' as never
+    const longId = `opaque:${'i'.repeat(10_000)}`
+    const longName = `${'n'.repeat(10_000)}.png`
+    options.messages = [...options.messages, createMessage({
+      role: 'user',
+      source: { kind: 'tool', callId },
+      content: [{
+        type: 'tool-result',
+        toolCallId: callId,
+        content: [
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: 'sha256:tool-image',
+              mediaType: 'image/png',
+              bytes: 2,
+              width: 1,
+              height: 1,
+              name: 'tool.png',
+              data: 'TOP_SECRET_IMAGE_BYTES',
+            },
+          } as never,
+          {
+            type: 'image',
+            attachment: {
+              attachmentId: longId,
+              mediaType: 'image/webp',
+              bytes: 123,
+              width: 640,
+              height: 480,
+              name: longName,
+            },
+          } as never,
+        ],
+      }],
+    })]
+
+    const prompt = buildPrompt(options, 100_000)
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      conversation: Array<{ content: Array<{ content?: Array<{ type: string; text?: string }> }> }>
+    }
+    const projected = payload.conversation.at(-1)!.content[0]!.content!
+
+    expect(projected[0]).toEqual({
+      type: 'text',
+      text: '[DSH image attachment omitted by text-only backend; '
+        + 'attachmentId="sha256:tool-image"; mediaType="image/png"; bytes=2; '
+        + 'width=1; height=1; name="tool.png"]',
+    })
+    expect(projected[1]!.type).toBe('text')
+    expect(projected[1]!.text!.length).toBeLessThanOrEqual(640)
+    expect(projected[1]!.text).toContain('mediaType="image/webp"')
+    expect(projected[1]!.text).toContain('bytes=123; width=640; height=480')
+    expect(projected[1]!.text).toContain('…')
+    expect(prompt).not.toContain('TOP_SECRET_IMAGE_BYTES')
+    expect(prompt).not.toContain('i'.repeat(1_000))
+    expect(prompt).not.toContain('n'.repeat(1_000))
+  })
+
+  it('continues to reject a top-level image on the text-only ACP route', () => {
+    const options = request()
+    options.messages = [createMessage({
+      role: 'user',
+      source: { kind: 'user' },
+      content: [{
+        type: 'image',
+        attachment: {
+          attachmentId: 'sha256:user-image', mediaType: 'image/png', bytes: 1,
+          width: 1, height: 1,
+        },
+      } as never],
+    })]
+
+    expect(() => buildPrompt(options, 100_000)).toThrow(/text-only DSH requests/)
+  })
+
   it('delegates DSH tool schemas and requires an immediate tool-call envelope', () => {
     const options = request()
     options.tools = [{

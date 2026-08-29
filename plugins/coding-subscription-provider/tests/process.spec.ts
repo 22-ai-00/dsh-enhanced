@@ -58,6 +58,105 @@ describe('CLI process bridge', () => {
     expect(parseAssistantText('grok', '{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"k"}}}')).toBe('k')
   })
 
+  it.each([
+    {
+      name: 'a Codex command execution item',
+      provider: 'codex' as const,
+      lines: ['{"type":"item.started","item":{"type":"command_execution","command":"pwd","status":"in_progress"}}\n'],
+    },
+    {
+      name: 'a malformed Codex item lifecycle without a passive item type',
+      provider: 'codex' as const,
+      lines: ['{"type":"item.started","item":{"status":"in_progress"}}\n'],
+    },
+    {
+      name: 'a Claude tool_use assistant block',
+      provider: 'claude' as const,
+      lines: ['{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_1","name":"Read","input":{"file_path":"README.md"}}]}}\n'],
+    },
+    {
+      name: 'a Claude server_tool_use stream block',
+      provider: 'claude' as const,
+      lines: ['{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search"}}}\n'],
+    },
+    {
+      name: 'a Claude input_json_delta',
+      provider: 'claude' as const,
+      lines: ['{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"README.md\\"}"}}}\n'],
+    },
+    {
+      name: 'a Claude tool_progress event',
+      provider: 'claude' as const,
+      lines: ['{"type":"tool_progress","tool_use_id":"toolu_1","tool_name":"Read","elapsed_time_seconds":0.1}\n'],
+    },
+    {
+      name: 'a non-empty Claude native tool catalog',
+      provider: 'claude' as const,
+      lines: ['{"type":"system","subtype":"init","tools":["Read"]}\n'],
+    },
+    {
+      name: 'an official Cursor tool_call event',
+      provider: 'cursor' as const,
+      lines: [
+        '{"type":"system","subtype":"init","apiKeySource":"login"}\n',
+        '{"type":"tool_call","subtype":"started","call_id":"toolu_1","tool_call":{"readToolCall":{"args":{"path":"README.md"}}}}\n',
+      ],
+    },
+    {
+      name: 'a Cursor tool_result event',
+      provider: 'cursor' as const,
+      lines: [
+        '{"type":"system","subtype":"init","apiKeySource":"login"}\n',
+        '{"type":"tool_result","call_id":"toolu_1","result":{"content":"contents"}}\n',
+      ],
+    },
+    {
+      name: 'a Grok headless tool_call event',
+      provider: 'grok' as const,
+      lines: ['{"type":"tool_call","toolCallId":"call-1","toolName":"list_dir","status":"pending"}\n'],
+    },
+    {
+      name: 'a Grok ACP tool_call_update event',
+      provider: 'grok' as const,
+      lines: ['{"method":"session/update","params":{"update":{"sessionUpdate":"tool_call_update","toolCallId":"call-1","status":"completed"}}}\n'],
+    },
+    {
+      name: 'a Grok native tool_use terminal',
+      provider: 'grok' as const,
+      lines: ['{"type":"end","stopReason":"tool_use"}\n'],
+    },
+    {
+      name: 'a non-empty Grok native tool catalog',
+      provider: 'grok' as const,
+      lines: ['{"type":"available_commands","tools":["read_file"],"commands":[]}\n'],
+    },
+  ])('fails closed immediately for $name', async ({ provider, lines }) => {
+    const child = new FakeChild()
+    let context: ProviderFailureContext | undefined
+    const pending = collect(runCliText(
+      buildInvocation(provider, { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), killGraceMs: 100, onSettled: value => { context = value } },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'CLI_PROTOCOL_ERROR',
+      cause: 'protocol',
+      reason: 'NATIVE_TOOL_EVENT',
+    })
+    await Promise.resolve()
+    child.spawn()
+    for (const line of lines) child.stdout.write(line)
+    await Promise.resolve()
+    expect(child.kills).toContain('SIGINT')
+    child.finish(null, 'SIGINT')
+
+    await rejected
+    expect(context).toMatchObject({
+      phase: 'terminal',
+      terminalReason: 'native-tool-event',
+      teardownState: 'completed',
+    })
+  })
+
   it('accepts Grok 1.0.5 native streaming-json success events', async () => {
     const child = new FakeChild()
     let context: ProviderFailureContext | undefined
@@ -478,12 +577,12 @@ describe('CLI process bridge', () => {
     {
       name: 'only unknown JSON events',
       line: '{"type":"future.extension"}\n',
-      reason: 'UNRECOGNIZED_EVENTS',
+      reason: 'UNKNOWN_EVENT',
     },
     {
       name: 'valid JSON with a non-event shape',
       line: '[]\n',
-      reason: 'UNRECOGNIZED_EVENTS',
+      reason: 'UNKNOWN_EVENT',
     },
     {
       name: 'recognized events without assistant text',
@@ -504,6 +603,57 @@ describe('CLI process bridge', () => {
     await Promise.resolve()
     child.stdout.write(line)
     child.finish()
+    await rejected
+  })
+
+  it.each([
+    {
+      provider: 'claude' as const,
+      line: '{"type":"stream_event","event":{"type":"future_active"}}\n',
+    },
+    {
+      provider: 'grok' as const,
+      line: '{"type":"stream_event","event":{"type":"future_active"}}\n',
+    },
+    {
+      provider: 'grok' as const,
+      line: '{"sessionUpdate":"future_active"}\n',
+    },
+    {
+      provider: 'grok' as const,
+      line: '{"method":"session/update","params":{"update":{"sessionUpdate":"future_active"}}}\n',
+    },
+  ])('fails closed for an unknown nested $provider event', async ({ provider, line }) => {
+    const child = new FakeChild()
+    const pending = collect(runCliText(
+      buildInvocation(provider, { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), killGraceMs: 100 },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'CLI_PROTOCOL_ERROR',
+      reason: 'UNKNOWN_EVENT',
+    })
+    await Promise.resolve()
+    child.stdout.write(line)
+    child.finish(null, 'SIGINT')
+    await rejected
+  })
+
+  it('rejects a tool envelope emitted after a successful terminal event', async () => {
+    const child = new FakeChild()
+    const pending = collect(runCliText(
+      buildInvocation('codex', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), killGraceMs: 100 },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'CLI_PROTOCOL_ERROR',
+      reason: 'EVENT_AFTER_TERMINAL',
+    })
+    await Promise.resolve()
+    child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","content":"answer"}}\n')
+    child.stdout.write('{"type":"turn.completed"}\n')
+    child.stdout.write('{"type":"item.completed","item":{"type":"agent_message","content":"{\\"protocol\\":\\"dsh-tool-calls/v1\\",\\"calls\\":[]}"}}\n')
+    child.finish(null, 'SIGINT')
     await rejected
   })
 
@@ -569,9 +719,26 @@ describe('CLI process bridge', () => {
     child.stdout.write('{"type":"system","subtype":"init","apiKeySource":"login"}\n')
     child.stdout.write('{"type":"assistant","message":"answer"}\n')
     child.stdout.write('{"type":"result","subtype":"success","is_error":false,"result":"answer"}\n')
-    child.stdout.write('{"type":"future.extension"}\n')
     child.finish()
     await expect(pending).resolves.toEqual(['answer'])
+  })
+
+  it('fails closed for an unknown event even after recognized text', async () => {
+    const child = new FakeChild()
+    const pending = collect(runCliText(
+      buildInvocation('cursor', { cwd: '/repo', prompt: 'x' }),
+      { spawn: fakeSpawn(child), killGraceMs: 100 },
+    ))
+    const rejected = expect(pending).rejects.toMatchObject({
+      code: 'CLI_PROTOCOL_ERROR',
+      reason: 'UNKNOWN_EVENT',
+    })
+    await Promise.resolve()
+    child.stdout.write('{"type":"system","subtype":"init","apiKeySource":"login"}\n')
+    child.stdout.write('{"type":"assistant","message":"answer"}\n')
+    child.stdout.write('{"type":"future.extension"}\n')
+    child.finish(null, 'SIGINT')
+    await rejected
   })
 
   it.each([
@@ -628,6 +795,10 @@ describe('CLI process bridge', () => {
     { provider: 'cursor' as const, result: '{"type":"result","subtype":"future","is_error":false,"result":"partial"}', reason: 'INVALID_TERMINAL' },
     { provider: 'claude' as const, result: '{"type":"result","subtype":"cancelled","is_error":false,"result":"partial"}', reason: 'REPORTED_FAILURE' },
     { provider: 'cursor' as const, result: '{"type":"result","subtype":"interrupted","is_error":false,"result":"partial"}', reason: 'REPORTED_FAILURE' },
+    { provider: 'grok' as const, result: '{"type":"end","stopReason":"cancelled"}', reason: 'REPORTED_FAILURE' },
+    { provider: 'grok' as const, result: '{"type":"end","stopReason":"max_tokens"}', reason: 'REPORTED_FAILURE' },
+    { provider: 'grok' as const, result: '{"type":"end","stopReason":"max_turn_requests"}', reason: 'REPORTED_FAILURE' },
+    { provider: 'grok' as const, result: '{"type":"end","stopReason":"future_reason"}', reason: 'INVALID_TERMINAL' },
   ])('rejects $provider terminal result unless it is explicitly successful ($reason)', async ({ provider, result, reason }) => {
     const child = new FakeChild()
     const pending = collect(runCliText(

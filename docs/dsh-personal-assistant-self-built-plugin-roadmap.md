@@ -26,7 +26,7 @@
 
 延迟审批的提交闭环已补齐：Policy 增加只读 `getProposal`，Memory、Wiki 与 Automations 各自通过 `reconcileProposals()` 轮询自己待决提案的终态，再用与前台 `decideProposal` 完全相同的事务/写入路径提交。方向仍是「域读取 Policy」，Policy 不回调任何域；pending 永不被当作批准，重复 reconcile 幂等，冲突降级为 `conflicted` 而不丢弃决定。Automations 的该定时器独立于 scheduler，因此 `schedulerEnabled: false` 时批准一个 automation 仍会生效。
 
-无人值守的成本上限也已收紧：不上报 usage 的 provider（本机 CLI 与 ACP 订阅类 route）按全额预留结算，而不是按 0 结算，否则周期预算的 `spent_amount` 永远为 0、永不触顶。`coding-subscription-provider` 的 Claude、Cursor、Grok 与默认 Codex CLI route 在收到非空 `tools` 时会以 `tool_calls_unsupported` 明确失败，不再静默丢弃工具；显式 opt-in 的 Codex direct route 与 `traex-acp-provider` 则能把原生工具调用交回 DSH Agent Loop / Policy 执行。
+无人值守的成本上限也已收紧：不上报 usage 的 provider（本机 CLI 与 ACP 订阅类 route）按全额预留结算，而不是按 0 结算，否则周期预算的 `spent_amount` 永远为 0、永不触顶。工具集现由 Agent/preset 唯一决定，不再对 provider/model 做准入分类；本机 CLI、ACP、直连和网关 route 都把工具调用意图交回同一 DSH Agent Loop / Policy 执行，provider 本身不执行或授权工具。
 
 当前实现的运行边界也需要明确：Lark 默认关闭；Policy 默认拒绝，需要部署者显式放行；Lark 官方长连接没有可验证的 replay cursor/backfill，插件只报告 reconnect gap；provider 接受后断线而无法对账的发送保持 `unknown_after_send`，不会盲目重发；只有经授权且目标模型声明图片能力的光栅图片会受限下载到 AttachmentStore，其余附件仍只保存有界元数据；持久服务仍需要单机 supervisor，macOS onboarding 已能自动安装 launchd，Linux/容器仍需 systemd/Docker 等部署层。
 

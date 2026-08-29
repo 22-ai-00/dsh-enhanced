@@ -37,6 +37,41 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 const FIXTURES_ROOT = join(HERE, '..', 'tests', 'fixtures')
 
 const PROVIDERS = ['codex', 'claude', 'cursor', 'grok']
+const CODEX_DISABLED_NATIVE_FEATURES = [
+  'shell_tool', 'shell_zsh_fork', 'unified_exec_zsh_fork', 'shell_snapshot',
+  'deferred_executor', 'js_repl', 'js_repl_tools_only', 'view_image', 'hooks',
+  'code_mode', 'code_mode_buffered_exec', 'code_mode_host', 'code_mode_only',
+  'web_search_request', 'web_search_cached', 'search_tool',
+  'memories', 'external_agent_memory_import',
+  'apply_patch_freeform', 'apply_patch_streaming_events', 'exec_permission_approvals', 'request_rule',
+  'multi_agent', 'multi_agent_v2', 'multi_agent_mode', 'collaboration_modes',
+  'apps', 'enable_mcp_apps', 'tool_suggest', 'recommended_plugins', 'plugins',
+  'mcp_2026_07_28', 'apps_mcp_path_override', 'tool_search', 'deferred_tool_world_state',
+  'non_prefixed_mcp_tool_names', 'unavailable_dummy_tools',
+  'executor_capability_discovery', 'plugin_hooks', 'in_app_browser',
+  'browser_use', 'browser_use_full_cdp_access', 'browser_use_external', 'computer_use',
+  'remote_plugin', 'plugin_sharing', 'image_generation',
+  'skill_mcp_dependency_install', 'skill_search', 'skill_env_var_dependency_prompt',
+  'standalone_web_search', 'default_mode_request_user_input', 'request_permissions_tool',
+  'token_budget', 'current_time_reminder', 'terminal_visualization_instructions',
+  'guardian_approval', 'guardianv2', 'goals', 'tool_call_mcp_elicitation', 'auth_elicitation',
+  'artifact', 'workspace_dependencies',
+]
+const CODEX_NATIVE_BOUNDARY_CONFIG_OVERRIDES = [
+  'project_doc_max_bytes=0',
+  'skills.include_instructions=false',
+  'skills.bundled.enabled=false',
+  'orchestrator.skills.enabled=false',
+  'orchestrator.mcp.enabled=false',
+  'include_apps_instructions=false',
+  'include_permissions_instructions=false',
+  'include_environment_context=false',
+  'include_collaboration_mode_instructions=false',
+  'tools.update_plan.enabled=false',
+  'tools.experimental_request_user_input.enabled=false',
+  'web_search="disabled"',
+  'agents.enabled=false',
+]
 const SCENARIOS = ['success', 'partial-then-success', 'terminal-failure', 'malformed', 'auth-source', 'usage']
 
 const HELP = `
@@ -107,7 +142,13 @@ function parseArgs(argv) {
 function buildArgv(provider, prompt) {
   switch (provider) {
     case 'codex':
-      return { command: 'codex', args: ['exec', '--json', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only', prompt] }
+      return {
+        command: 'codex',
+        args: ['exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+          ...CODEX_DISABLED_NATIVE_FEATURES.flatMap(feature => ['--disable', feature]),
+          ...CODEX_NATIVE_BOUNDARY_CONFIG_OVERRIDES.flatMap(value => ['--config', value]),
+          '--sandbox', 'read-only', prompt],
+      }
     case 'claude':
       return {
         command: 'claude',
@@ -115,12 +156,13 @@ function buildArgv(provider, prompt) {
           '--no-session-persistence', '--safe-mode', '--permission-mode', 'dontAsk', '--tools', '', prompt],
       }
     case 'cursor':
-      return { command: 'cursor-agent', args: ['--print', '--output-format', 'stream-json', prompt] }
+      return { command: 'cursor-agent', args: ['--print', '--output-format', 'stream-json', '--mode=ask', prompt] }
     case 'grok':
       return {
         command: 'grok',
         args: ['-p', prompt, '--output-format', 'streaming-json', '--permission-mode', 'dontAsk',
-          '--no-auto-update', '--no-memory', '--no-subagents', '--disable-web-search'],
+          '--no-auto-update', '--no-memory', '--no-subagents', '--disable-web-search', '--verbatim',
+          '--tools', 'search_tool', '--disallowed-tools', 'search_tool,use_tool'],
       }
     default:
       throw new Error(`unknown provider: ${provider}`)

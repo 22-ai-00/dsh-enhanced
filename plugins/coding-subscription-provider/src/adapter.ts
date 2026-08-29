@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import {
+  CallId,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   LlmAdapter,
@@ -32,7 +34,7 @@ import {
   type CodexProviderConfig,
   type CodingSubscriptionProviderConfig,
 } from './config.js'
-import { buildPrompt } from './prompt.js'
+import { buildPrompt, parseDelegatedToolCalls } from './prompt.js'
 import { runCliText, type ProviderFailureContext, type PromptSubmissionState, type RunCliTextOptions } from './process.js'
 import { buildInvocation, type CliInvocation, type ProviderId } from './providers.js'
 import { resolveTrustedSessionCwd, TrustedSessionCwdError, type LiveSessionLookup } from './session-cwd.js'
@@ -62,7 +64,7 @@ interface RouteDefinition {
 export const routeDefinitions: readonly RouteDefinition[] = [
   { route: 'codex-subscription', cli: 'codex', name: 'Codex Subscription (local CLI)', maturity: 'stable' },
   { route: 'claude-subscription', cli: 'claude', name: 'Claude Subscription (local Claude Code)', maturity: 'experimental' },
-  { route: 'cursor-subscription', cli: 'cursor', name: 'Cursor Subscription (local Agent CLI)', maturity: 'beta' },
+  { route: 'cursor-subscription', cli: 'cursor', name: 'Cursor Subscription (local Agent CLI)', maturity: 'experimental' },
   { route: 'grok-subscription', cli: 'grok', name: 'Grok Subscription (local Grok Build)', maturity: 'beta' },
 ]
 
@@ -271,26 +273,6 @@ function validHttpStatus(error: unknown): number | undefined {
   return typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599
     ? status
     : undefined
-}
-
-/** Stable code for a request that needs tool calls this text-only route cannot make. */
-export const TOOL_CALLS_UNSUPPORTED_CODE = 'tool_calls_unsupported'
-
-/**
- * Refuse a request that supplies tool schemas.
- *
- * These routes drive local coding CLIs that only return assistant text; they
- * cannot emit a `tool-call` block. Silently dropping `options.tools` would let an
- * unattended automation appear to run while never invoking its allowlisted tools,
- * so the request fails loudly and names the working alternative instead.
- */
-function toolCallsUnsupported(definition: RouteDefinition): LlmError {
-  return new LlmError(
-    `${definition.name} is a text-only route and cannot perform tool calls. `
-    + 'Use a provider that emits tool calls (for example @dsh-enhanced/traex-acp-provider) '
-    + 'for agent or automation work that requires tools.',
-    TOOL_CALLS_UNSUPPORTED_CODE,
-  )
 }
 
 /** Report a local prompt bound through DSH's canonical overflow path so compaction can retry it. */
@@ -679,12 +661,6 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
     try {
       if (signal.aborted) throw abortReason(signal)
       const directCodex = definition.cli === 'codex' && this.config.codex.transport === 'direct-responses'
-      // Refuse tool work before any subprocess starts: this route cannot emit a
-      // tool call, and a silent drop would look like a successful empty run.
-      if (!directCodex && options.tools !== undefined && options.tools.length > 0) {
-        outcome = 'preflight'
-        throw toolCallsUnsupported(definition)
-      }
       let cwd: string
       try {
         cwd = this.trustedCwd(options)
@@ -808,7 +784,8 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
       // reports it via onSettled; if it never reports (early return mid-stream) we say unknown.
       phase = 'stream'
       let text = ''
-      yield { type: 'block-start', index: 0, blockType: 'text' }
+      const bufferForToolDelegation = (options.tools?.length ?? 0) > 0
+      if (!bufferForToolDelegation) yield { type: 'block-start', index: 0, blockType: 'text' }
       try {
         // Calling an injected runner may itself perform work or throw synchronously, so
         // stop claiming not-submitted immediately before control crosses that boundary.
@@ -818,15 +795,67 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         for await (const delta of deltas) {
           if (delta.length === 0) continue
           text += delta
-          assistantTextForwarded = true
-          yield { type: 'text-delta', index: 0, text: delta }
+          if (!bufferForToolDelegation) {
+            assistantTextForwarded = true
+            yield { type: 'text-delta', index: 0, text: delta }
+          }
         }
       } catch (error: unknown) {
         outcome = outcomeFor(error)
         throw cliFailure(definition, profile.command, error)
       }
-      outcome = 'ok'
+
+      const ensureProjectionActive = (): void => {
+        if (!signal.aborted) return
+        outcome = 'aborted'
+        throw abortReason(signal)
+      }
+      // The child may settle successfully in the same turn that the Agent is
+      // cancelled. Never parse or project its buffered response after that
+      // cancellation has won the race.
+      ensureProjectionActive()
+
+      if (bufferForToolDelegation) {
+        let calls: ReturnType<typeof parseDelegatedToolCalls>
+        try {
+          calls = parseDelegatedToolCalls(text, options.tools ?? [])
+        } catch (error: unknown) {
+          outcome = 'protocol'
+          throw cliFailure(definition, profile.command, error)
+        }
+        ensureProjectionActive()
+        if (calls !== undefined) {
+          for (const [index, call] of calls.entries()) {
+            ensureProjectionActive()
+            const id = CallId(`${definition.cli}-${randomUUID()}`)
+            yield { type: 'block-start', index, blockType: 'tool-call' }
+            ensureProjectionActive()
+            yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments }
+            ensureProjectionActive()
+            yield {
+              type: 'block-end',
+              index,
+              block: { type: 'tool-call', id, name: call.name, arguments: call.arguments },
+            }
+          }
+          ensureProjectionActive()
+          outcome = 'ok'
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+
+        ensureProjectionActive()
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        ensureProjectionActive()
+        assistantTextForwarded = true
+        yield { type: 'text-delta', index: 0, text }
+      } else {
+        outcome = 'ok'
+      }
+      ensureProjectionActive()
       yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      ensureProjectionActive()
+      outcome = 'ok'
       yield { type: 'finish', reason: { kind: 'stop' } }
     } finally {
       settle()

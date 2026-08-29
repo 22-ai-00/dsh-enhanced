@@ -2,6 +2,11 @@ import type { ContentBlock, GenerateOptions, Message, ToolSchema } from '@deepse
 
 export const DSH_TOOL_CALL_PROTOCOL = 'dsh-tool-calls/v1'
 
+const MAX_TOOL_RESULT_IMAGE_DESCRIPTION_CHARS = 640
+const MAX_ATTACHMENT_ID_DESCRIPTION_CHARS = 192
+const MAX_ATTACHMENT_MEDIA_TYPE_DESCRIPTION_CHARS = 48
+const MAX_ATTACHMENT_NAME_DESCRIPTION_CHARS = 128
+
 export interface DelegatedToolCall {
   readonly name: string
   readonly arguments: string
@@ -23,6 +28,56 @@ interface TranscriptMessage {
   content: TranscriptBlock[]
 }
 
+function boundedDescription(value: unknown, maxChars: number): string {
+  const input = String(value)
+  let output = ''
+  let chars = 0
+  for (const character of input) {
+    if (chars >= maxChars - 1) return `${output}…`
+    output += character
+    chars += 1
+  }
+  return output
+}
+
+function boundedQuotedDescription(value: unknown, maxEncodedChars: number): string {
+  const input = String(value)
+  let output = ''
+  for (const character of input) {
+    // Encode controls and delimiters exactly as JSON would, without first
+    // materializing an unbounded copy of an attacker-controlled metadata field.
+    const encoded = JSON.stringify(character).slice(1, -1)
+    if (output.length + encoded.length > maxEncodedChars) return `"${output}…"`
+    output += encoded
+  }
+  return `"${output}"`
+}
+
+function toolResultImageDescription(block: Extract<ContentBlock, { type: 'image' }>): string {
+  const attachment = block.attachment
+  const fields = [
+    `attachmentId=${boundedQuotedDescription(attachment.attachmentId, MAX_ATTACHMENT_ID_DESCRIPTION_CHARS)}`,
+    `mediaType=${boundedQuotedDescription(attachment.mediaType, MAX_ATTACHMENT_MEDIA_TYPE_DESCRIPTION_CHARS)}`,
+    `bytes=${boundedDescription(attachment.bytes, 32)}`,
+    `width=${boundedDescription(attachment.width, 32)}`,
+    `height=${boundedDescription(attachment.height, 32)}`,
+    ...(attachment.name === undefined
+      ? []
+      : [`name=${boundedQuotedDescription(attachment.name, MAX_ATTACHMENT_NAME_DESCRIPTION_CHARS)}`]),
+  ]
+  return boundedDescription(
+    `[DSH image attachment omitted by text-only backend; ${fields.join('; ')}]`,
+    MAX_TOOL_RESULT_IMAGE_DESCRIPTION_CHARS,
+  )
+}
+
+function serializeToolResultContent(block: ContentBlock): TranscriptBlock {
+  if (block.type === 'image') {
+    return { type: 'text', text: toolResultImageDescription(block) }
+  }
+  return serializeBlock(block)
+}
+
 function serializeBlock(block: ContentBlock): TranscriptBlock {
   switch (block.type) {
     case 'text':
@@ -36,7 +91,7 @@ function serializeBlock(block: ContentBlock): TranscriptBlock {
         type: 'tool-result',
         toolCallId: block.toolCallId,
         ...(block.isError === undefined ? {} : { isError: block.isError }),
-        content: block.content.map(serializeBlock),
+        content: block.content.map(serializeToolResultContent),
       }
     case 'image':
       throw new Error('TraeX ACP provider currently accepts text-only DSH requests')

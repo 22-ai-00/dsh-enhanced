@@ -83,8 +83,6 @@ interface DshDeliveryRuntimeOptions {
   policyRef: string
   provider: string
   model: string
-  toolCapableProviders: ReadonlySet<string>
-  unknownRouteToolCalls: 'allow' | 'deny'
   maxOutputTokens: number
   permissionPickerTtlMs: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
@@ -186,14 +184,14 @@ class ApprovalReviewerReaderUnavailableError extends Error {
   }
 }
 
-class ToolCapabilityAdmissionError extends Error {
+class AdapterToolCallProtocolError extends Error {
   constructor(
     readonly provider: string,
     readonly model: string,
     readonly presetId: string,
   ) {
-    super(`assistant-delivery: ${provider}/${model} cannot execute the tools mounted by preset ${presetId}`)
-    this.name = 'ToolCapabilityAdmissionError'
+    super(`assistant-delivery: adapter ${provider}/${model} declares no DSH tool-call protocol`)
+    this.name = 'AdapterToolCallProtocolError'
   }
 }
 
@@ -207,36 +205,24 @@ class ImageCapabilityAdmissionError extends Error {
   }
 }
 
-function requireToolCapability(
+function requireAdapterToolCallProtocol(
   llm: LlmRuntime,
   provider: string,
   model: string,
   presetId: string,
   toolCount: number,
-  declaredToolCapableProviders: ReadonlySet<string>,
-  unknownRouteToolCalls: 'allow' | 'deny',
 ): void {
   if (toolCount === 0) return
-  const capability = resolveLlmRouteCapability(llm, provider, model)
-  if (capability?.toolCalls === 'native' || capability?.toolCalls === 'bridge') return
-  // A provider-owned declaration is authoritative in both directions: an
-  // explicit `none` still fails closed even when the route is allowlisted or
-  // unknown routes are admitted.
-  if (capability?.toolCalls === 'none') throw new ToolCapabilityAdmissionError(provider, model, presetId)
-  // Only routes with no declaration at all reach the host policy. The DSH
-  // `generate` contract accepts `tools` for every adapter, so tool calling is
-  // the adapter baseline rather than an opt-in: gateway and built-in providers
-  // (pi-ai and friends) never publish registry metadata, and denying them by
-  // default made every such route unusable behind a tool-mounting preset.
-  if (declaredToolCapableProviders.has(provider)) return
-  if (unknownRouteToolCalls === 'allow') return
-  throw new ToolCapabilityAdmissionError(provider, model, presetId)
+  if (resolveLlmRouteCapability(llm, provider, model)?.toolCalls === 'none') {
+    throw new AdapterToolCallProtocolError(provider, model, presetId)
+  }
 }
 
-function toolCapabilityReply(error: ToolCapabilityAdmissionError): ModelCommandReply {
+function adapterToolCallProtocolReply(error: AdapterToolCallProtocolError): ModelCommandReply {
   return {
-    text: `当前模型 ${error.provider}/${error.model} 已声明不支持工具调用，无法执行 preset “${error.presetId}” 暴露的工具。`
-      + '请发送 /model 切换到支持工具调用的 provider，或改用不挂载工具的 preset。',
+    text: `当前路由 ${error.provider}/${error.model} 的 adapter 明确声明未实现统一 DSH tool-call 协议，`
+      + `因此无法承载 preset “${error.presetId}” 已挂载的工具。`
+      + '这不是模型权限差异；请升级或修复该 provider adapter，使其实现 native/bridge 协议。',
     format: 'plain',
   }
 }
@@ -2293,14 +2279,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           )
           const llm = this.ctx.get('llm')
           if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
-          requireToolCapability(
+          requireAdapterToolCallProtocol(
             llm,
             selected.provider,
             selected.model,
             presetId,
             agentCtx.tools.schemas(agentCtx.agent).length,
-            this.options.toolCapableProviders,
-            this.options.unknownRouteToolCalls,
           )
         } })
       const agent = handle.agent
@@ -2394,12 +2378,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           return { outcome: 'not-processed', failureCode: 'image-capability-notice-failed', retryable: true }
         }
       }
-      if (error instanceof ToolCapabilityAdmissionError) {
+      if (error instanceof AdapterToolCallProtocolError) {
         try {
-          this.options.replyCommand(binding, envelope.eventId, toolCapabilityReply(error))
+          this.options.replyCommand(binding, envelope.eventId, adapterToolCallProtocolReply(error))
           return { outcome: 'processed' }
         } catch {
-          return { outcome: 'not-processed', failureCode: 'tool-capability-notice-failed', retryable: true }
+          return { outcome: 'not-processed', failureCode: 'adapter-tool-protocol-notice-failed', retryable: true }
         }
       }
       this.ctx.logger.warn(

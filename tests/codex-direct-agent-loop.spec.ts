@@ -1,7 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import {
   AssistantPolicyService,
@@ -231,10 +230,6 @@ describe('Codex direct private Responses Agent Loop', () => {
         discoverCodexModels: forbiddenCliCall,
       })
       ctx.llm.registerAdapter(['codex-subscription'], adapter)
-      registerLlmRouteCapability(ctx.llm, {
-        provider: 'codex-subscription',
-        toolCalls: 'native',
-      })
       await ctx.plugin(AgentLoop, { agents: [] })
 
       const runner = new DshAutomationRunner(ctx, ctx.assistantPolicy, {

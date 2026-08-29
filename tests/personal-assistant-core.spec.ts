@@ -108,7 +108,6 @@ describe('four-core personal assistant composition', () => {
         misfireKind: 'latest', misfireLimit: 1, overlap: 'skip', retrySafety: 'never', maxRetries: 0,
         budgetId: 'core-automation-runs', budgetAmount: 1,
       },
-      toolCapableProviders: ['mock'],
     })
     const adapter = new CoreAdapter()
     ctx.llm.registerAdapter(['mock'], adapter)

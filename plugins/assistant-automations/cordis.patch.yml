@@ -32,5 +32,3 @@
           maxRetries: 0
           budgetId: assistant-automations-proposals
           budgetAmount: 1
-        toolCapableProviders:
-          - deepseek-official

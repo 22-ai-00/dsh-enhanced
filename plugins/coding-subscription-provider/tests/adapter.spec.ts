@@ -10,6 +10,7 @@ import LlmRuntime, {
   markAgentLoopRequest,
   ReasoningEffortId,
   type GenerateOptions,
+  type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
 import { realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
@@ -19,7 +20,6 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   CodingSubscriptionAdapter as RawCodingSubscriptionAdapter,
   redactDiagnostic,
-  TOOL_CALLS_UNSUPPORTED_CODE,
   type AdapterDependencies,
 } from '../src/adapter.ts'
 import { SubscriptionAuthError } from '../src/auth.ts'
@@ -811,27 +811,192 @@ describe('coding subscription LLM adapter', () => {
     expect(requestResponses).not.toHaveBeenCalled()
   })
 
-  it('refuses a tool-calling request before spawning any process', async () => {
-    // These routes only return assistant text. Dropping `tools` silently would let
-    // an unattended automation look like it ran while never invoking a tool, so the
-    // request has to fail loudly and name a route that can perform tool calls.
-    const runText = vi.fn(() => (async function* () { yield 'never' })())
+  it.each([
+    ['codex-subscription', 'codex'],
+    ['claude-subscription', 'claude'],
+    ['cursor-subscription', 'cursor'],
+    ['grok-subscription', 'grok'],
+  ] as const)('bridges one exact DSH tool call through the %s CLI route', async (provider, idPrefix) => {
+    const runText = vi.fn((_invocation: CliInvocation) => (async function* () {
+      yield '{"protocol":"dsh-tool-calls/v1","calls":['
+      yield '{"name":"allowed_tool","arguments":{"value":"from-cli"}}]}'
+    })())
     const verifyAuth = vi.fn(async () => {})
     const adapter = new CodingSubscriptionAdapter(Config(), { runText, verifyAuth })
     const withTools: GenerateOptions = {
-      ...request(),
+      ...providerRequest(provider),
       tools: [{
         name: 'allowed_tool',
         description: 'A tool the caller expects to be callable.',
-        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        parameters: {
+          type: 'object',
+          properties: { value: { type: 'string' } },
+          required: ['value'],
+          additionalProperties: false,
+        },
       }],
     }
 
-    await expect(adapter.stream(withTools)[Symbol.asyncIterator]().next()).rejects.toMatchObject({
-      failure: { code: TOOL_CALLS_UNSUPPORTED_CODE },
+    const chunks = []
+    for await (const chunk of adapter.stream(withTools)) chunks.push(chunk)
+
+    const callDelta = chunks.find(chunk => chunk.type === 'tool-call-delta')
+    expect(callDelta).toMatchObject({
+      type: 'tool-call-delta',
+      index: 0,
+      name: 'allowed_tool',
+      argumentsDelta: '{"value":"from-cli"}',
     })
-    expect(runText).not.toHaveBeenCalled()
-    expect(verifyAuth).not.toHaveBeenCalled()
+    if (callDelta?.type !== 'tool-call-delta') throw new Error('missing bridged tool call')
+    expect(String(callDelta.id)).toMatch(new RegExp(`^${idPrefix}-[0-9a-f-]{36}$`, 'u'))
+    expect(chunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'tool-call' },
+      callDelta,
+      {
+        type: 'block-end',
+        index: 0,
+        block: {
+          type: 'tool-call',
+          id: callDelta.id,
+          name: 'allowed_tool',
+          arguments: '{"value":"from-cli"}',
+        },
+      },
+      { type: 'finish', reason: { kind: 'tool-calls' } },
+    ])
+    expect(verifyAuth).toHaveBeenCalledOnce()
+    expect(runText).toHaveBeenCalledOnce()
+    expect(runText.mock.calls[0]?.[0].args.join(' ')).toContain('dsh-tool-calls/v1')
+  })
+
+  it('buffers an ordinary final response when tools are present so bridge JSON never leaks', async () => {
+    const runText = vi.fn(() => (async function* () {
+      yield 'task '
+      yield 'complete'
+    })())
+    const adapter = new CodingSubscriptionAdapter(Config(), { runText, verifyAuth: async () => {} })
+    const withTools: GenerateOptions = {
+      ...request(),
+      tools: [{ name: 'allowed_tool', description: 'Allowed.', parameters: { type: 'object' } }],
+    }
+
+    const chunks = []
+    for await (const chunk of adapter.stream(withTools)) chunks.push(chunk)
+
+    expect(chunks).toEqual([
+      { type: 'block-start', index: 0, blockType: 'text' },
+      { type: 'text-delta', index: 0, text: 'task complete' },
+      { type: 'block-end', index: 0, block: { type: 'text', text: 'task complete' } },
+      { type: 'finish', reason: { kind: 'stop' } },
+    ])
+  })
+
+  it('does not project a buffered tool call when cancellation wins as the CLI settles', async () => {
+    const controller = new AbortController()
+    const reason = new Error('cancelled before bridge projection', { cause: 'abort' })
+    const settled: Array<{ outcome?: string; assistantTextForwarded?: boolean }> = []
+    const runText = vi.fn(() => (async function* () {
+      yield '{"protocol":"dsh-tool-calls/v1","calls":[{"name":"allowed_tool","arguments":{}}]}'
+      controller.abort(reason)
+    })())
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText,
+      verifyAuth: async () => {},
+      onSettled: context => { settled.push(context) },
+    })
+    const withTools: GenerateOptions = {
+      ...request(),
+      signal: controller.signal,
+      tools: [{ name: 'allowed_tool', description: 'Allowed.', parameters: { type: 'object' } }],
+    }
+    const chunks: StreamChunk[] = []
+
+    await expect((async () => {
+      for await (const chunk of adapter.stream(withTools)) chunks.push(chunk)
+    })()).rejects.toBe(reason)
+
+    expect(chunks).toEqual([])
+    expect(settled).toEqual([
+      expect.objectContaining({ outcome: 'aborted', assistantTextForwarded: false }),
+    ])
+  })
+
+  it('stops bridge projection at the next chunk boundary after cancellation', async () => {
+    const controller = new AbortController()
+    const reason = new Error('cancelled during bridge projection', { cause: 'abort' })
+    const settled: Array<{ outcome?: string; assistantTextForwarded?: boolean }> = []
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText: () => (async function* () {
+        yield '{"protocol":"dsh-tool-calls/v1","calls":[{"name":"allowed_tool","arguments":{}}]}'
+      })(),
+      verifyAuth: async () => {},
+      onSettled: context => { settled.push(context) },
+    })
+    const iterator = adapter.stream({
+      ...request(),
+      signal: controller.signal,
+      tools: [{ name: 'allowed_tool', description: 'Allowed.', parameters: { type: 'object' } }],
+    })[Symbol.asyncIterator]()
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'block-start', index: 0, blockType: 'tool-call' },
+    })
+    controller.abort(reason)
+    await expect(iterator.next()).rejects.toBe(reason)
+
+    expect(settled).toEqual([
+      expect.objectContaining({ outcome: 'aborted', assistantTextForwarded: false }),
+    ])
+  })
+
+  it('does not report a buffered tool response as successful when the consumer stops mid-projection', async () => {
+    const settled: Array<{ outcome?: string; assistantTextForwarded?: boolean }> = []
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText: () => (async function* () {
+        yield '{"protocol":"dsh-tool-calls/v1","calls":[{"name":"allowed_tool","arguments":{}}]}'
+      })(),
+      verifyAuth: async () => {},
+      onSettled: context => { settled.push(context) },
+    })
+    const iterator = adapter.stream({
+      ...request(),
+      tools: [{ name: 'allowed_tool', description: 'Allowed.', parameters: { type: 'object' } }],
+    })[Symbol.asyncIterator]()
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: { type: 'block-start', index: 0, blockType: 'tool-call' },
+    })
+    await iterator.return?.()
+
+    expect(settled).toEqual([
+      expect.objectContaining({ outcome: 'aborted', assistantTextForwarded: false }),
+    ])
+  })
+
+  it('fails a malformed or unauthorized DSH envelope without forwarding its text', async () => {
+    const settled: Array<{ outcome?: string; assistantTextForwarded?: boolean }> = []
+    const runText = vi.fn(() => (async function* () {
+      yield 'progress\n{"protocol":"dsh-tool-calls/v1","calls":['
+      yield '{"name":"forbidden_tool","arguments":{}}]}'
+    })())
+    const adapter = new CodingSubscriptionAdapter(Config(), {
+      runText,
+      verifyAuth: async () => {},
+      onSettled: context => { settled.push(context) },
+    })
+    const withTools: GenerateOptions = {
+      ...request(),
+      tools: [{ name: 'allowed_tool', description: 'Allowed.', parameters: { type: 'object' } }],
+    }
+
+    await expect((async () => {
+      for await (const _chunk of adapter.stream(withTools)) { /* drain */ }
+    })()).rejects.toMatchObject({ failure: { code: 'CLI_PROTOCOL_ERROR' } })
+    expect(settled).toEqual([
+      expect.objectContaining({ outcome: 'protocol', assistantTextForwarded: false }),
+    ])
   })
 
   it('uses the opt-in Codex direct transport for image/tool capable requests without invoking CLI seams', async () => {

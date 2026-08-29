@@ -1,17 +1,73 @@
 import { describe, expect, it } from 'vitest'
-import { buildInvocation, providerPresets } from '../src/providers.ts'
+import {
+  CODEX_DISABLED_NATIVE_FEATURES,
+  CODEX_NATIVE_BOUNDARY_CONFIG_OVERRIDES,
+  buildInvocation,
+  providerPresets,
+} from '../src/providers.ts'
+
+const codexDisabledNativeFeatureArgs = CODEX_DISABLED_NATIVE_FEATURES
+  .flatMap(feature => ['--disable', feature])
+const codexNativeBoundaryConfigArgs = CODEX_NATIVE_BOUNDARY_CONFIG_OVERRIDES
+  .flatMap(value => ['--config', value])
 
 describe('provider presets', () => {
-  it('uses fixed, credential-free Codex argv and a read-only sandbox', () => {
+  it('uses fixed, credential-free Codex argv with native capabilities disabled and a read-only sandbox', () => {
     expect(buildInvocation('codex', { cwd: '/repo', prompt: 'review' })).toMatchObject({
       command: 'codex', cwd: '/repo', shell: false,
-      args: ['exec', '--json', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only', 'review'],
+      args: [
+        'exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+        ...codexDisabledNativeFeatureArgs,
+        ...codexNativeBoundaryConfigArgs,
+        '--sandbox', 'read-only', 'review',
+      ],
     })
   })
 
-  it('makes Claude text-only, prints Cursor output, and does not force Cursor', () => {
+  it('pins every Codex native executor and skill-injection feature once', () => {
+    expect(CODEX_DISABLED_NATIVE_FEATURES).toEqual(expect.arrayContaining([
+      'shell_tool', 'shell_snapshot', 'view_image', 'hooks',
+      'js_repl', 'deferred_executor',
+      'code_mode', 'code_mode_buffered_exec', 'code_mode_host', 'code_mode_only',
+      'web_search_request', 'web_search_cached', 'search_tool',
+      'memories', 'apply_patch_freeform',
+      'multi_agent', 'multi_agent_v2', 'collaboration_modes',
+      'apps', 'enable_mcp_apps', 'tool_suggest', 'recommended_plugins', 'plugins',
+      'executor_capability_discovery', 'remote_plugin', 'plugin_sharing',
+      'tool_search', 'in_app_browser',
+      'browser_use', 'browser_use_full_cdp_access', 'browser_use_external',
+      'computer_use', 'image_generation',
+      'skill_mcp_dependency_install', 'skill_search',
+      'standalone_web_search', 'request_permissions_tool', 'current_time_reminder',
+      'goals', 'tool_call_mcp_elicitation', 'auth_elicitation',
+      'artifact', 'workspace_dependencies',
+    ]))
+    expect(new Set(CODEX_DISABLED_NATIVE_FEATURES).size).toBe(CODEX_DISABLED_NATIVE_FEATURES.length)
+  })
+
+  it('suppresses Codex project, skill, orchestrator, and utility-tool injection', () => {
+    expect(CODEX_NATIVE_BOUNDARY_CONFIG_OVERRIDES).toEqual([
+      'project_doc_max_bytes=0',
+      'skills.include_instructions=false',
+      'skills.bundled.enabled=false',
+      'orchestrator.skills.enabled=false',
+      'orchestrator.mcp.enabled=false',
+      'include_apps_instructions=false',
+      'include_permissions_instructions=false',
+      'include_environment_context=false',
+      'include_collaboration_mode_instructions=false',
+      'tools.update_plan.enabled=false',
+      'tools.experimental_request_user_input.enabled=false',
+      'web_search="disabled"',
+      'agents.enabled=false',
+    ])
+  })
+
+  it('disables Claude tools and pins Cursor to ask mode without forcing it', () => {
     expect(providerPresets.claude.args).toEqual(expect.arrayContaining(['--permission-mode', 'dontAsk', '--tools', '', '--include-partial-messages', '--no-session-persistence', '--safe-mode']))
-    expect(providerPresets.cursor.args).toContain('--print')
+    expect(providerPresets.cursor.args).toEqual([
+      '--print', '--output-format', 'stream-json', '--mode=ask',
+    ])
     expect(providerPresets.cursor.args.join(' ')).not.toContain('force')
   })
 
@@ -40,7 +96,10 @@ describe('provider presets', () => {
     } as never)
 
     expect(invocation.args).toEqual([
-      'exec', '--json', '--ephemeral', '--ignore-user-config', '--sandbox', 'read-only',
+      'exec', '--json', '--ephemeral', '--ignore-user-config', '--ignore-rules',
+      ...codexDisabledNativeFeatureArgs,
+      ...codexNativeBoundaryConfigArgs,
+      '--sandbox', 'read-only',
       '--model', 'gpt-5.6-sol',
       '--config', 'model_reasoning_effort="xhigh"',
       'hi',

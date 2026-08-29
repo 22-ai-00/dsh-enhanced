@@ -58,7 +58,7 @@ export function apply(ctx: Context, input?: CodingSubscriptionProviderConfig): v
         provider,
         toolCalls: provider === 'codex-subscription' && config.codex.transport === 'direct-responses'
           ? 'native'
-          : 'none',
+          : 'bridge',
       }))
     }
     ctx.llm.registerAdapter(routes, adapter)

@@ -39,7 +39,6 @@ function effectiveConfig(input: {
       databasePath: ${input.root}/automations.sqlite
       runsPath: ${input.root}/runs
       schedulerEnabled: false
-      toolCapableProviders: [deepseek-official]
 - id: dsh-enhanced-assistant-delivery
   config:
     databasePath: ${input.deliveryPath}
@@ -49,7 +48,6 @@ function effectiveConfig(input: {
     defaultAgentPreset: standard
     agentProvider: deepseek-official
     agentModel: default
-    toolCapableProviders: [deepseek-official]
 - id: dsh-enhanced-lark-channel
   config: { enabled: true, account: primary, tenant: personal }
 - id: dsh-enhanced-traex-acp-provider

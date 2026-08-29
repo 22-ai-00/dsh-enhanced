@@ -141,23 +141,6 @@ function removeManagedRules(values: YAMLSeq): void {
   }
 }
 
-function appendUniqueString(values: YAMLMap, key: string, value: string, label: string): void {
-  const current = values.get(key, true) as Node | undefined
-  if (current === undefined) {
-    values.set(key, [value])
-    return
-  }
-  const sequence = asSeq(current, label)
-  const entries = sequence.items.map((item, index) => {
-    const parsed = (item as Node | null)?.toJSON()
-    if (typeof parsed !== 'string' || parsed.trim() === '') {
-      throw new Error(`supervised-growth setup: ${label}[${index}] must be a non-empty string`)
-    }
-    return parsed
-  })
-  if (!entries.includes(value)) sequence.add(value)
-}
-
 function dshWorkspace(value: unknown, dshHome: string): string {
   const expression = /^dshHomePath\((['"])assistant-workspace\1\)$/u
   if (typeof value === 'string' && expression.test(value)) {
@@ -305,11 +288,13 @@ export function configureSupervisedGrowthProfilePatch(input: SupervisedGrowthPro
   const principal = principalId(input.binding.principal)
 
   const automations = asMap(personal.get('assistantAutomations', true) as Node, 'assistantAutomations config')
+  automations.delete('toolCapableProviders')
+  automations.delete('unknownRouteToolCalls')
+  delivery.delete('toolCapableProviders')
+  delivery.delete('unknownRouteToolCalls')
   automations.set('schedulerEnabled', true)
-  appendUniqueString(automations, 'toolCapableProviders', 'traex-agent', 'assistantAutomations.toolCapableProviders')
   delivery.set('agentProvider', 'traex-agent')
   delivery.set('agentModel', 'default')
-  delivery.set('toolCapableProviders', ['traex-agent'])
   traex.set('enabled', true)
   traex.set('cwd', workspace)
 
@@ -462,18 +447,8 @@ export function assertEffectiveSupervisedGrowthConfig(input: {
   if (automations.get('schedulerEnabled') !== true) {
     throw new Error('supervised-growth setup: effective assistantAutomations.schedulerEnabled must be true')
   }
-  const automationToolRoutes = asSeq(automations.get('toolCapableProviders', true) as Node, 'assistantAutomations.toolCapableProviders')
-    .items.map(item => (item as Node | null)?.toJSON())
-  if (!automationToolRoutes.includes('traex-agent')) {
-    throw new Error('supervised-growth setup: effective assistantAutomations.toolCapableProviders must include traex-agent')
-  }
   if (delivery.get('agentProvider') !== 'traex-agent' || delivery.get('agentModel') !== 'default') {
     throw new Error('supervised-growth setup: effective assistant-delivery route must be traex-agent/default')
-  }
-  const deliveryToolRoutes = asSeq(delivery.get('toolCapableProviders', true) as Node, 'assistant-delivery.toolCapableProviders')
-    .items.map(item => (item as Node | null)?.toJSON())
-  if (!deliveryToolRoutes.includes('traex-agent')) {
-    throw new Error('supervised-growth setup: effective assistant-delivery.toolCapableProviders must include traex-agent')
   }
   if (traex.get('enabled') !== true || dshWorkspace(traex.get('cwd'), input.dshHome) !== workspace) {
     throw new Error('supervised-growth setup: effective TraeX route must be enabled at the exact assistant workspace')

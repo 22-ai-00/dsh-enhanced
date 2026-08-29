@@ -37,10 +37,6 @@ import {
   type LarkTransport,
   type LarkTransportHandlers,
 } from '@dsh-enhanced/lark-channel'
-import {
-  registerLlmRouteCapability,
-  resolveLlmRouteCapability,
-} from '@dsh-enhanced/llm-route-capabilities'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 
 const ACCOUNT = 'bot-1'
@@ -409,7 +405,6 @@ async function openGrowthRuntime(input: {
     defaultAgentPreset: PRESET,
     agentProvider: 'growth-model',
     agentModel: 'default',
-    toolCapableProviders: ['growth-model'],
   })
   await ctx.plugin(AssistantEvolutionService, {
     databasePath: input.evolutionPath,
@@ -423,7 +418,6 @@ async function openGrowthRuntime(input: {
     schedulerEnabled: false,
     reconcileIntervalMs: 0,
     allowUnbudgetedExecution: false,
-    toolCapableProviders: ['growth-model'],
   })
   ctx.llm.registerAdapter(['growth-model'], input.llm)
   await ctx.plugin(AgentLoop, { agents: [] })
@@ -794,7 +788,7 @@ describe('supervised personal-assistant growth composition', () => {
       && entry.guidance_version === rule.generation)).toBe(true)
   })
 
-  test('rejects a tool-bearing Delivery turn on Codex text-only capability before adapter auth or stream', async () => {
+  test('runs a tool-bearing Delivery turn on Codex CLI without route capability metadata', async () => {
     const root = await mkdtemp(join(tmpdir(), 'personal-assistant-codex-e2e-'))
     roots.push(root)
     const workspace = join(root, 'workspace')
@@ -815,44 +809,44 @@ describe('supervised personal-assistant growth composition', () => {
       defaultAgentPreset: PRESET,
       agentProvider: 'codex-subscription',
       agentModel: 'default',
-      // The provider-owned `none` declaration below must override this legacy allowlist.
-      toolCapableProviders: ['codex-subscription'],
     })
     await ctx.plugin(AssistantEvolutionService, {
       databasePath: join(root, 'evolution.sqlite'),
       reconcileIntervalMs: 0,
     })
     const verifyAuth = vi.fn(async () => {})
-    const runText = vi.fn(() => (async function* () { yield 'must never run' })())
+    const runText = vi.fn(() => (async function* () { yield 'Codex received the same Agent tools.' })())
     const codingConfig = CodingSubscriptionConfig()
     codingConfig.cwd = workspace
     const codex = new CodingSubscriptionAdapter(codingConfig, {
       verifyAuth,
       runText,
+      liveSessions: ctx.sessions,
     })
     const stream = vi.spyOn(codex, 'stream')
     ctx.llm.registerAdapter(['codex-subscription'], codex)
-    registerLlmRouteCapability(ctx.llm, { provider: 'codex-subscription', toolCalls: 'none' })
     await ctx.plugin(AgentLoop, { agents: [] })
     const transport = new FakeLarkTransport()
     await installLark(ctx, transport)
     await pairOwner(ctx)
 
-    expect(resolveLlmRouteCapability(ctx.llm, 'codex-subscription', 'default'))
-      .toMatchObject({ toolCalls: 'none' })
     await transport.message(larkMessage('om-codex-tool-turn', 'use an evolution tool'))
     expect(saved.size).toBe(1)
     await runInboundPass(ctx)
     await runInboundPass(ctx)
 
-    expect(stream).not.toHaveBeenCalled()
-    expect(verifyAuth).not.toHaveBeenCalled()
-    expect(runText).not.toHaveBeenCalled()
-    expect(transport.sent.at(-1)?.input).toMatchObject({
-      text: expect.stringContaining('codex-subscription/default'),
+    expect(stream).toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(verifyAuth).toHaveBeenCalled()
+      expect(runText).toHaveBeenCalled()
     })
+    const request = stream.mock.calls[0]?.[0]
+    expect(request?.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining([
+      'evolution_review',
+      'evolution_propose',
+    ]))
     expect(transport.sent.at(-1)?.input).toMatchObject({
-      text: expect.stringContaining('/model'),
+      markdown: expect.stringContaining('Codex received the same Agent tools.'),
     })
     await closeContext(ctx)
   })

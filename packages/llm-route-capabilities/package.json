@@ -1,7 +1,7 @@
 {
   "name": "@dsh-enhanced/llm-route-capabilities",
   "version": "0.1.4",
-  "description": "Runtime-local LLM route capability declarations for DeepSeek Harness integrations.",
+  "description": "Runtime-local LLM route tool-call projection metadata for DeepSeek Harness integrations.",
   "license": "MIT",
   "type": "module",
   "main": "./lib/index.js",

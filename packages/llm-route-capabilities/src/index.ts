@@ -2,6 +2,10 @@ import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, LlmRuntime } from '@deepseek-ai/dsh-llm'
 import { version } from './version.js'
 
+/**
+ * Adapter protocol projection only; never an Agent tool authorization decision.
+ * `none` is an explicit negative implementation declaration, not a model capability tier.
+ */
 export type ToolCallMode = 'none' | 'native' | 'bridge'
 
 export interface LlmRouteCapabilityDeclaration {
@@ -284,7 +288,7 @@ export function createAgentLoopRequestAttestor(
 }
 
 /**
- * Attach one audited capability declaration to exactly one live LLM runtime.
+ * Attach one audited tool-call projection declaration to exactly one live LLM runtime.
  * A selector has a single owner; even an identical duplicate is rejected so
  * plugin unload cannot make another plugin's declaration disappear.
  */

@@ -63,15 +63,6 @@ export interface Config {
   policyRef?: string
   agentProvider?: string
   agentModel?: string
-  /** Audited native-tool routes whose upstream adapters do not publish registry metadata yet. */
-  toolCapableProviders?: string[]
-  /**
-   * How to admit a route that publishes no tool-call capability at all. The DSH
-   * `generate` contract accepts `tools` for every adapter, so `allow` matches
-   * that baseline; `deny` opts a deployment into strict allowlisting. A
-   * provider-owned `none` declaration always fails closed either way.
-   */
-  unknownRouteToolCalls?: 'allow' | 'deny'
   agentMaxOutputTokens?: number
   modelPickerTtlMs?: number
   permissionPickerTtlMs?: number
@@ -124,10 +115,6 @@ const configSchema = Schema.object({
   policyRef: Schema.string().min(1).default('owner-dm'),
   agentProvider: Schema.string().min(1).default('deepseek-official'),
   agentModel: Schema.string().min(1).default('deepseek-v4-flash'),
-  toolCapableProviders: Schema.array(
-    Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u),
-  ).default(['deepseek-official']),
-  unknownRouteToolCalls: Schema.union(['allow', 'deny'] as const).default('allow'),
   agentMaxOutputTokens: Schema.number().step(1).min(1).default(8_192),
   modelPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   permissionPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
@@ -392,8 +379,6 @@ export class AssistantDeliveryService extends Service {
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         getAgentPresets: () => runtimeCtx.get('agentPresets'),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
-        toolCapableProviders: new Set(config.toolCapableProviders),
-        unknownRouteToolCalls: config.unknownRouteToolCalls ?? 'allow',
         modelPickerTtlMs: config.modelPickerTtlMs,
         permissionPickerTtlMs: config.permissionPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),

@@ -10,7 +10,7 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { registerLlmRouteCapability, type ToolCallMode } from '@dsh-enhanced/llm-route-capabilities'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -89,10 +89,9 @@ async function harness(options: {
   }
   backgroundProposal?: boolean
   budgetMetric?: string
-  toolCapableProviders?: readonly string[]
-  unknownRouteToolCalls?: 'allow' | 'deny'
   presetTool?: string
   requestedTools?: readonly string[]
+  toolCalls?: ToolCallMode
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-automations-runner-'))
   roots.push(root)
@@ -182,6 +181,9 @@ async function harness(options: {
   }))
   const adapter = new ToolCallingAdapter(options.requestedTools)
   ctx.llm.registerAdapter(['mock'], adapter)
+  if (options.toolCalls !== undefined) {
+    registerLlmRouteCapability(ctx.llm, { provider: 'mock', toolCalls: options.toolCalls })
+  }
   await ctx.plugin(AgentLoop, { agents: [] })
   let flushes = 0
   ctx.on('session/flush', () => { flushes += 1 })
@@ -190,8 +192,6 @@ async function harness(options: {
     calls: () => ({ allowedCalls, deniedCalls, flushes, startupDecision }),
     runner: new DshAutomationRunner(ctx, ctx.assistantPolicy, {
       allowUnbudgetedExecution: options.allowUnbudgetedExecution ?? true,
-      toolCapableProviders: options.toolCapableProviders ?? ['mock'],
-      unknownRouteToolCalls: options.unknownRouteToolCalls ?? 'deny',
     }),
   }
 }
@@ -262,23 +262,8 @@ describe('fresh rc.8 automation Agent runner', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('rejects an undeclared tool-bearing route before followup and conservatively finalizes after Agent submission', async () => {
-    const fixture = await harness({ toolCapableProviders: [], unknownRouteToolCalls: 'deny' })
-    const release = vi.spyOn(fixture.ctx.assistantPolicy, 'release')
-    const finalize = vi.spyOn(fixture.ctx.assistantPolicy, 'finalize')
-    const running = fixture.runner.run(input(definition({
-      budgetId: 'runner-budget', budgetAmount: 100,
-    })))
-
-    await expect(running).rejects.toThrow(/tool.*provider|provider.*tool/i)
-    expect(fixture.adapter.requests).toHaveLength(0)
-    expect(release).not.toHaveBeenCalled()
-    expect(finalize).toHaveBeenCalledWith(expect.any(String), 100)
-    await fixture.ctx.fiber.restart()
-  })
-
-  test('admits a route that publishes no capability so gateway providers can run tool-bearing automations', async () => {
-    const fixture = await harness({ toolCapableProviders: [], unknownRouteToolCalls: 'allow' })
+  test('passes the immutable tool allowlist to the selected provider without route-specific admission metadata', async () => {
+    const fixture = await harness()
 
     await expect(fixture.runner.run(input(definition())))
       .resolves.toMatchObject({ outcome: 'succeeded' })
@@ -288,17 +273,29 @@ describe('fresh rc.8 automation Agent runner', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('lets a provider-owned none declaration override the deployment allowlist', async () => {
-    const fixture = await harness({ toolCapableProviders: ['mock'] })
-    registerLlmRouteCapability(fixture.ctx.llm, { provider: 'mock', toolCalls: 'none' })
+  test.each(['native', 'bridge'] as const)(
+    'passes a tool-bearing run through an adapter declaring the %s protocol projection',
+    async (toolCalls) => {
+      const fixture = await harness({ toolCalls })
 
-    await expect(fixture.runner.run(input())).rejects.toThrow(/tool.*provider|provider.*tool/i)
+      await expect(fixture.runner.run(input(definition())))
+        .resolves.toMatchObject({ outcome: 'succeeded' })
+      expect(fixture.adapter.requests).toHaveLength(2)
+      await fixture.ctx.fiber.restart()
+    },
+  )
+
+  test('fails closed before provider execution when the adapter explicitly declares no tool-call protocol', async () => {
+    const fixture = await harness({ toolCalls: 'none' })
+
+    await expect(fixture.runner.run(input(definition())))
+      .rejects.toThrow(/adapter mock\/runner-model.*no DSH tool-call protocol/i)
     expect(fixture.adapter.requests).toHaveLength(0)
     await fixture.ctx.fiber.restart()
   })
 
-  test('does not require capability metadata after the immutable allowlist removes every tool', async () => {
-    const fixture = await harness({ toolCapableProviders: [], requestedTools: [] })
+  test('allows an explicit none declaration when the immutable final tool scope is empty', async () => {
+    const fixture = await harness({ requestedTools: [], toolCalls: 'none' })
     const result = await fixture.runner.run(input(definition({ allowedTools: [] })))
 
     expect(result.outcome).toBe('succeeded')
@@ -397,7 +394,6 @@ describe('fresh rc.8 automation Agent runner', () => {
     }
     const fixture = await harness()
     fixture.ctx.llm.registerAdapter(['blocking'], new BlockingAdapter())
-    registerLlmRouteCapability(fixture.ctx.llm, { provider: 'blocking', toolCalls: 'native' })
     const controller = new AbortController()
     const running = fixture.runner.run(input(definition({ provider: 'blocking' }), controller.signal))
     await new Promise(resolve => setTimeout(resolve, 10))

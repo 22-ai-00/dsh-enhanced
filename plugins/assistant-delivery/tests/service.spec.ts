@@ -330,14 +330,7 @@ describe('assistant delivery Cordis service', () => {
       spoolPath: '/tmp/spool',
     })
     expect(config.defaultAgentPreset).toBe('standard')
-    expect(config.toolCapableProviders).toEqual(['deepseek-official'])
-    expect(config.unknownRouteToolCalls).toBe('allow')
     expect(config.toolApprovalTtlMs).toBe(300_000)
-    expect(() => AssistantDeliveryService.Config({
-      databasePath: '/tmp/delivery.sqlite',
-      spoolPath: '/tmp/spool',
-      toolCapableProviders: ['bad route'],
-    })).toThrow(/toolCapableProviders|pattern|invalid/i)
     for (const toolApprovalTtlMs of [999, 300_001]) {
       expect(() => AssistantDeliveryService.Config({
         databasePath: '/tmp/delivery.sqlite',

@@ -73,10 +73,12 @@ export interface RunCliTextOptions {
 export type CliProtocolFailureReason =
   | 'MALFORMED_JSON'
   | 'NO_JSON_EVENTS'
-  | 'UNRECOGNIZED_EVENTS'
+  | 'UNKNOWN_EVENT'
+  | 'EVENT_AFTER_TERMINAL'
   | 'NO_ASSISTANT_TEXT'
   | 'MISSING_SUCCESS_TERMINAL'
   | 'INVALID_TERMINAL'
+  | 'NATIVE_TOOL_EVENT'
   | 'REPORTED_FAILURE'
 
 /** A stable, credential-free protocol failure that the adapter can map. */
@@ -233,10 +235,9 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
   let sawIncrementalText = false
   let sawAggregateText = false
   let sawValidJson = false
-  let sawRecognizedEvent = false
   let sawAssistantText = false
   let sawSuccessTerminal = false
-  let terminalReason: 'success' | 'reported-failure' | 'invalid-terminal' | undefined
+  let terminalReason: 'success' | 'reported-failure' | 'invalid-terminal' | 'native-tool-event' | undefined
   let sawCursorAuthInit = false
   let sawChildOutput = false
   let sawStdoutOutput = false
@@ -393,7 +394,6 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
         : new CliProcessExitError(invocation.provider, code, signal))
     } else close(validateProtocolSettlement(invocation.provider, {
       sawValidJson,
-      sawRecognizedEvent,
       sawAssistantText,
       sawSuccessTerminal,
       sawCursorAuthInit,
@@ -421,21 +421,36 @@ export async function* runCliText(invocation: CliInvocation, options: RunCliText
     sawChildOutput = true
     const decoded = decodeJsonLine(line)
     if (decoded.kind === 'empty') return
+    if (sawSuccessTerminal) {
+      stop(new CliProtocolError(invocation.provider, 'EVENT_AFTER_TERMINAL'))
+      return
+    }
     sawStdoutOutput = true
     if (decoded.kind === 'malformed') {
       stop(new CliProtocolError(invocation.provider, 'MALFORMED_JSON'))
       return
     }
     sawValidJson = true
-    if (!decoded.event) return
+    if (!decoded.event) {
+      stop(new CliProtocolError(invocation.provider, 'UNKNOWN_EVENT'))
+      return
+    }
     const parsed = parseProviderEvent(invocation.provider, decoded.event)
-    if (!parsed) return
-    sawRecognizedEvent = true
+    if (!parsed) {
+      stop(new CliProtocolError(invocation.provider, 'UNKNOWN_EVENT'))
+      return
+    }
     firstEventAt ??= performance.now()
     if (phase === 'spawn' || phase === 'initialize') phase = 'prompt'
     if (parsed.auth === 'subscription') sawCursorAuthInit = true
     else if (parsed.auth === 'other') {
       stop(new CliSubscriptionAuthError('cursor', 'UNEXPECTED_AUTH_SOURCE'))
+      return
+    }
+    if (parsed.nativeTool) {
+      terminalReason = 'native-tool-event'
+      phase = 'terminal'
+      stop(new CliProtocolError(invocation.provider, 'NATIVE_TOOL_EVENT'))
       return
     }
     if (parsed.outcome === 'failure') {
@@ -497,6 +512,8 @@ export interface ParsedEvent {
   readonly terminal: boolean
   readonly outcome?: 'success' | 'failure' | 'invalid'
   readonly auth?: 'subscription' | 'other'
+  /** The provider tried to use its own executor instead of the DSH tool bridge. */
+  readonly nativeTool?: true
 }
 
 export function parseAssistantEvent(provider: CliInvocation['provider'], line: string): ParsedEvent | undefined {
@@ -525,6 +542,7 @@ const providerDecoders: Record<CliInvocation['provider'], ProviderEventDecoder> 
 
 function decodeCodexEvent(event: Record<string, unknown>): ParsedEvent | undefined {
   const item = object(event.item)
+  if (isCodexItemEvent(event.type) && isCodexNativeToolItem(item)) return nativeTool()
   if (event.type === 'item.completed' && item?.type === 'agent_message') return parsed(textOf(item.content) ?? textOf(item.text), false)
   if (event.type === 'agent_message') return parsed(textOf(event.content) ?? textOf(event.text), false)
   if (event.type === 'turn.completed') return known({ outcome: 'success' })
@@ -536,59 +554,182 @@ function decodeCodexEvent(event: Record<string, unknown>): ParsedEvent | undefin
 
 function decodeClaudeEvent(event: Record<string, unknown>): ParsedEvent | undefined {
   const inner = object(event.event)
-  if (event.type === 'stream_event' && inner?.type === 'content_block_delta') return parsed(textOf(object(inner.delta)?.text), false)
-  if (event.type === 'stream_event') return known()
+  if (isClaudeNativeToolEvent(event, inner)) return nativeTool()
+  if (event.type === 'stream_event') return decodeAnthropicStreamEvent(inner)
   if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content), true)
   if (event.type === 'result') return parsed(textOf(event.result), true, resultOutcome(event))
-  if (knownType(event, ['system', 'user', 'tool_progress', 'tool_use_summary', 'auth_status', 'rate_limit_event'])) return known()
+  if (knownType(event, ['system', 'user', 'auth_status', 'rate_limit_event'])) return known()
   return undefined
 }
 
 function decodeCursorEvent(event: Record<string, unknown>): ParsedEvent | undefined {
+  if (isToolLifecycle(event.type) || containsNativeToolBlock(event.message) || containsNativeToolBlock(event.content)) {
+    return nativeTool()
+  }
   if (event.type === 'system' && event.subtype === 'init') {
     return known({ auth: event.apiKeySource === 'login' ? 'subscription' : 'other' })
   }
   if (event.type === 'system') return known()
   if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content) ?? textOf(event.text), false)
   if (event.type === 'result') return parsed(textOf(event.result) ?? textOf(event.message), true, resultOutcome(event))
-  if (knownType(event, ['user', 'tool_call', 'tool_result'])) return known()
+  if (event.type === 'user') return known()
   return undefined
 }
 
 function decodeGrokEvent(event: Record<string, unknown>): ParsedEvent | undefined {
+  const update = object(event.update)
+  const paramsUpdate = object(object(event.params)?.update)
+  const anthropic = object(event.event)
+  if (isGrokNativeToolEvent(event, update, paramsUpdate, anthropic)) return nativeTool()
   if (event.type === 'text') {
     return typeof event.data === 'string' ? parsed(event.data, false) : undefined
   }
   if (event.type === 'error') return known({ outcome: 'failure' })
   if (event.type === 'end') {
-    return typeof event.stopReason === 'string' && event.stopReason.length > 0
-      ? known({ outcome: 'success' })
-      : known({ outcome: 'invalid' })
+    if (event.stopReason === 'end_turn') return known({ outcome: 'success' })
+    if (event.stopReason === 'tool_use') return nativeTool()
+    if (isKnownGrokFailureStopReason(event.stopReason)) return known({ outcome: 'failure' })
+    return known({ outcome: 'invalid' })
+  }
+  if (event.type === 'available_commands') {
+    if (!Array.isArray(event.tools) || (event.commands !== undefined && !Array.isArray(event.commands))) return undefined
+    return event.tools.length === 0 ? known() : nativeTool()
+  }
+  if (event.type === 'usage') {
+    if (event.stopReason === undefined || event.stopReason === 'end_turn') return known()
+    if (event.stopReason === 'tool_use') return nativeTool()
+    if (isKnownGrokFailureStopReason(event.stopReason)) return known({ outcome: 'failure' })
+    return known({ outcome: 'invalid' })
   }
   if (event.type === 'streaming-messages-json' || event.type === 'message' || event.type === 'update') {
-    return parsed(textOf(event.text) ?? textOf(event.content) ?? textOf(object(event.delta)?.text) ?? textOf(event.message), false)
+    const text = textOf(event.text) ?? textOf(event.content) ?? textOf(object(event.delta)?.text) ?? textOf(event.message)
+    return text === undefined ? undefined : parsed(text, false)
   }
-  const anthropic = object(event.event)
-  if (event.type === 'stream_event' && anthropic?.type === 'content_block_delta') return parsed(textOf(object(anthropic.delta)?.text), false)
-  if (event.type === 'stream_event') return known()
-  if (event.type === 'content_block_delta') return parsed(textOf(object(event.delta)?.text), false)
-  const update = object(event.update)
-  if (event.sessionUpdate === 'agent_message_chunk') return parsed(textOf(event.content) ?? textOf(update?.text) ?? textOf(update?.content), false)
-  if (typeof event.sessionUpdate === 'string') return known()
-  if (update?.sessionUpdate === 'agent_message_chunk') return parsed(textOf(update.content), false)
-  if (typeof update?.sessionUpdate === 'string') return known()
-  const paramsUpdate = object(object(event.params)?.update)
-  if (event.method === 'session/update' && paramsUpdate?.sessionUpdate === 'agent_message_chunk') {
-    return parsed(textOf(paramsUpdate.content), false)
+  if (event.type === 'stream_event') return decodeAnthropicStreamEvent(anthropic)
+  if (event.type === 'content_block_delta') return decodeAnthropicContentBlockDelta(object(event.delta))
+  if (typeof event.sessionUpdate === 'string') {
+    return decodeGrokSessionUpdate(event.sessionUpdate, event.content ?? update?.content)
   }
-  if (event.method === 'session/update') return known()
+  if (typeof update?.sessionUpdate === 'string') return decodeGrokSessionUpdate(update.sessionUpdate, update.content)
+  if (event.method === 'session/update' && typeof paramsUpdate?.sessionUpdate === 'string') {
+    return decodeGrokSessionUpdate(paramsUpdate.sessionUpdate, paramsUpdate.content)
+  }
   if (event.type === 'result') {
     const outcome = resultOutcome(event)
     return parsed(textOf(event.result) ?? textOf(event.text), true, outcome === 'success' ? undefined : outcome)
   }
   if (event.type === 'assistant') return parsed(textOf(event.message) ?? textOf(event.content) ?? textOf(event.text), false)
-  if (knownType(event, ['system', 'user', 'tool_call', 'tool_result'])) return known()
+  if (knownType(event, ['system', 'user'])) return known()
   return undefined
+}
+
+function isCodexItemEvent(type: unknown): boolean {
+  return type === 'item.started' || type === 'item.updated' || type === 'item.completed'
+}
+
+function decodeAnthropicStreamEvent(inner: Record<string, unknown> | undefined): ParsedEvent | undefined {
+  if (inner?.type === 'content_block_delta') return decodeAnthropicContentBlockDelta(object(inner.delta))
+  if (inner?.type === 'content_block_start') {
+    const block = object(inner.content_block)
+    if (!knownValue(block?.type, ['text', 'thinking', 'redacted_thinking'])) return undefined
+    return parsed(textOf(block?.text), false)
+  }
+  if (inner?.type === 'error') return known({ outcome: 'failure' })
+  if (knownValue(inner?.type, ['message_start', 'content_block_stop', 'message_delta', 'message_stop', 'ping'])) return known()
+  return undefined
+}
+
+function decodeAnthropicContentBlockDelta(delta: Record<string, unknown> | undefined): ParsedEvent | undefined {
+  if (delta?.type === undefined && typeof delta?.text === 'string') return parsed(delta.text, false)
+  if (delta?.type === 'text_delta' && typeof delta.text === 'string') return parsed(delta.text, false)
+  if (knownValue(delta?.type, ['thinking_delta', 'signature_delta', 'citations_delta'])) return known()
+  return undefined
+}
+
+const passiveGrokSessionUpdates = [
+  'user_message_chunk',
+  'agent_thought_chunk',
+  'plan',
+  'plan_update',
+  'plan_removed',
+  'available_commands_update',
+  'current_mode_update',
+  'config_option_update',
+  'session_info_update',
+  'usage_update',
+] as const
+
+function decodeGrokSessionUpdate(type: string, content: unknown): ParsedEvent | undefined {
+  if (type === 'agent_message_chunk') {
+    const text = textOf(content)
+    return text === undefined ? undefined : parsed(text, false)
+  }
+  return knownValue(type, passiveGrokSessionUpdates) ? known() : undefined
+}
+
+/** Codex exec JSONL currently has only three passive item kinds; every other
+ * item kind represents a built-in/dynamic tool or another active capability.
+ * Keeping this as a passive allowlist makes new native executors fail closed. */
+function isCodexNativeToolItem(item: Record<string, unknown> | undefined): boolean {
+  if (typeof item?.type !== 'string') return true
+  return item.type !== 'agent_message' && item.type !== 'reasoning' && item.type !== 'error'
+}
+
+function isClaudeNativeToolEvent(
+  event: Record<string, unknown>,
+  inner: Record<string, unknown> | undefined,
+): boolean {
+  if (isToolLifecycle(event.type) || event.type === 'tool_progress') return true
+  if (event.stop_reason === 'tool_use' || object(event.message)?.stop_reason === 'tool_use') return true
+  if (object(inner?.delta)?.stop_reason === 'tool_use') return true
+  if (event.type === 'system' && Array.isArray(event.tools) && event.tools.length > 0) return true
+  if (containsNativeToolBlock(event.message) || containsNativeToolBlock(event.content)
+    || containsNativeToolBlock(event.delta)) return true
+  return event.type === 'stream_event'
+    && (containsNativeToolBlock(inner?.message) || containsNativeToolBlock(inner?.content_block)
+      || containsNativeToolBlock(inner?.delta))
+}
+
+function isGrokNativeToolEvent(
+  event: Record<string, unknown>,
+  update: Record<string, unknown> | undefined,
+  paramsUpdate: Record<string, unknown> | undefined,
+  anthropic: Record<string, unknown> | undefined,
+): boolean {
+  if (isToolLifecycle(event.type) || isToolLifecycle(event.sessionUpdate)
+    || isToolLifecycle(update?.sessionUpdate) || isToolLifecycle(paramsUpdate?.sessionUpdate)) return true
+  if (event.type === 'available_commands' && Array.isArray(event.tools) && event.tools.length > 0) return true
+  if (event.method === 'session/request_permission' || event.method === 'session/requestPermission') return true
+  if (containsNativeToolBlock(event.message) || containsNativeToolBlock(event.content)
+    || containsNativeToolBlock(event.delta)) return true
+  return event.type === 'stream_event'
+    && (containsNativeToolBlock(anthropic?.message) || containsNativeToolBlock(anthropic?.content_block)
+      || containsNativeToolBlock(anthropic?.delta))
+}
+
+function isToolLifecycle(value: unknown): boolean {
+  if (typeof value !== 'string') return false
+  return value === 'tool_call' || value === 'tool_result' || value === 'tool_use'
+    || value.startsWith('tool_call_') || value.startsWith('tool_use_')
+    || value === 'hook_execution' || value === 'pending_interaction' || value === 'interaction_resolved'
+}
+
+function containsNativeToolBlock(value: unknown, depth = 0): boolean {
+  if (depth > 8) return false
+  if (Array.isArray(value)) return value.some(item => containsNativeToolBlock(item, depth + 1))
+  const record = object(value)
+  if (record === undefined) return false
+  const type = record.type
+  if (isToolLifecycle(type) || type === 'server_tool_use' || type === 'input_json_delta'
+    || (typeof type === 'string' && type.endsWith('_tool_result'))) return true
+  return containsNativeToolBlock(record.content, depth + 1)
+    || containsNativeToolBlock(record.message, depth + 1)
+    || containsNativeToolBlock(record.content_block, depth + 1)
+    || containsNativeToolBlock(record.delta, depth + 1)
+}
+
+function nativeTool(): ParsedEvent {
+  return { terminal: false, nativeTool: true }
 }
 
 export function parseAssistantText(provider: CliInvocation['provider'], line: string): string | undefined {
@@ -605,6 +746,14 @@ function known(fields: Omit<ParsedEvent, 'terminal'> = {}): ParsedEvent {
 
 function knownType(event: Record<string, unknown>, types: readonly string[]): boolean {
   return typeof event.type === 'string' && types.includes(event.type)
+}
+
+function knownValue(value: unknown, values: readonly string[]): value is string {
+  return typeof value === 'string' && values.includes(value)
+}
+
+function isKnownGrokFailureStopReason(value: unknown): boolean {
+  return knownValue(value, ['cancelled', 'canceled', 'max_tokens', 'max_turn_requests'])
 }
 
 function resultOutcome(event: Record<string, unknown>): 'success' | 'failure' | 'invalid' {
@@ -636,7 +785,6 @@ function decodeJsonLine(line: string): DecodedJsonLine {
 
 interface ProtocolSettlement {
   readonly sawValidJson: boolean
-  readonly sawRecognizedEvent: boolean
   readonly sawAssistantText: boolean
   readonly sawSuccessTerminal: boolean
   readonly sawCursorAuthInit: boolean
@@ -647,7 +795,6 @@ function validateProtocolSettlement(provider: CliInvocation['provider'], state: 
     return new CliSubscriptionAuthError('cursor', 'MISSING_AUTH_EVENT')
   }
   if (!state.sawValidJson) return new CliProtocolError(provider, 'NO_JSON_EVENTS')
-  if (!state.sawRecognizedEvent) return new CliProtocolError(provider, 'UNRECOGNIZED_EVENTS')
   if (!state.sawAssistantText) return new CliProtocolError(provider, 'NO_ASSISTANT_TEXT')
   if ((provider === 'codex' || provider === 'claude' || provider === 'cursor' || provider === 'grok') && !state.sawSuccessTerminal) {
     return new CliProtocolError(provider, 'MISSING_SUCCESS_TERMINAL')
@@ -659,10 +806,12 @@ function protocolErrorMessage(provider: CliInvocation['provider'], reason: CliPr
   const descriptions: Record<CliProtocolFailureReason, string> = {
     MALFORMED_JSON: 'emitted malformed NDJSON',
     NO_JSON_EVENTS: 'closed without any JSON events',
-    UNRECOGNIZED_EVENTS: 'emitted no recognized protocol events',
+    UNKNOWN_EVENT: 'emitted an event outside the supported protocol allowlist',
+    EVENT_AFTER_TERMINAL: 'emitted an event after its successful terminal event',
     NO_ASSISTANT_TEXT: 'closed without assistant text',
     MISSING_SUCCESS_TERMINAL: 'closed without a successful terminal event',
     INVALID_TERMINAL: 'emitted an unrecognized terminal result',
+    NATIVE_TOOL_EVENT: 'emitted a forbidden native tool event',
     REPORTED_FAILURE: 'reported a failed model turn',
   }
   return `${provider} CLI ${descriptions[reason]}`
