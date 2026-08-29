@@ -144,6 +144,7 @@ export class LarkChannelService extends Service {
     }, transport, {
       approvalSecret: appSecret,
       showProgress: config.showProgress,
+      progressDetails: config.progressDetails,
       statusReactions: config.statusReactions,
       settleApproval: value => delivery.settleApproval(value),
       recoverApprovalSettlement: value => delivery.recoverApprovalSettlement(value),

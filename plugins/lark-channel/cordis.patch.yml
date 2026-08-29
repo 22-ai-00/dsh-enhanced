@@ -14,6 +14,7 @@
         domain: feishu
         requireMentionInGroups: true
         showProgress: true
+        progressDetails: direct
         statusReactions: true
         maxTextBytes: 65536
         staleAfterMs: 300000

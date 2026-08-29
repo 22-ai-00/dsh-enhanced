@@ -1652,6 +1652,7 @@ describe('Lark Web-profile onboarding patch', () => {
       appId: 'cli_0123456789abcdef',
       credentialHandle: 'lark-app-secret-primary',
       showProgress: true,
+      progressDetails: 'direct',
       statusReactions: true,
       imageDownloadTimeoutMs: 30_000,
     })

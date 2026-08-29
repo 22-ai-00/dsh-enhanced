@@ -252,4 +252,4 @@ Anthropic 的技术文档允许 `claude -p` 使用订阅登录，但其法律与
 - Grok Build `1.0.5`（已验证；目录与 effort 来自 ACP `initialize` 的 `modelState`，生成事件遵循官方 [headless `streaming-json`](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/14-headless-mode.md#streaming-json)）
 - Cursor CLI：目录使用官方 [`--list-models`](https://cursor.com/changelog/cli-jan-08-2026)；本机未安装，依赖 fixture 验证
 
-设计证据、官方文档链接以及 Hermes/OpenClaw 对比见 [调研报告](../../docs/coding-subscription-provider-research.md)。仓库兼容基线见 [compatibility.md](../../docs/compatibility.md)。
+进一步阅读：[Codex 路由调研](../../docs/grok-bot-codex-router-research.md)、[插件生态与 Hermes/OpenClaw 对比](../../docs/dsh-personal-assistant-plugin-landscape.md)、[兼容基线](../../docs/compatibility.md)。

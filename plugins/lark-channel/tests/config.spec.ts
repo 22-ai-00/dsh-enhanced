@@ -13,12 +13,20 @@ describe('lark-channel bundle contract', () => {
   test('accepts only a secret environment name and rejects plaintext-looking config fields', () => {
     expect(Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET' }))
       .toMatchObject({ appSecretEnv: 'LARK_APP_SECRET', enabled: false, requireMentionInGroups: true,
-        showProgress: true, statusReactions: true, imageDownloadTimeoutMs: 30_000 })
+        showProgress: true, progressDetails: 'direct', statusReactions: true, imageDownloadTimeoutMs: 30_000 })
     expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'not-valid' }))
       .toThrow()
     expect(() => Config({
       account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET', appSecret: 'plaintext',
     } as never)).toThrow()
+  })
+
+  test('shows detailed progress only in direct messages', () => {
+    expect(Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', progressDetails: 'off' }))
+      .toMatchObject({ progressDetails: 'off' })
+    expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', progressDetails: 'all' } as never)).toThrow()
   })
 
   test('bounds the image resource request timeout independently from the websocket handshake', () => {

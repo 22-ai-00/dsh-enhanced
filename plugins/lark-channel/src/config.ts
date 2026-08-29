@@ -12,6 +12,7 @@ export interface Config {
   domain?: 'feishu' | 'lark'
   requireMentionInGroups?: boolean
   showProgress?: boolean
+  progressDetails?: 'off' | 'direct'
   statusReactions?: boolean
   maxTextBytes?: number
   staleAfterMs?: number
@@ -31,6 +32,7 @@ const schema = Schema.object({
   domain: Schema.union(['feishu', 'lark'] as const).default('feishu'),
   requireMentionInGroups: Schema.boolean().default(true),
   showProgress: Schema.boolean().default(true),
+  progressDetails: Schema.union(['off', 'direct'] as const).default('direct'),
   statusReactions: Schema.boolean().default(true),
   maxTextBytes: Schema.number().step(1).min(1).max(1024 * 1024).default(65_536),
   staleAfterMs: Schema.number().step(1).min(1_000).max(86_400_000).default(300_000),
@@ -50,6 +52,7 @@ const fields = new Set([
   'handshakeTimeoutMs',
   'imageDownloadTimeoutMs',
   'maxTextBytes',
+  'progressDetails',
   'requireMentionInGroups',
   'showProgress',
   'staleAfterMs',

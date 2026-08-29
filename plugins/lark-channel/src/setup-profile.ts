@@ -1237,6 +1237,7 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
     domain: input.domain,
     requireMentionInGroups: true,
     showProgress: true,
+    progressDetails: 'direct',
     statusReactions: true,
     maxTextBytes: 65_536,
     staleAfterMs: 300_000,

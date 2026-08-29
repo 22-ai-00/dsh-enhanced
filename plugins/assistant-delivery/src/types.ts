@@ -296,12 +296,12 @@ export interface DeliveryToolApprovalRequest {
 export type DeliveryToolApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
 /**
- * Safe, user-visible execution progress. It intentionally has no tool arguments or tool output.
+ * Bounded, user-visible execution progress.
  *
- * `step` carries the assistant's own already-published summary of what it is doing — the durable
- * `reasoning` block of an `assistant/message`, or the neutral phase label of a step for providers
- * that never emit reasoning at all. Turns that call no tool and write no todo would otherwise leave
- * the channel's progress surface with nothing between `started` and the terminal update.
+ * `step` carries a neutral execution phase, never model reasoning/thinking content. Tool updates
+ * carry redacted previews so an adapter can render useful call details for an audience it considers
+ * private; adapters must still account for the target conversation before publishing them. Preview
+ * strings are presentation-only and are not durable Delivery state.
  *
  * `failed` carries the short failure *code* only. The human-readable provider message may quote the
  * prompt or upstream payloads, so it stays behind this boundary; the code is what makes a failed
@@ -310,8 +310,8 @@ export type DeliveryToolApprovalOutcome = 'allowed-once' | 'rejected' | 'cancell
 export type DeliveryProgressUpdate =
   | { kind: 'started' }
   | { kind: 'step'; text: string }
-  | { kind: 'tool-started'; callId: string; toolName: string }
-  | { kind: 'tool-finished'; callId: string; failed: boolean }
+  | { kind: 'tool-started'; callId: string; toolName: string; argumentsPreview?: string }
+  | { kind: 'tool-finished'; callId: string; failed: boolean; resultPreview?: string; code?: string }
   | { kind: 'todos'; todos: readonly DeliveryProgressTodo[] }
   | { kind: 'completed' }
   | { kind: 'failed'; code?: string }

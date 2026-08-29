@@ -1,5 +1,7 @@
 # 飞书消息 Reaction 与安全进度展示研究
 
+> **历史研究。** 本文保存 API 与设计依据，不作为当前行为说明；当前配置、安全边界和使用方式见 [`lark-channel` README](../plugins/lark-channel/README.md) 与 [`assistant-delivery` README](../plugins/assistant-delivery/README.md)。
+
 > 研究目标：为 `lark-channel` 增加“收到消息后标记 `Get`、成功完成后标记 `DONE`”以及安全、可审计的执行进度展示。本文以飞书官方 API、官方 Node/Channel SDK 为准，结合 OpenClaw、`dsh-lark-link` 和 `omdsh-dev/dsh-lark` 的实现进行取舍。
 
 ## 结论

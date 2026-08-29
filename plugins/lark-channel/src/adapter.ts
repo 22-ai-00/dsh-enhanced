@@ -71,6 +71,7 @@ export interface LarkApprovalSettlementInput {
 export interface LarkAdapterOptions {
   now?: () => number
   showProgress?: boolean
+  progressDetails?: 'off' | 'direct'
   statusReactions?: boolean
   approvalSecret?: string
   settleApproval?(input: LarkApprovalSettlementInput): unknown | Promise<unknown>
@@ -457,6 +458,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.progressPresenter = new LarkProgressPresenter(
       transport,
       options.showProgress ?? true,
+      options.progressDetails ?? 'direct',
       error => this.recordPresentationFailure(error),
     )
   }

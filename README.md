@@ -1,12 +1,12 @@
 # dsh-enhanced
 
-`dsh-enhanced` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的多插件仓库。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle。
+`dsh-enhanced` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的社区增强插件仓库。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。
 
-仓库目前包含两类能力：面向编码场景的 ACP/模型 provider，以及基于 DSH `0.1.0-rc.8` 自研的个人助理套件。个人助理提供审批与预算、长期记忆、Markdown Wiki、冷启动可恢复自动化、持久消息投递、飞书长连接和审批门控的行为 guidance 演化；这些包仍标记为实验性，适合先在受监督的单机 profile 中使用。
+仓库提供两类能力：面向编码场景的 ACP/模型 provider，以及基于 DSH `0.1.0-rc.8` 自研的实验性个人助理套件。个人助理适合先在受监督的单机 profile 中使用。
 
-## 在 dsh 中使用
+## 快速开始
 
-安装已发布插件：
+要求 Node.js 22.19+（或 24+）和 pnpm 11.7.0。安装已发布插件：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/<plugin-name>
@@ -17,98 +17,52 @@ dsh web
 本地开发时把包名换成插件目录：
 
 ```sh
+pnpm install
 pnpm build
 dsh plugin --profile web add ./plugins/hello
 ```
 
 使用 DSH 源码版 CLI 时，把 `dsh` 换成 DSH 仓库根目录下的 `pnpm dsh`。
 
-## 最快搭建个人助理
+## 快速搭建个人助理
 
-本地调试只需要一条命令，默认安装到 `web`、自动确保兼容的 DSH/pnpm、构建并链接本仓库插件。首次非交互运行选择安全的本机核心场景，不创建飞书应用或常驻服务：
+默认安装到 `web` profile，并选择安全的本机核心场景：
 
 ```sh
 ./scripts/install/install-local.sh
 ```
 
-修改插件源码后，一键重建并纯重启当前 `web` 常驻服务，不更新任何配置：
+修改源码后可重建并纯重启当前服务；命令不会更新配置：
 
 ```sh
 ./scripts/install/restart.sh
 ```
 
-重启其他 profile 时只传一个参数，例如 `./scripts/install/restart.sh personal-web`。远程安装器只接受固定发布标签和 SHA-256 校验，不再从 mutable `main` 取执行代码；场景选项、飞书复用和平台差异见[安装脚本文档](scripts/install)。
-
-`personal-assistant` bundle 自带本地 Web/direct `foreground` capability grant，直接安装后即可使用 profile 中**已经挂载**的技能、工具和插件动作；工具仍走 `workspace-write + ask`、显式 deny、紧急停止、sandbox、reviewer 和预算硬门。安全核心还挂载只读的 `plugin_discover` / plan 工具，供 Agent 按能力找出内置、完整性固定的首方候选；它们不能下载、安装或重启 profile。安装器默认 `--agent-tools preserve`；飞书场景中需要外部 Agent 调用工具时，才显式使用 `--agent-tools allow`。规则不会安装或挂载新能力，也不会放宽 `background` 任务。
-
-owner 可在飞书中发送 `/permissions` 打开三档权限卡片（不支持卡片时显示等价文字），也可用 `/permission ask`、`/permission auto` 或二次确认的 `/permission full confirm` 切换。工具可达性与这三档执行权限是两层独立控制：`full` 关闭逐次审批并放开 sandbox，但仍受显式 Policy deny、紧急停止、身份校验和预算硬门约束。
-
-默认 `standard` 模式仍保持 scheduler 和成长行为关闭。需要显式启用有 owner 飞书审批、每日预算和受限主动巡检的部署时使用：
+需要 owner 飞书审批、每日预算和受限主动巡检时，显式启用受监督成长模式：
 
 ```sh
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
 ```
 
-该模式默认把带工具的 Agent 固定到声明 `bridge` 能力的 TraeX route。默认 Codex CLI transport 仍是 text-only；只有显式切换到实验性的 `direct-responses` transport，Codex subscription route 才声明原生工具调用，并在 attachment service 可用时声明图片输入。成长结果只形成按 workspace/preset 隔离的顾问性 guidance，采用和退役都必须经 owner 审批，不会自行改写代码、凭据、Policy 或部署配置。
+远程安装器只接受固定发布标签和 SHA-256 校验，不从 mutable `main` 执行代码。完整场景选项、凭据存储和平台差异见[安装脚本文档](scripts/install)；飞书授权、模型选择、进度展示与常驻服务见 [`lark-channel` 文档](plugins/lark-channel)。
 
-如果希望逐项控制，CLI/Web 个人助理可以先安装核心 meta-bundle，它会组合 Policy、Memory、Wiki 和 Automations：
+个人助理默认采用 `workspace-write + ask`。工具可达性和执行权限是两层控制；即使选择 `full`，显式 Policy deny、紧急停止、身份校验和预算硬门仍然生效。规则不会自行安装能力、修改代码或凭据，也不会放宽后台任务。完整边界以各插件 README 为准。
 
-```sh
-pnpm install
-pnpm build
-dsh plugin --profile web add ./plugins/personal-assistant
-dsh --profile web --dump-config
-```
+## 能力概览
 
-默认配置面向本机单用户：没有既有用户设置时选择 `workspace-write + ask`，foreground Agent 只能访问 profile 已挂载的能力；后台 scheduler、`background` 与外部身份仍默认拒绝。完全访问必须在 selector 中明确选择，或用 `--permission danger-full-access --confirm-dangerous-full-access`；可继续用显式 Policy deny、精确身份与预算收窄。
+| 类别 | 入口 |
+| --- | --- |
+| ACP 与编码模型 | [`acp`](plugins/acp)、[`coding-subscription-provider`](plugins/coding-subscription-provider)、[`traex-acp-provider`](plugins/traex-acp-provider) |
+| 个人助理核心 | [`personal-assistant`](plugins/personal-assistant) 组合 Policy、Memory、Wiki 与 Automations |
+| 消息与凭据 | [`assistant-delivery`](plugins/assistant-delivery)、[`lark-channel`](plugins/lark-channel)、[`credentials-keychain`](plugins/credentials-keychain) |
+| 主动能力 | Heartbeat、Event Triggers、Memory/Wiki Bridge、受审批的 Evolution |
+| 运维与扩展 | Health、Plugin Control Plane 与最小示例 `hello` |
 
-需要通过飞书聊天时，再追加 Delivery、系统 Keychain 和 Lark adapter：
+全部包、用途和安装命令见[插件目录](plugins/README.md)。新增、重命名、弃用或移除插件时，同时更新该目录。
 
-```sh
-dsh plugin --profile web add ./plugins/assistant-delivery
-dsh plugin --profile web add ./plugins/credentials-keychain
-dsh plugin --profile web add ./plugins/lark-channel
-pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app
-```
+## 开发与检查
 
-最后一个命令使用飞书官方设备授权流程，输出确认链接和终端二维码。确认页允许选择已有应用或创建新应用；选择已有应用时只展示并添加本 channel 所需的最小权限、消息事件和卡片回调，不删除原有权限。若要锁定更新某个已有应用（例如补齐 `card.action.trigger`），可追加 `--app-id cli_...`。App Secret 自动写入 macOS Keychain、Linux Secret Service、无桌面 Linux 的当前用户 `0600` protected-file，或 Windows DPAPI 文件，不进入命令参数或 profile。Linux 默认先探测 Secret Service，纯 SSH/服务器会在 OAuth 前自动降级并验证 protected-file；内建 systemd 服务还会前置检查 user manager 与 logout persistence。向导随后通过一次 owner 私聊完成精确身份绑定并启用 Web profile；Windows 常驻路径为 best-effort。详细步骤与未加密文件边界见 [`lark-channel` 文档](plugins/lark-channel)。
-
-连接后，合法的新消息持久入队会收到 `Get` reaction，普通 Agent 任务会显示不含原始 CoT/工具敏感数据的执行进度，最终回复发送成功后原消息再收到 `DONE`。同一私聊或群聊稳定 lane 会持续 resume 同一个 DSH session；`/status` 可核对代次与上下文，`/stop` 只停止当前任务并保留上下文，`/new` 才原子切换到空白的下一代 session。私聊发送 `/model`，机器人会返回带“分组、模型、effort”三个下拉框的选择卡片；点击确认后，选择按聊天持久化，下一条消息生效且保留上下文。`/model use <provider/model>` 仍是文字后备。即使原默认模型 route 已失效，`/model` 也不依赖 LLM 生成，可以直接完成恢复。
-
-## 插件一览
-
-每个插件都是独立发布的 npm 包，只安装需要的能力即可。个人助理实验包在本地开发阶段可把表中的包名换成对应的 `./plugins/<name>`：
-
-| 插件 | 简要说明 | 快速安装 |
-|---|---|---|
-| [`@dsh-enhanced/acp`](plugins/acp) | 将 DSH 暴露为 ACP stdio agent，让支持 ACP 的编辑器使用 DSH 的 Agent、模型、工具、权限与会话能力。 | `dsh plugin --profile acp add @dsh-enhanced/acp` |
-| [`@dsh-enhanced/coding-subscription-provider`](plugins/coding-subscription-provider) | 接入本机已登录的 Codex、Claude Code、Cursor Agent 和 Grok Build；Codex 另有显式 opt-in 的私有 Responses 直连，可原生返回工具调用并消费图片。 | `dsh plugin --profile web add @dsh-enhanced/coding-subscription-provider` |
-| [`@dsh-enhanced/traex-acp-provider`](plugins/traex-acp-provider) | 通过 ACP 调用本机已登录的 TraeX，并动态展示其模型与逐模型 reasoning effort。 | `dsh plugin --profile web add @dsh-enhanced/traex-acp-provider` |
-| [`@dsh-enhanced/personal-assistant`](plugins/personal-assistant) | 个人助理核心 meta-bundle，一次组合 Policy、Memory、Wiki 和 Automations，不包含消息通道。 | `dsh plugin --profile web add @dsh-enhanced/personal-assistant` |
-| [`@dsh-enhanced/assistant-policy`](plugins/assistant-policy) | 默认拒绝的授权、审批提案、硬预算和脱敏审计边界。 | 通常由 `personal-assistant` 安装 |
-| [`@dsh-enhanced/personal-memory`](plugins/personal-memory) | 有界、分域、审批写入的长期事实与偏好记忆。 | 通常由 `personal-assistant` 安装 |
-| [`@dsh-enhanced/personal-wiki`](plugins/personal-wiki) | Markdown 为真源、支持中文检索和审批写入的个人知识库。 | 通常由 `personal-assistant` 安装 |
-| [`@dsh-enhanced/assistant-automations`](plugins/assistant-automations) | 带 occurrence/run 账本、租约 fencing 和隔离 Agent 的持久调度器。 | 通常由 `personal-assistant` 安装 |
-| [`@dsh-enhanced/assistant-delivery`](plugins/assistant-delivery) | 与厂商无关的持久 inbox/outbox、身份配对、会话绑定和投递恢复核心。 | `dsh plugin --profile web add @dsh-enhanced/assistant-delivery` |
-| [`@dsh-enhanced/credentials-keychain`](plugins/credentials-keychain) | 通过 OS Keychain/Secret Service 或严格权限的 Linux protected-file 提供受 Policy 限制的凭据 handle。 | `dsh plugin --profile web add @dsh-enhanced/credentials-keychain` |
-| [`@dsh-enhanced/lark-channel`](plugins/lark-channel) | 飞书/Lark WebSocket 薄适配器，带官方一键选建应用、`Get`/`DONE` 状态、脱敏执行进度、模型卡片和跨平台常驻服务。 | `dsh plugin --profile web add @dsh-enhanced/lark-channel` |
-| [`@dsh-enhanced/assistant-heartbeat`](plugins/assistant-heartbeat) | 复用 Automations 的 active-hours 主动巡检和成本硬停止。 | 按需安装 |
-| [`@dsh-enhanced/event-triggers`](plugins/event-triggers) | 持久化 file、受限 HTTPS/JSON 和 HMAC webhook 事件触发。 | 按需安装 |
-| [`@dsh-enhanced/memory-wiki-bridge`](plugins/memory-wiki-bridge) | 在 Memory 与 Wiki 之间生成可追溯、需审批的晋升提案。 | 按需安装 |
-| [`@dsh-enhanced/assistant-evolution`](plugins/assistant-evolution) | 基于可信 automation 结果提出按作用域隔离的行为 guidance，经飞书 owner 审批后注入后续 session；不自我扩权或修改代码。 | `supervised-growth` 模式安装 |
-| [`@dsh-enhanced/assistant-health`](plugins/assistant-health) | 聚合各 provider 的脱敏 liveness/readiness 与运维诊断。 | 按需安装 |
-| [`@dsh-enhanced/plugin-control-plane`](plugins/plugin-control-plane) | 按能力发现候选 bundle，生成 owner 审批计划，并通过隔离 staging + 完整性核对 + 原子 profile 切换启用。 | 按需安装 |
-| [`@dsh-enhanced/hello`](plugins/hello) | 最小示例插件，用于验证 bundle 安装、Cordis patch、构建与日志链路。 | `dsh plugin --profile web add @dsh-enhanced/hello` |
-
-安装 Web provider 后运行 `dsh --profile web --dump-config` 检查最终配置，再执行 `dsh web`。Coding Subscription Provider 的 CLI transport 需要先安装并登录相应官方客户端；显式启用 Codex `direct-responses` 时，生成不需要 Codex 可执行文件，但要求同一 POSIX 用户已有符合安全权限约束的 `CODEX_HOME/auth.json` 或 `~/.codex/auth.json`。TraeX provider 还需要在配置中显式设置 `enabled: true`。各插件的完整配置、权限边界和排错方法见表内链接。
-
-ACP 插件使用独立的 `acp` profile。安装后运行 `dsh --profile acp --dump-config`，再在 ACP 客户端中把 `dsh --profile acp` 配置为 stdio agent。原生 Windows 支持目前为实验性，详见插件文档。
-
-个人助理为什么这样拆分、哪些社区实现只作为设计参考，以及目前仍未实现的浏览器/RPA、非图片附件下载/上传和资料 ingest，见[自研插件路线图](docs/dsh-personal-assistant-self-built-plugin-roadmap.md)。新增、重命名、弃用或移除插件时，应同时维护本表和 [`plugins/README.md`](plugins/README.md) 的完整目录。
-
-## 开发
-
-要求 Node.js 22.19+（或 24+）和 pnpm 11.7.0。
+创建插件前先读[新增插件指南](docs/creating-a-plugin.md)；调整包边界或 Host/Web 双面插件时读[架构说明](docs/architecture.md)；修改 DSH/Cordis 依赖或使用新上游 API 时读[兼容性基线](docs/compatibility.md)。
 
 ```sh
 pnpm install
@@ -116,69 +70,39 @@ pnpm create:plugin my-plugin
 pnpm check
 ```
 
-## 发版与版本记录
+`pnpm check` 会依次执行 manifest 校验、零警告 lint、类型检查、测试、构建，以及所有插件和共享包的 dry-run pack。涉及 package 边界或 `files` 时，还应检查打包文件列表；生成的 `lib/`、coverage、tarball 和缓存不提交。
 
-仓库级版本记录在 [`release-manifest.json`](release-manifest.json)。查看当前版本、待发布版本和下一个默认版本：
+每个插件必须保持可独立发布，并包含 `lib/`、`cordis.patch.yml`、`README.md` 和 `LICENSE`。部署相关值进入校验过的 `Config`，外部资源使用 Cordis effect/disposer 管理；权限与外部 authority 必须写入插件 README。
+
+## 发版入口
+
+仓库使用 [`release-manifest.json`](release-manifest.json) 记录统一版本：
 
 ```sh
 pnpm release:status
-```
-
-准备下一次整体发版时，默认读取已记录版本并把补丁位加一，例如 `0.1.0 → 0.1.1`：
-
-```sh
 pnpm release:prepare
+pnpm check
 ```
 
-需要主动升级主版本或次版本时可以显式指定，而且指定值必须高于当前记录：
+版本变更合入 `main` 后，只能在与当前 `origin/main` 完全一致、且与 `pending` 一致的提交上创建稳定标签 `vX.Y.Z`。推送标签触发 [Release workflow](.github/workflows/release.yml)。不要在插件目录直接运行 `npm publish`，不要为重试创建或移动标签。
 
-```sh
-pnpm release:prepare -- 0.2.0
-```
+准备版本、校验 main/tag、发布、失败重试、immutable tag ruleset、竞态控制和 npm 凭据的完整协议见[发版指南](docs/releasing.md)。
 
-`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。运行 `pnpm check` 并把版本变更提交、合入 `main` 后，先同步并确认本地 `main` 就是当前 `origin/main`，再在这个提交上创建与 `pending` 完全一致的稳定版本标签：
+## 文档与目录
 
-```sh
-git fetch origin +refs/heads/main:refs/remotes/origin/main
-git switch main
-git merge --ff-only origin/main
-test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)"
-pnpm release:status
-git tag vX.Y.Z
-git push origin refs/tags/vX.Y.Z
-```
-
-推送 `v*` 标签会触发 GitHub Actions（[`.github/workflows/release.yml`](.github/workflows/release.yml)）。workflow 检出标签本身，并在任何发布动作之前 fail closed：标签必须严格为 `vX.Y.Z`、peeled commit 必须等于当前 `origin/main` HEAD，且标签版本、`pending`、根版本、完整的 `plugins/*` / `packages/*` 包集合、各包 `package.json` 与 `src/version.ts` 必须全部一致。通过 `pnpm check` 和上述校验后，才会从标签所指源码提交用 pnpm 发布：
-
-```sh
-pnpm release:publish
-```
-
-不要在插件目录运行 `npm publish`：npm 不会把 workspace 的 `catalog:` 依赖转换成实际版本，最终包将无法在 DSH profile 中安装。每个插件的 `prepublishOnly` 会拦截这种误操作。发布成功后，同一 workflow 会执行：
-
-```sh
-pnpm release:record
-```
-
-该命令复用发布前的完整一致性校验，然后更新 `current`、追加 `history` 并清空 `pending`。CI 的 publish job 只有 `contents: read`，账本 job 才有 `contents: write` 且不接触 `NPM_TOKEN`、不安装依赖；它只提交 `release-manifest.json`，并且在 npm 发布前和账本推送前都会重新确认 `origin/main` 未前进。按下述 immutable tag ruleset 部署后，release tag 会稳定指向实际发布的源码提交；workflow 自身不会创建或移动 tag，账本记录位于其后的独立提交。
-
-若发版中途出现暂时性失败，`pending` 会保留。请在 GitHub Actions 中 rerun 原 run，或手动运行 Release workflow 并输入同一个现有 tag；不要为重试创建或移动标签。仓库应通过 immutable tag ruleset 禁止删除或强制移动发布标签，并用 protected release environment 限制 `NPM_TOKEN` 的可用范围和审批人。递归发布不是原子事务，重试可能发生在部分包已经发布之后，但只能继续使用同一个版本和源码提交。
-
-workflow 的多次远端检查会缩小竞态窗口，但不能从技术上完全消除“最后一次检查结束后、npm 请求发出前 `main` 又前进”的 TOCTOU。发版期间应冻结 `main` 合入，或让所有能更新 `main` 的流程共享一个会实际阻塞写入的互斥机制。protected environment 的审批只控制发布 job 和 secret 的使用，不能单独锁定 `main`。若 `origin/main` 已前进或版本一致性校验失败，workflow 会拒绝继续；不得移动原 tag 来绕过。
-
-当前首次发布采用 GitHub Environment `npm-release` 中的 Secret `NPM_TOKEN`：在 npmjs.com 创建有期限、最小权限且仅覆盖所需 `@dsh-enhanced/*` 包的 **granular access token**，为该 environment 配置 required reviewers 和允许的部署分支/标签。workflow 会先检查 secret 非空并执行 `npm whoami`，通过后才发布。包完成首次发布和 npm 侧配置后，可迁移到 trusted publishing/OIDC，以移除长期 npm 写入 token；本流程暂不启用 OIDC。
-
-## 目录
+- [文档索引](docs/README.md)
+- [插件目录](plugins/README.md)
+- [仓库架构](docs/architecture.md)
+- [兼容性基线](docs/compatibility.md)
+- [个人助理路线图](docs/dsh-personal-assistant-self-built-plugin-roadmap.md)
 
 ```text
 plugins/   独立发布的 DSH bundle
 packages/  多插件复用的普通库
 templates/ 新插件模板
 scripts/   创建、安装、重启与校验脚本
-docs/      开发文档
+docs/      开发指南与历史研究
 ```
-
-- [插件目录](plugins/README.md) · [新增插件](docs/creating-a-plugin.md) · [架构](docs/architecture.md) · [兼容性](docs/compatibility.md)
 
 ## License
 

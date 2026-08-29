@@ -67,7 +67,7 @@ function sha256(value: string): string {
   return createHash('sha256').update(value).digest('hex')
 }
 
-function fixture() {
+function fixture(options: LarkAdapterOptions = {}) {
   const transport = new FakeTransport()
   const accept = vi.fn(async (_envelope: InboundEnvelope): Promise<{
     duplicate: boolean
@@ -78,7 +78,7 @@ function fixture() {
   const adapter = new LarkDeliveryAdapter({
     account: 'primary-bot', tenant: 'tenant-a', requireMentionInGroups: true,
     maxTextBytes: 65_536, staleAfterMs: 60_000,
-  }, transport, { now: () => 1_100 })
+  }, transport, { now: () => 1_100, ...options })
   return { accept, adapter, context, transport }
 }
 
@@ -331,7 +331,7 @@ describe('Lark delivery adapter', () => {
     await vi.waitFor(() => expect(f.transport.addReaction).toHaveResolved())
   })
 
-  test('renders only safe native progress events and never a reasoning event', async () => {
+  test('renders bounded tool details in direct-message progress without raw reasoning events', async () => {
     const f = fixture()
     await f.adapter.start(f.context)
     const common = {
@@ -340,9 +340,11 @@ describe('Lark delivery adapter', () => {
     await f.adapter.progress?.({ ...common, update: { kind: 'started' } })
     await f.adapter.progress?.({ ...common, update: {
       kind: 'tool-started', callId: 'call-1', toolName: 'web.search',
+      argumentsPreview: '{\n  "query": "release notes"\n}',
     } })
     await f.adapter.progress?.({ ...common, update: {
       kind: 'tool-finished', callId: 'call-1', failed: false,
+      resultPreview: 'Found 2 matching release notes',
     } })
     await f.adapter.progress?.({ ...common, update: { kind: 'todos', todos: [
       { content: '核对接口', status: 'completed' },
@@ -362,10 +364,13 @@ describe('Lark delivery adapter', () => {
     const serialized = JSON.stringify(f.transport.writeProgress.mock.calls)
     expect(serialized).toContain('RUN_STARTED')
     expect(serialized).toContain('TOOL_CALL_START')
+    expect(serialized).toContain('TOOL_CALL_ARGS')
     expect(serialized).toContain('TOOL_CALL_RESULT')
     expect(serialized).toContain('RUN_FINISHED')
     expect(serialized).toContain('核对接口')
     expect(serialized).not.toContain('REASONING_')
+    expect(events.map(event => event.eventType).filter(type => type.startsWith('TOOL_CALL_')))
+      .toEqual(['TOOL_CALL_START', 'TOOL_CALL_ARGS', 'TOOL_CALL_END', 'TOOL_CALL_RESULT'])
     // The OpenAPI request envelope is snake_case, but each event content is an
     // AG-UI payload. Assert the latter independently so fields cannot regress
     // into their outer-envelope spelling and become literal JSON in Feishu.
@@ -373,16 +378,158 @@ describe('Lark delivery adapter', () => {
     expect(eventContent('TOOL_CALL_START')).toMatchObject({
       toolCallId: 'call-1', toolCallName: 'web.search',
     })
+    expect(eventContent('TOOL_CALL_ARGS')).toEqual({
+      toolCallId: 'call-1', delta: '{\n  "query": "release notes"\n}',
+    })
     expect(eventContent('TOOL_CALL_END')).toEqual({ toolCallId: 'call-1' })
     expect(eventContent('TOOL_CALL_RESULT')).toMatchObject({
       messageId: 'result-call-1', toolCallId: 'call-1',
+      content: { type: 'code', code: 'Found 2 matching release notes' },
     })
     expect(eventContent('RUN_FINISHED')).toEqual({
       threadId: 'oc_dm', runId: 'delivery-1', status: 'done',
     })
   })
 
-  test('renders a reasoning-only turn as its own step bubble per step', async () => {
+  test('keeps tool arguments and results out of group progress', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    const target = {
+      principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
+      conversation: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a',
+        kind: 'group' as const, chat: 'oc_group' },
+    }
+    const common = { bindingId: 'binding-group', eventId: 'om_group', target }
+    await f.adapter.progress?.({ ...common, update: { kind: 'started' } })
+    await f.adapter.progress?.({ ...common, update: {
+      kind: 'tool-started', callId: 'call-group', toolName: 'memory_search',
+      argumentsPreview: '{"query":"private memory"}',
+    } })
+    await f.adapter.progress?.({ ...common, update: {
+      kind: 'tool-finished', callId: 'call-group', failed: true,
+      resultPreview: 'private memory result',
+      code: 'group-private-code',
+    } })
+    await f.adapter.progress?.({ ...common, update: { kind: 'failed', code: 'turn-group-private-code' } })
+
+    const serialized = JSON.stringify(f.transport.writeProgress.mock.calls)
+    expect(serialized).not.toContain('TOOL_CALL_ARGS')
+    expect(serialized).not.toContain('private memory')
+    expect(serialized).not.toContain('group-private-code')
+    expect(serialized).toContain('执行失败')
+    expect(serialized).toContain('TOOL_FAILED')
+    expect(serialized).toContain('任务未完成')
+  })
+
+  test('keeps direct-message details disabled when progressDetails is off', async () => {
+    const f = fixture({ progressDetails: 'off' })
+    await f.adapter.start(f.context)
+    const common = { bindingId: 'binding-off', eventId: 'om_off', target: intent().target }
+    await f.adapter.progress?.({ ...common, update: { kind: 'started' } })
+    await f.adapter.progress?.({ ...common, update: {
+      kind: 'tool-started', callId: 'call-off', toolName: 'memory_search',
+      argumentsPreview: '{"query":"private off query"}',
+    } })
+    await f.adapter.progress?.({ ...common, update: {
+      kind: 'tool-finished', callId: 'call-off', failed: true,
+      resultPreview: 'private off result', code: 'private-off-code',
+    } })
+    await f.adapter.progress?.({ ...common, update: { kind: 'failed', code: 'private-turn-code' } })
+
+    const serialized = JSON.stringify(f.transport.writeProgress.mock.calls)
+    expect(serialized).not.toContain('TOOL_CALL_ARGS')
+    expect(serialized).not.toContain('private off')
+    expect(serialized).not.toContain('private-off-code')
+    expect(serialized).not.toContain('private-turn-code')
+    expect(serialized).toContain('TOOL_FAILED')
+  })
+
+  test('does not widen a group run to details when a later intent changes target metadata', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    const groupTarget = {
+      principal: intent().target.principal,
+      conversation: { ...intent().target.conversation, kind: 'group' as const, chat: 'oc_group' },
+    }
+    const common = { bindingId: 'binding-fixed', eventId: 'om_fixed' }
+    await f.adapter.progress?.({ ...common, target: groupTarget, update: { kind: 'started' } })
+    await f.adapter.progress?.({ ...common, target: intent().target, update: {
+      kind: 'tool-started', callId: 'call-fixed', toolName: 'memory_search',
+      argumentsPreview: '{"query":"must stay private"}',
+    } })
+    await f.adapter.progress?.({ ...common, target: intent().target, update: {
+      kind: 'tool-finished', callId: 'call-fixed', failed: false,
+      resultPreview: 'must stay private result',
+    } })
+
+    const serialized = JSON.stringify(f.transport.writeProgress.mock.calls)
+    expect(serialized).not.toContain('TOOL_CALL_ARGS')
+    expect(serialized).not.toContain('must stay private')
+  })
+
+  test('keeps long and escaped tool identities distinct and present in every event', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    const common = { bindingId: 'binding-ids', eventId: 'om_ids', target: intent().target }
+    await f.adapter.progress?.({ ...common, update: { kind: 'started' } })
+    const rawIds = [`${'same-prefix'.repeat(40)}-a`, `${'same-prefix'.repeat(40)}-b`]
+    for (const callId of rawIds) {
+      await f.adapter.progress?.({ ...common, update: {
+        kind: 'tool-started', callId, toolName: '\u0000'.repeat(1_000),
+        argumentsPreview: '\u0000'.repeat(1_500),
+      } })
+      await f.adapter.progress?.({ ...common, update: {
+        kind: 'tool-finished', callId, failed: false, resultPreview: 'done',
+      } })
+    }
+
+    const events = f.transport.writeProgress.mock.calls
+      .flatMap(call => call[1] as readonly { eventType: string; content: string }[])
+    const toolEvents = events.filter(event => event.eventType.startsWith('TOOL_CALL_'))
+    expect(toolEvents.every(event => event.content.length <= 4_096)).toBe(true)
+    const parsed = toolEvents.map(event => ({
+      type: event.eventType,
+      content: JSON.parse(event.content) as { toolCallId?: string; toolCallName?: string },
+    }))
+    expect(parsed.every(event => event.content.toolCallId !== undefined)).toBe(true)
+    const ids = parsed.filter(event => event.type === 'TOOL_CALL_START')
+      .map(event => event.content.toolCallId)
+    expect(new Set(ids).size).toBe(2)
+    expect(ids.every(id => id !== undefined && id.length <= 240)).toBe(true)
+    expect(parsed.filter(event => event.type === 'TOOL_CALL_START')
+      .every(event => event.content.toolCallName?.includes('\u0000') === false)).toBe(true)
+    for (const id of ids) {
+      expect(parsed.filter(event => event.content.toolCallId === id).map(event => event.type))
+        .toEqual(['TOOL_CALL_START', 'TOOL_CALL_ARGS', 'TOOL_CALL_END', 'TOOL_CALL_RESULT'])
+    }
+  })
+
+  test('keeps required tool-result identity when escaped detail reaches the event character budget', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    const common = { bindingId: 'binding-large', eventId: 'om_large', target: intent().target }
+    await f.adapter.progress?.({ ...common, update: { kind: 'started' } })
+    await f.adapter.progress?.({ ...common, update: {
+      kind: 'tool-started', callId: 'call-large', toolName: 'memory_search', argumentsPreview: '{}',
+    } })
+    await f.adapter.progress?.({ ...common, update: {
+      kind: 'tool-finished', callId: 'call-large', failed: false,
+      resultPreview: '\u0000'.repeat(1_500),
+    } })
+
+    const events = f.transport.writeProgress.mock.calls
+      .flatMap(call => call[1] as readonly { eventType: string; content: string }[])
+    const result = events.find(event => event.eventType === 'TOOL_CALL_RESULT')
+    if (result === undefined) throw new Error('missing tool result')
+    expect(result.content.length).toBeLessThanOrEqual(4_096)
+    expect(JSON.parse(result.content)).toMatchObject({
+      toolCallId: 'call-large',
+      content: { type: 'code' },
+      truncated: true,
+    })
+  })
+
+  test('renders neutral phase updates as their own step bubbles', async () => {
     const f = fixture()
     await f.adapter.start(f.context)
     const common = { bindingId: 'binding-1', eventId: 'om_in', target: intent().target }
