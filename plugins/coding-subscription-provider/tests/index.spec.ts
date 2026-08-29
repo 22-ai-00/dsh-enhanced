@@ -23,9 +23,9 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
       'cursor-subscription',
     ])
     expect(resolveLlmRouteCapability(ctx.llm, 'codex-subscription', 'default'))
-      .toMatchObject({ toolCalls: 'none' })
+      .toMatchObject({ toolCalls: 'bridge' })
     expect(resolveLlmRouteCapability(ctx.llm, 'cursor-subscription', 'default'))
-      .toMatchObject({ toolCalls: 'none' })
+      .toMatchObject({ toolCalls: 'bridge' })
     await fiber.dispose()
     expect(ctx.llm.listProviders()).toEqual([])
     expect(resolveLlmRouteCapability(ctx.llm, 'codex-subscription', 'default')).toBeUndefined()
@@ -45,13 +45,38 @@ describe('dsh-enhanced-coding-subscription-provider', () => {
     const fiber = await ctx.plugin(Plugin, config)
     expect(ctx.llm.listProviders().map(provider => provider.id)).toEqual(['codex-subscription'])
     expect(resolveLlmRouteCapability(ctx.llm, 'codex-subscription', 'default'))
-      .toMatchObject({ toolCalls: 'none' })
+      .toMatchObject({ toolCalls: 'bridge' })
     expect(resolveLlmRouteCapability(ctx.llm, 'cursor-subscription', 'default')).toBeUndefined()
     await fiber.dispose()
     await ctx.fiber.dispose()
   })
 
-  it('advertises native tool calls only for the explicit Codex direct transport', async () => {
+  it('publishes the controlled tool bridge for every CLI-backed route', async () => {
+    const ctx = new Context()
+    await ctx.plugin(LlmRuntime)
+    await ctx.plugin(SessionStore)
+    await ctx.plugin(AgentRegistry)
+    const config = Plugin.Config()
+    config.claude.enabled = true
+    config.grok.enabled = true
+    config.grok.userVerifiedSubscription = true
+    const fiber = await ctx.plugin(Plugin, config)
+
+    for (const provider of [
+      'codex-subscription',
+      'claude-subscription',
+      'cursor-subscription',
+      'grok-subscription',
+    ]) {
+      expect(resolveLlmRouteCapability(ctx.llm, provider, 'default'))
+        .toMatchObject({ toolCalls: 'bridge' })
+    }
+
+    await fiber.dispose()
+    await ctx.fiber.dispose()
+  })
+
+  it('advertises native tool calls only for Codex direct while CLI routes use the controlled bridge', async () => {
     const ctx = new Context()
     await ctx.plugin(LlmRuntime)
     await ctx.plugin(SessionStore)

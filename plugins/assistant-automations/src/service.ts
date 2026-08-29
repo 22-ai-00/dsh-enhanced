@@ -80,15 +80,6 @@ export interface Config {
   allowUnbudgetedExecution?: boolean
   /** Trusted authority and execution bounds used for model-proposed definitions. */
   proposalDefaults?: AutomationProposalDefaults
-  /** Audited native-tool routes whose upstream adapters do not publish registry metadata yet. */
-  toolCapableProviders?: string[]
-  /**
-   * How to admit a route that publishes no tool-call capability at all. The DSH
-   * `generate` contract accepts `tools` for every adapter, so `allow` matches
-   * that baseline; `deny` opts a deployment into strict allowlisting. A
-   * provider-owned `none` declaration always fails closed either way.
-   */
-  unknownRouteToolCalls?: 'allow' | 'deny'
 }
 
 export interface AutomationServiceProposalInput {
@@ -188,10 +179,6 @@ const configSchema = Schema.object({
   reconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
   allowUnbudgetedExecution: Schema.boolean().default(false),
   proposalDefaults: proposalDefaultsSchema,
-  toolCapableProviders: Schema.array(
-    Schema.string().pattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,255}$/u),
-  ).default(['deepseek-official']),
-  unknownRouteToolCalls: Schema.union(['allow', 'deny'] as const).default('allow'),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' {
@@ -273,8 +260,6 @@ export class AssistantAutomationsService extends Service {
     const artifacts = new AutomationArtifactStore({ rootPath: config.runsPath, maxBytes: config.maxArtifactBytes })
     const runner = new PolicyBoundRunner(policy, new DshAutomationRunner(ctx, policy, {
       allowUnbudgetedExecution: config.allowUnbudgetedExecution,
-      toolCapableProviders: config.toolCapableProviders,
-      unknownRouteToolCalls: config.unknownRouteToolCalls ?? 'allow',
     }))
     this.coordinator = new AutomationCoordinator({
       store: this.store,

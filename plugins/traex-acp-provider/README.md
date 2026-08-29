@@ -2,7 +2,7 @@
 
 把同一台机器、同一 OS 用户已经登录的 TraeX / TRAE CLI 注册为 DeepSeek Harness 的 `traex-agent` provider。DSH 在这里是 **ACP client**：每次模型请求都会在校验 live Agent session 工作区后启动新的 `traex acp serve`、完成 ACP v1 握手、创建会话、校验模型/effort，并把握手目录作为非权威展示缓存。普通 `agent_message_chunk` 会映射为 DSH 文本；当请求带 DSH tool schema 时，TraeX 可以返回受控工具信封，插件把它转换成 DSH 原生 tool call，由 Harness 执行后进入下一 step。
 
-启用时，插件会在同一个 `LlmRuntime` 上通过 `@dsh-enhanced/llm-route-capabilities` 发布 `traex-agent` 的 `toolCalls: bridge`，并随 Cordis fiber 撤回。Delivery/Automations 因而能在启动模型前区分这条受控桥接 route 与 text-only coding subscription，而不依赖 rc.8 会丢弃的自定义 model metadata。
+启用时，插件会在同一个 `LlmRuntime` 上通过 `@dsh-enhanced/llm-route-capabilities` 发布 `traex-agent` 的 `toolCalls: bridge`，并随 Cordis fiber 撤回。这个字段只描述 adapter 如何把模型输出投影成标准 DSH tool call，不参与 Delivery/Automations 准入，也不改变模型可见的工具或 Skill；真正的工具授权与执行仍由统一的 Agent Loop、Policy、审批和 sandbox 负责。
 
 这不是订阅 OAuth 转接，也不是模型 API provider。认证、模型供应、网络请求和可能产生的费用均由本机 TraeX 负责；插件不读取或托管 token。仓库中的 [`@dsh-enhanced/acp`](../acp) 方向正好相反——它让 DSH 自己成为供编辑器调用的 ACP agent。
 

@@ -1,5 +1,7 @@
 # Grok Bot 0.18 重构仓库的 Codex 路由调研
 
+> **历史说明（2026-08-29）：** 本文中将 CLI route 标为 `none`/text-only 并建议按 route 准入的结论已被统一工具桥接取代。当前合同是工具和 Skills 属于 Agent/preset，provider 只把调用意图转换为 DSH tool call，不决定工具可见性或授权。下文保留为当时的调研快照。
+
 日期：2026-08-25
 外部仓库审计提交：`a9f633e09d49a85829b8236331b9e21f7e612634`
 

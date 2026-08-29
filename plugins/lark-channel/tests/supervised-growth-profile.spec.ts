@@ -53,6 +53,8 @@ const fixture = `
       databasePath: /Users/test/.dsh/assistant-automations/state.sqlite
       runsPath: /Users/test/.dsh/assistant-automations/runs
       schedulerEnabled: false
+      toolCapableProviders: [deepseek-official]
+      unknownRouteToolCalls: deny
 - id: dsh-enhanced-assistant-delivery
   config:
     defaultWorkspace: !!js dshHomePath('assistant-workspace')
@@ -60,6 +62,7 @@ const fixture = `
     agentProvider: deepseek-official
     agentModel: deepseek-v4-flash
     toolCapableProviders: [deepseek-official]
+    unknownRouteToolCalls: deny
 - id: dsh-enhanced-lark-channel
   config: { enabled: true, account: primary, tenant: personal }
 - id: dsh-enhanced-traex-acp-provider
@@ -123,13 +126,15 @@ describe('supervised-growth profile patch', () => {
     const growth = heartbeat.heartbeats.find((entry: { id: string }) => entry.id === 'supervised-growth')
 
     expect(assistant.assistantAutomations.schedulerEnabled).toBe(true)
-    expect(assistant.assistantAutomations.toolCapableProviders).toContain('traex-agent')
+    expect(assistant.assistantAutomations.toolCapableProviders).toBeUndefined()
+    expect(assistant.assistantAutomations.unknownRouteToolCalls).toBeUndefined()
     expect(assistant.assistantPolicy.rules.find((rule: { id: string }) => rule.id === 'keep-user-rule')).toBeDefined()
     expect(assistant.assistantPolicy.budgets).toContainEqual({
       id: 'supervised-growth-daily-runs', metric: 'automation-runs', limit: 7, periodMs: 86400000, scope: 'workspace',
     })
     expect(delivery).toMatchObject({ agentProvider: 'traex-agent', agentModel: 'default' })
-    expect(delivery.toolCapableProviders).toEqual(['traex-agent'])
+    expect(delivery.toolCapableProviders).toBeUndefined()
+    expect(delivery.unknownRouteToolCalls).toBeUndefined()
     expect(traex).toMatchObject({ enabled: true, cwd: '/Users/test/.dsh/assistant-workspace' })
     expect(growth).toMatchObject({
       enabled: true,

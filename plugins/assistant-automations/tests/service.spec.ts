@@ -107,7 +107,6 @@ describe('assistant automations Cordis service', () => {
       databasePath: '/tmp/automations.sqlite',
       runsPath: '/tmp/runs',
     })
-    expect(config.toolCapableProviders).toEqual(['deepseek-official'])
     expect(config.allowUnbudgetedExecution).toBe(false)
     expect(config.proposalDefaults).toEqual({
       provider: 'deepseek-official', model: 'deepseek-chat', allowedTools: [],
@@ -115,11 +114,6 @@ describe('assistant automations Cordis service', () => {
       misfireKind: 'latest', misfireLimit: 1, overlap: 'skip', retrySafety: 'never', maxRetries: 0,
       budgetId: 'assistant-automations-proposals', budgetAmount: 1,
     })
-    expect(() => AssistantAutomationsService.Config({
-      databasePath: '/tmp/automations.sqlite',
-      runsPath: '/tmp/runs',
-      toolCapableProviders: ['bad route'],
-    })).toThrow(/toolCapableProviders|pattern|invalid/i)
     expect(() => AssistantAutomationsService.Config({
       databasePath: '/tmp/automations.sqlite', runsPath: '/tmp/runs',
       proposalDefaults: { ...proposalDefaults, budgetId: '' },

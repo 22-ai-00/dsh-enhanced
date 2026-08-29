@@ -1,5 +1,7 @@
 # Agent Five-Breakpoint Implementation Plan
 
+> **历史说明（2026-08-29）：** 第 2 节的 provider/model 工具能力准入是当时的过渡设计，现已被统一工具桥接取代。工具和 Skills 属于 Agent/preset，所有 model route 获得同一 schemas，执行仍经过 Agent Loop / Policy。下文保留为历史实施记录，不是当前运行合同。
+
 > **Execution rule:** preserve the current dirty worktree, make no commits or branch moves, and implement every behavior test-first. A focused test must be observed failing for the intended reason before its production change.
 
 **Goal:** Turn the existing DSH plugin set into a safely deployable, Feishu-connected, proactively scheduled, approval-gated learning agent whose LLM route can be supplied by Codex/TraeX without silently selecting a model that cannot execute the mounted tools.
