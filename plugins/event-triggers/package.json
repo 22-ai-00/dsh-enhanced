@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/event-triggers",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Durable bounded file, HTTP/JSON, and HMAC webhook triggers for DSH automations.",
   "license": "MIT",
   "type": "module",
