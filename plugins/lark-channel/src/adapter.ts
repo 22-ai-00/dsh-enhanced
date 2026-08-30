@@ -133,6 +133,9 @@ const LARK_TOOL_APPROVAL_ARGUMENTS_MAX_BYTES = 16 * 1_024
 const LARK_TOOL_APPROVAL_MAX_TIMER_MS = 2_147_483_647
 const larkCallbackIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,255}$/u
 const larkProviderMessageIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
+// Lark can reject or render a Markdown card blank when it contains a GFM table. This mirrors the
+// proven Hermes Feishu compatibility rule while leaving ordinary Markdown cards unchanged.
+const larkMarkdownTable = /^\|.*\|\r?\n\|[-|: ]+\|/mu
 
 function hasUsableApprovalSecret(secret: string | undefined): secret is string {
   return secret !== undefined && Buffer.byteLength(secret, 'utf8') >= 16
@@ -701,6 +704,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       return { outcome: 'not-sent', failureCode: 'lark-route-mismatch', retryable: false }
     }
     if (signal.aborted) return { outcome: 'not-sent', failureCode: 'lark-aborted', retryable: true }
+    const useMarkdownCard = intent.format === 'markdown' && !larkMarkdownTable.test(intent.text)
     let input: import('./types.js').LarkSendInput
     if (intent.format === 'approval') {
       if (intent.approval === undefined || this.approvalSecret === undefined || this.settleApproval === undefined) {
@@ -775,7 +779,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         revision: 0,
       }) }
     } else {
-      input = intent.format === 'markdown' ? { markdown: intent.text } : { text: intent.text }
+      input = useMarkdownCard ? { markdown: intent.text } : { text: intent.text }
     }
     // A synthetic lane represents all standalone group messages from one
     // sender. Replying to the inbound event would make Lark create a provider
@@ -800,11 +804,16 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       if (!(error instanceof LarkTransportError) || error.code !== 'format_error') {
         return sendFailure(error)
       }
-      const fallback = intent.format === 'permission-picker' && intent.permissionPicker !== undefined
-        ? { text: intent.text, suffix: 'permission-picker-fallback' }
-        : intent.format === 'model-picker' && intent.modelPicker !== undefined
-          ? { text: modelPickerFallbackText(intent), suffix: 'model-picker-fallback' }
-          : undefined
+      // Agent-authored Markdown can be valid for DSH yet contain a construct the current Lark
+      // card parser rejects. The answer is already durable at this boundary, so preserve it with
+      // a text message instead of dead-lettering the only user-visible result.
+      const fallback = useMarkdownCard
+        ? { text: intent.text, suffix: 'markdown-fallback' }
+        : intent.format === 'permission-picker' && intent.permissionPicker !== undefined
+          ? { text: intent.text, suffix: 'permission-picker-fallback' }
+          : intent.format === 'model-picker' && intent.modelPicker !== undefined
+            ? { text: modelPickerFallbackText(intent), suffix: 'model-picker-fallback' }
+            : undefined
       if (fallback === undefined) return sendFailure(error)
       try {
         result = await this.transport.send(conversation.chat, { text: fallback.text }, {
