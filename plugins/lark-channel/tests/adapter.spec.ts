@@ -287,7 +287,7 @@ describe('Lark delivery adapter', () => {
     })
   })
 
-  test('sends a GFM table answer directly as exact text with the original reply target', async () => {
+  test('keeps a GFM table answer on the native card path with the original reply target', async () => {
     const f = fixture()
     await f.adapter.start(f.context)
     const answer = '| 技能 | 用途 |\n| --- | --- |\n| `skill` | 查看可用技能 |'
@@ -302,7 +302,7 @@ describe('Lark delivery adapter', () => {
       outcome: 'accepted', providerMessageId: 'om_sent',
     })
     expect(f.transport.send).toHaveBeenCalledOnce()
-    expect(f.transport.send).toHaveBeenCalledWith('oc_group', { text: answer }, {
+    expect(f.transport.send).toHaveBeenCalledWith('oc_group', { markdown: answer }, {
       replyTo: 'om_in', replyInThread: true, requestKey: 'reply-1',
     })
     expect(f.transport.addReaction).toHaveBeenCalledWith('om_in', 'DONE')
@@ -325,6 +325,27 @@ describe('Lark delivery adapter', () => {
     expect(f.transport.send).toHaveBeenNthCalledWith(2, 'oc_dm', { text: answer }, {
       replyTo: 'om_in', requestKey: 'reply-1:markdown-fallback',
     })
+    expect(f.transport.addReaction).toHaveBeenCalledWith('om_in', 'DONE')
+  })
+
+  test('falls back to the byte-exact table answer when Lark rejects its native card', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    f.transport.send.mockRejectedValueOnce(new LarkTransportError('format_error', 'invalid native table'))
+    const answer = '前文\r\n\r\n| 技能 | 用途 |\r\n| :--- | ---: |\r\n| `a\\|b` | **说明** |\r\n\r\n后文\r\n'
+
+    await expect(f.adapter.send(intent({ format: 'markdown', text: answer }),
+      new AbortController().signal)).resolves.toEqual({
+      outcome: 'accepted', providerMessageId: 'om_sent',
+    })
+    expect(f.transport.send).toHaveBeenCalledTimes(2)
+    expect(f.transport.send).toHaveBeenNthCalledWith(1, 'oc_dm', { markdown: answer }, {
+      replyTo: 'om_in', requestKey: 'reply-1',
+    })
+    expect(f.transport.send).toHaveBeenNthCalledWith(2, 'oc_dm', { text: answer }, {
+      replyTo: 'om_in', requestKey: 'reply-1:markdown-fallback',
+    })
+    expect((f.transport.send.mock.calls[1]![1] as { text: string }).text).toBe(answer)
     expect(f.transport.addReaction).toHaveBeenCalledWith('om_in', 'DONE')
   })
 

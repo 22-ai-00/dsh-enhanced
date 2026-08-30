@@ -58,6 +58,7 @@
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
     "@larksuiteoapi/node-sdk": "1.73.0",
+    "markdown-it": "14.1.1",
     "qrcode": "1.5.4",
     "yaml": "2.9.0"
   },
@@ -91,6 +92,7 @@
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/credentials-keychain": "workspace:*",
     "@dsh-enhanced/traex-acp-provider": "workspace:*",
+    "@types/markdown-it": "14.1.2",
     "@types/node": "catalog:",
     "@types/qrcode": "1.5.6",
     "typescript": "catalog:",

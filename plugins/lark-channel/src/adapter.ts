@@ -133,9 +133,6 @@ const LARK_TOOL_APPROVAL_ARGUMENTS_MAX_BYTES = 16 * 1_024
 const LARK_TOOL_APPROVAL_MAX_TIMER_MS = 2_147_483_647
 const larkCallbackIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,255}$/u
 const larkProviderMessageIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
-// Lark can reject or render a Markdown card blank when it contains a GFM table. This mirrors the
-// proven Hermes Feishu compatibility rule while leaving ordinary Markdown cards unchanged.
-const larkMarkdownTable = /^\|.*\|\r?\n\|[-|: ]+\|/mu
 
 function hasUsableApprovalSecret(secret: string | undefined): secret is string {
   return secret !== undefined && Buffer.byteLength(secret, 'utf8') >= 16
@@ -704,7 +701,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       return { outcome: 'not-sent', failureCode: 'lark-route-mismatch', retryable: false }
     }
     if (signal.aborted) return { outcome: 'not-sent', failureCode: 'lark-aborted', retryable: true }
-    const useMarkdownCard = intent.format === 'markdown' && !larkMarkdownTable.test(intent.text)
+    const useMarkdownCard = intent.format === 'markdown'
     let input: import('./types.js').LarkSendInput
     if (intent.format === 'approval') {
       if (intent.approval === undefined || this.approvalSecret === undefined || this.settleApproval === undefined) {
