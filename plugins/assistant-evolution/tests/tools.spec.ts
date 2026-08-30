@@ -1,5 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
-import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import { CallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -48,7 +48,7 @@ function agent(): Agent {
   }
 }
 
-async function harness() {
+async function harness(options: { autonomousRollback?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-evolution-tools-'))
   temporaryRoots.push(root)
   const ctx = new Context()
@@ -78,6 +78,13 @@ async function harness() {
         actions: ['execute'],
         resource: { kind: 'tool', id: 'evolution_*' },
       },
+      {
+        id: 'allow-evolution-rollback',
+        effect: 'allow',
+        subject: { kind: 'agent', id: 'primary', workspace: '/work/alpha' },
+        actions: ['rollback'],
+        resource: { kind: 'evolution', id: 'rule:*' },
+      },
     ],
   })
   ctx.provide('assistantDelivery', {
@@ -94,6 +101,7 @@ async function harness() {
     databasePath: join(root, 'evolution.sqlite'),
     minSample: 4,
     reconcileIntervalMs: 0,
+    autonomousRollback: options.autonomousRollback ?? true,
   })
   return { ctx, agent: agent() }
 }
@@ -127,15 +135,63 @@ function observeTrusted(ctx: Context, situation: string, outcome: 'succeeded' | 
   })
 }
 
+async function approvedRule(ctx: Context, target: Agent, situation: string) {
+  for (let index = 1; index <= 4; index += 1) {
+    observeTrusted(ctx, situation, 'failed', index)
+  }
+  const proposed = ctx.assistantEvolution.propose(target, {
+    mutation: { op: 'adopt', input: { situation, guidance: 'Use the reviewed approach.' } },
+  })
+  ctx.assistantPolicy.decideProposal({
+    proposalId: proposed.policyProposalId,
+    principal: 'owner:lark:123',
+    expectedVersion: 1,
+    decision: 'approved',
+    reason: 'owner confirmed',
+  })
+  return ctx.assistantEvolution.reconcileProposals()[0]!.rule!
+}
+
+async function recordAttributedFailures(ctx: Context, rule: Awaited<ReturnType<typeof approvedRule>>) {
+  const automationId = rule.situation.replace(/^automation:/u, '')
+  for (let index = 1; index <= 4; index += 1) {
+    const session = agent()
+    agentEvents(ctx, session).emit('agent/session-start', { source: 'startup' })
+    const exposure = await ctx.assistantEvolution.captureAutomationExposure({
+      workspace: '/work/alpha',
+      agentPreset: 'primary',
+      automationId,
+      sessionId: String(session.session.id),
+    })
+    ctx.assistantEvolution.recordAutomationOutcome({
+      situation: rule.situation,
+      outcome: 'failed',
+      detail: `post-exposure failure ${index}`,
+      workspace: '/work/alpha',
+      agentPreset: 'primary',
+      automationId,
+      sessionId: String(session.session.id),
+      ruleId: exposure!.ruleId,
+      guidanceVersion: exposure!.guidanceVersion,
+      occurredAt: Date.now() + 10_000 + index,
+      idempotencyKey: `rollback-evidence:${rule.id}:${index}`,
+    })
+  }
+}
+
 describe('assistant evolution tools', () => {
-  test('registers exactly three bounded evolution tools', async () => {
+  test('registers exactly four bounded evolution tools', async () => {
     const { ctx } = await harness()
     expect(ctx.tools.schemas().map(schema => schema.name).filter(name => name.startsWith('evolution_')).sort())
-      .toEqual(['evolution_observe', 'evolution_propose', 'evolution_review'])
+      .toEqual(['evolution_observe', 'evolution_propose', 'evolution_review', 'evolution_rollback'])
+    const rollback = ctx.tools.schemas().find(schema => schema.name === 'evolution_rollback')
+    const parameters = rollback!.parameters as { properties: Record<string, unknown> }
+    expect(Object.keys(parameters.properties).sort())
+      .toEqual(['expected_version', 'rule_id'])
     await ctx.fiber.restart()
   })
 
-  test('all three tools fail closed without a trusted Agent', async () => {
+  test('all four tools fail closed without a trusted Agent', async () => {
     const { ctx } = await harness()
     for (const [name, args] of [
       ['evolution_observe', {
@@ -143,6 +199,9 @@ describe('assistant evolution tools', () => {
       }],
       ['evolution_review', {}],
       ['evolution_propose', { operation: 'adopt', situation: 'x', guidance: 'x' }],
+      ['evolution_rollback', {
+        rule_id: 'rule-00000000-0000-4000-8000-000000000000', expected_version: 1,
+      }],
     ] as const) {
       const result = await ctx.tools.execute(call(name, args))
       expect(result.isError).toBe(true)
@@ -293,5 +352,91 @@ describe('assistant evolution tools', () => {
     expect(first.isError).toBe(false)
     expect(replay.isError ? undefined : replay.value).toEqual(first.isError ? undefined : first.value)
     await ctx.fiber.restart()
+  })
+
+  test('rollback accepts only an exact target while Host owns risk, reason, and evidence', async () => {
+    const { ctx, agent: target } = await harness()
+    const rule = await approvedRule(ctx, target, 'automation:tool-rollback')
+    await recordAttributedFailures(ctx, rule)
+
+    const rolled = await ctx.tools.execute(call('evolution_rollback', {
+      rule_id: rule.id,
+      expected_version: rule.version,
+    }, target))
+    const value = rolled.isError ? undefined : rolled.value as {
+      ruleId: string
+      status: string
+      version: number
+      replayed: boolean
+      risk: string
+      reason: string
+      evaluation: { failures: number; total: number }
+      baseline: { failures: number; total: number }
+      evidence: { digest: string; total: number; sampleEpisodeIds: string[] }
+    }
+
+    expect(rolled.isError).toBe(false)
+    expect(value).toMatchObject({
+      ruleId: rule.id,
+      status: 'retired',
+      version: 2,
+      replayed: false,
+      risk: 'low',
+      evaluation: { failures: 4, total: 4 },
+      baseline: { failures: 4, total: 4 },
+      evidence: { total: 4 },
+    })
+    expect(value?.reason).toMatch(/Automatic low-risk rollback/u)
+    expect(value?.evidence.digest).toMatch(/^[a-f0-9]{64}$/u)
+    expect(value?.evidence.sampleEpisodeIds).toHaveLength(4)
+    expect(ctx.assistantEvolution.listRules(target, 'active')).toEqual([])
+    expect(ctx.assistantPolicy.listPendingApprovalDispatches()).toHaveLength(0)
+    await ctx.fiber.restart()
+  })
+
+  test('rollback is one attempt per Agent while a new Agent can replay the exact receipt', async () => {
+    const { ctx, agent: target } = await harness()
+    const rule = await approvedRule(ctx, target, 'automation:tool-rollback-replay')
+    await recordAttributedFailures(ctx, rule)
+    const args = { rule_id: rule.id, expected_version: rule.version }
+
+    const first = await ctx.tools.execute(call('evolution_rollback', args, target))
+    const sameAgentReplay = await ctx.tools.execute(call('evolution_rollback', args, target))
+    const newAgentReplay = await ctx.tools.execute(call('evolution_rollback', args, agent()))
+
+    expect(first.isError).toBe(false)
+    expect(sameAgentReplay.isError).toBe(true)
+    expect(JSON.stringify(sameAgentReplay.content)).toMatch(/one|already|attempt/iu)
+    expect(newAgentReplay.isError).toBe(false)
+    expect(newAgentReplay.isError ? undefined : newAgentReplay.value).toMatchObject({
+      ruleId: rule.id,
+      status: 'retired',
+      replayed: true,
+    })
+    expect(ctx.assistantEvolution.health().autonomousRollbacks).toBe(1)
+    await ctx.fiber.restart()
+  })
+
+  test('a failed rollback consumes the Agent attempt and disabled mode mutates nothing', async () => {
+    const enabled = await harness()
+    const invalid = await enabled.ctx.tools.execute(call('evolution_rollback', {
+      rule_id: 'not-a-server-rule', expected_version: 1,
+    }, enabled.agent))
+    const retry = await enabled.ctx.tools.execute(call('evolution_rollback', {
+      rule_id: 'rule-00000000-0000-4000-8000-000000000000', expected_version: 1,
+    }, enabled.agent))
+    expect(invalid.isError).toBe(true)
+    expect(retry.isError).toBe(true)
+    expect(JSON.stringify(retry.content)).toMatch(/one|already|attempt/iu)
+    await enabled.ctx.fiber.restart()
+
+    const disabled = await harness({ autonomousRollback: false })
+    const denied = await disabled.ctx.tools.execute(call('evolution_rollback', {
+      rule_id: 'rule-00000000-0000-4000-8000-000000000000', expected_version: 1,
+    }, disabled.agent))
+    expect(denied.isError).toBe(true)
+    expect(JSON.stringify(denied.content)).toMatch(/disabled|forbidden/iu)
+    expect(disabled.ctx.assistantEvolution.health().autonomousRollbacks).toBe(0)
+    await disabled.ctx.fiber.restart()
   })
 })

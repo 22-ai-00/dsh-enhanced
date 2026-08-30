@@ -49,6 +49,10 @@ export interface MemorySearchRequest {
   context: MemoryAgentContext
   query: string
   limit?: number
+  /** Optional Host-side filters. Model-facing callers cannot choose these. */
+  kinds?: readonly MemoryKind[]
+  trusts?: readonly MemoryTrust[]
+  sensitivities?: readonly MemorySensitivity[]
 }
 
 export interface MemorySearchHit {

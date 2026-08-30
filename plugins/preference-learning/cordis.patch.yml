@@ -1,0 +1,19 @@
+- insert:
+    - id: dsh-enhanced-preference-learning
+      name: '@dsh-enhanced/preference-learning'
+      inject:
+        - assistantPolicy
+        - systemPrompt
+      config:
+        enabled: true
+        databasePath: !!js dshHomePath('preference-learning/preferences.sqlite')
+        signalTtlMs: 7776000000
+        hypothesisTtlMs: 2592000000
+        minSignalsForActivation: 2
+        minConfidenceBps: 7500
+        maxContradictionBps: 2500
+        maxActiveOverlays: 6
+        maxReviewHypotheses: 20
+        maxOverlayBytes: 2048
+        maintenanceIntervalMs: 3600000
+        maintenanceBatchSize: 500

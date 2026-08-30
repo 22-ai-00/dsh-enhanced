@@ -41,6 +41,12 @@ import type {
   PreparedInboundMessage,
 } from './coordinator.js'
 import { externalPrincipalId } from './canonical.js'
+import {
+  feedbackSignalInput,
+  feedbackUsage,
+  parseFeedbackCommand,
+} from './feedback-command.js'
+import type { FeedbackSignalSelection } from './feedback-command.js'
 import type { InboundImageMaterializer } from './inbound-images.js'
 import type { DeliveryInboundRuntime } from './service.js'
 import {
@@ -56,6 +62,7 @@ import type {
   ConversationModelSelection,
   ConversationRef,
   DeliveryProgressUpdate,
+  DeliveryPreferenceFeedback,
   InboundEnvelope,
   ModelPickerIntent,
   ModelRouteRef,
@@ -100,6 +107,18 @@ interface DshDeliveryRuntimeOptions {
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
   ): boolean
+  isOwnerFeedbackController(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): boolean
+  authorizeOwnerPreferenceFeedback(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    selections: readonly Readonly<FeedbackSignalSelection>[],
+  ): { occurredAt: number } | undefined
+  dispatchPreferenceFeedback(
+    events: readonly Readonly<DeliveryPreferenceFeedback>[],
+  ): Promise<'recorded' | 'unavailable' | 'unknown'>
   /** Durably reserve the exact terminal reply authorization before permission state can change. */
   authorizePermissionReply(
     binding: Readonly<ConversationBinding>,
@@ -1880,6 +1899,106 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     return { outcome: 'processed' }
   }
 
+  private async runFeedbackCommand(
+    command: ParsedDeliveryCommand,
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    markDispatching: MarkInboundDispatching | undefined,
+  ): Promise<InboundProcessResult> {
+    const parsed = parseFeedbackCommand(command.rawInput)
+    if (parsed.kind === 'invalid') {
+      return this.replySessionCommand(binding, envelope, {
+        text: feedbackUsage,
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if ((envelope.attachments?.length ?? 0) > 0) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '反馈命令不接受文件、图片或其他附件；本次反馈未记录。请只发送 /feedback 文字命令。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    let authorized: boolean
+    try {
+      authorized = this.options.isOwnerFeedbackController(binding, envelope)
+    } catch {
+      return {
+        outcome: 'not-processed',
+        failureCode: 'feedback-authorization-check-failed',
+        retryable: true,
+      }
+    }
+    if (!authorized) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '当前身份不能提交偏好反馈；本次反馈未记录。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if (markDispatching === undefined) {
+      return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+    }
+    signal.throwIfAborted()
+    markDispatching()
+    signal.throwIfAborted()
+
+    // The dispatch fence proves the exact Inbox/binding snapshot. Recheck the
+    // mutable owner and consume an audited preference-signal authorization
+    // immediately before the authoritative sink receives the batch.
+    let attestation: { occurredAt: number } | undefined
+    try {
+      attestation = this.options.authorizeOwnerPreferenceFeedback(
+        binding,
+        envelope,
+        parsed.selections,
+      )
+    } catch {
+      return {
+        outcome: 'not-processed',
+        failureCode: 'feedback-authorization-check-failed-after-dispatch',
+        retryable: false,
+      }
+    }
+    if (attestation === undefined) {
+      return {
+        outcome: 'not-processed',
+        failureCode: 'feedback-authorization-revoked',
+        retryable: false,
+      }
+    }
+
+    const events = parsed.selections.map(selection => feedbackSignalInput(
+      binding,
+      envelope,
+      selection,
+      attestation.occurredAt,
+    ))
+    const result = await this.options.dispatchPreferenceFeedback(Object.freeze(events))
+    signal.throwIfAborted()
+    if (result === 'unavailable') {
+      this.options.replyCommand(binding, envelope.eventId, {
+        text: '偏好学习服务尚未启用；本次反馈未记录。请联系管理员安装或启用 preference-learning。',
+        format: 'plain',
+      })
+      return { outcome: 'processed' }
+    }
+    if (result === 'unknown') {
+      this.options.replyCommand(binding, envelope.eventId, {
+        text: '反馈记录状态未知；请不要为同一回答重复提交。系统只会在收到匹配的持久回执后确认成功。',
+        format: 'plain',
+      })
+      return { outcome: 'processed' }
+    }
+    signal.throwIfAborted()
+    this.options.replyCommand(binding, envelope.eventId, {
+      text: parsed.selections.length === 1
+        ? '已记录反馈。它只作用于当前工作区与 preset。'
+        : '已记录反馈及对应的回复长度偏好。它们只作用于当前工作区与 preset。',
+      format: 'plain',
+    })
+    return { outcome: 'processed' }
+  }
+
   private sessionHelp(native: readonly CommandDescriptor[]): string {
     const lines = [
       '会话命令：',
@@ -1888,6 +2007,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       '- /status（/session）：查看当前 session、上下文与模型。',
       '- /model：查看或切换模型；上下文保留。',
       '- /permission：查看或切换运行权限。',
+      '- /feedback：提交结构化反馈或低风险回复偏好；不进入模型。',
       '- /help：显示当前实际可用命令。',
     ]
     const visible = native.filter(command => SAFE_NATIVE_COMMANDS.has(command.name))
@@ -2146,6 +2266,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     prepared?: Readonly<PreparedInboundMessage>,
     markDispatching?: MarkInboundDispatching,
   ): Promise<InboundProcessResult> {
+    if (sessionCommand?.name === 'feedback') {
+      return await this.runFeedbackCommand(
+        sessionCommand,
+        binding,
+        envelope,
+        signal,
+        markDispatching,
+      )
+    }
     const permissions = permissionCommand(sessionCommand)
     if (permissions !== undefined) {
       if (markDispatching === undefined) {

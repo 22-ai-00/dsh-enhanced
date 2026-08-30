@@ -246,7 +246,7 @@ describe('versioned rule identity', () => {
   })
 })
 
-describe('schema v3 migration through the v2 quarantine', () => {
+describe('schema v4 migration through the v2 quarantine', () => {
   test('quarantines unverifiable pending v2 proposals as durable conflicts', () => {
     const path = databasePath('v2-to-v3')
     const v2 = new DatabaseSync(path)
@@ -337,8 +337,8 @@ describe('schema v3 migration through the v2 quarantine', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(3)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3)
+    expect(evolutionSchemaVersion).toBe(4)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(4)
     expect(migrated.prepare(`SELECT scope_key, trust, rule_id, claimed_rule_id FROM evolution_episodes`).get())
       .toEqual({ scope_key: 'legacy:v1', trust: 'legacy', rule_id: null, claimed_rule_id: 'claimed-rule' })
     expect(migrated.prepare(`SELECT scope_key, generation FROM evolution_rules`).get())
@@ -349,6 +349,8 @@ describe('schema v3 migration through the v2 quarantine', () => {
       .some((column: unknown) => (column as { name: string }).name === 'guidance_version')).toBe(true)
     expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'evolution_guidance_exposures'").get())
       .toEqual({ name: 'evolution_guidance_exposures' })
+    expect(migrated.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'evolution_autonomous_rollbacks'").get())
+      .toEqual({ name: 'evolution_autonomous_rollbacks' })
     migrated.close()
 
     const target = new EvolutionStore({ path })

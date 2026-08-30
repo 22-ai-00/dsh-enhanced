@@ -163,9 +163,9 @@ export class DshAutomationRunner implements AutomationRunner {
     let followupSubmitted = false
     let removeAbort: (() => void) | undefined
     let result: AutomationRunnerResult | undefined
+    let toolCalls = 0
     try {
       const globalNames = tools.schemas().map(schema => schema.name)
-      let toolCalls = 0
       agentCreationSubmitted = true
       handle = await agents.create({
         sessionId: SessionId(input.sessionId),
@@ -256,6 +256,7 @@ export class DshAutomationRunner implements AutomationRunner {
         ...summarize(agent.session.events, input.signal),
         sessionId: input.sessionId,
       }
+      result = { ...result, usage: { ...result.usage, toolCalls } }
       await sessions.flush(agent.session)
       if (reservationId !== undefined) {
         this.policy.finalize(reservationId, input.automation.definition.budgetAmount!)

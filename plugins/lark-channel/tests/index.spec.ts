@@ -7,6 +7,8 @@ const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.
   version: string
   bin: Record<string, string>
   files: string[]
+  peerDependencies: Record<string, string>
+  devDependencies: Record<string, string>
 }
 
 describe('dsh-enhanced-lark-channel entrypoint', () => {
@@ -27,6 +29,11 @@ describe('dsh-enhanced-lark-channel entrypoint', () => {
     for (const path of Object.values(manifest.bin)) {
       expect(readFileSync(new URL(`..${path.slice(1)}`, import.meta.url), 'utf8')).toMatch(/^#!\/usr\/bin\/env node/u)
     }
+  })
+
+  test('does not couple the channel or supervised activator to a specific model provider', () => {
+    expect(manifest.peerDependencies).not.toHaveProperty('@dsh-enhanced/traex-acp-provider')
+    expect(manifest.devDependencies).not.toHaveProperty('@dsh-enhanced/traex-acp-provider')
   })
 
   test('declares credentialHandle as a conditional Cordis dependency', () => {

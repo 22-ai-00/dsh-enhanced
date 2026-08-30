@@ -40,7 +40,7 @@ import { AssistantDeliveryService } from '../src/service.ts'
 import { DeliveryStore } from '../src/store.ts'
 import type {
   ConversationBinding, ConversationModelSelection, ConversationRef, DeliveryAdapter, DeliveryProgressIntent,
-  InboundEnvelope, ModelRouteRef, OutboundFormat, OutboundIntent,
+  DeliveryPreferenceFeedback, InboundEnvelope, ModelRouteRef, OutboundFormat, OutboundIntent,
 } from '../src/types.ts'
 
 const roots: string[] = []
@@ -166,6 +166,7 @@ interface PermissionHarnessOptions {
   providePresets?: boolean
   provideApproval?: boolean
   allowAgentReply?: boolean
+  allowPreferenceSignal?: boolean
   presets?: Record<string, PresetSpec>
   seedDefaultPreset?: string
   onResolve?(): void
@@ -444,6 +445,12 @@ async function runtimeHarness(
       resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
     { id: 'owner-ingest', effect: 'allow', subject: { kind: 'external', id: 'lark/bot-1/tenant-a/ou_owner' },
       actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+    { id: 'linked-ingest', effect: 'allow', subject: { kind: 'external', id: 'lark/bot-1/tenant-a/ou_linked' },
+      actions: ['pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+    ...(permissions?.allowPreferenceSignal === false ? [] : [{ id: 'owner-preference-signal', effect: 'allow' as const, subject: {
+      kind: 'external' as const, id: 'lark/bot-1/tenant-a/ou_owner', workspace,
+    }, actions: ['signal'], resource: { kind: 'preference' as const, id: `${agentPreset}/*` },
+    context: { initiators: ['external' as const] } }]),
     ...(permissions?.allowAgentReply === false ? [] : [{ id: 'agent-reply', effect: 'allow' as const, subject: {
       kind: 'agent' as const, id: agentPreset, workspace, principal: 'lark/bot-1/tenant-a/ou_owner',
     },
@@ -452,6 +459,9 @@ async function runtimeHarness(
       ...(permissions?.replyBudget === undefined
         ? {}
         : { budget: { id: 'permission-replies', amount: 1 } }) }]),
+    { id: 'linked-agent-reply', effect: 'allow', subject: {
+      kind: 'agent' as const, id: agentPreset, workspace, principal: 'lark/bot-1/tenant-a/ou_linked',
+    }, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
   ], ...(permissions?.replyBudget === undefined ? {} : { budgets: [{
     id: 'permission-replies',
     metric: 'replies',
@@ -531,6 +541,7 @@ function runtimeStore(service: AssistantDeliveryService): {
     failureCode?: string
     leaseUntil?: number
     nextAttemptAt?: number
+    receivedAt: number
   } | undefined
   getInboxByProviderEvent(channel: string, account: string, eventId: string): {
     id: string
@@ -1721,6 +1732,262 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(fixture.sends.at(-1)?.text).toContain('当前会话')
     expect(fixture.sends.at(-1)?.text).toContain('第 1 代')
     expect(fixture.sends.at(-1)?.text).toContain('上下文消息')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback emits an owner-attested typed event only after the durable dispatch gate', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-owner-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-feedback-seed', 'establish the exact binding'))
+    await drive(fixture.service)
+
+    const order: string[] = []
+    const store = runtimeStore(fixture.service)
+    const markInboxDispatching = store.markInboxDispatching.bind(store)
+    vi.spyOn(store, 'markInboxDispatching').mockImplementation(input => {
+      order.push('durable-dispatch')
+      return markInboxDispatching(input)
+    })
+    const feedback: Array<Readonly<DeliveryPreferenceFeedback>> = []
+    fixture.service.subscribePreferenceFeedback(events => {
+      order.push('feedback-listener')
+      expect(Object.isFrozen(events)).toBe(true)
+      for (const event of events) {
+        expect(Object.isFrozen(event)).toBe(true)
+        expect(Object.isFrozen(event.scope)).toBe(true)
+        feedback.push(event)
+      }
+      return events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const }))
+    })
+    const resume = vi.spyOn(fixture.ctx.agents, 'resume')
+    const modelCalls = fixture.llm.requests.length
+    const inbound = {
+      ...message('evt-feedback-typed', '/feedback verbosity concise', 'command'),
+      occurredAt: Date.now() + 60_000,
+    }
+    const accepted = await fixture.service.acceptInbound(inbound)
+    await drive(fixture.service)
+
+    expect(order).toEqual(['durable-dispatch', 'feedback-listener'])
+    expect(store.getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
+    expect(feedback).toEqual([expect.objectContaining({
+      scope: { workspace: root, preset: 'primary' },
+      preferenceKey: 'response.verbosity',
+      candidateValue: 'concise',
+      stance: 'support',
+      actorTrust: 'owner-authenticated',
+      interpretationTrust: 'typed-feedback',
+      source: 'direct-owner-feedback',
+      occurredAt: store.getInbox(accepted.inboxId)?.receivedAt,
+    })])
+    expect(feedback[0]?.idempotencyKey).toMatch(/^delivery-feedback-v1:[a-f0-9]{64}$/u)
+    expect(feedback[0]?.idempotencyKey).not.toContain(inbound.eventId)
+    expect(feedback[0]?.idempotencyKey).not.toContain(principal.user)
+    expect(fixture.llm.requests).toHaveLength(modelCalls)
+    expect(resume).not.toHaveBeenCalled()
+    expect(fixture.sends.at(-1)?.text).toContain('已记录反馈')
+
+    await expect(fixture.service.acceptInbound(inbound)).resolves.toMatchObject({
+      duplicate: true,
+      status: 'processed',
+    })
+    await drive(fixture.service)
+    expect(feedback).toHaveLength(1)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback too-long emits both T0 response feedback and typed T1 verbosity', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-length-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const feedback: Array<Readonly<DeliveryPreferenceFeedback>> = []
+    fixture.service.subscribePreferenceFeedback(events => {
+      feedback.push(...events)
+      return events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const }))
+    })
+
+    await fixture.service.acceptInbound(message('evt-feedback-too-long', '/feedback too-long', 'command'))
+    await drive(fixture.service)
+
+    expect(feedback.map(event => [event.preferenceKey, event.candidateValue])).toEqual([
+      ['feedback.response', 'too-long'],
+      ['response.verbosity', 'concise'],
+    ])
+    expect(new Set(feedback.map(event => event.idempotencyKey)).size).toBe(2)
+    expect(fixture.llm.requests).toEqual([])
+    expect(fixture.sends.at(-1)?.text).toContain('回复长度偏好')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback unregisters an old preference sink and permits a clean reload', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-unavailable-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const removedListener = vi.fn()
+    const unsubscribe = fixture.service.subscribePreferenceFeedback(removedListener)
+    unsubscribe()
+    unsubscribe()
+    const replacementListener = vi.fn(async (
+      events: readonly Readonly<DeliveryPreferenceFeedback>[],
+    ) => events.map(event => ({
+      idempotencyKey: event.idempotencyKey,
+      status: 'recorded' as const,
+    })))
+    fixture.service.subscribePreferenceFeedback(replacementListener)
+
+    await fixture.service.acceptInbound(message('evt-feedback-unavailable', '/feedback helpful', 'command'))
+    await drive(fixture.service)
+
+    expect(removedListener).not.toHaveBeenCalled()
+    expect(replacementListener).toHaveBeenCalledOnce()
+    expect(fixture.llm.requests).toEqual([])
+    expect(fixture.sends.at(-1)?.text).toContain('已记录反馈')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback degrades safely when no preference subscriber is installed', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-unavailable-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-feedback-unavailable', '/feedback helpful', 'command'))
+    await drive(fixture.service)
+
+    expect(fixture.llm.requests).toEqual([])
+    expect(fixture.sends.at(-1)?.text).toContain('偏好学习服务尚未启用')
+    expect(fixture.sends.at(-1)?.text).toContain('本次反馈未记录')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback contains listener failures and never exposes their details', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-failed-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    fixture.service.subscribePreferenceFeedback(() => {
+      throw new Error('private downstream database and credential detail')
+    })
+
+    await fixture.service.acceptInbound(message('evt-feedback-failed', '/feedback helpful', 'command'))
+    await drive(fixture.service)
+
+    expect(fixture.llm.requests).toEqual([])
+    expect(fixture.sends.at(-1)?.text).toContain('反馈记录状态未知')
+    expect(fixture.sends.at(-1)?.text).toContain('不要为同一回答重复提交')
+    expect(fixture.sends.at(-1)?.text).not.toContain('private downstream')
+    expect(fixture.sends.at(-1)?.text).not.toContain('credential')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback requires one matching durable batch receipt and rejects a second authoritative sink', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-receipt-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    fixture.service.subscribePreferenceFeedback(() => [])
+    expect(() => fixture.service.subscribePreferenceFeedback(async events => events.map(event => ({
+      idempotencyKey: event.idempotencyKey,
+      status: 'recorded' as const,
+    })))).toThrow(/already registered/i)
+
+    await fixture.service.acceptInbound(message('evt-feedback-noop-receipt', '/feedback helpful', 'command'))
+    await drive(fixture.service)
+
+    expect(fixture.sends.at(-1)?.text).toContain('反馈记录状态未知')
+    expect(fixture.sends.at(-1)?.text).not.toContain('已记录反馈')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback needs an audited exact preference signal grant in addition to reply authority', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-policy-'))
+    roots.push(root)
+    const fixture = await permissionRuntimeHarness(root, new Map(), {
+      allowPreferenceSignal: false,
+      seedDefaultPreset: 'unlocked-dynamic-id',
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const sink = vi.fn(async (events: readonly Readonly<DeliveryPreferenceFeedback>[]) => events.map(event => ({
+      idempotencyKey: event.idempotencyKey,
+      status: 'recorded' as const,
+    })))
+    fixture.service.subscribePreferenceFeedback(sink)
+
+    await fixture.service.acceptInbound(message('evt-feedback-policy-denied', '/feedback helpful', 'command'))
+    await drive(fixture.service)
+
+    expect(sink).not.toHaveBeenCalled()
+    expect(fixture.ctx.assistantPolicy.queryAudit().some(event => event.action === 'signal'
+      && event.resourceKind === 'preference' && event.outcome === 'denied')).toBe(true)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback refuses linked principals even when their ordinary inbound route is authorized', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-linked-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const ownerPairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: ownerPairing.challenge.id, principal, code: ownerPairing.code })
+    const linkedPrincipal = { ...principal, user: 'ou_linked' }
+    const linkedConversation = { ...conversation, chat: 'oc_linked' }
+    const linkedPairing = fixture.service.issuePairing('test', linkedPrincipal)
+    const linked = fixture.service.confirmPairing({
+      challengeId: linkedPairing.challenge.id,
+      principal: linkedPrincipal,
+      code: linkedPairing.code,
+    })
+    expect(linked).toMatchObject({ role: 'linked', status: 'active' })
+    const feedback = vi.fn()
+    fixture.service.subscribePreferenceFeedback(feedback)
+
+    await fixture.service.acceptInbound({
+      channel: 'lark',
+      account: 'bot-1',
+      eventId: 'evt-feedback-linked',
+      occurredAt: Date.now(),
+      principal: linkedPrincipal,
+      conversation: linkedConversation,
+      kind: 'command',
+      text: '/feedback helpful',
+    })
+    await drive(fixture.service)
+
+    expect(feedback).not.toHaveBeenCalled()
+    expect(fixture.llm.requests).toEqual([])
+    expect(fixture.sends.at(-1)?.text).toContain('当前身份不能提交偏好反馈')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback rejects attachments before emitting any event', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-attachment-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const feedback = vi.fn()
+    fixture.service.subscribePreferenceFeedback(feedback)
+
+    await fixture.service.acceptInbound({
+      ...message('evt-feedback-attachment', '/feedback helpful', 'command'),
+      attachments: [{ resourceType: 'file', providerRef: 'file-feedback-1', fileName: 'feedback.txt' }],
+    })
+    await drive(fixture.service)
+
+    expect(feedback).not.toHaveBeenCalled()
+    expect(fixture.llm.requests).toEqual([])
+    expect(fixture.sends.at(-1)?.text).toContain('反馈命令不接受')
+    expect(fixture.sends.at(-1)?.text).toContain('本次反馈未记录')
     await fixture.ctx.fiber.restart()
   })
 

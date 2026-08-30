@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-automations",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A durable, fenced cold-start scheduler and isolated Agent runner for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
@@ -60,6 +60,8 @@
     "@deepseek-ai/dsh-session": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.8 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-evaluation": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-evolution": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
@@ -84,6 +86,12 @@
     "@dsh-enhanced/assistant-delivery": {
       "optional": true
     },
+    "@dsh-enhanced/assistant-evaluation": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-evolution": {
+      "optional": true
+    },
     "@dsh-enhanced/assistant-policy": {
       "optional": true
     }
@@ -100,6 +108,7 @@
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
+    "@dsh-enhanced/assistant-evaluation": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",

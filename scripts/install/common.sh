@@ -20,8 +20,10 @@ DSH_ENHANCED_LARK_PLUGIN_SLUGS=(
 )
 
 DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
-  'traex-acp-provider'
   'assistant-evolution'
+  'assistant-evaluation'
+  'preference-learning'
+  'assistant-heartbeat'
 )
 
 # This is retained only for users deliberately migrating an old all-in-one
@@ -89,7 +91,9 @@ Agent tool modes:
 Scenarios:
   core       Local Web/direct core plus read-only plugin discovery.  No channel, daemon, or scheduler.
   lark       Core plus durable Delivery, OS credential storage, and Feishu/Lark onboarding.
-  supervised Lark plus TraeX and approval-gated behavioural evolution. Requires a resident service.
+  supervised Lark plus Evaluation, Preference Learning, Heartbeat, and risk-tiered behavioural evolution.
+             The growth loop reuses the configured Delivery model route; add TraeX explicitly with --with traex.
+             Requires a resident service. Add health explicitly with --with health when wanted.
   full       Compatibility migration set containing every previous default top-level bundle.
 EOF
 }
@@ -309,7 +313,7 @@ dsh_enhanced_choose_scenario() {
   else
     printf '  2) 飞书/Lark 常驻助理（需要 owner onboarding）\n' >&2
   fi
-  printf '  3) 受监督成长（飞书 + TraeX + owner 审批）\n' >&2
+  printf '  3) 分级自治成长（飞书 + Heartbeat；低风险自动，高影响 owner 审批）\n' >&2
   printf '请选择 [1]：' >&2
   local choice
   IFS= read -r choice

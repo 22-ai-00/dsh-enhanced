@@ -86,6 +86,17 @@ describe('task recovery and overlap', () => {
     ]))
     expect(store.listOccurrences({ limit: 10 }).find(value => value.automationId === 'auto-running'))
       .toMatchObject({ status: 'unknown', reason: 'runner-lease-expired' })
+    const recoveredRun = store.listRuns({ automationId: 'auto-running', limit: 10 })[0]!
+    expect(recoveredRun).toMatchObject({ status: 'unknown', evidenceStatus: 'suppressed' })
+    expect(store.listPendingEvaluations(10)).toEqual([
+      expect.objectContaining({
+        runId: recoveredRun.id,
+        payload: expect.objectContaining({
+          scope: { workspace: '/work/alpha', preset: 'primary' },
+          executionStatus: 'unknown', objectiveStatus: 'unknown', deliveryStatus: 'not-required',
+        }),
+      }),
+    ])
     store.close()
   })
 
@@ -104,6 +115,8 @@ describe('task recovery and overlap', () => {
     expect(store.recoverExpiredTasks({ now: 1_352 })).toEqual([
       expect.objectContaining({ id: task.id, status: 'unknown', attemptCount: 2 }),
     ])
+    expect(store.listRuns({ automationId: 'auto-retry', limit: 10 }))
+      .toEqual([expect.objectContaining({ status: 'unknown' })])
     store.close()
   })
 
@@ -161,6 +174,68 @@ describe('task recovery and overlap', () => {
     })
     expect(store.completeTask(input)).toMatchObject({ status: 'succeeded', evidenceStatus: 'pending' })
     expect(store.listRuns({ automationId: 'auto-complete', limit: 10 })).toHaveLength(1)
+    expect(store.listPendingEvaluations(10)).toEqual([
+      expect.objectContaining({
+        runId: expect.stringMatching(/^run-/), kind: 'terminal', status: 'pending',
+        payload: expect.objectContaining({
+          scope: { workspace: '/work/alpha', preset: 'primary' },
+          situation: 'automation:auto-complete',
+          executionStatus: 'succeeded', objectiveStatus: 'unknown', deliveryStatus: 'not-required',
+          source: { kind: 'automation', id: 'assistant-automations' }, trust: 'trusted',
+          metrics: expect.objectContaining({ outputTokens: 2 }),
+          evaluator: { id: 'assistant-automations', version: 'terminal-v1' },
+        }),
+      }),
+    ])
+    store.close()
+  })
+
+  test('attributes trusted evidence to the immutable claim snapshot across a running reconcile', async () => {
+    const { store } = await fixture()
+    store.reconcileSystemOwned({
+      owner: 'heartbeat', automationId: 'mutable-system', idempotencyKey: 'system:old',
+      definition: definition({
+        workspace: '/work/old', agentPreset: 'old',
+        schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' },
+      }),
+    })
+    store.createManual({ automationId: 'mutable-system', requestId: 'one', dryRun: false })
+    const duty = store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+    const claimed = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_100, leaseMs: 1_000,
+    })!
+    expect(store.getTaskExecutionSnapshot(claimed.id)).toMatchObject({
+      version: 1, definition: { workspace: '/work/old', agentPreset: 'old' },
+    })
+    store.startTask({
+      taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_101, leaseMs: 1_000, sessionId: 'old-session',
+    })
+    store.reconcileSystemOwned({
+      owner: 'heartbeat', automationId: 'mutable-system', idempotencyKey: 'system:new',
+      definition: definition({
+        workspace: '/work/new', agentPreset: 'new', deliveryBindingId: 'new-binding',
+        schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' },
+      }),
+    })
+    const run = store.completeTask({
+      taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_200, outcome: 'succeeded', outputPreview: 'done', usage: {},
+    })
+
+    expect(store.get('mutable-system')).toMatchObject({
+      version: 2, definition: { workspace: '/work/new', agentPreset: 'new', deliveryBindingId: 'new-binding' },
+    })
+    expect(run).toMatchObject({
+      evidence: { workspace: '/work/old', agentPreset: 'old' },
+    })
+    expect(run).not.toHaveProperty('deliveryStatus')
+    expect(store.getRunExecutionSnapshot(run.id)).toMatchObject({
+      version: 1, definition: { workspace: '/work/old', agentPreset: 'old' },
+    })
+    expect(store.listPendingEvaluations(10)[0]?.payload).toMatchObject({
+      scope: { workspace: '/work/old', preset: 'old' }, deliveryStatus: 'not-required',
+    })
     store.close()
   })
 
@@ -183,9 +258,52 @@ describe('task recovery and overlap', () => {
       expect(run).toMatchObject({ status: outcome, evidenceStatus: 'suppressed' })
       expect(run).not.toHaveProperty('evidence')
       expect(store.listPendingEvidence(10)).toEqual([])
+      expect(store.listPendingEvaluations(10)).toEqual([
+        expect.objectContaining({
+          runId: run.id,
+          payload: expect.objectContaining({
+            executionStatus: outcome,
+            objectiveStatus: 'unknown',
+            deliveryStatus: 'not-required',
+          }),
+        }),
+      ])
       store.close()
     },
   )
+
+  test('uses distinct stable situation hashes for maximum-length automation ids', async () => {
+    const { store } = await fixture()
+    const ids = ['a'.repeat(500), 'b'.repeat(500)]
+    for (const [index, automationId] of ids.entries()) {
+      store.createApproved({
+        automationId, idempotencyKey: `create:long:${index}`, definition: definition(),
+      })
+      store.materializeDue({
+        now: Date.parse('2026-08-21T10:01:00.000Z'), misfireGraceMs: minute, maxCatchUp: 10,
+      })
+    }
+    const duty = store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+    for (const automationId of ids) {
+      const task = store.listTasks({ automationId, limit: 1 })[0]!
+      store.claimTask({
+        taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_100, leaseMs: 1_000,
+      })
+      store.startTask({
+        taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: 1_101, leaseMs: 1_000, sessionId: `session-${automationId[0]}`,
+      })
+      store.completeTask({
+        taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: 1_200, outcome: 'succeeded', outputPreview: 'done', usage: {},
+      })
+    }
+    const situations = store.listPendingEvaluations(10).map(entry => entry.payload.situation)
+    expect(situations).toHaveLength(2)
+    expect(new Set(situations).size).toBe(2)
+    expect(situations.every(value => /^automation:[a-f0-9]{64}$/u.test(value))).toBe(true)
+    store.close()
+  })
 
   test('durably rotates a failing evidence row behind its pending peers', async () => {
     const value = await fixture()
@@ -216,6 +334,41 @@ describe('task recovery and overlap', () => {
     value.store.deferRunEvidence({ runId: first.id, expectedStatus: 'pending', now: value.now() })
 
     expect(value.store.listPendingEvidence(1)[0]?.id).not.toBe(first.id)
+    value.store.close()
+  })
+
+  test('backs off and dead-letters a permanently failing Evaluation observation', async () => {
+    const value = await fixture()
+    const task = due(value.store, 'auto-evaluation-poison')
+    const duty = value.store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+    value.store.claimTask({
+      taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_100, leaseMs: 1_000,
+    })
+    value.store.startTask({
+      taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_101, leaseMs: 1_000, sessionId: 'session-poison',
+    })
+    value.store.completeTask({
+      taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_200, outcome: 'failed', outputPreview: 'failed', usage: {},
+    })
+    let entry = value.store.listPendingEvaluations(10)[0]!
+    for (let attempt = 1; attempt <= 8; attempt += 1) {
+      const at = 2_000 + attempt
+      entry = value.store.deferEvaluation({
+        id: entry.id, expectedStatus: 'pending', now: at, retryAt: at + 1_000,
+        maxAttempts: 8, errorCode: 'invalid-input',
+      })
+      expect(entry.attemptCount).toBe(attempt)
+      if (attempt < 8) {
+        expect(entry).toMatchObject({ status: 'pending', nextAttemptAt: at + 1_000, lastErrorCode: 'invalid-input' })
+        expect(value.store.listPendingEvaluations(10, at + 999)).toEqual([])
+      }
+    }
+    expect(entry).toMatchObject({
+      status: 'dead-letter', attemptCount: 8, lastErrorCode: 'invalid-input', lastFailureAt: 2_008,
+    })
+    expect(value.store.listPendingEvaluations(10)).toEqual([])
     value.store.close()
   })
 
@@ -281,6 +434,10 @@ describe('task recovery and overlap', () => {
     ]))
     expect(runs.filter(run => run.evidenceStatus === 'suppressed').every(run => run.evidence === undefined)).toBe(true)
     expect(migrated.listPendingEvidence(10)).toHaveLength(3)
+    // The original v2 schema had no immutable execution snapshot. Its evidence
+    // was synthesized from the definition at migration time, so it must never
+    // be promoted into a trusted cross-scope Evaluation observation.
+    expect(migrated.listPendingEvaluations(10)).toEqual([])
     migrated.close()
   })
 
@@ -299,6 +456,7 @@ describe('task recovery and overlap', () => {
     const run = value.store.completeTask({ taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
       now: value.now(), outcome: 'succeeded', outputPreview: 'done', usage: {} })
     expect(run).toMatchObject({ occurrenceId: occurrence.id, deliveryStatus: 'pending' })
+    expect(value.store.getPendingEvaluationForRun(run.id)?.payload.deliveryStatus).toBe('unknown')
     expect(value.store.listPendingDeliveries(10)).toEqual([expect.objectContaining({ id: run.id })])
 
     expect(value.store.completeRunDelivery({ runId: run.id, expectedStatus: 'pending',
@@ -324,6 +482,8 @@ describe('task recovery and overlap', () => {
     const run = value.store.completeTask({ taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
       now: value.now(), outcome: 'succeeded', outputPreview: 'HEARTBEAT_OK', usage: {} })
 
+    expect(run).toMatchObject({ deliveryStatus: 'suppressed' })
+    expect(value.store.getPendingEvaluationForRun(run.id)?.payload.deliveryStatus).toBe('not-required')
     const suppressed = value.store.suppressRunDelivery({ runId: run.id, expectedStatus: 'pending', now: value.now() + 1 })
     expect(suppressed).toMatchObject({ deliveryStatus: 'suppressed' })
     expect(suppressed).not.toHaveProperty('deliveryRef')
@@ -331,6 +491,102 @@ describe('task recovery and overlap', () => {
     expect(replay).toMatchObject({ deliveryStatus: 'suppressed' })
     expect(replay).not.toHaveProperty('deliveryRef')
     expect(value.store.listPendingDeliveries(10)).toEqual([])
+    value.store.close()
+  })
+
+  test.each(['failed', 'timed_out', 'cancelled', 'unknown'] as const)(
+    'marks delivery not-required when a delivery-bound run ends %s',
+    async outcome => {
+      const value = await fixture()
+      const automationId = `delivery-${outcome}`
+      value.store.createApproved({
+        automationId, idempotencyKey: `create:${automationId}`,
+        definition: definition({
+          deliveryBindingId: 'binding-owner',
+          schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' },
+        }),
+      })
+      value.store.createManual({ automationId, requestId: 'one', dryRun: false })
+      const duty = value.store.acquireDuty({ ownerId: 'owner-a', now: value.now(), leaseMs: 1_000 })
+      const claimed = value.store.claimNextTask({
+        ownerId: 'owner-a', fencingToken: duty.fencingToken, now: value.now(), leaseMs: 1_000,
+      })!
+      value.store.startTask({
+        taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: value.now(), leaseMs: 1_000, sessionId: 'session-delivery',
+      })
+      const run = value.store.completeTask({
+        taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: value.now(), outcome, outputPreview: 'failure', usage: {},
+      })
+      expect(run).not.toHaveProperty('deliveryStatus')
+      expect(value.store.getPendingEvaluationForRun(run.id)?.payload).toMatchObject({
+        executionStatus: outcome === 'timed_out' ? 'timed-out' : outcome,
+        deliveryStatus: 'not-required',
+      })
+      value.store.close()
+    },
+  )
+})
+
+describe('scope-bound run history', () => {
+  test('uses immutable claim scope and returns newest runs first', async () => {
+    const { store } = await fixture()
+    const alpha = due(store, 'history-alpha', { workspace: '/work/alpha', agentPreset: 'primary' })
+    const beta = due(store, 'history-beta', { workspace: '/work/beta', agentPreset: 'secondary' })
+    const duty = store.acquireDuty({ ownerId: 'history-owner', now: 1_000, leaseMs: 100_000 })
+    for (const [task, session, now] of [[alpha, 'alpha-session', 2_000], [beta, 'beta-session', 3_000]] as const) {
+      store.claimTask({ taskId: task.id, ownerId: 'history-owner', fencingToken: duty.fencingToken,
+        now: now - 20, leaseMs: 10_000 })
+      store.startTask({ taskId: task.id, ownerId: 'history-owner', fencingToken: duty.fencingToken,
+        now: now - 10, leaseMs: 10_000, sessionId: session })
+      store.completeTask({ taskId: task.id, ownerId: 'history-owner', fencingToken: duty.fencingToken,
+        now, outcome: 'succeeded', outputPreview: `${session}-private-output`, usage: {} })
+    }
+
+    expect(store.listRunsForExecutionScope({
+      workspace: '/work/alpha/../alpha', agentPreset: 'primary', limit: 20,
+    })).toEqual([
+      expect.objectContaining({ automationId: 'history-alpha', outputPreview: 'alpha-session-private-output' }),
+    ])
+    expect(store.listRunsForExecutionScope({
+      workspace: '/work/beta', agentPreset: 'secondary', limit: 20,
+    })).toEqual([
+      expect.objectContaining({ automationId: 'history-beta', outputPreview: 'beta-session-private-output' }),
+    ])
+    store.close()
+  })
+})
+
+describe('content-free health metrics', () => {
+  test('distinguishes current Evaluation backlog from lifetime failed attempts', async () => {
+    const value = await fixture()
+    const task = due(value.store, 'auto-evaluation-health')
+    const duty = value.store.acquireDuty({ ownerId: 'owner-a', now: value.now(), leaseMs: minute })
+    value.store.claimTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: value.now(), leaseMs: minute })
+    value.store.startTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: value.now(), leaseMs: minute, sessionId: 'evaluation-health' })
+    value.store.completeTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: value.now(), outcome: 'failed', outputPreview: 'failed', usage: {} })
+
+    expect(value.store.health()).toMatchObject({
+      pendingEvaluations: 1, retryingEvaluations: 0, failedEvaluationAttempts: 0,
+      deadLetterEvaluations: 0, oldestPendingEvaluationAt: value.now(),
+    })
+    const entry = value.store.listPendingEvaluations(1, value.now())[0]!
+    value.store.deferEvaluation({ id: entry.id, expectedStatus: 'pending', now: value.now(),
+      retryAt: value.now() + 1_000, maxAttempts: 2, errorCode: 'temporary' })
+    expect(value.store.health()).toMatchObject({
+      pendingEvaluations: 1, retryingEvaluations: 1, failedEvaluationAttempts: 1,
+      deadLetterEvaluations: 0, oldestPendingEvaluationAt: value.now(),
+    })
+    value.store.deferEvaluation({ id: entry.id, expectedStatus: 'pending', now: value.now() + 1,
+      retryAt: value.now() + 2_000, maxAttempts: 2, errorCode: 'permanent' })
+    expect(value.store.health()).toMatchObject({
+      pendingEvaluations: 0, retryingEvaluations: 0, failedEvaluationAttempts: 2,
+      deadLetterEvaluations: 1, oldestPendingEvaluationAt: 0,
+    })
     value.store.close()
   })
 })

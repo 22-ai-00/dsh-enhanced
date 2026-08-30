@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantEvolutionError, AssistantEvolutionService } from '../src/service.ts'
+import { EvolutionStoreError } from '../src/store.ts'
 
 const temporaryRoots: string[] = []
 
@@ -52,12 +53,17 @@ function stubAgent(options: {
   return { agent, injections }
 }
 
-async function harness(options: {
+interface HarnessOptions {
   allow?: boolean
   root?: string
   maxInjectedRules?: number
   maxEvidenceSamples?: number
-} = {}) {
+  now?: () => number
+  autonomousRollback?: boolean
+  allowRollbackPolicy?: boolean
+}
+
+async function harness(options: HarnessOptions = {}) {
   const root = options.root ?? await mkdtemp(join(tmpdir(), 'assistant-evolution-service-'))
   if (options.root === undefined) temporaryRoots.push(root)
   const ctx = new Context()
@@ -80,6 +86,14 @@ async function harness(options: {
         resource: { kind: 'evolution' as const, id: 'proposals' },
         context: { initiators: ['foreground' as const] },
       },
+      ...(options.allowRollbackPolicy === false ? [] : [{
+        id: `allow-evolution-rollback-${index}`,
+        effect: 'allow' as const,
+        subject: { kind: 'agent' as const, id: 'primary', workspace },
+        actions: ['rollback'],
+        resource: { kind: 'evolution' as const, id: 'rule:*' },
+        context: { initiators: ['foreground' as const] },
+      }]),
     ]),
   })
   const service = new AssistantEvolutionService(ctx, {
@@ -89,7 +103,8 @@ async function harness(options: {
     maxInjectedRules: options.maxInjectedRules ?? 12,
     maxEvidenceSamples: options.maxEvidenceSamples ?? 8,
     reconcileIntervalMs: 0,
-  })
+    autonomousRollback: options.autonomousRollback ?? false,
+  }, options.now === undefined ? {} : { now: options.now })
   return { ctx, policy, service, root }
 }
 
@@ -130,8 +145,8 @@ function observeTrusted(
 }
 
 /** Drive the full observe -> candidate -> propose -> approve -> commit loop. */
-async function adoptRule(situation = 'weekly-report') {
-  const fixture = await harness()
+async function adoptRule(situation = 'weekly-report', options: HarnessOptions = {}) {
+  const fixture = await harness(options)
   const { agent } = stubAgent()
   for (let index = 1; index <= 4; index += 1) observeTrusted(fixture.service, situation, 'failed', index)
   const candidate = fixture.service.candidates(agent)[0]!
@@ -161,8 +176,8 @@ function approve(
   return fixture.service.reconcileProposals()[0]!
 }
 
-async function approvedRule(situation = 'weekly-report') {
-  const fixture = await adoptRule(situation)
+async function approvedRule(situation = 'weekly-report', options: HarnessOptions = {}) {
+  const fixture = await adoptRule(situation, options)
   const settled = approve(fixture, fixture.proposed)
   return { ...fixture, rule: settled.rule! }
 }
@@ -202,6 +217,45 @@ async function recordAttributedOutcomes(
 }
 
 describe('assistant evolution service', () => {
+  test('exposes only content-free global health counters with explicit zero timestamps', async () => {
+    const fixture = await harness({ now: () => 7_000 })
+    const { agent } = stubAgent()
+
+    expect(fixture.service.health()).toEqual({
+      activeRules: 0,
+      retiredRules: 0,
+      pendingProposals: 0,
+      conflictedProposals: 0,
+      trustedEpisodes: 0,
+      unattributedTrustedEpisodes: 0,
+      lastTrustedEpisodeAt: 0,
+      lastReconciledAt: 0,
+      autonomousRollbacks: 0,
+    })
+
+    fixture.service.recordEpisode(agent, {
+      situation: 'SENTINEL-SITUATION', outcome: 'failed', detail: 'SENTINEL-DETAIL',
+      occurredAt: 6_000, idempotencyKey: 'health-self-reported',
+    })
+    fixture.service.recordAutomationOutcome({
+      situation: 'SENTINEL-AUTOMATION', outcome: 'succeeded', detail: 'SENTINEL-TRUSTED-DETAIL',
+      workspace: '/work/alpha', agentPreset: 'primary', occurredAt: 6_500,
+      idempotencyKey: 'health-trusted',
+    })
+
+    expect(fixture.service.health()).toMatchObject({
+      trustedEpisodes: 1,
+      unattributedTrustedEpisodes: 1,
+      lastTrustedEpisodeAt: 6_500,
+      lastReconciledAt: 0,
+    })
+    fixture.service.reconcileProposals()
+    const serialized = JSON.stringify(fixture.service.health())
+    expect(serialized).toContain('"lastReconciledAt":7000')
+    expect(serialized).not.toMatch(/SENTINEL|\/work\/alpha|primary|situation|detail/i)
+    await fixture.ctx.fiber.restart()
+  })
+
   test('fails closed without a trusted Agent identity', async () => {
     const fixture = await harness()
     for (const call of [
@@ -230,6 +284,13 @@ describe('assistant evolution service', () => {
     const fixture = await adoptRule()
 
     expect(fixture.proposed.status).toBe('pending')
+    expect(fixture.service.health()).toMatchObject({
+      activeRules: 0,
+      pendingProposals: 1,
+      trustedEpisodes: 4,
+      unattributedTrustedEpisodes: 4,
+      lastTrustedEpisodeAt: 1_004,
+    })
     expect(fixture.service.listRules(fixture.agent, 'active')).toEqual([])
     expect(fixture.service.guidance(fixture.agent)).toBe('')
     await fixture.ctx.fiber.restart()
@@ -255,6 +316,7 @@ describe('assistant evolution service', () => {
     expect(settled).toHaveLength(1)
     expect(settled[0]).toMatchObject({ status: 'approved' })
     expect(fixture.service.listRules(fixture.agent, 'active')).toHaveLength(1)
+    expect(fixture.service.health()).toMatchObject({ activeRules: 1, pendingProposals: 0 })
     await fixture.ctx.fiber.restart()
   })
 
@@ -569,6 +631,106 @@ describe('assistant evolution service', () => {
     expect(() => fixture.service.propose(fixture.agent, request))
       .toThrowError(/retire candidate|evidence|sample/iu)
     expect(recover).not.toHaveBeenCalled()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('autonomous rollback is opt-in and never falls back to a proposal', async () => {
+    const fixture = await approvedRule('automation:rollback-disabled')
+    await recordAttributedOutcomes(
+      fixture,
+      ['failed', 'failed', 'failed', 'failed'],
+      'rollback-disabled',
+    )
+    const authorize = vi.spyOn(fixture.policy, 'authorizeAgent')
+
+    expect(() => fixture.service.rollback(fixture.agent, {
+      ruleId: fixture.rule.id,
+      expectedVersion: fixture.rule.version,
+    })).toThrowError(expect.objectContaining<Partial<AssistantEvolutionError>>({ code: 'forbidden' }))
+    expect(authorize).not.toHaveBeenCalled()
+    expect(fixture.service.listRules(fixture.agent, 'active')).toHaveLength(1)
+    expect(fixture.policy.listPendingApprovalDispatches()).toHaveLength(0)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('Host recomputes and atomically applies an exact low-risk rollback', async () => {
+    const fixture = await approvedRule('automation:auto-rollback', { autonomousRollback: true })
+    const episodes = await recordAttributedOutcomes(
+      fixture,
+      ['failed', 'failed', 'failed', 'failed'],
+      'auto-rollback',
+    )
+    const authorize = vi.spyOn(fixture.policy, 'authorizeAgent')
+
+    const result = fixture.service.rollback(fixture.agent, {
+      ruleId: fixture.rule.id,
+      expectedVersion: fixture.rule.version,
+    })
+
+    expect(authorize).toHaveBeenCalledWith(
+      fixture.agent,
+      'rollback',
+      { kind: 'evolution', id: `rule:${fixture.rule.id}` },
+    )
+    expect(result).toMatchObject({
+      replayed: false,
+      rule: { id: fixture.rule.id, status: 'retired', version: 2 },
+      rollback: {
+        risk: 'low',
+        evaluation: { failures: 4, total: 4 },
+        baseline: { failures: 4, total: 4 },
+        evidence: { total: 4 },
+      },
+    })
+    expect(result.rollback.reason).toMatch(/Automatic low-risk rollback/u)
+    expect(result.rollback.evidence.sampleEpisodeIds)
+      .toEqual(episodes.toReversed().map(episode => episode.id))
+    expect(fixture.service.guidance(fixture.agent)).toBe('')
+    expect(fixture.service.health()).toMatchObject({
+      activeRules: 0,
+      retiredRules: 1,
+      autonomousRollbacks: 1,
+    })
+    expect(fixture.policy.listPendingApprovalDispatches()).toHaveLength(0)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('autonomous rollback requires its distinct exact Policy capability and scope', async () => {
+    const denied = await approvedRule('automation:rollback-policy-denied', {
+      autonomousRollback: true,
+      allowRollbackPolicy: false,
+    })
+    await recordAttributedOutcomes(denied, ['failed', 'failed', 'failed', 'failed'], 'rollback-denied')
+    expect(() => denied.service.rollback(denied.agent, {
+      ruleId: denied.rule.id,
+      expectedVersion: denied.rule.version,
+    })).toThrowError(expect.objectContaining<Partial<AssistantEvolutionError>>({ code: 'forbidden' }))
+    expect(denied.service.listRules(denied.agent, 'active')).toHaveLength(1)
+    await denied.ctx.fiber.restart()
+
+    const scoped = await approvedRule('automation:rollback-scope', { autonomousRollback: true })
+    await recordAttributedOutcomes(scoped, ['failed', 'failed', 'failed', 'failed'], 'rollback-scope')
+    const beta = stubAgent({ cwd: '/work/beta' })
+    expect(() => scoped.service.rollback(beta.agent, {
+      ruleId: scoped.rule.id,
+      expectedVersion: scoped.rule.version,
+    })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'not-found' }))
+    expect(scoped.service.listRules(scoped.agent, 'active')).toHaveLength(1)
+    await scoped.ctx.fiber.restart()
+  })
+
+  test('autonomous rollback replays its immutable Host receipt exactly', async () => {
+    const fixture = await approvedRule('automation:rollback-replay', { autonomousRollback: true })
+    await recordAttributedOutcomes(fixture, ['failed', 'failed', 'failed', 'failed'], 'rollback-replay')
+    const input = { ruleId: fixture.rule.id, expectedVersion: fixture.rule.version }
+
+    const first = fixture.service.rollback(fixture.agent, input)
+    const replay = fixture.service.rollback(fixture.agent, input)
+
+    expect(replay.replayed).toBe(true)
+    expect(replay.rollback).toEqual(first.rollback)
+    expect(replay.rule).toEqual(first.rule)
+    expect(fixture.service.health().autonomousRollbacks).toBe(1)
     await fixture.ctx.fiber.restart()
   })
 

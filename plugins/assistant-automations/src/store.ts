@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { isAbsolute } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
   dueOccurrences,
@@ -12,6 +12,9 @@ import { AutomationDatabaseError, openAutomationDatabase } from './sqlite.js'
 import type {
   AutomationDefinition,
   AutomationDeliveryStatus,
+  AutomationEvaluationOutboxEntry,
+  AutomationEvaluationOutcome,
+  AutomationEvaluationStatus,
   AutomationEvidenceAttribution,
   AutomationEvidenceStatus,
   AutomationOccurrence,
@@ -104,6 +107,8 @@ interface AttemptRow {
   failure_code: string | null
   started_at: number | null
   finished_at: number | null
+  automation_snapshot_hash: string | null
+  automation_snapshot_json: string | null
   created_at: number
   updated_at: number
 }
@@ -127,8 +132,31 @@ interface RunRow {
   updated_at: number
 }
 
+interface EvaluationOutboxRow {
+  id: string
+  run_id: string
+  observation_kind: 'terminal'
+  status: AutomationEvaluationStatus
+  payload_json: string
+  attempt_count: number
+  next_attempt_at: number
+  last_failure_at: number | null
+  last_error_code: string | null
+  created_at: number
+  updated_at: number
+}
+
+interface ScopedRunRow extends RunRow {
+  scope_snapshot_hash: string | null
+  scope_snapshot_json: string | null
+}
+
 function hash(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+function hashText(value: string): string {
+  return createHash('sha256').update(value).digest('hex')
 }
 
 function text(value: unknown, field: string, maximum = 1_000): string {
@@ -251,6 +279,77 @@ export function normalizeAutomationDefinition(
   })
 }
 
+function freezeAutomationSnapshot(value: unknown, expectedId?: string): AutomationRecord {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new AutomationStoreError('invalid-state', 'automation execution snapshot must be an object')
+  }
+  const input = value as Record<string, unknown>
+  if (typeof input['id'] !== 'string' || (expectedId !== undefined && input['id'] !== expectedId)) {
+    throw new AutomationStoreError('invalid-state', 'automation execution snapshot id does not match its task')
+  }
+  if (input['status'] !== 'active' || !Number.isSafeInteger(input['version']) || (input['version'] as number) < 1
+    || !Number.isSafeInteger(input['createdAt']) || !Number.isSafeInteger(input['updatedAt'])) {
+    throw new AutomationStoreError('invalid-state', 'automation execution snapshot metadata is invalid')
+  }
+  const nextRunAt = input['nextRunAt']
+  if (nextRunAt !== undefined && !Number.isSafeInteger(nextRunAt)) {
+    throw new AutomationStoreError('invalid-state', 'automation execution snapshot nextRunAt is invalid')
+  }
+  const owner = input['owner']
+  if (owner !== undefined && typeof owner !== 'string') {
+    throw new AutomationStoreError('invalid-state', 'automation execution snapshot owner is invalid')
+  }
+  const definition = normalizeAutomationDefinition(input['definition'], 16 * 1024 * 1024, 10_000)
+  return Object.freeze({
+    id: input['id'],
+    ...(owner === undefined ? {} : { owner }),
+    definition,
+    status: 'active',
+    nextRunAt: nextRunAt as number | undefined,
+    createdAt: input['createdAt'] as number,
+    updatedAt: input['updatedAt'] as number,
+    version: input['version'] as number,
+  })
+}
+
+function encodeAutomationSnapshot(value: AutomationRecord): { hash: string; json: string } {
+  const json = JSON.stringify(value)
+  if (Buffer.byteLength(json, 'utf8') > 16 * 1024 * 1024) {
+    throw new AutomationStoreError('invalid-definition', 'automation execution snapshot exceeds 16777216 bytes')
+  }
+  return { hash: hashText(json), json }
+}
+
+function decodeAutomationSnapshot(
+  snapshotHash: string | null,
+  snapshotJson: string | null,
+  expectedId?: string,
+): AutomationRecord | undefined {
+  if (snapshotHash === null || snapshotJson === null) return undefined
+  if (Buffer.byteLength(snapshotJson, 'utf8') > 16 * 1024 * 1024
+    || hashText(snapshotJson) !== snapshotHash) {
+    throw new AutomationStoreError('invalid-state', 'automation execution snapshot integrity check failed')
+  }
+  try {
+    return freezeAutomationSnapshot(JSON.parse(snapshotJson), expectedId)
+  } catch (error) {
+    if (error instanceof AutomationStoreError) throw error
+    throw new AutomationStoreError('invalid-state', 'automation execution snapshot contains invalid JSON')
+  }
+}
+
+function automationSnapshot(row: AttemptRow, expectedId?: string): AutomationRecord | undefined {
+  return decodeAutomationSnapshot(row.automation_snapshot_hash, row.automation_snapshot_json, expectedId)
+}
+
+function executionScopeMatches(
+  snapshot: AutomationRecord,
+  scope: { workspace: string; agentPreset: string },
+): boolean {
+  return resolve(snapshot.definition.workspace.normalize('NFC')) === resolve(scope.workspace.normalize('NFC'))
+    && snapshot.definition.agentPreset.normalize('NFC').trim() === scope.agentPreset.normalize('NFC').trim()
+}
+
 function record(row: DefinitionRow): AutomationRecord {
   return Object.freeze({
     id: row.id,
@@ -344,6 +443,43 @@ function run(row: RunRow): AutomationRun {
   })
 }
 
+function deepFreezeJson<T>(value: T): T {
+  if (typeof value !== 'object' || value === null || Object.isFrozen(value)) return value
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreezeJson(child)
+  return Object.freeze(value)
+}
+
+function evaluationOutboxEntry(row: EvaluationOutboxRow): AutomationEvaluationOutboxEntry {
+  if (row.observation_kind !== 'terminal'
+    || (row.status !== 'pending' && row.status !== 'recorded' && row.status !== 'dead-letter')
+    || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0
+    || !Number.isSafeInteger(row.next_attempt_at)) {
+    throw new AutomationStoreError('invalid-state', 'automation evaluation outbox row has an invalid state')
+  }
+  if (Buffer.byteLength(row.payload_json, 'utf8') > 32_768) {
+    throw new AutomationStoreError('invalid-state', 'automation evaluation payload exceeds 32768 bytes')
+  }
+  let payload: AutomationEvaluationOutcome
+  try {
+    payload = deepFreezeJson(JSON.parse(row.payload_json) as AutomationEvaluationOutcome)
+  } catch {
+    throw new AutomationStoreError('invalid-state', 'automation evaluation payload contains invalid JSON')
+  }
+  return Object.freeze({
+    id: row.id,
+    runId: row.run_id,
+    kind: row.observation_kind,
+    status: row.status,
+    payload,
+    attemptCount: row.attempt_count,
+    nextAttemptAt: row.next_attempt_at,
+    ...(row.last_failure_at === null ? {} : { lastFailureAt: row.last_failure_at }),
+    ...(row.last_error_code === null ? {} : { lastErrorCode: row.last_error_code }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
+}
+
 function duty(row: DutyRow, acquired: boolean): DutyLease {
   return Object.freeze({
     acquired,
@@ -401,6 +537,62 @@ function buildOutcomeEvidence(input: {
     throw new AutomationStoreError('invalid-definition', 'automation evidence exceeds 16384 bytes')
   }
   return { status: 'pending', json }
+}
+
+function evaluationExecutionStatus(
+  status: AutomationRunStatus,
+): AutomationEvaluationOutcome['executionStatus'] {
+  return status === 'timed_out' ? 'timed-out' : status
+}
+
+function nonNegativeUsageMetric(usage: Readonly<Record<string, unknown>>, key: string): number | undefined {
+  const value = usage[key]
+  return Number.isSafeInteger(value) && (value as number) >= 0 ? value as number : undefined
+}
+
+function buildTerminalEvaluation(input: {
+  automation: AutomationRecord
+  runId: string
+  outcome: AutomationRunStatus
+  occurredAt: number
+  usage: Readonly<Record<string, unknown>>
+  startedAt: number | null
+  attemptNumber: number
+  deliveryStatus: AutomationEvaluationOutcome['deliveryStatus']
+}): AutomationEvaluationOutcome {
+  const inputTokens = nonNegativeUsageMetric(input.usage, 'inputTokens')
+  const outputTokens = nonNegativeUsageMetric(input.usage, 'outputTokens')
+  const toolCalls = nonNegativeUsageMetric(input.usage, 'toolCalls')
+  const latencyMs = input.startedAt === null ? undefined : Math.max(0, input.occurredAt - input.startedAt)
+  const retries = Math.max(0, input.attemptNumber - 1)
+  const metrics = Object.freeze({
+    ...(inputTokens === undefined ? {} : { inputTokens }),
+    ...(outputTokens === undefined ? {} : { outputTokens }),
+    ...(toolCalls === undefined ? {} : { toolCalls }),
+    ...(latencyMs === undefined ? {} : { latencyMs }),
+    ...(retries === 0 ? {} : { retries }),
+  })
+  const rawSituation = `automation:${input.automation.id}`
+  const situation = Buffer.byteLength(rawSituation, 'utf8') <= 200
+    ? rawSituation
+    : `automation:${createHash('sha256').update(input.automation.id).digest('hex')}`
+  return Object.freeze({
+    scope: Object.freeze({
+      workspace: input.automation.definition.workspace,
+      preset: input.automation.definition.agentPreset,
+    }),
+    situation,
+    executionStatus: evaluationExecutionStatus(input.outcome),
+    objectiveStatus: 'unknown',
+    deliveryStatus: input.deliveryStatus,
+    source: Object.freeze({ kind: 'automation', id: 'assistant-automations' }),
+    trust: 'trusted',
+    evidence: Object.freeze([{ kind: 'automation-run', ref: input.runId }]),
+    metrics,
+    occurredAt: input.occurredAt,
+    idempotencyKey: `assistant-automations:terminal:${input.runId}:v1`,
+    evaluator: Object.freeze({ id: 'assistant-automations', version: 'terminal-v1' }),
+  })
 }
 
 export function stableOccurrenceId(
@@ -568,6 +760,11 @@ export class AutomationStore {
     runningTasks: number
     failedRuns: number
     unknownRuns: number
+    pendingEvaluations: number
+    retryingEvaluations: number
+    failedEvaluationAttempts: number
+    deadLetterEvaluations: number
+    oldestPendingEvaluationAt: number
   } {
     const scalar = (sql: string) => (this.database.prepare(sql).get() as { count: number }).count
     return {
@@ -577,6 +774,21 @@ export class AutomationStore {
       runningTasks: scalar("SELECT COUNT(*) AS count FROM automation_tasks WHERE status = 'running'"),
       failedRuns: scalar("SELECT COUNT(*) AS count FROM automation_runs WHERE status IN ('failed', 'timed_out', 'cancelled')"),
       unknownRuns: scalar("SELECT COUNT(*) AS count FROM automation_runs WHERE status = 'unknown'"),
+      pendingEvaluations: scalar("SELECT COUNT(*) AS count FROM automation_evaluation_outbox WHERE status = 'pending'"),
+      retryingEvaluations: scalar(
+        "SELECT COUNT(*) AS count FROM automation_evaluation_outbox WHERE status = 'pending' AND attempt_count > 0",
+      ),
+      // This is an append-only lifetime counter. It supports rate/delta
+      // monitoring but does not by itself describe current health.
+      failedEvaluationAttempts: scalar(
+        'SELECT COALESCE(SUM(attempt_count), 0) AS count FROM automation_evaluation_outbox',
+      ),
+      deadLetterEvaluations: scalar(
+        "SELECT COUNT(*) AS count FROM automation_evaluation_outbox WHERE status = 'dead-letter'",
+      ),
+      oldestPendingEvaluationAt: scalar(
+        "SELECT COALESCE(MIN(created_at), 0) AS count FROM automation_evaluation_outbox WHERE status = 'pending'",
+      ),
     }
   }
 
@@ -784,6 +996,32 @@ export class AutomationStore {
     return this.getTask(id)
   }
 
+  /** Immutable definition captured by the winning claim, never the mutable current row. */
+  getTaskExecutionSnapshot(taskId: string): AutomationRecord | undefined {
+    const taskRow = this.database.prepare('SELECT * FROM automation_tasks WHERE id = ?').get(taskId) as TaskRow | undefined
+    if (taskRow === undefined || taskRow.attempt_count < 1) return undefined
+    const attempt = this.database.prepare(`
+      SELECT * FROM automation_attempts WHERE task_id = ? AND attempt_number = ?
+    `).get(taskId, taskRow.attempt_count) as AttemptRow | undefined
+    return attempt === undefined ? undefined : automationSnapshot(attempt, taskRow.automation_id)
+  }
+
+  /** Immutable definition associated with a durable terminal run. */
+  getRunExecutionSnapshot(runId: string): AutomationRecord | undefined {
+    const row = this.database.prepare(`
+      SELECT attempt.*, run.automation_id AS expected_automation_id
+      FROM automation_runs AS run
+      JOIN automation_attempts AS attempt ON attempt.id = run.attempt_id
+      WHERE run.id = ?
+    `).get(runId) as (AttemptRow & { expected_automation_id: string }) | undefined
+    return row === undefined ? undefined : automationSnapshot(row, row.expected_automation_id)
+  }
+
+  getRun(runId: string): AutomationRun | undefined {
+    const row = this.database.prepare('SELECT * FROM automation_runs WHERE id = ?').get(runId) as RunRow | undefined
+    return row === undefined ? undefined : run(row)
+  }
+
   acquireDuty(input: { ownerId: string; now: number; leaseMs: number }): DutyLease {
     const ownerId = text(input.ownerId, 'ownerId', 500)
     this.validateLease(input.now, input.leaseMs)
@@ -958,8 +1196,10 @@ export class AutomationStore {
       `).get(row.id, row.attempt_count, input.fencingToken) as AttemptRow | undefined
       if (attempt === undefined) throw new AutomationStoreError('stale-fence', 'winning attempt was not found')
       const runId = `run-${row.id}`
-      const automation = this.get(row.automation_id)
-      if (automation === undefined) throw new AutomationStoreError('invalid-state', 'automation definition was not found')
+      const automation = automationSnapshot(attempt, row.automation_id)
+      if (automation === undefined) {
+        throw new AutomationStoreError('invalid-state', 'winning attempt has no immutable automation snapshot')
+      }
       const evidence = buildOutcomeEvidence({
         automation,
         runId,
@@ -967,10 +1207,27 @@ export class AutomationStore {
         occurredAt: input.now,
         attribution: evidenceAttribution,
       })
-      const deliveryStatus = input.outcome === 'succeeded'
+      const normalizedOutput = preview.normalize('NFC').trim()
+      const runDeliveryStatus = input.outcome === 'succeeded'
         && automation.definition.deliveryBindingId !== undefined
-        ? 'pending'
+        ? normalizedOutput === '' || automation.definition.deliverySuppressExact?.includes(normalizedOutput) === true
+          ? 'suppressed'
+          : 'pending'
         : null
+      const evaluation = buildTerminalEvaluation({
+        automation,
+        runId,
+        outcome: input.outcome,
+        occurredAt: input.now,
+        usage: input.usage,
+        startedAt: attempt.started_at,
+        attemptNumber: attempt.attempt_number,
+        deliveryStatus: runDeliveryStatus === 'pending' ? 'unknown' : 'not-required',
+      })
+      const evaluationJson = JSON.stringify(evaluation)
+      if (Buffer.byteLength(evaluationJson, 'utf8') > 32_768) {
+        throw new AutomationStoreError('invalid-definition', 'automation evaluation payload exceeds 32768 bytes')
+      }
       this.database.prepare(`
         INSERT INTO automation_runs(
           id, occurrence_id, automation_id, task_id, attempt_id, status, session_id, artifact_ref,
@@ -979,9 +1236,15 @@ export class AutomationStore {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
       `).run(
         runId, row.occurrence_id, row.automation_id, row.id, attempt.id, input.outcome,
-        input.sessionId ?? null, input.artifactRef ?? null, preview, usageJson, deliveryStatus,
+        input.sessionId ?? null, input.artifactRef ?? null, preview, usageJson, runDeliveryStatus,
         evidence.status, evidence.json, input.now, input.now,
       )
+      this.database.prepare(`
+        INSERT INTO automation_evaluation_outbox(
+          id, run_id, observation_kind, status, payload_json, attempt_count,
+          next_attempt_at, last_failure_at, last_error_code, created_at, updated_at
+        ) VALUES (?, ?, 'terminal', 'pending', ?, 0, ?, NULL, NULL, ?, ?)
+      `).run(`evaluation-terminal:${runId}`, runId, evaluationJson, input.now, input.now, input.now)
       this.database.prepare(`
         UPDATE automation_attempts
         SET status = ?, failure_code = ?, finished_at = ?, updated_at = ? WHERE id = ?
@@ -1035,6 +1298,110 @@ export class AutomationStore {
       throw new AutomationStoreError('version-conflict', 'run evidence state changed before completion')
     }
     return run(this.database.prepare('SELECT * FROM automation_runs WHERE id = ?').get(input.runId) as unknown as RunRow)
+  }
+
+  listPendingEvaluations(limit: number, now = Number.MAX_SAFE_INTEGER): AutomationEvaluationOutboxEntry[] {
+    if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 1_000) {
+      throw new AutomationStoreError('invalid-definition', 'evaluation limit must be between 1 and 1000')
+    }
+    if (!Number.isSafeInteger(now)) throw new AutomationStoreError('invalid-definition', 'now must be a safe integer')
+    const rows = this.database.prepare(`
+      SELECT * FROM automation_evaluation_outbox
+      WHERE status = 'pending' AND next_attempt_at <= ? ORDER BY next_attempt_at, id LIMIT ?
+    `).all(now, limit) as unknown as EvaluationOutboxRow[]
+    const output: AutomationEvaluationOutboxEntry[] = []
+    for (const row of rows) {
+      try {
+        output.push(evaluationOutboxEntry(row))
+      } catch {
+        // A repaired or legacy poison row must not abort scheduler recovery or
+        // starve valid observations behind it. Quarantine it without exposing
+        // payload contents or exception text.
+        this.database.prepare(`
+          UPDATE automation_evaluation_outbox
+          SET status = 'dead-letter', attempt_count = attempt_count + 1,
+              last_failure_at = ?, last_error_code = 'invalid-outbox-payload', updated_at = ?
+          WHERE id = ? AND status = 'pending'
+        `).run(now, now, row.id)
+      }
+    }
+    return output
+  }
+
+  getPendingEvaluationForRun(runId: string, now = Number.MAX_SAFE_INTEGER): AutomationEvaluationOutboxEntry | undefined {
+    if (!Number.isSafeInteger(now)) throw new AutomationStoreError('invalid-definition', 'now must be a safe integer')
+    const row = this.database.prepare(`
+      SELECT * FROM automation_evaluation_outbox
+      WHERE run_id = ? AND observation_kind = 'terminal' AND status = 'pending' AND next_attempt_at <= ?
+      ORDER BY id LIMIT 1
+    `).get(runId, now) as EvaluationOutboxRow | undefined
+    if (row === undefined) return undefined
+    try {
+      return evaluationOutboxEntry(row)
+    } catch {
+      this.database.prepare(`
+        UPDATE automation_evaluation_outbox
+        SET status = 'dead-letter', attempt_count = attempt_count + 1,
+            last_failure_at = ?, last_error_code = 'invalid-outbox-payload', updated_at = ?
+        WHERE id = ? AND status = 'pending'
+      `).run(now, now, row.id)
+      return undefined
+    }
+  }
+
+  deferEvaluation(input: {
+    id: string
+    expectedStatus: 'pending'
+    now: number
+    retryAt: number
+    maxAttempts: number
+    errorCode: string
+  }): AutomationEvaluationOutboxEntry {
+    if (!Number.isSafeInteger(input.now)) throw new AutomationStoreError('invalid-definition', 'now must be a safe integer')
+    if (!Number.isSafeInteger(input.retryAt) || input.retryAt < input.now
+      || !Number.isSafeInteger(input.maxAttempts) || input.maxAttempts < 1 || input.maxAttempts > 100) {
+      throw new AutomationStoreError('invalid-definition', 'evaluation retry bounds are invalid')
+    }
+    const errorCode = text(input.errorCode, 'evaluation errorCode', 64)
+    const changed = this.database.prepare(`
+      UPDATE automation_evaluation_outbox
+      SET attempt_count = attempt_count + 1,
+          status = CASE WHEN attempt_count + 1 >= ? THEN 'dead-letter' ELSE 'pending' END,
+          next_attempt_at = CASE WHEN attempt_count + 1 >= ? THEN next_attempt_at ELSE ? END,
+          last_failure_at = ?, last_error_code = ?, updated_at = ?
+      WHERE id = ? AND status = ?
+    `).run(
+      input.maxAttempts, input.maxAttempts, input.retryAt, input.now, errorCode,
+      input.now, input.id, input.expectedStatus,
+    )
+    if (changed.changes !== 1) {
+      const current = this.database.prepare('SELECT * FROM automation_evaluation_outbox WHERE id = ?')
+        .get(input.id) as EvaluationOutboxRow | undefined
+      if (current?.status === 'recorded') return evaluationOutboxEntry(current)
+      throw new AutomationStoreError('version-conflict', 'evaluation outbox state changed before deferral')
+    }
+    return evaluationOutboxEntry(this.database.prepare('SELECT * FROM automation_evaluation_outbox WHERE id = ?')
+      .get(input.id) as unknown as EvaluationOutboxRow)
+  }
+
+  completeEvaluation(input: {
+    id: string
+    expectedStatus: 'pending'
+    now: number
+  }): AutomationEvaluationOutboxEntry {
+    if (!Number.isSafeInteger(input.now)) throw new AutomationStoreError('invalid-definition', 'now must be a safe integer')
+    const changed = this.database.prepare(`
+      UPDATE automation_evaluation_outbox SET status = 'recorded', updated_at = ?
+      WHERE id = ? AND status = ?
+    `).run(input.now, input.id, input.expectedStatus)
+    if (changed.changes !== 1) {
+      const current = this.database.prepare('SELECT * FROM automation_evaluation_outbox WHERE id = ?')
+        .get(input.id) as EvaluationOutboxRow | undefined
+      if (current?.status === 'recorded') return evaluationOutboxEntry(current)
+      throw new AutomationStoreError('version-conflict', 'evaluation outbox state changed before completion')
+    }
+    return evaluationOutboxEntry(this.database.prepare('SELECT * FROM automation_evaluation_outbox WHERE id = ?')
+      .get(input.id) as unknown as EvaluationOutboxRow)
   }
 
   listPendingDeliveries(limit: number): AutomationRun[] {
@@ -1095,6 +1462,61 @@ export class AutomationStore {
     return (rows as unknown as RunRow[]).map(run)
   }
 
+  /**
+   * Newest-first terminal history whose immutable claim snapshot belongs to one
+   * exact Agent scope.  Legacy rows without a verifiable snapshot are omitted;
+   * the current mutable definition is never used to guess historical scope.
+   */
+  listRunsForExecutionScope(input: {
+    workspace: string
+    agentPreset: string
+    automationId?: string
+    limit: number
+  }): AutomationRun[] {
+    if (!isAbsolute(input.workspace) || input.agentPreset.normalize('NFC').trim() === '') {
+      throw new AutomationStoreError('invalid-definition', 'run history requires an absolute workspace and preset')
+    }
+    if (!Number.isSafeInteger(input.limit) || input.limit <= 0 || input.limit > 1_000) {
+      throw new AutomationStoreError('invalid-definition', 'run limit must be between 1 and 1000')
+    }
+    const output: AutomationRun[] = []
+    let cursor: { createdAt: number; id: string } | undefined
+    while (output.length < input.limit) {
+      const pageSize = Math.min(1_000, Math.max(100, (input.limit - output.length) * 4))
+      const automationClause = input.automationId === undefined ? '' : 'AND run.automation_id = ?'
+      const cursorClause = cursor === undefined
+        ? ''
+        : 'AND (run.created_at < ? OR (run.created_at = ? AND run.id < ?))'
+      const parameters: Array<string | number> = []
+      if (input.automationId !== undefined) parameters.push(input.automationId)
+      if (cursor !== undefined) parameters.push(cursor.createdAt, cursor.createdAt, cursor.id)
+      parameters.push(pageSize)
+      const rows = this.database.prepare(`
+        SELECT run.*,
+          attempt.automation_snapshot_hash AS scope_snapshot_hash,
+          attempt.automation_snapshot_json AS scope_snapshot_json
+        FROM automation_runs AS run
+        JOIN automation_attempts AS attempt ON attempt.id = run.attempt_id
+        WHERE 1 = 1 ${automationClause} ${cursorClause}
+        ORDER BY run.created_at DESC, run.id DESC
+        LIMIT ?
+      `).all(...parameters) as unknown as ScopedRunRow[]
+      for (const row of rows) {
+        const snapshot = decodeAutomationSnapshot(
+          row.scope_snapshot_hash,
+          row.scope_snapshot_json,
+          row.automation_id,
+        )
+        if (snapshot !== undefined && executionScopeMatches(snapshot, input)) output.push(run(row))
+        if (output.length === input.limit) break
+      }
+      const last = rows.at(-1)
+      if (last === undefined || rows.length < pageSize) break
+      cursor = { createdAt: last.created_at, id: last.id }
+    }
+    return Object.freeze(output) as AutomationRun[]
+  }
+
   recoverExpiredTasks(input: { now: number; limit?: number }): AutomationTask[] {
     if (!Number.isSafeInteger(input.now)) throw new AutomationStoreError('invalid-definition', 'now must be a safe integer')
     const limit = input.limit ?? 100
@@ -1109,10 +1531,17 @@ export class AutomationStore {
       `).all(input.now, limit) as unknown as TaskRow[]
       const recovered: AutomationTask[] = []
       for (const row of rows) {
-        const definition = this.get(row.automation_id)!.definition
+        const attempt = this.database.prepare(`
+          SELECT * FROM automation_attempts
+          WHERE task_id = ? AND attempt_number = ? AND fencing_token = ?
+        `).get(row.id, row.attempt_count, row.fencing_token) as AttemptRow | undefined
+        if (attempt === undefined) {
+          throw new AutomationStoreError('invalid-state', 'expired task has no matching execution attempt')
+        }
+        const snapshot = automationSnapshot(attempt, row.automation_id)
         const retry = row.status === 'running'
-          && definition.retrySafety === 'idempotent'
-          && row.attempt_count <= definition.maxRetries
+          && snapshot?.definition.retrySafety === 'idempotent'
+          && row.attempt_count <= snapshot.definition.maxRetries
         const target: AutomationTaskStatus = row.status === 'claimed' || retry ? 'scheduled' : 'unknown'
         const attemptStatus: AutomationTaskStatus = row.status === 'claimed' ? 'lost' : 'unknown'
         this.database.prepare(`
@@ -1129,6 +1558,39 @@ export class AutomationStore {
           WHERE id = ?
         `).run(target, input.now, row.id)
         if (target === 'unknown') {
+          if (snapshot !== undefined) {
+            const runId = `run-${row.id}`
+            const evaluation = buildTerminalEvaluation({
+              automation: snapshot,
+              runId,
+              outcome: 'unknown',
+              occurredAt: input.now,
+              usage: {},
+              startedAt: attempt.started_at,
+              attemptNumber: attempt.attempt_number,
+              deliveryStatus: 'not-required',
+            })
+            const evaluationJson = JSON.stringify(evaluation)
+            if (Buffer.byteLength(evaluationJson, 'utf8') > 32_768) {
+              throw new AutomationStoreError('invalid-state', 'recovered automation evaluation payload is oversized')
+            }
+            this.database.prepare(`
+              INSERT INTO automation_runs(
+                id, occurrence_id, automation_id, task_id, attempt_id, status, session_id, artifact_ref,
+                output_preview, usage_json, delivery_status, delivery_ref, evidence_status, evidence_json,
+                created_at, updated_at
+              ) VALUES (?, ?, ?, ?, ?, 'unknown', ?, NULL, ?, '{}', NULL, NULL, 'suppressed', NULL, ?, ?)
+            `).run(
+              runId, row.occurrence_id, row.automation_id, row.id, attempt.id, attempt.session_id,
+              'runner lease expired before terminal receipt', input.now, input.now,
+            )
+            this.database.prepare(`
+              INSERT INTO automation_evaluation_outbox(
+                id, run_id, observation_kind, status, payload_json, attempt_count,
+                next_attempt_at, last_failure_at, last_error_code, created_at, updated_at
+              ) VALUES (?, ?, 'terminal', 'pending', ?, 0, ?, NULL, NULL, ?, ?)
+            `).run(`evaluation-terminal:${runId}`, runId, evaluationJson, input.now, input.now, input.now)
+          }
           this.database.prepare(`
             UPDATE automation_occurrences SET status = 'unknown', reason = 'runner-lease-expired', updated_at = ? WHERE id = ?
           `).run(input.now, row.occurrence_id)
@@ -1203,6 +1665,7 @@ export class AutomationStore {
     }
     const attemptNumber = row.attempt_count + 1
     const attemptId = `attempt-${row.id}-${attemptNumber}`
+    const snapshot = encodeAutomationSnapshot(automation)
     const leaseUntil = input.now + input.leaseMs
     this.database.prepare(`
       UPDATE automation_tasks
@@ -1212,9 +1675,13 @@ export class AutomationStore {
     this.database.prepare(`
       INSERT INTO automation_attempts(
         id, task_id, attempt_number, owner_id, fencing_token, status, session_id,
-        failure_code, started_at, finished_at, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, 'claimed', NULL, NULL, NULL, NULL, ?, ?)
-    `).run(attemptId, row.id, attemptNumber, input.ownerId, input.fencingToken, input.now, input.now)
+        failure_code, started_at, finished_at, automation_snapshot_hash,
+        automation_snapshot_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'claimed', NULL, NULL, NULL, NULL, ?, ?, ?, ?)
+    `).run(
+      attemptId, row.id, attemptNumber, input.ownerId, input.fencingToken,
+      snapshot.hash, snapshot.json, input.now, input.now,
+    )
     return this.getTask(row.id)
   }
 

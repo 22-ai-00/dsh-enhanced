@@ -33,6 +33,7 @@ function renderUntrustedJson(tag: string, value: unknown): string {
 
 export function registerEvolutionTools(ctx: Context, service: AssistantEvolutionService): void {
   const proposedAgents = new WeakSet<object>()
+  const rollbackAgents = new WeakSet<object>()
   ctx.tools.register(defineTool({
     name: 'evolution_observe',
     description: 'Record one observed outcome for a recurring situation as evidence for future learning.',
@@ -206,6 +207,96 @@ export function registerEvolutionTools(ctx: Context, service: AssistantEvolution
         status: proposed.status,
         version: proposed.version,
         replayed: proposed.replayed,
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'evolution_rollback',
+    description:
+      'Retire one exact active guidance rule only when the Host proves sufficient trusted '
+      + 'post-exposure regression evidence. This low-risk rollback cannot adopt or change guidance, '
+      + 'permissions, evidence, reason, or risk classification.',
+    parameters: {
+      rule_id: { type: 'string', required: true },
+      expected_version: { type: 'integer', required: true },
+    },
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          ruleId: { type: 'string', required: true },
+          status: { type: 'string', required: true, enum: ['retired'] },
+          version: { type: 'integer', required: true },
+          replayed: { type: 'boolean', required: true },
+          risk: { type: 'string', required: true, enum: ['low'] },
+          reason: { type: 'string', required: true },
+          evaluation: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              failures: { type: 'integer', required: true },
+              total: { type: 'integer', required: true },
+            },
+          },
+          baseline: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              failures: { type: 'integer', required: true },
+              total: { type: 'integer', required: true },
+            },
+          },
+          evidence: {
+            type: 'object',
+            required: true,
+            additionalProperties: false,
+            properties: {
+              digest: { type: 'string', required: true },
+              total: { type: 'integer', required: true },
+              sampleEpisodeIds: {
+                type: 'array',
+                required: true,
+                items: { type: 'string' },
+              },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args, exec) {
+      if (exec.agent !== undefined && rollbackAgents.has(exec.agent)) {
+        throw new Error('this Agent instance has already made its one evolution rollback attempt')
+      }
+      if (exec.agent !== undefined) rollbackAgents.add(exec.agent)
+      const result = service.rollback(exec.agent, {
+        ruleId: args.rule_id,
+        expectedVersion: args.expected_version,
+      })
+      return {
+        ruleId: result.rule.id,
+        status: 'retired' as const,
+        version: result.rule.version,
+        replayed: result.replayed,
+        risk: result.rollback.risk,
+        reason: result.rollback.reason,
+        evaluation: {
+          failures: result.rollback.evaluation.failures,
+          total: result.rollback.evaluation.total,
+        },
+        baseline: {
+          failures: result.rollback.baseline.failures,
+          total: result.rollback.baseline.total,
+        },
+        evidence: {
+          digest: result.rollback.evidence.digest,
+          total: result.rollback.evidence.total,
+          sampleEpisodeIds: [...result.rollback.evidence.sampleEpisodeIds],
+        },
       }
     },
   }))

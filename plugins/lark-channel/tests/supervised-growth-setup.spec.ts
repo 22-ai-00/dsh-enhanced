@@ -11,7 +11,6 @@ import {
   parseSupervisedGrowthSetupArgs,
   sameSupervisedGrowthBinding,
   selectUniqueOwnerBinding,
-  verifySupervisedGrowthTraexReadiness,
   verifySupervisedGrowthResidentService,
 } from '../src/supervised-growth-setup.ts'
 
@@ -138,44 +137,6 @@ describe('supervised-growth setup guards', () => {
       attempts: 1,
       run: () => ({ status: 0, stdout: '', stderr: '' }),
     })).rejects.toThrow(/verifiable resident health/i)
-  })
-
-  test('fails closed unless the explicit prompt-free TraeX readiness probe returns a usable catalog', async () => {
-    const calls: unknown[][] = []
-    const readiness = async (...args: unknown[]) => {
-      calls.push(args)
-      return { models: [{ id: 'default' }] }
-    }
-    await expect(verifySupervisedGrowthTraexReadiness({
-      traexConfig: { enabled: true, cwd: '/work/owner' }, timeoutMs: 30_000,
-    }, {
-      load: async () => ({ Config: value => value, probeTraexReadiness: readiness }),
-    })).resolves.toBeUndefined()
-    expect(calls).toHaveLength(1)
-    expect(calls[0]?.[1]).toMatchObject({ timeoutMs: 30_000 })
-
-    await expect(verifySupervisedGrowthTraexReadiness({
-      traexConfig: { enabled: true, cwd: '/work/owner' }, timeoutMs: 30_000,
-    }, {
-      load: async () => ({ Config: value => value, probeTraexReadiness: async () => ({ models: [] }) }),
-    })).rejects.toThrow(/no usable TraeX models/i)
-    await expect(verifySupervisedGrowthTraexReadiness({
-      traexConfig: { enabled: true, cwd: '/work/owner' }, timeoutMs: 30_000,
-    }, {
-      load: async () => { throw new Error('provider unavailable') },
-    })).rejects.toThrow(/provider unavailable/i)
-    await expect(verifySupervisedGrowthTraexReadiness({
-      traexConfig: { enabled: true, cwd: '/work/owner' }, timeoutMs: 30_000,
-    }, {
-      load: async () => ({ Config: value => value, probeTraexReadiness: async () => {
-        throw new Error('TraeX login required')
-      } }),
-    })).rejects.toThrow(/login required/i)
-    await expect(verifySupervisedGrowthTraexReadiness({
-      traexConfig: { enabled: true, cwd: '/work/owner' }, timeoutMs: 10,
-    }, {
-      load: async () => ({ Config: value => value, probeTraexReadiness: async () => new Promise(() => {}) }),
-    })).rejects.toThrow(/timed out/i)
   })
 
   test('the real pnpm-profile .bin entrypoint prints help and leaves the profile untouched', async () => {

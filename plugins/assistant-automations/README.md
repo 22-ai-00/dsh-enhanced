@@ -62,7 +62,7 @@ dsh --profile web --dump-config
 - `automation_list`：只读、有限输出；不回显 prompt、principal、数据库路径或运行目录。
 - `automation_manage`：以 `expected_version` CAS 提交 pause/resume/delete 提案。
 - `automation_run`：创建幂等 manual occurrence，并强制 `dryRun: true`、空工具白名单、无 delivery。
-- `automation_history`：读取有限 occurrence/run 摘要，不暴露 artifact 的宿主绝对路径。
+- `automation_history`：按当前 Agent 的 exact workspace + preset 返回 newest-first 的有限 occurrence/run 摘要；`run_id` 可精确读取 Evaluation 指向的单次运行。历史归属使用 claim 时的不可变 definition snapshot，跨 scope 或无法验证的旧记录按 not-found 处理；输出明确标为不可信数据，且不暴露 session id 或 artifact 宿主路径。
 
 模型发起的 create/pause/resume/delete 全部走 `assistant-policy`。模型工具 schema 不接受 principal、workspace、preset、provider/model、投递绑定、预算、TTL、执行上限或 retry/misfire/overlap 等 authority selector。存在 Delivery 时，服务通过当前 Agent 的已认证 owner binding 派生 principal/workspace/binding；没有 Delivery 的 headless 调用必须由可信宿主 API 显式提供 principal。提案 TTL 只来自配置。
 
@@ -79,6 +79,8 @@ SQLite occurrence id 由 automation、trigger 类型和 scheduledAt/eventId 稳�
 完整 JSON artifact 先通过同目录临时文件、fsync、atomic rename 写入，再提交 terminal run；SQLite 只保存有限 preview 和相对 artifact ref。execution 与 delivery 是两个状态域：若可选的 `assistant-delivery` 存在，带固定 `deliveryBindingId` 的成功 run 会以 `automation:<occurrenceId>:<bindingId>` 幂等写入它的 outbox；投递失败不会把成功 execution 改写成失败，后续 tick 只重试同一 enqueue。定义还可带有界的 `deliverySuppressExact`；空输出或精确匹配值会在同一账本中进入 terminal `suppressed`，不会送到 Delivery。该字段必须同时绑定 `deliveryBindingId`，Heartbeat 用它抑制 `HEARTBEAT_OK`。
 
 terminal run 还会在同一 SQLite 事务中写入不可变、有限大小的成长证据。稳定 situation 使用 `automation:<automationId>`，可编辑名称只进入展示 detail；`succeeded`、`failed`、`timed_out` 进入独立 evidence outbox，`cancelled`、`unknown` 则持久化为 `suppressed`。可选的 `assistant-evolution` 暂不可用或抛错时不会改变 run 终态，leader 后续以 `automation-run:<runId>` 重放同一条证据。runner 只有返回 exact session 时，证据才会携带 session；rule/version 还要求 Evolution 能查到 guidance 成功注入后持久化的同 session、scope、automation exposure receipt。计划中的 active rule 或 setup 前失败不会被伪装成因果证据。
+
+每个 terminal run 还会原子写入独立的 Evaluation outbox；`assistant-evaluation` 未安装或暂时失败不会重跑任务，也不会阻塞 Evolution。发送使用稳定幂等键、超时、指数退避和有界尝试，永久失败进入 `dead-letter`，只保存有界错误类别而不保存异常正文。`health()` 分开公开当前 `pendingEvaluations`、`retryingEvaluations`、`deadLetterEvaluations`、最老 pending 时间，以及只用于做增量/速率观测的累计 `failedEvaluationAttempts`；历史失败总数本身不表示当前不健康。
 
 ## 配置
 

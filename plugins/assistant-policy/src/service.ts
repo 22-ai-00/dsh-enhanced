@@ -88,6 +88,7 @@ const resourceKindSchema = Schema.union([
   'memory',
   'message',
   'network',
+  'preference',
   'tool',
   'wiki',
   '*',

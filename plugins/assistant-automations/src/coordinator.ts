@@ -2,6 +2,8 @@ import type { AutomationArtifactStore } from './artifacts.js'
 import { AutomationStoreError, type AutomationStore } from './store.js'
 import type {
   AutomationOccurrence,
+  AutomationEvaluationOutcome,
+  AutomationEvaluationOutboxEntry,
   AutomationRecord,
   AutomationRun,
   AutomationRunStatus,
@@ -69,6 +71,11 @@ export interface AutomationOutcomeRecorder {
     | undefined
 }
 
+/** Optional append-only Evaluation ledger. It has its own durable outbox lane. */
+export interface AutomationEvaluationRecorder {
+  append(input: AutomationEvaluationOutcome): unknown | Promise<unknown>
+}
+
 export class AutomationRunnerAmbiguousError extends Error {
   constructor(message: string, options?: ErrorOptions) {
     super(message, options)
@@ -108,6 +115,19 @@ function boundedText(value: unknown, maximumBytes: number): string | undefined {
 }
 
 const exposureReceiptTimeoutMs = 2_000
+const evaluationMaxAttempts = 8
+const evaluationRetryBaseMs = 1_000
+const evaluationRetryMaxMs = 3_600_000
+const evaluationRecorderTimeoutMs = 2_000
+
+function recorderErrorCode(error: unknown): string {
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    const code = (error as { code?: unknown }).code
+    if (typeof code === 'string' && /^[A-Za-z0-9._:-]{1,64}$/u.test(code)) return code
+  }
+  if (error instanceof Error && /^[A-Za-z][A-Za-z0-9]{0,63}$/u.test(error.name)) return error.name
+  return 'recorder-error'
+}
 
 export class AutomationCoordinator {
   private readonly store: AutomationStore
@@ -122,8 +142,10 @@ export class AutomationCoordinator {
   private readonly maxConcurrency: number
   private readonly tickIntervalMs: number
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>()
+  private readonly activeEvaluations = new Map<string, Promise<void>>()
   private delivery: AutomationDeliveryDispatcher | undefined
   private outcomeRecorder: AutomationOutcomeRecorder | undefined
+  private evaluationRecorder: AutomationEvaluationRecorder | undefined
   private fencingToken: number | undefined
   private timer: ReturnType<typeof setInterval> | undefined
   private stopped = false
@@ -157,9 +179,10 @@ export class AutomationCoordinator {
     if (this.stopped) throw new Error('assistant-automations coordinator is stopped')
     const now = this.now()
     if (!this.ensureDuty(now)) return
+    this.store.recoverExpiredTasks({ now, limit: this.maxCatchUp })
+    this.dispatchPendingEvaluations()
     this.dispatchPendingEvidence()
     this.dispatchPendingDeliveries()
-    this.store.recoverExpiredTasks({ now, limit: this.maxCatchUp })
     this.store.materializeDue({ now, misfireGraceMs: this.misfireGraceMs, maxCatchUp: this.maxCatchUp })
     while (this.active.size < this.maxConcurrency) {
       const claimed = this.store.claimNextTask({
@@ -190,9 +213,18 @@ export class AutomationCoordinator {
     this.outcomeRecorder = recorder
   }
 
+  /** Attach the optional unified Evaluation sink without coupling it to Evolution. */
+  setEvaluationRecorder(recorder: AutomationEvaluationRecorder | undefined): void {
+    this.evaluationRecorder = recorder
+    if (recorder !== undefined && !this.stopped) this.dispatchPendingEvaluations()
+  }
+
   async whenIdle(): Promise<void> {
-    while (this.active.size > 0) {
-      await Promise.all([...this.active.values()].map(value => value.promise))
+    while (this.active.size > 0 || this.activeEvaluations.size > 0) {
+      await Promise.allSettled([
+        ...[...this.active.values()].map(value => value.promise),
+        ...this.activeEvaluations.values(),
+      ])
     }
   }
 
@@ -246,7 +278,7 @@ export class AutomationCoordinator {
   }
 
   private async execute(claimed: AutomationTask, controller: AbortController): Promise<void> {
-    const automation = this.store.get(claimed.automationId)
+    const automation = this.store.getTaskExecutionSnapshot(claimed.id)
     const occurrence = this.store.getOccurrence(claimed.occurrenceId)
     if (automation === undefined || occurrence === undefined || this.fencingToken === undefined) {
       throw new Error('assistant-automations: claimed task snapshot is missing')
@@ -347,6 +379,7 @@ export class AutomationCoordinator {
       })
       this.dispatchRunDelivery(run)
       this.dispatchRunEvidence(run)
+      this.dispatchRunEvaluation(run.id)
     } finally {
       clearInterval(heartbeat)
     }
@@ -412,13 +445,75 @@ export class AutomationCoordinator {
     }
   }
 
+  private dispatchPendingEvaluations(): void {
+    if (this.evaluationRecorder === undefined) return
+    const now = this.now()
+    for (const entry of this.store.listPendingEvaluations(100, now)) this.dispatchEvaluation(entry)
+  }
+
+  private dispatchRunEvaluation(runId: string): void {
+    if (this.evaluationRecorder === undefined) return
+    const entry = this.store.getPendingEvaluationForRun(runId, this.now())
+    if (entry !== undefined) this.dispatchEvaluation(entry)
+  }
+
+  private dispatchEvaluation(entry: AutomationEvaluationOutboxEntry): void {
+    const recorder = this.evaluationRecorder
+    if (recorder === undefined || entry.status !== 'pending' || this.activeEvaluations.has(entry.id)) return
+    const promise = this.recordEvaluation(recorder, entry).finally(() => this.activeEvaluations.delete(entry.id))
+    this.activeEvaluations.set(entry.id, promise)
+    void promise.catch(() => {})
+  }
+
+  private async recordEvaluation(
+    recorder: AutomationEvaluationRecorder,
+    entry: AutomationEvaluationOutboxEntry,
+  ): Promise<void> {
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([
+        Promise.resolve(recorder.append(entry.payload)),
+        new Promise<never>((_resolve, reject) => {
+          timeout = setTimeout(() => reject(Object.assign(new Error('evaluation recorder timed out'), {
+            code: 'recorder-timeout',
+          })), evaluationRecorderTimeoutMs)
+          timeout.unref?.()
+        }),
+      ])
+      this.store.completeEvaluation({ id: entry.id, expectedStatus: 'pending', now: this.now() })
+    } catch (error) {
+      // The payload is immutable and has its own idempotency key. A crash after
+      // append but before settlement therefore replays safely without rerunning
+      // the Automation or coupling this lane to Evolution evidence.
+      try {
+        const now = this.now()
+        const delay = Math.min(
+          evaluationRetryMaxMs,
+          evaluationRetryBaseMs * 2 ** Math.min(entry.attemptCount, 12),
+        )
+        this.store.deferEvaluation({
+          id: entry.id,
+          expectedStatus: 'pending',
+          now,
+          retryAt: now + delay,
+          maxAttempts: evaluationMaxAttempts,
+          errorCode: recorderErrorCode(error),
+        })
+      } catch {
+        // A concurrent settlement or shutdown already owns the next step.
+      }
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout)
+    }
+  }
+
   private dispatchPendingDeliveries(): void {
     for (const run of this.store.listPendingDeliveries(100)) this.dispatchRunDelivery(run)
   }
 
   private dispatchRunDelivery(run: AutomationRun): void {
     if (run.deliveryStatus !== 'pending') return
-    const automation = this.store.get(run.automationId)
+    const automation = this.store.getRunExecutionSnapshot(run.id)
     const bindingId = automation?.definition.deliveryBindingId
     if (automation === undefined || bindingId === undefined) return
     const normalizedOutput = run.outputPreview.normalize('NFC').trim()

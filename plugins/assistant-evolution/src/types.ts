@@ -83,6 +83,26 @@ export interface StoredRule {
   generation: number
 }
 
+/**
+ * Immutable receipt for a Host-authorized, evidence-gated rollback.
+ *
+ * This lane can only retire one exact active guidance generation. The risk
+ * classification and evidence snapshot are computed by the store while holding
+ * the SQLite writer lock; callers cannot provide or weaken either one.
+ */
+export interface StoredAutonomousRollback {
+  scopeKey: string
+  ruleId: string
+  expectedVersion: number
+  resultVersion: number
+  risk: 'low'
+  reason: string
+  evaluation: SituationStats
+  baseline: SituationStats
+  evidence: EvidenceReference
+  occurredAt: number
+}
+
 /** Observed failure rate for one situation over a bounded recent window. */
 export interface SituationStats {
   scopeKey: string

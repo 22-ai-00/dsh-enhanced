@@ -202,7 +202,7 @@ describe('fresh rc.8 automation Agent runner', () => {
     const result = await fixture.runner.run(input())
     expect(result).toEqual({
       outcome: 'succeeded', sessionId: 'automation-occ-runner-1', output: 'final answer',
-      usage: { inputTokens: 30, outputTokens: 8, cacheReadTokens: 2 },
+      usage: { inputTokens: 30, outputTokens: 8, cacheReadTokens: 2, toolCalls: 1 },
     })
     expect(fixture.adapter.requests).toHaveLength(2)
     expect(fixture.adapter.requests[0]).toMatchObject({ provider: 'mock', model: 'runner-model', maxTokens: 777 })
@@ -366,6 +366,7 @@ describe('fresh rc.8 automation Agent runner', () => {
     })))
     await expect(running).resolves.toMatchObject({ outcome: 'succeeded', usage: {
       inputTokens: 9, outputTokens: 9, cacheReadTokens: 1, cacheWriteTokens: 1, reasoningTokens: 1,
+      toolCalls: 0,
     } })
     expect(finalize).toHaveBeenCalledWith(expect.any(String), 1)
     expect(release).not.toHaveBeenCalled()

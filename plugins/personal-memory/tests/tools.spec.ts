@@ -94,7 +94,7 @@ describe('personal memory rc.8 tools', () => {
 
     const schemas = ctx.tools.schemas().filter(schema => schema.name.startsWith('memory_'))
     expect(schemas.map(schema => schema.name).sort())
-      .toEqual(['memory_manage', 'memory_search'])
+      .toEqual(['memory_manage', 'memory_search', 'memory_search_confirmed'])
     expect(schemas.find(schema => schema.name === 'memory_manage')?.parameters.properties)
       .not.toHaveProperty('principal')
     expect(schemas.find(schema => schema.name === 'memory_manage')?.parameters.properties)
@@ -208,6 +208,63 @@ describe('personal memory rc.8 tools', () => {
         score: expect.any(Number),
       })],
     })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('memory_search_confirmed cannot be widened beyond non-sensitive confirmed guidance', async () => {
+    const fixture = await harness()
+    const seed = (id: string, entry: {
+      kind: 'fact' | 'instruction' | 'preference'
+      trust: 'external' | 'user-confirmed'
+      sensitivity: 'private' | 'sensitive'
+      content: string
+    }) => {
+      const proposal = fixture.ctx.personalMemory.propose(fixture.agent, {
+        idempotencyKey: `seed:confirmed-search:${id}`,
+        principal: 'lark/main/tenant/owner',
+        mutation: {
+          op: 'add', identity: { owner: 'user', scope: 'workspace', workspace: '/work/alpha' },
+          entry: {
+            ...entry, confidence: 1,
+            provenance: { source: 'test', observedAt: 10_000 },
+          },
+        },
+      })
+      fixture.ctx.personalMemory.decideProposal({
+        proposalId: proposal.proposalId, principal: 'lark/main/tenant/owner',
+        expectedVersion: 1, decision: 'approved', reason: 'fixture',
+      })
+    }
+    seed('allowed', {
+      kind: 'preference', trust: 'user-confirmed', sensitivity: 'private',
+      content: 'review-guidance prefer concise summaries',
+    })
+    seed('external', {
+      kind: 'preference', trust: 'external', sensitivity: 'private',
+      content: 'review-guidance untrusted preference',
+    })
+    seed('fact', {
+      kind: 'fact', trust: 'user-confirmed', sensitivity: 'private',
+      content: 'review-guidance confirmed fact',
+    })
+    seed('sensitive', {
+      kind: 'instruction', trust: 'user-confirmed', sensitivity: 'sensitive',
+      content: 'review-guidance sensitive instruction',
+    })
+
+    const result = await fixture.ctx.tools.execute({
+      callId: CallId('memory-search-confirmed'), name: 'memory_search_confirmed', agent: fixture.agent,
+      signal: new AbortController().signal, arguments: { query: 'review-guidance', limit: 20 },
+    })
+    expect(result.isError).toBe(false)
+    expect(result.isError ? undefined : result.value).toEqual({
+      hits: [expect.objectContaining({
+        content: 'review-guidance prefer concise summaries',
+        kind: 'preference', trust: 'user-confirmed',
+      })],
+    })
+    const rendered = result.content[0]
+    expect(rendered?.type === 'text' ? rendered.text : '').toContain('<memory_search_confirmed_results>')
     await fixture.ctx.fiber.restart()
   })
 

@@ -10,6 +10,7 @@ import {
   AssistantAutomationsError,
   AssistantAutomationsService,
 } from '../src/service.ts'
+import { AutomationStore } from '../src/store.ts'
 import type { AutomationDefinition } from '../src/types.ts'
 
 const roots: string[] = []
@@ -200,7 +201,9 @@ describe('assistant automations Cordis service', () => {
       mutation: { op: 'create', automationId: 'auto-review', definition: proposedDefinition() } as never,
     })
     expect(service.health()).toEqual({ activeAutomations: 0, pausedAutomations: 0,
-      pendingTasks: 0, runningTasks: 0, failedRuns: 0, unknownRuns: 0 })
+      pendingTasks: 0, runningTasks: 0, failedRuns: 0, unknownRuns: 0,
+      pendingEvaluations: 0, retryingEvaluations: 0, failedEvaluationAttempts: 0,
+      deadLetterEvaluations: 0, oldestPendingEvaluationAt: 0 })
     expect(service.list(current)).toEqual([])
     const approved = service.decideProposal({
       proposalId: proposal.proposalId, principal: 'lark/main/tenant/owner', expectedVersion: 1,
@@ -227,6 +230,44 @@ describe('assistant automations Cordis service', () => {
     expect(() => denied.service.list(agent({ cwd: '/work/alpha' })))
       .toThrowError(expect.objectContaining<Partial<AssistantAutomationsError>>({ code: 'missing-identity' }))
     await denied.ctx.fiber.restart()
+  })
+
+  test('history is exact-scope, supports exact run lookup, and never falls back to current definitions', async () => {
+    const fixture = await harness()
+    const store = (fixture.service as unknown as { store: AutomationStore }).store
+    const complete = (automationId: string, workspace: string, preset: string, output: string, now: number) => {
+      store.createApproved({
+        automationId, idempotencyKey: `history:create:${automationId}`,
+        definition: { ...definition(), workspace, agentPreset: preset },
+      })
+      const occurrence = store.createManual({ automationId, requestId: `history:${automationId}`, dryRun: false })
+      const task = store.listTasks({ automationId, limit: 1 })[0]!
+      const duty = store.acquireDuty({ ownerId: 'history-test', now: now - 30, leaseMs: 100_000 })
+      store.claimTask({ taskId: task.id, ownerId: 'history-test', fencingToken: duty.fencingToken,
+        now: now - 20, leaseMs: 10_000 })
+      store.startTask({ taskId: task.id, ownerId: 'history-test', fencingToken: duty.fencingToken,
+        now: now - 10, leaseMs: 10_000, sessionId: `session-${automationId}` })
+      const run = store.completeTask({ taskId: task.id, ownerId: 'history-test', fencingToken: duty.fencingToken,
+        now, outcome: 'succeeded', outputPreview: output, usage: {} })
+      return { occurrence, run }
+    }
+    const alpha = complete('history-alpha', '/work/alpha', 'primary', 'alpha-visible', 10_000)
+    const beta = complete('history-beta', '/work/beta', 'secondary', 'beta-secret', 20_000)
+    const current = agent({ cwd: '/work/alpha', preset: 'primary' })
+
+    expect(fixture.service.history(current)).toEqual({
+      occurrences: [expect.objectContaining({ id: alpha.occurrence.id })],
+      runs: [expect.objectContaining({ id: alpha.run.id, outputPreview: 'alpha-visible' })],
+    })
+    expect(fixture.service.history(current, { runId: alpha.run.id })).toEqual({
+      occurrences: [expect.objectContaining({ id: alpha.occurrence.id })],
+      runs: [expect.objectContaining({ id: alpha.run.id })],
+    })
+    expect(() => fixture.service.history(current, { runId: beta.run.id }))
+      .toThrowError(expect.objectContaining<Partial<AssistantAutomationsError>>({ code: 'not-found' }))
+    expect(() => fixture.service.history(current, { runId: 'not-a-run' }))
+      .toThrowError(expect.objectContaining<Partial<AssistantAutomationsError>>({ code: 'invalid-input' }))
+    await fixture.ctx.fiber.restart()
   })
 
   test('authorizes external ingestion explicitly and deduplicates the source event', async () => {

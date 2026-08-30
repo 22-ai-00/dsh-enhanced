@@ -16,6 +16,7 @@ import type {
   RuleInput,
   SituationStats,
   StoredEpisode,
+  StoredAutonomousRollback,
   StoredProposal,
   StoredRule,
 } from './types.js'
@@ -41,6 +42,18 @@ export interface EvolutionStoreOptions {
   maxSituationBytes?: number
   maxGuidanceBytes?: number
   maxDetailBytes?: number
+}
+
+/** Low-cardinality counters safe to expose through a local health seam. */
+export interface EvolutionStoreHealth {
+  activeRules: number
+  retiredRules: number
+  pendingProposals: number
+  conflictedProposals: number
+  trustedEpisodes: number
+  unattributedTrustedEpisodes: number
+  lastTrustedEpisodeAt: number
+  autonomousRollbacks: number
 }
 
 interface EpisodeRow {
@@ -96,6 +109,24 @@ interface GuidanceExposureRow {
   rule_id: string
   guidance_version: number
   exposed_at: number
+}
+
+interface AutonomousRollbackRow {
+  idempotency_key: string
+  scope_key: string
+  rule_id: string
+  expected_version: number
+  result_version: number
+  risk: 'low'
+  reason: string
+  evaluation_failures: number
+  evaluation_total: number
+  baseline_failures: number
+  baseline_total: number
+  evidence_digest: string
+  evidence_total: number
+  sample_episode_ids_json: string
+  occurred_at: number
 }
 
 function digest(value: unknown): string {
@@ -169,6 +200,35 @@ function guidanceExposure(row: GuidanceExposureRow): GuidanceExposure {
   })
 }
 
+function autonomousRollback(row: AutonomousRollbackRow, situation: string): StoredAutonomousRollback {
+  return Object.freeze({
+    scopeKey: row.scope_key,
+    ruleId: row.rule_id,
+    expectedVersion: row.expected_version,
+    resultVersion: row.result_version,
+    risk: row.risk,
+    reason: row.reason,
+    evaluation: Object.freeze({
+      scopeKey: row.scope_key,
+      situation,
+      failures: row.evaluation_failures,
+      total: row.evaluation_total,
+    }),
+    baseline: Object.freeze({
+      scopeKey: row.scope_key,
+      situation,
+      failures: row.baseline_failures,
+      total: row.baseline_total,
+    }),
+    evidence: Object.freeze({
+      sampleEpisodeIds: Object.freeze(JSON.parse(row.sample_episode_ids_json) as string[]),
+      digest: row.evidence_digest,
+      total: row.evidence_total,
+    }),
+    occurredAt: row.occurred_at,
+  })
+}
+
 /**
  * Durable evidence and rule ledger.
  *
@@ -195,6 +255,45 @@ export class EvolutionStore {
 
   close(): void {
     this.#database.close()
+  }
+
+  /**
+   * Return aggregate operational state only. The query deliberately projects no
+   * situation, scope, guidance, detail, principal, path, or proposal body.
+   */
+  health(): Readonly<EvolutionStoreHealth> {
+    const row = this.#database.prepare(`
+      SELECT
+        (SELECT COUNT(*) FROM evolution_rules WHERE status = 'active') AS active_rules,
+        (SELECT COUNT(*) FROM evolution_rules WHERE status = 'retired') AS retired_rules,
+        (SELECT COUNT(*) FROM evolution_proposals WHERE status = 'pending') AS pending_proposals,
+        (SELECT COUNT(*) FROM evolution_proposals WHERE status = 'conflicted') AS conflicted_proposals,
+        (SELECT COUNT(*) FROM evolution_episodes WHERE trust = 'trusted') AS trusted_episodes,
+        (SELECT COUNT(*) FROM evolution_episodes
+          WHERE trust = 'trusted' AND rule_id IS NULL) AS unattributed_trusted_episodes,
+        (SELECT COALESCE(MAX(occurred_at), 0) FROM evolution_episodes
+          WHERE trust = 'trusted') AS last_trusted_episode_at,
+        (SELECT COUNT(*) FROM evolution_autonomous_rollbacks) AS autonomous_rollbacks
+    `).get() as {
+      active_rules: number
+      retired_rules: number
+      pending_proposals: number
+      conflicted_proposals: number
+      trusted_episodes: number
+      unattributed_trusted_episodes: number
+      last_trusted_episode_at: number
+      autonomous_rollbacks: number
+    }
+    return Object.freeze({
+      activeRules: row.active_rules,
+      retiredRules: row.retired_rules,
+      pendingProposals: row.pending_proposals,
+      conflictedProposals: row.conflicted_proposals,
+      trustedEpisodes: row.trusted_episodes,
+      unattributedTrustedEpisodes: row.unattributed_trusted_episodes,
+      lastTrustedEpisodeAt: row.last_trusted_episode_at,
+      autonomousRollbacks: row.autonomous_rollbacks,
+    })
   }
 
   /** Record one observed outcome. Idempotent on `idempotencyKey`. */
@@ -497,6 +596,145 @@ export class EvolutionStore {
       options.retireFailureRate,
       evidenceSampleLimit,
     )
+  }
+
+  /**
+   * Retire one exact active guidance generation through the narrow autonomous
+   * rollback lane.
+   *
+   * Eligibility is recomputed after `BEGIN IMMEDIATE`, then the rule update,
+   * immutable evidence receipt and audit row commit together. The caller owns
+   * only the exact target and expected version; risk, reason and evidence are
+   * Host-derived. A replay of that exact tuple returns the durable winner.
+   */
+  rollbackRule(options: {
+    scopeKey: string
+    ruleId: string
+    expectedVersion: number
+    window: number
+    minSample: number
+    retireFailureRate: number
+    evidenceSampleLimit?: number
+  }): { rollback: StoredAutonomousRollback; rule: StoredRule; replayed: boolean } {
+    const scopeKey = this.#scopeKey(options.scopeKey)
+    const ruleId = this.#serverRuleId(options.ruleId)
+    if (!Number.isSafeInteger(options.expectedVersion) || options.expectedVersion < 1
+      || options.expectedVersion > 1_000_000_000) {
+      throw new EvolutionStoreError('invalid-input', 'expectedVersion must be a positive safe integer')
+    }
+    this.#requireWindow(options.window)
+    if (!Number.isSafeInteger(options.minSample) || options.minSample < 1) {
+      throw new EvolutionStoreError('invalid-input', 'minSample must be a positive safe integer')
+    }
+    if (!Number.isFinite(options.retireFailureRate)
+      || options.retireFailureRate < 0 || options.retireFailureRate > 1) {
+      throw new EvolutionStoreError('invalid-input', 'retireFailureRate must be within 0 and 1')
+    }
+    const evidenceSampleLimit = options.evidenceSampleLimit ?? 8
+    if (!Number.isSafeInteger(evidenceSampleLimit)
+      || evidenceSampleLimit < 1 || evidenceSampleLimit > 50) {
+      throw new EvolutionStoreError('invalid-input', 'evidence sample limit must be between 1 and 50')
+    }
+    const expectedVersion = options.expectedVersion
+    const idempotencyKey = `rollback:${digest([scopeKey, ruleId, expectedVersion])}`
+    let storedRollback: StoredAutonomousRollback | undefined
+    let storedRule: StoredRule | undefined
+    let replayed = false
+
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const previous = this.#database.prepare(`
+        SELECT * FROM evolution_autonomous_rollbacks WHERE idempotency_key = ?
+      `).get(idempotencyKey) as unknown as AutonomousRollbackRow | undefined
+      if (previous !== undefined) {
+        const existing = this.#database.prepare('SELECT * FROM evolution_rules WHERE id = ?')
+          .get(ruleId) as unknown as RuleRow | undefined
+        if (previous.scope_key !== scopeKey || previous.rule_id !== ruleId
+          || previous.expected_version !== expectedVersion || existing === undefined
+          || existing.scope_key !== scopeKey || existing.status !== 'retired'
+          || existing.version !== previous.result_version
+          || existing.retired_reason !== previous.reason) {
+          throw new EvolutionStoreError('invalid-state', 'autonomous rollback receipt does not match the rule')
+        }
+        storedRollback = autonomousRollback(previous, existing.situation)
+        storedRule = rule(existing)
+        replayed = true
+        this.#database.exec('COMMIT')
+      } else {
+        const existing = this.#database.prepare('SELECT * FROM evolution_rules WHERE id = ?')
+          .get(ruleId) as unknown as RuleRow | undefined
+        if (existing === undefined || existing.scope_key !== scopeKey) {
+          throw new EvolutionStoreError('not-found', 'evolution rule was not found in the Agent scope')
+        }
+        if (existing.status !== 'active') {
+          throw new EvolutionStoreError('invalid-state', 'evolution rule is not active')
+        }
+        if (existing.version !== expectedVersion) {
+          throw new EvolutionStoreError('version-conflict', 'expectedVersion does not match the active rule')
+        }
+
+        const active = rule(existing)
+        const episodes = this.#evaluationEpisodes(active, options.window)
+        const evaluation = this.#statsFromEpisodes(scopeKey, existing.situation, episodes)
+        const baseline = Object.freeze({
+          scopeKey,
+          situation: existing.situation,
+          failures: existing.baseline_failures,
+          total: existing.baseline_total,
+        })
+        const failureRate = evaluation.failures / evaluation.total
+        const didNotImprove = evaluation.failures * baseline.total
+          >= baseline.failures * evaluation.total
+        if (evaluation.total < options.minSample
+          || failureRate < options.retireFailureRate || !didNotImprove) {
+          throw new EvolutionStoreError(
+            'invalid-state',
+            'autonomous rollback requires sufficient exact trusted post-exposure regression evidence',
+          )
+        }
+        const provenance = this.#candidateEvidence(episodes, evidenceSampleLimit)
+        const resultVersion = expectedVersion + 1
+        const reason = 'Automatic low-risk rollback: exact trusted post-exposure failures '
+          + `${evaluation.failures}/${evaluation.total} did not improve on adoption baseline `
+          + `${baseline.failures}/${baseline.total}.`
+        const now = this.#now()
+        const updated = this.#database.prepare(`
+          UPDATE evolution_rules
+          SET status = 'retired', retired_reason = ?, updated_at = ?, version = ?
+          WHERE id = ? AND scope_key = ? AND status = 'active' AND version = ?
+        `).run(reason, now, resultVersion, ruleId, scopeKey, expectedVersion)
+        if (updated.changes !== 1) {
+          throw new EvolutionStoreError('version-conflict', 'active rule changed during autonomous rollback')
+        }
+        this.#database.prepare(`
+          INSERT INTO evolution_autonomous_rollbacks(
+            idempotency_key, scope_key, rule_id, expected_version, result_version,
+            risk, reason, evaluation_failures, evaluation_total,
+            baseline_failures, baseline_total, evidence_digest, evidence_total,
+            sample_episode_ids_json, occurred_at)
+          VALUES (?, ?, ?, ?, ?, 'low', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          idempotencyKey, scopeKey, ruleId, expectedVersion, resultVersion,
+          reason, evaluation.failures, evaluation.total, baseline.failures, baseline.total,
+          provenance.evidenceDigest, provenance.evidenceTotal,
+          JSON.stringify(provenance.evidence.map(entry => entry.episodeId)), now,
+        )
+        this.#audit('rollback', ruleId, resultVersion, now)
+        const persisted = this.#database.prepare(`
+          SELECT * FROM evolution_autonomous_rollbacks WHERE idempotency_key = ?
+        `).get(idempotencyKey) as unknown as AutonomousRollbackRow
+        const updatedRule = this.#database.prepare('SELECT * FROM evolution_rules WHERE id = ?')
+          .get(ruleId) as unknown as RuleRow
+        storedRollback = autonomousRollback(persisted, updatedRule.situation)
+        storedRule = rule(updatedRule)
+        this.#database.exec('COMMIT')
+      }
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+
+    return { rollback: storedRollback!, rule: storedRule!, replayed }
   }
 
   #retirementCandidateFromRule(

@@ -15,6 +15,8 @@
 | 插件 | 包 | 状态 | 说明 |
 |---|---|---|---|
 | [assistant-policy](assistant-policy) | `@dsh-enhanced/assistant-policy` | 实验性 | 个人助理的默认拒绝授权、硬预算、审批提案和脱敏审计边界。 |
+| [assistant-evaluation](assistant-evaluation) | `@dsh-enhanced/assistant-evaluation` | 实验性 | 区分执行、目标与投递的本地评测账本；Host 写可信事实，模型只能在精确 scope 内追加独立的低信任自评。 |
+| [preference-learning](preference-learning) | `@dsh-enhanced/preference-learning` | 实验性 | 从有界 typed feedback 形成可衰减偏好假设；只允许 Host 固定目录中的 T1 局部偏好临时生效并自动回滚，不把推断伪装成长期 Memory。 |
 | [personal-memory](personal-memory) | `@dsh-enhanced/personal-memory` | 实验性 | 有界、分域、审批写入的个人助理长期记忆。 |
 | [personal-wiki](personal-wiki) | `@dsh-enhanced/personal-wiki` | 实验性 | 以 Markdown 为真源、支持中文检索与审批写入的个人知识库。 |
 | [assistant-automations](assistant-automations) | `@dsh-enhanced/assistant-automations` | 实验性 | 单机冷启动持久调度、occurrence/task/run 账本、租约 fencing 与隔离 Agent 执行。 |
@@ -35,7 +37,7 @@
 |---|---|---|---|
 | [credentials-keychain](credentials-keychain) | `@dsh-enhanced/credentials-keychain` | 实验性 | macOS Keychain/Linux Secret Service/Windows DPAPI/单变量 provider、policy gate、TTL/撤销和 secret-free lease 审计。 |
 | [memory-wiki-bridge](memory-wiki-bridge) | `@dsh-enhanced/memory-wiki-bridge` | 实验性 | 只通过公开 service 生成带稳定 provenance 的 Memory↔Wiki 审批提案。 |
-| [assistant-evolution](assistant-evolution) | `@dsh-enhanced/assistant-evolution` | 实验性 | 审批门控的行为自演化：观察结果、按证据提出行为规则、经 owner 批准后作为顾问性上下文注入；不能自我批准、不能扩权、不能原地改写。 |
+| [assistant-evolution](assistant-evolution) | `@dsh-enhanced/assistant-evolution` | 实验性 | 审批门控的行为自演化：按证据提出 guidance，经 owner 批准后注入；只允许对 Host 证明已退化的 exact rule 自动回滚，不能自我采用、扩权或原地改写。 |
 | [assistant-health](assistant-health) | `@dsh-enhanced/assistant-health` | 实验性 | 聚合 provider 自有 health seam 的脱敏 liveness/readiness/详细报告。 |
 | [plugin-control-plane](plugin-control-plane) | `@dsh-enhanced/plugin-control-plane` | 实验性 | 按能力发现、owner 审批、隔离验证与原子启用 bundle；源码创建/修改只允许 linked Git worktree + `pnpm check` + PR。 |
 

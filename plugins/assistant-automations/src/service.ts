@@ -1,4 +1,4 @@
-import { isAbsolute } from 'node:path'
+import { isAbsolute, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -8,6 +8,7 @@ import type { AssistantPolicyService, PolicyDecision } from '@dsh-enhanced/assis
 import { AutomationArtifactStore } from './artifacts.js'
 import {
   AutomationCoordinator,
+  type AutomationEvaluationRecorder,
   type AutomationOutcomeRecorder,
   type AutomationRunner,
   type AutomationRunnerInput,
@@ -112,9 +113,11 @@ export interface SystemAutomationReconcileInput {
 
 export type AssistantAutomationsErrorCode =
   | 'disposed'
+  | 'invalid-input'
   | 'invalid-proposal'
   | 'missing-identity'
   | 'missing-approval-route'
+  | 'not-found'
   | 'policy-denied'
   | 'unauthorized-principal'
 
@@ -290,6 +293,13 @@ export class AssistantAutomationsService extends Service {
       this.coordinator.setOutcomeRecorder(recorder)
       return () => this.coordinator.setOutcomeRecorder(undefined)
     })
+    // Evaluation has an independent durable outbox. Installing or restarting it
+    // later cannot be hidden by Evolution's already-recorded evidence state.
+    ctx.inject(['assistantEvaluation'], evaluationCtx => {
+      const recorder = evaluationCtx.get('assistantEvaluation') as AutomationEvaluationRecorder
+      this.coordinator.setEvaluationRecorder(recorder)
+      return () => this.coordinator.setEvaluationRecorder(undefined)
+    })
     if (config.schedulerEnabled) this.coordinator.start()
     if (config.reconcileIntervalMs > 0) {
       ctx.effect(() => {
@@ -430,19 +440,50 @@ export class AssistantAutomationsService extends Service {
     return this.store.list()
   }
 
-  history(agent: Agent | undefined, input: { automationId?: string; limit?: number } = {}): {
+  history(agent: Agent | undefined, input: {
+    automationId?: string
+    runId?: string
+    limit?: number
+  } = {}): {
     occurrences: AutomationOccurrence[]
     runs: AutomationRun[]
   } {
-    this.authorizeAgent(agent, 'history', input.automationId ?? 'catalog')
+    const identity = this.authorizeAgent(agent, 'history', input.automationId ?? 'catalog')
+    if (input.runId !== undefined && input.automationId !== undefined) {
+      throw new AssistantAutomationsError('invalid-input', 'history accepts runId or automationId, not both')
+    }
     const limit = input.limit ?? 20
+    if (input.runId !== undefined) {
+      if (!/^run-task-occ-[a-f0-9]{64}$/u.test(input.runId)) {
+        throw new AssistantAutomationsError('invalid-input', 'runId is not a canonical Automation run id')
+      }
+      const run = this.store.getRun(input.runId)
+      const snapshot = run === undefined ? undefined : this.store.getRunExecutionSnapshot(run.id)
+      const sameScope = snapshot !== undefined
+        && resolve(snapshot.definition.workspace.normalize('NFC')) === resolve(identity.workspace.normalize('NFC'))
+        && snapshot.definition.agentPreset.normalize('NFC').trim()
+          === identity.agentPreset.normalize('NFC').trim()
+      if (run === undefined || !sameScope) {
+        // Do not reveal whether a cross-scope run exists.
+        throw new AssistantAutomationsError('not-found', 'automation run was not found in the current Agent scope')
+      }
+      const occurrence = this.store.getOccurrence(run.occurrenceId)
+      if (occurrence === undefined) {
+        throw new AssistantAutomationsError('not-found', 'automation run occurrence was not found')
+      }
+      return { occurrences: [occurrence], runs: [run] }
+    }
+    const runs = this.store.listRunsForExecutionScope({
+      ...identity,
+      ...(input.automationId === undefined ? {} : { automationId: input.automationId }),
+      limit,
+    })
     return {
-      occurrences: this.store.listOccurrences({
-        ...(input.automationId === undefined ? {} : { automationId: input.automationId }), limit,
+      occurrences: runs.flatMap(value => {
+        const occurrence = this.store.getOccurrence(value.occurrenceId)
+        return occurrence === undefined ? [] : [occurrence]
       }),
-      runs: this.store.listRuns({
-        ...(input.automationId === undefined ? {} : { automationId: input.automationId }), limit,
-      }),
+      runs,
     }
   }
 

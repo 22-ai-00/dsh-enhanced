@@ -198,6 +198,33 @@ export class PersonalMemoryService extends Service {
     })
   }
 
+  /**
+   * Narrow background-review seam.  Its trust/kind/sensitivity filters are
+   * service-owned so a maintenance Agent cannot widen them through tool args.
+   */
+  searchConfirmedGuidance(agent: Agent | undefined, request: ServiceSearchRequest): MemorySearchHit[] {
+    this.assertActive()
+    const context = this.agentContext(agent)
+    const authorizationOptions = request.authorizationIdempotencyKey === undefined
+      ? {}
+      : { idempotencyKey: request.authorizationIdempotencyKey }
+    const decision = this.policy.authorizeAgent(
+      agent,
+      'search',
+      { kind: 'memory', id: 'visible' },
+      authorizationOptions,
+    )
+    if (decision.effect !== 'allow') throw decisionError(decision)
+    return this.memoryStore.search({
+      context,
+      query: request.query,
+      limit: request.limit ?? this.config.searchLimit,
+      kinds: ['instruction', 'preference'],
+      trusts: ['user-confirmed'],
+      sensitivities: ['private'],
+    })
+  }
+
   read(agent: Agent | undefined, request: { ids: readonly string[] }): MemoryRecord[] {
     this.assertActive()
     const context = this.agentContext(agent)

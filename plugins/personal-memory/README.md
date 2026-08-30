@@ -46,12 +46,13 @@ dsh --profile web --dump-config
 ## 行为与工具
 
 - `memory_search`：显式检索当前 agent 可见的四个域；ASCII 与中文 unigram/bigram 均可召回，排序和 tie-break 确定，读取不更新任何计数。
+- `memory_search_confirmed`：面向后台复盘的窄查询；服务端固定只返回非敏感、`user-confirmed` 的 `instruction` / `preference`，调用方不能通过参数放宽 trust、kind 或 sensitivity。
 - `memory_manage`：只创建 add/replace/remove 提案，返回完整 diff、proposal id、TTL 和版本；它没有直接提交路径，也不接受模型提供 principal 或 TTL。principal、workspace 和飞书投递 binding 必须来自当前 Agent 的 authenticated Delivery owner route，TTL 来自可信配置；没有活动绑定时 fail closed。
 - `ctx.personalMemory.decideProposal(...)`：供绑定 owner 的可信通道/UI 决定提案。principal、版本、决定内容和理由均受幂等/CAS 约束。
 - `ctx.personalMemory.exportJson(agent)`：导出版本化 JSON，不包含哈希、状态、时间戳、token 表或审计表。
 - `ctx.personalMemory.proposeImport(...)`：先验证整个有界文档，再为每条记录创建审批提案；Agent 路径同样由 Delivery 派生审批 authority，未批准前不会写入 memory record。仅在未组合 Delivery 的可信本地/headless 集成中，程序化调用方可以显式传入 principal；一旦 Delivery 可用就不能用该字段覆盖绑定 owner。
 
-每次 `agent/session-start` 最多注入一次冻结快照。快照合并 user-global、当前 workspace、当前 agent-global 和当前 agent-workspace，受 top-K、字节和粗略 token 三重预算约束；`sensitive` 记录不会进入环境快照。内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”，所有 XML 元字符在预算计算前转义，记录无法闭合数据边界。`memory_search` 与 `memory_manage` 的模型可见结果也分别使用有界、转义的 `<memory_search_results>` / `<memory_proposal_results>` framing。缺少绝对 cwd 或 agent preset 时不搜索、不提案、不注入，也不会退化到共享域。
+每次 `agent/session-start` 最多注入一次冻结快照。快照合并 user-global、当前 workspace、当前 agent-global 和当前 agent-workspace，受 top-K、字节和粗略 token 三重预算约束；`sensitive` 记录不会进入环境快照。内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”，所有 XML 元字符在预算计算前转义，记录无法闭合数据边界。`memory_search`、`memory_search_confirmed` 与 `memory_manage` 的模型可见结果也使用有界、转义的独立 framing。缺少绝对 cwd 或 agent preset 时不搜索、不提案、不注入，也不会退化到共享域。
 
 ## 数据与一致性
 

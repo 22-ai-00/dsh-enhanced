@@ -15,7 +15,7 @@
 # 飞书/Lark 持久消息与 owner onboarding
 ./scripts/install/install-local.sh --scenario lark --lark configure
 
-# 飞书 + TraeX + 审批门控行为成长；必须保留常驻服务
+# 飞书 + Evaluation + Preference Learning + Heartbeat；低风险自动、高影响审批
 ./scripts/install/install-local.sh --scenario supervised --lark configure
 ```
 
@@ -23,7 +23,9 @@
 
 管理内建服务时，安装器会在 OAuth 前检查 systemd user manager 和 lingering。当前用户有权时会自动启用 lingering；需要管理员权限时，交互向导会先展示唯一的固定提权命令，并询问是否现在通过 `sudo` 执行，密码由 `sudo` 直接读取，不进入安装器、参数或日志。拒绝、失败或非交互运行都会在云端授权前停止并给出同一条可复制命令。容器、未启用 systemd 的 WSL 或其他没有 systemd user manager/logind 的系统应使用 `--no-service`，并由 Docker、s6、runit 等外部 supervisor 保持 `dsh --profile <name> --no-open` 常驻；此时安装器不会宣称或验证内建服务的注销后存活能力。
 
-`--with coding|traex|health|heartbeat|events|bridge` 按需追加能力。`--scenario full` 只用于迁移旧的全量默认集合；新安装不应使用它。`--mode supervised-growth` 保持兼容，等价于 supervised 场景。
+`supervised` 额外安装 Evaluation、Preference Learning、Evolution 与 Heartbeat；Host 固定风险目录中的低风险、局部、可逆成长可在 TTL、预算和回滚门内自动生效，高影响动作仍生成 owner proposal。激活器复用有效 profile 已配置的 `agentProvider` / `agentModel`，不会安装、硬编码或强制切换到特定模型 provider。需要 TraeX 时显式加 `--with traex`。`assistant-health` 目前只负责检测、不参与激活或修复，所以不默认安装；需要只读诊断时显式加 `--with health`。
+
+`--with coding|traex|health|heartbeat|events|bridge` 可为其他场景追加能力。`--scenario full` 只用于迁移旧的全量默认集合；新安装不应使用它。`--mode supervised-growth` 保持兼容，等价于 supervised 场景。
 
 核心 profile 中的 `plugin_discover` 可立即按能力检索内置、完整性固定的首方候选目录；它不会下载或启用任何包。Agent 只能生成待审批 plan，owner 仍需用 `dsh-plugin-control approve` 与 `activate` 在 staging profile 中显式启用。写入 `~/.dsh/plugin-control/catalog.json` 的 owner catalog 会取代内置目录。
 

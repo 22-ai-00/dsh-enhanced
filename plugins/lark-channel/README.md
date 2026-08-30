@@ -10,7 +10,7 @@
 
 - [安装、凭据与常驻服务](docs/setup.md)
 - [会话命令、卡片、可靠性与排障](docs/operations.md)
-- [受监督成长激活器](docs/supervised-growth.md)
+- [分级自治成长激活器](docs/supervised-growth.md)
 - [进度展示、安全与权限边界](docs/progress-security.md)
 
 ## 兼容性
@@ -18,6 +18,7 @@
 - DeepSeek Harness：`>=0.1.0-rc.8 <0.2.0` 基线语义（通过 `assistant-delivery`）。
 - `@dsh-enhanced/assistant-delivery`：`>=0.1.0 <0.2.0`。
 - `@dsh-enhanced/credentials-keychain`：handle 模式为 `>=0.1.0 <0.2.0`；env fallback 不要求其激活。
+- 分级自治成长激活器要求有效 profile 同时启用 `@dsh-enhanced/assistant-automations`、`@dsh-enhanced/assistant-evaluation`、`@dsh-enhanced/preference-learning`、`@dsh-enhanced/assistant-evolution` 与 `@dsh-enhanced/assistant-heartbeat`；它复用 Delivery 的 provider/model，不要求 TraeX 成为当前 route。T1 偏好采用和已验证退化回滚可自动执行，自由文本 guidance 与高影响动作继续走 owner proposal。
 - 官方 `@larksuiteoapi/node-sdk`：固定 `1.73.0`。
 - Node.js：`^22.19.0 || >=24.0.0`。
 
