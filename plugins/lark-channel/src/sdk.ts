@@ -30,6 +30,7 @@ import {
   type LarkTransportErrorCode,
   type LarkTransportHandlers,
 } from './types.js'
+import { renderLarkAnswerElements } from './answer-card.js'
 import { installLarkCardCallbackBridge } from './ws-card-callback.js'
 
 const LARK_PROGRESS_API = '/open-apis/im/v1/message_cot'
@@ -777,15 +778,20 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
   }
   // An answer card stays content-first: Lark already shows the bot name and avatar above the
   // bubble, so a header here would duplicate the sender identity and add weight to every reply.
-  // `wide_screen_mode` is what keeps authored Markdown tables from wrapping into unreadable rows.
+  // GFM tables are promoted to native Card 2.0 table elements by the answer renderer.
   return {
     msgType: 'interactive',
     content: JSON.stringify({
       schema: '2.0',
-      config: { wide_screen_mode: true },
+      config: {
+        compact_width: false,
+        width_mode: 'fill',
+        wide_screen_mode: true,
+        summary: { content: '智能体已完成任务并返回最终答复' },
+      },
       body: {
         padding: '12px 16px 12px 16px',
-        elements: [{ tag: 'markdown', content: input.markdown, text_align: 'left' }],
+        elements: renderLarkAnswerElements(input.markdown),
       },
     }),
   }
