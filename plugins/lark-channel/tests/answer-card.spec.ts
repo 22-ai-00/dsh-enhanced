@@ -75,6 +75,39 @@ describe('Lark answer card renderer', () => {
     }])
   })
 
+  test('preserves authored fences and leading indentation when headings split card elements', () => {
+    const source = [
+      '# 示例',
+      '',
+      '    ```',
+      '    这是缩进代码，不是围栏',
+      '',
+      '~~~ js',
+      'const value = 1',
+      '',
+      '',
+      '~~~~   ',
+    ].join('\r\n')
+
+    expect(renderLarkAnswerElements(source)).toEqual([
+      { tag: 'markdown', content: '示例', text_align: 'left', text_size: 'heading-1' },
+      {
+        tag: 'markdown',
+        content: [
+          '    ```',
+          '    这是缩进代码，不是围栏',
+          '',
+          '~~~ js',
+          'const value = 1',
+          '',
+          '',
+          '~~~~   ',
+        ].join('\n'),
+        text_align: 'left',
+      },
+    ])
+  })
+
   test('turns tables beyond the five-component provider limit into readable lists', () => {
     const source = Array.from({ length: 7 }, (_unused, index) => [
       `## 分组 ${index + 1}`,

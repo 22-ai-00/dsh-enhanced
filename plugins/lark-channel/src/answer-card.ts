@@ -226,9 +226,9 @@ export function renderLarkAnswerElements(input: string): readonly LarkAnswerCard
   let nativeTableCount = 0
 
   const flushMarkdown = () => {
-    const content = markdownBuffer.join('\n\n').replace(/\n{3,}/gu, '\n\n').trim()
+    const content = markdownBuffer.join('\n\n')
     markdownBuffer.length = 0
-    if (content.length > 0) elements.push({ tag: 'markdown', content, text_align: 'left' })
+    if (content.trim().length > 0) elements.push({ tag: 'markdown', content, text_align: 'left' })
   }
 
   for (let index = 0; index < tokens.length;) {
@@ -272,9 +272,13 @@ export function renderLarkAnswerElements(input: string): readonly LarkAnswerCard
     }
 
     if (token.type === 'fence' || token.type === 'code_block') {
-      const fence = token.markup || '```'
-      const info = token.info.trim()
-      markdownBuffer.push(`${fence}${info}\n${token.content.replace(/\n+$/u, '')}\n${fence}`)
+      if (token.map !== null) {
+        markdownBuffer.push(sourceLines(lines, token.map))
+      } else {
+        const fence = token.markup || '```'
+        const info = token.info.trim()
+        markdownBuffer.push(`${fence}${info}\n${token.content.replace(/\n+$/u, '')}\n${fence}`)
+      }
       index += 1
       continue
     }
@@ -285,7 +289,9 @@ export function renderLarkAnswerElements(input: string): readonly LarkAnswerCard
       continue
     }
 
-    if (token.type === 'hr') markdownBuffer.push('---')
+    if (token.type === 'hr') {
+      markdownBuffer.push(token.map === null ? (token.markup || '---') : sourceLines(lines, token.map))
+    }
     index += 1
   }
 
