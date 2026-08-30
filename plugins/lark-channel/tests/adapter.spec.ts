@@ -287,6 +287,64 @@ describe('Lark delivery adapter', () => {
     })
   })
 
+  test('sends a GFM table answer directly as exact text with the original reply target', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    const answer = '| 技能 | 用途 |\n| --- | --- |\n| `skill` | 查看可用技能 |'
+    const group = intent({ format: 'markdown', text: answer, target: {
+      principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
+      conversation: {
+        channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', kind: 'group', chat: 'oc_group', thread: 'omt_1',
+      },
+    } })
+
+    await expect(f.adapter.send(group, new AbortController().signal)).resolves.toEqual({
+      outcome: 'accepted', providerMessageId: 'om_sent',
+    })
+    expect(f.transport.send).toHaveBeenCalledOnce()
+    expect(f.transport.send).toHaveBeenCalledWith('oc_group', { text: answer }, {
+      replyTo: 'om_in', replyInThread: true, requestKey: 'reply-1',
+    })
+    expect(f.transport.addReaction).toHaveBeenCalledWith('om_in', 'DONE')
+  })
+
+  test('falls back to the exact answer text when Lark rejects an ordinary Markdown card', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    f.transport.send.mockRejectedValueOnce(new LarkTransportError('format_error', 'invalid Markdown card'))
+    const answer = '**技能列表**\n\n- `skill`: 查看可用技能'
+
+    await expect(f.adapter.send(intent({ format: 'markdown', text: answer }),
+      new AbortController().signal)).resolves.toEqual({
+      outcome: 'accepted', providerMessageId: 'om_sent',
+    })
+    expect(f.transport.send).toHaveBeenCalledTimes(2)
+    expect(f.transport.send).toHaveBeenNthCalledWith(1, 'oc_dm', { markdown: answer }, {
+      replyTo: 'om_in', requestKey: 'reply-1',
+    })
+    expect(f.transport.send).toHaveBeenNthCalledWith(2, 'oc_dm', { text: answer }, {
+      replyTo: 'om_in', requestKey: 'reply-1:markdown-fallback',
+    })
+    expect(f.transport.addReaction).toHaveBeenCalledWith('om_in', 'DONE')
+  })
+
+  test('classifies a failed Markdown text fallback from the fallback attempt', async () => {
+    const f = fixture()
+    await f.adapter.start(f.context)
+    f.transport.send
+      .mockRejectedValueOnce(new LarkTransportError('format_error', 'invalid Markdown card'))
+      .mockRejectedValueOnce(new LarkTransportError('rate_limited', 'slow down', 2_000))
+
+    await expect(f.adapter.send(intent({ format: 'markdown', text: '**answer**' }),
+      new AbortController().signal)).resolves.toEqual({
+      outcome: 'not-sent', failureCode: 'lark-rate-limited', retryable: true, retryAfterMs: 2_000,
+    })
+    expect(f.transport.send).toHaveBeenNthCalledWith(2, 'oc_dm', { text: '**answer**' }, {
+      replyTo: 'om_in', requestKey: 'reply-1:markdown-fallback',
+    })
+    expect(f.transport.addReaction).not.toHaveBeenCalled()
+  })
+
   test('keeps a synthetic top-level group lane top-level even when Delivery supplies its inbound event id', async () => {
     const f = fixture()
     await f.adapter.start(f.context)
