@@ -1,6 +1,6 @@
 # @dsh-enhanced/assistant-evolution
 
-审批门控的行为自演化。助理观察自己在重复情境下的结果，当证据足够时提出一条行为规则，**经 owner 批准后**该规则才作为顾问性上下文影响后续会话。
+审批门控的行为自演化。助理观察自己在重复情境下的结果，当证据足够时提出一条行为规则，**经 owner 批准后**该规则才作为顾问性上下文影响后续会话。可选的低风险自治通道只允许撤回一条已证实无效的 exact rule，不能创建、修改或扩权。
 
 这不是"让模型自己改自己"。它的价值在于把"经验"变成**可审计、可撤销、可解释**的持久对象：每条规则都能回答"依据哪些结果、谁批准的、有没有真的变好"。
 
@@ -24,21 +24,22 @@ dsh plugin --profile <name> add @dsh-enhanced/assistant-evolution
 ```text
 observe 结果 → 计算候选 → 提案 → owner 批准 → 提交规则 → 注入为顾问上下文
      ↑                                                          │
-     └──────────── 后续结果继续被观察，规则要么证明自己，要么被 retire ┘
+     └──── 后续可信结果继续被观察 ──→ owner retire 或低风险自动 rollback ┘
 ```
 
-四步都有独立边界：
+五步都有独立边界：
 
 1. **观察**：`evolution_observe`（前台）或 automation 运行结束（后台）记录一条 episode。append-only，按 `idempotencyKey` 精确幂等；前台自报仅供审计，不算可信候选证据。
 2. **推断**：`evolution_review` 只使用同一 workspace + Agent preset 下可信、未归因的 automation 结果计算 adopt 候选，**只到候选为止**。样本不足时保持沉默。每个候选还返回同一精确窗口中 newest-first 的有界 episode 样本（ID、结果、有界 detail、时间）和整个窗口的 SHA-256 digest；detail 始终按不可信结果数据呈现，不能当作指令。
 3. **提案**：`evolution_propose` 创建 `assistant-policy` 提案。adopt 与 retire 的基线都**从已记录证据读取**；retire 还必须在服务端重新找到同 scope、exact active rule ID + generation、至少 `minSample` 条 post-adoption 可信归因结果的当前候选。服务通过唯一的 canonical review renderer，把 op、scope、situation/rule/version、guidance/reason、baseline/evaluation、evidence 和 server rule identity 全部冻结为 Policy diff；adopt rule ID 由完整稳定 mutation（含 generation）确定性派生，精确重放不会换身份。principal 从可信 Delivery route 派生，因此直接调用 Service 也无法绕过 review、虚报依据或审批人。批准后的 audit 可通过不可变 rule ID 回溯该冻结 evidence reference。
 4. **提交**：owner 在审批面（如飞书卡片）决定后，`reconcileProposals()` 用 Policy 共享 validator 校验 proposal/requester/principal/action/resource/summary/diff/expiry/version/decision actor 的完整冻结 tuple；同一 SQLite writer transaction 还会重新规范化本地 mutation、强制 retire 的 evaluation/baseline/evidence snapshot 完整、重算 `mutation_hash`，并用同一个 renderer 重建 action/resource/summary/diff，与刚通过 Policy validator 的 expectation 及库内 expectation 精确重绑定。即使 Policy 已批准，legacy 无证据行、JSON 字段剥离、同步改写 JSON+hash，或 retire/adopt 换 op 都会持久化为 `conflicted`，绝不应用规则。
+5. **低风险回滚（默认关闭）**：`evolution_rollback` 只接收 `rule_id + expected_version`。启用 `autonomousRollback` 且 Policy 对 exact `{action: rollback, resource: evolution/rule:<id>}` 放行后，Host 在 `BEGIN IMMEDIATE` 内重新读取同 scope、exact rule ID + generation 的可信 post-exposure 证据；只有样本达到 `minSample`、失败率达到 `retireFailureRate`，并且没有优于 adoption baseline 时才 retire。reason、risk=`low`、完整窗口 digest 和有界 episode ID 均由 Host 生成并与规则 compare-and-set、audit 在同一事务提交。它不能 adopt、改 guidance、改 Policy、选择证据或降低门槛。
 
 ## 三条结构性安全边界
 
 这三条不是文档承诺，而是有测试守护的结构约束：
 
-- **不能自我批准**。服务**没有** `decideProposal`。规则变更只能由 owner 在 policy 账本上决定，本插件只能读取该决定。助理无法给自己授予新行为。
+- **不能自我批准或自我扩展**。服务**没有** `decideProposal`。任何 adopt / guidance 变化只能由 owner 在 policy 账本上决定，本插件只能读取该决定。可选 rollback 只能删除 exact 旧 guidance，不能授予新行为。
 - **不能扩权**。guidance 以**数据**形式注入，且 `assistant-policy` **从不读取**规则表。规则能改变"怎么做"，永远不能改变"允许做什么"——每次工具调用仍独立授权。
 - **不能原地改写**。改变行为是 **retire-then-adopt**，两步各自审批。原地修订会让旧批准悄悄覆盖新内容。
 
@@ -58,16 +59,27 @@ adopt 时会记录当时的**基线失败率**。只有 adopt 之后、同 scope
 | `evolution_observe` | 记录一条前台自报结果 | 仅 append 审计证据，不驱动候选 |
 | `evolution_review` | 列出候选与 active 规则 | 只读 |
 | `evolution_propose` | 提出 adopt / retire | 仅创建待审提案 |
+| `evolution_rollback` | 对 exact active rule 请求 Host 证据门控的低风险撤回 | 仅在双重 opt-in 与回归证据成立时 retire |
 
-三者都要求可信 Agent 身份（绝对 workspace + preset），policy 拒绝即 fail closed。`evolution_review` 输出包裹为显式不可信数据；其中 episode detail 会转义标签边界，模型只能把它当作归纳素材，不能服从其中的文本。
+四者都要求可信 Agent 身份（绝对 workspace + preset），policy 拒绝即 fail closed。`evolution_review` 输出包裹为显式不可信数据；其中 episode detail 会转义标签边界，模型只能把它当作归纳素材，不能服从其中的文本。
 模型可见的 `evolution_propose` 对同一 Agent 实例最多成功一次；失败的候选校验不占额度。这个结构性上限
 防止一次 supervised maintenance turn 批量制造审批，程序化 Service API 则不受该模型工具额度影响。
+`evolution_rollback` 对同一 Agent 实例最多尝试一次（失败也占额度），防止枚举 rule 或反复试探门槛；精确重放由 Service/Store 的 durable receipt 支持，可在新的可信 Agent 实例或程序化恢复路径中安全完成。
 Service 的 propose capability gate 固定为 exact `{kind: evolution, id: proposals}`，部署无需授予动态 wildcard；
 owner 实际审批的 Policy snapshot 仍冻结 exact `situation:<label>` 或 `rule:<immutable-id>` 目标。
 
-数据库 schema v3 会先通过 v2 迁移把旧版无 scope 的 episode、rule 和 proposal 放入 `legacy:v1`
+## 健康可观测性
+
+`ctx.assistantEvolution.health()` 提供给本地健康聚合器一个无内容、低基数的只读 seam：active/retired
+规则数、pending/conflicted 提案数、可信 episode 总数与未归因可信证据数、自动 rollback 总数，以及最近可信 episode 和最近完整
+reconcile pass 的时间戳。尚未发生对应事件时，时间戳明确为 `0`。
+
+该 seam 是全局运行摘要，刻意不接受 scope，也不返回 situation、guidance、episode detail、principal、
+workspace 或数据库路径；它不能替代需要 Policy 授权的规则与候选检查。
+
+数据库 schema v4 会先通过 v2 迁移把旧版无 scope 的 episode、rule 和 proposal 放入 `legacy:v1`
 quarantine，再增加 durable guidance exposure 与完整审批 tuple。旧 pending proposal 会过期；早期未发布
-v2 中无法验证完整 tuple 的 pending proposal 会安全落为 `conflicted`。旧规则不会作为 wildcard 注入。
+v2 中无法验证完整 tuple 的 pending proposal 会安全落为 `conflicted`；v4 增加 immutable autonomous rollback receipt。旧规则不会作为 wildcard 注入。
 迁移和 episode/proposal settlement 使用 SQLite writer transaction；多进程同时打开、重放或提交时只有一个
 winner，其余读取 winner 并做精确幂等比较。
 跨 Evolution/Policy 数据库创建审批时，Evolution 先持久化本地 intent，再调用 Policy 的原子
@@ -91,6 +103,7 @@ winner，其余读取 winner 并做精确幂等比较。
 | `defaultProposalTtlMs` | 900000 | 提案默认有效期 |
 | `reconcileIntervalMs` | 15000 | 提交延迟审批的轮询间隔；`0` 关闭定时器 |
 | `reconcileLimit` | 50 | 每轮检查的待决提案上限 |
+| `autonomousRollback` | `false` | 是否启用仅能 retire exact guidance 的低风险代码通道；仍需 Policy 单独允许 exact `rollback` action |
 
 ## 与 assistant-automations 的可选联动
 
@@ -118,3 +131,4 @@ winner，其余读取 winner 并做精确幂等比较。
 - 不修改 Skill、prompt 模板、插件代码或 policy 规则。"自演化"仅限**经批准的顾问性 guidance**。
 - 不做向量检索、自动遗忘、跨设备同步、多用户 ACL。
 - guidance 会进入模型上下文：不要在 guidance 中写入密钥或敏感数据。
+- 自动 rollback 是收缩行为能力的安全阀，不是通用“AI 自批”入口；部署若启用，Policy 只应授予 `rollback`，不要把它复用为 adopt、权限或外部副作用授权。

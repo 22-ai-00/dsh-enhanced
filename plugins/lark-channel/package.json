@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/lark-channel",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "A thin Feishu/Lark WebSocket adapter for the durable DSH assistant-delivery core.",
   "license": "MIT",
   "type": "module",
@@ -66,8 +66,7 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@dsh-enhanced/assistant-automations": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/credentials-keychain": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/traex-acp-provider": ">=0.1.0 <0.2.0"
+    "@dsh-enhanced/credentials-keychain": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -81,9 +80,6 @@
     },
     "@dsh-enhanced/credentials-keychain": {
       "optional": true
-    },
-    "@dsh-enhanced/traex-acp-provider": {
-      "optional": true
     }
   },
   "devDependencies": {
@@ -91,7 +87,6 @@
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/credentials-keychain": "workspace:*",
-    "@dsh-enhanced/traex-acp-provider": "workspace:*",
     "@types/markdown-it": "14.1.2",
     "@types/node": "catalog:",
     "@types/qrcode": "1.5.6",

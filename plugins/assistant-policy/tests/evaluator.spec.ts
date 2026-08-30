@@ -110,6 +110,28 @@ describe('assistant policy evaluator', () => {
     expect(decide(rules, background).reasonCode).toBe('default-deny')
   })
 
+  test('keeps reversible preference authority separate from confirmed Memory writes', () => {
+    const rules: PolicyRule[] = [{
+      id: 'allow-local-preference-overlay',
+      effect: 'allow',
+      actions: ['activate'],
+      resource: { kind: 'preference', id: '*' },
+    }]
+    const preference = {
+      ...baseRequest,
+      action: 'activate',
+      resource: { kind: 'preference' as const, id: 'response.verbosity' },
+    }
+    const memory = {
+      ...baseRequest,
+      action: 'activate',
+      resource: { kind: 'memory' as const, id: 'preference:response.verbosity' },
+    }
+
+    expect(decide(rules, preference).effect).toBe('allow')
+    expect(decide(rules, memory).reasonCode).toBe('default-deny')
+  })
+
   test('uses declaration order to break ties between matching deny rules', () => {
     const decision = decide([
       { id: 'first-deny', effect: 'deny', actions: ['execute'] },

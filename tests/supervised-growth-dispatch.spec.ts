@@ -60,6 +60,13 @@ function effectiveConfig(input: {
     evaluationWindow: 10
     minSample: 4
     reconcileIntervalMs: 0
+- id: dsh-enhanced-assistant-evaluation
+  config:
+    databasePath: ${input.root}/evaluation.sqlite
+- id: dsh-enhanced-preference-learning
+  config:
+    enabled: true
+    databasePath: ${input.root}/preferences.sqlite
 `
 }
 

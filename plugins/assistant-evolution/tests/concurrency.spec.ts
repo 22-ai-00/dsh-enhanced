@@ -50,6 +50,11 @@ interface WorkerResult {
     replayed: boolean
     rule?: { id: string }
   }
+  rollback?: {
+    rollback: { ruleId: string; resultVersion: number; evidence: { digest: string } }
+    replayed: boolean
+    rule: { id: string; status: string; version: number }
+  }
   error?: { name: string; code?: string; message: string }
 }
 
@@ -79,6 +84,8 @@ function runWorker(moduleUrl: string, data: Record<string, unknown>): Promise<Wo
             result = { ok: true, episodeId: episode.id, episode }
           } else if (workerData.action === 'settle') {
             result = { ok: true, settled: store.settleProposal(workerData.input) }
+          } else if (workerData.action === 'rollback') {
+            result = { ok: true, rollback: store.rollbackRule(workerData.input) }
           } else {
             result = { ok: true }
           }
@@ -135,6 +142,43 @@ function seedAdoptProposal(path: string): { proposalId: string } {
   return { proposalId: proposal.proposalId }
 }
 
+function seedRollbackRule(path: string) {
+  const store = new EvolutionStore({ path, now: () => 1_000 })
+  const proposal = store.createProposal({
+    idempotencyKey: 'concurrent-rollback-adopt',
+    requester: 'agent:primary',
+    principal: 'owner:lark:123',
+    mutation: {
+      op: 'adopt',
+      input: { scopeKey, situation: 'automation:concurrent-rollback', guidance: 'Try this approach.' },
+      baseline: { scopeKey, situation: 'automation:concurrent-rollback', failures: 4, total: 4 },
+    },
+    expiresAt: 60_000,
+  })
+  store.attachPolicy(proposal.proposalId, 'policy-concurrent-rollback-adopt')
+  const rule = store.settleProposal({
+    proposalId: proposal.proposalId,
+    policyStatus: 'approved',
+    policyVersion: 2,
+  }).rule!
+  for (let index = 1; index <= 4; index += 1) {
+    store.recordEpisode({
+      scopeKey,
+      situation: rule.situation,
+      outcome: 'failed',
+      detail: `failure ${index}`,
+      source: 'automation',
+      trust: 'trusted',
+      ruleId: rule.id,
+      guidanceVersion: rule.generation,
+      occurredAt: 2_000 + index,
+      idempotencyKey: `concurrent-rollback:${index}`,
+    })
+  }
+  store.close()
+  return rule
+}
+
 describe('multi-process SQLite safety', () => {
   test('32 concurrent exact episode replays all return the winning row', async () => {
     const root = temporaryRoot('episode-race')
@@ -188,6 +232,45 @@ describe('multi-process SQLite safety', () => {
     expect(settlements.every(result => result.rule !== undefined)).toBe(true)
     expect(new Set(settlements.map(result => result.rule?.id)).size).toBe(1)
     expect(settlements[0]!.rule?.id).toBeDefined()
+  }, 30_000)
+
+  test('24 concurrent exact rollbacks produce one mutation and durable replays', async () => {
+    const root = temporaryRoot('rollback-race')
+    const moduleUrl = workerModule(root)
+    const path = join(root, 'evolution.sqlite')
+    const rule = seedRollbackRule(path)
+    const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2)
+    const input = {
+      scopeKey,
+      ruleId: rule.id,
+      expectedVersion: rule.version,
+      window: 10,
+      minSample: 4,
+      retireFailureRate: 0.4,
+      evidenceSampleLimit: 4,
+    }
+
+    const pending = Array.from({ length: 24 }, () => runWorker(moduleUrl, {
+      path, action: 'rollback', input, barrier,
+    }))
+    await releaseWhenReady(barrier, 24)
+    const results = await Promise.all(pending)
+
+    expect(results.map(result => result.error)).toEqual(Array.from({ length: 24 }))
+    const rollbacks = results.map(result => result.rollback!)
+    expect(rollbacks.filter(result => !result.replayed)).toHaveLength(1)
+    expect(new Set(rollbacks.map(result => result.rollback.evidence.digest)).size).toBe(1)
+    expect(new Set(rollbacks.map(result => JSON.stringify(result.rollback))).size).toBe(1)
+    expect(rollbacks.every(result => result.rule.status === 'retired'
+      && result.rule.version === 2)).toBe(true)
+
+    const database = new DatabaseSync(path)
+    expect(database.prepare('SELECT COUNT(*) AS count FROM evolution_autonomous_rollbacks').get())
+      .toEqual({ count: 1 })
+    expect(database.prepare(
+      "SELECT COUNT(*) AS count FROM evolution_audit WHERE operation = 'rollback'",
+    ).get()).toEqual({ count: 1 })
+    database.close()
   }, 30_000)
 
   test('concurrent fresh opens create the schema exactly once', async () => {
@@ -259,6 +342,8 @@ describe('multi-process SQLite safety', () => {
       for (const column of columns) expect(info.filter(candidate => candidate.name === column)).toHaveLength(1)
     }
     expect(migrated.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'evolution_guidance_exposures'").get())
+      .toEqual({ count: 1 })
+    expect(migrated.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'evolution_autonomous_rollbacks'").get())
       .toEqual({ count: 1 })
     migrated.close()
   }, 30_000)

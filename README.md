@@ -38,7 +38,7 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/restart.sh
 ```
 
-需要 owner 飞书审批、每日预算和受限主动巡检时，显式启用受监督成长模式：
+需要评测、偏好学习、每日预算和受限主动巡检时，显式启用分级自治成长模式（命令名为兼容旧版仍保留 `supervised-growth`）：
 
 ```sh
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
@@ -46,7 +46,7 @@ dsh plugin --profile web add ./plugins/hello
 
 远程安装器只接受固定发布标签和 SHA-256 校验，不从 mutable `main` 执行代码。完整场景选项、凭据存储和平台差异见[安装脚本文档](scripts/install)；飞书授权、模型选择、进度展示与常驻服务见 [`lark-channel` 文档](plugins/lark-channel)。
 
-个人助理默认采用 `workspace-write + ask`。工具可达性和执行权限是两层控制；即使选择 `full`，显式 Policy deny、紧急停止、身份校验和预算硬门仍然生效。规则不会自行安装能力、修改代码或凭据，也不会放宽后台任务。完整边界以各插件 README 为准。
+个人助理默认采用 `workspace-write + ask`；可显式传 `--permission auto`，让确定性低风险动作和隔离 reviewer 认可的局部可逆动作自动继续，而网络、凭据、破坏性操作、提权和复杂 shell 仍交人工。工具可达性和执行权限是两层控制；即使选择 `full`，显式 Policy deny、紧急停止、身份校验和预算硬门仍然生效。完整边界以各插件 README 为准。
 
 ## 能力概览
 
@@ -55,7 +55,7 @@ dsh plugin --profile web add ./plugins/hello
 | ACP 与编码模型 | [`acp`](plugins/acp)、[`coding-subscription-provider`](plugins/coding-subscription-provider)、[`traex-acp-provider`](plugins/traex-acp-provider) |
 | 个人助理核心 | [`personal-assistant`](plugins/personal-assistant) 组合 Policy、Memory、Wiki 与 Automations |
 | 消息与凭据 | [`assistant-delivery`](plugins/assistant-delivery)、[`lark-channel`](plugins/lark-channel)、[`credentials-keychain`](plugins/credentials-keychain) |
-| 主动能力 | Heartbeat、Event Triggers、Memory/Wiki Bridge、受审批的 Evolution |
+| 主动成长 | Evaluation、Preference Learning、Heartbeat、Event Triggers、Memory/Wiki Bridge 与可自动回滚的 Evolution |
 | 运维与扩展 | Health、Plugin Control Plane 与最小示例 `hello` |
 
 全部包、用途和安装命令见[插件目录](plugins/README.md)。新增、重命名、弃用或移除插件时，同时更新该目录。

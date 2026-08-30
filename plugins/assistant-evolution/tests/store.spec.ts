@@ -217,6 +217,97 @@ describe('candidate detection', () => {
   })
 })
 
+describe('autonomous low-risk rollback', () => {
+  const rollbackOptions = (rule: StoredRule) => ({
+    scopeKey,
+    ruleId: rule.id,
+    expectedVersion: rule.version,
+    window: 10,
+    minSample: 4,
+    retireFailureRate: 0.4,
+    evidenceSampleLimit: 2,
+  })
+
+  test('atomically retires only an exact rule with Host-derived regression evidence', () => {
+    const target = store()
+    const rule = adopt(target, 'rollback-regression', { failures: 4, total: 4 }).rule!
+    const episodes = []
+    for (let index = 1; index <= 4; index += 1) {
+      episodes.push(observe(target, rule.situation, 'failed', index, rule.id))
+    }
+
+    const result = target.rollbackRule(rollbackOptions(rule))
+
+    expect(result).toMatchObject({
+      replayed: false,
+      rule: { id: rule.id, status: 'retired', version: 2 },
+      rollback: {
+        scopeKey,
+        ruleId: rule.id,
+        expectedVersion: 1,
+        resultVersion: 2,
+        risk: 'low',
+        evaluation: { failures: 4, total: 4 },
+        baseline: { failures: 4, total: 4 },
+        evidence: { total: 4 },
+      },
+    })
+    expect(result.rollback.reason).toMatch(/Automatic low-risk rollback.*4\/4.*4\/4/u)
+    expect(result.rollback.evidence.digest).toMatch(/^[a-f0-9]{64}$/u)
+    expect(result.rollback.evidence.sampleEpisodeIds)
+      .toEqual(episodes.toReversed().slice(0, 2).map(episode => episode.id))
+    expect(target.activeRule(scopeKey, rule.situation)).toBeUndefined()
+    expect(target.health()).toMatchObject({ autonomousRollbacks: 1, retiredRules: 1 })
+    target.close()
+  })
+
+  test('replays the exact target and expected version without a second mutation', () => {
+    const target = store()
+    const rule = adopt(target, 'rollback-replay', { failures: 4, total: 4 }).rule!
+    for (let index = 1; index <= 4; index += 1) {
+      observe(target, rule.situation, 'failed', index, rule.id)
+    }
+
+    const first = target.rollbackRule(rollbackOptions(rule))
+    const replay = target.rollbackRule(rollbackOptions(rule))
+
+    expect(replay.replayed).toBe(true)
+    expect(replay.rollback).toEqual(first.rollback)
+    expect(replay.rule).toEqual(first.rule)
+    expect(target.health().autonomousRollbacks).toBe(1)
+    target.close()
+  })
+
+  test('fails closed for insufficient, improved, cross-scope, or stale evidence', () => {
+    const target = store()
+    const insufficient = adopt(target, 'rollback-insufficient', { failures: 4, total: 4 }).rule!
+    for (let index = 1; index <= 3; index += 1) {
+      observe(target, insufficient.situation, 'failed', index, insufficient.id)
+    }
+    expect(() => target.rollbackRule(rollbackOptions(insufficient)))
+      .toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'invalid-state' }))
+
+    const improved = adopt(target, 'rollback-improved', { failures: 4, total: 4 }).rule!
+    for (let index = 1; index <= 2; index += 1) {
+      observe(target, improved.situation, 'failed', index, improved.id)
+    }
+    for (let index = 3; index <= 4; index += 1) {
+      observe(target, improved.situation, 'succeeded', index, improved.id)
+    }
+    expect(() => target.rollbackRule(rollbackOptions(improved)))
+      .toThrowError(/regression evidence/u)
+    expect(() => target.rollbackRule({
+      ...rollbackOptions(improved),
+      scopeKey: JSON.stringify(['/work/beta', 'primary']),
+    })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'not-found' }))
+    expect(() => target.rollbackRule({ ...rollbackOptions(improved), expectedVersion: 99 }))
+      .toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'version-conflict' }))
+    expect(target.listRules(scopeKey, 'active')).toHaveLength(2)
+    expect(target.health().autonomousRollbacks).toBe(0)
+    target.close()
+  })
+})
+
 function adopt(target: EvolutionStore, situation: string, baseline: { failures: number; total: number }) {
   const proposal = target.createProposal({
     idempotencyKey: `adopt:${situation}`,

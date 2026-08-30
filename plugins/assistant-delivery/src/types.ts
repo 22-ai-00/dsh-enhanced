@@ -69,6 +69,47 @@ export interface InboundEnvelope {
   attachments?: readonly InboundAttachmentDescriptor[]
 }
 
+/** Closed key/value catalog emitted by Delivery's authenticated `/feedback` command. */
+export type DeliveryPreferenceSelection =
+  | { readonly preferenceKey: 'feedback.response'; readonly candidateValue:
+    | 'helpful' | 'not-helpful' | 'too-long' | 'too-short'
+    | 'wrong-format' | 'wrong-action' | 'unwanted-reminder' }
+  | { readonly preferenceKey: 'recommendation.ranking'; readonly candidateValue:
+    'recency' | 'familiarity' | 'evidence' }
+  | { readonly preferenceKey: 'response.explanation_depth'; readonly candidateValue:
+    'result-first' | 'balanced' | 'tutorial' }
+  | { readonly preferenceKey: 'response.language'; readonly candidateValue: 'zh-CN' | 'en' }
+  | { readonly preferenceKey: 'response.structure'; readonly candidateValue:
+    'prose' | 'bullets' | 'mixed' }
+  | { readonly preferenceKey: 'response.verbosity'; readonly candidateValue:
+    'concise' | 'balanced' | 'detailed' }
+  | { readonly preferenceKey: 'suggestion.frequency'; readonly candidateValue: 'low' | 'normal' }
+
+/**
+ * Immutable Host-attested feedback event. Delivery, not a model or listener,
+ * owns every field and the downstream idempotency identity.
+ */
+export type DeliveryPreferenceFeedback = Readonly<{
+  readonly scope: Readonly<{ workspace: string; preset: string }>
+  readonly stance: 'support'
+  readonly actorTrust: 'owner-authenticated'
+  readonly interpretationTrust: 'typed-feedback'
+  readonly source: 'direct-owner-feedback'
+  readonly occurredAt: number
+  readonly idempotencyKey: string
+}> & DeliveryPreferenceSelection
+
+/** Durable acknowledgement returned by the single authoritative sink. */
+export interface DeliveryPreferenceFeedbackReceipt {
+  readonly idempotencyKey: string
+  readonly status: 'recorded'
+}
+
+export type DeliveryPreferenceFeedbackListener = (
+  events: readonly Readonly<DeliveryPreferenceFeedback>[],
+) => readonly Readonly<DeliveryPreferenceFeedbackReceipt>[]
+  | Promise<readonly Readonly<DeliveryPreferenceFeedbackReceipt>[]>
+
 export type AttachmentResourceType = 'audio' | 'file' | 'image' | 'sticker' | 'video'
 
 export interface InboundAttachmentDescriptor {

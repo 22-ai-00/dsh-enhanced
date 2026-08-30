@@ -81,7 +81,11 @@ const fixture = `
         principal: lark/primary/personal/ou_owner
     maxScratchBytes: 2048
 - id: dsh-enhanced-assistant-evolution
-  config: { databasePath: /Users/test/.dsh/assistant-evolution/state.sqlite }
+  config: { databasePath: /Users/test/.dsh/assistant-evolution/state.sqlite, autonomousRollback: false }
+- id: dsh-enhanced-assistant-evaluation
+  config: { databasePath: /Users/test/.dsh/assistant-evaluation/evaluation.sqlite }
+- id: dsh-enhanced-preference-learning
+  config: { enabled: true, databasePath: /Users/test/.dsh/preference-learning/preferences.sqlite }
 `
 
 const binding = {
@@ -123,6 +127,7 @@ describe('supervised-growth profile patch', () => {
     const delivery = parsed.find(row => row.id === 'dsh-enhanced-assistant-delivery').config
     const traex = parsed.find(row => row.id === 'dsh-enhanced-traex-acp-provider').config
     const heartbeat = parsed.find(row => row.id === 'dsh-enhanced-assistant-heartbeat').config
+    const evolution = parsed.find(row => row.id === 'dsh-enhanced-assistant-evolution').config
     const growth = heartbeat.heartbeats.find((entry: { id: string }) => entry.id === 'supervised-growth')
 
     expect(assistant.assistantAutomations.schedulerEnabled).toBe(true)
@@ -132,46 +137,71 @@ describe('supervised-growth profile patch', () => {
     expect(assistant.assistantPolicy.budgets).toContainEqual({
       id: 'supervised-growth-daily-runs', metric: 'automation-runs', limit: 7, periodMs: 86400000, scope: 'workspace',
     })
-    expect(delivery).toMatchObject({ agentProvider: 'traex-agent', agentModel: 'default' })
+    expect(delivery).toMatchObject({ agentProvider: 'deepseek-official', agentModel: 'deepseek-v4-flash' })
     expect(delivery.toolCapableProviders).toBeUndefined()
     expect(delivery.unknownRouteToolCalls).toBeUndefined()
-    expect(traex).toMatchObject({ enabled: true, cwd: '/Users/test/.dsh/assistant-workspace' })
+    expect(traex).toEqual({ enabled: false, cwd: '/tmp/old' })
+    expect(evolution).toMatchObject({
+      databasePath: '/Users/test/.dsh/assistant-evolution/state.sqlite', autonomousRollback: true,
+    })
     expect(growth).toMatchObject({
       enabled: true,
       scratchPath: '/Users/test/.dsh/assistant-heartbeat/supervised-growth.md',
       workspace: '/Users/test/.dsh/assistant-workspace',
       agentPreset: 'standard',
-      provider: 'traex-agent',
-      model: 'default',
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
       timezone: 'Asia/Shanghai',
       activeStartHour: 8,
       activeEndHour: 22,
       intervalMinutes: 120,
       principal: 'lark/primary/personal/ou_owner',
-      allowedTools: ['evolution_review', 'evolution_propose'],
-      timeoutMs: 60000,
-      maxOutputTokens: 512,
-      maxToolCalls: 2,
+      allowedTools: [
+        'evaluation_review', 'automation_history', 'memory_search_confirmed', 'evaluation_self_assess',
+        'preference_review', 'preference_activate',
+        'evolution_review', 'evolution_rollback', 'evolution_propose',
+      ],
+      timeoutMs: 120000,
+      maxOutputTokens: 1024,
+      maxToolCalls: 8,
       budgetId: 'supervised-growth-daily-runs',
       budgetAmount: 1,
       deliveryBindingId: 'binding-owner-dm',
     })
     expect(growth.initialScratch).toMatch(/review before.*propose/i)
-    expect(growth.initialScratch).toContain('owner-approved guidance proposal')
+    expect(growth.initialScratch).toContain('evaluation_self_assess')
+    expect(growth.initialScratch).toContain('self-reported')
+    expect(growth.initialScratch).toContain('Host-catalog T1')
+    expect(growth.initialScratch).toContain('trusted post-exposure regression')
+    expect(growth.initialScratch).toContain('owner approval')
     expect(growth.initialScratch).toMatch(/must not modify code, credentials, or Policy/i)
 
     const rules = assistant.assistantPolicy.rules.filter((rule: { id: string }) => rule.id.startsWith('supervised-growth-'))
     expect(rules.map((rule: { id: string }) => rule.id).sort()).toEqual([
       'supervised-growth-automation-delivery',
+      'supervised-growth-automation-history',
+      'supervised-growth-automation-history-tool',
+      'supervised-growth-evaluation-review-tool',
+      'supervised-growth-evaluation-self-assess-tool',
       'supervised-growth-evolution-approval-delivery',
       'supervised-growth-evolution-inspect-candidates',
       'supervised-growth-evolution-inspect-rules',
       'supervised-growth-evolution-propose',
       'supervised-growth-evolution-propose-tool',
       'supervised-growth-evolution-review',
+      'supervised-growth-evolution-rollback',
+      'supervised-growth-evolution-rollback-tool',
       'supervised-growth-guidance-snapshot',
       'supervised-growth-heartbeat-execute',
       'supervised-growth-heartbeat-reconcile',
+      'supervised-growth-memory-search',
+      'supervised-growth-memory-search-confirmed-tool',
+      'supervised-growth-preference-activate',
+      'supervised-growth-preference-activate-tool',
+      'supervised-growth-preference-review',
+      'supervised-growth-preference-review-tool',
+      'supervised-growth-preference-signal',
+      'supervised-growth-preference-snapshot',
     ])
     expect(rules).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -201,6 +231,46 @@ describe('supervised-growth profile patch', () => {
         actions: ['execute'], resource: { kind: 'tool', id: 'evolution_review' }, context: { initiators: ['background'] },
       }),
       expect.objectContaining({
+        id: 'supervised-growth-evaluation-review-tool',
+        actions: ['execute'], resource: { kind: 'tool', id: 'evaluation_review' }, context: { initiators: ['background'] },
+      }),
+      expect.objectContaining({
+        id: 'supervised-growth-evaluation-self-assess-tool',
+        actions: ['execute'], resource: { kind: 'tool', id: 'evaluation_self_assess' }, context: { initiators: ['background'] },
+      }),
+      expect.objectContaining({
+        id: 'supervised-growth-automation-history',
+        actions: ['history'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] },
+      }),
+      expect.objectContaining({
+        id: 'supervised-growth-memory-search',
+        actions: ['search'], resource: { kind: 'memory', id: 'visible' }, context: { initiators: ['background'] },
+      }),
+      expect.objectContaining({
+        id: 'supervised-growth-preference-review',
+        actions: ['review'], resource: { kind: 'preference', id: 'hypotheses' },
+        context: { initiators: ['background'] },
+      }),
+      expect.objectContaining({
+        id: 'supervised-growth-preference-activate',
+        actions: ['activate'], resource: { kind: 'preference', id: 'pref-hyp-*' },
+        context: { initiators: ['background'] },
+      }),
+      expect.objectContaining({
+        id: 'supervised-growth-preference-snapshot',
+        actions: ['snapshot'], resource: { kind: 'preference', id: 'active' },
+        context: { initiators: ['background', 'external', 'foreground'] },
+      }),
+      expect.objectContaining({
+        id: 'supervised-growth-preference-signal',
+        subject: {
+          kind: 'external', id: 'lark/primary/personal/ou_owner',
+          workspace: '/Users/test/.dsh/assistant-workspace',
+        },
+        actions: ['signal'], resource: { kind: 'preference', id: 'standard/*' },
+        context: { initiators: ['external'] },
+      }),
+      expect.objectContaining({
         id: 'supervised-growth-evolution-propose-tool',
         actions: ['execute'], resource: { kind: 'tool', id: 'evolution_propose' }, context: { initiators: ['background'] },
       }),
@@ -217,6 +287,10 @@ describe('supervised-growth profile patch', () => {
         actions: ['propose'], resource: { kind: 'evolution', id: 'proposals' }, context: { initiators: ['background'] },
       }),
       expect.objectContaining({
+        id: 'supervised-growth-evolution-rollback',
+        actions: ['rollback'], resource: { kind: 'evolution', id: 'rule:*' }, context: { initiators: ['background'] },
+      }),
+      expect.objectContaining({
         id: 'supervised-growth-guidance-snapshot',
         actions: ['snapshot'], resource: { kind: 'evolution', id: 'guidance' }, context: { initiators: ['background'] },
       }),
@@ -231,8 +305,8 @@ describe('supervised-growth profile patch', () => {
       'dsh-enhanced-personal-assistant',
       'dsh-enhanced-assistant-delivery',
       'dsh-enhanced-lark-channel',
-      'dsh-enhanced-traex-acp-provider',
       'dsh-enhanced-assistant-heartbeat',
+      'dsh-enhanced-assistant-evolution',
     ]) {
       const entry = parsed.find(row => row.id === id)
       expect(entry?.config).toBeDefined()
@@ -242,12 +316,21 @@ describe('supervised-growth profile patch', () => {
     expect(personal.personalMemory.databasePath).toContain("dshHomePath('personal-memory/memory.sqlite')")
   })
 
-  test('fails closed when any required effective bundle row is disabled', () => {
-    const disabledEffective = fixture.replace(
-      '- id: dsh-enhanced-assistant-evolution\n  config:',
-      '- id: dsh-enhanced-assistant-evolution\n  disabled: true\n  config:',
+  test.each(['assistant-evolution', 'assistant-evaluation', 'preference-learning'])(
+    'fails closed when required effective %s is disabled',
+    plugin => {
+      const id = `dsh-enhanced-${plugin}`
+      const disabledEffective = fixture.replace(`- id: ${id}\n  config:`, `- id: ${id}\n  disabled: true\n  config:`)
+      expect(() => configured('[]\n', disabledEffective)).toThrow(/disabled/i)
+    },
+  )
+
+  test('fails closed when Preference Learning is installed but functionally disabled', () => {
+    const disabled = fixture.replace(
+      'config: { enabled: true, databasePath: /Users/test/.dsh/preference-learning/preferences.sqlite }',
+      'config: { enabled: false, databasePath: /Users/test/.dsh/preference-learning/preferences.sqlite }',
     )
-    expect(() => configured('[]\n', disabledEffective)).toThrow(/disabled/i)
+    expect(() => configured('[]\n', disabled)).toThrow(/preference-learning\.enabled/i)
   })
 
   test('reads custom local databases from the effective tree rather than assuming DSH defaults', () => {
@@ -261,11 +344,14 @@ describe('supervised-growth profile patch', () => {
   })
 
   test('rejects an effective tree where a higher-priority layer undoes any required supervised grant', () => {
-    // The raw user overlay intentionally contains no Evolution row; DSH's
-    // post-compose dump contributes it from its independently installed bundle.
+    // Evaluation and Preference Learning remain independent rows contributed by
+    // their bundles; Evolution is present because this overlay opts into its
+    // bounded automatic rollback lane.
     const overlayRows = rows(configured('[]\n'))
-    const evolutionRow = rows(fixture).find(row => row.id === 'dsh-enhanced-assistant-evolution')
-    const configuredEffective = stringify([...overlayRows, evolutionRow])
+    const requiredRows = rows(fixture).filter(row => [
+      'dsh-enhanced-assistant-evaluation', 'dsh-enhanced-preference-learning',
+    ].includes(row.id))
+    const configuredEffective = stringify([...overlayRows, ...requiredRows])
     const schedulerUndone = configuredEffective.replace('schedulerEnabled: true', 'schedulerEnabled: false')
     expect(() => assertEffectiveSupervisedGrowthConfig({
       effectiveConfig: schedulerUndone,
@@ -273,15 +359,56 @@ describe('supervised-growth profile patch', () => {
       binding,
     })).toThrow(/schedulerEnabled/i)
 
-    const disabledTraex = configuredEffective.replace(
-      '- id: dsh-enhanced-traex-acp-provider\n  config:',
-      '- id: dsh-enhanced-traex-acp-provider\n  disabled: true\n  config:',
+    const disabledHeartbeat = configuredEffective.replace(
+      '- id: dsh-enhanced-assistant-heartbeat\n  config:',
+      '- id: dsh-enhanced-assistant-heartbeat\n  disabled: true\n  config:',
     )
     expect(() => assertEffectiveSupervisedGrowthConfig({
-      effectiveConfig: disabledTraex,
+      effectiveConfig: disabledHeartbeat,
       dshHome: '/Users/test/.dsh',
       binding,
     })).toThrow(/disabled/i)
+
+    const rollbackUndone = configuredEffective.replace('autonomousRollback: true', 'autonomousRollback: false')
+    expect(() => assertEffectiveSupervisedGrowthConfig({
+      effectiveConfig: rollbackUndone,
+      dshHome: '/Users/test/.dsh',
+      binding,
+    })).toThrow(/autonomousRollback/i)
+
+    const deliveryRouteChanged = configuredEffective.replace(
+      'agentProvider: deepseek-official',
+      'agentProvider: codex-subscription',
+    )
+    expect(() => assertEffectiveSupervisedGrowthConfig({
+      effectiveConfig: deliveryRouteChanged,
+      dshHome: '/Users/test/.dsh',
+      binding,
+    })).toThrow(/heartbeat/i)
+  })
+
+  test('reuses the configured Delivery route and rejects an empty provider or model', () => {
+    const customRoute = fixture
+      .replace('agentProvider: deepseek-official', 'agentProvider: codex-subscription')
+      .replace('agentModel: deepseek-v4-flash', 'agentModel: gpt-5.6-terra')
+    const output = configureSupervisedGrowthProfilePatch({
+      profilePatch: '[]\n', effectiveConfig: customRoute, dshHome: '/Users/test/.dsh', binding,
+    })
+    const parsed = rows(output)
+    const delivery = parsed.find(row => row.id === 'dsh-enhanced-assistant-delivery').config
+    const heartbeat = parsed.find(row => row.id === 'dsh-enhanced-assistant-heartbeat').config
+    const growth = heartbeat.heartbeats.find((entry: { id: string }) => entry.id === 'supervised-growth')
+    expect(delivery).toMatchObject({ agentProvider: 'codex-subscription', agentModel: 'gpt-5.6-terra' })
+    expect(growth).toMatchObject({ provider: 'codex-subscription', model: 'gpt-5.6-terra' })
+
+    const missingProvider = fixture.replace('agentProvider: deepseek-official', 'agentProvider: ""')
+    expect(() => configureSupervisedGrowthProfilePatch({
+      profilePatch: '[]\n', effectiveConfig: missingProvider, dshHome: '/Users/test/.dsh', binding,
+    })).toThrow(/agentProvider/i)
+    const missingModel = fixture.replace('agentModel: deepseek-v4-flash', 'agentModel: ""')
+    expect(() => configureSupervisedGrowthProfilePatch({
+      profilePatch: '[]\n', effectiveConfig: missingModel, dshHome: '/Users/test/.dsh', binding,
+    })).toThrow(/agentModel/i)
   })
 
   test('fails closed for a binding that does not exactly match the configured Lark account, workspace, and preset', () => {

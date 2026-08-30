@@ -24,6 +24,7 @@ import type {
   EvolutionMutation,
   EvolutionProposalMutation,
   RuleCandidate,
+  StoredAutonomousRollback,
   StoredEpisode,
   StoredProposal,
   StoredRule,
@@ -52,6 +53,11 @@ export interface Config {
   /** Poll interval for committing decisions settled after the originating turn. */
   reconcileIntervalMs?: number
   reconcileLimit?: number
+  /**
+   * Permit the narrow evidence-gated rollback lane. This only enables the code
+   * path; Policy must independently allow exact `rollback` actions.
+   */
+  autonomousRollback?: boolean
 }
 
 const configSchema = Schema.object({
@@ -68,6 +74,7 @@ const configSchema = Schema.object({
   defaultProposalTtlMs: Schema.number().step(1).min(1).default(900_000),
   reconcileIntervalMs: Schema.number().step(1).min(0).default(15_000),
   reconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
+  autonomousRollback: Schema.boolean().default(false),
 }) as Schema<Config>
 
 const evolutionApprovalSource = 'dsh-enhanced-assistant-evolution'
@@ -97,6 +104,26 @@ export interface EvolutionProposalResult {
   version: number
   replayed: boolean
   rule: StoredRule | undefined
+}
+
+export interface EvolutionRollbackResult {
+  rollback: StoredAutonomousRollback
+  rule: StoredRule
+  replayed: boolean
+}
+
+/** Content-free, global operational summary for local health aggregation. */
+export interface AssistantEvolutionHealth {
+  activeRules: number
+  retiredRules: number
+  pendingProposals: number
+  conflictedProposals: number
+  trustedEpisodes: number
+  unattributedTrustedEpisodes: number
+  lastTrustedEpisodeAt: number
+  /** Last fully completed reconciliation pass; zero means none has completed. */
+  lastReconciledAt: number
+  autonomousRollbacks: number
 }
 
 export interface ForegroundEpisodeInput {
@@ -154,13 +181,15 @@ function ruleIdFromStableMutation(stable: string): string {
  * only then let an approved rule shape future sessions as injected advisory
  * context. Three boundaries are structural rather than cosmetic:
  *
- * - **No self-approval.** Every rule change is an `assistant-policy` proposal. The
- *   service cannot decide its own proposals, so the assistant can never grant
- *   itself a new behaviour.
+ * - **No self-adoption.** New or changed guidance is always an
+ *   `assistant-policy` proposal. The only optional autonomous mutation removes
+ *   an exact active rule after Host-recomputed regression evidence; it can never
+ *   create or revise guidance.
  * - **No privilege growth.** Guidance is injected as data and policy never reads
  *   the rule table, so a rule can change approach but never authority.
- * - **No in-place revision.** Changing behaviour is retire-then-adopt, each
- *   separately approved, so an old approval can never silently cover new guidance.
+ * - **No in-place revision.** Replacement is always retire-then-adopt. A rollback
+ *   may remove the old rule, but the replacement still needs its own approval,
+ *   so an old decision can never silently cover new guidance.
  */
 export class AssistantEvolutionService extends Service {
   static Config = configSchema
@@ -170,10 +199,12 @@ export class AssistantEvolutionService extends Service {
   private readonly policy: AssistantPolicyService
   private readonly config: Required<Config>
   private readonly injected = new WeakSet<Agent>()
+  private readonly now: () => number
   private delivery: EvolutionApprovalDelivery | undefined
   private active = true
+  private lastReconciledAt = 0
 
-  constructor(ctx: Context, input: Config) {
+  constructor(ctx: Context, input: Config, options: { now?: () => number } = {}) {
     super(ctx, 'assistantEvolution')
     try {
       this.config = configSchema(input) as Required<Config>
@@ -183,6 +214,7 @@ export class AssistantEvolutionService extends Service {
     const policy = ctx.get('assistantPolicy') as AssistantPolicyService | undefined
     if (policy === undefined) throw new Error('assistant-evolution: assistantPolicy service is required')
     this.policy = policy
+    this.now = options.now ?? Date.now
     this.store = new EvolutionStore({
       path: this.config.databasePath,
       maxGuidanceBytes: this.config.maxRuleGuidanceBytes,
@@ -223,6 +255,15 @@ export class AssistantEvolutionService extends Service {
         return () => clearInterval(timer)
       }, 'assistant-evolution.reconcile')
     }
+  }
+
+  /** Aggregate health seam. It never returns content, identities, scopes, or paths. */
+  health(): Readonly<AssistantEvolutionHealth> {
+    this.assertActive()
+    return Object.freeze({
+      ...this.store.health(),
+      lastReconciledAt: this.lastReconciledAt,
+    })
   }
 
   /** Record one observed outcome as evidence. */
@@ -335,6 +376,42 @@ export class AssistantEvolutionService extends Service {
   listRules(agent: Agent | undefined, status?: 'active' | 'retired'): StoredRule[] {
     const scopeKey = this.authorize(agent, 'inspect', 'rules')
     return this.store.listRules(scopeKey, status)
+  }
+
+  /**
+   * Remove one exact active guidance generation through the opt-in low-risk lane.
+   *
+   * The model identifies only the immutable rule and its observed version. This
+   * method derives scope from the Agent, authorizes the exact Policy action, and
+   * delegates the evidence/risk/reason decision to one transactional Host path.
+   */
+  rollback(agent: Agent | undefined, input: {
+    ruleId: string
+    expectedVersion: number
+  }): EvolutionRollbackResult {
+    this.assertActive()
+    if (!this.config.autonomousRollback) {
+      throw new AssistantEvolutionError('forbidden', 'autonomous evolution rollback is disabled')
+    }
+    const ruleId = input.ruleId.normalize('NFC').trim()
+    if (!/^rule-[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+      .test(ruleId)) {
+      throw new AssistantEvolutionError('invalid-input', 'ruleId must be an immutable server-issued rule ID')
+    }
+    if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1
+      || input.expectedVersion > 1_000_000_000) {
+      throw new AssistantEvolutionError('invalid-input', 'expectedVersion must be a positive safe integer')
+    }
+    const scopeKey = this.authorize(agent, 'rollback', `rule:${ruleId}`)
+    return this.store.rollbackRule({
+      scopeKey,
+      ruleId,
+      expectedVersion: input.expectedVersion,
+      window: this.config.evaluationWindow,
+      minSample: this.config.minSample,
+      retireFailureRate: this.config.retireFailureRate,
+      evidenceSampleLimit: this.config.maxEvidenceSamples,
+    })
   }
 
   /**
@@ -481,6 +558,7 @@ export class AssistantEvolutionService extends Service {
         this.store.deferPendingProposal(pending.proposalId)
       }
     }
+    this.lastReconciledAt = this.now()
     return settled
   }
 

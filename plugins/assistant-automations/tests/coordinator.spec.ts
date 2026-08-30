@@ -7,6 +7,7 @@ import {
   AutomationCoordinator,
   AutomationRunnerAmbiguousError,
   type AutomationDeliveryDispatcher,
+  type AutomationEvaluationRecorder,
   type AutomationOutcomeRecorder,
   type AutomationRunner,
   type AutomationRunnerInput,
@@ -34,7 +35,7 @@ function definition(overrides: Record<string, unknown> = {}) {
 async function fixture(runner: AutomationRunner, overrides: Record<string, number> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-automations-coordinator-'))
   roots.push(root)
-  const at = Date.parse('2026-08-21T10:01:00.000Z')
+  let at = Date.parse('2026-08-21T10:01:00.000Z')
   const store = new AutomationStore({ path: join(root, 'state.sqlite'), now: () => at })
   const artifacts = new AutomationArtifactStore({ rootPath: join(root, 'runs'), maxBytes: 64_000 })
   const coordinator = new AutomationCoordinator({
@@ -42,7 +43,7 @@ async function fixture(runner: AutomationRunner, overrides: Record<string, numbe
     dutyLeaseMs: 10_000, taskLeaseMs: 5_000, misfireGraceMs: minute, maxCatchUp: 10,
     maxConcurrency: 2, ...overrides,
   })
-  return { root, store, coordinator }
+  return { root, store, coordinator, advance: (milliseconds: number) => { at += milliseconds } }
 }
 
 describe('automation coordinator', () => {
@@ -108,6 +109,81 @@ describe('automation coordinator', () => {
     await value.coordinator.tick()
     expect(recorded).toHaveLength(1)
     value.coordinator.stop()
+    value.store.close()
+  })
+
+  test('durably retries unified evaluation without rerunning work or coupling Evolution evidence', async () => {
+    const recorded: Parameters<AutomationEvaluationRecorder['append']>[0][] = []
+    let available = false
+    let executions = 0
+    const value = await fixture({
+      async run() {
+        executions += 1
+        return { outcome: 'failed', output: 'did not work', usage: { inputTokens: 7, outputTokens: 2 } }
+      },
+    })
+    value.coordinator.setEvaluationRecorder({
+      async append(input) {
+        if (!available) throw new Error('evaluation ledger is down')
+        recorded.push(input)
+      },
+    })
+    value.store.createApproved({
+      automationId: 'auto-evaluation', idempotencyKey: 'create:evaluation', definition: definition(),
+    })
+
+    await value.coordinator.tick()
+    await value.coordinator.whenIdle()
+    expect(executions).toBe(1)
+    expect(recorded).toEqual([])
+    expect(value.store.listPendingEvaluations(10)).toEqual([
+      expect.objectContaining({
+        status: 'pending', payload: expect.objectContaining({
+          executionStatus: 'failed', objectiveStatus: 'unknown', deliveryStatus: 'not-required',
+          metrics: expect.objectContaining({ inputTokens: 7, outputTokens: 2 }),
+        }),
+      }),
+    ])
+
+    available = true
+    value.advance(1_000)
+    await value.coordinator.tick()
+    await value.coordinator.whenIdle()
+    expect(executions).toBe(1)
+    expect(recorded).toHaveLength(1)
+    expect(value.store.listPendingEvaluations(10)).toEqual([])
+    // Evolution owns a separate outbox and remains pending because no Evolution
+    // recorder was attached; Evaluation success cannot settle it.
+    expect(value.store.listPendingEvidence(10)).toHaveLength(1)
+    await value.coordinator.stop()
+    value.store.close()
+  })
+
+  test('flushes a durable Evaluation backlog when the optional sink is attached later', async () => {
+    let executions = 0
+    const value = await fixture({
+      async run() {
+        executions += 1
+        return { outcome: 'succeeded', output: 'done', usage: {} }
+      },
+    })
+    value.store.createApproved({
+      automationId: 'evaluation-late-attach', idempotencyKey: 'create:evaluation-late-attach',
+      definition: definition(),
+    })
+    await value.coordinator.tick()
+    await value.coordinator.whenIdle()
+    expect(executions).toBe(1)
+    expect(value.store.listPendingEvaluations(10)).toHaveLength(1)
+
+    const recorded: Parameters<AutomationEvaluationRecorder['append']>[0][] = []
+    value.coordinator.setEvaluationRecorder({ async append(input) { recorded.push(input) } })
+    await value.coordinator.whenIdle()
+
+    expect(recorded).toHaveLength(1)
+    expect(value.store.listPendingEvaluations(10)).toEqual([])
+    expect(executions).toBe(1)
+    await value.coordinator.stop()
     value.store.close()
   })
 

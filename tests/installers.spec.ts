@@ -4,6 +4,11 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { afterEach, describe, expect, test } from 'vitest'
+import { parse, stringify } from 'yaml'
+import {
+  assertEffectiveSupervisedGrowthConfig,
+  configureSupervisedGrowthProfilePatch,
+} from '../plugins/lark-channel/src/supervised-growth-profile.ts'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const installDirectory = join(repoRoot, 'scripts', 'install')
@@ -56,6 +61,24 @@ async function configureExistingLark(dshHome: string, profile = 'web'): Promise<
 async function writeExecutable(path: string, content: string): Promise<void> {
   await writeFile(path, content, 'utf8')
   await chmod(path, 0o755)
+}
+
+const yamlOptions = {
+  customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+} as const
+
+async function composeSelectedBundleRows(installerOutput: string): Promise<any[]> {
+  const paths = [...new Set([...installerOutput.matchAll(new RegExp(`${repoRoot}/plugins/[a-z0-9-]+`, 'gu'))]
+    .map(match => match[0]))]
+  const rows: any[] = []
+  for (const path of paths) {
+    const patch = parse(await readFile(join(path, 'cordis.patch.yml'), 'utf8'), yamlOptions) as any[]
+    for (const operation of patch) {
+      if (Array.isArray(operation.insert)) rows.push(...operation.insert)
+      else if (typeof operation.id === 'string') rows.push(operation)
+    }
+  }
+  return rows
 }
 
 afterEach(async () => {
@@ -166,7 +189,7 @@ describe('one-click installers', () => {
     }
   })
 
-  test('supervised-growth explicitly installs Evolution then invokes the audited activator after Lark onboarding', async () => {
+  test('supervised-growth installs every activator dependency then invokes it after Lark onboarding', async () => {
     const dshHome = await temporaryDshHome()
 
     const result = runInstaller(localInstaller, [
@@ -176,9 +199,61 @@ describe('one-click installers', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('部署模式：supervised-growth')
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-evolution'))
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-evaluation'))
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'preference-learning'))
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-heartbeat'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-health'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'traex-acp-provider'))
     expect(result.stdout).toContain('dsh-lark-setup --profile web')
     expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000')
     expect(result.stdout).not.toContain('overlay：未应用')
+  })
+
+  test('supervised-growth installs TraeX only when explicitly requested', async () => {
+    const dshHome = await temporaryDshHome()
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--mode', 'supervised-growth', '--lark', 'configure', '--with', 'traex',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'traex-acp-provider'))
+  })
+
+  test('selected supervised bundles compose into a real effective tree accepted by the activator', async () => {
+    const dshHome = await temporaryDshHome()
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--mode', 'supervised-growth', '--lark', 'configure',
+    ], dshHome)
+    expect(result.status, result.stderr).toBe(0)
+
+    const installedRows = await composeSelectedBundleRows(result.stdout)
+    const lark = installedRows.find(row => row.id === 'dsh-enhanced-lark-channel')
+    expect(lark).toBeDefined()
+    lark.config = { ...lark.config, enabled: true, account: 'primary', tenant: 'personal' }
+    const effectiveBefore = stringify(installedRows)
+    const binding = {
+      id: 'binding-owner-dm',
+      conversation: { channel: 'lark', account: 'primary', tenant: 'personal', kind: 'dm', chat: 'oc_owner' },
+      principal: { channel: 'lark', account: 'primary', tenant: 'personal', user: 'ou_owner' },
+      workspace: join(dshHome, 'assistant-workspace'),
+      agentPreset: 'standard',
+      sessionId: 'session-owner', generation: 1, policyRef: 'owner-dm', status: 'active',
+      createdAt: 1, updatedAt: 1, version: 1,
+    } as const
+    const overlay = parse(configureSupervisedGrowthProfilePatch({
+      profilePatch: '[]\n', effectiveConfig: effectiveBefore, dshHome, binding,
+    }), yamlOptions) as any[]
+    const composed = new Map(installedRows.map(row => [row.id, row]))
+    for (const row of overlay) composed.set(row.id, row)
+
+    expect(assertEffectiveSupervisedGrowthConfig({
+      effectiveConfig: stringify([...composed.values()]), dshHome, binding,
+    })).toMatchObject({
+      workspace: join(dshHome, 'assistant-workspace'),
+      agentPreset: 'standard',
+      provider: 'deepseek-official',
+      model: 'deepseek-v4-flash',
+    })
   })
 
   test('supervised-growth passes an explicit acknowledgement only to its activator', async () => {

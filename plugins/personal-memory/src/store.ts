@@ -358,7 +358,27 @@ export class MemoryStore {
     const normalizedQuery = normalizeContent(request.query).normalize('NFKC').toLocaleLowerCase('en-US')
     const queryTokens = tokenizeMemory(normalizedQuery)
     const queryTokenSet = new Set(queryTokens)
-    const records = this.#visibleRecords(context)
+    const validKinds = new Set<MemoryKind>(['experience', 'fact', 'instruction', 'preference'])
+    const validTrusts = new Set<MemoryTrust>(['agent-observed', 'external', 'user-confirmed'])
+    const validSensitivities = new Set<MemorySensitivity>(['private', 'sensitive'])
+    const requireFilter = <T extends string>(
+      values: readonly T[] | undefined,
+      allowed: ReadonlySet<T>,
+      label: string,
+    ): ReadonlySet<T> | undefined => {
+      if (values === undefined) return undefined
+      if (!Array.isArray(values) || values.length === 0 || values.some(value => !allowed.has(value))) {
+        throw new MemoryStoreError('invalid-entry', `memory search ${label} filter is invalid`)
+      }
+      return new Set(values)
+    }
+    const kinds = requireFilter(request.kinds, validKinds, 'kind')
+    const trusts = requireFilter(request.trusts, validTrusts, 'trust')
+    const sensitivities = requireFilter(request.sensitivities, validSensitivities, 'sensitivity')
+    const records = this.#visibleRecords(context).filter(record =>
+      (kinds === undefined || kinds.has(record.kind))
+      && (trusts === undefined || trusts.has(record.trust))
+      && (sensitivities === undefined || sensitivities.has(record.sensitivity)))
     const candidates = records.flatMap((record): MemorySearchHit[] => {
       const recordTokens = this.#tokens(record.id)
       const matchedTokens = recordTokens.filter(token => queryTokenSet.has(token))

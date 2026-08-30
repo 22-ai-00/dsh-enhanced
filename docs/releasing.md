@@ -19,7 +19,7 @@ pnpm release:prepare
 需要主动升级主版本或次版本时可以显式指定，而且指定值必须高于当前记录：
 
 ```sh
-pnpm release:prepare -- 0.2.0
+pnpm release:prepare 0.2.0
 ```
 
 `release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。

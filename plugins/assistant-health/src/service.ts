@@ -9,6 +9,9 @@ export const providerIds = [
   'personalMemory',
   'personalWiki',
   'assistantAutomations',
+  'assistantEvaluation',
+  'preferenceLearning',
+  'assistantEvolution',
   'assistantDelivery',
   'credentialsKeychain',
   'eventTriggers',
@@ -18,6 +21,7 @@ export const providerIds = [
 
 export type HealthProviderId = typeof providerIds[number]
 export type HealthMetric = boolean | number | string
+export type HealthSeverity = 'healthy' | 'degraded' | 'unhealthy'
 
 export interface Config {
   requiredProviders?: HealthProviderId[]
@@ -29,10 +33,19 @@ export interface ProviderHealth {
   metrics: Readonly<Record<string, HealthMetric>>
 }
 
+export interface HealthAssessment {
+  providerId: HealthProviderId
+  severity: Exclude<HealthSeverity, 'healthy'>
+  /** Stable, low-cardinality reason code. */
+  code: string
+}
+
 export interface AssistantHealthReport {
   ready: boolean
+  severity: HealthSeverity
   generatedAt: number
   providers: readonly ProviderHealth[]
+  assessments: readonly HealthAssessment[]
   warnings: readonly string[]
 }
 
@@ -50,12 +63,25 @@ const configSchema = Schema.object({
   ]),
 }) as Schema<Config>
 
-const keys: Record<HealthProviderId, Readonly<Record<string, 'boolean' | 'number' | readonly string[]>>> = {
+type HealthMetricSpecification = 'boolean' | 'number' | 'optional-number' | readonly string[]
+
+const keys: Record<HealthProviderId, Readonly<Record<string, HealthMetricSpecification>>> = {
   assistantPolicy: { emergencyStop: 'boolean', lastAuditSequence: 'number' },
   personalMemory: { activeRecords: 'number', removedRecords: 'number', expiredRecords: 'number', pendingProposals: 'number' },
   personalWiki: { pages: 'number', lintErrors: 'number', lintWarnings: 'number', pendingProposals: 'number' },
   assistantAutomations: { activeAutomations: 'number', pausedAutomations: 'number', pendingTasks: 'number',
-    runningTasks: 'number', failedRuns: 'number', unknownRuns: 'number' },
+    runningTasks: 'number', failedRuns: 'number', unknownRuns: 'number', pendingEvaluations: 'number',
+    retryingEvaluations: 'number', failedEvaluationAttempts: 'number', deadLetterEvaluations: 'number',
+    oldestPendingEvaluationAt: 'number' },
+  assistantEvaluation: { ready: 'boolean', schemaVersion: 'number', outcomes: 'number',
+    trustedOutcomes: 'number', selfReportedOutcomes: 'number', externalOutcomes: 'number',
+    selfAssessments: 'number', latestOccurredAt: 'optional-number' },
+  preferenceLearning: { ready: 'boolean', enabled: 'boolean', schemaVersion: 'number', signals: 'number',
+    hypotheses: 'number', active: 'number', shadow: 'number', proposed: 'number',
+    rolledBack: 'number', expired: 'number', lastRecordedAt: 'optional-number' },
+  assistantEvolution: { activeRules: 'number', retiredRules: 'number', pendingProposals: 'number',
+    conflictedProposals: 'number', trustedEpisodes: 'number', unattributedTrustedEpisodes: 'number',
+    lastTrustedEpisodeAt: 'number', lastReconciledAt: 'number', autonomousRollbacks: 'number' },
   assistantDelivery: { pendingInbox: 'number', deadLetterInbox: 'number', pendingOutbox: 'number',
     deadLetterOutbox: 'number', unknownOutbox: 'number', adapters: 'number' },
   credentialsKeychain: { handles: 'number', activeLeases: 'number', failedLeases: 'number' },
@@ -63,6 +89,110 @@ const keys: Record<HealthProviderId, Readonly<Record<string, 'boolean' | 'number
   assistantHeartbeat: { active: 'number', paused: 'number', empty: 'number' },
   larkChannel: { state: ['connected', 'connected-with-gap', 'connecting', 'disabled', 'disconnected', 'reconnecting'],
     gapGeneration: 'number' },
+}
+
+interface HealthSummary {
+  ready: boolean
+  severity: HealthSeverity
+  assessments: HealthAssessment[]
+  warnings: string[]
+}
+
+function operationalAssessments(
+  provider: ProviderHealth,
+  required: boolean,
+): Array<{ severity: Exclude<HealthSeverity, 'healthy'>; code: string; blocksReadiness?: true }> {
+  if (provider.status !== 'ready') return []
+  const metric = (key: string): HealthMetric | undefined => provider.metrics[key]
+  const output: Array<{
+    severity: Exclude<HealthSeverity, 'healthy'>
+    code: string
+    blocksReadiness?: true
+  }> = []
+  const add = (
+    condition: boolean,
+    severity: Exclude<HealthSeverity, 'healthy'>,
+    code: string,
+    blocksReadiness = false,
+  ) => {
+    if (condition) output.push({ severity, code, ...(blocksReadiness ? { blocksReadiness: true as const } : {}) })
+  }
+
+  // Assess only current, actionable state. Lifetime ledger counters such as
+  // failedRuns, unknownRuns, failedEvaluationAttempts, conflictedProposals,
+  // and failedLeases remain observable metrics but cannot prove that the
+  // provider is unhealthy now.
+  switch (provider.id) {
+    case 'assistantPolicy':
+      add(metric('emergencyStop') === true, 'unhealthy', 'emergency-stop', true)
+      break
+    case 'personalWiki':
+      add((metric('lintErrors') as number) > 0, 'degraded', 'lint-errors')
+      break
+    case 'assistantAutomations':
+      add((metric('deadLetterEvaluations') as number) > 0, 'degraded', 'evaluation-dead-letter-backlog')
+      break
+    case 'preferenceLearning':
+      add(metric('enabled') === false && required, 'unhealthy', 'disabled', true)
+      break
+    case 'assistantDelivery':
+      add((metric('unknownOutbox') as number) > 0, 'unhealthy', 'unknown-outbox-backlog')
+      add((metric('deadLetterInbox') as number) > 0 || (metric('deadLetterOutbox') as number) > 0,
+        'degraded', 'dead-letter-backlog')
+      break
+    case 'larkChannel': {
+      const state = metric('state')
+      add(state === 'connected-with-gap', 'degraded', 'connected-with-gap')
+      add(state === 'connecting' || state === 'reconnecting', 'degraded', 'connection-in-progress')
+      add(state === 'disconnected', required ? 'unhealthy' : 'degraded', 'disconnected', required)
+      add(state === 'disabled' && required, 'unhealthy', 'disabled', true)
+      break
+    }
+    default:
+      break
+  }
+  return output
+}
+
+function summarize(providers: readonly ProviderHealth[], required: ReadonlySet<HealthProviderId>): HealthSummary {
+  const assessments: HealthAssessment[] = []
+  const warnings: string[] = []
+  let ready = true
+  let severity: HealthSeverity = 'healthy'
+  const append = (
+    providerId: HealthProviderId,
+    level: Exclude<HealthSeverity, 'healthy'>,
+    code: string,
+    warning: string,
+    blocksReadiness = false,
+  ) => {
+    assessments.push(Object.freeze({ providerId, severity: level, code }))
+    warnings.push(warning)
+    if (level === 'unhealthy') severity = 'unhealthy'
+    else if (severity === 'healthy') severity = 'degraded'
+    if (blocksReadiness) ready = false
+  }
+
+  for (const provider of providers) {
+    const isRequired = required.has(provider.id)
+    if (provider.status === 'missing') {
+      if (isRequired) append(provider.id, 'unhealthy', 'required-provider-missing',
+        `provider-missing:${provider.id}`, true)
+      continue
+    }
+    if (provider.status === 'error') {
+      append(provider.id, isRequired ? 'unhealthy' : 'degraded', 'health-seam-error',
+        isRequired ? `provider-error:${provider.id}` : `provider-degraded:${provider.id}:health-seam-error`,
+        isRequired)
+      continue
+    }
+    for (const assessment of operationalAssessments(provider, isRequired)) {
+      append(provider.id, assessment.severity, assessment.code,
+        `provider-${assessment.severity}:${provider.id}:${assessment.code}`,
+        assessment.blocksReadiness === true)
+    }
+  }
+  return { ready, severity, assessments, warnings }
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -75,7 +205,8 @@ function metrics(id: HealthProviderId, value: unknown): Readonly<Record<string, 
   const output: Record<string, HealthMetric> = {}
   for (const [key, specification] of Object.entries(keys[id])) {
     const current = input[key]
-    if (specification === 'number') {
+    if (specification === 'optional-number' && current === undefined) continue
+    if (specification === 'number' || specification === 'optional-number') {
       if (!Number.isSafeInteger(current) || (current as number) < 0) throw new Error('invalid numeric health metric')
       output[key] = current as number
     } else if (specification === 'boolean') {
@@ -124,10 +255,8 @@ export class AssistantHealthService extends Service {
   readiness(): { ready: boolean; warnings: string[] } {
     this.assertActive()
     const providers = this.collect()
-    const warnings = providers
-      .filter(item => this.required.has(item.id) && item.status !== 'ready')
-      .map(item => `provider-${item.status}:${item.id}`)
-    return { ready: warnings.length === 0, warnings }
+    const summary = summarize(providers, this.required)
+    return { ready: summary.ready, warnings: summary.warnings }
   }
 
   report(agent: Agent | undefined): AssistantHealthReport {
@@ -137,14 +266,14 @@ export class AssistantHealthService extends Service {
       throw new AssistantHealthError('policy-denied', `assistant-health policy denied report: ${decision.reasonCode}`)
     }
     const providers = this.collect()
-    const warnings = providers
-      .filter(item => this.required.has(item.id) && item.status !== 'ready')
-      .map(item => `provider-${item.status}:${item.id}`)
+    const summary = summarize(providers, this.required)
     return Object.freeze({
-      ready: warnings.length === 0,
+      ready: summary.ready,
+      severity: summary.severity,
       generatedAt: this.now(),
       providers: Object.freeze(providers),
-      warnings: Object.freeze(warnings) as unknown as string[],
+      assessments: Object.freeze(summary.assessments),
+      warnings: Object.freeze(summary.warnings),
     })
   }
 

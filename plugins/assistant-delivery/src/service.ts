@@ -26,10 +26,14 @@ import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
 import { canonicalConversation, externalPrincipalId } from './canonical.js'
 import { isExactDeliveryCommand, parseDeliveryCommand } from './session-commands.js'
+import type { FeedbackSignalSelection } from './feedback-command.js'
 import type {
   ConversationBinding,
   ConversationRef,
   DeliveryAdapter,
+  DeliveryPreferenceFeedback,
+  DeliveryPreferenceFeedbackListener,
+  DeliveryPreferenceFeedbackReceipt,
   DeliveryToolApprovalRequest,
   ExternalPrincipalKey,
   InboundEnvelope,
@@ -327,6 +331,9 @@ export class AssistantDeliveryService extends Service {
   private readonly agentApprovalBindings = new WeakMap<Agent, { bindingId: string; token: symbol }>()
   private readonly toolApprovalControllers = new Set<AbortController>()
   private readonly modelSelectionWaiters = new Map<string, Set<ModelSelectionWaiter>>()
+  private preferenceFeedbackSink:
+    | Readonly<{ token: symbol; listener: DeliveryPreferenceFeedbackListener }>
+    | undefined
   private modelSelectionFlight: Promise<void> | undefined
   private modelSelectionRetryTimer: ReturnType<typeof setTimeout> | undefined
   private runtime: DeliveryInboundRuntime | undefined
@@ -387,6 +394,11 @@ export class AssistantDeliveryService extends Service {
         imageMaterializer,
         isInboundAuthorized: (binding, envelope) => this.isInboundAuthorized(binding, envelope),
         isPermissionController: (binding, envelope) => this.isPermissionController(binding, envelope),
+        isOwnerFeedbackController: (binding, envelope) =>
+          this.isOwnerFeedbackController(binding, envelope),
+        authorizeOwnerPreferenceFeedback: (binding, envelope, selections) =>
+          this.authorizeOwnerPreferenceFeedback(binding, envelope, selections),
+        dispatchPreferenceFeedback: events => this.dispatchPreferenceFeedback(events),
         authorizePermissionReply: (binding, envelope) => this.authorizePermissionReply(binding, envelope),
         beginModelCommand: conversation => this.deliveryStore.beginModelCommand(conversation),
         commitModelCommand: input => this.deliveryStore.commitModelCommand(input),
@@ -425,6 +437,7 @@ export class AssistantDeliveryService extends Service {
     if (config.schedulerEnabled) this.start()
     ctx.effect(() => async () => {
       this.active = false
+      this.preferenceFeedbackSink = undefined
       this.cancelModelSelectionWaiters()
       for (const controller of this.toolApprovalControllers) {
         controller.abort(new Error('assistant-delivery is stopping'))
@@ -951,6 +964,29 @@ export class AssistantDeliveryService extends Service {
     return this.registry.register(adapter)
   }
 
+  /**
+   * Trusted Host registration seam for the one authoritative, durable sink.
+   * It is intentionally not an Agent tool. The receipt contract prevents a
+   * no-op observer from being mistaken for persistence.
+   */
+  subscribePreferenceFeedback(listener: DeliveryPreferenceFeedbackListener): () => void {
+    this.assertActive()
+    if (typeof listener !== 'function') {
+      throw new TypeError('assistant-delivery: preference feedback listener must be a function')
+    }
+    if (this.preferenceFeedbackSink !== undefined) {
+      throw new Error('assistant-delivery: a preference feedback sink is already registered')
+    }
+    const token = Symbol('preference-feedback-sink')
+    this.preferenceFeedbackSink = Object.freeze({ token, listener })
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      if (this.preferenceFeedbackSink?.token === token) this.preferenceFeedbackSink = undefined
+    }
+  }
+
   health(): ReturnType<DeliveryStore['health']> & { adapters: number } {
     this.assertActive()
     return { ...this.deliveryStore.health(), adapters: this.registry.size() }
@@ -1007,6 +1043,137 @@ export class AssistantDeliveryService extends Service {
       resource: { kind: 'message', id: binding.id },
       context: { initiator: 'external' },
     }).effect === 'allow'
+  }
+
+  private isOwnerFeedbackController(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): boolean {
+    if (!this.isInboundAuthorized(binding, envelope)) return false
+    const principal = this.deliveryStore.getPrincipal(binding.principal)
+    const inbox = this.deliveryStore.getInboxByProviderEvent(
+      envelope.channel,
+      envelope.account,
+      envelope.eventId,
+    )
+    if (principal?.status !== 'active' || principal.role !== 'owner'
+      || inbox?.status !== 'claimed'
+      || inbox.bindingId !== binding.id
+      || JSON.stringify(inbox.envelope) !== JSON.stringify(envelope)) {
+      return false
+    }
+    return this.policy.evaluate({
+      subject: {
+        kind: 'agent',
+        id: binding.agentPreset,
+        workspace: binding.workspace,
+        principal: externalPrincipalId(binding.principal),
+      },
+      action: 'reply',
+      resource: { kind: 'message', id: binding.id },
+      context: { initiator: 'external' },
+    }).effect === 'allow'
+  }
+
+  private authorizeOwnerPreferenceFeedback(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    selections: readonly Readonly<FeedbackSignalSelection>[],
+  ): { occurredAt: number } | undefined {
+    if (!this.isOwnerFeedbackController(binding, envelope)
+      || !Array.isArray(selections) || selections.length < 1 || selections.length > 16) return undefined
+    const inbox = this.deliveryStore.getInboxByProviderEvent(
+      envelope.channel,
+      envelope.account,
+      envelope.eventId,
+    )
+    if (inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+      || JSON.stringify(inbox.envelope) !== JSON.stringify(envelope)) return undefined
+    const subject = {
+      kind: 'external' as const,
+      id: externalPrincipalId(binding.principal),
+      workspace: binding.workspace,
+    }
+    const requests = selections.map(selection => ({
+      selection,
+      authorization: {
+        subject,
+        action: 'signal',
+        resource: { kind: 'preference' as const, id: `${binding.agentPreset}/${selection.preferenceKey}` },
+        context: { initiator: 'external' as const },
+      },
+    }))
+    const denied = requests.find(entry => this.policy.evaluate(entry.authorization).effect !== 'allow')
+    if (denied !== undefined) {
+      this.policy.authorize(denied.authorization, {
+        idempotencyKey: this.preferenceSignalAuthorizationKey(
+          binding,
+          envelope,
+          denied.authorization.resource.id,
+          denied.selection.candidateValue,
+        ),
+        auditDetails: { bindingVersion: binding.version },
+      })
+      return undefined
+    }
+    for (const { authorization, selection } of requests) {
+      const decision = this.policy.authorize(authorization, {
+        idempotencyKey: this.preferenceSignalAuthorizationKey(
+          binding,
+          envelope,
+          authorization.resource.id,
+          selection.candidateValue,
+        ),
+        auditDetails: { bindingVersion: binding.version },
+      })
+      if (decision.effect !== 'allow') return undefined
+    }
+    // Provider clocks are not authoritative. The locally persisted Inbox time
+    // is bounded by the same Host clock as Preference Learning's retention gate.
+    return Object.freeze({ occurredAt: inbox.receivedAt })
+  }
+
+  private preferenceSignalAuthorizationKey(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    resourceId: string,
+    candidateValue: string,
+  ): string {
+    const digest = createHash('sha256').update('assistant-delivery-preference-authorization-v2\0')
+      .update(JSON.stringify([
+        binding.id,
+        binding.version,
+        envelope.channel,
+        envelope.account,
+        envelope.eventId,
+        resourceId,
+        candidateValue,
+      ]))
+      .digest('hex')
+    return `delivery-pref-auth:${digest}`
+  }
+
+  private async dispatchPreferenceFeedback(
+    events: readonly Readonly<DeliveryPreferenceFeedback>[],
+  ): Promise<'recorded' | 'unavailable' | 'unknown'> {
+    const registration = this.preferenceFeedbackSink
+    if (registration === undefined) return 'unavailable'
+    try {
+      const receipts = await registration.listener(events)
+      if (!Array.isArray(receipts) || receipts.length !== events.length) return 'unknown'
+      const expected = new Set(events.map(event => event.idempotencyKey))
+      const received = new Set<string>()
+      for (const receipt of receipts as readonly Readonly<DeliveryPreferenceFeedbackReceipt>[]) {
+        if (receipt?.status !== 'recorded'
+          || typeof receipt.idempotencyKey !== 'string'
+          || !expected.has(receipt.idempotencyKey)
+          || received.has(receipt.idempotencyKey)) return 'unknown'
+        received.add(receipt.idempotencyKey)
+      }
+      return received.size === expected.size ? 'recorded' : 'unknown'
+    } catch {
+      return 'unknown'
+    }
   }
 
   private authorizePermissionReply(

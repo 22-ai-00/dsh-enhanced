@@ -1,0 +1,12 @@
+- insert:
+    - id: dsh-enhanced-assistant-evaluation
+      name: '@dsh-enhanced/assistant-evaluation'
+      config:
+        databasePath: !!js dshHomePath('assistant-evaluation/evaluation.sqlite')
+        maxQueryLimit: 100
+        maxReviewOutcomes: 20
+        maxSituationBytes: 200
+        maxMetricsBytes: 4096
+        maxEvidenceRefs: 32
+        defaultSummaryWindowMs: 2592000000
+        maxSummaryWindowMs: 31536000000

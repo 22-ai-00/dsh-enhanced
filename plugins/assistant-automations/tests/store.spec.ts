@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { AutomationStore, AutomationStoreError, stableOccurrenceId } from '../src/store.ts'
+import { openAutomationDatabase } from '../src/sqlite.ts'
 
 const temporaryRoots: string[] = []
 const minute = 60_000
@@ -47,7 +48,7 @@ describe('automation SQLite store', () => {
     expect((await stat(join(fixture.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(fixture.path)).mode & 0o777).toBe(0o600)
     const database = new DatabaseSync(fixture.path, { readOnly: true })
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
     expect(database.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all())
       .toEqual(expect.arrayContaining([
@@ -75,6 +76,45 @@ describe('automation SQLite store', () => {
     await chmod(path, 0o600)
     expect(() => new AutomationStore({ path }))
       .toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'schema-too-new' }))
+  })
+
+  test.each([4, 5])('does not promote schema-v%s history without an immutable execution snapshot', async version => {
+    const root = await mkdtemp(join(tmpdir(), `assistant-automations-v${version}-`))
+    temporaryRoots.push(root)
+    const path = join(root, 'legacy.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE automation_runs (id TEXT PRIMARY KEY) STRICT;
+      CREATE TABLE automation_attempts (id TEXT PRIMARY KEY) STRICT;
+      ${version === 5 ? `
+      CREATE TABLE automation_evaluation_outbox (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        observation_kind TEXT NOT NULL,
+        status TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO automation_runs(id) VALUES ('legacy-run');
+      INSERT INTO automation_evaluation_outbox VALUES (
+        'legacy-evaluation', 'legacy-run', 'terminal', 'pending', '{}', 1000, 1000
+      );
+      ` : ''}
+      PRAGMA user_version = ${version};
+    `)
+    legacy.close()
+    await chmod(path, 0o600)
+
+    const migrated = openAutomationDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
+    const rows = migrated.prepare(`
+      SELECT status, attempt_count, last_error_code FROM automation_evaluation_outbox ORDER BY id
+    `).all()
+    expect(rows).toEqual(version === 5
+      ? [{ status: 'dead-letter', attempt_count: 1, last_error_code: 'legacy-unverifiable-provenance' }]
+      : [])
+    migrated.close()
   })
 
   test('validates immutable definitions and replays creation idempotently', async () => {

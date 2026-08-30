@@ -140,6 +140,42 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
   }))
 
   ctx.tools.register(defineTool({
+    name: 'memory_search_confirmed',
+    description:
+      'Search only non-sensitive, user-confirmed instructions and preferences visible to the current exact Agent scope.',
+    parameters: {
+      query: { type: 'string', required: true },
+      limit: { type: 'integer' },
+    },
+    output: {
+      schema: SEARCH_OUTPUT,
+      render: (_args, value) => [{
+        type: 'text', text: renderUntrustedJson('memory_search_confirmed_results', value),
+      }],
+    },
+    async execute(args, exec) {
+      const hits = service.searchConfirmedGuidance(exec.agent, {
+        query: args.query,
+        ...(args.limit === undefined ? {} : { limit: args.limit }),
+        authorizationIdempotencyKey: `memory-search-confirmed:${String(exec.rootCallId)}:${String(exec.callId)}`,
+      })
+      return {
+        hits: hits.map(({ record, score }) => ({
+          id: record.id,
+          owner: record.owner,
+          scope: record.scope,
+          kind: record.kind,
+          content: record.content,
+          trust: record.trust,
+          confidence: record.confidence,
+          score,
+          version: record.version,
+        })),
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'memory_manage',
     description: 'Propose an add, replace, or remove operation for durable memory. This never commits directly; the bound principal must approve the complete diff.',
     parameters: {

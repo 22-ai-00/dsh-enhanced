@@ -13,6 +13,9 @@ export type PolicyResourceKind =
   | 'memory'
   | 'message'
   | 'network'
+  // Tentative preference hypotheses and their bounded T1 overlays stay
+  // separate from owner-confirmed long-term Memory.
+  | 'preference'
   | 'tool'
   | 'wiki'
 

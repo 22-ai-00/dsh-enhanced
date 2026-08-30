@@ -8,7 +8,11 @@ export const inject = ['assistantPolicy']
 export { AssistantEvolutionService, version }
 export type { Config }
 export { AssistantEvolutionError } from './service.js'
-export type { EvolutionProposalResult } from './service.js'
+export type {
+  AssistantEvolutionHealth,
+  EvolutionProposalResult,
+  EvolutionRollbackResult,
+} from './service.js'
 export * from './types.js'
 
 export function apply(ctx: Context, config: Config): void {

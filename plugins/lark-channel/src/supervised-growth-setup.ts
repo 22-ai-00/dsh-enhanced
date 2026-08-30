@@ -200,81 +200,6 @@ export interface SupervisedGrowthResidentHealthDependencies {
   retryDelayMs?: number
 }
 
-export interface SupervisedGrowthTraexReadinessModule {
-  Config: (input: Record<string, unknown>) => Record<string, unknown>
-  probeTraexReadiness: (config: Record<string, unknown>, options: {
-    timeoutMs: number
-    signal: AbortSignal
-  }) => Promise<{ models: readonly unknown[] }>
-}
-
-export interface SupervisedGrowthTraexReadinessDependencies {
-  load?: () => Promise<SupervisedGrowthTraexReadinessModule>
-}
-
-async function boundedAwait<T>(input: {
-  operation: Promise<T>
-  timeoutMs: number
-  label: string
-  onTimeout?: () => void
-}): Promise<T> {
-  let timeout: ReturnType<typeof setTimeout> | undefined
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timeout = setTimeout(() => {
-      input.onTimeout?.()
-      reject(new Error(`supervised-growth setup: ${input.label} timed out`))
-    }, input.timeoutMs)
-  })
-  try {
-    return await Promise.race([input.operation, deadline])
-  } finally {
-    if (timeout !== undefined) clearTimeout(timeout)
-  }
-}
-
-/**
- * Explicit installation-only control-plane probe.  It calls the provider's
- * named readiness API rather than listModels/resolveModel, which intentionally
- * remain process-free because they do not carry a live loop session identity.
- */
-export async function verifySupervisedGrowthTraexReadiness(input: {
-  traexConfig: Record<string, unknown>
-  timeoutMs: number
-}, dependencies: SupervisedGrowthTraexReadinessDependencies = {}): Promise<void> {
-  if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1) {
-    throw new Error('supervised-growth setup: TraeX readiness timeout must be a positive integer')
-  }
-  if (input.traexConfig['enabled'] !== true) {
-    throw new Error('supervised-growth setup: TraeX readiness requires an enabled effective provider configuration')
-  }
-  const timeoutMs = Math.min(input.timeoutMs, 60_000)
-  const load = dependencies.load ?? (async () => {
-    const provider = await import('@dsh-enhanced/traex-acp-provider') as unknown as Partial<SupervisedGrowthTraexReadinessModule>
-    if (typeof provider.Config !== 'function' || typeof provider.probeTraexReadiness !== 'function') {
-      throw new Error('supervised-growth setup: installed TraeX provider lacks the required explicit readiness probe')
-    }
-    return provider as SupervisedGrowthTraexReadinessModule
-  })
-  const provider = await boundedAwait({
-    operation: load(), timeoutMs, label: 'loading the TraeX readiness provider',
-  })
-  const config = provider.Config({ ...input.traexConfig })
-  const controller = new AbortController()
-  try {
-    const catalog = await boundedAwait({
-      operation: provider.probeTraexReadiness(config, { timeoutMs, signal: controller.signal }),
-      timeoutMs,
-      label: 'TraeX login and model catalog readiness',
-      onTimeout: () => controller.abort(new Error('supervised-growth readiness timeout')),
-    })
-    if (!Array.isArray(catalog.models) || catalog.models.length === 0) {
-      throw new Error('supervised-growth setup: TraeX readiness returned no usable TraeX models')
-    }
-  } finally {
-    controller.abort()
-  }
-}
-
 function residentHealthCommand(command: string, args: readonly string[]): ResidentHealthCommandResult {
   const result = spawnSync(command, args, {
     encoding: 'utf8', maxBuffer: 128 * 1024, stdio: ['ignore', 'pipe', 'pipe'],
@@ -419,7 +344,7 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
     updatedPatch,
     validate: () => dumpProfile(args.profile),
     afterCommit: async effectiveConfig => {
-      const verified = assertEffectiveSupervisedGrowthConfig({ effectiveConfig, dshHome, binding })
+      assertEffectiveSupervisedGrowthConfig({ effectiveConfig, dshHome, binding })
       const effectiveDatabases = supervisedGrowthDatabasePaths(effectiveConfig, dshHome)
       if (effectiveDatabases.deliveryDatabasePath !== databases.deliveryDatabasePath
         || effectiveDatabases.automationsDatabasePath !== databases.automationsDatabasePath) {
@@ -433,15 +358,6 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
         query,
         selected: binding,
       })
-      await verifySupervisedGrowthTraexReadiness({
-        traexConfig: verified.traexConfig,
-        timeoutMs: args.timeoutMs,
-      })
-      await assertSelectedOwnerBindingCurrent({
-        databasePath: databases.deliveryDatabasePath,
-        query,
-        selected: binding,
-      })
       service = await restartAndVerifySupervisedGrowthResident({ dshHome, profile: args.profile })
     },
     restore: async () => {
@@ -450,7 +366,7 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
     },
   })
   if (service === undefined) throw new Error('supervised-growth setup: resident restart did not return a service')
-  process.stdout.write(`supervised-growth 已启用：owner binding ${binding.id}，每日运行次数上限 7；每轮最多 512 输出 token。\n`
+  process.stdout.write(`supervised-growth 已启用：owner binding ${binding.id}，每日运行次数上限 7；每轮最多 1024 输出 token。\n`
   + `DSH Host 已由 ${service.kind} 重启并通过健康检查。状态：${service.statusCommand}\n日志：${service.logCommand}\n`)
 }
 

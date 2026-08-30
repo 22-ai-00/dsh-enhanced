@@ -102,6 +102,42 @@ export interface DutyLease {
 export type AutomationRunStatus = 'cancelled' | 'failed' | 'succeeded' | 'timed_out' | 'unknown'
 export type AutomationDeliveryStatus = 'enqueued' | 'pending' | 'suppressed'
 export type AutomationEvidenceStatus = 'pending' | 'recorded' | 'suppressed'
+export type AutomationEvaluationStatus = 'pending' | 'recorded' | 'dead-letter'
+
+/**
+ * Frozen terminal observation written to the Evaluation outbox in the same
+ * transaction as its Automation run.  This intentionally mirrors the public
+ * assistant-evaluation append seam without importing that optional plugin.
+ */
+export interface AutomationEvaluationOutcome {
+  scope: { workspace: string; preset: string }
+  situation: string
+  executionStatus: 'succeeded' | 'failed' | 'timed-out' | 'cancelled' | 'unknown'
+  objectiveStatus: 'unknown'
+  deliveryStatus: 'not-required' | 'unknown'
+  source: { kind: 'automation'; id: 'assistant-automations' }
+  trust: 'trusted'
+  evidence: ReadonlyArray<{ kind: string; ref: string; digest?: string }>
+  metrics: Readonly<Record<string, number>>
+  occurredAt: number
+  idempotencyKey: string
+  evaluator: { id: 'assistant-automations'; version: 'terminal-v1' }
+}
+
+export interface AutomationEvaluationOutboxEntry {
+  id: string
+  runId: string
+  kind: 'terminal'
+  status: AutomationEvaluationStatus
+  payload: AutomationEvaluationOutcome
+  attemptCount: number
+  nextAttemptAt: number
+  lastFailureAt?: number
+  /** Bounded machine-readable category only; never an exception message. */
+  lastErrorCode?: string
+  createdAt: number
+  updatedAt: number
+}
 
 /**
  * Immutable evidence captured in the same transaction as a terminal run.

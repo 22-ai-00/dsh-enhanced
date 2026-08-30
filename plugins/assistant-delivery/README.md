@@ -8,10 +8,11 @@
 
 - DSH / Agent / Agent Presets / LLM / Session：`>=0.1.0-rc.8 <0.2.0`
 - `@deepseek-ai/dsh-attachment`：`>=0.1.0-rc.8 <0.2.0`，仅图片入站路径需要的可选 Host service
-- `@deepseek-ai/dsh-commands`：`>=0.1.0-rc.8 <0.2.0`，可选 Host command service；按 `0.1.0-rc.8` 命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
+- `@deepseek-ai/dsh-commands`：`>=0.1.0-rc.8 <0.2.0`，可选 Host command service；按 `0.1.0-rc.8` 命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
 - `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：`>=0.1.0-rc.8 <0.2.0`，权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
 - Cordis：`^4.0.1`
 - `@dsh-enhanced/assistant-policy`：`>=0.1.0 <0.2.0`，硬依赖
+- Preference Learning 是反向订阅 `subscribePreferenceFeedback()` 的可选下游；Delivery 不声明对它的 peer/runtime 依赖，避免消息核心与学习插件形成双向包依赖
 - 真实多轮恢复还要求 profile 已配置官方 `ctx.sessionPersistence` provider；缺失时新建空 session 可以成功，但冷 resume 会进入有界失败/死信路径。
 
 ```sh
@@ -128,8 +129,27 @@ rules:
 - `/new`（别名 `/clear`）：停止当前任务并切换到空白的下一 generation；旧 session 及历史不删除。
 - `/stop`：停止当前任务，保留当前 session 与已持久的上下文。
 - `/compact`：仅在当前 DSH command service/preset 实际发布时出现；通过原生命令面执行，不交给模型。
+- `/feedback`：提交固定枚举的响应反馈或低风险回复偏好；在 Delivery 本地处理，不恢复 Agent、不交给模型。
 
 渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
+
+`/feedback` 的完整固定语法如下；不接受附件或额外自由文本：
+
+```text
+/feedback helpful|not-helpful|too-long|too-short|wrong-format|wrong-action|unwanted-reminder
+/feedback verbosity concise|balanced|detailed
+/feedback structure prose|bullets|mixed
+/feedback language zh-CN|en
+/feedback explanation result-first|balanced|tutorial
+/feedback suggestions low|normal
+/feedback ranking recency|familiarity|evidence
+```
+
+只有 exact active binding 上的 active `owner` principal 可以提交。Delivery 在现有 inbound/reply Policy 通过后核对 durable Inbox/envelope、binding revision、workspace、preset 与 owner 身份，先写 `dispatch-started` fence，再复核一次身份，并对 exact external owner + workspace 执行可审计的 `signal` / `preference:<preset>/<catalog-key>` Policy 授权，最后才向 `subscribePreferenceFeedback(listener)` 注册的唯一权威 sink 发布不可变 typed batch。`linked` principal 即使拥有普通消息入口也不能获得 `owner-authenticated`；event idempotency key 由 provider-scoped event、binding snapshot 和固定 catalog selection 做 SHA-256 派生，不把 event/principal 原文传给下游。证据时间使用 durable Inbox 的 Host `receivedAt`，不相信可能有时钟偏差的 provider 时间。`too-long` / `too-short` 在同一原子 batch 中发布 T0 响应评价和对应的 T1 verbosity 选择。
+
+注册接口是 Host-only、只读、非模型工具；全进程只允许一个 authoritative sink。sink 必须将整个 batch 原子、持久、幂等地提交，并逐 event 返回 exact key + `recorded` receipt；缺回执、错 key、重复 key、空操作或异常一律不会向用户宣称成功。未安装 Preference Learning 或 sink 已卸载时返回确定性“未记录”；提交结果不明时只报告“状态未知”并明确不要重复反馈，不回显异常、数据库路径或凭据。由于 Delivery 与下游账本不能跨 SQLite 原子提交，sink 成功后进程若在终态回复前退出，Inbox 仍可能显示 ambiguous；同一 provider event 重放由稳定 key 安全去重。
+
+Profile 还必须为当前 owner principal 添加精确授权，例如：`subject={kind: external, id: <canonical-owner>, workspace: <workspace>}`、`action=signal`、`resource={kind: preference, id: <preset>/*}`、`initiator=external`。没有这条规则时默认拒绝，普通 `reply` 权限不会隐式获得偏好写入权。
 
 需要 resume 的命令遇到已知的持久化格式不兼容、事件类型缺失或日志损坏时，只返回有界诊断码与恢复建议，不回显 prompt/历史，也不删除原 session；可在修复对应 DSH 插件后重试，或用 `/new` 开始空白会话。
 

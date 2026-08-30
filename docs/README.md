@@ -25,6 +25,7 @@
 
 - [插件生态研究与建设清单](dsh-personal-assistant-plugin-landscape.md)：社区方案、能力拆分和风险对照。
 - [全自研插件路线图](dsh-personal-assistant-self-built-plugin-roadmap.md)：个人助理的总体边界、阶段和未实现项。
+- [持续成长的个人助理](continuous-personal-assistant-growth.md)：自评测、偏好学习、改进循环、自治等级和长期验收目标。
 
 ## 飞书历史研究
 

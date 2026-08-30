@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evolutionSchemaVersion = 3
+export const evolutionSchemaVersion = 4
 
 export class EvolutionDatabaseError extends Error {
   constructor(
@@ -98,6 +98,39 @@ function migrateV2ToV3(database: DatabaseSync): void {
   `)
 }
 
+function migrateV3ToV4(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE evolution_autonomous_rollbacks (
+      idempotency_key TEXT PRIMARY KEY,
+      scope_key TEXT NOT NULL,
+      rule_id TEXT NOT NULL,
+      expected_version INTEGER NOT NULL CHECK (expected_version >= 1),
+      result_version INTEGER NOT NULL CHECK (result_version = expected_version + 1),
+      risk TEXT NOT NULL CHECK (risk = 'low'),
+      reason TEXT NOT NULL,
+      evaluation_failures INTEGER NOT NULL CHECK (evaluation_failures >= 0),
+      evaluation_total INTEGER NOT NULL CHECK (
+        evaluation_total > 0 AND evaluation_failures <= evaluation_total),
+      baseline_failures INTEGER NOT NULL CHECK (baseline_failures >= 0),
+      baseline_total INTEGER NOT NULL CHECK (
+        baseline_total > 0 AND baseline_failures <= baseline_total),
+      evidence_digest TEXT NOT NULL CHECK (length(evidence_digest) = 64),
+      evidence_total INTEGER NOT NULL CHECK (evidence_total = evaluation_total),
+      sample_episode_ids_json TEXT NOT NULL CHECK (
+        json_valid(sample_episode_ids_json) AND json_type(sample_episode_ids_json) = 'array'),
+      occurred_at INTEGER NOT NULL,
+      UNIQUE(scope_key, rule_id, expected_version),
+      FOREIGN KEY(rule_id) REFERENCES evolution_rules(id)
+    ) STRICT;
+    CREATE INDEX evolution_autonomous_rollbacks_occurred
+      ON evolution_autonomous_rollbacks(occurred_at);
+
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '4')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+    PRAGMA user_version = 4;
+  `)
+}
+
 function createCurrentSchema(database: DatabaseSync): void {
   database.exec(`
     CREATE TABLE schema_meta (
@@ -187,8 +220,33 @@ function createCurrentSchema(database: DatabaseSync): void {
     CREATE INDEX evolution_guidance_exposures_lookup
       ON evolution_guidance_exposures(session_id, scope_key, situation, exposed_at, rule_id);
 
-    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '3');
-    PRAGMA user_version = 3;
+    CREATE TABLE evolution_autonomous_rollbacks (
+      idempotency_key TEXT PRIMARY KEY,
+      scope_key TEXT NOT NULL,
+      rule_id TEXT NOT NULL,
+      expected_version INTEGER NOT NULL CHECK (expected_version >= 1),
+      result_version INTEGER NOT NULL CHECK (result_version = expected_version + 1),
+      risk TEXT NOT NULL CHECK (risk = 'low'),
+      reason TEXT NOT NULL,
+      evaluation_failures INTEGER NOT NULL CHECK (evaluation_failures >= 0),
+      evaluation_total INTEGER NOT NULL CHECK (
+        evaluation_total > 0 AND evaluation_failures <= evaluation_total),
+      baseline_failures INTEGER NOT NULL CHECK (baseline_failures >= 0),
+      baseline_total INTEGER NOT NULL CHECK (
+        baseline_total > 0 AND baseline_failures <= baseline_total),
+      evidence_digest TEXT NOT NULL CHECK (length(evidence_digest) = 64),
+      evidence_total INTEGER NOT NULL CHECK (evidence_total = evaluation_total),
+      sample_episode_ids_json TEXT NOT NULL CHECK (
+        json_valid(sample_episode_ids_json) AND json_type(sample_episode_ids_json) = 'array'),
+      occurred_at INTEGER NOT NULL,
+      UNIQUE(scope_key, rule_id, expected_version),
+      FOREIGN KEY(rule_id) REFERENCES evolution_rules(id)
+    ) STRICT;
+    CREATE INDEX evolution_autonomous_rollbacks_occurred
+      ON evolution_autonomous_rollbacks(occurred_at);
+
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '4');
+    PRAGMA user_version = 4;
   `)
 }
 
@@ -209,6 +267,7 @@ function migrate(database: DatabaseSync): void {
     while (version < evolutionSchemaVersion) {
       if (version === 1) migrateV1ToV2(database)
       else if (version === 2) migrateV2ToV3(database)
+      else if (version === 3) migrateV3ToV4(database)
       version = schemaVersion(database)
     }
     database.exec('COMMIT')

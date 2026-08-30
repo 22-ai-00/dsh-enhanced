@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const automationSchemaVersion = 4
+export const automationSchemaVersion = 6
 
 export class AutomationDatabaseError extends Error {
   constructor(readonly code: 'invalid-path' | 'schema-too-new', message: string) {
@@ -92,6 +92,8 @@ function migrate(database: DatabaseSync): void {
       failure_code TEXT,
       started_at INTEGER,
       finished_at INTEGER,
+      automation_snapshot_hash TEXT NOT NULL,
+      automation_snapshot_json TEXT NOT NULL CHECK (json_valid(automation_snapshot_json)),
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       UNIQUE (task_id, attempt_number),
@@ -124,6 +126,23 @@ function migrate(database: DatabaseSync): void {
       FOREIGN KEY (task_id) REFERENCES automation_tasks(id),
       FOREIGN KEY (attempt_id) REFERENCES automation_attempts(id)
     ) STRICT;
+
+    CREATE TABLE automation_evaluation_outbox (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      observation_kind TEXT NOT NULL CHECK (observation_kind IN ('terminal')),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'recorded', 'dead-letter')),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+      next_attempt_at INTEGER NOT NULL,
+      last_failure_at INTEGER,
+      last_error_code TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (run_id) REFERENCES automation_runs(id)
+    ) STRICT;
+    CREATE INDEX automation_evaluation_dispatch
+      ON automation_evaluation_outbox(status, next_attempt_at, id);
 
     CREATE TABLE duty_lease (
       singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -161,7 +180,7 @@ function migrate(database: DatabaseSync): void {
       FOREIGN KEY (automation_id) REFERENCES automation_definitions(id)
     ) STRICT;
 
-    PRAGMA user_version = 4;
+    PRAGMA user_version = 6;
     COMMIT;
     `)
     return
@@ -252,6 +271,107 @@ function migrate(database: DatabaseSync): void {
         COMMIT;
       `)
     }
+    version = 4
+  }
+  if (version === 4) {
+    const hasRuns = database.prepare(`
+      SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'automation_runs'
+    `).get() !== undefined
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ${hasRuns ? `
+      CREATE TABLE automation_evaluation_outbox (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        observation_kind TEXT NOT NULL CHECK (observation_kind IN ('terminal')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'recorded')),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        UNIQUE (run_id, observation_kind),
+        FOREIGN KEY (run_id) REFERENCES automation_runs(id)
+      ) STRICT;
+      CREATE INDEX automation_evaluation_dispatch
+        ON automation_evaluation_outbox(status, updated_at, id);
+
+      ` : ''}
+
+      PRAGMA user_version = 5;
+      COMMIT;
+    `)
+    version = 5
+  }
+  if (version === 5) {
+    const hasAttempts = database.prepare(`
+      SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'automation_attempts'
+    `).get() !== undefined
+    const hasOutbox = database.prepare(`
+      SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'automation_evaluation_outbox'
+    `).get() !== undefined
+    const hasRuns = database.prepare(`
+      SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'automation_runs'
+    `).get() !== undefined
+    if (!hasRuns) {
+      database.exec(`
+        BEGIN IMMEDIATE;
+        ${hasAttempts ? `
+        ALTER TABLE automation_attempts ADD COLUMN automation_snapshot_hash TEXT;
+        ALTER TABLE automation_attempts ADD COLUMN automation_snapshot_json TEXT
+          CHECK (automation_snapshot_json IS NULL OR json_valid(automation_snapshot_json));
+        ` : ''}
+        DROP INDEX IF EXISTS automation_evaluation_dispatch;
+        DROP TABLE IF EXISTS automation_evaluation_outbox;
+        PRAGMA user_version = 6;
+        COMMIT;
+      `)
+      return
+    }
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ${hasAttempts ? `
+      ALTER TABLE automation_attempts ADD COLUMN automation_snapshot_hash TEXT;
+      ALTER TABLE automation_attempts ADD COLUMN automation_snapshot_json TEXT
+        CHECK (automation_snapshot_json IS NULL OR json_valid(automation_snapshot_json));
+      ` : ''}
+      ${hasOutbox ? `
+      ALTER TABLE automation_evaluation_outbox RENAME TO automation_evaluation_outbox_v5;
+      DROP INDEX IF EXISTS automation_evaluation_dispatch;
+      ` : ''}
+      CREATE TABLE automation_evaluation_outbox (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        observation_kind TEXT NOT NULL CHECK (observation_kind IN ('terminal')),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'recorded', 'dead-letter')),
+        payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        next_attempt_at INTEGER NOT NULL,
+        last_failure_at INTEGER,
+        last_error_code TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (run_id) REFERENCES automation_runs(id)
+      ) STRICT;
+      ${hasOutbox ? `
+      INSERT INTO automation_evaluation_outbox(
+        id, run_id, observation_kind, status, payload_json, attempt_count,
+        next_attempt_at, last_failure_at, last_error_code, created_at, updated_at
+      )
+      SELECT id, run_id, observation_kind,
+        CASE WHEN status = 'pending' THEN 'dead-letter' ELSE status END,
+        payload_json,
+        CASE WHEN status = 'pending' THEN 1 ELSE 0 END,
+        updated_at,
+        CASE WHEN status = 'pending' THEN updated_at ELSE NULL END,
+        CASE WHEN status = 'pending' THEN 'legacy-unverifiable-provenance' ELSE NULL END,
+        created_at, updated_at
+      FROM automation_evaluation_outbox_v5;
+      DROP TABLE automation_evaluation_outbox_v5;
+      ` : ''}
+      CREATE INDEX automation_evaluation_dispatch
+        ON automation_evaluation_outbox(status, next_attempt_at, id);
+      PRAGMA user_version = 6;
+      COMMIT;
+    `)
   }
 }
 

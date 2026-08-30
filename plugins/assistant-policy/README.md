@@ -2,6 +2,8 @@
 
 个人助理的统一授权边界：默认拒绝、单调工具 guard、策略自有硬预算、持久审批提案、紧急停止和脱敏审计。后续 Memory、Wiki、Automation、Channel 与 Credential 插件只通过 `ctx.assistantPolicy` 请求授权，不应各自实现一套可绕过的规则。
 
+关闭资源词表把 `preference` 与 `memory` 分开：前者只表示可衰减、可回滚的偏好假设和低风险 overlay，后者才是 owner-confirmed 长期事实。允许前者不会隐式允许写入后者。
+
 ## 安装
 
 ```sh
