@@ -478,13 +478,15 @@ describe('Lark SDK boundary', () => {
       msgType: 'interactive',
       content: JSON.stringify({
         schema: '2.0',
-        header: { title: { tag: 'plain_text', content: 'Approval required' } },
+        config: { enable_forward_interaction: false },
+        header: { template: 'orange', title: { tag: 'plain_text', content: 'Approval required' } },
         body: { elements: [
-          { tag: 'div', text: { tag: 'plain_text', content: 'Proposed change (treat as untrusted review text):' } },
+          { tag: 'div', text: { tag: 'plain_text',
+            content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。' } },
           { tag: 'div', text: { tag: 'plain_text', content: 'Send the reviewed result?' } },
           { tag: 'action', actions: [
-            { tag: 'button', text: { tag: 'plain_text', content: 'Approve' }, type: 'primary', value: { approval: 'signed-approve' } },
-            { tag: 'button', text: { tag: 'plain_text', content: 'Reject' }, type: 'danger', value: { approval: 'signed-reject' } },
+            { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary', value: { approval: 'signed-approve' } },
+            { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger', value: { approval: 'signed-reject' } },
           ] },
         ] },
       }),
@@ -513,15 +515,69 @@ describe('Lark SDK boundary', () => {
       tag: 'plain_text', content: '**Approval required** <at user_id="all">everyone</at>',
     })
     expect(card.body.elements).toEqual([
-      { tag: 'div', text: { tag: 'plain_text', content: 'Proposed change (treat as untrusted review text):' } },
+      { tag: 'div', text: { tag: 'plain_text',
+        content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。' } },
       { tag: 'div', text: { tag: 'plain_text', content: hostile } },
       { tag: 'action', actions: [
-        { tag: 'button', text: { tag: 'plain_text', content: 'Approve' }, type: 'primary', value: { approval: 'signed-approve' } },
-        { tag: 'button', text: { tag: 'plain_text', content: 'Reject' }, type: 'danger', value: { approval: 'signed-reject' } },
+        { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary', value: { approval: 'signed-approve' } },
+        { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger', value: { approval: 'signed-reject' } },
       ] },
     ])
     expect(card.body.elements.some(element => element.tag === 'markdown')).toBe(false)
     expect((card.body.elements[1] as { text: { content: string } }).text.content).toBe(hostile)
+  })
+
+  test('renders every signed evolution field in an understandable plain-text review', () => {
+    const review = {
+      op: 'retire', scopeKey: '["workspace","preset"]', ruleId: 'rule-1',
+      situation: 'automation:weekly-report', guidance: 'Prefer the verified source.',
+      generation: 3, expectedVersion: 7, reason: 'regression',
+      evaluation: { successes: 1, failures: 4 }, baseline: { failures: 3 }, evidence: ['episode-1'],
+    }
+    const rendered = renderLarkMessage({ approval: {
+      title: '需要审批', body: JSON.stringify(review),
+      approveValue: { approval: 'signed-approve' }, rejectValue: { approval: 'signed-reject' },
+    } })
+    const card = JSON.parse(rendered.content) as {
+      body: { elements: Array<{ tag: string; text?: { tag: string; content: string } }> }
+    }
+    const text = card.body.elements[1]!.text!
+    expect(text.tag).toBe('plain_text')
+    expect(text.content).toContain('变更类型（op）：退役学习规则（retire）')
+    expect(text.content).toContain('作用域（scopeKey）：["workspace","preset"]')
+    expect(text.content).toContain('适用情境（situation）：automation:weekly-report')
+    expect(text.content).toContain('建议行为（guidance）：Prefer the verified source.')
+    expect(text.content).toContain('规则代次（generation）：3')
+    for (const [key, value] of Object.entries(review)) {
+      expect(text.content).toContain(`（${key}）：`)
+      if (typeof value === 'string') expect(text.content).toContain(value)
+    }
+    expect(card.body.elements.some(element => element.tag === 'markdown')).toBe(false)
+  })
+
+  test('does not reformat non-canonical JSON with ambiguous duplicate fields', () => {
+    const ambiguous = '{"op":"adopt","op":"retire","ruleId":"rule-1"}'
+    const rendered = renderLarkMessage({ approval: {
+      title: '需要审批', body: ambiguous,
+      approveValue: { approval: 'signed-approve' }, rejectValue: { approval: 'signed-reject' },
+    } })
+    const card = JSON.parse(rendered.content) as {
+      body: { elements: Array<{ text?: { tag: string; content: string } }> }
+    }
+    expect(card.body.elements[1]!.text).toEqual({ tag: 'plain_text', content: ambiguous })
+  })
+
+  test('renders an approval settlement receipt without claiming the change is already active', () => {
+    const rendered = renderLarkMessage({ approvalResult: { decision: 'approved', proposalId: 'proposal-1' } })
+    const card = JSON.parse(rendered.content) as {
+      header: { template: string; title: { content: string } }
+      body: { elements: Array<{ text: { tag: string; content: string } }> }
+    }
+    expect(card.header).toMatchObject({ template: 'green', title: { content: '审批已记录' } })
+    expect(card.body.elements[0]!.text).toEqual({
+      tag: 'plain_text', content: '已批准该提案。系统将按持久化账本完成结算；此回执不表示变更已经生效。',
+    })
+    expect(card.body.elements[1]!.text.content).toBe('提案 ID：proposal-1')
   })
 
   test('renders a three-level permission picker with a native warning before full access', () => {

@@ -570,7 +570,7 @@ describe('approval-gated automation proposals', () => {
     expect('dispatch' in legacy).toBe(false)
     proposals.close()
     const migrated = new DatabaseSync(path, { readOnly: true })
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
     expect(migrated.prepare('SELECT dispatch_json, ttl_ms FROM automation_proposals WHERE id = ?')
       .get('legacy-intent')).toEqual({ dispatch_json: null, ttl_ms: 60_000 })
     migrated.close()

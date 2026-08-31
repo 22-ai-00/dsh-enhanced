@@ -4,12 +4,22 @@ import type { Config } from './service.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-evolution'
-export const inject = ['assistantPolicy']
+export const inject = ['assistantPolicy', 'assistantEvaluation']
 export { AssistantEvolutionService, version }
 export type { Config }
-export { AssistantEvolutionError } from './service.js'
+export {
+  HOST_RECOVERY_BACKGROUND_ID,
+  SUPERVISED_GROWTH_ANALYST_AUTOMATION_ID,
+  AssistantEvolutionError,
+  canonicalEvolutionHostScope,
+} from './service.js'
 export type {
   AssistantEvolutionHealth,
+  EvaluationOutcomeInput,
+  EvaluationProjectionInput,
+  EvolutionHostOperation,
+  EvolutionHostScope,
+  EvolutionOwnerUndoInput,
   EvolutionProposalResult,
   EvolutionRollbackResult,
 } from './service.js'

@@ -10,6 +10,8 @@
         signalTtlMs: 7776000000
         hypothesisTtlMs: 2592000000
         minSignalsForActivation: 2
+        minBehavioralSignalsForActivation: 6
+        autonomousT1Enabled: true
         minConfidenceBps: 7500
         maxContradictionBps: 2500
         maxActiveOverlays: 6

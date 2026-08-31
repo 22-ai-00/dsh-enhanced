@@ -1,13 +1,20 @@
 import type { AutomationArtifactStore } from './artifacts.js'
+import type { DeliveryPresentationUpdate } from '@dsh-enhanced/assistant-delivery'
+import { HostAutomationExecutorRegistry } from './host-executors.js'
 import { AutomationStoreError, type AutomationStore } from './store.js'
+import { isHostAutomationDefinition, legacyAutomationExecutionDiagnostic } from './types.js'
 import type {
   AutomationOccurrence,
+  AutomationExecutionDiagnostic,
+  AutomationIncident,
   AutomationEvaluationOutcome,
   AutomationEvaluationOutboxEntry,
   AutomationRecord,
   AutomationRun,
   AutomationRunStatus,
   AutomationTask,
+  HostExecutionRequirement,
+  HostExecutorAvailabilityDecision,
 } from './types.js'
 
 export interface AutomationRunnerInput {
@@ -23,6 +30,8 @@ export interface AutomationRunnerResult {
   sessionId?: string
   output: string
   usage: Readonly<Record<string, unknown>>
+  /** Omitted only by legacy/custom runners; the coordinator persists unknown. */
+  diagnostic?: AutomationExecutionDiagnostic
 }
 
 export interface AutomationRunner {
@@ -37,13 +46,30 @@ export interface AutomationDeliveryDispatcher {
     idempotencyKey: string
     text: string
     format?: 'markdown' | 'plain'
+    metadata?: Readonly<Record<string, string>>
   }): { id: string; status: string }
+  enqueueAutomationResult?(input: {
+    automationId: string
+    runId: string
+    workspace: string
+    bindingId: string
+    outputPreview: string
+  }): { id: string; status: string }
+  enqueueBackgroundRoute?(input: {
+    sourceId: string
+    authorityId: string
+    idempotencyKey: string
+    text: string
+    format?: 'markdown' | 'plain'
+  }): { id: string; status: string }
+  /** Trusted Host-only desired-message projection; never exposed as an Agent tool. */
+  publishDeliveryPresentation?(input: DeliveryPresentationUpdate): { status: string }
 }
 
 /**
- * Optional one-way sink for finished-run outcomes, used to feed behavioural
- * learning. Structural interface rather than a service import, so the scheduler
- * stays independent of whether any learning plugin is installed.
+ * Optional one-way sink for finished production-run telemetry. The sink owns
+ * any learning eligibility decision; this scheduler never treats operational
+ * execution success or failure as a quality label.
  */
 export interface AutomationOutcomeRecorder {
   recordAutomationOutcome(input: {
@@ -77,9 +103,23 @@ export interface AutomationEvaluationRecorder {
 }
 
 export class AutomationRunnerAmbiguousError extends Error {
-  constructor(message: string, options?: ErrorOptions) {
+  readonly diagnostic: AutomationExecutionDiagnostic
+
+  constructor(message: string, options?: ErrorOptions & { diagnostic?: AutomationExecutionDiagnostic }) {
     super(message, options)
     this.name = 'AutomationRunnerAmbiguousError'
+    this.diagnostic = options?.diagnostic ?? legacyAutomationExecutionDiagnostic
+  }
+}
+
+export class AutomationRunnerFailureError extends Error {
+  constructor(
+    message: string,
+    readonly diagnostic: AutomationExecutionDiagnostic,
+    options?: ErrorOptions,
+  ) {
+    super(message, options)
+    this.name = 'AutomationRunnerFailureError'
   }
 }
 
@@ -95,6 +135,7 @@ export interface AutomationCoordinatorOptions {
   maxCatchUp: number
   maxConcurrency: number
   tickIntervalMs?: number
+  hostExecutors?: HostAutomationExecutorRegistry
 }
 
 function sessionId(task: AutomationTask): string {
@@ -112,6 +153,18 @@ function boundedText(value: unknown, maximumBytes: number): string | undefined {
   const normalized = value.normalize('NFC').trim()
   if (normalized === '' || Buffer.byteLength(normalized, 'utf8') > maximumBytes) return undefined
   return normalized
+}
+
+function incidentAlertText(incident: AutomationIncident): string {
+  return [
+    `Automation incident ${incident.id}`,
+    `automation: ${incident.automationId}`,
+    `state: ${incident.state}`,
+    `stage: ${incident.stage}`,
+    `failure: ${incident.failureClass}/${incident.failurePhase}/${incident.failureCode}`,
+    `side effects: ${incident.sideEffectState}`,
+    `retryability: ${incident.retryability}`,
+  ].join('\n')
 }
 
 const exposureReceiptTimeoutMs = 2_000
@@ -141,6 +194,7 @@ export class AutomationCoordinator {
   private readonly maxCatchUp: number
   private readonly maxConcurrency: number
   private readonly tickIntervalMs: number
+  private readonly hostExecutors: HostAutomationExecutorRegistry
   private readonly active = new Map<string, { controller: AbortController; promise: Promise<void> }>()
   private readonly activeEvaluations = new Map<string, Promise<void>>()
   private delivery: AutomationDeliveryDispatcher | undefined
@@ -165,6 +219,7 @@ export class AutomationCoordinator {
     this.maxCatchUp = options.maxCatchUp
     this.maxConcurrency = options.maxConcurrency
     this.tickIntervalMs = options.tickIntervalMs ?? Math.max(1_000, Math.floor(options.dutyLeaseMs / 3))
+    this.hostExecutors = options.hostExecutors ?? new HostAutomationExecutorRegistry()
   }
 
   start(): void {
@@ -179,23 +234,38 @@ export class AutomationCoordinator {
     if (this.stopped) throw new Error('assistant-automations coordinator is stopped')
     const now = this.now()
     if (!this.ensureDuty(now)) return
+    this.store.recoverExpiredCircuitProbes({ now })
     this.store.recoverExpiredTasks({ now, limit: this.maxCatchUp })
     this.dispatchPendingEvaluations()
     this.dispatchPendingEvidence()
     this.dispatchPendingDeliveries()
-    this.store.materializeDue({ now, misfireGraceMs: this.misfireGraceMs, maxCatchUp: this.maxCatchUp })
+    this.dispatchPendingIncidentAlerts()
+    const materializeAvailability = this.hostAvailability(
+      this.store.listDueHostExecutionRequirements({ now }), 'materialize',
+    )
+    this.store.materializeDue({
+      now,
+      misfireGraceMs: this.misfireGraceMs,
+      maxCatchUp: this.maxCatchUp,
+      hostAvailability: materializeAvailability,
+    })
     while (this.active.size < this.maxConcurrency) {
+      const claimAvailability = this.hostAvailability(
+        this.store.listClaimableHostExecutionRequirements(), 'claim',
+      )
       const claimed = this.store.claimNextTask({
         ownerId: this.ownerId,
         fencingToken: this.fencingToken!,
         now,
         leaseMs: this.taskLeaseMs,
+        hostAvailability: claimAvailability,
       })
       if (claimed === undefined) break
       if (claimed.status !== 'claimed') continue
       this.abortRequestedActive()
       this.launch(claimed)
     }
+    this.dispatchPendingIncidentAlerts()
   }
 
   setDeliveryDispatcher(delivery: AutomationDeliveryDispatcher | undefined): void {
@@ -242,6 +312,33 @@ export class AutomationCoordinator {
     }
     for (const value of this.active.values()) value.controller.abort('coordinator-stop')
     await this.whenIdle()
+    if (this.fencingToken !== undefined) {
+      try {
+        this.store.releaseDuty({ ownerId: this.ownerId, fencingToken: this.fencingToken, now: this.now() })
+      } catch (error) {
+        // A successor that already advanced the fence owns the row.  The
+        // stopped coordinator must not interfere with it.
+        if (!(error instanceof AutomationStoreError) || error.code !== 'stale-fence') throw error
+      } finally {
+        this.fencingToken = undefined
+      }
+    }
+  }
+
+  private hostAvailability(
+    requirements: readonly HostExecutionRequirement[],
+    stage: HostExecutorAvailabilityDecision['stage'],
+  ): HostExecutorAvailabilityDecision[] {
+    return requirements.map(requirement => {
+      const proof = this.hostExecutors.prove(requirement.execution)
+      return Object.freeze({
+        automationId: requirement.automationId,
+        definitionHash: requirement.definitionHash,
+        stage,
+        available: proof.available,
+        reasonCode: proof.available ? 'host-executor-available' : proof.reasonCode,
+      })
+    })
   }
 
   private ensureDuty(now: number): boolean {
@@ -278,86 +375,216 @@ export class AutomationCoordinator {
   }
 
   private async execute(claimed: AutomationTask, controller: AbortController): Promise<void> {
-    const automation = this.store.getTaskExecutionSnapshot(claimed.id)
-    const occurrence = this.store.getOccurrence(claimed.occurrenceId)
-    if (automation === undefined || occurrence === undefined || this.fencingToken === undefined) {
-      throw new Error('assistant-automations: claimed task snapshot is missing')
-    }
+    if (this.fencingToken === undefined) throw new Error('assistant-automations: duty fence is missing')
     const fence = this.fencingToken
     const freshSessionId = sessionId(claimed)
-    const started = this.store.startTask({
-      taskId: claimed.id,
-      ownerId: this.ownerId,
-      fencingToken: fence,
-      now: this.now(),
-      leaseMs: this.taskLeaseMs,
-      sessionId: freshSessionId,
-    })
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    let heartbeat: ReturnType<typeof setInterval> | undefined
     let timedOut = false
-    const timeout = setTimeout(() => {
-      timedOut = true
-      controller.abort('timeout')
-    }, automation.definition.timeoutMs)
-    timeout.unref?.()
-    const heartbeat = setInterval(() => {
+    try {
+      const started = this.store.startTask({
+        taskId: claimed.id,
+        ownerId: this.ownerId,
+        fencingToken: fence,
+        now: this.now(),
+        leaseMs: this.taskLeaseMs,
+        sessionId: freshSessionId,
+      })
+      let automation: AutomationRecord | undefined
+      let occurrence: ReturnType<AutomationStore['getOccurrence']>
       try {
-        const now = this.now()
-        this.store.renewDuty({
-          ownerId: this.ownerId,
-          fencingToken: fence,
-          now,
-          leaseMs: this.dutyLeaseMs,
-        })
-        this.store.heartbeatTask({
+        automation = this.store.getTaskExecutionSnapshot(claimed.id)
+        occurrence = this.store.getOccurrence(claimed.occurrenceId)
+      } catch {
+        this.store.quarantineInvalidExecutionSnapshot({
           taskId: started.id,
           ownerId: this.ownerId,
           fencingToken: fence,
-          now,
-          leaseMs: this.taskLeaseMs,
+          now: this.now(),
         })
+        return
+      }
+      if (automation === undefined || occurrence === undefined) {
+        this.store.quarantineInvalidExecutionSnapshot({
+          taskId: started.id,
+          ownerId: this.ownerId,
+          fencingToken: fence,
+          now: this.now(),
+        })
+        return
+      }
+      const hostExecution = isHostAutomationDefinition(automation.definition)
+      timeout = setTimeout(() => {
+        timedOut = true
+        controller.abort('timeout')
+      }, automation.definition.timeoutMs)
+      timeout.unref?.()
+      heartbeat = setInterval(() => {
+        try {
+          const now = this.now()
+          this.store.renewDuty({
+            ownerId: this.ownerId,
+            fencingToken: fence,
+            now,
+            leaseMs: this.dutyLeaseMs,
+          })
+          this.store.heartbeatTask({
+            taskId: started.id,
+            ownerId: this.ownerId,
+            fencingToken: fence,
+            now,
+            leaseMs: this.taskLeaseMs,
+          })
+        } catch {
+          controller.abort('lease-lost')
+        }
+      }, Math.max(250, Math.floor(Math.min(this.dutyLeaseMs, this.taskLeaseMs) / 3)))
+      heartbeat.unref?.()
+
+      let result: AutomationRunnerResult
+      try {
+        const admission = this.store.acquireCircuitExecutionForTask({
+          taskId: started.id,
+          now: this.now(),
+          leaseMs: Math.min(86_400_000, Math.max(this.taskLeaseMs, automation.definition.timeoutMs)),
+        })
+        if (admission.kind === 'blocked') {
+          result = {
+            outcome: 'failed',
+            output: `execution circuit is ${admission.circuit.state} for immutable definition ${admission.circuit.definitionHash}`,
+            usage: {},
+            diagnostic: Object.freeze({
+              schemaVersion: 1,
+              failureClass: admission.circuit.failureClass,
+              failurePhase: 'preflight',
+              failureCode: 'circuit-open',
+              promptSubmissionState: hostExecution ? 'not-applicable' : 'not-submitted',
+              sideEffectState: 'none',
+              retryability: 'after-intervention',
+              budgetSettlementState: automation.definition.budgetId === undefined ? 'not-required' : 'not-reserved',
+            }),
+          }
+        } else {
+          const runnerPromise = Promise.resolve().then(() => this.runner.run({
+            automation,
+            occurrence,
+            task: started,
+            sessionId: freshSessionId,
+            signal: controller.signal,
+          }))
+          // The runner owns Agent flush/disposal. It may violate cancellation,
+          // so its late settlement is deliberately detached from terminal I/O.
+          const settledRunner = runnerPromise.then(
+            value => ({ kind: 'result' as const, value }),
+            error => ({ kind: 'error' as const, error }),
+          )
+          let removeAbort = () => {}
+          const aborted = new Promise<{ kind: 'aborted' }>(resolve => {
+            const finish = () => resolve({ kind: 'aborted' })
+            if (controller.signal.aborted) finish()
+            else {
+              controller.signal.addEventListener('abort', finish, { once: true })
+              removeAbort = () => controller.signal.removeEventListener('abort', finish)
+            }
+          })
+          const settled = await Promise.race([settledRunner, aborted])
+          removeAbort()
+          void settledRunner.then(() => {})
+          if (settled.kind === 'aborted' || controller.signal.aborted) {
+            const isTimeout = timedOut
+            result = {
+              outcome: isTimeout ? 'timed_out' : 'cancelled',
+              output: isTimeout ? 'automation execution timed out' : 'automation execution was cancelled',
+              usage: {},
+              diagnostic: Object.freeze({
+                schemaVersion: 1,
+                failureClass: isTimeout ? 'timeout' : 'cancelled',
+                failurePhase: 'unknown',
+                failureCode: isTimeout ? 'execution-timeout' : 'execution-cancelled',
+                promptSubmissionState: hostExecution ? 'not-applicable' : 'unknown',
+                sideEffectState: 'unknown',
+                retryability: 'unsafe',
+                budgetSettlementState: automation.definition.budgetId === undefined ? 'not-required' : 'unknown',
+              }),
+            }
+          } else if (settled.kind === 'error') {
+            const error = settled.error
+            const diagnostic = error instanceof AutomationRunnerFailureError
+              || error instanceof AutomationRunnerAmbiguousError
+              ? error.diagnostic
+              : legacyAutomationExecutionDiagnostic
+            result = {
+              outcome: error instanceof AutomationRunnerAmbiguousError ? 'unknown' : 'failed',
+              output: error instanceof Error ? error.message : String(error),
+              usage: {},
+              diagnostic,
+            }
+          } else {
+            result = settled.value
+          }
+        }
       } catch {
-        controller.abort('lease-lost')
+        result = {
+          outcome: 'unknown',
+          output: 'automation circuit admission could not be proven',
+          usage: {},
+          diagnostic: Object.freeze({
+            schemaVersion: 1,
+            failureClass: 'infrastructure',
+            failurePhase: 'preflight',
+            failureCode: 'circuit-admission-failed',
+            promptSubmissionState: hostExecution ? 'not-applicable' : 'not-submitted',
+            sideEffectState: 'none',
+            retryability: 'after-intervention',
+            budgetSettlementState: automation.definition.budgetId === undefined ? 'not-required' : 'not-reserved',
+          }),
+        }
       }
-    }, Math.max(250, Math.floor(Math.min(this.dutyLeaseMs, this.taskLeaseMs) / 3)))
-    heartbeat.unref?.()
-    let result: AutomationRunnerResult
-    try {
-      result = await this.runner.run({
-        automation,
-        occurrence,
-        task: started,
-        sessionId: freshSessionId,
-        signal: controller.signal,
-      })
-    } catch (error) {
-      result = {
-        outcome: controller.signal.aborted
-          ? 'cancelled'
-          : error instanceof AutomationRunnerAmbiguousError ? 'unknown' : 'failed',
-        output: error instanceof Error ? error.message : String(error),
-        usage: {},
-      }
-    } finally {
-      clearTimeout(timeout)
-    }
-    try {
-      const evidenceSessionId = result.sessionId === freshSessionId ? freshSessionId : undefined
+      if (timeout !== undefined) clearTimeout(timeout)
+
+      const evidenceSessionId = occurrence.dryRun === false && result.sessionId === freshSessionId
+        ? freshSessionId
+        : undefined
       const exposure = evidenceSessionId === undefined
         ? undefined
         : await this.getExposure(automation, evidenceSessionId)
-      const outcome: AutomationRunStatus = timedOut
-        ? 'timed_out'
-        : controller.signal.aborted ? 'cancelled' : result.outcome
+      let outcome: AutomationRunStatus = result.outcome
+      let diagnostic: AutomationExecutionDiagnostic = result.diagnostic ?? legacyAutomationExecutionDiagnostic
       const outputPreview = preview(result.output)
-      const artifactRef = this.artifacts.write(occurrence.id, {
-        occurrenceId: occurrence.id,
-        automationId: automation.id,
-        taskId: started.id,
-        outcome,
-        sessionId: result.sessionId ?? freshSessionId,
-        output: result.output,
-        usage: result.usage,
-      })
+      let artifactRef: string | undefined
+      try {
+        artifactRef = this.artifacts.write(occurrence.id, {
+          occurrenceId: occurrence.id,
+          automationId: automation.id,
+          taskId: started.id,
+          outcome,
+          sessionId: result.sessionId ?? freshSessionId,
+          output: result.output,
+          usage: result.usage,
+          diagnostic,
+        })
+      } catch {
+        // The execution may already have crossed prompt/tool boundaries. Commit
+        // a content-free unknown recovery receipt instead of waiting for lease
+        // expiry or pretending the missing artifact did not matter.
+        outcome = 'unknown'
+        diagnostic = Object.freeze({
+          schemaVersion: 1,
+          failureClass: 'infrastructure',
+          failurePhase: 'artifact-write',
+          failureCode: 'artifact-write-failed',
+          promptSubmissionState: diagnostic.promptSubmissionState,
+          sideEffectState: diagnostic.sideEffectState,
+          retryability: diagnostic.promptSubmissionState === 'not-submitted'
+            && diagnostic.sideEffectState === 'none'
+            && (diagnostic.budgetSettlementState === 'not-required'
+              || diagnostic.budgetSettlementState === 'not-reserved'
+              || diagnostic.budgetSettlementState === 'released')
+            ? 'safe'
+            : 'unsafe',
+          budgetSettlementState: diagnostic.budgetSettlementState,
+        })
+      }
       const run = this.store.completeTask({
         taskId: started.id,
         ownerId: this.ownerId,
@@ -365,10 +592,11 @@ export class AutomationCoordinator {
         now: this.now(),
         outcome,
         sessionId: result.sessionId ?? freshSessionId,
-        artifactRef,
-        outputPreview,
-        usage: result.usage,
-        ...(evidenceSessionId === undefined
+        ...(artifactRef === undefined ? {} : { artifactRef }),
+        outputPreview: artifactRef === undefined ? 'artifact persistence failed' : outputPreview,
+        usage: artifactRef === undefined ? {} : result.usage,
+        diagnostic,
+        ...(artifactRef === undefined || evidenceSessionId === undefined
           ? {}
           : {
               evidenceAttribution: {
@@ -381,7 +609,8 @@ export class AutomationCoordinator {
       this.dispatchRunEvidence(run)
       this.dispatchRunEvaluation(run.id)
     } finally {
-      clearInterval(heartbeat)
+      if (timeout !== undefined) clearTimeout(timeout)
+      if (heartbeat !== undefined) clearInterval(heartbeat)
     }
   }
 
@@ -424,15 +653,34 @@ export class AutomationCoordinator {
 
   private dispatchPendingEvidence(): void {
     if (this.outcomeRecorder === undefined) return
-    for (const run of this.store.listPendingEvidence(100)) this.dispatchRunEvidence(run)
+    for (const run of this.store.listPendingEvidence(100)) {
+      try {
+        this.dispatchRunEvidence(run)
+      } catch {
+        // One corrupt/concurrently-settled row must not starve its peers.
+      }
+    }
   }
 
   private dispatchRunEvidence(run: AutomationRun): void {
     const recorder = this.outcomeRecorder
     if (recorder === undefined || run.evidenceStatus !== 'pending' || run.evidence === undefined) return
+    let proven: ReturnType<AutomationStore['getProvenProductionRun']>
     try {
-      recorder.recordAutomationOutcome(run.evidence)
-      this.store.completeRunEvidence({ runId: run.id, expectedStatus: 'pending', now: this.now() })
+      proven = this.store.getProvenProductionRun(run.id)
+    } catch {
+      this.store.suppressRunEvidence({ runId: run.id, expectedStatus: 'pending', now: this.now() })
+      return
+    }
+    if (proven === undefined
+      || (proven.run.status !== 'succeeded' && proven.run.status !== 'failed' && proven.run.status !== 'timed_out')
+      || proven.run.evidenceStatus !== 'pending' || proven.run.evidence === undefined) {
+      this.store.suppressRunEvidence({ runId: run.id, expectedStatus: 'pending', now: this.now() })
+      return
+    }
+    try {
+      recorder.recordAutomationOutcome(proven.run.evidence)
+      this.store.completeRunEvidence({ runId: proven.run.id, expectedStatus: 'pending', now: this.now() })
     } catch {
       // Evidence is an outbox lane: the run remains terminal and a later leader
       // tick repeats the same recorder idempotency key. Move a poison row behind
@@ -460,7 +708,20 @@ export class AutomationCoordinator {
   private dispatchEvaluation(entry: AutomationEvaluationOutboxEntry): void {
     const recorder = this.evaluationRecorder
     if (recorder === undefined || entry.status !== 'pending' || this.activeEvaluations.has(entry.id)) return
-    const promise = this.recordEvaluation(recorder, entry).finally(() => this.activeEvaluations.delete(entry.id))
+    const authoritativeMode = this.store.getRunExecutionMode(entry.runId)
+    const payloadMode = (entry.payload as Partial<AutomationEvaluationOutcome>).executionMode
+    if (authoritativeMode !== 'production' || (payloadMode !== undefined && payloadMode !== 'production')) {
+      // Repair old preview rows without ever presenting them to a trusted sink.
+      // `recorded` here means the durable outbox item was conclusively handled;
+      // no Evaluation outcome is invented.
+      this.store.completeEvaluation({ id: entry.id, expectedStatus: 'pending', now: this.now() })
+      return
+    }
+    const normalizedEntry = payloadMode === 'production'
+      ? entry
+      : Object.freeze({ ...entry, payload: Object.freeze({ ...entry.payload, executionMode: 'production' as const }) })
+    const promise = this.recordEvaluation(recorder, normalizedEntry)
+      .finally(() => this.activeEvaluations.delete(entry.id))
     this.activeEvaluations.set(entry.id, promise)
     void promise.catch(() => {})
   }
@@ -508,28 +769,125 @@ export class AutomationCoordinator {
   }
 
   private dispatchPendingDeliveries(): void {
-    for (const run of this.store.listPendingDeliveries(100)) this.dispatchRunDelivery(run)
+    for (const run of this.store.listPendingDeliveries(100)) {
+      try {
+        this.dispatchRunDelivery(run)
+      } catch {
+        // Per-row isolation: the next pending delivery remains dispatchable.
+      }
+    }
+  }
+
+  private dispatchPendingIncidentAlerts(): void {
+    const delivery = this.delivery
+    if (delivery === undefined) return
+    for (const incident of this.store.listPendingIncidentAlerts(100)) {
+      try {
+        const target = this.store.getIncidentNotificationTarget(incident.id)
+        if (target === undefined) continue
+        const lifecycleKey = `automation-incident:${incident.id}:g${incident.lifecycleGeneration}`
+        let outbox: { id: string; status: string }
+        if (target.kind === 'owner-route') {
+          const enqueue = delivery.enqueueBackgroundRoute
+          const publish = delivery.publishDeliveryPresentation
+          if (enqueue === undefined || publish === undefined) continue
+          outbox = incident.alertRef === undefined
+            ? enqueue.call(delivery, {
+                sourceId: 'assistant-automations-incidents',
+                authorityId: target.authorityId,
+                idempotencyKey: lifecycleKey,
+                // Immutable bootstrap text. The typed presentation below owns all
+                // mutable details and eventually replaces this exact message.
+                text: `Automation incident ${incident.id}`,
+                format: 'plain',
+              })
+            : { id: incident.alertRef, status: 'enqueued' }
+          publish.call(delivery, {
+            presentationKey: lifecycleKey,
+            originalOutboxIdempotencyKey: lifecycleKey,
+            revision: incident.presentationRevision,
+            presentation: {
+              kind: 'automation-incident',
+              incidentId: incident.id,
+              automationId: incident.automationId,
+              definitionHash: incident.definitionHash,
+              stage: incident.stage,
+              state: incident.state,
+              failureClass: incident.failureClass,
+              failurePhase: incident.failurePhase,
+              failureCode: incident.failureCode,
+              sideEffectState: incident.sideEffectState,
+              retryability: incident.retryability,
+              lifecycleGeneration: incident.lifecycleGeneration,
+              incidentRevision: incident.presentationRevision,
+              openedAt: incident.openedAt,
+              updatedAt: incident.updatedAt,
+              ...(incident.resolvedAt === undefined ? {} : { resolvedAt: incident.resolvedAt }),
+            },
+          })
+        } else {
+          // Agent approval bindings are Conversation bindings, not Host owner-
+          // route authorities. Emit one idempotent content-free update per
+          // durable revision; Delivery intentionally reserves mutable incident
+          // presentations for stable Host owner routes.
+          outbox = delivery.enqueueBackground({
+            sourceId: 'assistant-automations-incidents',
+            workspace: target.workspace,
+            bindingId: target.bindingId,
+            idempotencyKey: `${lifecycleKey}:r${incident.presentationRevision}`,
+            text: incidentAlertText(incident),
+            format: 'plain',
+          })
+        }
+        this.store.completeIncidentAlert({
+          incidentId: incident.id,
+          expectedStatus: 'pending',
+          expectedLifecycleGeneration: incident.lifecycleGeneration,
+          expectedPresentationRevision: incident.presentationRevision,
+          expectedVersion: incident.version,
+          alertRef: outbox.id,
+          now: this.now(),
+        })
+      } catch {
+        // Emergency stop / Policy refusal keeps the durable incident and its
+        // pending alert. A later authorized tick uses the same idempotency key.
+      }
+    }
   }
 
   private dispatchRunDelivery(run: AutomationRun): void {
     if (run.deliveryStatus !== 'pending') return
-    const automation = this.store.getRunExecutionSnapshot(run.id)
+    let proof: ReturnType<AutomationStore['getProvenProductionRun']>
+    try {
+      proof = this.store.getProvenProductionRun(run.id)
+    } catch {
+      this.store.suppressRunDelivery({ runId: run.id, expectedStatus: 'pending', now: this.now() })
+      return
+    }
+    const automation = proof?.automation
+    const evidence = proof?.run.evidence
     const bindingId = automation?.definition.deliveryBindingId
-    if (automation === undefined || bindingId === undefined) return
+    if (proof === undefined || proof.run.status !== 'succeeded'
+      || evidence === undefined || automation === undefined || bindingId === undefined) {
+      // Unknown/legacy mode, missing immutable snapshot, hash mismatch, and a
+      // missing binding all reduce monotonically to a terminal no-send state.
+      this.store.suppressRunDelivery({ runId: run.id, expectedStatus: 'pending', now: this.now() })
+      return
+    }
+    run = proof.run
     const normalizedOutput = run.outputPreview.normalize('NFC').trim()
     if (normalizedOutput === '' || automation.definition.deliverySuppressExact?.includes(normalizedOutput) === true) {
       this.store.suppressRunDelivery({ runId: run.id, expectedStatus: 'pending', now: this.now() })
       return
     }
-    if (this.delivery === undefined) return
+    if (this.delivery?.enqueueAutomationResult === undefined) return
     try {
-      const outbox = this.delivery.enqueueBackground({
-        sourceId: automation.id,
+      const outbox = this.delivery.enqueueAutomationResult({
+        automationId: automation.id,
+        runId: run.id,
         workspace: automation.definition.workspace,
         bindingId,
-        idempotencyKey: `automation:${run.occurrenceId}:${bindingId}`,
-        text: run.outputPreview,
-        format: 'markdown',
+        outputPreview: run.outputPreview,
       })
       this.store.completeRunDelivery({
         runId: run.id,

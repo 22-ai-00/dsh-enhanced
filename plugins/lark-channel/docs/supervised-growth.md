@@ -1,64 +1,98 @@
 # 分级自治成长激活器
 
-`dsh-supervised-growth-setup --profile web` 只能在完成 Lark onboarding 后使用。它只读取 Delivery/Automations 的本地 SQLite 控制面，不解析或执行任何模型输入；首先等待一条与 profile 中 account、tenant、默认 workspace 和 preset 完全一致的 active owner 私聊 binding。没有匹配时会要求 owner 再发一条普通私聊并进行有界轮询；超时、存在多个匹配或 binding 不一致时均不修改 profile。
+`dsh-supervised-growth-setup --profile web` 在完成 Lark owner onboarding 后，把
+`supervised-growth/v2` 作为无模型的 `assistant-recovery` Host runbook 激活。它不把恢复步骤、
+目标 scope、owner route 或 Policy 参数交给模型选择。另有独立、受限的 adoption analyst；它不参与
+Recovery，只能把一个 Host 选出的候选转为 owner 审批卡。
 
 ```sh
 ~/.dsh/profiles/web/node_modules/.bin/dsh-supervised-growth-setup --profile web
 
-# 仅当确认已有活动任务可以在 scheduler 开启后继续运行时使用
+# 只有在确认其他现存 active automation 可以继续运行时才使用
 ~/.dsh/profiles/web/node_modules/.bin/dsh-supervised-growth-setup \
   --profile web \
   --ack-existing-automations
 ```
 
-## 激活前检查
+激活器先从有效配置读取 Delivery、Automations 和 Recovery 的真实 SQLite 路径，再等待唯一一条
+与 account、tenant、默认 workspace 和 preset 完全一致的 active owner 私聊 binding。没有匹配、
+存在多个匹配、binding 在写入或重启前发生变化时均不会继续。
 
-激活器会检查已有 automation。任何 active job（包括旧 `assistant-heartbeat` job）默认都会阻止启用：scheduler 开启后会加载全部 durable row，不能按 owner 名称推测旧 heartbeat 是否安全。
+## 两阶段激活与完整回滚
 
-只有在确认所有现存任务都可在 scheduler 启用后继续运行时，才传入 `--ack-existing-automations`。这个确认不会恢复、创建或改写 job 定义，但现有 active job 之后可被 scheduler 领取。
+一次激活只生成一个非 bearer `activationNonce`，并动态读取已安装 Recovery 包当前编译的
+`RECOVERY_CATALOG_DIGEST`。随后严格执行两个重启阶段：
 
-激活器基于 `dsh --dump-config` 的有效组合树生成完整受管 overlay，不假设 raw patch 已含 meta-bundle 配置；Delivery 与 Automations 的数据库路径也从有效树取得。原子写入后，它会再次 dump 并验证：
+1. 写入 `activationState: preview`。此时普通 Automations scheduler 固定为关闭；Recovery 只通过
+   exact `runSystemDry` 运行一次完整 preview。升级配置中的旧 `supervised-growth` Heartbeat 会先被
+   标记为 disabled、清空 allowed tools，并通过唯一的 reconcile 权限把 durable
+   `heartbeat:supervised-growth` 暂停；新的 `heartbeat:supervised-growth-analyst` 也固定为 paused。
+2. resident 进程 running 只是第一道门。激活器继续有界轮询 Recovery SQLite，要求本次重启的
+   `bootstrapStatus` 为 `succeeded`，并证明 legacy Heartbeat、Recovery preview 与 analyst 都处于
+   预期状态，analyst definition 和私有 scratch 与受管合约逐项一致。
+3. 只有 preview 通过，才用同一 nonce、catalog digest、owner authority 和完整计划写入
+   `activationState: active`，打开 scheduler 并再次重启。
+4. active 阶段同样要求本次持久 bootstrap 成功，并从 Automations SQLite 证明
+   `recovery:supervised-growth` 由 `dsh-enhanced-assistant-recovery` 持有、处于 active，且完整
+   production definition 与当前编译计划逐项一致；analyst 必须由 `assistant-heartbeat` 持有、处于
+   active，且仍与同一 exact definition 相等。
 
-- scheduler 配置；
-- Delivery 中非空的 provider/model，以及 heartbeat 与该 route 的精确一致性；
-- `automation-runs` budget；
-- heartbeat；
-- Preference Learning 已启用，Evolution 的低风险自动回滚开关已打开；
-- 每条 setup 托管的 Policy rule。
+preview 配置验证、preview bootstrap、active 配置验证、active bootstrap、binding 重验或 resident
+健康任一失败，激活器都会原样写回进入命令前的 patch，并重启原 profile。不会留下“进程还活着，
+但 Recovery 已降级/失败”的半激活状态。
 
-如果 home/profile 的高优先级 layer 覆盖任何受管值，写入会立即恢复。激活器在写入前和重启前都会重读同一 owner binding 的完整 route、status 与 version；version 变化、撤销或多个 binding 均 fail closed。
+## 生成的受管配置
 
-## 模型 route、工具协议与常驻健康门
+- 稳定 Delivery owner route `supervised-growth-owner` 精确固定 conversation、principal、绝对
+  workspace、preset、policyRef 和首次启用时的 minimum generation；后续同 lineage `/new` 可以前进，
+  身份或 scope 漂移会失败关闭。
+- Recovery job `supervised-growth` 每天在 Asia/Shanghai 的
+  08:00、10:00、12:00、14:00、16:00、18:00、20:00 运行，使用 `automation-runs` workspace
+  budget，每天最多 7 次、每次固定 1。
+- analyst 每天 08:00 最多运行一次，使用独立 `automation-runs` workspace budget。它的 immutable
+  allowlist 只有 `evolution_adoption_review` 和 `evolution_adoption_propose`，Policy 还把 inspect/propose
+  限定到 production `heartbeat:supervised-growth-analyst`。定义只带 `approvalBindingId`，不带
+  `deliveryBindingId`，所以只有 proposal 卡会发给 owner，普通模型正文不会投递。
+- 固定 runbook 依次做 owner authority/Health admission、Evaluation durable projection、至多一条
+  Preference retention、至多一个 evidence-ready T1 激活、至多一条可信回归 Evolution rollback、
+  至多一个 exact circuit production canary，最后再次验证 authority 与 Health。
+- preview 完成相同的读取、规划和验证，但不提交 production mutation、exposure、Delivery 或 circuit。
+- workflow learning 不以 Lark 消息、卡片或 callback 作为写入面。只有 Delivery 通过私有、可撤销的
+  trace sink 投影已证明的 content-free revision；自动来源还要求 active owner 对已投递普通 Agent reply
+  的精确 `/feedback achieved` 与静态 catalog selector。候选仍须 owner approval、replay、effect-blocked
+  shadow、单次 canary 和 trusted outcome，Lark 只负责呈现 Delivery 已持久的结果。
+- Automation incident 只能由固定 `assistant-automations-incidents` 主体投递：Host run
+  限定到 `message/route:supervised-growth-owner`，analyst Agent run 限定到当前 exact owner
+  binding。两条授权都绑定同一 workspace 和 principal，不能互相借用。Evolution proposal
+  审批仍只能投递给当前 exact owner binding。
+- 普通 owner Agent 继续拥有 foreground/external 的 Evolution review/propose/rollback/undo 工具与
+  inspect/propose 权限，以及 Preference/Evolution prompt snapshot；这些权限不对 Recovery 或 legacy
+  background model heartbeat 开放。analyst 只获得上述两个 adoption 工具和精确 evolution resource。
 
-激活器把有效 Delivery 配置中的 `agentProvider` / `agentModel` 原样用于受管 heartbeat，不改写 Delivery，也不硬编码或优先选择 TraeX。后台默认 route 由 profile owner 的既有 Delivery 配置决定；要切换它，应先修改并验证该 profile 的 Delivery 默认 route，而不是让后台任务猜测 provider。会话级 `/model` 覆盖不会被误当成后台默认值。
+overlay 不授予 Recovery shell、文件系统内容读取、网络、浏览器、凭据、代码修改或 Policy 修改能力。
+T2/T3 与自由文本 guidance 仍需 owner 审批。确定性 T1 激活、可信回归回滚和固定 circuit canary 按
+runbook 执行，不增加逐动作审批。
 
-激活器自身不发送模型 prompt，也不会用某个 provider 的私有 readiness API 作为通用真源。每次 heartbeat 真正执行时，`assistant-automations` 会在模型请求前解析 live provider/model 协议元数据：最终工具集非空时，只有 adapter 明确声明 `toolCalls: none` 才 fail closed；缺失声明、`native` 和 `bridge` 均使用同一 Agent/preset 工具面、Policy 与审计。这一预检只判断统一 DSH tool-call 协议是否实现，不授予工具权限，也不把模型 route 当作能力边界。
+## Health 与安装场景
 
-模型登录和实际可调用性属于独立运行条件；安装器的 `--model-route verify` 可对 DSH headless route 主动消耗一次最小调用，但不替代当前 Delivery route 的 provider 登录与运行检查。重启后还必须通过 resident running health gate，否则恢复旧 profile 和旧服务。
+`supervised` 场景安装 `assistant-evaluation`、`preference-learning`、`assistant-evolution`、`assistant-growth-experiments`、
+`assistant-heartbeat`、`assistant-health` 和 `assistant-recovery`。Heartbeat 不接管 Recovery，只承载
+独立 analyst，因此 `assistantHeartbeat` 始终是 supervised Health required provider；用户已有的其他
+Heartbeat 配置保持不变。
 
-Windows Task Scheduler 没有该实现所需的可验证健康信号，因此 supervised growth 在 Windows 拒绝激活，不会把 best-effort 启动伪装成常驻成功。
+必需 Health provider 包含 Policy、Memory、Wiki、Automations、Evaluation、Preference、Evolution、
+Delivery、Heartbeat、Recovery 和 Lark Channel。Recovery bootstrap 的 `failed`、stale run/step、缺 provider、
+Lark 断联、open incident/circuit 等都不会被 resident running 状态掩盖。
 
-## 生成的受控任务
+TraeX 或其他模型 route 不是 Recovery 依赖。它们只影响普通前台助手；需要时用 `--with traex` 等
+方式单独安装。Windows Task Scheduler 没有可验证的 resident running gate，因此当前拒绝激活
+supervised growth。
 
-受管 overlay 只允许精确 workspace/preset 的后台 heartbeat：
+## 已有 Automation 与重复执行
 
-- 08:00–22:00 每 120 分钟执行一次，恰好每天 7 次；
-- 每轮先用 Evaluation 找出至多一条未自评结果；只按其 exact run 读取 Automation 历史，并只引用检索到的 owner-confirmed Memory；证据足够时可追加一次 `self-reported` objective 判断；
-- 调用 `preference_review`；只有 Host 固定目录中证据已达标的 T1 shadow 假设，才可精确调用一次 `preference_activate`。它仍是带 TTL、可衰减、可回滚且服从当前指令的 tentative overlay，不会伪装成 owner-confirmed Memory；
-- 之后调用 `evolution_review`。若 Host 能独立证明某条 active guidance 在 exact exposure 后出现可信回归，可精确 `evolution_rollback` 一次；否则最多提出一条仍需 owner 审批的 `evolution_propose`；
-- 每轮最多 8 次工具调用、120 秒和 1024 个输出 token；
-- Policy budget 使用 `automation-runs`，每天最多 7 次、每次固定计 1；1024 是输出上限，不是不具备可验证性的总 token 预算；
-- pending Evolution proposal 的审批卡只允许固定 Evolution 后台主体投递到这个 exact owner binding；自由文本 guidance、外部动作和其他高影响变更仍只能经 owner approval apply，确定性低风险回滚不需要逐次审批；
-- scratch 禁止 decide/apply、修改代码、凭据、Policy 或已有 automation；没有候选时必须精确输出 `HEARTBEAT_OK`；
-- overlay 不授予 shell、文件系统、网络或凭据权限。
-
-`supervised` 安装场景会把 `assistant-evaluation`、`preference-learning`、`assistant-evolution` 和 `assistant-heartbeat` 作为必需顶层 bundle 一同安装；`assistant-health` 当前只读检测且不参与激活或自动修复，因此保持显式可选。
-TraeX 也不是激活器依赖，不会由该场景默认安装；确实把 Delivery 默认 route 配成 TraeX 时，应在安装器中显式使用 `--with traex`。
-
-## 升级与 legacy binding
-
-升级前已有的 conversation binding 会继续固定旧 preset/workspace；旧安装常见 preset 为 `primary`。新 binding 使用 Delivery 当前默认身份。
-
-执行 `dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools` 时，setup 会按完整 preset + workspace 保留精确 legacy 规则，并把主规则更新到当前默认身份。refresh 会清除所有历史 account id 的 setup-managed external reply/capability/tool 规则，只为当前 account 的 canonical owner principal 重建。
-
-Delivery 外部规则的 principal、preset 和 workspace 始终精确；capability 的 action/resource 使用 `*`，以覆盖该身份已挂载的动态工具和插件内部 Policy 动作。外部工具规则仍以工具 id `*` 配合可选显式 deny。本地 `foreground` 规则则有意对 preset/workspace 使用 `*`，支持 Web/direct 中的用户切换。
+除 exact managed `heartbeat:supervised-growth`、`heartbeat:supervised-growth-analyst` 和
+`recovery:supervised-growth` 外，任何 active
+Automation 默认阻止激活，以免打开 scheduler 时意外运行。确认这些其他任务可继续后，显式传入
+`--ack-existing-automations`。已成功启用的 profile 可以再次运行激活器；它会为新一轮 preview
+生成新 nonce，先暂停旧 managed definition，再按相同两阶段协议重新证明，而不要求为自身使用
+ack 参数。

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -7,10 +8,18 @@ import type { StoredRule } from '../src/types.ts'
 
 const roots: string[] = []
 const scopeKey = JSON.stringify(['/work/alpha', 'primary'])
+let projectionScopeWatermark = 0
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  projectionScopeWatermark = 0
 })
+
+function nextProjectionScopeWatermark(): number { return ++projectionScopeWatermark }
+
+function projectionDigest(value: unknown): string {
+  return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
 
 function store(now: () => number = () => 1_000) {
   const root = mkdtempSync(join(tmpdir(), 'assistant-evolution-store-'))
@@ -25,17 +34,25 @@ function observe(
   index: number,
   ruleId?: string,
 ) {
-  return target.recordEpisode({
+  const subjectRef = JSON.stringify(['evaluation-outcome', situation, index])
+  const digest = projectionDigest({
+    scopeKey, subjectRef, situation, outcome, ruleId: ruleId ?? null,
+  })
+  return target.applyTaskLearningProjection({
     scopeKey,
+    scopeWatermark: nextProjectionScopeWatermark(),
+    subjectKind: 'outcome',
+    subjectRef,
+    version: 1,
+    digest,
+    disposition: 'upsert',
     situation,
     outcome,
     detail: `attempt ${index}`,
-    source: 'automation',
-    trust: 'trusted',
+    evidenceRef: `evaluation:${situation}:${index}`,
     occurredAt: 1_000 + index,
-    idempotencyKey: `${situation}:${index}`,
     ...(ruleId === undefined ? {} : { ruleId, guidanceVersion: 1 }),
-  })
+  }).episode!
 }
 
 const thresholds = {
@@ -62,7 +79,11 @@ function retirementMutation(
   })!
   return {
     op: 'retire' as const,
+    scopeKey: rule.scopeKey,
     ruleId: rule.id,
+    situation: rule.situation,
+    guidance: rule.guidance,
+    generation: rule.generation,
     expectedVersion,
     reason,
     evaluation: candidate.stats,
@@ -76,21 +97,130 @@ function retirementMutation(
 }
 
 describe('evidence ledger', () => {
-  test('replays an identical episode and rejects a reused key with new content', () => {
+  test('replays an identical projection and rejects a reused version with new content', () => {
     const target = store()
     const first = observe(target, 'weekly-report', 'failed', 1)
     expect(observe(target, 'weekly-report', 'failed', 1)).toEqual(first)
 
-    expect(() => target.recordEpisode({
+    const subjectRef = JSON.stringify(['evaluation-outcome', 'weekly-report', 1])
+    expect(() => target.applyTaskLearningProjection({
+      scopeKey,
+      scopeWatermark: nextProjectionScopeWatermark(),
+      subjectKind: 'outcome',
+      subjectRef,
+      version: 1,
+      digest: projectionDigest({
+        scopeKey, subjectRef, situation: 'weekly-report', outcome: 'succeeded', ruleId: null,
+      }),
+      disposition: 'upsert',
       situation: 'weekly-report',
       outcome: 'succeeded',
       detail: 'attempt 1',
-      source: 'automation',
-      scopeKey,
-      trust: 'trusted',
+      evidenceRef: 'evaluation:weekly-report:1',
       occurredAt: 1_001,
-      idempotencyKey: 'weekly-report:1',
     })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'idempotency-conflict' }))
+    target.close()
+  })
+
+  test('deduplicates one immutable projection across advancing scope watermarks', () => {
+    const target = store()
+    const subjectRef = 'evaluation-outcome:immutable-42'
+    const input = {
+      scopeKey,
+      subjectKind: 'outcome' as const,
+      subjectRef,
+      version: 1,
+      digest: projectionDigest({ subjectRef, outcome: 'failed' }),
+      disposition: 'upsert' as const,
+      situation: 'weekly-report',
+      outcome: 'failed' as const,
+      detail: 'objective assertion failed',
+      evidenceRef: 'evaluation:immutable-42',
+      occurredAt: 1_042,
+    }
+    const first = target.applyTaskLearningProjection({
+      ...input,
+      scopeWatermark: nextProjectionScopeWatermark(),
+    }).episode!
+    const replay = target.applyTaskLearningProjection({
+      ...input,
+      scopeWatermark: nextProjectionScopeWatermark(),
+    }).episode!
+
+    expect(replay).toEqual(first)
+    expect(target.stats(scopeKey, 'weekly-report', 10)).toMatchObject({ failures: 1, total: 1 })
+
+    for (const conflicting of [
+      {
+        ...input,
+        outcome: 'succeeded' as const,
+        digest: projectionDigest({ subjectRef, outcome: 'succeeded' }),
+      },
+      {
+        ...input,
+        detail: 'a different canonical assessment',
+        digest: projectionDigest({ subjectRef, detail: 'a different canonical assessment' }),
+      },
+      {
+        ...input,
+        ruleId: 'different-rule',
+        guidanceVersion: 1,
+        digest: projectionDigest({ subjectRef, ruleId: 'different-rule', guidanceVersion: 1 }),
+      },
+    ]) {
+      expect(() => target.applyTaskLearningProjection({
+        ...conflicting,
+        scopeWatermark: nextProjectionScopeWatermark(),
+      })).toThrowError(
+        expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'idempotency-conflict' }),
+      )
+    }
+    target.close()
+  })
+
+  test('replaces one learning vote with newer canonical revisions and rejects same-version disagreement', () => {
+    const target = store()
+    const subjectRef = 'automation-run:daily-report:run-42'
+    const common = {
+      scopeKey,
+      subjectKind: 'automation-run' as const,
+      subjectRef,
+      situation: 'automation:daily-report',
+      outcome: 'failed' as const,
+      detail: 'authoritative Evaluation objective: not-achieved',
+      occurredAt: 1_042,
+      disposition: 'upsert' as const,
+    }
+    const first = target.applyTaskLearningProjection({
+      ...common,
+      scopeWatermark: nextProjectionScopeWatermark(),
+      version: 1,
+      digest: projectionDigest({ subjectRef, version: 1, outcome: 'failed' }),
+      evidenceRef: 'evaluation:first-assessment',
+    }).episode!
+    const sameSubject = target.applyTaskLearningProjection({
+      ...common,
+      scopeWatermark: nextProjectionScopeWatermark(),
+      version: 2,
+      digest: projectionDigest({ subjectRef, version: 2, outcome: 'failed' }),
+      detail: 'independent verification also failed',
+      evidenceRef: 'evaluation:second-assessment',
+    }).episode!
+
+    expect(sameSubject.id).not.toBe(first.id)
+    expect(sameSubject.evidenceRef).toBe('evaluation:second-assessment')
+    expect(target.stats(scopeKey, common.situation, 10)).toMatchObject({ failures: 1, total: 1 })
+    expect(() => target.applyTaskLearningProjection({
+      ...common,
+      scopeWatermark: nextProjectionScopeWatermark(),
+      version: 2,
+      digest: projectionDigest({ subjectRef, version: 2, outcome: 'succeeded' }),
+      outcome: 'succeeded',
+      detail: 'authoritative Evaluation objective: achieved',
+      evidenceRef: 'evaluation:contradictory-assessment',
+    })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({
+      code: 'idempotency-conflict',
+    }))
     target.close()
   })
 
@@ -114,7 +244,192 @@ describe('evidence ledger', () => {
   })
 })
 
+describe('versioned Evaluation task projections', () => {
+  const digestFor = (version: number, marker = 0) => (version * 16 + marker).toString(16).padStart(64, '0')
+
+  function upsertProjection(
+    target: EvolutionStore,
+    subjectRef: string,
+    version: number,
+    outcome: 'succeeded' | 'failed',
+    situation = 'projection-window',
+    occurredAt = 2_000 + version,
+  ) {
+    return target.applyTaskLearningProjection({
+      scopeKey,
+      scopeWatermark: nextProjectionScopeWatermark(),
+      subjectKind: 'outcome',
+      subjectRef,
+      version,
+      digest: digestFor(version),
+      disposition: 'upsert',
+      situation,
+      outcome,
+      detail: `authoritative revision ${version}`,
+      evidenceRef: `evaluation:${subjectRef}:${version}`,
+      occurredAt,
+    })
+  }
+
+  test('accepts first version N, exact replay and gaps while rejecting rollback or same-version corruption', () => {
+    const target = store()
+    const first = upsertProjection(target, 'task:42', 5, 'failed')
+    const replay = upsertProjection(target, 'task:42', 5, 'failed')
+    expect(first.replayed).toBe(false)
+    expect(replay).toMatchObject({ replayed: true, episode: { id: first.episode!.id } })
+
+    expect(() => target.applyTaskLearningProjection({
+      scopeKey,
+      scopeWatermark: nextProjectionScopeWatermark(),
+      subjectKind: 'outcome',
+      subjectRef: 'task:42',
+      version: 5,
+      digest: digestFor(5, 1),
+      disposition: 'retract',
+      situation: 'projection-window',
+      occurredAt: 2_005,
+    })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({
+      code: 'idempotency-conflict',
+    }))
+    expect(() => upsertProjection(target, 'task:42', 4, 'failed')).toThrowError(
+      expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'version-conflict' }),
+    )
+
+    const replacement = upsertProjection(target, 'task:42', 9, 'succeeded')
+    expect(replacement.episode?.id).not.toBe(first.episode?.id)
+    expect(target.stats(scopeKey, 'projection-window', 10)).toMatchObject({ failures: 0, total: 1 })
+
+    target.applyTaskLearningProjection({
+      scopeKey,
+      scopeWatermark: nextProjectionScopeWatermark(),
+      subjectKind: 'outcome',
+      subjectRef: 'task:42',
+      version: 11,
+      digest: digestFor(11),
+      disposition: 'retract',
+      situation: 'projection-window',
+      occurredAt: 2_011,
+    })
+    expect(target.stats(scopeKey, 'projection-window', 10)).toMatchObject({ failures: 0, total: 0 })
+    expect(target.getTaskLearningProjection({
+      scopeKey,
+      subjectKind: 'outcome',
+      subjectRef: 'task:42',
+    })).toMatchObject({ version: 11, disposition: 'retract' })
+
+    upsertProjection(target, 'task:42', 14, 'failed')
+    expect(target.stats(scopeKey, 'projection-window', 10)).toMatchObject({ failures: 1, total: 1 })
+    expect(target.health()).toMatchObject({
+      taskLearningProjections: 1,
+      retractedTaskLearningProjections: 0,
+      taskLearningProjectionRevisions: 4,
+      taskLearningProjectionIntegrityErrors: 0,
+    })
+    target.close()
+  })
+
+  test('invalidates pending cards and refuses stale creation when a non-rendered window row changes', () => {
+    const target = store()
+    for (let index = 1; index <= 4; index += 1) {
+      upsertProjection(target, `pending:${index}`, 1, 'failed', 'pending-window', 3_000 + index)
+    }
+    const candidate = target.candidates({
+      ...thresholds,
+      evidenceSampleLimit: 1,
+    }).find(entry => entry.situation === 'pending-window')!
+    expect(candidate.evidence).toHaveLength(1)
+    expect(candidate.evidenceTotal).toBe(4)
+    const mutation = {
+      op: 'adopt' as const,
+      input: { scopeKey, situation: 'pending-window', guidance: 'Use the reviewed workflow.' },
+      baseline: candidate.stats,
+      evidence: {
+        sampleEpisodeIds: candidate.evidence.map(entry => entry.episodeId),
+        digest: candidate.evidenceDigest,
+        total: candidate.evidenceTotal,
+        window: 10,
+      },
+    }
+    const pending = target.createProposal({
+      idempotencyKey: 'projection:pending-card',
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation,
+      expiresAt: 61_000,
+    })
+    upsertProjection(target, 'pending:1', 2, 'succeeded', 'pending-window', 3_001)
+    expect(target.getProposal(pending.proposalId)?.status).toBe('conflicted')
+
+    for (let index = 1; index <= 4; index += 1) {
+      upsertProjection(target, `creation:${index}`, 1, 'failed', 'creation-window', 4_000 + index)
+    }
+    const stale = target.candidates({
+      ...thresholds,
+      evidenceSampleLimit: 1,
+    }).find(entry => entry.situation === 'creation-window')!
+    upsertProjection(target, 'creation:1', 2, 'succeeded', 'creation-window', 4_001)
+    expect(() => target.createProposal({
+      idempotencyKey: 'projection:stale-create',
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: {
+        op: 'adopt',
+        input: { scopeKey, situation: 'creation-window', guidance: 'Never apply stale evidence.' },
+        baseline: stale.stats,
+        evidence: {
+          sampleEpisodeIds: stale.evidence.map(entry => entry.episodeId),
+          digest: stale.evidenceDigest,
+          total: stale.evidenceTotal,
+          window: 10,
+        },
+      },
+      expiresAt: 61_000,
+    })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({
+      code: 'version-conflict',
+    }))
+    target.close()
+  })
+})
+
 describe('candidate detection', () => {
+  test('quarantines operational failures even when trusted infrastructure recorded them', () => {
+    const target = store()
+    for (let index = 1; index <= 5; index += 1) {
+      const episode = target.recordEpisode({
+        scopeKey,
+        situation: 'automation:heartbeat',
+        outcome: 'failed',
+        detail: `configuration failure ${index}`,
+        source: 'automation',
+        trust: 'trusted',
+        evidenceKind: 'operational',
+        occurredAt: 1_000 + index,
+        idempotencyKey: `heartbeat-operational:${index}`,
+      })
+      expect(episode).toMatchObject({ evidenceKind: 'operational', learningEligible: false })
+    }
+
+    expect(target.stats(scopeKey, 'automation:heartbeat', 10)).toMatchObject({ failures: 0, total: 0 })
+    expect(target.candidates(thresholds)).toEqual([])
+    target.close()
+  })
+
+  test('requires an immutable Evaluation reference before quality evidence is eligible', () => {
+    const target = store()
+    expect(() => target.recordEpisode({
+      scopeKey,
+      situation: 'weekly-report',
+      outcome: 'failed',
+      detail: 'assertion failed',
+      source: 'automation',
+      trust: 'trusted',
+      evidenceKind: 'objective',
+      occurredAt: 1_001,
+      idempotencyKey: 'missing-evaluation-ref',
+    })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'invalid-input' }))
+    target.close()
+  })
+
   test('stays silent until the sample is large enough', () => {
     const target = store()
     observe(target, 'weekly-report', 'failed', 1)
@@ -231,7 +546,7 @@ describe('autonomous low-risk rollback', () => {
   test('atomically retires only an exact rule with Host-derived regression evidence', () => {
     const target = store()
     const rule = adopt(target, 'rollback-regression', { failures: 4, total: 4 }).rule!
-    const episodes = []
+    const episodes: Array<{ id: string }> = []
     for (let index = 1; index <= 4; index += 1) {
       episodes.push(observe(target, rule.situation, 'failed', index, rule.id))
     }
@@ -330,6 +645,53 @@ function adopt(target: EvolutionStore, situation: string, baseline: { failures: 
 }
 
 describe('approval-gated rule changes', () => {
+  test('refuses to activate a proposal whose frozen samples are only operational telemetry', () => {
+    const target = store()
+    const episodes: Array<{ id: string }> = []
+    for (let index = 1; index <= 4; index += 1) {
+      episodes.push(target.recordEpisode({
+        scopeKey,
+        situation: 'automation:operational-only',
+        outcome: 'failed',
+        detail: `provider failure ${index}`,
+        source: 'automation',
+        trust: 'trusted',
+        evidenceKind: 'operational',
+        occurredAt: 1_000 + index,
+        idempotencyKey: `operational-activation:${index}`,
+      }))
+    }
+    expect(() => target.createProposal({
+      idempotencyKey: 'adopt:operational-only',
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: {
+        op: 'adopt',
+        input: {
+          scopeKey,
+          situation: 'automation:operational-only',
+          guidance: 'Do not learn from this.',
+        },
+        baseline: {
+          scopeKey,
+          situation: 'automation:operational-only',
+          failures: 4,
+          total: 4,
+        },
+        evidence: {
+          sampleEpisodeIds: episodes.map(episode => episode.id),
+          digest: 'a'.repeat(64),
+          total: 4,
+        },
+      },
+      expiresAt: 61_000,
+    })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({
+      code: 'version-conflict',
+    }))
+    expect(target.listRules(scopeKey)).toEqual([])
+    target.close()
+  })
+
   test('a pending proposal changes nothing until it is settled', () => {
     const target = store()
     const proposal = target.createProposal({
@@ -374,6 +736,46 @@ describe('approval-gated rule changes', () => {
 
     expect(settled.proposal.status).toBe('rejected')
     expect(target.listRules(scopeKey)).toEqual([])
+    expect(target.getEvolutionApplicationReceipt(proposal.proposalId)).toMatchObject({
+      localProposalId: proposal.proposalId,
+      policyProposalId: 'policy-rejected',
+      applicationStatus: 'rejected',
+      operation: 'adopt',
+      revision: 2,
+      receiptDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    })
+    expect(target.listPendingEvolutionApplicationReceipts(10)).toHaveLength(1)
+    target.close()
+  })
+
+  test('records Policy expiry as a domain terminal receipt without applying guidance', () => {
+    const target = store()
+    const proposal = target.createProposal({
+      idempotencyKey: 'adopt:expired',
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: {
+        op: 'adopt',
+        input: { scopeKey, situation: 'expired', guidance: 'Never applied.' },
+        baseline: { scopeKey, situation: 'expired', failures: 4, total: 4 },
+      },
+      expiresAt: 61_000,
+    })
+    target.attachPolicy(proposal.proposalId, 'policy-expired')
+
+    const settled = target.settleProposal({
+      proposalId: proposal.proposalId,
+      policyStatus: 'expired',
+      policyVersion: 2,
+    })
+
+    expect(settled.proposal.status).toBe('expired')
+    expect(target.getEvolutionApplicationReceipt(proposal.proposalId)).toMatchObject({
+      policyProposalId: 'policy-expired',
+      applicationStatus: 'expired',
+      operation: 'adopt',
+    })
+    expect(target.listRules(scopeKey)).toEqual([])
     target.close()
   })
 
@@ -388,7 +790,72 @@ describe('approval-gated rule changes', () => {
 
     expect(replay.replayed).toBe(true)
     expect(target.listRules(scopeKey, 'active')).toHaveLength(1)
+    const receipt = target.getEvolutionApplicationReceipt(first.proposal.proposalId)!
+    expect(receipt).toMatchObject({
+      policyProposalId: 'policy-weekly-report',
+      applicationStatus: 'applied',
+      operation: 'adopt',
+      ruleId: first.rule!.id,
+      resultingRuleVersion: 1,
+      ruleStatus: 'active',
+      revision: 2,
+    })
+    const pending = target.listPendingEvolutionApplicationReceipts(10)[0]!
+    expect(pending).toMatchObject({ state: 'pending', attemptCount: 0 })
+    expect(target.settleEvolutionApplicationPublication({
+      localProposalId: receipt.localProposalId,
+      receiptDigest: receipt.receiptDigest,
+      outcome: 'retry',
+      error: 'delivery-test-error',
+    })).toMatchObject({ state: 'pending', attemptCount: 1, lastError: 'delivery-test-error' })
+    expect(target.settleEvolutionApplicationPublication({
+      localProposalId: receipt.localProposalId,
+      receiptDigest: receipt.receiptDigest,
+      outcome: 'published',
+    })).toMatchObject({ state: 'published', attemptCount: 2 })
+    expect(target.listPendingEvolutionApplicationReceipts(10)).toEqual([])
     target.close()
+  })
+
+  test('recovers an unacknowledged terminal presentation after process restart', () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-evolution-receipt-restart-'))
+    roots.push(root)
+    const path = join(root, 'evolution.sqlite')
+    const first = new EvolutionStore({ path, now: () => 7_000 })
+    const local = first.createProposal({
+      idempotencyKey: 'adopt:restart-receipt',
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: {
+        op: 'adopt',
+        input: { scopeKey, situation: 'restart-receipt', guidance: 'Persist the receipt.' },
+        baseline: { scopeKey, situation: 'restart-receipt', failures: 4, total: 4 },
+      },
+      expiresAt: 61_000,
+    })
+    first.attachPolicy(local.proposalId, 'policy-restart-receipt')
+    first.settleProposal({
+      proposalId: local.proposalId,
+      policyStatus: 'approved',
+      policyVersion: 2,
+    })
+    const before = first.getEvolutionApplicationReceipt(local.proposalId)!
+    first.close()
+
+    const reopened = new EvolutionStore({ path, now: () => 8_000 })
+    expect(reopened.getEvolutionApplicationReceipt(local.proposalId)).toEqual(before)
+    expect(reopened.listPendingEvolutionApplicationReceipts(10)).toMatchObject([{
+      state: 'pending',
+      attemptCount: 0,
+      receipt: { receiptDigest: before.receiptDigest },
+    }])
+    reopened.settleEvolutionApplicationPublication({
+      localProposalId: local.proposalId,
+      receiptDigest: before.receiptDigest,
+      outcome: 'published',
+    })
+    expect(reopened.listPendingEvolutionApplicationReceipts(10)).toEqual([])
+    reopened.close()
   })
 
   test('a competing active rule conflicts instead of overwriting the approved one', () => {
@@ -416,6 +883,10 @@ describe('approval-gated rule changes', () => {
 
     expect(settled.proposal.status).toBe('conflicted')
     expect(target.listRules(scopeKey, 'active')).toHaveLength(1)
+    expect(target.getEvolutionApplicationReceipt(second.proposalId)).toMatchObject({
+      applicationStatus: 'conflicted',
+      operation: 'adopt',
+    })
     target.close()
   })
 
@@ -464,6 +935,13 @@ describe('approval-gated rule changes', () => {
 
     expect(settled.proposal.status).toBe('approved')
     expect(target.getRule(rule.id)).toMatchObject({ status: 'retired', retiredReason: 'did not help' })
+    expect(target.getEvolutionApplicationReceipt(retire.proposalId)).toMatchObject({
+      applicationStatus: 'applied',
+      operation: 'retire',
+      ruleId: rule.id,
+      resultingRuleVersion: 2,
+      ruleStatus: 'retired',
+    })
     expect(target.activeRule(scopeKey, 'flaky')).toBeUndefined()
     target.close()
   })

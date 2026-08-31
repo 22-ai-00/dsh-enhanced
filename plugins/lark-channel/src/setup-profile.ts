@@ -101,7 +101,7 @@ interface ManagedRuleId {
 }
 
 interface ManagedFixedRuleId {
-  kind: 'approval' | 'credential' | 'ingress'
+  kind: 'approval' | 'credential' | 'ingress' | 'preference-signal' | 'preference-snapshot'
   account: string
   sourceId?: typeof managedApprovalSources[number]
 }
@@ -571,6 +571,8 @@ function parseManagedFixedRuleId(id: string): ManagedFixedRuleId | undefined {
   const fixedPrefixes = [
     { prefix: 'lark-channel-credential-', kind: 'credential' },
     { prefix: 'lark-owner-ingress-', kind: 'ingress' },
+    { prefix: 'lark-owner-preference-signal-', kind: 'preference-signal' },
+    { prefix: 'lark-owner-preference-snapshot-', kind: 'preference-snapshot' },
   ] as const
   for (const candidate of fixedPrefixes) {
     if (!id.startsWith(candidate.prefix)) continue
@@ -591,6 +593,8 @@ function parseManagedFixedRuleId(id: string): ManagedFixedRuleId | undefined {
 function isReservedManagedFixedRuleId(id: string): boolean {
   return id.startsWith('lark-channel-credential-')
     || id.startsWith('lark-owner-ingress-')
+    || id.startsWith('lark-owner-preference-signal-')
+    || id.startsWith('lark-owner-preference-snapshot-')
     || id.startsWith('lark-owner-approval-')
 }
 
@@ -618,6 +622,29 @@ function managedFixedRuleMatches(item: YAMLMap, managedId: ManagedFixedRuleId): 
       )
       && resource.get('kind') === 'message'
       && resource.get('id') === TOOL_WILDCARD
+      && sequenceEquals(context.get('initiators', true) as Node | undefined, ['external'])
+  }
+  if (managedId.kind === 'preference-signal') {
+    const preferenceId = resource.get('id')
+    return subject.get('kind') === 'external'
+      && isCanonicalLarkPrincipalForAccount(subject.get('id'), managedId.account)
+      && isLiteralAbsolutePath(subject.get('workspace'))
+      && sequenceEquals(item.get('actions', true) as Node | undefined, ['signal'])
+      && resource.get('kind') === 'preference'
+      && typeof preferenceId === 'string'
+      && preferenceId.endsWith('/*')
+      && presetIdPattern.test(preferenceId.slice(0, -2))
+      && sequenceEquals(context.get('initiators', true) as Node | undefined, ['external'])
+  }
+  if (managedId.kind === 'preference-snapshot') {
+    return subject.get('kind') === 'agent'
+      && typeof subject.get('id') === 'string'
+      && presetIdPattern.test(subject.get('id') as string)
+      && isLiteralAbsolutePath(subject.get('workspace'))
+      && isCanonicalLarkPrincipalForAccount(subject.get('principal'), managedId.account)
+      && sequenceEquals(item.get('actions', true) as Node | undefined, ['snapshot'])
+      && resource.get('kind') === 'preference'
+      && resource.get('id') === 'active'
       && sequenceEquals(context.get('initiators', true) as Node | undefined, ['external'])
   }
   const principal = subject.get('principal')
@@ -670,6 +697,17 @@ function sweepRetiredManagedFixedRules(
     const managedId = typeof id === 'string' ? parseManagedFixedRuleId(id) : undefined
     if (managedId !== undefined
       && managedId.account !== currentAccount
+      && managedFixedRuleMatches(item, managedId)) rules.items.splice(index, 1)
+  }
+}
+
+function removeManagedPreferenceLearningRules(rules: YAMLSeq): void {
+  for (let index = rules.items.length - 1; index >= 0; index -= 1) {
+    const item = rules.items[index]
+    if (!isMap(item)) continue
+    const id = item.get('id')
+    const managedId = typeof id === 'string' ? parseManagedFixedRuleId(id) : undefined
+    if ((managedId?.kind === 'preference-signal' || managedId?.kind === 'preference-snapshot')
       && managedFixedRuleMatches(item, managedId)) rules.items.splice(index, 1)
   }
 }
@@ -903,6 +941,44 @@ function upsertApprovalRules(
   }
 }
 
+/**
+ * Minimal always-on personal adaptation grants. These are independent of the
+ * broad Agent-tool switch: a standard Lark owner can accumulate and consume
+ * only Host-catalog T1 overlays without opting into the supervised operations
+ * stack or general tool reachability.
+ */
+function upsertPreferenceLearningRules(
+  document: Document,
+  rules: YAMLSeq,
+  input: { account: string; identity: AgentIdentity; principal: string },
+): void {
+  upsertById(document, rules, {
+    id: `lark-owner-preference-signal-${input.account}`,
+    effect: 'allow',
+    subject: {
+      kind: 'external',
+      id: input.principal,
+      workspace: input.identity.workspace,
+    },
+    actions: ['signal'],
+    resource: { kind: 'preference', id: `${input.identity.preset}/*` },
+    context: { initiators: ['external'] },
+  })
+  upsertById(document, rules, {
+    id: `lark-owner-preference-snapshot-${input.account}`,
+    effect: 'allow',
+    subject: {
+      kind: 'agent',
+      id: input.identity.preset,
+      workspace: input.identity.workspace,
+      principal: input.principal,
+    },
+    actions: ['snapshot'],
+    resource: { kind: 'preference', id: 'active' },
+    context: { initiators: ['external'] },
+  })
+}
+
 function configuredOwnerPrincipal(rules: YAMLSeq, account: string): string | undefined {
   const rule = rules.items.find(item => isMap(item) && item.get('id') === `lark-owner-ingress-${account}`)
   if (!isMap(rule) || rule.get('effect') !== 'allow') return undefined
@@ -981,6 +1057,7 @@ export function refreshLarkAgentPolicyPatch(input: LarkAgentPolicyRefreshInput):
     // No disabled channel may leave an executable Agent rule behind, including
     // reply grants and rules for retired account ids.
     removeAllManagedExternalAgentRules(rules)
+    removeManagedPreferenceLearningRules(rules)
     if (input.account !== undefined) {
       throw new Error('lark-channel setup: no enabled Lark account exists to match the requested account')
     }
@@ -1002,6 +1079,11 @@ export function refreshLarkAgentPolicyPatch(input: LarkAgentPolicyRefreshInput):
 
   removeAllManagedExternalAgentRules(rules, input.agentTools === 'enable')
   if (principal !== undefined) {
+    upsertPreferenceLearningRules(document, rules, {
+      account: configuredAccount,
+      identity: agent,
+      principal,
+    })
     upsertExternalReplyRule(document, rules, { account: configuredAccount, identity: agent, principal })
     for (const legacyAgent of legacyAgents) {
       upsertExternalReplyRule(document, rules, {
@@ -1026,6 +1108,8 @@ export function refreshLarkAgentPolicyPatch(input: LarkAgentPolicyRefreshInput):
         })
       }
     }
+  } else {
+    removeManagedPreferenceLearningRules(rules)
   }
   return document.toString({ lineWidth: 0 })
 }
@@ -1133,6 +1217,11 @@ export function configureLarkProfilePatch(input: LarkProfileSetupInput): string 
     actions: ['approval.decide', 'ingest'],
     resource: { kind: 'message', id: '*' },
     context: { initiators: ['external'] },
+  })
+  upsertPreferenceLearningRules(document, rules, {
+    account,
+    identity: agent,
+    principal: principalId,
   })
   // Rebuild setup-managed external rules from a single exact account owner.
   // This also sweeps rules left by retired accounts and migrates legacy rules

@@ -20,7 +20,7 @@ import {
   AutomationBudgetReplayError,
   DshAutomationRunner,
 } from '../src/runner.ts'
-import type { AutomationDefinition } from '../src/types.ts'
+import type { AgentAutomationDefinition, AutomationDefinition } from '../src/types.ts'
 
 const roots: string[] = []
 
@@ -56,7 +56,7 @@ class ToolCallingAdapter extends LlmAdapter {
   }
 }
 
-function definition(overrides: Partial<AutomationDefinition> = {}): AutomationDefinition {
+function definition(overrides: Partial<AgentAutomationDefinition> = {}): AgentAutomationDefinition {
   return {
     name: 'Runner', prompt: 'Use the allowed tool once.',
     schedule: { kind: 'at', at: '2030-01-01T00:00:00.000Z' },
@@ -154,7 +154,9 @@ async function harness(options: {
     }],
   })
   let startupDecision: string | undefined
+  const executionContexts: unknown[] = []
   ctx.on('agent/session-start', ({ agent: started }) => {
+    executionContexts.push(started.ctx.get('assistantAutomationExecution'))
     started.session.append('approval/policy', { policy: 'never' })
     started.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
     const append = started.session.append as unknown as (type: string, data: unknown) => unknown
@@ -189,6 +191,7 @@ async function harness(options: {
   ctx.on('session/flush', () => { flushes += 1 })
   return {
     ctx, adapter, bindAgentApprovalRoute, derivedApprovalRoutes, presetResolve, presetMount, unbindApprovalRoute,
+    executionContexts,
     calls: () => ({ allowedCalls, deniedCalls, flushes, startupDecision }),
     runner: new DshAutomationRunner(ctx, ctx.assistantPolicy, {
       allowUnbudgetedExecution: options.allowUnbudgetedExecution ?? true,
@@ -197,12 +200,35 @@ async function harness(options: {
 }
 
 describe('fresh rc.8 automation Agent runner', () => {
+  test('publishes a Host-derived execution mode before session-start observers run', async () => {
+    const production = await harness({ requestedTools: [] })
+    await production.runner.run(input(definition({ allowedTools: [] })))
+    expect(production.executionContexts).toEqual([{
+      mode: 'production', automationId: 'auto-runner', occurrenceId: 'occ-runner',
+    }])
+    await production.ctx.fiber.restart()
+
+    const preview = await harness({ requestedTools: [] })
+    const previewInput = input(definition({ allowedTools: [] }))
+    previewInput.occurrence = { ...previewInput.occurrence, dryRun: true }
+    await preview.runner.run(previewInput)
+    expect(preview.executionContexts).toEqual([{
+      mode: 'preview', automationId: 'auto-runner', occurrenceId: 'occ-runner',
+    }])
+    await preview.ctx.fiber.restart()
+  })
+
   test('pins identity/model, enforces visibility plus monotonic call cap, flushes, and disposes', async () => {
     const fixture = await harness()
     const result = await fixture.runner.run(input())
     expect(result).toEqual({
       outcome: 'succeeded', sessionId: 'automation-occ-runner-1', output: 'final answer',
       usage: { inputTokens: 30, outputTokens: 8, cacheReadTokens: 2, toolCalls: 1 },
+      diagnostic: {
+        schemaVersion: 1, failureClass: 'none', failurePhase: 'none', failureCode: 'none',
+        promptSubmissionState: 'submitted', sideEffectState: 'possible', retryability: 'unsafe',
+        budgetSettlementState: 'not-required',
+      },
     })
     expect(fixture.adapter.requests).toHaveLength(2)
     expect(fixture.adapter.requests[0]).toMatchObject({ provider: 'mock', model: 'runner-model', maxTokens: 777 })
@@ -230,6 +256,48 @@ describe('fresh rc.8 automation Agent runner', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('classifies a preset surface mismatch before any model request', async () => {
+    const fixture = await harness({ presetTool: 'preset_extra', requestedTools: [] })
+    let caught: unknown
+    try {
+      await fixture.runner.run(input(definition({ allowedTools: [] })))
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toMatchObject({
+      diagnostic: {
+        failureClass: 'configuration', failurePhase: 'agent-setup',
+        promptSubmissionState: 'not-submitted', sideEffectState: 'possible',
+      },
+    })
+    expect(fixture.adapter.requests).toEqual([])
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('classifies an official Policy setup denial as policy after Agent creation', async () => {
+    const fixture = await harness({ requestedTools: [] })
+    vi.spyOn(fixture.ctx.assistantPolicy, 'bindInitiator').mockImplementationOnce(() => {
+      const error = Object.assign(new Error('background binding denied'), { code: 'policy-binding-denied' })
+      error.name = 'AssistantPolicyError'
+      throw error
+    })
+    let caught: unknown
+    try {
+      await fixture.runner.run(input(definition({ allowedTools: [] })))
+    } catch (error) {
+      caught = error
+    }
+
+    expect(caught).toMatchObject({
+      diagnostic: {
+        failureClass: 'policy', failurePhase: 'agent-setup', failureCode: 'policy-binding-denied',
+        promptSubmissionState: 'not-submitted', sideEffectState: 'possible', retryability: 'unsafe',
+      },
+    })
+    expect(fixture.adapter.requests).toEqual([])
+    await fixture.ctx.fiber.restart()
+  })
+
   test('binds an immutable background approval route before tools run and disposes it with the Agent', async () => {
     const fixture = await harness({
       approvalRoute: {
@@ -247,6 +315,29 @@ describe('fresh rc.8 automation Agent runner', () => {
       workspace: process.cwd(), principal: 'lark/main/tenant/owner',
     }])
     expect(fixture.unbindApprovalRoute).toHaveBeenCalledOnce()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('prefers an approval-only binding without turning it into an ordinary delivery sink', async () => {
+    const fixture = await harness({
+      approvalRoute: {
+        bindingId: 'binding-approval', workspace: process.cwd(), agentPreset: 'primary', principal: 'lark/main/tenant/owner',
+      },
+      backgroundProposal: true,
+      requestedTools: ['allowed_tool'],
+    })
+    const value = definition({
+      approvalBindingId: 'binding-approval',
+      deliveryBindingId: 'binding-result',
+    })
+    const result = await fixture.runner.run(input(value))
+
+    expect(result.outcome).toBe('succeeded')
+    expect(fixture.bindAgentApprovalRoute).toHaveBeenCalledWith(expect.anything(), { bindingId: 'binding-approval' })
+    expect(fixture.derivedApprovalRoutes).toEqual([expect.objectContaining({ bindingId: 'binding-approval' })])
+    // The immutable definition retains the independent ordinary sink; the
+    // runner only delegates approval authority and never rewrites delivery.
+    expect(value.deliveryBindingId).toBe('binding-result')
     await fixture.ctx.fiber.restart()
   })
 
@@ -344,6 +435,60 @@ describe('fresh rc.8 automation Agent runner', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('never resumes an Agent execution from a still-reserved replay, even on a later task attempt', async () => {
+    const fixture = await harness({ requestedTools: [] })
+    const value = definition({
+      allowedTools: [], budgetId: 'runner-budget', budgetAmount: 1,
+      retrySafety: 'idempotent', maxRetries: 1,
+    })
+    const reserved = fixture.ctx.assistantPolicy.reserve({
+      budgetId: 'runner-budget',
+      subject: {
+        kind: 'background', id: 'auto-runner', workspace: value.workspace,
+        principal: value.principal,
+      },
+      amount: 1,
+      idempotencyKey: 'automation-budget:auto-runner:occ-runner:automation-runs:runner-budget',
+    })
+    const retry = input(value)
+    retry.task = { ...retry.task, attemptCount: 2 }
+
+    await expect(fixture.runner.run(retry)).rejects.toMatchObject({
+      reservationStatus: 'reserved',
+      diagnostic: {
+        failureCode: 'automation-budget-reservation-replayed',
+        promptSubmissionState: 'unknown', sideEffectState: 'unknown',
+        budgetSettlementState: 'reserved',
+      },
+    })
+    expect(fixture.adapter.requests).toEqual([])
+    expect(fixture.ctx.assistantPolicy.reserve({
+      budgetId: 'runner-budget',
+      subject: {
+        kind: 'background', id: 'auto-runner', workspace: value.workspace,
+        principal: value.principal,
+      },
+      amount: 1,
+      idempotencyKey: 'automation-budget:auto-runner:occ-runner:automation-runs:runner-budget',
+    })).toMatchObject({ reservationId: reserved.reservationId, status: 'reserved', replayed: true })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test.each([
+    ['released', 'not-submitted', 'none', 'after-intervention'],
+    ['reserved', 'unknown', 'unknown', 'unsafe'],
+    ['finalized', 'unknown', 'unknown', 'unsafe'],
+  ] as const)(
+    'reports a replayed %s budget reservation without inventing pre-crash prompt or side-effect facts',
+    (status, promptSubmissionState, sideEffectState, retryability) => {
+      const error = new AutomationBudgetReplayError(status)
+      expect(error.diagnostic).toMatchObject({
+        failureClass: 'budget', failurePhase: 'budget-reservation',
+        budgetSettlementState: status, promptSubmissionState, sideEffectState, retryability,
+      })
+    },
+  )
+
   test('finalizes the fixed full per-run cost and treats token usage only as execution evidence', async () => {
     class OverBudgetAdapter extends LlmAdapter {
       override async * stream(): AsyncIterable<StreamChunk> {
@@ -408,7 +553,20 @@ describe('fresh rc.8 automation Agent runner', () => {
   test('classifies a durability failure after Agent execution as ambiguous and still disposes', async () => {
     const fixture = await harness()
     fixture.ctx.on('session/flush', () => { throw new Error('storage unavailable') })
-    await expect(fixture.runner.run(input())).rejects.toBeInstanceOf(AutomationRunnerAmbiguousError)
+    let caught: unknown
+    try {
+      await fixture.runner.run(input())
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(AutomationRunnerAmbiguousError)
+    expect(caught).toMatchObject({
+      diagnostic: {
+        failureClass: 'infrastructure', failurePhase: 'session-flush',
+        promptSubmissionState: 'submitted', sideEffectState: 'possible',
+        retryability: 'unsafe',
+      },
+    })
     expect(fixture.ctx.agents.list()).toEqual([])
     await fixture.ctx.fiber.restart()
   })

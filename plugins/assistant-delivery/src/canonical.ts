@@ -1,4 +1,13 @@
-import type { ConversationRef, DeliveryTarget, ExternalPrincipalKey } from './types.js'
+import { createHash } from 'node:crypto'
+import { isAbsolute } from 'node:path'
+import type {
+  ConversationBinding,
+  ConversationRef,
+  DeliveryTarget,
+  ExternalPrincipalKey,
+  OwnerRouteAuthority,
+  OwnerRouteBindingSnapshot,
+} from './types.js'
 
 export type DeliveryValidationErrorCode =
   | 'invalid-conversation'
@@ -56,6 +65,38 @@ export function externalPrincipalId(input: ExternalPrincipalKey): string {
     .join('/')
 }
 
+/** Canonical identity for trusted local control-plane operators. */
+export function canonicalLocalOperatorId(input: unknown): string {
+  if (typeof input !== 'string') {
+    throw new DeliveryValidationError('invalid-identity', 'operatorId must be a string')
+  }
+  const normalized = input.normalize('NFC').trim()
+  const hasControl = [...normalized].some(character => {
+    const code = character.codePointAt(0)!
+    return code <= 0x1f || code === 0x7f
+  })
+  if (normalized === '' || Buffer.byteLength(normalized, 'utf8') > 256 || hasControl) {
+    throw new DeliveryValidationError('invalid-identity', 'operatorId is invalid')
+  }
+  return normalized
+}
+
+/** Canonical identity for a trusted Host background source. */
+export function canonicalBackgroundSourceId(input: unknown): string {
+  if (typeof input !== 'string') {
+    throw new DeliveryValidationError('invalid-identity', 'background source id must be a string')
+  }
+  const normalized = input.normalize('NFC').trim()
+  const hasControl = [...normalized].some(character => {
+    const code = character.codePointAt(0)!
+    return code <= 0x1f || code === 0x7f
+  })
+  if (normalized === '' || Buffer.byteLength(normalized, 'utf8') > 256 || hasControl) {
+    throw new DeliveryValidationError('invalid-identity', 'background source id is invalid')
+  }
+  return normalized
+}
+
 export function canonicalConversation(input: ConversationRef): ConversationRef {
   const value = exactObject(input, ['channel', 'account', 'tenant', 'kind', 'chat', 'thread'], 'invalid-conversation')
   if (value.kind !== 'dm' && value.kind !== 'group') {
@@ -90,4 +131,90 @@ export function canonicalTarget(input: DeliveryTarget): DeliveryTarget {
     throw new DeliveryValidationError('route-mismatch', 'principal and conversation namespaces do not match')
   }
   return { conversation, principal }
+}
+
+function ownerRouteText(value: unknown, field: string, maxBytes: number): string {
+  if (typeof value !== 'string') {
+    throw new DeliveryValidationError('invalid-identity', `owner route ${field} must be a string`)
+  }
+  const normalized = value.normalize('NFC').trim()
+  const hasControl = [...normalized].some(character => {
+    const code = character.codePointAt(0)!
+    return code <= 0x1f || code === 0x7f
+  })
+  if (normalized === '' || Buffer.byteLength(normalized, 'utf8') > maxBytes || hasControl) {
+    throw new DeliveryValidationError('invalid-identity', `owner route ${field} is invalid`)
+  }
+  return normalized
+}
+
+/** Canonicalize a Host-owned route authority without accepting hidden fields. */
+export function canonicalOwnerRouteAuthority(input: OwnerRouteAuthority): OwnerRouteAuthority {
+  const value = exactObject(input, [
+    'id', 'conversation', 'principal', 'workspace', 'agentPreset', 'policyRef', 'minimumGeneration',
+  ], 'invalid-identity')
+  const id = ownerRouteText(value.id, 'id', 128)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(id)) {
+    throw new DeliveryValidationError('invalid-identity', 'owner route id is invalid')
+  }
+  const target = canonicalTarget({
+    conversation: value.conversation as ConversationRef,
+    principal: value.principal as ExternalPrincipalKey,
+  })
+  const workspace = ownerRouteText(value.workspace, 'workspace', 4_096)
+  if (!isAbsolute(workspace)) {
+    throw new DeliveryValidationError('invalid-identity', 'owner route workspace must be absolute')
+  }
+  const agentPreset = ownerRouteText(value.agentPreset, 'agentPreset', 128)
+  const policyRef = ownerRouteText(value.policyRef, 'policyRef', 256)
+  if (!Number.isSafeInteger(value.minimumGeneration) || Number(value.minimumGeneration) < 1) {
+    throw new DeliveryValidationError('invalid-identity', 'owner route minimumGeneration is invalid')
+  }
+  return {
+    id,
+    conversation: target.conversation,
+    principal: target.principal,
+    workspace,
+    agentPreset,
+    policyRef,
+    minimumGeneration: Number(value.minimumGeneration),
+  }
+}
+
+export function ownerRouteAuthorityHash(input: OwnerRouteAuthority): string {
+  const authority = canonicalOwnerRouteAuthority(input)
+  return createHash('sha256').update(JSON.stringify(authority)).digest('hex')
+}
+
+/** Exact lineage comparison. `status` and `version` are deliberately checked by the caller. */
+export function bindingMatchesOwnerRoute(
+  binding: Readonly<ConversationBinding>,
+  input: Readonly<OwnerRouteAuthority>,
+): boolean {
+  const authority = canonicalOwnerRouteAuthority(input as OwnerRouteAuthority)
+  return JSON.stringify(binding.conversation) === JSON.stringify(authority.conversation)
+    && JSON.stringify(binding.principal) === JSON.stringify(authority.principal)
+    && binding.workspace === authority.workspace
+    && binding.agentPreset === authority.agentPreset
+    && binding.policyRef === authority.policyRef
+    && binding.generation >= authority.minimumGeneration
+}
+
+export function ownerRouteBindingSnapshot(
+  authorityInput: Readonly<OwnerRouteAuthority>,
+  binding: Readonly<ConversationBinding>,
+): OwnerRouteBindingSnapshot {
+  const authority = canonicalOwnerRouteAuthority(authorityInput as OwnerRouteAuthority)
+  if (!bindingMatchesOwnerRoute(binding, authority)) {
+    throw new DeliveryValidationError('route-mismatch', 'binding does not match owner route authority')
+  }
+  return {
+    receiptVersion: 2,
+    authorityId: authority.id,
+    authorityHash: ownerRouteAuthorityHash(authority),
+    bindingId: binding.id,
+    bindingVersion: binding.version,
+    generation: binding.generation,
+    minimumGeneration: authority.minimumGeneration,
+  }
 }

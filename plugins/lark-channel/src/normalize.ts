@@ -77,6 +77,9 @@ export function normalizeLarkMessage(
         providerMessageId: eventId,
         rawContentType: key(input.rawContentType, 'rawContentType'),
         resourceCount: String(Math.min(input.resources.length, 999)),
+        ...(input.replyToMessageId === undefined
+          ? {}
+          : { replyToProviderMessageId: providerCapability(input.replyToMessageId, 'replyToMessageId') }),
       },
       ...(input.resources.length === 0 ? {} : { attachments: input.resources.map(resource => ({
         resourceType: resource.type,

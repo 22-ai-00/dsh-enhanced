@@ -1,6 +1,6 @@
 # @dsh-enhanced/assistant-evolution
 
-审批门控的行为自演化。助理观察自己在重复情境下的结果，当证据足够时提出一条行为规则，**经 owner 批准后**该规则才作为顾问性上下文影响后续会话。可选的低风险自治通道只允许撤回一条已证实无效的 exact rule，不能创建、修改或扩权。
+审批门控的行为自演化。助理观察自己在重复情境下的结果，当证据足够时提出一条行为规则，**经 owner 批准后**该规则才作为顾问性上下文影响后续会话。owner 可随时通过二次审批撤销 exact rule；可选的低风险自治通道也只能撤回一条已证实无效的 exact rule，二者都不能创建、修改或扩权。
 
 这不是"让模型自己改自己"。它的价值在于把"经验"变成**可审计、可撤销、可解释**的持久对象：每条规则都能回答"依据哪些结果、谁批准的、有没有真的变好"。
 
@@ -14,26 +14,45 @@
 dsh plugin --profile <name> add @dsh-enhanced/assistant-evolution
 ```
 
-依赖 `@dsh-enhanced/assistant-policy`。未组合 policy 时**拒绝加载**，而不是降级为无治理运行。
+依赖 `@dsh-enhanced/assistant-policy` 与 `@dsh-enhanced/assistant-evaluation`。未组合 Policy 或权威
+Evaluation 账本时**拒绝加载**，而不是降级为无治理运行。
 `@dsh-enhanced/assistant-delivery` 是可选 peer：存在时，插件从当前 Agent 的 authenticated owner route
 派生 principal，并让 Policy 在创建提案的同一事务中保存 dispatch；不存在时只允许可信 headless 调用方
 通过 Service API 显式传 principal。模型工具永远不能选择 principal 或审批期限。
+独立 supervised-growth analyst 必须有 Delivery owner route，因此不使用 headless 降级。规则结算时生成的
+application receipt 即使 Delivery 暂时不可用也会留在 Evolution 自己的 durable outbox，恢复后原位更新原审批卡。
+该 presentation 不是公开 Delivery service 方法：Delivery 只向当前 Evolution producer generation 签发私有、
+可撤销的进程内 capability。registration 不进入 Agent、tool schema、proposal payload 或 read API；服务替换、
+卸载或 disposer 后旧 capability 立即失效，durable outbox 只会等待有效的新 registration 重试。
+`@dsh-enhanced/assistant-automations` 也是可选 peer：仅当 Evaluation receipt 引用 automation run 时，
+Evolution 才要求它提供并重新验证 exact production-run proof。普通非自动化 Evaluation 投影不依赖它。
+默认 Cordis patch 会为完整 supervised-growth 组合声明该顺序依赖。
 
 ## 闭环
 
 ```text
-observe 结果 → 计算候选 → 提案 → owner 批准 → 提交规则 → 注入为顾问上下文
+Evaluation 客观/验证结果 → 计算候选 → 提案 → owner 批准 → 提交规则 → 注入为顾问上下文
      ↑                                                          │
-     └──── 后续可信结果继续被观察 ──→ owner retire 或低风险自动 rollback ┘
+     └──── 后续可信结果继续被观察 ──→ evidence retire / owner undo / 自动 rollback ┘
 ```
 
-五步都有独立边界：
+关键阶段都有独立边界：
 
-1. **观察**：`evolution_observe`（前台）或 automation 运行结束（后台）记录一条 episode。append-only，按 `idempotencyKey` 精确幂等；前台自报仅供审计，不算可信候选证据。
-2. **推断**：`evolution_review` 只使用同一 workspace + Agent preset 下可信、未归因的 automation 结果计算 adopt 候选，**只到候选为止**。样本不足时保持沉默。每个候选还返回同一精确窗口中 newest-first 的有界 episode 样本（ID、结果、有界 detail、时间）和整个窗口的 SHA-256 digest；detail 始终按不可信结果数据呈现，不能当作指令。
-3. **提案**：`evolution_propose` 创建 `assistant-policy` 提案。adopt 与 retire 的基线都**从已记录证据读取**；retire 还必须在服务端重新找到同 scope、exact active rule ID + generation、至少 `minSample` 条 post-adoption 可信归因结果的当前候选。服务通过唯一的 canonical review renderer，把 op、scope、situation/rule/version、guidance/reason、baseline/evaluation、evidence 和 server rule identity 全部冻结为 Policy diff；adopt rule ID 由完整稳定 mutation（含 generation）确定性派生，精确重放不会换身份。principal 从可信 Delivery route 派生，因此直接调用 Service 也无法绕过 review、虚报依据或审批人。批准后的 audit 可通过不可变 rule ID 回溯该冻结 evidence reference。
-4. **提交**：owner 在审批面（如飞书卡片）决定后，`reconcileProposals()` 用 Policy 共享 validator 校验 proposal/requester/principal/action/resource/summary/diff/expiry/version/decision actor 的完整冻结 tuple；同一 SQLite writer transaction 还会重新规范化本地 mutation、强制 retire 的 evaluation/baseline/evidence snapshot 完整、重算 `mutation_hash`，并用同一个 renderer 重建 action/resource/summary/diff，与刚通过 Policy validator 的 expectation 及库内 expectation 精确重绑定。即使 Policy 已批准，legacy 无证据行、JSON 字段剥离、同步改写 JSON+hash，或 retire/adopt 换 op 都会持久化为 `conflicted`，绝不应用规则。
-5. **低风险回滚（默认关闭）**：`evolution_rollback` 只接收 `rule_id + expected_version`。启用 `autonomousRollback` 且 Policy 对 exact `{action: rollback, resource: evolution/rule:<id>}` 放行后，Host 在 `BEGIN IMMEDIATE` 内重新读取同 scope、exact rule ID + generation 的可信 post-exposure 证据；只有样本达到 `minSample`、失败率达到 `retireFailureRate`，并且没有优于 adoption baseline 时才 retire。reason、risk=`low`、完整窗口 digest 和有界 episode ID 均由 Host 生成并与规则 compare-and-set、audit 在同一事务提交。它不能 adopt、改 guidance、改 Policy、选择证据或降低门槛。
+1. **观察**：`evolution_observe`（前台自报）和 `recordAutomationOutcome`（后台执行状态）都只写 operational audit，不能驱动学习。可信 Host 只能调用 `projectEvaluationOutcome({ scope, evaluationId })`：服务按 exact branded scope 从 `assistant-evaluation` 读取 frozen trusted receipt，并从 receipt 自己派生 situation、objective outcome、时间与证据类型。调用方不能提交或覆盖这些质量字段。当前只有明确的 `achieved / not-achieved` objective 可投影；`unknown` 拒绝，`partial` 明确返回 ignored/non-learning，绝不偷映射为一次完整失败。verification 在 Evaluation 增加 typed schema 前保持关闭。旧自由输入 `recordEvaluationOutcome` 永久 fail closed。非 Automation objective 的 `learningSubjectRef` 是 immutable Evaluation outcome；Automation objective 则从已验证 production proof 派生为 exact immutable run ID，`evidenceRef` 仍保持独立的 Evaluation ledger identity。一个 run 即使被多条 Evaluation outcome 重复评估，也最多形成一个 learning-eligible episode：相同结论返回原 row，矛盾结论 fail closed。
+2. **推断**：`evolution_review` 只使用同一 workspace + Agent preset 下明确 learning-eligible、未归因的客观/验证结果计算 adopt 候选，**只到候选为止**。样本不足时保持沉默。每个候选还返回同一精确窗口中 newest-first 的有界 episode 样本（ID、Evaluation reference、证据类别、结果、有界 detail、时间）和整个窗口的 SHA-256 digest；detail 始终按不可信结果数据呈现，不能当作指令。
+3. **独立 analyst**：`evolution_adoption_review` 与 `evolution_adoption_propose` 只接受 immutable `assistantAutomationExecution`，且必须是 production 模式、Automation ID 精确等于 `heartbeat:supervised-growth-analyst`、已绑定 authenticated Delivery owner route。review 按确定性优先级最多冻结一个 adopt 候选，返回随机 opaque token、完整窗口 digest/total/window、样本 ID 与有界 evidence。propose 只接受 `review_token + guidance`，在 SQLite writer lock 内重新验证 token、scope、occurrence、阈值和完整窗口。持久提案身份只绑定 `scope + situation + evidenceDigest + evidenceTotal + contractVersion`，不绑定 guidance、执行 ID 或措辞；并发、重启、不同措辞只生成一张卡，首个已提交 guidance 胜出。前台、preview、别的 Automation、无 owner route、旧 token 或证据变化全部 fail closed。
+4. **提案**：`evolution_propose` 创建 `assistant-policy` 提案。adopt 与 retire 的基线都**从已记录证据读取**；retire 还必须在服务端重新找到同 scope、exact active rule ID + generation、至少 `minSample` 条 post-adoption 可信归因结果的当前候选。服务通过唯一的 canonical review renderer，把 op、exact scopeKey、situation、当前 guidance、generation、rule/version、reason、baseline/evaluation/evidence 和 server rule identity 全部冻结为 Policy diff；owner-undo 也冻结同一份当前规则快照，而不是只显示 UUID。这些字段始终是 plain untrusted review data，不会作为系统指令执行。adopt rule ID 由完整稳定 mutation（含 generation）确定性派生，精确重放不会换身份。principal 从可信 Delivery route 派生，因此直接调用 Service 也无法绕过 review、虚报依据或审批人。批准后的 audit 可通过不可变 rule ID 回溯该冻结 evidence reference。
+5. **提交与真实终态**：owner 在审批面（如飞书卡片）决定后，`reconcileProposals()` 用 Policy 共享 validator 校验 proposal/requester/principal/action/resource/summary/diff/expiry/version/decision actor 的完整冻结 tuple；同一 SQLite writer transaction 还会重新规范化本地 mutation、强制 retire 的 evaluation/baseline/evidence snapshot 完整、重算 `mutation_hash`，并用同一个 renderer 重建 action/resource/summary/diff，与刚通过 Policy validator 的 expectation 及库内 expectation 精确重绑定。即使 Policy 已批准，legacy 无证据行、JSON 字段剥离、同步改写 JSON+hash，或 retire/adopt 换 op 都会持久化为 `conflicted`，绝不应用规则。该事务同时生成 domain-authoritative `applied / rejected / expired / conflicted` receipt，冻结 local/policy proposal、operation、exact rule/version/status、terminalAt 与 SHA-256 digest。独立 application outbox 通过 Delivery 的 `approval-application:<policyProposalId>` presentation 原位更新 `approval-card:<policyProposalId>`；Delivery 失败不回滚规则，崩溃后重放同 revision/digest，且从不把 Policy `approved` 自己显示成已应用。
+6. **owner 即时撤销**：`evolution_undo` 只接收 `rule_id + expected_version + operation_id`，不接收 principal、reason、guidance 或权限字段。当前 Agent 提供 exact workspace + preset，Delivery 的 authenticated owner route 提供 principal；工具只创建独立 `evolution.owner-undo` Policy 审批，不能自行决定。owner 批准后，`reconcileProposals()` 对冻结 scope/rule/version 做 CAS 并立即 retire；无需回归样本，因为这是 owner 撤回自己的既有批准。错误 owner、跨 scope、旧 version、被另一张卡抢先结算的旧卡都拒绝或落为 `conflicted`。精确 operation replay 返回同一 durable proposal/rule receipt，重启后也可继续结算。
+7. **低风险回滚（默认关闭）**：`evolution_rollback` 只接收 `rule_id + expected_version`。启用 `autonomousRollback` 且 Policy 对 exact `{action: rollback, resource: evolution/rule:<id>}` 放行后，Host 在 `BEGIN IMMEDIATE` 内重新读取同 scope、exact rule ID + generation 的可信 post-exposure 证据；只有样本达到 `minSample`、失败率达到 `retireFailureRate`，并且没有优于 adoption baseline 时才 retire。reason、risk=`low`、完整窗口 digest 和有界 episode ID 均由 Host 生成并与规则 compare-and-set、audit 在同一事务提交。它不能 adopt、改 guidance、改 Policy、选择证据或降低门槛。
+
+`supervised-growth/v2` 的固定 Host 控制面无需伪造 Agent，也不读取 session header：Host 先用
+`canonicalEvolutionHostScope({ workspace, preset })` 创建冻结 branded scope，再调用
+`hostCandidates`、`hostListRules` 或 singular `hostRollbackOne`。每次调用必须携带 authenticated owner
+`principal + operationId`，服务会用固定 background Policy subject
+`dsh-enhanced-assistant-recovery` 对 exact workspace/action/resource 授权。复制/序列化 scope 会移除 brand
+并 fail closed。Host rollback 与模型入口复用同一事务门，因此只有 exact exposure receipt 归因的
+quality-eligible Evaluation evidence 可触发；`recordAutomationOutcome` 的 operational 行永远不算。
 
 ## 三条结构性安全边界
 
@@ -50,7 +69,7 @@ adopt 不会复用旧 ID；重新积累基线时也只看 retirement timestamp �
 
 ## 规则要凭业绩留下
 
-adopt 时会记录当时的**基线失败率**。只有 adopt 之后、同 scope、可信且归因到该 exact rule ID 与 generation 的结果才参与 retire 判断；cross-scope、自报/claim、旧 generation，以及不足 `minSample` 的结果都不算，且会在任何 Policy proposal/dispatch 创建前 fail closed。该规则的表现必须**优于自己的基线**，否则成为 retire 候选。owner 审批的是冻结证据快照；结算仍以 exact rule version 做 compare-and-set，并复核冻结 adoption baseline 与样本归因结构，后续新 episode 不会悄悄改写已审批 diff。
+adopt 时会记录当时的**基线失败率**。只有 adopt 之后、同 scope、明确 learning-eligible 且归因到该 exact rule ID 与 generation 的客观/验证结果才参与 retire 判断；execution failed/succeeded、cross-scope、自报/claim、旧 generation，以及不足 `minSample` 的结果都不算，且会在任何 Policy proposal/dispatch 创建前 fail closed。该规则的表现必须**优于自己的基线**，否则成为 retire 候选。owner 审批的是冻结证据快照；结算仍以 exact rule version 做 compare-and-set，并复核冻结 adoption baseline 与样本归因结构，后续新 episode 不会悄悄改写已审批 diff。
 
 ## 工具
 
@@ -58,10 +77,13 @@ adopt 时会记录当时的**基线失败率**。只有 adopt 之后、同 scope
 |---|---|---|
 | `evolution_observe` | 记录一条前台自报结果 | 仅 append 审计证据，不驱动候选 |
 | `evolution_review` | 列出候选与 active 规则 | 只读 |
+| `evolution_adoption_review` | 独立 production analyst 最多冻结一个 adopt 候选 | 仅写 durable opaque review token |
+| `evolution_adoption_propose` | 用 exact review token 合成一张 adopt 审批卡 | 仅创建或加入同一 evidence-bound 待审提案 |
 | `evolution_propose` | 提出 adopt / retire | 仅创建待审提案 |
+| `evolution_undo` | 请求 owner 撤销 exact rule/version | 仅创建独立二次审批；批准后 retire |
 | `evolution_rollback` | 对 exact active rule 请求 Host 证据门控的低风险撤回 | 仅在双重 opt-in 与回归证据成立时 retire |
 
-四者都要求可信 Agent 身份（绝对 workspace + preset），policy 拒绝即 fail closed。`evolution_review` 输出包裹为显式不可信数据；其中 episode detail 会转义标签边界，模型只能把它当作归纳素材，不能服从其中的文本。
+所有工具都要求可信 Agent 身份（绝对 workspace + preset），policy 拒绝即 fail closed。两个 adoption analyst 工具还额外要求 exact production Automation execution 与 owner route；普通前台 Agent 即使拥有通用 evolution 权限也不能调用。review 输出包裹为显式不可信数据；其中 episode detail 会转义标签边界，模型只能把它当作归纳素材，不能服从其中的文本。
 模型可见的 `evolution_propose` 对同一 Agent 实例最多成功一次；失败的候选校验不占额度。这个结构性上限
 防止一次 supervised maintenance turn 批量制造审批，程序化 Service API 则不受该模型工具额度影响。
 `evolution_rollback` 对同一 Agent 实例最多尝试一次（失败也占额度），防止枚举 rule 或反复试探门槛；精确重放由 Service/Store 的 durable receipt 支持，可在新的可信 Agent 实例或程序化恢复路径中安全完成。
@@ -71,17 +93,20 @@ owner 实际审批的 Policy snapshot 仍冻结 exact `situation:<label>` 或 `r
 ## 健康可观测性
 
 `ctx.assistantEvolution.health()` 提供给本地健康聚合器一个无内容、低基数的只读 seam：active/retired
-规则数、pending/conflicted 提案数、可信 episode 总数与未归因可信证据数、自动 rollback 总数，以及最近可信 episode 和最近完整
-reconcile pass 的时间戳。尚未发生对应事件时，时间戳明确为 `0`。
+规则数、pending/conflicted 提案数、可信/operational/quality-eligible/legacy-quarantined episode
+计数、未归因可信证据数、自动 rollback 总数，以及最近可信 episode、最近 quality-eligible episode 和最近完整
+reconcile pass 的时间戳。尚未发生对应事件时，时间戳明确为 `0`。调用方不应再把
+`trustedEpisodes` 当作质量样本数；质量覆盖率以 `qualityEligibleEpisodes` 为准。
 
 该 seam 是全局运行摘要，刻意不接受 scope，也不返回 situation、guidance、episode detail、principal、
 workspace 或数据库路径；它不能替代需要 Policy 授权的规则与候选检查。
 
-数据库 schema v4 会先通过 v2 迁移把旧版无 scope 的 episode、rule 和 proposal 放入 `legacy:v1`
+数据库 schema v12 会先通过 v2 迁移把旧版无 scope 的 episode、rule 和 proposal 放入 `legacy:v1`
 quarantine，再增加 durable guidance exposure 与完整审批 tuple。旧 pending proposal 会过期；早期未发布
-v2 中无法验证完整 tuple 的 pending proposal 会安全落为 `conflicted`；v4 增加 immutable autonomous rollback receipt。旧规则不会作为 wildcard 注入。
+v2 中无法验证完整 tuple 的 pending proposal 会安全落为 `conflicted`；v4 增加 immutable autonomous rollback receipt；v5 把所有旧 episode 标为 `legacy-unknown` 且 `learning_eligible=0`，并把所有基于旧证据尚未结算的 pending Evolution proposal 标为 `conflicted`。v6 先以 `(scope, immutable Evaluation ref)` 建立唯一身份；v7 重建 episode CHECK，使权威投影具有独立的 `evaluation` provenance。v8 新增独立 `learning_subject_ref` 和数据库唯一约束 `(scope, learning_subject_ref)`，从结构上阻止同一 Automation run 被多条 Evaluation outcome 放大样本数，同时不偷换 `evidence_ref` 的 Evaluation 语义。v7 旧 learning row 无法事后证明其 Automation run identity，因此迁移时一律保守降为 `legacy-unknown + learning_eligible=0`，并把受影响 scope 的 pending proposal 标为 `conflicted`；operational audit 不受影响。旧版 binary automation failure 或重复 Evaluation 结果都不能污染候选、adoption、延迟激活或 rollback。旧规则不会作为 wildcard 注入。
 迁移和 episode/proposal settlement 使用 SQLite writer transaction；多进程同时打开、重放或提交时只有一个
 winner，其余读取 winner 并做精确幂等比较。
+v9 开始只接受 Evaluation 的 versioned task projection；v10 增加按 production occurrence 冻结的 analyst review ledger；v11 增加与 proposal settlement 同事务提交的 application receipt 和独立 presentation outbox。v12 为 task projection、analyst review 和候选证据加入 authoritative scope watermark 与完整 task-revision tuple：所有依赖证据的创建或结算都必须在 Evaluation 的 trusted writer fence 内重新证明；缺少这组冻结证据的旧 pending proposal 一律转为 `conflicted`，不会在稍后被批准时应用。旧终态在启动时会补投 outbox，新终态不会依赖 pending-proposal 扫描。
 跨 Evolution/Policy 数据库创建审批时，Evolution 先持久化本地 intent，再调用 Policy 的原子
 `recoverOrCreateProposal(notAfter)`：同一 writer transaction 内只会恢复 exact proposal、在绝对截止时间前创建，
 或在截止后永久 tombstone 该 idempotency key。这样 lookup/create 竞争和重启都不会续期或留下 orphan approval card。
@@ -107,7 +132,7 @@ winner，其余读取 winner 并做精确幂等比较。
 
 ## 与 assistant-automations 的可选联动
 
-若同时安装 `@dsh-enhanced/assistant-automations`，后台运行结束可自动成为可信证据。Evolution 只在
+若同时安装 `@dsh-enhanced/assistant-automations`，后台运行结束会成为可信的**运行审计**，但不会自动成为质量证据。Evolution 只在
 `agent/session-start` guidance 注入成功**之后**，持久化 exact
 `sessionId + workspace + Agent preset + situation + ruleId + generation` receipt。Automations 必须在 runner
 返回 actual session ID 后调用 `captureAutomationExposure(...)`；缺 receipt、错 session/scope、未实际注入，
@@ -115,14 +140,27 @@ winner，其余读取 winner 并做精确幂等比较。
 
 该绑定是**单向、可选、结构化**的：automations 不依赖本插件，没有 recorder 或 recorder 抛错时运行完全不受影响。`cancelled` 不计入——它不说明方法好坏，计入会污染失败率。
 
-后台入口 `recordAutomationOutcome` 刻意最小：**只能追加证据**。只有 payload 的
+后台入口 `recordAutomationOutcome` 刻意最小：**只能追加 operational audit**。只有 payload 的
 `automationId/sessionId/ruleId/guidanceVersion` 与 durable receipt 完整一致时才写入可信规则归因；否则
-`ruleId` 仅作为 claim 留档。它不能 adopt / retire / 读取规则。因此 automation 依然无法在没有 owner
+`ruleId` 仅作为 claim 留档。无论 execution 是 succeeded 还是 failed，该入口都固定
+`learningEligible=false`。权威 Evaluation 必须经独立的 `projectEvaluationOutcome` 入口，由服务读取
+exact trusted receipt 并派生 objective evidence，才能参与统计。若 receipt 引用 automation run，Evolution 还会直接向
+Automations 校验 production-only immutable proof，并把 exact immutable run ID 写成独立学习主体；多条 Evaluation row 不会把一个 run 重复计数。Recovery 或其他 caller 的转述不算。它不能 adopt / retire / 读取规则。因此 automation 依然无法在没有 owner
 决定的情况下改变自己的行为。
+
+Automation Agent 的 Host execution context 若明确为 `preview`，Evolution 在 `agent/session-start` 不注入
+active guidance，也不写 exposure receipt；只有明确 `production` 或缺失 automation context 的普通前台会话
+可进入注入路径。未知/畸形的未来 mode 按非 production fail closed。
 
 成功注入的 receipt 也让同一 session 在正常重启/resume 后不重复注入同一 immutable generation。新代规则
 可作为增量 guidance 注入；若旧规则已经进入该 session 的 LLM 历史，插件无法从上游不可变历史中物理删除
 它，但 retired guidance 不会再次注入，也不会再为新 outcome 生成可信归因。
+
+生产 Automation 注入时，exact `automation:<id>` 规则会在 `maxInjectedRules` 的全局切片**之前**置顶；即使
+scope 内已有超过 12 条 active rule，目标规则仍会进入有界 guidance block 并写入 exposure receipt。普通
+foreground 会话继续按 situation 稳定排序并受相同 rule-count/byte 上限约束。若 session-start 早于
+Automation execution context 安装，post-setup `injectAutomationGuidance` 会依据 durable exposure 优先补入尚未
+注入的 exact rule，不会因一次较早的全局切片而永久失去归因。
 
 ## 权限与非目标
 
@@ -132,3 +170,4 @@ winner，其余读取 winner 并做精确幂等比较。
 - 不做向量检索、自动遗忘、跨设备同步、多用户 ACL。
 - guidance 会进入模型上下文：不要在 guidance 中写入密钥或敏感数据。
 - 自动 rollback 是收缩行为能力的安全阀，不是通用“AI 自批”入口；部署若启用，Policy 只应授予 `rollback`，不要把它复用为 adopt、权限或外部副作用授权。
+- Host 控制面还需 Policy 明确允许 background subject `dsh-enhanced-assistant-recovery` 的 `inspect` 和按需 `rollback`；仅拿到 Cordis service 引用不等于获得权限。

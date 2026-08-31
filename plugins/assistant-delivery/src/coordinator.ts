@@ -1,9 +1,18 @@
 import type { ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import {
+  isFeedbackDispatchRecoveryCode,
+  isFeedbackRetryableFailureCode,
+  isLearningDispatchRecoveryCode,
+  isLearningRetryableFailureCode,
+  isWorkflowDispatchRecoveryCode,
   permissionDispatchRecoveryFromFailureCode,
   type PermissionDispatchRecovery,
 } from './session-commands.js'
-import { DeliveryStoreError, type DeliveryStore } from './store.js'
+import {
+  DeliveryStoreError,
+  type DeliveryStore,
+  type OwnerRouteDispatchGuard,
+} from './store.js'
 import type {
   AdapterReconcileResult,
   AdapterSendResult,
@@ -230,6 +239,8 @@ interface DeliveryCoordinatorOptions {
   maxConcurrency: number
   retryBaseMs: number
   retryMaxMs: number
+  /** Host-owned route authority and exact Policy recheck used at claim and immediately before send. */
+  ownerRouteGuard?: Readonly<OwnerRouteDispatchGuard>
   tickIntervalMs?: number
   now?: () => number
   random?: () => number
@@ -259,6 +270,7 @@ export class DeliveryCoordinator {
       maxAttempts: this.options.maxAttempts,
       unknownReconcileRoutes: this.options.registry.reconcilableUnknownRoutes(),
       excludeIds: [...this.active.keys()],
+      ...(this.options.ownerRouteGuard === undefined ? {} : { ownerRouteGuard: this.options.ownerRouteGuard }),
     })
     for (const claim of claims) {
       const abort = new AbortController()
@@ -351,30 +363,47 @@ export class DeliveryCoordinator {
       }
       return
     }
-    const binding = this.options.store.getBinding(record.intent.bindingId)
-    if (binding?.status !== 'active') {
-      this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'binding-revoked', retryable: false })
-      return
-    }
-    if (!sameConversation(binding.conversation, record.intent.target.conversation)
-      || !samePrincipal(binding.principal, record.intent.target.principal)) {
+    const ownerRoute = this.options.ownerRouteGuard === undefined
+      ? { kind: 'not-route' as const }
+      : this.options.store.validateClaimedOwnerRoute(record, this.options.ownerRouteGuard)
+    if (ownerRoute.kind === 'denied') {
       this.finish(record, fencingToken, {
-        outcome: 'not-sent', failureCode: 'binding-target-mismatch', retryable: false,
+        outcome: 'not-sent', failureCode: ownerRoute.failureCode, retryable: false,
       })
       return
     }
-    let authorized: boolean
-    try {
-      authorized = this.options.store.isAuthorizedPrincipal(binding.principal)
-    } catch {
+    if (ownerRoute.kind === 'deferred') {
       this.finish(record, fencingToken, {
-        outcome: 'not-sent', failureCode: 'principal-authorization-check-failed', retryable: true,
+        outcome: 'not-sent', failureCode: ownerRoute.failureCode, retryable: true,
       })
       return
     }
-    if (!authorized) {
-      this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'principal-revoked', retryable: false })
-      return
+    if (ownerRoute.kind === 'not-route') {
+      const binding = this.options.store.getBinding(record.intent.bindingId)
+      if (binding?.status !== 'active') {
+        this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'binding-revoked', retryable: false })
+        return
+      }
+      if (!sameConversation(binding.conversation, record.intent.target.conversation)
+        || !samePrincipal(binding.principal, record.intent.target.principal)) {
+        this.finish(record, fencingToken, {
+          outcome: 'not-sent', failureCode: 'binding-target-mismatch', retryable: false,
+        })
+        return
+      }
+      let authorized: boolean
+      try {
+        authorized = this.options.store.isAuthorizedPrincipal(binding.principal)
+      } catch {
+        this.finish(record, fencingToken, {
+          outcome: 'not-sent', failureCode: 'principal-authorization-check-failed', retryable: true,
+        })
+        return
+      }
+      if (!authorized) {
+        this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'principal-revoked', retryable: false })
+        return
+      }
     }
     try {
       const result = await adapter.send(record.intent, signal)
@@ -418,7 +447,12 @@ export class DeliveryCoordinator {
       return
     }
     if (result.outcome === 'not-sent') {
-      this.finish(record, fencingToken, { outcome: 'not-sent', failureCode: 'reconciled-not-sent', retryable: true })
+      const ownerRoute = record.intent.metadata?.['dsh.route.authority'] !== undefined
+      this.finish(record, fencingToken, {
+        outcome: 'not-sent',
+        failureCode: ownerRoute ? 'owner-route-reconciled-not-sent' : 'reconciled-not-sent',
+        retryable: !ownerRoute,
+      })
       return
     }
     this.options.store.finishOutbox({ outboxId: record.id, ownerId: this.options.ownerId, fencingToken,
@@ -770,7 +804,12 @@ export class InboundCoordinator {
       return
     }
     if (dispatchMarked && result.outcome !== 'processed') {
-      if (permissionDispatchRecoveryFromFailureCode(result.failureCode) !== undefined) {
+      if (permissionDispatchRecoveryFromFailureCode(result.failureCode) !== undefined
+        || isFeedbackDispatchRecoveryCode(result.failureCode)
+        || isFeedbackRetryableFailureCode(result.failureCode)
+        || isLearningDispatchRecoveryCode(result.failureCode)
+        || isLearningRetryableFailureCode(result.failureCode)
+        || isWorkflowDispatchRecoveryCode(result.failureCode)) {
         this.finishInbound(inboxId, fencingToken, result)
         return
       }

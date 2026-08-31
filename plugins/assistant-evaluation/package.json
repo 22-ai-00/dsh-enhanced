@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-evaluation",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "A bounded, append-only outcome evaluation ledger for the DSH personal assistant.",
   "license": "MIT",
   "type": "module",
@@ -52,7 +52,10 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-skill": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.8 <0.2.0"
+    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.8 <0.2.0",
+    "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/assistant-evolution": ">0.1.7 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -66,6 +69,15 @@
     },
     "@deepseek-ai/dsh-tools": {
       "optional": true
+    },
+    "@dsh-enhanced/assistant-automations": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-delivery": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-evolution": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -76,6 +88,9 @@
     "@deepseek-ai/dsh-skill": "catalog:",
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
+    "@dsh-enhanced/assistant-automations": "workspace:*",
+    "@dsh-enhanced/assistant-delivery": "workspace:*",
+    "@dsh-enhanced/assistant-evolution": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

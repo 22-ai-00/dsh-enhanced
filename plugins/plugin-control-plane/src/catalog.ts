@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
-import { readFile } from 'node:fs/promises'
+import { lstat, readFile, realpath } from 'node:fs/promises'
+import { resolve } from 'node:path'
 
 export interface CatalogEntry {
   id: string
@@ -20,6 +21,11 @@ export interface CatalogPackage {
 }
 
 export interface CapabilityCatalog { schemaVersion: 1; entries: CatalogEntry[] }
+export interface LoadedCapabilityCatalog {
+  catalog: CapabilityCatalog
+  digest: string
+  provenance: 'owner-provided-integrity-pinned'
+}
 
 const idPattern = /^[a-z0-9][a-z0-9-]{0,63}$/u
 const packagePattern = /^@[a-z0-9][a-z0-9-]*\/[a-z0-9][a-z0-9-]*$/u
@@ -86,18 +92,24 @@ export function parseCatalog(value: unknown): CapabilityCatalog {
 }
 
 export async function loadCatalog(path: string): Promise<CapabilityCatalog> {
+  const metadata = await lstat(path)
+  const uid = process.getuid?.()
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+    || (metadata.mode & 0o022) !== 0 || (uid !== undefined && metadata.uid !== uid)
+    || await realpath(path) !== resolve(path)) {
+    throw new Error('plugin-control-plane: owner catalog must be an owner-owned regular file without writable aliases or symlink traversal')
+  }
   const source = await readFile(path, 'utf8')
   if (Buffer.byteLength(source) > 1_048_576) throw new Error('plugin-control-plane: catalog exceeds 1 MiB')
   return parseCatalog(JSON.parse(source) as unknown)
 }
 
 /**
- * Curated first-party candidates make a new core installation immediately
- * useful without granting an Agent registry, network, or activation access.
- * They deliberately remain pinned to a previously published, immutable npm
- * release.  An owner-created catalog at Config.catalogPath replaces this list.
+ * Package-local example used by documentation and tests. It is deliberately
+ * not a runtime fallback or trust source because it is not signature-verified.
+ * Runtime discovery requires an owner-provided, integrity-pinned regular file.
  */
-export const firstPartyCatalog: CapabilityCatalog = parseCatalog({
+export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
   schemaVersion: 1,
   entries: [
     {
@@ -177,13 +189,9 @@ export const firstPartyCatalog: CapabilityCatalog = parseCatalog({
   ],
 })
 
-export async function loadCatalogWithFirstPartyFallback(path: string): Promise<CapabilityCatalog> {
-  try {
-    return await loadCatalog(path)
-  } catch (error: unknown) {
-    if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') return firstPartyCatalog
-    throw error
-  }
+export async function loadCatalogWithMetadata(path: string): Promise<LoadedCapabilityCatalog> {
+  const catalog = await loadCatalog(path)
+  return Object.freeze({ catalog, digest: createHash('sha256').update(JSON.stringify(catalog)).digest('hex'), provenance: 'owner-provided-integrity-pinned' })
 }
 
 export function discover(catalog: CapabilityCatalog, capability: string): CatalogEntry[] {

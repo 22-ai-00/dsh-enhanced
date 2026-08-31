@@ -3,6 +3,8 @@ import type { StoredRule } from './types.js'
 export interface GuidanceOptions {
   maxBytes: number
   maxRules: number
+  /** Exact production Automation situation that must survive the rule-count slice. */
+  prioritySituation?: string
 }
 
 export interface GuidanceSnapshot {
@@ -45,7 +47,12 @@ export function buildGuidanceSnapshot(
     'still authorized independently. Each rule ID and generation is immutable.',
   ]
   const footer = '</learned_guidance>'
-  const ordered = [...active].sort((left, right) => left.situation.localeCompare(right.situation))
+  const ordered = [...active].sort((left, right) => {
+    const leftPriority = left.situation === options.prioritySituation
+    const rightPriority = right.situation === options.prioritySituation
+    if (leftPriority !== rightPriority) return leftPriority ? -1 : 1
+    return left.situation.localeCompare(right.situation)
+  })
   const lines: string[] = []
   const included: StoredRule[] = []
   let total = Buffer.byteLength([...header, footer].join('\n'), 'utf8')

@@ -1,0 +1,15 @@
+- insert:
+    - id: dsh-enhanced-assistant-growth-experiments
+      name: '@dsh-enhanced/assistant-growth-experiments'
+      inject:
+        - assistantAutomations
+        - assistantDelivery
+      config:
+        databasePath: !!js dshHomePath('assistant-growth-experiments/growth.sqlite')
+        tickIntervalMs: 5000
+        minRepeatedSuccesses: 3
+        maxBatchSize: 10
+        maxExperimentDurationMs: 604800000
+        maxOperationAttempts: 8
+        retryBaseMs: 1000
+        retryMaxMs: 60000

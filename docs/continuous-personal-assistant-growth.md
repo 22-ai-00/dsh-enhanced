@@ -6,6 +6,12 @@
 
 这里的“持续成长”指长期、复利式、受预算约束的改进，不指无限资源、无边界权限或能够修改自身安全边界的执行体。
 
+## 当前个人优先交付口径
+
+完整目标仍包含后文的长期运维、恢复与能力工厂，但个人助理的首个可用里程碑不以这些重型能力为前置条件。普通 Lark 场景必须在不安装 Health、Heartbeat 或 Recovery 的情况下形成一条无人编排的低风险闭环：完成的 authenticated owner 对话产生不含正文的持久偏好证据，达到固定阈值后自动启用 Host catalog 内的 T1 overlay，真实下一轮提示词记录 exact exposure，明确的持续偏好纠正能够回滚被暴露的版本并自动启用新选择。使用者只需正常对话；不需要手工写数据库、调用学习 API、运行维护命令或逐条批准 T1 变化。
+
+跨任务 Evaluation/Evolution、固定 Recovery runbook 与能力工厂仍可作为显式 supervised/实验能力启用。自由文本 guidance、新插件、外部承诺、权限扩大和不可逆动作不会因为“个人优先”而自动获批；它们不属于上述普通使用闭环的完成证明，也不能被包装成已经全自动上线。
+
 ## 成功状态
 
 完成形态需要同时满足以下条件：
@@ -131,7 +137,7 @@ replay → shadow → canary
 - `assistant-evaluation`：Outcome/Evaluation 权威账本、汇总、健康、scope 内 review 与独立低信任自评。
 - `assistant-evolution`：当前从可信 Automation execution episode 生成行为 guidance 候选并保留 exact exposure 归因；后续改为消费 Evaluation 的 objective/latest projection。采用自由文本 guidance 仍需 owner 审批，确定性退化回滚可按 T1 自治。
 - `personal-memory`：确认后的短期之外个人事实、偏好与约束。
-- `preference-learning`：使用 Host 固定 T0–T3 catalog 消费 typed feedback，维护 claim/effect 分离、可衰减和可删除的偏好假设；只有已认证 owner 的明确反馈能解锁 T1 tentative overlay，T2 只形成 proposal，T3 拒绝进入学习层。
+- `preference-learning`：使用 Host 固定 T0–T3 catalog 消费 typed feedback 和 Delivery 私有证明的完成对话行为，维护 claim/effect 分离、可衰减和可删除的偏好假设；已认证 owner 的明确选择可立即控制固定 T1，普通行为必须达到更高连续阈值，T2 只形成 proposal，T3 拒绝进入学习层。
 - `assistant-automations`：冷启动可恢复的执行和评测触发器，不拥有学习结论。
 - `assistant-health`：统一健康投影、阈值和告警信号，不直接修复。
 - 后续 `assistant-recovery`：只执行版本化固定 runbook、circuit breaker 和回滚请求。
@@ -170,7 +176,7 @@ replay → shadow → canary
 
 ### 阶段 0：修通现有成长闭环
 
-- fresh supervised-growth 安装必须包含所需 Evaluation/Evolution/Heartbeat；
+- fresh supervised-growth 安装必须包含 Evaluation/Evolution/Health/Recovery 与独立 Heartbeat analyst；v2 Recovery 取代旧 maintenance Heartbeat，升级时先暂停旧 job；analyst 每天最多一次，只能把 Host 选出的 adopt 候选转为 owner 审批卡；
 - 成长 route 不再与特定模型绑定；
 - Evolution 加入 Health；成长任务连续失败可靠通知 owner；
 - 真实 effective config、重启和激活路径进入集成测试。
@@ -185,7 +191,7 @@ replay → shadow → canary
 
 ### 阶段 2：偏好与工作流学习
 
-- typed owner feedback、固定 catalog、PreferenceHypothesis、冲突、衰减、删除和 T1 自动采用已具备；
+- typed owner feedback、完成 owner turn 的 content-free 行为证据、固定 catalog、PreferenceHypothesis、冲突、衰减、删除和 T1 自动采用已具备；
 - 后续补充更多经过身份与事件绑定证明的纠正/拒绝信号，以及低敏长期 Memory 晋升；
 - 重复人工流程生成 Automation proposal。
 
@@ -201,6 +207,12 @@ replay → shadow → canary
 - linked worktree 中生成 Skill/插件；
 - 测试、评测、PR、签名包、staging、canary 和版本化启用；
 - 逐类验证后再扩大自动提升范围。
+
+> **本版本范围决定（2026-08-31）：明确延期 Stage 4 的 source/release lane。** 已验证的
+> Host attestor 与 `source-plan` / `scaffold` 仅可生成并检查变更，终态严格止于
+> `ready-for-human-review`；它们不构成 PR、签名、registry 发布、验证或 catalog admission。
+> 只有补齐 durable release operation/CAS、独立可信的 Git/签名/registry adapter、真实端到端
+> fixture 和对应故障恢复门后，才能重新开启本阶段的自动化范围。
 
 ## 完成证明
 

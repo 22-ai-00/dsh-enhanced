@@ -38,6 +38,22 @@ export interface LarkApprovalCard {
   rejectValue: { approval: string }
 }
 
+export interface LarkApprovalResultCard {
+  decision: 'approved' | 'rejected'
+  proposalId: string
+}
+
+export interface LarkApprovalApplicationCard {
+  status: 'applied' | 'conflicted' | 'expired' | 'rejected'
+  operation: 'adopt' | 'owner-undo' | 'retire'
+  policyProposalId: string
+  localProposalId: string
+  terminalAt: number
+  ruleId?: string
+  resultingRuleVersion?: number
+  ruleStatus?: 'active' | 'retired'
+}
+
 export interface LarkToolApprovalCard {
   title: string
   toolName: string
@@ -84,8 +100,29 @@ export interface LarkSelectOption {
   label: string
 }
 
+export interface LarkAutomationIncidentCard {
+  incidentId: string
+  automationId: string
+  definitionHash: string
+  stage: 'claim' | 'materialize' | 'terminal'
+  state: 'open' | 'recovering' | 'resolved'
+  failureClass: string
+  failurePhase: string
+  failureCode: string
+  sideEffectState: 'none' | 'possible' | 'unknown'
+  retryability: 'after-intervention' | 'safe' | 'unsafe' | 'unknown'
+  lifecycleGeneration: number
+  incidentRevision: number
+  openedAt: number
+  updatedAt: number
+  resolvedAt?: number
+}
+
 export type LarkSendInput =
   | { approval: LarkApprovalCard }
+  | { approvalApplication: LarkApprovalApplicationCard }
+  | { approvalResult: LarkApprovalResultCard }
+  | { automationIncident: LarkAutomationIncidentCard }
   | { markdown: string }
   | { modelPicker: LarkModelPickerCard }
   | { modelSelectionResult: LarkModelSelectionResultCard }

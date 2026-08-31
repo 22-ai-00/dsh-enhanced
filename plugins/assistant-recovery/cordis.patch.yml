@@ -1,0 +1,14 @@
+- insert:
+    - id: dsh-enhanced-assistant-recovery
+      name: '@dsh-enhanced/assistant-recovery'
+      inject:
+        - assistantAutomations
+        - assistantDelivery
+        - assistantEvaluation
+        - assistantEvolution
+        - assistantPreferenceLearning
+        - assistantHealth
+      config:
+        databasePath: !!js dshHomePath('assistant-recovery/recovery.sqlite')
+        jobs: []
+        maxStepDurationMs: 10000

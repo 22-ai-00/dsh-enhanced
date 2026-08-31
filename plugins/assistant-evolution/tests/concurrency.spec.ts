@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -82,6 +83,13 @@ function runWorker(moduleUrl: string, data: Record<string, unknown>): Promise<Wo
           if (workerData.action === 'record') {
             const episode = store.recordEpisode(workerData.input)
             result = { ok: true, episodeId: episode.id, episode }
+          } else if (workerData.action === 'project') {
+            const projection = store.applyTaskLearningProjection(workerData.input)
+            result = {
+              ok: true,
+              episodeId: projection.episode?.id,
+              episode: projection.episode,
+            }
           } else if (workerData.action === 'settle') {
             result = { ok: true, settled: store.settleProposal(workerData.input) }
           } else if (workerData.action === 'rollback') {
@@ -162,17 +170,30 @@ function seedRollbackRule(path: string) {
     policyVersion: 2,
   }).rule!
   for (let index = 1; index <= 4; index += 1) {
-    store.recordEpisode({
+    const subjectRef = JSON.stringify(['evaluation-outcome', 'concurrent-rollback', index])
+    const digest = createHash('sha256').update(JSON.stringify({
       scopeKey,
+      subjectRef,
+      situation: rule.situation,
+      outcome: 'failed',
+      ruleId: rule.id,
+      guidanceVersion: rule.generation,
+    })).digest('hex')
+    store.applyTaskLearningProjection({
+      scopeKey,
+      scopeWatermark: index,
+      subjectKind: 'outcome',
+      subjectRef,
+      version: 1,
+      digest,
+      disposition: 'upsert',
       situation: rule.situation,
       outcome: 'failed',
       detail: `failure ${index}`,
-      source: 'automation',
-      trust: 'trusted',
+      evidenceRef: `evaluation:concurrent-rollback:${index}`,
       ruleId: rule.id,
       guidanceVersion: rule.generation,
       occurredAt: 2_000 + index,
-      idempotencyKey: `concurrent-rollback:${index}`,
     })
   }
   store.close()
@@ -180,7 +201,7 @@ function seedRollbackRule(path: string) {
 }
 
 describe('multi-process SQLite safety', () => {
-  test('32 concurrent exact episode replays all return the winning row', async () => {
+  test('32 concurrent exact self-reported episode replays all return the winning row', async () => {
     const root = temporaryRoot('episode-race')
     const moduleUrl = workerModule(root)
     const path = join(root, 'evolution.sqlite')
@@ -192,8 +213,9 @@ describe('multi-process SQLite safety', () => {
       situation: 'weekly-report',
       outcome: 'failed',
       detail: 'same run',
-      source: 'automation',
-      trust: 'trusted',
+      source: 'foreground' as const,
+      trust: 'self-reported' as const,
+      evidenceKind: 'operational' as const,
       occurredAt: 10_000,
       idempotencyKey: 'exact-run',
     }
@@ -207,6 +229,95 @@ describe('multi-process SQLite safety', () => {
     expect(results.map(result => result.error)).toEqual(Array.from({ length: 32 }))
     expect(new Set(results.map(result => result.episodeId)).size).toBe(1)
     expect(results.every(result => JSON.stringify(result.episode) === JSON.stringify(results[0]!.episode))).toBe(true)
+  }, 30_000)
+
+  test('32 concurrent exact versioned projections count one immutable Evaluation result', async () => {
+    const root = temporaryRoot('evaluation-reference-race')
+    const moduleUrl = workerModule(root)
+    const path = join(root, 'evolution.sqlite')
+    const initialized = new EvolutionStore({ path })
+    initialized.close()
+    const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2)
+    const subjectRef = 'evaluation-outcome:aliased-result'
+    const input = {
+      scopeKey,
+      scopeWatermark: 1,
+      subjectKind: 'outcome' as const,
+      subjectRef,
+      version: 1,
+      digest: createHash('sha256').update(JSON.stringify({ subjectRef, outcome: 'failed' })).digest('hex'),
+      disposition: 'upsert' as const,
+      situation: 'weekly-report',
+      outcome: 'failed',
+      detail: 'same immutable Evaluation result',
+      evidenceRef: 'evaluation:aliased-result',
+      occurredAt: 10_000,
+    }
+
+    const pending = Array.from({ length: 32 }, () => runWorker(moduleUrl, {
+      path,
+      action: 'project',
+      input,
+      barrier,
+    }))
+    await releaseWhenReady(barrier, 32)
+    const results = await Promise.all(pending)
+
+    expect(results.map(result => result.error)).toEqual(Array.from({ length: 32 }))
+    expect(new Set(results.map(result => result.episodeId)).size).toBe(1)
+    const inspected = new EvolutionStore({ path })
+    expect(inspected.stats(scopeKey, 'weekly-report', 10)).toEqual({
+      scopeKey, situation: 'weekly-report', failures: 1, total: 1,
+    })
+    inspected.close()
+  }, 30_000)
+
+  test('32 concurrent Evaluation outcomes for one Automation run create one episode', async () => {
+    const root = temporaryRoot('automation-learning-subject-race')
+    const moduleUrl = workerModule(root)
+    const path = join(root, 'evolution.sqlite')
+    const initialized = new EvolutionStore({ path })
+    initialized.close()
+    const barrier = new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT * 2)
+    const subjectRef = 'automation-run:daily-report:run-42'
+    const common = {
+      scopeKey,
+      scopeWatermark: 1,
+      subjectKind: 'automation-run' as const,
+      subjectRef,
+      version: 1,
+      digest: createHash('sha256').update(JSON.stringify({ subjectRef, outcome: 'failed' })).digest('hex'),
+      disposition: 'upsert' as const,
+      situation: 'automation:daily-report',
+      outcome: 'failed' as const,
+      detail: 'authoritative Evaluation objective: not-achieved',
+      evidenceRef: 'evaluation:automation-run-42',
+      occurredAt: 10_000,
+    }
+    const pending = Array.from({ length: 32 }, () => runWorker(moduleUrl, {
+      path,
+      action: 'project',
+      input: common,
+      barrier,
+    }))
+    await releaseWhenReady(barrier, 32)
+    const results = await Promise.all(pending)
+
+    expect(results.map(result => result.error)).toEqual(Array.from({ length: 32 }))
+    expect(new Set(results.map(result => result.episodeId)).size).toBe(1)
+    const inspected = new EvolutionStore({ path })
+    expect(inspected.stats(scopeKey, common.situation, 10)).toMatchObject({ failures: 1, total: 1 })
+    expect(() => inspected.applyTaskLearningProjection({
+      ...common,
+      scopeWatermark: 2,
+      digest: createHash('sha256').update(JSON.stringify({
+        subjectRef, outcome: 'succeeded',
+      })).digest('hex'),
+      outcome: 'succeeded',
+      detail: 'authoritative Evaluation objective: achieved',
+      evidenceRef: 'evaluation:automation-run-42:contradiction',
+    })).toThrow(/different canonical content/iu)
+    inspected.close()
   }, 30_000)
 
   test('24 concurrent settlements report exactly one apply and exact replays thereafter', async () => {
@@ -334,7 +445,10 @@ describe('multi-process SQLite safety', () => {
     expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
       .toBeGreaterThan(1)
     for (const [table, columns] of [
-      ['evolution_episodes', ['scope_key', 'trust', 'claimed_rule_id', 'guidance_version']],
+      ['evolution_episodes', [
+        'scope_key', 'trust', 'claimed_rule_id', 'guidance_version',
+        'evidence_kind', 'evidence_ref', 'learning_eligible',
+      ]],
       ['evolution_rules', ['scope_key', 'generation']],
       ['evolution_proposals', ['scope_key', 'creation_intent_json', 'settlement_expectation_json']],
     ] as const) {

@@ -14,7 +14,12 @@ import type {
   EvaluationEvidenceRef,
   EvaluationHealth,
   EvaluationJson,
+  EvaluationLearningEvidenceTuple,
+  EvaluationLearningWriterFence,
+  EvaluationLearningWriterFenceResult,
   EvaluationMetrics,
+  EvaluationProjectionOutboxEntry,
+  EvaluationProjectionState,
   EvaluationScope,
   ExecutionStatus,
   ObjectiveStatus,
@@ -24,9 +29,11 @@ import type {
   OutcomeSummary,
   OutcomeSummaryQuery,
   OutcomeTrust,
+  ProjectedOutcome,
   SelfAssessmentInput,
   StoredSelfAssessment,
   StoredOutcome,
+  TrustedTaskLearningProjectionReceipt,
 } from './types.js'
 
 export type EvaluationStoreErrorCode = 'idempotency-conflict' | 'invalid-input' | 'not-found'
@@ -69,6 +76,23 @@ interface OutcomeRow {
   recorded_at: number
   evaluator_id: string
   evaluator_version: string
+  task_subject_key: string | null
+  task_subject_kind: 'automation-run' | 'outcome' | null
+  task_subject_ref: string | null
+}
+
+interface ProjectedOutcomeRow extends OutcomeRow {
+  task_subject_key: string
+  task_subject_kind: 'automation-run' | 'outcome'
+  task_subject_ref: string
+  task_objective_conflicted: 0 | 1
+  task_primary_outcome_id: string
+  task_execution_outcome_id: string | null
+  task_objective_outcome_id: string | null
+  task_delivery_outcome_id: string | null
+  task_learning_version: number
+  task_learning_digest: string
+  task_learning_disposition: 'upsert' | 'retract'
 }
 
 interface NormalizedEnvelope extends OutcomeEnvelope {
@@ -92,6 +116,32 @@ interface SelfAssessmentRow {
   situation: string
   execution_status: ExecutionStatus
   delivery_status: DeliveryStatus
+}
+
+interface ProjectionOutboxRow {
+  evaluation_id: string
+  status: 'pending' | 'recorded'
+  attempt_count: number
+  next_attempt_at: number
+  last_failure_at: number | null
+  last_failure_code: string | null
+  created_at: number
+  updated_at: number
+  workspace: string
+  preset: string
+}
+
+function projectionState(row: ProjectionOutboxRow): EvaluationProjectionState {
+  return Object.freeze({
+    evaluationId: row.evaluation_id,
+    scope: Object.freeze({ workspace: row.workspace, preset: row.preset }),
+    status: row.status,
+    attemptCount: row.attempt_count,
+    nextAttemptAt: row.next_attempt_at,
+    ...(row.last_failure_code === null ? {} : { lastFailureCode: row.last_failure_code }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
 }
 
 const standardIntegerMetrics = new Set([
@@ -234,6 +284,56 @@ function stored(row: OutcomeRow): StoredOutcome {
   })
 }
 
+function trustedEvidence(row: OutcomeRow): readonly Readonly<EvaluationEvidenceRef>[] {
+  return Object.freeze((JSON.parse(row.evidence_json) as EvaluationEvidenceRef[])
+    .map(entry => Object.freeze({ ...entry })))
+}
+
+function executionComponent(row: OutcomeRow | undefined) {
+  if (row === undefined) return undefined
+  return Object.freeze({
+    outcomeId: row.id,
+    status: row.execution_status,
+    source: Object.freeze({ kind: row.source_kind, id: row.source_id }),
+    evidence: trustedEvidence(row),
+    occurredAt: row.occurred_at,
+    evaluator: Object.freeze({ id: row.evaluator_id, version: row.evaluator_version }),
+  })
+}
+
+function objectiveComponent(row: OutcomeRow | undefined) {
+  if (row === undefined) return undefined
+  return Object.freeze({
+    outcomeId: row.id,
+    status: row.objective_status,
+    source: Object.freeze({ kind: row.source_kind, id: row.source_id }),
+    evidence: trustedEvidence(row),
+    occurredAt: row.occurred_at,
+    evaluator: Object.freeze({ id: row.evaluator_id, version: row.evaluator_version }),
+  })
+}
+
+function projected(row: ProjectedOutcomeRow): ProjectedOutcome {
+  return Object.freeze({
+    ...stored(row),
+    projection: Object.freeze({
+      subjectKind: row.task_subject_kind,
+      subjectRef: row.task_subject_ref,
+      status: row.task_objective_conflicted === 1 ? 'objective-conflict' as const : 'ready' as const,
+      primaryOutcomeId: row.task_primary_outcome_id,
+      ...(row.task_execution_outcome_id === null
+        ? {} : { executionOutcomeId: row.task_execution_outcome_id }),
+      ...(row.task_objective_outcome_id === null
+        ? {} : { objectiveOutcomeId: row.task_objective_outcome_id }),
+      ...(row.task_delivery_outcome_id === null
+        ? {} : { deliveryOutcomeId: row.task_delivery_outcome_id }),
+      learningVersion: row.task_learning_version,
+      learningDigest: row.task_learning_digest,
+      learningDisposition: row.task_learning_disposition,
+    }),
+  })
+}
+
 function selfAssessment(row: SelfAssessmentRow): StoredSelfAssessment {
   return Object.freeze({
     id: row.id,
@@ -255,6 +355,134 @@ function selfAssessment(row: SelfAssessmentRow): StoredSelfAssessment {
 
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+}
+
+/** Stable cross-package digest for one canonical task learning revision. */
+export function evaluationLearningProjectionDigest(input: {
+  scopeKey: string
+  situation: string
+  execution?: Readonly<{
+    outcomeId: string
+    status: ExecutionStatus
+    source: Readonly<{ kind: OutcomeSourceKind; id: string }>
+    evidence: readonly Readonly<EvaluationEvidenceRef>[]
+    occurredAt: number
+    evaluator: Readonly<{ id: string; version: string }>
+  }>
+  objective?: Readonly<{
+    outcomeId: string
+    status: ObjectiveStatus
+    source: Readonly<{ kind: OutcomeSourceKind; id: string }>
+    evidence: readonly Readonly<EvaluationEvidenceRef>[]
+    occurredAt: number
+    evaluator: Readonly<{ id: string; version: string }>
+  }>
+  projection: Readonly<{
+    subjectKind: 'automation-run' | 'outcome'
+    subjectRef: string
+    disposition: 'upsert' | 'retract'
+    evidenceOutcomeId?: string
+  }>
+}): string {
+  return digest([
+    'evaluation-task-learning/v1',
+    input.scopeKey,
+    input.projection.subjectKind,
+    input.projection.subjectRef,
+    input.projection.disposition,
+    input.situation,
+    input.execution === undefined ? null : [
+      input.execution.outcomeId,
+      input.execution.status,
+      input.execution.source.kind,
+      input.execution.source.id,
+      input.execution.evidence.map(entry => [entry.kind, entry.ref, entry.digest ?? null]),
+      input.execution.occurredAt,
+      input.execution.evaluator.id,
+      input.execution.evaluator.version,
+    ],
+    input.objective === undefined ? null : [
+      input.objective.outcomeId,
+      input.objective.status,
+      input.objective.source.kind,
+      input.objective.source.id,
+      input.objective.evidence.map(entry => [entry.kind, entry.ref, entry.digest ?? null]),
+      input.objective.occurredAt,
+      input.objective.evaluator.id,
+      input.objective.evaluator.version,
+    ],
+    input.projection.evidenceOutcomeId ?? null,
+  ])
+}
+
+interface TaskSubject {
+  key: string
+  kind: 'automation-run' | 'outcome'
+  ref: string
+}
+
+function taskSubject(
+  scopeKey: string,
+  outcomeId: string,
+  references: readonly EvaluationEvidenceRef[],
+): TaskSubject {
+  const automationRunRefs = new Set(references
+    .filter(reference => reference.kind === 'automation-run')
+    .map(reference => reference.ref))
+  if (automationRunRefs.size === 1) {
+    const ref = [...automationRunRefs][0]!
+    return Object.freeze({
+      key: JSON.stringify([scopeKey, 'automation-run', ref]),
+      kind: 'automation-run' as const,
+      ref,
+    })
+  }
+  return Object.freeze({
+    key: JSON.stringify([scopeKey, 'outcome', outcomeId]),
+    kind: 'outcome' as const,
+    ref: outcomeId,
+  })
+}
+
+function newer(left: OutcomeRow, right: OutcomeRow): number {
+  if (left.recorded_at !== right.recorded_at) return left.recorded_at - right.recorded_at
+  return left.id === right.id ? 0 : left.id > right.id ? 1 : -1
+}
+
+function latest(rows: readonly OutcomeRow[]): OutcomeRow | undefined {
+  return rows.reduce<OutcomeRow | undefined>((winner, row) => (
+    winner === undefined || newer(row, winner) > 0 ? row : winner
+  ), undefined)
+}
+
+function containsEvidence(row: OutcomeRow, kind: string): boolean {
+  try {
+    return (JSON.parse(row.evidence_json) as unknown[]).some(entry => (
+      typeof entry === 'object' && entry !== null && !Array.isArray(entry)
+      && (entry as { kind?: unknown }).kind === kind
+    ))
+  } catch {
+    return false
+  }
+}
+
+function isAuthoritativeAutomationTerminal(row: OutcomeRow): boolean {
+  return row.trust === 'trusted'
+    && row.source_kind === 'automation'
+    && row.source_id === 'assistant-automations'
+    && row.evaluator_id === 'assistant-automations'
+    && /^(?:terminal|host-runbook)-v[1-9][0-9]*$/u.test(row.evaluator_version)
+    && containsEvidence(row, 'automation-run')
+}
+
+function isAuthenticatedOwnerFeedback(row: OutcomeRow): boolean {
+  return row.trust === 'trusted'
+    && row.source_kind === 'user-feedback'
+    && row.source_id === 'assistant-delivery/typed-owner-feedback'
+    && row.evaluator_id === 'assistant-delivery-owner-feedback'
+    && row.evaluator_version === '2'
+    && containsEvidence(row, 'automation-run')
+    && containsEvidence(row, 'delivery-outbox')
 }
 
 export class EvaluationStore {
@@ -291,6 +519,12 @@ export class EvaluationStore {
       this.#database.close()
       throw new EvaluationStoreError('invalid-input', 'default summary window exceeds the maximum window')
     }
+    try {
+      this.#rebuildTaskProjections()
+    } catch (error) {
+      this.#database.close()
+      throw error
+    }
   }
 
   close(): void { this.#database.close() }
@@ -308,35 +542,152 @@ export class EvaluationStore {
     const normalized = this.#normalize(input)
     const payloadHash = digest(normalized)
     const id = `outcome-${randomUUID()}`
+    const subject = taskSubject(normalized.scopeKey, id, normalized.evidence)
     const recordedAt = timestamp(this.#now(), 'recordedAt')
     const metric = normalized.metrics
-    this.#database.prepare(`
-      INSERT INTO evaluation_outcomes(
-        id, idempotency_key, payload_hash, scope_key, workspace, preset, situation,
-        execution_status, objective_status, delivery_status, source_kind, source_id,
-        trust, evidence_json, metrics_json, cost_usd_micros, latency_ms, input_tokens,
-        output_tokens, tool_calls, occurred_at, recorded_at, evaluator_id, evaluator_version)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(idempotency_key) DO NOTHING
-    `).run(
-      id, normalized.idempotencyKey, payloadHash, normalized.scopeKey,
-      normalized.scope.workspace, normalized.scope.preset, normalized.situation,
-      normalized.executionStatus, normalized.objectiveStatus, normalized.deliveryStatus,
-      normalized.source.kind, normalized.source.id, normalized.trust,
-      JSON.stringify(normalized.evidence), JSON.stringify(normalized.metrics),
-      metric.costUsdMicros ?? null, metric.latencyMs ?? null, metric.inputTokens ?? null,
-      metric.outputTokens ?? null, metric.toolCalls ?? null, normalized.occurredAt,
-      recordedAt, normalized.evaluator.id, normalized.evaluator.version,
-    )
-    const winner = this.#database.prepare('SELECT * FROM evaluation_outcomes WHERE idempotency_key = ?')
-      .get(normalized.idempotencyKey) as unknown as OutcomeRow
-    if (winner.payload_hash !== payloadHash) {
-      throw new EvaluationStoreError(
-        'idempotency-conflict',
-        'evaluation outcome idempotency key was reused with different content',
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#database.prepare(`
+        INSERT INTO evaluation_outcomes(
+          id, idempotency_key, payload_hash, scope_key, workspace, preset, situation,
+          execution_status, objective_status, delivery_status, source_kind, source_id,
+          trust, evidence_json, metrics_json, cost_usd_micros, latency_ms, input_tokens,
+          output_tokens, tool_calls, occurred_at, recorded_at, evaluator_id, evaluator_version,
+          task_subject_key, task_subject_kind, task_subject_ref)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(idempotency_key) DO NOTHING
+      `).run(
+        id, normalized.idempotencyKey, payloadHash, normalized.scopeKey,
+        normalized.scope.workspace, normalized.scope.preset, normalized.situation,
+        normalized.executionStatus, normalized.objectiveStatus, normalized.deliveryStatus,
+        normalized.source.kind, normalized.source.id, normalized.trust,
+        JSON.stringify(normalized.evidence), JSON.stringify(normalized.metrics),
+        metric.costUsdMicros ?? null, metric.latencyMs ?? null, metric.inputTokens ?? null,
+        metric.outputTokens ?? null, metric.toolCalls ?? null, normalized.occurredAt,
+        recordedAt, normalized.evaluator.id, normalized.evaluator.version,
+        subject.key, subject.kind, subject.ref,
       )
+      const winner = this.#database.prepare('SELECT * FROM evaluation_outcomes WHERE idempotency_key = ?')
+        .get(normalized.idempotencyKey) as unknown as OutcomeRow
+      if (winner.payload_hash !== payloadHash) {
+        throw new EvaluationStoreError(
+          'idempotency-conflict',
+          'evaluation outcome idempotency key was reused with different content',
+        )
+      }
+      const winnerSubject = winner.task_subject_key === null
+        ? taskSubject(winner.scope_key, winner.id, JSON.parse(winner.evidence_json) as EvaluationEvidenceRef[])
+        : {
+            key: winner.task_subject_key,
+            kind: winner.task_subject_kind!,
+            ref: winner.task_subject_ref!,
+          }
+      this.#database.prepare(`
+        INSERT INTO evaluation_task_projections(
+          subject_key, scope_key, subject_kind, subject_ref, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(subject_key) DO NOTHING
+      `).run(
+        winnerSubject.key,
+        winner.scope_key,
+        winnerSubject.kind,
+        winnerSubject.ref,
+        winner.recorded_at,
+      )
+      const refreshed = this.#refreshTaskProjection(winnerSubject.key)
+      if (winner.trust === 'trusted' && refreshed.learningVersionChanged) {
+        this.#database.prepare(`
+          INSERT INTO evaluation_projection_outbox(
+            evaluation_id, status, attempt_count, next_attempt_at,
+            last_failure_at, last_failure_code, created_at, updated_at)
+          VALUES (?, 'pending', 0, ?, NULL, NULL, ?, ?)
+          ON CONFLICT(evaluation_id) DO NOTHING
+        `).run(winner.id, winner.recorded_at, winner.recorded_at, winner.recorded_at)
+        this.#advanceScopeWatermark(winner.scope_key, winner.recorded_at)
+      }
+      this.#database.exec('COMMIT')
+      return stored(winner)
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
     }
-    return stored(winner)
+  }
+
+  listPendingProjections(limitInput = 100, nowInput = this.#now()): EvaluationProjectionOutboxEntry[] {
+    const limit = timestamp(limitInput, 'projection limit')
+    const now = timestamp(nowInput, 'projection now')
+    if (limit < 1 || limit > 1_000) {
+      throw new EvaluationStoreError('invalid-input', 'projection limit must be between 1 and 1000')
+    }
+    const rows = this.#database.prepare(`
+      SELECT projection.*, outcome.workspace, outcome.preset
+      FROM evaluation_projection_outbox projection
+      JOIN evaluation_outcomes outcome ON outcome.id = projection.evaluation_id
+      WHERE projection.status = 'pending' AND projection.next_attempt_at <= ?
+      ORDER BY projection.next_attempt_at, projection.created_at, projection.evaluation_id
+      LIMIT ?
+    `).all(now, limit) as unknown as ProjectionOutboxRow[]
+    return rows.map(row => projectionState(row) as EvaluationProjectionOutboxEntry)
+  }
+
+  peekPendingProjection(scopeInput: EvaluationScope, nowInput = this.#now()): EvaluationProjectionOutboxEntry | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const now = timestamp(nowInput, 'projection now')
+    const row = this.#database.prepare(`
+      SELECT projection.*, outcome.workspace, outcome.preset
+      FROM evaluation_projection_outbox projection
+      JOIN evaluation_outcomes outcome ON outcome.id = projection.evaluation_id
+      WHERE projection.status = 'pending' AND projection.next_attempt_at <= ?
+        AND outcome.scope_key = ? AND outcome.trust = 'trusted'
+      ORDER BY projection.next_attempt_at, projection.created_at, projection.evaluation_id
+      LIMIT 1
+    `).get(now, scopeKey) as unknown as ProjectionOutboxRow | undefined
+    return row === undefined ? undefined : projectionState(row) as EvaluationProjectionOutboxEntry
+  }
+
+  getProjection(scopeInput: EvaluationScope, evaluationIdInput: string): EvaluationProjectionState | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const evaluationId = boundedText(evaluationIdInput, 'evaluationId', 200)
+    const row = this.#database.prepare(`
+      SELECT projection.*, outcome.workspace, outcome.preset
+      FROM evaluation_projection_outbox projection
+      JOIN evaluation_outcomes outcome ON outcome.id = projection.evaluation_id
+      WHERE projection.evaluation_id = ? AND outcome.scope_key = ?
+        AND outcome.trust = 'trusted'
+    `).get(evaluationId, scopeKey) as unknown as ProjectionOutboxRow | undefined
+    return row === undefined ? undefined : projectionState(row)
+  }
+
+  completeProjection(input: { evaluationId: string; now: number }): boolean {
+    const evaluationId = boundedText(input.evaluationId, 'evaluationId', 200)
+    const now = timestamp(input.now, 'projection completion time')
+    return this.#database.prepare(`
+      UPDATE evaluation_projection_outbox
+      SET status = 'recorded', updated_at = ?, last_failure_code = NULL
+      WHERE evaluation_id = ? AND status = 'pending'
+    `).run(now, evaluationId).changes === 1
+  }
+
+  deferProjection(input: {
+    evaluationId: string
+    now: number
+    retryAt: number
+    failureCode: string
+  }): boolean {
+    const evaluationId = boundedText(input.evaluationId, 'evaluationId', 200)
+    const now = timestamp(input.now, 'projection failure time')
+    const retryAt = timestamp(input.retryAt, 'projection retry time')
+    if (retryAt <= now) throw new EvaluationStoreError('invalid-input', 'projection retry must be in the future')
+    const failureCode = boundedText(input.failureCode, 'projection failureCode', 64)
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(failureCode)) {
+      throw new EvaluationStoreError('invalid-input', 'projection failureCode is invalid')
+    }
+    return this.#database.prepare(`
+      UPDATE evaluation_projection_outbox
+      SET attempt_count = attempt_count + 1, next_attempt_at = ?,
+        last_failure_at = ?, last_failure_code = ?, updated_at = ?
+      WHERE evaluation_id = ? AND status = 'pending'
+    `).run(retryAt, now, failureCode, now, evaluationId).changes === 1
   }
 
   /**
@@ -436,6 +787,190 @@ export class EvaluationStore {
     })
   }
 
+  /** Resolve the task projection containing one immutable audit outcome. */
+  getTaskProjection(scopeInput: EvaluationScope, outcomeIdInput: string): ProjectedOutcome | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const outcomeId = boundedText(outcomeIdInput, 'outcomeId', 200)
+    const row = this.#database.prepare(`
+      SELECT task.*
+      FROM evaluation_outcomes audit
+      JOIN evaluation_task_projection_view task
+        ON task.task_subject_key = audit.task_subject_key
+      WHERE audit.id = ? AND audit.scope_key = ?
+    `).get(outcomeId, scopeKey) as unknown as ProjectedOutcomeRow | undefined
+    return row === undefined ? undefined : projected(row)
+  }
+
+  /**
+   * Resolve an append-only outbox trigger to the latest canonical state of its
+   * task. The trigger may be arbitrarily old; version/digest always describe
+   * the current task projection.
+   */
+  getTaskLearningProjection(
+    scopeInput: EvaluationScope,
+    outcomeIdInput: string,
+  ): TrustedTaskLearningProjectionReceipt | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const outcomeId = boundedText(outcomeIdInput, 'outcomeId', 200)
+    const row = this.#database.prepare(`
+      SELECT task.*
+      FROM evaluation_projection_outbox outbox
+      JOIN evaluation_outcomes audit ON audit.id = outbox.evaluation_id
+      JOIN evaluation_task_projection_view task
+        ON task.task_subject_key = audit.task_subject_key
+      WHERE audit.id = ? AND audit.scope_key = ? AND audit.trust = 'trusted'
+    `).get(outcomeId, scopeKey) as unknown as ProjectedOutcomeRow | undefined
+    if (row === undefined || row.trust !== 'trusted') return undefined
+    const watermarkRow = this.#database.prepare(`
+      SELECT watermark FROM evaluation_scope_watermarks WHERE scope_key = ?
+    `).get(scopeKey) as { watermark: number } | undefined
+    if (watermarkRow === undefined || !Number.isSafeInteger(watermarkRow.watermark)
+      || watermarkRow.watermark < 1) {
+      throw new EvaluationStoreError('invalid-input', 'canonical scope watermark is unavailable')
+    }
+    const task = projected(row)
+    const selected = (id: string | undefined): OutcomeRow | undefined => id === undefined
+      ? undefined
+      : this.#database.prepare('SELECT * FROM evaluation_outcomes WHERE id = ? AND scope_key = ?')
+        .get(id, scopeKey) as unknown as OutcomeRow | undefined
+    const execution = executionComponent(selected(task.projection.executionOutcomeId))
+    const objective = task.projection.status === 'objective-conflict'
+      ? undefined
+      : objectiveComponent(selected(task.projection.objectiveOutcomeId))
+    const projection = Object.freeze({
+      subjectKind: task.projection.subjectKind,
+      subjectRef: task.projection.subjectRef,
+      version: task.projection.learningVersion,
+      digest: task.projection.learningDigest,
+      disposition: task.projection.learningDisposition,
+      ...(task.projection.objectiveOutcomeId === undefined
+        ? {} : { evidenceOutcomeId: task.projection.objectiveOutcomeId }),
+    })
+    const receipt: TrustedTaskLearningProjectionReceipt = Object.freeze({
+      triggerOutcomeId: outcomeId,
+      scope: Object.freeze({ ...task.scope }),
+      scopeKey: task.scopeKey,
+      scopeWatermark: watermarkRow.watermark,
+      situation: task.situation,
+      ...(execution === undefined ? {} : { execution }),
+      ...(objective === undefined ? {} : { objective }),
+      projection,
+    })
+    if (projection.version < 1 || !/^[a-f\d]{64}$/u.test(projection.digest)
+      || evaluationLearningProjectionDigest(receipt) !== projection.digest) {
+      throw new EvaluationStoreError('invalid-input', 'canonical task learning projection is corrupt')
+    }
+    return receipt
+  }
+
+  /**
+   * Hold Evaluation's scope writer fence while a synchronous downstream
+   * callback acquires and commits its own writer transaction.  The fixed lock
+   * order is Evaluation first, downstream second; a Promise-returning callback
+   * is rejected so the lock can never escape this stack frame.
+   */
+  withLearningWriterFence<T>(
+    scopeInput: EvaluationScope,
+    fenceInput: EvaluationLearningWriterFence,
+    callback: () => T,
+  ): EvaluationLearningWriterFenceResult<T> {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const fence = this.#normalizeLearningWriterFence(fenceInput)
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const watermark = this.#database.prepare(`
+        SELECT watermark FROM evaluation_scope_watermarks WHERE scope_key = ?
+      `).get(scopeKey) as { watermark: number } | undefined
+      if (watermark?.watermark !== fence.scopeWatermark) {
+        this.#database.exec('COMMIT')
+        return Object.freeze({ matched: false as const, reason: 'watermark-changed' as const })
+      }
+      const pending = this.#database.prepare(`
+        SELECT 1 AS present
+        FROM evaluation_projection_outbox outbox
+        JOIN evaluation_outcomes outcome ON outcome.id = outbox.evaluation_id
+        WHERE outcome.scope_key = ? AND outcome.trust = 'trusted'
+          AND outbox.status = 'pending'
+        LIMIT 1
+      `).get(scopeKey) as { present: 1 } | undefined
+      if (pending !== undefined) {
+        this.#database.exec('COMMIT')
+        return Object.freeze({ matched: false as const, reason: 'projection-pending' as const })
+      }
+      const statement = this.#database.prepare(`
+        SELECT learning_version AS version, learning_digest AS digest,
+          learning_disposition AS disposition
+        FROM evaluation_task_projections
+        WHERE scope_key = ? AND subject_kind = ? AND subject_ref = ?
+      `)
+      for (const evidence of fence.evidence) {
+        const current = statement.get(
+          scopeKey,
+          evidence.subjectKind,
+          evidence.subjectRef,
+        ) as { version: number; digest: string; disposition: 'upsert' | 'retract' } | undefined
+        if (current === undefined || current.version !== evidence.version
+          || current.digest !== evidence.digest || current.disposition !== 'upsert') {
+          this.#database.exec('COMMIT')
+          return Object.freeze({ matched: false as const, reason: 'evidence-changed' as const })
+        }
+      }
+      const value = callback()
+      if (typeof value === 'object' && value !== null && 'then' in value
+        && typeof (value as { then?: unknown }).then === 'function') {
+        throw new EvaluationStoreError(
+          'invalid-input',
+          'learning writer fence callback must be synchronous',
+        )
+      }
+      this.#database.exec('COMMIT')
+      return Object.freeze({ matched: true as const, value })
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  /** Query one deterministic latest row per task; raw query() remains the audit API. */
+  queryTasks(input: OutcomeQuery): ProjectedOutcome[] {
+    const { scopeKey } = canonicalEvaluationScope(input.scope)
+    const limit = input.limit ?? Math.min(50, this.#maxQueryLimit)
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > this.#maxQueryLimit) {
+      throw new EvaluationStoreError('invalid-input', `query limit must be between 1 and ${this.#maxQueryLimit}`)
+    }
+    const clauses = ['scope_key = ?']
+    const parameters: Array<string | number> = [scopeKey]
+    const add = (column: string, value: string | number | undefined) => {
+      if (value === undefined) return
+      clauses.push(`${column} = ?`)
+      parameters.push(value)
+    }
+    add('situation', input.situation === undefined ? undefined : this.#situation(input.situation))
+    add('execution_status', input.executionStatus === undefined
+      ? undefined : oneOf(input.executionStatus, executionStatuses, 'executionStatus'))
+    add('objective_status', input.objectiveStatus === undefined
+      ? undefined : oneOf(input.objectiveStatus, objectiveStatuses, 'objectiveStatus'))
+    add('delivery_status', input.deliveryStatus === undefined
+      ? undefined : oneOf(input.deliveryStatus, deliveryStatuses, 'deliveryStatus'))
+    add('source_kind', input.sourceKind === undefined
+      ? undefined : oneOf(input.sourceKind, outcomeSourceKinds, 'sourceKind'))
+    add('trust', input.trust === undefined ? undefined : oneOf(input.trust, outcomeTrustLevels, 'trust'))
+    if (input.excludeSituationPrefix !== undefined) {
+      const prefix = this.#situation(input.excludeSituationPrefix)
+      clauses.push('substr(situation, 1, length(?)) <> ?')
+      parameters.push(prefix, prefix)
+    }
+    const [from, to] = this.#optionalRange(input.fromOccurredAt, input.toOccurredAt)
+    if (from !== undefined) { clauses.push('occurred_at >= ?'); parameters.push(from) }
+    if (to !== undefined) { clauses.push('occurred_at <= ?'); parameters.push(to) }
+    parameters.push(limit)
+    const rows = this.#database.prepare(`
+      SELECT * FROM evaluation_task_projection_view WHERE ${clauses.join(' AND ')}
+      ORDER BY occurred_at DESC, task_subject_key DESC LIMIT ?
+    `).all(...parameters) as unknown as ProjectedOutcomeRow[]
+    return rows.map(row => projected(row))
+  }
+
   query(input: OutcomeQuery): StoredOutcome[] {
     const { scopeKey } = canonicalEvaluationScope(input.scope)
     const limit = input.limit ?? Math.min(50, this.#maxQueryLimit)
@@ -507,7 +1042,7 @@ export class EvaluationStore {
         TOTAL(tool_calls) AS tool_calls,
         TOTAL(latency_ms) AS latency_total,
         COUNT(latency_ms) AS latency_count
-      FROM evaluation_outcomes
+      FROM evaluation_task_projection_view
       WHERE scope_key = ? AND occurred_at >= ? AND occurred_at <= ?
         AND (? IS NULL OR situation = ?)
         AND (? IS NULL OR substr(situation, 1, length(?)) <> ?)
@@ -564,6 +1099,17 @@ export class EvaluationStore {
     `).get() as { outcomes: number; trusted: number | null; self_reported: number | null; external: number | null; latest: number | null }
     const assessmentRow = this.#database.prepare('SELECT COUNT(*) AS count FROM evaluation_self_assessments')
       .get() as { count: number }
+    const taskRow = this.#database.prepare(`
+      SELECT COUNT(*) AS count, SUM(objective_conflicted) AS conflicted
+      FROM evaluation_task_projections WHERE primary_outcome_id IS NOT NULL
+    `).get() as { count: number; conflicted: number | null }
+    const projectionRow = this.#database.prepare(`
+      SELECT COUNT(*) AS pending,
+        SUM(attempt_count > 0) AS retrying,
+        TOTAL(attempt_count) AS attempts,
+        MIN(created_at) AS oldest
+      FROM evaluation_projection_outbox WHERE status = 'pending'
+    `).get() as { pending: number; retrying: number | null; attempts: number; oldest: number | null }
     return Object.freeze({
       ready: true,
       schemaVersion: evaluationSchemaVersion,
@@ -572,7 +1118,274 @@ export class EvaluationStore {
       selfReportedOutcomes: row.self_reported ?? 0,
       externalOutcomes: row.external ?? 0,
       selfAssessments: assessmentRow.count,
+      taskProjections: taskRow.count,
+      conflictedTaskProjections: taskRow.conflicted ?? 0,
+      pendingProjections: projectionRow.pending,
+      retryingProjections: projectionRow.retrying ?? 0,
+      projectionAttempts: projectionRow.attempts,
+      ...(projectionRow.oldest === null ? {} : { oldestPendingProjectionAt: projectionRow.oldest }),
       ...(row.latest === null ? {} : { latestOccurredAt: row.latest }),
+    })
+  }
+
+  #rebuildTaskProjections(): void {
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const rows = this.#database.prepare(`
+        SELECT * FROM evaluation_outcomes ORDER BY recorded_at, id
+      `).all() as unknown as OutcomeRow[]
+      const updateOutcome = this.#database.prepare(`
+        UPDATE evaluation_outcomes
+        SET task_subject_key = ?, task_subject_kind = ?, task_subject_ref = ?
+        WHERE id = ?
+      `)
+      const insertSubject = this.#database.prepare(`
+        INSERT INTO evaluation_task_projections(
+          subject_key, scope_key, subject_kind, subject_ref, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(subject_key) DO UPDATE SET
+          scope_key = excluded.scope_key,
+          subject_kind = excluded.subject_kind,
+          subject_ref = excluded.subject_ref
+      `)
+      const subjects = new Set<string>()
+      for (const row of rows) {
+        const subject = row.task_subject_key === null
+          || row.task_subject_kind === null
+          || row.task_subject_ref === null
+          ? taskSubject(row.scope_key, row.id, JSON.parse(row.evidence_json) as EvaluationEvidenceRef[])
+          : { key: row.task_subject_key, kind: row.task_subject_kind, ref: row.task_subject_ref }
+        if (row.task_subject_key !== subject.key
+          || row.task_subject_kind !== subject.kind
+          || row.task_subject_ref !== subject.ref) {
+          updateOutcome.run(subject.key, subject.kind, subject.ref, row.id)
+        }
+        insertSubject.run(subject.key, row.scope_key, subject.kind, subject.ref, row.recorded_at)
+        subjects.add(subject.key)
+      }
+      for (const subjectKey of [...subjects].sort()) {
+        const refreshed = this.#refreshTaskProjection(subjectKey)
+        if (!refreshed.learningVersionChanged) continue
+        const current = this.#database.prepare(`
+          SELECT projection.scope_key, projection.primary_outcome_id, projection.updated_at,
+            outcome.trust
+          FROM evaluation_task_projections projection
+          JOIN evaluation_outcomes outcome ON outcome.id = projection.primary_outcome_id
+          WHERE projection.subject_key = ?
+        `).get(subjectKey) as {
+          scope_key: string
+          primary_outcome_id: string
+          updated_at: number
+          trust: OutcomeTrust
+        }
+        if (current.trust !== 'trusted') continue
+        this.#database.prepare(`
+          INSERT INTO evaluation_projection_outbox(
+            evaluation_id, status, attempt_count, next_attempt_at,
+            last_failure_at, last_failure_code, created_at, updated_at)
+          VALUES (?, 'pending', 0, ?, NULL, NULL, ?, ?)
+          ON CONFLICT(evaluation_id) DO UPDATE SET
+            status = 'pending', attempt_count = 0,
+            next_attempt_at = excluded.next_attempt_at,
+            last_failure_at = NULL, last_failure_code = NULL,
+            updated_at = excluded.updated_at
+        `).run(
+          current.primary_outcome_id,
+          current.updated_at,
+          current.updated_at,
+          current.updated_at,
+        )
+        this.#advanceScopeWatermark(current.scope_key, current.updated_at)
+      }
+      this.#database.exec('COMMIT')
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  #refreshTaskProjection(subjectKey: string): { learningVersionChanged: boolean } {
+    const projection = this.#database.prepare(`
+      SELECT subject_kind, subject_ref, learning_version, learning_digest, learning_disposition
+      FROM evaluation_task_projections WHERE subject_key = ?
+    `).get(subjectKey) as {
+      subject_kind: 'automation-run' | 'outcome'
+      subject_ref: string
+      learning_version: number
+      learning_digest: string | null
+      learning_disposition: 'upsert' | 'retract' | null
+    } | undefined
+    if (projection === undefined) {
+      throw new EvaluationStoreError('not-found', 'task projection subject was not found')
+    }
+    const rows = this.#database.prepare(`
+      SELECT * FROM evaluation_outcomes WHERE task_subject_key = ?
+      ORDER BY recorded_at, id
+    `).all(subjectKey) as unknown as OutcomeRow[]
+    if (rows.length === 0) return { learningVersionChanged: false }
+
+    let primary: OutcomeRow
+    let execution: OutcomeRow | undefined
+    let objective: OutcomeRow | undefined
+    let delivery: OutcomeRow | undefined
+    let objectiveConflicted = false
+    if (projection.subject_kind === 'outcome') {
+      primary = latest(rows)!
+      execution = primary
+      objective = primary
+      delivery = primary
+    } else {
+      const terminals = rows.filter(row => isAuthoritativeAutomationTerminal(row))
+      execution = latest(terminals)
+
+      const owners = rows.filter(row => isAuthenticatedOwnerFeedback(row)
+        && row.objective_status !== 'unknown')
+      const ownerStatuses = new Set(owners.map(row => row.objective_status))
+      if (ownerStatuses.size > 1) objectiveConflicted = true
+      else if (owners.length > 0) objective = latest(owners)
+      else {
+        const trustedObjectives = rows.filter(row => row.trust === 'trusted'
+          && row.source_kind !== 'user-feedback'
+          && row.objective_status !== 'unknown')
+        const ranked = trustedObjectives.map(row => ({
+          row,
+          // Independent trusted evaluators supersede the terminal producer's
+          // initial objective, while an owner judgement has already won above.
+          rank: isAuthoritativeAutomationTerminal(row) ? 1 : 2,
+        })).sort((left, right) => left.rank - right.rank || newer(left.row, right.row))
+        objective = ranked.at(-1)?.row
+      }
+
+      const ownerDelivery = latest(rows.filter(row => isAuthenticatedOwnerFeedback(row)
+        && row.delivery_status === 'delivered'))
+      const trustedDelivery = latest(rows.filter(row => row.trust === 'trusted'
+        && row.source_kind === 'delivery' && row.delivery_status !== 'unknown'))
+      delivery = ownerDelivery ?? trustedDelivery ?? execution
+
+      const rankedPrimary = rows.map(row => ({
+        row,
+        rank: isAuthoritativeAutomationTerminal(row)
+          ? 4
+          : isAuthenticatedOwnerFeedback(row)
+            ? 3
+            : row.trust === 'trusted'
+              ? 2
+              : row.trust === 'external' ? 1 : 0,
+      })).sort((left, right) => left.rank - right.rank || newer(left.row, right.row))
+      primary = rankedPrimary.at(-1)!.row
+    }
+    const objectiveStatus = objectiveConflicted ? 'unknown' : objective?.objective_status ?? 'unknown'
+    const objectiveSituationMismatch = objective !== undefined && objective.situation !== primary.situation
+    const hostRunbook = execution !== undefined && isAuthoritativeAutomationTerminal(execution)
+      && /^host-runbook-v[1-9][0-9]*$/u.test(execution.evaluator_version)
+    const learningDisposition = !objectiveConflicted
+      && !objectiveSituationMismatch
+      && objective?.trust === 'trusted'
+      && (objectiveStatus === 'achieved' || objectiveStatus === 'not-achieved')
+      && (projection.subject_kind !== 'automation-run' || execution !== undefined)
+      && !hostRunbook
+      ? 'upsert' as const
+      : 'retract' as const
+    const evidenceOutcomeId = objectiveConflicted ? undefined : objective?.id
+    const learningExecution = executionComponent(execution)
+    const learningObjective = objectiveConflicted ? undefined : objectiveComponent(objective)
+    const learningDigest = evaluationLearningProjectionDigest({
+      scopeKey: primary.scope_key,
+      situation: primary.situation,
+      ...(learningExecution === undefined ? {} : { execution: learningExecution }),
+      ...(learningObjective === undefined ? {} : { objective: learningObjective }),
+      projection: {
+        subjectKind: projection.subject_kind,
+        subjectRef: projection.subject_ref,
+        disposition: learningDisposition,
+        ...(evidenceOutcomeId === undefined ? {} : { evidenceOutcomeId }),
+      },
+    })
+    const learningVersionChanged = projection.learning_digest !== learningDigest
+      || projection.learning_disposition !== learningDisposition
+    const learningVersion = projection.learning_version === 0
+      ? 1
+      : learningVersionChanged
+        ? projection.learning_version + 1
+        : projection.learning_version
+    if (!Number.isSafeInteger(learningVersion)) {
+      throw new EvaluationStoreError('invalid-input', 'task learning projection version overflow')
+    }
+    const updatedAt = Math.max(...rows.map(row => row.recorded_at))
+    this.#database.prepare(`
+      UPDATE evaluation_task_projections
+      SET primary_outcome_id = ?, execution_outcome_id = ?, objective_outcome_id = ?,
+        delivery_outcome_id = ?, objective_conflicted = ?, learning_version = ?,
+        learning_digest = ?, learning_disposition = ?, updated_at = ?
+      WHERE subject_key = ?
+    `).run(
+      primary.id,
+      execution?.id ?? null,
+      objectiveConflicted ? null : objective?.id ?? null,
+      delivery?.id ?? null,
+      objectiveConflicted ? 1 : 0,
+      learningVersion,
+      learningDigest,
+      learningDisposition,
+      updatedAt,
+      subjectKey,
+    )
+    return { learningVersionChanged: projection.learning_version === 0 || learningVersionChanged }
+  }
+
+  #advanceScopeWatermark(scopeKey: string, updatedAt: number): number {
+    this.#database.prepare(`
+      INSERT INTO evaluation_scope_watermarks(scope_key, watermark, updated_at)
+      VALUES (?, 1, ?)
+      ON CONFLICT(scope_key) DO UPDATE SET
+        watermark = evaluation_scope_watermarks.watermark + 1,
+        updated_at = excluded.updated_at
+    `).run(scopeKey, updatedAt)
+    const row = this.#database.prepare(`
+      SELECT watermark FROM evaluation_scope_watermarks WHERE scope_key = ?
+    `).get(scopeKey) as { watermark: number }
+    if (!Number.isSafeInteger(row.watermark) || row.watermark < 1) {
+      throw new EvaluationStoreError('invalid-input', 'canonical scope watermark overflow')
+    }
+    return row.watermark
+  }
+
+  #normalizeLearningWriterFence(
+    input: EvaluationLearningWriterFence,
+  ): Readonly<{ scopeWatermark: number; evidence: readonly Readonly<EvaluationLearningEvidenceTuple>[] }> {
+    if (typeof input !== 'object' || input === null || Array.isArray(input)
+      || !Number.isSafeInteger(input.scopeWatermark) || input.scopeWatermark < 1
+      || !Array.isArray(input.evidence) || input.evidence.length < 1
+      || input.evidence.length > 10_000) {
+      throw new EvaluationStoreError('invalid-input', 'learning writer fence is invalid')
+    }
+    const seen = new Set<string>()
+    const entries = input.evidence.map((raw, index) => {
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)
+        || raw.disposition !== 'upsert'
+        || (raw.subjectKind !== 'automation-run' && raw.subjectKind !== 'outcome')
+        || !Number.isSafeInteger(raw.version) || raw.version < 1
+        || raw.version > 1_000_000_000
+        || typeof raw.digest !== 'string' || !/^[a-f\d]{64}$/u.test(raw.digest)) {
+        throw new EvaluationStoreError('invalid-input', `learning writer fence evidence[${index}] is invalid`)
+      }
+      const subjectRef = boundedText(raw.subjectRef, `evidence[${index}].subjectRef`, 1_000)
+      const identity = JSON.stringify([raw.subjectKind, subjectRef])
+      if (seen.has(identity)) {
+        throw new EvaluationStoreError('invalid-input', 'learning writer fence contains duplicate evidence')
+      }
+      seen.add(identity)
+      return Object.freeze({
+        subjectKind: raw.subjectKind,
+        subjectRef,
+        version: raw.version,
+        digest: raw.digest,
+        disposition: 'upsert' as const,
+      })
+    })
+    return Object.freeze({
+      scopeWatermark: input.scopeWatermark,
+      evidence: Object.freeze(entries),
     })
   }
 

@@ -23,6 +23,7 @@ export interface HeartbeatConfig {
   maxToolCalls?: number
   budgetId?: string
   budgetAmount?: number
+  approvalBindingId?: string
   deliveryBindingId?: string
 }
 
@@ -31,9 +32,13 @@ export interface Config {
   maxScratchBytes?: number
 }
 
-export interface NormalizedHeartbeatConfig extends Required<Omit<HeartbeatConfig, 'budgetAmount' | 'budgetId' | 'deliveryBindingId'>> {
+export interface NormalizedHeartbeatConfig extends Required<Omit<
+  HeartbeatConfig,
+  'approvalBindingId' | 'budgetAmount' | 'budgetId' | 'deliveryBindingId'
+>> {
   budgetId?: string
   budgetAmount?: number
+  approvalBindingId?: string
   deliveryBindingId?: string
 }
 
@@ -75,6 +80,7 @@ const heartbeatSchema = Schema.object({
   maxToolCalls: Schema.number().step(1).min(0).max(100).default(4),
   budgetId: Schema.string(),
   budgetAmount: Schema.number().step(1).min(1).max(10_000_000),
+  approvalBindingId: Schema.string(),
   deliveryBindingId: Schema.string(),
 })
 
@@ -91,9 +97,13 @@ function text(value: unknown, field: string, maxBytes = 500): string {
 }
 
 function normalizeProfile(value: HeartbeatConfig): NormalizedHeartbeatConfig {
-  const parsed = heartbeatSchema(value) as Required<Omit<HeartbeatConfig, 'budgetAmount' | 'budgetId' | 'deliveryBindingId'>> & {
+  const parsed = heartbeatSchema(value) as Required<Omit<
+    HeartbeatConfig,
+    'approvalBindingId' | 'budgetAmount' | 'budgetId' | 'deliveryBindingId'
+  >> & {
     budgetId?: string
     budgetAmount?: number
+    approvalBindingId?: string
     deliveryBindingId?: string
   }
   const id = text(parsed.id, 'heartbeat id', 200)
@@ -141,6 +151,9 @@ function normalizeProfile(value: HeartbeatConfig): NormalizedHeartbeatConfig {
     principal: text(parsed.principal, 'principal', 500),
     allowedTools: Object.freeze(allowedTools) as unknown as string[],
     ...(parsed.budgetId === undefined ? {} : { budgetId: text(parsed.budgetId, 'budgetId', 200) }),
+    ...(parsed.approvalBindingId === undefined
+      ? {}
+      : { approvalBindingId: text(parsed.approvalBindingId, 'approvalBindingId', 500) }),
     ...(parsed.deliveryBindingId === undefined
       ? {}
       : { deliveryBindingId: text(parsed.deliveryBindingId, 'deliveryBindingId', 500) }),
@@ -210,6 +223,9 @@ export function heartbeatDefinition(
     ...(profile.budgetId === undefined ? {} : {
       budgetId: profile.budgetId,
       budgetAmount: profile.budgetAmount!,
+    }),
+    ...(profile.approvalBindingId === undefined ? {} : {
+      approvalBindingId: profile.approvalBindingId,
     }),
     ...(profile.deliveryBindingId === undefined ? {} : {
       deliveryBindingId: profile.deliveryBindingId,

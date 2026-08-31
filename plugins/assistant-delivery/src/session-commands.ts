@@ -42,6 +42,51 @@ export function isPermissionDeliveryCommand(
   return command?.name === 'permission' || command?.name === 'permissions'
 }
 
+/** Typed feedback dispatches only replay-safe idempotent Host ledger writes. */
+export function isFeedbackDeliveryCommand(
+  envelope: Readonly<Pick<InboundEnvelope, 'kind' | 'text'>>,
+): boolean {
+  return parseDeliveryCommand(envelope)?.name === 'feedback'
+}
+
+/** Workflow commands commit only idempotent owner-ledger revisions. */
+export function isWorkflowDeliveryCommand(
+  envelope: Readonly<Pick<InboundEnvelope, 'kind' | 'text'>>,
+): boolean {
+  return parseDeliveryCommand(envelope)?.name === 'workflow'
+}
+
+/** Learning controls commit only idempotent owner-scoped Preference mutations. */
+export function isLearningDeliveryCommand(
+  envelope: Readonly<Pick<InboundEnvelope, 'kind' | 'text'>>,
+): boolean {
+  return parseDeliveryCommand(envelope)?.name === 'learning'
+}
+
+export const feedbackDispatchRecoveryCode = 'feedback-dispatch-recovery' as const
+export const workflowDispatchRecoveryCode = 'workflow-dispatch-recovery' as const
+export const learningDispatchRecoveryCode = 'learning-dispatch-recovery' as const
+
+export function isLearningDispatchRecoveryCode(value: string | undefined): boolean {
+  return value === learningDispatchRecoveryCode
+}
+
+export function isWorkflowDispatchRecoveryCode(value: string | undefined): boolean {
+  return value === workflowDispatchRecoveryCode
+}
+
+export function isFeedbackDispatchRecoveryCode(value: string | undefined): boolean {
+  return value === feedbackDispatchRecoveryCode
+}
+
+export function isFeedbackRetryableFailureCode(value: string | undefined): boolean {
+  return value === 'preference-feedback-state-unknown' || value === 'objective-feedback-state-unknown'
+}
+
+export function isLearningRetryableFailureCode(value: string | undefined): boolean {
+  return value === 'learning-control-state-unknown'
+}
+
 export function permissionDispatchRecoveryCode(recovery: PermissionDispatchRecovery): string {
   return permissionDispatchRecoveryCodes[recovery]
 }

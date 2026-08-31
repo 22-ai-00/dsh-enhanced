@@ -245,7 +245,12 @@ describe('event triggers service', () => {
     const databasePath = join(root, 'events.sqlite')
     let now = 1_000
     const store = new EventTriggerStore({ path: databasePath, now: () => now })
-    for (let index = 0; index < 1_000; index += 1) {
+    // `flushPending()` reads one page of 100 items at a time. One complete stale
+    // page is sufficient to prove it advances to the later live item, without
+    // making the regression test depend on disk throughput from 1,000 separate
+    // SQLite transactions when the repository suite runs in parallel.
+    const stalePageSize = 100
+    for (let index = 0; index < stalePageSize; index += 1) {
       now += 1
       expect(store.acceptWebhook({
         triggerId: 'removed', eventId: `stale-${index}`, occurredAt: now, cooldownMs: 0, maxFires: 2_000,
@@ -272,7 +277,7 @@ describe('event triggers service', () => {
     await service.flushPending()
 
     expect(automations.events).toEqual([expect.objectContaining({ automationId: 'live-task' })])
-    expect(service.health()).toMatchObject({ pendingEvents: 0, quarantinedEvents: 1_000, deliveredEvents: 1 })
+    expect(service.health()).toMatchObject({ pendingEvents: 0, quarantinedEvents: stalePageSize, deliveredEvents: 1 })
     await ctx.fiber.restart()
   }, 15_000)
 })

@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-evolution",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Approval-gated behavioural self-evolution for the DSH personal assistant.",
   "license": "MIT",
   "type": "module",
@@ -54,7 +54,9 @@
     "@deepseek-ai/dsh-llm": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-session": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.8 <0.2.0",
-    "@dsh-enhanced/assistant-delivery": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/assistant-evaluation": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
@@ -76,6 +78,12 @@
     "@dsh-enhanced/assistant-delivery": {
       "optional": true
     },
+    "@dsh-enhanced/assistant-automations": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-evaluation": {
+      "optional": true
+    },
     "@dsh-enhanced/assistant-policy": {
       "optional": true
     }
@@ -90,6 +98,8 @@
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
+    "@dsh-enhanced/assistant-automations": "workspace:*",
+    "@dsh-enhanced/assistant-evaluation": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",

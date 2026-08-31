@@ -44,6 +44,18 @@ describe('Lark inbound normalization', () => {
     })
   })
 
+  test('preserves an exact provider reply target as bounded non-prompt metadata', () => {
+    expect(normalizeLarkMessage(config, message({
+      messageId: 'om_feedback', content: '/feedback helpful', replyToMessageId: 'om_answer',
+    }), 100_100)).toMatchObject({
+      outcome: 'accept',
+      envelope: { metadata: { replyToProviderMessageId: 'om_answer' } },
+    })
+    expect(() => normalizeLarkMessage(config, message({
+      replyToMessageId: '../om_answer',
+    }), 100_100)).toThrow(/replyToMessageId/i)
+  })
+
   test('isolates group conversations by provider thread and requires a direct bot mention', () => {
     const accepted = normalizeLarkMessage(config, message({
       chatType: 'group', mentionedBot: true, rootId: 'om_root', threadId: 'omt_thread', content: '/new',

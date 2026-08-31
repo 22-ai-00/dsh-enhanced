@@ -15,25 +15,74 @@ import {
   type PolicyDecision,
 } from '@dsh-enhanced/assistant-policy'
 import {
+  TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
+  type TrustedDeliveryEvaluationClaims,
+  type TrustedDeliveryEvaluationRegistration,
+} from '@dsh-enhanced/assistant-evaluation'
+import {
+  ASSISTANT_GROWTH_CONTRACT_VERSION,
+  growthObjectDigest,
+  validateResolvedWorkflowAutomationTemplate,
+  validateWorkflowAutomationTemplate,
+  validateWorkflowScope,
+  validateWorkflowTraceProjectionReceipt,
+  workflowArgumentShapeDigest,
+  type GrowthWorkflowTraceSourceRegistration,
+  type ResolvedWorkflowAutomationTemplate,
+  type WorkflowAutomationTemplate,
+  type WorkflowScope,
+  type WorkflowTraceSink,
+} from '@dsh-enhanced/assistant-growth-contract'
+import {
   DeliveryAdapterRegistry,
   DeliveryCoordinator,
   InboundCoordinator,
   type InboundMessageProcessor,
 } from './coordinator.js'
-import { DeliveryStore, DeliveryStoreError } from './store.js'
+import { DeliveryStore, DeliveryStoreError, type OwnerRouteDispatchGuard } from './store.js'
 import { DshDeliveryRuntime } from './agent-runtime.js'
 import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
-import { canonicalConversation, externalPrincipalId } from './canonical.js'
+import {
+  bindingMatchesOwnerRoute,
+  canonicalBackgroundSourceId as canonicalHostBackgroundSourceId,
+  canonicalConversation,
+  canonicalLocalOperatorId,
+  canonicalOwnerRouteAuthority,
+  externalPrincipalId,
+  ownerRouteAuthorityHash,
+  ownerRouteBindingSnapshot,
+} from './canonical.js'
 import { isExactDeliveryCommand, parseDeliveryCommand } from './session-commands.js'
-import type { FeedbackSignalSelection } from './feedback-command.js'
+import {
+  feedbackSignalInput,
+  classifyNaturalPreferenceDirective,
+  observedResponseLanguage,
+  type FeedbackSignalSelection,
+} from './feedback-command.js'
+import type { WorkflowCommand } from './workflow-command.js'
+import {
+  DELIVERY_PREFERENCE_PROJECTION_PROTOCOL,
+  TRUSTED_DELIVERY_PRESENTATION_PRODUCER_PROTOCOL,
+} from './types.js'
 import type {
   ConversationBinding,
   ConversationRef,
   DeliveryAdapter,
-  DeliveryPreferenceFeedback,
-  DeliveryPreferenceFeedbackListener,
+  DeadLetterResolutionResult,
+  DeliveryLearningControlAction,
+  DeliveryLearningControlReceipt,
+  DeliveryLearningControlRequest,
+  DeliveryOwnerLineage,
+  DeliveryPreferenceEvent,
+  DeliveryPreferenceCompletion,
   DeliveryPreferenceFeedbackReceipt,
+  DeliveryPreferenceObservation,
+  DeliveryPreferenceRegistration,
+  DeliveryPreferenceProducer,
+  DeliveryPreferencePrincipalAttestation,
+  DeliveryPreferenceTurnAttestation,
+  DeliveryPresentationUpdate,
   DeliveryToolApprovalRequest,
   ExternalPrincipalKey,
   InboundEnvelope,
@@ -44,10 +93,204 @@ import type {
   ModelSelectionResult,
   ModelSelectionSettlementInput,
   ModelSelectionTerminalResult,
+  OwnerRouteAuthority,
+  OwnerRouteValidationReceipt,
+  OutboundIntent,
   OutboxRecord,
   PairingChallenge,
   PermissionPickerIntent,
+  ResolvedOwnerRoute,
+  StoredDeliveryPresentation,
+  TrustedDeliveryPresentationProducer,
+  TrustedDeliveryPresentationRegistration,
 } from './types.js'
+
+const trustedDeliveryPreferenceProducers = new WeakSet<object>()
+const deliveryPreferenceProducerProbe = Symbol('assistant-delivery.preference-producer-probe')
+
+/**
+ * Process-local authenticity against accidental service-slot collisions. The
+ * private symbol is never exported, so copying the public method shape is not
+ * enough to solicit a genuine registration. This is not an OS/process sandbox
+ * boundary against code already executing inside the trusted Host process.
+ */
+export function isTrustedDeliveryPreferenceProducer(
+  value: unknown,
+): value is DeliveryPreferenceProducer {
+  if (typeof value !== 'object' || value === null) return false
+  try {
+    const probe = (value as Record<PropertyKey, unknown>)[deliveryPreferenceProducerProbe]
+    if (typeof probe !== 'function') return false
+    const exact = (probe as () => unknown)()
+    return typeof exact === 'object' && exact !== null
+      && trustedDeliveryPreferenceProducers.has(exact)
+  } catch {
+    return false
+  }
+}
+
+const learningMetadataPrefix = 'dsh.learning.'
+const automationObjectiveFeedbackFooter = [
+  '',
+  '---',
+  '任务结果反馈：直接回复本消息并发送 `/feedback achieved`、`/feedback partial` 或 `/feedback not-achieved`。',
+  '`helpful` 等只记录偏好，不会被当成任务成败。',
+].join('\n')
+
+interface AutomationDeliveryEvidenceResolver {
+  resolveDeliveryEvidence(input: {
+    automationId: string
+    runId: string
+    expectedWorkspace: string
+    expectedBindingId: string
+    expectedOutputDigest: string
+  }): Readonly<{
+    schemaVersion: 1
+    source: 'assistant-automations'
+    executionKind: 'agent'
+    automationId: string
+    runId: string
+    occurrenceId: string
+    workspace: string
+    agentPreset: string
+    bindingId: string
+    situation: string
+    occurredAt: number
+    executionStatus: 'succeeded'
+    outputDigest: string
+    proofDigest: string
+  }> | undefined
+}
+
+function isAutomationDeliveryEvidenceResolver(value: unknown): value is AutomationDeliveryEvidenceResolver {
+  return typeof value === 'object' && value !== null
+    && typeof (value as Partial<AutomationDeliveryEvidenceResolver>).resolveDeliveryEvidence === 'function'
+}
+
+function registrationOwnedByEvaluation(
+  registration: Readonly<TrustedDeliveryEvaluationRegistration>,
+): boolean {
+  const candidate = registration as Readonly<TrustedDeliveryEvaluationRegistration> & Readonly<{
+    owner?: Readonly<{
+      ownsTrustedDeliveryEvaluationRegistration(
+        value: Readonly<TrustedDeliveryEvaluationRegistration>,
+      ): boolean
+    }>
+  }>
+  try {
+    return typeof candidate.owner === 'object' && candidate.owner !== null
+      && typeof candidate.owner.ownsTrustedDeliveryEvaluationRegistration === 'function'
+      && candidate.owner.ownsTrustedDeliveryEvaluationRegistration(registration)
+  } catch {
+    return false
+  }
+}
+
+function registrationOwnedByPreference(
+  registration: Readonly<DeliveryPreferenceRegistration>,
+): boolean {
+  try {
+    return typeof registration.owner === 'object' && registration.owner !== null
+      && typeof registration.owner.ownsDeliveryPreferenceRegistration === 'function'
+      && registration.owner.ownsDeliveryPreferenceRegistration(registration)
+  } catch {
+    return false
+  }
+}
+
+function isTrustedDeliveryPresentationProducer(
+  value: unknown,
+): value is TrustedDeliveryPresentationProducer {
+  return typeof value === 'object' && value !== null
+    && typeof (value as Partial<TrustedDeliveryPresentationProducer>)
+      .trustedDeliveryPresentationProducerGeneration === 'function'
+    && typeof (value as Partial<TrustedDeliveryPresentationProducer>)
+      .registerTrustedDeliveryPresentationSink === 'function'
+}
+
+function validatePreferenceProjectionReceipts(
+  receipts: unknown,
+  events: readonly Readonly<DeliveryPreferenceEvent>[],
+): void {
+  if (!Array.isArray(receipts) || receipts.length !== events.length) {
+    throw Object.assign(new Error('preference projection receipt batch is invalid'), {
+      code: 'invalid-receipt',
+    })
+  }
+  const expected = new Set(events.map(event => event.idempotencyKey))
+  const received = new Set<string>()
+  for (const receipt of receipts as readonly Readonly<DeliveryPreferenceFeedbackReceipt>[]) {
+    if (receipt?.status !== 'recorded' || typeof receipt.idempotencyKey !== 'string'
+      || !expected.has(receipt.idempotencyKey) || received.has(receipt.idempotencyKey)) {
+      throw Object.assign(new Error('preference projection receipt is invalid'), {
+        code: 'invalid-receipt',
+      })
+    }
+    received.add(receipt.idempotencyKey)
+  }
+}
+
+function validateLearningControlReceipt(
+  value: unknown,
+  request: Readonly<DeliveryLearningControlRequest>,
+): asserts value is Readonly<DeliveryLearningControlReceipt> {
+  if (typeof value !== 'object' || value === null) throw new Error('learning control receipt is invalid')
+  const receipt = value as Partial<DeliveryLearningControlReceipt>
+  if (receipt.action !== request.action || receipt.idempotencyKey !== request.idempotencyKey) {
+    throw new Error('learning control receipt identity is invalid')
+  }
+  if (receipt.outcome === 'stale') return
+  if (receipt.outcome !== 'applied' || typeof receipt.replayed !== 'boolean'
+    || typeof receipt.state !== 'object' || receipt.state === null) {
+    throw new Error('learning control receipt outcome is invalid')
+  }
+  const state = receipt.state
+  if (!['active', 'disabled', 'paused'].includes(state.mode as string)
+    || typeof state.administrativelyEnabled !== 'boolean'
+    || !['active', 'paused'].includes(state.collectionMode as string)
+    || [state.signals, state.hypotheses, state.storedActiveOverlays,
+      state.effectiveActiveOverlays, state.activeOverlays, state.shadowHypotheses]
+      .some(count => !Number.isSafeInteger(count) || count < 0)) {
+    throw new Error('learning control receipt state is invalid')
+  }
+  const expectedMode = state.administrativelyEnabled ? state.collectionMode : 'disabled'
+  const expectedEffective = state.administrativelyEnabled && state.collectionMode === 'active'
+    ? state.storedActiveOverlays
+    : 0
+  if (state.mode !== expectedMode || state.effectiveActiveOverlays !== expectedEffective
+    || state.activeOverlays !== expectedEffective) {
+    throw new Error('learning control receipt state gates are inconsistent')
+  }
+  if (request.action === 'forget'
+    && (!Number.isSafeInteger(receipt.deletedSignals) || receipt.deletedSignals! < 0
+      || !Number.isSafeInteger(receipt.deletedHypotheses) || receipt.deletedHypotheses! < 0)) {
+    throw new Error('learning forget receipt is invalid')
+  }
+  if (request.action === 'explain') {
+    if (!Array.isArray(receipt.explanation)) throw new Error('learning explain receipt is invalid')
+    for (const item of receipt.explanation) {
+      if (typeof item !== 'object' || item === null
+        || typeof item.key !== 'string' || typeof item.value !== 'string'
+        || !['active', 'inactive', 'rolled-back', 'shadow', 'suppressed'].includes(item.state)
+        || !Number.isSafeInteger(item.version) || item.version < 1
+        || [item.supportingSignals, item.contradictingSignals, item.evidenceMass]
+          .some(count => !Number.isSafeInteger(count) || count < 0)) {
+        throw new Error('learning explain receipt is invalid')
+      }
+    }
+  }
+  if (request.action === 'rollback'
+    && (typeof receipt.rolledBack !== 'boolean'
+      || (receipt.rolledBack
+        ? !Number.isSafeInteger(receipt.rolledBackVersion) || receipt.rolledBackVersion! < 2
+        : receipt.rolledBackVersion !== undefined))) {
+    throw new Error('learning rollback receipt is invalid')
+  }
+}
+
+function containsReservedLearningMetadata(metadata: Readonly<Record<string, string>> | undefined): boolean {
+  return metadata !== undefined && Object.keys(metadata).some(key => key.startsWith(learningMetadataPrefix))
+}
 
 export interface Config {
   databasePath: string
@@ -71,6 +314,8 @@ export interface Config {
   modelPickerTtlMs?: number
   permissionPickerTtlMs?: number
   toolApprovalTtlMs?: number
+  /** Host-owned stable routes. They are never exposed as Agent tools or prompt input. */
+  ownerRoutes?: readonly OwnerRouteAuthority[]
 }
 
 export interface DeliveryInboundRuntime extends InboundMessageProcessor {
@@ -123,6 +368,27 @@ const configSchema = Schema.object({
   modelPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   permissionPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   toolApprovalTtlMs: Schema.number().step(1).min(1_000).max(300_000).default(300_000),
+  ownerRoutes: Schema.array(Schema.object({
+    id: Schema.string().min(1).required(),
+    conversation: Schema.object({
+      channel: Schema.string().min(1).required(),
+      account: Schema.string().min(1).required(),
+      tenant: Schema.string().min(1).required(),
+      kind: Schema.union(['dm', 'group'] as const).required(),
+      chat: Schema.string().min(1).required(),
+      thread: Schema.string(),
+    }).required(),
+    principal: Schema.object({
+      channel: Schema.string().min(1).required(),
+      account: Schema.string().min(1).required(),
+      tenant: Schema.string().min(1).required(),
+      user: Schema.string().min(1).required(),
+    }).required(),
+    workspace: Schema.string().min(1).required(),
+    agentPreset: Schema.string().min(1).required(),
+    policyRef: Schema.string().min(1).required(),
+    minimumGeneration: Schema.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).required(),
+  })).default([]),
 }) as Schema<Config>
 
 declare module '@deepseek-ai/cordis' {
@@ -133,6 +399,73 @@ declare module '@deepseek-ai/cordis' {
 
 function policyDenied(decision: PolicyDecision): AssistantDeliveryError {
   return new AssistantDeliveryError('policy-denied', `assistant-delivery policy denied operation: ${decision.reasonCode}`)
+}
+
+function canonicalBackgroundSourceId(input: unknown): string {
+  try {
+    return canonicalHostBackgroundSourceId(input)
+  } catch {
+    throw new AssistantDeliveryError('runtime-conflict', 'background source identity is invalid')
+  }
+}
+
+function canonicalOwnerRouteId(input: unknown): string {
+  const id = canonicalBackgroundSourceId(input)
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(id)) {
+    throw new AssistantDeliveryError('missing-binding', 'owner route authority id is invalid')
+  }
+  return id
+}
+
+function canonicalRouteIdempotencyKey(input: unknown): string {
+  if (typeof input !== 'string') {
+    throw new AssistantDeliveryError('runtime-conflict', 'owner route idempotency key is invalid')
+  }
+  const normalized = input.trim()
+  const hasControl = [...normalized].some(character => {
+    const code = character.codePointAt(0)!
+    return code <= 0x1f || code === 0x7f
+  })
+  if (normalized === '' || normalized.length > 512 || hasControl) {
+    throw new AssistantDeliveryError('runtime-conflict', 'owner route idempotency key is invalid')
+  }
+  return normalized
+}
+
+interface DeliveryEvaluationSinkRegistration {
+  token: symbol
+  registration: Readonly<TrustedDeliveryEvaluationRegistration>
+}
+
+interface WorkflowTraceSinkRegistration {
+  token: symbol
+  sink: WorkflowTraceSink
+}
+
+type DeliveryPresentationProducerId = 'assistant-automations' | 'assistant-evolution'
+
+interface DeliveryPresentationProducerBinding {
+  readonly producerId: DeliveryPresentationProducerId
+  readonly producer: TrustedDeliveryPresentationProducer
+  readonly generation: string
+  readonly registration: Readonly<TrustedDeliveryPresentationRegistration>
+  readonly dispose: () => void
+}
+
+/** One exact Policy identity shared by enqueue admission and dispatch rechecks. */
+function authorizeOwnerRoute(
+  policy: AssistantPolicyService,
+  authority: Readonly<OwnerRouteAuthority>,
+  sourceId: string,
+  idempotencyKey: string,
+): PolicyDecision {
+  const operationDigest = createHash('sha256').update(JSON.stringify([
+    sourceId, authority.id, ownerRouteAuthorityHash(authority as OwnerRouteAuthority), idempotencyKey,
+  ])).digest('hex')
+  return policy.authorize({ subject: { kind: 'background', id: sourceId,
+    workspace: authority.workspace, principal: externalPrincipalId(authority.principal) }, action: 'send',
+  resource: { kind: 'message', id: `route:${authority.id}` },
+  context: { initiator: 'background' } }, { idempotencyKey: `message-route-send:${operationDigest}` })
 }
 
 function pickerIncludesRoute(picker: Readonly<ModelPickerIntent>, route: Readonly<ModelRouteRef>): boolean {
@@ -320,11 +653,14 @@ export class AssistantDeliveryService extends Service {
   static Config = configSchema
 
   private readonly deliveryStore: DeliveryStore
+  private readonly context: Context
   private readonly policy: AssistantPolicyService
   private readonly registry: DeliveryAdapterRegistry
   private readonly outbound: DeliveryCoordinator
   private readonly inbound: InboundCoordinator
   private readonly config: Required<Config>
+  private readonly ownerRoutes: ReadonlyMap<string, Readonly<OwnerRouteAuthority>>
+  private readonly ownerRouteGuard: Readonly<OwnerRouteDispatchGuard>
   private readonly ownerId = `assistant-delivery-${randomUUID()}`
   private readonly bindingFlights = new Map<string, Promise<ConversationBinding>>()
   private readonly conversationTransitions = new Map<string, Promise<void>>()
@@ -332,9 +668,26 @@ export class AssistantDeliveryService extends Service {
   private readonly toolApprovalControllers = new Set<AbortController>()
   private readonly modelSelectionWaiters = new Map<string, Set<ModelSelectionWaiter>>()
   private preferenceFeedbackSink:
-    | Readonly<{ token: symbol; listener: DeliveryPreferenceFeedbackListener }>
+    | Readonly<{
+      token: symbol
+      registration: Readonly<DeliveryPreferenceRegistration>
+      dispose: () => void
+    }>
     | undefined
+  private evaluationSink: DeliveryEvaluationSinkRegistration | undefined
+  private workflowTraceSink: WorkflowTraceSinkRegistration | undefined
+  private automationPresentationBinding: DeliveryPresentationProducerBinding | undefined
+  private evolutionPresentationBinding: DeliveryPresentationProducerBinding | undefined
+  private readonly activePresentationRegistrations = new WeakSet<object>()
+  private readonly evaluationProducerGeneration = `assistant-delivery:${randomUUID()}`
+  private readonly preferenceProducerGeneration = `assistant-delivery-preference:${randomUUID()}`
+  private readonly preferenceTurns = new WeakMap<Agent, Readonly<DeliveryPreferenceTurnAttestation>>()
   private modelSelectionFlight: Promise<void> | undefined
+  private presentationFlight: Promise<void> | undefined
+  private workflowTraceFlight: Promise<void> | undefined
+  private preferenceProjectionFlight: Promise<void> | undefined
+  private workflowTraceRetryTimer: ReturnType<typeof setTimeout> | undefined
+  private preferenceProjectionRetryTimer: ReturnType<typeof setTimeout> | undefined
   private modelSelectionRetryTimer: ReturnType<typeof setTimeout> | undefined
   private runtime: DeliveryInboundRuntime | undefined
   private timer: ReturnType<typeof setInterval> | undefined
@@ -342,6 +695,14 @@ export class AssistantDeliveryService extends Service {
 
   constructor(ctx: Context, input: Config) {
     super(ctx, 'assistantDelivery')
+    trustedDeliveryPreferenceProducers.add(this)
+    Object.defineProperty(this, deliveryPreferenceProducerProbe, {
+      value: () => this,
+      enumerable: false,
+      configurable: false,
+      writable: false,
+    })
+    this.context = ctx
     let config: Required<Config>
     try {
       config = AssistantDeliveryService.Config(input) as Required<Config>
@@ -355,9 +716,39 @@ export class AssistantDeliveryService extends Service {
     if (policy === undefined) throw new Error('assistant-delivery: assistantPolicy service is required')
     mkdirSync(config.spoolPath, { recursive: true, mode: 0o700 })
     chmodSync(config.spoolPath, 0o700)
-    this.config = config
+    let ownerRoutes: OwnerRouteAuthority[]
+    try {
+      ownerRoutes = config.ownerRoutes.map(route => canonicalOwnerRouteAuthority(route))
+    } catch (error) {
+      throw new Error(`assistant-delivery: invalid owner route authority: ${String(error)}`, { cause: error })
+    }
+    if (new Set(ownerRoutes.map(route => route.id)).size !== ownerRoutes.length) {
+      throw new Error('assistant-delivery: invalid owner route authority: duplicate id')
+    }
+    const frozenOwnerRoutes = Object.freeze(ownerRoutes.map(route => Object.freeze({
+      ...route,
+      conversation: Object.freeze({ ...route.conversation }),
+      principal: Object.freeze({ ...route.principal }),
+    })))
+    this.config = { ...config, ownerRoutes: frozenOwnerRoutes }
+    this.ownerRoutes = new Map(frozenOwnerRoutes.map(route => [route.id, route]))
     this.policy = policy
+    const ownerRouteGuard: OwnerRouteDispatchGuard = {
+      ownerRoutes: [...this.ownerRoutes.values()],
+      authorize: ({ authority, sourceId, idempotencyKey }) =>
+        authorizeOwnerRoute(this.policy, authority, sourceId, idempotencyKey).effect === 'allow',
+    }
+    this.ownerRouteGuard = Object.freeze(ownerRouteGuard)
     this.deliveryStore = new DeliveryStore({ path: config.databasePath, maxTextBytes: config.maxTextBytes })
+    ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
+      this.capturePreferenceTurn(agent, message.source, turn)
+    })
+    ctx.on('agent/inbox/discarded', ({ agent }) => {
+      this.preferenceTurns.delete(agent)
+    })
+    ctx.on('agent/status', ({ agent, status }) => {
+      if (status === 'idle') this.preferenceTurns.delete(agent)
+    })
     this.registry = new DeliveryAdapterRegistry({
       accept: async envelope => {
         const result = await this.acceptInbound(envelope)
@@ -376,7 +767,9 @@ export class AssistantDeliveryService extends Service {
     })
     this.outbound = new DeliveryCoordinator({ store: this.deliveryStore, registry: this.registry,
       ownerId: this.ownerId, leaseMs: config.leaseMs, maxAttempts: config.maxAttempts,
-      maxConcurrency: config.maxConcurrency, retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs })
+      maxConcurrency: config.maxConcurrency, retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs,
+      ownerRouteGuard: this.ownerRouteGuard,
+    })
     this.inbound = new InboundCoordinator({ store: this.deliveryStore, processor: () => this.runtime,
       ownerId: this.ownerId, leaseMs: config.leaseMs, maxAttempts: config.maxAttempts,
       maxConcurrency: config.maxConcurrency, retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs })
@@ -399,6 +792,14 @@ export class AssistantDeliveryService extends Service {
         authorizeOwnerPreferenceFeedback: (binding, envelope, selections) =>
           this.authorizeOwnerPreferenceFeedback(binding, envelope, selections),
         dispatchPreferenceFeedback: events => this.dispatchPreferenceFeedback(events),
+        replyCompletedPreferenceTurn: (agent, binding, envelope, reply) =>
+          this.replyCompletedPreferenceTurn(agent, binding, envelope, reply),
+        dispatchObjectiveFeedback: (binding, envelope, objectiveStatus) =>
+          this.dispatchObjectiveFeedback(binding, envelope, objectiveStatus),
+        dispatchWorkflowCommand: (binding, envelope, command) =>
+          this.dispatchWorkflowCommand(binding, envelope, command),
+        dispatchLearningCommand: (binding, envelope, action, preferenceKey) =>
+          this.dispatchLearningCommand(binding, envelope, action, preferenceKey),
         authorizePermissionReply: (binding, envelope) => this.authorizePermissionReply(binding, envelope),
         beginModelCommand: conversation => this.deliveryStore.beginModelCommand(conversation),
         commitModelCommand: input => this.deliveryStore.commitModelCommand(input),
@@ -419,14 +820,6 @@ export class AssistantDeliveryService extends Service {
           ...(reply.modelPicker === undefined ? {} : { modelPicker: reply.modelPicker }),
           ...(reply.permissionPicker === undefined ? {} : { permissionPicker: reply.permissionPicker }),
         }) },
-        reply: (agent, eventId, reply) => { this.reply(agent, {
-          idempotencyKey: `inbound:${eventId}:reply`,
-          text: reply.text,
-          replyToEventId: eventId,
-          ...(reply.format === undefined ? {} : { format: reply.format }),
-          ...(reply.modelPicker === undefined ? {} : { modelPicker: reply.modelPicker }),
-          ...(reply.permissionPicker === undefined ? {} : { permissionPicker: reply.permissionPicker }),
-        }) },
       }))
       void this.drainModelSelectionSettlements()
       return unregister
@@ -434,10 +827,36 @@ export class AssistantDeliveryService extends Service {
     ctx.inject(['approval'], approvalCtx => approvalCtx.on('approval/request', (request, next) =>
       this.requestToolApproval(approvalCtx, request, next)))
     ctx.inject(['tools'], toolsCtx => registerDeliveryTools(toolsCtx, this))
+    // Presentation writes are intentionally reverse-bound. Delivery creates
+    // the publisher closure and hands it only to the exact live domain service;
+    // a public service-slot caller can no longer forge a terminal projection.
+    const currentAutomations = ctx.get('assistantAutomations' as never) as unknown
+    if (isTrustedDeliveryPresentationProducer(currentAutomations)) {
+      this.bindPresentationProducer('assistant-automations', currentAutomations)
+    }
+    ctx.inject(['assistantAutomations' as never], automationsCtx => {
+      const producer = automationsCtx.get('assistantAutomations' as never) as unknown
+      if (!isTrustedDeliveryPresentationProducer(producer)) return
+      return this.bindPresentationProducer('assistant-automations', producer)
+    })
+    const currentEvolution = ctx.get('assistantEvolution' as never) as unknown
+    if (isTrustedDeliveryPresentationProducer(currentEvolution)) {
+      this.bindPresentationProducer('assistant-evolution', currentEvolution)
+    }
+    ctx.inject(['assistantEvolution' as never], evolutionCtx => {
+      const producer = evolutionCtx.get('assistantEvolution' as never) as unknown
+      if (!isTrustedDeliveryPresentationProducer(producer)) return
+      return this.bindPresentationProducer('assistant-evolution', producer)
+    })
     if (config.schedulerEnabled) this.start()
     ctx.effect(() => async () => {
       this.active = false
+      trustedDeliveryPreferenceProducers.delete(this)
       this.preferenceFeedbackSink = undefined
+      this.evaluationSink = undefined
+      this.workflowTraceSink = undefined
+      this.automationPresentationBinding?.dispose()
+      this.evolutionPresentationBinding?.dispose()
       this.cancelModelSelectionWaiters()
       for (const controller of this.toolApprovalControllers) {
         controller.abort(new Error('assistant-delivery is stopping'))
@@ -934,17 +1353,26 @@ export class AssistantDeliveryService extends Service {
     id: string
     expectedAttemptCount: number
     resolution: 'cancel' | 'retry'
-  }): InboxRecord | OutboxRecord {
+  }): DeadLetterResolutionResult<InboxRecord> | DeadLetterResolutionResult<OutboxRecord> {
     this.assertActive()
-    const decision = this.policy.authorize({ subject: { kind: 'external', id: `local:${input.operatorId}` },
+    let operatorId: string
+    try {
+      operatorId = canonicalLocalOperatorId(input.operatorId)
+    } catch {
+      throw new AssistantDeliveryError('runtime-conflict', 'dead-letter operator identity is invalid')
+    }
+    const operationDigest = createHash('sha256').update(JSON.stringify([
+      operatorId, input.kind, input.id, input.expectedAttemptCount, input.resolution,
+    ])).digest('hex')
+    const decision = this.policy.authorize({ subject: { kind: 'external', id: `local:${operatorId}` },
       action: 'delivery.resolve', resource: { kind: 'message', id: `${input.kind}:${input.id}` },
-      context: { initiator: 'foreground' } }, { idempotencyKey: `delivery-resolve:${input.kind}:${input.id}:${input.expectedAttemptCount}:${input.resolution}` })
+      context: { initiator: 'foreground' } }, { idempotencyKey: `delivery-resolve:${operationDigest}` })
     if (decision.effect !== 'allow') throw policyDenied(decision)
     return input.kind === 'inbox'
       ? this.deliveryStore.resolveInbox({ inboxId: input.id, expectedAttemptCount: input.expectedAttemptCount,
-        resolution: input.resolution })
+        resolution: input.resolution, operatorId })
       : this.deliveryStore.resolveOutbox({ outboxId: input.id, expectedAttemptCount: input.expectedAttemptCount,
-        resolution: input.resolution })
+        resolution: input.resolution, operatorId })
   }
 
   registerInboundRuntime(runtime: DeliveryInboundRuntime): () => void {
@@ -964,32 +1392,435 @@ export class AssistantDeliveryService extends Service {
     return this.registry.register(adapter)
   }
 
-  /**
-   * Trusted Host registration seam for the one authoritative, durable sink.
-   * It is intentionally not an Agent tool. The receipt contract prevents a
-   * no-op observer from being mistaken for persistence.
-   */
-  subscribePreferenceFeedback(listener: DeliveryPreferenceFeedbackListener): () => void {
+  currentPreferenceTurn(agent: Agent): Readonly<DeliveryPreferenceTurnAttestation> | undefined {
     this.assertActive()
-    if (typeof listener !== 'function') {
-      throw new TypeError('assistant-delivery: preference feedback listener must be a function')
+    const attestation = this.preferenceTurns.get(agent)
+    if (attestation === undefined
+      || String(agent.session.id) !== attestation.sessionId
+      || agent.session.header.cwd !== attestation.scope.workspace
+      || agent.session.header.agentPreset !== attestation.scope.preset) return undefined
+    const binding = this.deliveryStore.getBinding(attestation.bindingId)
+    const inbox = this.deliveryStore.getInbox(attestation.sourceInboxId)
+    const lineage = binding === undefined ? undefined : this.ownerLineageForBinding(binding)
+    if (binding?.status !== 'active' || binding.version !== attestation.bindingVersion
+      || binding.sessionId !== attestation.sessionId
+      || inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+      || inbox.envelope.eventId !== attestation.sourceEventId
+      || lineage?.principalRecordId !== attestation.principalLineage.principalRecordId
+      || lineage?.principalVersion !== attestation.principalLineage.principalVersion
+      || !this.isOwnerFeedbackController(binding, inbox.envelope)) return undefined
+    const started = agent.session.events.some(event =>
+      event.type === 'turn/start' && event.data.turn === attestation.turn)
+    const ended = agent.session.events.some(event =>
+      event.type === 'turn/end' && event.data.turn === attestation.turn)
+    return started && !ended ? attestation : undefined
+  }
+
+  preferencePrincipalForAgent(
+    agent: Agent,
+  ): Readonly<DeliveryPreferencePrincipalAttestation> | undefined {
+    this.assertActive()
+    const sessionId = String(agent.session.id)
+    const binding = this.deliveryStore.getBindingBySession(sessionId)
+    const principal = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+    if (binding?.status !== 'active' || binding.sessionId !== sessionId
+      || binding.workspace !== agent.session.header.cwd
+      || binding.agentPreset !== agent.session.header.agentPreset
+      || principal?.status !== 'active' || principal.role !== 'owner'
+      || JSON.stringify(principal.principal) !== JSON.stringify(binding.principal)) return undefined
+    return Object.freeze({
+      scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+      principalId: externalPrincipalId(binding.principal),
+      principalLineage: Object.freeze({
+        principalRecordId: principal.id,
+        principalVersion: principal.version,
+      }),
+      bindingId: binding.id,
+      bindingVersion: binding.version,
+      sessionId,
+    })
+  }
+
+  private capturePreferenceTurn(agent: Agent, sourceInput: unknown, turnInput: unknown): void {
+    if (!this.active || typeof sourceInput !== 'object' || sourceInput === null
+      || !Number.isSafeInteger(turnInput) || (turnInput as number) < 0) return
+    const source = sourceInput as { kind?: unknown; channel?: unknown; account?: unknown; eventId?: unknown }
+    if (source.kind !== 'delivery' || typeof source.channel !== 'string'
+      || typeof source.account !== 'string' || typeof source.eventId !== 'string') return
+    const sessionId = String(agent.session.id)
+    const binding = this.deliveryStore.getBindingBySession(sessionId)
+    const inbox = this.deliveryStore.getInboxByProviderEvent(source.channel, source.account, source.eventId)
+    const lineage = binding === undefined ? undefined : this.ownerLineageForBinding(binding)
+    if (binding?.status !== 'active' || inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+      || binding.sessionId !== sessionId || binding.workspace !== agent.session.header.cwd
+      || binding.agentPreset !== agent.session.header.agentPreset
+      || lineage === undefined
+      || !this.isOwnerFeedbackController(binding, inbox.envelope)) return
+    this.preferenceTurns.set(agent, Object.freeze({
+      scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+      principalId: externalPrincipalId(binding.principal),
+      principalLineage: lineage,
+      bindingId: binding.id,
+      bindingVersion: binding.version,
+      sessionId,
+      sourceEventId: source.eventId,
+      sourceInboxId: inbox.id,
+      turn: turnInput as number,
+    }))
+  }
+
+  trustedPreferenceProducerGeneration(): string {
+    this.assertActive()
+    return this.preferenceProducerGeneration
+  }
+
+  /** Exact process-local Preference owner registration; copied or self-asserted sinks fail. */
+  registerTrustedPreferenceSink(
+    registration: Readonly<DeliveryPreferenceRegistration>,
+  ): () => void {
+    this.assertActive()
+    if (registration.protocol !== DELIVERY_PREFERENCE_PROJECTION_PROTOCOL
+      || registration.producer !== 'preference-learning'
+      || registration.generation !== this.preferenceProducerGeneration
+      || typeof registration.append !== 'function'
+      || (registration.appendSynchronously !== undefined
+        && typeof registration.appendSynchronously !== 'function')
+      || !registrationOwnedByPreference(registration)) {
+      throw new AssistantDeliveryError('runtime-conflict', 'trusted Preference registration is invalid')
     }
     if (this.preferenceFeedbackSink !== undefined) {
-      throw new Error('assistant-delivery: a preference feedback sink is already registered')
+      if (this.preferenceFeedbackSink.registration === registration) {
+        return this.preferenceFeedbackSink.dispose
+      }
+      throw new AssistantDeliveryError('runtime-conflict', 'trusted Preference sink is already registered')
     }
-    const token = Symbol('preference-feedback-sink')
-    this.preferenceFeedbackSink = Object.freeze({ token, listener })
+    const token = Symbol('assistant-delivery.trusted-preference')
     let active = true
-    return () => {
+    const dispose = () => {
       if (!active) return
       active = false
       if (this.preferenceFeedbackSink?.token === token) this.preferenceFeedbackSink = undefined
     }
+    this.preferenceFeedbackSink = Object.freeze({ token, registration, dispose })
+    this.deliveryStore.requeuePreferenceProjections()
+    void this.drainPreferenceProjections()
+    return dispose
+  }
+
+  trustedEvaluationProducerGeneration(): string {
+    this.assertActive()
+    return this.evaluationProducerGeneration
+  }
+
+  registerTrustedDeliveryEvaluationSink(
+    registration: Readonly<TrustedDeliveryEvaluationRegistration>,
+  ): () => void {
+    this.assertActive()
+    if (registration.protocol !== TRUSTED_EVALUATION_PRODUCER_PROTOCOL
+      || registration.producer !== 'assistant-delivery'
+      || registration.generation !== this.evaluationProducerGeneration
+      || typeof registration.issueCapability !== 'function'
+      || typeof registration.append !== 'function'
+      || !registrationOwnedByEvaluation(registration)) {
+      throw new AssistantDeliveryError('runtime-conflict', 'trusted Evaluation registration is invalid')
+    }
+    if (this.evaluationSink !== undefined) {
+      throw new AssistantDeliveryError('runtime-conflict', 'trusted Evaluation sink is already registered')
+    }
+    const token = Symbol('assistant-delivery.trusted-evaluation')
+    this.evaluationSink = Object.freeze({ token, registration })
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      if (this.evaluationSink?.token === token) this.evaluationSink = undefined
+    }
+  }
+
+  /**
+   * Register Growth's exact private sink. Replaying current is deliberately
+   * queued after this method returns so a registration receipt can never be
+   * confused with synchronous projection success.
+   */
+  registerWorkflowTraceSink(input: Readonly<{
+    contractVersion: 1
+    sink: WorkflowTraceSink
+  }>): GrowthWorkflowTraceSourceRegistration {
+    this.assertActive()
+    if (typeof input !== 'object' || input === null
+      || Object.keys(input).sort().join(',') !== 'contractVersion,sink'
+      || input.contractVersion !== ASSISTANT_GROWTH_CONTRACT_VERSION
+      || typeof input.sink !== 'object' || input.sink === null
+      || typeof input.sink.projectWorkflowTraceRevision !== 'function') {
+      throw new AssistantDeliveryError('runtime-conflict', 'workflow trace sink registration is invalid')
+    }
+    if (this.workflowTraceSink !== undefined) {
+      throw new AssistantDeliveryError('runtime-conflict', 'workflow trace sink is already registered')
+    }
+    const token = Symbol('assistant-delivery.workflow-trace')
+    this.workflowTraceSink = Object.freeze({ token, sink: input.sink })
+    const source = this.deliveryStore.workflowTraceSourceAttestation()
+    let registered = true
+    const receipt = Object.freeze({
+      contractVersion: ASSISTANT_GROWTH_CONTRACT_VERSION,
+      ...source,
+      dispose: () => {
+        if (!registered) return
+        registered = false
+        if (this.workflowTraceSink?.token === token) this.workflowTraceSink = undefined
+      },
+    }) satisfies GrowthWorkflowTraceSourceRegistration
+    queueMicrotask(() => {
+      if (!this.active || this.workflowTraceSink?.token !== token) return
+      this.deliveryStore.requeueCurrentWorkflowTraces()
+      void this.drainWorkflowTraces()
+    })
+    return receipt
+  }
+
+  resolveWorkflowAutomationTemplate(input: Readonly<{
+    contractVersion: 1
+    template: Readonly<WorkflowAutomationTemplate>
+    scope: Readonly<WorkflowScope>
+    ownerBindingId: string
+  }>): Readonly<ResolvedWorkflowAutomationTemplate> {
+    this.assertActive()
+    if (typeof input !== 'object' || input === null
+      || Object.keys(input).sort().join(',') !== 'contractVersion,ownerBindingId,scope,template'
+      || input.contractVersion !== ASSISTANT_GROWTH_CONTRACT_VERSION
+      || typeof input.ownerBindingId !== 'string') {
+      throw new AssistantDeliveryError('runtime-conflict', 'workflow template resolution request is invalid')
+    }
+    const template = validateWorkflowAutomationTemplate(input.template)
+    const scope = validateWorkflowScope(input.scope)
+    const stored = this.deliveryStore.getWorkflowAutomationTemplate(template)
+    const binding = this.deliveryStore.getBinding(input.ownerBindingId)
+    const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+    const principalId = binding === undefined ? undefined : externalPrincipalId(binding.principal)
+    if (stored === undefined || stored.status !== 'active'
+      || stored.resolved.ownerBindingId !== input.ownerBindingId
+      || stored.resolved.scope.workspace !== scope.workspace
+      || stored.resolved.scope.preset !== scope.preset
+      || binding?.status !== 'active' || binding.workspace !== scope.workspace
+      || binding.agentPreset !== scope.preset || owner?.status !== 'active' || owner.role !== 'owner'
+      || stored.review.bindingId !== binding.id
+      || stored.review.bindingVersion !== binding.version
+      || stored.review.bindingGeneration !== binding.generation
+      || stored.review.principalId !== owner.id
+      || stored.resolved.principalId !== principalId) {
+      throw new AssistantDeliveryError('missing-binding', 'workflow template owner review is stale')
+    }
+    const decision = this.policy.authorize({
+      subject: { kind: 'background', id: 'assistant-growth-experiments',
+        workspace: scope.workspace, principal: externalPrincipalId(binding.principal) },
+      action: 'inspect',
+      resource: { kind: 'evolution', id: `workflow-template:${template.templateRef}` },
+      context: { initiator: 'background' },
+    }, { idempotencyKey: `workflow-template-resolve:${template.templateDigest}:${binding.version}` })
+    if (decision.effect !== 'allow') throw policyDenied(decision)
+    // Policy evaluation is not a lock. Re-read the mutable route immediately
+    // before returning private prompt material.
+    const currentBinding = this.deliveryStore.getBinding(binding.id)
+    const currentOwner = currentBinding === undefined
+      ? undefined
+      : this.deliveryStore.getPrincipal(currentBinding.principal)
+    const currentTemplate = this.deliveryStore.getWorkflowAutomationTemplate(template)
+    if (currentBinding?.status !== 'active' || currentBinding.version !== binding.version
+      || currentBinding.generation !== binding.generation
+      || currentOwner?.status !== 'active' || currentOwner.role !== 'owner'
+      || currentTemplate?.status !== 'active' || currentTemplate.version !== stored.version
+      || currentTemplate.review.bindingId !== currentBinding.id
+      || currentTemplate.review.bindingVersion !== currentBinding.version
+      || currentTemplate.review.bindingGeneration !== currentBinding.generation
+      || currentTemplate.review.principalId !== currentOwner.id
+      || currentTemplate.resolved.principalId !== externalPrincipalId(currentBinding.principal)) {
+      throw new AssistantDeliveryError('missing-binding', 'workflow template authority changed during resolution')
+    }
+    return validateResolvedWorkflowAutomationTemplate(currentTemplate.resolved)
   }
 
   health(): ReturnType<DeliveryStore['health']> & { adapters: number } {
     this.assertActive()
     return { ...this.deliveryStore.health(), adapters: this.registry.size() }
+  }
+
+  /** Exact process-local proof for a Delivery-minted publisher registration. */
+  ownsTrustedDeliveryPresentationRegistration(
+    registration: Readonly<TrustedDeliveryPresentationRegistration>,
+  ): boolean {
+    return this.active && typeof registration === 'object' && registration !== null
+      && this.activePresentationRegistrations.has(registration)
+  }
+
+  getDeliveryPresentation(presentationKey: string): StoredDeliveryPresentation | undefined {
+    this.assertActive()
+    return this.deliveryStore.getDeliveryPresentation(presentationKey)
+  }
+
+  private presentationBinding(
+    producerId: DeliveryPresentationProducerId,
+  ): DeliveryPresentationProducerBinding | undefined {
+    return producerId === 'assistant-automations'
+      ? this.automationPresentationBinding
+      : this.evolutionPresentationBinding
+  }
+
+  private setPresentationBinding(
+    producerId: DeliveryPresentationProducerId,
+    binding: DeliveryPresentationProducerBinding | undefined,
+  ): void {
+    if (producerId === 'assistant-automations') this.automationPresentationBinding = binding
+    else this.evolutionPresentationBinding = binding
+  }
+
+  private presentationProducerGeneration(producer: TrustedDeliveryPresentationProducer): string {
+    let generation: unknown
+    try {
+      generation = producer.trustedDeliveryPresentationProducerGeneration()
+    } catch {
+      throw new AssistantDeliveryError('runtime-conflict', 'presentation producer generation is unavailable')
+    }
+    if (typeof generation !== 'string') {
+      throw new AssistantDeliveryError('runtime-conflict', 'presentation producer generation is invalid')
+    }
+    const normalized = generation.normalize('NFC').trim()
+    const hasControl = [...normalized].some(character => {
+      const code = character.codePointAt(0)!
+      return code <= 0x1f || code === 0x7f
+    })
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(normalized) || hasControl) {
+      throw new AssistantDeliveryError('runtime-conflict', 'presentation producer generation is invalid')
+    }
+    return normalized
+  }
+
+  /**
+   * Delivery owns the registration and its publish closure. The producer only
+   * receives that closure after it has proven this exact in-process object is
+   * its expected Delivery owner; replacement and disposal revoke it eagerly.
+   */
+  private bindPresentationProducer(
+    producerId: DeliveryPresentationProducerId,
+    producer: TrustedDeliveryPresentationProducer,
+  ): () => void {
+    const generation = this.presentationProducerGeneration(producer)
+    const current = this.presentationBinding(producerId)
+    // Cordis can expose more than one proxy object for the same service
+    // instance. A producer generation is minted once per concrete producer
+    // lifetime, so it is the stable instance identity across those proxies.
+    // Do not issue a second publisher merely because a later inject callback
+    // reached the same producer through a different proxy.
+    if (current?.generation === generation) return current.dispose
+
+    let live = true
+    let registration!: Readonly<TrustedDeliveryPresentationRegistration>
+    registration = Object.freeze({
+      protocol: TRUSTED_DELIVERY_PRESENTATION_PRODUCER_PROTOCOL,
+      producer: producerId,
+      generation,
+      owner: this,
+      publish: (input: DeliveryPresentationUpdate): StoredDeliveryPresentation => {
+        this.assertCurrentPresentationProducer(producerId, producer, generation, registration, live)
+        return this.publishTrustedDeliveryPresentation(producerId, input)
+      },
+    }) satisfies TrustedDeliveryPresentationRegistration
+    this.activePresentationRegistrations.add(registration)
+
+    let unregister: (() => void) | undefined
+    let binding!: DeliveryPresentationProducerBinding
+    const dispose = () => {
+      if (!live) return
+      live = false
+      this.activePresentationRegistrations.delete(registration)
+      if (this.presentationBinding(producerId) === binding) {
+        this.setPresentationBinding(producerId, undefined)
+      }
+      unregister?.()
+    }
+    binding = Object.freeze({ producerId, producer, generation, registration, dispose })
+    this.setPresentationBinding(producerId, binding)
+    try {
+      unregister = producer.registerTrustedDeliveryPresentationSink(registration)
+      if (typeof unregister !== 'function') {
+        throw new AssistantDeliveryError(
+          'runtime-conflict',
+          'presentation producer returned no registration disposer',
+        )
+      }
+      // A reload that swaps its generation while registering cannot inherit a
+      // publisher issued to the preceding instance state.
+      if (this.presentationProducerGeneration(producer) !== generation) {
+        throw new AssistantDeliveryError('runtime-conflict', 'presentation producer changed during registration')
+      }
+    } catch (error) {
+      live = false
+      this.activePresentationRegistrations.delete(registration)
+      if (this.presentationBinding(producerId) === binding) {
+        this.setPresentationBinding(producerId, current)
+      }
+      try {
+        unregister?.()
+      } catch {
+        // Registration never became live, so cleanup cannot replace the
+        // original registration failure.
+      }
+      throw error
+    }
+    // Do not revoke the old producer until the replacement has accepted the
+    // new publisher; a reentrant durable outbox drain then has one valid owner.
+    current?.dispose()
+    return dispose
+  }
+
+  private assertCurrentPresentationProducer(
+    producerId: DeliveryPresentationProducerId,
+    producer: TrustedDeliveryPresentationProducer,
+    generation: string,
+    registration: Readonly<TrustedDeliveryPresentationRegistration>,
+    live: boolean,
+  ): void {
+    this.assertActive()
+    const current = this.presentationBinding(producerId)
+    if (!live || !this.activePresentationRegistrations.has(registration)
+      || current?.producer !== producer || current.generation !== generation
+      || current.registration !== registration
+      || this.presentationProducerGeneration(producer) !== generation) {
+      throw new AssistantDeliveryError('runtime-conflict', 'stale trusted presentation producer capability')
+    }
+  }
+
+  private publishTrustedDeliveryPresentation(
+    producerId: DeliveryPresentationProducerId,
+    input: DeliveryPresentationUpdate,
+  ): StoredDeliveryPresentation {
+    this.assertActive()
+    if (typeof input !== 'object' || input === null || Array.isArray(input)
+      || typeof (input as { presentation?: unknown }).presentation !== 'object'
+      || (input as { presentation?: unknown }).presentation === null
+      || Array.isArray((input as { presentation?: unknown }).presentation)) {
+      throw new AssistantDeliveryError('runtime-conflict', 'trusted presentation input is invalid')
+    }
+    const exactApproval = producerId === 'assistant-evolution'
+      && input.presentation.kind === 'approval-application'
+      && input.presentationKey === `approval-application:${input.presentation.policyProposalId}`
+      && input.originalOutboxIdempotencyKey === `approval-card:${input.presentation.policyProposalId}`
+    const incidentKey = input.presentation.kind === 'automation-incident'
+      ? `automation-incident:${input.presentation.incidentId}:g${input.presentation.lifecycleGeneration}`
+      : undefined
+    const exactIncident = producerId === 'assistant-automations'
+      && input.presentation.kind === 'automation-incident'
+      && input.presentationKey === incidentKey
+      && input.originalOutboxIdempotencyKey === incidentKey
+      && input.revision === input.presentation.incidentRevision
+    if (!exactApproval && !exactIncident) {
+      throw new AssistantDeliveryError(
+        'runtime-conflict',
+        'presentation does not target its exact durable provider message',
+      )
+    }
+    const stored = this.deliveryStore.publishDeliveryPresentation(input)
+    void this.drainDeliveryPresentations()
+    return stored
   }
 
   private isInboundAuthorized(
@@ -1075,11 +1906,28 @@ export class AssistantDeliveryService extends Service {
     }).effect === 'allow'
   }
 
+  private ownerLineageForBinding(
+    binding: Readonly<ConversationBinding>,
+  ): Readonly<DeliveryOwnerLineage> | undefined {
+    const principal = this.deliveryStore.getPrincipal(binding.principal)
+    if (principal?.status !== 'active' || principal.role !== 'owner'
+      || JSON.stringify(principal.principal) !== JSON.stringify(binding.principal)) return undefined
+    return Object.freeze({
+      principalRecordId: principal.id,
+      principalVersion: principal.version,
+    })
+  }
+
   private authorizeOwnerPreferenceFeedback(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
     selections: readonly Readonly<FeedbackSignalSelection>[],
-  ): { occurredAt: number } | undefined {
+  ): {
+    occurredAt: number
+    principalLineage: Readonly<DeliveryOwnerLineage>
+    admissionCursor: Readonly<import('./types.js').DeliveryAdmissionCursor>
+    exposureTarget?: Readonly<{ sourceInboxId: string; sourceOutboxId: string }>
+  } | undefined {
     if (!this.isOwnerFeedbackController(binding, envelope)
       || !Array.isArray(selections) || selections.length < 1 || selections.length > 16) return undefined
     const inbox = this.deliveryStore.getInboxByProviderEvent(
@@ -1089,6 +1937,8 @@ export class AssistantDeliveryService extends Service {
     )
     if (inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
       || JSON.stringify(inbox.envelope) !== JSON.stringify(envelope)) return undefined
+    const principalLineage = this.ownerLineageForBinding(binding)
+    if (principalLineage === undefined) return undefined
     const subject = {
       kind: 'external' as const,
       id: externalPrincipalId(binding.principal),
@@ -1130,7 +1980,29 @@ export class AssistantDeliveryService extends Service {
     }
     // Provider clocks are not authoritative. The locally persisted Inbox time
     // is bounded by the same Host clock as Preference Learning's retention gate.
-    return Object.freeze({ occurredAt: inbox.receivedAt })
+    const replyTarget = envelope.metadata?.replyToProviderMessageId
+    const sourceOutbox = typeof replyTarget === 'string'
+      ? this.deliveryStore.getOutboxByProviderMessage(envelope.channel, envelope.account, replyTarget)
+      : undefined
+    const sourceEventId = sourceOutbox?.intent.replyToEventId
+    const sourceInbox = sourceEventId === undefined
+      ? undefined
+      : this.deliveryStore.getInboxByProviderEvent(envelope.channel, envelope.account, sourceEventId)
+    const exposureTarget = sourceOutbox !== undefined
+      && sourceOutbox.providerMessageId === replyTarget
+      && sourceOutbox.intent.bindingId === binding.id
+      && sourceInbox?.status === 'processed'
+      && sourceInbox.bindingId === binding.id
+      && JSON.stringify(sourceOutbox.intent.target.conversation) === JSON.stringify(binding.conversation)
+      && JSON.stringify(sourceOutbox.intent.target.principal) === JSON.stringify(binding.principal)
+      ? Object.freeze({ sourceInboxId: sourceInbox.id, sourceOutboxId: sourceOutbox.id })
+      : undefined
+    return Object.freeze({
+      occurredAt: inbox.receivedAt,
+      principalLineage,
+      admissionCursor: inbox.admissionCursor,
+      ...(exposureTarget === undefined ? {} : { exposureTarget }),
+    })
   }
 
   private preferenceSignalAuthorizationKey(
@@ -1154,24 +2026,445 @@ export class AssistantDeliveryService extends Service {
   }
 
   private async dispatchPreferenceFeedback(
-    events: readonly Readonly<DeliveryPreferenceFeedback>[],
+    events: readonly Readonly<DeliveryPreferenceEvent>[],
   ): Promise<'recorded' | 'unavailable' | 'unknown'> {
-    const registration = this.preferenceFeedbackSink
-    if (registration === undefined) return 'unavailable'
+    this.deliveryStore.enqueuePreferenceProjection(events)
+    // Preserve the Inbox admission order through the process-local sink. A
+    // later owner control must not overtake an earlier projection from another
+    // binding of the same owner scope.
+    await this.drainPreferenceProjections()
+    return 'recorded'
+  }
+
+  private async dispatchLearningCommand(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    action: DeliveryLearningControlAction,
+    preferenceKey?: string,
+  ): Promise<'forbidden' | 'unavailable' | 'unknown' | Readonly<DeliveryLearningControlReceipt>> {
+    if (!this.isOwnerFeedbackController(binding, envelope)) return 'forbidden'
+    const inbox = this.deliveryStore.getInboxByProviderEvent(
+      envelope.channel,
+      envelope.account,
+      envelope.eventId,
+    )
+    if (inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+      || JSON.stringify(inbox.envelope) !== JSON.stringify(envelope)) return 'forbidden'
+    const principalLineage = this.ownerLineageForBinding(binding)
+    if (principalLineage === undefined) return 'forbidden'
+    const sink = this.preferenceFeedbackSink
+    if (sink === undefined
+      || sink.registration.generation !== this.preferenceProducerGeneration
+      || !registrationOwnedByPreference(sink.registration)
+      || typeof sink.registration.control !== 'function') return 'unavailable'
+    const idempotencyKey = `delivery-learning-control-v2:${createHash('sha256')
+      .update('assistant-delivery-learning-control-v2\0')
+      .update(JSON.stringify([
+        binding.id,
+        binding.version,
+        binding.sessionId,
+        principalLineage.principalRecordId,
+        principalLineage.principalVersion,
+        inbox.admissionCursor.epoch,
+        inbox.admissionCursor.sequence,
+        envelope.channel,
+        envelope.account,
+        envelope.eventId,
+        action,
+        preferenceKey ?? null,
+      ]))
+      .digest('hex')}`
+    const request: Readonly<DeliveryLearningControlRequest> = Object.freeze({
+      scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+      principalId: externalPrincipalId(binding.principal),
+      principalLineage,
+      admissionCursor: inbox.admissionCursor,
+      action,
+      ...(preferenceKey === undefined ? {} : { preferenceKey }),
+      occurredAt: inbox.receivedAt,
+      idempotencyKey,
+    })
+    await this.drainPreferenceProjections()
+    if (this.deliveryStore.hasBlockingPreferenceProjectionBefore(request)) return 'unknown'
     try {
-      const receipts = await registration.listener(events)
-      if (!Array.isArray(receipts) || receipts.length !== events.length) return 'unknown'
-      const expected = new Set(events.map(event => event.idempotencyKey))
-      const received = new Set<string>()
-      for (const receipt of receipts as readonly Readonly<DeliveryPreferenceFeedbackReceipt>[]) {
-        if (receipt?.status !== 'recorded'
-          || typeof receipt.idempotencyKey !== 'string'
-          || !expected.has(receipt.idempotencyKey)
-          || received.has(receipt.idempotencyKey)) return 'unknown'
-        received.add(receipt.idempotencyKey)
-      }
-      return received.size === expected.size ? 'recorded' : 'unknown'
+      const receipt = await sink.registration.control(request)
+      validateLearningControlReceipt(receipt, request)
+      return receipt
     } catch {
+      return 'unknown'
+    }
+  }
+
+  private completedPreferenceEvents(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    reply: Readonly<OutboxRecord>,
+  ): readonly Readonly<DeliveryPreferenceEvent>[] | undefined {
+    const directive = envelope.kind === 'text'
+      ? classifyNaturalPreferenceDirective(envelope.text)
+      : undefined
+    const naturalSelection = directive?.kind === 'durable-exact-selection'
+      ? directive.selection
+      : undefined
+    // A whole-message correction is an instruction, not representative task
+    // language. Keep it as one explicit signal instead of double-counting the
+    // language used to express the correction.
+    const candidateValue = envelope.kind === 'text' && directive?.kind === 'ordinary-content'
+      ? observedResponseLanguage(envelope.text)
+      : undefined
+    if (!this.isOwnerFeedbackController(binding, envelope)) return undefined
+    const inbox = this.deliveryStore.getInboxByProviderEvent(
+      envelope.channel,
+      envelope.account,
+      envelope.eventId,
+    )
+    const durableReply = this.deliveryStore.getOutbox(reply.id)
+    const principalLineage = this.ownerLineageForBinding(binding)
+    if (inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+      || principalLineage === undefined
+      || durableReply?.id !== reply.id
+      || durableReply.intent.bindingId !== binding.id
+      || durableReply.intent.replyToEventId !== envelope.eventId
+      || durableReply.intent.idempotencyKey !== this.inboundReplyIdempotencyKey(binding, envelope.eventId)
+      || JSON.stringify(durableReply.intent.target.conversation) !== JSON.stringify(binding.conversation)
+      || JSON.stringify(durableReply.intent.target.principal) !== JSON.stringify(binding.principal)) {
+      throw new AssistantDeliveryError(
+        'runtime-conflict',
+        'completed preference turn does not match its durable reply',
+      )
+    }
+    const selections: FeedbackSignalSelection[] = []
+    if (naturalSelection !== undefined) selections.push(naturalSelection)
+    if (candidateValue !== undefined) selections.push({
+      preferenceKey: 'response.language',
+      candidateValue,
+      interpretationTrust: 'typed-feedback',
+    })
+    const authorization = selections.length === 0
+      ? undefined
+      : this.authorizeOwnerPreferenceFeedback(binding, envelope, selections)
+    const completion = Object.freeze({
+      bindingId: binding.id,
+      bindingVersion: binding.version,
+      sessionId: binding.sessionId,
+      sourceEventId: envelope.eventId,
+      sourceInboxId: inbox.id,
+      replyOutboxId: durableReply.id,
+    })
+    const completionDigest = createHash('sha256')
+      .update('assistant-delivery-completed-preference-binding-v2\0')
+      .update(JSON.stringify([
+        binding.id,
+        binding.version,
+        binding.sessionId,
+        principalLineage.principalRecordId,
+        principalLineage.principalVersion,
+        inbox.admissionCursor.epoch,
+        inbox.admissionCursor.sequence,
+        inbox.id,
+        durableReply.id,
+        envelope.eventId,
+      ]))
+      .digest('hex')
+    const completionEvent: DeliveryPreferenceCompletion = Object.freeze({
+      scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+      principalId: externalPrincipalId(binding.principal),
+      principalLineage,
+      admissionCursor: inbox.admissionCursor,
+      actorTrust: 'owner-authenticated',
+      source: 'delivery-completion',
+      occurredAt: inbox.receivedAt,
+      idempotencyKey: `delivery-completed-binding-v2:${completionDigest}`,
+      completion,
+    })
+    const events: DeliveryPreferenceEvent[] = []
+    if (naturalSelection !== undefined && authorization !== undefined) {
+      events.push(completionEvent)
+      events.push(feedbackSignalInput(binding, envelope, naturalSelection, authorization))
+    }
+    if (candidateValue !== undefined && authorization !== undefined) {
+      const digest = createHash('sha256')
+        .update('assistant-delivery-completed-preference-turn-v2\0')
+        .update(JSON.stringify([
+          binding.id,
+          binding.version,
+          binding.sessionId,
+          principalLineage.principalRecordId,
+          principalLineage.principalVersion,
+          inbox.admissionCursor.epoch,
+          inbox.admissionCursor.sequence,
+          inbox.id,
+          durableReply.id,
+          envelope.eventId,
+          candidateValue,
+        ]))
+        .digest('hex')
+      const event: DeliveryPreferenceObservation = Object.freeze({
+        scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+        principalId: externalPrincipalId(binding.principal),
+        principalLineage,
+        admissionCursor: inbox.admissionCursor,
+        preferenceKey: 'response.language',
+        candidateValue,
+        stance: 'support',
+        actorTrust: 'owner-authenticated',
+        interpretationTrust: 'behavioral-inference',
+        source: 'delivery-observation',
+        occurredAt: inbox.receivedAt,
+        idempotencyKey: `delivery-completed-turn-v2:${digest}`,
+        completion,
+      })
+      events.push(event)
+    }
+    if (events.length === 0) events.push(completionEvent)
+    return Object.freeze(events)
+  }
+
+  private async dispatchWorkflowCommand(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    command: Extract<WorkflowCommand, { kind: 'retract' | 'save' }>,
+  ): Promise<'conflict' | 'invalid-target' | 'recorded' | 'unavailable' | 'unknown'> {
+    const replyTarget = envelope.metadata?.replyToProviderMessageId
+    if (typeof replyTarget !== 'string' || !this.isOwnerFeedbackController(binding, envelope)) {
+      return 'invalid-target'
+    }
+    const reviewInbox = this.deliveryStore.getInboxByProviderEvent(
+      envelope.channel,
+      envelope.account,
+      envelope.eventId,
+    )
+    const sourceOutbox = this.deliveryStore.getOutboxByProviderMessage(
+      envelope.channel,
+      envelope.account,
+      replyTarget,
+    )
+    const sourceEventId = sourceOutbox?.intent.replyToEventId
+    const sourceInbox = sourceEventId === undefined
+      ? undefined
+      : this.deliveryStore.getInboxByProviderEvent(envelope.channel, envelope.account, sourceEventId)
+    if (reviewInbox?.status !== 'claimed' || reviewInbox.bindingId !== binding.id
+      || sourceInbox?.status !== 'processed' || sourceInbox.bindingId !== binding.id
+      || sourceInbox.envelope.kind !== 'text'
+      || (sourceInbox.envelope.attachments?.length ?? 0) !== 0
+      || sourceOutbox === undefined || sourceOutbox.providerMessageId !== replyTarget
+      || sourceOutbox.intent.bindingId !== binding.id
+      || JSON.stringify(sourceInbox.envelope.conversation) !== JSON.stringify(binding.conversation)
+      || JSON.stringify(sourceInbox.envelope.principal) !== JSON.stringify(binding.principal)
+      || JSON.stringify(sourceOutbox.intent.target.conversation) !== JSON.stringify(binding.conversation)
+      || JSON.stringify(sourceOutbox.intent.target.principal) !== JSON.stringify(binding.principal)) {
+      return 'invalid-target'
+    }
+    const subjectRef = growthObjectDigest({
+      contract: 'assistant-delivery-owner-workflow-subject/v1',
+      workspace: binding.workspace,
+      preset: binding.agentPreset,
+      bindingId: binding.id,
+      sourceInboxId: sourceInbox.id,
+      sourceOutboxId: sourceOutbox.id,
+    })
+    const taskRef = growthObjectDigest({
+      contract: 'assistant-delivery-owner-task-ref/v1',
+      workspace: binding.workspace,
+      preset: binding.agentPreset,
+      sourceInboxId: sourceInbox.id,
+    })
+    const payloadDigest = growthObjectDigest({
+      contract: 'assistant-delivery-owner-workflow-command/v1',
+      action: command.kind === 'save' ? 'upsert' : 'retract',
+      reviewInboxId: reviewInbox.id,
+      sourceInboxId: sourceInbox.id,
+      sourceOutboxId: sourceOutbox.id,
+      subjectRef,
+      ...(command.kind === 'save'
+        ? { name: command.name, cron: command.cron, timezone: command.timezone }
+        : {}),
+    })
+    try {
+      this.deliveryStore.commitOwnerWorkflowTraceCommand({
+        action: command.kind === 'save' ? 'upsert' : 'retract',
+        operationId: `workflow-command:${reviewInbox.id}`,
+        payloadDigest,
+        binding,
+        reviewInboxId: reviewInbox.id,
+        sourceInboxId: sourceInbox.id,
+        sourceOutboxId: sourceOutbox.id,
+        subjectRef,
+        occurredAt: sourceInbox.receivedAt,
+        ...(command.kind === 'save' ? {
+          taskRef,
+          templateContent: {
+            scope: { workspace: binding.workspace, preset: binding.agentPreset },
+            ownerBindingId: binding.id,
+            name: command.name,
+            prompt: sourceInbox.envelope.text,
+            schedule: { kind: 'cron', expression: command.cron, timezone: command.timezone },
+            timeoutMs: 60_000,
+            toolCatalogIds: ['assistant.agent-turn'],
+            deliveryBindingId: binding.id,
+          },
+          steps: [{
+            catalogId: 'assistant.agent-turn',
+            argumentSchemaDigest: workflowArgumentShapeDigest({ prompt: sourceInbox.envelope.text }),
+          }],
+        } : {}),
+      })
+    } catch (error) {
+      if (error instanceof DeliveryStoreError) {
+        if (error.code === 'idempotency-conflict' || error.code === 'version-conflict') return 'conflict'
+        if (error.code === 'invalid-binding' || error.code === 'unauthorized-principal'
+          || error.code === 'receipt-mismatch' || error.code === 'conflict') return 'invalid-target'
+      }
+      return 'invalid-target'
+    }
+    void this.drainWorkflowTraces()
+    return 'recorded'
+  }
+
+  /**
+   * Convert only an authenticated reply to one exact Automation delivery into
+   * a trusted objective label. The original run timestamp is retained because
+   * Evolution re-proves the immutable production run; the later Inbox is a
+   * separate evidence reference, never copied as prose.
+   */
+  private async dispatchObjectiveFeedback(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    objectiveStatus: import('./feedback-command.js').ObjectiveFeedbackStatus,
+  ): Promise<'conflict' | 'invalid-target' | 'recorded' | 'unavailable' | 'unknown'> {
+    const replyTarget = envelope.metadata?.replyToProviderMessageId
+    if (typeof replyTarget !== 'string') return 'invalid-target'
+    if (!this.isOwnerFeedbackController(binding, envelope)) return 'invalid-target'
+    const inbox = this.deliveryStore.getInboxByProviderEvent(envelope.channel, envelope.account, envelope.eventId)
+    const target = this.deliveryStore.getOutboxByProviderMessage(envelope.channel, envelope.account, replyTarget)
+    if (inbox?.status !== 'claimed' || inbox.bindingId !== binding.id
+      || target === undefined || target.providerMessageId !== replyTarget
+      || target.intent.bindingId !== binding.id
+      || JSON.stringify(target.intent.target.conversation) !== JSON.stringify(binding.conversation)
+      || JSON.stringify(target.intent.target.principal) !== JSON.stringify(binding.principal)) {
+      return 'invalid-target'
+    }
+    const metadata = target.intent.metadata
+    // Ordinary Agent replies have no learning metadata.  They are eligible
+    // only for Delivery's local, atomic verified-workflow receipt; the Store
+    // rebuilds the full Inbox/Outbox fence and abstains unless the source text
+    // selects a closed deterministic-deidentification template.  Do not route
+    // these judgements through Evaluation: they are task proof for workflow
+    // repetition, not a cross-plugin quality vote.
+    if (metadata?.['dsh.learning.kind'] !== 'automation-run') {
+      const sourceEventId = target.intent.replyToEventId
+      if (typeof sourceEventId !== 'string') return 'invalid-target'
+      const sourceInbox = this.deliveryStore.getInboxByProviderEvent(
+        envelope.channel,
+        envelope.account,
+        sourceEventId,
+      )
+      if (sourceInbox === undefined) return 'invalid-target'
+      try {
+        const recorded = this.deliveryStore.commitVerifiedWorkflowTraceFeedback({
+          binding,
+          feedbackInboxId: inbox.id,
+          sourceInboxId: sourceInbox.id,
+          sourceOutboxId: target.id,
+          objectiveStatus,
+        })
+        if (recorded.outcome === 'trace-recorded') void this.drainWorkflowTraces()
+        return 'recorded'
+      } catch (error) {
+        if (error instanceof DeliveryStoreError) {
+          if (error.code === 'idempotency-conflict' || error.code === 'version-conflict') {
+            return 'conflict'
+          }
+          if (error.code === 'invalid-binding' || error.code === 'unauthorized-principal'
+            || error.code === 'receipt-mismatch' || error.code === 'conflict'
+            || error.code === 'not-found') return 'invalid-target'
+        }
+        return 'invalid-target'
+      }
+    }
+    const automationId = metadata?.['dsh.learning.automationId']
+    const runId = metadata?.['dsh.learning.runId']
+    const situation = metadata?.['dsh.learning.situation']
+    const occurredAtText = metadata?.['dsh.learning.occurredAt']
+    const outputDigest = metadata?.['dsh.learning.outputDigest']
+    const proofDigest = metadata?.['dsh.learning.proofDigest']
+    if (metadata?.['dsh.learning.schemaVersion'] !== '2'
+      || metadata['dsh.learning.kind'] !== 'automation-run'
+      || metadata['dsh.learning.executionStatus'] !== 'succeeded'
+      || typeof automationId !== 'string' || typeof runId !== 'string'
+      || typeof situation !== 'string' || situation !== `automation:${automationId}`
+      || typeof outputDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(outputDigest)
+      || typeof proofDigest !== 'string' || !/^[a-f0-9]{64}$/u.test(proofDigest)
+      || typeof occurredAtText !== 'string' || !/^(0|[1-9][0-9]{0,15})$/u.test(occurredAtText)) {
+      return 'invalid-target'
+    }
+    const occurredAt = Number(occurredAtText)
+    if (!Number.isSafeInteger(occurredAt) || occurredAt > inbox.receivedAt) return 'invalid-target'
+    if (!target.intent.text.endsWith(automationObjectiveFeedbackFooter)) return 'invalid-target'
+    const outputPreview = target.intent.text.slice(0, -automationObjectiveFeedbackFooter.length)
+    if (createHash('sha256').update(outputPreview).digest('hex') !== outputDigest) return 'invalid-target'
+    const resolver = this.context.get('assistantAutomations')
+    if (!isAutomationDeliveryEvidenceResolver(resolver)) return 'unavailable'
+    let proof: ReturnType<AutomationDeliveryEvidenceResolver['resolveDeliveryEvidence']>
+    try {
+      proof = resolver.resolveDeliveryEvidence({
+        automationId,
+        runId,
+        expectedWorkspace: binding.workspace,
+        expectedBindingId: binding.id,
+        expectedOutputDigest: outputDigest,
+      })
+    } catch {
+      return 'invalid-target'
+    }
+    if (proof === undefined || proof.schemaVersion !== 1 || proof.source !== 'assistant-automations'
+      || proof.executionKind !== 'agent' || proof.executionStatus !== 'succeeded'
+      || proof.automationId !== automationId || proof.runId !== runId
+      || proof.workspace !== binding.workspace || proof.agentPreset !== binding.agentPreset
+      || proof.bindingId !== binding.id || proof.situation !== situation
+      || proof.occurredAt !== occurredAt || proof.outputDigest !== outputDigest
+      || proof.proofDigest !== proofDigest) return 'invalid-target'
+    const sink = this.evaluationSink
+    if (sink === undefined) return 'unavailable'
+    // One immutable Automation run is one learning subject. The objective
+    // status and Inbox event deliberately do not enter the key: replays and
+    // repeated equal judgements collapse, while an opposite judgement becomes
+    // an explicit conflict instead of a second Evolution vote.
+    const digest = createHash('sha256').update('assistant-delivery-objective-feedback-v2\0')
+      .update(JSON.stringify([binding.workspace, binding.agentPreset, target.id, runId]))
+      .digest('hex')
+    const claims: TrustedDeliveryEvaluationClaims = Object.freeze({
+      scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+      situation,
+      objectiveStatus,
+      runId,
+      outboxId: target.id,
+      chatId: binding.conversation.chat,
+      principalId: externalPrincipalId(binding.principal),
+      bindingId: binding.id,
+      occurredAt,
+      idempotencyKey: `assistant-delivery:objective-feedback-v2:${digest}`,
+    })
+    try {
+      const capabilityReceipt = sink.registration.issueCapability(claims)
+      if (this.evaluationSink?.token !== sink.token) return 'unknown'
+      const receipt = await Promise.resolve(sink.registration.append({
+        capabilityReceipt,
+        runId,
+        outboxId: target.id,
+        chatId: binding.conversation.chat,
+        principalId: externalPrincipalId(binding.principal),
+        bindingId: binding.id,
+        idempotencyKey: claims.idempotencyKey,
+      }))
+      if (typeof receipt !== 'object' || receipt === null
+        || (receipt as Partial<{ idempotencyKey: string }>).idempotencyKey !== claims.idempotencyKey) {
+        return 'unknown'
+      }
+      return 'recorded'
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error
+        && (error as { code?: unknown }).code === 'idempotency-conflict') return 'conflict'
       return 'unknown'
     }
   }
@@ -1586,8 +2879,15 @@ export class AssistantDeliveryService extends Service {
     idempotencyKey: string
     text: string
     format?: 'markdown' | 'plain'
+    metadata?: Readonly<Record<string, string>>
   }): OutboxRecord {
     this.assertActive()
+    if (containsReservedLearningMetadata(input.metadata)) {
+      throw new AssistantDeliveryError(
+        'runtime-conflict',
+        'reserved learning metadata requires the typed Automation result seam',
+      )
+    }
     const binding = this.deliveryStore.getBinding(input.bindingId)
     if (binding === undefined || binding.status !== 'active' || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding does not exist or is revoked')
@@ -1605,7 +2905,204 @@ export class AssistantDeliveryService extends Service {
     }
     return this.deliveryStore.enqueue({ idempotencyKey: input.idempotencyKey, bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
-      format: input.format ?? 'plain' })
+      format: input.format ?? 'plain',
+      ...(input.metadata === undefined ? {} : { metadata: input.metadata }) })
+  }
+
+  /**
+   * Dedicated Automation result lane. Every learning field is derived from an
+   * authoritative Automations receipt; callers cannot supply metadata,
+   * idempotency, source identity, occurrence, timestamp, or feedback text.
+   */
+  enqueueAutomationResult(input: {
+    automationId: string
+    runId: string
+    workspace: string
+    bindingId: string
+    outputPreview: string
+  }): OutboxRecord {
+    this.assertActive()
+    if (typeof input.outputPreview !== 'string') {
+      throw new AssistantDeliveryError('runtime-conflict', 'Automation result output is invalid')
+    }
+    const outputDigest = createHash('sha256').update(input.outputPreview).digest('hex')
+    const resolver = this.context.get('assistantAutomations')
+    if (!isAutomationDeliveryEvidenceResolver(resolver)) {
+      throw new AssistantDeliveryError('runtime-conflict', 'Automation delivery evidence is unavailable')
+    }
+    let proof: ReturnType<AutomationDeliveryEvidenceResolver['resolveDeliveryEvidence']>
+    try {
+      proof = resolver.resolveDeliveryEvidence({
+        automationId: input.automationId,
+        runId: input.runId,
+        expectedWorkspace: input.workspace,
+        expectedBindingId: input.bindingId,
+        expectedOutputDigest: outputDigest,
+      })
+    } catch {
+      throw new AssistantDeliveryError('runtime-conflict', 'Automation delivery evidence was rejected')
+    }
+    if (proof === undefined || proof.schemaVersion !== 1 || proof.source !== 'assistant-automations'
+      || proof.executionKind !== 'agent' || proof.executionStatus !== 'succeeded'
+      || proof.automationId !== input.automationId || proof.runId !== input.runId
+      || proof.workspace !== input.workspace || proof.bindingId !== input.bindingId
+      || proof.situation !== `automation:${input.automationId}`
+      || proof.outputDigest !== outputDigest || !/^[a-f0-9]{64}$/u.test(proof.proofDigest)
+      || !Number.isSafeInteger(proof.occurredAt) || proof.occurredAt < 0) {
+      throw new AssistantDeliveryError('runtime-conflict', 'Automation delivery evidence is mismatched')
+    }
+    const binding = this.deliveryStore.getBinding(input.bindingId)
+    if (binding === undefined || binding.status !== 'active' || !this.hasActivePrincipal(binding)
+      || binding.workspace !== input.workspace || binding.agentPreset !== proof.agentPreset) {
+      throw new AssistantDeliveryError('missing-binding', 'Automation result binding is unavailable or mismatched')
+    }
+    const decision = this.policy.authorize({
+      subject: { kind: 'background', id: proof.automationId,
+        workspace: proof.workspace, principal: externalPrincipalId(binding.principal) },
+      action: 'send', resource: { kind: 'message', id: binding.id }, context: { initiator: 'background' },
+    }, { idempotencyKey: `message-send:automation:${proof.occurrenceId}:${binding.id}` })
+    if (decision.effect !== 'allow') throw policyDenied(decision)
+    if (!this.hasActivePrincipal(binding)) {
+      throw new AssistantDeliveryError('missing-binding', 'delivery binding principal is no longer active')
+    }
+    const text = `${input.outputPreview}${automationObjectiveFeedbackFooter}`
+    if (Buffer.byteLength(text, 'utf8') > this.config.maxTextBytes) {
+      throw new AssistantDeliveryError('runtime-conflict', 'Automation result exceeds the delivery text limit')
+    }
+    return this.deliveryStore.enqueue({
+      idempotencyKey: `automation:${proof.occurrenceId}:${binding.id}`,
+      bindingId: binding.id,
+      target: { conversation: binding.conversation, principal: binding.principal },
+      text,
+      format: 'markdown',
+      metadata: Object.freeze({
+        'dsh.learning.schemaVersion': '2',
+        'dsh.learning.kind': 'automation-run',
+        'dsh.learning.automationId': proof.automationId,
+        'dsh.learning.runId': proof.runId,
+        'dsh.learning.situation': proof.situation,
+        'dsh.learning.occurredAt': String(proof.occurredAt),
+        'dsh.learning.executionStatus': proof.executionStatus,
+        'dsh.learning.outputDigest': proof.outputDigest,
+        'dsh.learning.proofDigest': proof.proofDigest,
+      }),
+    })
+  }
+
+  /** Resolve the current generation of one exact Host-owned owner route. */
+  resolveOwnerRoute(authorityIdInput: string): ResolvedOwnerRoute {
+    this.assertActive()
+    const authorityId = canonicalOwnerRouteId(authorityIdInput)
+    const authority = this.ownerRoutes.get(authorityId)
+    if (authority === undefined) {
+      throw new AssistantDeliveryError('missing-binding', 'owner route authority is not configured')
+    }
+    const binding = this.deliveryStore.getActiveBinding(authority.conversation)
+    const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+    if (binding === undefined || binding.status !== 'active'
+      || !bindingMatchesOwnerRoute(binding, authority)
+      || owner?.status !== 'active' || owner.role !== 'owner') {
+      throw new AssistantDeliveryError('missing-binding', 'active binding does not match owner route authority')
+    }
+    return {
+      authorityId,
+      binding,
+      snapshot: ownerRouteBindingSnapshot(authority, binding),
+    }
+  }
+
+  /**
+   * Revalidate Recovery/other Host work against the live owner route without
+   * exposing a session id, conversation id, user message or delivery content.
+   */
+  validateOwnerRoute(input: {
+    authorityId: string
+    principalId: string
+    workspace: string
+    agentPreset: string
+  }): Readonly<OwnerRouteValidationReceipt> {
+    this.assertActive()
+    const resolved = this.resolveOwnerRoute(input.authorityId)
+    const authority = this.ownerRoutes.get(resolved.authorityId)!
+    const principalLineage = this.ownerLineageForBinding(resolved.binding)
+    if (principalLineage === undefined) {
+      throw new AssistantDeliveryError('missing-binding', 'owner route principal lineage is unavailable')
+    }
+    const expectedPrincipal = externalPrincipalId(authority.principal)
+    const text = (value: unknown, label: string, maxBytes: number): string => {
+      if (typeof value !== 'string') {
+        throw new AssistantDeliveryError('missing-binding', `owner route ${label} is invalid`)
+      }
+      const normalized = value.normalize('NFC').trim()
+      const hasControl = [...normalized].some(character => {
+        const point = character.codePointAt(0)!
+        return point <= 0x1f || point === 0x7f
+      })
+      if (normalized === '' || Buffer.byteLength(normalized, 'utf8') > maxBytes || hasControl) {
+        throw new AssistantDeliveryError('missing-binding', `owner route ${label} is invalid`)
+      }
+      return normalized
+    }
+    const principalId = text(input.principalId, 'principal', 1_024)
+    const workspace = text(input.workspace, 'workspace', 4_096)
+    const agentPreset = text(input.agentPreset, 'preset', 200)
+    if (principalId !== expectedPrincipal || workspace !== authority.workspace
+      || agentPreset !== authority.agentPreset) {
+      throw new AssistantDeliveryError('missing-binding', 'owner route authority does not match the requested scope')
+    }
+    return Object.freeze({
+      receiptVersion: 2 as const,
+      authorityId: resolved.authorityId,
+      authorityHash: resolved.snapshot.authorityHash,
+      principalId,
+      principalRecordId: principalLineage.principalRecordId,
+      principalVersion: principalLineage.principalVersion,
+      workspace,
+      agentPreset,
+      bindingVersion: resolved.snapshot.bindingVersion,
+      generation: resolved.snapshot.generation,
+    })
+  }
+
+  /**
+   * Enqueue against a stable Host-owned route rather than a session binding.
+   * Policy is evaluated against the exact `route:<authorityId>` resource. The
+   * Store re-resolves under its write transaction, so a concurrent `/new`
+   * either wins completely or follows the earlier immutable Outbox receipt.
+   */
+  enqueueBackgroundRoute(input: {
+    sourceId: string
+    authorityId: string
+    idempotencyKey: string
+    text: string
+    format?: 'markdown' | 'plain'
+  }): OutboxRecord {
+    this.assertActive()
+    const sourceId = canonicalBackgroundSourceId(input.sourceId)
+    const idempotencyKey = canonicalRouteIdempotencyKey(input.idempotencyKey)
+    if (typeof input.text !== 'string' || Buffer.byteLength(input.text, 'utf8') > this.config.maxTextBytes
+      || (input.format !== undefined && input.format !== 'markdown' && input.format !== 'plain')) {
+      throw new AssistantDeliveryError('runtime-conflict', 'owner route message is invalid')
+    }
+    const resolved = this.resolveOwnerRoute(input.authorityId)
+    const authority = this.ownerRoutes.get(resolved.authorityId)!
+    const decision = authorizeOwnerRoute(this.policy, authority, sourceId, idempotencyKey)
+    if (decision.effect !== 'allow') throw policyDenied(decision)
+    try {
+      return this.deliveryStore.enqueueOwnerRoute({
+        authority,
+        sourceId,
+        sourceHash: createHash('sha256').update(sourceId).digest('hex'),
+        idempotencyKey,
+        text: input.text,
+        format: input.format ?? 'plain',
+      })
+    } catch (error) {
+      if (error instanceof DeliveryStoreError && error.code === 'invalid-binding') {
+        throw new AssistantDeliveryError('missing-binding', 'owner route changed during enqueue')
+      }
+      throw error
+    }
   }
 
   enqueueApproval(input: {
@@ -1721,6 +3218,54 @@ export class AssistantDeliveryService extends Service {
     permissionPicker?: PermissionPickerIntent
     replyToEventId?: string
   }): OutboxRecord {
+    const prepared = this.prepareAgentReply(agent, input)
+    return this.deliveryStore.enqueue(prepared.intent)
+  }
+
+  private async replyCompletedPreferenceTurn(
+    agent: Agent,
+    expectedBinding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    input: {
+      text: string
+      format?: 'markdown' | 'model-picker' | 'permission-picker' | 'plain'
+      modelPicker?: ModelPickerIntent
+      permissionPicker?: PermissionPickerIntent
+    },
+  ): Promise<'recorded' | 'unavailable' | 'unknown'> {
+    const prepared = this.prepareAgentReply(agent, {
+      idempotencyKey: `inbound:${envelope.eventId}:reply`,
+      replyToEventId: envelope.eventId,
+      ...input,
+    })
+    if (prepared.binding.id !== expectedBinding.id
+      || prepared.binding.version !== expectedBinding.version
+      || prepared.binding.sessionId !== expectedBinding.sessionId
+      || JSON.stringify(envelope.conversation) !== JSON.stringify(prepared.binding.conversation)
+      || JSON.stringify(envelope.principal) !== JSON.stringify(prepared.binding.principal)) {
+      throw new AssistantDeliveryError(
+        'missing-binding',
+        'completed turn no longer belongs to its exact Delivery binding',
+      )
+    }
+    let projected = false
+    this.deliveryStore.enqueueReplyWithPreferenceProjection(prepared.intent, reply => {
+      const events = this.completedPreferenceEvents(prepared.binding, envelope, reply)
+      projected = events !== undefined
+      return events
+    })
+    if (projected) await this.drainPreferenceProjections()
+    return projected ? 'recorded' : 'unavailable'
+  }
+
+  private prepareAgentReply(agent: Agent | undefined, input: {
+    idempotencyKey: string
+    text: string
+    format?: 'markdown' | 'model-picker' | 'permission-picker' | 'plain'
+    modelPicker?: ModelPickerIntent
+    permissionPicker?: PermissionPickerIntent
+    replyToEventId?: string
+  }): Readonly<{ binding: ConversationBinding; intent: OutboundIntent }> {
     this.assertActive()
     const binding = agent === undefined ? undefined : this.deliveryStore.getBindingBySession(String(agent.session.id))
     if (agent === undefined || binding === undefined || binding.status !== 'active'
@@ -1741,14 +3286,15 @@ export class AssistantDeliveryService extends Service {
       throw new AssistantDeliveryError('missing-binding', 'Agent delivery principal is no longer active')
     }
     const format = this.replyFormat(binding.conversation, input.format) ?? 'plain'
-    return this.deliveryStore.enqueue({ idempotencyKey, bindingId: binding.id,
+    const intent: OutboundIntent = { idempotencyKey, bindingId: binding.id,
       target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
       format,
       ...(input.modelPicker === undefined ? {} : { modelPicker: input.modelPicker }),
       ...(format !== 'permission-picker' || input.permissionPicker === undefined
         ? {}
         : { permissionPicker: input.permissionPicker }),
-      ...(input.replyToEventId === undefined ? {} : { replyToEventId: input.replyToEventId }) })
+      ...(input.replyToEventId === undefined ? {} : { replyToEventId: input.replyToEventId }) }
+    return Object.freeze({ binding, intent: Object.freeze(intent) })
   }
 
   history(agent: Agent | undefined, input: { limit?: number }): {
@@ -1819,11 +3365,21 @@ export class AssistantDeliveryService extends Service {
     await this.drainModelSelectionSettlements()
     this.drainApprovalDispatches()
     await this.outbound.tick()
+    await this.drainDeliveryPresentations()
+    await this.drainPreferenceProjections()
+    await this.drainWorkflowTraces()
   }
 
   async whenIdle(): Promise<void> {
     this.assertActive()
-    await Promise.all([this.inbound.whenIdle(), this.outbound.whenIdle(), this.modelSelectionFlight])
+    await Promise.all([
+      this.inbound.whenIdle(),
+      this.outbound.whenIdle(),
+      this.modelSelectionFlight,
+      this.presentationFlight,
+      this.preferenceProjectionFlight,
+      this.workflowTraceFlight,
+    ])
   }
 
   start(): void {
@@ -1989,10 +3545,175 @@ export class AssistantDeliveryService extends Service {
   private async stopInternal(): Promise<void> {
     if (this.timer !== undefined) clearInterval(this.timer)
     if (this.modelSelectionRetryTimer !== undefined) clearTimeout(this.modelSelectionRetryTimer)
+    if (this.workflowTraceRetryTimer !== undefined) clearTimeout(this.workflowTraceRetryTimer)
+    if (this.preferenceProjectionRetryTimer !== undefined) clearTimeout(this.preferenceProjectionRetryTimer)
     this.timer = undefined
     this.modelSelectionRetryTimer = undefined
+    this.workflowTraceRetryTimer = undefined
+    this.preferenceProjectionRetryTimer = undefined
     this.cancelModelSelectionWaiters()
-    await Promise.all([this.inbound.stop(), this.outbound.stop(), this.modelSelectionFlight])
+    await Promise.all([
+      this.inbound.stop(),
+      this.outbound.stop(),
+      this.modelSelectionFlight,
+      this.presentationFlight,
+      this.preferenceProjectionFlight,
+      this.workflowTraceFlight,
+    ])
+  }
+
+  private drainPreferenceProjections(): Promise<void> {
+    if (this.preferenceProjectionRetryTimer !== undefined) {
+      clearTimeout(this.preferenceProjectionRetryTimer)
+      this.preferenceProjectionRetryTimer = undefined
+    }
+    if (this.preferenceProjectionFlight !== undefined) return this.preferenceProjectionFlight
+    const flight = this.runPreferenceProjection()
+      .finally(() => {
+        if (this.preferenceProjectionFlight === flight) this.preferenceProjectionFlight = undefined
+      })
+    this.preferenceProjectionFlight = flight
+    return flight
+  }
+
+  private async runPreferenceProjection(): Promise<void> {
+    const sink = this.preferenceFeedbackSink
+    if (sink === undefined) return
+    let attempted = 0
+    while (attempted < 100) {
+      const entries = this.deliveryStore.listPendingPreferenceProjections(100 - attempted)
+      if (entries.length === 0) break
+      for (const entry of entries) {
+        if (!this.active || this.preferenceFeedbackSink?.token !== sink.token) return
+        attempted += 1
+        try {
+          if (sink.registration.appendSynchronously !== undefined) {
+            this.deliveryStore.projectPreferenceProjectionUnderOwnerFence(entry, current => {
+              if (!this.active || this.preferenceFeedbackSink?.token !== sink.token
+                || !registrationOwnedByPreference(sink.registration)) {
+                throw Object.assign(new Error('stale Preference projection registration'), {
+                  code: 'stale-registration',
+                })
+              }
+              const receipts = sink.registration.appendSynchronously!(current.events)
+              validatePreferenceProjectionReceipts(receipts, current.events)
+            })
+          } else {
+            // Rolling-upgrade fallback. It still rechecks immediately before
+            // sink I/O; current in-process Preference registrations use the
+            // synchronous path above to close the remaining check/use window.
+            if (!this.deliveryStore.preferenceProjectionHasCurrentOwner(entry)) continue
+            const receipts = await Promise.resolve(sink.registration.append(entry.events))
+            validatePreferenceProjectionReceipts(receipts, entry.events)
+            if (!this.active || this.preferenceFeedbackSink?.token !== sink.token) return
+            this.deliveryStore.completePreferenceProjection({
+              batchKey: entry.batchKey,
+              payloadDigest: entry.payloadDigest,
+            })
+          }
+        } catch (error) {
+          if (!this.active || this.preferenceFeedbackSink?.token !== sink.token) return
+          const now = Date.now()
+          const retryAt = now + Math.min(
+            this.config.retryMaxMs,
+            this.config.retryBaseMs * (2 ** Math.min(30, entry.attemptCount)),
+          )
+          const code = typeof error === 'object' && error !== null && 'code' in error
+            && typeof (error as { code?: unknown }).code === 'string'
+            ? `sink-${(error as { code: string }).code}`.slice(0, 64)
+            : 'sink-projection-failed'
+          this.deliveryStore.deferPreferenceProjection({
+            batchKey: entry.batchKey,
+            payloadDigest: entry.payloadDigest,
+            now,
+            retryAt,
+            failureCode: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(code)
+              ? code
+              : 'sink-projection-failed',
+          })
+        }
+      }
+    }
+    const nextRetryAt = this.deliveryStore.nextPreferenceProjectionAttemptAt()
+    if (nextRetryAt !== undefined && this.preferenceFeedbackSink?.token === sink.token
+      && this.preferenceProjectionRetryTimer === undefined) {
+      this.preferenceProjectionRetryTimer = setTimeout(() => {
+        this.preferenceProjectionRetryTimer = undefined
+        if (this.active) void this.drainPreferenceProjections()
+      }, Math.max(1, Math.min(2_147_483_647, nextRetryAt - Date.now())))
+      this.preferenceProjectionRetryTimer.unref?.()
+    }
+  }
+
+  /** Host test/operator seam: project due trace revisions without waiting for the scheduler. */
+  projectWorkflowTraces(): Promise<void> {
+    this.assertActive()
+    return this.drainWorkflowTraces()
+  }
+
+  private drainWorkflowTraces(): Promise<void> {
+    if (this.workflowTraceRetryTimer !== undefined) {
+      clearTimeout(this.workflowTraceRetryTimer)
+      this.workflowTraceRetryTimer = undefined
+    }
+    if (this.workflowTraceFlight !== undefined) return this.workflowTraceFlight
+    const flight = this.runWorkflowTraceProjection()
+      .finally(() => { if (this.workflowTraceFlight === flight) this.workflowTraceFlight = undefined })
+    this.workflowTraceFlight = flight
+    return flight
+  }
+
+  private async runWorkflowTraceProjection(): Promise<void> {
+    const registration = this.workflowTraceSink
+    if (registration === undefined) return
+    const entries = this.deliveryStore.listPendingWorkflowTraceRevisions(100)
+    let nextRetryAt: number | undefined
+    for (const entry of entries) {
+      if (!this.active || this.workflowTraceSink?.token !== registration.token) return
+      try {
+        const candidate = await Promise.resolve(
+          registration.sink.projectWorkflowTraceRevision(entry.revision),
+        )
+        validateWorkflowTraceProjectionReceipt(candidate, entry.revision)
+        if (!this.active || this.workflowTraceSink?.token !== registration.token) return
+        this.deliveryStore.completeWorkflowTraceRevision({
+          subjectRef: entry.revision.subjectRef,
+          version: entry.revision.version,
+          digest: entry.revision.digest,
+        })
+      } catch (error) {
+        if (!this.active || this.workflowTraceSink?.token !== registration.token) return
+        const now = Date.now()
+        const retryDelay = Math.min(
+          this.config.retryMaxMs,
+          this.config.retryBaseMs * (2 ** Math.min(30, entry.attemptCount)),
+        )
+        const retryAt = now + retryDelay
+        const code = typeof error === 'object' && error !== null && 'code' in error
+          && typeof (error as { code?: unknown }).code === 'string'
+          ? `sink-${(error as { code: string }).code}`.slice(0, 64)
+          : 'sink-projection-failed'
+        this.deliveryStore.deferWorkflowTraceRevision({
+          subjectRef: entry.revision.subjectRef,
+          version: entry.revision.version,
+          digest: entry.revision.digest,
+          now,
+          retryAt,
+          failureCode: /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(code)
+            ? code
+            : 'sink-projection-failed',
+        })
+        nextRetryAt = Math.min(nextRetryAt ?? retryAt, retryAt)
+      }
+    }
+    if (nextRetryAt !== undefined && this.workflowTraceSink?.token === registration.token
+      && this.workflowTraceRetryTimer === undefined) {
+      this.workflowTraceRetryTimer = setTimeout(() => {
+        this.workflowTraceRetryTimer = undefined
+        if (this.active) void this.drainWorkflowTraces()
+      }, Math.max(1, Math.min(2_147_483_647, nextRetryAt - Date.now())))
+      this.workflowTraceRetryTimer.unref?.()
+    }
   }
 
   private resolveModelSelectionWaiters(
@@ -2047,6 +3768,155 @@ export class AssistantDeliveryService extends Service {
       // Another Host sharing the same durable Delivery DB won the scan fence.
       if (error instanceof DeliveryStoreError && error.code === 'stale-fence') return
       throw error
+    }
+  }
+
+  private drainDeliveryPresentations(): Promise<void> {
+    if (this.presentationFlight !== undefined) return this.presentationFlight
+    const flight = this.runDeliveryPresentations()
+      .finally(() => { if (this.presentationFlight === flight) this.presentationFlight = undefined })
+    this.presentationFlight = flight
+    return flight
+  }
+
+  private async runDeliveryPresentations(): Promise<void> {
+    const attemptedPresentationKeys: string[] = []
+    for (let index = 0; index < this.config.maxConcurrency; index += 1) {
+      const claimed = this.deliveryStore.claimDeliveryPresentation({
+        ownerId: this.ownerId,
+        leaseMs: this.config.leaseMs,
+        excludePresentationKeys: attemptedPresentationKeys,
+      })
+      if (claimed === undefined) return
+      const { presentation, fencingToken } = claimed
+      attemptedPresentationKeys.push(presentation.presentationKey)
+      const original = this.deliveryStore.getOutboxByIdempotencyKey(
+        presentation.originalOutboxIdempotencyKey,
+      )
+      const finishFailure = (failureCode: string, terminal = false) => {
+        // Presentation is a projection of an already-authoritative terminal
+        // domain receipt. A transient provider failure must never turn that
+        // receipt into a permanent lie simply because the normal message-send
+        // retry budget was exhausted. Only an immutable original or revoked
+        // authority can terminally fence the projection.
+        const outcome = terminal ? 'dead' as const : 'retry_wait' as const
+        const retryDelay = Math.min(
+          this.config.retryMaxMs,
+          this.config.retryBaseMs * (2 ** Math.min(30, Math.max(0, presentation.attemptCount - 1))),
+        )
+        try {
+          this.deliveryStore.finishDeliveryPresentation({
+            presentationKey: presentation.presentationKey,
+            revision: presentation.revision,
+            ownerId: this.ownerId,
+            fencingToken,
+            outcome,
+            failureCode,
+            ...(outcome === 'retry_wait' ? { nextAttemptAt: Date.now() + retryDelay } : {}),
+          })
+        } catch (error) {
+          // A newer desired revision superseded this provider attempt. Its
+          // pending row is authoritative and must not be overwritten by the
+          // older completion.
+          if (error instanceof DeliveryStoreError && error.code === 'stale-fence') return
+          throw error
+        }
+      }
+      if (original === undefined) {
+        // The domain can settle before the Policy dispatch scanner creates the
+        // card. Preserve the desired state without exhausting retries.
+        this.deliveryStore.finishDeliveryPresentation({
+          presentationKey: presentation.presentationKey,
+          revision: presentation.revision,
+          ownerId: this.ownerId,
+          fencingToken,
+          outcome: 'retry_wait',
+          failureCode: 'original-message-not-created',
+          nextAttemptAt: Date.now() + this.config.retryBaseMs,
+        })
+        continue
+      }
+      if (original.status === 'dead') {
+        finishFailure('original-message-dead', true)
+        continue
+      }
+      if (original.providerMessageId === undefined) {
+        this.deliveryStore.finishDeliveryPresentation({
+          presentationKey: presentation.presentationKey,
+          revision: presentation.revision,
+          ownerId: this.ownerId,
+          fencingToken,
+          outcome: 'retry_wait',
+          failureCode: 'original-provider-message-pending',
+          nextAttemptAt: Date.now() + this.config.retryBaseMs,
+        })
+        continue
+      }
+      if (presentation.presentation.kind === 'automation-incident') {
+        const route = this.deliveryStore.validatePresentationOwnerRoute(original, this.ownerRouteGuard)
+        if (route.kind === 'deferred') {
+          finishFailure(route.failureCode)
+          continue
+        }
+        if (route.kind !== 'authorized') {
+          finishFailure(route.kind === 'denied'
+            ? route.failureCode
+            : 'presentation-owner-route-required', true)
+          continue
+        }
+      } else {
+        const binding = this.deliveryStore.getBinding(original.intent.bindingId)
+        const principal = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+        if (binding?.status !== 'active' || principal?.status !== 'active' || principal.role !== 'owner') {
+          finishFailure('presentation-route-revoked', true)
+          continue
+        }
+      }
+      const adapter = this.registry.get(
+        original.intent.target.conversation.channel,
+        original.intent.target.conversation.account,
+      )
+      if (adapter?.updatePresentation === undefined) {
+        finishFailure('presentation-adapter-unavailable')
+        continue
+      }
+      const controller = new AbortController()
+      const timeout = setTimeout(
+        () => controller.abort(new Error('delivery presentation lease elapsed')),
+        this.config.leaseMs,
+      )
+      timeout.unref?.()
+      let updateError: unknown
+      try {
+        await adapter.updatePresentation(
+          original.providerMessageId,
+          presentation.presentation,
+          controller.signal,
+        )
+      } catch (error) {
+        updateError = error
+      } finally {
+        clearTimeout(timeout)
+      }
+      if (updateError !== undefined) {
+        const code = updateError instanceof Error
+          ? `presentation-${updateError.name.normalize('NFC').toLowerCase().replaceAll(/[^a-z0-9]+/gu, '-').slice(0, 80)}`
+          : 'presentation-unknown-error'
+        finishFailure(code)
+        continue
+      }
+      try {
+        this.deliveryStore.finishDeliveryPresentation({
+          presentationKey: presentation.presentationKey,
+          revision: presentation.revision,
+          ownerId: this.ownerId,
+          fencingToken,
+          outcome: 'presented',
+          providerMessageId: original.providerMessageId,
+        })
+      } catch (error) {
+        if (!(error instanceof DeliveryStoreError) || error.code !== 'stale-fence') throw error
+      }
     }
   }
 

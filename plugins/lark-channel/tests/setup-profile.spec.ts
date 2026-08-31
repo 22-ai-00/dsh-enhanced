@@ -145,6 +145,8 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(disabled).not.toContain('lark-owner-capability-')
     expect(disabled).not.toContain('lark-owner-tool-')
     expect(disabled).toContain('lark-owner-reply-secondary')
+    expect(disabled).toContain('lark-owner-preference-signal-secondary')
+    expect(disabled).toContain('lark-owner-preference-snapshot-secondary')
 
     const channelDisabled = enabled.replace(
       /(id: dsh-enhanced-lark-channel[\s\S]*?\n\s+enabled:) true/u,
@@ -159,6 +161,75 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(disabledChannelRefresh).not.toContain('lark-owner-capability-')
     expect(disabledChannelRefresh).not.toContain('lark-owner-tool-')
     expect(disabledChannelRefresh).not.toContain('lark-owner-reply-')
+    expect(disabledChannelRefresh).not.toContain('lark-owner-preference-signal-')
+    expect(disabledChannelRefresh).not.toContain('lark-owner-preference-snapshot-')
+  })
+
+  test('always grants only the two bounded preference-learning capabilities to the authenticated owner', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const refresh = (lark as Record<string, unknown>).refreshLarkAgentPolicyPatch as (input: unknown) => string
+    const input = {
+      profilePatch: fixture,
+      dshHome: '/Users/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'secondary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      keychainService: 'dsh/lark/web/secondary',
+      keychainAccount: 'secondary',
+    }
+    const configured = configure(input)
+    const rows = parse(configured, {
+      customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
+    })
+    const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')
+      .config.assistantPolicy.rules as PolicyRuleShape[]
+
+    expect(rules.find(rule => rule.id === 'lark-owner-preference-signal-secondary')).toEqual({
+      id: 'lark-owner-preference-signal-secondary',
+      effect: 'allow',
+      subject: {
+        kind: 'external',
+        id: 'lark/secondary/personal/ou_owner',
+        workspace: '/Users/test/.dsh/assistant-workspace',
+      },
+      actions: ['signal'],
+      resource: { kind: 'preference', id: 'standard/*' },
+      context: { initiators: ['external'] },
+    })
+    expect(rules.find(rule => rule.id === 'lark-owner-preference-snapshot-secondary')).toEqual({
+      id: 'lark-owner-preference-snapshot-secondary',
+      effect: 'allow',
+      subject: {
+        kind: 'agent',
+        id: 'standard',
+        workspace: '/Users/test/.dsh/assistant-workspace',
+        principal: 'lark/secondary/personal/ou_owner',
+      },
+      actions: ['snapshot'],
+      resource: { kind: 'preference', id: 'active' },
+      context: { initiators: ['external'] },
+    })
+    expect(configured).not.toContain('lark-owner-capability-')
+    expect(configured).not.toContain('lark-owner-tool-')
+
+    // The narrow adaptation grants survive an explicit broad-tool disable and
+    // every refresh remains byte-stable.
+    const disabled = refresh({
+      profilePatch: configured,
+      dshHome: input.dshHome,
+      agentTools: 'disable',
+    })
+    expect(disabled).toContain('lark-owner-preference-signal-secondary')
+    expect(disabled).toContain('lark-owner-preference-snapshot-secondary')
+    expect(disabled).not.toContain('lark-owner-capability-')
+    expect(disabled).not.toContain('lark-owner-tool-')
+    expect(refresh({
+      profilePatch: disabled,
+      dshHome: input.dshHome,
+      agentTools: 'disable',
+    })).toBe(disabled)
   })
 
   test('refresh sweeps setup-managed external rules for every retired account id', () => {
@@ -194,6 +265,25 @@ describe('Lark Web-profile onboarding patch', () => {
           actions: [execute]
           resource: { kind: tool, id: "*" }
           context: { initiators: [external] }
+        - id: lark-owner-preference-signal-retired
+          effect: allow
+          subject:
+            kind: external
+            id: lark/retired/personal/ou_retired
+            workspace: /Users/test/.dsh/assistant-workspace
+          actions: [signal]
+          resource: { kind: preference, id: "standard/*" }
+          context: { initiators: [external] }
+        - id: lark-owner-preference-snapshot-retired
+          effect: allow
+          subject:
+            kind: agent
+            id: standard
+            workspace: /Users/test/.dsh/assistant-workspace
+            principal: lark/retired/personal/ou_retired
+          actions: [snapshot]
+          resource: { kind: preference, id: active }
+          context: { initiators: [external] }
       budgets: []`)
     expect(polluted).toContain('lark-owner-tool-*-retired')
 
@@ -205,6 +295,8 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(enabled).not.toContain('lark-owner-reply-retired')
     expect(enabled).not.toContain('lark-owner-capability-*-retired')
     expect(enabled).not.toContain('lark-owner-tool-*-retired')
+    expect(enabled).not.toContain('lark-owner-preference-signal-retired')
+    expect(enabled).not.toContain('lark-owner-preference-snapshot-retired')
     expect(enabled).toContain('lark-owner-reply-secondary')
     expect(enabled).toContain('lark-owner-tool-*-secondary')
 
@@ -262,11 +354,15 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(secondary).not.toContain('lark-owner-tool-*-primary')
     expect(secondary).not.toContain('lark-owner-ingress-primary')
     expect(secondary).not.toContain('lark-owner-reply-primary')
+    expect(secondary).not.toContain('lark-owner-preference-signal-primary')
+    expect(secondary).not.toContain('lark-owner-preference-snapshot-primary')
     expect(secondary).not.toContain('lark-owner-approval-dsh-enhanced-personal-memory-primary')
     expect(secondary).not.toContain('lark-channel-credential-primary')
     expect(secondary).not.toContain('id: lark-app-secret-primary')
     expect(secondary).toContain('lark-owner-capability-*-secondary')
     expect(secondary).toContain('lark-owner-tool-*-secondary')
+    expect(secondary).toContain('lark-owner-preference-signal-secondary')
+    expect(secondary).toContain('lark-owner-preference-snapshot-secondary')
 
     const disabled = configure({
       profilePatch: secondary,

@@ -25,3 +25,4 @@
         modelPickerTtlMs: 900000
         permissionPickerTtlMs: 900000
         toolApprovalTtlMs: 300000
+        ownerRoutes: []
