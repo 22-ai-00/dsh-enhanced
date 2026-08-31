@@ -39,10 +39,15 @@ async function harness() {
   roots.push(root)
   const ctx = new Context()
   const prepareAgentApproval = vi.fn((_agent: Agent | undefined, input: { sourceId: string }) => ({
+    routeVersion: 2 as const,
     sourceId: input.sourceId,
     bindingId: 'binding-owner',
+    bindingVersion: 3,
+    bindingGeneration: 2,
     workspace: '/work/alpha',
     principal: 'lark/main/tenant/owner',
+    principalRecordId: 'principal-owner',
+    principalVersion: 4,
   }))
   ctx.provide('assistantDelivery' as never, { prepareAgentApproval } as never)
   await ctx.plugin(SystemPrompt)

@@ -89,6 +89,7 @@
     "@deepseek-ai/dsh-tools": "catalog:",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@dsh-enhanced/personal-memory": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:"

@@ -46,10 +46,14 @@ receipt 只保存 scope digest、
 
 - T0：只记录结构化观测，不生成行为假设；
 - T1：格式、语言、详略、建议频率和推荐排序等本地可逆偏好；先处于 `shadow`，证据达标后才可激活；
-- T2：长期记忆、自动通知、外部承诺、数据边界和预算策略；仅形成 `proposed + inactive`，本插件不能激活；
+- T2：长期记忆、自动通知、外部承诺、数据边界和预算策略；保持 `proposed + inactive`。首版只有 `memory.retention=long-term` 经过独立 promotion ledger 形成 owner 审批提案；其他 T2 不会进入 producer allowlist；
 - T3：审批边界、凭据、安全风险目录和破坏性默认值；拒绝记录为偏好证据。
 
-`actorTrust`（谁给出的信号）与 `interpretationTrust`（如何解释信号）分别保存。`tentative + active` 仍然不是 `confirmed`；本插件没有确认或写入 Memory 的 API。
+`actorTrust`（谁给出的信号）与 `interpretationTrust`（如何解释信号）分别保存。`tentative + active` 仍然不是 `confirmed`。Preference 不直接写 Memory：它只通过 Personal Memory 私有、可撤销 registration 投递固定 proposal，并仅在收到绑定最终 Memory record 的 committed receipt 后投影 `confirmed`。
+
+长期 Memory 晋升不接受单一信号：当前门槛是至少 3 个支持信号、至少 2 个独立的 interpretation/source 通道、confidence >= 8500 bps、contradiction <= 1500 bps，且 hypothesis 必须仍是未过期的 `memory.retention=long-term`。请求只有 catalog tuple、计数、摘要和 owner fence，没有自由正文；Personal Memory 固定渲染为 `Retain information the owner explicitly confirms for long-term memory.`。这只表示 owner 希望长期保留其明确确认的信息，不会把其他偏好、聊天正文或推断自动写进 Memory。
+
+promotion 与 Memory proposal outbox 在同一 Preference SQLite 事务创建。Memory 不可用时指数退避并在重启后继续；Memory 通过 Delivery 当前 owner route v2 重新验证 scope/principal/lineage/generation 后才建立审批，不允许 headless 降级。终态严格区分 `confirmed`、owner-explicit `rejected`、`expired`、`conflicted` 与 `stale-owner`。forget、owner rotation 和 superseding evidence 会创建 durable cancellation outbox；旧终态回执只能收到 `cancelled` ACK，不能复活已删除状态。若 Memory 在取消前已经 commit，则回报 `already-confirmed`，本轮不会伪装撤销已提交 Memory。
 
 ## 信号接入
 
@@ -108,6 +112,7 @@ ctx.assistantPreferenceLearning.appendObservation({
 | `maxOverlayBytes` | `2048` | 固定 renderer 输出硬上限 |
 | `maintenanceIntervalMs` | 1 小时 | 有界清理过期 signal 的周期（1 分钟至 24 小时） |
 | `maintenanceBatchSize` | `500` | 每轮物理清理的最大 signal 数（最多 5000） |
+| `promotionReconcileLimit` | `50` | 每轮提交、取消和终态回执投影的最大数量（最多 1000） |
 
 置信度使用固定 actor/interpretation 权重、时间衰减、支持/矛盾质量和证据覆盖率计算；不调用模型打分。证据或状态更新与信号写入位于同一 `BEGIN IMMEDIATE` 事务中。
 
@@ -120,7 +125,7 @@ ctx.assistantPreferenceLearning.appendObservation({
 
 ## 限制
 
-owner 身份、日常 completed-turn 证明与显式反馈由 `assistant-delivery` 负责；未安装 Delivery 时仍可记录低信任系统观测，但不会产生可自动激活的 owner 证据。T2 的批准与 Memory 持久化属于独立、审批化的后续集成。当前自动学习只改变固定低风险表达偏好，不改变 Policy、工具权限、凭据、预算或安全阈值。
+owner 身份、日常 completed-turn 证明与显式反馈由 `assistant-delivery` 负责；未安装 Delivery 时仍可记录低信任系统观测，但不会产生可自动激活的 owner 证据。未安装 Personal Memory 时，合格 T2 promotion 会安全地留在本地 durable outbox；它不会绕过审批。当前自动学习只改变固定低风险表达偏好，不改变 Policy、工具权限、凭据、预算或安全阈值。
 
 ## 兼容性
 

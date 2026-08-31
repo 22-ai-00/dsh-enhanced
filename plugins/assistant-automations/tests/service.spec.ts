@@ -1,7 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
-import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantPolicyService, type ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -75,7 +75,7 @@ const proposalDefaults = {
 }
 
 async function harness(allow = true, options: {
-  deliveryRoute?: false | { sourceId: string; bindingId: string; workspace: string; principal: string }
+  deliveryRoute?: false | ApprovalDispatchRoute
 } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-automations-service-'))
   roots.push(root)
@@ -83,8 +83,10 @@ async function harness(allow = true, options: {
   const prepareAgentApproval = vi.fn(() => options.deliveryRoute === false
     ? (() => { throw new Error('disabled') })()
     : options.deliveryRoute ?? {
-        sourceId: 'dsh-enhanced-assistant-automations', bindingId: 'binding-owner',
+        routeVersion: 2 as const, sourceId: 'dsh-enhanced-assistant-automations',
+        bindingId: 'binding-owner', bindingVersion: 3, bindingGeneration: 2,
         workspace: '/work/alpha', principal: 'lark/main/tenant/owner',
+        principalRecordId: 'principal-owner', principalVersion: 4,
       })
   if (options.deliveryRoute !== false) {
     ctx.provide('assistantDelivery' as never, { prepareAgentApproval } as never)
@@ -182,8 +184,10 @@ describe('assistant automations Cordis service', () => {
     await routed.ctx.fiber.restart()
 
     const mismatched = await harness(true, { deliveryRoute: {
-      sourceId: 'dsh-enhanced-assistant-automations', bindingId: 'binding-owner',
+      routeVersion: 2, sourceId: 'dsh-enhanced-assistant-automations',
+      bindingId: 'binding-owner', bindingVersion: 3, bindingGeneration: 2,
       workspace: '/work/other', principal: 'lark/main/tenant/owner',
+      principalRecordId: 'principal-owner', principalVersion: 4,
     } })
     expect(() => mismatched.service.propose(current, {
       idempotencyKey: 'service:wrong-workspace',

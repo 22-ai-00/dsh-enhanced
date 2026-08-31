@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import {
   chmodSync,
   closeSync,
@@ -9,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const preferenceSchemaVersion = 9
+export const preferenceSchemaVersion = 12
 
 export type PreferenceDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -47,6 +48,32 @@ function preparePrivateFile(path: string): void {
 
 function userVersion(database: DatabaseSync): number {
   return (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+}
+
+export interface PreferencePromotionCancellationUpgradeBinding {
+  promotionId: string
+  promotionGeneration: number
+  requestDigest: string
+  principalLineageId: string
+  principalLineageVersion: number
+  ownerGeneration: number
+}
+
+/** Opaque stable binding used after cancellation rows redact their owner lineage. */
+export function preferencePromotionCancellationUpgradeBindingDigest(
+  input: Readonly<PreferencePromotionCancellationUpgradeBinding>,
+): string {
+  return createHash('sha256')
+    .update('preference-memory-promotion-cancellation-upgrade/v1\0')
+    .update(JSON.stringify([
+      input.promotionId,
+      input.promotionGeneration,
+      input.requestDigest,
+      input.principalLineageId,
+      input.principalLineageVersion,
+      input.ownerGeneration,
+    ]))
+    .digest('hex')
 }
 
 function migrate(database: DatabaseSync): void {
@@ -496,6 +523,318 @@ function migrate(database: DatabaseSync): void {
       UPDATE preference_schema_meta SET value = '9' WHERE key = 'schema-version';
       PRAGMA user_version = 9;
     `)
+    if (current < 10) database.exec(`
+      CREATE TABLE preference_memory_promotions (
+        promotion_id TEXT NOT NULL,
+        promotion_generation INTEGER NOT NULL CHECK (promotion_generation >= 1),
+        scope_key TEXT NOT NULL,
+        scope_digest TEXT NOT NULL CHECK (
+          length(scope_digest) = 64 AND scope_digest NOT GLOB '*[^a-f0-9]*'
+        ),
+        workspace TEXT NOT NULL,
+        preset TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        principal_digest TEXT NOT NULL CHECK (
+          length(principal_digest) = 64 AND principal_digest NOT GLOB '*[^a-f0-9]*'
+        ),
+        principal_lineage_id TEXT NOT NULL,
+        principal_lineage_version INTEGER NOT NULL CHECK (principal_lineage_version >= 1),
+        owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1),
+        hypothesis_id TEXT NOT NULL,
+        hypothesis_key TEXT NOT NULL CHECK (hypothesis_key = 'memory.retention'),
+        hypothesis_value TEXT NOT NULL CHECK (hypothesis_value = 'long-term'),
+        hypothesis_version INTEGER NOT NULL CHECK (hypothesis_version >= 1),
+        confidence_bps INTEGER NOT NULL CHECK (confidence_bps BETWEEN 0 AND 10000),
+        contradiction_bps INTEGER NOT NULL CHECK (contradiction_bps BETWEEN 0 AND 10000),
+        supporting_signals INTEGER NOT NULL CHECK (supporting_signals >= 2),
+        distinct_signal_sources INTEGER NOT NULL CHECK (distinct_signal_sources >= 1),
+        evidence_mass INTEGER NOT NULL CHECK (evidence_mass >= 1),
+        renderer_id TEXT NOT NULL CHECK (renderer_id = 'memory.retention.long-term/v1'),
+        observed_at INTEGER NOT NULL CHECK (observed_at >= 0),
+        deadline_at INTEGER NOT NULL CHECK (deadline_at > observed_at),
+        request_digest TEXT NOT NULL UNIQUE CHECK (
+          length(request_digest) = 64 AND request_digest NOT GLOB '*[^a-f0-9]*'
+        ),
+        idempotency_key TEXT NOT NULL UNIQUE,
+        state TEXT NOT NULL CHECK (state IN (
+          'pending', 'submitted', 'confirmed', 'rejected', 'expired',
+          'conflicted', 'stale-owner', 'cancelled'
+        )),
+        memory_proposal_id TEXT,
+        submission_receipt_digest TEXT CHECK (submission_receipt_digest IS NULL OR (
+          length(submission_receipt_digest) = 64
+          AND submission_receipt_digest NOT GLOB '*[^a-f0-9]*'
+        )),
+        terminal_result_version INTEGER CHECK (
+          terminal_result_version IS NULL OR terminal_result_version >= 1
+        ),
+        terminal_receipt_digest TEXT CHECK (terminal_receipt_digest IS NULL OR (
+          length(terminal_receipt_digest) = 64
+          AND terminal_receipt_digest NOT GLOB '*[^a-f0-9]*'
+        )),
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (promotion_id, promotion_generation),
+        UNIQUE(scope_key, hypothesis_id, promotion_generation)
+      ) STRICT;
+      CREATE INDEX preference_memory_promotions_scope_state
+        ON preference_memory_promotions(scope_key, state, updated_at, promotion_id);
+      CREATE INDEX preference_memory_promotions_hypothesis
+        ON preference_memory_promotions(hypothesis_id, promotion_generation DESC);
+
+      CREATE TABLE preference_memory_promotion_outbox (
+        promotion_id TEXT NOT NULL,
+        promotion_generation INTEGER NOT NULL CHECK (promotion_generation >= 1),
+        state TEXT NOT NULL CHECK (state IN ('pending', 'retry_wait', 'submitted', 'cancelled')),
+        attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+        next_attempt_at INTEGER NOT NULL CHECK (next_attempt_at >= 0),
+        submitted_at INTEGER,
+        last_error TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (promotion_id, promotion_generation),
+        FOREIGN KEY (promotion_id, promotion_generation)
+          REFERENCES preference_memory_promotions(promotion_id, promotion_generation)
+          ON DELETE CASCADE
+      ) STRICT;
+      CREATE INDEX preference_memory_promotion_outbox_pending
+        ON preference_memory_promotion_outbox(state, next_attempt_at, updated_at, promotion_id);
+
+      CREATE TABLE preference_memory_promotion_results (
+        promotion_id TEXT NOT NULL,
+        promotion_generation INTEGER NOT NULL CHECK (promotion_generation >= 1),
+        result_version INTEGER NOT NULL CHECK (result_version >= 1),
+        request_digest TEXT NOT NULL CHECK (
+          length(request_digest) = 64 AND request_digest NOT GLOB '*[^a-f0-9]*'
+        ),
+        receipt_digest TEXT NOT NULL UNIQUE CHECK (
+          length(receipt_digest) = 64 AND receipt_digest NOT GLOB '*[^a-f0-9]*'
+        ),
+        status TEXT NOT NULL CHECK (status IN (
+          'confirmed', 'rejected', 'expired', 'conflicted', 'stale-owner'
+        )),
+        rejection_kind TEXT CHECK (rejection_kind IS NULL OR rejection_kind = 'owner-explicit'),
+        memory_proposal_id TEXT,
+        memory_proposal_version INTEGER CHECK (
+          memory_proposal_version IS NULL OR memory_proposal_version >= 1
+        ),
+        memory_record_id TEXT,
+        memory_record_version INTEGER CHECK (
+          memory_record_version IS NULL OR memory_record_version >= 1
+        ),
+        memory_record_digest TEXT CHECK (memory_record_digest IS NULL OR (
+          length(memory_record_digest) = 64
+          AND memory_record_digest NOT GLOB '*[^a-f0-9]*'
+        )),
+        occurred_at INTEGER NOT NULL CHECK (occurred_at >= 0),
+        projected_at INTEGER NOT NULL CHECK (projected_at >= 0),
+        PRIMARY KEY (promotion_id, promotion_generation),
+        FOREIGN KEY (promotion_id, promotion_generation)
+          REFERENCES preference_memory_promotions(promotion_id, promotion_generation)
+          ON DELETE CASCADE,
+        CHECK ((status = 'confirmed'
+          AND memory_proposal_id IS NOT NULL AND memory_proposal_version IS NOT NULL
+          AND memory_record_id IS NOT NULL AND memory_record_version IS NOT NULL
+          AND memory_record_digest IS NOT NULL AND rejection_kind IS NULL)
+          OR (status = 'rejected'
+            AND memory_proposal_id IS NOT NULL AND memory_proposal_version IS NOT NULL
+            AND rejection_kind = 'owner-explicit' AND memory_record_id IS NULL
+            AND memory_record_version IS NULL AND memory_record_digest IS NULL)
+          OR (status IN ('expired', 'conflicted')
+            AND memory_proposal_id IS NOT NULL AND memory_proposal_version IS NOT NULL
+            AND rejection_kind IS NULL AND memory_record_id IS NULL
+            AND memory_record_version IS NULL AND memory_record_digest IS NULL)
+          OR (status = 'stale-owner'
+            AND memory_proposal_id IS NULL AND memory_proposal_version IS NULL
+            AND rejection_kind IS NULL AND memory_record_id IS NULL
+            AND memory_record_version IS NULL AND memory_record_digest IS NULL))
+      ) STRICT;
+
+      -- Privacy-preserving resurrection fence retained after owner rotation or
+      -- forget. It contains only opaque/digested promotion identity.
+      CREATE TABLE preference_memory_promotion_cancellations (
+        promotion_id TEXT NOT NULL,
+        promotion_generation INTEGER NOT NULL CHECK (promotion_generation >= 1),
+        request_digest TEXT NOT NULL CHECK (
+          length(request_digest) = 64 AND request_digest NOT GLOB '*[^a-f0-9]*'
+        ),
+        principal_lineage_id TEXT NOT NULL,
+        principal_lineage_version INTEGER NOT NULL CHECK (principal_lineage_version >= 1),
+        owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1),
+        reason TEXT NOT NULL CHECK (reason IN (
+          'forget', 'owner-rotated', 'superseded'
+        )),
+        cancelled_at INTEGER NOT NULL CHECK (cancelled_at >= 0),
+        cancellation_digest TEXT NOT NULL UNIQUE CHECK (
+          length(cancellation_digest) = 64 AND cancellation_digest NOT GLOB '*[^a-f0-9]*'
+        ),
+        state TEXT NOT NULL CHECK (state IN (
+          'pending', 'retry_wait', 'cancelled', 'already-confirmed'
+        )),
+        attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+        next_attempt_at INTEGER NOT NULL CHECK (next_attempt_at >= 0),
+        receipt_digest TEXT CHECK (receipt_digest IS NULL OR (
+          length(receipt_digest) = 64 AND receipt_digest NOT GLOB '*[^a-f0-9]*'
+        )),
+        last_error TEXT,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (promotion_id, promotion_generation)
+      ) STRICT;
+      CREATE INDEX preference_memory_promotion_cancellations_pending
+        ON preference_memory_promotion_cancellations(state, next_attempt_at, updated_at, promotion_id);
+
+      UPDATE preference_schema_meta SET value = '10' WHERE key = 'schema-version';
+      PRAGMA user_version = 10;
+    `)
+    if (current < 11) database.exec(`
+      UPDATE preference_schema_meta SET value = '11' WHERE key = 'schema-version';
+      PRAGMA user_version = 11;
+    `)
+    if (current < 12) {
+      database.exec(`
+        ALTER TABLE preference_memory_promotion_cancellations
+          ADD COLUMN upgrade_binding_digest TEXT CHECK (
+            upgrade_binding_digest IS NULL OR (
+              length(upgrade_binding_digest) = 64
+              AND upgrade_binding_digest NOT GLOB '*[^a-f0-9]*'
+            )
+          );
+      `)
+      const rows = database.prepare(`
+        SELECT cancellation.promotion_id, cancellation.promotion_generation,
+          cancellation.request_digest, cancellation.principal_lineage_id,
+          cancellation.principal_lineage_version, cancellation.owner_generation,
+          cancellation.reason, cancellation.state, cancellation.receipt_digest,
+          promotion.request_digest AS promotion_request_digest,
+          promotion.principal_lineage_id AS promotion_principal_lineage_id,
+          promotion.principal_lineage_version AS promotion_principal_lineage_version,
+          promotion.owner_generation AS promotion_owner_generation
+        FROM preference_memory_promotion_cancellations cancellation
+        LEFT JOIN preference_memory_promotions promotion
+          ON promotion.promotion_id = cancellation.promotion_id
+          AND promotion.promotion_generation = cancellation.promotion_generation
+      `).all() as Array<{
+        promotion_id: string
+        promotion_generation: number
+        request_digest: string
+        principal_lineage_id: string
+        principal_lineage_version: number
+        owner_generation: number
+        reason: 'forget' | 'owner-rotated' | 'superseded'
+        state: 'pending' | 'retry_wait' | 'cancelled' | 'already-confirmed'
+        receipt_digest: string | null
+        promotion_request_digest: string | null
+        promotion_principal_lineage_id: string | null
+        promotion_principal_lineage_version: number | null
+        promotion_owner_generation: number | null
+      }>
+      const update = database.prepare(`
+        UPDATE preference_memory_promotion_cancellations
+        SET upgrade_binding_digest = ?, principal_lineage_id = ?,
+          principal_lineage_version = ?, owner_generation = ?
+        WHERE promotion_id = ? AND promotion_generation = ?
+      `)
+      for (const row of rows) {
+        const redacted = row.receipt_digest !== null
+          && row.principal_lineage_id.startsWith('redacted-')
+        const hasPromotionBinding = row.promotion_request_digest !== null
+          && row.promotion_principal_lineage_id !== null
+          && row.promotion_principal_lineage_version !== null
+          && row.promotion_owner_generation !== null
+          && row.promotion_request_digest === row.request_digest
+        const requiresDelivery = row.state === 'pending' || row.state === 'retry_wait'
+          || (row.state === 'already-confirmed' && row.reason !== 'superseded')
+        if (redacted && !hasPromotionBinding
+          && (requiresDelivery || row.reason === 'superseded')) {
+          throw new PreferenceDatabaseError(
+            'unsafe-file',
+            'legacy promotion cancellation cannot be safely upgraded after owner-lineage redaction',
+          )
+        }
+        const binding = hasPromotionBinding ? {
+          promotionId: row.promotion_id,
+          promotionGeneration: row.promotion_generation,
+          requestDigest: row.promotion_request_digest!,
+          principalLineageId: row.promotion_principal_lineage_id!,
+          principalLineageVersion: row.promotion_principal_lineage_version!,
+          ownerGeneration: row.promotion_owner_generation!,
+        } : {
+          promotionId: row.promotion_id,
+          promotionGeneration: row.promotion_generation,
+          requestDigest: row.request_digest,
+          principalLineageId: row.principal_lineage_id,
+          principalLineageVersion: row.principal_lineage_version,
+          ownerGeneration: row.owner_generation,
+        }
+        const restoreLineage = redacted
+          && requiresDelivery
+          && hasPromotionBinding
+        update.run(
+          preferencePromotionCancellationUpgradeBindingDigest(binding),
+          restoreLineage ? binding.principalLineageId : row.principal_lineage_id,
+          restoreLineage ? binding.principalLineageVersion : row.principal_lineage_version,
+          restoreLineage ? binding.ownerGeneration : row.owner_generation,
+          row.promotion_id,
+          row.promotion_generation,
+        )
+      }
+      database.exec(`
+        ALTER TABLE preference_memory_promotion_cancellations
+          RENAME TO preference_memory_promotion_cancellations_v11;
+        CREATE TABLE preference_memory_promotion_cancellations (
+          promotion_id TEXT NOT NULL,
+          promotion_generation INTEGER NOT NULL CHECK (promotion_generation >= 1),
+          request_digest TEXT NOT NULL CHECK (
+            length(request_digest) = 64 AND request_digest NOT GLOB '*[^a-f0-9]*'
+          ),
+          principal_lineage_id TEXT NOT NULL,
+          principal_lineage_version INTEGER NOT NULL CHECK (principal_lineage_version >= 1),
+          owner_generation INTEGER NOT NULL CHECK (owner_generation >= 1),
+          reason TEXT NOT NULL CHECK (reason IN (
+            'forget', 'owner-rotated', 'superseded'
+          )),
+          cancelled_at INTEGER NOT NULL CHECK (cancelled_at >= 0),
+          cancellation_digest TEXT NOT NULL UNIQUE CHECK (
+            length(cancellation_digest) = 64 AND cancellation_digest NOT GLOB '*[^a-f0-9]*'
+          ),
+          state TEXT NOT NULL CHECK (state IN (
+            'pending', 'retry_wait', 'cancelled', 'already-confirmed'
+          )),
+          attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+          next_attempt_at INTEGER NOT NULL CHECK (next_attempt_at >= 0),
+          receipt_digest TEXT CHECK (receipt_digest IS NULL OR (
+            length(receipt_digest) = 64 AND receipt_digest NOT GLOB '*[^a-f0-9]*'
+          )),
+          last_error TEXT,
+          upgrade_binding_digest TEXT NOT NULL CHECK (
+            length(upgrade_binding_digest) = 64
+            AND upgrade_binding_digest NOT GLOB '*[^a-f0-9]*'
+          ),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (promotion_id, promotion_generation)
+        ) STRICT;
+        INSERT INTO preference_memory_promotion_cancellations(
+          promotion_id, promotion_generation, request_digest, principal_lineage_id,
+          principal_lineage_version, owner_generation, reason, cancelled_at,
+          cancellation_digest, state, attempt_count, next_attempt_at, receipt_digest,
+          last_error, upgrade_binding_digest, updated_at
+        )
+        SELECT promotion_id, promotion_generation, request_digest, principal_lineage_id,
+          principal_lineage_version, owner_generation, reason, cancelled_at,
+          cancellation_digest, state, attempt_count, next_attempt_at, receipt_digest,
+          last_error, upgrade_binding_digest, updated_at
+        FROM preference_memory_promotion_cancellations_v11;
+        DROP TABLE preference_memory_promotion_cancellations_v11;
+        CREATE INDEX preference_memory_promotion_cancellations_pending
+          ON preference_memory_promotion_cancellations(
+            state, next_attempt_at, updated_at, promotion_id
+          );
+        UPDATE preference_memory_promotion_cancellations
+        SET state = 'pending', receipt_digest = NULL, last_error = NULL, next_attempt_at = 0
+        WHERE state = 'already-confirmed' AND reason IN ('forget', 'owner-rotated');
+        UPDATE preference_schema_meta SET value = '12' WHERE key = 'schema-version';
+        PRAGMA user_version = 12;
+      `)
+    }
     database.exec('COMMIT')
     transactionStarted = false
   } catch (error) {

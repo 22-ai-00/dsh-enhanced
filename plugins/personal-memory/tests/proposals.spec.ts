@@ -10,11 +10,24 @@ import {
 } from '@dsh-enhanced/assistant-policy'
 import { afterEach, describe, expect, test } from 'vitest'
 import { MemoryProposalManager } from '../src/proposals.ts'
-import { hashMemoryMutation, MemoryStore } from '../src/store.ts'
-import type { MemoryEntryInput, MemoryIdentity } from '../src/types.ts'
+import { hashMemoryMutation, memoryPrincipalDigest, MemoryStore } from '../src/store.ts'
+import type { MemoryEntryInput, MemoryIdentity, MemoryOwnerNamespace } from '../src/types.ts'
 
 const temporaryRoots: string[] = []
 const identity: MemoryIdentity = { owner: 'user', scope: 'user-global' }
+const namespace: MemoryOwnerNamespace = Object.freeze({
+  mode: 'headless',
+  principalDigest: memoryPrincipalDigest('owner:lark:123'),
+  lineageId: 'proposal-tests',
+  lineageVersion: 1,
+})
+const routeV2 = {
+  routeVersion: 2 as const,
+  bindingVersion: 1,
+  bindingGeneration: 1,
+  principalRecordId: 'principal-row-proposals',
+  principalVersion: 1,
+}
 
 async function harness(now: () => number = () => 100_000) {
   const root = await mkdtemp(join(tmpdir(), 'personal-memory-proposals-'))
@@ -55,6 +68,7 @@ function proposalInput(content = 'Remember this stable fact') {
     idempotencyKey: 'proposal:add:stable-fact',
     requester: 'agent:primary',
     principal: 'owner:lark:123',
+    namespace,
     ttlMs: 60_000,
     mutation: { op: 'add' as const, identity, entry: entry(content) },
   }
@@ -76,7 +90,7 @@ describe('approval-gated memory proposals', () => {
     })
     expect(created.diff).toContain('Remember this stable fact')
     expect(replay).toEqual({ ...created, replayed: true })
-    expect(memory.list(identity)).toEqual([])
+    expect(memory.list(namespace, identity)).toEqual([])
     memory.close()
     await ctx.fiber.restart()
   })
@@ -112,6 +126,7 @@ describe('approval-gated memory proposals', () => {
   test('binds and exactly replays the durable delivery dispatch route', async () => {
     const { manager, memory, policy, ctx } = await harness()
     const dispatch = {
+      ...routeV2,
       sourceId: 'dsh-enhanced-personal-memory',
       bindingId: 'binding-owner-dm',
       workspace: '/work/alpha',
@@ -154,6 +169,7 @@ describe('approval-gated memory proposals', () => {
       ...proposalInput('attached proposal must stay read-only'),
       idempotencyKey: 'proposal:attached-policy-missing',
       dispatch: {
+        ...routeV2,
         sourceId: 'dsh-enhanced-personal-memory',
         bindingId: 'binding-owner-dm',
         workspace: '/work/alpha',
@@ -195,7 +211,7 @@ describe('approval-gated memory proposals', () => {
     expect(readCalls).toBe(1)
     expect(emptyPolicy.listPendingApprovalDispatches()).toEqual([])
     expect(emptyPolicy.getProposal(attached.policyProposalId)).toBeUndefined()
-    expect(fixture.memory.list(identity)).toEqual([])
+    expect(fixture.memory.list(namespace, identity)).toEqual([])
     fixture.memory.close()
     await fixture.ctx.fiber.restart()
     await emptyCtx.fiber.restart()
@@ -231,7 +247,7 @@ describe('approval-gated memory proposals', () => {
     expect(approved).toMatchObject({ status: 'approved', version: 2, replayed: false })
     expect(approved.record?.content).toBe('Remember this stable fact')
     expect(replay).toEqual({ ...approved, replayed: true })
-    expect(memory.list(identity)).toHaveLength(1)
+    expect(memory.list(namespace, identity)).toHaveLength(1)
     expect(manager.propose(proposalInput())).toMatchObject({ status: 'approved', version: 2, replayed: true })
     memory.close()
     await ctx.fiber.restart()
@@ -240,7 +256,7 @@ describe('approval-gated memory proposals', () => {
   test('supports approved replace and remove with target-version CAS', async () => {
     const { manager, memory, ctx } = await harness()
     const original = memory.applyApprovedMutation({
-      op: 'add', idempotencyKey: 'fixture:add', identity, entry: entry('Vim'),
+      op: 'add', idempotencyKey: 'fixture:add', namespace, identity, entry: entry('Vim'),
     })
     const replacement = manager.propose({
       ...proposalInput(),
@@ -280,7 +296,7 @@ describe('approval-gated memory proposals', () => {
 
     expect(replaced.record).toMatchObject({ content: 'Helix', version: 2 })
     expect(removed.record).toMatchObject({ status: 'removed', version: 3 })
-    expect(memory.get(identity, original.id)).toBeUndefined()
+    expect(memory.get(namespace, identity, original.id)).toBeUndefined()
     memory.close()
     await ctx.fiber.restart()
   })
@@ -312,7 +328,7 @@ describe('approval-gated memory proposals', () => {
 
     expect(rejected.status).toBe('rejected')
     expect(expired.status).toBe('expired')
-    expect(memory.list(identity)).toEqual([])
+    expect(memory.list(namespace, identity)).toEqual([])
     memory.close()
     await ctx.fiber.restart()
   })
@@ -320,7 +336,7 @@ describe('approval-gated memory proposals', () => {
   test('marks an approved proposal conflicted when its target changed after review', async () => {
     const { manager, memory, ctx } = await harness()
     const original = memory.applyApprovedMutation({
-      op: 'add', idempotencyKey: 'fixture:add', identity, entry: entry('old value'),
+      op: 'add', idempotencyKey: 'fixture:add', namespace, identity, entry: entry('old value'),
     })
     const proposal = manager.propose({
       ...proposalInput(),
@@ -336,6 +352,7 @@ describe('approval-gated memory proposals', () => {
     memory.applyApprovedMutation({
       op: 'replace',
       idempotencyKey: 'fixture:concurrent-replace',
+      namespace,
       identity,
       id: original.id,
       expectedVersion: original.version,
@@ -352,7 +369,7 @@ describe('approval-gated memory proposals', () => {
 
     expect(result).toMatchObject({ status: 'conflicted', version: 2 })
     expect(result.record).toBeUndefined()
-    expect(memory.get(identity, original.id)?.content).toBe('concurrent value')
+    expect(memory.get(namespace, identity, original.id)?.content).toBe('concurrent value')
     memory.close()
     await ctx.fiber.restart()
   })
@@ -384,7 +401,7 @@ describe('approval-gated memory proposals', () => {
     })
 
     expect(recovered).toMatchObject({ status: 'approved', version: 2, replayed: true })
-    expect(memory.list(identity).map(record => record.content)).toEqual(['recover after restart'])
+    expect(memory.list(namespace, identity).map(record => record.content)).toEqual(['recover after restart'])
     memory.close()
     await ctx.fiber.restart()
   })
@@ -396,6 +413,7 @@ describe('approval-gated memory proposals', () => {
       ...proposalInput('recover cross-database proposal gap'),
       idempotencyKey: 'proposal:cross-database-gap',
       dispatch: {
+        ...routeV2,
         sourceId: 'dsh-enhanced-personal-memory',
         bindingId: 'binding-owner-dm',
         workspace: '/work/alpha',
@@ -449,84 +467,29 @@ describe('approval-gated memory proposals', () => {
     expect(manager.reconcile(50)).toEqual([])
     expect(recoveryCount).toBe(1)
     expect(proposeCount).toBe(0)
-    expect(memory.list(identity).map(record => record.content))
+    expect(memory.list(namespace, identity).map(record => record.content))
       .toEqual(['recover cross-database proposal gap'])
     memory.close()
     await ctx.fiber.restart()
   })
 
-  test('recovers a legacy crash-gap intent when the Policy TTL began after the local intent', async () => {
+  test('rejects a legacy ownerless intent hash instead of attaching it to a namespaced proposal', async () => {
     let now = 100_000
     const fixture = await harness(() => now)
     const input = {
       ...proposalInput('recover a legacy crash-gap intent'),
       idempotencyKey: 'proposal:legacy-cross-database-gap',
     }
-    const mutation = fixture.memory.normalizeMutation(input.mutation)
+    const mutation = fixture.memory.normalizeMutation(input.mutation, { namespace })
     const proposalId = `memory-${createHash('sha256')
       .update(input.idempotencyKey)
       .digest('hex')
       .slice(0, 32)}`
     const legacyHash = hashMemoryMutation(mutation)
-    fixture.memory.prepareProposalIntent({
-      ...input,
-      mutation,
-      proposalId,
-      mutationHash: legacyHash,
-    })
-
-    // Legacy Policy proposals derived expiry from Policy's own clock. A crash
-    // between these writes therefore leaves a valid row whose deadline differs
-    // from the newer local-intent absolute deadline.
-    now += 5
-    const policyProposal = fixture.policy.propose({
-      idempotencyKey: `personal-memory:${input.idempotencyKey}`,
-      requester: input.requester,
-      principal: input.principal,
-      action: 'memory.add',
-      resource: { kind: 'memory', id: proposalId },
-      diff: JSON.stringify(mutation, null, 2),
-      summary: 'add user user-global memory fact',
-      ttlMs: input.ttlMs,
-    })
-    let recoveryCount = 0
-    let legacyProposeCount = 0
-    const manager = new MemoryProposalManager(fixture.memory, {
-      recoverOrCreateProposal(recovery) {
-        recoveryCount += 1
-        return fixture.policy.recoverOrCreateProposal(recovery)
-      },
-      propose(proposal) {
-        legacyProposeCount += 1
-        return fixture.policy.propose(proposal)
-      },
-      decideProposal: decision => fixture.policy.decideProposal(decision),
-      getProposal: id => fixture.policy.getProposal(id),
-      getProposalByIdempotencyKey: lookup => fixture.policy.getProposalByIdempotencyKey(lookup),
-    })
-
-    expect(manager.reconcile(50)).toEqual([])
-    expect(recoveryCount).toBe(0)
-    expect(legacyProposeCount).toBe(1)
+    expect(() => fixture.memory.prepareProposalIntent({
+      ...input, notAfter: 160_000, mutation, proposalId, mutationHash: legacyHash,
+    })).toThrowError(expect.objectContaining({ code: 'invalid-entry' }))
     expect(fixture.memory.listProposalIntents(10)).toEqual([])
-    expect(fixture.memory.getProposal(proposalId)).toMatchObject({
-      policyProposalId: policyProposal.proposalId,
-      status: 'pending',
-    })
-    expect(fixture.memory.getProposal(proposalId)?.mutationHash).not.toBe(legacyHash)
-
-    fixture.policy.decideProposal({
-      proposalId: policyProposal.proposalId,
-      principal: input.principal,
-      expectedVersion: 1,
-      decision: 'approved',
-      reason: 'approve the recovered legacy proposal',
-    })
-    expect(manager.reconcile(50)).toEqual([
-      expect.objectContaining({ status: 'approved', version: 2 }),
-    ])
-    expect(fixture.memory.list(identity).map(record => record.content))
-      .toEqual(['recover a legacy crash-gap intent'])
     fixture.memory.close()
     await fixture.ctx.fiber.restart()
   })
@@ -582,7 +545,7 @@ describe('approval-gated memory proposals', () => {
     expect(recoveryCount).toBe(1)
     expect(proposeCount).toBe(0)
     expect(fixture.memory.listProposalIntents(10)).toEqual([])
-    expect(fixture.memory.list(identity)).toEqual([])
+    expect(fixture.memory.list(namespace, identity)).toEqual([])
     expect(fixture.policy.listPendingApprovalDispatches()).toEqual([])
     fixture.memory.close()
     await fixture.ctx.fiber.restart()
@@ -605,6 +568,7 @@ describe('approval-gated memory proposals', () => {
       idempotencyKey: 'proposal:atomic-abandonment-winner',
       ttlMs: 1_000,
       dispatch: {
+        ...routeV2,
         sourceId: 'dsh-enhanced-personal-memory',
         bindingId: 'binding-owner-dm',
         workspace: '/work/alpha',
@@ -647,8 +611,8 @@ describe('approval-gated memory proposals', () => {
     expect(secondManager.reconcile(50)).toEqual([])
     expect(firstPolicy.listPendingApprovalDispatches()).toEqual([])
     expect(secondPolicy.listPendingApprovalDispatches()).toEqual([])
-    expect(firstMemory.list(identity)).toEqual([])
-    expect(secondMemory.list(identity)).toEqual([])
+    expect(firstMemory.list(namespace, identity)).toEqual([])
+    expect(secondMemory.list(namespace, identity)).toEqual([])
     firstMemory.close()
     secondMemory.close()
     await firstContext.fiber.restart()
@@ -672,6 +636,7 @@ describe('approval-gated memory proposals', () => {
       idempotencyKey: 'proposal:atomic-creation-winner',
       ttlMs: 1_000,
       dispatch: {
+        ...routeV2,
         sourceId: 'dsh-enhanced-personal-memory',
         bindingId: 'binding-owner-dm',
         workspace: '/work/alpha',
@@ -724,8 +689,8 @@ describe('approval-gated memory proposals', () => {
     expect(settlements).toEqual([
       expect.objectContaining({ status: 'approved', version: 2 }),
     ])
-    expect(earlyMemory.list(identity).map(record => record.content)).toEqual(['atomic creation winner'])
-    expect(lateMemory.list(identity).map(record => record.content)).toEqual(['atomic creation winner'])
+    expect(earlyMemory.list(namespace, identity).map(record => record.content)).toEqual(['atomic creation winner'])
+    expect(lateMemory.list(namespace, identity).map(record => record.content)).toEqual(['atomic creation winner'])
     expect(earlyPolicy.listPendingApprovalDispatches()).toEqual([])
     expect(latePolicy.listPendingApprovalDispatches()).toEqual([])
     earlyMemory.close()
@@ -745,6 +710,7 @@ describe('approval-gated memory proposals', () => {
     )
     const managerB = new MemoryProposalManager(secondMemory, secondPolicy)
     const dispatch = {
+      ...routeV2,
       sourceId: 'dsh-enhanced-personal-memory',
       bindingId: 'binding-owner-dm',
       workspace: '/work/alpha',
@@ -808,6 +774,7 @@ describe('approval-gated memory proposals', () => {
         ...proposalInput(`recovery ${mismatch} mismatch`),
         idempotencyKey: `proposal:recovery-${mismatch}-mismatch`,
         dispatch: {
+          ...routeV2,
           sourceId: 'dsh-enhanced-personal-memory',
           bindingId: 'expected-owner-binding',
           workspace: '/work/alpha',
@@ -836,7 +803,7 @@ describe('approval-gated memory proposals', () => {
       expect(recovered.reconcile(50)).toEqual([
         expect.objectContaining({ status: 'conflicted', version: 2 }),
       ])
-      expect(fixture.memory.list(identity), mismatch).toEqual([])
+      expect(fixture.memory.list(namespace, identity), mismatch).toEqual([])
       expect(fixture.memory.listProposalIntents(10), mismatch).toEqual([])
       fixture.memory.close()
       await fixture.ctx.fiber.restart()
@@ -864,7 +831,7 @@ describe('approval-gated memory proposals', () => {
     expect(fixture.manager.reconcile(50)).toEqual([
       expect.objectContaining({ proposalId: beyondFirstPage.proposalId, status: 'approved' }),
     ])
-    expect(fixture.memory.list(identity).map(record => record.content))
+    expect(fixture.memory.list(namespace, identity).map(record => record.content))
       .toEqual([beyondFirstPage.mutation.op === 'add' ? beyondFirstPage.mutation.entry.content : ''])
     fixture.memory.close()
     await fixture.ctx.fiber.restart()
@@ -946,7 +913,7 @@ describe('approval-gated memory proposals', () => {
     })).toMatchObject({ status: 'conflicted', version: 2 })
     expect(fixture.memory.listProposalIntents(10)).toEqual([])
     expect(fixture.memory.listPendingProposals(10)).toEqual([])
-    expect(fixture.memory.list(identity)).toEqual([])
+    expect(fixture.memory.list(namespace, identity)).toEqual([])
     fixture.memory.close()
     await fixture.ctx.fiber.restart()
   })
@@ -986,7 +953,7 @@ describe('approval-gated memory proposals', () => {
 
     expect(() => manager.propose(proposalInput('changed content')))
       .toThrowError(expect.objectContaining({ code: 'idempotency-conflict' }))
-    expect(memory.list(identity)).toEqual([])
+    expect(memory.list(namespace, identity)).toEqual([])
     memory.close()
     await ctx.fiber.restart()
   })
@@ -1004,13 +971,13 @@ describe('approval-gated memory proposals', () => {
       decision: 'approved',
       reason: 'owner confirmed on a card',
     })
-    expect(memory.list(identity)).toEqual([])
+    expect(memory.list(namespace, identity)).toEqual([])
 
     const settled = manager.reconcile(50)
 
     expect(settled).toHaveLength(1)
     expect(settled[0]).toMatchObject({ proposalId: proposal.proposalId, status: 'approved' })
-    expect(memory.list(identity).map(record => record.content)).toEqual(['approved out of band'])
+    expect(memory.list(namespace, identity).map(record => record.content)).toEqual(['approved out of band'])
     memory.close()
     await ctx.fiber.restart()
   })
@@ -1060,7 +1027,7 @@ describe('approval-gated memory proposals', () => {
       expect(manager.reconcile(50)).toEqual([
         expect.objectContaining({ proposalId: proposal.proposalId, status: 'conflicted', version: 2 }),
       ])
-      expect(fixture.memory.list(identity), field).toEqual([])
+      expect(fixture.memory.list(namespace, identity), field).toEqual([])
       expect(fixture.memory.getProposal(proposal.proposalId), field)
         .toMatchObject({ status: 'conflicted', version: 2 })
       fixture.memory.close()
@@ -1094,7 +1061,7 @@ describe('approval-gated memory proposals', () => {
     })
 
     expect(settled).toMatchObject({ status: 'conflicted', version: 2 })
-    expect(fixture.memory.list(identity)).toEqual([])
+    expect(fixture.memory.list(namespace, identity)).toEqual([])
     fixture.memory.close()
     await fixture.ctx.fiber.restart()
   })
@@ -1113,12 +1080,12 @@ describe('approval-gated memory proposals', () => {
     expect(manager.reconcile(50)).toHaveLength(1)
     // A second pass must not duplicate the record or re-settle the proposal.
     expect(manager.reconcile(50)).toHaveLength(0)
-    expect(memory.list(identity).map(record => record.content)).toEqual(['committed once'])
+    expect(memory.list(namespace, identity).map(record => record.content)).toEqual(['committed once'])
 
     // An undecided proposal stays pending: silence is never treated as approval.
     manager.propose({ ...proposalInput('still pending'), idempotencyKey: 'proposal:add:pending' })
     expect(manager.reconcile(50)).toHaveLength(0)
-    expect(memory.list(identity).map(record => record.content)).toEqual(['committed once'])
+    expect(memory.list(namespace, identity).map(record => record.content)).toEqual(['committed once'])
     memory.close()
     await ctx.fiber.restart()
   })
@@ -1137,7 +1104,7 @@ describe('approval-gated memory proposals', () => {
     const settled = manager.reconcile(50)
 
     expect(settled[0]).toMatchObject({ status: 'rejected' })
-    expect(memory.list(identity)).toEqual([])
+    expect(memory.list(namespace, identity)).toEqual([])
     memory.close()
     await ctx.fiber.restart()
   })

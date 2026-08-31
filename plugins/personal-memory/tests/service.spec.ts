@@ -55,11 +55,18 @@ async function harness(options: {
   maxImportRecords?: number
   delivery?: {
     prepareAgentApproval: (agent: Agent | undefined, input: { sourceId: string }) => {
+      routeVersion: 2
       sourceId: string
       bindingId: string
+      bindingVersion: number
+      bindingGeneration: number
       workspace: string
       principal: string
+      principalRecordId: string
+      principalVersion: number
     }
+    preferencePrincipalForAgent?: (agent: Agent) => unknown
+    prepareOwnerApprovalForPreference?: (...args: never[]) => unknown
   }
 } = {}) {
   const ctx = new Context()
@@ -112,10 +119,15 @@ describe('personal memory Cordis service', () => {
   test('derives approval authority from the exact active delivery route and dispatches it durably', async () => {
     const calls: Array<{ agent: Agent | undefined; sourceId: string }> = []
     const route = {
+      routeVersion: 2 as const,
       sourceId: 'dsh-enhanced-personal-memory',
       bindingId: 'binding-owner-dm',
+      bindingVersion: 1,
+      bindingGeneration: 1,
       workspace: '/work/alpha',
       principal: 'lark/main/tenant/owner',
+      principalRecordId: 'principal-row-owner',
+      principalVersion: 1,
     }
     const { ctx, policy, service } = await harness({
       delivery: {
@@ -202,10 +214,15 @@ describe('personal memory Cordis service', () => {
 
   test('derives the same Delivery authority for model-originated imports', async () => {
     const route = {
+      routeVersion: 2 as const,
       sourceId: 'dsh-enhanced-personal-memory',
       bindingId: 'binding-import-owner',
+      bindingVersion: 1,
+      bindingGeneration: 1,
       workspace: '/work/alpha',
       principal: 'lark/main/tenant/import-owner',
+      principalRecordId: 'principal-row-import-owner',
+      principalVersion: 1,
     }
     const { ctx, policy, service } = await harness({
       delivery: { prepareAgentApproval: () => route },
@@ -427,7 +444,8 @@ describe('personal memory Cordis service', () => {
       idempotencyKey: 'malformed',
       principal: 'owner:lark:123',
     })).toThrowError(expect.objectContaining<Partial<PersonalMemoryError>>({ code: 'invalid-import' }))
-    expect(service.search(agent, { query: '' })).toEqual([])
+    expect(() => service.search(agent, { query: '' }))
+      .toThrowError(expect.objectContaining<Partial<PersonalMemoryError>>({ code: 'missing-identity' }))
     await ctx.fiber.restart()
   })
 })

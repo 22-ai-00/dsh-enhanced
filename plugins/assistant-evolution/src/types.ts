@@ -1,3 +1,5 @@
+import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
+
 /** Binary terminal projection. Its quality meaning is determined separately by
  * evidenceKind; execution success alone is never treated as task success. */
 export type EpisodeOutcome = 'succeeded' | 'failed'
@@ -305,12 +307,12 @@ export interface EvolutionCreationIntent {
   diff: string
   summary: string
   ttlMs: number
-  dispatch?: Readonly<{
-    sourceId: string
-    bindingId: string
-    workspace: string
-    principal: string
-  }>
+  dispatch?: Readonly<ApprovalDispatchRoute>
+}
+
+/** New Policy proposal input; legacy routes are retained only in stored rows. */
+export type EvolutionCreationInput = Omit<EvolutionCreationIntent, 'dispatch'> & {
+  dispatch?: Readonly<ApprovalDispatchRouteV2>
 }
 
 /** Durable proof that an exact immutable rule was injected into a session. */

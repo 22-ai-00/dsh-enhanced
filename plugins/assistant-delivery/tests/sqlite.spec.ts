@@ -79,6 +79,7 @@ describe('delivery SQLite boundary', () => {
       'inbox_attempts', 'inbox_messages', 'outbox_attempts', 'outbox_messages',
       'model_picker_states', 'model_selection_settlements', 'pairing_challenges',
       'approval_dispatch_cursor', 'dead_letter_resolutions',
+      'approval_outbox_routes',
       'delivery_preference_projection_outbox',
       'delivery_inbox_admission_clock', 'delivery_inbox_admissions',
     ]))
@@ -185,6 +186,35 @@ describe('delivery SQLite boundary', () => {
       admission_sequence: null,
       terminal_at: null,
     })
+    migrated.close()
+  })
+
+  test('adds the immutable approval route receipt ledger when migrating schema v15', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v15-approval-route-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const raw = openDeliveryDatabase(path)
+    raw.exec(`
+      DROP INDEX approval_outbox_route_binding;
+      DROP TABLE approval_outbox_routes;
+      PRAGMA user_version = 15;
+    `)
+    raw.close()
+
+    const migrated = openDeliveryDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
+    expect((migrated.prepare('PRAGMA table_info(approval_outbox_routes)').all() as Array<{
+      name: string
+    }>).map(column => column.name)).toEqual([
+      'outbox_id', 'route_version', 'source_id', 'binding_id', 'binding_version',
+      'binding_generation', 'workspace', 'principal', 'principal_record_id', 'principal_version',
+    ])
+    expect(() => migrated.prepare(`
+      INSERT INTO approval_outbox_routes(
+        outbox_id, route_version, source_id, binding_id, binding_version, binding_generation,
+        workspace, principal, principal_record_id, principal_version
+      ) VALUES ('missing', 1, 'source', 'binding', 1, 1, '/work/alpha', 'owner', 'principal', 1)
+    `).run()).toThrow()
     migrated.close()
   })
 

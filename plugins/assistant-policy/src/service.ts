@@ -636,7 +636,22 @@ export class AssistantPolicyService extends Service {
     expectedVersion: number,
   ): ApprovalDispatchResult {
     this.assertActive()
-    const result = this.ledger.markApprovalDispatchEnqueued(proposalId, expectedVersion)
+    let result: ApprovalDispatchResult
+    try {
+      result = this.ledger.markApprovalDispatchEnqueued(proposalId, expectedVersion)
+    } catch (error) {
+      if (error instanceof PolicyLedgerError && error.code === 'legacy-unverifiable') {
+        this.ledger.appendAudit({
+          actor: 'system:approval-dispatch',
+          action: 'approval.dispatch.enqueue',
+          resource: { kind: 'approval-proposal', id: proposalId },
+          outcome: 'rejected',
+          reasonCode: 'legacy-unverifiable-enqueued',
+          details: { expectedVersion, routeVersion: 1 },
+        })
+      }
+      throw error
+    }
     this.ledger.appendAudit({
       actor: 'system:approval-dispatch',
       action: 'approval.dispatch.enqueue',

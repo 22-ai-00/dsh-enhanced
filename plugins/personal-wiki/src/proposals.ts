@@ -7,6 +7,7 @@ import {
 import type {
   ApprovalDecisionInput,
   ApprovalDispatchRoute,
+  ApprovalDispatchRouteV2,
   ApprovalProposalRecoveryInput,
   ApprovalProposalRecoveryResult,
   ApprovalProposalResult,
@@ -79,21 +80,61 @@ function permanentPolicyRecoveryFailure(error: unknown): boolean {
     .includes(String(error.code))
 }
 
-function storedDispatch(value: string): Readonly<ApprovalDispatchRoute> {
-  const parsed = JSON.parse(value) as Partial<ApprovalDispatchRoute>
-  if (parsed === null || typeof parsed !== 'object'
-    || typeof parsed.sourceId !== 'string'
-    || typeof parsed.bindingId !== 'string'
-    || typeof parsed.workspace !== 'string'
-    || typeof parsed.principal !== 'string') {
-    throw new WikiProposalStoreError('invalid-state', 'stored wiki approval route is invalid')
+function approvalDispatch(
+  value: string,
+  errorCode: Extract<WikiProposalStoreErrorCode, 'invalid-input' | 'invalid-state'>,
+  allowLegacy: boolean,
+): Readonly<ApprovalDispatchRoute> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new WikiProposalStoreError(errorCode, 'wiki approval route is invalid')
   }
-  return Object.freeze({
-    sourceId: parsed.sourceId,
-    bindingId: parsed.bindingId,
-    workspace: parsed.workspace,
-    principal: parsed.principal,
-  })
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new WikiProposalStoreError(errorCode, 'wiki approval route is invalid')
+  }
+  const route = parsed as Record<string, unknown>
+  const keys = Object.keys(route).sort().join(',')
+  const legacyKeys = 'bindingId,principal,sourceId,workspace'
+  const versionedLegacyKeys = 'bindingId,principal,routeVersion,sourceId,workspace'
+  const v2Keys = [
+    'bindingGeneration', 'bindingId', 'bindingVersion', 'principal', 'principalRecordId',
+    'principalVersion', 'routeVersion', 'sourceId', 'workspace',
+  ].sort().join(',')
+  const legacy = keys === legacyKeys || (keys === versionedLegacyKeys && route['routeVersion'] === 1)
+  const v2 = keys === v2Keys && route['routeVersion'] === 2
+    && typeof route['bindingVersion'] === 'number'
+    && Number.isSafeInteger(route['bindingVersion']) && route['bindingVersion'] > 0
+    && typeof route['bindingGeneration'] === 'number'
+    && Number.isSafeInteger(route['bindingGeneration']) && route['bindingGeneration'] > 0
+    && typeof route['principalRecordId'] === 'string'
+    && route['principalRecordId'].trim() !== ''
+    && Buffer.byteLength(route['principalRecordId'], 'utf8') <= 500
+    && typeof route['principalVersion'] === 'number'
+    && Number.isSafeInteger(route['principalVersion']) && route['principalVersion'] > 0
+  if ((!v2 && !(allowLegacy && legacy))
+    || typeof route['sourceId'] !== 'string' || route['sourceId'].trim() === ''
+    || typeof route['bindingId'] !== 'string' || route['bindingId'].trim() === ''
+    || typeof route['workspace'] !== 'string' || route['workspace'].trim() === ''
+    || typeof route['principal'] !== 'string' || route['principal'].trim() === '') {
+    throw new WikiProposalStoreError(errorCode, 'wiki approval route is invalid')
+  }
+  return Object.freeze(parsed as ApprovalDispatchRoute)
+}
+
+function storedDispatch(value: string): Readonly<ApprovalDispatchRoute> {
+  return approvalDispatch(value, 'invalid-state', true)
+}
+
+function newApprovalDispatch(
+  value: Readonly<ApprovalDispatchRouteV2>,
+): Readonly<ApprovalDispatchRouteV2> {
+  return approvalDispatch(
+    JSON.stringify(value),
+    'invalid-input',
+    false,
+  ) as Readonly<ApprovalDispatchRouteV2>
 }
 
 function stored(row: ProposalRow): StoredWikiProposal {
@@ -239,8 +280,9 @@ export class WikiProposalStore {
     write: PreparedWikiWrite
     expiresAt: number
     ttlMs: number
-    dispatch?: Readonly<ApprovalDispatchRoute>
+    dispatch?: Readonly<ApprovalDispatchRouteV2>
   }): { proposal: StoredWikiProposal; replayed: boolean } {
+    const dispatch = input.dispatch === undefined ? undefined : newApprovalDispatch(input.dispatch)
     const existing = this.get(input.proposalId)
     if (existing !== undefined) {
       if (existing.idempotencyKey !== input.idempotencyKey
@@ -254,7 +296,7 @@ export class WikiProposalStore {
           UPDATE wiki_proposals SET ttl_ms = ?, dispatch_json = ?, updated_at = ? WHERE id = ?
         `).run(
           input.ttlMs,
-          input.dispatch === undefined ? null : JSON.stringify(input.dispatch),
+          dispatch === undefined ? null : JSON.stringify(dispatch),
           this.now(),
           input.proposalId,
         )
@@ -282,7 +324,7 @@ export class WikiProposalStore {
       `).run(
         input.proposalId, input.idempotencyKey, input.requester, input.principal, input.requestHash,
         writeHash, JSON.stringify(input.write), input.expiresAt, createdAt, now, input.ttlMs,
-        input.dispatch === undefined ? null : JSON.stringify(input.dispatch),
+        dispatch === undefined ? null : JSON.stringify(dispatch),
       )
       this.database.exec('COMMIT')
     } catch (error) {
@@ -352,6 +394,12 @@ function summary(write: PreparedWikiWrite): string {
 }
 
 function policyProposalRecoveryInput(proposal: StoredWikiProposal): ApprovalProposalRecoveryInput {
+  if (proposal.dispatch !== undefined && proposal.dispatch.routeVersion !== 2) {
+    throw new WikiProposalStoreError(
+      'invalid-input',
+      'legacy wiki approval route cannot create a new Policy dispatch',
+    )
+  }
   return {
     idempotencyKey: `personal-wiki:${proposal.idempotencyKey}`,
     requester: proposal.requester,
@@ -361,7 +409,7 @@ function policyProposalRecoveryInput(proposal: StoredWikiProposal): ApprovalProp
     diff: diff(proposal.write),
     summary: summary(proposal.write),
     notAfter: proposal.expiresAt,
-    ...(proposal.dispatch === undefined ? {} : { dispatch: proposal.dispatch }),
+    ...(proposal.dispatch?.routeVersion === 2 ? { dispatch: proposal.dispatch } : {}),
   }
 }
 
@@ -395,6 +443,7 @@ export class WikiProposalManager {
     if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs <= 0) {
       throw new WikiProposalStoreError('invalid-input', 'wiki proposal ttlMs must be a positive safe integer')
     }
+    const dispatch = input.dispatch === undefined ? undefined : newApprovalDispatch(input.dispatch)
     const id = proposalId(input.idempotencyKey)
     const requestHash = hashJson({
       idempotencyKey: input.idempotencyKey,
@@ -402,7 +451,7 @@ export class WikiProposalManager {
       principal: input.principal,
       ttlMs: input.ttlMs,
       mutation: input.mutation,
-      dispatch: input.dispatch,
+      dispatch,
     })
     const existing = this.store.get(id)
     let saved: { proposal: StoredWikiProposal; replayed: boolean }
@@ -419,7 +468,7 @@ export class WikiProposalManager {
         write: existing.write,
         expiresAt: existing.expiresAt,
         ttlMs: input.ttlMs,
-        ...(input.dispatch === undefined ? {} : { dispatch: input.dispatch }),
+        ...(dispatch === undefined ? {} : { dispatch }),
       })
     } else {
       const write = this.vault.prepareWrite(input.mutation)
@@ -434,7 +483,7 @@ export class WikiProposalManager {
         write,
         expiresAt,
         ttlMs: input.ttlMs,
-        ...(input.dispatch === undefined ? {} : { dispatch: input.dispatch }),
+        ...(dispatch === undefined ? {} : { dispatch }),
       })
     }
     let recovery: ApprovalProposalRecoveryResult

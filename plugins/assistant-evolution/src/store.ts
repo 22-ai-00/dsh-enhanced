@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import type { ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
 import { openEvolutionDatabase } from './sqlite.js'
 import { evolutionMutationReview } from './review.js'
 import type {
@@ -10,6 +11,7 @@ import type {
   EvidenceReference,
   EvidenceSample,
   EvolutionCreationIntent,
+  EvolutionCreationInput,
   EvolutionMutation,
   EvolutionSettlementExpectation,
   GuidanceExposure,
@@ -304,6 +306,61 @@ function rule(row: RuleRow): StoredRule {
   })
 }
 
+function approvalDispatch(
+  input: unknown,
+  errorCode: Extract<EvolutionStoreErrorCode, 'invalid-input' | 'invalid-state'>,
+  allowLegacy: boolean,
+): Readonly<ApprovalDispatchRoute> {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new EvolutionStoreError(errorCode, 'Policy dispatch is invalid')
+  }
+  const route = input as Record<string, unknown>
+  const keys = Object.keys(route).sort().join(',')
+  const legacyKeys = 'bindingId,principal,sourceId,workspace'
+  const versionedLegacyKeys = 'bindingId,principal,routeVersion,sourceId,workspace'
+  const v2Keys = [
+    'bindingGeneration', 'bindingId', 'bindingVersion', 'principal', 'principalRecordId',
+    'principalVersion', 'routeVersion', 'sourceId', 'workspace',
+  ].sort().join(',')
+  const legacy = keys === legacyKeys || (keys === versionedLegacyKeys && route['routeVersion'] === 1)
+  const v2 = keys === v2Keys && route['routeVersion'] === 2
+    && typeof route['bindingVersion'] === 'number'
+    && Number.isSafeInteger(route['bindingVersion']) && route['bindingVersion'] > 0
+    && typeof route['bindingGeneration'] === 'number'
+    && Number.isSafeInteger(route['bindingGeneration']) && route['bindingGeneration'] > 0
+    && typeof route['principalRecordId'] === 'string'
+    && route['principalRecordId'].trim() !== ''
+    && Buffer.byteLength(route['principalRecordId'], 'utf8') <= 500
+    && typeof route['principalVersion'] === 'number'
+    && Number.isSafeInteger(route['principalVersion']) && route['principalVersion'] > 0
+  if ((!v2 && !(allowLegacy && legacy))
+    || typeof route['sourceId'] !== 'string' || route['sourceId'].trim() === ''
+    || typeof route['bindingId'] !== 'string' || route['bindingId'].trim() === ''
+    || typeof route['workspace'] !== 'string' || route['workspace'].trim() === ''
+    || typeof route['principal'] !== 'string' || route['principal'].trim() === '') {
+    throw new EvolutionStoreError(errorCode, 'Policy dispatch is invalid')
+  }
+  return Object.freeze(input as ApprovalDispatchRoute)
+}
+
+function creationIntent(value: string | null): EvolutionCreationIntent | undefined {
+  if (value === null) return undefined
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(value)
+  } catch {
+    throw new EvolutionStoreError('invalid-state', 'stored Policy creation intent is invalid')
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new EvolutionStoreError('invalid-state', 'stored Policy creation intent is invalid')
+  }
+  const intent = parsed as Record<string, unknown>
+  if (Object.hasOwn(intent, 'dispatch') && intent['dispatch'] !== undefined) {
+    intent['dispatch'] = approvalDispatch(intent['dispatch'], 'invalid-state', true)
+  }
+  return Object.freeze(parsed as EvolutionCreationIntent)
+}
+
 function proposal(row: ProposalRow): StoredProposal {
   return Object.freeze({
     proposalId: row.id,
@@ -314,9 +371,7 @@ function proposal(row: ProposalRow): StoredProposal {
     scopeKey: row.scope_key,
     mutationHash: row.mutation_hash,
     mutation: JSON.parse(row.mutation_json) as EvolutionMutation,
-    creationIntent: row.creation_intent_json === null
-      ? undefined
-      : JSON.parse(row.creation_intent_json) as EvolutionCreationIntent,
+    creationIntent: creationIntent(row.creation_intent_json),
     status: row.status,
     expiresAt: row.expires_at,
     resultRuleId: row.result_rule_id ?? undefined,
@@ -1474,7 +1529,7 @@ export class EvolutionStore {
     principal: string
     mutation: Extract<EvolutionMutation, { op: 'adopt' }>
     expiresAt: number
-    creationIntent: EvolutionCreationIntent
+    creationIntent: EvolutionCreationInput
   }): Readonly<{ proposal: StoredProposal; replayed: boolean }> {
     const reviewToken = this.#analystReviewToken(input.reviewToken)
     const scopeKey = this.#scopeKey(input.scopeKey)
@@ -1896,7 +1951,7 @@ export class EvolutionStore {
     principal: string
     mutation: EvolutionMutation
     expiresAt: number
-    creationIntent?: EvolutionCreationIntent
+    creationIntent?: EvolutionCreationInput
   }): StoredProposal {
     const key = this.#bounded(input.idempotencyKey, 'idempotencyKey', 200)
     const normalized = this.#validateMutation(input.mutation)
@@ -3027,7 +3082,7 @@ export class EvolutionStore {
   }
 
   #validateCreationIntent(
-    input: EvolutionCreationIntent,
+    input: EvolutionCreationInput,
     expected: { key: string; requester: string; principal: string },
   ): EvolutionCreationIntent {
     if (input.idempotencyKey !== expected.key || input.requester !== expected.requester
@@ -3054,12 +3109,15 @@ export class EvolutionStore {
       if (input.dispatch.principal !== expected.principal) {
         throw new EvolutionStoreError('invalid-input', 'Policy dispatch is bound to another principal')
       }
-      intent.dispatch = {
-        sourceId: this.#rawBounded(input.dispatch.sourceId, 'dispatch sourceId', 500),
-        bindingId: this.#rawBounded(input.dispatch.bindingId, 'dispatch bindingId', 500),
-        workspace: this.#rawBounded(input.dispatch.workspace, 'dispatch workspace', 4_096),
-        principal: this.#rawBounded(input.dispatch.principal, 'dispatch principal', 500),
-      }
+      this.#rawBounded(input.dispatch.sourceId, 'dispatch sourceId', 500)
+      this.#rawBounded(input.dispatch.bindingId, 'dispatch bindingId', 500)
+      this.#rawBounded(input.dispatch.workspace, 'dispatch workspace', 4_096)
+      this.#rawBounded(input.dispatch.principal, 'dispatch principal', 500)
+      intent.dispatch = approvalDispatch(
+        JSON.parse(JSON.stringify(input.dispatch)) as unknown,
+        'invalid-input',
+        false,
+      )
     }
     return intent
   }

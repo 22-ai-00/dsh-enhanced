@@ -2,13 +2,37 @@ import { createHash, randomUUID } from 'node:crypto'
 import { isAbsolute, resolve } from 'node:path'
 import type { DatabaseSync } from 'node:sqlite'
 import {
+  PREFERENCE_MEMORY_PROMOTION_KEY,
+  PREFERENCE_MEMORY_PROMOTION_RENDERER_ID,
+  PREFERENCE_MEMORY_PROMOTION_VALUE,
+  validatePreferenceMemoryPromotionRequest,
+  validatePreferenceMemoryPromotionCancellationReceipt,
+  validatePreferenceMemoryPromotionCancellationRequest,
+  validatePreferenceMemoryPromotionResult,
+  validatePreferenceMemoryPromotionSubmissionReceipt,
+  withPreferenceMemoryPromotionRequestDigest,
+  withPreferenceMemoryPromotionCancellationDigest,
+  type PreferenceMemoryPromotionCancellationReason,
+  type PreferenceMemoryPromotionCancellationRequest,
+  type PreferenceMemoryPromotionCancellationReceipt,
+  type PreferenceMemoryPromotionRequest,
+  type PreferenceMemoryPromotionResult,
+  type PreferenceMemoryPromotionResultAck,
+  type PreferenceMemoryPromotionSubmissionReceipt,
+  type PreferenceMemoryPromotionTerminalStatus,
+} from '@dsh-enhanced/assistant-growth-contract'
+import {
   catalogSelection,
   preferenceCatalog,
   renderCatalogPreference,
   type PreferenceKey,
   type PreferenceRiskTier,
 } from './catalog.js'
-import { openPreferenceDatabase, preferenceSchemaVersion } from './sqlite.js'
+import {
+  openPreferenceDatabase,
+  preferencePromotionCancellationUpgradeBindingDigest,
+  preferenceSchemaVersion,
+} from './sqlite.js'
 import {
   preferenceActorTrustLevels,
   preferenceInterpretationTrustLevels,
@@ -63,6 +87,10 @@ export interface PreferenceStoreOptions {
   maxActiveOverlays: number
   maxReviewHypotheses: number
   maxOverlayBytes: number
+  minSignalsForPromotion?: number
+  minConfidenceBpsForPromotion?: number
+  maxContradictionBpsForPromotion?: number
+  promotionProposalTtlMs?: number
 }
 
 export interface PreferenceForgetResult {
@@ -169,6 +197,31 @@ export interface PreferenceScopeLearningRollbackResult extends PreferenceScopeLe
   rolledBackVersion?: number
 }
 
+export type PreferenceMemoryPromotionState =
+  | 'pending'
+  | 'retry_wait'
+  | 'submitted'
+  | PreferenceMemoryPromotionTerminalStatus
+  | 'cancelled'
+
+export interface StoredPreferenceMemoryPromotion {
+  request: Readonly<PreferenceMemoryPromotionRequest>
+  state: PreferenceMemoryPromotionState
+  memoryProposalId?: string
+  submissionReceiptDigest?: string
+  terminalResultVersion?: number
+  terminalReceiptDigest?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface PendingPreferenceMemoryPromotion extends StoredPreferenceMemoryPromotion {
+  state: 'pending' | 'retry_wait'
+  attemptCount: number
+  nextAttemptAt: number
+  lastError?: string
+}
+
 interface SignalRow {
   id: string
   idempotency_key: string
@@ -260,6 +313,84 @@ interface ScopeAdmissionRow {
   ignore_events_through_sequence: number | null
   learning_paused: number
   control_version: number
+}
+
+interface MemoryPromotionRow {
+  promotion_id: string
+  promotion_generation: number
+  scope_key: string
+  scope_digest: string
+  workspace: string
+  preset: string
+  principal_id: string
+  principal_digest: string
+  principal_lineage_id: string
+  principal_lineage_version: number
+  owner_generation: number
+  hypothesis_id: string
+  hypothesis_key: typeof PREFERENCE_MEMORY_PROMOTION_KEY
+  hypothesis_value: typeof PREFERENCE_MEMORY_PROMOTION_VALUE
+  hypothesis_version: number
+  confidence_bps: number
+  contradiction_bps: number
+  supporting_signals: number
+  distinct_signal_sources: number
+  evidence_mass: number
+  renderer_id: typeof PREFERENCE_MEMORY_PROMOTION_RENDERER_ID
+  observed_at: number
+  deadline_at: number
+  request_digest: string
+  idempotency_key: string
+  state: PreferenceMemoryPromotionState
+  memory_proposal_id: string | null
+  submission_receipt_digest: string | null
+  terminal_result_version: number | null
+  terminal_receipt_digest: string | null
+  created_at: number
+  updated_at: number
+}
+
+interface MemoryPromotionOutboxRow extends MemoryPromotionRow {
+  outbox_state: 'pending' | 'retry_wait' | 'submitted' | 'cancelled'
+  attempt_count: number
+  next_attempt_at: number
+  last_error: string | null
+}
+
+interface MemoryPromotionResultRow {
+  promotion_id: string
+  promotion_generation: number
+  result_version: number
+  request_digest: string
+  receipt_digest: string
+  status: PreferenceMemoryPromotionTerminalStatus
+  rejection_kind: 'owner-explicit' | null
+  memory_proposal_id: string | null
+  memory_proposal_version: number | null
+  memory_record_id: string | null
+  memory_record_version: number | null
+  memory_record_digest: string | null
+  occurred_at: number
+  projected_at: number
+}
+
+interface MemoryPromotionCancellationRow {
+  promotion_id: string
+  promotion_generation: number
+  request_digest: string
+  principal_lineage_id: string
+  principal_lineage_version: number
+  owner_generation: number
+  reason: PreferenceMemoryPromotionCancellationReason
+  cancelled_at: number
+  cancellation_digest: string
+  state: 'pending' | 'retry_wait' | 'cancelled' | 'already-confirmed'
+  attempt_count: number
+  next_attempt_at: number
+  receipt_digest: string | null
+  upgrade_binding_digest: string | null
+  last_error: string | null
+  updated_at: number
 }
 
 const actorWeights: Readonly<Record<PreferenceActorTrust, number>> = Object.freeze({
@@ -434,6 +565,94 @@ function hypothesisFromRow(row: HypothesisRow): PreferenceHypothesis {
   })
 }
 
+function promotionRequestFromRow(
+  row: MemoryPromotionRow,
+): Readonly<PreferenceMemoryPromotionRequest> {
+  return validatePreferenceMemoryPromotionRequest({
+    contractVersion: 1,
+    promotionId: row.promotion_id,
+    promotionGeneration: row.promotion_generation,
+    requestDigest: row.request_digest,
+    idempotencyKey: row.idempotency_key,
+    scope: { workspace: row.workspace, preset: row.preset },
+    principalId: row.principal_id,
+    principalLineage: {
+      principalRecordId: row.principal_lineage_id,
+      principalVersion: row.principal_lineage_version,
+    },
+    ownerGeneration: row.owner_generation,
+    hypothesis: {
+      id: row.hypothesis_id,
+      key: row.hypothesis_key,
+      value: row.hypothesis_value,
+      version: row.hypothesis_version,
+      confidenceBps: row.confidence_bps,
+      contradictionBps: row.contradiction_bps,
+      supportingSignals: row.supporting_signals,
+      distinctSignalSources: row.distinct_signal_sources,
+      evidenceMass: row.evidence_mass,
+    },
+    rendererId: row.renderer_id,
+    observedAt: row.observed_at,
+    deadlineAt: row.deadline_at,
+  })
+}
+
+function promotionFromRow(row: MemoryPromotionRow): StoredPreferenceMemoryPromotion {
+  return Object.freeze({
+    request: promotionRequestFromRow(row),
+    state: row.state,
+    ...(row.memory_proposal_id === null ? {} : { memoryProposalId: row.memory_proposal_id }),
+    ...(row.submission_receipt_digest === null
+      ? {} : { submissionReceiptDigest: row.submission_receipt_digest }),
+    ...(row.terminal_result_version === null
+      ? {} : { terminalResultVersion: row.terminal_result_version }),
+    ...(row.terminal_receipt_digest === null
+      ? {} : { terminalReceiptDigest: row.terminal_receipt_digest }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  })
+}
+
+function promotionResultFromRow(row: MemoryPromotionResultRow): Readonly<PreferenceMemoryPromotionResult> {
+  const common = {
+    contractVersion: 1 as const,
+    promotionId: row.promotion_id,
+    promotionGeneration: row.promotion_generation,
+    requestDigest: row.request_digest,
+    resultVersion: row.result_version,
+    status: row.status,
+    occurredAt: row.occurred_at,
+    receiptDigest: row.receipt_digest,
+  }
+  if (row.status === 'confirmed') {
+    return validatePreferenceMemoryPromotionResult({
+      ...common,
+      memoryProposalId: row.memory_proposal_id,
+      memoryProposalVersion: row.memory_proposal_version,
+      memoryRecordId: row.memory_record_id,
+      memoryRecordVersion: row.memory_record_version,
+      memoryRecordDigest: row.memory_record_digest,
+    })
+  }
+  if (row.status === 'rejected') {
+    return validatePreferenceMemoryPromotionResult({
+      ...common,
+      rejectionKind: row.rejection_kind,
+      memoryProposalId: row.memory_proposal_id,
+      memoryProposalVersion: row.memory_proposal_version,
+    })
+  }
+  if (row.status === 'expired' || row.status === 'conflicted') {
+    return validatePreferenceMemoryPromotionResult({
+      ...common,
+      memoryProposalId: row.memory_proposal_id,
+      memoryProposalVersion: row.memory_proposal_version,
+    })
+  }
+  return validatePreferenceMemoryPromotionResult(common)
+}
+
 function hypothesisId(scopeKey: string, preferenceKey: PreferenceKey, candidateValue: string): string {
   return `pref-hyp-${createHash('sha256')
     .update(`preference-hypothesis-v1\0${scopeKey}\0${preferenceKey}\0${candidateValue}`)
@@ -498,11 +717,617 @@ export class PreferenceStore {
       maxActiveOverlays: options.maxActiveOverlays,
       maxReviewHypotheses: options.maxReviewHypotheses,
       maxOverlayBytes: options.maxOverlayBytes,
+      minSignalsForPromotion: options.minSignalsForPromotion ?? 3,
+      minConfidenceBpsForPromotion: options.minConfidenceBpsForPromotion ?? 8_500,
+      maxContradictionBpsForPromotion: options.maxContradictionBpsForPromotion ?? 1_500,
+      promotionProposalTtlMs: options.promotionProposalTtlMs ?? 604_800_000,
     })
   }
 
   appendSignal(input: PreferenceSignalInput): StoredPreferenceSignal {
     return this.appendSignals([input])[0]!
+  }
+
+  /**
+   * Materialize every currently eligible low-sensitivity T2 hypothesis into a
+   * durable promotion plus proposal outbox row in the same SQLite transaction.
+   * Eligibility requires repeated evidence from at least two independent
+   * interpretation/source channels; one signal can never emit a proposal.
+   */
+  enqueueEligibleMemoryPromotions(
+    scopeInput: PreferenceScope,
+    principalIdInput: string,
+    owner: Readonly<PreferenceScopePrincipalFence>,
+  ): readonly StoredPreferenceMemoryPromotion[] {
+    this.#assertOpen()
+    const canonical = canonicalPreferenceScope(scopeInput)
+    const principalId = boundedText(principalIdInput, 'principalId', 500)
+    const principalDigest = preferencePrincipalDigest(principalId)
+    if (principalDigest !== owner.principalDigest) {
+      throw new PreferenceStoreError('conflict', 'promotion principal does not match owner fence')
+    }
+    const now = this.#now()
+    const created: StoredPreferenceMemoryPromotion[] = []
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#assertScopePrincipalInTransaction(canonical, owner)
+      this.#assertScopeLearningActiveInTransaction(canonical)
+      this.#refreshScopeInTransaction(canonical.scopeKey, canonical.scope, now)
+      const candidates = this.#database.prepare(`
+        SELECT hypothesis.*, (
+          SELECT COUNT(DISTINCT signal.interpretation_trust || ':' || signal.source)
+          FROM preference_signals signal
+          WHERE signal.scope_key = hypothesis.scope_key
+            AND signal.preference_key = hypothesis.preference_key
+            AND signal.candidate_value = hypothesis.candidate_value
+            AND signal.stance = 'support'
+            AND signal.actor_trust = 'owner-authenticated'
+            AND signal.interpretation_trust IN ('explicit-selection', 'typed-feedback')
+            AND signal.source IN ('direct-owner-feedback', 'signed-ui-feedback')
+            AND signal.occurred_at >= ?
+        ) AS distinct_signal_sources
+        FROM preference_hypotheses hypothesis
+        WHERE hypothesis.scope_key = ?
+          AND hypothesis.preference_key = ? AND hypothesis.candidate_value = ?
+          AND hypothesis.risk_tier = 'T2' AND hypothesis.claim_state = 'proposed'
+          AND hypothesis.effect_state = 'inactive' AND hypothesis.expires_at > ?
+          AND hypothesis.supporting_signals >= ?
+          AND hypothesis.confidence_bps >= ?
+          AND hypothesis.contradiction_bps <= ?
+        ORDER BY hypothesis.updated_at, hypothesis.id
+      `).all(
+        Math.max(0, now - this.#options.signalTtlMs),
+        canonical.scopeKey,
+        PREFERENCE_MEMORY_PROMOTION_KEY,
+        PREFERENCE_MEMORY_PROMOTION_VALUE,
+        now,
+        this.#options.minSignalsForPromotion,
+        this.#options.minConfidenceBpsForPromotion,
+        this.#options.maxContradictionBpsForPromotion,
+      ) as unknown as Array<HypothesisRow & { distinct_signal_sources: number }>
+      for (const row of candidates) {
+        // Multiple copies of the same typed feedback path are correlated. The
+        // first release demands at least two separately attested channels.
+        if (row.distinct_signal_sources < 2) continue
+        const prior = this.#database.prepare(`
+          SELECT * FROM preference_memory_promotions
+          WHERE scope_key = ? AND hypothesis_id = ?
+          ORDER BY promotion_generation DESC LIMIT 1
+        `).get(canonical.scopeKey, row.id) as unknown as MemoryPromotionRow | undefined
+        if (prior !== undefined && prior.hypothesis_version === row.version
+          && prior.owner_generation === owner.generation
+          && prior.principal_lineage_id === owner.principalLineageId
+          && prior.principal_lineage_version === owner.principalLineageVersion
+          && prior.state !== 'cancelled') continue
+        const promotionId = `pref-promotion-${createHash('sha256')
+          .update(`preference-memory-promotion-v1\0${canonical.scopeKey}\0${row.id}`)
+          .digest('hex')}`
+        const generationFloor = this.#database.prepare(`
+          SELECT MAX(promotion_generation) AS generation FROM (
+            SELECT promotion_generation FROM preference_memory_promotions
+              WHERE promotion_id = ?
+            UNION ALL
+            SELECT promotion_generation FROM preference_memory_promotion_cancellations
+              WHERE promotion_id = ?
+          )
+        `).get(promotionId, promotionId) as { generation: number | null }
+        const promotionGeneration = (generationFloor.generation ?? 0) + 1
+        const idempotencyKey = `preference-memory-promotion:${promotionId}:g${promotionGeneration}`
+        const deadlineAt = Math.min(
+          row.expires_at,
+          now + this.#options.promotionProposalTtlMs,
+        )
+        if (deadlineAt <= now) continue
+        const request = validatePreferenceMemoryPromotionRequest(
+          withPreferenceMemoryPromotionRequestDigest({
+            contractVersion: 1,
+            promotionId,
+            promotionGeneration,
+            idempotencyKey,
+            scope: { workspace: row.workspace, preset: row.preset },
+            principalId,
+            principalLineage: {
+              principalRecordId: owner.principalLineageId,
+              principalVersion: owner.principalLineageVersion,
+            },
+            ownerGeneration: owner.generation,
+            hypothesis: {
+              id: row.id,
+              key: PREFERENCE_MEMORY_PROMOTION_KEY,
+              value: PREFERENCE_MEMORY_PROMOTION_VALUE,
+              version: row.version,
+              confidenceBps: row.confidence_bps,
+              contradictionBps: row.contradiction_bps,
+              supportingSignals: row.supporting_signals,
+              distinctSignalSources: row.distinct_signal_sources,
+              evidenceMass: row.evidence_mass,
+            },
+            rendererId: PREFERENCE_MEMORY_PROMOTION_RENDERER_ID,
+            observedAt: now,
+            deadlineAt,
+          }),
+        )
+        this.#database.prepare(`
+          INSERT INTO preference_memory_promotions(
+            promotion_id, promotion_generation, scope_key, scope_digest, workspace, preset,
+            principal_id, principal_digest, principal_lineage_id, principal_lineage_version,
+            owner_generation, hypothesis_id, hypothesis_key, hypothesis_value,
+            hypothesis_version, confidence_bps, contradiction_bps, supporting_signals,
+            distinct_signal_sources, evidence_mass, renderer_id, observed_at, deadline_at,
+            request_digest, idempotency_key, state, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+            'pending', ?, ?)
+        `).run(
+          request.promotionId, request.promotionGeneration, canonical.scopeKey,
+          canonical.scopeDigest, request.scope.workspace, request.scope.preset,
+          request.principalId, principalDigest, request.principalLineage.principalRecordId,
+          request.principalLineage.principalVersion, request.ownerGeneration,
+          request.hypothesis.id, request.hypothesis.key, request.hypothesis.value,
+          request.hypothesis.version, request.hypothesis.confidenceBps,
+          request.hypothesis.contradictionBps, request.hypothesis.supportingSignals,
+          request.hypothesis.distinctSignalSources, request.hypothesis.evidenceMass,
+          request.rendererId, request.observedAt, request.deadlineAt, request.requestDigest,
+          request.idempotencyKey, now, now,
+        )
+        this.#database.prepare(`
+          INSERT INTO preference_memory_promotion_outbox(
+            promotion_id, promotion_generation, state, attempt_count, next_attempt_at,
+            submitted_at, last_error, updated_at
+          ) VALUES (?, ?, 'pending', 0, ?, NULL, NULL, ?)
+        `).run(request.promotionId, request.promotionGeneration, now, now)
+        const inserted = this.#database.prepare(`
+          SELECT * FROM preference_memory_promotions
+          WHERE promotion_id = ? AND promotion_generation = ?
+        `).get(request.promotionId, request.promotionGeneration) as unknown as MemoryPromotionRow
+        created.push(promotionFromRow(inserted))
+      }
+      this.#database.exec('COMMIT')
+      return Object.freeze(created)
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  listPendingMemoryPromotions(limit: number): readonly PendingPreferenceMemoryPromotion[] {
+    this.#assertOpen()
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new PreferenceStoreError('invalid-input', 'promotion outbox limit must be between 1 and 1000')
+    }
+    const rows = this.#database.prepare(`
+      SELECT promotion.*, outbox.state AS outbox_state, outbox.attempt_count,
+        outbox.next_attempt_at, outbox.last_error
+      FROM preference_memory_promotion_outbox outbox
+      JOIN preference_memory_promotions promotion
+        ON promotion.promotion_id = outbox.promotion_id
+          AND promotion.promotion_generation = outbox.promotion_generation
+      WHERE outbox.state IN ('pending', 'retry_wait') AND outbox.next_attempt_at <= ?
+      ORDER BY outbox.next_attempt_at, outbox.updated_at, promotion.promotion_id
+      LIMIT ?
+    `).all(this.#now(), limit) as unknown as MemoryPromotionOutboxRow[]
+    return Object.freeze(rows.map((row): PendingPreferenceMemoryPromotion => {
+      const stored = promotionFromRow(row)
+      return Object.freeze({
+        request: stored.request,
+        state: row.outbox_state === 'retry_wait' ? 'retry_wait' : 'pending',
+        ...(stored.memoryProposalId === undefined ? {} : { memoryProposalId: stored.memoryProposalId }),
+        ...(stored.submissionReceiptDigest === undefined
+          ? {} : { submissionReceiptDigest: stored.submissionReceiptDigest }),
+        ...(stored.terminalResultVersion === undefined
+          ? {} : { terminalResultVersion: stored.terminalResultVersion }),
+        ...(stored.terminalReceiptDigest === undefined
+          ? {} : { terminalReceiptDigest: stored.terminalReceiptDigest }),
+        createdAt: stored.createdAt,
+        updatedAt: stored.updatedAt,
+        attemptCount: row.attempt_count,
+        nextAttemptAt: row.next_attempt_at,
+        ...(row.last_error === null ? {} : { lastError: row.last_error }),
+      })
+    }))
+  }
+
+  settleMemoryPromotionSubmission(input: Readonly<{
+    request: Readonly<PreferenceMemoryPromotionRequest>
+    receipt?: Readonly<PreferenceMemoryPromotionSubmissionReceipt>
+    retryError?: string
+  }>): StoredPreferenceMemoryPromotion {
+    this.#assertOpen()
+    const request = validatePreferenceMemoryPromotionRequest(input.request)
+    if ((input.receipt === undefined) === (input.retryError === undefined)) {
+      throw new PreferenceStoreError('invalid-input', 'promotion submission needs exactly one outcome')
+    }
+    const receipt = input.receipt === undefined
+      ? undefined
+      : validatePreferenceMemoryPromotionSubmissionReceipt(input.receipt, request)
+    const retryError = input.retryError === undefined
+      ? undefined
+      : boundedText(input.retryError, 'promotion retry error', 500)
+    const now = this.#now()
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const current = this.#promotionRow(request.promotionId, request.promotionGeneration)
+      if (current.request_digest !== request.requestDigest) {
+        throw new PreferenceStoreError('idempotency-conflict', 'promotion request identity changed')
+      }
+      if (current.state === 'cancelled' || this.#isPromotionTerminal(current.state)) {
+        this.#database.exec('COMMIT')
+        return promotionFromRow(current)
+      }
+      const outbox = this.#database.prepare(`
+        SELECT state, attempt_count FROM preference_memory_promotion_outbox
+        WHERE promotion_id = ? AND promotion_generation = ?
+      `).get(request.promotionId, request.promotionGeneration) as {
+        state: 'pending' | 'retry_wait' | 'submitted' | 'cancelled'
+        attempt_count: number
+      } | undefined
+      if (outbox === undefined) throw new PreferenceStoreError('conflict', 'promotion has no outbox row')
+      if (outbox.state === 'submitted') {
+        if (receipt === undefined
+          || current.memory_proposal_id !== receipt.memoryProposalId
+          || current.submission_receipt_digest !== receipt.receiptDigest) {
+          throw new PreferenceStoreError('idempotency-conflict', 'promotion submission replay changed')
+        }
+      } else if (receipt !== undefined) {
+        this.#database.prepare(`
+          UPDATE preference_memory_promotions
+          SET state = 'submitted', memory_proposal_id = ?, submission_receipt_digest = ?, updated_at = ?
+          WHERE promotion_id = ? AND promotion_generation = ?
+            AND request_digest = ? AND state IN ('pending', 'retry_wait')
+        `).run(
+          receipt.memoryProposalId, receipt.receiptDigest, now, request.promotionId,
+          request.promotionGeneration, request.requestDigest,
+        )
+        this.#database.prepare(`
+          UPDATE preference_memory_promotion_outbox
+          SET state = 'submitted', attempt_count = attempt_count + 1, submitted_at = ?,
+            last_error = NULL, updated_at = ?
+          WHERE promotion_id = ? AND promotion_generation = ?
+            AND state IN ('pending', 'retry_wait')
+        `).run(now, now, request.promotionId, request.promotionGeneration)
+      } else {
+        const attempt = outbox.attempt_count + 1
+        const delay = Math.min(60_000, 250 * (2 ** Math.min(attempt - 1, 8)))
+        this.#database.prepare(`
+          UPDATE preference_memory_promotion_outbox
+          SET state = 'retry_wait', attempt_count = ?, next_attempt_at = ?,
+            last_error = ?, updated_at = ?
+          WHERE promotion_id = ? AND promotion_generation = ?
+            AND state IN ('pending', 'retry_wait')
+        `).run(
+          attempt, now + delay, retryError!, now,
+          request.promotionId, request.promotionGeneration,
+        )
+      }
+      this.#database.exec('COMMIT')
+      return promotionFromRow(this.#promotionRow(request.promotionId, request.promotionGeneration))
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  /**
+   * Project one branded Personal Memory terminal result. The projection and
+   * immutable result receipt commit together. A committed terminal receipt is
+   * authoritative for exact replay/conflict checks; otherwise a cancellation
+   * tombstone wins over a delayed result, preventing owner ABA or forget
+   * resurrection.
+   */
+  projectMemoryPromotionResult(
+    input: Readonly<PreferenceMemoryPromotionResult>,
+  ): Readonly<PreferenceMemoryPromotionResultAck> {
+    this.#assertOpen()
+    const result = validatePreferenceMemoryPromotionResult(input)
+    const now = this.#now()
+    if (result.occurredAt > now) {
+      throw new PreferenceStoreError('invalid-input', 'promotion result occurredAt is in the future')
+    }
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const cancellation = this.#database.prepare(`
+        SELECT request_digest, reason, state FROM preference_memory_promotion_cancellations
+        WHERE promotion_id = ? AND promotion_generation = ?
+      `).get(result.promotionId, result.promotionGeneration) as {
+        request_digest: string
+        reason: PreferenceMemoryPromotionCancellationReason
+        state: MemoryPromotionCancellationRow['state']
+      } | undefined
+      if (cancellation !== undefined && cancellation.reason !== 'superseded') {
+        if (cancellation.request_digest !== result.requestDigest) {
+          throw new PreferenceStoreError('idempotency-conflict', 'cancelled promotion identity changed')
+        }
+        if (cancellation.state !== 'cancelled') {
+          throw new PreferenceStoreError('conflict', 'promotion compensation is not complete')
+        }
+        this.#database.exec('COMMIT')
+        return Object.freeze({
+          contractVersion: 1,
+          promotionId: result.promotionId,
+          promotionGeneration: result.promotionGeneration,
+          resultVersion: result.resultVersion,
+          receiptDigest: result.receiptDigest,
+          outcome: 'cancelled',
+        })
+      }
+      const existing = this.#database.prepare(`
+        SELECT * FROM preference_memory_promotion_results
+        WHERE promotion_id = ? AND promotion_generation = ?
+      `).get(result.promotionId, result.promotionGeneration) as unknown as
+        MemoryPromotionResultRow | undefined
+      if (existing !== undefined) {
+        const stored = promotionResultFromRow(existing)
+        if (stored.resultVersion !== result.resultVersion
+          || stored.requestDigest !== result.requestDigest
+          || stored.receiptDigest !== result.receiptDigest) {
+          throw new PreferenceStoreError('idempotency-conflict', 'promotion terminal result changed')
+        }
+        this.#database.exec('COMMIT')
+        return Object.freeze({
+          contractVersion: 1,
+          promotionId: result.promotionId,
+          promotionGeneration: result.promotionGeneration,
+          resultVersion: result.resultVersion,
+          receiptDigest: result.receiptDigest,
+          outcome: 'replayed',
+        })
+      }
+      const promotion = this.#database.prepare(`
+        SELECT * FROM preference_memory_promotions
+        WHERE promotion_id = ? AND promotion_generation = ?
+      `).get(result.promotionId, result.promotionGeneration) as unknown as MemoryPromotionRow | undefined
+      if (promotion === undefined) {
+        throw new PreferenceStoreError('not-found', 'promotion result has no request ledger entry')
+      }
+      validatePreferenceMemoryPromotionResult(result, promotionRequestFromRow(promotion))
+      if (promotion.state === 'cancelled') {
+        this.#recordPromotionCancellationInTransaction(promotion, 'superseded', now)
+        this.#database.exec('COMMIT')
+        return Object.freeze({
+          contractVersion: 1,
+          promotionId: result.promotionId,
+          promotionGeneration: result.promotionGeneration,
+          resultVersion: result.resultVersion,
+          receiptDigest: result.receiptDigest,
+          outcome: 'cancelled',
+        })
+      }
+      if (this.#isPromotionTerminal(promotion.state)) {
+        throw new PreferenceStoreError('conflict', 'promotion terminal state has no matching receipt')
+      }
+      if (promotion.state !== 'submitted'
+        || promotion.memory_proposal_id === null
+        || promotion.submission_receipt_digest === null) {
+        throw new PreferenceStoreError('conflict', 'promotion result arrived before request submission')
+      }
+      if (result.status !== 'stale-owner'
+        && result.memoryProposalId !== promotion.memory_proposal_id) {
+        throw new PreferenceStoreError('idempotency-conflict', 'promotion result changed Memory proposal identity')
+      }
+      const currentOwner = this.#database.prepare(`
+        SELECT 1 AS present FROM preference_scope_principals
+        WHERE scope_key = ? AND principal_digest = ?
+          AND principal_lineage_id = ? AND principal_lineage_version = ?
+          AND generation = ? AND purge_pending = 0 AND admission_cursor_epoch IS NOT NULL
+      `).get(
+        promotion.scope_key, promotion.principal_digest, promotion.principal_lineage_id,
+        promotion.principal_lineage_version, promotion.owner_generation,
+      )
+      if (currentOwner === undefined) {
+        this.#cancelPromotionInTransaction(promotion, 'owner-rotated', now)
+        this.#database.exec('COMMIT')
+        return Object.freeze({
+          contractVersion: 1,
+          promotionId: result.promotionId,
+          promotionGeneration: result.promotionGeneration,
+          resultVersion: result.resultVersion,
+          receiptDigest: result.receiptDigest,
+          outcome: 'cancelled',
+        })
+      }
+      if (result.status === 'confirmed' || result.status === 'rejected') {
+        const hypothesis = this.#database.prepare(`
+          SELECT * FROM preference_hypotheses
+          WHERE id = ? AND scope_key = ?
+        `).get(promotion.hypothesis_id, promotion.scope_key) as unknown as HypothesisRow | undefined
+        if (hypothesis === undefined || hypothesis.version !== promotion.hypothesis_version
+          || hypothesis.preference_key !== promotion.hypothesis_key
+          || hypothesis.candidate_value !== promotion.hypothesis_value
+          || hypothesis.risk_tier !== 'T2' || hypothesis.effect_state !== 'inactive'
+          || hypothesis.claim_state !== 'proposed') {
+          throw new PreferenceStoreError(
+            'conflict',
+            'promotion result no longer matches the exact proposed hypothesis',
+          )
+        }
+        const nextVersion = hypothesis.version + 1
+        const claimState: PreferenceClaimState = result.status
+        const changedHypothesis = this.#database.prepare(`
+          UPDATE preference_hypotheses
+          SET claim_state = ?, version = ?, updated_at = ?
+          WHERE id = ? AND scope_key = ? AND version = ?
+            AND claim_state = 'proposed' AND effect_state = 'inactive'
+        `).run(
+          claimState, nextVersion, now, hypothesis.id, hypothesis.scope_key, hypothesis.version,
+        )
+        if (changedHypothesis.changes !== 1) {
+          throw new PreferenceStoreError('conflict', 'promotion hypothesis projection lost its CAS')
+        }
+        this.#transition(
+          hypothesis,
+          claimState,
+          'inactive',
+          result.status === 'rejected' ? 'owner-rejected' : 'evidence-updated',
+          nextVersion,
+          now,
+        )
+      }
+      const confirmed = result.status === 'confirmed' ? result : undefined
+      const rejected = result.status === 'rejected' ? result : undefined
+      const failed = result.status === 'expired' || result.status === 'conflicted' ? result : undefined
+      this.#database.prepare(`
+        INSERT INTO preference_memory_promotion_results(
+          promotion_id, promotion_generation, result_version, request_digest, receipt_digest,
+          status, rejection_kind, memory_proposal_id, memory_proposal_version,
+          memory_record_id, memory_record_version, memory_record_digest, occurred_at, projected_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        result.promotionId, result.promotionGeneration, result.resultVersion,
+        result.requestDigest, result.receiptDigest, result.status,
+        rejected?.rejectionKind ?? null,
+        confirmed?.memoryProposalId ?? rejected?.memoryProposalId
+          ?? failed?.memoryProposalId ?? null,
+        confirmed?.memoryProposalVersion ?? rejected?.memoryProposalVersion
+          ?? failed?.memoryProposalVersion ?? null,
+        confirmed?.memoryRecordId ?? null, confirmed?.memoryRecordVersion ?? null,
+        confirmed?.memoryRecordDigest ?? null, result.occurredAt, now,
+      )
+      const changed = this.#database.prepare(`
+        UPDATE preference_memory_promotions
+        SET state = ?, terminal_result_version = ?, terminal_receipt_digest = ?, updated_at = ?
+        WHERE promotion_id = ? AND promotion_generation = ? AND state = 'submitted'
+          AND request_digest = ?
+      `).run(
+        result.status, result.resultVersion, result.receiptDigest, now, result.promotionId,
+        result.promotionGeneration, result.requestDigest,
+      )
+      if (changed.changes !== 1) {
+        throw new PreferenceStoreError('conflict', 'promotion state changed during result projection')
+      }
+      this.#database.exec('COMMIT')
+      return Object.freeze({
+        contractVersion: 1,
+        promotionId: result.promotionId,
+        promotionGeneration: result.promotionGeneration,
+        resultVersion: result.resultVersion,
+        receiptDigest: result.receiptDigest,
+        outcome: 'applied',
+      })
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  getMemoryPromotion(
+    promotionIdInput: string,
+    promotionGeneration: number,
+  ): StoredPreferenceMemoryPromotion | undefined {
+    this.#assertOpen()
+    const promotionId = boundedText(promotionIdInput, 'promotionId', 500)
+    if (!Number.isSafeInteger(promotionGeneration) || promotionGeneration < 1) {
+      throw new PreferenceStoreError('invalid-input', 'promotionGeneration is invalid')
+    }
+    const row = this.#database.prepare(`
+      SELECT * FROM preference_memory_promotions
+      WHERE promotion_id = ? AND promotion_generation = ?
+    `).get(promotionId, promotionGeneration) as unknown as MemoryPromotionRow | undefined
+    return row === undefined ? undefined : promotionFromRow(row)
+  }
+
+  listPendingMemoryPromotionCancellations(
+    limit: number,
+  ): readonly Readonly<PreferenceMemoryPromotionCancellationRequest>[] {
+    this.#assertOpen()
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new PreferenceStoreError('invalid-input', 'promotion cancellation limit must be between 1 and 1000')
+    }
+    const rows = this.#database.prepare(`
+      SELECT * FROM preference_memory_promotion_cancellations
+      WHERE state IN ('pending', 'retry_wait') AND next_attempt_at <= ?
+      ORDER BY next_attempt_at, updated_at, promotion_id LIMIT ?
+    `).all(this.#now(), limit) as unknown as MemoryPromotionCancellationRow[]
+    return Object.freeze(rows.map(row => {
+      const request = validatePreferenceMemoryPromotionCancellationRequest({
+        contractVersion: 1,
+        promotionId: row.promotion_id,
+        promotionGeneration: row.promotion_generation,
+        requestDigest: row.request_digest,
+        principalLineage: {
+          principalRecordId: row.principal_lineage_id,
+          principalVersion: row.principal_lineage_version,
+        },
+        ownerGeneration: row.owner_generation,
+        reason: row.reason,
+        occurredAt: row.cancelled_at,
+        cancellationDigest: row.cancellation_digest,
+      })
+      if (row.upgrade_binding_digest !== this.#cancellationUpgradeBindingDigest(request)) {
+        throw new PreferenceStoreError('idempotency-conflict', 'promotion cancellation binding changed')
+      }
+      return request
+    }))
+  }
+
+  settleMemoryPromotionCancellation(input: Readonly<{
+    request: Readonly<PreferenceMemoryPromotionCancellationRequest>
+    receipt?: Readonly<PreferenceMemoryPromotionCancellationReceipt>
+    retryError?: string
+  }>): void {
+    this.#assertOpen()
+    const request = validatePreferenceMemoryPromotionCancellationRequest(input.request)
+    if ((input.receipt === undefined) === (input.retryError === undefined)) {
+      throw new PreferenceStoreError('invalid-input', 'promotion cancellation needs exactly one outcome')
+    }
+    const receipt = input.receipt === undefined
+      ? undefined
+      : validatePreferenceMemoryPromotionCancellationReceipt(input.receipt, request)
+    const retryError = input.retryError === undefined
+      ? undefined
+      : boundedText(input.retryError, 'promotion cancellation retry error', 500)
+    if (receipt?.outcome === 'already-confirmed' && request.reason !== 'superseded') {
+      throw new PreferenceStoreError('conflict', 'privacy cancellation requires Memory compensation')
+    }
+    const now = this.#now()
+    const current = this.#database.prepare(`
+      SELECT * FROM preference_memory_promotion_cancellations
+      WHERE promotion_id = ? AND promotion_generation = ?
+    `).get(request.promotionId, request.promotionGeneration) as unknown as
+      MemoryPromotionCancellationRow | undefined
+    if (current === undefined || current.request_digest !== request.requestDigest
+      || current.cancellation_digest !== request.cancellationDigest) {
+      throw new PreferenceStoreError('idempotency-conflict', 'promotion cancellation identity changed')
+    }
+    const upgradeBindingDigest = this.#cancellationUpgradeBindingDigest(request)
+    if (current.upgrade_binding_digest !== upgradeBindingDigest) {
+      throw new PreferenceStoreError('idempotency-conflict', 'promotion cancellation binding changed')
+    }
+    if (current.state === 'cancelled' || current.state === 'already-confirmed') {
+      if (receipt !== undefined && current.receipt_digest !== receipt.receiptDigest) {
+        throw new PreferenceStoreError('idempotency-conflict', 'promotion cancellation receipt changed')
+      }
+      return
+    }
+    if (receipt !== undefined) {
+      const changed = this.#database.prepare(`
+        UPDATE preference_memory_promotion_cancellations
+        SET state = ?, attempt_count = attempt_count + 1, receipt_digest = ?,
+          principal_lineage_id = ?, principal_lineage_version = 1, owner_generation = 1,
+          last_error = NULL, updated_at = ?
+        WHERE promotion_id = ? AND promotion_generation = ?
+          AND state IN ('pending', 'retry_wait') AND upgrade_binding_digest = ?
+      `).run(
+        receipt.outcome === 'already-confirmed' ? 'already-confirmed' : 'cancelled',
+        receipt.receiptDigest,
+        `redacted-${createHash('sha256').update(request.principalLineage.principalRecordId).digest('hex')}`,
+        now, request.promotionId, request.promotionGeneration, upgradeBindingDigest,
+      )
+      if (changed.changes !== 1) {
+        throw new PreferenceStoreError('conflict', 'promotion cancellation changed during settlement')
+      }
+      return
+    }
+    const attempt = current.attempt_count + 1
+    const delay = Math.min(60_000, 250 * (2 ** Math.min(attempt - 1, 8)))
+    this.#database.prepare(`
+      UPDATE preference_memory_promotion_cancellations
+      SET state = 'retry_wait', attempt_count = ?, next_attempt_at = ?,
+        last_error = ?, updated_at = ?
+      WHERE promotion_id = ? AND promotion_generation = ?
+          AND state IN ('pending', 'retry_wait') AND upgrade_binding_digest = ?
+    `).run(
+      attempt, now + delay, retryError!, now, request.promotionId, request.promotionGeneration,
+      upgradeBindingDigest,
+    )
   }
 
   /**
@@ -2369,6 +3194,8 @@ export class PreferenceStore {
         // that disclose the deleted counts/times. The exact current forget
         // replay was handled above; after this boundary only its new receipt
         // and tombstone may survive.
+        this.#cancelScopePromotionsInTransaction(canonical.scopeKey, 'forget', now)
+        this.#purgeScopePromotionDetailsInTransaction(canonical.scopeKey)
         this.#database.prepare(
           'DELETE FROM preference_owner_control_receipts WHERE scope_digest = ?',
         ).run(canonical.scopeDigest)
@@ -2894,6 +3721,23 @@ export class PreferenceStore {
         expiresAt, activatedAt, rolledBackAt, version, now, prior.id,
       )
       this.#transition(prior, claimState, effectState, transitionReason, version, now)
+      if (entry.riskTier === 'T2') {
+        const promotions = this.#database.prepare(`
+          SELECT * FROM preference_memory_promotions
+          WHERE scope_key = ? AND hypothesis_id = ?
+            AND state IN ('pending', 'submitted')
+        `).all(scopeKey, prior.id) as unknown as MemoryPromotionRow[]
+        for (const promotion of promotions) {
+          if (claimState === 'expired') {
+            this.#cancelPromotionInTransaction(promotion, 'superseded', now)
+          } else if (candidate !== promotion.hypothesis_value
+            || version !== promotion.hypothesis_version
+            || evidence.confidenceBps < this.#options.minConfidenceBpsForPromotion
+            || evidence.contradictionBps > this.#options.maxContradictionBpsForPromotion) {
+            this.#cancelPromotionInTransaction(promotion, 'superseded', now)
+          }
+        }
+      }
     }
   }
 
@@ -3063,7 +3907,150 @@ export class PreferenceStore {
     return row.forgotten_through ?? undefined
   }
 
+  #promotionRow(promotionId: string, promotionGeneration: number): MemoryPromotionRow {
+    const row = this.#database.prepare(`
+      SELECT * FROM preference_memory_promotions
+      WHERE promotion_id = ? AND promotion_generation = ?
+    `).get(promotionId, promotionGeneration) as unknown as MemoryPromotionRow | undefined
+    if (row === undefined) throw new PreferenceStoreError('not-found', 'promotion was not found')
+    return row
+  }
+
+  #isPromotionTerminal(state: PreferenceMemoryPromotionState): state is PreferenceMemoryPromotionTerminalStatus {
+    return ['confirmed', 'rejected', 'expired', 'conflicted', 'stale-owner'].includes(state)
+  }
+
+  #recordPromotionCancellationInTransaction(
+    row: MemoryPromotionRow,
+    reason: PreferenceMemoryPromotionCancellationReason,
+    now: number,
+  ): void {
+    const request = validatePreferenceMemoryPromotionCancellationRequest(
+      withPreferenceMemoryPromotionCancellationDigest({
+        contractVersion: 1,
+        promotionId: row.promotion_id,
+        promotionGeneration: row.promotion_generation,
+        requestDigest: row.request_digest,
+        principalLineage: {
+          principalRecordId: row.principal_lineage_id,
+          principalVersion: row.principal_lineage_version,
+        },
+        ownerGeneration: row.owner_generation,
+        reason,
+        occurredAt: now,
+      }),
+    )
+    const upgradeBindingDigest = this.#cancellationUpgradeBindingDigest(request)
+    const existing = this.#database.prepare(`
+      SELECT * FROM preference_memory_promotion_cancellations
+      WHERE promotion_id = ? AND promotion_generation = ?
+    `).get(request.promotionId, request.promotionGeneration) as unknown as
+      MemoryPromotionCancellationRow | undefined
+    if (existing !== undefined) {
+      if (existing.upgrade_binding_digest !== upgradeBindingDigest) {
+        throw new PreferenceStoreError('idempotency-conflict', 'promotion cancellation binding changed')
+      }
+      if (existing.reason === 'superseded' && request.reason !== 'superseded') {
+        this.#database.prepare(`
+          UPDATE preference_memory_promotion_cancellations SET
+            principal_lineage_id = ?, principal_lineage_version = ?, owner_generation = ?,
+            reason = ?, cancelled_at = ?, cancellation_digest = ?, state = 'pending',
+            attempt_count = 0, next_attempt_at = ?, receipt_digest = NULL,
+            last_error = NULL, updated_at = ?
+          WHERE promotion_id = ? AND promotion_generation = ?
+            AND reason = 'superseded' AND upgrade_binding_digest = ?
+        `).run(
+          request.principalLineage.principalRecordId, request.principalLineage.principalVersion,
+          request.ownerGeneration, request.reason, request.occurredAt, request.cancellationDigest,
+          now, now, request.promotionId, request.promotionGeneration, upgradeBindingDigest,
+        )
+      }
+      return
+    }
+    this.#database.prepare(`
+      INSERT INTO preference_memory_promotion_cancellations(
+        promotion_id, promotion_generation, request_digest, principal_lineage_id,
+        principal_lineage_version, owner_generation, reason, cancelled_at,
+        cancellation_digest, state, attempt_count, next_attempt_at,
+        upgrade_binding_digest, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+    `).run(
+      request.promotionId, request.promotionGeneration, request.requestDigest,
+      request.principalLineage.principalRecordId, request.principalLineage.principalVersion,
+      request.ownerGeneration, request.reason, request.occurredAt, request.cancellationDigest,
+      now, upgradeBindingDigest, now,
+    )
+  }
+
+  #cancellationUpgradeBindingDigest(
+    request: Pick<PreferenceMemoryPromotionCancellationRequest,
+      'promotionId' | 'promotionGeneration' | 'requestDigest' | 'principalLineage' | 'ownerGeneration'>,
+  ): string {
+    return preferencePromotionCancellationUpgradeBindingDigest({
+      promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration,
+      requestDigest: request.requestDigest,
+      principalLineageId: request.principalLineage.principalRecordId,
+      principalLineageVersion: request.principalLineage.principalVersion,
+      ownerGeneration: request.ownerGeneration,
+    })
+  }
+
+  #cancelPromotionInTransaction(
+    row: MemoryPromotionRow,
+    reason: PreferenceMemoryPromotionCancellationReason,
+    now: number,
+  ): void {
+    this.#recordPromotionCancellationInTransaction(row, reason, now)
+    if (row.state === 'cancelled') return
+    if (this.#isPromotionTerminal(row.state)) return
+    this.#database.prepare(`
+      UPDATE preference_memory_promotions SET state = 'cancelled', updated_at = ?
+      WHERE promotion_id = ? AND promotion_generation = ?
+        AND state IN ('pending', 'submitted')
+    `).run(now, row.promotion_id, row.promotion_generation)
+    this.#database.prepare(`
+      UPDATE preference_memory_promotion_outbox SET state = 'cancelled', updated_at = ?
+      WHERE promotion_id = ? AND promotion_generation = ?
+        AND state IN ('pending', 'retry_wait', 'submitted')
+    `).run(now, row.promotion_id, row.promotion_generation)
+  }
+
+  #cancelScopePromotionsInTransaction(
+    scopeKey: string,
+    reason: Extract<PreferenceMemoryPromotionCancellationReason, 'forget' | 'owner-rotated'>,
+    now: number,
+  ): void {
+    const rows = this.#database.prepare(`
+      SELECT * FROM preference_memory_promotions
+      WHERE scope_key = ? AND state IN ('pending', 'submitted', 'confirmed', 'cancelled')
+    `).all(scopeKey) as unknown as MemoryPromotionRow[]
+    for (const row of rows) this.#cancelPromotionInTransaction(row, reason, now)
+  }
+
+  #purgeScopePromotionDetailsInTransaction(scopeKey: string): void {
+    this.#database.prepare(`
+      DELETE FROM preference_memory_promotion_results
+      WHERE (promotion_id, promotion_generation) IN (
+        SELECT promotion_id, promotion_generation FROM preference_memory_promotions
+        WHERE scope_key = ?
+      )
+    `).run(scopeKey)
+    this.#database.prepare(`
+      DELETE FROM preference_memory_promotion_outbox
+      WHERE (promotion_id, promotion_generation) IN (
+        SELECT promotion_id, promotion_generation FROM preference_memory_promotions
+        WHERE scope_key = ?
+      )
+    `).run(scopeKey)
+    this.#database.prepare('DELETE FROM preference_memory_promotions WHERE scope_key = ?').run(scopeKey)
+  }
+
   #deleteScopeDataInTransaction(scopeKey: string, scopeDigest: string): void {
+    this.#cancelScopePromotionsInTransaction(scopeKey, 'owner-rotated', this.#now())
+    // Request rows include private scope/principal material. Keep only opaque
+    // cancellation tombstones so delayed Memory receipts can be ACK-cancelled.
+    this.#purgeScopePromotionDetailsInTransaction(scopeKey)
     this.#database.prepare(
       'DELETE FROM preference_owner_control_receipts WHERE scope_digest = ?',
     ).run(scopeDigest)

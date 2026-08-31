@@ -5,7 +5,7 @@ import type SkillRegistry from '@deepseek-ai/dsh-skill'
 import Schema from '@deepseek-ai/schemastery'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type {
-  ApprovalDispatchRoute,
+  ApprovalDispatchRouteV2,
   AssistantPolicyService,
   PolicyDecision,
 } from '@dsh-enhanced/assistant-policy'
@@ -275,7 +275,7 @@ export class PersonalWikiService extends Service {
     agent: Agent | undefined,
     workspace: string,
     explicitPrincipal: string | undefined,
-  ): { principal: string; dispatch?: Readonly<ApprovalDispatchRoute> } {
+  ): { principal: string; dispatch?: Readonly<ApprovalDispatchRouteV2> } {
     const delivery = this.approvalDelivery
     if (delivery === undefined) {
       if (explicitPrincipal === undefined || explicitPrincipal.trim() === '') {
@@ -287,7 +287,8 @@ export class PersonalWikiService extends Service {
       return { principal: explicitPrincipal }
     }
     const route = delivery.prepareAgentApproval(agent, { sourceId: PERSONAL_WIKI_APPROVAL_SOURCE })
-    if (route.sourceId !== PERSONAL_WIKI_APPROVAL_SOURCE
+    if (route.routeVersion !== 2
+      || route.sourceId !== PERSONAL_WIKI_APPROVAL_SOURCE
       || route.workspace !== workspace
       || route.bindingId.trim() === ''
       || route.principal.trim() === '') {

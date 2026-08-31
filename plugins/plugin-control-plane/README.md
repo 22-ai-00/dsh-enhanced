@@ -11,7 +11,7 @@ dsh --profile web --dump-config
 
 插件服务读取配置中的 `catalogPath`、`statePath` 和 `trustPath`。owner CLI 固定从 `$DSH_HOME/plugin-control/trust.json` 读取信任配置；`--trust`、`--state`、`--dsh-home`、公钥、authority、key id、attestor path 等命令参数都会被拒绝。trust 文件必须是 canonical、owner-owned `0600` 普通文件，其目录必须是 owner-owned `0700`，不能经过符号链接。
 
-推荐 trust schema v2：
+基础 Host attestation 部署可使用 trust schema v2；启用 source release lane 时使用 schema v4，并额外配置 owner release-authorization 公钥、owner catalog/registry 以及八个 release adapter。每个 adapter 都固定 canonical executable/interpreter path、SHA-256、receipt authority/key、超时和唯一的 phase-specific config 环境变量，例如 DSH_RELEASE_PR_CONFIG。下面保留 Host 配置示例：
 
 ```json
 {
@@ -66,7 +66,7 @@ dsh --profile web --dump-config
 
 `hostAttestor` 可以为 `null`。这种部署只能走人工 attestation，不会自签或自动越过任何 `awaiting-*` 状态。旧 trust schema v1 仍可读取，但被规范化成保守的默认 `hostPolicy` 且不配置可执行 attestor，因此也是 manual-only。
 
-Control Plane 只保存 Ed25519 公钥，不读取、接收、生成或持有 Host attestation 私钥。
+Control Plane 只保存 Ed25519 公钥，不读取、接收、生成或持有 Host attestation / release 私钥。
 
 ## 能力闭环
 
@@ -153,9 +153,20 @@ dsh-plugin-control attest \
 
 ## 源码能力 lane 和边界
 
-`source-plan` / `scaffold` 只在 owner 审批的 linked、clean worktree 和固定 generator digest 上生成插件并运行 `pnpm check`，终态最多为 `ready-for-human-review`。
+`source-plan` / `scaffold` 只在 owner 审批的 linked、clean worktree 和固定 generator digest 上生成插件并运行 `pnpm check`。local checks 使用临时 Git index 对 exact scope 计算 staged tree/patch digest，不污染工作树的真实 index。owner 必须在 checks 之后为 exact source digests、scope 和 release policy 签发独立 authorization，随后才能执行 `release-start`。
 
-本包仍没有 Stage 4 的 PR 创建/合并 adapter、独立 signer、registry publish/verification adapter，也没有把产物转换成已发布 catalog candidate 的 builder/orchestrator。因此源码 lane 不会声称“已建 PR、已签名、已发布、已进入 registry 或已激活”；这些仍需外部系统和后续独立 activation plan。
+owner 可以用 `release-request` 导出当前 durable phase request、用 `release-step` 调用已固定 adapter 并应用 receipt，或用 `release-attest` 应用 owner-controlled 外部系统生成的同协议 receipt。phase 不能由调用者选择，而由 durable source plan 状态决定。publish 超时等不确定结果必须先进入 `publish-ambiguous`，再由独立 registry verifier 的签名 reconciliation receipt 决定继续验证、以新 fence 重试，或 fail closed。
+
+随包发布的 `bin/dsh-local-release-adapter.js` 是 local-only 的通用参考 adapter；trust 中每个 phase 必须安装为不同 canonical 文件/inode，并使用不同 adapter id、authority 与 receipt key；脚本副本可以共享同一个固定、只读的 Node interpreter。各副本的 owner-private config 还应给出不同 state directory。它实现：
+
+- local bare Git remote 上的 immutable PR ref、由 owner-private exact review decision 驱动的独立 review receipt，以及 target-ref compare-and-swap merge；
+- 从 exact merge commit 做至少两次独立 checkout，并分别复制为新的可写 sandbox workspace；owner 配置固定 Linux bubblewrap、Node、pnpm runtime tree、离线 store 与 tar executable 的 canonical path/摘要。sandbox 使用空 HOME/tmp、无网络的新 user/mount/PID namespace，固定执行 `pnpm install --offline --frozen-lockfile --ignore-scripts --package-import-method=copy`、目标包 `build` 与 `pnpm pack`，最终 artifact 直接采用 package manager pack lifecycle/packlist 生成的 tarball，再生成 CycloneDX SBOM 和 SLSA provenance；
+- 独立 signer 对 exact artifact statement 签名；
+- local filesystem registry 的 package/version immutable publication；
+- 在独立 download root 复制并重新验证 registry bytes；
+- 复用 Control Plane catalog helper 执行 request-bound before/after digest CAS admission。
+
+adapter 的 stdout 只有一个签名 JSON receipt，stderr 不打印 request 或 secret；它还会用 config 中固定的 release-authorization 公钥重新验签。每个 phase 在 owner-private state directory 永久绑定 operationId + requestDigest：完全相同请求重放同一 receipt，同 id 不同 payload 拒绝。`registry-verify` 副本还实现 `reconcile`，同时核对 immutable tarball 和 publication record，并用自己的独立 key 签发 `exists-match` / `absent` / `unknown` / `digest-conflict` evidence。该参考实现不访问网络，也不等同于 GitHub/npm adapter；需要远端 PR/registry 的部署应提供遵循相同 request/receipt 与幂等协议的 owner adapter。
 
 ## 权限
 
@@ -163,6 +174,11 @@ dsh-plugin-control attest \
 - owner CLI `activate`：读取/复制/rename/恢复 DSH profile，并执行固定 DSH executable。
 - owner CLI `probe`：执行固定 Host attestor，只有严格 allowlist 环境；不读取 attestation 私钥，不使用 shell或网络客户端。
 - owner CLI `scaffold`：仅在审批绑定的 linked worktree 中运行固定边界内的 `git` / `pnpm`。
-- 本包没有 registry 搜索、包下载器、PR、签名或发布 adapter。
+- owner CLI release 命令：读取 owner-private release authorization 或人工签名 receipt，写 release operation SQLite 状态，并只执行 trust 中固定的 adapter executable；publish reconciliation 只接受独立 registry verifier 的签名 receipt，不接受裸 observation。
+- local release adapter：读取一个 allowlisted、按 phase 命名的配置路径（例如 DSH_RELEASE_PR_CONFIG；连字符转换为下划线）；该配置及其目录、每个 phase 的 Ed25519 私钥、release-authorization 公钥和 state directory 必须 owner-owned private。按 phase 可执行 owner 固定 SHA-256 的 local Git、Node、pnpm、tar 和 bubblewrap executable，读 approved repository/worktree 与继承的只读 artifact/SBOM/provenance fd，写 local bare Git remote、review store、isolated build root、immutable file registry、独立 download root 和 owner catalog。它不内置 key、token、credential、remote URL 或任意 shell command，也不使用 shell、浏览器或网络；依赖安装禁用 lifecycle scripts，只有 owner 固定的目标包 build/pack lifecycle 会执行。
+- build adapter 不接受调用方或通用 config 注入任意命令/argv；它只运行固定的 offline frozen install、package build 与 `pnpm pack` 流程。pnpm runtime tree 和离线 store 以 canonical owner/root-owned、非 group/world-writable 的递归 inventory digest 固定并只读挂载；每轮只给 disposable workspace 与 pack output 写权限。私钥路径与 config path 不出现在 durable request。生产部署应为 PR/review、review/merge、build/sign、sign/publish 和 publish/registry-verify 配置独立 executable identity、进程状态目录及 signing authority/key。
+- Linux local adapter 对 Git、tar、bubblewrap 及 catalog helper/interpreter 保持 `O_NOFOLLOW` 已验证 descriptor，并通过 `/proc/self/fd` 执行；bubblewrap 的 toolchain/store/workspace/output 也从已打开目录 descriptor 挂载。缺少 Linux `/proc/self/fd` 时 fail closed。catalog helper 在独立 pinned Node 子进程中运行，不会把 mutable helper pathname 动态 import 到签名进程。
+- catalog admission 使用同一文件系统的 `O_TMPFILE`、固定系统入口 `/usr/bin/python3` 安全解析出的 Python 3.8+ canonical target，以及跨目录 `renameat2(RENAME_EXCHANGE)` 提交和可验证反向交换。它不查询 `PATH`：入口、canonical target 及目录链必须 root-owned 且不可被 group/other 写，target 以 `O_NOFOLLOW` 打开并通过保留 descriptor 执行，执行前后复验 inode、时间戳与 SHA-256。父目录 descriptor 上的内核 `flock` 覆盖整个事务且随进程崩溃释放；每次 exchange 的确定性私有目录、before/desired/stage inode 与摘要先写入并 fsync 到 request-bound v2 journal。broker 不执行 pathname cleanup，无法归类的文件原样保留供人工 reconcile。缺少 Linux procfs、`O_TMPFILE`、`renameat2`、`flock` 或安全兼容的 interpreter 时 fail closed。Unix 文件 mode 不能隔离持续恶意的同 UID 进程；生产部署必须使用独立 UID 的 commit broker，或确保 worker 对 catalog 父目录无写权限。
+- local artifact activation 在安装期间持续持有已验证 cache inode，并把 `/proc/<control-plane-pid>/fd/<n>` reference 交给 DSH；registered DSH executor 及其解释器也从已验证 descriptor 启动。该路径是 Linux-only，且不会把 `release-complete` 视为 activation。
 
 兼容性见仓库 [compatibility baseline](../../docs/compatibility.md)。Node.js 要求 `^22.19.0 || >=24.0.0`（使用 `node:sqlite`）。

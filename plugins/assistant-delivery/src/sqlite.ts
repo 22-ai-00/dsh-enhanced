@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 15
+export const deliverySchemaVersion = 16
 
 /**
  * A database-local, durable total order for every admitted Inbox. The trigger
@@ -407,6 +407,69 @@ const approvalDispatchCursorSchema = `
   ) STRICT;
 `
 
+/** Immutable v2 route receipt coupled to the approval Outbox insertion. */
+const approvalOutboxRouteSchema = `
+  CREATE TABLE IF NOT EXISTS approval_outbox_routes (
+    outbox_id TEXT PRIMARY KEY,
+    route_version INTEGER NOT NULL CHECK (route_version = 2),
+    source_id TEXT NOT NULL,
+    binding_id TEXT NOT NULL,
+    binding_version INTEGER NOT NULL CHECK (binding_version >= 1),
+    binding_generation INTEGER NOT NULL CHECK (binding_generation >= 1),
+    workspace TEXT NOT NULL,
+    principal TEXT NOT NULL,
+    principal_record_id TEXT NOT NULL,
+    principal_version INTEGER NOT NULL CHECK (principal_version >= 1),
+    FOREIGN KEY (outbox_id) REFERENCES outbox_messages(id) ON DELETE CASCADE,
+    FOREIGN KEY (binding_id) REFERENCES conversation_bindings(id),
+    FOREIGN KEY (principal_record_id) REFERENCES delivery_principals(id)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS approval_outbox_route_binding
+    ON approval_outbox_routes(binding_id, binding_version, binding_generation);
+`
+
+function assertApprovalOutboxRouteSchema(database: DatabaseSync): void {
+  const columns = database.prepare('PRAGMA table_info(approval_outbox_routes)').all() as Array<{
+    name: string
+    type: string
+    notnull: number
+    pk: number
+  }>
+  const expected = [
+    ['outbox_id', 'TEXT', 1, 1],
+    ['route_version', 'INTEGER', 1, 0],
+    ['source_id', 'TEXT', 1, 0],
+    ['binding_id', 'TEXT', 1, 0],
+    ['binding_version', 'INTEGER', 1, 0],
+    ['binding_generation', 'INTEGER', 1, 0],
+    ['workspace', 'TEXT', 1, 0],
+    ['principal', 'TEXT', 1, 0],
+    ['principal_record_id', 'TEXT', 1, 0],
+    ['principal_version', 'INTEGER', 1, 0],
+  ] as const
+  if (columns.length !== expected.length || expected.some((entry, index) => {
+    const column = columns[index]
+    return column === undefined || column.name !== entry[0] || column.type !== entry[1]
+      || column.notnull !== entry[2] || column.pk !== entry[3]
+  })) {
+    throw new Error('delivery approval route receipt schema is invalid')
+  }
+  const foreignKeys = database.prepare('PRAGMA foreign_key_list(approval_outbox_routes)').all() as Array<{
+    from: string
+    table: string
+    to: string
+  }>
+  const expectedForeignKeys = [
+    ['binding_id', 'conversation_bindings', 'id'],
+    ['outbox_id', 'outbox_messages', 'id'],
+    ['principal_record_id', 'delivery_principals', 'id'],
+  ]
+  const actualForeignKeys = foreignKeys.map(row => [row.from, row.table, row.to]).sort()
+  if (JSON.stringify(actualForeignKeys) !== JSON.stringify(expectedForeignKeys)) {
+    throw new Error('delivery approval route receipt foreign keys are invalid')
+  }
+}
+
 const modelPickerStateSchema = `
   CREATE TABLE conversation_model_epochs (
     conversation_hash TEXT PRIMARY KEY,
@@ -736,6 +799,14 @@ function migrateObserved(database: DatabaseSync): void {
     `)
     version = 15
   }
+  if (version === 15) {
+    database.exec(`
+      ${approvalOutboxRouteSchema}
+      PRAGMA user_version = 16;
+    `)
+    assertApprovalOutboxRouteSchema(database)
+    version = 16
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -929,6 +1000,8 @@ function migrateObserved(database: DatabaseSync): void {
 
     ${approvalDispatchCursorSchema}
 
+    ${approvalOutboxRouteSchema}
+
     ${deadLetterResolutionSchema}
 
     ${deadLetterResolutionCompatibilitySchema}
@@ -943,7 +1016,7 @@ function migrateObserved(database: DatabaseSync): void {
 
     ${inboxAdmissionSchema}
 
-    PRAGMA user_version = 15;
+    PRAGMA user_version = 16;
   `)
 }
 
@@ -952,6 +1025,7 @@ function migrate(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE')
   try {
     migrateObserved(database)
+    assertApprovalOutboxRouteSchema(database)
     database.exec('COMMIT')
   } catch (error) {
     try { database.exec('ROLLBACK') } catch {}

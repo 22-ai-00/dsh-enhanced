@@ -5,9 +5,11 @@ import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import {
   AssistantPolicyService,
+  type ApprovalDispatchRoute,
+  type ApprovalDispatchRouteV2,
   type ApprovalProposalSnapshot,
 } from '@dsh-enhanced/assistant-policy'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { WikiProposalManager, WikiProposalStore, WikiProposalStoreError } from '../src/proposals.ts'
 import type { WikiPageInput } from '../src/types.ts'
 import { WikiVault } from '../src/vault.ts'
@@ -62,7 +64,111 @@ function proposalInput(title = 'Personal assistant') {
   }
 }
 
+const v2Dispatch: ApprovalDispatchRouteV2 = {
+  routeVersion: 2,
+  sourceId: 'dsh-enhanced-personal-wiki',
+  bindingId: 'binding-owner-dm',
+  bindingVersion: 11,
+  bindingGeneration: 4,
+  workspace: '/work/alpha',
+  principal: 'owner:lark:123',
+  principalRecordId: 'principal-owner-record',
+  principalVersion: 6,
+}
+
 describe('approval-gated wiki proposals', () => {
+  test('round-trips the complete v2 dispatch through SQLite and Policy', async () => {
+    const fixture = await harness()
+    const recover = vi.spyOn(fixture.policy, 'recoverOrCreateProposal')
+    const input = { ...proposalInput(), idempotencyKey: 'wiki:v2-roundtrip', dispatch: v2Dispatch }
+    const created = fixture.manager.propose(input)
+
+    expect(fixture.store.get(created.proposalId)?.dispatch).toStrictEqual(v2Dispatch)
+    const raw = new DatabaseSync(fixture.statePath, { readOnly: true })
+      .prepare('SELECT dispatch_json FROM wiki_proposals WHERE id = ?')
+      .get(created.proposalId) as { dispatch_json: string }
+    expect(JSON.parse(raw.dispatch_json)).toStrictEqual(v2Dispatch)
+    expect(recover).toHaveBeenCalledWith(expect.objectContaining({ dispatch: v2Dispatch }))
+    fixture.store.close()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test.each([
+    ['bindingVersion', { bindingVersion: v2Dispatch.bindingVersion + 1 }],
+    ['bindingGeneration', { bindingGeneration: v2Dispatch.bindingGeneration + 1 }],
+    ['principalRecordId', { principalRecordId: `${v2Dispatch.principalRecordId}-other` }],
+    ['principalVersion', { principalVersion: v2Dispatch.principalVersion + 1 }],
+  ])('binds v2 %s into the proposal request hash', async (_field, changed) => {
+    const fixture = await harness()
+    const input = { ...proposalInput(), idempotencyKey: 'wiki:v2-hash', dispatch: v2Dispatch }
+    fixture.manager.propose(input)
+    expect(() => fixture.manager.propose({
+      ...input,
+      dispatch: { ...v2Dispatch, ...changed },
+    })).toThrowError(expect.objectContaining<Partial<WikiProposalStoreError>>({
+      code: 'idempotency-conflict',
+    }))
+    fixture.store.close()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('preserves an exact legacy v1 database row without inventing authority fields', async () => {
+    const fixture = await harness()
+    const legacyDispatch: ApprovalDispatchRoute = {
+      sourceId: v2Dispatch.sourceId,
+      bindingId: v2Dispatch.bindingId,
+      workspace: v2Dispatch.workspace,
+      principal: v2Dispatch.principal,
+    }
+    const created = fixture.manager.propose({
+      ...proposalInput(), idempotencyKey: 'wiki:v1-roundtrip', dispatch: v2Dispatch,
+    })
+    const database = new DatabaseSync(fixture.statePath)
+    database.prepare('UPDATE wiki_proposals SET dispatch_json = ? WHERE id = ?')
+      .run(JSON.stringify(legacyDispatch), created.proposalId)
+    database.close()
+    expect(fixture.store.get(created.proposalId)?.dispatch).toStrictEqual(legacyDispatch)
+    fixture.store.close()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('rejects a legacy v1 route at the new proposal boundary', async () => {
+    const fixture = await harness()
+    expect(() => fixture.manager.propose({
+      ...proposalInput(),
+      idempotencyKey: 'wiki:v1-write',
+      dispatch: {
+        sourceId: v2Dispatch.sourceId,
+        bindingId: v2Dispatch.bindingId,
+        workspace: v2Dispatch.workspace,
+        principal: v2Dispatch.principal,
+      } as ApprovalDispatchRouteV2,
+    })).toThrowError(expect.objectContaining<Partial<WikiProposalStoreError>>({
+      code: 'invalid-input',
+    }))
+    fixture.store.close()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test.each([
+    ['missing fence', { ...v2Dispatch, principalVersion: undefined }],
+    ['invalid version', { ...v2Dispatch, bindingVersion: 0 }],
+    ['unknown key', { ...v2Dispatch, unexpected: true }],
+  ])('rejects malformed stored v2 dispatch: %s', async (_case, malformed) => {
+    const fixture = await harness()
+    const created = fixture.manager.propose({
+      ...proposalInput(), idempotencyKey: `wiki:v2-tamper:${_case}`, dispatch: v2Dispatch,
+    })
+    const database = new DatabaseSync(fixture.statePath)
+    database.prepare('UPDATE wiki_proposals SET dispatch_json = ? WHERE id = ?')
+      .run(JSON.stringify(malformed), created.proposalId)
+    database.close()
+    expect(() => fixture.store.get(created.proposalId))
+      .toThrowError(expect.objectContaining<Partial<WikiProposalStoreError>>({ code: 'invalid-state' }))
+    fixture.store.close()
+    await fixture.ctx.fiber.restart()
+  })
+
   test('persists one exact proposed page privately and replays idempotently', async () => {
     const { manager, statePath, store, ctx } = await harness()
 
@@ -511,12 +617,7 @@ describe('approval-gated wiki proposals', () => {
     const input = {
       ...proposalInput('Cross-database recovery'),
       idempotencyKey: 'wiki:cross-database-recovery',
-      dispatch: {
-        sourceId: 'dsh-enhanced-personal-wiki',
-        bindingId: 'binding-owner-dm',
-        workspace: '/work/alpha',
-        principal: 'owner:lark:123',
-      },
+      dispatch: v2Dispatch,
     }
     let policyProposalId: string | undefined
     const crashingPolicy = {
@@ -610,12 +711,7 @@ describe('approval-gated wiki proposals', () => {
     const input = {
       ...proposalInput('Expired local intent'),
       idempotencyKey: 'wiki:expired-local-intent',
-      dispatch: {
-        sourceId: 'dsh-enhanced-personal-wiki',
-        bindingId: 'binding-owner-dm',
-        workspace: '/work/alpha',
-        principal: 'owner:lark:123',
-      },
+      dispatch: v2Dispatch,
     }
     expect(() => firstManager.propose(input)).toThrow('Policy unavailable before commit')
     now += 60_001
@@ -636,12 +732,7 @@ describe('approval-gated wiki proposals', () => {
     const input = {
       ...proposalInput('Atomic deadline race'),
       idempotencyKey: 'wiki:atomic-deadline-race',
-      dispatch: {
-        sourceId: 'dsh-enhanced-personal-wiki',
-        bindingId: 'binding-owner-dm',
-        workspace: '/work/alpha',
-        principal: 'owner:lark:123',
-      },
+      dispatch: v2Dispatch,
     }
     const unavailablePolicy = {
       recoverOrCreateProposal: () => { throw new Error('Policy unavailable before commit') },

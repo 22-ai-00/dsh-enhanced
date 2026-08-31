@@ -9,10 +9,12 @@ import {
   type ApprovalProposalRecoveryResult,
   type ApprovalProposalResult,
   type ApprovalProposalSnapshot,
+  type ApprovalDispatchRouteV2,
 } from '@dsh-enhanced/assistant-policy'
 import {
-  hashMemoryMutation,
+  hashMemoryProposalIntent,
   isMissingPolicyProposalId,
+  memoryOwnerNamespaceKey,
   MemoryStore,
   MemoryStoreError,
   missingPolicyProposalId,
@@ -26,6 +28,14 @@ import type {
   StoredMemoryProposal,
   StoredMemoryProposalIntent,
 } from './types.js'
+import type { PreferenceMemoryPromotionCancellationReceipt } from '@dsh-enhanced/assistant-growth-contract'
+
+export class MemoryPromotionCancelledError extends Error {
+  constructor(readonly receipt: Readonly<PreferenceMemoryPromotionCancellationReceipt>) {
+    super('Preference promotion was durably cancelled')
+    this.name = 'MemoryPromotionCancelledError'
+  }
+}
 
 export interface MemoryApprovalPolicy {
   propose(input: ApprovalProposalInput): ApprovalProposalResult
@@ -35,8 +45,10 @@ export interface MemoryApprovalPolicy {
   getProposalByIdempotencyKey?(input: ApprovalProposalLookupInput): ApprovalProposalSnapshot | undefined
 }
 
-function deterministicProposalId(idempotencyKey: string): string {
-  return `memory-${createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 32)}`
+function deterministicProposalId(namespaceKey: string, idempotencyKey: string): string {
+  return `memory-${createHash('sha256')
+    .update(`personal-memory-proposal/v2\0${namespaceKey}\0${idempotencyKey}`)
+    .digest('hex').slice(0, 32)}`
 }
 
 function proposalDiff(mutation: MemoryMutation): string {
@@ -48,20 +60,12 @@ function proposalSummary(mutation: MemoryMutation): string {
   return `${mutation.op} ${mutation.identity.owner} ${mutation.identity.scope} memory ${target}`
 }
 
-function hashMemoryProposalIntent(input: Pick<MemoryProposalInput, 'dispatch' | 'mutation' | 'ttlMs'>): string {
-  const dispatch = input.dispatch === undefined
-    ? null
-    : {
-      sourceId: input.dispatch.sourceId,
-      bindingId: input.dispatch.bindingId,
-      workspace: input.dispatch.workspace,
-      principal: input.dispatch.principal,
-    }
-  return createHash('sha256').update(JSON.stringify({
-    mutation: input.mutation,
-    ttlMs: input.ttlMs,
-    dispatch,
-  })).digest('hex')
+function policyDispatch(input: MemoryProposalInput['dispatch']): Readonly<ApprovalDispatchRouteV2> | undefined {
+  if (input === undefined) return undefined
+  if (input.routeVersion !== 2) {
+    throw new MemoryStoreError('invalid-entry', 'new memory approval dispatch must use route version 2')
+  }
+  return input
 }
 
 function proposalCreationVersion(proposal: ApprovalProposalResult): number {
@@ -102,16 +106,27 @@ export class MemoryProposalManager {
   constructor(
     private readonly store: MemoryStore,
     private readonly policy: MemoryApprovalPolicy,
+    private readonly validatePromotionOwner?: (proposal: StoredMemoryProposal) => 'current' | 'stale-owner',
   ) {}
 
   propose(input: MemoryProposalInput): MemoryProposalResult {
     if (input.idempotencyKey.trim() === '') {
       throw new MemoryStoreError('invalid-entry', 'proposal idempotencyKey must not be empty')
     }
-    const proposalId = deterministicProposalId(input.idempotencyKey)
-    const mutation = this.store.normalizeMutation(input.mutation, { preflight: false })
-    const normalized: MemoryProposalInput = {
+    const notAfter = this.store.resolveProposalNotAfter(
+      input.namespace, input.idempotencyKey, input.ttlMs, input.notAfter,
+    )
+    const proposalId = deterministicProposalId(
+      memoryOwnerNamespaceKey(input.namespace),
+      input.idempotencyKey,
+    )
+    const mutation = this.store.normalizeMutation(input.mutation, {
+      namespace: input.namespace,
+      preflight: false,
+    })
+    const normalized: MemoryProposalInput & { notAfter: number } = {
       ...input,
+      notAfter,
       mutation,
     }
     const mutationHash = hashMemoryProposalIntent(normalized)
@@ -126,7 +141,62 @@ export class MemoryProposalManager {
     if (prepared.kind === 'proposal') {
       return this.#replayStoredProposal(prepared.proposal, normalized)
     }
+    if (prepared.kind === 'cancelled') {
+      throw new MemoryPromotionCancelledError(prepared.receipt)
+    }
     return this.#submitProposal(prepared.intent, prepared.replayed)
+  }
+
+  /**
+   * Materialize a terminal upstream fence/deadline result without creating a
+   * headless Policy proposal. The exact request still becomes durable first.
+   */
+  rejectPromotionBeforePolicy(
+    input: MemoryProposalInput & { promotion: NonNullable<MemoryProposalInput['promotion']> },
+    status: 'expired' | 'stale-owner',
+  ): MemoryProposalResult {
+    if (input.dispatch !== undefined) {
+      throw new MemoryStoreError('invalid-entry', 'pre-Policy promotion settlement cannot carry a dispatch')
+    }
+    const proposalId = deterministicProposalId(
+      memoryOwnerNamespaceKey(input.namespace),
+      input.idempotencyKey,
+    )
+    const notAfter = this.store.resolveProposalNotAfter(
+      input.namespace, input.idempotencyKey, input.ttlMs, input.notAfter,
+    )
+    const mutation = this.store.normalizeMutation(input.mutation, {
+      namespace: input.namespace,
+      preflight: false,
+    })
+    const normalized = { ...input, notAfter, mutation }
+    const mutationHash = hashMemoryProposalIntent(normalized)
+    const prepared = this.store.prepareProposalIntent({ ...normalized, proposalId, mutationHash })
+    if (prepared.kind === 'conflict') {
+      throw new MemoryStoreError('idempotency-conflict', 'proposal key was used for another mutation')
+    }
+    if (prepared.kind === 'proposal') {
+      const settled = prepared.proposal.status === 'pending'
+        ? this.store.settleProposal({
+          proposalId,
+          policyStatus: 'conflicted',
+          promotion: { ...input.promotion, statusOverride: status },
+        })
+        : this.store.settleProposal({
+          proposalId,
+          policyStatus: 'conflicted',
+          promotion: { ...input.promotion, statusOverride: status },
+        })
+      return result(settled.proposal, true, settled.record)
+    }
+    if (prepared.kind === 'cancelled') {
+      throw new MemoryPromotionCancelledError(prepared.receipt)
+    }
+    const settled = this.store.conflictProposalIntent(proposalId, {
+      ...input.promotion,
+      statusOverride: status,
+    })
+    return result(settled.proposal, prepared.replayed || settled.replayed)
   }
 
   #replayStoredProposal(
@@ -151,14 +221,16 @@ export class MemoryProposalManager {
     input: StoredMemoryProposalIntent,
     intentReplayed: boolean,
   ): MemoryProposalResult {
-    const proposalId = deterministicProposalId(input.idempotencyKey)
+    const proposalId = deterministicProposalId(
+      memoryOwnerNamespaceKey(input.namespace),
+      input.idempotencyKey,
+    )
     const diff = proposalDiff(input.mutation)
     const mutationHash = hashMemoryProposalIntent(input)
-    const legacyMutationHash = hashMemoryMutation(input.mutation)
-    if (input.proposalId !== proposalId
-      || (input.mutationHash !== mutationHash && input.mutationHash !== legacyMutationHash)) {
+    if (input.proposalId !== proposalId || input.mutationHash !== mutationHash) {
       throw new MemoryStoreError('idempotency-conflict', 'durable proposal intent does not match its canonical payload')
     }
+    const dispatch = policyDispatch(input.dispatch)
     const policyContent = {
       idempotencyKey: `personal-memory:${input.idempotencyKey}`,
       requester: input.requester,
@@ -167,49 +239,34 @@ export class MemoryProposalManager {
       resource: { kind: 'memory', id: proposalId },
       diff,
       summary: proposalSummary(input.mutation),
-      ...(input.dispatch === undefined ? {} : { dispatch: input.dispatch }),
+      ...(dispatch === undefined ? {} : { dispatch }),
     }
     let policyProposal: ApprovalProposalResult
     try {
-      const notAfter = input.createdAt + input.ttlMs
+      const notAfter = input.notAfter
       if (!Number.isSafeInteger(notAfter)) {
         throw new MemoryStoreError('invalid-entry', 'proposal intent deadline exceeds the safe timestamp range')
       }
-      const legacyReplay = input.mutationHash === legacyMutationHash
-        && input.mutationHash !== mutationHash
-      const legacyExisting = legacyReplay
-        ? this.policy.getProposalByIdempotencyKey?.({
-          idempotencyKey: policyContent.idempotencyKey,
-          requester: policyContent.requester,
-          principal: policyContent.principal,
-          action: policyContent.action,
-          resource: policyContent.resource,
-        })
-        : undefined
-      if (legacyExisting !== undefined) {
-        // The read is deliberately scoped and non-creating. Policy proposal rows
-        // are immutable/non-deletable, so ordinary propose now performs an exact
-        // legacy TTL/dispatch replay without opening a missing-row create path.
-        policyProposal = this.policy.propose({ ...policyContent, ttlMs: input.ttlMs })
-      } else {
-        const recovered = this.policy.recoverOrCreateProposal({ ...policyContent, notAfter })
-        if (recovered.kind === 'abandoned') {
-          const conflicted = this.store.conflictProposalIntent(proposalId)
-          return result(conflicted.proposal, intentReplayed || recovered.replayed || conflicted.replayed)
-        }
-        policyProposal = recovered.proposal
+      const recovered = this.policy.recoverOrCreateProposal({ ...policyContent, notAfter })
+      if (recovered.kind === 'abandoned') {
+        const promotion = input.promotion === undefined
+          ? undefined
+          : { ...input.promotion, statusOverride: 'expired' as const }
+        const conflicted = this.store.conflictProposalIntent(proposalId, promotion)
+        return result(conflicted.proposal, intentReplayed || recovered.replayed || conflicted.replayed)
       }
+      policyProposal = recovered.proposal
     } catch (error) {
       if (!permanentPolicyRecoveryFailure(error)
         && !(error instanceof MemoryStoreError && error.code === 'invalid-entry')) throw error
-      const conflicted = this.store.conflictProposalIntent(proposalId)
+      const conflicted = this.store.conflictProposalIntent(proposalId, input.promotion)
       return result(conflicted.proposal, intentReplayed || conflicted.replayed)
     }
     let expectedVersion: number
     try {
       expectedVersion = proposalCreationVersion(policyProposal)
     } catch {
-      const conflicted = this.store.conflictProposalIntent(proposalId)
+      const conflicted = this.store.conflictProposalIntent(proposalId, input.promotion)
       return result(conflicted.proposal, intentReplayed || conflicted.replayed)
     }
     const attached = this.store.getProposal(proposalId)
@@ -222,10 +279,13 @@ export class MemoryProposalManager {
       idempotencyKey: input.idempotencyKey,
       requester: input.requester,
       principal: input.principal,
+      namespace: input.namespace,
       mutation: input.mutation,
       mutationHash,
+      notAfter: input.notAfter,
       expiresAt: policyProposal.expiresAt,
       version: expectedVersion,
+      ...(input.promotion === undefined ? {} : { promotion: input.promotion }),
     })
     const replayed = intentReplayed || policyProposal.replayed || saved.replayed
     if (saved.proposal.status !== 'pending' || policyProposal.status === 'pending') {
@@ -318,6 +378,7 @@ export class MemoryProposalManager {
           this.store.deferProposalIntent(intent.proposalId)
           continue
         }
+        if (prepared.kind === 'cancelled') continue
         const recovered = prepared.kind === 'proposal'
           ? this.#replayStoredProposal(prepared.proposal, intent)
           : this.#submitProposal(prepared.intent, true)
@@ -360,6 +421,19 @@ export class MemoryProposalManager {
         expiresAt: proposal.expiresAt,
         expectedVersion,
       })
+      if (terminal.status === 'approved' && proposal.promotion !== undefined) {
+        if (this.validatePromotionOwner === undefined) {
+          throw new MemoryStoreError('invalid-entry', 'promotion owner fence is unavailable')
+        }
+        if (this.validatePromotionOwner(proposal) === 'stale-owner') {
+          const stale = this.store.settleProposal({
+            proposalId: proposal.proposalId,
+            policyStatus: 'conflicted',
+            promotion: { ...proposal.promotion, statusOverride: 'stale-owner' },
+          })
+          return result(stale.proposal, policyReplayed || stale.replayed, stale.record)
+        }
+      }
       const applied = this.store.settleProposal({
         proposalId: proposal.proposalId,
         policyStatus: terminal.status,

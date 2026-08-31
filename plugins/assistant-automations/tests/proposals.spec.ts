@@ -6,6 +6,7 @@ import { Context } from '@deepseek-ai/cordis'
 import {
   AssistantPolicyService,
   type ApprovalDispatchRoute,
+  type ApprovalDispatchRouteV2,
   type ApprovalProposalSnapshot,
 } from '@dsh-enhanced/assistant-policy'
 import { afterEach, describe, expect, test, vi } from 'vitest'
@@ -49,11 +50,16 @@ async function harness(now: () => number = () => nowValue) {
   return { root, statePath, policyPath, automations, proposals, policy, manager, ctx }
 }
 
-const dispatch: ApprovalDispatchRoute = {
+const dispatch: ApprovalDispatchRouteV2 = {
+  routeVersion: 2,
   sourceId: 'dsh-enhanced-assistant-automations',
   bindingId: 'binding-owner',
+  bindingVersion: 7,
+  bindingGeneration: 3,
   workspace: '/work/alpha',
   principal: 'owner:lark:123',
+  principalRecordId: 'principal-owner-record',
+  principalVersion: 5,
 }
 
 function createInput(prompt = 'Run a safe review.', suffix = 'review') {
@@ -81,13 +87,24 @@ describe('approval-gated automation proposals', () => {
     expect(fixture.automations.get('auto-review')).toBeUndefined()
     expect(recover).toHaveBeenCalledOnce()
     expect(ordinaryPropose).not.toHaveBeenCalled()
+    expect(fixture.proposals.get(created.proposalId)?.dispatch).toStrictEqual(dispatch)
+    const persisted = new DatabaseSync(fixture.statePath, { readOnly: true })
+    const row = persisted.prepare('SELECT dispatch_json FROM automation_proposals WHERE id = ?')
+      .get(created.proposalId) as { dispatch_json: string }
+    expect(JSON.parse(row.dispatch_json)).toStrictEqual(dispatch)
+    persisted.close()
     expect(fixture.policy.listPendingApprovalDispatches()).toEqual([
       expect.objectContaining({
         proposalId: created.policyProposalId,
+        routeVersion: dispatch.routeVersion,
         sourceId: dispatch.sourceId,
         bindingId: dispatch.bindingId,
+        bindingVersion: dispatch.bindingVersion,
+        bindingGeneration: dispatch.bindingGeneration,
         workspace: dispatch.workspace,
         principal: dispatch.principal,
+        principalRecordId: dispatch.principalRecordId,
+        principalVersion: dispatch.principalVersion,
       }),
     ])
     expect((await stat(fixture.statePath)).mode & 0o777).toBe(0o600)
@@ -101,6 +118,80 @@ describe('approval-gated automation proposals', () => {
     fixture.manager.propose(createInput())
     expect(() => fixture.manager.propose(createInput('changed')))
       .toThrowError(expect.objectContaining<Partial<AutomationProposalStoreError>>({ code: 'idempotency-conflict' }))
+    fixture.proposals.close()
+    fixture.automations.close()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test.each([
+    ['bindingVersion', { bindingVersion: dispatch.bindingVersion + 1 }],
+    ['bindingGeneration', { bindingGeneration: dispatch.bindingGeneration + 1 }],
+    ['principalRecordId', { principalRecordId: `${dispatch.principalRecordId}-other` }],
+    ['principalVersion', { principalVersion: dispatch.principalVersion + 1 }],
+  ])('binds %s into the proposal request hash', async (_field, changed) => {
+    const fixture = await harness()
+    fixture.manager.propose(createInput())
+    expect(() => fixture.manager.propose({
+      ...createInput(),
+      dispatch: { ...dispatch, ...changed },
+    })).toThrowError(expect.objectContaining<Partial<AutomationProposalStoreError>>({
+      code: 'idempotency-conflict',
+    }))
+    fixture.proposals.close()
+    fixture.automations.close()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('reads an exact legacy v1 database row without inventing v2 authority', async () => {
+    const fixture = await harness()
+    const legacyDispatch: ApprovalDispatchRoute = {
+      sourceId: dispatch.sourceId,
+      bindingId: dispatch.bindingId,
+      workspace: dispatch.workspace,
+      principal: dispatch.principal,
+    }
+    const created = fixture.manager.propose(createInput())
+    const database = new DatabaseSync(fixture.statePath)
+    database.prepare('UPDATE automation_proposals SET dispatch_json = ? WHERE id = ?')
+      .run(JSON.stringify(legacyDispatch), created.proposalId)
+    database.close()
+    expect(fixture.proposals.get(created.proposalId)?.dispatch).toStrictEqual(legacyDispatch)
+    fixture.proposals.close()
+    fixture.automations.close()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('rejects a legacy v1 route at the new proposal boundary', async () => {
+    const fixture = await harness()
+    expect(() => fixture.manager.propose({
+      ...createInput(),
+      dispatch: {
+        sourceId: dispatch.sourceId,
+        bindingId: dispatch.bindingId,
+        workspace: dispatch.workspace,
+        principal: dispatch.principal,
+      } as ApprovalDispatchRouteV2,
+    })).toThrowError(expect.objectContaining<Partial<AutomationProposalStoreError>>({
+      code: 'invalid-input',
+    }))
+    fixture.proposals.close()
+    fixture.automations.close()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test.each([
+    ['missing fence', { ...dispatch, principalVersion: undefined }],
+    ['invalid generation', { ...dispatch, bindingGeneration: 0 }],
+    ['unknown key', { ...dispatch, unexpected: true }],
+  ])('rejects malformed stored v2 dispatch: %s', async (_case, malformed) => {
+    const fixture = await harness()
+    const prepared = fixture.manager.propose(createInput())
+    const database = new DatabaseSync(fixture.statePath)
+    database.prepare('UPDATE automation_proposals SET dispatch_json = ? WHERE id = ?')
+      .run(JSON.stringify(malformed), prepared.proposalId)
+    database.close()
+    expect(() => fixture.proposals.get(prepared.proposalId))
+      .toThrowError(expect.objectContaining<Partial<AutomationProposalStoreError>>({ code: 'invalid-state' }))
     fixture.proposals.close()
     fixture.automations.close()
     await fixture.ctx.fiber.restart()

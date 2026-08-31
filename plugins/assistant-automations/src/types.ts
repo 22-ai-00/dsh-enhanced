@@ -1,5 +1,5 @@
 import type { AutomationSchedule } from './schedule.js'
-import type { ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
 
 export type MisfirePolicy =
   | { kind: 'skip' }
@@ -623,7 +623,7 @@ export interface AutomationProposalInput {
   idempotencyKey: string
   requester: string
   principal: string
-  dispatch?: Readonly<ApprovalDispatchRoute>
+  dispatch?: Readonly<ApprovalDispatchRouteV2>
   ttlMs: number
   mutation: AutomationMutation
 }

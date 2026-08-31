@@ -2,6 +2,8 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
 import { afterEach, describe, expect, test } from 'vitest'
 import { EvolutionStore, EvolutionStoreError } from '../src/store.ts'
 import type { StoredRule } from '../src/types.ts'
@@ -62,6 +64,42 @@ const thresholds = {
   adoptFailureRate: 0.4,
   retireFailureRate: 0.4,
   limit: 10,
+}
+
+const v2Dispatch: ApprovalDispatchRouteV2 = {
+  routeVersion: 2,
+  sourceId: 'dsh-enhanced-assistant-evolution',
+  bindingId: 'binding-owner-dm',
+  bindingVersion: 13,
+  bindingGeneration: 4,
+  workspace: '/work/alpha',
+  principal: 'owner:lark:123',
+  principalRecordId: 'principal-owner-record',
+  principalVersion: 8,
+}
+
+function policyCreationIntent(
+  idempotencyKey: string,
+  dispatch: ApprovalDispatchRouteV2,
+) {
+  return {
+    idempotencyKey,
+    requester: 'agent:primary',
+    principal: 'owner:lark:123',
+    action: 'evolution.adopt',
+    resource: { kind: 'evolution', id: 'situation:route-fidelity' },
+    diff: '{"op":"adopt"}',
+    summary: 'Adopt route-fidelity guidance',
+    ttlMs: 60_000,
+    dispatch,
+  }
+}
+
+const routeFidelityMutation = {
+  op: 'adopt' as const,
+  ruleId: 'rule-route-fidelity',
+  input: { scopeKey, situation: 'route-fidelity', guidance: 'Keep the complete approval route.' },
+  baseline: { scopeKey, situation: 'route-fidelity', failures: 4, total: 4 },
 }
 
 function retirementMutation(
@@ -645,6 +683,149 @@ function adopt(target: EvolutionStore, situation: string, baseline: { failures: 
 }
 
 describe('approval-gated rule changes', () => {
+  test('round-trips a complete v2 Policy creation route across SQLite restart', () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-evolution-route-v2-'))
+    roots.push(root)
+    const path = join(root, 'evolution.sqlite')
+    const first = new EvolutionStore({ path, now: () => 1_000 })
+    const idempotencyKey = 'adopt:route-fidelity'
+    const created = first.createProposal({
+      idempotencyKey,
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: routeFidelityMutation,
+      expiresAt: 61_000,
+      creationIntent: policyCreationIntent(idempotencyKey, v2Dispatch),
+    })
+    expect(created.creationIntent?.dispatch).toStrictEqual(v2Dispatch)
+    first.close()
+
+    const raw = new DatabaseSync(path, { readOnly: true })
+    const row = raw.prepare('SELECT creation_intent_json FROM evolution_proposals WHERE id = ?')
+      .get(created.proposalId) as { creation_intent_json: string }
+    expect((JSON.parse(row.creation_intent_json) as { dispatch: unknown }).dispatch)
+      .toStrictEqual(v2Dispatch)
+    raw.close()
+
+    const reopened = new EvolutionStore({ path, now: () => 2_000 })
+    expect(reopened.getProposal(created.proposalId)?.creationIntent?.dispatch)
+      .toStrictEqual(v2Dispatch)
+    expect(reopened.listPendingProposals(10)[0]?.creationIntent?.dispatch)
+      .toStrictEqual(v2Dispatch)
+    reopened.close()
+  })
+
+  test('reads a legacy v1 creation route but rejects it at the new write boundary', () => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-evolution-route-v1-'))
+    roots.push(root)
+    const path = join(root, 'evolution.sqlite')
+    const target = new EvolutionStore({ path, now: () => 1_000 })
+    const idempotencyKey = 'adopt:legacy-route'
+    const legacyDispatch: ApprovalDispatchRoute = {
+      sourceId: v2Dispatch.sourceId,
+      bindingId: v2Dispatch.bindingId,
+      workspace: v2Dispatch.workspace,
+      principal: v2Dispatch.principal,
+    }
+    expect(() => target.createProposal({
+      idempotencyKey,
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: routeFidelityMutation,
+      expiresAt: 61_000,
+      creationIntent: policyCreationIntent(
+        idempotencyKey,
+        legacyDispatch as unknown as ApprovalDispatchRouteV2,
+      ),
+    })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'invalid-input' }))
+
+    const created = target.createProposal({
+      idempotencyKey,
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: routeFidelityMutation,
+      expiresAt: 61_000,
+      creationIntent: policyCreationIntent(idempotencyKey, v2Dispatch),
+    })
+    target.close()
+    const database = new DatabaseSync(path)
+    const row = database.prepare('SELECT creation_intent_json FROM evolution_proposals WHERE id = ?')
+      .get(created.proposalId) as { creation_intent_json: string }
+    const intent = JSON.parse(row.creation_intent_json) as Record<string, unknown>
+    database.prepare('UPDATE evolution_proposals SET creation_intent_json = ? WHERE id = ?')
+      .run(JSON.stringify({ ...intent, dispatch: legacyDispatch }), created.proposalId)
+    database.close()
+    const reopened = new EvolutionStore({ path, now: () => 2_000 })
+    expect(reopened.getProposal(created.proposalId)?.creationIntent?.dispatch)
+      .toStrictEqual(legacyDispatch)
+    reopened.close()
+  })
+
+  test.each([
+    ['bindingVersion', { bindingVersion: v2Dispatch.bindingVersion + 1 }],
+    ['bindingGeneration', { bindingGeneration: v2Dispatch.bindingGeneration + 1 }],
+    ['principalRecordId', { principalRecordId: `${v2Dispatch.principalRecordId}-other` }],
+    ['principalVersion', { principalVersion: v2Dispatch.principalVersion + 1 }],
+  ])('rejects a creation-intent winner replay with changed %s', (_field, changed) => {
+    const target = store()
+    const idempotencyKey = `adopt:route-winner:${_field}`
+    const input = {
+      idempotencyKey,
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: routeFidelityMutation,
+      expiresAt: 61_000,
+    }
+    target.createProposal({
+      ...input,
+      creationIntent: policyCreationIntent(idempotencyKey, v2Dispatch),
+    })
+    expect(() => target.createProposal({
+      ...input,
+      creationIntent: policyCreationIntent(
+        idempotencyKey,
+        { ...v2Dispatch, ...changed } as ApprovalDispatchRouteV2,
+      ),
+    })).toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({
+      code: 'idempotency-conflict',
+    }))
+    target.close()
+  })
+
+  test.each([
+    ['missing fence', { ...v2Dispatch, principalVersion: undefined }],
+    ['invalid generation', { ...v2Dispatch, bindingGeneration: 0 }],
+    ['unknown key', { ...v2Dispatch, unexpected: true }],
+  ])('rejects a tampered stored v2 creation route: %s', (_case, malformed) => {
+    const root = mkdtempSync(join(tmpdir(), 'assistant-evolution-route-tamper-'))
+    roots.push(root)
+    const path = join(root, 'evolution.sqlite')
+    const first = new EvolutionStore({ path, now: () => 1_000 })
+    const idempotencyKey = `adopt:route-tamper:${_case}`
+    const created = first.createProposal({
+      idempotencyKey,
+      requester: 'agent:primary',
+      principal: 'owner:lark:123',
+      mutation: routeFidelityMutation,
+      expiresAt: 61_000,
+      creationIntent: policyCreationIntent(idempotencyKey, v2Dispatch),
+    })
+    first.close()
+
+    const database = new DatabaseSync(path)
+    const row = database.prepare('SELECT creation_intent_json FROM evolution_proposals WHERE id = ?')
+      .get(created.proposalId) as { creation_intent_json: string }
+    const intent = JSON.parse(row.creation_intent_json) as Record<string, unknown>
+    database.prepare('UPDATE evolution_proposals SET creation_intent_json = ? WHERE id = ?')
+      .run(JSON.stringify({ ...intent, dispatch: malformed }), created.proposalId)
+    database.close()
+
+    const reopened = new EvolutionStore({ path, now: () => 2_000 })
+    expect(() => reopened.getProposal(created.proposalId))
+      .toThrowError(expect.objectContaining<Partial<EvolutionStoreError>>({ code: 'invalid-state' }))
+    reopened.close()
+  })
+
   test('refuses to activate a proposal whose frozen samples are only operational telemetry', () => {
     const target = store()
     const episodes: Array<{ id: string }> = []

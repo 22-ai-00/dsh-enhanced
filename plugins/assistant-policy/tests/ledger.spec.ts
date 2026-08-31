@@ -63,11 +63,39 @@ async function concurrentlyMigrate(path: string): Promise<MigrationWorkerResult[
   return Promise.all([first.result, second.result])
 }
 
-function seedLegacyVersion(path: string, version: 1 | 2 | 3): void {
+function seedLegacyVersion(path: string, version: 1 | 2 | 3 | 5): void {
   new PolicyLedger({ path }).close()
   const database = new DatabaseSync(path)
   database.exec('PRAGMA foreign_keys = OFF')
   if (version <= 3) database.exec('DROP TABLE approval_idempotency_tombstones')
+  database.exec('DROP INDEX approval_dispatches_pending_idx')
+  database.exec('ALTER TABLE approval_dispatches RENAME TO approval_dispatches_v6')
+  database.exec(`
+    CREATE TABLE approval_dispatches (
+      proposal_id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      binding_id TEXT NOT NULL,
+      workspace TEXT NOT NULL,
+      principal TEXT NOT NULL,
+      state TEXT NOT NULL CHECK (state IN ('pending', 'enqueued')),
+      payload_hash TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      enqueued_at INTEGER,
+      version INTEGER NOT NULL DEFAULT 1,
+      proposal_version INTEGER NOT NULL,
+      FOREIGN KEY (proposal_id) REFERENCES approval_proposals(id) ON DELETE CASCADE
+    ) STRICT;
+    INSERT INTO approval_dispatches(
+      proposal_id, source_id, binding_id, workspace, principal, state, payload_hash,
+      created_at, enqueued_at, version, proposal_version
+    )
+    SELECT proposal_id, source_id, binding_id, workspace, principal, state, payload_hash,
+           created_at, enqueued_at, version, proposal_version
+    FROM approval_dispatches_v6;
+    DROP TABLE approval_dispatches_v6;
+    CREATE INDEX approval_dispatches_pending_idx
+      ON approval_dispatches(state, created_at, proposal_id);
+  `)
   if (version === 2) {
     database.exec('ALTER TABLE approval_dispatches DROP COLUMN proposal_version')
   }
@@ -93,6 +121,9 @@ describe('policy ledger', () => {
 
     const database = new DatabaseSync(path)
     const version = database.prepare('PRAGMA user_version').get() as { user_version: number }
+    const dispatchColumns = database.prepare('PRAGMA table_info(approval_dispatches)').all() as Array<{
+      name: string
+    }>
     const tables = database.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
@@ -100,7 +131,25 @@ describe('policy ledger', () => {
     `).all() as { name: string }[]
     database.close()
 
-    expect(version.user_version).toBe(5)
+    expect(version.user_version).toBe(6)
+    expect(dispatchColumns.map(column => column.name)).toEqual([
+      'proposal_id',
+      'route_version',
+      'source_id',
+      'binding_id',
+      'binding_version',
+      'binding_generation',
+      'workspace',
+      'principal',
+      'principal_record_id',
+      'principal_version',
+      'state',
+      'payload_hash',
+      'created_at',
+      'enqueued_at',
+      'version',
+      'proposal_version',
+    ])
     expect(tables.map(table => table.name)).toEqual([
       'approval_dispatches',
       'approval_idempotency_tombstones',
@@ -181,10 +230,15 @@ describe('policy ledger', () => {
     expect(() => migratedLedger.propose({
       ...legacyReplay,
       dispatch: {
+        routeVersion: 2,
         sourceId: 'lark-primary',
         bindingId: 'binding-owner',
+        bindingVersion: 1,
+        bindingGeneration: 1,
         workspace: '/work/alpha',
         principal: 'owner:lark:123',
+        principalRecordId: 'principal-owner-row',
+        principalVersion: 1,
       },
     })).toThrowError(expect.objectContaining<Partial<PolicyLedgerError>>({ code: 'idempotency-conflict' }))
     migratedLedger.close()
@@ -198,7 +252,7 @@ describe('policy ledger', () => {
       .get() as { count: number }
     migrated.close()
 
-    expect(version.user_version).toBe(5)
+    expect(version.user_version).toBe(6)
     expect(proposal.diff_text).toBeNull()
     expect(dispatches.count).toBe(0)
   })
@@ -301,38 +355,53 @@ describe('policy ledger', () => {
     v2.close()
 
     const migrated = new PolicyLedger({ path, now: () => 1_500 })
-    expect(migrated.listPendingApprovalDispatches()).toEqual([
-      expect.objectContaining({
-        proposalId: 'v2-proposal',
-        proposalVersion: 1,
-        payloadHash,
-        diff,
-      }),
-    ])
+    expect(migrated.listPendingApprovalDispatches()).toEqual([])
+    expect(() => migrated.markApprovalDispatchEnqueued('v2-proposal', 1))
+      .toThrowError(expect.objectContaining<Partial<PolicyLedgerError>>({ code: 'legacy-unverifiable' }))
     migrated.close()
 
     const inspected = new DatabaseSync(path)
     const schema = inspected.prepare('PRAGMA user_version').get() as { user_version: number }
     const dispatch = inspected.prepare(`
-      SELECT proposal_version FROM approval_dispatches WHERE proposal_id = 'v2-proposal'
-    `).get() as { proposal_version: number }
+      SELECT route_version, binding_version, binding_generation, principal_record_id,
+             principal_version, state, payload_hash, proposal_version
+      FROM approval_dispatches WHERE proposal_id = 'v2-proposal'
+    `).get() as {
+      route_version: number
+      binding_version: number | null
+      binding_generation: number | null
+      principal_record_id: string | null
+      principal_version: number | null
+      state: string
+      payload_hash: string
+      proposal_version: number
+    }
     const privacyRows = inspected.prepare(`
       SELECT id, diff_text FROM approval_proposals
       WHERE id IN ('v2-proposal', 'v2-unrouted', 'v2-enqueued', 'v2-terminal')
       ORDER BY id
     `).all() as Array<{ id: string; diff_text: string | null }>
     inspected.close()
-    expect(schema.user_version).toBe(5)
-    expect(dispatch.proposal_version).toBe(1)
+    expect(schema.user_version).toBe(6)
+    expect(dispatch).toEqual({
+      route_version: 1,
+      binding_version: null,
+      binding_generation: null,
+      principal_record_id: null,
+      principal_version: null,
+      state: 'quarantined',
+      payload_hash: payloadHash,
+      proposal_version: 1,
+    })
     expect(privacyRows).toEqual([
       { id: 'v2-enqueued', diff_text: null },
-      { id: 'v2-proposal', diff_text: diff },
+      { id: 'v2-proposal', diff_text: null },
       { id: 'v2-terminal', diff_text: null },
       { id: 'v2-unrouted', diff_text: null },
     ])
   })
 
-  test.each([0, 1, 2, 3] as const)(
+  test.each([0, 1, 2, 3, 5] as const)(
     'serializes two process openers while migrating schema v%s',
     async version => {
       const path = await temporaryDatabase()
@@ -344,7 +413,7 @@ describe('policy ledger', () => {
       const schema = migrated.prepare('PRAGMA user_version').get() as { user_version: number }
       const journal = migrated.prepare('PRAGMA journal_mode').get() as { journal_mode: string }
       migrated.close()
-      expect(schema.user_version).toBe(5)
+      expect(schema.user_version).toBe(6)
       expect(journal.journal_mode).toBe('wal')
     },
   )
@@ -433,7 +502,7 @@ describe('policy ledger', () => {
     `).all() as Array<{ name: string; dflt_value: string | null }>)
       .find(column => column.name === 'intent_hash')
     migrated.close()
-    expect(schema.user_version).toBe(5)
+    expect(schema.user_version).toBe(6)
     expect(tombstone.intent_hash).toBe('legacy-v4-unbound')
     expect(intentColumn?.dflt_value).toBeNull()
   })

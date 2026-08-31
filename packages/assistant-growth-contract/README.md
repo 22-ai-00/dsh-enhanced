@@ -20,5 +20,10 @@ Automation 的八个 Host 操作共享同一套 identity、artifact CAS 与 rece
 避免导出校验与实际激活目录各自维护一份并发生漂移。它只描述闭集协议，不拥有证据、
 偏好状态或激活权限。
 
+Preference/Memory promotion 协议只允许 `memory.retention=long-term` 和固定 renderer，
+并以 request/result/cancellation digest 绑定 hypothesis 版本、owner generation 与 principal lineage。
+共享 contract 同时持有 producer 的进程内可撤销 brand，使 Memory 无需加载可选的 Preference 插件即可验真；
+它只定义 registration 与 content-free wire，不提供自由文本、Memory 写权限或无审批降级。
+
 本包只使用 Node `crypto` 计算 canonical SHA-256，不访问网络、文件系统、子进程、凭据或
 浏览器，也没有 install script。

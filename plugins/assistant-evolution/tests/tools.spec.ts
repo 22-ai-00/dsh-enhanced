@@ -95,10 +95,15 @@ async function harness(options: { autonomousRollback?: boolean } = {}) {
   ctx.provide('assistantDelivery', {
     prepareAgentApproval() {
       return {
+        routeVersion: 2 as const,
         sourceId: 'dsh-enhanced-assistant-evolution',
         bindingId: 'tool-owner-binding',
+        bindingVersion: 3,
+        bindingGeneration: 2,
         workspace: '/work/alpha',
         principal: 'owner:lark:123',
+        principalRecordId: 'principal-owner',
+        principalVersion: 4,
       }
     },
   } as never)

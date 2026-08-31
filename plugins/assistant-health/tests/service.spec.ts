@@ -631,7 +631,7 @@ describe('assistant health service', () => {
     expect(service.readiness()).toEqual({ ready: true, warnings: [] })
     expect(service.report(agent()).providers).toContainEqual({
       id: 'preferenceLearning', status: 'ready', metrics: {
-        ready: true, enabled: true, schemaVersion: 9, signals: 0,
+        ready: true, enabled: true, schemaVersion: 12, signals: 0,
         hypotheses: 0, active: 0, shadow: 0, proposed: 0,
         rolledBack: 0, expired: 0,
       },

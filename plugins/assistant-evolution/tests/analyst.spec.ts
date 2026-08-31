@@ -114,10 +114,15 @@ async function fixture(options: { route?: boolean; root?: string } = {}): Promis
   })
   if (options.route !== false) {
     const route: ApprovalDispatchRoute = {
+      routeVersion: 2,
       sourceId: 'dsh-enhanced-assistant-evolution',
       bindingId: 'analyst-owner-route',
+      bindingVersion: 3,
+      bindingGeneration: 2,
       workspace: WORKSPACE,
       principal: OWNER,
+      principalRecordId: 'principal-owner',
+      principalVersion: 4,
     }
     ctx.provide('assistantDelivery', { prepareAgentApproval: () => route } as never)
   }

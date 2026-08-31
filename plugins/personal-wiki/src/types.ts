@@ -1,4 +1,4 @@
-import type { ApprovalDispatchRoute } from '@dsh-enhanced/assistant-policy'
+import type { ApprovalDispatchRoute, ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
 
 export type WikiPageType = 'concept' | 'decision' | 'meta' | 'person' | 'project' | 'question' | 'source'
 export type WikiPageAuthority = 'curated' | 'derived'
@@ -125,7 +125,7 @@ export interface WikiProposalInput {
   principal: string
   ttlMs: number
   mutation: WikiUpsertMutation
-  dispatch?: Readonly<ApprovalDispatchRoute>
+  dispatch?: Readonly<ApprovalDispatchRouteV2>
 }
 
 export interface WikiProposalDecisionInput {
