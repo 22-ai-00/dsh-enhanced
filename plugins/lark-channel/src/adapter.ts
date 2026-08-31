@@ -5,6 +5,7 @@ import type {
   DeliveryAdapter,
   DeliveryAdapterContext,
   DeliveryProgressIntent,
+  DeliveryPresentation,
   DeliveryToolApprovalOutcome,
   DeliveryToolApprovalRequest,
   ModelPickerIntent,
@@ -830,6 +831,38 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     return { outcome: 'accepted', providerMessageId: result.messageId }
   }
 
+  async updatePresentation(
+    providerMessageId: string,
+    presentation: Readonly<DeliveryPresentation>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) throw signal.reason
+    const update = this.transport.updateRawCard
+    if (update === undefined) throw new Error('Lark transport does not support card replacement')
+    if (presentation.kind === 'automation-incident') {
+      await update.call(this.transport, providerMessageId, rawCard({
+        automationIncident: presentation,
+      }), signal)
+      return
+    }
+    if (presentation.kind !== 'approval-application') {
+      throw new Error('Lark presentation kind is unsupported')
+    }
+    await update.call(this.transport, providerMessageId, rawCard({
+      approvalApplication: {
+        status: presentation.applicationStatus,
+        operation: presentation.operation,
+        policyProposalId: presentation.policyProposalId,
+        localProposalId: presentation.localProposalId,
+        terminalAt: presentation.terminalAt,
+        ...(presentation.ruleId === undefined ? {} : { ruleId: presentation.ruleId }),
+        ...(presentation.resultingRuleVersion === undefined
+          ? {} : { resultingRuleVersion: presentation.resultingRuleVersion }),
+        ...(presentation.ruleStatus === undefined ? {} : { ruleStatus: presentation.ruleStatus }),
+      },
+    }), signal)
+  }
+
   private matchesTarget(target: Readonly<OutboundIntent['target']>): boolean {
     const { conversation, principal } = target
     return conversation.channel === this.channel
@@ -1034,6 +1067,15 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
           throw new LarkApprovalError('invalid', 'Lark approval settlement is unavailable')
         }
         await this.settleApproval(settlement)
+      }
+      return {
+        toast: { type: 'success', content: payload.decision === 'approved'
+          ? '批准已记录，等待账本结算'
+          : '提案已拒绝' },
+        ...callbackCard({ approvalResult: {
+          decision: payload.decision,
+          proposalId: payload.proposalId,
+        } }),
       }
     } catch (error) {
       if (error instanceof LarkPermissionPickerError) {

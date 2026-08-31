@@ -1,13 +1,27 @@
-/** Whether an observed episode ended well. Deliberately binary: a rule is only
- * worth adopting if the difference it makes is unambiguous. */
+/** Binary terminal projection. Its quality meaning is determined separately by
+ * evidenceKind; execution success alone is never treated as task success. */
 export type EpisodeOutcome = 'succeeded' | 'failed'
 
-/** Where an episode came from. Unattended runs and foreground turns are both
- * admissible evidence, but the origin is recorded so review can weigh them. */
-export type EpisodeSource = 'automation' | 'foreground'
+/** Where an episode came from. Source is provenance, never learning authority. */
+export type EpisodeSource = 'automation' | 'evaluation' | 'foreground'
 
 /** Whether the recorder is authoritative for the fact it reports. */
 export type EpisodeTrust = 'trusted' | 'self-reported' | 'legacy'
+
+/**
+ * Why an episode exists in the ledger.
+ *
+ * Execution status is operational telemetry, not evidence that an answer was
+ * correct or useful. Only an authoritative objective assertion or independent
+ * verification may influence behavioural learning. Rows written before this
+ * distinction existed are permanently quarantined as `legacy-unknown`.
+ */
+export type EpisodeEvidenceKind = 'operational' | 'objective' | 'verification' | 'legacy-unknown'
+
+export type QualityEvidenceKind = Extract<EpisodeEvidenceKind, 'objective' | 'verification'>
+
+export type TaskLearningSubjectKind = 'automation-run' | 'outcome'
+export type TaskLearningDisposition = 'upsert' | 'retract'
 
 /** Reserved scope used only for rows that predate scoped evidence. */
 export const legacyEvolutionScope = 'legacy:v1'
@@ -30,6 +44,16 @@ export interface EpisodeInput {
   detail: string
   source: EpisodeSource
   trust: EpisodeTrust
+  evidenceKind: EpisodeEvidenceKind
+  /** Immutable ID in the authoritative Evaluation ledger. Required for quality evidence. */
+  evidenceRef?: string
+  /**
+   * Immutable unit whose behaviour may be learned from. For an Automation
+   * objective this is the exact production run, not the Evaluation row that
+   * happened to assess it. For every other objective it is the Evaluation
+   * outcome itself.
+   */
+  learningSubjectRef?: string
   /** Trusted infrastructure attribution. Model-supplied values never enter this field. */
   ruleId?: string
   /** Immutable rule generation captured by trusted injection infrastructure. */
@@ -48,10 +72,56 @@ export interface StoredEpisode {
   detail: string
   source: EpisodeSource
   trust: EpisodeTrust
+  evidenceKind: EpisodeEvidenceKind
+  evidenceRef: string | undefined
+  learningSubjectRef: string | undefined
+  /** Host-derived projection; callers cannot mark arbitrary telemetry eligible. */
+  learningEligible: boolean
   ruleId: string | undefined
   guidanceVersion: number | undefined
   claimedRuleId: string | undefined
   occurredAt: number
+}
+
+/** Current monotonic state of one Evaluation-owned learning subject. */
+export interface StoredTaskLearningProjection {
+  scopeKey: string
+  /** Latest Evaluation scope watermark carried by the applying receipt. */
+  scopeWatermark: number
+  subjectKind: TaskLearningSubjectKind
+  subjectRef: string
+  version: number
+  digest: string
+  disposition: TaskLearningDisposition
+  situation: string
+  episodeId?: string
+  updatedAt: number
+}
+
+export type TaskLearningProjectionInput = {
+  scopeKey: string
+  scopeWatermark: number
+  subjectKind: TaskLearningSubjectKind
+  subjectRef: string
+  version: number
+  digest: string
+  situation: string
+  occurredAt: number
+} & ({
+  disposition: 'upsert'
+  outcome: EpisodeOutcome
+  detail: string
+  evidenceRef: string
+  ruleId?: string
+  guidanceVersion?: number
+} | {
+  disposition: 'retract'
+})
+
+export interface TaskLearningProjectionResult {
+  projection: Readonly<StoredTaskLearningProjection>
+  episode?: Readonly<StoredEpisode>
+  replayed: boolean
 }
 
 export interface RuleInput {
@@ -119,6 +189,8 @@ export interface SituationStats {
 export interface EvidenceSample {
   episodeId: string
   outcome: EpisodeOutcome
+  evidenceKind: QualityEvidenceKind
+  evidenceRef: string
   detail: string
   occurredAt: number
 }
@@ -129,6 +201,18 @@ export interface EvidenceReference {
   /** Digest of the complete ordered candidate window, not only the samples. */
   digest: string
   total: number
+  /** Exact configured candidate window used for full digest revalidation. */
+  window?: number
+  /** Required for every v12 evidence-dependent proposal. */
+  scopeWatermark?: number
+  /** Complete ordered task-revision identity for the exact evidence window. */
+  taskRevisions?: readonly Readonly<{
+    subjectKind: TaskLearningSubjectKind
+    subjectRef: string
+    version: number
+    digest: string
+    disposition: 'upsert'
+  }>[]
 }
 
 export type EvolutionMutation =
@@ -142,7 +226,12 @@ export type EvolutionMutation =
     }
   | {
       op: 'retire'
+      /** Frozen exact active-rule review snapshot; all are server-derived. */
+      scopeKey: string
       ruleId: string
+      situation: string
+      guidance: string
+      generation: number
       expectedVersion: number
       reason: string
       /** Exact post-adoption window that justified retiring this rule. */
@@ -151,6 +240,17 @@ export type EvolutionMutation =
       baseline: SituationStats
       /** Exact attributed candidate provenance reviewed by the owner. */
       evidence: EvidenceReference
+    }
+  | {
+      /** Owner-approved immediate removal; it can never revise guidance. */
+      op: 'owner-undo'
+      scopeKey: string
+      ruleId: string
+      situation: string
+      guidance: string
+      generation: number
+      expectedVersion: number
+      reason: string
     }
 
 /** Caller intent. Scope, baseline, generation and immutable rule ID are server-owned. */
@@ -244,6 +344,104 @@ export interface RuleCandidate {
   evidenceDigest: string
   /** Number of eligible episodes covered by the digest. */
   evidenceTotal: number
+  /** Evaluation scope state from which the complete window was computed. */
+  scopeWatermark: number
+  /** Complete ordered identity, not merely the bounded display samples. */
+  taskRevisions: readonly Readonly<{
+    subjectKind: TaskLearningSubjectKind
+    subjectRef: string
+    version: number
+    digest: string
+    disposition: 'upsert'
+  }>[]
   /** Bounded, human-readable justification shown to the owner on review. */
   rationale: string
+}
+
+/** Immutable protocol spoken by the dedicated supervised-growth analyst. */
+export const SUPERVISED_GROWTH_ANALYST_CONTRACT_VERSION = 'supervised-growth-analyst/v1' as const
+export type SupervisedGrowthAnalystContractVersion =
+  typeof SUPERVISED_GROWTH_ANALYST_CONTRACT_VERSION
+
+/**
+ * Complete identity of the exact adoption window reviewed by the analyst.
+ *
+ * `evidenceDigest` binds every eligible episode in the ordered window. Samples
+ * are a bounded, human-readable projection and never replace that full digest.
+ */
+export interface SupervisedGrowthAnalystEvidence {
+  contractVersion: SupervisedGrowthAnalystContractVersion
+  situation: string
+  failures: number
+  total: number
+  evidenceDigest: string
+  evidenceTotal: number
+  evidenceWindow: number
+  sampleEpisodeIds: readonly string[]
+  evidence: readonly EvidenceSample[]
+  scopeWatermark: number
+  taskRevisions: readonly Readonly<{
+    subjectKind: TaskLearningSubjectKind
+    subjectRef: string
+    version: number
+    digest: string
+    disposition: 'upsert'
+  }>[]
+}
+
+/** At most one adoption candidate is exposed to one analyst execution. */
+export interface SupervisedGrowthAnalystCandidate extends SupervisedGrowthAnalystEvidence {
+  /** Random durable capability; it deliberately reveals no evidence fields. */
+  reviewToken: string
+  /** True when this exact evidence identity already owns a durable proposal. */
+  proposalExists: boolean
+}
+
+export interface SupervisedGrowthAnalystReview {
+  contractVersion: SupervisedGrowthAnalystContractVersion
+  candidate?: Readonly<SupervisedGrowthAnalystCandidate>
+}
+
+/** The analyst supplies wording only; target, baseline and evidence stay frozen. */
+export interface SupervisedGrowthAnalystProposalInput {
+  reviewToken: string
+  guidance: string
+}
+
+/** Durable binding between one production execution and its frozen review. */
+export interface StoredSupervisedGrowthAnalystReview {
+  reviewToken: string
+  scopeKey: string
+  occurrenceId: string
+  evidence: Readonly<SupervisedGrowthAnalystEvidence>
+  proposalId?: string
+  createdAt: number
+  proposedAt?: number
+}
+
+export type EvolutionApplicationStatus = 'applied' | 'conflicted' | 'expired' | 'rejected'
+export type EvolutionApplicationOperation = 'adopt' | 'owner-undo' | 'retire'
+
+/** Domain-authoritative result of applying one terminal Policy decision. */
+export interface StoredEvolutionApplicationReceipt {
+  localProposalId: string
+  policyProposalId: string
+  applicationStatus: EvolutionApplicationStatus
+  operation: EvolutionApplicationOperation
+  terminalAt: number
+  receiptDigest: string
+  revision: number
+  ruleId?: string
+  resultingRuleVersion?: number
+  ruleStatus?: RuleStatus
+}
+
+/** Durable producer outbox state; Delivery acknowledgement is not settlement. */
+export interface StoredEvolutionApplicationOutboxEntry {
+  receipt: Readonly<StoredEvolutionApplicationReceipt>
+  state: 'pending' | 'published'
+  attemptCount: number
+  updatedAt: number
+  publishedAt?: number
+  lastError?: string
 }

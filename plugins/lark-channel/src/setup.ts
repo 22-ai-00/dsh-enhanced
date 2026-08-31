@@ -2096,6 +2096,8 @@ const managedPolicyRulePrefixes = [
   'lark-channel-credential-',
   'lark-owner-approval-',
   'lark-owner-ingress-',
+  'lark-owner-preference-signal-',
+  'lark-owner-preference-snapshot-',
   'lark-owner-reply-',
   'lark-owner-capability-',
   'lark-owner-tool-',

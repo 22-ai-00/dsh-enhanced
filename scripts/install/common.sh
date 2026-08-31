@@ -17,13 +17,19 @@ DSH_ENHANCED_LARK_PLUGIN_SLUGS=(
   'assistant-delivery'
   'credentials-keychain'
   'lark-channel'
+  # Ordinary authenticated owner conversations should learn bounded T1
+  # preferences without forcing a personal deployment to opt into the
+  # Health/Heartbeat/Recovery operations stack.
+  'preference-learning'
 )
 
 DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
   'assistant-evolution'
   'assistant-evaluation'
-  'preference-learning'
+  'assistant-growth-experiments'
   'assistant-heartbeat'
+  'assistant-health'
+  'assistant-recovery'
 )
 
 # This is retained only for users deliberately migrating an old all-in-one
@@ -70,7 +76,7 @@ Options:
 EOF
   if [[ "$source_mode" == 'npm' ]]; then
     cat <<'EOF'
-  --plugin-version <value>  Version/tag applied to every @dsh-enhanced package (default: latest)
+  --plugin-version <value>  Version/tag applied to every @dsh-enhanced package (default: installer release)
 EOF
   fi
   cat <<'EOF'
@@ -90,10 +96,11 @@ Agent tool modes:
 
 Scenarios:
   core       Local Web/direct core plus read-only plugin discovery.  No channel, daemon, or scheduler.
-  lark       Core plus durable Delivery, OS credential storage, and Feishu/Lark onboarding.
-  supervised Lark plus Evaluation, Preference Learning, Heartbeat, and risk-tiered behavioural evolution.
-             The growth loop reuses the configured Delivery model route; add TraeX explicitly with --with traex.
-             Requires a resident service. Add health explicitly with --with health when wanted.
+  lark       Core plus durable Delivery, bounded automatic preference learning,
+             OS credential storage, and Feishu/Lark onboarding.
+  supervised Lark plus Evaluation, deterministic Recovery, Health gates, and risk-tiered evolution.
+             Recovery is model-free; TraeX remains an optional foreground model route (`--with traex`).
+             Requires a resident service and installs content-free Health/bootstrap gates.
   full       Compatibility migration set containing every previous default top-level bundle.
 EOF
 }
@@ -313,7 +320,7 @@ dsh_enhanced_choose_scenario() {
   else
     printf '  2) 飞书/Lark 常驻助理（需要 owner onboarding）\n' >&2
   fi
-  printf '  3) 分级自治成长（飞书 + Heartbeat；低风险自动，高影响 owner 审批）\n' >&2
+  printf '  3) 分级自治成长（飞书 + Recovery；低风险自动，高影响 owner 审批）\n' >&2
   printf '请选择 [1]：' >&2
   local choice
   IFS= read -r choice

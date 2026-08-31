@@ -113,6 +113,7 @@ export interface PreferenceLimits {
   signalTtlMs: number
   hypothesisTtlMs: number
   minSignalsForActivation: number
+  minBehavioralSignalsForActivation: number
   minConfidenceBps: number
   maxContradictionBps: number
   maxActiveOverlays: number

@@ -17,6 +17,16 @@ import {
 } from '@dsh-enhanced/assistant-policy'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantEvolutionService } from '../src/service.ts'
+import {
+  installQualityFixtures,
+  projectTrustedOutcome,
+  type FakeAutomationQualityResolver,
+} from './quality-fixture.ts'
+import type { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
+import type {
+  DeliveryPresentationUpdate,
+  TrustedDeliveryPresentationRegistration,
+} from '@dsh-enhanced/assistant-delivery'
 
 const APPROVAL_SOURCE = 'dsh-enhanced-assistant-evolution'
 const OWNER = 'lark/bot-1/tenant-a/ou_owner'
@@ -59,7 +69,31 @@ interface Harness {
   evolutionPath: string
   policy: AssistantPolicyService
   service: AssistantEvolutionService
+  evaluation: AssistantEvaluationService
+  qualityResolver: FakeAutomationQualityResolver
   prepareAgentApproval: ReturnType<typeof vi.fn>
+  publishDeliveryPresentation: ReturnType<typeof vi.fn>
+}
+
+function installPresentationSink(
+  service: AssistantEvolutionService,
+  publish: (input: unknown) => unknown,
+): () => void {
+  const registrations = new WeakSet<object>()
+  let registration!: Readonly<TrustedDeliveryPresentationRegistration>
+  registration = Object.freeze({
+    protocol: 'assistant-delivery/trusted-presentation-producer/v1',
+    producer: 'assistant-evolution' as const,
+    generation: service.trustedDeliveryPresentationProducerGeneration(),
+    owner: Object.freeze({
+      ownsTrustedDeliveryPresentationRegistration: (
+        candidate: Readonly<TrustedDeliveryPresentationRegistration>,
+      ) => registrations.has(candidate),
+    }),
+    publish: (input: DeliveryPresentationUpdate) => publish(input) as never,
+  }) satisfies TrustedDeliveryPresentationRegistration
+  registrations.add(registration)
+  return service.registerTrustedDeliveryPresentationSink(registration)
 }
 
 function agent(options: { id?: string; cwd?: string; preset?: string } = {}): Agent {
@@ -118,9 +152,13 @@ async function openHarness(options: {
     if (options.route === undefined) throw new Error('approval route unavailable')
     return options.route
   })
+  const publishDeliveryPresentation = vi.fn((input: unknown) => input)
   if (options.route !== undefined) {
-    ctx.provide('assistantDelivery', { prepareAgentApproval } as never)
+    ctx.provide('assistantDelivery', {
+      prepareAgentApproval,
+    } as never)
   }
+  const quality = installQualityFixtures(ctx, join(root, 'evaluation.sqlite'))
   await ctx.plugin(AssistantEvolutionService, {
     databasePath: evolutionPath,
     evaluationWindow: 10,
@@ -129,6 +167,9 @@ async function openHarness(options: {
     reconcileIntervalMs: 0,
     reconcileLimit: options.reconcileLimit ?? 50,
   })
+  if (options.route !== undefined) {
+    installPresentationSink(ctx.assistantEvolution, publishDeliveryPresentation)
+  }
   return {
     ctx,
     root,
@@ -136,7 +177,9 @@ async function openHarness(options: {
     evolutionPath,
     policy: ctx.assistantPolicy,
     service: ctx.assistantEvolution,
+    ...quality,
     prepareAgentApproval,
+    publishDeliveryPresentation,
   }
 }
 
@@ -152,16 +195,16 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-function seedCandidate(service: AssistantEvolutionService, situation: string): void {
+async function seedCandidate(fixture: Harness, situation: string): Promise<void> {
   for (let index = 1; index <= 4; index += 1) {
-    service.recordAutomationOutcome({
+    await projectTrustedOutcome({
+      ...fixture,
+      key: `seed:${situation}:${index}`,
       situation,
       outcome: 'failed',
-      detail: `trusted failure ${index}`,
       workspace: WORKSPACE,
-      agentPreset: PRESET,
+      preset: PRESET,
       occurredAt: 1_000 + index,
-      idempotencyKey: `seed:${situation}:${index}`,
     })
   }
 }
@@ -170,14 +213,14 @@ function adoptMutation(situation: string) {
   return {
     op: 'adopt' as const,
     input: {
-      situation,
+      situation: situation.startsWith('automation:') ? situation : `automation:${situation}`,
       guidance: 'Draft the report a day early.',
     },
   }
 }
 
 async function seedActiveAutomationRule(fixture: Harness, target: Agent, situation: string) {
-  seedCandidate(fixture.service, situation)
+  await seedCandidate(fixture, situation)
   const proposed = fixture.service.propose(target, { mutation: adoptMutation(situation) })
   fixture.policy.decideProposal({
     proposalId: proposed.policyProposalId,
@@ -208,18 +251,17 @@ async function seedAttributedRetirementEvidence(
       automationId,
       sessionId: String(session.session.id),
     })
-    episodes.push(fixture.service.recordAutomationOutcome({
+    episodes.push(await projectTrustedOutcome({
+      ...fixture,
+      key: `${keyPrefix}:${index}`,
       situation: rule.situation,
       outcome,
-      detail: `${keyPrefix} ${outcome} ${index}`,
       workspace: WORKSPACE,
-      agentPreset: PRESET,
-      automationId,
+      preset: PRESET,
       sessionId: String(session.session.id),
       ruleId: exposure!.ruleId,
       guidanceVersion: exposure!.guidanceVersion,
       occurredAt: Date.now() + 10_000 + index,
-      idempotencyKey: `${keyPrefix}:${index}`,
     }))
   }
   return episodes
@@ -245,7 +287,7 @@ describe('assistant evolution approval bridge', () => {
     }
     const fixture = await openHarness({ route })
     const target = agent()
-    seedCandidate(fixture.service, 'static-gate-report')
+    await seedCandidate(fixture, 'static-gate-report')
 
     expect(fixture.policy.authorizeAgent(
       target,
@@ -264,7 +306,7 @@ describe('assistant evolution approval bridge', () => {
 
     expect(fixture.policy.getProposal(proposed.policyProposalId)?.resource).toEqual({
       kind: 'evolution',
-      id: 'situation:static-gate-report',
+      id: 'situation:automation:static-gate-report',
     })
   })
 
@@ -295,11 +337,11 @@ describe('assistant evolution approval bridge', () => {
     }
     const fixture = await openHarness({ route, tools: true })
     const target = agent()
-    seedCandidate(fixture.service, 'tool-weekly-report')
+    await seedCandidate(fixture, 'tool-weekly-report')
 
     const proposed = await fixture.ctx.tools.execute(call('evolution_propose', {
       operation: 'adopt',
-      situation: 'tool-weekly-report',
+      situation: 'automation:tool-weekly-report',
       guidance: 'Draft the report a day early.',
     }, target))
 
@@ -317,7 +359,7 @@ describe('assistant evolution approval bridge', () => {
     }
     const fixture = await openHarness({ route })
     const target = agent()
-    seedCandidate(fixture.service, 'weekly-report')
+    await seedCandidate(fixture, 'weekly-report')
     const candidate = fixture.service.candidates(target)[0]!
 
     const proposed = fixture.service.propose(target, {
@@ -347,8 +389,8 @@ describe('assistant evolution approval bridge', () => {
       principal: route.principal,
       requester: `agent:${PRESET}`,
       action: 'evolution.adopt',
-      resource: { kind: 'evolution', id: 'situation:weekly-report' },
-      summary: 'Adopt learned guidance for weekly-report',
+      resource: { kind: 'evolution', id: 'situation:automation:weekly-report' },
+      summary: 'Adopt learned guidance for automation:weekly-report',
       diff: expectedDiff,
       proposalVersion: 1,
       state: 'pending',
@@ -359,7 +401,7 @@ describe('assistant evolution approval bridge', () => {
       op: 'adopt',
       ruleId: expect.stringMatching(/^rule-/u),
       scopeKey: JSON.stringify([WORKSPACE, PRESET]),
-      situation: 'weekly-report',
+      situation: 'automation:weekly-report',
       guidance: 'Draft the report a day early.',
       baseline: { failures: 4, total: 4 },
       evidence: {
@@ -368,6 +410,68 @@ describe('assistant evolution approval bridge', () => {
         sampleEpisodeIds: candidate.evidence.map(entry => entry.episodeId),
       },
     })
+    database.close()
+  })
+
+  test('publishes actual application state from an independent durable outbox and retries after failure', async () => {
+    const route: ApprovalDispatchRoute = {
+      sourceId: APPROVAL_SOURCE,
+      bindingId: 'binding-owner-dm',
+      workspace: WORKSPACE,
+      principal: OWNER,
+    }
+    const fixture = await openHarness({ route })
+    const target = agent()
+    await seedCandidate(fixture, 'terminal-presentation')
+    const proposed = fixture.service.propose(target, {
+      mutation: adoptMutation('terminal-presentation'),
+    })
+    fixture.policy.decideProposal({
+      proposalId: proposed.policyProposalId,
+      principal: OWNER,
+      expectedVersion: 1,
+      decision: 'approved',
+      reason: 'owner approved the exact guidance',
+    })
+    fixture.publishDeliveryPresentation.mockImplementation(() => {
+      throw new Error('provider unavailable')
+    })
+
+    const [settled] = fixture.service.reconcileProposals()
+    expect(settled).toMatchObject({ status: 'approved', rule: { status: 'active', version: 1 } })
+    const database = new DatabaseSync(fixture.evolutionPath)
+    expect(database.prepare(`
+      SELECT state, attempt_count FROM evolution_application_outbox WHERE local_proposal_id = ?
+    `).get(proposed.proposalId)).toMatchObject({ state: 'pending', attempt_count: 2 })
+
+    fixture.publishDeliveryPresentation.mockImplementation((input: unknown) => input)
+    expect(fixture.service.reconcileProposals()).toEqual([])
+    expect(fixture.publishDeliveryPresentation).toHaveBeenLastCalledWith({
+      presentationKey: `approval-application:${proposed.policyProposalId}`,
+      originalOutboxIdempotencyKey: `approval-card:${proposed.policyProposalId}`,
+      revision: 2,
+      presentation: {
+        kind: 'approval-application',
+        policyProposalId: proposed.policyProposalId,
+        localProposalId: proposed.proposalId,
+        applicationStatus: 'applied',
+        operation: 'adopt',
+        terminalAt: expect.any(Number),
+        receiptDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        ruleId: settled!.rule!.id,
+        resultingRuleVersion: 1,
+        ruleStatus: 'active',
+      },
+    })
+    expect(database.prepare(`
+      SELECT state, attempt_count, published_at
+      FROM evolution_application_outbox WHERE local_proposal_id = ?
+    `).get(proposed.proposalId)).toMatchObject({
+      state: 'published', attempt_count: 3, published_at: expect.any(Number),
+    })
+    const calls = fixture.publishDeliveryPresentation.mock.calls.length
+    expect(fixture.service.reconcileApplicationPresentations()).toBe(0)
+    expect(fixture.publishDeliveryPresentation).toHaveBeenCalledTimes(calls)
     database.close()
   })
 
@@ -410,7 +514,11 @@ describe('assistant evolution approval bridge', () => {
     const frozenMutation = JSON.parse(pending.mutation_json) as Record<string, unknown>
     expect(frozenMutation).toEqual({
       op: 'retire',
+      scopeKey: rule.scopeKey,
       ruleId: rule.id,
+      situation: rule.situation,
+      guidance: rule.guidance,
+      generation: rule.generation,
       expectedVersion: rule.version,
       reason: request.mutation.reason,
       evaluation: candidate.stats,
@@ -419,6 +527,9 @@ describe('assistant evolution approval bridge', () => {
         sampleEpisodeIds: candidate.evidence.map(entry => entry.episodeId),
         digest: candidate.evidenceDigest,
         total: candidate.evidenceTotal,
+        window: 10,
+        scopeWatermark: candidate.scopeWatermark,
+        taskRevisions: candidate.taskRevisions,
       },
     })
     expect(pending.mutation_hash).toBe(createHash('sha256')
@@ -491,7 +602,7 @@ describe('assistant evolution approval bridge', () => {
   test('allows an explicit principal only without Delivery and fails closed without either identity source', async () => {
     const fixture = await openHarness()
     const target = agent()
-    seedCandidate(fixture.service, 'headless-report')
+    await seedCandidate(fixture, 'headless-report')
 
     const proposed = fixture.service.propose(target, {
       mutation: adoptMutation('headless-report'),
@@ -502,7 +613,7 @@ describe('assistant evolution approval bridge', () => {
     expect(fixture.policy.getProposal(proposed.policyProposalId)?.principal).toBe('owner:headless:primary')
     expect(fixture.policy.listPendingApprovalDispatches()).toEqual([])
 
-    seedCandidate(fixture.service, 'missing-route-report')
+    await seedCandidate(fixture, 'missing-route-report')
     expect(() => fixture.service.propose(target, {
       mutation: adoptMutation('missing-route-report'),
     })).toThrowError(/approval|principal|route/iu)
@@ -517,13 +628,182 @@ describe('assistant evolution approval bridge', () => {
       principal: OWNER,
     }
     const fixture = await openHarness({ route })
-    seedCandidate(fixture.service, 'forged-owner-report')
+    await seedCandidate(fixture, 'forged-owner-report')
 
     expect(() => fixture.service.propose(agent(), {
       mutation: adoptMutation('forged-owner-report'),
       principal: 'lark/bot-1/tenant-a/ou_attacker',
     })).toThrowError(/principal|owner|route/iu)
     expect(fixture.policy.listPendingApprovalDispatches()).toEqual([])
+  })
+
+  test('dispatches a distinct exact owner undo and settles it safely after restart', async () => {
+    const route: ApprovalDispatchRoute = {
+      sourceId: APPROVAL_SOURCE,
+      bindingId: 'binding-owner-dm',
+      workspace: WORKSPACE,
+      principal: OWNER,
+    }
+    const fixture = await openHarness({ route })
+    const target = agent()
+    const rule = await seedActiveAutomationRule(fixture, target, 'automation:owner-undo')
+
+    expect(() => fixture.service.requestOwnerUndo(target, {
+      ruleId: rule.id,
+      expectedVersion: rule.version,
+      operationId: 'owner-undo:forged-fields',
+      guidance: 'replace the approved guidance',
+      principal: 'lark/bot-1/tenant-a/ou_attacker',
+      reason: 'caller-controlled',
+    } as never)).toThrow(/accepts only/iu)
+    expect(fixture.policy.listPendingApprovalDispatches()).toEqual([])
+
+    fixture.prepareAgentApproval.mockReturnValueOnce({
+      ...route,
+      principal: 'lark/bot-1/tenant-a/ou_attacker',
+    })
+    expect(() => fixture.service.requestOwnerUndo(target, {
+      ruleId: rule.id,
+      expectedVersion: rule.version,
+      operationId: 'owner-undo:wrong-owner-route',
+    })).toThrow(/principal|owner|route/iu)
+    expect(fixture.policy.listPendingApprovalDispatches()).toEqual([])
+
+    const proposed = fixture.service.requestOwnerUndo(target, {
+      ruleId: rule.id,
+      expectedVersion: rule.version,
+      operationId: 'owner-undo:message-42',
+    })
+
+    expect(proposed).toMatchObject({ status: 'pending', replayed: false })
+    expect(fixture.service.listRules(target, 'active')).toContainEqual(rule)
+    const [dispatch] = fixture.policy.listPendingApprovalDispatches()
+      .filter(entry => entry.proposalId === proposed.policyProposalId)
+    expect(dispatch).toMatchObject({
+      sourceId: APPROVAL_SOURCE,
+      bindingId: route.bindingId,
+      workspace: WORKSPACE,
+      principal: OWNER,
+      requester: `agent:${PRESET}:owner-undo`,
+      action: 'evolution.owner-undo',
+      resource: { kind: 'evolution', id: `rule:${rule.id}` },
+      summary: `Undo learned guidance rule ${rule.id}`,
+      state: 'pending',
+    })
+    expect(JSON.parse(dispatch!.diff)).toEqual({
+      op: 'owner-undo',
+      scopeKey: JSON.stringify([WORKSPACE, PRESET]),
+      ruleId: rule.id,
+      situation: rule.situation,
+      guidance: rule.guidance,
+      generation: rule.generation,
+      expectedVersion: rule.version,
+      reason: 'Owner-approved immediate guidance undo.',
+    })
+    expect(() => fixture.policy.decideProposal({
+      proposalId: proposed.policyProposalId,
+      principal: 'lark/bot-1/tenant-a/ou_attacker',
+      expectedVersion: 1,
+      decision: 'approved',
+      reason: 'not the owner',
+    })).toThrow(/principal|owner|review/iu)
+    fixture.policy.decideProposal({
+      proposalId: proposed.policyProposalId,
+      principal: OWNER,
+      expectedVersion: 1,
+      decision: 'approved',
+      reason: 'remove this guidance now',
+    })
+    await closeHarness(fixture)
+
+    const restarted = await openHarness({ root: fixture.root, route })
+    expect(restarted.service.reconcileProposals()).toMatchObject([{
+      proposalId: proposed.proposalId,
+      status: 'approved',
+      rule: {
+        id: rule.id,
+        status: 'retired',
+        version: rule.version + 1,
+        retiredReason: 'Owner-approved immediate guidance undo.',
+      },
+    }])
+    const replay = restarted.service.requestOwnerUndo(agent(), {
+      ruleId: rule.id,
+      expectedVersion: rule.version,
+      operationId: 'owner-undo:message-42',
+    })
+    expect(replay).toMatchObject({
+      proposalId: proposed.proposalId,
+      status: 'approved',
+      replayed: true,
+      rule: { id: rule.id, status: 'retired', version: rule.version + 1 },
+    })
+    const database = new DatabaseSync(restarted.evolutionPath)
+    expect(database.prepare(`
+      SELECT operation, rule_id, result_version FROM evolution_audit
+      WHERE operation = 'owner-undo'
+    `).all()).toEqual([{
+      operation: 'owner-undo', rule_id: rule.id, result_version: rule.version + 1,
+    }])
+    database.close()
+  })
+
+  test('owner undo rejects cross-scope and stale targets and conflicts a superseded card', async () => {
+    const route: ApprovalDispatchRoute = {
+      sourceId: APPROVAL_SOURCE,
+      bindingId: 'binding-owner-dm',
+      workspace: WORKSPACE,
+      principal: OWNER,
+    }
+    const fixture = await openHarness({ route })
+    const target = agent()
+    const rule = await seedActiveAutomationRule(fixture, target, 'automation:owner-undo-cas')
+    expect(() => fixture.service.requestOwnerUndo(target, {
+      ruleId: rule.id,
+      expectedVersion: rule.version + 1,
+      operationId: 'owner-undo:stale',
+    })).toThrow(/version|stale/iu)
+    expect(() => fixture.service.requestOwnerUndo(agent({ cwd: '/work/beta' }), {
+      ruleId: rule.id,
+      expectedVersion: rule.version,
+      operationId: 'owner-undo:cross-scope',
+    })).toThrow(/denied|forbidden|scope|found/iu)
+
+    const first = fixture.service.requestOwnerUndo(target, {
+      ruleId: rule.id,
+      expectedVersion: rule.version,
+      operationId: 'owner-undo:first-card',
+    })
+    const superseded = fixture.service.requestOwnerUndo(target, {
+      ruleId: rule.id,
+      expectedVersion: rule.version,
+      operationId: 'owner-undo:old-card',
+    })
+    fixture.policy.decideProposal({
+      proposalId: first.policyProposalId,
+      principal: OWNER,
+      expectedVersion: 1,
+      decision: 'approved',
+      reason: 'first exact card wins',
+    })
+    expect(fixture.service.reconcileProposals()).toMatchObject([{
+      proposalId: first.proposalId,
+      status: 'approved',
+      rule: { id: rule.id, status: 'retired' },
+    }])
+    fixture.policy.decideProposal({
+      proposalId: superseded.policyProposalId,
+      principal: OWNER,
+      expectedVersion: 1,
+      decision: 'approved',
+      reason: 'late stale card',
+    })
+    expect(fixture.service.reconcileProposals()).toMatchObject([{
+      proposalId: superseded.proposalId,
+      status: 'conflicted',
+      rule: undefined,
+    }])
+    expect(fixture.service.listRules(target, 'retired')).toHaveLength(1)
   })
 })
 
@@ -693,7 +973,7 @@ describe('assistant evolution settlement validation', () => {
     }
     const fixture = await openHarness({ route })
     const target = agent()
-    seedCandidate(fixture.service, 'crash-gap')
+    await seedCandidate(fixture, 'crash-gap')
     const originalRecovery = fixture.policy.recoverOrCreateProposal.bind(fixture.policy)
     vi.spyOn(fixture.policy, 'recoverOrCreateProposal').mockImplementationOnce((input) => {
       originalRecovery(input)
@@ -723,7 +1003,7 @@ describe('assistant evolution settlement validation', () => {
     expect(recover).toHaveBeenCalledOnce()
     expect(attached).toMatchObject([{
       status: 'approved',
-      rule: { situation: 'crash-gap' },
+      rule: { situation: 'automation:crash-gap' },
     }])
   })
 
@@ -732,7 +1012,7 @@ describe('assistant evolution settlement validation', () => {
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
     const fixture = await openHarness({ defaultProposalTtlMs: 1 })
     const target = agent()
-    seedCandidate(fixture.service, 'expired-gap')
+    await seedCandidate(fixture, 'expired-gap')
     vi.spyOn(fixture.policy, 'recoverOrCreateProposal').mockImplementationOnce(() => {
       throw new Error('Policy was unavailable before commit')
     })
@@ -767,7 +1047,7 @@ describe('assistant evolution settlement validation', () => {
       principal: OWNER,
     }
     const first = await openHarness({ route, defaultProposalTtlMs: 1 })
-    seedCandidate(first.service, 'atomic-expiry-race')
+    await seedCandidate(first, 'atomic-expiry-race')
     const second = await openHarness({ root: first.root, route, defaultProposalTtlMs: 1 })
     const originalPropose = first.policy.propose.bind(first.policy)
     const originalRecovery = first.policy.recoverOrCreateProposal.bind(first.policy)
@@ -807,7 +1087,7 @@ describe('assistant evolution settlement validation', () => {
     const proposals = []
     for (let index = 1; index <= 5; index += 1) {
       const situation = `fair-${index}`
-      seedCandidate(fixture.service, situation)
+      await seedCandidate(fixture, situation)
       proposals.push(fixture.service.propose(target, {
         mutation: adoptMutation(situation),
         principal: OWNER,
@@ -828,14 +1108,14 @@ describe('assistant evolution settlement validation', () => {
     expect(fixture.service.reconcileProposals()).toMatchObject([{
       proposalId: last.proposalId,
       status: 'approved',
-      rule: { situation: 'fair-5' },
+      rule: { situation: 'automation:fair-5' },
     }])
   })
 
   test('settles an already-terminal exact Policy snapshot on the direct proposal replay path', async () => {
     const fixture = await openHarness()
     const target = agent()
-    seedCandidate(fixture.service, 'direct-replay')
+    await seedCandidate(fixture, 'direct-replay')
     const request = {
       mutation: adoptMutation('direct-replay'),
       principal: OWNER,
@@ -857,7 +1137,7 @@ describe('assistant evolution settlement validation', () => {
       status: 'approved',
       version: 2,
       replayed: true,
-      rule: expect.objectContaining({ situation: 'direct-replay', status: 'active' }),
+      rule: expect.objectContaining({ situation: 'automation:direct-replay', status: 'active' }),
     })
     expect(fixture.service.listRules(target, 'active')).toHaveLength(1)
     expect(fixture.service.reconcileProposals()).toEqual([])
@@ -866,7 +1146,7 @@ describe('assistant evolution settlement validation', () => {
   test('uses the same settlement validator on direct replay and durably conflicts a forged snapshot', async () => {
     const fixture = await openHarness()
     const target = agent()
-    seedCandidate(fixture.service, 'direct-tamper')
+    await seedCandidate(fixture, 'direct-tamper')
     const request = {
       mutation: adoptMutation('direct-tamper'),
       principal: OWNER,
@@ -926,7 +1206,7 @@ describe('assistant evolution settlement validation', () => {
       const fixture = await openHarness()
       const target = agent()
       const situation = `tamper-${field.replaceAll(' ', '-')}`
-      seedCandidate(fixture.service, situation)
+      await seedCandidate(fixture, situation)
       const request = { mutation: adoptMutation(situation), principal: OWNER }
       const proposed = fixture.service.propose(target, request)
       fixture.policy.decideProposal({

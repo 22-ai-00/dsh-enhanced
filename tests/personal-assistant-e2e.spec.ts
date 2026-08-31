@@ -6,7 +6,6 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import {
-  CallId,
   LlmAdapter,
   type GenerateOptions,
   type StreamChunk,
@@ -19,9 +18,15 @@ import {
   type SessionId,
 } from '@deepseek-ai/dsh-session'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
-import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import {
+  AssistantDeliveryService,
+  pairPrincipalLocally,
+  type DeliveryPreferenceEvent,
+} from '@dsh-enhanced/assistant-delivery'
+import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import { AssistantEvolutionService } from '@dsh-enhanced/assistant-evolution'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { PreferenceLearningService } from '@dsh-enhanced/preference-learning'
 import {
   CodingSubscriptionAdapter,
   Config as CodingSubscriptionConfig,
@@ -43,10 +48,11 @@ const ACCOUNT = 'bot-1'
 const TENANT = 'tenant-a'
 const OWNER_USER = 'ou_owner'
 const OWNER = `lark/${ACCOUNT}/${TENANT}/${OWNER_USER}`
+const REPLACEMENT_OWNER_USER = 'ou_replacement_owner'
+const REPLACEMENT_OWNER = `lark/${ACCOUNT}/${TENANT}/${REPLACEMENT_OWNER_USER}`
 const PRESET = 'primary'
 const GROWTH_AUTOMATION = 'growth-loop'
 const GROWTH_SITUATION = `automation:${GROWTH_AUTOMATION}`
-const GUIDANCE = 'Verify durable evidence before reporting that the growth loop succeeded.'
 const LARK_SECRET = 'personal-assistant-e2e-signing-secret'
 
 const roots: string[] = []
@@ -103,71 +109,13 @@ class FakeLarkTransport implements LarkTransport {
 
 class GrowthAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
-  failAutomationRuns = false
-  retirementTarget: { ruleId: string; expectedVersion: number } | undefined
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
     const messages = JSON.stringify(options.messages)
-    if (this.failAutomationRuns && messages.includes('automation-growth-run')) {
-      throw new Error('deterministic post-adoption automation failure')
-    }
-    if (messages.includes('request-evolution-retirement') && !messages.includes('evolution_review')) {
-      const id = CallId('e2e-evolution-review')
-      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-      yield { type: 'tool-call-delta', index: 0, id, name: 'evolution_review', argumentsDelta: '{}' }
-      yield {
-        type: 'block-end',
-        index: 0,
-        block: { type: 'tool-call', id, name: 'evolution_review', arguments: '{}' },
-      }
-      yield { type: 'usage', usage: completeUsage(12, 2) }
-      yield { type: 'finish', reason: { kind: 'tool-calls' } }
-      return
-    }
-    if (messages.includes('request-evolution-retirement') && !messages.includes('evolution_propose')) {
-      if (this.retirementTarget === undefined) throw new Error('retirement target is not configured')
-      const id = CallId('e2e-evolution-retirement')
-      const args = JSON.stringify({
-        operation: 'retire',
-        rule_id: this.retirementTarget.ruleId,
-        expected_version: this.retirementTarget.expectedVersion,
-        reason: 'Post-adoption automated runs show the guidance is not helping.',
-      })
-      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-      yield { type: 'tool-call-delta', index: 0, id, name: 'evolution_propose', argumentsDelta: args }
-      yield {
-        type: 'block-end',
-        index: 0,
-        block: { type: 'tool-call', id, name: 'evolution_propose', arguments: args },
-      }
-      yield { type: 'usage', usage: completeUsage(12, 3) }
-      yield { type: 'finish', reason: { kind: 'tool-calls' } }
-      return
-    }
-    if (messages.includes('request-evolution-proposal') && !messages.includes('tool-result')) {
-      const id = CallId('e2e-evolution-proposal')
-      const args = JSON.stringify({
-        operation: 'adopt',
-        situation: GROWTH_SITUATION,
-        guidance: GUIDANCE,
-      })
-      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-      yield { type: 'tool-call-delta', index: 0, id, name: 'evolution_propose', argumentsDelta: args }
-      yield {
-        type: 'block-end',
-        index: 0,
-        block: { type: 'tool-call', id, name: 'evolution_propose', arguments: args },
-      }
-      yield { type: 'usage', usage: completeUsage(12, 3) }
-      yield { type: 'finish', reason: { kind: 'tool-calls' } }
-      return
-    }
     const text = messages.includes('automation-growth-run')
       ? 'automation growth run succeeded'
-      : messages.includes('fresh-guidance-check')
-        ? 'fresh session received approved guidance'
-        : 'evolution proposal submitted for owner approval'
+      : 'personal assistant reply'
     yield { type: 'block-start', index: 0, blockType: 'text' }
     yield { type: 'text-delta', index: 0, text }
     yield { type: 'block-end', index: 0, block: { type: 'text', text } }
@@ -186,7 +134,7 @@ function completeUsage(inputTokens: number, outputTokens: number) {
   }
 }
 
-function larkMessage(messageId: string, content: string): LarkMessage {
+function larkMessage(messageId: string, content: string, replyToMessageId?: string): LarkMessage {
   return {
     messageId,
     chatId: 'oc_owner',
@@ -198,6 +146,7 @@ function larkMessage(messageId: string, content: string): LarkMessage {
     mentionAll: false,
     mentionedBot: false,
     createTime: Date.now(),
+    ...(replyToMessageId === undefined ? {} : { replyToMessageId }),
   }
 }
 
@@ -280,9 +229,12 @@ async function runGrowthAutomation(ctx: Context, eventId: string): Promise<void>
     eventId,
     occurredAt: Date.now(),
   })
-  await ctx.assistantAutomations.tick()
-  await ctx.assistantAutomations.whenIdle()
-  await ctx.assistantAutomations.tick()
+  // One pass may first drain recovered outboxes and only materialize the new
+  // task. Bound the drain rather than assuming a fresh-process pass ordering.
+  for (let pass = 0; pass < 4; pass += 1) {
+    await ctx.assistantAutomations.tick()
+    await ctx.assistantAutomations.whenIdle()
+  }
 }
 
 function policyRules(workspace: string) {
@@ -301,8 +253,20 @@ function policyRules(workspace: string) {
       context: { initiators: ['external' as const] },
     },
     {
+      id: 'trusted-lark-owner-feedback', effect: 'allow' as const,
+      subject: { kind: 'external' as const, id: OWNER, workspace },
+      actions: ['signal'], resource: { kind: 'preference' as const, id: `${PRESET}/*` },
+      context: { initiators: ['external' as const] },
+    },
+    {
+      id: 'preference-overlay', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: PRESET, workspace, principal: OWNER },
+      actions: ['snapshot'], resource: { kind: 'preference' as const, id: 'active' },
+      context: { initiators: ['external' as const] },
+    },
+    {
       id: 'delivery-agent-reply', effect: 'allow' as const,
-      subject: { kind: 'agent' as const, id: PRESET, workspace },
+      subject: { kind: 'agent' as const, id: PRESET, workspace, principal: OWNER },
       actions: ['reply'], resource: { kind: 'message' as const, id: '*' },
       context: { initiators: ['external' as const] },
     },
@@ -360,21 +324,42 @@ function policyRules(workspace: string) {
       actions: ['execute'], resource: { kind: 'automation' as const, id: GROWTH_AUTOMATION },
       context: { initiators: ['background' as const] },
     },
+    {
+      id: 'automation-delivery', effect: 'allow' as const,
+      subject: { kind: 'background' as const, id: GROWTH_AUTOMATION, workspace, principal: OWNER },
+      actions: ['send'], resource: { kind: 'message' as const, id: '*' },
+      context: { initiators: ['background' as const] },
+    },
   ]
 }
 
-function seedGrowthCandidate(service: AssistantEvolutionService, workspace: string): void {
-  for (let index = 1; index <= 4; index += 1) {
-    service.recordAutomationOutcome({
-      situation: GROWTH_SITUATION,
-      outcome: 'failed',
-      detail: `trusted pre-adoption failure ${index}`,
+function reconcileGrowthAutomation(ctx: Context, workspace: string, deliveryBindingId?: string): void {
+  ctx.assistantAutomations.reconcileSystem({
+    owner: 'e2e-system',
+    automationId: GROWTH_AUTOMATION,
+    idempotencyKey: 'e2e-growth-automation-v1',
+    definition: {
+      name: 'Growth evidence loop',
+      prompt: 'automation-growth-run',
+      schedule: { kind: 'at', at: '2099-01-01T00:00:00.000Z' },
       workspace,
       agentPreset: PRESET,
-      occurredAt: 1_000 + index,
-      idempotencyKey: `e2e-growth-seed:${index}`,
-    })
-  }
+      provider: 'growth-model',
+      model: 'default',
+      allowedTools: [],
+      timeoutMs: 60_000,
+      maxOutputTokens: 256,
+      maxToolCalls: 0,
+      misfire: { kind: 'latest' },
+      overlap: 'skip',
+      retrySafety: 'never',
+      maxRetries: 0,
+      principal: OWNER,
+      ...(deliveryBindingId === undefined ? {} : { deliveryBindingId }),
+      budgetId: 'growth-budget',
+      budgetAmount: 1,
+    },
+  })
 }
 
 async function openGrowthRuntime(input: {
@@ -405,6 +390,9 @@ async function openGrowthRuntime(input: {
     defaultAgentPreset: PRESET,
     agentProvider: 'growth-model',
     agentModel: 'default',
+  })
+  await ctx.plugin(AssistantEvaluationService, {
+    databasePath: join(input.root, 'evaluation.sqlite'),
   })
   await ctx.plugin(AssistantEvolutionService, {
     databasePath: input.evolutionPath,
@@ -438,9 +426,1044 @@ afterEach(async () => {
   larkMessageSequence = 0
 })
 
-describe('supervised personal-assistant growth composition', () => {
-  test('adopts guidance, records attributed automation evidence, and retires it through a second owner approval', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-growth-e2e-'))
+describe('personal-assistant growth composition', () => {
+  // This path deliberately drives seventeen durable owner turns.  The default
+  // five-second unit-test budget is too small when the root suite is also
+  // compiling and exercising the SQLite-heavy plugin packages in parallel.
+  test('learns a language overlay from ordinary owner use and rolls back the exact exposed version on correction', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-preference-e2e-'))
+    roots.push(root)
+    const workspace = join(root, 'workspace')
+    const deliveryPath = join(root, 'delivery.sqlite')
+    const preferencePath = join(root, 'preferences.sqlite')
+    const ctx = new Context()
+    contexts.add(ctx)
+    const saved = new Map<string, SavedSession>()
+    const llm = new GrowthAdapter()
+
+    await installAgentRuntime(ctx, saved)
+    await ctx.plugin(AssistantPolicyService, {
+      databasePath: join(root, 'policy.sqlite'),
+      proposalMaintenanceIntervalMs: 0,
+      rules: policyRules(workspace),
+    })
+    await ctx.plugin(AssistantDeliveryService, {
+      databasePath: deliveryPath,
+      spoolPath: join(root, 'spool'),
+      schedulerEnabled: false,
+      defaultWorkspace: workspace,
+      defaultAgentPreset: PRESET,
+      agentProvider: 'growth-model',
+      agentModel: 'default',
+    })
+    await ctx.plugin(PreferenceLearningService, {
+      databasePath: preferencePath,
+      maintenanceIntervalMs: 3_600_000,
+    })
+    ctx.llm.registerAdapter(['growth-model'], llm)
+    await ctx.plugin(AgentLoop, { agents: [] })
+    const transport = new FakeLarkTransport()
+    await installLark(ctx, transport)
+    await pairOwner(ctx)
+
+    const completeTurn = async (
+      eventId: string,
+      content: string,
+      replyToMessageId?: string,
+    ): Promise<SentLarkMessage> => {
+      const before = transport.sent.length
+      await transport.message(larkMessage(eventId, content, replyToMessageId))
+      // Bound the public Delivery drain: the first pass completes the Agent
+      // turn, while later passes may send its reply and project its durable,
+      // content-free preference receipt.
+      for (let pass = 0; pass < 3; pass += 1) await runInboundPass(ctx)
+      const reply = transport.sent.slice(before).find(message => 'markdown' in message.input)
+      if (reply === undefined) throw new Error(`owner turn did not produce a durable reply: ${eventId}`)
+      return reply
+    }
+
+    const chineseTurns = [
+      '请帮我整理紫竹项目今天需要完成的工作',
+      '请帮我总结紫竹项目本周的重要安排',
+      '请帮我检查紫竹项目当前还有哪些风险',
+      '请帮我梳理紫竹项目下一步行动计划',
+      '请帮我列出紫竹项目今天的优先事项',
+      '请帮我回顾紫竹项目尚未完成的任务',
+    ]
+    for (const [index, content] of chineseTurns.entries()) {
+      await completeTurn(`om-preference-zh-${index + 1}`, content)
+    }
+
+    expect(ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: 6,
+      active: 1,
+      rolledBack: 0,
+    })
+    const preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    const signalColumns = preferenceDatabase.prepare('PRAGMA table_info(preference_signals)')
+      .all() as Array<{ name: string }>
+    expect(signalColumns.map(column => column.name)).not.toEqual(expect.arrayContaining([
+      'content', 'message', 'prompt', 'reply', 'text',
+    ]))
+    const initialSignals = preferenceDatabase.prepare(`
+      SELECT preference_key, candidate_value, interpretation_trust, source
+      FROM preference_signals ORDER BY occurred_at, id
+    `).all()
+    expect(initialSignals).toEqual(chineseTurns.map(() => ({
+      preference_key: 'response.language',
+      candidate_value: 'zh-CN',
+      interpretation_trust: 'behavioral-inference',
+      source: 'delivery-observation',
+    })))
+    expect(JSON.stringify(preferenceDatabase.prepare('SELECT * FROM preference_signals').all()))
+      .not.toContain('紫竹项目')
+    const activatedChinese = preferenceDatabase.prepare(`
+      SELECT id, version, effect_state FROM preference_hypotheses
+      WHERE preference_key = 'response.language' AND candidate_value = 'zh-CN'
+    `).get() as { id: string; version: number; effect_state: string }
+    expect(activatedChinese.effect_state).toBe('active')
+
+    const deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT COUNT(*) AS count FROM inbox_messages
+      WHERE event_id LIKE 'om-preference-zh-%' AND status = 'processed'
+    `).get()).toEqual({ count: 6 })
+    expect(deliveryDatabase.prepare(`
+      SELECT COUNT(*) AS count FROM outbox_messages
+      WHERE idempotency_key LIKE 'inbound:%:reply'
+        AND status IN ('accepted', 'delivered', 'read')
+    `).get()).toEqual({ count: 6 })
+    expect(deliveryDatabase.prepare(`
+      SELECT COUNT(*) AS count FROM delivery_preference_projection_outbox
+    `).get()).toEqual({ count: 0 })
+
+    const initialBinding = deliveryDatabase.prepare(`
+      SELECT id, principal_json, generation FROM conversation_bindings
+      WHERE status = 'active'
+    `).get() as { id: string; principal_json: string; generation: number }
+    await transport.message(larkMessage('om-preference-new-binding', '/new'))
+    for (let pass = 0; pass < 3; pass += 1) await runInboundPass(ctx)
+    const rotatedBinding = deliveryDatabase.prepare(`
+      SELECT id, principal_json, generation FROM conversation_bindings
+      WHERE status = 'active'
+    `).get() as { id: string; principal_json: string; generation: number }
+    expect(rotatedBinding).toMatchObject({
+      principal_json: initialBinding.principal_json,
+      generation: initialBinding.generation + 1,
+    })
+    expect(rotatedBinding.id).not.toBe(initialBinding.id)
+
+    const englishReply = await completeTurn(
+      'om-preference-en-once',
+      'Please summarize all work that I need to finish today',
+    )
+    const firstAdaptedPrompt = JSON.stringify(llm.requests.at(-1)?.messages)
+    expect(firstAdaptedPrompt).toContain('<tentative_preference_overlay>')
+    expect(firstAdaptedPrompt).toContain('Respond in Simplified Chinese')
+    expect(ctx.assistantPreferenceLearning.health()).toMatchObject({ active: 1, rolledBack: 0 })
+    const stillActiveChinese = preferenceDatabase.prepare(`
+      SELECT id, version, effect_state FROM preference_hypotheses
+      WHERE preference_key = 'response.language' AND candidate_value = 'zh-CN'
+    `).get() as { id: string; version: number; effect_state: string }
+    expect(stillActiveChinese).toMatchObject({ id: activatedChinese.id, effect_state: 'active' })
+
+    const signalsBeforeOneShotRequests = ctx.assistantPreferenceLearning.health().signals
+    const oneShotRequests = [
+      '请用英文回答。',
+      '这次请用英文回答',
+      'Please answer in Chinese.',
+      'Please respond in English.',
+      'Please be concise.',
+      'Please use more bullet points.',
+      'this time, answer in English',
+      'for this response, please respond in English',
+    ]
+    for (const [index, content] of oneShotRequests.entries()) {
+      await completeTurn(`om-preference-one-shot-${index + 1}`, content)
+    }
+    expect(ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: signalsBeforeOneShotRequests,
+      active: 1,
+      rolledBack: 0,
+    })
+
+    // Preference keeps only durable identifiers for the exact completed turn;
+    // message content remains in Delivery and never crosses this boundary.
+    const exposureRows = preferenceDatabase.prepare(`
+      SELECT hypothesis_id, hypothesis_version, source_inbox_id, reply_outbox_id, state
+      , source_event_id FROM preference_exposures
+    `).all() as Array<{
+      hypothesis_id: string
+      hypothesis_version: number
+      source_inbox_id: string
+      reply_outbox_id: string
+      state: string
+      source_event_id: string
+    }>
+    const exactExposure = exposureRows.find(row => row.source_event_id === 'om-preference-en-once')
+    if (exactExposure === undefined) {
+      throw new Error(`active overlay exposure was not bound: ${JSON.stringify(exposureRows)}`)
+    }
+    expect(exactExposure).toMatchObject({
+      hypothesis_id: activatedChinese.id,
+      state: 'bound',
+    })
+
+    await completeTurn('om-preference-explicit-en', '以后用英文回答', englishReply.messageId)
+    expect(ctx.assistantPreferenceLearning.health()).toMatchObject({ active: 1, rolledBack: 1 })
+    const rolledBackChinese = preferenceDatabase.prepare(`
+      SELECT id, effect_state FROM preference_hypotheses
+      WHERE preference_key = 'response.language' AND candidate_value = 'zh-CN'
+    `).get()
+    expect(rolledBackChinese).toEqual({ id: activatedChinese.id, effect_state: 'rolled-back' })
+    const correction = preferenceDatabase.prepare(`
+      SELECT c.hypothesis_id, c.hypothesis_version, c.source_inbox_id, c.reply_outbox_id
+      FROM preference_exposure_corrections c
+      WHERE c.hypothesis_id = ? AND c.hypothesis_version = ?
+    `).get(exactExposure!.hypothesis_id, exactExposure!.hypothesis_version)
+    expect(correction).toEqual({
+      hypothesis_id: exactExposure!.hypothesis_id,
+      hypothesis_version: exactExposure!.hypothesis_version,
+      source_inbox_id: exactExposure!.source_inbox_id,
+      reply_outbox_id: exactExposure!.reply_outbox_id,
+    })
+
+    await completeTurn('om-preference-final-check', 'Please give me the final status of this work')
+    const correctedRuntimeSnapshots = (llm.requests.at(-1)?.messages ?? [])
+      .filter(message => JSON.stringify(message).includes('"form":"snapshot"'))
+    const correctedPrompt = JSON.stringify(correctedRuntimeSnapshots.at(-1))
+    expect(correctedPrompt).toContain('<tentative_preference_overlay>')
+    expect(correctedPrompt).toContain('Respond in English')
+    expect(correctedPrompt).not.toContain('Respond in Simplified Chinese')
+    deliveryDatabase.close()
+    preferenceDatabase.close()
+  }, 20_000)
+
+  test('controls preference learning through Lark across restart without entering the model', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-learning-control-e2e-'))
+    roots.push(root)
+    const workspace = join(root, 'workspace')
+    const policyPath = join(root, 'policy.sqlite')
+    const deliveryPath = join(root, 'delivery.sqlite')
+    const preferencePath = join(root, 'preferences.sqlite')
+    const saved = new Map<string, SavedSession>()
+    const llm = new GrowthAdapter()
+
+    const openRuntime = async () => {
+      const ctx = new Context()
+      contexts.add(ctx)
+      await installAgentRuntime(ctx, saved)
+      await ctx.plugin(AssistantPolicyService, {
+        databasePath: policyPath,
+        proposalMaintenanceIntervalMs: 0,
+        rules: policyRules(workspace),
+      })
+      await ctx.plugin(AssistantDeliveryService, {
+        databasePath: deliveryPath,
+        spoolPath: join(root, 'spool'),
+        schedulerEnabled: false,
+        retryBaseMs: 60_000,
+        retryMaxMs: 60_000,
+        defaultWorkspace: workspace,
+        defaultAgentPreset: PRESET,
+        agentProvider: 'growth-model',
+        agentModel: 'default',
+      })
+      await ctx.plugin(PreferenceLearningService, {
+        databasePath: preferencePath,
+        maintenanceIntervalMs: 3_600_000,
+      })
+      ctx.llm.registerAdapter(['growth-model'], llm)
+      await ctx.plugin(AgentLoop, { agents: [] })
+      const transport = new FakeLarkTransport()
+      await installLark(ctx, transport)
+      return { ctx, transport }
+    }
+
+    const drain = async (ctx: Context) => {
+      for (let pass = 0; pass < 3; pass += 1) await runInboundPass(ctx)
+    }
+    const send = async (
+      runtime: Awaited<ReturnType<typeof openRuntime>>,
+      eventId: string,
+      content: string,
+    ) => {
+      await runtime.transport.message(larkMessage(eventId, content))
+      await drain(runtime.ctx)
+    }
+
+    let runtime = await openRuntime()
+    await pairOwner(runtime.ctx)
+    for (let index = 1; index <= 6; index += 1) {
+      await send(
+        runtime,
+        `om-learning-control-seed-${index}`,
+        `请帮我整理云杉项目第 ${index} 批工作的今日安排`,
+      )
+    }
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 6, active: 1 })
+    const callsAfterLearning = llm.requests.length
+
+    await send(runtime, 'om-learning-control-explain', '/learning explain')
+    expect(llm.requests).toHaveLength(callsAfterLearning)
+    const explainReply = JSON.stringify(runtime.transport.sent.at(-1)?.input)
+    expect(explainReply).toContain('key=response.language')
+    expect(explainReply).toContain('value=zh-CN')
+    expect(explainReply).toContain('state=active')
+    expect(explainReply).toMatch(/version=\d+/u)
+    expect(explainReply).toContain('supportingSignals=6')
+    expect(explainReply).toContain('contradictingSignals=0')
+    expect(explainReply).toMatch(/evidenceMass=\d+/u)
+    expect(explainReply).not.toContain('云杉项目')
+    let preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    const explainReceiptBeforeRestart = preferenceDatabase.prepare(`
+      SELECT payload_hash, action, admission_cursor_epoch, admission_cursor_sequence,
+        result_admission_high_water, result_signals, result_hypotheses,
+        result_active_overlays, result_stored_active_overlays,
+        result_explanation_json
+      FROM preference_owner_control_receipts WHERE action = 'explain'
+    `).get()
+    expect(explainReceiptBeforeRestart).toMatchObject({
+      action: 'explain', result_signals: 6, result_hypotheses: 1,
+      result_active_overlays: 1, result_stored_active_overlays: 1,
+    })
+    const explainOrdering = explainReceiptBeforeRestart as {
+      admission_cursor_sequence: number
+      result_admission_high_water: number
+    }
+    expect(explainOrdering.result_admission_high_water)
+      .toBeLessThan(explainOrdering.admission_cursor_sequence)
+    expect(JSON.parse((explainReceiptBeforeRestart as { result_explanation_json: string })
+      .result_explanation_json)).toEqual([expect.objectContaining({
+      key: 'response.language', value: 'zh-CN', state: 'active',
+      supportingSignals: 6, contradictingSignals: 0,
+    })])
+    preferenceDatabase.close()
+
+    await closeContext(runtime.ctx)
+    runtime = await openRuntime()
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 6, active: 1 })
+    preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    expect(preferenceDatabase.prepare(`
+      SELECT payload_hash, action, admission_cursor_epoch, admission_cursor_sequence,
+        result_admission_high_water, result_signals, result_hypotheses,
+        result_active_overlays, result_stored_active_overlays,
+        result_explanation_json
+      FROM preference_owner_control_receipts WHERE action = 'explain'
+    `).get()).toEqual(explainReceiptBeforeRestart)
+    preferenceDatabase.close()
+
+    await send(runtime, 'om-learning-control-status', '/learning status')
+    expect(llm.requests).toHaveLength(callsAfterLearning)
+    expect(JSON.stringify(runtime.transport.sent.at(-1)?.input)).toContain('组件状态：已启用')
+    expect(JSON.stringify(runtime.transport.sent.at(-1)?.input)).toContain('收集状态：运行中')
+
+    await send(runtime, 'om-learning-control-pause', '/learning pause')
+    expect(llm.requests).toHaveLength(callsAfterLearning)
+    expect(JSON.stringify(runtime.transport.sent.at(-1)?.input)).toContain('已暂停当前工作区')
+
+    await closeContext(runtime.ctx)
+    runtime = await openRuntime()
+    await send(
+      runtime,
+      'om-learning-control-paused-turn',
+      '请帮我继续整理云杉项目今天的工作安排',
+    )
+    expect(llm.requests).toHaveLength(callsAfterLearning + 1)
+    expect(JSON.stringify(llm.requests.at(-1)?.messages)).not.toContain('<tentative_preference_overlay>')
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 6, active: 1 })
+
+    await send(runtime, 'om-learning-control-resume', '/learning resume')
+    expect(llm.requests).toHaveLength(callsAfterLearning + 1)
+    expect(JSON.stringify(runtime.transport.sent.at(-1)?.input)).toContain('已恢复当前工作区')
+    await send(
+      runtime,
+      'om-learning-control-resumed-turn',
+      '请帮我检查云杉项目今天是否还有遗漏事项',
+    )
+    expect(JSON.stringify(llm.requests.at(-1)?.messages)).toContain('<tentative_preference_overlay>')
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 7, active: 1 })
+
+    type ProjectionFence = (
+      input: { batchKey: string; payloadDigest: string },
+      project: (entry: unknown) => void,
+    ) => unknown
+    interface ProjectionStore {
+      projectPreferenceProjectionUnderOwnerFence: ProjectionFence
+      enqueuePreferenceProjection(events: readonly Readonly<DeliveryPreferenceEvent>[]): unknown
+    }
+    const projectionStore = (runtime.ctx.assistantDelivery as unknown as {
+      deliveryStore: ProjectionStore
+    }).deliveryStore
+    const projectUnderFence = projectionStore.projectPreferenceProjectionUnderOwnerFence
+      .bind(projectionStore)
+    vi.spyOn(projectionStore, 'projectPreferenceProjectionUnderOwnerFence')
+      .mockImplementationOnce((input, project) => projectUnderFence(input, entry => {
+        project(entry)
+        throw new Error('injected delayed projection after Preference commit before Delivery ACK')
+      }))
+    await send(
+      runtime,
+      'om-learning-control-delayed-before-rollback',
+      '请继续整理云杉项目今天的工作安排',
+    )
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 8, active: 1 })
+    let deliveryDatabase = new DatabaseSync(deliveryPath)
+    const delayedProjection = deliveryDatabase.prepare(`
+      SELECT events_json FROM delivery_preference_projection_outbox
+      WHERE status = 'retry_wait' AND failure_code = 'sink-projection-failed'
+    `).get() as { events_json: string } | undefined
+    if (delayedProjection === undefined) throw new Error('delayed projection fixture was not retained')
+    deliveryDatabase.prepare(`
+      UPDATE delivery_preference_projection_outbox SET next_attempt_at = 0
+      WHERE status = 'retry_wait' AND failure_code = 'sink-projection-failed'
+    `).run()
+    deliveryDatabase.close()
+
+    const callsBeforeRollback = llm.requests.length
+    await send(
+      runtime,
+      'om-learning-control-rollback-language',
+      '/learning rollback response.language confirm',
+    )
+    expect(llm.requests).toHaveLength(callsBeforeRollback)
+    expect(JSON.stringify(runtime.transport.sent.at(-1)?.input))
+      .toContain('已回滚 response.language')
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: 8, active: 0, rolledBack: 1,
+    })
+    preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    expect(preferenceDatabase.prepare(`
+      SELECT effect_state FROM preference_hypotheses
+      WHERE preference_key = 'response.language' AND candidate_value = 'zh-CN'
+    `).get()).toEqual({ effect_state: 'rolled-back' })
+    const rollbackFence = preferenceDatabase.prepare(`
+      SELECT admission_high_water, ignore_events_through_sequence
+      FROM preference_scope_principals
+    `).get() as { admission_high_water: number; ignore_events_through_sequence: number }
+    expect(rollbackFence.ignore_events_through_sequence).toBe(rollbackFence.admission_high_water)
+    preferenceDatabase.close()
+
+    const staleEvents = (JSON.parse(delayedProjection.events_json) as DeliveryPreferenceEvent[])
+      .map(event => Object.freeze({
+        ...event,
+        idempotencyKey: `${event.idempotencyKey}-delayed-after-rollback`,
+      }))
+    projectionStore.enqueuePreferenceProjection(staleEvents)
+    await closeContext(runtime.ctx)
+    runtime = await openRuntime()
+    await drain(runtime.ctx)
+    expect(llm.requests).toHaveLength(callsBeforeRollback)
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: 8, active: 0, rolledBack: 1,
+    })
+    deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT COUNT(*) AS count FROM delivery_preference_projection_outbox
+      WHERE terminal_at IS NULL
+    `).get()).toEqual({ count: 0 })
+    deliveryDatabase.close()
+
+    await send(
+      runtime,
+      'om-learning-control-after-rollback',
+      'Please summarize the remaining work for the spruce project',
+    )
+    const postRollbackRuntimeTail = (llm.requests.at(-1)?.messages ?? []).slice(-2)
+    expect(JSON.stringify(postRollbackRuntimeTail)).not.toContain('<tentative_preference_overlay>')
+    expect(JSON.stringify(postRollbackRuntimeTail))
+      .toContain('Earlier runtime-context snapshots no longer apply')
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ active: 0, rolledBack: 1 })
+
+    type RollbackArgs = [unknown, unknown, unknown, unknown, number, string]
+    interface RollbackStore {
+      rollbackScopeLearningKey(...args: RollbackArgs): unknown
+    }
+    const rollbackStore = (runtime.ctx.assistantPreferenceLearning as unknown as {
+      store: RollbackStore
+    }).store
+    const rollbackOnce = rollbackStore.rollbackScopeLearningKey.bind(rollbackStore)
+    vi.spyOn(rollbackStore, 'rollbackScopeLearningKey')
+      .mockImplementationOnce((...args: RollbackArgs) => {
+        rollbackOnce(...args)
+        throw new Error('injected crash after durable no-active rollback receipt')
+      })
+    const callsBeforeNoop = llm.requests.length
+    await send(
+      runtime,
+      'om-learning-control-rollback-no-active',
+      '/learning rollback response.language confirm',
+    )
+    expect(llm.requests).toHaveLength(callsBeforeNoop)
+    deliveryDatabase = new DatabaseSync(deliveryPath)
+    expect(deliveryDatabase.prepare(`
+      SELECT status, failure_code FROM inbox_messages
+      WHERE event_id = 'om-learning-control-rollback-no-active'
+    `).get()).toEqual({ status: 'retry_wait', failure_code: 'learning-dispatch-recovery' })
+    deliveryDatabase.prepare(`
+      UPDATE inbox_messages SET next_attempt_at = 0
+      WHERE event_id = 'om-learning-control-rollback-no-active' AND status = 'retry_wait'
+    `).run()
+    deliveryDatabase.close()
+    preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    const noActiveReceiptBeforeRestart = preferenceDatabase.prepare(`
+      SELECT payload_hash, target_preference_key, result_applied,
+        result_rolled_back, result_rolled_back_version, admission_cursor_sequence
+      FROM preference_owner_control_receipts
+      WHERE action = 'rollback' AND result_rolled_back = 0
+    `).get()
+    expect(noActiveReceiptBeforeRestart).toMatchObject({
+      target_preference_key: 'response.language', result_applied: 1,
+      result_rolled_back: 0, result_rolled_back_version: null,
+    })
+    preferenceDatabase.close()
+
+    await closeContext(runtime.ctx)
+    runtime = await openRuntime()
+    await drain(runtime.ctx)
+    expect(llm.requests).toHaveLength(callsBeforeNoop)
+    expect(JSON.stringify(runtime.transport.sent.at(-1)?.input))
+      .toContain('response.language 当前没有激活偏好')
+    preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    expect(preferenceDatabase.prepare(`
+      SELECT payload_hash, target_preference_key, result_applied,
+        result_rolled_back, result_rolled_back_version, admission_cursor_sequence
+      FROM preference_owner_control_receipts
+      WHERE action = 'rollback' AND result_rolled_back = 0
+    `).get()).toEqual(noActiveReceiptBeforeRestart)
+    expect(preferenceDatabase.prepare(`
+      SELECT COUNT(*) AS count FROM preference_transitions
+      WHERE reason = 'owner-rejected'
+    `).get()).toEqual({ count: 1 })
+    preferenceDatabase.close()
+
+    await send(runtime, 'om-learning-control-forget-prompt', '/learning forget')
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ active: 0, rolledBack: 1 })
+    expect(JSON.stringify(runtime.transport.sent.at(-1)?.input)).toContain('尚未删除任何学习记录')
+    await send(runtime, 'om-learning-control-forget', '/learning forget confirm')
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: 0,
+      hypotheses: 0,
+      active: 0,
+    })
+    expect(JSON.stringify(runtime.transport.sent.at(-1)?.input)).toContain('已永久删除')
+
+    const callsBeforeFreshTurn = llm.requests.length
+    await send(
+      runtime,
+      'om-learning-control-after-forget',
+      '请帮我重新整理云杉项目今天的计划',
+    )
+    expect(llm.requests).toHaveLength(callsBeforeFreshTurn + 1)
+    const freshRuntimeTail = (llm.requests.at(-1)?.messages ?? []).slice(-2)
+    expect(JSON.stringify(freshRuntimeTail)).not.toContain('<tentative_preference_overlay>')
+    expect(JSON.stringify(llm.requests.at(-1)?.messages))
+      .toContain('Earlier runtime-context snapshots no longer apply')
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 1, active: 0 })
+  })
+
+  test('projects a committed reply after Preference is installed late and never reruns the owner turn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-preference-recovery-e2e-'))
+    roots.push(root)
+    const workspace = join(root, 'workspace')
+    const policyPath = join(root, 'policy.sqlite')
+    const deliveryPath = join(root, 'delivery.sqlite')
+    const preferencePath = join(root, 'preferences.sqlite')
+    const saved = new Map<string, SavedSession>()
+    const llm = new GrowthAdapter()
+
+    const openRuntime = async (withPreference: boolean) => {
+      const ctx = new Context()
+      contexts.add(ctx)
+      await installAgentRuntime(ctx, saved)
+      await ctx.plugin(AssistantPolicyService, {
+        databasePath: policyPath,
+        proposalMaintenanceIntervalMs: 0,
+        rules: policyRules(workspace),
+      })
+      await ctx.plugin(AssistantDeliveryService, {
+        databasePath: deliveryPath,
+        spoolPath: join(root, 'spool'),
+        schedulerEnabled: false,
+        defaultWorkspace: workspace,
+        defaultAgentPreset: PRESET,
+        agentProvider: 'growth-model',
+        agentModel: 'default',
+      })
+      if (withPreference) {
+        await ctx.plugin(PreferenceLearningService, {
+          databasePath: preferencePath,
+          maintenanceIntervalMs: 3_600_000,
+        })
+      }
+      ctx.llm.registerAdapter(['growth-model'], llm)
+      await ctx.plugin(AgentLoop, { agents: [] })
+      const transport = new FakeLarkTransport()
+      await installLark(ctx, transport)
+      return { ctx, transport }
+    }
+
+    let runtime = await openRuntime(false)
+    await pairOwner(runtime.ctx)
+    await runtime.transport.message(larkMessage(
+      'om-preference-before-install',
+      '请帮我整理青松项目今天需要完成的工作',
+    ))
+    for (let pass = 0; pass < 3; pass += 1) await runInboundPass(runtime.ctx)
+    expect(llm.requests).toHaveLength(1)
+
+    let deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT status, failure_code FROM inbox_messages
+      WHERE event_id = 'om-preference-before-install'
+    `).get()).toEqual({ status: 'processed', failure_code: null })
+    expect(deliveryDatabase.prepare(`
+      SELECT status FROM outbox_messages
+      WHERE idempotency_key LIKE 'inbound:%:reply'
+    `).get()).toEqual({ status: 'accepted' })
+    expect(deliveryDatabase.prepare(`
+      SELECT status, attempt_count, failure_code
+      FROM delivery_preference_projection_outbox
+    `).get()).toEqual({ status: 'pending', attempt_count: 0, failure_code: null })
+    deliveryDatabase.close()
+
+    await closeContext(runtime.ctx)
+    runtime = await openRuntime(true)
+    for (let pass = 0; pass < 3; pass += 1) await runInboundPass(runtime.ctx)
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: 1,
+      active: 0,
+    })
+    expect(llm.requests).toHaveLength(1)
+    deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT COUNT(*) AS count FROM delivery_preference_projection_outbox
+    `).get()).toEqual({ count: 0 })
+    deliveryDatabase.close()
+
+    // A second full reload proves both ledgers agree that the projection has
+    // already committed; neither the model turn nor the signal is replayed.
+    await closeContext(runtime.ctx)
+    runtime = await openRuntime(true)
+    for (let pass = 0; pass < 2; pass += 1) await runInboundPass(runtime.ctx)
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: 1,
+      active: 0,
+    })
+    expect(llm.requests).toHaveLength(1)
+  })
+
+  test('replays a real Preference commit after Delivery loses its acknowledgement without duplicating a signal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-preference-ack-loss-e2e-'))
+    roots.push(root)
+    const workspace = join(root, 'workspace')
+    const policyPath = join(root, 'policy.sqlite')
+    const deliveryPath = join(root, 'delivery.sqlite')
+    const preferencePath = join(root, 'preferences.sqlite')
+    const saved = new Map<string, SavedSession>()
+    const llm = new GrowthAdapter()
+
+    const openRuntime = async () => {
+      const ctx = new Context()
+      contexts.add(ctx)
+      await installAgentRuntime(ctx, saved)
+      await ctx.plugin(AssistantPolicyService, {
+        databasePath: policyPath,
+        proposalMaintenanceIntervalMs: 0,
+        rules: policyRules(workspace),
+      })
+      await ctx.plugin(AssistantDeliveryService, {
+        databasePath: deliveryPath,
+        spoolPath: join(root, 'spool'),
+        schedulerEnabled: false,
+        retryBaseMs: 60_000,
+        retryMaxMs: 60_000,
+        defaultWorkspace: workspace,
+        defaultAgentPreset: PRESET,
+        agentProvider: 'growth-model',
+        agentModel: 'default',
+      })
+      await ctx.plugin(PreferenceLearningService, {
+        databasePath: preferencePath,
+        maintenanceIntervalMs: 3_600_000,
+      })
+      ctx.llm.registerAdapter(['growth-model'], llm)
+      await ctx.plugin(AgentLoop, { agents: [] })
+      const transport = new FakeLarkTransport()
+      await installLark(ctx, transport)
+      return { ctx, transport }
+    }
+
+    let runtime = await openRuntime()
+    await pairOwner(runtime.ctx)
+    type ProjectionFence = (
+      input: { batchKey: string; payloadDigest: string },
+      project: (entry: unknown) => void,
+    ) => unknown
+    const projectionStore = (runtime.ctx.assistantDelivery as unknown as {
+      deliveryStore: { projectPreferenceProjectionUnderOwnerFence: ProjectionFence }
+    }).deliveryStore
+    const projectUnderFence = projectionStore.projectPreferenceProjectionUnderOwnerFence.bind(projectionStore)
+    vi.spyOn(projectionStore, 'projectPreferenceProjectionUnderOwnerFence')
+      .mockImplementationOnce((input, project) => projectUnderFence(input, entry => {
+        project(entry)
+        throw new Error('injected crash after the real Preference commit before Delivery ACK')
+      }))
+
+    await runtime.transport.message(larkMessage(
+      'om-preference-ack-loss',
+      '请帮我整理今天需要完成的工作安排',
+    ))
+    for (let pass = 0; pass < 3; pass += 1) await runInboundPass(runtime.ctx)
+    expect(llm.requests).toHaveLength(1)
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 1, active: 0 })
+
+    let deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT status, attempt_count, failure_code
+      FROM delivery_preference_projection_outbox
+    `).get()).toEqual({
+      status: 'retry_wait',
+      attempt_count: 1,
+      failure_code: 'sink-projection-failed',
+    })
+    deliveryDatabase.close()
+
+    await closeContext(runtime.ctx)
+    runtime = await openRuntime()
+    for (let pass = 0; pass < 3; pass += 1) await runInboundPass(runtime.ctx)
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 1, active: 0 })
+    expect(llm.requests).toHaveLength(1)
+    deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT COUNT(*) AS count FROM delivery_preference_projection_outbox
+    `).get()).toEqual({ count: 0 })
+    deliveryDatabase.close()
+  })
+
+  test('fails closed on the replacement owner first turn and ignores a delayed old-owner replay', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-preference-owner-fence-e2e-'))
+    roots.push(root)
+    const workspace = join(root, 'workspace')
+    const policyPath = join(root, 'policy.sqlite')
+    const deliveryPath = join(root, 'delivery.sqlite')
+    const preferencePath = join(root, 'preferences.sqlite')
+    const saved = new Map<string, SavedSession>()
+    const llm = new GrowthAdapter()
+    const replacementPrincipal = {
+      channel: 'lark', account: ACCOUNT, tenant: TENANT, user: REPLACEMENT_OWNER_USER,
+    }
+    const replacementRules = [
+      {
+        id: 'trusted-lark-replacement-owner', effect: 'allow' as const,
+        subject: { kind: 'external' as const, id: REPLACEMENT_OWNER },
+        actions: ['approval.decide', 'ingest', 'pair.confirm'],
+        resource: { kind: 'message' as const, id: '*' },
+        context: { initiators: ['external' as const] },
+      },
+      {
+        id: 'trusted-lark-replacement-owner-feedback', effect: 'allow' as const,
+        subject: { kind: 'external' as const, id: REPLACEMENT_OWNER, workspace },
+        actions: ['signal'], resource: { kind: 'preference' as const, id: `${PRESET}/*` },
+        context: { initiators: ['external' as const] },
+      },
+      {
+        id: 'replacement-owner-preference-overlay', effect: 'allow' as const,
+        subject: { kind: 'agent' as const, id: PRESET, workspace, principal: REPLACEMENT_OWNER },
+        actions: ['snapshot'], resource: { kind: 'preference' as const, id: 'active' },
+        context: { initiators: ['external' as const] },
+      },
+      {
+        id: 'replacement-owner-delivery-reply', effect: 'allow' as const,
+        subject: { kind: 'agent' as const, id: PRESET, workspace, principal: REPLACEMENT_OWNER },
+        actions: ['reply'], resource: { kind: 'message' as const, id: '*' },
+        context: { initiators: ['external' as const] },
+      },
+    ]
+
+    const openRuntime = async () => {
+      const ctx = new Context()
+      contexts.add(ctx)
+      await installAgentRuntime(ctx, saved)
+      await ctx.plugin(AssistantPolicyService, {
+        databasePath: policyPath,
+        proposalMaintenanceIntervalMs: 0,
+        rules: [...policyRules(workspace), ...replacementRules],
+      })
+      await ctx.plugin(AssistantDeliveryService, {
+        databasePath: deliveryPath,
+        spoolPath: join(root, 'spool'),
+        schedulerEnabled: false,
+        retryBaseMs: 60_000,
+        retryMaxMs: 60_000,
+        defaultWorkspace: workspace,
+        defaultAgentPreset: PRESET,
+        agentProvider: 'growth-model',
+        agentModel: 'default',
+      })
+      await ctx.plugin(PreferenceLearningService, {
+        databasePath: preferencePath,
+        maintenanceIntervalMs: 3_600_000,
+      })
+      ctx.llm.registerAdapter(['growth-model'], llm)
+      await ctx.plugin(AgentLoop, { agents: [] })
+      const transport = new FakeLarkTransport()
+      await installLark(ctx, transport)
+      return { ctx, transport }
+    }
+
+    const replacementMessage = (messageId: string, content: string): LarkMessage => ({
+      ...larkMessage(messageId, content),
+      chatId: 'oc_replacement_owner',
+      senderId: REPLACEMENT_OWNER_USER,
+    })
+    const completeTurn = async (
+      runtime: Awaited<ReturnType<typeof openRuntime>>,
+      message: LarkMessage,
+    ): Promise<void> => {
+      await runtime.transport.message(message)
+      for (let pass = 0; pass < 3; pass += 1) await runInboundPass(runtime.ctx)
+    }
+
+    let runtime = await openRuntime()
+    await pairOwner(runtime.ctx)
+    for (let index = 1; index <= 6; index += 1) {
+      await completeTurn(runtime, larkMessage(
+        `om-owner-fence-seed-${index}`,
+        `请帮我整理青竹项目第 ${index} 批工作的今日安排`,
+      ))
+    }
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 6, active: 1 })
+
+    type ProjectionFence = (
+      input: { batchKey: string; payloadDigest: string },
+      project: (entry: unknown) => void,
+    ) => unknown
+    const projectionStore = (runtime.ctx.assistantDelivery as unknown as {
+      deliveryStore: { projectPreferenceProjectionUnderOwnerFence: ProjectionFence }
+    }).deliveryStore
+    const projectUnderFence = projectionStore.projectPreferenceProjectionUnderOwnerFence.bind(projectionStore)
+    vi.spyOn(projectionStore, 'projectPreferenceProjectionUnderOwnerFence')
+      .mockImplementationOnce((input, project) => projectUnderFence(input, entry => {
+        project(entry)
+        throw new Error('injected old-owner crash after Preference commit before Delivery ACK')
+      }))
+    await completeTurn(runtime, larkMessage(
+      'om-owner-fence-delayed-old',
+      '请帮我继续整理青竹项目的今日安排',
+    ))
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 7, active: 1 })
+
+    pairPrincipalLocally({ databasePath: deliveryPath, principal: replacementPrincipal })
+    await completeTurn(runtime, replacementMessage(
+      'om-owner-fence-replacement-first',
+      'Please summarize everything that I need to finish today',
+    ))
+    expect(JSON.stringify(llm.requests.at(-1)?.messages)).not.toContain('<tentative_preference_overlay>')
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: 1,
+      active: 0,
+      rolledBack: 0,
+    })
+    let preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    expect(preferenceDatabase.prepare(`
+      SELECT candidate_value, COUNT(*) AS count
+      FROM preference_signals GROUP BY candidate_value
+    `).all()).toEqual([{ candidate_value: 'en', count: 1 }])
+    preferenceDatabase.close()
+
+    let deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT status, attempt_count, failure_code, terminal_at IS NOT NULL AS terminal
+      FROM delivery_preference_projection_outbox
+    `).all()).toEqual([{
+      status: 'retry_wait',
+      attempt_count: 1,
+      failure_code: 'owner-lineage-retired',
+      terminal: 1,
+    }])
+    deliveryDatabase.close()
+
+    const modelCallsBeforeRestart = llm.requests.length
+    await closeContext(runtime.ctx)
+    runtime = await openRuntime()
+    for (let pass = 0; pass < 3; pass += 1) await runInboundPass(runtime.ctx)
+    expect(llm.requests).toHaveLength(modelCallsBeforeRestart)
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: 1,
+      active: 0,
+      rolledBack: 0,
+    })
+    preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    expect(preferenceDatabase.prepare(`
+      SELECT candidate_value, COUNT(*) AS count
+      FROM preference_signals GROUP BY candidate_value
+    `).all()).toEqual([{ candidate_value: 'en', count: 1 }])
+    preferenceDatabase.close()
+    deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT status, attempt_count, failure_code, terminal_at IS NOT NULL AS terminal
+      FROM delivery_preference_projection_outbox
+    `).all()).toEqual([{
+      status: 'retry_wait',
+      attempt_count: 1,
+      failure_code: 'owner-lineage-retired',
+      terminal: 1,
+    }])
+    deliveryDatabase.close()
+  })
+
+  test('never revives an uncommitted A1 projection when the same owner returns as A3', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-preference-owner-aba-e2e-'))
+    roots.push(root)
+    const workspace = join(root, 'workspace')
+    const policyPath = join(root, 'policy.sqlite')
+    const deliveryPath = join(root, 'delivery.sqlite')
+    const preferencePath = join(root, 'preferences.sqlite')
+    const saved = new Map<string, SavedSession>()
+    const llm = new GrowthAdapter()
+    const ownerPrincipal = {
+      channel: 'lark', account: ACCOUNT, tenant: TENANT, user: OWNER_USER,
+    }
+    const replacementPrincipal = {
+      channel: 'lark', account: ACCOUNT, tenant: TENANT, user: REPLACEMENT_OWNER_USER,
+    }
+
+    const openRuntime = async (withPreference: boolean) => {
+      const ctx = new Context()
+      contexts.add(ctx)
+      await installAgentRuntime(ctx, saved)
+      await ctx.plugin(AssistantPolicyService, {
+        databasePath: policyPath,
+        proposalMaintenanceIntervalMs: 0,
+        rules: policyRules(workspace),
+      })
+      await ctx.plugin(AssistantDeliveryService, {
+        databasePath: deliveryPath,
+        spoolPath: join(root, 'spool'),
+        schedulerEnabled: false,
+        retryBaseMs: 60_000,
+        retryMaxMs: 60_000,
+        defaultWorkspace: workspace,
+        defaultAgentPreset: PRESET,
+        agentProvider: 'growth-model',
+        agentModel: 'default',
+      })
+      if (withPreference) {
+        await ctx.plugin(PreferenceLearningService, {
+          databasePath: preferencePath,
+          maintenanceIntervalMs: 3_600_000,
+        })
+      }
+      ctx.llm.registerAdapter(['growth-model'], llm)
+      await ctx.plugin(AgentLoop, { agents: [] })
+      const transport = new FakeLarkTransport()
+      await installLark(ctx, transport)
+      return { ctx, transport }
+    }
+    const completeTurn = async (
+      runtime: Awaited<ReturnType<typeof openRuntime>>,
+      messageId: string,
+      content: string,
+    ) => {
+      await runtime.transport.message(larkMessage(messageId, content))
+      for (let pass = 0; pass < 3; pass += 1) await runInboundPass(runtime.ctx)
+    }
+
+    // A1 first establishes a genuine active preference in the downstream DB.
+    let runtime = await openRuntime(true)
+    await pairOwner(runtime.ctx)
+    for (let index = 1; index <= 6; index += 1) {
+      await completeTurn(
+        runtime,
+        `om-owner-aba-seed-${index}`,
+        `请帮我整理雪松项目第 ${index} 批工作的今日安排`,
+      )
+    }
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 6, active: 1 })
+    await closeContext(runtime.ctx)
+
+    // With Preference absent, A1 commits its reply and durable projection but
+    // cannot advance Preference's observed owner lineage.
+    runtime = await openRuntime(false)
+    await completeTurn(
+      runtime,
+      'om-owner-aba-pending-a1',
+      '请帮我继续整理雪松项目今天的工作安排',
+    )
+    expect(llm.requests).toHaveLength(7)
+    let deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT status, attempt_count, terminal_at, lane_principal_version
+      FROM delivery_preference_projection_outbox
+    `).all()).toEqual([{
+      status: 'pending', attempt_count: 0, terminal_at: null, lane_principal_version: 1,
+    }])
+    deliveryDatabase.close()
+    await closeContext(runtime.ctx)
+
+    // No B or A3 projection reaches Preference. The handoff transaction alone
+    // must retire A1, including when the external principal string returns.
+    pairPrincipalLocally({ databasePath: deliveryPath, principal: replacementPrincipal })
+    const returnedOwner = pairPrincipalLocally({ databasePath: deliveryPath, principal: ownerPrincipal })
+    expect(returnedOwner).toMatchObject({ version: 3, status: 'active', role: 'owner' })
+    deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT status, attempt_count, failure_code, terminal_at IS NOT NULL AS terminal,
+        lane_principal_version
+      FROM delivery_preference_projection_outbox
+    `).all()).toEqual([{
+      status: 'pending',
+      attempt_count: 0,
+      failure_code: 'owner-lineage-retired',
+      terminal: 1,
+      lane_principal_version: 1,
+    }])
+    deliveryDatabase.close()
+    let preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    expect(preferenceDatabase.prepare(`
+      SELECT generation, principal_lineage_version FROM preference_scope_principals
+    `).get()).toEqual({ generation: 1, principal_lineage_version: 1 })
+    expect(preferenceDatabase.prepare(`
+      SELECT COUNT(*) AS count FROM preference_signals
+    `).get()).toEqual({ count: 6 })
+    preferenceDatabase.close()
+
+    // A3 must fail closed before its first prompt, then reset Preference to its
+    // exact new lineage. The terminal A1 outbox is never sent or model-rerun.
+    runtime = await openRuntime(true)
+    const callsBeforeA3 = llm.requests.length
+    await completeTurn(
+      runtime,
+      'om-owner-aba-first-a3',
+      'Please list everything that remains for the cedar project today',
+    )
+    expect(llm.requests).toHaveLength(callsBeforeA3 + 1)
+    expect(JSON.stringify(llm.requests.at(-1)?.messages)).not.toContain('<tentative_preference_overlay>')
+    expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({
+      signals: 1,
+      active: 0,
+      rolledBack: 0,
+    })
+    preferenceDatabase = new DatabaseSync(preferencePath, { readOnly: true })
+    expect(preferenceDatabase.prepare(`
+      SELECT generation, principal_lineage_version FROM preference_scope_principals
+    `).get()).toEqual({ generation: 2, principal_lineage_version: 3 })
+    expect(preferenceDatabase.prepare(`
+      SELECT candidate_value, COUNT(*) AS count
+      FROM preference_signals GROUP BY candidate_value
+    `).all()).toEqual([{ candidate_value: 'en', count: 1 }])
+    preferenceDatabase.close()
+    deliveryDatabase = new DatabaseSync(deliveryPath, { readOnly: true })
+    expect(deliveryDatabase.prepare(`
+      SELECT failure_code, terminal_at IS NOT NULL AS terminal
+      FROM delivery_preference_projection_outbox
+    `).all()).toEqual([{ failure_code: 'owner-lineage-retired', terminal: 1 }])
+    deliveryDatabase.close()
+  })
+
+  test('turns an exact owner reply into one trusted objective episode and rejects stale/unlinked replies', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-assistant-feedback-e2e-'))
     roots.push(root)
     const workspace = join(root, 'workspace')
     const policyPath = join(root, 'policy.sqlite')
@@ -448,344 +1471,129 @@ describe('supervised personal-assistant growth composition', () => {
     const evolutionPath = join(root, 'evolution.sqlite')
     const saved = new Map<string, SavedSession>()
     const llm = new GrowthAdapter()
-    const runtimeInput = { root, workspace, policyPath, automationPath, evolutionPath, saved, llm }
-    let runtime = await openGrowthRuntime(runtimeInput)
-    let ctx = runtime.ctx
-    let transport = runtime.transport
+    const runtime = await openGrowthRuntime({ root, workspace, policyPath, automationPath, evolutionPath, saved, llm })
+    const { ctx, transport } = runtime
     await pairOwner(ctx)
-    seedGrowthCandidate(ctx.assistantEvolution, workspace)
-
-    const evolutionSubject = { kind: 'agent' as const, id: PRESET, workspace }
-    expect(ctx.assistantPolicy.evaluate({
-      subject: evolutionSubject,
-      action: 'propose',
-      resource: { kind: 'evolution', id: 'proposals' },
-      context: { initiator: 'external' },
-    })).toMatchObject({ effect: 'allow', ruleId: 'evolution-proposals' })
-    expect(ctx.assistantPolicy.evaluate({
-      subject: evolutionSubject,
-      action: 'propose',
-      resource: { kind: 'evolution', id: `situation:${GROWTH_SITUATION}` },
-      context: { initiator: 'external' },
-    })).toMatchObject({ effect: 'deny' })
-
-    await transport.message(larkMessage('om-growth-request', 'request-evolution-proposal'))
-    await runInboundPass(ctx)
-
-    const [dispatch] = ctx.assistantPolicy.listPendingApprovalDispatches()
-    expect(dispatch).toMatchObject({
-      sourceId: 'dsh-enhanced-assistant-evolution',
-      workspace,
-      principal: OWNER,
-      requester: `agent:${PRESET}`,
-      action: 'evolution.adopt',
-      resource: { kind: 'evolution', id: `situation:${GROWTH_SITUATION}` },
-      proposalVersion: 1,
-      state: 'pending',
-    })
-    expect(dispatch?.diff).toContain(GUIDANCE)
-
-    // Delivery preserves per-binding order: the turn reply settles before the
-    // approval card that was appended later in the same durable outbox.
+    await transport.message(larkMessage('om-feedback-bind', 'establish owner binding'))
     await runInboundPass(ctx)
     await runInboundPass(ctx)
-    const approvalMessage = transport.sent.find(message => 'approval' in message.input)
-    expect(approvalMessage?.input).toMatchObject({
-      approval: {
-        title: `Adopt learned guidance for ${GROWTH_SITUATION}`,
-        body: expect.stringContaining(GUIDANCE),
-      },
-    })
-    if (approvalMessage === undefined || !('approval' in approvalMessage.input)) {
-      throw new Error('Delivery did not send the durable evolution approval card')
-    }
-    await transport.action({
-      messageId: approvalMessage.messageId,
-      chatId: approvalMessage.chatId,
-      operatorId: OWNER_USER,
-      tag: 'button',
-      value: approvalMessage.input.approval.approveValue,
-    })
-    expect(ctx.assistantPolicy.getProposal(dispatch!.proposalId)).toMatchObject({
-      status: 'approved',
-      decidedBy: OWNER,
-      version: 2,
-    })
-    const beforeRestart = new DatabaseSync(evolutionPath, { readOnly: true })
-    const unapplied = beforeRestart.prepare(`
-      SELECT status, result_rule_id FROM evolution_proposals WHERE policy_proposal_id = ?
-    `).get(dispatch!.proposalId)
-    beforeRestart.close()
-    expect(unapplied).toEqual({ status: 'pending', result_rule_id: null })
 
-    // The callback has committed Policy and Delivery state, but Evolution has
-    // not applied the mutation yet. Tear down every service and reopen the same
-    // SQLite files to prove reconciliation does not depend on in-memory objects.
-    await closeContext(ctx)
-    runtime = await openGrowthRuntime(runtimeInput)
-    ctx = runtime.ctx
-    transport = runtime.transport
-    expect(ctx.assistantPolicy.getProposal(dispatch!.proposalId)).toMatchObject({
-      status: 'approved',
-      decidedBy: OWNER,
-      version: 2,
-    })
-    const [reconciled] = ctx.assistantEvolution.reconcileProposals()
-    expect(reconciled).toMatchObject({
-      status: 'approved',
-      rule: { situation: GROWTH_SITUATION, guidance: GUIDANCE, generation: 1 },
-    })
-    expect(ctx.assistantEvolution.reconcileProposals()).toEqual([])
-    const rule = reconciled?.rule
-    if (rule === undefined) throw new Error('approved evolution proposal did not produce a rule')
-    llm.retirementTarget = { ruleId: rule.id, expectedVersion: rule.version }
+    const deliveryDatabase = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+    const binding = deliveryDatabase.prepare(`
+      SELECT id FROM conversation_bindings WHERE status = 'active' ORDER BY generation DESC LIMIT 1
+    `).get() as { id: string } | undefined
+    deliveryDatabase.close()
+    if (binding === undefined) throw new Error('owner Delivery binding was not established')
 
-    ctx.assistantAutomations.reconcileSystem({
-      owner: 'e2e-system',
-      automationId: GROWTH_AUTOMATION,
-      idempotencyKey: 'e2e-growth-automation-v1',
-      definition: {
-        name: 'Growth evidence loop',
-        prompt: 'automation-growth-run',
-        schedule: { kind: 'at', at: '2099-01-01T00:00:00.000Z' },
-        workspace,
-        agentPreset: PRESET,
-        provider: 'growth-model',
-        model: 'default',
-        allowedTools: [],
-        timeoutMs: 60_000,
-        maxOutputTokens: 256,
-        maxToolCalls: 0,
-        misfire: { kind: 'latest' },
-        overlap: 'skip',
-        retrySafety: 'never',
-        maxRetries: 0,
-        principal: OWNER,
-        budgetId: 'growth-budget',
-        budgetAmount: 1,
-      },
-    })
-    await runGrowthAutomation(ctx, 'growth-event-1')
-
-    const automationRequest = llm.requests.find(request =>
-      JSON.stringify(request.messages).includes('automation-growth-run'))
-    expect(JSON.stringify(automationRequest?.messages)).toContain('<learned_guidance>')
-    expect(JSON.stringify(automationRequest?.messages)).toContain(GUIDANCE)
-
-    await transport.message(larkMessage('om-new-session', '/new'))
-    await runInboundPass(ctx)
-    await transport.message(larkMessage('om-guidance-check', 'fresh-guidance-check'))
+    reconcileGrowthAutomation(ctx, workspace, binding.id)
+    await runGrowthAutomation(ctx, 'objective-feedback-run')
     await runInboundPass(ctx)
     await runInboundPass(ctx)
-    const freshRequest = llm.requests.find(request =>
-      JSON.stringify(request.messages).includes('fresh-guidance-check'))
-    expect(JSON.stringify(freshRequest?.messages)).toContain('<learned_guidance>')
-    expect(JSON.stringify(freshRequest?.messages)).toContain(GUIDANCE)
+    const automationMessage = transport.sent.find(message =>
+      JSON.stringify(message.input).includes('automation growth run succeeded'))
+    if (automationMessage === undefined) throw new Error('Automation result was not delivered to owner')
 
-    const firstAutomationDb = new DatabaseSync(automationPath, { readOnly: true })
-    const firstDurableRun = firstAutomationDb.prepare(`
-      SELECT id, status, session_id, evidence_status, evidence_json
-      FROM automation_runs WHERE automation_id = ?
-    `).get(GROWTH_AUTOMATION) as {
-      id: string
-      status: string
-      session_id: string
-      evidence_status: string
+    const objectiveFeedbackMessage = larkMessage(
+      'om-objective-not-achieved', '/feedback not-achieved', automationMessage.messageId,
+    )
+    await transport.message(objectiveFeedbackMessage)
+    await runInboundPass(ctx)
+    await runInboundPass(ctx)
+    await ctx.assistantEvaluation.whenProjectionIdle()
+
+    const evaluationDatabase = new DatabaseSync(join(root, 'evaluation.sqlite'), { readOnly: true })
+    const objective = evaluationDatabase.prepare(`
+      SELECT objective_status, delivery_status, source_kind, trust, evidence_json
+      FROM evaluation_outcomes
+      WHERE source_kind = 'user-feedback'
+    `).all() as Array<{
+      objective_status: string
+      delivery_status: string
+      source_kind: string
+      trust: string
       evidence_json: string
-    }
-    firstAutomationDb.close()
-    expect(firstDurableRun).toMatchObject({ status: 'succeeded', evidence_status: 'recorded' })
-    expect(JSON.parse(firstDurableRun.evidence_json)).toMatchObject({
-      situation: GROWTH_SITUATION,
-      outcome: 'succeeded',
-      automationId: GROWTH_AUTOMATION,
-      runId: firstDurableRun.id,
-      sessionId: firstDurableRun.session_id,
-      ruleId: rule.id,
-      guidanceVersion: rule.generation,
+    }>
+    evaluationDatabase.close()
+    expect(objective).toHaveLength(1)
+    expect(objective[0]).toMatchObject({
+      objective_status: 'not-achieved', delivery_status: 'delivered',
+      source_kind: 'user-feedback', trust: 'trusted',
     })
+    expect(JSON.parse(objective[0]!.evidence_json)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'automation-run' }),
+      expect.objectContaining({ kind: 'delivery-outbox' }),
+    ]))
 
-    const firstEvolutionDb = new DatabaseSync(evolutionPath, { readOnly: true })
-    const firstEvidence = firstEvolutionDb.prepare(`
-      SELECT source, trust, situation, rule_id, guidance_version
-      FROM evolution_episodes WHERE idempotency_key = ?
-    `).get(`automation-run:${firstDurableRun.id}`)
-    firstEvolutionDb.close()
-    expect(firstEvidence).toEqual({
-      source: 'automation',
-      trust: 'trusted',
-      situation: GROWTH_SITUATION,
-      rule_id: rule.id,
-      guidance_version: rule.generation,
+    // The terminal Automation row and its later owner judgement remain two
+    // immutable audit records, but user-facing Evaluation is one task. The
+    // terminal supplies execution/metrics while the authenticated reply
+    // supplies objective/delivery, so learning evidence is not double-counted.
+    expect(ctx.assistantEvaluation.summary({
+      scope: { workspace, preset: PRESET }, situation: GROWTH_SITUATION,
+    })).toMatchObject({
+      total: 1,
+      execution: { succeeded: 1, failed: 0, timedOut: 0, cancelled: 0, unknown: 0 },
+      objective: { achieved: 0, partial: 0, notAchieved: 1, unknown: 0 },
+      delivery: { delivered: 1, failed: 0, notRequired: 0, unknown: 0 },
     })
+    expect(ctx.assistantEvaluation.queryTasks({
+      scope: { workspace, preset: PRESET }, situation: GROWTH_SITUATION, limit: 10,
+    })).toEqual([
+      expect.objectContaining({
+        executionStatus: 'succeeded', objectiveStatus: 'not-achieved', deliveryStatus: 'delivered',
+        projection: expect.objectContaining({ subjectKind: 'automation-run', status: 'ready' }),
+      }),
+    ])
 
-    llm.failAutomationRuns = true
-    for (let index = 2; index <= 5; index += 1) {
-      await runGrowthAutomation(ctx, `growth-event-${index}`)
-    }
+    const evolutionDatabase = new DatabaseSync(evolutionPath, { readOnly: true })
+    const projected = evolutionDatabase.prepare(`
+      SELECT outcome, source, trust, evidence_kind
+      FROM evolution_episodes WHERE situation = ? AND source = 'evaluation'
+    `).all(GROWTH_SITUATION)
+    evolutionDatabase.close()
+    expect(projected).toEqual([{ outcome: 'failed', source: 'evaluation', trust: 'trusted', evidence_kind: 'objective' }])
 
-    await transport.message(larkMessage('om-retirement-session', '/new'))
+    // Provider retry of the same event is absorbed by Inbox/Evaluation idempotency.
+    await transport.message(objectiveFeedbackMessage)
     await runInboundPass(ctx)
-    await transport.message(larkMessage('om-retirement-request', 'request-evolution-retirement'))
-    await runInboundPass(ctx)
+    await ctx.assistantEvaluation.whenProjectionIdle()
 
-    const [retirementDispatch] = ctx.assistantPolicy.listPendingApprovalDispatches()
-    expect(retirementDispatch).toMatchObject({
-      sourceId: 'dsh-enhanced-assistant-evolution',
-      workspace,
-      principal: OWNER,
-      requester: `agent:${PRESET}`,
-      action: 'evolution.retire',
-      resource: { kind: 'evolution', id: `rule:${rule.id}` },
-      proposalVersion: 1,
-      state: 'pending',
-    })
-    expect(retirementDispatch?.diff).toContain('Post-adoption automated runs')
-    const retirementProposalRequest = llm.requests.find(request => {
-      const messages = JSON.stringify(request.messages)
-      return messages.includes('request-evolution-retirement')
-        && messages.includes('evolution_review')
-        && !messages.includes('evolution_propose')
-    })
-    const retirementProposalMessages = JSON.stringify(retirementProposalRequest?.messages)
-    expect(retirementProposalMessages).toContain('\\"kind\\":\\"retire\\"')
-    expect(retirementProposalMessages).toContain(`\\"ruleId\\":\\"${rule.id}\\"`)
-    expect(retirementProposalMessages).toContain('\\"evidenceTotal\\":5')
-
-    await runInboundPass(ctx)
-    await runInboundPass(ctx)
-    const retirementApprovalMessage = transport.sent.find(message =>
-      'approval' in message.input
-      && message.input.approval.title === `Retire learned guidance rule ${rule.id}`)
-    expect(retirementApprovalMessage?.input).toMatchObject({
-      approval: {
-        title: `Retire learned guidance rule ${rule.id}`,
-        body: expect.stringContaining('Post-adoption automated runs'),
-      },
-    })
-    if (retirementApprovalMessage === undefined || !('approval' in retirementApprovalMessage.input)) {
-      throw new Error('Delivery did not send the durable retirement approval card')
-    }
-    await transport.action({
-      messageId: retirementApprovalMessage.messageId,
-      chatId: retirementApprovalMessage.chatId,
-      operatorId: OWNER_USER,
-      tag: 'button',
-      value: retirementApprovalMessage.input.approval.approveValue,
-    })
-    expect(ctx.assistantPolicy.getProposal(retirementDispatch!.proposalId)).toMatchObject({
-      status: 'approved',
-      decidedBy: OWNER,
-      version: 2,
-    })
-
-    const retirementBeforeRestart = new DatabaseSync(evolutionPath, { readOnly: true })
-    const unappliedRetirement = retirementBeforeRestart.prepare(`
-      SELECT status, result_rule_id FROM evolution_proposals WHERE policy_proposal_id = ?
-    `).get(retirementDispatch!.proposalId)
-    retirementBeforeRestart.close()
-    expect(unappliedRetirement).toEqual({ status: 'pending', result_rule_id: null })
-
-    await closeContext(ctx)
-    runtime = await openGrowthRuntime(runtimeInput)
-    ctx = runtime.ctx
-    transport = runtime.transport
-    expect(ctx.assistantPolicy.getProposal(retirementDispatch!.proposalId)).toMatchObject({
-      status: 'approved',
-      decidedBy: OWNER,
-      version: 2,
-    })
-    const [reconciledRetirement] = ctx.assistantEvolution.reconcileProposals()
-    expect(reconciledRetirement).toMatchObject({
-      status: 'approved',
-      rule: {
-        id: rule.id,
-        situation: GROWTH_SITUATION,
-        guidance: GUIDANCE,
-        status: 'retired',
-        retiredReason: 'Post-adoption automated runs show the guidance is not helping.',
-        version: rule.version + 1,
-      },
-    })
-    expect(ctx.assistantEvolution.reconcileProposals()).toEqual([])
-
-    const exactOnceDb = new DatabaseSync(evolutionPath, { readOnly: true })
-    const retirementAudit = exactOnceDb.prepare(`
-      SELECT COUNT(*) AS count, MAX(result_version) AS result_version
-      FROM evolution_audit WHERE operation = 'retire' AND rule_id = ?
-    `).get(rule.id)
-    exactOnceDb.close()
-    expect(retirementAudit).toEqual({ count: 1, result_version: rule.version + 1 })
-
-    await transport.message(larkMessage('om-post-retirement-session', '/new'))
-    await runInboundPass(ctx)
+    // Distinct provider events about the same immutable run cannot amplify its
+    // sample weight. Equal judgement replays the same Evaluation receipt; an
+    // opposite judgement is surfaced as a conflict and does not overwrite it.
     await transport.message(larkMessage(
-      'om-post-retirement-guidance-check',
-      'fresh-guidance-check-after-retirement',
+      'om-objective-same-run', '/feedback not-achieved', automationMessage.messageId,
     ))
     await runInboundPass(ctx)
     await runInboundPass(ctx)
-    const postRetirementRequest = llm.requests.find(request =>
-      JSON.stringify(request.messages).includes('fresh-guidance-check-after-retirement'))
-    const postRetirementMessages = JSON.stringify(postRetirementRequest?.messages)
-    expect(postRetirementMessages).not.toContain('<learned_guidance>')
-    expect(postRetirementMessages).not.toContain(GUIDANCE)
+    await transport.message(larkMessage(
+      'om-objective-conflict', '/feedback achieved', automationMessage.messageId,
+    ))
+    await runInboundPass(ctx)
+    await runInboundPass(ctx)
+    expect(transport.sent.some(message =>
+      JSON.stringify(message.input).includes('已经记录了不同的任务结果'))).toBe(true)
 
-    await closeContext(ctx)
+    // A new session changes the binding generation. Neither an unlinked command
+    // nor a reply to the old generation may relabel the immutable run.
+    await transport.message(larkMessage('om-feedback-new', '/new'))
+    await runInboundPass(ctx)
+    await runInboundPass(ctx)
+    await transport.message(larkMessage('om-feedback-unlinked', '/feedback achieved'))
+    await runInboundPass(ctx)
+    await transport.message(larkMessage(
+      'om-feedback-stale', '/feedback achieved', automationMessage.messageId,
+    ))
+    await runInboundPass(ctx)
+    await runInboundPass(ctx)
+    await ctx.assistantEvaluation.whenProjectionIdle()
 
-    const policyDb = new DatabaseSync(policyPath, { readOnly: true })
-    const budgets = policyDb.prepare(`
-      SELECT amount, actual_amount, status FROM budget_reservations
-      WHERE idempotency_key LIKE 'automation-budget:growth-loop:%:automation-runs:growth-budget'
-      ORDER BY idempotency_key
-    `).all()
-    policyDb.close()
-    expect(budgets).toHaveLength(5)
-    expect(budgets).toEqual(budgets.map(() => ({ amount: 1, actual_amount: 1, status: 'finalized' })))
-
-    const automationDb = new DatabaseSync(automationPath, { readOnly: true })
-    const durableRuns = automationDb.prepare(`
-      SELECT id, status, session_id, evidence_status, evidence_json
-      FROM automation_runs WHERE automation_id = ? ORDER BY created_at, id
-    `).all(GROWTH_AUTOMATION) as Array<{
-      id: string
-      status: string
-      session_id: string
-      evidence_status: string
-      evidence_json: string
-    }>
-    automationDb.close()
-    expect(durableRuns).toHaveLength(5)
-    expect(durableRuns.filter(run => run.status === 'succeeded')).toHaveLength(1)
-    expect(durableRuns.filter(run => run.status === 'failed')).toHaveLength(4)
-    expect(durableRuns.every(run => run.evidence_status === 'recorded')).toBe(true)
-    for (const durableRun of durableRuns) {
-      expect(JSON.parse(durableRun.evidence_json)).toMatchObject({
-        situation: GROWTH_SITUATION,
-        outcome: durableRun.status,
-        automationId: GROWTH_AUTOMATION,
-        runId: durableRun.id,
-        sessionId: durableRun.session_id,
-        ruleId: rule.id,
-        guidanceVersion: rule.generation,
-      })
-    }
-
-    const evolutionDb = new DatabaseSync(evolutionPath, { readOnly: true })
-    const durableEvidence = evolutionDb.prepare(`
-      SELECT source, trust, situation, outcome, rule_id, guidance_version
-      FROM evolution_episodes WHERE idempotency_key LIKE 'automation-run:%'
-      ORDER BY occurred_at, id
-    `).all()
-    evolutionDb.close()
-    expect(durableEvidence).toHaveLength(5)
-    expect(durableEvidence.filter(entry => entry.outcome === 'failed')).toHaveLength(4)
-    expect(durableEvidence.every(entry =>
-      entry.source === 'automation'
-      && entry.trust === 'trusted'
-      && entry.situation === GROWTH_SITUATION
-      && entry.rule_id === rule.id
-      && entry.guidance_version === rule.generation)).toBe(true)
+    const finalEvaluation = new DatabaseSync(join(root, 'evaluation.sqlite'), { readOnly: true })
+    const finalCount = finalEvaluation.prepare(`
+      SELECT COUNT(*) AS count FROM evaluation_outcomes WHERE source_kind = 'user-feedback'
+    `).get()
+    finalEvaluation.close()
+    expect(finalCount).toEqual({ count: 1 })
   })
 
   test('runs a tool-bearing Delivery turn on Codex CLI without route capability metadata', async () => {
@@ -809,6 +1617,9 @@ describe('supervised personal-assistant growth composition', () => {
       defaultAgentPreset: PRESET,
       agentProvider: 'codex-subscription',
       agentModel: 'default',
+    })
+    await ctx.plugin(AssistantEvaluationService, {
+      databasePath: join(root, 'evaluation.sqlite'),
     })
     await ctx.plugin(AssistantEvolutionService, {
       databasePath: join(root, 'evolution.sqlite'),
@@ -844,6 +1655,7 @@ describe('supervised personal-assistant growth composition', () => {
     expect(request?.tools?.map(tool => tool.name)).toEqual(expect.arrayContaining([
       'evolution_review',
       'evolution_propose',
+      'evolution_undo',
     ]))
     expect(transport.sent.at(-1)?.input).toMatchObject({
       markdown: expect.stringContaining('Codex received the same Agent tools.'),

@@ -85,6 +85,209 @@ export interface StoredOutcome extends OutcomeEnvelope {
   recordedAt: number
 }
 
+export interface EvaluationTaskProjection {
+  /** Stable scope-bound task identity. Automation outcomes share the exact run reference. */
+  subjectKind: 'automation-run' | 'outcome'
+  subjectRef: string
+  /** Conflicting trusted owner judgements are quarantined instead of resolved by arrival order. */
+  status: 'ready' | 'objective-conflict'
+  primaryOutcomeId: string
+  executionOutcomeId?: string
+  objectiveOutcomeId?: string
+  deliveryOutcomeId?: string
+  /** Monotonic semantic revision consumed by downstream learning ledgers. */
+  learningVersion: number
+  /** SHA-256 of the complete canonical learning projection at this revision. */
+  learningDigest: string
+  /** `retract` removes any older eligible vote for this task. */
+  learningDisposition: 'upsert' | 'retract'
+}
+
+/** One task-level projection assembled from immutable append-only outcome records. */
+export interface ProjectedOutcome extends StoredOutcome {
+  projection: Readonly<EvaluationTaskProjection>
+}
+
+/**
+ * Minimal immutable proof returned to another trusted Host service. Metrics,
+ * producer idempotency keys and record timestamps stay private to the ledger.
+ */
+export interface TrustedOutcomeReceipt {
+  id: string
+  scope: Readonly<EvaluationScope>
+  /** Canonical JSON tuple of normalized absolute workspace and preset. */
+  scopeKey: string
+  situation: string
+  executionStatus: ExecutionStatus
+  objectiveStatus: ObjectiveStatus
+  deliveryStatus: DeliveryStatus
+  source: Readonly<OutcomeSource>
+  trust: 'trusted'
+  evidence: readonly Readonly<EvaluationEvidenceRef>[]
+  occurredAt: number
+  evaluator: Readonly<OutcomeEvaluator>
+}
+
+export interface TrustedTaskExecutionComponent {
+  outcomeId: string
+  status: ExecutionStatus
+  source: Readonly<OutcomeSource>
+  evidence: readonly Readonly<EvaluationEvidenceRef>[]
+  occurredAt: number
+  evaluator: Readonly<OutcomeEvaluator>
+}
+
+export interface TrustedTaskObjectiveComponent {
+  outcomeId: string
+  status: ObjectiveStatus
+  source: Readonly<OutcomeSource>
+  evidence: readonly Readonly<EvaluationEvidenceRef>[]
+  occurredAt: number
+  evaluator: Readonly<OutcomeEvaluator>
+}
+
+/**
+ * Canonical, versioned task state exported to Evolution. `triggerOutcomeId` is
+ * merely the append-only outbox row that caused reconciliation; every retry
+ * resolves the current task projection represented by `projection`.
+ *
+ * Execution and objective provenance are deliberately separate.  For an
+ * Automation task, execution comes from its immutable production receipt while
+ * the objective may come from a later authenticated owner judgement.  A flat
+ * source/evidence tuple cannot truthfully represent both authorities.
+ */
+export interface TrustedTaskLearningProjectionReceipt {
+  triggerOutcomeId: string
+  scope: Readonly<EvaluationScope>
+  scopeKey: string
+  /**
+   * Monotonic canonical-learning revision for the complete scope.  It advances
+   * in the same Evaluation writer transaction that changes a task projection
+   * and queues its durable projection outbox row.
+   */
+  scopeWatermark: number
+  situation: string
+  execution?: Readonly<TrustedTaskExecutionComponent>
+  objective?: Readonly<TrustedTaskObjectiveComponent>
+  projection: Readonly<{
+    subjectKind: 'automation-run' | 'outcome'
+    subjectRef: string
+    version: number
+    digest: string
+    disposition: 'upsert' | 'retract'
+    /** Exact trusted objective row selected by canonical precedence. */
+    evidenceOutcomeId?: string
+  }>
+}
+
+/** Exact current task identity frozen into an Evolution evidence window. */
+export interface EvaluationLearningEvidenceTuple {
+  subjectKind: 'automation-run' | 'outcome'
+  subjectRef: string
+  version: number
+  digest: string
+  disposition: 'upsert'
+}
+
+/**
+ * A complete scope-level fence snapshot.  The callback-capability accepting
+ * this type is synchronous: it holds Evaluation's writer lock for its entire
+ * execution, and callers must acquire any downstream lock only afterwards.
+ */
+export interface EvaluationLearningWriterFence {
+  scopeWatermark: number
+  evidence: readonly Readonly<EvaluationLearningEvidenceTuple>[]
+}
+
+export type EvaluationLearningWriterFenceFailure =
+  | 'evidence-changed'
+  | 'projection-pending'
+  | 'watermark-changed'
+
+export type EvaluationLearningWriterFenceResult<T> = Readonly<{
+  matched: true
+  value: T
+}> | Readonly<{
+  matched: false
+  reason: EvaluationLearningWriterFenceFailure
+}>
+
+export const TRUSTED_EVALUATION_PRODUCER_PROTOCOL =
+  'assistant-evaluation/trusted-producer/v1' as const
+
+export interface TrustedAutomationEvaluationClaims {
+  scope: Readonly<EvaluationScope>
+  automationId: string
+  situation: string
+  runId: string
+  executionMode: 'production'
+  executionStatus: ExecutionStatus
+  objectiveStatus: Extract<ObjectiveStatus, 'achieved' | 'not-achieved' | 'unknown'>
+  deliveryStatus: Extract<DeliveryStatus, 'not-required' | 'unknown'>
+  metrics: EvaluationMetrics
+  occurredAt: number
+  idempotencyKey: string
+  evaluatorVersion: `terminal-v${number}` | `host-runbook-v${number}`
+}
+
+export interface TrustedAutomationEvaluationAppendInput {
+  capabilityReceipt: unknown
+  automationId: string
+  runId: string
+  idempotencyKey: string
+}
+
+/** Process-local owner carried by a registration across Cordis sibling scopes. */
+export interface TrustedEvaluationRegistrationOwner {
+  ownsTrustedAutomationEvaluationRegistration(
+    registration: Readonly<TrustedAutomationEvaluationRegistration>,
+  ): boolean
+  ownsTrustedDeliveryEvaluationRegistration(
+    registration: Readonly<TrustedDeliveryEvaluationRegistration>,
+  ): boolean
+}
+
+export interface TrustedAutomationEvaluationRegistration {
+  protocol: typeof TRUSTED_EVALUATION_PRODUCER_PROTOCOL
+  producer: 'assistant-automations'
+  generation: string
+  owner: TrustedEvaluationRegistrationOwner
+  issueCapability(claims: TrustedAutomationEvaluationClaims): unknown
+  append(input: TrustedAutomationEvaluationAppendInput): StoredOutcome
+}
+
+export interface TrustedDeliveryEvaluationClaims {
+  scope: Readonly<EvaluationScope>
+  situation: string
+  runId: string
+  outboxId: string
+  chatId: string
+  principalId: string
+  bindingId: string
+  objectiveStatus: Extract<ObjectiveStatus, 'achieved' | 'partial' | 'not-achieved'>
+  occurredAt: number
+  idempotencyKey: string
+}
+
+export interface TrustedDeliveryEvaluationAppendInput {
+  capabilityReceipt: unknown
+  runId: string
+  outboxId: string
+  chatId: string
+  principalId: string
+  bindingId: string
+  idempotencyKey: string
+}
+
+export interface TrustedDeliveryEvaluationRegistration {
+  protocol: typeof TRUSTED_EVALUATION_PRODUCER_PROTOCOL
+  producer: 'assistant-delivery'
+  generation: string
+  owner: TrustedEvaluationRegistrationOwner
+  issueCapability(claims: TrustedDeliveryEvaluationClaims): unknown
+  append(input: TrustedDeliveryEvaluationAppendInput): StoredOutcome
+}
+
 /**
  * A model/evaluator judgement linked to an existing Host outcome. It is kept in
  * a separate table so a later self-assessment cannot double-count task volume or
@@ -165,7 +368,37 @@ export interface EvaluationHealth {
   selfReportedOutcomes: number
   externalOutcomes: number
   selfAssessments: number
+  taskProjections: number
+  conflictedTaskProjections: number
+  /** Append-only triggers still waiting to project their current canonical task state. */
+  pendingProjections: number
+  retryingProjections: number
+  projectionAttempts: number
+  oldestPendingProjectionAt?: number
   latestOccurredAt?: number
+}
+
+/** Durable Evaluation-owned work item for the optional Evolution sink. */
+export interface EvaluationProjectionOutboxEntry {
+  evaluationId: string
+  scope: Readonly<EvaluationScope>
+  status: 'pending'
+  attemptCount: number
+  nextAttemptAt: number
+  lastFailureCode?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface EvaluationProjectionState {
+  evaluationId: string
+  scope: Readonly<EvaluationScope>
+  status: 'pending' | 'recorded'
+  attemptCount: number
+  nextAttemptAt: number
+  lastFailureCode?: string
+  createdAt: number
+  updatedAt: number
 }
 
 /** Runtime limits exposed to Host producers before they build a durable append intent. */
@@ -194,7 +427,7 @@ export interface EvaluationSelfAssessRequest {
 
 export interface EvaluationReview {
   summary: OutcomeSummary
-  outcomes: readonly StoredOutcome[]
+  outcomes: readonly ProjectedOutcome[]
   /** Latest self-report per reviewed outcome; it never changes the parent summary. */
   selfAssessments: readonly StoredSelfAssessment[]
 }

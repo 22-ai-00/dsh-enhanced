@@ -38,7 +38,15 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/restart.sh
 ```
 
-需要评测、偏好学习、每日预算和受限主动巡检时，显式启用分级自治成长模式（命令名为兼容旧版仍保留 `supervised-growth`）：
+希望通过飞书日常对话自动学习语言等有界偏好时，使用普通 Lark 场景即可；它不要求 Evaluation、Heartbeat、Health 或 Recovery：
+
+```sh
+./scripts/install/install-local.sh --scenario lark --lark configure
+```
+
+安装后可直接用 `/learning status|explain|pause|resume|rollback <key> confirm|forget confirm` 管理当前 workspace + preset 的学习；这些命令由 Host 本地处理，不进入模型。`explain` 只显示闭集 key/value、状态、版本和证据计数，不回显历史对话；`rollback` 只撤回当前 owner lineage 的一个 exact active T1 key。持续偏好可用“以后用中文回答”等闭集表达，一次性的“这次请简短回答”只作用于当前请求，不会被固化。
+
+需要跨任务评测、演化提案、恢复账本和受限主动巡检时，再显式启用分级自治成长模式（命令名为兼容旧版仍保留 `supervised-growth`）：
 
 ```sh
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
@@ -55,7 +63,7 @@ dsh plugin --profile web add ./plugins/hello
 | ACP 与编码模型 | [`acp`](plugins/acp)、[`coding-subscription-provider`](plugins/coding-subscription-provider)、[`traex-acp-provider`](plugins/traex-acp-provider) |
 | 个人助理核心 | [`personal-assistant`](plugins/personal-assistant) 组合 Policy、Memory、Wiki 与 Automations |
 | 消息与凭据 | [`assistant-delivery`](plugins/assistant-delivery)、[`lark-channel`](plugins/lark-channel)、[`credentials-keychain`](plugins/credentials-keychain) |
-| 主动成长 | Evaluation、Preference Learning、Heartbeat、Event Triggers、Memory/Wiki Bridge 与可自动回滚的 Evolution |
+| 主动成长 | Evaluation、Preference Learning、Growth Experiments、Recovery、受限 adoption analyst、Memory/Wiki Bridge 与可自动回滚的 Evolution |
 | 运维与扩展 | Health、Plugin Control Plane 与最小示例 `hello` |
 
 全部包、用途和安装命令见[插件目录](plugins/README.md)。新增、重命名、弃用或移除插件时，同时更新该目录。

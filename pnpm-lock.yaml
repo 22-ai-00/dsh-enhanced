@@ -164,9 +164,15 @@ importers:
       '@dsh-enhanced/assistant-delivery':
         specifier: workspace:*
         version: link:plugins/assistant-delivery
+      '@dsh-enhanced/assistant-evaluation':
+        specifier: workspace:*
+        version: link:plugins/assistant-evaluation
       '@dsh-enhanced/assistant-evolution':
         specifier: workspace:*
         version: link:plugins/assistant-evolution
+      '@dsh-enhanced/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:packages/assistant-growth-contract
       '@dsh-enhanced/assistant-health':
         specifier: workspace:*
         version: link:plugins/assistant-health
@@ -176,6 +182,9 @@ importers:
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:plugins/assistant-policy
+      '@dsh-enhanced/assistant-recovery':
+        specifier: workspace:*
+        version: link:plugins/assistant-recovery
       '@dsh-enhanced/coding-subscription-provider':
         specifier: workspace:*
         version: link:plugins/coding-subscription-provider
@@ -200,6 +209,9 @@ importers:
       '@dsh-enhanced/personal-wiki':
         specifier: workspace:*
         version: link:plugins/personal-wiki
+      '@dsh-enhanced/preference-learning':
+        specifier: workspace:*
+        version: link:plugins/preference-learning
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
@@ -215,6 +227,18 @@ importers:
       yaml:
         specifier: 2.9.0
         version: 2.9.0
+
+  packages/assistant-growth-contract:
+    devDependencies:
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.8(@types/node@22.20.0)(vite@8.2.1(@types/node@22.20.0)(yaml@2.9.0))
 
   packages/llm-route-capabilities:
     devDependencies:
@@ -306,9 +330,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.1
-      '@dsh-enhanced/assistant-evolution':
-        specifier: '>=0.1.0 <0.2.0'
-        version: link:../assistant-evolution
+      '@dsh-enhanced/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:../../packages/assistant-growth-contract
       '@dsh-enhanced/llm-route-capabilities':
         specifier: workspace:*
         version: link:../../packages/llm-route-capabilities
@@ -349,6 +373,9 @@ importers:
       '@dsh-enhanced/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
+      '@dsh-enhanced/assistant-evolution':
+        specifier: workspace:*
+        version: link:../assistant-evolution
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
@@ -367,6 +394,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.1
+      '@dsh-enhanced/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:../../packages/assistant-growth-contract
       '@dsh-enhanced/llm-route-capabilities':
         specifier: workspace:*
         version: link:../../packages/llm-route-capabilities
@@ -416,6 +446,15 @@ importers:
       '@deepseek-ai/dsh-user-approval':
         specifier: 'catalog:'
         version: 0.1.0-rc.8(71b7117735d21b2bc30f9889b235e266)
+      '@dsh-enhanced/assistant-automations':
+        specifier: workspace:*
+        version: link:../assistant-automations
+      '@dsh-enhanced/assistant-evaluation':
+        specifier: workspace:*
+        version: link:../assistant-evaluation
+      '@dsh-enhanced/assistant-evolution':
+        specifier: workspace:*
+        version: link:../assistant-evolution
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
@@ -456,6 +495,15 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.1.0-rc.8(8523aa825fd63e646bb45b757ea3834d)
+      '@dsh-enhanced/assistant-automations':
+        specifier: workspace:*
+        version: link:../assistant-automations
+      '@dsh-enhanced/assistant-delivery':
+        specifier: workspace:*
+        version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-evolution':
+        specifier: workspace:*
+        version: link:../assistant-evolution
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
@@ -496,9 +544,61 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.1.0-rc.8(8523aa825fd63e646bb45b757ea3834d)
+      '@dsh-enhanced/assistant-automations':
+        specifier: workspace:*
+        version: link:../assistant-automations
       '@dsh-enhanced/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-evaluation':
+        specifier: workspace:*
+        version: link:../assistant-evaluation
+      '@dsh-enhanced/assistant-policy':
+        specifier: workspace:*
+        version: link:../assistant-policy
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.8(@types/node@22.20.0)(vite@8.2.1(@types/node@22.20.0)(yaml@2.9.0))
+
+  plugins/assistant-growth-experiments:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: 'catalog:'
+        version: 3.18.1
+      '@dsh-enhanced/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:../../packages/assistant-growth-contract
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 'catalog:'
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@deepseek-ai/dsh-agent-loop':
+        specifier: 'catalog:'
+        version: 0.1.0-rc.8(a07f6d3eb7823cc815bcf2c808cb6920)
+      '@deepseek-ai/dsh-agent-loop-testkit':
+        specifier: 'catalog:'
+        version: 0.1.0-rc.8(09e94d57701593a902e717708cbe5c40)
+      '@deepseek-ai/dsh-llm':
+        specifier: 'catalog:'
+        version: 0.1.0-rc.8(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-attachment@0.1.0-rc.8(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-brand@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1))(@deepseek-ai/dsh-timeout@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)(@deepseek-ai/dsh-invariants@0.1.0-rc.6(@deepseek-ai/cordis@4.0.1)))
+      '@deepseek-ai/dsh-tools':
+        specifier: 'catalog:'
+        version: 0.1.0-rc.8(8523aa825fd63e646bb45b757ea3834d)
+      '@dsh-enhanced/assistant-automations':
+        specifier: workspace:*
+        version: link:../assistant-automations
+      '@dsh-enhanced/assistant-delivery':
+        specifier: workspace:*
+        version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-evaluation':
+        specifier: workspace:*
+        version: link:../assistant-evaluation
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
@@ -530,6 +630,9 @@ importers:
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
+      '@dsh-enhanced/preference-learning':
+        specifier: workspace:*
+        version: link:../preference-learning
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
@@ -607,6 +710,43 @@ importers:
       '@deepseek-ai/dsh-user-approval':
         specifier: 'catalog:'
         version: 0.1.0-rc.8(71b7117735d21b2bc30f9889b235e266)
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.8(@types/node@22.20.0)(vite@8.2.1(@types/node@22.20.0)(yaml@2.9.0))
+
+  plugins/assistant-recovery:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: 'catalog:'
+        version: 3.18.1
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 'catalog:'
+        version: 4.0.1(@deepseek-ai/cordis-plugin-include@1.0.6)(@deepseek-ai/cordis-plugin-loader@1.0.2)
+      '@dsh-enhanced/assistant-automations':
+        specifier: workspace:*
+        version: link:../assistant-automations
+      '@dsh-enhanced/assistant-delivery':
+        specifier: workspace:*
+        version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-evaluation':
+        specifier: workspace:*
+        version: link:../assistant-evaluation
+      '@dsh-enhanced/assistant-evolution':
+        specifier: workspace:*
+        version: link:../assistant-evolution
+      '@dsh-enhanced/assistant-health':
+        specifier: workspace:*
+        version: link:../assistant-health
+      '@dsh-enhanced/preference-learning':
+        specifier: workspace:*
+        version: link:../preference-learning
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
@@ -743,9 +883,33 @@ importers:
       '@dsh-enhanced/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-evaluation':
+        specifier: workspace:*
+        version: link:../assistant-evaluation
+      '@dsh-enhanced/assistant-evolution':
+        specifier: workspace:*
+        version: link:../assistant-evolution
+      '@dsh-enhanced/assistant-growth-experiments':
+        specifier: workspace:*
+        version: link:../assistant-growth-experiments
+      '@dsh-enhanced/assistant-health':
+        specifier: workspace:*
+        version: link:../assistant-health
+      '@dsh-enhanced/assistant-heartbeat':
+        specifier: workspace:*
+        version: link:../assistant-heartbeat
+      '@dsh-enhanced/assistant-recovery':
+        specifier: workspace:*
+        version: link:../assistant-recovery
       '@dsh-enhanced/credentials-keychain':
         specifier: workspace:*
         version: link:../credentials-keychain
+      '@dsh-enhanced/personal-assistant':
+        specifier: workspace:*
+        version: link:../personal-assistant
+      '@dsh-enhanced/preference-learning':
+        specifier: workspace:*
+        version: link:../preference-learning
       '@types/markdown-it':
         specifier: 14.1.2
         version: 14.1.2

@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantDeliveryService, type DeliveryInboundRuntime } from '../src/service.ts'
 import { DeliveryStore } from '../src/store.ts'
@@ -64,6 +65,7 @@ interface MountHarnessOptions {
   approval?: boolean
   flush?: false | ((session: Session) => void | Promise<void>)
   permissionReplyBudget?: number
+  resolutionBudget?: number
   reviewer?: DeliveryReviewerAdapter
   reviewerMountOrder?: 'before-policy' | 'after-delivery'
   toolApprovalTtlMs?: number
@@ -120,10 +122,34 @@ async function mountHarness(root: string, allow = true, options: MountHarnessOpt
     }
     if (options.flush !== false) ctx.on('session/flush', options.flush ?? (() => {}))
   }
+  const budgets = [
+    ...(options.permissionReplyBudget === undefined ? [] : [{
+      id: 'permission-replies', metric: 'replies', limit: options.permissionReplyBudget,
+      periodMs: 60_000, scope: 'global' as const,
+    }]),
+    ...(options.resolutionBudget === undefined ? [] : [{
+      id: 'delivery-resolutions', metric: 'delivery-resolutions', limit: options.resolutionBudget,
+      periodMs: 60_000, scope: 'subject' as const,
+    }]),
+  ]
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: allow ? [
     { id: 'local-pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' },
-      actions: ['pair.issue', 'pair.link', 'delivery.resolve'], resource: { kind: 'message', id: '*' },
-      context: { initiators: ['foreground'] } },
+      actions: options.resolutionBudget === undefined
+        ? ['pair.issue', 'pair.link', 'delivery.resolve'] : ['pair.issue', 'pair.link'],
+      resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground'] } },
+    ...(options.resolutionBudget === undefined ? [] : [{
+      id: 'local-test-resolution', effect: 'allow' as const,
+      subject: { kind: 'external' as const, id: 'local:test' },
+      actions: ['delivery.resolve'], resource: { kind: 'message' as const, id: '*' },
+      context: { initiators: ['foreground' as const] },
+      budget: { id: 'delivery-resolutions', amount: 1 },
+    }, {
+      id: 'local-other-resolution', effect: 'allow' as const,
+      subject: { kind: 'external' as const, id: 'local:other' },
+      actions: ['delivery.resolve'], resource: { kind: 'message' as const, id: '*' },
+      context: { initiators: ['foreground' as const] },
+      budget: { id: 'delivery-resolutions', amount: 1 },
+    }]),
     { id: 'external-owner', effect: 'allow', subject: { kind: 'external', id: 'lark/bot-1/tenant-a/ou_owner' },
       actions: ['approval.decide', 'pair.confirm', 'ingest'], resource: { kind: 'message', id: '*' },
       context: { initiators: ['external'] } },
@@ -162,13 +188,7 @@ async function mountHarness(root: string, allow = true, options: MountHarnessOpt
       subject: { kind: 'agent', id: 'forged', workspace: '/work/alpha' },
       actions: ['history', 'reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['foreground'] } },
   ] : [],
-  ...(options.permissionReplyBudget === undefined ? {} : { budgets: [{
-    id: 'permission-replies',
-    metric: 'replies',
-    limit: options.permissionReplyBudget,
-    periodMs: 60_000,
-    scope: 'global' as const,
-  }] }),
+  ...(budgets.length === 0 ? {} : { budgets }),
   ...(options.reviewer === undefined ? {} : {
     autoReview: { provider: 'delivery-reviewer', model: 'review-model' },
   }) })
@@ -980,6 +1000,36 @@ describe('assistant delivery Cordis service', () => {
     })).toMatchObject({ intent: { replyToEventId: 'om_original' } })
     expect(() => service.enqueueBackground({ sourceId: 'forged', workspace: '/work/alpha', bindingId: binding.id,
       idempotencyKey: 'forged', text: 'no' })).toThrowError(expect.objectContaining({ code: 'policy-denied' }))
+    expect(() => service.enqueueBackground({
+      sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
+      idempotencyKey: 'automation:forged-learning', text: 'forged result',
+      metadata: { 'dsh.learning.runId': 'run-from-somewhere-else' },
+    })).toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    const outputPreview = 'verified automation result'
+    const outputDigest = createHash('sha256').update(outputPreview).digest('hex')
+    ctx.provide('assistantAutomations', {
+      resolveDeliveryEvidence: () => Object.freeze({
+        schemaVersion: 1, source: 'assistant-automations', executionKind: 'agent',
+        automationId: 'automation-1', runId: 'run-verified', occurrenceId: 'occurrence-verified',
+        workspace: '/work/alpha', agentPreset: 'primary', bindingId: binding.id,
+        situation: 'automation:automation-1', occurredAt: 123,
+        executionStatus: 'succeeded', outputDigest, proofDigest: 'b'.repeat(64),
+      }),
+    } as never)
+    expect(service.enqueueAutomationResult({
+      automationId: 'automation-1', runId: 'run-verified', workspace: '/work/alpha',
+      bindingId: binding.id, outputPreview,
+    })).toMatchObject({
+      intent: {
+        text: expect.stringContaining('/feedback not-achieved'),
+        metadata: {
+          'dsh.learning.schemaVersion': '2',
+          'dsh.learning.runId': 'run-verified',
+          'dsh.learning.outputDigest': outputDigest,
+          'dsh.learning.proofDigest': 'b'.repeat(64),
+        },
+      },
+    })
     expect((service as unknown as Record<string, unknown>)['store']).toBeUndefined()
     await ctx.fiber.restart()
   })
@@ -1248,8 +1298,11 @@ describe('assistant delivery Cordis service', () => {
 
   test('owns adapter lifecycle and rejects calls after disposal', async () => {
     const { ctx, service } = await harness()
-    expect(service.health()).toEqual({ pendingInbox: 0, deadLetterInbox: 0, pendingOutbox: 0,
-      deadLetterOutbox: 0, unknownOutbox: 0, adapters: 0 })
+    expect(service.health()).toEqual({ pendingInbox: 0, deadLetterInbox: 0,
+      actionableDeadLetterInbox: 0, resolvedDeadLetterInbox: 0, pendingOutbox: 0,
+      deadLetterOutbox: 0, actionableDeadLetterOutbox: 0, resolvedDeadLetterOutbox: 0,
+      unknownOutbox: 0, actionableUnknownOutbox: 0, resolvedUnknownOutbox: 0,
+      pendingPresentations: 0, deadPresentations: 0, adapters: 0 })
     const dispose = vi.fn()
     const adapter: DeliveryAdapter = { channel: 'lark', account: 'bot-1',
       capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain'] },
@@ -2178,6 +2231,153 @@ describe('assistant delivery Cordis service', () => {
     await ctx.fiber.restart()
   })
 
+  test('durably replaces the original approval card only with a domain application terminal state', async () => {
+    const { ctx, root, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1',
+      workspace: '/work/alpha', agentPreset: 'primary', policyRef: 'owner-dm' }),
+    process: async () => ({ outcome: 'processed' }) })
+    await service.acceptInbound(envelope)
+    const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const updatePresentation = vi.fn(async () => {})
+    await service.registerAdapter({
+      channel: 'lark',
+      account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain', 'markdown', 'approval'] },
+      start: async () => {},
+      send: async () => ({ outcome: 'accepted', providerMessageId: 'om_domain_terminal' }),
+      updatePresentation,
+    })
+    const proposal = ctx.assistantPolicy.propose({
+      idempotencyKey: 'domain-terminal-dispatch',
+      requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner',
+      action: 'send',
+      resource: { kind: 'message', id: binding.id },
+      diff: 'adopt exact rule',
+      summary: 'Adopt exact rule',
+      ttlMs: 60_000,
+      dispatch: { sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+        principal: 'lark/bot-1/tenant-a/ou_owner' },
+    })
+    await service.tick()
+    await service.whenIdle()
+    expect(service.history(foreground('delivery-session-1'), {}).outbox.find(row =>
+      row.intent.idempotencyKey === `approval-card:${proposal.proposalId}`))
+      .toMatchObject({ status: 'accepted', providerMessageId: 'om_domain_terminal' })
+
+    const presentationStore = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    expect(presentationStore.publishDeliveryPresentation({
+      presentationKey: `approval-application:${proposal.proposalId}`,
+      originalOutboxIdempotencyKey: `approval-card:${proposal.proposalId}`,
+      revision: 1,
+      presentation: {
+        kind: 'approval-application',
+        policyProposalId: proposal.proposalId,
+        localProposalId: 'evolution-proposal-1',
+        applicationStatus: 'conflicted',
+        operation: 'adopt',
+        terminalAt: 2_000,
+        receiptDigest: 'a'.repeat(64),
+      },
+    })).toMatchObject({ status: 'pending', presentedRevision: 0 })
+    await service.tick()
+    await service.whenIdle()
+    expect(updatePresentation).toHaveBeenCalledOnce()
+    expect(updatePresentation).toHaveBeenCalledWith(
+      'om_domain_terminal',
+      expect.objectContaining({ applicationStatus: 'conflicted', policyProposalId: proposal.proposalId }),
+      expect.any(AbortSignal),
+    )
+    expect(service.getDeliveryPresentation(`approval-application:${proposal.proposalId}`))
+      .toMatchObject({ status: 'presented', presentedRevision: 1, providerMessageId: 'om_domain_terminal' })
+    presentationStore.close()
+    await ctx.fiber.restart()
+  })
+
+  test('keeps an authoritative application terminal retryable past max attempts until its provider recovers', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    vi.setSystemTime(1_000_000)
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1',
+      workspace: '/work/alpha', agentPreset: 'primary', policyRef: 'owner-dm' }),
+    process: async () => ({ outcome: 'processed' }) })
+    await service.acceptInbound(envelope)
+    const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const updatePresentation = vi.fn(async (): Promise<void> => {
+      throw new Error('provider temporarily unavailable')
+    })
+    await service.registerAdapter({
+      channel: 'lark',
+      account: 'bot-1',
+      capabilities: { reconcileUnknownSend: false, receipts: [], formats: ['plain', 'approval'] },
+      start: async () => {},
+      send: async () => ({ outcome: 'accepted', providerMessageId: 'om_presentation_recovery' }),
+      updatePresentation,
+    })
+    const proposal = ctx.assistantPolicy.propose({
+      idempotencyKey: 'presentation-recovery-dispatch',
+      requester: 'automation:test',
+      principal: 'lark/bot-1/tenant-a/ou_owner',
+      action: 'send',
+      resource: { kind: 'message', id: binding.id },
+      diff: 'apply exact state',
+      summary: 'Apply exact state',
+      ttlMs: 60_000,
+      dispatch: { sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+        principal: 'lark/bot-1/tenant-a/ou_owner' },
+    })
+    await service.tick()
+    await service.whenIdle()
+    expect(service.history(foreground('delivery-session-1'), {}).outbox.find(row =>
+      row.intent.idempotencyKey === `approval-card:${proposal.proposalId}`))
+      .toMatchObject({ status: 'accepted', providerMessageId: 'om_presentation_recovery' })
+
+    const presentationKey = `approval-application:${proposal.proposalId}`
+    runtimeStoreFromService(service).publishDeliveryPresentation({
+      presentationKey,
+      originalOutboxIdempotencyKey: `approval-card:${proposal.proposalId}`,
+      revision: 1,
+      presentation: {
+        kind: 'approval-application',
+        policyProposalId: proposal.proposalId,
+        localProposalId: 'evolution-proposal-recovery',
+        applicationStatus: 'conflicted',
+        operation: 'adopt',
+        terminalAt: 1_000_001,
+        receiptDigest: 'b'.repeat(64),
+      },
+    })
+
+    // Delivery's regular send limit is five attempts. A completed domain
+    // receipt remains authoritative, so provider failures must keep this
+    // projection retryable even after that bound has been crossed.
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      await service.tick()
+      await service.whenIdle()
+      const pending = service.getDeliveryPresentation(presentationKey)!
+      expect(updatePresentation).toHaveBeenCalledTimes(attempt)
+      expect(pending).toMatchObject({ status: 'retry_wait', attemptCount: attempt,
+        failureCode: 'presentation-error' })
+      // Move past even the capped backoff without relying on an internal
+      // scheduling field in the public projection record.
+      vi.setSystemTime(Date.now() + 300_000)
+    }
+
+    updatePresentation.mockResolvedValueOnce(undefined)
+    await service.tick()
+    await service.whenIdle()
+    expect(updatePresentation).toHaveBeenCalledTimes(7)
+    expect(service.getDeliveryPresentation(presentationKey)).toMatchObject({
+      status: 'presented', attemptCount: 7, presentedRevision: 1,
+      providerMessageId: 'om_presentation_recovery',
+    })
+    await ctx.fiber.restart()
+  })
+
   test('persists a fair dispatch cursor across restart so a poison first page cannot starve later approvals', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     vi.setSystemTime(30_000)
@@ -2244,7 +2444,7 @@ describe('assistant delivery Cordis service', () => {
   })
 
   test('requires an explicit policy-gated operator decision before retrying an ambiguous send', async () => {
-    const { ctx, service } = await harness()
+    const { ctx, root, service } = await harness(true, { resolutionBudget: 1 })
     const challenge = service.issuePairing('test', principal)
     service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
     service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
@@ -2260,8 +2460,29 @@ describe('assistant delivery Cordis service', () => {
     await service.whenIdle()
     const unknown = service.history(foreground('delivery-session-1'), {}).outbox[0]!
     expect(unknown.status).toBe('unknown_after_send')
-    expect(service.resolveDeadLetter({ operatorId: 'test', kind: 'outbox', id: unknown.id,
-      expectedAttemptCount: unknown.attemptCount, resolution: 'retry' })).toMatchObject({ status: 'pending' })
+    const auditBeforeInvalidOperator = ctx.assistantPolicy.health().lastAuditSequence
+    expect(() => service.resolveDeadLetter({ operatorId: 'te\nst', kind: 'outbox', id: unknown.id,
+      expectedAttemptCount: unknown.attemptCount, resolution: 'retry' }))
+      .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    expect(ctx.assistantPolicy.health().lastAuditSequence).toBe(auditBeforeInvalidOperator)
+    const resolution = { operatorId: 'test', kind: 'outbox' as const, id: unknown.id,
+      expectedAttemptCount: unknown.attemptCount, resolution: 'retry' as const }
+    expect(service.resolveDeadLetter(resolution))
+      .toMatchObject({ record: { status: 'pending' }, receipt: { operatorId: 'test' }, replayed: false })
+    expect(service.resolveDeadLetter(resolution))
+      .toMatchObject({ record: { status: 'pending' }, receipt: { operatorId: 'test' }, replayed: true })
+    expect(() => service.resolveDeadLetter({ ...resolution, operatorId: 'other' }))
+      .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    const policyDatabase = new DatabaseSync(join(root, 'policy.sqlite'), { readOnly: true })
+    const reservations = policyDatabase.prepare(`
+      SELECT scope, metric, status FROM budget_reservations
+      WHERE metric = 'delivery-resolutions' ORDER BY scope
+    `).all()
+    policyDatabase.close()
+    expect(reservations).toEqual([
+      { scope: 'external:local:other', metric: 'delivery-resolutions', status: 'finalized' },
+      { scope: 'external:local:test', metric: 'delivery-resolutions', status: 'finalized' },
+    ])
     await ctx.fiber.restart()
   })
 })

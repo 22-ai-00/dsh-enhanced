@@ -1,4 +1,5 @@
 import { mkdtemp, rm } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -38,6 +39,33 @@ function due(store: AutomationStore, automationId: string, overrides: Record<str
   return store.listTasks({ automationId, limit: 10 })[0]!
 }
 
+function openSystemCircuit(store: AutomationStore, automationId: string) {
+  store.reconcileSystemOwned({
+    owner: 'heartbeat', automationId, idempotencyKey: `create:${automationId}`,
+    definition: definition({ schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' } }),
+  })
+  store.createManual({ automationId, requestId: 'open', dryRun: false })
+  const duty = store.acquireDuty({ ownerId: `duty-${automationId}`, now: 1_000, leaseMs: 10_000 })
+  const opening = store.claimNextTask({
+    ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_100, leaseMs: 1_000,
+  })!
+  store.startTask({
+    taskId: opening.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken,
+    now: 1_101, leaseMs: 1_000, sessionId: `opening-${automationId}`,
+  })
+  store.completeTask({
+    taskId: opening.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_200,
+    outcome: 'failed', outputPreview: 'bad configuration', usage: {}, diagnostic: {
+      schemaVersion: 1, failureClass: 'configuration', failurePhase: 'preflight',
+      failureCode: 'bad-configuration', promptSubmissionState: 'not-submitted',
+      sideEffectState: 'none', retryability: 'after-intervention',
+      budgetSettlementState: 'not-required',
+    },
+  })
+  const definitionHash = store.getDefinitionHash(automationId)!
+  return { duty, definitionHash, open: store.getCircuit(automationId, definitionHash)! }
+}
+
 describe('duty ownership and fencing', () => {
   test('acquires, renews, and takes over only at expiry with monotonic fencing', async () => {
     const { store } = await fixture()
@@ -50,6 +78,21 @@ describe('duty ownership and fencing', () => {
     expect(takeover).toEqual({ acquired: true, ownerId: 'owner-b', fencingToken: 2, leaseUntil: 2_200 })
     expect(() => store.renewDuty({ ownerId: 'owner-a', fencingToken: 1, now: 1_701, leaseMs: 500 }))
       .toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'stale-fence' }))
+    store.close()
+  })
+
+  test('releases only the exact duty fence and preserves monotonic takeover', async () => {
+    const { store } = await fixture()
+    expect(store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 }))
+      .toMatchObject({ acquired: true, fencingToken: 1 })
+    expect(store.releaseDuty({ ownerId: 'owner-a', fencingToken: 1, now: 1_100 }))
+      .toEqual({ acquired: false, ownerId: 'owner-a', fencingToken: 1, leaseUntil: 1_100 })
+    expect(store.acquireDuty({ ownerId: 'owner-b', now: 1_100, leaseMs: 500 }))
+      .toEqual({ acquired: true, ownerId: 'owner-b', fencingToken: 2, leaseUntil: 1_600 })
+    expect(() => store.releaseDuty({ ownerId: 'owner-a', fencingToken: 1, now: 1_101 }))
+      .toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'stale-fence' }))
+    expect(store.renewDuty({ ownerId: 'owner-b', fencingToken: 2, now: 1_200, leaseMs: 500 }))
+      .toMatchObject({ acquired: true, fencingToken: 2 })
     store.close()
   })
 
@@ -75,7 +118,10 @@ describe('task recovery and overlap', () => {
   test('requeues expired claimed work but marks ambiguous running work unknown', async () => {
     const { store } = await fixture()
     const claimedTask = due(store, 'auto-claimed')
-    const runningTask = due(store, 'auto-running', { schedule: { kind: 'at', at: '2026-08-21T10:01:00.000Z' } })
+    const runningTask = due(store, 'auto-running', {
+      schedule: { kind: 'at', at: '2026-08-21T10:01:00.000Z' },
+      approvalBindingId: 'binding-recovery-owner',
+    })
     store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
     store.claimTask({ taskId: claimedTask.id, ownerId: 'owner-a', fencingToken: 1, now: 1_100, leaseMs: 100 })
     store.claimTask({ taskId: runningTask.id, ownerId: 'owner-a', fencingToken: 1, now: 1_100, leaseMs: 100 })
@@ -95,6 +141,13 @@ describe('task recovery and overlap', () => {
           scope: { workspace: '/work/alpha', preset: 'primary' },
           executionStatus: 'unknown', objectiveStatus: 'unknown', deliveryStatus: 'not-required',
         }),
+      }),
+    ])
+    expect(store.listIncidents({ automationId: 'auto-running', limit: 10 })).toEqual([
+      expect.objectContaining({
+        state: 'open', failureClass: 'infrastructure', failurePhase: 'recovery',
+        failureCode: 'runner-lease-expired', notificationRouteId: 'binding-recovery-owner',
+        runId: recoveredRun.id,
       }),
     ])
     store.close()
@@ -187,6 +240,436 @@ describe('task recovery and overlap', () => {
         }),
       }),
     ])
+    store.close()
+  })
+
+  test('resolves only an exact immutable production evidence tuple into a revalidatable quality receipt', async () => {
+    const { store } = await fixture()
+    const task = due(store, 'auto-quality-proof')
+    const duty = store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+    store.claimTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_100, leaseMs: 1_000 })
+    store.startTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_101, leaseMs: 1_000, sessionId: 'quality-session' })
+    const run = store.completeTask({
+      taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_200,
+      outcome: 'succeeded', sessionId: 'quality-session', outputPreview: 'content never projected', usage: {},
+      evidenceAttribution: { sessionId: 'quality-session', ruleId: 'rule-1', guidanceVersion: 3 },
+      diagnostic: {
+        schemaVersion: 1, failureClass: 'none', failurePhase: 'none', failureCode: 'none',
+        promptSubmissionState: 'submitted', sideEffectState: 'possible', retryability: 'unsafe',
+        budgetSettlementState: 'not-required',
+      },
+    })
+    const expectation = {
+      automationId: 'auto-quality-proof', runId: run.id,
+      expectedScope: { workspace: '/work/alpha', preset: 'primary' },
+      expectedSituation: 'automation:auto-quality-proof', expectedOccurredAt: 1_200,
+      evidenceRef: { kind: 'automation-run' as const, ref: run.id },
+    }
+    const receipt = store.resolveQualityEvidence(expectation)!
+    expect(receipt).toMatchObject({
+      schemaVersion: 1, source: 'assistant-automations', executionKind: 'agent', automationId: 'auto-quality-proof',
+      runId: run.id, status: 'succeeded', scope: { workspace: '/work/alpha', preset: 'primary' },
+      situation: 'automation:auto-quality-proof', occurredAt: 1_200,
+      evidenceRef: { kind: 'automation-run', ref: run.id },
+      sessionId: 'quality-session', ruleId: 'rule-1', guidanceVersion: 3,
+      definitionHash: expect.stringMatching(/^[a-f0-9]{64}$/u),
+      proofDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    })
+    expect(receipt).not.toHaveProperty('outputPreview')
+    expect(receipt).not.toHaveProperty('artifactRef')
+    expect(receipt).not.toHaveProperty('principal')
+    expect(store.validateQualityEvidence(receipt)).toBe(true)
+    expect(store.validateQualityEvidence({ ...receipt, occurredAt: 1_201 })).toBe(false)
+    expect(store.resolveQualityEvidence({ ...expectation, expectedSituation: 'automation:other' })).toBeUndefined()
+
+    store.createManual({ automationId: 'auto-quality-proof', requestId: 'preview', dryRun: true })
+    const previewTask = store.claimNextTask({ ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_300, leaseMs: 1_000 })!
+    store.startTask({ taskId: previewTask.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_301, leaseMs: 1_000, sessionId: 'preview-session' })
+    const previewRun = store.completeTask({
+      taskId: previewTask.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_302,
+      outcome: 'succeeded', outputPreview: 'preview', usage: {}, diagnostic: {
+        schemaVersion: 1, failureClass: 'none', failurePhase: 'none', failureCode: 'none',
+        promptSubmissionState: 'submitted', sideEffectState: 'possible', retryability: 'unsafe',
+        budgetSettlementState: 'not-required',
+      },
+    })
+    expect(store.resolveQualityEvidence({
+      ...expectation, runId: previewRun.id, expectedOccurredAt: 1_302,
+      evidenceRef: { kind: 'automation-run', ref: previewRun.id },
+    })).toBeUndefined()
+    store.close()
+  })
+
+  test('proves only the exact Agent output and owner binding for typed Delivery', async () => {
+    const { store } = await fixture()
+    const task = due(store, 'auto-delivery-proof', { deliveryBindingId: 'binding-owner' })
+    const duty = store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+    store.claimTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_100, leaseMs: 1_000 })
+    store.startTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_101, leaseMs: 1_000, sessionId: 'delivery-session' })
+    const outputPreview = 'exact owner-visible result'
+    const run = store.completeTask({
+      taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_200,
+      outcome: 'succeeded', sessionId: 'delivery-session', outputPreview, usage: {},
+      diagnostic: {
+        schemaVersion: 1, failureClass: 'none', failurePhase: 'none', failureCode: 'none',
+        promptSubmissionState: 'submitted', sideEffectState: 'possible', retryability: 'unsafe',
+        budgetSettlementState: 'not-required',
+      },
+    })
+    const expectedOutputDigest = createHash('sha256').update(outputPreview).digest('hex')
+    const expectation = {
+      automationId: 'auto-delivery-proof', runId: run.id,
+      expectedWorkspace: '/work/alpha', expectedBindingId: 'binding-owner', expectedOutputDigest,
+    }
+    expect(store.resolveDeliveryEvidence(expectation)).toMatchObject({
+      schemaVersion: 1, source: 'assistant-automations', executionKind: 'agent',
+      automationId: 'auto-delivery-proof', runId: run.id, occurrenceId: run.occurrenceId,
+      workspace: '/work/alpha', agentPreset: 'primary', bindingId: 'binding-owner',
+      situation: 'automation:auto-delivery-proof', occurredAt: 1_200,
+      executionStatus: 'succeeded', outputDigest: expectedOutputDigest,
+      proofDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+    })
+    expect(store.resolveDeliveryEvidence({ ...expectation, expectedBindingId: 'binding-forged' })).toBeUndefined()
+    expect(store.resolveDeliveryEvidence({
+      ...expectation, expectedOutputDigest: createHash('sha256').update('forged').digest('hex'),
+    })).toBeUndefined()
+    store.completeRunDelivery({ runId: run.id, expectedStatus: 'pending',
+      deliveryRef: 'outbox-exact', now: 1_201 })
+    expect(store.resolveDeliveryEvidence(expectation)).toBeDefined()
+    store.close()
+  })
+
+  test('arms one durable half-open probe and atomically admits only one exact-definition task', async () => {
+    const value = await fixture()
+    const { store } = value
+    store.reconcileSystemOwned({
+      owner: 'heartbeat', automationId: 'auto-probe-single-flight', idempotencyKey: 'create:probe-single-flight',
+      definition: definition({
+        overlap: 'cancel-previous', schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' },
+      }),
+    })
+    store.createManual({ automationId: 'auto-probe-single-flight', requestId: 'open', dryRun: false })
+    const duty = store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+    const opening = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_100, leaseMs: 1_000,
+    })!
+    store.startTask({ taskId: opening.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_101, leaseMs: 1_000, sessionId: 'opening' })
+    store.completeTask({
+      taskId: opening.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_200,
+      outcome: 'failed', outputPreview: 'bad configuration', usage: {}, diagnostic: {
+        schemaVersion: 1, failureClass: 'configuration', failurePhase: 'preflight',
+        failureCode: 'bad-configuration', promptSubmissionState: 'not-submitted',
+        sideEffectState: 'none', retryability: 'after-intervention', budgetSettlementState: 'not-required',
+      },
+    })
+    const definitionHash = store.getDefinitionHash('auto-probe-single-flight')!
+    const opened = store.getCircuit('auto-probe-single-flight', definitionHash)!
+    const armed = store.armCircuitProbe({
+      owner: 'heartbeat', operationId: 'probe:single-flight',
+      automationId: 'auto-probe-single-flight', definitionHash,
+      expectedVersion: opened.version, now: 1_300, leaseMs: 1_000,
+    })
+    expect(armed).toMatchObject({
+      replayed: false, circuit: {
+        state: 'half-open', version: opened.version + 1,
+        probeToken: expect.stringMatching(/^probe-/), probeLeaseUntil: 2_300,
+      },
+    })
+
+    store.createManual({ automationId: 'auto-probe-single-flight', requestId: 'probe-a', dryRun: false })
+    store.createManual({ automationId: 'auto-probe-single-flight', requestId: 'probe-b', dryRun: false })
+    const first = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_301, leaseMs: 1_000,
+    })!
+    store.startTask({ taskId: first.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_302, leaseMs: 1_000, sessionId: 'probe-a' })
+    const second = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_303, leaseMs: 1_000,
+    })!
+    store.startTask({ taskId: second.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_304, leaseMs: 1_000, sessionId: 'probe-b' })
+
+    expect(store.acquireCircuitExecutionForTask({ taskId: first.id, now: 1_305, leaseMs: 1_000 }))
+      .toMatchObject({ kind: 'probe', circuit: { state: 'probing', probeTaskId: first.id } })
+    expect(store.acquireCircuitExecutionForTask({ taskId: second.id, now: 1_306, leaseMs: 1_000 }))
+      .toMatchObject({ kind: 'blocked', circuit: { state: 'probing', probeTaskId: first.id } })
+    // A retry by the same fenced task is idempotent, not a second probe grant.
+    expect(store.acquireCircuitExecutionForTask({ taskId: first.id, now: 1_307, leaseMs: 1_000 }))
+      .toMatchObject({ kind: 'probe', circuit: { probeTaskId: first.id } })
+
+    store.completeTask({
+      taskId: first.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_400,
+      outcome: 'succeeded', outputPreview: 'probe passed', usage: {}, diagnostic: {
+        schemaVersion: 1, failureClass: 'none', failurePhase: 'none', failureCode: 'none',
+        promptSubmissionState: 'submitted', sideEffectState: 'possible', retryability: 'unsafe',
+        budgetSettlementState: 'not-required',
+      },
+    })
+    expect(store.getCircuit('auto-probe-single-flight', definitionHash)).toMatchObject({
+      state: 'closed', version: opened.version + 3,
+    })
+    store.close()
+  })
+
+  test('atomically arms and schedules one replay-safe production canary bound to the exact circuit', async () => {
+    const { store, setNow } = await fixture()
+    const automationId = 'auto-atomic-canary'
+    const { duty, definitionHash, open } = openSystemCircuit(store, automationId)
+
+    // Work already queued while the circuit is open cannot steal the canary.
+    setNow(1_250)
+    const unrelated = store.createManual({ automationId, requestId: 'unrelated', dryRun: false })
+    setNow(1_300)
+    const input = {
+      owner: 'heartbeat', operationId: 'recovery:atomic-canary', automationId,
+      definitionHash, expectedVersion: open.version, now: 1_300, leaseMs: 1_000,
+    }
+    const receipt = store.probeCircuitAndScheduleCanary(input)
+    expect(receipt).toMatchObject({
+      operationId: input.operationId,
+      replayed: false,
+      executionMode: 'production',
+      occurrenceId: expect.stringMatching(/^occ-[a-f0-9]{64}$/u),
+      taskId: expect.stringMatching(/^task-occ-[a-f0-9]{64}$/u),
+      circuit: {
+        state: 'half-open', version: open.version + 1,
+        probeToken: expect.stringMatching(/^probe-/u), probeLeaseUntil: 2_300,
+      },
+    })
+    expect(receipt.taskId).toBe(`task-${receipt.occurrenceId}`)
+    expect(store.getOccurrence(receipt.occurrenceId)).toMatchObject({
+      triggerKind: 'manual', status: 'pending', dryRun: false, scheduledAt: 1_300,
+    })
+    expect(store.getTaskRecord(receipt.taskId)).toMatchObject({ status: 'scheduled', attemptCount: 0 })
+    const occurrenceCount = store.listOccurrences({ automationId, limit: 20 }).length
+    const taskCount = store.listTasks({ automationId, limit: 20 }).length
+    expect(store.probeCircuitAndScheduleCanary(input)).toEqual({ ...receipt, replayed: true })
+    expect(store.listOccurrences({ automationId, limit: 20 })).toHaveLength(occurrenceCount)
+    expect(store.listTasks({ automationId, limit: 20 })).toHaveLength(taskCount)
+    expect(() => store.probeCircuitAndScheduleCanary({ ...input, leaseMs: 2_000 }))
+      .toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'idempotency-conflict' }))
+
+    const unrelatedTask = store.claimNextTask({
+      ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_301, leaseMs: 1_000,
+    })!
+    expect(unrelatedTask.occurrenceId).toBe(unrelated.id)
+    store.startTask({
+      taskId: unrelatedTask.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken,
+      now: 1_302, leaseMs: 1_000, sessionId: 'unrelated',
+    })
+    expect(store.acquireCircuitExecutionForTask({ taskId: unrelatedTask.id, now: 1_303, leaseMs: 1_000 }))
+      .toMatchObject({ kind: 'blocked', circuit: { state: 'half-open' } })
+    store.completeTask({
+      taskId: unrelatedTask.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_304,
+      outcome: 'failed', outputPreview: 'circuit open', usage: {}, diagnostic: {
+        schemaVersion: 1, failureClass: 'configuration', failurePhase: 'preflight',
+        failureCode: 'circuit-open', promptSubmissionState: 'not-submitted',
+        sideEffectState: 'none', retryability: 'after-intervention', budgetSettlementState: 'not-required',
+      },
+    })
+    const canaryTask = store.claimNextTask({
+      ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_305, leaseMs: 1_000,
+    })!
+    expect(canaryTask.id).toBe(receipt.taskId)
+    store.startTask({
+      taskId: canaryTask.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken,
+      now: 1_306, leaseMs: 1_000, sessionId: 'atomic-canary',
+    })
+    expect(store.acquireCircuitExecutionForTask({ taskId: canaryTask.id, now: 1_307, leaseMs: 1_000 }))
+      .toMatchObject({ kind: 'probe', circuit: { state: 'probing', probeTaskId: receipt.taskId } })
+    store.close()
+  })
+
+  test('rolls back the circuit transition and operation ledger when atomic canary creation fails', async () => {
+    const { store, setNow } = await fixture()
+    const automationId = 'auto-canary-rollback'
+    const { definitionHash, open } = openSystemCircuit(store, automationId)
+    const operationId = 'recovery:collision'
+    setNow(1_250)
+    store.createManual({ automationId, requestId: `circuit-canary:${operationId}`, dryRun: false })
+    const occurrencesBefore = store.listOccurrences({ automationId, limit: 20 })
+    const tasksBefore = store.listTasks({ automationId, limit: 20 })
+
+    expect(() => store.probeCircuitAndScheduleCanary({
+      owner: 'heartbeat', operationId, automationId, definitionHash,
+      expectedVersion: open.version, now: 1_300, leaseMs: 1_000,
+    })).toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'idempotency-conflict' }))
+    expect(store.getCircuit(automationId, definitionHash)).toEqual(open)
+    expect(store.listOccurrences({ automationId, limit: 20 })).toEqual(occurrencesBefore)
+    expect(store.listTasks({ automationId, limit: 20 })).toEqual(tasksBefore)
+
+    // A different operation can still consume the unchanged CAS version,
+    // proving the failed operation left no durable ledger winner.
+    expect(store.probeCircuitAndScheduleCanary({
+      owner: 'heartbeat', operationId: 'recovery:after-rollback', automationId, definitionHash,
+      expectedVersion: open.version, now: 1_301, leaseMs: 1_000,
+    })).toMatchObject({ replayed: false, circuit: { state: 'half-open', version: open.version + 1 } })
+    store.close()
+  })
+
+  test('keeps preview executions completely outside the production circuit state machine', async () => {
+    const { store } = await fixture()
+    store.reconcileSystemOwned({
+      owner: 'heartbeat', automationId: 'auto-preview-circuit-isolation', idempotencyKey: 'create:preview-circuit-isolation',
+      definition: definition({
+        overlap: 'cancel-previous', schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' },
+      }),
+    })
+    const duty = store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+
+    store.createManual({ automationId: 'auto-preview-circuit-isolation', requestId: 'preview-failure', dryRun: true })
+    const previewFailure = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_100, leaseMs: 1_000,
+    })!
+    store.startTask({ taskId: previewFailure.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_101, leaseMs: 1_000, sessionId: 'preview-failure' })
+    expect(store.acquireCircuitExecutionForTask({ taskId: previewFailure.id, now: 1_102, leaseMs: 1_000 }))
+      .toEqual({ kind: 'normal' })
+    store.completeTask({
+      taskId: previewFailure.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_103,
+      outcome: 'failed', outputPreview: 'preview bad configuration', usage: {}, diagnostic: {
+        schemaVersion: 1, failureClass: 'configuration', failurePhase: 'preflight',
+        failureCode: 'preview-bad-configuration', promptSubmissionState: 'not-submitted',
+        sideEffectState: 'none', retryability: 'after-intervention', budgetSettlementState: 'not-required',
+      },
+    })
+    const definitionHash = store.getDefinitionHash('auto-preview-circuit-isolation')!
+    expect(store.getCircuit('auto-preview-circuit-isolation', definitionHash)).toBeUndefined()
+
+    store.createManual({ automationId: 'auto-preview-circuit-isolation', requestId: 'production-open', dryRun: false })
+    const productionFailure = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_200, leaseMs: 1_000,
+    })!
+    store.startTask({ taskId: productionFailure.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_201, leaseMs: 1_000, sessionId: 'production-open' })
+    store.completeTask({
+      taskId: productionFailure.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_202,
+      outcome: 'failed', outputPreview: 'production bad configuration', usage: {}, diagnostic: {
+        schemaVersion: 1, failureClass: 'configuration', failurePhase: 'preflight',
+        failureCode: 'production-bad-configuration', promptSubmissionState: 'not-submitted',
+        sideEffectState: 'none', retryability: 'after-intervention', budgetSettlementState: 'not-required',
+      },
+    })
+    const open = store.getCircuit('auto-preview-circuit-isolation', definitionHash)!
+    const armed = store.armCircuitProbe({
+      owner: 'heartbeat', operationId: 'probe:preview-isolation',
+      automationId: 'auto-preview-circuit-isolation', definitionHash,
+      expectedVersion: open.version, now: 1_300, leaseMs: 1_000,
+    })
+
+    store.createManual({ automationId: 'auto-preview-circuit-isolation', requestId: 'preview-success', dryRun: true })
+    const previewSuccess = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_301, leaseMs: 1_000,
+    })!
+    store.startTask({ taskId: previewSuccess.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_302, leaseMs: 1_000, sessionId: 'preview-success' })
+    expect(store.getOpenCircuitForTask(previewSuccess.id)).toBeUndefined()
+    expect(store.acquireCircuitExecutionForTask({ taskId: previewSuccess.id, now: 1_303, leaseMs: 1_000 }))
+      .toEqual({ kind: 'normal' })
+    store.completeTask({
+      taskId: previewSuccess.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_304,
+      outcome: 'succeeded', outputPreview: 'preview passed', usage: {}, diagnostic: {
+        schemaVersion: 1, failureClass: 'none', failurePhase: 'none', failureCode: 'none',
+        promptSubmissionState: 'submitted', sideEffectState: 'possible', retryability: 'unsafe',
+        budgetSettlementState: 'not-required',
+      },
+    })
+    expect(store.getCircuit('auto-preview-circuit-isolation', definitionHash)).toEqual(armed.circuit)
+
+    store.createManual({ automationId: 'auto-preview-circuit-isolation', requestId: 'production-probe', dryRun: false })
+    const productionProbe = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_305, leaseMs: 1_000,
+    })!
+    store.startTask({ taskId: productionProbe.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_306, leaseMs: 1_000, sessionId: 'production-probe' })
+    expect(store.acquireCircuitExecutionForTask({ taskId: productionProbe.id, now: 1_307, leaseMs: 1_000 }))
+      .toMatchObject({ kind: 'probe', circuit: { state: 'probing', probeTaskId: productionProbe.id } })
+    store.close()
+  })
+
+  test('recovers an expired durable probe lease after restart without clearing an ABA hash', async () => {
+    const value = await fixture()
+    const { store, path } = value
+    store.reconcileSystemOwned({
+      owner: 'heartbeat', automationId: 'auto-probe-restart', idempotencyKey: 'create:probe-restart',
+      definition: definition({ schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' } }),
+    })
+    store.createManual({ automationId: 'auto-probe-restart', requestId: 'open', dryRun: false })
+    const duty = store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+    const task = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_100, leaseMs: 1_000,
+    })!
+    store.startTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_101, leaseMs: 1_000, sessionId: 'opening' })
+    store.completeTask({
+      taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_200,
+      outcome: 'failed', outputPreview: 'bad config', usage: {}, diagnostic: {
+        schemaVersion: 1, failureClass: 'configuration', failurePhase: 'preflight',
+        failureCode: 'bad-configuration', promptSubmissionState: 'not-submitted', sideEffectState: 'none',
+        retryability: 'after-intervention', budgetSettlementState: 'not-required',
+      },
+    })
+    const oldHash = store.getDefinitionHash('auto-probe-restart')!
+    const open = store.getCircuit('auto-probe-restart', oldHash)!
+    store.armCircuitProbe({ owner: 'heartbeat', operationId: 'probe:restart-expiry',
+      automationId: 'auto-probe-restart', definitionHash: oldHash,
+      expectedVersion: open.version, now: 1_300, leaseMs: 100 })
+    store.createManual({ automationId: 'auto-probe-restart', requestId: 'expiring-probe', dryRun: false })
+    const probeTask = store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_350, leaseMs: 1_000,
+    })!
+    store.startTask({ taskId: probeTask.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_351, leaseMs: 1_000, sessionId: 'expiring-probe' })
+    expect(store.acquireCircuitExecutionForTask({ taskId: probeTask.id, now: 1_352, leaseMs: 1_000 }))
+      .toMatchObject({ kind: 'probe', circuit: { state: 'probing', probeLeaseUntil: 1_400 } })
+    store.close()
+
+    const restarted = new AutomationStore({ path, now: () => 1_500 })
+    restarted.reconcileSystemOwned({
+      owner: 'heartbeat', automationId: 'auto-probe-restart', idempotencyKey: 'probe-restart:v2',
+      definition: definition({ prompt: 'changed', schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' } }),
+    })
+    const newHash = restarted.getDefinitionHash('auto-probe-restart')!
+    expect(newHash).not.toBe(oldHash)
+    // Expiry recovery is exact-hash and must not create or clear the new hash.
+    expect(restarted.recoverExpiredCircuitProbes({ now: 1_500 })).toBe(1)
+    expect(restarted.getCircuit('auto-probe-restart', oldHash)).toMatchObject({ state: 'open' })
+    expect(restarted.getCircuit('auto-probe-restart', newHash)).toBeUndefined()
+    restarted.close()
+  })
+
+  test.each([
+    ['succeeded', {
+      schemaVersion: 1, failureClass: 'configuration', failurePhase: 'preflight', failureCode: 'bad-config',
+      promptSubmissionState: 'not-submitted', sideEffectState: 'none', retryability: 'after-intervention',
+      budgetSettlementState: 'not-required',
+    }],
+    ['failed', {
+      schemaVersion: 1, failureClass: 'none', failurePhase: 'none', failureCode: 'none',
+      promptSubmissionState: 'not-submitted', sideEffectState: 'none', retryability: 'safe',
+      budgetSettlementState: 'not-required',
+    }],
+  ] as const)('rejects a fresh %s completion whose typed diagnostic contradicts its outcome', async (outcome, diagnostic) => {
+    const { store } = await fixture()
+    const task = due(store, `auto-contradictory-${outcome}`)
+    const duty = store.acquireDuty({ ownerId: 'owner-a', now: 1_000, leaseMs: 10_000 })
+    store.claimTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_100, leaseMs: 1_000 })
+    store.startTask({ taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: 1_101, leaseMs: 1_000, sessionId: 'session-1' })
+
+    expect(() => store.completeTask({
+      taskId: task.id, ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_200,
+      outcome, outputPreview: 'contradictory', usage: {}, diagnostic,
+    })).toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'invalid-definition' }))
+    expect(store.listRuns({ automationId: `auto-contradictory-${outcome}`, limit: 10 })).toEqual([])
     store.close()
   })
 
@@ -337,6 +820,62 @@ describe('task recovery and overlap', () => {
     value.store.close()
   })
 
+  test('quarantines poison-first evidence and delivery rows without starving valid peers', async () => {
+    const value = await fixture()
+    for (const automationId of ['poison-a', 'valid-b']) {
+      value.store.createApproved({
+        automationId,
+        idempotencyKey: `create:${automationId}`,
+        definition: definition({
+          deliveryBindingId: 'binding-owner',
+          schedule: { kind: 'at', at: '2027-08-21T10:01:00.000Z' },
+        }),
+      })
+      value.store.createManual({ automationId, requestId: 'one', dryRun: false })
+    }
+    const duty = value.store.acquireDuty({ ownerId: 'owner-a', now: value.now(), leaseMs: 10_000 })
+    for (let index = 0; index < 2; index += 1) {
+      const claimed = value.store.claimNextTask({
+        ownerId: 'owner-a', fencingToken: duty.fencingToken, now: value.now(), leaseMs: 1_000,
+      })!
+      value.store.startTask({
+        taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: value.now(), leaseMs: 1_000, sessionId: `session-${index}`,
+      })
+      value.store.completeTask({
+        taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+        now: value.now(), outcome: 'succeeded', outputPreview: `done-${index}`, usage: {},
+      })
+    }
+
+    const database = new DatabaseSync(value.path)
+    const poisoned = database.prepare(`
+      SELECT id FROM automation_runs ORDER BY created_at, id LIMIT 1
+    `).get() as { id: string }
+    database.prepare(`
+      UPDATE automation_runs SET evidence_json = 'not-json', diagnostic_json = '{}' WHERE id = ?
+    `).run(poisoned.id)
+    database.close()
+
+    const evidence = value.store.listPendingEvidence(1)
+    const deliveries = value.store.listPendingDeliveries(1)
+    expect(evidence).toHaveLength(1)
+    expect(deliveries).toHaveLength(1)
+    expect(evidence[0]?.id).not.toBe(poisoned.id)
+    expect(deliveries[0]?.id).not.toBe(poisoned.id)
+
+    const inspected = new DatabaseSync(value.path, { readOnly: true })
+    expect(inspected.prepare(`
+      SELECT evidence_status, evidence_json, delivery_status, delivery_ref
+      FROM automation_runs WHERE id = ?
+    `).get(poisoned.id)).toEqual({
+      evidence_status: 'suppressed', evidence_json: null,
+      delivery_status: 'suppressed', delivery_ref: null,
+    })
+    inspected.close()
+    value.store.close()
+  })
+
   test('backs off and dead-letters a permanently failing Evaluation observation', async () => {
     const value = await fixture()
     const task = due(value.store, 'auto-evaluation-poison')
@@ -433,10 +972,11 @@ describe('task recovery and overlap', () => {
       expect.objectContaining({ id: 'legacy-malformed', evidenceStatus: 'suppressed' }),
     ]))
     expect(runs.filter(run => run.evidenceStatus === 'suppressed').every(run => run.evidence === undefined)).toBe(true)
-    expect(migrated.listPendingEvidence(10)).toHaveLength(3)
-    // The original v2 schema had no immutable execution snapshot. Its evidence
-    // was synthesized from the definition at migration time, so it must never
-    // be promoted into a trusted cross-scope Evaluation observation.
+    // The original v2 schema had no immutable execution snapshot. v7 therefore
+    // quarantines its synthesized pending evidence instead of dispatching it.
+    expect(migrated.listPendingEvidence(10)).toEqual([])
+    expect(migrated.listRuns({ limit: 10 }).filter(run => run.evidenceStatus === 'pending')).toEqual([])
+    // It must likewise never be promoted into a trusted Evaluation observation.
     expect(migrated.listPendingEvaluations(10)).toEqual([])
     migrated.close()
   })
@@ -464,6 +1004,67 @@ describe('task recovery and overlap', () => {
         status: 'succeeded', deliveryStatus: 'enqueued', deliveryRef: 'outbox-1',
       })
     expect(value.store.listPendingDeliveries(10)).toEqual([])
+    value.store.close()
+  })
+
+  test('never treats an approval-only route as an ordinary result delivery sink', async () => {
+    const value = await fixture()
+    value.store.createApproved({
+      automationId: 'approval-only', idempotencyKey: 'create:approval-only',
+      definition: definition({ approvalBindingId: 'binding-owner' }),
+    })
+    value.store.createManual({ automationId: 'approval-only', requestId: 'one', dryRun: false })
+    const duty = value.store.acquireDuty({ ownerId: 'owner-a', now: value.now(), leaseMs: 1_000 })
+    const claimed = value.store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: value.now(), leaseMs: 1_000,
+    })!
+    value.store.startTask({
+      taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: value.now(), leaseMs: 1_000, sessionId: 'session-approval-only',
+    })
+    const run = value.store.completeTask({
+      taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: value.now(), outcome: 'succeeded', outputPreview: 'proposal created', usage: {},
+    })
+
+    expect(run.deliveryStatus).toBeUndefined()
+    expect(value.store.getPendingEvaluationForRun(run.id)?.payload.deliveryStatus).toBe('not-required')
+    expect(value.store.listPendingDeliveries(10)).toEqual([])
+    expect(value.store.get('approval-only')?.definition).toMatchObject({
+      approvalBindingId: 'binding-owner',
+    })
+    value.store.close()
+  })
+
+  test('falls back to the immutable result binding for legacy Agent incidents', async () => {
+    const value = await fixture()
+    value.store.createApproved({
+      automationId: 'legacy-agent-incident', idempotencyKey: 'create:legacy-agent-incident',
+      definition: definition({ deliveryBindingId: 'binding-legacy-owner' }),
+    })
+    value.store.createManual({ automationId: 'legacy-agent-incident', requestId: 'one', dryRun: false })
+    const duty = value.store.acquireDuty({ ownerId: 'owner-a', now: value.now(), leaseMs: 1_000 })
+    const claimed = value.store.claimNextTask({
+      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: value.now(), leaseMs: 1_000,
+    })!
+    value.store.startTask({
+      taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: value.now(), leaseMs: 1_000, sessionId: 'session-legacy-incident',
+    })
+    value.store.completeTask({
+      taskId: claimed.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
+      now: value.now(), outcome: 'failed', outputPreview: 'not exposed', usage: {}, diagnostic: {
+        schemaVersion: 1, failureClass: 'provider', failurePhase: 'model-execution',
+        failureCode: 'provider-unavailable', promptSubmissionState: 'submitted',
+        sideEffectState: 'possible', retryability: 'unsafe', budgetSettlementState: 'not-required',
+      },
+    })
+
+    const incident = value.store.listIncidents({ automationId: 'legacy-agent-incident', limit: 10 })[0]!
+    expect(incident).toMatchObject({ state: 'open', notificationRouteId: 'binding-legacy-owner' })
+    expect(value.store.getIncidentNotificationTarget(incident.id)).toEqual({
+      kind: 'binding', bindingId: 'binding-legacy-owner', workspace: '/work/alpha',
+    })
     value.store.close()
   })
 

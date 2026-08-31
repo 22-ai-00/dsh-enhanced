@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-heartbeat",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "A bounded active-hours heartbeat policy layer backed by assistant-automations.",
   "license": "MIT",
   "type": "module",
@@ -55,7 +55,7 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.0-rc.8 <0.2.0",
     "@deepseek-ai/dsh-tools": ">=0.1.0-rc.8 <0.2.0",
-    "@dsh-enhanced/assistant-automations": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {

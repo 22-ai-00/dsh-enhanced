@@ -1,7 +1,7 @@
 import type { EvolutionMutation } from './types.js'
 
 export interface EvolutionMutationReview {
-  action: 'evolution.adopt' | 'evolution.retire'
+  action: 'evolution.adopt' | 'evolution.retire' | 'evolution.owner-undo'
   resource: Readonly<{ kind: 'evolution'; id: string }>
   summary: string
   diff: string
@@ -36,9 +36,31 @@ export function evolutionMutationReview(mutation: EvolutionMutation): EvolutionM
       diff: JSON.stringify(projection),
     })
   }
+  if (mutation.op === 'owner-undo') {
+    const projection = {
+      op: mutation.op,
+      scopeKey: mutation.scopeKey,
+      ruleId: mutation.ruleId,
+      situation: mutation.situation,
+      guidance: mutation.guidance,
+      generation: mutation.generation,
+      expectedVersion: mutation.expectedVersion,
+      reason: mutation.reason,
+    }
+    return Object.freeze({
+      action: 'evolution.owner-undo',
+      resource: Object.freeze({ kind: 'evolution', id: `rule:${mutation.ruleId}` }),
+      summary: boundedSummary(`Undo learned guidance rule ${mutation.ruleId}`),
+      diff: JSON.stringify(projection),
+    })
+  }
   const projection = {
     op: mutation.op,
+    scopeKey: mutation.scopeKey,
     ruleId: mutation.ruleId,
+    situation: mutation.situation,
+    guidance: mutation.guidance,
+    generation: mutation.generation,
     expectedVersion: mutation.expectedVersion,
     reason: mutation.reason,
     evaluation: mutation.evaluation,

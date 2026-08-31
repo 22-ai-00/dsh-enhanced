@@ -26,6 +26,7 @@ import {
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { effectiveApprovalPolicy, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { approvalReviewerOf, AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import { createHash } from 'node:crypto'
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -38,14 +39,45 @@ import { afterEach, describe, expect, test, vi } from 'vitest'
 import { deliveryProgressFromSessionEvent, modelPickerOperationId } from '../src/agent-runtime.ts'
 import { AssistantDeliveryService } from '../src/service.ts'
 import { DeliveryStore } from '../src/store.ts'
+import { DELIVERY_PREFERENCE_PROJECTION_PROTOCOL } from '../src/types.ts'
 import type {
   ConversationBinding, ConversationModelSelection, ConversationRef, DeliveryAdapter, DeliveryProgressIntent,
-  DeliveryPreferenceFeedback, InboundEnvelope, ModelRouteRef, OutboundFormat, OutboundIntent,
+  DeliveryPreferenceEvent, DeliveryPreferenceFeedback, InboundEnvelope, ModelRouteRef, OutboundFormat,
+  DeliveryLearningControlListener, DeliveryLearningControlRequest, DeliveryPreferenceFeedbackListener,
+  DeliveryLearningScopeStatus, DeliveryPreferenceRegistration,
+  OutboundIntent, OutboxRecord,
 } from '../src/types.ts'
 
 const roots: string[] = []
 const PRESET_TOOLS = ['bash', 'read', 'grep', 'glob'] as const
 const require = createRequire(import.meta.url)
+
+function learningScopeStatus(input: Readonly<{
+  administrativelyEnabled?: boolean
+  collectionMode?: 'active' | 'paused'
+  signals?: number
+  hypotheses?: number
+  storedActiveOverlays?: number
+  shadowHypotheses?: number
+}> = {}): Readonly<DeliveryLearningScopeStatus> {
+  const administrativelyEnabled = input.administrativelyEnabled ?? true
+  const collectionMode = input.collectionMode ?? 'active'
+  const storedActiveOverlays = input.storedActiveOverlays ?? 0
+  const effectiveActiveOverlays = administrativelyEnabled && collectionMode === 'active'
+    ? storedActiveOverlays
+    : 0
+  return Object.freeze({
+    mode: administrativelyEnabled ? collectionMode : 'disabled',
+    administrativelyEnabled,
+    collectionMode,
+    signals: input.signals ?? 0,
+    hypotheses: input.hypotheses ?? 0,
+    storedActiveOverlays,
+    effectiveActiveOverlays,
+    activeOverlays: effectiveActiveOverlays,
+    shadowHypotheses: input.shadowHypotheses ?? 0,
+  })
+}
 
 const presetToolsPlugin = {
   name: 'assistant-delivery-test-tools',
@@ -541,20 +573,71 @@ function runtimeStore(service: AssistantDeliveryService): {
     failureCode?: string
     leaseUntil?: number
     nextAttemptAt?: number
+    admissionCursor: Readonly<{ epoch: string; sequence: number }>
     receivedAt: number
   } | undefined
   getInboxByProviderEvent(channel: string, account: string, eventId: string): {
     id: string
     status: string
     bindingId?: string
+    admissionCursor: Readonly<{ epoch: string; sequence: number }>
+    receivedAt: number
   } | undefined
   deadLetterInbox(id: string, failureCode: string): unknown
   markInboxDispatching(input: unknown): unknown
   renewInboxClaim(input: { inboxId: string; ownerId: string; fencingToken: number; leaseMs: number }): boolean
   revokePrincipal(id: string, expectedVersion: number): unknown
   rotateBinding(input: { bindingId: string; expectedVersion: number; sessionId: string }): ConversationBinding
+  enqueue(input: OutboundIntent): OutboxRecord
+  getOutbox(id: string): OutboxRecord | undefined
 } {
   return (service as unknown as { deliveryStore: ReturnType<typeof runtimeStore> }).deliveryStore
+}
+
+function registerPreferenceSink(
+  service: AssistantDeliveryService,
+  append: DeliveryPreferenceFeedbackListener,
+  control?: DeliveryLearningControlListener,
+): () => void {
+  const owned = new WeakSet<object>()
+  const owner = Object.freeze({
+    ownsDeliveryPreferenceRegistration: (
+      registration: Readonly<DeliveryPreferenceRegistration>,
+    ) => owned.has(registration),
+  })
+  const registration: Readonly<DeliveryPreferenceRegistration> = Object.freeze({
+    protocol: DELIVERY_PREFERENCE_PROJECTION_PROTOCOL,
+    producer: 'preference-learning',
+    generation: service.trustedPreferenceProducerGeneration(),
+    owner,
+    append,
+    ...(control === undefined ? {} : { control }),
+  })
+  owned.add(registration)
+  return service.registerTrustedPreferenceSink(registration)
+}
+
+function preferenceProjectionRows(root: string): Array<{
+  status: string
+  attempt_count: number
+  failure_code: string | null
+  events_json: string
+}> {
+  const database = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+  try {
+    return database.prepare(`
+      SELECT status, attempt_count, failure_code, events_json
+      FROM delivery_preference_projection_outbox
+      ORDER BY created_at, batch_key
+    `).all() as Array<{
+      status: string
+      attempt_count: number
+      failure_code: string | null
+      events_json: string
+    }>
+  } finally {
+    database.close()
+  }
 }
 
 function suspendApprovalReviewerReader(ctx: Context): () => void {
@@ -1735,6 +1818,509 @@ describe('real rc.8 delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('/learning controls the exact owner scope locally without resuming Agent or calling the model', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-owner-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)
+    if (owner === undefined) throw new Error('owner fixture principal is missing')
+    const controls: Array<Readonly<DeliveryLearningControlRequest>> = []
+    registerPreferenceSink(
+      fixture.service,
+      events => events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const })),
+      async request => {
+        controls.push(request)
+        return {
+          outcome: 'applied',
+          action: request.action,
+          idempotencyKey: request.idempotencyKey,
+          replayed: false,
+          state: learningScopeStatus({
+            collectionMode: request.action === 'pause' ? 'paused' : 'active',
+            signals: 7,
+            hypotheses: 3,
+            storedActiveOverlays: 1,
+            shadowHypotheses: 2,
+          }),
+          ...(request.action === 'explain' ? { explanation: [{
+            key: 'response.verbosity', value: 'concise', state: 'active' as const,
+            version: 3, supportingSignals: 2, contradictingSignals: 0, evidenceMass: 800,
+          }] } : {}),
+          ...(request.action === 'rollback'
+            ? { rolledBack: true, rolledBackVersion: 4 }
+            : {}),
+        }
+      },
+    )
+    const resume = vi.spyOn(fixture.ctx.agents, 'resume')
+    const inputs = [
+      ['evt-learning-status', '/learning status', 'status'],
+      ['evt-learning-explain', '/learning explain', 'explain'],
+      ['evt-learning-pause', '/learning pause', 'pause'],
+      ['evt-learning-resume', '/learning resume', 'resume'],
+      ['evt-learning-rollback', '/learning rollback response.verbosity confirm', 'rollback'],
+    ] as const
+
+    for (const [eventId, text] of inputs) {
+      await fixture.service.acceptInbound(message(eventId, text, 'command'))
+      await drive(fixture.service)
+    }
+
+    expect(controls.map(request => request.action)).toEqual(inputs.map(([, , action]) => action))
+    for (const [index, request] of controls.entries()) {
+      const inbox = runtimeStore(fixture.service).getInboxByProviderEvent('lark', 'bot-1', inputs[index]![0])
+      expect(request).toMatchObject({
+        scope: { workspace: root, preset: 'primary' },
+        principalId: 'lark/bot-1/tenant-a/ou_owner',
+        principalLineage: { principalRecordId: owner.id, principalVersion: owner.version },
+        admissionCursor: inbox?.admissionCursor,
+        occurredAt: inbox?.receivedAt,
+      })
+      if (request.action === 'rollback') {
+        expect(request.preferenceKey).toBe('response.verbosity')
+      } else {
+        expect(request).not.toHaveProperty('preferenceKey')
+      }
+      expect(request.idempotencyKey).toMatch(/^delivery-learning-control-v2:[a-f0-9]{64}$/u)
+      expect(Object.isFrozen(request)).toBe(true)
+      expect(Object.isFrozen(request.scope)).toBe(true)
+      expect(Object.isFrozen(request.principalLineage)).toBe(true)
+      expect(Object.isFrozen(request.admissionCursor)).toBe(true)
+    }
+    expect(fixture.sends.at(-5)?.text).toContain('组件状态：已启用')
+    expect(fixture.sends.at(-5)?.text).toContain('收集状态：运行中')
+    expect(fixture.sends.at(-4)?.text).toContain('key=response.verbosity')
+    expect(fixture.sends.at(-3)?.text).toContain('已暂停当前工作区')
+    expect(fixture.sends.at(-2)?.text).toContain('已恢复当前工作区')
+    expect(fixture.sends.at(-1)?.text).toContain('已回滚 response.verbosity')
+    expect(fixture.llm.requests).toEqual([])
+    expect(resume).not.toHaveBeenCalled()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/learning forget is a no-op until the owner supplies the exact confirm token', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-forget-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const control = vi.fn(async (request: Readonly<DeliveryLearningControlRequest>) => ({
+      outcome: 'applied' as const,
+      action: request.action,
+      idempotencyKey: request.idempotencyKey,
+      replayed: false,
+      state: learningScopeStatus(),
+      deletedSignals: 11,
+      deletedHypotheses: 4,
+    }))
+    registerPreferenceSink(
+      fixture.service,
+      events => events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const })),
+      control,
+    )
+
+    await fixture.service.acceptInbound(message('evt-learning-forget-prompt', '/learning forget', 'command'))
+    await drive(fixture.service)
+    expect(control).not.toHaveBeenCalled()
+    expect(fixture.sends.at(-1)?.text).toContain('尚未删除任何学习记录')
+    expect(fixture.sends.at(-1)?.text).toContain('/learning forget confirm')
+
+    await fixture.service.acceptInbound(
+      message('evt-learning-forget-confirm', '/learning forget confirm', 'command'),
+    )
+    await drive(fixture.service)
+    expect(control).toHaveBeenCalledOnce()
+    expect(control.mock.calls[0]?.[0]).toMatchObject({ action: 'forget' })
+    expect(fixture.sends.at(-1)?.text).toContain('已永久删除')
+    expect(fixture.sends.at(-1)?.text).toContain('删除信号：11')
+    expect(fixture.llm.requests).toEqual([])
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/learning refuses linked principals even when their ordinary inbound route is authorized', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-linked-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const ownerPairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: ownerPairing.challenge.id, principal, code: ownerPairing.code })
+    const linkedPrincipal = { ...principal, user: 'ou_linked' }
+    const linkedConversation = { ...conversation, chat: 'oc_learning_linked' }
+    const linkedPairing = fixture.service.issuePairing('test', linkedPrincipal)
+    fixture.service.confirmPairing({
+      challengeId: linkedPairing.challenge.id,
+      principal: linkedPrincipal,
+      code: linkedPairing.code,
+    })
+    const control = vi.fn()
+    registerPreferenceSink(fixture.service, () => [], control)
+
+    await fixture.service.acceptInbound({
+      channel: 'lark',
+      account: 'bot-1',
+      eventId: 'evt-learning-linked',
+      occurredAt: Date.now(),
+      principal: linkedPrincipal,
+      conversation: linkedConversation,
+      kind: 'command',
+      text: '/learning pause',
+    })
+    await drive(fixture.service)
+
+    expect(control).not.toHaveBeenCalled()
+    expect(fixture.llm.requests).toEqual([])
+    expect(fixture.sends.at(-1)?.text).toContain('当前身份不是此会话的 owner')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/learning rejects attachments before invoking the trusted control registration', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-attachment-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const control = vi.fn()
+    registerPreferenceSink(fixture.service, () => [], control)
+
+    await fixture.service.acceptInbound({
+      ...message('evt-learning-attachment', '/learning pause', 'command'),
+      attachments: [{ resourceType: 'file', providerRef: 'file-learning-1', fileName: 'control.txt' }],
+    })
+    await drive(fixture.service)
+
+    expect(control).not.toHaveBeenCalled()
+    expect(fixture.llm.requests).toEqual([])
+    expect(fixture.sends.at(-1)?.text).toContain('学习控制命令不接受附件')
+    expect(fixture.sends.at(-1)?.text).toContain('本次未执行')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/learning reports an unavailable Preference service without entering Agent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-unavailable-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    registerPreferenceSink(
+      fixture.service,
+      events => events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const })),
+    )
+    const resume = vi.spyOn(fixture.ctx.agents, 'resume')
+    const accepted = await fixture.service.acceptInbound(
+      message('evt-learning-unavailable', '/learning status', 'command'),
+    )
+    await drive(fixture.service)
+
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
+    expect(fixture.sends.at(-1)?.text).toContain('偏好学习服务尚未启用')
+    expect(fixture.sends.at(-1)?.text).toContain('本次学习控制未执行')
+    expect(fixture.llm.requests).toEqual([])
+    expect(resume).not.toHaveBeenCalled()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/learning status distinguishes a registered but administratively disabled scope', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-disabled-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const control = vi.fn(async (request: Readonly<DeliveryLearningControlRequest>) => ({
+      outcome: 'applied' as const,
+      action: request.action,
+      idempotencyKey: request.idempotencyKey,
+      replayed: false,
+      state: learningScopeStatus({
+        administrativelyEnabled: false,
+        collectionMode: request.action === 'pause' ? 'paused' : 'active',
+        storedActiveOverlays: 1,
+      }),
+      ...(request.action === 'rollback' ? { rolledBack: false } : {}),
+    }))
+    registerPreferenceSink(fixture.service, () => [], control)
+
+    await fixture.service.acceptInbound(message('evt-learning-disabled', '/learning status', 'command'))
+    await drive(fixture.service)
+
+    expect(control).toHaveBeenCalledOnce()
+    expect(fixture.sends.at(-1)?.text).toContain('组件状态：已禁用')
+    expect(fixture.sends.at(-1)?.text).toContain('管理员开关：已关闭')
+    expect(fixture.sends.at(-1)?.text).toContain('收集状态：运行中')
+
+    await fixture.service.acceptInbound(message('evt-learning-disabled-pause', '/learning pause', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('已记录暂停状态')
+    expect(fixture.sends.at(-1)?.text).toContain('管理员禁用')
+
+    await fixture.service.acceptInbound(message('evt-learning-disabled-resume', '/learning resume', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('已记录恢复状态')
+    expect(fixture.sends.at(-1)?.text).toContain('管理员禁用')
+
+    await fixture.service.acceptInbound(message(
+      'evt-learning-disabled-rollback',
+      '/learning rollback response.verbosity confirm',
+      'command',
+    ))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('当前没有激活偏好')
+    expect(fixture.sends.at(-1)?.text).toContain('管理员开关：已禁用')
+    expect(fixture.sends.at(-1)?.text).toContain('已保存有效偏好：1')
+    expect(fixture.sends.at(-1)?.text).toContain('当前生效偏好：0')
+    expect(control).toHaveBeenCalledTimes(4)
+    expect(fixture.llm.requests).toEqual([])
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/learning keeps an unknown downstream commit retryable and does not expose its error', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-unknown-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const requests: Array<Readonly<DeliveryLearningControlRequest>> = []
+    const control = vi.fn((request: Readonly<DeliveryLearningControlRequest>) => {
+      requests.push(request)
+      if (requests.length === 1) throw new Error('private preference database and credential detail')
+      return {
+        outcome: 'applied' as const,
+        action: request.action,
+        idempotencyKey: request.idempotencyKey,
+        replayed: true,
+        state: learningScopeStatus({
+          collectionMode: 'paused', signals: 2, hypotheses: 1, shadowHypotheses: 1,
+        }),
+      }
+    })
+    registerPreferenceSink(fixture.service, () => [], control)
+    const accepted = await fixture.service.acceptInbound(
+      message('evt-learning-unknown', '/learning pause', 'command'),
+    )
+
+    await fixture.service.tick()
+    await fixture.service.whenIdle()
+
+    expect(control).toHaveBeenCalledOnce()
+    const waiting = runtimeStore(fixture.service).getInbox(accepted.inboxId)
+    expect(waiting).toMatchObject({
+      status: 'retry_wait',
+      failureCode: 'learning-dispatch-recovery',
+    })
+    expect(fixture.llm.requests).toEqual([])
+    expect(JSON.stringify(fixture.sends)).not.toContain('private preference')
+    expect(JSON.stringify(fixture.sends)).not.toContain('credential')
+    if (waiting?.nextAttemptAt === undefined) throw new Error('learning recovery retry timestamp is missing')
+    const database = new DatabaseSync(join(root, 'delivery.sqlite'))
+    try {
+      database.prepare('UPDATE inbox_messages SET next_attempt_at = 0 WHERE id = ? AND status = ?')
+        .run(accepted.inboxId, 'retry_wait')
+    } finally {
+      database.close()
+    }
+    await drive(fixture.service)
+    expect(control).toHaveBeenCalledTimes(2)
+    expect(requests[1]?.idempotencyKey).toBe(requests[0]?.idempotencyKey)
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
+    expect(fixture.sends.at(-1)?.text).toContain('已暂停当前工作区')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('holds later cross-binding preference events and /learning behind a deferred owner-lane head', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-preference-owner-lane-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const order: string[] = []
+    let failFirst = true
+    const control = vi.fn(async (request: Readonly<DeliveryLearningControlRequest>) => {
+      order.push(`control:${request.action}`)
+      return {
+        outcome: 'applied' as const,
+        action: request.action,
+        idempotencyKey: request.idempotencyKey,
+        replayed: false,
+        state: learningScopeStatus({ signals: 2 }),
+      }
+    })
+    registerPreferenceSink(fixture.service, events => {
+      const selection = events.find(event => event.source === 'direct-owner-feedback')
+      order.push(`append:${selection === undefined ? 'completion' : selection.candidateValue}`)
+      if (failFirst) {
+        failFirst = false
+        throw new Error('transient preference sink failure')
+      }
+      return events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const }))
+    }, control)
+
+    await fixture.service.acceptInbound(message('evt-lane-old', '/feedback helpful', 'command'))
+    await drive(fixture.service)
+    expect(order).toEqual(['append:helpful'])
+    const secondaryConversation = { ...conversation, chat: 'oc_preference_lane_secondary' }
+    const secondary = (eventId: string, text: string): InboundEnvelope => ({
+      ...message(eventId, text, 'command'),
+      conversation: secondaryConversation,
+    })
+    const database = new DatabaseSync(join(root, 'delivery.sqlite'))
+    try {
+      database.prepare(`
+        UPDATE delivery_preference_projection_outbox
+        SET next_attempt_at = ? WHERE terminal_at IS NULL
+      `).run(Date.now() + 3_600_000)
+    } finally {
+      database.close()
+    }
+
+    await fixture.service.acceptInbound(secondary('evt-lane-new', '/feedback verbosity concise'))
+    await drive(fixture.service)
+    expect(order).toEqual(['append:helpful'])
+    const status = await fixture.service.acceptInbound(
+      secondary('evt-lane-status', '/learning status'),
+    )
+    await drive(fixture.service)
+    expect(control).not.toHaveBeenCalled()
+    expect(runtimeStore(fixture.service).getInbox(status.inboxId)).toMatchObject({
+      status: 'retry_wait',
+      failureCode: 'learning-dispatch-recovery',
+    })
+
+    const release = new DatabaseSync(join(root, 'delivery.sqlite'))
+    try {
+      release.prepare(`
+        UPDATE delivery_preference_projection_outbox
+        SET next_attempt_at = 0 WHERE terminal_at IS NULL
+      `).run()
+      release.prepare(`
+        UPDATE inbox_messages SET next_attempt_at = 0
+        WHERE id = ? AND status = 'retry_wait'
+      `).run(status.inboxId)
+    } finally {
+      release.close()
+    }
+    await drive(fixture.service)
+
+    expect(order).toEqual([
+      'append:helpful',
+      'append:helpful',
+      'append:concise',
+      'control:status',
+    ])
+    expect(runtimeStore(fixture.service).getInbox(status.inboxId)).toMatchObject({ status: 'processed' })
+    expect(preferenceProjectionRows(root)).toEqual([])
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('recovers the exact cross-binding owner-lane order across a Delivery restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-preference-owner-lane-restart-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const first = await runtimeHarness(root, saved)
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const initialAttempts: string[] = []
+    registerPreferenceSink(first.service, events => {
+      const selection = events.find(event => event.source === 'direct-owner-feedback')
+      initialAttempts.push(selection === undefined ? 'completion' : selection.candidateValue)
+      throw new Error('transient sink failure before restart')
+    }, async request => ({
+      outcome: 'applied' as const,
+      action: request.action,
+      idempotencyKey: request.idempotencyKey,
+      replayed: false,
+      state: learningScopeStatus(),
+    }))
+
+    await first.service.acceptInbound(message('evt-restart-lane-old', '/feedback helpful', 'command'))
+    await drive(first.service)
+    const secondaryConversation = { ...conversation, chat: 'oc_preference_lane_restart_secondary' }
+    const secondary = (eventId: string, text: string): InboundEnvelope => ({
+      ...message(eventId, text, 'command'),
+      conversation: secondaryConversation,
+    })
+    const postpone = new DatabaseSync(join(root, 'delivery.sqlite'))
+    try {
+      postpone.prepare(`
+        UPDATE delivery_preference_projection_outbox
+        SET next_attempt_at = ? WHERE terminal_at IS NULL
+      `).run(Date.now() + 3_600_000)
+    } finally {
+      postpone.close()
+    }
+    await first.service.acceptInbound(secondary('evt-restart-lane-new', '/feedback wrong-action'))
+    await drive(first.service)
+    const status = await first.service.acceptInbound(
+      secondary('evt-restart-lane-status', '/learning status'),
+    )
+    await drive(first.service)
+    expect(initialAttempts).toEqual(['helpful'])
+    expect(runtimeStore(first.service).getInbox(status.inboxId)).toMatchObject({
+      status: 'retry_wait',
+      failureCode: 'learning-dispatch-recovery',
+    })
+    const releaseControl = new DatabaseSync(join(root, 'delivery.sqlite'))
+    try {
+      releaseControl.prepare(`
+        UPDATE inbox_messages SET next_attempt_at = 0
+        WHERE id = ? AND status = 'retry_wait'
+      `).run(status.inboxId)
+    } finally {
+      releaseControl.close()
+    }
+    await first.ctx.fiber.restart()
+
+    const restarted = await runtimeHarness(root, saved)
+    const recoveredOrder: string[] = []
+    const control = vi.fn(async (request: Readonly<DeliveryLearningControlRequest>) => {
+      recoveredOrder.push(`control:${request.action}`)
+      return {
+        outcome: 'applied' as const,
+        action: request.action,
+        idempotencyKey: request.idempotencyKey,
+        replayed: true,
+        state: learningScopeStatus({ signals: 2 }),
+      }
+    })
+    registerPreferenceSink(restarted.service, events => {
+      const selection = events.find(event => event.source === 'direct-owner-feedback')
+      recoveredOrder.push(`append:${selection === undefined ? 'completion' : selection.candidateValue}`)
+      return events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const }))
+    }, control)
+    await drive(restarted.service)
+
+    expect(recoveredOrder).toEqual([
+      'append:helpful',
+      'append:wrong-action',
+      'control:status',
+    ])
+    expect(control).toHaveBeenCalledOnce()
+    expect(runtimeStore(restarted.service).getInbox(status.inboxId)).toMatchObject({ status: 'processed' })
+    expect(preferenceProjectionRows(root)).toEqual([])
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('/learning help and invalid input are discoverable local no-ops', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-help-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const resume = vi.spyOn(fixture.ctx.agents, 'resume')
+
+    await fixture.service.acceptInbound(message('evt-learning-help', '/learning', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('/learning status')
+    expect(fixture.sends.at(-1)?.text).toContain('/learning forget confirm')
+
+    await fixture.service.acceptInbound(message('evt-learning-invalid', '/learning status now', 'command'))
+    await drive(fixture.service)
+    expect(fixture.sends.at(-1)?.text).toContain('学习控制命令')
+
+    expect(fixture.llm.requests).toEqual([])
+    expect(resume).not.toHaveBeenCalled()
+    await fixture.ctx.fiber.restart()
+  })
+
   test('/feedback emits an owner-attested typed event only after the durable dispatch gate', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-owner-'))
     roots.push(root)
@@ -1752,16 +2338,18 @@ describe('real rc.8 delivery Agent runtime', () => {
       return markInboxDispatching(input)
     })
     const feedback: Array<Readonly<DeliveryPreferenceFeedback>> = []
-    fixture.service.subscribePreferenceFeedback(events => {
+    registerPreferenceSink(fixture.service, events => {
       order.push('feedback-listener')
       expect(Object.isFrozen(events)).toBe(true)
       for (const event of events) {
         expect(Object.isFrozen(event)).toBe(true)
         expect(Object.isFrozen(event.scope)).toBe(true)
-        feedback.push(event)
+        if (event.source === 'direct-owner-feedback') feedback.push(event)
       }
       return events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const }))
     })
+    await fixture.service.whenIdle()
+    order.length = 0
     const resume = vi.spyOn(fixture.ctx.agents, 'resume')
     const modelCalls = fixture.llm.requests.length
     const inbound = {
@@ -1775,20 +2363,25 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(store.getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
     expect(feedback).toEqual([expect.objectContaining({
       scope: { workspace: root, preset: 'primary' },
+      principalLineage: {
+        principalRecordId: store.getPrincipal(principal)?.id,
+        principalVersion: store.getPrincipal(principal)?.version,
+      },
+      admissionCursor: store.getInbox(accepted.inboxId)?.admissionCursor,
       preferenceKey: 'response.verbosity',
       candidateValue: 'concise',
       stance: 'support',
       actorTrust: 'owner-authenticated',
-      interpretationTrust: 'typed-feedback',
+      interpretationTrust: 'explicit-selection',
       source: 'direct-owner-feedback',
       occurredAt: store.getInbox(accepted.inboxId)?.receivedAt,
     })])
-    expect(feedback[0]?.idempotencyKey).toMatch(/^delivery-feedback-v1:[a-f0-9]{64}$/u)
+    expect(feedback[0]?.idempotencyKey).toMatch(/^delivery-feedback-v3:[a-f0-9]{64}$/u)
     expect(feedback[0]?.idempotencyKey).not.toContain(inbound.eventId)
     expect(feedback[0]?.idempotencyKey).not.toContain(principal.user)
     expect(fixture.llm.requests).toHaveLength(modelCalls)
     expect(resume).not.toHaveBeenCalled()
-    expect(fixture.sends.at(-1)?.text).toContain('已记录反馈')
+    expect(fixture.sends.at(-1)?.text).toContain('已记录偏好反馈')
 
     await expect(fixture.service.acceptInbound(inbound)).resolves.toMatchObject({
       duplicate: true,
@@ -1799,6 +2392,353 @@ describe('real rc.8 delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('successful ordinary owner turns emit content-free behavioral use and closed natural corrections', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-automatic-preference-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const events: DeliveryPreferenceEvent[] = []
+    const store = runtimeStore(fixture.service)
+    registerPreferenceSink(fixture.service, batch => {
+      for (const event of batch) {
+        events.push(event)
+        if (event.source === 'delivery-observation') {
+          expect(store.getOutbox(event.completion.replyOutboxId)).toMatchObject({
+            id: event.completion.replyOutboxId,
+            intent: { replyToEventId: event.completion.sourceEventId },
+          })
+        }
+      }
+      return batch.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const }))
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-auto-language', '请帮我总结今天需要完成的工作安排'))
+    await drive(fixture.service)
+    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({
+      source: 'delivery-observation',
+      preferenceKey: 'response.language',
+      candidateValue: 'zh-CN',
+      actorTrust: 'owner-authenticated',
+      interpretationTrust: 'behavioral-inference',
+      completion: expect.objectContaining({ sourceEventId: 'evt-auto-language' }),
+    })]))
+    expect(JSON.stringify(events)).not.toContain('请帮我总结')
+
+    await fixture.service.acceptInbound(message('evt-natural-correction', '以后简短一点'))
+    await drive(fixture.service)
+    expect(events).toEqual(expect.arrayContaining([expect.objectContaining({
+      source: 'direct-owner-feedback',
+      preferenceKey: 'response.verbosity',
+      candidateValue: 'concise',
+      interpretationTrust: 'explicit-selection',
+    })]))
+
+    for (const [eventId, text] of [
+      ['evt-one-shot-polite-en', 'Could you please answer in Chinese?'],
+      ['evt-one-shot-polite-zh', '麻烦用英文回答'],
+    ] as const) {
+      await fixture.service.acceptInbound(message(eventId, text))
+      await drive(fixture.service)
+      expect(events.filter(event => 'completion' in event
+        && event.completion.sourceEventId === eventId)).toEqual([
+        expect.objectContaining({ source: 'delivery-completion' }),
+      ])
+    }
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('restarts after reply commit and replays its atomic content-free projection without rerunning Agent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-preference-crash-replay-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const first = await runtimeHarness(root, saved)
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    const accepted = await first.service.acceptInbound(
+      message('evt-preference-crash-replay', '请总结今天需要完成的工作安排'),
+    )
+    await drive(first.service)
+    expect(first.llm.requests).toHaveLength(1)
+    expect(runtimeStore(first.service).getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
+    expect(first.sends).toHaveLength(1)
+    expect(preferenceProjectionRows(root)).toEqual([
+      expect.objectContaining({ status: 'pending', attempt_count: 0, failure_code: null }),
+    ])
+    await first.ctx.fiber.restart()
+
+    const restarted = await runtimeHarness(root, saved)
+    const replayed: DeliveryPreferenceEvent[] = []
+    registerPreferenceSink(restarted.service, events => {
+      replayed.push(...events)
+      return events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const }))
+    })
+    await restarted.service.whenIdle()
+    await drive(restarted.service)
+
+    expect(restarted.llm.requests).toEqual([])
+    expect(replayed).toEqual([expect.objectContaining({
+      source: 'delivery-observation',
+      preferenceKey: 'response.language',
+      candidateValue: 'zh-CN',
+      completion: expect.objectContaining({
+        sourceInboxId: accepted.inboxId,
+        sourceEventId: 'evt-preference-crash-replay',
+      }),
+    })])
+    expect(JSON.stringify(replayed)).not.toContain('请总结今天')
+    expect(preferenceProjectionRows(root)).toEqual([])
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('/feedback binds an objective label only to the exact replied Automation delivery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-objective-feedback-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    expect(() => fixture.service.registerTrustedDeliveryEvaluationSink(Object.freeze({
+      protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
+      producer: 'assistant-delivery' as const,
+      generation: fixture.service.trustedEvaluationProducerGeneration(),
+      owner: Object.freeze({
+        ownsTrustedAutomationEvaluationRegistration: () => false,
+        ownsTrustedDeliveryEvaluationRegistration: () => false,
+      }),
+      issueCapability: () => Object.freeze(Object.create(null) as object),
+      append: () => { throw new Error('unreachable fake Evaluation append') },
+    }))).toThrowError(/registration is invalid/i)
+    const ownedRegistrations = new WeakSet<object>()
+    const capabilities = new WeakMap<object, Record<string, unknown>>()
+    const outcomes: Array<Record<string, unknown>> = []
+    const byKey = new Map<string, Record<string, unknown>>()
+    const payloads = new Map<string, string>()
+    const registrationOwner = Object.freeze({
+      ownsTrustedAutomationEvaluationRegistration: () => false,
+      ownsTrustedDeliveryEvaluationRegistration: (value: object) => ownedRegistrations.has(value),
+    })
+    const exactRegistration = Object.freeze({
+      protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
+      producer: 'assistant-delivery' as const,
+      generation: fixture.service.trustedEvaluationProducerGeneration(),
+      owner: registrationOwner,
+      issueCapability(input: unknown) {
+        const capability = Object.freeze(Object.create(null) as object)
+        capabilities.set(capability, structuredClone(input) as Record<string, unknown>)
+        return capability
+      },
+      append(input: unknown) {
+        const appendInput = input as Record<string, unknown>
+        const claims = capabilities.get(appendInput.capabilityReceipt as object)
+        if (claims === undefined) throw new Error('forged Evaluation capability')
+        const key = String(appendInput.idempotencyKey)
+        const payload = JSON.stringify(claims)
+        const existing = byKey.get(key)
+        if (existing !== undefined) {
+          if (payloads.get(key) !== payload) {
+            throw Object.assign(new Error('objective judgement conflict'), { code: 'idempotency-conflict' })
+          }
+          return existing
+        }
+        const stored = Object.freeze({
+          ...claims,
+          id: `evaluation-${byKey.size + 1}`,
+          executionStatus: 'succeeded',
+          deliveryStatus: 'delivered',
+          source: Object.freeze({ kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' }),
+          trust: 'trusted',
+          evidence: Object.freeze([
+            Object.freeze({ kind: 'automation-run', ref: String(claims.runId) }),
+            Object.freeze({ kind: 'delivery-outbox', ref: String(claims.outboxId) }),
+          ]),
+          idempotencyKey: key,
+        })
+        byKey.set(key, stored)
+        payloads.set(key, payload)
+        outcomes.push(stored)
+        return stored
+      },
+    })
+    ownedRegistrations.add(exactRegistration)
+    expect(registrationOwner.ownsTrustedDeliveryEvaluationRegistration(exactRegistration)).toBe(true)
+    expect(registrationOwner.ownsTrustedDeliveryEvaluationRegistration({ ...exactRegistration })).toBe(false)
+    fixture.service.registerTrustedDeliveryEvaluationSink(exactRegistration as never)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-objective-seed', 'establish exact binding'))
+    await drive(fixture.service)
+    const binding = runtimeStore(fixture.service).getActiveBinding(conversation)!
+    const runOccurredAt = Date.now() - 5_000
+    const automationId = 'daily-review'
+    const runId = 'run-daily-review-1'
+    const outputPreview = 'Review complete.'
+    const outputDigest = createHash('sha256').update(outputPreview).digest('hex')
+    const proofDigest = 'a'.repeat(64)
+    const feedbackFooter = [
+      '',
+      '---',
+      '任务结果反馈：直接回复本消息并发送 `/feedback achieved`、`/feedback partial` 或 `/feedback not-achieved`。',
+      '`helpful` 等只记录偏好，不会被当成任务成败。',
+    ].join('\n')
+    fixture.ctx.provide('assistantAutomations', {
+      resolveDeliveryEvidence(input: Record<string, unknown>) {
+        if (input.automationId !== automationId || input.runId !== runId
+          || input.expectedWorkspace !== root || input.expectedBindingId !== binding.id
+          || input.expectedOutputDigest !== outputDigest) return undefined
+        return Object.freeze({
+          schemaVersion: 1, source: 'assistant-automations', executionKind: 'agent',
+          automationId, runId, occurrenceId: 'occurrence-daily-review-1', workspace: root,
+          agentPreset: 'primary', bindingId: binding.id, situation: `automation:${automationId}`,
+          occurredAt: runOccurredAt, executionStatus: 'succeeded', outputDigest, proofDigest,
+        })
+      },
+    } as never)
+    const outbox = runtimeStore(fixture.service).enqueue({
+      idempotencyKey: 'automation:objective-feedback:1',
+      bindingId: binding.id,
+      target: { conversation: binding.conversation, principal: binding.principal },
+      text: `${outputPreview}${feedbackFooter}`,
+      format: 'plain',
+      metadata: {
+        'dsh.learning.schemaVersion': '2',
+        'dsh.learning.kind': 'automation-run',
+        'dsh.learning.automationId': automationId,
+        'dsh.learning.runId': runId,
+        'dsh.learning.situation': `automation:${automationId}`,
+        'dsh.learning.occurredAt': String(runOccurredAt),
+        'dsh.learning.executionStatus': 'succeeded',
+        'dsh.learning.outputDigest': outputDigest,
+        'dsh.learning.proofDigest': proofDigest,
+      },
+    })
+    await drive(fixture.service)
+    const delivered = runtimeStore(fixture.service).getOutbox(outbox.id)!
+    expect(delivered).toMatchObject({ status: 'accepted', providerMessageId: expect.any(String) })
+
+    registerPreferenceSink(fixture.service, async events => events.map(event => ({
+      idempotencyKey: event.idempotencyKey,
+      status: 'recorded' as const,
+    })))
+    const preference = {
+      ...message('evt-objective-helpful', '/feedback helpful', 'command'),
+      metadata: { replyToProviderMessageId: delivered.providerMessageId! },
+    }
+    await fixture.service.acceptInbound(preference)
+    await drive(fixture.service)
+    expect(outcomes).toEqual([])
+    expect(fixture.sends.at(-1)?.text).toContain('不会被当成任务成败')
+
+    const feedback = {
+      ...message('evt-objective-achieved', '/feedback achieved', 'command'),
+      metadata: { replyToProviderMessageId: delivered.providerMessageId! },
+    }
+    await fixture.service.acceptInbound(feedback)
+    await drive(fixture.service)
+
+    expect(outcomes).toEqual([expect.objectContaining({
+      scope: { workspace: root, preset: 'primary' },
+      situation: `automation:${automationId}`,
+      executionStatus: 'succeeded',
+      objectiveStatus: 'achieved',
+      deliveryStatus: 'delivered',
+      source: { kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' },
+      trust: 'trusted',
+      occurredAt: runOccurredAt,
+      evidence: expect.arrayContaining([
+        { kind: 'automation-run', ref: runId },
+        { kind: 'delivery-outbox', ref: outbox.id },
+      ]),
+    })])
+    expect(String(outcomes[0]?.idempotencyKey))
+      .toMatch(/^assistant-delivery:objective-feedback-v2:[a-f0-9]{64}$/u)
+    await expect(fixture.service.acceptInbound(feedback)).resolves.toMatchObject({ duplicate: true })
+    await drive(fixture.service)
+    expect(outcomes).toHaveLength(1)
+
+    await fixture.service.acceptInbound({
+      ...message('evt-objective-achieved-again', '/feedback achieved', 'command'),
+      metadata: { replyToProviderMessageId: delivered.providerMessageId! },
+    })
+    await drive(fixture.service)
+    expect(outcomes).toHaveLength(1)
+
+    await fixture.service.acceptInbound({
+      ...message('evt-objective-conflict', '/feedback not-achieved', 'command'),
+      metadata: { replyToProviderMessageId: delivered.providerMessageId! },
+    })
+    await drive(fixture.service)
+    expect(outcomes).toHaveLength(1)
+    expect(fixture.sends.at(-1)?.text).toContain('已经记录了不同的任务结果')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('/feedback achieved can turn one exact ordinary Agent reply into a closed-set verified workflow trace', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-verified-workflow-runtime-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const traces: Array<Record<string, unknown>> = []
+    fixture.service.registerWorkflowTraceSink({
+      contractVersion: 1,
+      sink: {
+        projectWorkflowTraceRevision(revision) {
+          traces.push(structuredClone(revision) as Record<string, unknown>)
+          return {
+            contractVersion: 1,
+            source: revision.source,
+            scope: revision.scope,
+            subjectRef: revision.subjectRef,
+            version: revision.version,
+            disposition: revision.disposition,
+            digest: revision.digest,
+            outcome: 'applied' as const,
+            candidateIds: [],
+          }
+        },
+      },
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message(
+      'evt-verified-workflow-source',
+      'prepare daily workspace status summary',
+    ))
+    await drive(fixture.service)
+    const sourceInbox = runtimeStore(fixture.service)
+      .getInboxByProviderEvent('lark', 'bot-1', 'evt-verified-workflow-source')!
+    const sourceProviderMessageId = replyProviderMessageId(fixture.service, 'evt-verified-workflow-source')
+    expect(runtimeStore(fixture.service).getInbox(sourceInbox.id)).toMatchObject({ status: 'processed' })
+
+    await fixture.service.acceptInbound({
+      ...message('evt-verified-workflow-achieved', '/feedback achieved', 'command'),
+      metadata: { replyToProviderMessageId: sourceProviderMessageId },
+    })
+    await drive(fixture.service)
+
+    expect(traces).toEqual([expect.objectContaining({
+      disposition: 'upsert',
+      evidence: expect.objectContaining({
+        signal: 'verified-repetition',
+        objectiveStatus: 'achieved',
+        ownerBindingId: runtimeStore(fixture.service).getActiveBinding(conversation)!.id,
+        taskRef: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        taskEvidenceDigest: expect.stringMatching(/^[a-f0-9]{64}$/u),
+        template: expect.objectContaining({
+          privacyAttestation: expect.objectContaining({ kind: 'deterministic-deidentification' }),
+        }),
+      }),
+    })])
+    expect(JSON.stringify(traces)).not.toContain('prepare daily workspace status summary')
+    expect(fixture.sends.at(-1)?.text).toContain('已把该次任务结果记录为 achieved')
+
+    await fixture.service.acceptInbound({
+      ...message('evt-verified-workflow-conflict', '/feedback partial', 'command'),
+      metadata: { replyToProviderMessageId: sourceProviderMessageId },
+    })
+    await drive(fixture.service)
+    expect(traces).toHaveLength(1)
+    expect(fixture.sends.at(-1)?.text).toContain('已经记录了不同的任务结果')
+    await fixture.ctx.fiber.restart()
+  })
+
   test('/feedback too-long emits both T0 response feedback and typed T1 verbosity', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-length-'))
     roots.push(root)
@@ -1806,8 +2746,9 @@ describe('real rc.8 delivery Agent runtime', () => {
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     const feedback: Array<Readonly<DeliveryPreferenceFeedback>> = []
-    fixture.service.subscribePreferenceFeedback(events => {
-      feedback.push(...events)
+    registerPreferenceSink(fixture.service, events => {
+      feedback.push(...events.filter((event): event is DeliveryPreferenceFeedback =>
+        event.source === 'direct-owner-feedback'))
       return events.map(event => ({ idempotencyKey: event.idempotencyKey, status: 'recorded' as const }))
     })
 
@@ -1831,16 +2772,16 @@ describe('real rc.8 delivery Agent runtime', () => {
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     const removedListener = vi.fn()
-    const unsubscribe = fixture.service.subscribePreferenceFeedback(removedListener)
+    const unsubscribe = registerPreferenceSink(fixture.service, removedListener)
     unsubscribe()
     unsubscribe()
     const replacementListener = vi.fn(async (
-      events: readonly Readonly<DeliveryPreferenceFeedback>[],
+      events: readonly Readonly<DeliveryPreferenceEvent>[],
     ) => events.map(event => ({
       idempotencyKey: event.idempotencyKey,
       status: 'recorded' as const,
     })))
-    fixture.service.subscribePreferenceFeedback(replacementListener)
+    registerPreferenceSink(fixture.service, replacementListener)
 
     await fixture.service.acceptInbound(message('evt-feedback-unavailable', '/feedback helpful', 'command'))
     await drive(fixture.service)
@@ -1848,44 +2789,57 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(removedListener).not.toHaveBeenCalled()
     expect(replacementListener).toHaveBeenCalledOnce()
     expect(fixture.llm.requests).toEqual([])
-    expect(fixture.sends.at(-1)?.text).toContain('已记录反馈')
+    expect(fixture.sends.at(-1)?.text).toContain('已记录偏好反馈')
     await fixture.ctx.fiber.restart()
   })
 
-  test('/feedback degrades safely when no preference subscriber is installed', async () => {
+  test('/feedback durably queues when Preference is not installed yet', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-unavailable-'))
     roots.push(root)
     const fixture = await runtimeHarness(root, new Map())
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
 
-    await fixture.service.acceptInbound(message('evt-feedback-unavailable', '/feedback helpful', 'command'))
+    const accepted = await fixture.service.acceptInbound(
+      message('evt-feedback-unavailable', '/feedback helpful', 'command'),
+    )
     await drive(fixture.service)
 
     expect(fixture.llm.requests).toEqual([])
-    expect(fixture.sends.at(-1)?.text).toContain('偏好学习服务尚未启用')
-    expect(fixture.sends.at(-1)?.text).toContain('本次反馈未记录')
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
+    expect(fixture.sends.at(-1)?.text).toContain('已记录偏好反馈')
+    const queued = preferenceProjectionRows(root)
+    expect(queued).toHaveLength(1)
+    expect(queued[0]).toMatchObject({ status: 'pending', attempt_count: 0, failure_code: null })
+    expect(queued[0]?.events_json).not.toContain('evt-feedback-unavailable')
     await fixture.ctx.fiber.restart()
   })
 
-  test('/feedback contains listener failures and never exposes their details', async () => {
+  test('/feedback contains sink failures while retaining a durable replay', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-feedback-failed-'))
     roots.push(root)
     const fixture = await runtimeHarness(root, new Map())
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
-    fixture.service.subscribePreferenceFeedback(() => {
+    registerPreferenceSink(fixture.service, () => {
       throw new Error('private downstream database and credential detail')
     })
 
-    await fixture.service.acceptInbound(message('evt-feedback-failed', '/feedback helpful', 'command'))
+    const accepted = await fixture.service.acceptInbound(message('evt-feedback-failed', '/feedback helpful', 'command'))
     await drive(fixture.service)
 
     expect(fixture.llm.requests).toEqual([])
-    expect(fixture.sends.at(-1)?.text).toContain('反馈记录状态未知')
-    expect(fixture.sends.at(-1)?.text).toContain('不要为同一回答重复提交')
-    expect(fixture.sends.at(-1)?.text).not.toContain('private downstream')
-    expect(fixture.sends.at(-1)?.text).not.toContain('credential')
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
+    expect(preferenceProjectionRows(root)).toEqual([
+      expect.objectContaining({
+        status: 'retry_wait',
+        attempt_count: expect.any(Number),
+        failure_code: 'sink-projection-failed',
+      }),
+    ])
+    expect(preferenceProjectionRows(root)[0]!.attempt_count).toBeGreaterThanOrEqual(1)
+    expect(JSON.stringify(fixture.sends)).not.toContain('private downstream')
+    expect(JSON.stringify(fixture.sends)).not.toContain('credential')
     await fixture.ctx.fiber.restart()
   })
 
@@ -1895,17 +2849,24 @@ describe('real rc.8 delivery Agent runtime', () => {
     const fixture = await runtimeHarness(root, new Map())
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
-    fixture.service.subscribePreferenceFeedback(() => [])
-    expect(() => fixture.service.subscribePreferenceFeedback(async events => events.map(event => ({
+    registerPreferenceSink(fixture.service, () => [])
+    expect(() => registerPreferenceSink(fixture.service, async events => events.map(event => ({
       idempotencyKey: event.idempotencyKey,
       status: 'recorded' as const,
     })))).toThrow(/already registered/i)
 
-    await fixture.service.acceptInbound(message('evt-feedback-noop-receipt', '/feedback helpful', 'command'))
+    const accepted = await fixture.service.acceptInbound(message('evt-feedback-noop-receipt', '/feedback helpful', 'command'))
     await drive(fixture.service)
 
-    expect(fixture.sends.at(-1)?.text).toContain('反馈记录状态未知')
-    expect(fixture.sends.at(-1)?.text).not.toContain('已记录反馈')
+    expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
+    expect(preferenceProjectionRows(root)).toEqual([
+      expect.objectContaining({
+        status: 'retry_wait',
+        attempt_count: expect.any(Number),
+        failure_code: 'sink-invalid-receipt',
+      }),
+    ])
+    expect(fixture.sends.at(-1)?.text).toContain('已记录偏好反馈')
     await fixture.ctx.fiber.restart()
   })
 
@@ -1918,11 +2879,11 @@ describe('real rc.8 delivery Agent runtime', () => {
     })
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
-    const sink = vi.fn(async (events: readonly Readonly<DeliveryPreferenceFeedback>[]) => events.map(event => ({
+    const sink = vi.fn(async (events: readonly Readonly<DeliveryPreferenceEvent>[]) => events.map(event => ({
       idempotencyKey: event.idempotencyKey,
       status: 'recorded' as const,
     })))
-    fixture.service.subscribePreferenceFeedback(sink)
+    registerPreferenceSink(fixture.service, sink)
 
     await fixture.service.acceptInbound(message('evt-feedback-policy-denied', '/feedback helpful', 'command'))
     await drive(fixture.service)
@@ -1949,7 +2910,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     })
     expect(linked).toMatchObject({ role: 'linked', status: 'active' })
     const feedback = vi.fn()
-    fixture.service.subscribePreferenceFeedback(feedback)
+    registerPreferenceSink(fixture.service, feedback)
 
     await fixture.service.acceptInbound({
       channel: 'lark',
@@ -1965,7 +2926,7 @@ describe('real rc.8 delivery Agent runtime', () => {
 
     expect(feedback).not.toHaveBeenCalled()
     expect(fixture.llm.requests).toEqual([])
-    expect(fixture.sends.at(-1)?.text).toContain('当前身份不能提交偏好反馈')
+    expect(fixture.sends.at(-1)?.text).toContain('当前身份不能提交反馈')
     await fixture.ctx.fiber.restart()
   })
 
@@ -1976,7 +2937,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
     const feedback = vi.fn()
-    fixture.service.subscribePreferenceFeedback(feedback)
+    registerPreferenceSink(fixture.service, feedback)
 
     await fixture.service.acceptInbound({
       ...message('evt-feedback-attachment', '/feedback helpful', 'command'),

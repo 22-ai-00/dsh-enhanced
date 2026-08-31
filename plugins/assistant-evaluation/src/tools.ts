@@ -1,7 +1,7 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import type { AssistantEvaluationService } from './service.js'
-import type { OutcomeSummary, StoredOutcome, StoredSelfAssessment } from './types.js'
+import type { OutcomeSummary, ProjectedOutcome, StoredSelfAssessment } from './types.js'
 
 const countSchema = {
   type: 'object',
@@ -31,7 +31,7 @@ function safeSummary(summary: OutcomeSummary) {
   }
 }
 
-function safeOutcome(outcome: StoredOutcome) {
+function safeOutcome(outcome: ProjectedOutcome) {
   // `evidence.ref` is intentionally opaque.  Only the first-party Automations
   // terminal producer owns a model-visible lookup seam, so a third-party Host
   // append cannot smuggle an arbitrary reference through the friendly
@@ -52,6 +52,7 @@ function safeOutcome(outcome: StoredOutcome) {
     deliveryStatus: outcome.deliveryStatus,
     sourceKind: outcome.source.kind,
     trust: outcome.trust,
+    projectionStatus: outcome.projection.status,
     evidenceCount: outcome.evidence.length,
     occurredAt: outcome.occurredAt,
     evaluatorId: outcome.evaluator.id,
@@ -138,6 +139,8 @@ export function registerEvaluationTools(
                 sourceKind: { type: 'string', required: true,
                   enum: ['automation', 'foreground', 'delivery', 'user-feedback', 'system', 'evaluator', 'import'] },
                 trust: { type: 'string', required: true, enum: ['trusted', 'self-reported', 'external'] },
+                projectionStatus: { type: 'string', required: true,
+                  enum: ['ready', 'objective-conflict'] },
                 evidenceCount: { type: 'integer', required: true }, occurredAt: { type: 'integer', required: true },
                 evaluatorId: { type: 'string', required: true }, evaluatorVersion: { type: 'string', required: true },
                 automationRunId: { type: 'string' },

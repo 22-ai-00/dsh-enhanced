@@ -3,7 +3,9 @@
       name: '@dsh-enhanced/assistant-evolution'
       inject:
         - assistantPolicy
-      # assistantDelivery is optional and discovered dynamically for owner routes.
+        - assistantEvaluation
+        - assistantAutomations
+      # assistantDelivery remains optional and is discovered dynamically for owner routes.
       config:
         databasePath: !!js dshHomePath('assistant-evolution/evolution.sqlite')
         evaluationWindow: 20

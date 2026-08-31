@@ -1,0 +1,98 @@
+{
+  "name": "@dsh-enhanced/assistant-recovery",
+  "version": "0.1.8",
+  "description": "Deterministic Host recovery and supervised self-evolution runbook for DeepSeek Harness.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "directory": "plugins/assistant-recovery"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh-plugin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/assistant-evaluation": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/assistant-evolution": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/assistant-health": ">0.1.7 <0.2.0",
+    "@dsh-enhanced/preference-learning": ">0.1.7 <0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-automations": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-delivery": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-evaluation": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-evolution": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-health": {
+      "optional": true
+    },
+    "@dsh-enhanced/preference-learning": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "catalog:",
+    "@dsh-enhanced/assistant-automations": "workspace:*",
+    "@dsh-enhanced/assistant-delivery": "workspace:*",
+    "@dsh-enhanced/assistant-evaluation": "workspace:*",
+    "@dsh-enhanced/assistant-evolution": "workspace:*",
+    "@dsh-enhanced/assistant-health": "workspace:*",
+    "@dsh-enhanced/preference-learning": "workspace:*",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  },
+  "dependencies": {
+    "@deepseek-ai/schemastery": "catalog:"
+  }
+}

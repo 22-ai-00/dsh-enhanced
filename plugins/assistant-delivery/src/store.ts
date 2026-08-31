@@ -2,20 +2,72 @@ import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import { isAbsolute } from 'node:path'
 import type { DatabaseSync, StatementSync } from 'node:sqlite'
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
-import { canonicalConversation, canonicalPrincipal, canonicalTarget } from './canonical.js'
 import {
+  ASSISTANT_GROWTH_CONTRACT_VERSION,
+  WORKFLOW_TRACE_SOURCE_ID,
+  growthObjectDigest,
+  validateResolvedWorkflowAutomationTemplate,
+  validateWorkflowAutomationTemplate,
+  validateWorkflowAutomationTemplateContent,
+  validateWorkflowTraceRevision,
+  workflowAutomationTemplateContentDigest,
+  workflowArgumentShapeDigest,
+  workflowScopeKey,
+  workflowTraceRevisionDigest,
+  type ResolvedWorkflowAutomationTemplate,
+  type WorkflowAutomationTemplate,
+  type WorkflowAutomationTemplateContent,
+  type WorkflowStepFingerprint,
+  type WorkflowTraceRevision,
+  type WorkflowTraceSourceAttestation,
+} from '@dsh-enhanced/assistant-growth-contract'
+import {
+  bindingMatchesOwnerRoute,
+  canonicalBackgroundSourceId,
+  canonicalConversation,
+  canonicalLocalOperatorId,
+  canonicalOwnerRouteAuthority,
+  canonicalPrincipal,
+  canonicalTarget,
+  externalPrincipalId,
+  ownerRouteAuthorityHash,
+  ownerRouteBindingSnapshot,
+} from './canonical.js'
+import {
+  feedbackDispatchRecoveryCode,
+  isFeedbackDeliveryCommand,
+  isFeedbackDispatchRecoveryCode,
   isExactDeliveryCommand,
+  isLearningDeliveryCommand,
+  isLearningDispatchRecoveryCode,
+  isLearningRetryableFailureCode,
   isPermissionDeliveryCommand,
+  isWorkflowDeliveryCommand,
+  isWorkflowDispatchRecoveryCode,
+  learningDispatchRecoveryCode,
   parseDeliveryCommand,
   permissionDispatchRecoveryCode,
   permissionDispatchRecoveryFromFailureCode,
+  workflowDispatchRecoveryCode,
 } from './session-commands.js'
+import { parseFeedbackCommand } from './feedback-command.js'
 import { openDeliveryDatabase } from './sqlite.js'
+import {
+  deriveDeterministicallyDeidentifiedWorkflowTemplate,
+  getDeterministicallyDeidentifiedWorkflowTemplate,
+} from './workflow-auto-producer.js'
 import type {
   ConversationBinding,
   ConversationModelSelection,
   ConversationRef,
+  DeadLetterResolutionKind,
+  DeadLetterResolutionReceipt,
+  DeadLetterResolutionResult,
+  DeadLetterResolutionStatus,
   DeliveryAttachment,
+  DeliveryPreferenceEvent,
+  DeliveryPresentation,
+  DeliveryPresentationUpdate,
   DeliveryPrincipal,
   DeliveryReceipt,
   ExternalPrincipalKey,
@@ -25,9 +77,11 @@ import type {
   ModelPickerIntent,
   ModelPickerState,
   ModelRouteRef,
+  OwnerRouteAuthority,
   OutboxRecord,
   PairingChallenge,
   PermissionPickerIntent,
+  StoredDeliveryPresentation,
 } from './types.js'
 
 export type DeliveryStoreErrorCode =
@@ -60,6 +114,22 @@ interface DeliveryStoreOptions {
   codeGenerator?: () => string
   maxTextBytes?: number
 }
+
+export interface OwnerRouteDispatchGuard {
+  readonly ownerRoutes: readonly Readonly<OwnerRouteAuthority>[]
+  /** False is an explicit revocation; throw means the check is unavailable and must be retried without I/O. */
+  readonly authorize: (input: {
+    authority: Readonly<OwnerRouteAuthority>
+    sourceId: string
+    idempotencyKey: string
+  }) => boolean
+}
+
+export type OwnerRouteDispatchValidation =
+  | { kind: 'not-route' }
+  | { kind: 'authorized' }
+  | { kind: 'deferred'; failureCode: string }
+  | { kind: 'denied'; failureCode: string }
 
 type InboundDispatchBindingSnapshot = Pick<
   ConversationBinding,
@@ -159,6 +229,8 @@ interface InboxRow {
   fencing_token: number | null
   lease_until: number | null
   failure_code: string | null
+  admission_epoch: string
+  admission_sequence: number
   received_at: number
   updated_at: number
 }
@@ -179,6 +251,580 @@ interface OutboxRow {
   updated_at: number
 }
 
+interface DeliveryPresentationRow {
+  presentation_key: string
+  original_outbox_idempotency_key: string
+  revision: number
+  payload_hash: string
+  payload_json: string
+  status: StoredDeliveryPresentation['status']
+  attempt_count: number
+  presented_revision: number
+  next_attempt_at: number | null
+  claimed_by: string | null
+  fencing_token: number | null
+  lease_until: number | null
+  provider_message_id: string | null
+  failure_code: string | null
+  created_at: number
+  updated_at: number
+}
+
+interface WorkflowTraceRevisionRow {
+  subject_ref: string
+  version: number
+  source_generation: number
+  source_authority_digest: string
+  scope_key: string
+  workspace: string
+  preset: string
+  disposition: WorkflowTraceRevision['disposition']
+  digest: string
+  payload_json: string
+  created_at: number
+}
+
+interface WorkflowTraceOutboxRow extends WorkflowTraceRevisionRow {
+  status: 'delivered' | 'pending' | 'retry_wait'
+  attempt_count: number
+  next_attempt_at: number
+  failure_code: string | null
+  updated_at: number
+}
+
+interface WorkflowVerifiedTaskFeedbackRow {
+  source_outbox_id: string
+  source_inbox_id: string
+  feedback_inbox_id: string
+  binding_id: string
+  binding_version: number
+  binding_generation: number
+  principal_record_id: string
+  objective_status: 'achieved' | 'partial' | 'not-achieved'
+  task_ref: string
+  task_evidence_digest: string
+  trace_subject_ref: string | null
+  trace_version: number | null
+  trace_digest: string | null
+  template_ref: string | null
+  created_at: number
+}
+
+interface PreferenceProjectionOutboxRow {
+  batch_key: string
+  payload_digest: string
+  events_json: string
+  status: 'pending' | 'retry_wait'
+  attempt_count: number
+  next_attempt_at: number
+  failure_code: string | null
+  lane_kind: 'exact' | 'legacy' | 'unclassified'
+  lane_epoch: string | null
+  lane_workspace: string | null
+  lane_preset: string | null
+  lane_principal_record_id: string | null
+  lane_principal_version: number | null
+  admission_sequence: number | null
+  terminal_at: number | null
+  created_at: number
+  updated_at: number
+}
+
+interface PreferenceProjectionLane {
+  epoch: string
+  workspace: string
+  preset: string
+  principalRecordId: string
+  principalVersion: number
+  admissionSequence: number
+}
+
+interface WorkflowTemplateRow {
+  template_ref: string
+  template_digest: string
+  scope_key: string
+  workspace: string
+  preset: string
+  owner_binding_id: string
+  content_json: string
+  privacy_kind: WorkflowAutomationTemplate['privacyAttestation']['kind']
+  privacy_attestation_id: string
+  privacy_attestation_digest: string
+  review_receipt_json: string
+  status: 'active' | 'revoked'
+  review_inbox_id: string
+  source_inbox_id: string
+  source_outbox_id: string
+  created_at: number
+  updated_at: number
+  version: number
+}
+
+export interface WorkflowTraceOutboxEntry {
+  revision: Readonly<WorkflowTraceRevision>
+  status: WorkflowTraceOutboxRow['status']
+  attemptCount: number
+  nextAttemptAt: number
+  failureCode?: string
+  updatedAt: number
+}
+
+export interface PreferenceProjectionOutboxEntry {
+  batchKey: string
+  payloadDigest: string
+  events: readonly Readonly<DeliveryPreferenceEvent>[]
+  lane?: Readonly<PreferenceProjectionLane>
+  attemptCount: number
+  nextAttemptAt: number
+  failureCode?: string
+}
+
+export type PreferenceProjectionFenceResult = 'completed' | 'ignored' | 'missing'
+
+export interface OwnerWorkflowTraceCommandResult {
+  revision: Readonly<WorkflowTraceRevision>
+  template?: Readonly<WorkflowAutomationTemplate>
+  replayed: boolean
+}
+
+/**
+ * The durable result of an authenticated owner objective judgement over one
+ * ordinary Agent reply.  Only an achieved judgement with a closed-set,
+ * deterministic template can create a workflow trace.
+ */
+export type VerifiedWorkflowTraceFeedbackResult =
+  | Readonly<{
+      outcome: 'trace-recorded'
+      revision: Readonly<WorkflowTraceRevision>
+      template: Readonly<WorkflowAutomationTemplate>
+      replayed: boolean
+    }>
+  | Readonly<{
+      outcome: 'no-trace'
+      reason: 'objective-not-achieved' | 'privacy-abstained'
+      replayed: boolean
+    }>
+
+export interface StoredWorkflowTemplate {
+  resolved: Readonly<ResolvedWorkflowAutomationTemplate>
+  review: Readonly<{
+    bindingId: string
+    bindingVersion: number
+    bindingGeneration: number
+    principalId: string
+    reviewInboxId: string
+    sourceInboxId: string
+    sourceOutboxId: string
+  }>
+  status: WorkflowTemplateRow['status']
+  version: number
+}
+
+function workflowTraceRevision(row: WorkflowTraceRevisionRow): Readonly<WorkflowTraceRevision> {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(row.payload_json) as unknown
+  } catch {
+    throw new DeliveryStoreError('conflict', 'workflow trace revision payload is corrupt')
+  }
+  const revision = validateWorkflowTraceRevision(parsed)
+  if (revision.subjectRef !== row.subject_ref || revision.version !== row.version
+    || revision.source.sourceId !== WORKFLOW_TRACE_SOURCE_ID
+    || revision.source.generation !== row.source_generation
+    || revision.source.authorityDigest !== row.source_authority_digest
+    || workflowScopeKey(revision.scope) !== row.scope_key
+    || revision.scope.workspace !== row.workspace || revision.scope.preset !== row.preset
+    || revision.disposition !== row.disposition || revision.digest !== row.digest) {
+    throw new DeliveryStoreError('conflict', 'workflow trace revision columns do not match payload')
+  }
+  return revision
+}
+
+function workflowTraceOutboxEntry(row: WorkflowTraceOutboxRow): WorkflowTraceOutboxEntry {
+  return Object.freeze({
+    revision: workflowTraceRevision(row),
+    status: row.status,
+    attemptCount: row.attempt_count,
+    nextAttemptAt: row.next_attempt_at,
+    ...(row.failure_code === null ? {} : { failureCode: row.failure_code }),
+    updatedAt: row.updated_at,
+  })
+}
+
+function preferenceProjectionBatchKey(events: readonly Readonly<DeliveryPreferenceEvent>[]): string {
+  const identities = events.map(event => event.idempotencyKey)
+  return `delivery-preference-v1:${createHash('sha256')
+    .update('assistant-delivery-preference-projection-v1\0')
+    .update(JSON.stringify(identities))
+    .digest('hex')}`
+}
+
+function exactPreferenceProjectionKeys(
+  value: Readonly<Record<string, unknown>>,
+  allowed: readonly string[],
+  label: string,
+): void {
+  if (Object.keys(value).some(key => !allowed.includes(key))) {
+    throw new DeliveryStoreError('invalid-intent', `${label} contains unsupported fields`)
+  }
+}
+
+function exactPreferenceProjectionText(value: unknown, label: string, max: number): string {
+  if (typeof value !== 'string') {
+    throw new DeliveryStoreError('invalid-intent', `${label} must be a string`)
+  }
+  const normalized = validateBindingText(value, label, max)
+  if (normalized !== value) {
+    throw new DeliveryStoreError('invalid-intent', `${label} is not canonical`)
+  }
+  return value
+}
+
+function canonicalPreferenceProjectionScope(value: unknown): Readonly<{
+  workspace: string
+  preset: string
+}> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new DeliveryStoreError('invalid-intent', 'preference projection scope is invalid')
+  }
+  const record = value as Readonly<Record<string, unknown>>
+  exactPreferenceProjectionKeys(record, ['workspace', 'preset'], 'preference projection scope')
+  return Object.freeze({
+    workspace: exactPreferenceProjectionText(record['workspace'], 'preference workspace', 4_096),
+    preset: exactPreferenceProjectionText(record['preset'], 'preference preset', 200),
+  })
+}
+
+function canonicalPreferenceCompletionIdentity(value: unknown): Readonly<{
+  bindingId: string
+  bindingVersion: number
+  sessionId: string
+  sourceEventId: string
+  sourceInboxId: string
+  replyOutboxId: string
+}> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new DeliveryStoreError('invalid-intent', 'preference completion identity is invalid')
+  }
+  const record = value as Readonly<Record<string, unknown>>
+  exactPreferenceProjectionKeys(record, [
+    'bindingId', 'bindingVersion', 'sessionId', 'sourceEventId', 'sourceInboxId', 'replyOutboxId',
+  ], 'preference completion identity')
+  if (!Number.isSafeInteger(record['bindingVersion']) || (record['bindingVersion'] as number) < 1) {
+    throw new DeliveryStoreError('invalid-intent', 'preference binding version is invalid')
+  }
+  return Object.freeze({
+    bindingId: exactPreferenceProjectionText(record['bindingId'], 'preference bindingId', 500),
+    bindingVersion: record['bindingVersion'] as number,
+    sessionId: exactPreferenceProjectionText(record['sessionId'], 'preference sessionId', 500),
+    sourceEventId: exactPreferenceProjectionText(record['sourceEventId'], 'preference sourceEventId', 500),
+    sourceInboxId: exactPreferenceProjectionText(record['sourceInboxId'], 'preference sourceInboxId', 500),
+    replyOutboxId: exactPreferenceProjectionText(record['replyOutboxId'], 'preference replyOutboxId', 500),
+  })
+}
+
+function canonicalPreferencePrincipalLineage(value: unknown): Readonly<{
+  principalRecordId: string
+  principalVersion: number
+}> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new DeliveryStoreError('invalid-intent', 'preference principal lineage is invalid')
+  }
+  const record = value as Readonly<Record<string, unknown>>
+  exactPreferenceProjectionKeys(
+    record,
+    ['principalRecordId', 'principalVersion'],
+    'preference principal lineage',
+  )
+  if (!Number.isSafeInteger(record['principalVersion']) || (record['principalVersion'] as number) < 1) {
+    throw new DeliveryStoreError('invalid-intent', 'preference principal lineage version is invalid')
+  }
+  return Object.freeze({
+    principalRecordId: exactPreferenceProjectionText(
+      record['principalRecordId'],
+      'preference principal record id',
+      500,
+    ),
+    principalVersion: record['principalVersion'] as number,
+  })
+}
+
+function canonicalPreferenceAdmissionCursor(value: unknown): Readonly<{
+  epoch: string
+  sequence: number
+}> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new DeliveryStoreError('invalid-intent', 'preference admission cursor is invalid')
+  }
+  const record = value as Readonly<Record<string, unknown>>
+  exactPreferenceProjectionKeys(record, ['epoch', 'sequence'], 'preference admission cursor')
+  if (typeof record['epoch'] !== 'string' || !/^[0-9a-f]{32}$/u.test(record['epoch'])
+    || !Number.isSafeInteger(record['sequence']) || (record['sequence'] as number) < 1) {
+    throw new DeliveryStoreError('invalid-intent', 'preference admission cursor is invalid')
+  }
+  return Object.freeze({
+    epoch: record['epoch'],
+    sequence: record['sequence'] as number,
+  })
+}
+
+function canonicalPreferenceProjectionEvent(value: unknown): Readonly<DeliveryPreferenceEvent> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new DeliveryStoreError('invalid-intent', 'preference projection event is invalid')
+  }
+  const record = value as Readonly<Record<string, unknown>>
+  const source = record['source']
+  const scope = canonicalPreferenceProjectionScope(record['scope'])
+  const occurredAt = record['occurredAt']
+  if (!Number.isSafeInteger(occurredAt) || (occurredAt as number) < 0) {
+    throw new DeliveryStoreError('invalid-intent', 'preference projection occurredAt is invalid')
+  }
+  const idempotencyKey = exactPreferenceProjectionText(
+    record['idempotencyKey'],
+    'preference event idempotencyKey',
+    200,
+  )
+  if (record['actorTrust'] !== 'owner-authenticated') {
+    throw new DeliveryStoreError('invalid-intent', 'preference projection actor is invalid')
+  }
+  const optionalAuthorityKeys = [
+    ...(record['principalLineage'] === undefined ? [] : ['principalLineage']),
+    ...(record['admissionCursor'] === undefined ? [] : ['admissionCursor']),
+  ]
+  const admissionCursor = record['admissionCursor'] === undefined
+    ? undefined
+    : canonicalPreferenceAdmissionCursor(record['admissionCursor'])
+  if (source === 'delivery-completion') {
+    exactPreferenceProjectionKeys(record, [
+      'scope', 'principalId', ...optionalAuthorityKeys, 'actorTrust', 'source',
+      'occurredAt', 'idempotencyKey', 'completion',
+    ], 'preference completion')
+    return Object.freeze({
+      scope,
+      principalId: exactPreferenceProjectionText(record['principalId'], 'preference principalId', 500),
+      ...(record['principalLineage'] === undefined
+        ? {}
+        : { principalLineage: canonicalPreferencePrincipalLineage(record['principalLineage']) }),
+      ...(admissionCursor === undefined ? {} : { admissionCursor }),
+      actorTrust: 'owner-authenticated',
+      source,
+      occurredAt: occurredAt as number,
+      idempotencyKey,
+      completion: canonicalPreferenceCompletionIdentity(record['completion']),
+    })
+  }
+  if (source === 'delivery-observation') {
+    exactPreferenceProjectionKeys(record, [
+      'scope', 'principalId', ...optionalAuthorityKeys, 'preferenceKey', 'candidateValue', 'stance',
+      'actorTrust', 'interpretationTrust', 'source', 'occurredAt', 'idempotencyKey', 'completion',
+    ], 'preference observation')
+    if (record['preferenceKey'] !== 'response.language'
+      || (record['candidateValue'] !== 'zh-CN' && record['candidateValue'] !== 'en')
+      || record['stance'] !== 'support'
+      || record['interpretationTrust'] !== 'behavioral-inference') {
+      throw new DeliveryStoreError('invalid-intent', 'preference observation selection is invalid')
+    }
+    return Object.freeze({
+      scope,
+      principalId: exactPreferenceProjectionText(record['principalId'], 'preference principalId', 500),
+      ...(record['principalLineage'] === undefined
+        ? {}
+        : { principalLineage: canonicalPreferencePrincipalLineage(record['principalLineage']) }),
+      ...(admissionCursor === undefined ? {} : { admissionCursor }),
+      preferenceKey: 'response.language',
+      candidateValue: record['candidateValue'],
+      stance: 'support',
+      actorTrust: 'owner-authenticated',
+      interpretationTrust: 'behavioral-inference',
+      source,
+      occurredAt: occurredAt as number,
+      idempotencyKey,
+      completion: canonicalPreferenceCompletionIdentity(record['completion']),
+    })
+  }
+  if (source !== 'direct-owner-feedback') {
+    throw new DeliveryStoreError('invalid-intent', 'preference projection source is invalid')
+  }
+  exactPreferenceProjectionKeys(record, [
+    'scope', 'principalId', ...optionalAuthorityKeys, 'preferenceKey', 'candidateValue', 'stance',
+    'actorTrust', 'interpretationTrust', 'source', 'occurredAt', 'idempotencyKey', 'exposureTarget',
+  ], 'preference feedback')
+  if (record['stance'] !== 'support'
+    || (record['interpretationTrust'] !== 'explicit-selection'
+      && record['interpretationTrust'] !== 'typed-feedback')) {
+    throw new DeliveryStoreError('invalid-intent', 'preference feedback trust is invalid')
+  }
+  const key = record['preferenceKey']
+  const candidate = record['candidateValue']
+  const catalog: Readonly<Record<string, readonly string[]>> = {
+    'feedback.response': [
+      'helpful', 'not-helpful', 'too-long', 'too-short', 'wrong-format',
+      'wrong-action', 'unwanted-reminder',
+    ],
+    'recommendation.ranking': ['recency', 'familiarity', 'evidence'],
+    'response.explanation_depth': ['result-first', 'balanced', 'tutorial'],
+    'response.language': ['zh-CN', 'en'],
+    'response.structure': ['prose', 'bullets', 'mixed'],
+    'response.verbosity': ['concise', 'balanced', 'detailed'],
+    'suggestion.frequency': ['low', 'normal'],
+  }
+  if (typeof key !== 'string' || typeof candidate !== 'string'
+    || !catalog[key]?.includes(candidate)) {
+    throw new DeliveryStoreError('invalid-intent', 'preference feedback selection is invalid')
+  }
+  let exposureTarget: Readonly<{ sourceInboxId: string; sourceOutboxId: string }> | undefined
+  if (record['exposureTarget'] !== undefined) {
+    if (typeof record['exposureTarget'] !== 'object' || record['exposureTarget'] === null
+      || Array.isArray(record['exposureTarget'])) {
+      throw new DeliveryStoreError('invalid-intent', 'preference exposure target is invalid')
+    }
+    const target = record['exposureTarget'] as Readonly<Record<string, unknown>>
+    exactPreferenceProjectionKeys(target, ['sourceInboxId', 'sourceOutboxId'], 'preference exposure target')
+    exposureTarget = Object.freeze({
+      sourceInboxId: exactPreferenceProjectionText(
+        target['sourceInboxId'], 'preference exposure sourceInboxId', 500,
+      ),
+      sourceOutboxId: exactPreferenceProjectionText(
+        target['sourceOutboxId'], 'preference exposure sourceOutboxId', 500,
+      ),
+    })
+  }
+  return Object.freeze({
+    scope,
+    principalId: exactPreferenceProjectionText(record['principalId'], 'preference principalId', 500),
+    ...(record['principalLineage'] === undefined
+      ? {}
+      : { principalLineage: canonicalPreferencePrincipalLineage(record['principalLineage']) }),
+    ...(admissionCursor === undefined ? {} : { admissionCursor }),
+    preferenceKey: key,
+    candidateValue: candidate,
+    stance: 'support',
+    actorTrust: 'owner-authenticated',
+    interpretationTrust: record['interpretationTrust'],
+    source,
+    occurredAt: occurredAt as number,
+    idempotencyKey,
+    ...(exposureTarget === undefined ? {} : { exposureTarget }),
+  } as DeliveryPreferenceEvent)
+}
+
+function preferenceProjectionLane(
+  events: readonly Readonly<DeliveryPreferenceEvent>[],
+): Readonly<PreferenceProjectionLane> | undefined {
+  const exact = events.map(event => event.principalLineage !== undefined
+    && event.admissionCursor !== undefined)
+  if (exact.every(value => !value)) return undefined
+  if (!exact.every(Boolean)) {
+    throw new DeliveryStoreError(
+      'invalid-intent',
+      'preference projection batch mixes exact and legacy owner authority',
+    )
+  }
+  const first = events[0]!
+  const lineage = first.principalLineage!
+  const cursor = first.admissionCursor!
+  const lane = Object.freeze({
+    epoch: cursor.epoch,
+    workspace: first.scope.workspace,
+    preset: first.scope.preset,
+    principalRecordId: lineage.principalRecordId,
+    principalVersion: lineage.principalVersion,
+    admissionSequence: cursor.sequence,
+  })
+  if (events.some(event => event.admissionCursor!.epoch !== lane.epoch
+    || event.admissionCursor!.sequence !== lane.admissionSequence
+    || event.scope.workspace !== lane.workspace || event.scope.preset !== lane.preset
+    || event.principalLineage!.principalRecordId !== lane.principalRecordId
+    || event.principalLineage!.principalVersion !== lane.principalVersion)) {
+    throw new DeliveryStoreError(
+      'invalid-intent',
+      'preference projection batch spans multiple owner admission lanes',
+    )
+  }
+  return lane
+}
+
+function preferenceProjectionPayload(
+  events: readonly Readonly<DeliveryPreferenceEvent>[],
+): {
+  batchKey: string
+  digest: string
+  json: string
+  events: readonly Readonly<DeliveryPreferenceEvent>[]
+  lane?: Readonly<PreferenceProjectionLane>
+} {
+  if (!Array.isArray(events) || events.length < 1 || events.length > 16) {
+    throw new DeliveryStoreError('invalid-intent', 'preference projection batch must contain 1-16 events')
+  }
+  const canonicalEvents = Object.freeze(events.map(event => canonicalPreferenceProjectionEvent(event)))
+  const lane = preferenceProjectionLane(canonicalEvents)
+  const identities = canonicalEvents.map(event => event.idempotencyKey)
+  if (new Set(identities).size !== identities.length) {
+    throw new DeliveryStoreError('invalid-intent', 'preference projection batch contains duplicate events')
+  }
+  const json = JSON.stringify(canonicalEvents)
+  if (Buffer.byteLength(json, 'utf8') > 131_072) {
+    throw new DeliveryStoreError('invalid-intent', 'preference projection batch exceeds its byte cap')
+  }
+  return {
+    batchKey: preferenceProjectionBatchKey(canonicalEvents),
+    digest: createHash('sha256').update(json).digest('hex'),
+    json,
+    events: canonicalEvents,
+    ...(lane === undefined ? {} : { lane }),
+  }
+}
+
+function preferenceProjectionOutboxEntry(
+  row: PreferenceProjectionOutboxRow,
+): PreferenceProjectionOutboxEntry {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(row.events_json) as unknown
+  } catch {
+    throw new DeliveryStoreError('conflict', 'preference projection payload is corrupt')
+  }
+  if (!Array.isArray(parsed)) {
+    throw new DeliveryStoreError('conflict', 'preference projection payload is not a batch')
+  }
+  const payload = preferenceProjectionPayload(parsed as DeliveryPreferenceEvent[])
+  if (payload.batchKey !== row.batch_key || payload.digest !== row.payload_digest
+    || payload.json !== row.events_json) {
+    throw new DeliveryStoreError('conflict', 'preference projection columns do not match payload')
+  }
+  const storedLaneColumns = [
+    row.lane_epoch,
+    row.lane_workspace,
+    row.lane_preset,
+    row.lane_principal_record_id,
+    row.lane_principal_version,
+    row.admission_sequence,
+  ]
+  if (row.lane_kind === 'exact') {
+    if (storedLaneColumns.some(value => value === null) || payload.lane === undefined
+      || row.lane_epoch !== payload.lane.epoch
+      || row.lane_workspace !== payload.lane.workspace
+      || row.lane_preset !== payload.lane.preset
+      || row.lane_principal_record_id !== payload.lane.principalRecordId
+      || row.lane_principal_version !== payload.lane.principalVersion
+      || row.admission_sequence !== payload.lane.admissionSequence) {
+      throw new DeliveryStoreError('conflict', 'preference projection lane columns do not match payload')
+    }
+  } else if (row.lane_kind === 'legacy'
+    && (payload.lane !== undefined || storedLaneColumns.some(value => value !== null))) {
+    throw new DeliveryStoreError('conflict', 'legacy preference projection has exact lane authority')
+  }
+  return Object.freeze({
+    batchKey: row.batch_key,
+    payloadDigest: row.payload_digest,
+    events: payload.events,
+    ...(payload.lane === undefined ? {} : { lane: payload.lane }),
+    attemptCount: row.attempt_count,
+    nextAttemptAt: row.next_attempt_at,
+    ...(row.failure_code === null ? {} : { failureCode: row.failure_code }),
+  })
+}
+
 interface AttachmentRow {
   id: string
   owner_kind: 'inbox' | 'outbox'
@@ -193,6 +839,18 @@ interface AttachmentRow {
   file_name: string | null
   status: DeliveryAttachment['status']
   expires_at: number | null
+  created_at: number
+}
+
+interface DeadLetterResolutionRow {
+  kind: DeadLetterResolutionKind
+  message_id: string
+  attempt_count: number
+  receipt_version: 1
+  resolution: DeadLetterResolutionReceipt['resolution']
+  original_status: DeadLetterResolutionStatus
+  original_failure_code: string | null
+  operator_id: string
   created_at: number
 }
 
@@ -269,6 +927,20 @@ function attachmentFromRow(row: AttachmentRow): DeliveryAttachment {
     ...(imageRef === undefined ? {} : { imageRef }),
     status: row.status,
     ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
+    createdAt: row.created_at,
+  }
+}
+
+function deadLetterResolutionFromRow(row: DeadLetterResolutionRow): DeadLetterResolutionReceipt {
+  return {
+    receiptVersion: row.receipt_version,
+    kind: row.kind,
+    id: row.message_id,
+    attemptCount: row.attempt_count,
+    resolution: row.resolution,
+    originalStatus: row.original_status,
+    ...(row.original_failure_code === null ? {} : { originalFailureCode: row.original_failure_code }),
+    operatorId: row.operator_id,
     createdAt: row.created_at,
   }
 }
@@ -381,6 +1053,10 @@ const bindingSelect = `
 const inboxSelect = `
   SELECT id, channel, account, event_id, envelope_hash, envelope_json, status, binding_id,
     attempt_count, next_attempt_at, claimed_by, fencing_token, lease_until, failure_code,
+    (SELECT epoch FROM delivery_inbox_admissions WHERE inbox_id = inbox_messages.id)
+      AS admission_epoch,
+    (SELECT admission_sequence FROM delivery_inbox_admissions WHERE inbox_id = inbox_messages.id)
+      AS admission_sequence,
     received_at, updated_at
   FROM inbox_messages
 `
@@ -389,6 +1065,13 @@ const outboxSelect = `
   SELECT id, intent_hash, intent_json, status, provider_message_id, attempt_count,
     next_attempt_at, claimed_by, fencing_token, lease_until, failure_code, created_at, updated_at
   FROM outbox_messages
+`
+
+const deliveryPresentationSelect = `
+  SELECT presentation_key, original_outbox_idempotency_key, revision, payload_hash, payload_json,
+    status, attempt_count, presented_revision, next_attempt_at, claimed_by, fencing_token,
+    lease_until, provider_message_id, failure_code, created_at, updated_at
+  FROM delivery_presentations
 `
 
 function validateBindingText(value: string, field: string, max: number): string {
@@ -403,6 +1086,14 @@ function validateBindingText(value: string, field: string, max: number): string 
   return normalized
 }
 
+function resolutionOperatorId(value: unknown): string {
+  try {
+    return canonicalLocalOperatorId(value)
+  } catch {
+    throw new DeliveryStoreError('conflict', 'dead-letter operator identity is invalid')
+  }
+}
+
 function boundedMaintenanceLimit(value: number | undefined, fallback: number, label: string): number {
   const limit = value ?? fallback
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
@@ -412,6 +1103,10 @@ function boundedMaintenanceLimit(value: number | undefined, fallback: number, la
 }
 
 function inboxFromRow(row: InboxRow): InboxRecord {
+  if (!/^[0-9a-f]{32}$/u.test(row.admission_epoch)
+    || !Number.isSafeInteger(row.admission_sequence) || row.admission_sequence < 1) {
+    throw new DeliveryStoreError('conflict', 'Inbox admission cursor is missing or corrupt')
+  }
   return {
     id: row.id,
     channel: row.channel,
@@ -427,6 +1122,10 @@ function inboxFromRow(row: InboxRow): InboxRecord {
     ...(row.fencing_token === null ? {} : { fencingToken: row.fencing_token }),
     ...(row.lease_until === null ? {} : { leaseUntil: row.lease_until }),
     ...(row.failure_code === null ? {} : { failureCode: row.failure_code }),
+    admissionCursor: Object.freeze({
+      epoch: row.admission_epoch,
+      sequence: row.admission_sequence,
+    }),
     receivedAt: row.received_at,
     updatedAt: row.updated_at,
   }
@@ -448,6 +1147,138 @@ function outboxFromRow(row: OutboxRow): OutboxRecord {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }
+}
+
+function deliveryPresentationFromRow(row: DeliveryPresentationRow): StoredDeliveryPresentation {
+  let presentation: DeliveryPresentation
+  try {
+    presentation = canonicalDeliveryPresentation(JSON.parse(row.payload_json) as DeliveryPresentation)
+    const canonicalJson = JSON.stringify(presentation)
+    if (canonicalJson !== row.payload_json || digest(canonicalJson) !== row.payload_hash
+      || !Number.isSafeInteger(row.revision) || row.revision < 1
+      || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0
+      || !Number.isSafeInteger(row.presented_revision) || row.presented_revision < 0
+      || row.presented_revision > row.revision
+      || !Number.isSafeInteger(row.created_at) || !Number.isSafeInteger(row.updated_at)
+      || (row.status === 'presented' && row.provider_message_id === null)) {
+      throw new Error('invalid stored presentation')
+    }
+  } catch {
+    throw new DeliveryStoreError('invalid-intent', 'stored delivery presentation is invalid')
+  }
+  return {
+    presentationKey: row.presentation_key,
+    originalOutboxIdempotencyKey: row.original_outbox_idempotency_key,
+    revision: row.revision,
+    presentation,
+    status: row.status,
+    attemptCount: row.attempt_count,
+    presentedRevision: row.presented_revision,
+    ...(row.provider_message_id === null ? {} : { providerMessageId: row.provider_message_id }),
+    ...(row.failure_code === null ? {} : { failureCode: row.failure_code }),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  }
+}
+
+function canonicalDeliveryPresentation(input: DeliveryPresentation): DeliveryPresentation {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new DeliveryStoreError('invalid-intent', 'delivery presentation kind is invalid')
+  }
+  if (input.kind === 'automation-incident') {
+    const allowed = new Set([
+      'kind', 'incidentId', 'automationId', 'definitionHash', 'stage', 'state',
+      'failureClass', 'failurePhase', 'failureCode', 'sideEffectState', 'retryability',
+      'lifecycleGeneration', 'incidentRevision', 'openedAt', 'updatedAt', 'resolvedAt',
+    ])
+    if (Object.keys(input).some(key => !allowed.has(key))) {
+      throw new DeliveryStoreError('invalid-intent', 'automation incident presentation shape is invalid')
+    }
+    const incidentId = validateBindingText(input.incidentId, 'incidentId', 500)
+    const automationId = validateBindingText(input.automationId, 'automationId', 500)
+    const token = (value: unknown): value is string => typeof value === 'string'
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u.test(value)
+    if (!/^[a-f0-9]{64}$/u.test(input.definitionHash)
+      || !['claim', 'materialize', 'terminal'].includes(input.stage)
+      || !['open', 'recovering', 'resolved'].includes(input.state)
+      || !['budget', 'cancelled', 'configuration', 'execution', 'infrastructure',
+        'policy', 'provider', 'timeout', 'unknown'].includes(input.failureClass)
+      || !token(input.failurePhase) || !token(input.failureCode)
+      || !['none', 'possible', 'unknown'].includes(input.sideEffectState)
+      || !['after-intervention', 'safe', 'unsafe', 'unknown'].includes(input.retryability)
+      || !Number.isSafeInteger(input.lifecycleGeneration) || input.lifecycleGeneration < 1
+      || !Number.isSafeInteger(input.incidentRevision) || input.incidentRevision < 1
+      || !Number.isSafeInteger(input.openedAt) || input.openedAt < 0
+      || !Number.isSafeInteger(input.updatedAt) || input.updatedAt < input.openedAt
+      || (input.state === 'resolved') !== (input.resolvedAt !== undefined)
+      || (input.resolvedAt !== undefined
+        && (!Number.isSafeInteger(input.resolvedAt) || input.resolvedAt < input.openedAt))) {
+      throw new DeliveryStoreError('invalid-intent', 'automation incident presentation is invalid')
+    }
+    return Object.freeze({
+      kind: 'automation-incident' as const,
+      incidentId,
+      automationId,
+      definitionHash: input.definitionHash,
+      stage: input.stage,
+      state: input.state,
+      failureClass: input.failureClass,
+      failurePhase: input.failurePhase,
+      failureCode: input.failureCode,
+      sideEffectState: input.sideEffectState,
+      retryability: input.retryability,
+      lifecycleGeneration: input.lifecycleGeneration,
+      incidentRevision: input.incidentRevision,
+      openedAt: input.openedAt,
+      updatedAt: input.updatedAt,
+      ...(input.resolvedAt === undefined ? {} : { resolvedAt: input.resolvedAt }),
+    })
+  }
+  if (input.kind !== 'approval-application') {
+    throw new DeliveryStoreError('invalid-intent', 'delivery presentation kind is invalid')
+  }
+  const allowed = new Set([
+    'kind', 'policyProposalId', 'localProposalId', 'applicationStatus', 'operation',
+    'terminalAt', 'receiptDigest', 'ruleId', 'resultingRuleVersion', 'ruleStatus',
+  ])
+  if (Object.keys(input).some(key => !allowed.has(key))) {
+    throw new DeliveryStoreError('invalid-intent', 'delivery presentation shape is invalid')
+  }
+  const policyProposalId = validateBindingText(input.policyProposalId, 'policyProposalId', 200)
+  const localProposalId = validateBindingText(input.localProposalId, 'localProposalId', 200)
+  if (!['applied', 'conflicted', 'expired', 'rejected'].includes(input.applicationStatus)
+    || !['adopt', 'owner-undo', 'retire'].includes(input.operation)
+    || !Number.isSafeInteger(input.terminalAt) || input.terminalAt < 0
+    || !/^[a-f0-9]{64}$/u.test(input.receiptDigest)) {
+    throw new DeliveryStoreError('invalid-intent', 'approval application presentation is invalid')
+  }
+  const ruleId = input.ruleId === undefined
+    ? undefined
+    : validateBindingText(input.ruleId, 'ruleId', 200)
+  const resultingRuleVersion = input.resultingRuleVersion
+  if (resultingRuleVersion !== undefined
+    && (!Number.isSafeInteger(resultingRuleVersion) || resultingRuleVersion < 1)) {
+    throw new DeliveryStoreError('invalid-intent', 'presentation rule version is invalid')
+  }
+  if (input.ruleStatus !== undefined && input.ruleStatus !== 'active' && input.ruleStatus !== 'retired') {
+    throw new DeliveryStoreError('invalid-intent', 'presentation rule status is invalid')
+  }
+  if (input.applicationStatus === 'applied'
+    && (ruleId === undefined || resultingRuleVersion === undefined || input.ruleStatus === undefined)) {
+    throw new DeliveryStoreError('invalid-intent', 'applied presentation requires exact rule terminal state')
+  }
+  return Object.freeze({
+    kind: 'approval-application' as const,
+    policyProposalId,
+    localProposalId,
+    applicationStatus: input.applicationStatus,
+    operation: input.operation,
+    terminalAt: input.terminalAt,
+    receiptDigest: input.receiptDigest,
+    ...(ruleId === undefined ? {} : { ruleId }),
+    ...(resultingRuleVersion === undefined ? {} : { resultingRuleVersion }),
+    ...(input.ruleStatus === undefined ? {} : { ruleStatus: input.ruleStatus }),
+  })
 }
 
 function invalidEnvelope(message: string): never {
@@ -648,6 +1479,135 @@ function canonicalIntent(input: OutboundIntent, binding: ConversationBinding, ma
     ...(metadata === undefined ? {} : { metadata }) }
 }
 
+const ownerRouteReceiptKeys = [
+  'dsh.route.authority',
+  'dsh.route.authorityHash',
+  'dsh.route.bindingVersion',
+  'dsh.route.generation',
+  'dsh.route.initialBindingId',
+  'dsh.route.initialBindingVersion',
+  'dsh.route.initialGeneration',
+  'dsh.route.minimumGeneration',
+  'dsh.route.receiptVersion',
+  'dsh.route.sourceHash',
+  'dsh.route.sourceId',
+] as const
+
+interface OwnerRouteReceiptEvidence {
+  authorityId: string
+  authorityHash: string
+  bindingVersion: number
+  generation: number
+  initialBindingId: string
+  initialBindingVersion: number
+  initialGeneration: number
+  minimumGeneration: number
+  sourceHash: string
+  sourceId: string
+}
+
+type ParsedOwnerRouteReceipt =
+  | { kind: 'not-route' }
+  | { kind: 'invalid' }
+  | { kind: 'route'; evidence: OwnerRouteReceiptEvidence }
+
+type InspectedOwnerRouteDispatch =
+  | { kind: 'not-route' }
+  | { kind: 'deferred'; failureCode: string }
+  | { kind: 'denied'; failureCode: string }
+  | {
+    kind: 'authorized'
+    authority: OwnerRouteAuthority
+    binding: ConversationBinding
+    evidence: OwnerRouteReceiptEvidence
+  }
+
+function exactPositiveIntegerText(value: string | undefined): number | undefined {
+  if (value === undefined || !/^[1-9][0-9]*$/u.test(value)) return undefined
+  const parsed = Number(value)
+  return Number.isSafeInteger(parsed) && String(parsed) === value ? parsed : undefined
+}
+
+function parseOwnerRouteReceipt(record: Readonly<OutboxRecord>): ParsedOwnerRouteReceipt {
+  const metadata = record.intent.metadata
+  const authorityId = metadata?.['dsh.route.authority']
+  if (authorityId === undefined) return { kind: 'not-route' }
+  if (metadata === undefined
+    || Object.keys(metadata).length !== ownerRouteReceiptKeys.length
+    || Object.keys(metadata).some(key => !(ownerRouteReceiptKeys as readonly string[]).includes(key))
+    || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u.test(authorityId)
+    || !/^[a-f0-9]{64}$/u.test(metadata['dsh.route.authorityHash'] ?? '')
+    || !/^[a-f0-9]{64}$/u.test(metadata['dsh.route.sourceHash'] ?? '')
+    || metadata['dsh.route.receiptVersion'] !== '2'
+    || !['plain', 'markdown'].includes(record.intent.format ?? 'plain')
+    || record.intent.approval !== undefined
+    || record.intent.modelPicker !== undefined
+    || record.intent.permissionPicker !== undefined
+    || record.intent.replyToEventId !== undefined) return { kind: 'invalid' }
+  let sourceId: string
+  let initialBindingId: string
+  try {
+    sourceId = canonicalBackgroundSourceId(metadata['dsh.route.sourceId'])
+    initialBindingId = validateBindingText(metadata['dsh.route.initialBindingId']!, 'initialBindingId', 256)
+  } catch {
+    return { kind: 'invalid' }
+  }
+  const bindingVersion = exactPositiveIntegerText(metadata['dsh.route.bindingVersion'])
+  const generation = exactPositiveIntegerText(metadata['dsh.route.generation'])
+  const initialBindingVersion = exactPositiveIntegerText(metadata['dsh.route.initialBindingVersion'])
+  const initialGeneration = exactPositiveIntegerText(metadata['dsh.route.initialGeneration'])
+  const minimumGeneration = exactPositiveIntegerText(metadata['dsh.route.minimumGeneration'])
+  const sourceHash = metadata['dsh.route.sourceHash']!
+  if (bindingVersion === undefined || generation === undefined
+    || initialBindingVersion === undefined || initialGeneration === undefined
+    || minimumGeneration === undefined
+    || sourceId !== metadata['dsh.route.sourceId']
+    || digest(sourceId) !== sourceHash) return { kind: 'invalid' }
+  return {
+    kind: 'route',
+    evidence: {
+      authorityId,
+      authorityHash: metadata['dsh.route.authorityHash']!,
+      bindingVersion,
+      generation,
+      initialBindingId,
+      initialBindingVersion,
+      initialGeneration,
+      minimumGeneration,
+      sourceHash,
+      sourceId,
+    },
+  }
+}
+
+function ownerRouteReceiptMetadata(input: {
+  authority: Readonly<OwnerRouteAuthority>
+  binding: Readonly<ConversationBinding>
+  sourceId: string
+  initial?: Pick<OwnerRouteReceiptEvidence,
+    'initialBindingId' | 'initialBindingVersion' | 'initialGeneration'>
+}): Readonly<Record<string, string>> {
+  const snapshot = ownerRouteBindingSnapshot(input.authority, input.binding)
+  const initial = input.initial ?? {
+    initialBindingId: snapshot.bindingId,
+    initialBindingVersion: snapshot.bindingVersion,
+    initialGeneration: snapshot.generation,
+  }
+  return {
+    'dsh.route.authority': snapshot.authorityId,
+    'dsh.route.authorityHash': snapshot.authorityHash,
+    'dsh.route.bindingVersion': String(snapshot.bindingVersion),
+    'dsh.route.generation': String(snapshot.generation),
+    'dsh.route.initialBindingId': initial.initialBindingId,
+    'dsh.route.initialBindingVersion': String(initial.initialBindingVersion),
+    'dsh.route.initialGeneration': String(initial.initialGeneration),
+    'dsh.route.minimumGeneration': String(snapshot.minimumGeneration),
+    'dsh.route.receiptVersion': String(snapshot.receiptVersion),
+    'dsh.route.sourceHash': digest(input.sourceId),
+    'dsh.route.sourceId': input.sourceId,
+  }
+}
+
 function canonicalPermissionPicker(
   input: PermissionPickerIntent | undefined,
   binding: ConversationBinding,
@@ -805,6 +1765,29 @@ export class DeliveryStore {
       throw new DeliveryStoreError('conflict', 'delivery database instance namespace is missing or invalid')
     }
     this.databaseInstanceId = instance.instance_id
+    const now = this.now()
+    const authorityDigest = growthObjectDigest({
+      contract: 'assistant-delivery-workflow-trace-source/v1',
+      databaseInstanceId: this.databaseInstanceId,
+      sourceId: WORKFLOW_TRACE_SOURCE_ID,
+    })
+    this.database.prepare(`
+      INSERT INTO workflow_trace_source(
+        singleton, contract_version, generation, authority_digest, created_at, updated_at
+      ) VALUES (1, 1, 1, ?, ?, ?)
+      ON CONFLICT(singleton) DO NOTHING
+    `).run(authorityDigest, now, now)
+    const traceSource = this.database.prepare(`
+      SELECT contract_version, generation, authority_digest
+      FROM workflow_trace_source WHERE singleton = 1
+    `).get() as { contract_version: number; generation: number; authority_digest: string } | undefined
+    if (traceSource?.contract_version !== ASSISTANT_GROWTH_CONTRACT_VERSION
+      || traceSource.generation < 1 || !/^[a-f0-9]{64}$/u.test(traceSource.authority_digest)
+      || traceSource.authority_digest !== authorityDigest) {
+      this.database.close()
+      this.closed = true
+      throw new DeliveryStoreError('conflict', 'workflow trace source authority is missing or stale')
+    }
   }
 
   instanceId(): string {
@@ -1058,6 +2041,23 @@ export class DeliveryStore {
         SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
         FROM delivery_principals WHERE id = ?
       `).get(replacement.id) as unknown as PrincipalRow
+      // Projection authority is the exact durable owner row, not the external
+      // principal string. In particular, A -> B -> A gives A a new row
+      // version. Retire every batch that cannot belong to this exact version
+      // in the same transaction as the handoff so restart/requeue can never
+      // resurrect an older owner's evidence. Legacy and unclassified rows are
+      // deliberately included because they cannot prove an exact lineage.
+      this.database.prepare(`
+        UPDATE delivery_preference_projection_outbox
+        SET terminal_at = ?, failure_code = 'owner-lineage-retired',
+          next_attempt_at = 9007199254740991, updated_at = ?
+        WHERE terminal_at IS NULL AND status IN ('pending', 'retry_wait')
+          AND NOT (
+            lane_kind = 'exact'
+            AND lane_principal_record_id = ?
+            AND lane_principal_version = ?
+          )
+      `).run(now, now, result.id, result.version)
       return principalFromRow(result)
     })
   }
@@ -1701,20 +2701,26 @@ export class DeliveryStore {
     const bindingPrincipalJson = principalJson(binding.principal)
     const now = this.now()
     return this.transaction(() => {
-      const boundaryRow = this.database.prepare('SELECT rowid FROM inbox_messages WHERE id = ?')
-        .get(beforeInboxId) as { rowid: number } | undefined
+      const boundaryRow = this.database.prepare(`
+        SELECT admission.admission_sequence
+        FROM inbox_messages AS message
+        JOIN delivery_inbox_admissions AS admission ON admission.inbox_id = message.id
+        WHERE message.id = ?
+      `).get(beforeInboxId) as { admission_sequence: number } | undefined
       if (boundaryRow === undefined) {
         throw new DeliveryStoreError('not-found', 'inbox cancellation boundary was not found')
       }
       const dispatchingRows = this.database.prepare(`
-        SELECT id, envelope_json FROM inbox_messages
-        WHERE rowid < ? AND status = 'claimed' AND failure_code = 'dispatch-started'
+        SELECT message.id, message.envelope_json FROM inbox_messages AS message
+        JOIN delivery_inbox_admissions AS admission ON admission.inbox_id = message.id
+        WHERE admission.admission_sequence < ?
+          AND message.status = 'claimed' AND message.failure_code = 'dispatch-started'
           AND (binding_id = ? OR (
             json_extract(envelope_json, '$.conversation') = json(?)
             AND json_extract(envelope_json, '$.principal') = json(?)
           ))
-        ORDER BY rowid
-      `).all(boundaryRow.rowid, bindingId, bindingConversationJson, bindingPrincipalJson) as unknown as {
+        ORDER BY admission.admission_sequence
+      `).all(boundaryRow.admission_sequence, bindingId, bindingConversationJson, bindingPrincipalJson) as unknown as {
         id: string
         envelope_json: string
       }[]
@@ -1733,36 +2739,44 @@ export class DeliveryStore {
         }
       }
       const claimedRows = this.database.prepare(`
-        SELECT id FROM inbox_messages
-        WHERE rowid < ? AND status = 'claimed' AND failure_code IS NULL
+        SELECT message.id FROM inbox_messages AS message
+        JOIN delivery_inbox_admissions AS admission ON admission.inbox_id = message.id
+        WHERE admission.admission_sequence < ?
+          AND message.status = 'claimed' AND message.failure_code IS NULL
           AND (binding_id = ? OR (
             json_extract(envelope_json, '$.conversation') = json(?)
             AND json_extract(envelope_json, '$.principal') = json(?)
           ))
-        ORDER BY rowid
-      `).all(boundaryRow.rowid, bindingId, bindingConversationJson, bindingPrincipalJson) as unknown as { id: string }[]
+        ORDER BY admission.admission_sequence
+      `).all(boundaryRow.admission_sequence, bindingId, bindingConversationJson, bindingPrincipalJson) as unknown as { id: string }[]
       this.database.prepare(`
         UPDATE inbox_attempts SET status = 'dead_letter', failure_code = ?, finished_at = ?
         WHERE status = 'claimed' AND inbox_id IN (
-          SELECT id FROM inbox_messages
-          WHERE rowid < ? AND status = 'claimed' AND failure_code IS NULL
+          SELECT message.id FROM inbox_messages AS message
+          JOIN delivery_inbox_admissions AS admission ON admission.inbox_id = message.id
+          WHERE admission.admission_sequence < ?
+            AND message.status = 'claimed' AND message.failure_code IS NULL
             AND (binding_id = ? OR (
               json_extract(envelope_json, '$.conversation') = json(?)
               AND json_extract(envelope_json, '$.principal') = json(?)
             ))
         )
-      `).run(failureCode, now, boundaryRow.rowid, bindingId, bindingConversationJson, bindingPrincipalJson)
+      `).run(failureCode, now, boundaryRow.admission_sequence, bindingId, bindingConversationJson, bindingPrincipalJson)
       const cancelled = this.database.prepare(`
         UPDATE inbox_messages SET status = 'dead_letter', failure_code = ?, next_attempt_at = NULL,
           claimed_by = NULL, fencing_token = NULL, lease_until = NULL, updated_at = ?
-        WHERE rowid < ?
-          AND (binding_id = ? OR (
-            json_extract(envelope_json, '$.conversation') = json(?)
-            AND json_extract(envelope_json, '$.principal') = json(?)
-          ))
-          AND (status IN ('received', 'authorized', 'queued', 'retry_wait')
-            OR (status = 'claimed' AND failure_code IS NULL))
-      `).run(failureCode, now, boundaryRow.rowid, bindingId, bindingConversationJson, bindingPrincipalJson)
+        WHERE id IN (
+          SELECT message.id FROM inbox_messages AS message
+          JOIN delivery_inbox_admissions AS admission ON admission.inbox_id = message.id
+          WHERE admission.admission_sequence < ?
+            AND (message.binding_id = ? OR (
+              json_extract(message.envelope_json, '$.conversation') = json(?)
+              AND json_extract(message.envelope_json, '$.principal') = json(?)
+            ))
+            AND (message.status IN ('received', 'authorized', 'queued', 'retry_wait')
+              OR (message.status = 'claimed' AND message.failure_code IS NULL))
+        )
+      `).run(failureCode, now, boundaryRow.admission_sequence, bindingId, bindingConversationJson, bindingPrincipalJson)
       const cancelledCount = Number(cancelled.changes)
       if (!Number.isSafeInteger(cancelledCount)) {
         throw new DeliveryStoreError('conflict', 'inbox cancellation count is outside the safe integer range')
@@ -1798,16 +2812,21 @@ export class DeliveryStore {
     this.assertOpen()
     const target = canonicalTarget({ conversation: input.conversation, principal: input.principal })
     const beforeInboxId = validateBindingText(input.beforeInboxId, 'beforeInboxId', 256)
-    const boundary = this.database.prepare('SELECT rowid FROM inbox_messages WHERE id = ?')
-      .get(beforeInboxId) as { rowid: number } | undefined
+    const boundary = this.database.prepare(`
+      SELECT admission.admission_sequence
+      FROM inbox_messages AS message
+      JOIN delivery_inbox_admissions AS admission ON admission.inbox_id = message.id
+      WHERE message.id = ?
+    `).get(beforeInboxId) as { admission_sequence: number } | undefined
     if (boundary === undefined) throw new DeliveryStoreError('not-found', 'inbound recovery boundary Inbox was not found')
     const row = this.database.prepare(`${inboxSelect}
-      WHERE rowid < ? AND status IN ('received', 'authorized')
+      JOIN delivery_inbox_admissions AS pending_admission ON pending_admission.inbox_id = inbox_messages.id
+      WHERE pending_admission.admission_sequence < ? AND status IN ('received', 'authorized')
         AND json_extract(envelope_json, '$.conversation') = json(?)
         AND json_extract(envelope_json, '$.principal') = json(?)
-      ORDER BY rowid LIMIT 1
+      ORDER BY pending_admission.admission_sequence LIMIT 1
     `).get(
-      boundary.rowid,
+      boundary.admission_sequence,
       conversationJson(target.conversation),
       principalJson(target.principal),
     ) as InboxRow | undefined
@@ -1818,27 +2837,110 @@ export class DeliveryStore {
     this.assertOpen()
     const limit = Math.max(1, Math.min(100, input.limit ?? 20))
     const rows = input.bindingId === undefined
-      ? this.database.prepare(`${inboxSelect} ORDER BY received_at DESC, rowid DESC LIMIT ?`).all(limit)
-      : this.database.prepare(`${inboxSelect} WHERE binding_id = ? ORDER BY received_at DESC, rowid DESC LIMIT ?`)
+      ? this.database.prepare(`${inboxSelect} ORDER BY received_at DESC, admission_sequence DESC LIMIT ?`).all(limit)
+      : this.database.prepare(`${inboxSelect} WHERE binding_id = ? ORDER BY received_at DESC, admission_sequence DESC LIMIT ?`)
         .all(input.bindingId, limit)
     return (rows as unknown as InboxRow[]).map(inboxFromRow)
   }
 
+  getDeadLetterResolution(input: {
+    kind: DeadLetterResolutionKind
+    id: string
+    attemptCount: number
+  }): DeadLetterResolutionReceipt | undefined {
+    this.assertOpen()
+    if (!['inbox', 'outbox'].includes(input.kind)
+      || !Number.isSafeInteger(input.attemptCount) || input.attemptCount < 0) {
+      throw new DeliveryStoreError('conflict', 'dead-letter resolution identity is invalid')
+    }
+    const id = validateBindingText(input.id, 'messageId', 256)
+    const row = this.database.prepare(`
+      SELECT kind, message_id, attempt_count, receipt_version, resolution, original_status,
+        original_failure_code, operator_id, created_at
+      FROM dead_letter_resolutions
+      WHERE kind = ? AND message_id = ? AND attempt_count = ?
+    `).get(input.kind, id, input.attemptCount) as DeadLetterResolutionRow | undefined
+    return row === undefined ? undefined : deadLetterResolutionFromRow(row)
+  }
+
   health(): {
     pendingInbox: number
+    /** All retained Inbox rows in dead_letter, including operator-resolved tombstones. */
     deadLetterInbox: number
+    actionableDeadLetterInbox: number
+    resolvedDeadLetterInbox: number
     pendingOutbox: number
+    /** All retained Outbox rows in dead, including operator-resolved tombstones. */
     deadLetterOutbox: number
+    actionableDeadLetterOutbox: number
+    resolvedDeadLetterOutbox: number
+    /** All retained ambiguous Outbox rows, including operator-resolved tombstones. */
     unknownOutbox: number
+    actionableUnknownOutbox: number
+    resolvedUnknownOutbox: number
+    pendingPresentations: number
+    deadPresentations: number
   } {
     this.assertOpen()
     const scalar = (sql: string) => (this.database.prepare(sql).get() as { count: number }).count
     return {
       pendingInbox: scalar("SELECT COUNT(*) AS count FROM inbox_messages WHERE status IN ('received', 'authorized', 'queued', 'claimed', 'retry_wait')"),
       deadLetterInbox: scalar("SELECT COUNT(*) AS count FROM inbox_messages WHERE status = 'dead_letter'"),
+      actionableDeadLetterInbox: scalar(`
+        SELECT COUNT(*) AS count FROM inbox_messages AS message
+        WHERE message.status = 'dead_letter' AND NOT EXISTS (
+          SELECT 1 FROM dead_letter_resolutions AS resolution
+          WHERE resolution.kind = 'inbox' AND resolution.message_id = message.id
+            AND resolution.attempt_count = message.attempt_count AND resolution.resolution = 'cancel'
+        )
+      `),
+      resolvedDeadLetterInbox: scalar(`
+        SELECT COUNT(*) AS count FROM inbox_messages AS message
+        WHERE message.status = 'dead_letter' AND EXISTS (
+          SELECT 1 FROM dead_letter_resolutions AS resolution
+          WHERE resolution.kind = 'inbox' AND resolution.message_id = message.id
+            AND resolution.attempt_count = message.attempt_count AND resolution.resolution = 'cancel'
+        )
+      `),
       pendingOutbox: scalar("SELECT COUNT(*) AS count FROM outbox_messages WHERE status IN ('pending', 'attempting', 'retry_wait')"),
       deadLetterOutbox: scalar("SELECT COUNT(*) AS count FROM outbox_messages WHERE status = 'dead'"),
+      actionableDeadLetterOutbox: scalar(`
+        SELECT COUNT(*) AS count FROM outbox_messages AS message
+        WHERE message.status = 'dead' AND NOT EXISTS (
+          SELECT 1 FROM dead_letter_resolutions AS resolution
+          WHERE resolution.kind = 'outbox' AND resolution.message_id = message.id
+            AND resolution.attempt_count = message.attempt_count AND resolution.resolution = 'cancel'
+        )
+      `),
+      resolvedDeadLetterOutbox: scalar(`
+        SELECT COUNT(*) AS count FROM outbox_messages AS message
+        WHERE message.status = 'dead' AND EXISTS (
+          SELECT 1 FROM dead_letter_resolutions AS resolution
+          WHERE resolution.kind = 'outbox' AND resolution.message_id = message.id
+            AND resolution.attempt_count = message.attempt_count AND resolution.resolution = 'cancel'
+        )
+      `),
       unknownOutbox: scalar("SELECT COUNT(*) AS count FROM outbox_messages WHERE status = 'unknown_after_send'"),
+      actionableUnknownOutbox: scalar(`
+        SELECT COUNT(*) AS count FROM outbox_messages AS message
+        WHERE message.status = 'unknown_after_send' AND NOT EXISTS (
+          SELECT 1 FROM dead_letter_resolutions AS resolution
+          WHERE resolution.kind = 'outbox' AND resolution.message_id = message.id
+            AND resolution.attempt_count = message.attempt_count AND resolution.resolution = 'cancel'
+        )
+      `),
+      resolvedUnknownOutbox: scalar(`
+        SELECT COUNT(*) AS count FROM outbox_messages AS message
+        WHERE message.status = 'unknown_after_send' AND EXISTS (
+          SELECT 1 FROM dead_letter_resolutions AS resolution
+          WHERE resolution.kind = 'outbox' AND resolution.message_id = message.id
+            AND resolution.attempt_count = message.attempt_count AND resolution.resolution = 'cancel'
+        )
+      `),
+      pendingPresentations: scalar(
+        "SELECT COUNT(*) AS count FROM delivery_presentations WHERE status IN ('pending', 'attempting', 'retry_wait')",
+      ),
+      deadPresentations: scalar("SELECT COUNT(*) AS count FROM delivery_presentations WHERE status = 'dead'"),
     }
   }
 
@@ -1939,38 +3041,62 @@ export class DeliveryStore {
       this.database.prepare(`
         UPDATE inbox_messages SET status = 'dead_letter', failure_code = 'attempts-exhausted',
           next_attempt_at = NULL, updated_at = ?
-        WHERE rowid IN (
-          SELECT rowid FROM inbox_messages
-          WHERE status = 'retry_wait' AND next_attempt_at <= ? AND attempt_count >= ?
-            AND (failure_code IS NULL OR failure_code NOT IN (
+        WHERE id IN (
+          SELECT candidate.id FROM inbox_messages AS candidate
+          JOIN delivery_inbox_admissions AS candidate_admission
+            ON candidate_admission.inbox_id = candidate.id
+          WHERE candidate.status = 'retry_wait' AND candidate.next_attempt_at <= ?
+            AND candidate.attempt_count >= ?
+            AND (candidate.failure_code IS NULL OR candidate.failure_code NOT IN (
               'permission-dispatch-recovery',
               'permission-cancelled-recovery',
-              'permission-failure-notice-recovery'
+              'permission-failure-notice-recovery',
+              'feedback-dispatch-recovery',
+              'learning-dispatch-recovery',
+              'workflow-dispatch-recovery'
             ))
-          ORDER BY rowid LIMIT ?
+          ORDER BY candidate_admission.admission_sequence LIMIT ?
         )
       `).run(now, now, input.maxAttempts, maintenanceLimit)
       const candidates = this.database.prepare(`
         SELECT candidate.id FROM inbox_messages AS candidate
+        JOIN conversation_bindings AS candidate_binding
+          ON candidate_binding.id = candidate.binding_id
+        JOIN delivery_inbox_admissions AS candidate_admission
+          ON candidate_admission.inbox_id = candidate.id
         WHERE candidate.status IN ('queued', 'retry_wait')
           AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at <= ?)
           AND (candidate.status = 'queued' OR candidate.attempt_count < ? OR candidate.failure_code IN (
             'permission-dispatch-recovery',
             'permission-cancelled-recovery',
-            'permission-failure-notice-recovery'
+            'permission-failure-notice-recovery',
+            'feedback-dispatch-recovery',
+            'learning-dispatch-recovery',
+            'workflow-dispatch-recovery'
           ))
           AND candidate.binding_id IS NOT NULL
           AND NOT EXISTS (
             SELECT 1 FROM inbox_messages AS earlier
-            WHERE earlier.binding_id = candidate.binding_id
-              AND earlier.rowid < candidate.rowid
+            JOIN conversation_bindings AS earlier_binding
+              ON earlier_binding.id = earlier.binding_id
+            JOIN delivery_inbox_admissions AS earlier_admission
+              ON earlier_admission.inbox_id = earlier.id
+            WHERE earlier_binding.workspace = candidate_binding.workspace
+              AND earlier_binding.agent_preset = candidate_binding.agent_preset
+              AND earlier_binding.principal_id = candidate_binding.principal_id
+              AND earlier_admission.admission_sequence < candidate_admission.admission_sequence
               AND earlier.status NOT IN ('processed', 'dead_letter')
           )
           AND NOT EXISTS (
             SELECT 1 FROM inbox_messages AS active
-            WHERE active.binding_id = candidate.binding_id AND active.status = 'claimed'
+            JOIN conversation_bindings AS active_binding
+              ON active_binding.id = active.binding_id
+            WHERE active_binding.workspace = candidate_binding.workspace
+              AND active_binding.agent_preset = candidate_binding.agent_preset
+              AND active_binding.principal_id = candidate_binding.principal_id
+              AND active.status = 'claimed'
           )
-        ORDER BY candidate.rowid LIMIT ?
+        ORDER BY candidate_admission.admission_sequence LIMIT ?
       `).all(now, input.maxAttempts, input.limit) as unknown as { id: string }[]
       for (const candidate of candidates) {
         const current = this.getInbox(candidate.id)!
@@ -1981,7 +3107,10 @@ export class DeliveryStore {
             failure_code = CASE WHEN failure_code IN (
               'permission-dispatch-recovery',
               'permission-cancelled-recovery',
-              'permission-failure-notice-recovery'
+              'permission-failure-notice-recovery',
+              'feedback-dispatch-recovery',
+              'learning-dispatch-recovery',
+              'workflow-dispatch-recovery'
             ) THEN failure_code ELSE NULL END,
             updated_at = ?
           WHERE id = ? AND status IN ('queued', 'retry_wait')
@@ -2063,7 +3192,10 @@ export class DeliveryStore {
         UPDATE inbox_messages AS inbox SET failure_code = CASE WHEN failure_code IN (
           'permission-dispatch-recovery',
           'permission-cancelled-recovery',
-          'permission-failure-notice-recovery'
+          'permission-failure-notice-recovery',
+          'feedback-dispatch-recovery',
+          'learning-dispatch-recovery',
+          'workflow-dispatch-recovery'
         ) THEN failure_code ELSE 'dispatch-started' END, updated_at = ?
         WHERE inbox.id = ? AND inbox.status = 'claimed' AND inbox.claimed_by = ?
           AND inbox.fencing_token = ? AND inbox.lease_until > ? AND inbox.binding_id = ?
@@ -2138,8 +3270,12 @@ export class DeliveryStore {
     const recovered: string[] = []
     this.transaction(() => {
       const rows = this.database.prepare(`
-        SELECT id, event_id, binding_id, attempt_count, failure_code, envelope_json FROM inbox_messages
-        WHERE status = 'claimed' AND lease_until <= ? ORDER BY rowid LIMIT ?
+        SELECT message.id, message.event_id, message.binding_id, message.attempt_count,
+          message.failure_code, message.envelope_json
+        FROM inbox_messages AS message
+        JOIN delivery_inbox_admissions AS admission ON admission.inbox_id = message.id
+        WHERE message.status = 'claimed' AND message.lease_until <= ?
+        ORDER BY admission.admission_sequence LIMIT ?
       `).all(now, limit) as unknown as {
         id: string
         event_id: string
@@ -2150,12 +3286,24 @@ export class DeliveryStore {
       }[]
       for (const row of rows) {
         let interruptedPermission = false
+        let interruptedFeedback = false
+        let interruptedLearning = false
+        let interruptedWorkflow = false
         if (row.failure_code === 'dispatch-started') {
           try {
-            interruptedPermission = isPermissionDeliveryCommand(JSON.parse(row.envelope_json) as InboundEnvelope)
+            const envelope = JSON.parse(row.envelope_json) as InboundEnvelope
+            interruptedPermission = isPermissionDeliveryCommand(envelope)
+            interruptedFeedback = isFeedbackDeliveryCommand(envelope)
+            interruptedLearning = isLearningDeliveryCommand(envelope)
+            interruptedWorkflow = isWorkflowDeliveryCommand(envelope)
           } catch {}
         }
         const existingPermissionRecovery = permissionDispatchRecoveryFromFailureCode(row.failure_code ?? undefined)
+        const feedbackRecovery = interruptedFeedback || isFeedbackDispatchRecoveryCode(row.failure_code ?? undefined)
+        const learningRecovery = interruptedLearning
+          || isLearningDispatchRecoveryCode(row.failure_code ?? undefined)
+          || isLearningRetryableFailureCode(row.failure_code ?? undefined)
+        const workflowRecovery = interruptedWorkflow || isWorkflowDispatchRecoveryCode(row.failure_code ?? undefined)
         const permissionCommand = interruptedPermission || existingPermissionRecovery !== undefined
         const terminalOutbox = !permissionCommand || row.binding_id === null
           ? undefined
@@ -2189,14 +3337,22 @@ export class DeliveryStore {
           : existingPermissionRecovery === undefined
             ? undefined
             : permissionDispatchRecoveryCode(existingPermissionRecovery)
-        const ambiguous = row.failure_code === 'dispatch-started' && permissionRecovery === undefined
-        const exhausted = row.attempt_count >= input.maxAttempts && permissionRecovery === undefined
+        const ambiguous = row.failure_code === 'dispatch-started'
+          && permissionRecovery === undefined && !feedbackRecovery && !learningRecovery && !workflowRecovery
+        const exhausted = row.attempt_count >= input.maxAttempts
+          && permissionRecovery === undefined && !feedbackRecovery && !learningRecovery && !workflowRecovery
         const changed = this.database.prepare(`
           UPDATE inbox_messages SET status = ?, next_attempt_at = ?, claimed_by = NULL,
             fencing_token = NULL, lease_until = NULL, failure_code = ?, updated_at = ?
           WHERE id = ? AND status = 'claimed' AND lease_until <= ?
         `).run(ambiguous || exhausted ? 'dead_letter' : 'retry_wait', ambiguous || exhausted ? null : now,
-          ambiguous ? 'dispatch-ambiguous' : permissionRecovery ?? 'lease-expired', now, row.id, now)
+          ambiguous ? 'dispatch-ambiguous'
+            : permissionRecovery ?? (feedbackRecovery
+              ? feedbackDispatchRecoveryCode
+              : learningRecovery
+                ? learningDispatchRecoveryCode
+                : workflowRecovery ? workflowDispatchRecoveryCode : 'lease-expired'),
+          now, row.id, now)
         if (changed.changes !== 1) continue
         this.database.prepare(`
           UPDATE inbox_attempts SET status = 'lost', failure_code = 'lease-expired', finished_at = ?
@@ -2276,9 +3432,339 @@ export class DeliveryStore {
     return this.getOutbox(id)!
   }
 
+  /**
+   * Resolve and enqueue one Host-owned stable owner route under the same
+   * `BEGIN IMMEDIATE` fence as Outbox insertion.
+   *
+   * This closes the `/new` race between an earlier read and insertion. An
+   * existing idempotency winner is returned without mutation (including
+   * `unknown_after_send`) only after both the current route and the winner's
+   * immutable historical route receipt are revalidated.
+   */
+  enqueueOwnerRoute(input: {
+    authority: OwnerRouteAuthority
+    sourceId: string
+    sourceHash: string
+    idempotencyKey: string
+    text: string
+    format?: 'markdown' | 'plain'
+  }): OutboxRecord {
+    this.assertOpen()
+    const authority = canonicalOwnerRouteAuthority(input.authority)
+    let sourceId: string
+    try {
+      sourceId = canonicalBackgroundSourceId(input.sourceId)
+    } catch {
+      throw new DeliveryStoreError('invalid-intent', 'owner route source id is invalid')
+    }
+    if (typeof input.sourceHash !== 'string' || !/^[a-f0-9]{64}$/u.test(input.sourceHash)
+      || digest(sourceId) !== input.sourceHash) {
+      throw new DeliveryStoreError('invalid-intent', 'owner route source hash is invalid')
+    }
+    let idempotencyKey: string
+    try {
+      idempotencyKey = validateBindingText(input.idempotencyKey, 'idempotencyKey', 512)
+    } catch {
+      throw new DeliveryStoreError('invalid-intent', 'owner route idempotency key is invalid')
+    }
+    return this.transaction(() => {
+      const current = this.getActiveBinding(authority.conversation)
+      const owner = current === undefined ? undefined : this.getPrincipal(current.principal)
+      if (current === undefined || current.status !== 'active'
+        || !bindingMatchesOwnerRoute(current, authority)
+        || owner?.status !== 'active' || owner.role !== 'owner') {
+        throw new DeliveryStoreError('invalid-binding', 'active binding does not match owner route authority')
+      }
+
+      const winnerRow = this.database.prepare(`${outboxSelect} WHERE idempotency_key = ?`)
+        .get(idempotencyKey) as OutboxRow | undefined
+      const winner = winnerRow === undefined ? undefined : outboxFromRow(winnerRow)
+      const binding = winner === undefined ? current : this.getBinding(winner.intent.bindingId)
+      if (binding === undefined || !bindingMatchesOwnerRoute(binding, authority)) {
+        throw new DeliveryStoreError('idempotency-conflict', 'owner route idempotency winner has another lineage')
+      }
+      let receiptMetadata: Readonly<Record<string, string>>
+      if (winner === undefined) {
+        receiptMetadata = ownerRouteReceiptMetadata({ authority, binding, sourceId })
+      } else {
+        const parsed = parseOwnerRouteReceipt(winner)
+        const evidence = parsed.kind === 'route' ? parsed.evidence : undefined
+        const initialBinding = evidence === undefined ? undefined : this.getBinding(evidence.initialBindingId)
+        const exactReceipt = evidence !== undefined
+          && evidence.authorityId === authority.id
+          && evidence.authorityHash === ownerRouteAuthorityHash(authority)
+          && evidence.bindingVersion === binding.version - (binding.status === 'revoked' ? 1 : 0)
+          && evidence.generation === binding.generation
+          && evidence.minimumGeneration === authority.minimumGeneration
+          && evidence.sourceId === sourceId
+          && evidence.sourceHash === input.sourceHash
+          && initialBinding !== undefined
+          && bindingMatchesOwnerRoute(initialBinding, authority)
+          && evidence.initialBindingVersion
+            === initialBinding.version - (initialBinding.status === 'revoked' ? 1 : 0)
+          && evidence.initialGeneration === initialBinding.generation
+        if (!exactReceipt || winner.intent.metadata === undefined) {
+          throw new DeliveryStoreError(
+            'idempotency-conflict',
+            'owner route idempotency winner has an invalid immutable route receipt',
+          )
+        }
+        receiptMetadata = winner.intent.metadata
+      }
+      const expected = canonicalIntent({
+        idempotencyKey,
+        bindingId: binding.id,
+        target: { conversation: binding.conversation, principal: binding.principal },
+        text: input.text,
+        format: input.format ?? 'plain',
+        metadata: receiptMetadata,
+      }, binding, this.maxTextBytes)
+      if (winner !== undefined) {
+        if (winner.intentHash !== digest(JSON.stringify(expected))) {
+          throw new DeliveryStoreError(
+            'idempotency-conflict',
+            'owner route idempotency key was reused with a different immutable intent',
+          )
+        }
+        return winner
+      }
+      return this.enqueue(expected)
+    })
+  }
+
   getOutbox(id: string): OutboxRecord | undefined {
     this.assertOpen()
     const row = this.database.prepare(`${outboxSelect} WHERE id = ?`).get(id) as OutboxRow | undefined
+    return row === undefined ? undefined : outboxFromRow(row)
+  }
+
+  getOutboxByIdempotencyKey(idempotencyKeyInput: string): OutboxRecord | undefined {
+    this.assertOpen()
+    const idempotencyKey = validateBindingText(idempotencyKeyInput, 'idempotencyKey', 200)
+    const row = this.database.prepare(`${outboxSelect} WHERE idempotency_key = ?`)
+      .get(idempotencyKey) as OutboxRow | undefined
+    return row === undefined ? undefined : outboxFromRow(row)
+  }
+
+  /** Persist the latest desired replacement for one exact durable message. */
+  publishDeliveryPresentation(input: DeliveryPresentationUpdate): StoredDeliveryPresentation {
+    this.assertOpen()
+    const presentationKey = validateBindingText(input.presentationKey, 'presentationKey', 500)
+    const originalOutboxIdempotencyKey = validateBindingText(
+      input.originalOutboxIdempotencyKey,
+      'originalOutboxIdempotencyKey',
+      200,
+    )
+    if (!Number.isSafeInteger(input.revision) || input.revision < 1
+      || input.revision > Number.MAX_SAFE_INTEGER) {
+      throw new DeliveryStoreError('invalid-intent', 'presentation revision is invalid')
+    }
+    const presentation = canonicalDeliveryPresentation(input.presentation)
+    const payloadJson = JSON.stringify(presentation)
+    const payloadHash = digest(payloadJson)
+    const now = this.now()
+    return this.transaction(() => {
+      const current = this.database.prepare(`${deliveryPresentationSelect} WHERE presentation_key = ?`)
+        .get(presentationKey) as unknown as DeliveryPresentationRow | undefined
+      if (current !== undefined) {
+        if (input.revision < current.revision) {
+          throw new DeliveryStoreError('version-conflict', 'presentation revision is older than durable desired state')
+        }
+        if (input.revision === current.revision) {
+          if (current.original_outbox_idempotency_key !== originalOutboxIdempotencyKey
+            || current.payload_hash !== payloadHash || current.payload_json !== payloadJson) {
+            throw new DeliveryStoreError(
+              'idempotency-conflict',
+              'presentation revision was reused with different content',
+            )
+          }
+          return deliveryPresentationFromRow(current)
+        }
+        if (current.original_outbox_idempotency_key !== originalOutboxIdempotencyKey) {
+          throw new DeliveryStoreError(
+            'idempotency-conflict',
+            'presentation lifecycle was retargeted to another durable message',
+          )
+        }
+        this.database.prepare(`
+          UPDATE delivery_presentations
+          SET revision = ?, payload_hash = ?, payload_json = ?, status = 'pending',
+            next_attempt_at = NULL, claimed_by = NULL, fencing_token = NULL, lease_until = NULL,
+            failure_code = NULL, updated_at = ?
+          WHERE presentation_key = ? AND revision = ?
+        `).run(input.revision, payloadHash, payloadJson, now, presentationKey, current.revision)
+      } else {
+        this.database.prepare(`
+          INSERT INTO delivery_presentations(
+            presentation_key, original_outbox_idempotency_key, revision, payload_hash, payload_json,
+            status, attempt_count, presented_revision, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, 'pending', 0, 0, ?, ?)
+        `).run(
+          presentationKey,
+          originalOutboxIdempotencyKey,
+          input.revision,
+          payloadHash,
+          payloadJson,
+          now,
+          now,
+        )
+      }
+      const saved = this.database.prepare(`${deliveryPresentationSelect} WHERE presentation_key = ?`)
+        .get(presentationKey) as unknown as DeliveryPresentationRow
+      return deliveryPresentationFromRow(saved)
+    })
+  }
+
+  getDeliveryPresentation(presentationKeyInput: string): StoredDeliveryPresentation | undefined {
+    this.assertOpen()
+    const presentationKey = validateBindingText(presentationKeyInput, 'presentationKey', 500)
+    const row = this.database.prepare(`${deliveryPresentationSelect} WHERE presentation_key = ?`)
+      .get(presentationKey) as DeliveryPresentationRow | undefined
+    return row === undefined ? undefined : deliveryPresentationFromRow(row)
+  }
+
+  claimDeliveryPresentation(input: {
+    ownerId: string
+    leaseMs: number
+    /** Lifecycles already attempted by this drain pass. */
+    excludePresentationKeys?: readonly string[]
+  }): { presentation: StoredDeliveryPresentation; fencingToken: number } | undefined {
+    this.assertOpen()
+    const ownerId = validateBindingText(input.ownerId, 'ownerId', 500)
+    if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1) {
+      throw new DeliveryStoreError('conflict', 'presentation lease is invalid')
+    }
+    if ((input.excludePresentationKeys?.length ?? 0) > 100) {
+      throw new DeliveryStoreError('conflict', 'presentation exclusions exceed their bound')
+    }
+    const excluded = input.excludePresentationKeys?.map(key =>
+      validateBindingText(key, 'presentationKey', 500)) ?? []
+    const exclusionClause = excluded.length === 0
+      ? ''
+      : `AND presentation_key NOT IN (${excluded.map(() => '?').join(', ')})`
+    const now = this.now()
+    return this.transaction(() => {
+      // Quarantine bounded poison rows in-place before claiming a later valid
+      // lifecycle. A malformed earliest row must never starve the queue.
+      for (let inspected = 0; inspected < 100; inspected += 1) {
+        const current = this.database.prepare(`${deliveryPresentationSelect}
+          WHERE (status = 'pending'
+            OR (status = 'retry_wait' AND next_attempt_at <= ?)
+            OR (status = 'attempting' AND lease_until <= ?))
+          ${exclusionClause}
+          ORDER BY created_at, presentation_key LIMIT 1`)
+          .get(now, now, ...excluded) as unknown as DeliveryPresentationRow | undefined
+        if (current === undefined) return undefined
+        try {
+          deliveryPresentationFromRow(current)
+        } catch {
+          this.database.prepare(`
+            UPDATE delivery_presentations
+            SET status = 'dead', next_attempt_at = NULL, claimed_by = NULL,
+              lease_until = NULL, failure_code = 'presentation-poison-row', updated_at = ?
+            WHERE presentation_key = ? AND revision = ?
+          `).run(now, current.presentation_key, current.revision)
+          continue
+        }
+        const fencingToken = (current.fencing_token ?? 0) + 1
+        const changed = this.database.prepare(`
+          UPDATE delivery_presentations
+          SET status = 'attempting', attempt_count = attempt_count + 1,
+            claimed_by = ?, fencing_token = ?, lease_until = ?, next_attempt_at = NULL,
+            failure_code = NULL, updated_at = ?
+          WHERE presentation_key = ? AND revision = ?
+            AND COALESCE(fencing_token, 0) = ?
+            AND (status = 'pending'
+              OR (status = 'retry_wait' AND next_attempt_at <= ?)
+              OR (status = 'attempting' AND lease_until <= ?))
+        `).run(
+          ownerId,
+          fencingToken,
+          now + input.leaseMs,
+          now,
+          current.presentation_key,
+          current.revision,
+          current.fencing_token ?? 0,
+          now,
+          now,
+        )
+        if (changed.changes !== 1) throw new DeliveryStoreError('stale-fence', 'presentation claim changed')
+        const claimed = this.database.prepare(`${deliveryPresentationSelect} WHERE presentation_key = ?`)
+          .get(current.presentation_key) as unknown as DeliveryPresentationRow
+        return { presentation: deliveryPresentationFromRow(claimed), fencingToken }
+      }
+      return undefined
+    })
+  }
+
+  finishDeliveryPresentation(input: {
+    presentationKey: string
+    revision: number
+    ownerId: string
+    fencingToken: number
+    outcome: 'presented' | 'retry_wait' | 'dead'
+    providerMessageId?: string
+    failureCode?: string
+    nextAttemptAt?: number
+  }): StoredDeliveryPresentation {
+    this.assertOpen()
+    const presentationKey = validateBindingText(input.presentationKey, 'presentationKey', 500)
+    const ownerId = validateBindingText(input.ownerId, 'ownerId', 500)
+    if (!Number.isSafeInteger(input.revision) || input.revision < 1
+      || !Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1) {
+      throw new DeliveryStoreError('stale-fence', 'presentation completion fence is invalid')
+    }
+    const providerMessageId = input.providerMessageId === undefined
+      ? undefined
+      : validateBindingText(input.providerMessageId, 'providerMessageId', 512)
+    const failureCode = input.failureCode === undefined
+      ? undefined
+      : validateBindingText(input.failureCode, 'failureCode', 500)
+    if (input.outcome === 'presented' && providerMessageId === undefined) {
+      throw new DeliveryStoreError('conflict', 'presented replacement requires provider message identity')
+    }
+    if (input.outcome !== 'presented' && failureCode === undefined) {
+      throw new DeliveryStoreError('conflict', 'failed replacement requires a failure code')
+    }
+    if (input.outcome === 'retry_wait'
+      && (!Number.isSafeInteger(input.nextAttemptAt) || input.nextAttemptAt! < 0)) {
+      throw new DeliveryStoreError('conflict', 'replacement retry time is invalid')
+    }
+    const now = this.now()
+    const changed = this.database.prepare(`
+      UPDATE delivery_presentations
+      SET status = ?, presented_revision = CASE WHEN ? = 'presented' THEN revision ELSE presented_revision END,
+        provider_message_id = COALESCE(?, provider_message_id), failure_code = ?, next_attempt_at = ?,
+        claimed_by = NULL, lease_until = NULL, updated_at = ?
+      WHERE presentation_key = ? AND revision = ? AND status = 'attempting'
+        AND claimed_by = ? AND fencing_token = ?
+    `).run(
+      input.outcome,
+      input.outcome,
+      providerMessageId ?? null,
+      failureCode ?? null,
+      input.outcome === 'retry_wait' ? input.nextAttemptAt! : null,
+      now,
+      presentationKey,
+      input.revision,
+      ownerId,
+      input.fencingToken,
+    )
+    if (changed.changes !== 1) {
+      throw new DeliveryStoreError('stale-fence', 'presentation completion lost its claim or revision')
+    }
+    return this.getDeliveryPresentation(presentationKey)!
+  }
+
+  /** Exact provider-addressed lookup used only to bind authenticated replies. */
+  getOutboxByProviderMessage(channelInput: string, accountInput: string, providerMessageIdInput: string): OutboxRecord | undefined {
+    this.assertOpen()
+    const channel = validateBindingText(channelInput, 'channel', 256)
+    const account = validateBindingText(accountInput, 'account', 256)
+    const providerMessageId = validateBindingText(providerMessageIdInput, 'providerMessageId', 512)
+    const row = this.database.prepare(`${outboxSelect}
+      WHERE channel = ? AND account = ? AND provider_message_id = ?`)
+      .get(channel, account, providerMessageId) as OutboxRow | undefined
     return row === undefined ? undefined : outboxFromRow(row)
   }
 
@@ -2423,6 +3909,208 @@ export class DeliveryStore {
     return (rows as unknown as OutboxRow[]).map(outboxFromRow)
   }
 
+  /** Recheck a claimed route immediately before provider I/O. */
+  validateClaimedOwnerRoute(
+    recordInput: Readonly<OutboxRecord>,
+    guard: Readonly<OwnerRouteDispatchGuard>,
+  ): OwnerRouteDispatchValidation {
+    this.assertOpen()
+    const record = this.getOutbox(recordInput.id)
+    if (record === undefined || record.status !== 'attempting'
+      || record.fencingToken !== recordInput.fencingToken
+      || record.claimedBy !== recordInput.claimedBy) {
+      return { kind: 'denied', failureCode: 'owner-route-claim-changed' }
+    }
+    const inspected = this.inspectOwnerRouteDispatch(record, guard)
+    return inspected.kind === 'authorized'
+      ? { kind: 'authorized' }
+      : inspected
+  }
+
+  /** Recheck a durable owner route before mutating its exact provider message. */
+  validatePresentationOwnerRoute(
+    recordInput: Readonly<OutboxRecord>,
+    guard: Readonly<OwnerRouteDispatchGuard>,
+  ): OwnerRouteDispatchValidation {
+    this.assertOpen()
+    const record = this.getOutbox(recordInput.id)
+    if (record === undefined || record.intentHash !== recordInput.intentHash
+      || record.intent.idempotencyKey !== recordInput.intent.idempotencyKey
+      || record.providerMessageId !== recordInput.providerMessageId) {
+      return { kind: 'denied', failureCode: 'owner-route-message-changed' }
+    }
+    const inspected = this.inspectOwnerRouteDispatch(record, guard)
+    return inspected.kind === 'authorized'
+      ? { kind: 'authorized' }
+      : inspected
+  }
+
+  private inspectOwnerRouteDispatch(
+    record: Readonly<OutboxRecord>,
+    guard: Readonly<OwnerRouteDispatchGuard>,
+  ): InspectedOwnerRouteDispatch {
+    const parsed = parseOwnerRouteReceipt(record)
+    if (parsed.kind === 'not-route') return parsed
+    if (parsed.kind === 'invalid') {
+      return { kind: 'denied', failureCode: 'owner-route-receipt-invalid' }
+    }
+    const evidence = parsed.evidence
+    const authorities = new Map<string, OwnerRouteAuthority>()
+    try {
+      for (const input of guard.ownerRoutes) {
+        const authority = canonicalOwnerRouteAuthority(input as OwnerRouteAuthority)
+        if (authorities.has(authority.id)) {
+          return { kind: 'denied', failureCode: 'owner-route-authority-invalid' }
+        }
+        authorities.set(authority.id, authority)
+      }
+    } catch {
+      return { kind: 'denied', failureCode: 'owner-route-authority-invalid' }
+    }
+    const authority = authorities.get(evidence.authorityId)
+    if (authority === undefined) {
+      return { kind: 'denied', failureCode: 'owner-route-authority-revoked' }
+    }
+    if (ownerRouteAuthorityHash(authority) !== evidence.authorityHash
+      || authority.minimumGeneration !== evidence.minimumGeneration) {
+      return { kind: 'denied', failureCode: 'owner-route-authority-changed' }
+    }
+    const binding = this.getBinding(record.intent.bindingId)
+    const initialBinding = this.getBinding(evidence.initialBindingId)
+    if (binding === undefined || initialBinding === undefined) {
+      return { kind: 'denied', failureCode: 'owner-route-receipt-invalid' }
+    }
+    try {
+      const canonical = canonicalIntent(record.intent, binding, this.maxTextBytes)
+      if (digest(JSON.stringify(canonical)) !== record.intentHash
+        || !bindingMatchesOwnerRoute(binding, authority)
+        || !bindingMatchesOwnerRoute(initialBinding, authority)
+        || evidence.bindingVersion !== binding.version - (binding.status === 'revoked' ? 1 : 0)
+        || evidence.generation !== binding.generation
+        || evidence.initialBindingVersion
+          !== initialBinding.version - (initialBinding.status === 'revoked' ? 1 : 0)
+        || evidence.initialGeneration !== initialBinding.generation) {
+        return { kind: 'denied', failureCode: 'owner-route-receipt-invalid' }
+      }
+    } catch {
+      return { kind: 'denied', failureCode: 'owner-route-receipt-invalid' }
+    }
+    const current = this.getActiveBinding(authority.conversation)
+    if (current === undefined) {
+      return { kind: 'denied', failureCode: 'owner-route-binding-missing' }
+    }
+    const owner = this.getPrincipal(current.principal)
+    if (!bindingMatchesOwnerRoute(current, authority)
+      || owner?.status !== 'active' || owner.role !== 'owner') {
+      return { kind: 'denied', failureCode: 'owner-route-binding-drift' }
+    }
+    if (current.generation < evidence.generation
+      || current.generation < authority.minimumGeneration) {
+      return { kind: 'denied', failureCode: 'owner-route-generation-below-floor' }
+    }
+    try {
+      if (!guard.authorize({ authority, sourceId: evidence.sourceId,
+        idempotencyKey: record.intent.idempotencyKey })) {
+        return { kind: 'denied', failureCode: 'owner-route-policy-revoked' }
+      }
+    } catch {
+      return { kind: 'deferred', failureCode: 'owner-route-policy-check-failed' }
+    }
+    return { kind: 'authorized', authority, binding: current, evidence }
+  }
+
+  private ownerRouteIsProvablyUnsent(record: Readonly<OutboxRecord>): boolean {
+    if (!['pending', 'retry_wait'].includes(record.status)
+      || record.claimedBy !== undefined || record.providerMessageId !== undefined) return false
+    const row = this.database.prepare(`
+      SELECT COUNT(*) AS count FROM outbox_attempts
+      WHERE outbox_id = ? AND status IN ('accepted', 'unknown_after_send', 'reconciled', 'attempting')
+    `).get(record.id) as { count: number }
+    return row.count === 0
+  }
+
+  private rebindOwnerRouteBeforeClaim(
+    record: Readonly<OutboxRecord>,
+    inspected: Extract<InspectedOwnerRouteDispatch, { kind: 'authorized' }>,
+  ): boolean {
+    if (record.intent.bindingId === inspected.binding.id) return true
+    const metadata = ownerRouteReceiptMetadata({
+      authority: inspected.authority,
+      binding: inspected.binding,
+      sourceId: inspected.evidence.sourceId,
+      initial: inspected.evidence,
+    })
+    let intent: OutboundIntent
+    try {
+      intent = canonicalIntent({
+        ...record.intent,
+        bindingId: inspected.binding.id,
+        target: { conversation: inspected.binding.conversation, principal: inspected.binding.principal },
+        metadata,
+      }, inspected.binding, this.maxTextBytes)
+    } catch {
+      return false
+    }
+    const intentJson = JSON.stringify(intent)
+    const intentHash = digest(intentJson)
+    return this.database.prepare(`
+      UPDATE outbox_messages
+      SET binding_id = ?, intent_hash = ?, intent_json = ?, channel = ?, account = ?, lane_hash = ?, updated_at = ?
+      WHERE id = ? AND status = ? AND claimed_by IS NULL AND intent_hash = ?
+    `).run(
+      inspected.binding.id,
+      intentHash,
+      intentJson,
+      inspected.binding.conversation.channel,
+      inspected.binding.conversation.account,
+      conversationHash(inspected.binding.conversation),
+      this.now(),
+      record.id,
+      record.status,
+      record.intentHash,
+    ).changes === 1
+  }
+
+  private deadLetterOwnerRouteBeforeClaim(
+    record: Readonly<OutboxRecord>,
+    ownerId: string,
+    failureCode: string,
+    now: number,
+  ): boolean {
+    if (!['pending', 'retry_wait'].includes(record.status)
+      || !Number.isSafeInteger(record.attemptCount + 1)) return false
+    const attemptNumber = record.attemptCount + 1
+    const changed = this.database.prepare(`
+      UPDATE outbox_messages
+      SET status = 'dead', attempt_count = attempt_count + 1, next_attempt_at = NULL,
+        claimed_by = NULL, fencing_token = NULL, lease_until = NULL, failure_code = ?, updated_at = ?
+      WHERE id = ? AND status = ? AND claimed_by IS NULL AND intent_hash = ?
+    `).run(failureCode, now, record.id, record.status, record.intentHash)
+    if (changed.changes !== 1) return false
+    this.database.prepare(`
+      INSERT INTO outbox_attempts (
+        id, outbox_id, attempt_number, owner_id, fencing_token, operation, status,
+        failure_code, created_at, finished_at
+      ) VALUES (?, ?, ?, ?, ?, 'send', 'dead', ?, ?, ?)
+    `).run(`outbox_attempt_${randomUUID()}`, record.id, attemptNumber, ownerId,
+      attemptNumber, failureCode, now, now)
+    return true
+  }
+
+  private deferOwnerRouteBeforeClaim(
+    record: Readonly<OutboxRecord>,
+    failureCode: string,
+    now: number,
+    retryAt: number,
+  ): boolean {
+    if (!['pending', 'retry_wait'].includes(record.status)) return false
+    return this.database.prepare(`
+      UPDATE outbox_messages
+      SET status = 'retry_wait', next_attempt_at = ?, failure_code = ?, updated_at = ?
+      WHERE id = ? AND status = ? AND claimed_by IS NULL AND intent_hash = ?
+    `).run(retryAt, failureCode, now, record.id, record.status, record.intentHash).changes === 1
+  }
+
   claimOutbox(input: {
     ownerId: string
     leaseMs: number
@@ -2433,6 +4121,7 @@ export class DeliveryStore {
     /** Locally active work that must not be reclaimed even if its durable lease was externally lost. */
     excludeIds?: readonly string[]
     maintenanceLimit?: number
+    ownerRouteGuard?: Readonly<OwnerRouteDispatchGuard>
   }): { record: OutboxRecord; fencingToken: number; mode: 'reconcile' | 'send' }[] {
     this.assertOpen()
     const ownerId = validateBindingText(input.ownerId, 'ownerId', 256)
@@ -2464,6 +4153,7 @@ export class DeliveryStore {
     const routeParameters = routes?.flatMap(route => [route.channel, route.account]) ?? []
     const now = this.now()
     const claims: { record: OutboxRecord; fencingToken: number; mode: 'reconcile' | 'send' }[] = []
+    const validatedOwnerRouteIds: string[] = []
     this.transaction(() => {
       this.database.prepare(`
         UPDATE outbox_messages SET status = 'dead', failure_code = 'attempts-exhausted',
@@ -2484,6 +4174,11 @@ export class DeliveryStore {
         WHERE rowid IN (
           SELECT candidate.rowid FROM outbox_messages AS candidate
           WHERE candidate.status = 'unknown_after_send'
+            AND NOT EXISTS (
+              SELECT 1 FROM dead_letter_resolutions AS resolution
+              WHERE resolution.kind = 'outbox' AND resolution.message_id = candidate.id
+                AND resolution.attempt_count = candidate.attempt_count AND resolution.resolution = 'cancel'
+            )
             AND (
               SELECT COUNT(*) FROM outbox_attempts AS history
               WHERE history.outbox_id = candidate.id AND history.operation = 'reconcile'
@@ -2491,6 +4186,44 @@ export class DeliveryStore {
           ORDER BY candidate.rowid LIMIT ?
         )
       `).run(now, input.maxAttempts, maintenanceLimit)
+      const ownerRouteRows = this.database.prepare(`
+        SELECT id FROM outbox_messages
+        WHERE status IN ('pending', 'retry_wait') AND claimed_by IS NULL
+          AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+          AND json_type(intent_json, '$.metadata."dsh.route.authority"') IS NOT NULL
+        ORDER BY rowid LIMIT ?
+      `).all(now, maintenanceLimit) as unknown as { id: string }[]
+      const ownerRouteGuard = input.ownerRouteGuard ?? { ownerRoutes: [], authorize: () => false }
+      for (const row of ownerRouteRows) {
+        const record = this.getOutbox(row.id)
+        if (record === undefined) continue
+        const inspected = this.inspectOwnerRouteDispatch(record, ownerRouteGuard)
+        if (inspected.kind === 'deferred') {
+          this.deferOwnerRouteBeforeClaim(
+            record,
+            inspected.failureCode,
+            now,
+            now + Math.max(1, Math.min(input.leaseMs, 30_000)),
+          )
+          continue
+        }
+        if (inspected.kind !== 'authorized') {
+          const failureCode = inspected.kind === 'denied'
+            ? inspected.failureCode
+            : 'owner-route-receipt-invalid'
+          this.deadLetterOwnerRouteBeforeClaim(record, ownerId, failureCode, now)
+          continue
+        }
+        if (!this.ownerRouteIsProvablyUnsent(record)) {
+          this.deadLetterOwnerRouteBeforeClaim(record, ownerId, 'owner-route-send-proof-missing', now)
+          continue
+        }
+        if (!this.rebindOwnerRouteBeforeClaim(record, inspected)) {
+          this.deadLetterOwnerRouteBeforeClaim(record, ownerId, 'owner-route-rebind-conflict', now)
+          continue
+        }
+        validatedOwnerRouteIds.push(record.id)
+      }
       this.database.prepare(`
         UPDATE outbox_messages SET status = 'dead', failure_code = CASE
             WHEN status = 'unknown_after_send' THEN 'binding-revoked-unknown'
@@ -2500,6 +4233,12 @@ export class DeliveryStore {
         WHERE rowid IN (
           SELECT candidate.rowid FROM outbox_messages AS candidate
           WHERE candidate.status IN ('pending', 'retry_wait', 'unknown_after_send')
+            AND json_type(candidate.intent_json, '$.metadata."dsh.route.authority"') IS NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM dead_letter_resolutions AS resolution
+              WHERE resolution.kind = 'outbox' AND resolution.message_id = candidate.id
+                AND resolution.attempt_count = candidate.attempt_count AND resolution.resolution = 'cancel'
+            )
             AND NOT EXISTS (
               SELECT 1 FROM conversation_bindings AS binding
               WHERE binding.id = candidate.binding_id AND binding.status = 'active'
@@ -2507,10 +4246,25 @@ export class DeliveryStore {
           ORDER BY candidate.rowid LIMIT ?
         )
       `).run(now, maintenanceLimit)
+      const ownerRouteClaimClause = validatedOwnerRouteIds.length === 0
+        ? `AND (
+            json_type(candidate.intent_json, '$.metadata."dsh.route.authority"') IS NULL
+            OR candidate.status = 'unknown_after_send'
+          )`
+        : `AND (
+            json_type(candidate.intent_json, '$.metadata."dsh.route.authority"') IS NULL
+            OR candidate.status = 'unknown_after_send'
+            OR candidate.id IN (${validatedOwnerRouteIds.map(() => '?').join(', ')})
+          )`
       const candidates = this.database.prepare(`
         SELECT candidate.id, candidate.status FROM outbox_messages AS candidate
         WHERE candidate.status IN ('pending', 'retry_wait', 'unknown_after_send')
           AND candidate.claimed_by IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM dead_letter_resolutions AS resolution
+            WHERE resolution.kind = 'outbox' AND resolution.message_id = candidate.id
+              AND resolution.attempt_count = candidate.attempt_count AND resolution.resolution = 'cancel'
+          )
           AND (candidate.next_attempt_at IS NULL OR candidate.next_attempt_at <= ?)
           AND (
             candidate.status = 'pending'
@@ -2523,10 +4277,16 @@ export class DeliveryStore {
               WHERE history.outbox_id = candidate.id AND history.operation = 'reconcile'
             ) < ?)
           )
-          AND EXISTS (
-            SELECT 1 FROM conversation_bindings AS binding
-            WHERE binding.id = candidate.binding_id AND binding.status = 'active'
+          AND (
+            EXISTS (
+              SELECT 1 FROM conversation_bindings AS binding
+              WHERE binding.id = candidate.binding_id AND binding.status = 'active'
+            ) OR (
+              candidate.status = 'unknown_after_send'
+              AND json_type(candidate.intent_json, '$.metadata."dsh.route.authority"') IS NOT NULL
+            )
           )
+          ${ownerRouteClaimClause}
           ${routeClause}
           ${excludeClause}
           AND NOT EXISTS (
@@ -2534,6 +4294,11 @@ export class DeliveryStore {
             WHERE earlier.lane_hash = candidate.lane_hash
               AND earlier.rowid < candidate.rowid
               AND earlier.status NOT IN ('accepted', 'delivered', 'read', 'dead')
+              AND NOT EXISTS (
+                SELECT 1 FROM dead_letter_resolutions AS resolution
+                WHERE resolution.kind = 'outbox' AND resolution.message_id = earlier.id
+                  AND resolution.attempt_count = earlier.attempt_count AND resolution.resolution = 'cancel'
+              )
           )
           AND NOT EXISTS (
             SELECT 1 FROM outbox_messages AS active
@@ -2541,7 +4306,8 @@ export class DeliveryStore {
           )
         ORDER BY candidate.rowid
         LIMIT ?
-      `).all(now, input.maxAttempts, input.maxAttempts, ...routeParameters, ...excludeIds, input.limit) as unknown as {
+      `).all(now, input.maxAttempts, input.maxAttempts, ...validatedOwnerRouteIds,
+        ...routeParameters, ...excludeIds, input.limit) as unknown as {
         id: string; status: OutboxRecord['status']
       }[]
       for (const candidate of candidates) {
@@ -2718,7 +4484,12 @@ export class DeliveryStore {
       const current = this.getOutbox(row.id)!
       const rank: Record<string, number> = { accepted: 1, delivered: 2, read: 3 }
       if ((rank[input.status] ?? 0) > (rank[current.status] ?? 0)) {
-        this.database.prepare('UPDATE outbox_messages SET status = ?, updated_at = ? WHERE id = ?')
+        this.database.prepare(`
+          UPDATE outbox_messages
+          SET status = ?, failure_code = NULL, next_attempt_at = NULL,
+            claimed_by = NULL, fencing_token = NULL, lease_until = NULL, updated_at = ?
+          WHERE id = ?
+        `)
           .run(input.status, now, row.id)
       }
     })
@@ -2779,54 +4550,125 @@ export class DeliveryStore {
     inboxId: string
     expectedAttemptCount: number
     resolution: 'cancel' | 'retry'
-  }): InboxRecord {
+    operatorId: string
+  }): DeadLetterResolutionResult<InboxRecord> {
     this.assertOpen()
-    const current = this.getInbox(input.inboxId)
-    if (current?.status !== 'dead_letter' || current.attemptCount !== input.expectedAttemptCount) {
-      throw new DeliveryStoreError('version-conflict', 'dead-letter inbox attempt count or state changed')
+    const operatorId = resolutionOperatorId(input.operatorId)
+    if (!['cancel', 'retry'].includes(input.resolution)
+      || !Number.isSafeInteger(input.expectedAttemptCount) || input.expectedAttemptCount < 0) {
+      throw new DeliveryStoreError('version-conflict', 'dead-letter inbox resolution identity is invalid')
     }
-    if (input.resolution === 'retry') {
-      const binding = current.bindingId === undefined ? undefined : this.getBinding(current.bindingId)
-      if (binding?.status !== 'active') throw new DeliveryStoreError('conflict', 'dead-letter inbox has no active binding')
-    }
-    const now = this.now()
-    const changed = this.database.prepare(`
-      UPDATE inbox_messages SET status = ?, failure_code = ?, next_attempt_at = NULL, updated_at = ?
-      WHERE id = ? AND status = 'dead_letter' AND attempt_count = ?
-    `).run(input.resolution === 'retry' ? 'queued' : 'dead_letter',
-      input.resolution === 'retry' ? null : 'operator-cancelled', now, input.inboxId, input.expectedAttemptCount)
-    if (changed.changes !== 1) throw new DeliveryStoreError('version-conflict', 'dead-letter inbox changed')
-    return this.getInbox(input.inboxId)!
+    return this.transaction(() => {
+      const current = this.getInbox(input.inboxId)
+      const existing = this.getDeadLetterResolution({ kind: 'inbox', id: input.inboxId,
+        attemptCount: input.expectedAttemptCount })
+      if (existing !== undefined) {
+        if (current !== undefined && existing.resolution === input.resolution
+          && existing.operatorId === operatorId) {
+          return { record: current, receipt: existing, replayed: true }
+        }
+        throw new DeliveryStoreError('version-conflict', 'dead-letter inbox decision already settled')
+      }
+      if (current?.status !== 'dead_letter' || current.attemptCount !== input.expectedAttemptCount) {
+        throw new DeliveryStoreError('version-conflict', 'dead-letter inbox attempt count or state changed')
+      }
+      if (input.resolution === 'retry') {
+        const binding = current.bindingId === undefined ? undefined : this.getBinding(current.bindingId)
+        if (binding?.status !== 'active') {
+          throw new DeliveryStoreError('conflict', 'dead-letter inbox has no active binding')
+        }
+      }
+      const now = this.now()
+      this.database.prepare(`
+        INSERT INTO dead_letter_resolutions (
+          kind, message_id, attempt_count, receipt_version, resolution, original_status,
+          original_failure_code, operator_id, created_at
+        ) VALUES ('inbox', ?, ?, 1, ?, 'dead_letter', ?, ?, ?)
+      `).run(input.inboxId, input.expectedAttemptCount, input.resolution,
+        current.failureCode ?? null, operatorId, now)
+      const changed = this.database.prepare(`
+        UPDATE inbox_messages SET status = ?, failure_code = ?, next_attempt_at = NULL, updated_at = ?
+        WHERE id = ? AND status = 'dead_letter' AND attempt_count = ?
+      `).run(input.resolution === 'retry' ? 'queued' : 'dead_letter',
+        input.resolution === 'retry' ? null : 'operator-cancelled', now,
+        input.inboxId, input.expectedAttemptCount)
+      if (changed.changes !== 1) throw new DeliveryStoreError('version-conflict', 'dead-letter inbox changed')
+      return {
+        record: this.getInbox(input.inboxId)!,
+        receipt: this.getDeadLetterResolution({ kind: 'inbox', id: input.inboxId,
+          attemptCount: input.expectedAttemptCount })!,
+        replayed: false,
+      }
+    })
   }
 
   resolveOutbox(input: {
     outboxId: string
     expectedAttemptCount: number
     resolution: 'cancel' | 'retry'
-  }): OutboxRecord {
+    operatorId: string
+  }): DeadLetterResolutionResult<OutboxRecord> {
     this.assertOpen()
+    const operatorId = resolutionOperatorId(input.operatorId)
+    if (!['cancel', 'retry'].includes(input.resolution)
+      || !Number.isSafeInteger(input.expectedAttemptCount) || input.expectedAttemptCount < 0) {
+      throw new DeliveryStoreError('version-conflict', 'outbox resolution identity is invalid')
+    }
     return this.transaction(() => {
       const current = this.getOutbox(input.outboxId)
+      const existing = this.getDeadLetterResolution({ kind: 'outbox', id: input.outboxId,
+        attemptCount: input.expectedAttemptCount })
+      if (existing !== undefined) {
+        if (current !== undefined && existing.resolution === input.resolution
+          && existing.operatorId === operatorId) {
+          return { record: current, receipt: existing, replayed: true }
+        }
+        throw new DeliveryStoreError('version-conflict', 'outbox decision already settled')
+      }
       if (current === undefined || !['dead', 'unknown_after_send'].includes(current.status)
         || current.attemptCount !== input.expectedAttemptCount) {
         throw new DeliveryStoreError('version-conflict', 'outbox attempt count or resolvable state changed')
       }
       if (input.resolution === 'retry') {
+        if (current.status === 'unknown_after_send'
+          && parseOwnerRouteReceipt(current).kind !== 'not-route') {
+          throw new DeliveryStoreError(
+            'conflict',
+            'unknown owner route sends cannot move lineage or be replayed',
+          )
+        }
         const binding = this.getBinding(current.intent.bindingId)
         if (binding?.status !== 'active') {
           throw new DeliveryStoreError('conflict', 'resolvable outbox has no active binding')
         }
       }
       const now = this.now()
+      this.database.prepare(`
+        INSERT INTO dead_letter_resolutions (
+          kind, message_id, attempt_count, receipt_version, resolution, original_status,
+          original_failure_code, operator_id, created_at
+        ) VALUES ('outbox', ?, ?, 1, ?, ?, ?, ?, ?)
+      `).run(input.outboxId, input.expectedAttemptCount, input.resolution, current.status,
+        current.failureCode ?? null, operatorId, now)
+      const targetStatus = input.resolution === 'retry'
+        ? 'pending'
+        : current.status
+      const targetFailure = input.resolution === 'retry'
+        ? null
+        : current.status === 'unknown_after_send' ? 'operator-cancelled-unknown' : 'operator-cancelled'
       const changed = this.database.prepare(`
         UPDATE outbox_messages SET status = ?, failure_code = ?, next_attempt_at = NULL,
           claimed_by = NULL, fencing_token = NULL, lease_until = NULL, updated_at = ?
         WHERE id = ? AND status = ? AND attempt_count = ?
-      `).run(input.resolution === 'retry' ? 'pending' : 'dead',
-        input.resolution === 'retry' ? null : 'operator-cancelled', now,
+      `).run(targetStatus, targetFailure, now,
         input.outboxId, current.status, input.expectedAttemptCount)
       if (changed.changes !== 1) throw new DeliveryStoreError('version-conflict', 'resolvable outbox changed')
-      return this.getOutbox(input.outboxId)!
+      return {
+        record: this.getOutbox(input.outboxId)!,
+        receipt: this.getDeadLetterResolution({ kind: 'outbox', id: input.outboxId,
+          attemptCount: input.expectedAttemptCount })!,
+        replayed: false,
+      }
     })
   }
 
@@ -3187,6 +5029,1468 @@ export class DeliveryStore {
       }
       return JSON.parse(completedResultJson) as unknown
     })
+  }
+
+  workflowTraceSourceAttestation(): Readonly<WorkflowTraceSourceAttestation> {
+    this.assertOpen()
+    const row = this.database.prepare(`
+      SELECT generation, authority_digest FROM workflow_trace_source WHERE singleton = 1
+    `).get() as { generation: number; authority_digest: string } | undefined
+    if (row === undefined || !Number.isSafeInteger(row.generation) || row.generation < 1
+      || !/^[a-f0-9]{64}$/u.test(row.authority_digest)) {
+      throw new DeliveryStoreError('conflict', 'workflow trace source authority is corrupt')
+    }
+    return Object.freeze({
+      sourceId: WORKFLOW_TRACE_SOURCE_ID,
+      generation: row.generation,
+      authorityDigest: row.authority_digest,
+    })
+  }
+
+  /**
+   * Apply one already-authenticated source revision. First version may be any
+   * positive integer and gaps are allowed; lower versions and same-version
+   * content changes fail closed.
+   */
+  recordWorkflowTraceRevision(input: Readonly<WorkflowTraceRevision>): {
+    revision: Readonly<WorkflowTraceRevision>
+    replayed: boolean
+  } {
+    this.assertOpen()
+    const revision = validateWorkflowTraceRevision(input)
+    return this.transaction(() => this.insertWorkflowTraceRevisionInTransaction(revision))
+  }
+
+  /**
+   * Atomic owner command ledger + private template review + source revision.
+   * Prompt text is stored only in workflow_template_registry.content_json; the
+   * command receipt and Growth trace carry only references and digests.
+   */
+  commitOwnerWorkflowTraceCommand(input: Readonly<{
+    action: 'retract' | 'upsert'
+    operationId: string
+    payloadDigest: string
+    binding: Readonly<ConversationBinding>
+    reviewInboxId: string
+    sourceInboxId: string
+    sourceOutboxId: string
+    subjectRef: string
+    occurredAt: number
+    taskRef?: string
+    /** Principal identity is derived below from the authenticated live binding. */
+    templateContent?: Readonly<Omit<WorkflowAutomationTemplateContent, 'principalId'>>
+    steps?: readonly Readonly<WorkflowStepFingerprint>[]
+  }>): OwnerWorkflowTraceCommandResult {
+    this.assertOpen()
+    const operationId = validateBindingText(input.operationId, 'workflow operationId', 512)
+    if (!/^[a-f0-9]{64}$/u.test(input.payloadDigest)
+      || !/^[a-f0-9]{64}$/u.test(input.subjectRef)
+      || !Number.isSafeInteger(input.occurredAt) || input.occurredAt < 0
+      || (input.action === 'upsert') !== (input.templateContent !== undefined
+        && input.steps !== undefined && input.taskRef !== undefined)
+      || (input.taskRef !== undefined && !/^[a-f0-9]{64}$/u.test(input.taskRef))) {
+      throw new DeliveryStoreError('conflict', 'workflow command tuple is invalid')
+    }
+    return this.transaction(() => {
+      const prior = this.database.prepare(`
+        SELECT payload_digest, result_json FROM workflow_trace_commands WHERE operation_id = ?
+      `).get(operationId) as { payload_digest: string; result_json: string } | undefined
+      if (prior !== undefined) {
+        if (prior.payload_digest !== input.payloadDigest) {
+          throw new DeliveryStoreError('idempotency-conflict', 'workflow command was reused with different input')
+        }
+        let result: { revision?: unknown; template?: unknown }
+        try {
+          result = JSON.parse(prior.result_json) as { revision?: unknown; template?: unknown }
+        } catch {
+          throw new DeliveryStoreError('conflict', 'workflow command receipt is corrupt')
+        }
+        return Object.freeze({
+          revision: validateWorkflowTraceRevision(result.revision),
+          ...(result.template === undefined
+            ? {}
+            : { template: validateWorkflowAutomationTemplate(result.template) }),
+          replayed: true,
+        })
+      }
+
+      const binding = this.getBinding(input.binding.id)
+      const owner = binding === undefined ? undefined : this.getPrincipal(binding.principal)
+      if (binding === undefined || binding.status !== 'active'
+        || binding.version !== input.binding.version || binding.generation !== input.binding.generation
+        || JSON.stringify(binding.conversation) !== JSON.stringify(input.binding.conversation)
+        || JSON.stringify(binding.principal) !== JSON.stringify(input.binding.principal)
+        || binding.workspace !== input.binding.workspace || binding.agentPreset !== input.binding.agentPreset
+        || owner?.status !== 'active' || owner.role !== 'owner') {
+        throw new DeliveryStoreError('unauthorized-principal', 'workflow command owner binding changed')
+      }
+      const reviewInbox = this.getInbox(input.reviewInboxId)
+      const sourceInbox = this.getInbox(input.sourceInboxId)
+      const sourceOutbox = this.getOutbox(input.sourceOutboxId)
+      if (reviewInbox?.status !== 'claimed' || reviewInbox.bindingId !== binding.id
+        || sourceInbox?.status !== 'processed' || sourceInbox.bindingId !== binding.id
+        || sourceOutbox === undefined || sourceOutbox.intent.bindingId !== binding.id
+        || sourceOutbox.intent.replyToEventId !== sourceInbox.envelope.eventId
+        || sourceOutbox.providerMessageId === undefined
+        || !['accepted', 'delivered', 'read'].includes(sourceOutbox.status)
+        || JSON.stringify(sourceInbox.envelope.conversation) !== JSON.stringify(binding.conversation)
+        || JSON.stringify(sourceInbox.envelope.principal) !== JSON.stringify(binding.principal)
+        || JSON.stringify(sourceOutbox.intent.target.conversation) !== JSON.stringify(binding.conversation)
+        || JSON.stringify(sourceOutbox.intent.target.principal) !== JSON.stringify(binding.principal)) {
+        throw new DeliveryStoreError('conflict', 'workflow command does not target one completed owner task')
+      }
+
+      const currentRow = this.database.prepare(`
+        SELECT revision.* FROM workflow_trace_current AS current
+        JOIN workflow_trace_revisions AS revision
+          ON revision.subject_ref = current.subject_ref AND revision.version = current.version
+        WHERE current.subject_ref = ?
+      `).get(input.subjectRef) as WorkflowTraceRevisionRow | undefined
+      const current = currentRow === undefined ? undefined : workflowTraceRevision(currentRow)
+      const version = current === undefined ? 1 : current.version + 1
+      if (!Number.isSafeInteger(version)) {
+        throw new DeliveryStoreError('version-conflict', 'workflow trace version overflow')
+      }
+
+      let template: Readonly<WorkflowAutomationTemplate> | undefined
+      if (input.action === 'upsert') {
+        const content = validateWorkflowAutomationTemplateContent({
+          ...input.templateContent,
+          principalId: externalPrincipalId(binding.principal),
+        })
+        if (content.scope.workspace !== binding.workspace || content.scope.preset !== binding.agentPreset
+          || content.ownerBindingId !== binding.id || content.deliveryBindingId !== binding.id) {
+          throw new DeliveryStoreError('invalid-binding', 'workflow template does not match the owner binding')
+        }
+        const templateDigest = workflowAutomationTemplateContentDigest(content)
+        const reviewReceipt = Object.freeze({
+          contractVersion: 1 as const,
+          kind: 'owner-explicit-template-review' as const,
+          limitation: 'deidentification-unproven' as const,
+          templateDigest,
+          bindingId: binding.id,
+          bindingVersion: binding.version,
+          bindingGeneration: binding.generation,
+          principalId: owner.id,
+          reviewInboxId: reviewInbox.id,
+          sourceInboxId: sourceInbox.id,
+          sourceOutboxId: sourceOutbox.id,
+        })
+        const attestationDigest = growthObjectDigest({
+          contract: 'assistant-delivery-workflow-template-review/v1',
+          receipt: reviewReceipt,
+        })
+        const templateRef = `workflow-template:${growthObjectDigest({
+          contract: 'assistant-delivery-workflow-template-ref/v1',
+          templateDigest,
+          reviewInboxId: reviewInbox.id,
+        })}`
+        const attestationId = `workflow-review:${attestationDigest}`
+        template = validateWorkflowAutomationTemplate({
+          templateRef,
+          templateDigest,
+          privacyAttestation: {
+            kind: 'owner-explicit',
+            limitation: 'deidentification-unproven',
+            attestationId,
+            attestationDigest,
+          },
+        })
+        this.revokeCurrentWorkflowTemplateInTransaction(current, this.now())
+        const now = this.now()
+        this.database.prepare(`
+          INSERT INTO workflow_template_registry(
+            template_ref, template_digest, scope_key, workspace, preset, owner_binding_id,
+            content_json, privacy_kind, privacy_attestation_id, privacy_attestation_digest,
+            review_receipt_json, status, review_inbox_id, source_inbox_id, source_outbox_id,
+            created_at, updated_at, version
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'owner-explicit', ?, ?, ?, 'active', ?, ?, ?, ?, ?, 1)
+        `).run(
+          template.templateRef, template.templateDigest, workflowScopeKey(content.scope),
+          content.scope.workspace, content.scope.preset, binding.id, JSON.stringify(content),
+          template.privacyAttestation.attestationId,
+          template.privacyAttestation.attestationDigest,
+          JSON.stringify(reviewReceipt), reviewInbox.id, sourceInbox.id, sourceOutbox.id,
+          now, now,
+        )
+      } else {
+        this.revokeCurrentWorkflowTemplateInTransaction(current, this.now())
+      }
+
+      const payload: Omit<WorkflowTraceRevision, 'digest'> = Object.freeze({
+        source: this.workflowTraceSourceAttestation(),
+        scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+        subjectRef: input.subjectRef,
+        version,
+        disposition: input.action,
+        ...(input.action === 'retract' ? {} : {
+          evidence: Object.freeze({
+            occurredAt: input.occurredAt,
+            signal: 'owner-explicit' as const,
+            objectiveStatus: 'unknown' as const,
+            ownerBindingId: binding.id,
+            taskRef: input.taskRef!,
+            template: template!,
+            steps: input.steps!,
+          }),
+        }),
+      })
+      const revision = validateWorkflowTraceRevision({
+        ...payload,
+        digest: workflowTraceRevisionDigest(payload),
+      })
+      const recorded = this.insertWorkflowTraceRevisionInTransaction(revision)
+      if (recorded.replayed) {
+        throw new DeliveryStoreError('version-conflict', 'new workflow command unexpectedly replayed a trace version')
+      }
+      const resultJson = JSON.stringify({ revision, ...(template === undefined ? {} : { template }) })
+      this.database.prepare(`
+        INSERT INTO workflow_trace_commands(operation_id, payload_digest, result_json, created_at)
+        VALUES (?, ?, ?, ?)
+      `).run(operationId, input.payloadDigest, resultJson, this.now())
+      return Object.freeze({ revision, ...(template === undefined ? {} : { template }), replayed: false })
+    })
+  }
+
+  /**
+   * Atomically record an authenticated owner objective judgement about one
+   * ordinary completed Agent turn and, only when a closed deterministic
+   * deidentification catalog recognizes the source, emit its verified trace.
+   *
+   * The caller may not supply a prompt, task reference, template, or proof:
+   * all of them are rebuilt below from the exact durable Inbox/Outbox fence.
+   * A normal durable reply alone is intentionally insufficient; the owner
+   * must have replied `/feedback achieved` to that exact provider message.
+   */
+  commitVerifiedWorkflowTraceFeedback(input: Readonly<{
+    binding: Readonly<ConversationBinding>
+    feedbackInboxId: string
+    sourceInboxId: string
+    sourceOutboxId: string
+    objectiveStatus: 'achieved' | 'partial' | 'not-achieved'
+  }>): VerifiedWorkflowTraceFeedbackResult {
+    this.assertOpen()
+    if (typeof input !== 'object' || input === null
+      || !['achieved', 'partial', 'not-achieved'].includes(input.objectiveStatus)
+      || typeof input.feedbackInboxId !== 'string' || typeof input.sourceInboxId !== 'string'
+      || typeof input.sourceOutboxId !== 'string') {
+      throw new DeliveryStoreError('conflict', 'verified workflow feedback tuple is invalid')
+    }
+    const feedbackInboxId = validateBindingText(input.feedbackInboxId, 'workflow feedback inbox id', 256)
+    const sourceInboxId = validateBindingText(input.sourceInboxId, 'workflow source inbox id', 256)
+    const sourceOutboxId = validateBindingText(input.sourceOutboxId, 'workflow source outbox id', 256)
+    return this.transaction(() => {
+      const binding = this.getBinding(input.binding.id)
+      const owner = binding === undefined ? undefined : this.getPrincipal(binding.principal)
+      if (binding === undefined || binding.status !== 'active' || binding.conversation.kind !== 'dm'
+        || binding.version !== input.binding.version || binding.generation !== input.binding.generation
+        || binding.sessionId !== input.binding.sessionId
+        || JSON.stringify(binding.conversation) !== JSON.stringify(input.binding.conversation)
+        || JSON.stringify(binding.principal) !== JSON.stringify(input.binding.principal)
+        || binding.workspace !== input.binding.workspace || binding.agentPreset !== input.binding.agentPreset
+        || owner?.status !== 'active' || owner.role !== 'owner') {
+        throw new DeliveryStoreError('unauthorized-principal', 'verified workflow owner binding changed')
+      }
+
+      const feedbackInbox = this.getInbox(feedbackInboxId)
+      const sourceInbox = this.getInbox(sourceInboxId)
+      const sourceOutbox = this.getOutbox(sourceOutboxId)
+      const feedbackCommand = feedbackInbox === undefined || feedbackInbox.envelope.kind !== 'command'
+        ? undefined
+        : parseDeliveryCommand(feedbackInbox.envelope)
+      const feedback = feedbackCommand?.name !== 'feedback'
+        ? undefined
+        : parseFeedbackCommand(feedbackCommand.rawInput)
+      if (feedbackInbox?.status !== 'claimed' || feedbackInbox.bindingId !== binding.id
+        || (feedbackInbox.envelope.attachments?.length ?? 0) !== 0
+        || feedback?.kind !== 'objective' || feedback.objectiveStatus !== input.objectiveStatus
+        || sourceInbox?.status !== 'processed' || sourceInbox.bindingId !== binding.id
+        || sourceInbox.envelope.kind !== 'text' || (sourceInbox.envelope.attachments?.length ?? 0) !== 0
+        || sourceOutbox === undefined || sourceOutbox.intent.bindingId !== binding.id
+        || sourceOutbox.intent.idempotencyKey !== `inbound:${sourceInbox.id}:reply`
+        || sourceOutbox.intent.replyToEventId !== sourceInbox.envelope.eventId
+        || !['accepted', 'delivered', 'read'].includes(sourceOutbox.status)
+        || sourceOutbox.providerMessageId === undefined
+        || (sourceOutbox.intent.format !== 'markdown' && sourceOutbox.intent.format !== 'plain')
+        || sourceOutbox.intent.metadata !== undefined
+        || sourceOutbox.intent.modelPicker !== undefined
+        || sourceOutbox.intent.permissionPicker !== undefined
+        || sourceOutbox.intent.approval !== undefined
+        || feedbackInbox.envelope.metadata?.replyToProviderMessageId !== sourceOutbox.providerMessageId
+        || JSON.stringify(feedbackInbox.envelope.conversation) !== JSON.stringify(binding.conversation)
+        || JSON.stringify(feedbackInbox.envelope.principal) !== JSON.stringify(binding.principal)
+        || JSON.stringify(sourceInbox.envelope.conversation) !== JSON.stringify(binding.conversation)
+        || JSON.stringify(sourceInbox.envelope.principal) !== JSON.stringify(binding.principal)
+        || JSON.stringify(sourceOutbox.intent.target.conversation) !== JSON.stringify(binding.conversation)
+        || JSON.stringify(sourceOutbox.intent.target.principal) !== JSON.stringify(binding.principal)) {
+        throw new DeliveryStoreError('conflict', 'verified workflow feedback does not target one completed owner turn')
+      }
+
+      const taskRef = growthObjectDigest({
+        contract: 'assistant-delivery-verified-workflow-task-ref/v1',
+        bindingId: binding.id,
+        sourceInboxId: sourceInbox.id,
+        sourceInboxEnvelopeHash: sourceInbox.envelopeHash,
+        sourceOutboxId: sourceOutbox.id,
+        sourceOutboxIntentHash: sourceOutbox.intentHash,
+      })
+      const taskEvidenceDigest = growthObjectDigest({
+        contract: 'assistant-delivery-verified-workflow-task-evidence/v1',
+        binding: {
+          id: binding.id,
+          version: binding.version,
+          generation: binding.generation,
+          workspace: binding.workspace,
+          preset: binding.agentPreset,
+        },
+        principal: { recordId: owner.id, version: owner.version },
+        source: {
+          inboxId: sourceInbox.id,
+          envelopeHash: sourceInbox.envelopeHash,
+          outboxId: sourceOutbox.id,
+          intentHash: sourceOutbox.intentHash,
+          providerMessageId: sourceOutbox.providerMessageId,
+        },
+        feedback: {
+          inboxId: feedbackInbox.id,
+          envelopeHash: feedbackInbox.envelopeHash,
+          objectiveStatus: input.objectiveStatus,
+        },
+      })
+      const prior = this.database.prepare(`
+        SELECT * FROM workflow_verified_task_feedback WHERE source_outbox_id = ?
+      `).get(sourceOutbox.id) as WorkflowVerifiedTaskFeedbackRow | undefined
+      if (prior !== undefined) {
+        return this.replayVerifiedWorkflowTraceFeedback({
+          row: prior,
+          binding,
+          ownerId: owner.id,
+          feedbackInboxId: feedbackInbox.id,
+          sourceInboxId: sourceInbox.id,
+          sourceOutboxId: sourceOutbox.id,
+          objectiveStatus: input.objectiveStatus,
+          taskRef,
+          taskEvidenceDigest,
+        })
+      }
+
+      const descriptor = input.objectiveStatus === 'achieved'
+        ? deriveDeterministicallyDeidentifiedWorkflowTemplate(sourceInbox.envelope.text)
+        : undefined
+      if (descriptor === undefined) {
+        this.insertVerifiedWorkflowTaskFeedback({
+          sourceOutboxId: sourceOutbox.id,
+          sourceInboxId: sourceInbox.id,
+          feedbackInboxId: feedbackInbox.id,
+          binding,
+          ownerId: owner.id,
+          objectiveStatus: input.objectiveStatus,
+          taskRef,
+          taskEvidenceDigest,
+        })
+        return Object.freeze({
+          outcome: 'no-trace',
+          reason: input.objectiveStatus === 'achieved' ? 'privacy-abstained' : 'objective-not-achieved',
+          replayed: false,
+        })
+      }
+
+      const content = validateWorkflowAutomationTemplateContent({
+        scope: { workspace: binding.workspace, preset: binding.agentPreset },
+        ownerBindingId: binding.id,
+        principalId: externalPrincipalId(binding.principal),
+        name: descriptor.name,
+        prompt: descriptor.prompt,
+        schedule: descriptor.schedule,
+        timeoutMs: descriptor.timeoutMs,
+        toolCatalogIds: descriptor.toolCatalogIds,
+        deliveryBindingId: binding.id,
+      })
+      const templateDigest = workflowAutomationTemplateContentDigest(content)
+      const privacyReceipt = Object.freeze({
+        contractVersion: 1 as const,
+        kind: 'deterministic-deidentification-template-attestation' as const,
+        method: 'assistant-delivery-redaction-v1' as const,
+        catalogId: descriptor.catalogId,
+        templateDigest,
+        bindingId: binding.id,
+        bindingVersion: binding.version,
+        bindingGeneration: binding.generation,
+        principalId: owner.id,
+      })
+      const attestationDigest = growthObjectDigest({
+        contract: 'assistant-delivery-workflow-template-deidentification/v1',
+        receipt: privacyReceipt,
+      })
+      const template = validateWorkflowAutomationTemplate({
+        templateRef: `workflow-template:${growthObjectDigest({
+          contract: 'assistant-delivery-workflow-template-ref/v2', templateDigest,
+        })}`,
+        templateDigest,
+        privacyAttestation: {
+          kind: 'deterministic-deidentification',
+          method: 'assistant-delivery-redaction-v1',
+          attestationId: `workflow-deidentification:${attestationDigest}`,
+          attestationDigest,
+        },
+      })
+      const existingTemplate = this.getWorkflowAutomationTemplate(template)
+      if (existingTemplate !== undefined) {
+        if (existingTemplate.status !== 'active'
+          || JSON.stringify(existingTemplate.resolved) !== JSON.stringify({ contractVersion: 1, template, ...content })
+          || existingTemplate.review.bindingId !== binding.id
+          || existingTemplate.review.bindingVersion !== binding.version
+          || existingTemplate.review.bindingGeneration !== binding.generation
+          || existingTemplate.review.principalId !== owner.id) {
+          throw new DeliveryStoreError('receipt-mismatch', 'deterministic workflow template is stale')
+        }
+      } else {
+        const now = this.now()
+        this.database.prepare(`
+          INSERT INTO workflow_template_registry(
+            template_ref, template_digest, scope_key, workspace, preset, owner_binding_id,
+            content_json, privacy_kind, privacy_attestation_id, privacy_attestation_digest,
+            review_receipt_json, status, review_inbox_id, source_inbox_id, source_outbox_id,
+            created_at, updated_at, version
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, 'deterministic-deidentification', ?, ?, ?,
+            'active', ?, ?, ?, ?, ?, 1)
+        `).run(
+          template.templateRef, template.templateDigest, workflowScopeKey(content.scope),
+          content.scope.workspace, content.scope.preset, binding.id, JSON.stringify(content),
+          template.privacyAttestation.attestationId, template.privacyAttestation.attestationDigest,
+          JSON.stringify(privacyReceipt), feedbackInbox.id, sourceInbox.id, sourceOutbox.id, now, now,
+        )
+      }
+
+      const subjectRef = growthObjectDigest({
+        contract: 'assistant-delivery-verified-workflow-subject/v1',
+        bindingId: binding.id,
+        sourceInboxId: sourceInbox.id,
+        sourceOutboxId: sourceOutbox.id,
+      })
+      const payload: Omit<WorkflowTraceRevision, 'digest'> = Object.freeze({
+        source: this.workflowTraceSourceAttestation(),
+        scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+        subjectRef,
+        version: 1,
+        disposition: 'upsert' as const,
+        evidence: Object.freeze({
+          occurredAt: feedbackInbox.receivedAt,
+          signal: 'verified-repetition' as const,
+          objectiveStatus: 'achieved' as const,
+          ownerBindingId: binding.id,
+          taskRef,
+          taskEvidenceDigest,
+          template,
+          steps: Object.freeze([Object.freeze({
+            catalogId: 'assistant.agent-turn',
+            argumentSchemaDigest: workflowArgumentShapeDigest({ prompt: descriptor.prompt }),
+          })]),
+        }),
+      })
+      const revision = validateWorkflowTraceRevision({
+        ...payload,
+        digest: workflowTraceRevisionDigest(payload),
+      })
+      const recorded = this.insertWorkflowTraceRevisionInTransaction(revision)
+      if (recorded.replayed) {
+        throw new DeliveryStoreError('version-conflict', 'new verified workflow feedback unexpectedly replayed')
+      }
+      this.insertVerifiedWorkflowTaskFeedback({
+        sourceOutboxId: sourceOutbox.id,
+        sourceInboxId: sourceInbox.id,
+        feedbackInboxId: feedbackInbox.id,
+        binding,
+        ownerId: owner.id,
+        objectiveStatus: input.objectiveStatus,
+        taskRef,
+        taskEvidenceDigest,
+        revision,
+        template,
+      })
+      return Object.freeze({ outcome: 'trace-recorded', revision, template, replayed: false })
+    })
+  }
+
+  private insertVerifiedWorkflowTaskFeedback(input: Readonly<{
+    sourceOutboxId: string
+    sourceInboxId: string
+    feedbackInboxId: string
+    binding: Readonly<ConversationBinding>
+    ownerId: string
+    objectiveStatus: 'achieved' | 'partial' | 'not-achieved'
+    taskRef: string
+    taskEvidenceDigest: string
+    revision?: Readonly<WorkflowTraceRevision>
+    template?: Readonly<WorkflowAutomationTemplate>
+  }>): void {
+    if ((input.revision === undefined) !== (input.template === undefined)) {
+      throw new DeliveryStoreError('conflict', 'verified workflow trace and template must agree')
+    }
+    if (input.revision !== undefined && (input.revision.disposition !== 'upsert'
+      || input.revision.evidence?.signal !== 'verified-repetition'
+      || input.revision.evidence.objectiveStatus !== 'achieved'
+      || input.revision.evidence.taskRef !== input.taskRef
+      || input.revision.evidence.taskEvidenceDigest !== input.taskEvidenceDigest
+      || JSON.stringify(input.revision.evidence.template) !== JSON.stringify(input.template))) {
+      throw new DeliveryStoreError('receipt-mismatch', 'verified workflow trace is not bound to its task receipt')
+    }
+    this.database.prepare(`
+      INSERT INTO workflow_verified_task_feedback(
+        source_outbox_id, source_inbox_id, feedback_inbox_id, binding_id, binding_version,
+        binding_generation, principal_record_id, objective_status, task_ref, task_evidence_digest,
+        trace_subject_ref, trace_version, trace_digest, template_ref, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      input.sourceOutboxId, input.sourceInboxId, input.feedbackInboxId,
+      input.binding.id, input.binding.version, input.binding.generation, input.ownerId,
+      input.objectiveStatus, input.taskRef, input.taskEvidenceDigest,
+      input.revision?.subjectRef ?? null, input.revision?.version ?? null,
+      input.revision?.digest ?? null, input.template?.templateRef ?? null, this.now(),
+    )
+  }
+
+  private replayVerifiedWorkflowTraceFeedback(input: Readonly<{
+    row: Readonly<WorkflowVerifiedTaskFeedbackRow>
+    binding: Readonly<ConversationBinding>
+    ownerId: string
+    feedbackInboxId: string
+    sourceInboxId: string
+    sourceOutboxId: string
+    objectiveStatus: 'achieved' | 'partial' | 'not-achieved'
+    taskRef: string
+    taskEvidenceDigest: string
+  }>): VerifiedWorkflowTraceFeedbackResult {
+    const row = input.row
+    if (row.source_outbox_id !== input.sourceOutboxId || row.source_inbox_id !== input.sourceInboxId
+      || row.feedback_inbox_id !== input.feedbackInboxId || row.binding_id !== input.binding.id
+      || row.binding_version !== input.binding.version || row.binding_generation !== input.binding.generation
+      || row.principal_record_id !== input.ownerId || row.objective_status !== input.objectiveStatus
+      || row.task_ref !== input.taskRef || row.task_evidence_digest !== input.taskEvidenceDigest) {
+      throw new DeliveryStoreError('idempotency-conflict', 'verified workflow task already has a different owner judgement')
+    }
+    const traceFields = [row.trace_subject_ref, row.trace_version, row.trace_digest, row.template_ref]
+    const traceFieldCount = traceFields.filter(value => value !== null).length
+    if (traceFieldCount === 0) {
+      return Object.freeze({
+        outcome: 'no-trace',
+        reason: row.objective_status === 'achieved' ? 'privacy-abstained' : 'objective-not-achieved',
+        replayed: true,
+      })
+    }
+    if (traceFieldCount !== traceFields.length || row.trace_subject_ref === null || row.trace_version === null
+      || row.trace_digest === null || row.template_ref === null
+      || !Number.isSafeInteger(row.trace_version) || row.trace_version < 1
+      || !/^[a-f0-9]{64}$/u.test(row.trace_subject_ref)
+      || !/^[a-f0-9]{64}$/u.test(row.trace_digest)) {
+      throw new DeliveryStoreError('conflict', 'verified workflow task receipt is corrupt')
+    }
+    const traceRow = this.database.prepare(`
+      SELECT * FROM workflow_trace_revisions WHERE subject_ref = ? AND version = ?
+    `).get(row.trace_subject_ref, row.trace_version) as WorkflowTraceRevisionRow | undefined
+    if (traceRow === undefined) {
+      throw new DeliveryStoreError('conflict', 'verified workflow task trace is missing')
+    }
+    const revision = workflowTraceRevision(traceRow)
+    const template = revision.disposition === 'upsert' ? revision.evidence?.template : undefined
+    if (revision.digest !== row.trace_digest || revision.disposition !== 'upsert'
+      || revision.evidence?.signal !== 'verified-repetition'
+      || revision.evidence.objectiveStatus !== 'achieved'
+      || revision.evidence.ownerBindingId !== input.binding.id
+      || revision.evidence.taskRef !== input.taskRef
+      || revision.evidence.taskEvidenceDigest !== input.taskEvidenceDigest
+      || template === undefined || template.templateRef !== row.template_ref) {
+      throw new DeliveryStoreError('receipt-mismatch', 'verified workflow task trace changed identity')
+    }
+    const storedTemplate = this.getWorkflowAutomationTemplate(template)
+    if (storedTemplate === undefined
+      || JSON.stringify(storedTemplate.resolved.template) !== JSON.stringify(template)) {
+      throw new DeliveryStoreError('receipt-mismatch', 'verified workflow task template is missing')
+    }
+    return Object.freeze({ outcome: 'trace-recorded', revision, template, replayed: true })
+  }
+
+  getWorkflowAutomationTemplate(templateInput: Readonly<WorkflowAutomationTemplate>): StoredWorkflowTemplate | undefined {
+    this.assertOpen()
+    const template = validateWorkflowAutomationTemplate(templateInput)
+    const row = this.database.prepare(`
+      SELECT * FROM workflow_template_registry WHERE template_ref = ?
+    `).get(template.templateRef) as WorkflowTemplateRow | undefined
+    if (row === undefined) return undefined
+    let contentValue: unknown
+    let reviewValue: unknown
+    try {
+      contentValue = JSON.parse(row.content_json) as unknown
+      reviewValue = JSON.parse(row.review_receipt_json) as unknown
+    } catch {
+      throw new DeliveryStoreError('conflict', 'workflow template registry payload is corrupt')
+    }
+    if (typeof reviewValue !== 'object' || reviewValue === null || Array.isArray(reviewValue)) {
+      throw new DeliveryStoreError('conflict', 'workflow template review receipt is corrupt')
+    }
+    const review = reviewValue as Record<string, unknown>
+    const content = validateWorkflowAutomationTemplateContent(contentValue)
+    const receiptBindingVersion = review['bindingVersion']
+    const receiptBindingGeneration = review['bindingGeneration']
+    let attestationDigest: string
+    if (row.privacy_kind === 'owner-explicit') {
+      const exactReviewKeys = [
+        'contractVersion', 'kind', 'limitation', 'templateDigest', 'bindingId', 'bindingVersion',
+        'bindingGeneration', 'principalId', 'reviewInboxId', 'sourceInboxId', 'sourceOutboxId',
+      ].sort()
+      if (Object.keys(review).sort().some((key, index) => key !== exactReviewKeys[index])
+        || Object.keys(review).length !== exactReviewKeys.length
+        || review['contractVersion'] !== 1 || review['kind'] !== 'owner-explicit-template-review'
+        || review['limitation'] !== 'deidentification-unproven'
+        || review['templateDigest'] !== row.template_digest
+        || review['bindingId'] !== row.owner_binding_id
+        || review['reviewInboxId'] !== row.review_inbox_id
+        || review['sourceInboxId'] !== row.source_inbox_id
+        || review['sourceOutboxId'] !== row.source_outbox_id
+        || typeof review['principalId'] !== 'string'
+        || typeof receiptBindingVersion !== 'number' || !Number.isSafeInteger(receiptBindingVersion)
+        || receiptBindingVersion < 1
+        || typeof receiptBindingGeneration !== 'number' || !Number.isSafeInteger(receiptBindingGeneration)
+        || receiptBindingGeneration < 1) {
+        throw new DeliveryStoreError('conflict', 'workflow template review receipt columns do not match')
+      }
+      attestationDigest = growthObjectDigest({
+        contract: 'assistant-delivery-workflow-template-review/v1',
+        receipt: review,
+      })
+    } else if (row.privacy_kind === 'deterministic-deidentification') {
+      const exactReceiptKeys = [
+        'contractVersion', 'kind', 'method', 'catalogId', 'templateDigest', 'bindingId',
+        'bindingVersion', 'bindingGeneration', 'principalId',
+      ].sort()
+      const catalogId = review['catalogId']
+      const descriptor = typeof catalogId === 'string'
+        ? getDeterministicallyDeidentifiedWorkflowTemplate(catalogId)
+        : undefined
+      if (Object.keys(review).sort().some((key, index) => key !== exactReceiptKeys[index])
+        || Object.keys(review).length !== exactReceiptKeys.length
+        || review['contractVersion'] !== 1
+        || review['kind'] !== 'deterministic-deidentification-template-attestation'
+        || review['method'] !== 'assistant-delivery-redaction-v1'
+        || descriptor === undefined
+        || review['templateDigest'] !== row.template_digest
+        || review['bindingId'] !== row.owner_binding_id
+        || typeof review['principalId'] !== 'string'
+        || typeof receiptBindingVersion !== 'number' || !Number.isSafeInteger(receiptBindingVersion)
+        || receiptBindingVersion < 1
+        || typeof receiptBindingGeneration !== 'number' || !Number.isSafeInteger(receiptBindingGeneration)
+        || receiptBindingGeneration < 1
+        || content.name !== descriptor.name || content.prompt !== descriptor.prompt
+        || content.schedule.kind !== descriptor.schedule.kind
+        || content.schedule.expression !== descriptor.schedule.expression
+        || content.schedule.timezone !== descriptor.schedule.timezone
+        || content.timeoutMs !== descriptor.timeoutMs
+        || JSON.stringify(content.toolCatalogIds) !== JSON.stringify(descriptor.toolCatalogIds)) {
+        throw new DeliveryStoreError('conflict', 'deterministic workflow deidentification receipt is invalid')
+      }
+      attestationDigest = growthObjectDigest({
+        contract: 'assistant-delivery-workflow-template-deidentification/v1',
+        receipt: review,
+      })
+    } else {
+      throw new DeliveryStoreError('conflict', 'workflow template privacy kind is invalid')
+    }
+    const storedTemplate = validateWorkflowAutomationTemplate({
+      templateRef: row.template_ref,
+      templateDigest: row.template_digest,
+      privacyAttestation: row.privacy_kind === 'owner-explicit'
+        ? {
+            kind: 'owner-explicit', limitation: 'deidentification-unproven',
+            attestationId: row.privacy_attestation_id,
+            attestationDigest: row.privacy_attestation_digest,
+          }
+        : {
+            kind: 'deterministic-deidentification', method: 'assistant-delivery-redaction-v1',
+            attestationId: row.privacy_attestation_id,
+            attestationDigest: row.privacy_attestation_digest,
+          },
+    })
+    if (JSON.stringify(storedTemplate) !== JSON.stringify(template)
+      || attestationDigest !== row.privacy_attestation_digest
+      || storedTemplate.privacyAttestation.attestationId !== (row.privacy_kind === 'owner-explicit'
+        ? `workflow-review:${attestationDigest}`
+        : `workflow-deidentification:${attestationDigest}`)) {
+      throw new DeliveryStoreError('receipt-mismatch', 'workflow template attestation is stale')
+    }
+    const contentBinding = this.getBinding(row.owner_binding_id)
+    const resolved = validateResolvedWorkflowAutomationTemplate({
+      contractVersion: 1,
+      template: storedTemplate,
+      ...content,
+    })
+    if (workflowScopeKey(content.scope) !== row.scope_key
+      || content.scope.workspace !== row.workspace || content.scope.preset !== row.preset
+      || content.ownerBindingId !== row.owner_binding_id
+      || contentBinding === undefined
+      || content.principalId !== externalPrincipalId(contentBinding.principal)
+      || workflowAutomationTemplateContentDigest(content) !== row.template_digest) {
+      throw new DeliveryStoreError('receipt-mismatch', 'workflow template content columns do not match')
+    }
+    return Object.freeze({
+      resolved,
+      review: Object.freeze({
+        bindingId: row.owner_binding_id,
+        bindingVersion: review['bindingVersion'] as number,
+        bindingGeneration: review['bindingGeneration'] as number,
+        principalId: review['principalId'] as string,
+        reviewInboxId: row.review_inbox_id,
+        sourceInboxId: row.source_inbox_id,
+        sourceOutboxId: row.source_outbox_id,
+      }),
+      status: row.status,
+      version: row.version,
+    })
+  }
+
+  requeueCurrentWorkflowTraces(): number {
+    this.assertOpen()
+    const now = this.now()
+    return this.transaction(() => {
+      this.database.prepare(`
+        UPDATE workflow_trace_outbox
+        SET status = 'delivered', failure_code = 'superseded-revision', updated_at = ?
+        WHERE status IN ('pending', 'retry_wait') AND NOT EXISTS (
+          SELECT 1 FROM workflow_trace_current AS current
+          WHERE current.subject_ref = workflow_trace_outbox.subject_ref
+            AND current.version = workflow_trace_outbox.version
+        )
+      `).run(now)
+      return Number(this.database.prepare(`
+        UPDATE workflow_trace_outbox
+        SET status = 'pending', attempt_count = 0, next_attempt_at = ?, failure_code = NULL, updated_at = ?
+        WHERE (subject_ref, version) IN (
+          SELECT subject_ref, version FROM workflow_trace_current
+        )
+      `).run(now, now).changes)
+    })
+  }
+
+  enqueuePreferenceProjection(
+    events: readonly Readonly<DeliveryPreferenceEvent>[],
+  ): Readonly<{ batchKey: string; payloadDigest: string; replayed: boolean }> {
+    this.assertOpen()
+    const payload = preferenceProjectionPayload(events)
+    return this.transaction(() => this.insertPreferenceProjection(payload))
+  }
+
+  /**
+   * Persist an Agent reply and its content-free learning projection under one
+   * SQLite commit. A process crash can therefore expose neither row or both,
+   * but never a durable reply that permanently lost its completion signal.
+   */
+  enqueueReplyWithPreferenceProjection(
+    input: OutboundIntent,
+    eventsForReply: (
+      reply: Readonly<OutboxRecord>,
+    ) => readonly Readonly<DeliveryPreferenceEvent>[] | undefined,
+  ): Readonly<{
+    reply: OutboxRecord
+    projection?: Readonly<{ batchKey: string; payloadDigest: string; replayed: boolean }>
+  }> {
+    this.assertOpen()
+    if (typeof eventsForReply !== 'function') {
+      throw new DeliveryStoreError('invalid-intent', 'preference projection builder is invalid')
+    }
+    return this.transaction(() => {
+      const reply = this.enqueue(input)
+      const events = eventsForReply(reply)
+      if (events === undefined) return Object.freeze({ reply })
+      const projection = this.insertPreferenceProjection(preferenceProjectionPayload(events))
+      return Object.freeze({ reply, projection })
+    })
+  }
+
+  listPendingPreferenceProjections(
+    limitInput = 100,
+    nowInput = this.now(),
+  ): PreferenceProjectionOutboxEntry[] {
+    this.assertOpen()
+    if (!Number.isSafeInteger(limitInput) || limitInput < 1 || limitInput > 1_000
+      || !Number.isSafeInteger(nowInput) || nowInput < 0) {
+      throw new DeliveryStoreError('conflict', 'preference projection outbox bounds are invalid')
+    }
+    return this.transaction(() => {
+      this.normalizePreferenceProjectionLanes(nowInput)
+      const legacy = this.database.prepare(`
+        SELECT * FROM delivery_preference_projection_outbox
+        WHERE terminal_at IS NULL AND lane_kind <> 'exact'
+          AND status IN ('pending', 'retry_wait')
+        ORDER BY created_at, batch_key
+        LIMIT 1
+      `).get() as PreferenceProjectionOutboxRow | undefined
+      if (legacy !== undefined) {
+        if (legacy.next_attempt_at > nowInput) return []
+        return this.validPreferenceProjectionEntries([legacy], nowInput)
+      }
+      const rows = this.database.prepare(`
+        SELECT candidate.*
+        FROM delivery_preference_projection_outbox AS candidate
+        WHERE candidate.terminal_at IS NULL AND candidate.lane_kind = 'exact'
+          AND candidate.status IN ('pending', 'retry_wait')
+          AND candidate.next_attempt_at <= ?
+          AND NOT EXISTS (
+            SELECT 1
+            FROM delivery_preference_projection_outbox AS earlier
+            WHERE earlier.terminal_at IS NULL AND earlier.lane_kind = 'exact'
+              AND earlier.status IN ('pending', 'retry_wait')
+              AND earlier.lane_epoch = candidate.lane_epoch
+              AND earlier.lane_workspace = candidate.lane_workspace
+              AND earlier.lane_preset = candidate.lane_preset
+              AND earlier.lane_principal_record_id = candidate.lane_principal_record_id
+              AND earlier.lane_principal_version = candidate.lane_principal_version
+              AND (
+                earlier.admission_sequence < candidate.admission_sequence
+                OR (
+                  earlier.admission_sequence = candidate.admission_sequence
+                  AND (
+                    earlier.created_at < candidate.created_at
+                    OR (earlier.created_at = candidate.created_at
+                      AND earlier.batch_key < candidate.batch_key)
+                  )
+                )
+              )
+          )
+        ORDER BY candidate.next_attempt_at, candidate.admission_sequence,
+          candidate.created_at, candidate.batch_key
+        LIMIT ?
+      `).all(nowInput, limitInput) as unknown as PreferenceProjectionOutboxRow[]
+      return this.validPreferenceProjectionEntries(rows, nowInput)
+    })
+  }
+
+  /** Earliest retry time among global legacy or exact owner-lane heads. */
+  nextPreferenceProjectionAttemptAt(nowInput = this.now()): number | undefined {
+    this.assertOpen()
+    if (!Number.isSafeInteger(nowInput) || nowInput < 0) {
+      throw new DeliveryStoreError('conflict', 'preference projection retry clock is invalid')
+    }
+    return this.transaction(() => {
+      this.normalizePreferenceProjectionLanes(nowInput)
+      const legacy = this.database.prepare(`
+        SELECT next_attempt_at FROM delivery_preference_projection_outbox
+        WHERE terminal_at IS NULL AND lane_kind <> 'exact'
+          AND status IN ('pending', 'retry_wait')
+        ORDER BY created_at, batch_key
+        LIMIT 1
+      `).get() as { next_attempt_at: number } | undefined
+      if (legacy !== undefined) return legacy.next_attempt_at
+      const row = this.database.prepare(`
+        SELECT candidate.next_attempt_at
+        FROM delivery_preference_projection_outbox AS candidate
+        WHERE candidate.terminal_at IS NULL AND candidate.lane_kind = 'exact'
+          AND candidate.status IN ('pending', 'retry_wait')
+          AND NOT EXISTS (
+            SELECT 1
+            FROM delivery_preference_projection_outbox AS earlier
+            WHERE earlier.terminal_at IS NULL AND earlier.lane_kind = 'exact'
+              AND earlier.status IN ('pending', 'retry_wait')
+              AND earlier.lane_epoch = candidate.lane_epoch
+              AND earlier.lane_workspace = candidate.lane_workspace
+              AND earlier.lane_preset = candidate.lane_preset
+              AND earlier.lane_principal_record_id = candidate.lane_principal_record_id
+              AND earlier.lane_principal_version = candidate.lane_principal_version
+              AND (
+                earlier.admission_sequence < candidate.admission_sequence
+                OR (
+                  earlier.admission_sequence = candidate.admission_sequence
+                  AND (
+                    earlier.created_at < candidate.created_at
+                    OR (earlier.created_at = candidate.created_at
+                      AND earlier.batch_key < candidate.batch_key)
+                  )
+                )
+              )
+          )
+        ORDER BY candidate.next_attempt_at
+        LIMIT 1
+      `).get() as { next_attempt_at: number } | undefined
+      return row?.next_attempt_at
+    })
+  }
+
+  /**
+   * A direct control may run only after every earlier projection in its exact
+   * owner lane is terminal. Valid legacy rows are a global upgrade barrier
+   * because their missing cursor makes a narrower comparison impossible.
+   */
+  hasBlockingPreferenceProjectionBefore(input: Readonly<{
+    scope: Readonly<{ workspace: string; preset: string }>
+    principalLineage: Readonly<{ principalRecordId: string; principalVersion: number }>
+    admissionCursor: Readonly<{ epoch: string; sequence: number }>
+  }>): boolean {
+    this.assertOpen()
+    const workspace = validateBindingText(input.scope.workspace, 'preference workspace', 4_096)
+    const preset = validateBindingText(input.scope.preset, 'preference preset', 200)
+    const principalRecordId = validateBindingText(
+      input.principalLineage.principalRecordId,
+      'preference principal record id',
+      500,
+    )
+    if (!Number.isSafeInteger(input.principalLineage.principalVersion)
+      || input.principalLineage.principalVersion < 1
+      || !/^[0-9a-f]{32}$/u.test(input.admissionCursor.epoch)
+      || !Number.isSafeInteger(input.admissionCursor.sequence)
+      || input.admissionCursor.sequence < 1) {
+      throw new DeliveryStoreError('conflict', 'preference control barrier authority is invalid')
+    }
+    const now = this.now()
+    return this.transaction(() => {
+      this.normalizePreferenceProjectionLanes(now)
+      const blocker = this.database.prepare(`
+        SELECT 1 AS present
+        FROM delivery_preference_projection_outbox
+        WHERE terminal_at IS NULL AND status IN ('pending', 'retry_wait')
+          AND (
+            lane_kind <> 'exact'
+            OR (
+              lane_epoch = ? AND lane_workspace = ? AND lane_preset = ?
+              AND lane_principal_record_id = ? AND lane_principal_version = ?
+              AND admission_sequence < ?
+            )
+          )
+        LIMIT 1
+      `).get(
+        input.admissionCursor.epoch,
+        workspace,
+        preset,
+        principalRecordId,
+        input.principalLineage.principalVersion,
+        input.admissionCursor.sequence,
+      ) as { present: number } | undefined
+      return blocker !== undefined
+    })
+  }
+
+  completePreferenceProjection(input: {
+    batchKey: string
+    payloadDigest: string
+  }): void {
+    this.assertOpen()
+    const changed = this.database.prepare(`
+      DELETE FROM delivery_preference_projection_outbox
+      WHERE batch_key = ? AND payload_digest = ? AND terminal_at IS NULL
+    `).run(input.batchKey, input.payloadDigest)
+    if (changed.changes === 1) return
+    const current = this.database.prepare(`
+      SELECT payload_digest, terminal_at
+      FROM delivery_preference_projection_outbox WHERE batch_key = ?
+    `).get(input.batchKey) as { payload_digest: string; terminal_at: number | null } | undefined
+    // Another Host can append the same idempotent batch and delete it first.
+    // Absence is therefore the peer-completed terminal, not a local failure.
+    if (current === undefined) return
+    if (current.payload_digest !== input.payloadDigest) {
+      throw new DeliveryStoreError('receipt-mismatch', 'preference projection completion changed identity')
+    }
+    // A concurrent owner handoff terminally quarantines this exact batch. Its
+    // late completion is an ACK-ignore terminal, never a reason to revive or
+    // retry evidence from the retired lineage.
+    if (current.terminal_at !== null) return
+    throw new DeliveryStoreError('version-conflict', 'preference projection completion lost its active batch')
+  }
+
+  deferPreferenceProjection(input: {
+    batchKey: string
+    payloadDigest: string
+    now: number
+    retryAt: number
+    failureCode: string
+  }): void {
+    this.assertOpen()
+    const failureCode = validateBindingText(input.failureCode, 'preference projection failureCode', 64)
+    if (!Number.isSafeInteger(input.now) || !Number.isSafeInteger(input.retryAt)
+      || input.retryAt <= input.now) {
+      throw new DeliveryStoreError('conflict', 'preference projection retry time is invalid')
+    }
+    const changed = this.database.prepare(`
+      UPDATE delivery_preference_projection_outbox
+      SET status = 'retry_wait', attempt_count = attempt_count + 1,
+        next_attempt_at = ?, failure_code = ?, updated_at = ?
+      WHERE batch_key = ? AND payload_digest = ? AND terminal_at IS NULL
+    `).run(
+      input.retryAt,
+      failureCode,
+      input.now,
+      input.batchKey,
+      input.payloadDigest,
+    )
+    if (changed.changes === 1) return
+    const current = this.database.prepare(`
+      SELECT payload_digest, terminal_at
+      FROM delivery_preference_projection_outbox WHERE batch_key = ?
+    `).get(input.batchKey) as { payload_digest: string; terminal_at: number | null } | undefined
+    // If a peer received the authoritative receipt and removed this row while
+    // our append was failing, its exact downstream commit is already enough.
+    if (current === undefined) return
+    if (current.payload_digest !== input.payloadDigest) {
+      throw new DeliveryStoreError('receipt-mismatch', 'preference projection defer changed identity')
+    }
+    if (current.terminal_at !== null) return
+    throw new DeliveryStoreError('version-conflict', 'preference projection defer lost its active batch')
+  }
+
+  /**
+   * Revalidate one previously-read batch against the live Delivery owner.
+   * Stale, legacy, poison, already-terminal, and peer-completed rows are
+   * acknowledged without invoking a downstream sink.
+   */
+  preferenceProjectionHasCurrentOwner(input: {
+    batchKey: string
+    payloadDigest: string
+  }): boolean {
+    this.assertOpen()
+    return this.transaction(() => this.currentPreferenceProjectionInTransaction(input) !== undefined)
+  }
+
+  /**
+   * Linearizable projection for a process-local synchronous Preference writer.
+   * Delivery's BEGIN IMMEDIATE remains held while Preference commits, giving
+   * all cooperating processes the fixed Delivery -> Preference lock order.
+   * A handoff therefore linearizes wholly before the callback (which is then
+   * skipped) or wholly after the Preference commit and Delivery ACK.
+   */
+  projectPreferenceProjectionUnderOwnerFence(
+    input: { batchKey: string; payloadDigest: string },
+    project: (entry: Readonly<PreferenceProjectionOutboxEntry>) => void,
+  ): PreferenceProjectionFenceResult {
+    this.assertOpen()
+    if (typeof project !== 'function') {
+      throw new DeliveryStoreError('invalid-intent', 'preference projection writer is invalid')
+    }
+    return this.transaction(() => {
+      const row = this.database.prepare(`
+        SELECT * FROM delivery_preference_projection_outbox WHERE batch_key = ?
+      `).get(input.batchKey) as PreferenceProjectionOutboxRow | undefined
+      if (row === undefined) return 'missing'
+      if (row.payload_digest !== input.payloadDigest) {
+        throw new DeliveryStoreError('receipt-mismatch', 'preference projection fence changed identity')
+      }
+      const entry = this.currentPreferenceProjectionInTransaction(input, row)
+      if (entry === undefined) return 'ignored'
+      const result = project(entry) as unknown
+      if (typeof result === 'object' && result !== null
+        && typeof (result as { then?: unknown }).then === 'function') {
+        throw new DeliveryStoreError(
+          'invalid-intent',
+          'preference projection fenced writer must complete synchronously',
+        )
+      }
+      const deleted = this.database.prepare(`
+        DELETE FROM delivery_preference_projection_outbox
+        WHERE batch_key = ? AND payload_digest = ? AND terminal_at IS NULL
+      `).run(entry.batchKey, entry.payloadDigest)
+      if (deleted.changes !== 1) {
+        throw new DeliveryStoreError('version-conflict', 'preference projection fenced ACK lost its batch')
+      }
+      return 'completed'
+    })
+  }
+
+  requeuePreferenceProjections(): number {
+    this.assertOpen()
+    const now = this.now()
+    return Number(this.database.prepare(`
+      UPDATE delivery_preference_projection_outbox
+      SET status = 'pending', next_attempt_at = ?, failure_code = NULL, updated_at = ?
+      WHERE terminal_at IS NULL
+    `).run(now, now).changes)
+  }
+
+  private normalizePreferenceProjectionLanes(now: number): void {
+    const rows = this.database.prepare(`
+      SELECT * FROM delivery_preference_projection_outbox
+      WHERE terminal_at IS NULL
+      ORDER BY created_at, batch_key
+    `).all() as unknown as PreferenceProjectionOutboxRow[]
+    for (const row of rows) {
+      try {
+        const entry = preferenceProjectionOutboxEntry(row)
+        if (row.lane_kind !== 'unclassified') continue
+        const changed = entry.lane === undefined
+          ? this.database.prepare(`
+              UPDATE delivery_preference_projection_outbox
+              SET lane_kind = 'legacy', lane_epoch = NULL, lane_workspace = NULL,
+                lane_preset = NULL, lane_principal_record_id = NULL,
+                lane_principal_version = NULL, admission_sequence = NULL,
+                updated_at = ?
+              WHERE batch_key = ? AND payload_digest = ?
+                AND terminal_at IS NULL AND lane_kind = 'unclassified'
+            `).run(now, entry.batchKey, entry.payloadDigest)
+          : this.database.prepare(`
+              UPDATE delivery_preference_projection_outbox
+              SET lane_kind = 'exact', lane_epoch = ?, lane_workspace = ?,
+                lane_preset = ?, lane_principal_record_id = ?,
+                lane_principal_version = ?, admission_sequence = ?, updated_at = ?
+              WHERE batch_key = ? AND payload_digest = ?
+                AND terminal_at IS NULL AND lane_kind = 'unclassified'
+            `).run(
+              entry.lane.epoch,
+              entry.lane.workspace,
+              entry.lane.preset,
+              entry.lane.principalRecordId,
+              entry.lane.principalVersion,
+              entry.lane.admissionSequence,
+              now,
+              entry.batchKey,
+              entry.payloadDigest,
+            )
+        if (changed.changes !== 1) {
+          throw new DeliveryStoreError(
+            'version-conflict',
+            'preference projection lane normalization lost its exact batch',
+          )
+        }
+      } catch {
+        this.database.prepare(`
+          UPDATE delivery_preference_projection_outbox
+          SET terminal_at = ?, failure_code = 'projection-poison-row',
+            attempt_count = attempt_count + 1, next_attempt_at = 9007199254740991,
+            updated_at = ?
+          WHERE batch_key = ? AND terminal_at IS NULL
+        `).run(now, now, row.batch_key)
+      }
+    }
+  }
+
+  private currentPreferenceProjectionInTransaction(
+    input: { batchKey: string; payloadDigest: string },
+    selected?: PreferenceProjectionOutboxRow,
+  ): PreferenceProjectionOutboxEntry | undefined {
+    const row = selected ?? this.database.prepare(`
+      SELECT * FROM delivery_preference_projection_outbox WHERE batch_key = ?
+    `).get(input.batchKey) as PreferenceProjectionOutboxRow | undefined
+    if (row === undefined) return undefined
+    if (row.payload_digest !== input.payloadDigest) {
+      throw new DeliveryStoreError('receipt-mismatch', 'preference projection owner fence changed identity')
+    }
+    if (row.terminal_at !== null) return undefined
+
+    let entry: PreferenceProjectionOutboxEntry
+    try {
+      entry = preferenceProjectionOutboxEntry(row)
+    } catch {
+      this.terminalizePreferenceProjectionInTransaction(row.batch_key, 'projection-poison-row')
+      return undefined
+    }
+    const owners = this.database.prepare(`
+      SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+      FROM delivery_principals WHERE role = 'owner' AND status = 'active'
+      ORDER BY id LIMIT 2
+    `).all() as unknown as PrincipalRow[]
+    let currentPrincipalId: string | undefined
+    try {
+      currentPrincipalId = owners.length === 1
+        ? externalPrincipalId(JSON.parse(owners[0]!.principal_json) as ExternalPrincipalKey)
+        : undefined
+    } catch {
+      currentPrincipalId = undefined
+    }
+    const owner = owners.length === 1 ? owners[0] : undefined
+    if (row.lane_kind !== 'exact' || entry.lane === undefined || owner === undefined
+      || entry.lane.principalRecordId !== owner.id
+      || entry.lane.principalVersion !== owner.version
+      || entry.events.some(event => event.principalId !== currentPrincipalId)) {
+      this.terminalizePreferenceProjectionInTransaction(row.batch_key, 'owner-lineage-retired')
+      return undefined
+    }
+    return entry
+  }
+
+  private terminalizePreferenceProjectionInTransaction(batchKey: string, failureCode: string): void {
+    const now = this.now()
+    this.database.prepare(`
+      UPDATE delivery_preference_projection_outbox
+      SET terminal_at = ?, failure_code = ?, next_attempt_at = 9007199254740991,
+        updated_at = ?
+      WHERE batch_key = ? AND terminal_at IS NULL
+    `).run(now, failureCode, now, batchKey)
+  }
+
+  private validPreferenceProjectionEntries(
+    rows: readonly PreferenceProjectionOutboxRow[],
+    now: number,
+  ): PreferenceProjectionOutboxEntry[] {
+    const result: PreferenceProjectionOutboxEntry[] = []
+    for (const row of rows) {
+      try {
+        result.push(preferenceProjectionOutboxEntry(row))
+      } catch {
+        this.database.prepare(`
+          UPDATE delivery_preference_projection_outbox
+          SET terminal_at = ?, failure_code = 'projection-poison-row',
+            attempt_count = attempt_count + 1, next_attempt_at = 9007199254740991,
+            updated_at = ?
+          WHERE batch_key = ? AND terminal_at IS NULL
+        `).run(now, now, row.batch_key)
+      }
+    }
+    return result
+  }
+
+  private insertPreferenceProjection(payload: Readonly<{
+    batchKey: string
+    digest: string
+    json: string
+    lane?: Readonly<PreferenceProjectionLane>
+  }>): Readonly<{ batchKey: string; payloadDigest: string; replayed: boolean }> {
+    const existing = this.database.prepare(`
+      SELECT payload_digest, events_json
+      FROM delivery_preference_projection_outbox WHERE batch_key = ?
+    `).get(payload.batchKey) as { payload_digest: string; events_json: string } | undefined
+    if (existing !== undefined) {
+      if (existing.payload_digest !== payload.digest || existing.events_json !== payload.json) {
+        throw new DeliveryStoreError(
+          'idempotency-conflict',
+          'preference projection identity was reused with different events',
+        )
+      }
+      return Object.freeze({
+        batchKey: payload.batchKey,
+        payloadDigest: payload.digest,
+        replayed: true,
+      })
+    }
+    const now = this.now()
+    this.database.prepare(`
+      INSERT INTO delivery_preference_projection_outbox(
+        batch_key, payload_digest, events_json, status, attempt_count,
+        next_attempt_at, failure_code, lane_kind, lane_epoch, lane_workspace,
+        lane_preset, lane_principal_record_id, lane_principal_version,
+        admission_sequence, terminal_at, created_at, updated_at
+      ) VALUES (?, ?, ?, 'pending', 0, ?, NULL, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+    `).run(
+      payload.batchKey,
+      payload.digest,
+      payload.json,
+      now,
+      payload.lane === undefined ? 'legacy' : 'exact',
+      payload.lane?.epoch ?? null,
+      payload.lane?.workspace ?? null,
+      payload.lane?.preset ?? null,
+      payload.lane?.principalRecordId ?? null,
+      payload.lane?.principalVersion ?? null,
+      payload.lane?.admissionSequence ?? null,
+      now,
+      now,
+    )
+    return Object.freeze({
+      batchKey: payload.batchKey,
+      payloadDigest: payload.digest,
+      replayed: false,
+    })
+  }
+
+  listPendingWorkflowTraceRevisions(limitInput = 100, nowInput = this.now()): WorkflowTraceOutboxEntry[] {
+    this.assertOpen()
+    if (!Number.isSafeInteger(limitInput) || limitInput < 1 || limitInput > 1_000
+      || !Number.isSafeInteger(nowInput) || nowInput < 0) {
+      throw new DeliveryStoreError('conflict', 'workflow trace outbox bounds are invalid')
+    }
+    const rows = this.database.prepare(`
+      SELECT revision.*, outbox.status, outbox.attempt_count, outbox.next_attempt_at,
+        outbox.failure_code, outbox.updated_at
+      FROM workflow_trace_outbox AS outbox
+      JOIN workflow_trace_revisions AS revision
+        ON revision.subject_ref = outbox.subject_ref AND revision.version = outbox.version
+      JOIN workflow_trace_current AS current
+        ON current.subject_ref = outbox.subject_ref AND current.version = outbox.version
+      WHERE outbox.status IN ('pending', 'retry_wait') AND outbox.next_attempt_at <= ?
+      ORDER BY outbox.next_attempt_at, outbox.updated_at, outbox.subject_ref, outbox.version
+      LIMIT ?
+    `).all(nowInput, limitInput) as unknown as WorkflowTraceOutboxRow[]
+    const result: WorkflowTraceOutboxEntry[] = []
+    for (const row of rows) {
+      try {
+        result.push(workflowTraceOutboxEntry(row))
+      } catch {
+        this.deferWorkflowTraceRevision({
+          subjectRef: row.subject_ref,
+          version: row.version,
+          digest: row.digest,
+          now: nowInput,
+          retryAt: nowInput + 86_400_000,
+          failureCode: 'trace-poison-row',
+        })
+      }
+    }
+    return result
+  }
+
+  completeWorkflowTraceRevision(input: {
+    subjectRef: string
+    version: number
+    digest: string
+    now?: number
+  }): void {
+    this.assertOpen()
+    const now = input.now ?? this.now()
+    const changed = this.database.prepare(`
+      UPDATE workflow_trace_outbox
+      SET status = 'delivered', failure_code = NULL, next_attempt_at = ?, updated_at = ?
+      WHERE subject_ref = ? AND version = ? AND status IN ('pending', 'retry_wait')
+        AND EXISTS (
+          SELECT 1 FROM workflow_trace_revisions AS revision
+          WHERE revision.subject_ref = workflow_trace_outbox.subject_ref
+            AND revision.version = workflow_trace_outbox.version AND revision.digest = ?
+        )
+    `).run(now, now, input.subjectRef, input.version, input.digest)
+    if (changed.changes !== 1) {
+      const current = this.database.prepare(`
+        SELECT outbox.status, revision.digest FROM workflow_trace_outbox AS outbox
+        JOIN workflow_trace_revisions AS revision
+          ON revision.subject_ref = outbox.subject_ref AND revision.version = outbox.version
+        WHERE outbox.subject_ref = ? AND outbox.version = ?
+      `).get(input.subjectRef, input.version) as { status: string; digest: string } | undefined
+      if (current?.status !== 'delivered' || current.digest !== input.digest) {
+        throw new DeliveryStoreError('version-conflict', 'workflow trace completion lost its exact revision')
+      }
+    }
+  }
+
+  deferWorkflowTraceRevision(input: {
+    subjectRef: string
+    version: number
+    digest: string
+    now: number
+    retryAt: number
+    failureCode: string
+  }): void {
+    this.assertOpen()
+    const failureCode = validateBindingText(input.failureCode, 'workflow trace failureCode', 64)
+    if (!Number.isSafeInteger(input.now) || !Number.isSafeInteger(input.retryAt)
+      || input.retryAt <= input.now) throw new DeliveryStoreError('conflict', 'workflow trace retry time is invalid')
+    const changed = this.database.prepare(`
+      UPDATE workflow_trace_outbox
+      SET status = 'retry_wait', attempt_count = attempt_count + 1,
+        next_attempt_at = ?, failure_code = ?, updated_at = ?
+      WHERE subject_ref = ? AND version = ? AND status IN ('pending', 'retry_wait')
+        AND EXISTS (
+          SELECT 1 FROM workflow_trace_revisions AS revision
+          WHERE revision.subject_ref = workflow_trace_outbox.subject_ref
+            AND revision.version = workflow_trace_outbox.version AND revision.digest = ?
+        )
+    `).run(input.retryAt, failureCode, input.now, input.subjectRef, input.version, input.digest)
+    if (changed.changes !== 1) {
+      throw new DeliveryStoreError('version-conflict', 'workflow trace defer lost its exact revision')
+    }
+  }
+
+  private insertWorkflowTraceRevisionInTransaction(
+    input: Readonly<WorkflowTraceRevision>,
+  ): { revision: Readonly<WorkflowTraceRevision>; replayed: boolean } {
+    const revision = validateWorkflowTraceRevision(input)
+    const source = this.workflowTraceSourceAttestation()
+    if (revision.source.sourceId !== source.sourceId
+      || revision.source.generation !== source.generation
+      || revision.source.authorityDigest !== source.authorityDigest) {
+      throw new DeliveryStoreError('unauthorized-principal', 'workflow trace source authority changed')
+    }
+
+    const existingRow = this.database.prepare(`
+      SELECT * FROM workflow_trace_revisions WHERE subject_ref = ? AND version = ?
+    `).get(revision.subjectRef, revision.version) as WorkflowTraceRevisionRow | undefined
+    if (existingRow !== undefined) {
+      const existing = workflowTraceRevision(existingRow)
+      if (existing.digest !== revision.digest
+        || JSON.stringify(existing) !== JSON.stringify(revision)) {
+        throw new DeliveryStoreError(
+          'idempotency-conflict',
+          'workflow trace version was reused with different content',
+        )
+      }
+      const current = this.database.prepare(`
+        SELECT version, digest FROM workflow_trace_current WHERE subject_ref = ?
+      `).get(revision.subjectRef) as { version: number; digest: string } | undefined
+      if (current === undefined || current.version < revision.version
+        || (current.version === revision.version && current.digest !== revision.digest)) {
+        throw new DeliveryStoreError('conflict', 'workflow trace current projection is inconsistent')
+      }
+      return Object.freeze({ revision: existing, replayed: true })
+    }
+
+    const current = this.database.prepare(`
+      SELECT version, digest FROM workflow_trace_current WHERE subject_ref = ?
+    `).get(revision.subjectRef) as { version: number; digest: string } | undefined
+    if (current !== undefined && revision.version <= current.version) {
+      throw new DeliveryStoreError(
+        'version-conflict',
+        'workflow trace version is lower than the current projection',
+      )
+    }
+
+    const now = this.now()
+    this.database.prepare(`
+      INSERT INTO workflow_trace_revisions(
+        subject_ref, version, source_generation, source_authority_digest, scope_key,
+        workspace, preset, disposition, digest, payload_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      revision.subjectRef,
+      revision.version,
+      revision.source.generation,
+      revision.source.authorityDigest,
+      workflowScopeKey(revision.scope),
+      revision.scope.workspace,
+      revision.scope.preset,
+      revision.disposition,
+      revision.digest,
+      JSON.stringify(revision),
+      now,
+    )
+    this.database.prepare(`
+      INSERT INTO workflow_trace_current(
+        subject_ref, version, digest, disposition, payload_json, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(subject_ref) DO UPDATE SET
+        version = excluded.version,
+        digest = excluded.digest,
+        disposition = excluded.disposition,
+        payload_json = excluded.payload_json,
+        updated_at = excluded.updated_at
+      WHERE excluded.version > workflow_trace_current.version
+    `).run(
+      revision.subjectRef,
+      revision.version,
+      revision.digest,
+      revision.disposition,
+      JSON.stringify(revision),
+      now,
+    )
+    this.database.prepare(`
+      INSERT INTO workflow_trace_outbox(
+        subject_ref, version, status, attempt_count, next_attempt_at,
+        failure_code, created_at, updated_at
+      ) VALUES (?, ?, 'pending', 0, ?, NULL, ?, ?)
+    `).run(revision.subjectRef, revision.version, now, now, now)
+    return Object.freeze({ revision, replayed: false })
+  }
+
+  private revokeCurrentWorkflowTemplateInTransaction(
+    current: Readonly<WorkflowTraceRevision> | undefined,
+    now: number,
+  ): void {
+    const template = current?.disposition === 'upsert' ? current.evidence?.template : undefined
+    if (template === undefined) return
+    const row = this.database.prepare(`
+      SELECT template_digest, status FROM workflow_template_registry WHERE template_ref = ?
+    `).get(template.templateRef) as { template_digest: string; status: WorkflowTemplateRow['status'] } | undefined
+    if (row === undefined) return
+    if (row.template_digest !== template.templateDigest) {
+      throw new DeliveryStoreError('receipt-mismatch', 'current workflow template identity is corrupt')
+    }
+    if (row.status === 'revoked') return
+    const changed = this.database.prepare(`
+      UPDATE workflow_template_registry
+      SET status = 'revoked', updated_at = ?, version = version + 1
+      WHERE template_ref = ? AND template_digest = ? AND status = 'active'
+    `).run(now, template.templateRef, template.templateDigest)
+    if (changed.changes !== 1) {
+      throw new DeliveryStoreError('version-conflict', 'workflow template revocation lost its exact version')
+    }
   }
 
   close(): void {

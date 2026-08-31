@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
+import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -10,9 +11,11 @@ import type { EpisodeInput, EvolutionMutation } from '../src/types.ts'
 const roots: string[] = []
 const alphaScope = JSON.stringify(['/work/alpha', 'primary'])
 const betaScope = JSON.stringify(['/work/beta', 'primary'])
+let projectionScopeWatermark = 0
 
 afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true })
+  projectionScopeWatermark = 0
 })
 
 function databasePath(name: string): string {
@@ -31,20 +34,59 @@ function record(target: EvolutionStore, input: {
   index: number
   outcome?: 'succeeded' | 'failed'
   trust?: 'trusted' | 'self-reported'
-  source?: 'automation' | 'foreground'
+  source?: 'automation' | 'evaluation' | 'foreground'
   ruleId?: string
   guidanceVersion?: number
   claimedRuleId?: string
   occurredAt?: number
   idempotencyKey?: string
 }) {
+  if ((input.trust ?? 'trusted') === 'trusted') {
+    const subjectRef = JSON.stringify([
+      'evaluation-outcome', input.scopeKey, input.situation, input.index,
+    ])
+    const occurredAt = input.occurredAt ?? 1_000 + input.index
+    const ruleId = input.ruleId
+    const digest = createHash('sha256').update(JSON.stringify({
+      scopeKey: input.scopeKey,
+      subjectRef,
+      situation: input.situation,
+      outcome: input.outcome ?? 'failed',
+      ruleId: ruleId ?? null,
+      occurredAt,
+    })).digest('hex')
+    return target.applyTaskLearningProjection({
+      scopeKey: input.scopeKey,
+      scopeWatermark: ++projectionScopeWatermark,
+      subjectKind: 'outcome',
+      subjectRef,
+      version: 1,
+      digest,
+      disposition: 'upsert',
+      situation: input.situation,
+      outcome: input.outcome ?? 'failed',
+      detail: `attempt ${input.index}`,
+      evidenceRef: `evaluation:${input.scopeKey}:${input.situation}:${input.index}`,
+      occurredAt,
+      ...(ruleId === undefined ? {} : { ruleId, guidanceVersion: input.guidanceVersion ?? 1 }),
+    }).episode!
+  }
   return target.recordEpisode({
     scopeKey: input.scopeKey,
     situation: input.situation,
     outcome: input.outcome ?? 'failed',
     detail: `attempt ${input.index}`,
-    source: input.source ?? 'automation',
+    source: input.source ?? ((input.trust ?? 'trusted') === 'trusted' ? 'evaluation' : 'foreground'),
     trust: input.trust ?? 'trusted',
+    evidenceKind: (input.trust ?? 'trusted') === 'trusted' ? 'objective' : 'operational',
+    ...((input.trust ?? 'trusted') === 'trusted'
+      ? {
+          evidenceRef: `evaluation:${input.scopeKey}:${input.situation}:${input.index}`,
+          learningSubjectRef: JSON.stringify([
+            'evaluation-outcome', input.scopeKey, input.situation, input.index,
+          ]),
+        }
+      : {}),
     occurredAt: input.occurredAt ?? 1_000 + input.index,
     idempotencyKey: input.idempotencyKey ?? `${input.scopeKey}:${input.situation}:${input.index}`,
     ...(input.ruleId === undefined ? {} : {
@@ -65,6 +107,27 @@ const thresholds = {
   retireFailureRate: 0.4,
   limit: 10,
 }
+
+describe('current schema', () => {
+  test('creates and reopens a fresh version-12 database without replaying a migration', () => {
+    const path = databasePath('fresh-v12-reopen')
+    const created = openEvolutionDatabase(path)
+    expect((created.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+      .toBe(evolutionSchemaVersion)
+    expect(created.prepare(`SELECT value FROM schema_meta WHERE key = 'schema-version'`).get())
+      .toEqual({ value: String(evolutionSchemaVersion) })
+    created.close()
+
+    const reopened = openEvolutionDatabase(path)
+    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+      .toBe(evolutionSchemaVersion)
+    expect(reopened.prepare(`
+      SELECT COUNT(*) AS count FROM sqlite_schema
+      WHERE type = 'table' AND name = 'evolution_scope_learning_watermarks'
+    `).get()).toEqual({ count: 1 })
+    reopened.close()
+  })
+})
 
 function adopt(target: EvolutionStore, input: {
   scopeKey?: string
@@ -112,7 +175,11 @@ function retire(target: EvolutionStore, ruleId: string, expectedVersion: number)
     principal: 'owner:lark:123',
     mutation: {
       op: 'retire',
+      scopeKey: rule.scopeKey,
       ruleId,
+      situation: rule.situation,
+      guidance: rule.guidance,
+      generation: rule.generation,
       expectedVersion,
       reason: 'did not help',
       evaluation: candidate.stats,
@@ -282,6 +349,16 @@ describe('schema v4 migration through the v2 quarantine', () => {
       );
       PRAGMA user_version = 2;
     `)
+    const insertEpisode = v2.prepare(`
+      INSERT INTO evolution_episodes(
+        id, idempotency_key, situation, outcome, detail, source, scope_key,
+        trust, rule_id, claimed_rule_id, occurred_at)
+      VALUES (?, ?, 'automation:legacy-failure', 'failed', 'execution failed',
+        'automation', ?, 'trusted', NULL, NULL, ?)
+    `)
+    for (let index = 1; index <= 5; index += 1) {
+      insertEpisode.run(`legacy-episode-${index}`, `legacy-run-${index}`, alphaScope, 100 + index)
+    }
     v2.close()
 
     const migrated = openEvolutionDatabase(path)
@@ -297,6 +374,39 @@ describe('schema v4 migration through the v2 quarantine', () => {
     expect(migrated.prepare('PRAGMA table_info(evolution_episodes)').all()
       .filter((column: unknown) => (column as { name: string }).name === 'guidance_version')).toHaveLength(1)
     migrated.close()
+
+    const target = new EvolutionStore({ path })
+    expect(target.candidates(thresholds)).toEqual([])
+    const ledger = new DatabaseSync(path)
+    const quarantined = ledger.prepare(`
+      SELECT evidence_kind, evidence_ref, learning_eligible
+      FROM evolution_episodes ORDER BY id
+    `).all()
+    expect(quarantined).toEqual(Array.from({ length: 5 }, () => ({
+      evidence_kind: 'legacy-unknown', evidence_ref: null, learning_eligible: 0,
+    })))
+    ledger.close()
+
+    // A cross-database crash may leave the Evolution row committed while the
+    // Automation outbox still needs to replay. Both meanings are ineligible, so
+    // v5 returns the quarantined winner instead of poisoning the outbox with an
+    // idempotency conflict solely because the schema learned a new category.
+    expect(target.recordEpisode({
+      scopeKey: alphaScope,
+      situation: 'automation:legacy-failure',
+      outcome: 'failed',
+      detail: 'execution failed',
+      source: 'automation',
+      trust: 'trusted',
+      evidenceKind: 'operational',
+      occurredAt: 101,
+      idempotencyKey: 'legacy-run-1',
+    })).toMatchObject({
+      id: 'legacy-episode-1',
+      evidenceKind: 'legacy-unknown',
+      learningEligible: false,
+    })
+    target.close()
   })
 
   test('quarantines v1 rows instead of treating them as scoped trusted evidence', () => {
@@ -337,10 +447,20 @@ describe('schema v4 migration through the v2 quarantine', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(4)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(4)
-    expect(migrated.prepare(`SELECT scope_key, trust, rule_id, claimed_rule_id FROM evolution_episodes`).get())
-      .toEqual({ scope_key: 'legacy:v1', trust: 'legacy', rule_id: null, claimed_rule_id: 'claimed-rule' })
+    expect(evolutionSchemaVersion).toBe(12)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(12)
+    expect(migrated.prepare(`
+      SELECT scope_key, trust, evidence_kind, evidence_ref, learning_eligible,
+        rule_id, claimed_rule_id FROM evolution_episodes
+    `).get()).toEqual({
+      scope_key: 'legacy:v1',
+      trust: 'legacy',
+      evidence_kind: 'legacy-unknown',
+      evidence_ref: null,
+      learning_eligible: 0,
+      rule_id: null,
+      claimed_rule_id: 'claimed-rule',
+    })
     expect(migrated.prepare(`SELECT scope_key, generation FROM evolution_rules`).get())
       .toEqual({ scope_key: 'legacy:v1', generation: 0 })
     expect(migrated.prepare(`SELECT status, scope_key FROM evolution_proposals`).get())
@@ -357,5 +477,307 @@ describe('schema v4 migration through the v2 quarantine', () => {
     expect(target.candidates(thresholds)).toEqual([])
     expect(target.listRules(alphaScope, 'active')).toEqual([])
     target.close()
+  })
+})
+
+describe('schema v6 immutable Evaluation identity migration', () => {
+  test('deterministically retains one quality row and quarantines duplicate v5 evidence', () => {
+    const path = databasePath('v5-duplicate-quality')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+      CREATE TABLE evolution_episodes (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        situation TEXT NOT NULL,
+        outcome TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        source TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        trust TEXT NOT NULL,
+        evidence_kind TEXT NOT NULL,
+        evidence_ref TEXT,
+        learning_eligible INTEGER NOT NULL,
+        rule_id TEXT,
+        guidance_version INTEGER,
+        claimed_rule_id TEXT,
+        occurred_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE TABLE evolution_proposals (
+        id TEXT PRIMARY KEY,
+        policy_proposal_id TEXT UNIQUE,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        requester TEXT NOT NULL,
+        principal TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        mutation_hash TEXT NOT NULL,
+        mutation_json TEXT NOT NULL,
+        creation_intent_json TEXT,
+        settlement_expectation_json TEXT,
+        status TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        result_rule_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        version INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO schema_meta VALUES ('schema-version', '5');
+      INSERT INTO evolution_episodes VALUES
+        ('episode-a', 'idem-a', 'weekly-report', 'failed', 'first', 'automation',
+          '${alphaScope}', 'trusted', 'objective', 'evaluation:duplicate', 1,
+          NULL, NULL, NULL, 100),
+        ('episode-b', 'idem-b', 'weekly-report', 'succeeded', 'second', 'automation',
+          '${alphaScope}', 'trusted', 'verification', 'evaluation:duplicate', 1,
+          NULL, NULL, NULL, 101),
+        ('episode-c', 'idem-c', 'weekly-report', 'failed', 'unique', 'automation',
+          '${alphaScope}', 'trusted', 'objective', 'evaluation:unique', 1,
+          NULL, NULL, NULL, 102);
+      INSERT INTO evolution_proposals VALUES
+        ('proposal-affected', NULL, 'proposal-idem-a', 'agent', 'owner', '${alphaScope}',
+          'hash-a', '{}', NULL, NULL, 'pending', 999, NULL, 100, 100, 1),
+        ('proposal-unaffected', NULL, 'proposal-idem-b', 'agent', 'owner', '${betaScope}',
+          'hash-b', '{}', NULL, NULL, 'pending', 999, NULL, 100, 100, 1);
+      PRAGMA user_version = 5;
+    `)
+    legacy.close()
+
+    const migrated = openEvolutionDatabase(path)
+    expect(evolutionSchemaVersion).toBe(12)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(12)
+    expect(migrated.prepare(`
+      SELECT id, evidence_kind, evidence_ref, learning_eligible
+      FROM evolution_episodes ORDER BY id
+    `).all()).toEqual([
+      { id: 'episode-a', evidence_kind: 'legacy-unknown', evidence_ref: null, learning_eligible: 0 },
+      { id: 'episode-b', evidence_kind: 'legacy-unknown', evidence_ref: null, learning_eligible: 0 },
+      { id: 'episode-c', evidence_kind: 'legacy-unknown', evidence_ref: null, learning_eligible: 0 },
+    ])
+    expect(migrated.prepare(`
+      SELECT id, status, version FROM evolution_proposals ORDER BY id
+    `).all()).toEqual([
+      { id: 'proposal-affected', status: 'conflicted', version: 2 },
+      { id: 'proposal-unaffected', status: 'conflicted', version: 2 },
+    ])
+    expect(() => migrated.prepare(`
+      INSERT INTO evolution_episodes(
+        id, idempotency_key, situation, outcome, detail, source, scope_key,
+        trust, evidence_kind, evidence_ref, learning_subject_ref, learning_eligible,
+        rule_id, guidance_version, claimed_rule_id, occurred_at)
+      VALUES (
+        'episode-d', 'idem-d', 'weekly-report', 'failed', 'duplicate', 'automation',
+        ?, 'trusted', 'objective', 'evaluation:duplicate', 'subject:duplicate',
+        1, NULL, NULL, NULL, 103)
+    `).run(alphaScope)).toThrow(/check/iu)
+    migrated.close()
+  })
+})
+
+describe('schema v7 Evaluation provenance migration', () => {
+  test('rebuilds a v6 episode ledger so authoritative Evaluation provenance is representable', () => {
+    const path = databasePath('v6-evaluation-source')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+      CREATE TABLE evolution_episodes (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        situation TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN ('succeeded', 'failed')),
+        detail TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('automation', 'foreground')),
+        scope_key TEXT NOT NULL,
+        trust TEXT NOT NULL CHECK (trust IN ('trusted', 'self-reported', 'legacy')),
+        evidence_kind TEXT NOT NULL CHECK (
+          evidence_kind IN ('operational', 'objective', 'verification', 'legacy-unknown')),
+        evidence_ref TEXT,
+        learning_eligible INTEGER NOT NULL CHECK (learning_eligible IN (0, 1)),
+        rule_id TEXT,
+        guidance_version INTEGER CHECK (guidance_version IS NULL OR guidance_version >= 1),
+        claimed_rule_id TEXT,
+        occurred_at INTEGER NOT NULL,
+        CHECK (learning_eligible = 0 OR (
+          trust = 'trusted'
+          AND evidence_kind IN ('objective', 'verification')
+          AND evidence_ref IS NOT NULL))
+      ) STRICT;
+      CREATE UNIQUE INDEX evolution_episodes_quality_evidence_identity
+        ON evolution_episodes(scope_key, evidence_kind, evidence_ref)
+        WHERE learning_eligible = 1;
+      CREATE TABLE evolution_proposals (
+        id TEXT PRIMARY KEY,
+        policy_proposal_id TEXT UNIQUE,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        requester TEXT NOT NULL,
+        principal TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        mutation_hash TEXT NOT NULL,
+        mutation_json TEXT NOT NULL,
+        creation_intent_json TEXT,
+        settlement_expectation_json TEXT,
+        status TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        result_rule_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        version INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO schema_meta VALUES ('schema-version', '6');
+      INSERT INTO evolution_episodes VALUES
+        ('episode-v6', 'idem-v6', 'weekly-report', 'failed', 'legacy projection', 'automation',
+          '${alphaScope}', 'trusted', 'objective', 'evaluation:v6', 1, NULL, NULL, NULL, 100),
+        ('episode-v6-cross-kind', 'idem-v6-cross-kind', 'weekly-report', 'succeeded',
+          'future kind alias', 'automation', '${alphaScope}', 'trusted', 'verification',
+          'evaluation:v6', 1, NULL, NULL, NULL, 101);
+      INSERT INTO evolution_proposals VALUES (
+        'proposal-v6-affected', NULL, 'proposal-v6-idem', 'agent', 'owner', '${alphaScope}',
+        'hash', '{}', NULL, NULL, 'pending', 999, NULL, 100, 100, 1
+      );
+      PRAGMA user_version = 6;
+    `)
+    legacy.close()
+
+    const migrated = openEvolutionDatabase(path)
+    expect(evolutionSchemaVersion).toBe(12)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(12)
+    expect(migrated.prepare(`
+      SELECT id, evidence_kind, evidence_ref, learning_eligible
+      FROM evolution_episodes WHERE id LIKE 'episode-v6%' ORDER BY id
+    `).all()).toEqual([
+      { id: 'episode-v6', evidence_kind: 'legacy-unknown', evidence_ref: null, learning_eligible: 0 },
+      {
+        id: 'episode-v6-cross-kind', evidence_kind: 'legacy-unknown',
+        evidence_ref: null, learning_eligible: 0,
+      },
+    ])
+    expect(migrated.prepare(`
+      SELECT status, version FROM evolution_proposals WHERE id = 'proposal-v6-affected'
+    `).get()).toEqual({ status: 'conflicted', version: 2 })
+    expect(() => migrated.prepare(`
+      INSERT INTO evolution_episodes(
+        id, idempotency_key, situation, outcome, detail, source, scope_key,
+        trust, evidence_kind, evidence_ref, learning_subject_ref, learning_eligible,
+        rule_id, guidance_version, claimed_rule_id, occurred_at)
+      VALUES (
+        'episode-v7', 'idem-v7', 'weekly-report', 'failed', 'authoritative projection',
+        'evaluation', ?, 'trusted', 'objective', 'evaluation:v7', 'subject:v7',
+        1, NULL, NULL, NULL, 101)
+    `).run(alphaScope)).not.toThrow()
+    expect(() => migrated.prepare(`
+      INSERT INTO evolution_episodes(
+        id, idempotency_key, situation, outcome, detail, source, scope_key,
+        trust, evidence_kind, evidence_ref, learning_subject_ref, learning_eligible,
+        rule_id, guidance_version, claimed_rule_id, occurred_at)
+      VALUES (
+        'episode-v7-alias', 'idem-v7-alias', 'weekly-report', 'failed', 'future kind alias',
+        'evaluation', ?, 'trusted', 'verification', 'evaluation:v7', 'subject:v7-alias',
+        1, NULL, NULL, NULL, 101)
+    `).run(alphaScope)).toThrow(/unique/iu)
+    migrated.close()
+  })
+})
+
+describe('schema v8 learning-subject identity migration', () => {
+  test('quarantines unverifiable v7 learning rows and conflicts their pending scope', () => {
+    const path = databasePath('v7-learning-subject')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+      CREATE TABLE evolution_episodes (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        situation TEXT NOT NULL,
+        outcome TEXT NOT NULL CHECK (outcome IN ('succeeded', 'failed')),
+        detail TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('automation', 'evaluation', 'foreground')),
+        scope_key TEXT NOT NULL,
+        trust TEXT NOT NULL CHECK (trust IN ('trusted', 'self-reported', 'legacy')),
+        evidence_kind TEXT NOT NULL CHECK (
+          evidence_kind IN ('operational', 'objective', 'verification', 'legacy-unknown')),
+        evidence_ref TEXT,
+        learning_eligible INTEGER NOT NULL CHECK (learning_eligible IN (0, 1)),
+        rule_id TEXT,
+        guidance_version INTEGER CHECK (guidance_version IS NULL OR guidance_version >= 1),
+        claimed_rule_id TEXT,
+        occurred_at INTEGER NOT NULL,
+        CHECK (learning_eligible = 0 OR (
+          source = 'evaluation' AND trust = 'trusted'
+          AND evidence_kind IN ('objective', 'verification') AND evidence_ref IS NOT NULL))
+      ) STRICT;
+      CREATE UNIQUE INDEX evolution_episodes_quality_evidence_identity
+        ON evolution_episodes(scope_key, evidence_ref) WHERE learning_eligible = 1;
+      CREATE TABLE evolution_proposals (
+        id TEXT PRIMARY KEY, policy_proposal_id TEXT UNIQUE,
+        idempotency_key TEXT NOT NULL UNIQUE, requester TEXT NOT NULL,
+        principal TEXT NOT NULL, scope_key TEXT NOT NULL, mutation_hash TEXT NOT NULL,
+        mutation_json TEXT NOT NULL, creation_intent_json TEXT,
+        settlement_expectation_json TEXT, status TEXT NOT NULL,
+        expires_at INTEGER NOT NULL, result_rule_id TEXT, created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL, version INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO schema_meta VALUES ('schema-version', '7');
+      INSERT INTO evolution_episodes VALUES
+        ('v7-quality-a', 'v7-idem-a', 'automation:daily', 'failed', 'first assessment',
+          'evaluation', '${alphaScope}', 'trusted', 'objective', 'evaluation:v7:a',
+          1, NULL, NULL, NULL, 100),
+        ('v7-quality-b', 'v7-idem-b', 'automation:daily', 'failed', 'second assessment',
+          'evaluation', '${alphaScope}', 'trusted', 'objective', 'evaluation:v7:b',
+          1, NULL, NULL, NULL, 100),
+        ('v7-operational', 'v7-idem-operational', 'automation:daily', 'failed', 'run failed',
+          'automation', '${betaScope}', 'trusted', 'operational', NULL,
+          0, NULL, NULL, NULL, 101);
+      INSERT INTO evolution_proposals VALUES
+        ('v7-alpha-pending', NULL, 'v7-proposal-a', 'agent', 'owner', '${alphaScope}',
+          'hash-a', '{}', NULL, NULL, 'pending', 999, NULL, 100, 100, 1),
+        ('v7-beta-pending', NULL, 'v7-proposal-b', 'agent', 'owner', '${betaScope}',
+          'hash-b', '{}', NULL, NULL, 'pending', 999, NULL, 100, 100, 1);
+      PRAGMA user_version = 7;
+    `)
+    legacy.close()
+
+    const migrated = openEvolutionDatabase(path)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(12)
+    expect(migrated.prepare(`
+      SELECT id, evidence_kind, evidence_ref, learning_subject_ref, learning_eligible
+      FROM evolution_episodes ORDER BY id
+    `).all()).toEqual([
+      {
+        id: 'v7-operational', evidence_kind: 'operational', evidence_ref: null,
+        learning_subject_ref: null, learning_eligible: 0,
+      },
+      {
+        id: 'v7-quality-a', evidence_kind: 'legacy-unknown', evidence_ref: null,
+        learning_subject_ref: null, learning_eligible: 0,
+      },
+      {
+        id: 'v7-quality-b', evidence_kind: 'legacy-unknown', evidence_ref: null,
+        learning_subject_ref: null, learning_eligible: 0,
+      },
+    ])
+    expect(migrated.prepare('SELECT id, status, version FROM evolution_proposals ORDER BY id').all())
+      .toEqual([
+        { id: 'v7-alpha-pending', status: 'conflicted', version: 2 },
+        { id: 'v7-beta-pending', status: 'conflicted', version: 2 },
+      ])
+    const insert = migrated.prepare(`
+      INSERT INTO evolution_episodes(
+        id, idempotency_key, situation, outcome, detail, source, scope_key,
+        trust, evidence_kind, evidence_ref, learning_subject_ref, learning_eligible,
+        rule_id, guidance_version, claimed_rule_id, occurred_at)
+      VALUES (?, ?, 'automation:daily', ?, ?, 'evaluation', ?, 'trusted', 'objective', ?, ?,
+        1, NULL, NULL, NULL, 200)
+    `)
+    insert.run(
+      'v8-quality-a', 'v8-idem-a', 'failed', 'same run', alphaScope,
+      'evaluation:v8:a', 'automation-run:immutable-a',
+    )
+    expect(() => insert.run(
+      'v8-quality-b', 'v8-idem-b', 'failed', 'same run', alphaScope,
+      'evaluation:v8:b', 'automation-run:immutable-a',
+    )).toThrow(/unique/iu)
+    expect(() => insert.run(
+      'v8-quality-null', 'v8-idem-null', 'failed', 'missing subject', alphaScope,
+      'evaluation:v8:null', null,
+    )).toThrow(/learning subject/iu)
+    migrated.close()
   })
 })

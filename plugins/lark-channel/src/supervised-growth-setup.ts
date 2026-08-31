@@ -1,9 +1,17 @@
 #!/usr/bin/env node
 
-import { chmod, open, readFile, rename } from 'node:fs/promises'
+import { chmod, open, readFile, rename, stat } from 'node:fs/promises'
 import { spawnSync } from 'node:child_process'
+import { createHash, randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join } from 'node:path'
+import { isDeepStrictEqual } from 'node:util'
+import type { OwnerRouteAuthority } from '@dsh-enhanced/assistant-delivery'
+import type {
+  RecoveryBootstrapAttestation,
+  RecoveryHealth,
+} from '@dsh-enhanced/assistant-recovery'
+import { isMap, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 import { installDshResidentService, residentServiceKind, type InstalledResidentService } from './resident.js'
 import { isMainEntry } from './setup.js'
 import {
@@ -11,6 +19,9 @@ import {
   configureSupervisedGrowthProfilePatch,
   supervisedGrowthDatabasePaths,
   supervisedGrowthBindingQuery,
+  supervisedGrowthAnalystRuntimeConfig,
+  supervisedGrowthRecoveryRuntimeConfig,
+  type SupervisedGrowthActivationState,
   type SupervisedGrowthBinding,
 } from './supervised-growth-profile.js'
 
@@ -58,7 +69,15 @@ export function assertSupervisedGrowthAutomationGuard(
   // heartbeat is not intrinsically safe: it may carry broad tools or a
   // different route.  Keep the guard stricter than necessary until an exact
   // managed-definition hash can prove a pre-existing row is this overlay.
-  const existing = records.filter(record => record.status === 'active')
+  // The exact legacy managed job is migrated with scheduler=false, its execute
+  // grant removed, and its Heartbeat profile reconciled to paused before the
+  // active scheduler is restored. Other durable active rows remain an explicit
+  // operator decision.
+  const existing = records.filter(record => record.status === 'active'
+    && !(record.id === 'heartbeat:supervised-growth' && record.owner === 'assistant-heartbeat')
+    && !(record.id === 'heartbeat:supervised-growth-analyst' && record.owner === 'assistant-heartbeat')
+    && !(record.id === 'recovery:supervised-growth'
+      && record.owner === 'dsh-enhanced-assistant-recovery'))
   if (existing.length > 0 && !acknowledged) {
     throw new Error('supervised-growth setup: active automations already exist; rerun with --ack-existing-automations to leave them untouched')
   }
@@ -183,6 +202,45 @@ export async function activateSupervisedGrowthPatch<T>(input: {
   }
 }
 
+/**
+ * Transactional two-restart activation. Preview and production deliberately
+ * share one nonce and catalog digest, but production is not even written until
+ * the caller has attested the restarted preview bootstrap. Any failure restores
+ * the exact original patch bytes and restarts that original profile.
+ */
+export async function activateSupervisedGrowthRecoveryStages<T>(input: {
+  patchPath: string
+  originalPatch: string
+  previewPatch: string
+  validate: (stage: SupervisedGrowthActivationState) => T
+  buildActivePatch: (previewEffective: T) => string
+  afterStage: (stage: SupervisedGrowthActivationState, effectiveConfig: T) => Promise<void>
+  restore: () => Promise<void>
+}): Promise<T> {
+  try {
+    await atomicWrite(input.patchPath, input.previewPatch)
+    const previewEffective = input.validate('preview')
+    await input.afterStage('preview', previewEffective)
+
+    const activePatch = input.buildActivePatch(previewEffective)
+    await atomicWrite(input.patchPath, activePatch)
+    const activeEffective = input.validate('active')
+    await input.afterStage('active', activeEffective)
+    return activeEffective
+  } catch (error) {
+    await atomicWrite(input.patchPath, input.originalPatch)
+    try {
+      await input.restore()
+    } catch (rollbackError) {
+      throw new Error(
+        `supervised-growth setup: activation failed and rollback service restore also failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`,
+        { cause: error },
+      )
+    }
+    throw error
+  }
+}
+
 function delay(milliseconds: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, milliseconds))
 }
@@ -264,6 +322,352 @@ export async function restartAndVerifySupervisedGrowthResident(input: {
   return service
 }
 
+interface AutomationSnapshot extends AutomationGuardRecord {
+  owner?: string
+  definition?: unknown
+}
+
+export interface SupervisedGrowthRecoveryBootstrapExpectation {
+  attestations: readonly RecoveryBootstrapAttestation[]
+  attestationSetDigest: string
+}
+
+export interface SupervisedGrowthRecoveryStageDependencies {
+  inspectRecovery?: (databasePath: string) => Promise<RecoveryHealth>
+  /** Complete inventory, including paused managed rows. */
+  listAutomations?: (databasePath: string) => Promise<readonly AutomationSnapshot[]>
+  /** @deprecated compatibility test seam; active rows alone cannot prove preview pause. */
+  listActiveAutomations?: (databasePath: string) => Promise<readonly AutomationSnapshot[]>
+  expectedProductionDefinition?: (effectiveConfig: string, recoveryDatabasePath: string) => Promise<unknown>
+  expectedAnalystDefinition?: (effectiveConfig: string) => Promise<unknown>
+  expectedBootstrap?: (
+    effectiveConfig: string,
+    recoveryDatabasePath: string,
+  ) => Promise<SupervisedGrowthRecoveryBootstrapExpectation>
+  wait?: (milliseconds: number) => Promise<void>
+  retryDelayMs?: number
+}
+
+async function inspectRecoveryBootstrap(databasePath: string): Promise<RecoveryHealth> {
+  const { RecoveryStore } = await import('@dsh-enhanced/assistant-recovery')
+  const store = new RecoveryStore({ path: databasePath })
+  try {
+    return store.health()
+  } finally {
+    store.close()
+  }
+}
+
+async function recoveryBootstrapGenerationBeforeRestart(databasePath: string): Promise<number> {
+  try {
+    await stat(databasePath)
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error
+      && (error as { code?: unknown }).code === 'ENOENT') return 0
+    throw error
+  }
+  const generation = (await inspectRecoveryBootstrap(databasePath)).bootstrapGeneration
+  if (!Number.isSafeInteger(generation) || generation < 0) {
+    throw new Error('supervised-growth setup: persisted Recovery bootstrap generation is invalid before restart')
+  }
+  return generation
+}
+
+async function automationSnapshots(databasePath: string): Promise<readonly AutomationSnapshot[]> {
+  const { listAutomationsLocally } = await import('@dsh-enhanced/assistant-automations')
+  return listAutomationsLocally(databasePath)
+}
+
+function effectiveOwnerRoutes(effectiveConfig: string): readonly Record<string, unknown>[] {
+  const document = parseDocument(effectiveConfig, { uniqueKeys: true })
+  if (document.errors.length > 0) {
+    throw new Error(`supervised-growth setup: invalid effective profile YAML: ${document.errors[0]!.message}`)
+  }
+  if (!isSeq(document.contents)) {
+    throw new Error('supervised-growth setup: effective profile must be a YAML sequence')
+  }
+  const rows = document.contents.items.filter(item => isMap(item)
+    && (item.get('id') as unknown) === 'dsh-enhanced-assistant-delivery') as YAMLMap[]
+  if (rows.length !== 1 || rows[0]!.get('disabled') === true) {
+    throw new Error('supervised-growth setup: effective assistant-delivery row must be uniquely enabled')
+  }
+  const configNode = rows[0]!.get('config', true) as Node | undefined
+  if (!isMap(configNode)) {
+    throw new Error('supervised-growth setup: effective assistant-delivery config must be a YAML mapping')
+  }
+  const routesNode = configNode.get('ownerRoutes', true) as Node | undefined
+  if (routesNode === undefined) return Object.freeze([])
+  if (!isSeq(routesNode)) {
+    throw new Error('supervised-growth setup: effective assistant-delivery.ownerRoutes must be a YAML sequence')
+  }
+  return Object.freeze(routesNode.items.map((item, index) => {
+    if (!isMap(item)) {
+      throw new Error(`supervised-growth setup: effective ownerRoutes[${index}] must be a YAML mapping`)
+    }
+    const value = item.toJSON()
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`supervised-growth setup: effective ownerRoutes[${index}] must be a YAML mapping`)
+    }
+    return value as Record<string, unknown>
+  }))
+}
+
+/**
+ * Rebuild Recovery's complete content-free bootstrap proof from the final DSH
+ * config. The same Delivery authority hash and Recovery activation-plan digest
+ * algorithms used by the live service are deliberately reused here.
+ */
+export async function expectedSupervisedGrowthRecoveryBootstrap(
+  effectiveConfig: string,
+  recoveryDatabasePath: string,
+): Promise<SupervisedGrowthRecoveryBootstrapExpectation> {
+  const [delivery, recovery] = await Promise.all([
+    import('@dsh-enhanced/assistant-delivery'),
+    import('@dsh-enhanced/assistant-recovery'),
+  ])
+  const normalized = recovery.normalizeRecoveryConfig({
+    ...supervisedGrowthRecoveryRuntimeConfig(effectiveConfig),
+    databasePath: recoveryDatabasePath,
+  } as never)
+  const authorityHash = (delivery as unknown as {
+    ownerRouteAuthorityHash: (input: OwnerRouteAuthority) => string
+  }).ownerRouteAuthorityHash
+  const authorities = new Map<string, string>()
+  for (const raw of effectiveOwnerRoutes(effectiveConfig)) {
+    const rawId = raw.id
+    if (typeof rawId !== 'string') {
+      throw new Error('supervised-growth setup: effective owner route id is invalid')
+    }
+    const id = rawId.normalize('NFC').trim()
+    const authority = raw as unknown as OwnerRouteAuthority
+    const digest = authorityHash(authority)
+    if (authorities.has(id)) {
+      throw new Error(`supervised-growth setup: effective owner route ${id} is duplicated`)
+    }
+    authorities.set(id, digest)
+  }
+  const attestations = recovery.canonicalRecoveryBootstrapAttestationSet(normalized.jobs.map(job => {
+    const route = authorities.get(job.ownerRouteId)
+    if (route === undefined) {
+      throw new Error(`supervised-growth setup: Recovery job ${job.id} has no effective owner route`)
+    }
+    return Object.freeze({
+      automationId: recovery.recoveryAutomationId(job.id),
+      activationState: job.activationState,
+      activationNonce: job.activationNonce,
+      activationPlanDigest: recovery.recoveryActivationPlanDigest(
+        job,
+        normalized.maxStepDurationMs,
+        route,
+      ),
+    })
+  }))
+  return Object.freeze({
+    attestations,
+    attestationSetDigest: recovery.recoveryBootstrapAttestationSetDigest(attestations),
+  })
+}
+
+async function expectedRecoveryProductionDefinition(
+  effectiveConfig: string,
+  recoveryDatabasePath: string,
+): Promise<unknown> {
+  const recovery = await import('@dsh-enhanced/assistant-recovery')
+  const runtimeConfig = supervisedGrowthRecoveryRuntimeConfig(effectiveConfig)
+  const normalized = recovery.normalizeRecoveryConfig(
+    { ...runtimeConfig, databasePath: recoveryDatabasePath } as never,
+  )
+  const job = normalized.jobs.find(candidate => candidate.id === 'supervised-growth')
+  if (job === undefined) {
+    throw new Error('supervised-growth setup: effective Recovery job is missing during runtime attestation')
+  }
+  return recovery.recoveryAutomationDefinition(job, normalized.maxStepDurationMs, 'production')
+}
+
+/**
+ * Rebuild the exact analyst definition from final config and its private,
+ * managed scratch. Drifted scratch bytes fail activation instead of silently
+ * changing what the unattended analyst will do.
+ */
+async function expectedSupervisedGrowthAnalystDefinition(effectiveConfig: string): Promise<unknown> {
+  const heartbeatRuntime = supervisedGrowthAnalystRuntimeConfig(effectiveConfig)
+  const heartbeat = await import('@dsh-enhanced/assistant-heartbeat')
+  const normalized = heartbeat.normalizeHeartbeatConfig({
+    heartbeats: [heartbeatRuntime.heartbeat as never],
+    maxScratchBytes: heartbeatRuntime.maxScratchBytes,
+  })
+  const profile = normalized.heartbeats[0]
+  if (profile === undefined || profile.id !== 'supervised-growth-analyst') {
+    throw new Error('supervised-growth setup: normalized analyst heartbeat is missing')
+  }
+  const raw = await readFile(profile.scratchPath, 'utf8')
+  const content = raw.normalize('NFC').replace(/\r\n?/gu, '\n').trim()
+  if (content !== profile.initialScratch.normalize('NFC').replace(/\r\n?/gu, '\n').trim()) {
+    throw new Error('supervised-growth setup: managed analyst scratch drifted from the attested contract')
+  }
+  if (Buffer.byteLength(content, 'utf8') > heartbeatRuntime.maxScratchBytes) {
+    throw new Error('supervised-growth setup: managed analyst scratch exceeds its configured bound')
+  }
+  const revision = createHash('sha256').update(content, 'utf8').digest('hex')
+  return heartbeat.heartbeatDefinition(profile, content, revision)
+}
+
+/**
+ * Persisted plugin bootstrap, not merely OS process state, is the stage gate.
+ * Preview additionally proves both model-free jobs are paused; active proves the
+ * exact compiled production definition is the sole active managed replacement.
+ */
+export async function verifySupervisedGrowthRecoveryStage(input: {
+  stage: SupervisedGrowthActivationState
+  effectiveConfig: string
+  recoveryDatabasePath: string
+  automationsDatabasePath: string
+  previousBootstrapGeneration: number
+  timeoutMs: number
+}, dependencies: SupervisedGrowthRecoveryStageDependencies = {}): Promise<number> {
+  const inspect = dependencies.inspectRecovery ?? inspectRecoveryBootstrap
+  const listAll = dependencies.listAutomations
+    ?? dependencies.listActiveAutomations
+    ?? automationSnapshots
+  const expectedBootstrap = await (dependencies.expectedBootstrap
+    ?? expectedSupervisedGrowthRecoveryBootstrap)(
+      input.effectiveConfig,
+      input.recoveryDatabasePath,
+    )
+  const expectedDefinition = input.stage === 'active'
+    ? await (dependencies.expectedProductionDefinition ?? expectedRecoveryProductionDefinition)(
+        input.effectiveConfig,
+        input.recoveryDatabasePath,
+      )
+    : undefined
+  const expectedAnalystDefinition = await (
+    dependencies.expectedAnalystDefinition ?? expectedSupervisedGrowthAnalystDefinition
+  )(input.effectiveConfig)
+  const wait = dependencies.wait ?? delay
+  const retryDelayMs = dependencies.retryDelayMs ?? 250
+  if (!Number.isSafeInteger(input.previousBootstrapGeneration) || input.previousBootstrapGeneration < 0
+    || !Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 1 || input.timeoutMs > 900_000
+    || !Number.isSafeInteger(retryDelayMs) || retryDelayMs < 1 || retryDelayMs > 5_000) {
+    throw new Error('supervised-growth setup: invalid Recovery bootstrap verification bounds')
+  }
+  let remaining = input.timeoutMs
+  let highestObservedGeneration = input.previousBootstrapGeneration
+  let lastFailure: unknown
+  for (;;) {
+    try {
+      const health = await inspect(input.recoveryDatabasePath)
+      const generation = health.bootstrapGeneration
+      if (!Number.isSafeInteger(generation) || generation < 0) {
+        throw new Error('supervised-growth setup: Recovery bootstrap generation is invalid')
+      }
+      if (generation < highestObservedGeneration) {
+        throw new Error(
+          `supervised-growth setup: Recovery bootstrap generation regressed from ${highestObservedGeneration} to ${generation}`,
+        )
+      }
+      highestObservedGeneration = generation
+      if (generation > input.previousBootstrapGeneration) {
+        if (health.bootstrapStatus === 'failed') {
+          throw new Error(
+            `supervised-growth setup: Recovery ${input.stage} bootstrap failed${health.bootstrapFailureCode === undefined ? '' : `: ${health.bootstrapFailureCode}`}`,
+          )
+        }
+        if (health.bootstrapStatus === 'succeeded') {
+          if (!health.bootstrapAttestationValid) {
+            throw new Error(`supervised-growth setup: Recovery ${input.stage} bootstrap attestation is invalid`)
+          }
+          if (!isDeepStrictEqual(health.bootstrapAttestations, expectedBootstrap.attestations)) {
+            throw new Error(`supervised-growth setup: Recovery ${input.stage} exact bootstrap attestation set does not match the effective plan`)
+          }
+          if (health.bootstrapAttestationSetDigest !== expectedBootstrap.attestationSetDigest) {
+            throw new Error(`supervised-growth setup: Recovery ${input.stage} bootstrap attestation set digest does not match the effective plan`)
+          }
+          const automations = await listAll(input.automationsDatabasePath)
+          const stableHealth = await inspect(input.recoveryDatabasePath)
+          const stableGeneration = stableHealth.bootstrapGeneration
+          if (!Number.isSafeInteger(stableGeneration) || stableGeneration < 0) {
+            throw new Error('supervised-growth setup: Recovery bootstrap generation is invalid')
+          }
+          if (stableGeneration < highestObservedGeneration) {
+            throw new Error(
+              `supervised-growth setup: Recovery bootstrap generation regressed from ${highestObservedGeneration} to ${stableGeneration}`,
+            )
+          }
+          highestObservedGeneration = stableGeneration
+          if (stableGeneration !== generation) {
+            lastFailure = new Error('Recovery bootstrap generation changed while attesting Automations')
+          } else {
+            if (stableHealth.bootstrapStatus !== 'succeeded'
+              || !stableHealth.bootstrapAttestationValid
+              || stableHealth.bootstrapAttestationSetDigest !== expectedBootstrap.attestationSetDigest
+              || !isDeepStrictEqual(stableHealth.bootstrapAttestations, expectedBootstrap.attestations)) {
+              throw new Error(
+                `supervised-growth setup: Recovery ${input.stage} bootstrap attestation changed while attesting Automations`,
+              )
+            }
+            const legacyActive = automations.find(record => record.id === 'heartbeat:supervised-growth'
+              && record.status === 'active')
+            const recoveries = automations.filter(record => record.id === 'recovery:supervised-growth'
+              && record.status === 'active')
+            const analysts = automations.filter(record => record.id === 'heartbeat:supervised-growth-analyst')
+            const analyst = analysts.length === 1 ? analysts[0] : undefined
+            const expectedAnalystStatus = input.stage === 'active' ? 'active' : 'paused'
+            const analystExact = analyst !== undefined
+              && analyst.owner === 'assistant-heartbeat'
+              && analyst.status === expectedAnalystStatus
+              && isDeepStrictEqual(analyst.definition, expectedAnalystDefinition)
+            if (!analystExact) {
+              throw new Error(
+                `supervised-growth setup: ${input.stage} analyst automation does not match its exact attested definition`,
+              )
+            }
+            if (legacyActive === undefined && input.stage === 'preview' && recoveries.length === 0) {
+              return generation
+            }
+            if (legacyActive === undefined && input.stage === 'active' && recoveries.length === 1) {
+              const record = recoveries[0]!
+              if (record.owner === 'dsh-enhanced-assistant-recovery'
+                && isDeepStrictEqual(record.definition, expectedDefinition)) return generation
+              throw new Error('supervised-growth setup: active Recovery automation definition does not match the compiled plan')
+            }
+            lastFailure = new Error(input.stage === 'preview'
+              ? 'legacy/recovery/analyst preview automations have not reached their attested paused state'
+              : 'exact Recovery and analyst production automations are not active')
+          }
+        }
+      } else if (health.bootstrapStatus === 'succeeded'
+        && health.bootstrapAttestationValid
+        && health.bootstrapAttestationSetDigest === expectedBootstrap.attestationSetDigest
+        && isDeepStrictEqual(health.bootstrapAttestations, expectedBootstrap.attestations)) {
+        throw new Error(
+          `supervised-growth setup: Recovery ${input.stage} bootstrap reused generation ${generation}`,
+        )
+      } else {
+        lastFailure = new Error(`waiting for a Recovery bootstrap generation newer than ${input.previousBootstrapGeneration}`)
+      }
+    } catch (error) {
+      // A current-generation explicit bootstrap failure or definition mismatch
+      // is terminal. Missing/busy DB state and not-yet-reconciled paused rows are
+      // retried within the same bounded gate.
+      if (error instanceof Error
+        && (/Recovery (?:preview|active) bootstrap failed/u.test(error.message)
+          || /bootstrap (?:attestation|generation)/u.test(error.message)
+          || /bootstrap reused generation/u.test(error.message)
+          || /analyst automation/u.test(error.message)
+          || /definition does not match/u.test(error.message))) throw error
+      lastFailure = error
+    }
+    if (remaining <= 0) {
+      throw new Error(
+        `supervised-growth setup: Recovery ${input.stage} bootstrap did not become ready${lastFailure instanceof Error ? `: ${lastFailure.message}` : ''}`,
+      )
+    }
+    const waitFor = Math.min(retryDelayMs, remaining)
+    await wait(waitFor)
+    remaining -= waitFor
+  }
+}
+
 async function awaitOwnerBinding(input: {
   databasePath: string
   query: ReturnType<typeof supervisedGrowthBindingQuery>
@@ -326,11 +730,16 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
     listActiveAutomationsLocally(databases.automationsDatabasePath),
     args.ackExistingAutomations,
   )
-  const updatedPatch = configureSupervisedGrowthProfilePatch({
+  const { RECOVERY_CATALOG_DIGEST } = await import('@dsh-enhanced/assistant-recovery')
+  const activationNonce = randomUUID()
+  const previewPatch = configureSupervisedGrowthProfilePatch({
     profilePatch: originalPatch,
     effectiveConfig: effectiveBefore,
     dshHome,
     binding,
+    activationState: 'preview',
+    activationNonce,
+    recoveryCatalogDigest: RECOVERY_CATALOG_DIGEST,
   })
   await assertSelectedOwnerBindingCurrent({
     databasePath: databases.deliveryDatabasePath,
@@ -338,16 +747,37 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
     selected: binding,
   })
   let service: InstalledResidentService | undefined
-  await activateSupervisedGrowthPatch({
+  let acceptedBootstrapGeneration: number | undefined
+  await activateSupervisedGrowthRecoveryStages({
     patchPath,
     originalPatch,
-    updatedPatch,
-    validate: () => dumpProfile(args.profile),
-    afterCommit: async effectiveConfig => {
-      assertEffectiveSupervisedGrowthConfig({ effectiveConfig, dshHome, binding })
+    previewPatch,
+    validate: stage => {
+      const effectiveConfig = dumpProfile(args.profile)
+      assertEffectiveSupervisedGrowthConfig({
+        effectiveConfig,
+        dshHome,
+        binding,
+        activationState: stage,
+        activationNonce,
+        recoveryCatalogDigest: RECOVERY_CATALOG_DIGEST,
+      })
+      return effectiveConfig
+    },
+    buildActivePatch: previewEffective => configureSupervisedGrowthProfilePatch({
+      profilePatch: previewPatch,
+      effectiveConfig: previewEffective,
+      dshHome,
+      binding,
+      activationState: 'active',
+      activationNonce,
+      recoveryCatalogDigest: RECOVERY_CATALOG_DIGEST,
+    }),
+    afterStage: async (stage, effectiveConfig) => {
       const effectiveDatabases = supervisedGrowthDatabasePaths(effectiveConfig, dshHome)
       if (effectiveDatabases.deliveryDatabasePath !== databases.deliveryDatabasePath
-        || effectiveDatabases.automationsDatabasePath !== databases.automationsDatabasePath) {
+        || effectiveDatabases.automationsDatabasePath !== databases.automationsDatabasePath
+        || effectiveDatabases.recoveryDatabasePath !== databases.recoveryDatabasePath) {
         throw new Error('supervised-growth setup: a higher-priority profile layer changed a guarded local database path')
       }
       // The binding is re-read after the atomic write and again immediately
@@ -358,7 +788,17 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
         query,
         selected: binding,
       })
+      const previousBootstrapGeneration = acceptedBootstrapGeneration
+        ?? await recoveryBootstrapGenerationBeforeRestart(databases.recoveryDatabasePath)
       service = await restartAndVerifySupervisedGrowthResident({ dshHome, profile: args.profile })
+      acceptedBootstrapGeneration = await verifySupervisedGrowthRecoveryStage({
+        stage,
+        effectiveConfig,
+        recoveryDatabasePath: databases.recoveryDatabasePath,
+        automationsDatabasePath: databases.automationsDatabasePath,
+        previousBootstrapGeneration,
+        timeoutMs: args.timeoutMs,
+      })
     },
     restore: async () => {
       dumpProfile(args.profile)
@@ -366,7 +806,7 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
     },
   })
   if (service === undefined) throw new Error('supervised-growth setup: resident restart did not return a service')
-  process.stdout.write(`supervised-growth 已启用：owner binding ${binding.id}，每日运行次数上限 7；每轮最多 1024 输出 token。\n`
+  process.stdout.write(`supervised-growth/v2 Recovery 已启用：owner binding ${binding.id}，Recovery 每日上限 7；独立 adoption analyst 每日上限 1。\n`
   + `DSH Host 已由 ${service.kind} 重启并通过健康检查。状态：${service.statusCommand}\n日志：${service.logCommand}\n`)
 }
 

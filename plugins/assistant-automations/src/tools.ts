@@ -111,7 +111,7 @@ export function registerAutomationTools(ctx: Context, service: AssistantAutomati
         id: value.id, name: value.definition.name, status: value.status, version: value.version,
         schedule: value.definition.schedule,
         ...(value.nextRunAt === undefined ? {} : { nextRunAt: value.nextRunAt }),
-        allowedToolCount: value.definition.allowedTools.length,
+        allowedToolCount: value.definition.allowedTools?.length ?? 0,
       })) }
     },
   }))

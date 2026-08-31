@@ -1,5 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
+import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,9 +24,11 @@ describe('dsh-enhanced-assistant-evolution entrypoint', () => {
   })
 
   test('declares the policy dependency and bounded private defaults', () => {
-    expect(entrypoint.inject).toEqual(['assistantPolicy'])
+    expect(entrypoint.inject).toEqual(['assistantPolicy', 'assistantEvaluation'])
     expect(bundle).toContain("dshHomePath('assistant-evolution/evolution.sqlite')")
     expect(bundle).toContain('- assistantPolicy')
+    expect(bundle).toContain('- assistantEvaluation')
+    expect(bundle).toContain('- assistantAutomations')
     expect(bundle).toContain('minSample: 5')
     expect(bundle).toContain('maxEvidenceSamples: 8')
     expect(bundle).toContain('maxGuidanceBytes: 4096')
@@ -34,6 +37,8 @@ describe('dsh-enhanced-assistant-evolution entrypoint', () => {
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
     expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.1.0-rc.8 <0.2.0')
     expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-enhanced/assistant-evaluation']).toBe('>0.1.7 <0.2.0')
+    expect(manifest.peerDependencies['@dsh-enhanced/assistant-automations']).toBe('>0.1.7 <0.2.0')
   })
 
   test('loads through apply when assistant-policy is already composed', async () => {
@@ -41,6 +46,7 @@ describe('dsh-enhanced-assistant-evolution entrypoint', () => {
     const ctx = new Context()
     try {
       new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), rules: [] })
+      new AssistantEvaluationService(ctx, { databasePath: join(root, 'evaluation.sqlite') })
       entrypoint.apply(ctx, { databasePath: join(root, 'evolution.sqlite'), reconcileIntervalMs: 0 })
       expect(ctx.assistantEvolution).toBeInstanceOf(entrypoint.AssistantEvolutionService)
       // Nothing is learned before an owner approves anything.

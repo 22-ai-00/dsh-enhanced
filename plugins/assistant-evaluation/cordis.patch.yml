@@ -10,3 +10,8 @@
         maxEvidenceRefs: 32
         defaultSummaryWindowMs: 2592000000
         maxSummaryWindowMs: 31536000000
+        projectionIntervalMs: 5000
+        projectionBatchSize: 100
+        projectionTimeoutMs: 2000
+        projectionRetryBaseMs: 1000
+        projectionRetryMaxMs: 3600000

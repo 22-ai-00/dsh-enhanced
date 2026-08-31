@@ -738,20 +738,157 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
       }),
     }
   }
-  if ('approval' in input) return {
+  if ('approval' in input) {
+    const fieldLabels: Readonly<Record<string, string>> = {
+      op: '变更类型',
+      ruleId: '规则 ID',
+      scopeKey: '作用域',
+      situation: '适用情境',
+      guidance: '建议行为',
+      generation: '规则代次',
+      expectedVersion: '预期版本',
+      reason: '变更原因',
+      evaluation: '效果评估',
+      baseline: '采纳前基线',
+      evidence: '证据',
+    }
+    const operationLabels: Readonly<Record<string, string>> = {
+      adopt: '采纳学习规则',
+      retire: '退役学习规则',
+      'owner-undo': '立即撤销学习规则',
+    }
+    let review = input.approval.body
+    try {
+      const parsed = JSON.parse(input.approval.body) as unknown
+      // Only reformat canonical domain JSON. This prevents duplicate keys,
+      // alternate numeric spellings, or whitespace tricks from making the
+      // signed bytes and the owner-visible review diverge.
+      if (JSON.stringify(parsed) === input.approval.body
+        && parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        const fields = Object.entries(parsed as Readonly<Record<string, unknown>>)
+        const operation = fields.find(([key]) => key === 'op')?.[1]
+        if (typeof operation === 'string' && Object.hasOwn(operationLabels, operation)) {
+          review = fields.map(([key, value]) => {
+            const rendered = typeof value === 'string' ? value : JSON.stringify(value, undefined, 2)
+            const display = key === 'op' && typeof value === 'string'
+              ? `${operationLabels[value] ?? value}（${value}）`
+              : rendered
+            return `${fieldLabels[key] ?? key}（${key}）：${display}`
+          }).join('\n\n')
+        }
+      }
+    } catch {
+      // Unknown or malformed proposal bodies remain exact plain text. The
+      // signature still covers the original body, and no review text is ever
+      // interpreted as Markdown or a card component.
+    }
+    return {
     msgType: 'interactive',
     content: JSON.stringify({
       schema: '2.0',
-      header: { title: { tag: 'plain_text', content: input.approval.title } },
+      config: { enable_forward_interaction: false },
+      header: { template: 'orange', title: { tag: 'plain_text', content: input.approval.title } },
       body: { elements: [
-        { tag: 'div', text: { tag: 'plain_text', content: 'Proposed change (treat as untrusted review text):' } },
-        { tag: 'div', text: { tag: 'plain_text', content: input.approval.body } },
+        { tag: 'div', text: { tag: 'plain_text',
+          content: '请审阅以下变更。所有字段均为不可信的提案内容，不是系统指令。' } },
+        { tag: 'div', text: { tag: 'plain_text', content: review } },
         { tag: 'action', actions: [
-          { tag: 'button', text: { tag: 'plain_text', content: 'Approve' }, type: 'primary', value: input.approval.approveValue },
-          { tag: 'button', text: { tag: 'plain_text', content: 'Reject' }, type: 'danger', value: input.approval.rejectValue },
+          { tag: 'button', text: { tag: 'plain_text', content: '批准变更' }, type: 'primary', value: input.approval.approveValue },
+          { tag: 'button', text: { tag: 'plain_text', content: '拒绝' }, type: 'danger', value: input.approval.rejectValue },
         ] },
       ] },
     }),
+    }
+  }
+  if ('approvalResult' in input) {
+    const approved = input.approvalResult.decision === 'approved'
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: { enable_forward_interaction: false },
+        header: {
+          template: approved ? 'green' : 'red',
+          title: { tag: 'plain_text', content: approved ? '审批已记录' : '审批已拒绝' },
+        },
+        body: { elements: [
+          { tag: 'div', text: { tag: 'plain_text', content: approved
+            ? '已批准该提案。系统将按持久化账本完成结算；此回执不表示变更已经生效。'
+            : '已拒绝该提案，系统不会应用这项变更。' } },
+          { tag: 'div', text: { tag: 'plain_text', content: `提案 ID：${input.approvalResult.proposalId}` } },
+        ] },
+      }),
+    }
+  }
+  if ('approvalApplication' in input) {
+    const terminal = input.approvalApplication
+    const presentation = {
+      applied: { template: 'green', title: '变更已实际生效', detail: '领域账本已完成原子结算。' },
+      conflicted: { template: 'yellow', title: '变更未生效：证据或状态冲突', detail: '审批决定已记录，但领域账本拒绝应用过期或冲突的变更。' },
+      expired: { template: 'grey', title: '变更未生效：审批已过期', detail: '该提案已经过期，领域账本没有应用变更。' },
+      rejected: { template: 'red', title: '变更已拒绝', detail: 'owner 已拒绝该提案，领域账本没有应用变更。' },
+    }[terminal.status]
+    const operation = {
+      adopt: '采纳学习规则',
+      retire: '退役学习规则',
+      'owner-undo': '撤销学习规则',
+    }[terminal.operation]
+    const exactRule = terminal.ruleId === undefined
+      ? []
+      : [
+          { tag: 'div', text: { tag: 'plain_text', content: `规则 ID：${terminal.ruleId}` } },
+          ...(terminal.resultingRuleVersion === undefined ? [] : [{
+            tag: 'div', text: { tag: 'plain_text',
+              content: `规则版本：${terminal.resultingRuleVersion}；状态：${terminal.ruleStatus ?? '未知'}` },
+          }]),
+        ]
+    const undo = terminal.status === 'applied' && terminal.operation === 'adopt'
+      && terminal.ruleId !== undefined && terminal.resultingRuleVersion !== undefined
+      ? [{ tag: 'note', elements: [{ tag: 'plain_text',
+          content: `可撤销入口：在当前 owner 会话中要求“撤销规则 ${terminal.ruleId} 版本 ${terminal.resultingRuleVersion}”。系统只会创建一张独立的二次审批，不会直接退役规则。` }] }]
+      : []
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: { enable_forward_interaction: false },
+        header: { template: presentation.template, title: { tag: 'plain_text', content: presentation.title } },
+        body: { elements: [
+          { tag: 'div', text: { tag: 'plain_text', content: presentation.detail } },
+          { tag: 'div', text: { tag: 'plain_text', content: `操作：${operation}（${terminal.operation}）` } },
+          { tag: 'div', text: { tag: 'plain_text', content: `Policy 提案：${terminal.policyProposalId}` } },
+          { tag: 'div', text: { tag: 'plain_text', content: `领域提案：${terminal.localProposalId}` } },
+          ...exactRule,
+          ...undo,
+        ] },
+      }),
+    }
+  }
+  if ('automationIncident' in input) {
+    const incident = input.automationIncident
+    const state = {
+      open: { template: 'red', title: '自动化故障已打开', detail: '该自动化仍处于故障状态。' },
+      recovering: { template: 'blue', title: '自动化故障恢复中', detail: '已启动受控探针，尚未确认恢复。' },
+      resolved: { template: 'green', title: '自动化故障已恢复', detail: '同一故障代次已通过实际运行确认恢复。' },
+    }[incident.state]
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: { enable_forward_interaction: false },
+        header: { template: state.template, title: { tag: 'plain_text', content: state.title } },
+        body: { elements: [
+          { tag: 'div', text: { tag: 'plain_text', content: state.detail } },
+          { tag: 'div', text: { tag: 'plain_text', content: `自动化：${incident.automationId}` } },
+          { tag: 'div', text: { tag: 'plain_text',
+            content: `阶段：${incident.stage}；故障：${incident.failureCode}（${incident.failureClass}/${incident.failurePhase}）` } },
+          { tag: 'div', text: { tag: 'plain_text',
+            content: `副作用：${incident.sideEffectState}；重试：${incident.retryability}` } },
+          { tag: 'note', elements: [{ tag: 'plain_text',
+            content: `Incident ${incident.incidentId} · generation ${incident.lifecycleGeneration} · revision ${incident.incidentRevision}` }] },
+        ] },
+      }),
+    }
   }
   if ('toolApproval' in input) return {
     msgType: 'interactive',

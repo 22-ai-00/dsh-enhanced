@@ -6,4 +6,5 @@
 
 | 包 | 用途 |
 | --- | --- |
+| [`@dsh-enhanced/assistant-growth-contract`](assistant-growth-contract) | 为 Delivery、自动化与受监督 growth 实验提供可验证、内容最小化的 workflow/实验契约；不激活 Cordis 插件，也不保存或传递原始 owner 内容。 |
 | [`@dsh-enhanced/llm-route-capabilities`](llm-route-capabilities) | 在精确的 DSH `LlmRuntime` 上发布和查询 provider/model 的 tool-call 协议投影方式；不决定 Agent 工具权限，仅用显式 `none` 表达 adapter 未实现统一协议，也不会激活 Cordis 插件。 |

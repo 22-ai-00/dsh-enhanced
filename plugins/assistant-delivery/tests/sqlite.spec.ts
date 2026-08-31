@@ -1,4 +1,5 @@
-import { chmod, mkdtemp, rm, stat } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -6,6 +7,36 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { deliverySchemaVersion, DeliveryDatabaseError, openDeliveryDatabase } from '../src/sqlite.ts'
 
 const roots: string[] = []
+
+async function openDeliveryConcurrently(path: string, start: string, count = 12): Promise<void> {
+  const moduleUrl = new URL('../src/sqlite.ts', import.meta.url).href
+  const childSource = `
+    import { existsSync } from 'node:fs';
+    while (!existsSync(${JSON.stringify(start)})) {
+      await new Promise(resolve => setTimeout(resolve, 1));
+    }
+    const { openDeliveryDatabase } = await import(${JSON.stringify(moduleUrl)});
+    const database = openDeliveryDatabase(${JSON.stringify(path)});
+    database.close();
+  `
+  const openChild = () => new Promise<void>((resolve, reject) => {
+    const child = spawn(process.execPath, [
+      '--no-warnings', '--experimental-transform-types',
+      '--input-type=module', '--eval', childSource,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', chunk => { stderr += String(chunk) })
+    child.once('error', reject)
+    child.once('close', code => {
+      if (code === 0) resolve()
+      else reject(new Error(`concurrent Delivery opener exited ${code}: ${stderr}`))
+    })
+  })
+  const openers = Array.from({ length: count }, () => openChild())
+  await writeFile(start, 'go', { mode: 0o600 })
+  await Promise.all(openers)
+}
 
 const deliveryAttachmentsV6Schema = `
   CREATE TABLE delivery_attachments (
@@ -47,7 +78,9 @@ describe('delivery SQLite boundary', () => {
       'delivery_receipts', 'conversation_model_epochs', 'conversation_model_selections',
       'inbox_attempts', 'inbox_messages', 'outbox_attempts', 'outbox_messages',
       'model_picker_states', 'model_selection_settlements', 'pairing_challenges',
-      'approval_dispatch_cursor',
+      'approval_dispatch_cursor', 'dead_letter_resolutions',
+      'delivery_preference_projection_outbox',
+      'delivery_inbox_admission_clock', 'delivery_inbox_admissions',
     ]))
     const modelColumns = (database.prepare('PRAGMA table_info(conversation_model_selections)').all() as { name: string }[])
       .map(row => row.name)
@@ -61,9 +94,184 @@ describe('delivery SQLite boundary', () => {
     ]))
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'delivery_attachment_owner_ordinal'").get())
       .toEqual({ name: 'delivery_attachment_owner_ordinal' })
+    const projectionColumns = (database.prepare(`
+      PRAGMA table_info(delivery_preference_projection_outbox)
+    `).all() as Array<{ name: string }>).map(column => column.name)
+    expect(projectionColumns).toEqual(expect.arrayContaining([
+      'lane_kind', 'lane_epoch', 'lane_workspace', 'lane_preset',
+      'lane_principal_record_id', 'lane_principal_version', 'admission_sequence', 'terminal_at',
+    ]))
     database.close()
     expect((await stat(join(root, 'nested'))).mode & 0o777).toBe(0o700)
     expect((await stat(path)).mode & 0o777).toBe(0o600)
+  })
+
+  test('backfills stable Inbox admission cursors when migrating schema v12', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v12-admission-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const raw = openDeliveryDatabase(path)
+    raw.exec('DROP TRIGGER delivery_inbox_admission_after_insert')
+    raw.exec('DROP TABLE delivery_inbox_admissions')
+    raw.exec('DROP TABLE delivery_inbox_admission_clock')
+    raw.prepare(`
+      INSERT INTO inbox_messages(
+        id, channel, account, event_id, envelope_hash, envelope_json, status,
+        attempt_count, received_at, updated_at
+      ) VALUES (?, 'lark', 'bot', ?, ?, ?, 'received', 0, 10, 10)
+    `).run('inbox-old-1', 'event-old-1', 'a'.repeat(64), JSON.stringify({ legacy: 1 }))
+    raw.prepare(`
+      INSERT INTO inbox_messages(
+        id, channel, account, event_id, envelope_hash, envelope_json, status,
+        attempt_count, received_at, updated_at
+      ) VALUES (?, 'lark', 'bot', ?, ?, ?, 'received', 0, 10, 10)
+    `).run('inbox-old-2', 'event-old-2', 'b'.repeat(64), JSON.stringify({ legacy: 2 }))
+    raw.exec('PRAGMA user_version = 12')
+    raw.close()
+
+    const migrated = openDeliveryDatabase(path)
+    const rows = migrated.prepare(`
+      SELECT inbox_id, epoch, admission_sequence
+      FROM delivery_inbox_admissions ORDER BY admission_sequence
+    `).all() as Array<{ inbox_id: string; epoch: string; admission_sequence: number }>
+    expect(rows).toEqual([
+      { inbox_id: 'inbox-old-1', epoch: expect.stringMatching(/^[0-9a-f]{32}$/u), admission_sequence: 1 },
+      { inbox_id: 'inbox-old-2', epoch: expect.stringMatching(/^[0-9a-f]{32}$/u), admission_sequence: 2 },
+    ])
+    migrated.close()
+  })
+
+  test('migrates a live v13 preference outbox to unclassified fail-closed lanes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v13-preference-lane-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const raw = new DatabaseSync(path)
+    raw.exec(`
+      CREATE TABLE delivery_preference_projection_outbox (
+        batch_key TEXT PRIMARY KEY,
+        payload_digest TEXT NOT NULL CHECK (
+          length(payload_digest) = 64 AND payload_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        events_json TEXT NOT NULL CHECK (
+          json_valid(events_json) AND json_type(events_json) = 'array'
+          AND json_array_length(events_json) BETWEEN 1 AND 16
+        ),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'retry_wait')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        next_attempt_at INTEGER NOT NULL,
+        failure_code TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX delivery_preference_projection_due
+        ON delivery_preference_projection_outbox(status, next_attempt_at, updated_at, batch_key);
+      INSERT INTO delivery_preference_projection_outbox(
+        batch_key, payload_digest, events_json, status, attempt_count,
+        next_attempt_at, failure_code, created_at, updated_at
+      ) VALUES ('legacy-batch', '${'a'.repeat(64)}', '[{"legacy":true}]',
+        'retry_wait', 1, 200, 'legacy-temporary', 100, 100);
+      PRAGMA user_version = 13;
+    `)
+    raw.close()
+
+    const migrated = openDeliveryDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
+    expect(migrated.prepare(`
+      SELECT lane_kind, lane_epoch, admission_sequence, terminal_at
+      FROM delivery_preference_projection_outbox WHERE batch_key = 'legacy-batch'
+    `).get()).toEqual({
+      lane_kind: 'unclassified',
+      lane_epoch: null,
+      admission_sequence: null,
+      terminal_at: null,
+    })
+    migrated.close()
+  })
+
+  test('serializes concurrent v13 to v14 openers before computing ALTER columns', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v13-concurrent-open-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const start = join(root, 'start')
+    const raw = new DatabaseSync(path)
+    raw.exec(`
+      CREATE TABLE delivery_preference_projection_outbox (
+        batch_key TEXT PRIMARY KEY,
+        payload_digest TEXT NOT NULL CHECK (
+          length(payload_digest) = 64 AND payload_digest NOT GLOB '*[^0-9a-f]*'
+        ),
+        events_json TEXT NOT NULL CHECK (
+          json_valid(events_json) AND json_type(events_json) = 'array'
+          AND json_array_length(events_json) BETWEEN 1 AND 16
+        ),
+        status TEXT NOT NULL CHECK (status IN ('pending', 'retry_wait')),
+        attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+        next_attempt_at INTEGER NOT NULL,
+        failure_code TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX delivery_preference_projection_due
+        ON delivery_preference_projection_outbox(status, next_attempt_at, updated_at, batch_key);
+      PRAGMA user_version = 13;
+    `)
+    raw.close()
+    await openDeliveryConcurrently(path, start)
+
+    const migrated = openDeliveryDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
+    const columns = (migrated.prepare(`
+      PRAGMA table_info(delivery_preference_projection_outbox)
+    `).all() as Array<{ name: string }>).map(column => column.name)
+    expect(columns).toEqual(expect.arrayContaining([
+      'lane_kind', 'lane_epoch', 'lane_workspace', 'lane_preset',
+      'lane_principal_record_id', 'lane_principal_version', 'admission_sequence', 'terminal_at',
+    ]))
+    migrated.close()
+  })
+
+  test('converges concurrent openers from the published v8 schema', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v8-concurrent-open-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const start = join(root, 'start')
+    openDeliveryDatabase(path).close()
+    const raw = new DatabaseSync(path)
+    raw.exec(`
+      DROP TRIGGER IF EXISTS delivery_inbox_admission_after_insert;
+      DROP TABLE IF EXISTS delivery_inbox_admissions;
+      DROP TABLE IF EXISTS delivery_inbox_admission_clock;
+      DROP TABLE IF EXISTS delivery_preference_projection_outbox;
+      DROP TABLE IF EXISTS trusted_delivery_evaluation_outbox;
+      DROP TABLE IF EXISTS workflow_trace_commands;
+      DROP TABLE IF EXISTS workflow_trace_outbox;
+      DROP TABLE IF EXISTS workflow_trace_current;
+      DROP TABLE IF EXISTS workflow_trace_revisions;
+      DROP TABLE IF EXISTS workflow_template_registry;
+      DROP TABLE IF EXISTS workflow_trace_source;
+      DROP TABLE IF EXISTS delivery_presentations;
+      DROP TRIGGER IF EXISTS dead_letter_inbox_resolution_fence;
+      DROP TRIGGER IF EXISTS dead_letter_outbox_resolution_fence;
+      DROP TRIGGER IF EXISTS dead_letter_outbox_cancelled_unknown_fence;
+      DROP INDEX IF EXISTS dead_letter_resolution_projection;
+      DROP TABLE IF EXISTS dead_letter_resolutions;
+      PRAGMA user_version = 8;
+    `)
+    raw.close()
+
+    await openDeliveryConcurrently(path, start)
+
+    const migrated = openDeliveryDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
+    const tables = (migrated.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table'
+    `).all() as Array<{ name: string }>).map(row => row.name)
+    expect(tables).toEqual(expect.arrayContaining([
+      'dead_letter_resolutions', 'delivery_presentations',
+      'workflow_trace_source', 'delivery_preference_projection_outbox',
+      'delivery_inbox_admissions',
+    ]))
+    migrated.close()
   })
 
   test('rejects relative paths and schemas written by a newer implementation', async () => {
@@ -228,6 +436,36 @@ describe('delivery SQLite boundary', () => {
       WHERE owner_kind = 'inbox' AND owner_id = 'owner-99'
       ORDER BY ordinal DESC LIMIT 1
     `).get()).toEqual({ ordinal: 99 })
+    migrated.close()
+  })
+
+  test('adds the immutable operator-resolution receipt ledger when migrating schema v8', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-v8-schema-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const raw = new DatabaseSync(path)
+    raw.exec(`
+      CREATE TABLE existing_delivery_state (id TEXT PRIMARY KEY) STRICT;
+      INSERT INTO existing_delivery_state (id) VALUES ('kept');
+      PRAGMA user_version = 8;
+    `)
+    raw.close()
+
+    const migrated = openDeliveryDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: deliverySchemaVersion })
+    expect(migrated.prepare('SELECT id FROM existing_delivery_state').get()).toEqual({ id: 'kept' })
+    expect(migrated.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'dead_letter_resolutions'
+    `).get()).toEqual({ name: 'dead_letter_resolutions' })
+    expect((migrated.prepare('PRAGMA table_info(dead_letter_resolutions)').all() as {
+      name: string
+      pk: number
+    }[])).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: 'kind', pk: 1 }),
+      expect.objectContaining({ name: 'message_id', pk: 2 }),
+      expect.objectContaining({ name: 'attempt_count', pk: 3 }),
+      expect.objectContaining({ name: 'receipt_version' }),
+    ]))
     migrated.close()
   })
 })

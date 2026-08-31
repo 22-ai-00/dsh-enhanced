@@ -48,12 +48,14 @@ describe('automation SQLite store', () => {
     expect((await stat(join(fixture.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(fixture.path)).mode & 0o777).toBe(0o600)
     const database = new DatabaseSync(fixture.path, { readOnly: true })
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
     expect(database.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all())
       .toEqual(expect.arrayContaining([
         { name: 'automation_attempts' },
+        { name: 'automation_circuit_operations' },
         { name: 'automation_definitions' },
+        { name: 'automation_incidents' },
         { name: 'automation_occurrences' },
         { name: 'automation_runs' },
         { name: 'automation_system_reconciles' },
@@ -76,6 +78,47 @@ describe('automation SQLite store', () => {
     await chmod(path, 0o600)
     expect(() => new AutomationStore({ path }))
       .toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'schema-too-new' }))
+  })
+
+  test('migrates v8 incidents into generation one without trusting legacy enqueue as presentation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-v8-incidents-'))
+    temporaryRoots.push(root)
+    const path = join(root, 'legacy.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE automation_incidents (
+        id TEXT PRIMARY KEY, automation_id TEXT NOT NULL, definition_hash TEXT NOT NULL,
+        stage TEXT NOT NULL, state TEXT NOT NULL, failure_class TEXT NOT NULL,
+        failure_phase TEXT NOT NULL, failure_code TEXT NOT NULL, side_effect_state TEXT NOT NULL,
+        retryability TEXT NOT NULL, notification_route_id TEXT NOT NULL, alert_status TEXT NOT NULL,
+        alert_ref TEXT, run_id TEXT, opened_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        resolved_at INTEGER, version INTEGER NOT NULL,
+        UNIQUE (automation_id, definition_hash, stage)
+      ) STRICT;
+      INSERT INTO automation_incidents VALUES
+        ('incident-open', 'auto-open', '${'a'.repeat(64)}', 'terminal', 'open', 'configuration',
+          'host-execution', 'catalog-mismatch', 'none', 'after-intervention', 'owner-route',
+          'enqueued', 'legacy-outbox-open', 'run-open', 1000, 1100, NULL, 4),
+        ('incident-resolved', 'auto-resolved', '${'b'.repeat(64)}', 'terminal', 'resolved', 'configuration',
+          'host-execution', 'catalog-mismatch', 'none', 'after-intervention', 'owner-route',
+          'enqueued', 'legacy-outbox-resolved', 'run-resolved', 1000, 1200, 1200, 5);
+      PRAGMA user_version = 8;
+    `)
+    legacy.close()
+    await chmod(path, 0o600)
+
+    const migrated = openAutomationDatabase(path)
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
+    expect(migrated.prepare(`
+      SELECT id, lifecycle_generation, presentation_revision, alert_status, alert_ref
+      FROM automation_incidents ORDER BY id
+    `).all()).toEqual([
+      { id: 'incident-open', lifecycle_generation: 1, presentation_revision: 4,
+        alert_status: 'pending', alert_ref: null },
+      { id: 'incident-resolved', lifecycle_generation: 1, presentation_revision: 5,
+        alert_status: 'suppressed', alert_ref: null },
+    ])
+    migrated.close()
   })
 
   test.each([4, 5])('does not promote schema-v%s history without an immutable execution snapshot', async version => {
@@ -107,13 +150,110 @@ describe('automation SQLite store', () => {
     await chmod(path, 0o600)
 
     const migrated = openAutomationDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 6 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
     const rows = migrated.prepare(`
       SELECT status, attempt_count, last_error_code FROM automation_evaluation_outbox ORDER BY id
     `).all()
     expect(rows).toEqual(version === 5
       ? [{ status: 'dead-letter', attempt_count: 1, last_error_code: 'legacy-unverifiable-provenance' }]
       : [])
+    migrated.close()
+  })
+
+  test('migrates v6 preview effect intents to terminal suppression atomically', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-v6-preview-'))
+    temporaryRoots.push(root)
+    const path = join(root, 'legacy.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE automation_occurrences (
+        id TEXT PRIMARY KEY, dry_run INTEGER NOT NULL CHECK (dry_run IN (0, 1))
+      ) STRICT;
+      CREATE TABLE automation_runs (
+        id TEXT PRIMARY KEY, occurrence_id TEXT NOT NULL UNIQUE, automation_id TEXT NOT NULL,
+        task_id TEXT NOT NULL UNIQUE, attempt_id TEXT NOT NULL UNIQUE, status TEXT NOT NULL,
+        session_id TEXT, artifact_ref TEXT, output_preview TEXT NOT NULL, usage_json TEXT NOT NULL,
+        delivery_status TEXT, delivery_ref TEXT,
+        evidence_status TEXT NOT NULL CHECK (evidence_status IN ('pending', 'recorded', 'suppressed')),
+        evidence_json TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+      ) STRICT;
+      INSERT INTO automation_occurrences VALUES ('occ-preview', 1), ('occ-production', 0);
+      INSERT INTO automation_runs VALUES
+        ('run-preview', 'occ-preview', 'auto-preview', 'task-preview', 'attempt-preview', 'succeeded',
+         NULL, NULL, 'preview', '{}', 'pending', 'old-delivery', 'pending', '{"legacy":true}', 1, 1),
+        ('run-production', 'occ-production', 'auto-production', 'task-production', 'attempt-production', 'succeeded',
+         NULL, NULL, 'production', '{}', 'pending', NULL, 'pending', '{"legacy":true}', 2, 2);
+      PRAGMA user_version = 6;
+    `)
+    legacy.close()
+    await chmod(path, 0o600)
+
+    const migrated = openAutomationDatabase(path)
+    expect(migrated.prepare(`
+      SELECT id, execution_mode, definition_hash, evidence_status, evidence_json,
+        delivery_status, delivery_ref, json_extract(diagnostic_json, '$.failureClass') AS failure_class
+      FROM automation_runs ORDER BY id
+    `).all()).toEqual([
+      {
+        id: 'run-preview', execution_mode: 'preview', definition_hash: null,
+        evidence_status: 'suppressed', evidence_json: null,
+        delivery_status: 'suppressed', delivery_ref: null, failure_class: 'unknown',
+      },
+      {
+        id: 'run-production', execution_mode: 'unknown', definition_hash: null,
+        evidence_status: 'pending', evidence_json: '{"legacy":true}',
+        delivery_status: 'pending', delivery_ref: null, failure_class: 'unknown',
+      },
+    ])
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
+    migrated.close()
+  })
+
+  test('repairs the pre-half-open schema-v7 preview without clearing exact open circuits', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-v7-circuit-preview-'))
+    temporaryRoots.push(root)
+    const path = join(root, 'legacy.sqlite')
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      CREATE TABLE automation_circuits (
+        automation_id TEXT NOT NULL, definition_hash TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('open', 'closed')),
+        failure_class TEXT NOT NULL CHECK (failure_class IN ('configuration', 'policy', 'budget')),
+        failure_phase TEXT NOT NULL, failure_code TEXT NOT NULL,
+        opened_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        version INTEGER NOT NULL CHECK (version >= 1),
+        PRIMARY KEY (automation_id, definition_hash)
+      ) STRICT;
+      CREATE INDEX automation_open_circuits ON automation_circuits(state, updated_at, automation_id);
+      INSERT INTO automation_circuits VALUES (
+        'legacy-open', '${'a'.repeat(64)}', 'open', 'configuration', 'preflight',
+        'legacy-config', 100, 100, 7
+      );
+      PRAGMA user_version = 7;
+    `)
+    legacy.close()
+    await chmod(path, 0o600)
+
+    const migrated = openAutomationDatabase(path)
+    expect(migrated.prepare(`PRAGMA table_info('automation_circuits')`).all())
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'probe_token' }),
+        expect.objectContaining({ name: 'probe_lease_until' }),
+        expect.objectContaining({ name: 'probe_task_id' }),
+      ]))
+    expect(migrated.prepare(`
+      SELECT state, probe_token, probe_lease_until, probe_task_id, version
+      FROM automation_circuits WHERE automation_id = 'legacy-open'
+    `).get()).toEqual({
+      state: 'open', probe_token: null, probe_lease_until: null, probe_task_id: null, version: 7,
+    })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
+    expect(migrated.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_incidents'
+    `).get()).toEqual({ name: 'automation_incidents' })
+    expect(migrated.prepare(`
+      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_circuit_operations'
+    `).get()).toEqual({ name: 'automation_circuit_operations' })
     migrated.close()
   })
 
@@ -204,6 +344,134 @@ describe('automation SQLite store', () => {
       idempotencyKey: 'take-user-row', definition: definition(),
     })).toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'invalid-state' }))
     fixture.store.close()
+  })
+
+  test('never claims a normal paused Automation task through either claim path', async () => {
+    const fixture = await store(() => 1_000)
+    const created = fixture.store.createApproved({
+      automationId: 'ordinary-paused-task', idempotencyKey: 'create:ordinary-paused-task', definition: definition(),
+    })
+    const occurrence = fixture.store.createManual({
+      automationId: created.id, requestId: 'queued-before-pause', dryRun: false,
+    })
+    const task = fixture.store.listTasks({ automationId: created.id, limit: 10 })[0]!
+    expect(task.occurrenceId).toBe(occurrence.id)
+    fixture.store.changeApproved({
+      automationId: created.id, operation: 'pause', expectedVersion: created.version,
+      idempotencyKey: 'pause:ordinary-paused-task',
+    })
+    const duty = fixture.store.acquireDuty({ ownerId: 'paused-guard', now: 1_000, leaseMs: 1_000 })
+
+    expect(fixture.store.claimNextTask({
+      ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_001, leaseMs: 100,
+    })).toBeUndefined()
+    expect(fixture.store.claimTask({
+      taskId: task.id, ownerId: duty.ownerId, fencingToken: duty.fencingToken, now: 1_001, leaseMs: 100,
+    })).toBeUndefined()
+    expect(fixture.store.listTasks({ automationId: created.id, limit: 10 })[0])
+      .toMatchObject({ id: task.id, status: 'scheduled', attemptCount: 0 })
+    fixture.store.close()
+  })
+
+  test('pauses one exact system-owned revision with a content-free crash-safe CAS receipt', async () => {
+    const fixture = await store(() => 1_000)
+    const automationId = 'recovery-retired-job'
+    const owner = 'assistant-recovery'
+    const secretDefinition = definition({ prompt: 'never expose this recovery prompt' })
+    fixture.store.reconcileSystemOwned({
+      owner,
+      automationId,
+      idempotencyKey: 'recovery-retired-job:v1',
+      definition: secretDefinition,
+    })
+    const definitionHash = fixture.store.getDefinitionHash(automationId)!
+    const inspectBefore = new DatabaseSync(fixture.path, { readOnly: true })
+    const before = inspectBefore.prepare(`
+      SELECT create_idempotency_key, definition_hash, definition_json, status, next_run_at, version
+      FROM automation_definitions WHERE id = ?
+    `).get(automationId)
+    inspectBefore.close()
+
+    // Two independently opened stores model competing Host controllers. Only
+    // one fresh operation may consume the exact active/version CAS.
+    const contender = new AutomationStore({ path: fixture.path, now: () => 1_001 })
+    const input = {
+      owner,
+      operationId: 'recovery-config:v2:pause-retired-job',
+      automationId,
+      definitionHash,
+      expectedVersion: 1,
+    }
+    const first = fixture.store.pauseSystemOwned(input)
+    expect(first).toEqual({
+      operationId: input.operationId,
+      owner,
+      automationId,
+      definitionHash,
+      expectedVersion: 1,
+      definitionVersion: 2,
+      automationStatus: 'paused',
+      replayed: false,
+    })
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(() => contender.pauseSystemOwned({
+      ...input,
+      operationId: 'recovery-config:v2:competing-pause',
+    })).toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'version-conflict' }))
+
+    const inspectAfter = new DatabaseSync(fixture.path, { readOnly: true })
+    const after = inspectAfter.prepare(`
+      SELECT create_idempotency_key, definition_hash, definition_json, status, next_run_at, version
+      FROM automation_definitions WHERE id = ?
+    `).get(automationId) as Record<string, unknown>
+    const ledger = inspectAfter.prepare(`
+      SELECT system_owner, automation_id, result_json
+      FROM automation_system_reconciles WHERE idempotency_key = ?
+    `).get(input.operationId) as Record<string, unknown>
+    inspectAfter.close()
+    expect(after).toEqual({
+      ...(before as Record<string, unknown>),
+      status: 'paused',
+      next_run_at: null,
+      version: 2,
+    })
+    expect(ledger).toMatchObject({ system_owner: owner, automation_id: automationId })
+    expect(JSON.stringify(ledger)).not.toContain('never expose this recovery prompt')
+
+    // Simulate all processes stopping after the winning commit but before its
+    // caller persists the response. A fresh store gets the durable receipt.
+    fixture.store.close()
+    contender.close()
+    const restarted = new AutomationStore({ path: fixture.path, now: () => 1_002 })
+    expect(restarted.pauseSystemOwned(input)).toEqual({ ...first, replayed: true })
+    expect(() => restarted.pauseSystemOwned({ ...input, expectedVersion: 2 }))
+      .toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'idempotency-conflict' }))
+    expect(() => restarted.pauseSystemOwned({
+      ...input,
+      operationId: 'recovery-config:v2:already-paused',
+      expectedVersion: 2,
+    })).toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'invalid-state' }))
+    expect(() => restarted.pauseSystemOwned({
+      ...input,
+      owner: 'another-owner',
+      operationId: 'recovery-config:v2:cross-owner',
+    })).toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'not-found' }))
+
+    // A later reconcile advances the same immutable hash. A stale inventory
+    // tuple cannot pause this newer active revision.
+    restarted.reconcileSystemOwned({
+      owner,
+      automationId,
+      idempotencyKey: 'recovery-retired-job:resume-v3',
+      desiredStatus: 'active',
+      definition: secretDefinition,
+    })
+    expect(restarted.get(automationId)).toMatchObject({ status: 'active', version: 3 })
+    expect(() => restarted.pauseSystemOwned({
+      ...input,
+      operationId: 'recovery-config:v2:stale-revision',
+    })).toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'version-conflict' }))
+    restarted.close()
   })
 
   test('materializes stable occurrences with latest/skip/bounded replay and survives rollback/restart', async () => {

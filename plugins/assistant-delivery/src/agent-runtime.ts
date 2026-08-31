@@ -46,23 +46,34 @@ import {
   feedbackUsage,
   parseFeedbackCommand,
 } from './feedback-command.js'
-import type { FeedbackSignalSelection } from './feedback-command.js'
+import type { FeedbackSignalSelection, ObjectiveFeedbackStatus } from './feedback-command.js'
 import type { InboundImageMaterializer } from './inbound-images.js'
+import {
+  learningCommandUsage,
+  parseLearningCommand,
+} from './learning-command.js'
 import type { DeliveryInboundRuntime } from './service.js'
 import {
   isExactDeliveryCommand,
+  learningDispatchRecoveryCode,
   parseDeliveryCommand,
   permissionDispatchRecoveryCode,
   type ParsedDeliveryCommand,
   type PermissionDispatchRecovery,
 } from './session-commands.js'
 import { DeliveryStoreError } from './store.js'
+import {
+  parseWorkflowCommand,
+  workflowCommandUsage,
+  type WorkflowCommand,
+} from './workflow-command.js'
 import type {
   ConversationBinding,
   ConversationModelSelection,
   ConversationRef,
   DeliveryProgressUpdate,
-  DeliveryPreferenceFeedback,
+  DeliveryLearningControlReceipt,
+  DeliveryPreferenceEvent,
   InboundEnvelope,
   ModelPickerIntent,
   ModelRouteRef,
@@ -115,10 +126,38 @@ interface DshDeliveryRuntimeOptions {
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
     selections: readonly Readonly<FeedbackSignalSelection>[],
-  ): { occurredAt: number } | undefined
+  ): {
+    occurredAt: number
+    principalLineage: Readonly<import('./types.js').DeliveryOwnerLineage>
+    admissionCursor: Readonly<import('./types.js').DeliveryAdmissionCursor>
+    exposureTarget?: Readonly<{ sourceInboxId: string; sourceOutboxId: string }>
+  } | undefined
   dispatchPreferenceFeedback(
-    events: readonly Readonly<DeliveryPreferenceFeedback>[],
+    events: readonly Readonly<DeliveryPreferenceEvent>[],
   ): Promise<'recorded' | 'unavailable' | 'unknown'>
+  replyCompletedPreferenceTurn(
+    agent: Agent,
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    input: ModelCommandReply,
+  ): 'recorded' | 'unavailable' | 'unknown'
+    | Promise<'recorded' | 'unavailable' | 'unknown'>
+  dispatchObjectiveFeedback(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    objectiveStatus: ObjectiveFeedbackStatus,
+  ): Promise<'conflict' | 'invalid-target' | 'recorded' | 'unavailable' | 'unknown'>
+  dispatchWorkflowCommand(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    command: Extract<WorkflowCommand, { kind: 'retract' | 'save' }>,
+  ): Promise<'conflict' | 'invalid-target' | 'recorded' | 'unavailable' | 'unknown'>
+  dispatchLearningCommand(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    action: 'explain' | 'forget' | 'pause' | 'resume' | 'rollback' | 'status',
+    preferenceKey?: string,
+  ): Promise<'forbidden' | 'unavailable' | 'unknown' | Readonly<DeliveryLearningControlReceipt>>
   /** Durably reserve the exact terminal reply authorization before permission state can change. */
   authorizePermissionReply(
     binding: Readonly<ConversationBinding>,
@@ -142,7 +181,6 @@ interface DshDeliveryRuntimeOptions {
     input: ModelCommandReply,
     idempotencyKey?: string,
   ): void
-  reply(agent: Agent, eventId: string, input: ModelCommandReply): void
 }
 
 interface ModelCommandReply {
@@ -1931,7 +1969,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     }
     if (!authorized) {
       return this.replySessionCommand(binding, envelope, {
-        text: '当前身份不能提交偏好反馈；本次反馈未记录。',
+        text: '当前身份不能提交反馈；本次反馈未记录。',
         format: 'plain',
       }, signal, markDispatching)
     }
@@ -1942,10 +1980,57 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     markDispatching()
     signal.throwIfAborted()
 
+    if (parsed.kind === 'objective') {
+      const objective = await this.options.dispatchObjectiveFeedback(
+        binding,
+        envelope,
+        parsed.objectiveStatus,
+      )
+      signal.throwIfAborted()
+      if (objective === 'unknown') {
+        return {
+          outcome: 'not-processed',
+          failureCode: 'objective-feedback-state-unknown',
+          retryable: true,
+        }
+      }
+      if (objective === 'unavailable') {
+        this.options.replyCommand(binding, envelope.eventId, {
+          text: '评测服务尚未启用；本次任务结果未记录。请联系管理员启用成长组件。',
+          format: 'plain',
+        })
+        return { outcome: 'processed' }
+      }
+      if (objective === 'invalid-target') {
+        this.options.replyCommand(binding, envelope.eventId, {
+          text: '任务结果未记录。请直接回复对应的自动化或普通 Agent 任务结果消息，并发送 /feedback achieved、partial 或 not-achieved。',
+          format: 'plain',
+        })
+        return { outcome: 'processed' }
+      }
+      if (objective === 'conflict') {
+        this.options.replyCommand(binding, envelope.eventId, {
+          text: '该次任务已经记录了不同的任务结果；为避免重复计票，本次未覆盖原记录。',
+          format: 'plain',
+        })
+        return { outcome: 'processed' }
+      }
+      this.options.replyCommand(binding, envelope.eventId, {
+        text: `已把该次任务结果记录为 ${parsed.objectiveStatus}；同一次任务只计一票。`,
+        format: 'plain',
+      })
+      return { outcome: 'processed' }
+    }
+
     // The dispatch fence proves the exact Inbox/binding snapshot. Recheck the
     // mutable owner and consume an audited preference-signal authorization
     // immediately before the authoritative sink receives the batch.
-    let attestation: { occurredAt: number } | undefined
+    let attestation: {
+      occurredAt: number
+      principalLineage: Readonly<import('./types.js').DeliveryOwnerLineage>
+      admissionCursor: Readonly<import('./types.js').DeliveryAdmissionCursor>
+      exposureTarget?: Readonly<{ sourceInboxId: string; sourceOutboxId: string }>
+    } | undefined
     try {
       attestation = this.options.authorizeOwnerPreferenceFeedback(
         binding,
@@ -1971,20 +2056,23 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       binding,
       envelope,
       selection,
-      attestation.occurredAt,
+      attestation,
     ))
     const result = await this.options.dispatchPreferenceFeedback(Object.freeze(events))
     signal.throwIfAborted()
+    if (result === 'unknown') {
+      // The Inbox remains the durable retry envelope. Both downstream ledgers
+      // are idempotent, so a crash/ambiguous local call safely replays the exact
+      // feedback event rather than acknowledging a signal that may be lost.
+      return {
+        outcome: 'not-processed',
+        failureCode: 'preference-feedback-state-unknown',
+        retryable: true,
+      }
+    }
     if (result === 'unavailable') {
       this.options.replyCommand(binding, envelope.eventId, {
-        text: '偏好学习服务尚未启用；本次反馈未记录。请联系管理员安装或启用 preference-learning。',
-        format: 'plain',
-      })
-      return { outcome: 'processed' }
-    }
-    if (result === 'unknown') {
-      this.options.replyCommand(binding, envelope.eventId, {
-        text: '反馈记录状态未知；请不要为同一回答重复提交。系统只会在收到匹配的持久回执后确认成功。',
+        text: '偏好学习服务尚未启用；本次偏好反馈未记录。',
         format: 'plain',
       })
       return { outcome: 'processed' }
@@ -1992,10 +2080,199 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     signal.throwIfAborted()
     this.options.replyCommand(binding, envelope.eventId, {
       text: parsed.selections.length === 1
-        ? '已记录反馈。它只作用于当前工作区与 preset。'
-        : '已记录反馈及对应的回复长度偏好。它们只作用于当前工作区与 preset。',
+        ? '已记录偏好反馈；它不会被当成任务成败。只作用于当前工作区与 preset。'
+        : '已记录偏好反馈及对应的回复长度偏好；它们不会被当成任务成败。只作用于当前工作区与 preset。',
       format: 'plain',
     })
+    return { outcome: 'processed' }
+  }
+
+  private async runWorkflowCommand(
+    command: ParsedDeliveryCommand,
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    markDispatching: MarkInboundDispatching | undefined,
+  ): Promise<InboundProcessResult> {
+    const parsed = parseWorkflowCommand(command.rawInput)
+    if (parsed.kind === 'help' || parsed.kind === 'invalid') {
+      return this.replySessionCommand(binding, envelope, {
+        text: workflowCommandUsage,
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if ((envelope.attachments?.length ?? 0) > 0) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '工作流学习命令不接受附件；本次未记录。请只回复一条无附件的已完成任务结果。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    let authorized: boolean
+    try {
+      authorized = this.options.isOwnerFeedbackController(binding, envelope)
+    } catch {
+      return { outcome: 'not-processed', failureCode: 'workflow-authorization-check-failed', retryable: true }
+    }
+    if (!authorized) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '当前身份不是此会话的 owner；本次工作流学习未记录。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if (markDispatching === undefined) {
+      return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+    }
+    signal.throwIfAborted()
+    markDispatching()
+    signal.throwIfAborted()
+    const outcome = await this.options.dispatchWorkflowCommand(binding, envelope, parsed)
+    signal.throwIfAborted()
+    if (outcome === 'unknown') {
+      return { outcome: 'not-processed', failureCode: 'workflow-dispatch-recovery', retryable: true }
+    }
+    const text = outcome === 'recorded'
+      ? parsed.kind === 'save'
+        ? '已记录 owner 明确授权的工作流证据；它只会生成候选与审批，当前没有自动化被启用。'
+        : '已撤回这条任务对应的工作流证据；若已有实验，成长组件会按证据撤回流程回滚。'
+      : outcome === 'invalid-target'
+        ? '工作流证据未记录。请直接回复同一会话中一条已完成、无附件的任务结果消息。'
+        : outcome === 'conflict'
+          ? '该工作流命令与已持久化记录冲突；本次没有覆盖原记录。'
+          : '成长组件尚未启用；本次工作流证据未记录。'
+    this.options.replyCommand(binding, envelope.eventId, { text, format: 'plain' })
+    return { outcome: 'processed' }
+  }
+
+  private async runLearningCommand(
+    command: ParsedDeliveryCommand,
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    signal: AbortSignal,
+    markDispatching: MarkInboundDispatching | undefined,
+  ): Promise<InboundProcessResult> {
+    const parsed = parseLearningCommand(command.rawInput)
+    if (parsed.kind === 'help' || parsed.kind === 'invalid') {
+      return this.replySessionCommand(binding, envelope, {
+        text: learningCommandUsage,
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if (parsed.kind === 'forget-prompt') {
+      return this.replySessionCommand(binding, envelope, {
+        text: '尚未删除任何学习记录。若确定永久删除当前工作区与 preset 的记录，请发送 /learning forget confirm。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if ((envelope.attachments?.length ?? 0) > 0) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '学习控制命令不接受附件；本次未执行。请只发送 /learning 文字命令。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    let authorized: boolean
+    try {
+      authorized = this.options.isOwnerFeedbackController(binding, envelope)
+    } catch {
+      return { outcome: 'not-processed', failureCode: 'learning-authorization-check-failed', retryable: true }
+    }
+    if (!authorized) {
+      return this.replySessionCommand(binding, envelope, {
+        text: '当前身份不是此会话的 owner；本次学习控制未执行。',
+        format: 'plain',
+      }, signal, markDispatching)
+    }
+    if (markDispatching === undefined) {
+      return { outcome: 'not-processed', failureCode: 'dispatch-gate-unavailable', retryable: true }
+    }
+    signal.throwIfAborted()
+    markDispatching()
+    signal.throwIfAborted()
+    const action = parsed.kind === 'forget-confirm'
+      ? 'forget'
+      : parsed.kind === 'rollback-confirm' ? 'rollback' : parsed.kind
+    const result = await this.options.dispatchLearningCommand(
+      binding,
+      envelope,
+      action,
+      parsed.kind === 'rollback-confirm' ? parsed.preferenceKey : undefined,
+    )
+    signal.throwIfAborted()
+    if (result === 'unknown') {
+      return { outcome: 'not-processed', failureCode: learningDispatchRecoveryCode, retryable: true }
+    }
+    if (result === 'unavailable') {
+      this.options.replyCommand(binding, envelope.eventId, {
+        text: '偏好学习服务尚未启用；本次学习控制未执行。',
+        format: 'plain',
+      })
+      return { outcome: 'processed' }
+    }
+    if (result === 'forbidden' || result.outcome === 'stale') {
+      this.options.replyCommand(binding, envelope.eventId, {
+        text: result === 'forbidden'
+          ? 'owner 或会话绑定已变化；本次学习控制未执行。'
+          : '已有更新的学习控制，或 owner/会话绑定已经变化；本次学习控制未执行，也未覆盖当前状态。',
+        format: 'plain',
+      })
+      return { outcome: 'processed' }
+    }
+    const state = result.state
+    const statusLines = [
+      `组件状态：${state.administrativelyEnabled ? '已启用' : '已禁用'}`,
+      `管理员开关：${state.administrativelyEnabled ? '已开启' : '已关闭'}`,
+      `收集状态：${state.collectionMode === 'paused' ? '已暂停' : '运行中'}`,
+      `owner 控制：${state.collectionMode === 'paused' ? '已暂停' : '未暂停'}`,
+      `- 已保存信号：${state.signals}`,
+      `- 已保存假设：${state.hypotheses}`,
+      `- 已保存有效偏好：${state.storedActiveOverlays}`,
+      `- 当前生效偏好：${state.effectiveActiveOverlays}`,
+      `- 待观察假设：${state.shadowHypotheses}`,
+    ]
+    const text = result.action === 'status'
+      ? statusLines.join('\n')
+      : result.action === 'explain'
+        ? result.explanation?.length
+          ? [
+              '当前 owner 与 lineage 的 T1 偏好摘要（不含原始内容）：',
+              ...result.explanation.map(item => [
+                `- key=${item.key}`,
+                `  value=${item.value}`,
+                `  state=${item.state}`,
+                `  version=${item.version}`,
+                `  supportingSignals=${item.supportingSignals}`,
+                `  contradictingSignals=${item.contradictingSignals}`,
+                `  evidenceMass=${item.evidenceMass}`,
+              ].join('\n')),
+            ].join('\n')
+          : '当前 owner 与 lineage 没有 T1 偏好摘要。'
+      : result.action === 'pause'
+        ? [state.administrativelyEnabled
+            ? '已暂停当前工作区与 preset 的偏好学习。暂停期间不收集、不激活、也不注入偏好；已有记录保留。'
+            : '已记录暂停状态；偏好学习组件当前由管理员禁用，重新启用后仍会保持暂停。',
+          '', ...statusLines].join('\n')
+        : result.action === 'resume'
+          ? [state.administrativelyEnabled
+              ? '已恢复当前工作区与 preset 的偏好学习；已有的有效偏好会重新生效。'
+              : '已记录恢复状态；偏好学习组件当前仍由管理员禁用，只有管理员重新启用后偏好才会生效。',
+            '', ...statusLines].join('\n')
+          : result.action === 'rollback'
+            ? [result.rolledBack
+                ? `已回滚 ${parsed.kind === 'rollback-confirm' ? parsed.preferenceKey : '指定键'} 当前激活的偏好。`
+                : `${parsed.kind === 'rollback-confirm' ? parsed.preferenceKey : '指定键'} 当前没有激活偏好；未修改偏好记录。`,
+              state.administrativelyEnabled
+                ? `owner 收集状态：${state.collectionMode === 'paused' ? '已暂停' : '运行中'}。`
+                : '管理员开关：已禁用；即使 owner 处于运行状态，偏好仍不会收集或生效。',
+              '',
+              ...statusLines,
+            ].join('\n')
+            : [
+              '已永久删除当前工作区与 preset 的偏好学习记录。',
+              `- 删除信号：${result.deletedSignals ?? 0}`,
+              `- 删除假设：${result.deletedHypotheses ?? 0}`,
+              '',
+              ...statusLines,
+            ].join('\n')
+    this.options.replyCommand(binding, envelope.eventId, { text, format: 'plain' })
     return { outcome: 'processed' }
   }
 
@@ -2007,7 +2284,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       '- /status（/session）：查看当前 session、上下文与模型。',
       '- /model：查看或切换模型；上下文保留。',
       '- /permission：查看或切换运行权限。',
-      '- /feedback：提交结构化反馈或低风险回复偏好；不进入模型。',
+      '- /feedback：提交结构化偏好；回复自动化结果可记录 achieved/partial/not-achieved；不进入模型。',
+      '- /learning：查看、暂停、恢复或清除当前 scope 的偏好学习；不进入模型。',
       '- /help：显示当前实际可用命令。',
     ]
     const visible = native.filter(command => SAFE_NATIVE_COMMANDS.has(command.name))
@@ -2275,6 +2553,24 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         markDispatching,
       )
     }
+    if (sessionCommand?.name === 'workflow') {
+      return await this.runWorkflowCommand(
+        sessionCommand,
+        binding,
+        envelope,
+        signal,
+        markDispatching,
+      )
+    }
+    if (sessionCommand?.name === 'learning') {
+      return await this.runLearningCommand(
+        sessionCommand,
+        binding,
+        envelope,
+        signal,
+        markDispatching,
+      )
+    }
     const permissions = permissionCommand(sessionCommand)
     if (permissions !== undefined) {
       if (markDispatching === undefined) {
@@ -2483,7 +2779,15 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // Agent answers are authored as Markdown (tables, bold, inline code), so request Markdown
       // rendering; sending them as plain text shows the raw `|---|` and `**` syntax to the user.
       if (output.text !== '') {
-        this.options.reply(agent, envelope.eventId, { text: output.text, format: 'markdown' })
+        const learning = await this.options.replyCompletedPreferenceTurn(
+          agent,
+          binding,
+          envelope,
+          { text: output.text, format: 'markdown' },
+        )
+        if (learning === 'unknown') {
+          this.ctx.logger.warn('assistant-delivery: completed-turn preference projection is ambiguous')
+        }
       }
       publishProgress({ kind: 'completed' })
       return { outcome: 'processed' }

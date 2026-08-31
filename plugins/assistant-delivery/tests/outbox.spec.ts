@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DeliveryStore } from '../src/store.ts'
-import type { DeliveryReceipt, OutboundIntent } from '../src/types.ts'
+import type { DeliveryPresentationUpdate, DeliveryReceipt, OutboundIntent } from '../src/types.ts'
 
 const roots: string[] = []
 
@@ -45,6 +45,28 @@ function addBinding(value: Awaited<ReturnType<typeof fixture>>, index: number) {
 function routeIntent(key: string, route: ReturnType<typeof addBinding>): OutboundIntent {
   return { idempotencyKey: key, bindingId: route.binding.id,
     target: { principal: route.principal, conversation: route.conversation }, text: 'hello', format: 'plain' }
+}
+
+function incidentPresentation(
+  incidentId: string,
+  lifecycleGeneration: number,
+  revision: number,
+  state: 'open' | 'recovering' | 'resolved',
+): DeliveryPresentationUpdate {
+  const lifecycleKey = `automation-incident:${incidentId}:g${lifecycleGeneration}`
+  return {
+    presentationKey: lifecycleKey,
+    originalOutboxIdempotencyKey: lifecycleKey,
+    revision,
+    presentation: {
+      kind: 'automation-incident', incidentId, automationId: 'heartbeat:growth',
+      definitionHash: 'b'.repeat(64), stage: 'terminal', state,
+      failureClass: 'configuration', failurePhase: 'host-execution', failureCode: 'catalog-mismatch',
+      sideEffectState: 'none', retryability: 'after-intervention', lifecycleGeneration,
+      incidentRevision: revision, openedAt: 1_000, updatedAt: 1_000 + revision,
+      ...(state === 'resolved' ? { resolvedAt: 1_000 + revision } : {}),
+    },
+  }
 }
 
 describe('durable outbox', () => {
@@ -93,6 +115,162 @@ describe('durable outbox', () => {
       .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
     expect(f.store.getApprovalIntent('operation-1', f.binding.id)).toEqual(approval.approval)
     expect(f.store.getApprovalIntent('operation-1', 'another-binding')).toBeUndefined()
+    f.store.close()
+  })
+
+  test('durably versions and fences domain-authoritative approval card replacements', async () => {
+    const f = await fixture()
+    const original = f.store.enqueue({
+      ...intent('approval-card:policy-1', f, '{}'),
+      format: 'approval',
+      approval: {
+        operationId: 'approval:policy-1',
+        proposalId: 'policy-1',
+        expectedVersion: 1,
+        expiresAt: 10_000,
+        title: 'Adopt guidance',
+        diffHash: 'a'.repeat(64),
+      },
+    })
+    const send = f.store.claimOutbox({ ownerId: 'sender', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.finishOutbox({
+      outboxId: original.id,
+      ownerId: 'sender',
+      fencingToken: send.fencingToken,
+      outcome: 'accepted',
+      providerMessageId: 'om_approval_1',
+    })
+    const desired = {
+      presentationKey: 'approval-application:policy-1',
+      originalOutboxIdempotencyKey: 'approval-card:policy-1',
+      revision: 2,
+      presentation: {
+        kind: 'approval-application' as const,
+        policyProposalId: 'policy-1',
+        localProposalId: 'local-1',
+        applicationStatus: 'applied' as const,
+        operation: 'adopt' as const,
+        terminalAt: 1_000,
+        receiptDigest: 'b'.repeat(64),
+        ruleId: 'rule-1',
+        resultingRuleVersion: 1,
+        ruleStatus: 'active' as const,
+      },
+    }
+    expect(f.store.publishDeliveryPresentation(desired)).toMatchObject({
+      status: 'pending', revision: 2, presentedRevision: 0,
+    })
+    expect(f.store.publishDeliveryPresentation(desired)).toEqual(
+      f.store.getDeliveryPresentation(desired.presentationKey),
+    )
+    expect(() => f.store.publishDeliveryPresentation({
+      ...desired,
+      presentation: { ...desired.presentation, receiptDigest: 'c'.repeat(64) },
+    })).toThrowError(expect.objectContaining({ code: 'idempotency-conflict' }))
+    const claimed = f.store.claimDeliveryPresentation({ ownerId: 'presenter-a', leaseMs: 100 })!
+    expect(claimed.presentation).toMatchObject({ attemptCount: 1, status: 'attempting' })
+    expect(f.store.finishDeliveryPresentation({
+      presentationKey: desired.presentationKey,
+      revision: desired.revision,
+      ownerId: 'presenter-a',
+      fencingToken: claimed.fencingToken,
+      outcome: 'presented',
+      providerMessageId: 'om_approval_1',
+    })).toMatchObject({ status: 'presented', presentedRevision: 2, providerMessageId: 'om_approval_1' })
+
+    const conflicted = f.store.publishDeliveryPresentation({
+      ...desired,
+      revision: 3,
+      presentation: {
+        kind: desired.presentation.kind,
+        policyProposalId: desired.presentation.policyProposalId,
+        localProposalId: desired.presentation.localProposalId,
+        operation: desired.presentation.operation,
+        terminalAt: desired.presentation.terminalAt,
+        applicationStatus: 'conflicted',
+        receiptDigest: 'd'.repeat(64),
+      },
+    })
+    expect(conflicted).toMatchObject({ status: 'pending', revision: 3, presentedRevision: 2 })
+    const retry = f.store.claimDeliveryPresentation({ ownerId: 'presenter-b', leaseMs: 100 })!
+    f.store.finishDeliveryPresentation({
+      presentationKey: desired.presentationKey,
+      revision: 3,
+      ownerId: 'presenter-b',
+      fencingToken: retry.fencingToken,
+      outcome: 'retry_wait',
+      failureCode: 'provider-timeout',
+      nextAttemptAt: 2_000,
+    })
+    expect(f.store.claimDeliveryPresentation({ ownerId: 'too-early', leaseMs: 100 })).toBeUndefined()
+    f.setNow(2_000)
+    expect(f.store.claimDeliveryPresentation({ ownerId: 'presenter-c', leaseMs: 100 }))
+      .toMatchObject({ presentation: { revision: 3, attemptCount: 3 } })
+    f.store.close()
+
+    const reopened = new DeliveryStore({ path: f.databasePath, now: () => 2_100 })
+    expect(reopened.getDeliveryPresentation(desired.presentationKey)).toMatchObject({
+      revision: 3,
+      status: 'attempting',
+      presentedRevision: 2,
+      providerMessageId: 'om_approval_1',
+    })
+    reopened.close()
+  })
+
+  test('coalesces incident resolution before send and fences a crashed older update revision', async () => {
+    const f = await fixture()
+    const incidentId = `incident-${'a'.repeat(64)}`
+    const open = incidentPresentation(incidentId, 1, 1, 'open')
+    f.store.enqueue(intent(open.originalOutboxIdempotencyKey, f, `Automation incident ${incidentId}`))
+    f.store.publishDeliveryPresentation(open)
+    const resolved = incidentPresentation(incidentId, 1, 2, 'resolved')
+    expect(f.store.publishDeliveryPresentation(resolved)).toMatchObject({
+      revision: 2, status: 'pending', presentation: { state: 'resolved' },
+    })
+    expect(f.store.getDeliveryPresentation(open.presentationKey)).toMatchObject({
+      revision: 2, presentedRevision: 0,
+    })
+
+    const crashed = f.store.claimDeliveryPresentation({ ownerId: 'presenter-crashed', leaseMs: 100 })!
+    expect(crashed.presentation.revision).toBe(2)
+    const corrected = incidentPresentation(incidentId, 1, 3, 'resolved')
+    f.store.publishDeliveryPresentation(corrected)
+    expect(() => f.store.finishDeliveryPresentation({
+      presentationKey: open.presentationKey, revision: 2, ownerId: 'presenter-crashed',
+      fencingToken: crashed.fencingToken, outcome: 'presented', providerMessageId: 'om_stale',
+    })).toThrowError(expect.objectContaining({ code: 'stale-fence' }))
+    const winner = f.store.claimDeliveryPresentation({ ownerId: 'presenter-restarted', leaseMs: 100 })!
+    expect(winner.presentation).toMatchObject({ revision: 3, status: 'attempting' })
+    f.store.finishDeliveryPresentation({
+      presentationKey: open.presentationKey, revision: 3, ownerId: 'presenter-restarted',
+      fencingToken: winner.fencingToken, outcome: 'presented', providerMessageId: 'om_exact',
+    })
+    expect(f.store.getDeliveryPresentation(open.presentationKey)).toMatchObject({
+      status: 'presented', presentedRevision: 3, providerMessageId: 'om_exact',
+    })
+    f.store.close()
+  })
+
+  test('quarantines a poison presentation row without starving a later valid lifecycle', async () => {
+    const f = await fixture()
+    const poison = incidentPresentation(`incident-${'0'.repeat(64)}`, 1, 1, 'open')
+    const valid = incidentPresentation(`incident-${'f'.repeat(64)}`, 1, 1, 'open')
+    f.store.publishDeliveryPresentation(poison)
+    f.store.publishDeliveryPresentation(valid)
+    const database = new DatabaseSync(f.databasePath)
+    database.prepare(`
+      UPDATE delivery_presentations SET payload_json = '{}' WHERE presentation_key = ?
+    `).run(poison.presentationKey)
+    database.close()
+
+    expect(f.store.claimDeliveryPresentation({ ownerId: 'fair-presenter', leaseMs: 100 }))
+      .toMatchObject({ presentation: { presentationKey: valid.presentationKey } })
+    const inspection = new DatabaseSync(f.databasePath, { readOnly: true })
+    expect(inspection.prepare(`
+      SELECT status, failure_code FROM delivery_presentations WHERE presentation_key = ?
+    `).get(poison.presentationKey)).toEqual({ status: 'dead', failure_code: 'presentation-poison-row' })
+    inspection.close()
     f.store.close()
   })
 
@@ -411,14 +589,289 @@ describe('durable outbox', () => {
     expect(f.store.getOutbox(record.id)).toMatchObject({ status: 'dead', attemptCount: 1,
       failureCode: 'attempts-exhausted' })
 
-    expect(f.store.resolveOutbox({ outboxId: record.id, expectedAttemptCount: 1, resolution: 'retry' }))
-      .toMatchObject({ status: 'pending', attemptCount: 1 })
+    expect(f.store.resolveOutbox({ outboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'retry', operatorId: 'test-operator' }))
+      .toMatchObject({ record: { status: 'pending', attemptCount: 1 }, replayed: false })
     const retried = f.store.claimOutbox({ ownerId: 'worker-c', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
     expect(retried).toMatchObject({ fencingToken: 2, mode: 'send',
       record: { id: record.id, status: 'attempting', attemptCount: 2 } })
     expect(() => f.store.finishOutbox({ outboxId: record.id, ownerId: 'worker-a', fencingToken: first.fencingToken,
       outcome: 'accepted', providerMessageId: 'om_stale' }))
       .toThrowError(expect.objectContaining({ code: 'stale-fence' }))
+    f.store.close()
+  })
+
+  test('makes a newly failed retry attempt actionable despite the previous attempt receipt', async () => {
+    const f = await fixture()
+    const record = f.store.enqueue(intent('operator-retry-fails-again', f))
+    const first = f.store.claimOutbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
+    f.store.finishOutbox({ outboxId: record.id, ownerId: 'worker-a', fencingToken: first.fencingToken,
+      outcome: 'dead', failureCode: 'permanent-first' })
+    f.store.resolveOutbox({ outboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'retry', operatorId: 'owner-operator' })
+
+    const second = f.store.claimOutbox({ ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
+    f.store.finishOutbox({ outboxId: record.id, ownerId: 'worker-b', fencingToken: second.fencingToken,
+      outcome: 'dead', failureCode: 'permanent-second' })
+    expect(f.store.getOutbox(record.id)).toMatchObject({ status: 'dead', attemptCount: 2,
+      failureCode: 'permanent-second' })
+    expect(f.store.getDeadLetterResolution({ kind: 'outbox', id: record.id, attemptCount: 1 }))
+      .toMatchObject({ resolution: 'retry', originalFailureCode: 'permanent-first' })
+    expect(f.store.getDeadLetterResolution({ kind: 'outbox', id: record.id, attemptCount: 2 })).toBeUndefined()
+    expect(f.store.resolveOutbox({ outboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'retry', operatorId: 'owner-operator' }))
+      .toMatchObject({ record: { status: 'dead', attemptCount: 2, failureCode: 'permanent-second' },
+        receipt: { resolution: 'retry', attemptCount: 1, operatorId: 'owner-operator' }, replayed: true })
+    expect(f.store.health()).toMatchObject({
+      deadLetterOutbox: 1,
+      actionableDeadLetterOutbox: 1,
+      resolvedDeadLetterOutbox: 0,
+    })
+    f.store.close()
+  })
+
+  test('migrates v8 cancelled dead and ambiguous attempts without making either retryable', async () => {
+    const f = await fixture()
+    const dead = f.store.enqueue(intent('v8-cancelled-dead', f))
+    const deadClaim = f.store.claimOutbox({ ownerId: 'worker-a', leaseMs: 100,
+      limit: 1, maxAttempts: 3 })[0]!
+    f.store.finishOutbox({ outboxId: dead.id, ownerId: 'worker-a',
+      fencingToken: deadClaim.fencingToken, outcome: 'dead', failureCode: 'provider-rejected' })
+
+    const ambiguous = f.store.enqueue(intent('v8-cancelled-unknown', f))
+    const ambiguousClaim = f.store.claimOutbox({ ownerId: 'worker-b', leaseMs: 100,
+      limit: 1, maxAttempts: 3 })[0]!
+    f.store.finishOutbox({ outboxId: ambiguous.id, ownerId: 'worker-b',
+      fencingToken: ambiguousClaim.fencingToken, outcome: 'unknown_after_send',
+      failureCode: 'response-lost' })
+    f.store.close()
+
+    const legacy = new DatabaseSync(f.databasePath)
+    legacy.exec(`
+      DROP TABLE IF EXISTS delivery_preference_projection_outbox;
+      DROP TABLE IF EXISTS trusted_delivery_evaluation_outbox;
+      DROP TABLE IF EXISTS workflow_trace_commands;
+      DROP TABLE IF EXISTS workflow_trace_outbox;
+      DROP TABLE IF EXISTS workflow_trace_current;
+      DROP TABLE IF EXISTS workflow_trace_revisions;
+      DROP TABLE IF EXISTS workflow_template_registry;
+      DROP TABLE IF EXISTS workflow_trace_source;
+      DROP TABLE IF EXISTS delivery_presentations;
+      DROP TRIGGER dead_letter_inbox_resolution_fence;
+      DROP TRIGGER dead_letter_outbox_resolution_fence;
+      DROP TRIGGER dead_letter_outbox_cancelled_unknown_fence;
+      DROP TABLE dead_letter_resolutions;
+      PRAGMA user_version = 8;
+    `)
+    legacy.prepare(`
+      UPDATE outbox_messages
+      SET status = 'dead', failure_code = 'operator-cancelled'
+      WHERE id IN (?, ?)
+    `).run(dead.id, ambiguous.id)
+    legacy.close()
+
+    const migrated = new DeliveryStore({ path: f.databasePath, now: () => 2_000 })
+    expect(migrated.getOutbox(dead.id)).toMatchObject({
+      status: 'dead', attemptCount: 1, failureCode: 'operator-cancelled',
+    })
+    expect(migrated.getOutbox(ambiguous.id)).toMatchObject({
+      status: 'unknown_after_send', attemptCount: 1, failureCode: 'operator-cancelled-unknown',
+    })
+    expect(migrated.getDeadLetterResolution({ kind: 'outbox', id: dead.id, attemptCount: 1 }))
+      .toMatchObject({ resolution: 'cancel', originalStatus: 'dead',
+        originalFailureCode: 'provider-rejected', operatorId: 'legacy-v8-migration' })
+    expect(migrated.getDeadLetterResolution({ kind: 'outbox', id: ambiguous.id, attemptCount: 1 }))
+      .toMatchObject({ resolution: 'cancel', originalStatus: 'unknown_after_send',
+        originalFailureCode: 'response-lost', operatorId: 'legacy-v8-migration' })
+    expect(migrated.health()).toMatchObject({
+      deadLetterOutbox: 1, actionableDeadLetterOutbox: 0, resolvedDeadLetterOutbox: 1,
+      unknownOutbox: 1, actionableUnknownOutbox: 0, resolvedUnknownOutbox: 1,
+    })
+    for (const id of [dead.id, ambiguous.id]) {
+      expect(() => migrated.resolveOutbox({ outboxId: id, expectedAttemptCount: 1,
+        resolution: 'retry', operatorId: 'owner-operator' }))
+        .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    }
+    expect(migrated.claimOutbox({ ownerId: 'worker-c', leaseMs: 100,
+      limit: 2, maxAttempts: 3 })).toEqual([])
+    migrated.close()
+  })
+
+  test('fences an already-open v8 writer after v9 migration', async () => {
+    const f = await fixture()
+    const record = f.store.enqueue(intent('v8-live-writer-unknown', f))
+    const claim = f.store.claimOutbox({ ownerId: 'worker-a', leaseMs: 100,
+      limit: 1, maxAttempts: 3 })[0]!
+    f.store.finishOutbox({ outboxId: record.id, ownerId: 'worker-a',
+      fencingToken: claim.fencingToken, outcome: 'unknown_after_send',
+      providerMessageId: 'om_v8_live_writer', failureCode: 'response-lost' })
+    f.store.close()
+
+    const downgrade = new DatabaseSync(f.databasePath)
+    downgrade.exec(`
+      DROP TABLE IF EXISTS delivery_preference_projection_outbox;
+      DROP TABLE IF EXISTS trusted_delivery_evaluation_outbox;
+      DROP TABLE IF EXISTS workflow_trace_commands;
+      DROP TABLE IF EXISTS workflow_trace_outbox;
+      DROP TABLE IF EXISTS workflow_trace_current;
+      DROP TABLE IF EXISTS workflow_trace_revisions;
+      DROP TABLE IF EXISTS workflow_template_registry;
+      DROP TABLE IF EXISTS workflow_trace_source;
+      DROP TABLE IF EXISTS delivery_presentations;
+      DROP TRIGGER dead_letter_inbox_resolution_fence;
+      DROP TRIGGER dead_letter_outbox_resolution_fence;
+      DROP TRIGGER dead_letter_outbox_cancelled_unknown_fence;
+      DROP TABLE dead_letter_resolutions;
+      PRAGMA user_version = 8;
+    `)
+    downgrade.close()
+    const legacyWriter = new DatabaseSync(f.databasePath)
+    const migrated = new DeliveryStore({ path: f.databasePath, now: () => 2_000 })
+
+    expect(() => legacyWriter.prepare(`
+      UPDATE outbox_messages
+      SET status = 'dead', failure_code = 'operator-cancelled', updated_at = 2_000
+      WHERE id = ? AND status = 'unknown_after_send' AND attempt_count = 1
+    `).run(record.id)).toThrowError(/exact v9 receipt/)
+    expect(migrated.getOutbox(record.id)).toMatchObject({
+      status: 'unknown_after_send', failureCode: 'response-lost',
+    })
+    expect(migrated.getDeadLetterResolution({ kind: 'outbox', id: record.id,
+      attemptCount: 1 })).toBeUndefined()
+
+    migrated.resolveOutbox({ outboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'cancel', operatorId: 'owner-operator' })
+    expect(() => legacyWriter.prepare(`
+      UPDATE outbox_messages
+      SET status = 'attempting', attempt_count = attempt_count + 1,
+        claimed_by = 'legacy-worker', fencing_token = 99, lease_until = 3_000, updated_at = 2_001
+      WHERE id = ? AND status = 'unknown_after_send' AND attempt_count = 1
+    `).run(record.id)).toThrowError(/cannot be reclaimed/)
+    expect(() => legacyWriter.prepare(`
+      UPDATE outbox_messages
+      SET status = 'pending', failure_code = NULL, updated_at = 2_001
+      WHERE id = ? AND status = 'unknown_after_send' AND attempt_count = 1
+    `).run(record.id)).toThrowError(/cannot be reclaimed|exact v9 receipt/)
+    const fenced = migrated.getOutbox(record.id)!
+    expect(fenced).toMatchObject({ status: 'unknown_after_send', attemptCount: 1 })
+    expect(fenced.claimedBy).toBeUndefined()
+    expect(migrated.claimOutbox({ ownerId: 'worker-b', leaseMs: 100,
+      limit: 1, maxAttempts: 3 })).toEqual([])
+    legacyWriter.close()
+    migrated.close()
+  })
+
+  test('accepts late external delivery facts after an ambiguous attempt was cancelled', async () => {
+    const f = await fixture()
+    const record = f.store.enqueue(intent('cancel-unknown-late-receipt', f))
+    const claim = f.store.claimOutbox({ ownerId: 'worker-a', leaseMs: 100,
+      limit: 1, maxAttempts: 3 })[0]!
+    f.store.finishOutbox({ outboxId: record.id, ownerId: 'worker-a',
+      fencingToken: claim.fencingToken, outcome: 'unknown_after_send',
+      providerMessageId: 'om_late_delivery', failureCode: 'response-lost' })
+    f.store.resolveOutbox({ outboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'cancel', operatorId: 'owner-operator' })
+
+    const delivered: DeliveryReceipt = {
+      channel: 'lark', account: 'bot-1', providerMessageId: 'om_late_delivery',
+      status: 'delivered', occurredAt: 1_100,
+    }
+    const updated = f.store.recordReceipt(delivered)
+    expect(updated).toMatchObject({ id: record.id, status: 'delivered' })
+    expect(updated.failureCode).toBeUndefined()
+    expect(f.store.getDeadLetterResolution({ kind: 'outbox', id: record.id,
+      attemptCount: 1 })).toMatchObject({
+      resolution: 'cancel', originalStatus: 'unknown_after_send', operatorId: 'owner-operator',
+    })
+    expect(f.store.health()).toMatchObject({
+      unknownOutbox: 0, actionableUnknownOutbox: 0, resolvedUnknownOutbox: 0,
+    })
+    expect(f.store.claimOutbox({ ownerId: 'worker-b', leaseMs: 100,
+      limit: 1, maxAttempts: 3 })).toEqual([])
+    f.store.close()
+  })
+
+  test('tombstones an operator-cancelled unknown send without resending it and unblocks its lane', async () => {
+    const f = await fixture()
+    const unknown = f.store.enqueue(intent('cancel-unknown', f))
+    const following = f.store.enqueue(intent('after-cancelled-unknown', f))
+    const first = f.store.claimOutbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.finishOutbox({ outboxId: unknown.id, ownerId: 'worker-a', fencingToken: first.fencingToken,
+      outcome: 'unknown_after_send', failureCode: 'response-lost' })
+    expect(f.store.health()).toMatchObject({
+      unknownOutbox: 1,
+      actionableUnknownOutbox: 1,
+      resolvedUnknownOutbox: 0,
+    })
+
+    expect(f.store.resolveOutbox({ outboxId: unknown.id, expectedAttemptCount: 1,
+      resolution: 'cancel', operatorId: 'owner-operator' }))
+      .toMatchObject({ record: { status: 'unknown_after_send', attemptCount: 1,
+        failureCode: 'operator-cancelled-unknown' }, replayed: false })
+    expect(f.store.getDeadLetterResolution({ kind: 'outbox', id: unknown.id, attemptCount: 1 })).toEqual({
+      receiptVersion: 1,
+      kind: 'outbox',
+      id: unknown.id,
+      attemptCount: 1,
+      resolution: 'cancel',
+      originalStatus: 'unknown_after_send',
+      originalFailureCode: 'response-lost',
+      operatorId: 'owner-operator',
+      createdAt: 1_000,
+    })
+    expect(() => f.store.resolveOutbox({ outboxId: unknown.id, expectedAttemptCount: 1,
+      resolution: 'retry', operatorId: 'owner-operator' }))
+      .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    expect(f.store.health()).toMatchObject({
+      unknownOutbox: 1,
+      actionableUnknownOutbox: 0,
+      resolvedUnknownOutbox: 1,
+    })
+
+    const claims = f.store.claimOutbox({ ownerId: 'worker-b', leaseMs: 100, limit: 2, maxAttempts: 3 })
+    expect(claims)
+      .toEqual([expect.objectContaining({ mode: 'send', record: expect.objectContaining({ id: following.id }) })])
+    f.store.finishOutbox({ outboxId: following.id, ownerId: 'worker-b', fencingToken: claims[0]!.fencingToken,
+      outcome: 'accepted', providerMessageId: 'om_after_cancelled_unknown' })
+    expect(f.store.getOutbox(unknown.id)).toMatchObject({ status: 'unknown_after_send', attemptCount: 1,
+      failureCode: 'operator-cancelled-unknown' })
+    f.store.close()
+
+    const reopened = new DeliveryStore({ path: f.databasePath, now: () => 2_000 })
+    expect(reopened.health()).toMatchObject({
+      unknownOutbox: 1,
+      actionableUnknownOutbox: 0,
+      resolvedUnknownOutbox: 1,
+    })
+    expect(reopened.resolveOutbox({ outboxId: unknown.id, expectedAttemptCount: 1,
+      resolution: 'cancel', operatorId: 'owner-operator' }))
+      .toMatchObject({ record: { id: unknown.id, status: 'unknown_after_send' },
+        receipt: { resolution: 'cancel', operatorId: 'owner-operator' }, replayed: true })
+    expect(() => reopened.resolveOutbox({ outboxId: unknown.id, expectedAttemptCount: 1,
+      resolution: 'cancel', operatorId: 'different-operator' }))
+      .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    expect(reopened.claimOutbox({ ownerId: 'worker-c', leaseMs: 100, limit: 1, maxAttempts: 3 }))
+      .toEqual([])
+    reopened.close()
+  })
+
+  test('canonicalizes equivalent Unicode operator identities before receipt idempotency', async () => {
+    const f = await fixture()
+    const record = f.store.enqueue(intent('unicode-operator-replay', f))
+    const claim = f.store.claimOutbox({ ownerId: 'worker-a', leaseMs: 100,
+      limit: 1, maxAttempts: 1 })[0]!
+    f.store.finishOutbox({ outboxId: record.id, ownerId: 'worker-a',
+      fencingToken: claim.fencingToken, outcome: 'dead', failureCode: 'permanent' })
+
+    const first = f.store.resolveOutbox({ outboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'cancel', operatorId: 'ope\u0301rator' })
+    expect(first).toMatchObject({ receipt: { operatorId: 'opérator' }, replayed: false })
+    expect(f.store.resolveOutbox({ outboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'cancel', operatorId: 'opérator' }))
+      .toMatchObject({ receipt: { operatorId: 'opérator' }, replayed: true })
+    expect(() => f.store.resolveOutbox({ outboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'cancel', operatorId: 'bad\noperator' }))
+      .toThrowError(expect.objectContaining({ code: 'conflict' }))
     f.store.close()
   })
 
@@ -432,8 +885,9 @@ describe('durable outbox', () => {
     f.store.rotateBinding({ bindingId: f.binding.id, expectedVersion: f.binding.version, sessionId: 'session-rotated' })
 
     expect(() => f.store.resolveOutbox({
-      outboxId: record.id, expectedAttemptCount: 1, resolution: 'retry',
+      outboxId: record.id, expectedAttemptCount: 1, resolution: 'retry', operatorId: 'test-operator',
     })).toThrowError(expect.objectContaining({ code: 'conflict' }))
+    expect(f.store.getDeadLetterResolution({ kind: 'outbox', id: record.id, attemptCount: 1 })).toBeUndefined()
     expect(f.store.claimOutbox({ ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 3,
       unknownReconcileRoutes: [] })).toEqual([])
     f.store.close()

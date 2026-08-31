@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
+import { RECOVERY_CATALOG_DIGEST } from '@dsh-enhanced/assistant-recovery'
 import {
   assertEffectiveSupervisedGrowthConfig,
   configureSupervisedGrowthProfilePatch,
@@ -109,7 +110,7 @@ describe('one-click installers', () => {
     expect(result.stdout).not.toContain('dsh-lark-setup')
   })
 
-  test('lark skip can explicitly disable managed foreground capability without touching channel onboarding', async () => {
+  test('standard Lark installs automatic preference learning without the supervised operations stack', async () => {
     const dshHome = await temporaryDshHome()
     const result = runInstaller(localInstaller, [
       '--dry-run', '--scenario', 'lark', '--lark', 'skip', '--agent-tools', 'disable',
@@ -118,6 +119,12 @@ describe('one-click installers', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('部署场景：lark')
     expect(result.stdout).toContain('Agent 工具授权：disable')
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'preference-learning'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-evaluation'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-evolution'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-heartbeat'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-health'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-recovery'))
     expect(result.stdout).toContain(
       `${join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')} `
       + '--profile web --refresh-agent-policy --disable-agent-tools',
@@ -158,6 +165,29 @@ describe('one-click installers', () => {
     expect(result.stdout).not.toContain('@dsh-enhanced/hello@')
   })
 
+  test('npm supervised install defaults every required bundle to the installer release', async () => {
+    const dshHome = await temporaryDshHome()
+    const installer = await readFile(npmInstaller, 'utf8')
+    const release = installer.match(/^DSH_ENHANCED_PINNED_RELEASE_REF='v([^']+)'$/mu)?.[1]
+    expect(release).toMatch(/^\d+\.\d+\.\d+$/u)
+
+    const result = runInstaller(npmInstaller, [
+      '--dry-run', '--scenario', 'supervised', '--lark', 'configure',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    const selected = [...result.stdout.matchAll(/@dsh-enhanced\/([a-z0-9-]+)@([^\s]+)/gu)]
+    expect(selected.length).toBeGreaterThan(0)
+    expect(new Set(selected.map(match => match[2]))).toEqual(new Set([release]))
+    const slugs = new Set(selected.map(match => match[1]))
+    for (const required of [
+      'personal-assistant', 'assistant-delivery', 'assistant-evaluation',
+      'assistant-evolution', 'assistant-growth-experiments', 'preference-learning', 'assistant-heartbeat',
+      'assistant-health', 'assistant-recovery', 'lark-channel',
+    ]) expect(slugs.has(required), `missing ${required}`).toBe(true)
+    expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000')
+  })
+
   test('refuses incompatible stored permission defaults before changing the installation', async () => {
     for (const preset of ['read-only', 'unrecognized-local-preset']) {
       const dshHome = await temporaryDshHome()
@@ -189,20 +219,29 @@ describe('one-click installers', () => {
     }
   })
 
-  test('supervised-growth installs every activator dependency then invokes it after Lark onboarding', async () => {
+  test('Recovery README primary command installs every activator dependency then invokes it after Lark onboarding', async () => {
     const dshHome = await temporaryDshHome()
+    const readme = await readFile(join(repoRoot, 'plugins', 'assistant-recovery', 'README.md'), 'utf8')
+    const documentedCommand = readme.match(/^\.\/scripts\/install\/install-local\.sh --scenario supervised --lark configure$/mu)?.[0]
+    expect(documentedCommand).toBeDefined()
+    const [, ...documentedArgs] = documentedCommand!.split(/\s+/u)
 
     const result = runInstaller(localInstaller, [
-      '--dry-run', '--mode', 'supervised-growth', '--lark', 'configure',
+      '--dry-run', ...documentedArgs,
     ], dshHome)
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('部署模式：supervised-growth')
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'personal-assistant'))
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-delivery'))
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'lark-channel'))
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-evolution'))
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-evaluation'))
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-growth-experiments'))
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'preference-learning'))
     expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-heartbeat'))
-    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-health'))
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-health'))
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-recovery'))
     expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'traex-acp-provider'))
     expect(result.stdout).toContain('dsh-lark-setup --profile web')
     expect(result.stdout).toContain('dsh-supervised-growth-setup --profile web --timeout-ms 300000')
@@ -242,17 +281,23 @@ describe('one-click installers', () => {
     } as const
     const overlay = parse(configureSupervisedGrowthProfilePatch({
       profilePatch: '[]\n', effectiveConfig: effectiveBefore, dshHome, binding,
+      activationState: 'preview',
+      activationNonce: 'installer-compose-preview',
+      recoveryCatalogDigest: RECOVERY_CATALOG_DIGEST,
     }), yamlOptions) as any[]
     const composed = new Map(installedRows.map(row => [row.id, row]))
     for (const row of overlay) composed.set(row.id, row)
 
     expect(assertEffectiveSupervisedGrowthConfig({
       effectiveConfig: stringify([...composed.values()]), dshHome, binding,
+      activationState: 'preview',
+      activationNonce: 'installer-compose-preview',
+      recoveryCatalogDigest: RECOVERY_CATALOG_DIGEST,
     })).toMatchObject({
       workspace: join(dshHome, 'assistant-workspace'),
       agentPreset: 'standard',
-      provider: 'deepseek-official',
-      model: 'deepseek-v4-flash',
+      activationState: 'preview',
+      automationId: 'recovery:supervised-growth',
     })
   })
 

@@ -231,7 +231,8 @@ describe('adapter registry and delivery coordinator', () => {
       failureCode: 'lost' })
     expect(f.store.getOutbox(next.id)).toMatchObject({ status: 'pending', attemptCount: 0 })
 
-    f.store.resolveOutbox({ outboxId: row.id, expectedAttemptCount: 1, resolution: 'cancel' })
+    f.store.resolveOutbox({ outboxId: row.id, expectedAttemptCount: 1,
+      resolution: 'cancel', operatorId: 'test-operator' })
     await f.coordinator.tick()
     await f.coordinator.whenIdle()
     expect(send).toHaveBeenCalledTimes(2)

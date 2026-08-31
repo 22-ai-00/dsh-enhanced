@@ -12,10 +12,10 @@
 # 本机 Web/direct 核心
 ./scripts/install/install-local.sh --scenario core --yes
 
-# 飞书/Lark 持久消息与 owner onboarding
+# 飞书/Lark 持久消息、owner onboarding 与日常使用自动偏好学习
 ./scripts/install/install-local.sh --scenario lark --lark configure
 
-# 飞书 + Evaluation + Preference Learning + Heartbeat；低风险自动、高影响审批
+# 在上述能力上增加 Evaluation + Evolution + Recovery；低风险自动、高影响审批
 ./scripts/install/install-local.sh --scenario supervised --lark configure
 ```
 
@@ -23,7 +23,9 @@
 
 管理内建服务时，安装器会在 OAuth 前检查 systemd user manager 和 lingering。当前用户有权时会自动启用 lingering；需要管理员权限时，交互向导会先展示唯一的固定提权命令，并询问是否现在通过 `sudo` 执行，密码由 `sudo` 直接读取，不进入安装器、参数或日志。拒绝、失败或非交互运行都会在云端授权前停止并给出同一条可复制命令。容器、未启用 systemd 的 WSL 或其他没有 systemd user manager/logind 的系统应使用 `--no-service`，并由 Docker、s6、runit 等外部 supervisor 保持 `dsh --profile <name> --no-open` 常驻；此时安装器不会宣称或验证内建服务的注销后存活能力。
 
-`supervised` 额外安装 Evaluation、Preference Learning、Evolution 与 Heartbeat；Host 固定风险目录中的低风险、局部、可逆成长可在 TTL、预算和回滚门内自动生效，高影响动作仍生成 owner proposal。激活器复用有效 profile 已配置的 `agentProvider` / `agentModel`，不会安装、硬编码或强制切换到特定模型 provider。需要 TraeX 时显式加 `--with traex`。`assistant-health` 目前只负责检测、不参与激活或修复，所以不默认安装；需要只读诊断时显式加 `--with health`。
+普通 `lark` 场景已经安装 Preference Learning：经 owner onboarding 的完成对话只产生无正文的有界行为证据，并可在固定 T1 目录、阈值和回滚门内自动应用偏好；它不要求 Health、Heartbeat 或 Recovery，也不会新增通用 Agent 工具授权。`--disable-agent-tools` 只移除向导托管的规则，不覆盖用户自定义规则或显式的全局 Policy 默认值。
+
+`supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Recovery 与 Health；v2 激活器用同一 nonce 执行 preview→active 的固定 Host runbook。Recovery bootstrap 本身不依赖模型；独立 `supervised-growth-analyst` 每天最多运行一次，只能读取一个 Host 选出的 adoption candidate 并生成 owner 审批 proposal，不能投递普通模型正文。成长 overlay 会把 Heartbeat 连同 Delivery、Evaluation、Preference Learning、Evolution、Growth Experiments、Recovery、Lark Channel 和四个核心 service 标记为 Health required，并为审批后的 workflow replay/shadow/单次 canary 配置独立的低额度预算与 exact owner route。升级时旧 `supervised-growth` model heartbeat 会被安全暂停；TraeX 仍只在显式 `--with traex` 时安装。
 
 `--with coding|traex|health|heartbeat|events|bridge` 可为其他场景追加能力。`--scenario full` 只用于迁移旧的全量默认集合；新安装不应使用它。`--mode supervised-growth` 保持兼容，等价于 supervised 场景。
 
@@ -51,6 +53,7 @@
 `--require-service` 在 Linux 同时验证 systemd user unit 和 lingering；若未启用 lingering，注销会停止 user service，按 doctor 提示运行 `sudo loginctl enable-linger "$(id -u)"`。macOS LaunchAgent 与 Windows 当前用户计划任务只能在用户登录会话中运行；Windows 的任务会在失败后重启，但不宣称注销后继续运行。
 
 远程 npm 安装器不再从 mutable `main` 下载库文件。应从一个发布标签下载 `install-npm.sh`；当脚本不在 `common.sh` 旁边运行时，它只会获取同一 `vX.Y.Z` 标签的 `common.sh` 并验证内嵌 SHA-256。发布流程会在 `release:prepare` 自动更新该 tag 与 digest。
+安装器默认把每个 `@dsh-enhanced/*` 目标精确固定到这个内嵌发布标签的版本，避免递归 npm 发布尚未全部完成时由 `latest` 解析出混合版本；只有显式传入 `--plugin-version` 或 `DSH_ENHANCED_VERSION` 才会覆盖。`supervised` 场景要求完整的同版本 bundle 集合，安装后才运行 preview→active 激活器。
 
 本地源码改动后仅重建并重启已有常驻服务：
 

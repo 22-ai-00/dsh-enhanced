@@ -39,6 +39,8 @@
 | [memory-wiki-bridge](memory-wiki-bridge) | `@dsh-enhanced/memory-wiki-bridge` | 实验性 | 只通过公开 service 生成带稳定 provenance 的 Memory↔Wiki 审批提案。 |
 | [assistant-evolution](assistant-evolution) | `@dsh-enhanced/assistant-evolution` | 实验性 | 审批门控的行为自演化：按证据提出 guidance，经 owner 批准后注入；只允许对 Host 证明已退化的 exact rule 自动回滚，不能自我采用、扩权或原地改写。 |
 | [assistant-health](assistant-health) | `@dsh-enhanced/assistant-health` | 实验性 | 聚合 provider 自有 health seam 的脱敏 liveness/readiness/详细报告。 |
+| [assistant-recovery](assistant-recovery) | `@dsh-enhanced/assistant-recovery` | 实验性 | 无模型、固定 catalog、带幂等步骤账本的 `supervised-growth/v2` Host 恢复控制面。 |
+| [assistant-growth-experiments](assistant-growth-experiments) | `@dsh-enhanced/assistant-growth-experiments` | 实验性（仅显式安装） | 工作流 replay/shadow/canary 的边界原型；真实 Automations 端口和组合验收完成前不进入默认个人助理成长配置。 |
 | [plugin-control-plane](plugin-control-plane) | `@dsh-enhanced/plugin-control-plane` | 实验性 | 按能力发现、owner 审批、隔离验证与原子启用 bundle；源码创建/修改只允许 linked Git worktree + `pnpm check` + PR。 |
 
 ## 示例与开发

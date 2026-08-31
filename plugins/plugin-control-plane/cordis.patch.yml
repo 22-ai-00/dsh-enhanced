@@ -4,4 +4,5 @@
       config:
         catalogPath: !!js dshHomePath('plugin-control/catalog.json')
         statePath: !!js dshHomePath('plugin-control/plans')
+        trustPath: !!js dshHomePath('plugin-control/trust.json')
         proposalTtlMs: 900000

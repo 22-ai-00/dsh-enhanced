@@ -123,7 +123,7 @@ function assertSuccessfulMigration(results: WorkerMessage[]): void {
   expect(results.map(result => result.error)).toEqual(Array.from({ length: results.length }))
   expect(results.map(result => result.result)).toEqual(Array.from({ length: results.length }, () => ({
     schemaVersion: preferenceSchemaVersion,
-    schemaTables: 5,
+    schemaTables: 11,
     journalMode: 'wal',
     secureDelete: 1,
   })))

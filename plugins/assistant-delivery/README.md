@@ -8,7 +8,7 @@
 
 - DSH / Agent / Agent Presets / LLM / Session：`>=0.1.0-rc.8 <0.2.0`
 - `@deepseek-ai/dsh-attachment`：`>=0.1.0-rc.8 <0.2.0`，仅图片入站路径需要的可选 Host service
-- `@deepseek-ai/dsh-commands`：`>=0.1.0-rc.8 <0.2.0`，可选 Host command service；按 `0.1.0-rc.8` 命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
+- `@deepseek-ai/dsh-commands`：`>=0.1.0-rc.8 <0.2.0`，可选 Host command service；按 `0.1.0-rc.8` 命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
 - `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：`>=0.1.0-rc.8 <0.2.0`，权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
 - Cordis：`^4.0.1`
 - `@dsh-enhanced/assistant-policy`：`>=0.1.0 <0.2.0`，硬依赖
@@ -37,7 +37,7 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent
 | `tickIntervalMs` | `1000` | pump 周期 |
 | `leaseMs` | `30000` | 单次 Inbox/Outbox/模型确认 claim 租约，也是模型确认实时解析的 deadline；运行中的 Inbox turn 与 Outbox send 都会周期续租 |
 | `maxAttempts` | `5` | 发送与 unknown 对账各自的自动尝试上限；owner 显式 retry 会在不重置审计计数的前提下再授予一次尝试；无对账能力的 unknown 保持待人工处理 |
-| `maxConcurrency` | `4` | 跨 binding 并发数；同一 binding 始终串行 |
+| `maxConcurrency` | `4` | 跨 owner scope 并发数；同一 durable principal row + workspace + preset 即使有多个 binding 也按 Inbox admission 顺序串行 |
 | `maxTextBytes` | `65536` | 单条入站/出站正文 UTF-8 上限 |
 | `retryBaseMs` / `retryMaxMs` | `1000` / `300000` | 指数退避边界；adapter 的 Retry-After 是下限 |
 | `pairingTtlMs` / `pairingMaxAttempts` | `600000` / `5` | 一次性本地配对时效与尝试上限 |
@@ -49,6 +49,7 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent
 | `modelPickerTtlMs` | `900000` | `/model` 选择卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 | `permissionPickerTtlMs` | `900000` | `/permissions` 三档权限卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 | `toolApprovalTtlMs` | `300000` | 当前 open turn 的即时工具审批有效期；范围 1 秒至 5 分钟 |
+| `ownerRoutes` | `[]` | Host-owned 稳定 owner 路由；每项精确固定 id、conversation、principal、绝对 workspace、preset、policyRef 和 minimumGeneration |
 
 所有可变部署值都经过 Schemastery 校验。每个 binding 会持久固定 workspace 与已解析的 preset id；有 roster 时，fresh create 和 cold resume 都在 Agent 发布前挂载该 preset，不能把 session header 中的 `agentPreset` 当成已经完成组合。fresh create 的新 workspace 使用 `0700` 请求模式，已有目录的权限不会被改写；cold resume 只验证持久 workspace 仍是目录，不会在仓库被删除或网络盘掉线时悄悄创建一个空目录。SQLite 使用 `WAL`、`synchronous=FULL`、foreign keys、busy timeout 和 forward-only schema；私有目录/数据库权限分别收窄为 `0700` / `0600`，未来 schema 会拒绝打开。
 
@@ -82,17 +83,59 @@ rules:
     actions: [execute]
     resource: { kind: tool, id: bash }
     context: { initiators: [external] }
-  - id: one-automation-send
+  - id: supervised-growth-owner-route
     effect: allow
-    subject: { kind: background, id: daily-review, workspace: "/absolute/workspace" }
-    actions: [approval.send, send]
-    resource: { kind: message, id: "binding_*" }
+    subject:
+      kind: background
+      id: growth-supervisor
+      workspace: "/absolute/workspace"
+      principal: "lark/my-bot/my-tenant/my-user"
+    actions: [send]
+    resource: { kind: message, id: "route:supervised-growth-owner" }
     context: { initiators: [background] }
 ```
 
 能力挂载、Policy 可达性和执行审查是分层的门：preset mount 决定 `bash`、`read`、`glob`、`grep` 等工具是否进入 Agent 目录，Policy 再按主体与 initiator 授权。安装器默认为本地 Web/direct `foreground` Agent 写入跨 preset/workspace 的通用 capability 规则，并为 Delivery 写入精确 preset + 绝对 workspace + canonical external principal + `external` 规则；Delivery 在每次 create/resume 时从 binding/envelope 绑定同一 principal。通配 action/resource 同时覆盖动态工具和 `memory.search`、`wiki.read`、`automation.propose` 等插件内部二次 Policy 动作，而 `background` 不会因此放宽。自定义部署可使用更窄的 allowlist 或显式 deny，deny 始终优先。message ingress/reply 使用 `resource.id: "*"` 是预期行为。`policyRef` 目前只是 binding 上的审计标签，不会把规则自动收窄为 DM；同一 owner principal 在群内 @ 机器人时仍会使用其精确 external Agent 规则。
 
 `issuePairing()`、`linkPrincipal()`、`resolveDeadLetter()` 是可信本地控制面 API，不注册为模型工具。配对 code 只返回一次，数据库只保存随机 salt 的 scrypt hash；空 allowlist 不会把第一位来信者设成 owner。跨平台 principal 必须分别配对后再由 owner 显式 link。
+
+### 稳定 owner 路由
+
+长期运行的 supervised-growth / recovery 控制面不应把某一代 `bindingId` 当作永久收件地址。部署方可以在 Delivery 配置中声明稳定但不扩权的 Host authority：
+
+```yaml
+ownerRoutes:
+  - id: supervised-growth-owner
+    conversation:
+      channel: lark
+      account: my-bot
+      tenant: my-tenant
+      kind: dm
+      chat: oc_owner
+    principal:
+      channel: lark
+      account: my-bot
+      tenant: my-tenant
+      user: my-user
+    workspace: /absolute/workspace
+    agentPreset: personal-assistant
+    policyRef: owner-dm
+    minimumGeneration: 1
+```
+
+`resolveOwnerRoute(id)` 每次从 binding ledger 读取该 conversation 的当前 active binding，只接受 active owner，且要求 principal、workspace、agent preset、policyRef 全部逐项相等、generation 不低于显式 floor；`/new` 产生的同 lineage 下一代可单调前进，任一身份或作用域漂移都会 fail closed。authority 只存在于 Host 配置和 service API，不注册为 Agent 工具、不进入 prompt，也不能由成长系统自行创建或修改。
+
+`enqueueBackgroundRoute()` 的 Policy resource 固定为精确的 `message/route:<authorityId>`，subject 同时带配置中的 workspace 与 canonical owner principal；部署规则不需要、也不应为这条控制路径授予 message 通配符。Policy 通过后，Delivery 会在同一个 `BEGIN IMMEDIATE` 事务内重新解析 active binding 并写 Outbox，封住授权期间 `/new` 的竞态。claim 时还会在同一写事务内重新验证 authority、source hash、完整 owner scope、generation floor 与当前 exact Policy；route 被删除、修改或撤权时不会调用 adapter，而是写入带 `owner-route-*` failure code 的 terminal Outbox 和 `outbox_attempts` 审计 receipt。
+
+显式 Policy deny 表示 T3 撤权并永久 dead；Policy 检查本身抛错（例如 SQLite busy、滚动部署中的短暂不可用）不等同撤权。claim 前发生时，消息保持 `retry_wait`、`attemptCount` 不增加并暴露 `owner-route-policy-check-failed`；claim 后、adapter I/O 前发生时，当前 not-sent attempt 进入带退避的 `retry_wait`。两者都不会调用 provider，Policy 恢复后可自动继续。锁顺序也保持单向：enqueue 的 Policy 写在进入 Delivery 事务前已经完成；claim 只有 Delivery→Policy 的同步检查，没有持有 Policy 写事务再进入 Delivery 的反向路径。运维可用 `pendingOutbox` 加该 failure code 定位持续锁冲突，而不丢失唯一告警。
+
+每条 route Outbox 的 immutable metadata 都保存 authority/source identity、authority/source hash、最初与当前解析出的 binding id/version/generation、minimumGeneration 与 receipt version，供 incident 按原 lineage 和实际 dispatch generation 对账。相同 idempotency key、authority、source、正文与格式在 `/new` 或 Host 重启后仍返回原 Outbox；修改任何不可变内容都会冲突。
+
+若尚未发生 provider I/O，`pending` 或由 provider 明确证明 not-sent 的 `retry_wait` 可以在 claim 前用 CAS 单调重绑定到同身份、同 scope 的 `/new` generation；intent、route snapshot/hash 与 lane 会一起原子更新，最初 lineage 保持不变。claim 后、真正调用 adapter 前还会再次核对 authority 与 Policy；刚好在 claim 后提交的同 scope `/new` 可继续向稳定 conversation 发送，任何 principal/workspace/preset/policyRef 漂移仍失败关闭。已有 `attempting`/accepted/ambiguous 证据的记录绝不通过该路径迁移。
+
+如果原记录已经是 `unknown_after_send`，重放只返回该 ambiguous 记录，不迁移到新 generation、不重新入队、更不会自动重发；稳定 route 的 operator `retry` 也会被拒绝。它只能在原 lineage 上由 adapter reconcile、由 owner cancel/park，或被后到的 provider receipt 单调结算。这是稳定 route 比普通 Outbox 更严格的 unknown-send 契约。
+
+不同 Host 必须部署同一份 authority 配置。同一 idempotency key 的配置漂移会由 authority hash receipt 拒绝；本功能刻意不增加数据库 schema，因此使用不同新 key 的两个 Host 不会通过账本互相证明配置一致，部署层仍需用同一受控 profile 发布并校验配置。
 
 `pairPrincipalLocally()` 是给安装向导使用的更窄离线入口：调用方必须已经拥有私有 Delivery SQLite 的本机文件权限，并提供完整 typed principal；函数内部仍走一次 challenge/confirm 事务，只返回 principal 记录，不返回 code。`lark-channel` 向导先用一次性 DM 短语确认具体 `open_id`，再调用该入口；普通 Agent、外部消息和后台任务都无法访问它。
 
@@ -129,7 +172,8 @@ rules:
 - `/new`（别名 `/clear`）：停止当前任务并切换到空白的下一 generation；旧 session 及历史不删除。
 - `/stop`：停止当前任务，保留当前 session 与已持久的上下文。
 - `/compact`：仅在当前 DSH command service/preset 实际发布时出现；通过原生命令面执行，不交给模型。
-- `/feedback`：提交固定枚举的响应反馈或低风险回复偏好；在 Delivery 本地处理，不恢复 Agent、不交给模型。
+- `/feedback`：提交固定枚举的响应偏好，或对 exact Automation 结果提交任务目标状态；在 Delivery 本地处理，不恢复 Agent、不交给模型。
+- `/learning`：查看状态或 content-free T1 摘要、暂停、恢复、按 exact T1 key 回滚或清除当前 workspace + preset 的偏好学习；只允许 exact active owner，在 Delivery 本地处理，不恢复 Agent、不交给模型。
 
 渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
 
@@ -137,6 +181,7 @@ rules:
 
 ```text
 /feedback helpful|not-helpful|too-long|too-short|wrong-format|wrong-action|unwanted-reminder
+/feedback achieved|partial|not-achieved
 /feedback verbosity concise|balanced|detailed
 /feedback structure prose|bullets|mixed
 /feedback language zh-CN|en
@@ -145,11 +190,29 @@ rules:
 /feedback ranking recency|familiarity|evidence
 ```
 
-只有 exact active binding 上的 active `owner` principal 可以提交。Delivery 在现有 inbound/reply Policy 通过后核对 durable Inbox/envelope、binding revision、workspace、preset 与 owner 身份，先写 `dispatch-started` fence，再复核一次身份，并对 exact external owner + workspace 执行可审计的 `signal` / `preference:<preset>/<catalog-key>` Policy 授权，最后才向 `subscribePreferenceFeedback(listener)` 注册的唯一权威 sink 发布不可变 typed batch。`linked` principal 即使拥有普通消息入口也不能获得 `owner-authenticated`；event idempotency key 由 provider-scoped event、binding snapshot 和固定 catalog selection 做 SHA-256 派生，不把 event/principal 原文传给下游。证据时间使用 durable Inbox 的 Host `receivedAt`，不相信可能有时钟偏差的 provider 时间。`too-long` / `too-short` 在同一原子 batch 中发布 T0 响应评价和对应的 T1 verbosity 选择。
+`helpful`、`not-helpful` 等只进入 Preference Learning，绝不被推断成任务成功或失败。对于
+Automation 结果，`achieved`、`partial`、`not-achieved` 只接受为带固定反馈说明的、exact production
+Automation 成功结果的直接回复；Automation 结果只能通过 Host-only `enqueueAutomationResult(...)` 进入
+这条路径：Delivery 会重新核对 immutable run、workspace、binding 与输出 digest，并自行生成保留的
+`dsh.learning.*` 证据；普通 `enqueueBackground(...)` 不能提交这些保留 metadata。同一 immutable run
+的相同目标状态幂等重放为同一 Evaluation outcome，之后提交相反状态会报告冲突，不会形成第二票。
 
-注册接口是 Host-only、只读、非模型工具；全进程只允许一个 authoritative sink。sink 必须将整个 batch 原子、持久、幂等地提交，并逐 event 返回 exact key + `recorded` receipt；缺回执、错 key、重复 key、空操作或异常一律不会向用户宣称成功。未安装 Preference Learning 或 sink 已卸载时返回确定性“未记录”；提交结果不明时只报告“状态未知”并明确不要重复反馈，不回显异常、数据库路径或凭据。由于 Delivery 与下游账本不能跨 SQLite 原子提交，sink 成功后进程若在终态回复前退出，Inbox 仍可能显示 ambiguous；同一 provider event 重放由稳定 key 安全去重。
+普通 Agent 回复另有一条更窄的本地 workflow 证据路径：active owner 必须精确回复该条已持久、已投递的 reply，且原始入站正文必须逐字命中已审查的闭集静态 catalog。只有 `achieved` 与该 catalog 同时成立，Delivery 才原子记录 content-free `verified-repetition` trace，并把静态模板保留在私有 registry；正文、模型输出和 owner 自由文本不会投影到 Growth。`partial`、`not-achieved`、未命中 catalog、preview、失败运行、旧 schema、手写 background intent 或不能由 durable Inbox/Outbox route 重新证明的目标只留下不可改写的本地 `no-trace` 回执，绝不宣称任务成功或形成学习样本。
+
+workflow trace 只会投影给一个由 Growth 以 `registerWorkflowTraceSink(...)` 注册的进程内、可撤销 sink。
+Delivery 先持久化 trace outbox，再异步投影并验证 exact receipt；sink 暂时不可用会退避重试，卸载、替换或
+disposer 会立即撤销该 authority。这个 sink 不是模型工具、通用 Growth service 写入面或任意调用方可伪造的
+callback。
+
+只有 exact active binding 上的 active `owner` principal 可以提交。Delivery 在现有 inbound/reply Policy 通过后核对 durable Inbox/envelope、binding revision、workspace、preset 与 owner 身份，先写 `dispatch-started` fence，再复核一次身份，并对 exact external owner + workspace 执行可审计的 `signal` / `preference:<preset>/<catalog-key>` Policy 授权，最后才向唯一权威 sink 发布不可变 typed batch。`linked` principal 即使拥有普通消息入口也不能获得 `owner-authenticated`；event idempotency key 由 provider-scoped event、binding snapshot、durable principal row lineage、Inbox admission cursor 和固定 catalog selection 做 SHA-256 派生，不把 event/principal 原文传给下游。每个 Delivery SQLite 用不可变 instance epoch + 递增序号为 Inbox 建立持久全序，同毫秒事件和跨 binding 控制不依赖墙钟排序；`receivedAt` 只用于保留期，不决定控制 precedence。`too-long` / `too-short` 在同一原子 batch 中发布 T0 响应评价和对应的 T1 verbosity 选择。
+
+注册接口是 Host-only、只读、非模型工具；`preference-projection/v2` 全进程只允许一个 authoritative sink。sink 必须将整个 batch 原子、持久、幂等地提交，并逐 event 返回 exact key + `recorded` receipt。Delivery 先把投影与 reply 写进自己的 SQLite；Preference 尚未安装、重载中或 sink 暂时失败时保留 pending/retry row，之后按原 admission cursor 重放，不重新调用 Agent。投影 outbox 以 `Delivery epoch + workspace + preset + principal row/version` 组成持久 owner lane；同 lane 较早的未终态 cursor 即使尚未到重试时间，也会阻止后续任意 preference key 和 `/learning` control 越过。control 因屏障而 defer 时保留其 durable Inbox recovery，不会把 drain 返回误报为控制成功。缺回执、错 key、重复 key或异常不会伪造下游成功；相同 provider event 与 cursor 由稳定 key 安全去重。旧 v1 或无 cursor 投影在升级边界作为全局 fail-closed 屏障，交给新 Preference 终态 ACK-ignore；无法规范化的损坏行则保留 terminal quarantine 审计后解除屏障，既不会被应用，也不会永久锁死全部学习控制。
 
 Profile 还必须为当前 owner principal 添加精确授权，例如：`subject={kind: external, id: <canonical-owner>, workspace: <workspace>}`、`action=signal`、`resource={kind: preference, id: <preset>/*}`、`initiator=external`。没有这条规则时默认拒绝，普通 `reply` 权限不会隐式获得偏好写入权。
+
+日常使用无需发送命令：普通 owner 文本只有在 Agent turn 完成、session 已 flush 且 exact reply Outbox durable enqueue 后，才会发布 content-free `response.language` behavioral observation。分类器只输出固定的 `zh-CN` / `en`，对短文本、代码块、URL 和混合语言会 abstain；正文和模型输出不会进入学习 event。整条短消息精确匹配“以后简短一点 / 以后用中文回答 / 今后少用列表”等持续偏好闭集（及固定英文等价）时发布 `explicit-selection`；“请用中文回答”等本轮指令不会固化，也不会贡献相反的语言证据。多行、引用、代码、长文本或仅包含短语都不会触发。下游仍须独立执行阈值、TTL、scope、CAS 与回滚门槛。
+
+`/learning` 使用字节精确的闭集语法：`status`、`explain`、`pause`、`resume`、`rollback <exact-T1-catalog-key> confirm`、`forget confirm`。token 之间只接受一个 ASCII 空格，不做 trim 或 Unicode 空白归一化；单独发送 `forget` 只显示确认提示，不删除；命令不接受附件。`explain` 只返回 exact owner + lineage 的 catalog key/value、effect state、version 和 evidence counts，不返回原始内容、不调用模型、不推进 admission high-water。`pause` 持久阻断新证据、T1 激活与 prompt 注入但保留已有记录；`resume` 只接受恢复命令之后收到的新事件，暂停期间已排队的 projection 会被 ACK 丢弃而不会复活；`rollback` 只 CAS 回滚该 key 当前 active T1，无 active 时是准确 no-op，两者都推进 cutoff 防止较旧 projection 复活；`forget confirm` 物理删除该 scope 的信号、假设、transition、exposure 以及较旧 status/pause/explain/rollback 快照，并保留最小 cutoff 防止旧 durable projection 重放。控制回执与 mutation 在同一事务提交，响应丢失或重启后以同一幂等键重放原结果。状态回复独立显示管理员 enabled gate、owner pause gate、已存 active overlays 和当前 effective overlays。
 
 需要 resume 的命令遇到已知的持久化格式不兼容、事件类型缺失或日志损坏时，只返回有界诊断码与恢复建议，不回显 prompt/历史，也不删除原 session；可在修复对应 DSH 插件后重试，或用 `/new` 开始空白会话。
 
@@ -192,7 +255,19 @@ Profile 还必须为当前 owner principal 添加精确授权，例如：`subjec
 
 普通 Agent 回复、Automation 结果和未来 Heartbeat 都必须 enqueue 到同一 Outbox。相同 `idempotencyKey` + 相同不可变 intent 返回同一行；同 key 改正文或 route 会冲突。
 
-延迟审批由 domain 先通过 `prepareAgentApproval()` 从当前 Agent 的 active owner binding 派生不可伪造的 source/binding/workspace/principal route，再把该 route 随 Policy proposal 持久化；background Agent 可由可信 runner 使用 `bindAgentApprovalRoute()` 临时绑定 automation definition 中的 immutable `deliveryBindingId`，该绑定不会注册为模型工具。Delivery tick 会在发送前领取 Policy dispatch，以 `approval-card:<proposalId>` / `approval:<proposalId>` 写入同一 Outbox，再用 CAS 标记已入队；若进程在两步之间退出，重放仍命中同一 intent。schema v6 另以带版本 fence 的持久 `(createdAt, proposalId)` 高水位分页扫描 pending dispatch：无效 route 不会被伪标为已入队，但也不能用一个 poison page 永久饿死后续审批；扫描到尾后回绕重试这些条目，Host 重启与并发 scanner 都不会倒退覆盖新游标。
+延迟审批由 domain 先通过 `prepareAgentApproval()` 从当前 Agent 的 active owner binding 派生不可伪造的 source/binding/workspace/principal route，再把该 route 随 Policy proposal 持久化；background Agent 可由可信 runner 使用 `bindAgentApprovalRoute()` 临时绑定 automation definition 中的 immutable `deliveryBindingId`，该绑定不会注册为模型工具。Delivery 在同一 owner 事务内从 active binding 派生 canonical external `principalId`，并把它固定到私有 workflow template content/digest；Host resolver 在返回 prompt 前会再次核对 exact binding version/generation 与 principal。该 principal 不进入 Growth trace 或 Growth 数据库。Delivery tick 会在发送前领取 Policy dispatch，以 `approval-card:<proposalId>` / `approval:<proposalId>` 写入同一 Outbox，再用 CAS 标记已入队；若进程在两步之间退出，重放仍命中同一 intent。schema v6 另以带版本 fence 的持久 `(createdAt, proposalId)` 高水位分页扫描 pending dispatch：无效 route 不会被伪标为已入队，但也不能用一个 poison page 永久饿死后续审批；扫描到尾后回绕重试这些条目，Host 重启与并发 scanner 都不会倒退覆盖新游标。
+
+Policy 的 `approved` 只表示 owner 决定，不表示领域变更已经应用。schema v10 的 Host-only
+presentation publisher 由 Delivery 只向当前 Evolution 或 Automations 实例签发、可撤销的进程内 capability；它不是
+公开 service API，也不能由普通调用方伪造。该 capability 接收领域结算或 Automation incident 生成的单调版本 typed
+projection，持久等待原 Outbox 真正取得 provider message id，再通过 adapter 原位替换同一条消息。
+只有带 exact rule id/version/status 的 `applied` 可以显示为已生效；`conflicted`、`expired`、
+`rejected` 各自保留独立终态。更新采用 lease、fencing token、payload digest 与重启重试；新 revision
+会压过旧 provider completion，撤权或原消息永久失败则明确进入 dead，而不会把“已入队”误当成“已展示”。
+临时 adapter/provider 更新失败不消耗普通 Outbox 的 `maxAttempts`，会持续退避恢复；只有原消息已不可变 dead
+或 authority/owner route 被撤销才终止该 presentation。
+
+Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同时作为 presentation 与原始 Outbox identity。同 generation 的 open/detail/recovering/resolved revision 会在发送前合并到最新期望；原消息处于 attempting 或 unknown 且没有 provider id 时只等待，不猜测发送结果。取得 provider id 后，每次更新都重新验证原始 owner-route receipt、当前 authority/generation/owner 和 exact Policy；暂时检查失败或 provider update 异常会退避重试，Host 重启和失去 fence 后仍可恢复。generation+1 使用新 identity，因此真正 reopen 会创建新消息。损坏的 presentation 行会原位隔离，不能饿死后续生命周期。
 
 `enqueueApproval()` 只接受固定的 operation/proposal/version/expiry/title/diffHash 字段，并重新核对 active owner、精确 workspace/principal、Policy pending snapshot、展示标题和正文 SHA-256，调用方不能替换审批卡片展示内容。渠道签名后的点击仍必须回到 `settleApproval()`；它从 Outbox 取回持久 operation tuple，并再次核对 active owner binding、principal/chat、proposal version/expiry/diffHash 与 Policy pending snapshot，重复点击只会得到同一持久化结果。若 Policy 已提交而 Delivery 在写回结果前退出，只有此前已经落盘的同一 settlement 且当前 Policy 为精确同一终态时才能通过 `recoverApprovalSettlement()` 补全；该恢复路径不会新建 settlement，也不会决定 pending/expired proposal。
 
@@ -212,6 +287,10 @@ Profile 还必须为当前 owner principal 添加精确授权，例如：`subjec
 - claim/complete 带 owner + fencing token；过期 worker 不能提交新 owner 的结果。
 - 运行中的 Inbox/Outbox claim 每隔约三分之一租期按精确 owner + fencing token 续租；续租失败会 abort Agent/adapter signal，过期 worker 即使随后返回成功也不能提交结果。
 - `maxAttempts` 只限制自动 claim；owner 对 dead letter/unknown 的显式 retry 把状态 CAS 回 `queued`/`pending` 并获得一次新 claim，`attempt_count` 与 attempt ledger 不回绕。
+- schema v9 为每次 operator `cancel|retry` 写入不可变的 `dead_letter_resolutions` receipt，精确绑定 `kind + message id + attempt_count`、原状态/故障码、必填 operator 和 receipt version；消息与 attempt 审计行不会被删除。控制面返回 `{record, receipt, replayed}`，响应丢失后同一 operator 重放同一决定会在重新通过当前 Policy 后幂等返回，换 operator 或相反决定冲突；其中 receipt 指向被结算的旧 exact attempt，record 是重放时的当前消息投影，可能已经进入下一 attempt 或外部 receipt 终态。`retry` receipt 只结算旧 attempt，下一次 claim 会增加 `attempt_count`，若再次失败会重新成为 actionable。
+- v8→v9 会为旧版仅以 `operator-cancelled` 标记的结算回填 legacy receipt，并从 exact attempt 恢复旧 unknown 的 ambiguous 状态。actor 无法恢复，因此明确使用 `legacy-v8-migration` sentinel；被覆盖前故障码优先从同 message + attempt number 的 attempt history 精确恢复，历史缺失或没有 failure code 时写入字面值 `legacy-unknown`，不把缺失伪装成可归责事实。迁移后数据库 trigger 要求所有新的 resolution UPDATE 先有同事务、同原状态/故障快照的 v9 receipt；因此迁移前已打开的 v8 writer 会安全失败，不能绕过 operator identity 或重新领取已取消的 unknown。共享数据库滚动部署应先排空旧 writer，旧实例出现该 fence 错误后由 v9 控制面重做明确决策。
+- `health().deadLetterInbox/deadLetterOutbox/unknownOutbox` 保留为历史 terminal 行总数以兼容旧消费者；告警与健康聚合应使用 `actionableDeadLetterInbox/actionableDeadLetterOutbox/actionableUnknownOutbox`。对应 `resolved*` 字段统计当前 exact attempt 已有 cancel tombstone 的行，因此 operator 已处理的历史不会让系统永久 degraded。
+- `unknown_after_send` cancel 后仍保留为独立的 ambiguous 状态和原始 resolution receipt，不伪装成确定未发送；该 exact attempt 不会再被自动 reconcile/send，并视为 lane terminal，cancel receipt 也不能改写成 retry。若平台随后给出匹配 provider message id 的 delivered/read receipt，外部事实可单调提升当前状态并清除当前失败标记，原 cancel/attempt ledger 仍保留。普通尚未结算的 unknown 只能由显式、Policy-gated operator `retry` 重新入队；稳定 owner route 禁止 retry，只能原 lineage reconcile/cancel/park。系统从不自动重发 unknown send。
 - Agent dispatch 前写 `dispatch-started` marker。此后进程崩溃会进入 `dispatch-ambiguous` dead letter，避免自动产生第二个 turn；这会牺牲一次自动重放，需要 owner 审阅后显式 retry。
 - `/permission` 是受限例外：它使用专用 commit/cancel/failure recovery marker，并以精确 Inbox id（兼容旧 event id）与 `replyToEventId` 共同证明终态 Outbox；崩溃恢复不会把普通 background Outbox 或同名伪造 key 当成完成见证。
 - 当前 rc.8 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。

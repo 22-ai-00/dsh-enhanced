@@ -35,8 +35,110 @@ export function registerEvolutionTools(ctx: Context, service: AssistantEvolution
   const proposedAgents = new WeakSet<object>()
   const rollbackAgents = new WeakSet<object>()
   ctx.tools.register(defineTool({
+    name: 'evolution_adoption_review',
+    description:
+      'Review at most one evidence-backed adoption candidate. This capability is restricted '
+      + 'to the dedicated supervised-growth analyst production Automation.',
+    parameters: {},
+    output: {
+      schema: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          contractVersion: { type: 'string', required: true },
+          candidate: {
+            type: 'object',
+            additionalProperties: false,
+            properties: {
+              contractVersion: { type: 'string', required: true },
+              reviewToken: { type: 'string', required: true },
+              situation: { type: 'string', required: true },
+              failures: { type: 'integer', required: true },
+              total: { type: 'integer', required: true },
+              evidenceDigest: { type: 'string', required: true },
+              evidenceTotal: { type: 'integer', required: true },
+              evidenceWindow: { type: 'integer', required: true },
+              sampleEpisodeIds: {
+                type: 'array',
+                required: true,
+                items: { type: 'string' },
+              },
+              evidence: {
+                type: 'array',
+                required: true,
+                items: {
+                  type: 'object',
+                  additionalProperties: false,
+                  properties: {
+                    episodeId: { type: 'string', required: true },
+                    outcome: { type: 'string', required: true, enum: ['failed', 'succeeded'] },
+                    evidenceKind: {
+                      type: 'string',
+                      required: true,
+                      enum: ['objective', 'verification'],
+                    },
+                    evidenceRef: { type: 'string', required: true },
+                    detail: { type: 'string', required: true },
+                    occurredAt: { type: 'integer', required: true },
+                  },
+                },
+              },
+              proposalExists: { type: 'boolean', required: true },
+            },
+          },
+        },
+      },
+      render: (_args, value) => [{
+        type: 'text',
+        text: renderUntrustedJson('evolution_adoption_review', value),
+      }],
+    },
+    async execute(_args, exec) {
+      const reviewed = service.reviewSupervisedGrowthAdoption(exec.agent)
+      return reviewed.candidate === undefined
+        ? { contractVersion: reviewed.contractVersion }
+        : {
+            contractVersion: reviewed.contractVersion,
+            candidate: {
+              ...reviewed.candidate,
+              sampleEpisodeIds: [...reviewed.candidate.sampleEpisodeIds],
+              evidence: reviewed.candidate.evidence.map(entry => ({ ...entry })),
+            },
+          }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
+    name: 'evolution_adoption_propose',
+    description:
+      'Propose guidance for the exact frozen adoption review. It always creates or joins '
+      + 'an owner approval and never applies guidance directly.',
+    parameters: {
+      review_token: { type: 'string', required: true },
+      guidance: { type: 'string', required: true },
+    },
+    output: {
+      schema: PROPOSAL_OUTPUT,
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args, exec) {
+      const proposed = service.proposeSupervisedGrowthAdoption(exec.agent, {
+        reviewToken: args.review_token,
+        guidance: args.guidance,
+      })
+      return {
+        proposalId: proposed.proposalId,
+        status: proposed.status,
+        version: proposed.version,
+        replayed: proposed.replayed,
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'evolution_observe',
-    description: 'Record one observed outcome for a recurring situation as evidence for future learning.',
+    description:
+      'Append a self-reported operational observation for audit. It cannot create a learning candidate.',
     parameters: {
       situation: { type: 'string', required: true },
       outcome: { type: 'string', required: true, enum: ['succeeded', 'failed'] },
@@ -101,6 +203,12 @@ export function registerEvolutionTools(ctx: Context, service: AssistantEvolution
                     properties: {
                       episodeId: { type: 'string', required: true },
                       outcome: { type: 'string', required: true, enum: ['failed', 'succeeded'] },
+                      evidenceKind: {
+                        type: 'string',
+                        required: true,
+                        enum: ['objective', 'verification'],
+                      },
+                      evidenceRef: { type: 'string', required: true },
                       detail: { type: 'string', required: true },
                       occurredAt: { type: 'integer', required: true },
                     },
@@ -212,10 +320,40 @@ export function registerEvolutionTools(ctx: Context, service: AssistantEvolution
   }))
 
   ctx.tools.register(defineTool({
+    name: 'evolution_undo',
+    description:
+      'Ask the current authenticated owner to immediately remove one exact active guidance version. '
+      + 'This only creates a separate owner approval request; the model cannot approve it, alter guidance, '
+      + 'supply a principal/reason, or bypass the exact version check.',
+    parameters: {
+      rule_id: { type: 'string', required: true },
+      expected_version: { type: 'integer', required: true },
+      operation_id: { type: 'string', required: true },
+    },
+    output: {
+      schema: PROPOSAL_OUTPUT,
+      render: (_args, value) => [{ type: 'text', text: JSON.stringify(value) }],
+    },
+    async execute(args, exec) {
+      const proposed = service.requestOwnerUndo(exec.agent, {
+        ruleId: args.rule_id,
+        expectedVersion: args.expected_version,
+        operationId: args.operation_id,
+      })
+      return {
+        proposalId: proposed.proposalId,
+        status: proposed.status,
+        version: proposed.version,
+        replayed: proposed.replayed,
+      }
+    },
+  }))
+
+  ctx.tools.register(defineTool({
     name: 'evolution_rollback',
     description:
       'Retire one exact active guidance rule only when the Host proves sufficient trusted '
-      + 'post-exposure regression evidence. This low-risk rollback cannot adopt or change guidance, '
+      + 'post-exposure objective/verification regression evidence. This low-risk rollback cannot adopt or change guidance, '
       + 'permissions, evidence, reason, or risk classification.',
     parameters: {
       rule_id: { type: 'string', required: true },

@@ -2,7 +2,388 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 8
+export const deliverySchemaVersion = 15
+
+/**
+ * A database-local, durable total order for every admitted Inbox. The trigger
+ * deliberately lives in SQLite so an already-open v12 process also receives
+ * a cursor after a v13 process migrates the shared database.
+ */
+const inboxAdmissionSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_inbox_admission_clock (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    current_sequence INTEGER NOT NULL CHECK (
+      current_sequence BETWEEN 0 AND 9007199254740991
+    )
+  ) STRICT;
+  INSERT INTO delivery_inbox_admission_clock(singleton, current_sequence)
+    VALUES (1, 0) ON CONFLICT(singleton) DO NOTHING;
+
+  CREATE TABLE IF NOT EXISTS delivery_inbox_admissions (
+    inbox_id TEXT PRIMARY KEY,
+    epoch TEXT NOT NULL CHECK (
+      length(epoch) = 32 AND epoch NOT GLOB '*[^0-9a-f]*'
+    ),
+    admission_sequence INTEGER NOT NULL UNIQUE CHECK (
+      admission_sequence BETWEEN 1 AND 9007199254740991
+    ),
+    FOREIGN KEY (inbox_id) REFERENCES inbox_messages(id) ON DELETE CASCADE
+  ) STRICT;
+
+  INSERT OR IGNORE INTO delivery_inbox_admissions(inbox_id, epoch, admission_sequence)
+  SELECT message.id, instance.instance_id,
+    ROW_NUMBER() OVER (ORDER BY message.rowid)
+  FROM inbox_messages AS message
+  CROSS JOIN delivery_instance AS instance
+  WHERE instance.singleton = 1;
+
+  UPDATE delivery_inbox_admission_clock
+  SET current_sequence = MAX(current_sequence,
+    (SELECT COALESCE(MAX(admission_sequence), 0) FROM delivery_inbox_admissions))
+  WHERE singleton = 1;
+
+  CREATE TRIGGER IF NOT EXISTS delivery_inbox_admission_after_insert
+  AFTER INSERT ON inbox_messages
+  BEGIN
+    UPDATE delivery_inbox_admission_clock
+    SET current_sequence = current_sequence + 1
+    WHERE singleton = 1;
+    INSERT INTO delivery_inbox_admissions(inbox_id, epoch, admission_sequence)
+    SELECT NEW.id, instance.instance_id, clock.current_sequence
+    FROM delivery_instance AS instance
+    CROSS JOIN delivery_inbox_admission_clock AS clock
+    WHERE instance.singleton = 1 AND clock.singleton = 1;
+  END;
+`
+
+const preferenceProjectionSchema = `
+  CREATE TABLE delivery_preference_projection_outbox (
+    batch_key TEXT PRIMARY KEY,
+    payload_digest TEXT NOT NULL CHECK (
+      length(payload_digest) = 64 AND payload_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    events_json TEXT NOT NULL CHECK (
+      json_valid(events_json) AND json_type(events_json) = 'array'
+      AND json_array_length(events_json) BETWEEN 1 AND 16
+    ),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'retry_wait')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at INTEGER NOT NULL,
+    failure_code TEXT,
+    lane_kind TEXT NOT NULL DEFAULT 'unclassified' CHECK (
+      lane_kind IN ('exact', 'legacy', 'unclassified')
+    ),
+    lane_epoch TEXT CHECK (
+      lane_epoch IS NULL OR (
+        length(lane_epoch) = 32 AND lane_epoch NOT GLOB '*[^0-9a-f]*'
+      )
+    ),
+    lane_workspace TEXT,
+    lane_preset TEXT,
+    lane_principal_record_id TEXT,
+    lane_principal_version INTEGER CHECK (
+      lane_principal_version IS NULL OR lane_principal_version >= 1
+    ),
+    admission_sequence INTEGER CHECK (
+      admission_sequence IS NULL OR admission_sequence BETWEEN 1 AND 9007199254740991
+    ),
+    terminal_at INTEGER CHECK (terminal_at IS NULL OR terminal_at >= 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX delivery_preference_projection_due
+    ON delivery_preference_projection_outbox(
+      terminal_at, lane_kind, status, next_attempt_at, updated_at, batch_key
+    );
+  CREATE INDEX delivery_preference_projection_lane
+    ON delivery_preference_projection_outbox(
+      terminal_at, lane_epoch, lane_workspace, lane_preset,
+      lane_principal_record_id, lane_principal_version, admission_sequence,
+      created_at, batch_key
+    );
+`
+
+const workflowTraceSchema = `
+  CREATE TABLE workflow_trace_source (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    contract_version INTEGER NOT NULL CHECK (contract_version = 1),
+    generation INTEGER NOT NULL CHECK (generation >= 1),
+    authority_digest TEXT NOT NULL CHECK (
+      length(authority_digest) = 64 AND authority_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE workflow_template_registry (
+    template_ref TEXT PRIMARY KEY,
+    template_digest TEXT NOT NULL CHECK (
+      length(template_digest) = 64 AND template_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    scope_key TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    preset TEXT NOT NULL,
+    owner_binding_id TEXT NOT NULL,
+    content_json TEXT NOT NULL,
+    privacy_kind TEXT NOT NULL CHECK (
+      privacy_kind IN ('deterministic-deidentification', 'owner-explicit')
+    ),
+    privacy_attestation_id TEXT NOT NULL UNIQUE,
+    privacy_attestation_digest TEXT NOT NULL CHECK (
+      length(privacy_attestation_digest) = 64
+      AND privacy_attestation_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    review_receipt_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+    review_inbox_id TEXT NOT NULL,
+    source_inbox_id TEXT NOT NULL,
+    source_outbox_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    FOREIGN KEY (owner_binding_id) REFERENCES conversation_bindings(id),
+    FOREIGN KEY (review_inbox_id) REFERENCES inbox_messages(id),
+    FOREIGN KEY (source_inbox_id) REFERENCES inbox_messages(id),
+    FOREIGN KEY (source_outbox_id) REFERENCES outbox_messages(id)
+  ) STRICT;
+  CREATE INDEX workflow_template_scope
+    ON workflow_template_registry(scope_key, status, updated_at, template_ref);
+
+  CREATE TABLE workflow_trace_revisions (
+    subject_ref TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    source_generation INTEGER NOT NULL CHECK (source_generation >= 1),
+    source_authority_digest TEXT NOT NULL CHECK (
+      length(source_authority_digest) = 64
+      AND source_authority_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    scope_key TEXT NOT NULL,
+    workspace TEXT NOT NULL,
+    preset TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK (disposition IN ('upsert', 'retract')),
+    digest TEXT NOT NULL CHECK (length(digest) = 64 AND digest NOT GLOB '*[^0-9a-f]*'),
+    payload_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (subject_ref, version)
+  ) STRICT;
+
+  CREATE TABLE workflow_trace_current (
+    subject_ref TEXT PRIMARY KEY,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    digest TEXT NOT NULL,
+    disposition TEXT NOT NULL CHECK (disposition IN ('upsert', 'retract')),
+    payload_json TEXT NOT NULL,
+    updated_at INTEGER NOT NULL,
+    FOREIGN KEY (subject_ref, version) REFERENCES workflow_trace_revisions(subject_ref, version)
+  ) STRICT;
+
+  CREATE TABLE workflow_trace_outbox (
+    subject_ref TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'delivered', 'retry_wait')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at INTEGER NOT NULL,
+    failure_code TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (subject_ref, version),
+    FOREIGN KEY (subject_ref, version) REFERENCES workflow_trace_revisions(subject_ref, version)
+  ) STRICT;
+  CREATE INDEX workflow_trace_outbox_due
+    ON workflow_trace_outbox(status, next_attempt_at, updated_at, subject_ref, version);
+
+  CREATE TABLE workflow_trace_commands (
+    operation_id TEXT PRIMARY KEY,
+    payload_digest TEXT NOT NULL CHECK (
+      length(payload_digest) = 64 AND payload_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    result_json TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  ) STRICT;
+
+  CREATE TABLE trusted_delivery_evaluation_outbox (
+    idempotency_key TEXT PRIMARY KEY,
+    payload_digest TEXT NOT NULL CHECK (
+      length(payload_digest) = 64 AND payload_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    claims_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('pending', 'retry_wait', 'delivered')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    next_attempt_at INTEGER NOT NULL,
+    failure_code TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX trusted_delivery_evaluation_due
+    ON trusted_delivery_evaluation_outbox(status, next_attempt_at, updated_at, idempotency_key);
+`
+
+/**
+ * One authenticated owner objective judgement for one ordinary Delivery turn.
+ * This is intentionally separate from Evaluation's cross-plugin ledger: the
+ * local receipt is the atomic proof coupled to a WorkflowTrace, so a restart
+ * cannot leave a supposedly verified trace without its exact owner fence.
+ */
+const workflowVerifiedTaskFeedbackSchema = `
+  CREATE TABLE IF NOT EXISTS workflow_verified_task_feedback (
+    source_outbox_id TEXT PRIMARY KEY,
+    source_inbox_id TEXT NOT NULL UNIQUE,
+    feedback_inbox_id TEXT NOT NULL UNIQUE,
+    binding_id TEXT NOT NULL,
+    binding_version INTEGER NOT NULL CHECK (binding_version >= 1),
+    binding_generation INTEGER NOT NULL CHECK (binding_generation >= 1),
+    principal_record_id TEXT NOT NULL,
+    objective_status TEXT NOT NULL CHECK (
+      objective_status IN ('achieved', 'partial', 'not-achieved')
+    ),
+    task_ref TEXT NOT NULL CHECK (
+      length(task_ref) = 64 AND task_ref NOT GLOB '*[^0-9a-f]*'
+    ),
+    task_evidence_digest TEXT NOT NULL CHECK (
+      length(task_evidence_digest) = 64
+      AND task_evidence_digest NOT GLOB '*[^0-9a-f]*'
+    ),
+    trace_subject_ref TEXT CHECK (
+      trace_subject_ref IS NULL
+      OR (length(trace_subject_ref) = 64 AND trace_subject_ref NOT GLOB '*[^0-9a-f]*')
+    ),
+    trace_version INTEGER CHECK (trace_version IS NULL OR trace_version >= 1),
+    trace_digest TEXT CHECK (
+      trace_digest IS NULL
+      OR (length(trace_digest) = 64 AND trace_digest NOT GLOB '*[^0-9a-f]*')
+    ),
+    template_ref TEXT,
+    created_at INTEGER NOT NULL,
+    CHECK (
+      (trace_subject_ref IS NOT NULL AND trace_version IS NOT NULL
+        AND trace_digest IS NOT NULL AND template_ref IS NOT NULL)
+      OR
+      (trace_subject_ref IS NULL AND trace_version IS NULL
+        AND trace_digest IS NULL AND template_ref IS NULL)
+    ),
+    FOREIGN KEY (source_outbox_id) REFERENCES outbox_messages(id),
+    FOREIGN KEY (source_inbox_id) REFERENCES inbox_messages(id),
+    FOREIGN KEY (feedback_inbox_id) REFERENCES inbox_messages(id),
+    FOREIGN KEY (binding_id) REFERENCES conversation_bindings(id),
+    FOREIGN KEY (principal_record_id) REFERENCES delivery_principals(id),
+    FOREIGN KEY (template_ref) REFERENCES workflow_template_registry(template_ref),
+    FOREIGN KEY (trace_subject_ref, trace_version)
+      REFERENCES workflow_trace_revisions(subject_ref, version)
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS workflow_verified_task_feedback_binding
+    ON workflow_verified_task_feedback(binding_id, created_at, source_outbox_id);
+`
+
+const deliveryPresentationSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_presentations (
+    presentation_key TEXT PRIMARY KEY,
+    original_outbox_idempotency_key TEXT NOT NULL,
+    revision INTEGER NOT NULL CHECK (revision >= 1),
+    payload_hash TEXT NOT NULL,
+    payload_json TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+      status IN ('pending', 'attempting', 'presented', 'retry_wait', 'dead')
+    ),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+    presented_revision INTEGER NOT NULL DEFAULT 0 CHECK (presented_revision >= 0),
+    next_attempt_at INTEGER,
+    claimed_by TEXT,
+    fencing_token INTEGER,
+    lease_until INTEGER,
+    provider_message_id TEXT,
+    failure_code TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  ) STRICT;
+  CREATE INDEX IF NOT EXISTS delivery_presentation_claim
+    ON delivery_presentations(status, next_attempt_at, lease_until, created_at, presentation_key);
+`
+
+const deadLetterResolutionSchema = `
+  CREATE TABLE dead_letter_resolutions (
+    kind TEXT NOT NULL CHECK (kind IN ('inbox', 'outbox')),
+    message_id TEXT NOT NULL,
+    attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
+    receipt_version INTEGER NOT NULL CHECK (receipt_version = 1),
+    resolution TEXT NOT NULL CHECK (resolution IN ('cancel', 'retry')),
+    original_status TEXT NOT NULL CHECK (
+      (kind = 'inbox' AND original_status = 'dead_letter')
+      OR (kind = 'outbox' AND original_status IN ('dead', 'unknown_after_send'))
+    ),
+    original_failure_code TEXT,
+    operator_id TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (kind, message_id, attempt_count)
+  ) STRICT;
+  CREATE INDEX dead_letter_resolution_projection
+    ON dead_letter_resolutions(kind, resolution, message_id, attempt_count);
+`
+
+// These triggers are a rolling-upgrade fence for a v8 process that opened the
+// database before v9 changed PRAGMA user_version. SQLite does not evict that
+// already-open writer. A v9 writer first persists the exact operator receipt
+// in the same transaction, so any receipt-less v8 resolution is rejected.
+const deadLetterResolutionCompatibilitySchema = `
+  CREATE TRIGGER dead_letter_inbox_resolution_fence
+  BEFORE UPDATE ON inbox_messages
+  WHEN OLD.status = 'dead_letter' AND NEW.attempt_count = OLD.attempt_count AND (
+    NEW.status = 'queued'
+    OR (NEW.status = 'dead_letter' AND NEW.failure_code = 'operator-cancelled')
+  ) AND NOT EXISTS (
+    SELECT 1 FROM dead_letter_resolutions AS resolution
+    WHERE resolution.kind = 'inbox' AND resolution.message_id = OLD.id
+      AND resolution.attempt_count = OLD.attempt_count
+      AND resolution.resolution = CASE WHEN NEW.status = 'queued' THEN 'retry' ELSE 'cancel' END
+      AND resolution.original_status = OLD.status
+      AND resolution.original_failure_code IS OLD.failure_code
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'inbox resolution requires an exact v9 receipt');
+  END;
+
+  CREATE TRIGGER dead_letter_outbox_resolution_fence
+  BEFORE UPDATE ON outbox_messages
+  WHEN OLD.status IN ('dead', 'unknown_after_send')
+    AND NEW.attempt_count = OLD.attempt_count AND (
+      NEW.status = 'pending'
+      OR (NEW.status = 'dead' AND NEW.failure_code = 'operator-cancelled')
+      OR (NEW.status = 'unknown_after_send' AND NEW.failure_code = 'operator-cancelled-unknown')
+    ) AND NOT EXISTS (
+    SELECT 1 FROM dead_letter_resolutions AS resolution
+    WHERE resolution.kind = 'outbox' AND resolution.message_id = OLD.id
+      AND resolution.attempt_count = OLD.attempt_count
+      AND resolution.resolution = CASE WHEN NEW.status = 'pending' THEN 'retry' ELSE 'cancel' END
+      AND resolution.original_status = OLD.status
+      AND resolution.original_failure_code IS OLD.failure_code
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'outbox resolution requires an exact v9 receipt');
+  END;
+
+  CREATE TRIGGER dead_letter_outbox_cancelled_unknown_fence
+  BEFORE UPDATE ON outbox_messages
+  WHEN OLD.status = 'unknown_after_send' AND EXISTS (
+    SELECT 1 FROM dead_letter_resolutions AS resolution
+    WHERE resolution.kind = 'outbox' AND resolution.message_id = OLD.id
+      AND resolution.attempt_count = OLD.attempt_count AND resolution.resolution = 'cancel'
+      AND resolution.original_status = 'unknown_after_send'
+  ) AND NOT (
+    NEW.attempt_count = OLD.attempt_count AND (
+      (NEW.status = 'unknown_after_send' AND NEW.failure_code = 'operator-cancelled-unknown')
+      OR (
+        NEW.status IN ('accepted', 'delivered', 'read') AND EXISTS (
+          SELECT 1 FROM delivery_receipts AS receipt
+          WHERE receipt.channel = OLD.channel AND receipt.account = OLD.account
+            AND receipt.provider_message_id = OLD.provider_message_id
+            AND receipt.status = NEW.status
+        )
+      )
+    )
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'cancelled unknown outbox attempt cannot be reclaimed');
+  END;
+`
 
 const deliveryInstanceSchema = `
   CREATE TABLE delivery_instance (
@@ -76,7 +457,73 @@ export class DeliveryDatabaseError extends Error {
   }
 }
 
-function migrate(database: DatabaseSync): void {
+function hasTable(database: DatabaseSync, name: string): boolean {
+  return database.prepare(`
+    SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = ?
+  `).get(name) !== undefined
+}
+
+function hasColumn(database: DatabaseSync, table: string, column: string): boolean {
+  return (database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+    .some(entry => entry.name === column)
+}
+
+function migratePreferenceProjectionLane(database: DatabaseSync): void {
+  const lockedVersion = (database.prepare('PRAGMA user_version').get() as { user_version: number })
+    .user_version
+  if (lockedVersion >= 14) return
+  if (lockedVersion !== 13) {
+    throw new Error(`delivery preference lane migration expected schema 13, received ${lockedVersion}`)
+  }
+  if (!hasTable(database, 'delivery_preference_projection_outbox')) {
+    database.exec('PRAGMA user_version = 14')
+    return
+  }
+    const additions = [
+      ['lane_kind', `TEXT NOT NULL DEFAULT 'unclassified' CHECK (
+        lane_kind IN ('exact', 'legacy', 'unclassified')
+      )`],
+      ['lane_epoch', `TEXT CHECK (
+        lane_epoch IS NULL OR (
+          length(lane_epoch) = 32 AND lane_epoch NOT GLOB '*[^0-9a-f]*'
+        )
+      )`],
+      ['lane_workspace', 'TEXT'],
+      ['lane_preset', 'TEXT'],
+      ['lane_principal_record_id', 'TEXT'],
+      ['lane_principal_version', `INTEGER CHECK (
+        lane_principal_version IS NULL OR lane_principal_version >= 1
+      )`],
+      ['admission_sequence', `INTEGER CHECK (
+        admission_sequence IS NULL OR admission_sequence BETWEEN 1 AND 9007199254740991
+      )`],
+      ['terminal_at', 'INTEGER CHECK (terminal_at IS NULL OR terminal_at >= 0)'],
+    ] as const
+    const alter = additions
+      .filter(([column]) => !hasColumn(database, 'delivery_preference_projection_outbox', column))
+      .map(([column, definition]) => `
+        ALTER TABLE delivery_preference_projection_outbox
+        ADD COLUMN ${column} ${definition};
+      `)
+      .join('')
+  database.exec(`
+    ${alter}
+    DROP INDEX IF EXISTS delivery_preference_projection_due;
+    CREATE INDEX delivery_preference_projection_due
+      ON delivery_preference_projection_outbox(
+        terminal_at, lane_kind, status, next_attempt_at, updated_at, batch_key
+      );
+    CREATE INDEX IF NOT EXISTS delivery_preference_projection_lane
+      ON delivery_preference_projection_outbox(
+        terminal_at, lane_epoch, lane_workspace, lane_preset,
+        lane_principal_record_id, lane_principal_version, admission_sequence,
+        created_at, batch_key
+      );
+    PRAGMA user_version = 14;
+  `)
+}
+
+function migrateObserved(database: DatabaseSync): void {
   const row = database.prepare('PRAGMA user_version').get() as { user_version: number }
   let version = row.user_version
   if (version > deliverySchemaVersion) {
@@ -88,18 +535,15 @@ function migrate(database: DatabaseSync): void {
   if (version === deliverySchemaVersion) return
   if (version === 1) {
     database.exec(`
-      BEGIN IMMEDIATE;
       ALTER TABLE delivery_attachments ADD COLUMN resource_kind TEXT;
       ALTER TABLE delivery_attachments ADD COLUMN provider_ref TEXT;
       ALTER TABLE delivery_attachments ADD COLUMN file_name TEXT;
       PRAGMA user_version = 2;
-      COMMIT;
     `)
     version = 2
   }
   if (version === 2) {
     database.exec(`
-      BEGIN IMMEDIATE;
       CREATE TABLE conversation_model_selections (
         conversation_hash TEXT PRIMARY KEY,
         conversation_json TEXT NOT NULL,
@@ -110,40 +554,32 @@ function migrate(database: DatabaseSync): void {
         version INTEGER NOT NULL CHECK (version >= 1)
       ) STRICT;
       PRAGMA user_version = 4;
-      COMMIT;
     `)
     version = 4
   }
   if (version === 3) {
     database.exec(`
-      BEGIN IMMEDIATE;
       ALTER TABLE conversation_model_selections ADD COLUMN reasoning_effort TEXT;
       PRAGMA user_version = 4;
-      COMMIT;
     `)
     version = 4
   }
   if (version === 4) {
     database.exec(`
-      BEGIN IMMEDIATE;
       ${modelPickerStateSchema}
       PRAGMA user_version = 5;
-      COMMIT;
     `)
     version = 5
   }
   if (version === 5) {
     database.exec(`
-      BEGIN IMMEDIATE;
       ${approvalDispatchCursorSchema}
       PRAGMA user_version = 6;
-      COMMIT;
     `)
     version = 6
   }
   if (version === 6) {
     database.exec(`
-      BEGIN IMMEDIATE;
       CREATE TABLE delivery_attachments_v7 (
         id TEXT PRIMARY KEY,
         owner_kind TEXT NOT NULL CHECK (owner_kind IN ('inbox', 'outbox')),
@@ -178,21 +614,130 @@ function migrate(database: DatabaseSync): void {
       CREATE UNIQUE INDEX delivery_attachment_owner_ordinal
         ON delivery_attachments(owner_kind, owner_id, ordinal);
       PRAGMA user_version = 7;
-      COMMIT;
     `)
     version = 7
   }
   if (version === 7) {
     database.exec(`
-      BEGIN IMMEDIATE;
       ${deliveryInstanceSchema}
       PRAGMA user_version = 8;
-      COMMIT;
     `)
-    return
+    version = 8
   }
+  if (version === 8) {
+    // v8 represented an operator cancel only by overwriting failure_code. A
+    // plain table creation would revive those terminal attempts as actionable
+    // and allow an old ambiguous send to be retried after upgrade. Preserve
+    // the lost decision as an immutable legacy receipt before publishing v9.
+    const hasInbox = hasTable(database, 'inbox_messages')
+    const hasOutbox = hasTable(database, 'outbox_messages')
+    const hasInboxAttempts = hasTable(database, 'inbox_attempts')
+    const hasOutboxAttempts = hasTable(database, 'outbox_attempts')
+    const inboxOriginalFailure = hasInboxAttempts ? `COALESCE((
+          SELECT attempt.failure_code FROM inbox_attempts AS attempt
+          WHERE attempt.inbox_id = message.id
+            AND attempt.attempt_number = message.attempt_count
+            AND attempt.failure_code IS NOT NULL
+          ORDER BY attempt.rowid DESC LIMIT 1
+        ), 'legacy-unknown')` : `'legacy-unknown'`
+    const outboxOriginalFailure = hasOutboxAttempts ? `COALESCE((
+          SELECT attempt.failure_code FROM outbox_attempts AS attempt
+          WHERE attempt.outbox_id = message.id
+            AND attempt.attempt_number = message.attempt_count
+            AND attempt.failure_code IS NOT NULL
+          ORDER BY attempt.rowid DESC LIMIT 1
+        ), 'legacy-unknown')` : `'legacy-unknown'`
+    const inboxBackfill = hasInbox ? `
+      INSERT INTO dead_letter_resolutions (
+        kind, message_id, attempt_count, receipt_version, resolution, original_status,
+        original_failure_code, operator_id, created_at
+      )
+      SELECT 'inbox', message.id, message.attempt_count, 1, 'cancel', 'dead_letter',
+        ${inboxOriginalFailure}, 'legacy-v8-migration', message.updated_at
+      FROM inbox_messages AS message
+      WHERE message.status = 'dead_letter' AND message.failure_code = 'operator-cancelled';
+    ` : ''
+    const outboxBackfill = hasOutbox ? `
+      INSERT INTO dead_letter_resolutions (
+        kind, message_id, attempt_count, receipt_version, resolution, original_status,
+        original_failure_code, operator_id, created_at
+      )
+      SELECT 'outbox', message.id, message.attempt_count, 1, 'cancel',
+        CASE WHEN ${hasOutboxAttempts ? `EXISTS (
+          SELECT 1 FROM outbox_attempts AS attempt
+          WHERE attempt.outbox_id = message.id
+            AND attempt.attempt_number = message.attempt_count
+            AND attempt.status = 'unknown_after_send'
+        )` : '0'} THEN 'unknown_after_send' ELSE 'dead' END,
+        ${outboxOriginalFailure}, 'legacy-v8-migration', message.updated_at
+      FROM outbox_messages AS message
+      WHERE message.status = 'dead' AND message.failure_code = 'operator-cancelled';
+
+      UPDATE outbox_messages AS message
+      SET status = 'unknown_after_send', failure_code = 'operator-cancelled-unknown'
+      WHERE message.status = 'dead' AND message.failure_code = 'operator-cancelled'
+        AND EXISTS (
+          SELECT 1 FROM dead_letter_resolutions AS resolution
+          WHERE resolution.kind = 'outbox' AND resolution.message_id = message.id
+            AND resolution.attempt_count = message.attempt_count
+            AND resolution.original_status = 'unknown_after_send'
+        );
+    ` : ''
+    database.exec(`
+      ${deadLetterResolutionSchema}
+      ${inboxBackfill}
+      ${outboxBackfill}
+      ${hasInbox && hasOutbox ? deadLetterResolutionCompatibilitySchema : ''}
+      PRAGMA user_version = 9;
+    `)
+    version = 9
+  }
+  if (version === 9) {
+    database.exec(`
+      ${deliveryPresentationSchema}
+      PRAGMA user_version = 10;
+    `)
+    version = 10
+  }
+  if (version === 10) {
+    database.exec(`
+      ${workflowTraceSchema}
+      PRAGMA user_version = 11;
+    `)
+    version = 11
+  }
+  if (version === 11) {
+    database.exec(`
+      ${preferenceProjectionSchema}
+      PRAGMA user_version = 12;
+    `)
+    version = 12
+  }
+  if (version === 12) {
+    database.exec(hasTable(database, 'inbox_messages')
+      && hasTable(database, 'delivery_instance')
+      ? `
+        ${inboxAdmissionSchema}
+        PRAGMA user_version = 13;
+      `
+      : `
+        PRAGMA user_version = 13;
+      `)
+    version = 13
+  }
+  if (version === 13) {
+    migratePreferenceProjectionLane(database)
+    version = 14
+  }
+  if (version === 14) {
+    database.exec(`
+      ${workflowVerifiedTaskFeedbackSchema}
+      PRAGMA user_version = 15;
+    `)
+    version = 15
+  }
+  if (version === deliverySchemaVersion) return
   database.exec(`
-    BEGIN IMMEDIATE;
     ${deliveryInstanceSchema}
     CREATE TABLE delivery_principals (
       id TEXT PRIMARY KEY,
@@ -384,9 +929,34 @@ function migrate(database: DatabaseSync): void {
 
     ${approvalDispatchCursorSchema}
 
-    PRAGMA user_version = 8;
-    COMMIT;
+    ${deadLetterResolutionSchema}
+
+    ${deadLetterResolutionCompatibilitySchema}
+
+    ${deliveryPresentationSchema}
+
+    ${workflowTraceSchema}
+
+    ${workflowVerifiedTaskFeedbackSchema}
+
+    ${preferenceProjectionSchema}
+
+    ${inboxAdmissionSchema}
+
+    PRAGMA user_version = 15;
   `)
+}
+
+/** Serialize the complete forward migration chain across every Host process. */
+function migrate(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    migrateObserved(database)
+    database.exec('COMMIT')
+  } catch (error) {
+    try { database.exec('ROLLBACK') } catch {}
+    throw error
+  }
 }
 
 export function openDeliveryDatabase(path: string): DatabaseSync {

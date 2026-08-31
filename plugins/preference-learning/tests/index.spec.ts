@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import PreferenceLearningService, { name, preferenceCatalog, version } from '../src/index.ts'
+import { preferenceSchemaVersion } from '../src/sqlite.ts'
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -35,7 +36,7 @@ describe('dsh-enhanced-preference-learning', () => {
     await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite') })
     await ctx.plugin(PreferenceLearningService, { databasePath: join(root, 'preferences.sqlite') })
     const service = ctx.assistantPreferenceLearning
-    expect(service.health()).toMatchObject({ ready: true, enabled: true, schemaVersion: 1 })
+    expect(service.health()).toMatchObject({ ready: true, enabled: true, schemaVersion: preferenceSchemaVersion })
     await ctx.fiber.restart()
     expect(() => service.health()).toThrowError(/disposed/i)
     contexts.splice(contexts.indexOf(ctx), 1)

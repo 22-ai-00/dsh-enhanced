@@ -66,6 +66,32 @@ describe('durable inbox', () => {
     f.store.close()
   })
 
+  test('assigns a durable total-order cursor even when Inbox timestamps tie', async () => {
+    const f = await fixture()
+    const first = f.store.acceptInbound(envelope('evt-cursor-1', f)).record
+    const second = f.store.acceptInbound(envelope('evt-cursor-2', f)).record
+    expect(second.admissionCursor).toEqual({
+      epoch: first.admissionCursor.epoch,
+      sequence: first.admissionCursor.sequence + 1,
+    })
+    expect(f.store.acceptInbound(envelope('evt-cursor-1', f))).toMatchObject({
+      duplicate: true,
+      record: { admissionCursor: first.admissionCursor },
+    })
+    f.store.close()
+
+    const reopened = new DeliveryStore({ path: f.path, now: () => 1_000 })
+    const third = reopened.acceptInbound({
+      ...envelope('evt-cursor-3', f),
+      eventId: 'evt-cursor-3',
+    }).record
+    expect(third.admissionCursor).toEqual({
+      epoch: first.admissionCursor.epoch,
+      sequence: second.admissionCursor.sequence + 1,
+    })
+    reopened.close()
+  })
+
   test('rejects namespace confusion, oversize content, and unbounded metadata', async () => {
     const f = await fixture()
     expect(() => f.store.acceptInbound({ ...envelope('evt-1', f), account: 'bot-2' }))
@@ -370,7 +396,7 @@ describe('durable inbox', () => {
     f.store.close()
   })
 
-  test('claims in binding order, serializes a lane, and allows another lane', async () => {
+  test('serializes the exact owner scope across bindings and allows another owner lane', async () => {
     const f = await fixture()
     const secondPrincipal = { ...f.principal, user: 'ou_second' }
     const issued = f.store.issuePairing(secondPrincipal, { ttlMs: 5_000, maxAttempts: 3 })
@@ -378,11 +404,26 @@ describe('durable inbox', () => {
     const secondConversation = { ...f.conversation, chat: 'oc_second' }
     const secondBinding = f.store.createBinding({ conversation: secondConversation, principal: secondPrincipal,
       workspace: '/work/beta', agentPreset: 'primary', sessionId: 'session-2', policyRef: 'owner-dm' })
+    const siblingConversation = { ...f.conversation, chat: 'oc_owner_sibling' }
+    const siblingBinding = f.store.createBinding({
+      conversation: siblingConversation,
+      principal: f.principal,
+      workspace: f.binding.workspace,
+      agentPreset: f.binding.agentPreset,
+      sessionId: 'session-owner-sibling',
+      policyRef: 'owner-dm',
+    })
     const one = f.store.acceptInbound(envelope('evt-1', f)).record
+    const sibling = f.store.acceptInbound({
+      ...envelope('evt-sibling', f),
+      conversation: siblingConversation,
+    }).record
     const two = f.store.acceptInbound(envelope('evt-2', f)).record
     const other = f.store.acceptInbound({ ...envelope('evt-3', f), principal: secondPrincipal,
       conversation: secondConversation }).record
-    for (const [record, binding] of [[one, f.binding], [two, f.binding], [other, secondBinding]] as const) {
+    for (const [record, binding] of [
+      [one, f.binding], [sibling, siblingBinding], [two, f.binding], [other, secondBinding],
+    ] as const) {
       f.store.queueInbox(record.id, binding.id)
     }
     const claims = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 10, maxAttempts: 3 })
@@ -390,8 +431,35 @@ describe('durable inbox', () => {
     expect(f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 10, maxAttempts: 3 })).toEqual([])
     f.store.finishInbox({ inboxId: one.id, ownerId: 'worker-a', fencingToken: claims[0]!.fencingToken,
       outcome: 'processed' })
-    expect(f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 10, maxAttempts: 3 })[0]?.record.id).toBe(two.id)
+    const next = f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 10, maxAttempts: 3 })[0]!
+    expect(next.record.id).toBe(sibling.id)
+    f.store.finishInbox({ inboxId: sibling.id, ownerId: 'worker-b', fencingToken: next.fencingToken,
+      outcome: 'processed' })
+    expect(f.store.claimInbox({ ownerId: 'worker-c', leaseMs: 100, limit: 10, maxAttempts: 3 })[0]?.record.id)
+      .toBe(two.id)
     f.store.close()
+  })
+
+  test('claims owner-scoped Inbox work by its durable admission cursor after rowid rewrite', async () => {
+    const f = await fixture()
+    const first = f.store.acceptInbound(envelope('evt-stable-order-1', f)).record
+    const second = f.store.acceptInbound(envelope('evt-stable-order-2', f)).record
+    f.store.queueInbox(first.id, f.binding.id)
+    f.store.queueInbox(second.id, f.binding.id)
+    expect(first.admissionCursor.sequence).toBeLessThan(second.admissionCursor.sequence)
+    f.store.close()
+
+    const database = new DatabaseSync(f.path)
+    database.prepare('UPDATE inbox_messages SET rowid = 10002 WHERE id = ?').run(first.id)
+    database.prepare('UPDATE inbox_messages SET rowid = 10001 WHERE id = ?').run(second.id)
+    database.exec('VACUUM')
+    database.close()
+
+    const reopened = new DeliveryStore({ path: f.path })
+    const claim = reopened.claimInbox({ ownerId: 'worker-stable-order', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    expect(claim.record.id).toBe(first.id)
+    expect(reopened.claimInbox({ ownerId: 'worker-other', leaseMs: 100, limit: 1, maxAttempts: 3 })).toEqual([])
+    reopened.close()
   })
 
   test('durably fences every earlier undispatched Inbox while preserving an already-dispatched turn', async () => {
@@ -578,12 +646,155 @@ describe('durable inbox', () => {
     expect(f.store.getInbox(record.id)).toMatchObject({ status: 'dead_letter', attemptCount: 1,
       failureCode: 'attempts-exhausted' })
 
-    expect(f.store.resolveInbox({ inboxId: record.id, expectedAttemptCount: 1, resolution: 'retry' }))
-      .toMatchObject({ status: 'queued', attemptCount: 1 })
+    expect(f.store.resolveInbox({ inboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'retry', operatorId: 'test-operator' }))
+      .toMatchObject({ record: { status: 'queued', attemptCount: 1 }, replayed: false })
     const retried = f.store.claimInbox({ ownerId: 'worker-c', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
     expect(retried).toMatchObject({ fencingToken: 2, record: { id: record.id, status: 'claimed', attemptCount: 2 } })
     expect(() => f.store.finishInbox({ inboxId: record.id, ownerId: 'worker-a', fencingToken: first.fencingToken,
       outcome: 'processed' })).toThrowError(expect.objectContaining({ code: 'stale-fence' }))
+    f.store.close()
+  })
+
+  test('projects a cancelled dead letter as resolved across restart without deleting its audit row', async () => {
+    const f = await fixture()
+    const record = f.store.acceptInbound(envelope('evt-operator-cancel', f)).record
+    f.store.deadLetterInbox(record.id, 'invalid-provider-payload')
+    expect(f.store.health()).toMatchObject({
+      deadLetterInbox: 1,
+      actionableDeadLetterInbox: 1,
+      resolvedDeadLetterInbox: 0,
+    })
+
+    expect(f.store.resolveInbox({ inboxId: record.id, expectedAttemptCount: 0,
+      resolution: 'cancel', operatorId: 'owner-operator' }))
+      .toMatchObject({ record: { id: record.id, status: 'dead_letter',
+        failureCode: 'operator-cancelled' }, replayed: false })
+    expect(f.store.getDeadLetterResolution({ kind: 'inbox', id: record.id, attemptCount: 0 })).toEqual({
+      receiptVersion: 1,
+      kind: 'inbox',
+      id: record.id,
+      attemptCount: 0,
+      resolution: 'cancel',
+      originalStatus: 'dead_letter',
+      originalFailureCode: 'invalid-provider-payload',
+      operatorId: 'owner-operator',
+      createdAt: 1_000,
+    })
+    expect(f.store.health()).toMatchObject({
+      deadLetterInbox: 1,
+      actionableDeadLetterInbox: 0,
+      resolvedDeadLetterInbox: 1,
+    })
+    f.store.close()
+
+    const reopened = new DeliveryStore({ path: f.path, now: () => 2_000 })
+    expect(reopened.getInbox(record.id)).toMatchObject({ status: 'dead_letter', failureCode: 'operator-cancelled' })
+    expect(reopened.health()).toMatchObject({
+      deadLetterInbox: 1,
+      actionableDeadLetterInbox: 0,
+      resolvedDeadLetterInbox: 1,
+    })
+    expect(reopened.getDeadLetterResolution({ kind: 'inbox', id: record.id, attemptCount: 0 }))
+      .toMatchObject({ resolution: 'cancel', operatorId: 'owner-operator' })
+    expect(reopened.resolveInbox({ inboxId: record.id, expectedAttemptCount: 0,
+      resolution: 'cancel', operatorId: 'owner-operator' }))
+      .toMatchObject({ record: { id: record.id, status: 'dead_letter' },
+        receipt: { resolution: 'cancel', operatorId: 'owner-operator' }, replayed: true })
+    expect(() => reopened.resolveInbox({ inboxId: record.id, expectedAttemptCount: 0,
+      resolution: 'cancel', operatorId: 'different-operator' }))
+      .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    reopened.close()
+  })
+
+  test('migrates v8 operator-cancelled dead letters with recovered or explicit unknown failures', async () => {
+    const f = await fixture()
+    const record = f.store.acceptInbound(envelope('evt-v8-operator-cancel-no-history', f)).record
+    f.store.deadLetterInbox(record.id, 'invalid-provider-payload')
+    const historical = f.store.acceptInbound(envelope('evt-v8-operator-cancel-history', f)).record
+    f.store.queueInbox(historical.id, f.binding.id)
+    const claim = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
+    f.store.finishInbox({ inboxId: historical.id, ownerId: 'worker-a', fencingToken: claim.fencingToken,
+      outcome: 'dead_letter', failureCode: 'processor-rejected' })
+    f.store.close()
+
+    const legacy = new DatabaseSync(f.path)
+    legacy.exec(`
+      DROP TABLE IF EXISTS delivery_preference_projection_outbox;
+      DROP TABLE IF EXISTS trusted_delivery_evaluation_outbox;
+      DROP TABLE IF EXISTS workflow_trace_commands;
+      DROP TABLE IF EXISTS workflow_trace_outbox;
+      DROP TABLE IF EXISTS workflow_trace_current;
+      DROP TABLE IF EXISTS workflow_trace_revisions;
+      DROP TABLE IF EXISTS workflow_template_registry;
+      DROP TABLE IF EXISTS workflow_trace_source;
+      DROP TABLE IF EXISTS delivery_presentations;
+      DROP TRIGGER dead_letter_inbox_resolution_fence;
+      DROP TRIGGER dead_letter_outbox_resolution_fence;
+      DROP TRIGGER dead_letter_outbox_cancelled_unknown_fence;
+      DROP TABLE dead_letter_resolutions;
+      PRAGMA user_version = 8;
+    `)
+    legacy.prepare(`
+      UPDATE inbox_messages SET failure_code = 'operator-cancelled' WHERE id IN (?, ?)
+    `).run(record.id, historical.id)
+    legacy.close()
+
+    const migrated = new DeliveryStore({ path: f.path, now: () => 2_000 })
+    expect(migrated.getInbox(record.id)).toMatchObject({
+      status: 'dead_letter', attemptCount: 0, failureCode: 'operator-cancelled',
+    })
+    expect(migrated.getDeadLetterResolution({ kind: 'inbox', id: record.id, attemptCount: 0 }))
+      .toEqual({
+        receiptVersion: 1,
+        kind: 'inbox',
+        id: record.id,
+        attemptCount: 0,
+        resolution: 'cancel',
+        originalStatus: 'dead_letter',
+        originalFailureCode: 'legacy-unknown',
+        operatorId: 'legacy-v8-migration',
+        createdAt: 1_000,
+      })
+    expect(migrated.getDeadLetterResolution({ kind: 'inbox', id: historical.id, attemptCount: 1 }))
+      .toMatchObject({
+        resolution: 'cancel', originalStatus: 'dead_letter',
+        originalFailureCode: 'processor-rejected', operatorId: 'legacy-v8-migration',
+      })
+    expect(migrated.health()).toMatchObject({
+      deadLetterInbox: 2, actionableDeadLetterInbox: 0, resolvedDeadLetterInbox: 2,
+    })
+    for (const [id, attemptCount] of [[record.id, 0], [historical.id, 1]] as const) {
+      expect(() => migrated.resolveInbox({ inboxId: id, expectedAttemptCount: attemptCount,
+        resolution: 'retry', operatorId: 'owner-operator' }))
+        .toThrowError(expect.objectContaining({ code: 'version-conflict' }))
+    }
+    migrated.close()
+  })
+
+  test('makes a newly failed retry attempt actionable despite the previous attempt receipt', async () => {
+    const f = await fixture()
+    const record = f.store.acceptInbound(envelope('evt-retry-fails-again', f)).record
+    f.store.queueInbox(record.id, f.binding.id)
+    const first = f.store.claimInbox({ ownerId: 'worker-a', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
+    f.store.finishInbox({ inboxId: record.id, ownerId: 'worker-a', fencingToken: first.fencingToken,
+      outcome: 'dead_letter', failureCode: 'permanent-first' })
+    f.store.resolveInbox({ inboxId: record.id, expectedAttemptCount: 1,
+      resolution: 'retry', operatorId: 'owner-operator' })
+
+    const second = f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 100, limit: 1, maxAttempts: 1 })[0]!
+    f.store.finishInbox({ inboxId: record.id, ownerId: 'worker-b', fencingToken: second.fencingToken,
+      outcome: 'dead_letter', failureCode: 'permanent-second' })
+    expect(f.store.getInbox(record.id)).toMatchObject({ status: 'dead_letter', attemptCount: 2,
+      failureCode: 'permanent-second' })
+    expect(f.store.getDeadLetterResolution({ kind: 'inbox', id: record.id, attemptCount: 1 }))
+      .toMatchObject({ resolution: 'retry', originalFailureCode: 'permanent-first' })
+    expect(f.store.getDeadLetterResolution({ kind: 'inbox', id: record.id, attemptCount: 2 })).toBeUndefined()
+    expect(f.store.health()).toMatchObject({
+      deadLetterInbox: 1,
+      actionableDeadLetterInbox: 1,
+      resolvedDeadLetterInbox: 0,
+    })
     f.store.close()
   })
 

@@ -2,6 +2,13 @@
 
 飞书/Lark 的薄协议适配器：把 WebSocket 长连接消息写入 `assistant-delivery` 的 typed Inbox，并把已经落盘的 Outbox intent 转成飞书发送或回复 API。本包不拥有配对、会话、重试或授权真源。
 
+Delivery 的 typed presentation 还可把审批实际生效终态，以及拥有稳定 owner route 的 Host
+Automation incident `open / recovering / resolved` 原位渲染到同一条飞书卡片。本包只渲染 Delivery
+已经持久化、授权并取得 provider message id 的 projection，不能创建领域终态、伪造 `applied` 或 incident
+revision，也不能绕过 Delivery/Policy。Agent Automation 只持有 exact conversation binding，因此每个持久
+revision 投递一条内容无关的状态更新；两种路径的重试、fence 与 generation 都由 Automations/Delivery
+账本负责。
+
 插件默认 `enabled: false`，安装后不会立即读取凭据或联网。启用后，合法新消息落盘时可添加 `Get`，最终答复发送成功后可添加 `DONE`；reaction 与原生执行进度都是 best-effort 展示，最终答复仍由 Delivery Outbox 保证。
 
 默认进度策略为 `progressDetails: direct`：经 Delivery 授权的私聊可显示限长、常见凭据已脱敏的工具参数和结果；默认向导只授权 owner。群聊只显示工具名、状态、步骤与待办。`progressDetails: off` 可在所有会话隐藏参数和结果。任何 reasoning/thinking 内容都不外发；飞书 `message_cot` 不可用时只降级展示，不影响任务或最终回复。
@@ -16,9 +23,10 @@
 ## 兼容性
 
 - DeepSeek Harness：`>=0.1.0-rc.8 <0.2.0` 基线语义（通过 `assistant-delivery`）。
-- `@dsh-enhanced/assistant-delivery`：`>=0.1.0 <0.2.0`。
+- `@dsh-enhanced/assistant-delivery`：`>0.1.7 <0.2.0`；本包的 supervised setup 使用当前发布切片的私有 capability。
 - `@dsh-enhanced/credentials-keychain`：handle 模式为 `>=0.1.0 <0.2.0`；env fallback 不要求其激活。
-- 分级自治成长激活器要求有效 profile 同时启用 `@dsh-enhanced/assistant-automations`、`@dsh-enhanced/assistant-evaluation`、`@dsh-enhanced/preference-learning`、`@dsh-enhanced/assistant-evolution` 与 `@dsh-enhanced/assistant-heartbeat`；它复用 Delivery 的 provider/model，不要求 TraeX 成为当前 route。T1 偏好采用和已验证退化回滚可自动执行，自由文本 guidance 与高影响动作继续走 owner proposal。
+- 普通个人助理场景同时安装 `@dsh-enhanced/preference-learning`。向导会只为完成 owner 对话产生有界偏好证据及读取 active snapshot 的两项能力；它们不依赖广义 Agent 工具开关，也不要求 Health/Heartbeat/Recovery。
+- 分级自治成长激活器要求有效 profile 同时启用 `@dsh-enhanced/personal-assistant`、`@dsh-enhanced/assistant-automations`、`@dsh-enhanced/assistant-heartbeat`、`@dsh-enhanced/assistant-evaluation`、`@dsh-enhanced/preference-learning`、`@dsh-enhanced/assistant-evolution`、`@dsh-enhanced/assistant-growth-experiments`、`@dsh-enhanced/assistant-health` 与 `@dsh-enhanced/assistant-recovery`。Policy、Memory 与 Wiki 由 personal-assistant 这一 profile row 提供。Recovery 仍是无模型 Host runbook；独立的 `supervised-growth-analyst` 每天最多一次，只能 review/propose adoption，preview 强制 paused，active 前逐项证明定义和私有 scratch，且只有审批路由、没有普通结果投递。workflow lane 使用 Delivery 私有、可撤销的 content-free trace sink，以及独立预算、owner-bound approval、prefix-bounded dynamic Automation identity 和 exact binding delivery；Lark 文本、卡片或回调本身不能制造 trace 或 learned workflow。默认不授予 learned workflow 任意工具。旧 `supervised-growth` Heartbeat 只在升级时被安全暂停。
 - 官方 `@larksuiteoapi/node-sdk`：固定 `1.73.0`。
 - Node.js：`^22.19.0 || >=24.0.0`。
 
@@ -26,7 +34,7 @@
 
 ## 安装
 
-先配置 `@dsh-enhanced/assistant-policy` 与 `@dsh-enhanced/assistant-delivery`，再安装本包：
+先配置 `@dsh-enhanced/assistant-policy`、`@dsh-enhanced/assistant-delivery` 与 `@dsh-enhanced/preference-learning`，再安装本包：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/lark-channel
@@ -92,6 +100,13 @@ config:
 /permission ask
 /permission auto
 /permission full confirm
+/feedback           # 查看固定偏好反馈语法
+/learning status    # 查看偏好学习状态
+/learning explain   # 查看无历史正文的 key/value、版本与证据计数
+/learning pause     # 暂停收集、激活与注入
+/learning resume    # 恢复，仅接收此后的新证据
+/learning rollback response.language confirm # 撤回当前 lineage 的一个 exact active T1 key
+/learning forget confirm # 物理删除当前 scope 的学习记录
 ```
 
 未知 slash 命令不会进入模型。模型卡片、权限卡片和会话 lane 语义见[操作文档](docs/operations.md)。
@@ -110,6 +125,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 
 - `--allow-agent-tools` 是高权限显式开关：为本地 `foreground` 与精确 owner Delivery 主体建立 capability/工具可达性；不授权 `background`，也不绕过显式 deny、紧急停止、身份、预算及插件业务硬门。
 - `ask` 和 `auto` 中需要人工确认的工具调用只向 active owner 私聊发送一次性审批卡；`full` 关闭逐次审批并放开 sandbox，应保持 owner 与应用可用范围最小。
+- 行为学习审批卡会把签名覆盖的 scope、情境、guidance、版本、证据和回滚原因逐字段以纯文本展示；提案内容不会作为 Markdown 或卡片组件解释。点击后卡片只确认 Policy 决策已写入持久账本，明确不把“批准”误报成“变更已生效”。
 - 网络仅访问所选飞书/Lark OpenAPI、token 与 WebSocket endpoint；图片读取使用固定消息资源端点，不接受消息或模型提供的 URL，并关闭重定向。
 - App Secret 不写 Delivery 数据库、工具参数、health、route、日志或异常；Linux protected-file 没有额外静态加密，同 UID、root 和可读备份仍能取得内容。
 - Delivery SQLite 保存标准化文本、路由 id 和最多 10 个受限附件描述符；不保存 raw 事件、token 或下载 URL。图片字节只交给 AttachmentStore。

@@ -690,8 +690,15 @@ describe('Lark delivery adapter', () => {
     })
     await expect(adapter.send(approvalIntent, new AbortController().signal)).resolves.toMatchObject({ outcome: 'accepted' })
     const sent = transport.send.mock.calls.at(-1)![1] as { approval: { approveValue: { approval: string } } }
-    await transport.emitCardAction({ messageId: 'om_card', chatId: 'oc_dm', operatorId: 'ou_owner',
-      value: sent.approval.approveValue })
+    const confirmation = await transport.emitCardAction({
+      messageId: 'om_card', chatId: 'oc_dm', operatorId: 'ou_owner', value: sent.approval.approveValue,
+    })
+    expect(confirmation).toEqual({
+      toast: { type: 'success', content: '批准已记录，等待账本结算' },
+      card: { type: 'raw', data: JSON.parse(renderLarkMessage({
+        approvalResult: { decision: 'approved', proposalId: 'proposal-1' },
+      }).content) },
+    })
     expect(settleApproval).toHaveBeenCalledWith(expect.objectContaining({
       operationId: 'operation-1', callbackChatId: 'oc_dm', bindingId: 'binding-1',
       principal: { channel: 'lark', account: 'primary-bot', tenant: 'tenant-a', user: 'ou_owner' },
@@ -715,6 +722,82 @@ describe('Lark delivery adapter', () => {
     expect(settleApproval).toHaveBeenCalledOnce()
     expect(recoverApprovalSettlement).not.toHaveBeenCalled()
     expect(adapter.health()).toMatchObject({ lastErrorCode: 'format_error' })
+  })
+
+  test('replaces the original approval card with actual domain state and a discoverable exact undo path', async () => {
+    const { adapter, transport } = fixture()
+    const signal = new AbortController().signal
+    await adapter.updatePresentation('om_approval', {
+      kind: 'approval-application',
+      policyProposalId: 'policy-1',
+      localProposalId: 'local-1',
+      applicationStatus: 'applied',
+      operation: 'adopt',
+      terminalAt: 2_000,
+      receiptDigest: 'a'.repeat(64),
+      ruleId: 'rule-1',
+      resultingRuleVersion: 3,
+      ruleStatus: 'active',
+    }, signal)
+
+    expect(transport.updateRawCard).toHaveBeenCalledTimes(1)
+    const applied = JSON.stringify(transport.updateRawCard.mock.calls[0]![1])
+    expect(applied).toContain('变更已实际生效')
+    expect(applied).toContain('rule-1')
+    expect(applied).toContain('版本 3')
+    expect(applied).toContain('独立的二次审批')
+    expect(applied).not.toContain('a'.repeat(64))
+
+    await adapter.updatePresentation('om_approval', {
+      kind: 'approval-application',
+      policyProposalId: 'policy-1',
+      localProposalId: 'local-1',
+      applicationStatus: 'conflicted',
+      operation: 'adopt',
+      terminalAt: 2_001,
+      receiptDigest: 'b'.repeat(64),
+    }, signal)
+    const conflicted = JSON.stringify(transport.updateRawCard.mock.calls[1]![1])
+    expect(conflicted).toContain('变更未生效')
+    expect(conflicted).toContain('yellow')
+    expect(conflicted).not.toContain('实际生效')
+  })
+
+  test('renders open, recovering, and resolved incident revisions onto the same provider message', async () => {
+    const { adapter, transport } = fixture()
+    const signal = new AbortController().signal
+    const base = {
+      kind: 'automation-incident' as const,
+      incidentId: `incident-${'a'.repeat(64)}`,
+      automationId: 'heartbeat:supervised-growth',
+      definitionHash: 'b'.repeat(64),
+      stage: 'terminal' as const,
+      failureClass: 'configuration' as const,
+      failurePhase: 'host-execution',
+      failureCode: 'catalog-mismatch',
+      sideEffectState: 'none' as const,
+      retryability: 'after-intervention' as const,
+      lifecycleGeneration: 1,
+      openedAt: 1_000,
+    }
+    await adapter.updatePresentation('om_incident', {
+      ...base, state: 'open', incidentRevision: 1, updatedAt: 1_001,
+    }, signal)
+    await adapter.updatePresentation('om_incident', {
+      ...base, state: 'recovering', incidentRevision: 2, updatedAt: 1_002,
+    }, signal)
+    await adapter.updatePresentation('om_incident', {
+      ...base, state: 'resolved', incidentRevision: 3, updatedAt: 1_003, resolvedAt: 1_003,
+    }, signal)
+
+    expect(transport.updateRawCard.mock.calls.map(call => call[0]))
+      .toEqual(['om_incident', 'om_incident', 'om_incident'])
+    const cards = transport.updateRawCard.mock.calls.map(call => JSON.stringify(call[1]))
+    expect(cards[0]).toContain('自动化故障已打开')
+    expect(cards[1]).toContain('自动化故障恢复中')
+    expect(cards[2]).toContain('自动化故障已恢复')
+    expect(cards[2]).toContain('generation 1 · revision 3')
+    expect(cards.every(card => card.includes('catalog-mismatch'))).toBe(true)
   })
 
   test('uses only durable recovery for an expired authenticated approval capability', async () => {
@@ -742,8 +825,9 @@ describe('Lark delivery adapter', () => {
     const token = sent.approval.approveValue.approval
 
     now = 2_000
-    await transport.emitCardAction({ messageId: 'om_recovery', chatId: 'oc_dm', operatorId: 'ou_owner',
-      value: sent.approval.approveValue })
+    await expect(transport.emitCardAction({
+      messageId: 'om_recovery', chatId: 'oc_dm', operatorId: 'ou_owner', value: sent.approval.approveValue,
+    })).resolves.toMatchObject({ toast: { type: 'success', content: '批准已记录，等待账本结算' } })
     expect(settleApproval).not.toHaveBeenCalled()
     expect(recoverApprovalSettlement).toHaveBeenCalledWith(expect.objectContaining({
       operationId: 'operation-recovery', callbackChatId: 'oc_dm', bindingId: 'binding-1',
