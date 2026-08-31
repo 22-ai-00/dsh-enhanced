@@ -44,7 +44,7 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/install-local.sh --scenario lark --lark configure
 ```
 
-安装后可直接用 `/learning status|explain|pause|resume|rollback <key> confirm|forget confirm` 管理当前 workspace + preset 的学习；这些命令由 Host 本地处理，不进入模型。`explain` 只显示闭集 key/value、状态、版本和证据计数，不回显历史对话；`rollback` 只撤回当前 owner lineage 的一个 exact active T1 key。持续偏好可用“以后用中文回答”等闭集表达，一次性的“这次请简短回答”只作用于当前请求，不会被固化。
+安装后可直接用 `/learning status|explain|export|pause|resume|rollback <key> confirm|forget confirm` 管理当前 workspace + preset 的学习；这些命令由 Host 本地处理，不进入模型。`explain` 只显示闭集 key/value、状态、版本和证据计数；`export` 返回版本化、稳定排序的 current-scope T1 JSON，两者都不回显历史对话。导出不写文件，也不包含 workspace、owner/lineage、generation、session、event、Inbox/Outbox、cursor、幂等键或 exposure 等内部标识；`rollback` 只撤回当前 owner lineage 的一个 exact active T1 key。持续偏好可用“以后用中文回答”等闭集表达，一次性的“这次请简短回答”只作用于当前请求，不会被固化。
 
 需要跨任务评测、演化提案、恢复账本和受限主动巡检时，再显式启用分级自治成长模式（命令名为兼容旧版仍保留 `supervised-growth`）：
 

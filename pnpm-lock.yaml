@@ -1098,6 +1098,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.1
+      '@dsh-enhanced/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:../../packages/assistant-growth-contract
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'

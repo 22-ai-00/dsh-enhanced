@@ -173,7 +173,7 @@ ownerRoutes:
 - `/stop`：停止当前任务，保留当前 session 与已持久的上下文。
 - `/compact`：仅在当前 DSH command service/preset 实际发布时出现；通过原生命令面执行，不交给模型。
 - `/feedback`：提交固定枚举的响应偏好，或对 exact Automation 结果提交任务目标状态；在 Delivery 本地处理，不恢复 Agent、不交给模型。
-- `/learning`：查看状态或 content-free T1 摘要、暂停、恢复、按 exact T1 key 回滚或清除当前 workspace + preset 的偏好学习；只允许 exact active owner，在 Delivery 本地处理，不恢复 Agent、不交给模型。
+- `/learning`：查看状态或 content-free T1 摘要、导出版本化稳定 JSON、暂停、恢复、按 exact T1 key 回滚或清除当前 workspace + preset 的偏好学习；只允许 exact active owner，在 Delivery 本地处理，不恢复 Agent、不交给模型。
 
 渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
 
@@ -212,7 +212,7 @@ Profile 还必须为当前 owner principal 添加精确授权，例如：`subjec
 
 日常使用无需发送命令：普通 owner 文本只有在 Agent turn 完成、session 已 flush 且 exact reply Outbox durable enqueue 后，才会发布 content-free `response.language` behavioral observation。分类器只输出固定的 `zh-CN` / `en`，对短文本、代码块、URL 和混合语言会 abstain；正文和模型输出不会进入学习 event。整条短消息精确匹配“以后简短一点 / 以后用中文回答 / 今后少用列表”等持续偏好闭集（及固定英文等价）时发布 `explicit-selection`；“请用中文回答”等本轮指令不会固化，也不会贡献相反的语言证据。多行、引用、代码、长文本或仅包含短语都不会触发。下游仍须独立执行阈值、TTL、scope、CAS 与回滚门槛。
 
-`/learning` 使用字节精确的闭集语法：`status`、`explain`、`pause`、`resume`、`rollback <exact-T1-catalog-key> confirm`、`forget confirm`。token 之间只接受一个 ASCII 空格，不做 trim 或 Unicode 空白归一化；单独发送 `forget` 只显示确认提示，不删除；命令不接受附件。`explain` 只返回 exact owner + lineage 的 catalog key/value、effect state、version 和 evidence counts，不返回原始内容、不调用模型、不推进 admission high-water。`pause` 持久阻断新证据、T1 激活与 prompt 注入但保留已有记录；`resume` 只接受恢复命令之后收到的新事件，暂停期间已排队的 projection 会被 ACK 丢弃而不会复活；`rollback` 只 CAS 回滚该 key 当前 active T1，无 active 时是准确 no-op，两者都推进 cutoff 防止较旧 projection 复活；`forget confirm` 物理删除该 scope 的信号、假设、transition、exposure 以及较旧 status/pause/explain/rollback 快照，并保留最小 cutoff 防止旧 durable projection 重放。控制回执与 mutation 在同一事务提交，响应丢失或重启后以同一幂等键重放原结果。状态回复独立显示管理员 enabled gate、owner pause gate、已存 active overlays 和当前 effective overlays。
+`/learning` 使用字节精确的闭集语法：`status`、`explain`、`export`、`pause`、`resume`、`rollback <exact-T1-catalog-key> confirm`、`forget confirm`。token 之间只接受一个 ASCII 空格，不做 trim 或 Unicode 空白归一化；单独发送 `forget` 只显示确认提示，不删除；命令不接受附件。`explain` 只返回 exact owner + lineage 的 catalog key/value、effect state、version 和 evidence counts；`export` 复用同一 owner/binding/lineage/admission fence 和 receipt-backed 读取，但由 Delivery 严格校验结构化 receipt 后自行生成 `dsh-preference-learning` v1 JSON。JSON 只含 current-scope T1 key/value/state/version/evidence counts，按 key/value 稳定排序，不含正文、workspace 绝对路径、principal/lineage/generation/session/event/Inbox/Outbox/cursor/idempotency/exposure，也不写文件。两种读取都不调用模型、不推进 admission high-water；相同 Inbox 重放会返回持久保存的原快照。`pause` 持久阻断新证据、T1 激活与 prompt 注入但保留已有记录；`resume` 只接受恢复命令之后收到的新事件，暂停期间已排队的 projection 会被 ACK 丢弃而不会复活；`rollback` 只 CAS 回滚该 key 当前 active T1，无 active 时是准确 no-op，两者都推进 cutoff 防止较旧 projection 复活；`forget confirm` 物理删除该 scope 的信号、假设、transition、exposure 以及较旧 status/pause/explain/export/rollback 快照，并保留最小 cutoff 防止旧 durable projection 重放。控制回执与 mutation 在同一事务提交，响应丢失或重启后以同一幂等键重放原结果。状态回复独立显示管理员 enabled gate、owner pause gate、已存 active overlays 和当前 effective overlays。
 
 需要 resume 的命令遇到已知的持久化格式不兼容、事件类型缺失或日志损坏时，只返回有界诊断码与恢复建议，不回显 prompt/历史，也不删除原 session；可在修复对应 DSH 插件后重试，或用 `/new` 开始空白会话。
 

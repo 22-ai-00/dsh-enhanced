@@ -738,6 +738,36 @@ describe('personal-assistant growth composition', () => {
       key: 'response.language', value: 'zh-CN', state: 'active',
       supportingSignals: 6, contradictingSignals: 0,
     })])
+
+    await send(runtime, 'om-learning-control-export', '/learning export')
+    expect(llm.requests).toHaveLength(callsAfterLearning)
+    const exportInput = runtime.transport.sent.at(-1)?.input
+    if (exportInput === undefined || !('text' in exportInput)) {
+      throw new Error('learning export did not produce a plain JSON reply')
+    }
+    const exportJson = exportInput.text
+    expect(JSON.parse(exportJson)).toEqual({
+      format: 'dsh-preference-learning',
+      records: [expect.objectContaining({
+        key: 'response.language', value: 'zh-CN', state: 'active',
+        supportingSignals: 6, contradictingSignals: 0,
+      })],
+      version: 1,
+    })
+    expect(exportJson).not.toMatch(
+      /云杉项目|\/assistant-workspace|principal|lineage|generation|session|event|inbox|outbox|cursor|idempot|exposure/iu,
+    )
+    const exportReceiptBeforeRestart = preferenceDatabase.prepare(`
+      SELECT payload_hash, action, admission_cursor_epoch, admission_cursor_sequence,
+        result_admission_high_water, result_signals, result_hypotheses,
+        result_active_overlays, result_stored_active_overlays,
+        result_explanation_json
+      FROM preference_owner_control_receipts WHERE action = 'export'
+    `).get()
+    expect(exportReceiptBeforeRestart).toMatchObject({
+      action: 'export', result_signals: 6, result_hypotheses: 1,
+      result_active_overlays: 1, result_stored_active_overlays: 1,
+    })
     preferenceDatabase.close()
 
     await closeContext(runtime.ctx)
@@ -751,7 +781,22 @@ describe('personal-assistant growth composition', () => {
         result_explanation_json
       FROM preference_owner_control_receipts WHERE action = 'explain'
     `).get()).toEqual(explainReceiptBeforeRestart)
+    expect(preferenceDatabase.prepare(`
+      SELECT payload_hash, action, admission_cursor_epoch, admission_cursor_sequence,
+        result_admission_high_water, result_signals, result_hypotheses,
+        result_active_overlays, result_stored_active_overlays,
+        result_explanation_json
+      FROM preference_owner_control_receipts WHERE action = 'export'
+    `).get()).toEqual(exportReceiptBeforeRestart)
     preferenceDatabase.close()
+
+    await send(runtime, 'om-learning-control-export-after-restart', '/learning export')
+    expect(llm.requests).toHaveLength(callsAfterLearning)
+    const restartedExportInput = runtime.transport.sent.at(-1)?.input
+    if (restartedExportInput === undefined || !('text' in restartedExportInput)) {
+      throw new Error('restarted learning export did not produce a plain JSON reply')
+    }
+    expect(restartedExportInput.text).toBe(exportJson)
 
     await send(runtime, 'om-learning-control-status', '/learning status')
     expect(llm.requests).toHaveLength(callsAfterLearning)

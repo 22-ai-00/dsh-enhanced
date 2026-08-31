@@ -160,6 +160,10 @@ export interface PreferenceScopeLearningExplainResult extends PreferenceScopeLea
   explanation: readonly Readonly<PreferenceScopeLearningExplanation>[]
 }
 
+export interface PreferenceScopeLearningExportResult extends PreferenceScopeLearningControlResult {
+  records: readonly Readonly<PreferenceScopeLearningExplanation>[]
+}
+
 export interface PreferenceScopeLearningRollbackResult extends PreferenceScopeLearningControlResult {
   rolledBack: boolean
   rolledBackVersion?: number
@@ -226,7 +230,7 @@ interface HostActivationReceiptRow {
 
 interface OwnerControlReceiptRow {
   payload_hash: string
-  action: 'explain' | 'forget' | 'pause' | 'resume' | 'rollback' | 'status'
+  action: 'explain' | 'export' | 'forget' | 'pause' | 'resume' | 'rollback' | 'status'
   target_preference_key: string | null
   admission_cursor_epoch: string
   admission_cursor_sequence: number
@@ -953,6 +957,12 @@ export class PreferenceStore {
         this.#database.exec('COMMIT')
         return Object.freeze({ applied: replay.result_applied === 1, replayed: true, state })
       }
+      const current = this.#scopeAdmissionRowInTransaction(canonical.scopeKey)
+      if (!this.#readCursorCanObserveCurrent(current, admissionCursor)) {
+        const state = this.#scopeLearningStatusInTransaction(canonical, owner, false)
+        this.#database.exec('COMMIT')
+        return Object.freeze({ applied: false, replayed: false, state })
+      }
       // Status is an authenticated read, not an ordering barrier. Advancing
       // the admission high-water here could discard an older Agent turn that
       // was already running but had not yet committed its projection.
@@ -1013,7 +1023,13 @@ export class PreferenceStore {
         const explanation = this.#ownerControlExplanationFromReceipt(replay)
         const state = this.#ownerControlStateFromReceipt(replay)
         this.#database.exec('COMMIT')
-        return Object.freeze({ applied: true, replayed: true, state, explanation })
+        return Object.freeze({ applied: replay.result_applied === 1, replayed: true, state, explanation })
+      }
+      const current = this.#scopeAdmissionRowInTransaction(canonical.scopeKey)
+      if (!this.#readCursorCanObserveCurrent(current, admissionCursor)) {
+        const state = this.#scopeLearningStatusInTransaction(canonical, owner, false)
+        this.#database.exec('COMMIT')
+        return Object.freeze({ applied: false, replayed: false, state, explanation: Object.freeze([]) })
       }
       // Deliberately do not refresh/reconcile hypotheses here. Explain is a
       // ledger read and must not advance cursors or mutate preference state.
@@ -1038,6 +1054,82 @@ export class PreferenceStore {
       })
       this.#database.exec('COMMIT')
       return Object.freeze({ applied: true, replayed: false, state, explanation })
+    } catch (error) {
+      this.#database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  /** Receipt-backed, stable export snapshot for the exact current owner scope. */
+  exportScopeLearning(
+    scopeInput: PreferenceScope,
+    owner: Readonly<PreferenceScopePrincipalFence>,
+    admissionCursorInput: Readonly<PreferenceAdmissionCursor>,
+    occurredAtInput: number,
+    idempotencyKeyInput: string,
+  ): PreferenceScopeLearningExportResult {
+    this.#assertOpen()
+    const canonical = canonicalPreferenceScope(scopeInput)
+    const admissionCursor = canonicalPreferenceAdmissionCursor(admissionCursorInput)
+    const occurredAt = safeTimestamp(occurredAtInput, 'occurredAt')
+    const rawIdempotencyKey = boundedText(idempotencyKeyInput, 'idempotencyKey', 500)
+    const idempotencyKey = `pref-owner-control-${createHash('sha256')
+      .update(`preference-owner-control-idempotency-v1\0${rawIdempotencyKey}`).digest('hex')}`
+    const hash = payloadHash({
+      scopeDigest: canonical.scopeDigest,
+      principalDigest: owner.principalDigest,
+      principalLineageId: owner.principalLineageId,
+      principalLineageVersion: owner.principalLineageVersion,
+      generation: owner.generation,
+      action: 'export',
+      format: 'dsh-preference-learning',
+      version: 1,
+      admissionCursor,
+    })
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      this.#assertScopePrincipalInTransaction(canonical, owner)
+      const replay = this.#database.prepare(`
+        SELECT * FROM preference_owner_control_receipts WHERE idempotency_key = ?
+      `).get(idempotencyKey) as unknown as OwnerControlReceiptRow | undefined
+      if (replay !== undefined) {
+        if (replay.payload_hash !== hash || replay.action !== 'export') {
+          throw new PreferenceStoreError('idempotency-conflict', 'learning export idempotency key was reused')
+        }
+        const records = this.#ownerControlExplanationFromReceipt(replay)
+        const state = this.#ownerControlStateFromReceipt(replay)
+        this.#database.exec('COMMIT')
+        return Object.freeze({ applied: replay.result_applied === 1, replayed: true, state, records })
+      }
+      const current = this.#scopeAdmissionRowInTransaction(canonical.scopeKey)
+      if (!this.#readCursorCanObserveCurrent(current, admissionCursor)) {
+        const state = this.#scopeLearningStatusInTransaction(canonical, owner, false)
+        this.#database.exec('COMMIT')
+        return Object.freeze({ applied: false, replayed: false, state, records: Object.freeze([]) })
+      }
+      // Like explain, export is a ledger read. It neither reconciles state nor
+      // advances the admission high-water for already-running earlier turns.
+      const rows = this.#database.prepare(`
+        SELECT * FROM preference_hypotheses
+        WHERE scope_key = ? AND risk_tier = 'T1'
+        ORDER BY preference_key ASC, candidate_value ASC, id ASC
+      `).all(canonical.scopeKey) as unknown as HypothesisRow[]
+      const records = Object.freeze(rows.map(explanationFromRow))
+      const state = this.#scopeLearningStatusInTransaction(canonical, owner, false)
+      this.#insertOwnerControlReceipt({
+        idempotencyKey,
+        hash,
+        canonical,
+        owner,
+        action: 'export',
+        admissionCursor,
+        applied: true,
+        state,
+        explanation: records,
+        occurredAt,
+      })
+      this.#database.exec('COMMIT')
+      return Object.freeze({ applied: true, replayed: false, state, records })
     } catch (error) {
       this.#database.exec('ROLLBACK')
       throw error
@@ -3019,6 +3111,15 @@ export class PreferenceStore {
       && admissionCursor.sequence > (current.admission_high_water ?? 0)
   }
 
+  #readCursorCanObserveCurrent(
+    current: Readonly<ScopeAdmissionRow>,
+    admissionCursor: Readonly<PreferenceAdmissionCursor>,
+  ): boolean {
+    return current.admission_cursor_epoch === admissionCursor.epoch
+      && admissionCursor.sequence >= (current.lineage_claim_sequence ?? 1)
+      && admissionCursor.sequence > (current.ignore_events_through_sequence ?? 0)
+  }
+
   #admitEventCursorInTransaction(
     canonical: ReturnType<typeof canonicalPreferenceScope>,
     owner: Readonly<PreferenceScopePrincipalFence>,
@@ -3063,7 +3164,7 @@ export class PreferenceStore {
     hash: string
     canonical: ReturnType<typeof canonicalPreferenceScope>
     owner: Readonly<PreferenceScopePrincipalFence>
-    action: 'explain' | 'forget' | 'pause' | 'resume' | 'rollback' | 'status'
+    action: 'explain' | 'export' | 'forget' | 'pause' | 'resume' | 'rollback' | 'status'
     preferenceKey?: PreferenceKey
     admissionCursor: Readonly<PreferenceAdmissionCursor>
     applied: boolean
@@ -3121,33 +3222,33 @@ export class PreferenceStore {
     receipt: Readonly<OwnerControlReceiptRow>,
   ): readonly Readonly<PreferenceScopeLearningExplanation>[] {
     if (receipt.result_explanation_json === null) {
-      throw new PreferenceStoreError('conflict', 'learning explain receipt is missing its snapshot')
+      throw new PreferenceStoreError('conflict', 'learning summary receipt is missing its snapshot')
     }
     let value: unknown
     try {
       value = JSON.parse(receipt.result_explanation_json)
     } catch {
-      throw new PreferenceStoreError('conflict', 'learning explain receipt snapshot is corrupt')
+      throw new PreferenceStoreError('conflict', 'learning summary receipt snapshot is corrupt')
     }
     if (!Array.isArray(value)) {
-      throw new PreferenceStoreError('conflict', 'learning explain receipt snapshot is corrupt')
+      throw new PreferenceStoreError('conflict', 'learning summary receipt snapshot is corrupt')
     }
     const explanation = value.map(entry => {
       if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
-        throw new PreferenceStoreError('conflict', 'learning explain receipt snapshot is corrupt')
+        throw new PreferenceStoreError('conflict', 'learning summary receipt snapshot is corrupt')
       }
       const row = entry as Partial<PreferenceScopeLearningExplanation>
       const key = exactT1PreferenceKey(row.key)
       try {
         catalogSelection(key, row.value)
       } catch {
-        throw new PreferenceStoreError('conflict', 'learning explain receipt snapshot is corrupt')
+        throw new PreferenceStoreError('conflict', 'learning summary receipt snapshot is corrupt')
       }
       if (!['active', 'inactive', 'rolled-back', 'shadow', 'suppressed'].includes(row.state ?? '')
         || !Number.isSafeInteger(row.version) || row.version! < 1
         || [row.supportingSignals, row.contradictingSignals, row.evidenceMass]
           .some(count => !Number.isSafeInteger(count) || count! < 0)) {
-        throw new PreferenceStoreError('conflict', 'learning explain receipt snapshot is corrupt')
+        throw new PreferenceStoreError('conflict', 'learning summary receipt snapshot is corrupt')
       }
       return Object.freeze({
         key,

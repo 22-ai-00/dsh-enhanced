@@ -1848,6 +1848,14 @@ describe('real rc.8 delivery Agent runtime', () => {
             key: 'response.verbosity', value: 'concise', state: 'active' as const,
             version: 3, supportingSignals: 2, contradictingSignals: 0, evidenceMass: 800,
           }] } : {}),
+          ...(request.action === 'export' ? { exportDocument: {
+            records: [{
+              value: 'concise', key: 'response.verbosity', state: 'active' as const,
+              version: 3, evidenceMass: 800, contradictingSignals: 0, supportingSignals: 2,
+            }],
+            version: 1 as const,
+            format: 'dsh-preference-learning' as const,
+          } } : {}),
           ...(request.action === 'rollback'
             ? { rolledBack: true, rolledBackVersion: 4 }
             : {}),
@@ -1858,6 +1866,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     const inputs = [
       ['evt-learning-status', '/learning status', 'status'],
       ['evt-learning-explain', '/learning explain', 'explain'],
+      ['evt-learning-export', '/learning export', 'export'],
       ['evt-learning-pause', '/learning pause', 'pause'],
       ['evt-learning-resume', '/learning resume', 'resume'],
       ['evt-learning-rollback', '/learning rollback response.verbosity confirm', 'rollback'],
@@ -1889,9 +1898,19 @@ describe('real rc.8 delivery Agent runtime', () => {
       expect(Object.isFrozen(request.principalLineage)).toBe(true)
       expect(Object.isFrozen(request.admissionCursor)).toBe(true)
     }
-    expect(fixture.sends.at(-5)?.text).toContain('组件状态：已启用')
-    expect(fixture.sends.at(-5)?.text).toContain('收集状态：运行中')
-    expect(fixture.sends.at(-4)?.text).toContain('key=response.verbosity')
+    expect(fixture.sends.at(-6)?.text).toContain('组件状态：已启用')
+    expect(fixture.sends.at(-6)?.text).toContain('收集状态：运行中')
+    expect(fixture.sends.at(-5)?.text).toContain('key=response.verbosity')
+    const exportText = fixture.sends.at(-4)?.text
+    expect(JSON.parse(exportText ?? '')).toEqual({
+      format: 'dsh-preference-learning',
+      records: [{
+        contradictingSignals: 0, evidenceMass: 800, key: 'response.verbosity',
+        state: 'active', supportingSignals: 2, value: 'concise', version: 3,
+      }],
+      version: 1,
+    })
+    expect(exportText).not.toMatch(/workspace|principal|lineage|admission|session|event|inbox|outbox|idempot/iu)
     expect(fixture.sends.at(-3)?.text).toContain('已暂停当前工作区')
     expect(fixture.sends.at(-2)?.text).toContain('已恢复当前工作区')
     expect(fixture.sends.at(-1)?.text).toContain('已回滚 response.verbosity')
@@ -1899,6 +1918,101 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(resume).not.toHaveBeenCalled()
     await fixture.ctx.fiber.restart()
   })
+
+  test.each([
+    ['an extra receipt field', 'receipt-field', 'private-export-receipt'],
+    ['an extra state field', 'state-field', 'private-export-state'],
+    ['an invalid format', 'format', 'private-export-format'],
+    ['an invalid version', 'version', 'private-export-version'],
+    ['an unknown catalog key', 'key', 'private.export.key'],
+    ['a value outside its catalog key', 'value', 'private-export-value'],
+    ['non-canonical record order', 'order', 'response.language'],
+  ] as const)(
+    '/learning export keeps %s retryable without replying or exposing its payload',
+    async (_case, mutation, payloadMarker) => {
+      const root = await mkdtemp(join(tmpdir(), `assistant-delivery-learning-export-${mutation}-`))
+      roots.push(root)
+      const fixture = await runtimeHarness(root, new Map())
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      const record: Record<string, unknown> = {
+        key: 'response.verbosity',
+        value: 'concise',
+        state: 'active',
+        version: 3,
+        supportingSignals: 2,
+        contradictingSignals: 0,
+        evidenceMass: 800,
+      }
+      const exportDocument: Record<string, unknown> = {
+        format: 'dsh-preference-learning',
+        version: 1,
+        records: [record],
+      }
+      const control = vi.fn(async (request: Readonly<DeliveryLearningControlRequest>) => {
+        const receipt: Record<string, unknown> = {
+          outcome: 'applied',
+          action: request.action,
+          idempotencyKey: request.idempotencyKey,
+          replayed: false,
+          state: learningScopeStatus(),
+          exportDocument,
+        }
+        switch (mutation) {
+          case 'receipt-field':
+            receipt.privatePayload = payloadMarker
+            break
+          case 'state-field':
+            receipt.state = { ...learningScopeStatus(), privatePayload: payloadMarker }
+            break
+          case 'format':
+            exportDocument.format = payloadMarker
+            break
+          case 'version':
+            exportDocument.version = payloadMarker
+            break
+          case 'key':
+            record.key = payloadMarker
+            break
+          case 'value':
+            record.value = payloadMarker
+            break
+          case 'order':
+            exportDocument.records = [
+              record,
+              {
+                ...record,
+                key: 'response.language',
+                value: 'en',
+                version: 1,
+                supportingSignals: 1,
+                evidenceMass: 100,
+              },
+            ]
+            break
+        }
+        return receipt as never
+      })
+      registerPreferenceSink(fixture.service, () => [], control)
+      const sendsBefore = fixture.sends.length
+      const accepted = await fixture.service.acceptInbound(
+        message(`evt-learning-export-${mutation}`, '/learning export', 'command'),
+      )
+
+      await fixture.service.tick()
+      await fixture.service.whenIdle()
+
+      expect(control).toHaveBeenCalledOnce()
+      expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({
+        status: 'retry_wait',
+        failureCode: 'learning-dispatch-recovery',
+      })
+      expect(fixture.sends).toHaveLength(sendsBefore)
+      expect(JSON.stringify(fixture.sends)).not.toContain(payloadMarker)
+      expect(fixture.llm.requests).toEqual([])
+      await fixture.ctx.fiber.restart()
+    },
+  )
 
   test('/learning forget is a no-op until the owner supplies the exact confirm token', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-learning-forget-'))
@@ -1964,7 +2078,7 @@ describe('real rc.8 delivery Agent runtime', () => {
       principal: linkedPrincipal,
       conversation: linkedConversation,
       kind: 'command',
-      text: '/learning pause',
+      text: '/learning export',
     })
     await drive(fixture.service)
 
@@ -1984,7 +2098,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     registerPreferenceSink(fixture.service, () => [], control)
 
     await fixture.service.acceptInbound({
-      ...message('evt-learning-attachment', '/learning pause', 'command'),
+      ...message('evt-learning-attachment', '/learning export', 'command'),
       attachments: [{ resourceType: 'file', providerRef: 'file-learning-1', fileName: 'control.txt' }],
     })
     await drive(fixture.service)

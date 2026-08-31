@@ -1,3 +1,5 @@
+import { assistantT1PreferenceValues } from '@dsh-enhanced/assistant-growth-contract'
+
 export const preferenceRiskTiers = ['T0', 'T1', 'T2', 'T3'] as const
 export type PreferenceRiskTier = typeof preferenceRiskTiers[number]
 
@@ -18,22 +20,22 @@ export const preferenceCatalog = Object.freeze({
     values: Object.freeze(['acknowledged', 'ignored', 'retried', 'corrected']),
   }),
   'response.verbosity': Object.freeze({
-    riskTier: 'T1', values: Object.freeze(['concise', 'balanced', 'detailed']),
+    riskTier: 'T1', values: assistantT1PreferenceValues['response.verbosity'],
   }),
   'response.structure': Object.freeze({
-    riskTier: 'T1', values: Object.freeze(['prose', 'bullets', 'mixed']),
+    riskTier: 'T1', values: assistantT1PreferenceValues['response.structure'],
   }),
   'response.language': Object.freeze({
-    riskTier: 'T1', values: Object.freeze(['zh-CN', 'en']),
+    riskTier: 'T1', values: assistantT1PreferenceValues['response.language'],
   }),
   'response.explanation_depth': Object.freeze({
-    riskTier: 'T1', values: Object.freeze(['result-first', 'balanced', 'tutorial']),
+    riskTier: 'T1', values: assistantT1PreferenceValues['response.explanation_depth'],
   }),
   'suggestion.frequency': Object.freeze({
-    riskTier: 'T1', values: Object.freeze(['low', 'normal']),
+    riskTier: 'T1', values: assistantT1PreferenceValues['suggestion.frequency'],
   }),
   'recommendation.ranking': Object.freeze({
-    riskTier: 'T1', values: Object.freeze(['recency', 'familiarity', 'evidence']),
+    riskTier: 'T1', values: assistantT1PreferenceValues['recommendation.ranking'],
   }),
   'memory.retention': Object.freeze({
     riskTier: 'T2', values: Object.freeze(['session-only', 'long-term']),

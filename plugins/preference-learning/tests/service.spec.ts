@@ -714,6 +714,34 @@ describe('preference learning service', () => {
     database.close()
   })
 
+  test('exports a versioned content-free T1 snapshot through the trusted owner control', async () => {
+    const { delivery, feedback } = await harness({ autonomousT1Enabled: true })
+    feedback(feedbackEvent('owner-control-export-active', {
+      interpretationTrust: 'explicit-selection',
+    }))
+    const control = delivery.currentRegistration()!.control!
+    const request = Object.freeze({
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      principalId: 'owner:lark:123',
+      principalLineage: OWNER_LINEAGE,
+      admissionCursor: admissionCursor(),
+      action: 'export' as const,
+      occurredAt: Date.now(),
+      idempotencyKey: 'owner-control-export',
+    })
+    const exported = await control(request)
+    expect(exported).toMatchObject({
+      outcome: 'applied', replayed: false,
+      exportDocument: {
+        format: 'dsh-preference-learning', version: 1,
+        records: [{ key: 'response.structure', value: 'bullets', state: 'active' }],
+      },
+    })
+    const json = JSON.stringify(exported.outcome === 'applied' ? exported.exportDocument : {})
+    expect(json).not.toMatch(/owner:lark|work\/alpha|principal|lineage|admission|idempot|inbox|outbox/iu)
+    expect(await control(request)).toEqual({ ...exported, replayed: true })
+  })
+
   test('ACK-ignores legacy projections and marks a cursorless control stale', async () => {
     const { ctx, databasePath, delivery, feedback } = await harness()
     const modern = feedbackEvent('legacy-without-cursor')
