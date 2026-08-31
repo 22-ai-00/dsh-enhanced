@@ -51,6 +51,7 @@ import type { InboundImageMaterializer } from './inbound-images.js'
 import {
   learningCommandUsage,
   parseLearningCommand,
+  serializeLearningExport,
 } from './learning-command.js'
 import type { DeliveryInboundRuntime } from './service.js'
 import {
@@ -72,6 +73,7 @@ import type {
   ConversationModelSelection,
   ConversationRef,
   DeliveryProgressUpdate,
+  DeliveryLearningControlAction,
   DeliveryLearningControlReceipt,
   DeliveryPreferenceEvent,
   InboundEnvelope,
@@ -155,7 +157,7 @@ interface DshDeliveryRuntimeOptions {
   dispatchLearningCommand(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
-    action: 'explain' | 'forget' | 'pause' | 'resume' | 'rollback' | 'status',
+    action: DeliveryLearningControlAction,
     preferenceKey?: string,
   ): Promise<'forbidden' | 'unavailable' | 'unknown' | Readonly<DeliveryLearningControlReceipt>>
   /** Durably reserve the exact terminal reply authorization before permission state can change. */
@@ -2230,6 +2232,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     ]
     const text = result.action === 'status'
       ? statusLines.join('\n')
+      : result.action === 'export'
+        ? serializeLearningExport(result.exportDocument!)
       : result.action === 'explain'
         ? result.explanation?.length
           ? [
@@ -2285,7 +2289,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       '- /model：查看或切换模型；上下文保留。',
       '- /permission：查看或切换运行权限。',
       '- /feedback：提交结构化偏好；回复自动化结果可记录 achieved/partial/not-achieved；不进入模型。',
-      '- /learning：查看、暂停、恢复或清除当前 scope 的偏好学习；不进入模型。',
+      '- /learning：查看、导出、暂停、恢复或清除当前 scope 的偏好学习；不进入模型。',
       '- /help：显示当前实际可用命令。',
     ]
     const visible = native.filter(command => SAFE_NATIVE_COMMANDS.has(command.name))

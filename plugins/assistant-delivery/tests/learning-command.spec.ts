@@ -1,5 +1,9 @@
 import { describe, expect, test } from 'vitest'
-import { learningCommandUsage, parseLearningCommand } from '../src/learning-command.ts'
+import {
+  learningCommandUsage,
+  parseLearningCommand,
+  serializeLearningExport,
+} from '../src/learning-command.ts'
 
 describe('Delivery learning control command grammar', () => {
   test.each([
@@ -7,6 +11,7 @@ describe('Delivery learning control command grammar', () => {
     [' help', { kind: 'help' }],
     [' status', { kind: 'status' }],
     [' explain', { kind: 'explain' }],
+    [' export', { kind: 'export' }],
     [' pause', { kind: 'pause' }],
     [' resume', { kind: 'resume' }],
     [' forget', { kind: 'forget-prompt' }],
@@ -33,6 +38,9 @@ describe('Delivery learning control command grammar', () => {
     ' resume later',
     ' status --json',
     ' explain ',
+    ' Export',
+    ' export ',
+    ' export now',
     ' rollback memory.retention confirm',
     ' rollback response.verbosity',
     ' rollback  response.verbosity confirm',
@@ -47,10 +55,27 @@ describe('Delivery learning control command grammar', () => {
   test('keeps the irreversible confirmation and every supported command discoverable', () => {
     expect(learningCommandUsage).toContain('/learning status')
     expect(learningCommandUsage).toContain('/learning explain')
+    expect(learningCommandUsage).toContain('/learning export')
     expect(learningCommandUsage).toContain('/learning pause')
     expect(learningCommandUsage).toContain('/learning resume')
     expect(learningCommandUsage).toContain('/learning forget confirm')
     expect(learningCommandUsage).toContain('/learning rollback <T1-key> confirm')
     expect(learningCommandUsage).toContain('必须完整输入 forget confirm')
+  })
+
+  test('serializes an export document with stable recursive object-key order', () => {
+    const document = {
+      records: [{
+        value: 'concise', key: 'response.verbosity', state: 'active' as const,
+        version: 2, evidenceMass: 800, contradictingSignals: 0, supportingSignals: 2,
+      }],
+      version: 1 as const,
+      format: 'dsh-preference-learning' as const,
+    }
+    const serialized = serializeLearningExport(document)
+    expect(JSON.parse(serialized)).toEqual(document)
+    expect(serialized.indexOf('"format"')).toBeLessThan(serialized.indexOf('"records"'))
+    expect(serialized.indexOf('"contradictingSignals"'))
+      .toBeLessThan(serialized.indexOf('"key"'))
   })
 })

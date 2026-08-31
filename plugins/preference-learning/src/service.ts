@@ -9,6 +9,7 @@ import {
   type DeliveryAdmissionCursor,
   type DeliveryLearningControlReceipt,
   type DeliveryLearningControlRequest,
+  type DeliveryLearningExportDocument,
   type DeliveryLearningExplanation,
   type DeliveryLearningScopeStatus,
   type DeliveryOwnerLineage,
@@ -640,7 +641,7 @@ export class PreferenceLearningService extends Service {
     const principalId = hostText(request.principalId, 'Delivery learning principalId', 500)
     const idempotencyKey = hostText(request.idempotencyKey, 'Delivery learning idempotencyKey', 500)
     if (!Number.isSafeInteger(request.occurredAt) || request.occurredAt < 0
-      || !['explain', 'forget', 'pause', 'resume', 'rollback', 'status'].includes(request.action)
+      || !['explain', 'export', 'forget', 'pause', 'resume', 'rollback', 'status'].includes(request.action)
       || (request.action === 'rollback' ? typeof request.preferenceKey !== 'string'
         : request.preferenceKey !== undefined)) {
       throw new PreferenceLearningError('unattested-signal', 'Delivery learning control is invalid')
@@ -671,6 +672,7 @@ export class PreferenceLearningService extends Service {
       let deletedSignals: number | undefined
       let deletedHypotheses: number | undefined
       let explanation: readonly Readonly<DeliveryLearningExplanation>[] | undefined
+      let exportDocument: Readonly<DeliveryLearningExportDocument> | undefined
       let rolledBack: boolean | undefined
       let rolledBackVersion: number | undefined
       let state: PreferenceScopeLearningStatus
@@ -695,9 +697,30 @@ export class PreferenceLearningService extends Service {
           request.occurredAt,
           idempotencyKey,
         )
+        if (!result.applied) {
+          return Object.freeze({ outcome: 'stale', action: request.action, idempotencyKey })
+        }
         replayed = result.replayed
         state = result.state
         explanation = result.explanation
+      } else if (request.action === 'export') {
+        const result = this.store.exportScopeLearning(
+          request.scope,
+          principal,
+          admissionCursor,
+          request.occurredAt,
+          idempotencyKey,
+        )
+        if (!result.applied) {
+          return Object.freeze({ outcome: 'stale', action: request.action, idempotencyKey })
+        }
+        replayed = result.replayed
+        state = result.state
+        exportDocument = Object.freeze({
+          format: 'dsh-preference-learning',
+          version: 1,
+          records: result.records,
+        })
       } else if (request.action === 'pause' || request.action === 'resume') {
         const result = this.store.setScopeLearningPaused(
           request.scope,
@@ -757,6 +780,7 @@ export class PreferenceLearningService extends Service {
         ...(deletedSignals === undefined ? {} : { deletedSignals }),
         ...(deletedHypotheses === undefined ? {} : { deletedHypotheses }),
         ...(explanation === undefined ? {} : { explanation }),
+        ...(exportDocument === undefined ? {} : { exportDocument }),
         ...(rolledBack === undefined ? {} : { rolledBack }),
         ...(rolledBackVersion === undefined ? {} : { rolledBackVersion }),
       })

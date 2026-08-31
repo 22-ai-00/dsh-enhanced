@@ -54,6 +54,7 @@ import {
   ownerRouteBindingSnapshot,
 } from './canonical.js'
 import { isExactDeliveryCommand, parseDeliveryCommand } from './session-commands.js'
+import { deliveryT1PreferenceKeys, deliveryT1PreferenceValues } from './learning-command.js'
 import {
   feedbackSignalInput,
   classifyNaturalPreferenceDirective,
@@ -234,18 +235,43 @@ function validateLearningControlReceipt(
   value: unknown,
   request: Readonly<DeliveryLearningControlRequest>,
 ): asserts value is Readonly<DeliveryLearningControlReceipt> {
-  if (typeof value !== 'object' || value === null) throw new Error('learning control receipt is invalid')
+  if (typeof value !== 'object' || value === null || Array.isArray(value)
+    || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new Error('learning control receipt is invalid')
+  }
   const receipt = value as Partial<DeliveryLearningControlReceipt>
   if (receipt.action !== request.action || receipt.idempotencyKey !== request.idempotencyKey) {
     throw new Error('learning control receipt identity is invalid')
   }
-  if (receipt.outcome === 'stale') return
+  if (receipt.outcome === 'stale') {
+    if (Object.keys(receipt).sort().join(',') !== 'action,idempotencyKey,outcome') {
+      throw new Error('learning stale receipt contains untrusted fields')
+    }
+    return
+  }
   if (receipt.outcome !== 'applied' || typeof receipt.replayed !== 'boolean'
     || typeof receipt.state !== 'object' || receipt.state === null) {
     throw new Error('learning control receipt outcome is invalid')
   }
+  const expectedReceiptKeys = ['action', 'idempotencyKey', 'outcome', 'replayed', 'state']
+  if (request.action === 'forget') expectedReceiptKeys.push('deletedHypotheses', 'deletedSignals')
+  if (request.action === 'explain') expectedReceiptKeys.push('explanation')
+  if (request.action === 'export') expectedReceiptKeys.push('exportDocument')
+  if (request.action === 'rollback') {
+    expectedReceiptKeys.push('rolledBack')
+    if (receipt.rolledBack === true) expectedReceiptKeys.push('rolledBackVersion')
+  }
+  if (Object.keys(receipt).sort().join(',') !== expectedReceiptKeys.sort().join(',')) {
+    throw new Error('learning control receipt contains untrusted fields')
+  }
   const state = receipt.state
-  if (!['active', 'disabled', 'paused'].includes(state.mode as string)
+  if (Array.isArray(state) || Object.getPrototypeOf(state) !== Object.prototype
+    || Object.keys(state).sort().join(',') !== [
+      'activeOverlays', 'administrativelyEnabled', 'collectionMode',
+      'effectiveActiveOverlays', 'hypotheses', 'mode', 'shadowHypotheses',
+      'signals', 'storedActiveOverlays',
+    ].join(',')
+    || !['active', 'disabled', 'paused'].includes(state.mode as string)
     || typeof state.administrativelyEnabled !== 'boolean'
     || !['active', 'paused'].includes(state.collectionMode as string)
     || [state.signals, state.hypotheses, state.storedActiveOverlays,
@@ -277,6 +303,41 @@ function validateLearningControlReceipt(
           .some(count => !Number.isSafeInteger(count) || count < 0)) {
         throw new Error('learning explain receipt is invalid')
       }
+    }
+  }
+  if (request.action === 'export') {
+    const document = receipt.exportDocument
+    if (typeof document !== 'object' || document === null || Array.isArray(document)
+      || Object.getPrototypeOf(document) !== Object.prototype
+      || Object.keys(document).sort().join(',') !== 'format,records,version'
+      || document.format !== 'dsh-preference-learning' || document.version !== 1
+      || !Array.isArray(document.records)
+      || document.records.length > Object.values(deliveryT1PreferenceValues)
+        .reduce((total, values) => total + values.length, 0)) {
+      throw new Error('learning export receipt is invalid')
+    }
+    let previousIdentity: string | undefined
+    for (const item of document.records) {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)
+        || Object.getPrototypeOf(item) !== Object.prototype
+        || Object.keys(item).sort().join(',') !== [
+          'contradictingSignals', 'evidenceMass', 'key', 'state',
+          'supportingSignals', 'value', 'version',
+        ].join(',')
+        || !(deliveryT1PreferenceKeys as readonly string[]).includes(item.key)
+        || !(deliveryT1PreferenceValues as Readonly<Record<string, readonly string[]>>)[item.key]
+          ?.includes(item.value)
+        || !['active', 'inactive', 'rolled-back', 'shadow', 'suppressed'].includes(item.state)
+        || !Number.isSafeInteger(item.version) || item.version < 1
+        || [item.supportingSignals, item.contradictingSignals, item.evidenceMass]
+          .some(count => !Number.isSafeInteger(count) || count < 0)) {
+        throw new Error('learning export receipt is invalid')
+      }
+      const identity = `${item.key}\0${item.value}`
+      if (previousIdentity !== undefined && identity <= previousIdentity) {
+        throw new Error('learning export receipt is not canonically ordered')
+      }
+      previousIdentity = identity
     }
   }
   if (request.action === 'rollback'

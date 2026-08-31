@@ -16,5 +16,9 @@ Automation 的八个 Host 操作共享同一套 identity、artifact CAS 与 rece
 `operationId` 只有精确相同 payload 才能重放；promotion receipt 同时返回下一版本及其摘要，
 确保之后的撤票或证据变化能对准实际生产 artifact 回滚。
 
+本包也固定 Delivery 与 Preference Learning 共同消费的可逆 T1 偏好 key/value 目录，
+避免导出校验与实际激活目录各自维护一份并发生漂移。它只描述闭集协议，不拥有证据、
+偏好状态或激活权限。
+
 本包只使用 Node `crypto` 计算 canonical SHA-256，不访问网络、文件系统、子进程、凭据或
 浏览器，也没有 install script。

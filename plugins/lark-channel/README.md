@@ -103,6 +103,7 @@ config:
 /feedback           # 查看固定偏好反馈语法
 /learning status    # 查看偏好学习状态
 /learning explain   # 查看无历史正文的 key/value、版本与证据计数
+/learning export    # 导出无正文、无内部标识的稳定 T1 JSON
 /learning pause     # 暂停收集、激活与注入
 /learning resume    # 恢复，仅接收此后的新证据
 /learning rollback response.language confirm # 撤回当前 lineage 的一个 exact active T1 key

@@ -177,6 +177,161 @@ describe('preference database', () => {
     )).toEqual({ ...pause, replayed: true })
     upgraded.close()
   })
+
+  test('preserves v8 explain, pause, and rollback receipts across the v9 migration', () => {
+    const path = join(root(), 'v8-control-receipts.sqlite')
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const first = store(() => 20_000, path)
+    const owner = first.ensureScopePrincipal(scope, 'owner:A', 10_000, OWNER_LINEAGE, cursor(1))
+    first.appendSignals([
+      signal({ idempotencyKey: 'v8-migration-ready-1' }),
+      signal({ idempotencyKey: 'v8-migration-ready-2' }),
+    ], { ownerFence: owner, admissionCursor: cursor(2) })
+    const ready = first.list(scope, 10, 'owner:A', OWNER_LINEAGE)[0]!
+    const active = first.activate(scope, ready.id, ready.version, owner)
+    const explained = first.explainScopeLearning(
+      scope, owner, cursor(3), 20_000, 'v8-migration-explain',
+    )
+    const paused = first.setScopeLearningPaused(
+      scope, owner, true, cursor(4), 20_001, 'v8-migration-pause',
+    )
+    const rolledBack = first.rollbackScopeLearningKey(
+      scope, owner, 'response.verbosity', cursor(5), 20_002, 'v8-migration-rollback',
+    )
+    expect(explained).toMatchObject({
+      applied: true, replayed: false,
+      state: {
+        mode: 'active', activeOverlays: 1, storedActiveOverlays: 1,
+        controlVersion: 1, admissionHighWater: cursor(2),
+      },
+      explanation: [{
+        key: 'response.verbosity', value: 'concise', state: 'active', version: active.version,
+      }],
+    })
+    expect(paused).toMatchObject({
+      applied: true, replayed: false,
+      state: {
+        mode: 'paused', activeOverlays: 0, storedActiveOverlays: 1,
+        controlVersion: 2, admissionHighWater: cursor(4), ignoreEventsThrough: cursor(4),
+      },
+    })
+    expect(rolledBack).toMatchObject({
+      applied: true, replayed: false, rolledBack: true, rolledBackVersion: active.version + 1,
+      state: {
+        mode: 'paused', activeOverlays: 0, storedActiveOverlays: 0,
+        controlVersion: 3, admissionHighWater: cursor(5), ignoreEventsThrough: cursor(5),
+      },
+    })
+    first.close()
+
+    // Recreate the exact schema-v8 receipt table around real API-produced
+    // receipts. Opening it below must exercise the production v8 -> v9 copy.
+    const downgrade = new DatabaseSync(path)
+    downgrade.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE preference_owner_control_receipts
+        RENAME TO preference_owner_control_receipts_v9;
+      DROP INDEX preference_owner_control_scope_time;
+      CREATE TABLE preference_owner_control_receipts (
+        idempotency_key TEXT PRIMARY KEY,
+        payload_hash TEXT NOT NULL,
+        scope_digest TEXT NOT NULL,
+        principal_digest TEXT NOT NULL CHECK (
+          length(principal_digest) = 64 AND principal_digest NOT GLOB '*[^a-f0-9]*'
+        ),
+        generation INTEGER NOT NULL CHECK (generation >= 1),
+        action TEXT NOT NULL CHECK (action IN (
+          'explain', 'forget', 'pause', 'resume', 'rollback', 'status'
+        )),
+        target_preference_key TEXT,
+        admission_cursor_epoch TEXT NOT NULL,
+        admission_cursor_sequence INTEGER NOT NULL CHECK (admission_cursor_sequence >= 1),
+        result_applied INTEGER NOT NULL CHECK (result_applied IN (0, 1)),
+        result_paused INTEGER NOT NULL CHECK (result_paused IN (0, 1)),
+        result_control_version INTEGER NOT NULL CHECK (result_control_version >= 1),
+        result_admission_high_water INTEGER
+          CHECK (result_admission_high_water IS NULL OR result_admission_high_water >= 1),
+        result_ignore_events_through_sequence INTEGER
+          CHECK (result_ignore_events_through_sequence IS NULL
+            OR result_ignore_events_through_sequence >= 1),
+        result_signals INTEGER NOT NULL CHECK (result_signals >= 0),
+        result_hypotheses INTEGER NOT NULL CHECK (result_hypotheses >= 0),
+        result_active_overlays INTEGER NOT NULL CHECK (result_active_overlays >= 0),
+        result_stored_active_overlays INTEGER NOT NULL DEFAULT 0
+          CHECK (result_stored_active_overlays >= 0),
+        result_shadow_hypotheses INTEGER NOT NULL CHECK (result_shadow_hypotheses >= 0),
+        result_deleted_signals INTEGER NOT NULL DEFAULT 0 CHECK (result_deleted_signals >= 0),
+        result_deleted_hypotheses INTEGER NOT NULL DEFAULT 0 CHECK (result_deleted_hypotheses >= 0),
+        result_forgotten_through INTEGER NOT NULL DEFAULT -1 CHECK (result_forgotten_through >= -1),
+        result_explanation_json TEXT,
+        result_rolled_back INTEGER NOT NULL DEFAULT 0 CHECK (result_rolled_back IN (0, 1)),
+        result_rolled_back_version INTEGER
+          CHECK (result_rolled_back_version IS NULL OR result_rolled_back_version >= 2),
+        occurred_at INTEGER NOT NULL,
+        CHECK ((action = 'rollback' AND target_preference_key IS NOT NULL)
+          OR (action != 'rollback' AND target_preference_key IS NULL)),
+        CHECK ((action = 'explain' AND result_explanation_json IS NOT NULL)
+          OR (action != 'explain' AND result_explanation_json IS NULL)),
+        CHECK (result_rolled_back = 0 OR action = 'rollback')
+      ) STRICT;
+      INSERT INTO preference_owner_control_receipts
+        SELECT * FROM preference_owner_control_receipts_v9;
+      DROP TABLE preference_owner_control_receipts_v9;
+      CREATE INDEX preference_owner_control_scope_time
+        ON preference_owner_control_receipts(
+          scope_digest, admission_cursor_epoch, admission_cursor_sequence DESC, idempotency_key
+        );
+      UPDATE preference_schema_meta SET value = '8' WHERE key = 'schema-version';
+      PRAGMA user_version = 8;
+      COMMIT;
+    `)
+    const v8Receipts = downgrade.prepare(`
+      SELECT * FROM preference_owner_control_receipts ORDER BY action
+    `).all()
+    expect(v8Receipts.map(row => (row as { action: string }).action))
+      .toEqual(['explain', 'pause', 'rollback'])
+    downgrade.close()
+
+    const upgraded = store(() => 20_100, path)
+    const audit = new DatabaseSync(path, { readOnly: true })
+    expect((audit.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+      .toBe(preferenceSchemaVersion)
+    expect(audit.prepare(`
+      SELECT * FROM preference_owner_control_receipts ORDER BY action
+    `).all()).toEqual(v8Receipts)
+    const principalBeforeReplay = audit.prepare(`
+      SELECT learning_paused, control_version, admission_high_water,
+        admission_high_water_kind, ignore_events_through_sequence
+      FROM preference_scope_principals
+    `).get()
+    audit.close()
+
+    expect(upgraded.explainScopeLearning(
+      scope, owner, cursor(3), 20_000, 'v8-migration-explain',
+    )).toEqual({ ...explained, replayed: true })
+    expect(upgraded.setScopeLearningPaused(
+      scope, owner, true, cursor(4), 20_001, 'v8-migration-pause',
+    )).toEqual({ ...paused, replayed: true })
+    expect(upgraded.rollbackScopeLearningKey(
+      scope, owner, 'response.verbosity', cursor(5), 20_002, 'v8-migration-rollback',
+    )).toEqual({ ...rolledBack, replayed: true })
+
+    const afterReplay = new DatabaseSync(path, { readOnly: true })
+    expect(afterReplay.prepare(`
+      SELECT effect_state, version FROM preference_hypotheses WHERE id = ?
+    `).get(active.id)).toEqual({ effect_state: 'rolled-back', version: active.version + 1 })
+    expect(afterReplay.prepare(`
+      SELECT COUNT(*) AS count FROM preference_transitions
+      WHERE hypothesis_id = ? AND reason = 'owner-rejected'
+    `).get(active.id)).toEqual({ count: 1 })
+    expect(afterReplay.prepare(`
+      SELECT learning_paused, control_version, admission_high_water,
+        admission_high_water_kind, ignore_events_through_sequence
+      FROM preference_scope_principals
+    `).get()).toEqual(principalBeforeReplay)
+    afterReplay.close()
+    upgraded.close()
+  })
 })
 
 describe('preference store', () => {
@@ -868,6 +1023,46 @@ describe('preference store', () => {
     restarted.close()
   })
 
+  test('exports a durable content-free T1 snapshot without advancing admission order', () => {
+    const path = join(root(), 'learning-export.sqlite')
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const first = store(() => 20_000, path)
+    const owner = first.ensureScopePrincipal(scope, 'owner:A', 10_000, OWNER_LINEAGE, cursor(1))
+    first.appendSignals([
+      signal({ idempotencyKey: 'export-ready-1' }),
+      signal({ idempotencyKey: 'export-ready-2' }),
+    ], { ownerFence: owner, admissionCursor: cursor(2) })
+    const ready = first.list(scope, 10, 'owner:A', OWNER_LINEAGE)[0]!
+    first.activate(scope, ready.id, ready.version, owner)
+
+    const exported = first.exportScopeLearning(
+      scope, owner, cursor(4), 20_000, 'export-active-t1',
+    )
+    expect(exported).toMatchObject({
+      applied: true, replayed: false,
+      state: { admissionHighWater: { epoch: ADMISSION_EPOCH, sequence: 2 } },
+      records: [{
+        key: 'response.verbosity', value: 'concise', state: 'active',
+        supportingSignals: 2, contradictingSignals: 0,
+      }],
+    })
+    expect(JSON.stringify(exported.records)).not.toMatch(/work|owner|principal|lineage|idempot|inbox|outbox/iu)
+    expect(first.appendSignals([signal({
+      preferenceKey: 'response.structure', candidateValue: 'bullets',
+      idempotencyKey: 'in-flight-before-export', occurredAt: 19_999,
+    })], { ownerFence: owner, admissionCursor: cursor(3) })).toHaveLength(1)
+    expect(first.exportScopeLearning(
+      scope, owner, cursor(4), 20_000, 'export-active-t1',
+    )).toEqual({ ...exported, replayed: true })
+    first.close()
+
+    const restarted = store(() => 20_001, path)
+    expect(restarted.exportScopeLearning(
+      scope, owner, cursor(4), 20_000, 'export-active-t1',
+    )).toEqual({ ...exported, replayed: true })
+    restarted.close()
+  })
+
   test('resume admits only events newer than its durable cutoff', () => {
     const target = store(() => 20_000)
     const scope = { workspace: '/work/alpha', preset: 'primary' }
@@ -977,13 +1172,49 @@ describe('preference store', () => {
     `).all()).toEqual([{ deleted_signals: 1, deleted_hypotheses: 1 }])
     database.close()
 
-    // Replaying an old read after the privacy boundary may only expose the
-    // current empty state; its deleted historical snapshot no longer exists.
+    // Replaying an old read after the privacy boundary must not reconstruct a
+    // snapshot from either the deleted generation or later learned data.
     const restarted = store(() => 20_004, path)
     expect(restarted.recordScopeLearningStatus(
       scope, owner, cursor(3), 20_000, 'privacy-old-status',
-    )).toMatchObject({ applied: true, replayed: false, state: { signals: 0, hypotheses: 0 } })
+    )).toMatchObject({ applied: false, replayed: false, state: { signals: 0, hypotheses: 0 } })
     restarted.close()
+  })
+
+  test('never rebuilds a forgotten export request from post-forget preferences', () => {
+    const target = store(() => 30_000)
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const owner = target.ensureScopePrincipal(scope, 'owner:A', 20_000, OWNER_LINEAGE, cursor(1))
+    target.appendSignals([signal({ idempotencyKey: 'export-before-forget' })], {
+      ownerFence: owner, admissionCursor: cursor(2),
+    })
+    const before = target.exportScopeLearning(
+      scope, owner, cursor(3), 30_000, 'old-export-request',
+    )
+    expect(before.records).toEqual([expect.objectContaining({
+      key: 'response.verbosity', value: 'concise',
+    })])
+
+    expect(target.forgetScope(scope, 'forget-after-export', {
+      ownerFence: owner, admissionCursor: cursor(4), occurredAt: 30_001,
+    })).toMatchObject({ applied: true })
+    target.appendSignals([signal({
+      preferenceKey: 'response.structure', candidateValue: 'bullets',
+      idempotencyKey: 'post-forget-preference', occurredAt: 30_000,
+    })], { ownerFence: owner, admissionCursor: cursor(5) })
+
+    expect(target.exportScopeLearning(
+      scope, owner, cursor(3), 30_000, 'old-export-request',
+    )).toMatchObject({ applied: false, replayed: false, records: [] })
+    expect(target.exportScopeLearning(
+      scope, owner, cursor(6), 30_003, 'new-export-request',
+    )).toMatchObject({
+      applied: true,
+      records: [expect.objectContaining({
+        key: 'response.structure', value: 'bullets',
+      })],
+    })
+    target.close()
   })
 
   test('records typed signals idempotently without retaining the raw idempotency key', () => {

@@ -1,4 +1,5 @@
 export * from './types.js'
 export * from './canonical.js'
 export * from './automation.js'
+export * from './preferences.js'
 export { version } from './version.js'

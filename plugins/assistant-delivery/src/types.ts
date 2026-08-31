@@ -220,6 +220,7 @@ export type DeliveryPreferenceEvent =
 
 export type DeliveryLearningControlAction =
   | 'explain'
+  | 'export'
   | 'forget'
   | 'pause'
   | 'resume'
@@ -234,6 +235,13 @@ export interface DeliveryLearningExplanation {
   readonly supportingSignals: number
   readonly contradictingSignals: number
   readonly evidenceMass: number
+}
+
+/** Portable, content-free snapshot for the exact current owner scope. */
+export interface DeliveryLearningExportDocument {
+  readonly format: 'dsh-preference-learning'
+  readonly version: 1
+  readonly records: readonly Readonly<DeliveryLearningExplanation>[]
 }
 
 /** Content-free owner command minted only after Delivery revalidates the exact Inbox binding. */
@@ -275,6 +283,7 @@ export type DeliveryLearningControlReceipt =
     deletedSignals?: number
     deletedHypotheses?: number
     explanation?: readonly Readonly<DeliveryLearningExplanation>[]
+    exportDocument?: Readonly<DeliveryLearningExportDocument>
     rolledBack?: boolean
     rolledBackVersion?: number
   }>

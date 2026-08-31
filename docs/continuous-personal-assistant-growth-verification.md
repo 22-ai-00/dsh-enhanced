@@ -248,3 +248,17 @@ fixture 和相应 crash/recovery gates。
   `192` 个测试文件 / `2626` 项测试、每包测试、clean build 与全部插件/共享包 `pack --dry-run`。
 - `pnpm release:prepare`：本地准备 `0.1.8`；`pnpm release:status` 显示 current `0.1.7`、pending `0.1.8`。
   本轮没有执行 publish、push 或创建 Git tag。
+
+## 2026-08-31 `/learning export` 产品缺口闭合
+
+- 新增 exact owner 本地命令 `/learning export`。它沿用 Delivery 的 claimed Inbox、binding、principal
+  lineage、admission cursor 和私有 Preference registration，不进入 Agent/LLM，也不写 workspace 文件。
+- Preference schema v9 在同一事务保存 content-free T1 snapshot 与 control receipt；Delivery 只接受固定
+  `dsh-preference-learning` v1、闭集 catalog、稳定排序且无额外字段的结构，再自行生成确定性 JSON。
+- 导出只含 T1 key/value/effect state/version/evidence counts，不含消息正文、workspace、principal、lineage、
+  generation、session/event、Inbox/Outbox、cursor、幂等键或 exposure。
+- `status`、`explain`、`export` 仍不推进 admission high-water；若 `forget` 已删除旧快照并越过其 cursor，
+  历史只读请求返回 stale，不能从后来学习的新偏好重建旧请求结果。
+- 本切片定向验证：Delivery `514/514`、Preference Learning `72/72`、根 personal-assistant E2E `8/8`；
+  完整根 `pnpm check` 通过，覆盖 `192` 个根测试文件 / `2642` 项测试、全包测试、typecheck、build、
+  zero-warning lint 与全部包 dry-run pack。

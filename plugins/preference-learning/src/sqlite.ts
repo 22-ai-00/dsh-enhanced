@@ -9,7 +9,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const preferenceSchemaVersion = 8
+export const preferenceSchemaVersion = 9
 
 export type PreferenceDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -424,6 +424,77 @@ function migrate(database: DatabaseSync): void {
         );
       UPDATE preference_schema_meta SET value = '8' WHERE key = 'schema-version';
       PRAGMA user_version = 8;
+    `)
+    if (current < 9) database.exec(`
+      ALTER TABLE preference_owner_control_receipts
+        RENAME TO preference_owner_control_receipts_v8;
+      DROP INDEX preference_owner_control_scope_time;
+      CREATE TABLE preference_owner_control_receipts (
+        idempotency_key TEXT PRIMARY KEY,
+        payload_hash TEXT NOT NULL,
+        scope_digest TEXT NOT NULL,
+        principal_digest TEXT NOT NULL CHECK (
+          length(principal_digest) = 64 AND principal_digest NOT GLOB '*[^a-f0-9]*'
+        ),
+        generation INTEGER NOT NULL CHECK (generation >= 1),
+        action TEXT NOT NULL CHECK (action IN (
+          'explain', 'export', 'forget', 'pause', 'resume', 'rollback', 'status'
+        )),
+        target_preference_key TEXT,
+        admission_cursor_epoch TEXT NOT NULL,
+        admission_cursor_sequence INTEGER NOT NULL CHECK (admission_cursor_sequence >= 1),
+        result_applied INTEGER NOT NULL CHECK (result_applied IN (0, 1)),
+        result_paused INTEGER NOT NULL CHECK (result_paused IN (0, 1)),
+        result_control_version INTEGER NOT NULL CHECK (result_control_version >= 1),
+        result_admission_high_water INTEGER
+          CHECK (result_admission_high_water IS NULL OR result_admission_high_water >= 1),
+        result_ignore_events_through_sequence INTEGER
+          CHECK (result_ignore_events_through_sequence IS NULL
+            OR result_ignore_events_through_sequence >= 1),
+        result_signals INTEGER NOT NULL CHECK (result_signals >= 0),
+        result_hypotheses INTEGER NOT NULL CHECK (result_hypotheses >= 0),
+        result_active_overlays INTEGER NOT NULL CHECK (result_active_overlays >= 0),
+        result_stored_active_overlays INTEGER NOT NULL DEFAULT 0
+          CHECK (result_stored_active_overlays >= 0),
+        result_shadow_hypotheses INTEGER NOT NULL CHECK (result_shadow_hypotheses >= 0),
+        result_deleted_signals INTEGER NOT NULL DEFAULT 0 CHECK (result_deleted_signals >= 0),
+        result_deleted_hypotheses INTEGER NOT NULL DEFAULT 0 CHECK (result_deleted_hypotheses >= 0),
+        result_forgotten_through INTEGER NOT NULL DEFAULT -1 CHECK (result_forgotten_through >= -1),
+        result_explanation_json TEXT,
+        result_rolled_back INTEGER NOT NULL DEFAULT 0 CHECK (result_rolled_back IN (0, 1)),
+        result_rolled_back_version INTEGER
+          CHECK (result_rolled_back_version IS NULL OR result_rolled_back_version >= 2),
+        occurred_at INTEGER NOT NULL,
+        CHECK ((action = 'rollback' AND target_preference_key IS NOT NULL)
+          OR (action != 'rollback' AND target_preference_key IS NULL)),
+        CHECK ((action IN ('explain', 'export') AND result_explanation_json IS NOT NULL)
+          OR (action NOT IN ('explain', 'export') AND result_explanation_json IS NULL)),
+        CHECK (result_rolled_back = 0 OR action = 'rollback')
+      ) STRICT;
+      INSERT INTO preference_owner_control_receipts(
+        idempotency_key, payload_hash, scope_digest, principal_digest, generation,
+        action, target_preference_key, admission_cursor_epoch, admission_cursor_sequence,
+        result_applied, result_paused, result_control_version, result_admission_high_water,
+        result_ignore_events_through_sequence, result_signals, result_hypotheses,
+        result_active_overlays, result_stored_active_overlays, result_shadow_hypotheses,
+        result_deleted_signals, result_deleted_hypotheses, result_forgotten_through,
+        result_explanation_json, result_rolled_back, result_rolled_back_version, occurred_at
+      )
+      SELECT idempotency_key, payload_hash, scope_digest, principal_digest, generation,
+        action, target_preference_key, admission_cursor_epoch, admission_cursor_sequence,
+        result_applied, result_paused, result_control_version, result_admission_high_water,
+        result_ignore_events_through_sequence, result_signals, result_hypotheses,
+        result_active_overlays, result_stored_active_overlays, result_shadow_hypotheses,
+        result_deleted_signals, result_deleted_hypotheses, result_forgotten_through,
+        result_explanation_json, result_rolled_back, result_rolled_back_version, occurred_at
+      FROM preference_owner_control_receipts_v8;
+      DROP TABLE preference_owner_control_receipts_v8;
+      CREATE INDEX preference_owner_control_scope_time
+        ON preference_owner_control_receipts(
+          scope_digest, admission_cursor_epoch, admission_cursor_sequence DESC, idempotency_key
+        );
+      UPDATE preference_schema_meta SET value = '9' WHERE key = 'schema-version';
+      PRAGMA user_version = 9;
     `)
     database.exec('COMMIT')
     transactionStarted = false
