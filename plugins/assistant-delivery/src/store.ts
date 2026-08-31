@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID, scryptSync, timingSafeEqual } from
 import { isAbsolute } from 'node:path'
 import type { DatabaseSync, StatementSync } from 'node:sqlite'
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
+import type { ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
 import {
   ASSISTANT_GROWTH_CONTRACT_VERSION,
   WORKFLOW_TRACE_SOURCE_ID,
@@ -77,6 +78,7 @@ import type {
   ModelPickerIntent,
   ModelPickerState,
   ModelRouteRef,
+  OwnerApprovalForPreferenceInput,
   OwnerRouteAuthority,
   OutboxRecord,
   PairingChallenge,
@@ -249,6 +251,19 @@ interface OutboxRow {
   failure_code: string | null
   created_at: number
   updated_at: number
+}
+
+interface ApprovalOutboxRouteRow {
+  outbox_id: string
+  route_version: number
+  source_id: string
+  binding_id: string
+  binding_version: number
+  binding_generation: number
+  workspace: string
+  principal: string
+  principal_record_id: string
+  principal_version: number
 }
 
 interface DeliveryPresentationRow {
@@ -1084,6 +1099,83 @@ function validateBindingText(value: string, field: string, max: number): string 
     throw new DeliveryStoreError('invalid-binding', `${field} is invalid`)
   }
   return normalized
+}
+
+function approvalRouteText(value: unknown, field: string, maxBytes: number): string {
+  if (typeof value !== 'string') {
+    throw new DeliveryStoreError('invalid-intent', `approval route ${field} is invalid`)
+  }
+  const normalized = value.normalize('NFC').trim()
+  const hasControl = [...normalized].some(character => {
+    const code = character.codePointAt(0)!
+    return code <= 0x1f || code === 0x7f
+  })
+  if (normalized === '' || normalized !== value || Buffer.byteLength(normalized, 'utf8') > maxBytes || hasControl) {
+    throw new DeliveryStoreError('invalid-intent', `approval route ${field} is invalid`)
+  }
+  return normalized
+}
+
+function canonicalApprovalDispatchRoute(input: unknown): ApprovalDispatchRouteV2 {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new DeliveryStoreError('invalid-intent', 'approval route must be a v2 object')
+  }
+  const route = input as Record<string, unknown>
+  const fields = [
+    'bindingGeneration', 'bindingId', 'bindingVersion', 'principal', 'principalRecordId',
+    'principalVersion', 'routeVersion', 'sourceId', 'workspace',
+  ]
+  if (Object.keys(route).sort().join(',') !== fields.join(',') || route.routeVersion !== 2) {
+    throw new DeliveryStoreError('invalid-intent', 'approval route must be complete route version 2')
+  }
+  const sourceId = approvalRouteText(route.sourceId, 'sourceId', 256)
+  const bindingId = approvalRouteText(route.bindingId, 'bindingId', 512)
+  const workspace = approvalRouteText(route.workspace, 'workspace', 4_096)
+  const principal = approvalRouteText(route.principal, 'principal', 512)
+  const principalRecordId = approvalRouteText(route.principalRecordId, 'principalRecordId', 500)
+  if (!isAbsolute(workspace)
+    || !Number.isSafeInteger(route.bindingVersion) || (route.bindingVersion as number) < 1
+    || !Number.isSafeInteger(route.bindingGeneration) || (route.bindingGeneration as number) < 1
+    || !Number.isSafeInteger(route.principalVersion) || (route.principalVersion as number) < 1) {
+    throw new DeliveryStoreError('invalid-intent', 'approval route fence is invalid')
+  }
+  return Object.freeze({
+    routeVersion: 2,
+    sourceId,
+    bindingId,
+    bindingVersion: route.bindingVersion as number,
+    bindingGeneration: route.bindingGeneration as number,
+    workspace,
+    principal,
+    principalRecordId,
+    principalVersion: route.principalVersion as number,
+  })
+}
+
+function approvalRouteFromRow(row: ApprovalOutboxRouteRow): ApprovalDispatchRouteV2 {
+  return canonicalApprovalDispatchRoute({
+    routeVersion: row.route_version,
+    sourceId: row.source_id,
+    bindingId: row.binding_id,
+    bindingVersion: row.binding_version,
+    bindingGeneration: row.binding_generation,
+    workspace: row.workspace,
+    principal: row.principal,
+    principalRecordId: row.principal_record_id,
+    principalVersion: row.principal_version,
+  })
+}
+
+function sameApprovalRoute(left: ApprovalDispatchRouteV2, right: ApprovalDispatchRouteV2): boolean {
+  return left.routeVersion === right.routeVersion
+    && left.sourceId === right.sourceId
+    && left.bindingId === right.bindingId
+    && left.bindingVersion === right.bindingVersion
+    && left.bindingGeneration === right.bindingGeneration
+    && left.workspace === right.workspace
+    && left.principal === right.principal
+    && left.principalRecordId === right.principalRecordId
+    && left.principalVersion === right.principalVersion
 }
 
 function resolutionOperatorId(value: unknown): string {
@@ -2078,6 +2170,17 @@ export class DeliveryStore {
     return row === undefined ? undefined : principalFromRow(row)
   }
 
+  private getBindingPrincipal(bindingId: string): DeliveryPrincipal | undefined {
+    const row = this.database.prepare(`
+      SELECT principal.id, principal.principal_json, principal.role, principal.status,
+        principal.linked_to_id, principal.created_at, principal.updated_at, principal.version
+      FROM conversation_bindings AS binding
+      JOIN delivery_principals AS principal ON principal.id = binding.principal_id
+      WHERE binding.id = ?
+    `).get(bindingId) as PrincipalRow | undefined
+    return row === undefined ? undefined : principalFromRow(row)
+  }
+
   createBinding(input: {
     conversation: ConversationRef
     principal: ExternalPrincipalKey
@@ -2191,10 +2294,148 @@ export class DeliveryStore {
       .all() as unknown as BindingRow[]).map(bindingFromRow)
   }
 
+  /** Snapshot one exact active owner binding under the Delivery write fence. */
+  resolveApprovalRouteByBinding(input: Readonly<{
+    sourceId: string
+    bindingId: string
+    scope: Readonly<{ workspace: string; preset: string }>
+    principalId?: string
+  }>): ApprovalDispatchRouteV2 | undefined {
+    this.assertOpen()
+    let sourceId: string
+    let bindingId: string
+    let workspace: string
+    let preset: string
+    let principalId: string | undefined
+    try {
+      sourceId = canonicalBackgroundSourceId(input.sourceId)
+      bindingId = approvalRouteText(input.bindingId, 'bindingId', 512)
+      workspace = approvalRouteText(input.scope.workspace, 'workspace', 4_096)
+      preset = approvalRouteText(input.scope.preset, 'preset', 256)
+      principalId = input.principalId === undefined
+        ? undefined
+        : approvalRouteText(input.principalId, 'principalId', 512)
+    } catch {
+      throw new DeliveryStoreError('invalid-binding', 'approval route resolution input is invalid')
+    }
+    if (!isAbsolute(workspace)) {
+      throw new DeliveryStoreError('invalid-binding', 'approval route workspace is invalid')
+    }
+    return this.transaction(() => {
+      const binding = this.getBinding(bindingId)
+      const owner = binding === undefined ? undefined : this.getBindingPrincipal(binding.id)
+      const currentPrincipalId = binding === undefined ? undefined : externalPrincipalId(binding.principal)
+      if (binding?.status !== 'active' || binding.workspace !== workspace || binding.agentPreset !== preset
+        || owner?.status !== 'active' || owner.role !== 'owner'
+        || JSON.stringify(owner.principal) !== JSON.stringify(binding.principal)
+        || currentPrincipalId === undefined
+        || (principalId !== undefined && currentPrincipalId !== principalId)) return undefined
+      return Object.freeze({
+        routeVersion: 2 as const,
+        sourceId,
+        bindingId: binding.id,
+        bindingVersion: binding.version,
+        bindingGeneration: binding.generation,
+        workspace: binding.workspace,
+        principal: currentPrincipalId,
+        principalRecordId: owner.id,
+        principalVersion: owner.version,
+      })
+    })
+  }
+
+  /** Resolve one unique current owner from content-free Host authority evidence. */
+  resolveOwnerApprovalForPreference(
+    input: Readonly<OwnerApprovalForPreferenceInput>,
+  ): ApprovalDispatchRouteV2 | undefined {
+    this.assertOpen()
+    let sourceId: string
+    let workspace: string
+    let preset: string
+    let principalId: string
+    let principalRecordId: string
+    try {
+      sourceId = canonicalBackgroundSourceId(input.sourceId)
+      workspace = approvalRouteText(input.scope.workspace, 'workspace', 4_096)
+      preset = approvalRouteText(input.scope.preset, 'preset', 256)
+      principalId = approvalRouteText(input.principalId, 'principalId', 512)
+      principalRecordId = approvalRouteText(
+        input.principalLineage.principalRecordId,
+        'principalRecordId',
+        500,
+      )
+    } catch {
+      throw new DeliveryStoreError('invalid-binding', 'owner approval authority input is invalid')
+    }
+    if (!isAbsolute(workspace)
+      || !Number.isSafeInteger(input.principalLineage.principalVersion)
+      || input.principalLineage.principalVersion < 1
+      || !Number.isSafeInteger(input.ownerGeneration) || input.ownerGeneration < 1) {
+      throw new DeliveryStoreError('invalid-binding', 'owner approval authority fence is invalid')
+    }
+    return this.transaction(() => {
+      const rows = this.database.prepare(`
+        SELECT binding.id, binding.conversation_json, binding.principal_json, binding.workspace,
+          binding.agent_preset, binding.session_id, binding.generation, binding.policy_ref,
+          binding.status, binding.created_at, binding.updated_at, binding.version
+        FROM conversation_bindings AS binding
+        JOIN delivery_principals AS principal ON principal.id = binding.principal_id
+        WHERE binding.status = 'active' AND binding.workspace = ? AND binding.agent_preset = ?
+          AND principal.id = ? AND principal.version = ?
+          AND principal.status = 'active' AND principal.role = 'owner'
+        ORDER BY binding.id LIMIT 2
+      `).all(
+        workspace,
+        preset,
+        principalRecordId,
+        input.principalLineage.principalVersion,
+      ) as unknown as BindingRow[]
+      if (rows.length !== 1) return undefined
+      const binding = bindingFromRow(rows[0]!)
+      const owner = this.getBindingPrincipal(binding.id)
+      if (externalPrincipalId(binding.principal) !== principalId
+        || binding.generation !== input.ownerGeneration
+        || owner?.status !== 'active' || owner.role !== 'owner'
+        || owner.id !== principalRecordId || owner.version !== input.principalLineage.principalVersion
+        || JSON.stringify(owner.principal) !== JSON.stringify(binding.principal)) return undefined
+      return Object.freeze({
+        routeVersion: 2 as const,
+        sourceId,
+        bindingId: binding.id,
+        bindingVersion: binding.version,
+        bindingGeneration: binding.generation,
+        workspace: binding.workspace,
+        principal: principalId,
+        principalRecordId,
+        principalVersion: input.principalLineage.principalVersion,
+      })
+    })
+  }
+
   getBindingBySession(sessionId: string): ConversationBinding | undefined {
     this.assertOpen()
     const row = this.database.prepare(`${bindingSelect} WHERE session_id = ?`).get(sessionId) as BindingRow | undefined
     return row === undefined ? undefined : bindingFromRow(row)
+  }
+
+  /** Read one exact Agent owner attestation under a single SQLite snapshot. */
+  getPreferencePrincipalForSession(input: Readonly<{
+    sessionId: string
+    workspace: string | undefined
+    preset: string | undefined
+  }>): Readonly<{ binding: ConversationBinding; principal: DeliveryPrincipal }> | undefined {
+    this.assertOpen()
+    if (typeof input.sessionId !== 'string' || typeof input.workspace !== 'string'
+      || typeof input.preset !== 'string') return undefined
+    return this.transaction(() => {
+      const binding = this.getBindingBySession(input.sessionId)
+      const principal = binding === undefined ? undefined : this.getBindingPrincipal(binding.id)
+      if (binding?.status !== 'active' || binding.sessionId !== input.sessionId
+        || binding.workspace !== input.workspace || binding.agentPreset !== input.preset
+        || principal?.status !== 'active' || principal.role !== 'owner'
+        || JSON.stringify(principal.principal) !== JSON.stringify(binding.principal)) return undefined
+      return Object.freeze({ binding, principal })
+    })
   }
 
   getModelSelection(input: ConversationRef): ConversationModelSelection | undefined {
@@ -3365,12 +3606,19 @@ export class DeliveryStore {
   }
 
   enqueue(input: OutboundIntent): OutboxRecord {
+    return this.enqueueIntent(input, false)
+  }
+
+  private enqueueIntent(input: OutboundIntent, approvalRouteValidated: boolean): OutboxRecord {
     this.assertOpen()
     const binding = this.getBinding(input.bindingId)
     if (binding === undefined || binding.status !== 'active') {
       throw new DeliveryStoreError('invalid-intent', 'outbound intent requires an active binding')
     }
     const intent = canonicalIntent(input, binding, this.maxTextBytes)
+    if (intent.format === 'approval' && !approvalRouteValidated) {
+      throw new DeliveryStoreError('invalid-intent', 'approval Outbox requires an exact v2 route fence')
+    }
     if (intent.idempotencyKey.startsWith('inbound:') && intent.idempotencyKey.endsWith(':reply')) {
       const replyEventId = intent.replyToEventId
       const inbox = replyEventId === undefined
@@ -3430,6 +3678,83 @@ export class DeliveryStore {
       throw error
     }
     return this.getOutbox(id)!
+  }
+
+  /**
+   * Atomically revalidate one immutable Policy route and insert its approval
+   * Outbox. Legacy routes are deliberately not accepted by this boundary.
+   */
+  enqueueApprovalRoute(input: {
+    route: Readonly<ApprovalDispatchRouteV2>
+    intent: Readonly<{
+      approval: NonNullable<OutboundIntent['approval']>
+      idempotencyKey: string
+      text: string
+    }>
+  }): OutboxRecord {
+    this.assertOpen()
+    const route = canonicalApprovalDispatchRoute(input.route)
+    return this.transaction(() => {
+      const binding = this.getBinding(route.bindingId)
+      const owner = binding === undefined ? undefined : this.getBindingPrincipal(binding.id)
+      if (binding === undefined || binding.status !== 'active'
+        || binding.version !== route.bindingVersion
+        || binding.generation !== route.bindingGeneration
+        || binding.workspace !== route.workspace
+        || externalPrincipalId(binding.principal) !== route.principal
+        || owner?.status !== 'active' || owner.role !== 'owner'
+        || owner.id !== route.principalRecordId || owner.version !== route.principalVersion
+        || externalPrincipalId(owner.principal) !== route.principal) {
+        throw new DeliveryStoreError('invalid-binding', 'approval route exact owner fence changed')
+      }
+      const intent = canonicalIntent({
+        idempotencyKey: input.intent.idempotencyKey,
+        bindingId: binding.id,
+        target: { conversation: binding.conversation, principal: binding.principal },
+        text: input.intent.text,
+        format: 'approval',
+        approval: input.intent.approval,
+      }, binding, this.maxTextBytes)
+      const intentHash = digest(JSON.stringify(intent))
+      const winnerRow = this.database.prepare(`${outboxSelect} WHERE idempotency_key = ?`)
+        .get(intent.idempotencyKey) as OutboxRow | undefined
+      if (winnerRow !== undefined) {
+        const receiptRow = this.database.prepare(`
+          SELECT outbox_id, route_version, source_id, binding_id, binding_version, binding_generation,
+            workspace, principal, principal_record_id, principal_version
+          FROM approval_outbox_routes WHERE outbox_id = ?
+        `).get(winnerRow.id) as ApprovalOutboxRouteRow | undefined
+        let receipt: ApprovalDispatchRouteV2 | undefined
+        try {
+          receipt = receiptRow === undefined ? undefined : approvalRouteFromRow(receiptRow)
+        } catch {}
+        if (winnerRow.intent_hash !== intentHash || receipt === undefined || !sameApprovalRoute(receipt, route)) {
+          throw new DeliveryStoreError(
+            'idempotency-conflict',
+            'approval Outbox winner does not match the exact immutable v2 route and intent',
+          )
+        }
+        return outboxFromRow(winnerRow)
+      }
+      const outbox = this.enqueueIntent(intent, true)
+      this.database.prepare(`
+        INSERT INTO approval_outbox_routes(
+          outbox_id, route_version, source_id, binding_id, binding_version, binding_generation,
+          workspace, principal, principal_record_id, principal_version
+        ) VALUES (?, 2, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        outbox.id,
+        route.sourceId,
+        route.bindingId,
+        route.bindingVersion,
+        route.bindingGeneration,
+        route.workspace,
+        route.principal,
+        route.principalRecordId,
+        route.principalVersion,
+      )
+      return outbox
+    })
   }
 
   /**

@@ -1,8 +1,19 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import Schema from '@deepseek-ai/schemastery'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
+import type {
+  PreferenceMemoryPromotionRegistration,
+} from '@dsh-enhanced/assistant-growth-contract'
+import {
+  PREFERENCE_MEMORY_PROMOTION_PROTOCOL,
+  brandPreferenceMemoryPromotionProducer,
+  unbrandPreferenceMemoryPromotionProducer,
+  validatePreferenceMemoryPromotionCancellationReceipt,
+  validatePreferenceMemoryPromotionResult,
+  validatePreferenceMemoryPromotionSubmissionReceipt,
+} from '@dsh-enhanced/assistant-growth-contract'
 import {
   DELIVERY_PREFERENCE_PROJECTION_PROTOCOL,
   isTrustedDeliveryPreferenceProducer,
@@ -59,6 +70,7 @@ export interface Config {
   maxOverlayBytes?: number
   maintenanceIntervalMs?: number
   maintenanceBatchSize?: number
+  promotionReconcileLimit?: number
 }
 
 const configSchema = Schema.object({
@@ -76,6 +88,7 @@ const configSchema = Schema.object({
   maxOverlayBytes: Schema.number().step(1).min(256).max(2_048).default(2_048),
   maintenanceIntervalMs: Schema.number().step(1).min(60_000).max(86_400_000).default(3_600_000),
   maintenanceBatchSize: Schema.number().step(1).min(1).max(5_000).default(500),
+  promotionReconcileLimit: Schema.number().step(1).min(1).max(1_000).default(50),
 }) as Schema<Config>
 
 export type PreferenceLearningErrorCode =
@@ -173,6 +186,18 @@ function isDeliveryPreferenceProducer(value: unknown): value is DeliveryPreferen
     && typeof (value as Partial<DeliveryPreferenceProducer>).preferencePrincipalForAgent === 'function'
 }
 
+function registrationOwnedByPersonalMemory(
+  registration: Readonly<PreferenceMemoryPromotionRegistration>,
+): boolean {
+  try {
+    return typeof registration.owner === 'object' && registration.owner !== null
+      && typeof registration.owner.ownsPreferencePromotionSourceRegistration === 'function'
+      && registration.owner.ownsPreferencePromotionSourceRegistration(registration)
+  } catch {
+    return false
+  }
+}
+
 export interface PreferenceHostOperation {
   scope: PreferenceHostScope
   /** Authenticated owner identity supplied by the Host route, never a model. */
@@ -212,6 +237,15 @@ export class PreferenceLearningService extends Service {
   private readonly policy: AssistantPolicyService
   private readonly config: Required<Config>
   private readonly activeDeliveryRegistrations = new WeakSet<object>()
+  private readonly memoryPromotionProducerGeneration = `preference-${randomUUID()}`
+  /** Re-entrancy guard only; durable ownership and retry state remain in SQLite. */
+  private memoryPromotionReconcileRunning = false
+  private memoryPromotionReconcileScheduled = false
+  private memoryPromotionBinding: Readonly<{
+    token: symbol
+    registration: Readonly<PreferenceMemoryPromotionRegistration>
+    dispose: () => void
+  }> | undefined
   private deliveryBinding: Readonly<{
     generation: string
     producer: DeliveryPreferenceProducer
@@ -222,6 +256,7 @@ export class PreferenceLearningService extends Service {
 
   constructor(ctx: Context, input: Config, options: { now?: () => number } = {}) {
     super(ctx, 'assistantPreferenceLearning')
+    brandPreferenceMemoryPromotionProducer(this)
     try {
       this.config = configSchema(input) as Required<Config>
     } catch (error) {
@@ -245,6 +280,10 @@ export class PreferenceLearningService extends Service {
       maxActiveOverlays: this.config.maxActiveOverlays,
       maxReviewHypotheses: this.config.maxReviewHypotheses,
       maxOverlayBytes: this.config.maxOverlayBytes,
+      minSignalsForPromotion: 3,
+      minConfidenceBpsForPromotion: 8_500,
+      maxContradictionBpsForPromotion: 1_500,
+      promotionProposalTtlMs: Math.min(this.config.hypothesisTtlMs, 604_800_000),
     })
 
     // Runtime context is re-evaluated before every model step. The AgentLoop
@@ -286,6 +325,7 @@ export class PreferenceLearningService extends Service {
         if (this.config.enabled && this.config.autonomousT1Enabled) {
           this.store.activateReadyScopes(this.config.maintenanceBatchSize)
         }
+        if (this.memoryPromotionBinding !== undefined) this.reconcileMemoryPromotions()
       } catch {
         ctx.logger.warn('preference-learning: bounded retention maintenance failed')
       }
@@ -293,12 +333,153 @@ export class PreferenceLearningService extends Service {
     maintenanceTimer.unref()
     ctx.effect(() => () => {
       this.active = false
+      unbrandPreferenceMemoryPromotionProducer(this)
       clearInterval(maintenanceTimer)
       this.deliveryBinding?.dispose()
       this.deliveryBinding = undefined
+      this.memoryPromotionBinding?.dispose()
+      this.memoryPromotionBinding = undefined
       disposeCurrentTools?.()
       this.store.close()
     }, 'preference-learning.database')
+  }
+
+  trustedMemoryPromotionProducerGeneration(): string {
+    this.assertActive()
+    return this.memoryPromotionProducerGeneration
+  }
+
+  /** Accept one exact Memory-owned, process-local bidirectional registration. */
+  registerTrustedMemoryPromotionResultSink(
+    registration: Readonly<PreferenceMemoryPromotionRegistration>,
+  ): () => void {
+    this.assertActive()
+    if (registration.protocol !== PREFERENCE_MEMORY_PROMOTION_PROTOCOL
+      || registration.producer !== 'personal-memory'
+      || registration.sourceGeneration !== this.memoryPromotionProducerGeneration
+      || typeof registration.sinkGeneration !== 'string'
+      || registration.sinkGeneration.normalize('NFC').trim() !== registration.sinkGeneration
+      || registration.sinkGeneration === ''
+      || Buffer.byteLength(registration.sinkGeneration, 'utf8') > 200
+      || typeof registration.propose !== 'function'
+      || typeof registration.cancelPromotion !== 'function'
+      || typeof registration.listTerminalResults !== 'function'
+      || typeof registration.acknowledgeTerminalResult !== 'function'
+      || !registrationOwnedByPersonalMemory(registration)) {
+      throw new PreferenceLearningError('unattested-signal', 'trusted Memory promotion registration is invalid')
+    }
+    const current = this.memoryPromotionBinding
+    if (current !== undefined) {
+      if (current.registration === registration) return current.dispose
+      throw new PreferenceLearningError('unattested-signal', 'trusted Memory promotion sink is already registered')
+    }
+    const token = Symbol('preference-learning.memory-promotion')
+    let live = true
+    const dispose = () => {
+      if (!live) return
+      live = false
+      if (this.memoryPromotionBinding?.token === token) this.memoryPromotionBinding = undefined
+    }
+    this.memoryPromotionBinding = Object.freeze({ token, registration, dispose })
+    this.reconcileMemoryPromotions()
+    return dispose
+  }
+
+  /**
+   * Bounded durable producer drain. Failures stay in retry_wait; one malformed
+   * or unavailable Memory row never drops the remaining outbox.
+   */
+  reconcileMemoryPromotions(limit = this.config.promotionReconcileLimit): Readonly<{
+    submitted: number
+    cancelled: number
+    projected: number
+  }> {
+    this.assertActive()
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new PreferenceLearningError('invalid-input', 'promotion reconcile limit is invalid')
+    }
+    const binding = this.memoryPromotionBinding
+    if (binding === undefined) return Object.freeze({ submitted: 0, cancelled: 0, projected: 0 })
+    if (this.memoryPromotionReconcileRunning) {
+      return Object.freeze({ submitted: 0, cancelled: 0, projected: 0 })
+    }
+    this.memoryPromotionReconcileRunning = true
+    let submitted = 0
+    let cancelled = 0
+    let projected = 0
+    const current = () => this.memoryPromotionBinding?.token === binding.token
+      && binding.registration.sourceGeneration === this.memoryPromotionProducerGeneration
+      && registrationOwnedByPersonalMemory(binding.registration)
+    try {
+    for (const request of this.store.listPendingMemoryPromotionCancellations(limit)) {
+      if (!current()) return Object.freeze({ submitted, cancelled, projected })
+      try {
+        const receipt = validatePreferenceMemoryPromotionCancellationReceipt(
+          binding.registration.cancelPromotion(request),
+          request,
+        )
+        this.store.settleMemoryPromotionCancellation({ request, receipt })
+        cancelled += 1
+      } catch (error) {
+        this.store.settleMemoryPromotionCancellation({
+          request,
+          retryError: this.promotionFailureCode(error),
+        })
+      }
+    }
+    for (const entry of this.store.listPendingMemoryPromotions(limit)) {
+      if (!current()) return Object.freeze({ submitted, cancelled, projected })
+      try {
+        const receipt = validatePreferenceMemoryPromotionSubmissionReceipt(
+          binding.registration.propose(entry.request),
+          entry.request,
+        )
+        this.store.settleMemoryPromotionSubmission({ request: entry.request, receipt })
+        submitted += 1
+      } catch (error) {
+        this.store.settleMemoryPromotionSubmission({
+          request: entry.request,
+          retryError: this.promotionFailureCode(error),
+        })
+      }
+    }
+    if (current()) {
+      const results = binding.registration.listTerminalResults(limit)
+      if (!Array.isArray(results) || results.length > limit) {
+        throw new PreferenceLearningError('unattested-signal', 'Memory returned an invalid result batch')
+      }
+      for (const raw of results) {
+        if (!current()) break
+        const result = validatePreferenceMemoryPromotionResult(raw)
+        const acknowledgement = this.store.projectMemoryPromotionResult(result)
+        binding.registration.acknowledgeTerminalResult(acknowledgement)
+        projected += 1
+      }
+    }
+    return Object.freeze({ submitted, cancelled, projected })
+    } finally {
+      this.memoryPromotionReconcileRunning = false
+    }
+  }
+
+  private promotionFailureCode(error: unknown): string {
+    const name = error instanceof Error ? error.name : 'unknown-error'
+    return `memory-${name.normalize('NFC').toLowerCase().replaceAll(/[^a-z0-9]+/gu, '-').slice(0, 80)}`
+  }
+
+  /** Never call Memory while Delivery is still holding its preference writer lock. */
+  private scheduleMemoryPromotionReconcile(): void {
+    if (this.memoryPromotionBinding === undefined || this.memoryPromotionReconcileScheduled) return
+    this.memoryPromotionReconcileScheduled = true
+    queueMicrotask(() => {
+      this.memoryPromotionReconcileScheduled = false
+      if (!this.active || this.memoryPromotionBinding === undefined) return
+      try {
+        this.reconcileMemoryPromotions()
+      } catch {
+        this.ctx.logger.warn('preference-learning: Memory promotion reconciliation failed')
+      }
+    })
   }
 
   /**
@@ -771,6 +952,7 @@ export class PreferenceLearningService extends Service {
         }
         state = forgotten.state
       }
+      this.scheduleMemoryPromotionReconcile()
       return Object.freeze({
         outcome: 'applied',
         action: request.action,
@@ -941,6 +1123,7 @@ export class PreferenceLearningService extends Service {
               })]
             : []),
       })
+      this.store.enqueueEligibleMemoryPromotions(first.scope, principalId, principal)
     }
     if (this.config.autonomousT1Enabled) {
       const scopes = new Map(admittedEvents.map(event => [
@@ -954,6 +1137,7 @@ export class PreferenceLearningService extends Service {
     } catch (error) {
       if (!(error instanceof PreferenceStoreError && error.code === 'learning-paused')) throw error
     }
+    this.scheduleMemoryPromotionReconcile()
     return Object.freeze(events.map(event => Object.freeze({
       idempotencyKey: event.idempotencyKey,
       status: 'recorded' as const,

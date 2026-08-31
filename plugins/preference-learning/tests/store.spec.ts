@@ -4,8 +4,18 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import {
+  withPreferenceMemoryPromotionCancellationDigest,
+  withPreferenceMemoryPromotionCancellationReceiptDigest,
+  withPreferenceMemoryPromotionResultDigest,
+  withPreferenceMemoryPromotionSubmissionDigest,
+} from '@dsh-enhanced/assistant-growth-contract'
 import { afterEach, describe, expect, test } from 'vitest'
-import { openPreferenceDatabase, preferenceSchemaVersion } from '../src/sqlite.ts'
+import {
+  openPreferenceDatabase,
+  preferencePromotionCancellationUpgradeBindingDigest,
+  preferenceSchemaVersion,
+} from '../src/sqlite.ts'
 import { PreferenceStore, PreferenceStoreError } from '../src/store.ts'
 import type { PreferenceSignalInput } from '../src/types.ts'
 
@@ -58,6 +68,26 @@ function signal(overrides: Partial<PreferenceSignalInput> = {}): PreferenceSigna
   }
 }
 
+function promotionSignals(scope = { workspace: '/work/alpha', preset: 'primary' }) {
+  return [
+    signal({
+      scope, preferenceKey: 'memory.retention', candidateValue: 'long-term',
+      interpretationTrust: 'typed-feedback', source: 'direct-owner-feedback',
+      occurredAt: 9_997, idempotencyKey: 'promotion-support-1',
+    }),
+    signal({
+      scope, preferenceKey: 'memory.retention', candidateValue: 'long-term',
+      interpretationTrust: 'explicit-selection', source: 'direct-owner-feedback',
+      occurredAt: 9_998, idempotencyKey: 'promotion-support-2',
+    }),
+    signal({
+      scope, preferenceKey: 'memory.retention', candidateValue: 'long-term',
+      interpretationTrust: 'typed-feedback', source: 'signed-ui-feedback',
+      occurredAt: 9_999, idempotencyKey: 'promotion-support-3',
+    }),
+  ] satisfies PreferenceSignalInput[]
+}
+
 describe('preference database', () => {
   test('creates a private WAL/FULL database and rejects unsafe paths', () => {
     const path = join(root(), 'private', 'preferences.sqlite')
@@ -95,6 +125,10 @@ describe('preference database', () => {
       DROP TABLE preference_exposure_corrections;
       DROP TABLE preference_exposures;
       DROP TABLE preference_scope_principals;
+      DROP TABLE preference_memory_promotion_cancellations;
+      DROP TABLE preference_memory_promotion_results;
+      DROP TABLE preference_memory_promotion_outbox;
+      DROP TABLE preference_memory_promotions;
       UPDATE preference_schema_meta SET value = '1' WHERE key = 'schema-version';
       PRAGMA user_version = 1;
     `)
@@ -126,6 +160,10 @@ describe('preference database', () => {
 
     const downgrade = new DatabaseSync(path)
     downgrade.exec(`
+      DROP TABLE preference_memory_promotion_cancellations;
+      DROP TABLE preference_memory_promotion_results;
+      DROP TABLE preference_memory_promotion_outbox;
+      DROP TABLE preference_memory_promotions;
       DROP INDEX preference_owner_control_scope_time;
       CREATE TABLE preference_owner_control_receipts_v7 (
         idempotency_key TEXT PRIMARY KEY,
@@ -229,6 +267,10 @@ describe('preference database', () => {
     const downgrade = new DatabaseSync(path)
     downgrade.exec(`
       BEGIN IMMEDIATE;
+      DROP TABLE preference_memory_promotion_cancellations;
+      DROP TABLE preference_memory_promotion_results;
+      DROP TABLE preference_memory_promotion_outbox;
+      DROP TABLE preference_memory_promotions;
       ALTER TABLE preference_owner_control_receipts
         RENAME TO preference_owner_control_receipts_v9;
       DROP INDEX preference_owner_control_scope_time;
@@ -332,9 +374,396 @@ describe('preference database', () => {
     afterReplay.close()
     upgraded.close()
   })
+
+  test('migrates an existing schema-v9 database without changing export receipts', () => {
+    const path = join(root(), 'v9-promotion-migration.sqlite')
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const first = store(() => 20_000, path)
+    const owner = first.ensureScopePrincipal(scope, 'owner:A', 10_000, OWNER_LINEAGE, cursor(1))
+    first.appendSignals([
+      signal({ idempotencyKey: 'v9-export-1' }),
+      signal({ idempotencyKey: 'v9-export-2' }),
+    ], { ownerFence: owner, admissionCursor: cursor(2) })
+    const exported = first.exportScopeLearning(
+      scope, owner, cursor(3), 20_000, 'v9-export-receipt',
+    )
+    first.close()
+
+    const downgrade = new DatabaseSync(path)
+    downgrade.exec(`
+      DROP TABLE preference_memory_promotion_cancellations;
+      DROP TABLE preference_memory_promotion_results;
+      DROP TABLE preference_memory_promotion_outbox;
+      DROP TABLE preference_memory_promotions;
+      UPDATE preference_schema_meta SET value = '9' WHERE key = 'schema-version';
+      PRAGMA user_version = 9;
+    `)
+    const receiptBefore = downgrade.prepare(`
+      SELECT * FROM preference_owner_control_receipts WHERE action = 'export'
+    `).get()
+    downgrade.close()
+
+    const upgraded = store(() => 20_100, path)
+    expect(upgraded.exportScopeLearning(
+      scope, owner, cursor(3), 20_000, 'v9-export-receipt',
+    )).toEqual({ ...exported, replayed: true })
+    const audit = new DatabaseSync(path, { readOnly: true })
+    expect((audit.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
+      .toBe(preferenceSchemaVersion)
+    expect(audit.prepare(`
+      SELECT * FROM preference_owner_control_receipts WHERE action = 'export'
+    `).get()).toEqual(receiptBefore)
+    expect((audit.prepare(`
+      SELECT COUNT(*) AS count FROM sqlite_master
+      WHERE type = 'table' AND name LIKE 'preference_memory_promotion%'
+    `).get() as { count: number }).count).toBe(4)
+    audit.close()
+    upgraded.close()
+  })
+
+  test('reopens legacy privacy already-confirmed receipts for compensation only', () => {
+    const path = join(root(), 'v11-cancellation-compensation.sqlite')
+    const target = store(() => 10_000, path)
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const owner = target.ensureScopePrincipal(scope, 'owner:A', 9_900, OWNER_LINEAGE, cursor(1))
+    target.appendSignals(promotionSignals(scope), { ownerFence: owner, admissionCursor: cursor(2) })
+    const request = target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)[0]!.request
+    target.settleMemoryPromotionSubmission({ request, receipt: withPreferenceMemoryPromotionSubmissionDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      outcome: 'accepted' as const, memoryProposalId: 'memory-proposal-v10',
+    }) })
+    target.forgetScope(scope, 'forget-v10-promotion', {
+      ownerFence: owner, admissionCursor: cursor(3), occurredAt: 10_000,
+    })
+    target.close()
+    const legacy = new DatabaseSync(path)
+    legacy.prepare(`
+      UPDATE preference_memory_promotion_cancellations
+      SET state = 'already-confirmed', receipt_digest = ?
+      WHERE promotion_id = ? AND promotion_generation = ?
+    `).run('a'.repeat(64), request.promotionId, request.promotionGeneration)
+    legacy.exec(`
+      ALTER TABLE preference_memory_promotion_cancellations
+        DROP COLUMN upgrade_binding_digest;
+      UPDATE preference_schema_meta SET value = '11' WHERE key = 'schema-version';
+      PRAGMA user_version = 11;
+    `)
+    legacy.close()
+
+    const reopened = store(() => 10_100, path)
+    expect(reopened.listPendingMemoryPromotionCancellations(10))
+      .toEqual([expect.objectContaining({
+        promotionId: request.promotionId, reason: 'forget',
+      })])
+    reopened.close()
+  })
+
+  test('fails closed migrating a redacted supersede cancellation after its promotion was purged', () => {
+    const path = join(root(), 'v11-unrecoverable-supersede.sqlite')
+    const target = store(() => 10_000, path)
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const owner = target.ensureScopePrincipal(scope, 'owner:A', 9_900, OWNER_LINEAGE, cursor(1))
+    target.appendSignals(promotionSignals(scope), { ownerFence: owner, admissionCursor: cursor(2) })
+    const request = target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)[0]!.request
+    target.close()
+    const legacy = new DatabaseSync(path)
+    const cancellation = withPreferenceMemoryPromotionCancellationDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      principalLineage: request.principalLineage, ownerGeneration: request.ownerGeneration,
+      reason: 'superseded' as const, occurredAt: 10_000,
+    })
+    legacy.exec(`
+      ALTER TABLE preference_memory_promotion_cancellations
+        DROP COLUMN upgrade_binding_digest;
+      UPDATE preference_schema_meta SET value = '11' WHERE key = 'schema-version';
+      PRAGMA user_version = 11;
+    `)
+    legacy.prepare(`
+      INSERT INTO preference_memory_promotion_cancellations(
+        promotion_id, promotion_generation, request_digest, principal_lineage_id,
+        principal_lineage_version, owner_generation, reason, cancelled_at, cancellation_digest,
+        state, attempt_count, next_attempt_at, receipt_digest, updated_at
+      ) VALUES (?, ?, ?, ?, 1, 1, 'superseded', ?, ?, 'already-confirmed', 1, ?, ?, ?)
+    `).run(
+      request.promotionId, request.promotionGeneration, request.requestDigest,
+      `redacted-${'a'.repeat(64)}`, cancellation.occurredAt, cancellation.cancellationDigest,
+      10_000, 'b'.repeat(64), 10_000,
+    )
+    legacy.prepare('DELETE FROM preference_memory_promotions WHERE promotion_id = ?')
+      .run(request.promotionId)
+    legacy.close()
+
+    expect(() => store(() => 10_100, path)).toThrow(/cannot be safely upgraded/iu)
+  })
 })
 
 describe('preference store', () => {
+  test('atomically creates only an allowlisted multi-signal T2 promotion and proposal outbox', () => {
+    const target = store(() => 10_000)
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const owner = target.ensureScopePrincipal(scope, 'owner:A', 9_900, OWNER_LINEAGE, cursor(1))
+    const events = promotionSignals(scope)
+    target.appendSignals(events.slice(0, 2), { ownerFence: owner, admissionCursor: cursor(2) })
+    expect(target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)).toEqual([])
+    target.appendSignals([events[2]!], { ownerFence: owner, admissionCursor: cursor(3) })
+
+    const [created] = target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)
+    expect(created).toMatchObject({
+      state: 'pending',
+      request: {
+        promotionGeneration: 1, ownerGeneration: owner.generation,
+        rendererId: 'memory.retention.long-term/v1',
+        hypothesis: {
+          key: 'memory.retention', value: 'long-term', supportingSignals: 3,
+          distinctSignalSources: 3, confidenceBps: expect.any(Number),
+        },
+      },
+    })
+    expect(created!.request.hypothesis.confidenceBps).toBeGreaterThanOrEqual(8_500)
+    expect(created!.request.hypothesis.contradictionBps).toBeLessThanOrEqual(1_500)
+    expect(target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)).toEqual([])
+    expect(target.listPendingMemoryPromotions(10)).toEqual([expect.objectContaining({
+      request: created!.request, state: 'pending', attemptCount: 0,
+    })])
+    target.close()
+  })
+
+  test('persists submission retry and projects distinct terminal Memory results idempotently', () => {
+    let now = 10_000
+    const target = store(() => now)
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const owner = target.ensureScopePrincipal(scope, 'owner:A', 9_900, OWNER_LINEAGE, cursor(1))
+    target.appendSignals(promotionSignals(scope), { ownerFence: owner, admissionCursor: cursor(2) })
+    const request = target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)[0]!.request
+
+    target.settleMemoryPromotionSubmission({ request, retryError: 'memory-unavailable' })
+    expect(target.listPendingMemoryPromotions(10)).toEqual([])
+    now = 10_250
+    expect(target.listPendingMemoryPromotions(10)[0]).toMatchObject({ attemptCount: 1, state: 'retry_wait' })
+    const submission = withPreferenceMemoryPromotionSubmissionDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      outcome: 'accepted' as const, memoryProposalId: 'memory-proposal-1',
+    })
+    expect(target.settleMemoryPromotionSubmission({ request, receipt: submission })).toMatchObject({
+      state: 'submitted', memoryProposalId: 'memory-proposal-1',
+    })
+    const confirmed = withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 1, status: 'confirmed' as const, memoryProposalId: 'memory-proposal-1',
+      memoryProposalVersion: 2, memoryRecordId: 'memory-record-1', memoryRecordVersion: 1,
+      memoryRecordDigest: 'a'.repeat(64), occurredAt: now,
+    })
+    expect(target.projectMemoryPromotionResult(confirmed).outcome).toBe('applied')
+    expect(target.projectMemoryPromotionResult(confirmed).outcome).toBe('replayed')
+    expect(target.getMemoryPromotion(request.promotionId, request.promotionGeneration))
+      .toMatchObject({ state: 'confirmed', terminalReceiptDigest: confirmed.receiptDigest })
+    expect(target.get(scope, request.hypothesis.id, 'owner:A', OWNER_LINEAGE))
+      .toMatchObject({ claimState: 'confirmed', effectState: 'inactive' })
+    const rejected = withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 2, status: 'rejected' as const, rejectionKind: 'owner-explicit' as const,
+      memoryProposalId: 'memory-proposal-1', memoryProposalVersion: 3, occurredAt: now,
+    })
+    expect(() => target.projectMemoryPromotionResult(rejected)).toThrow(/terminal result changed/iu)
+    target.close()
+  })
+
+  test('does not supersede a confirmed promotion when later evidence advances its hypothesis', () => {
+    let now = 10_000
+    const target = store(() => now)
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const owner = target.ensureScopePrincipal(scope, 'owner:A', 9_900, OWNER_LINEAGE, cursor(1))
+    target.appendSignals(promotionSignals(scope), { ownerFence: owner, admissionCursor: cursor(2) })
+    const request = target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)[0]!.request
+    const submission = withPreferenceMemoryPromotionSubmissionDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      outcome: 'accepted' as const, memoryProposalId: 'memory-proposal-confirmed',
+    })
+    target.settleMemoryPromotionSubmission({ request, receipt: submission })
+    const confirmed = withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 1, status: 'confirmed' as const,
+      memoryProposalId: 'memory-proposal-confirmed', memoryProposalVersion: 2,
+      memoryRecordId: 'memory-record-confirmed', memoryRecordVersion: 1,
+      memoryRecordDigest: 'c'.repeat(64), occurredAt: now,
+    })
+    target.projectMemoryPromotionResult(confirmed)
+    const confirmedVersion = target.get(
+      scope, request.hypothesis.id, 'owner:A', OWNER_LINEAGE,
+    )!.version
+
+    now += 1
+    target.appendSignals([signal({
+      scope, preferenceKey: 'memory.retention', candidateValue: 'long-term',
+      interpretationTrust: 'explicit-selection', source: 'signed-ui-feedback',
+      occurredAt: now, idempotencyKey: 'promotion-support-after-confirmation',
+    })], { ownerFence: owner, admissionCursor: cursor(3) })
+
+    expect(target.get(scope, request.hypothesis.id, 'owner:A', OWNER_LINEAGE)).toMatchObject({
+      claimState: 'confirmed', version: confirmedVersion + 1,
+    })
+    expect(target.getMemoryPromotion(request.promotionId, request.promotionGeneration))
+      .toMatchObject({ state: 'confirmed', terminalReceiptDigest: confirmed.receiptDigest })
+    expect(target.listPendingMemoryPromotionCancellations(10)).toEqual([])
+    target.close()
+  })
+
+  test('checks a saved terminal receipt before a legacy supersede cancellation', () => {
+    const path = join(root(), 'terminal-before-cancellation.sqlite')
+    const target = store(() => 10_000, path)
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const owner = target.ensureScopePrincipal(scope, 'owner:A', 9_900, OWNER_LINEAGE, cursor(1))
+    target.appendSignals(promotionSignals(scope), { ownerFence: owner, admissionCursor: cursor(2) })
+    const request = target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)[0]!.request
+    const submission = withPreferenceMemoryPromotionSubmissionDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      outcome: 'accepted' as const, memoryProposalId: 'memory-proposal-terminal-first',
+    })
+    target.settleMemoryPromotionSubmission({ request, receipt: submission })
+    const confirmed = withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 1, status: 'confirmed' as const,
+      memoryProposalId: 'memory-proposal-terminal-first', memoryProposalVersion: 2,
+      memoryRecordId: 'memory-record-terminal-first', memoryRecordVersion: 1,
+      memoryRecordDigest: 'd'.repeat(64), occurredAt: 10_000,
+    })
+    target.projectMemoryPromotionResult(confirmed)
+    target.close()
+
+    // Recreate the valid coexistence left by the previous implementation,
+    // which superseded a confirmed promotion after its hypothesis refreshed.
+    const cancellation = withPreferenceMemoryPromotionCancellationDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      principalLineage: request.principalLineage, ownerGeneration: request.ownerGeneration,
+      reason: 'superseded' as const, occurredAt: 10_000,
+    })
+    const upgradeBindingDigest = preferencePromotionCancellationUpgradeBindingDigest({
+      promotionId: cancellation.promotionId,
+      promotionGeneration: cancellation.promotionGeneration,
+      requestDigest: cancellation.requestDigest,
+      principalLineageId: cancellation.principalLineage.principalRecordId,
+      principalLineageVersion: cancellation.principalLineage.principalVersion,
+      ownerGeneration: cancellation.ownerGeneration,
+    })
+    const legacy = new DatabaseSync(path)
+    legacy.prepare(`
+      INSERT INTO preference_memory_promotion_cancellations(
+        promotion_id, promotion_generation, request_digest, principal_lineage_id,
+        principal_lineage_version, owner_generation, reason, cancelled_at,
+        cancellation_digest, state, attempt_count, next_attempt_at, upgrade_binding_digest, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0, ?, ?, ?)
+    `).run(
+      cancellation.promotionId, cancellation.promotionGeneration, cancellation.requestDigest,
+      cancellation.principalLineage.principalRecordId,
+      cancellation.principalLineage.principalVersion, cancellation.ownerGeneration,
+      cancellation.reason, cancellation.occurredAt, cancellation.cancellationDigest,
+      10_000, upgradeBindingDigest, 10_000,
+    )
+    legacy.close()
+
+    const reopened = store(() => 10_000, path)
+    expect(reopened.projectMemoryPromotionResult(confirmed).outcome).toBe('replayed')
+    const changed = withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 2, status: 'confirmed' as const,
+      memoryProposalId: 'memory-proposal-terminal-first', memoryProposalVersion: 3,
+      memoryRecordId: 'memory-record-terminal-changed', memoryRecordVersion: 2,
+      memoryRecordDigest: 'e'.repeat(64), occurredAt: 10_000,
+    })
+    expect(() => reopened.projectMemoryPromotionResult(changed))
+      .toThrow(/terminal result changed/iu)
+    reopened.close()
+  })
+
+  test('a forget cancellation dominates a previously projected result replay', () => {
+    const target = store(() => 10_000)
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const owner = target.ensureScopePrincipal(scope, 'owner:A', 9_900, OWNER_LINEAGE, cursor(1))
+    target.appendSignals(promotionSignals(scope), { ownerFence: owner, admissionCursor: cursor(2) })
+    const request = target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)[0]!.request
+    target.settleMemoryPromotionSubmission({ request, receipt: withPreferenceMemoryPromotionSubmissionDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      outcome: 'accepted' as const, memoryProposalId: 'memory-proposal-cancel-after-project',
+    }) })
+    const confirmed = withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 1, status: 'confirmed' as const,
+      memoryProposalId: 'memory-proposal-cancel-after-project', memoryProposalVersion: 2,
+      memoryRecordId: 'memory-record-cancel-after-project', memoryRecordVersion: 1,
+      memoryRecordDigest: 'f'.repeat(64), occurredAt: 10_000,
+    })
+    expect(target.projectMemoryPromotionResult(confirmed).outcome).toBe('applied')
+
+    target.forgetScope(scope, 'forget-after-project', {
+      ownerFence: owner, admissionCursor: cursor(3), occurredAt: 10_000,
+    })
+    const cancellation = target.listPendingMemoryPromotionCancellations(10)[0]!
+    const receipt = withPreferenceMemoryPromotionCancellationReceiptDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      cancellationDigest: cancellation.cancellationDigest, outcome: 'cancelled' as const,
+    })
+    expect(() => target.projectMemoryPromotionResult(confirmed))
+      .toThrow(/compensation is not complete/iu)
+    target.settleMemoryPromotionCancellation({ request: cancellation, receipt })
+
+    expect(target.projectMemoryPromotionResult(confirmed).outcome).toBe('cancelled')
+    expect(target.listPendingMemoryPromotionCancellations(10)).toEqual([])
+    target.close()
+  })
+
+  test('forget cancels a submitted promotion and permanently ACK-cancels a delayed result', () => {
+    const target = store(() => 10_000)
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const owner = target.ensureScopePrincipal(scope, 'owner:A', 9_900, OWNER_LINEAGE, cursor(1))
+    target.appendSignals(promotionSignals(scope), { ownerFence: owner, admissionCursor: cursor(2) })
+    const request = target.enqueueEligibleMemoryPromotions(scope, 'owner:A', owner)[0]!.request
+    const submission = withPreferenceMemoryPromotionSubmissionDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      outcome: 'accepted' as const, memoryProposalId: 'memory-proposal-2',
+    })
+    target.settleMemoryPromotionSubmission({ request, receipt: submission })
+    target.forgetScope(scope, 'forget-promotion', {
+      ownerFence: owner, admissionCursor: cursor(3), occurredAt: 10_000,
+    })
+    const cancellation = target.listPendingMemoryPromotionCancellations(10)[0]!
+    expect(cancellation).toMatchObject({
+      promotionId: request.promotionId, requestDigest: request.requestDigest,
+      ownerGeneration: owner.generation, reason: 'forget',
+    })
+    const cancellationReceipt = withPreferenceMemoryPromotionCancellationReceiptDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      cancellationDigest: cancellation.cancellationDigest, outcome: 'cancelled' as const,
+    })
+    target.settleMemoryPromotionCancellation({ request: cancellation, receipt: cancellationReceipt })
+    expect(target.listPendingMemoryPromotionCancellations(10)).toEqual([])
+
+    const delayed = withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 1, status: 'confirmed' as const, memoryProposalId: 'memory-proposal-2',
+      memoryProposalVersion: 2, memoryRecordId: 'memory-record-late', memoryRecordVersion: 1,
+      memoryRecordDigest: 'b'.repeat(64), occurredAt: 10_000,
+    })
+    expect(target.projectMemoryPromotionResult(delayed).outcome).toBe('cancelled')
+    target.close()
+  })
+
   test('list and get require the exact lineage when the same external owner returns', () => {
     const target = store(() => 10_000)
     const scope = { workspace: '/work/alpha', preset: 'primary' }
@@ -388,6 +817,10 @@ describe('preference store', () => {
     downgrade.exec(`
       PRAGMA foreign_keys = OFF;
       BEGIN IMMEDIATE;
+      DROP TABLE preference_memory_promotion_cancellations;
+      DROP TABLE preference_memory_promotion_results;
+      DROP TABLE preference_memory_promotion_outbox;
+      DROP TABLE preference_memory_promotions;
       CREATE TABLE preference_scope_principals_v5 (
         scope_key TEXT PRIMARY KEY,
         scope_digest TEXT NOT NULL,
@@ -534,6 +967,10 @@ describe('preference store', () => {
     downgrade.exec(`
       PRAGMA foreign_keys = OFF;
       BEGIN IMMEDIATE;
+      DROP TABLE preference_memory_promotion_cancellations;
+      DROP TABLE preference_memory_promotion_results;
+      DROP TABLE preference_memory_promotion_outbox;
+      DROP TABLE preference_memory_promotions;
       CREATE TABLE preference_scope_principals_v6 (
         scope_key TEXT PRIMARY KEY,
         scope_digest TEXT NOT NULL,

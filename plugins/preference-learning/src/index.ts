@@ -15,6 +15,7 @@ export {
   PreferenceLearningError,
   canonicalPreferenceHostScope,
 } from './service.js'
+export { isTrustedPreferenceMemoryPromotionProducer } from '@dsh-enhanced/assistant-growth-contract'
 export type {
   PreferenceHostActivationCandidate,
   PreferenceHostOwnerFence,

@@ -10,7 +10,7 @@ import {
   approvalReviewerOf,
   isAutoReviewEscalation,
   type ApprovalReviewer,
-  type ApprovalDispatchRoute,
+  type ApprovalDispatchRouteV2,
   type AssistantPolicyService,
   type PolicyDecision,
 } from '@dsh-enhanced/assistant-policy'
@@ -95,6 +95,8 @@ import type {
   ModelSelectionSettlementInput,
   ModelSelectionTerminalResult,
   OwnerRouteAuthority,
+  OwnerApprovalForPreferenceInput,
+  OwnerApprovalForPreferenceResult,
   OwnerRouteValidationReceipt,
   OutboundIntent,
   OutboxRecord,
@@ -1482,13 +1484,11 @@ export class AssistantDeliveryService extends Service {
   ): Readonly<DeliveryPreferencePrincipalAttestation> | undefined {
     this.assertActive()
     const sessionId = String(agent.session.id)
-    const binding = this.deliveryStore.getBindingBySession(sessionId)
-    const principal = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
-    if (binding?.status !== 'active' || binding.sessionId !== sessionId
-      || binding.workspace !== agent.session.header.cwd
-      || binding.agentPreset !== agent.session.header.agentPreset
-      || principal?.status !== 'active' || principal.role !== 'owner'
-      || JSON.stringify(principal.principal) !== JSON.stringify(binding.principal)) return undefined
+    const resolved = this.deliveryStore.getPreferencePrincipalForSession({
+      sessionId, workspace: agent.session.header.cwd, preset: agent.session.header.agentPreset,
+    })
+    if (resolved === undefined) return undefined
+    const { binding, principal } = resolved
     return Object.freeze({
       scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
       principalId: externalPrincipalId(binding.principal),
@@ -1498,6 +1498,7 @@ export class AssistantDeliveryService extends Service {
       }),
       bindingId: binding.id,
       bindingVersion: binding.version,
+      bindingGeneration: binding.generation,
       sessionId,
     })
   }
@@ -1698,6 +1699,71 @@ export class AssistantDeliveryService extends Service {
       throw new AssistantDeliveryError('missing-binding', 'workflow template authority changed during resolution')
     }
     return validateResolvedWorkflowAutomationTemplate(currentTemplate.resolved)
+  }
+
+  /**
+   * Host-only bridge from one exact reviewed workflow template to a v2 Policy
+   * approval route. This method is not registered as an Agent tool.
+   */
+  prepareWorkflowApproval(input: Readonly<{
+    sourceId: string
+    contractVersion: 1
+    template: Readonly<WorkflowAutomationTemplate>
+    scope: Readonly<WorkflowScope>
+    ownerBindingId: string
+  }>): ApprovalDispatchRouteV2 {
+    this.assertActive()
+    if (typeof input !== 'object' || input === null
+      || Object.keys(input).sort().join(',') !== 'contractVersion,ownerBindingId,scope,sourceId,template') {
+      throw new AssistantDeliveryError('runtime-conflict', 'workflow approval route request is invalid')
+    }
+    const sourceId = canonicalBackgroundSourceId(input.sourceId)
+    const resolved = this.resolveWorkflowAutomationTemplate({
+      contractVersion: input.contractVersion,
+      template: input.template,
+      scope: input.scope,
+      ownerBindingId: input.ownerBindingId,
+    })
+    const route = this.deliveryStore.resolveApprovalRouteByBinding({
+      sourceId,
+      bindingId: resolved.ownerBindingId,
+      scope: resolved.scope,
+      principalId: resolved.principalId,
+    })
+    if (route === undefined) {
+      throw new AssistantDeliveryError('missing-binding', 'workflow approval owner route changed')
+    }
+    return route
+  }
+
+  /**
+   * Host-only, content-free route minting seam for Preference promotion.
+   * No binding id is accepted from the caller; Delivery resolves the unique
+   * current binding from the exact owner lineage and generation.
+   */
+  prepareOwnerApprovalForPreference(
+    input: Readonly<OwnerApprovalForPreferenceInput>,
+  ): OwnerApprovalForPreferenceResult {
+    this.assertActive()
+    if (typeof input !== 'object' || input === null || Array.isArray(input)
+      || Object.keys(input).sort().join(',')
+        !== 'ownerGeneration,principalId,principalLineage,scope,sourceId'
+      || typeof input.scope !== 'object' || input.scope === null || Array.isArray(input.scope)
+      || Object.keys(input.scope).sort().join(',') !== 'preset,workspace'
+      || typeof input.principalLineage !== 'object' || input.principalLineage === null
+      || Array.isArray(input.principalLineage)
+      || Object.keys(input.principalLineage).sort().join(',') !== 'principalRecordId,principalVersion') {
+      throw new AssistantDeliveryError('runtime-conflict', 'preference approval owner authority is invalid')
+    }
+    try {
+      const route = this.deliveryStore.resolveOwnerApprovalForPreference(input)
+      return route ?? Object.freeze({ kind: 'stale-owner' as const })
+    } catch (error) {
+      if (error instanceof DeliveryStoreError && error.code === 'invalid-binding') {
+        throw new AssistantDeliveryError('runtime-conflict', 'preference approval owner authority is invalid')
+      }
+      throw error
+    }
   }
 
   health(): ReturnType<DeliveryStore['health']> & { adapters: number } {
@@ -3167,19 +3233,20 @@ export class AssistantDeliveryService extends Service {
   }
 
   enqueueApproval(input: {
-    sourceId: string
-    workspace: string
-    bindingId: string
+    route: Readonly<ApprovalDispatchRouteV2>
     idempotencyKey: string
     text: string
     approval: NonNullable<import('./types.js').OutboundIntent['approval']>
   }): OutboxRecord {
     this.assertActive()
-    const binding = this.deliveryStore.getBinding(input.bindingId)
+    if (input.route?.routeVersion !== 2) {
+      throw new AssistantDeliveryError('missing-binding', 'approval dispatch requires an exact v2 owner route')
+    }
+    const binding = this.deliveryStore.getBinding(input.route.bindingId)
     if (binding === undefined || binding.status !== 'active') {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding does not exist or is revoked')
     }
-    if (binding.workspace !== input.workspace) {
+    if (binding.workspace !== input.route.workspace) {
       throw new AssistantDeliveryError('missing-binding', 'delivery workspace does not match the active binding')
     }
     const owner = this.deliveryStore.getPrincipal(binding.principal)
@@ -3195,14 +3262,22 @@ export class AssistantDeliveryService extends Service {
       || createHash('sha256').update(input.text).digest('hex') !== proposal.diffHash) {
       throw new AssistantDeliveryError('missing-binding', 'approval card does not match its active owner and Policy proposal')
     }
-    const decision = this.policy.authorize({ subject: { kind: 'background', id: input.sourceId,
-      workspace: input.workspace, principal }, action: 'approval.send',
+    const decision = this.policy.authorize({ subject: { kind: 'background', id: input.route.sourceId,
+      workspace: input.route.workspace, principal }, action: 'approval.send',
     resource: { kind: 'message', id: binding.id }, context: { initiator: 'background' } },
     { idempotencyKey: `message-approval:${input.idempotencyKey}` })
     if (decision.effect !== 'allow') throw policyDenied(decision)
-    return this.deliveryStore.enqueue({ idempotencyKey: input.idempotencyKey, bindingId: binding.id,
-      target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
-      format: 'approval', approval: input.approval })
+    try {
+      return this.deliveryStore.enqueueApprovalRoute({ route: input.route, intent: {
+        idempotencyKey: input.idempotencyKey, text: input.text, approval: input.approval,
+      } })
+    } catch (error) {
+      if (error instanceof DeliveryStoreError
+        && (error.code === 'invalid-binding' || error.code === 'invalid-intent')) {
+        throw new AssistantDeliveryError('missing-binding', 'approval route changed or is invalid')
+      }
+      throw error
+    }
   }
 
   private replyCommand(bindingInput: Readonly<ConversationBinding>, input: {
@@ -3399,7 +3474,7 @@ export class AssistantDeliveryService extends Service {
     }
   }
 
-  prepareAgentApproval(agent: Agent | undefined, input: { sourceId: string }): ApprovalDispatchRoute {
+  prepareAgentApproval(agent: Agent | undefined, input: { sourceId: string }): ApprovalDispatchRouteV2 {
     this.assertActive()
     const sourceId = input.sourceId.trim()
     const direct = agent === undefined ? undefined : this.deliveryStore.getBindingBySession(String(agent.session.id))
@@ -3416,8 +3491,17 @@ export class AssistantDeliveryService extends Service {
       || agent.session.header.agentPreset !== binding.agentPreset) {
       throw new AssistantDeliveryError('missing-binding', 'Agent session has no authenticated active owner approval route')
     }
-    return Object.freeze({ sourceId, bindingId: binding.id, workspace: binding.workspace,
-      principal: externalPrincipalId(binding.principal) })
+    return Object.freeze({
+      routeVersion: 2 as const,
+      sourceId,
+      bindingId: binding.id,
+      bindingVersion: binding.version,
+      bindingGeneration: binding.generation,
+      workspace: binding.workspace,
+      principal: externalPrincipalId(binding.principal),
+      principalRecordId: owner.id,
+      principalVersion: owner.version,
+    })
   }
 
   async tick(): Promise<void> {
@@ -3797,10 +3881,19 @@ export class AssistantDeliveryService extends Service {
     const dispatches = this.policy.listPendingApprovalDispatches(100, cursor.after)
     for (const dispatch of dispatches) {
       try {
+        if (dispatch.routeVersion !== 2) continue
         this.enqueueApproval({
-          sourceId: dispatch.sourceId,
-          workspace: dispatch.workspace,
-          bindingId: dispatch.bindingId,
+          route: {
+            routeVersion: 2,
+            sourceId: dispatch.sourceId,
+            bindingId: dispatch.bindingId,
+            bindingVersion: dispatch.bindingVersion,
+            bindingGeneration: dispatch.bindingGeneration,
+            workspace: dispatch.workspace,
+            principal: dispatch.principal,
+            principalRecordId: dispatch.principalRecordId,
+            principalVersion: dispatch.principalVersion,
+          },
           idempotencyKey: `approval-card:${dispatch.proposalId}`,
           text: dispatch.diff,
           approval: {

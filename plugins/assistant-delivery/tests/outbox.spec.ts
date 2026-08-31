@@ -32,6 +32,21 @@ function intent(key: string, f: Awaited<ReturnType<typeof fixture>>, text = 'hel
     text, format: 'plain' }
 }
 
+function approvalRoute(f: Awaited<ReturnType<typeof fixture>>) {
+  const owner = f.store.getPrincipal(f.principal)!
+  return {
+    routeVersion: 2 as const,
+    sourceId: 'automation-1',
+    bindingId: f.binding.id,
+    bindingVersion: f.binding.version,
+    bindingGeneration: f.binding.generation,
+    workspace: f.binding.workspace,
+    principal: 'lark/bot-1/tenant-a/ou_owner',
+    principalRecordId: owner.id,
+    principalVersion: owner.version,
+  }
+}
+
 function addBinding(value: Awaited<ReturnType<typeof fixture>>, index: number) {
   const principal = { ...value.principal, user: `ou_batch_${index}` }
   const issued = value.store.issuePairing(principal, { ttlMs: 5_000, maxAttempts: 3 })
@@ -102,7 +117,11 @@ describe('durable outbox', () => {
         expiresAt: 10_000, title: 'Approval required', diffHash: 'a'.repeat(64),
       },
     }
-    expect(f.store.enqueue(approval)).toMatchObject({ status: 'pending', intent: approval })
+    expect(() => f.store.enqueue(approval))
+      .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    expect(f.store.enqueueApprovalRoute({ route: approvalRoute(f), intent: {
+      idempotencyKey: approval.idempotencyKey, text: approval.text, approval: approval.approval!,
+    } })).toMatchObject({ status: 'pending', intent: approval })
     expect(() => f.store.enqueue({ ...intent('approval:missing', f), format: 'approval' }))
       .toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
     expect(() => f.store.enqueue({ ...intent('approval:forged', f), approval: approval.approval! }))
@@ -118,9 +137,91 @@ describe('durable outbox', () => {
     f.store.close()
   })
 
+  test('atomically fences approval route v2 against ABA, tampering, and idempotency replay', async () => {
+    const f = await fixture()
+    const route = approvalRoute(f)
+    const request = {
+      route,
+      intent: {
+        idempotencyKey: 'approval:route-v2',
+        text: 'Approve exact change.',
+        approval: {
+          operationId: 'operation-route-v2', proposalId: 'proposal-route-v2', expectedVersion: 1,
+          expiresAt: 10_000, title: 'Approval required', diffHash: 'a'.repeat(64),
+        },
+      },
+    }
+    expect(() => f.store.enqueueApprovalRoute({
+      ...request,
+      route: { sourceId: route.sourceId, bindingId: route.bindingId,
+        workspace: route.workspace, principal: route.principal } as never,
+    })).toThrowError(expect.objectContaining({ code: 'invalid-intent' }))
+    for (const [suffix, changed] of [
+      ['binding-version', { bindingVersion: route.bindingVersion + 1 }],
+      ['binding-generation', { bindingGeneration: route.bindingGeneration + 1 }],
+      ['workspace', { workspace: '/work/other' }],
+      ['principal', { principal: 'lark/bot-1/tenant-a/ou_attacker' }],
+      ['principal-record', { principalRecordId: 'principal_attacker' }],
+      ['principal-version', { principalVersion: route.principalVersion + 1 }],
+    ] as const) {
+      expect(() => f.store.enqueueApprovalRoute({
+        route: { ...route, ...changed },
+        intent: { ...request.intent, idempotencyKey: `${request.intent.idempotencyKey}:${suffix}` },
+      })).toThrowError(expect.objectContaining({ code: 'invalid-binding' }))
+    }
+    const queued = f.store.enqueueApprovalRoute(request)
+    expect(f.store.enqueueApprovalRoute(request)).toEqual(queued)
+
+    const reopened = new DeliveryStore({ path: f.databasePath, now: () => 1_001 })
+    expect(reopened.enqueueApprovalRoute(request)).toEqual(queued)
+    reopened.close()
+
+    const database = new DatabaseSync(f.databasePath)
+    expect(database.prepare(`
+      SELECT route_version, source_id, binding_id, binding_version, binding_generation, workspace,
+        principal, principal_record_id, principal_version
+      FROM approval_outbox_routes WHERE outbox_id = ?
+    `).get(queued.id)).toEqual({
+      route_version: 2,
+      source_id: route.sourceId,
+      binding_id: route.bindingId,
+      binding_version: route.bindingVersion,
+      binding_generation: route.bindingGeneration,
+      workspace: route.workspace,
+      principal: route.principal,
+      principal_record_id: route.principalRecordId,
+      principal_version: route.principalVersion,
+    })
+    database.prepare(`UPDATE approval_outbox_routes SET binding_generation = ? WHERE outbox_id = ?`)
+      .run(route.bindingGeneration + 1, queued.id)
+    database.close()
+    expect(() => f.store.enqueueApprovalRoute(request))
+      .toThrowError(expect.objectContaining({ code: 'idempotency-conflict' }))
+
+    const fresh = await fixture()
+    const staleRoute = approvalRoute(fresh)
+    const owner = fresh.store.getPrincipal(fresh.principal)!
+    fresh.store.revokePrincipal(owner.id, owner.version)
+    const pairing = fresh.store.issuePairing(fresh.principal, { ttlMs: 5_000, maxAttempts: 3 })
+    const reactivated = fresh.store.confirmPairing({
+      challengeId: pairing.challenge.id, principal: fresh.principal, code: pairing.code,
+    })
+    fresh.store.createBinding({
+      conversation: fresh.conversation, principal: fresh.principal, workspace: '/work/alpha',
+      agentPreset: 'primary', sessionId: 'session-2', policyRef: 'owner-dm', expectedGeneration: 2,
+    })
+    expect(reactivated.id).toBe(staleRoute.principalRecordId)
+    expect(reactivated.version).toBe(staleRoute.principalVersion + 2)
+    expect(() => fresh.store.enqueueApprovalRoute({ ...request, route: staleRoute, intent: {
+      ...request.intent, idempotencyKey: 'approval:route-v2-aba',
+    } })).toThrowError(expect.objectContaining({ code: 'invalid-binding' }))
+    fresh.store.close()
+    f.store.close()
+  })
+
   test('durably versions and fences domain-authoritative approval card replacements', async () => {
     const f = await fixture()
-    const original = f.store.enqueue({
+    const approval = {
       ...intent('approval-card:policy-1', f, '{}'),
       format: 'approval',
       approval: {
@@ -131,7 +232,10 @@ describe('durable outbox', () => {
         title: 'Adopt guidance',
         diffHash: 'a'.repeat(64),
       },
-    })
+    } as const
+    const original = f.store.enqueueApprovalRoute({ route: approvalRoute(f), intent: {
+      idempotencyKey: approval.idempotencyKey, text: approval.text, approval: approval.approval,
+    } })
     const send = f.store.claimOutbox({ ownerId: 'sender', leaseMs: 100, limit: 1, maxAttempts: 3 })[0]!
     f.store.finishOutbox({
       outboxId: original.id,

@@ -17,6 +17,18 @@ import {
   DELIVERY_PREFERENCE_PROJECTION_PROTOCOL,
 } from '@dsh-enhanced/assistant-delivery'
 import { AssistantPolicyService, setApprovalReviewer } from '@dsh-enhanced/assistant-policy'
+import { PersonalMemoryService } from '@dsh-enhanced/personal-memory'
+import {
+  PREFERENCE_MEMORY_PROMOTION_PROTOCOL,
+  isTrustedPreferenceMemoryPromotionProducer,
+  withPreferenceMemoryPromotionCancellationDigest,
+  withPreferenceMemoryPromotionResultDigest,
+  withPreferenceMemoryPromotionSubmissionDigest,
+  type PreferenceMemoryPromotionRegistration,
+  type PreferenceMemoryPromotionResultAck,
+  type PreferenceMemoryPromotionRequest,
+  type PreferenceMemoryPromotionResult,
+} from '@dsh-enhanced/assistant-growth-contract'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,6 +40,7 @@ import {
   PreferenceLearningService,
   canonicalPreferenceHostScope,
 } from '../src/service.ts'
+import { preferencePromotionCancellationUpgradeBindingDigest } from '../src/sqlite.ts'
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -149,6 +162,7 @@ async function harness(options: {
       principalLineage: OWNER_LINEAGE,
       bindingId: 'binding-owner',
       bindingVersion: 1,
+      bindingGeneration: 1,
       sessionId: String(target.session.id),
     }))
     return deliveryService
@@ -168,6 +182,7 @@ async function harness(options: {
   } | undefined)?.preferenceFeedbackSink?.registration
   return {
     ctx,
+    root,
     databasePath,
     agent: agent(),
     feedback(event: Readonly<DeliveryPreferenceEvent>) {
@@ -191,6 +206,7 @@ async function harness(options: {
       }))
     },
     delivery: { currentRegistration },
+    actualDelivery: deliveryService,
     async disposeDelivery() { await deliveryFiber?.dispose() },
     async reloadDelivery() { return mountDelivery() },
     service,
@@ -208,6 +224,10 @@ function call(name: string, args: Record<string, unknown>, withAgent?: Agent) {
 }
 
 type StructureFeedback = Extract<DeliveryPreferenceFeedback, { preferenceKey: 'response.structure' }>
+type MemoryRetentionFeedback = DeliveryPreferenceFeedback & Readonly<{
+  preferenceKey: 'memory.retention'
+  candidateValue: 'long-term'
+}>
 
 function feedbackEvent(
   idempotencyKey: string,
@@ -238,6 +258,27 @@ function appendReady(
   for (let index = 1; index <= 2; index += 1) {
     feedback(feedbackEvent(`${prefix}-${index}`, { occurredAt }))
   }
+}
+
+function memoryRetentionFeedback(
+  idempotencyKey: string,
+  interpretationTrust: 'explicit-selection' | 'typed-feedback',
+  occurredAt = Date.now(),
+): MemoryRetentionFeedback {
+  return {
+    scope: { workspace: '/work/alpha', preset: 'primary' },
+    principalId: 'owner:lark:123',
+    principalLineage: OWNER_LINEAGE,
+    admissionCursor: admissionCursor(),
+    preferenceKey: 'memory.retention',
+    candidateValue: 'long-term',
+    stance: 'support',
+    actorTrust: 'owner-authenticated',
+    interpretationTrust,
+    source: 'direct-owner-feedback',
+    occurredAt,
+    idempotencyKey,
+  } as unknown as MemoryRetentionFeedback
 }
 
 function observationEvent(
@@ -291,6 +332,259 @@ function completionEvent(
 }
 
 describe('preference learning service', () => {
+  test('compensates confirmed Memory after lost ACK, then reconciles cancellation before result', async () => {
+    let clock = Date.now() + 1_000
+    const fixture = await harness({ now: () => clock })
+    const delivery = fixture.actualDelivery!
+    vi.spyOn(delivery, 'prepareOwnerApprovalForPreference').mockImplementation(input => Object.freeze({
+      routeVersion: 2 as const,
+      sourceId: input.sourceId,
+      bindingId: 'binding-owner',
+      bindingVersion: input.ownerGeneration,
+      bindingGeneration: input.ownerGeneration,
+      workspace: input.scope.workspace,
+      principal: input.principalId,
+      principalRecordId: input.principalLineage.principalRecordId,
+      principalVersion: input.principalLineage.principalVersion,
+    }))
+    const memoryPath = join(fixture.root, 'memory.sqlite')
+    const memory = new PersonalMemoryService(fixture.ctx, {
+      databasePath: memoryPath, approvalMode: 'delivery-required', reconcileIntervalMs: 0,
+    })
+    const memoryStore = (memory as unknown as {
+      memoryStore: {
+        listPendingProposals(limit: number): readonly Readonly<{
+          proposalId: string
+          principal: string
+          version: number
+        }>[]
+        listPendingPromotionResults(limit: number): readonly unknown[]
+      }
+    }).memoryStore
+
+    fixture.feedback(memoryRetentionFeedback('memory-compensation-1', 'typed-feedback', clock))
+    fixture.feedback(memoryRetentionFeedback('memory-compensation-2', 'explicit-selection', clock))
+    fixture.feedback(memoryRetentionFeedback('memory-compensation-3', 'typed-feedback', clock))
+    await new Promise(resolve => setImmediate(resolve))
+    const pending = memoryStore.listPendingProposals(10)[0]!
+    const confirmed = memory.decideProposal({
+      proposalId: pending.proposalId, principal: pending.principal,
+      expectedVersion: pending.version, decision: 'approved',
+      reason: 'confirmed before Preference result acknowledgement',
+    })
+    expect(confirmed.record).toBeDefined()
+    const pendingResults = memoryStore.listPendingPromotionResults(10) as readonly Readonly<{ occurredAt: number }>[]
+    expect(pendingResults).toHaveLength(1)
+    clock = Math.max(clock, pendingResults[0]!.occurredAt)
+
+    // Simulate a crash/lost result ACK: Preference has not projected the
+    // confirmed result when the owner forgets the scope. The next drain must
+    // compensate Memory first, persist that cancellation receipt, and only
+    // then consume the stale terminal result.
+    fixture.service.forgetScope({ workspace: '/work/alpha', preset: 'primary' }, 'forget-after-ack-loss')
+    expect(fixture.service.reconcileMemoryPromotions())
+      .toEqual({ submitted: 0, cancelled: 1, projected: 1 })
+    expect(memoryStore.listPendingPromotionResults(10)).toEqual([])
+    expect(fixture.service.reconcileMemoryPromotions())
+      .toEqual({ submitted: 0, cancelled: 0, projected: 0 })
+
+    await fixture.ctx.fiber.restart()
+    contexts.splice(contexts.indexOf(fixture.ctx), 1)
+    const memoryAudit = new DatabaseSync(memoryPath, { readOnly: true })
+    expect(memoryAudit.prepare('SELECT status, version FROM memory_records WHERE id = ?')
+      .get(confirmed.record!.id)).toEqual({ status: 'removed', version: 2 })
+    expect(memoryAudit.prepare(`
+      SELECT COUNT(*) AS count FROM memory_tokens WHERE memory_id = ?
+    `).get(confirmed.record!.id)).toEqual({ count: 0 })
+    expect(memoryAudit.prepare('SELECT COUNT(*) AS count FROM memory_promotion_compensations')
+      .get()).toEqual({ count: 1 })
+    expect(memoryAudit.prepare('SELECT state FROM memory_promotion_results')
+      .get()).toEqual({ state: 'completed' })
+    memoryAudit.close()
+    const preferenceAudit = new DatabaseSync(fixture.databasePath, { readOnly: true })
+    expect(preferenceAudit.prepare('SELECT state FROM preference_memory_promotion_cancellations')
+      .get()).toEqual({ state: 'cancelled' })
+    preferenceAudit.close()
+  })
+
+  test('upgrades an ACKed supersede into a forget and compensates confirmed Memory', async () => {
+    let clock = Date.now() + 1_000
+    const fixture = await harness({ now: () => clock })
+    const delivery = fixture.actualDelivery!
+    vi.spyOn(delivery, 'prepareOwnerApprovalForPreference').mockImplementation(input => Object.freeze({
+      routeVersion: 2 as const, sourceId: input.sourceId, bindingId: 'binding-owner',
+      bindingVersion: input.ownerGeneration, bindingGeneration: input.ownerGeneration,
+      workspace: input.scope.workspace, principal: input.principalId,
+      principalRecordId: input.principalLineage.principalRecordId,
+      principalVersion: input.principalLineage.principalVersion,
+    }))
+    const memoryPath = join(fixture.root, 'memory-supersede-forget.sqlite')
+    const memory = new PersonalMemoryService(fixture.ctx, {
+      databasePath: memoryPath, approvalMode: 'delivery-required', reconcileIntervalMs: 0,
+    })
+    const memoryStore = (memory as unknown as { memoryStore: {
+      listPendingProposals(limit: number): readonly Readonly<{
+        proposalId: string
+        principal: string
+        version: number
+      }>[]
+      listPendingPromotionResults(limit: number): readonly Readonly<{ occurredAt: number }>[]
+    } }).memoryStore
+    fixture.feedback(memoryRetentionFeedback('memory-supersede-forget-1', 'typed-feedback', clock))
+    fixture.feedback(memoryRetentionFeedback('memory-supersede-forget-2', 'explicit-selection', clock))
+    fixture.feedback(memoryRetentionFeedback('memory-supersede-forget-3', 'typed-feedback', clock))
+    await new Promise(resolve => setImmediate(resolve))
+    const pending = memoryStore.listPendingProposals(10)[0]!
+    const confirmed = memory.decideProposal({
+      proposalId: pending.proposalId, principal: pending.principal, expectedVersion: pending.version,
+      decision: 'approved', reason: 'confirmed before stale supersede',
+    })
+    const [result] = memoryStore.listPendingPromotionResults(10)
+    clock = Math.max(clock, result!.occurredAt)
+
+    const preferenceDb = new DatabaseSync(fixture.databasePath)
+    const promotion = preferenceDb.prepare(`
+      SELECT * FROM preference_memory_promotions
+    `).get() as Record<string, string | number>
+    const superseded = withPreferenceMemoryPromotionCancellationDigest({
+      contractVersion: 1 as const, promotionId: String(promotion['promotion_id']),
+      promotionGeneration: Number(promotion['promotion_generation']),
+      requestDigest: String(promotion['request_digest']), principalLineage: OWNER_LINEAGE,
+      ownerGeneration: Number(promotion['owner_generation']), reason: 'superseded' as const,
+      occurredAt: clock,
+    })
+    preferenceDb.prepare(`
+      INSERT INTO preference_memory_promotion_cancellations(
+        promotion_id, promotion_generation, request_digest, principal_lineage_id,
+        principal_lineage_version, owner_generation, reason, cancelled_at, cancellation_digest,
+        state, attempt_count, next_attempt_at, upgrade_binding_digest, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 'superseded', ?, ?, 'pending', 0, ?, ?, ?)
+    `).run(
+      superseded.promotionId, superseded.promotionGeneration, superseded.requestDigest,
+      superseded.principalLineage.principalRecordId, superseded.principalLineage.principalVersion,
+      superseded.ownerGeneration, superseded.occurredAt, superseded.cancellationDigest, clock,
+      preferencePromotionCancellationUpgradeBindingDigest({
+        promotionId: superseded.promotionId, promotionGeneration: superseded.promotionGeneration,
+        requestDigest: superseded.requestDigest,
+        principalLineageId: superseded.principalLineage.principalRecordId,
+        principalLineageVersion: superseded.principalLineage.principalVersion,
+        ownerGeneration: superseded.ownerGeneration,
+      }), clock,
+    )
+    preferenceDb.close()
+    expect(fixture.service.reconcileMemoryPromotions())
+      .toEqual({ submitted: 0, cancelled: 1, projected: 1 })
+    const redacted = new DatabaseSync(fixture.databasePath)
+    expect(redacted.prepare(`
+      SELECT reason, state, principal_lineage_id, principal_lineage_version, owner_generation
+      FROM preference_memory_promotion_cancellations
+    `).get()).toEqual(expect.objectContaining({
+      reason: 'superseded', state: 'already-confirmed',
+      principal_lineage_version: 1, owner_generation: 1,
+      principal_lineage_id: expect.stringMatching(/^redacted-/u),
+    }))
+    redacted.close()
+
+    fixture.service.forgetScope({ workspace: '/work/alpha', preset: 'primary' }, 'forget-after-supersede-ack')
+    expect(fixture.service.reconcileMemoryPromotions())
+      .toEqual({ submitted: 0, cancelled: 1, projected: 0 })
+    await fixture.ctx.fiber.restart()
+    contexts.splice(contexts.indexOf(fixture.ctx), 1)
+    const memoryAudit = new DatabaseSync(memoryPath, { readOnly: true })
+    expect(memoryAudit.prepare('SELECT status, version FROM memory_records WHERE id = ?')
+      .get(confirmed.record!.id)).toEqual({ status: 'removed', version: 2 })
+    expect(memoryAudit.prepare('SELECT COUNT(*) AS count FROM memory_tokens WHERE memory_id = ?')
+      .get(confirmed.record!.id)).toEqual({ count: 0 })
+    expect(memoryAudit.prepare('SELECT COUNT(*) AS count FROM memory_promotion_compensations')
+      .get()).toEqual({ count: 1 })
+    memoryAudit.close()
+    const finalPreference = new DatabaseSync(fixture.databasePath, { readOnly: true })
+    expect(finalPreference.prepare(`
+      SELECT reason, state, principal_lineage_version, owner_generation
+      FROM preference_memory_promotion_cancellations
+    `).get()).toEqual({
+      reason: 'forget', state: 'cancelled', principal_lineage_version: 1, owner_generation: 1,
+    })
+    finalPreference.close()
+  })
+
+  test('uses one branded Memory registration for durable submission and terminal projection', async () => {
+    let clock = Date.now() + 1_000
+    const { ctx, feedback, service } = await harness({ now: () => clock })
+    expect(isTrustedPreferenceMemoryPromotionProducer(service)).toBe(true)
+    expect(isTrustedPreferenceMemoryPromotionProducer({ ...service })).toBe(false)
+    let registration: Readonly<PreferenceMemoryPromotionRegistration> | undefined
+    const requests: PreferenceMemoryPromotionRequest[] = []
+    const results: PreferenceMemoryPromotionResult[] = []
+    const acknowledgements: unknown[] = []
+    let failFirst = true
+    const owner = {
+      ownsPreferencePromotionSourceRegistration(value: Readonly<PreferenceMemoryPromotionRegistration>) {
+        return value === registration
+      },
+    }
+    registration = Object.freeze({
+      protocol: PREFERENCE_MEMORY_PROMOTION_PROTOCOL,
+      producer: 'personal-memory' as const,
+      sourceGeneration: service.trustedMemoryPromotionProducerGeneration(),
+      sinkGeneration: 'memory-generation-1',
+      owner,
+      propose(request: Readonly<PreferenceMemoryPromotionRequest>) {
+        if (failFirst) {
+          failFirst = false
+          throw new Error('transient Memory outage')
+        }
+        requests.push(request)
+        return withPreferenceMemoryPromotionSubmissionDigest({
+          contractVersion: 1 as const, promotionId: request.promotionId,
+          promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+          outcome: 'accepted' as const, memoryProposalId: 'memory-proposal-service-1',
+        })
+      },
+      cancelPromotion() { throw new Error('unexpected cancellation') },
+      listTerminalResults() { return results.splice(0) },
+      acknowledgeTerminalResult(ack: Readonly<PreferenceMemoryPromotionResultAck>) {
+        acknowledgements.push(ack)
+      },
+    })
+    const dispose = service.registerTrustedMemoryPromotionResultSink(registration)
+    expect(() => service.registerTrustedMemoryPromotionResultSink({ ...registration! }))
+      .toThrow(/registration is invalid|already registered/iu)
+
+    feedback(memoryRetentionFeedback('memory-retention-1', 'typed-feedback'))
+    feedback(memoryRetentionFeedback('memory-retention-2', 'explicit-selection'))
+    feedback(memoryRetentionFeedback('memory-retention-3', 'typed-feedback'))
+    await new Promise(resolve => setImmediate(resolve))
+    expect(requests).toHaveLength(0)
+    // The first automatic drain failed and is durable retry_wait. Re-open it
+    // after the fixed 250ms first backoff without reaching into the Store.
+    clock += 250
+    expect(service.reconcileMemoryPromotions()).toMatchObject({ submitted: 1 })
+    expect(requests[0]).toMatchObject({
+      hypothesis: { key: 'memory.retention', value: 'long-term',
+        supportingSignals: 3, distinctSignalSources: 2 },
+      rendererId: 'memory.retention.long-term/v1',
+    })
+    const request = requests[0]!
+    results.push(withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 1, status: 'confirmed' as const,
+      memoryProposalId: 'memory-proposal-service-1', memoryProposalVersion: 2,
+      memoryRecordId: 'memory-record-service-1', memoryRecordVersion: 1,
+      memoryRecordDigest: 'a'.repeat(64), occurredAt: Date.now(),
+    }))
+    expect(service.reconcileMemoryPromotions()).toMatchObject({ projected: 1 })
+    expect(acknowledgements).toEqual([expect.objectContaining({ outcome: 'applied' })])
+
+    dispose()
+    expect(service.reconcileMemoryPromotions()).toEqual({ submitted: 0, cancelled: 0, projected: 0 })
+    await ctx.fiber.restart()
+    expect(isTrustedPreferenceMemoryPromotionProducer(service)).toBe(false)
+    expect(() => service.trustedMemoryPromotionProducerGeneration()).toThrow(/disposed/iu)
+    contexts.splice(contexts.indexOf(ctx), 1)
+  })
+
   test.each(['before', 'after'] as const)(
     'binds an exact owned Delivery registration when Delivery installs %s Preference',
     async deliveryInstall => {
@@ -527,6 +821,7 @@ describe('preference learning service', () => {
       }),
       bindingId: 'binding-owner-a3',
       bindingVersion: 3,
+      bindingGeneration: 3,
       sessionId: String(agent!.session.id),
     }))
 

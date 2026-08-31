@@ -95,6 +95,45 @@ describe('four-core personal assistant composition', () => {
           actions: ['ingest'], resource: { kind: 'automation', id: 'auto-context' }, context: { initiators: ['external'] } },
       ],
     })
+    const ownerPrincipal = 'owner:test'
+    const ownerBindingId = 'binding-core-owner'
+    const ownerRecordId = 'principal-core-owner'
+    // This Host-owned test seam mirrors Delivery's authenticated v2 route and
+    // principal attestation. Both the foreground proposal Agent and the
+    // Automation-created background Agent therefore resolve the same durable
+    // owner namespace without weakening Personal Memory's fail-closed path.
+    ctx.provide('assistantDelivery' as never, {
+      prepareAgentApproval(current: Agent | undefined, input: { sourceId: string }) {
+        if (current?.session.header.cwd !== '/work/alpha'
+          || current.session.header.agentPreset !== 'primary') {
+          throw new Error('test Delivery owner route does not match the Agent')
+        }
+        return Object.freeze({
+          routeVersion: 2 as const,
+          sourceId: input.sourceId,
+          bindingId: ownerBindingId,
+          bindingVersion: 1,
+          bindingGeneration: 1,
+          workspace: '/work/alpha',
+          principal: ownerPrincipal,
+          principalRecordId: ownerRecordId,
+          principalVersion: 1,
+        })
+      },
+      preferencePrincipalForAgent(current: Agent) {
+        if (current.session.header.cwd !== '/work/alpha'
+          || current.session.header.agentPreset !== 'primary') return undefined
+        return Object.freeze({
+          scope: Object.freeze({ workspace: '/work/alpha', preset: 'primary' }),
+          principalId: ownerPrincipal,
+          principalLineage: Object.freeze({ principalRecordId: ownerRecordId, principalVersion: 1 }),
+          bindingId: ownerBindingId,
+          bindingVersion: 1,
+          bindingGeneration: 1,
+          sessionId: String(current.session.id),
+        })
+      },
+    } as never)
     await ctx.plugin(PersonalMemoryService, {
       databasePath: join(root, 'memory.sqlite'),
       approvalMode: 'delivery-or-headless',
@@ -115,31 +154,31 @@ describe('four-core personal assistant composition', () => {
 
     const agent = foreground()
     const memory = ctx.personalMemory.propose(agent, {
-      idempotencyKey: 'core:memory', principal: 'owner:test',
+      idempotencyKey: 'core:memory', principal: ownerPrincipal,
       mutation: { op: 'add', identity: { owner: 'user', scope: 'workspace', workspace: '/work/alpha' },
         entry: { kind: 'preference', content: 'Preferred editor is Helix and coffee is hand-brewed.', sensitivity: 'private',
           trust: 'user-confirmed', confidence: 1, provenance: { source: 'user', observedAt: 1 } } },
     })
-    ctx.personalMemory.decideProposal({ proposalId: memory.proposalId, principal: 'owner:test', expectedVersion: 1,
+    ctx.personalMemory.decideProposal({ proposalId: memory.proposalId, principal: ownerPrincipal, expectedVersion: 1,
       decision: 'approved', reason: 'confirmed' })
     const wiki = ctx.personalWiki.propose(agent, {
-      idempotencyKey: 'core:wiki', principal: 'owner:test', mutation: { op: 'create', input: {
+      idempotencyKey: 'core:wiki', principal: ownerPrincipal, mutation: { op: 'create', input: {
         title: 'Agent architecture', type: 'concept', authority: 'curated', status: 'active', tags: ['agent'], aliases: [],
         sources: [{ uri: 'https://example.test/agent', sha256: 'a'.repeat(64) }],
         body: '# Agent architecture\n\nMemory and knowledge remain separate service-owned truths.',
       } },
     })
-    ctx.personalWiki.decideProposal({ proposalId: wiki.proposalId, principal: 'owner:test', expectedVersion: 1,
+    ctx.personalWiki.decideProposal({ proposalId: wiki.proposalId, principal: ownerPrincipal, expectedVersion: 1,
       decision: 'approved', reason: 'reviewed' })
     const automation = ctx.assistantAutomations.propose(agent, {
-      idempotencyKey: 'core:automation', principal: 'owner:test', mutation: { op: 'create', automationId: 'auto-context',
+      idempotencyKey: 'core:automation', principal: ownerPrincipal, mutation: { op: 'create', automationId: 'auto-context',
         definition: { name: 'Context review', prompt: 'Retrieve approved personal context.',
           schedule: { kind: 'at', at: '2030-01-01T00:00:00.000Z' }, workspace: '/work/alpha', agentPreset: 'primary',
           provider: 'mock', model: 'core-model', allowedTools: ['memory_search', 'wiki_search'], timeoutMs: 60_000,
           maxOutputTokens: 512, maxToolCalls: 2, misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never',
-          maxRetries: 0, principal: 'owner:test' } },
+          maxRetries: 0, principal: ownerPrincipal } },
     })
-    ctx.assistantAutomations.decideProposal({ proposalId: automation.proposalId, principal: 'owner:test', expectedVersion: 1,
+    ctx.assistantAutomations.decideProposal({ proposalId: automation.proposalId, principal: ownerPrincipal, expectedVersion: 1,
       decision: 'approved', reason: 'reviewed' })
     ctx.assistantAutomations.ingestExternal({ sourceId: 'core-test', automationId: 'auto-context', eventId: 'event-1', occurredAt: 1 })
 

@@ -3,10 +3,33 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test } from 'vitest'
 import { MemoryStore } from '../src/store.ts'
-import type { MemoryAgentContext, MemoryEntryInput, MemoryIdentity } from '../src/types.ts'
+import type { MemoryAgentContext, MemoryEntryInput, MemoryIdentity, MemoryOwnerNamespace } from '../src/types.ts'
 
 const temporaryRoots: string[] = []
-const context: MemoryAgentContext = { workspace: '/work/alpha', agentPreset: 'primary' }
+const namespaceA: MemoryOwnerNamespace = {
+  mode: 'delivery',
+  principalDigest: 'a'.repeat(64),
+  principalRecordId: 'principal-a',
+  principalVersion: 1,
+}
+const namespaceB: MemoryOwnerNamespace = {
+  mode: 'delivery',
+  principalDigest: 'b'.repeat(64),
+  principalRecordId: 'principal-b',
+  principalVersion: 1,
+}
+const namespaceA3: MemoryOwnerNamespace = { ...namespaceA, principalVersion: 3 }
+const headlessNamespace: MemoryOwnerNamespace = {
+  mode: 'headless',
+  principalDigest: 'c'.repeat(64),
+  lineageId: 'host-owner-a',
+  lineageVersion: 1,
+}
+const context: MemoryAgentContext = {
+  workspace: '/work/alpha',
+  agentPreset: 'primary',
+  namespace: namespaceA,
+}
 
 async function store() {
   const root = await mkdtemp(join(tmpdir(), 'personal-memory-retrieval-'))
@@ -35,10 +58,12 @@ function add(
   identity: MemoryIdentity,
   content: string,
   overrides: Partial<MemoryEntryInput> = {},
+  namespace: MemoryOwnerNamespace = namespaceA,
 ) {
   return memory.applyApprovedMutation({
     op: 'add',
     idempotencyKey: `add:${identity.owner}:${identity.scope}:${content}`,
+    namespace,
     identity,
     entry: entry(content, overrides),
   })
@@ -64,6 +89,50 @@ describe('personal memory retrieval', () => {
       'workspace agent memory',
       'workspace user memory',
     ])
+    memory.close()
+  })
+
+  test('isolates identical semantic scopes by exact owner namespace and headless lineage', async () => {
+    const memory = await store()
+    add(memory, { owner: 'user', scope: 'user-global' }, 'owner A secret', {}, namespaceA)
+    add(memory, { owner: 'user', scope: 'user-global' }, 'owner B secret', {}, namespaceB)
+    add(memory, { owner: 'user', scope: 'user-global' }, 'headless secret', {}, headlessNamespace)
+
+    expect(memory.search({ context, query: 'secret' }).map(hit => hit.record.content)).toEqual(['owner A secret'])
+    expect(memory.search({ context: { ...context, namespace: namespaceB }, query: 'secret' })
+      .map(hit => hit.record.content)).toEqual(['owner B secret'])
+    expect(memory.search({ context: { ...context, namespace: headlessNamespace }, query: 'secret' })
+      .map(hit => hit.record.content)).toEqual(['headless secret'])
+    memory.close()
+  })
+
+  test('does not revive generation-one records after owner A to B to A rotation', async () => {
+    const memory = await store()
+    const old = add(memory, { owner: 'user', scope: 'user-global' }, 'old A memory', {}, namespaceA)
+    add(memory, { owner: 'user', scope: 'user-global' }, 'B memory', {}, namespaceB)
+    add(memory, { owner: 'user', scope: 'user-global' }, 'new A memory', {}, namespaceA3)
+
+    const returned = memory.search({ context: { ...context, namespace: namespaceA3 }, query: 'memory' })
+    expect(returned.map(hit => hit.record.content)).toEqual(['new A memory'])
+    expect(() => memory.read({ ...context, namespace: namespaceA3 }, [old.id]))
+      .toThrowError(expect.objectContaining({ code: 'not-found' }))
+    memory.close()
+  })
+
+  test('keeps records visible across slash-new binding generations for the same principal lineage', async () => {
+    const memory = await store()
+    const record = add(memory, { owner: 'user', scope: 'workspace', workspace: '/work/alpha' },
+      'stable across slash-new')
+
+    // A Delivery binding generation is not a durable Memory namespace field.
+    // Re-attesting the same principal row/version after /new must select the
+    // same namespace and preserve read/search/snapshot/export visibility.
+    const afterNew: MemoryAgentContext = { ...context, namespace: { ...namespaceA } }
+    expect(memory.read(afterNew, [record.id])).toEqual([record])
+    expect(memory.search({ context: afterNew, query: 'slash-new' })[0]?.record.id).toBe(record.id)
+    expect(memory.snapshot({ context: afterNew, limit: 10, maxBytes: 512, maxTokens: 128 }).text)
+      .toContain('stable across slash-new')
+    expect(memory.exportDocument(afterNew).records[0]?.entry.content).toBe('stable across slash-new')
     memory.close()
   })
 

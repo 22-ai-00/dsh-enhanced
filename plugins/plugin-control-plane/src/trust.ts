@@ -1,4 +1,5 @@
-import { lstat, open, readFile, realpath } from 'node:fs/promises'
+import { constants as fsConstants } from 'node:fs'
+import { lstat, open, readFile, realpath, type FileHandle } from 'node:fs/promises'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { createHash, createPublicKey } from 'node:crypto'
 import type { HostAttestationPolicy, SourceReleaseAdapterIdentity, SourceReleasePhase } from './types.js'
@@ -17,7 +18,7 @@ export interface TrustKey {
 }
 
 export interface PluginControlTrustConfig {
-  schemaVersion: 1 | 2 | 3
+  schemaVersion: 1 | 2 | 3 | 4
   installationId: string
   dshHome: string
   ledger: { id: string; path: string }
@@ -50,9 +51,11 @@ export interface PluginControlTrustConfig {
   approvalKeys: readonly TrustKey[]
   hostAttestationKeys: readonly TrustKey[]
   releaseKeys: readonly TrustKey[]
+  releaseAuthorizationKeys: readonly TrustKey[]
 }
 
 export interface TrustedExecutableSnapshot { device: bigint; inode: bigint; sha256: string }
+export interface OpenTrustedExecutable { path: string; handle: FileHandle; snapshot: TrustedExecutableSnapshot }
 
 export class TrustConfigError extends Error {
   constructor(readonly code: 'invalid-config' | 'unsafe-file', message: string) {
@@ -117,6 +120,19 @@ function keys(value: unknown, label: string): readonly TrustKey[] {
   }))
 }
 
+function keyFingerprint(key: TrustKey): string {
+  const der = createPublicKey(key.publicKeyPem).export({ format: 'der', type: 'spki' })
+  return createHash('sha256').update(der).digest('hex')
+}
+
+function assertIndependentKeySets(left: readonly TrustKey[], right: readonly TrustKey[], label: string): void {
+  for (const first of left) for (const second of right) {
+    if ((first.authority === second.authority && first.keyId === second.keyId) || keyFingerprint(first) === keyFingerprint(second)) {
+      throw new TrustConfigError('invalid-config', `${label} must not reuse an authority/key identity or public key`)
+    }
+  }
+}
+
 async function assertOwnerPrivateFile(path: string): Promise<void> {
   const metadata = await lstat(path)
   const uid = process.getuid?.()
@@ -131,30 +147,59 @@ async function assertOwnerPrivateFile(path: string): Promise<void> {
   }
 }
 
-export async function inspectTrustedExecutable(path: string, expectedSha256: string): Promise<TrustedExecutableSnapshot> {
+async function readAt(handle: FileHandle, size: bigint): Promise<Buffer> {
+  const bytes = Buffer.alloc(Number(size)); let offset = 0
+  while (offset < bytes.length) {
+    const result = await handle.read(bytes, offset, bytes.length - offset, offset)
+    if (result.bytesRead === 0) break
+    offset += result.bytesRead
+  }
+  if (offset !== bytes.length) throw new TrustConfigError('unsafe-file', 'trusted executable changed or was truncated while reading')
+  return bytes
+}
+
+async function snapshotOpenTrustedExecutable(path: string, handle: FileHandle, expectedSha256: string): Promise<TrustedExecutableSnapshot> {
+  const before = await handle.stat({ bigint: true }); const pathBefore = await lstat(path, { bigint: true }); const uid = process.getuid?.()
+  const expectedUid = uid === undefined ? undefined : BigInt(uid)
+  if (!before.isFile() || before.nlink !== 1n || before.size > 268_435_456n || (before.mode & 0o111n) === 0n
+    || (before.mode & 0o022n) !== 0n || (expectedUid !== undefined && before.uid !== 0n && before.uid !== expectedUid)
+    || !pathBefore.isFile() || pathBefore.isSymbolicLink() || pathBefore.dev !== before.dev || pathBefore.ino !== before.ino) {
+    throw new TrustConfigError('unsafe-file', 'trusted executable must be one bounded non-writable root- or owner-owned executable regular file')
+  }
+  const bytes = await readAt(handle, before.size); const sha256 = createHash('sha256').update(bytes).digest('hex')
+  const after = await handle.stat({ bigint: true }); const pathAfter = await lstat(path, { bigint: true })
+  if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.mtimeNs !== before.mtimeNs
+    || after.ctimeNs !== before.ctimeNs || pathAfter.dev !== before.dev || pathAfter.ino !== before.ino || sha256 !== expectedSha256) {
+    throw new TrustConfigError('unsafe-file', 'trusted executable identity or digest changed during verification')
+  }
+  return Object.freeze({ device: before.dev, inode: before.ino, sha256 })
+}
+
+export async function openTrustedExecutable(path: string, expectedSha256: string): Promise<OpenTrustedExecutable> {
   if (!isAbsolute(path) || await realpath(path) !== resolve(path)) throw new TrustConfigError('unsafe-file', 'trusted executable path must be canonical')
   const directory = await lstat(dirname(path)); const uid = process.getuid?.()
   if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o022) !== 0
     || (uid !== undefined && directory.uid !== 0 && directory.uid !== uid)) {
     throw new TrustConfigError('unsafe-file', 'trusted executable directory must not be writable by another principal')
   }
-  const handle = await open(path, 'r')
+  const handle = await open(path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW)
   try {
-    const before = await handle.stat({ bigint: true }); const pathBefore = await lstat(path, { bigint: true })
-    const expectedUid = uid === undefined ? undefined : BigInt(uid)
-    if (!before.isFile() || before.nlink !== 1n || before.size > 268_435_456n || (before.mode & 0o111n) === 0n
-      || (before.mode & 0o022n) !== 0n || (expectedUid !== undefined && before.uid !== 0n && before.uid !== expectedUid)
-      || !pathBefore.isFile() || pathBefore.isSymbolicLink() || pathBefore.dev !== before.dev || pathBefore.ino !== before.ino) {
-      throw new TrustConfigError('unsafe-file', 'trusted executable must be one bounded non-writable root- or owner-owned executable regular file')
-    }
-    const sha256 = createHash('sha256').update(await handle.readFile()).digest('hex')
-    const after = await handle.stat({ bigint: true }); const pathAfter = await lstat(path, { bigint: true })
-    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size || after.mtimeNs !== before.mtimeNs
-      || pathAfter.dev !== before.dev || pathAfter.ino !== before.ino || sha256 !== expectedSha256) {
-      throw new TrustConfigError('unsafe-file', 'trusted executable identity or digest changed during verification')
-    }
-    return Object.freeze({ device: before.dev, inode: before.ino, sha256 })
-  } finally { await handle.close() }
+    const snapshot = await snapshotOpenTrustedExecutable(path, handle, expectedSha256)
+    return Object.freeze({ path, handle, snapshot })
+  } catch (error) { await handle.close(); throw error }
+}
+
+export async function verifyOpenTrustedExecutable(value: OpenTrustedExecutable): Promise<TrustedExecutableSnapshot> {
+  const current = await snapshotOpenTrustedExecutable(value.path, value.handle, value.snapshot.sha256)
+  if (current.device !== value.snapshot.device || current.inode !== value.snapshot.inode) {
+    throw new TrustConfigError('unsafe-file', 'trusted executable descriptor identity changed during execution')
+  }
+  return current
+}
+
+export async function inspectTrustedExecutable(path: string, expectedSha256: string): Promise<TrustedExecutableSnapshot> {
+  const executable = await openTrustedExecutable(path, expectedSha256)
+  try { return executable.snapshot } finally { await executable.handle.close() }
 }
 
 function environmentAllowlist(value: unknown, label: string): readonly string[] {
@@ -235,10 +280,20 @@ async function externalAdapter(value: unknown, label: string, trustedKeys: reado
     authority, keyId, timeoutMs: Number(item.timeoutMs) })
 }
 
-function independent(left: TrustedReleaseAdapter | undefined, right: TrustedReleaseAdapter | undefined, label: string): void {
-  if (left !== undefined && right !== undefined
-    && ((left.authority === right.authority && left.keyId === right.keyId)
-      || left.path === right.path || left.sha256 === right.sha256)) {
+async function independent(left: TrustedReleaseAdapter | undefined, right: TrustedReleaseAdapter | undefined, label: string,
+  trustedKeys: readonly TrustKey[]): Promise<void> {
+  if (left === undefined || right === undefined) return
+  const leftFile = await lstat(left.path, { bigint: true }); const rightFile = await lstat(right.path, { bigint: true })
+  const leftKey = trustedKeys.find(key => key.authority === left.authority && key.keyId === left.keyId)!
+  const rightKey = trustedKeys.find(key => key.authority === right.authority && key.keyId === right.keyId)!
+  const leftInterpreter = left.interpreter === null ? undefined : await lstat(left.interpreter.path, { bigint: true })
+  const rightInterpreter = right.interpreter === null ? undefined : await lstat(right.interpreter.path, { bigint: true })
+  const sameIdentity = (first: { dev: bigint; ino: bigint } | undefined, second: { dev: bigint; ino: bigint } | undefined): boolean =>
+    first !== undefined && second !== undefined && first.dev === second.dev && first.ino === second.ino
+  if (left.id === right.id || left.authority === right.authority || left.path === right.path
+    || sameIdentity(leftFile, rightFile)
+    || sameIdentity(leftFile, rightInterpreter) || sameIdentity(leftInterpreter, rightFile)
+    || keyFingerprint(leftKey) === keyFingerprint(rightKey)) {
     throw new TrustConfigError('invalid-config', `${label} must use independent executable and signing authority/key`)
   }
 }
@@ -255,6 +310,9 @@ export async function loadTrustConfig(pathInput: string): Promise<PluginControlT
   else if (root.schemaVersion === 2) exactKeys(root, ['schemaVersion', 'installationId', 'dshHome', 'ledger', 'executor', 'hostPolicy', 'hostAttestor', 'approvalKeys', 'hostAttestationKeys'], 'trust config')
   else if (root.schemaVersion === 3) exactKeys(root, ['schemaVersion', 'installationId', 'dshHome', 'ledger', 'executor', 'hostPolicy', 'hostAttestor',
     'catalog', 'releaseRegistry', 'releaseReceiptTtlMs', 'releaseAdapters', 'approvalKeys', 'hostAttestationKeys', 'releaseKeys'], 'trust config')
+  else if (root.schemaVersion === 4) exactKeys(root, ['schemaVersion', 'installationId', 'dshHome', 'ledger', 'executor', 'hostPolicy', 'hostAttestor',
+    'catalog', 'releaseRegistry', 'releaseReceiptTtlMs', 'releaseAdapters', 'approvalKeys', 'hostAttestationKeys', 'releaseKeys',
+    'releaseAuthorizationKeys'], 'trust config')
   else throw new TrustConfigError('invalid-config', 'unsupported trust config schema')
   const installationId = text(root.installationId, 'installationId', 36).toLowerCase()
   if (!UUID.test(installationId)) throw new TrustConfigError('invalid-config', 'installationId must be a UUID')
@@ -279,10 +337,16 @@ export async function loadTrustConfig(pathInput: string): Promise<PluginControlT
   await inspectTrustedExecutable(executorPath, executorSha256)
   const executorEnvironmentAllowlist = environmentAllowlist(executorInput.environmentAllowlist, 'executor.environmentAllowlist')
   const approvalKeys = keys(root.approvalKeys, 'approvalKeys'); const hostAttestationKeys = keys(root.hostAttestationKeys, 'hostAttestationKeys')
-  const releaseKeys = root.schemaVersion === 3 ? keys(root.releaseKeys, 'releaseKeys') : Object.freeze([])
-  const hostPolicy = root.schemaVersion === 2 || root.schemaVersion === 3 ? policy(root.hostPolicy) : defaultHostAttestationPolicy
+  const releaseKeys = root.schemaVersion === 3 || root.schemaVersion === 4 ? keys(root.releaseKeys, 'releaseKeys') : Object.freeze([])
+  const releaseAuthorizationKeys = root.schemaVersion === 4 ? keys(root.releaseAuthorizationKeys, 'releaseAuthorizationKeys') : Object.freeze([])
+  if (root.schemaVersion === 4) {
+    assertIndependentKeySets(releaseAuthorizationKeys, approvalKeys, 'release authorization and source approval keys')
+    assertIndependentKeySets(releaseAuthorizationKeys, releaseKeys, 'release authorization and adapter receipt keys')
+    assertIndependentKeySets(approvalKeys, releaseKeys, 'source approval and adapter receipt keys')
+  }
+  const hostPolicy = root.schemaVersion === 2 || root.schemaVersion === 3 || root.schemaVersion === 4 ? policy(root.hostPolicy) : defaultHostAttestationPolicy
   let hostAttestor: PluginControlTrustConfig['hostAttestor']
-  if ((root.schemaVersion === 2 || root.schemaVersion === 3) && root.hostAttestor !== null) {
+  if ((root.schemaVersion === 2 || root.schemaVersion === 3 || root.schemaVersion === 4) && root.hostAttestor !== null) {
     const item = record(root.hostAttestor, 'hostAttestor')
     exactKeys(item, ['id', 'version', 'path', 'sha256', 'interpreter', 'environmentAllowlist', 'authority', 'keyId', 'timeoutMs'], 'hostAttestor')
     const id = text(item.id, 'hostAttestor.id', 128); const version = text(item.version, 'hostAttestor.version', 64)
@@ -323,7 +387,7 @@ export async function loadTrustConfig(pathInput: string): Promise<PluginControlT
   let releaseRegistry: PluginControlTrustConfig['releaseRegistry']
   let releaseReceiptTtlMs = 30_000
   let releaseAdapters: PluginControlTrustConfig['releaseAdapters']
-  if (root.schemaVersion === 3) {
+  if (root.schemaVersion === 3 || root.schemaVersion === 4) {
     const catalogInput = record(root.catalog, 'catalog'); exactKeys(catalogInput, ['id', 'path'], 'catalog')
     const catalogId = text(catalogInput.id, 'catalog.id', 128); const catalogPathInput = text(catalogInput.path, 'catalog.path', 2_000)
     if (!ID.test(catalogId) || !isAbsolute(catalogPathInput) || await realpath(catalogPathInput) !== resolve(catalogPathInput)) {
@@ -343,11 +407,12 @@ export async function loadTrustConfig(pathInput: string): Promise<PluginControlT
     exactKeys(adapterInput, phases, 'releaseAdapters')
     const parsedAdapters: Partial<Record<SourceReleasePhase, NonNullable<TrustedReleaseAdapter>>> = {}
     for (const phase of phases) if (adapterInput[phase] !== null) parsedAdapters[phase] = await externalAdapter(adapterInput[phase], `releaseAdapters.${phase}`, releaseKeys)
-    independent(parsedAdapters.review, parsedAdapters.pr, 'review and PR/source adapters')
-    independent(parsedAdapters.review, parsedAdapters.merge, 'review and merge adapters')
-    independent(parsedAdapters.sign, parsedAdapters.build, 'signer and builder adapters')
-    independent(parsedAdapters.sign, parsedAdapters.publish, 'signer and publisher adapters')
-    independent(parsedAdapters['registry-verify'], parsedAdapters.publish, 'registry verifier and publisher adapters')
+    for (let left = 0; left < phases.length; left += 1) {
+      for (let right = left + 1; right < phases.length; right += 1) {
+        await independent(parsedAdapters[phases[left]!], parsedAdapters[phases[right]!],
+          `${phases[left]} and ${phases[right]} release adapters`, releaseKeys)
+      }
+    }
     releaseAdapters = Object.freeze(parsedAdapters)
   }
   return Object.freeze({
@@ -366,11 +431,13 @@ export async function loadTrustConfig(pathInput: string): Promise<PluginControlT
     approvalKeys,
     hostAttestationKeys,
     releaseKeys,
+    releaseAuthorizationKeys,
   })
 }
 
-export function resolveTrustKey(config: PluginControlTrustConfig, purpose: 'approval' | 'host-attestation' | 'release', authority: string, keyId: string): TrustKey {
-  const source = purpose === 'approval' ? config.approvalKeys : purpose === 'host-attestation' ? config.hostAttestationKeys : config.releaseKeys
+export function resolveTrustKey(config: PluginControlTrustConfig, purpose: 'approval' | 'host-attestation' | 'release' | 'release-authorization', authority: string, keyId: string): TrustKey {
+  const source = purpose === 'approval' ? config.approvalKeys : purpose === 'host-attestation'
+    ? config.hostAttestationKeys : purpose === 'release' ? config.releaseKeys : config.releaseAuthorizationKeys
   const result = source.find(item => item.authority === authority && item.keyId === keyId)
   if (result === undefined) throw new TrustConfigError('invalid-config', `${purpose} authority/key is not pre-registered`)
   return result

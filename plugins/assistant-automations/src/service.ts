@@ -397,7 +397,10 @@ export class AssistantAutomationsService extends Service implements
     | Readonly<{ token: symbol; registration: Readonly<TrustedAutomationEvaluationRegistration> }>
     | undefined
   private presentationSink: DeliveryPresentationSinkRegistration | undefined
-  private approvalDelivery: Pick<AssistantDeliveryService, 'prepareAgentApproval'> | undefined
+  private approvalDelivery: Pick<
+    AssistantDeliveryService,
+    'prepareAgentApproval' | 'prepareWorkflowApproval'
+  > | undefined
   private workflowTemplateResolver: WorkflowTemplateResolver | undefined
   private evaluation: AssistantEvaluationService | undefined
   private active = true
@@ -782,6 +785,30 @@ export class AssistantAutomationsService extends Service implements
         'Delivery resolved a different workflow template or owner scope',
       )
     }
+    const approvalDelivery = this.approvalDelivery
+    if (approvalDelivery === undefined || typeof approvalDelivery.prepareWorkflowApproval !== 'function') {
+      throw new AssistantAutomationsError(
+        'runtime-conflict',
+        'Growth approval requires the private Delivery v2 approval route resolver',
+      )
+    }
+    const dispatch = approvalDelivery.prepareWorkflowApproval({
+      sourceId: GROWTH_AUTOMATION_OWNER,
+      contractVersion: 1,
+      template: input.template,
+      scope: input.scope,
+      ownerBindingId: input.ownerBindingId,
+    })
+    if (dispatch.routeVersion !== 2
+      || dispatch.sourceId !== GROWTH_AUTOMATION_OWNER
+      || dispatch.bindingId !== resolved.ownerBindingId
+      || dispatch.workspace !== resolved.scope.workspace
+      || dispatch.principal !== resolved.principalId) {
+      throw new AssistantAutomationsError(
+        'runtime-conflict',
+        'Delivery resolved a different workflow approval route',
+      )
+    }
     const requestedCatalog = [...resolved.toolCatalogIds]
     const observedCatalog = [...new Set(input.steps.map(step => step.catalogId))].sort()
     if (canonicalGrowthJson(observedCatalog) !== canonicalGrowthJson(requestedCatalog)) {
@@ -876,12 +903,7 @@ export class AssistantAutomationsService extends Service implements
       diff,
       summary: 'Approve learned workflow as a paused Automation',
       notAfter: input.deadlineAt,
-      dispatch: {
-        sourceId: GROWTH_AUTOMATION_OWNER,
-        bindingId: resolved.ownerBindingId,
-        workspace: resolved.scope.workspace,
-        principal: resolved.principalId,
-      },
+      dispatch,
     })
     if (approval.kind === 'abandoned') {
       const receipt = withGrowthPortReceiptDigest({
@@ -1808,7 +1830,8 @@ export class AssistantAutomationsService extends Service implements
     const dispatch = delivery.prepareAgentApproval(agent, {
       sourceId: 'dsh-enhanced-assistant-automations',
     })
-    if (dispatch.sourceId !== 'dsh-enhanced-assistant-automations'
+    if (dispatch.routeVersion !== 2
+      || dispatch.sourceId !== 'dsh-enhanced-assistant-automations'
       || dispatch.workspace !== identity.workspace
       || dispatch.bindingId.trim() === ''
       || dispatch.principal.trim() === '') {

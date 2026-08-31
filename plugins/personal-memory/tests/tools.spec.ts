@@ -75,10 +75,24 @@ async function harness() {
   })
   ctx.provide('assistantDelivery', {
     prepareAgentApproval: () => ({
+      routeVersion: 2 as const,
       sourceId: 'dsh-enhanced-personal-memory',
       bindingId: 'binding-owner-dm',
+      bindingVersion: 1,
+      bindingGeneration: 1,
       workspace: '/work/alpha',
       principal: 'lark/main/tenant/owner',
+      principalRecordId: 'principal-row-owner',
+      principalVersion: 1,
+    }),
+    preferencePrincipalForAgent: () => ({
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      principalId: 'lark/main/tenant/owner',
+      principalLineage: { principalRecordId: 'principal-row-owner', principalVersion: 1 },
+      bindingId: 'binding-owner-dm',
+      bindingVersion: 1,
+      bindingGeneration: 1,
+      sessionId: '',
     }),
   })
   await ctx.plugin(PersonalMemoryService, {

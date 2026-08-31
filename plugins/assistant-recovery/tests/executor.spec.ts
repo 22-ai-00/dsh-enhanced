@@ -316,16 +316,23 @@ describe('RecoveryExecutor', () => {
   })
 
   it('is bounded when a mutating port ignores abort and records ambiguity without later actions', async () => {
+    vi.useFakeTimers()
     const { store } = fixture()
     const port = new Port()
     port.executeOverride = async (_context, stepId) => {
       if (stepId === 't1-effects') return new Promise(() => {})
       return { status: 'succeeded', resultCode: `${stepId}.complete`, afterDigest: hash('d') }
     }
-    const startedAt = Date.now()
-    const result = await new RecoveryExecutor(store, port, 100).execute(input())
+    const operation = new RecoveryExecutor(store, port, 100).execute(input())
+    await vi.advanceTimersByTimeAsync(99)
+    let settled = false
+    void operation.then(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
 
-    expect(Date.now() - startedAt).toBeLessThan(1_000)
+    await vi.advanceTimersByTimeAsync(1)
+    const result = await operation
+
     expect(result).toMatchObject({ status: 'unknown', resultCode: 'action-timeout-ambiguous' })
     expect(result.steps.at(-1)).toMatchObject({
       stepId: 't1-effects', status: 'unknown', resultCode: 'action-timeout-ambiguous',

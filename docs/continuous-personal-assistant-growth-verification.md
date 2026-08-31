@@ -35,7 +35,7 @@
 9. 低打扰：健康周期不发消息；同一候选/evidence digest 不重复发卡；incident 在同一生命周期消息上收敛到 resolved。
 10. 发布门：manifest、lint、typecheck、全部 tests、build、每包 dry-run pack 和真实安装/重启故障注入全部通过。
 
-## 未关闭事项
+## 当时未关闭事项（历史快照）
 
 - P0：关闭 Evaluation 权威样本撤回与 Evolution 候选创建/审批结算之间的跨库竞态；普通插件不得自行声明可信 producer。
 - P0：让 analyst Agent automation 进入与 Host automation 等价的 durable incident 生命周期。
@@ -262,3 +262,77 @@ fixture 和相应 crash/recovery gates。
 - 本切片定向验证：Delivery `514/514`、Preference Learning `72/72`、根 personal-assistant E2E `8/8`；
   完整根 `pnpm check` 通过，覆盖 `192` 个根测试文件 / `2642` 项测试、全包测试、typecheck、build、
   zero-warning lint 与全部包 dry-run pack。
+
+## 2026-08-31 Stage 3 Memory 晋升与 Stage 4 本地发布纵切覆盖
+
+本节覆盖上方历史快照中“长期 Memory 晋升仍未接通”和“Stage 4 source/release 延期”的旧状态；历史内容与
+当时数字保留原样。以下结论来自当前 README、API、独立 P0/P1 复审和最终全仓门禁。
+
+### Stage 3：Memory promotion 已形成的可信链
+
+1. **固定候选与审批语义。** 只有达到多信号、独立来源阈值的 allowlisted
+   `memory.retention=long-term` T2 hypothesis 会原子创建 promotion 与 outbox。跨插件协议只传 content-free
+   evidence summary，并固定 renderer；Personal Memory 不接受调用方提供的自由文本、trust 或直接写权限。
+   promotion 在 owner approval 前保持 pending，只有 Memory record 已提交后才回传 `confirmed`。
+2. **稳定 namespace。** Delivery Memory namespace 的持久身份是 `principalRecordId + principalVersion`。
+   binding generation 只用于审批时 freshness fence，不进入记录 namespace：同 owner `/new` 后仍可检索已确认
+   Memory；owner A→B→A 会获得更高 principal version，旧代数据和迟到写入与新代隔离。
+3. **可恢复结果链。** request/submission/result/ACK 分别绑定 promotion generation 与 digest；提交失败进入
+   durable retry，未 ACK 的 terminal result 可在重启后重放，且 exact ACK 只完成对应 result version。
+   `rejected`、`expired`、`conflicted`、`stale-owner` 不创建 Memory record。
+4. **取消与补偿。** Preference 的 `forget`、owner rotation 或 supersede 会持久化 cancellation；Personal Memory
+   在同一写事务中先检查/写入 `(promotionId, promotionGeneration)` tombstone。双连接和冷重启证明
+   cancel-before-submit 永久阻断迟到 intent/proposal。若 record 已确认而 ACK 丢失，privacy cancellation 会按
+   record id/version/digest 做 CAS tombstone、删除检索 token 后才完成；`superseded` 不误删 confirmed Memory。
+   已 ACK 且脱敏的 `superseded` 仍可凭不可逆 upgrade binding 安全升级为后续 `forget` / owner rotation。
+5. **真实 Delivery 边界。** Memory 集成测试装载真实 Delivery、Policy、Memory 服务及真实 SQLite，验证真实
+   `/new` command 后同 lineage 的 read/search，以及 A→B→A 时旧 record 隔离与 pending promotion stale-owner
+   fence。测试中的 Agent/adapter 仍是本地 stub，因此不声称已经验证真实飞书卡片发送或人工点击链。
+
+### Stage 4：已证明的 local trusted vertical slice
+
+1. **Post-check authorization。** local checks 成功后保存 exact tree/patch digest，source plan 停在
+   `ready-for-human-review`；随后必须由 owner 另签 Ed25519 release authorization，绑定 plan、base commit、
+   checked bytes、scope 和完整 release policy。每个 phase 在准备 durable request 和真正执行外部副作用前均
+   重新验签；跨过授权有效期或任一绑定变化时 executor 零调用并 fail closed。
+2. **八阶段 durable CAS。** `pr / review / merge / build / sign / publish / registry-verify /
+   catalog-admission` 均先写 durable operation，再调用 adapter，最后以 signed receipt、request digest、plan
+   revision 与 release fence CAS apply。same phase/fence 只能重放同一 operation；不同 payload、并发 worker、
+   row/receipt tamper 与 crash/reopen 均有针对性测试。
+3. **Signed reconciliation。** publish timeout/不确定结果进入 `publish-ambiguous`；CLI 拒绝 unsigned observation，
+   独立 registry verifier 的签名 receipt 绑定 ambiguous publish receipt/evidence、exact artifact bytes/signature 和
+   registry reference。`exists-match` 继续、`absent` 提升 fence 后重试、`unknown` 保持 ambiguous、
+   `digest-conflict` fail closed。
+4. **Pinned fd 与 artifact fencing。** Linux release invoker、activation CLI 和 local adapter 从持续打开的可信 fd
+   经 `/proc/*/fd` 执行 adapter、DSH executor、Git、tar、bubblewrap、Node、pnpm 与 catalog helper；artifact
+   phases 继承 tarball/SBOM/provenance fd，activation 让下游从控制面持续持有的 artifact inode 读取。执行前后
+   核对 inode、size、时间戳和 digest，路径 swap 测试证明恶意替换 inode 不会执行或被安装。
+5. **Local-only 实体闭环。** E2E 使用真实 local bare Git、immutable PR ref、owner-private review、target-ref merge
+   CAS、两个独立 checkout、固定 bubblewrap/Node/pnpm/store 的断网 `install --offline --frozen-lockfile
+   --ignore-scripts`、目标包 build 和真实 `pnpm pack`。两轮 tgz bytes/packlist 一致后再生成 CycloneDX SBOM、
+   SLSA provenance、签名、immutable filesystem registry、独立下载复核，并通过 request-bound v2 attempt
+   journal、父目录 descriptor `flock` 与 `O_TMPFILE`/`renameat2(RENAME_EXCHANGE)` catalog CAS admission。
+   干净 profile 最终安装并 import 该 tgz。
+6. **发布不等于激活。** `release-complete` 是 source plan 的终态，重新开放 gap 但保留 exact admitted candidate
+   reservation。它不会自动创建 activation plan或修改 production profile；后续必须显式创建该 candidate 的
+   activation plan，并另经七阶段 Host attestation。
+
+### 本轮仍未证明
+
+- GitHub PR/review/branch-protection 与 npm publish/verify/dist-tag 的远程 adapters；当前 adapter 强制使用 local
+  bare Git 和 `file:` registry。
+- 远程 token 生命周期、权限、限流、网络超时及真实远端 ambiguous-publish reconciliation。
+- 真实 wall-clock long soak；现有 Host soak fixture/状态机证明协议与阈值，不构成长时间生产运行证据。
+- sandbox 内完整仓库 test workload；当前证明的是依赖安装、目标插件 build/pack 与干净 profile install/import。
+- source release 的自动激活、production profile 最终启用，以及真实人工 Host attestation。
+- 对持续恶意同 UID writer 的 OS 级隔离；生产 catalog commit broker 必须使用独立 UID，或让 worker 对
+  catalog 父目录无写权限。local reference 路径还依赖 Linux procfs、`O_TMPFILE`、`renameat2`、bubblewrap 和
+  由固定 `/usr/bin/python3` 安全解析出的 root-owned Python 3.8+，缺少任一能力都会 fail closed。
+
+### 本节验证状态
+
+- Stage 3 promotion 定向 tests：shared contract `11/11`、Personal Memory `90/90`、Preference Learning `84/84`。
+- Stage 4 定向 tests：Control Plane `150/150`；local release adapter E2E `3/3`。
+- 根目录 `pnpm check`：`198/198` 根测试文件、`2847/2847` 项测试；workspace validation、zero-warning
+  lint、全包 typecheck/build 与 `22` 个插件 + `2` 个共享包 dry-run pack 全部通过。
+- 本轮没有执行 GitHub/npm 远程发布、production activation 或 long soak。

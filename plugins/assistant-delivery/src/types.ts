@@ -1,5 +1,6 @@
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
 
 export interface ExternalPrincipalKey {
   channel: string
@@ -358,8 +359,22 @@ export interface DeliveryPreferencePrincipalAttestation {
   readonly principalLineage: Readonly<DeliveryOwnerLineage>
   readonly bindingId: string
   readonly bindingVersion: number
+  readonly bindingGeneration: number
   readonly sessionId: string
 }
+
+/** Host-only authority query used to mint an exact approval route for Preference promotion. */
+export interface OwnerApprovalForPreferenceInput {
+  readonly sourceId: string
+  readonly scope: Readonly<{ workspace: string; preset: string }>
+  readonly principalId: string
+  readonly principalLineage: Readonly<DeliveryOwnerLineage>
+  readonly ownerGeneration: number
+}
+
+export type OwnerApprovalForPreferenceResult =
+  | ApprovalDispatchRouteV2
+  | Readonly<{ kind: 'stale-owner' }>
 
 /** Structural Host contract consumed by Preference without a reverse package dependency. */
 export interface DeliveryPreferenceProducer {
@@ -371,6 +386,9 @@ export interface DeliveryPreferenceProducer {
   preferencePrincipalForAgent(
     agent: Agent,
   ): Readonly<DeliveryPreferencePrincipalAttestation> | undefined
+  prepareOwnerApprovalForPreference(
+    input: Readonly<OwnerApprovalForPreferenceInput>,
+  ): OwnerApprovalForPreferenceResult
 }
 
 export type AttachmentResourceType = 'audio' | 'file' | 'image' | 'sticker' | 'video'

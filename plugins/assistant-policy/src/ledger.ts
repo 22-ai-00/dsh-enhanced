@@ -10,6 +10,7 @@ export type PolicyLedgerErrorCode =
   | 'invalid-input'
   | 'invalid-path'
   | 'invalid-state'
+  | 'legacy-unverifiable'
   | 'not-found'
   | 'schema-too-new'
   | 'unauthorized'
@@ -69,7 +70,7 @@ export interface ApprovalProposalInput {
   diff: string
   summary: string
   ttlMs: number
-  dispatch?: Readonly<ApprovalDispatchRoute>
+  dispatch?: Readonly<ApprovalDispatchRouteV2>
 }
 
 /**
@@ -86,15 +87,31 @@ export interface ApprovalProposalRecoveryInput {
   diff: string
   summary: string
   notAfter: number
-  dispatch?: Readonly<ApprovalDispatchRoute>
+  dispatch?: Readonly<ApprovalDispatchRouteV2>
 }
 
-export interface ApprovalDispatchRoute {
+export interface ApprovalDispatchRouteV1 {
+  /** Omitted by pre-v2 callers and persisted explicitly as route version 1. */
+  routeVersion?: 1
   sourceId: string
   bindingId: string
   workspace: string
   principal: string
 }
+
+export interface ApprovalDispatchRouteV2 {
+  routeVersion: 2
+  sourceId: string
+  bindingId: string
+  bindingVersion: number
+  bindingGeneration: number
+  workspace: string
+  principal: string
+  principalRecordId: string
+  principalVersion: number
+}
+
+export type ApprovalDispatchRoute = ApprovalDispatchRouteV1 | ApprovalDispatchRouteV2
 
 export type ApprovalProposalStatus = 'approved' | 'expired' | 'pending' | 'rejected'
 
@@ -160,7 +177,7 @@ export interface ApprovalProposalLookupInput {
   resource: { kind: string; id: string }
 }
 
-export type ApprovalDispatchState = 'enqueued' | 'pending'
+export type ApprovalDispatchState = 'enqueued' | 'pending' | 'quarantined'
 
 /** Stable high-water mark for a pending-dispatch scan. */
 export interface ApprovalDispatchCursor {
@@ -172,12 +189,8 @@ export interface ApprovalDispatchCursor {
  * Immutable, policy-derived payload and route for one durable approval delivery.
  * Callers can choose when to enqueue it, but cannot substitute display content.
  */
-export interface ApprovalDispatchSnapshot {
+interface ApprovalDispatchSnapshotBase {
   proposalId: string
-  sourceId: string
-  bindingId: string
-  workspace: string
-  principal: string
   requester: string
   action: string
   resource: { kind: string; id: string }
@@ -192,6 +205,11 @@ export interface ApprovalDispatchSnapshot {
   enqueuedAt: number | undefined
   version: number
 }
+
+export type ApprovalDispatchSnapshot = Readonly<ApprovalDispatchSnapshotBase & (
+  | (ApprovalDispatchRouteV1 & { routeVersion: 1 })
+  | ApprovalDispatchRouteV2
+)>
 
 export interface ApprovalDispatchResult {
   proposalId: string
@@ -261,12 +279,20 @@ interface ProposalRow {
   version: number
 }
 
-interface DispatchRow {
-  proposal_id: string
+interface DispatchRouteRow {
+  route_version: number
   source_id: string
   binding_id: string
+  binding_version: number | null
+  binding_generation: number | null
   workspace: string
   dispatch_principal: string
+  principal_record_id: string | null
+  principal_version: number | null
+}
+
+interface DispatchRow extends DispatchRouteRow {
+  proposal_id: string
   state: ApprovalDispatchState
   payload_hash: string
   dispatch_created_at: number
@@ -291,6 +317,7 @@ const textLimits = Object.freeze({
   action: 256,
   resourceId: 4_096,
   workspace: 4_096,
+  principalRecordId: 500,
   summary: APPROVAL_DISPLAY_BUDGET.maxSummaryBytes,
   diff: APPROVAL_DISPLAY_BUDGET.maxDiffBytes,
   reason: 2_048,
@@ -312,6 +339,74 @@ function requireBoundedText(
   }
 }
 
+function requirePositiveSafeInteger(value: number, field: string): void {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new PolicyLedgerError('invalid-input', `${field} must be a positive safe integer`)
+  }
+}
+
+type StoredApprovalDispatchRoute =
+  | (ApprovalDispatchRouteV1 & { routeVersion: 1 })
+  | ApprovalDispatchRouteV2
+
+function approvalDispatchRouteVersion(route: ApprovalDispatchRoute): 1 | 2 {
+  return route.routeVersion ?? 1
+}
+
+function storedApprovalDispatchRoute(row: DispatchRouteRow): StoredApprovalDispatchRoute {
+  const common = {
+    sourceId: row.source_id,
+    bindingId: row.binding_id,
+    workspace: row.workspace,
+    principal: row.dispatch_principal,
+  }
+  if (row.route_version === 1) {
+    if (row.binding_version !== null || row.binding_generation !== null
+      || row.principal_record_id !== null || row.principal_version !== null) {
+      throw new PolicyLedgerError('invalid-state', 'legacy approval dispatch contains v2 authority fields')
+    }
+    return Object.freeze({ routeVersion: 1 as const, ...common })
+  }
+  const bindingVersion = row.binding_version
+  const bindingGeneration = row.binding_generation
+  const principalRecordId = row.principal_record_id
+  const principalVersion = row.principal_version
+  if (row.route_version !== 2
+    || !Number.isSafeInteger(bindingVersion) || bindingVersion === null || bindingVersion <= 0
+    || !Number.isSafeInteger(bindingGeneration) || bindingGeneration === null || bindingGeneration <= 0
+    || typeof principalRecordId !== 'string'
+    || principalRecordId.trim() === ''
+    || Buffer.byteLength(principalRecordId, 'utf8') > textLimits.principalRecordId
+    || !Number.isSafeInteger(principalVersion) || principalVersion === null || principalVersion <= 0) {
+    throw new PolicyLedgerError('invalid-state', 'approval dispatch v2 authority fields are invalid')
+  }
+  return Object.freeze({
+    routeVersion: 2 as const,
+    ...common,
+    bindingVersion,
+    bindingGeneration,
+    principalRecordId,
+    principalVersion,
+  })
+}
+
+function sameApprovalDispatchRoute(
+  stored: StoredApprovalDispatchRoute,
+  input: ApprovalDispatchRoute,
+): boolean {
+  const routeVersion = approvalDispatchRouteVersion(input)
+  if (stored.routeVersion !== routeVersion
+    || stored.sourceId !== input.sourceId
+    || stored.bindingId !== input.bindingId
+    || stored.workspace !== input.workspace
+    || stored.principal !== input.principal) return false
+  return routeVersion === 1 || (stored.routeVersion === 2 && input.routeVersion === 2
+    && stored.bindingVersion === input.bindingVersion
+    && stored.bindingGeneration === input.bindingGeneration
+    && stored.principalRecordId === input.principalRecordId
+    && stored.principalVersion === input.principalVersion)
+}
+
 function dispatchPayloadHash(input: {
   proposalId: string
   route: ApprovalDispatchRoute
@@ -325,22 +420,44 @@ function dispatchPayloadHash(input: {
   expiresAt: number
   proposalVersion: number
 }): string {
-  const canonicalPayload = JSON.stringify([
-    input.proposalId,
-    input.route.sourceId,
-    input.route.bindingId,
-    input.route.workspace,
-    input.route.principal,
-    input.requester,
-    input.action,
-    input.resourceKind,
-    input.resourceId,
-    input.summary,
-    input.diff,
-    input.diffHash,
-    input.expiresAt,
-    input.proposalVersion,
-  ])
+  const canonicalPayload = JSON.stringify(input.route.routeVersion === 2
+    ? [
+        'approval-dispatch-payload-v2',
+        input.proposalId,
+        input.route.sourceId,
+        input.route.bindingId,
+        input.route.bindingVersion,
+        input.route.bindingGeneration,
+        input.route.workspace,
+        input.route.principal,
+        input.route.principalRecordId,
+        input.route.principalVersion,
+        input.requester,
+        input.action,
+        input.resourceKind,
+        input.resourceId,
+        input.summary,
+        input.diff,
+        input.diffHash,
+        input.expiresAt,
+        input.proposalVersion,
+      ]
+    : [
+        input.proposalId,
+        input.route.sourceId,
+        input.route.bindingId,
+        input.route.workspace,
+        input.route.principal,
+        input.requester,
+        input.action,
+        input.resourceKind,
+        input.resourceId,
+        input.summary,
+        input.diff,
+        input.diffHash,
+        input.expiresAt,
+        input.proposalVersion,
+      ])
   return createHash('sha256').update(canonicalPayload).digest('hex')
 }
 
@@ -350,23 +467,45 @@ function dispatchPayloadHash(input: {
  */
 function approvalRecoveryIntentHash(input: ApprovalProposalRecoveryInput): string {
   const dispatch = input.dispatch
-  const canonicalIntent = JSON.stringify([
-    'approval-recovery-intent-v1',
-    input.idempotencyKey,
-    input.notAfter,
-    input.requester,
-    input.principal,
-    input.action,
-    input.resource.kind,
-    input.resource.id,
-    input.diff,
-    input.summary,
-    dispatch === undefined ? 0 : 1,
-    dispatch?.sourceId ?? null,
-    dispatch?.bindingId ?? null,
-    dispatch?.workspace ?? null,
-    dispatch?.principal ?? null,
-  ])
+  const canonicalIntent = JSON.stringify(dispatch?.routeVersion === 2
+    ? [
+        'approval-recovery-intent-v2',
+        input.idempotencyKey,
+        input.notAfter,
+        input.requester,
+        input.principal,
+        input.action,
+        input.resource.kind,
+        input.resource.id,
+        input.diff,
+        input.summary,
+        1,
+        dispatch.sourceId,
+        dispatch.bindingId,
+        dispatch.bindingVersion,
+        dispatch.bindingGeneration,
+        dispatch.workspace,
+        dispatch.principal,
+        dispatch.principalRecordId,
+        dispatch.principalVersion,
+      ]
+    : [
+        'approval-recovery-intent-v1',
+        input.idempotencyKey,
+        input.notAfter,
+        input.requester,
+        input.principal,
+        input.action,
+        input.resource.kind,
+        input.resource.id,
+        input.diff,
+        input.summary,
+        dispatch === undefined ? 0 : 1,
+        dispatch?.sourceId ?? null,
+        dispatch?.bindingId ?? null,
+        dispatch?.workspace ?? null,
+        dispatch?.principal ?? null,
+      ])
   return createHash('sha256').update(canonicalIntent).digest('hex')
 }
 
@@ -642,10 +781,32 @@ export class PolicyLedger {
     requireBoundedText(input.summary, 'summary', textLimits.summary)
     requireBoundedText(input.diff, 'diff', textLimits.diff, { allowEmpty: true })
     if (input.dispatch !== undefined) {
+      const routeVersion = (input.dispatch as { routeVersion?: unknown }).routeVersion
+      if (routeVersion !== 2) {
+        throw new PolicyLedgerError('invalid-input', 'new approval dispatch routes must use routeVersion 2')
+      }
       requireBoundedText(input.dispatch.sourceId, 'dispatch.sourceId', textLimits.id)
       requireBoundedText(input.dispatch.bindingId, 'dispatch.bindingId', textLimits.id)
       requireBoundedText(input.dispatch.workspace, 'dispatch.workspace', textLimits.workspace)
       requireBoundedText(input.dispatch.principal, 'dispatch.principal', textLimits.id)
+      const route = input.dispatch as ApprovalDispatchRouteV2
+      requirePositiveSafeInteger(route.bindingVersion, 'dispatch.bindingVersion')
+      requirePositiveSafeInteger(route.bindingGeneration, 'dispatch.bindingGeneration')
+      if (typeof route.principalRecordId !== 'string') {
+        throw new PolicyLedgerError('invalid-input', 'dispatch.principalRecordId must be text')
+      }
+      requireBoundedText(
+        route.principalRecordId,
+        'dispatch.principalRecordId',
+        textLimits.principalRecordId,
+      )
+      if (route.principalRecordId.normalize('NFC').trim() !== route.principalRecordId) {
+        throw new PolicyLedgerError(
+          'invalid-input',
+          'dispatch.principalRecordId must be normalized and trimmed',
+        )
+      }
+      requirePositiveSafeInteger(route.principalVersion, 'dispatch.principalVersion')
       if (!isAbsolute(input.dispatch.workspace)) {
         throw new PolicyLedgerError('invalid-path', 'dispatch.workspace must be absolute')
       }
@@ -672,24 +833,21 @@ export class PolicyLedger {
     expiryMatches: boolean,
   ): void {
     const existingDispatch = this.#database.prepare(`
-      SELECT source_id, binding_id, workspace, principal, state, payload_hash, proposal_version
+      SELECT route_version, source_id, binding_id, binding_version, binding_generation,
+             workspace, principal AS dispatch_principal, principal_record_id, principal_version,
+             state, payload_hash, proposal_version
       FROM approval_dispatches WHERE proposal_id = ?
-    `).get(existing.id) as {
-      source_id: string
-      binding_id: string
-      workspace: string
-      principal: string
+    `).get(existing.id) as (DispatchRouteRow & {
       state: ApprovalDispatchState
       payload_hash: string
       proposal_version: number
-    } | undefined
+    }) | undefined
+    const storedRoute = existingDispatch === undefined
+      ? undefined
+      : storedApprovalDispatchRoute(existingDispatch)
     const sameDispatch = input.dispatch === undefined
       ? existingDispatch === undefined
-      : existingDispatch !== undefined
-        && existingDispatch.source_id === input.dispatch.sourceId
-        && existingDispatch.binding_id === input.dispatch.bindingId
-        && existingDispatch.workspace === input.dispatch.workspace
-        && existingDispatch.principal === input.dispatch.principal
+      : storedRoute !== undefined && sameApprovalDispatchRoute(storedRoute, input.dispatch)
     const sameDiff = input.dispatch === undefined
       ? existingDispatch === undefined && existing.diff_hash === diffHash
       : existingDispatch !== undefined
@@ -764,15 +922,21 @@ export class PolicyLedger {
       })
       this.#database.prepare(`
         INSERT INTO approval_dispatches(
-          proposal_id, source_id, binding_id, workspace, principal,
+          proposal_id, route_version, source_id, binding_id, binding_version,
+          binding_generation, workspace, principal, principal_record_id, principal_version,
           state, payload_hash, created_at, proposal_version
-        ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, 1)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, 1)
       `).run(
         id,
+        approvalDispatchRouteVersion(input.dispatch),
         input.dispatch.sourceId,
         input.dispatch.bindingId,
+        input.dispatch.routeVersion === 2 ? input.dispatch.bindingVersion : null,
+        input.dispatch.routeVersion === 2 ? input.dispatch.bindingGeneration : null,
         input.dispatch.workspace,
         input.dispatch.principal,
+        input.dispatch.routeVersion === 2 ? input.dispatch.principalRecordId : null,
+        input.dispatch.routeVersion === 2 ? input.dispatch.principalVersion : null,
         payloadHash,
         createdAt,
       )
@@ -1024,8 +1188,10 @@ export class PolicyLedger {
     const cursorCreatedAt = after?.createdAt ?? null
     const cursorProposalId = after?.proposalId ?? ''
     const rows = this.#database.prepare(`
-      SELECT d.proposal_id, d.source_id, d.binding_id, d.workspace,
-             d.principal AS dispatch_principal, d.state, d.payload_hash,
+      SELECT d.proposal_id, d.route_version, d.source_id, d.binding_id,
+             d.binding_version, d.binding_generation, d.workspace,
+             d.principal AS dispatch_principal, d.principal_record_id,
+             d.principal_version, d.state, d.payload_hash,
              d.created_at AS dispatch_created_at, d.enqueued_at,
              d.version AS dispatch_version, d.proposal_version, p.requester,
              p.principal AS proposal_principal, p.action, p.resource_kind,
@@ -1033,7 +1199,8 @@ export class PolicyLedger {
              p.expires_at, p.version AS current_proposal_version
       FROM approval_dispatches d
       JOIN approval_proposals p ON p.id = d.proposal_id
-      WHERE d.state = 'pending' AND p.status = 'pending' AND p.expires_at > ?
+      WHERE d.state = 'pending' AND d.route_version = 2
+        AND p.status = 'pending' AND p.expires_at > ?
         AND (? IS NULL OR d.created_at > ? OR (d.created_at = ? AND d.proposal_id > ?))
       ORDER BY d.created_at ASC, d.proposal_id ASC
       LIMIT ?
@@ -1051,6 +1218,13 @@ export class PolicyLedger {
     }
     return this.#transaction(() => {
       const dispatch = this.#dispatch(proposalId)
+      const route = storedApprovalDispatchRoute(dispatch)
+      if (route.routeVersion !== 2) {
+        throw new PolicyLedgerError(
+          'legacy-unverifiable',
+          'legacy approval dispatch cannot be enqueued or replayed',
+        )
+      }
       if (dispatch.state === 'enqueued') {
         return this.#dispatchResult(dispatch, true)
       }
@@ -1124,8 +1298,10 @@ export class PolicyLedger {
 
   #dispatch(proposalId: string): DispatchRow {
     const dispatch = this.#database.prepare(`
-      SELECT d.proposal_id, d.source_id, d.binding_id, d.workspace,
-             d.principal AS dispatch_principal, d.state, d.payload_hash,
+      SELECT d.proposal_id, d.route_version, d.source_id, d.binding_id,
+             d.binding_version, d.binding_generation, d.workspace,
+             d.principal AS dispatch_principal, d.principal_record_id,
+             d.principal_version, d.state, d.payload_hash,
              d.created_at AS dispatch_created_at, d.enqueued_at,
              d.version AS dispatch_version, d.proposal_version, p.requester,
              p.principal AS proposal_principal, p.action, p.resource_kind,
@@ -1151,14 +1327,10 @@ export class PolicyLedger {
     if (row.current_proposal_version !== row.proposal_version) {
       throw new PolicyLedgerError('invalid-state', 'approval dispatch proposal version changed')
     }
+    const route = storedApprovalDispatchRoute(row)
     const expectedPayloadHash = dispatchPayloadHash({
       proposalId: row.proposal_id,
-      route: {
-        sourceId: row.source_id,
-        bindingId: row.binding_id,
-        workspace: row.workspace,
-        principal: row.dispatch_principal,
-      },
+      route,
       requester: row.requester,
       action: row.action,
       resourceKind: row.resource_kind,
@@ -1174,9 +1346,7 @@ export class PolicyLedger {
     }
     return Object.freeze({
       proposalId: row.proposal_id,
-      sourceId: row.source_id,
-      bindingId: row.binding_id,
-      workspace: row.workspace,
+      ...route,
       principal: row.proposal_principal,
       requester: row.requester,
       action: row.action,

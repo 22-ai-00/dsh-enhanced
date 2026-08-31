@@ -993,6 +993,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.1
+      '@dsh-enhanced/assistant-growth-contract':
+        specifier: workspace:*
+        version: link:../../packages/assistant-growth-contract
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
@@ -1126,6 +1129,9 @@ importers:
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
+      '@dsh-enhanced/personal-memory':
+        specifier: workspace:*
+        version: link:../personal-memory
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0

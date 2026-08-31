@@ -118,8 +118,9 @@ async function harness(options: {
       throw new Error('assistant-delivery: Agent session has no authenticated active owner approval route')
     }
     const derived = {
-      sourceId: input.sourceId, bindingId: route.bindingId,
-      workspace: route.workspace, principal: route.principal,
+      routeVersion: 2 as const, sourceId: input.sourceId, bindingId: route.bindingId,
+      bindingVersion: 3, bindingGeneration: 2, workspace: route.workspace,
+      principal: route.principal, principalRecordId: 'principal-owner', principalVersion: 4,
     }
     derivedApprovalRoutes.push(derived)
     return derived
@@ -311,8 +312,9 @@ describe('fresh rc.8 automation Agent runner', () => {
     expect(result.outcome).toBe('succeeded')
     expect(fixture.bindAgentApprovalRoute).toHaveBeenCalledWith(expect.anything(), { bindingId: 'binding-owner' })
     expect(fixture.derivedApprovalRoutes).toEqual([{
-      sourceId: 'dsh-enhanced-assistant-evolution', bindingId: 'binding-owner',
-      workspace: process.cwd(), principal: 'lark/main/tenant/owner',
+      routeVersion: 2, sourceId: 'dsh-enhanced-assistant-evolution', bindingId: 'binding-owner',
+      bindingVersion: 3, bindingGeneration: 2, workspace: process.cwd(),
+      principal: 'lark/main/tenant/owner', principalRecordId: 'principal-owner', principalVersion: 4,
     }])
     expect(fixture.unbindApprovalRoute).toHaveBeenCalledOnce()
     await fixture.ctx.fiber.restart()

@@ -17,6 +17,7 @@ import type {
 } from '@dsh-enhanced/assistant-delivery'
 import type {
   ApprovalDispatchRoute,
+  ApprovalDispatchRouteV2,
   ApprovalProposalRecoveryInput,
   ApprovalProposalResult,
   ApprovalProposalSnapshot,
@@ -37,6 +38,7 @@ import {
 import { registerEvolutionTools } from './tools.js'
 import type {
   EvolutionCreationIntent,
+  EvolutionCreationInput,
   EvolutionMutation,
   EvolutionProposalMutation,
   QualityEvidenceKind,
@@ -865,7 +867,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
     const ttlMs = this.config.defaultProposalTtlMs
     const requester = `automation:${SUPERVISED_GROWTH_ANALYST_AUTOMATION_ID}`
     const reviewPresentation = evolutionMutationReview(mutation)
-    const creationIntent: EvolutionCreationIntent = {
+    const creationIntent: EvolutionCreationInput = {
       idempotencyKey,
       requester,
       principal: route.principal,
@@ -1009,7 +1011,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
     const stable = evolutionDigest(['owner-undo-v1', scopeKey, route.principal, operationId])
     const idempotencyKey = `evolution-owner-undo:${stable}`
     const review = evolutionMutationReview(mutation)
-    const creationIntent: EvolutionCreationIntent = {
+    const creationIntent: EvolutionCreationInput = {
       idempotencyKey,
       requester,
       principal: route.principal,
@@ -1155,7 +1157,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
     const idempotencyKey = `evolution:${stable}`
     const route = this.approvalRoute(agent, input.principal)
     const review = evolutionMutationReview(mutation)
-    const creationIntent: EvolutionCreationIntent = {
+    const creationIntent: EvolutionCreationInput = {
       idempotencyKey,
       requester,
       principal: route.principal,
@@ -1286,7 +1288,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
 
   private submitLocalProposal(local: StoredProposal, replayed: boolean): EvolutionProposalResult {
     const intent = local.creationIntent
-    if (intent === undefined) {
+    if (intent === undefined || (intent.dispatch !== undefined && intent.dispatch.routeVersion !== 2)) {
       const conflict = this.store.settleProposal({
         proposalId: local.proposalId,
         securityConflict: true,
@@ -1302,7 +1304,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
       diff: intent.diff,
       summary: intent.summary,
       notAfter: local.expiresAt,
-      ...(intent.dispatch === undefined ? {} : { dispatch: intent.dispatch }),
+      ...(intent.dispatch?.routeVersion === 2 ? { dispatch: intent.dispatch } : {}),
     }
     const recovered = this.policy.recoverOrCreateProposal(recoveryInput)
     if (recovered.kind === 'abandoned') {
@@ -1415,11 +1417,12 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
   private approvalRoute(
     agent: Agent | undefined,
     explicitPrincipal: string | undefined,
-  ): { principal: string; dispatch?: ApprovalDispatchRoute } {
+  ): { principal: string; dispatch?: ApprovalDispatchRouteV2 } {
     if (this.delivery !== undefined) {
       const dispatch = this.delivery.prepareAgentApproval(agent, { sourceId: evolutionApprovalSource })
       const workspace = agent?.session.header.cwd
-      if (dispatch.sourceId !== evolutionApprovalSource || dispatch.workspace !== workspace
+      if (dispatch.routeVersion !== 2
+        || dispatch.sourceId !== evolutionApprovalSource || dispatch.workspace !== workspace
         || dispatch.principal.trim() === '') {
         throw new AssistantEvolutionError('invalid-input', 'authenticated approval route does not match the Agent')
       }

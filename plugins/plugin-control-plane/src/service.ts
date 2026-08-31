@@ -44,7 +44,17 @@ export class PluginControlPlaneService extends Service {
     ctx.inject(['tools'], toolsCtx => registerPluginControlTools(toolsCtx, this))
   }
 
+  private async boundTrust(): Promise<Awaited<ReturnType<typeof loadTrustConfig>>> {
+    const trust = await loadTrustConfig(this.config.trustPath)
+    if (resolve(join(this.config.statePath, 'control.sqlite')) !== trust.ledger.path
+      || resolve(this.config.catalogPath) !== trust.catalog.path) {
+      throw new Error('plugin-control-plane: configured ledger/catalog do not match the owner trust binding')
+    }
+    return trust
+  }
+
   async discover(capability: string): Promise<CatalogEntry[]> {
+    await this.boundTrust()
     const loaded = await loadCatalogWithMetadata(this.config.catalogPath)
     return discover(loaded.catalog, capability)
   }
@@ -59,8 +69,7 @@ export class PluginControlPlaneService extends Service {
     const matches = discover(loaded.catalog, gap.capability)
     const candidate = matches.find(item => item.id === candidateId)
     if (candidate === undefined) throw new Error('plugin-control-plane: candidate does not match the exact open capability gap')
-    const trust = await loadTrustConfig(this.config.trustPath)
-    if (join(this.config.statePath, 'control.sqlite') !== trust.ledger.path) throw new Error('plugin-control-plane: configured ledger does not match the owner trust binding')
+    const trust = await this.boundTrust()
     if (profile.normalize('NFC').trim() !== profile) throw new Error('plugin-control-plane: profile must already be canonical text')
     const target = await canonicalTarget(trust.dshHome, profile)
     return this.store.createPlan({ candidate, catalog: loaded, matchedCapabilities: candidate.capabilities,

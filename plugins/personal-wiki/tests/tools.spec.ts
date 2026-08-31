@@ -57,10 +57,15 @@ async function harness() {
   })
   ctx.provide('assistantDelivery', {
     prepareAgentApproval: () => ({
+      routeVersion: 2 as const,
       sourceId: 'dsh-enhanced-personal-wiki',
       bindingId: 'binding-owner-dm',
+      bindingVersion: 3,
+      bindingGeneration: 2,
       workspace: '/work/alpha',
       principal: 'lark/main/tenant/owner',
+      principalRecordId: 'principal-owner',
+      principalVersion: 4,
     }),
   })
   await ctx.plugin(PersonalWikiService, {

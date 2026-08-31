@@ -1,4 +1,4 @@
-import type { CatalogEntry } from './catalog.js'
+import type { CatalogEntry, CatalogPackage } from './catalog.js'
 
 export type PlanStatus =
   | 'pending-approval'
@@ -114,7 +114,7 @@ export interface PluginActivationPlan {
     catalogProvenance: 'owner-provided-integrity-pinned'
     matchedCapabilities: readonly string[]
     authorities: readonly string[]
-    packages: readonly { package: string; version: string; integrity: string }[]
+    packages: readonly CatalogPackage[]
   }
   installationId: string
   ledger: { id: string; path: string }
@@ -170,6 +170,8 @@ export interface PluginSourcePlan {
   generatorDigest: string
   scope: readonly string[]
   approval?: VerifiedApprovalReceipt
+  sourceCheck?: SourceCheckEvidence
+  releaseAuthorization?: VerifiedSourceReleaseAuthorization
   release?: {
     id: string
     fence: number
@@ -177,6 +179,61 @@ export interface PluginSourcePlan {
     failureCode?: string
     updatedAt: number
   }
+}
+
+/** Exact source bytes that completed the local post-generation check gate. */
+export interface SourceCheckEvidence {
+  treeDigest: string
+  patchDigest: string
+  checkedAt: number
+}
+
+export interface SourceReleasePolicy {
+  targetBranch: string
+  candidateId: string
+  packageName: string
+  packageVersion: string
+  packagePath: string
+  dshBaseline: string
+  capabilities: readonly string[]
+  authorities: readonly string[]
+  requires: readonly { package: string; version: string; integrity: string }[]
+  registryId: string
+  registryLocator: string
+  registryReference: string
+  catalogId: string
+  catalogPath: string
+  minimumReproducibleBuilds: number
+}
+
+/**
+ * A fresh owner decision made after local checks. It deliberately cannot be
+ * substituted with the approval that authorized source generation.
+ */
+export interface SourceReleaseAuthorization {
+  schemaVersion: 1
+  kind: 'dsh-source-release-authorization'
+  authorizationId: string
+  authority: string
+  keyId: string
+  planId: string
+  planDigest: string
+  baseCommit: string
+  checkedTreeDigest: string
+  checkedPatchDigest: string
+  scope: readonly string[]
+  releasePolicy: SourceReleasePolicy
+  authorizedAt: number
+  expiresAt: number
+  signature: string
+}
+
+export interface VerifiedSourceReleaseAuthorization extends SourceReleaseAuthorization {
+  signatureDigest: string
+}
+
+export interface SourceReleaseAuthorizationAuthority {
+  verify(authorization: SourceReleaseAuthorization, plan: PluginSourcePlan): Promise<VerifiedSourceReleaseAuthorization>
 }
 
 export interface SourceReleaseAdapterIdentity {
@@ -190,6 +247,9 @@ export interface SourceReleaseAdapterIdentity {
 }
 
 export interface SourceReleaseArtifact {
+  candidateId: string
+  sourceName: string
+  packagePath: string
   packageName: string
   packageVersion: string
   tarballPath: string
@@ -211,42 +271,51 @@ interface SourceReleaseRequestBase {
   schemaVersion: 1
   kind: 'dsh-source-release-request'
   operationId: string
+  attempt: number
   requestedAt: number
   receiptTtlMs: number
   installationId: string
   ledger: { id: string; path: string }
   plan: { id: string; digest: string; revision: number }
   release: { id: string; fence: number }
+  authorization: VerifiedSourceReleaseAuthorization
   adapter: SourceReleaseAdapterIdentity
   registry: { id: string; locator: string }
   catalog: { id: string; path: string }
 }
 
 export type SourceReleaseRequest = SourceReleaseRequestBase & (
-  | { phase: 'pr'; input: { repository: string; worktree: string; baseCommit: string; name: string; scope: readonly string[] } }
+  | { phase: 'pr'; input: { repository: string; worktree: string; baseCommit: string; name: string; scope: readonly string[];
+    expectedTreeDigest: string; expectedPatchDigest: string } }
   | { phase: 'review'; input: { prId: string; headCommit: string; baseCommit: string; prEvidenceDigest: string } }
-  | { phase: 'merge'; input: { prId: string; headCommit: string; reviewId: string; reviewEvidenceDigest: string } }
-  | { phase: 'build'; input: { repository: string; mergeCommit: string; mergeEvidenceDigest: string; name: string } }
+  | { phase: 'merge'; input: { prId: string; headCommit: string; reviewId: string; reviewEvidenceDigest: string; targetBranch: string } }
+  | { phase: 'build'; input: { repository: string; mergeCommit: string; mergeEvidenceDigest: string; name: string;
+    expectedCandidateId: string; expectedPackageName: string; expectedPackageVersion: string; expectedPackagePath: string;
+    expectedDshBaseline: string; expectedCapabilities: readonly string[]; expectedAuthorities: readonly string[];
+    expectedRequires: readonly { package: string; version: string; integrity: string }[] } }
   | { phase: 'sign'; input: { artifact: SourceReleaseArtifact; buildEvidenceDigest: string } }
   | { phase: 'publish'; input: { artifact: SourceReleaseArtifact; artifactStatementDigest: string; artifactSignature: string; signEvidenceDigest: string } }
   | { phase: 'registry-verify'; input: { artifact: SourceReleaseArtifact; artifactStatementDigest: string; artifactSignature: string;
     registryReference: string; publishEvidenceDigest: string } }
   | { phase: 'catalog-admission'; input: { artifact: SourceReleaseArtifact; artifactStatementDigest: string; artifactSignature: string;
-    registryReference: string; verificationEvidenceDigest: string; candidate: CatalogEntry } }
+    registryReference: string; registryVerificationRequest: Extract<SourceReleaseRequest, { phase: 'registry-verify' }>;
+    registryVerificationReceipt: SourceReleaseReceipt; verificationEvidenceDigest: string; expectedBeforeCatalogDigest: string;
+    expectedAfterCatalogDigest: string; candidate: CatalogEntry } }
 )
 
 export type SourceReleaseSuccessEvidence =
-  | { kind: 'pr'; prId: string; baseCommit: string; headCommit: string; repositoryDigest: string }
-  | { kind: 'review'; prId: string; headCommit: string; reviewId: string; decision: 'approved'; reviewerPrincipalDigest: string }
-  | { kind: 'merge'; prId: string; reviewedHeadCommit: string; mergeCommit: string; targetBranch: string }
-  | ({ kind: 'build'; isolated: true; reproducibleBuilds: number; firstBuildSha256: string; secondBuildSha256: string } & SourceReleaseArtifact)
-  | { kind: 'sign'; artifactStatementDigest: string; artifactSignature: string; artifactSignatureDigest: string }
+  | { kind: 'pr'; prId: string; baseCommit: string; headCommit: string; treeDigest: string; patchDigest: string; repositoryDigest: string }
+  | { kind: 'review'; prId: string; headCommit: string; reviewId: string; decision: 'approved'; reviewerPrincipalDigest: string; prEvidenceDigest: string }
+  | { kind: 'merge'; prId: string; reviewedHeadCommit: string; reviewId: string; reviewEvidenceDigest: string; mergeCommit: string; targetBranch: string }
+  | ({ kind: 'build'; isolated: true; reproducibleBuilds: number; firstBuildSha256: string; secondBuildSha256: string; mergeEvidenceDigest: string } & SourceReleaseArtifact)
+  | { kind: 'sign'; artifactStatementDigest: string; artifactSignature: string; artifactSignatureDigest: string; buildEvidenceDigest: string }
   | { kind: 'publish'; registryId: string; registryReference: string; packageName: string; packageVersion: string;
-    tarballSha256: string; tarballIntegrity: string; artifactStatementDigest: string; artifactSignatureDigest: string; immutable: true }
+    tarballSha256: string; tarballIntegrity: string; artifactStatementDigest: string; artifactSignatureDigest: string; signEvidenceDigest: string; immutable: true }
   | { kind: 'registry-verify'; registryId: string; registryReference: string; independentlyDownloaded: true;
-    downloadedBytes: number; downloadedSha256: string; downloadedIntegrity: string; artifactStatementDigest: string; artifactSignatureDigest: string }
+    downloadedBytes: number; downloadedSha256: string; downloadedIntegrity: string; artifactStatementDigest: string;
+    artifactSignatureDigest: string; publishEvidenceDigest: string }
   | { kind: 'catalog-admission'; admissionId: string; catalogId: string; beforeCatalogDigest: string; afterCatalogDigest: string;
-    verificationEvidenceDigest: string; candidate: CatalogEntry }
+    registryReference: string; artifactStatementDigest: string; artifactSignatureDigest: string; verificationEvidenceDigest: string; candidate: CatalogEntry }
 
 export interface SourceReleaseFailureEvidence {
   kind: 'failure'
@@ -263,6 +332,76 @@ export interface SourceReleasePublishAmbiguityEvidence {
   packageVersion: string
   tarballSha256: string
   detailDigest: string
+}
+
+export interface SourcePublishReconciliationRequest {
+  schemaVersion: 1
+  kind: 'dsh-source-publish-reconciliation-request'
+  operationId: string
+  attempt: number
+  requestedAt: number
+  receiptTtlMs: number
+  installationId: string
+  ledger: { id: string; path: string }
+  plan: { id: string; digest: string; revision: number }
+  release: { id: string; fence: number }
+  authorization: VerifiedSourceReleaseAuthorization
+  adapter: SourceReleaseAdapterIdentity
+  registry: { id: string; locator: string }
+  ambiguousPublish: { operationId: string; receiptId: string; receiptDigest: string; evidenceDigest: string }
+  artifact: { packageName: string; packageVersion: string; tarballSha256: string; tarballIntegrity: string }
+  expectedArtifactStatementDigest: string
+  expectedArtifactSignatureDigest: string
+  expectedRegistryReference: string
+}
+
+export interface SourcePublishReconciliationEvidence {
+  kind: 'publish-reconciliation'
+  outcome: 'exists-match' | 'absent' | 'unknown' | 'digest-conflict'
+  registryId: string
+  registryReference: string | null
+  packageName: string
+  packageVersion: string
+  expectedTarballSha256: string
+  expectedTarballIntegrity: string
+  expectedArtifactStatementDigest: string
+  expectedArtifactSignatureDigest: string
+  observedTarballSha256: string | null
+  observedTarballIntegrity: string | null
+  observedArtifactStatementDigest: string | null
+  observedArtifactSignatureDigest: string | null
+  ambiguousPublishOperationId: string
+  ambiguousPublishReceiptDigest: string
+  detailDigest: string
+}
+
+export interface SourcePublishReconciliationReceipt {
+  schemaVersion: 1
+  kind: 'dsh-source-publish-reconciliation-receipt'
+  receiptId: string
+  authority: string
+  keyId: string
+  installationId: string
+  planId: string
+  planDigest: string
+  releaseId: string
+  fence: number
+  operationId: string
+  requestDigest: string
+  evidence: SourcePublishReconciliationEvidence
+  evidenceDigest: string
+  observedAt: number
+  expiresAt: number
+  signature: string
+}
+
+export interface VerifiedSourcePublishReconciliationReceipt extends Omit<SourcePublishReconciliationReceipt, 'signature'> {
+  signatureDigest: string
+}
+
+export interface SourcePublishReconciliationAuthority {
+  verify(receipt: SourcePublishReconciliationReceipt, plan: PluginSourcePlan,
+    request: SourcePublishReconciliationRequest): Promise<VerifiedSourcePublishReconciliationReceipt>
 }
 
 export interface SourceReleaseReceipt {
@@ -296,6 +435,8 @@ export interface SourceReleaseOperation {
   planId: string
   phase: SourceReleasePhase
   operationId: string
+  attempt: number
+  fence: number
   bindingDigest: string
   requestDigest: string
   request: SourceReleaseRequest

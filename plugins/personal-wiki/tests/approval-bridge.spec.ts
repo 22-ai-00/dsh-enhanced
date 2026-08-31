@@ -96,10 +96,15 @@ afterEach(async () => {
 describe('personal wiki production approval bridge', () => {
   test('derives owner authority from the exact Agent binding and persists the exact dispatch', async () => {
     const route: ApprovalDispatchRoute = {
+      routeVersion: 2,
       sourceId: PERSONAL_WIKI_APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
+      bindingVersion: 3,
+      bindingGeneration: 2,
       workspace: '/work/alpha',
       principal: 'lark/main/tenant/owner',
+      principalRecordId: 'principal-owner',
+      principalVersion: 4,
     }
     const { ctx, service, policy, prepareAgentApproval } = await harness(route)
 
@@ -135,10 +140,15 @@ describe('personal wiki production approval bridge', () => {
 
   test('rejects a model-forged principal and an inexact route workspace before Policy proposal creation', async () => {
     const exact: ApprovalDispatchRoute = {
+      routeVersion: 2,
       sourceId: PERSONAL_WIKI_APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
+      bindingVersion: 3,
+      bindingGeneration: 2,
       workspace: '/work/alpha',
       principal: 'lark/main/tenant/owner',
+      principalRecordId: 'principal-owner',
+      principalVersion: 4,
     }
     const first = await harness(exact)
     expect(() => first.service.propose(agent(), {

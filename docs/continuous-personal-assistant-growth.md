@@ -214,6 +214,69 @@ replay → shadow → canary
 > 只有补齐 durable release operation/CAS、独立可信的 Git/签名/registry adapter、真实端到端
 > fixture 和对应故障恢复门后，才能重新开启本阶段的自动化范围。
 
+## 2026-08-31 本轮 Stage 3 / Stage 4 覆盖更新
+
+本节记录上述阶段说明之后新增的实现，只覆盖本轮已有代码与测试所能证明的范围。上面的历史范围决定保留为
+当时快照；它不再代表当前 source/release lane 的实现上限。2026-08-31 的最终全仓门禁已经通过。
+
+### Stage 3：Memory promotion
+
+- Preference Learning 只会把固定 allowlist 中的 `memory.retention=long-term` T2 假设送入晋升链。请求使用固定
+  renderer，不允许调用方携带自由文本或自行声明 Memory 写权限；只有 owner 明确批准后，Personal Memory
+  才提交 `user-confirmed` 长期记录。
+- Delivery 模式下的 Memory namespace 由稳定的 `principalRecordId + principalVersion` 构成，而不是 session、
+  binding generation 或可复用的外部 principal 字符串。相同 owner 的 `/new` 只轮换 session/binding generation，
+  因而已确认 Memory 对新 session 仍可见；owner A→B→A 时 principal version 前进，旧 owner 代的记录和
+  pending promotion 不会泄漏给返回后的新代。
+- promotion request、submission、terminal result 与 ACK 都有独立 digest、generation 和持久 outbox。
+  `confirmed` 只在 Memory record 已提交后产生；`rejected`、`expired`、`conflicted` 与 `stale-owner` 保持为
+  不同终态，不能被折叠成成功。
+- `forget`、owner rotation 或 hypothesis supersede 会先写 durable cancellation tombstone。cancel-before-submit
+  在多连接与冷重启后仍会阻止迟到提案。`superseded` 不删除已经确认的 Memory；后续 `forget` / owner
+  rotation 可通过保留的不可逆 upgrade binding 将已脱敏 tombstone 升级为 privacy cancellation，并对 exact
+  promotion-created record 做 CAS tombstone、删除检索 token，再完成结果 ACK，不能留下可检索的已遗忘记录。
+- 集成测试使用真实 `AssistantDeliveryService`、`AssistantPolicyService`、`PersonalMemoryService` 和各自 SQLite
+  账本，覆盖真实 Delivery owner lineage、binding rotation、Memory read/search 以及 A→B→A pending promotion
+  fencing，其中同 owner 场景通过真实 Delivery `/new` command 轮换 binding 后再次召回已确认 Memory。
+  测试仍使用本地 stub Agent/adapter，不构成真实飞书卡片发送或人工点击验收。
+
+### Stage 4：local trusted source release vertical slice
+
+- `ready-for-human-review` 之后必须取得新的 Ed25519 owner authorization；授权绑定 exact plan、base commit、
+  checked tree/patch digest、scope 与 release policy，并在每个 phase 前重新验证。生成阶段的旧审批不能替代
+  这次 post-check authorization。
+- source release 已形成八个固定 phase：`pr → review → merge → build → sign → publish → registry-verify →
+  catalog-admission`。每个 request 在执行前持久化，并以 operation id、attempt、plan revision、release fence、
+  request/binding digest 和签名 receipt 做 single-flight 与 CAS；崩溃重放不能更换 payload 或跳过 phase。
+- publish 结果不确定时进入 `publish-ambiguous`，只能由独立 registry verifier 的 request-bound 签名
+  reconciliation receipt 收敛。`exists-match`、`absent`、`unknown` 与 `digest-conflict` 分别决定继续验证、
+  提升 fence 后重试、保持不确定或 fail closed；裸 observation 不是发布证据。
+- Linux release invoker 和 activation CLI 都通过持续打开的 `/proc/self/fd/*` 执行固定
+  executable/interpreter；artifact phases 继承 tarball/SBOM/provenance fd，activation 则让下游从控制面持续
+  持有的 artifact fd 读取。local adapter 内的 Git、tar、bubblewrap、Node、pnpm 与 catalog helper 也以
+  descriptor-pinned 方式执行；toolchain/store 先复制为校验过的私有 snapshot，再从目录 fd 挂入 sandbox。
+- 随包的 local-only reference adapter 在本地 bare Git 上创建 immutable PR ref、读取 owner-private review
+  decision、以 `git update-ref` 做 merge CAS；从 exact merge commit 建独立 checkout，以固定 `/usr/bin/bwrap`
+  隔离且断网地执行 pinned pnpm 的 `install --offline --frozen-lockfile --ignore-scripts`、目标包 `build` 和真实
+  `pnpm pack`。两次独立构建校验 tgz bytes/packlist，产物再生成 CycloneDX SBOM 与 SLSA provenance、签名、
+  写入 immutable filesystem registry、独立下载复核，并通过 request-bound v2 attempt journal、父目录
+  descriptor `flock` 与原子 CAS 进入 catalog。
+- `release-complete` 只表示 source release 和 catalog admission 完成。它把 gap 重新开放但保留 exact admitted
+  candidate reservation；不会自动创建 activation plan或修改 production profile。后续 activation 必须显式使用
+  该 candidate，并另经 staging、reload、readiness、effect-blocked replay、shadow、canary、soak 和 health。
+
+本轮没有实现或验证 GitHub PR/branch-protection adapter、npm registry/dist-tag adapter、远端凭据与限流、
+网络故障后的真实远端 reconciliation，也没有完成真实 wall-clock long soak 或 production activation。local
+E2E 已证明 bwrap 内真实离线 pnpm install/build/pack 和干净 profile 的 tgz 安装/import，但没有在 sandbox 内
+运行完整仓库测试。descriptor pin 与 catalog exchange 依赖 Linux procfs、`O_TMPFILE`、`renameat2`、bubblewrap
+及由固定 `/usr/bin/python3` 安全解析出的 root-owned Python 3.8+；缺失时 fail closed。若威胁模型包含持续恶意的同 UID 进程，生产部署还必须让
+catalog commit broker 使用独立 UID，或确保 worker 无权写 catalog 父目录。
+
+最终验证：根 `pnpm check` 全绿，包含 workspace manifest 校验、零告警 lint、全包 typecheck/build、
+`198` 个根测试文件 / `2847` 项测试、所有 package test，以及 `22` 个插件和 `2` 个共享包的 dry-run pack。
+Stage 3 定向结果为 contract `11/11`、Personal Memory `90/90`、Preference Learning `84/84`；Stage 4
+Control Plane 为 `150/150`，真实 local release adapter E2E 为 `3/3`。
+
 ## 完成证明
 
 “持续成长”不能靠某个测试绿色或一次演示证明。最终验收必须包含长期 soak、真实任务集、跨重启恢复、故障注入、偏好纠错、错误记忆删除、预算耗尽、canary 回归和回滚。每个已采用改进都必须能回答：依据是什么、谁或什么评测了它、改善了什么、花费多少、如何撤销。

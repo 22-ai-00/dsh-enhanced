@@ -32,6 +32,16 @@ const APPROVAL_SOURCE = 'dsh-enhanced-assistant-evolution'
 const OWNER = 'lark/bot-1/tenant-a/ou_owner'
 const WORKSPACE = '/work/alpha'
 const PRESET = 'primary'
+const routeV2: Pick<
+  Extract<ApprovalDispatchRoute, { routeVersion: 2 }>,
+  'routeVersion' | 'bindingVersion' | 'bindingGeneration' | 'principalRecordId' | 'principalVersion'
+> = {
+  routeVersion: 2 as const,
+  bindingVersion: 3,
+  bindingGeneration: 2,
+  principalRecordId: 'principal-owner',
+  principalVersion: 4,
+}
 const roots: string[] = []
 const contexts = new Set<Context>()
 
@@ -280,6 +290,7 @@ function call(name: string, args: Record<string, unknown>, target: Agent) {
 describe('assistant evolution approval bridge', () => {
   test('uses an exact static capability gate while freezing the exact approval target', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -312,6 +323,7 @@ describe('assistant evolution approval bridge', () => {
 
   test('keeps principal out of the model-visible evolution_propose schema', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -330,6 +342,7 @@ describe('assistant evolution approval bridge', () => {
 
   test('executes the model-visible proposal without a principal by using the authenticated route', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -352,6 +365,7 @@ describe('assistant evolution approval bridge', () => {
 
   test('derives the principal from Delivery and persists its complete Policy dispatch tuple', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -368,9 +382,12 @@ describe('assistant evolution approval bridge', () => {
 
     expect(fixture.prepareAgentApproval).toHaveBeenCalledWith(target, { sourceId: APPROVAL_SOURCE })
     const database = new DatabaseSync(fixture.evolutionPath)
-    const stored = database.prepare('SELECT mutation_json FROM evolution_proposals WHERE id = ?')
-      .get(proposed.proposalId) as { mutation_json: string }
+    const stored = database.prepare(`
+      SELECT mutation_json, creation_intent_json FROM evolution_proposals WHERE id = ?
+    `).get(proposed.proposalId) as { mutation_json: string; creation_intent_json: string }
     const mutation = JSON.parse(stored.mutation_json) as Record<string, unknown>
+    expect((JSON.parse(stored.creation_intent_json) as { dispatch: unknown }).dispatch)
+      .toStrictEqual(route)
     const expectedDiff = JSON.stringify({
       op: mutation.op,
       ruleId: mutation.ruleId,
@@ -383,10 +400,15 @@ describe('assistant evolution approval bridge', () => {
     const [dispatch] = fixture.policy.listPendingApprovalDispatches()
     expect(dispatch).toMatchObject({
       proposalId: proposed.policyProposalId,
+      routeVersion: route.routeVersion,
       sourceId: APPROVAL_SOURCE,
       bindingId: route.bindingId,
+      bindingVersion: route.bindingVersion,
+      bindingGeneration: route.bindingGeneration,
       workspace: route.workspace,
       principal: route.principal,
+      principalRecordId: route.principalRecordId,
+      principalVersion: route.principalVersion,
       requester: `agent:${PRESET}`,
       action: 'evolution.adopt',
       resource: { kind: 'evolution', id: 'situation:automation:weekly-report' },
@@ -415,6 +437,7 @@ describe('assistant evolution approval bridge', () => {
 
   test('publishes actual application state from an independent durable outbox and retries after failure', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -477,6 +500,7 @@ describe('assistant evolution approval bridge', () => {
 
   test('freezes an exact retirement candidate into local mutation and Policy diff/hash across restart', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -572,6 +596,7 @@ describe('assistant evolution approval bridge', () => {
 
   test('rejects a caller-supplied stale retirement version before creating Policy approval', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -622,6 +647,7 @@ describe('assistant evolution approval bridge', () => {
 
   test('rejects an explicit principal that differs from the authenticated Delivery owner', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -639,6 +665,7 @@ describe('assistant evolution approval bridge', () => {
 
   test('dispatches a distinct exact owner undo and settles it safely after restart', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -750,6 +777,7 @@ describe('assistant evolution approval bridge', () => {
 
   test('owner undo rejects cross-scope and stale targets and conflicts a superseded card', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -810,6 +838,7 @@ describe('assistant evolution approval bridge', () => {
 describe('assistant evolution settlement validation', () => {
   test('owner approval cannot execute legacy, evidence-stripped, or tampered retire JSON', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -962,10 +991,11 @@ describe('assistant evolution settlement validation', () => {
       expect(fixture.service.reconcileProposals(), scenario.name).toEqual([])
       await closeHarness(fixture)
     }
-  })
+  }, 15_000)
 
   test('reconciles the crash gap after Policy commit from the durable local creation intent', async () => {
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,
@@ -1041,6 +1071,7 @@ describe('assistant evolution settlement validation', () => {
     let now = 20_000
     const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
     const route: ApprovalDispatchRoute = {
+      ...routeV2,
       sourceId: APPROVAL_SOURCE,
       bindingId: 'binding-owner-dm',
       workspace: WORKSPACE,

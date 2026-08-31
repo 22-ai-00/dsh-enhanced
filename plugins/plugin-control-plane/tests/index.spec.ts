@@ -4,6 +4,7 @@ import { discover, exampleIntegrityPinnedCatalog, loadCatalog, loadCatalogWithMe
 import { chmod, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as {
   version: string
@@ -49,6 +50,33 @@ describe('dsh-enhanced-plugin-control-plane', () => {
       integrity: 'sha512-aGVsbG8=', authorities: ['none'], dshBaseline: '0.1.0-rc.8',
       requires: [{ package: '@dsh-enhanced/assistant-health', version: '0.1.3', integrity: 'sha512-aGVsbG8=' }],
     }] })).toThrow('duplicate package')
+  })
+
+  it('round-trips a canonical local registry artifact while preserving historical entries', () => {
+    const registryPath = '/var/lib/dsh-registry'; const locator = pathToFileURL(registryPath).href
+    const reference = pathToFileURL(join(registryPath, 'packages', encodeURIComponent('@dsh-enhanced/local'), '1.2.3', 'package.tgz')).href
+    const catalog = parseCatalog({ schemaVersion: 1, entries: [
+      { id: 'historical', capabilities: ['old'], package: '@dsh-enhanced/historical', version: '1.0.0',
+        integrity: 'sha512-aGVsbG8=', authorities: ['none'], dshBaseline: '0.1.0-rc.8' },
+      { id: 'local', capabilities: ['local'], package: '@dsh-enhanced/local', version: '1.2.3',
+        integrity: 'sha512-aGVsbG8=', registry: { id: 'owner-local', locator, reference },
+        authorities: ['none'], dshBaseline: '0.1.0-rc.8' },
+    ] })
+    expect(parseCatalog(JSON.parse(JSON.stringify(catalog)))).toEqual(catalog)
+    expect(catalog.entries[0]?.registry).toBeUndefined()
+    expect(catalog.entries[1]?.registry).toEqual({ id: 'owner-local', locator, reference })
+  })
+
+  it('rejects local registry references that are non-canonical or escape the immutable package location', () => {
+    const base = { id: 'local', capabilities: ['local'], package: '@dsh-enhanced/local', version: '1.2.3',
+      integrity: 'sha512-aGVsbG8=', authorities: ['none'], dshBaseline: '0.1.0-rc.8' }
+    const locator = 'file:///var/lib/dsh-registry'
+    for (const reference of [
+      'file:../escape.tgz',
+      'file:///var/lib/dsh-registry/packages/%40dsh-enhanced%2Flocal/1.2.3/../escape.tgz',
+      'file:///tmp/package.tgz',
+      'https://registry.example.invalid/package.tgz',
+    ]) expect(() => parseCatalog({ schemaVersion: 1, entries: [{ ...base, registry: { id: 'owner-local', locator, reference } }] })).toThrow()
   })
 
   it('accepts only owner-controlled regular catalog files and rejects writable aliases', async () => {

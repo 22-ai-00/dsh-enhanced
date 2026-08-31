@@ -8,6 +8,7 @@ import {
 import type {
   ApprovalDecisionInput,
   ApprovalDispatchRoute,
+  ApprovalDispatchRouteV2,
   ApprovalProposalRecoveryInput,
   ApprovalProposalRecoveryResult,
   ApprovalProposalResult,
@@ -75,32 +76,53 @@ function id(idempotencyKey: string): string {
   return `automation-${createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 32)}`
 }
 
-function approvalDispatch(value: string | null): Readonly<ApprovalDispatchRoute> | undefined {
+function approvalDispatch(
+  value: string | null,
+  errorCode: Extract<AutomationProposalStoreErrorCode, 'invalid-input' | 'invalid-state'>,
+  allowLegacy = true,
+): Readonly<ApprovalDispatchRoute> | undefined {
   if (value === null) return undefined
   let parsed: unknown
   try {
     parsed = JSON.parse(value)
   } catch {
-    throw new AutomationProposalStoreError('invalid-state', 'automation proposal dispatch is not valid JSON')
+    throw new AutomationProposalStoreError(errorCode, 'automation proposal dispatch is not valid JSON')
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-    throw new AutomationProposalStoreError('invalid-state', 'automation proposal dispatch is invalid')
+    throw new AutomationProposalStoreError(errorCode, 'automation proposal dispatch is invalid')
   }
   const route = parsed as Record<string, unknown>
-  if (Object.keys(route).sort().join(',') !== 'bindingId,principal,sourceId,workspace'
+  const keys = Object.keys(route).sort().join(',')
+  const legacyKeys = 'bindingId,principal,sourceId,workspace'
+  const versionedLegacyKeys = 'bindingId,principal,routeVersion,sourceId,workspace'
+  const v2Keys = [
+    'bindingGeneration', 'bindingId', 'bindingVersion', 'principal', 'principalRecordId',
+    'principalVersion', 'routeVersion', 'sourceId', 'workspace',
+  ].sort().join(',')
+  const legacy = keys === legacyKeys || (keys === versionedLegacyKeys && route['routeVersion'] === 1)
+  const v2 = keys === v2Keys && route['routeVersion'] === 2
+    && typeof route['bindingVersion'] === 'number'
+    && Number.isSafeInteger(route['bindingVersion']) && route['bindingVersion'] > 0
+    && typeof route['bindingGeneration'] === 'number'
+    && Number.isSafeInteger(route['bindingGeneration']) && route['bindingGeneration'] > 0
+    && typeof route['principalRecordId'] === 'string'
+    && route['principalRecordId'].trim() !== ''
+    && Buffer.byteLength(route['principalRecordId'], 'utf8') <= 500
+    && typeof route['principalVersion'] === 'number'
+    && Number.isSafeInteger(route['principalVersion']) && route['principalVersion'] > 0
+  if ((!v2 && !(allowLegacy && legacy))
     || typeof route['sourceId'] !== 'string'
     || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(route['sourceId'])
     || typeof route['bindingId'] !== 'string' || route['bindingId'].trim() === ''
     || typeof route['workspace'] !== 'string' || !isAbsolute(route['workspace'])
     || typeof route['principal'] !== 'string' || route['principal'].trim() === '') {
-    throw new AutomationProposalStoreError('invalid-state', 'automation proposal dispatch is invalid')
+    throw new AutomationProposalStoreError(errorCode, 'automation proposal dispatch is invalid')
   }
-  return Object.freeze({
-    sourceId: route['sourceId'],
-    bindingId: route['bindingId'],
-    workspace: route['workspace'],
-    principal: route['principal'],
-  })
+  return Object.freeze(parsed as ApprovalDispatchRoute)
+}
+
+function newApprovalDispatch(value: Readonly<ApprovalDispatchRouteV2>): Readonly<ApprovalDispatchRouteV2> {
+  return approvalDispatch(JSON.stringify(value), 'invalid-input', false) as Readonly<ApprovalDispatchRouteV2>
 }
 
 function stored(row: ProposalRow): StoredAutomationProposal {
@@ -113,7 +135,7 @@ function stored(row: ProposalRow): StoredAutomationProposal {
     idempotencyKey: row.idempotency_key,
     requester: row.requester,
     principal: row.principal,
-    ...(row.dispatch_json === null ? {} : { dispatch: approvalDispatch(row.dispatch_json)! }),
+    ...(row.dispatch_json === null ? {} : { dispatch: approvalDispatch(row.dispatch_json, 'invalid-state')! }),
     requestHash: row.change_hash,
     changeHash: hash(JSON.parse(row.change_json)),
     mutation: Object.freeze(JSON.parse(row.change_json) as AutomationMutation),
@@ -174,12 +196,13 @@ export class AutomationProposalStore {
     idempotencyKey: string
     requester: string
     principal: string
-    dispatch?: Readonly<ApprovalDispatchRoute>
+    dispatch?: Readonly<ApprovalDispatchRouteV2>
     requestHash: string
     mutation: AutomationMutation
     expiresAt: number
     ttlMs: number
   }): { proposal: StoredAutomationProposal; replayed: boolean } {
+    const dispatch = input.dispatch === undefined ? undefined : newApprovalDispatch(input.dispatch)
     const existingRow = this.database.prepare('SELECT * FROM automation_proposals WHERE id = ?').get(input.proposalId) as ProposalRow | undefined
     if (existingRow !== undefined) {
       const existing = stored(existingRow)
@@ -198,7 +221,7 @@ export class AutomationProposalStore {
       ) VALUES (?, NULL, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, NULL, ?, ?, 1)
     `).run(
       input.proposalId, input.idempotencyKey, input.requester, input.principal,
-      input.dispatch === undefined ? null : JSON.stringify(input.dispatch), input.requestHash,
+      dispatch === undefined ? null : JSON.stringify(dispatch), input.requestHash,
       JSON.stringify(input.mutation), input.expiresAt, input.ttlMs, now, now,
     )
     return { proposal: this.get(input.proposalId)!, replayed: false }
@@ -302,14 +325,7 @@ export class AutomationProposalManager {
     if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs <= 0) {
       throw new AutomationProposalStoreError('invalid-input', 'proposal ttlMs must be positive')
     }
-    const dispatch = input.dispatch === undefined
-      ? undefined
-      : approvalDispatch(JSON.stringify({
-          sourceId: input.dispatch.sourceId,
-          bindingId: input.dispatch.bindingId,
-          workspace: input.dispatch.workspace,
-          principal: input.dispatch.principal,
-        }))
+    const dispatch = input.dispatch === undefined ? undefined : newApprovalDispatch(input.dispatch)
     if (dispatch !== undefined && dispatch.principal !== input.principal) {
       throw new AutomationProposalStoreError('invalid-input', 'approval dispatch belongs to another principal')
     }
@@ -481,12 +497,13 @@ export class AutomationProposalManager {
     snapshot: ApprovalProposalSnapshot | undefined
     replayed: boolean
   } | undefined {
+    if (proposal.dispatch !== undefined && proposal.dispatch.routeVersion !== 2) return undefined
     const recovered = this.policy.recoverOrCreateProposal({
       ...this.policyIdentity(proposal),
       diff: diff(proposal.mutation),
       summary: summary(proposal.mutation),
       notAfter: proposal.expiresAt,
-      ...(proposal.dispatch === undefined ? {} : { dispatch: proposal.dispatch }),
+      ...(proposal.dispatch?.routeVersion === 2 ? { dispatch: proposal.dispatch } : {}),
     })
     if (recovered.kind === 'abandoned') return undefined
     const policyProposal = recovered.proposal

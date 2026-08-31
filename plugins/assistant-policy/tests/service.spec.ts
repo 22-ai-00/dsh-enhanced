@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { AssistantPolicyService } from '../src/service.ts'
@@ -138,10 +139,15 @@ describe('assistant policy Cordis service', () => {
       summary: 'Remember a fact',
       ttlMs: 60_000,
       dispatch: {
+        routeVersion: 2,
         sourceId: 'lark-primary',
         bindingId: 'owner-binding',
+        bindingVersion: 2,
+        bindingGeneration: 1,
         workspace: '/work/alpha',
         principal: 'owner',
+        principalRecordId: 'principal-owner-row',
+        principalVersion: 3,
       },
     })
     const [dispatch] = service.listPendingApprovalDispatches()
@@ -162,6 +168,52 @@ describe('assistant policy Cordis service', () => {
       'approval.dispatch.enqueue',
       'approval.decide',
     ])
+    await ctx.fiber.restart()
+  })
+
+  test('audits and rejects a replay of a legacy unverifiable enqueued dispatch', async () => {
+    const ctx = new Context()
+    const path = await databasePath()
+    const service = new AssistantPolicyService(ctx, { databasePath: path, rules: [] })
+    const proposal = service.propose({
+      idempotencyKey: 'legacy-enqueued-replay',
+      requester: 'agent:primary',
+      principal: 'owner',
+      action: 'memory.add',
+      resource: { kind: 'memory', id: 'fact-legacy' },
+      diff: '+ fact',
+      summary: 'Remember a fact',
+      ttlMs: 60_000,
+      dispatch: {
+        routeVersion: 2,
+        sourceId: 'lark-primary',
+        bindingId: 'owner-binding',
+        bindingVersion: 2,
+        bindingGeneration: 1,
+        workspace: '/work/alpha',
+        principal: 'owner',
+        principalRecordId: 'principal-owner-row',
+        principalVersion: 3,
+      },
+    })
+    service.markApprovalDispatchEnqueued(proposal.proposalId, 1)
+    const database = new DatabaseSync(path)
+    database.prepare(`
+      UPDATE approval_dispatches
+      SET route_version = 1, binding_version = NULL, binding_generation = NULL,
+          principal_record_id = NULL, principal_version = NULL
+      WHERE proposal_id = ?
+    `).run(proposal.proposalId)
+    database.close()
+
+    expect(() => service.markApprovalDispatchEnqueued(proposal.proposalId, 1))
+      .toThrowError(expect.objectContaining({ code: 'legacy-unverifiable' }))
+    expect(service.queryAudit({ limit: 10 }).at(-1)).toMatchObject({
+      action: 'approval.dispatch.enqueue',
+      outcome: 'rejected',
+      reasonCode: 'legacy-unverifiable-enqueued',
+      details: { expectedVersion: 1, routeVersion: 1 },
+    })
     await ctx.fiber.restart()
   })
 

@@ -1,15 +1,22 @@
 import { DatabaseSync } from 'node:sqlite'
-import { mkdir, mkdtemp, rm, stat } from 'node:fs/promises'
+import { chmod, link, mkdir, mkdtemp, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
+import { withPreferenceMemoryPromotionCancellationDigest } from '@dsh-enhanced/assistant-growth-contract'
 import {
+  hashMemoryProposalIntent,
   hashMemoryMutation,
+  memoryOwnerNamespaceKey,
+  memoryPrincipalDigest,
   MemoryStore,
   MemoryStoreError,
   missingPolicyProposalId,
 } from '../src/store.ts'
-import type { MemoryEntryInput, MemoryIdentity } from '../src/types.ts'
+import { openMemoryDatabase } from '../src/sqlite.ts'
+import type {
+  MemoryEntryInput, MemoryIdentity, MemoryOwnerNamespace, MemoryProposalInput,
+} from '../src/types.ts'
 
 const temporaryRoots: string[] = []
 
@@ -20,6 +27,7 @@ async function temporaryPath(name = 'memory.sqlite') {
 }
 
 afterEach(async () => {
+  vi.restoreAllMocks()
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
@@ -39,6 +47,18 @@ const agentWorkspace: MemoryIdentity = {
   scope: 'workspace',
   workspace: '/work/alpha',
   agentPreset: 'primary',
+}
+const namespaceA: MemoryOwnerNamespace = {
+  mode: 'delivery',
+  principalDigest: 'a'.repeat(64),
+  principalRecordId: 'principal-a',
+  principalVersion: 1,
+}
+const namespaceB: MemoryOwnerNamespace = {
+  mode: 'delivery',
+  principalDigest: 'b'.repeat(64),
+  principalRecordId: 'principal-b',
+  principalVersion: 1,
 }
 
 function entry(content: string, overrides: Partial<MemoryEntryInput> = {}): MemoryEntryInput {
@@ -74,31 +94,46 @@ describe('personal memory store', () => {
 
   test('creates a private forward-versioned SQLite schema', async () => {
     const path = await temporaryPath()
-    new MemoryStore({ path }).close()
+    const database = openMemoryDatabase(path)
 
     expect((await stat(join(path, '..'))).mode & 0o777).toBe(0o700)
     expect((await stat(path)).mode & 0o777).toBe(0o600)
-    const database = new DatabaseSync(path)
     const version = database.prepare('PRAGMA user_version').get() as { user_version: number }
     const tables = database.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
       ORDER BY name
     `).all() as { name: string }[]
-    database.close()
-
-    expect(version.user_version).toBe(2)
+    expect(version.user_version).toBe(4)
     expect(tables.map(table => table.name)).toEqual([
       'memory_audit',
+      'memory_promotion_cancellations',
+      'memory_promotion_compensations',
+      'memory_promotion_results',
       'memory_proposal_intents',
       'memory_proposals',
       'memory_records',
       'memory_tokens',
       'schema_meta',
     ])
+    for (const table of ['memory_records', 'memory_proposals', 'memory_proposal_intents', 'memory_audit']) {
+      const columns = database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
+      expect(columns.map(column => column.name)).not.toContain('owner_generation')
+    }
+    expect((database.prepare('PRAGMA table_info(memory_promotion_results)').all() as Array<{ name: string }>)
+      .map(column => column.name)).toContain('owner_generation')
+    expect((database.prepare('PRAGMA table_info(memory_promotion_cancellations)').all() as Array<{ name: string }>)
+      .map(column => column.name)).toContain('owner_generation')
+    expect((database.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode).toBe('wal')
+    expect((database.prepare('PRAGMA synchronous').get() as { synchronous: number }).synchronous).toBe(2)
+    expect((database.prepare('PRAGMA secure_delete').get() as { secure_delete: number }).secure_delete).toBe(1)
+    database.exec("INSERT INTO schema_meta(key, value) VALUES ('sidecar-probe', 'written')")
+    expect((await stat(`${path}-wal`)).mode & 0o777).toBe(0o600)
+    expect((await stat(`${path}-shm`)).mode & 0o777).toBe(0o600)
+    database.close()
   })
 
-  test('migrates a v1 database without destructive recreation', async () => {
+  test('migrates v2 records, proposals, intents, and audit receipts into an unclaimable quarantine', async () => {
     const path = await temporaryPath()
     await mkdir(join(path, '..'), { recursive: true })
     const database = new DatabaseSync(path)
@@ -206,37 +241,73 @@ describe('personal memory store', () => {
       JSON.stringify(mutation),
       100_000,
     )
+    database.exec(`
+      CREATE INDEX memory_proposals_reconcile
+        ON memory_proposals(status, updated_at, id);
+      CREATE TABLE memory_proposal_intents (
+        id TEXT PRIMARY KEY,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        requester TEXT NOT NULL,
+        principal TEXT NOT NULL,
+        mutation_hash TEXT NOT NULL,
+        mutation_json TEXT NOT NULL,
+        ttl_ms INTEGER NOT NULL CHECK (ttl_ms > 0),
+        dispatch_source_id TEXT,
+        dispatch_binding_id TEXT,
+        dispatch_workspace TEXT,
+        dispatch_principal TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      ) STRICT;
+      CREATE INDEX memory_proposal_intents_reconcile
+        ON memory_proposal_intents(updated_at, id);
+      UPDATE schema_meta SET value = '2' WHERE key = 'schema-version';
+      PRAGMA user_version = 2;
+    `)
+    database.prepare(`
+      INSERT INTO memory_proposal_intents(
+        id, idempotency_key, requester, principal, mutation_hash, mutation_json, ttl_ms,
+        dispatch_source_id, dispatch_binding_id, dispatch_workspace, dispatch_principal,
+        created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 60000, NULL, NULL, NULL, NULL, 1000, 1000)
+    `).run('legacy-intent', 'legacy-intent-key', 'legacy-requester', 'legacy-principal',
+      hashMemoryMutation(mutation), JSON.stringify(mutation))
+    database.prepare(`
+      INSERT INTO memory_audit(
+        idempotency_key, mutation_hash, operation, memory_id, result_version, occurred_at
+      ) VALUES (?, ?, 'add', ?, 1, 1000)
+    `).run('legacy-audit-key', hashMemoryMutation(mutation), 'legacy-memory')
     database.close()
+    await chmod(path, 0o600)
 
     const store = new MemoryStore({ path, now: () => 2_000 })
-    expect(store.get(userGlobal, 'legacy-memory')?.content).toBe('preserve me through migration')
-    expect(store.getProposal('legacy-proposal')).toEqual(expect.objectContaining({
-      proposalId: 'legacy-proposal',
-      policyProposalId: 'legacy-policy-proposal',
-      status: 'pending',
-      mutation,
-      version: 1,
-    }))
-    const settled = store.settleProposal({
+    expect(store.get(namespaceA, userGlobal, 'legacy-memory')).toBeUndefined()
+    expect(() => store.settleProposal({
       proposalId: 'legacy-proposal',
       policyStatus: 'approved',
       policyVersion: 2,
-    })
-    expect(settled.proposal).toEqual(expect.objectContaining({ status: 'approved', version: 2 }))
-    expect(store.get(userGlobal, 'legacy-memory')).toBeUndefined()
-    expect(store.list(userGlobal, { includeRemoved: true })).toEqual([
-      expect.objectContaining({ id: 'legacy-memory', status: 'removed', version: 2 }),
-    ])
+    })).toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'invalid-identity' }))
+    expect(store.list(namespaceA, userGlobal, { includeRemoved: true })).toEqual([])
+    expect(store.listProposalIntents(10)).toEqual([])
     store.close()
 
     const migrated = new DatabaseSync(path)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(4)
     expect(migrated.prepare('SELECT value FROM schema_meta WHERE key = ?').get('schema-version'))
-      .toEqual({ value: '2' })
+      .toEqual({ value: '4' })
     expect(migrated.prepare('SELECT value FROM legacy_marker').get()).toEqual({ value: 'preserved' })
     expect(migrated.prepare(`
-      SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_proposal_intents'
-    `).get()).toEqual({ name: 'memory_proposal_intents' })
+      SELECT namespace_mode, namespace_key FROM memory_records WHERE id = 'legacy-memory'
+    `).get()).toEqual({ namespace_mode: 'legacy-quarantine', namespace_key: 'legacy-v2' })
+    expect(migrated.prepare(`
+      SELECT namespace_mode, status, version FROM memory_proposals WHERE id = 'legacy-proposal'
+    `).get()).toEqual({ namespace_mode: 'legacy-quarantine', status: 'conflicted', version: 2 })
+    expect(migrated.prepare(`
+      SELECT namespace_mode, namespace_key FROM memory_proposal_intents WHERE id = 'legacy-intent'
+    `).get()).toEqual({ namespace_mode: 'legacy-quarantine', namespace_key: 'legacy-v2' })
+    expect(migrated.prepare(`
+      SELECT namespace_mode, namespace_key FROM memory_audit WHERE idempotency_key = 'legacy-audit-key'
+    `).get()).toEqual({ namespace_mode: 'legacy-quarantine', namespace_key: 'legacy-v2' })
     migrated.close()
   })
 
@@ -247,16 +318,140 @@ describe('personal memory store', () => {
       store.applyApprovedMutation({
         op: 'add',
         idempotencyKey: `add-${index}`,
+        namespace: namespaceA,
         identity,
         entry: entry(`memory-${index}`),
       })
     }
 
     for (const [index, identity] of identities.entries()) {
-      expect(store.list(identity).map(record => record.content)).toEqual([`memory-${index}`])
+      expect(store.list(namespaceA, identity).map(record => record.content)).toEqual([`memory-${index}`])
     }
-    expect(store.list({ ...agentWorkspace, workspace: '/work/beta' })).toEqual([])
-    expect(store.list({ ...agentWorkspace, agentPreset: 'secondary' })).toEqual([])
+    expect(store.list(namespaceA, { ...agentWorkspace, workspace: '/work/beta' })).toEqual([])
+    expect(store.list(namespaceA, { ...agentWorkspace, agentPreset: 'secondary' })).toEqual([])
+    store.close()
+  })
+
+  test('scopes records, duplicate detection, and mutation receipts to exact owner lineage', async () => {
+    const store = new MemoryStore({ path: await temporaryPath(), now: () => 10_000 })
+    const firstA = store.applyApprovedMutation({
+      op: 'add', idempotencyKey: 'same-key', namespace: namespaceA, identity: userGlobal, entry: entry('same fact'),
+    })
+    const firstB = store.applyApprovedMutation({
+      op: 'add', idempotencyKey: 'same-key', namespace: namespaceB, identity: userGlobal, entry: entry('same fact'),
+    })
+    const namespaceA3: MemoryOwnerNamespace = { ...namespaceA, principalVersion: 3 }
+    const newA = store.applyApprovedMutation({
+      op: 'add', idempotencyKey: 'same-key', namespace: namespaceA3, identity: userGlobal, entry: entry('same fact'),
+    })
+
+    expect(firstA.id).not.toBe(firstB.id)
+    expect(newA.id).not.toBe(firstA.id)
+    expect(store.get(namespaceA3, userGlobal, firstA.id)).toBeUndefined()
+    expect(store.list(namespaceA3, userGlobal).map(record => record.id)).toEqual([newA.id])
+    store.close()
+  })
+
+  test('keeps the namespace stable across binding generations but rotates on principal version', async () => {
+    const store = new MemoryStore({ path: await temporaryPath(), now: () => 10_000 })
+    const firstBinding = {
+      principalDigest: namespaceA.principalDigest,
+      principalRecordId: namespaceA.principalRecordId,
+      principalVersion: namespaceA.principalVersion,
+      bindingGeneration: 11,
+    }
+    const afterNewBinding = { ...firstBinding, bindingGeneration: 12 }
+    const namespaceFromBinding = (binding: typeof firstBinding): MemoryOwnerNamespace => ({
+      mode: 'delivery',
+      principalDigest: binding.principalDigest,
+      principalRecordId: binding.principalRecordId,
+      principalVersion: binding.principalVersion,
+    })
+    const beforeNew = namespaceFromBinding(firstBinding)
+    const afterNew = namespaceFromBinding(afterNewBinding)
+    const first = store.applyApprovedMutation({
+      op: 'add', idempotencyKey: 'binding-generation-independent', namespace: beforeNew,
+      identity: userGlobal, entry: entry('survives slash-new'),
+    })
+
+    // Binding generation belongs to proposal/promotion fencing and is intentionally
+    // absent from MemoryOwnerNamespace, so a new session/binding sees this record.
+    expect(afterNewBinding.bindingGeneration).not.toBe(firstBinding.bindingGeneration)
+    expect(memoryOwnerNamespaceKey(afterNew)).toBe(memoryOwnerNamespaceKey(beforeNew))
+    expect(store.get(afterNew, userGlobal, first.id)?.content).toBe('survives slash-new')
+    const renamedPrincipal: MemoryOwnerNamespace = {
+      ...afterNew,
+      principalDigest: 'f'.repeat(64),
+    }
+    expect(memoryOwnerNamespaceKey(renamedPrincipal)).toBe(memoryOwnerNamespaceKey(beforeNew))
+    expect(store.get(renamedPrincipal, userGlobal, first.id)?.id).toBe(first.id)
+
+    const rotated: MemoryOwnerNamespace = { ...namespaceA, principalVersion: 2 }
+    expect(store.get(rotated, userGlobal, first.id)).toBeUndefined()
+    expect(store.list(rotated, userGlobal)).toEqual([])
+    store.close()
+  })
+
+  test('durably tombstones cancellation before submit and rejects changed or delayed work', async () => {
+    const store = new MemoryStore({ path: await temporaryPath(), now: () => 10_000 })
+    const principal = 'lark/main/tenant/owner'
+    const namespace: MemoryOwnerNamespace = {
+      mode: 'delivery',
+      principalDigest: memoryPrincipalDigest(principal),
+      principalRecordId: 'principal-row-owner',
+      principalVersion: 4,
+    }
+    const promotion = {
+      promotionId: 'promotion-cancel-before-submit',
+      promotionGeneration: 2,
+      requestDigest: 'd'.repeat(64),
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      ownerGeneration: 9,
+    } as const
+    const cancellation = withPreferenceMemoryPromotionCancellationDigest({
+      contractVersion: 1 as const,
+      promotionId: promotion.promotionId,
+      promotionGeneration: promotion.promotionGeneration,
+      requestDigest: promotion.requestDigest,
+      principalLineage: {
+        principalRecordId: namespace.principalRecordId,
+        principalVersion: namespace.principalVersion,
+      },
+      ownerGeneration: promotion.ownerGeneration,
+      reason: 'forget' as const,
+      occurredAt: 9_999,
+    })
+
+    expect(store.cancelPromotionBeforeOrAfterSubmit(cancellation).outcome).toBe('cancelled')
+    expect(store.cancelPromotionBeforeOrAfterSubmit(cancellation).outcome).toBe('replayed')
+
+    const input = {
+      proposalId: 'cancelled-memory-proposal',
+      idempotencyKey: 'cancelled-memory-idempotency',
+      requester: 'preference-learning',
+      principal,
+      namespace,
+      ttlMs: 60_000,
+      notAfter: 70_000,
+      promotion,
+      mutation: { op: 'add', identity: userWorkspace, entry: entry('must never be proposed') },
+    } satisfies MemoryProposalInput & { proposalId: string; notAfter: number }
+    expect(store.prepareProposalIntent({ ...input, mutationHash: hashMemoryProposalIntent(input) }))
+      .toMatchObject({ kind: 'cancelled', receipt: { outcome: 'replayed' } })
+    expect(store.getProposalIntent(input.proposalId)).toBeUndefined()
+
+    const changed = withPreferenceMemoryPromotionCancellationDigest({
+      contractVersion: 1 as const,
+      promotionId: cancellation.promotionId,
+      promotionGeneration: cancellation.promotionGeneration,
+      requestDigest: cancellation.requestDigest,
+      principalLineage: { ...cancellation.principalLineage, principalVersion: 5 },
+      ownerGeneration: cancellation.ownerGeneration,
+      reason: cancellation.reason,
+      occurredAt: cancellation.occurredAt,
+    })
+    expect(() => store.cancelPromotionBeforeOrAfterSubmit(changed))
+      .toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'idempotency-conflict' }))
     store.close()
   })
 
@@ -270,7 +465,7 @@ describe('personal memory store', () => {
     ]
 
     for (const identity of invalid) {
-      expect(() => store.list(identity))
+      expect(() => store.list(namespaceA, identity))
         .toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'invalid-identity' }))
     }
     store.close()
@@ -282,28 +477,32 @@ describe('personal memory store', () => {
     const expiring = store.applyApprovedMutation({
       op: 'add',
       idempotencyKey: 'expiring',
+      namespace: namespaceA,
       identity: userGlobal,
       entry: entry('temporary', { expiresAt: 11_000 }),
     })
     const removed = store.applyApprovedMutation({
       op: 'add',
       idempotencyKey: 'remove-me',
+      namespace: namespaceA,
       identity: userGlobal,
       entry: entry('remove me'),
     })
     store.applyApprovedMutation({
       op: 'remove',
       idempotencyKey: 'remove-me-approved',
+      namespace: namespaceA,
       identity: userGlobal,
       id: removed.id,
       expectedVersion: removed.version,
     })
     now = 11_000
 
-    expect(store.get(userGlobal, expiring.id)).toBeUndefined()
-    expect(store.get(userGlobal, removed.id)).toBeUndefined()
-    expect(store.list(userGlobal)).toEqual([])
-    expect(store.list(userGlobal, { includeRemoved: true }).map(record => record.status)).toEqual(['removed'])
+    expect(store.get(namespaceA, userGlobal, expiring.id)).toBeUndefined()
+    expect(store.get(namespaceA, userGlobal, removed.id)).toBeUndefined()
+    expect(store.list(namespaceA, userGlobal)).toEqual([])
+    expect(store.list(namespaceA, userGlobal, { includeRemoved: true }).map(record => record.status))
+      .toEqual(['removed'])
     store.close()
   })
 
@@ -312,6 +511,7 @@ describe('personal memory store', () => {
     const original = store.applyApprovedMutation({
       op: 'add',
       idempotencyKey: 'add-editor',
+      namespace: namespaceA,
       identity: userGlobal,
       entry: entry('Preferred editor is Vim', { kind: 'preference' }),
     })
@@ -319,6 +519,7 @@ describe('personal memory store', () => {
     const replaced = store.applyApprovedMutation({
       op: 'replace',
       idempotencyKey: 'replace-editor',
+      namespace: namespaceA,
       identity: userGlobal,
       id: original.id,
       expectedVersion: original.version,
@@ -337,6 +538,7 @@ describe('personal memory store', () => {
     expect(() => store.applyApprovedMutation({
       op: 'replace',
       idempotencyKey: 'stale-replace',
+      namespace: namespaceA,
       identity: userGlobal,
       id: original.id,
       expectedVersion: 1,
@@ -350,6 +552,7 @@ describe('personal memory store', () => {
     const mutation = {
       op: 'add' as const,
       idempotencyKey: 'stable-add',
+      namespace: namespaceA,
       identity: userGlobal,
       entry: entry('Stable fact'),
     }
@@ -358,7 +561,7 @@ describe('personal memory store', () => {
     const replay = store.applyApprovedMutation(mutation)
 
     expect(replay).toEqual(created)
-    expect(store.list(userGlobal)).toHaveLength(1)
+    expect(store.list(namespaceA, userGlobal)).toHaveLength(1)
     store.close()
   })
 
@@ -371,6 +574,7 @@ describe('personal memory store', () => {
     store.applyApprovedMutation({
       op: 'add',
       idempotencyKey: 'first',
+      namespace: namespaceA,
       identity: userGlobal,
       entry: entry('same fact'),
     })
@@ -378,12 +582,14 @@ describe('personal memory store', () => {
     expect(() => store.applyApprovedMutation({
       op: 'add',
       idempotencyKey: 'duplicate',
+      namespace: namespaceA,
       identity: userGlobal,
       entry: entry('same fact'),
     })).toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'duplicate-content' }))
     expect(() => store.applyApprovedMutation({
       op: 'add',
       idempotencyKey: 'oversized',
+      namespace: namespaceA,
       identity: userGlobal,
       entry: entry('this content is too large'),
     })).toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'content-too-large' }))
@@ -396,8 +602,55 @@ describe('personal memory store', () => {
     const database = new DatabaseSync(path)
     database.exec('PRAGMA user_version = 99')
     database.close()
+    await chmod(path, 0o600)
 
     expect(() => new MemoryStore({ path }))
       .toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'schema-too-new' }))
+  })
+
+  test('rejects unsafe existing database files and sidecars', async () => {
+    const publicPath = await temporaryPath('public.sqlite')
+    await mkdir(join(publicPath, '..'), { recursive: true })
+    await writeFile(publicPath, '')
+    await chmod(publicPath, 0o644)
+    expect(() => new MemoryStore({ path: publicPath }))
+      .toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'unsafe-file' }))
+
+    const target = await temporaryPath('target.sqlite')
+    await mkdir(join(target, '..'), { recursive: true })
+    await writeFile(target, '')
+    await chmod(target, 0o600)
+    const symbolic = await temporaryPath('symbolic.sqlite')
+    await mkdir(join(symbolic, '..'), { recursive: true })
+    await symlink(target, symbolic)
+    expect(() => new MemoryStore({ path: symbolic }))
+      .toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'unsafe-file' }))
+
+    const hard = await temporaryPath('hard.sqlite')
+    await mkdir(join(hard, '..'), { recursive: true })
+    await link(target, hard)
+    expect(() => new MemoryStore({ path: target }))
+      .toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'unsafe-file' }))
+
+    const owned = await temporaryPath('wrong-owner.sqlite')
+    await mkdir(join(owned, '..'), { recursive: true })
+    await writeFile(owned, '')
+    await chmod(owned, 0o600)
+    const uid = process.getuid?.()
+    if (uid !== undefined) {
+      vi.spyOn(process, 'getuid').mockReturnValue(uid + 1)
+      expect(() => new MemoryStore({ path: owned }))
+        .toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'unsafe-file' }))
+      vi.restoreAllMocks()
+    }
+
+    const sidecarPath = await temporaryPath('sidecar.sqlite')
+    await mkdir(join(sidecarPath, '..'), { recursive: true })
+    await writeFile(sidecarPath, '')
+    await chmod(sidecarPath, 0o600)
+    await writeFile(`${sidecarPath}-wal`, '')
+    await chmod(`${sidecarPath}-wal`, 0o644)
+    expect(() => new MemoryStore({ path: sidecarPath }))
+      .toThrowError(expect.objectContaining<Partial<MemoryStoreError>>({ code: 'unsafe-file' }))
   })
 })

@@ -19,3 +19,4 @@
         maxOverlayBytes: 2048
         maintenanceIntervalMs: 3600000
         maintenanceBatchSize: 500
+        promotionReconcileLimit: 50

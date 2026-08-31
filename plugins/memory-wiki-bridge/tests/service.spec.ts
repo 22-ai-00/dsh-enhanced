@@ -7,12 +7,15 @@ import { MemoryWikiBridgeError, MemoryWikiBridgeService } from '../src/service.t
 const contexts: Context[] = []
 afterEach(async () => { await Promise.all(contexts.splice(0).map(ctx => ctx.fiber.restart())) })
 
+const memoryNamespace = { mode: 'headless', principalDigest: 'c'.repeat(64),
+  lineageId: 'headless:test-owner', lineageVersion: 1 } as const
+
 const memoryRecords = [
-  { id: 'mem-a', version: 2, contentHash: 'a'.repeat(64), content: 'User prefers concise reports.',
+  { namespace: memoryNamespace, id: 'mem-a', version: 2, contentHash: 'a'.repeat(64), content: 'User prefers concise reports.',
     kind: 'preference', sensitivity: 'private', trust: 'user-confirmed', confidence: 1,
     provenance: { source: 'user', observedAt: 1 }, owner: 'user', scope: 'user-global', status: 'active',
     createdAt: 1, updatedAt: 2 },
-  { id: 'mem-b', version: 1, contentHash: 'b'.repeat(64), content: 'Project Atlas uses a local-first architecture.',
+  { namespace: memoryNamespace, id: 'mem-b', version: 1, contentHash: 'b'.repeat(64), content: 'Project Atlas uses a local-first architecture.',
     kind: 'fact', sensitivity: 'private', trust: 'user-confirmed', confidence: 1,
     provenance: { source: 'user', observedAt: 1 }, owner: 'user', scope: 'workspace', workspace: '/work/alpha',
     status: 'active', createdAt: 1, updatedAt: 2 },

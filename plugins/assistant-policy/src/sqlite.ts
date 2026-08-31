@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const policySchemaVersion = 5
+export const policySchemaVersion = 6
 
 export const legacyApprovalIntentHash = 'legacy-v4-unbound'
 
@@ -108,21 +108,46 @@ function migrate(database: DatabaseSync): void {
 
         CREATE TABLE approval_dispatches (
           proposal_id TEXT PRIMARY KEY,
+          route_version INTEGER NOT NULL CHECK (route_version IN (1, 2)),
           source_id TEXT NOT NULL,
           binding_id TEXT NOT NULL,
+          binding_version INTEGER,
+          binding_generation INTEGER,
           workspace TEXT NOT NULL,
           principal TEXT NOT NULL,
-          state TEXT NOT NULL CHECK (state IN ('pending', 'enqueued')),
+          principal_record_id TEXT,
+          principal_version INTEGER,
+          state TEXT NOT NULL CHECK (state IN ('pending', 'enqueued', 'quarantined')),
           payload_hash TEXT NOT NULL,
           created_at INTEGER NOT NULL,
           enqueued_at INTEGER,
           version INTEGER NOT NULL DEFAULT 1,
           proposal_version INTEGER NOT NULL,
+          CHECK (
+            (route_version = 1
+              AND state IN ('enqueued', 'quarantined')
+              AND binding_version IS NULL
+              AND binding_generation IS NULL
+              AND principal_record_id IS NULL
+              AND principal_version IS NULL)
+            OR
+            (route_version = 2
+              AND state IN ('pending', 'enqueued')
+              AND binding_version IS NOT NULL
+              AND binding_version BETWEEN 1 AND 9007199254740991
+              AND binding_generation IS NOT NULL
+              AND binding_generation BETWEEN 1 AND 9007199254740991
+              AND principal_record_id IS NOT NULL
+              AND length(CAST(principal_record_id AS BLOB)) BETWEEN 1 AND 500
+              AND principal_version IS NOT NULL
+              AND principal_version BETWEEN 1 AND 9007199254740991)
+          ),
           FOREIGN KEY (proposal_id) REFERENCES approval_proposals(id) ON DELETE CASCADE
         ) STRICT;
 
         CREATE INDEX approval_dispatches_pending_idx
-          ON approval_dispatches(state, created_at, proposal_id);
+          ON approval_dispatches(created_at, proposal_id)
+          WHERE state = 'pending' AND route_version = 2;
 
         CREATE TABLE approval_idempotency_tombstones (
           idempotency_key TEXT PRIMARY KEY,
@@ -146,9 +171,9 @@ function migrate(database: DatabaseSync): void {
           details_json TEXT NOT NULL
         ) STRICT;
 
-        INSERT INTO schema_meta(key, value) VALUES ('schema-version', '5');
+        INSERT INTO schema_meta(key, value) VALUES ('schema-version', '6');
       `)
-      version = 5
+      version = 6
     }
 
     if (version === 1) {
@@ -224,6 +249,129 @@ function migrate(database: DatabaseSync): void {
         DROP TABLE approval_idempotency_tombstones_v4;
       `)
       version = 5
+    }
+
+    if (version === 5) {
+      // A v5 route has no durable Delivery lineage. Preserve it explicitly as
+      // v1 rather than manufacturing binding/principal fence values. Rebuild
+      // the table so fresh and migrated databases enforce the same all-or-none
+      // v2 authority contract.
+      const dispatchTable = database.prepare(`
+        SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'approval_dispatches'
+      `).get() as { name: string } | undefined
+      if (dispatchTable === undefined) {
+        // Early v4 test/development fixtures could omit the then-unrelated
+        // dispatch table. Keep that accepted migration surface.
+        database.exec(`
+          CREATE TABLE approval_dispatches (
+            proposal_id TEXT PRIMARY KEY,
+            route_version INTEGER NOT NULL CHECK (route_version IN (1, 2)),
+            source_id TEXT NOT NULL,
+            binding_id TEXT NOT NULL,
+            binding_version INTEGER,
+            binding_generation INTEGER,
+            workspace TEXT NOT NULL,
+            principal TEXT NOT NULL,
+            principal_record_id TEXT,
+            principal_version INTEGER,
+            state TEXT NOT NULL CHECK (state IN ('pending', 'enqueued', 'quarantined')),
+            payload_hash TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            enqueued_at INTEGER,
+            version INTEGER NOT NULL DEFAULT 1,
+            proposal_version INTEGER NOT NULL,
+            CHECK (
+              (route_version = 1
+                AND state IN ('enqueued', 'quarantined')
+                AND binding_version IS NULL
+                AND binding_generation IS NULL
+                AND principal_record_id IS NULL
+                AND principal_version IS NULL)
+              OR
+              (route_version = 2
+                AND state IN ('pending', 'enqueued')
+                AND binding_version IS NOT NULL
+                AND binding_version BETWEEN 1 AND 9007199254740991
+                AND binding_generation IS NOT NULL
+                AND binding_generation BETWEEN 1 AND 9007199254740991
+                AND principal_record_id IS NOT NULL
+                AND length(CAST(principal_record_id AS BLOB)) BETWEEN 1 AND 500
+                AND principal_version IS NOT NULL
+                AND principal_version BETWEEN 1 AND 9007199254740991)
+            ),
+            FOREIGN KEY (proposal_id) REFERENCES approval_proposals(id) ON DELETE CASCADE
+          ) STRICT;
+          CREATE INDEX approval_dispatches_pending_idx
+            ON approval_dispatches(created_at, proposal_id)
+            WHERE state = 'pending' AND route_version = 2;
+        `)
+      } else {
+        database.exec(`
+        DROP INDEX IF EXISTS approval_dispatches_pending_idx;
+        ALTER TABLE approval_dispatches RENAME TO approval_dispatches_v5;
+        CREATE TABLE approval_dispatches (
+          proposal_id TEXT PRIMARY KEY,
+          route_version INTEGER NOT NULL CHECK (route_version IN (1, 2)),
+          source_id TEXT NOT NULL,
+          binding_id TEXT NOT NULL,
+          binding_version INTEGER,
+          binding_generation INTEGER,
+          workspace TEXT NOT NULL,
+          principal TEXT NOT NULL,
+          principal_record_id TEXT,
+          principal_version INTEGER,
+          state TEXT NOT NULL CHECK (state IN ('pending', 'enqueued', 'quarantined')),
+          payload_hash TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          enqueued_at INTEGER,
+          version INTEGER NOT NULL DEFAULT 1,
+          proposal_version INTEGER NOT NULL,
+          CHECK (
+            (route_version = 1
+              AND state IN ('enqueued', 'quarantined')
+              AND binding_version IS NULL
+              AND binding_generation IS NULL
+              AND principal_record_id IS NULL
+              AND principal_version IS NULL)
+            OR
+            (route_version = 2
+              AND state IN ('pending', 'enqueued')
+              AND binding_version IS NOT NULL
+              AND binding_version BETWEEN 1 AND 9007199254740991
+              AND binding_generation IS NOT NULL
+              AND binding_generation BETWEEN 1 AND 9007199254740991
+              AND principal_record_id IS NOT NULL
+              AND length(CAST(principal_record_id AS BLOB)) BETWEEN 1 AND 500
+              AND principal_version IS NOT NULL
+              AND principal_version BETWEEN 1 AND 9007199254740991)
+          ),
+          FOREIGN KEY (proposal_id) REFERENCES approval_proposals(id) ON DELETE CASCADE
+        ) STRICT;
+        INSERT INTO approval_dispatches(
+          proposal_id, route_version, source_id, binding_id, binding_version,
+          binding_generation, workspace, principal, principal_record_id,
+          principal_version, state, payload_hash, created_at, enqueued_at,
+          version, proposal_version
+        )
+        SELECT proposal_id, 1, source_id, binding_id, NULL, NULL, workspace,
+               principal, NULL, NULL,
+               CASE state WHEN 'pending' THEN 'quarantined' ELSE state END,
+               payload_hash, created_at,
+               enqueued_at, version, proposal_version
+        FROM approval_dispatches_v5;
+        UPDATE approval_proposals
+        SET diff_text = NULL
+        WHERE EXISTS (
+          SELECT 1 FROM approval_dispatches_v5
+          WHERE approval_dispatches_v5.proposal_id = approval_proposals.id
+        );
+        DROP TABLE approval_dispatches_v5;
+        CREATE INDEX approval_dispatches_pending_idx
+          ON approval_dispatches(created_at, proposal_id)
+          WHERE state = 'pending' AND route_version = 2;
+        `)
+      }
+      version = 6
     }
 
     if (version !== policySchemaVersion) {

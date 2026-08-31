@@ -1,8 +1,14 @@
+import { createHash } from 'node:crypto'
 import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const controlPlaneSchemaVersion = 8
+export const controlPlaneSchemaVersion = 11
+
+export function controlPlaneOperationReceiptDigest(idempotencyKey: string, operation: string, inputDigest: string,
+  resultJson: string, createdAt: number): string {
+  return createHash('sha256').update(JSON.stringify([idempotencyKey, operation, inputDigest, resultJson, createdAt])).digest('hex')
+}
 
 export class ControlPlaneDatabaseError extends Error {
   constructor(readonly code: 'invalid-path' | 'schema-too-new' | 'unsafe-file', message: string) {
@@ -82,6 +88,7 @@ function createCurrent(database: DatabaseSync): void {
       created_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
       approval_json TEXT CHECK(approval_json IS NULL OR json_valid(approval_json)),
+      approval_receipt_json TEXT CHECK(approval_receipt_json IS NULL OR (json_valid(approval_receipt_json) AND json_type(approval_receipt_json) = 'object')),
       activation_id TEXT,
       activation_fence INTEGER NOT NULL DEFAULT 0 CHECK(activation_fence >= 0),
       activation_lease_until INTEGER,
@@ -118,6 +125,11 @@ function createCurrent(database: DatabaseSync): void {
       created_at INTEGER NOT NULL,
       expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
       approval_json TEXT CHECK(approval_json IS NULL OR json_valid(approval_json)),
+      checked_tree_digest TEXT CHECK(checked_tree_digest IS NULL OR (length(checked_tree_digest) = 64 AND checked_tree_digest NOT GLOB '*[^a-f0-9]*')),
+      checked_patch_digest TEXT CHECK(checked_patch_digest IS NULL OR (length(checked_patch_digest) = 64 AND checked_patch_digest NOT GLOB '*[^a-f0-9]*')),
+      checked_at INTEGER,
+      release_authorization_json TEXT CHECK(release_authorization_json IS NULL OR (json_valid(release_authorization_json) AND json_type(release_authorization_json) = 'object')),
+      release_authorization_digest TEXT CHECK(release_authorization_digest IS NULL OR length(release_authorization_digest) = 64),
       release_id TEXT,
       release_fence INTEGER NOT NULL DEFAULT 0 CHECK(release_fence >= 0),
       release_failure_phase TEXT CHECK(release_failure_phase IS NULL OR release_failure_phase IN (
@@ -125,6 +137,10 @@ function createCurrent(database: DatabaseSync): void {
       )),
       release_failure_code TEXT,
       updated_at INTEGER NOT NULL,
+      CHECK((checked_tree_digest IS NULL AND checked_patch_digest IS NULL AND checked_at IS NULL) OR
+        (checked_tree_digest IS NOT NULL AND checked_patch_digest IS NOT NULL AND checked_at IS NOT NULL)),
+      CHECK((release_authorization_json IS NULL AND release_authorization_digest IS NULL) OR
+        (release_authorization_json IS NOT NULL AND release_authorization_digest IS NOT NULL)),
       FOREIGN KEY(gap_id) REFERENCES capability_gaps(id) ON DELETE RESTRICT
     ) STRICT;
 
@@ -168,6 +184,9 @@ function createCurrent(database: DatabaseSync): void {
     CREATE TABLE source_release_operations (
       plan_id TEXT NOT NULL,
       phase TEXT NOT NULL CHECK(phase IN ('pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission')),
+      release_id TEXT NOT NULL,
+      release_fence INTEGER NOT NULL CHECK(release_fence >= 1),
+      attempt INTEGER NOT NULL CHECK(attempt >= 1),
       operation_id TEXT NOT NULL UNIQUE,
       binding_digest TEXT NOT NULL CHECK(length(binding_digest) = 64),
       request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
@@ -178,7 +197,13 @@ function createCurrent(database: DatabaseSync): void {
       created_at INTEGER NOT NULL,
       completed_at INTEGER,
       applied_at INTEGER,
-      PRIMARY KEY(plan_id, phase),
+      PRIMARY KEY(plan_id, phase, attempt),
+      UNIQUE(plan_id, phase, release_fence),
+      CHECK(
+        (status = 'pending' AND receipt_digest IS NULL AND receipt_json IS NULL AND completed_at IS NULL AND applied_at IS NULL) OR
+        (status = 'completed' AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND completed_at IS NOT NULL AND applied_at IS NULL) OR
+        (status = 'applied' AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND completed_at IS NOT NULL AND applied_at IS NOT NULL)
+      ),
       FOREIGN KEY(plan_id) REFERENCES source_plans(id) ON DELETE RESTRICT
     ) STRICT, WITHOUT ROWID;
 
@@ -187,6 +212,7 @@ function createCurrent(database: DatabaseSync): void {
       operation TEXT NOT NULL,
       input_digest TEXT NOT NULL CHECK(length(input_digest) = 64),
       result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+      result_digest TEXT NOT NULL CHECK(length(result_digest) = 64),
       created_at INTEGER NOT NULL
     ) STRICT, WITHOUT ROWID;
 
@@ -197,7 +223,33 @@ function createCurrent(database: DatabaseSync): void {
       quarantined_at INTEGER NOT NULL
     ) STRICT, WITHOUT ROWID;
 
-    PRAGMA user_version = 8;
+    CREATE TABLE source_publish_reconciliations (
+      plan_id TEXT NOT NULL,
+      release_id TEXT NOT NULL,
+      release_fence INTEGER NOT NULL CHECK(release_fence >= 1),
+      attempt INTEGER NOT NULL CHECK(attempt >= 1),
+      operation_id TEXT NOT NULL,
+      binding_digest TEXT NOT NULL CHECK(length(binding_digest) = 64),
+      request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+      request_json TEXT NOT NULL CHECK(json_valid(request_json) AND json_type(request_json) = 'object'),
+      status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'applied')),
+      receipt_digest TEXT CHECK(receipt_digest IS NULL OR length(receipt_digest) = 64),
+      receipt_json TEXT CHECK(receipt_json IS NULL OR (json_valid(receipt_json) AND json_type(receipt_json) = 'object')),
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      applied_at INTEGER,
+      PRIMARY KEY(plan_id, attempt),
+      UNIQUE(operation_id),
+      CHECK(
+        (status = 'pending' AND receipt_digest IS NULL AND receipt_json IS NULL AND completed_at IS NULL AND applied_at IS NULL) OR
+        (status = 'completed' AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND completed_at IS NOT NULL AND applied_at IS NULL) OR
+        (status = 'applied' AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND completed_at IS NOT NULL AND applied_at IS NOT NULL)
+      ),
+      FOREIGN KEY(plan_id) REFERENCES source_plans(id) ON DELETE RESTRICT
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX source_publish_reconciliations_release ON source_publish_reconciliations(plan_id, release_fence, created_at);
+
+    PRAGMA user_version = 11;
   `)
 }
 
@@ -457,6 +509,151 @@ function migrateV7ToV8(database: DatabaseSync): void {
   `)
 }
 
+function migrateV8ToV9(database: DatabaseSync): void {
+  const sourceColumns = new Set((database.prepare('PRAGMA table_info(source_plans)').all() as Array<{ name: string }>).map(column => column.name))
+  const addSourceColumns = [
+    sourceColumns.has('checked_tree_digest') ? '' : "ALTER TABLE source_plans ADD COLUMN checked_tree_digest TEXT CHECK(checked_tree_digest IS NULL OR (length(checked_tree_digest) = 64 AND checked_tree_digest NOT GLOB '*[^a-f0-9]*'));",
+    sourceColumns.has('checked_patch_digest') ? '' : "ALTER TABLE source_plans ADD COLUMN checked_patch_digest TEXT CHECK(checked_patch_digest IS NULL OR (length(checked_patch_digest) = 64 AND checked_patch_digest NOT GLOB '*[^a-f0-9]*'));",
+    sourceColumns.has('checked_at') ? '' : 'ALTER TABLE source_plans ADD COLUMN checked_at INTEGER;',
+    sourceColumns.has('release_authorization_json') ? '' : `ALTER TABLE source_plans ADD COLUMN release_authorization_json TEXT
+      CHECK(release_authorization_json IS NULL OR (json_valid(release_authorization_json) AND json_type(release_authorization_json) = 'object'));`,
+    sourceColumns.has('release_authorization_digest') ? '' : 'ALTER TABLE source_plans ADD COLUMN release_authorization_digest TEXT CHECK(release_authorization_digest IS NULL OR length(release_authorization_digest) = 64);',
+  ].join('\n')
+  database.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN IMMEDIATE;
+    -- The table did not exist in released v8. Keeping this cleanup inside the
+    -- transaction also makes interrupted-development migrations atomic.
+    DROP TABLE IF EXISTS source_publish_reconciliations;
+    ${addSourceColumns}
+    UPDATE source_plans SET status = 'release-failed', release_failure_code = 'legacy-unverifiable-release',
+      release_failure_phase = CASE status
+        WHEN 'awaiting-pr' THEN 'pr' WHEN 'awaiting-review' THEN 'review' WHEN 'awaiting-merge' THEN 'merge'
+        WHEN 'awaiting-build' THEN 'build' WHEN 'awaiting-sign' THEN 'sign' WHEN 'awaiting-publish' THEN 'publish'
+        WHEN 'awaiting-registry-verify' THEN 'registry-verify' WHEN 'awaiting-catalog-admission' THEN 'catalog-admission'
+        WHEN 'publish-ambiguous' THEN 'publish' WHEN 'release-complete' THEN 'catalog-admission' ELSE release_failure_phase END,
+      revision = revision + 1, updated_at = CASE WHEN updated_at < created_at THEN created_at ELSE updated_at END
+      WHERE status IN ('awaiting-pr', 'awaiting-review', 'awaiting-merge', 'awaiting-build', 'awaiting-sign',
+        'awaiting-publish', 'awaiting-registry-verify', 'awaiting-catalog-admission', 'publish-ambiguous', 'release-complete');
+    ALTER TABLE source_release_operations RENAME TO source_release_operations_v8;
+    CREATE TABLE source_release_operations (
+      plan_id TEXT NOT NULL,
+      phase TEXT NOT NULL CHECK(phase IN ('pr', 'review', 'merge', 'build', 'sign', 'publish', 'registry-verify', 'catalog-admission')),
+      release_id TEXT NOT NULL,
+      release_fence INTEGER NOT NULL CHECK(release_fence >= 1),
+      attempt INTEGER NOT NULL CHECK(attempt >= 1),
+      operation_id TEXT NOT NULL UNIQUE,
+      binding_digest TEXT NOT NULL CHECK(length(binding_digest) = 64),
+      request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+      request_json TEXT NOT NULL CHECK(json_valid(request_json) AND json_type(request_json) = 'object'),
+      status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'applied')),
+      receipt_digest TEXT CHECK(receipt_digest IS NULL OR length(receipt_digest) = 64),
+      receipt_json TEXT CHECK(receipt_json IS NULL OR (json_valid(receipt_json) AND json_type(receipt_json) = 'object')),
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      applied_at INTEGER,
+      PRIMARY KEY(plan_id, phase, attempt),
+      UNIQUE(plan_id, phase, release_fence),
+      CHECK(
+        (status = 'pending' AND receipt_digest IS NULL AND receipt_json IS NULL AND completed_at IS NULL AND applied_at IS NULL) OR
+        (status = 'completed' AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND completed_at IS NOT NULL AND applied_at IS NULL) OR
+        (status = 'applied' AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND completed_at IS NOT NULL AND applied_at IS NOT NULL)
+      ),
+      FOREIGN KEY(plan_id) REFERENCES source_plans(id) ON DELETE RESTRICT
+    ) STRICT, WITHOUT ROWID;
+    INSERT OR REPLACE INTO quarantined_legacy_plans (source, reason, payload_json, quarantined_at)
+      SELECT 'source_release_operations_v8:' || operation_id, 'release-operation-lacks-post-check-authorization-and-attempt-binding',
+        json_object('plan_id', plan_id, 'phase', phase, 'operation_id', operation_id, 'binding_digest', binding_digest,
+          'request_digest', request_digest, 'request_json', json(request_json), 'status', status,
+          'receipt_digest', receipt_digest, 'receipt_json', CASE WHEN receipt_json IS NULL THEN NULL ELSE json(receipt_json) END,
+          'created_at', created_at, 'completed_at', completed_at, 'applied_at', applied_at),
+        CAST(strftime('%s', 'now') AS INTEGER) * 1000
+      FROM source_release_operations_v8;
+    DROP TABLE source_release_operations_v8;
+    CREATE TABLE source_publish_reconciliations (
+      plan_id TEXT NOT NULL,
+      release_id TEXT NOT NULL,
+      release_fence INTEGER NOT NULL CHECK(release_fence >= 1),
+      attempt INTEGER NOT NULL CHECK(attempt >= 1),
+      operation_id TEXT NOT NULL,
+      binding_digest TEXT NOT NULL CHECK(length(binding_digest) = 64),
+      request_digest TEXT NOT NULL CHECK(length(request_digest) = 64),
+      request_json TEXT NOT NULL CHECK(json_valid(request_json) AND json_type(request_json) = 'object'),
+      status TEXT NOT NULL CHECK(status IN ('pending', 'completed', 'applied')),
+      receipt_digest TEXT CHECK(receipt_digest IS NULL OR length(receipt_digest) = 64),
+      receipt_json TEXT CHECK(receipt_json IS NULL OR (json_valid(receipt_json) AND json_type(receipt_json) = 'object')),
+      created_at INTEGER NOT NULL,
+      completed_at INTEGER,
+      applied_at INTEGER,
+      PRIMARY KEY(plan_id, attempt),
+      UNIQUE(operation_id),
+      CHECK(
+        (status = 'pending' AND receipt_digest IS NULL AND receipt_json IS NULL AND completed_at IS NULL AND applied_at IS NULL) OR
+        (status = 'completed' AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND completed_at IS NOT NULL AND applied_at IS NULL) OR
+        (status = 'applied' AND receipt_digest IS NOT NULL AND receipt_json IS NOT NULL AND completed_at IS NOT NULL AND applied_at IS NOT NULL)
+      ),
+      FOREIGN KEY(plan_id) REFERENCES source_plans(id) ON DELETE RESTRICT
+    ) STRICT, WITHOUT ROWID;
+    CREATE INDEX source_publish_reconciliations_release ON source_publish_reconciliations(plan_id, release_fence, created_at);
+    PRAGMA user_version = 9;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `)
+}
+
+function migrateV9ToV10(database: DatabaseSync): void {
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    const columns = new Set((database.prepare('PRAGMA table_info(operation_receipts)').all() as Array<{ name: string }>).map(column => column.name))
+    const hadDigest = columns.has('result_digest')
+    const receipts = database.prepare(`SELECT idempotency_key, operation, input_digest, result_json,
+      ${hadDigest ? 'result_digest' : 'NULL AS result_digest'}, created_at FROM operation_receipts`).all() as Array<{
+        idempotency_key: string; operation: string; input_digest: string; result_json: string; result_digest: string | null; created_at: number
+      }>
+    database.exec(`
+      ALTER TABLE operation_receipts RENAME TO operation_receipts_v9;
+      CREATE TABLE operation_receipts (
+        idempotency_key TEXT PRIMARY KEY,
+        operation TEXT NOT NULL,
+        input_digest TEXT NOT NULL CHECK(length(input_digest) = 64),
+        result_json TEXT NOT NULL CHECK(json_valid(result_json)),
+        result_digest TEXT NOT NULL CHECK(length(result_digest) = 64),
+        created_at INTEGER NOT NULL
+      ) STRICT, WITHOUT ROWID;
+    `)
+    const insert = database.prepare(`INSERT INTO operation_receipts
+      (idempotency_key, operation, input_digest, result_json, result_digest, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    const quarantine = database.prepare(`INSERT OR REPLACE INTO quarantined_legacy_plans
+      (source, reason, payload_json, quarantined_at) VALUES (?, ?, ?, ?)`)
+    for (const row of receipts) {
+      const digest = controlPlaneOperationReceiptDigest(row.idempotency_key, row.operation, row.input_digest, row.result_json, row.created_at)
+      if (!hadDigest || row.result_digest === null) {
+        quarantine.run('operation_receipts_v9:' + row.idempotency_key, 'operation-receipt-lacks-full-envelope-digest',
+          JSON.stringify({ idempotencyKey: row.idempotency_key, operation: row.operation, inputDigest: row.input_digest,
+            result: JSON.parse(row.result_json) as unknown, createdAt: row.created_at }), Date.now())
+        continue
+      }
+      if (row.result_digest !== digest) {
+        throw new ControlPlaneDatabaseError('unsafe-file', 'schema-v9 operation receipt digest is corrupt')
+      }
+      insert.run(row.idempotency_key, row.operation, row.input_digest, row.result_json, digest, row.created_at)
+    }
+    database.exec('DROP TABLE operation_receipts_v9; PRAGMA user_version = 10; COMMIT')
+  } catch (error) { database.exec('ROLLBACK'); throw error }
+}
+
+function migrateV10ToV11(database: DatabaseSync): void {
+  const columns = new Set((database.prepare('PRAGMA table_info(activation_plans)').all() as Array<{ name: string }>).map(column => column.name))
+  database.exec('BEGIN IMMEDIATE')
+  try {
+    if (!columns.has('approval_receipt_json')) {
+      database.exec(`ALTER TABLE activation_plans ADD COLUMN approval_receipt_json TEXT
+        CHECK(approval_receipt_json IS NULL OR (json_valid(approval_receipt_json) AND json_type(approval_receipt_json) = 'object'))`)
+    }
+    database.exec('PRAGMA user_version = 11; COMMIT')
+  } catch (error) { database.exec('ROLLBACK'); throw error }
+}
+
 export function openControlPlaneDatabase(path: string): DatabaseSync {
   prepare(path)
   const database = new DatabaseSync(path)
@@ -473,6 +670,9 @@ export function openControlPlaneDatabase(path: string): DatabaseSync {
       if (version <= 5) migrateV5ToV6(database)
       if (version <= 6) migrateV6ToV7(database)
       if (version <= 7) migrateV7ToV8(database)
+      if (version <= 8) migrateV8ToV9(database)
+      if (version <= 9) migrateV9ToV10(database)
+      if (version <= 10) migrateV10ToV11(database)
     }
     database.exec('PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
     return database

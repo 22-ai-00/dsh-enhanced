@@ -247,6 +247,14 @@ function runtimeStoreFromService(service: AssistantDeliveryService): DeliverySto
   return (service as unknown as { deliveryStore: DeliveryStore }).deliveryStore
 }
 
+function approvalRouteFor(
+  service: AssistantDeliveryService,
+  binding: Readonly<ConversationBinding>,
+  sourceId = 'automation-1',
+) {
+  return service.prepareAgentApproval(foreground(binding.sessionId), { sourceId })
+}
+
 async function boundApprovalHarness(options: MountHarnessOptions & {
   sessionId?: string
   route?: ConversationRef
@@ -1924,7 +1932,7 @@ describe('assistant delivery Cordis service', () => {
     const proposal = ctx.assistantPolicy.propose({ idempotencyKey: 'approval-1', requester: 'automation:test',
       principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
       diff, summary: 'Send reviewed status', ttlMs: 5_000 })
-    expect(service.enqueueApproval({ sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
+    expect(service.enqueueApproval({ route: approvalRouteFor(service, binding),
       idempotencyKey: 'approval-card-1', text: diff, approval: {
         operationId: 'card-click-1', proposalId: proposal.proposalId, expectedVersion: 1,
         expiresAt: proposal.expiresAt, title: 'Send reviewed status', diffHash: proposal.diffHash,
@@ -1965,7 +1973,7 @@ describe('assistant delivery Cordis service', () => {
       callbackChatId: conversation.chat, bindingId: binding.id, principal, proposalId: proposal.proposalId,
       expectedVersion: proposal.version, diffHash: proposal.diffHash, decision: 'approved' as const,
       reason: 'owner approved exact change' }
-    service.enqueueApproval({ sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+    service.enqueueApproval({ route: approvalRouteFor(service, binding),
       idempotencyKey: 'approval-preterminal-card', text: diff, approval: { operationId: input.operationId,
         proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
         title: 'Already terminal', diffHash: proposal.diffHash } })
@@ -1999,7 +2007,7 @@ describe('assistant delivery Cordis service', () => {
       callbackChatId: conversation.chat, bindingId: binding.id, principal, proposalId: proposal.proposalId,
       expectedVersion: proposal.version, diffHash: proposal.diffHash, decision: 'approved' as const,
       reason: 'owner approved exact change' }
-    first.service.enqueueApproval({ sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+    first.service.enqueueApproval({ route: approvalRouteFor(first.service, binding),
       idempotencyKey: 'approval-crash-card', text: diff, approval: { operationId: input.operationId,
         proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
         title: 'Persist reviewed change', diffHash: proposal.diffHash } })
@@ -2046,7 +2054,7 @@ describe('assistant delivery Cordis service', () => {
       callbackChatId: conversation.chat, bindingId: binding.id, principal, proposalId: proposal.proposalId,
       expectedVersion: proposal.version, diffHash: proposal.diffHash, decision: 'approved' as const,
       reason: 'owner approved too late' }
-    service.enqueueApproval({ sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+    service.enqueueApproval({ route: approvalRouteFor(service, binding),
       idempotencyKey: 'approval-expiry-card', text: diff, approval: { operationId: input.operationId,
         proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
         title: 'Expiry recovery', diffHash: proposal.diffHash } })
@@ -2091,7 +2099,7 @@ describe('assistant delivery Cordis service', () => {
       callbackChatId: conversation.chat, bindingId: binding.id, principal, proposalId: proposal.proposalId,
       expectedVersion: proposal.version, diffHash: proposal.diffHash, decision: 'approved' as const,
       reason: 'owner approved' }
-    service.enqueueApproval({ sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+    service.enqueueApproval({ route: approvalRouteFor(service, binding),
       idempotencyKey: 'approval-terminal-conflict-card', text: diff, approval: { operationId: input.operationId,
         proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
         title: 'Conflicting terminal decision', diffHash: proposal.diffHash } })
@@ -2120,10 +2128,35 @@ describe('assistant delivery Cordis service', () => {
     service.registerInboundRuntime({ createSession: async () => ({ sessionId: 'delivery-session-1', workspace: '/work/alpha',
       agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
     await service.acceptInbound(envelope)
-    expect(service.prepareAgentApproval(foreground('delivery-session-1'), { sourceId: 'automation-1' }))
-      .toEqual(expect.objectContaining({ sourceId: 'automation-1', workspace: '/work/alpha',
-        principal: 'lark/bot-1/tenant-a/ou_owner' }))
     const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const owner = runtimeStoreFromService(service).getPrincipal(principal)!
+    expect(service.prepareAgentApproval(foreground('delivery-session-1'), { sourceId: 'automation-1' }))
+      .toEqual({
+        routeVersion: 2,
+        sourceId: 'automation-1',
+        bindingId: binding.id,
+        bindingVersion: binding.version,
+        bindingGeneration: binding.generation,
+        workspace: '/work/alpha',
+        principal: 'lark/bot-1/tenant-a/ou_owner',
+        principalRecordId: owner.id,
+        principalVersion: owner.version,
+      })
+    expect(service.preferencePrincipalForAgent(foreground('delivery-session-1'))).toEqual({
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      principalId: 'lark/bot-1/tenant-a/ou_owner',
+      principalLineage: { principalRecordId: owner.id, principalVersion: owner.version },
+      bindingId: binding.id,
+      bindingVersion: binding.version,
+      bindingGeneration: binding.generation,
+      sessionId: binding.sessionId,
+    })
+    expect(service.preferencePrincipalForAgent(
+      foregroundWithHeader('delivery-session-1', '/work/forged', 'primary'),
+    )).toBeUndefined()
+    expect(service.preferencePrincipalForAgent(
+      foregroundWithHeader('delivery-session-1', '/work/alpha', 'forged'),
+    )).toBeUndefined()
     const background = foregroundWithHeader('heartbeat-session', '/work/alpha', 'primary')
     const unbind = service.bindAgentApprovalRoute(background, { bindingId: binding.id })
     expect(service.prepareAgentApproval(background, { sourceId: 'automation-1' }))
@@ -2140,6 +2173,117 @@ describe('assistant delivery Cordis service', () => {
     expect(() => service.prepareAgentApproval(
       foregroundWithHeader('delivery-session-1', '/work/alpha', 'forged'), { sourceId: 'automation-1' },
     )).toThrowError(expect.objectContaining({ code: 'missing-binding' }))
+    await ctx.fiber.restart()
+  })
+
+  test('mints a unique v2 Preference approval route and reports stale owner fences', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const store = runtimeStoreFromService(service)
+    const binding = store.createBinding({
+      conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'preference-owner', policyRef: 'owner-dm',
+    })
+    const owner = store.getPrincipal(principal)!
+    const authority = {
+      sourceId: 'preference-promotion',
+      scope: { workspace: binding.workspace, preset: binding.agentPreset },
+      principalId: 'lark/bot-1/tenant-a/ou_owner',
+      principalLineage: { principalRecordId: owner.id, principalVersion: owner.version },
+      ownerGeneration: binding.generation,
+    }
+    expect(service.prepareOwnerApprovalForPreference(authority)).toEqual({
+      routeVersion: 2,
+      sourceId: authority.sourceId,
+      bindingId: binding.id,
+      bindingVersion: binding.version,
+      bindingGeneration: binding.generation,
+      workspace: binding.workspace,
+      principal: authority.principalId,
+      principalRecordId: owner.id,
+      principalVersion: owner.version,
+    })
+    expect(service.prepareOwnerApprovalForPreference({ ...authority, ownerGeneration: binding.generation + 1 }))
+      .toEqual({ kind: 'stale-owner' })
+    expect(service.prepareOwnerApprovalForPreference({ ...authority, principalLineage: {
+      ...authority.principalLineage, principalVersion: owner.version + 1,
+    } })).toEqual({ kind: 'stale-owner' })
+    expect(() => service.prepareOwnerApprovalForPreference({ ...authority, bindingId: binding.id } as never))
+      .toThrowError(expect.objectContaining({ code: 'runtime-conflict' }))
+    const second = store.createBinding({
+      conversation: { ...conversation, chat: 'oc_second_owner_route' },
+      principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'preference-owner-second', policyRef: 'owner-dm',
+    })
+    expect(service.prepareOwnerApprovalForPreference(authority)).toEqual({ kind: 'stale-owner' })
+    store.rotateBinding({
+      bindingId: second.id, expectedVersion: second.version, sessionId: 'preference-owner-second-next',
+    })
+
+    const next = store.rotateBinding({
+      bindingId: binding.id, expectedVersion: binding.version, sessionId: 'preference-owner-next',
+    })
+    expect(service.preferencePrincipalForAgent(foreground(binding.sessionId))).toBeUndefined()
+    expect(service.prepareOwnerApprovalForPreference(authority)).toEqual({ kind: 'stale-owner' })
+    expect(service.prepareOwnerApprovalForPreference({ ...authority, ownerGeneration: next.generation }))
+      .toEqual({ kind: 'stale-owner' })
+    store.revokePrincipal(owner.id, owner.version)
+    expect(service.preferencePrincipalForAgent(foreground(next.sessionId))).toBeUndefined()
+    expect(service.prepareOwnerApprovalForPreference({ ...authority, ownerGeneration: next.generation }))
+      .toEqual({ kind: 'stale-owner' })
+    await ctx.fiber.restart()
+  })
+
+  test('derives a workflow approval route from the revalidated private template owner', async () => {
+    const { ctx, service } = await harness()
+    const challenge = service.issuePairing('test', principal)
+    service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const store = runtimeStoreFromService(service)
+    const binding = store.createBinding({
+      conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'workflow-approval-owner', policyRef: 'owner-dm',
+    })
+    const template = {
+      templateRef: 'workflow-template:test',
+      templateDigest: 'a'.repeat(64),
+      privacyAttestation: {
+        kind: 'deterministic-deidentification' as const,
+        method: 'assistant-delivery-redaction-v1' as const,
+        attestationId: 'workflow-review:test',
+        attestationDigest: 'b'.repeat(64),
+      },
+    }
+    const resolved = {
+      contractVersion: 1 as const,
+      template,
+      scope: { workspace: binding.workspace, preset: binding.agentPreset },
+      ownerBindingId: binding.id,
+      principalId: 'lark/bot-1/tenant-a/ou_owner',
+      name: 'Daily summary',
+      prompt: 'Summarize current workspace state.',
+      schedule: { kind: 'cron' as const, expression: '0 9 * * *', timezone: 'UTC' },
+      timeoutMs: 60_000,
+      toolCatalogIds: ['assistant.agent-turn'],
+      deliveryBindingId: binding.id,
+    }
+    const resolve = vi.spyOn(service, 'resolveWorkflowAutomationTemplate').mockReturnValue(resolved)
+    const input = { sourceId: 'assistant-growth-automations', contractVersion: 1 as const, template,
+      scope: resolved.scope, ownerBindingId: binding.id }
+    const owner = store.getPrincipal(principal)!
+    expect(service.prepareWorkflowApproval(input)).toEqual({
+      routeVersion: 2, sourceId: input.sourceId, bindingId: binding.id,
+      bindingVersion: binding.version, bindingGeneration: binding.generation,
+      workspace: binding.workspace, principal: resolved.principalId,
+      principalRecordId: owner.id, principalVersion: owner.version,
+    })
+    resolve.mockImplementationOnce(() => {
+      store.rotateBinding({ bindingId: binding.id, expectedVersion: binding.version,
+        sessionId: 'workflow-approval-owner-next' })
+      return resolved
+    })
+    expect(() => service.prepareWorkflowApproval(input))
+      .toThrowError(expect.objectContaining({ code: 'missing-binding' }))
     await ctx.fiber.restart()
   })
 
@@ -2182,11 +2326,11 @@ describe('assistant delivery Cordis service', () => {
     const proposal = ctx.assistantPolicy.propose({ idempotencyKey: 'canonical-approval', requester: 'automation:test',
       principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
       diff, summary: 'Review exact diff', ttlMs: 5_000 })
-    const canonical = { sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
+    const canonical = { route: approvalRouteFor(service, binding),
       idempotencyKey: 'canonical-card', text: diff, approval: { operationId: `approval:${proposal.proposalId}`,
         proposalId: proposal.proposalId, expectedVersion: proposal.version, expiresAt: proposal.expiresAt,
         title: 'Review exact diff', diffHash: proposal.diffHash } }
-    expect(() => service.enqueueApproval({ ...canonical, workspace: '/work/other' })).toThrow()
+    expect(() => service.enqueueApproval({ ...canonical, route: { ...canonical.route, workspace: '/work/other' } })).toThrow()
     for (const changed of [
       { ...canonical, text: 'misleading diff', idempotencyKey: 'canonical-card-text' },
       { ...canonical, idempotencyKey: 'canonical-card-title', approval: { ...canonical.approval, title: 'Misleading' } },
@@ -2206,16 +2350,15 @@ describe('assistant delivery Cordis service', () => {
       agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
     await service.acceptInbound(envelope)
     const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const exactRoute = approvalRouteFor(service, binding)
     ctx.assistantPolicy.propose({ idempotencyKey: 'bad-dispatch', requester: 'automation:test',
       principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
       diff: 'bad', summary: 'Bad route', ttlMs: 5_000,
-      dispatch: { sourceId: 'automation-1', workspace: '/work/other', bindingId: binding.id,
-        principal: 'lark/bot-1/tenant-a/ou_owner' } })
+      dispatch: { ...exactRoute, workspace: '/work/other' } })
     const good = ctx.assistantPolicy.propose({ idempotencyKey: 'good-dispatch', requester: 'automation:test',
       principal: 'lark/bot-1/tenant-a/ou_owner', action: 'send', resource: { kind: 'message', id: binding.id },
       diff: 'good', summary: 'Good route', ttlMs: 5_000,
-      dispatch: { sourceId: 'automation-1', workspace: '/work/alpha', bindingId: binding.id,
-        principal: 'lark/bot-1/tenant-a/ou_owner' } })
+      dispatch: exactRoute })
     const mark = vi.spyOn(ctx.assistantPolicy, 'markApprovalDispatchEnqueued')
       .mockImplementationOnce(() => { throw new Error('simulated crash after durable enqueue') })
     await service.tick()
@@ -2240,6 +2383,7 @@ describe('assistant delivery Cordis service', () => {
     process: async () => ({ outcome: 'processed' }) })
     await service.acceptInbound(envelope)
     const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const route = approvalRouteFor(service, binding)
     const updatePresentation = vi.fn(async () => {})
     await service.registerAdapter({
       channel: 'lark',
@@ -2258,8 +2402,7 @@ describe('assistant delivery Cordis service', () => {
       diff: 'adopt exact rule',
       summary: 'Adopt exact rule',
       ttlMs: 60_000,
-      dispatch: { sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
-        principal: 'lark/bot-1/tenant-a/ou_owner' },
+      dispatch: route,
     })
     await service.tick()
     await service.whenIdle()
@@ -2307,6 +2450,7 @@ describe('assistant delivery Cordis service', () => {
     process: async () => ({ outcome: 'processed' }) })
     await service.acceptInbound(envelope)
     const binding = service.history(foreground('delivery-session-1'), {}).binding
+    const route = approvalRouteFor(service, binding)
     const updatePresentation = vi.fn(async (): Promise<void> => {
       throw new Error('provider temporarily unavailable')
     })
@@ -2327,8 +2471,7 @@ describe('assistant delivery Cordis service', () => {
       diff: 'apply exact state',
       summary: 'Apply exact state',
       ttlMs: 60_000,
-      dispatch: { sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
-        principal: 'lark/bot-1/tenant-a/ou_owner' },
+      dispatch: route,
     })
     await service.tick()
     await service.whenIdle()
@@ -2390,6 +2533,7 @@ describe('assistant delivery Cordis service', () => {
       agentPreset: 'primary', policyRef: 'owner-dm' }), process: async () => ({ outcome: 'processed' }) })
     await first.service.acceptInbound(envelope)
     const binding = first.service.history(foreground('delivery-session-1'), {}).binding
+    const exactRoute = approvalRouteFor(first.service, binding)
     const poison = Array.from({ length: 100 }, (_, index) => first.ctx.assistantPolicy.propose({
       idempotencyKey: `poison-dispatch-${index}`,
       requester: 'automation:test',
@@ -2399,8 +2543,7 @@ describe('assistant delivery Cordis service', () => {
       diff: `poison ${index}`,
       summary: `Poison dispatch ${index}`,
       ttlMs: 60_000,
-      dispatch: { sourceId: 'automation-1', workspace: `/work/poison-${index}`, bindingId: binding.id,
-        principal: 'lark/bot-1/tenant-a/ou_owner' },
+      dispatch: { ...exactRoute, workspace: `/work/poison-${index}` },
     }))
     vi.setSystemTime(30_001)
     const good = first.ctx.assistantPolicy.propose({
@@ -2412,8 +2555,7 @@ describe('assistant delivery Cordis service', () => {
       diff: 'the later valid approval',
       summary: 'Later valid approval',
       ttlMs: 60_000,
-      dispatch: { sourceId: 'automation-1', workspace: binding.workspace, bindingId: binding.id,
-        principal: 'lark/bot-1/tenant-a/ou_owner' },
+      dispatch: exactRoute,
     })
 
     await first.service.tick()

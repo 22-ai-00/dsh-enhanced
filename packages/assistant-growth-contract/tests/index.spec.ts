@@ -2,18 +2,33 @@ import { describe, expect, test } from 'vitest'
 import {
   ASSISTANT_GROWTH_CONTRACT_VERSION,
   GROWTH_EFFECT_BLOCKER_PROTOCOL,
+  brandPreferenceMemoryPromotionProducer,
   growthPortPayloadDigest,
+  isTrustedPreferenceMemoryPromotionProducer,
+  resolveTrustedPreferenceMemoryPromotionProducer,
   validateExternalPrincipalId,
   validateGrowthPromotionReceipt,
   validateResolvedWorkflowAutomationTemplate,
   validateGrowthShadowReceipt,
   validateWorkflowTraceRevision,
+  unbrandPreferenceMemoryPromotionProducer,
   withGrowthPortReceiptDigest,
+  PREFERENCE_MEMORY_PROMOTION_RENDERER_ID,
+  validatePreferenceMemoryPromotionCancellationReceipt,
+  validatePreferenceMemoryPromotionRequest,
+  validatePreferenceMemoryPromotionResult,
+  validatePreferenceMemoryPromotionSubmissionReceipt,
+  withPreferenceMemoryPromotionCancellationDigest,
+  withPreferenceMemoryPromotionCancellationReceiptDigest,
+  withPreferenceMemoryPromotionRequestDigest,
+  withPreferenceMemoryPromotionResultDigest,
+  withPreferenceMemoryPromotionSubmissionDigest,
   workflowArgumentShapeDigest,
   workflowAutomationTemplateContentDigest,
   workflowCandidateSignature,
   workflowTraceRevisionDigest,
   type GrowthAutomationArtifactRequest,
+  type PreferenceMemoryPromotionProducer,
   type WorkflowTraceRevision,
 } from '../src/index.ts'
 
@@ -79,6 +94,105 @@ function trace(): WorkflowTraceRevision {
 }
 
 describe('assistant growth shared contract', () => {
+  test('owns the exact revocable Preference promotion producer brand', () => {
+    const producer: PreferenceMemoryPromotionProducer = {
+      trustedMemoryPromotionProducerGeneration: () => 'preference-generation:1',
+      registerTrustedMemoryPromotionResultSink: () => () => {},
+    }
+    const wrapper = new Proxy(producer, {})
+
+    expect(isTrustedPreferenceMemoryPromotionProducer(producer)).toBe(false)
+    expect(isTrustedPreferenceMemoryPromotionProducer(wrapper)).toBe(false)
+    brandPreferenceMemoryPromotionProducer(producer)
+    expect(isTrustedPreferenceMemoryPromotionProducer(producer)).toBe(true)
+    expect(isTrustedPreferenceMemoryPromotionProducer(wrapper)).toBe(true)
+    expect(resolveTrustedPreferenceMemoryPromotionProducer(producer)).toBe(producer)
+    expect(resolveTrustedPreferenceMemoryPromotionProducer(wrapper)).toBe(producer)
+    expect(isTrustedPreferenceMemoryPromotionProducer({ ...producer })).toBe(false)
+    const revocable = Proxy.revocable(producer, {})
+    expect(resolveTrustedPreferenceMemoryPromotionProducer(revocable.proxy)).toBe(producer)
+    revocable.revoke()
+    expect(resolveTrustedPreferenceMemoryPromotionProducer(revocable.proxy)).toBeUndefined()
+    expect(isTrustedPreferenceMemoryPromotionProducer(revocable.proxy)).toBe(false)
+
+    unbrandPreferenceMemoryPromotionProducer(producer)
+    unbrandPreferenceMemoryPromotionProducer(producer)
+    expect(isTrustedPreferenceMemoryPromotionProducer(producer)).toBe(false)
+    expect(isTrustedPreferenceMemoryPromotionProducer(wrapper)).toBe(false)
+    expect(resolveTrustedPreferenceMemoryPromotionProducer(wrapper)).toBeUndefined()
+  })
+
+  test('strictly binds the fixed low-sensitivity preference promotion protocol', () => {
+    const request = withPreferenceMemoryPromotionRequestDigest({
+      contractVersion: 1 as const,
+      promotionId: 'promotion-1',
+      promotionGeneration: 1,
+      idempotencyKey: 'promotion-1:g1',
+      scope: { workspace: '/workspace', preset: 'default' },
+      principalId: 'lark/main/tenant/owner',
+      principalLineage: { principalRecordId: 'principal-row-1', principalVersion: 2 },
+      ownerGeneration: 3,
+      hypothesis: {
+        id: 'hypothesis-1', key: 'memory.retention' as const, value: 'long-term' as const,
+        version: 4, confidenceBps: 9_000, contradictionBps: 500,
+        supportingSignals: 3, distinctSignalSources: 2, evidenceMass: 3_000,
+      },
+      rendererId: PREFERENCE_MEMORY_PROMOTION_RENDERER_ID,
+      observedAt: 1_000,
+      deadlineAt: 2_000,
+    })
+    expect(validatePreferenceMemoryPromotionRequest(request)).toEqual(request)
+    expect(() => validatePreferenceMemoryPromotionRequest({
+      ...request, hypothesis: { ...request.hypothesis, key: 'external.commitments' },
+    })).toThrow(/allowlist|digest/iu)
+    expect(() => validatePreferenceMemoryPromotionRequest({
+      ...request, freeText: 'remember everything',
+    })).toThrow(/shape/iu)
+
+    const submission = withPreferenceMemoryPromotionSubmissionDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      outcome: 'accepted' as const, memoryProposalId: 'memory-proposal-1',
+    })
+    expect(validatePreferenceMemoryPromotionSubmissionReceipt(submission, request)).toEqual(submission)
+
+    const confirmed = withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 1, status: 'confirmed' as const, memoryProposalId: 'memory-proposal-1',
+      memoryProposalVersion: 2, memoryRecordId: 'memory-record-1', memoryRecordVersion: 1,
+      memoryRecordDigest: sha, occurredAt: 1_500,
+    })
+    expect(validatePreferenceMemoryPromotionResult(confirmed, request)).toEqual(confirmed)
+    expect(() => validatePreferenceMemoryPromotionResult(withPreferenceMemoryPromotionResultDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      resultVersion: 1, status: 'rejected' as const, rejectionKind: 'system' as never,
+      memoryProposalId: 'memory-proposal-1', memoryProposalVersion: 2, occurredAt: 1_500,
+    }), request)).toThrow(/owner rejection/iu)
+
+    const cancellation = withPreferenceMemoryPromotionCancellationDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      principalLineage: request.principalLineage, ownerGeneration: request.ownerGeneration,
+      reason: 'forget' as const, occurredAt: 1_600,
+    })
+    const cancellationReceipt = withPreferenceMemoryPromotionCancellationReceiptDigest({
+      contractVersion: 1 as const, promotionId: request.promotionId,
+      promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+      cancellationDigest: cancellation.cancellationDigest, outcome: 'cancelled' as const,
+    })
+    expect(validatePreferenceMemoryPromotionCancellationReceipt(cancellationReceipt, cancellation))
+      .toEqual(cancellationReceipt)
+    expect(() => validatePreferenceMemoryPromotionCancellationReceipt(
+      withPreferenceMemoryPromotionCancellationReceiptDigest({
+        contractVersion: 1 as const, promotionId: request.promotionId,
+        promotionGeneration: request.promotionGeneration, requestDigest: request.requestDigest,
+        cancellationDigest: cancellation.cancellationDigest, outcome: 'already-confirmed' as const,
+      }), cancellation,
+    )).toThrow(/compensation/iu)
+  })
+
   test('argument shape ignores scalar values, array order, and array length', () => {
     expect(workflowArgumentShapeDigest({ count: 1, flags: [true, 'x', true] }))
       .toBe(workflowArgumentShapeDigest({ count: 42, flags: ['secret', false] }))

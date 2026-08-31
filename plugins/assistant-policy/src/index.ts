@@ -29,6 +29,8 @@ export type {
   ApprovalDispatchResult,
   ApprovalDispatchCursor,
   ApprovalDispatchRoute,
+  ApprovalDispatchRouteV1,
+  ApprovalDispatchRouteV2,
   ApprovalDispatchSnapshot,
   ApprovalDispatchState,
   ApprovalProposalInput,
