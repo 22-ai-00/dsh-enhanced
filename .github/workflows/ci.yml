@@ -47,6 +47,25 @@ jobs:
           command -v python3 >/dev/null
           test -d /proc/self/fd
 
+          # ubuntu-latest enables an AppArmor restriction that lets bwrap create
+          # most namespaces but blocks the loopback setup for --unshare-net.
+          # The hosted runner is ephemeral; relax it here so the adapter test
+          # still exercises its real, network-isolated bubblewrap sandbox.
+          if [[ -r /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]] \
+            && [[ "$(</proc/sys/kernel/apparmor_restrict_unprivileged_userns)" == '1' ]]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          /usr/bin/bwrap \
+            --unshare-all \
+            --die-with-parent \
+            --new-session \
+            --ro-bind /usr /usr \
+            --ro-bind /lib /lib \
+            --ro-bind /lib64 /lib64 \
+            --proc /proc \
+            --dev /dev \
+            /usr/bin/true
+
       - name: Install native pnpm test runtime
         shell: bash
         run: |
