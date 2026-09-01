@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
-import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync, realpathSync } from 'node:fs'
-import { dirname, isAbsolute, resolve } from 'node:path'
+import { closeSync, constants, existsSync, lstatSync, mkdirSync, openSync } from 'node:fs'
+import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
 export const controlPlaneSchemaVersion = 11
@@ -32,9 +32,13 @@ function prepare(path: string): void {
   mkdirSync(directory, { recursive: true, mode: 0o700 })
   const directoryStat = lstatSync(directory)
   const uid = process.getuid?.()
-  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink() || realpathSync(directory) !== resolve(directory)
+  // The leaf directory itself must be a private, owner-owned real directory.
+  // A symlinked ancestor (for example a distro that exposes $HOME through a
+  // symlink such as /home/<user> -> /data00/home/<user>) is out of this
+  // plugin's control and is tolerated, matching the sibling sqlite bundles.
+  if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()
     || (directoryStat.mode & 0o077) !== 0 || (uid !== undefined && directoryStat.uid !== uid)) {
-    throw new ControlPlaneDatabaseError('unsafe-file', 'plugin-control-plane database directory must be private and must not traverse symlinks')
+    throw new ControlPlaneDatabaseError('unsafe-file', 'plugin-control-plane database directory must be a private, owner-owned real directory')
   }
   if (!existsSync(path)) closeSync(openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_RDWR, 0o600))
   assertPrivateRegularFile(path)
