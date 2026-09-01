@@ -454,13 +454,25 @@ describe('delivery SQLite boundary', () => {
       insert.run(`attachment-${index}`, owner, `sha-${index}`, `image-${index}`)
     }
     raw.exec('COMMIT')
+    const ordinalPlan = raw.prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT ROW_NUMBER() OVER (
+        PARTITION BY attachment.owner_kind, attachment.owner_id
+        ORDER BY attachment.rowid
+      ) - 1
+      FROM delivery_attachments AS attachment
+    `).all() as { detail: string }[]
+    expect(ordinalPlan.map(row => row.detail).join('\n')).not.toMatch(/CORRELATED/u)
     raw.exec('PRAGMA user_version = 6')
     raw.close()
 
     const startedAt = performance.now()
     const migrated = openDeliveryDatabase(path)
     const elapsedMs = performance.now() - startedAt
-    expect(elapsedMs).toBeLessThan(1_500)
+    // The query-plan assertion guards the quadratic regression. This wider
+    // wall-clock ceiling only catches a runaway migration without coupling the
+    // suite to runner contention from the other SQLite-heavy test workers.
+    expect(elapsedMs).toBeLessThan(5_000)
     expect(migrated.prepare(`
       SELECT ordinal FROM delivery_attachments
       WHERE owner_kind = 'inbox' AND owner_id = 'owner-99'

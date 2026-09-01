@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/personal-assistant",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "A core-only meta-bundle for the DSH personal assistant policy, memory, Wiki, and automations plugins.",
   "license": "MIT",
   "type": "module",

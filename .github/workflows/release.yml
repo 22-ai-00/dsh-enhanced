@@ -77,6 +77,48 @@ jobs:
           cache: pnpm
           registry-url: https://registry.npmjs.org
 
+      - name: Verify Linux E2E prerequisites
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install --yes --no-install-recommends \
+            bubblewrap \
+            file \
+            git \
+            python3 \
+            tar
+
+          command -v bwrap >/dev/null
+          command -v git >/dev/null
+          command -v tar >/dev/null
+          command -v python3 >/dev/null
+          test -d /proc/self/fd
+
+      - name: Install native pnpm test runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          runtime_prefix="${RUNNER_TEMP}/dsh-test-pnpm"
+          npm install \
+            --prefix "${runtime_prefix}" \
+            --no-audit \
+            --no-fund \
+            --no-save \
+            --package-lock=false \
+            @pnpm/exe@11.7.0
+
+          pnpm_root="${runtime_prefix}/node_modules/@pnpm/exe"
+          node -e '
+            const manifest = require(process.argv[1]);
+            if (manifest.name !== "@pnpm/exe" || manifest.version !== "11.7.0") {
+              throw new Error(`unexpected pnpm runtime: ${manifest.name}@${manifest.version}`);
+            }
+          ' "${pnpm_root}/package.json"
+          test -x "${pnpm_root}/pnpm"
+          file "${pnpm_root}/pnpm" | grep -Eq 'ELF .* executable'
+          printf 'DSH_TEST_PNPM_ROOT=%s\n' "${pnpm_root}" >> "${GITHUB_ENV}"
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
