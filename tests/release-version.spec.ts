@@ -687,6 +687,7 @@ describe('release version workflow', () => {
 
   test('root release commands include packages and bootstrap cyclic peer builds', async () => {
     const manifest = await readJson(join(repoRoot, 'package.json'))
+    const releaseWorkflow = await readFile(join(repoRoot, '.github', 'workflows', 'release.yml'), 'utf8')
 
     expect(manifest.scripts['pack:check']).toContain("--filter './packages/*'")
     expect(manifest.scripts['release:publish']).toContain("--filter './packages/*'")
@@ -700,6 +701,10 @@ describe('release version workflow', () => {
     )
     expect(manifest.scripts.test).toMatch(/^pnpm run build &&/)
     expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
+    expect(releaseWorkflow).toContain('- name: Verify Linux E2E prerequisites')
+    expect(releaseWorkflow).toContain('- name: Install native pnpm test runtime')
+    expect(releaseWorkflow).toContain("@pnpm/exe@11.7.0")
+    expect(releaseWorkflow).toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
   })
 
   test('status shows the recorded version and next default patch', async () => {

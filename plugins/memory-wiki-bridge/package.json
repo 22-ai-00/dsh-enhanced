@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/memory-wiki-bridge",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "description": "Proposal-only, provenance-stable promotion between DSH personal Memory and Wiki.",
   "license": "MIT",
   "type": "module",
