@@ -127,6 +127,43 @@ describe('release version workflow', () => {
     expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('1.0.0')
   })
 
+  test('supersede advances a failed pending release without recording it as successful', async () => {
+    const root = await createRepository('0.1.0', true)
+    expect(runRelease(root, 'prepare').status).toBe(0)
+
+    const result = runRelease(root, 'supersede', '0.1.2')
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Superseded pending release 0.1.1 with 0.1.2')
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.2')
+    expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('0.1.2')
+    expect((await readJson(join(root, 'packages', 'shared', 'package.json'))).version).toBe('0.1.2')
+    expect(await readFile(join(root, 'plugins', 'example', 'src', 'version.ts'), 'utf8'))
+      .toBe("export const version = '0.1.2'\n")
+    const ledger = await readJson(join(root, 'release-manifest.json'))
+    expect(ledger.current.version).toBe('0.1.0')
+    expect(ledger.history.map((release: { version: string }) => release.version)).toEqual(['0.1.0'])
+    expect(ledger.pending.version).toBe('0.1.2')
+    expect(ledger.pending.packages).toEqual({
+      '@fixture/example': '0.1.2',
+      '@fixture/shared': '0.1.2',
+    })
+  })
+
+  test('supersede requires an explicit version greater than the pending release', async () => {
+    const root = await createRepository('0.1.0')
+    expect(runRelease(root, 'prepare').status).toBe(0)
+
+    let result = runRelease(root, 'supersede')
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('An explicit replacement version is required')
+
+    result = runRelease(root, 'supersede', '0.1.1')
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('must be greater than pending release 0.1.1')
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.1')
+  })
+
   test('versions ordinary publishable packages together with plugins', async () => {
     const root = await createRepository('0.1.0', true)
 
@@ -648,11 +685,19 @@ describe('release version workflow', () => {
     expect(result.stdout).toContain('Verified release tag v0.1.0')
   })
 
-  test('root pack and publish commands include ordinary packages', async () => {
+  test('root release commands include packages and bootstrap cyclic peer builds', async () => {
     const manifest = await readJson(join(repoRoot, 'package.json'))
 
     expect(manifest.scripts['pack:check']).toContain("--filter './packages/*'")
     expect(manifest.scripts['release:publish']).toContain("--filter './packages/*'")
+    expect(manifest.scripts['release:supersede']).toContain('release-version.mjs supersede')
+    expect(manifest.scripts.build).toMatch(/^pnpm run build:bootstrap &&/)
+    expect(manifest.scripts['build:bootstrap']).toBe(
+      'pnpm run build:packages'
+      + ' && pnpm --filter @dsh-enhanced/assistant-policy run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-evaluation run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-delivery run build',
+    )
     expect(manifest.scripts.test).toMatch(/^pnpm run build &&/)
     expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
   })

@@ -1,6 +1,6 @@
 {
   "name": "dsh-enhanced",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "description": "A scalable monorepo for community DeepSeek Harness plugins.",
   "license": "MIT",
@@ -10,7 +10,8 @@
     "node": "^22.19.0 || >=24.0.0"
   },
   "scripts": {
-    "build": "pnpm --recursive --if-present run build",
+    "build": "pnpm run build:bootstrap && pnpm --recursive --if-present run build",
+    "build:bootstrap": "pnpm run build:packages && pnpm --filter @dsh-enhanced/assistant-policy run build && pnpm --filter @dsh-enhanced/assistant-evaluation run build && pnpm --filter @dsh-enhanced/assistant-delivery run build",
     "build:packages": "pnpm --recursive --filter './packages/*' --if-present run build",
     "check": "pnpm run validate && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run pack:check",
     "create:plugin": "node ./scripts/create-plugin.mjs",
@@ -20,6 +21,7 @@
     "release:publish": "pnpm --recursive --filter './plugins/*' --filter './packages/*' publish --no-git-checks",
     "release:record": "node ./scripts/release-version.mjs record",
     "release:status": "node ./scripts/release-version.mjs status",
+    "release:supersede": "node ./scripts/release-version.mjs supersede",
     "test": "pnpm run build && vitest run tests && pnpm --recursive --if-present run test",
     "typecheck": "pnpm run build && pnpm --recursive --if-present run typecheck",
     "validate": "node ./scripts/validate-workspace.mjs"
