@@ -333,6 +333,7 @@ async function createFixture(): Promise<ReleaseFixture> {
   const rolesRoot = join(root, 'roles')
   const toolchainRoot = join(root, 'toolchain')
   const pnpmRoot = toolchainRoot
+  const buildNodePath = join(toolchainRoot, 'node')
   const buildPnpmPath = join(toolchainRoot, 'pnpm')
   const storeRoot = join(root, 'pnpm-store')
   await Promise.all([
@@ -345,6 +346,7 @@ async function createFixture(): Promise<ReleaseFixture> {
     mkdir(storeRoot, { mode: 0o700 }),
   ])
   await cp(pnpmSourceRoot, pnpmRoot, { recursive: true })
+  await copyFile(nodePath, buildNodePath)
   const originalPnpm = join(pnpmRoot, 'pnpm'); const copiedPnpm = join(pnpmRoot, '.pnpm-copy')
   await copyFile(originalPnpm, copiedPnpm); await rm(originalPnpm); await writeFile(originalPnpm, await readFile(copiedPnpm), { mode: 0o700 }); await rm(copiedPnpm)
   await hardenToolchain(pnpmRoot)
@@ -368,6 +370,7 @@ async function createFixture(): Promise<ReleaseFixture> {
   await writeFile(join(source, 'plugins', 'fixture-capability', 'build.mjs'), `import { copyFileSync, mkdirSync, readFileSync, readlinkSync } from 'node:fs'
 if (process.cwd() !== '/workspace/plugins/fixture-capability' || process.env.HOME !== '/home'
   || process.env.TMPDIR !== '/tmp' || process.env.SOURCE_DATE_EPOCH !== '0') process.exit(9)
+if (process.execPath !== '/toolchain/node') process.exit(11)
 const hostNamespace = readFileSync('.host-netns', 'utf8').trim()
 if (readlinkSync('/proc/self/ns/net') === hostNamespace) process.exit(10)
 mkdirSync('lib', { recursive: true }); copyFileSync('src/index.js', 'lib/index.js')
@@ -450,6 +453,7 @@ mkdirSync('lib', { recursive: true }); copyFileSync('src/index.js', 'lib/index.j
   const tarExecutable = await executable(tarPath)
   const sandboxExecutable = await executable(sandboxPath)
   const nodeDigest = digestBytes(await readFile(nodePath))
+  const nodeExecutable = await executable(buildNodePath)
   const pnpmExecutable = await executable(buildPnpmPath)
   const pnpmRootPin = { path: await realpath(pnpmRoot), sha256: await directoryDigest(pnpmRoot) }
   const storeRootPin = { path: await realpath(storeRoot), sha256: await directoryDigest(storeRoot) }
@@ -506,7 +510,7 @@ mkdirSync('lib', { recursive: true }); copyFileSync('src/index.js', 'lib/index.j
         },
       })
     }
-    if (phase === 'build') Object.assign(config, { build: { sandboxExecutable, tarExecutable, pnpmExecutable,
+    if (phase === 'build') Object.assign(config, { build: { sandboxExecutable, tarExecutable, nodeExecutable, pnpmExecutable,
       pnpmRoot: pnpmRootPin, storeRoot: storeRootPin } })
     if (['publish', 'registry-verify', 'catalog-admission'].includes(phase)) {
       Object.assign(config, {

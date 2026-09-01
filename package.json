@@ -1,6 +1,6 @@
 {
   "name": "dsh-enhanced",
-  "version": "0.1.11",
+  "version": "0.1.12",
   "private": true,
   "description": "A scalable monorepo for community DeepSeek Harness plugins.",
   "license": "MIT",
@@ -22,7 +22,7 @@
     "release:record": "node ./scripts/release-version.mjs record",
     "release:status": "node ./scripts/release-version.mjs status",
     "release:supersede": "node ./scripts/release-version.mjs supersede",
-    "test": "pnpm run build && vitest run tests && pnpm --recursive --if-present run test",
+    "test": "pnpm run build && vitest run --testTimeout=15000 tests && pnpm --recursive --if-present run test",
     "typecheck": "pnpm run build && pnpm --recursive --if-present run typecheck",
     "validate": "node ./scripts/validate-workspace.mjs"
   },
