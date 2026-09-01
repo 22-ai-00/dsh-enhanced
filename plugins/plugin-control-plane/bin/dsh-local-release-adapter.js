@@ -227,11 +227,13 @@ function copyPinnedTree(source, destination, label) {
         const metadata = lstatSync(sourcePath)
         if (metadata.isDirectory()) {
           mkdirSync(destinationPath, { mode: metadata.mode & 0o777 })
+          chmodSync(destinationPath, metadata.mode & 0o777)
           const child = openSync(sourcePath, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW)
           try { visit({ descriptor: child }, join(sourceLogicalPath, name), destinationPath) } finally { closeSync(child) }
         } else if (metadata.isFile()) {
           const bytes = readFileSync(sourcePath)
           writeFileSync(destinationPath, bytes, { mode: metadata.mode & 0o777, flag: 'wx' })
+          chmodSync(destinationPath, metadata.mode & 0o777)
         } else if (metadata.isSymbolicLink()) {
           const target = readlinkSync(sourcePath)
           if (isAbsolute(target)) fail(`${label} contains an absolute symlink`)
