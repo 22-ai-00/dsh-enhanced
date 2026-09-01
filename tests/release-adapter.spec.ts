@@ -794,7 +794,15 @@ describe('owner-controlled local release adapter', () => {
         expectedRequires: target.policy.requires,
       },
     })
-    const buildReceipt = await runAdapter(target, buildRequest)
+    // Snapshot copies must preserve the owner-pinned mode bits even when the
+    // release worker runs with a restrictive production-style umask.
+    const previousUmask = process.umask(0o077)
+    let buildReceipt: SourceReleaseReceipt
+    try {
+      buildReceipt = await runAdapter(target, buildRequest)
+    } finally {
+      process.umask(previousUmask)
+    }
     verifyReceipt(buildRequest, buildReceipt, target.roles.build)
     const build = success(buildReceipt)
     if (build.kind !== 'build') throw new Error('missing build evidence')

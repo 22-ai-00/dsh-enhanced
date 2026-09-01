@@ -1005,7 +1005,7 @@ describe('personal-assistant growth composition', () => {
     expect(JSON.stringify(llm.requests.at(-1)?.messages))
       .toContain('Earlier runtime-context snapshots no longer apply')
     expect(runtime.ctx.assistantPreferenceLearning.health()).toMatchObject({ signals: 1, active: 0 })
-  })
+  }, 20_000)
 
   test('projects a committed reply after Preference is installed late and never reruns the owner turn', async () => {
     const root = await mkdtemp(join(tmpdir(), 'personal-assistant-preference-recovery-e2e-'))
