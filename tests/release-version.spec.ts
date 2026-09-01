@@ -700,6 +700,7 @@ describe('release version workflow', () => {
       + ' && pnpm --filter @dsh-enhanced/assistant-delivery run build',
     )
     expect(manifest.scripts.test).toMatch(/^pnpm run build &&/)
+    expect(manifest.scripts.test).toContain('vitest run --testTimeout=15000 tests')
     expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
     expect(releaseWorkflow).toContain('- name: Verify Linux E2E prerequisites')
     expect(releaseWorkflow).toContain('- name: Install native pnpm test runtime')

@@ -385,13 +385,15 @@ function catalogConfig(value) {
 }
 function buildConfig(value) {
   const item = object(value, 'build config')
-  exactKeys(item, ['sandboxExecutable', 'tarExecutable', 'pnpmExecutable', 'pnpmRoot', 'storeRoot'], 'build config')
+  exactKeys(item, ['sandboxExecutable', 'tarExecutable', 'nodeExecutable', 'pnpmExecutable', 'pnpmRoot', 'storeRoot'], 'build config')
   const sandboxExecutable = inspectExecutable(item.sandboxExecutable, 'build sandbox')
   const tarExecutable = inspectExecutable(item.tarExecutable, 'tar')
   if (sandboxExecutable.path !== '/usr/bin/bwrap') fail('local build adapter requires the pinned Linux bubblewrap sandbox')
+  const nodeExecutable = inspectExecutable(item.nodeExecutable, 'build Node executable')
   const pnpmExecutable = inspectExecutable(item.pnpmExecutable, 'pnpm executable')
   const pnpmRoot = pinnedDirectory(item.pnpmRoot, 'pnpm root')
   const storeRoot = pinnedDirectory(item.storeRoot, 'pnpm store')
+  if (nodeExecutable.path !== join(pnpmRoot.path, 'node')) fail('Node executable must be the pinned pnpm root node entrypoint')
   if (pnpmExecutable.path !== join(pnpmRoot.path, 'pnpm')) fail('pnpm executable must be the pinned pnpm root entrypoint')
   let pnpmManifest
   try { pnpmManifest = object(JSON.parse(readFileSync(join(pnpmRoot.path, 'package.json'), 'utf8')), 'pnpm manifest') }
@@ -400,7 +402,7 @@ function buildConfig(value) {
   const storeVersion = Number.parseInt(pnpmVersion.split('.')[0], 10)
   const projectsPath = join(storeRoot.path, `v${storeVersion}`, 'projects')
   if (!existsSync(projectsPath) || !lstatSync(projectsPath).isDirectory()) fail('pnpm store project registry is unavailable')
-  return { sandboxExecutable, tarExecutable, pnpmExecutable, pnpmRoot, storeRoot, storeVersion }
+  return { sandboxExecutable, tarExecutable, nodeExecutable, pnpmExecutable, pnpmRoot, storeRoot, storeVersion }
 }
 function verifyBuildPins(build) {
   for (const [item, label] of [[build.pnpmRoot, 'pnpm root'], [build.storeRoot, 'pnpm store']]) {
