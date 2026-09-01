@@ -339,6 +339,48 @@ async function prepare(root, requestedVersion) {
   console.log(`Prepared release ${version}`)
 }
 
+async function supersede(root, requestedVersion) {
+  if (requestedVersion === undefined) {
+    throw new Error('An explicit replacement version is required to supersede a pending release')
+  }
+  const { ledger, ledgerPath, pendingVersion } = await validatePendingRelease(root, 'supersede')
+  assertStableVersion(requestedVersion, 'Replacement release version')
+  if (compareVersions(requestedVersion, pendingVersion) <= 0) {
+    throw new Error(`Replacement release ${requestedVersion} must be greater than pending release ${pendingVersion}`)
+  }
+
+  const rootManifestPath = join(root, 'package.json')
+  const rootManifest = await readJson(rootManifestPath)
+  const workspacePackages = []
+  for (const entry of await publishableEntries(root)) {
+    const packagePath = join(entry.directory, entry.name)
+    const manifestPath = join(root, packagePath, 'package.json')
+    const versionPath = join(root, packagePath, 'src', 'version.ts')
+    const manifest = await readJson(manifestPath)
+    const versionSource = await readFile(versionPath, 'utf8')
+    if (manifest.version !== pendingVersion || parseRuntimeVersion(versionSource, manifest.name) !== pendingVersion) {
+      throw new Error(`${manifest.name} no longer matches pending release ${pendingVersion}`)
+    }
+    manifest.version = requestedVersion
+    workspacePackages.push({ manifest, manifestPath, versionPath })
+  }
+
+  rootManifest.version = requestedVersion
+  ledger.pending = {
+    version: requestedVersion,
+    preparedAt: new Date().toISOString(),
+    packages: Object.fromEntries(workspacePackages.map(({ manifest }) => [manifest.name, requestedVersion])),
+  }
+  await writeJson(rootManifestPath, rootManifest)
+  await Promise.all(workspacePackages.map(({ manifest, manifestPath }) => writeJson(manifestPath, manifest)))
+  await Promise.all(workspacePackages.map(({ versionPath }) => (
+    writeFile(versionPath, `export const version = '${requestedVersion}'\n`)
+  )))
+  await updatePinnedRemoteInstaller(root, requestedVersion)
+  await writeJson(ledgerPath, ledger)
+  console.log(`Superseded pending release ${pendingVersion} with ${requestedVersion}`)
+}
+
 async function record(root) {
   const { ledger, ledgerPath, pendingVersion } = await validatePendingRelease(root, 'record')
 
@@ -375,10 +417,11 @@ async function status(root) {
 async function main() {
   const { command, version, root } = parseArguments(process.argv.slice(2))
   if (command === 'prepare') return prepare(root, version)
+  if (command === 'supersede') return supersede(root, version)
   if (command === 'record') return record(root)
   if (command === 'status') return status(root)
   if (command === 'verify-tag') return verifyTag(root, version)
-  throw new Error('Usage: release-version.mjs <prepare|record|status|verify-tag> [version-or-tag] [--root <path>]')
+  throw new Error('Usage: release-version.mjs <prepare|supersede|record|status|verify-tag> [version-or-tag] [--root <path>]')
 }
 
 main().catch(error => {

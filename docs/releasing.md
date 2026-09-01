@@ -64,6 +64,14 @@ pnpm release:record
 
 若发版中途出现暂时性失败，`pending` 会保留。请在 GitHub Actions 中 rerun 原 run，或手动运行 Release workflow 并输入同一个现有 tag；不要为重试创建或移动标签。
 
+若失败原因必须修改源码，旧标签就不能再满足“标签等于当前 `origin/main`”的发布门。先确认旧 workflow 已停止，并检查该版本是否发生部分发布；修复合入 `main` 前，用显式更高版本替换 `pending`，例如：
+
+```sh
+pnpm release:supersede 0.1.9
+```
+
+该命令只推进待发布版本，不会把失败版本写入成功历史。旧标签必须保留且不得移动；修复和新版本变更通过完整校验、合入 `main` 后，再从新的 `origin/main` HEAD 创建新标签。如果旧 run 已部分发布，旧版本应视为不完整版本，不再重试，并确保替代版本包含完整包集合。
+
 仓库应通过 immutable tag ruleset 禁止删除或强制移动发布标签，并用 protected release environment 限制 `NPM_TOKEN` 的可用范围和审批人。递归发布不是原子事务，重试可能发生在部分包已经发布之后，但只能继续使用同一个版本和源码提交。
 
 ## `main` 并发与 TOCTOU
