@@ -704,6 +704,13 @@ describe('release version workflow', () => {
     expect(releaseWorkflow).toContain('- name: Verify Linux E2E prerequisites')
     expect(releaseWorkflow).toContain('- name: Install native pnpm test runtime')
     expect(releaseWorkflow).toContain("@pnpm/exe@11.7.0")
+    expect(releaseWorkflow).toContain('kernel.apparmor_restrict_unprivileged_userns=0')
+    expect(releaseWorkflow).toContain('/usr/bin/bwrap')
+    expect(releaseWorkflow).toContain('--unshare-all')
+    const ciWorkflow = await readFile(join(repoRoot, '.github', 'workflows', 'ci.yml'), 'utf8')
+    expect(ciWorkflow).toContain('kernel.apparmor_restrict_unprivileged_userns=0')
+    expect(ciWorkflow).toContain('/usr/bin/bwrap')
+    expect(ciWorkflow).toContain('--unshare-all')
     expect(releaseWorkflow).toContain("printf 'DSH_TEST_PNPM_ROOT=%s\\n'")
   })
 
