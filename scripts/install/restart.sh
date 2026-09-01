@@ -56,7 +56,11 @@ if [[ "$SERVICE_KIND" == 'launchd' ]]; then
   launchctl kickstart -k "$TARGET"
 elif [[ "$SERVICE_KIND" == 'systemd' ]]; then
   TARGET="dsh-profile-$PROFILE.service"
-  if ! systemctl --user status "$TARGET" >/dev/null 2>&1; then
+  # Probe unit-file existence, not run state: `systemctl status` exits non-zero
+  # for an installed-but-inactive unit, which would misreport a stopped service
+  # as uninstalled and refuse to start it. `cat` succeeds whenever the unit file
+  # is installed regardless of whether it is currently running.
+  if ! systemctl --user cat "$TARGET" >/dev/null 2>&1; then
     printf 'dsh-enhanced restart: systemd user service 尚未安装：%s\n' "$TARGET" >&2
     exit 1
   fi
