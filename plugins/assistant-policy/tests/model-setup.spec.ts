@@ -38,6 +38,21 @@ describe('model setup', () => {
     expect(result.credentialsPath).toBeUndefined()
   })
 
+  test('serializes a freshly created settings file in block style, not a single flow line', async () => {
+    const home = await temporaryHome()
+    // No settings.yaml exists: the document is parsed from '{}', whose flow-style
+    // root map would otherwise render as `{ agent-default-model: { ... } }` on one
+    // line and defeat block-style readers (the installer's awk provider parser).
+    const resolved = resolveModelSetup(parseModelSetupArgs(['--dsh-home', home, '--provider', 'traex-agent']))
+    const result = await applyModelSetup(resolved)
+
+    const text = await readFile(result.settingsPath, 'utf8')
+    expect(text).not.toMatch(/^\{/u)
+    expect(text).toMatch(/^agent-default-model:\s*$/mu)
+    expect(text).toMatch(/^\s+provider:\s+traex-agent\s*$/mu)
+    expect(parse(text)['agent-default-model']).toEqual({ provider: 'traex-agent', model: 'default' })
+  })
+
   test('declares a custom gateway route under llm-pi-ai and stores the key from the environment', async () => {
     const home = await temporaryHome()
     const resolved = resolveModelSetup(parseModelSetupArgs([
