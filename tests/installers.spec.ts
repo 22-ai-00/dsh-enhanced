@@ -735,6 +735,41 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     expect(result.stdout).not.toContain('dsh-model-setup')
   })
 
+  test('resolves dsh-model-setup from the pnpm shim, then falls back to a node-run package bin', async () => {
+    const dshHome = await temporaryDshHome()
+    const base = join(dshHome, 'profiles', 'web', 'node_modules')
+    const binDir = join(base, '.bin')
+    const paScript = join(base, '@dsh-enhanced', 'personal-assistant', 'bin', 'dsh-model-setup.js')
+    const apScript = join(base, '@dsh-enhanced', 'assistant-policy', 'bin', 'dsh-model-setup.js')
+
+    const resolve = (): { status: number | null; stdout: string } => spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_resolve_model_setup web "$2"', 'installer-test', installerLibrary, dshHome,
+    ], { encoding: 'utf8' })
+
+    // No launcher anywhere -> non-zero, no output.
+    const none = resolve()
+    expect(none.status).not.toBe(0)
+    expect(none.stdout).toBe('')
+
+    // Package bin present but no shim -> node fallback (prefers personal-assistant).
+    await mkdir(join(base, '@dsh-enhanced', 'assistant-policy', 'bin'), { recursive: true })
+    await writeFile(apScript, '// stub\n', 'utf8')
+    const apOnly = resolve()
+    expect(apOnly.status, apOnly.stdout).toBe(0)
+    expect(apOnly.stdout).toBe(`node\n${apScript}\n`)
+
+    await mkdir(join(base, '@dsh-enhanced', 'personal-assistant', 'bin'), { recursive: true })
+    await writeFile(paScript, '// stub\n', 'utf8')
+    const preferPa = resolve()
+    expect(preferPa.stdout).toBe(`node\n${paScript}\n`)
+
+    // An executable shim wins over the package bins.
+    await mkdir(binDir, { recursive: true })
+    await writeExecutable(join(binDir, 'dsh-model-setup'), '#!/bin/bash\nexit 0\n')
+    const withShim = resolve()
+    expect(withShim.stdout).toBe(`${join(binDir, 'dsh-model-setup')}\n`)
+  })
+
   test('configuring deepseek-official plans an env-only key store into settings and credentials', async () => {
     const dshHome = await temporaryDshHome()
 
