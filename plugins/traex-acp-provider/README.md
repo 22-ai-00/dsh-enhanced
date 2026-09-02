@@ -31,6 +31,16 @@ dsh --profile web --dump-config
 
 该实验性 route 默认关闭。确认本机版本、登录和 ACP 入口后设置 `enabled: true`，再在 DSH 的 provider/model 选择处选择 `traex-agent`。首次打开模型选择器时，`listModels` 会自动执行一次不提交 prompt 的只读 ACP discovery，展示当前账号完整模型目录；并发查询共享同一次发现，短 TTL 内直接复用，过期后刷新。`default` 沿用 TraeX 当前模型。具体模型和 effort 都通过 ACP session config option 选择，不会拼进 shell 命令。
 
+### 设为部署默认模型
+
+除了在选择器里临时选用，也可把 `traex-agent` 设为该 profile 的部署默认模型。个人助理套件的 `dsh-model-setup`（见 [`personal-assistant`](../personal-assistant/README.md#配置默认模型)）会把 `agent-default-model` 指向 `traex-agent`，并在指定 profile 的 patch 层把本 route 置为 `enabled: true`：
+
+```sh
+dsh-model-setup --provider traex-agent --enable-in-profile web
+```
+
+一键安装器同样支持：本机存在 `traex`/`trae-cli` 时交互向导会出现「本机 TraeX」选项，或直接 `./scripts/install/install-local.sh --model-provider traex-agent`——它会自动把本 bundle 加入安装集、写默认选择、启用 route，并探测 `traex login status`（未登录仅提示，不中断）。route 启用按 profile 记录在 `cordis.patch.yml`，与全局 `settings.yaml` 的默认模型选择相互独立；`enabled` 仍是本 bundle 的最终开关。
+
 ## 快速开始（5 步）
 
 1. **确认 ACP 可用**：`traex acp serve --help` 能打开、`traex login status` 输出 `Logged in using Trae`。命令名是 `trae-cli` 时用它替换下面的 `traex`。

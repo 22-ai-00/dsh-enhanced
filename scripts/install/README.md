@@ -1,6 +1,6 @@
 # 安装、诊断与重启
 
-安装器先确保 Node.js、pnpm 和 DSH `0.1.0-rc.8`，再按场景安装最小 bundle 集合。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
+安装器先确保 Node.js、pnpm 和 DSH `0.1.0-rc.8`，再按场景安装最小 bundle 集合。三档场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 包含全部 `core` 能力，`supervised` 又在 `lark` 之上追加评测、演化与恢复。首次非交互运行和 `--yes` 都选择安全的 `core` 场景：安装个人助理四核心和只读的插件控制面，不创建飞书应用、不启动 daemon、不发送模型请求。
 
 ```sh
 ./scripts/install/install-local.sh --yes
@@ -37,7 +37,53 @@
 ./scripts/install/install-local.sh --permission danger-full-access --confirm-dangerous-full-access
 ```
 
-默认不更改安装器托管的 Agent capability 规则。飞书场景中才可显式用 `--agent-tools allow` 或 `--agent-tools disable`；`core` 场景保持 `preserve`。模型 route 不会被安装器静默调用；配置模型后可请求一次最小验证：
+默认不更改安装器托管的 Agent capability 规则。飞书场景中才可显式用 `--agent-tools allow` 或 `--agent-tools disable`；`core` 场景保持 `preserve`。
+
+## 配置默认模型
+
+DSH 需要一个能解析的默认模型才能真正对话。所有场景在飞书/常驻服务处理之后、模型 route 验证之前都会进入一次模型配置引导：交互运行会检测当前 profile 是否已能解析 `agent-default-model` 的 provider/model，已配置则默认保留，未配置则默认现在配置；`--yes` 和非交互运行只保留 profile 已组合的默认（至少是内置的 `deepseek-official`），绝不擅自写入新 route。
+
+引导支持三种目标，都由 `dsh-model-setup` 写入 `settings.yaml` 的 `agent-default-model`（自定义网关另写 `llm-pi-ai.providers.<route>`）：
+
+```sh
+# DeepSeek 官方：只需模型名（缺省 deepseek-v4-flash）与 API Key
+./scripts/install/install-local.sh --model-provider deepseek-official --model-name deepseek-v4-flash
+
+# 自定义 OpenAI 兼容网关：provider + base URL（+ 可选协议/显示名）
+./scripts/install/install-local.sh \
+  --model-provider super-relay --model-name glm5.2 \
+  --model-base-url https://super-relay.example/v1 \
+  --model-api openai-completions --model-display-name 'Super Relay'
+
+# 本机 TraeX：复用已登录的 traex/trae-cli，无需 API Key
+./scripts/install/install-local.sh --model-provider traex-agent
+```
+
+`--model-api` 仅用于自定义网关，缺省 `openai-completions`（`/v1/chat/completions`），也可选 `openai-responses` 或 `anthropic-messages`；`deepseek-official` 由内置 `dsh-llm-deepseek` 服务，禁止携带这些传输字段。`--model configure` 在交互终端会额外弹出选择向导；`--model skip` 完全跳过。
+
+### 本机 TraeX 作为默认模型
+
+若本机 PATH 上存在 `traex` 或 `trae-cli`，交互向导会多出一个「本机 TraeX」选项，也可用 `--model-provider traex-agent` 直接指定。这是一个 **agent route**（由本机已登录的 TraeX 通过 ACP 提供），因此：
+
+- 不需要 API Key，也不接受 `--model-base-url/--model-api/--model-display-name`。
+- 安装器会自动把 `@dsh-enhanced/traex-acp-provider` 加入安装集，把 `agent-default-model` 指向 `traex-agent`，并在**该 profile 的 patch 层**把 provider 行置为 `enabled: true`（保留其它行、注释与 `!!js` 表达式；已有 `cwd` 覆盖不被改写）。
+- 随后探测 `traex login status`；未登录只给出非致命提示（请在同一 OS 用户下 `traex login`），不会中断安装。
+
+注意 route 启用是**按 profile** 的（写在 `profiles/<profile>/cordis.patch.yml`），与写全局 `settings.yaml` 的默认模型选择不同。每次真实调用会新起一个 `traex acp serve` 子进程并消耗 TraeX 侧额度；具体边界见 [`traex-acp-provider` 文档](../../plugins/traex-acp-provider/README.md)。
+
+API Key 只从环境读取，绝不作为命令行参数（避免进入进程列表、日志与历史）。安装器优先读取 `DSH_ENHANCED_MODEL_API_KEY`，其次是按 provider 派生的凭据引用（`deepseek-official` 用 `DEEPSEEK_API_KEY`，其余形如 `SUPER_RELAY_API_KEY`）；命中任一即在写入 route 后把密钥存入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`）。交互终端未命中环境变量时会用隐藏输入（`read -s`）询问一次，仅为该子进程导出、结束即清除。都没有时仍写入 route 选择，并提示稍后设置对应环境变量或编辑 `.credentials.yaml`，不会中断安装。agent route（TraeX）不涉及 API Key。
+
+也可安装后单独运行：
+
+```sh
+DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-model-setup \
+  --provider deepseek-official --model deepseek-v4-flash
+
+# TraeX：写默认选择并在 web profile 启用 route（需先 --with traex 或已安装该 bundle）
+"$DSH_HOME"/profiles/web/node_modules/.bin/dsh-model-setup --provider traex-agent --enable-in-profile web
+```
+
+模型 route 不会被安装器静默调用；配置模型后可请求一次最小验证：
 
 ```sh
 ./scripts/install/install-local.sh --scenario lark --lark keep --model-route verify
