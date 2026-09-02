@@ -178,16 +178,24 @@ function localParts(instant: number, zone: string): {
   return { year, month, day, hour, minute, dayOfWeek: new Date(Date.UTC(year, month - 1, day)).getUTCDay() }
 }
 
-function cronMatches(fields: CronFields, local: ReturnType<typeof localParts>): boolean {
-  if (!fields.minute.includes(local.minute) || !fields.hour.includes(local.hour) || !fields.month.includes(local.month)) {
-    return false
-  }
+function cronMatchesDate(fields: CronFields, local: ReturnType<typeof localParts>): boolean {
+  if (!fields.month.includes(local.month)) return false
   const dayOfMonth = fields.dayOfMonth.includes(local.day)
   const dayOfWeek = fields.dayOfWeek.includes(local.dayOfWeek)
   if (fields.dayOfMonthWildcard) return dayOfWeek
   if (fields.dayOfWeekWildcard) return dayOfMonth
   return dayOfMonth || dayOfWeek
 }
+
+// A whole local day whose date fields cannot match has no matching minute, so
+// the minute scan skips it in one jump instead of stepping 1440 times (a
+// day-restricted expression such as a leap-day cron otherwise scans years of
+// minutes). The jump keeps a one-hour margin below the wall-clock distance to
+// the next/previous local midnight so a 23-hour spring-forward day can never
+// leap over a real matching minute; landing early only costs a re-check. Days
+// whose date matches still scan minute-by-minute, so DST wall-time handling is
+// unchanged for the common every-day expressions.
+const DAY_SKIP_MARGIN_MINUTES = 60
 
 export function nextOccurrence(schedule: AutomationSchedule, after: number): number | undefined {
   if (!Number.isSafeInteger(after)) throw new ScheduleError('invalid-schedule', 'after must be a safe millisecond instant')
@@ -207,8 +215,18 @@ export function nextOccurrence(schedule: AutomationSchedule, after: number): num
     case 'cron': {
       const fields = parseCronExpression(schedule.expression)
       let candidate = Math.floor(after / 60_000) * 60_000 + 60_000
-      for (let scanned = 0; scanned < MAX_SCAN_MINUTES; scanned += 1, candidate += 60_000) {
-        if (cronMatches(fields, localParts(candidate, schedule.timezone))) return candidate
+      for (let scanned = 0; scanned < MAX_SCAN_MINUTES;) {
+        const local = localParts(candidate, schedule.timezone)
+        if (cronMatchesDate(fields, local)) {
+          if (fields.minute.includes(local.minute) && fields.hour.includes(local.hour)) return candidate
+          candidate += 60_000
+          scanned += 1
+          continue
+        }
+        const minutesToMidnight = 1_440 - (local.hour * 60 + local.minute)
+        const jump = Math.max(1, minutesToMidnight - DAY_SKIP_MARGIN_MINUTES)
+        candidate += jump * 60_000
+        scanned += jump
       }
       throw new ScheduleError('scan-limit', 'no cron occurrence found within five years')
     }
@@ -232,8 +250,18 @@ export function previousOccurrence(schedule: AutomationSchedule, atOrBefore: num
     case 'cron': {
       const fields = parseCronExpression(schedule.expression)
       let candidate = Math.floor(atOrBefore / 60_000) * 60_000
-      for (let scanned = 0; scanned < MAX_SCAN_MINUTES; scanned += 1, candidate -= 60_000) {
-        if (cronMatches(fields, localParts(candidate, schedule.timezone))) return candidate
+      for (let scanned = 0; scanned < MAX_SCAN_MINUTES;) {
+        const local = localParts(candidate, schedule.timezone)
+        if (cronMatchesDate(fields, local)) {
+          if (fields.minute.includes(local.minute) && fields.hour.includes(local.hour)) return candidate
+          candidate -= 60_000
+          scanned += 1
+          continue
+        }
+        const minutesSinceMidnight = local.hour * 60 + local.minute
+        const jump = Math.max(1, minutesSinceMidnight + 1 - DAY_SKIP_MARGIN_MINUTES)
+        candidate -= jump * 60_000
+        scanned += jump
       }
       throw new ScheduleError('scan-limit', 'no prior cron occurrence found within five years')
     }
