@@ -46,7 +46,7 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
 
 API Key 绝不作为参数传入：加 `--store-key` 时，值只从 `DSH_ENHANCED_MODEL_API_KEY` 或按 provider 派生的凭据引用（`deepseek-official` 为 `DEEPSEEK_API_KEY`，其余形如 `SUPER_RELAY_API_KEY`）读取，并原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥缺失时 fail-closed 且不改动 `settings.yaml`。不加 `--store-key` 则只写 route 选择，凭据仍按 DSH 运行时的环境/`.credentials.yaml` 解析。
 
-`traex-agent` 是 **agent route**：不需要 API Key（也拒绝 `--store-key` 与网关传输字段），由本机已登录的 TraeX 通过 [`@dsh-enhanced/traex-acp-provider`](../traex-acp-provider/README.md) 提供。`--enable-in-profile <profile>` 会在该 profile 的 `cordis.patch.yml` 里把 provider 行置为 `enabled: true`（保留其它行/注释/`!!js`，仅在缺失时补默认 `cwd`），因此启用是按 profile 的，与全局 `settings.yaml` 的默认模型选择相互独立。安装器的模型配置引导即调用此工具，详见[安装脚本文档](../../scripts/install/README.md#配置默认模型)。
+`traex-agent` 是 **agent route**：不需要 API Key（也拒绝 `--store-key` 与网关传输字段），由本机已登录的 TraeX 通过 [`@dsh-enhanced/traex-acp-provider`](../traex-acp-provider/README.md) 提供。它把全局 `agent-default-model` 指向 `traex-agent`，并用 `--enable-in-profile <profile>` 在该 profile 的 `cordis.patch.yml` 里把 provider 行置为 `enabled: true`（保留其它行/注释/`!!js`，仅在缺失时补默认 `cwd`）。注意 `agent-default-model` 是全局唯一段、被所有 profile 共享，而该 route 的适配器只在启用了本 bundle 的 profile 里注册；因此只有已启用的 profile（如 `web`）能解析 `traex-agent`，`headless` 等未装该 bundle 的 profile 会 `NO_ADAPTER`。安装器的模型配置引导即调用此工具，详见[安装脚本文档](../../scripts/install/README.md#配置默认模型)。
 
 ## 权限与数据
 

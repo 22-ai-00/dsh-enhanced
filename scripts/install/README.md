@@ -66,10 +66,10 @@ DSH 需要一个能解析的默认模型才能真正对话。所有场景在飞�
 若本机 PATH 上存在 `traex` 或 `trae-cli`，交互向导会多出一个「本机 TraeX」选项，也可用 `--model-provider traex-agent` 直接指定。这是一个 **agent route**（由本机已登录的 TraeX 通过 ACP 提供），因此：
 
 - 不需要 API Key，也不接受 `--model-base-url/--model-api/--model-display-name`。
-- 安装器会自动把 `@dsh-enhanced/traex-acp-provider` 加入安装集，把 `agent-default-model` 指向 `traex-agent`，并在**该 profile 的 patch 层**把 provider 行置为 `enabled: true`（保留其它行、注释与 `!!js` 表达式；已有 `cwd` 覆盖不被改写）。
+- 安装器会自动把 `@dsh-enhanced/traex-acp-provider` 加入安装集，把全局 `settings.yaml` 的 `agent-default-model` 指向 `traex-agent`，并在**该 profile 的 patch 层**把 provider 行置为 `enabled: true`（保留其它行、注释与 `!!js` 表达式；已有 `cwd` 覆盖不被改写）。
 - 随后探测 `traex login status`；未登录只给出非致命提示（请在同一 OS 用户下 `traex login`），不会中断安装。
 
-注意 route 启用是**按 profile** 的（写在 `profiles/<profile>/cordis.patch.yml`），与写全局 `settings.yaml` 的默认模型选择不同。每次真实调用会新起一个 `traex acp serve` 子进程并消耗 TraeX 侧额度；具体边界见 [`traex-acp-provider` 文档](../../plugins/traex-acp-provider/README.md)。
+注意 `traex-agent` 的**适配器是按 profile 注册的**（只在启用了 `traex-acp-provider` bundle 的 profile 里存在），而 `agent-default-model` 是**全局唯一**的 settings 段、被所有 profile 共享。因此把默认设为 `traex-agent` 后，只有已启用该 route 的 profile（默认 `web`）能真正解析它；`headless` 等未安装该 bundle 的 profile 若用这个默认会报 `NO_ADAPTER`。安装器为此对 agent route 采用**结构化验证**：不发模型请求，而是确认目标 profile 的 `--dump-config` 已注册 `traex-acp-provider` 并检查 `traex login status`，避免误用 `headless` 触发 `NO_ADAPTER`，也不消耗任何额度。每次真实调用会新起一个 `traex acp serve` 子进程并消耗 TraeX 侧额度；具体边界见 [`traex-acp-provider` 文档](../../plugins/traex-acp-provider/README.md)。
 
 API Key 只从环境读取，绝不作为命令行参数（避免进入进程列表、日志与历史）。安装器优先读取 `DSH_ENHANCED_MODEL_API_KEY`，其次是按 provider 派生的凭据引用（`deepseek-official` 用 `DEEPSEEK_API_KEY`，其余形如 `SUPER_RELAY_API_KEY`）；命中任一即在写入 route 后把密钥存入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`）。交互终端未命中环境变量时会用隐藏输入（`read -s`）询问一次，仅为该子进程导出、结束即清除。都没有时仍写入 route 选择，并提示稍后设置对应环境变量或编辑 `.credentials.yaml`，不会中断安装。agent route（TraeX）不涉及 API Key。
 
@@ -88,6 +88,8 @@ DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-mo
 ```sh
 ./scripts/install/install-local.sh --scenario lark --lark keep --model-route verify
 ```
+
+验证方式取决于当前全局默认的 provider 类型：普通 API-key/网关 route 通过 `headless` profile 发送一次固定的最小请求；agent route（`traex-agent`）不发模型请求，改为校验目标 profile 已注册 `traex-acp-provider` 适配器并检查 `traex login status`。
 
 每次新 profile 都会预检 Web 端口（默认 `127.0.0.1:3080`，可用 `DSH_ENHANCED_WEB_PORT` 覆盖），并在结束时验证 profile 可组合。独立诊断：
 
