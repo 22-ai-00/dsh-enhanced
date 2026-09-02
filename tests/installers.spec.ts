@@ -658,6 +658,37 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     expect(result.stdout).toContain("dsh --profile headless Reply\\ with\\ exactly\\ DSH_ROUTE_READY")
   })
 
+  test('an agent-route default verifies structurally instead of a headless model call', async () => {
+    const dshHome = await temporaryDshHome()
+    // The runtime resolves the settings.yaml user-layer selection, which is what
+    // the verifier reads; a real run would have just written it.
+    await writeFile(join(dshHome, 'settings.yaml'),
+      'agent-default-model:\n  provider: traex-agent\n  model: default\n', 'utf8')
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model-route', 'verify',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('agent route traex-agent 不发送模型请求')
+    expect(result.stdout).toContain('校验 profile web 已注册适配器并检查本机登录')
+    // No headless model call is planned for an agent route.
+    expect(result.stdout).not.toContain('DSH_ROUTE_READY')
+  })
+
+  test('the effective-default reader returns the settings.yaml user-layer provider', async () => {
+    const dshHome = await temporaryDshHome()
+    await writeFile(join(dshHome, 'settings.yaml'),
+      'ui-theme:\n  preference: dark\nagent-default-model:\n  provider: traex-agent\n  model: default\nllm-pi-ai:\n  providers: {}\n', 'utf8')
+
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_effective_default_provider "$2"', 'installer-test', installerLibrary, dshHome,
+    ], { encoding: 'utf8' })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout.trim()).toBe('traex-agent')
+  })
+
   test('non-interactive default keeps the composed model without configuring a route', async () => {
     const dshHome = await temporaryDshHome()
 
