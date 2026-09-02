@@ -68,6 +68,12 @@ Options:
   --confirm-dangerous-full-access
                             Required together with --permission danger-full-access
   --model-route <mode>      auto, verify, or skip (default: auto; a verify call may incur model cost)
+  --model <mode>            auto, configure, or skip (default: auto) — configure the deployment default model
+  --model-provider <route>  Provider route to configure (deepseek-official, a custom gateway name, or traex-agent)
+  --model-name <id>         Model id for the selected provider route
+  --model-base-url <url>    Custom OpenAI-compatible gateway base URL (custom provider only)
+  --model-api <protocol>    openai-completions (default), openai-responses, or anthropic-messages (custom provider only)
+  --model-display-name <s>  Optional human label for a custom provider route
   --dsh-version <version>   DSH version to ensure (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
   --no-service              Do not install or restart the platform resident service
   --yes                     Choose the safe default without the installer menu
@@ -95,6 +101,7 @@ Agent tool modes:
   disable    Remove the setup-managed external Agent tool rules.
 
 Scenarios:
+  Capabilities are additive: core ⊂ lark ⊂ supervised.
   core       Local Web/direct core plus read-only plugin discovery.  No channel, daemon, or scheduler.
   lark       Core plus durable Delivery, bounded automatic preference learning,
              OS credential storage, and Feishu/Lark onboarding.
@@ -313,7 +320,7 @@ dsh_enhanced_choose_lark_mode() {
 
 dsh_enhanced_choose_scenario() {
   local configured="$1"
-  printf '\n选择部署场景：\n' >&2
+  printf '\n选择部署场景（能力逐档叠加：core ⊂ lark ⊂ supervised）：\n' >&2
   printf '  1) 仅本机核心（推荐：安全、可立即通过 Web/direct 使用）\n' >&2
   if [[ "$configured" == '1' ]]; then
     printf '  2) 保留已配置的飞书常驻助理\n' >&2
@@ -343,6 +350,327 @@ dsh_enhanced_choose_model_route_mode() {
     '1') printf 'verify' ;;
     ''|'2') printf 'skip' ;;
     *) return 2 ;;
+  esac
+}
+
+# Detect whether the effective profile already resolves a usable default model.
+# We inspect the composed config rather than only settings.yaml so that a
+# deployment relying on the built-in deepseek-official default is not treated as
+# unconfigured; a route is "configured" when a provider/model pair resolves and
+# the referenced credential is present in settings/.credentials.yaml/env.
+dsh_enhanced_model_is_configured() {
+  local profile="$1"
+  local dsh_home="$2"
+  local config
+  config="$(dsh --profile "$profile" --dump-config 2>/dev/null)" || return 1
+  printf '%s' "$config" | awk '
+    BEGIN { in_adm = 0; provider = ""; model = "" }
+    /^- id:/ { in_adm = 0 }
+    /^- id:[[:space:]]+agent-default-model[[:space:]]*$/ { in_adm = 1; next }
+    in_adm && /^[[:space:]]+provider:[[:space:]]+/ {
+      line = $0; sub(/^[[:space:]]+provider:[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line); provider = line
+    }
+    in_adm && /^[[:space:]]+model:[[:space:]]+/ {
+      line = $0; sub(/^[[:space:]]+model:[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line); model = line
+    }
+    END { exit !(provider != "" && model != "") }
+  ' || return 1
+}
+
+dsh_enhanced_choose_model_mode() {
+  local configured="$1"
+  if [[ "$configured" == '1' ]]; then
+    printf '\n检测到当前 profile 已能解析默认模型：\n' >&2
+    printf '  1) 保留当前模型配置（推荐）\n' >&2
+    printf '  2) 重新配置默认模型（DeepSeek 官方或自定义 OpenAI 兼容网关）\n' >&2
+    printf '请选择 [1]：' >&2
+    local choice
+    IFS= read -r choice
+    case "$choice" in
+      ''|'1') printf 'skip' ;;
+      '2') printf 'configure' ;;
+      *) return 2 ;;
+    esac
+  else
+    printf '\n当前 profile 尚未配置可用的默认模型：\n' >&2
+    printf '  1) 现在配置默认模型（推荐）\n' >&2
+    printf '  2) 稍后手动配置（编辑 settings.yaml 或运行 dsh-model-setup）\n' >&2
+    printf '请选择 [1]：' >&2
+    local choice
+    IFS= read -r choice
+    case "$choice" in
+      ''|'1') printf 'configure' ;;
+      '2') printf 'skip' ;;
+      *) return 2 ;;
+    esac
+  fi
+}
+
+# Interactively collect the model route into the caller's named variables.  UI
+# goes to stderr; nothing here echoes the API key.  Reads only the provider,
+# model, base URL, api, and display-name; the secret is prompted separately and
+# handed to dsh-model-setup through the environment, never as an argument.
+dsh_enhanced_prompt_model_route() {
+  local provider_var="$1"
+  local model_var="$2"
+  local base_url_var="$3"
+  local api_var="$4"
+  local display_var="$5"
+  local traex_command=''
+  traex_command="$(dsh_enhanced_detect_traex_command || true)"
+  printf '\n配置默认模型：\n' >&2
+  printf '  1) DeepSeek 官方（deepseek-official，只需 API Key）\n' >&2
+  printf '  2) 自定义 OpenAI 兼容网关（provider + base URL + API Key）\n' >&2
+  if [[ -n "$traex_command" ]]; then
+    printf '  3) 本机 TraeX（traex-agent，复用已登录的 %s，无需 API Key）\n' "$traex_command" >&2
+  fi
+  printf '请选择 [1]：' >&2
+  local kind
+  IFS= read -r kind
+  case "$kind" in
+    ''|'1')
+      printf -v "$provider_var" '%s' 'deepseek-official'
+      printf 'DeepSeek 模型 [deepseek-v4-flash]：' >&2
+      local model
+      IFS= read -r model
+      printf -v "$model_var" '%s' "${model:-deepseek-v4-flash}"
+      printf -v "$base_url_var" '%s' ''
+      printf -v "$api_var" '%s' ''
+      printf -v "$display_var" '%s' ''
+      ;;
+    '2')
+      printf 'Provider route 名称（如 super-relay）：' >&2
+      local provider
+      IFS= read -r provider
+      if [[ -z "$provider" || "$provider" == 'deepseek-official' ]]; then
+        dsh_enhanced_fail 2 '自定义网关需要一个不同于 deepseek-official 的 provider route 名称。'
+        return $?
+      fi
+      if dsh_enhanced_is_agent_route "$provider"; then
+        dsh_enhanced_fail 2 "$provider 是本机 agent route，请在菜单中选择 TraeX 选项，而不是自定义网关。"
+        return $?
+      fi
+      printf -v "$provider_var" '%s' "$provider"
+      printf '模型 id（如 glm5.2）：' >&2
+      local model
+      IFS= read -r model
+      if [[ -z "$model" ]]; then
+        dsh_enhanced_fail 2 '自定义网关需要一个模型 id。'
+        return $?
+      fi
+      printf -v "$model_var" '%s' "$model"
+      printf 'Base URL（如 https://gateway.example/v1）：' >&2
+      local base_url
+      IFS= read -r base_url
+      if [[ "$base_url" != http://* && "$base_url" != https://* ]]; then
+        dsh_enhanced_fail 2 'Base URL 必须以 http:// 或 https:// 开头。'
+        return $?
+      fi
+      printf -v "$base_url_var" '%s' "$base_url"
+      printf 'API 协议 [openai-completions]（可选 openai-responses、anthropic-messages）：' >&2
+      local api
+      IFS= read -r api
+      case "${api:-openai-completions}" in
+        openai-completions|openai-responses|anthropic-messages) printf -v "$api_var" '%s' "${api:-openai-completions}" ;;
+        *) dsh_enhanced_fail 2 'API 协议只能是 openai-completions、openai-responses 或 anthropic-messages。'; return $? ;;
+      esac
+      printf '显示名（可选，直接回车跳过）：' >&2
+      local display
+      IFS= read -r display
+      printf -v "$display_var" '%s' "$display"
+      ;;
+    '3')
+      if [[ -z "$traex_command" ]]; then
+        dsh_enhanced_fail 2 '本机未检测到 traex/trae-cli，无法选择 TraeX。'
+        return $?
+      fi
+      # An agent route needs no model id, base URL, api, or display name; the
+      # coding agent owns its own model catalog and credentials.
+      printf -v "$provider_var" '%s' 'traex-agent'
+      printf -v "$model_var" '%s' ''
+      printf -v "$base_url_var" '%s' ''
+      printf -v "$api_var" '%s' ''
+      printf -v "$display_var" '%s' ''
+      ;;
+    *)
+      return 2
+      ;;
+  esac
+}
+
+# Detect a locally installed TraeX / TRAE CLI executable so the model prompt can
+# offer it as a zero-key default-model route.  Prints the resolved command name
+# on stdout and returns 0 when found; returns 1 otherwise.
+dsh_enhanced_detect_traex_command() {
+  local candidate
+  for candidate in traex trae-cli; do
+    if command -v "$candidate" >/dev/null 2>&1; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The agent route (TraeX) is served by a local coding agent, not an API key.
+# Mirror model-setup.ts's AGENT_ROUTES so the shell can branch without Node.
+dsh_enhanced_is_agent_route() {
+  [[ "$1" == 'traex-agent' ]]
+}
+
+# Ensure the provider bundle backing an agent route is installed into the
+# profile before we enable and resolve it.  The flag path pre-selects the slug
+# with every other bundle; this covers interactive selection made after the main
+# install, and is a no-op when the bundle is already present.
+dsh_enhanced_ensure_agent_bundle() {
+  local provider="$1"
+  local profile="$2"
+  local dsh_home="$3"
+  local source_mode="$4"
+  local repo_root="$5"
+  local plugin_version="$6"
+  local dry_run="$7"
+  dsh_enhanced_is_agent_route "$provider" || return 0
+  local slug='traex-acp-provider'
+  if [[ "$dry_run" != '1' && -d "$dsh_home/profiles/$profile/node_modules/@dsh-enhanced/$slug" ]]; then
+    return 0
+  fi
+  local target
+  if [[ "$source_mode" == 'local' ]]; then
+    target="$repo_root/plugins/$slug"
+    if [[ ! -f "$target/package.json" ]]; then
+      dsh_enhanced_fail 1 "缺少本地插件：$target"
+      return $?
+    fi
+  else
+    target="@dsh-enhanced/$slug@$plugin_version"
+  fi
+  printf '\n为 traex-agent 安装 provider bundle：\n'
+  dsh_enhanced_run "$dry_run" dsh plugin --profile "$profile" add "$target"
+}
+
+
+# Run dsh-model-setup with the resolved route.  For an API-key route the key is
+# read from the environment (DSH_ENHANCED_MODEL_API_KEY or the derived credential
+# reference); in an interactive terminal we offer a hidden prompt and export it
+# only for the child process.  When no key is available we still write the route
+# selection and tell the owner where to supply the secret, rather than failing
+# the install.  For an agent route (TraeX) there is no key: we write the default
+# selection and enable the route bundle row in this profile's patch layer.
+dsh_enhanced_apply_model() {
+  local profile="$1"
+  local dsh_home="$2"
+  local provider="$3"
+  local model="$4"
+  local base_url="$5"
+  local api="$6"
+  local display_name="$7"
+  local dry_run="$8"
+  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup"
+
+  local args=(--dsh-home "$dsh_home" --provider "$provider")
+  [[ -n "$model" ]] && args+=(--model "$model")
+  [[ -n "$base_url" ]] && args+=(--base-url "$base_url")
+  [[ -n "$api" ]] && args+=(--api "$api")
+  [[ -n "$display_name" ]] && args+=(--display-name "$display_name")
+
+  printf '\n模型配置：provider=%s' "$provider"
+  [[ -n "$model" ]] && printf ' model=%s' "$model"
+  printf '\n'
+
+  # Agent route (TraeX): no API key.  Write the default selection and flip the
+  # route bundle row to enabled in this profile's patch layer.
+  if dsh_enhanced_is_agent_route "$provider"; then
+    args+=(--enable-in-profile "$profile")
+    if [[ "$dry_run" == '1' ]]; then
+      printf '模型配置：将写入 settings.yaml 并在 profile %s 的 patch 层启用 traex-acp-provider（无需 API Key）。\n' "$profile"
+      dsh_enhanced_print_command "$setup_bin" "${args[@]}"
+      return 0
+    fi
+    if [[ ! -x "$setup_bin" ]]; then
+      dsh_enhanced_fail 1 "找不到安装后的 dsh-model-setup：$setup_bin"
+      return $?
+    fi
+    "$setup_bin" "${args[@]}" || return $?
+    # A live login is required for the route to actually serve; probe it as a
+    # non-fatal hint so a not-yet-logged-in TraeX does not fail the install.
+    local traex_command=''
+    traex_command="$(dsh_enhanced_detect_traex_command || true)"
+    if [[ -n "$traex_command" ]]; then
+      if ! "$traex_command" login status >/dev/null 2>&1; then
+        printf '模型配置提示：%s 尚未确认登录；请在同一用户下运行 `%s login` 后再使用 traex-agent。\n' \
+          "$traex_command" "$traex_command"
+      fi
+    else
+      printf '模型配置提示：未在 PATH 找到 traex/trae-cli；请安装并登录后再使用 traex-agent。\n'
+    fi
+    return 0
+  fi
+
+  # Decide whether a key is (or can be made) available for this run.
+  local have_key='0'
+  local key_env_var='DSH_ENHANCED_MODEL_API_KEY'
+  local derived_ref
+  derived_ref="$(dsh_enhanced_derive_api_key_env "$provider")"
+  if [[ -n "${!key_env_var:-}" || -n "${!derived_ref:-}" ]]; then
+    have_key='1'
+  fi
+
+  if [[ "$dry_run" == '1' ]]; then
+    if [[ "$have_key" == '1' ]]; then
+      printf '模型配置：将写入 settings.yaml 并把环境中的 API Key 存入 .credentials.yaml。\n'
+      dsh_enhanced_print_command "$setup_bin" "${args[@]}" --store-key
+    else
+      printf '模型配置：将写入 settings.yaml；未检测到 API Key，稍后请设置 %s 或编辑 .credentials.yaml。\n' "$derived_ref"
+      dsh_enhanced_print_command "$setup_bin" "${args[@]}"
+    fi
+    return 0
+  fi
+
+  if [[ ! -x "$setup_bin" ]]; then
+    dsh_enhanced_fail 1 "找不到安装后的 dsh-model-setup：$setup_bin"
+    return $?
+  fi
+
+  # Offer a hidden key prompt only in an interactive terminal and only when the
+  # environment does not already carry one.  The value is exported solely for
+  # the setup child and unset immediately afterwards; it never enters argv.
+  if [[ "$have_key" != '1' && -t 0 && -t 1 ]]; then
+    printf '为 %s 输入 API Key（直接回车跳过存储）：' "$derived_ref" >&2
+    local secret=''
+    IFS= read -rs secret || secret=''
+    printf '\n' >&2
+    if [[ -n "$secret" ]]; then
+      DSH_ENHANCED_MODEL_API_KEY="$secret" "$setup_bin" "${args[@]}" --store-key
+      local status=$?
+      unset secret
+      return $status
+    fi
+  fi
+
+  if [[ "$have_key" == '1' ]]; then
+    "$setup_bin" "${args[@]}" --store-key
+  else
+    "$setup_bin" "${args[@]}"
+    printf '模型配置：未存储 API Key；请设置环境变量 %s 或编辑 %s/.credentials.yaml 后再验证。\n' \
+      "$derived_ref" "$dsh_home"
+  fi
+}
+
+# Mirror deriveApiKeyEnv() in model-setup.ts so the shell can tell whether a
+# credential reference is already present without launching Node.
+dsh_enhanced_derive_api_key_env() {
+  local provider="$1"
+  if [[ "$provider" == 'deepseek-official' ]]; then
+    printf 'DEEPSEEK_API_KEY'
+    return 0
+  fi
+  local identifier
+  identifier="$(printf '%s' "$provider" | tr '[:lower:]' '[:upper:]' | tr -c 'A-Z0-9' '_')"
+  [[ "$identifier" =~ ^[A-Z_] ]] || identifier="_$identifier"
+  case "$identifier" in
+    *_API_KEY) printf '%s' "$identifier" ;;
+    *) printf '%s_API_KEY' "$identifier" ;;
   esac
 }
 
@@ -724,6 +1052,12 @@ dsh_enhanced_install() {
   local permission_preset='preserve'
   local confirm_dangerous_full_access='0'
   local model_route_mode='auto'
+  local model_mode='auto'
+  local model_provider=''
+  local model_name=''
+  local model_base_url=''
+  local model_api=''
+  local model_display_name=''
   local web_port="${DSH_ENHANCED_WEB_PORT:-3080}"
   local dsh_version="${DSH_VERSION:-$DSH_ENHANCED_DEFAULT_DSH_VERSION}"
   local plugin_version="${DSH_ENHANCED_VERSION:-latest}"
@@ -779,6 +1113,36 @@ dsh_enhanced_install() {
       --model-route)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-route 需要一个值。'; return $?; }
         model_route_mode="$2"
+        shift 2
+        ;;
+      --model)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model 需要一个值。'; return $?; }
+        model_mode="$2"
+        shift 2
+        ;;
+      --model-provider)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-provider 需要一个值。'; return $?; }
+        model_provider="$2"
+        shift 2
+        ;;
+      --model-name)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-name 需要一个值。'; return $?; }
+        model_name="$2"
+        shift 2
+        ;;
+      --model-base-url)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-base-url 需要一个值。'; return $?; }
+        model_base_url="$2"
+        shift 2
+        ;;
+      --model-api)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-api 需要一个值。'; return $?; }
+        model_api="$2"
+        shift 2
+        ;;
+      --model-display-name)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--model-display-name 需要一个值。'; return $?; }
+        model_display_name="$2"
         shift 2
         ;;
       --dsh-version)
@@ -854,6 +1218,33 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 '--model-route 只能是 auto、verify 或 skip。'
     return $?
   esac
+  case "$model_mode" in auto|configure|skip) ;; *)
+    dsh_enhanced_fail 2 '--model 只能是 auto、configure 或 skip。'
+    return $?
+  esac
+  if [[ -n "$model_api" ]]; then
+    case "$model_api" in openai-completions|openai-responses|anthropic-messages) ;; *)
+      dsh_enhanced_fail 2 '--model-api 只能是 openai-completions、openai-responses 或 anthropic-messages。'
+      return $?
+    esac
+  fi
+  # A custom gateway route needs a base URL; the built-in deepseek-official route
+  # and local agent routes (TraeX) must not carry gateway transport fields.  Fail
+  # loud before any install work.
+  if dsh_enhanced_is_agent_route "$model_provider"; then
+    if [[ -n "$model_base_url" || -n "$model_api" || -n "$model_display_name" ]]; then
+      dsh_enhanced_fail 2 "--model-base-url/--model-api/--model-display-name 不适用于本机 agent route $model_provider。"
+      return $?
+    fi
+  elif [[ -n "$model_provider" && "$model_provider" != 'deepseek-official' ]]; then
+    if [[ -z "$model_base_url" ]]; then
+      dsh_enhanced_fail 2 '自定义模型 provider 需要 --model-base-url（以 http:// 或 https:// 开头）。'
+      return $?
+    fi
+  elif [[ -n "$model_base_url" || -n "$model_api" || -n "$model_display_name" ]]; then
+    dsh_enhanced_fail 2 '--model-base-url/--model-api/--model-display-name 仅适用于自定义 provider，不能用于 deepseek-official。'
+    return $?
+  fi
   if [[ -z "$dsh_version" || "$dsh_version" == -* ]]; then
     dsh_enhanced_fail 2 'DSH 版本值不合法。'
     return $?
@@ -1008,6 +1399,12 @@ dsh_enhanced_install() {
         ;;
     esac
   done
+  # Selecting the TraeX agent route as the default model pulls in its provider
+  # bundle so the route can be enabled and resolve in the same run.  Interactive
+  # selection happens after install and is handled on the spot in apply_model.
+  if dsh_enhanced_is_agent_route "$model_provider"; then
+    dsh_enhanced_append_slug 'traex-acp-provider'
+  fi
 
   local targets=()
   for slug in "${selected_slugs[@]}"; do
@@ -1070,6 +1467,52 @@ dsh_enhanced_install() {
   fi
   if [[ "$deployment_mode" == 'supervised-growth' ]]; then
     dsh_enhanced_apply_supervised_growth "$profile" "$dsh_home" "$ack_existing_automations" "$dry_run" || return $?
+  fi
+
+  # Configure the deployment default model before offering a route check.  An
+  # explicit --model-provider is a non-interactive configure; otherwise --model
+  # (default auto) decides, detecting whether the composed profile already
+  # resolves a usable provider/model so a returning owner is not re-prompted.
+  if [[ -n "$model_provider" ]]; then
+    model_mode='configure'
+  fi
+  local model_configured='0'
+  if [[ "$dry_run" != '1' ]] && dsh_enhanced_model_is_configured "$profile" "$dsh_home"; then
+    model_configured='1'
+  fi
+  if [[ "$model_mode" == 'auto' ]]; then
+    if [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
+      # Non-interactive runs never invent a route: keep whatever the profile
+      # already composes (the built-in deepseek-official default at minimum).
+      model_mode='skip'
+    else
+      model_mode="$(dsh_enhanced_choose_model_mode "$model_configured")" || {
+        dsh_enhanced_fail 2 '模型配置选项无效。'
+        return $?
+      }
+    fi
+  fi
+  if [[ "$model_mode" == 'configure' ]]; then
+    if [[ -z "$model_provider" ]]; then
+      if [[ "$dry_run" == '1' || ( ! -t 0 || ! -t 1 ) ]]; then
+        # Without an explicit --model-provider there is nothing to write in a
+        # non-interactive or dry-run configure; guide the owner to the flags.
+        dsh_enhanced_fail 2 '非交互配置模型需要 --model-provider（自定义网关还需 --model-name 与 --model-base-url）。'
+        return $?
+      fi
+      dsh_enhanced_prompt_model_route model_provider model_name model_base_url model_api model_display_name || {
+        dsh_enhanced_fail 2 '模型配置输入无效。'
+        return $?
+      }
+    fi
+    # An agent route chosen interactively (or after the main install set) may
+    # not have had its provider bundle selected above; ensure it is present.
+    dsh_enhanced_ensure_agent_bundle "$model_provider" "$profile" "$dsh_home" \
+      "$source_mode" "$repo_root" "$plugin_version" "$dry_run" || return $?
+    dsh_enhanced_apply_model "$profile" "$dsh_home" "$model_provider" "$model_name" \
+      "$model_base_url" "$model_api" "$model_display_name" "$dry_run" || return $?
+  else
+    printf '\n模型配置：本次跳过；使用 profile 已组合的默认模型。\n'
   fi
 
   if [[ "$model_route_mode" == 'auto' ]]; then
