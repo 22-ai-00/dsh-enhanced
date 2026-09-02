@@ -7,7 +7,8 @@
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
   "bin": {
-    "dsh-permission-setup": "./bin/dsh-permission-setup.js"
+    "dsh-permission-setup": "./bin/dsh-permission-setup.js",
+    "dsh-model-setup": "./bin/dsh-model-setup.js"
   },
   "exports": {
     ".": {
@@ -18,6 +19,10 @@
     "./permission-setup": {
       "types": "./lib/permission-setup.d.ts",
       "default": "./lib/permission-setup.js"
+    },
+    "./model-setup": {
+      "types": "./lib/model-setup.d.ts",
+      "default": "./lib/model-setup.js"
     },
     "./package.json": "./package.json"
   },

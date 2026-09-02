@@ -658,6 +658,173 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     expect(result.stdout).toContain("dsh --profile headless Reply\\ with\\ exactly\\ DSH_ROUTE_READY")
   })
 
+  test('non-interactive default keeps the composed model without configuring a route', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, ['--dry-run', '--lark', 'skip'], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('模型配置：本次跳过；使用 profile 已组合的默认模型。')
+    expect(result.stdout).not.toContain('dsh-model-setup')
+  })
+
+  test('configuring deepseek-official plans an env-only key store into settings and credentials', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model-provider', 'deepseek-official', '--model-name', 'deepseek-v4-flash',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('模型配置：provider=deepseek-official model=deepseek-v4-flash')
+    expect(result.stdout).toContain(
+      `${join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-model-setup')} `
+      + `--dsh-home ${dshHome} --provider deepseek-official --model deepseek-v4-flash`,
+    )
+    // The key is never an argument; without one in the environment the plan
+    // still writes the route and names the credential reference to set later.
+    expect(result.stdout).toContain('未检测到 API Key，稍后请设置 DEEPSEEK_API_KEY')
+    expect(result.stdout).not.toContain('--store-key')
+  })
+
+  test('an available key env var upgrades the deepseek plan to store the credential', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = spawnSync('/bin/bash', [localInstaller,
+      '--dry-run', '--lark', 'skip', '--model-provider', 'deepseek-official',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: process.env.PATH ?? '', DSH_HOME: dshHome, DSH_ENHANCED_MODEL_API_KEY: 'plat-secret' },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('把环境中的 API Key 存入 .credentials.yaml')
+    expect(result.stdout).toContain('--provider deepseek-official --store-key')
+  })
+
+  test('a custom gateway route plans llm-pi-ai transport fields', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model-provider', 'super-relay', '--model-name', 'glm5.2',
+      '--model-base-url', 'https://super-relay.example/v1', '--model-api', 'openai-completions',
+      '--model-display-name', 'Super Relay',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain(
+      '--provider super-relay --model glm5.2 --base-url https://super-relay.example/v1'
+      + ' --api openai-completions --display-name Super\\ Relay',
+    )
+  })
+
+  test('rejects a custom gateway route without a base URL and deepseek with transport fields', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const missingBaseUrl = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model-provider', 'super-relay', '--model-name', 'glm5.2',
+    ], dshHome)
+    expect(missingBaseUrl.status).toBe(2)
+    expect(missingBaseUrl.stderr).toContain('自定义模型 provider 需要 --model-base-url')
+    expect(missingBaseUrl.stdout).not.toContain('dsh plugin')
+
+    const misplacedFields = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model-provider', 'deepseek-official', '--model-base-url', 'https://x/v1',
+    ], dshHome)
+    expect(misplacedFields.status).toBe(2)
+    expect(misplacedFields.stderr).toContain('仅适用于自定义 provider')
+    expect(misplacedFields.stdout).not.toContain('dsh plugin')
+  })
+
+  test('non-interactive configure without a provider guides the owner to the model flags', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model', 'configure',
+    ], dshHome)
+
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('非交互配置模型需要 --model-provider')
+  })
+
+  test('model menu writes UI separately from its machine-readable selection', () => {
+    const configured = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_choose_model_mode 1', 'installer-test', installerLibrary,
+    ], { encoding: 'utf8', input: '2\n' })
+    expect(configured.status, configured.stderr).toBe(0)
+    expect(configured.stdout).toBe('configure')
+    expect(configured.stderr).toContain('检测到当前 profile 已能解析默认模型')
+
+    const unconfigured = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_choose_model_mode 0', 'installer-test', installerLibrary,
+    ], { encoding: 'utf8', input: '\n' })
+    expect(unconfigured.status, unconfigured.stderr).toBe(0)
+    expect(unconfigured.stdout).toBe('configure')
+    expect(unconfigured.stderr).toContain('尚未配置可用的默认模型')
+  })
+
+  test('selecting the local TraeX route plans bundle install, default selection, and profile enable', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model-provider', 'traex-agent',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    // The provider bundle is pulled into the top-level install set...
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'traex-acp-provider'))
+    // ...and the default-model write enables the route in this profile's patch.
+    expect(result.stdout).toContain('模型配置：provider=traex-agent')
+    expect(result.stdout).toContain(
+      `${join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-model-setup')} `
+      + `--dsh-home ${dshHome} --provider traex-agent --enable-in-profile web`,
+    )
+    // Agent routes never touch an API key.
+    expect(result.stdout).not.toContain('--store-key')
+    expect(result.stdout).not.toContain('存入 .credentials.yaml')
+    expect(result.stdout).toContain('无需 API Key')
+  })
+
+  test('rejects gateway transport fields on the TraeX agent route', async () => {
+    const dshHome = await temporaryDshHome()
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model-provider', 'traex-agent', '--model-base-url', 'https://x/v1',
+    ], dshHome)
+
+    expect(result.status).toBe(2)
+    expect(result.stderr).toContain('不适用于本机 agent route traex-agent')
+    expect(result.stdout).not.toContain('dsh plugin')
+  })
+
+  test('the model prompt offers TraeX only when a local traex command is present', () => {
+    const scriptWithTraex = 'export PATH="$2:$PATH"; source "$1"; '
+      + 'dsh_enhanced_prompt_model_route p m b a d >/dev/null; printf "provider=%s" "$p"'
+    const fakeBin = join(tmpdir(), `dsh-fake-traex-${Date.now()}`)
+
+    return (async () => {
+      await mkdir(fakeBin, { recursive: true })
+      await writeExecutable(join(fakeBin, 'traex'), '#!/bin/bash\nexit 0\n')
+
+      const withTraex = spawnSync('/bin/bash', ['-c', scriptWithTraex, 'installer-test', installerLibrary, fakeBin], {
+        encoding: 'utf8', input: '3\n',
+      })
+      expect(withTraex.status, withTraex.stderr).toBe(0)
+      expect(withTraex.stderr).toContain('本机 TraeX')
+      expect(withTraex.stdout).toBe('provider=traex-agent')
+
+      // Without a traex command on PATH, option 3 is not offered and is invalid.
+      const withoutTraex = spawnSync('/bin/bash', [
+        '-c', 'export PATH="/nonexistent-only"; source "$1"; dsh_enhanced_prompt_model_route p m b a d; printf "rc=%s" "$?"',
+        'installer-test', installerLibrary,
+      ], { encoding: 'utf8', input: '3\n' })
+      expect(withoutTraex.stderr).not.toContain('本机 TraeX')
+
+      await rm(fakeBin, { recursive: true, force: true })
+    })()
+  })
+
   test('explicit configure mode reruns onboarding and can avoid installing a service', async () => {
     const dshHome = await temporaryDshHome()
     await configureExistingLark(dshHome)
