@@ -720,18 +720,31 @@ dsh_enhanced_verify_model_route() {
 
 # Read the settings.yaml user-layer agent-default-model.provider, which is the
 # selection the runtime actually resolves (it wins over the composed value).
+# dsh-model-setup writes block-style YAML, but a hand-edited or older file may
+# be flow-style (`{ agent-default-model: { provider: X, ... } }`); handle both
+# so the verifier never misreads the default and picks the wrong route.
 dsh_enhanced_effective_default_provider() {
   local dsh_home="$1"
   local settings_path="$dsh_home/settings.yaml"
   [[ -f "$settings_path" ]] || return 0
-  awk '
+  local provider
+  provider="$(awk '
     BEGIN { in_s = 0 }
     /^agent-default-model:[[:space:]]*$/ { in_s = 1; next }
     in_s && /^[^[:space:]]/ { in_s = 0 }
     in_s && /^[[:space:]]+provider:[[:space:]]+/ {
       line = $0; sub(/^[[:space:]]+provider:[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line); print line; exit
     }
-  ' "$settings_path"
+  ' "$settings_path")"
+  if [[ -z "$provider" ]]; then
+    # Flow-style fallback: match `agent-default-model: { ... provider: X ... }`
+    # anywhere in the document. Kept deliberately narrow (a single unquoted
+    # token) so it never guesses on complex documents.
+    provider="$(grep -oE 'agent-default-model:[[:space:]]*\{[^{}]*provider:[[:space:]]*[^,}[:space:]]+' "$settings_path" \
+      | grep -oE 'provider:[[:space:]]*[^,}[:space:]]+' | head -n1 \
+      | sed -E 's/^provider:[[:space:]]*//')"
+  fi
+  printf '%s' "$provider"
 }
 
 # Verify an agent route without a model call: the adapter must be registered in
