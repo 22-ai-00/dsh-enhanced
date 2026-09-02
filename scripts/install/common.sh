@@ -677,10 +677,26 @@ dsh_enhanced_derive_api_key_env() {
 dsh_enhanced_verify_model_route() {
   local mode="$1"
   local dry_run="$2"
+  local profile="$3"
+  local dsh_home="$4"
   if [[ "$mode" == 'skip' ]]; then
     printf '模型 route：未发送请求；可稍后运行安装器并加 --model-route verify。\n'
     return 0
   fi
+
+  # The effective default provider is the settings.yaml user-layer selection,
+  # which wins over any composed value at runtime.  An agent route (TraeX) only
+  # has its adapter in the profile that enabled its bundle, and it never accepts
+  # a headless one-shot prompt, so verify it structurally instead of calling a
+  # model: confirm the adapter is registered in the target profile and that the
+  # local agent reports a login.  This also avoids spending any model quota.
+  local effective_provider
+  effective_provider="$(dsh_enhanced_effective_default_provider "$dsh_home")"
+  if dsh_enhanced_is_agent_route "$effective_provider"; then
+    dsh_enhanced_verify_agent_route "$effective_provider" "$profile" "$dry_run"
+    return $?
+  fi
+
   if [[ "$dry_run" == '1' ]]; then
     printf '模型 route：将通过 DSH headless profile 发送一次固定的最小验证请求。\n'
     dsh_enhanced_print_command dsh --profile headless 'Reply with exactly DSH_ROUTE_READY and nothing else.'
@@ -701,6 +717,64 @@ dsh_enhanced_verify_model_route() {
   fi
   printf '模型 route 验证通过。\n'
 }
+
+# Read the settings.yaml user-layer agent-default-model.provider, which is the
+# selection the runtime actually resolves (it wins over the composed value).
+dsh_enhanced_effective_default_provider() {
+  local dsh_home="$1"
+  local settings_path="$dsh_home/settings.yaml"
+  [[ -f "$settings_path" ]] || return 0
+  awk '
+    BEGIN { in_s = 0 }
+    /^agent-default-model:[[:space:]]*$/ { in_s = 1; next }
+    in_s && /^[^[:space:]]/ { in_s = 0 }
+    in_s && /^[[:space:]]+provider:[[:space:]]+/ {
+      line = $0; sub(/^[[:space:]]+provider:[[:space:]]+/, "", line); sub(/[[:space:]]+$/, "", line); print line; exit
+    }
+  ' "$settings_path"
+}
+
+# Verify an agent route without a model call: the adapter must be registered in
+# the target profile, and the backing local agent must report a login.  Neither
+# check spends model quota; both are the real prerequisites for the route.
+dsh_enhanced_verify_agent_route() {
+  local provider="$1"
+  local profile="$2"
+  local dry_run="$3"
+  if [[ "$dry_run" == '1' ]]; then
+    printf '模型 route：agent route %s 不发送模型请求；将校验 profile %s 已注册适配器并检查本机登录。\n' "$provider" "$profile"
+    dsh_enhanced_print_command dsh --profile "$profile" --dump-config
+    return 0
+  fi
+  printf '模型 route：agent route %s，改为结构化校验（不消耗模型额度）。\n' "$provider"
+
+  # traex-agent is served by @dsh-enhanced/traex-acp-provider.
+  local composed
+  if ! composed="$(dsh --profile "$profile" --dump-config 2>&1)"; then
+    printf '%s\n' "$composed" >&2
+    dsh_enhanced_fail 1 "模型 route 验证失败：profile $profile 无法组合。"
+    return $?
+  fi
+  if [[ "$composed" != *'@dsh-enhanced/traex-acp-provider'* ]]; then
+    dsh_enhanced_fail 1 "模型 route 验证失败：profile $profile 未注册 traex-acp-provider 适配器；请先在该 profile 启用 traex-agent（安装器会自动启用，或运行 dsh-model-setup --provider traex-agent --enable-in-profile $profile）。"
+    return $?
+  fi
+
+  local traex_command=''
+  traex_command="$(dsh_enhanced_detect_traex_command || true)"
+  if [[ -z "$traex_command" ]]; then
+    dsh_enhanced_fail 1 '模型 route 验证失败：未在 PATH 找到 traex/trae-cli。'
+    return $?
+  fi
+  local login_status
+  if ! login_status="$("$traex_command" login status 2>&1)" || [[ "$login_status" != *'Logged in using Trae'* ]]; then
+    printf '%s\n' "$login_status" >&2
+    dsh_enhanced_fail 1 "模型 route 验证失败：$traex_command 未确认登录；请在同一 OS 用户下运行 \`$traex_command login\` 后重试。"
+    return $?
+  fi
+  printf '模型 route 验证通过：traex-acp-provider 已在 profile %s 注册，且 %s 已登录。\n' "$profile" "$traex_command"
+}
+
 
 dsh_enhanced_check_web_port_available() {
   local port="$1"
@@ -1525,7 +1599,7 @@ dsh_enhanced_install() {
       }
     fi
   fi
-  dsh_enhanced_verify_model_route "$model_route_mode" "$dry_run" || return $?
+  dsh_enhanced_verify_model_route "$model_route_mode" "$dry_run" "$profile" "$dsh_home" || return $?
 
   printf '\n最终 profile 自检：\n'
   if [[ "$dry_run" == '1' ]]; then
