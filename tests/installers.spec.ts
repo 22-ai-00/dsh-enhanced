@@ -689,6 +689,42 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     expect(result.stdout.trim()).toBe('traex-agent')
   })
 
+  test('the effective-default reader also parses a flow-style settings document', async () => {
+    // dsh-model-setup writes block style, but a hand-edited or legacy file may be
+    // flow style; the reader must still resolve the provider so agent-route
+    // verification does not fall back to a headless model call.
+    const dshHome = await temporaryDshHome()
+    const read = async (document: string): Promise<string> => {
+      await writeFile(join(dshHome, 'settings.yaml'), document, 'utf8')
+      const result = spawnSync('/bin/bash', [
+        '-c', 'source "$1"; dsh_enhanced_effective_default_provider "$2"', 'installer-test', installerLibrary, dshHome,
+      ], { encoding: 'utf8' })
+      expect(result.status, result.stderr).toBe(0)
+      return result.stdout.trim()
+    }
+
+    expect(await read('{ agent-default-model: { provider: traex-agent, model: default } }\n')).toBe('traex-agent')
+    expect(await read('{ ui-theme: { preference: dark }, agent-default-model: { provider: super-relay, model: glm5.2 } }\n')).toBe('super-relay')
+    expect(await read('ui-theme:\n  preference: dark\n')).toBe('')
+  })
+
+  test('a fresh install then read resolves the agent-route provider end to end', async () => {
+    // Regression for the flow-style serialization bug: with no prior settings
+    // file, dsh-model-setup must write block-style YAML the installer can parse.
+    const dshHome = await temporaryDshHome()
+    const setupBin = join(repoRoot, 'plugins', 'personal-assistant', 'bin', 'dsh-model-setup.js')
+    const write = spawnSync(process.execPath, [
+      setupBin, '--dsh-home', dshHome, '--provider', 'traex-agent', '--enable-in-profile', 'web',
+    ], { encoding: 'utf8', env: { ...process.env, DSH_HOME: dshHome } })
+    expect(write.status, write.stderr).toBe(0)
+
+    const read = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_effective_default_provider "$2"', 'installer-test', installerLibrary, dshHome,
+    ], { encoding: 'utf8' })
+    expect(read.status, read.stderr).toBe(0)
+    expect(read.stdout.trim()).toBe('traex-agent')
+  })
+
   test('non-interactive default keeps the composed model without configuring a route', async () => {
     const dshHome = await temporaryDshHome()
 

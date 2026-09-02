@@ -241,6 +241,14 @@ async function loadMappingDocument(path: string, description: string): Promise<R
   if (!isMap(document.contents)) {
     throw new Error(`assistant-policy model setup: ${description} must contain a YAML mapping`)
   }
+  // An absent file is parsed from '{}', which yields a flow-style root map that
+  // serializes to a single `{ a: { b: c } }` line. Downstream block-style
+  // readers (the installer's awk agent-default-model parser) expect the key on
+  // its own line, so force block style. Nested maps created via setIn default
+  // to block style already; this only fixes the root of a freshly created file.
+  if (document.contents.flow) {
+    document.contents.flow = false
+  }
   return document
 }
 
