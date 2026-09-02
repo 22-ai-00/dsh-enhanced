@@ -2233,6 +2233,88 @@ describe('Lark Web-profile onboarding patch', () => {
     expect(output).not.toMatch(/client_secret|candidate-secret/u)
   })
 
+  test('re-onboards over an existing protected-file handle without failing closed as ambiguous', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const firstPath = '/home/test/.dsh/credentials-keychain/lark-web-primary-11111111111111111111111111111111.secret'
+    const first = configure({
+      profilePatch: fixture,
+      dshHome: '/home/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      credentialProvider: 'linux-protected-file',
+      credentialPath: firstPath,
+      keychainService: 'dsh/lark/web/primary/versions/linux-protected-file',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+
+    // A second onboarding of the same account (e.g. rerunning the wizard) must
+    // recognize the current protected-file handle as its own managed shape and
+    // overwrite it, rather than refusing with "ambiguous". This is the exact
+    // failure hit on a headless Linux install whose first run used protected-file.
+    const secondPath = '/home/test/.dsh/credentials-keychain/lark-web-primary-22222222222222222222222222222222.secret'
+    const second = configure({
+      profilePatch: first,
+      dshHome: '/home/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      credentialProvider: 'linux-protected-file',
+      credentialPath: secondPath,
+      keychainService: 'dsh/lark/web/primary/versions/linux-protected-file',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+
+    const rows = parse(second, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
+    const handles = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain').config.handles
+    expect(handles).toEqual([expect.objectContaining({ provider: 'linux-protected-file', path: secondPath })])
+    expect(handles).toHaveLength(1)
+  })
+
+  test('re-onboards over an existing protected-file handle when switching to secret-service', () => {
+    const configure = (lark as Record<string, unknown>).configureLarkProfilePatch as (input: unknown) => string
+    const first = configure({
+      profilePatch: fixture,
+      dshHome: '/home/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      credentialProvider: 'linux-protected-file',
+      credentialPath: '/home/test/.dsh/credentials-keychain/lark-web-primary-11111111111111111111111111111111.secret',
+      keychainService: 'dsh/lark/web/primary/versions/linux-protected-file',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+
+    const second = configure({
+      profilePatch: first,
+      dshHome: '/home/test/.dsh',
+      appId: 'cli_0123456789abcdef',
+      account: 'primary',
+      tenant: 'personal',
+      domain: 'feishu',
+      ownerUserId: 'ou_owner',
+      credentialProvider: 'linux-secret-service',
+      keychainService: 'dsh/lark/web/primary/versions/33333333333333333333333333333333',
+      keychainAccount: 'primary',
+      agentTools: 'enable',
+    })
+
+    const rows = parse(second, { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
+    const handles = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-credentials-keychain').config.handles
+    expect(handles).toEqual([expect.objectContaining({ provider: 'linux-secret-service', account: 'primary' })])
+    expect(handles).toHaveLength(1)
+    expect(handles[0]).not.toHaveProperty('path')
+  })
+
   test.each([
     'C:\\Users\\test\\lark.secret',
     '/home/test/.dsh/credentials-keychain/../lark.secret',
