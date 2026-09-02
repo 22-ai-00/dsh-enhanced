@@ -28,6 +28,26 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 
 需要收紧时可添加显式 deny，或使用安装器的 `--agent-tools disable` 移除托管的 foreground grant；先在测试 profile 使用 `--dump-config` 检查最终 patch。
 
+## 配置默认模型
+
+meta-bundle 附带 `dsh-model-setup`（同时以 `@dsh-enhanced/assistant-policy/model-setup` 导出），把部署默认模型写入 DSH `settings.yaml` 的 `agent-default-model`；自定义 OpenAI 兼容网关另写 `llm-pi-ai.providers.<route>`。它只写模型选择与 provider profile，不改权限、不动 channel。
+
+```sh
+# DeepSeek 官方（缺省模型 deepseek-v4-flash）
+dsh-model-setup --provider deepseek-official --model deepseek-v4-flash
+
+# 自定义网关（缺省协议 openai-completions）
+dsh-model-setup --provider super-relay --model glm5.2 \
+  --base-url https://super-relay.example/v1 --api openai-completions
+
+# 本机 TraeX（agent route，无 API Key）：写默认选择并在指定 profile 启用 route
+dsh-model-setup --provider traex-agent --enable-in-profile web
+```
+
+API Key 绝不作为参数传入：加 `--store-key` 时，值只从 `DSH_ENHANCED_MODEL_API_KEY` 或按 provider 派生的凭据引用（`deepseek-official` 为 `DEEPSEEK_API_KEY`，其余形如 `SUPER_RELAY_API_KEY`）读取，并原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥缺失时 fail-closed 且不改动 `settings.yaml`。不加 `--store-key` 则只写 route 选择，凭据仍按 DSH 运行时的环境/`.credentials.yaml` 解析。
+
+`traex-agent` 是 **agent route**：不需要 API Key（也拒绝 `--store-key` 与网关传输字段），由本机已登录的 TraeX 通过 [`@dsh-enhanced/traex-acp-provider`](../traex-acp-provider/README.md) 提供。`--enable-in-profile <profile>` 会在该 profile 的 `cordis.patch.yml` 里把 provider 行置为 `enabled: true`（保留其它行/注释/`!!js`，仅在缺失时补默认 `cwd`），因此启用是按 profile 的，与全局 `settings.yaml` 的默认模型选择相互独立。安装器的模型配置引导即调用此工具，详见[安装脚本文档](../../scripts/install/README.md#配置默认模型)。
+
 ## 权限与数据
 
 meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API、凭据、浏览器或安装脚本权限；四个子包的实际权限和数据边界分别见其 README。新 session 从 `workspace-write + ask` 开始；若确实需要 `danger-full-access + never`，必须在原生 selector 中明确选择，或使用安装器的 `--permission danger-full-access --confirm-dangerous-full-access`。完全访问会允许 Host sandbox 访问任意文件与网络且不逐次询问；已有兼容的用户设置始终优先。

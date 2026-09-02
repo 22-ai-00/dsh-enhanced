@@ -127,9 +127,9 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 - 文件系统：创建一个 SQLite 数据库及 WAL/SHM 辅助文件；新目录权限 `0700`，主数据库 `0600`。数据库使用 WAL、`busy_timeout`、外键、FULL synchronous 和前向 schema 版本。
 - 网络：插件不直接打开 socket；启用隔离自动 reviewer 时会调用宿主 `dsh-llm`，所选 provider route 可能使用网络。provider 的认证与传输仍由宿主拥有，本插件不直接读取其凭据。
 - 子进程：无。
-- 凭据：不读取或保存凭据值。审计按敏感 key/value、shell `command`、授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。自动 reviewer 输入只要需要任何 secret 脱敏就失去自动放行资格并转人工。
+- 凭据：运行时的 Policy service 不读取或保存凭据值。审计按敏感 key/value、shell `command`、授权头、token、password、path/cwd 做脱敏，资源 id 仅保存 SHA-256。自动 reviewer 输入只要需要任何 secret 脱敏就失去自动放行资格并转人工。包另附带两个安装期 CLI（`dsh-permission-setup`、`dsh-model-setup`），仅供安装器/部署者手动调用，不在 Cordis 运行时加载：`dsh-permission-setup` 只原子改写 `settings.yaml` 的 `permission.defaultPreset`；`dsh-model-setup` 原子写入 `agent-default-model`（自定义网关另写 `llm-pi-ai.providers.<route>`），并在显式 `--store-key` 时把仅从环境变量读取的 API Key 原子写入 `$DSH_HOME/.credentials.yaml`（`0600`，目录 `0700`），密钥绝不作为命令行参数、缺失时 fail-closed。`dsh-model-setup` 还支持 agent route（如 `traex-agent`）：这类 route 不涉及 API Key，`--enable-in-profile <profile>` 只在该 profile 的 `cordis.patch.yml` 原子改写对应 provider 行的 `enabled`（保留其它行/注释/`!!js`），非 YAML 序列的 patch 会 fail-closed 而非被覆盖。
 - 浏览器：无。
-- 安装脚本：无。
+- 安装脚本：无 npm 生命周期脚本；上述 CLI 仅在被显式调用时运行。
 
 审批展示预算由包根的 frozen `APPROVAL_DISPLAY_BUDGET` 统一公开：Delivery 默认文本上限 64 KiB，summary 最多 120 UTF-8 bytes，diff 最多 60 KiB，预留 4 KiB 给渠道渲染。原始 diff 只在 routed dispatch 仍为 pending 时存在；成功 enqueue、批准、拒绝或过期都会在同一状态事务中清除，v2→v3 迁移也会清除无路由、已 enqueue 和终态记录的遗留原文。业务域仍不得把 credential、token 或其他秘密写进 diff。`proposalMaintenanceIntervalMs` 默认每 15 秒有界地过期 stale proposal，设为 `0` 可关闭，最大值为 `2147483647`。审计是 append-only；当前版本不会自动删除记录，部署者应根据自己的隐私与合规周期备份或轮换整个数据库。SQLite 提供单机多连接并发安全，不承诺多主机共享文件系统上的一致性。
 

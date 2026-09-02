@@ -32,6 +32,8 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/install-local.sh
 ```
 
+三档部署场景能力逐级叠加：`core ⊂ lark ⊂ supervised`——`lark` 含全部 `core` 能力并加飞书常驻与偏好学习，`supervised` 再在 `lark` 之上追加评测、演化与恢复。安装过程中会引导配置一个可解析的默认模型（DeepSeek 官方或自定义 OpenAI 兼容网关）；API Key 只从环境读取，命中后写入 `$DSH_HOME/.credentials.yaml`（`0600`）。
+
 修改源码后可重建并纯重启当前服务；命令不会更新配置：
 
 ```sh
