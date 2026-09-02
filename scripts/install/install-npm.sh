@@ -4,8 +4,8 @@ set -euo pipefail
 # These two values are rewritten by release-version.mjs during `release:prepare`.
 # A remote `curl | bash` invocation therefore fetches common.sh from one tagged
 # release and refuses a changed payload before it executes it.
-DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.12'
-DSH_ENHANCED_PINNED_COMMON_SHA256='7ccc1cea3d48e1e1e5ee754be868ccf81eda960d289c8620109c4e24ab0fd57e'
+DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.13'
+DSH_ENHANCED_PINNED_COMMON_SHA256='d684484054ebb1397a548e28f296bb9963aa0dbb4ed69d0cf734a03cc9cca049'
 
 # Recursive npm publication is not atomic. Default every bundle to the exact
 # release that contains this installer so `latest` cannot compose old and new

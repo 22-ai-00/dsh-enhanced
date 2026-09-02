@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-policy",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "A DeepSeek Harness plugin for Assistant Policy.",
   "license": "MIT",
   "type": "module",
