@@ -39,7 +39,9 @@ dsh --profile web --dump-config
 dsh-model-setup --provider traex-agent --enable-in-profile web
 ```
 
-一键安装器同样支持：本机存在 `traex`/`trae-cli` 时交互向导会出现「本机 TraeX」选项，或直接 `./scripts/install/install-local.sh --model-provider traex-agent`——它会自动把本 bundle 加入安装集、写默认选择、启用 route，并探测 `traex login status`（未登录仅提示，不中断）。route 启用按 profile 记录在 `cordis.patch.yml`，与全局 `settings.yaml` 的默认模型选择相互独立；`enabled` 仍是本 bundle 的最终开关。
+一键安装器同样支持：本机存在 `traex`/`trae-cli` 时交互向导会出现「本机 TraeX」选项，或直接 `./scripts/install/install-local.sh --model-provider traex-agent`——它会自动把本 bundle 加入安装集、把全局 `agent-default-model` 指向 `traex-agent`、在该 profile 启用 route，并探测 `traex login status`（未登录仅提示，不中断）。
+
+关键区别：`agent-default-model` 是**全局唯一**的 settings 段，被所有 profile 共享；而本 route 的**适配器按 profile 注册**，只在启用了本 bundle 的 profile 里存在。因此把默认设为 `traex-agent` 后，只有已启用本 route 的 profile（默认 `web`）能解析它，`headless` 等未安装本 bundle 的 profile 会报 `NO_ADAPTER`。安装器的 `--model-route verify` 因此对 agent route 采用结构化验证（校验目标 profile 已注册适配器 + `traex login status`），不发模型请求、不消耗额度。`enabled` 仍是本 bundle 的最终开关。
 
 ## 快速开始（5 步）
 
