@@ -3,6 +3,7 @@ import {
   dueOccurrences,
   nextOccurrence,
   parseCronExpression,
+  previousOccurrence,
   ScheduleError,
   validateSchedule,
 } from '../src/schedule.ts'
@@ -83,7 +84,30 @@ describe('automation schedules', () => {
     const leap = validateSchedule({ kind: 'cron', expression: '0 0 29 2 *', timezone: 'UTC' })
     expect(nextOccurrence(leap, utc('2027-03-01T00:00:00.000Z')))
       .toBe(utc('2028-02-29T00:00:00.000Z'))
+    // Scanning backwards across the same multi-year gap must land on the prior
+    // leap day, exercising the day-skip in previousOccurrence too.
+    expect(previousOccurrence(leap, utc('2027-03-01T00:00:00.000Z')))
+      .toBe(utc('2024-02-29T00:00:00.000Z'))
     expect(() => validateSchedule({ kind: 'cron', expression: '* * * * *', timezone: 'Mars/Olympus' }))
       .toThrowError(expect.objectContaining<Partial<ScheduleError>>({ code: 'invalid-timezone' }))
+  })
+
+  test('day-skipping preserves DST wall times on a date-restricted cron', () => {
+    // 2:30 on 2026-03-08 does not exist (spring forward), so a date-restricted
+    // cron must skip that year and land on the next existing wall time — the
+    // day-skip must not fabricate a match on the short day.
+    const spring = validateSchedule({ kind: 'cron', expression: '30 2 8 3 *', timezone: 'America/New_York' })
+    expect(nextOccurrence(spring, utc('2026-01-01T00:00:00.000Z')))
+      .toBe(utc('2027-03-08T07:30:00.000Z'))
+
+    // 1:30 on 2026-11-01 occurs twice (fall back); both must still be emitted
+    // even though the surrounding days are skipped by the date filter.
+    const fall = validateSchedule({ kind: 'cron', expression: '30 1 1 11 *', timezone: 'America/New_York' })
+    const first = nextOccurrence(fall, utc('2026-10-01T00:00:00.000Z'))
+    const second = nextOccurrence(fall, first!)
+    expect([first, second]).toEqual([
+      utc('2026-11-01T05:30:00.000Z'),
+      utc('2026-11-01T06:30:00.000Z'),
+    ])
   })
 })
