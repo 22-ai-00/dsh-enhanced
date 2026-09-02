@@ -728,7 +728,15 @@ function managedCredentialHandleMatches(item: YAMLMap): boolean {
     && sequenceEquals(item.get('purposes', true) as Node | undefined, ['connect'])
     && item.get('maxLeaseMs') === 86_400_000
   if (!commonShape) return false
-  if (provider === 'windows-dpapi') return isLiteralAbsolutePath(item.get('path'))
+  // File-backed providers store a literal path and no service/account; keychain
+  // providers store service/account and no path. Both are shapes this setup
+  // writes (see configureLarkProfilePatch), so recognizing every one it emits is
+  // required — otherwise re-running onboarding on a profile whose current handle
+  // used that provider fails closed as "ambiguous". A headless/no-desktop Linux
+  // first run in particular lands on linux-protected-file.
+  if (provider === 'windows-dpapi' || provider === 'linux-protected-file') {
+    return isLiteralAbsolutePath(item.get('path'))
+  }
   return (provider === 'linux-secret-service' || provider === 'macos-keychain')
     && typeof item.get('service') === 'string'
     && typeof item.get('account') === 'string'
