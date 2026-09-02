@@ -550,6 +550,33 @@ dsh_enhanced_ensure_agent_bundle() {
 }
 
 
+# Resolve how to invoke dsh-model-setup for a profile.  pnpm normally links a
+# `.bin/dsh-model-setup` shim, but that shim is absent on profiles installed
+# before the bin existed, and its exec bit can be lost on some layouts.  Prefer
+# the shim, then fall back to running a provider package's bin script with node
+# (which needs no exec bit and resolves the shared implementation the same way).
+# Prints the launcher tokens, one per line; returns non-zero when none is found.
+dsh_enhanced_resolve_model_setup() {
+  local profile="$1"
+  local dsh_home="$2"
+  local base="$dsh_home/profiles/$profile/node_modules"
+  local shim="$base/.bin/dsh-model-setup"
+  if [[ -x "$shim" ]]; then
+    printf '%s\n' "$shim"
+    return 0
+  fi
+  local candidate
+  for candidate in \
+    "$base/@dsh-enhanced/personal-assistant/bin/dsh-model-setup.js" \
+    "$base/@dsh-enhanced/assistant-policy/bin/dsh-model-setup.js"; do
+    if [[ -f "$candidate" ]]; then
+      printf 'node\n%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 # Run dsh-model-setup with the resolved route.  For an API-key route the key is
 # read from the environment (DSH_ENHANCED_MODEL_API_KEY or the derived credential
 # reference); in an interactive terminal we offer a hidden prompt and export it
@@ -566,7 +593,23 @@ dsh_enhanced_apply_model() {
   local api="$6"
   local display_name="$7"
   local dry_run="$8"
-  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup"
+  # Resolve the launcher once: the pnpm .bin shim when present, else `node
+  # <package>/bin/dsh-model-setup.js`.  In dry-run we cannot inspect an
+  # unrealized profile, so display the canonical shim path for the plan.
+  local setup_launcher=()
+  local setup_display="$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup"
+  if [[ "$dry_run" != '1' ]]; then
+    # `mapfile` from a process substitution always exits 0, so capture the
+    # resolver output and treat an empty result as the failure signal.
+    local resolved_launcher=()
+    mapfile -t resolved_launcher < <(dsh_enhanced_resolve_model_setup "$profile" "$dsh_home")
+    if [[ ${#resolved_launcher[@]} -eq 0 ]]; then
+      dsh_enhanced_fail 1 "找不到安装后的 dsh-model-setup（既无 .bin/dsh-model-setup，也无 personal-assistant/assistant-policy 的 bin 脚本）：$dsh_home/profiles/$profile"
+      return $?
+    fi
+    setup_launcher=("${resolved_launcher[@]}")
+    setup_display="${setup_launcher[*]}"
+  fi
 
   local args=(--dsh-home "$dsh_home" --provider "$provider")
   [[ -n "$model" ]] && args+=(--model "$model")
@@ -584,14 +627,10 @@ dsh_enhanced_apply_model() {
     args+=(--enable-in-profile "$profile")
     if [[ "$dry_run" == '1' ]]; then
       printf '模型配置：将写入 settings.yaml 并在 profile %s 的 patch 层启用 traex-acp-provider（无需 API Key）。\n' "$profile"
-      dsh_enhanced_print_command "$setup_bin" "${args[@]}"
+      dsh_enhanced_print_command "$setup_display" "${args[@]}"
       return 0
     fi
-    if [[ ! -x "$setup_bin" ]]; then
-      dsh_enhanced_fail 1 "找不到安装后的 dsh-model-setup：$setup_bin"
-      return $?
-    fi
-    "$setup_bin" "${args[@]}" || return $?
+    "${setup_launcher[@]}" "${args[@]}" || return $?
     # A live login is required for the route to actually serve; probe it as a
     # non-fatal hint so a not-yet-logged-in TraeX does not fail the install.
     local traex_command=''
@@ -619,17 +658,12 @@ dsh_enhanced_apply_model() {
   if [[ "$dry_run" == '1' ]]; then
     if [[ "$have_key" == '1' ]]; then
       printf '模型配置：将写入 settings.yaml 并把环境中的 API Key 存入 .credentials.yaml。\n'
-      dsh_enhanced_print_command "$setup_bin" "${args[@]}" --store-key
+      dsh_enhanced_print_command "$setup_display" "${args[@]}" --store-key
     else
       printf '模型配置：将写入 settings.yaml；未检测到 API Key，稍后请设置 %s 或编辑 .credentials.yaml。\n' "$derived_ref"
-      dsh_enhanced_print_command "$setup_bin" "${args[@]}"
+      dsh_enhanced_print_command "$setup_display" "${args[@]}"
     fi
     return 0
-  fi
-
-  if [[ ! -x "$setup_bin" ]]; then
-    dsh_enhanced_fail 1 "找不到安装后的 dsh-model-setup：$setup_bin"
-    return $?
   fi
 
   # Offer a hidden key prompt only in an interactive terminal and only when the
@@ -641,7 +675,7 @@ dsh_enhanced_apply_model() {
     IFS= read -rs secret || secret=''
     printf '\n' >&2
     if [[ -n "$secret" ]]; then
-      DSH_ENHANCED_MODEL_API_KEY="$secret" "$setup_bin" "${args[@]}" --store-key
+      DSH_ENHANCED_MODEL_API_KEY="$secret" "${setup_launcher[@]}" "${args[@]}" --store-key
       local status=$?
       unset secret
       return $status
@@ -649,9 +683,9 @@ dsh_enhanced_apply_model() {
   fi
 
   if [[ "$have_key" == '1' ]]; then
-    "$setup_bin" "${args[@]}" --store-key
+    "${setup_launcher[@]}" "${args[@]}" --store-key
   else
-    "$setup_bin" "${args[@]}"
+    "${setup_launcher[@]}" "${args[@]}"
     printf '模型配置：未存储 API Key；请设置环境变量 %s 或编辑 %s/.credentials.yaml 后再验证。\n' \
       "$derived_ref" "$dsh_home"
   fi
