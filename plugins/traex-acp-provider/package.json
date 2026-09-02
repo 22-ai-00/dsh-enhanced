@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/traex-acp-provider",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "description": "Use a local TraeX coding agent as a DeepSeek Harness model provider over ACP.",
   "license": "MIT",
   "type": "module",
