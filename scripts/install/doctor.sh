@@ -24,8 +24,9 @@ while [[ $# -gt 0 ]]; do
       cat <<'EOF'
 Usage: doctor.sh [--profile <name>] [--preflight] [--port <1..65535>] [--require-service]
 
-Without --preflight, verifies that the profile composes.  --require-service
-also verifies the configured Lark resident service and Linux logout persistence.
+Without --preflight, verifies that a profile composes; profiles without an
+enabled Lark Channel are also foreground-activated.  --require-service verifies
+the configured Lark resident service and Linux logout persistence.
 EOF
       exit 0 ;;
     *) dsh_enhanced_fail 2 "未知参数：$1"; exit $? ;;
