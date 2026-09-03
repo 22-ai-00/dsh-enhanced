@@ -437,6 +437,9 @@ printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
 if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
 exit 0
 `)
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+exit 0
+`)
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; exit 0; fi
 printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
@@ -620,6 +623,9 @@ printf '%s\\n' 'simulated DSH activation failure'
     await writeFile(join(dshHome, 'settings.yaml'), originalSettings, 'utf8')
     await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
