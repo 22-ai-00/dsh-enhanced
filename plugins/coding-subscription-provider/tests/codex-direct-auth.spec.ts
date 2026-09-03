@@ -634,10 +634,12 @@ describe('Codex direct credential store', () => {
     const secondStore = new CodexCredentialStore({ authFile, fetch: fetcher, refreshTimeoutMs: 5_000 })
     const second = secondStore.requestResponses('{}', new AbortController().signal)
 
-    let attemptsBeforeRelease = 0
     try {
-      await new Promise<void>(resolve => setTimeout(resolve, 20))
-      attemptsBeforeRelease = refreshAttempts
+      // A changed identity field means the second store must run its own
+      // refresh instead of sharing the first in-flight one. Wait until both
+      // refreshes are actually in flight rather than racing a fixed delay,
+      // which flaked under load; if they shared, this stays at 1 and fails.
+      await vi.waitFor(() => expect(refreshAttempts).toBe(2))
     } finally {
       releaseRefresh?.()
     }
@@ -645,7 +647,6 @@ describe('Codex direct credential store', () => {
       expect.objectContaining({ status: 401 }),
       expect.objectContaining({ status: 401 }),
     ])
-    expect(attemptsBeforeRelease).toBe(2)
     expect(refreshAttempts).toBe(2)
   })
 
