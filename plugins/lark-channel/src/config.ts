@@ -18,6 +18,7 @@ export interface Config {
   staleAfterMs?: number
   handshakeTimeoutMs?: number
   imageDownloadTimeoutMs?: number
+  userQuestionTtlMs?: number
 }
 
 const schema = Schema.object({
@@ -38,6 +39,8 @@ const schema = Schema.object({
   staleAfterMs: Schema.number().step(1).min(1_000).max(86_400_000).default(300_000),
   handshakeTimeoutMs: Schema.number().step(1).min(1_000).max(120_000).default(15_000),
   imageDownloadTimeoutMs: Schema.number().step(1).min(1_000).max(120_000).default(30_000),
+  userQuestionTtlMs: Schema.number().step(1).min(60_000).max(7 * 24 * 60 * 60 * 1_000)
+    .default(24 * 60 * 60 * 1_000),
 }) as Schema<Config>
 
 const fields = new Set([
@@ -58,6 +61,7 @@ const fields = new Set([
   'staleAfterMs',
   'statusReactions',
   'tenant',
+  'userQuestionTtlMs',
 ])
 
 export const Config = new Proxy(schema, {

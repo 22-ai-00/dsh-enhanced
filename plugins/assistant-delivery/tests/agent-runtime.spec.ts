@@ -1568,6 +1568,10 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(started?.kind === 'tool-started' ? started.argumentsPreview : '').toContain('[REDACTED]')
     expect(started?.kind === 'tool-started' ? started.argumentsPreview : '').not.toContain('also-private')
     expect(started?.kind === 'tool-started' ? started.argumentsPreview : '').not.toContain('private-too')
+    expect(deliveryProgressFromSessionEvent(event({
+      type: 'tool/call', data: { turn: 1, step: 1, callId: 'call-question', name: 'ask_user_question',
+        arguments: '{"questions":[{"question":"secret draft"}]}' },
+    }))).toEqual({ kind: 'step', text: '等待您的回答…' })
     const finished = deliveryProgressFromSessionEvent(event({
       type: 'tool/result', surfaceOp: 'append', data: { turn: 1, step: 1,
         message: { source: { callId: 'call-1' }, content: [{ type: 'tool-result', toolCallId: 'call-1',

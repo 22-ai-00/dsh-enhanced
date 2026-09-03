@@ -3,6 +3,8 @@
 仓库初始化时对齐以下上游源码状态：
 
 - DeepSeek Harness 运行时与 npm 测试依赖：`0.1.0-rc.8`（上游源码提交 `141eb6fef83422698aef7a981029e843e8161534`）
+- `@deepseek-ai/dsh-host-apiproxy@0.1.0-rc.8`（可选 Host seam）：ApiProxy 保持唯一 `userQuestions` provider。`assistant-delivery` 只消费其 `events.mux()` 中的 question request/resolution，并把仍有 exact active owner binding 的请求交给有能力的渠道 adapter；Web 与渠道回答共享 rpc id，first-claim-wins。未挂载 ApiProxy 的非 Web profile 不注册替代 provider、不会因该桥接失败启动，只是没有跨渠道问题交互。
+- `@deepseek-ai/dsh-user-questions@0.1.0-rc.8`：跨渠道桥接公开的 question/answer 结构与 Host ApiProxy 使用同一份 wire-safe 类型。
 - 官方 ACP 行为复查基线：`@deepseek-ai/dsh-acp@0.1.0-rc.5`（上游源码提交 `47f943859bef60e4160492346772ded9b24f765a`）
 - `@deepseek-ai/cordis`：`4.0.1`
 - Node.js：`^22.19.0 || >=24.0.0`

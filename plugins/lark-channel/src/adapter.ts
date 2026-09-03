@@ -8,6 +8,9 @@ import type {
   DeliveryPresentation,
   DeliveryToolApprovalOutcome,
   DeliveryToolApprovalRequest,
+  DeliveryUserQuestionOutcome,
+  DeliveryUserQuestionRequest,
+  InboundEnvelope,
   ModelPickerIntent,
   ModelPickerState,
   ModelRouteRef,
@@ -49,6 +52,13 @@ import {
   type LarkToolApprovalActionPayload,
 } from './tool-approval.js'
 import {
+  LarkUserQuestionError,
+  parseLarkUserQuestionCallback,
+  signLarkUserQuestionAction,
+  verifyLarkUserQuestionAction,
+  type LarkUserQuestionActionPayload,
+} from './user-question.js'
+import {
   LarkTransportError,
   type LarkChannelHealth,
   type LarkInboundConfig,
@@ -74,6 +84,7 @@ export interface LarkAdapterOptions {
   showProgress?: boolean
   progressDetails?: 'off' | 'direct'
   statusReactions?: boolean
+  userQuestionTtlMs?: number
   approvalSecret?: string
   settleApproval?(input: LarkApprovalSettlementInput): unknown | Promise<unknown>
   recoverApprovalSettlement?(input: LarkApprovalSettlementInput): unknown | undefined | Promise<unknown | undefined>
@@ -124,6 +135,26 @@ interface PendingToolApproval {
   providerMessageId?: string
 }
 
+type UserQuestionAnswer = Extract<DeliveryUserQuestionOutcome, { outcome: 'answered' }>['answer']
+type UserQuestionAnswerItem = UserQuestionAnswer['answers'][number]
+
+interface PendingUserQuestion {
+  readonly input: Readonly<DeliveryUserQuestionRequest>
+  readonly payload: Omit<LarkUserQuestionActionPayload,
+    'action' | 'optionIndex' | 'questionIndex' | 'revision'>
+  readonly requestHash: string
+  readonly signal: AbortSignal
+  readonly abort: () => void
+  readonly resolve: (outcome: DeliveryUserQuestionOutcome) => void
+  readonly outcome: Promise<DeliveryUserQuestionOutcome>
+  readonly answers: UserQuestionAnswerItem[]
+  readonly selectedOptionIndexes: Set<number>
+  questionIndex: number
+  revision: number
+  providerMessageId?: string
+  timer?: ReturnType<typeof setTimeout>
+}
+
 interface ToolApprovalTombstone {
   readonly expiresAt: number
   timer?: ReturnType<typeof setTimeout>
@@ -132,6 +163,9 @@ interface ToolApprovalTombstone {
 const LARK_TOOL_APPROVAL_REASON_MAX_BYTES = 2 * 1_024
 const LARK_TOOL_APPROVAL_ARGUMENTS_MAX_BYTES = 16 * 1_024
 const LARK_TOOL_APPROVAL_MAX_TIMER_MS = 2_147_483_647
+const LARK_USER_QUESTION_MAX_QUESTIONS = 16
+const LARK_USER_QUESTION_MAX_OPTIONS = 20
+const LARK_USER_QUESTION_MAX_TEXT_BYTES = 16 * 1_024
 const larkCallbackIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@:-]{0,255}$/u
 const larkProviderMessageIdentifier = /^[A-Za-z0-9][A-Za-z0-9._@/-]{0,255}$/u
 
@@ -144,6 +178,67 @@ function boundedReviewText(value: string | undefined, maxBytes: number): boolean
     && !/(?:\p{Cc}|\p{Bidi_Control})/u.test(
       value.replaceAll('\n', '').replaceAll('\r', '').replaceAll('\t', ''),
     ))
+}
+
+function samePrincipal(left: InboundEnvelope['principal'], right: InboundEnvelope['principal']): boolean {
+  return left.channel === right.channel
+    && left.account === right.account
+    && left.tenant === right.tenant
+    && left.user === right.user
+}
+
+function sameConversation(
+  left: InboundEnvelope['conversation'],
+  right: InboundEnvelope['conversation'],
+): boolean {
+  return left.channel === right.channel
+    && left.account === right.account
+    && left.tenant === right.tenant
+    && left.kind === right.kind
+    && left.chat === right.chat
+    && left.thread === right.thread
+}
+
+function validUserQuestionRequest(input: Readonly<DeliveryUserQuestionRequest>): boolean {
+  if (!larkCallbackIdentifier.test(input.operationId)
+    || !larkCallbackIdentifier.test(input.bindingId)
+    || !larkCallbackIdentifier.test(input.sessionId)
+    || !Number.isSafeInteger(input.bindingVersion) || input.bindingVersion < 1
+    || !Number.isSafeInteger(input.bindingGeneration) || input.bindingGeneration < 1
+    || input.questions.length < 1 || input.questions.length > LARK_USER_QUESTION_MAX_QUESTIONS) {
+    return false
+  }
+  const ids = new Set<string>()
+  for (const question of input.questions) {
+    if (typeof question.id !== 'string' || question.id.length === 0 || ids.has(question.id)
+      || typeof question.question !== 'string' || question.question.trim().length === 0
+      || !boundedReviewText(question.question, LARK_USER_QUESTION_MAX_TEXT_BYTES)
+      || !boundedReviewText(question.detail, LARK_USER_QUESTION_MAX_TEXT_BYTES)
+      || !boundedReviewText(question.header, 1_024)) {
+      return false
+    }
+    ids.add(question.id)
+    const options = question.options ?? []
+    if (options.length > LARK_USER_QUESTION_MAX_OPTIONS) return false
+    const labels = new Set<string>()
+    for (const option of options) {
+      if (typeof option.label !== 'string' || option.label.trim().length === 0
+        || labels.has(option.label)
+        || !boundedReviewText(option.label, 1_024)
+        || !boundedReviewText(option.description, 4_096)) {
+        return false
+      }
+      labels.add(option.label)
+    }
+  }
+  return true
+}
+
+function displayOptionLabel(label: string): { label: string; recommended: boolean } {
+  const recommended = /(?:\s*\(Recommended\)|\s*（推荐）)\s*$/u
+  return recommended.test(label)
+    ? { label: label.replace(recommended, '').trim() || label, recommended: true }
+    : { label, recommended: false }
 }
 
 function sameToolApprovalPayload(
@@ -421,8 +516,11 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
   private readonly loadModelPicker: LarkAdapterOptions['loadModelPicker']
   private readonly advanceModelPicker: LarkAdapterOptions['advanceModelPicker']
   private readonly statusReactions: boolean
+  private readonly userQuestionTtlMs: number
   private readonly progressPresenter: LarkProgressPresenter
   private readonly pendingToolApprovals = new Map<string, PendingToolApproval>()
+  private readonly pendingUserQuestions = new Map<string, PendingUserQuestion>()
+  private readonly userQuestionAnswerEvents = new Map<string, ReturnType<typeof setTimeout>>()
   private readonly toolApprovalTombstones = new Map<string, ToolApprovalTombstone>()
   private readonly modelSelectionUpdates = new Map<string, PendingModelSelectionUpdate>()
   private state: LarkChannelHealth['state'] = 'disconnected'
@@ -445,6 +543,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         : ['plain', 'markdown', 'approval', 'model-picker'] as const,
       inboundImages: typeof transport.downloadMessageImage === 'function',
       toolApprovals: hasUsableApprovalSecret(options.approvalSecret),
+      userQuestions: hasUsableApprovalSecret(options.approvalSecret),
     })
     this.now = options.now ?? Date.now
     this.approvalSecret = options.approvalSecret
@@ -456,6 +555,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.loadModelPicker = options.loadModelPicker
     this.advanceModelPicker = options.advanceModelPicker
     this.statusReactions = options.statusReactions ?? true
+    this.userQuestionTtlMs = options.userQuestionTtlMs ?? 24 * 60 * 60 * 1_000
     this.progressPresenter = new LarkProgressPresenter(
       transport,
       options.showProgress ?? true,
@@ -468,8 +568,28 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     this.state = 'connecting'
     const unsubscribe = this.transport.subscribe({
       message: async message => {
-        const normalized = normalizeLarkMessage(this.config, message, this.now())
+        // A reply to a live question card is already an explicit interaction
+        // with the bot. Lark does not necessarily mark that reply as an @mention,
+        // so let only this narrowly identified candidate pass normalization's
+        // group mention gate. If the full owner/route/message fences below do
+        // not accept it as an answer, ignore it instead of enqueueing a turn.
+        const unmentionedQuestionReply = message.chatType === 'group'
+          && this.config.requireMentionInGroups
+          && !message.mentionedBot
+          && message.replyToMessageId !== undefined
+          && [...this.pendingUserQuestions.values()].some(
+            pending => pending.providerMessageId === message.replyToMessageId,
+          )
+        const normalized = normalizeLarkMessage(
+          unmentionedQuestionReply
+            ? { ...this.config, requireMentionInGroups: false }
+            : this.config,
+          message,
+          this.now(),
+        )
         if (normalized.outcome !== 'accept') return
+        if (await this.tryAnswerUserQuestion(normalized.envelope, message.messageId)) return
+        if (unmentionedQuestionReply) return
         const accepted = await context.accept(normalized.envelope)
         if (this.statusReactions && !accepted.duplicate && accepted.status === 'queued') {
           // The durable Inbox acknowledgement is the critical path. A slow or
@@ -499,6 +619,7 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       unsubscribe()
       this.state = 'disconnected'
       this.cancelPendingToolApprovals('unavailable', true)
+      this.cancelPendingUserQuestions()
       await this.transport.disconnect().catch(() => {})
       throw error
     }
@@ -509,6 +630,8 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       unsubscribe()
       this.state = 'disconnected'
       this.cancelPendingToolApprovals('unavailable', true)
+      this.cancelPendingUserQuestions()
+      this.clearUserQuestionAnswerEvents()
       this.cancelModelSelectionUpdates()
       await this.transport.disconnect()
     }
@@ -641,6 +764,123 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     }, error => {
       this.recordPresentationFailure(error)
       this.settleToolApproval(pending, 'unavailable')
+    })
+    return outcome
+  }
+
+  async requestUserQuestion(
+    input: Readonly<DeliveryUserQuestionRequest>,
+    signal: AbortSignal,
+  ): Promise<DeliveryUserQuestionOutcome> {
+    if (signal.aborted
+      || !hasUsableApprovalSecret(this.approvalSecret)
+      || (this.state !== 'connected' && this.state !== 'connected-with-gap')
+      || !this.matchesTarget(input.target)
+      || !larkCallbackIdentifier.test(input.target.conversation.chat)
+      || !larkCallbackIdentifier.test(input.target.principal.user)
+      || !validUserQuestionRequest(input)) {
+      return { outcome: 'unavailable' }
+    }
+    let now: number
+    try {
+      now = this.now()
+    } catch {
+      return { outcome: 'unavailable' }
+    }
+    const expiresAt = now + this.userQuestionTtlMs
+    if (!Number.isSafeInteger(now) || now < 0
+      || !Number.isSafeInteger(this.userQuestionTtlMs) || this.userQuestionTtlMs < 1
+      || !Number.isSafeInteger(expiresAt)) {
+      return { outcome: 'unavailable' }
+    }
+    const requestHash = createHash('sha256')
+      .update(JSON.stringify(input.questions), 'utf8')
+      .digest('hex')
+    const existing = this.pendingUserQuestions.get(input.operationId)
+    if (existing !== undefined) {
+      return existing.requestHash === requestHash
+        && existing.input.sessionId === input.sessionId
+        && existing.input.bindingId === input.bindingId
+        && existing.input.bindingVersion === input.bindingVersion
+        && existing.input.bindingGeneration === input.bindingGeneration
+        && samePrincipal(existing.input.target.principal, input.target.principal)
+        && sameConversation(existing.input.target.conversation, input.target.conversation)
+        ? existing.outcome
+        : { outcome: 'unavailable' }
+    }
+
+    let resolve!: (outcome: DeliveryUserQuestionOutcome) => void
+    const outcome = new Promise<DeliveryUserQuestionOutcome>(settle => { resolve = settle })
+    let pending!: PendingUserQuestion
+    const abort = () => {
+      this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', true)
+    }
+    pending = {
+      input,
+      payload: {
+        version: 1,
+        channel: this.channel,
+        account: this.account,
+        tenant: this.config.tenant,
+        rpcId: input.operationId,
+        sessionId: input.sessionId,
+        bindingId: input.bindingId,
+        bindingVersion: input.bindingVersion,
+        bindingGeneration: input.bindingGeneration,
+        chatId: input.target.conversation.chat,
+        ownerUser: input.target.principal.user,
+        requestHash,
+        expiresAt,
+      },
+      requestHash,
+      signal,
+      abort,
+      resolve,
+      outcome,
+      answers: [],
+      selectedOptionIndexes: new Set(),
+      questionIndex: 0,
+      revision: 0,
+    }
+    let card: Extract<import('./types.js').LarkSendInput, { userQuestion: unknown }>
+    try {
+      card = { userQuestion: this.userQuestionCard(pending) }
+      if (Buffer.byteLength(renderLarkMessage(card).content, 'utf8') > LARK_APPROVAL_CARD_MAX_BYTES) {
+        return { outcome: 'unavailable' }
+      }
+    } catch {
+      return { outcome: 'unavailable' }
+    }
+
+    this.pendingUserQuestions.set(input.operationId, pending)
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) {
+      this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', false)
+      return outcome
+    }
+    this.armUserQuestionExpiry(pending)
+    let sending: Promise<Awaited<ReturnType<LarkTransport['send']>>>
+    try {
+      sending = Promise.resolve(this.transport.send(
+        input.target.conversation.chat,
+        card,
+        this.userQuestionSendOptions(pending),
+      ))
+    } catch (error) {
+      this.recordPresentationFailure(error)
+      this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', false)
+      return outcome
+    }
+    void sending.then(result => {
+      if (this.pendingUserQuestions.get(input.operationId) !== pending) return
+      if (!larkProviderMessageIdentifier.test(result.messageId)) {
+        this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', false)
+        return
+      }
+      pending.providerMessageId = result.messageId
+    }, error => {
+      this.recordPresentationFailure(error)
+      this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', false)
     })
     return outcome
   }
@@ -873,6 +1113,263 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
       && principal.tenant === this.config.tenant
   }
 
+  private userQuestionCard(pending: PendingUserQuestion): import('./types.js').LarkUserQuestionCard {
+    if (!hasUsableApprovalSecret(this.approvalSecret)) {
+      throw new LarkUserQuestionError('invalid', 'Lark user question signing is unavailable')
+    }
+    const question = pending.input.questions[pending.questionIndex]
+    if (question === undefined) {
+      throw new LarkUserQuestionError('invalid', 'Lark user question index is invalid')
+    }
+    const callbackValue = (
+      action: LarkUserQuestionActionPayload['action'],
+      optionIndex: number | null,
+    ) => ({
+      userQuestion: signLarkUserQuestionAction(this.approvalSecret!, {
+        ...pending.payload,
+        questionIndex: pending.questionIndex,
+        optionIndex,
+        action,
+        revision: pending.revision,
+      }),
+    })
+    const options = (question.options ?? []).map((option, optionIndex) => {
+      const display = displayOptionLabel(option.label)
+      return {
+        label: display.label,
+        ...(option.description === undefined ? {} : { description: option.description }),
+        recommended: display.recommended,
+        selected: pending.selectedOptionIndexes.has(optionIndex),
+        value: callbackValue(question.multiSelect === true ? 'toggle' : 'select', optionIndex),
+      }
+    })
+    return {
+      title: question.header?.trim() || '需要你的回答',
+      question: question.question.trim(),
+      ...(question.detail === undefined ? {} : { detail: question.detail }),
+      position: pending.questionIndex + 1,
+      total: pending.input.questions.length,
+      multiSelect: question.multiSelect === true,
+      expectsText: options.length === 0,
+      options,
+      ...(question.multiSelect === true && pending.selectedOptionIndexes.size > 0
+        ? { submitValue: callbackValue('submit', null) }
+        : {}),
+      cancelValue: callbackValue('cancel', null),
+      answered: pending.answers.map((answer, index) => ({
+        title: pending.input.questions[index]?.header?.trim() || `问题 ${index + 1}`,
+        answer: this.userQuestionAnswerSummary(answer),
+      })),
+    }
+  }
+
+  private userQuestionAnswerSummary(answer: UserQuestionAnswerItem): string {
+    const parts = [...answer.selected, ...(answer.custom === undefined ? [] : [answer.custom])]
+    const value = parts.join('；')
+    return value.length <= 240 ? value : `${value.slice(0, 237)}...`
+  }
+
+  private userQuestionSendOptions(pending: PendingUserQuestion): LarkSendOptions {
+    const conversation = pending.input.target.conversation
+    const providerReplyTarget = conversation.kind === 'group'
+      && !isLarkTopLevelSenderThread(conversation.thread)
+      ? conversation.thread
+      : undefined
+    return {
+      requestKey: `user-question:${pending.input.operationId}:${pending.requestHash}:${pending.revision}`,
+      ...(providerReplyTarget === undefined ? {} : { replyTo: providerReplyTarget, replyInThread: true }),
+    }
+  }
+
+  private async refreshUserQuestionCard(pending: PendingUserQuestion): Promise<void> {
+    if (this.pendingUserQuestions.get(pending.input.operationId) !== pending) return
+    const card = { userQuestion: this.userQuestionCard(pending) } as const
+    if (Buffer.byteLength(renderLarkMessage(card).content, 'utf8') > LARK_APPROVAL_CARD_MAX_BYTES) {
+      this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', true)
+      return
+    }
+    const update = this.transport.updateRawCard
+    if (pending.providerMessageId !== undefined && update !== undefined) {
+      try {
+        await update.call(
+          this.transport,
+          pending.providerMessageId,
+          rawCard(card),
+          new AbortController().signal,
+        )
+        return
+      } catch (error) {
+        this.recordPresentationFailure(error)
+      }
+    }
+    try {
+      const result = await this.transport.send(
+        pending.input.target.conversation.chat,
+        card,
+        this.userQuestionSendOptions(pending),
+      )
+      if (this.pendingUserQuestions.get(pending.input.operationId) !== pending) return
+      if (!larkProviderMessageIdentifier.test(result.messageId)) {
+        this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', true)
+        return
+      }
+      pending.providerMessageId = result.messageId
+    } catch (error) {
+      this.recordPresentationFailure(error)
+      this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', true)
+    }
+  }
+
+  private userQuestionResult(
+    status: import('./types.js').LarkUserQuestionResultCard['status'],
+    answerCount: number,
+  ): import('./types.js').LarkUserQuestionResultCard {
+    if (status === 'answered') {
+      return { status, summary: `已提交 ${answerCount} 个回答，智能体正在继续处理。` }
+    }
+    if (status === 'cancelled') {
+      return { status, summary: '问题已取消，智能体将停止等待本次回答。' }
+    }
+    return { status, summary: '问题已在其他界面处理，或当前会话已经结束。' }
+  }
+
+  private updateUserQuestionResult(
+    pending: PendingUserQuestion,
+    status: import('./types.js').LarkUserQuestionResultCard['status'],
+  ): void {
+    const update = this.transport.updateRawCard
+    if (pending.providerMessageId === undefined || update === undefined) return
+    const card = rawCard({ userQuestionResult: this.userQuestionResult(status, pending.answers.length) })
+    void update.call(
+      this.transport,
+      pending.providerMessageId,
+      card,
+      new AbortController().signal,
+    ).catch(error => this.recordPresentationFailure(error))
+  }
+
+  private settleUserQuestion(
+    pending: PendingUserQuestion,
+    outcome: DeliveryUserQuestionOutcome,
+    status: import('./types.js').LarkUserQuestionResultCard['status'],
+    updatePresentation: boolean,
+  ): boolean {
+    if (this.pendingUserQuestions.get(pending.input.operationId) !== pending) return false
+    this.pendingUserQuestions.delete(pending.input.operationId)
+    pending.signal.removeEventListener('abort', pending.abort)
+    if (pending.timer !== undefined) clearTimeout(pending.timer)
+    pending.resolve(outcome)
+    if (updatePresentation) this.updateUserQuestionResult(pending, status)
+    return true
+  }
+
+  private armUserQuestionExpiry(pending: PendingUserQuestion): void {
+    const expire = () => {
+      if (this.pendingUserQuestions.get(pending.input.operationId) !== pending) return
+      let remaining: number
+      try {
+        remaining = pending.payload.expiresAt - this.now()
+      } catch {
+        this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', true)
+        return
+      }
+      if (!Number.isSafeInteger(remaining)) {
+        this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', true)
+        return
+      }
+      if (remaining <= 0) {
+        this.settleUserQuestion(pending, { outcome: 'cancelled' }, 'cancelled', true)
+        return
+      }
+      pending.timer = setTimeout(expire, Math.min(remaining, LARK_TOOL_APPROVAL_MAX_TIMER_MS))
+      pending.timer.unref()
+    }
+    expire()
+  }
+
+  private cancelPendingUserQuestions(): void {
+    for (const pending of this.pendingUserQuestions.values()) {
+      this.settleUserQuestion(pending, { outcome: 'unavailable' }, 'resolved', true)
+    }
+  }
+
+  private recordUserQuestionAnswer(
+    pending: PendingUserQuestion,
+    answer: UserQuestionAnswerItem,
+  ): DeliveryUserQuestionOutcome | undefined {
+    pending.answers.push(answer)
+    pending.selectedOptionIndexes.clear()
+    if (pending.questionIndex + 1 < pending.input.questions.length) {
+      pending.questionIndex += 1
+      pending.revision += 1
+      return undefined
+    }
+    return { outcome: 'answered', answer: { answers: [...pending.answers] } }
+  }
+
+  private rememberUserQuestionAnswerEvent(eventId: string): void {
+    if (this.userQuestionAnswerEvents.has(eventId)) return
+    const timer = setTimeout(() => {
+      this.userQuestionAnswerEvents.delete(eventId)
+    }, Math.max(this.config.staleAfterMs, 60_000))
+    timer.unref()
+    this.userQuestionAnswerEvents.set(eventId, timer)
+  }
+
+  private clearUserQuestionAnswerEvents(): void {
+    for (const timer of this.userQuestionAnswerEvents.values()) clearTimeout(timer)
+    this.userQuestionAnswerEvents.clear()
+  }
+
+  private async tryAnswerUserQuestion(envelope: InboundEnvelope, providerMessageId: string): Promise<boolean> {
+    if (this.userQuestionAnswerEvents.has(providerMessageId)) return true
+    if (envelope.kind !== 'text' || envelope.attachments !== undefined) return false
+    const replyTo = envelope.metadata?.replyToProviderMessageId
+    const routeCandidates = [...this.pendingUserQuestions.values()].filter(pending =>
+      samePrincipal(pending.input.target.principal, envelope.principal)
+      && sameConversation(pending.input.target.conversation, envelope.conversation))
+    let pending: PendingUserQuestion | undefined
+    if (replyTo !== undefined) {
+      pending = [...this.pendingUserQuestions.values()].find(candidate =>
+        candidate.providerMessageId === replyTo
+        && samePrincipal(candidate.input.target.principal, envelope.principal)
+        && candidate.input.target.conversation.channel === envelope.conversation.channel
+        && candidate.input.target.conversation.account === envelope.conversation.account
+        && candidate.input.target.conversation.tenant === envelope.conversation.tenant
+        && candidate.input.target.conversation.kind === envelope.conversation.kind
+        && candidate.input.target.conversation.chat === envelope.conversation.chat)
+    } else if (routeCandidates.length === 1) {
+      pending = routeCandidates[0]
+    }
+    if (pending === undefined || pending.providerMessageId === undefined) return false
+    const question = pending.input.questions[pending.questionIndex]
+    if (question === undefined) return false
+    const typed = envelope.text.trim()
+    if (typed.length === 0) return false
+    const exactOption = (question.options ?? []).find(option => option.label === typed)
+    const staged = [...pending.selectedOptionIndexes].sort((left, right) => left - right)
+      .flatMap(index => question.options?.[index]?.label ?? [])
+    const selected = exactOption === undefined
+      ? staged
+      : question.multiSelect === true
+        ? [...new Set([...staged, exactOption.label])]
+        : [exactOption.label]
+    const custom = exactOption === undefined ? typed : undefined
+    const result = this.recordUserQuestionAnswer(pending, {
+      id: question.id,
+      selected,
+      ...(custom === undefined ? {} : { custom }),
+    })
+    this.rememberUserQuestionAnswerEvent(providerMessageId)
+    if (result === undefined) {
+      await this.refreshUserQuestionCard(pending)
+    } else {
+      this.settleUserQuestion(pending, result, 'answered', true)
+    }
+    if (this.statusReactions) void this.addReaction(providerMessageId, 'DONE')
+    return true
+  }
+
   private armToolApprovalTombstone(operationId: string, tombstone: ToolApprovalTombstone): void {
     const expire = () => {
       if (this.toolApprovalTombstones.get(operationId) !== tombstone) return
@@ -1018,6 +1515,9 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         }
         return this.handleToolApprovalAction(action, (value as { toolApproval: string }).toolApproval)
       }
+      if (Object.prototype.hasOwnProperty.call(value, 'userQuestion')) {
+        return await this.handleUserQuestionAction(action, parseLarkUserQuestionCallback(value))
+      }
       if (Object.prototype.hasOwnProperty.call(value, 'permissionPicker')) {
         return await this.handlePermissionPickerAction(action, parseLarkPermissionPickerCallback(value))
       }
@@ -1083,6 +1583,11 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
         return { toast: { type: 'warning', content: error.code === 'expired'
           ? '权限卡片已过期，请重新发送 /permission'
           : '权限卡片无效或已失效，请重新发送 /permission' } }
+      }
+      if (error instanceof LarkUserQuestionError) {
+        return { toast: { type: 'warning', content: error.code === 'expired'
+          ? '问题卡片已过期，请重新向智能体发起请求'
+          : '问题卡片已更新或失效，请使用最新卡片' } }
       }
       if (error instanceof LarkApprovalError || error instanceof LarkModelPickerError
         || error instanceof LarkToolApprovalError) {
@@ -1174,6 +1679,103 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     }
     return { toast: { type: payload.decision === 'allowed-once' ? 'success' : 'info',
       content: payload.decision === 'allowed-once' ? '已仅允许本次工具调用' : '已拒绝工具调用' } }
+  }
+
+  private async handleUserQuestionAction(
+    action: import('./types.js').LarkCardAction,
+    callback: ReturnType<typeof parseLarkUserQuestionCallback>,
+  ): Promise<unknown> {
+    if (!hasUsableApprovalSecret(this.approvalSecret) || action.tag !== 'button'
+      || !larkProviderMessageIdentifier.test(action.messageId)) {
+      throw new LarkUserQuestionError('invalid', 'Lark user question callback is unavailable')
+    }
+    const payload = verifyLarkUserQuestionAction(this.approvalSecret, callback.userQuestion, this.now())
+    if (payload.channel !== this.channel || payload.account !== this.account
+      || payload.tenant !== this.config.tenant || payload.chatId !== action.chatId
+      || payload.ownerUser !== action.operatorId) {
+      throw new LarkUserQuestionError('invalid', 'Lark user question route does not match')
+    }
+    const pending = this.pendingUserQuestions.get(payload.rpcId)
+    if (pending === undefined
+      || pending.providerMessageId !== action.messageId
+      || pending.payload.version !== payload.version
+      || pending.payload.channel !== payload.channel
+      || pending.payload.account !== payload.account
+      || pending.payload.tenant !== payload.tenant
+      || pending.payload.rpcId !== payload.rpcId
+      || pending.payload.sessionId !== payload.sessionId
+      || pending.payload.bindingId !== payload.bindingId
+      || pending.payload.bindingVersion !== payload.bindingVersion
+      || pending.payload.bindingGeneration !== payload.bindingGeneration
+      || pending.payload.chatId !== payload.chatId
+      || pending.payload.ownerUser !== payload.ownerUser
+      || pending.payload.requestHash !== payload.requestHash
+      || pending.payload.expiresAt !== payload.expiresAt
+      || pending.questionIndex !== payload.questionIndex
+      || pending.revision !== payload.revision) {
+      throw new LarkUserQuestionError('invalid', 'Lark user question request does not match')
+    }
+    const question = pending.input.questions[pending.questionIndex]
+    if (question === undefined) {
+      throw new LarkUserQuestionError('invalid', 'Lark user question index is invalid')
+    }
+    if (payload.action === 'cancel') {
+      this.settleUserQuestion(pending, { outcome: 'cancelled' }, 'cancelled', false)
+      return {
+        toast: { type: 'info', content: '已取消本次问题' },
+        ...callbackCard({ userQuestionResult: this.userQuestionResult('cancelled', pending.answers.length) }),
+      }
+    }
+    const options = question.options ?? []
+    if (payload.action === 'toggle') {
+      if (question.multiSelect !== true || payload.optionIndex === null
+        || options[payload.optionIndex] === undefined) {
+        throw new LarkUserQuestionError('invalid', 'Lark user question option is invalid')
+      }
+      if (pending.selectedOptionIndexes.has(payload.optionIndex)) {
+        pending.selectedOptionIndexes.delete(payload.optionIndex)
+      } else {
+        pending.selectedOptionIndexes.add(payload.optionIndex)
+      }
+      pending.revision += 1
+      return {
+        toast: { type: 'info', content: pending.selectedOptionIndexes.size === 0
+          ? '已清空选择'
+          : `已选择 ${pending.selectedOptionIndexes.size} 项` },
+        ...callbackCard({ userQuestion: this.userQuestionCard(pending) }),
+      }
+    }
+    let answer: UserQuestionAnswerItem
+    if (payload.action === 'select') {
+      if (question.multiSelect === true || payload.optionIndex === null
+        || options[payload.optionIndex] === undefined) {
+        throw new LarkUserQuestionError('invalid', 'Lark user question option is invalid')
+      }
+      answer = { id: question.id, selected: [options[payload.optionIndex]!.label] }
+    } else {
+      if (question.multiSelect !== true || payload.optionIndex !== null
+        || pending.selectedOptionIndexes.size === 0) {
+        throw new LarkUserQuestionError('invalid', 'Lark user question selection is empty')
+      }
+      answer = {
+        id: question.id,
+        selected: [...pending.selectedOptionIndexes]
+          .sort((left, right) => left - right)
+          .map(index => options[index]!.label),
+      }
+    }
+    const result = this.recordUserQuestionAnswer(pending, answer)
+    if (result === undefined) {
+      return {
+        toast: { type: 'success', content: '回答已记录，请继续下一题' },
+        ...callbackCard({ userQuestion: this.userQuestionCard(pending) }),
+      }
+    }
+    this.settleUserQuestion(pending, result, 'answered', false)
+    return {
+      toast: { type: 'success', content: '回答已提交，智能体将继续处理' },
+      ...callbackCard({ userQuestionResult: this.userQuestionResult('answered', pending.answers.length) }),
+    }
   }
 
   private async handleModelPickerAction(
