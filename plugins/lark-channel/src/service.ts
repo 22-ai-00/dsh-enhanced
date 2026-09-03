@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
-import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
+import { type AssistantDeliveryService, DeliveryAdapterRegistryStoppedError } from '@dsh-enhanced/assistant-delivery'
 import { LarkDeliveryAdapter } from './adapter.js'
 import { Config } from './config.js'
 import { createOfficialLarkTransport, type OfficialLarkTransportOptions } from './sdk.js'
@@ -163,6 +163,15 @@ export class LarkChannelService extends Service {
         ? [this.stopController.signal]
         : [this.stopController.signal, credentialSignal])
     } catch (error) {
+      // A stopped registry means the whole plugin tree is tearing down (often
+      // because an earlier plugin failed to load, e.g. the web server hit
+      // EADDRINUSE). Registering our adapter into that teardown is not the real
+      // failure, so do not re-throw it as this service's fatal cause and mask
+      // the true one; settle ready and unwind quietly.
+      if (error instanceof DeliveryAdapterRegistryStoppedError) {
+        this.ready.resolve()
+        return
+      }
       this.ready.reject(error)
       throw error
     } finally {

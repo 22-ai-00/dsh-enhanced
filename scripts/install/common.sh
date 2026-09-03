@@ -577,6 +577,56 @@ dsh_enhanced_resolve_model_setup() {
   return 1
 }
 
+# Restart an already-installed resident service so it reloads a just-changed
+# profile/settings (e.g. a newly selected default model or enabled route). This
+# only restarts; it never installs a unit. A missing unit is not fatal here —
+# the Feishu step installs/starts it — so we warn and continue.
+dsh_enhanced_restart_resident_service() {
+  local profile="$1"
+  local dry_run="$2"
+  local platform="${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}"
+  case "$platform" in
+    Darwin|darwin)
+      local target="gui/$(id -u)/ai.deepseek.dsh.profile.$profile"
+      if [[ "$dry_run" == '1' ]]; then
+        printf '常驻服务：将重启以加载新模型配置。\n'
+        dsh_enhanced_print_command launchctl kickstart -k "$target"
+        return 0
+      fi
+      if launchctl print "$target" >/dev/null 2>&1; then
+        printf '常驻服务：重启以加载新模型配置。\n'
+        launchctl kickstart -k "$target" || printf '常驻服务：重启失败；请手动重启后再验证。\n'
+      fi
+      ;;
+    Linux|linux)
+      local target="dsh-profile-$profile.service"
+      if [[ "$dry_run" == '1' ]]; then
+        printf '常驻服务：将重启以加载新模型配置。\n'
+        dsh_enhanced_print_command systemctl --user restart "$target"
+        return 0
+      fi
+      if command -v systemctl >/dev/null 2>&1 && systemctl --user cat "$target" >/dev/null 2>&1; then
+        printf '常驻服务：重启以加载新模型配置。\n'
+        systemctl --user restart "$target" || printf '常驻服务：重启失败；请手动运行 systemctl --user restart %s。\n' "$target"
+      fi
+      ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT|windows|win32)
+      local target="DSH profile $profile"
+      if [[ "$dry_run" == '1' ]]; then
+        printf '常驻服务：将重启以加载新模型配置。\n'
+        dsh_enhanced_print_command schtasks.exe /End /TN "$target"
+        dsh_enhanced_print_command schtasks.exe /Run /TN "$target"
+        return 0
+      fi
+      if schtasks.exe /Query /TN "$target" >/dev/null 2>&1; then
+        printf '常驻服务：重启以加载新模型配置。\n'
+        schtasks.exe /End /TN "$target" >/dev/null 2>&1 || true
+        schtasks.exe /Run /TN "$target" >/dev/null 2>&1 || printf '常驻服务：重启失败；请手动重启计划任务。\n'
+      fi
+      ;;
+  esac
+}
+
 # Run dsh-model-setup with the resolved route.  For an API-key route the key is
 # read from the environment (DSH_ENHANCED_MODEL_API_KEY or the derived credential
 # reference); in an interactive terminal we offer a hidden prompt and export it
@@ -1632,6 +1682,13 @@ dsh_enhanced_install() {
       "$source_mode" "$repo_root" "$plugin_version" "$dry_run" || return $?
     dsh_enhanced_apply_model "$profile" "$dsh_home" "$model_provider" "$model_name" \
       "$model_base_url" "$model_api" "$model_display_name" "$dry_run" || return $?
+    # A resident service is already running the pre-change profile; enabling a
+    # new route (traex bundle) or changing the default model only takes effect
+    # after it reloads. Restart it before the route check and postflight so both
+    # observe the intended model rather than the stale one.
+    if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
+      dsh_enhanced_restart_resident_service "$profile" "$dry_run" || return $?
+    fi
   else
     printf '\n模型配置：本次跳过；使用 profile 已组合的默认模型。\n'
   fi
