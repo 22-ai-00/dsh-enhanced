@@ -50,6 +50,9 @@ import type {
 
 const roots: string[] = []
 const PRESET_TOOLS = ['bash', 'read', 'grep', 'glob'] as const
+// Budget rollover behavior is covered by the policy suite. Runtime budget
+// fixtures must not accidentally cross a wall-clock boundary during a test.
+const NON_ROLLING_TEST_BUDGET_PERIOD_MS = Number.MAX_SAFE_INTEGER
 const require = createRequire(import.meta.url)
 
 function learningScopeStatus(input: Readonly<{
@@ -498,7 +501,7 @@ async function runtimeHarness(
     id: 'permission-replies',
     metric: 'replies',
     limit: permissions.replyBudget,
-    periodMs: 60_000,
+    periodMs: NON_ROLLING_TEST_BUDGET_PERIOD_MS,
     scope: 'subject' as const,
   }] }) })
   const permissionPresets = permissions === undefined || permissions.providePresets === false
