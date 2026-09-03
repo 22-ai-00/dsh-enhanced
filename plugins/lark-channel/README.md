@@ -24,6 +24,7 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 
 - DeepSeek Harness：`>=0.1.0-rc.8 <0.2.0` 基线语义（通过 `assistant-delivery`）。
 - `@dsh-enhanced/assistant-delivery`：`>0.1.7 <0.2.0`；本包的 supervised setup 使用当前发布切片的私有 capability。
+- `@deepseek-ai/dsh-host-apiproxy`：可选。它存在时由 Delivery 消费其 rc.8 `events.mux()`，把 active owner binding 的 `ask_user_question` 转给飞书；它仍是唯一的 `userQuestions` provider。没有 `apiProxy` 的非 Web profile 可正常启动，只是不具备这条跨渠道问题桥接。
 - `@dsh-enhanced/credentials-keychain`：handle 模式为 `>=0.1.0 <0.2.0`；env fallback 不要求其激活。
 - 普通个人助理场景同时安装 `@dsh-enhanced/preference-learning`。向导会只为完成 owner 对话产生有界偏好证据及读取 active snapshot 的两项能力；它们不依赖广义 Agent 工具开关，也不要求 Health/Heartbeat/Recovery。
 - 分级自治成长激活器要求有效 profile 同时启用 `@dsh-enhanced/personal-assistant`、`@dsh-enhanced/assistant-automations`、`@dsh-enhanced/assistant-heartbeat`、`@dsh-enhanced/assistant-evaluation`、`@dsh-enhanced/preference-learning`、`@dsh-enhanced/assistant-evolution`、`@dsh-enhanced/assistant-growth-experiments`、`@dsh-enhanced/assistant-health` 与 `@dsh-enhanced/assistant-recovery`。Policy、Memory 与 Wiki 由 personal-assistant 这一 profile row 提供。Recovery 仍是无模型 Host runbook；独立的 `supervised-growth-analyst` 每天最多一次，只能 review/propose adoption，preview 强制 paused，active 前逐项证明定义和私有 scratch，且只有审批路由、没有普通结果投递。workflow lane 使用 Delivery 私有、可撤销的 content-free trace sink，以及独立预算、owner-bound approval、prefix-bounded dynamic Automation identity 和 exact binding delivery；Lark 文本、卡片或回调本身不能制造 trace 或 learned workflow。默认不授予 learned workflow 任意工具。旧 `supervised-growth` Heartbeat 只在升级时被安全暂停。
@@ -78,11 +79,20 @@ config:
   progressDetails: direct
   statusReactions: true
   imageDownloadTimeoutMs: 30000
+  userQuestionTtlMs: 86400000
 ```
 
 `credentialHandle` 应由 `@dsh-enhanced/credentials-keychain` 提供，并只允许 consumer `dsh-enhanced-lark-channel`、purpose `connect`。兼容部署可改用 `appSecretEnv`，两者只能选一个；配置不接受 `appSecret` 等明文字段。
 
-飞书应用至少需要机器人身份读取、单聊/群内 @ 消息接收、机器人发消息、`im.message.receive_v1`；`Get`/`DONE` 需要 `im:message.reactions:write_only`，图片需要 `im:resource`，审批和选择卡片需要 `card.action.trigger`。事件与回调使用 WebSocket 长连接，不需要公网 callback URL。
+`userQuestionTtlMs` 默认 24 小时，范围为 1 分钟至 7 天；它限制当前进程内等待飞书回答的时长。过期、取消、Host 已在其他端结算或 adapter 注销都会撤销这次即时等待，不会把后到消息变成新的问题回答；短暂 WebSocket 重连不会主动丢弃仍有效的卡片。
+
+飞书应用至少需要机器人身份读取、单聊/群内 @ 消息接收、机器人发消息、`im.message.receive_v1`；`Get`/`DONE` 需要 `im:message.reactions:write_only`，图片需要 `im:resource`，审批、模型选择和用户问题卡片需要 `card.action.trigger`。事件与回调使用 WebSocket 长连接，不需要公网 callback URL。
+
+## `ask_user_question` 交互
+
+有 `apiProxy` 时，Delivery 把仍属于 exact active owner binding 的 pending question 送到原飞书会话。Web 与飞书都是同一 ApiProxy 请求的回答端，先被接受的回答获胜；若已由 Web 或其他飞书事件结算，旧卡只会显示终态，不会再启动一个 turn。
+
+飞书使用不可转发的 CardKit 2.0 卡片呈现选项。推荐项只显示“推荐”标识，不会自动选择；多选必须点击“提交已选答案”；无选项时会明确要求输入，可回复问题卡片，或在只有这一条 pending question 的原会话直接发送下一条文字。按钮和卡片回调使用签名 capability，且回调或自由文本都必须匹配 exact owner、account/tenant/chat、原会话路由、当前 binding version/generation 与请求 fence。问题会发送到原 binding 会话而非强制转为私聊，因此在群聊中问题正文、详情和选项对群成员可见；不要把秘密、凭据或只应由私聊接收的内容放进问题。
 
 ## 常用命令
 
@@ -126,6 +136,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 
 - `--allow-agent-tools` 是高权限显式开关：为本地 `foreground` 与精确 owner Delivery 主体建立 capability/工具可达性；不授权 `background`，也不绕过显式 deny、紧急停止、身份、预算及插件业务硬门。
 - `ask` 和 `auto` 中需要人工确认的工具调用只向 active owner 私聊发送一次性审批卡；`full` 关闭逐次审批并放开 sandbox，应保持 owner 与应用可用范围最小。
+- `ask_user_question` 的卡片是另一条即时交互路径：本包有向原飞书会话发送/原位更新 CardKit 2.0 卡片、并接收 `card.action.trigger` callback 的网络权限。选项仅以签名 callback capability 提交；自由文本只接受原卡回复或唯一 pending question 所在原会话的 exact owner 输入。它不把卡片点击或回复写成普通 Inbox/新 turn，且问题内容会在原会话显示，群聊并不保密。
 - 行为学习审批卡会把签名覆盖的 scope、情境、guidance、版本、证据和回滚原因逐字段以纯文本展示；提案内容不会作为 Markdown 或卡片组件解释。点击后卡片只确认 Policy 决策已写入持久账本，明确不把“批准”误报成“变更已生效”。
 - 网络仅访问所选飞书/Lark OpenAPI、token 与 WebSocket endpoint；图片读取使用固定消息资源端点，不接受消息或模型提供的 URL，并关闭重定向。
 - App Secret 不写 Delivery 数据库、工具参数、health、route、日志或异常；Linux protected-file 没有额外静态加密，同 UID、root 和可读备份仍能取得内容。

@@ -63,6 +63,60 @@ export interface LarkToolApprovalCard {
   rejectValue: { toolApproval: string }
 }
 
+/** One immediately actionable choice on a Lark user-question card. */
+export interface LarkUserQuestionOption {
+  /** Untrusted, user-visible option text. Rendered only as CardKit plain text. */
+  label: string
+  /** Optional untrusted supporting text. Rendered only as CardKit plain text. */
+  description?: string
+  /** Presentation-only recommendation; it never implies that the option is selected. */
+  recommended?: boolean
+  /** Current selection state, used by a multi-select card while it remains open. */
+  selected?: boolean
+  /** Signed, opaque callback value owned by the question bridge. */
+  value: { userQuestion: string }
+}
+
+/** One answered item shown while a multi-question request advances. */
+export interface LarkUserQuestionAnsweredItem {
+  /** Untrusted question heading. Rendered only as CardKit plain text. */
+  title: string
+  /** Untrusted answer summary. Rendered only as CardKit plain text. */
+  answer: string
+}
+
+/** One currently pending user question rendered as a CardKit 2.0 card. */
+export interface LarkUserQuestionCard {
+  /** Untrusted, user-visible title. Rendered only as CardKit plain text. */
+  title: string
+  /** Untrusted question text. Rendered only as CardKit plain text. */
+  question: string
+  /** Optional untrusted supporting detail. Rendered only as CardKit plain text. */
+  detail?: string
+  /** One-based position of this question within the pending request batch. */
+  position: number
+  /** Total questions in the pending request batch. */
+  total: number
+  /** Whether option clicks build a selection that must be submitted explicitly. */
+  multiSelect: boolean
+  /** Whether the user may answer with free text by replying to this card. */
+  expectsText: boolean
+  options: readonly LarkUserQuestionOption[]
+  /** Optional signed callback that confirms the current multi-select state. */
+  submitValue?: { userQuestion: string }
+  /** Optional signed callback that cancels the pending question request. */
+  cancelValue?: { userQuestion: string }
+  /** Earlier answers in the same request batch, shown as a plain-text summary. */
+  answered?: readonly LarkUserQuestionAnsweredItem[]
+}
+
+/** A terminal projection for a previously pending Lark user-question card. */
+export interface LarkUserQuestionResultCard {
+  status: 'answered' | 'cancelled' | 'resolved'
+  /** Untrusted, user-visible terminal summary. Rendered only as CardKit plain text. */
+  summary: string
+}
+
 export interface LarkModelPickerCard {
   title: string
   body: string
@@ -129,6 +183,8 @@ export type LarkSendInput =
   | { permissionPicker: LarkPermissionPickerCard }
   | { text: string }
   | { toolApproval: LarkToolApprovalCard }
+  | { userQuestion: LarkUserQuestionCard }
+  | { userQuestionResult: LarkUserQuestionResultCard }
 
 export interface LarkSendOptions {
   replyTo?: string
