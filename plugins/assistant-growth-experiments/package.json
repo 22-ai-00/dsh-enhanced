@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-growth-experiments",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Durable supervised workflow learning with approval, replay, effect-blocked shadow, one-shot canary, and exact rollback.",
   "license": "MIT",
   "type": "module",
