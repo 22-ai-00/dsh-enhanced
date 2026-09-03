@@ -850,6 +850,38 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     expect(result.stderr).toContain('非交互配置模型需要 --model-provider')
   })
 
+  test('restarts the resident service after (re)configuring the model on a managed profile', async () => {
+    const dshHome = await temporaryDshHome()
+    await configureExistingLark(dshHome)
+
+    // Keeping the existing Feishu bot leaves a managed resident service, so a
+    // model (re)configuration must restart it to load the new default/route.
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'keep', '--model-provider', 'deepseek-official', '--model-name', 'deepseek-v4-flash',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('常驻服务：将重启以加载新模型配置。')
+    expect(result.stdout).toContain('systemctl --user restart dsh-profile-web.service')
+  })
+
+  test('does not restart a service when the model step is skipped or no service is managed', async () => {
+    const skipHome = await temporaryDshHome()
+    const skipModel = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model', 'skip',
+    ], skipHome)
+    expect(skipModel.status, skipModel.stderr).toBe(0)
+    expect(skipModel.stdout).not.toContain('常驻服务：将重启以加载新模型配置。')
+
+    // core scenario configures a model but manages no channel/service.
+    const coreHome = await temporaryDshHome()
+    const core = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--model-provider', 'deepseek-official',
+    ], coreHome)
+    expect(core.status, core.stderr).toBe(0)
+    expect(core.stdout).not.toContain('常驻服务：将重启以加载新模型配置。')
+  })
+
   test('model menu writes UI separately from its machine-readable selection', () => {
     const configured = spawnSync('/bin/bash', [
       '-c', 'source "$1"; dsh_enhanced_choose_model_mode 1', 'installer-test', installerLibrary,
