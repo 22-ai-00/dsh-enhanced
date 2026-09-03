@@ -132,6 +132,27 @@ describe('one-click installers', () => {
     expect(result.stdout).not.toContain('--install-service')
   })
 
+  test('repairs the legacy Evolution-to-Evaluation bundle closure without expanding Lark into supervised', async () => {
+    const dshHome = await temporaryDshHome()
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    await mkdir(profileDirectory, { recursive: true })
+    await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
+      dependencies: { '@dsh-enhanced/assistant-evolution': '0.1.7' },
+      dsh: { profile: { bundles: ['@dsh-enhanced/assistant-evolution'] } },
+    }, null, 2), 'utf8')
+
+    const result = runInstaller(localInstaller, [
+      '--dry-run', '--scenario', 'lark', '--lark', 'skip',
+    ], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('旧 profile 含 assistant-evolution 但缺少 assistant-evaluation')
+    expect(result.stdout).toContain(join(repoRoot, 'plugins', 'assistant-evaluation'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-heartbeat'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-health'))
+    expect(result.stdout).not.toContain(join(repoRoot, 'plugins', 'assistant-recovery'))
+  })
+
   test('explicit standard is byte-for-byte the default dry-run and does not mount Evolution', async () => {
     const implicitHome = await temporaryDshHome()
     const explicitHome = await temporaryDshHome()
@@ -358,6 +379,10 @@ printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
     await writeExecutable(join(fakeBin, 'dsh-new'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '0.1.0-rc.8\\n'; exit 0; fi
 printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
+if [[ "$*" == *'--no-open --port 0'* ]]; then
+  printf 'dsh web: http://127.0.0.1:43210\\n'
+  exit 0
+fi
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
@@ -391,7 +416,69 @@ printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
     expect(log).toContain('pnpm build')
     expect(log).toContain('dsh plugin --profile web add')
     expect(log).toContain('dsh --profile web --dump-config')
+    expect(log).toContain('dsh --profile web --host 127.0.0.1 --no-open --port 0')
     expect(log).not.toContain('lark-setup')
+  })
+
+  test('fails before Feishu onboarding when a real activation probe reports a pending service', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'dsh-home')
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'commands.log')
+    await mkdir(fakeBin, { recursive: true })
+    await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
+    await writeFile(join(dshHome, 'profiles', 'web', 'package.json'), JSON.stringify({
+      dependencies: {
+        '@dsh-enhanced/assistant-evolution': '0.1.7',
+        '@dsh-enhanced/assistant-evaluation': '0.1.7',
+      },
+    }, null, 2), 'utf8')
+    await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; exit 0; fi
+printf 'pnpm %s\\n' "$*" >> "$INSTALL_LOG"
+`)
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.0-rc.8\\n'; exit 0; fi
+printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
+if [[ "$*" == *'--no-open --port 0'* ]]; then
+  printf '%s\\n' 'Error: dsh: plugin tree failed to load: dsh: 1 entry did not activate' >&2
+  printf '%s\\n' '@dsh-enhanced/assistant-evolution: pending (waiting for service: assistantEvaluation)' >&2
+  exit 1
+fi
+if [[ "\${1:-}" == 'plugin' ]]; then
+  bin="$DSH_HOME/profiles/web/node_modules/.bin"
+  mkdir -p "$bin"
+  cat > "$bin/dsh-lark-setup" <<'EOF'
+#!/bin/bash
+printf 'lark-setup %s\\n' "$*" >> "$INSTALL_LOG"
+EOF
+  chmod 755 "$bin/dsh-lark-setup"
+fi
+`)
+
+    const result = spawnSync('/bin/bash', [
+      localInstaller, '--scenario', 'lark', '--lark', 'skip', '--no-service', '--yes',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        DSH_HOME: dshHome,
+        INSTALL_LOG: logPath,
+      },
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('waiting for service: assistantEvaluation')
+    expect(result.stderr).toContain('尚未继续飞书授权、凭据写入或常驻服务启动')
+    const log = await readFile(logPath, 'utf8')
+    expect(log).toContain('--no-open --port 0')
+    expect(log).not.toContain('lark-setup')
+    expect(log).not.toContain('systemctl --user show-environment')
   })
 
   test('supervised-growth invokes the installed activator only after the installed Lark setup completes', async () => {
@@ -420,11 +507,18 @@ exit 0
 `)
     await writeExecutable(join(fakeBin, 'systemctl'), `#!/bin/bash
 printf 'systemctl %s\\n' "$*" >> "$INSTALL_LOG"
+if [[ "\${1:-}" == '--user' && "\${2:-}" == 'show' ]]; then
+  printf '%s\\n' 'ActiveState=active' 'SubState=running' 'NRestarts=0' 'ExecMainStatus=0'
+fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
 if [[ "\${1:-}" == '--version' ]]; then printf '0.1.0-rc.8\\n'; exit 0; fi
 printf 'dsh %s\\n' "$*" >> "$INSTALL_LOG"
+if [[ "$*" == *'--no-open --port 0'* ]]; then
+  printf 'dsh web: http://127.0.0.1:43210\\n'
+  exit 0
+fi
 if [[ "\${1:-}" == 'plugin' ]]; then
   bin="$DSH_HOME/profiles/web/node_modules/.bin"
   mkdir -p "$bin"
@@ -449,6 +543,7 @@ fi
         DSH_HOME: dshHome,
         INSTALL_LOG: logPath,
         FAKE_PREFIX: root,
+        DSH_ENHANCED_SERVICE_STABILITY_SECONDS: '0',
       },
     })
 
@@ -457,13 +552,194 @@ fi
     const log = await readFile(logPath, 'utf8')
     expect(log).toContain('systemctl --user show-environment')
     expect(log).toContain('systemctl --user is-active --quiet dsh-profile-web.service')
+    expect(log).toContain('systemctl --user show dsh-profile-web.service')
     expect(log).toContain('loginctl show-user')
+    expect(log).not.toContain('--no-open --port 0')
     const larkSetup = log.indexOf('lark-setup --profile web --install-service')
     const activator = log.indexOf('supervised-setup --profile web --timeout-ms 300000')
     const serviceDoctor = log.indexOf('systemctl --user is-active --quiet dsh-profile-web.service')
     expect(larkSetup).toBeGreaterThanOrEqual(0)
     expect(activator).toBeGreaterThan(larkSetup)
     expect(serviceDoctor).toBeGreaterThan(activator)
+  })
+
+  test('Linux service stability verification stops a restart loop and reports its journal', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const commandLog = join(root, 'commands.log')
+    const showCount = join(root, 'show-count')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'systemctl'), `#!/bin/bash
+printf 'systemctl %s\\n' "$*" >> "$COMMAND_LOG"
+if [[ "\${1:-}" == '--user' && "\${2:-}" == 'show' ]]; then
+  count=0
+  if [[ -f "$SHOW_COUNT" ]]; then count="$(cat "$SHOW_COUNT")"; fi
+  count=$((count + 1))
+  printf '%s' "$count" > "$SHOW_COUNT"
+  if [[ "$count" == '1' ]]; then restarts=0; else restarts=1; fi
+  printf 'ActiveState=active\\nSubState=running\\nNRestarts=%s\\nExecMainStatus=0\\n' "$restarts"
+fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'journalctl'), `#!/bin/bash
+printf 'journalctl %s\\n' "$*" >> "$COMMAND_LOG"
+printf '%s\\n' 'simulated DSH activation failure'
+`)
+
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_verify_linux_service_stability web',
+      'installer-test', installerLibrary,
+    ], {
+      encoding: 'utf8',
+      env: {
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        COMMAND_LOG: commandLog,
+        SHOW_COUNT: showCount,
+        DSH_ENHANCED_SERVICE_STABILITY_SECONDS: '0',
+      },
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('restarts=0->1')
+    expect(result.stderr).toContain('simulated DSH activation failure')
+    expect(result.stderr).toContain('已停止该服务以避免无限重启')
+    const log = await readFile(commandLog, 'utf8')
+    expect(log).toContain('systemctl --user show dsh-profile-web.service')
+    expect(log).toContain('journalctl --user -u dsh-profile-web.service -n 80 --no-pager')
+    expect(log).toContain('systemctl --user stop dsh-profile-web.service')
+  })
+
+  test('checks TraeX login before changing its global default or restarting the managed Lark service', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'dsh-home')
+    const fakeBin = join(root, 'bin')
+    const commandLog = join(root, 'commands.log')
+    await mkdir(fakeBin, { recursive: true })
+    await configureExistingLark(dshHome)
+    const originalSettings = 'agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-flash\n'
+    await writeFile(join(dshHome, 'settings.yaml'), originalSettings, 'utf8')
+    await writeExecutable(join(fakeBin, 'node'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '11.7.0\\n'; exit 0; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'loginctl'), `#!/bin/bash
+if [[ "\${1:-}" == 'show-user' ]]; then printf 'yes\\n'; fi
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'systemctl'), `#!/bin/bash
+printf 'systemctl %s\\n' "$*" >> "$COMMAND_LOG"
+exit 0
+`)
+    await writeExecutable(join(fakeBin, 'traex'), `#!/bin/bash
+if [[ "\${1:-}" == 'login' && "\${2:-}" == 'status' ]]; then
+  printf '%s\\n' 'not logged in'
+  exit 1
+fi
+exit 1
+`)
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.0-rc.8\\n'; exit 0; fi
+printf 'dsh %s\\n' "$*" >> "$COMMAND_LOG"
+if [[ "$*" == *'--dump-config'* ]]; then
+  printf '%s\\n' "name: '@dsh-enhanced/traex-acp-provider'"
+fi
+if [[ "\${1:-}" == 'plugin' ]]; then
+  bin="$DSH_HOME/profiles/web/node_modules/.bin"
+  mkdir -p "$bin"
+  cat > "$bin/dsh-lark-setup" <<'EOF'
+#!/bin/bash
+printf 'lark-setup %s\\n' "$*" >> "$COMMAND_LOG"
+EOF
+  cat > "$bin/dsh-model-setup" <<'EOF'
+#!/bin/bash
+printf 'model-setup %s\\n' "$*" >> "$COMMAND_LOG"
+EOF
+  chmod 755 "$bin/dsh-lark-setup" "$bin/dsh-model-setup"
+fi
+`)
+
+    const result = spawnSync('/bin/bash', [
+      localInstaller, '--scenario', 'lark', '--lark', 'keep', '--model-provider', 'traex-agent', '--yes',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        PATH: `${fakeBin}:/usr/bin:/bin`,
+        DSH_HOME: dshHome,
+        COMMAND_LOG: commandLog,
+      },
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('traex 未确认登录')
+    const log = await readFile(commandLog, 'utf8')
+    expect(log).not.toContain('model-setup --dsh-home')
+    expect(log).not.toContain('systemctl --user restart dsh-profile-web.service')
+    expect(await readFile(join(dshHome, 'settings.yaml'), 'utf8')).toBe(originalSettings)
+  })
+
+  test('agent-route rollback restores the exact pre-write settings and profile patch', async () => {
+    const dshHome = await temporaryDshHome()
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    const settingsPath = join(dshHome, 'settings.yaml')
+    const profilePatch = join(profileDirectory, 'cordis.patch.yml')
+    const originalSettings = 'agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-flash\n'
+    const originalPatch = '# owner overlay\n[]\n'
+    await mkdir(profileDirectory, { recursive: true })
+    await writeFile(settingsPath, originalSettings, 'utf8')
+    await writeFile(profilePatch, originalPatch, 'utf8')
+
+    const result = spawnSync('/bin/bash', [
+      '-c', [
+        'source "$1"',
+        'snapshot="$(dsh_enhanced_snapshot_agent_route_configuration "$2" "$3")" || exit $?',
+        "printf 'agent-default-model:\\n  provider: traex-agent\\n' > \"$3/settings.yaml\"",
+        "printf '%s\\n' '- id: dsh-enhanced-traex-acp-provider' '  config: { enabled: true }' > \"$3/profiles/$2/cordis.patch.yml\"",
+        'dsh_enhanced_restore_agent_route_configuration "$snapshot" "$2" "$3"',
+      ].join('\n'),
+      'installer-test', installerLibrary, 'web', dshHome,
+    ], { encoding: 'utf8' })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(settingsPath, 'utf8')).toBe(originalSettings)
+    expect(await readFile(profilePatch, 'utf8')).toBe(originalPatch)
+  })
+
+  test('agent-route transaction restores files when SIGTERM lands after the model write', async () => {
+    const dshHome = await temporaryDshHome()
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    const settingsPath = join(dshHome, 'settings.yaml')
+    const profilePatch = join(profileDirectory, 'cordis.patch.yml')
+    const originalSettings = 'agent-default-model:\n  provider: deepseek-official\n  model: deepseek-v4-flash\n'
+    const originalPatch = '# owner overlay\n[]\n'
+    await mkdir(profileDirectory, { recursive: true })
+    await writeFile(settingsPath, originalSettings, 'utf8')
+    await writeFile(profilePatch, originalPatch, 'utf8')
+
+    const result = spawnSync('/bin/bash', [
+      '-c', [
+        'source "$1"',
+        'dsh_enhanced_apply_model() {',
+        `  printf 'agent-default-model:\\n  provider: traex-agent\\n' > "$2/settings.yaml"`,
+        `  printf '%s\\n' '- id: dsh-enhanced-traex-acp-provider' > "$2/profiles/$1/cordis.patch.yml"`,
+        '  kill -TERM "$BASHPID"',
+        '}',
+        'dsh_enhanced_verify_model_route() { return 1; }',
+        'dsh_enhanced_apply_verified_agent_model "$2" "$3" traex-agent "" "" "" "" 0 1',
+        'status=$?',
+        '[[ "$status" == 143 ]]',
+      ].join('\n'),
+      'installer-test', installerLibrary, 'web', dshHome,
+    ], { encoding: 'utf8' })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('已恢复原有 settings/profile patch')
+    expect(await readFile(settingsPath, 'utf8')).toBe(originalSettings)
+    expect(await readFile(profilePatch, 'utf8')).toBe(originalPatch)
   })
 
   test('auto mode keeps an existing enabled Feishu bot and only restarts its service', async () => {
@@ -474,10 +750,48 @@ fi
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('飞书处理：保留当前应用配置')
+    expect(result.stdout).toContain('检测到已有启用的 Lark channel；跳过临时 Host')
     const larkSetup = join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')
     const installService = `${larkSetup} --profile web --install-service`
     expect(result.stdout).toContain(installService)
     expect(result.stdout).not.toContain('--refresh-agent-policy')
+  })
+
+  test('recognizes a home-layer Lark binding as the effective profile binding', async () => {
+    const dshHome = await temporaryDshHome()
+    await writeFile(join(dshHome, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel
+  config:
+    enabled: true
+    appId: cli_0123456789abcdef
+`, 'utf8')
+
+    const result = runInstaller(localInstaller, ['--dry-run', '--yes'], dshHome)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('部署场景：lark')
+    expect(result.stdout).toContain('飞书处理：保留当前应用配置')
+    expect(result.stdout).toContain('检测到已有启用的 Lark channel；跳过临时 Host')
+  })
+
+  test('a profile-layer Lark disable overrides a configured home layer', async () => {
+    const dshHome = await temporaryDshHome()
+    const profilePatch = join(dshHome, 'profiles', 'web', 'cordis.patch.yml')
+    await mkdir(dirname(profilePatch), { recursive: true })
+    await writeFile(join(dshHome, 'cordis.patch.yml'), `- id: dsh-enhanced-lark-channel
+  config:
+    enabled: true
+    appId: cli_0123456789abcdef
+`, 'utf8')
+    await writeFile(profilePatch, `- id: dsh-enhanced-lark-channel
+  disabled: true
+`, 'utf8')
+
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_effective_lark_is_configured "$2" "$3"',
+      'installer-test', installerLibrary, profilePatch, join(dshHome, 'cordis.patch.yml'),
+    ], { encoding: 'utf8' })
+
+    expect(result.status).toBe(1)
   })
 
   test('fresh configure mode preserves Agent tool reachability unless it is explicitly authorized', async () => {
@@ -918,6 +1232,9 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
     expect(result.stdout).not.toContain('--store-key')
     expect(result.stdout).not.toContain('存入 .credentials.yaml')
     expect(result.stdout).toContain('无需 API Key')
+    expect(result.stdout).toContain('本轮已配置 TraeX，正在执行免额度的适配器与登录校验')
+    expect(result.stdout).toContain('agent route traex-agent 不发送模型请求')
+    expect(result.stdout).not.toContain('DSH_ROUTE_READY')
   })
 
   test('rejects gateway transport fields on the TraeX agent route', async () => {
