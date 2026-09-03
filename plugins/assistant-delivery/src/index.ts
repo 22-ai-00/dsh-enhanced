@@ -1,9 +1,10 @@
 import type { Context } from '@deepseek-ai/cordis'
+import { DeliveryAdapterRegistryStoppedError } from './coordinator.js'
 import { AssistantDeliveryService, Config, isTrustedDeliveryPreferenceProducer } from './service.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-delivery'
-export { AssistantDeliveryService, Config, isTrustedDeliveryPreferenceProducer, version }
+export { AssistantDeliveryService, Config, DeliveryAdapterRegistryStoppedError, isTrustedDeliveryPreferenceProducer, version }
 export type { DeliveryInboundRuntime } from './service.js'
 export * from './types.js'
 export * from './operator.js'
