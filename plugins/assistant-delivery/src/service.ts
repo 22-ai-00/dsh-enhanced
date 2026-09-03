@@ -3,6 +3,8 @@ import { isAbsolute } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-host-apiproxy'
+import type { ApiProxy, ClientResponse, RpcId, RpcReceipt } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import Schema from '@deepseek-ai/schemastery'
@@ -85,6 +87,8 @@ import type {
   DeliveryPreferenceTurnAttestation,
   DeliveryPresentationUpdate,
   DeliveryToolApprovalRequest,
+  DeliveryUserQuestionOutcome,
+  DeliveryUserQuestionRequest,
   ExternalPrincipalKey,
   InboundEnvelope,
   InboxRecord,
@@ -636,6 +640,158 @@ interface ToolApprovalCallFact {
   hashIdentity: readonly unknown[]
 }
 
+/** The narrow ApiProxy surface used by the live question bridge. */
+interface UserQuestionApiProxy {
+  events: Pick<ApiProxy['events'], 'mux'>
+  respond(message: ClientResponse): Promise<RpcReceipt>
+}
+
+type UserQuestionBatch = DeliveryUserQuestionRequest['questions']
+type UserQuestionAnswer = Extract<DeliveryUserQuestionOutcome, { outcome: 'answered' }>['answer']
+
+type UserQuestionApiResponse =
+  | Readonly<{
+    type: 'client-response'
+    rpcId: RpcId
+    result: Readonly<{
+      ok: true
+      value: Readonly<{ sessionId: string; answer: UserQuestionAnswer }>
+    }>
+  }>
+  | Readonly<{
+    type: 'client-response'
+    rpcId: RpcId
+    result: Readonly<{
+      ok: false
+      error: Readonly<{ code: 'cancelled'; message: string; details: Record<string, never> }>
+    }>
+  }>
+
+interface UserQuestionRequestedFrame {
+  rpcId: RpcId
+  sessionId: string
+  questions: UserQuestionBatch
+}
+
+interface UserQuestionResolvedFrame {
+  questionRpcId: RpcId
+}
+
+interface UserQuestionAuthority {
+  adapter: DeliveryAdapter
+  binding: ConversationBinding
+  ownerId: string
+  ownerVersion: number
+}
+
+type UserQuestionRoute =
+  | { state: 'deferred' }
+  | { state: 'invalid' }
+  | { state: 'ready'; authority: UserQuestionAuthority }
+
+interface PendingUserQuestionAttempt {
+  readonly controller: AbortController
+  readonly authority: UserQuestionAuthority
+  readonly detachBridgeAbort: () => void
+}
+
+interface PendingUserQuestion {
+  readonly rpcId: RpcId
+  readonly sessionId: string
+  readonly questions: UserQuestionBatch
+  readonly requestHash: string
+  state: 'waiting' | 'dispatching' | 'responding'
+  attempt?: PendingUserQuestionAttempt
+  response?: UserQuestionApiResponse
+  responseAttempts: number
+}
+
+interface UserQuestionBridge {
+  readonly proxy: UserQuestionApiProxy
+  readonly controller: AbortController
+  readonly pending: Map<string, PendingUserQuestion>
+  readonly completed: Set<string>
+}
+
+const userQuestionTombstoneLimit = 1_024
+
+function isUserQuestionApiProxy(value: unknown): value is UserQuestionApiProxy {
+  if (value === null || typeof value !== 'object') return false
+  const candidate = value as Partial<UserQuestionApiProxy>
+  return candidate.events !== null && typeof candidate.events === 'object'
+    && typeof candidate.events.mux === 'function'
+    && typeof candidate.respond === 'function'
+}
+
+function requestedUserQuestionFrame(value: unknown): UserQuestionRequestedFrame | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const envelope = value as { rpcId?: unknown; payload?: unknown }
+  if (typeof envelope.rpcId !== 'string' || envelope.rpcId.length === 0
+    || envelope.payload === null || typeof envelope.payload !== 'object'
+    || Array.isArray(envelope.payload)) return undefined
+  const payload = envelope.payload as { type?: unknown; sessionId?: unknown; questions?: unknown }
+  if (payload.type !== 'question/requested' || typeof payload.sessionId !== 'string'
+    || payload.sessionId.length === 0 || !Array.isArray(payload.questions)) return undefined
+  return {
+    rpcId: envelope.rpcId as RpcId,
+    sessionId: payload.sessionId,
+    questions: Object.freeze([...payload.questions]) as UserQuestionBatch,
+  }
+}
+
+function resolvedUserQuestionFrame(value: unknown): UserQuestionResolvedFrame | undefined {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const envelope = value as { payload?: unknown }
+  if (envelope.payload === null || typeof envelope.payload !== 'object' || Array.isArray(envelope.payload)) {
+    return undefined
+  }
+  const payload = envelope.payload as { type?: unknown; questionRpcId?: unknown; outcome?: unknown }
+  if (payload.type !== 'question/resolved' || typeof payload.questionRpcId !== 'string'
+    || payload.questionRpcId.length === 0
+    || (payload.outcome !== 'answered' && payload.outcome !== 'cancelled')) return undefined
+  return { questionRpcId: payload.questionRpcId as RpcId }
+}
+
+function userQuestionRequestHash(sessionId: string, questions: UserQuestionBatch): string | undefined {
+  try {
+    const encoded = JSON.stringify([sessionId, questions])
+    return typeof encoded === 'string' ? createHash('sha256').update(encoded).digest('hex') : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function cancelledUserQuestionResponse(rpcId: RpcId): UserQuestionApiResponse {
+  return {
+    type: 'client-response',
+    rpcId,
+    result: {
+      ok: false,
+      error: {
+        code: 'cancelled',
+        message: 'the user cancelled ask_user_question',
+        details: {},
+      },
+    },
+  }
+}
+
+function sameUserQuestionAuthority(
+  left: Readonly<UserQuestionAuthority>,
+  right: Readonly<UserQuestionAuthority> | undefined,
+): boolean {
+  return right !== undefined
+    && right.adapter === left.adapter
+    && right.binding.id === left.binding.id
+    && right.binding.version === left.binding.version
+    && right.binding.generation === left.binding.generation
+    && right.binding.sessionId === left.binding.sessionId
+    && right.ownerId === left.ownerId
+    && right.ownerVersion === left.ownerVersion
+    && JSON.stringify(right.binding.conversation) === JSON.stringify(left.binding.conversation)
+    && JSON.stringify(right.binding.principal) === JSON.stringify(left.binding.principal)
+}
+
 type ToolApprovalRoute =
   | { state: 'none' | 'invalid' }
   | { state: 'bound'; binding: ConversationBinding; kind: 'delegated' | 'direct'; token?: symbol }
@@ -729,6 +885,8 @@ export class AssistantDeliveryService extends Service {
   private readonly conversationTransitions = new Map<string, Promise<void>>()
   private readonly agentApprovalBindings = new WeakMap<Agent, { bindingId: string; token: symbol }>()
   private readonly toolApprovalControllers = new Set<AbortController>()
+  private readonly drainingUserQuestionAdapters = new WeakSet<DeliveryAdapter>()
+  private userQuestionBridge: UserQuestionBridge | undefined
   private readonly modelSelectionWaiters = new Map<string, Set<ModelSelectionWaiter>>()
   private preferenceFeedbackSink:
     | Readonly<{
@@ -890,6 +1048,14 @@ export class AssistantDeliveryService extends Service {
     ctx.inject(['approval'], approvalCtx => approvalCtx.on('approval/request', (request, next) =>
       this.requestToolApproval(approvalCtx, request, next)))
     ctx.inject(['tools'], toolsCtx => registerDeliveryTools(toolsCtx, this))
+    // ApiProxy owns the only `userQuestions` provider. Delivery merely bridges
+    // its server-request mux frames to an authenticated channel adapter and
+    // echoes a client response; it must never register a competing provider.
+    ctx.inject(['apiProxy'], apiCtx => {
+      const apiProxy = apiCtx.apiProxy as unknown
+      if (!isUserQuestionApiProxy(apiProxy)) return
+      return this.attachUserQuestionApiProxy(apiProxy)
+    })
     // Presentation writes are intentionally reverse-bound. Delivery creates
     // the publisher closure and hands it only to the exact live domain service;
     // a public service-slot caller can no longer forge a terminal projection.
@@ -921,6 +1087,7 @@ export class AssistantDeliveryService extends Service {
       this.automationPresentationBinding?.dispose()
       this.evolutionPresentationBinding?.dispose()
       this.cancelModelSelectionWaiters()
+      this.stopUserQuestionBridge(new Error('assistant-delivery is stopping'))
       for (const controller of this.toolApprovalControllers) {
         controller.abort(new Error('assistant-delivery is stopping'))
       }
@@ -1452,7 +1619,316 @@ export class AssistantDeliveryService extends Service {
 
   registerAdapter(adapter: DeliveryAdapter): Promise<() => Promise<void>> {
     this.assertActive()
-    return this.registry.register(adapter)
+    return this.registry.register(adapter).then(unregister => {
+      this.drainingUserQuestionAdapters.delete(adapter)
+      this.dispatchPendingUserQuestions()
+      let registered = true
+      return async () => {
+        if (!registered) return
+        registered = false
+        this.drainingUserQuestionAdapters.add(adapter)
+        this.abortUserQuestionAttemptsForAdapter(adapter, new Error('delivery adapter is unregistering'))
+        await unregister()
+        this.dispatchPendingUserQuestions()
+      }
+    })
+  }
+
+  private attachUserQuestionApiProxy(proxy: UserQuestionApiProxy): () => void {
+    this.stopUserQuestionBridge(new Error('ApiProxy question bridge replaced'))
+    if (!this.active) return () => {}
+    const bridge: UserQuestionBridge = {
+      proxy,
+      controller: new AbortController(),
+      pending: new Map(),
+      completed: new Set(),
+    }
+    this.userQuestionBridge = bridge
+    void this.consumeUserQuestionMux(bridge)
+    let attached = true
+    return () => {
+      if (!attached) return
+      attached = false
+      this.stopUserQuestionBridge(new Error('ApiProxy question bridge disposed'), bridge)
+    }
+  }
+
+  private stopUserQuestionBridge(reason: Error, expected?: UserQuestionBridge): void {
+    const bridge = expected ?? this.userQuestionBridge
+    if (bridge === undefined || this.userQuestionBridge !== bridge) return
+    this.userQuestionBridge = undefined
+    bridge.controller.abort(reason)
+    for (const pending of bridge.pending.values()) {
+      const attempt = pending.attempt
+      attempt?.detachBridgeAbort()
+      attempt?.controller.abort(reason)
+      delete pending.attempt
+    }
+    bridge.pending.clear()
+    bridge.completed.clear()
+  }
+
+  private async consumeUserQuestionMux(bridge: UserQuestionBridge): Promise<void> {
+    try {
+      const stream = bridge.proxy.events.mux({
+        rpcId: randomUUID() as RpcId,
+        payload: {},
+      }, bridge.controller.signal)
+      if (stream === null || typeof stream !== 'object'
+        || typeof stream[Symbol.asyncIterator] !== 'function') return
+      for await (const frame of stream) {
+        if (!this.active || this.userQuestionBridge !== bridge || bridge.controller.signal.aborted) return
+        const resolved = resolvedUserQuestionFrame(frame)
+        if (resolved !== undefined) {
+          this.resolvePendingUserQuestion(bridge, resolved.questionRpcId)
+          continue
+        }
+        const requested = requestedUserQuestionFrame(frame)
+        if (requested !== undefined) this.requestUserQuestionFromMux(bridge, requested)
+      }
+    } catch {
+      // ApiProxy is an in-process service. If its stream is torn down, its
+      // Cordis injection disposer will replace this bridge; never leak a
+      // rejected iterator into the Host lifecycle.
+    } finally {
+      if (this.userQuestionBridge === bridge && !bridge.controller.signal.aborted) {
+        this.stopUserQuestionBridge(new Error('ApiProxy question mux ended'), bridge)
+      }
+    }
+  }
+
+  private requestUserQuestionFromMux(
+    bridge: UserQuestionBridge,
+    frame: Readonly<UserQuestionRequestedFrame>,
+  ): void {
+    if (bridge.completed.has(frame.rpcId)) return
+    const requestHash = userQuestionRequestHash(frame.sessionId, frame.questions)
+    if (requestHash === undefined) return
+    const existing = bridge.pending.get(frame.rpcId)
+    if (existing !== undefined) {
+      if (existing.sessionId !== frame.sessionId || existing.requestHash !== requestHash) {
+        this.queueUserQuestionResponse(bridge, existing, cancelledUserQuestionResponse(existing.rpcId))
+      } else {
+        this.dispatchUserQuestion(bridge, existing)
+      }
+      return
+    }
+    const pending: PendingUserQuestion = {
+      rpcId: frame.rpcId,
+      sessionId: frame.sessionId,
+      questions: frame.questions,
+      requestHash,
+      state: 'waiting',
+      responseAttempts: 0,
+    }
+    bridge.pending.set(pending.rpcId, pending)
+    this.dispatchUserQuestion(bridge, pending)
+  }
+
+  private resolvePendingUserQuestion(bridge: UserQuestionBridge, rpcId: RpcId): void {
+    this.markUserQuestionCompleted(bridge, rpcId)
+    const pending = bridge.pending.get(rpcId)
+    if (pending === undefined) return
+    bridge.pending.delete(rpcId)
+    const attempt = pending.attempt
+    attempt?.detachBridgeAbort()
+    attempt?.controller.abort(new Error('ApiProxy question request resolved'))
+    delete pending.attempt
+  }
+
+  private markUserQuestionCompleted(bridge: UserQuestionBridge, rpcId: RpcId): void {
+    if (bridge.completed.size >= userQuestionTombstoneLimit) {
+      const oldest = bridge.completed.values().next().value as string | undefined
+      if (oldest !== undefined) bridge.completed.delete(oldest)
+    }
+    bridge.completed.add(rpcId)
+  }
+
+  private dispatchPendingUserQuestions(): void {
+    const bridge = this.userQuestionBridge
+    if (!this.active || bridge === undefined || bridge.controller.signal.aborted) return
+    for (const pending of bridge.pending.values()) this.dispatchUserQuestion(bridge, pending)
+  }
+
+  private dispatchUserQuestion(bridge: UserQuestionBridge, pending: PendingUserQuestion): void {
+    if (!this.active || this.userQuestionBridge !== bridge || bridge.controller.signal.aborted
+      || bridge.pending.get(pending.rpcId) !== pending || pending.state !== 'waiting') return
+    if (pending.response !== undefined) {
+      this.sendUserQuestionResponse(bridge, pending)
+      return
+    }
+    const route = this.resolveUserQuestionRoute(pending.sessionId)
+    if (route.state === 'deferred') return
+    if (route.state === 'invalid') {
+      this.queueUserQuestionResponse(bridge, pending, cancelledUserQuestionResponse(pending.rpcId))
+      return
+    }
+    const controller = new AbortController()
+    const abortForBridge = () => controller.abort(bridge.controller.signal.reason)
+    if (bridge.controller.signal.aborted) abortForBridge()
+    else bridge.controller.signal.addEventListener('abort', abortForBridge, { once: true })
+    const attempt: PendingUserQuestionAttempt = {
+      controller,
+      authority: route.authority,
+      detachBridgeAbort: () => bridge.controller.signal.removeEventListener('abort', abortForBridge),
+    }
+    pending.state = 'dispatching'
+    pending.attempt = attempt
+    const input: DeliveryUserQuestionRequest = Object.freeze({
+      operationId: pending.rpcId,
+      bindingId: route.authority.binding.id,
+      bindingVersion: route.authority.binding.version,
+      bindingGeneration: route.authority.binding.generation,
+      sessionId: pending.sessionId,
+      target: Object.freeze({
+        conversation: Object.freeze({ ...route.authority.binding.conversation }),
+        principal: Object.freeze({ ...route.authority.binding.principal }),
+      }),
+      questions: pending.questions,
+    })
+    void Promise.resolve()
+      .then(() => route.authority.adapter.requestUserQuestion!(input, controller.signal))
+      .then(
+        outcome => this.completeUserQuestionAttempt(bridge, pending, attempt, outcome),
+        () => this.completeUserQuestionAttempt(bridge, pending, attempt, { outcome: 'unavailable' }),
+      )
+  }
+
+  private completeUserQuestionAttempt(
+    bridge: UserQuestionBridge,
+    pending: PendingUserQuestion,
+    attempt: PendingUserQuestionAttempt,
+    outcome: unknown,
+  ): void {
+    if (this.userQuestionBridge !== bridge || bridge.pending.get(pending.rpcId) !== pending
+      || pending.attempt !== attempt) return
+    delete pending.attempt
+    attempt.detachBridgeAbort()
+    if (attempt.controller.signal.aborted) {
+      pending.state = 'waiting'
+      this.dispatchUserQuestion(bridge, pending)
+      return
+    }
+    if (!this.active || bridge.controller.signal.aborted) return
+    const route = this.resolveUserQuestionRoute(pending.sessionId)
+    if (route.state === 'deferred') {
+      pending.state = 'waiting'
+      return
+    }
+    if (route.state === 'invalid' || !sameUserQuestionAuthority(attempt.authority, route.authority)) {
+      this.queueUserQuestionResponse(bridge, pending, cancelledUserQuestionResponse(pending.rpcId))
+      return
+    }
+    if (outcome !== null && typeof outcome === 'object'
+      && (outcome as { outcome?: unknown }).outcome === 'answered'
+      && typeof (outcome as { answer?: unknown }).answer === 'object'
+      && (outcome as { answer?: unknown }).answer !== null) {
+      const answer = (outcome as { answer: UserQuestionAnswer }).answer
+      this.queueUserQuestionResponse(bridge, pending, {
+        type: 'client-response',
+        rpcId: pending.rpcId,
+        result: { ok: true, value: { sessionId: pending.sessionId, answer } },
+      })
+      return
+    }
+    this.queueUserQuestionResponse(bridge, pending, cancelledUserQuestionResponse(pending.rpcId))
+  }
+
+  private queueUserQuestionResponse(
+    bridge: UserQuestionBridge,
+    pending: PendingUserQuestion,
+    response: UserQuestionApiResponse,
+  ): void {
+    if (this.userQuestionBridge !== bridge || bridge.pending.get(pending.rpcId) !== pending) return
+    const attempt = pending.attempt
+    attempt?.detachBridgeAbort()
+    attempt?.controller.abort(new Error('ApiProxy question response is being sent'))
+    delete pending.attempt
+    pending.response = response
+    pending.responseAttempts = 0
+    pending.state = 'responding'
+    this.sendUserQuestionResponse(bridge, pending)
+  }
+
+  private async sendUserQuestionResponse(bridge: UserQuestionBridge, pending: PendingUserQuestion): Promise<void> {
+    const response = pending.response
+    if (response === undefined || this.userQuestionBridge !== bridge
+      || bridge.pending.get(pending.rpcId) !== pending || pending.state !== 'responding') return
+    let receipt: RpcReceipt
+    try {
+      receipt = await bridge.proxy.respond(response)
+    } catch {
+      if (this.userQuestionBridge === bridge && bridge.pending.get(pending.rpcId) === pending) {
+        pending.responseAttempts += 1
+        const retry = setTimeout(() => {
+          void this.sendUserQuestionResponse(bridge, pending)
+        }, Math.min(250 * 2 ** Math.min(pending.responseAttempts - 1, 5), 5_000))
+        retry.unref()
+      }
+      return
+    }
+    if (this.userQuestionBridge !== bridge || bridge.pending.get(pending.rpcId) !== pending) return
+    if (!receipt.accepted && receipt.reason === 'bad-response') {
+      if (response.result.ok) {
+        pending.response = cancelledUserQuestionResponse(pending.rpcId)
+        pending.responseAttempts = 0
+        void this.sendUserQuestionResponse(bridge, pending)
+      } else {
+        delete pending.response
+        pending.state = 'waiting'
+      }
+      return
+    }
+    bridge.pending.delete(pending.rpcId)
+    this.markUserQuestionCompleted(bridge, pending.rpcId)
+  }
+
+  private abortUserQuestionAttemptsForAdapter(adapter: DeliveryAdapter, reason: Error): void {
+    const bridge = this.userQuestionBridge
+    if (bridge === undefined) return
+    for (const pending of bridge.pending.values()) {
+      if (pending.attempt?.authority.adapter === adapter) pending.attempt.controller.abort(reason)
+    }
+  }
+
+  private resolveUserQuestionRoute(sessionId: string): UserQuestionRoute {
+    try {
+      return this.resolveUserQuestionRouteFromStore(sessionId)
+    } catch {
+      // A transient local store failure is not proof that the owner or binding
+      // was revoked. Keep the ApiProxy request pending for replay/re-registration.
+      return { state: 'deferred' }
+    }
+  }
+
+  private resolveUserQuestionRouteFromStore(sessionId: string): UserQuestionRoute {
+    const binding = this.deliveryStore.getBindingBySession(sessionId)
+    // The mux carries every Web session. Absence from Delivery is not a
+    // revocation signal and must never let this optional bridge cancel a
+    // question owned only by the Web UI.
+    if (binding === undefined) return { state: 'deferred' }
+    const active = this.deliveryStore.getActiveBinding(binding.conversation)
+    const owner = this.deliveryStore.getPrincipal(binding.principal)
+    if (binding?.status !== 'active' || binding.sessionId !== sessionId
+      || active?.id !== binding.id || active.version !== binding.version
+      || active.generation !== binding.generation || active.sessionId !== binding.sessionId
+      || JSON.stringify(active.principal) !== JSON.stringify(binding.principal)
+      || JSON.stringify(active.conversation) !== JSON.stringify(binding.conversation)
+      || owner?.status !== 'active' || owner.role !== 'owner'
+      || JSON.stringify(owner.principal) !== JSON.stringify(binding.principal)) {
+      return { state: 'invalid' }
+    }
+    const adapter = this.registry.get(binding.conversation.channel, binding.conversation.account)
+    if (adapter === undefined || this.drainingUserQuestionAdapters.has(adapter)
+      || adapter.capabilities.userQuestions !== true || adapter.requestUserQuestion === undefined) {
+      return { state: 'deferred' }
+    }
+    return { state: 'ready', authority: {
+      adapter,
+      binding,
+      ownerId: owner.id,
+      ownerVersion: owner.version,
+    } }
   }
 
   currentPreferenceTurn(agent: Agent): Readonly<DeliveryPreferenceTurnAttestation> | undefined {

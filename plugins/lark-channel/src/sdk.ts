@@ -29,6 +29,7 @@ import {
   type LarkTransport,
   type LarkTransportErrorCode,
   type LarkTransportHandlers,
+  type LarkUserQuestionOption,
 } from './types.js'
 import { renderLarkAnswerElements } from './answer-card.js'
 import { installLarkCardCallbackBridge } from './ws-card-callback.js'
@@ -516,6 +517,127 @@ export const LARK_PERMISSION_PICKER_CONTROLS = Object.freeze({
 
 export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive' | 'text'; content: string } {
   if ('text' in input) return { msgType: 'text', content: JSON.stringify({ text: input.text }) }
+  if ('userQuestion' in input) {
+    const question = input.userQuestion
+    const optionButton = (option: LarkUserQuestionOption, index: number) => {
+      const markers = [
+        ...(question.multiSelect && option.selected === true ? ['✓ 已选'] : []),
+        ...(option.recommended === true ? ['推荐'] : []),
+      ]
+      const value = option.value
+      return {
+        tag: 'button',
+        name: `user_question_option_${index + 1}`,
+        type: option.recommended === true || (question.multiSelect && option.selected === true)
+          ? 'primary'
+          : 'default',
+        width: 'fill',
+        text: { tag: 'plain_text', content: markers.length === 0
+          ? option.label
+          : `${markers.join(' · ')}：${option.label}` },
+        value,
+        behaviors: [{ type: 'callback', value }],
+      }
+    }
+    const submit = question.submitValue === undefined
+      ? []
+      : [{
+          tag: 'button',
+          name: 'user_question_submit',
+          type: 'primary',
+          width: 'fill',
+          text: { tag: 'plain_text', content: question.multiSelect ? '提交已选答案' : '提交答案' },
+          value: question.submitValue,
+          behaviors: [{ type: 'callback' as const, value: question.submitValue }],
+        }]
+    const cancel = question.cancelValue === undefined
+      ? []
+      : [{
+          tag: 'button',
+          name: 'user_question_cancel',
+          type: 'default',
+          width: 'fill',
+          text: { tag: 'plain_text', content: '取消本次问题' },
+          value: question.cancelValue,
+          behaviors: [{ type: 'callback' as const, value: question.cancelValue }],
+        }]
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: {
+          update_multi: true,
+          enable_forward_interaction: false,
+          summary: { content: '智能体正在等待您的选择或补充回答' },
+        },
+        header: {
+          template: 'blue',
+          title: { tag: 'plain_text', content: question.title },
+        },
+        body: { padding: '12px 12px 20px 12px', elements: [
+          { tag: 'div', text: { tag: 'plain_text', content: `问题 ${question.position} / ${question.total}` } },
+          { tag: 'div', text: { tag: 'plain_text', content: question.question } },
+          ...(question.detail === undefined ? [] : [
+            { tag: 'div', text: { tag: 'plain_text', content: question.detail } },
+          ]),
+          ...(question.answered === undefined ? [] : question.answered.map(answered => ({
+            tag: 'div',
+            text: { tag: 'plain_text', content: `已答摘要：${answered.title}：${answered.answer}` },
+          }))),
+          ...(question.expectsText ? [
+            { tag: 'div', text: { tag: 'plain_text', content: '如需输入其他答案，请直接回复这张问题卡片。' } },
+          ] : []),
+          ...question.options.flatMap((option, index) => [
+            ...(option.description === undefined ? [] : [
+              { tag: 'div', text: { tag: 'plain_text', content: option.description } },
+            ]),
+            optionButton(option, index),
+          ]),
+          ...submit,
+          ...cancel,
+        ] },
+      }),
+    }
+  }
+  if ('userQuestionResult' in input) {
+    const result = input.userQuestionResult
+    const presentation = {
+      answered: {
+        template: 'green',
+        title: '已收到您的回答',
+        detail: '回答已交给智能体，正在继续处理。',
+        summary: '智能体已收到您的回答并将继续处理',
+      },
+      cancelled: {
+        template: 'grey',
+        title: '本次问题已取消',
+        detail: '该问题已取消，智能体不会继续等待此回答。',
+        summary: '本次问题已取消，智能体不再等待回答',
+      },
+      resolved: {
+        template: 'blue',
+        title: '本次问题已处理',
+        detail: '该问题已在其他已授权终端完成处理。',
+        summary: '本次问题已由已授权终端处理完成',
+      },
+    }[result.status]
+    return {
+      msgType: 'interactive',
+      content: JSON.stringify({
+        schema: '2.0',
+        config: {
+          update_multi: true,
+          enable_forward_interaction: false,
+          summary: { content: presentation.summary },
+        },
+        header: { template: presentation.template, title: { tag: 'plain_text', content: presentation.title } },
+        body: { padding: '12px 12px 20px 12px', elements: [
+          { tag: 'div', text: { tag: 'plain_text', content: presentation.detail } },
+          { tag: 'div', text: { tag: 'plain_text', content: result.summary } },
+        ] },
+      }),
+    }
+  }
   if ('permissionPicker' in input) {
     const picker = input.permissionPicker
     const level = (

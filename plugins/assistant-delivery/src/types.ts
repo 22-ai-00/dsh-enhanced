@@ -1,5 +1,6 @@
 import type { ImageAttachmentRef, ImageMediaType } from '@deepseek-ai/dsh-attachment'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { AskUserQuestionAnswer, AskUserQuestionItem } from '@deepseek-ai/dsh-user-questions/types'
 import type { ApprovalDispatchRouteV2 } from '@dsh-enhanced/assistant-policy'
 
 export interface ExternalPrincipalKey {
@@ -748,6 +749,24 @@ export interface DeliveryToolApprovalRequest {
 
 export type DeliveryToolApprovalOutcome = 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
 
+/** One live Host question routed to the authenticated Delivery conversation owner. */
+export interface DeliveryUserQuestionRequest {
+  /** Stable ApiProxy server-request id; echoed only by the trusted Host bridge. */
+  operationId: string
+  bindingId: string
+  bindingVersion: number
+  bindingGeneration: number
+  sessionId: string
+  target: DeliveryTarget
+  /** Exact upstream batch. An adapter must answer every item once and in order. */
+  questions: readonly AskUserQuestionItem[]
+}
+
+export type DeliveryUserQuestionOutcome =
+  | { outcome: 'answered'; answer: AskUserQuestionAnswer }
+  | { outcome: 'cancelled' }
+  | { outcome: 'unavailable' }
+
 /**
  * Bounded, user-visible execution progress.
  *
@@ -796,6 +815,7 @@ export interface DeliveryAdapter {
     formats: readonly OutboundFormat[]
     inboundImages?: boolean
     toolApprovals?: boolean
+    userQuestions?: boolean
   }>
   start(context: DeliveryAdapterContext): Promise<void | (() => void | Promise<void>)>
   readInboundImage?(
@@ -807,6 +827,11 @@ export interface DeliveryAdapter {
     input: Readonly<DeliveryToolApprovalRequest>,
     signal: AbortSignal,
   ): Promise<DeliveryToolApprovalOutcome>
+  /** Live and deliberately non-durable; ApiProxy remains the sole question provider. */
+  requestUserQuestion?(
+    input: Readonly<DeliveryUserQuestionRequest>,
+    signal: AbortSignal,
+  ): Promise<DeliveryUserQuestionOutcome>
   /** Best-effort UI only; implementations must not treat it as task state or a durable reply. */
   progress?(intent: Readonly<DeliveryProgressIntent>): Promise<void>
   /** Replace one exact bot-authored durable message with a domain terminal projection. */
