@@ -24,8 +24,11 @@ DSH_ENHANCED_LARK_PLUGIN_SLUGS=(
 )
 
 DSH_ENHANCED_SUPERVISED_GROWTH_PLUGIN_SLUGS=(
-  'assistant-evolution'
   'assistant-evaluation'
+  # Evaluation provides the authoritative service consumed by Evolution.  DSH
+  # resolves activation by service availability, but keeping the provider
+  # first makes the intended install topology unambiguous to operators too.
+  'assistant-evolution'
   'assistant-growth-experiments'
   'assistant-heartbeat'
   'assistant-health'
@@ -220,17 +223,84 @@ dsh_enhanced_ensure_pnpm() {
   fi
 }
 
-dsh_enhanced_lark_is_configured() {
+# Prints the Lark fields explicitly supplied by one patch layer as
+# `disabled|enabled|appId`.  An empty field means the layer does not override
+# that value.  Values which are present but unusable stay non-empty, so they
+# correctly shadow a lower-priority valid value instead of being mistaken for
+# a fallback.
+dsh_enhanced_lark_patch_fields() {
   local patch_path="$1"
-  [[ -f "$patch_path" ]] || return 1
+  if [[ ! -f "$patch_path" ]]; then
+    printf '||\n'
+    return 0
+  fi
   awk '
-    BEGIN { in_lark = 0; enabled = 0; app_id = 0 }
+    function value_after_colon(line) {
+      sub(/^[^:]*:[[:space:]]*/, "", line)
+      sub(/[[:space:]]+#.*$/, "", line)
+      sub(/[[:space:]]+$/, "", line)
+      return line
+    }
+    BEGIN { in_lark = 0; disabled = ""; enabled = ""; app_id = "" }
     /^- id:[[:space:]]+dsh-enhanced-lark-channel[[:space:]]*$/ { in_lark = 1; next }
     in_lark && /^- id:/ { in_lark = 0 }
-    in_lark && /^[[:space:]]+enabled:[[:space:]]+true[[:space:]]*$/ { enabled = 1 }
-    in_lark && /^[[:space:]]+appId:[[:space:]]+cli_[0-9a-fA-F]{16}[[:space:]]*$/ { app_id = 1 }
-    END { exit !(enabled && app_id) }
+    in_lark && /^[[:space:]]+disabled:/ {
+      value = value_after_colon($0)
+      if (value == "true" || value == "false") disabled = value
+    }
+    in_lark && /^[[:space:]]+enabled:/ {
+      value = value_after_colon($0)
+      if (value == "true" || value == "false") enabled = value
+    }
+    in_lark && /^[[:space:]]+appId:/ {
+      value = value_after_colon($0)
+      app_id = value == "" ? "__invalid__" : value
+    }
+    END { printf "%s|%s|%s\n", disabled, enabled, app_id }
   ' "$patch_path"
+}
+
+# DSH loads the home layer before the selected profile layer.  Inspect both as
+# a field-level overlay rather than accepting either one independently: a
+# profile-level `disabled: true`, `enabled: false`, or replacement App ID must
+# take precedence over a valid home-level binding.  This mirrors what the Host
+# will run and keeps scenario selection, onboarding, probe suppression, and
+# doctor on one definition of “configured”.
+dsh_enhanced_effective_lark_is_configured() {
+  local profile_patch="$1"
+  local home_patch="$2"
+  local profile_disabled profile_enabled profile_app_id
+  local home_disabled home_enabled home_app_id
+  IFS='|' read -r profile_disabled profile_enabled profile_app_id \
+    <<< "$(dsh_enhanced_lark_patch_fields "$profile_patch")"
+  IFS='|' read -r home_disabled home_enabled home_app_id \
+    <<< "$(dsh_enhanced_lark_patch_fields "$home_patch")"
+
+  local disabled="$home_disabled"
+  local enabled="$home_enabled"
+  local app_id="$home_app_id"
+  [[ -n "$profile_disabled" ]] && disabled="$profile_disabled"
+  [[ -n "$profile_enabled" ]] && enabled="$profile_enabled"
+  [[ -n "$profile_app_id" ]] && app_id="$profile_app_id"
+  [[ "$disabled" != 'true' && "$enabled" == 'true' \
+    && "$app_id" =~ ^cli_[0-9a-fA-F]{16}$ ]]
+}
+
+dsh_enhanced_lark_is_configured() {
+  dsh_enhanced_effective_lark_is_configured "$1" /dev/null
+}
+
+# `dsh plugin add` is deliberately additive: rerunning a smaller scenario does
+# not remove a bundle that an earlier installer version added.  Older profiles
+# can therefore still mount Evolution after its Evaluation provider became a
+# separate required bundle.  A profile manifest is the authoritative record of
+# installed bundle layers, so use it to repair this one known historical
+# closure without broadening a normal Lark installation into supervised mode.
+dsh_enhanced_profile_mentions_bundle() {
+  local profile_manifest="$1"
+  local package_name="$2"
+  [[ -f "$profile_manifest" ]] || return 1
+  grep -Fq "\"$package_name\"" "$profile_manifest"
 }
 
 dsh_enhanced_validate_permission_default() {
@@ -549,6 +619,67 @@ dsh_enhanced_ensure_agent_bundle() {
   dsh_enhanced_run "$dry_run" dsh plugin --profile "$profile" add "$target"
 }
 
+# Model setup changes a global setting and a profile-local route row.  Keep a
+# tiny exact-file snapshot while a newly selected agent route is being
+# validated, so an adapter composition failure cannot leave all profiles
+# pointing at a route that was never proven usable.
+dsh_enhanced_snapshot_agent_route_configuration() {
+  local profile="$1"
+  local dsh_home="$2"
+  local snapshot_directory
+  if ! snapshot_directory="$(mktemp -d "${TMPDIR:-/tmp}/dsh-enhanced-agent-route.XXXXXX")"; then
+    return 1
+  fi
+  if ! chmod 700 "$snapshot_directory"; then
+    rm -rf -- "$snapshot_directory"
+    return 1
+  fi
+
+  local settings_path="$dsh_home/settings.yaml"
+  local profile_patch="$dsh_home/profiles/$profile/cordis.patch.yml"
+  if [[ -e "$settings_path" ]]; then
+    cp -p -- "$settings_path" "$snapshot_directory/settings.yaml" || {
+      rm -rf -- "$snapshot_directory"
+      return 1
+    }
+    : > "$snapshot_directory/settings.present"
+  fi
+  if [[ -e "$profile_patch" ]]; then
+    cp -p -- "$profile_patch" "$snapshot_directory/cordis.patch.yml" || {
+      rm -rf -- "$snapshot_directory"
+      return 1
+    }
+    : > "$snapshot_directory/profile-patch.present"
+  fi
+  printf '%s' "$snapshot_directory"
+}
+
+dsh_enhanced_restore_agent_route_configuration() {
+  local snapshot_directory="$1"
+  local profile="$2"
+  local dsh_home="$3"
+  [[ -n "$snapshot_directory" && -d "$snapshot_directory" ]] || return 0
+  local settings_path="$dsh_home/settings.yaml"
+  local profile_patch="$dsh_home/profiles/$profile/cordis.patch.yml"
+  if [[ -f "$snapshot_directory/settings.present" ]]; then
+    cp -p -- "$snapshot_directory/settings.yaml" "$settings_path" || return 1
+  else
+    rm -f -- "$settings_path"
+  fi
+  if [[ -f "$snapshot_directory/profile-patch.present" ]]; then
+    cp -p -- "$snapshot_directory/cordis.patch.yml" "$profile_patch" || return 1
+  else
+    rm -f -- "$profile_patch"
+  fi
+  rm -rf -- "$snapshot_directory"
+}
+
+dsh_enhanced_discard_agent_route_configuration_snapshot() {
+  local snapshot_directory="$1"
+  [[ -n "$snapshot_directory" && -d "$snapshot_directory" ]] || return 0
+  rm -rf -- "$snapshot_directory"
+}
+
 
 # Resolve how to invoke dsh-model-setup for a profile.  pnpm normally links a
 # `.bin/dsh-model-setup` shim, but that shim is absent on profiles installed
@@ -633,7 +764,9 @@ dsh_enhanced_restart_resident_service() {
 # only for the child process.  When no key is available we still write the route
 # selection and tell the owner where to supply the secret, rather than failing
 # the install.  For an agent route (TraeX) there is no key: we write the default
-# selection and enable the route bundle row in this profile's patch layer.
+# selection and enable the route bundle row in this profile's patch layer.  The
+# subsequent model-route step owns its adapter/login validation, so an explicit
+# --model-route skip can still opt out.
 dsh_enhanced_apply_model() {
   local profile="$1"
   local dsh_home="$2"
@@ -681,18 +814,6 @@ dsh_enhanced_apply_model() {
       return 0
     fi
     "${setup_launcher[@]}" "${args[@]}" || return $?
-    # A live login is required for the route to actually serve; probe it as a
-    # non-fatal hint so a not-yet-logged-in TraeX does not fail the install.
-    local traex_command=''
-    traex_command="$(dsh_enhanced_detect_traex_command || true)"
-    if [[ -n "$traex_command" ]]; then
-      if ! "$traex_command" login status >/dev/null 2>&1; then
-        printf '模型配置提示：%s 尚未确认登录；请在同一用户下运行 `%s login` 后再使用 traex-agent。\n' \
-          "$traex_command" "$traex_command"
-      fi
-    else
-      printf '模型配置提示：未在 PATH 找到 traex/trae-cli；请安装并登录后再使用 traex-agent。\n'
-    fi
     return 0
   fi
 
@@ -763,6 +884,8 @@ dsh_enhanced_verify_model_route() {
   local dry_run="$2"
   local profile="$3"
   local dsh_home="$4"
+  local configured_provider="${5:-}"
+  local agent_login_verified="${6:-0}"
   if [[ "$mode" == 'skip' ]]; then
     printf '模型 route：未发送请求；可稍后运行安装器并加 --model-route verify。\n'
     return 0
@@ -774,10 +897,12 @@ dsh_enhanced_verify_model_route() {
   # a headless one-shot prompt, so verify it structurally instead of calling a
   # model: confirm the adapter is registered in the target profile and that the
   # local agent reports a login.  This also avoids spending any model quota.
-  local effective_provider
-  effective_provider="$(dsh_enhanced_effective_default_provider "$dsh_home")"
+  local effective_provider="$configured_provider"
+  if [[ -z "$effective_provider" ]]; then
+    effective_provider="$(dsh_enhanced_effective_default_provider "$dsh_home")"
+  fi
   if dsh_enhanced_is_agent_route "$effective_provider"; then
-    dsh_enhanced_verify_agent_route "$effective_provider" "$profile" "$dry_run"
+    dsh_enhanced_verify_agent_route "$effective_provider" "$profile" "$dry_run" "$agent_login_verified"
     return $?
   fi
 
@@ -831,13 +956,42 @@ dsh_enhanced_effective_default_provider() {
   printf '%s' "$provider"
 }
 
+# Verify the local login independently of profile writes.  This is intentionally
+# done before dsh-model-setup changes the global default, so an absent or stale
+# TraeX login cannot strand other profiles on an unusable route.
+dsh_enhanced_verify_agent_login() {
+  local provider="$1"
+  local dry_run="$2"
+  dsh_enhanced_is_agent_route "$provider" || return 0
+  if [[ "$dry_run" == '1' ]]; then
+    printf '模型 route：将确认本机 TraeX 登录状态（不启动 ACP、不会消耗模型额度）。\n'
+    dsh_enhanced_print_command traex login status
+    return 0
+  fi
+  local traex_command=''
+  traex_command="$(dsh_enhanced_detect_traex_command || true)"
+  if [[ -z "$traex_command" ]]; then
+    dsh_enhanced_fail 1 '模型 route 验证失败：未在 PATH 找到 traex/trae-cli。'
+    return $?
+  fi
+  local login_status
+  if ! login_status="$("$traex_command" login status 2>&1)" || [[ "$login_status" != *'Logged in using Trae'* ]]; then
+    printf '%s\n' "$login_status" >&2
+    dsh_enhanced_fail 1 "模型 route 验证失败：$traex_command 未确认登录；请在同一 OS 用户下运行 \`$traex_command login\` 后重试。"
+    return $?
+  fi
+  printf '模型 route：%s 已确认登录。\n' "$traex_command"
+}
+
 # Verify an agent route without a model call: the adapter must be registered in
-# the target profile, and the backing local agent must report a login.  Neither
-# check spends model quota; both are the real prerequisites for the route.
+# the target profile, and (unless it was checked immediately before this call)
+# the backing local agent must report a login.  Neither check spends model
+# quota; both are the real prerequisites for the route.
 dsh_enhanced_verify_agent_route() {
   local provider="$1"
   local profile="$2"
   local dry_run="$3"
+  local login_verified="${4:-0}"
   if [[ "$dry_run" == '1' ]]; then
     printf '模型 route：agent route %s 不发送模型请求；将校验 profile %s 已注册适配器并检查本机登录。\n' "$provider" "$profile"
     dsh_enhanced_print_command dsh --profile "$profile" --dump-config
@@ -857,20 +1011,66 @@ dsh_enhanced_verify_agent_route() {
     return $?
   fi
 
-  local traex_command=''
-  traex_command="$(dsh_enhanced_detect_traex_command || true)"
-  if [[ -z "$traex_command" ]]; then
-    dsh_enhanced_fail 1 '模型 route 验证失败：未在 PATH 找到 traex/trae-cli。'
-    return $?
+  if [[ "$login_verified" != '1' ]]; then
+    dsh_enhanced_verify_agent_login "$provider" "$dry_run" || return $?
   fi
-  local login_status
-  if ! login_status="$("$traex_command" login status 2>&1)" || [[ "$login_status" != *'Logged in using Trae'* ]]; then
-    printf '%s\n' "$login_status" >&2
-    dsh_enhanced_fail 1 "模型 route 验证失败：$traex_command 未确认登录；请在同一 OS 用户下运行 \`$traex_command login\` 后重试。"
-    return $?
-  fi
-  printf '模型 route 验证通过：traex-acp-provider 已在 profile %s 注册，且 %s 已登录。\n' "$profile" "$traex_command"
+  printf '模型 route 验证通过：traex-acp-provider 已在 profile %s 注册，且本机 TraeX 已登录。\n' "$profile"
 }
+
+# Write and structurally verify a new agent-route default as a small file
+# transaction.  The function body deliberately runs in a subshell: its EXIT,
+# INT, and TERM traps cannot replace the caller's installer/remote-bootstrap
+# cleanup handlers, while every DSH configuration write remains visible.  A
+# signal after dsh-model-setup has written the new global default therefore
+# restores the exact pre-write settings and profile patch before this subshell
+# exits.
+dsh_enhanced_apply_verified_agent_model() (
+  local profile="$1"
+  local dsh_home="$2"
+  local provider="$3"
+  local model="$4"
+  local base_url="$5"
+  local api="$6"
+  local display_name="$7"
+  local dry_run="$8"
+  local login_verified="${9:-0}"
+  if [[ "$dry_run" == '1' ]]; then
+    dsh_enhanced_apply_model "$profile" "$dsh_home" "$provider" "$model" \
+      "$base_url" "$api" "$display_name" "$dry_run" || return $?
+    dsh_enhanced_verify_model_route verify "$dry_run" "$profile" "$dsh_home" \
+      "$provider" "$login_verified"
+    return $?
+  fi
+
+  local snapshot=''
+  if ! snapshot="$(dsh_enhanced_snapshot_agent_route_configuration "$profile" "$dsh_home")"; then
+    dsh_enhanced_fail 1 '无法创建 TraeX 模型配置回滚点；为避免写入未经验证的全局默认模型，已停止。'
+    return $?
+  fi
+  local committed='0'
+  trap '
+    status=$?
+    if [[ "$committed" != "1" && -n "$snapshot" ]]; then
+      if dsh_enhanced_restore_agent_route_configuration "$snapshot" "$profile" "$dsh_home"; then
+        printf "模型配置：TraeX route 未通过验证或安装被中断，已恢复原有 settings/profile patch。\n" >&2
+      else
+        printf "dsh-enhanced installer: TraeX 模型 route 未通过验证，且无法自动恢复原有 settings/profile patch；请立即检查这两个文件。\n" >&2
+      fi
+    fi
+    exit "$status"
+  ' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  dsh_enhanced_apply_model "$profile" "$dsh_home" "$provider" "$model" \
+    "$base_url" "$api" "$display_name" "$dry_run" || return $?
+  dsh_enhanced_verify_model_route verify "$dry_run" "$profile" "$dsh_home" \
+    "$provider" "$login_verified" || return $?
+
+  committed='1'
+  dsh_enhanced_discard_agent_route_configuration_snapshot "$snapshot" || true
+  trap - EXIT INT TERM
+)
 
 
 dsh_enhanced_check_web_port_available() {
@@ -1018,6 +1218,234 @@ dsh_enhanced_prepare_linux_resident_service() {
   printf 'systemd：user manager 与 logout persistence 已就绪。\n'
 }
 
+# Start a short-lived real Web host on an OS-assigned loopback port and wait for
+# its post-Loader ready line.  Unlike --dump-config (which only composes YAML)
+# and --help (which exits during CLI parsing), this makes DSH audit that every
+# enabled Cordis entry actually activated.  A configured Lark row is disabled
+# in a process-only overlay so the probe neither opens another WebSocket nor
+# changes the saved profile.
+dsh_enhanced_stop_activation_probe() {
+  local pid="$1"
+  local attempt
+  [[ -n "$pid" ]] || return 0
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill -INT "$pid" >/dev/null 2>&1 || true
+    for attempt in 1 2 3 4 5; do
+      kill -0 "$pid" >/dev/null 2>&1 || break
+      sleep 1
+    done
+  fi
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+    sleep 1
+  fi
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  fi
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
+dsh_enhanced_cleanup_activation_probe() {
+  local pid="${1:-}"
+  local probe_directory="${2:-}"
+  dsh_enhanced_stop_activation_probe "$pid"
+  if [[ -n "$probe_directory" && -d "$probe_directory" ]]; then
+    rm -rf -- "$probe_directory"
+  fi
+}
+
+dsh_enhanced_restore_trap() {
+  local saved_trap="$1"
+  local signal="$2"
+  trap - "$signal"
+  if [[ -n "$saved_trap" ]]; then
+    # `trap -p` emits a shell-escaped `trap ...` command.  Restoring it avoids
+    # surprising callers that source common.sh and already own these handlers.
+    eval "$saved_trap"
+  fi
+}
+
+dsh_enhanced_verify_profile_activation() {
+  local profile="$1"
+  local dsh_home="$2"
+  local dry_run="$3"
+  local profile_patch="$dsh_home/profiles/$profile/cordis.patch.yml"
+  local home_patch="$dsh_home/cordis.patch.yml"
+  if [[ "$dry_run" == '1' ]]; then
+    printf 'profile 运行时自检：将以临时 loopback Web Host 实际加载全部插件，并等待就绪信号。\n'
+    dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
+    return 0
+  fi
+
+  local probe_directory
+  if ! probe_directory="$(mktemp -d "${TMPDIR:-/tmp}/dsh-enhanced-activation.XXXXXX")"; then
+    dsh_enhanced_fail 1 '无法创建 profile 运行时自检的临时目录。'
+    return $?
+  fi
+  chmod 700 "$probe_directory" || {
+    rm -rf -- "$probe_directory"
+    dsh_enhanced_fail 1 '无法保护 profile 运行时自检的临时目录。'
+    return $?
+  }
+
+  local stdout_path="$probe_directory/stdout.log"
+  local stderr_path="$probe_directory/stderr.log"
+  local overlay_path="$probe_directory/disable-lark.yml"
+  local overlay_args=()
+  local lark_temporarily_disabled='0'
+  if dsh_enhanced_effective_lark_is_configured "$profile_patch" "$home_patch"; then
+    printf '%s\n' '- id: dsh-enhanced-lark-channel' '  disabled: true' > "$overlay_path"
+    overlay_args=(--patch "$overlay_path")
+    lark_temporarily_disabled='1'
+  fi
+
+  printf 'profile 运行时自检：正在实际加载全部插件（临时端口）。\n'
+  local probe_pid=''
+  local saved_exit_trap saved_int_trap saved_term_trap
+  saved_exit_trap="$(trap -p EXIT || true)"
+  saved_int_trap="$(trap -p INT || true)"
+  saved_term_trap="$(trap -p TERM || true)"
+  trap 'dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"' EXIT
+  trap 'dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"; exit 130' INT
+  trap 'dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"; exit 143' TERM
+  dsh --profile "$profile" "${overlay_args[@]}" --host 127.0.0.1 --no-open --port 0 > "$stdout_path" 2> "$stderr_path" &
+  probe_pid=$!
+  local ready='0'
+  local elapsed
+  for ((elapsed = 0; elapsed < 30; elapsed += 1)); do
+    if grep -Fq 'dsh web: http://127.0.0.1:' "$stdout_path" 2>/dev/null; then
+      ready='1'
+      break
+    fi
+    if ! kill -0 "$probe_pid" >/dev/null 2>&1; then break; fi
+    sleep 1
+  done
+
+  # A short-lived process can write the ready line between the final grep and
+  # the liveness check above.  Treat that completed output as a successful
+  # activation probe too; the probe only needs to prove that DSH composed and
+  # activated the profile far enough to start its Web Host.
+  if grep -Fq 'dsh web: http://127.0.0.1:' "$stdout_path" 2>/dev/null; then
+    ready='1'
+  fi
+
+  if [[ "$ready" == '1' ]]; then
+    dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"
+    dsh_enhanced_restore_trap "$saved_exit_trap" EXIT
+    dsh_enhanced_restore_trap "$saved_int_trap" INT
+    dsh_enhanced_restore_trap "$saved_term_trap" TERM
+    if [[ "$lark_temporarily_disabled" == '1' ]]; then
+      printf 'profile 运行时自检通过：除临时禁用的 Lark channel 外，全部启用插件已激活。\n'
+    else
+      printf 'profile 运行时自检通过：全部启用插件已激活。\n'
+    fi
+    return 0
+  fi
+
+  local failure='启动进程在 Web Host 就绪前退出。'
+  if kill -0 "$probe_pid" >/dev/null 2>&1; then
+    failure='30 秒内没有等到 Web Host 就绪。'
+  fi
+  dsh_enhanced_stop_activation_probe "$probe_pid"
+  dsh_enhanced_restore_trap "$saved_exit_trap" EXIT
+  dsh_enhanced_restore_trap "$saved_int_trap" INT
+  dsh_enhanced_restore_trap "$saved_term_trap" TERM
+  printf 'profile 运行时自检失败：%s\n' "$failure" >&2
+  if [[ -s "$stdout_path" ]]; then
+    printf '%s\n' '--- DSH stdout ---' >&2
+    sed -n '1,160p' "$stdout_path" >&2
+  fi
+  if [[ -s "$stderr_path" ]]; then
+    printf '%s\n' '--- DSH stderr ---' >&2
+    sed -n '1,240p' "$stderr_path" >&2
+  fi
+  rm -rf -- "$probe_directory"
+  dsh_enhanced_fail 1 "profile $profile 未能完整激活；尚未继续飞书授权、凭据写入或常驻服务启动。"
+}
+
+dsh_enhanced_read_linux_service_snapshot() {
+  local target="$1"
+  local snapshot
+  if ! snapshot="$(systemctl --user show "$target" \
+    --property=ActiveState --property=SubState --property=NRestarts --property=ExecMainStatus 2>&1)"; then
+    printf '%s\n' "$snapshot" >&2
+    return 1
+  fi
+  local active_state sub_state restarts main_status
+  active_state="$(printf '%s\n' "$snapshot" | awk -F= '$1 == "ActiveState" { print substr($0, index($0, "=") + 1); exit }')"
+  sub_state="$(printf '%s\n' "$snapshot" | awk -F= '$1 == "SubState" { print substr($0, index($0, "=") + 1); exit }')"
+  restarts="$(printf '%s\n' "$snapshot" | awk -F= '$1 == "NRestarts" { print substr($0, index($0, "=") + 1); exit }')"
+  main_status="$(printf '%s\n' "$snapshot" | awk -F= '$1 == "ExecMainStatus" { print substr($0, index($0, "=") + 1); exit }')"
+  if [[ -z "$active_state" || -z "$sub_state" || ! "$restarts" =~ ^[0-9]+$ || ! "$main_status" =~ ^[0-9]+$ ]]; then
+    printf 'doctor：无法解析 systemd 服务 %s 的稳定性状态。\n' "$target" >&2
+    return 1
+  fi
+  printf '%s|%s|%s|%s\n' "$active_state" "$sub_state" "$restarts" "$main_status"
+}
+
+dsh_enhanced_report_linux_service_failure() {
+  local target="$1"
+  local reason="$2"
+  printf 'doctor：systemd 服务 %s 未能稳定运行：%s\n' "$target" "$reason" >&2
+  if command -v journalctl >/dev/null 2>&1; then
+    journalctl --user -u "$target" -n 80 --no-pager >&2 || true
+  fi
+  if systemctl --user stop "$target" >/dev/null 2>&1; then
+    printf 'doctor：已停止该服务以避免无限重启；修复后运行 systemctl --user restart %s。\n' "$target" >&2
+  else
+    printf 'doctor：尝试停止该服务失败；请立即运行 systemctl --user stop %s，避免继续重启。\n' "$target" >&2
+  fi
+}
+
+dsh_enhanced_verify_linux_service_stability() {
+  local profile="$1"
+  local target="dsh-profile-$profile.service"
+  local first
+  if ! first="$(dsh_enhanced_read_linux_service_snapshot "$target")"; then
+    dsh_enhanced_report_linux_service_failure "$target" '无法读取 initial systemd 状态。'
+    dsh_enhanced_fail 1 "doctor：无法确认 systemd 服务 $target 稳定运行。"
+    return $?
+  fi
+  local first_active first_substate first_restarts first_status
+  IFS='|' read -r first_active first_substate first_restarts first_status <<< "$first"
+  if [[ "$first_active" != 'active' || "$first_substate" != 'running' || "$first_status" != '0' ]]; then
+    dsh_enhanced_report_linux_service_failure "$target" \
+      "initial state=$first_active/$first_substate, restarts=$first_restarts, main-status=$first_status"
+    dsh_enhanced_fail 1 "doctor：systemd 服务 $target 未处于 active/running。"
+    return $?
+  fi
+
+  # The unit waits five seconds before a restart.  Twelve seconds catches an
+  # immediate failure plus a full restart without making normal onboarding
+  # feel stalled; it is an acceptance window, not a perpetual monitor.
+  local stability_seconds="${DSH_ENHANCED_SERVICE_STABILITY_SECONDS:-12}"
+  if ! [[ "$stability_seconds" =~ ^[0-9]{1,2}$ ]] || (( stability_seconds > 60 )); then
+    dsh_enhanced_fail 2 'DSH_ENHANCED_SERVICE_STABILITY_SECONDS 必须是 0..60。'
+    return $?
+  fi
+  if (( stability_seconds > 0 )); then
+    printf 'doctor：观察 systemd 服务 %s %s 秒，确认未进入重启循环。\n' "$target" "$stability_seconds"
+    sleep "$stability_seconds"
+  fi
+
+  local second
+  if ! second="$(dsh_enhanced_read_linux_service_snapshot "$target")"; then
+    dsh_enhanced_report_linux_service_failure "$target" '稳定性观察后无法读取 systemd 状态。'
+    dsh_enhanced_fail 1 "doctor：无法确认 systemd 服务 $target 稳定运行。"
+    return $?
+  fi
+  local second_active second_substate second_restarts second_status
+  IFS='|' read -r second_active second_substate second_restarts second_status <<< "$second"
+  if [[ "$second_active" != 'active' || "$second_substate" != 'running' || "$second_status" != '0'
+    || "$second_restarts" != "$first_restarts" ]]; then
+    dsh_enhanced_report_linux_service_failure "$target" \
+      "final state=$second_active/$second_substate, restarts=$first_restarts->$second_restarts, main-status=$second_status"
+    dsh_enhanced_fail 1 "doctor：systemd 服务 $target 在稳定性窗口内退出或重启。"
+    return $?
+  fi
+  printf 'doctor：systemd 服务稳定运行（NRestarts=%s）。\n' "$second_restarts"
+}
+
 # The installer calls this before creating a brand-new profile and after it has
 # composed the final profile.  It deliberately never starts an Agent or sends a
 # model request; model readiness is an explicit separate choice.
@@ -1043,28 +1471,34 @@ dsh_enhanced_doctor() {
     return $?
   fi
   local patch_path="$dsh_home/profiles/$profile/cordis.patch.yml"
-  if ! dsh_enhanced_lark_is_configured "$patch_path"; then
+  local home_patch_path="$dsh_home/cordis.patch.yml"
+  if ! dsh_enhanced_effective_lark_is_configured "$patch_path" "$home_patch_path"; then
     if [[ "$require_service" == '1' ]]; then
       dsh_enhanced_fail 1 "doctor：profile $profile 未配置已启用的飞书 channel，不能验证常驻服务。"
       return $?
     fi
-    printf 'doctor：profile 配置可组合；未启用飞书常驻服务。\n'
+    dsh_enhanced_verify_profile_activation "$profile" "$dsh_home" 0 || return $?
+    printf 'doctor：profile 可组合且已激活；未启用飞书常驻服务。\n'
     return 0
   fi
   if [[ "$require_service" != '1' ]]; then
-    printf 'doctor：profile 配置可组合；飞书服务状态可用 doctor.sh --require-service 复查。\n'
+    printf 'doctor：profile 配置可组合；为避免与可能运行的 Lark 服务并发启动第二个 Host，未做前台 activation probe。\n'
+    printf 'doctor：飞书服务状态可用 doctor.sh --require-service 复查。\n'
     return 0
   fi
-  case "$(uname -s)" in
+  case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in
     Linux)
       if ! command -v systemctl >/dev/null 2>&1; then
         dsh_enhanced_fail 1 'doctor：找不到 systemctl，无法验证 Linux 常驻服务。'
         return $?
       fi
-      if ! systemctl --user is-active --quiet "dsh-profile-$profile.service"; then
-        dsh_enhanced_fail 1 "doctor：systemd 服务 dsh-profile-$profile.service 未运行。"
+      local systemd_target="dsh-profile-$profile.service"
+      if ! systemctl --user is-active --quiet "$systemd_target"; then
+        dsh_enhanced_report_linux_service_failure "$systemd_target" 'systemctl is-active 报告服务未运行。'
+        dsh_enhanced_fail 1 "doctor：systemd 服务 $systemd_target 未运行。"
         return $?
       fi
+      dsh_enhanced_verify_linux_service_stability "$profile" || return $?
       if ! command -v loginctl >/dev/null 2>&1; then
         dsh_enhanced_fail 1 'doctor：找不到 loginctl，无法验证 Linux logout persistence。'
         return $?
@@ -1452,8 +1886,11 @@ dsh_enhanced_install() {
   dsh_enhanced_validate_permission_default "$dsh_home/settings.yaml" || return $?
 
   local existing_patch_path="$dsh_home/profiles/$profile/cordis.patch.yml"
+  local existing_home_patch_path="$dsh_home/cordis.patch.yml"
   local existing_lark_configured='0'
-  if dsh_enhanced_lark_is_configured "$existing_patch_path"; then existing_lark_configured='1'; fi
+  if dsh_enhanced_effective_lark_is_configured "$existing_patch_path" "$existing_home_patch_path"; then
+    existing_lark_configured='1'
+  fi
 
   # Keep the legacy --mode surface working, but make it an alias for the
   # explicit supervised scenario.  A scenario is selected before any package
@@ -1577,6 +2014,18 @@ dsh_enhanced_install() {
     dsh_enhanced_append_slug 'traex-acp-provider'
   fi
 
+  # Migration repair for profiles created before Evaluation became Evolution's
+  # required service provider.  Installing the current `lark` scenario alone
+  # would otherwise preserve the old Evolution layer and leave the host unable
+  # to start.  Keep the repair precise: do not enable Evolution for a normal
+  # Lark profile and do not remove any user-selected bundle.
+  local profile_manifest="$dsh_home/profiles/$profile/package.json"
+  if dsh_enhanced_profile_mentions_bundle "$profile_manifest" '@dsh-enhanced/assistant-evolution' \
+    && ! dsh_enhanced_profile_mentions_bundle "$profile_manifest" '@dsh-enhanced/assistant-evaluation'; then
+    printf '兼容性修复：检测到旧 profile 含 assistant-evolution 但缺少 assistant-evaluation；本次将自动补齐其运行时 provider。\n'
+    dsh_enhanced_append_slug 'assistant-evaluation'
+  fi
+
   local targets=()
   for slug in "${selected_slugs[@]}"; do
     if [[ "$source_mode" == 'local' ]]; then
@@ -1602,12 +2051,19 @@ dsh_enhanced_install() {
     dsh --profile "$profile" --dump-config >/dev/null
     printf 'profile 配置校验通过。\n'
   fi
+  if [[ "$existing_lark_configured" == '1' ]]; then
+    printf 'profile 运行时自检：检测到已有启用的 Lark channel；跳过临时 Host，避免与可能运行的既有服务并发访问状态。\n'
+  else
+    dsh_enhanced_verify_profile_activation "$profile" "$dsh_home" "$dry_run" || return $?
+  fi
   dsh_enhanced_apply_permission_choice "$permission_preset" "$confirm_dangerous_full_access" \
     "$profile" "$dsh_home" "$dry_run" || return $?
 
   local patch_path="$dsh_home/profiles/$profile/cordis.patch.yml"
   local lark_configured='0'
-  if dsh_enhanced_lark_is_configured "$patch_path"; then lark_configured='1'; fi
+  if dsh_enhanced_effective_lark_is_configured "$patch_path" "$existing_home_patch_path"; then
+    lark_configured='1'
+  fi
   if [[ "$scenario" == 'core' ]]; then
     lark_mode='skip'
     printf '\n飞书处理：core 场景未安装 channel，已跳过。\n'
@@ -1648,6 +2104,8 @@ dsh_enhanced_install() {
     model_mode='configure'
   fi
   local model_configured='0'
+  local agent_route_verified='0'
+  local agent_login_verified='0'
   if [[ "$dry_run" != '1' ]] && dsh_enhanced_model_is_configured "$profile" "$dsh_home"; then
     model_configured='1'
   fi
@@ -1680,12 +2138,35 @@ dsh_enhanced_install() {
     # not have had its provider bundle selected above; ensure it is present.
     dsh_enhanced_ensure_agent_bundle "$model_provider" "$profile" "$dsh_home" \
       "$source_mode" "$repo_root" "$plugin_version" "$dry_run" || return $?
-    dsh_enhanced_apply_model "$profile" "$dsh_home" "$model_provider" "$model_name" \
-      "$model_base_url" "$model_api" "$model_display_name" "$dry_run" || return $?
+
+    if dsh_enhanced_is_agent_route "$model_provider"; then
+      if [[ "$model_route_mode" == 'auto' ]]; then
+        # This verification only checks the local adapter registration and
+        # `traex login status`; it never starts an ACP session or spends quota.
+        printf '模型 route：本轮已配置 TraeX，正在执行免额度的适配器与登录校验。\n'
+        model_route_mode='verify'
+      fi
+      if [[ "$model_route_mode" == 'verify' ]]; then
+        # Check the external prerequisite before writing a global default.
+        dsh_enhanced_verify_agent_login "$model_provider" "$dry_run" || return $?
+        agent_login_verified='1'
+      fi
+    fi
+
+    if dsh_enhanced_is_agent_route "$model_provider" && [[ "$model_route_mode" == 'verify' ]]; then
+      # Do not restart a managed Lark service into an unusable global default.
+      # The scoped transaction also rolls back a Ctrl-C/TERM during validation.
+      dsh_enhanced_apply_verified_agent_model "$profile" "$dsh_home" "$model_provider" "$model_name" \
+        "$model_base_url" "$model_api" "$model_display_name" "$dry_run" "$agent_login_verified" || return $?
+      agent_route_verified='1'
+    else
+      dsh_enhanced_apply_model "$profile" "$dsh_home" "$model_provider" "$model_name" \
+        "$model_base_url" "$model_api" "$model_display_name" "$dry_run" || return $?
+    fi
     # A resident service is already running the pre-change profile; enabling a
     # new route (traex bundle) or changing the default model only takes effect
-    # after it reloads. Restart it before the route check and postflight so both
-    # observe the intended model rather than the stale one.
+    # after it reloads. An agent route has already passed its zero-cost local
+    # prerequisite check above; now reload the resident process for postflight.
     if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
       dsh_enhanced_restart_resident_service "$profile" "$dry_run" || return $?
     fi
@@ -1703,7 +2184,10 @@ dsh_enhanced_install() {
       }
     fi
   fi
-  dsh_enhanced_verify_model_route "$model_route_mode" "$dry_run" "$profile" "$dsh_home" || return $?
+  if [[ "$agent_route_verified" != '1' ]]; then
+    dsh_enhanced_verify_model_route "$model_route_mode" "$dry_run" "$profile" "$dsh_home" \
+      "$model_provider" || return $?
+  fi
 
   printf '\n最终 profile 自检：\n'
   if [[ "$dry_run" == '1' ]]; then
@@ -1721,7 +2205,7 @@ dsh_enhanced_install() {
     if [[ "$require_service" == '1' ]]; then
       printf 'doctor：将验证 profile、飞书 channel、常驻服务与 Linux logout persistence。\n'
     else
-      printf 'doctor：将验证 profile 可以组合；飞书服务可用 doctor.sh --require-service 复查。\n'
+      printf 'doctor：将验证 profile 能真实激活；飞书服务可用 doctor.sh --require-service 复查。\n'
     fi
   else
     dsh_enhanced_doctor postflight "$profile" "$dsh_home" "$web_port" "$require_service" || return $?
@@ -1733,6 +2217,9 @@ dsh_enhanced_install() {
     printf '立即使用：dsh --profile %s\n' "$profile"
   fi
   if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
-    printf '查看日志：tail -f %s/logs/%s-host.error.log\n' "$dsh_home" "$profile"
+    case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in
+      Linux) printf '查看日志：journalctl --user -u dsh-profile-%s.service -f\n' "$profile" ;;
+      *) printf '查看日志：tail -f %s/logs/%s-host.error.log\n' "$dsh_home" "$profile" ;;
+    esac
   fi
 }
