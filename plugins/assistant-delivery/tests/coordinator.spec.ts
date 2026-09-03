@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { DeliveryAdapterRegistry, DeliveryCoordinator, InboundCoordinator } from '../src/coordinator.ts'
+import { DeliveryAdapterRegistry, DeliveryAdapterRegistryStoppedError, DeliveryCoordinator, InboundCoordinator } from '../src/coordinator.ts'
 import { DeliveryStore } from '../src/store.ts'
 import type {
   AdapterReconcileResult,
@@ -80,6 +80,7 @@ describe('adapter registry and delivery coordinator', () => {
 
     const stopping = f.registry.stop()
     await expect(registration).rejects.toThrow(/stopped/i)
+    await expect(registration).rejects.toBeInstanceOf(DeliveryAdapterRegistryStoppedError)
 
     release()
     await stopping
@@ -129,6 +130,13 @@ describe('adapter registry and delivery coordinator', () => {
     await vi.advanceTimersByTimeAsync(5_000)
     expect(stopped).toBe(true)
     await stopping
+    f.store.close()
+  })
+
+  test('rejects registration into an already-stopped registry with the typed error', async () => {
+    const f = await fixture()
+    await f.registry.stop()
+    await expect(f.registry.register(adapter())).rejects.toBeInstanceOf(DeliveryAdapterRegistryStoppedError)
     f.store.close()
   })
 

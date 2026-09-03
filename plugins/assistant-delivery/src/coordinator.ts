@@ -77,6 +77,18 @@ function dispatchAuthorizationFailure(error: unknown):
 
 const adapterDisposeGraceMs = 5_000
 
+// A registry that is (or becomes) stopped rejects registration with this typed
+// error. It means the whole plugin tree is tearing down — often because an
+// earlier plugin failed to load (e.g. the web server hit EADDRINUSE) — so a
+// channel adapter that was mid-registration must not surface it as its own
+// fatal cause and mask the real one.
+export class DeliveryAdapterRegistryStoppedError extends Error {
+  constructor() {
+    super('assistant-delivery adapter registry is stopped')
+    this.name = 'DeliveryAdapterRegistryStoppedError'
+  }
+}
+
 type AdapterDisposer = () => void | Promise<void>
 
 type AdapterStartOutcome =
@@ -144,7 +156,7 @@ export class DeliveryAdapterRegistry {
   }
 
   async register(adapter: DeliveryAdapter): Promise<() => Promise<void>> {
-    if (this.stopped) throw new Error('assistant-delivery adapter registry is stopped')
+    if (this.stopped) throw new DeliveryAdapterRegistryStoppedError()
     const key = adapterKey(adapter.channel, adapter.account)
     if (this.adapters.has(key) || this.starting.has(key)) {
       throw new Error(`delivery adapter ${adapter.channel}/${adapter.account} is already registered`)
@@ -165,13 +177,13 @@ export class DeliveryAdapterRegistry {
       ])
       if (outcome.status === 'stopped') {
         void this.cleanupStarting(entry)
-        throw new Error('assistant-delivery adapter registry is stopped')
+        throw new DeliveryAdapterRegistryStoppedError()
       }
       if (outcome.status === 'failed') throw outcome.error
       dispose = outcome.dispose
       if (this.stopped) {
         await this.cleanupStarting(entry)
-        throw new Error('assistant-delivery adapter registry is stopped')
+        throw new DeliveryAdapterRegistryStoppedError()
       }
       if (this.starting.get(key) === entry) this.starting.delete(key)
       this.adapters.set(key, { adapter, ...(dispose === undefined ? {} : { dispose }) })

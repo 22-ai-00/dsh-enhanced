@@ -2,7 +2,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { describe, expect, test, vi } from 'vitest'
 import { signLarkApprovalAction } from '../src/approval.ts'
 import { LarkChannelService } from '../src/service.ts'
-import type { DeliveryAdapter, DeliveryAdapterContext } from '@dsh-enhanced/assistant-delivery'
+import { DeliveryAdapterRegistryStoppedError, type DeliveryAdapter, type DeliveryAdapterContext } from '@dsh-enhanced/assistant-delivery'
 import type { LarkTransport, LarkTransportHandlers } from '../src/types.ts'
 
 function transport(): LarkTransport {
@@ -102,6 +102,21 @@ describe('Lark Cordis service', () => {
     expect(() => new LarkChannelService(empty, config, {
       env: { LARK_APP_SECRET: '   ' }, createTransport: () => transport(),
     })).toThrow(/LARK_APP_SECRET/)
+  })
+
+  test('treats a stopped delivery registry as benign teardown instead of a fatal cause', async () => {
+    // The whole plugin tree can tear down while this adapter is registering
+    // (e.g. an earlier plugin hit EADDRINUSE). A stopped registry must not
+    // become this service's fatal load cause and mask the real failure.
+    const ctx = new Context()
+    ctx.provide('assistantDelivery', {
+      registerAdapter: vi.fn(async () => { throw new DeliveryAdapterRegistryStoppedError() }),
+    })
+    const service = new LarkChannelService(ctx, {
+      enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET',
+    }, { env: { LARK_APP_SECRET: 'super-secret-value' }, createTransport: () => transport() })
+    await expect(service.whenReady()).resolves.toBeUndefined()
+    await ctx.fiber.restart()
   })
 
   test('is safely installable while disabled without resolving credentials or opening a connection', async () => {
