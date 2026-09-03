@@ -13,7 +13,8 @@ describe('lark-channel bundle contract', () => {
   test('accepts only a secret environment name and rejects plaintext-looking config fields', () => {
     expect(Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET' }))
       .toMatchObject({ appSecretEnv: 'LARK_APP_SECRET', enabled: false, requireMentionInGroups: true,
-        showProgress: true, progressDetails: 'direct', statusReactions: true, imageDownloadTimeoutMs: 30_000 })
+        showProgress: true, progressDetails: 'direct', statusReactions: true, imageDownloadTimeoutMs: 30_000,
+        userQuestionTtlMs: 86_400_000 })
     expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'not-valid' }))
       .toThrow()
     expect(() => Config({
@@ -37,6 +38,16 @@ describe('lark-channel bundle contract', () => {
       appSecretEnv: 'LARK_APP_SECRET', imageDownloadTimeoutMs: 999 })).toThrow()
     expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
       appSecretEnv: 'LARK_APP_SECRET', imageDownloadTimeoutMs: 120_001 })).toThrow()
+  })
+
+  test('bounds how long a live user-question card can resume its waiting turn', () => {
+    expect(Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', userQuestionTtlMs: 3_600_000 }))
+      .toMatchObject({ userQuestionTtlMs: 3_600_000 })
+    expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', userQuestionTtlMs: 59_999 })).toThrow()
+    expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', userQuestionTtlMs: 604_800_001 })).toThrow()
   })
 
   test('accepts one credential handle instead of environment access but never both', () => {

@@ -534,6 +534,9 @@ export function deliveryProgressFromSessionEvent(event: SessionEvent): DeliveryP
     return undefined
   }
   if (event.type === 'tool/call') {
+    if (event.data.name === 'ask_user_question') {
+      return { kind: 'step', text: '等待您的回答…' }
+    }
     const argumentsPreview = progressArgumentsPreview(event.data.arguments)
     return {
       kind: 'tool-started',

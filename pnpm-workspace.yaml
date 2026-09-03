@@ -16,6 +16,7 @@ catalog:
   '@deepseek-ai/dsh-agent-loop-testkit': 0.1.0-rc.8
   '@deepseek-ai/dsh-agent-presets': 0.1.0-rc.8
   '@deepseek-ai/dsh-cordis-host-runner': 0.1.0-rc.8
+  '@deepseek-ai/dsh-host-apiproxy': 0.1.0-rc.8
   '@deepseek-ai/dsh-llm': 0.1.0-rc.8
   '@deepseek-ai/dsh-plan-mode': 0.1.0-rc.8
   '@deepseek-ai/dsh-permission-presets': 0.1.0-rc.8
@@ -28,6 +29,7 @@ catalog:
   '@deepseek-ai/dsh-token-meter': 0.1.0-rc.8
   '@deepseek-ai/dsh-tools': 0.1.0-rc.8
   '@deepseek-ai/dsh-user-approval': 0.1.0-rc.8
+  '@deepseek-ai/dsh-user-questions': 0.1.0-rc.8
   '@deepseek-ai/schemastery': 3.18.1
   '@deepseek-ai/cordis': 4.0.1
   '@deepseek-ai/cordis-plugin-loader': 1.0.2
@@ -56,6 +58,7 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-compaction-tool-result-pruner@0.1.0-rc.8'
   - '@deepseek-ai/dsh-compaction@0.1.0-rc.8'
   - '@deepseek-ai/dsh-cordis-host-runner@0.1.0-rc.8'
+  - '@deepseek-ai/dsh-host-apiproxy@0.1.0-rc.8'
   - '@deepseek-ai/dsh-llm@0.1.0-rc.8'
   - '@deepseek-ai/dsh-plan-mode@0.1.0-rc.8'
   - '@deepseek-ai/dsh-permission-presets@0.1.0-rc.8'
@@ -68,3 +71,4 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-token-meter@0.1.0-rc.8'
   - '@deepseek-ai/dsh-tools@0.1.0-rc.8'
   - '@deepseek-ai/dsh-user-approval@0.1.0-rc.8'
+  - '@deepseek-ai/dsh-user-questions@0.1.0-rc.8'

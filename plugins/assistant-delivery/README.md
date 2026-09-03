@@ -8,6 +8,8 @@
 
 - DSH / Agent / Agent Presets / LLM / Session：`>=0.1.0-rc.8 <0.2.0`
 - `@deepseek-ai/dsh-attachment`：`>=0.1.0-rc.8 <0.2.0`，仅图片入站路径需要的可选 Host service
+- `@deepseek-ai/dsh-host-apiproxy`：`>=0.1.0-rc.8 <0.2.0`，可选 Host service。它保持唯一的 `ctx.userQuestions` provider；存在时 Delivery 使用 rc.8 的 `events.mux()` 桥接已绑定渠道会话的问题，缺失时不阻止非 Web profile 启动，只是不提供跨渠道问题交互。
+- `@deepseek-ai/dsh-user-questions`：`>=0.1.0-rc.8 <0.2.0`，仅使用其 wire-safe question/answer 类型；provider 仍由 Host ApiProxy 独占。
 - `@deepseek-ai/dsh-commands`：`>=0.1.0-rc.8 <0.2.0`，可选 Host command service；按 `0.1.0-rc.8` 命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
 - `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：`>=0.1.0-rc.8 <0.2.0`，权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
 - Cordis：`^4.0.1`
@@ -152,6 +154,12 @@ ownerRoutes:
 - adapter 的 socket、timer、SDK client 和 listener 必须由 `start()` disposer 释放。
 
 内部身份始终是结构化的 `ExternalPrincipalKey`、`ConversationRef` 与 `ConversationBinding`，不会从 `platform:chat:thread` 字符串反解析路由。DM 不允许 thread；group 入口要求渠道提供显式且稳定的 thread，可以是真实 provider root，也可以是渠道命名空间内按 principal 派生的顶层合成 lane。binding 仍固定精确 principal，任何同 conversation 的另一 principal 都会在进入 session 前 dead-letter，不能共享既有 owner 上下文。Lark 顶层群消息使用按发送者派生的合成 lane，真实回复串继续按 `root_id` 隔离。
+
+### 跨渠道 `ask_user_question`
+
+`apiProxy` 始终是 `ctx.userQuestions` 的唯一 provider；Delivery 不注册第二个 provider。可选的 rc.8 `apiProxy.events.mux()` 将 pending `question/requested` 帧交给 Delivery，Delivery 只在其 session 仍对应 exact active owner binding、当前 adapter 仍具备问题交互能力时，转给该渠道；回答以同一 rpc id 回写 `apiProxy.respond()`。同一请求同时可被 Web 与渠道界面看到，谁先被 ApiProxy 接受谁生效（first-claim-wins）；晚到、撤销或重复回答不会制造新的 Agent turn。
+
+渠道自由文本只在回复该问题消息，或原会话仅有这一条 pending question 时结算；两种路径都要求 account、tenant、conversation、principal、binding version/generation 与当前 owner fence 匹配。匹配回答直接恢复原来的工具调用，不写 Inbox、不作为普通新消息排队；`/stop`、`/new`、`/clear` 仍按正常命令路径取消旧 wait。问题发往原 binding 会话，不保证是私聊：若原会话是群聊，问题正文和选项对该群可见，敏感问题应在私聊中发起或改用其他交互方式。
 
 ## Agent 与工具
 

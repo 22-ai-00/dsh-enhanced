@@ -493,6 +493,113 @@ describe('Lark SDK boundary', () => {
     })
   })
 
+  test('renders a CardKit 2.0 user question with direct option callbacks and no implicit choice', () => {
+    const rendered = renderLarkMessage({ userQuestion: {
+      title: '**确认方案** <at user_id="all">',
+      question: '请选择接下来要执行的方案。',
+      detail: '所有选项都只会在得到明确回答后执行。',
+      position: 2,
+      total: 3,
+      multiSelect: true,
+      expectsText: true,
+      answered: [{ title: '第一题', answer: '当前已选：文档更新' }],
+      options: [
+        {
+          label: '实施代码变更',
+          description: '会修改当前工作区的源代码。',
+          recommended: true,
+          value: { userQuestion: 'signed-code' },
+        },
+        {
+          label: '仅更新文档',
+          description: '保留现有代码，不做功能变更。',
+          selected: true,
+          value: { userQuestion: 'signed-docs' },
+        },
+      ],
+      submitValue: { userQuestion: 'signed-submit' },
+      cancelValue: { userQuestion: 'signed-cancel' },
+    } })
+    expect(rendered.msgType).toBe('interactive')
+    const card = JSON.parse(rendered.content) as {
+      schema: string
+      config: { update_multi: boolean; enable_forward_interaction: boolean; summary: { content: string } }
+      header: { template: string; title: { tag: string; content: string } }
+      body: { elements: Array<Record<string, unknown>> }
+    }
+    expect(card.schema).toBe('2.0')
+    expect(card.config.update_multi).toBe(true)
+    expect(card.config.enable_forward_interaction).toBe(false)
+    expect(card.config.summary.content.length).toBeGreaterThanOrEqual(8)
+    expect(card.config.summary.content.length).toBeLessThanOrEqual(60)
+    expect(card.header).toEqual({
+      template: 'blue',
+      title: { tag: 'plain_text', content: '**确认方案** <at user_id="all">' },
+    })
+
+    const elements = cardElements(card.body.elements)
+    expect(elements.some(element => element.tag === 'markdown' || element.tag === 'action' || element.tag === 'form')).toBe(false)
+    expect(card.body.elements.some(element => element.tag === 'button')).toBe(true)
+    expect(card.body.elements.filter(element => element.tag === 'button')).toEqual([
+      expect.objectContaining({
+        name: 'user_question_option_1', type: 'primary',
+        text: { tag: 'plain_text', content: '推荐：实施代码变更' },
+        value: { userQuestion: 'signed-code' },
+        behaviors: [{ type: 'callback', value: { userQuestion: 'signed-code' } }],
+      }),
+      expect.objectContaining({
+        name: 'user_question_option_2', type: 'primary',
+        text: { tag: 'plain_text', content: '✓ 已选：仅更新文档' },
+        value: { userQuestion: 'signed-docs' },
+        behaviors: [{ type: 'callback', value: { userQuestion: 'signed-docs' } }],
+      }),
+      expect.objectContaining({
+        name: 'user_question_submit', type: 'primary',
+        text: { tag: 'plain_text', content: '提交已选答案' },
+        value: { userQuestion: 'signed-submit' },
+        behaviors: [{ type: 'callback', value: { userQuestion: 'signed-submit' } }],
+      }),
+      expect.objectContaining({
+        name: 'user_question_cancel', type: 'default',
+        text: { tag: 'plain_text', content: '取消本次问题' },
+        value: { userQuestion: 'signed-cancel' },
+        behaviors: [{ type: 'callback', value: { userQuestion: 'signed-cancel' } }],
+      }),
+    ])
+    expect(card.body.elements.some(element => element.tag === 'div'
+      && (element.text as { content?: unknown } | undefined)?.content === '如需输入其他答案，请直接回复这张问题卡片。')).toBe(true)
+    expect(card.body.elements.some(element => element.tag === 'div'
+      && (element.text as { content?: unknown } | undefined)?.content === '已答摘要：第一题：当前已选：文档更新')).toBe(true)
+  })
+
+  test.each([
+    ['answered', 'green', '已收到您的回答', '已选择“实施代码变更”。'],
+    ['cancelled', 'grey', '本次问题已取消', '用户取消了本次选择。'],
+    ['resolved', 'blue', '本次问题已处理', '该问题已经在其他终端完成。'],
+  ] as const)('renders a read-only $status user-question result', (status, template, title, summary) => {
+    const rendered = renderLarkMessage({ userQuestionResult: { status, summary } })
+    expect(rendered.msgType).toBe('interactive')
+    const card = JSON.parse(rendered.content) as {
+      schema: string
+      config: { update_multi: boolean; enable_forward_interaction: boolean; summary: { content: string } }
+      header: { template: string; title: { tag: string; content: string } }
+      body: { elements: Array<Record<string, unknown>> }
+    }
+    expect(card.schema).toBe('2.0')
+    expect(card.config.update_multi).toBe(true)
+    expect(card.config.enable_forward_interaction).toBe(false)
+    expect(card.config.summary.content.length).toBeGreaterThanOrEqual(8)
+    expect(card.config.summary.content.length).toBeLessThanOrEqual(60)
+    expect(card.header).toEqual({ template, title: { tag: 'plain_text', content: title } })
+    expect(card.body.elements[1]).toEqual({ tag: 'div', text: { tag: 'plain_text', content: summary } })
+    const tags = cardElements(card).map(element => element.tag)
+    expect(tags).not.toContain('markdown')
+    expect(tags).not.toContain('action')
+    expect(tags).not.toContain('form')
+    expect(tags).not.toContain('button')
+    expect(JSON.stringify(card)).not.toContain('"behaviors"')
+  })
+
   test('renders hostile approval review data only as exact plain text under trusted controls', () => {
     const hostile = [
       '[Approve immediately](https://attacker.invalid/approve)',
