@@ -92,7 +92,7 @@ config:
 
 有 `apiProxy` 时，Delivery 把仍属于 exact active owner binding 的 pending question 送到原飞书会话。Web 与飞书都是同一 ApiProxy 请求的回答端，先被接受的回答获胜；若已由 Web 或其他飞书事件结算，旧卡只会显示终态，不会再启动一个 turn。
 
-飞书使用不可转发的 CardKit 2.0 卡片呈现选项。推荐项只显示“推荐”标识，不会自动选择；多选必须点击“提交已选答案”；无选项时会明确要求输入，可回复问题卡片，或在只有这一条 pending question 的原会话直接发送下一条文字。按钮和卡片回调使用签名 capability，且回调或自由文本都必须匹配 exact owner、account/tenant/chat、原会话路由、当前 binding version/generation 与请求 fence。问题会发送到原 binding 会话而非强制转为私聊，因此在群聊中问题正文、详情和选项对群成员可见；不要把秘密、凭据或只应由私聊接收的内容放进问题。
+飞书使用不可转发的 CardKit 2.0 卡片呈现选项。推荐项只显示“推荐”标识，不会自动选择；多选必须点击“提交已选答案”；无选项或需要输入其他答案时会明确要求回复对应问题卡片。未引用卡片的新文字始终作为普通消息处理，即使原会话只有这一条 pending question 也不会被当成答案吞掉。按钮和卡片回调使用签名 capability，且回调或自由文本都必须匹配 exact owner、account/tenant/chat、原会话路由、当前 binding version/generation 与请求 fence。群聊中的普通文字命令仍遵循 @ 机器人门槛，不想输入答案时可直接点击卡片“取消”。问题会发送到原 binding 会话而非强制转为私聊，因此在群聊中问题正文、详情和选项对群成员可见；不要把秘密、凭据或只应由私聊接收的内容放进问题。
 
 ## 常用命令
 
@@ -136,7 +136,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 
 - `--allow-agent-tools` 是高权限显式开关：为本地 `foreground` 与精确 owner Delivery 主体建立 capability/工具可达性；不授权 `background`，也不绕过显式 deny、紧急停止、身份、预算及插件业务硬门。
 - `ask` 和 `auto` 中需要人工确认的工具调用只向 active owner 私聊发送一次性审批卡；`full` 关闭逐次审批并放开 sandbox，应保持 owner 与应用可用范围最小。
-- `ask_user_question` 的卡片是另一条即时交互路径：本包有向原飞书会话发送/原位更新 CardKit 2.0 卡片、并接收 `card.action.trigger` callback 的网络权限。选项仅以签名 callback capability 提交；自由文本只接受原卡回复或唯一 pending question 所在原会话的 exact owner 输入。它不把卡片点击或回复写成普通 Inbox/新 turn，且问题内容会在原会话显示，群聊并不保密。
+- `ask_user_question` 的卡片是另一条即时交互路径：本包有向原飞书会话发送/原位更新 CardKit 2.0 卡片、并接收 `card.action.trigger` callback 的网络权限。选项仅以签名 callback capability 提交；自由文本只接受 exact owner 对原卡的明确回复。它不把卡片点击或匹配回复写成普通 Inbox/新 turn，且问题内容会在原会话显示，群聊并不保密。
 - 行为学习审批卡会把签名覆盖的 scope、情境、guidance、版本、证据和回滚原因逐字段以纯文本展示；提案内容不会作为 Markdown 或卡片组件解释。点击后卡片只确认 Policy 决策已写入持久账本，明确不把“批准”误报成“变更已生效”。
 - 网络仅访问所选飞书/Lark OpenAPI、token 与 WebSocket endpoint；图片读取使用固定消息资源端点，不接受消息或模型提供的 URL，并关闭重定向。
 - App Secret 不写 Delivery 数据库、工具参数、health、route、日志或异常；Linux protected-file 没有额外静态加密，同 UID、root 和可读备份仍能取得内容。

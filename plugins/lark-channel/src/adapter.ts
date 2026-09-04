@@ -1325,22 +1325,15 @@ export class LarkDeliveryAdapter implements DeliveryAdapter {
     if (this.userQuestionAnswerEvents.has(providerMessageId)) return true
     if (envelope.kind !== 'text' || envelope.attachments !== undefined) return false
     const replyTo = envelope.metadata?.replyToProviderMessageId
-    const routeCandidates = [...this.pendingUserQuestions.values()].filter(pending =>
-      samePrincipal(pending.input.target.principal, envelope.principal)
-      && sameConversation(pending.input.target.conversation, envelope.conversation))
-    let pending: PendingUserQuestion | undefined
-    if (replyTo !== undefined) {
-      pending = [...this.pendingUserQuestions.values()].find(candidate =>
-        candidate.providerMessageId === replyTo
-        && samePrincipal(candidate.input.target.principal, envelope.principal)
-        && candidate.input.target.conversation.channel === envelope.conversation.channel
-        && candidate.input.target.conversation.account === envelope.conversation.account
-        && candidate.input.target.conversation.tenant === envelope.conversation.tenant
-        && candidate.input.target.conversation.kind === envelope.conversation.kind
-        && candidate.input.target.conversation.chat === envelope.conversation.chat)
-    } else if (routeCandidates.length === 1) {
-      pending = routeCandidates[0]
-    }
+    if (replyTo === undefined) return false
+    const pending = [...this.pendingUserQuestions.values()].find(candidate =>
+      candidate.providerMessageId === replyTo
+      && samePrincipal(candidate.input.target.principal, envelope.principal)
+      && candidate.input.target.conversation.channel === envelope.conversation.channel
+      && candidate.input.target.conversation.account === envelope.conversation.account
+      && candidate.input.target.conversation.tenant === envelope.conversation.tenant
+      && candidate.input.target.conversation.kind === envelope.conversation.kind
+      && candidate.input.target.conversation.chat === envelope.conversation.chat)
     if (pending === undefined || pending.providerMessageId === undefined) return false
     const question = pending.input.questions[pending.questionIndex]
     if (question === undefined) return false

@@ -1046,7 +1046,7 @@ export function renderLarkMessage(input: LarkSendInput): { msgType: 'interactive
         compact_width: false,
         width_mode: 'fill',
         wide_screen_mode: true,
-        summary: { content: '智能体已完成任务并返回最终答复' },
+        summary: { content: '智能体已返回答复' },
       },
       body: {
         padding: '12px 16px 12px 16px',
