@@ -85,7 +85,7 @@ Options:
 EOF
   if [[ "$source_mode" == 'npm' ]]; then
     cat <<'EOF'
-  --plugin-version <value>  Version/tag applied to every @dsh-enhanced package (default: installer release)
+  --plugin-version <value>  Version/tag applied to every @dsh-enhanced package (default: latest)
 EOF
   fi
   cat <<'EOF'

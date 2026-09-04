@@ -7,12 +7,11 @@ set -euo pipefail
 DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.22'
 DSH_ENHANCED_PINNED_COMMON_SHA256='f47ea65d6c2186107fac6b02392e5e8036d067de5bee610391c249018864400c'
 
-# Recursive npm publication is not atomic. Default every bundle to the exact
-# release that contains this installer so `latest` cannot compose old and new
-# internal Host seams while a unified release is still being published.
-if [[ -z "${DSH_ENHANCED_VERSION:-}" ]]; then
-  DSH_ENHANCED_VERSION="${DSH_ENHANCED_PINNED_RELEASE_REF#v}"
-fi
+# Bundles default to npm `latest` (resolved in common.sh) so every install picks
+# up the newest published @dsh-enhanced/* release without waiting for an
+# installer refresh. Override with --plugin-version or DSH_ENHANCED_VERSION to
+# pin a specific tag. The pinned ref + SHA-256 above are still used to fetch and
+# verify common.sh from a fixed release tag.
 
 SCRIPT_DIRECTORY=''
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then

@@ -186,7 +186,7 @@ describe('one-click installers', () => {
     expect(result.stdout).not.toContain('@dsh-enhanced/hello@')
   })
 
-  test('npm supervised install defaults every required bundle to the installer release', async () => {
+  test('npm supervised install defaults every required bundle to latest', async () => {
     const dshHome = await temporaryDshHome()
     const installer = await readFile(npmInstaller, 'utf8')
     const release = installer.match(/^DSH_ENHANCED_PINNED_RELEASE_REF='v([^']+)'$/mu)?.[1]
@@ -199,7 +199,7 @@ describe('one-click installers', () => {
     expect(result.status, result.stderr).toBe(0)
     const selected = [...result.stdout.matchAll(/@dsh-enhanced\/([a-z0-9-]+)@([^\s]+)/gu)]
     expect(selected.length).toBeGreaterThan(0)
-    expect(new Set(selected.map(match => match[2]))).toEqual(new Set([release]))
+    expect(new Set(selected.map(match => match[2]))).toEqual(new Set(['latest']))
     const slugs = new Set(selected.map(match => match[1]))
     for (const required of [
       'personal-assistant', 'assistant-delivery', 'assistant-evaluation',

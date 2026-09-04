@@ -54,7 +54,19 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
 ```
 
-远程安装器只接受固定发布标签和 SHA-256 校验，不从 mutable `main` 执行代码。完整场景选项、凭据存储和平台差异见[安装脚本文档](scripts/install)；飞书授权、模型选择、进度展示与常驻服务见 [`lark-channel` 文档](plugins/lark-channel)。
+不便先 clone 仓库时，可一键远程安装（始终拉取最新发布的 `@dsh-enhanced/*` 插件，DSH host 仍固定 `0.1.0-rc.8`）：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
+```
+
+需要指定场景或其它选项时，把参数跟在 `--` 之后：
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash -s -- --scenario lark --lark configure
+```
+
+引导器 `install-npm.sh` 虽从 `main` 拉取，但实际安装逻辑（`common.sh`）从一个固定 `vX.Y.Z` 发布标签拉取并经内嵌 SHA-256 校验后才执行，不从 mutable `main` 执行代码。完整场景选项、凭据存储和平台差异见[安装脚本文档](scripts/install)；飞书授权、模型选择、进度展示与常驻服务见 [`lark-channel` 文档](plugins/lark-channel)。
 
 个人助理默认采用 `workspace-write + ask`；可显式传 `--permission auto`，让确定性低风险动作和隔离 reviewer 认可的局部可逆动作自动继续，而网络、凭据、破坏性操作、提权和复杂 shell 仍交人工。工具可达性和执行权限是两层控制；即使选择 `full`，显式 Policy deny、紧急停止、身份校验和预算硬门仍然生效。完整边界以各插件 README 为准。
 
