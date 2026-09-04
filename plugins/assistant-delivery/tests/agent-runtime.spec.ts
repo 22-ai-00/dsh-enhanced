@@ -1634,6 +1634,83 @@ describe('real rc.8 delivery Agent runtime', () => {
     await f.ctx.fiber.restart()
   })
 
+  test('regenerates when a completed turn that used tools ends with empty text', async () => {
+    // Regression guard: a turn that calls a tool (paired), then ends completed with no prose, is
+    // an empty completed turn and must be regenerated — not shown the emptyAgentReply retry notice.
+    // The emptyAfterToolsOnly skip (now removed) misclassified this normal tool-only output as
+    // "no recovery needed" and delivered the retry notice instead of an answer.
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-empty-after-tools-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const f = await runtimeHarness(
+      root,
+      saved,
+      undefined,
+      ['plain', 'markdown', 'model-picker', 'permission-picker'],
+      root,
+      undefined,
+      'primary',
+      true,
+      'probe',
+      undefined,
+      {
+        allowPresetProbeExecution: true,
+        provideApproval: false,
+        seedDefaultPreset: 'unlocked-dynamic-id',
+      },
+    )
+    const answer = '工具调用后重新生成的完整回答。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const request = f.llm.requests.length
+      if (request === 1) {
+        const id = CallId('call-empty-after-tools')
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: { type: 'tool-call', id, name: 'preset_probe', arguments: '{}' },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      if (request === 2) {
+        // The tool has run and been paired; the model now ends the turn completed with no prose.
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: answer }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-empty-after-tools', '请查询后回答'))
+    await drive(f.service)
+
+    expect(f.presetExecute).toHaveBeenCalledOnce()
+    expect(f.llm.requests).toHaveLength(3)
+    expect(f.llm.requests[2]?.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringMatching(/current task.*produced no sendable answer/iu) }),
+    ])
+    expect(f.sends.map(value => value.text)).toEqual([answer])
+    expect(f.sends[0]?.text).not.toMatch(/未生成可发送的回答|请重试/u)
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    const events = [...saved.values()].flatMap(value => value.events)
+    const toolCall = events.find(event => event.type === 'tool/call'
+      && String(event.data.callId) === 'call-empty-after-tools')
+    const regenerated = events.find(event => event.type === 'assistant/message'
+      && event.data.message.content.some(block => block.type === 'text' && block.text === answer))
+    if (toolCall?.type !== 'tool/call' || regenerated?.type !== 'assistant/message') {
+      throw new Error('tool-active empty turn and its regeneration were not persisted')
+    }
+    expect(regenerated.data.turn).toBeGreaterThan(toolCall.data.turn)
+    await f.ctx.fiber.restart()
+  })
+
   test('automatically replaces an oversized answer with one complete compact answer', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-compact-'))
     roots.push(root)

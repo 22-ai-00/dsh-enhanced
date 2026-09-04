@@ -1254,17 +1254,15 @@ function finalAssistant(
   truncated: boolean
   stopped: boolean
   hasUnpairedToolCall: boolean
-  hadToolActivity: boolean
   failureCode?: string
 } {
   if (expectedTurn === undefined) {
-    return { text: '', completed: false, truncated: false, stopped: false, hasUnpairedToolCall: false, hadToolActivity: false }
+    return { text: '', completed: false, truncated: false, stopped: false, hasUnpairedToolCall: false }
   }
   let text = ''
   let completed = false
   let truncated = false
   let stopped = false
-  let hadToolActivity = false
   const unpairedToolCalls = new Set<string>()
   let failureCode: string | undefined
   for (const event of events.slice(from)) {
@@ -1274,7 +1272,6 @@ function finalAssistant(
       for (const block of event.data.message.content) {
         if (block.type === 'tool-call') {
           unpairedToolCalls.add(String(block.id))
-          hadToolActivity = true
         }
       }
     }
@@ -1308,7 +1305,6 @@ function finalAssistant(
     truncated,
     stopped,
     hasUnpairedToolCall: unpairedToolCalls.size > 0,
-    hadToolActivity,
     ...(failureCode === undefined ? {} : { failureCode }),
   }
 }
@@ -3124,12 +3120,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         const currentEmpty = output.text.trim() === ''
         const oversized = Buffer.byteLength(assembledText, 'utf8') > this.options.maxTextBytes
         const stalledRecovery = completionKind !== undefined && output.completed && !currentEmpty && !addedText
-        // A tool-active turn with empty text is normal: the model's output was tool calls, not prose.
-        // Do not treat it as an empty response needing recovery — that would inject a "do not call
-        // tools" prompt and break the next turn.
-        const emptyAfterToolsOnly = currentEmpty && output.hadToolActivity
         const recoverable = automaticToolViolation || output.truncated
-          || (output.completed && ((currentEmpty && !emptyAfterToolsOnly) || oversized || stalledRecovery))
+          || (output.completed && (currentEmpty || oversized || stalledRecovery))
         if (recoverable && deliveryTurn !== undefined && !output.hasUnpairedToolCall
           && automaticTurns < this.options.maxAutoContinuationTurns) {
           const isLastAutomaticTurn = automaticTurns + 1 >= this.options.maxAutoContinuationTurns
