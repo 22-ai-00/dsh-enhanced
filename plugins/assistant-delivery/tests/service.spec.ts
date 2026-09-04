@@ -359,6 +359,21 @@ describe('assistant delivery Cordis service', () => {
     })
     expect(config.defaultAgentPreset).toBe('standard')
     expect(config.toolApprovalTtlMs).toBe(300_000)
+    expect(config.agentMaxAutoContinuationTurns).toBe(2)
+    for (const agentMaxAutoContinuationTurns of [0, 8]) {
+      expect(AssistantDeliveryService.Config({
+        databasePath: '/tmp/delivery.sqlite',
+        spoolPath: '/tmp/spool',
+        agentMaxAutoContinuationTurns,
+      }).agentMaxAutoContinuationTurns).toBe(agentMaxAutoContinuationTurns)
+    }
+    for (const agentMaxAutoContinuationTurns of [-1, 1.5, 9]) {
+      expect(() => AssistantDeliveryService.Config({
+        databasePath: '/tmp/delivery.sqlite',
+        spoolPath: '/tmp/spool',
+        agentMaxAutoContinuationTurns,
+      })).toThrow(/agentMaxAutoContinuationTurns|invalid/i)
+    }
     for (const toolApprovalTtlMs of [999, 300_001]) {
       expect(() => AssistantDeliveryService.Config({
         databasePath: '/tmp/delivery.sqlite',
