@@ -5,7 +5,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { afterAll, afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
+import { lstatSync } from 'node:fs'
+import { afterAll, afterEach, beforeEach, describe as baseDescribe, expect, test, vi } from 'vitest'
 import { approvalSigningPayload, Ed25519ApprovalAuthority } from '../src/approval.ts'
 import { Ed25519HostAttestationAuthority, hostAttestationEvidenceDigest, hostAttestationSigningPayload } from '../src/attestation.ts'
 import { exampleIntegrityPinnedCatalog } from '../src/catalog.ts'
@@ -317,6 +318,10 @@ async function withEnvironment<T>(environment: Record<string, string>, action: (
 beforeEach(() => { vi.spyOn(process.stdout, 'write').mockImplementation((() => true) as typeof process.stdout.write) })
 afterEach(async () => { vi.restoreAllMocks(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 afterAll(async () => { if (cachedInterpreterRoot !== undefined) await rm(cachedInterpreterRoot, { recursive: true, force: true }) })
+
+const rootOwnsSystemDirs = process.platform === 'linux'
+  && lstatSync('/usr/bin', { bigint: true }).uid === 0n
+const describe = rootOwnsSystemDirs ? baseDescribe : baseDescribe.skip
 
 describe.sequential('trusted staged CLI', () => {
   test('runs the real source-plan, signed approval and generator through the exact two-path scope', async () => {

@@ -156,10 +156,10 @@ untracked 新包/源码文件。下列状态必须按“最后一次完整验证
 因此，本快照证明了个人助理无人编排的低风险学习主链已经形成并曾在真实组合中通过，但当前最新文件仍需要
 完成用户学习控制面、重新跑稳定态门禁和最后无新增 P0/P1 的复审，才能结束原任务。
 
-## 2026-08-31 GhostAP 预留收尾快照（二）
+## 2026-08-31 预留收尾快照（二）
 
-收到运行时预留收尾指令后，`acceptance_guard`、`agent_incident_fix` 与
-`control_plane_attestor` 均被立即中断；权威 agent 状态随后确认三者均为 `interrupted`。本节只保存
+本轮收尾时，`acceptance_guard`、`agent_incident_fix` 与
+`control_plane_attestor` 三个审查视角均被立即中断；权威 agent 状态随后确认三者均为 `interrupted`。本节只保存
 中断前已经完整返回的结果，不把正在编辑的源码或未完成测试当成通过。收尾后未再启动门禁。
 
 ### 已完成并在对应修改后完整返回的定向证明
