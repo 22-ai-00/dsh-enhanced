@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-growth-contract",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "Strict shared workflow-growth wire contracts for DSH assistant plugins.",
   "license": "MIT",
   "type": "module",
