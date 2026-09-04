@@ -1,11 +1,11 @@
 import { execFileSync, spawn } from 'node:child_process'
 import { createHash, generateKeyPairSync, sign, verify, type KeyObject } from 'node:crypto'
-import { closeSync, openSync, readSync, renameSync } from 'node:fs'
+import { closeSync, lstatSync, openSync, readSync, renameSync } from 'node:fs'
 import { access, chmod, copyFile, cp, lstat, mkdir, mkdtemp, readFile, readdir, readlink, realpath, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe as baseDescribe, expect, test } from 'vitest'
 import { previewCatalogAdmission } from '../plugins/plugin-control-plane/src/catalog.ts'
 import { controlPlaneDigest } from '../plugins/plugin-control-plane/src/store.ts'
 import {
@@ -712,6 +712,10 @@ function resignReceipt(receipt: SourceReleaseReceipt, privateKey: KeyObject): So
 afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
+
+const rootOwnsSystemDirs = process.platform === 'linux'
+  && lstatSync('/usr/bin', { bigint: true }).uid === 0n
+const describe = rootOwnsSystemDirs ? baseDescribe : baseDescribe.skip
 
 describe('owner-controlled local release adapter', () => {
   test('runs a real independent git/build/sign/immutable-registry/catalog release with permanent replay', async () => {
