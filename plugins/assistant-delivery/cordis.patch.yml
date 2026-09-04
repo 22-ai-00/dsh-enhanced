@@ -22,6 +22,7 @@
         agentProvider: deepseek-official
         agentModel: deepseek-v4-flash
         agentMaxOutputTokens: 8192
+        agentMaxAutoContinuationTurns: 2
         modelPickerTtlMs: 900000
         permissionPickerTtlMs: 900000
         toolApprovalTtlMs: 300000

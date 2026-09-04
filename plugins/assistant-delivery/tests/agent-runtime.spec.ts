@@ -7,6 +7,8 @@ import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import { AttachmentId, type AttachmentStore, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { PresetSpec } from '@deepseek-ai/dsh-permission-presets'
 import {
+  CallId,
+  createUserMessage,
   LlmAdapter,
   ReasoningEffortId,
   type GenerateOptions,
@@ -23,8 +25,8 @@ import {
   type SessionHeader,
   type SessionId,
 } from '@deepseek-ai/dsh-session'
-import { defineTool } from '@deepseek-ai/dsh-tools'
-import { effectiveApprovalPolicy, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
+import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
+import ApprovalService, { effectiveApprovalPolicy, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { approvalReviewerOf, AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
@@ -208,6 +210,8 @@ interface PermissionHarnessOptions {
   leaseMs?: number
   replyBudget?: number
   maxTextBytes?: number
+  maxAutoContinuationTurns?: number
+  allowPresetProbeExecution?: boolean
 }
 
 const testPermissionPresets = {
@@ -422,6 +426,7 @@ async function runtimeHarness(
   sessionPersistence?: (ctx: Context) => unknown,
 ) {
   const ctx = new Context()
+  const presetExecute = vi.fn(async () => ({ mounted: true }))
   if (presetRoot !== undefined) await ctx.plugin(Loader)
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' }, tools: { mode: 'native' } })
   if (presetRoot === undefined && provideAgentPresets) {
@@ -440,7 +445,7 @@ async function runtimeHarness(
             properties: { mounted: { type: 'boolean', required: true } } },
           render: (_args, output) => [{ type: 'text', text: JSON.stringify(output) }],
         },
-        async execute() { return { mounted: true } },
+        async execute() { return await presetExecute() },
       }))
       return { id: id ?? agentPreset }
     })
@@ -495,6 +500,12 @@ async function runtimeHarness(
       ...(permissions?.replyBudget === undefined
         ? {}
         : { budget: { id: 'permission-replies', amount: 1 } }) }]),
+    ...(permissions?.allowPresetProbeExecution === true ? [{ id: 'agent-preset-probe-execute',
+      effect: 'allow' as const, subject: {
+        kind: 'agent' as const, id: agentPreset, workspace, principal: 'lark/bot-1/tenant-a/ou_owner',
+      },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: 'preset_probe' },
+      context: { initiators: ['external' as const] } }] : []),
     { id: 'linked-agent-reply', effect: 'allow', subject: {
       kind: 'agent' as const, id: agentPreset, workspace, principal: 'lark/bot-1/tenant-a/ou_linked',
     }, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
@@ -537,7 +548,10 @@ async function runtimeHarness(
     schedulerEnabled: false, defaultWorkspace: workspace, defaultAgentPreset: agentPreset, agentProvider: defaultRoute.provider,
     agentModel: defaultRoute.model,
     ...(permissions?.leaseMs === undefined ? {} : { leaseMs: permissions.leaseMs }),
-    ...(permissions?.maxTextBytes === undefined ? {} : { maxTextBytes: permissions.maxTextBytes }) })
+    ...(permissions?.maxTextBytes === undefined ? {} : { maxTextBytes: permissions.maxTextBytes }),
+    ...(permissions?.maxAutoContinuationTurns === undefined
+      ? {}
+      : { agentMaxAutoContinuationTurns: permissions.maxAutoContinuationTurns }) })
   const llm = new ReplyAdapter('Mock provider', ['delivery-model'], image?.inputModalities ?? ['text'])
   ctx.llm.registerAdapter(['mock'], llm)
   const alternate = new ReplyAdapter('Alternate provider', ['fast', 'precise'])
@@ -558,7 +572,7 @@ async function runtimeHarness(
       }
     } }
   await ctx.assistantDelivery.registerAdapter(channel)
-  return { ctx, llm, alternate, permissionPresets, progresses, sends, service: ctx.assistantDelivery }
+  return { ctx, llm, alternate, permissionPresets, presetExecute, progresses, sends, service: ctx.assistantDelivery }
 }
 
 async function drive(service: AssistantDeliveryService): Promise<void> {
@@ -796,7 +810,905 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(f.sends[0]?.format).toBe('markdown')
   })
 
-  test('surfaces a partial max-token answer as truncated instead of claiming completion', async () => {
+  test('automatically completes a max-token answer and sends one combined reply', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-completion-'))
+    roots.push(root)
+    const f = await runtimeHarness(
+      root,
+      new Map(),
+      undefined,
+      ['plain', 'markdown', 'model-picker', 'permission-picker'],
+    )
+    const first = '核心结论是：自动补全'
+    const remainder = '应在后台完成，用户无需回复“继续”。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const text = f.llm.requests.length === 1 ? first : remainder
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: f.llm.requests.length === 1
+        ? { kind: 'max-tokens' }
+        : { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-completion', '请给出完整结论'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(2)
+    expect(f.llm.requests[1]?.messages.at(-1)?.source).toEqual({
+      kind: 'plugin',
+      plugin: '@dsh-enhanced/assistant-delivery',
+      form: 'notice',
+      summary: 'Automatic answer completion attempt 1',
+    })
+    expect(f.llm.requests[1]?.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringMatching(/Continue exactly/iu) }),
+    ])
+    expect(f.sends).toHaveLength(1)
+    expect(f.sends[0]).toMatchObject({ text: first + remainder, format: 'markdown' })
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    expect(f.progresses.filter(value => value.update.kind === 'completed')).toHaveLength(1)
+    await f.ctx.fiber.restart()
+  })
+
+  test('waits for Agent maintenance before installing barriers or submitting automatic completion', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-maintenance-'))
+    roots.push(root)
+    const f = await runtimeHarness(
+      root,
+      new Map(),
+      undefined,
+      ['plain', 'markdown', 'model-picker', 'permission-picker'],
+    )
+    const eventId = 'evt-auto-maintenance'
+    const first = '维护前的回答片段，'
+    const remainder = '维护结束后再自动补全。'
+    let deliveryAgent: Agent | undefined
+    let deliveryTurn: number | undefined
+    let deliveryTurnEnded = false
+    let maintenanceActive = false
+    let automaticInsertedDuringMaintenance = false
+    let automaticClaimedDuringMaintenance = false
+    let restrict: ReturnType<typeof vi.spyOn> | undefined
+    let guard: ReturnType<typeof vi.spyOn> | undefined
+    let restrictBaseline = 0
+    let guardBaseline = 0
+    let resolveMaintenanceStarted!: () => void
+    const maintenanceStarted = new Promise<void>(resolve => { resolveMaintenanceStarted = resolve })
+    let releaseMaintenance!: () => void
+    const maintenanceGate = new Promise<void>(resolve => { releaseMaintenance = resolve })
+    let maintenance: Promise<void> | undefined
+
+    f.ctx.on('agent/inbox/inserted', event => {
+      const source = event.message.source
+      if (maintenanceActive && source.kind === 'plugin'
+        && source.plugin === '@dsh-enhanced/assistant-delivery') {
+        automaticInsertedDuringMaintenance = true
+      }
+    })
+    f.ctx.on('agent/inbox/claimed', event => {
+      const source = event.message.source
+      if (source.kind === 'delivery' && source.eventId === eventId) {
+        deliveryAgent = event.agent
+        deliveryTurn = event.turn
+        restrict = vi.spyOn(event.agent.ctx.tools, 'restrict')
+        guard = vi.spyOn(event.agent.ctx.tools, 'guard')
+        return
+      }
+      if (maintenanceActive && source.kind === 'plugin'
+        && source.plugin === '@dsh-enhanced/assistant-delivery') {
+        automaticClaimedDuringMaintenance = true
+      }
+    })
+    f.ctx.on('session/event', (session, event) => {
+      if (session === deliveryAgent?.session && event.type === 'turn/end'
+        && event.data.turn === deliveryTurn) deliveryTurnEnded = true
+    })
+    f.ctx.on('session/flush', async session => {
+      const agent = deliveryAgent
+      if (!deliveryTurnEnded || agent === undefined || session !== agent.session
+        || maintenance !== undefined) return
+      await agent.whenIdle()
+      restrictBaseline = restrict?.mock.calls.length ?? 0
+      guardBaseline = guard?.mock.calls.length ?? 0
+      maintenance = agent.runMaintenance(async () => {
+        maintenanceActive = true
+        resolveMaintenanceStarted()
+        try {
+          await maintenanceGate
+        } finally {
+          maintenanceActive = false
+        }
+      })
+    })
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const text = f.llm.requests.length === 1 ? first : remainder
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: f.llm.requests.length === 1
+        ? { kind: 'max-tokens' }
+        : { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message(eventId, '请给出完整回答'))
+    const driving = drive(f.service)
+    await maintenanceStarted
+    await new Promise<void>(resolve => setImmediate(resolve))
+    const duringMaintenance = {
+      status: deliveryAgent?.status,
+      requests: f.llm.requests.length,
+      automaticInserted: automaticInsertedDuringMaintenance,
+      automaticClaimed: automaticClaimedDuringMaintenance,
+      restrictCalls: (restrict?.mock.calls.length ?? 0) - restrictBaseline,
+      guardCalls: (guard?.mock.calls.length ?? 0) - guardBaseline,
+    }
+    releaseMaintenance()
+    await maintenance
+    await driving
+
+    expect(duringMaintenance).toEqual({
+      status: 'idle',
+      requests: 1,
+      automaticInserted: false,
+      automaticClaimed: false,
+      restrictCalls: 0,
+      guardCalls: 0,
+    })
+    expect(f.llm.requests).toHaveLength(2)
+    expect(f.sends).toHaveLength(1)
+    expect(f.sends[0]).toMatchObject({ text: first + remainder, format: 'markdown' })
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('uses the last automatic turn to compact repeatedly truncated segments into a complete answer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-final-compact-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const first = '第一段很长的回答仍未结束。'
+    const second = '第二段继续展开但仍未结束。'
+    const compact = '完整结论：系统已在后台自动收敛并给出最终答案。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const request = f.llm.requests.length
+      const text = request === 1 ? first : request === 2 ? second : compact
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: request < 3 ? { kind: 'max-tokens' } : { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-final-compact', '请直接给出完整结论'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(3)
+    expect(f.llm.requests[2]?.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringMatching(/current task.*complete/iu) }),
+    ])
+    expect(f.sends.map(value => value.text)).toEqual([compact])
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('scopes compact recovery to the current task instead of earlier completed turns', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-current-task-'))
+    roots.push(root)
+    const maxTextBytes = 160
+    const f = await runtimeHarness(
+      root, new Map(), undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { maxTextBytes },
+    )
+    const historicalAnswer = '上一个任务已经完成，不应进入新结论。'
+    const oversizedCurrentAnswer = '当前任务的冗长中间内容。'.repeat(12)
+    const compactCurrentAnswer = '当前任务的完整结论。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const text = f.llm.requests.length === 1
+        ? historicalAnswer
+        : f.llm.requests.length === 2
+          ? oversizedCurrentAnswer
+          : compactCurrentAnswer
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-history', '请完成上一个任务'))
+    await drive(f.service)
+    await f.service.acceptInbound(message('evt-auto-current-task', '请只总结当前任务'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(3)
+    const recoveryPrompt = f.llm.requests[2]?.messages.at(-1)?.content
+      .find(block => block.type === 'text')
+    expect(recoveryPrompt?.type === 'text' ? recoveryPrompt.text : '').toMatch(
+      /\[DSH automatic answer completion notice\].*most recent user request.*Ignore all earlier completed tasks/iu,
+    )
+    expect(f.sends.map(value => value.text)).toEqual([historicalAnswer, compactCurrentAnswer])
+    await f.ctx.fiber.restart()
+  })
+
+  test('cancels an automatic tool attempt and finishes in a fresh execution-disabled turn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-tool-guard-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const f = await runtimeHarness(
+      root,
+      saved,
+      undefined,
+      ['plain', 'markdown', 'model-picker', 'permission-picker'],
+    )
+    await f.ctx.plugin(ApprovalService, { policy: 'ask' })
+    const approvalRequests = vi.fn(async () => 'rejected' as const)
+    f.ctx.on('approval/request', approvalRequests, { prepend: true })
+    const first = '前半段回答，'
+    const remainder = '后半段在新的安全自动补全 turn 中完成。'
+    const complete = first + remainder
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      if (f.llm.requests.length === 1) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: first }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: first } }
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+        return
+      }
+      if (f.llm.requests.length === 2) {
+        const id = CallId('call-auto-preset-probe')
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: { type: 'tool-call', id, name: 'preset_probe', arguments: '{}' },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: complete }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: complete } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-tool-guard', '请给出完整回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(3)
+    expect(f.llm.requests[1]?.tools?.map(tool => tool.name)).toContain('preset_probe')
+    expect(f.presetExecute).not.toHaveBeenCalled()
+    expect(approvalRequests).not.toHaveBeenCalled()
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('tool-started')
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('tool-finished')
+    expect(f.sends).toHaveLength(1)
+    expect(f.sends[0]).toMatchObject({ text: complete, format: 'markdown' })
+    expect(f.progresses.filter(value => value.update.kind === 'completed')).toHaveLength(1)
+
+    const events = [...saved.values()].flatMap(value => value.events)
+    const toolCall = events.find(event => event.type === 'tool/call'
+      && String(event.data.callId) === 'call-auto-preset-probe')
+    const completedText = events.find(event => event.type === 'assistant/message'
+      && event.data.message.content.some(block => block.type === 'text' && block.text === complete))
+    if (toolCall?.type !== 'tool/call' || completedText?.type !== 'assistant/message') {
+      throw new Error('automatic completion turn events were not persisted')
+    }
+    expect(completedText.data.turn).toBeGreaterThan(toolCall.data.turn)
+    expect(toolCall.data.step).toBe(1)
+    expect(completedText.data.step).toBe(1)
+    await f.ctx.fiber.restart()
+  })
+
+  test('retries compact recovery after an oversized answer\'s automatic tool violation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-compact-tool-retry-'))
+    roots.push(root)
+    const maxTextBytes = 96
+    const f = await runtimeHarness(
+      root, new Map(), undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { maxTextBytes, provideApproval: false },
+    )
+    await f.ctx.plugin(ApprovalService, { policy: 'ask' })
+    const approvalRequests = vi.fn(async () => 'rejected' as const)
+    f.ctx.on('approval/request', approvalRequests, { prepend: true })
+    const oversized = '超长回答'.repeat(30)
+    const compact = '完整结论：第二次压缩恢复成功。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const request = f.llm.requests.length
+      if (request === 1) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: oversized }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: oversized } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (request === 2) {
+        const id = CallId('call-auto-compact-tool-retry')
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: { type: 'tool-call', id, name: 'preset_probe', arguments: '{}' },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: compact }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: compact } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-compact-tool-retry', '请完整回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(3)
+    for (const request of f.llm.requests.slice(1)) {
+      expect(request.messages.at(-1)?.content).toEqual([
+        expect.objectContaining({ type: 'text', text: expect.stringMatching(/Rewrite the current task.*complete/iu) }),
+      ])
+    }
+    expect(f.presetExecute).not.toHaveBeenCalled()
+    expect(approvalRequests).not.toHaveBeenCalled()
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('tool-started')
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('tool-finished')
+    expect(f.sends.map(value => value.text)).toEqual([compact])
+    expect(Buffer.byteLength(f.sends[0]!.text, 'utf8')).toBeLessThanOrEqual(maxTextBytes)
+    expect(f.progresses.filter(value => value.update.kind === 'completed')).toHaveLength(1)
+    await f.ctx.fiber.restart()
+  })
+
+  test('bounds repeated tool attempts across automatic completion turns', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-tool-loop-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const approvalRequests = vi.fn(async () => 'rejected' as const)
+    f.ctx.on('approval/request', approvalRequests, { prepend: true })
+    const partial = '已经生成的安全正文。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const request = f.llm.requests.length
+      if (request === 1) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: partial }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: partial } }
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+        return
+      }
+      const id = CallId(`call-auto-loop-${request}`)
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
+      yield {
+        type: 'block-end',
+        index: 0,
+        block: { type: 'tool-call', id, name: 'preset_probe', arguments: '{}' },
+      }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-tool-loop', '请回答，不要重复操作'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(3)
+    expect(f.presetExecute).not.toHaveBeenCalled()
+    expect(approvalRequests).not.toHaveBeenCalled()
+    expect(f.sends).toHaveLength(1)
+    expect(f.sends[0]?.text).toContain(partial)
+    expect(f.sends[0]?.text).toMatch(/截断|不完整|继续/iu)
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('tool-started')
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('tool-finished')
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-output-truncated' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('releases automatic tool barriers before a queued normal turn executes tools', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-tool-barrier-lifecycle-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const f = await runtimeHarness(
+      root,
+      saved,
+      undefined,
+      ['plain', 'markdown', 'model-picker', 'permission-picker'],
+      root,
+      undefined,
+      'primary',
+      true,
+      'probe',
+      undefined,
+      {
+        allowPresetProbeExecution: true,
+        provideApproval: false,
+        seedDefaultPreset: 'unlocked-dynamic-id',
+      },
+    )
+    const first = '自动补全前半段，'
+    const automaticRemainder = '自动补全已完成。'
+    const normalAnswer = '普通用户 turn 的工具调用已完成。'
+    const normalMessage = createUserMessage({
+      content: [{ type: 'text', text: '下一条普通用户消息需要调用 preset_probe。' }],
+      source: { kind: 'user' },
+    })
+    let normalQueued = false
+    let normalTurn: number | undefined
+    let normalTurnEnded = false
+    let normalTurnEvents: readonly SessionEvent[] = []
+    let resolveNormalTurnEnded!: () => void
+    const normalTurnDone = new Promise<void>(resolve => { resolveNormalTurnEnded = resolve })
+    f.ctx.on('agent/inbox/claimed', event => {
+      if (event.message.id === normalMessage.id) {
+        normalTurn = event.turn
+        return
+      }
+      const source = event.message.source
+      if (normalQueued || source.kind !== 'plugin'
+        || source.plugin !== '@dsh-enhanced/assistant-delivery') return
+      normalQueued = true
+      event.agent.followup(normalMessage)
+    })
+    f.ctx.on('session/event', (session, event) => {
+      if (event.type !== 'turn/end' || event.data.turn !== normalTurn || normalTurnEnded) return
+      normalTurnEvents = structuredClone(session.events)
+      normalTurnEnded = true
+      resolveNormalTurnEnded()
+    })
+    // Keep Delivery's post-completion flush open until the already-queued normal turn settles;
+    // otherwise handle disposal is allowed to cancel that independent turn before it proves the
+    // synchronous onSettled barrier release.
+    f.ctx.on('session/flush', async () => {
+      if (normalQueued && !normalTurnEnded) await normalTurnDone
+    })
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const request = f.llm.requests.length
+      if (request === 1) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: first }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: first } }
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+        return
+      }
+      if (request === 2) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: automaticRemainder }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: automaticRemainder } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      if (request === 3) {
+        const id = CallId('call-normal-preset-probe')
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
+        yield {
+          type: 'block-end',
+          index: 0,
+          block: { type: 'tool-call', id, name: 'preset_probe', arguments: '{}' },
+        }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: normalAnswer }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: normalAnswer } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-tool-barrier-lifecycle', '请给出完整回答'))
+    await drive(f.service)
+
+    expect(normalQueued).toBe(true)
+    expect(normalTurnEnded).toBe(true)
+    expect(f.llm.requests).toHaveLength(4)
+    expect(f.presetExecute).toHaveBeenCalledOnce()
+    expect(f.sends).toHaveLength(1)
+    expect(f.sends[0]).toMatchObject({ text: first + automaticRemainder, format: 'markdown' })
+    const normalCall = normalTurnEvents.find(event => event.type === 'tool/call'
+      && String(event.data.callId) === 'call-normal-preset-probe')
+    const normalResult = normalTurnEvents.find(event => event.type === 'tool/result'
+      && event.data.message.content.some(block => block.type === 'tool-result'
+        && String(block.toolCallId) === 'call-normal-preset-probe'))
+    const normalText = normalTurnEvents.find(event => event.type === 'assistant/message'
+      && event.data.message.content.some(block => block.type === 'text' && block.text === normalAnswer))
+    if (normalCall?.type !== 'tool/call' || normalResult?.type !== 'tool/result'
+      || normalText?.type !== 'assistant/message' || normalTurn === undefined) {
+      throw new Error('queued normal tool turn was not persisted')
+    }
+    expect(normalCall.data.turn).toBe(normalTurn)
+    expect(normalResult.data.turn).toBe(normalTurn)
+    expect(normalText.data.turn).toBe(normalTurn)
+    expect(normalText.data.step).toBe(2)
+    await f.ctx.fiber.restart()
+  })
+
+  test('keeps automatic tool barriers after followup throws post-enqueue until Agent teardown', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-post-enqueue-failure-'))
+    roots.push(root)
+    const f = await runtimeHarness(
+      root,
+      new Map(),
+      undefined,
+      ['plain', 'markdown', 'model-picker', 'permission-picker'],
+      root,
+      undefined,
+      'primary',
+      true,
+      'probe',
+      undefined,
+      {
+        allowPresetProbeExecution: true,
+        provideApproval: false,
+        seedDefaultPreset: 'unlocked-dynamic-id',
+      },
+    )
+    const eventId = 'evt-auto-post-enqueue-failure'
+    const partial = '自动补全前已生成的片段。'
+    let injectedFailure = false
+    let resolveBarrierProbe!: (result: ToolExecutionResult) => void
+    let rejectBarrierProbe!: (reason?: unknown) => void
+    const barrierProbe = new Promise<ToolExecutionResult>((resolve, reject) => {
+      resolveBarrierProbe = resolve
+      rejectBarrierProbe = reject
+    })
+    f.ctx.on('agent/inbox/claimed', event => {
+      const source = event.message.source
+      if (injectedFailure || source.kind !== 'delivery' || source.eventId !== eventId) return
+      injectedFailure = true
+      const originalFollowup = event.agent.followup.bind(event.agent)
+      vi.spyOn(event.agent, 'followup').mockImplementationOnce(message => {
+        originalFollowup(message)
+        // The first microtask runs before automaticCompletionTurn observes followup's rejection;
+        // the second probes the interval after its finally block but before owner teardown.
+        queueMicrotask(() => {
+          queueMicrotask(() => {
+            void event.agent.ctx.tools.execute({
+              callId: CallId('call-auto-post-enqueue-barrier-probe'),
+              name: 'preset_probe',
+              arguments: {},
+              agent: event.agent,
+              signal: new AbortController().signal,
+            }).then(resolveBarrierProbe, rejectBarrierProbe)
+          })
+        })
+        throw new Error('simulated followup failure after enqueue')
+      })
+    })
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const text = f.llm.requests.length === 1 ? partial : '不得发送的自动补全文本。'
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: f.llm.requests.length === 1
+        ? { kind: 'max-tokens' }
+        : { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    const accepted = await f.service.acceptInbound(message(eventId, '请给出完整回答'))
+    await drive(f.service)
+    const probeResult = await barrierProbe
+
+    expect(injectedFailure).toBe(true)
+    expect(probeResult.isError).toBe(true)
+    expect(JSON.stringify(probeResult)).toContain('automatic answer completion disables tool execution')
+    expect(f.presetExecute).not.toHaveBeenCalled()
+    expect(f.sends).toEqual([])
+    expect(runtimeStore(f.service).getInbox(accepted.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'processor-ambiguous',
+    })
+    await f.ctx.fiber.restart()
+  })
+
+  test('deduplicates a long Unicode overlap between automatic completion segments', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-overlap-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const overlap = '这是一段足够长而且不能重复的衔接文字'
+    const first = `开头内容。${overlap}`
+    const remainder = `${overlap}，这里是最终结论。`
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const text = f.llm.requests.length === 1 ? first : remainder
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: f.llm.requests.length === 1
+        ? { kind: 'max-tokens' }
+        : { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-overlap', '请回答'))
+    await drive(f.service)
+
+    expect(f.sends.map(value => value.text)).toEqual([`${first}，这里是最终结论。`])
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('deduplicates a short Chinese phrase at an automatic continuation boundary', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-short-overlap-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const first = '最终选择北京'
+    const continuation = '北京，因为它满足全部条件。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const text = f.llm.requests.length === 1 ? first : continuation
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: f.llm.requests.length === 1
+        ? { kind: 'max-tokens' }
+        : { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-short-overlap', '请回答'))
+    await drive(f.service)
+
+    expect(f.sends.map(value => value.text)).toEqual(['最终选择北京，因为它满足全部条件。'])
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('does not treat a repeated segment plus whitespace as a completed continuation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-whitespace-stall-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const partial = '仍然没有完成的回答片段。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const request = f.llm.requests.length
+      const text = request === 2 ? `${partial}\n  ` : partial
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: request === 1 ? { kind: 'max-tokens' } : { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-whitespace-stall', '请回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(3)
+    expect(f.sends[0]?.text).toContain(partial)
+    expect(f.sends[0]?.text).toMatch(/截断|不完整|继续/iu)
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('completed')
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-output-truncated' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('does not mistake a repeated completion segment for a complete answer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-stalled-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const partial = '这是仍然没有补全的原始片段。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: partial }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: partial } }
+      yield { type: 'finish', reason: f.llm.requests.length === 1
+        ? { kind: 'max-tokens' }
+        : { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-stalled', '请回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(3)
+    expect(f.sends).toHaveLength(1)
+    expect(f.sends[0]?.text).toContain(partial)
+    expect(f.sends[0]?.text).toMatch(/截断|不完整|继续/iu)
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('completed')
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-output-truncated' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('keeps a partial answer when automatic continuation completes empty', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-empty-after-partial-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const partial = '已经生成但尚未完成的回答。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      if (f.llm.requests.length === 1) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: partial }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: partial } }
+        yield { type: 'finish', reason: { kind: 'max-tokens' } }
+        return
+      }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-empty-after-partial', '请回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(3)
+    expect(f.sends[0]?.text).toContain(partial)
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-output-truncated' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('drops a max-token tool call before automatic text continuation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-unpaired-tool-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const f = await runtimeHarness(root, saved)
+    const partial = '工具调用前的说明。'
+    const remainder = '随后直接完成文字回答。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      if (f.llm.requests.length > 1) {
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: remainder }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: remainder } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      const id = CallId('call-unpaired')
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: partial }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: partial } }
+      yield { type: 'block-start', index: 1, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 1, id, name: 'preset_probe', argumentsDelta: '{}' }
+      yield {
+        type: 'block-end',
+        index: 1,
+        block: { type: 'tool-call', id, name: 'preset_probe', arguments: '{}' },
+      }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-unpaired-tool', '请执行并回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(2)
+    expect(f.sends.map(value => value.text)).toEqual([partial + remainder])
+    expect([...saved.values()].flatMap(value => value.events).filter(event => event.type === 'tool/call')).toEqual([])
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('automatically regenerates an empty answer before showing a retry notice', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-empty-recovery-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const answer = '这是自动重试后生成的完整回答。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      if (f.llm.requests.length === 1) {
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: answer }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-empty-recovery', '请回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(2)
+    expect(f.llm.requests[1]?.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringMatching(/current task.*produced no sendable answer/iu) }),
+    ])
+    expect(f.sends.map(value => value.text)).toEqual([answer])
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('automatically replaces an oversized answer with one complete compact answer', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-compact-'))
+    roots.push(root)
+    const maxTextBytes = 96
+    const f = await runtimeHarness(
+      root, new Map(), undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { maxTextBytes },
+    )
+    const oversized = '超长回答'.repeat(30)
+    const compact = '完整结论：后台自动压缩后直接回复。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const text = f.llm.requests.length === 1 ? oversized : compact
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-compact', '请完整回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(2)
+    expect(f.llm.requests[1]?.messages.at(-1)?.content).toEqual([
+      expect.objectContaining({ type: 'text', text: expect.stringMatching(/Rewrite the current task.*complete/iu) }),
+    ])
+    expect(f.sends.map(value => value.text)).toEqual([compact])
+    expect(Buffer.byteLength(f.sends[0]!.text, 'utf8')).toBeLessThanOrEqual(maxTextBytes)
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'completed' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('keeps the latest compact candidate when a later recovery attempt fails', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-compact-fallback-'))
+    roots.push(root)
+    const maxTextBytes = 128
+    const f = await runtimeHarness(
+      root, new Map(), undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { maxTextBytes },
+    )
+    const oversized = `ORIGINAL-UNFINISHED-${'旧'.repeat(80)}`
+    const compact = `COMPACT-CONCLUSION-${'新'.repeat(38)}`
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const request = f.llm.requests.length
+      if (request < 3) {
+        const text = request === 1 ? oversized : compact
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      yield {
+        type: 'finish',
+        reason: { kind: 'error', failure: { code: 'TEST_RECOVERY_FAILED', message: 'simulated failure' } },
+      }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-compact-fallback', '请完整回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(3)
+    expect(Buffer.byteLength(compact, 'utf8')).toBeGreaterThan(maxTextBytes)
+    expect(f.sends[0]?.text).toContain('COMPACT-CONCLUSION')
+    expect(f.sends[0]?.text).not.toContain('ORIGINAL-UNFINISHED')
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-output-truncated' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('falls back to a visible partial after bounded automatic completion stays truncated', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-truncated-answer-'))
     roots.push(root)
     const f = await runtimeHarness(root, new Map())
@@ -815,13 +1727,92 @@ describe('real rc.8 delivery Agent runtime', () => {
     await f.service.acceptInbound(message('evt-truncated-answer', '你怎么知道我之前在做什么？'))
     await drive(f.service)
 
+    expect(f.llm.requests).toHaveLength(3)
     expect(f.sends).toHaveLength(1)
     expect(f.sends[0]?.text).toContain(partial)
-    expect(f.sends[0]?.text).toMatch(/(?:输出|长度|token).*(?:上限|截断)|(?:截断|不完整).*(?:继续|重试)/iu)
+    expect(f.sends[0]?.text).toMatch(/未能完整生成|可能不完整|回答不完整/iu)
+    expect(f.sends[0]?.text).not.toMatch(/回复[“"]?继续/iu)
     expect(f.progresses.map(value => value.update.kind)).not.toContain('completed')
     expect(f.progresses.at(-1)?.update).toEqual({
       kind: 'failed',
       code: 'agent-output-truncated',
+    })
+    await f.ctx.fiber.restart()
+  })
+
+  test('can disable automatic completion while preserving a visible truncation fallback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-disabled-'))
+    roots.push(root)
+    const f = await runtimeHarness(
+      root, new Map(), undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { maxAutoContinuationTurns: 0 },
+    )
+    const partial = '管理员关闭自动补全后的可见片段。'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: partial }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: partial } }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-auto-disabled', '请回答'))
+    await drive(f.service)
+
+    expect(f.llm.requests).toHaveLength(1)
+    expect(f.sends[0]?.text).toContain(partial)
+    expect(f.sends[0]?.text).toMatch(/截断|不完整|继续/iu)
+    expect(f.sends[0]?.text).not.toMatch(/回复[“"]?继续/iu)
+    expect(f.sends[0]?.text).not.toMatch(/系统已自动尝试|自动补全后仍/iu)
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('completed')
+    expect(f.progresses.at(-1)?.update).toEqual({ kind: 'failed', code: 'agent-output-truncated' })
+    await f.ctx.fiber.restart()
+  })
+
+  test('rechecks inbound authorization before an unavailable automatic-completion fallback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-unavailable-authorization-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const store = runtimeStore(f.service)
+    const owner = store.getPrincipal(principal)!
+    let sawRunning = false
+    let restrictionFailureInstalled = false
+    let restrict: ReturnType<typeof vi.spyOn> | undefined
+    f.ctx.on('agent/status', ({ agent, status }) => {
+      if (status === 'running') {
+        sawRunning = true
+        return
+      }
+      if (!sawRunning || restrictionFailureInstalled) return
+      restrictionFailureInstalled = true
+      restrict = vi.spyOn(agent.ctx.tools, 'restrict').mockImplementationOnce(() => {
+        store.revokePrincipal(owner.id, owner.version)
+        throw new Error('simulated unavailable automatic tool barrier')
+      })
+    })
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      const partial = '不得在授权撤销后发送的片段。'
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: partial }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: partial } }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    })
+
+    const accepted = await f.service.acceptInbound(message('evt-auto-unavailable-authorization', '请回答'))
+    await drive(f.service)
+
+    expect(restrictionFailureInstalled).toBe(true)
+    expect(restrict).toHaveBeenCalledOnce()
+    expect(f.llm.requests).toHaveLength(1)
+    expect(f.sends).toEqual([])
+    expect(store.getInbox(accepted.inboxId)).toMatchObject({
+      status: 'dead_letter',
+      failureCode: 'processor-ambiguous',
     })
     await f.ctx.fiber.restart()
   })
@@ -875,7 +1866,7 @@ describe('real rc.8 delivery Agent runtime', () => {
 
     expect(f.sends).toHaveLength(1)
     expect(Buffer.byteLength(f.sends[0]!.text, 'utf8')).toBeLessThanOrEqual(maxTextBytes)
-    expect(f.sends[0]?.text).toMatch(/截断|继续|retry|!/u)
+    expect(f.sends[0]?.text).toMatch(/未完整|不完整|retry|!/u)
     expect(f.progresses.at(-1)?.update).toEqual({
       kind: 'failed',
       code: 'agent-output-truncated',
@@ -907,7 +1898,7 @@ describe('real rc.8 delivery Agent runtime', () => {
 
     expect(f.sends).toHaveLength(1)
     expect(Buffer.byteLength(f.sends[0]!.text, 'utf8')).toBeLessThanOrEqual(maxTextBytes)
-    expect(f.sends[0]?.text).toMatch(/截断|继续|retry|!/u)
+    expect(f.sends[0]?.text).toMatch(/未完整|不完整|retry|!/u)
     expect(f.progresses.at(-1)?.update).toEqual({
       kind: 'failed',
       code: 'agent-output-truncated',
