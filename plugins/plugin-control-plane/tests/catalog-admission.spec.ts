@@ -6,7 +6,7 @@ import { chmod, link, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unl
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe as baseDescribe, expect, test } from 'vitest'
 import {
   admitCatalogCandidate,
   catalogAdmissionId,
@@ -78,6 +78,10 @@ function input(path: string, current: CapabilityCatalog, rawCandidate: CatalogEn
     verificationEvidenceDigest: '3'.repeat(64), candidate: rawCandidate, ...overrides,
   }
 }
+
+const rootOwnsSystemDirs = process.platform === 'linux'
+  && lstatSync('/usr/bin', { bigint: true }).uid === 0n
+const describe = rootOwnsSystemDirs ? baseDescribe : baseDescribe.skip
 
 describe('owner-private catalog CAS admission', () => {
   test('atomically admits a candidate and makes it visible to discovery', async () => {

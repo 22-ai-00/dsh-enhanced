@@ -12,7 +12,11 @@ afterEach(async () => {
   roots.clear()
 })
 
-describe.runIf(process.platform === 'linux')('catalog commit interpreter portability', () => {
+// Containers may map all files to a non-root uid; the trust checks require uid 0 directories.
+const rootOwnsSystemDirs = process.platform === 'linux'
+  && lstatSync('/usr/bin', { bigint: true }).uid === 0n
+
+describe.runIf(rootOwnsSystemDirs)('catalog commit interpreter portability', () => {
   test('resolves the fixed generic launcher and pins its canonical minor-version target', () => {
     const expectedPath = realpathSync('/usr/bin/python3')
     const interpreter = openTrustedCatalogCommitInterpreter('/usr/bin/python3')

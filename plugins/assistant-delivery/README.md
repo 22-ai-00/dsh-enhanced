@@ -186,7 +186,9 @@ ownerRoutes:
 
 渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
 
-Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正文超过 `maxTextBytes` 时，Delivery 默认在同一 session 中发起最多两轮后台恢复：先续写缺失部分；若仍未结束，最后一次机会优先根据当前请求和其后全部已有回答片段压缩为预算内的完整答案，不会把同一长会话中更早已完成的任务混入结论。空回答会重新生成，首轮即超长的回答会直接压缩。每个片段先持久化，再开始下一轮；恢复轮沿用已经选定的 provider、model 和 effort，但 source 明确标记为 Delivery 的内部 notice。恢复轮禁止工具执行：rc.8 仍可能把 scoped tool schema 序列化给 provider，但任何调用都会在审批和执行前被拒绝，并立即结束该恢复轮；工具状态也不会展示给用户，后续恢复仍受同一总轮数限制。最终只投递一次合并后的完整回复并标记完成，不需要用户发送“继续”。
+Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正文超过 `maxTextBytes` 时，Delivery 默认在同一 session 中发起最多两轮后台恢复：先续写缺失部分；若仍未结束，最后一次机会优先根据当前请求和其后全部已有回答片段压缩为预算内的完整答案，不会把同一长会话中更早已完成的任务混入结论。空回答会重新生成，首轮即超长的回答会直接压缩。每个片段先持久化，再开始下一轮；恢复轮沿用已经选定的 provider、model 和 effort，但 source 明确标记为 Delivery 的内部 notice。恢复轮禁止工具执行：rc.8 仍可能把 scoped tool schema 序列化给 provider，但任何调用都会在审批和执行前被拒绝，并立即结束该恢复轮；工具状态也不会展示给用户，后续恢复仍受同一总轮数限制。最终只投递一次合并后的完整回复并标记完成，不需要用户发送”继续”。
+
+此外，如果一个正常完成的 turn 使用了工具但最终消息很短（≤ 400 个 Unicode 字符），Delivery 会额外发起一个工具禁用的自检 turn，让模型自我判断其上一轮输出是否已包含对用户请求的完整回答。模型只需回答 `FINISHED` 或 `UNFINISHED`。如果模型回答 `UNFINISHED`，Delivery 会发起一个**工具启用**的后续 turn 让模型继续实际完成工作；如果回答 `FINISHED` 或自检本身失败，则按原样投递当前文本。这解决了模型在工具 turn 末尾只声明下一步意图（如”让我修正解析…”）却未实际执行就 end_turn 的问题，且不依赖关键字匹配，语言无关。自检 turn 与后续 continue-work turn 共享 `agentMaxAutoContinuationTurns` 预算。
 
 后台恢复是新的、有界模型 turn，可能产生额外模型用量，不是对同一个已提交请求的透明重试。若恢复轮失败或次数耗尽、没有新增正文，或已经持久化但无法建立安全调度边界，Delivery 才保留当前最佳正文、附加明确的未完成提示并标记失败；完全没有可用正文时发送重试提示。失败提示不再要求用户发送“继续”这类协议词。若任何片段无法确认持久化，则不投递该结果，也不宣称完成。这些失败回复不会进入 completed-turn preference projection。`agentMaxAutoContinuationTurns` 设为 `0` 时保留直接失败提示行为。
 
