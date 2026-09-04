@@ -207,6 +207,7 @@ interface PermissionHarnessOptions {
   onResolve?(): void
   leaseMs?: number
   replyBudget?: number
+  maxTextBytes?: number
 }
 
 const testPermissionPresets = {
@@ -535,7 +536,8 @@ async function runtimeHarness(
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
     schedulerEnabled: false, defaultWorkspace: workspace, defaultAgentPreset: agentPreset, agentProvider: defaultRoute.provider,
     agentModel: defaultRoute.model,
-    ...(permissions?.leaseMs === undefined ? {} : { leaseMs: permissions.leaseMs }) })
+    ...(permissions?.leaseMs === undefined ? {} : { leaseMs: permissions.leaseMs }),
+    ...(permissions?.maxTextBytes === undefined ? {} : { maxTextBytes: permissions.maxTextBytes }) })
   const llm = new ReplyAdapter('Mock provider', ['delivery-model'], image?.inputModalities ?? ['text'])
   ctx.llm.registerAdapter(['mock'], llm)
   const alternate = new ReplyAdapter('Alternate provider', ['fast', 'precise'])
@@ -792,6 +794,177 @@ describe('real rc.8 delivery Agent runtime', () => {
     // Answers are authored as Markdown, so a capable channel must be told to render them.
     expect(f.sends.map(value => value.text)).toEqual(['reply-1'])
     expect(f.sends[0]?.format).toBe('markdown')
+  })
+
+  test('surfaces a partial max-token answer as truncated instead of claiming completion', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-truncated-answer-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    const partial = '不是我知道，而是从当前会话读到的——链'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: partial }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: partial } }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 16 } }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-truncated-answer', '你怎么知道我之前在做什么？'))
+    await drive(f.service)
+
+    expect(f.sends).toHaveLength(1)
+    expect(f.sends[0]?.text).toContain(partial)
+    expect(f.sends[0]?.text).toMatch(/(?:输出|长度|token).*(?:上限|截断)|(?:截断|不完整).*(?:继续|重试)/iu)
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('completed')
+    expect(f.progresses.at(-1)?.update).toEqual({
+      kind: 'failed',
+      code: 'agent-output-truncated',
+    })
+    await f.ctx.fiber.restart()
+  })
+
+  test('surfaces an empty max-token answer instead of completing without a reply', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-empty-truncated-answer-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 0 } }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-empty-truncated-answer', '继续处理'))
+    await drive(f.service)
+
+    expect(f.sends).toHaveLength(1)
+    expect(f.sends[0]?.text).toMatch(/输出达到上限.*未生成|回复“继续”|重试/iu)
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('completed')
+    expect(f.progresses.at(-1)?.update).toEqual({
+      kind: 'failed',
+      code: 'agent-output-truncated',
+    })
+    await f.ctx.fiber.restart()
+  })
+
+  test('keeps a truncated answer inside the configured UTF-8 delivery byte budget', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-truncated-byte-budget-'))
+    roots.push(root)
+    const maxTextBytes = 48
+    const f = await runtimeHarness(
+      root, new Map(), undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { maxTextBytes },
+    )
+    const partial = '这是一个会超过投递字节上限的中文回答前缀'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: partial }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: partial } }
+      yield { type: 'finish', reason: { kind: 'max-tokens' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-truncated-byte-budget', 'x'))
+    await drive(f.service)
+
+    expect(f.sends).toHaveLength(1)
+    expect(Buffer.byteLength(f.sends[0]!.text, 'utf8')).toBeLessThanOrEqual(maxTextBytes)
+    expect(f.sends[0]?.text).toMatch(/截断|继续|retry|!/u)
+    expect(f.progresses.at(-1)?.update).toEqual({
+      kind: 'failed',
+      code: 'agent-output-truncated',
+    })
+    await f.ctx.fiber.restart()
+  })
+
+  test('turns an oversized completed answer into a bounded visible truncation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-completed-byte-budget-'))
+    roots.push(root)
+    const maxTextBytes = 48
+    const f = await runtimeHarness(
+      root, new Map(), undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { maxTextBytes },
+    )
+    const answer = '这是模型声称完成但超过投递字节上限的中文回答'
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: answer }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: answer } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-completed-byte-budget', 'x'))
+    await drive(f.service)
+
+    expect(f.sends).toHaveLength(1)
+    expect(Buffer.byteLength(f.sends[0]!.text, 'utf8')).toBeLessThanOrEqual(maxTextBytes)
+    expect(f.sends[0]?.text).toMatch(/截断|继续|retry|!/u)
+    expect(f.progresses.at(-1)?.update).toEqual({
+      kind: 'failed',
+      code: 'agent-output-truncated',
+    })
+    await f.ctx.fiber.restart()
+  })
+
+  test('surfaces an empty completed answer instead of silently claiming completion', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-empty-answer-'))
+    roots.push(root)
+    const f = await runtimeHarness(root, new Map())
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: '' } }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 0 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-empty-answer', '请回答这个问题'))
+    await drive(f.service)
+
+    expect(f.sends).toHaveLength(1)
+    expect(f.sends[0]?.text).toMatch(/模型.*(?:没有|未).*回答|未生成.*回答|重试/iu)
+    expect(f.progresses.map(value => value.update.kind)).not.toContain('completed')
+    expect(f.progresses.at(-1)?.update).toEqual({
+      kind: 'failed',
+      code: 'agent-empty-response',
+    })
+    await f.ctx.fiber.restart()
+  })
+
+  test('still sends a non-empty fallback at the minimum delivery byte budget', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-minimum-byte-budget-'))
+    roots.push(root)
+    const f = await runtimeHarness(
+      root, new Map(), undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+      { maxTextBytes: 1 },
+    )
+    vi.spyOn(f.llm, 'stream').mockImplementation(async function* (options) {
+      f.llm.requests.push(options)
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const pairing = f.service.issuePairing('test', principal)
+    f.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await f.service.acceptInbound(message('evt-minimum-byte-budget', 'x'))
+    await drive(f.service)
+
+    expect(f.sends.map(value => value.text)).toEqual(['!'])
+    expect(f.progresses.at(-1)?.update).toEqual({
+      kind: 'failed',
+      code: 'agent-empty-response',
+    })
+    await f.ctx.fiber.restart()
   })
 
   test('persists one owner session, resumes across turns/restart, and deduplicates provider events', async () => {

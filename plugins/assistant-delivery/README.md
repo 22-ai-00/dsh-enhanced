@@ -159,7 +159,7 @@ ownerRoutes:
 
 `apiProxy` 始终是 `ctx.userQuestions` 的唯一 provider；Delivery 不注册第二个 provider。可选的 rc.8 `apiProxy.events.mux()` 将 pending `question/requested` 帧交给 Delivery，Delivery 只在其 session 仍对应 exact active owner binding、当前 adapter 仍具备问题交互能力时，转给该渠道；回答以同一 rpc id 回写 `apiProxy.respond()`。同一请求同时可被 Web 与渠道界面看到，谁先被 ApiProxy 接受谁生效（first-claim-wins）；晚到、撤销或重复回答不会制造新的 Agent turn。
 
-渠道自由文本只在回复该问题消息，或原会话仅有这一条 pending question 时结算；两种路径都要求 account、tenant、conversation、principal、binding version/generation 与当前 owner fence 匹配。匹配回答直接恢复原来的工具调用，不写 Inbox、不作为普通新消息排队；`/stop`、`/new`、`/clear` 仍按正常命令路径取消旧 wait。问题发往原 binding 会话，不保证是私聊：若原会话是群聊，问题正文和选项对该群可见，敏感问题应在私聊中发起或改用其他交互方式。
+渠道自由文本只有在明确回复对应问题消息时才会结算，并要求 account、tenant、conversation、principal、binding version/generation 与当前 owner fence 全部匹配；同一路由恰好只有一个 pending question 也不会吞掉未引用的新消息。匹配回答直接恢复原来的工具调用，不写 Inbox、不作为普通新消息排队；`/stop`、`/new`、`/clear` 仍按渠道正常命令接入规则取消旧 wait（例如群聊可能仍要求 @ 机器人），问题卡的取消按钮则不依赖文字命令。问题发往原 binding 会话，不保证是私聊：若原会话是群聊，问题正文和选项对该群可见，敏感问题应在私聊中发起或改用其他交互方式。
 
 ## Agent 与工具
 
@@ -183,7 +183,7 @@ ownerRoutes:
 - `/feedback`：提交固定枚举的响应偏好，或对 exact Automation 结果提交任务目标状态；在 Delivery 本地处理，不恢复 Agent、不交给模型。
 - `/learning`：查看状态或 content-free T1 摘要、导出版本化稳定 JSON、暂停、恢复、按 exact T1 key 回滚或清除当前 workspace + preset 的偏好学习；只允许 exact active owner，在 Delivery 本地处理，不恢复 Agent、不交给模型。
 
-渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
+渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。Agent Loop 以 `max-tokens` 结束时，Delivery 会保留已经生成的正文、在 `maxTextBytes` 内预留明确的“不完整/回复继续”提示并把进度标为失败，不再把半句冒充“任务已完成”；即使截断或正常结束时正文为空，也会发送预算内的非空重试提示，绝不静默完成。一个声称正常完成、但超过投递字节预算的回答也按截断处理；截断回复不进入 completed-turn preference projection。
 
 `/feedback` 的完整固定语法如下；不接受附件或额外自由文本：
 

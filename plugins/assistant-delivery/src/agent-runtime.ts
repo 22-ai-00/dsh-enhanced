@@ -104,6 +104,7 @@ interface DshDeliveryRuntimeOptions {
   provider: string
   model: string
   maxOutputTokens: number
+  maxTextBytes: number
   permissionPickerTtlMs: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
   /** Atomically remove a stale explicit effort without overwriting a newer model choice. */
@@ -1126,14 +1127,63 @@ function sessionFingerprint(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 8)
 }
 
+const AGENT_OUTPUT_TRUNCATED_CODE = 'agent-output-truncated'
+const AGENT_EMPTY_RESPONSE_CODE = 'agent-empty-response'
+
+function utf8Prefix(value: string, maxBytes: number): string {
+  const bytes = Buffer.from(value, 'utf8')
+  if (bytes.length <= maxBytes) return value
+  let end = maxBytes
+  while (end > 0 && (bytes[end]! & 0xc0) === 0x80) end -= 1
+  return bytes.subarray(0, end).toString('utf8')
+}
+
+function fittingNotice(candidates: readonly string[], maxBytes: number): string {
+  return candidates.find(value => Buffer.byteLength(value, 'utf8') <= maxBytes) ?? '!'
+}
+
+function truncatedAgentReply(text: string, maxBytes: number): string {
+  const notice = fittingNotice([
+    '⚠️ 本轮输出达到上限，回答可能不完整。请回复“继续”，我会接着回答。',
+    '回答达到上限，可能不完整；请回复“继续”。',
+    '回答被截断，请继续。',
+    'retry',
+    '!',
+  ], maxBytes)
+  if (text.trim() === '') return fittingNotice([
+    '模型本轮输出达到上限，但尚未生成可发送的正文。请回复“继续”或缩小问题范围后重试。',
+    '输出达到上限且未生成正文，请回复“继续”。',
+    '未生成回答，请重试。',
+    'retry',
+    '!',
+  ], maxBytes)
+  const separator = '\n\n> '
+  const suffix = `${separator}${notice}`
+  const prefixBudget = maxBytes - Buffer.byteLength(suffix, 'utf8')
+  if (prefixBudget <= 0) return notice
+  const prefix = utf8Prefix(text, prefixBudget)
+  return prefix.trim() === '' ? notice : `${prefix}${suffix}`
+}
+
+function emptyAgentReply(maxBytes: number): string {
+  return fittingNotice([
+    '模型本轮未生成可发送的回答。请重试；如果问题较长，也可以拆成更小的步骤。',
+    '模型未生成回答，请重试。',
+    '请重试。',
+    'retry',
+    '!',
+  ], maxBytes)
+}
+
 function finalAssistant(
   events: readonly SessionEvent[],
   from: number,
   expectedTurn: number | undefined,
-): { text: string; completed: boolean; stopped: boolean; failureCode?: string } {
-  if (expectedTurn === undefined) return { text: '', completed: false, stopped: false }
+): { text: string; completed: boolean; truncated: boolean; stopped: boolean; failureCode?: string } {
+  if (expectedTurn === undefined) return { text: '', completed: false, truncated: false, stopped: false }
   let text = ''
   let completed = false
+  let truncated = false
   let stopped = false
   let failureCode: string | undefined
   for (const event of events.slice(from)) {
@@ -1144,7 +1194,9 @@ function finalAssistant(
     if (event.type === 'turn/end' && event.data.turn === expectedTurn) {
       const reason = event.data.reason
       completed = typeof reason === 'object' && reason !== null && 'kind' in reason
-        && ['completed', 'max-tokens'].includes((reason as { kind: string }).kind)
+        && (reason as { kind: string }).kind === 'completed'
+      truncated = typeof reason === 'object' && reason !== null && 'kind' in reason
+        && (reason as { kind: string }).kind === 'max-tokens'
       stopped = typeof reason === 'object' && reason !== null
         && (reason as { kind?: unknown }).kind === 'aborted'
         && typeof (reason as { reason?: unknown }).reason === 'object'
@@ -1153,10 +1205,10 @@ function finalAssistant(
       const error = typeof reason === 'object' && reason !== null && 'error' in reason
         ? (reason as { error?: { code?: unknown } }).error
         : undefined
-      failureCode = completed || typeof error?.code !== 'string' ? undefined : error.code
+      failureCode = completed || truncated || typeof error?.code !== 'string' ? undefined : error.code
     }
   }
-  return { text, completed, stopped, ...(failureCode === undefined ? {} : { failureCode }) }
+  return { text, completed, truncated, stopped, ...(failureCode === undefined ? {} : { failureCode }) }
 }
 
 export class DshDeliveryRuntime implements DeliveryInboundRuntime {
@@ -2779,22 +2831,36 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
           : { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: false }
       }
+      if (output.truncated || Buffer.byteLength(output.text, 'utf8') > this.options.maxTextBytes) {
+        this.options.replyCommand(binding, envelope.eventId, {
+          text: truncatedAgentReply(output.text, this.options.maxTextBytes),
+          format: 'markdown',
+        })
+        publishProgress({ kind: 'failed', code: AGENT_OUTPUT_TRUNCATED_CODE })
+        return { outcome: 'processed' }
+      }
       if (!output.completed) {
         publishProgress({ kind: 'failed', ...(output.failureCode === undefined ? {} : { code: output.failureCode }) })
         return { outcome: 'not-processed', failureCode: 'agent-turn-incomplete', retryable: false }
       }
+      if (output.text.trim() === '') {
+        this.options.replyCommand(binding, envelope.eventId, {
+          text: emptyAgentReply(this.options.maxTextBytes),
+          format: 'markdown',
+        })
+        publishProgress({ kind: 'failed', code: AGENT_EMPTY_RESPONSE_CODE })
+        return { outcome: 'processed' }
+      }
       // Agent answers are authored as Markdown (tables, bold, inline code), so request Markdown
       // rendering; sending them as plain text shows the raw `|---|` and `**` syntax to the user.
-      if (output.text !== '') {
-        const learning = await this.options.replyCompletedPreferenceTurn(
-          agent,
-          binding,
-          envelope,
-          { text: output.text, format: 'markdown' },
-        )
-        if (learning === 'unknown') {
-          this.ctx.logger.warn('assistant-delivery: completed-turn preference projection is ambiguous')
-        }
+      const learning = await this.options.replyCompletedPreferenceTurn(
+        agent,
+        binding,
+        envelope,
+        { text: output.text, format: 'markdown' },
+      )
+      if (learning === 'unknown') {
+        this.ctx.logger.warn('assistant-delivery: completed-turn preference projection is ambiguous')
       }
       publishProgress({ kind: 'completed' })
       return { outcome: 'processed' }
