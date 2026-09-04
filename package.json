@@ -1,6 +1,6 @@
 {
   "name": "dsh-enhanced",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "private": true,
   "description": "A scalable monorepo for community DeepSeek Harness plugins.",
   "license": "MIT",
