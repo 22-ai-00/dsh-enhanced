@@ -1000,6 +1000,7 @@ export class AssistantDeliveryService extends Service {
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         getAgentPresets: () => runtimeCtx.get('agentPresets'),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
+        maxTextBytes: config.maxTextBytes,
         modelPickerTtlMs: config.modelPickerTtlMs,
         permissionPickerTtlMs: config.permissionPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
