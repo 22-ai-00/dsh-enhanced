@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/plugin-control-plane",
-  "version": "0.1.19",
+  "version": "0.1.20",
   "description": "A durable capability-gap, approval and staged plugin activation control plane for DSH.",
   "license": "MIT",
   "type": "module",
