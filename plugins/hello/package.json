@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/hello",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "description": "A minimal installable DeepSeek Harness plugin bundle.",
   "license": "MIT",
   "type": "module",

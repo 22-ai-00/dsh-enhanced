@@ -464,7 +464,7 @@ describe('Lark SDK boundary', () => {
       compact_width: false,
       width_mode: 'fill',
       wide_screen_mode: true,
-      summary: { content: '智能体已完成任务并返回最终答复' },
+      summary: { content: '智能体已返回答复' },
     })
     // Lark already shows the bot identity above the bubble, so a reply must not add its own header.
     expect(answerCard.header).toBeUndefined()

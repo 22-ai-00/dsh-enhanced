@@ -236,25 +236,35 @@ describe('Lark ask_user_question adapter', () => {
     await f.dispose?.()
   })
 
-  test('accepts the next exact DM text as the pending answer but never swallows commands or another sender', async () => {
+  test('accepts only an exact DM reply to the question card and never swallows a new message', async () => {
     const f = await fixture({ approvalSecret: secret })
     const controller = new AbortController()
     const pending = f.adapter.requestUserQuestion(request({
       questions: [{ id: 'detail', question: '还需要补充什么？' }],
     }), controller.signal)
     await vi.waitFor(() => expect(f.transport.send).toHaveBeenCalledOnce())
+    let settled = false
+    void pending.then(() => { settled = true })
 
     await f.transport.emitMessage({ messageId: 'om_other', senderId: 'ou_other', content: '不应成为回答' })
     expect(f.context.accept).toHaveBeenCalledOnce()
     await f.transport.emitMessage({ messageId: 'om_stop', content: '/stop' })
     expect(f.context.accept).toHaveBeenCalledTimes(2)
+    await f.transport.emitMessage({ messageId: 'om_new_turn', content: '这是一个新的普通问题' })
+    expect(f.context.accept).toHaveBeenCalledTimes(3)
+    await Promise.resolve()
+    expect(settled).toBe(false)
 
-    await f.transport.emitMessage({ messageId: 'om_direct_answer', content: '保持无感切换' })
+    await f.transport.emitMessage({
+      messageId: 'om_direct_answer',
+      content: '保持无感切换',
+      replyToMessageId: 'om_question_1',
+    })
     await expect(pending).resolves.toEqual({
       outcome: 'answered',
       answer: { answers: [{ id: 'detail', selected: [], custom: '保持无感切换' }] },
     })
-    expect(f.context.accept).toHaveBeenCalledTimes(2)
+    expect(f.context.accept).toHaveBeenCalledTimes(3)
     await f.dispose?.()
   })
 
