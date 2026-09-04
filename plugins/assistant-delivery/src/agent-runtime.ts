@@ -104,6 +104,7 @@ interface DshDeliveryRuntimeOptions {
   provider: string
   model: string
   maxOutputTokens: number
+  maxAutoContinuationTurns: number
   maxTextBytes: number
   permissionPickerTtlMs: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
@@ -236,6 +237,14 @@ const ESCAPED_QUOTED_PROGRESS_ASSIGNMENT_START = new RegExp(
 type InboundAuthorizationState = 'authorized' | 'revoked' | 'check-failed'
 
 class DurableAgentIdentityError extends Error {}
+
+class AutomaticCompletionUnavailableError extends Error {}
+
+class AutomaticCompletionAuthorizationError extends Error {
+  constructor(readonly state: Exclude<InboundAuthorizationState, 'authorized'>) {
+    super(`assistant-delivery: automatic completion authorization is ${state}`)
+  }
+}
 
 class ApprovalReviewerReaderUnavailableError extends Error {
   constructor(cause: unknown) {
@@ -1129,6 +1138,9 @@ function sessionFingerprint(value: string): string {
 
 const AGENT_OUTPUT_TRUNCATED_CODE = 'agent-output-truncated'
 const AGENT_EMPTY_RESPONSE_CODE = 'agent-empty-response'
+const AUTOMATIC_COMPLETION_TOOL_DENIAL = 'assistant-delivery: automatic answer completion disables tool execution'
+
+type AutomaticCompletionKind = 'compact' | 'continue' | 'regenerate'
 
 function utf8Prefix(value: string, maxBytes: number): string {
   const bytes = Buffer.from(value, 'utf8')
@@ -1144,15 +1156,15 @@ function fittingNotice(candidates: readonly string[], maxBytes: number): string 
 
 function truncatedAgentReply(text: string, maxBytes: number): string {
   const notice = fittingNotice([
-    '⚠️ 本轮输出达到上限，回答可能不完整。请回复“继续”，我会接着回答。',
-    '回答达到上限，可能不完整；请回复“继续”。',
-    '回答被截断，请继续。',
+    '⚠️ 本次回答未能完整生成；以下内容可能不完整。',
+    '本次回答未完整生成。',
+    '回答不完整。',
     'retry',
     '!',
   ], maxBytes)
   if (text.trim() === '') return fittingNotice([
-    '模型本轮输出达到上限，但尚未生成可发送的正文。请回复“继续”或缩小问题范围后重试。',
-    '输出达到上限且未生成正文，请回复“继续”。',
+    '本次未能生成可发送的完整回答。请稍后重试或缩小问题范围。',
+    '本次未能生成完整回答，请重试。',
     '未生成回答，请重试。',
     'retry',
     '!',
@@ -1175,21 +1187,98 @@ function emptyAgentReply(maxBytes: number): string {
   ], maxBytes)
 }
 
+function mergeContinuationText(current: string, continuation: string): { text: string; added: boolean } {
+  if (current === '') return { text: continuation, added: continuation !== '' }
+  if (continuation === '') return { text: current, added: false }
+  if (continuation.startsWith(current)) {
+    const suffix = continuation.slice(current.length)
+    const added = suffix.trim() !== ''
+    return { text: added ? continuation : current, added }
+  }
+  if (current.endsWith(continuation)) return { text: current, added: false }
+  const currentPoints = [...current]
+  const continuationPoints = [...continuation]
+  const maxOverlap = Math.min(currentPoints.length, continuationPoints.length, 4_096)
+  for (let length = maxOverlap; length >= 2; length -= 1) {
+    const currentOverlap = currentPoints.slice(-length)
+    if (length < 16) {
+      const hanCount = currentOverlap.filter(point => /^\p{Script=Han}$/u.test(point)).length
+      if (hanCount < 2 || currentOverlap.some(point => !/^[\p{Script=Han}\p{P}\p{Z}]$/u.test(point))) continue
+    }
+    if (currentOverlap.join('') !== continuationPoints.slice(0, length).join('')) continue
+    const suffix = continuationPoints.slice(length).join('')
+    const added = suffix.trim() !== ''
+    return { text: added ? current + suffix : current, added }
+  }
+  return { text: current + continuation, added: continuation.trim() !== '' }
+}
+
+function automaticCompletionPrompt(
+  kind: AutomaticCompletionKind,
+  maxTextBytes: number,
+  maxOutputTokens: number,
+): string {
+  const marker = '[DSH automatic answer completion notice]'
+  const scope = 'Work only on the current task: the most recent user request before the first marked notice '
+    + 'in this trailing recovery sequence, plus assistant answer segments after that request. '
+    + 'Ignore all earlier completed tasks, and treat every marked notice as an instruction rather than answer content.'
+  const common = 'Do not call tools, repeat actions, discuss this recovery instruction, or add a preamble.'
+  if (kind === 'continue') {
+    return `${marker} ${scope} The immediately preceding assistant answer segment was cut off by an output limit. `
+      + `Continue exactly from its last character and finish the current answer. Return only the missing remainder `
+      + `without repeating earlier text. ${common}`
+  }
+  if (kind === 'compact') {
+    const approximateCjkCharacters = Math.max(1, Math.floor(maxTextBytes / 4))
+    const targetTokens = Math.max(1, Math.min(
+      Math.floor(maxOutputTokens / 2),
+      approximateCjkCharacters,
+    ))
+    return `${marker} ${scope} Rewrite the current task result as one complete, self-contained, concise final answer `
+      + `using at most ${targetTokens} tokens `
+      + `and under ${maxTextBytes} UTF-8 bytes (about ${approximateCjkCharacters} CJK characters). `
+      + 'Preserve the conclusion and essential facts, '
+      + `but remove repetition and nonessential detail. ${common}`
+  }
+  return `${marker} ${scope} The preceding attempt produced no sendable answer. Answer the current request now `
+    + `with one complete, self-contained and concise final response. ${common}`
+}
+
 function finalAssistant(
   events: readonly SessionEvent[],
   from: number,
   expectedTurn: number | undefined,
-): { text: string; completed: boolean; truncated: boolean; stopped: boolean; failureCode?: string } {
-  if (expectedTurn === undefined) return { text: '', completed: false, truncated: false, stopped: false }
+): {
+  text: string
+  completed: boolean
+  truncated: boolean
+  stopped: boolean
+  hasUnpairedToolCall: boolean
+  failureCode?: string
+} {
+  if (expectedTurn === undefined) {
+    return { text: '', completed: false, truncated: false, stopped: false, hasUnpairedToolCall: false }
+  }
   let text = ''
   let completed = false
   let truncated = false
   let stopped = false
+  const unpairedToolCalls = new Set<string>()
   let failureCode: string | undefined
   for (const event of events.slice(from)) {
     if (event.type === 'assistant/message' && event.data.turn === expectedTurn) {
       text = event.data.message.content.filter(block => block.type === 'text')
         .map(block => block.type === 'text' ? block.text : '').join('')
+      for (const block of event.data.message.content) {
+        if (block.type === 'tool-call') unpairedToolCalls.add(String(block.id))
+      }
+    }
+    if (event.type === 'tool/result' && event.data.turn === expectedTurn) {
+      const block = event.data.message.content.find(value => value.type === 'tool-result')
+      const callId = block?.type === 'tool-result'
+        ? block.toolCallId
+        : event.data.message.source?.callId
+      if (callId !== undefined) unpairedToolCalls.delete(String(callId))
     }
     if (event.type === 'turn/end' && event.data.turn === expectedTurn) {
       const reason = event.data.reason
@@ -1208,7 +1297,14 @@ function finalAssistant(
       failureCode = completed || truncated || typeof error?.code !== 'string' ? undefined : error.code
     }
   }
-  return { text, completed, truncated, stopped, ...(failureCode === undefined ? {} : { failureCode }) }
+  return {
+    text,
+    completed,
+    truncated,
+    stopped,
+    hasUnpairedToolCall: unpairedToolCalls.size > 0,
+    ...(failureCode === undefined ? {} : { failureCode }),
+  }
 }
 
 export class DshDeliveryRuntime implements DeliveryInboundRuntime {
@@ -1303,6 +1399,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   private followupTurn(
     agent: Agent,
     message: ReturnType<typeof createUserMessage>,
+    onClaimed?: (turn: number) => void,
+    onSettled?: () => void,
   ): Promise<number | undefined> {
     return new Promise((resolve, reject) => {
       let claimedTurn: number | undefined
@@ -1325,13 +1423,29 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         reject(error)
       }
       const removeClaimed = this.ctx.on('agent/inbox/claimed', event => {
-        if (event.agent === agent && event.message.id === message.id) claimedTurn = event.turn
+        if (event.agent === agent && event.message.id === message.id) {
+          claimedTurn = event.turn
+          onClaimed?.(event.turn)
+        }
       })
       const removeDiscarded = this.ctx.on('agent/inbox/discarded', event => {
-        if (event.agent === agent && event.message.id === message.id) settle(undefined)
+        if (event.agent !== agent || event.message.id !== message.id) return
+        try {
+          onSettled?.()
+        } catch (error) {
+          fail(error)
+          return
+        }
+        settle(undefined)
       })
       const removeSessionEvent = this.ctx.on('session/event', (session, event) => {
         if (session === agent.session && event.type === 'turn/end' && event.data.turn === claimedTurn) {
+          try {
+            onSettled?.()
+          } catch (error) {
+            fail(error)
+            return
+          }
           settle(claimedTurn)
         }
       })
@@ -1341,6 +1455,131 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         fail(error)
       }
     })
+  }
+
+  /** Wait only for scheduling quiescence; exact turn ownership still comes from followupTurn(). */
+  private async waitForAgentIdle(agent: Agent, signal: AbortSignal): Promise<void> {
+    signal.throwIfAborted()
+    while (true) {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false
+        const cleanup = (): void => signal.removeEventListener('abort', aborted)
+        const finish = (): void => {
+          if (settled) return
+          settled = true
+          cleanup()
+          resolve()
+        }
+        const fail = (error: unknown): void => {
+          if (settled) return
+          settled = true
+          cleanup()
+          reject(error)
+        }
+        const aborted = (): void => {
+          try {
+            signal.throwIfAborted()
+          } catch (error) {
+            fail(error)
+          }
+        }
+        signal.addEventListener('abort', aborted, { once: true })
+        void agent.whenIdle().then(finish, fail)
+        if (signal.aborted) aborted()
+      })
+      signal.throwIfAborted()
+      if (agent.status === 'idle') return
+    }
+  }
+
+  /**
+   * Queue a synthetic completion turn only after the previous exact turn retired. rc.8 may still
+   * serialize scoped tool schemas, but every call is denied before approval/execution while this
+   * turn owns the Agent, so recovering prose cannot repeat an external side effect.
+   */
+  private async automaticCompletionTurn(
+    agent: Agent,
+    message: ReturnType<typeof createUserMessage>,
+    signal: AbortSignal,
+    expectedPreviousTurn: number,
+    authorize: () => InboundAuthorizationState,
+    onClaimed: (turn: number) => void,
+  ): Promise<number | undefined> {
+    await this.waitForAgentIdle(agent, signal)
+    signal.throwIfAborted()
+    let liftPreExecute: (() => void) | undefined
+    let liftRestriction: (() => void) | undefined
+    let liftGuard: (() => void) | undefined
+    let submitted = false
+    let exactTurnSettled = false
+    const releaseToolBarriers = (): void => {
+      let firstError: unknown
+      if (liftGuard !== undefined) {
+        try {
+          liftGuard()
+          liftGuard = undefined
+        } catch (error) {
+          firstError ??= error
+        }
+      }
+      if (liftRestriction !== undefined) {
+        try {
+          liftRestriction()
+          liftRestriction = undefined
+        } catch (error) {
+          firstError ??= error
+        }
+      }
+      if (liftPreExecute !== undefined) {
+        try {
+          liftPreExecute()
+          liftPreExecute = undefined
+        } catch (error) {
+          firstError ??= error
+        }
+      }
+      if (firstError !== undefined) throw firstError
+    }
+    try {
+      liftPreExecute = agent.ctx.on('tools/pre-execute', () => Promise.resolve({
+        kind: 'deny' as const,
+        reason: AUTOMATIC_COMPLETION_TOOL_DENIAL,
+      }), { prepend: true })
+      liftRestriction = agent.ctx.tools.restrict({ allow: [] })
+      liftGuard = agent.ctx.tools.guard(() => AUTOMATIC_COMPLETION_TOOL_DENIAL)
+      signal.throwIfAborted()
+      if (agent.status !== 'idle' || agent.inbox.hasPending) {
+        throw new AutomaticCompletionUnavailableError(
+          'assistant-delivery: automatic completion lost the idle scheduling boundary',
+        )
+      }
+      const latestBoundary = agent.session.events.findLast(event =>
+        event.type === 'turn/start' || event.type === 'turn/end')
+      if (latestBoundary?.type !== 'turn/end' || latestBoundary.data.turn !== expectedPreviousTurn) {
+        throw new AutomaticCompletionUnavailableError(
+          'assistant-delivery: another turn crossed the automatic completion boundary',
+        )
+      }
+      const authorization = authorize()
+      if (authorization !== 'authorized') throw new AutomaticCompletionAuthorizationError(authorization)
+      submitted = true
+      return await this.followupTurn(agent, message, onClaimed, () => {
+        exactTurnSettled = true
+        releaseToolBarriers()
+      })
+    } catch (error) {
+      if (signal.aborted) signal.throwIfAborted()
+      if (submitted || error instanceof AutomaticCompletionAuthorizationError
+        || error instanceof AutomaticCompletionUnavailableError) throw error
+      throw new AutomaticCompletionUnavailableError(
+        'assistant-delivery: automatic completion safety guard was unavailable',
+        { cause: error },
+      )
+    } finally {
+      // A submitted message may already be pending or running even when followup() throws.
+      // Keep the barriers attached to the Agent scope until exact settlement or handle teardown.
+      if (!submitted || exactTurnSettled) releaseToolBarriers()
+    }
   }
 
   private async setupAgent(
@@ -2788,9 +3027,32 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         const authorizationFailure = preDispatchAuthorizationFailure()
         if (authorizationFailure !== undefined) return authorizationFailure
       }
-      const from = agent.session.events.length
+      let turnFrom = agent.session.events.length
+      const automaticCompletionTurns = new Map<number, AutomaticCompletionKind>()
+      const automaticCompletionToolViolations = new Set<number>()
       removeProgress = this.ctx.on('session/event', (session, event) => {
         if (session !== agent.session) return
+        if (event.type === 'step/start') {
+          const automaticKind = automaticCompletionTurns.get(event.data.turn)
+          if (automaticKind !== undefined) {
+            publishProgress({
+              kind: 'step',
+              text: automaticKind === 'compact' ? '正在压缩并补全回答…' : '正在自动补全回答…',
+            })
+            return
+          }
+        }
+        if (event.type === 'tool/call' && automaticCompletionTurns.has(event.data.turn)) {
+          if (!automaticCompletionToolViolations.has(event.data.turn)) {
+            automaticCompletionToolViolations.add(event.data.turn)
+            agent.cancel(
+              { kind: 'hook', reason: 'assistant-delivery-automatic-completion-tool-call' },
+              { keepInbox: true },
+            )
+          }
+          return
+        }
+        if (event.type === 'tool/result' && automaticCompletionTurns.has(event.data.turn)) return
         const update = deliveryProgressFromSessionEvent(event)
         if (update !== undefined) publishProgress(update)
       })
@@ -2814,50 +3076,191 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId,
         trust: 'untrusted',
       } })
-      const deliveryTurn = await this.followupTurn(agent, message)
-      const output = finalAssistant(agent.session.events, from, deliveryTurn)
-      if (!await sessions.flush(agent.session)) {
-        publishProgress({ kind: 'failed', code: 'session-persistence-unavailable' })
-        return { outcome: 'not-processed', failureCode: 'session-flush-failed', retryable: false }
+      let deliveryTurn = await this.followupTurn(agent, message)
+      let completionKind: AutomaticCompletionKind | undefined
+      let automaticTurns = 0
+      let assembledText = ''
+      let bestEffortText = ''
+      while (true) {
+        const output = finalAssistant(agent.session.events, turnFrom, deliveryTurn)
+        let addedText = false
+        if (output.text.trim() !== '') {
+          if (completionKind === 'compact' || completionKind === 'regenerate') {
+            const previousText = assembledText
+            addedText = output.text.trim() !== previousText.trim()
+            if (addedText) assembledText = output.text
+          } else {
+            const merged = mergeContinuationText(assembledText, output.text)
+            assembledText = merged.text
+            addedText = merged.added
+          }
+          bestEffortText = assembledText
+        }
+        // Every exact segment crosses the persistence barrier before another paid model turn can start.
+        if (!await sessions.flush(agent.session)) {
+          publishProgress({ kind: 'failed', code: 'session-persistence-unavailable' })
+          return { outcome: 'not-processed', failureCode: 'session-flush-failed', retryable: false }
+        }
+        signal.throwIfAborted()
+        const cancelled = this.activeSessionControls.get(binding.sessionId)?.command
+        const automaticToolViolation = deliveryTurn !== undefined
+          && automaticCompletionToolViolations.has(deliveryTurn)
+        if (cancelled !== undefined || (output.stopped && !automaticToolViolation)) {
+          publishProgress({ kind: 'failed', code: cancelled === 'new' ? 'new-session' : 'user-stopped' })
+          return { outcome: 'processed' }
+        }
+        const finalAuthorization = checkAuthorization()
+        if (finalAuthorization !== 'authorized') {
+          return finalAuthorization === 'revoked'
+            ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
+            : { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: false }
+        }
+        const currentEmpty = output.text.trim() === ''
+        const oversized = Buffer.byteLength(assembledText, 'utf8') > this.options.maxTextBytes
+        const stalledRecovery = completionKind !== undefined && output.completed && !currentEmpty && !addedText
+        const recoverable = automaticToolViolation || output.truncated
+          || (output.completed && (currentEmpty || oversized || stalledRecovery))
+        if (recoverable && deliveryTurn !== undefined && !output.hasUnpairedToolCall
+          && automaticTurns < this.options.maxAutoContinuationTurns) {
+          const isLastAutomaticTurn = automaticTurns + 1 >= this.options.maxAutoContinuationTurns
+          const nextKind: AutomaticCompletionKind = oversized
+            ? 'compact'
+            : assembledText.trim() === ''
+              ? 'regenerate'
+              : isLastAutomaticTurn
+                ? 'compact'
+                : 'continue'
+          automaticTurns += 1
+          turnFrom = agent.session.events.length
+          const completionMessage = createUserMessage({
+            content: [{
+              type: 'text',
+              text: automaticCompletionPrompt(
+                nextKind,
+                this.options.maxTextBytes,
+                this.options.maxOutputTokens,
+              ),
+            }],
+            source: {
+              kind: 'plugin',
+              plugin: '@dsh-enhanced/assistant-delivery',
+              form: 'notice',
+              summary: `Automatic answer completion attempt ${automaticTurns}`,
+            },
+          })
+          completionKind = nextKind
+          try {
+            deliveryTurn = await this.automaticCompletionTurn(
+              agent,
+              completionMessage,
+              signal,
+              deliveryTurn,
+              checkAuthorization,
+              turn => automaticCompletionTurns.set(turn, nextKind),
+            )
+          } catch (error) {
+            if (error instanceof AutomaticCompletionAuthorizationError) {
+              return error.state === 'revoked'
+                ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
+                : { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: false }
+            }
+            if (!(error instanceof AutomaticCompletionUnavailableError)) throw error
+            signal.throwIfAborted()
+            const cancellation = this.activeSessionControls.get(binding.sessionId)?.command
+            if (cancellation !== undefined) {
+              publishProgress({ kind: 'failed', code: cancellation === 'new' ? 'new-session' : 'user-stopped' })
+              return { outcome: 'processed' }
+            }
+            const fallbackAuthorization = checkAuthorization()
+            if (fallbackAuthorization !== 'authorized') {
+              return fallbackAuthorization === 'revoked'
+                ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
+                : { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: false }
+            }
+            const hasPartial = bestEffortText.trim() !== ''
+            this.options.replyCommand(binding, envelope.eventId, {
+              text: hasPartial
+                ? truncatedAgentReply(bestEffortText, this.options.maxTextBytes)
+                : emptyAgentReply(this.options.maxTextBytes),
+              format: 'markdown',
+            })
+            publishProgress({
+              kind: 'failed',
+              code: hasPartial ? AGENT_OUTPUT_TRUNCATED_CODE : AGENT_EMPTY_RESPONSE_CODE,
+            })
+            return { outcome: 'processed' }
+          }
+          continue
+        }
+        if (automaticToolViolation) {
+          const hasPartial = bestEffortText.trim() !== ''
+          this.options.replyCommand(binding, envelope.eventId, {
+            text: hasPartial
+              ? truncatedAgentReply(bestEffortText, this.options.maxTextBytes)
+              : emptyAgentReply(this.options.maxTextBytes),
+            format: 'markdown',
+          })
+          publishProgress({
+            kind: 'failed',
+            code: hasPartial ? AGENT_OUTPUT_TRUNCATED_CODE : AGENT_EMPTY_RESPONSE_CODE,
+          })
+          return { outcome: 'processed' }
+        }
+        if (output.truncated || oversized) {
+          this.options.replyCommand(binding, envelope.eventId, {
+            text: truncatedAgentReply(bestEffortText, this.options.maxTextBytes),
+            format: 'markdown',
+          })
+          publishProgress({ kind: 'failed', code: AGENT_OUTPUT_TRUNCATED_CODE })
+          return { outcome: 'processed' }
+        }
+        if (stalledRecovery) {
+          this.options.replyCommand(binding, envelope.eventId, {
+            text: truncatedAgentReply(bestEffortText, this.options.maxTextBytes),
+            format: 'markdown',
+          })
+          publishProgress({ kind: 'failed', code: AGENT_OUTPUT_TRUNCATED_CODE })
+          return { outcome: 'processed' }
+        }
+        if (!output.completed) {
+          if (automaticTurns > 0 && bestEffortText.trim() !== '') {
+            this.options.replyCommand(binding, envelope.eventId, {
+              text: truncatedAgentReply(bestEffortText, this.options.maxTextBytes),
+              format: 'markdown',
+            })
+            publishProgress({
+              kind: 'failed',
+              code: output.failureCode ?? AGENT_OUTPUT_TRUNCATED_CODE,
+            })
+            return { outcome: 'processed' }
+          }
+          publishProgress({ kind: 'failed', ...(output.failureCode === undefined ? {} : { code: output.failureCode }) })
+          return { outcome: 'not-processed', failureCode: 'agent-turn-incomplete', retryable: false }
+        }
+        if (currentEmpty || assembledText.trim() === '') {
+          const hasPartial = bestEffortText.trim() !== ''
+          this.options.replyCommand(binding, envelope.eventId, {
+            text: hasPartial
+              ? truncatedAgentReply(bestEffortText, this.options.maxTextBytes)
+              : emptyAgentReply(this.options.maxTextBytes),
+            format: 'markdown',
+          })
+          publishProgress({
+            kind: 'failed',
+            code: hasPartial ? AGENT_OUTPUT_TRUNCATED_CODE : AGENT_EMPTY_RESPONSE_CODE,
+          })
+          return { outcome: 'processed' }
+        }
+        break
       }
-      const cancelled = this.activeSessionControls.get(binding.sessionId)?.command
-      if (cancelled !== undefined || output.stopped) {
-        publishProgress({ kind: 'failed', code: cancelled === 'new' ? 'new-session' : 'user-stopped' })
-        return { outcome: 'processed' }
-      }
-      const finalAuthorization = checkAuthorization()
-      if (finalAuthorization !== 'authorized') {
-        return finalAuthorization === 'revoked'
-          ? { outcome: 'not-processed', failureCode: 'inbound-authorization-revoked', retryable: false }
-          : { outcome: 'not-processed', failureCode: 'inbound-authorization-check-failed', retryable: false }
-      }
-      if (output.truncated || Buffer.byteLength(output.text, 'utf8') > this.options.maxTextBytes) {
-        this.options.replyCommand(binding, envelope.eventId, {
-          text: truncatedAgentReply(output.text, this.options.maxTextBytes),
-          format: 'markdown',
-        })
-        publishProgress({ kind: 'failed', code: AGENT_OUTPUT_TRUNCATED_CODE })
-        return { outcome: 'processed' }
-      }
-      if (!output.completed) {
-        publishProgress({ kind: 'failed', ...(output.failureCode === undefined ? {} : { code: output.failureCode }) })
-        return { outcome: 'not-processed', failureCode: 'agent-turn-incomplete', retryable: false }
-      }
-      if (output.text.trim() === '') {
-        this.options.replyCommand(binding, envelope.eventId, {
-          text: emptyAgentReply(this.options.maxTextBytes),
-          format: 'markdown',
-        })
-        publishProgress({ kind: 'failed', code: AGENT_EMPTY_RESPONSE_CODE })
-        return { outcome: 'processed' }
-      }
+      signal.throwIfAborted()
       // Agent answers are authored as Markdown (tables, bold, inline code), so request Markdown
       // rendering; sending them as plain text shows the raw `|---|` and `**` syntax to the user.
       const learning = await this.options.replyCompletedPreferenceTurn(
         agent,
         binding,
         envelope,
-        { text: output.text, format: 'markdown' },
+        { text: assembledText, format: 'markdown' },
       )
       if (learning === 'unknown') {
         this.ctx.logger.warn('assistant-delivery: completed-turn preference projection is ambiguous')

@@ -126,10 +126,10 @@ traex --sandbox read-only --ask-for-approval never acp serve
 - SDK 前的 wire guard 会追踪 JSON-RPC request id；非法 envelope、未知/重复 response id、未声明的 filesystem/terminal request 和未知 notification 都会终止该轮，不交给 SDK 宽松处理。
 - 只消费当前 session 的文本 `agent_message_chunk`；普通文本直接成为最终回复，严格匹配 `dsh-tool-calls/v1` 的信封会转换为 DSH tool call。thought、plan 和 TraeX 自己的 tool update 不会伪装成 DSH 输出。
 - 工具信封只允许调用本次 `GenerateOptions.tools` 中存在的精确名称，参数必须是 JSON 对象；未知工具、空调用或畸形信封以 `ACP_PROTOCOL_ERROR` fail closed。截断终态不会执行工具信封。若模型误在合法信封前附加一小段进度说明，插件会只提取并隐藏该信封，避免原始 JSON 泄漏到对话界面；不含协议标记的普通 JSON 仍按文本处理。
-- `end_turn`、`max_tokens`、`max_turn_requests` 是可完成终态；`refusal`、`cancelled`、断连、畸形/超限 NDJSON、无文本或缺少终态都会失败。
+- `end_turn` 是正常完成终态；`max_tokens`、`max_turn_requests` 都映射为 DSH `max-tokens` 截断终态，供上层决定是否创建新的补全 turn。`refusal`、`cancelled`、断连、畸形/超限 NDJSON、无文本或缺少终态都会失败。
 - TraeX 可能仍在 stderr 记录 `unsupported call` 一类内部工具路由告警；这是其内部工具未向本兼容层开放，不等同于 DSH 工具失败。插件会要求模型只返回 `dsh-tool-calls/v1` 信封；若调用仍失败，生命周期日志会同时给出 phase、terminal、exitCode 和 signal，便于区分终态缺失、协议校验与进程退出。
 - 已保存的 effort 可能在切换模型、账号权益变化或目录更新后失效。此时插件在 `session/prompt` 前丢弃该陈旧值，使用本次 ACP session 返回的当前默认档位继续执行；不会重放 prompt 或重复计费，生命周期日志会标记 `reasoningFallback=true`。下次打开模型选择器会显示新目录。
-- 不自动重试。外部 agent 可能已经读取上下文或产生服务端计费，自动重试会放大副作用。
+- Provider 不会重放同一个已提交请求。外部 agent 可能已经读取上下文或产生服务端计费，原请求自动重试会放大副作用；上层 `assistant-delivery` 可在持久化 `max_tokens` / `max_turn_requests` 终态后，选择创建新的、有界、禁止工具执行的后续 turn 来补齐回答，这不属于 Provider 重试。rc.8 仍可能向 Provider 序列化 scoped tool schema，但恢复期间的任何工具调用都会在审批和执行前被拒绝。TraeX 的每个后续 turn 仍会启动新进程/session，并按一次新的模型调用消耗额度。
 
 调用失败时返回的稳定 `LlmError` code 与排查：
 

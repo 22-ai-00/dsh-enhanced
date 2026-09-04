@@ -11,6 +11,8 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 
 插件默认 `enabled: false`，安装后不会立即读取凭据或联网。启用后，合法新消息落盘时可添加 `Get`，最终答复发送成功后可添加 `DONE`；reaction 与原生执行进度都是 best-effort 展示，最终答复仍由 Delivery Outbox 保证。
 
+模型回答被输出上限截断、返回空正文或超过 Delivery 的 `maxTextBytes` 时，Delivery 默认会在后台自动续写、重新生成或压缩，并在恢复完成后只向飞书发送一条完整答复；正常情况不需要用户再回复“继续”。模型恢复次数耗尽或安全调度边界不可用时才展示明确的未完成提示，也不再要求用户发送“继续”这类协议词；持久化无法确认时则不投递结果，任何情况都不会把半句标成“任务已完成”。Delivery 与本插件的 `maxTextBytes` 默认都为 `65536`，手工覆盖时应保持一致。
+
 默认进度策略为 `progressDetails: direct`：经 Delivery 授权的私聊可显示限长、常见凭据已脱敏的工具参数和结果；默认向导只授权 owner。群聊只显示工具名、状态、步骤与待办。`progressDetails: off` 可在所有会话隐藏参数和结果。任何 reasoning/thinking 内容都不外发；飞书 `message_cot` 不可用时只降级展示，不影响任务或最终回复。
 
 ## 文档

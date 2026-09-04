@@ -378,6 +378,7 @@ export interface Config {
   agentProvider?: string
   agentModel?: string
   agentMaxOutputTokens?: number
+  agentMaxAutoContinuationTurns?: number
   modelPickerTtlMs?: number
   permissionPickerTtlMs?: number
   toolApprovalTtlMs?: number
@@ -432,6 +433,7 @@ const configSchema = Schema.object({
   agentProvider: Schema.string().min(1).default('deepseek-official'),
   agentModel: Schema.string().min(1).default('deepseek-v4-flash'),
   agentMaxOutputTokens: Schema.number().step(1).min(1).default(8_192),
+  agentMaxAutoContinuationTurns: Schema.number().step(1).min(0).max(8).default(2),
   modelPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   permissionPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   toolApprovalTtlMs: Schema.number().step(1).min(1_000).max(300_000).default(300_000),
@@ -1000,6 +1002,7 @@ export class AssistantDeliveryService extends Service {
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         getAgentPresets: () => runtimeCtx.get('agentPresets'),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
+        maxAutoContinuationTurns: config.agentMaxAutoContinuationTurns,
         maxTextBytes: config.maxTextBytes,
         modelPickerTtlMs: config.modelPickerTtlMs,
         permissionPickerTtlMs: config.permissionPickerTtlMs,
