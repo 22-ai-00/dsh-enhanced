@@ -3,8 +3,11 @@
 # Shared implementation for install-local.sh and install-npm.sh.
 # This file is sourced by the two public entrypoints; do not execute it directly.
 
-DSH_ENHANCED_DEFAULT_DSH_VERSION='0.1.0-rc.8'
+DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
+if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
+  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.0-rc.8'
+fi
 DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
   'personal-assistant'
   # Read-only capability discovery and owner-approved staging are part of the
@@ -78,6 +81,7 @@ Options:
   --model-api <protocol>    openai-completions (default), openai-responses, or anthropic-messages (custom provider only)
   --model-display-name <s>  Optional human label for a custom provider route
   --dsh-version <version>   DSH version to ensure (default: ${DSH_ENHANCED_DEFAULT_DSH_VERSION})
+  --ack-unverified-host     Allow a DSH version outside ${DSH_ENHANCED_VERIFIED_HOST_RANGE}
   --no-service              Do not install or restart the platform resident service
   --yes                     Choose the safe default without the installer menu
   --dry-run                 Print the complete plan without changing the machine
@@ -164,28 +168,139 @@ dsh_enhanced_require_node() {
   fi
 }
 
+dsh_enhanced_is_host_version() {
+  local version="$1"
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+}
+
+dsh_enhanced_version_ge() {
+  local left="${1%%+*}"
+  local right="${2%%+*}"
+  [[ "$left" == "$right" ]] && return 0
+
+  local left_core="${left%%-*}"
+  local right_core="${right%%-*}"
+  local left_prerelease=''
+  local right_prerelease=''
+  local higher
+  if [[ "$left" == *-* ]]; then left_prerelease="${left#*-}"; fi
+  if [[ "$right" == *-* ]]; then right_prerelease="${right#*-}"; fi
+
+  if [[ "$left_core" != "$right_core" ]]; then
+    higher="$(printf '%s\n%s\n' "$left_core" "$right_core" | LC_ALL=C sort -V | tail -n1)"
+    [[ "$higher" == "$left_core" ]]
+    return
+  fi
+
+  # GNU version sort places a suffix after the otherwise identical bare
+  # version. SemVer has the opposite rule: 0.1.0 is newer than 0.1.0-rc.8.
+  [[ -z "$left_prerelease" ]] && return 0
+  [[ -z "$right_prerelease" ]] && return 1
+  higher="$(printf '%s\n%s\n' "$left_prerelease" "$right_prerelease" | LC_ALL=C sort -V | tail -n1)"
+  [[ "$higher" == "$left_prerelease" ]]
+}
+
+dsh_enhanced_version_in_range() {
+  local version="$1"
+  local range="$2"
+  local token
+  local bound
+  local -a tokens=()
+  read -r -a tokens <<< "$range"
+  [[ ${#tokens[@]} -gt 0 ]] || return 1
+
+  for token in "${tokens[@]}"; do
+    case "$token" in
+      '>='*)
+        bound="${token#>=}"
+        dsh_enhanced_is_host_version "$bound" && dsh_enhanced_version_ge "$version" "$bound" || return 1
+        ;;
+      '>'*)
+        bound="${token#>}"
+        dsh_enhanced_is_host_version "$bound" || return 1
+        dsh_enhanced_version_ge "$version" "$bound" || return 1
+        if dsh_enhanced_version_ge "$bound" "$version"; then return 1; fi
+        ;;
+      '<='*)
+        bound="${token#<=}"
+        dsh_enhanced_is_host_version "$bound" && dsh_enhanced_version_ge "$bound" "$version" || return 1
+        ;;
+      '<'*)
+        bound="${token#<}"
+        dsh_enhanced_is_host_version "$bound" || return 1
+        dsh_enhanced_version_ge "$bound" "$version" || return 1
+        if dsh_enhanced_version_ge "$version" "$bound"; then return 1; fi
+        ;;
+      '='*)
+        bound="${token#=}"
+        dsh_enhanced_is_host_version "$bound" || return 1
+        dsh_enhanced_version_ge "$version" "$bound" || return 1
+        dsh_enhanced_version_ge "$bound" "$version" || return 1
+        ;;
+      *)
+        bound="$token"
+        dsh_enhanced_is_host_version "$bound" || return 1
+        dsh_enhanced_version_ge "$version" "$bound" || return 1
+        dsh_enhanced_version_ge "$bound" "$version" || return 1
+        ;;
+    esac
+  done
+}
+
 dsh_enhanced_ensure_dsh() {
   local requested_version="$1"
   local dry_run="$2"
+  local ack_unverified_host="$3"
+  local target_version="$requested_version"
   local current_version=''
   printf 'DSH 目标：@deepseek-ai/dsh@%s\n' "$requested_version"
+  if [[ "$requested_version" == 'latest' ]]; then
+    if [[ "$dry_run" == '1' ]]; then
+      dsh_enhanced_print_command npm install --global '@deepseek-ai/dsh@latest'
+      return 0
+    fi
+    if ! target_version="$(npm view @deepseek-ai/dsh dist-tags.latest)"; then
+      dsh_enhanced_fail 1 '无法从 npm 查询 @deepseek-ai/dsh 的 latest 版本。'
+      return $?
+    fi
+    if ! dsh_enhanced_is_host_version "$target_version"; then
+      dsh_enhanced_fail 1 "npm 返回了无效的 @deepseek-ai/dsh latest 版本：${target_version:-empty}"
+      return $?
+    fi
+    printf 'DSH latest 已解析为：%s\n' "$target_version"
+  fi
+  if ! dsh_enhanced_version_in_range "$target_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+    printf '警告：DSH %s 超出 dsh-enhanced 已验证范围 %s。\n' \
+      "$target_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE" >&2
+    if [[ "$ack_unverified_host" != '1' ]]; then
+      dsh_enhanced_fail 2 '如需继续，请显式传入 --ack-unverified-host。'
+      return $?
+    fi
+    printf '已确认继续使用未经验证的 DSH host 版本。\n' >&2
+  fi
   if [[ "$dry_run" == '1' ]]; then
-    dsh_enhanced_print_command npm install --global "@deepseek-ai/dsh@$requested_version"
+    dsh_enhanced_print_command npm install --global "@deepseek-ai/dsh@$target_version"
     return 0
   fi
   if command -v dsh >/dev/null 2>&1; then
     current_version="$(dsh --version 2>/dev/null || true)"
   fi
-  if [[ "$current_version" == "$requested_version" ]]; then
-    printf 'DSH 已安装且版本匹配：%s\n' "$current_version"
+  if [[ -n "$current_version" ]] && dsh_enhanced_is_host_version "$current_version" \
+    && dsh_enhanced_version_ge "$current_version" "$target_version"; then
+    if dsh_enhanced_version_ge "$target_version" "$current_version"; then
+      printf 'DSH 已安装且版本匹配：%s\n' "$current_version"
+    else
+      printf 'DSH 当前版本 %s 高于目标 %s；保留现有版本，避免降级。\n' \
+        "$current_version" "$target_version"
+    fi
     return 0
   fi
   if [[ -n "$current_version" ]]; then
-    printf 'DSH 当前版本为 %s，正在切换到 %s。\n' "$current_version" "$requested_version"
+    printf 'DSH 当前版本为 %s，正在升级到 %s。\n' "$current_version" "$target_version"
   else
     printf '未检测到 DSH，正在安装。\n'
   fi
-  npm install --global "@deepseek-ai/dsh@$requested_version"
+  npm install --global "@deepseek-ai/dsh@$target_version"
   hash -r
   dsh_enhanced_refresh_global_path || true
   if ! command -v dsh >/dev/null 2>&1; then
@@ -193,8 +308,9 @@ dsh_enhanced_ensure_dsh() {
     return $?
   fi
   current_version="$(dsh --version 2>/dev/null || true)"
-  if [[ "$current_version" != "$requested_version" ]]; then
-    dsh_enhanced_fail 1 "DSH 版本校验失败：得到 ${current_version:-unknown}，期望 $requested_version。"
+  if ! dsh_enhanced_is_host_version "$current_version" \
+    || ! dsh_enhanced_version_ge "$current_version" "$target_version"; then
+    dsh_enhanced_fail 1 "DSH 版本校验失败：得到 ${current_version:-unknown}，期望不低于 $target_version。"
     return $?
   fi
 }
@@ -1668,6 +1784,7 @@ dsh_enhanced_install() {
   local plugin_version="${DSH_ENHANCED_VERSION:-latest}"
   local manage_service='1'
   local ack_existing_automations='0'
+  local ack_unverified_host='0'
   local assume_yes='0'
   local dry_run='0'
   local add_ons=()
@@ -1772,6 +1889,10 @@ dsh_enhanced_install() {
         ack_existing_automations='1'
         shift
         ;;
+      --ack-unverified-host)
+        ack_unverified_host='1'
+        shift
+        ;;
       --yes)
         assume_yes='1'
         shift
@@ -1850,7 +1971,8 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 '--model-base-url/--model-api/--model-display-name 仅适用于自定义 provider，不能用于 deepseek-official。'
     return $?
   fi
-  if [[ -z "$dsh_version" || "$dsh_version" == -* ]]; then
+  if [[ -z "$dsh_version" \
+    || ( "$dsh_version" != 'latest' && ! "$dsh_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ) ]]; then
     dsh_enhanced_fail 2 'DSH 版本值不合法。'
     return $?
   fi
@@ -1954,7 +2076,7 @@ dsh_enhanced_install() {
   if [[ "$dry_run" != '1' ]]; then
     dsh_enhanced_require_node || return $?
   fi
-  dsh_enhanced_ensure_dsh "$dsh_version" "$dry_run" || return $?
+  dsh_enhanced_ensure_dsh "$dsh_version" "$dry_run" "$ack_unverified_host" || return $?
 
   if [[ "$source_mode" == 'local' ]]; then
     dsh_enhanced_ensure_pnpm "$dry_run" || return $?

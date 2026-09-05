@@ -169,7 +169,7 @@ describe('one-click installers', () => {
     expect(explicit.stdout).not.toContain('dsh-supervised-growth-setup')
   })
 
-  test('npm installer pins DSH and applies one release selector to every published bundle', async () => {
+  test('npm installer tracks the latest DSH and applies one release selector to every published bundle', async () => {
     const dshHome = await temporaryDshHome()
 
     const result = runInstaller(npmInstaller, [
@@ -178,7 +178,7 @@ describe('one-click installers', () => {
 
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('目标 profile：personal-web')
-    expect(result.stdout).toContain('@deepseek-ai/dsh@0.1.0-rc.8')
+    expect(result.stdout).toContain('@deepseek-ai/dsh@latest')
     expect(result.stdout).toContain('@dsh-enhanced/personal-assistant@0.2.0')
     expect(result.stdout).toContain('@dsh-enhanced/plugin-control-plane@0.2.0')
     expect(result.stdout).not.toContain('@dsh-enhanced/lark-channel@0.2.0')
@@ -357,6 +357,69 @@ describe('one-click installers', () => {
     expect(result.stdout).not.toContain('dsh plugin')
   })
 
+  test('compares prereleases without treating an rc as newer than the matching stable version', () => {
+    const result = spawnSync('/bin/bash', [
+      '-c', [
+        'source "$1"',
+        'dsh_enhanced_version_ge 0.1.0-rc.8 0.1.0-rc.7',
+        '! dsh_enhanced_version_ge 0.1.0-rc.7 0.1.0-rc.8',
+        'dsh_enhanced_version_ge 0.1.0 0.1.0-rc.8',
+        '! dsh_enhanced_version_ge 0.1.0-rc.8 0.1.0',
+        'dsh_enhanced_version_ge 0.1.2-rc.1 0.1.0-rc.8',
+        "dsh_enhanced_version_in_range 0.1.2-rc.1 '>=0.1.0-rc.8 <0.2.0'",
+        "! dsh_enhanced_version_in_range 0.2.0 '>=0.1.0-rc.8 <0.2.0'",
+      ].join('\n'),
+      'installer-test', installerLibrary,
+    ], { encoding: 'utf8' })
+
+    expect(result.status, result.stderr).toBe(0)
+  })
+
+  test('resolves latest but preserves an installed newer DSH version', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'commands.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.3\n'; fi
+`)
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+printf 'npm %s\n' "$*" >> "$INSTALL_LOG"
+if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.2-rc.1\n'; fi
+`)
+
+    const result = spawnSync('/bin/bash', [
+      '-c', 'source "$1"; dsh_enhanced_ensure_dsh latest 0 0',
+      'installer-test', installerLibrary,
+    ], {
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:/usr/bin:/bin`, INSTALL_LOG: logPath },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('DSH latest 已解析为：0.1.2-rc.1')
+    expect(result.stdout).toContain('保留现有版本，避免降级')
+    expect(await readFile(logPath, 'utf8')).toBe('npm view @deepseek-ai/dsh dist-tags.latest\n')
+  })
+
+  test('requires explicit acknowledgement for a host outside the verified range', async () => {
+    const dshHome = await temporaryDshHome()
+    const blocked = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--dsh-version', '0.1.0-rc.7',
+    ], dshHome)
+    expect(blocked.status).toBe(2)
+    expect(blocked.stderr).toContain('超出 dsh-enhanced 已验证范围 >=0.1.0-rc.8')
+    expect(blocked.stderr).toContain('--ack-unverified-host')
+    expect(blocked.stdout).not.toContain('dsh plugin')
+
+    const acknowledged = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'skip', '--dsh-version', '0.1.0-rc.7', '--ack-unverified-host',
+    ], dshHome)
+    expect(acknowledged.status, acknowledged.stderr).toBe(0)
+    expect(acknowledged.stderr).toContain('已确认继续使用未经验证的 DSH host 版本')
+    expect(acknowledged.stdout).toContain('@deepseek-ai/dsh@0.1.0-rc.7')
+  })
+
   test('local installer replaces an incompatible DSH and executes build, install, and validation', async () => {
     const root = await temporaryDshHome()
     const dshHome = join(root, 'dsh-home')
@@ -386,6 +449,7 @@ fi
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
 printf 'npm %s\\n' "$*" >> "$INSTALL_LOG"
+if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.0-rc.8\\n'; exit 0; fi
 if [[ "\${1:-}" == 'prefix' ]]; then printf '%s\\n' "$FAKE_PREFIX"; exit 0; fi
 if [[ "$*" == 'install --global @deepseek-ai/dsh@0.1.0-rc.8' ]]; then
   cp "$FAKE_BIN/dsh-new" "$FAKE_BIN/dsh"
@@ -438,6 +502,7 @@ if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.0-rc.8\n'; fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
@@ -496,6 +561,7 @@ if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.0-rc.8\\n'; exit 0; fi
 if [[ "\${1:-}" == 'prefix' ]]; then printf '%s\\n' "$FAKE_PREFIX"; fi
 exit 0
 `)
@@ -626,6 +692,7 @@ if [[ "\${1:-}" == '--version' ]]; then printf 'v24.7.0\\n'; fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+if [[ "$*" == 'view @deepseek-ai/dsh dist-tags.latest' ]]; then printf '0.1.0-rc.8\\n'; fi
 exit 0
 `)
     await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash

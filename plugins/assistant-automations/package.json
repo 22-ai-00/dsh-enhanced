@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/assistant-automations",
-  "version": "0.1.22",
+  "version": "0.1.23",
   "description": "A durable, fenced cold-start scheduler and isolated Agent runner for DeepSeek Harness.",
   "license": "MIT",
   "type": "module",
