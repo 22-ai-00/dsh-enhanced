@@ -87,6 +87,16 @@ afterEach(async () => {
 })
 
 describe('one-click installers', () => {
+  test('keeps the shared installer compatible with macOS Bash 3.2 empty-array semantics', async () => {
+    const source = await readFile(installerLibrary, 'utf8')
+
+    expect(source).not.toMatch(/\b(?:mapfile|readarray)\b/u)
+    expect(source).not.toMatch(/\|\s+(?:LC_ALL=C\s+)?sort -V/u)
+    expect(source).toContain('if [[ -n "${selected_slugs[0]+set}" ]]')
+    expect(source).toContain('if [[ -n "${add_ons[0]+set}" ]]')
+    expect(source).toContain('${overlay_args[@]+"${overlay_args[@]}"}')
+  })
+
   test('local installer defaults to the safe core scenario with capability discovery and excludes optional bundles', async () => {
     const dshHome = await temporaryDshHome()
 

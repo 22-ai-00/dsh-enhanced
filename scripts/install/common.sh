@@ -182,22 +182,55 @@ dsh_enhanced_version_ge() {
   local right_core="${right%%-*}"
   local left_prerelease=''
   local right_prerelease=''
-  local higher
+  local left_major left_minor left_patch
+  local right_major right_minor right_patch
+  local left_identifier right_identifier
+  local index
+  local LC_ALL=C
   if [[ "$left" == *-* ]]; then left_prerelease="${left#*-}"; fi
   if [[ "$right" == *-* ]]; then right_prerelease="${right#*-}"; fi
 
-  if [[ "$left_core" != "$right_core" ]]; then
-    higher="$(printf '%s\n%s\n' "$left_core" "$right_core" | LC_ALL=C sort -V | tail -n1)"
-    [[ "$higher" == "$left_core" ]]
-    return
-  fi
+  IFS=. read -r left_major left_minor left_patch <<< "$left_core"
+  IFS=. read -r right_major right_minor right_patch <<< "$right_core"
+  for index in 0 1 2; do
+    case "$index" in
+      0) left_identifier="$left_major"; right_identifier="$right_major" ;;
+      1) left_identifier="$left_minor"; right_identifier="$right_minor" ;;
+      *) left_identifier="$left_patch"; right_identifier="$right_patch" ;;
+    esac
+    if (( 10#$left_identifier > 10#$right_identifier )); then return 0; fi
+    if (( 10#$left_identifier < 10#$right_identifier )); then return 1; fi
+  done
 
-  # GNU version sort places a suffix after the otherwise identical bare
-  # version. SemVer has the opposite rule: 0.1.0 is newer than 0.1.0-rc.8.
+  # A stable version has higher precedence than a prerelease with the same
+  # core. Compare prerelease identifiers without GNU-only `sort -V`, because
+  # the public installer also supports macOS's Bash 3.2 and BSD userland.
   [[ -z "$left_prerelease" ]] && return 0
   [[ -z "$right_prerelease" ]] && return 1
-  higher="$(printf '%s\n%s\n' "$left_prerelease" "$right_prerelease" | LC_ALL=C sort -V | tail -n1)"
-  [[ "$higher" == "$left_prerelease" ]]
+
+  local -a left_identifiers=()
+  local -a right_identifiers=()
+  IFS=. read -r -a left_identifiers <<< "$left_prerelease"
+  IFS=. read -r -a right_identifiers <<< "$right_prerelease"
+  index=0
+  while [[ -n "${left_identifiers[$index]+set}" || -n "${right_identifiers[$index]+set}" ]]; do
+    if [[ -z "${left_identifiers[$index]+set}" ]]; then return 1; fi
+    if [[ -z "${right_identifiers[$index]+set}" ]]; then return 0; fi
+    left_identifier="${left_identifiers[$index]}"
+    right_identifier="${right_identifiers[$index]}"
+    if [[ "$left_identifier" != "$right_identifier" ]]; then
+      if [[ "$left_identifier" =~ ^[0-9]+$ && "$right_identifier" =~ ^[0-9]+$ ]]; then
+        (( 10#$left_identifier > 10#$right_identifier ))
+        return
+      fi
+      [[ "$left_identifier" =~ ^[0-9]+$ ]] && return 1
+      [[ "$right_identifier" =~ ^[0-9]+$ ]] && return 0
+      [[ "$left_identifier" > "$right_identifier" ]]
+      return
+    fi
+    index=$((index + 1))
+  done
+  return 0
 }
 
 dsh_enhanced_version_in_range() {
@@ -206,10 +239,10 @@ dsh_enhanced_version_in_range() {
   local token
   local bound
   local -a tokens=()
+  [[ -n "$range" ]] || return 1
   read -r -a tokens <<< "$range"
-  [[ ${#tokens[@]} -gt 0 ]] || return 1
 
-  for token in "${tokens[@]}"; do
+  for token in "${tokens[@]+"${tokens[@]}"}"; do
     case "$token" in
       '>='*)
         bound="${token#>=}"
@@ -898,11 +931,12 @@ dsh_enhanced_apply_model() {
   local setup_launcher=()
   local setup_display="$dsh_home/profiles/$profile/node_modules/.bin/dsh-model-setup"
   if [[ "$dry_run" != '1' ]]; then
-    # `mapfile` from a process substitution always exits 0, so capture the
-    # resolver output and treat an empty result as the failure signal.
     local resolved_launcher=()
-    mapfile -t resolved_launcher < <(dsh_enhanced_resolve_model_setup "$profile" "$dsh_home")
-    if [[ ${#resolved_launcher[@]} -eq 0 ]]; then
+    local launcher_token
+    while IFS= read -r launcher_token; do
+      resolved_launcher+=("$launcher_token")
+    done < <(dsh_enhanced_resolve_model_setup "$profile" "$dsh_home")
+    if [[ -z "${resolved_launcher[0]+set}" ]]; then
       dsh_enhanced_fail 1 "找不到安装后的 dsh-model-setup（既无 .bin/dsh-model-setup，也无 personal-assistant/assistant-policy 的 bin 脚本）：$dsh_home/profiles/$profile"
       return $?
     fi
@@ -1424,7 +1458,8 @@ dsh_enhanced_verify_profile_activation() {
   trap 'dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"' EXIT
   trap 'dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"; exit 130' INT
   trap 'dsh_enhanced_cleanup_activation_probe "$probe_pid" "$probe_directory"; exit 143' TERM
-  dsh --profile "$profile" "${overlay_args[@]}" --host 127.0.0.1 --no-open --port 0 > "$stdout_path" 2> "$stderr_path" &
+  dsh --profile "$profile" "${overlay_args[@]+"${overlay_args[@]}"}" \
+    --host 127.0.0.1 --no-open --port 0 > "$stdout_path" 2> "$stderr_path" &
   probe_pid=$!
   local ready='0'
   local elapsed
@@ -1692,7 +1727,7 @@ dsh_enhanced_apply_lark() {
       fi
       # Refresh only the policy layer from the existing channel binding before
       # any restart; this path never reopens app/credential/owner onboarding.
-      if [[ ${#agent_tools_flag[@]} -gt 0 ]]; then
+      if [[ "$agent_tools" != 'preserve' ]]; then
         dsh_enhanced_run "$dry_run" "$setup_bin" --profile "$profile" --refresh-agent-policy \
           "${agent_tools_flag[@]}" || return $?
       fi
@@ -1722,7 +1757,7 @@ dsh_enhanced_apply_lark() {
       ;;
     skip)
       printf '\n飞书处理：本次跳过；现有配置不会被修改。\n'
-      if [[ ${#agent_tools_flag[@]} -gt 0 ]]; then
+      if [[ "$agent_tools" != 'preserve' ]]; then
         if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
           dsh_enhanced_fail 1 "找不到安装后的 dsh-lark-setup：$setup_bin"
           return $?
@@ -2094,9 +2129,11 @@ dsh_enhanced_install() {
   local existing_slug
   dsh_enhanced_append_slug() {
     local candidate="$1"
-    for existing_slug in "${selected_slugs[@]}"; do
-      [[ "$existing_slug" == "$candidate" ]] && return 0
-    done
+    if [[ -n "${selected_slugs[0]+set}" ]]; then
+      for existing_slug in "${selected_slugs[@]}"; do
+        [[ "$existing_slug" == "$candidate" ]] && return 0
+      done
+    fi
     selected_slugs+=("$candidate")
   }
   for slug in "${DSH_ENHANCED_CORE_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
@@ -2115,20 +2152,22 @@ dsh_enhanced_install() {
       for slug in "${DSH_ENHANCED_LEGACY_FULL_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
       ;;
   esac
-  for slug in "${add_ons[@]}"; do
-    case "$slug" in
-      coding) dsh_enhanced_append_slug 'coding-subscription-provider' ;;
-      traex) dsh_enhanced_append_slug 'traex-acp-provider' ;;
-      health) dsh_enhanced_append_slug 'assistant-health' ;;
-      heartbeat) dsh_enhanced_append_slug 'assistant-heartbeat' ;;
-      events) dsh_enhanced_append_slug 'event-triggers' ;;
-      bridge) dsh_enhanced_append_slug 'memory-wiki-bridge' ;;
-      *)
-        dsh_enhanced_fail 2 "不支持的 --with add-on：$slug；可选 coding、traex、health、heartbeat、events、bridge。"
-        return $?
-        ;;
-    esac
-  done
+  if [[ -n "${add_ons[0]+set}" ]]; then
+    for slug in "${add_ons[@]}"; do
+      case "$slug" in
+        coding) dsh_enhanced_append_slug 'coding-subscription-provider' ;;
+        traex) dsh_enhanced_append_slug 'traex-acp-provider' ;;
+        health) dsh_enhanced_append_slug 'assistant-health' ;;
+        heartbeat) dsh_enhanced_append_slug 'assistant-heartbeat' ;;
+        events) dsh_enhanced_append_slug 'event-triggers' ;;
+        bridge) dsh_enhanced_append_slug 'memory-wiki-bridge' ;;
+        *)
+          dsh_enhanced_fail 2 "不支持的 --with add-on：$slug；可选 coding、traex、health、heartbeat、events、bridge。"
+          return $?
+          ;;
+      esac
+    done
+  fi
   # Selecting the TraeX agent route as the default model pulls in its provider
   # bundle so the route can be enabled and resolve in the same run.  Interactive
   # selection happens after install and is handled on the spot in apply_model.
