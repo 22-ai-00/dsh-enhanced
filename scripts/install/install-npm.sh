@@ -4,8 +4,8 @@ set -euo pipefail
 # These values are rewritten by release-version.mjs during `release:prepare`.
 # A remote `curl | bash` invocation therefore fetches common.sh from one tagged
 # release and refuses a changed payload before it executes it.
-DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.23'
-DSH_ENHANCED_PINNED_COMMON_SHA256='f9db9b22d66d5b06bdc64137f15174cd97063fcda95ae4ac34aca3bbde900a0b'
+DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.24'
+DSH_ENHANCED_PINNED_COMMON_SHA256='2ef41724f752a9030a158822288d0e3326e7b046102ead5013594679120ba821'
 DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.0-rc.8'
 export DSH_ENHANCED_VERIFIED_HOST_RANGE
 

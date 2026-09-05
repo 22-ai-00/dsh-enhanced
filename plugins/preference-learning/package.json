@@ -1,6 +1,6 @@
 {
   "name": "@dsh-enhanced/preference-learning",
-  "version": "0.1.23",
+  "version": "0.1.24",
   "description": "Bounded, typed preference learning for the DSH personal assistant.",
   "license": "MIT",
   "type": "module",
