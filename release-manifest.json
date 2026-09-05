@@ -1,39 +1,8 @@
 {
   "schemaVersion": 1,
   "current": {
-    "version": "0.1.23",
-    "releasedAt": "2026-09-04T16:50:57.155Z",
-    "verifiedHostRange": ">=0.1.0-rc.8",
-    "packages": {
-      "@dsh-enhanced/assistant-growth-contract": "0.1.23",
-      "@dsh-enhanced/llm-route-capabilities": "0.1.23",
-      "@dsh-enhanced/acp": "0.1.23",
-      "@dsh-enhanced/assistant-automations": "0.1.23",
-      "@dsh-enhanced/assistant-delivery": "0.1.23",
-      "@dsh-enhanced/assistant-evaluation": "0.1.23",
-      "@dsh-enhanced/assistant-evolution": "0.1.23",
-      "@dsh-enhanced/assistant-growth-experiments": "0.1.23",
-      "@dsh-enhanced/assistant-health": "0.1.23",
-      "@dsh-enhanced/assistant-heartbeat": "0.1.23",
-      "@dsh-enhanced/assistant-policy": "0.1.23",
-      "@dsh-enhanced/assistant-recovery": "0.1.23",
-      "@dsh-enhanced/coding-subscription-provider": "0.1.23",
-      "@dsh-enhanced/credentials-keychain": "0.1.23",
-      "@dsh-enhanced/event-triggers": "0.1.23",
-      "@dsh-enhanced/hello": "0.1.23",
-      "@dsh-enhanced/lark-channel": "0.1.23",
-      "@dsh-enhanced/memory-wiki-bridge": "0.1.23",
-      "@dsh-enhanced/personal-assistant": "0.1.23",
-      "@dsh-enhanced/personal-memory": "0.1.23",
-      "@dsh-enhanced/personal-wiki": "0.1.23",
-      "@dsh-enhanced/plugin-control-plane": "0.1.23",
-      "@dsh-enhanced/preference-learning": "0.1.23",
-      "@dsh-enhanced/traex-acp-provider": "0.1.23"
-    }
-  },
-  "pending": {
     "version": "0.1.24",
-    "preparedAt": "2026-09-05T01:24:42.496Z",
+    "releasedAt": "2026-09-05T01:35:10.561Z",
     "verifiedHostRange": ">=0.1.0-rc.8",
     "packages": {
       "@dsh-enhanced/assistant-growth-contract": "0.1.24",
@@ -62,6 +31,7 @@
       "@dsh-enhanced/traex-acp-provider": "0.1.24"
     }
   },
+  "pending": null,
   "history": [
     {
       "version": "0.1.0",
@@ -487,6 +457,37 @@
         "@dsh-enhanced/plugin-control-plane": "0.1.23",
         "@dsh-enhanced/preference-learning": "0.1.23",
         "@dsh-enhanced/traex-acp-provider": "0.1.23"
+      }
+    },
+    {
+      "version": "0.1.24",
+      "releasedAt": "2026-09-05T01:35:10.561Z",
+      "verifiedHostRange": ">=0.1.0-rc.8",
+      "packages": {
+        "@dsh-enhanced/assistant-growth-contract": "0.1.24",
+        "@dsh-enhanced/llm-route-capabilities": "0.1.24",
+        "@dsh-enhanced/acp": "0.1.24",
+        "@dsh-enhanced/assistant-automations": "0.1.24",
+        "@dsh-enhanced/assistant-delivery": "0.1.24",
+        "@dsh-enhanced/assistant-evaluation": "0.1.24",
+        "@dsh-enhanced/assistant-evolution": "0.1.24",
+        "@dsh-enhanced/assistant-growth-experiments": "0.1.24",
+        "@dsh-enhanced/assistant-health": "0.1.24",
+        "@dsh-enhanced/assistant-heartbeat": "0.1.24",
+        "@dsh-enhanced/assistant-policy": "0.1.24",
+        "@dsh-enhanced/assistant-recovery": "0.1.24",
+        "@dsh-enhanced/coding-subscription-provider": "0.1.24",
+        "@dsh-enhanced/credentials-keychain": "0.1.24",
+        "@dsh-enhanced/event-triggers": "0.1.24",
+        "@dsh-enhanced/hello": "0.1.24",
+        "@dsh-enhanced/lark-channel": "0.1.24",
+        "@dsh-enhanced/memory-wiki-bridge": "0.1.24",
+        "@dsh-enhanced/personal-assistant": "0.1.24",
+        "@dsh-enhanced/personal-memory": "0.1.24",
+        "@dsh-enhanced/personal-wiki": "0.1.24",
+        "@dsh-enhanced/plugin-control-plane": "0.1.24",
+        "@dsh-enhanced/preference-learning": "0.1.24",
+        "@dsh-enhanced/traex-acp-provider": "0.1.24"
       }
     }
   ]
