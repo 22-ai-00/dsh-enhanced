@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -20,7 +20,7 @@ afterEach(async () => {
 function agent(): Agent {
   const id = SessionId(`wiki-tool-agent-${Math.random()}`)
   const session = Session.create(id, [], {
-    version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd: '/work/alpha', agentPreset: 'primary',
+    version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd: '/work/alpha', agentPreset: 'primary', isSeeded: false,
   })
   session.append('approval/policy', { policy: 'never' })
   session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
@@ -76,7 +76,7 @@ async function harness() {
 
 function call(name: string, arguments_: Record<string, unknown>, current?: Agent) {
   return {
-    callId: CallId(`wiki-${name}-${Math.random()}`),
+    callId: ToolCallId(`wiki-${name}-${Math.random()}`),
     name,
     ...(current === undefined ? {} : { agent: current }),
     signal: new AbortController().signal,
@@ -84,7 +84,7 @@ function call(name: string, arguments_: Record<string, unknown>, current?: Agent
   }
 }
 
-describe('personal wiki rc.8 tools', () => {
+describe('personal wiki rc.1 tools', () => {
   test('registers exactly four bounded wiki tools', async () => {
     const { ctx } = await harness()
     const schemas = ctx.tools.schemas().filter(schema => schema.name.startsWith('wiki_'))

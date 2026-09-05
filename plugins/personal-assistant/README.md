@@ -24,7 +24,7 @@ patch 会完整覆盖上游 `permission` 行，并挂载唯一的 `dsh-enhanced-
 - policy 默认写入一条 `dsh-enhanced-foreground-capability-*`：本机 Web/direct 的 foreground Agent 可访问 profile 已挂载的全部技能、工具与插件动作，后续动态挂载也无需逐项补 allow；它不会安装尚未安装的插件，也不授权 background 或飞书 external 身份。显式 deny、紧急停止、身份/预算检查仍优先。`budgets` 默认留空。
 - automations scheduler 默认关闭；创建并审批 automation 后仍需由部署者显式启用 scheduler。
 - Memory、Wiki、Policy、Automations 使用各自的 DSH home 私有路径和独立真源。
-- meta 入口先等待 Policy 完成激活，再依次挂载 Memory、Wiki 与 Automations；真实 rc.8 启动不依赖同步构造或 YAML 行序碰巧成功。
+- meta 入口先等待 Policy 完成激活，再依次挂载 Memory、Wiki 与 Automations；真实 `0.1.2-rc.1` 启动不依赖同步构造或 YAML 行序碰巧成功。
 
 需要收紧时可添加显式 deny，或使用安装器的 `--agent-tools disable` 移除托管的 foreground grant；先在测试 profile 使用 `--dump-config` 检查最终 patch。
 
@@ -54,4 +54,4 @@ meta-bundle 不引入一套独立于上游 Host 的 OS capability、网络 API�
 
 ## 兼容性
 
-子包均以 DeepSeek Harness `0.1.0-rc.8`（提交 `141eb6fef83422698aef7a981029e843e8161534`）为验证基线。参见[兼容性文档](../../docs/compatibility.md)。
+子包均以 DeepSeek Harness `0.1.2-rc.1` 为验证基线。参见[兼容性文档](../../docs/compatibility.md)。

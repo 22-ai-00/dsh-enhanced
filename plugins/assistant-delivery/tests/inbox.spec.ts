@@ -92,6 +92,22 @@ describe('durable inbox', () => {
     reopened.close()
   })
 
+  test('lists recoverable admissions in bounded durable order after a cursor', async () => {
+    const f = await fixture()
+    const first = f.store.acceptInbound(envelope('evt-recovery-page-1', f)).record
+    const second = f.store.acceptInbound(envelope('evt-recovery-page-2', f)).record
+    const third = f.store.acceptInbound(envelope('evt-recovery-page-3', f)).record
+    f.store.queueInbox(second.id, f.binding.id)
+
+    expect(f.store.listRecoverableInboundAdmissions({ limit: 1 }).map(record => record.id))
+      .toEqual([first.id])
+    expect(f.store.listRecoverableInboundAdmissions({
+      afterSequence: first.admissionCursor.sequence,
+      limit: 10,
+    }).map(record => record.id)).toEqual([third.id])
+    f.store.close()
+  })
+
   test('rejects namespace confusion, oversize content, and unbounded metadata', async () => {
     const f = await fixture()
     expect(() => f.store.acceptInbound({ ...envelope('evt-1', f), account: 'bot-2' }))
@@ -190,6 +206,7 @@ describe('durable inbox', () => {
     const refs = [imageRef('one', {
       attachmentId: AttachmentId('opaque:tenant/id+one=@~'),
       name: 'one.png',
+      originalDimensions: { width: 2, height: 3 },
     }), imageRef('two')]
 
     expect(f.store.listReadyInboundImageRefs(accepted.id)).toBeUndefined()

@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -25,6 +25,7 @@ function agent(): Agent {
     createdAt: 1,
     cwd: '/work/alpha',
     agentPreset: 'primary',
+    isSeeded: false,
   })
   session.append('approval/policy', { policy: 'never' })
   session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
@@ -102,7 +103,7 @@ async function harness() {
   return { ctx, agent: agent() }
 }
 
-describe('personal memory rc.8 tools', () => {
+describe('personal memory rc.1 tools', () => {
   test('registers only search and proposal-only manage tools', async () => {
     const { ctx } = await harness()
 
@@ -119,7 +120,7 @@ describe('personal memory rc.8 tools', () => {
   test('memory_manage creates a proposal without committing memory', async () => {
     const fixture = await harness()
     const managed = await fixture.ctx.tools.execute({
-      callId: CallId('memory-manage-1'),
+      callId: ToolCallId('memory-manage-1'),
       name: 'memory_manage',
       agent: fixture.agent,
       signal: new AbortController().signal,
@@ -154,7 +155,7 @@ describe('personal memory rc.8 tools', () => {
     expect(fixture.ctx.personalMemory.search(fixture.agent, { query: 'coffee' })[0]?.record.content)
       .toBe('User prefers hand-brewed coffee')
     const replay = await fixture.ctx.tools.execute({
-      callId: CallId('memory-manage-2'),
+      callId: ToolCallId('memory-manage-2'),
       name: 'memory_manage',
       agent: fixture.agent,
       signal: new AbortController().signal,
@@ -206,7 +207,7 @@ describe('personal memory rc.8 tools', () => {
     })
 
     const result = await fixture.ctx.tools.execute({
-      callId: CallId('memory-search-1'),
+      callId: ToolCallId('memory-search-1'),
       name: 'memory_search',
       agent: fixture.agent,
       signal: new AbortController().signal,
@@ -267,7 +268,7 @@ describe('personal memory rc.8 tools', () => {
     })
 
     const result = await fixture.ctx.tools.execute({
-      callId: CallId('memory-search-confirmed'), name: 'memory_search_confirmed', agent: fixture.agent,
+      callId: ToolCallId('memory-search-confirmed'), name: 'memory_search_confirmed', agent: fixture.agent,
       signal: new AbortController().signal, arguments: { query: 'review-guidance', limit: 20 },
     })
     expect(result.isError).toBe(false)
@@ -297,7 +298,7 @@ describe('personal memory rc.8 tools', () => {
       expectedVersion: 1, decision: 'approved', reason: 'test fixture' })
 
     const result = await fixture.ctx.tools.execute({
-      callId: CallId('memory-search-tainted'), name: 'memory_search', agent: fixture.agent,
+      callId: ToolCallId('memory-search-tainted'), name: 'memory_search', agent: fixture.agent,
       signal: new AbortController().signal, arguments: { query: 'safe continue' },
     })
     const rendered = result.content[0]
@@ -315,7 +316,7 @@ describe('personal memory rc.8 tools', () => {
     const { ctx } = await harness()
 
     const result = await ctx.tools.execute({
-      callId: CallId('memory-search-no-agent'),
+      callId: ToolCallId('memory-search-no-agent'),
       name: 'memory_search',
       signal: new AbortController().signal,
       arguments: { query: 'anything' },

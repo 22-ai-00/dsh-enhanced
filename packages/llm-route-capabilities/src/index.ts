@@ -1,5 +1,9 @@
 import type { AgentRegistry } from '@deepseek-ai/dsh-agent'
-import { deepFreeze, type GenerateOptions, type LlmRuntime } from '@deepseek-ai/dsh-llm'
+import {
+  projectImagesForTextModel,
+  type GenerateOptions,
+  type LlmRuntime,
+} from '@deepseek-ai/dsh-llm'
 import { types as nodeTypes } from 'node:util'
 import { version } from './version.js'
 
@@ -25,7 +29,7 @@ export interface AgentLoopRequestAttestor {
   claim(request: GenerateOptions, session: object): boolean
 
   /**
-   * Claim the one rc.8 `dsh-compaction-basic` auxiliary call that belongs to
+   * Claim the one `dsh-compaction-basic` auxiliary call that belongs to
    * the exact active Agent turn. The upstream compactor builds a mutable
    * envelope, so a successful claim seals that plain-data envelope in place at
    * this Host-owned provider-authority seam before validating its full shape.
@@ -77,8 +81,8 @@ const instructionMessageKeys = new Set(['id', 'role', 'content', 'source'])
 const compactionStartKeys = new Set(['compactionId', 'sourceCommandId', 'turn'])
 const automaticCompactionStartKeys = new Set(['compactionId', 'turn'])
 
-/** Exact final user instruction emitted by @deepseek-ai/dsh-compaction-basic rc.8. */
-const RC8_COMPACTION_INSTRUCTION = [
+/** Exact final user instruction emitted by @deepseek-ai/dsh-compaction-basic 0.1.2-rc.1. */
+const COMPACTION_INSTRUCTION = [
   'You are now acting as a compaction engine for this AI coding assistant. Condense the conversation ABOVE into a structured checkpoint that lets another model resume the work with no loss of essential context.',
   '',
   'Output EXACTLY the Markdown structure below: keep every section, in order. Use terse bullets, not prose paragraphs. Write "(none)" for an empty section — never drop a section.',
@@ -273,6 +277,28 @@ function deeplyFrozen(value: unknown): boolean {
 }
 
 /**
+ * Seal one graph already proven by plainCompactionRequestGraph(). Keep this
+ * local: `deepFreeze` was an unstable implementation export and is absent
+ * from DSH 0.1.2 even though the public request types remain compatible.
+ */
+function freezePlainGraph(value: object, signal: AbortSignal): void {
+  const pending: object[] = [value]
+  const visited = new WeakSet<object>()
+  while (pending.length > 0) {
+    const current = pending.pop()!
+    if (visited.has(current) || current === signal) continue
+    visited.add(current)
+    const keys = plainDataKeys(current)
+    if (keys === undefined) throw new TypeError('llm-route-capabilities: cannot freeze a non-plain request graph')
+    for (const key of keys) {
+      const child = (current as Record<string, unknown>)[key]
+      if (child !== null && typeof child === 'object' && child !== signal) pending.push(child)
+    }
+    Object.freeze(current)
+  }
+}
+
+/**
  * Validate the complete request graph without invoking getters before the
  * attestor freezes an upstream-owned compaction envelope in place. The only
  * exotic object admitted is the exact root `signal`; nested AbortSignals and
@@ -331,14 +357,14 @@ function exactCompactionInstruction(message: GenerateOptions['messages'][number]
     && uuidV4Pattern.test(message.id)
     && sameData({ role: message.role, content: message.content, source: message.source }, {
       role: 'user',
-      content: [{ type: 'text', text: RC8_COMPACTION_INSTRUCTION }],
+      content: [{ type: 'text', text: COMPACTION_INSTRUCTION }],
       source: { kind: 'plugin', plugin: 'dsh-compaction-basic' },
     })
 }
 
-/** Require the rc.8 opening marker to be the live turn's latest durable fact. */
+/** Require the opening marker to be the live turn's latest durable fact. */
 function hasFreshCurrentTurnCompaction(session: LiveAgentSession): boolean {
-  const events = session.events as readonly unknown[]
+  const events = session.snapshotEvents() as readonly unknown[]
   let openTurn: number | undefined
   let openCompaction: {
     readonly event: object
@@ -403,13 +429,14 @@ function sameLoopMessage(
   actual: GenerateOptions['messages'][number],
   expected: GenerateOptions['messages'][number],
   ownedRoutes: ReadonlySet<string>,
+  allowDetachedEqual = false,
 ): boolean {
-  if (actual === expected) return true
+  if (actual === expected || (allowDetachedEqual && sameData(actual, expected))) return true
   const source = expected.source
   if (expected.role !== 'assistant' || source.kind !== 'model' || source.replayState === undefined
     || ownedRoutes.has(source.provider)) return false
 
-  // DSH rc.8's forAdapter() makes exactly this detached snapshot when the
+  // DSH forAdapter() makes exactly this detached snapshot when the
   // historical replay state belongs to another adapter instance.
   return sameData(actual, {
     ...expected,
@@ -418,6 +445,31 @@ function sameLoopMessage(
       provider: source.provider,
       model: source.model,
     },
+  })
+}
+
+/**
+ * Match either the exact durable sequence or DSH's complete text-only image
+ * projection. Unchanged messages retain the strict identity requirement; only
+ * messages actually cloned by projectImagesForTextModel() may be detached but
+ * data-equal. This rejects partial projection and arbitrary equal-value clones.
+ */
+function sameLoopMessages(
+  actual: GenerateOptions['messages'],
+  expected: GenerateOptions['messages'],
+  ownedRoutes: ReadonlySet<string>,
+): boolean {
+  if (actual.length !== expected.length) return false
+  if (actual.every((message, index) => sameLoopMessage(message, expected[index]!, ownedRoutes))) return true
+
+  const projected = projectImagesForTextModel(expected)
+  if (projected === expected) return false
+  return actual.every((message, index) => {
+    const durable = expected[index]!
+    const candidate = projected[index]!
+    return candidate === durable
+      ? sameLoopMessage(message, durable, ownedRoutes)
+      : sameLoopMessage(message, candidate, ownedRoutes, true)
   })
 }
 
@@ -432,8 +484,7 @@ function exactLoopEnvelope(
   const header = session.requestHeader()
   if (header === undefined) return false
   const expectedMessages = session.deriveMessages()
-  if (request.messages.length !== expectedMessages.length
-    || !request.messages.every((message, index) => sameLoopMessage(message, expectedMessages[index]!, ownedRoutes))) return false
+  if (!sameLoopMessages(request.messages, expectedMessages, ownedRoutes)) return false
 
   const expected: Record<string, unknown> = {
     ...header.config,
@@ -474,9 +525,11 @@ function exactCompactionEnvelope(
   const expectedMessages = session.deriveMessages()
   const prefixLength = request.messages.length - 1
   if (prefixLength <= 0 || prefixLength >= expectedMessages.length
-    || !request.messages.slice(0, prefixLength).every((message, index) => (
-      sameLoopMessage(message, expectedMessages[index]!, ownedRoutes)
-    ))) return false
+    || !sameLoopMessages(
+      request.messages.slice(0, prefixLength),
+      expectedMessages.slice(0, prefixLength),
+      ownedRoutes,
+    )) return false
 
   const instruction = request.messages.at(-1)
   return instruction !== undefined
@@ -486,7 +539,7 @@ function exactCompactionEnvelope(
 
 /**
  * Preserve Agent Loop provenance across package duplication and transformations
- * owned by DSH's LLM runtime. DSH rc.8 keeps its request marker in a module-local
+ * owned by DSH's LLM runtime. DSH keeps its request marker in a module-local
  * WeakSet and may clone a frozen request while materializing adapter defaults or
  * stripping another adapter's replay state. The Agent Registry's initiator scope
  * instead spans the whole driver Promise and is owned by the Host service.
@@ -494,8 +547,9 @@ function exactCompactionEnvelope(
  * Ambient initiator presence is not enough: every claim also requires a running
  * Agent, exact registry identity, matching request/session id, the exact Session
  * object returned by the Host, and an envelope reconstructed from that Session's
- * current request header and derived message history. The only accepted clone is
- * DSH rc.8's documented replayState removal in forAdapter(). Provider-side
+ * current request header and derived message history. The only accepted clones
+ * are DSH's documented replayState removal in forAdapter() and its complete,
+ * deterministic projectImagesForTextModel() transform. Provider-side
  * canonical-cwd checks remain separate and mandatory.
  */
 export function createAgentLoopRequestAttestor(
@@ -544,7 +598,7 @@ export function createAgentLoopRequestAttestor(
           || !hasFreshCurrentTurnCompaction(initiator.session)) return false
 
         if (!plainCompactionRequestGraph(request, request.signal)) return false
-        deepFreeze(request)
+        freezePlainGraph(request, request.signal)
         return exactCompactionEnvelope(request, initiator.session, routes)
       } catch {
         // Never freeze or authorize a malformed/stale ambient auxiliary call.

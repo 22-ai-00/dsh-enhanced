@@ -17,10 +17,10 @@ import {
   type LlmRuntime,
 } from '@deepseek-ai/dsh-llm'
 import type { PermissionPresetService } from '@deepseek-ai/dsh-permission-presets'
-import { effectiveSandboxMode, setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
+import type {} from '@deepseek-ai/dsh-tool-todo'
+import { setSandboxMode } from '@deepseek-ai/dsh-sandbox-policy'
 import { isAppendSurfaceEvent, SessionId, type Session, type SessionEvent } from '@deepseek-ai/dsh-session'
 import {
-  effectiveApprovalPolicy,
   setApprovalPolicy,
   type ApprovalService,
 } from '@deepseek-ai/dsh-user-approval'
@@ -712,17 +712,18 @@ async function appendApprovalReviewer(
 function currentPermissionLevel(
   service: PermissionPresets,
   targets: PermissionPresetTargets,
-  events: readonly SessionEvent[],
+  session: Session,
 ): 'ask' | 'auto' | 'full' | 'custom' {
-  const current = service.current(events)
+  const events = session.snapshotEvents()
+  const current = service.current(session)
   if (current === targets.full) {
-    return effectiveSandboxMode(events) === 'danger-full-access'
-      && effectiveApprovalPolicy(events) === 'never'
+    return explicitSandboxMode(events) === 'danger-full-access'
+      && explicitApprovalPolicy(events) === 'never'
       && approvalReviewerOf(events) === 'none'
       ? 'full'
       : 'custom'
   }
-  if (effectiveSandboxMode(events) !== 'workspace-write' || effectiveApprovalPolicy(events) !== 'ask') return 'custom'
+  if (explicitSandboxMode(events) !== 'workspace-write' || explicitApprovalPolicy(events) !== 'ask') return 'custom'
   const reviewer = approvalReviewerOf(events)
   if (targets.ask === targets.auto && current === targets.ask) return reviewer === 'auto-review' ? 'auto' : 'ask'
   if (current === targets.ask) return reviewer === 'user' ? 'ask' : 'custom'
@@ -742,7 +743,7 @@ async function ensurePermissionReviewer(
   preset: string,
   reviewer: ApprovalReviewer,
 ): Promise<void> {
-  if (approvalReviewerOf(session.events) === reviewer) return
+  if (approvalReviewerOf(session.snapshotEvents()) === reviewer) return
   if (canonicalPresetReviewer(preset) === reviewer) {
     // PermissionPresetService deliberately makes a net-zero selection a no-op.
     // Re-append its official event when an older legacy reviewer event would
@@ -757,18 +758,18 @@ function ensureSandboxMode(
   session: Session,
   mode: Parameters<typeof setSandboxMode>[1],
 ): void {
-  if (explicitSandboxMode(session.events) === mode) return
+  if (explicitSandboxMode(session.snapshotEvents()) === mode) return
   setSandboxMode(session, mode)
-  if (explicitSandboxMode(session.events) !== mode) session.append('sandbox/mode', { mode })
+  if (explicitSandboxMode(session.snapshotEvents()) !== mode) session.append('sandbox/mode', { mode })
 }
 
 function ensureApprovalPolicy(
   session: Session,
   policy: Parameters<typeof setApprovalPolicy>[1],
 ): void {
-  if (explicitApprovalPolicy(session.events) === policy) return
+  if (explicitApprovalPolicy(session.snapshotEvents()) === policy) return
   setApprovalPolicy(session, policy)
-  if (explicitApprovalPolicy(session.events) !== policy) session.append('approval/policy', { policy })
+  if (explicitApprovalPolicy(session.snapshotEvents()) !== policy) session.append('approval/policy', { policy })
 }
 
 function permissionLevelLabel(level: 'ask' | 'auto' | 'full' | 'custom'): string {
@@ -1117,7 +1118,7 @@ function assertAdoptableUnstartedSession(
       'assistant-delivery: durable orphan session identity does not match the requested generation',
     )
   }
-  if (session.events.some(event => event.type === 'turn/start' || event.type === 'user/message')
+  if (session.snapshotEvents().some(event => event.type === 'turn/start' || event.type === 'user/message')
     || session.deriveMessages().length > 0) {
     throw new DurableAgentIdentityError(
       'assistant-delivery: refusing to adopt a deterministic session that already started a user turn',
@@ -1335,7 +1336,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         control.controller.abort(new UserSessionCancellation(control.command))
       }
     }
-    // rc.8 `whenIdle()` follows every later wakeup. Waiting on it here lets an
+    // `whenIdle()` follows every later wakeup. Waiting on it here lets an
     // unrelated followup keep `/stop` or `/new` alive forever. Clear pending
     // input and wait only for Delivery's exact reply-scheduling boundary.
     if (activeAgent) agent.cancel({ kind: 'user' })
@@ -1495,7 +1496,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   }
 
   /**
-   * Queue a synthetic completion turn only after the previous exact turn retired. rc.8 may still
+   * Queue a synthetic completion turn only after the previous exact turn retired. The runtime may still
    * serialize scoped tool schemas, but every call is denied before approval/execution while this
    * turn owns the Agent, so recovering prose cannot repeat an external side effect.
    */
@@ -1555,7 +1556,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           'assistant-delivery: automatic completion lost the idle scheduling boundary',
         )
       }
-      const latestBoundary = agent.session.events.findLast(event =>
+      const latestBoundary = agent.session.snapshotEvents().findLast(event =>
         event.type === 'turn/start' || event.type === 'turn/end')
       if (latestBoundary?.type !== 'turn/end' || latestBoundary.data.turn !== expectedPreviousTurn) {
         throw new AutomaticCompletionUnavailableError(
@@ -1843,7 +1844,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           const flushed = await sessions.flush(session)
           return reviewerReady
             && flushed
-            && currentPermissionLevel(permissionPresets, targets, session.events) === 'ask'
+            && currentPermissionLevel(permissionPresets, targets, session) === 'ask'
         } catch {
           return false
         }
@@ -1902,8 +1903,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       if (action.kind === 'invalid' || action.kind === 'warn-full') {
         return retryPermissionRecovery(recovery ?? 'failure-notice')
       }
-      const currentStateHash = permissionStateHash(session.events, targets.tableFingerprint)
-      const beforeLevel = currentPermissionLevel(permissionPresets, targets, session.events)
+      const currentStateHash = permissionStateHash(session.snapshotEvents(), targets.tableFingerprint)
+      const beforeLevel = currentPermissionLevel(permissionPresets, targets, session)
       const recoveredCommittedTarget = recovery === 'commit'
         && action.kind === 'switch'
         && beforeLevel === action.level
@@ -1945,7 +1946,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         return reply({ text: '权限卡片已过期或状态已变化；当前权限未改变。请重新发送 /permissions。', format: 'plain' })
       }
       if (action.kind === 'show') {
-        const level = currentPermissionLevel(permissionPresets, targets, session.events)
+        const level = currentPermissionLevel(permissionPresets, targets, session)
         const emergencyStop = this.policy.getEmergencyStop()
         if (emergencyStop.enabled) return authorizationFailure('revoked')
         const issuedAt = Date.now()
@@ -1956,7 +1957,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
               issuedAt,
               expiresAt: issuedAt + this.options.permissionPickerTtlMs,
               current: level,
-              expectedStateHash: permissionStateHash(session.events, targets.tableFingerprint),
+              expectedStateHash: permissionStateHash(session.snapshotEvents(), targets.tableFingerprint),
               emergencyStopVersion: emergencyStop.version,
               bindingVersion: binding.version,
               sessionId: binding.sessionId,
@@ -2027,7 +2028,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         signal.throwIfAborted()
         return retryPermissionRecovery('failure-notice')
       }
-      const afterLevel = currentPermissionLevel(permissionPresets, targets, session.events)
+      const afterLevel = currentPermissionLevel(permissionPresets, targets, session)
       if (afterLevel !== action.level) {
         const safeAskPersisted = await compensateToAsk()
         signal.throwIfAborted()
@@ -2671,7 +2672,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       if (command.name === 'status' || command.name === 'session') {
         const messages = agent.session.deriveMessages().length
-        const turns = agent.session.events.filter(event => event.type === 'turn/end').length
+        const turns = agent.session.snapshotEvents().filter(event => event.type === 'turn/end').length
         return this.replySessionCommand(binding, envelope, {
           text: [
             '当前会话',
@@ -3029,7 +3030,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         const authorizationFailure = preDispatchAuthorizationFailure()
         if (authorizationFailure !== undefined) return authorizationFailure
       }
-      let turnFrom = agent.session.events.length
+      let turnFrom = agent.session.snapshotEvents().length
       const automaticCompletionTurns = new Map<number, AutomaticCompletionKind>()
       const automaticCompletionToolViolations = new Set<number>()
       removeProgress = this.ctx.on('session/event', (session, event) => {
@@ -3084,7 +3085,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       let assembledText = ''
       let bestEffortText = ''
       while (true) {
-        const output = finalAssistant(agent.session.events, turnFrom, deliveryTurn)
+        const output = finalAssistant(agent.session.snapshotEvents(), turnFrom, deliveryTurn)
         let addedText = false
         if (output.text.trim() !== '') {
           if (completionKind === 'compact' || completionKind === 'regenerate') {
@@ -3133,7 +3134,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
                 ? 'compact'
                 : 'continue'
           automaticTurns += 1
-          turnFrom = agent.session.events.length
+          turnFrom = agent.session.snapshotEvents().length
           const completionMessage = createUserMessage({
             content: [{
               type: 'text',

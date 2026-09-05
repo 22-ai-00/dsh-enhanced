@@ -21,6 +21,7 @@ import {
   type LlmResolvedModelInfo,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import * as AcpPlugin from '../src/index.ts'
 import type { AcpConfig } from '../src/index.ts'
 
@@ -94,6 +95,7 @@ export async function makeBridgeHarness(options: {
 } = {}): Promise<BridgeHarness> {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   const adapter = new ScriptedAdapter(options.script ?? [])
   ctx.llm.registerAdapter(['mock'], adapter)

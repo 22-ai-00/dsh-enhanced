@@ -44,7 +44,7 @@ dsh --profile web --dump-config
     budgets: []
 ```
 
-匹配支持完整字符串中的 `*` 通配符。任意匹配的 deny 都优先于 allow；同 effect 先选更具体的规则，再按声明顺序决定。工具身份来自 rc.8 的 `Agent.session.header.agentPreset` 与绝对 `cwd`，缺少 agent、preset 或 workspace 时直接拒绝，调用方参数不能伪造这些字段。
+匹配支持完整字符串中的 `*` 通配符。任意匹配的 deny 都优先于 allow；同 effect 先选更具体的规则，再按声明顺序决定。工具身份来自 DSH 0.1.2-rc.1 的 `Agent.session.header.agentPreset` 与绝对 `cwd`，缺少 agent、preset 或 workspace 时直接拒绝，调用方参数不能伪造这些字段。
 
 ## 三档即时审批
 
@@ -58,7 +58,7 @@ dsh --profile web --dump-config
 
 canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要迁移写入。仅对旧版/第三方的非 canonical full preset，插件仍在 live session 扫描、`session/created` 和工具执行屏障做严格兼容迁移；它要求显式 full bundle、sandbox 与 approval 完全一致且没有 reviewer，失败则收窄并拒绝本次工具。
 
-`assistant-policy/approval-reviewer` 是 required session event。DSH rc.8 尚无公开事件注册 API，而且独立安装/软链接插件时，插件和 DSH Host 可能各自加载一份 `@deepseek-ai/dsh-session`。本包会同步校验 format v0，并在插件本地目录与从真实 Host 入口解析出的目录不同的情况下同时做精确、进程生命周期内单调注册；npm/pnpm bin 会先解析软链接，不依赖固定安装路径。注册不能在插件卸载或 HMR 时删除，否则 persistence 的关机 drain 和已有 session 冷恢复可能再次把事件判为 unknown。若无法从真实入口解析 Host copy，或已解析到的 copy 在格式、导出形态、同步加载能力上不兼容，插件都会 fail fast，拒绝仅修改本地目录并要求同步更新兼容层。
+`assistant-policy/approval-reviewer` 是 required session event。DSH 0.1.2-rc.1 尚无公开事件注册 API，而且独立安装/软链接插件时，插件和 DSH Host 可能各自加载一份 `@deepseek-ai/dsh-session`。本包会同步校验 format v0，并在插件本地目录与从真实 Host 入口解析出的目录不同的情况下同时做精确、进程生命周期内单调注册；npm/pnpm bin 会先解析软链接，不依赖固定安装路径。注册不能在插件卸载或 HMR 时删除，否则 persistence 的关机 drain 和已有 session 冷恢复可能再次把事件判为 unknown。若无法从真实入口解析 Host copy，或已解析到的 copy 在格式、导出形态、同步加载能力上不兼容，插件都会 fail fast，拒绝仅修改本地目录并要求同步更新兼容层。
 
 参数级风险门不是宽泛的字符串前缀判断，也不声称实现了完整 shell parser：
 
@@ -67,9 +67,9 @@ canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要
 - 简单但未分类的命令（例如 `pnpm test`）与未知工具进入 `ask-review`。`run_code` 例外：当前 worker runtime 是 bash-equivalent 的便利执行环境，不是 OS 安全边界，代码可触达 Node/进程能力，因此在 ask/auto 档始终进入 `ask-human`，不会交给模型自动批准；仅显式完整的 full 档会按其“不再请求批准”的语义直接继续；
 - 网络（包括内置 `web_search` / `web_fetch`）、credential 痕迹、后台执行（包括 `bash.run_in_background: true`）、破坏性操作、提权、workspace 外写入，以及包含管道、重定向、替换、引号等需要真实 shell 解析的命令进入 `ask-human`；`npx`、`npm exec`、`pnpm/yarn dlx` 与 `git submodule update` 也按潜在下载/远端执行直接归入这一档；
 - `pwsh` 在具备独立严格解析器前一律进入 `ask-human`；
-- `bash` / `pwsh` / `write` / `edit` 已携带 DSH rc.8 合法的 `sandbox_permissions: workspace-write | danger-full-access` 和非空 `justification` 时交还工具自身的原生审批，避免弹两次；Codex 风格的 `require_escalated` 或其他畸形升级参数仍交人工。
+- `bash` / `pwsh` / `write` / `edit` 已携带 DSH 0.1.2-rc.1 合法的 `sandbox_permissions: workspace-write | danger-full-access` 和非空 `justification` 时交还工具自身的原生审批，避免弹两次；Codex 风格的 `require_escalated` 或其他畸形升级参数仍交人工。
 
-workspace 路径判断是保守的词法检查，不替代宿主对 symlink、文件权限和进程的最终约束。尤其 DSH rc.8 的 `workspace-write` sandbox 不能被当作网络或子进程隔离；这里的风险门只负责授权路由，不是 OS 安全边界。
+workspace 路径判断是保守的词法检查，不替代宿主对 symlink、文件权限和进程的最终约束。尤其 DSH 0.1.2-rc.1 的 `workspace-write` sandbox 不能被当作网络或子进程隔离；这里的风险门只负责授权路由，不是 OS 安全边界。
 
 ### 隔离自动 reviewer
 
@@ -135,4 +135,4 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 
 ## 兼容性
 
-已针对 DeepSeek Harness `0.1.0-rc.8`（源码提交 `141eb6fef83422698aef7a981029e843e8161534`）验证。详见仓库[兼容性基线](../../docs/compatibility.md)。
+已针对 DeepSeek Harness `0.1.2-rc.1` 验证。详见仓库[兼容性基线](../../docs/compatibility.md)。

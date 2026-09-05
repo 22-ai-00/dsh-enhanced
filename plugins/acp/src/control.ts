@@ -340,7 +340,7 @@ export async function setNativeMode(
 ): Promise<{ agentPreset: string }> {
   if (!MODE_IDS.has(modeId)) throw new Error(`unknown mode: ${modeId}`)
   assertModeAvailable(modeId, platform)
-  if (agent.session.events.some(event => event.type === 'turn/start')) {
+  if (agent.session.snapshotEvents().some(event => event.type === 'turn/start')) {
     throw new Error(`session "${agent.session.id}" has already started; its agent preset is fixed`)
   }
   const preset = await presets.recompose(agent.ctx, modeId)

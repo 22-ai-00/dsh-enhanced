@@ -69,6 +69,7 @@
     "@deepseek-ai/dsh-agent-loop": "catalog:",
     "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
+    "@deepseek-ai/dsh-session-projection": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-delivery": "workspace:*",

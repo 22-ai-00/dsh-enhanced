@@ -3,11 +3,12 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import {
-  CallId,
   LlmAdapter,
+  ToolCallId,
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { registerLlmRouteCapability, type ToolCallMode } from '@dsh-enhanced/llm-route-capabilities'
@@ -39,7 +40,7 @@ class ToolCallingAdapter extends LlmAdapter {
     this.requests.push(options)
     if (this.requests.length === 1) {
       for (const [index, name] of this.requestedTools.entries()) {
-        const id = CallId(`call-${index}`)
+        const id = ToolCallId(`call-${index}`)
         yield { type: 'block-start', index, blockType: 'tool-call' }
         yield { type: 'tool-call-delta', index, id, name, argumentsDelta: '{}' }
         yield { type: 'block-end', index, block: { type: 'tool-call', id, name, arguments: '{}' } }
@@ -129,6 +130,7 @@ async function harness(options: {
     ctx.provide('assistantDelivery' as never, { bindAgentApprovalRoute, prepareAgentApproval } as never)
   }
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
+  await ctx.plugin(SessionProjectionRegistry)
   const presetResolve = vi.fn(async (id?: string) => ({ id: id ?? 'primary' }))
   const presetMount = vi.fn(async (agentCtx: Agent['ctx'], id?: string) => {
     if (options.presetTool !== undefined) {
@@ -200,7 +202,7 @@ async function harness(options: {
   }
 }
 
-describe('fresh rc.8 automation Agent runner', () => {
+describe('fresh rc.1 automation Agent runner', () => {
   test('publishes a Host-derived execution mode before session-start observers run', async () => {
     const production = await harness({ requestedTools: [] })
     await production.runner.run(input(definition({ allowedTools: [] })))

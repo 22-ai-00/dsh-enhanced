@@ -3,14 +3,15 @@
 > 事实截点：**2026-08-20（Asia/Shanghai）**
 > 研究对象：GitHub `dsh-plugin` topic、`awesome-dsh-plugin`、DeepSeek Harness 官方仓库、本仓库，以及 OpenClaw / Hermes Agent 官方仓库与文档。
 > 结论性质：源码与发布材料审查，不等同于安全审计；未使用真实飞书、Telegram、浏览器账号或云端记忆凭据做端到端验收。
+> 当前仓库已升级到 DSH `0.1.2-rc.1`。下文第三方插件版本、源码链接和实测结论仍是事实截点时针对 rc.8 的历史快照；peer range 即使语法上覆盖 rc.1，也必须重新做隔离 profile smoke 才能称为当前兼容。
 
 ## 一页结论
 
 1. GitHub topic 不是插件商店。检索日页面显示约 **8,865** 个仓库，但首屏已混入通用记忆框架、skills 集合和与 DSH 无关的项目。只有同时存在 `package.json#dsh.bundle.patch`、可解析的 `cordis.patch.yml`、实际 Host 源码和可安装产物，才应称为 DSH 插件。
 2. [`awesome-dsh-plugin`](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/588e49808284c589073ef2eefdf9260c2913a9dc/README.md) 在本次快照共有 **1,691 条插件行**（README 有 1,694 个 Markdown 列表项，其中 3 个是目录链接），质量高于 topic 搜索；但其[收录规则](https://github.com/awesome-dsh-plugin/awesome-dsh-plugin/blob/588e49808284c589073ef2eefdf9260c2913a9dc/contributing.md)明确是结构与维护活跃度的人工检查，不是运行兼容、安全或生产质量认证。
-3. DSH `0.1.0-rc.8` 已经提供会话持久化、skills、目标/计划、subagent、workflow、后台 jobs、工具审批、sandbox、Web/Search 等大部分“智能体骨架”。不要重复开发这些基础件。
+3. 当前 DSH `0.1.2-rc.1` 已经提供会话持久化、skills、目标/计划、subagent、workflow、后台 jobs、工具审批、sandbox、Web/Search 等大部分“智能体骨架”。不要重复开发这些基础件。
 4. 真正阻挡“OpenClaw / Hermes 式个人助理”的 P0 缺口是：**正式长期记忆接口与默认实现、会话关闭后仍可执行的持久调度、统一消息网关、后台任务的权限/预算/审计与插件隔离**。
-5. 当前最稳妥的个人落地组合是：DSH rc.8 + 本仓库模型桥接（可选）+ `dsh-memento` + `dsh-routines` + `dsh-lark-channel`（或小型 Telegram 插件）+ 官方 MCP client overlay + `dsh-pilot`（按需）+ 内置 sandbox/approval + `dsh-taintguard`（纵深防御）。
+5. 事实截点时建议的个人落地候选是：DSH rc.8 + 本仓库模型桥接（可选）+ `dsh-memento` + `dsh-routines` + `dsh-lark-channel`（或小型 Telegram 插件）+ 官方 MCP client overlay + `dsh-pilot`（按需）+ 内置 sandbox/approval + `dsh-taintguard`（纵深防御）。迁移到当前 `0.1.2-rc.1` 前必须逐个重验第三方插件。
 6. “达到 Claude 级智能”不是多装记忆插件就能得到。上限主要来自基础模型、上下文组织、工具可靠性、任务分解/复核和评测闭环；记忆与主动性主要改善连续性和执行覆盖，不能把弱模型直接变成强模型。
 
 ## 研究方法与真实性门槛
@@ -23,7 +24,7 @@
 | --- | --- | --- |
 | 结构可安装 | 有 `dsh.bundle.patch`，patch 实际 mount 包名，并有 Host 入口/可发布文件 | “可安装” |
 | 有可用证据 | 在上项基础上，有源码、测试脚本/CI、版本发布、清晰的权限和失败语义 | “可试用 / 候选” |
-| 当前兼容 | peer range 覆盖 rc.8，或刻意使用结构类型且源码没有明显依赖旧接口 | “rc.8 可试” |
+| 快照兼容 | peer range 覆盖 rc.8，或刻意使用结构类型且源码没有明显依赖旧接口 | “rc.8 可试”；不自动外推到当前 rc.1 |
 | 生产可用 | 还需真实账号 E2E、升级/故障恢复、秘密管理、攻击面与负载验证 | 本次审查**不授予任何社区插件此结论** |
 
 特别注意：DSH 官方 README 仍把项目标为 **developer preview**，预览期允许破坏性变更；“peer range 能解析”也不等于运行期行为完全兼容。证据见[官方 README](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/README.md)和本仓库[兼容性约定](./compatibility.md)。
@@ -52,7 +53,7 @@
 
 其收录规则要求真实代码、`dsh.bundle`、至少约一天/十次提交、近期活跃和人工 sanity check，也明确没有做安全审计与质量排名。因此，本报告没有假装逐个运行 1,691 个包，而是按个人助理关键链路抽查高相关候选。
 
-## DSH rc.8 已经具备什么
+## 当前 DSH `0.1.2-rc.1` 已经具备什么
 
 官方 base bundle 的[组合配置](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/bundle/base/cordis.patch.yml)已覆盖：
 
@@ -89,7 +90,7 @@ OpenClaw 的官方架构是“单操作者 Gateway + 多消息渠道 + tools/ski
 
 Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、FTS5 session search、后台记忆/skill review、cron 跨平台投递、隔离 subagent 和多个终端 backend。证据见[官方仓库](https://github.com/NousResearch/hermes-agent)、[Memory](https://hermes-agent.nousresearch.com/docs/user-guide/features/memory)、[Cron](https://hermes-agent.nousresearch.com/docs/user-guide/features/cron)、[Messaging](https://hermes-agent.nousresearch.com/docs/user-guide/messaging)和[Security](https://hermes-agent.nousresearch.com/docs/user-guide/security)。
 
-| 能力 | DSH rc.8 | OpenClaw / Hermes 基准 | 缺口判断 |
+| 能力 | DSH `0.1.2-rc.1` | OpenClaw / Hermes 基准 | 缺口判断 |
 | --- | --- | --- | --- |
 | 会话内工具智能体 | 强 | 强 | 已具备 |
 | skills / subagent / workflow | 已有 | 已有 | 已具备，主要缺调优与评测 |
@@ -109,11 +110,11 @@ Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、
 
 | 领域 | 插件与快照 | 兼容、测试/CI 证据 | 权限与边界 | 建议 |
 | --- | --- | --- | --- | --- |
-| 安全型长期记忆 | [`dsh-memento` 0.4.2](https://github.com/PerryLink/dsh-memento/tree/ff92ee95b543384bfd686d7a9f06a99bdf707084) | bundle 完整；peer `>=0.1.0-rc.6 <0.2.0` 覆盖 rc.8；有 CI/compat/release workflows、约 22 个测试文件 | 本地 `node:sqlite`，零网络/凭据；默认写入需 approval，审计和有界 scope；没有向量语义检索 | **首选个人记忆**。安全、可解释优先；上线前做 rc.8 smoke，且不要与另一记忆插件并装 |
+| 安全型长期记忆 | [`dsh-memento` 0.4.2](https://github.com/PerryLink/dsh-memento/tree/ff92ee95b543384bfd686d7a9f06a99bdf707084) | bundle 完整；peer `>=0.1.0-rc.6` 覆盖当时验证的 rc.8，但按标准 semver 不接受当前 `0.1.2-rc.1`；需先更新 peer 并重新验证；有 CI/compat/release workflows、约 22 个测试文件 | 本地 `node:sqlite`，零网络/凭据；默认写入需 approval，审计和有界 scope；没有向量语义检索 | **首选个人记忆候选**。安全、可解释优先；上线前做 rc.1 smoke，且不要与另一记忆插件并装 |
 | 冷调度 | [`@dsh-routines/bundle` 0.1.0](https://github.com/Jesse-njx/dsh-routines/tree/f59b4f03e7b36648b804fd07e57a53e276da5d81) | `^0.1.0-rc.6` ranges；有 build/typecheck、6 个测试文件，README 声明 46 项测试和 CI workflow | DSH 进程必须常驻；每次 fresh one-shot session；自动把需交互审批的动作拒绝，run JSON/MD 留审计；错过多次只补一次 | **首选主动任务**。先 file delivery，再接消息通道；用 launchd/systemd 保活 |
 | 飞书/Lark Gateway | [`dsh-lark-channel` 0.0.7](https://github.com/omdsh-dev/dsh-lark/tree/632807d9abafbb866a5e208a0298eff21c7856d1) | README 要求 DSH rc.6+；24 个测试文件、typecheck/build、CI/publish workflows；WebSocket 有配额与退避 | App secret、IM、文件、工作区高权限；有 sender/group/approver allowlist、workspaceRoots、群文件出站强审批、用户服务保活 | **国内首选通道**。新项目，先只开本人 DM、单 workspace、最小权限 |
 | 浏览器 | [`dsh-pilot` 0.1.1](https://github.com/Viger1/dsh-pilot/tree/65340d67a4de840205b9e8d00debed3180e87ad8) | bundle、build、6 个测试文件、GitHub workflow；peer 用 `*`，能安装但版本约束过松 | Playwright/Chrome 高权限；origin 在网络层拦截，未知站点跟随 DSH approval，无审批渠道 fail closed，密码字段默认拒绝 | **按需安装**。优于只在 tool entry 检查 URL；持久浏览器 profile 默认不要开 |
-| Prompt-injection 纵深防御 | [`dsh-taintguard` 0.1.0](https://github.com/sashankh/dsh-taintguard/tree/421e6726d9d0865e36fbe00a12a263409390dc11) | peer `^rc.6` 覆盖 rc.8；typecheck/test/CI，有 AgentDojo eval | 不读文件、不联网、不落盘；按来源 sticky taint 后 gate 高危工具。官方 eval 同时承认 97.6% consequential calls 被 gate，误拦很粗 | 只作 sandbox/最小权限之后的**纵深防御**；无人值守明确设 deny，不要宣传成完备防注入 |
+| Prompt-injection 纵深防御 | [`dsh-taintguard` 0.1.0](https://github.com/sashankh/dsh-taintguard/tree/421e6726d9d0865e36fbe00a12a263409390dc11) | peer `^0.1.0-rc.6` 覆盖当时验证的 rc.8，但按标准 semver 不接受当前 `0.1.2-rc.1`；需先更新 peer 并重新验证；typecheck/test/CI，有 AgentDojo eval | 不读文件、不联网、不落盘；按来源 sticky taint 后 gate 高危工具。官方 eval 同时承认 97.6% consequential calls 被 gate，误拦很粗 | 只作 sandbox/最小权限之后的**纵深防御**；无人值守明确设 deny，不要宣传成完备防注入 |
 
 ### B. 备选：适合特定目标，先做小范围验证
 
@@ -132,8 +133,8 @@ Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、
 | --- | --- |
 | [`@a9i5k4/dsh-auto-memory` 0.1.28](https://github.com/Aik358/dsh-auto-memory/tree/72660743af23adef4e2b4a060e7a240d30b2b9d8) | 四天发布 28 个版本；主要交付编译产物，常规源码/测试证据弱；每轮 subagent 整理、日记/反思/日历/问候很全，但同时读写文件、联网、执行子进程并可自更新包。其“主动提醒”主要是进程/页面或下次会话，不证明冷启动可靠投递。适合参考设计，不适合先托管个人数据。 |
 | [`dsh-hermes-memory` 1.0.0](https://github.com/isheng-eqi/dsh-hermes-memory/tree/8d32188753774817203e1a4867a83030f6a5db28) | 接近 Hermes 的 MEMORY/USER 双 bank 和 frozen snapshot，但只有编译 JS、无测试脚本，README 对“一项/五项工具”表述矛盾；源码使用 storage 却未声明 inject。且缺 Hermes 官方现有的注入扫描、后台 review、approval、session search 和外部 provider。 |
-| [`@openviking/dsh-memory-plugin` 0.1.0](https://github.com/volcengine/OpenViking/tree/2c205d8a7a9256457b582639795adf043b0ecc41/examples/dsh-memory-plugin) | 这是 OpenViking 官方仓库中的高质量 installable example，有多项测试、pending replay、URI guard 和可选 live E2E；但 peer **精确锁定 rc.6**，README 明确要求 exact rc.6，与当前 rc.8 不兼容。先升级适配再评估。 |
-| [`dsh-permission-rules` 0.5.2](https://github.com/PerryLink/dsh-permission-rules/tree/369f146d4a73935005442d1b9350c421111ada04) | 功能、测试、审计和 network policy 很有价值，但所有关键 DSH peers 精确锁 `0.1.0-rc.7`；当前 rc.8 应先更新。它也明确不是 OS sandbox。 |
+| [`@openviking/dsh-memory-plugin` 0.1.0](https://github.com/volcengine/OpenViking/tree/2c205d8a7a9256457b582639795adf043b0ecc41/examples/dsh-memory-plugin) | 这是 OpenViking 官方仓库中的高质量 installable example，有多项测试、pending replay、URI guard 和可选 live E2E；但 peer **精确锁定 rc.6**，README 明确要求 exact rc.6，与当前 `0.1.2-rc.1` 不兼容。先升级适配再评估。 |
+| [`dsh-permission-rules` 0.5.2](https://github.com/PerryLink/dsh-permission-rules/tree/369f146d4a73935005442d1b9350c421111ada04) | 功能、测试、审计和 network policy 很有价值，但所有关键 DSH peers 精确锁 `0.1.0-rc.7`；当前 `0.1.2-rc.1` 应先更新。它也明确不是 OS sandbox。 |
 | [`messaging-core`](https://github.com/534119219/dsh-messaging/tree/f1c3399ef40e3f419161d153e997d6f30576a627) | 一包声称 27 渠道，有 bundle 与大量 adapter 代码，但仓库主要是编译 `lib/`、无测试，安装流程仍偏手工 file dependency；配置向导还明确提示 secret 输入不隐藏。广度远超可核验深度。 |
 | [`dsh-im-channel` 0.2.1](https://github.com/shrekcg/dsh-im-channel/tree/fb64263341fba403a051b3c3fa9875933c425f8c) | 有源码/测试/CI，诚实标注仅飞书/Telegram 较完整；但架构包含独立 bridge、子进程调用 headless profile、额外 session package 与 40 个飞书工具，安装/权限/故障面明显大于 `dsh-lark-channel`。 |
 
@@ -141,7 +142,7 @@ Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、
 
 ### 最小可用个人助理（先跑通闭环）
 
-1. **DSH rc.8 base**：使用现成 session、skill、plan、subagent、jobs、sandbox/approval。
+1. **DSH `0.1.2-rc.1` base**：使用现成 session、skill、plan、subagent、jobs、sandbox/approval。
 2. **模型**：先用官方 provider；如果确实拥有对应订阅，再选本仓库 `coding-subscription-provider` 的 Codex route。不要同时启多个未验证 beta route。
 3. **记忆**：只装 `dsh-memento`，默认 `writePolicy=ask`；导入少量稳定偏好，不自动吞整个历史。
 4. **通道**：国内首选 `dsh-lark-channel`，只允许本人 DM、一个 workspaceRoot、最小飞书 scopes；境外简单场景可先用最小 Telegram bridge。
@@ -195,7 +196,7 @@ Hermes 官方 README/文档展示了多平台 gateway、双文件长期记忆、
 2. **Host 插件就是本机代码。** 它可以绕过模型工具 sandbox 直接读文件、联网、spawn；README 写“安全”不是隔离证据。
 3. **主动性放大权限。** 同一个 `bash`，用户盯着时和凌晨无人值守时不是同一风险等级。后台 profile 应默认 deny，单独列白名单和预算。
 4. **记忆是数据供应链。** 网页、邮件和群消息可把 prompt injection 固化成长期记忆；必须保存来源并把外部内容当不可信引用，而非系统指令。
-5. **版本固定。** DSH 还在 rc；每次从 rc.8 升级都应在 canary profile 回放 memory、schedule、channel、approval 和 recovery 测试。
+5. **版本固定。** DSH 还在 rc；每次升级当前 `0.1.2-rc.1` 基线都应在 canary profile 回放 memory、schedule、channel、approval 和 recovery 测试。
 6. **能力不等于智能。** 优先提升高质量模型路由、工具正确率和评测闭环；不要用无限 heartbeat、自改 skill 或大规模自动记忆制造“很主动”的假象。
 
 ## 建议的验收门槛

@@ -23,13 +23,13 @@ describe('dsh-enhanced-assistant-automations', () => {
     expect((entrypoint as Record<string, unknown>)['AutomationProposalManager']).toBeUndefined()
   })
 
-  test('ships disabled private defaults and verified rc.8 peers', () => {
+  test('ships disabled private defaults and verified rc.1 peers', () => {
     expect(bundle).toContain("dshHomePath('assistant-automations/state.sqlite')")
     expect(bundle).toContain("dshHomePath('assistant-automations/runs')")
     expect(bundle).toContain('- assistantPolicy')
     expect(bundle).toContain('schedulerEnabled: false')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
-    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.1.0-rc.8 <0.2.0')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.1.2-rc.1 <0.2.0')
     expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
   })
 

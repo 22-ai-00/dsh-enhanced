@@ -7,7 +7,7 @@ import AgentPresets from '@deepseek-ai/dsh-agent-presets'
 import { AttachmentId, type AttachmentStore, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { PresetSpec } from '@deepseek-ai/dsh-permission-presets'
 import {
-  CallId,
+  ToolCallId,
   createUserMessage,
   LlmAdapter,
   ReasoningEffortId,
@@ -19,14 +19,17 @@ import {
 } from '@deepseek-ai/dsh-llm'
 import {
   KNOWN_SESSION_EVENT_TYPES,
+  SessionLogOffset,
   SessionPreparation,
+  SessionSeq,
   type Session,
   type SessionEvent,
   type SessionHeader,
   type SessionId,
 } from '@deepseek-ai/dsh-session'
+import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
-import ApprovalService, { effectiveApprovalPolicy, setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
+import ApprovalService, { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { approvalReviewerOf, AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
@@ -107,18 +110,28 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-interface SavedSession { header: SessionHeader; events: readonly SessionEvent[] }
+interface SavedSession {
+  header: SessionHeader
+  events: readonly SessionEvent[]
+  inheritedEventCount: SessionLogOffset
+}
 
 interface DurableStoredSession {
   events: SessionEvent[]
   meta: SessionHeader
+  inheritedEventCount: SessionLogOffset
   revision: string
+}
+
+interface SessionStorageMetadata {
+  meta: SessionHeader
+  inheritedEventCount: SessionLogOffset
 }
 
 interface PersistenceBackend {
   readonly name: string
-  appendBatch(meta: SessionHeader, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void>
-  commitRepair(meta: SessionHeader, tornMarker: undefined, closers: readonly SessionEvent[]): Promise<void>
+  appendBatch(storage: SessionStorageMetadata, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void>
+  commitRepair(storage: SessionStorageMetadata, tornMarker: undefined, closers: readonly SessionEvent[]): Promise<void>
   list(): Promise<SessionHeader[]>
   loadStored(id: SessionId): Promise<DurableStoredSession | undefined>
   readStoredRevision(id: SessionId): Promise<string | undefined>
@@ -151,19 +164,19 @@ function persistenceBackend(stored: Map<string, DurableStoredSession>): Persiste
   const snapshot = (value: DurableStoredSession): DurableStoredSession => structuredClone(value)
   return {
     name: 'assistant-delivery-session-adoption-test',
-    async appendBatch(meta, events, isMaterialized) {
-      const current = stored.get(String(meta.id))
+    async appendBatch(storage, events, isMaterialized) {
+      const current = stored.get(String(storage.meta.id))
       revision += 1
       if (!isMaterialized || current === undefined) {
-        stored.set(String(meta.id), snapshot({ meta, events: [...events], revision: `test:${revision}` }))
+        stored.set(String(storage.meta.id), snapshot({ ...storage, events: [...events], revision: `test:${revision}` }))
         return
       }
       current.events.push(...structuredClone(events))
       current.revision = `test:${revision}`
     },
-    async commitRepair(meta, _tornMarker, closers) {
-      const current = stored.get(String(meta.id))
-      if (current === undefined) throw new Error(`missing stored session ${meta.id}`)
+    async commitRepair(storage, _tornMarker, closers) {
+      const current = stored.get(String(storage.meta.id))
+      if (current === undefined) throw new Error(`missing stored session ${storage.meta.id}`)
       revision += 1
       current.events.push(...structuredClone(closers))
       current.revision = `test:${revision}`
@@ -283,6 +296,10 @@ function lastSandboxMode(events: readonly SessionEvent[]): PresetSpec['sandbox']
   return undefined
 }
 
+function lastApprovalPolicy(events: readonly SessionEvent[]): PresetSpec['approval'] | undefined {
+  return events.findLast(event => event.type === 'approval/policy')?.data.policy
+}
+
 function permissionPresetFixture(options: PermissionHarnessOptions) {
   const presets: Readonly<Record<string, PresetSpec>> = options.presets ?? testPermissionPresets
   const names = Object.keys(presets)
@@ -292,9 +309,9 @@ function permissionPresetFixture(options: PermissionHarnessOptions) {
     if (preset === undefined) throw new Error(`unknown test permission preset: ${name}`)
     return preset
   })
-  const current = (events: readonly SessionEvent[]): string => {
+  const currentEvents = (events: readonly SessionEvent[]): string => {
     const sandbox = lastSandboxMode(events) ?? 'workspace-write'
-    const approval = effectiveApprovalPolicy(events) ?? 'ask'
+    const approval = lastApprovalPolicy(events) ?? 'ask'
     const selected = lastPermissionPreset(events)
     if (selected !== undefined) {
       const preset = presets[selected]
@@ -302,21 +319,22 @@ function permissionPresetFixture(options: PermissionHarnessOptions) {
     }
     return names.find(name => presets[name]?.sandbox === sandbox && presets[name]?.approval === approval) ?? 'custom'
   }
+  const current = (session: Session): string => currentEvents(session.snapshotEvents())
   const set = vi.fn((session: Session, name: string): void => {
     const preset = resolve(name)
-    if (current(session.events) !== name) session.append('permission/preset', { preset: name })
-    if ((lastSandboxMode(session.events) ?? 'workspace-write') !== preset.sandbox) {
+    if (current(session) !== name) session.append('permission/preset', { preset: name })
+    if ((lastSandboxMode(session.snapshotEvents()) ?? 'workspace-write') !== preset.sandbox) {
       const appendSandbox = session.append as unknown as (
         type: 'sandbox/mode',
         data: { mode: PresetSpec['sandbox'] },
       ) => void
       appendSandbox.call(session, 'sandbox/mode', { mode: preset.sandbox })
     }
-    if ((effectiveApprovalPolicy(session.events) ?? 'ask') !== preset.approval) {
+    if ((lastApprovalPolicy(session.snapshotEvents()) ?? 'ask') !== preset.approval) {
       setApprovalPolicy(session, preset.approval)
     }
   })
-  return { names, resolve, current, set }
+  return { names, resolve, current, currentEvents, set }
 }
 
 class ReplyAdapter extends LlmAdapter {
@@ -426,9 +444,11 @@ async function runtimeHarness(
   sessionPersistence?: (ctx: Context) => unknown,
 ) {
   const ctx = new Context()
+  ctx.baseUrl = pathToFileURL(`${root}/`).href
   const presetExecute = vi.fn(async () => ({ mounted: true }))
   if (presetRoot !== undefined) await ctx.plugin(Loader)
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' }, tools: { mode: 'native' } })
+  await ctx.plugin(SessionProjection)
   if (presetRoot === undefined && provideAgentPresets) {
     const presetResolve = vi.fn(async (id?: string) => ({ id: id ?? agentPreset }))
     const presetMount = vi.fn(async (agentCtx: Agent['ctx'], id?: string) => {
@@ -456,10 +476,15 @@ async function runtimeHarness(
       default: agentPreset,
       roots: [{ path: presetRoot, trust: 'system' }],
       includeUserRoot: false,
+      includeShippedRoot: false,
     })
   }
   ctx.on('session/flush', session => {
-    saved.set(String(session.id), structuredClone({ header: session.header, events: session.events }))
+    saved.set(String(session.id), structuredClone({
+      header: session.header,
+      events: session.snapshotEvents(),
+      inheritedEventCount: session.inheritedEventCount,
+    }))
   })
   const fallbackPersistence = {
     coordinator: {
@@ -477,6 +502,7 @@ async function runtimeHarness(
       const restored = structuredClone(value)
       return SessionPreparation.create(ctx.sessions.prepare(id, {
         seedSource: 'persistence', seed: [...restored.events], meta: restored.header,
+        inheritedEventCount: restored.inheritedEventCount,
       }))
     },
   }
@@ -523,7 +549,7 @@ async function runtimeHarness(
     ctx.provide('permissionPresets' as never, permissionPresets as never)
     const defaultPreset = permissions?.seedDefaultPreset ?? permissionPresets.names[0]!
     ctx.on('session/created', session => {
-      if (session.events.some(event => [
+      if (session.snapshotEvents().some(event => [
         'permission/preset', 'sandbox/mode', 'approval/policy',
       ].includes(String(event.type)))) return
       const spec = permissionPresets.resolve(defaultPreset)
@@ -537,7 +563,7 @@ async function runtimeHarness(
     ctx.provide('approval' as never, {
       config: { policy: 'ask' },
       setPolicy(agent: Agent, policy: 'ask' | 'never') {
-        if ((effectiveApprovalPolicy(agent.session.events) ?? 'ask') !== policy) {
+        if ((lastApprovalPolicy(agent.session.snapshotEvents()) ?? 'ask') !== policy) {
           setApprovalPolicy(agent.session, policy)
         }
       },
@@ -726,9 +752,9 @@ function expectSafeAskPermission(
   permissionPresets: ReturnType<typeof permissionPresetFixture>,
   events: readonly SessionEvent[],
 ): void {
-  expect(permissionPresets.current(events)).toBe('guarded-dynamic-id')
+  expect(permissionPresets.currentEvents(events)).toBe('guarded-dynamic-id')
   expect(lastSandboxMode(events)).toBe('workspace-write')
-  expect(effectiveApprovalPolicy(events) ?? 'ask').toBe('ask')
+  expect(lastApprovalPolicy(events) ?? 'ask').toBe('ask')
   expect(approvalReviewerOf(events)).toBe('user')
 }
 
@@ -736,9 +762,9 @@ function expectSafeFullPermission(
   permissionPresets: ReturnType<typeof permissionPresetFixture>,
   events: readonly SessionEvent[],
 ): void {
-  expect(permissionPresets.current(events)).toBe('unlocked-dynamic-id')
+  expect(permissionPresets.currentEvents(events)).toBe('unlocked-dynamic-id')
   expect(lastSandboxMode(events)).toBe('danger-full-access')
-  expect(effectiveApprovalPolicy(events)).toBe('never')
+  expect(lastApprovalPolicy(events)).toBe('never')
   expect(approvalReviewerOf(events)).toBe('none')
 }
 
@@ -747,19 +773,19 @@ function nativeFullEvents(persisted: SavedSession): SessionEvent[] {
     ...persisted.events,
     {
       type: 'permission/preset',
-      seq: persisted.events.length,
+      seq: SessionSeq(persisted.events.length),
       time: Date.now(),
       data: { preset: 'unlocked-dynamic-id' },
     },
     {
       type: 'sandbox/mode',
-      seq: persisted.events.length + 1,
+      seq: SessionSeq(persisted.events.length + 1),
       time: Date.now(),
       data: { mode: 'danger-full-access' },
     },
     {
       type: 'approval/policy',
-      seq: persisted.events.length + 2,
+      seq: SessionSeq(persisted.events.length + 2),
       time: Date.now(),
       data: { policy: 'never' },
     },
@@ -786,7 +812,7 @@ function attachmentFixture() {
   return { attachments, saveImages, saved }
 }
 
-describe('real rc.8 delivery Agent runtime', () => {
+describe('real rc.1 delivery Agent runtime', () => {
   test('namespaces model-picker operations by conversation as well as provider event id', () => {
     const first = modelPickerOperationId(conversation, 'same-event')
     expect(modelPickerOperationId(conversation, 'same-event')).toBe(first)
@@ -1066,7 +1092,7 @@ describe('real rc.8 delivery Agent runtime', () => {
         return
       }
       if (f.llm.requests.length === 2) {
-        const id = CallId('call-auto-preset-probe')
+        const id = ToolCallId('call-auto-preset-probe')
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
         yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
         yield {
@@ -1136,7 +1162,7 @@ describe('real rc.8 delivery Agent runtime', () => {
         return
       }
       if (request === 2) {
-        const id = CallId('call-auto-compact-tool-retry')
+        const id = ToolCallId('call-auto-compact-tool-retry')
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
         yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
         yield {
@@ -1191,7 +1217,7 @@ describe('real rc.8 delivery Agent runtime', () => {
         yield { type: 'finish', reason: { kind: 'max-tokens' } }
         return
       }
-      const id = CallId(`call-auto-loop-${request}`)
+      const id = ToolCallId(`call-auto-loop-${request}`)
       yield { type: 'block-start', index: 0, blockType: 'tool-call' }
       yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
       yield {
@@ -1266,7 +1292,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     })
     f.ctx.on('session/event', (session, event) => {
       if (event.type !== 'turn/end' || event.data.turn !== normalTurn || normalTurnEnded) return
-      normalTurnEvents = structuredClone(session.events)
+      normalTurnEvents = structuredClone(session.snapshotEvents())
       normalTurnEnded = true
       resolveNormalTurnEnded()
     })
@@ -1294,7 +1320,7 @@ describe('real rc.8 delivery Agent runtime', () => {
         return
       }
       if (request === 3) {
-        const id = CallId('call-normal-preset-probe')
+        const id = ToolCallId('call-normal-preset-probe')
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
         yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
         yield {
@@ -1381,7 +1407,7 @@ describe('real rc.8 delivery Agent runtime', () => {
         queueMicrotask(() => {
           queueMicrotask(() => {
             void event.agent.ctx.tools.execute({
-              callId: CallId('call-auto-post-enqueue-barrier-probe'),
+              callId: ToolCallId('call-auto-post-enqueue-barrier-probe'),
               name: 'preset_probe',
               arguments: {},
               agent: event.agent,
@@ -1577,7 +1603,7 @@ describe('real rc.8 delivery Agent runtime', () => {
         yield { type: 'finish', reason: { kind: 'stop' } }
         return
       }
-      const id = CallId('call-unpaired')
+      const id = ToolCallId('call-unpaired')
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text: partial }
       yield { type: 'block-end', index: 0, block: { type: 'text', text: partial } }
@@ -1664,7 +1690,7 @@ describe('real rc.8 delivery Agent runtime', () => {
       f.llm.requests.push(options)
       const request = f.llm.requests.length
       if (request === 1) {
-        const id = CallId('call-empty-after-tools')
+        const id = ToolCallId('call-empty-after-tools')
         yield { type: 'block-start', index: 0, blockType: 'tool-call' }
         yield { type: 'tool-call-delta', index: 0, id, name: 'preset_probe', argumentsDelta: '{}' }
         yield {
@@ -4845,6 +4871,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     const withoutReviewer = {
       header: persisted.header,
       events: persisted.events.filter(event => String(event.type) !== 'assistant-policy/approval-reviewer'),
+      inheritedEventCount: persisted.inheritedEventCount,
     }
     saved.set(binding.sessionId, withoutReviewer)
     const sendsBefore = fixture.sends.length
@@ -4991,10 +5018,11 @@ describe('real rc.8 delivery Agent runtime', () => {
       header: persisted.header,
       events: [...persisted.events, {
         type: 'sandbox/mode',
-        seq: persisted.events.length,
+        seq: SessionSeq(persisted.events.length),
         time: picker.expiresAt,
         data: { mode: 'workspace-write' },
       }],
+      inheritedEventCount: persisted.inheritedEventCount,
     })
     await first.ctx.fiber.restart()
 
@@ -5073,7 +5101,7 @@ describe('real rc.8 delivery Agent runtime', () => {
 
     const events = activeSessionEvents(fixture.service, saved)
     expect(lastSandboxMode(events)).toBe('danger-full-access')
-    expect(effectiveApprovalPolicy(events)).toBe('never')
+    expect(lastApprovalPolicy(events)).toBe('never')
     expect(approvalReviewerOf(events)).toBe('none')
     expect(fixture.sends.at(-1)?.text).toContain('已切换到 完全访问权限（full）')
 
@@ -5189,9 +5217,9 @@ describe('real rc.8 delivery Agent runtime', () => {
     try {
       await drive(fixture.service)
       const events = activeSessionEvents(fixture.service, saved)
-      expect(fixture.permissionPresets!.current(events)).toBe('guarded-dynamic-id')
+      expect(fixture.permissionPresets!.currentEvents(events)).toBe('guarded-dynamic-id')
       expect(lastSandboxMode(events)).not.toBe('danger-full-access')
-      expect(effectiveApprovalPolicy(events) ?? 'ask').toBe('ask')
+      expect(lastApprovalPolicy(events) ?? 'ask').toBe('ask')
       expect(approvalReviewerOf(events)).toBe('user')
       expect(fixture.sends.at(-1)?.text).toContain('权限卡片已过期')
     } finally {
@@ -5252,9 +5280,9 @@ describe('real rc.8 delivery Agent runtime', () => {
       await fixture.service.whenIdle()
 
       const events = activeSessionEvents(fixture.service, saved)
-      expect(fixture.permissionPresets!.current(events)).toBe('guarded-dynamic-id')
+      expect(fixture.permissionPresets!.currentEvents(events)).toBe('guarded-dynamic-id')
       expect(lastSandboxMode(events)).not.toBe('danger-full-access')
-      expect(effectiveApprovalPolicy(events) ?? 'ask').toBe('ask')
+      expect(lastApprovalPolicy(events) ?? 'ask').toBe('ask')
       expect(approvalReviewerOf(events)).toBe('user')
       expect(fixture.sends.at(-1)?.text).toContain('权限卡片已过期')
     } finally {
@@ -5340,7 +5368,7 @@ describe('real rc.8 delivery Agent runtime', () => {
 
     const events = activeSessionEvents(fixture.service, saved)
     expect(lastSandboxMode(events)).toBe('workspace-write')
-    expect(effectiveApprovalPolicy(events) ?? 'ask').toBe('ask')
+    expect(lastApprovalPolicy(events) ?? 'ask').toBe('ask')
     expect(approvalReviewerOf(events)).toBe('auto-review')
     expect(fixture.sends.at(-1)?.text).toContain('权限卡片已过期或状态已变化')
     await fixture.ctx.fiber.restart()
@@ -5362,7 +5390,9 @@ describe('real rc.8 delivery Agent runtime', () => {
     const persisted = saved.get(binding.sessionId)!
     const nativeFull = nativeFullEvents(persisted)
     expect(approvalReviewerOf(nativeFull)).toBe('user')
-    saved.set(binding.sessionId, { header: persisted.header, events: nativeFull })
+    saved.set(binding.sessionId, {
+      header: persisted.header, events: nativeFull, inheritedEventCount: persisted.inheritedEventCount,
+    })
 
     const restarted = await permissionRuntimeHarness(root, saved, {})
     await restarted.service.acceptInbound(message('evt-native-full-show', '/permission', 'command'))
@@ -5376,7 +5406,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     ])
     expect(lastPermissionPreset(reconciled)).toBe('unlocked-dynamic-id')
     expect(lastSandboxMode(reconciled)).toBe('danger-full-access')
-    expect(effectiveApprovalPolicy(reconciled)).toBe('never')
+    expect(lastApprovalPolicy(reconciled)).toBe('never')
     await restarted.ctx.fiber.restart()
   })
 
@@ -5400,7 +5430,11 @@ describe('real rc.8 delivery Agent runtime', () => {
       await first.ctx.fiber.restart()
 
       const persisted = saved.get(binding.sessionId)!
-      saved.set(binding.sessionId, { header: persisted.header, events: nativeFullEvents(persisted) })
+      saved.set(binding.sessionId, {
+        header: persisted.header,
+        events: nativeFullEvents(persisted),
+        inheritedEventCount: persisted.inheritedEventCount,
+      })
       const restarted = await permissionRuntimeHarness(root, saved, {})
       const restoreReader = suspendApprovalReviewerReader(restarted.ctx)
       const accepted = await restarted.service.acceptInbound(
@@ -5504,7 +5538,11 @@ describe('real rc.8 delivery Agent runtime', () => {
     await first.ctx.fiber.restart()
 
     const persisted = saved.get(binding.sessionId)!
-    saved.set(binding.sessionId, { header: persisted.header, events: nativeFullEvents(persisted) })
+    saved.set(binding.sessionId, {
+      header: persisted.header,
+      events: nativeFullEvents(persisted),
+      inheritedEventCount: persisted.inheritedEventCount,
+    })
     const restarted = await permissionRuntimeHarness(root, saved, {})
     const store = runtimeStore(restarted.service)
     const markDispatching = vi.spyOn(store, 'markInboxDispatching')
@@ -5515,7 +5553,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     const flushStarted = new Promise<void>(resolve => { markFlushStarted = resolve })
     const flush = vi.spyOn(restarted.ctx.sessions, 'flush')
       .mockImplementationOnce(async session => {
-        logsAtFlush.push([...session.events])
+        logsAtFlush.push([...session.snapshotEvents()])
         markFlushStarted()
         await flushGate
         return false
@@ -5537,7 +5575,7 @@ describe('real rc.8 delivery Agent runtime', () => {
     expect(logsAtFlush).toHaveLength(1)
     expect(approvalReviewerOf(logsAtFlush[0]!)).toBe('none')
     expect(lastSandboxMode(logsAtFlush[0]!)).toBe('danger-full-access')
-    expect(effectiveApprovalPolicy(logsAtFlush[0]!)).toBe('never')
+    expect(lastApprovalPolicy(logsAtFlush[0]!)).toBe('never')
     const waiting = store.getInbox(accepted.inboxId)
     expect(waiting).toMatchObject({ status: 'retry_wait', failureCode: 'agent-resume-failed' })
     expect(restarted.llm.requests).toHaveLength(0)
@@ -5576,7 +5614,11 @@ describe('real rc.8 delivery Agent runtime', () => {
       time: Date.now(),
       data: { reviewer },
     } as unknown as SessionEvent
-    saved.set(binding.sessionId, { header: persisted.header, events: [...full, existingReviewer] })
+    saved.set(binding.sessionId, {
+      header: persisted.header,
+      events: [...full, existingReviewer],
+      inheritedEventCount: persisted.inheritedEventCount,
+    })
 
     const restarted = await permissionRuntimeHarness(root, saved, {})
     await restarted.service.acceptInbound(message('evt-native-full-malformed', '/permission', 'command'))
@@ -5655,9 +5697,9 @@ describe('real rc.8 delivery Agent runtime', () => {
       await drive(fixture.service)
       expect(runtimeStore(fixture.service).getInbox(accepted.inboxId)).toMatchObject({ status: 'processed' })
       const events = activeSessionEvents(fixture.service, saved)
-      expect(fixture.permissionPresets!.current(events)).toBe('danger-full-access')
+      expect(fixture.permissionPresets!.currentEvents(events)).toBe('danger-full-access')
       expect(lastSandboxMode(events)).toBe('danger-full-access')
-      expect(effectiveApprovalPolicy(events)).toBe('never')
+      expect(lastApprovalPolicy(events)).toBe('never')
       expect(approvalReviewerOf(events)).toBe('none')
       expect(events.filter(event => event.type === 'assistant-policy/approval-reviewer')).toEqual([])
     } finally {
@@ -6173,11 +6215,11 @@ describe('real rc.8 delivery Agent runtime', () => {
     const logsAtFlush: SessionEvent[][] = []
     const flush = vi.spyOn(fixture.ctx.sessions, 'flush')
       .mockImplementationOnce(async session => {
-        logsAtFlush.push([...session.events])
+        logsAtFlush.push([...session.snapshotEvents()])
         return false
       })
       .mockImplementationOnce(async session => {
-        logsAtFlush.push([...session.events])
+        logsAtFlush.push([...session.snapshotEvents()])
         return false
       })
     const accepted = await fixture.service.acceptInbound(
@@ -6226,11 +6268,11 @@ describe('real rc.8 delivery Agent runtime', () => {
     const logsAtFlush: SessionEvent[][] = []
     const flush = vi.spyOn(fixture.ctx.sessions, 'flush')
       .mockImplementationOnce(async session => {
-        logsAtFlush.push([...session.events])
+        logsAtFlush.push([...session.snapshotEvents()])
         throw new Error('primary durability unavailable')
       })
       .mockImplementationOnce(async session => {
-        logsAtFlush.push([...session.events])
+        logsAtFlush.push([...session.snapshotEvents()])
         throw new Error('compensation durability unavailable')
       })
     const accepted = await fixture.service.acceptInbound(
@@ -6298,11 +6340,11 @@ describe('real rc.8 delivery Agent runtime', () => {
     const logsAtFlush: SessionEvent[][] = []
     const flush = vi.spyOn(fixture.ctx.sessions, 'flush')
       .mockImplementationOnce(async session => {
-        logsAtFlush.push([...session.events])
+        logsAtFlush.push([...session.snapshotEvents()])
         return false
       })
       .mockImplementationOnce(async session => {
-        logsAtFlush.push([...session.events])
+        logsAtFlush.push([...session.snapshotEvents()])
         return false
       })
     const accepted = await fixture.service.acceptInbound(

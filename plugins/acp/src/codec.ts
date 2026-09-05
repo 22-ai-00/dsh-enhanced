@@ -8,6 +8,7 @@ import type { ContentBlock as DshContentBlock } from '@deepseek-ai/dsh-llm'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-plan-mode'
 import type {} from '@deepseek-ai/dsh-session-title'
+import type {} from '@deepseek-ai/dsh-tool-todo'
 
 export interface SessionEventMapper {
   map(event: SessionEvent): SessionUpdate[]

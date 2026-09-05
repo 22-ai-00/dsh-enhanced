@@ -12,7 +12,9 @@ import {
   type SessionEvent,
   type SessionHeader,
   type SessionId,
+  type SessionLogOffset,
 } from '@deepseek-ai/dsh-session'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantDeliveryService, type DeliveryAdapter, type OutboundIntent } from '@dsh-enhanced/assistant-delivery'
 import { AssistantEvaluationService } from '@dsh-enhanced/assistant-evaluation'
@@ -63,13 +65,18 @@ const modelStep = Object.freeze({
 interface PersistedSession {
   events: readonly SessionEvent[]
   header: SessionHeader
+  inheritedEventCount: SessionLogOffset
 }
 
 /** Minimal durable session backend required by Delivery's public Agent resume path. */
 function mountSessionPersistence(ctx: Context): void {
   const saved = new Map<string, PersistedSession>()
   ctx.on('session/flush', session => {
-    saved.set(String(session.id), structuredClone({ header: session.header, events: session.events }))
+    saved.set(String(session.id), structuredClone({
+      header: session.header,
+      events: session.snapshotEvents(),
+      inheritedEventCount: session.inheritedEventCount,
+    }))
   })
   ctx.provide('sessionPersistence' as never, {
     coordinator: {
@@ -89,6 +96,7 @@ function mountSessionPersistence(ctx: Context): void {
         seedSource: 'persistence',
         seed: [...restored.events],
         meta: restored.header,
+        inheritedEventCount: restored.inheritedEventCount,
       }))
     },
   } as never)
@@ -301,6 +309,7 @@ describe('real supervised workflow-growth stack', () => {
     contexts.push(ctx)
 
     await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
+    await ctx.plugin(SessionProjectionRegistry)
     // Delivery's public runtime refuses to bind or later resume an Agent
     // session unless it crosses the durable session-persistence boundary.
     mountSessionPersistence(ctx)

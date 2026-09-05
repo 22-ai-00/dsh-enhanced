@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -30,6 +30,7 @@ function agent(): Agent {
     createdAt: 1,
     cwd: '/work/alpha',
     agentPreset: 'primary',
+    isSeeded: false,
   })
   setApprovalReviewer(session, 'none')
   session.append('approval/policy', { policy: 'never' })
@@ -119,7 +120,7 @@ async function harness(options: { autonomousRollback?: boolean } = {}) {
 
 function call(name: string, args: Record<string, unknown>, withAgent?: Agent) {
   return {
-    callId: CallId(`call-${name}-${Math.random()}`),
+    callId: ToolCallId(`call-${name}-${Math.random()}`),
     name,
     arguments: args,
     signal: new AbortController().signal,

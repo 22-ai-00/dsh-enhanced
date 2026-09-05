@@ -14,6 +14,7 @@ function session(seed: readonly SessionEvent[] = []): Session {
     version: SESSION_FORMAT_VERSION,
     id,
     createdAt: 1,
+    isSeeded: false,
     cwd: '/work/alpha',
     agentPreset: 'primary',
   })
@@ -32,8 +33,8 @@ function appendPermissionPreset(current: Session, preset: string): void {
 describe('durable approval reviewer', () => {
   test('folds the last event and replays it from a restored event log', () => {
     const original = session()
-    expect(foldApprovalReviewer(original.events)).toBeUndefined()
-    expect(approvalReviewerOf(original.events)).toBe('user')
+    expect(foldApprovalReviewer(original.snapshotEvents())).toBeUndefined()
+    expect(approvalReviewerOf(original.snapshotEvents())).toBe('user')
     expect(setApprovalReviewer(original, 'auto-review')).toBe(true)
     expect(getApprovalReviewer(original)).toBe('user')
     original.append('approval/policy', { policy: 'ask' })
@@ -41,32 +42,32 @@ describe('durable approval reviewer', () => {
     appendSandboxMode(original, 'workspace-write')
     expect(getApprovalReviewer(original)).toBe('auto-review')
 
-    const replayed = session(structuredClone(original.events))
-    expect(foldApprovalReviewer(replayed.events)).toBe('auto-review')
-    expect(approvalReviewerOf(replayed.events)).toBe('auto-review')
+    const replayed = session(structuredClone(original.snapshotEvents()))
+    expect(foldApprovalReviewer(replayed.snapshotEvents())).toBe('auto-review')
+    expect(approvalReviewerOf(replayed.snapshotEvents())).toBe('auto-review')
     expect(getApprovalReviewer(replayed)).toBe('auto-review')
   })
 
   test('validates values and does not append the current effective value', () => {
     const current = session()
-    const initialLength = current.events.length
+    const initialLength = current.snapshotEvents().length
     expect(setApprovalReviewer(current, 'user')).toBe(false)
-    expect(current.events).toHaveLength(initialLength)
+    expect(current.snapshotEvents()).toHaveLength(initialLength)
     expect(() => setApprovalReviewer(current, 'automatic' as never)).toThrow(TypeError)
-    expect(current.events).toHaveLength(initialLength)
+    expect(current.snapshotEvents()).toHaveLength(initialLength)
 
     expect(setApprovalReviewer(current, 'auto-review')).toBe(true)
-    const length = current.events.length
+    const length = current.snapshotEvents().length
     expect(setApprovalReviewer(current, 'auto-review')).toBe(false)
-    expect(current.events).toHaveLength(length)
+    expect(current.snapshotEvents()).toHaveLength(length)
   })
 
   test('requires an explicit coherent sandbox, approval, and reviewer triple for full access', () => {
     const never = session()
     never.append('approval/policy', { policy: 'never' })
-    expect(approvalReviewerOf(never.events)).toBe('user')
+    expect(approvalReviewerOf(never.snapshotEvents())).toBe('user')
     expect(setApprovalReviewer(never, 'auto-review')).toBe(true)
-    expect(foldApprovalReviewer(never.events)).toBe('auto-review')
+    expect(foldApprovalReviewer(never.snapshotEvents())).toBe('auto-review')
     expect(getApprovalReviewer(never)).toBe('user')
 
     setApprovalReviewer(never, 'none')
@@ -80,7 +81,7 @@ describe('durable approval reviewer', () => {
     const ask = session()
     appendSandboxMode(ask, 'danger-full-access')
     setApprovalReviewer(ask, 'none')
-    expect(foldApprovalReviewer(ask.events)).toBe('none')
+    expect(foldApprovalReviewer(ask.snapshotEvents())).toBe('none')
     expect(getApprovalReviewer(ask)).toBe('user')
 
     ask.append('user/message', createUserMessage({
@@ -111,7 +112,7 @@ describe('durable approval reviewer', () => {
     current.append('approval/policy', { policy: 'ask' })
 
     appendPermissionPreset(current, 'auto')
-    expect(foldApprovalReviewer(current.events)).toBeUndefined()
+    expect(foldApprovalReviewer(current.snapshotEvents())).toBeUndefined()
     expect(getApprovalReviewer(current)).toBe('auto-review')
 
     appendPermissionPreset(current, 'workspace-write')
@@ -121,7 +122,7 @@ describe('durable approval reviewer', () => {
     appendSandboxMode(current, 'danger-full-access')
     appendPermissionPreset(current, 'danger-full-access')
     expect(getApprovalReviewer(current)).toBe('none')
-    expect(current.events.some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
+    expect(current.snapshotEvents().some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
   })
 
   test('folds official preset and legacy reviewer events in durable log order', () => {

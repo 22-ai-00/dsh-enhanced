@@ -29,6 +29,9 @@ class FakeLarkTransport implements LarkTransport {
   }
   async connect(): Promise<void> {}
   async disconnect(): Promise<void> {}
+  async addReaction(): Promise<string> { return 'reaction-1' }
+  async createProgress() { return { cotId: 'cot-1', messageId: 'om-progress-1' } }
+  async writeProgress(): Promise<void> {}
   async message(input: LarkMessage): Promise<void> { await this.handlers?.message(input) }
   async action(input: LarkCardAction): Promise<void> { await this.handlers?.cardAction(input) }
 }
@@ -36,7 +39,7 @@ class FakeLarkTransport implements LarkTransport {
 function agent(sessionId: string): Agent {
   const id = SessionId(sessionId)
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1,
-    cwd: '/work/alpha', agentPreset: 'primary' })
+    cwd: '/work/alpha', agentPreset: 'primary', isSeeded: false })
   return { id, options: {}, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }

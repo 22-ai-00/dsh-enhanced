@@ -81,7 +81,7 @@ dsh-model-setup --provider traex-agent --enable-in-profile web
 
 - `enabled` 默认 `false`；只在完成本机兼容性与登录检查后显式开启。
 - `command` 是单个可执行文件名或绝对路径；插件固定参数数组并使用 `shell: false`，不接受 shell 片段。
-- `cwd` 是 ACP `session/new` 允许使用的工作目录；bundle 默认使用 `$DSH_HOME/assistant-workspace`，与标准 Delivery 默认值一致。相对路径按 DSH 进程启动目录解析。每个**带 prompt 的普通对话调用**必须是深冻结的 DSH Agent Loop 请求：同模块 marker 可直接验证；包被源码 link 或 DSH 在 adapter 边界复制请求时，则由 Host `agents` 服务核对仍在运行的精确 Agent、registry/session 对象身份，并从 live Session 的 header 与 derived messages 重建请求，只容许 rc.8 `forAdapter()` 删除跨 route `replayState`。随后插件用同一 live Session 的 header cwd，与配置 cwd 分别 `realpath` 后要求完全相等。缺失、过期、伪造、辅助/嵌套调用、请求变形、cwd mismatch 或 symlink escape 都会在 `traex login status` 和 ACP 启动前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝；ACP 收到的是 canonical live-session cwd。Cordis `config` 是整段替换，手工覆盖时不要意外删掉 bundle 的 `cwd`；若改用其他目录，还要把创建该会话的 Delivery `defaultWorkspace` 改为同一 realpath。
+- `cwd` 是 ACP `session/new` 允许使用的工作目录；bundle 默认使用 `$DSH_HOME/assistant-workspace`，与标准 Delivery 默认值一致。相对路径按 DSH 进程启动目录解析。每个**带 prompt 的普通对话调用**必须是深冻结的 DSH Agent Loop 请求：同模块 marker 可直接验证；包被源码 link 或 DSH 在 adapter 边界复制请求时，则由 Host `agents` 服务核对仍在运行的精确 Agent、registry/session 对象身份，并从 live Session 的 header 与 derived messages 重建请求，只容许 `0.1.2-rc.1` `forAdapter()` 删除跨 route `replayState`。随后插件用同一 live Session 的 header cwd，与配置 cwd 分别 `realpath` 后要求完全相等。缺失、过期、伪造、辅助/嵌套调用、请求变形、cwd mismatch 或 symlink escape 都会在 `traex login status` 和 ACP 启动前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝；ACP 收到的是 canonical live-session cwd。Cordis `config` 是整段替换，手工覆盖时不要意外删掉 bundle 的 `cwd`；若改用其他目录，还要把创建该会话的 Delivery `defaultWorkspace` 改为同一 realpath。
 - `listModels` 在缓存为空、过期或只有不完整的普通 stream 观察时，会通过当前 adapter 的 `probeReadiness` 执行 `traex login status` 和无 prompt 的 ACP discovery。它固定使用配置 cwd、read-only sandbox、`ask-for-approval=never`，不携带消息内容，不声明文件/terminal capability，并拒绝 permission request。并发查询 single-flight；完整目录在短 TTL 内复用，过期后刷新。发现失败时 `/model` 不会整体失败，而是安全回退到 `models` 配置别名，并只记录固定、无错误原文的诊断。
 - `resolveModel` 仍然 **不认证、不启动子进程**，只读取配置与当前短 TTL 内存缓存，保证 Agent Loop 的 `prepareCall` 路径 process-free。真实 `stream` 不信任该展示缓存；它继续要求 live session + canonical cwd，并以自己新建 ACP session 的目录重新权威校验模型与 effort。
 - 部署工具仍可在启用 route 前显式调用包导出的 `probeTraexReadiness`，主动验证本机登录和完整目录；调用完成后应 shutdown 临时 adapter。adapter shutdown 会 abort 尚未完成的目录发现、清除 single-flight 引用与缓存。
@@ -129,7 +129,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 - `end_turn` 是正常完成终态；`max_tokens`、`max_turn_requests` 都映射为 DSH `max-tokens` 截断终态，供上层决定是否创建新的补全 turn。`refusal`、`cancelled`、断连、畸形/超限 NDJSON、无文本或缺少终态都会失败。
 - TraeX 可能仍在 stderr 记录 `unsupported call` 一类内部工具路由告警；这是其内部工具未向本兼容层开放，不等同于 DSH 工具失败。插件会要求模型只返回 `dsh-tool-calls/v1` 信封；若调用仍失败，生命周期日志会同时给出 phase、terminal、exitCode 和 signal，便于区分终态缺失、协议校验与进程退出。
 - 已保存的 effort 可能在切换模型、账号权益变化或目录更新后失效。此时插件在 `session/prompt` 前丢弃该陈旧值，使用本次 ACP session 返回的当前默认档位继续执行；不会重放 prompt 或重复计费，生命周期日志会标记 `reasoningFallback=true`。下次打开模型选择器会显示新目录。
-- Provider 不会重放同一个已提交请求。外部 agent 可能已经读取上下文或产生服务端计费，原请求自动重试会放大副作用；上层 `assistant-delivery` 可在持久化 `max_tokens` / `max_turn_requests` 终态后，选择创建新的、有界、禁止工具执行的后续 turn 来补齐回答，这不属于 Provider 重试。rc.8 仍可能向 Provider 序列化 scoped tool schema，但恢复期间的任何工具调用都会在审批和执行前被拒绝。TraeX 的每个后续 turn 仍会启动新进程/session，并按一次新的模型调用消耗额度。
+- Provider 不会重放同一个已提交请求。外部 agent 可能已经读取上下文或产生服务端计费，原请求自动重试会放大副作用；上层 `assistant-delivery` 可在持久化 `max_tokens` / `max_turn_requests` 终态后，选择创建新的、有界、禁止工具执行的后续 turn 来补齐回答，这不属于 Provider 重试。DSH `0.1.2-rc.1` 仍可能向 Provider 序列化 scoped tool schema，但恢复期间的任何工具调用都会在审批和执行前被拒绝。TraeX 的每个后续 turn 仍会启动新进程/session，并按一次新的模型调用消耗额度。
 
 调用失败时返回的稳定 `LlmError` code 与排查：
 
@@ -156,7 +156,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 
 ## 已知限制
 
-- DSH `0.1.0-rc.8` 暴露的是 `LlmAdapter` seam，因此工具调用通过模型隐藏的严格 JSON 信封桥接，不是 TraeX 原生 tool update，也不是完整 ACP UI。TraeX 的 plan、diff、permission UI、会话列表和富内容不会进入 DSH。
+- DSH `0.1.2-rc.1` 暴露的是 `LlmAdapter` seam，因此工具调用通过模型隐藏的严格 JSON 信封桥接，不是 TraeX 原生 tool update，也不是完整 ACP UI。TraeX 的 plan、diff、permission UI、会话列表和富内容不会进入 DSH。
 - 每次 DSH 请求使用一个新的 TraeX 进程和 ACP session，不恢复外部历史；完整 DSH 对话会被序列化进 prompt。
 - 暂不转发图片、音频或 TraeX token usage。DSH tool schema 会随每一步序列化，工具结果则通过下一步的完整 DSH 对话返回给模型；实验性的 ACP `PromptResponse.usage` 只保留显式数值字段用于内部诊断，不会映射或发送为 DSH usage chunk。
 - TraeX 是变化中的开发工具；本实现以本机 `traecli 0.201.1 (internal edition)` 的 ACP v1 握手、逐模型 reasoning selector 与官方 ACP SDK `0.25.1` 为验证基线。升级后若 identity、模型/effort selector 或终态变化，插件会拒绝而不是猜测兼容。
@@ -164,7 +164,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 ## 兼容性与调研
 
 - Node.js `^22.19.0 || >=24.0.0`
-- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.1.0-rc.8 <0.2.0`
+- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.1.2-rc.1 <0.2.0`
 - Cordis `^4.0.1`
 - Agent Client Protocol SDK `0.25.1`，protocol version `1`
 

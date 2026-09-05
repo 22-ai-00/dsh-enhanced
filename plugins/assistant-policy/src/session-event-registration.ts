@@ -5,7 +5,7 @@ import { realpathSync } from 'node:fs'
 import { createRequire } from 'node:module'
 
 /**
- * rc.8 exposes its generated known-event catalog as a ReadonlySet and defers a
+ * DSH exposes its generated known-event catalog as a ReadonlySet and defers a
  * downstream registration API. Persistence nevertheless consults the same
  * object for both new batches and cold reads, so a narrowly scoped runtime
  * registration is the only compatible way to make this required plugin event
@@ -243,7 +243,7 @@ function validateRegistry(candidate: SessionRegistryCandidate): ValidatedSession
     || typeof (registry as Partial<MutableEventTypeRegistry>).add !== 'function'
     || typeof (registry as Partial<MutableEventTypeRegistry>).delete !== 'function') {
     throw new Error(
-      `${candidate.label} does not expose the mutable rc.8 session event catalog`,
+      `${candidate.label} does not expose the supported mutable session event catalog`,
     )
   }
   return { label: candidate.label, registry: registry as MutableEventTypeRegistry }
@@ -254,7 +254,7 @@ function supportOracle(persistence: PersistenceService): EventSupportOracle {
   if (coordinator === undefined
     || typeof coordinator.assertEventsSupported !== 'function') {
     throw new Error(
-      'assistant-policy: live sessionPersistence does not expose the rc.8 '
+      'assistant-policy: live sessionPersistence does not expose the supported '
       + 'PersistenceCoordinator event-support oracle; refusing unproven registration',
     )
   }
@@ -425,7 +425,7 @@ function installApprovalReviewerEventType(persistence: PersistenceService): void
 /**
  * Register the required reviewer event for the process lifetime.
  *
- * rc.8 persistence can drain after downstream plugin effects dispose, and
+ * Session persistence can drain after downstream plugin effects dispose, and
  * hot-reloaded module copies cannot safely coordinate ownership of this global
  * catalog. Removing the type would therefore make a valid durable tail (or an
  * already stored session) unreadable. The catalog is metadata only, so the

@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import {
   KNOWN_SESSION_EVENT_TYPES,
   Session,
@@ -49,6 +49,7 @@ function agent(options: { cwd?: string; preset?: string } = {}): Agent {
     version: SESSION_FORMAT_VERSION,
     id,
     createdAt: 1,
+    isSeeded: false,
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options.preset === undefined ? {} : { agentPreset: options.preset }),
   })
@@ -109,7 +110,7 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-describe('DSH rc.8 tool guard', () => {
+describe('DSH 0.1.2-rc.1 tool guard', () => {
   test('fails closed before appending a native-full reviewer when no persistence reader is proven', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-policy-native-full-registration-'))
     temporaryRoots.push(root)
@@ -146,7 +147,7 @@ describe('DSH rc.8 tool guard', () => {
     owner.session.append('turn/start', { turn: 1 })
 
     const result = await ctx.tools.execute({
-      callId: CallId('native-full-registration-unproven'),
+      callId: ToolCallId('native-full-registration-unproven'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -157,7 +158,7 @@ describe('DSH rc.8 tool guard', () => {
     expect(JSON.stringify(result.content)).toContain('migration could not be persisted')
     expect(executions).toBe(0)
     expect(flush).not.toHaveBeenCalled()
-    expect(owner.session.events.some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
+    expect(owner.session.snapshotEvents().some(event => event.type === 'assistant-policy/approval-reviewer')).toBe(false)
     await ctx.fiber.restart()
   })
 
@@ -212,7 +213,7 @@ describe('DSH rc.8 tool guard', () => {
     owner.session.append('turn/start', { turn: 1 })
 
     const first = ctx.tools.execute({
-      callId: CallId('native-full-adoption'),
+      callId: ToolCallId('native-full-adoption'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -226,7 +227,7 @@ describe('DSH rc.8 tool guard', () => {
         return result
       })
     const second = ctx.tools.execute({
-      callId: CallId('native-full-adoption-concurrent'),
+      callId: ToolCallId('native-full-adoption-concurrent'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -246,7 +247,7 @@ describe('DSH rc.8 tool guard', () => {
     expect(reconciliationResult).toBe('ready')
     expect(executions).toBe(2)
     expect(flush).toHaveBeenCalledOnce()
-    expect(approvalReviewerOf(owner.session.events)).toBe('none')
+    expect(approvalReviewerOf(owner.session.snapshotEvents())).toBe('none')
     await ctx.fiber.restart()
   })
 
@@ -301,7 +302,7 @@ describe('DSH rc.8 tool guard', () => {
       return flushGate
     })
     const oldExecution = oldCtx.tools.execute({
-      callId: CallId('native-full-old-instance'),
+      callId: ToolCallId('native-full-old-instance'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -315,7 +316,7 @@ describe('DSH rc.8 tool guard', () => {
       throw new Error('replacement must share the old migration flight')
     })
     const newExecution = newCtx.tools.execute({
-      callId: CallId('native-full-new-instance'),
+      callId: ToolCallId('native-full-new-instance'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -338,9 +339,9 @@ describe('DSH rc.8 tool guard', () => {
     await ctx.plugin(SystemPrompt)
     await ctx.plugin(ToolRuntime)
     await ctx.plugin(ApprovalService, { policy: 'ask' })
-    const persisted: Session['events'][] = []
+    const persisted: Array<ReturnType<Session['snapshotEvents']>> = []
     const flush = vi.fn(async (session: Session) => {
-      persisted.push(structuredClone(session.events))
+      persisted.push(structuredClone(session.snapshotEvents()))
       if (persisted.length === 1) throw new Error('persisted before acknowledgement')
       return true
     })
@@ -373,7 +374,7 @@ describe('DSH rc.8 tool guard', () => {
     owner.session.append('turn/start', { turn: 1 })
 
     const result = await ctx.tools.execute({
-      callId: CallId('native-full-compensation'),
+      callId: ToolCallId('native-full-compensation'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -386,7 +387,7 @@ describe('DSH rc.8 tool guard', () => {
     expect(flush).toHaveBeenCalledTimes(2)
     expect(approvalReviewerOf(persisted[0]!)).toBe('none')
     expect(approvalReviewerOf(persisted[1]!)).toBe('user')
-    expect(approvalReviewerOf(owner.session.events)).toBe('user')
+    expect(approvalReviewerOf(owner.session.snapshotEvents())).toBe('user')
     await ctx.fiber.restart()
   })
 
@@ -425,13 +426,13 @@ describe('DSH rc.8 tool guard', () => {
       .mockImplementation(async () => true)
     try {
       expect(await ctx.assistantPolicy.reconcileNativeFullReviewer(session)).toBe('unavailable')
-      expect(approvalReviewerOf(session.events)).toBe('none')
+      expect(approvalReviewerOf(session.snapshotEvents())).toBe('none')
       expect(await ctx.assistantPolicy.reconcileNativeFullReviewer(session)).toBe('unavailable')
       expect(flush).toHaveBeenCalledOnce()
 
       persistence.coordinator = provenCoordinator
       expect(await ctx.assistantPolicy.reconcileNativeFullReviewer(session)).toBe('unavailable')
-      expect(approvalReviewerOf(session.events)).toBe('user')
+      expect(approvalReviewerOf(session.snapshotEvents())).toBe('user')
       expect(flush).toHaveBeenCalledTimes(2)
       expect(await ctx.assistantPolicy.reconcileNativeFullReviewer(session)).toBe('not-applicable')
     } finally {
@@ -460,7 +461,8 @@ describe('DSH rc.8 tool guard', () => {
       resolve: (name: string) => name === 'legacy-full'
         ? { sandbox: 'danger-full-access', approval: 'never', name: 'Full access' }
         : { sandbox: 'workspace-write', approval: 'ask', name: 'Guarded' },
-      current: (events: Session['events']) => events.findLast(event => event.type === 'permission/preset')?.data.preset,
+      current: (session: Session) => session.snapshotEvents()
+        .findLast(event => event.type === 'permission/preset')?.data.preset,
     } as never)
     provideCompatibleSessionPersistence(ctx)
     let executions = 0
@@ -485,7 +487,7 @@ describe('DSH rc.8 tool guard', () => {
     owner.session.append('turn/start', { turn: 1 })
 
     const result = await ctx.tools.execute({
-      callId: CallId('native-full-stale-compensation'),
+      callId: ToolCallId('native-full-stale-compensation'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -495,7 +497,7 @@ describe('DSH rc.8 tool guard', () => {
     expect(result.isError).toBe(true)
     expect(executions).toBe(0)
     expect(flush).toHaveBeenCalledOnce()
-    expect(approvalReviewerOf(owner.session.events)).toBe('auto-review')
+    expect(approvalReviewerOf(owner.session.snapshotEvents())).toBe('auto-review')
     await ctx.fiber.restart()
   })
 
@@ -528,7 +530,8 @@ describe('DSH rc.8 tool guard', () => {
       resolve: (name: string) => name === 'legacy-full'
         ? { sandbox: 'danger-full-access', approval: 'never', name: 'Full access' }
         : { sandbox: 'workspace-write', approval: 'ask', name: 'Guarded' },
-      current: (events: Session['events']) => events.findLast(event => event.type === 'permission/preset')?.data.preset,
+      current: (session: Session) => session.snapshotEvents()
+        .findLast(event => event.type === 'permission/preset')?.data.preset,
     } as never)
     provideCompatibleSessionPersistence(ctx)
     let executions = 0
@@ -554,7 +557,7 @@ describe('DSH rc.8 tool guard', () => {
     owner.session.append('turn/start', { turn: 1 })
 
     const execution = ctx.tools.execute({
-      callId: CallId('native-full-downgrade'),
+      callId: ToolCallId('native-full-downgrade'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -572,8 +575,8 @@ describe('DSH rc.8 tool guard', () => {
 
     expect(result.isError).toBe(true)
     expect(executions).toBe(0)
-    expect(approvalReviewerOf(owner.session.events)).toBe('user')
-    expect(owner.session.events.findLast(event => event.type === 'approval/decided')?.data.outcome)
+    expect(approvalReviewerOf(owner.session.snapshotEvents())).toBe('user')
+    expect(owner.session.snapshotEvents().findLast(event => event.type === 'approval/decided')?.data.outcome)
       .toBe('unavailable')
     await ctx.fiber.restart()
   })
@@ -587,7 +590,7 @@ describe('DSH rc.8 tool guard', () => {
     await ctx.plugin(ApprovalService, { policy: 'never' })
     let executions = 0
     ctx.tools.register(defineTool({
-      // run_code is a reserved Code Mode presentation transport in rc.8 and
+      // run_code is the reserved PTC presentation transport and
       // cannot be registered by a fixture; an unknown executable tool reaches
       // the same pre-execute/approval path that caused the screenshot.
       name: 'future_external_tool',
@@ -608,7 +611,7 @@ describe('DSH rc.8 tool guard', () => {
     owner.session.append('turn/start', { turn: 1 })
 
     const result = await ctx.tools.execute({
-      callId: CallId('approval-never-attribution'),
+      callId: ToolCallId('approval-never-attribution'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -624,8 +627,8 @@ describe('DSH rc.8 tool guard', () => {
       }),
     ])
     expect(JSON.stringify(result.content)).not.toContain('the user rejected')
-    expect(owner.session.events.some(event => event.type === 'approval/asked')).toBe(false)
-    expect(owner.session.events.some(event => event.type === 'approval/decided')).toBe(false)
+    expect(owner.session.snapshotEvents().some(event => event.type === 'approval/asked')).toBe(false)
+    expect(owner.session.snapshotEvents().some(event => event.type === 'approval/decided')).toBe(false)
     await ctx.fiber.restart()
   })
 
@@ -656,14 +659,14 @@ describe('DSH rc.8 tool guard', () => {
     const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
 
     const read = await ctx.tools.execute({
-      callId: CallId('risk-read'),
+      callId: ToolCallId('risk-read'),
       name: 'read',
       arguments: { file_path: 'README.md' },
       signal: new AbortController().signal,
       agent: owner,
     })
     const unknown = await ctx.tools.execute({
-      callId: CallId('risk-unknown'),
+      callId: ToolCallId('risk-unknown'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -677,7 +680,7 @@ describe('DSH rc.8 tool guard', () => {
     owner.session.append('approval/policy', { policy: 'never' })
     setApprovalReviewer(owner.session, 'none')
     const incoherentNever = await ctx.tools.execute({
-      callId: CallId('risk-incoherent-never'),
+      callId: ToolCallId('risk-incoherent-never'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -688,7 +691,7 @@ describe('DSH rc.8 tool guard', () => {
 
     appendSandboxMode(owner, 'danger-full-access')
     const fullAccess = await ctx.tools.execute({
-      callId: CallId('risk-full-access'),
+      callId: ToolCallId('risk-full-access'),
       name: 'future_external_tool',
       arguments: {},
       signal: new AbortController().signal,
@@ -759,7 +762,7 @@ describe('DSH rc.8 tool guard', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('installs into the real rc.8 ToolRuntime and blocks before the tool body', async () => {
+  test('installs into the real rc.1 ToolRuntime and blocks before the tool body', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-policy-real-tools-'))
     temporaryRoots.push(root)
     const ctx = new Context()
@@ -790,7 +793,7 @@ describe('DSH rc.8 tool guard', () => {
     })
 
     const result = await ctx.tools.execute({
-      callId: CallId('probe-call'),
+      callId: ToolCallId('probe-call'),
       name: 'probe',
       arguments: {},
       signal: new AbortController().signal,
@@ -821,7 +824,7 @@ describe('DSH rc.8 tool guard', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('derives trusted identity from the rc.8 agent session header', async () => {
+  test('derives trusted identity from the rc.1 agent session header', async () => {
     const fixture = await service([{
       id: 'allow-primary-bash',
       effect: 'allow',

@@ -45,4 +45,4 @@ sha256=HMAC_SHA256(secret, timestamp + "\n" + nonce + "\n" + rawBody)
 
 ## 兼容性与参考
 
-以 DSH rc.8 `141eb6fef83422698aef7a981029e843e8161534` 验证。设计借鉴 `dsh-sentinel@833a4e9` 的 baseline/edge/cooldown 与 fire-before-delivery watermark，但没有安装或复制其 JSONL、shell command、弱租约或 capability URL 设计。
+以 DSH `0.1.2-rc.1` 验证。设计借鉴 `dsh-sentinel@833a4e9` 的 baseline/edge/cooldown 与 fire-before-delivery watermark，但没有安装或复制其 JSONL、shell command、弱租约或 capability URL 设计。

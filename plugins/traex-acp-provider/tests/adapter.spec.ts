@@ -2,7 +2,6 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, {
   createMessage,
-  deepFreeze,
   isAgentLoopRequest,
   LlmAdapter,
   markAgentLoopRequest,
@@ -10,6 +9,7 @@ import LlmRuntime, {
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { deepFreeze } from './deep-freeze.ts'
 import { createAgentLoopRequestAttestor } from '@dsh-enhanced/llm-route-capabilities'
 import { realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
@@ -369,7 +369,7 @@ describe('TraeX ACP LLM adapter', () => {
       ctx.llm.registerAdapter(['historical-route'], new HistoricalAdapter())
       ctx.llm.registerAdapter(['traex-agent'], adapter)
 
-      const original = isolatedLlm.markAgentLoopRequest(isolatedLlm.deepFreeze({
+      const original = isolatedLlm.markAgentLoopRequest(deepFreeze({
         provider: 'traex-agent',
         model: 'default',
         system: 'Be concise.',

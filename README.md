@@ -2,7 +2,7 @@
 
 `dsh-enhanced` 是 [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) 的社区增强插件仓库。`plugins/*` 中的每个目录都是可独立安装、测试和发布的 DSH bundle；`packages/*` 只存放不会自动启用的共享库。
 
-仓库提供两类能力：面向编码场景的 ACP/模型 provider，以及基于 DSH `0.1.0-rc.8` 自研的实验性个人助理套件。个人助理适合先在受监督的单机 profile 中使用。
+仓库提供两类能力：面向编码场景的 ACP/模型 provider，以及基于 DSH `0.1.2-rc.1` 自研的实验性个人助理套件。个人助理适合先在受监督的单机 profile 中使用。
 
 ## 快速开始
 

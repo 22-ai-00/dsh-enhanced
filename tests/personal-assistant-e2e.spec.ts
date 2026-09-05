@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import {
   LlmAdapter,
   type GenerateOptions,
@@ -16,6 +17,7 @@ import {
   type SessionEvent,
   type SessionHeader,
   type SessionId,
+  type SessionLogOffset,
 } from '@deepseek-ai/dsh-session'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import {
@@ -62,6 +64,7 @@ let larkMessageSequence = 0
 interface SavedSession {
   header: SessionHeader
   events: readonly SessionEvent[]
+  inheritedEventCount: SessionLogOffset
 }
 
 interface SentLarkMessage {
@@ -155,6 +158,7 @@ async function installAgentRuntime(ctx: Context, saved: Map<string, SavedSession
     systemPrompt: { persona: '' },
     tools: { mode: 'native' },
   })
+  await ctx.plugin(SessionProjectionRegistry)
   ctx.on('agent/session-start', ({ agent }) => {
     agent.session.append('approval/policy', { policy: 'never' })
     agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
@@ -166,7 +170,11 @@ async function installAgentRuntime(ctx: Context, saved: Map<string, SavedSession
     mount: async (_agentContext: unknown, id?: string) => ({ id: id ?? PRESET }),
   } as never)
   ctx.on('session/flush', session => {
-    saved.set(String(session.id), structuredClone({ header: session.header, events: session.events }))
+    saved.set(String(session.id), structuredClone({
+      header: session.header,
+      events: session.snapshotEvents(),
+      inheritedEventCount: session.inheritedEventCount,
+    }))
   })
   ctx.provide('sessionPersistence' as never, {
     coordinator: {
@@ -186,6 +194,7 @@ async function installAgentRuntime(ctx: Context, saved: Map<string, SavedSession
         seedSource: 'persistence',
         seed: [...restored.events],
         meta: restored.header,
+        inheritedEventCount: restored.inheritedEventCount,
       }))
     },
   } as never)

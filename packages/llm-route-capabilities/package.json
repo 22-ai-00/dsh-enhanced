@@ -43,8 +43,8 @@
     "tool-calls"
   ],
   "peerDependencies": {
-    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.8 <0.2.0"
+    "@deepseek-ai/dsh-agent": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-agent": {

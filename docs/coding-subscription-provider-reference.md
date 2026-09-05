@@ -77,7 +77,7 @@ provider/model route 只生成 token，不是 DSH 的能力授权边界。同一
 
 Codex direct 声明 `toolCalls: native`，保留后端原始 tool name、arguments 与 `call_id`。CLI route 声明 `toolCalls: bridge`，只接受严格的 `dsh-tool-calls/v1` 信封。两条路径都把请求返回 Host，由同一个 Agent Loop 执行工具并回填 result；provider 不直接执行 DSH 工具。
 
-普通对话必须从仍在运行的精确 Agent/registry/session 重建。唯一允许的辅助请求是同 route、能严格证明属于当前 turn 的 rc.8 compaction；它必须保留原 system/tools 与 live surface 前缀，只追加 canonical instruction。`session-title`、其他嵌套请求以及伪造、过期、空闲、变形或 symlink escape 均在生成前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝。
+普通对话必须从仍在运行的精确 Agent/registry/session 重建。唯一允许的辅助请求是同 route、能严格证明属于当前 turn 的 `0.1.2-rc.1` compaction；它必须保留原 system/tools 与 live surface 前缀，只追加 canonical instruction。`session-title`、其他嵌套请求以及伪造、过期、空闲、变形或 symlink escape 均在生成前以 `LOCAL_SESSION_CWD_REQUIRED` 拒绝。
 
 配置 `cwd` 与 live session cwd 的 `realpath` 必须完全相同。bundle 默认把它与 Delivery 的 `$DSH_HOME/assistant-workspace` 对齐；修改时必须同步 Delivery `defaultWorkspace` 并重启。
 
@@ -192,7 +192,7 @@ node plugins/coding-subscription-provider/scripts/capture-cli-fixtures.mjs --hel
 
 ## 已知限制
 
-- DSH `0.1.0-rc.8` 只提供 `LlmAdapter` provider 接缝，因此这是兼容适配，不是完整 Agent Runtime。
+- DSH `0.1.2-rc.1` 提供的是 `LlmAdapter` provider 接缝，因此这是兼容适配，不是完整 Agent Runtime。
 - 模型 route 的工具/skill 权限完全一致，但模型的工具选择质量、上下文容量和各 CLI 的沙箱实现可能不同。
 - Codex direct 使用私有协议，不是 OpenAI 对第三方承诺的公开 API；auth、header、endpoint、模型、事件和 usage 都可能变化。
 - Codex direct 只在 attachment service 可用时声明图片输入；不支持音频、视频和任意文件。图片与完整 JSON 请求有独立字节上限。
@@ -211,11 +211,11 @@ Anthropic 技术文档允许 `claude -p` 使用订阅登录，但其法律与合
 ## 已验证基线
 
 - Node.js `^22.19.0 || >=24.0.0`
-- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.1.0-rc.8 <0.2.0`
+- DeepSeek Harness / `@deepseek-ai/dsh-agent` / `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-session` `>=0.1.2-rc.1 <0.2.0`
 - Cordis `^4.0.1`
 - Codex CLI `0.147.0`–`0.150.1`（显式 fallback；模型目录基于 App Server `model/list`）
 - Codex direct（发布 bundle 默认；私有实验协议）
-- `@deepseek-ai/dsh-attachment` `>=0.1.0-rc.8 <0.2.0`（可选图片输入）
+- `@deepseek-ai/dsh-attachment` `>=0.1.2-rc.1 <0.2.0`（可选图片输入）
 - Claude Code `2.1.218`
 - Grok Build `1.0.5`
 - Cursor CLI 目录入口 `--list-models`；生成仍不列入已验证基线

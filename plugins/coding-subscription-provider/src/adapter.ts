@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import {
-  CallId,
+  ToolCallId,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   LlmAdapter,
@@ -833,7 +833,7 @@ export class CodingSubscriptionAdapter extends LlmAdapter {
         if (calls !== undefined) {
           for (const [index, call] of calls.entries()) {
             ensureProjectionActive()
-            const id = CallId(`${definition.cli}-${randomUUID()}`)
+            const id = ToolCallId(`${definition.cli}-${randomUUID()}`)
             yield { type: 'block-start', index, blockType: 'tool-call' }
             ensureProjectionActive()
             yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments }

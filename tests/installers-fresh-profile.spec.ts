@@ -34,7 +34,7 @@ exec env PATH="$REAL_PATH" pnpm "$@"
 `)
     await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
 set -euo pipefail
-if [[ "\${1:-}" == '--version' ]]; then printf '0.1.0-rc.8\\n'; exit 0; fi
+if [[ "\${1:-}" == '--version' ]]; then printf '0.1.2-rc.1\\n'; exit 0; fi
 if [[ "$*" == *'--no-open --port 0'* ]]; then
   printf 'dsh web: http://127.0.0.1:43210\\n'
   exit 0
@@ -83,7 +83,7 @@ PROFILE
 
     const installerArguments = [
       localInstaller,
-      '--dsh-version', '0.1.0-rc.8',
+      '--dsh-version', '0.1.2-rc.1',
       '--lark', 'skip',
       '--no-service',
     ]

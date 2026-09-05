@@ -24,7 +24,7 @@ dsh --profile web --dump-config
   },
   "executor": {
     "id": "dsh",
-    "version": "0.1.0-rc.8",
+    "version": "0.1.2-rc.1",
     "path": "/usr/local/bin/dsh",
     "sha256": "64-hex",
     "environmentAllowlist": ["PATH"]

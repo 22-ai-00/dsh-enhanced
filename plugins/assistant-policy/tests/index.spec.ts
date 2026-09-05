@@ -39,8 +39,8 @@ describe('dsh-enhanced-assistant-policy', () => {
     expect(bundle).toContain('rules: []')
     expect(bundle).toContain('budgets: []')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
-    expect(manifest.peerDependencies['@deepseek-ai/dsh-llm']).toBe('>=0.1.0-rc.8 <0.2.0')
-    expect(manifest.peerDependencies['@deepseek-ai/dsh-tools']).toBe('>=0.1.0-rc.8 <0.2.0')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-llm']).toBe('>=0.1.2-rc.1 <0.2.0')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-tools']).toBe('>=0.1.2-rc.1 <0.2.0')
   })
 
   it('loads through the Cordis entrypoint', async () => {

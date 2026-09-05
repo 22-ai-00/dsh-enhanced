@@ -53,6 +53,7 @@ function analystAgent(options: {
     createdAt: 1,
     cwd: WORKSPACE,
     agentPreset: PRESET,
+    isSeeded: false,
   })
   setApprovalReviewer(session, 'none')
   session.append('approval/policy', { policy: 'never' })

@@ -22,13 +22,13 @@ describe('dsh-enhanced-personal-wiki', () => {
     expect((entrypoint as Record<string, unknown>)['WikiProposalManager']).toBeUndefined()
   })
 
-  test('ships bounded private defaults and verified rc.8 peers', () => {
+  test('ships bounded private defaults and verified rc.1 peers', () => {
     expect(bundle).toContain("dshHomePath('personal-wiki/vault')")
     expect(bundle).toContain("dshHomePath('personal-wiki/state.sqlite')")
     expect(bundle).toContain('readMaxBytes: 8192')
     expect(bundle).toContain('- assistantPolicy')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
-    expect(manifest.peerDependencies['@deepseek-ai/dsh-skill']).toBe('>=0.1.0-rc.8 <0.2.0')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-skill']).toBe('>=0.1.2-rc.1 <0.2.0')
     expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
   })
 
