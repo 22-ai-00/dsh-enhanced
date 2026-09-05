@@ -135,7 +135,7 @@ async function writeJson(path, value) {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`)
 }
 
-async function updatePinnedRemoteInstaller(root, version) {
+async function updatePinnedRemoteInstaller(root, version, verifiedHostRange) {
   try {
     await access(join(root, 'scripts', 'install', 'common.sh'))
     await access(join(root, 'scripts', 'install', 'install-npm.sh'))
@@ -152,13 +152,18 @@ async function updatePinnedRemoteInstaller(root, version) {
     /^DSH_ENHANCED_PINNED_RELEASE_REF='v\d+\.\d+\.\d+'$/m,
     `DSH_ENHANCED_PINNED_RELEASE_REF='v${version}'`,
   )
-  const pinned = withReference.replace(
+  const withHash = withReference.replace(
     /^DSH_ENHANCED_PINNED_COMMON_SHA256='[0-9a-f]{64}'$/m,
     `DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`,
   )
+  const pinned = withHash.replace(
+    /^DSH_ENHANCED_VERIFIED_HOST_RANGE='[^']+'$/m,
+    () => `DSH_ENHANCED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`,
+  )
   if (pinned === installer || !pinned.includes(`DSH_ENHANCED_PINNED_RELEASE_REF='v${version}'`)
-    || !pinned.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)) {
-    throw new Error('install-npm.sh must contain exactly one releasable pinned ref and SHA-256')
+    || !pinned.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)
+    || !pinned.includes(`DSH_ENHANCED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`)) {
+    throw new Error('install-npm.sh must contain exactly one releasable pinned ref, SHA-256, and verified host range')
   }
   await writeFile(installerPath, pinned)
 }
@@ -253,8 +258,9 @@ async function validatePendingRelease(root, operation = 'verify') {
     const common = await readFile(join(root, 'scripts', 'install', 'common.sh'))
     const hash = createHash('sha256').update(common).digest('hex')
     if (!installer.includes(`DSH_ENHANCED_PINNED_RELEASE_REF='v${pendingVersion}'`)
-      || !installer.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)) {
-      throw new Error('Pinned remote installer does not match the pending release version and common.sh digest')
+      || !installer.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)
+      || !installer.includes(`DSH_ENHANCED_VERIFIED_HOST_RANGE='${ledger.pending.verifiedHostRange}'`)) {
+      throw new Error('Pinned remote installer does not match the pending release version, common.sh digest, and verified host range')
     }
   } catch (error) {
     if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
@@ -328,13 +334,14 @@ async function prepare(root, requestedVersion) {
   ledger.pending = {
     version,
     preparedAt: new Date().toISOString(),
+    verifiedHostRange: ledger.current.verifiedHostRange,
     packages,
   }
 
   await writeJson(rootManifestPath, rootManifest)
   await Promise.all(workspacePackages.map(workspacePackage => writeJson(workspacePackage.path, workspacePackage.manifest)))
   await Promise.all(workspacePackages.map(workspacePackage => writeFile(workspacePackage.versionPath, workspacePackage.versionSource)))
-  await updatePinnedRemoteInstaller(root, version)
+  await updatePinnedRemoteInstaller(root, version, ledger.pending.verifiedHostRange)
   await writeJson(ledgerPath, ledger)
   console.log(`Prepared release ${version}`)
 }
@@ -369,6 +376,7 @@ async function supersede(root, requestedVersion) {
   ledger.pending = {
     version: requestedVersion,
     preparedAt: new Date().toISOString(),
+    verifiedHostRange: ledger.pending.verifiedHostRange,
     packages: Object.fromEntries(workspacePackages.map(({ manifest }) => [manifest.name, requestedVersion])),
   }
   await writeJson(rootManifestPath, rootManifest)
@@ -376,7 +384,7 @@ async function supersede(root, requestedVersion) {
   await Promise.all(workspacePackages.map(({ versionPath }) => (
     writeFile(versionPath, `export const version = '${requestedVersion}'\n`)
   )))
-  await updatePinnedRemoteInstaller(root, requestedVersion)
+  await updatePinnedRemoteInstaller(root, requestedVersion, ledger.pending.verifiedHostRange)
   await writeJson(ledgerPath, ledger)
   console.log(`Superseded pending release ${pendingVersion} with ${requestedVersion}`)
 }
@@ -387,6 +395,7 @@ async function record(root) {
   const release = {
     version: pendingVersion,
     releasedAt: new Date().toISOString(),
+    verifiedHostRange: ledger.pending.verifiedHostRange,
     packages: ledger.pending.packages,
   }
   ledger.current = release
