@@ -3,6 +3,7 @@
   "current": {
     "version": "0.1.23",
     "releasedAt": "2026-09-04T16:50:57.155Z",
+    "verifiedHostRange": ">=0.1.0-rc.8",
     "packages": {
       "@dsh-enhanced/assistant-growth-contract": "0.1.23",
       "@dsh-enhanced/llm-route-capabilities": "0.1.23",
