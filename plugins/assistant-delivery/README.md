@@ -6,12 +6,11 @@
 
 ## 兼容性与安装顺序
 
-- DSH / Agent / Agent Presets / LLM / Session：`>=0.1.0-rc.8 <0.2.0`
-- `@deepseek-ai/dsh-attachment`：`>=0.1.0-rc.8 <0.2.0`，仅图片入站路径需要的可选 Host service
-- `@deepseek-ai/dsh-host-apiproxy`：`>=0.1.0-rc.8 <0.2.0`，可选 Host service。它保持唯一的 `ctx.userQuestions` provider；存在时 Delivery 使用 rc.8 的 `events.mux()` 桥接已绑定渠道会话的问题，缺失时不阻止非 Web profile 启动，只是不提供跨渠道问题交互。
-- `@deepseek-ai/dsh-user-questions`：`>=0.1.0-rc.8 <0.2.0`，仅使用其 wire-safe question/answer 类型；provider 仍由 Host ApiProxy 独占。
-- `@deepseek-ai/dsh-commands`：`>=0.1.0-rc.8 <0.2.0`，可选 Host command service；按 `0.1.0-rc.8` 命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
-- `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：`>=0.1.0-rc.8 <0.2.0`，权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
+- DSH / Agent / Agent Presets / LLM / Session：`>=0.1.2-rc.1 <0.2.0`
+- `@deepseek-ai/dsh-attachment`：`>=0.1.2-rc.1 <0.2.0`，仅图片入站路径需要的可选 Host service
+- `@deepseek-ai/dsh-user-questions`：`>=0.1.2-rc.1 <0.2.0`。它定义 `ctx.userQuestions.ask()` 和 Agent-scoped `user-questions/request` answerer waterfall；Web Host 通过 Remote Events 在 live root Agent scope 提供 answerer。该 seam 没有可供 Delivery 消费的独立 question request/answer 事件流。
+- `@deepseek-ai/dsh-commands`：`>=0.1.2-rc.1 <0.2.0`，可选 Host command service；按 `0.1.2-rc.1` 命令语法/执行契约只委托安全的原生 `/compact`。`/help`、`/status`、`/session`、`/new`、`/clear`、`/stop`、`/feedback`、`/learning` 及模型/权限控制命令都由 Delivery 自有；其他原生命令即使被宿主发布也不委托、不进入 LLM
+- `@deepseek-ai/dsh-permission-presets` / `@deepseek-ai/dsh-sandbox-policy` / `@deepseek-ai/dsh-user-approval`：`>=0.1.2-rc.1 <0.2.0`，权限档位命令使用 preset service，并通过 sandbox/approval 包的 canonical setter 固化执行事实；所需 Host service 缺失时命令 fail closed
 - Cordis：`^4.0.1`
 - `@dsh-enhanced/assistant-policy`：`>=0.1.0 <0.2.0`，硬依赖
 - Preference Learning 是反向订阅 `subscribePreferenceFeedback()` 的可选下游；Delivery 不声明对它的 peer/runtime 依赖，避免消息核心与学习插件形成双向包依赖
@@ -158,7 +157,7 @@ ownerRoutes:
 
 ### 跨渠道 `ask_user_question`
 
-`apiProxy` 始终是 `ctx.userQuestions` 的唯一 provider；Delivery 不注册第二个 provider。可选的 rc.8 `apiProxy.events.mux()` 将 pending `question/requested` 帧交给 Delivery，Delivery 只在其 session 仍对应 exact active owner binding、当前 adapter 仍具备问题交互能力时，转给该渠道；回答以同一 rpc id 回写 `apiProxy.respond()`。同一请求同时可被 Web 与渠道界面看到，谁先被 ApiProxy 接受谁生效（first-claim-wins）；晚到、撤销或重复回答不会制造新的 Agent turn。
+DSH `0.1.2-rc.1` 的 `ctx.userQuestions.ask()` 会把带 `agent` 的请求派发到该 exact live runtime root 的 Agent-scoped `user-questions/request` waterfall；随产品交付的 Web Host 通过 Remote Events 在同一 scope 注册 answerer。`dsh-user-questions` 不发布独立 request/answer 审计流，因此渠道集成必须直接注册 scoped answerer，并在其中完成 owner binding、adapter 能力、取消和回答校验。Delivery answerer 以前置顺序尝试有能力的渠道，避免先注册的远端 answerer 长时间等待而阻塞渠道；无 Delivery 路由、渠道不可用或回答畸形时继续 waterfall，已存在但失效的 owner binding 则以 `ASK_ABORTED` 失败关闭。没有 answerer 接受请求时 Host 以 `NO_PROVIDER` 失败，不会无限等待；多个 answerer 按 waterfall 组合顺序串联，当前 API 不承诺跨 UI 的竞速认领语义。
 
 渠道自由文本只有在明确回复对应问题消息时才会结算，并要求 account、tenant、conversation、principal、binding version/generation 与当前 owner fence 全部匹配；同一路由恰好只有一个 pending question 也不会吞掉未引用的新消息。匹配回答直接恢复原来的工具调用，不写 Inbox、不作为普通新消息排队；`/stop`、`/new`、`/clear` 仍按渠道正常命令接入规则取消旧 wait（例如群聊可能仍要求 @ 机器人），问题卡的取消按钮则不依赖文字命令。问题发往原 binding 会话，不保证是私聊：若原会话是群聊，问题正文和选项对该群可见，敏感问题应在私聊中发起或改用其他交互方式。
 
@@ -186,7 +185,7 @@ ownerRoutes:
 
 渠道 command envelope 只接受从正文第一字节开始的小写 ASCII slash 语法。未知命令、当前 preset 未发布的命令，以及大写、空命令等非法 slash 形态都只返回确定性帮助/错误，绝不作为自然语言进入 LLM。普通 Agent turn 只有在 session persistence `flush()` 明确返回 `true` 后才入队最终回复；返回 `false` 或抛错时不宣称任务成功。
 
-Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正文超过 `maxTextBytes` 时，Delivery 默认在同一 session 中发起最多两轮后台恢复：先续写缺失部分；若仍未结束，最后一次机会优先根据当前请求和其后全部已有回答片段压缩为预算内的完整答案，不会把同一长会话中更早已完成的任务混入结论。空回答会重新生成，首轮即超长的回答会直接压缩。每个片段先持久化，再开始下一轮；恢复轮沿用已经选定的 provider、model 和 effort，但 source 明确标记为 Delivery 的内部 notice。恢复轮禁止工具执行：rc.8 仍可能把 scoped tool schema 序列化给 provider，但任何调用都会在审批和执行前被拒绝，并立即结束该恢复轮；工具状态也不会展示给用户，后续恢复仍受同一总轮数限制。最终只投递一次合并后的完整回复并标记完成，不需要用户发送”继续”。
+Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正文超过 `maxTextBytes` 时，Delivery 默认在同一 session 中发起最多两轮后台恢复：先续写缺失部分；若仍未结束，最后一次机会优先根据当前请求和其后全部已有回答片段压缩为预算内的完整答案，不会把同一长会话中更早已完成的任务混入结论。空回答会重新生成，首轮即超长的回答会直接压缩。每个片段先持久化，再开始下一轮；恢复轮沿用已经选定的 provider、model 和 effort，但 source 明确标记为 Delivery 的内部 notice。恢复轮禁止工具执行：DSH `0.1.2-rc.1` 仍可能把 scoped tool schema 序列化给 provider，但任何调用都会在审批和执行前被拒绝，并立即结束该恢复轮；工具状态也不会展示给用户，后续恢复仍受同一总轮数限制。最终只投递一次合并后的完整回复并标记完成，不需要用户发送”继续”。
 后台恢复是新的、有界模型 turn，可能产生额外模型用量，不是对同一个已提交请求的透明重试。若恢复轮失败或次数耗尽、没有新增正文，或已经持久化但无法建立安全调度边界，Delivery 才保留当前最佳正文、附加明确的未完成提示并标记失败；完全没有可用正文时发送重试提示。失败提示不再要求用户发送“继续”这类协议词。若任何片段无法确认持久化，则不投递该结果，也不宣称完成。这些失败回复不会进入 completed-turn preference projection。`agentMaxAutoContinuationTurns` 设为 `0` 时保留直接失败提示行为。
 
 `/feedback` 的完整固定语法如下；不接受附件或额外自由文本：
@@ -305,7 +304,7 @@ Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同�
 - `unknown_after_send` cancel 后仍保留为独立的 ambiguous 状态和原始 resolution receipt，不伪装成确定未发送；该 exact attempt 不会再被自动 reconcile/send，并视为 lane terminal，cancel receipt 也不能改写成 retry。若平台随后给出匹配 provider message id 的 delivered/read receipt，外部事实可单调提升当前状态并清除当前失败标记，原 cancel/attempt ledger 仍保留。普通尚未结算的 unknown 只能由显式、Policy-gated operator `retry` 重新入队；稳定 owner route 禁止 retry，只能原 lineage reconcile/cancel/park。系统从不自动重发 unknown send。
 - Agent dispatch 前写 `dispatch-started` marker。此后进程崩溃会进入 `dispatch-ambiguous` dead letter，避免自动产生第二个 turn；这会牺牲一次自动重放，需要 owner 审阅后显式 retry。
 - `/permission` 是受限例外：它使用专用 commit/cancel/failure recovery marker，并以精确 Inbox id（兼容旧 event id）与 `replyToEventId` 共同证明终态 Outbox；崩溃恢复不会把普通 background Outbox 或同名伪造 key 当成完成见证。
-- 当前 rc.8 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。
+- 当前 DSH `0.1.2-rc.1` 的 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。
 - Outbox adapter 抛异常一律视为可能已发送；不会按照普通 5xx 重试。
 
 ## 权限与数据边界

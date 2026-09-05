@@ -6,7 +6,7 @@
 DSH_ENHANCED_DEFAULT_DSH_VERSION='latest'
 DSH_ENHANCED_DEFAULT_PNPM_VERSION='11.7.0'
 if [[ -z "${DSH_ENHANCED_VERIFIED_HOST_RANGE:-}" ]]; then
-  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.0-rc.8'
+  DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'
 fi
 DSH_ENHANCED_CORE_PLUGIN_SLUGS=(
   'personal-assistant'
@@ -238,9 +238,37 @@ dsh_enhanced_version_in_range() {
   local range="$2"
   local token
   local bound
+  local bound_without_build
+  local version_without_build="${version%%+*}"
+  local version_core="${version_without_build%%-*}"
+  local prerelease_allowed='0'
   local -a tokens=()
   [[ -n "$range" ]] || return 1
   read -r -a tokens <<< "$range"
+
+  # npm SemVer ranges exclude prereleases unless at least one comparator in
+  # the same AND set names a prerelease with the exact same major/minor/patch
+  # tuple. Keep this gate dependency-free for macOS's Bash 3.2 installer.
+  if [[ "$version_without_build" == *-* ]]; then
+    for token in "${tokens[@]+"${tokens[@]}"}"; do
+      case "$token" in
+        '>='*) bound="${token#>=}" ;;
+        '<='*) bound="${token#<=}" ;;
+        '>'*) bound="${token#>}" ;;
+        '<'*) bound="${token#<}" ;;
+        '='*) bound="${token#=}" ;;
+        *) bound="$token" ;;
+      esac
+      bound_without_build="${bound%%+*}"
+      if dsh_enhanced_is_host_version "$bound" \
+        && [[ "$bound_without_build" == *-* ]] \
+        && [[ "${bound_without_build%%-*}" == "$version_core" ]]; then
+        prerelease_allowed='1'
+        break
+      fi
+    done
+    [[ "$prerelease_allowed" == '1' ]] || return 1
+  fi
 
   for token in "${tokens[@]+"${tokens[@]}"}"; do
     case "$token" in

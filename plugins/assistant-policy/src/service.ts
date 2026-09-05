@@ -298,7 +298,7 @@ export class AssistantPolicyService extends Service {
           workspace,
         })
         if (risk === 'allow') return next()
-        const permission = approvalPermissionStateOf(agent.session.events)
+        const permission = approvalPermissionStateOf(agent.session.snapshotEvents())
         const configuredApproval = toolsCtx.get('approval')?.config.policy
         const approval = permission.approvalPolicyEvent
           ? permission.approvalPolicy
@@ -333,11 +333,11 @@ export class AssistantPolicyService extends Service {
   }
 
   private nativeFullCandidate(ctx: Context, session: Session): boolean {
-    const state = approvalPermissionStateOf(session.events)
+    const state = approvalPermissionStateOf(session.snapshotEvents())
     if (state.reviewerEvent
       || !state.sandboxModeEvent || state.sandboxMode !== 'danger-full-access'
       || !state.approvalPolicyEvent || state.approvalPolicy !== 'never') return false
-    const selected = session.events.findLast(event => event.type === 'permission/preset')?.data.preset
+    const selected = session.snapshotEvents().findLast(event => event.type === 'permission/preset')?.data.preset
     if (typeof selected !== 'string' || selected === '') return false
     const presets = ctx.get('permissionPresets') as PermissionPresetService | undefined
     if (presets === undefined) return false
@@ -345,7 +345,7 @@ export class AssistantPolicyService extends Service {
       const spec = presets.resolve(selected)
       return spec.sandbox === 'danger-full-access'
         && spec.approval === 'never'
-        && presets.current(session.events) === selected
+        && presets.current(session) === selected
     } catch {
       return false
     }
@@ -359,7 +359,7 @@ export class AssistantPolicyService extends Service {
     if (inFlight !== undefined) return await inFlight
     const unsettled = this.nativeFullUnsettled.get(session)
     if (unsettled !== undefined) {
-      if (approvalPermissionFingerprint(session.events) !== unsettled.fingerprint) {
+      if (approvalPermissionFingerprint(session.snapshotEvents()) !== unsettled.fingerprint) {
         // A later permission operation owns the session now. Never compensate
         // over its new state merely because an older migration was ambiguous.
         this.nativeFullUnsettled.delete(session)
@@ -369,7 +369,7 @@ export class AssistantPolicyService extends Service {
         const recovery = Promise.resolve().then(async (): Promise<NativeFullReviewerReconciliation> => {
           try {
             await this.reviewerEventRegistration.assertReady()
-            if (approvalPermissionFingerprint(session.events) !== unsettled.fingerprint) {
+            if (approvalPermissionFingerprint(session.snapshotEvents()) !== unsettled.fingerprint) {
               this.nativeFullUnsettled.delete(session)
               return 'unavailable'
             }
@@ -377,13 +377,13 @@ export class AssistantPolicyService extends Service {
             if (unsettled.phase === 'widened') {
               setApprovalReviewer(session, 'user')
               compensation = {
-                fingerprint: approvalPermissionFingerprint(session.events),
+                fingerprint: approvalPermissionFingerprint(session.snapshotEvents()),
                 phase: 'compensating',
               }
               this.nativeFullUnsettled.set(session, compensation)
             }
             if (await sessions.flush(session)
-              && approvalPermissionFingerprint(session.events) === compensation.fingerprint
+              && approvalPermissionFingerprint(session.snapshotEvents()) === compensation.fingerprint
               && getApprovalReviewer(session) === 'user') {
               this.nativeFullUnsettled.delete(session)
             }
@@ -420,7 +420,7 @@ export class AssistantPolicyService extends Service {
         if (!setApprovalReviewer(session, 'none') && getApprovalReviewer(session) !== 'none') {
           return 'unavailable'
         }
-        expectedPermission = approvalPermissionFingerprint(session.events)
+        expectedPermission = approvalPermissionFingerprint(session.snapshotEvents())
         this.nativeFullUnsettled.set(session, {
           fingerprint: expectedPermission,
           phase: 'widened',
@@ -429,7 +429,7 @@ export class AssistantPolicyService extends Service {
           // A Web permission change may race the durability barrier. Never let
           // the old full-state migration authorize a call after a newer
           // downgrade or reviewer selection has won.
-          if (approvalPermissionFingerprint(session.events) === expectedPermission
+          if (approvalPermissionFingerprint(session.snapshotEvents()) === expectedPermission
             && getApprovalReviewer(session) === 'none') {
             this.nativeFullUnsettled.delete(session)
             return 'ready'
@@ -444,14 +444,14 @@ export class AssistantPolicyService extends Service {
       // migration must deny its tool, but must not append reviewer=user over
       // that newer choice merely because its own flush acknowledgement failed.
       if (expectedPermission !== undefined
-        && approvalPermissionFingerprint(session.events) !== expectedPermission) {
+        && approvalPermissionFingerprint(session.snapshotEvents()) !== expectedPermission) {
         this.nativeFullUnsettled.delete(session)
         return 'unavailable'
       }
       try {
         setApprovalReviewer(session, 'user')
         const compensation: NativeFullUnsettledState = {
-          fingerprint: approvalPermissionFingerprint(session.events),
+          fingerprint: approvalPermissionFingerprint(session.snapshotEvents()),
           phase: 'compensating',
         }
         this.nativeFullUnsettled.set(session, compensation)
@@ -459,7 +459,7 @@ export class AssistantPolicyService extends Service {
         // Best-effort a second barrier so a cold resume cannot observe only
         // the widening half of this compatibility migration.
         if (await sessions.flush(session)
-          && approvalPermissionFingerprint(session.events) === compensation.fingerprint
+          && approvalPermissionFingerprint(session.snapshotEvents()) === compensation.fingerprint
           && getApprovalReviewer(session) === 'user') {
           this.nativeFullUnsettled.delete(session)
         }

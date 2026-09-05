@@ -35,7 +35,7 @@ describe('dsh-enhanced-assistant-evolution entrypoint', () => {
     expect(bundle).toContain('reconcileIntervalMs: 15000')
     expect(bundle).toContain('autonomousRollback: false')
     expect(manifest.dependencies['@deepseek-ai/schemastery']).toBe('catalog:')
-    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.1.0-rc.8 <0.2.0')
+    expect(manifest.peerDependencies['@deepseek-ai/dsh-agent']).toBe('>=0.1.2-rc.1 <0.2.0')
     expect(manifest.peerDependencies['@dsh-enhanced/assistant-policy']).toBe('>=0.1.0 <0.2.0')
     expect(manifest.peerDependencies['@dsh-enhanced/assistant-evaluation']).toBe('>0.1.7 <0.2.0')
     expect(manifest.peerDependencies['@dsh-enhanced/assistant-automations']).toBe('>0.1.7 <0.2.0')

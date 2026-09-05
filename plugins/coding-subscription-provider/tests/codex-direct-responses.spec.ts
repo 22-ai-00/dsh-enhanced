@@ -1,6 +1,6 @@
 import {
   BlockAssembler,
-  CallId,
+  ToolCallId,
   createMessage,
   ReasoningEffortId,
   type GenerateOptions,
@@ -130,7 +130,7 @@ async function installActualLlmInvariant(source: AsyncIterable<StreamChunk>): Pr
     },
   }
   await applyLlmInvariant(invariantContext as never)
-  if (streamHook === undefined) throw new Error('rc.8 LLM stream invariant was not installed')
+  if (streamHook === undefined) throw new Error('current DSH LLM stream invariant was not installed')
   return streamHook(request([]), () => source)
 }
 
@@ -271,7 +271,7 @@ describe('Codex private Responses transport', () => {
       type: 'block-end',
       index: 0,
       block: {
-        type: 'tool-call', id: CallId('call-private'), name: 'read_file', arguments: '{"path":"README.md"}',
+        type: 'tool-call', id: ToolCallId('call-private'), name: 'read_file', arguments: '{"path":"README.md"}',
       },
     })
     expect(chunks.at(-1)).toMatchObject({
@@ -796,7 +796,7 @@ describe('Codex private Responses transport', () => {
       height: 1,
       name: 'pixel.png',
     } as never
-    const callId = CallId('call-7')
+    const callId = ToolCallId('call-7')
     const messages: GenerateOptions['messages'] = [
       createMessage({
         role: 'user',
@@ -899,7 +899,7 @@ describe('Codex private Responses transport', () => {
 
   it('maps matching long Host call ids to one deterministic wire-safe id without mutating Host messages', async () => {
     const originalCallId = 'host-call-' + 'x'.repeat(80)
-    const hostCallId = CallId(originalCallId)
+    const hostCallId = ToolCallId(originalCallId)
     const assistant = createMessage({
       role: 'assistant',
       source: { kind: 'model', provider: 'codex-subscription', model: 'another-model' },
@@ -951,7 +951,7 @@ describe('Codex private Responses transport', () => {
     const obscured = `<\u200d|\u200d${[...'message'].join('\u200d')}\u200d|\u200d>`
     const tainted = `literal <|start|>; obscured ${obscured}`
     const neutralized = 'literal <｜start｜>; obscured <｜message｜>'
-    const callId = CallId('call-harmony')
+    const callId = ToolCallId('call-harmony')
     const messages: GenerateOptions['messages'] = [
       user(tainted),
       createMessage({
@@ -1039,8 +1039,8 @@ describe('Codex private Responses transport', () => {
       height: 1,
       name: 'tool.png',
     } as never
-    const errorCallId = CallId('call-error')
-    const emptyCallId = CallId('call-empty')
+    const errorCallId = ToolCallId('call-error')
+    const emptyCallId = ToolCallId('call-empty')
     const dependencies = directDependencies(sse([
       { type: 'response.completed', response: completedResponse() },
       '[DONE]',
@@ -1132,7 +1132,7 @@ describe('Codex private Responses transport', () => {
       source: { kind: 'model', provider: 'codex-subscription', model: 'gpt-5.6-sol', replayState },
       content: [
         { type: 'text', text: 'Answer' },
-        { type: 'tool-call', id: CallId('call-1'), name: 'read_file', arguments: '{"path":"a"}' },
+        { type: 'tool-call', id: ToolCallId('call-1'), name: 'read_file', arguments: '{"path":"a"}' },
       ],
     })
     const terminal = sse([{ type: 'response.completed', response: completedResponse() }, '[DONE]'])
@@ -1227,7 +1227,7 @@ describe('Codex private Responses transport', () => {
         { type: 'reasoning', text: 'Reviewed' },
         { type: 'text', text: 'Calling a tool' },
         {
-          type: 'tool-call', id: CallId('call-clean-replay'), name: 'read_file',
+          type: 'tool-call', id: ToolCallId('call-clean-replay'), name: 'read_file',
           arguments: '{"path":"README.md"}',
         },
       ],
@@ -1333,7 +1333,7 @@ describe('Codex private Responses transport', () => {
       },
       content: [{
         type: 'tool-call',
-        id: CallId('call-native'),
+        id: ToolCallId('call-native'),
         name: 'read_file',
         arguments: '{"path":"README.md"}',
       }],
@@ -1400,13 +1400,13 @@ describe('Codex private Responses transport', () => {
       { type: 'text-delta', index: 0, text: 'lo' },
       { type: 'block-end', index: 0, block: { type: 'text', text: 'Hello' } },
       { type: 'block-start', index: 1, blockType: 'tool-call' },
-      { type: 'tool-call-delta', index: 1, id: CallId('call-1'), name: 'read_file', argumentsDelta: '' },
-      { type: 'tool-call-delta', index: 1, id: CallId('call-1'), argumentsDelta: '{"path":' },
-      { type: 'tool-call-delta', index: 1, id: CallId('call-1'), argumentsDelta: '"README.md"}' },
+      { type: 'tool-call-delta', index: 1, id: ToolCallId('call-1'), name: 'read_file', argumentsDelta: '' },
+      { type: 'tool-call-delta', index: 1, id: ToolCallId('call-1'), argumentsDelta: '{"path":' },
+      { type: 'tool-call-delta', index: 1, id: ToolCallId('call-1'), argumentsDelta: '"README.md"}' },
       {
         type: 'block-end',
         index: 1,
-        block: { type: 'tool-call', id: CallId('call-1'), name: 'read_file', arguments: '{"path":"README.md"}' },
+        block: { type: 'tool-call', id: ToolCallId('call-1'), name: 'read_file', arguments: '{"path":"README.md"}' },
       },
       {
         type: 'usage',
@@ -1804,7 +1804,7 @@ describe('Codex private Responses transport', () => {
     },
   )
 
-  it('closes every partial max-token block before finish through the actual rc.8 LLM invariant', async () => {
+  it('closes every partial max-token block before finish through the actual DSH LLM invariant', async () => {
     const cases: Array<{
       readonly name: string
       readonly events: Array<Record<string, unknown> | '[DONE]'>
@@ -2325,8 +2325,8 @@ describe('Codex private Responses transport', () => {
     chunks.forEach(chunk => assembler.push(chunk))
 
     expect(assembler.blocks()).toEqual([
-      { type: 'tool-call', id: CallId('call-first'), name: 'read_file', arguments: '{malformed' },
-      { type: 'tool-call', id: CallId('call-second'), name: 'read_file', arguments: '{"path":"b"}' },
+      { type: 'tool-call', id: ToolCallId('call-first'), name: 'read_file', arguments: '{malformed' },
+      { type: 'tool-call', id: ToolCallId('call-second'), name: 'read_file', arguments: '{"path":"b"}' },
     ])
     expect(assembler.finish).toEqual({ kind: 'tool-calls' })
 
@@ -2348,10 +2348,10 @@ describe('Codex private Responses transport', () => {
     })
     const firstToolResult = createMessage({
       role: 'user',
-      source: { kind: 'tool', callId: CallId('call-first') },
+      source: { kind: 'tool', callId: ToolCallId('call-first') },
       content: [{
         type: 'tool-result',
-        toolCallId: CallId('call-first'),
+        toolCallId: ToolCallId('call-first'),
         isError: false,
         content: [{ type: 'text', text: 'first contents' }],
       }],

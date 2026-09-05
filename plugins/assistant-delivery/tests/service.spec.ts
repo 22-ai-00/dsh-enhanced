@@ -1,7 +1,8 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, {
-  CallId,
+  ToolCallId,
+  type ToolCallId as ToolCallIdType,
   LlmAdapter,
   createToolResultMessage,
   createUserMessage,
@@ -43,7 +44,7 @@ afterEach(async () => {
 function foreground(sessionId: string): Agent {
   const id = SessionId(sessionId)
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1,
-    cwd: '/work/alpha', agentPreset: 'primary' })
+    cwd: '/work/alpha', isSeeded: false, agentPreset: 'primary' })
   return { id, options: {}, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
@@ -51,7 +52,9 @@ function foreground(sessionId: string): Agent {
 
 function foregroundWithHeader(sessionId: string, cwd: string, agentPreset: string): Agent {
   const id = SessionId(sessionId)
-  const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd, agentPreset })
+  const session = Session.create(id, [], {
+    version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd, isSeeded: false, agentPreset,
+  })
   return { id, options: {}, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
@@ -69,6 +72,7 @@ interface MountHarnessOptions {
   reviewer?: DeliveryReviewerAdapter
   reviewerMountOrder?: 'before-policy' | 'after-delivery'
   toolApprovalTtlMs?: number
+  leaseMs?: number
 }
 
 class DeliveryReviewerAdapter extends LlmAdapter {
@@ -194,6 +198,7 @@ async function mountHarness(root: string, allow = true, options: MountHarnessOpt
   }) })
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
     schedulerEnabled: false,
+    ...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
     ...(options.toolApprovalTtlMs === undefined ? {} : { toolApprovalTtlMs: options.toolApprovalTtlMs }) })
   if (options.reviewer !== undefined && options.reviewerMountOrder === 'after-delivery') {
     await ctx.plugin(LlmRuntime)
@@ -228,7 +233,7 @@ function registerApprovalAgent(ctx: Context, sessionId: string, input: {
     content: [{ type: 'text', text: 'Please complete this exact requested action.' }],
     source: { kind: 'user' },
   }), { surfaceOp: 'append' })
-  session.append('tool/call', { turn: 1, step: 1, callId: CallId(input.callId),
+  session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId(input.callId),
     name: input.toolName, arguments: input.arguments })
   return agent
 }
@@ -421,6 +426,262 @@ describe('assistant delivery Cordis service', () => {
     expect(process).toHaveBeenCalledOnce()
     expect(service.history(foreground('delivery-session-1'), {}).inbox[0]).toMatchObject({ status: 'processed' })
     await ctx.fiber.restart()
+  })
+
+  test('advances a persisted received message on tick after restart without provider replay', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-received-restart-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const stranded = runtimeStoreFromService(first.service).acceptInbound({
+      ...envelope, eventId: 'evt-received-restart', text: 'recover me',
+    }).record
+    expect(stranded).toMatchObject({ status: 'received', attemptCount: 0 })
+    await first.ctx.fiber.restart()
+
+    const restarted = await mountHarness(root)
+    const processedEnvelopes: InboundEnvelope[] = []
+    const process = vi.fn(async (_binding: Readonly<ConversationBinding>, input: Readonly<InboundEnvelope>) => {
+      processedEnvelopes.push(input)
+      return { outcome: 'processed' as const }
+    })
+    restarted.service.registerInboundRuntime({
+      createSession: async () => ({ sessionId: 'delivery-recovered-session', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      process,
+    })
+    await restarted.service.tick()
+    await restarted.service.whenIdle()
+
+    expect(process).toHaveBeenCalledOnce()
+    expect(processedEnvelopes).toEqual([expect.objectContaining({ eventId: 'evt-received-restart' })])
+    expect(runtimeStoreFromService(restarted.service).getInbox(stranded.id))
+      .toMatchObject({ status: 'processed', attemptCount: 1 })
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('keeps received admissions pending until an inbound runtime registers', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-received-runtime-late-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const stranded = runtimeStoreFromService(first.service).acceptInbound({
+      ...envelope, eventId: 'evt-received-runtime-late', text: 'wait for runtime',
+    }).record
+    await first.ctx.fiber.restart()
+
+    const restarted = await mountHarness(root)
+    await restarted.service.tick()
+    expect(runtimeStoreFromService(restarted.service).getInbox(stranded.id))
+      .toMatchObject({ status: 'received', attemptCount: 0 })
+
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    restarted.service.registerInboundRuntime({
+      createSession: async () => ({ sessionId: 'delivery-late-runtime-session', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      process,
+    })
+    await restarted.service.tick()
+    await restarted.service.whenIdle()
+    expect(process).toHaveBeenCalledOnce()
+    expect(runtimeStoreFromService(restarted.service).getInbox(stranded.id)).toMatchObject({ status: 'processed' })
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('aborts a hanging received recovery and bounds shutdown without queueing the row', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-received-shutdown-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const stranded = runtimeStoreFromService(first.service).acceptInbound({
+      ...envelope, eventId: 'evt-received-shutdown', text: 'remain recoverable',
+    }).record
+    await first.ctx.fiber.restart()
+
+    const restarted = await mountHarness(root, true, { leaseMs: 1_000 })
+    let signal!: AbortSignal
+    let started!: () => void
+    const createStarted = new Promise<void>(resolve => { started = resolve })
+    restarted.service.registerInboundRuntime({
+      createSession: async input => {
+        signal = input.signal
+        started()
+        return await new Promise(() => {})
+      },
+      process: async () => ({ outcome: 'processed' }),
+    })
+    const tick = restarted.service.tick()
+    await createStarted
+    const before = Date.now()
+    await restarted.ctx.fiber.restart()
+
+    expect(signal.aborted).toBe(true)
+    expect(Date.now() - before).toBeLessThan(900)
+    const inspection = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    expect(inspection.getInbox(stranded.id)).toMatchObject({ status: 'received', attemptCount: 0 })
+    inspection.close()
+    void tick.catch(() => {})
+  })
+
+  test('dead-letters a received admission whose principal was revoked before restart recovery', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-received-revoked-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const store = runtimeStoreFromService(first.service)
+    const stranded = store.acceptInbound({ ...envelope, eventId: 'evt-received-revoked' }).record
+    const owner = store.getPrincipal(principal)!
+    store.revokePrincipal(owner.id, owner.version)
+    await first.ctx.fiber.restart()
+
+    const restarted = await mountHarness(root)
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    restarted.service.registerInboundRuntime({
+      createSession: async () => ({ sessionId: 'must-not-create', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      process,
+    })
+    await restarted.service.tick()
+
+    expect(process).not.toHaveBeenCalled()
+    expect(runtimeStoreFromService(restarted.service).getInbox(stranded.id))
+      .toMatchObject({ status: 'dead_letter', failureCode: 'unauthorized-principal', attemptCount: 0 })
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('fails closed for a stranded authorized admission bound to a superseded generation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-authorized-stale-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    first.service.registerInboundRuntime({
+      createSession: async () => ({ sessionId: 'delivery-authorized-generation-1', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      process: async () => ({ outcome: 'processed' }),
+    })
+    await first.service.acceptInbound({ ...envelope, eventId: 'evt-authorized-seed' })
+    const store = runtimeStoreFromService(first.service)
+    const oldBinding = store.getActiveBinding(conversation)!
+    const stranded = store.acceptInbound({ ...envelope, eventId: 'evt-authorized-stale' }).record
+    const database = new DatabaseSync(join(root, 'delivery.sqlite'))
+    database.prepare(`
+      UPDATE inbox_messages SET status = 'authorized', binding_id = ? WHERE id = ?
+    `).run(oldBinding.id, stranded.id)
+    database.close()
+    store.rotateBinding({
+      bindingId: oldBinding.id,
+      expectedVersion: oldBinding.version,
+      sessionId: 'delivery-authorized-generation-2',
+    })
+    await first.ctx.fiber.restart()
+
+    const restarted = await mountHarness(root)
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    restarted.service.registerInboundRuntime({
+      createSession: async () => ({ sessionId: 'must-not-create', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      process,
+    })
+    await restarted.service.tick()
+
+    expect(process).not.toHaveBeenCalled()
+    expect(runtimeStoreFromService(restarted.service).getInbox(stranded.id)).toMatchObject({
+      status: 'dead_letter',
+      bindingId: oldBinding.id,
+      failureCode: 'inbound-binding-superseded',
+      attemptCount: 0,
+    })
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('does not let one transiently poisoned received admission starve another conversation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-received-poison-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    const store = runtimeStoreFromService(first.service)
+    const poison = store.acceptInbound({ ...envelope, eventId: 'evt-received-poison' }).record
+    const otherConversation = { ...conversation, chat: 'oc_other' }
+    const healthy = store.acceptInbound({
+      ...envelope, eventId: 'evt-received-healthy', conversation: otherConversation,
+    }).record
+    await first.ctx.fiber.restart()
+
+    const restarted = await mountHarness(root)
+    const process = vi.fn(async () => ({ outcome: 'processed' as const }))
+    restarted.service.registerInboundRuntime({
+      createSession: async ({ envelope: input }) => {
+        if (input.eventId === poison.eventId) throw new Error('transient session backend failure')
+        return { sessionId: 'delivery-healthy-session', workspace: '/work/alpha',
+          agentPreset: 'primary', policyRef: 'owner-dm' }
+      },
+      process,
+    })
+    await restarted.service.tick()
+    await restarted.service.whenIdle()
+
+    expect(runtimeStoreFromService(restarted.service).getInbox(poison.id))
+      .toMatchObject({ status: 'received', attemptCount: 0 })
+    expect(runtimeStoreFromService(restarted.service).getInbox(healthy.id))
+      .toMatchObject({ status: 'processed', attemptCount: 1 })
+    expect(process).toHaveBeenCalledOnce()
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('recovers a received /new before later work and binds both to the new generation', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-received-new-'))
+    roots.push(root)
+    const first = await mountHarness(root)
+    const challenge = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: challenge.challenge.id, principal, code: challenge.code })
+    first.service.registerInboundRuntime({
+      createSession: async () => ({ sessionId: 'delivery-generation-1', workspace: '/work/alpha',
+        agentPreset: 'primary', policyRef: 'owner-dm' }),
+      process: async () => ({ outcome: 'processed' }),
+    })
+    await first.service.acceptInbound({ ...envelope, eventId: 'evt-generation-seed' })
+    const store = runtimeStoreFromService(first.service)
+    const reset = store.acceptInbound({
+      ...envelope, eventId: 'evt-received-new', kind: 'command', text: '/new',
+    }).record
+    const following = store.acceptInbound({
+      ...envelope, eventId: 'evt-received-after-new', text: 'after reset',
+    }).record
+    await first.ctx.fiber.restart()
+
+    const restarted = await mountHarness(root)
+    const processed: Array<{ generation: number; eventId: string }> = []
+    restarted.service.registerInboundRuntime({
+      createSession: async ({ generation }) => ({ sessionId: `delivery-generation-${generation}`,
+        workspace: '/work/alpha', agentPreset: 'primary', policyRef: 'owner-dm' }),
+      cancelActive: async () => false,
+      process: async (binding, input) => {
+        processed.push({ generation: binding.generation, eventId: input.eventId })
+        return { outcome: 'processed' }
+      },
+    })
+    await restarted.service.tick()
+    await restarted.service.whenIdle()
+    await restarted.service.tick()
+    await restarted.service.whenIdle()
+
+    const active = runtimeStoreFromService(restarted.service).getActiveBinding(conversation)!
+    expect(active).toMatchObject({ generation: 2, sessionId: 'delivery-generation-2' })
+    expect(runtimeStoreFromService(restarted.service).getInbox(reset.id))
+      .toMatchObject({ status: 'processed', bindingId: active.id })
+    expect(runtimeStoreFromService(restarted.service).getInbox(following.id))
+      .toMatchObject({ status: 'processed', bindingId: active.id })
+    expect(processed).toEqual([
+      { generation: 2, eventId: 'evt-received-new' },
+      { generation: 2, eventId: 'evt-received-after-new' },
+    ])
+    await restarted.ctx.fiber.restart()
   })
 
   test('/stop interrupts the live binding before joining its strictly serialized Inbox lane', async () => {
@@ -1342,7 +1603,7 @@ describe('assistant delivery Cordis service', () => {
     vi.setSystemTime(10_000)
     let flushedAsked = false
     const flush = vi.fn((session: Session) => {
-      flushedAsked = session.events.some(event => event.type === 'approval/asked'
+      flushedAsked = session.snapshotEvents().some(event => event.type === 'approval/asked'
         && String(event.data.callId) === 'call-delivery-1')
     })
     const { ctx, service } = await harness(true, { approval: true, flush, toolApprovalTtlMs: 2_000 })
@@ -1365,7 +1626,7 @@ describe('assistant delivery Cordis service', () => {
       send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
     })
 
-    await expect(ctx.approval.request({ agent, toolName: 'write_file', callId: CallId('call-delivery-1'),
+    await expect(ctx.approval.request({ agent, toolName: 'write_file', callId: ToolCallId('call-delivery-1'),
       reason: 'Write the requested file' })).resolves.toBe('allowed-once')
 
     expect(flush).toHaveBeenCalledWith(agent.session)
@@ -1399,7 +1660,7 @@ describe('assistant delivery Cordis service', () => {
     const pending = fixture.ctx.approval.request({
       agent: fixture.agent,
       toolName: 'write_file',
-      callId: CallId('call-delivery-1'),
+      callId: ToolCallId('call-delivery-1'),
       reason: 'Write the requested file',
     })
     await vi.waitFor(() => expect(requestToolApproval).toHaveBeenCalledOnce())
@@ -1432,7 +1693,7 @@ describe('assistant delivery Cordis service', () => {
     await expect(fixture.ctx.approval.request({
       agent: fixture.agent,
       toolName: 'write_file',
-      callId: CallId('call-delivery-1'),
+      callId: ToolCallId('call-delivery-1'),
       reason: 'Write the requested file',
     })).resolves.toBe('unavailable')
     expect(requestToolApproval).not.toHaveBeenCalled()
@@ -1453,7 +1714,7 @@ describe('assistant delivery Cordis service', () => {
     const pending = fixture.ctx.approval.request({
       agent: fixture.agent,
       toolName: 'write_file',
-      callId: CallId('call-delivery-1'),
+      callId: ToolCallId('call-delivery-1'),
       reason: 'Write the requested file',
     })
     await vi.waitFor(() => expect(requestToolApproval).toHaveBeenCalledOnce())
@@ -1475,11 +1736,11 @@ describe('assistant delivery Cordis service', () => {
 
   test('routes one exact open Code Mode sub-call and binds its dispatch identity', async () => {
     const fixture = await boundApprovalHarness({ sessionId: 'approval-code-dispatch' })
-    const subCallId = CallId('call-delivery-1:code:0')
+    const subCallId = ToolCallId('call-delivery-1:code:0')
     const argumentsValue = { path: '/work/alpha/code-mode.txt', mode: 'write' }
     fixture.agent.session.append('tool/code-dispatch-start', {
-      rootCallId: CallId('call-delivery-1'),
-      parentCallId: CallId('call-delivery-1'),
+      rootCallId: ToolCallId('call-delivery-1'),
+      parentCallId: ToolCallId('call-delivery-1'),
       subCallId,
       name: 'write_file',
       arguments: argumentsValue,
@@ -1512,9 +1773,9 @@ describe('assistant delivery Cordis service', () => {
   test('never prompts for an already settled Code Mode sub-call', async () => {
     const fixture = await boundApprovalHarness({ sessionId: 'approval-code-dispatch-settled' })
     const dispatch = {
-      rootCallId: CallId('call-delivery-1'),
-      parentCallId: CallId('call-delivery-1'),
-      subCallId: CallId('call-delivery-1:code:0'),
+      rootCallId: ToolCallId('call-delivery-1'),
+      parentCallId: ToolCallId('call-delivery-1'),
+      subCallId: ToolCallId('call-delivery-1:code:0'),
       name: 'write_file',
       arguments: { path: '/work/alpha/code-mode.txt', mode: 'write' },
     }
@@ -1551,7 +1812,7 @@ describe('assistant delivery Cordis service', () => {
     const unboundNext = vi.fn(async () => 'rejected' as const)
     unbound.ctx.on('approval/request', unboundNext)
     await expect(unbound.ctx.approval.request({ agent: unboundAgent, toolName: 'write_file',
-      callId: CallId('call-delivery-1') })).resolves.toBe('rejected')
+      callId: ToolCallId('call-delivery-1') })).resolves.toBe('rejected')
     expect(unboundNext).toHaveBeenCalledOnce()
     expect(unboundFlush).not.toHaveBeenCalled()
     await unbound.ctx.fiber.restart()
@@ -1562,14 +1823,14 @@ describe('assistant delivery Cordis service', () => {
     const next = vi.fn(async () => 'rejected' as const)
     bound.ctx.on('approval/request', next)
     await expect(bound.ctx.approval.request({ agent: bound.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-1') })).resolves.toBe('rejected')
+      callId: ToolCallId('call-delivery-1') })).resolves.toBe('rejected')
     expect(next).toHaveBeenCalledOnce()
     expect(flush).not.toHaveBeenCalled()
 
     // `ask + none` is conservatively folded back to the human user reviewer.
     bound.agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
     await expect(bound.ctx.approval.request({ agent: bound.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-1') })).resolves.toBe('unavailable')
+      callId: ToolCallId('call-delivery-1') })).resolves.toBe('unavailable')
     expect(next).toHaveBeenCalledOnce()
     expect(flush).not.toHaveBeenCalled()
 
@@ -1578,11 +1839,11 @@ describe('assistant delivery Cordis service', () => {
     const noneNext = vi.fn(async () => 'rejected' as const)
     const deliveryAnswerer = (bound.service as unknown as { requestToolApproval(
       approvalCtx: Context,
-      request: { agent: Agent; toolName: string; callId: CallId },
+      request: { agent: Agent; toolName: string; callId: ToolCallIdType },
       next: () => Promise<'rejected'>,
     ): Promise<string> }).requestToolApproval.bind(bound.service)
     await expect(deliveryAnswerer(bound.ctx, { agent: bound.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-1') }, noneNext)).resolves.toBe('unavailable')
+      callId: ToolCallId('call-delivery-1') }, noneNext)).resolves.toBe('unavailable')
     expect(noneNext).not.toHaveBeenCalled()
     await bound.ctx.fiber.restart()
   })
@@ -1613,24 +1874,24 @@ describe('assistant delivery Cordis service', () => {
     try {
       const ask = await setup('approval-mode-ask', [], 'user')
       await expect(ask.ctx.approval.request({ agent: ask.agent, toolName: 'write_file',
-        callId: CallId('call-delivery-1'), reason: HUMAN_APPROVAL_REASON })).resolves.toBe('allowed-once')
+        callId: ToolCallId('call-delivery-1'), reason: HUMAN_APPROVAL_REASON })).resolves.toBe('allowed-once')
       expect(ask.modelReviewer.requests).toHaveLength(0)
       expect(ask.requestToolApproval).toHaveBeenCalledOnce()
 
       const autoAllowed = await setup('approval-mode-auto-allowed', [reviewerAssessment('allow')], 'auto-review')
       await expect(autoAllowed.ctx.approval.request({ agent: autoAllowed.agent, toolName: 'write_file',
-        callId: CallId('call-delivery-1'), reason: AUTO_REVIEW_APPROVAL_REASON })).resolves.toBe('allowed-once')
+        callId: ToolCallId('call-delivery-1'), reason: AUTO_REVIEW_APPROVAL_REASON })).resolves.toBe('allowed-once')
       expect(autoAllowed.modelReviewer.requests).toHaveLength(1)
       expect(autoAllowed.requestToolApproval).not.toHaveBeenCalled()
 
       const autoRisky = await setup('approval-mode-auto-risky', [], 'auto-review')
       await expect(autoRisky.ctx.approval.request({ agent: autoRisky.agent, toolName: 'write_file',
-        callId: CallId('call-delivery-1'), reason: HUMAN_APPROVAL_REASON })).resolves.toBe('allowed-once')
+        callId: ToolCallId('call-delivery-1'), reason: HUMAN_APPROVAL_REASON })).resolves.toBe('allowed-once')
       expect(autoRisky.modelReviewer.requests).toHaveLength(0)
       expect(autoRisky.requestToolApproval).toHaveBeenCalledOnce()
 
       const nativeEscalation = await setup('approval-mode-native-escalation', [], 'auto-review')
-      const nativeCallId = CallId('call-native-escalation')
+      const nativeCallId = ToolCallId('call-native-escalation')
       const justification = 'Download the exact source archive requested by the user.'
       nativeEscalation.agent.session.append('tool/call', {
         turn: 1,
@@ -1655,13 +1916,13 @@ describe('assistant delivery Cordis service', () => {
       const autoEscalated = await setup('approval-mode-auto-escalated',
         [reviewerAssessment('escalate')], 'auto-review', 'after-delivery')
       await expect(autoEscalated.ctx.approval.request({ agent: autoEscalated.agent, toolName: 'write_file',
-        callId: CallId('call-delivery-1'), reason: AUTO_REVIEW_APPROVAL_REASON })).resolves.toBe('allowed-once')
+        callId: ToolCallId('call-delivery-1'), reason: AUTO_REVIEW_APPROVAL_REASON })).resolves.toBe('allowed-once')
       expect(autoEscalated.modelReviewer.requests).toHaveLength(1)
       expect(autoEscalated.requestToolApproval).toHaveBeenCalledOnce()
 
       const autoUnknown = await setup('approval-mode-auto-unknown', [], 'auto-review')
       await expect(autoUnknown.ctx.approval.request({ agent: autoUnknown.agent, toolName: 'write_file',
-        callId: CallId('call-delivery-1'), reason: 'unowned custom approval request' }))
+        callId: ToolCallId('call-delivery-1'), reason: 'unowned custom approval request' }))
         .resolves.toBe('unavailable')
       expect(autoUnknown.modelReviewer.requests).toHaveLength(0)
       expect(autoUnknown.requestToolApproval).not.toHaveBeenCalled()
@@ -1670,7 +1931,7 @@ describe('assistant delivery Cordis service', () => {
       full.agent.session.append('approval/policy', { policy: 'never' })
       appendSandboxMode(full.agent.session, 'danger-full-access')
       await expect(full.ctx.approval.request({ agent: full.agent, toolName: 'write_file',
-        callId: CallId('call-delivery-1'), reason: HUMAN_APPROVAL_REASON })).resolves.toBe('rejected')
+        callId: ToolCallId('call-delivery-1'), reason: HUMAN_APPROVAL_REASON })).resolves.toBe('rejected')
       expect(full.modelReviewer.requests).toHaveLength(0)
       expect(full.requestToolApproval).not.toHaveBeenCalled()
     } finally {
@@ -1684,7 +1945,7 @@ describe('assistant delivery Cordis service', () => {
     ])
     const fixture = await boundApprovalHarness({ sessionId: 'approval-auto-concurrent', reviewer: modelReviewer })
     fixture.agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
-    fixture.agent.session.append('tool/call', { turn: 1, step: 1, callId: CallId('call-delivery-2'),
+    fixture.agent.session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('call-delivery-2'),
       name: 'write_file', arguments: '{"path":"/work/alpha/b.txt"}' })
     const answers = new Map<string, (outcome: 'allowed-once') => void>()
     const requestToolApproval = vi.fn((input: Parameters<NonNullable<DeliveryAdapter['requestToolApproval']>>[0]) =>
@@ -1697,9 +1958,9 @@ describe('assistant delivery Cordis service', () => {
     })
 
     const first = fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-1'), reason: AUTO_REVIEW_APPROVAL_REASON })
+      callId: ToolCallId('call-delivery-1'), reason: AUTO_REVIEW_APPROVAL_REASON })
     const second = fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-2'), reason: AUTO_REVIEW_APPROVAL_REASON })
+      callId: ToolCallId('call-delivery-2'), reason: AUTO_REVIEW_APPROVAL_REASON })
     await vi.waitFor(() => expect(requestToolApproval).toHaveBeenCalledTimes(2))
     expect(modelReviewer.requests).toHaveLength(2)
     expect(requestToolApproval.mock.calls.map(([input]) => [input.callId, input.arguments]).sort()).toEqual([
@@ -1716,7 +1977,7 @@ describe('assistant delivery Cordis service', () => {
     const modelReviewer = new DeliveryReviewerAdapter([reviewerAssessment('escalate')])
     const fixture = await boundApprovalHarness({ sessionId: 'approval-auto-isolation', reviewer: modelReviewer })
     fixture.agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'auto-review' })
-    fixture.agent.session.append('tool/call', { turn: 1, step: 1, callId: CallId('call-delivery-2'),
+    fixture.agent.session.append('tool/call', { turn: 1, step: 1, callId: ToolCallId('call-delivery-2'),
       name: 'write_file', arguments: '{"path":"/work/alpha/b.txt"}' })
     let answer!: (outcome: 'allowed-once') => void
     const requestToolApproval = vi.fn(() => new Promise<'allowed-once'>(resolve => { answer = resolve }))
@@ -1728,10 +1989,10 @@ describe('assistant delivery Cordis service', () => {
     })
 
     const escalated = fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-1'), reason: AUTO_REVIEW_APPROVAL_REASON })
+      callId: ToolCallId('call-delivery-1'), reason: AUTO_REVIEW_APPROVAL_REASON })
     await vi.waitFor(() => expect(requestToolApproval).toHaveBeenCalledOnce())
     await expect(fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-2'), reason: 'unowned custom approval request' }))
+      callId: ToolCallId('call-delivery-2'), reason: 'unowned custom approval request' }))
       .resolves.toBe('unavailable')
     expect(modelReviewer.requests).toHaveLength(1)
     expect(requestToolApproval).toHaveBeenCalledOnce()
@@ -1759,7 +2020,7 @@ describe('assistant delivery Cordis service', () => {
       })
 
       await expect(fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
-        callId: CallId('call-delivery-1') })).resolves.toBe('unavailable')
+        callId: ToolCallId('call-delivery-1') })).resolves.toBe('unavailable')
       expect(requestToolApproval).not.toHaveBeenCalled()
       await fixture.ctx.fiber.restart()
     }
@@ -1778,7 +2039,7 @@ describe('assistant delivery Cordis service', () => {
     fixtures[0]!.agent.session.append('turn/start', { turn: 2 })
     fixtures[0]!.agent.session.append('step/start', { turn: 2, step: 1 })
     fixtures[3]!.agent.session.append('tool/result', { turn: 1, step: 1,
-      message: createToolResultMessage({ callId: CallId('call-delivery-1'),
+      message: createToolResultMessage({ callId: ToolCallId('call-delivery-1'),
         content: [{ type: 'text', text: 'already finished' }], isError: false }) }, { surfaceOp: 'append' })
 
     for (const fixture of fixtures) {
@@ -1790,7 +2051,7 @@ describe('assistant delivery Cordis service', () => {
         send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
       })
       await expect(fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
-        callId: CallId('call-delivery-1') })).resolves.toBe('unavailable')
+        callId: ToolCallId('call-delivery-1') })).resolves.toBe('unavailable')
       expect(requestToolApproval).not.toHaveBeenCalled()
       await fixture.ctx.fiber.restart()
     }
@@ -1806,7 +2067,7 @@ describe('assistant delivery Cordis service', () => {
       send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
     })
     await expect(fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-1'), reason: 'r'.repeat(2 * 1024 + 1) })).resolves.toBe('unavailable')
+      callId: ToolCallId('call-delivery-1'), reason: 'r'.repeat(2 * 1024 + 1) })).resolves.toBe('unavailable')
     expect(requestToolApproval).not.toHaveBeenCalled()
     await fixture.ctx.fiber.restart()
   })
@@ -1828,7 +2089,7 @@ describe('assistant delivery Cordis service', () => {
       send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
     })
     await expect(fixture.ctx.approval.request({ agent: delegated, toolName: 'write_file',
-      callId: CallId('call-delegated-1') })).resolves.toBe('unavailable')
+      callId: ToolCallId('call-delegated-1') })).resolves.toBe('unavailable')
     expect(requestToolApproval).toHaveBeenCalledOnce()
     await fixture.ctx.fiber.restart()
   })
@@ -1844,7 +2105,7 @@ describe('assistant delivery Cordis service', () => {
       send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
     })
     await expect(beforePrompt.ctx.approval.request({ agent: beforePrompt.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-1') })).resolves.toBe('unavailable')
+      callId: ToolCallId('call-delivery-1') })).resolves.toBe('unavailable')
     expect(driftedPrompt).not.toHaveBeenCalled()
     await beforePrompt.ctx.fiber.restart()
 
@@ -1865,7 +2126,7 @@ describe('assistant delivery Cordis service', () => {
       send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
     })
     await expect(afterPrompt.ctx.approval.request({ agent: afterPrompt.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-1') })).resolves.toBe('unavailable')
+      callId: ToolCallId('call-delivery-1') })).resolves.toBe('unavailable')
     expect(requestToolApproval).toHaveBeenCalledOnce()
     await afterPrompt.ctx.fiber.restart()
   })
@@ -1885,7 +2146,7 @@ describe('assistant delivery Cordis service', () => {
       send: async () => ({ outcome: 'accepted', providerMessageId: 'om_unused' }),
     })
     const outcome = fixture.ctx.approval.request({ agent: fixture.agent, toolName: 'write_file',
-      callId: CallId('call-delivery-1') })
+      callId: ToolCallId('call-delivery-1') })
     await vi.advanceTimersByTimeAsync(1_000)
     await expect(outcome).resolves.toBe('unavailable')
     expect(requestToolApproval).toHaveBeenCalledOnce()

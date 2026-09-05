@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "nextVerifiedHostRange": ">=0.1.2-rc.1 <0.2.0",
   "current": {
     "version": "0.1.24",
     "releasedAt": "2026-09-05T01:35:10.561Z",

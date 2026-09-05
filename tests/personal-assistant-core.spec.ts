@@ -2,7 +2,8 @@ import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import { CallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, LlmAdapter, type GenerateOptions, type StreamChunk } from '@deepseek-ai/dsh-llm'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -22,7 +23,7 @@ afterEach(async () => {
 function foreground(): Agent {
   const id = SessionId(`core-foreground-${Math.random()}`)
   const session = Session.create(id, [], {
-    version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd: '/work/alpha', agentPreset: 'primary',
+    version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd: '/work/alpha', agentPreset: 'primary', isSeeded: false,
   })
   return {
     id, options: {}, session,
@@ -42,7 +43,7 @@ class CoreAdapter extends LlmAdapter {
         { name: 'memory_search', arguments: '{"query":"coffee Helix","limit":5}' },
         { name: 'wiki_search', arguments: '{"query":"agent architecture","limit":5}' },
       ].entries()) {
-        const id = CallId(`core-call-${index}`)
+        const id = ToolCallId(`core-call-${index}`)
         yield { type: 'block-start', index, blockType: 'tool-call' }
         yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments }
         yield { type: 'block-end', index, block: { type: 'tool-call', id, name: call.name, arguments: call.arguments } }
@@ -65,6 +66,7 @@ describe('four-core personal assistant composition', () => {
     roots.push(root)
     const ctx = new Context()
     await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
+    await ctx.plugin(SessionProjectionRegistry)
     ctx.on('agent/session-start', ({ agent }) => {
       agent.session.append('approval/policy', { policy: 'never' })
       agent.session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })

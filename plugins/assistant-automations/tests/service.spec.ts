@@ -22,7 +22,7 @@ afterEach(async () => {
 function agent(options: { cwd?: string; preset?: string } = {}): Agent {
   const id = SessionId(`automations-agent-${Math.random()}`)
   const session = Session.create(id, [], {
-    version: SESSION_FORMAT_VERSION, id, createdAt: 1,
+    version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false,
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options.preset === undefined ? {} : { agentPreset: options.preset }),
   })

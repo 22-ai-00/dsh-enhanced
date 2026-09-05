@@ -113,4 +113,4 @@ JSON 导入是一组独立、可重放的提案，不承诺跨所有记录的一
 
 ## 兼容性
 
-已针对 DeepSeek Harness `0.1.0-rc.8`（源码提交 `141eb6fef83422698aef7a981029e843e8161534`）验证。详见仓库[兼容性基线](../../docs/compatibility.md)。
+已针对 DeepSeek Harness `0.1.2-rc.1` 验证。详见仓库[兼容性基线](../../docs/compatibility.md)。

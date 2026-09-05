@@ -1,6 +1,6 @@
 import {
-  CallId,
-  offloadRequestImages,
+  ToolCallId,
+  offloadRequestImagesWithPolicy,
   type ContentBlock,
   type GenerateOptions,
   type Message,
@@ -357,7 +357,11 @@ async function buildInput(
   maxRequestImageBytes: number,
   signal: AbortSignal,
 ): Promise<unknown[]> {
-  const messages = offloadRequestImages(options.messages, maxRequestImageBytes)
+  const messages = offloadRequestImagesWithPolicy(options.messages, {
+    maxBytes: maxRequestImageBytes,
+    representation: 'raw',
+    placeholder: () => '[image omitted to keep the request within its image limit; older images are omitted first. If this image is still needed, read its file again when a path is available; otherwise ask the user to attach it again.]',
+  })
   const input: unknown[] = []
   for (const message of messages) {
     const replay = matchingReplay(message, options.provider, options.model)
@@ -961,7 +965,7 @@ class ResponseStreamProcessor {
     state.arguments += delta
     return delta.length === 0
       ? []
-      : [{ type: 'tool-call-delta', index: state.index, id: CallId(state.callId), argumentsDelta: delta }]
+      : [{ type: 'tool-call-delta', index: state.index, id: ToolCallId(state.callId), argumentsDelta: delta }]
   }
 
   #functionDone(event: Record<string, unknown>): StreamChunk[] {
@@ -1432,7 +1436,7 @@ class ResponseStreamProcessor {
       {
         type: 'tool-call-delta',
         index: state.index,
-        id: CallId(callId),
+        id: ToolCallId(callId),
         name,
         argumentsDelta: initialArguments,
       },
@@ -1461,7 +1465,7 @@ class ResponseStreamProcessor {
       index: state.index,
       block: {
         type: 'tool-call',
-        id: CallId(state.callId),
+        id: ToolCallId(state.callId),
         name: state.name,
         arguments: state.arguments,
       },
@@ -1473,7 +1477,7 @@ class ResponseStreamProcessor {
       chunks.push({
         type: 'tool-call-delta',
         index: state.index,
-        id: CallId(state.callId),
+        id: ToolCallId(state.callId),
         argumentsDelta: finalArguments,
       })
       state.arguments = finalArguments
@@ -1567,7 +1571,7 @@ function projectNativeOutput(output: readonly unknown[], blockOrder: readonly un
         callIds.add(callId)
         blocksByKey.set(`tool:${itemId}`, {
           type: 'tool-call',
-          id: CallId(callId),
+          id: ToolCallId(callId),
           name: requireBoundedString(item.name, 'replay function name', MAX_TOOL_NAME_BYTES),
           arguments: requireString(item.arguments, 'replay function arguments'),
         })

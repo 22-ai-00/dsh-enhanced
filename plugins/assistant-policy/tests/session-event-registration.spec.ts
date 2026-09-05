@@ -29,13 +29,27 @@ const roots = new Set<string>()
 interface StoredSession {
   events: SessionEvent[]
   meta: SessionHeader
+  inheritedEventCount: number
   revision: string
+}
+
+interface SessionStorageMetadata {
+  readonly meta: SessionHeader
+  readonly inheritedEventCount: number
 }
 
 interface PersistenceBackend {
   readonly name: string
-  appendBatch(meta: SessionHeader, events: readonly SessionEvent[], isMaterialized: boolean): Promise<void>
-  commitRepair(meta: SessionHeader, tornMarker: undefined, closers: readonly SessionEvent[]): Promise<void>
+  appendBatch(
+    storage: SessionStorageMetadata,
+    events: readonly SessionEvent[],
+    isMaterialized: boolean,
+  ): Promise<void>
+  commitRepair(
+    storage: SessionStorageMetadata,
+    tornMarker: undefined,
+    closers: readonly SessionEvent[],
+  ): Promise<void>
   list(): Promise<SessionHeader[]>
   loadStored(id: ReturnType<typeof SessionId>): Promise<StoredSession | undefined>
   readStoredRevision(id: ReturnType<typeof SessionId>): Promise<string | undefined>
@@ -79,7 +93,7 @@ type PersistenceCoordinatorConstructor = new (
 ) => PersistenceCoordinator
 
 async function coordinatorConstructor(): Promise<PersistenceCoordinatorConstructor> {
-  // Use the exact persistence coordinator consumed by the installed rc.8 Agent loop.
+  // Use the exact persistence coordinator consumed by the installed DSH Agent loop.
   // It is a peer of the loop rather than a public dependency of this plugin.
   const loopPackage = require.resolve('@deepseek-ai/dsh-agent-loop/package.json')
   const entrypoint = require.resolve('@deepseek-ai/dsh-session-persistence', {
@@ -96,12 +110,14 @@ function backend(stored: Map<string, StoredSession>): PersistenceBackend {
   const snapshot = (value: StoredSession): StoredSession => structuredClone(value)
   return {
     name: 'assistant-policy-registration-test',
-    async appendBatch(meta, events, isMaterialized) {
+    async appendBatch(storage, events, isMaterialized) {
+      const { meta, inheritedEventCount } = storage
       const current = stored.get(String(meta.id))
       if (!isMaterialized || current === undefined) {
         revision += 1
         stored.set(String(meta.id), snapshot({
           meta,
+          inheritedEventCount,
           events: [...events],
           revision: `test:${revision}`,
         }))
@@ -111,7 +127,8 @@ function backend(stored: Map<string, StoredSession>): PersistenceBackend {
       current.events.push(...structuredClone(events))
       current.revision = `test:${revision}`
     },
-    async commitRepair(meta, _tornMarker, closers) {
+    async commitRepair(storage, _tornMarker, closers) {
+      const { meta } = storage
       const current = stored.get(String(meta.id))
       if (current === undefined) throw new Error(`missing stored session ${meta.id}`)
       revision += 1
@@ -280,6 +297,7 @@ describe('assistant-policy session event registration', () => {
         version: SESSION_FORMAT_VERSION,
         id: SessionId('three-registry-reader'),
         createdAt: 0,
+        isSeeded: false,
         cwd: '/work/alpha',
         delegationDepth: 0,
       }, [{
@@ -324,7 +342,7 @@ describe('assistant-policy session event registration', () => {
       expect(() => setApprovalReviewer(selection.session, selection.reviewer)).toThrow(/reader.*proven/i)
       await expect(waitForApprovalReviewerSessionEventReady(selection.session))
         .rejects.toThrow(/sessionPersistence is unavailable/i)
-      expect(selection.session.events.some(event => event.type === REVIEWER_EVENT_TYPE)).toBe(false)
+      expect(selection.session.snapshotEvents().some(event => event.type === REVIEWER_EVENT_TYPE)).toBe(false)
     }
 
     const firstCoordinator = new PersistenceCoordinator(first.ctx, backend(stored), {
@@ -386,6 +404,7 @@ describe('assistant-policy session event registration', () => {
       version: SESSION_FORMAT_VERSION,
       id: SessionId('hmr-rebuilt-reader'),
       createdAt: 0,
+      isSeeded: false,
       cwd: '/work/hmr',
       delegationDepth: 0,
     }, [{
@@ -430,7 +449,7 @@ describe('assistant-policy session event registration', () => {
     expect(registration.isReady()).toBe(false)
     await expect(waitForApprovalReviewerSessionEventReady(session)).rejects.toThrow(/cannot prove/i)
     expect(() => setApprovalReviewer(session, 'auto-review')).toThrow(/reader.*proven/i)
-    expect(session.events.some(event => event.type === REVIEWER_EVENT_TYPE)).toBe(false)
+    expect(session.snapshotEvents().some(event => event.type === REVIEWER_EVENT_TYPE)).toBe(false)
   })
 
   test('proves the launcher registry for a programmatic reader without loader metadata', async () => {
@@ -451,6 +470,7 @@ describe('assistant-policy session event registration', () => {
         version: SESSION_FORMAT_VERSION,
         id: SessionId('programmatic-reader'),
         createdAt: 0,
+        isSeeded: false,
         cwd: '/work/alpha',
         delegationDepth: 0,
       }, [{
@@ -542,7 +562,7 @@ describe('assistant-policy session event registration', () => {
     expect(KNOWN_SESSION_EVENT_TYPES.has(REVIEWER_EVENT_TYPE)).toBe(true)
 
     // Persistence is intentionally able to drain and cold-read after Policy's
-    // context has disposed. Deleting this global type here was the rc.8/HMR
+    // context has disposed. Deleting this global type here was the legacy HMR
     // race that made otherwise valid sessions permanently unresumable.
     const cold = await context(false)
     const coldCoordinator = new PersistenceCoordinator(cold.ctx, backend(stored), {
@@ -563,7 +583,7 @@ describe('assistant-policy session event registration', () => {
     apply(resumed.ctx, { databasePath: join(resumed.root, 'policy.sqlite'), rules: [] })
     const preparation = await resumedCoordinator.prepare(id)
     try {
-      expect(foldApprovalReviewer(preparation.session.events)).toBe('auto-review')
+      expect(foldApprovalReviewer(preparation.session.snapshotEvents())).toBe('auto-review')
       expect(preparation.session.header).toMatchObject({ id, cwd: '/work/alpha' })
     } finally {
       preparation[Symbol.dispose]()

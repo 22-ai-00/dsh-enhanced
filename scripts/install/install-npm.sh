@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# These values are rewritten by release-version.mjs during `release:prepare`.
+# These values are rewritten together by release-version.mjs during
+# `release:prepare`.
 # A remote `curl | bash` invocation therefore fetches common.sh from one tagged
 # release and refuses a changed payload before it executes it.
 DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.24'
 DSH_ENHANCED_PINNED_COMMON_SHA256='2ef41724f752a9030a158822288d0e3326e7b046102ead5013594679120ba821'
-DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.0-rc.8'
-export DSH_ENHANCED_VERIFIED_HOST_RANGE
+DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.8'
 
 # Bundles default to npm `latest` (resolved in common.sh) so every install picks
 # up the newest published @dsh-enhanced/* release without waiting for an
 # installer refresh. Override with --plugin-version or DSH_ENHANCED_VERSION to
-# pin a specific tag. The pinned ref + SHA-256 above are still used to fetch and
-# verify common.sh from a fixed release tag.
+# pin a specific tag. The pinned ref, SHA-256, and host range above stay aligned
+# with the fixed release used by the remote fallback.
 
 SCRIPT_DIRECTORY=''
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
@@ -65,6 +65,8 @@ else
     printf 'dsh-enhanced installer: 远程 common.sh 完整性校验失败；拒绝执行。\n' >&2
     exit 1
   fi
+  DSH_ENHANCED_VERIFIED_HOST_RANGE="$DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE"
+  export DSH_ENHANCED_VERIFIED_HOST_RANGE
   # shellcheck source=/dev/null
   source "$TEMPORARY_DIRECTORY/common.sh"
 fi

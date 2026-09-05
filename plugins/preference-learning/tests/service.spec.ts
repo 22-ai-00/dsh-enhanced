@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
-import { CallId, createUserMessage } from '@deepseek-ai/dsh-llm'
+import { ToolCallId, createUserMessage } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt, { renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -68,6 +68,7 @@ function agent(workspace = '/work/alpha', preset = 'primary'): Agent {
     createdAt: 1,
     cwd: workspace,
     agentPreset: preset,
+    isSeeded: false,
   })
   setApprovalReviewer(session, 'none')
   session.append('approval/policy', { policy: 'never' })
@@ -215,7 +216,7 @@ async function harness(options: {
 
 function call(name: string, args: Record<string, unknown>, withAgent?: Agent) {
   return {
-    callId: CallId(`call-${name}-${Math.random()}`),
+    callId: ToolCallId(`call-${name}-${Math.random()}`),
     name,
     arguments: args,
     signal: new AbortController().signal,
@@ -509,7 +510,7 @@ describe('preference learning service', () => {
   })
 
   test('uses one branded Memory registration for durable submission and terminal projection', async () => {
-    let clock = Date.now() + 1_000
+    let clock = 1_000_000
     const { ctx, feedback, service } = await harness({ now: () => clock })
     expect(isTrustedPreferenceMemoryPromotionProducer(service)).toBe(true)
     expect(isTrustedPreferenceMemoryPromotionProducer({ ...service })).toBe(false)
@@ -551,9 +552,9 @@ describe('preference learning service', () => {
     expect(() => service.registerTrustedMemoryPromotionResultSink({ ...registration! }))
       .toThrow(/registration is invalid|already registered/iu)
 
-    feedback(memoryRetentionFeedback('memory-retention-1', 'typed-feedback'))
-    feedback(memoryRetentionFeedback('memory-retention-2', 'explicit-selection'))
-    feedback(memoryRetentionFeedback('memory-retention-3', 'typed-feedback'))
+    feedback(memoryRetentionFeedback('memory-retention-1', 'typed-feedback', clock))
+    feedback(memoryRetentionFeedback('memory-retention-2', 'explicit-selection', clock))
+    feedback(memoryRetentionFeedback('memory-retention-3', 'typed-feedback', clock))
     await new Promise(resolve => setImmediate(resolve))
     expect(requests).toHaveLength(0)
     // The first automatic drain failed and is durable retry_wait. Re-open it
@@ -572,7 +573,7 @@ describe('preference learning service', () => {
       resultVersion: 1, status: 'confirmed' as const,
       memoryProposalId: 'memory-proposal-service-1', memoryProposalVersion: 2,
       memoryRecordId: 'memory-record-service-1', memoryRecordVersion: 1,
-      memoryRecordDigest: 'a'.repeat(64), occurredAt: Date.now(),
+      memoryRecordDigest: 'a'.repeat(64), occurredAt: clock,
     }))
     expect(service.reconcileMemoryPromotions()).toMatchObject({ projected: 1 })
     expect(acknowledgements).toEqual([expect.objectContaining({ outcome: 'applied' })])

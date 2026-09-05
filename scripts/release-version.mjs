@@ -95,6 +95,7 @@ function validateRecordedRelease(ledger) {
   if (ledger.schemaVersion !== 1) {
     throw new Error(`Unsupported release manifest schema version: ${String(ledger.schemaVersion)}`)
   }
+  nextVerifiedHostRange(ledger)
   if (!Array.isArray(ledger.history)) {
     throw new Error('Release history must be an array')
   }
@@ -127,6 +128,14 @@ function validateRecordedRelease(ledger) {
   }
 }
 
+function nextVerifiedHostRange(ledger) {
+  const range = ledger.nextVerifiedHostRange
+  if (typeof range !== 'string' || range.trim() === '') {
+    throw new Error('Release manifest nextVerifiedHostRange must be a non-empty string')
+  }
+  return range
+}
+
 async function readJson(path) {
   return JSON.parse(await readFile(path, 'utf8'))
 }
@@ -157,12 +166,12 @@ async function updatePinnedRemoteInstaller(root, version, verifiedHostRange) {
     `DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`,
   )
   const pinned = withHash.replace(
-    /^DSH_ENHANCED_VERIFIED_HOST_RANGE='[^']+'$/m,
-    () => `DSH_ENHANCED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`,
+    /^DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='[^']+'$/m,
+    () => `DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`,
   )
   if (pinned === installer || !pinned.includes(`DSH_ENHANCED_PINNED_RELEASE_REF='v${version}'`)
     || !pinned.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)
-    || !pinned.includes(`DSH_ENHANCED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`)) {
+    || !pinned.includes(`DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${verifiedHostRange}'`)) {
     throw new Error('install-npm.sh must contain exactly one releasable pinned ref, SHA-256, and verified host range')
   }
   await writeFile(installerPath, pinned)
@@ -259,7 +268,7 @@ async function validatePendingRelease(root, operation = 'verify') {
     const hash = createHash('sha256').update(common).digest('hex')
     if (!installer.includes(`DSH_ENHANCED_PINNED_RELEASE_REF='v${pendingVersion}'`)
       || !installer.includes(`DSH_ENHANCED_PINNED_COMMON_SHA256='${hash}'`)
-      || !installer.includes(`DSH_ENHANCED_VERIFIED_HOST_RANGE='${ledger.pending.verifiedHostRange}'`)) {
+      || !installer.includes(`DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='${ledger.pending.verifiedHostRange}'`)) {
       throw new Error('Pinned remote installer does not match the pending release version, common.sh digest, and verified host range')
     }
   } catch (error) {
@@ -334,7 +343,7 @@ async function prepare(root, requestedVersion) {
   ledger.pending = {
     version,
     preparedAt: new Date().toISOString(),
-    verifiedHostRange: ledger.current.verifiedHostRange,
+    verifiedHostRange: nextVerifiedHostRange(ledger),
     packages,
   }
 
@@ -420,6 +429,7 @@ async function status(root) {
   if (!baseVersion) throw new Error('Release manifest has neither a current nor a pending version')
   console.log(`Current release: ${ledger.current?.version ?? 'none'}`)
   console.log(`Pending release: ${ledger.pending?.version ?? 'none'}`)
+  console.log(`Next verified host range: ${nextVerifiedHostRange(ledger)}`)
   console.log(`Next default: ${nextPatch(baseVersion)}`)
 }
 

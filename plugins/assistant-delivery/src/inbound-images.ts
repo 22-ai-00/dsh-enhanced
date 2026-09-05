@@ -86,7 +86,9 @@ function validImageRefShape(
   return ref !== null
     && typeof ref === 'object'
     && !Array.isArray(ref)
-    && Object.keys(ref).every(key => ['attachmentId', 'mediaType', 'bytes', 'width', 'height', 'name'].includes(key))
+    && Object.keys(ref).every(key => [
+      'attachmentId', 'mediaType', 'bytes', 'width', 'height', 'name', 'originalDimensions',
+    ].includes(key))
     && typeof ref.attachmentId === 'string'
     && ref.attachmentId.length >= 1
     && ref.attachmentId.length <= 512
@@ -102,22 +104,19 @@ function validImageRefShape(
     && ref.height > 0
     && ref.height <= limits.maxImageDimension
     && ref.width * ref.height <= limits.maxImagePixels
+    && (ref.originalDimensions === undefined
+      || (isRecord(ref.originalDimensions)
+        && Object.keys(ref.originalDimensions).every(key => key === 'width' || key === 'height')
+        && Number.isSafeInteger(ref.originalDimensions.width)
+        && ref.originalDimensions.width > 0
+        && Number.isSafeInteger(ref.originalDimensions.height)
+        && ref.originalDimensions.height > 0))
     && (ref.name === undefined || (typeof ref.name === 'string'
       && ref.name.length >= 1
       && ref.name.length <= 255
       && ref.name !== '.'
       && ref.name !== '..'
       && !/[\\/\p{Cc}]/u.test(ref.name)))
-}
-
-function validSavedImageRef(
-  ref: ImageAttachmentRef,
-  input: SaveImageAttachment,
-  limits: Readonly<ImageAttachmentLimits>,
-): boolean {
-  return validImageRefShape(ref, limits)
-    && ref.mediaType === input.mediaType
-    && ref.bytes === input.data.byteLength
 }
 
 function validReadyBatch(
@@ -282,9 +281,7 @@ export class InboundImageMaterializer {
         : failure('image-storage-failed', true)
     }
     abortIfNeeded(input.signal)
-    if (!Array.isArray(refs)
-      || refs.length !== saveInputs.length
-      || refs.some((ref, index) => !validSavedImageRef(ref, saveInputs[index]!, limits))) {
+    if (!Array.isArray(refs) || !validReadyBatch(refs, saveInputs.length, limits)) {
       return failure('attachment-store-contract-invalid', false)
     }
     const afterSaveAuthorizationFailure = currentAuthorizationFailure(

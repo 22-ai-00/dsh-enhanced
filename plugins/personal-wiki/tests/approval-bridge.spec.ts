@@ -26,6 +26,7 @@ function agent(options: { cwd?: string; preset?: string } = {}): Agent {
     createdAt: 1,
     cwd: options.cwd ?? '/work/alpha',
     agentPreset: options.preset ?? 'primary',
+    isSeeded: false,
   })
   return {
     id,

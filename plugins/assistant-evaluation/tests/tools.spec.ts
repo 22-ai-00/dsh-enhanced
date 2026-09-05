@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -15,7 +15,7 @@ afterEach(async () => { await Promise.all(contexts.splice(0).map(ctx => ctx.fibe
 function agent(workspace = '/work/alpha'): Agent {
   const id = SessionId(`evaluation-agent-${Math.random()}`)
   const session = Session.create(id, [], {
-    version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd: workspace, agentPreset: 'primary',
+    version: SESSION_FORMAT_VERSION, id, createdAt: 1, cwd: workspace, agentPreset: 'primary', isSeeded: false,
   })
   return {
     id, options: {}, session,
@@ -27,7 +27,7 @@ function agent(workspace = '/work/alpha'): Agent {
 
 function call(name: string, args: Record<string, unknown>, target?: Agent) {
   return {
-    callId: CallId(`evaluation-call-${Math.random()}`), name, arguments: args,
+    callId: ToolCallId(`evaluation-call-${Math.random()}`), name, arguments: args,
     signal: new AbortController().signal, ...(target === undefined ? {} : { agent: target }),
   }
 }

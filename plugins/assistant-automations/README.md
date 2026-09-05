@@ -1,6 +1,6 @@
 # @dsh-enhanced/assistant-automations
 
-面向个人助理的单机、冷启动可恢复调度器。它把 automation 定义、稳定 occurrence、task、attempt、run 和 duty lease 写入 SQLite；进程重启后从账本继续，而不是把内存 timer 当作事实源。普通 Agent automation 每次执行创建一个新的 DSH rc.8 Agent，固定 workspace、preset 身份、provider/model、输出预算、工具白名单和工具调用上限；system-owned Host automation 则只调用进程内注册、版本和 catalog digest 精确匹配的固定执行器，不创建 Agent 或模型 turn。
+面向个人助理的单机、冷启动可恢复调度器。它把 automation 定义、稳定 occurrence、task、attempt、run 和 duty lease 写入 SQLite；进程重启后从账本继续，而不是把内存 timer 当作事实源。普通 Agent automation 每次执行创建一个新的 DSH `0.1.2-rc.1` Agent，固定 workspace、preset 身份、provider/model、输出预算、工具白名单和工具调用上限；system-owned Host automation 则只调用进程内注册、版本和 catalog digest 精确匹配的固定执行器，不创建 Agent 或模型 turn。
 
 执行前会先解析并挂载 automation 固定的 Agent preset，再在该 Agent 的最终工具平面上校验 immutable allowlist；preset 只提供 scoped tool 时也能被正确发现，preset 额外暴露未批准工具则整次 setup fail closed。通过校验的最终 tool schemas 会与 provider/model 无关地交给 Agent Loop；模型只供应生成，不决定工具可见性或授权，也没有部署侧 provider 能力名单。协议元数据缺失、`native` 和 `bridge` 都会放行；只有 adapter 主动声明 `toolCalls: none` 且最终 scope 非空时，才会在 provider 执行前因未实现统一 DSH tool-call 协议失败关闭。每次工具执行仍受 automation 白名单、调用上限、Policy、sandbox、审批和预算约束。
 
@@ -162,4 +162,4 @@ P0 是单机 scheduler，不支持共享网络文件系统、多主共识、DAG�
 
 ## 兼容性
 
-已针对 DeepSeek Harness `0.1.0-rc.8`（源码提交 `141eb6fef83422698aef7a981029e843e8161534`）验证。详见仓库[兼容性基线](../../docs/compatibility.md)。
+已针对 DeepSeek Harness `0.1.2-rc.1` 验证。详见仓库[兼容性基线](../../docs/compatibility.md)。

@@ -1,5 +1,5 @@
-import { CallId, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
-import type { SessionEvent } from '@deepseek-ai/dsh-session'
+import { ToolCallId, createAssistantMessage, createToolResultMessage } from '@deepseek-ai/dsh-llm'
+import { SessionSeq, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { describe, expect, it } from 'vitest'
 import { createSessionEventMapper } from '../src/codec.ts'
 
@@ -8,7 +8,7 @@ function event<T extends SessionEvent['type']>(
   data: Extract<SessionEvent, { type: T }>['data'],
   seq = 1,
 ): Extract<SessionEvent, { type: T }> {
-  return { type, data, seq, time: 1_700_000_000_000 } as Extract<SessionEvent, { type: T }>
+  return { type, data, seq: SessionSeq(seq), time: 1_700_000_000_000 } as Extract<SessionEvent, { type: T }>
 }
 
 describe('DSH session event to ACP updates', () => {
@@ -48,7 +48,7 @@ describe('DSH session event to ACP updates', () => {
 
   it('reports tool lifecycle and preserves DSH raw payloads in metadata', () => {
     const mapper = createSessionEventMapper({ includeRawEvents: true })
-    const callId = CallId('call-1')
+    const callId = ToolCallId('call-1')
     const started = mapper.map(event('tool/call', {
       turn: 1,
       step: 1,
@@ -96,7 +96,7 @@ describe('DSH session event to ACP updates', () => {
     const mode = mapper.map(event('agent-preset/selected', { agentPreset: 'minimal' }))
     const title = mapper.map(event('session/title', {
       title: 'ACP integration',
-      messageSeqs: [1],
+      messageSeqs: [SessionSeq(1)],
       source: { kind: 'fallback' },
     }))
     const raw = mapper.map(event('turn/start', { turn: 2 }))

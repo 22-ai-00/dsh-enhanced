@@ -135,8 +135,8 @@ export function approvalReviewerOf(events: readonly SessionEvent[]): ApprovalRev
   return hasCoherentAutoReview(events) ? 'auto-review' : 'user'
 }
 
-export function getApprovalReviewer(session: Pick<Session, 'events'>): ApprovalReviewer {
-  return approvalReviewerOf(session.events)
+export function getApprovalReviewer(session: Pick<Session, 'snapshotEvents'>): ApprovalReviewer {
+  return approvalReviewerOf(session.snapshotEvents())
 }
 
 /** Append a validated reviewer transition only when it changes the durable selection. */
@@ -144,7 +144,7 @@ export function setApprovalReviewer(session: Session, reviewer: ApprovalReviewer
   if (!isApprovalReviewer(reviewer)) {
     throw new TypeError('approval reviewer must be one of "user", "auto-review", or "none"')
   }
-  if (reviewerIntentOf(session.events) === reviewer) return false
+  if (reviewerIntentOf(session.snapshotEvents()) === reviewer) return false
   assertApprovalReviewerSessionEventReady(session)
   session.append('assistant-policy/approval-reviewer', { reviewer })
   return true

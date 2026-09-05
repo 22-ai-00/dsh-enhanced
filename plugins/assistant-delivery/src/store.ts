@@ -880,7 +880,7 @@ function canonicalImageRef(input: unknown): ImageAttachmentRef {
   const value = input as Record<string, unknown>
   const required = ['attachmentId', 'mediaType', 'bytes', 'width', 'height']
   if (required.some(key => !Object.hasOwn(value, key))
-    || Object.keys(value).some(key => ![...required, 'name'].includes(key))
+    || Object.keys(value).some(key => ![...required, 'name', 'originalDimensions'].includes(key))
     || typeof value.attachmentId !== 'string'
     || value.attachmentId.length < 1 || value.attachmentId.length > 512
     || /\p{Cc}/u.test(value.attachmentId)
@@ -889,6 +889,15 @@ function canonicalImageRef(input: unknown): ImageAttachmentRef {
     || !Number.isSafeInteger(value.bytes) || (value.bytes as number) < 1
     || !Number.isSafeInteger(value.width) || (value.width as number) < 1
     || !Number.isSafeInteger(value.height) || (value.height as number) < 1
+    || (value.originalDimensions !== undefined
+      && (value.originalDimensions === null
+        || typeof value.originalDimensions !== 'object'
+        || Array.isArray(value.originalDimensions)
+        || Object.keys(value.originalDimensions).some(key => key !== 'width' && key !== 'height')
+        || !Number.isSafeInteger((value.originalDimensions as Record<string, unknown>).width)
+        || ((value.originalDimensions as Record<string, unknown>).width as number) < 1
+        || !Number.isSafeInteger((value.originalDimensions as Record<string, unknown>).height)
+        || ((value.originalDimensions as Record<string, unknown>).height as number) < 1))
     || (value.name !== undefined && (typeof value.name !== 'string' || value.name.length < 1
       || value.name.length > 255 || value.name === '.' || value.name === '..' || /[\\/\p{Cc}]/u.test(value.name)))) {
     invalidImageRef()
@@ -900,6 +909,12 @@ function canonicalImageRef(input: unknown): ImageAttachmentRef {
     width: value.width as number,
     height: value.height as number,
     ...(value.name === undefined ? {} : { name: value.name as string }),
+    ...(value.originalDimensions === undefined ? {} : {
+      originalDimensions: {
+        width: (value.originalDimensions as { width: number }).width,
+        height: (value.originalDimensions as { height: number }).height,
+      },
+    }),
   }
 }
 
@@ -923,6 +938,8 @@ function sameImageRef(left: ImageAttachmentRef, right: ImageAttachmentRef): bool
     && left.width === right.width
     && left.height === right.height
     && left.name === right.name
+    && left.originalDimensions?.width === right.originalDimensions?.width
+    && left.originalDimensions?.height === right.originalDimensions?.height
 }
 
 function attachmentFromRow(row: AttachmentRow): DeliveryAttachment {
@@ -2891,6 +2908,16 @@ export class DeliveryStore {
     }
     const now = this.now()
     this.transaction(() => {
+      const current = this.getActiveBinding(record.envelope.conversation)
+      const principal = this.getBindingPrincipal(binding.id)
+      if (current?.id !== binding.id || current.version !== binding.version
+        || current.generation !== binding.generation || current.sessionId !== binding.sessionId) {
+        throw new DeliveryStoreError('invalid-binding', 'inbox binding is no longer the exact active generation')
+      }
+      if (principal?.status !== 'active'
+        || JSON.stringify(principal.principal) !== JSON.stringify(binding.principal)) {
+        throw new DeliveryStoreError('unauthorized-principal', 'inbox binding principal is not active')
+      }
       if (record.status === 'received') {
         this.database.prepare(`
           UPDATE inbox_messages SET status = 'authorized', binding_id = ?, updated_at = ?
@@ -3072,6 +3099,28 @@ export class DeliveryStore {
       principalJson(target.principal),
     ) as InboxRow | undefined
     return row === undefined ? undefined : inboxFromRow(row)
+  }
+
+  /**
+   * List a bounded page of persisted admissions that have not reached the
+   * worker queue yet. The admission cursor, rather than timestamps or rowid,
+   * preserves the global order across restarts and database maintenance.
+   */
+  listRecoverableInboundAdmissions(input: { afterSequence?: number; limit?: number } = {}): InboxRecord[] {
+    this.assertOpen()
+    const afterSequence = input.afterSequence ?? 0
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new DeliveryStoreError('conflict', 'invalid inbound admission recovery cursor')
+    }
+    const limit = boundedMaintenanceLimit(input.limit, 100, 'inbound admission recovery')
+    const rows = this.database.prepare(`${inboxSelect}
+      JOIN delivery_inbox_admissions AS pending_admission
+        ON pending_admission.inbox_id = inbox_messages.id
+      WHERE inbox_messages.status IN ('received', 'authorized')
+        AND pending_admission.admission_sequence > ?
+      ORDER BY pending_admission.admission_sequence LIMIT ?
+    `).all(afterSequence, limit) as unknown as InboxRow[]
+    return rows.map(inboxFromRow)
   }
 
   listInbox(input: { bindingId?: string; limit?: number } = {}): InboxRecord[] {

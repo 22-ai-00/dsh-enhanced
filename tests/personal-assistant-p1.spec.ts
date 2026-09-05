@@ -20,7 +20,7 @@ afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, {
 function foreground(): Agent {
   const id = SessionId('p1-foreground')
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1,
-    cwd: '/work/alpha', agentPreset: 'primary' })
+    cwd: '/work/alpha', agentPreset: 'primary', isSeeded: false })
   return { id, options: {}, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }),
     ctx: new Context(), status: 'idle', cancel() {}, whenIdle: async () => {},
     runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }

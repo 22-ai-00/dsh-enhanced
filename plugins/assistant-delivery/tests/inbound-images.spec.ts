@@ -292,6 +292,139 @@ describe('authorized inbound image materialization', () => {
     })
   })
 
+  test('accepts normalized refs exactly at the aggregate cap and reuses them after restart', async () => {
+    const normalized: readonly ImageAttachmentRef[] = [
+      {
+        attachmentId: AttachmentId('sha256:normalized-webp-one'),
+        mediaType: 'image/webp',
+        bytes: 48,
+        width: 1,
+        height: 1,
+        name: 'one.png',
+        originalDimensions: { width: 2, height: 2 },
+      },
+      {
+        attachmentId: AttachmentId('sha256:normalized-webp-two'),
+        mediaType: 'image/webp',
+        bytes: 48,
+        width: 2,
+        height: 2,
+        name: 'two.png',
+        originalDimensions: { width: 4, height: 4 },
+      },
+    ]
+    const saveImages = vi.fn(async () => normalized)
+    const attachments = {
+      imageLimits: {
+        maxImageBytes: 64,
+        maxImagesPerMessage: 2,
+        maxMessageImageBytes: 96,
+        maxImagePixels: 100,
+        maxImageDimension: 10,
+        mediaTypes: ['image/png', 'image/webp'] as const,
+      },
+      saveImages,
+    } as unknown as AttachmentStore
+    const f = await fixture({ attachments })
+
+    const input = f.envelope('evt-normalized-webp', [
+      { resourceType: 'image', providerRef: 'secret_normalized', fileName: 'one.png' },
+      { resourceType: 'image', providerRef: 'secret_normalized_two', fileName: 'two.png' },
+    ])
+    await expect(materialize(f, input)).resolves.toEqual({
+      outcome: 'ready', imageAttachments: normalized,
+    })
+    expect(saveImages).toHaveBeenCalledWith([
+      { data: png, mediaType: 'image/png', name: 'one.png' },
+      { data: png, mediaType: 'image/png', name: 'two.png' },
+    ])
+
+    const inbox = f.store.listInbox({ bindingId: f.binding.id })[0]!
+    f.setNow(1_500)
+    f.store.recoverInbox({ maxAttempts: 3 })
+    const recovered = f.store.claimInbox({ ownerId: 'worker-b', leaseMs: 500, limit: 1, maxAttempts: 3 })[0]!
+    await expect(f.materializer.materialize({
+      inboxId: inbox.id,
+      ownerId: 'worker-b',
+      fencingToken: recovered.fencingToken,
+      binding: f.binding,
+      envelope: input,
+      signal: new AbortController().signal,
+    })).resolves.toEqual({ outcome: 'ready', imageAttachments: normalized })
+    expect(f.read).toHaveBeenCalledTimes(2)
+    expect(saveImages).toHaveBeenCalledOnce()
+  })
+
+  test('rejects normalized refs one byte over the aggregate cap before commit on first and ready paths', async () => {
+    const normalized: readonly ImageAttachmentRef[] = [
+      {
+        attachmentId: AttachmentId('sha256:normalized-over-one'),
+        mediaType: 'image/webp',
+        bytes: 48,
+        width: 1,
+        height: 1,
+        originalDimensions: { width: 2, height: 2 },
+      },
+      {
+        attachmentId: AttachmentId('sha256:normalized-over-two'),
+        mediaType: 'image/webp',
+        bytes: 49,
+        width: 1,
+        height: 1,
+        originalDimensions: { width: 2, height: 2 },
+      },
+    ]
+    const saveImages = vi.fn(async () => normalized)
+    const attachments = {
+      imageLimits: {
+        maxImageBytes: 64,
+        maxImagesPerMessage: 2,
+        maxMessageImageBytes: 96,
+        maxImagePixels: 100,
+        maxImageDimension: 10,
+        mediaTypes: ['image/png', 'image/webp'] as const,
+      },
+      saveImages,
+    } as unknown as AttachmentStore
+    const f = await fixture({ attachments })
+    const commitInboundImageRefs = vi.spyOn(f.store, 'commitInboundImageRefs')
+    const input = f.envelope('evt-normalized-over-cap', [
+      { resourceType: 'image', providerRef: 'secret_over_one', fileName: 'one.png' },
+      { resourceType: 'image', providerRef: 'secret_over_two', fileName: 'two.png' },
+    ])
+    const claim = f.claim(input)
+    const request = {
+      ...claim,
+      binding: f.binding,
+      envelope: input,
+      signal: new AbortController().signal,
+    }
+
+    const result = await f.materializer.materialize(request)
+    expect(result).toEqual({
+      outcome: 'not-ready', failureCode: 'attachment-store-contract-invalid', retryable: false,
+    })
+    expect(commitInboundImageRefs).not.toHaveBeenCalled()
+    expect(JSON.stringify(result)).not.toContain('secret_over')
+    expect(f.store.listAttachments({ ownerKind: 'inbox', ownerId: claim.inboxId })).toEqual([
+      expect.objectContaining({ status: 'metadata', providerRef: 'secret_over_one' }),
+      expect.objectContaining({ status: 'metadata', providerRef: 'secret_over_two' }),
+    ])
+    expect(f.store.listReadyInboundImageRefs(claim.inboxId)).toBeUndefined()
+
+    const contentSha256 = createHash('sha256').update(png).digest('hex')
+    f.store.commitInboundImageRefs({
+      ...claim,
+      images: normalized.map(ref => ({ ref, contentSha256 })),
+    })
+    await expect(f.materializer.materialize(request)).resolves.toEqual({
+      outcome: 'not-ready', failureCode: 'image-state-invalid', retryable: false,
+    })
+    expect(commitInboundImageRefs).toHaveBeenCalledOnce()
+    expect(f.read).toHaveBeenCalledTimes(2)
+    expect(saveImages).toHaveBeenCalledOnce()
+  })
+
   test('maps provider retry and attachment admission/storage failures without leaking provider refs', async () => {
     const retry = await fixture({ read: vi.fn(async () => ({
       outcome: 'not-downloaded' as const,

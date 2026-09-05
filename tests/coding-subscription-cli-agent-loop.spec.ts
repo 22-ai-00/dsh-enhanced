@@ -1,6 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { AttachmentId } from '@deepseek-ai/dsh-attachment'
 import BasicCompactionEngine from '@deepseek-ai/dsh-compaction-basic'
 import ToolResultPruner from '@deepseek-ai/dsh-compaction-tool-result-pruner'
@@ -27,6 +28,7 @@ import type {
   ProviderId,
 } from '../plugins/coding-subscription-provider/src/providers.ts'
 import type { AutomationRunnerInput } from '../plugins/assistant-automations/src/coordinator.ts'
+import type { AgentAutomationDefinition } from '../plugins/assistant-automations/src/types.ts'
 import { DshAutomationRunner } from '../plugins/assistant-automations/src/runner.ts'
 import { createAgentLoopRequestAttestor } from '../packages/llm-route-capabilities/src/index.ts'
 
@@ -108,7 +110,7 @@ function automationInput(
   workspace: string,
   provider: SubscriptionRoute,
   cli: ProviderId,
-  overrides: Partial<AutomationRunnerInput['automation']['definition']> = {},
+  overrides: Partial<AgentAutomationDefinition> = {},
 ): AutomationRunnerInput {
   const id = `cli-agent-loop-${cli}`
   return {
@@ -177,6 +179,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
         systemPrompt: { persona: '' },
         tools: { mode: 'native' },
       })
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(SkillRegistry)
       ctx.skills.register({
         name: TEST_SKILL_NAME,
@@ -452,6 +455,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
         systemPrompt: { persona: '' },
         tools: { mode: 'native' },
       })
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(ApprovalService, { policy: 'ask' })
       await ctx.plugin(AssistantPolicyService, {
         databasePath: join(root, 'policy.sqlite'),
@@ -605,6 +609,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
         systemPrompt: { persona: '' },
         tools: { mode: 'native' },
       })
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(SkillRegistry)
       ctx.skills.register({
         name: TEST_SKILL_NAME,
@@ -744,6 +749,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
         systemPrompt: { persona: '' },
         tools: { mode: 'native' },
       })
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(ApprovalService, { policy: 'ask' })
       await ctx.plugin(AssistantPolicyService, {
         databasePath: join(root, 'policy.sqlite'),
@@ -846,8 +852,10 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
       config.cwd = root
       config.timeoutMs = 10_000
       config.codex.transport = 'cli'
+      const requestAttestor = createAgentLoopRequestAttestor(ctx.agents, ['codex-subscription'])
       adapter = new CodingSubscriptionAdapter(config, {
         liveSessions: ctx.sessions,
+        requestAttestor,
         runText,
         verifyAuth,
         getAttachments,
@@ -875,15 +883,9 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
         isError: false,
         omission: expect.objectContaining({
           type: 'text',
-          text: expect.stringContaining('[DSH image attachment omitted by text-only backend;'),
+          text: '[image omitted because this model accepts text only; attachment sha256:aaaaaaaa]',
         }),
       }))
-      expect(replayedImageResult?.omission.text).toContain(`attachmentId="${attachment.attachmentId}"`)
-      expect(replayedImageResult?.omission.text).toContain('mediaType="image/png"')
-      expect(replayedImageResult?.omission.text).toContain(`bytes=${attachmentData.byteLength}`)
-      expect(replayedImageResult?.omission.text).toContain('width=1; height=1')
-      expect(replayedImageResult?.omission.text).toContain('…')
-      expect(replayedImageResult?.omission.text?.length).toBeLessThanOrEqual(640)
       expect(approvalCallIds).toEqual([replayedImageResult?.callId])
 
       const finalPrompt = serializedRequests.at(-1)!
@@ -898,7 +900,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
     }
   })
 
-  test('uses the real rc.8 compaction pipeline to prune, summarize, checkpoint, and resume a CLI tool loop', async () => {
+  test('uses the real 0.1.2 compaction pipeline to prune, summarize, checkpoint, and resume a CLI tool loop', async () => {
     const root = await mkdtemp(join(tmpdir(), 'coding-subscription-cli-compaction-'))
     roots.push(root)
     const ctx = new Context()
@@ -909,6 +911,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
         systemPrompt: { persona: '' },
         tools: { mode: 'native' },
       })
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(TokenMeter)
       await ctx.plugin(ToolResultPruner, {
         thresholdChars: 8_192,
@@ -957,7 +960,7 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
               required: ['payload'],
               additionalProperties: false,
             },
-            render: (_arguments, value) => [{ type: 'text', text: value.payload }],
+            render: (_arguments, value) => [{ type: 'text', text: (value as { payload: string }).payload }],
           },
           async execute() {
             if (name === 'large_context_tool') {
@@ -1073,8 +1076,8 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
         result,
         normalRequestCount: normalRequests.length,
         summaryRequestCount: summaryRequests.length,
-        eventTypes: observedSession?.events.map(event => event.type),
-        turnEnds: observedSession?.events.filter(event => event.type === 'turn/end'),
+        eventTypes: observedSession?.snapshotEvents().map(event => event.type),
+        turnEnds: observedSession?.snapshotEvents().filter(event => event.type === 'turn/end'),
       }).toMatchObject({
         result: { outcome: 'succeeded', output: 'compaction-resume-complete' },
         normalRequestCount: 3,
@@ -1096,9 +1099,9 @@ describe('coding subscription CLI bridges through the real Agent Loop', () => {
       expect(summaryRequests[0]?.conversation.some(message =>
         JSON.stringify(message.content).includes('tool result middle pruned'))).toBe(true)
 
-      expect(observedSession?.events.filter(event => event.type === 'compaction/prune')).toHaveLength(1)
-      expect(observedSession?.events.filter(event => event.type === 'compaction/start')).toHaveLength(1)
-      expect(observedSession?.events.filter(event => event.type === 'compaction/end')).toHaveLength(1)
+      expect(observedSession?.snapshotEvents().filter(event => event.type === 'compaction/prune')).toHaveLength(1)
+      expect(observedSession?.snapshotEvents().filter(event => event.type === 'compaction/start')).toHaveLength(1)
+      expect(observedSession?.snapshotEvents().filter(event => event.type === 'compaction/end')).toHaveLength(1)
       expect(JSON.stringify(observedSession?.deriveMessages())).toContain('<compacted-summary>')
     } finally {
       adapter?.shutdown()

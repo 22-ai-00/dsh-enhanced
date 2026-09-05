@@ -1,7 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import LlmRuntime, {
-  CallId,
   LlmAdapter,
   createToolResultMessage,
   createUserMessage,
@@ -10,6 +9,7 @@ import LlmRuntime, {
   type LlmResolvedModelInfo,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -79,6 +79,7 @@ function createAgent(): Agent {
     version: SESSION_FORMAT_VERSION,
     id,
     createdAt: 1,
+    isSeeded: false,
     cwd: '/work/alpha',
     agentPreset: 'primary',
   })
@@ -103,7 +104,7 @@ interface Fixture {
   ctx: Context
   agent: Agent
   adapter: ReviewerAdapter
-  callId: ReturnType<typeof CallId>
+  callId: ReturnType<typeof ToolCallId>
   fallbackCalls: number
   fallbackEscalations: readonly boolean[]
   request(signal?: AbortSignal): Promise<ApprovalOutcome>
@@ -127,7 +128,7 @@ async function fixture(
     exactArguments?: Record<string, unknown>
     exactToolName?: 'bash' | 'run_code'
     policy?: Pick<Config, 'toolDefaultEffect' | 'rules' | 'budgets'>
-    toolMode?: 'code' | 'native'
+    toolMode?: 'ptc' | 'native'
     userIntent?: string
   } = {},
 ): Promise<Fixture> {
@@ -156,7 +157,7 @@ async function fixture(
   if (options.sandboxMode !== 'missing') {
     appendSandboxMode(agent, options.sandboxMode ?? 'workspace-write')
   }
-  const callId = CallId('exact-review-call')
+  const callId = ToolCallId('exact-review-call')
   const exactToolName = options.exactToolName ?? 'bash'
   if (options.historicalExactCall === true) {
     agent.session.append('turn/start', { turn: 1 })
@@ -186,7 +187,7 @@ async function fixture(
     : options.intentSource === 'plugin'
       ? { kind: 'plugin', plugin: 'untrusted-context' }
       : options.intentSource === 'tool'
-        ? { kind: 'tool', callId: CallId('context-tool-call') }
+        ? { kind: 'tool', callId: ToolCallId('context-tool-call') }
         : options.intentSource === 'unknown'
           ? { kind: 'another-plugin', provenance: 'untrusted-context' }
           : { kind: 'user' }
@@ -211,7 +212,7 @@ async function fixture(
   agent.session.append('tool/call', {
     turn,
     step: 1,
-    callId: CallId('other-call'),
+    callId: ToolCallId('other-call'),
     name: 'bash',
     arguments: JSON.stringify({ command: 'echo do-not-copy', token: 'sk-other-secret' }),
   })
@@ -317,7 +318,7 @@ describe('isolated automatic approval reviewer', () => {
     expect(wire).toContain('git status --short')
     expect(wire).toContain('Inspect the repository status')
     expect(wire).not.toContain('sk-other-secret')
-    expect(JSON.stringify(current.agent.session.events)).not.toContain('Narrow read-only repository inspection.')
+    expect(JSON.stringify(current.agent.session.snapshotEvents())).not.toContain('Narrow read-only repository inspection.')
   })
 
   test('requires an explicit ask plus workspace-write permission state for automatic review', async () => {
@@ -513,7 +514,7 @@ describe('isolated automatic approval reviewer', () => {
       exactArguments: arguments_,
       exactToolName: 'run_code',
       policy: { toolDefaultEffect: 'allow', rules: [] },
-      toolMode: 'code',
+      toolMode: 'ptc',
       userIntent: 'Run the provided local code once.',
     })
 

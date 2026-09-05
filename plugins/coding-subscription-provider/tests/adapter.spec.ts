@@ -3,15 +3,15 @@ import LlmRuntime, {
   CONTEXT_WINDOW_EXCEEDED_CODE,
   EMPTY_RESPONSE_CODE,
   QUOTA_EXCEEDED_CODE,
-  CallId,
+  ToolCallId,
   createMessage,
-  deepFreeze,
   errorChain,
   markAgentLoopRequest,
   ReasoningEffortId,
   type GenerateOptions,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import { deepFreeze } from './deep-freeze.ts'
 import { realpathSync } from 'node:fs'
 import { mkdtemp, mkdir, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -1028,11 +1028,11 @@ describe('coding subscription LLM adapter', () => {
     const runCodexDirect = vi.fn((_received: GenerateOptions) => (async function* () {
       yield { type: 'block-start', index: 0, blockType: 'tool-call' } as const
       yield {
-        type: 'tool-call-delta', index: 0, id: CallId('call-direct'), name: 'allowed_tool', argumentsDelta: '{}',
+        type: 'tool-call-delta', index: 0, id: ToolCallId('call-direct'), name: 'allowed_tool', argumentsDelta: '{}',
       } as const
       yield {
         type: 'block-end', index: 0,
-        block: { type: 'tool-call', id: CallId('call-direct'), name: 'allowed_tool', arguments: '{}' },
+        block: { type: 'tool-call', id: ToolCallId('call-direct'), name: 'allowed_tool', arguments: '{}' },
       } as const
       yield { type: 'finish', reason: { kind: 'tool-calls' } } as const
     })())

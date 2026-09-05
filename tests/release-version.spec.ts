@@ -56,6 +56,7 @@ async function createRepository(currentVersion = '0.1.0', withLibrary = false) {
   }
   await writeJson(join(root, 'release-manifest.json'), {
     schemaVersion: 1,
+    nextVerifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
     current,
     pending: null,
     history: [current],
@@ -94,8 +95,11 @@ describe('release version workflow', () => {
       .toBe("export const version = '0.1.1'\n")
     const ledger = await readJson(join(root, 'release-manifest.json'))
     expect(ledger.current.version).toBe('0.1.0')
+    expect(ledger.current.verifiedHostRange).toBe('>=0.1.0-rc.8')
+    expect(ledger.history[0].verifiedHostRange).toBe('>=0.1.0-rc.8')
+    expect(ledger.nextVerifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
     expect(ledger.pending.version).toBe('0.1.1')
-    expect(ledger.pending.verifiedHostRange).toBe('>=0.1.0-rc.8')
+    expect(ledger.pending.verifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
     expect(ledger.pending.packages).toEqual({ '@fixture/example': '0.1.1' })
   })
 
@@ -111,7 +115,7 @@ describe('release version workflow', () => {
     expect(ledger.pending).toBeNull()
     expect(ledger.current.version).toBe('0.1.1')
     expect(ledger.current.releasedAt).toEqual(expect.any(String))
-    expect(ledger.current.verifiedHostRange).toBe('>=0.1.0-rc.8')
+    expect(ledger.current.verifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
     expect(ledger.current.packages).toEqual({ '@fixture/example': '0.1.1' })
     expect(ledger.history.map((release: { version: string }) => release.version)).toEqual([
       '0.1.0',
@@ -138,7 +142,7 @@ describe('release version workflow', () => {
     await writeFile(join(installDirectory, 'install-npm.sh'), [
       "DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.0'",
       `DSH_ENHANCED_PINNED_COMMON_SHA256='${'0'.repeat(64)}'`,
-      "DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'",
+      "DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.7'",
       '',
     ].join('\n'))
 
@@ -148,7 +152,7 @@ describe('release version workflow', () => {
     const installer = await readFile(join(installDirectory, 'install-npm.sh'), 'utf8')
     expect(installer).toContain("DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.1'")
     expect(installer).toMatch(/^DSH_ENHANCED_PINNED_COMMON_SHA256='[0-9a-f]{64}'$/mu)
-    expect(installer).toContain("DSH_ENHANCED_VERIFIED_HOST_RANGE='>=0.1.0-rc.8'")
+    expect(installer).toContain("DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.2-rc.1 <0.2.0'")
   })
 
   test('supersede advances a failed pending release without recording it as successful', async () => {
@@ -168,7 +172,7 @@ describe('release version workflow', () => {
     expect(ledger.current.version).toBe('0.1.0')
     expect(ledger.history.map((release: { version: string }) => release.version)).toEqual(['0.1.0'])
     expect(ledger.pending.version).toBe('0.1.2')
-    expect(ledger.pending.verifiedHostRange).toBe('>=0.1.0-rc.8')
+    expect(ledger.pending.verifiedHostRange).toBe('>=0.1.2-rc.1 <0.2.0')
     expect(ledger.pending.packages).toEqual({
       '@fixture/example': '0.1.2',
       '@fixture/shared': '0.1.2',
@@ -695,6 +699,7 @@ describe('release version workflow', () => {
     const ledgerPath = join(root, 'release-manifest.json')
     await writeJson(ledgerPath, {
       schemaVersion: 1,
+      nextVerifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
       current: null,
       pending: {
         version: '0.1.0',
@@ -748,7 +753,24 @@ describe('release version workflow', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('Current release: 0.1.0')
     expect(result.stdout).toContain('Pending release: none')
+    expect(result.stdout).toContain('Next verified host range: >=0.1.2-rc.1 <0.2.0')
     expect(result.stdout).toContain('Next default: 0.1.1')
+  })
+
+  test('prepare rejects a missing next verified host range without writing versions', async () => {
+    const root = await createRepository('0.1.0')
+    const ledgerPath = join(root, 'release-manifest.json')
+    const ledger = await readJson(ledgerPath)
+    delete ledger.nextVerifiedHostRange
+    await writeJson(ledgerPath, ledger)
+
+    const result = runRelease(root, 'prepare')
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('nextVerifiedHostRange must be a non-empty string')
+    expect((await readJson(join(root, 'package.json'))).version).toBe('0.1.0')
+    expect((await readJson(join(root, 'plugins', 'example', 'package.json'))).version).toBe('0.1.0')
+    expect((await readJson(ledgerPath)).pending).toBeNull()
   })
 
   test('prepare rejects an explicit version that does not advance the record', async () => {
@@ -793,6 +815,7 @@ describe('release version workflow', () => {
     const ledgerPath = join(root, 'release-manifest.json')
     await writeJson(ledgerPath, {
       schemaVersion: 1,
+      nextVerifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
       current: null,
       pending: {
         version: '0.1.0',
@@ -816,6 +839,7 @@ describe('release version workflow', () => {
     const ledgerPath = join(root, 'release-manifest.json')
     await writeJson(ledgerPath, {
       schemaVersion: 1,
+      nextVerifiedHostRange: '>=0.1.2-rc.1 <0.2.0',
       current: null,
       pending: {
         version: '0.1.0',
@@ -830,6 +854,7 @@ describe('release version workflow', () => {
     expect(result.status, result.stderr).toBe(0)
     expect(result.stdout).toContain('Current release: none')
     expect(result.stdout).toContain('Pending release: 0.1.0')
+    expect(result.stdout).toContain('Next verified host range: >=0.1.2-rc.1 <0.2.0')
     expect(result.stdout).toContain('Next default: 0.1.1')
   })
 

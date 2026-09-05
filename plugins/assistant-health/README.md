@@ -63,4 +63,4 @@ activeActivations / failed / rollbackPending`；required control plane 尚有 ac
 
 ## 兼容性
 
-以 DSH rc.8 `141eb6fef83422698aef7a981029e843e8161534` 验证；参考官方 session telemetry/OTel 的观测边界，不把 best-effort telemetry 当审计。
+以 DSH `0.1.2-rc.1` 验证；参考官方 session telemetry/OTel 的观测边界，不把 best-effort telemetry 当审计。

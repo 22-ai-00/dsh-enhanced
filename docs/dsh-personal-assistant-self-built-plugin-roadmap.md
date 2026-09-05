@@ -2,7 +2,7 @@
 
 > 决策日期：**2026-08-20（Asia/Shanghai）**
 >
-> 目标运行时：DeepSeek Harness `0.1.0-rc.8`，官方源码基线 [`141eb6f`](https://github.com/deepseek-ai/deepseek-harness/tree/141eb6fef83422698aef7a981029e843e8161534)。
+> 当前目标运行时：DeepSeek Harness `0.1.2-rc.1`。本文最初按 `0.1.0-rc.8` / [`141eb6f`](https://github.com/deepseek-ai/deepseek-harness/tree/141eb6fef83422698aef7a981029e843e8161534) 制定；保留的 rc.8 链接和估算是历史设计证据，不代表当前兼容基线。
 >
 > 本文是开发清单，不是社区插件安装清单。前期生态审查见[《DSH 个人助理插件生态研究与建设清单》](./dsh-personal-assistant-plugin-landscape.md)。
 
@@ -87,7 +87,7 @@ CLI/Web-only 部署可不开发、不安装 `assistant-delivery` 与 `lark-chann
 
 ```mermaid
 flowchart TD
-  DSH[DSH rc.8 官方基座<br/>Agent / Session / Tools / Skills / Jobs<br/>Sandbox / Approval / Credentials]
+  DSH[DSH 0.1.2-rc.1 官方基座<br/>Agent / Session / Tools / Skills / Jobs<br/>Sandbox / Approval / Credentials]
   MEM[personal-memory]
   WIKI[personal-wiki]
   POLICY[assistant-policy]
@@ -135,7 +135,7 @@ flowchart TD
 3. `personal-wiki` 保存可读、可引用、可 Git 版本化的知识制品。
 4. `assistant-automations` 保存任务定义、occurrence 和 execution ledger；`assistant-delivery` 单独保存 identity/binding 与 inbox/outbox。执行成功和投递成功永远是两个状态。
 
-## DSH rc.8 已有，明确不重做
+## DSH `0.1.2-rc.1` 已有，明确不重做
 
 官方 base bundle 已组合 agent loop、JSONL 会话持久化、可选 SQLite session query、credentials、sandbox/permission/approval、shell/filesystem/Web Search、skills、goal/plan、compaction、jobs、subagent、workflow 和 Ralph。以[官方 base patch](https://github.com/deepseek-ai/deepseek-harness/blob/141eb6fef83422698aef7a981029e843e8161534/packages/bundle/base/cordis.patch.yml)为准。
 
@@ -206,7 +206,7 @@ packages/
 - v0.1 不挂接 compaction 自动抽取；未来增加时也只能产生 pending proposal，默认人工接受/拒绝，不能自动写入。
 - replace/remove 使用 `id + expectedVersion` CAS；审批等待结束后重新读取/校验版本和预算，再在一个事务内落盘。调用者自报的 `source` 不能决定自动批准策略。
 - 查询默认纯读，不能暗中更新 recall counter；审批记录、provider audit 和来源引用可互相核对；导出使用稳定版本格式。
-- 不追加 DSH rc.8 未注册的必需 `memory/*` Session Event；必要的插件事件只作 `ignorable` 观察记录，Memory 权威仍是自己的事务账本。
+- 不追加 DSH `0.1.2-rc.1` 未注册的必需 `memory/*` Session Event；必要的插件事件只作 `ignorable` 观察记录，Memory 权威仍是自己的事务账本。
 
 ### 第一版非目标
 
@@ -434,7 +434,7 @@ vault/
 - missed-run 策略 `skip | latest | bounded-replay(n)`；overlap `skip | queue-one | cancel-previous`；默认 `latest + skip`。
 - 一个 `$DSH_HOME` 只有一个 duty owner；lease 到期接管，所有 claim/commit 带 fencing token，stale owner 不能提交。
 - task 状态至少 `scheduled→claimed→running→succeeded|failed|timed_out|cancelled|lost|unknown`，attempt 独立；运行时可镜像到官方 `ctx.jobs` 供 list/kill，但不能把进程内 Jobs 当持久存储。
-- 通过 rc.8 Agent Registry/create/setup seam 建 fresh persisted root agent；保存 workspace/profile/model/permission snapshot、timeout、最大并发、模型 token/费用上限和最大工具调用数。只有官方 seam 不能隔离所需 runtime 时才使用 argv 数组启动子进程，绝不拼 shell 字符串或继承完整环境。
+- 通过 `0.1.2-rc.1` Agent Registry/create/setup seam 建 fresh persisted root agent；保存 workspace/profile/model/permission snapshot、timeout、最大并发、模型 token/费用上限和最大工具调用数。只有官方 seam 不能隔离所需 runtime 时才使用 argv 数组启动子进程，绝不拼 shell 字符串或继承完整环境。
 - 后台默认 fail closed：动作经过 `assistantPolicy`；无显式 grant 的 ask 变为 deny 或 durable approval pending。单个 automation 只能使用明确的 capability、路径、origin、recipient 和 SecretRef。
 - execution 成功后总是先持久化本地 run artifact/history。若可选注入 `ctx.assistantDelivery`，再用稳定 key `automation:<occurrenceId>:<target>` 调 `enqueue()`；重复调用返回同一 outbox row。Delivery 不存在时，CLI/Web 可直接读取本地结果；delivery 失败不把 execution 改成失败，receipt/status ref 只作为可选字段回写 run ledger。
 - 默认只重试“确定尚未产生副作用”的基础设施失败；完整 Agent turn 只有显式 `retrySafety=idempotent` 才自动重跑。无法判断的 crash 记 `unknown`，不盲重放。
@@ -640,9 +640,9 @@ P1 不是首版的隐性 P0。只有 P0 真实运行日志证明需求和边界�
 
 下列“周”是两名熟悉 TypeScript/Cordis/DSH 的工程师并行时的日历窗口；单人工时以本节末尾的总人日为准，不能把并行窗口当成单人工期。
 
-### Phase 0：锁定 rc.8 与安全契约（2–4 人日）
+### Phase 0（历史）：锁定 rc.8 与安全契约（2–4 人日）
 
-1. 将仓库当前 rc.6 catalog、workspace dependency 和兼容文档一起升级到 rc.8；本路线固定 commit `141eb6f`，不允许源码按 rc.8、包声明仍写 rc.6。
+1. 当时将仓库的 rc.6 catalog、workspace dependency 和兼容文档一起升级到 rc.8，并固定 commit `141eb6f`；当前基线已再次升级到 `0.1.2-rc.1`。
 2. 对官方 `agents/create/setup`、scoped tools/guard、session persistence、systemPrompt、approval、credentials、permission presets、jobs 和 schedule 做最小 contract probes 与 scratch-profile E2E。
 3. 先写威胁模型、运行 origin、数据分级、后台 fail-closed 基线和第三方参考/许可证账本；不要先实现高权限工具。
 4. 第二个插件真正复用时再抽 `packages/assistant-testkit`；Phase 0 可先把 fake clock、mock LLM、fake channel 与 crash fixtures 放在首个消费者测试目录。
@@ -704,7 +704,7 @@ CLI/Web-only 部署跳过整个 Phase 2；它不影响四个通用核心的完�
 
 ### DSH 兼容
 
-- 目标 commit 为 [`141eb6f`](https://github.com/deepseek-ai/deepseek-harness/tree/141eb6fef83422698aef7a981029e843e8161534) / `0.1.0-rc.8`；当前仓库的[兼容性文档](./compatibility.md)、workspace catalog 与 DSH peer 下界已统一到 rc.8，并由兼容性测试锁定。开发/测试依赖精确锁 rc.8；peer range 为 `>=0.1.0-rc.8 <0.2.0`，绝不写 `*`。
+- 当前仓库的[兼容性文档](./compatibility.md)、workspace catalog 与 DSH peer 下界统一到 `0.1.2-rc.1`，并由兼容性测试锁定。开发/测试依赖精确锁 `0.1.2-rc.1`；peer range 为 `>=0.1.2-rc.1 <0.2.0`，绝不写 `*`。原始路线固定的 [`141eb6f`](https://github.com/deepseek-ai/deepseek-harness/tree/141eb6fef83422698aef7a981029e843e8161534) / `0.1.0-rc.8` 仅保留作历史设计证据。
 - DSH Host 提供的 service 包放 `peerDependencies` + `devDependencies`；插件运行必须携带的 SQLite helper、cron parser、Lark SDK、Playwright 等放 `dependencies`。
 - consumer 对另一个自研 provider 同样声明 peer+dev dependency，并只通过包根公开 interface + Cordis injection 消费。若未来发布 `packages/*` shared 包，须先扩展当前只覆盖 `plugins/*` 的 publish/pack validation 流程。
 - 每次 rc 升级先在 canary profile 回放 Memory snapshot/write、Wiki write/rebuild、automation crash windows、Lark approval/delivery，再更新 peer range 和兼容文档。
@@ -743,6 +743,6 @@ CLI/Web-only 部署跳过整个 Phase 2；它不影响四个通用核心的完�
 主动执行：assistant-automations
 ```
 
-实现顺序是 rc.8/Policy → Memory/Wiki → Automations；确定需要外部消息时，再并行推进 Delivery/Lark。四个通用核心稳定后，才发布 core-only、零业务逻辑的 `personal-assistant` meta-bundle。CLI/Web-only 部署安装这个 meta 即可；飞书部署再显式安装 Delivery/Lark。若未来确实需要飞书“一包安装”，另建命名明确的 `personal-assistant-lark` 纯组合包，而不让同一个静态 manifest 假装拥有条件依赖。
+实现顺序是 Host 基线/Policy → Memory/Wiki → Automations；确定需要外部消息时，再并行推进 Delivery/Lark。四个通用核心稳定后，才发布 core-only、零业务逻辑的 `personal-assistant` meta-bundle。CLI/Web-only 部署安装这个 meta 即可；飞书部署再显式安装 Delivery/Lark。若未来确实需要飞书“一包安装”，另建命名明确的 `personal-assistant-lark` 纯组合包，而不让同一个静态 manifest 假装拥有条件依赖。
 
 `assistant-heartbeat`、`event-triggers`、`memory-wiki-bridge`、`assistant-health` 和 Browser 都由真实使用日志触发，绝不写成首版隐性依赖。所有社区仓库继续保持“固定 commit 的设计/源码参考”身份：不执行 `dsh plugin add`，不进入任何 dependency；若确需移植，先做 provenance/许可证审查并保留必要 attribution。这个方案能达到的是**可靠的个人助理工程底座**；最终是否接近 Claude Code/OpenClaw/Hermes 的任务智能，仍主要取决于模型、上下文/Skill 设计和真实评测，而不是继续增加插件数量。

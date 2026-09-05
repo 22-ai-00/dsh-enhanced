@@ -1111,9 +1111,10 @@ export async function loadCatalog(path: string): Promise<CapabilityCatalog> {
 }
 
 /**
- * Package-local example used by documentation and tests. It is deliberately
- * not a runtime fallback or trust source because it is not signature-verified.
- * Runtime discovery requires an owner-provided, integrity-pinned regular file.
+ * Immutable legacy test fixture for the npm 0.1.3 packages verified against
+ * DSH 0.1.0-rc.8. It is not the currently recommended catalog, a runtime
+ * fallback, or a trust source. Runtime discovery requires an owner-provided,
+ * integrity-pinned regular file.
  */
 export const exampleIntegrityPinnedCatalog: CapabilityCatalog = parseCatalog({
   schemaVersion: 1,

@@ -24,9 +24,9 @@ revision 投递一条内容无关的状态更新；两种路径的重试、fence
 
 ## 兼容性
 
-- DeepSeek Harness：`>=0.1.0-rc.8 <0.2.0` 基线语义（通过 `assistant-delivery`）。
+- DeepSeek Harness：`>=0.1.2-rc.1 <0.2.0` 基线语义（通过 `assistant-delivery`）。
 - `@dsh-enhanced/assistant-delivery`：`>0.1.7 <0.2.0`；本包的 supervised setup 使用当前发布切片的私有 capability。
-- `@deepseek-ai/dsh-host-apiproxy`：可选。它存在时由 Delivery 消费其 rc.8 `events.mux()`，把 active owner binding 的 `ask_user_question` 转给飞书；它仍是唯一的 `userQuestions` provider。没有 `apiProxy` 的非 Web profile 可正常启动，只是不具备这条跨渠道问题桥接。
+- `@deepseek-ai/dsh-user-questions`：由 DSH `0.1.2-rc.1` 定义 Agent-scoped `user-questions/request` answerer waterfall。Web Host 通过 Remote Events 提供 scoped answerer；飞书通道要承接 `ask_user_question` 时也必须直接注册同一 scope 的 answerer。
 - `@dsh-enhanced/credentials-keychain`：handle 模式为 `>=0.1.0 <0.2.0`；env fallback 不要求其激活。
 - 普通个人助理场景同时安装 `@dsh-enhanced/preference-learning`。向导会只为完成 owner 对话产生有界偏好证据及读取 active snapshot 的两项能力；它们不依赖广义 Agent 工具开关，也不要求 Health/Heartbeat/Recovery。
 - 分级自治成长激活器要求有效 profile 同时启用 `@dsh-enhanced/personal-assistant`、`@dsh-enhanced/assistant-automations`、`@dsh-enhanced/assistant-heartbeat`、`@dsh-enhanced/assistant-evaluation`、`@dsh-enhanced/preference-learning`、`@dsh-enhanced/assistant-evolution`、`@dsh-enhanced/assistant-growth-experiments`、`@dsh-enhanced/assistant-health` 与 `@dsh-enhanced/assistant-recovery`。Policy、Memory 与 Wiki 由 personal-assistant 这一 profile row 提供。Recovery 仍是无模型 Host runbook；独立的 `supervised-growth-analyst` 每天最多一次，只能 review/propose adoption，preview 强制 paused，active 前逐项证明定义和私有 scratch，且只有审批路由、没有普通结果投递。workflow lane 使用 Delivery 私有、可撤销的 content-free trace sink，以及独立预算、owner-bound approval、prefix-bounded dynamic Automation identity 和 exact binding delivery；Lark 文本、卡片或回调本身不能制造 trace 或 learned workflow。默认不授予 learned workflow 任意工具。旧 `supervised-growth` Heartbeat 只在升级时被安全暂停。
@@ -92,7 +92,7 @@ config:
 
 ## `ask_user_question` 交互
 
-有 `apiProxy` 时，Delivery 把仍属于 exact active owner binding 的 pending question 送到原飞书会话。Web 与飞书都是同一 ApiProxy 请求的回答端，先被接受的回答获胜；若已由 Web 或其他飞书事件结算，旧卡只会显示终态，不会再启动一个 turn。
+`ask_user_question` 由 Host 的 `ctx.userQuestions.ask()` 在 exact live root Agent scope 派发。飞书兼容层必须直接为这个 scope 注册 answerer，只接受仍属于 exact active owner binding、且 adapter 仍具备问题交互能力的请求，再把问题送到原飞书会话；按钮或自由输入的答案直接作为 waterfall 结果返回。Web Remote Events answerer 与飞书 answerer 是同一 scoped waterfall 的组合参与者，按 composition 顺序串联；迟到、撤销和重复交互仍必须由各 answerer 自己拒绝，且不得制造新的 Agent turn。
 
 飞书使用不可转发的 CardKit 2.0 卡片呈现选项。推荐项只显示“推荐”标识，不会自动选择；多选必须点击“提交已选答案”；无选项或需要输入其他答案时会明确要求回复对应问题卡片。未引用卡片的新文字始终作为普通消息处理，即使原会话只有这一条 pending question 也不会被当成答案吞掉。按钮和卡片回调使用签名 capability，且回调或自由文本都必须匹配 exact owner、account/tenant/chat、原会话路由、当前 binding version/generation 与请求 fence。群聊中的普通文字命令仍遵循 @ 机器人门槛，不想输入答案时可直接点击卡片“取消”。问题会发送到原 binding 会话而非强制转为私聊，因此在群聊中问题正文、详情和选项对群成员可见；不要把秘密、凭据或只应由私聊接收的内容放进问题。
 

@@ -144,7 +144,7 @@ function agent(sessionId = `memory-promotion-integration-${Math.random()}`): Age
   const id = SessionId(sessionId)
   const session = Session.create(id, [], {
     version: SESSION_FORMAT_VERSION, id, createdAt: 1,
-    cwd: scope.workspace, agentPreset: scope.preset,
+    cwd: scope.workspace, agentPreset: scope.preset, isSeeded: false,
   })
   return {
     id, options: {}, session,

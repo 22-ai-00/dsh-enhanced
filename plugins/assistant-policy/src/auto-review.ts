@@ -238,7 +238,7 @@ function exactToolCall(events: readonly SessionEvent[], callId: string, toolName
 
 function isExactNativeSandboxApproval(request: Readonly<ApprovalRequest>): boolean {
   if (request.callId === undefined || !NATIVE_SANDBOX_APPROVAL_TOOLS.has(request.toolName)) return false
-  const exact = exactToolCall(request.agent.session.events, String(request.callId), request.toolName)
+  const exact = exactToolCall(request.agent.session.snapshotEvents(), String(request.callId), request.toolName)
   if (exact?.arguments === null || typeof exact?.arguments !== 'object' || Array.isArray(exact.arguments)) return false
   const args = exact.arguments as Readonly<Record<string, unknown>>
   const mode = args.sandbox_permissions
@@ -319,14 +319,14 @@ function reviewFactFingerprint(
 
 function reviewPayload(request: ApprovalRequest): string | undefined {
   if (request.callId === undefined) return undefined
-  const exact = exactToolCall(request.agent.session.events, String(request.callId), request.toolName)
+  const exact = exactToolCall(request.agent.session.snapshotEvents(), String(request.callId), request.toolName)
   if (exact === undefined) return undefined
   if (containsPromptInjection(exact.arguments) || containsReviewSecret(exact.arguments)) return undefined
   const serialized = JSON.stringify(redactReviewValue(exact.arguments))
   if (serialized === undefined) return undefined
   const bounded = boundUtf8(serialized, MAX_ARGUMENT_BYTES)
   if (bounded.truncated) return undefined
-  const intent = recentUserIntent(request.agent.session.events)
+  const intent = recentUserIntent(request.agent.session.snapshotEvents())
   if (intent === undefined) return undefined
   return JSON.stringify({
     call: {
@@ -345,7 +345,7 @@ interface AutoReviewSnapshot {
 }
 
 function autoReviewSnapshot(request: ApprovalRequest): AutoReviewSnapshot | undefined {
-  const events = request.agent.session.events
+  const events = request.agent.session.snapshotEvents()
   const payload = reviewPayload(request)
   if (payload === undefined) return undefined
   if (request.callId === undefined) return undefined
@@ -435,7 +435,7 @@ function fallbackAfterReview(
   next: () => Promise<ApprovalOutcome>,
 ): Promise<ApprovalOutcome> | ApprovalOutcome {
   if (request.signal?.aborted === true) return 'cancelled'
-  return hasCoherentAutoReview(request.agent.session.events)
+  return hasCoherentAutoReview(request.agent.session.snapshotEvents())
     ? escalateToHuman(request, next)
     : 'unavailable'
 }
@@ -445,7 +445,7 @@ export function registerAutoReviewAnswerer(ctx: Context, input: AutoReviewConfig
   const config = resolveConfig(input)
   ctx.inject(['llm', 'approval'], (runtimeCtx) => {
     runtimeCtx.on('approval/request', async (request, next): Promise<ApprovalOutcome> => {
-      if (approvalReviewerOf(request.agent.session.events) !== 'auto-review') return next()
+      if (approvalReviewerOf(request.agent.session.snapshotEvents()) !== 'auto-review') return next()
       if (request.reason === HUMAN_APPROVAL_REASON) return escalateToHuman(request, next)
       if (isExactNativeSandboxApproval(request)) return escalateToHuman(request, next)
       if (request.reason !== AUTO_REVIEW_APPROVAL_REASON) return next()
@@ -460,7 +460,7 @@ export function registerAutoReviewAnswerer(ctx: Context, input: AutoReviewConfig
       }
       if (outcome === 'allow') {
         if (!isCurrentAutoReviewSnapshot(request, snapshot)
-          || !hasCoherentAutoReview(request.agent.session.events)) {
+          || !hasCoherentAutoReview(request.agent.session.snapshotEvents())) {
           return fallbackAfterReview(request, next)
         }
         return 'allowed-once'

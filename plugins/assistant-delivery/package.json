@@ -55,19 +55,18 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@deepseek-ai/dsh-agent": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-agent-presets": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-attachment": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-commands": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-host-apiproxy": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-llm": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-permission-presets": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-sandbox-policy": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-session": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-tools": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-agent": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-agent-presets": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-attachment": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-commands": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-permission-presets": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-sandbox-policy": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-session": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-tools": ">=0.1.2-rc.1 <0.2.0",
     "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
-    "@deepseek-ai/dsh-user-approval": ">=0.1.0-rc.8 <0.2.0",
-    "@deepseek-ai/dsh-user-questions": ">=0.1.0-rc.8 <0.2.0",
+    "@deepseek-ai/dsh-user-approval": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-user-questions": ">=0.1.2-rc.1 <0.2.0",
     "@dsh-enhanced/assistant-evaluation": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-evolution": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
@@ -86,9 +85,6 @@
       "optional": true
     },
     "@deepseek-ai/dsh-commands": {
-      "optional": true
-    },
-    "@deepseek-ai/dsh-host-apiproxy": {
       "optional": true
     },
     "@deepseek-ai/dsh-llm": {
@@ -134,13 +130,14 @@
     "@deepseek-ai/dsh-agent-presets": "catalog:",
     "@deepseek-ai/dsh-attachment": "catalog:",
     "@deepseek-ai/dsh-commands": "catalog:",
-    "@deepseek-ai/dsh-host-apiproxy": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-permission-presets": "catalog:",
     "@deepseek-ai/dsh-sandbox-policy": "catalog:",
     "@deepseek-ai/dsh-system-prompt": "catalog:",
+    "@deepseek-ai/dsh-tool-todo": "catalog:",
     "@deepseek-ai/dsh-tools": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
+    "@deepseek-ai/dsh-session-projection": "catalog:",
     "@deepseek-ai/dsh-user-approval": "catalog:",
     "@deepseek-ai/dsh-user-questions": "catalog:",
     "@dsh-enhanced/assistant-automations": "workspace:*",

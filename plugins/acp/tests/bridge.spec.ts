@@ -19,6 +19,7 @@ import {
   type LlmResolvedModelInfo,
   type StreamChunk,
 } from '@deepseek-ai/dsh-llm'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { MODEL_CONFIG_ID, REASONING_CONFIG_ID, modelValue, reasoningValue } from '../src/control.ts'
 import * as AcpPlugin from '../src/index.ts'
@@ -107,6 +108,7 @@ interface Harness {
 async function makeHarness(): Promise<Harness> {
   const ctx = new Context()
   await mountAgentLoopTestDependencies(ctx, { systemPrompt: { persona: '' } })
+  await ctx.plugin(SessionProjectionRegistry)
   await ctx.plugin(AgentLoop, { agents: [] })
   const adapter = new MockAdapter()
   ctx.llm.registerAdapter(['mock'], adapter)

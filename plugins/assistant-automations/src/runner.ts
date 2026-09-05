@@ -432,7 +432,7 @@ export class DshAutomationRunner implements AutomationRunner {
       followupSubmitted = true
       phase = 'model-execution'
       await agent.whenIdle()
-      const summary = summarize(agent.session.events, input.signal)
+      const summary = summarize(agent.session.snapshotEvents(), input.signal)
       sideEffectState = 'possible'
       phase = 'session-flush'
       await sessions.flush(agent.session)

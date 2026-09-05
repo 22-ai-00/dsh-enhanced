@@ -17,6 +17,7 @@ function agent(options: { cwd?: string; preset?: string } = {}): Agent {
     version: SESSION_FORMAT_VERSION,
     id,
     createdAt: 1,
+    isSeeded: false,
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(options.preset === undefined ? {} : { agentPreset: options.preset }),
   })

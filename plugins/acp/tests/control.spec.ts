@@ -146,7 +146,7 @@ describe('ACP native session controls', () => {
     const agent = {
       ctx: {},
       session: {
-        events,
+        snapshotEvents: () => events,
         append: (type: string, data: unknown) => events.push({ type, data }),
       },
     } as unknown as Agent
@@ -191,7 +191,7 @@ describe('ACP native session controls', () => {
       ctx: {},
       session: {
         id: 'windows-session',
-        events: [],
+        snapshotEvents: () => [],
         append: () => undefined,
       },
     } as unknown as Agent

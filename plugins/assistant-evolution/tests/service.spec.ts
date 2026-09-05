@@ -44,6 +44,7 @@ function stubAgent(options: {
     createdAt: 1,
     cwd: options.cwd ?? '/work/alpha',
     agentPreset: options.preset ?? 'primary',
+    isSeeded: false,
   })
   const inbox = new Inbox(session, { inserted() {}, discarded() {}, claimed() {} })
   const injections: UserMessage[] = []

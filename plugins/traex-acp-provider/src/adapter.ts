@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
 import {
-  CallId,
+  ToolCallId,
   CONTEXT_WINDOW_EXCEEDED_CODE,
   LlmAdapter,
   LlmError,
@@ -658,7 +658,7 @@ export class TraexAcpAdapter extends LlmAdapter {
         }
         if (calls !== undefined) {
           for (const [index, call] of calls.entries()) {
-            const id = CallId(`traex-${randomUUID()}`)
+            const id = ToolCallId(`traex-${randomUUID()}`)
             yield { type: 'block-start', index, blockType: 'tool-call' }
             yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments }
             yield {

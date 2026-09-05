@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentRegistry, { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
@@ -46,7 +46,7 @@ afterEach(async () => {
 })
 
 function registerAgent(ctx: Context, sessionId: string, input: {
-  callId: ReturnType<typeof CallId>
+  callId: ReturnType<typeof ToolCallId>
   toolName: string
   argumentsJson: string
 }): Agent {
@@ -143,7 +143,7 @@ async function fixture(adapterOutcome: DeliveryToolApprovalOutcome) {
   })
   await ctx.assistantDelivery.acceptInbound(envelope)
 
-  const callId = CallId('runtime-approval-call')
+  const callId = ToolCallId('runtime-approval-call')
   const arguments_ = { operation: 'exact-request', value: 7 }
   const argumentsJson = JSON.stringify(arguments_)
   const agent = registerAgent(ctx, 'runtime-approval-session', {
@@ -221,8 +221,8 @@ describe('owner-DM approval through the real tool runtime', () => {
         arguments: current.argumentsJson,
       }),
     ])
-    expect(current.agent.session.events.filter(event => event.type === 'approval/asked')).toHaveLength(1)
-    expect(current.agent.session.events.filter(event => event.type === 'approval/decided')).toEqual([
+    expect(current.agent.session.snapshotEvents().filter(event => event.type === 'approval/asked')).toHaveLength(1)
+    expect(current.agent.session.snapshotEvents().filter(event => event.type === 'approval/decided')).toEqual([
       expect.objectContaining({ data: expect.objectContaining({ outcome: 'allowed-once' }) }),
     ])
   })
@@ -245,7 +245,7 @@ describe('owner-DM approval through the real tool runtime', () => {
     expect(current.executions).toBe(0)
     expect(current.receivedArguments).toEqual([])
     expect(current.requestToolApproval).toHaveBeenCalledOnce()
-    expect(current.agent.session.events.filter(event => event.type === 'approval/decided')).toEqual([
+    expect(current.agent.session.snapshotEvents().filter(event => event.type === 'approval/decided')).toEqual([
       expect.objectContaining({ data: expect.objectContaining({ outcome: 'rejected' }) }),
     ])
   })

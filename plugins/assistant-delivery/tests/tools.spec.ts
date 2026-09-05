@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -17,7 +17,7 @@ afterEach(async () => Promise.all(roots.splice(0).map(root => rm(root, { recursi
 function agent(sessionId: string): Agent {
   const id = SessionId(sessionId)
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1,
-    cwd: '/work/alpha', agentPreset: 'primary' })
+    cwd: '/work/alpha', isSeeded: false, agentPreset: 'primary' })
   session.append('approval/policy', { policy: 'never' })
   session.append('assistant-policy/approval-reviewer', { reviewer: 'none' })
   const append = session.append as unknown as (type: string, data: unknown) => unknown
@@ -58,7 +58,7 @@ async function harness() {
 }
 
 function call(name: string, arguments_: Record<string, unknown>, current?: Agent) {
-  return { callId: CallId(`${name}-${Math.random()}`), name, arguments: arguments_, signal: new AbortController().signal,
+  return { callId: ToolCallId(`${name}-${Math.random()}`), name, arguments: arguments_, signal: new AbortController().signal,
     ...(current === undefined ? {} : { agent: current }) }
 }
 

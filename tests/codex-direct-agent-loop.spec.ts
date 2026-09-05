@@ -1,6 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import {
   AssistantPolicyService,
@@ -145,6 +146,7 @@ describe('Codex direct private Responses Agent Loop', () => {
         systemPrompt: { persona: '' },
         tools: { mode: 'native' },
       })
+      await ctx.plugin(SessionProjectionRegistry)
       await ctx.plugin(ApprovalService, { policy: 'ask' })
       await ctx.plugin(AssistantPolicyService, {
         databasePath: join(root, 'policy.sqlite'),
@@ -196,7 +198,7 @@ describe('Codex direct private Responses Agent Loop', () => {
           || String(request.callId) !== 'call-exact-42') {
           return Promise.resolve('rejected')
         }
-        const call = request.agent.session.events.findLast(event => event.type === 'tool/call'
+        const call = request.agent.session.snapshotEvents().findLast(event => event.type === 'tool/call'
           && String(event.data.callId) === 'call-exact-42')
         approvalRequests.push({
           sessionId: String(request.agent.session.id),

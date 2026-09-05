@@ -1,6 +1,6 @@
 import { PROTOCOL_VERSION } from '@agentclientprotocol/sdk'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import ApprovalService, { type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -128,7 +128,7 @@ describe('official ACP permission contracts', () => {
     const sessionId = await newSession(harness)
     const agent = harness.ctx.agents.get(SessionId(sessionId))!
     agent.session.append('turn/start', { turn: 1 })
-    return { agent, toolName: 'bash', callId: CallId('call-9') }
+    return { agent, toolName: 'bash', callId: ToolCallId('call-9') }
   }
 
   it('maps one-shot choices and rejects unknown selections', async () => {

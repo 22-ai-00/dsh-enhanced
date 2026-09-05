@@ -751,7 +751,7 @@ export type DeliveryToolApprovalOutcome = 'allowed-once' | 'rejected' | 'cancell
 
 /** One live Host question routed to the authenticated Delivery conversation owner. */
 export interface DeliveryUserQuestionRequest {
-  /** Stable ApiProxy server-request id; echoed only by the trusted Host bridge. */
+  /** Opaque id for this exact live waterfall attempt, used to bind channel callbacks. */
   operationId: string
   bindingId: string
   bindingVersion: number
@@ -827,7 +827,7 @@ export interface DeliveryAdapter {
     input: Readonly<DeliveryToolApprovalRequest>,
     signal: AbortSignal,
   ): Promise<DeliveryToolApprovalOutcome>
-  /** Live and deliberately non-durable; ApiProxy remains the sole question provider. */
+  /** Live and deliberately non-durable; Delivery participates as a user-question waterfall answerer. */
   requestUserQuestion?(
     input: Readonly<DeliveryUserQuestionRequest>,
     signal: AbortSignal,

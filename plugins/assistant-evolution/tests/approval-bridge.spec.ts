@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
-import { CallId } from '@deepseek-ai/dsh-llm'
+import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
@@ -114,6 +114,7 @@ function agent(options: { id?: string; cwd?: string; preset?: string } = {}): Ag
     createdAt: 1,
     cwd: options.cwd ?? WORKSPACE,
     agentPreset: options.preset ?? PRESET,
+    isSeeded: false,
   })
   setApprovalReviewer(session, 'none')
   session.append('approval/policy', { policy: 'never' })
@@ -279,7 +280,7 @@ async function seedAttributedRetirementEvidence(
 
 function call(name: string, args: Record<string, unknown>, target: Agent) {
   return {
-    callId: CallId(`call-${name}-${Math.random()}`),
+    callId: ToolCallId(`call-${name}-${Math.random()}`),
     name,
     arguments: args,
     signal: new AbortController().signal,

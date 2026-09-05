@@ -2,12 +2,14 @@ import { Context } from '@deepseek-ai/cordis'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import { LocalAttachmentStore } from '@deepseek-ai/dsh-attachment-local'
+import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import {
   KNOWN_SESSION_EVENT_TYPES,
   SessionPreparation,
   type SessionEvent,
   type SessionHeader,
   type SessionId,
+  type SessionLogOffset,
 } from '@deepseek-ai/dsh-session'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { Buffer } from 'node:buffer'
@@ -15,18 +17,18 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
-import { AssistantDeliveryService } from '../plugins/assistant-delivery/src/service.ts'
+import { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import {
   CodingSubscriptionAdapter,
   Config as CodingSubscriptionConfig,
 } from '../plugins/coding-subscription-provider/src/index.ts'
-import { LarkDeliveryAdapter } from '../plugins/lark-channel/src/adapter.ts'
+import { LarkDeliveryAdapter } from '@dsh-enhanced/lark-channel'
 import type {
   LarkMessage,
   LarkSendInput,
   LarkTransport,
   LarkTransportHandlers,
-} from '../plugins/lark-channel/src/types.ts'
+} from '@dsh-enhanced/lark-channel'
 
 const roots: string[] = []
 const onePixelPngBase64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII='
@@ -58,7 +60,7 @@ function codexTextResponse(): Response {
   ])
 }
 
-async function drive(service: AssistantDeliveryService): Promise<void> {
+async function drive(service: Pick<AssistantDeliveryService, 'tick' | 'whenIdle'>): Promise<void> {
   await service.tick()
   await service.whenIdle()
   await service.tick()
@@ -115,9 +117,18 @@ describe('Lark image to Direct Codex', () => {
         systemPrompt: { persona: '' },
         tools: { mode: 'native' },
       })
-      const saved = new Map<string, { header: SessionHeader; events: readonly SessionEvent[] }>()
+      await ctx.plugin(SessionProjectionRegistry)
+      const saved = new Map<string, {
+        header: SessionHeader
+        events: readonly SessionEvent[]
+        inheritedEventCount: SessionLogOffset
+      }>()
       ctx.on('session/flush', session => {
-        saved.set(String(session.id), structuredClone({ header: session.header, events: session.events }))
+        saved.set(String(session.id), structuredClone({
+          header: session.header,
+          events: session.snapshotEvents(),
+          inheritedEventCount: session.inheritedEventCount,
+        }))
       })
       ctx.provide('sessionPersistence' as never, {
         coordinator: {
@@ -135,6 +146,7 @@ describe('Lark image to Direct Codex', () => {
           const restored = structuredClone(value)
           return SessionPreparation.create(ctx.sessions.prepare(id, {
             seedSource: 'persistence', seed: [...restored.events], meta: restored.header,
+            inheritedEventCount: restored.inheritedEventCount,
           }))
         },
       } as never)
@@ -241,12 +253,14 @@ describe('Lark image to Direct Codex', () => {
       expect(String(imageBlock.attachment.attachmentId)).toMatch(/^sha256:[a-f0-9]{64}$/)
       expect(JSON.stringify([...saved.values()])).not.toContain(providerRef)
 
+      let storedImageDataUrl: string | undefined
       const reloadedCtx = new Context()
       try {
         const reloadedStore = new LocalAttachmentStore(reloadedCtx, attachmentConfig)
         const stored = await reloadedStore.readImage(imageBlock.attachment)
         expect(stored.ref).toEqual(imageBlock.attachment)
-        expect(stored.data).toEqual(png)
+        expect(stored.data.byteLength).toBe(imageBlock.attachment.bytes)
+        storedImageDataUrl = `data:${stored.ref.mediaType};base64,${Buffer.from(stored.data).toString('base64')}`
       } finally {
         await reloadedCtx.fiber.restart()
       }
@@ -260,7 +274,7 @@ describe('Lark image to Direct Codex', () => {
         content: [{
           type: 'input_image',
           detail: 'auto',
-          image_url: `data:image/png;base64,${onePixelPngBase64}`,
+          image_url: storedImageDataUrl,
         }],
       })
       expect(sent).toContainEqual({ chatId: 'oc_owner', input: { markdown: 'Codex saw the image.' } })
