@@ -768,15 +768,18 @@ describe('Codex direct credential store', () => {
     const store = new CodexCredentialStore({ authFile, fetch: fetcher, refreshTimeoutMs: 1_000 })
     const captured = captureFailure(store.requestResponses('{}', new AbortController().signal))
 
-    const timely = await Promise.race([
-      captured,
-      new Promise<'still-pending'>(resolve => setTimeout(() => resolve('still-pending'), 50)),
-    ])
-    releaseCancellation?.()
-    await captured
+    // Classification must not wait for `cancel()` to settle. Asserting that the
+    // failure surfaces while the cancellation is still pending states exactly
+    // that: `releaseCancellation` is only invoked after `captured` resolves, so
+    // an implementation that awaited the cancellation would deadlock and fail as
+    // a test timeout. Racing a 50ms wall-clock timer instead only asserted "fast
+    // enough on this host" and failed spuriously under full-suite load.
+    const failure = await captured
 
-    expect(timely).not.toBe('still-pending')
-    expect(timely).toMatchObject({ cause: 'provider-http', status: 429 })
+    expect(releaseCancellation).toBeTypeOf('function')
+    releaseCancellation?.()
+
+    expect(failure).toMatchObject({ cause: 'provider-http', status: 429 })
   })
 
   it('classifies a refresh timeout without retaining the fetch exception', async () => {
