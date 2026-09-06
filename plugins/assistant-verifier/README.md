@@ -33,7 +33,7 @@ Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和
 
 通过 `createVerifierAuthorities({ authorities })` 得到冻结配置和每个资源的 `digest`，将 `{ id, digest }` 填入条件的 `authority`。profile 类型为包导出的 `AcceptanceProfile`，条件格式来自 `@dsh-enhanced/task-acceptance-contract`。资源变更会改变摘要，旧契约不能悄悄使用新资源。
 
-`databasePath` 是私有 SQLite 文件绝对路径；默认 `dshHomePath('assistant-verifier/verification.sqlite')`。`tickIntervalMs` 默认 5000，0 表示由 Host 调用 `tick()`。契约最长有效 7 天，单轮验证最长 5 分钟，不确定的验证最多尝试 3 次。无法证明执行已停止、契约过期或尝试耗尽时保留待处理状态；Host 通过 `inspect(contractId)` 和 `continuations()` 查看。过期回执不会作为新的可信结果投递。
+`databasePath` 是私有 SQLite 文件绝对路径；默认 `dshHomePath('assistant-verifier/verification.sqlite')`。`tickIntervalMs` 默认 5000，0 表示由 Host 调用 `tick()`。契约最长有效 7 天，单轮验证最长 5 分钟，不确定的验证最多尝试 3 次。无法证明执行已停止、契约过期或尝试耗尽时保留待处理状态；Host 通过 `inspect(contractId)` 和 `continuations()` 查看。需要把回执逐项绑定到完整已接纳契约的 Host，可同步调用 `inspectAcceptedTask(contractId)`；它仅在契约和状态都存在时返回冻结的 `{ contract, ...state }`，不会把单独的回执状态当作验收证据。过期回执不会作为新的可信结果投递。
 
 回执描述该次任务在观测时刻的结果，`validUntil` 限制结果进入 Evaluation 的时间。已接纳的历史结果不会仅因时间流逝被改写；它不证明外部系统现在仍处于同一状态。持续目标、发布或权限决策需要自己的新鲜度要求及新契约回读。owner 的显式纠正与撤回仍可修改 canonical 判断。
 

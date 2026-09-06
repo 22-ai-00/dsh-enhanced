@@ -182,6 +182,30 @@ describe('Host acceptance service', () => {
     expect(service.inspect(handle.contractId)).toMatchObject({ state: 'done', receipt: { protocol: 'task-verification/v2', task: task.task } })
   })
 
+  it('returns a deeply frozen exact v2 contract with its validated receipt without changing legacy inspect', async () => {
+    const { producer, task, service, complete } = await harness('goal-step')
+    const handle = producer.registration!.prepare(task)!
+    const before = service.inspect(handle.contractId)
+    const acceptedBefore = service.inspectAcceptedTask(handle.contractId)
+    expect(before).toEqual({ state: 'awaiting-execution', attempts: 0, reason: null, receipt: null, execution: null })
+    expect(Object.keys(before!).sort()).toEqual(['attempts', 'execution', 'reason', 'receipt', 'state'])
+    expect(acceptedBefore).toMatchObject({ contract: { protocol: 'task-acceptance/v2', task: task.task }, state: 'awaiting-execution' })
+    expect(Object.isFrozen(acceptedBefore)).toBe(true)
+    expect(Object.isFrozen(acceptedBefore!.contract)).toBe(true)
+    expect(Object.isFrozen(acceptedBefore!.contract.task)).toBe(true)
+    expect(Object.isFrozen(acceptedBefore!.contract.task.kind === 'goal-step' && acceptedBefore!.contract.task.goal)).toBe(true)
+    expect(Object.isFrozen(acceptedBefore!.contract.criteria)).toBe(true)
+    complete(handle)
+    await producer.registration!.completed(handle)
+    await service.tick()
+    const accepted = service.inspectAcceptedTask(handle.contractId)
+    expect(accepted).toMatchObject({ state: 'done', receipt: { protocol: 'task-verification/v2', task: task.task, objectiveStatus: 'achieved' } })
+    expect(Object.isFrozen(accepted!.receipt)).toBe(true)
+    expect(Object.isFrozen(accepted!.receipt!.task)).toBe(true)
+    expect(() => service.inspectAcceptedTask('bad id')).toThrow(/contractId.*invalid/i)
+    expect(service.inspectAcceptedTask('unknown-contract')).toBeNull()
+  })
+
   it.each(['automation-run', 'foreground-turn'] as const)('rejects a %s producer attempting goal-step work', async kind => {
     const { producer, task } = await harness(kind)
     const goalTask: AcceptanceTask = { ...task, task: { kind: 'goal-step', ref: 'goal-run', goal: { id: 'goal-1', definitionVersion: 1, definitionDigest: 'a'.repeat(64), stepId: 'step-1', runId: 'run-1', sessionId: 'session-1', nativeGoalId: 'native-1', nativeRevision: 1 } } }

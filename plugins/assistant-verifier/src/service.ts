@@ -3,11 +3,12 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import {
   acceptanceCanonicalJson, acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt,
 } from '@dsh-enhanced/task-acceptance-contract'
-import type { CriterionResult, TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import type { CriterionResult, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { Config, compileAcceptanceProfiles } from './config.js'
 import { verifyAcceptanceCriteria } from './drivers.js'
 import type { AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration, VerifierEvaluationRegistration } from './host.js'
 import { AcceptanceStore } from './store.js'
+import type { Execution } from './store.js'
 
 export { Config } from './config.js'
 
@@ -100,6 +101,21 @@ export class AssistantVerifierService extends Service<Config> {
 
   /** Inspection contains explicit pending work; an execution completion is not a success verdict. */
   inspect = (contractId: string) => { this.#assertActive(); return this.#store.getState(contractId) }
+
+  /** Exact immutable contract plus its current validated state for Host feedback loops. */
+  inspectAcceptedTask = (contractId: string): Readonly<{
+    contract: TaskAcceptanceContract
+    state: 'awaiting-execution' | 'pending' | 'verifying' | 'done' | 'needs-attention'
+    attempts: number
+    reason: string | null
+    receipt: TaskVerificationReceipt | null
+    execution: Execution | null
+  }> | null => {
+    this.#assertActive()
+    const contract = this.#store.getContract(contractId)
+    const state = this.#store.getState(contractId)
+    return contract === null || state === null ? null : Object.freeze({ contract, ...state })
+  }
 
   continuations = () => { this.#assertActive(); return this.#store.listAttention() }
 

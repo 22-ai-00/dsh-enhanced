@@ -24,7 +24,7 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
         if (args.focus === true) throw new Error('goal_context focus requires goal_id')
         return { context: service.catalog(exec.agent) }
       }
-      return { context: service.describe(args.focus === true ? service.focus(exec.agent, args.goal_id) : service.inspect(exec.agent, args.goal_id)) }
+      return { context: service.describeForAgent(exec.agent, (args.focus === true ? service.focus(exec.agent, args.goal_id) : service.inspect(exec.agent, args.goal_id)).id) }
     },
   }))
   ctx.tools.register(defineTool({
