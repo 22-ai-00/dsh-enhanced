@@ -1147,50 +1147,28 @@ export class AssistantAutomationsService extends Service implements
     this.assertActive()
     const input = validateGrowthCanaryInspectionRequest(inputValue)
     const replay = this.growthStore.beginOperation('canary-inspection', input)
-    if (replay !== undefined) return validateGrowthCanaryInspectionReceipt(replay, input)
     const artifact = this.growthStore.requireArtifact(input)
+    if (replay !== undefined) {
+      const receipt = validateGrowthCanaryInspectionReceipt(replay, input)
+      if (receipt.outcome === 'passed') this.requireCurrentCanaryProof(artifact)
+      return receipt
+    }
     const run = artifact.canaryRunId === undefined ? undefined : this.store.getRun(artifact.canaryRunId)
     if (artifact.canaryTaskId === undefined || artifact.canaryRunId === undefined || run === undefined
       || run.taskId !== artifact.canaryTaskId || run.executionMode !== 'production') {
       throw new AssistantAutomationsError('runtime-conflict', 'canary inspection has no exact exposure proof')
     }
-    let proof: ReturnType<AssistantEvaluationService['getTrustedOutcome']>
-    const evaluation = this.evaluation
-    if (evaluation !== undefined && run.status === 'succeeded') {
-      const scope = canonicalEvaluationHostScope({ workspace: artifact.workspace, preset: artifact.preset })
-      const matches = evaluation.query({
-        scope,
-        situation: `automation:${artifact.automationId}`,
-        objectiveStatus: 'achieved',
-        trust: 'trusted',
-        limit: 100,
-      }).filter(outcome => outcome.evidence.some(entry =>
-        entry.kind === 'automation-run' && entry.ref === run.id))
-      if (matches.length === 1) {
-        proof = evaluation.getTrustedOutcome({ scope, outcomeId: matches[0]!.id })
-      }
-    }
-    const passed = proof !== undefined && proof.trust === 'trusted'
-      && proof.objectiveStatus === 'achieved'
-      && proof.evidence.some(entry => entry.kind === 'automation-run' && entry.ref === run.id)
+    const proof = run.status === 'succeeded' ? this.currentCanaryProof(artifact) : undefined
+    const passed = proof !== undefined
     const failed = run.status !== 'succeeded'
-    const evaluationDigest = !passed ? undefined : growthObjectDigest({
-      contract: 'assistant-automations-growth-evaluation-proof/v1',
-      id: proof!.id,
-      scopeKey: proof!.scopeKey,
-      situation: proof!.situation,
-      objectiveStatus: proof!.objectiveStatus,
-      trust: proof!.trust,
-      evidence: proof!.evidence,
-      occurredAt: proof!.occurredAt,
-      evaluator: proof!.evaluator,
-    })
+    const evaluationDigest = proof?.projection.digest
     if (passed) {
       this.growthStore.recordCanaryEvaluation({
         artifactId: artifact.artifactId,
         runId: run.id,
-        evaluationId: proof!.id,
+        evaluationId: proof!.triggerOutcomeId,
         evaluationDigest: evaluationDigest!,
+        proof: proof!,
       })
     }
     const receipt = withGrowthPortReceiptDigest({
@@ -1212,6 +1190,37 @@ export class AssistantAutomationsService extends Service implements
     )
   }
 
+  private currentCanaryProof(artifact: Readonly<GrowthArtifactRecord>) {
+    if (artifact.canaryRunId === undefined || this.evaluation === undefined
+      || typeof this.evaluation.getTrustedAutomationRunLearningProjection !== 'function') return undefined
+    const scope = canonicalEvaluationHostScope({ workspace: artifact.workspace, preset: artifact.preset })
+    const proof = this.evaluation.getTrustedAutomationRunLearningProjection({ scope, runId: artifact.canaryRunId })
+    if (proof === undefined || proof.scope.workspace !== scope.workspace || proof.scope.preset !== scope.preset
+      || proof.situation !== `automation:${artifact.automationId}`
+      || proof.projection.subjectKind !== 'automation-run' || proof.projection.subjectRef !== artifact.canaryRunId
+      || proof.projection.disposition !== 'upsert' || proof.execution?.status !== 'succeeded'
+      || proof.objective?.status !== 'achieved') return undefined
+    return proof
+  }
+
+  private requireCurrentCanaryProof(artifact: Readonly<GrowthArtifactRecord>) {
+    const current = this.currentCanaryProof(artifact)
+    const saved = artifact.canaryEvaluationProof
+    // Legacy append-only proofs deliberately fail closed. Never upgrade an old
+    // inspection receipt to a different canonical revision during promotion.
+    if (current === undefined || saved === undefined
+      || saved.scopeKey !== current.scopeKey
+      || saved.projection.subjectKind !== current.projection.subjectKind
+      || saved.projection.subjectRef !== current.projection.subjectRef
+      || saved.projection.version !== current.projection.version
+      || saved.projection.digest !== current.projection.digest
+      || saved.projection.disposition !== 'upsert'
+      || artifact.canaryEvaluationDigest !== current.projection.digest) {
+      throw new AssistantAutomationsError('runtime-conflict', 'canonical canary evidence changed or is unavailable')
+    }
+    return current
+  }
+
   promoteWorkflowAutomation(inputValue: Readonly<GrowthAutomationArtifactRequest>): GrowthPromotionReceipt {
     this.assertActive()
     const input = validateGrowthAutomationArtifactRequest(inputValue)
@@ -1222,35 +1231,46 @@ export class AssistantAutomationsService extends Service implements
       || artifact.canaryEvaluationId === undefined || artifact.canaryEvaluationDigest === undefined) {
       throw new AssistantAutomationsError('runtime-conflict', 'promotion requires the exact canary artifact')
     }
-    const definition = this.requireLiveGrowthArtifact(artifact)
-    if (definition === undefined || definition.owner !== GROWTH_AUTOMATION_OWNER
-      || this.store.getDefinitionHash(definition.id) !== input.artifactDigest
-      || !((definition.status === 'paused' && definition.version === input.artifactVersion)
-        || (definition.status === 'active' && definition.version === input.artifactVersion + 1))) {
-      throw new AssistantAutomationsError('runtime-conflict', 'promotion artifact changed before exact CAS')
-    }
-    const promoted = definition.status === 'active'
-      ? definition
-      : this.reconcileSystem({
-          owner: GROWTH_AUTOMATION_OWNER,
-          automationId: definition.id,
-          idempotencyKey: boundedGrowthKey('growth-promote', input),
-          desiredStatus: 'active',
-          definition: definition.definition,
-        })
-    const stored = this.growthStore.completePromotion({ request: input, automation: promoted })
-    const receipt = withGrowthPortReceiptDigest({
-      ...growthIdentity(input),
-      artifactId: input.artifactId,
-      artifactVersion: input.artifactVersion,
-      artifactDigest: input.artifactDigest,
-      outcome: 'promoted' as const,
-      resultingArtifactVersion: stored.definitionVersion,
-      resultingArtifactDigest: stored.definitionHash,
+    const proof = this.requireCurrentCanaryProof(artifact)
+    const fenced = this.evaluation!.withTrustedLearningWriterFence({
+      scope: canonicalEvaluationHostScope({ workspace: artifact.workspace, preset: artifact.preset }),
+      scopeWatermark: proof.scopeWatermark,
+      evidence: [{ ...proof.projection, disposition: 'upsert' }],
+    }, () => {
+      const definition = this.requireLiveGrowthArtifact(artifact)
+      if (definition === undefined || definition.owner !== GROWTH_AUTOMATION_OWNER
+        || this.store.getDefinitionHash(definition.id) !== input.artifactDigest
+        || !((definition.status === 'paused' && definition.version === input.artifactVersion)
+          || (definition.status === 'active' && definition.version === input.artifactVersion + 1))) {
+        throw new AssistantAutomationsError('runtime-conflict', 'promotion artifact changed before exact CAS')
+      }
+      const promoted = definition.status === 'active'
+        ? definition
+        : this.reconcileSystem({
+            owner: GROWTH_AUTOMATION_OWNER,
+            automationId: definition.id,
+            idempotencyKey: boundedGrowthKey('growth-promote', input),
+            desiredStatus: 'active',
+            definition: definition.definition,
+          })
+      const stored = this.growthStore.completePromotion({ request: input, automation: promoted })
+      const receipt = withGrowthPortReceiptDigest({
+        ...growthIdentity(input),
+        artifactId: input.artifactId,
+        artifactVersion: input.artifactVersion,
+        artifactDigest: input.artifactDigest,
+        outcome: 'promoted' as const,
+        resultingArtifactVersion: stored.definitionVersion,
+        resultingArtifactDigest: stored.definitionHash,
+      })
+      return validateGrowthPromotionReceipt(
+        this.growthStore.completeOperation('promotion', input, receipt), input,
+      )
     })
-    return validateGrowthPromotionReceipt(
-      this.growthStore.completeOperation('promotion', input, receipt), input,
-    )
+    if (!fenced.matched) {
+      throw new AssistantAutomationsError('runtime-conflict', `canonical canary evidence fence: ${fenced.reason}`)
+    }
+    return fenced.value
   }
 
   rollbackWorkflowAutomation(inputValue: Readonly<GrowthAutomationArtifactRequest>): GrowthRollbackReceipt {

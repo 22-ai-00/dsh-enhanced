@@ -1,3 +1,4 @@
+import type { TrustedTaskLearningProjectionReceipt } from '@dsh-enhanced/assistant-evaluation'
 import type { DatabaseSync } from 'node:sqlite'
 import { createHash } from 'node:crypto'
 import {
@@ -61,6 +62,7 @@ interface ArtifactRow {
   canary_run_id: string | null
   canary_evaluation_id: string | null
   canary_evaluation_digest: string | null
+  canary_evaluation_proof_json: string | null
   created_at: number
   updated_at: number
 }
@@ -93,6 +95,7 @@ export interface GrowthArtifactRecord {
   canaryRunId?: string
   canaryEvaluationId?: string
   canaryEvaluationDigest?: string
+  canaryEvaluationProof?: Readonly<TrustedTaskLearningProjectionReceipt>
   createdAt: number
   updatedAt: number
 }
@@ -127,6 +130,9 @@ function artifact(row: ArtifactRow): Readonly<GrowthArtifactRecord> {
     ...(row.canary_run_id === null ? {} : { canaryRunId: row.canary_run_id }),
     ...(row.canary_evaluation_id === null ? {} : { canaryEvaluationId: row.canary_evaluation_id }),
     ...(row.canary_evaluation_digest === null ? {} : { canaryEvaluationDigest: row.canary_evaluation_digest }),
+    ...(row.canary_evaluation_proof_json === null ? {} : {
+      canaryEvaluationProof: JSON.parse(row.canary_evaluation_proof_json) as TrustedTaskLearningProjectionReceipt,
+    }),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   })
@@ -437,6 +443,7 @@ export class GrowthAutomationStore {
     runId: string
     evaluationId: string
     evaluationDigest: string
+    proof: Readonly<TrustedTaskLearningProjectionReceipt>
   }>): Readonly<GrowthArtifactRecord> {
     this.assertOpen()
     return this.transaction(() => {
@@ -454,9 +461,9 @@ export class GrowthAutomationStore {
       }
       this.database.prepare(`
         UPDATE automation_growth_artifacts
-        SET canary_evaluation_id = ?, canary_evaluation_digest = ?, updated_at = ?
+        SET canary_evaluation_id = ?, canary_evaluation_digest = ?, canary_evaluation_proof_json = ?, updated_at = ?
         WHERE artifact_id = ?
-      `).run(input.evaluationId, input.evaluationDigest, this.now(), input.artifactId)
+      `).run(input.evaluationId, input.evaluationDigest, canonicalGrowthJson(input.proof), this.now(), input.artifactId)
       return this.byId(input.artifactId)!
     })
   }

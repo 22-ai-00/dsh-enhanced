@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const automationSchemaVersion = 10
+export const automationSchemaVersion = 11
 
 const growthTablesV10 = `
   CREATE TABLE automation_growth_operations (
@@ -52,6 +52,9 @@ const growthTablesV10 = `
     canary_evaluation_id TEXT UNIQUE,
     canary_evaluation_digest TEXT CHECK (
       canary_evaluation_digest IS NULL OR length(canary_evaluation_digest) = 64
+    ),
+    canary_evaluation_proof_json TEXT CHECK (
+      canary_evaluation_proof_json IS NULL OR json_valid(canary_evaluation_proof_json)
     ),
     created_at INTEGER NOT NULL CHECK (created_at >= 0),
     updated_at INTEGER NOT NULL CHECK (updated_at >= created_at),
@@ -384,7 +387,7 @@ function migrate(database: DatabaseSync): void {
     ) STRICT;
 
     ${growthTablesV10}
-    PRAGMA user_version = 10;
+    PRAGMA user_version = 11;
     COMMIT;
     `)
     return
@@ -695,11 +698,20 @@ function migrate(database: DatabaseSync): void {
       version = 9
     }
   }
+  if (version === 10) {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE automation_growth_artifacts ADD COLUMN canary_evaluation_proof_json TEXT
+        CHECK (canary_evaluation_proof_json IS NULL OR json_valid(canary_evaluation_proof_json));
+      PRAGMA user_version = 11;
+      COMMIT;
+    `)
+  }
   if (version === 9) {
     database.exec(`
       BEGIN IMMEDIATE;
       ${growthTablesV10}
-      PRAGMA user_version = 10;
+      PRAGMA user_version = 11;
       COMMIT;
     `)
   }
