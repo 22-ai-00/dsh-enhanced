@@ -15,14 +15,14 @@ import { AssistantGoalsService } from '../src/service.ts'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
-async function harness(databasePath?: string, maxContextChars?: number) {
+async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
   await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
-  const owners = new Map<Agent, string>(); const human = new Set<Agent>(); let allowed = true
+  const owners = new Map<Agent, string>(); const human = new Set<Agent>(); let allowed = true; const deniedActions = new Set<string>()
   const attestation = (agent: Agent) => {
     const principalId = owners.get(agent)
     return principalId === undefined ? undefined : { scope: { workspace: root, preset: 'primary' }, principalId,
@@ -32,7 +32,8 @@ async function harness(databasePath?: string, maxContextChars?: number) {
   // in assistant-delivery's real runtime integration test.
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: attestation,
     currentPreferenceTurn: (agent: Agent) => human.has(agent) ? attestation(agent) : undefined } as never)
-  ctx.provide('assistantPolicy' as never, { authorizeAgent: () => ({ effect: allowed ? 'allow' : 'deny' }) } as never)
+  ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }) } as never)
+  if (duringGoalChange !== undefined) ctx.on('goal/changed', ({ agent }) => duringGoalChange(agent))
   const path = databasePath ?? join(root, 'goals.sqlite')
   const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, ...(maxContextChars === undefined ? {} : { maxContextChars }) })
   const create = async (id: string, owner?: string) => {
@@ -41,7 +42,7 @@ async function harness(databasePath?: string, maxContextChars?: number) {
     cleanups.push(() => handle.dispose())
     return handle.agent
   }
-  return { ctx, root, path, plugin, owners, human, create, deny() { allowed = false }, service: ctx.assistantGoals }
+  return { ctx, root, path, plugin, owners, human, create, deny() { allowed = false }, denyAction(action: string) { deniedActions.add(action) }, service: ctx.assistantGoals }
 }
 const checkpoint = { nextStep: 'Check repository state', blockers: [], assumptions: [{ statement: 'Latest build was green', expiresAt: 0 }], evidenceRefs: ['run:one'], dependencies: [] }
 
@@ -150,5 +151,94 @@ describe('owner-scoped native goal context', () => {
     expect(JSON.stringify(requests[0]!.messages)).toContain('Check repository state')
     expect(agent.session.snapshotEvents().some(event => event.type === 'user/message' && JSON.stringify(event.data).includes('Check repository state'))).toBe(true)
     expect(f.ctx.assistantGoals.snapshot(agent)).toContain('Continue after reload')
+  })
+
+  it('controls only the current session binding through native CAS and retains business history', async () => {
+    const f = await harness(); const first = await f.create('control-first', 'owner'); f.human.add(first)
+    f.ctx.goals.create(first, { objective: 'Original control objective', maxGoalRounds: 3 })
+    let record = f.service.list(first)[0]!
+    record = f.service.checkpoint(first, record.id, record.version, checkpoint)
+    const edited = f.service.control(first, { goalId: record.id, expectedRevision: record.native.revision, operation: 'edit', objective: 'Edited control objective' })
+    expect(edited).toMatchObject({ originalObjective: 'Original control objective', checkpoint, native: { objective: 'Edited control objective', phase: 'active' } })
+    const paused = f.service.control(first, { goalId: record.id, expectedRevision: edited.native.revision, operation: 'pause' })
+    expect(paused.native.phase).toBe('paused')
+    const resumed = f.service.control(first, { goalId: record.id, expectedRevision: paused.native.revision, operation: 'resume' })
+    expect(resumed.native).toMatchObject({ phase: 'active', revision: paused.native.revision + 1 })
+    const beforeStale = f.ctx.goals.get(first)!
+    expect(() => f.service.control(first, { goalId: record.id, expectedRevision: paused.native.revision, operation: 'pause' })).toThrow()
+    expect(f.ctx.goals.get(first)).toEqual(beforeStale)
+    const second = await f.create('control-second', 'owner'); f.human.add(second)
+    f.service.focus(second, record.id)
+    expect(() => f.service.control(second, { goalId: record.id, expectedRevision: resumed.native.revision, operation: 'clear' })).toThrow('current session')
+    expect(f.ctx.goals.get(first)).toMatchObject({ id: resumed.native.goalId, revision: resumed.native.revision })
+    const cleared = f.service.control(first, { goalId: record.id, expectedRevision: resumed.native.revision, operation: 'clear' })
+    expect(cleared.native.phase).toBe('cleared')
+    expect(f.ctx.goals.get(first)).toBeUndefined()
+    await f.plugin.dispose()
+    await f.ctx.plugin(AssistantGoalsService, { databasePath: f.path })
+    expect(f.ctx.assistantGoals.inspect(first, record.id).native.phase).toBe('cleared')
+  })
+
+  it('requires the live owner turn and per-operation policy before control CAS', async () => {
+    const f = await harness(); const agent = await f.create('control-guard', 'owner')
+    f.human.add(agent); f.ctx.goals.create(agent, { objective: 'Guarded goal' })
+    const record = f.service.list(agent)[0]!
+    f.human.delete(agent)
+    expect(() => f.service.control(agent, { goalId: record.id, expectedRevision: record.native.revision, operation: 'pause' })).toThrow('current authenticated owner turn')
+    expect(f.ctx.goals.get(agent)?.phase).toBe('active')
+    f.human.add(agent); f.denyAction('pause')
+    expect(() => f.service.control(agent, { goalId: record.id, expectedRevision: record.native.revision, operation: 'pause' })).toThrow('policy denied')
+    expect(f.ctx.goals.get(agent)?.phase).toBe('active')
+    f.owners.delete(agent)
+    expect(() => f.service.control(agent, { goalId: record.id, expectedRevision: record.native.revision, operation: 'pause' })).toThrow('authenticated owner required')
+  })
+
+  it('rejects malformed direct control input before native mutation', async () => {
+    const f = await harness(); const agent = await f.create('control-input', 'owner'); f.human.add(agent)
+    f.ctx.goals.create(agent, { objective: 'Input goal' })
+    const record = f.service.list(agent)[0]!
+    expect(() => f.service.control(agent, { goalId: record.id, expectedRevision: record.native.revision, operation: 'edit' })).toThrow('invalid control input')
+    expect(() => f.service.control(agent, { goalId: record.id, expectedRevision: record.native.revision, operation: 'pause', objective: 'nope' } as never)).toThrow('invalid control input')
+    expect(() => f.service.control(agent, { goalId: record.id, expectedRevision: 0, operation: 'pause' })).toThrow('invalid control input')
+    expect(f.ctx.goals.get(agent)).toMatchObject({ id: record.native.goalId, revision: record.native.revision, phase: 'active' })
+  })
+
+  it('reports a partial commit when owner revocation prevents the native change from being projected', async () => {
+    let revoke = false
+    let f!: Awaited<ReturnType<typeof harness>>
+    f = await harness(undefined, undefined, agent => { if (revoke) f.owners.delete(agent) })
+    const agent = await f.create('control-partial', 'owner'); f.human.add(agent)
+    f.ctx.goals.create(agent, { objective: 'Projection failure goal' })
+    const record = f.service.list(agent)[0]!
+    revoke = true
+    expect(() => f.service.control(agent, { goalId: record.id, expectedRevision: record.native.revision, operation: 'pause' }))
+      .toThrow('native goal changed but business context could not be read back')
+    expect(f.ctx.goals.get(agent)).toMatchObject({ id: record.native.goalId, phase: 'paused', revision: record.native.revision + 1 })
+  })
+
+  it('does not return projected goal data when a later native listener revokes the owner', async () => {
+    const f = await harness(); const agent = await f.create('control-late-revocation', 'owner'); f.human.add(agent)
+    f.ctx.goals.create(agent, { objective: 'Late revocation goal' })
+    const record = f.service.list(agent)[0]!
+    f.ctx.on('goal/changed', ({ agent: changed }) => { if (changed === agent) f.owners.delete(agent) })
+    expect(() => f.service.control(agent, { goalId: record.id, expectedRevision: record.native.revision, operation: 'pause' }))
+      .toThrow('native goal changed but business context could not be read back')
+    expect(f.ctx.goals.get(agent)).toMatchObject({ id: record.native.goalId, phase: 'paused', revision: record.native.revision + 1 })
+    f.owners.set(agent, 'owner')
+    expect(f.service.inspect(agent, record.id).native.phase).toBe('paused')
+  })
+
+  it('normalizes control input before synchronous native change listeners can mutate the caller object', async () => {
+    let mutate = false
+    const input = { goalId: '', expectedRevision: 0, operation: 'pause' as const }
+    const f = await harness(undefined, undefined, () => { if (mutate) input.expectedRevision = 999 })
+    const agent = await f.create('control-snapshot', 'owner'); f.human.add(agent)
+    f.ctx.goals.create(agent, { objective: 'Snapshot goal' })
+    const record = f.service.list(agent)[0]!
+    input.goalId = record.id; input.expectedRevision = record.native.revision
+    mutate = true
+    const paused = f.service.control(agent, input)
+    expect(paused.native).toMatchObject({ phase: 'paused', revision: record.native.revision + 1 })
+    expect(input.expectedRevision).toBe(999)
   })
 })

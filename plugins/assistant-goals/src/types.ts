@@ -36,6 +36,15 @@ export interface GoalRecord {
   updatedAt: number
 }
 
+/** Owner-authorized lifecycle change for the currently bound native goal. */
+export interface GoalControlInput {
+  goalId: string
+  expectedRevision: number
+  operation: 'edit' | 'pause' | 'resume' | 'clear'
+  objective?: string
+  maxGoalRounds?: number
+}
+
 export type GoalStoreErrorCode =
   | 'conflict'
   | 'invalid-input'

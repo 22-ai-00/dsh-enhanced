@@ -46,4 +46,20 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
       })) }
     },
   }))
+  ctx.tools.register(defineTool({
+    name: 'goal_control',
+    description: 'Edit, pause, resume, or clear the current session native goal that is bound to this business goal. Requires a live authenticated owner turn and Policy permission for the requested operation. expected_revision is the native goal revision; clearing retains the business goal tombstone and history.',
+    parameters: {
+      goal_id: { type: 'string', required: true }, expected_revision: { type: 'integer', required: true },
+      operation: { type: 'string', required: true, enum: ['edit', 'pause', 'resume', 'clear'] },
+      objective: { type: 'string' }, max_goal_rounds: { type: 'integer' },
+    }, output,
+    async execute(args, exec) {
+      return { context: service.describe(service.control(exec.agent, {
+        goalId: args.goal_id, expectedRevision: args.expected_revision, operation: args.operation as 'edit' | 'pause' | 'resume' | 'clear',
+        ...(args.objective === undefined ? {} : { objective: args.objective }),
+        ...(args.max_goal_rounds === undefined ? {} : { maxGoalRounds: args.max_goal_rounds }),
+      })) }
+    },
+  }))
 }

@@ -8,7 +8,7 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { GoalStore } from './store.js'
-import type { GoalCheckpoint, GoalRecord, GoalScope, NativeGoalState } from './types.js'
+import type { GoalCheckpoint, GoalControlInput, GoalRecord, GoalScope, NativeGoalState } from './types.js'
 import { registerGoalTools } from './tools.js'
 
 export interface Config { databasePath?: string; maxContextChars?: number }
@@ -76,6 +76,13 @@ export class AssistantGoalsService extends Service {
     return { principalId: owner.principalId, ...owner.principalLineage, workspace: owner.scope.workspace, preset: owner.scope.preset }
   }
 
+  #requireOwnerTurn(agent: Agent, scope: GoalScope): void {
+    const turn = (this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined)?.currentPreferenceTurn(agent)
+    if (turn === undefined || acceptanceDigest({ principalId: turn.principalId, ...turn.principalLineage, workspace: turn.scope.workspace, preset: turn.scope.preset }) !== acceptanceDigest(scope)) {
+      throw new Error('assistant-goals: current authenticated owner turn required')
+    }
+  }
+
   #native(agent: Agent, goal: GoalView): NativeGoalState {
     return { sessionId: String(agent.session.id), goalId: String(goal.id), revision: goal.revision,
       objective: goal.objective, phase: goal.phase, roundsStarted: goal.roundsStarted,
@@ -105,8 +112,7 @@ export class AssistantGoalsService extends Service {
   create = (agent: Agent | undefined, objective: string, maxGoalRounds?: number): GoalRecord => {
     const scope = this.#scope(agent, 'create')
     this.#scope(agent, 'observe')
-    const turn = (this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined)?.currentPreferenceTurn(agent!)
-    if (turn === undefined || acceptanceDigest({ principalId: turn.principalId, ...turn.principalLineage, workspace: turn.scope.workspace, preset: turn.scope.preset }) !== acceptanceDigest(scope)) throw new Error('assistant-goals: current authenticated owner turn required')
+    this.#requireOwnerTurn(agent!, scope)
     if (typeof objective !== 'string' || objective.trim().length === 0 || objective.length > 16384) throw new Error('assistant-goals: invalid objective')
     if (maxGoalRounds !== undefined && (!Number.isSafeInteger(maxGoalRounds) || maxGoalRounds < 1)) throw new Error('assistant-goals: invalid round limit')
     const native = this.ctx.get('goals')
@@ -119,6 +125,74 @@ export class AssistantGoalsService extends Service {
       if (record !== undefined) return record
     } catch { /* Native creation is already committed; report its partial outcome. */ }
     throw new Error('assistant-goals: native goal created but context could not be indexed; inspect the current native goal before retrying')
+  }
+
+  control = (agent: Agent | undefined, value: GoalControlInput): GoalRecord => {
+    const input = this.#controlInput(value)
+    const scope = this.#scope(agent, input.operation)
+    this.#scope(agent, 'observe')
+    this.#requireOwnerTurn(agent!, scope)
+    const record = this.#store.get(scope, input.goalId)
+    if (record === undefined) throw new Error('assistant-goals: goal not found')
+    const native = this.ctx.get('goals')
+    if (native === undefined) throw new Error('assistant-goals: native goal service unavailable')
+    const current = native.get(agent!)
+    if (current === undefined
+      || record.native.sessionId !== String(agent!.session.id)
+      || record.native.goalId !== String(current.id)) throw new Error('assistant-goals: current session native goal binding required')
+    const ref = { id: current.id, revision: input.expectedRevision }
+    switch (input.operation) {
+      case 'edit': native.edit(agent!, ref, {
+        ...(input.objective === undefined ? {} : { objective: input.objective }),
+        ...(input.maxGoalRounds === undefined ? {} : { maxGoalRounds: input.maxGoalRounds }),
+      }); break
+      case 'pause': native.pause(agent!, ref); break
+      case 'resume': native.resume(agent!, ref); break
+      case 'clear': native.clear(agent!, ref); break
+    }
+    try {
+      const readbackScope = this.#scope(agent, input.operation)
+      this.#scope(agent, 'observe')
+      this.#requireOwnerTurn(agent!, readbackScope)
+      if (readbackScope.principalId !== scope.principalId
+        || readbackScope.principalRecordId !== scope.principalRecordId
+        || readbackScope.principalVersion !== scope.principalVersion
+        || readbackScope.workspace !== scope.workspace
+        || readbackScope.preset !== scope.preset) throw new Error('owner scope changed')
+      const updated = this.#store.get(readbackScope, input.goalId)
+      if (updated === undefined || updated.native.goalId !== String(current.id)
+        || updated.native.revision !== input.expectedRevision + 1
+        || (input.operation === 'clear' && updated.native.phase !== 'cleared')) {
+        throw new Error('projection mismatch')
+      }
+      return updated
+    } catch {
+      throw new Error('assistant-goals: native goal changed but business context could not be read back; inspect the current native goal before retrying')
+    }
+  }
+
+  #controlInput(value: GoalControlInput): GoalControlInput {
+    if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) throw new Error('assistant-goals: invalid control input')
+    const input = value as unknown as Record<string, unknown>
+    const names = Object.getOwnPropertyNames(input)
+    const allowed = new Set(['goalId', 'expectedRevision', 'operation', 'objective', 'maxGoalRounds'])
+    if (names.some(name => !allowed.has(name)) || !['goalId', 'expectedRevision', 'operation'].every(name => names.includes(name))
+      || Object.values(Object.getOwnPropertyDescriptors(input)).some(descriptor => !('value' in descriptor) || !descriptor.enumerable)) throw new Error('assistant-goals: invalid control input')
+    if (typeof input.goalId !== 'string' || input.goalId.length === 0 || input.goalId.length > 512
+      || typeof input.expectedRevision !== 'number' || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1
+      || (input.operation !== 'edit' && input.operation !== 'pause' && input.operation !== 'resume' && input.operation !== 'clear')) throw new Error('assistant-goals: invalid control input')
+    const operation = input.operation
+    if (operation !== 'edit' && (names.includes('objective') || names.includes('maxGoalRounds'))) throw new Error('assistant-goals: invalid control input')
+    if (operation === 'edit' && !names.includes('objective') && !names.includes('maxGoalRounds')) throw new Error('assistant-goals: invalid control input')
+    if (names.includes('objective') && (typeof input.objective !== 'string' || input.objective.trim().length === 0 || input.objective.length > 16384)) throw new Error('assistant-goals: invalid control input')
+    if (names.includes('maxGoalRounds') && (!Number.isSafeInteger(input.maxGoalRounds) || (input.maxGoalRounds as number) < 1)) throw new Error('assistant-goals: invalid control input')
+    return Object.freeze({
+      goalId: input.goalId,
+      expectedRevision: input.expectedRevision,
+      operation,
+      ...(names.includes('objective') ? { objective: input.objective as string } : {}),
+      ...(names.includes('maxGoalRounds') ? { maxGoalRounds: input.maxGoalRounds as number } : {}),
+    })
   }
 
   list = (agent: Agent | undefined): readonly GoalRecord[] => {
