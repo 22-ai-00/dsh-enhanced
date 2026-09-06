@@ -63,7 +63,7 @@ canonical `danger-full-access` 现在直接折叠为 reviewer `none`，不需要
 参数级风险门不是宽泛的字符串前缀判断，也不声称实现了完整 shell parser：
 
 - `read` / `read_image` 只有一个可证明位于 workspace 内且不带 credential-sensitive 标记的本地路径时可继续；`glob` / `grep` 只接受已知参数形态，并对 search root、glob/include 做同样的词法范围检查。workspace 外、`.env`、`.ssh`、`.codex/auth.json` 等敏感目标、URL、缺失路径或未知参数一律交人工；
-- `pwd`、受限 `ls`、`git status --short` 等少量精确 argv 形态可继续；其 `workdir` 与 `ls` 路径操作数仍必须位于非 credential 的 workspace 范围内，未知或畸形 bash 参数失败关闭；
+- `pwd`、受限 `ls`、`git status --short|--porcelain`、`git rev-parse --show-toplevel|--abbrev-ref HEAD`、`git diff --no-ext-diff` 的 `--stat|--stat --cached|--name-only`、`git log --oneline -n 10|20`，以及 `node/npm/pnpm/python3/cargo/rustc/tsc/git --version`、`node -v`、`go version`、`uname -s|-m` 等少量精确 argv 形态可继续。允许的条件是只读、不触网、不读 credential 路径且不接受可逃出 workspace 的操作数：带操作数的命令（如 `ls`）由独立分类器做范围检查，`git log --oneline -n 50`、`uname -a`、`go get`、`npm install`、`cargo install` 等相邻形态不在名单内。其 `workdir` 与 `ls` 路径操作数仍必须位于非 credential 的 workspace 范围内，未知或畸形 bash 参数失败关闭；
 - 简单但未分类的命令（例如 `pnpm test`）与未知工具进入 `ask-review`。`run_code` 例外：当前 worker runtime 是 bash-equivalent 的便利执行环境，不是 OS 安全边界，代码可触达 Node/进程能力，因此在 ask/auto 档始终进入 `ask-human`，不会交给模型自动批准；仅显式完整的 full 档会按其“不再请求批准”的语义直接继续；
 - 网络（包括内置 `web_search` / `web_fetch`）、credential 痕迹、后台执行（包括 `bash.run_in_background: true`）、破坏性操作、提权、workspace 外写入，以及包含管道、重定向、替换、引号等需要真实 shell 解析的命令进入 `ask-human`；`npx`、`npm exec`、`pnpm/yarn dlx` 与 `git submodule update` 也按潜在下载/远端执行直接归入这一档；
 - `pwsh` 在具备独立严格解析器前一律进入 `ask-human`；

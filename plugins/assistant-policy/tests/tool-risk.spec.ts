@@ -106,11 +106,54 @@ describe('parameter-aware tool risk classification', () => {
       'pwd',
       'ls -la src',
       'git status --short',
+      'git status --porcelain',
       'git branch --show-current',
       'git rev-parse --show-toplevel',
+      'git rev-parse --abbrev-ref HEAD',
       'git diff --no-ext-diff --stat',
+      'git diff --no-ext-diff --stat --cached',
+      'git diff --no-ext-diff --name-only',
+      'git log --oneline -n 10',
+      'git log --oneline -n 20',
+      'node --version',
+      'node -v',
+      'npm --version',
+      'pnpm --version',
+      'python3 --version',
+      'go version',
+      'cargo --version',
+      'rustc --version',
+      'tsc --version',
+      'git --version',
+      'uname -s',
+      'uname -m',
     ]) {
       expect(classifyToolRisk({ name: 'bash', arguments: { command }, workspace }), command).toBe('allow')
+    }
+  })
+
+  test('keeps allowlisted read-only shapes distinct from their mutating or networked neighbours', () => {
+    // Each of these differs from an allowlisted entry by one token. None may be
+    // auto-approved: the version probes must not become package installs, and a
+    // bounded log read must not become an unbounded or operand-taking one.
+    for (const command of [
+      'go get ./...',
+      'go build',
+      'npm install',
+      'npm --version --registry http://internal',
+      'pnpm add left-pad',
+      'cargo install ripgrep',
+      'git push',
+      'git log',
+      'git log --oneline -n 50',
+      'git log --oneline -n 10 ../outside',
+      'git diff --no-ext-diff --stat ../outside',
+      'uname -a',
+      'node --version --eval process.exit(1)',
+      'node -v -e 1',
+    ]) {
+      expect(classifyToolRisk({ name: 'bash', arguments: { command }, workspace }), command)
+        .not.toBe('allow')
     }
   })
 
