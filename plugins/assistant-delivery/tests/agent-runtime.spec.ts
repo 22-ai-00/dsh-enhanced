@@ -35,6 +35,7 @@ import { AssistantAutomationsService, type AutomationProposalResult } from '@dsh
 import { AssistantEvaluationService, TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
+import { AssistantGoalsService } from '../../assistant-goals/lib/index.js'
 import { createHash } from 'node:crypto'
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -159,6 +160,26 @@ async function persistenceCoordinatorConstructor(): Promise<PersistenceCoordinat
     PersistenceCoordinator: PersistenceCoordinatorConstructor
   }
   return module.PersistenceCoordinator
+}
+
+async function nativeGoalPlugins(): Promise<Readonly<{
+  GoalService: new (ctx: Context) => unknown
+  goalTools: { inject: readonly string[], apply: (ctx: Context, config: object) => void }
+}>> {
+  const goalsRequire = createRequire(new URL('../../assistant-goals/package.json', import.meta.url))
+  const goalEntry = goalsRequire.resolve('@deepseek-ai/dsh-goal')
+  const toolEntry = goalsRequire.resolve('@deepseek-ai/dsh-tool-goal')
+  const [goal, tools] = await Promise.all([
+    import(pathToFileURL(goalEntry).href),
+    import(pathToFileURL(toolEntry).href),
+  ]) as [{ default: new (ctx: Context) => unknown }, { inject: readonly string[], apply: (ctx: Context, config: object) => void }]
+  return { GoalService: goal.default, goalTools: { inject: tools.inject, apply: tools.apply } }
+}
+
+function nativeGoals(ctx: Context): Readonly<{
+  complete(agent: Agent, ref: { id: string, revision: number }): unknown
+}> {
+  return (ctx as unknown as { goals: ReturnType<typeof nativeGoals> }).goals
 }
 
 function persistenceBackend(stored: Map<string, DurableStoredSession>): PersistenceBackend {
@@ -7240,6 +7261,213 @@ describe('real rc.1 delivery Agent runtime', () => {
     }
     expect(fixture.service.settleModelSelection(selectionCallback))
       .toEqual({ status: 'rejected', reason: 'model-unavailable' })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('indexes native business goals for the live owner and restores an awaiting-verification checkpoint', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goals-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const goalPolicy = {
+      id: 'owner-business-goals', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner' },
+      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot'],
+      resource: { kind: 'goal' as const, id: 'business-context' },
+      context: { initiators: ['external' as const] },
+    }
+    const checkpointToolPolicy = {
+      id: 'owner-goal-checkpoint-tool', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner' },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_checkpoint' },
+      context: { initiators: ['external' as const] },
+    }
+    const createToolPolicy = {
+      id: 'owner-goal-create-tool', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner' },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_create' },
+      context: { initiators: ['external' as const] },
+    }
+    const nativeCreateToolPolicy = {
+      id: 'owner-native-create-goal-tool', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner' },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: 'create_goal' },
+      context: { initiators: ['external' as const] },
+    }
+    const mountGoals = async (ctx: Context) => {
+      const native = await nativeGoalPlugins()
+      await ctx.plugin(native.GoalService as never, {} as never)
+      await ctx.plugin(native.goalTools as never, {} as never)
+      await ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+    }
+    const first = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [goalPolicy, checkpointToolPolicy, createToolPolicy, nativeCreateToolPolicy], presets: canonicalPermissionPresets,
+      seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    })
+    await mountGoals(first.ctx)
+    let liveOwnerAgent: Agent | undefined
+    let firstRecord: ReturnType<AssistantGoalsService['list']>[number] | undefined
+    const created = new Promise<void>((resolve, reject) => {
+      let ran = false
+      first.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+        if (ran || first.service.currentPreferenceTurn(agent) === undefined) return await next()
+        ran = true
+        liveOwnerAgent = agent
+        try {
+          const rejectedNativeCreate = await first.ctx.tools.execute({
+            callId: ToolCallId('delivery-native-create-goal-rejected'), name: 'create_goal', agent, signal,
+            arguments: { objective: 'Close the September delivery report', max_goal_rounds: 2 },
+          })
+          if (!rejectedNativeCreate.isError || !rejectedNativeCreate.content.some(block =>
+            block.type === 'text' && block.text.includes('direct human turn'))) {
+            throw new Error('native create_goal did not reject the delivery source as a non-direct-human turn')
+          }
+          const createdGoal = await first.ctx.tools.execute({
+            callId: ToolCallId('delivery-goal-create'), name: 'goal_create', agent, signal,
+            arguments: { objective: 'Close the September delivery report', max_goal_rounds: 2 },
+          })
+          if (createdGoal.isError) throw new Error(`goal_create was rejected: ${JSON.stringify(createdGoal.content)}`)
+          const record = first.ctx.assistantGoals.list(agent).at(0)
+          if (record === undefined) throw new Error('native goal was not indexed during the owner turn')
+          const checkpoint = await first.ctx.tools.execute({
+            callId: ToolCallId('native-goal-checkpoint'), name: 'goal_checkpoint', agent, signal,
+            arguments: {
+              goal_id: record.id, expected_version: record.version, next_step: 'Review the owner report', blockers: [],
+              assumptions: [{ statement: 'Owner data remains available', expires_at: Date.now() + 60_000 }],
+              evidence_refs: ['lark:report'], dependencies: [],
+            },
+          })
+          if (checkpoint.isError) throw new Error(`goal checkpoint tool was rejected: ${JSON.stringify(checkpoint.content)}`)
+          nativeGoals(first.ctx).complete(agent, { id: record.native.goalId, revision: record.native.revision })
+          firstRecord = first.ctx.assistantGoals.list(agent).at(0)
+          resolve()
+        } catch (error) { reject(error) }
+        return await next()
+      })
+    })
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await first.service.acceptInbound(message('evt-native-goal-create', 'Track the September delivery report'))
+    await drive(first.service)
+    await created
+    if (liveOwnerAgent === undefined || firstRecord === undefined) throw new Error('native goal fixture never indexed its live owner goal')
+    expect(firstRecord).toMatchObject({ originalObjective: 'Close the September delivery report', native: { phase: 'complete' }, checkpoint: { nextStep: 'Review the owner report' } })
+    expect(first.ctx.assistantGoals.describe(firstRecord)).toContain('awaiting-verification')
+    expect(first.ctx.assistantGoals.describe(firstRecord)).not.toContain('"achieved"')
+    expect(KNOWN_SESSION_EVENT_TYPES.has('goal/change')).toBe(true)
+    await first.ctx.fiber.restart()
+
+    const reopened = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [goalPolicy, checkpointToolPolicy, createToolPolicy, nativeCreateToolPolicy], presets: canonicalPermissionPresets,
+      seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    })
+    await mountGoals(reopened.ctx)
+    let restored: ReturnType<AssistantGoalsService['list']> | undefined
+    reopened.ctx.on('agent/pre-step', async ({ agent }, next) => {
+      restored = reopened.ctx.assistantGoals.list(agent)
+      return await next()
+    })
+    await reopened.service.acceptInbound(message('evt-native-goal-restore', 'Show the current delivery context'))
+    await drive(reopened.service)
+    expect(restored).toEqual([expect.objectContaining({
+      id: firstRecord.id, originalObjective: 'Close the September delivery report', native: expect.objectContaining({ phase: 'complete' }),
+      checkpoint: expect.objectContaining({ nextStep: 'Review the owner report' }),
+    })])
+    await reopened.ctx.fiber.restart()
+  })
+
+  test('does not expose or adopt an old owner goal after a real owner handoff', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goal-handoff-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const replacement = { ...principal, user: 'ou_replacement' }
+    const externalId = (input: typeof principal) => `${input.channel}/${input.account}/${input.tenant}/${input.user}`
+    const goalRule = (id: string) => ({
+      id, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: id },
+      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot'],
+      resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] },
+    })
+    const toolRule = (id: string) => ({
+      id: `${id}-checkpoint`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: id },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_checkpoint' }, context: { initiators: ['external' as const] },
+    })
+    const contextToolRule = (id: string) => ({
+      id: `${id}-context`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: id },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_context' }, context: { initiators: ['external' as const] },
+    })
+    const createToolRule = (id: string) => ({
+      id: `${id}-create`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: id },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_create' }, context: { initiators: ['external' as const] },
+    })
+    const replacementRules = [
+      { id: 'replacement-ingest', effect: 'allow' as const, subject: { kind: 'external' as const, id: externalId(replacement) },
+        actions: ['ingest'], resource: { kind: 'message' as const, id: '*' }, context: { initiators: ['external' as const] } },
+      { id: 'replacement-reply', effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: externalId(replacement) },
+        actions: ['reply'], resource: { kind: 'message' as const, id: '*' }, context: { initiators: ['external' as const] } },
+      goalRule(externalId(replacement)), toolRule(externalId(replacement)), contextToolRule(externalId(replacement)), createToolRule(externalId(replacement)),
+    ]
+    const fixture = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [goalRule(externalId(principal)), toolRule(externalId(principal)), contextToolRule(externalId(principal)), createToolRule(externalId(principal)), ...replacementRules],
+      presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    })
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(native.goalTools as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+
+    let oldRecord: ReturnType<AssistantGoalsService['list']>[number] | undefined
+    let replacementContext: unknown
+    let replacementCheckpoint: Awaited<ReturnType<typeof fixture.ctx.tools.execute>> | undefined
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      const turn = fixture.service.currentPreferenceTurn(agent)
+      if (turn?.principalId === externalId(principal) && oldRecord === undefined) {
+        const createdGoal = await fixture.ctx.tools.execute({
+          callId: ToolCallId('old-owner-goal-create'), name: 'goal_create', agent, signal,
+          arguments: { objective: 'Protect the old owner delivery report', max_goal_rounds: 2 },
+        })
+        if (createdGoal.isError) throw new Error(`old owner goal_create was rejected: ${JSON.stringify(createdGoal.content)}`)
+        const indexed = fixture.ctx.assistantGoals.list(agent).at(0)
+        if (indexed === undefined) throw new Error('old owner native goal was not indexed')
+        const checkpoint = await fixture.ctx.tools.execute({
+          callId: ToolCallId('old-owner-goal-checkpoint'), name: 'goal_checkpoint', agent, signal,
+          arguments: { goal_id: indexed.id, expected_version: indexed.version, next_step: 'Keep private', blockers: [], assumptions: [], evidence_refs: [], dependencies: [] },
+        })
+        if (checkpoint.isError) throw new Error('old owner checkpoint was rejected')
+        oldRecord = fixture.ctx.assistantGoals.list(agent).at(0)
+        nativeGoals(fixture.ctx).complete(agent, { id: indexed.native.goalId, revision: indexed.native.revision })
+      }
+      if (turn?.principalId === externalId(replacement) && oldRecord !== undefined) {
+        replacementContext = await fixture.ctx.tools.execute({
+          callId: ToolCallId('replacement-goal-context'), name: 'goal_context', agent, signal, arguments: {},
+        })
+        replacementCheckpoint = await fixture.ctx.tools.execute({
+          callId: ToolCallId('replacement-old-goal-checkpoint'), name: 'goal_checkpoint', agent, signal,
+          arguments: { goal_id: oldRecord.id, expected_version: oldRecord.version, next_step: 'Take over', blockers: [], assumptions: [], evidence_refs: [], dependencies: [] },
+        })
+      }
+      return await next()
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-native-goal-old-owner', 'Create the private delivery goal'))
+    await drive(fixture.service)
+    if (oldRecord === undefined) throw new Error('old owner goal fixture did not finish')
+
+    const store = runtimeStore(fixture.service)
+    const oldOwner = store.getPrincipal(principal)!
+    store.revokePrincipal(oldOwner.id, oldOwner.version)
+    ;(store as unknown as { handoffOwner(input: typeof replacement): unknown }).handoffOwner(replacement)
+    await fixture.service.acceptInbound({ ...message('evt-native-goal-replacement', 'Continue the delivery work'), principal: replacement })
+    await drive(fixture.service)
+
+    expect(replacementContext).toMatchObject({ isError: false })
+    expect((replacementContext as { value: { context: string } }).value.context).toContain('"goals":[]')
+    expect(JSON.stringify(replacementContext)).not.toContain('Protect the old owner delivery report')
+    expect(replacementCheckpoint).toMatchObject({ isError: true })
+    expect(JSON.stringify(replacementCheckpoint)).not.toContain('Protect the old owner delivery report')
     await fixture.ctx.fiber.restart()
   })
 })

@@ -18,6 +18,9 @@ catalog:
   '@deepseek-ai/dsh-atomic-write': 0.1.2-rc.1
   '@deepseek-ai/dsh-code-runtime': 0.1.2-rc.1
   '@deepseek-ai/dsh-cordis-host-runner': 0.1.2-rc.1
+  '@deepseek-ai/dsh-goal': 0.1.2-rc.1
+  '@deepseek-ai/dsh-tool-goal': 0.1.2-rc.1
+  '@deepseek-ai/dsh-goal-round-driver': 0.1.2-rc.1
   '@deepseek-ai/dsh-home-paths': 0.1.2-rc.1
   '@deepseek-ai/dsh-invariants': 0.1.2-rc.1
   '@deepseek-ai/dsh-llm': 0.1.2-rc.1
@@ -74,6 +77,9 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-code-runtime@0.1.2-rc.1'
   - '@deepseek-ai/dsh-commands@0.1.2-rc.1'
   - '@deepseek-ai/dsh-cordis-host-runner@0.1.2-rc.1'
+  - '@deepseek-ai/dsh-goal@0.1.2-rc.1'
+  - '@deepseek-ai/dsh-tool-goal@0.1.2-rc.1'
+  - '@deepseek-ai/dsh-goal-round-driver@0.1.2-rc.1'
   - '@deepseek-ai/dsh-home-paths@0.1.2-rc.1'
   - '@deepseek-ai/dsh-invariants@0.1.2-rc.1'
   - '@deepseek-ai/dsh-llm@0.1.2-rc.1'

@@ -1,0 +1,52 @@
+export interface GoalScope {
+  principalId: string
+  principalRecordId: string
+  principalVersion: number
+  workspace: string
+  preset: string
+}
+
+export interface NativeGoalState {
+  sessionId: string
+  goalId: string
+  revision: number
+  objective: string
+  phase: 'active' | 'paused' | 'blocked' | 'complete' | 'cleared'
+  roundsStarted: number
+  maxGoalRounds: number
+  updatedAt: number
+}
+
+export interface GoalCheckpoint {
+  nextStep: string
+  blockers: readonly string[]
+  assumptions: readonly { statement: string; expiresAt: number }[]
+  evidenceRefs: readonly string[]
+  dependencies: readonly string[]
+}
+
+export interface GoalRecord {
+  id: string
+  scope: GoalScope
+  originalObjective: string
+  native: NativeGoalState
+  checkpoint: GoalCheckpoint
+  version: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type GoalStoreErrorCode =
+  | 'conflict'
+  | 'invalid-input'
+  | 'not-found'
+  | 'schema'
+  | 'unsafe-file'
+
+/** An intentionally non-descriptive error for owner-scoped ledger operations. */
+export class GoalStoreError extends Error {
+  constructor(readonly code: GoalStoreErrorCode) {
+    super('goal store operation rejected')
+    this.name = 'GoalStoreError'
+  }
+}

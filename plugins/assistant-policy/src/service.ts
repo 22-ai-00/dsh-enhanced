@@ -85,6 +85,7 @@ const resourceKindSchema = Schema.union([
   'credential',
   'evolution',
   'filesystem',
+  'goal',
   'memory',
   'message',
   'network',
