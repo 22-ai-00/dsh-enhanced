@@ -11,6 +11,19 @@ export type FeedbackSignalSelection = DeliveryPreferenceSelection & Readonly<{
   interpretationTrust?: 'explicit-selection' | 'typed-feedback'
 }>
 export type ObjectiveFeedbackStatus = 'achieved' | 'partial' | 'not-achieved'
+export type ObjectiveRevisionCommand = Readonly<{
+  kind: 'objective-revision'
+  action: 'correct' | 'withdraw'
+  expectedVersion: number
+  previousStatus: ObjectiveFeedbackStatus | 'unknown'
+  objectiveStatus: ObjectiveFeedbackStatus | 'unknown'
+}>
+export type ObjectiveCommand = Extract<ParsedFeedbackCommand, { kind: 'objective' | 'objective-revision' | 'objective-status' }>
+export type ObjectiveCommandResult = 'conflict' | 'invalid-target' | 'recorded' | 'unavailable' | 'unknown'
+  | Readonly<{ version: number; objectiveStatus: ObjectiveFeedbackStatus | 'unknown' }>
+export function objectiveStateMessage(state: Readonly<{ version: number; objectiveStatus: string }>): string {
+  return `当前任务反馈：${state.objectiveStatus}，版本 ${state.version}。\n继续回复原任务结果：\n/feedback correct ${state.version} ${state.objectiveStatus} not-achieved\n/feedback withdraw ${state.version} ${state.objectiveStatus}\n/feedback status`
+}
 
 export type NaturalPreferenceSelection = Extract<FeedbackSignalSelection, {
   preferenceKey: 'response.language' | 'response.structure' | 'response.verbosity'
@@ -27,6 +40,8 @@ export type NaturalPreferenceDirectiveClassification =
   | Readonly<{ kind: 'ordinary-content' }>
 
 export type ParsedFeedbackCommand =
+  | ObjectiveRevisionCommand
+  | { kind: 'objective-status' }
   | { kind: 'invalid' }
   | { kind: 'signals'; selections: readonly FeedbackSignalSelection[] }
   | { kind: 'objective'; objectiveStatus: ObjectiveFeedbackStatus }
@@ -80,6 +95,8 @@ const typedPreferences = Object.freeze({
 export const feedbackUsage = [
   '反馈命令：',
   '- 回复一条自动化或普通 Agent 任务结果，并发送 /feedback achieved|partial|not-achieved（记录该次任务结果）',
+  '- /feedback status（回复原任务结果，查询当前反馈与可复制的更正命令）',
+  '- /feedback correct <版本> <原状态> <新状态>；/feedback withdraw <版本> <原状态>（撤回后状态为 unknown）',
   '- /feedback helpful|not-helpful|too-long|too-short|wrong-format|wrong-action|unwanted-reminder',
   '- /feedback verbosity concise|balanced|detailed',
   '- /feedback structure prose|bullets|mixed',
@@ -97,6 +114,17 @@ export function parseFeedbackCommand(rawInput: string): ParsedFeedbackCommand {
   const normalized = rawInput.trim()
   if (normalized === '') return { kind: 'invalid' }
   const tokens = normalized.split(/[\t\n\r ]+/u)
+  if (normalized === 'status') return { kind: 'objective-status' }
+  if ((tokens[0] === 'correct' && tokens.length === 4) || (tokens[0] === 'withdraw' && tokens.length === 3)) {
+    const version = Number(tokens[1])
+    const previous = tokens[2]!
+    const next = tokens[0] === 'withdraw' ? 'unknown' : tokens[3]!
+    if (!/^[1-9][0-9]*$/u.test(tokens[1]!) || !Number.isSafeInteger(version)
+      || ![...objectiveFeedback, 'unknown'].includes(previous)
+      || (tokens[0] === 'correct' && !(objectiveFeedback as readonly string[]).includes(next))) return { kind: 'invalid' }
+    return { kind: 'objective-revision', action: tokens[0], expectedVersion: version,
+      previousStatus: previous as ObjectiveFeedbackStatus | 'unknown', objectiveStatus: next as ObjectiveFeedbackStatus | 'unknown' }
+  }
   if (tokens.length === 1) {
     const value = tokens[0]!
     if ((objectiveFeedback as readonly string[]).includes(value)) {

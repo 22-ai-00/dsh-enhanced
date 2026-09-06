@@ -104,3 +104,5 @@ intent。rollback 暂时不可达时保持 fail-closed 并在 health 中报告�
 ## 兼容性
 
 See the repository [compatibility baseline](../../docs/compatibility.md).
+
+Promoted experiments can enter `rollback-pending` when their exact canary's canonical objective is corrected or withdrawn. Automations sends the exact artifact version it paused; Growth persists that version and replays the rollback receipt after restart. Ordinary foreground workflow revisions continue through the existing trace/candidate invalidation path. Historical outcomes and unrelated deployments are preserved.

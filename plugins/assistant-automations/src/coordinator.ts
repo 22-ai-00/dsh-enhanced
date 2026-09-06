@@ -124,6 +124,8 @@ export class AutomationRunnerFailureError extends Error {
 }
 
 export interface AutomationCoordinatorOptions {
+  /** Host proof revalidation before every timer, manual, or internal dispatch tick. */
+  beforeDispatch?: () => void
   store: AutomationStore
   artifacts: AutomationArtifactStore
   runner: AutomationRunner
@@ -183,6 +185,7 @@ function recorderErrorCode(error: unknown): string {
 }
 
 export class AutomationCoordinator {
+  private readonly beforeDispatch: (() => void) | undefined
   private readonly store: AutomationStore
   private readonly artifacts: AutomationArtifactStore
   private readonly runner: AutomationRunner
@@ -208,6 +211,7 @@ export class AutomationCoordinator {
     if (!Number.isSafeInteger(options.maxConcurrency) || options.maxConcurrency <= 0 || options.maxConcurrency > 100) {
       throw new Error('assistant-automations: maxConcurrency must be between 1 and 100')
     }
+    this.beforeDispatch = options.beforeDispatch
     this.store = options.store
     this.artifacts = options.artifacts
     this.runner = options.runner
@@ -234,6 +238,7 @@ export class AutomationCoordinator {
     if (this.stopped) throw new Error('assistant-automations coordinator is stopped')
     const now = this.now()
     if (!this.ensureDuty(now)) return
+    this.beforeDispatch?.()
     this.store.recoverExpiredCircuitProbes({ now })
     this.store.recoverExpiredTasks({ now, limit: this.maxCatchUp })
     this.dispatchPendingEvaluations()

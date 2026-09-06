@@ -193,3 +193,15 @@ test('pending Evolution delivery does not block a canonical Evaluation fence', (
   expect(h.activate).toHaveBeenCalledTimes(1)
   expect(db.prepare("SELECT status FROM evaluation_projection_outbox").get()).toEqual({ status: 'pending' })
 })
+
+test('a newer positive owner judgement preserves an already promoted exact-run deployment', () => {
+  const h = harness(); h.append('achieved')
+  h.service.inspectWorkflowCanary(inspect)
+  h.service.promoteWorkflowAutomation(request)
+  h.append('achieved', true)
+  const rollback = vi.spyOn(h.service, 'rollbackWorkflowAutomation')
+  const deployed = h.service as unknown as { revalidatePromotedWorkflows(strict: boolean): void }
+  deployed.revalidatePromotedWorkflows(true)
+  expect(rollback).not.toHaveBeenCalled()
+  expect(h.growthStore.byExperiment('experiment')?.state).toBe('promoted')
+})

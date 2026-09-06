@@ -170,6 +170,19 @@ export class AssistantGrowthExperimentsService extends Service {
       this.store.close()
       throw error
     }
+    const invalidations = automations as { onWorkflowEvidenceInvalidated?: (listener: (experimentId: string, artifact: { id: string; version: number; digest: string }) => void) => () => void }
+    if (typeof invalidations.onWorkflowEvidenceInvalidated === 'function') {
+      const disposeInvalidations = invalidations.onWorkflowEvidenceInvalidated((experimentId, artifact) => {
+        const current = this.store.getExperiment(experimentId)
+        if (current === undefined || !['promoted', 'promotion-pending', 'canary-pending'].includes(current.state)
+          || current.artifactId !== artifact.id || current.artifactDigest !== artifact.digest) return
+        this.store.transitionExperiment({ experimentId, expectedVersion: current.version,
+          expectedState: current.state, state: 'rollback-pending', artifact,
+          operationKind: 'rollback', operationId: `${experimentId}:rollback`, terminalCode: 'canary-evidence-superseded' })
+        this.scheduleTick()
+      })
+      ctx.effect(() => disposeInvalidations)
+    }
     if (config.tickIntervalMs > 0) {
       this.timer = setInterval(() => { this.scheduleTick() }, config.tickIntervalMs)
       this.timer.unref?.()

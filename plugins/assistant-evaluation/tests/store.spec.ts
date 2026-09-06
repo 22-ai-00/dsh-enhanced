@@ -94,6 +94,8 @@ describe('evaluation database', () => {
     const path = join(root(), 'v3.sqlite')
     const current = openEvaluationDatabase(path)
     current.exec(`
+      DROP TABLE evaluation_owner_commands;
+      DROP TABLE evaluation_owner_revisions;
       DROP VIEW evaluation_task_projection_view;
       DROP TABLE evaluation_scope_watermarks;
       DROP TABLE evaluation_task_projections;
@@ -140,7 +142,7 @@ describe('evaluation database', () => {
         metrics: { outputTokens: 9 },
         projection: expect.objectContaining({ subjectKind: 'automation-run', subjectRef: runId }),
       })])
-    expect(store.health()).toMatchObject({ schemaVersion: 7, taskProjections: 1 })
+    expect(store.health()).toMatchObject({ schemaVersion: 8, taskProjections: 1 })
     store.close()
   })
 })
@@ -488,4 +490,90 @@ describe('evaluation store', () => {
     expect(tasks.every(task => task.projection.subjectKind === 'outcome')).toBe(true)
     store.close()
   })
+})
+
+describe('linked owner objective revisions', () => {
+  test('CAS revisions preserve immutable audit, quarantine independent conflict and never revive terminal success after withdrawal or restart', () => {
+    const path = join(root(), 'owner.sqlite')
+    let store = new EvaluationStore({ path, now: () => 2000 })
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const runId = 'owner-run'
+    store.append(envelope({ scope, situation: 'automation:owner',
+      source: { kind: 'automation', id: 'assistant-automations' },
+      evaluator: { id: 'assistant-automations', version: 'terminal-v1' },
+      evidence: [{ kind: 'automation-run', ref: runId }], idempotencyKey: 'terminal' }))
+    const owner = (status: OutcomeEnvelope['objectiveStatus'], key: string) => envelope({
+      scope, situation: 'automation:owner', objectiveStatus: status,
+      source: { kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' },
+      evaluator: { id: 'assistant-delivery-owner-feedback', version: '2' },
+      evidence: [{ kind: 'automation-run', ref: runId }, { kind: 'delivery-outbox', ref: 'result' }],
+      idempotencyKey: key,
+    })
+    const lineage = { principalRecordId: 'host-owner', principalVersion: 1 }
+    const initial = store.append(owner('achieved', 'initial'), { ...lineage, action: 'initial', operationId: 'evt-1' })
+    const initialVersion = store.queryTasks({ scope })[0]!.projection.learningVersion
+    expect(store.append(owner('achieved', 'initial'), { ...lineage, action: 'initial', operationId: 'evt-2' }).id).toBe(initial.id)
+    expect(store.queryTasks({ scope })[0]!.projection.learningVersion).toBe(initialVersion)
+    expect(() => store.append(owner('not-achieved', 'initial'), { ...lineage, action: 'initial', operationId: 'evt-conflict' })).toThrow(/initial judgement/)
+    const futureCommand = { ...lineage, action: 'correct' as const, operationId: 'future-command', expectedVersion: 3, previousStatus: 'unknown' as const }
+    expect(() => store.append(owner('achieved', 'future-outcome'), futureCommand)).toThrow(/judgement changed/)
+    const correctedCommand = { ...lineage, action: 'correct' as const, operationId: 'evt-3', expectedVersion: 1, previousStatus: 'achieved' as const }
+    const corrected = store.append(owner('not-achieved', 'correct'), correctedCommand)
+    expect(corrected.ownerFeedbackState).toEqual({ version: 2, objectiveStatus: 'not-achieved' })
+    expect(store.queryTasks({ scope })[0]).toMatchObject({ objectiveStatus: 'not-achieved', executionStatus: 'succeeded', projection: { status: 'ready' } })
+    const withdrawal = { ...lineage, action: 'withdraw' as const, operationId: 'evt-4', expectedVersion: 2, previousStatus: 'not-achieved' as const }
+    store.append(owner('unknown', 'withdraw'), withdrawal)
+    expect(store.queryTasks({ scope })[0]).toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
+    expect(store.append(owner('not-achieved', 'correct'), correctedCommand)).toEqual(corrected)
+    expect(() => store.append(owner('achieved', 'stale'), { ...correctedCommand, operationId: 'evt-stale' })).toThrow(/feedback|judgement/)
+    expect(() => store.append(owner('achieved', 'wrong-owner'), { ...correctedCommand, operationId: 'evt-wrong', principalRecordId: 'another-owner' })).toThrow(/judgement/)
+    store.close()
+    store = new EvaluationStore({ path, now: () => 3000 })
+    expect(store.queryTasks({ scope })[0]).toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
+    expect(store.getOutcome(scope, initial.id)?.objectiveStatus).toBe('achieved')
+    expect(() => store.append(owner('not-achieved', 'initial'), { ...lineage, action: 'initial', operationId: 'evt-conflict' })).toThrow(/judgement changed/)
+
+    expect(() => store.append(owner('achieved', 'future-outcome'), futureCommand)).toThrow(/judgement changed/)
+    store.append(owner('partial', 'correct-again'), { ...lineage, action: 'correct', operationId: 'evt-5', expectedVersion: 3, previousStatus: 'unknown' })
+    expect(store.queryTasks({ scope })[0]?.objectiveStatus).toBe('partial')
+    store.append(owner('achieved', 'independent-owner'))
+    expect(store.queryTasks({ scope })[0]).toMatchObject({ objectiveStatus: 'unknown', projection: { status: 'objective-conflict' } })
+    expect(store.query({ scope, limit: 20 })).toHaveLength(6)
+    store.close()
+  })
+})
+
+test('schema-seven feedback is lazily adopted by an exact Host target and remains withdrawable', () => {
+  const path = join(root(), 'legacy-owner.sqlite')
+  let store = new EvaluationStore({ path })
+  const original = envelope({ source: { kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' },
+    evaluator: { id: 'assistant-delivery-owner-feedback', version: '2' },
+    evidence: [{ kind: 'automation-run', ref: 'legacy-run' }, { kind: 'delivery-outbox', ref: 'legacy-outbox' }],
+    idempotencyKey: 'legacy-initial' })
+  const old = store.append(original)
+  store.close()
+  const db = new DatabaseSync(path)
+  db.exec("DROP TABLE evaluation_owner_commands; DROP TABLE evaluation_owner_revisions; UPDATE evaluation_schema_meta SET value = '7' WHERE key = 'schema-version'; PRAGMA user_version = 7")
+  db.close()
+  store = new EvaluationStore({ path })
+  const lineage = { principalRecordId: 'owner-record', principalVersion: 1 }
+  const claims = { scope: old.scope, situation: old.situation, runId: 'legacy-run', outboxId: 'legacy-outbox',
+    chatId: 'chat', principalId: 'owner', bindingId: 'binding', objectiveStatus: 'achieved' as const,
+    occurredAt: old.occurredAt, idempotencyKey: 'legacy-initial', initialIdempotencyKey: 'legacy-initial',
+    ownerCommand: { ...lineage, action: 'initial' as const, operationId: 'adopt' } }
+  expect(() => store.adoptLegacyOwnerFeedback({ ...claims, outboxId: 'wrong-result' })).toThrow(/exact delivered result/)
+  store.adoptLegacyOwnerFeedback(claims)
+  expect(store.ownerObjectiveState(old.scope, 'legacy-run', 'owner-record', 1)).toEqual({ version: 1, objectiveStatus: 'achieved' })
+  store.append({ ...original, objectiveStatus: 'partial', idempotencyKey: 'legacy-correct' },
+    { ...lineage, action: 'correct', operationId: 'legacy-correct', expectedVersion: 1, previousStatus: 'achieved' })
+  store.append({ ...original, objectiveStatus: 'unknown', idempotencyKey: 'legacy-withdraw' },
+    { ...lineage, action: 'withdraw', operationId: 'legacy-withdraw', expectedVersion: 2, previousStatus: 'partial' })
+  store.close()
+  store = new EvaluationStore({ path })
+  expect(store.getOutcome(old.scope, old.id)?.objectiveStatus).toBe('achieved')
+  expect(store.ownerObjectiveState(old.scope, 'legacy-run', 'owner-record', 1)).toEqual({ version: 3, objectiveStatus: 'unknown' })
+  expect(store.ownerObjectiveState(old.scope, 'legacy-run', 'owner-record', 2)).toBeUndefined()
+  expect(() => store.append({ ...original, idempotencyKey: 'changed-owner-version' },
+    { ...lineage, principalVersion: 2, action: 'correct', operationId: 'changed-owner-version', expectedVersion: 3, previousStatus: 'unknown' })).toThrow(/judgement changed/)
+  store.close()
 })

@@ -4056,6 +4056,16 @@ describe('real rc.1 delivery Agent runtime', () => {
     await drive(fixture.service)
     expect(outcomes).toHaveLength(1)
     expect(fixture.sends.at(-1)?.text).toContain('已经记录了不同的任务结果')
+    // This fixture deliberately implements the older registration without ownerRevisionProtocol.
+    for (const [index, command] of ['status', 'correct 1 achieved partial', 'withdraw 1 achieved'].entries()) {
+      await fixture.service.acceptInbound({
+        ...message(`evt-old-evaluation-${index}`, `/feedback ${command}`, 'command'),
+        metadata: { replyToProviderMessageId: delivered.providerMessageId! },
+      })
+      await drive(fixture.service)
+      expect(fixture.sends.at(-1)?.text).toContain('评测服务尚未启用')
+      expect(outcomes).toHaveLength(1)
+    }
     await fixture.ctx.fiber.restart()
   })
 
@@ -4124,6 +4134,23 @@ describe('real rc.1 delivery Agent runtime', () => {
     await drive(fixture.service)
     expect(traces).toHaveLength(1)
     expect(fixture.sends.at(-1)?.text).toContain('已经记录了不同的任务结果')
+    const requestsBeforeCorrections = fixture.llm.requests.length
+    for (const [event, command, expected] of [
+      ['status', 'status', 'correct 1 achieved not-achieved'],
+      ['correct', 'correct 1 achieved partial', '版本 2'],
+      ['stale', 'correct 1 achieved not-achieved', '/feedback status'],
+      ['withdraw', 'withdraw 2 partial', '版本 3'],
+      ['restore', 'correct 3 unknown achieved', '版本 4'],
+    ]) {
+      await fixture.service.acceptInbound({
+        ...message(`evt-verified-workflow-${event}`, `/feedback ${command}`, 'command'),
+        metadata: { replyToProviderMessageId: sourceProviderMessageId },
+      })
+      await drive(fixture.service)
+      expect(fixture.sends.at(-1)?.text).toContain(expected)
+    }
+    expect(traces.map(trace => trace.disposition)).toEqual(['upsert', 'retract', 'retract', 'upsert'])
+    expect(fixture.llm.requests).toHaveLength(requestsBeforeCorrections)
     await fixture.ctx.fiber.restart()
   })
 

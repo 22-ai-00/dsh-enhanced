@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { DeliveryStore, DeliveryStoreError } from '../src/store.ts'
 
@@ -221,7 +222,7 @@ describe('verified workflow feedback producer', () => {
       sourceInboxId: source.inboxId,
       sourceOutboxId: source.outboxId,
       objectiveStatus: 'achieved',
-    })).toEqual({ outcome: 'no-trace', reason: 'privacy-abstained', replayed: false })
+    })).toMatchObject({ outcome: 'no-trace', reason: 'privacy-abstained', replayed: false })
     expect(JSON.stringify(fixture.store.listPendingWorkflowTraceRevisions())).not.toContain('owner-secret-739')
     finishSourceInbox(fixture.store, achievedFeedback)
 
@@ -247,4 +248,71 @@ describe('verified workflow feedback producer', () => {
     expect(fixture.store.listPendingWorkflowTraceRevisions()).toHaveLength(0)
     fixture.store.close()
   })
+})
+
+test('foreground corrections and withdrawal advance one trace, preserve other tasks and reject stale commands', async () => {
+  const fixture = await createFixture()
+  const source = recordCompletedAgentReply({ ...fixture, eventId: 'source-revised',
+    text: 'prepare daily workspace status summary', providerMessageId: 'result-revised' })
+  const initialInbox = recordObjectiveFeedback({ ...fixture, eventId: 'initial-revised', providerMessageId: 'result-revised', objectiveStatus: 'achieved' })
+  const initial = fixture.store.commitVerifiedWorkflowTraceFeedback({ binding: fixture.binding, feedbackInboxId: initialInbox,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, objectiveStatus: 'achieved' })
+  finishSourceInbox(fixture.store, initialInbox)
+  const revise = async (eventId: string, text: string, providerMessageId = 'result-revised') => {
+    const { parseFeedbackCommand } = await import('../src/feedback-command.ts')
+    const command = parseFeedbackCommand(text)
+    if (command.kind !== 'objective-revision') throw new Error('invalid fixture')
+    const inbox = fixture.store.acceptInbound({ channel: fixture.principal.channel, account: fixture.principal.account,
+      eventId, occurredAt: 1000, principal: fixture.principal, conversation: fixture.conversation,
+      kind: 'command', text: `/feedback ${text}`, metadata: { replyToProviderMessageId: providerMessageId } }).record
+    claimInbox(fixture.store, inbox.id, fixture.binding.id)
+    const input = { binding: fixture.binding, feedbackInboxId: inbox.id, sourceInboxId: source.inboxId,
+      sourceOutboxId: source.outboxId, objectiveStatus: command.objectiveStatus, command }
+    try {
+      const result = fixture.store.commitVerifiedWorkflowTraceFeedback(input)
+      expect(fixture.store.commitVerifiedWorkflowTraceFeedback(input)).toMatchObject({ ...result, replayed: true })
+      return result
+    } finally { finishSourceInbox(fixture.store, inbox.id) }
+  }
+  await expect(revise('wrong-reply', 'correct 1 achieved partial', 'different-result')).rejects.toThrow(/completed owner turn/)
+  expect(await revise('correct-one', 'correct 1 achieved partial')).toMatchObject({ ownerFeedbackState: { version: 2, objectiveStatus: 'partial' } })
+  await expect(revise('stale-correction', 'correct 1 achieved not-achieved')).rejects.toThrow(/version changed/)
+  const obsoleteInitial = recordObjectiveFeedback({ ...fixture, eventId: 'new-obsolete-initial', providerMessageId: 'result-revised', objectiveStatus: 'achieved' })
+  expect(() => fixture.store.commitVerifiedWorkflowTraceFeedback({ binding: fixture.binding, feedbackInboxId: obsoleteInitial,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, objectiveStatus: 'achieved' })).toThrow(/current owner judgement/)
+  finishSourceInbox(fixture.store, obsoleteInitial)
+  expect(await revise('withdraw-one', 'withdraw 2 partial')).toMatchObject({ ownerFeedbackState: { version: 3, objectiveStatus: 'unknown' } })
+  expect(await revise('correct-two', 'correct 3 unknown achieved')).toMatchObject({ outcome: 'trace-recorded', ownerFeedbackState: { version: 4, objectiveStatus: 'achieved' } })
+  expect(await revise('equal-achieved', 'correct 4 achieved achieved')).toMatchObject({ outcome: 'trace-recorded', ownerFeedbackState: { version: 4, objectiveStatus: 'achieved' } })
+  expect(fixture.store.verifiedWorkflowObjectiveState(source.outboxId)).toEqual({ version: 4, objectiveStatus: 'achieved' })
+  if (initial.outcome !== 'trace-recorded') throw new Error('expected trace')
+  const latest = fixture.store.listPendingWorkflowTraceRevisions(100, 1000)
+  expect(latest.at(-1)?.revision).toMatchObject({ subjectRef: initial.revision.subjectRef, disposition: 'upsert', version: 4 })
+  expect(fixture.store.getWorkflowAutomationTemplate(initial.template)?.status).toBe('active')
+  fixture.store.close()
+})
+
+test('legacy foreground feedback does not transfer authority to a later principal incarnation after restart', async () => {
+  const fixture = await createFixture()
+  const path = join(roots.at(-1)!, 'delivery.sqlite')
+  const source = recordCompletedAgentReply({ ...fixture, eventId: 'legacy-source',
+    text: 'prepare daily workspace status summary', providerMessageId: 'legacy-result' })
+  const inbox = recordObjectiveFeedback({ ...fixture, eventId: 'legacy-initial', providerMessageId: 'legacy-result', objectiveStatus: 'achieved' })
+  fixture.store.commitVerifiedWorkflowTraceFeedback({ binding: fixture.binding, feedbackInboxId: inbox,
+    sourceInboxId: source.inboxId, sourceOutboxId: source.outboxId, objectiveStatus: 'achieved' })
+  fixture.store.close()
+  const db = new DatabaseSync(path)
+  db.exec('DROP TABLE delivery_owner_objective_commands; PRAGMA user_version = 16')
+  db.close()
+  const store = new DeliveryStore({ path, now: () => 1000 })
+  const owner = store.getPrincipal(fixture.principal)!
+  expect(store.verifiedWorkflowObjectiveState(source.outboxId, { principalRecordId: owner.id, principalVersion: owner.version })).toEqual({ version: 1, objectiveStatus: 'achieved' })
+  store.revokePrincipal(owner.id, owner.version)
+  const pairing = store.issuePairing(fixture.principal, { ttlMs: 10000, maxAttempts: 1 })
+  store.confirmPairing({ challengeId: pairing.challenge.id, principal: fixture.principal, code: pairing.code })
+  const newer = store.getPrincipal(fixture.principal)!
+  expect(newer.id).toBe(owner.id)
+  expect(newer.version).toBeGreaterThan(owner.version)
+  expect(store.verifiedWorkflowObjectiveState(source.outboxId, { principalRecordId: newer.id, principalVersion: newer.version })).toBeUndefined()
+  store.close()
 })

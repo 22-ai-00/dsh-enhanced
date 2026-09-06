@@ -1545,3 +1545,27 @@ describe('automation coordinator', () => {
     vi.useRealTimers()
   })
 })
+
+test('the real timer invokes the Host proof fence before materializing or claiming tasks', async () => {
+  const value = await fixture({ async run(input) {
+    return { outcome: 'succeeded', sessionId: input.sessionId, output: 'done', usage: {} }
+  } })
+  await value.coordinator.stop()
+  value.store.createApproved({ automationId: 'proof-fenced', idempotencyKey: 'proof-fenced', definition: definition() })
+  const run = vi.fn(async (input: AutomationRunnerInput) => ({ outcome: 'succeeded' as const, sessionId: input.sessionId, output: 'done', usage: {} }))
+  let available = false
+  const fence = vi.fn(() => { if (!available) throw new Error('canonical proof unavailable') })
+  const coordinator = new AutomationCoordinator({ store: value.store, artifacts: value.artifacts, runner: { run },
+    ownerId: 'timer-proof', now: () => Date.parse('2026-08-21T10:01:00.000Z'), dutyLeaseMs: 10000,
+    taskLeaseMs: 5000, misfireGraceMs: minute, maxCatchUp: 10, maxConcurrency: 1, tickIntervalMs: 5, beforeDispatch: fence })
+  try {
+    coordinator.start()
+    await new Promise(resolve => setTimeout(resolve, 20))
+    expect(fence.mock.calls.length).toBeGreaterThan(1)
+    expect(run).not.toHaveBeenCalled()
+    available = true
+    await new Promise(resolve => setTimeout(resolve, 20))
+    await coordinator.whenIdle()
+    expect(run).toHaveBeenCalledTimes(1)
+  } finally { await coordinator.stop(); value.store.close() }
+})

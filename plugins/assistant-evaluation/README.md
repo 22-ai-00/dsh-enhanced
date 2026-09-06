@@ -99,3 +99,9 @@ scope、situation、producer/evaluator id、证据引用和指标属于本地评
 Host 可通过 `getTrustedAutomationRunLearningProjection({ scope, runId })` 精确读取一个 run 的 ready canonical learning projection，无需扫描受 limit 限制的原始 audit 列表。不存在或 objective-conflict 时不返回证明；返回值沿用同一 canonical projection、revision、digest 和 scope watermark。调用方须检查 disposition 和执行/目标状态，并在产生依赖该证据的写入时使用 `withTrustedLearningWriterFence`。
 
 `withTrustedCanonicalLearningWriterFence` 为依赖 Evaluation canonical 状态本身的 Host 写入提供同样的 scope watermark、精确 task tuple 和同步写锁校验，但不要求投递给 Evolution 的 outbox 已完成。`withTrustedLearningWriterFence` 继续为 Evolution 依赖方保留 projection-pending gate；两者都不会代替或伪造 outbox 投递。
+
+### Owner outcome revisions
+
+Delivery's authenticated capability can explicitly correct or withdraw one exact delivered result. Schema 8 retains immutable raw outcomes, linked owner revisions, provider command receipts (including rejected CAS attempts), and a single canonical task projection. Owner lanes include principal record id and version. Only explicitly linked predecessors are superseded; independent contradictory owner evidence stays quarantined. Withdrawal is an authoritative `unknown` tombstone, so earlier terminal/evaluator success cannot reappear. The revision, digest, audit and projection outbox commit in the same SQLite transaction.
+
+Legacy schema 7 owner rows are adopted lazily through the exact Host delivery capability and stable initial idempotency key. Adoption verifies the run and Outbox references without rewriting raw history. Host consumers receive revision notifications and must also revalidate durable proof on startup / dispatch; a failed listener cannot prevent other consumers or the projection outbox from progressing.

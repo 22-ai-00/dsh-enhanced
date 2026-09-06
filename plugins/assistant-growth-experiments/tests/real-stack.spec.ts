@@ -299,7 +299,7 @@ async function publishVerifiedRepetition(
 const pause = () => new Promise(resolve => setTimeout(resolve, 3))
 
 describe('real supervised workflow-growth stack', () => {
-  test('survives restarts and lost ACKs across exact approval, blocked shadow, one canary, promotion, and rollback', async () => {
+  test.each(['workflow-retract', 'owner-correction', 'owner-withdrawal', 'owner-correction-lost-ack', 'evaluation-unavailable', 'owner-withdrawal-rollback-ack-loss', 'promotion-ack-loss-after-commit'] as const)('survives restarts and lost ACKs across exact approval, one canary, promotion, and %s', async invalidation => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-growth-real-stack-'))
     roots.push(root)
     const deliveryPath = join(root, 'delivery.sqlite')
@@ -405,7 +405,7 @@ describe('real supervised workflow-growth stack', () => {
     }
     await ctx.assistantDelivery.registerAdapter(deliveryAdapter)
     const seed = await seedOwnerWorkflow(ctx.assistantDelivery, delivered, deliveryPath)
-    await ctx.plugin(AssistantEvaluationService, {
+    const evaluationFiber = await ctx.plugin(AssistantEvaluationService, {
       databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0,
     })
 
@@ -595,8 +595,10 @@ describe('real supervised workflow-growth stack', () => {
     const promotionStore = (automations as unknown as {
       growthStore: { completePromotion(...args: unknown[]): unknown }
     }).growthStore
+    const completePromotion = promotionStore.completePromotion.bind(promotionStore)
     const promotionAckLoss = vi.spyOn(promotionStore, 'completePromotion')
-      .mockImplementationOnce(() => {
+      .mockImplementationOnce((...args) => {
+        if (invalidation === 'promotion-ack-loss-after-commit') completePromotion(...args)
         throw Object.assign(new Error('promotion acknowledgement lost'), { code: 'ack-lost' })
       })
     await growth.tick()
@@ -608,6 +610,26 @@ describe('real supervised workflow-growth stack', () => {
       expect.objectContaining({ automationId: seed.automationId, automationStatus: 'active', definitionVersion: 2 }),
     ])
 
+    if (invalidation === 'owner-correction-lost-ack') {
+      await ctx.assistantDelivery.acceptInbound({
+        channel: principal.channel, account: principal.account, eventId: 'evt-lost-ack-correction',
+        occurredAt: Date.now(), principal, conversation, kind: 'command',
+        text: '/feedback correct 1 achieved not-achieved',
+        metadata: { replyToProviderMessageId: resultMessage!.providerMessageId },
+      })
+      await ctx.assistantDelivery.tick(); await ctx.assistantDelivery.whenIdle(); await growth.whenIdle()
+      expect(automations.listSystemOwned({ owner: 'assistant-growth-experiments' })).toEqual([
+        expect.objectContaining({ automationStatus: 'paused', definitionVersion: 3 }),
+      ])
+      expect(growth.getExperiment(seed.experimentId)).toMatchObject({ state: 'rolled-back', artifactVersion: 2 })
+      await growthFiber.dispose(); await automationFiber.dispose()
+      automationFiber = await ctx.plugin(AssistantAutomationsService, automationConfig)
+      growthFiber = await ctx.plugin(AssistantGrowthExperimentsService, growthConfig)
+      await ctx.assistantAutomations.tick(); await ctx.assistantGrowthExperiments.tick()
+      expect(ctx.assistantGrowthExperiments.getExperiment(seed.experimentId)?.state).toBe('rolled-back')
+      return
+    }
+
     await growthFiber.dispose()
     await automationFiber.dispose()
     automationFiber = await ctx.plugin(AssistantAutomationsService, automationConfig)
@@ -618,6 +640,70 @@ describe('real supervised workflow-growth stack', () => {
     await growth.tick()
     experiment = growth.getExperiment(seed.experimentId)!
     expect(experiment).toMatchObject({ state: 'promoted', artifactVersion: 2 })
+
+    if (invalidation === 'evaluation-unavailable') {
+      await evaluationFiber.dispose()
+      await automations.tick(); await growth.whenIdle()
+      expect(automations.listSystemOwned({ owner: 'assistant-growth-experiments' })).toEqual([
+        expect.objectContaining({ automationStatus: 'paused', definitionVersion: 3 }),
+      ])
+      await growthFiber.dispose(); await automationFiber.dispose()
+      automationFiber = await ctx.plugin(AssistantAutomationsService, automationConfig)
+      growthFiber = await ctx.plugin(AssistantGrowthExperimentsService, growthConfig)
+      await ctx.assistantAutomations.tick(); await ctx.assistantGrowthExperiments.tick()
+      expect(ctx.assistantGrowthExperiments.getExperiment(seed.experimentId)?.state).toBe('rolled-back')
+      return
+    }
+
+    if (invalidation !== 'workflow-retract') {
+      const requestsBeforeRevision = adapter.requests.length
+      const rollbackLedger = (automations as unknown as {
+        growthStore: { completeRollback(...args: unknown[]): unknown }
+      }).growthStore
+      const completeRollback = rollbackLedger.completeRollback.bind(rollbackLedger)
+      const postCommitLoss = invalidation === 'owner-withdrawal-rollback-ack-loss'
+        ? vi.spyOn(rollbackLedger, 'completeRollback').mockImplementationOnce((...args) => {
+            completeRollback(...args)
+            throw Object.assign(new Error('rollback committed but reply lost'), { code: 'ack-lost' })
+          }) : undefined
+      await ctx.assistantDelivery.acceptInbound({
+        channel: principal.channel, account: principal.account,
+        eventId: `evt-${invalidation}`, occurredAt: Date.now(), principal, conversation,
+        kind: 'command', text: invalidation === 'owner-correction'
+          ? '/feedback correct 1 achieved not-achieved' : '/feedback withdraw 1 achieved',
+        metadata: { replyToProviderMessageId: resultMessage!.providerMessageId },
+      })
+      await ctx.assistantDelivery.tick()
+      await ctx.assistantDelivery.whenIdle()
+      postCommitLoss?.mockRestore()
+      if (postCommitLoss !== undefined) {
+        await growthFiber.dispose(); await automationFiber.dispose()
+        automationFiber = await ctx.plugin(AssistantAutomationsService, automationConfig)
+        automations = ctx.assistantAutomations
+        growthFiber = await ctx.plugin(AssistantGrowthExperimentsService, growthConfig)
+        growth = ctx.assistantGrowthExperiments
+        await automations.tick(); await growth.tick()
+      }
+      await growth.whenIdle()
+      expect(adapter.requests).toHaveLength(requestsBeforeRevision)
+      expect(ctx.assistantEvaluation.queryTasks({ scope: { workspace, preset }, limit: 10 })
+        .find(task => task.projection.subjectRef === resultMessage!.intent.metadata!['dsh.learning.runId']))
+        .toMatchObject({ objectiveStatus: invalidation === 'owner-correction' ? 'not-achieved' : 'unknown' })
+      expect(automations.listSystemOwned({ owner: 'assistant-growth-experiments' })).toEqual([
+        expect.objectContaining({ automationStatus: 'paused', definitionVersion: 3 }),
+      ])
+      expect(growth.getExperiment(seed.experimentId)?.state).toBe('rolled-back')
+      await growthFiber.dispose()
+      await automationFiber.dispose()
+      automationFiber = await ctx.plugin(AssistantAutomationsService, automationConfig)
+      growthFiber = await ctx.plugin(AssistantGrowthExperimentsService, growthConfig)
+      await ctx.assistantGrowthExperiments.tick()
+      expect(ctx.assistantAutomations.listSystemOwned({ owner: 'assistant-growth-experiments' })).toEqual([
+        expect.objectContaining({ automationStatus: 'paused', definitionVersion: 3 }),
+      ])
+      expect(ctx.assistantGrowthExperiments.getExperiment(seed.experimentId)?.state).toBe('rolled-back')
+      return
+    }
 
     const rollbackStore = (automations as unknown as {
       growthStore: { completeRollback(...args: unknown[]): unknown }

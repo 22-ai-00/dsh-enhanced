@@ -127,6 +127,7 @@ describe('delivery SQLite boundary', () => {
         attempt_count, received_at, updated_at
       ) VALUES (?, 'lark', 'bot', ?, ?, ?, 'received', 0, 10, 10)
     `).run('inbox-old-2', 'event-old-2', 'b'.repeat(64), JSON.stringify({ legacy: 2 }))
+    raw.exec('DROP TABLE delivery_owner_objective_commands')
     raw.exec('PRAGMA user_version = 12')
     raw.close()
 
@@ -171,6 +172,7 @@ describe('delivery SQLite boundary', () => {
         next_attempt_at, failure_code, created_at, updated_at
       ) VALUES ('legacy-batch', '${'a'.repeat(64)}', '[{"legacy":true}]',
         'retry_wait', 1, 200, 'legacy-temporary', 100, 100);
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 13;
     `)
     raw.close()
@@ -197,6 +199,7 @@ describe('delivery SQLite boundary', () => {
     raw.exec(`
       DROP INDEX approval_outbox_route_binding;
       DROP TABLE approval_outbox_routes;
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 15;
     `)
     raw.close()
@@ -243,6 +246,7 @@ describe('delivery SQLite boundary', () => {
       ) STRICT;
       CREATE INDEX delivery_preference_projection_due
         ON delivery_preference_projection_outbox(status, next_attempt_at, updated_at, batch_key);
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 13;
     `)
     raw.close()
@@ -285,6 +289,7 @@ describe('delivery SQLite boundary', () => {
       DROP TRIGGER IF EXISTS dead_letter_outbox_cancelled_unknown_fence;
       DROP INDEX IF EXISTS dead_letter_resolution_projection;
       DROP TABLE IF EXISTS dead_letter_resolutions;
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 8;
     `)
     raw.close()
@@ -336,6 +341,7 @@ describe('delivery SQLite boundary', () => {
         updated_at INTEGER NOT NULL,
         version INTEGER NOT NULL CHECK (version >= 1)
       ) STRICT;
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 3;
     `)
     raw.close()
@@ -358,6 +364,7 @@ describe('delivery SQLite boundary', () => {
       CREATE TABLE existing_delivery_state (id TEXT PRIMARY KEY) STRICT;
       INSERT INTO existing_delivery_state (id) VALUES ('kept');
       ${deliveryAttachmentsV6Schema}
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 4;
     `)
     raw.close()
@@ -380,6 +387,7 @@ describe('delivery SQLite boundary', () => {
     const raw = new DatabaseSync(path)
     raw.exec(`
       ${deliveryAttachmentsV6Schema}
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 5;
     `)
     raw.close()
@@ -406,6 +414,7 @@ describe('delivery SQLite boundary', () => {
         ('b-first', 'inbox', 'owner-b', '', 0, 'b1', 'image', 'image-b-1', 'metadata', 1),
         ('a-second', 'inbox', 'owner-a', '', 0, 'a2', 'image', 'image-a-2', 'metadata', 1),
         ('b-second', 'inbox', 'owner-b', '', 0, 'b2', 'image', 'image-b-2', 'metadata', 1);
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 6;
     `)
     raw.close()
@@ -489,6 +498,7 @@ describe('delivery SQLite boundary', () => {
     raw.exec(`
       CREATE TABLE existing_delivery_state (id TEXT PRIMARY KEY) STRICT;
       INSERT INTO existing_delivery_state (id) VALUES ('kept');
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 8;
     `)
     raw.close()

@@ -79,6 +79,7 @@ export interface OutcomeEnvelope {
 }
 
 export interface StoredOutcome extends OutcomeEnvelope {
+  ownerFeedbackState?: Readonly<OwnerObjectiveState>
   id: string
   /** Canonical JSON tuple of normalized absolute workspace and preset. */
   scopeKey: string
@@ -256,6 +257,21 @@ export interface TrustedAutomationEvaluationRegistration {
   append(input: TrustedAutomationEvaluationAppendInput): StoredOutcome
 }
 
+/** Host-attested owner command. The previous version and label are a CAS precondition. */
+export interface OwnerObjectiveCommand {
+  operationId: string
+  principalRecordId: string
+  principalVersion: number
+  action: 'initial' | 'correct' | 'withdraw'
+  expectedVersion?: number
+  previousStatus?: ObjectiveStatus
+}
+
+export interface OwnerObjectiveState {
+  version: number
+  objectiveStatus: ObjectiveStatus
+}
+
 export interface TrustedDeliveryEvaluationClaims {
   scope: Readonly<EvaluationScope>
   situation: string
@@ -264,7 +280,9 @@ export interface TrustedDeliveryEvaluationClaims {
   chatId: string
   principalId: string
   bindingId: string
-  objectiveStatus: Extract<ObjectiveStatus, 'achieved' | 'partial' | 'not-achieved'>
+  objectiveStatus: ObjectiveStatus
+  ownerCommand?: Readonly<OwnerObjectiveCommand>
+  initialIdempotencyKey?: string
   occurredAt: number
   idempotencyKey: string
 }
@@ -280,11 +298,13 @@ export interface TrustedDeliveryEvaluationAppendInput {
 }
 
 export interface TrustedDeliveryEvaluationRegistration {
+  ownerRevisionProtocol?: 'owner-objective-revision/v1'
   protocol: typeof TRUSTED_EVALUATION_PRODUCER_PROTOCOL
   producer: 'assistant-delivery'
   generation: string
   owner: TrustedEvaluationRegistrationOwner
   issueCapability(claims: TrustedDeliveryEvaluationClaims): unknown
+  inspect?(capabilityReceipt: unknown): OwnerObjectiveState | undefined
   append(input: TrustedDeliveryEvaluationAppendInput): StoredOutcome
 }
 

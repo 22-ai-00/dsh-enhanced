@@ -407,7 +407,9 @@ export interface OwnerWorkflowTraceCommandResult {
  * ordinary Agent reply.  Only an achieved judgement with a closed-set,
  * deterministic template can create a workflow trace.
  */
-export type VerifiedWorkflowTraceFeedbackResult =
+export type VerifiedWorkflowTraceFeedbackResult = Readonly<{
+  ownerFeedbackState?: Readonly<{ version: number; objectiveStatus: 'achieved' | 'partial' | 'not-achieved' | 'unknown' }>
+}> & (
   | Readonly<{
       outcome: 'trace-recorded'
       revision: Readonly<WorkflowTraceRevision>
@@ -418,7 +420,7 @@ export type VerifiedWorkflowTraceFeedbackResult =
       outcome: 'no-trace'
       reason: 'objective-not-achieved' | 'privacy-abstained'
       replayed: boolean
-    }>
+    }>)
 
 export interface StoredWorkflowTemplate {
   resolved: Readonly<ResolvedWorkflowAutomationTemplate>
@@ -5636,16 +5638,34 @@ export class DeliveryStore {
    * A normal durable reply alone is intentionally insufficient; the owner
    * must have replied `/feedback achieved` to that exact provider message.
    */
+  verifiedWorkflowObjectiveState(sourceOutboxId: string, lineage?: Readonly<{ principalRecordId: string; principalVersion: number }>): { version: number; objectiveStatus: 'achieved' | 'partial' | 'not-achieved' | 'unknown' } | undefined {
+    const row = this.database.prepare(`SELECT version, objective_status, principal_record_id, principal_version FROM delivery_owner_objective_commands
+      WHERE source_outbox_id = ? AND json_extract(result_json, '$.error') IS NULL ORDER BY version DESC LIMIT 1`).get(sourceOutboxId) as {
+        version: number; objective_status: 'achieved' | 'partial' | 'not-achieved' | 'unknown'; principal_record_id: string; principal_version: number
+      } | undefined
+    if (row !== undefined) {
+      if (lineage !== undefined && (row.principal_record_id !== lineage.principalRecordId || row.principal_version !== lineage.principalVersion)) return undefined
+      return { version: row.version, objectiveStatus: row.objective_status }
+    }
+    const initial = this.database.prepare(`SELECT objective_status, principal_record_id FROM workflow_verified_task_feedback WHERE source_outbox_id = ?`)
+      .get(sourceOutboxId) as { objective_status: 'achieved' | 'partial' | 'not-achieved'; principal_record_id: string } | undefined
+    // Legacy receipts predate principal-version audit. Only an unchanged first
+    // principal incarnation can prove that no authority turnover occurred.
+    if (lineage !== undefined && (lineage.principalVersion !== 1 || initial?.principal_record_id !== lineage.principalRecordId)) return undefined
+    return initial === undefined ? undefined : { version: 1, objectiveStatus: initial.objective_status }
+  }
+
   commitVerifiedWorkflowTraceFeedback(input: Readonly<{
     binding: Readonly<ConversationBinding>
     feedbackInboxId: string
     sourceInboxId: string
     sourceOutboxId: string
-    objectiveStatus: 'achieved' | 'partial' | 'not-achieved'
+    objectiveStatus: 'achieved' | 'partial' | 'not-achieved' | 'unknown'
+    command?: Readonly<import('./feedback-command.js').ObjectiveRevisionCommand>
   }>): VerifiedWorkflowTraceFeedbackResult {
     this.assertOpen()
     if (typeof input !== 'object' || input === null
-      || !['achieved', 'partial', 'not-achieved'].includes(input.objectiveStatus)
+      || !['achieved', 'partial', 'not-achieved', 'unknown'].includes(input.objectiveStatus)
       || typeof input.feedbackInboxId !== 'string' || typeof input.sourceInboxId !== 'string'
       || typeof input.sourceOutboxId !== 'string') {
       throw new DeliveryStoreError('conflict', 'verified workflow feedback tuple is invalid')
@@ -5653,7 +5673,7 @@ export class DeliveryStore {
     const feedbackInboxId = validateBindingText(input.feedbackInboxId, 'workflow feedback inbox id', 256)
     const sourceInboxId = validateBindingText(input.sourceInboxId, 'workflow source inbox id', 256)
     const sourceOutboxId = validateBindingText(input.sourceOutboxId, 'workflow source outbox id', 256)
-    return this.transaction(() => {
+    const committed = this.transaction(() => {
       const binding = this.getBinding(input.binding.id)
       const owner = binding === undefined ? undefined : this.getPrincipal(binding.principal)
       if (binding === undefined || binding.status !== 'active' || binding.conversation.kind !== 'dm'
@@ -5677,7 +5697,9 @@ export class DeliveryStore {
         : parseFeedbackCommand(feedbackCommand.rawInput)
       if (feedbackInbox?.status !== 'claimed' || feedbackInbox.bindingId !== binding.id
         || (feedbackInbox.envelope.attachments?.length ?? 0) !== 0
-        || feedback?.kind !== 'objective' || feedback.objectiveStatus !== input.objectiveStatus
+        || (feedback?.kind !== 'objective' && feedback?.kind !== 'objective-revision')
+        || feedback.objectiveStatus !== input.objectiveStatus
+        || JSON.stringify(feedback.kind === 'objective-revision' ? feedback : undefined) !== JSON.stringify(input.command)
         || sourceInbox?.status !== 'processed' || sourceInbox.bindingId !== binding.id
         || sourceInbox.envelope.kind !== 'text' || (sourceInbox.envelope.attachments?.length ?? 0) !== 0
         || sourceOutbox === undefined || sourceOutbox.intent.bindingId !== binding.id
@@ -5700,6 +5722,59 @@ export class DeliveryStore {
         throw new DeliveryStoreError('conflict', 'verified workflow feedback does not target one completed owner turn')
       }
 
+      const replay = this.database.prepare(`SELECT result_json, principal_record_id, principal_version FROM delivery_owner_objective_commands WHERE inbox_id = ?`)
+        .get(feedbackInbox.id) as { result_json: string; principal_record_id: string; principal_version: number } | undefined
+      if (replay !== undefined) {
+        if (replay.principal_record_id !== owner.id || replay.principal_version !== owner.version) {
+          throw new DeliveryStoreError('unauthorized-principal', 'owner command lineage changed')
+        }
+        const receipt = JSON.parse(replay.result_json) as VerifiedWorkflowTraceFeedbackResult & { error?: string }
+        if (receipt.error === 'version-conflict' || receipt.error === 'idempotency-conflict') return new DeliveryStoreError(receipt.error, 'feedback version changed; reply /feedback status and retry')
+        return { ...receipt, replayed: true }
+      }
+      const currentState = this.verifiedWorkflowObjectiveState(sourceOutbox.id, { principalRecordId: owner.id, principalVersion: owner.version })
+      const currentOwner = this.database.prepare(`SELECT principal_record_id, principal_version FROM delivery_owner_objective_commands
+        WHERE source_outbox_id = ? AND json_extract(result_json, '$.error') IS NULL ORDER BY version DESC LIMIT 1`).get(sourceOutbox.id) as { principal_record_id: string; principal_version: number } | undefined
+      if (currentOwner !== undefined && (currentOwner.principal_record_id !== owner.id || currentOwner.principal_version !== owner.version)) {
+        throw new DeliveryStoreError('unauthorized-principal', 'owner lineage changed')
+      }
+      if (input.command !== undefined && (currentState === undefined
+        || currentState.version !== input.command.expectedVersion
+        || currentState.objectiveStatus !== input.command.previousStatus)) {
+        this.database.prepare(`INSERT INTO delivery_owner_objective_commands VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(feedbackInbox.id, sourceOutbox.id, owner.id, owner.version, currentState?.version ?? 0,
+            currentState?.objectiveStatus ?? 'unknown', JSON.stringify(feedback), JSON.stringify({ error: 'version-conflict' }))
+        return new DeliveryStoreError('version-conflict', 'feedback version changed; reply /feedback status and retry')
+      }
+      const nextVersion = currentState === undefined ? 1 : currentState.objectiveStatus === input.objectiveStatus
+        ? currentState.version : currentState.version + 1
+      const finish = (result: VerifiedWorkflowTraceFeedbackResult): VerifiedWorkflowTraceFeedbackResult => {
+        const response = { ...result, ownerFeedbackState: { version: nextVersion, objectiveStatus: input.objectiveStatus } }
+        this.database.prepare(`INSERT INTO delivery_owner_objective_commands VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+          .run(feedbackInbox.id, sourceOutbox.id, owner.id, owner.version, nextVersion,
+            input.objectiveStatus, JSON.stringify(feedback), JSON.stringify(response))
+        return response
+      }
+      if (currentState !== undefined && (input.command !== undefined || currentState.version >= 1)
+        && (input.command === undefined || currentState.objectiveStatus === input.objectiveStatus)) {
+        if (currentState.objectiveStatus !== input.objectiveStatus) {
+          this.database.prepare(`INSERT INTO delivery_owner_objective_commands VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+            .run(feedbackInbox.id, sourceOutbox.id, owner.id, owner.version, currentState.version,
+              currentState.objectiveStatus, JSON.stringify(feedback), JSON.stringify({ error: 'idempotency-conflict' }))
+          return new DeliveryStoreError('idempotency-conflict', 'current owner judgement differs; use explicit correction')
+        }
+        const currentReceipt = this.database.prepare(`SELECT result_json FROM delivery_owner_objective_commands
+          WHERE source_outbox_id = ? AND version = ? AND json_extract(result_json, '$.error') IS NULL LIMIT 1`)
+          .get(sourceOutbox.id, currentState.version) as { result_json: string } | undefined
+        if (currentReceipt !== undefined) return finish({ ...JSON.parse(currentReceipt.result_json) as VerifiedWorkflowTraceFeedbackResult, replayed: true })
+      }
+      const subjectRef = growthObjectDigest({
+        contract: 'assistant-delivery-verified-workflow-subject/v1',
+        bindingId: binding.id, sourceInboxId: sourceInbox.id, sourceOutboxId: sourceOutbox.id,
+      })
+      const traceHead = this.database.prepare(`SELECT version FROM workflow_trace_current WHERE subject_ref = ?`)
+        .get(subjectRef) as { version: number } | undefined
+      const traceVersion = (traceHead?.version ?? 0) + 1
       const taskRef = growthObjectDigest({
         contract: 'assistant-delivery-verified-workflow-task-ref/v1',
         bindingId: binding.id,
@@ -5728,13 +5803,13 @@ export class DeliveryStore {
         feedback: {
           inboxId: feedbackInbox.id,
           envelopeHash: feedbackInbox.envelopeHash,
-          objectiveStatus: input.objectiveStatus,
+          objectiveStatus: input.objectiveStatus as 'achieved' | 'partial' | 'not-achieved',
         },
       })
       const prior = this.database.prepare(`
         SELECT * FROM workflow_verified_task_feedback WHERE source_outbox_id = ?
       `).get(sourceOutbox.id) as WorkflowVerifiedTaskFeedbackRow | undefined
-      if (prior !== undefined) {
+      if (prior !== undefined && input.command === undefined) {
         return this.replayVerifiedWorkflowTraceFeedback({
           row: prior,
           binding,
@@ -5742,7 +5817,7 @@ export class DeliveryStore {
           feedbackInboxId: feedbackInbox.id,
           sourceInboxId: sourceInbox.id,
           sourceOutboxId: sourceOutbox.id,
-          objectiveStatus: input.objectiveStatus,
+          objectiveStatus: input.objectiveStatus as 'achieved' | 'partial' | 'not-achieved',
           taskRef,
           taskEvidenceDigest,
         })
@@ -5752,21 +5827,27 @@ export class DeliveryStore {
         ? deriveDeterministicallyDeidentifiedWorkflowTemplate(sourceInbox.envelope.text)
         : undefined
       if (descriptor === undefined) {
-        this.insertVerifiedWorkflowTaskFeedback({
+        if (input.command !== undefined && traceHead !== undefined) {
+          const payload = { source: this.workflowTraceSourceAttestation(),
+            scope: { workspace: binding.workspace, preset: binding.agentPreset },
+            subjectRef, version: traceVersion, disposition: 'retract' as const }
+          this.insertWorkflowTraceRevisionInTransaction({ ...payload, digest: workflowTraceRevisionDigest(payload) })
+        }
+        if (input.command === undefined) this.insertVerifiedWorkflowTaskFeedback({
           sourceOutboxId: sourceOutbox.id,
           sourceInboxId: sourceInbox.id,
           feedbackInboxId: feedbackInbox.id,
           binding,
           ownerId: owner.id,
-          objectiveStatus: input.objectiveStatus,
+          objectiveStatus: input.objectiveStatus as 'achieved' | 'partial' | 'not-achieved',
           taskRef,
           taskEvidenceDigest,
         })
-        return Object.freeze({
+        return finish(Object.freeze({
           outcome: 'no-trace',
           reason: input.objectiveStatus === 'achieved' ? 'privacy-abstained' : 'objective-not-achieved',
           replayed: false,
-        })
+        }))
       }
 
       const content = validateWorkflowAutomationTemplateContent({
@@ -5836,17 +5917,11 @@ export class DeliveryStore {
         )
       }
 
-      const subjectRef = growthObjectDigest({
-        contract: 'assistant-delivery-verified-workflow-subject/v1',
-        bindingId: binding.id,
-        sourceInboxId: sourceInbox.id,
-        sourceOutboxId: sourceOutbox.id,
-      })
       const payload: Omit<WorkflowTraceRevision, 'digest'> = Object.freeze({
         source: this.workflowTraceSourceAttestation(),
         scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
         subjectRef,
-        version: 1,
+        version: traceVersion,
         disposition: 'upsert' as const,
         evidence: Object.freeze({
           occurredAt: feedbackInbox.receivedAt,
@@ -5870,20 +5945,22 @@ export class DeliveryStore {
       if (recorded.replayed) {
         throw new DeliveryStoreError('version-conflict', 'new verified workflow feedback unexpectedly replayed')
       }
-      this.insertVerifiedWorkflowTaskFeedback({
+      if (input.command === undefined) this.insertVerifiedWorkflowTaskFeedback({
         sourceOutboxId: sourceOutbox.id,
         sourceInboxId: sourceInbox.id,
         feedbackInboxId: feedbackInbox.id,
         binding,
         ownerId: owner.id,
-        objectiveStatus: input.objectiveStatus,
+        objectiveStatus: 'achieved',
         taskRef,
         taskEvidenceDigest,
         revision,
         template,
       })
-      return Object.freeze({ outcome: 'trace-recorded', revision, template, replayed: false })
+      return finish(Object.freeze({ outcome: 'trace-recorded', revision, template, replayed: false }))
     })
+    if (committed instanceof DeliveryStoreError) throw committed
+    return committed
   }
 
   private insertVerifiedWorkflowTaskFeedback(input: Readonly<{

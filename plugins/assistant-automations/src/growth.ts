@@ -162,6 +162,18 @@ export class GrowthAutomationStore {
     this.now = now
   }
 
+  listDeployedArtifacts(): readonly Readonly<GrowthArtifactRecord>[] {
+    return (this.database.prepare(`SELECT * FROM automation_growth_artifacts WHERE state IN ('canary-pending', 'promoted', 'rolled-back')`)
+      .all() as unknown as ArtifactRow[]).map(artifact)
+  }
+
+  rollbackVersion(experimentId: string): number | undefined {
+    const row = this.database.prepare(`SELECT receipt_json FROM automation_growth_operations
+      WHERE operation_id = ? AND operation_kind = 'rollback' AND status = 'completed'`)
+      .get(`${experimentId}:rollback`) as { receipt_json: string } | undefined
+    return row === undefined ? undefined : (JSON.parse(row.receipt_json) as { artifactVersion: number }).artifactVersion
+  }
+
   beginOperation(kind: GrowthOperationKind, input: Readonly<{ operationId: string }>): unknown | undefined {
     this.assertOpen()
     const payloadDigest = growthPortPayloadDigest(input)
@@ -194,8 +206,11 @@ export class GrowthAutomationStore {
     receipt: Readonly<Record<string, unknown>>,
   ): unknown {
     this.assertOpen()
+    return this.transaction(() => this.completeOperationInTransaction(kind, input, receipt))
+  }
+
+  private completeOperationInTransaction(kind: GrowthOperationKind, input: Readonly<{ operationId: string }>, receipt: Readonly<Record<string, unknown>>): unknown {
     const payloadDigest = growthPortPayloadDigest(input)
-    return this.transaction(() => {
       const existing = this.database.prepare(`
         SELECT * FROM automation_growth_operations WHERE operation_id = ?
       `).get(input.operationId) as OperationRow | undefined
@@ -213,7 +228,6 @@ export class GrowthAutomationStore {
         throw new AutomationStoreError('version-conflict', 'growth operation changed before receipt commit')
       }
       return JSON.parse(receiptJson) as unknown
-    })
   }
 
   artifactId(input: Readonly<GrowthAutomationProposalRequest>): string {
@@ -491,6 +505,7 @@ export class GrowthAutomationStore {
   completePromotion(input: Readonly<{
     request: Readonly<GrowthAutomationArtifactRequest>
     automation: Readonly<AutomationRecord>
+    receipt: Readonly<Record<string, unknown>>
   }>): Readonly<GrowthArtifactRecord> {
     this.assertOpen()
     return this.transaction(() => {
@@ -509,6 +524,7 @@ export class GrowthAutomationStore {
         input.automation.version, hash, this.now(), current.artifactId,
         input.request.artifactVersion, input.request.artifactDigest,
       )
+      this.completeOperationInTransaction('promotion', input.request, input.receipt)
       return this.byId(current.artifactId)!
     })
   }
@@ -516,6 +532,7 @@ export class GrowthAutomationStore {
   completeRollback(input: Readonly<{
     request: Readonly<GrowthAutomationArtifactRequest>
     automation: Readonly<AutomationRecord>
+    receipt: Readonly<Record<string, unknown>>
   }>): Readonly<GrowthArtifactRecord> {
     this.assertOpen()
     return this.transaction(() => {
@@ -535,6 +552,7 @@ export class GrowthAutomationStore {
         input.automation.version, this.now(), current.artifactId,
         input.request.artifactVersion, input.request.artifactDigest,
       )
+      this.completeOperationInTransaction('rollback', input.request, input.receipt)
       return this.byId(current.artifactId)!
     })
   }
