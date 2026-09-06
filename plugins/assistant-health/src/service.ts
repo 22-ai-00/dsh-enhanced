@@ -21,10 +21,11 @@ export const providerIds = [
   'pluginControlPlane',
   'assistantHeartbeat',
   'larkChannel',
+  'assistantVerifier',
 ] as const
 
 export type HealthProviderId = typeof providerIds[number]
-export type HealthMetric = boolean | number | string
+export type HealthMetric = boolean | number | string | string[]
 export type HealthSeverity = 'healthy' | 'degraded' | 'unhealthy'
 
 /**
@@ -49,6 +50,7 @@ const providerServiceNames: Readonly<Record<HealthProviderId, string>> = Object.
   pluginControlPlane: 'pluginControlPlane',
   assistantHeartbeat: 'assistantHeartbeat',
   larkChannel: 'larkChannel',
+  assistantVerifier: 'assistantVerifier',
 })
 
 export interface Config {
@@ -105,6 +107,7 @@ type HealthMetricSpecification =
   | 'optional-digest'
   | 'optional-number'
   | 'optional-production-status'
+  | 'host-producers'
   | readonly string[]
 
 /** Fixed Policy subject used by the non-model supervised-growth runbook. */
@@ -195,6 +198,12 @@ const keys: Record<HealthProviderId, Readonly<Record<string, HealthMetricSpecifi
   assistantHeartbeat: { active: 'number', paused: 'number', empty: 'number' },
   larkChannel: { state: ['connected', 'connected-with-gap', 'connecting', 'disabled', 'disconnected', 'reconnecting'],
     gapGeneration: 'number' },
+  // A dynamic seam keeps assistant-verifier independently installable. Only
+  // its two fixed Host producer ids are public health vocabulary.
+  assistantVerifier: { ready: 'boolean', profiles: 'number', requireAcceptance: 'boolean',
+    hostProducers: 'host-producers', evaluationConnected: 'boolean', awaitingExecution: 'number',
+    pendingVerification: 'number', pendingReceipts: 'number', expiredReceipts: 'number',
+    needsAttention: 'number' },
 }
 
 interface HealthSummary {
@@ -310,6 +319,19 @@ function operationalAssessments(
       add(state === 'disabled' && required, 'unhealthy', 'disabled', true)
       break
     }
+    case 'assistantVerifier':
+      // No approved profile is the default disabled state. Surface it without
+      // claiming that the installed service supplies acceptance capability.
+      add((metric('profiles') as number) === 0, 'degraded', 'acceptance-disabled')
+      // An unconnected optional verifier is actionable only when it has a
+      // receipt that cannot reach Evaluation.
+      add((metric('pendingReceipts') as number) > 0 && metric('evaluationConnected') === false,
+        'degraded', 'evaluation-disconnected-with-pending-receipts')
+      add((metric('expiredReceipts') as number) > 0, 'degraded', 'expired-receipt-backlog')
+      // This queue holds durable unknown/expired continuations, rather than
+      // a lifetime count of historical verification failures.
+      add((metric('needsAttention') as number) > 0, 'degraded', 'verification-needs-attention')
+      break
     default:
       break
   }
@@ -396,6 +418,14 @@ function metrics(id: HealthProviderId, value: unknown): Readonly<Record<string, 
         throw new Error('invalid health digest')
       }
       output[key] = current
+    } else if (specification === 'host-producers') {
+      if (!Array.isArray(current) || current.length > 2
+        || Array.from(current).some(item => item !== 'assistantAutomations' && item !== 'assistantDelivery')
+        || new Set(current).size !== current.length
+        || current.some((item, index) => index > 0 && item < current[index - 1])) {
+        throw new Error('invalid verifier Host producer health metric')
+      }
+      output[key] = [...current]
     } else if (specification === 'boolean' || specification === 'optional-boolean') {
       if (typeof current !== 'boolean') throw new Error('invalid boolean health metric')
       output[key] = current

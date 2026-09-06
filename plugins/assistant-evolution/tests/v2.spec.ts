@@ -109,7 +109,7 @@ const thresholds = {
 }
 
 describe('current schema', () => {
-  test('creates and reopens a fresh version-12 database without replaying a migration', () => {
+  test('creates and reopens a fresh version-13 database without replaying a migration', () => {
     const path = databasePath('fresh-v12-reopen')
     const created = openEvolutionDatabase(path)
     expect((created.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
@@ -447,8 +447,8 @@ describe('schema v4 migration through the v2 quarantine', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(12)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(12)
+    expect(evolutionSchemaVersion).toBe(13)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
     expect(migrated.prepare(`
       SELECT scope_key, trust, evidence_kind, evidence_ref, learning_eligible,
         rule_id, claimed_rule_id FROM evolution_episodes
@@ -542,8 +542,8 @@ describe('schema v6 immutable Evaluation identity migration', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(12)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(12)
+    expect(evolutionSchemaVersion).toBe(13)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
     expect(migrated.prepare(`
       SELECT id, evidence_kind, evidence_ref, learning_eligible
       FROM evolution_episodes ORDER BY id
@@ -637,8 +637,8 @@ describe('schema v7 Evaluation provenance migration', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(12)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(12)
+    expect(evolutionSchemaVersion).toBe(13)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
     expect(migrated.prepare(`
       SELECT id, evidence_kind, evidence_ref, learning_eligible
       FROM evolution_episodes WHERE id LIKE 'episode-v6%' ORDER BY id
@@ -735,7 +735,7 @@ describe('schema v8 learning-subject identity migration', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(12)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
     expect(migrated.prepare(`
       SELECT id, evidence_kind, evidence_ref, learning_subject_ref, learning_eligible
       FROM evolution_episodes ORDER BY id

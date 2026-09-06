@@ -77,6 +77,8 @@
     "oxlint": "catalog:",
     "typescript": "catalog:",
     "vitest": "catalog:",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*",
+    "@dsh-enhanced/assistant-verifier": "workspace:*"
   }
 }

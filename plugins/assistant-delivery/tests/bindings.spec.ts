@@ -95,6 +95,46 @@ describe('conversation bindings', () => {
     store.close()
   })
 
+  test('persists an immutable accepted foreground execution before dispatch and survives restart', async () => {
+    const { path, store } = await fixture()
+    authorize(store)
+    const binding = store.createBinding({ conversation, principal, workspace: '/work/alpha', agentPreset: 'primary',
+      sessionId: 'session-acceptance', policyRef: 'owner-dm' })
+    const inbox = store.acceptInbound({ channel: 'lark', account: 'bot-1', eventId: 'evt-acceptance', occurredAt: 1,
+      principal, conversation, kind: 'text', text: 'preserve  exact objective\n' }).record
+    store.queueInbox(inbox.id, binding.id)
+    const claim = store.claimInbox({ ownerId: 'test-owner', leaseMs: 10_000, limit: 1, maxAttempts: 3 })[0]!
+    const owner = store.getPrincipal(principal)!
+    const contract = {
+      id: 'contract-foreground-1', digest: 'a'.repeat(64),
+      scope: { workspace: '/work/alpha', preset: 'primary' },
+      owner: { principalRecordId: owner.id, principalVersion: owner.version },
+      task: { kind: 'foreground-turn' as const, ref: inbox.id }, objective: 'preserve  exact objective\n',
+    }
+    store.bindForegroundTaskAcceptance({ inboxId: inbox.id, contractId: contract.id, contractDigest: contract.digest,
+      scope: contract.scope, owner: contract.owner, binding, dispatchedAt: 1_000 })
+    expect(() => store.bindForegroundTaskAcceptance({ inboxId: inbox.id, contractId: contract.id,
+      contractDigest: 'b'.repeat(64), scope: contract.scope, owner: contract.owner, binding, dispatchedAt: 1_000 }))
+      .toThrowError(expect.objectContaining({ code: 'idempotency-conflict' }))
+    store.finishForegroundTaskAcceptance({ contractId: contract.id, status: 'succeeded', quiescent: true, completedAt: 1_001 })
+    expect(store.inspectForegroundAcceptedExecution(contract)).toEqual(expect.objectContaining({
+      contractId: contract.id, dispatchedAt: 1_000, status: 'succeeded', quiescent: true, executionRef: inbox.id,
+    }))
+    expect(store.inspectForegroundAcceptedExecutionForOwner({
+      inboxId: inbox.id, scope: contract.scope, owner: contract.owner, bindingId: binding.id,
+    })).toEqual(expect.objectContaining({ contractId: contract.id, executionRef: inbox.id }))
+    expect(store.inspectForegroundAcceptedExecutionForOwner({
+      inboxId: inbox.id, scope: contract.scope, owner: { ...contract.owner, principalVersion: contract.owner.principalVersion + 1 }, bindingId: binding.id,
+    })).toBeNull()
+    store.close()
+
+    const reopened = new DeliveryStore({ path })
+    expect(reopened.inspectForegroundAcceptedExecution(contract)).toEqual(expect.objectContaining({ status: 'succeeded' }))
+    expect(reopened.inspectForegroundAcceptedExecution({ ...contract, task: { kind: 'foreground-turn', ref: 'other' } })).toBeNull()
+    reopened.close()
+    void claim
+  })
+
   test('/new preserves old history and atomically increments generation', async () => {
     const { store, tick } = await fixture()
     authorize(store)

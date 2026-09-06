@@ -21,7 +21,7 @@
 | --- | --- | --- | --- | --- |
 | 01 | P0 | Automations Canary 使用 Evaluation canonical projection，在激活提交时取得 writer fence；绑定任务版本、digest 和 scope watermark | 冲突前置、inspection 后纠正、并发纠正、重启重放均不能用旧成功升级；合法晋升与重试通过 | 已验证 |
 | 02 | P0 | Delivery 提供 owner 任务评价修订与撤回；Evaluation 保留历史且每任务只一票 | 同值重试幂等、旧消息重放不覆盖新修订、冲突/撤回传到所有成长消费者和已推广版本 | 已验证 |
-| 03 | P0/C | 不可变 TaskAcceptanceContract，独立代码、文档引用和目标系统回读 verifier；接入前台与 Automation 结果生产者 | 真实失败不能因为退出码或模型自评判成功；契约篡改、错 run、过期回执拒绝；unknown 触发验证下一步 | 待做 |
+| 03 | P0/C | 不可变 TaskAcceptanceContract，独立代码、文档引用和目标系统回读 verifier；接入前台与 Automation AgentLoop 结果生产者 | 真实失败不能因为退出码或模型自评判成功；契约篡改、错 run、过期回执拒绝；unknown 触发验证下一步 | 已验证 |
 | 04 | P0/F | 固定任务集、留出集、基线 runner 和版本化结果记录；包含代码、研究、跨日、主动性、注入和撤销 | 同输入同模型同预算可重跑；记录成功率、成本、延迟、返工、多次分布和消融；留出不参与候选生成 | 待做 |
 | 05 | P1/A | 业务目标编排 bundle：成功条件、期限、依赖、预算、授权、假设、阻塞、唤醒和证据；关联原生 goal/session/run | 跨会话与重启恢复，多步骤任务真实完成；过时假设重查，用户目标变化传播，无重复外部提交 | 待做 |
 | 06 | P1/A | 任务策略选择：直接执行、调查、实验、独立复核、候选比较和原生 subagent；route 结果归因 | 困难任务改变方法，工具故障与推理失败可区分；协调成本有记录；固定预算比较策略收益 | 待做 |
@@ -57,7 +57,7 @@
 - 最终在 `a670538` 代码上执行根 `pnpm check`，退出码 0：manifest、零 lint 警告、所有包类型检查、主测试运行 200 文件/2,909 测试通过（4 文件/81 测试跳过）、递归包测试、完整构建、所有插件与共享库 dry-run pack 全部通过。跳过项和模拟模型不算真实外部部署或智能收益证据。之后仅更新此账本并取消跟踪本地代理临时报告。
 - 纯 core/Web 的 Memory 身份接线待补：meta patch 默认 `approvalMode: delivery-required`，`PersonalMemoryService.agentContext()` 要求 Delivery owner；显式 headless principal 仅为程序化集成入口。当前 core 组合测试用 Host 测试 seam 提供 Delivery 身份，安装测试用替身 DSH，均不能证明纯 Web 用户可开箱完成记忆任务。工作包 17 要补实际本机 owner 身份与审批路径，不能以匿名 namespace 或模型自报 principal 绕过现有边界。
 - 本机全局 `dsh --version` 为 `0.1.0-rc.8`，低于当前 `0.1.2-rc.1` 测试基线；真实 profile 验证须使用隔离安装的目标 Host，不能直接用全局旧 CLI 的结果作兼容性结论。
-- ChatGPT 参与方案与关键取舍评审；首次连接选择待用户确认。连接未完成不代表已获得 ChatGPT 评审。
+- 计划由 ChatGPT 参与方案与关键取舍评审；首次连接选择待用户确认。本批实际调用 Codex with ChatGPT 的 workspace-info 返回内部错误，尚未获得 ChatGPT 评审；未启用外部隧道。
 - 07 第一切片 `37d1e06`：Personal Memory 用原生 SystemPrompt 动态 context，从当前 Session 有效输入提取有界 query，每模型步骤重新检查 owner、Policy 与记录状态；相关记忆优先，再补用户确认的偏好和约定，附来源、原始引用、版本与失效信息。敏感记录在 top-K 前排除，转义覆盖模板花括号。95 项 Memory 测试、类型检查和真实 AgentLoop 两步骤之间撤回的集成测试通过，独立审查通过；无 SystemPrompt 时保留旧启动快照兼容路径。
 - 07 限制：目标 Host 追加新的 superseding runtime snapshot，保留已提供过的历史快照、工具结果和模型输出；当前切片只更新有效快照，不能证明历史擦除或跨 owner 会话迁移隔离。结构化 goal/step 检索、适用条件与反例、冲突决策、工具证据压缩和实测决策收益仍待实现与验证，完整工作包未完成。
 - 02 已验证，提交 `2780fdf`：普通任务与 Automation 的 `/feedback status`、`correct`、`withdraw` 接入真实 Host 入口；Evaluation schema 8 和 Delivery schema 17 保存版本化 owner 判断及成功/失败命令回执。只有明确链接的旧判断被替代；独立矛盾继续隔离，撤回不复活旧成功。owner record+version、精确回复目标与 CAS 一起校验；旧 Evaluation 缺少修订协议时拒绝，旧 foreground 数据无法证明原 principal version 时拒绝跨版本继承。
@@ -70,3 +70,10 @@
 ## 完成审计
 
 结束前逐行填写实现提交、测试命令及结果、真实运行证据和限制。只有以上工作包全部有充分证据时才宣称整体目标完成。`pnpm check` 的成功证明仓库工程检查通过；它不能单独证明智能增益、高权限隔离、外部系统发布或两周主动收益。
+
+- 03 已完成本机工程验收：新增 inert `task-acceptance-contract` 与 `assistant-verifier` bundle。真实 owner 的 scope、版本、原始目标、预期结果和资源摘要在模型提交前冻结；前台与 production Automation AgentLoop 的实际终态进入独立验证，再写入 Evaluation canonical。普通退出成功不会替代指定行为、文档引用或目标系统字段的实际观测。控制命令、preview 与独立 Host runbook 继续使用原协议；没有原始用户 prompt 的 Host runbook 不冒充 AgentLoop 目标，也不得作为行为学习样本。
+- 03 生产入口证据：真实 Cordis/AgentLoop/SQLite，经 owner 配对、公开 Automation 提案审批及实际调度，验证模型调用前契约已经存在；相同正常模型回复分别得到 achieved/not-achieved。前台自动续写只使用同一契约；`/stop` 保留 unknown。真实 `/feedback` 经过精确 reply、owner lineage 和 CAS，支持纠正、撤回与旧消息重放；Evaluation 卸载时不报已记录，重新挂载后可以重试。模型和外部 transport 为确定性替身，不计作真实云模型或外部账号证据。
+- 03 恢复与边界：已提交的任务重启后不重复原执行；验证最多三次，未知/过期保持待处理状态并进入 Health。等待执行及回执 outbox 分页轮转，100 条未完成或过期记录不会饿死后页。必需验收在 Host 服务生命周期内保持单调，卸载或可选配置替换不能绕过。异步 Host 回读、Evaluation 投递及卸载有界，卸载后迟到的验证不落库；旧库迁移保留历史水位 0，不伪造可信水位。
+- 03 独立复核通过：共享契约、验证驱动、服务/持久化、两个生产入口、Evaluation owner 修订、Evolution 迁移及 Health 均经独立只读复核与实际测试日志核验。驱动执行捕获的单文件快照，超时关闭本方管道后返回 unknown；同 UID 对手、逃逸后代终止、可执行路径原子绑定及父目录恶意替换仍不属于其安全保证，详见插件 README。高权限隔离完整保留在 08–10。
+- 03 最终根 `CI=true pnpm check` 退出码 **0**：`/tmp/dsh-task3-check-v4.log`、`.exit`。manifest 为 23 个插件、3 个共享库；零 lint 警告、全包类型检查、主测试 208 文件/3,038 测试通过（4 文件/82 测试跳过）、递归包测试、完整构建和全部 dry-run pack 通过。检查过两个新增包的实际打包清单，未包含测试或数据库。此前三次失败均为测试夹具的 lint/类型错误，已修复，未计为通过证据。随后仅更新文档进度。
+- 下一项为 04 的固定任务集、真实可复跑基线与留出集。03 的结果是任务时刻的历史验收，不能作为无限期新鲜的外部状态证明；持续目标、能力提升和生产部署仍需后续新鲜度、比较基线及真实环境验证。整体自治目标尚未完成。

@@ -3,6 +3,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type SkillRegistry from '@deepseek-ai/dsh-skill'
 import type { ToolRuntime } from '@deepseek-ai/dsh-tools'
 import Schema from '@deepseek-ai/schemastery'
+import { validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { EvaluationStore, canonicalEvaluationScope } from './store.js'
 import { registerEvaluationTools } from './tools.js'
 import type {
@@ -29,6 +30,7 @@ import type {
   TrustedDeliveryEvaluationClaims,
   TrustedDeliveryEvaluationRegistration,
   TrustedEvaluationRegistrationOwner,
+  TrustedVerifierEvaluationRegistration,
   TrustedOutcomeReceipt,
   TrustedTaskLearningProjectionReceipt,
 } from './types.js'
@@ -167,7 +169,7 @@ interface TrustedEvaluationProjector {
     evaluationId: string
   }): Readonly<{
     triggerOutcomeId: string
-    subjectKind: 'automation-run' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -176,7 +178,7 @@ interface TrustedEvaluationProjector {
     status: 'applied' | 'replayed'
   }> | Promise<Readonly<{
     triggerOutcomeId: string
-    subjectKind: 'automation-run' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -198,6 +200,11 @@ export interface TrustedDeliveryEvaluationProducer {
   registerTrustedDeliveryEvaluationSink(
     registration: Readonly<TrustedDeliveryEvaluationRegistration>,
   ): () => void
+}
+
+interface TrustedVerifierEvaluationProducer {
+  trustedVerificationProducerGeneration(): string
+  registerTrustedVerifierEvaluationSink(registration: Readonly<TrustedVerifierEvaluationRegistration>): () => void
 }
 
 interface TrustedProducerBinding<Producer> {
@@ -226,6 +233,12 @@ function isTrustedDeliveryEvaluationProducer(
       .registerTrustedDeliveryEvaluationSink === 'function'
 }
 
+function isTrustedVerifierEvaluationProducer(value: unknown): value is TrustedVerifierEvaluationProducer {
+  return typeof value === 'object' && value !== null
+    && typeof (value as Partial<TrustedVerifierEvaluationProducer>).trustedVerificationProducerGeneration === 'function'
+    && typeof (value as Partial<TrustedVerifierEvaluationProducer>).registerTrustedVerifierEvaluationSink === 'function'
+}
+
 function isTrustedEvaluationProjector(value: unknown): value is TrustedEvaluationProjector {
   return typeof value === 'object' && value !== null
     && typeof (value as Partial<TrustedEvaluationProjector>).projectTrustedEvaluationTaskRevision === 'function'
@@ -248,8 +261,10 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   private projector: TrustedEvaluationProjector | undefined
   private automationBinding: TrustedProducerBinding<TrustedAutomationEvaluationProducer> | undefined
   private deliveryBinding: TrustedProducerBinding<TrustedDeliveryEvaluationProducer> | undefined
+  private verifierBinding: TrustedProducerBinding<TrustedVerifierEvaluationProducer> | undefined
   private readonly activeAutomationRegistrations = new WeakSet<object>()
   private readonly activeDeliveryRegistrations = new WeakSet<object>()
+  private readonly activeVerifierRegistrations = new WeakSet<object>()
   private readonly activeProjections = new Map<string, Promise<void>>()
   private projectionTimer: ReturnType<typeof setInterval> | undefined
   private active = true
@@ -333,6 +348,13 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       if (!isTrustedDeliveryEvaluationProducer(producer)) return
       return this.bindDeliveryProducer(producer)
     })
+    const currentVerifier = ctx.get('assistantVerifier' as never) as unknown
+    if (isTrustedVerifierEvaluationProducer(currentVerifier)) this.bindVerifierProducer(currentVerifier)
+    ctx.inject(['assistantVerifier' as never], verifierCtx => {
+      const producer = verifierCtx.get('assistantVerifier' as never) as unknown
+      if (!isTrustedVerifierEvaluationProducer(producer)) return
+      return this.bindVerifierProducer(producer)
+    })
     if (this.config.projectionIntervalMs > 0) {
       this.projectionTimer = setInterval(() => {
         void this.reconcileProjections().catch(() => {})
@@ -346,6 +368,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       disposeCurrentProjector?.()
       this.automationBinding?.dispose()
       this.deliveryBinding?.dispose()
+      this.verifierBinding?.dispose()
       disposeCurrentTools?.()
       disposeCurrentSkill?.()
       await Promise.allSettled(this.activeProjections.values())
@@ -674,6 +697,13 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       && this.activeDeliveryRegistrations.has(registration)
   }
 
+  ownsTrustedVerifierEvaluationRegistration(
+    registration: Readonly<TrustedVerifierEvaluationRegistration>,
+  ): boolean {
+    return this.active && typeof registration === 'object' && registration !== null
+      && this.activeVerifierRegistrations.has(registration)
+  }
+
   review(agent: Agent | undefined, input: EvaluationReviewRequest = {}): EvaluationReview {
     this.assertActive()
     const scope = this.agentScope(agent, 'evaluation_review')
@@ -839,7 +869,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         if (typeof capabilityReceipt !== 'object' || capabilityReceipt === null) throw new AssistantEvaluationError('forbidden', 'invalid owner capability')
         const claims = capabilities.get(capabilityReceipt)
         if (claims?.ownerCommand === undefined) throw new AssistantEvaluationError('forbidden', 'missing owner lineage')
-        return this.store.ownerObjectiveState(claims.scope, claims.runId, claims.ownerCommand.principalRecordId, claims.ownerCommand.principalVersion)
+        return this.store.ownerObjectiveState(claims.scope, claims.subjectKind ?? 'automation-run',
+          claims.subjectRef ?? claims.runId, claims.ownerCommand.principalRecordId, claims.ownerCommand.principalVersion)
       },
       append: (input: TrustedDeliveryEvaluationAppendInput): StoredOutcome => {
         this.assertCurrentProducer(producer, generation, registered, 'delivery')
@@ -868,7 +899,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
           source: { kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' },
           trust: 'trusted',
           evidence: [
-            { kind: 'automation-run', ref: claims.runId },
+            { kind: claims.subjectKind ?? 'automation-run', ref: claims.subjectRef ?? claims.runId },
             { kind: 'delivery-outbox', ref: claims.outboxId },
           ],
           metrics: {},
@@ -903,6 +934,104 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       throw error
     }
     if (previous !== undefined) previous.dispose()
+    return dispose
+  }
+
+  private bindVerifierProducer(producer: TrustedVerifierEvaluationProducer): () => void {
+    const generation = hostIdentifier(producer.trustedVerificationProducerGeneration(), 'trusted verifier generation', 200)
+    const current = this.verifierBinding
+    if (current?.generation === generation) return current.dispose
+    let registered = true
+    let disposeRegistration: (() => void) | undefined
+    let binding!: TrustedProducerBinding<TrustedVerifierEvaluationProducer>
+    const assertCurrent = () => {
+      this.assertActive()
+      if (!registered || this.verifierBinding?.producer !== producer
+        || this.verifierBinding.generation !== generation
+        || producer.trustedVerificationProducerGeneration() !== generation) {
+        throw new AssistantEvaluationError('forbidden', 'stale verifier Evaluation producer capability')
+      }
+    }
+    const registration: TrustedVerifierEvaluationRegistration = Object.freeze({
+      protocol: 'assistant-verifier/evaluation/v1' as const,
+      generation,
+      owner: this,
+      append: async (input: Readonly<{ contract: unknown; receipt: unknown; execution: unknown }>) => {
+        assertCurrent()
+        if (typeof input !== 'object' || input === null || Array.isArray(input)
+          || Object.keys(input).sort().join(',') !== 'contract,execution,receipt') {
+          throw new AssistantEvaluationError('forbidden', 'verifier Evaluation input is invalid')
+        }
+        let contract
+        let receipt
+        try {
+          contract = validateTaskAcceptanceContract(input.contract)
+          receipt = validateTaskVerificationReceipt(contract, input.receipt)
+        } catch {
+          throw new AssistantEvaluationError('forbidden', 'verifier Evaluation contract or receipt is invalid')
+        }
+        const execution = input.execution as { status?: unknown; quiescent?: unknown; completedAt?: unknown; executionRef?: unknown }
+        const completedAt = execution?.completedAt
+        if (execution === null || typeof execution !== 'object' || Array.isArray(execution)
+          || !['succeeded', 'failed', 'timed-out', 'cancelled', 'unknown'].includes(execution.status as string)
+          || typeof execution.quiescent !== 'boolean'
+          || (!execution.quiescent && receipt.objectiveStatus !== 'unknown') || !Number.isSafeInteger(completedAt)
+          || (completedAt as number) < contract.issuedAt || receipt.startedAt < (completedAt as number)
+          || receipt.validUntil <= this.now() || receipt.completedAt < receipt.startedAt
+          || receipt.completedAt > this.now()
+          || execution.executionRef !== contract.task.ref) {
+          throw new AssistantEvaluationError('forbidden', 'verifier Evaluation execution is invalid')
+        }
+        const taskRef = hostIdentifier(contract.task.ref, 'verification task ref', 1_000)
+        const scope = canonicalEvaluationScope(contract.scope).scope
+        let situation: string
+        if (contract.task.kind === 'foreground-turn') situation = `foreground:${taskRef}`
+        else {
+          const projection = this.store.getAutomationRunLearningProjection(scope, taskRef)
+          if (projection === undefined || projection.execution === undefined) {
+            throw new AssistantEvaluationError('forbidden', 'automation terminal Evaluation projection is not available')
+          }
+          situation = projection.situation
+        }
+        this.appendTrusted({
+          scope, situation,
+          executionStatus: execution.status as OutcomeEnvelope['executionStatus'],
+          objectiveStatus: receipt.objectiveStatus,
+          deliveryStatus: 'not-required',
+          source: { kind: 'evaluator', id: 'assistant-verifier' }, trust: 'trusted',
+          evidence: [
+            { kind: contract.task.kind, ref: taskRef },
+            { kind: 'acceptance-contract', ref: contract.id, digest: contract.digest },
+            { kind: 'verification-receipt', ref: receipt.id, digest: receipt.digest },
+            { kind: 'execution', ref: execution.executionRef },
+          ],
+          metrics: {}, occurredAt: receipt.completedAt,
+          idempotencyKey: `assistant-verifier:${receipt.id}`,
+          evaluator: { id: 'assistant-verifier', version: '1' },
+        })
+      },
+    })
+    this.activeVerifierRegistrations.add(registration)
+    const dispose = () => {
+      if (!registered) return
+      registered = false
+      this.activeVerifierRegistrations.delete(registration)
+      if (this.verifierBinding === binding) this.verifierBinding = undefined
+      disposeRegistration?.()
+    }
+    binding = Object.freeze({ producer, generation, dispose })
+    const previous = this.verifierBinding
+    this.verifierBinding = binding
+    try {
+      disposeRegistration = producer.registerTrustedVerifierEvaluationSink(registration)
+      if (typeof disposeRegistration !== 'function') throw new AssistantEvaluationError('forbidden', 'verifier returned no registration disposer')
+    } catch (error) {
+      registered = false
+      this.activeVerifierRegistrations.delete(registration)
+      if (this.verifierBinding === binding) this.verifierBinding = previous
+      throw error
+    }
+    previous?.dispose()
     return dispose
   }
 
@@ -980,6 +1109,12 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       || !Number.isSafeInteger(input.occurredAt) || input.occurredAt < 0) {
       throw new AssistantEvaluationError('forbidden', 'delivery Evaluation claims are invalid')
     }
+    const subjectKind = input.subjectKind ?? 'automation-run'
+    const subjectRef = input.subjectRef ?? input.runId
+    if ((input.subjectKind !== undefined && input.subjectKind !== 'automation-run' && input.subjectKind !== 'foreground-turn')
+      || (input.subjectRef !== undefined && input.subjectRef.trim() === '')) {
+      throw new AssistantEvaluationError('forbidden', 'delivery Evaluation subject is invalid')
+    }
     const command = input.ownerCommand
     if (command !== undefined && ((command.action === 'withdraw') !== (input.objectiveStatus === 'unknown')
       || (command.action === 'initial' && (command.expectedVersion !== undefined || command.previousStatus !== undefined))
@@ -997,6 +1132,8 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
       }) }),
       scope: Object.freeze({ ...canonicalEvaluationScope(input.scope).scope }),
       situation: hostIdentifier(input.situation, 'situation', this.config.maxSituationBytes),
+      ...(input.subjectKind === undefined ? {} : { subjectKind }),
+      ...(input.subjectRef === undefined ? {} : { subjectRef: hostIdentifier(subjectRef, 'subjectRef', 1_000) }),
       runId: hostIdentifier(input.runId, 'runId', 1_000),
       outboxId: hostIdentifier(input.outboxId, 'outboxId', 1_000),
       chatId: hostIdentifier(input.chatId, 'chatId', 1_000),

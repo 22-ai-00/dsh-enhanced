@@ -10,6 +10,7 @@ import {
 } from './schedule.js'
 import { AutomationDatabaseError, openAutomationDatabase } from './sqlite.js'
 import { isHostAutomationDefinition, legacyAutomationExecutionDiagnostic } from './types.js'
+import type { AcceptanceContract, AcceptedExecution } from './acceptance.js'
 import type {
   AutomationIncident,
   AutomationIncidentNotificationTarget,
@@ -150,6 +151,22 @@ interface RunRow {
   evidence_json: string | null
   created_at: number
   updated_at: number
+}
+
+interface AcceptanceRow {
+  task_id: string
+  contract_id: string
+  contract_digest: string
+  workspace: string
+  preset: string
+  principal_record_id: string
+  principal_version: number
+  binding_id: string
+  binding_version: number
+  binding_generation: number
+  dispatched_at: number
+  submitted: number
+  quiescent: number
 }
 
 interface CircuitRow {
@@ -2367,6 +2384,86 @@ export class AutomationStore {
   }
 
   /**
+   * Durable, pre-prompt binding to an immutable task attempt.  A recorded
+   * binding means the prompt boundary is treated as crossed even if a process
+   * dies immediately afterwards; recovery must never replay its side effects.
+   */
+  bindTaskAcceptance(input: {
+    taskId: string
+    contractId: string
+    contractDigest: string
+    scope: { workspace: string; preset: string }
+    owner: { principalRecordId: string; principalVersion: number }
+    bindingId: string
+    bindingVersion: number
+    bindingGeneration: number
+    dispatchedAt: number
+  }): void {
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u.test(input.contractId)
+      || !/^[a-f0-9]{64}$/u.test(input.contractDigest)
+      || !Number.isSafeInteger(input.dispatchedAt) || input.dispatchedAt < 0
+      || !Number.isSafeInteger(input.owner.principalVersion) || input.owner.principalVersion < 1
+      || !Number.isSafeInteger(input.bindingVersion) || input.bindingVersion < 1
+      || !Number.isSafeInteger(input.bindingGeneration) || input.bindingGeneration < 1) {
+      throw new AutomationStoreError('invalid-definition', 'acceptance binding is invalid')
+    }
+    const required = [input.scope.workspace, input.scope.preset, input.owner.principalRecordId, input.bindingId]
+    if (required.some(value => typeof value !== 'string' || value.trim() === '' || Buffer.byteLength(value, 'utf8') > 4_096)) {
+      throw new AutomationStoreError('invalid-definition', 'acceptance binding text is invalid')
+    }
+    this.transaction(() => {
+      const taskRow = this.database.prepare('SELECT * FROM automation_tasks WHERE id = ?').get(input.taskId) as TaskRow | undefined
+      if (taskRow === undefined || !['claimed', 'running'].includes(taskRow.status) || taskRow.attempt_count < 1) {
+        throw new AutomationStoreError('invalid-state', 'acceptance task is not an active attempt')
+      }
+      const snapshot = this.getTaskExecutionSnapshot(input.taskId)
+      const occurrenceRow = this.database.prepare('SELECT * FROM automation_occurrences WHERE id = ?').get(taskRow.occurrence_id) as OccurrenceRow | undefined
+      if (snapshot === undefined || isHostAutomationDefinition(snapshot.definition) || occurrenceRow?.dry_run !== 0
+        || snapshot.definition.workspace !== input.scope.workspace || snapshot.definition.agentPreset !== input.scope.preset) {
+        throw new AutomationStoreError('invalid-state', 'acceptance does not match immutable production task')
+      }
+      const existing = this.database.prepare('SELECT * FROM automation_task_acceptance WHERE task_id = ?').get(input.taskId) as AcceptanceRow | undefined
+      if (existing !== undefined) {
+        throw new AutomationStoreError('invalid-state', existing.submitted === 1
+          ? 'accepted task prompt may not be submitted again'
+          : 'acceptance binding already exists')
+      }
+      this.database.prepare(`INSERT INTO automation_task_acceptance(
+        task_id, contract_id, contract_digest, workspace, preset, principal_record_id,
+        principal_version, binding_id, binding_version, binding_generation, dispatched_at, submitted
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`).run(
+        input.taskId, input.contractId, input.contractDigest, input.scope.workspace, input.scope.preset,
+        input.owner.principalRecordId, input.owner.principalVersion, input.bindingId, input.bindingVersion, input.bindingGeneration,
+        input.dispatchedAt,
+      )
+    })
+  }
+
+  inspectAcceptedExecution(contract: AcceptanceContract): AcceptedExecution | null {
+    const row = this.database.prepare(`SELECT acceptance.*, run.* FROM automation_task_acceptance acceptance
+      LEFT JOIN automation_runs run ON run.task_id = acceptance.task_id
+      WHERE acceptance.contract_id = ?`).get(contract.id) as (AcceptanceRow & Partial<RunRow>) | undefined
+    if (row === undefined || row.contract_digest !== contract.digest || row.workspace !== contract.scope.workspace
+      || row.preset !== contract.scope.preset || row.principal_record_id !== contract.owner.principalRecordId
+      || row.principal_version !== contract.owner.principalVersion || contract.task.kind !== 'automation-run'
+      || contract.task.ref !== `run-${row.task_id}`) return null
+    if (row.id === undefined || row.status === undefined || row.created_at === undefined || row.diagnostic_json === undefined) return null
+    const snapshot = this.getRunExecutionSnapshot(row.id)
+    if (snapshot === undefined || isHostAutomationDefinition(snapshot.definition)
+      || snapshot.definition.workspace !== row.workspace || snapshot.definition.agentPreset !== row.preset
+      || this.getRunExecutionMode(row.id) !== 'production') return null
+    const status = row.status === 'timed_out' ? 'timed-out' : row.status
+    const quiescent = row.quiescent === 1
+    return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest,
+      dispatchedAt: row.dispatched_at, status, quiescent, completedAt: row.created_at, executionRef: row.id })
+  }
+
+  markAcceptedTaskQuiescent(taskId: string, quiescent: boolean): void {
+    this.database.prepare(`UPDATE automation_task_acceptance SET quiescent = ? WHERE task_id = ?`)
+      .run(quiescent ? 1 : 0, taskId)
+  }
+
+  /**
    * Re-prove the exact production tuple immediately before an effect sink.
    * Legacy rows, mutable current definitions, and a mode flag alone are never
    * sufficient. Corrupt snapshots throw so dispatchers can quarantine the row.
@@ -3450,9 +3547,14 @@ export class AutomationStore {
           throw new AutomationStoreError('invalid-state', 'expired task has no matching execution attempt')
         }
         const snapshot = automationSnapshot(attempt, row.automation_id)
+        const accepted = this.database.prepare('SELECT submitted FROM automation_task_acceptance WHERE task_id = ?')
+          .get(row.id) as { submitted: number } | undefined
         const retry = row.status === 'running'
           && snapshot?.definition.retrySafety === 'idempotent'
           && row.attempt_count <= snapshot.definition.maxRetries
+          // Accepted task prompts are side-effect capable.  A lease/restart
+          // can recover their terminal unknown receipt but cannot replay them.
+          && accepted?.submitted !== 1
         const target: AutomationTaskStatus = row.status === 'claimed' || retry ? 'scheduled' : 'unknown'
         const attemptStatus: AutomationTaskStatus = row.status === 'claimed' ? 'lost' : 'unknown'
         this.database.prepare(`

@@ -51,7 +51,8 @@
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
     "@dsh-enhanced/assistant-growth-contract": "workspace:*",
-    "@dsh-enhanced/llm-route-capabilities": "workspace:*"
+    "@dsh-enhanced/llm-route-capabilities": "workspace:*",
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",

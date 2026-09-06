@@ -142,7 +142,7 @@ describe('evaluation database', () => {
         metrics: { outputTokens: 9 },
         projection: expect.objectContaining({ subjectKind: 'automation-run', subjectRef: runId }),
       })])
-    expect(store.health()).toMatchObject({ schemaVersion: 8, taskProjections: 1 })
+    expect(store.health()).toMatchObject({ schemaVersion: 9, taskProjections: 1 })
     store.close()
   })
 })
@@ -493,6 +493,20 @@ describe('evaluation store', () => {
 })
 
 describe('linked owner objective revisions', () => {
+  test('keeps a legacy Automation run id equal to a typed subject label unambiguous', () => {
+    const store = new EvaluationStore({ path: join(root(), 'legacy-subject-label.sqlite') })
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const runId = 'foreground-turn'
+    const lineage = { principalRecordId: 'host-owner', principalVersion: 1 }
+    store.append(envelope({ scope, evidence: [{ kind: 'automation-run', ref: runId }, { kind: 'delivery-outbox', ref: 'result' }],
+      source: { kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' },
+      evaluator: { id: 'assistant-delivery-owner-feedback', version: '2' }, idempotencyKey: 'legacy-label' }),
+    { ...lineage, action: 'initial', operationId: 'legacy-label' })
+    expect(store.ownerObjectiveState(scope, runId, lineage.principalRecordId, lineage.principalVersion))
+      .toEqual({ version: 1, objectiveStatus: 'achieved' })
+    store.close()
+  })
+
   test('CAS revisions preserve immutable audit, quarantine independent conflict and never revive terminal success after withdrawal or restart', () => {
     const path = join(root(), 'owner.sqlite')
     let store = new EvaluationStore({ path, now: () => 2000 })
@@ -539,6 +553,36 @@ describe('linked owner objective revisions', () => {
     store.append(owner('achieved', 'independent-owner'))
     expect(store.queryTasks({ scope })[0]).toMatchObject({ objectiveStatus: 'unknown', projection: { status: 'objective-conflict' } })
     expect(store.query({ scope, limit: 20 })).toHaveLength(6)
+    store.close()
+  })
+
+  test('foreground owner revisions supersede the verifier outcome and remain withdrawn after restart', () => {
+    const path = join(root(), 'foreground-owner.sqlite')
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const inboxId = 'inbox:foreground-owner'
+    const lineage = { principalRecordId: 'host-owner', principalVersion: 1 }
+    const owner = (status: OutcomeEnvelope['objectiveStatus'], key: string) => envelope({
+      scope, situation: `foreground:${inboxId}`, objectiveStatus: status,
+      source: { kind: 'user-feedback', id: 'assistant-delivery/typed-owner-feedback' },
+      evaluator: { id: 'assistant-delivery-owner-feedback', version: '2' },
+      evidence: [{ kind: 'foreground-turn', ref: inboxId }, { kind: 'delivery-outbox', ref: 'outbox:result' }],
+      idempotencyKey: key,
+    })
+    let store = new EvaluationStore({ path, now: () => 2_000 })
+    store.append(envelope({ scope, situation: `foreground:${inboxId}`,
+      source: { kind: 'evaluator', id: 'assistant-verifier' },
+      evaluator: { id: 'assistant-verifier', version: '1' },
+      evidence: [{ kind: 'foreground-turn', ref: inboxId }, { kind: 'acceptance-contract', ref: 'contract' },
+        { kind: 'verification-receipt', ref: 'receipt' }], idempotencyKey: 'foreground-terminal' }))
+    store.append(owner('achieved', 'foreground-initial'), { ...lineage, action: 'initial', operationId: 'foreground-1' })
+    store.append(owner('partial', 'foreground-correct'), { ...lineage, action: 'correct', operationId: 'foreground-2', expectedVersion: 1, previousStatus: 'achieved' })
+    store.append(owner('unknown', 'foreground-withdraw'), { ...lineage, action: 'withdraw', operationId: 'foreground-3', expectedVersion: 2, previousStatus: 'partial' })
+    expect(store.queryTasks({ scope })[0]).toMatchObject({
+      executionStatus: 'succeeded', objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' },
+    })
+    store.close()
+    store = new EvaluationStore({ path, now: () => 3_000 })
+    expect(store.queryTasks({ scope })[0]).toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
     store.close()
   })
 })

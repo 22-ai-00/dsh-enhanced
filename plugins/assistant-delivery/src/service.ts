@@ -42,6 +42,7 @@ import {
 } from './coordinator.js'
 import { DeliveryStore, DeliveryStoreError, type OwnerRouteDispatchGuard } from './store.js'
 import { DshDeliveryRuntime } from './agent-runtime.js'
+import type { AcceptanceContract, AcceptanceHandle, TaskAcceptanceRegistration } from './acceptance.js'
 import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
 import {
@@ -821,6 +822,10 @@ export class AssistantDeliveryService extends Service {
   private readonly activePresentationRegistrations = new WeakSet<object>()
   private readonly evaluationProducerGeneration = `assistant-delivery:${randomUUID()}`
   private readonly preferenceProducerGeneration = `assistant-delivery-preference:${randomUUID()}`
+  private readonly acceptanceProducerGeneration = `assistant-delivery-acceptance:${randomUUID()}`
+  private acceptanceSink: Readonly<{ token: symbol; registration: TaskAcceptanceRegistration }> | undefined
+  /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
+  private acceptanceRequired = false
   private readonly preferenceTurns = new WeakMap<Agent, Readonly<DeliveryPreferenceTurnAttestation>>()
   private modelSelectionFlight: Promise<void> | undefined
   private presentationFlight: Promise<void> | undefined
@@ -924,6 +929,8 @@ export class AssistantDeliveryService extends Service {
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
         maxAutoContinuationTurns: config.agentMaxAutoContinuationTurns,
         maxTextBytes: config.maxTextBytes,
+        prepareForegroundTaskAcceptance: (binding, envelope) => this.prepareForegroundTaskAcceptance(binding, envelope),
+        completeForegroundTaskAcceptance: (handle, input) => this.completeForegroundTaskAcceptance(handle, input),
         modelPickerTtlMs: config.modelPickerTtlMs,
         permissionPickerTtlMs: config.permissionPickerTtlMs,
         getModelSelection: conversation => this.deliveryStore.getModelSelection(conversation),
@@ -1006,6 +1013,7 @@ export class AssistantDeliveryService extends Service {
       this.active = false
       trustedDeliveryPreferenceProducers.delete(this)
       this.preferenceFeedbackSink = undefined
+      this.acceptanceSink = undefined
       this.evaluationSink = undefined
       this.workflowTraceSink = undefined
       this.automationPresentationBinding?.dispose()
@@ -1539,6 +1547,101 @@ export class AssistantDeliveryService extends Service {
       active = false
       if (this.runtime === runtime) this.runtime = undefined
     }
+  }
+
+  /** Private verifier producer generation; invalidated with this service. */
+  trustedAcceptanceProducerGeneration = (): string => {
+    this.assertActive()
+    return this.acceptanceProducerGeneration
+  }
+
+  registerTaskAcceptanceSink = (registration: TaskAcceptanceRegistration): (() => void) => {
+    this.assertActive()
+    const verifier = this.ctx.get('assistantVerifier' as never, false) as unknown as
+      { ownsTaskAcceptanceRegistration?(value: TaskAcceptanceRegistration): boolean } | undefined
+    if (registration.protocol !== 'assistant-verifier/host-producer/v1'
+      || registration.generation !== this.acceptanceProducerGeneration
+      || typeof registration.prepare !== 'function' || typeof registration.completed !== 'function'
+      || typeof registration.requiresAcceptance !== 'boolean'
+      || typeof verifier?.ownsTaskAcceptanceRegistration !== 'function'
+      || verifier.ownsTaskAcceptanceRegistration(registration) !== true) {
+      throw new AssistantDeliveryError('runtime-conflict', 'task acceptance registration is invalid')
+    }
+    if (this.acceptanceSink !== undefined) {
+      if (this.acceptanceSink.registration === registration) return this.removeTaskAcceptanceSink(this.acceptanceSink.token)
+      throw new AssistantDeliveryError('runtime-conflict', 'task acceptance sink is already registered')
+    }
+    const token = Symbol('assistant-delivery.task-acceptance')
+    if (registration.requiresAcceptance) this.acceptanceRequired = true
+    this.acceptanceSink = Object.freeze({ token, registration })
+    return this.removeTaskAcceptanceSink(token)
+  }
+
+  inspectAcceptedExecution = async (contract: AcceptanceContract) => {
+    this.assertActive()
+    return this.deliveryStore.inspectForegroundAcceptedExecution(contract)
+  }
+
+  private removeTaskAcceptanceSink(token: symbol): () => void {
+    let live = true
+    return () => {
+      if (!live) return
+      live = false
+      if (this.acceptanceSink?.token === token) this.acceptanceSink = undefined
+    }
+  }
+
+  private prepareForegroundTaskAcceptance(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): AcceptanceHandle | undefined {
+    const sink = this.acceptanceSink
+    if (sink === undefined) {
+      if (this.acceptanceRequired) {
+        throw new AssistantDeliveryError('runtime-conflict', 'required task acceptance verifier is unavailable')
+      }
+      return undefined
+    }
+    const owner = this.ownerLineageForBinding(binding)
+    const inbox = this.deliveryStore.getInboxByProviderEvent(envelope.channel, envelope.account, envelope.eventId)
+    const exactInbox = inbox !== undefined && inbox.status === 'claimed' && inbox.bindingId === binding.id
+      && JSON.stringify(inbox.envelope) === JSON.stringify(envelope)
+    if (owner === undefined || !exactInbox) {
+      if (this.acceptanceRequired) {
+        throw new AssistantDeliveryError('missing-binding', 'required task acceptance lacks an authenticated owner inbox')
+      }
+      return undefined
+    }
+    const task = Object.freeze({ kind: 'foreground-turn' as const, ref: inbox.id })
+    const prepared = sink.registration.prepare(Object.freeze({
+      scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+      owner: Object.freeze({ principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion }),
+      task,
+      // Preserve the original inbound objective byte-for-byte.
+      objective: envelope.text,
+    }))
+    if (prepared === null) {
+      if (this.acceptanceRequired) {
+        throw new AssistantDeliveryError('runtime-conflict', 'required task acceptance profile did not produce a contract')
+      }
+      return undefined
+    }
+    this.deliveryStore.bindForegroundTaskAcceptance({ inboxId: inbox.id, contractId: prepared.contractId,
+      contractDigest: prepared.contractDigest, scope: { workspace: binding.workspace, preset: binding.agentPreset },
+      owner, binding, dispatchedAt: Date.now() })
+    return prepared
+  }
+
+  private async completeForegroundTaskAcceptance(
+    handle: AcceptanceHandle,
+    input: { status: 'succeeded' | 'failed' | 'timed-out' | 'cancelled' | 'unknown'; quiescent: boolean },
+  ): Promise<void> {
+    const sink = this.acceptanceSink
+    this.deliveryStore.finishForegroundTaskAcceptance({ contractId: handle.contractId, ...input, completedAt: Date.now() })
+    if (sink === undefined && this.acceptanceRequired) {
+      throw new AssistantDeliveryError('runtime-conflict', 'required task acceptance verifier is unavailable after Host completion')
+    }
+    if (sink !== undefined) await sink.registration.completed(handle)
   }
 
   registerAdapter(adapter: DeliveryAdapter): Promise<() => Promise<void>> {
@@ -2719,8 +2822,60 @@ export class AssistantDeliveryService extends Service {
         sourceEventId,
       )
       if (sourceInbox === undefined) return 'invalid-target'
-      if (parsed.kind === 'objective-status') return this.deliveryStore.verifiedWorkflowObjectiveState(target.id, this.ownerLineageForBinding(binding)) ?? 'recorded'
+      const lineage = this.ownerLineageForBinding(binding)
+      const accepted = lineage === undefined ? null : this.deliveryStore.inspectForegroundAcceptedExecutionForOwner({
+        inboxId: sourceInbox.id,
+        scope: { workspace: binding.workspace, preset: binding.agentPreset },
+        owner: lineage,
+        bindingId: binding.id,
+      })
+      const canonicalForeground = accepted !== null
+      const projectForegroundOwner = async (inspectOnly: boolean) => {
+        const sink = this.evaluationSink
+        if (sink === undefined || lineage === undefined) return undefined
+        if ((parsed.kind !== 'objective' || inspectOnly) && (sink.registration.ownerRevisionProtocol !== 'owner-objective-revision/v1'
+          || typeof sink.registration.inspect !== 'function')) return undefined
+        const operationId = `owner-feedback:${createHash('sha256').update(JSON.stringify([inbox.id, inbox.envelopeHash])).digest('hex')}`
+        const digest = createHash('sha256').update('assistant-delivery-foreground-objective-feedback-v1\0')
+          .update(JSON.stringify([binding.workspace, binding.agentPreset, sourceInbox.id, target.id]))
+          .digest('hex')
+        const claims: TrustedDeliveryEvaluationClaims = Object.freeze({
+          scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
+          situation: `foreground:${sourceInbox.id}`,
+          subjectKind: 'foreground-turn', subjectRef: sourceInbox.id, runId: sourceInbox.id, outboxId: target.id,
+          chatId: binding.conversation.chat, principalId: externalPrincipalId(binding.principal), bindingId: binding.id,
+          objectiveStatus, ownerCommand: { ...lineage, operationId,
+            action: parsed.kind === 'objective-revision' ? parsed.action : 'initial' as const,
+            ...(parsed.kind === 'objective-revision' ? { expectedVersion: parsed.expectedVersion, previousStatus: parsed.previousStatus } : {}),
+          },
+          occurredAt: inbox.receivedAt,
+          initialIdempotencyKey: `assistant-delivery:foreground-objective-feedback-v1:${digest}`,
+          idempotencyKey: parsed.kind === 'objective-revision' ? operationId : `assistant-delivery:foreground-objective-feedback-v1:${digest}`,
+        })
+        const capabilityReceipt = sink.registration.issueCapability(claims)
+        if (this.evaluationSink?.token !== sink.token) return undefined
+        if (inspectOnly) return sink.registration.inspect?.(capabilityReceipt)
+        const receipt = await Promise.resolve(sink.registration.append({
+          capabilityReceipt, runId: sourceInbox.id, outboxId: target.id, chatId: binding.conversation.chat,
+          principalId: externalPrincipalId(binding.principal), bindingId: binding.id, idempotencyKey: claims.idempotencyKey,
+        }))
+        return typeof receipt === 'object' && receipt !== null
+          && typeof (receipt as Partial<{ ownerFeedbackState: unknown }>).ownerFeedbackState === 'object'
+          ? (receipt as { ownerFeedbackState: import('@dsh-enhanced/assistant-evaluation').OwnerObjectiveState }).ownerFeedbackState
+          : undefined
+      }
+      if (parsed.kind === 'objective-status') {
+        if (!canonicalForeground) return this.deliveryStore.verifiedWorkflowObjectiveState(target.id, lineage) ?? 'recorded'
+        try { return await projectForegroundOwner(true) ?? 'unavailable' } catch { return 'unknown' }
+      }
+      if (canonicalForeground && this.evaluationSink === undefined) return 'unavailable'
       try {
+        // Evaluation commits first for accepted foreground tasks. If the sink
+        // is unavailable, never acknowledge a Delivery-only success; a replay
+        // can safely repeat the opaque command and then repair local workflow
+        // evidence after the canonical owner revision is durable.
+        const canonical = canonicalForeground ? await projectForegroundOwner(false) : undefined
+        if (canonicalForeground && canonical === undefined) return 'unavailable'
         const result = this.deliveryStore.commitVerifiedWorkflowTraceFeedback({
           binding,
           feedbackInboxId: inbox.id,
@@ -2730,7 +2885,7 @@ export class AssistantDeliveryService extends Service {
           ...(parsed.kind === 'objective-revision' ? { command: parsed } : {}),
         })
         await this.drainWorkflowTraces()
-        return result.ownerFeedbackState ?? 'recorded'
+        return canonical ?? result.ownerFeedbackState ?? 'recorded'
       } catch (error) {
         if (error instanceof DeliveryStoreError) {
           if (error.code === 'idempotency-conflict' || error.code === 'version-conflict') {
@@ -2740,6 +2895,8 @@ export class AssistantDeliveryService extends Service {
             || error.code === 'receipt-mismatch' || error.code === 'conflict'
             || error.code === 'not-found') return 'invalid-target'
         }
+        if (typeof error === 'object' && error !== null && 'code' in error
+          && ['idempotency-conflict', 'version-conflict'].includes(String((error as { code?: unknown }).code))) return 'conflict'
         return 'invalid-target'
       }
     }

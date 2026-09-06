@@ -2,7 +2,28 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 17
+export const deliverySchemaVersion = 18
+
+const taskAcceptanceExecutionSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_task_acceptance_executions (
+    inbox_id TEXT PRIMARY KEY REFERENCES inbox_messages(id),
+    contract_id TEXT NOT NULL UNIQUE,
+    contract_digest TEXT NOT NULL CHECK(length(contract_digest) = 64),
+    workspace TEXT NOT NULL,
+    preset TEXT NOT NULL,
+    principal_record_id TEXT NOT NULL,
+    principal_version INTEGER NOT NULL CHECK(principal_version >= 1),
+    binding_id TEXT NOT NULL REFERENCES conversation_bindings(id),
+    binding_version INTEGER NOT NULL CHECK(binding_version >= 1),
+    binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+    dispatched_at INTEGER NOT NULL CHECK(dispatched_at >= 0),
+    status TEXT NOT NULL CHECK(status IN ('pending', 'succeeded', 'failed', 'timed-out', 'cancelled', 'unknown')),
+    quiescent INTEGER NOT NULL CHECK(quiescent IN (0, 1)),
+    completed_at INTEGER,
+    execution_ref TEXT,
+    CHECK((status = 'pending') = (completed_at IS NULL AND execution_ref IS NULL))
+  ) STRICT;
+`
 
 const ownerObjectiveRevisionSchema = `
   CREATE TABLE delivery_owner_objective_commands (
@@ -610,10 +631,6 @@ function migrateObserved(database: DatabaseSync): void {
       `delivery schema ${version} is newer than supported schema ${deliverySchemaVersion}`,
     )
   }
-  if (version === 16) {
-    database.exec(`${ownerObjectiveRevisionSchema} PRAGMA user_version = 17;`)
-    version = 17
-  }
   if (version === deliverySchemaVersion) return
   if (version === 1) {
     database.exec(`
@@ -830,6 +847,10 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec(`${ownerObjectiveRevisionSchema} PRAGMA user_version = 17;`)
     version = 17
   }
+  if (version === 17) {
+    database.exec(`${taskAcceptanceExecutionSchema} PRAGMA user_version = 18;`)
+    version = 18
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1040,7 +1061,8 @@ function migrateObserved(database: DatabaseSync): void {
     ${inboxAdmissionSchema}
 
     ${ownerObjectiveRevisionSchema}
-    PRAGMA user_version = 17;
+    ${taskAcceptanceExecutionSchema}
+    PRAGMA user_version = 18;
   `)
 }
 

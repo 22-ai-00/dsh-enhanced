@@ -71,6 +71,7 @@ import {
 import { AutomationProposalManager, AutomationProposalStore } from './proposals.js'
 import { DshAutomationRunner, HostAutomationRunner, RoutedAutomationRunner } from './runner.js'
 import { AutomationStore } from './store.js'
+import type { AcceptanceContract, AcceptedExecution, TaskAcceptanceRegistration } from './acceptance.js'
 import { registerAutomationTools } from './tools.js'
 import type {
   AutomationMutation,
@@ -393,6 +394,10 @@ export class AssistantAutomationsService extends Service implements
   private readonly config: Required<Config>
   private readonly evaluationProducerGeneration = `assistant-automations:${randomUUID()}`
   private readonly presentationProducerGeneration = `assistant-automations-presentation:${randomUUID()}`
+  private readonly acceptanceProducerGeneration = `assistant-automations-acceptance:${randomUUID()}`
+  private acceptanceSink: Readonly<{ token: symbol; registration: TaskAcceptanceRegistration }> | undefined
+  /** Once a live verifier requires acceptance, a transient detach must not reopen prompt submission. */
+  private acceptanceRequired = false
   private evaluationSink:
     | Readonly<{ token: symbol; registration: Readonly<TrustedAutomationEvaluationRegistration> }>
     | undefined
@@ -435,6 +440,8 @@ export class AssistantAutomationsService extends Service implements
     const runner = new PolicyBoundRunner(policy, new RoutedAutomationRunner(
       new DshAutomationRunner(ctx, policy, {
         allowUnbudgetedExecution: config.allowUnbudgetedExecution,
+        prepareAcceptance: input => this.prepareTaskAcceptance(input),
+        acceptanceEnabled: () => this.acceptanceSink !== undefined || this.acceptanceRequired,
       }),
       new HostAutomationRunner(this.hostExecutors, policy, {
         allowUnbudgetedExecution: config.allowUnbudgetedExecution,
@@ -513,6 +520,7 @@ export class AssistantAutomationsService extends Service implements
     ctx.effect(() => async () => {
       this.active = false
       this.evaluationSink = undefined
+      this.acceptanceSink = undefined
       this.presentationSink?.dispose()
       this.coordinator.setEvaluationRecorder(undefined)
       await this.coordinator.stop()
@@ -530,6 +538,83 @@ export class AssistantAutomationsService extends Service implements
   trustedDeliveryPresentationProducerGeneration(): string {
     this.assertActive()
     return this.presentationProducerGeneration
+  }
+
+  /** Private verifier producer generation; invalidated with this service. */
+  trustedAcceptanceProducerGeneration(): string {
+    this.assertActive()
+    return this.acceptanceProducerGeneration
+  }
+
+  registerTaskAcceptanceSink(registration: TaskAcceptanceRegistration): () => void {
+    this.assertActive()
+    const verifier = this.ctx.get('assistantVerifier' as never, false) as unknown as
+      { ownsTaskAcceptanceRegistration?(value: TaskAcceptanceRegistration): boolean } | undefined
+    if (registration.protocol !== 'assistant-verifier/host-producer/v1'
+      || registration.generation !== this.acceptanceProducerGeneration
+      || typeof registration.prepare !== 'function' || typeof registration.completed !== 'function'
+      || typeof verifier?.ownsTaskAcceptanceRegistration !== 'function'
+      || !verifier.ownsTaskAcceptanceRegistration(registration)) {
+      throw new AssistantAutomationsError('runtime-conflict', 'task acceptance registration is invalid')
+    }
+    if (this.acceptanceSink !== undefined) {
+      if (this.acceptanceSink.registration === registration) {
+        const token = this.acceptanceSink.token
+        return () => { if (this.acceptanceSink?.token === token) this.acceptanceSink = undefined }
+      }
+      throw new AssistantAutomationsError('runtime-conflict', 'task acceptance sink is already registered')
+    }
+    const token = Symbol('assistant-automations.task-acceptance')
+    this.acceptanceSink = Object.freeze({ token, registration })
+    if (registration.requiresAcceptance === true) this.acceptanceRequired = true
+    let live = true
+    return () => {
+      if (!live) return
+      live = false
+      if (this.acceptanceSink?.token === token) this.acceptanceSink = undefined
+    }
+  }
+
+  async inspectAcceptedExecution(contract: AcceptanceContract): Promise<AcceptedExecution | null> {
+    this.assertActive()
+    return this.store.inspectAcceptedExecution(contract)
+  }
+
+  private prepareTaskAcceptance(input: {
+    taskId: string
+    automationId: string
+    scope: { workspace: string; preset: string }
+    objective: string
+    owner?: { principalRecordId: string; principalVersion: number }
+    binding?: { id: string; version: number; generation: number }
+  }): void {
+    const sink = this.acceptanceSink
+    if (sink === undefined) {
+      if (this.acceptanceRequired) {
+        throw new AssistantAutomationsError('runtime-conflict', 'required task acceptance verifier is unavailable')
+      }
+      return
+    }
+    if (input.owner === undefined || input.binding === undefined) {
+      if (this.acceptanceRequired) {
+        throw new AssistantAutomationsError('missing-approval-route', 'required task acceptance lacks an authenticated Delivery owner')
+      }
+      return
+    }
+    const handle = sink.registration.prepare(Object.freeze({ scope: Object.freeze(input.scope), owner: input.owner,
+      task: Object.freeze({ kind: 'automation-run' as const, ref: `run-${input.taskId}` }), objective: input.objective,
+    }))
+    if (handle === null) {
+      if (this.acceptanceRequired) {
+        throw new AssistantAutomationsError('runtime-conflict', 'required task acceptance profile is unavailable')
+      }
+      return
+    }
+    this.store.bindTaskAcceptance({ taskId: input.taskId, contractId: handle.contractId, contractDigest: handle.contractDigest,
+      scope: input.scope, owner: input.owner, bindingId: input.binding.id, bindingVersion: input.binding.version,
+      bindingGeneration: input.binding.generation,
+      dispatchedAt: Date.now(),
+    })
   }
 
   /**

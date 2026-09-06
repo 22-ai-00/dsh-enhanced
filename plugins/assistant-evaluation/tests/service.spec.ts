@@ -39,7 +39,7 @@ describe('assistant evaluation service', () => {
     expect(service.query({ scope: stored.scope, limit: 10 })).toEqual([stored])
     expect(service.summary({ scope: stored.scope, fromOccurredAt: 0, toOccurredAt: 5_000 }).total).toBe(1)
     expect(service.health()).toMatchObject({
-      ready: true, schemaVersion: 8, outcomes: 1, trustedOutcomes: 1,
+      ready: true, schemaVersion: 9, outcomes: 1, trustedOutcomes: 1,
       taskProjections: 1, conflictedTaskProjections: 0, pendingProjections: 1,
     })
     expect(service.limits()).toMatchObject({ maxSituationBytes: 200, maxQueryLimit: 100, maxEvidenceRefs: 32 })
@@ -115,6 +115,59 @@ describe('assistant evaluation service', () => {
       scope: canonicalEvaluationHostScope({ workspace: '/work/other', preset: 'primary' }),
       outcomeId: trusted.id,
     })).toBeUndefined()
+  })
+
+  test('accepts a typed foreground owner subject while legacy Delivery claims remain Automation runs', async () => {
+    const { delivery, service } = await harness()
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const inboxId = 'inbox:foreground-1'
+    const base = {
+      scope, situation: `foreground:${inboxId}`, subjectKind: 'foreground-turn' as const, subjectRef: inboxId,
+      runId: inboxId, outboxId: 'outbox:foreground-1', chatId: 'chat:owner', principalId: 'owner:1', bindingId: 'binding:1',
+      occurredAt: 1_000, initialIdempotencyKey: 'foreground:initial',
+    }
+    delivery.append({ ...base, objectiveStatus: 'achieved', idempotencyKey: 'foreground:initial',
+      ownerCommand: { operationId: 'foreground:one', principalRecordId: 'owner-record', principalVersion: 1, action: 'initial' } })
+    delivery.append({ ...base, objectiveStatus: 'unknown', idempotencyKey: 'foreground:withdraw',
+      ownerCommand: { operationId: 'foreground:two', principalRecordId: 'owner-record', principalVersion: 1,
+        action: 'withdraw', expectedVersion: 1, previousStatus: 'achieved' } })
+    expect(service.queryTasks({ scope })[0]).toMatchObject({
+      projection: { subjectKind: 'foreground-turn', subjectRef: inboxId, learningDisposition: 'retract' },
+      objectiveStatus: 'unknown',
+    })
+  })
+
+  test('persists foreground owner correction and withdrawal across an Evaluation restart', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-evaluation-foreground-owner-'))
+    roots.push(root)
+    const path = join(root, 'evaluation.sqlite')
+    const scope = { workspace: '/work/alpha', preset: 'primary' }
+    const inboxId = 'inbox:foreground-restart'
+    const base = {
+      scope, situation: `foreground:${inboxId}`, subjectKind: 'foreground-turn' as const, subjectRef: inboxId,
+      runId: inboxId, outboxId: 'outbox:foreground-restart', chatId: 'chat:owner', principalId: 'owner:1', bindingId: 'binding:1',
+      occurredAt: 1_000, initialIdempotencyKey: 'foreground-restart:initial',
+    }
+    const ctx = new Context(); contexts.push(ctx)
+    const { delivery } = installTrustedTestProducers(ctx)
+    const first = new AssistantEvaluationService(ctx, { databasePath: path }, { now: () => 5_000 })
+    delivery.append({ ...base, objectiveStatus: 'achieved', idempotencyKey: 'foreground-restart:initial',
+      ownerCommand: { operationId: 'foreground-restart:one', principalRecordId: 'owner-record', principalVersion: 1, action: 'initial' } })
+    delivery.append({ ...base, objectiveStatus: 'partial', idempotencyKey: 'foreground-restart:correct',
+      ownerCommand: { operationId: 'foreground-restart:two', principalRecordId: 'owner-record', principalVersion: 1,
+        action: 'correct', expectedVersion: 1, previousStatus: 'achieved' } })
+    delivery.append({ ...base, objectiveStatus: 'unknown', idempotencyKey: 'foreground-restart:withdraw',
+      ownerCommand: { operationId: 'foreground-restart:three', principalRecordId: 'owner-record', principalVersion: 1,
+        action: 'withdraw', expectedVersion: 2, previousStatus: 'partial' } })
+    expect(first.queryTasks({ scope })[0]).toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
+    await ctx.fiber.restart(); contexts.splice(contexts.indexOf(ctx), 1)
+
+    const reopenedCtx = new Context(); contexts.push(reopenedCtx)
+    installTrustedTestProducers(reopenedCtx)
+    const reopened = new AssistantEvaluationService(reopenedCtx, { databasePath: path }, { now: () => 6_000 })
+    expect(reopened.queryTasks({ scope })[0]).toMatchObject({
+      objectiveStatus: 'unknown', projection: { subjectKind: 'foreground-turn', subjectRef: inboxId, learningDisposition: 'retract' },
+    })
   })
 
   test('durably retries and exactly settles trusted objective projection when Evolution attaches', async () => {

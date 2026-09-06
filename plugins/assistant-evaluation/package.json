@@ -96,6 +96,7 @@
     "vitest": "catalog:"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "catalog:"
+    "@deepseek-ai/schemastery": "catalog:",
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
   }
 }

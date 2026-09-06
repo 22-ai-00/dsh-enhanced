@@ -88,7 +88,7 @@ export interface StoredOutcome extends OutcomeEnvelope {
 
 export interface EvaluationTaskProjection {
   /** Stable scope-bound task identity. Automation outcomes share the exact run reference. */
-  subjectKind: 'automation-run' | 'outcome'
+  subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
   subjectRef: string
   /** Conflicting trusted owner judgements are quarantined instead of resolved by arrival order. */
   status: 'ready' | 'objective-conflict'
@@ -171,7 +171,7 @@ export interface TrustedTaskLearningProjectionReceipt {
   execution?: Readonly<TrustedTaskExecutionComponent>
   objective?: Readonly<TrustedTaskObjectiveComponent>
   projection: Readonly<{
-    subjectKind: 'automation-run' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -183,7 +183,7 @@ export interface TrustedTaskLearningProjectionReceipt {
 
 /** Exact current task identity frozen into an Evolution evidence window. */
 export interface EvaluationLearningEvidenceTuple {
-  subjectKind: 'automation-run' | 'outcome'
+  subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
   subjectRef: string
   version: number
   digest: string
@@ -246,6 +246,18 @@ export interface TrustedEvaluationRegistrationOwner {
   ownsTrustedDeliveryEvaluationRegistration(
     registration: Readonly<TrustedDeliveryEvaluationRegistration>,
   ): boolean
+  ownsTrustedVerifierEvaluationRegistration(
+    registration: Readonly<TrustedVerifierEvaluationRegistration>,
+  ): boolean
+}
+
+/** Private verifier-to-ledger capability.  It carries the immutable acceptance
+ * pair and the Host re-read execution, never a caller supplied verdict. */
+export interface TrustedVerifierEvaluationRegistration {
+  protocol: 'assistant-verifier/evaluation/v1'
+  generation: string
+  owner: TrustedEvaluationRegistrationOwner
+  append(input: Readonly<{ contract: unknown; receipt: unknown; execution: unknown }>): Promise<void>
 }
 
 export interface TrustedAutomationEvaluationRegistration {
@@ -275,6 +287,11 @@ export interface OwnerObjectiveState {
 export interface TrustedDeliveryEvaluationClaims {
   scope: Readonly<EvaluationScope>
   situation: string
+  /** Defaults to the legacy Automation subject when omitted by an older Delivery producer. */
+  subjectKind?: 'automation-run' | 'foreground-turn'
+  /** Defaults to `runId` for legacy Automation feedback. */
+  subjectRef?: string
+  /** Legacy Automation subject reference retained for rolling producer compatibility. */
   runId: string
   outboxId: string
   chatId: string

@@ -32,6 +32,8 @@ export interface AutomationRunnerResult {
   usage: Readonly<Record<string, unknown>>
   /** Omitted only by legacy/custom runners; the coordinator persists unknown. */
   diagnostic?: AutomationExecutionDiagnostic
+  /** Only the runner can attest that its own Agent/resources were joined. */
+  quiescent?: boolean
 }
 
 export interface AutomationRunner {
@@ -625,6 +627,9 @@ export class AutomationCoordinator {
               },
             }),
       })
+      // Persist actual runner cleanup state rather than deriving it from a
+      // terminal status.  Unknown/custom/timeout runners remain false.
+      this.store.markAcceptedTaskQuiescent(started.id, result.quiescent === true && outcome !== 'cancelled' && outcome !== 'unknown')
       this.dispatchRunDelivery(run)
       this.dispatchRunEvidence(run)
       this.dispatchRunEvaluation(run.id)

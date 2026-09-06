@@ -76,9 +76,10 @@ function harness(options: {
   taskLearningProjectionIntegrityErrors?: number
   failedLeases?: number
   preferenceEnabled?: boolean
+  verifierHealth?: unknown
   requiredProviders?: Array<'assistantPolicy' | 'personalMemory' | 'personalWiki' | 'assistantAutomations'
     | 'assistantEvaluation' | 'preferenceLearning' | 'assistantEvolution' | 'assistantRecovery'
-    | 'assistantGrowthExperiments' | 'pluginControlPlane' | 'larkChannel'>
+    | 'assistantGrowthExperiments' | 'pluginControlPlane' | 'larkChannel' | 'assistantVerifier'>
 } = {}) {
   const ctx = new Context(); contexts.push(ctx)
   const policy = new FakePolicy(ctx); policy.allow = options.allow ?? true
@@ -135,6 +136,7 @@ function harness(options: {
     failedLeases: options.failedLeases ?? 0 })
   new Provider(ctx, 'eventTriggers', { pendingEvents: 1, deliveredEvents: 9, triggersObserved: 2 })
   new Provider(ctx, 'assistantHeartbeat', { active: 1, paused: 1, empty: 1 })
+  if (options.verifierHealth !== undefined) new Provider(ctx, 'assistantVerifier', options.verifierHealth)
   if (options.recoveryHealth !== undefined) new Provider(ctx, 'assistantRecovery', options.recoveryHealth)
   if (options.growthExperimentsHealth !== undefined) {
     new Provider(ctx, 'assistantGrowthExperiments', options.growthExperimentsHealth)
@@ -640,6 +642,81 @@ describe('assistant health service', () => {
     const serialized = JSON.stringify(report)
     expect(serialized).not.toMatch(/SENTINEL|content|vaultPath|rawMessage|tenant|secret/i)
     expect(Buffer.byteLength(serialized)).toBeLessThan(16_384)
+  })
+
+  test('projects the installed verifier seam without a runtime package dependency', () => {
+    const fixture = harness({ verifierHealth: {
+      ready: true, profiles: 2, requireAcceptance: true,
+      hostProducers: ['assistantAutomations', 'assistantDelivery'], evaluationConnected: true,
+      awaitingExecution: 1, pendingVerification: 2, pendingReceipts: 0,
+      expiredReceipts: 0, needsAttention: 0,
+      owner: 'SENTINEL-OWNER', task: 'SENTINEL-TASK', databasePath: '/secret/verifier.sqlite',
+    } })
+
+    expect(fixture.service.readiness()).toEqual({ ready: true, warnings: [] })
+    expect(fixture.service.report(agent())).toMatchObject({
+      severity: 'healthy',
+      providers: expect.arrayContaining([{
+        id: 'assistantVerifier', status: 'ready', metrics: {
+          ready: true, profiles: 2, requireAcceptance: true,
+          hostProducers: ['assistantAutomations', 'assistantDelivery'], evaluationConnected: true,
+          awaitingExecution: 1, pendingVerification: 2, pendingReceipts: 0,
+          expiredReceipts: 0, needsAttention: 0,
+        },
+      }]),
+    })
+    expect(JSON.stringify(fixture.service.report(agent()))).not.toMatch(/SENTINEL|databasePath/iu)
+  })
+
+  test('reports an installed verifier with no profiles as disabled, without blocking optional readiness', () => {
+    const fixture = harness({ verifierHealth: {
+      ready: true, profiles: 0, requireAcceptance: false, hostProducers: [], evaluationConnected: false,
+      awaitingExecution: 0, pendingVerification: 0, pendingReceipts: 0, expiredReceipts: 0, needsAttention: 0,
+    } })
+
+    expect(fixture.service.readiness()).toEqual({ ready: true, warnings: [
+      'provider-degraded:assistantVerifier:acceptance-disabled',
+    ] })
+    expect(fixture.service.report(agent())).toMatchObject({ severity: 'degraded', assessments: [
+      { providerId: 'assistantVerifier', severity: 'degraded', code: 'acceptance-disabled' },
+    ] })
+  })
+
+  test('degrades durable verifier receipts that cannot be trusted or delivered', () => {
+    const fixture = harness({ verifierHealth: {
+      ready: true, profiles: 1, requireAcceptance: true, hostProducers: ['assistantDelivery'],
+      evaluationConnected: false, awaitingExecution: 0, pendingVerification: 0, pendingReceipts: 2,
+      expiredReceipts: 1, needsAttention: 3,
+    } })
+
+    expect(fixture.service.readiness()).toEqual({ ready: true, warnings: [
+      'provider-degraded:assistantVerifier:evaluation-disconnected-with-pending-receipts',
+      'provider-degraded:assistantVerifier:expired-receipt-backlog',
+      'provider-degraded:assistantVerifier:verification-needs-attention',
+    ] })
+    expect(fixture.service.report(agent())).toMatchObject({ severity: 'degraded', assessments: [
+      { providerId: 'assistantVerifier', severity: 'degraded', code: 'evaluation-disconnected-with-pending-receipts' },
+      { providerId: 'assistantVerifier', severity: 'degraded', code: 'expired-receipt-backlog' },
+      { providerId: 'assistantVerifier', severity: 'degraded', code: 'verification-needs-attention' },
+    ] })
+  })
+
+  const sparseProducerIds: unknown[] = []
+  sparseProducerIds.length = 1
+  test.each([
+    ['unknown producer', ['assistantAutomations', 'foreign-host']],
+    ['unsorted producer ids', ['assistantDelivery', 'assistantAutomations']],
+    ['sparse producer ids', sparseProducerIds],
+  ])('fails closed on verifier %s health payloads', (_label, hostProducers) => {
+    const fixture = harness({ requiredProviders: ['assistantVerifier'], verifierHealth: {
+      ready: true, profiles: 1, requireAcceptance: true, hostProducers, evaluationConnected: true,
+      awaitingExecution: 0, pendingVerification: 0, pendingReceipts: 0, expiredReceipts: 0, needsAttention: 0,
+    } })
+
+    expect(fixture.service.readiness()).toEqual({ ready: false, warnings: ['provider-error:assistantVerifier'] })
+    expect(fixture.service.report(agent()).providers).toContainEqual({
+      id: 'assistantVerifier', status: 'error', metrics: {},
+    })
   })
 
   test('accepts an empty Evaluation ledger whose optional latest timestamp is absent', () => {
