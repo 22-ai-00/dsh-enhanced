@@ -8086,6 +8086,215 @@ describe('real rc.1 delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test.each([
+    { name: 'retains one settled native model call and rejects the second at the call cap',
+      budget: { modelCalls: 1, toolCalls: 0, inputTokens: 20, outputTokens: 14, durationMs: 5_000, maxOutputTokensPerCall: 7 }, meter: 'priced' as const, nativeRequests: 1,
+      nativeMaxTokens: undefined, nativeUsages: undefined,
+      snapshot: { modelCalls: 1, heldCalls: 0, inputTokens: 10, outputTokens: 2 } },
+    { name: 'settles cache usage against its complete billed input total',
+      budget: { modelCalls: 1, toolCalls: 0, inputTokens: 10, outputTokens: 7, durationMs: 5_000, maxOutputTokensPerCall: 7 }, meter: 'priced' as const, nativeRequests: 1,
+      nativeMaxTokens: [7], nativeUsages: [{ inputTokens: 6, cacheReadTokens: 3, cacheWriteTokens: 1, outputTokens: 2, reasoningTokens: 1, totalTokens: 12 }],
+      snapshot: { modelCalls: 1, heldCalls: 0, inputTokens: 10, outputTokens: 2 } },
+    { name: 'caps the second native request at its remaining output budget',
+      budget: { modelCalls: 2, toolCalls: 0, inputTokens: 20, outputTokens: 3, durationMs: 5_000, maxOutputTokensPerCall: 7 }, meter: 'priced' as const, nativeRequests: 2,
+      nativeMaxTokens: [3, 1], nativeUsages: [{ inputTokens: 10, outputTokens: 2, totalTokens: 12 }, { inputTokens: 10, outputTokens: 1, totalTokens: 11 }],
+      snapshot: { modelCalls: 2, heldCalls: 0, inputTokens: 20, outputTokens: 3 } },
+    { name: 'ignores monetary arithmetic for a token-only budget even when a tariff is known',
+      budget: { modelCalls: 1, toolCalls: 0, inputTokens: 1_000_000_000, outputTokens: 14, durationMs: 5_000, maxOutputTokensPerCall: 7 }, meter: 'large-unpriced' as const, nativeRequests: 1,
+      nativeMaxTokens: undefined, nativeUsages: undefined,
+      snapshot: { modelCalls: 1, heldCalls: 0, inputTokens: 10, outputTokens: 2 } },
+    { name: 'rejects an input upper bound before the first native adapter request',
+      budget: { modelCalls: 2, toolCalls: 0, inputTokens: 9, outputTokens: 14, durationMs: 5_000, maxOutputTokensPerCall: 7 }, meter: 'priced' as const, nativeRequests: 0,
+      nativeMaxTokens: undefined, nativeUsages: undefined,
+      snapshot: { modelCalls: 0, heldCalls: 0 } },
+    { name: 'rejects a priced reservation that exceeds its cost ceiling before the adapter request',
+      budget: { modelCalls: 2, toolCalls: 0, inputTokens: 20, outputTokens: 14, costUsdMicros: 1, durationMs: 5_000, maxOutputTokensPerCall: 7 }, meter: 'priced' as const, nativeRequests: 0,
+      nativeMaxTokens: undefined, nativeUsages: undefined,
+      snapshot: { modelCalls: 0, heldCalls: 0 } },
+    { name: 'rejects a priced reservation when the route has no tariff',
+      budget: { modelCalls: 2, toolCalls: 0, inputTokens: 20, outputTokens: 14, costUsdMicros: 100, durationMs: 5_000, maxOutputTokensPerCall: 7 }, meter: 'unknown-tariff' as const, nativeRequests: 0,
+      nativeMaxTokens: undefined, nativeUsages: undefined,
+      snapshot: { modelCalls: 0, heldCalls: 0 } },
+    { name: 'rejects a native request without an exact route meter',
+      budget: { modelCalls: 2, toolCalls: 0, inputTokens: 20, outputTokens: 14, durationMs: 5_000, maxOutputTokensPerCall: 7 }, meter: 'missing' as const, nativeRequests: 0,
+      nativeMaxTokens: undefined, nativeUsages: undefined,
+      snapshot: { modelCalls: 0, heldCalls: 0 } },
+  ] as const)('enforces the durable goal execution budget: $name', async ({ budget, meter, nativeRequests, nativeMaxTokens, nativeUsages, snapshot }) => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-step-budget-'))
+    roots.push(root)
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const objective = 'Bound native model budget without charging the foreground reply'
+    const rule = (name: string) => ({ id: `goal-step-budget-${name}`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['execute'],
+      resource: { kind: 'tool' as const, id: name }, context: { initiators: ['external' as const] } })
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [{ id: 'goal-step-budget-goal', effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'execute'], resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] } }, rule('goal_create')],
+      presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, goalContinuationTimeoutMs: 5_000,
+    })
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(native.goalTools as never, {} as never)
+    await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true,
+      stepMaxDurationMs: 5_000, executionBudget: budget } as never)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+    await writeFile(join(root, 'report.md'), 'Confirmed result')
+    const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
+    const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+    await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
+      authorities: [authority], profiles: [{ id: 'goal-step-budget', version: 1, scope: { workspace: root, preset: 'primary' },
+        owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000,
+        bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
+      }],
+    })
+    let goalId = ''
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
+        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-budget-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 2 } })
+        if (created.isError) throw new Error('goal-step budget setup rejected')
+        goalId = fixture.ctx.assistantGoals.list(agent).at(0)?.id ?? ''
+      }
+      return await next()
+    })
+    if (meter !== 'missing') fixture.ctx.assistantGoals.registerBudgetMeter({ id: `meter-${meter}`, provider: 'mock', model: 'delivery-model',
+      inputTokenUpperBound: () => meter === 'large-unpriced' ? 1_000_000_000 : 10,
+      inputUsdMicrosPerMillionTokens: meter === 'unknown-tariff' ? null : 1_000_000,
+      outputUsdMicrosPerMillionTokens: meter === 'unknown-tariff' ? null : 1_000_000,
+    })
+    if (nativeUsages !== undefined) {
+      const original = fixture.llm.stream.bind(fixture.llm)
+      vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+        if (fixture.llm.requests.length === 0) { yield* original(options); return }
+        fixture.llm.requests.push(options)
+        const usage = nativeUsages[fixture.llm.requests.length - 2]
+        if (usage === undefined) throw new Error('unexpected native budget model request')
+        const text = 'Native budget response.'
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+        yield { type: 'usage', usage }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      })
+    }
+
+    await fixture.service.acceptInbound(message(`evt-goal-step-budget-${meter}-${budget.inputTokens}`, objective))
+    await drive(fixture.service)
+    await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
+
+    expect(goalId).not.toBe('')
+    expect(fixture.llm.requests).toHaveLength(1 + nativeRequests)
+    if (nativeMaxTokens !== undefined) expect(fixture.llm.requests.slice(1).map((request) => request.maxTokens)).toEqual(nativeMaxTokens)
+    else if (nativeRequests === 1) expect(fixture.llm.requests[1]?.maxTokens).toBe(7)
+    const ledger = new DatabaseSync(join(root, 'goals.sqlite.budgets'), { readOnly: true })
+    try {
+      const row = ledger.prepare('SELECT COUNT(*) AS model_calls, COALESCE(SUM(CASE WHEN state = \'held\' THEN 1 ELSE 0 END), 0) AS held_calls, COALESCE(SUM(CASE WHEN state = \'held\' THEN input_tokens_reserved ELSE input_tokens_actual END), 0) AS input_tokens, COALESCE(SUM(CASE WHEN state = \'held\' THEN output_tokens_reserved ELSE output_tokens_actual END), 0) AS output_tokens FROM goal_budget_reservations WHERE goal_id = ?').get(goalId) as { model_calls: number; held_calls: number; input_tokens: number; output_tokens: number }
+      expect({ modelCalls: row.model_calls, heldCalls: row.held_calls, inputTokens: row.input_tokens, outputTokens: row.output_tokens }).toMatchObject(snapshot)
+    } finally { ledger.close() }
+    if (nativeRequests === 1) {
+      const executions = new DatabaseSync(join(root, 'goals.sqlite.executions'), { readOnly: true })
+      try {
+        expect(executions.prepare('SELECT COUNT(*) AS count FROM goal_execution_runs').get()).toMatchObject({ count: 2 })
+      } finally { executions.close() }
+    }
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('keeps a full native budget reservation held and the round unknown when the adapter omits usage', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-step-budget-usage-'))
+    roots.push(root)
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const objective = 'Keep missing native usage conservatively charged'
+    const rule = (name: string) => ({ id: `goal-step-budget-usage-${name}`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['execute'], resource: { kind: 'tool' as const, id: name }, context: { initiators: ['external' as const] } })
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [{ id: 'goal-step-budget-usage-goal', effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'execute'], resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] } }, rule('goal_create')],
+      presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, goalContinuationTimeoutMs: 5_000,
+    })
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never); await fixture.ctx.plugin(native.goalTools as never, {} as never); await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, stepMaxDurationMs: 5_000,
+      executionBudget: { modelCalls: 1, toolCalls: 0, inputTokens: 10, outputTokens: 7, durationMs: 5_000, maxOutputTokensPerCall: 7 } } as never)
+    const pairing = fixture.service.issuePairing('test', principal); fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)!; const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }; const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+    await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: [{ id: 'goal-step-budget-usage', version: 1, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }] }] })
+    let goalId = ''
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-budget-usage-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 2 } }); if (created.isError) throw new Error('goal-step missing usage setup rejected'); goalId = fixture.ctx.assistantGoals.list(agent).at(0)?.id ?? '' }; return await next() })
+    fixture.ctx.assistantGoals.registerBudgetMeter({ id: 'meter-missing-usage', provider: 'mock', model: 'delivery-model', inputTokenUpperBound: () => 10, inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
+    const original = fixture.llm.stream.bind(fixture.llm)
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      if (fixture.llm.requests.length === 0) { yield* original(options); return }
+      fixture.llm.requests.push(options)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'Native response without usage.' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Native response without usage.' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+
+    await fixture.service.acceptInbound(message('evt-goal-step-budget-missing-usage', objective)); await drive(fixture.service); await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
+    expect(fixture.llm.requests).toHaveLength(2)
+    const budget = new DatabaseSync(join(root, 'goals.sqlite.budgets'), { readOnly: true })
+    try { expect(budget.prepare('SELECT COUNT(*) AS model_calls, COALESCE(SUM(CASE WHEN state = \'held\' THEN 1 ELSE 0 END), 0) AS held_calls, SUM(input_tokens_reserved) AS input_tokens, SUM(output_tokens_reserved) AS output_tokens FROM goal_budget_reservations WHERE goal_id = ?').get(goalId)).toMatchObject({ model_calls: 1, held_calls: 1, input_tokens: 10, output_tokens: 7 }) } finally { budget.close() }
+    const executions = new DatabaseSync(join(root, 'goals.sqlite.executions'), { readOnly: true })
+    try { expect(JSON.parse((executions.prepare('SELECT execution_json FROM goal_execution_runs').get() as { execution_json: string }).execution_json)).toMatchObject({ status: 'unknown', quiescent: false }) } finally { executions.close() }
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('denies a native goal tool at a zero tool budget before the preset body runs', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-step-tool-budget-'))
+    roots.push(root)
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'; const objective = 'Do not execute an unfunded native tool'
+    const rule = (name: string) => ({ id: `goal-step-tool-budget-${name}`, effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['execute'], resource: { kind: 'tool' as const, id: name }, context: { initiators: ['external' as const] } })
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [{ id: 'goal-step-tool-budget-goal', effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'execute'], resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] } }, rule('goal_create')],
+      presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, allowPresetProbeExecution: true, goalContinuationTimeoutMs: 5_000,
+    })
+    const native = await nativeGoalPlugins(); await fixture.ctx.plugin(native.GoalService as never, {} as never); await fixture.ctx.plugin(native.goalTools as never, {} as never); await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, stepMaxDurationMs: 5_000, executionBudget: { modelCalls: 1, toolCalls: 0, inputTokens: 10, outputTokens: 7, durationMs: 5_000, maxOutputTokensPerCall: 7 } } as never)
+    const pairing = fixture.service.issuePairing('test', principal); fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)!; const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }; const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+    await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: [{ id: 'goal-step-tool-budget', version: 1, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }] }] })
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-tool-budget-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } }); if (created.isError) throw new Error('goal-step tool budget setup rejected') }; return await next() })
+    fixture.ctx.assistantGoals.registerBudgetMeter({ id: 'meter-tool-budget', provider: 'mock', model: 'delivery-model', inputTokenUpperBound: () => 10, inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
+    const original = fixture.llm.stream.bind(fixture.llm)
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      if (fixture.llm.requests.length === 0) { yield* original(options); return }
+      fixture.llm.requests.push(options)
+      const callId = ToolCallId('goal-step-tool-budget-probe')
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id: callId, name: 'preset_probe', argumentsDelta: '{}' }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'preset_probe', arguments: '{}' } }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    })
+    await fixture.service.acceptInbound(message('evt-goal-step-tool-budget', objective)); await drive(fixture.service); await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
+    expect(fixture.llm.requests).toHaveLength(2)
+    expect(fixture.presetExecute).not.toHaveBeenCalled()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('bounds an unresolved native input meter at the configured goal duration before the adapter', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-step-meter-deadline-'))
+    roots.push(root)
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'; const objective = 'Bound an unresolved native meter'
+    const rule = (name: string) => ({ id: `goal-step-meter-deadline-${name}`, effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['execute'], resource: { kind: 'tool' as const, id: name }, context: { initiators: ['external' as const] } })
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [{ id: 'goal-step-meter-deadline-goal', effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'execute'], resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] } }, rule('goal_create')],
+      presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, goalContinuationTimeoutMs: 5_000,
+    })
+    const native = await nativeGoalPlugins(); await fixture.ctx.plugin(native.GoalService as never, {} as never); await fixture.ctx.plugin(native.goalTools as never, {} as never); await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, stepMaxDurationMs: 5_000, executionBudget: { modelCalls: 1, toolCalls: 0, inputTokens: 10, outputTokens: 7, durationMs: 150, maxOutputTokensPerCall: 7 } } as never)
+    const pairing = fixture.service.issuePairing('test', principal); fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)!; const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }; const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+    await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: [{ id: 'goal-step-meter-deadline', version: 1, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }] }] })
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => { if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) { const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-step-meter-deadline-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } }); if (created.isError) throw new Error('goal-step meter deadline setup rejected') }; return await next() })
+    fixture.ctx.assistantGoals.registerBudgetMeter({ id: 'meter-never-settles', provider: 'mock', model: 'delivery-model', inputTokenUpperBound: () => new Promise<number>(() => {}), inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
+    await fixture.service.acceptInbound(message('evt-goal-step-meter-deadline', objective)); await drive(fixture.service); await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
+    expect(fixture.llm.requests).toHaveLength(1)
+    await fixture.ctx.fiber.restart()
+  })
+
   test('rejects a native goal round before its model request when no goal-step profile exists', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-step-no-profile-'))
     roots.push(root)

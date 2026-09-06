@@ -147,6 +147,13 @@ export class GoalExecutionRuntime {
   }
   whenIdle = async (): Promise<void> => { while (this.#pending.size) await Promise.all(this.#pending) }
   health = () => ({ enabled: this.#store !== undefined, verifierConnected: this.#sink !== undefined, activeRounds: this.#rounds.size })
+  budgetState = (agent: Agent): { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal } | undefined => {
+    if (this.#revoked.has(agent)) throw new Error('assistant-goals: cancelled execution cannot resume')
+    const round = this.#rounds.get(agent)
+    if (round === undefined) return undefined
+    this.#assertRound(round)
+    return { record: this.current(agent).record, run: round.run, signal: round.signal }
+  }
 
   #isGoalTurn(agent: Agent, turn: number): boolean {
     const events = agent.session.snapshotEvents()
