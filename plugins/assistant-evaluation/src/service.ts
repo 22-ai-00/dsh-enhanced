@@ -544,6 +544,26 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     }, callback)
   }
 
+  /**
+   * Canonical task writer fence for Host consumers whose commit depends on
+   * Evaluation state itself, rather than on delivery of that state to Evolution.
+   */
+  withTrustedCanonicalLearningWriterFence<T>(input: Readonly<{
+    scope: EvaluationHostScope
+    scopeWatermark: number
+    evidence: readonly Readonly<EvaluationLearningEvidenceTuple>[]
+  }>, callback: () => T): EvaluationLearningWriterFenceResult<T> {
+    this.assertActive()
+    if (typeof callback !== 'function') {
+      throw new AssistantEvaluationError('invalid-input', 'writer fence callback is required')
+    }
+    const scope = exactEvaluationHostScope(input.scope)
+    return this.store.withLearningWriterFence(scope, {
+      scopeWatermark: input.scopeWatermark,
+      evidence: input.evidence,
+    }, callback, { requireProjectionDelivery: false })
+  }
+
   /** Host-only seam for a memory-assisted/model evaluator; always stored as self-reported. */
   appendSelfAssessment(input: SelfAssessmentInput): StoredSelfAssessment {
     this.assertActive()

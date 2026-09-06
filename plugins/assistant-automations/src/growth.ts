@@ -338,6 +338,26 @@ export class GrowthAutomationStore {
     return artifact(row)
   }
 
+  requireCanaryInspectionArtifact(
+    input: Readonly<GrowthAutomationArtifactRequest>,
+  ): Readonly<GrowthArtifactRecord> {
+    this.assertOpen()
+    const row = this.database.prepare(`
+      SELECT * FROM automation_growth_artifacts WHERE artifact_id = ?
+    `).get(input.artifactId) as ArtifactRow | undefined
+    const promotedReplay = row?.state === 'promoted'
+      && row.definition_version === input.artifactVersion + 1
+      && row.definition_hash === input.artifactDigest
+      && row.experiment_id === input.experimentId
+      && row.candidate_id === input.candidateId
+      && row.candidate_revision === input.candidateRevision
+      && row.candidate_digest === input.candidateDigest
+    if (row === undefined || (!identityMatches(row, input) && !promotedReplay)) {
+      throw new AutomationStoreError('version-conflict', 'growth canary inspection artifact is stale or missing')
+    }
+    return artifact(row)
+  }
+
   byExperiment(experimentId: string): Readonly<GrowthArtifactRecord> | undefined {
     this.assertOpen()
     const row = this.database.prepare(`

@@ -1147,7 +1147,9 @@ export class AssistantAutomationsService extends Service implements
     this.assertActive()
     const input = validateGrowthCanaryInspectionRequest(inputValue)
     const replay = this.growthStore.beginOperation('canary-inspection', input)
-    const artifact = this.growthStore.requireArtifact(input)
+    const artifact = replay === undefined
+      ? this.growthStore.requireArtifact(input)
+      : this.growthStore.requireCanaryInspectionArtifact(input)
     if (replay !== undefined) {
       const receipt = validateGrowthCanaryInspectionReceipt(replay, input)
       if (receipt.outcome === 'passed') this.requireCurrentCanaryProof(artifact)
@@ -1232,7 +1234,7 @@ export class AssistantAutomationsService extends Service implements
       throw new AssistantAutomationsError('runtime-conflict', 'promotion requires the exact canary artifact')
     }
     const proof = this.requireCurrentCanaryProof(artifact)
-    const fenced = this.evaluation!.withTrustedLearningWriterFence({
+    const fenced = this.evaluation!.withTrustedCanonicalLearningWriterFence({
       scope: canonicalEvaluationHostScope({ workspace: artifact.workspace, preset: artifact.preset }),
       scopeWatermark: proof.scopeWatermark,
       evidence: [{ ...proof.projection, disposition: 'upsert' }],
