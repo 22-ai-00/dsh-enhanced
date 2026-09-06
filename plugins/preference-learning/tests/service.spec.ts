@@ -285,6 +285,7 @@ function memoryRetentionFeedback(
 function observationEvent(
   index: number,
   candidateValue: 'zh-CN' | 'en',
+  occurredAt: number = Date.now(),
 ): DeliveryPreferenceObservation {
   return {
     scope: { workspace: '/work/alpha', preset: 'primary' },
@@ -297,7 +298,7 @@ function observationEvent(
     actorTrust: 'owner-authenticated',
     interpretationTrust: 'behavioral-inference',
     source: 'delivery-observation',
-    occurredAt: Date.now(),
+    occurredAt,
     idempotencyKey: `completed-turn-${candidateValue}-${index}`,
     completion: {
       bindingId: 'binding-owner',
@@ -632,12 +633,26 @@ describe('preference learning service', () => {
   })
 
   test('automatically applies repeated completed-turn language use without a command', async () => {
-    const { ctx, agent: target, feedback } = await harness({ autonomousT1Enabled: true })
-    for (let index = 1; index <= 5; index += 1) feedback(observationEvent(index, 'zh-CN'))
+    // Signal weight decays with the age of each observation
+    // (`decayPermille = (ttl - age) / ttl`), and activation compares the decayed
+    // mass against a coverage target. Stamping observations with the ambient
+    // `Date.now()` while the service reads its own wall clock therefore let the
+    // promotion margin shrink with however long the run took, so this test
+    // failed under full-suite load rather than on a behaviour change. Freeze
+    // both sides on one instant so the decay is exactly zero and the assertion
+    // measures promotion, not machine speed.
+    const clock = Date.now()
+    const { ctx, agent: target, feedback } = await harness({
+      autonomousT1Enabled: true,
+      now: () => clock,
+    })
+    const observation = (index: number, candidateValue: 'zh-CN' | 'en') =>
+      observationEvent(index, candidateValue, clock)
+    for (let index = 1; index <= 5; index += 1) feedback(observation(index, 'zh-CN'))
     expect(ctx.assistantPreferenceLearning.review(target).hypotheses[0]).toMatchObject({
       candidateValue: 'zh-CN', effectState: 'shadow', supportingSignals: 5,
     })
-    feedback(observationEvent(6, 'zh-CN'))
+    feedback(observation(6, 'zh-CN'))
     expect(ctx.assistantPreferenceLearning.review(target)).toMatchObject({
       activeOverlay: expect.stringContaining('Simplified Chinese'),
       hypotheses: expect.arrayContaining([expect.objectContaining({
@@ -645,9 +660,9 @@ describe('preference learning service', () => {
       })]),
     })
 
-    feedback(observationEvent(7, 'en'))
+    feedback(observation(7, 'en'))
     expect(ctx.assistantPreferenceLearning.review(target).activeOverlay).toContain('Simplified Chinese')
-    for (let index = 8; index <= 12; index += 1) feedback(observationEvent(index, 'en'))
+    for (let index = 8; index <= 12; index += 1) feedback(observation(index, 'en'))
     const adapted = ctx.assistantPreferenceLearning.review(target)
     expect(adapted.activeOverlay).toContain('Respond in English')
     expect(adapted.hypotheses).toEqual(expect.arrayContaining([
