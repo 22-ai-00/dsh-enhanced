@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 9
+export const evaluationSchemaVersion = 10
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -200,7 +200,7 @@ const taskProjectionSchema = `
   CREATE TABLE evaluation_task_projections (
     subject_key TEXT PRIMARY KEY,
     scope_key TEXT NOT NULL,
-    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'outcome')),
+    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'goal-step', 'outcome')),
     subject_ref TEXT NOT NULL,
     primary_outcome_id TEXT,
     execution_outcome_id TEXT,
@@ -554,6 +554,20 @@ function migrate(database: DatabaseSync): void {
         ${taskProjectionViewSchema}
         UPDATE evaluation_schema_meta SET value = '9' WHERE key = 'schema-version';
         PRAGMA user_version = 9;
+      `)
+    }
+    if (schemaVersion(database) === 9) {
+      // Rebuild only the constrained projection table; its rows and all
+      // outcome/foreign-key references remain intact across the v9 -> v10 step.
+      database.exec(`
+        DROP VIEW evaluation_task_projection_view;
+        ALTER TABLE evaluation_task_projections RENAME TO evaluation_task_projections_v9;
+        DROP INDEX evaluation_task_projections_scope_time;
+        ${taskProjectionSchema.replace('CREATE INDEX evaluation_outcomes_task_subject\n    ON evaluation_outcomes(task_subject_key, recorded_at, id);', '')}
+        INSERT INTO evaluation_task_projections SELECT * FROM evaluation_task_projections_v9;
+        DROP TABLE evaluation_task_projections_v9;
+        UPDATE evaluation_schema_meta SET value = '10' WHERE key = 'schema-version';
+        PRAGMA user_version = 10;
       `)
     }
     if (schemaVersion(database) !== evaluationSchemaVersion) {

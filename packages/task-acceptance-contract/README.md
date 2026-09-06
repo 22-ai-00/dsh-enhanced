@@ -15,3 +15,12 @@ cap.
 
 The package does not make a receipt trusted. A Host-owned producer must bind an
 accepted contract to its durable authority and independently obtain evidence.
+
+`task-acceptance/v1` and `task-verification/v1` retain their original task
+identity (`automation-run` or `foreground-turn`) and canonical digest form.
+`v2` is reserved for durable native-goal execution: it only accepts a
+`goal-step` task with its immutable goal definition digest and version, step,
+run, session, native goal ID, and native revision. A verification receipt must
+use the matching protocol version and reproduce the complete task identity.
+The wire library validates and binds these values; a Host producer remains
+responsible for obtaining them from an authoritative goal lifecycle.

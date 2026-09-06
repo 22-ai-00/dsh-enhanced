@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite'
 import {
   acceptanceCanonicalJson, validateTaskAcceptanceContract, validateTaskVerificationReceipt,
 } from '@dsh-enhanced/task-acceptance-contract'
-import type { TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import type { AcceptanceTaskIdentity, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 
 export class AcceptanceStoreError extends Error {
   constructor(readonly code: 'invalid-input' | 'conflict' | 'corrupt', message: string) { super(message); this.name = 'AcceptanceStoreError' }
@@ -150,11 +150,16 @@ export class AcceptanceStore {
   }
 
   getContract(id: string): TaskAcceptanceContract | null { safeId(id, 'contractId'); const row = this.#database.prepare('SELECT payload FROM acceptance_contracts WHERE id = ?').get(id) as ContractRow | undefined; return row === undefined ? null : parseContract(row.payload) }
-  getTaskContract(identity: { scope: { workspace: string; preset: string }; owner: { principalRecordId: string; principalVersion: number }; task: { kind: 'automation-run' | 'foreground-turn'; ref: string } }): TaskAcceptanceContract | null {
+  getTaskContract(identity: { scope: { workspace: string; preset: string }; owner: { principalRecordId: string; principalVersion: number }; task: AcceptanceTaskIdentity }): TaskAcceptanceContract | null {
     if (typeof identity.scope?.workspace !== 'string' || !isAbsolute(identity.scope.workspace) || normalize(identity.scope.workspace) !== identity.scope.workspace || typeof identity.scope.preset !== 'string' || !IDENTIFIER.test(identity.scope.preset)) fail('invalid-input', 'scope is invalid')
-    safeId(identity.owner?.principalRecordId, 'owner principalRecordId'); if (!Number.isSafeInteger(identity.owner.principalVersion) || identity.owner.principalVersion < 1) fail('invalid-input', 'owner principalVersion is invalid'); if (identity.task.kind !== 'automation-run' && identity.task.kind !== 'foreground-turn') fail('invalid-input', 'task kind is invalid'); safeId(identity.task.ref, 'task ref')
+    safeId(identity.owner?.principalRecordId, 'owner principalRecordId'); if (!Number.isSafeInteger(identity.owner.principalVersion) || identity.owner.principalVersion < 1) fail('invalid-input', 'owner principalVersion is invalid'); if (identity.task.kind !== 'automation-run' && identity.task.kind !== 'foreground-turn' && identity.task.kind !== 'goal-step') fail('invalid-input', 'task kind is invalid'); safeId(identity.task.ref, 'task ref')
     const row = this.#database.prepare('SELECT payload FROM acceptance_contracts WHERE scope = ? AND owner = ? AND task_kind = ? AND task_ref = ?').get(identity.scope.workspace + '\0' + identity.scope.preset, identity.owner.principalRecordId + '\0' + identity.owner.principalVersion, identity.task.kind, identity.task.ref) as ContractRow | undefined
-    return row === undefined ? null : parseContract(row.payload)
+    if (row === undefined) return null
+    const contract = parseContract(row.payload)
+    // v2 goal work shares the SQL lookup key with its producer-provided ref,
+    // but its immutable full binding is part of the durable identity.
+    if (acceptanceCanonicalJson(contract.task) !== acceptanceCanonicalJson(identity.task)) fail('conflict', 'task binding differs')
+    return contract
   }
 
   markExecutionFinished(contractId: string, input: Execution): void {

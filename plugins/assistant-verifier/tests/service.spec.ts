@@ -39,11 +39,11 @@ async function harness(kind: AcceptanceTask['task']['kind'] = 'automation-run', 
   await writeFile(join(root, 'report.md'), 'Confirmed result\n')
   const ctx = new Context(); contexts.push(ctx)
   const producer = new Producer()
-  ctx.provide((kind === 'automation-run' ? 'assistantAutomations' : 'assistantDelivery') as never, producer as never)
+  ctx.provide((kind === 'automation-run' ? 'assistantAutomations' : kind === 'foreground-turn' ? 'assistantDelivery' : 'assistantGoals') as never, producer as never)
   const authority: DocumentAuthorityInput = { kind: 'document', id: 'sources', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 1_024 }
   const authorities = createVerifierAuthorities({ authorities: [authority] })
   const task: AcceptanceTask = { scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'owner-1', principalVersion: 1 },
-    task: { kind, ref: 'run-1' }, objective: '  Keep original objective\n' }
+    task: kind === 'goal-step' ? { kind, ref: 'run-1', goal: { id: 'goal-1', definitionVersion: 1, definitionDigest: 'a'.repeat(64), stepId: 'step-1', runId: 'run-1', sessionId: 'session-1', nativeGoalId: 'native-1', nativeRevision: 1 } } : { kind, ref: 'run-1' }, objective: '  Keep original objective\n' }
   let now = 1_000
   const config = { databasePath: join(root, 'verifier.sqlite'), tickIntervalMs: 0, requireAcceptance: required, authorities: [authority],
     profiles: [{ id: 'report', version: 1, scope: task.scope, owner: task.owner, taskKind: kind, objective: task.objective,
@@ -168,6 +168,24 @@ describe('Host acceptance service', () => {
     await registration.completed(handle)
     await service.tick()
     expect(service.inspect(handle.contractId)).toMatchObject({ state: 'done', attempts: 1, receipt: { objectiveStatus: 'not-achieved' } })
+  })
+
+  it('freezes and reconciles a trusted goal-step v2 contract and receipt', async () => {
+    const { producer, task, service, complete, config } = await harness('goal-step')
+    const registration = producer.registration!
+    const handle = registration.prepare(task)!
+    const durable = new AcceptanceStore(config.databasePath)
+    try { expect(durable.getContract(handle.contractId)).toMatchObject({ protocol: 'task-acceptance/v2', task: task.task }) } finally { durable.close() }
+    complete(handle)
+    await registration.completed(handle)
+    await service.tick()
+    expect(service.inspect(handle.contractId)).toMatchObject({ state: 'done', receipt: { protocol: 'task-verification/v2', task: task.task } })
+  })
+
+  it.each(['automation-run', 'foreground-turn'] as const)('rejects a %s producer attempting goal-step work', async kind => {
+    const { producer, task } = await harness(kind)
+    const goalTask: AcceptanceTask = { ...task, task: { kind: 'goal-step', ref: 'goal-run', goal: { id: 'goal-1', definitionVersion: 1, definitionDigest: 'a'.repeat(64), stepId: 'step-1', runId: 'run-1', sessionId: 'session-1', nativeGoalId: 'native-1', nativeRevision: 1 } } }
+    expect(() => producer.registration!.prepare(goalTask)).toThrow('wrong Host task kind')
   })
 
   it('reconciles a durable terminal proof after restart without rerunning task effects', async () => {

@@ -1,11 +1,11 @@
-import type { TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import type { AcceptanceTaskIdentity, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import type { Execution } from './store.js'
 
 /** Supplied by a Host production entrypoint, never a model tool payload. */
 export interface AcceptanceTask {
   readonly scope: TaskAcceptanceContract['scope']
   readonly owner: TaskAcceptanceContract['owner']
-  readonly task: TaskAcceptanceContract['task']
+  readonly task: AcceptanceTaskIdentity
   readonly objective: string
 }
 

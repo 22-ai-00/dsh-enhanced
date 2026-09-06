@@ -31,7 +31,7 @@ describe('dsh-enhanced-assistant-evaluation', () => {
     await ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite') })
     const service = ctx.assistantEvaluation
     expect(service.health()).toMatchObject({
-      ready: true, schemaVersion: 9, outcomes: 0, taskProjections: 0, pendingProjections: 0,
+      ready: true, schemaVersion: 10, outcomes: 0, taskProjections: 0, pendingProjections: 0,
     })
     await ctx.fiber.restart()
     expect(() => service.health()).toThrowError(/disposed/i)

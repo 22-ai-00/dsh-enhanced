@@ -986,7 +986,10 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         const scope = canonicalEvaluationScope(contract.scope).scope
         let situation: string
         if (contract.task.kind === 'foreground-turn') situation = `foreground:${taskRef}`
-        else {
+        else if (contract.task.kind === 'goal-step') {
+          const goal = contract.task.goal
+          situation = `goal:${hostIdentifier(goal.id, 'goal id', 1_000)}:definition:${goal.definitionVersion}`
+        } else {
           const projection = this.store.getAutomationRunLearningProjection(scope, taskRef)
           if (projection === undefined || projection.execution === undefined) {
             throw new AssistantEvaluationError('forbidden', 'automation terminal Evaluation projection is not available')

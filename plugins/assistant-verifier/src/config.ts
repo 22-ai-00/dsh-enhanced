@@ -1,6 +1,6 @@
 import Schema from '@deepseek-ai/schemastery'
 import { acceptanceCanonicalJson, acceptanceDigest, createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
-import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import type { AcceptanceTaskIdentity, TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import type { AcceptanceTask } from './host.js'
 import { createVerifierAuthorities } from './drivers.js'
 import type { VerifierAuthority, VerifierAuthorityInput } from './drivers.js'
@@ -9,7 +9,7 @@ import type { VerifierAuthority, VerifierAuthorityInput } from './drivers.js'
 export interface AcceptanceProfile extends Omit<AcceptanceTask, 'task'> {
   readonly id: string
   readonly version: number
-  readonly taskKind: TaskAcceptanceContract['task']['kind']
+  readonly taskKind: AcceptanceTaskIdentity['kind']
   readonly criteria: TaskAcceptanceContract['criteria']
   readonly validityMs: number
   readonly bounds: TaskAcceptanceContract['bounds']
@@ -56,8 +56,15 @@ export function compileAcceptanceProfiles(config: Config): Readonly<{
       throw new Error('assistant-verifier: invalid acceptance profile shape')
     }
     const digest = acceptanceDigest(input)
-    const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v1', id: 'profile-validation',
-      scope: input.scope, owner: input.owner, task: { kind: input.taskKind, ref: 'profile-validation' },
+    const task: AcceptanceTaskIdentity = input.taskKind === 'goal-step'
+      ? { kind: 'goal-step', ref: 'profile-validation', goal: {
+          id: 'profile-validation-goal', definitionVersion: 1,
+          definitionDigest: '0'.repeat(64), stepId: 'profile-validation-step', runId: 'profile-validation',
+          sessionId: 'profile-validation-session', nativeGoalId: 'profile-validation-native-goal', nativeRevision: 1,
+        } }
+      : { kind: input.taskKind, ref: 'profile-validation' }
+    const contract = createTaskAcceptanceContract({ protocol: input.taskKind === 'goal-step' ? 'task-acceptance/v2' : 'task-acceptance/v1', id: 'profile-validation',
+      scope: input.scope, owner: input.owner, task,
       objective: input.objective, profile: { id: input.id, version: input.version, digest },
       criteria: input.criteria, issuedAt: 0, expiresAt: input.validityMs, bounds: input.bounds })
     if (input.validityMs <= input.bounds.maxDurationMs) throw new Error('assistant-verifier: profile validity must exceed verification duration')

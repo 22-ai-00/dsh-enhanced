@@ -142,8 +142,68 @@ describe('evaluation database', () => {
         metrics: { outputTokens: 9 },
         projection: expect.objectContaining({ subjectKind: 'automation-run', subjectRef: runId }),
       })])
-    expect(store.health()).toMatchObject({ schemaVersion: 9, taskProjections: 1 })
+    expect(store.health()).toMatchObject({ schemaVersion: 10, taskProjections: 1 })
     store.close()
+  })
+
+  test('preserves a schema-nine projection and its evidence while rebuilding the v10 subject constraint', () => {
+    const path = join(root(), 'v9.sqlite')
+    const store = new EvaluationStore({ path, now: () => 2_000 })
+    const stored = store.append(envelope({
+      situation: 'automation:v9-migration',
+      evidence: [{ kind: 'automation-run', ref: 'v9-run', digest: 'sha256:v9' }],
+      idempotencyKey: 'v9-projection-evidence',
+    }))
+    expect(store.queryTasks({ scope: stored.scope, limit: 10 })).toEqual([
+      expect.objectContaining({ id: stored.id, evidence: stored.evidence,
+        projection: expect.objectContaining({ subjectKind: 'automation-run', subjectRef: 'v9-run' }) }),
+    ])
+    store.close()
+
+    const legacy = new DatabaseSync(path)
+    const v9View = legacy.prepare(`SELECT sql FROM sqlite_schema WHERE type = 'view' AND name = 'evaluation_task_projection_view'`)
+      .get() as { sql: string }
+    legacy.exec(`
+      DROP VIEW evaluation_task_projection_view;
+      ALTER TABLE evaluation_task_projections RENAME TO evaluation_task_projections_v9_fixture;
+      DROP INDEX evaluation_task_projections_scope_time;
+      CREATE TABLE evaluation_task_projections (
+        subject_key TEXT PRIMARY KEY,
+        scope_key TEXT NOT NULL,
+        subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'outcome')),
+        subject_ref TEXT NOT NULL,
+        primary_outcome_id TEXT,
+        execution_outcome_id TEXT,
+        objective_outcome_id TEXT,
+        delivery_outcome_id TEXT,
+        objective_conflicted INTEGER NOT NULL DEFAULT 0 CHECK (objective_conflicted IN (0, 1)),
+        learning_version INTEGER NOT NULL DEFAULT 0 CHECK (learning_version >= 0),
+        learning_digest TEXT CHECK (learning_digest IS NULL OR length(learning_digest) = 64),
+        learning_disposition TEXT CHECK (learning_disposition IN ('upsert', 'retract')),
+        updated_at INTEGER NOT NULL,
+        FOREIGN KEY (primary_outcome_id) REFERENCES evaluation_outcomes(id) ON DELETE RESTRICT,
+        FOREIGN KEY (execution_outcome_id) REFERENCES evaluation_outcomes(id) ON DELETE RESTRICT,
+        FOREIGN KEY (objective_outcome_id) REFERENCES evaluation_outcomes(id) ON DELETE RESTRICT,
+        FOREIGN KEY (delivery_outcome_id) REFERENCES evaluation_outcomes(id) ON DELETE RESTRICT
+      ) STRICT;
+      CREATE INDEX evaluation_task_projections_scope_time
+        ON evaluation_task_projections(scope_key, updated_at DESC, subject_key);
+      ${v9View.sql};
+      INSERT INTO evaluation_task_projections SELECT * FROM evaluation_task_projections_v9_fixture;
+      DROP TABLE evaluation_task_projections_v9_fixture;
+      UPDATE evaluation_schema_meta SET value = '9' WHERE key = 'schema-version';
+      PRAGMA user_version = 9;
+    `)
+    legacy.close()
+
+    const migrated = openEvaluationDatabase(path)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(10)
+    expect(migrated.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+    expect(migrated.prepare(`SELECT subject_kind, subject_ref, primary_outcome_id FROM evaluation_task_projections`).all())
+      .toEqual([{ subject_kind: 'automation-run', subject_ref: 'v9-run', primary_outcome_id: stored.id }])
+    expect(migrated.prepare(`SELECT evidence_json FROM evaluation_task_projection_view WHERE id = ?`).get(stored.id))
+      .toEqual({ evidence_json: JSON.stringify(stored.evidence) })
+    migrated.close()
   })
 })
 

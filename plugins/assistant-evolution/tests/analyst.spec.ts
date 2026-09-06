@@ -373,8 +373,8 @@ describe('supervised growth analyst', () => {
     database.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(13)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
+    expect(evolutionSchemaVersion).toBe(14)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(14)
     expect((migrated.prepare('SELECT COUNT(*) AS count FROM evolution_supervised_analyst_reviews')
       .get() as { count: number }).count).toBe(0)
     if (seeded) {
