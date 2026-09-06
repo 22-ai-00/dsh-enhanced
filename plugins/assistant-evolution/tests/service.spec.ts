@@ -583,7 +583,8 @@ describe('assistant evolution service', () => {
   })
 
   test('counts one immutable Automation run once across several Evaluation outcomes', async () => {
-    const fixture = await harness()
+    let recordedAt = 44_000
+    const fixture = await harness({ now: () => recordedAt })
     const scope = canonicalEvolutionHostScope({ workspace: '/work/alpha', preset: 'primary' })
     const situation = 'automation:one-learning-subject'
     const runId = 'run:one-learning-subject'
@@ -596,6 +597,7 @@ describe('assistant evolution service', () => {
       occurredAt: 4_400,
       status: 'succeeded',
     })
+    recordedAt += 1
     fixture.qualityResolver.appendTrustedEvaluation({
       scope: { workspace: '/work/alpha', preset: 'primary' },
       automationId: 'one-learning-subject',
@@ -610,21 +612,23 @@ describe('assistant evolution service', () => {
       idempotencyKey: 'learning-subject:terminal',
       evaluatorVersion: 'terminal-v1',
     })
-    const append = (key: string, objectiveStatus: 'achieved' | 'not-achieved') => fixture
-      .qualityResolver.appendTrustedEvaluation({
-      scope: { workspace: '/work/alpha', preset: 'primary' },
-      automationId: 'one-learning-subject',
-      situation,
-      runId,
-      executionMode: 'production',
-      executionStatus: 'succeeded',
-      objectiveStatus,
-      deliveryStatus: 'not-required',
-      metrics: {},
-      occurredAt: 4_400,
-      idempotencyKey: key,
-      evaluatorVersion: 'terminal-v1',
-    })
+    const append = (key: string, objectiveStatus: 'achieved' | 'not-achieved') => {
+      recordedAt += 1
+      return fixture.qualityResolver.appendTrustedEvaluation({
+        scope: { workspace: '/work/alpha', preset: 'primary' },
+        automationId: 'one-learning-subject',
+        situation,
+        runId,
+        executionMode: 'production',
+        executionStatus: 'succeeded',
+        objectiveStatus,
+        deliveryStatus: 'not-required',
+        metrics: {},
+        occurredAt: 4_400,
+        idempotencyKey: key,
+        evaluatorVersion: 'terminal-v1',
+      })
+    }
     const firstOutcome = append('learning-subject:first', 'achieved')
     const secondOutcome = append('learning-subject:second', 'achieved')
     const first = fixture.service.projectEvaluationOutcome({ scope, evaluationId: firstOutcome.id })
