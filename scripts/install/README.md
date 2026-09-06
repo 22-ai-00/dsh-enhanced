@@ -102,13 +102,13 @@ DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-mo
 
 `--require-service` 在 Linux 同时验证 systemd user unit、稳定性窗口和 lingering；若检测到循环崩溃会停止该 unit 并输出 journal，若未启用 lingering，注销会停止 user service，按 doctor 提示运行 `sudo loginctl enable-linger "$(id -u)"`。未带 `--require-service` 的 doctor 会避免对已启用 Lark 的 profile 启动第二个 Host；macOS LaunchAgent 与 Windows 当前用户计划任务只能在用户登录会话中运行；Windows 的任务会在失败后重启，但不宣称注销后继续运行。
 
-远程 npm 安装器（`install-npm.sh`）可从 `main` 直接拉取执行，但它只是薄引导器；当脚本不在 `common.sh` 旁边运行时，它从一个固定 `vX.Y.Z` 发布标签拉取 `common.sh` 并验证内嵌 SHA-256 后才 source，实际安装逻辑不从 mutable `main` 执行。发布流程会在 `release:prepare` 自动更新引导器内嵌的 tag 与 digest。
+远程 npm 安装器（`install-npm.sh`）可从 `main` 直接拉取执行，但它只是薄引导器；当脚本不在 `common.sh` 旁边运行时，它从一个固定 `vX.Y.Z` 发布标签拉取 `common.sh` 并验证内嵌 SHA-256 后才 source，实际安装逻辑不从 mutable `main` 执行。因而 checkout 中尚未发布的安装逻辑不会被远程引导器加载；必须先由 `release:prepare` 同步新 tag、digest 与 host range，再发布该 tag。发布流程会自动完成这项同步。
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
 ```
 
-安装器默认把每个 `@dsh-enhanced/*` 目标解析为 npm `latest`，始终安装最新发布版本；显式传入 `--plugin-version` 或 `DSH_ENHANCED_VERSION` 可固定到某个 tag 以保证整套 bundle 同版本。`supervised` 场景要求完整的 bundle 集合，安装后才运行 preview→active 激活器。
+安装器默认先把 `@dsh-enhanced/personal-assistant@latest` 解析为一次安装的精确版本，再用该精确版本预检并安装每个选中的 `@dsh-enhanced/*` bundle；因此仍会获得最新的完整发布，不会因各包独立解析 `latest` 而混装。预检发现任一 bundle 尚未发布该版本时，会在修改 profile 前失败。显式传入 `--plugin-version` 或 `DSH_ENHANCED_VERSION` 可使用精确 SemVer 或 npm dist-tag；tag 同样先由 anchor 解析为精确版本。版本 range 会被拒绝，因为它不能表达一个可验证的单一 cohort。`--dry-run` 不访问 npm registry，会显示待执行的 anchor 解析与预检；要确认实际发布状态请去掉 `--dry-run`。`supervised` 场景要求完整的 bundle 集合，安装后才运行 preview→active 激活器。
 
 本地源码改动后仅重建并重启已有常驻服务：
 

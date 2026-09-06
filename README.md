@@ -54,7 +54,7 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/install-local.sh --mode supervised-growth --lark configure
 ```
 
-不便先 clone 仓库时，可一键远程安装（始终拉取 npm `latest` 的 `@dsh-enhanced/*` 插件与 DSH host；已安装的更新 host 不会被降级）。安装器会按发布账本中的已验证 host 范围进行检查，显式指定范围外版本时必须同时传 `--ack-unverified-host`：
+不便先 clone 仓库时，可一键远程安装。远程引导器会校验并执行固定发布 tag 的 `common.sh`；当前 checkout 中的 cohort 解析改动会在下一次 `release:prepare` 和发布该 tag 后才进入这条远程路径。DSH host 默认跟随 npm `latest`；发布后的安装脚本会先把 `@dsh-enhanced/personal-assistant@latest` 解析为精确版本，再以该版本安装整套选中的 `@dsh-enhanced/*` bundle，从而保持默认获取最新完整发布且避免跨包 `latest` 混装。安装器会按发布账本中的已验证 host 范围进行检查，显式指定范围外版本时必须同时传 `--ack-unverified-host`：
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/22-ai-00/dsh-enhanced/main/scripts/install/install-npm.sh | bash
