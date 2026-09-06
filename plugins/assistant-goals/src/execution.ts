@@ -28,6 +28,7 @@ export class GoalExecutionRuntime {
   readonly #store: GoalExecutionStore | undefined
   readonly #rounds = new Map<Agent, ActiveRound>()
   readonly #pending = new Set<Promise<void>>()
+  readonly #settlements = new WeakMap<Agent, Promise<void>>()
   readonly #revoked = new WeakSet<Agent>()
   #sink: TaskAcceptanceRegistration | undefined
   #active = true
@@ -139,6 +140,11 @@ export class GoalExecutionRuntime {
   }
 
   list = (scope: GoalScope, goalId: string): readonly GoalExecutionRun[] => this.#store?.listForGoal(scope, goalId) ?? []
+  /** Assembly may precede pre-step; wait only for this Agent's previous terminal round. */
+  refresh = async (agent: Agent | undefined, signal?: AbortSignal): Promise<void> => {
+    const pending = agent === undefined ? undefined : this.#settlements.get(agent)
+    if (pending !== undefined) await this.#bounded(pending, signal ?? new AbortController().signal)
+  }
   whenIdle = async (): Promise<void> => { while (this.#pending.size) await Promise.all(this.#pending) }
   health = () => ({ enabled: this.#store !== undefined, verifierConnected: this.#sink !== undefined, activeRounds: this.#rounds.size })
 
@@ -237,6 +243,10 @@ export class GoalExecutionRuntime {
     if (round.finish !== undefined) return round.finish
     round.finishing = true
     round.finish = Promise.resolve().then(() => this.#settle(round, completed))
+    this.#settlements.set(round.agent, round.finish)
+    void round.finish.finally(() => {
+      if (this.#settlements.get(round.agent) === round.finish) this.#settlements.delete(round.agent)
+    }).catch(() => {})
     return round.finish
   }
 
@@ -262,6 +272,12 @@ export class GoalExecutionRuntime {
     }
     if (this.#active && this.#sink === round.registration) {
       await this.#bounded(round.registration.completed(round.handle), new AbortController().signal)
+      const verifier = this.ctx.get('assistantVerifier', false)
+      if (this.#active && this.#sink === round.registration && verifier?.ownsTaskAcceptanceRegistration(round.registration)) {
+        // One existing bounded reconciliation cycle. Busy queues may still be
+        // pending; the context reports that honestly instead of inferring success.
+        await this.#bounded(verifier.tick(), new AbortController().signal)
+      }
     }
   }
 

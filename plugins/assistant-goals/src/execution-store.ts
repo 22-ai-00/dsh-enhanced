@@ -1,5 +1,5 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { GoalStoreError } from './types.js'
 import type { GoalExecutionIntent, GoalExecutionRun, GoalScope } from './types.js'
 import { prepareGoalStoreDatabaseFile } from './store.js'
@@ -25,8 +25,9 @@ function intentInput(value: GoalExecutionIntent): GoalExecutionIntent {
   return freeze(JSON.parse(JSON.stringify(value)) as GoalExecutionIntent)
 }
 
-function run(row: { intent_json: string; contract_id: string | null; contract_digest: string | null; dispatched_at: number | null; execution_json: string | null }): GoalExecutionRun {
+function run(row: { intent_json: string; contract_id: string | null; contract_digest: string | null; dispatched_at: number | null; execution_json: string | null; scope_key: string; goal_id: string; issued_at: number }): GoalExecutionRun {
   const intent = intentInput(parse(row.intent_json) as GoalExecutionIntent)
+  if (row.scope_key !== acceptanceCanonicalJson(intent.scope) || row.goal_id !== intent.task.goal.id || row.issued_at !== intent.admission.issuedAt) fail('schema')
   const acceptance = row.contract_id === null && row.contract_digest === null ? undefined
     : (typeof row.contract_id === 'string' && /^[A-Za-z0-9_.:-]{1,512}$/u.test(row.contract_id) && typeof row.contract_digest === 'string' && /^[a-f0-9]{64}$/u.test(row.contract_digest)
       ? freeze({ contractId: row.contract_id, contractDigest: row.contract_digest }) : fail('schema'))
@@ -47,24 +48,44 @@ export class GoalExecutionStore {
     this.#database = new DatabaseSync(path, { enableForeignKeyConstraints: true })
     try {
       this.#database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 250; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
-      const version = (this.#database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+      let version = (this.#database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
       const tables = this.#database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string }>
-      if (version === 0 && tables.length === 0) this.#database.exec(`
+      if (version === 0 && tables.length === 0) {
+        this.#database.exec(`
       BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS goal_execution_runs (
         run_id TEXT PRIMARY KEY, intent_json TEXT NOT NULL, contract_id TEXT UNIQUE, contract_digest TEXT,
-        dispatched_at INTEGER, execution_json TEXT
+        dispatched_at INTEGER, execution_json TEXT, scope_key TEXT NOT NULL, goal_id TEXT NOT NULL, issued_at INTEGER NOT NULL
       ) STRICT;
-      PRAGMA user_version = 1; COMMIT;`)
-      else if (version !== 1 || tables.length !== 1 || tables[0]?.name !== 'goal_execution_runs') fail('schema')
+      PRAGMA user_version = 2; COMMIT;`)
+        version = 2
+      }
+      else if (version === 1 && tables.length === 1 && tables[0]?.name === 'goal_execution_runs') {
+        this.#database.exec('BEGIN IMMEDIATE;')
+        try {
+          this.#database.exec("ALTER TABLE goal_execution_runs ADD COLUMN scope_key TEXT NOT NULL DEFAULT ''; ALTER TABLE goal_execution_runs ADD COLUMN goal_id TEXT NOT NULL DEFAULT ''; ALTER TABLE goal_execution_runs ADD COLUMN issued_at INTEGER NOT NULL DEFAULT 0;")
+          const rows = this.#database.prepare('SELECT run_id, intent_json FROM goal_execution_runs').all() as Array<{ run_id: string; intent_json: string }>
+          const backfill = this.#database.prepare('UPDATE goal_execution_runs SET scope_key = ?, goal_id = ?, issued_at = ? WHERE run_id = ?')
+          for (const row of rows) {
+            const intent = intentInput(parse(row.intent_json) as GoalExecutionIntent)
+            backfill.run(acceptanceCanonicalJson(intent.scope), intent.task.goal.id, intent.admission.issuedAt, row.run_id)
+            this.#get(row.run_id)
+          }
+          this.#database.exec('PRAGMA user_version = 2; COMMIT;'); version = 2
+        } catch (error) {
+          this.#database.exec('ROLLBACK;')
+          throw error
+        }
+      } else if (version !== 2 || tables.length !== 1 || tables[0]?.name !== 'goal_execution_runs') fail('schema')
       const columns = (this.#database.prepare('PRAGMA table_info(goal_execution_runs)').all() as Array<{ name: string }>).map(item => item.name)
-      if (!same(columns, ['run_id', 'intent_json', 'contract_id', 'contract_digest', 'dispatched_at', 'execution_json'])) fail('schema')
+      if (!same(columns, ['run_id', 'intent_json', 'contract_id', 'contract_digest', 'dispatched_at', 'execution_json', 'scope_key', 'goal_id', 'issued_at'])) fail('schema')
+      this.#database.exec('CREATE INDEX IF NOT EXISTS goal_execution_scope_goal_issued ON goal_execution_runs(scope_key, goal_id, issued_at DESC, run_id ASC)')
       for (const row of this.#database.prepare('SELECT run_id FROM goal_execution_runs').all() as Array<{ run_id: string }>) this.#get(row.run_id)
       if (path !== ':memory:') prepareGoalStoreDatabaseFile(path)
     } catch (error) { this.#database.close(); throw error }
   }
   #get(runId: string): GoalExecutionRun | undefined {
-    const row = this.#database.prepare('SELECT intent_json, contract_id, contract_digest, dispatched_at, execution_json FROM goal_execution_runs WHERE run_id = ?').get(runId) as { intent_json: string; contract_id: string | null; contract_digest: string | null; dispatched_at: number | null; execution_json: string | null } | undefined
+    const row = this.#database.prepare('SELECT intent_json, contract_id, contract_digest, dispatched_at, execution_json, scope_key, goal_id, issued_at FROM goal_execution_runs WHERE run_id = ?').get(runId) as { intent_json: string; contract_id: string | null; contract_digest: string | null; dispatched_at: number | null; execution_json: string | null; scope_key: string; goal_id: string; issued_at: number } | undefined
     if (row === undefined) return undefined
     const result = run(row)
     if (result.intent.runId !== runId) fail('schema')
@@ -76,7 +97,7 @@ export class GoalExecutionStore {
   prepare(input: GoalExecutionIntent): GoalExecutionRun {
     const intent = intentInput(input); const existing = this.#get(intent.runId)
     if (existing !== undefined) { if (!same(existing.intent, intent)) fail('conflict'); return existing }
-    this.#write('INSERT INTO goal_execution_runs(run_id, intent_json) VALUES (?, ?)', intent.runId, JSON.stringify(intent))
+    this.#write('INSERT INTO goal_execution_runs(run_id, intent_json, scope_key, goal_id, issued_at) VALUES (?, ?, ?, ?, ?)', intent.runId, JSON.stringify(intent), acceptanceCanonicalJson(intent.scope), intent.task.goal.id, intent.admission.issuedAt)
     return this.#get(intent.runId)!
   }
   get(runId: string): GoalExecutionRun | undefined { return typeof runId === 'string' ? this.#get(runId) : fail('invalid-input') }
@@ -98,7 +119,17 @@ export class GoalExecutionStore {
     if (this.#write('UPDATE goal_execution_runs SET execution_json = ? WHERE run_id = ? AND execution_json IS NULL', JSON.stringify(freeze({ ...execution })), runId) !== 1) fail('conflict'); return this.#get(runId)!
   }
   getByContract(contractId: string): GoalExecutionRun | undefined { if (typeof contractId !== 'string') fail('invalid-input'); const row = this.#database.prepare('SELECT run_id FROM goal_execution_runs WHERE contract_id = ?').get(contractId) as { run_id: string } | undefined; return row ? this.#get(row.run_id) : undefined }
-  listForGoal(scope: GoalScope, goalId: string): readonly GoalExecutionRun[] { return freeze((this.#database.prepare('SELECT run_id FROM goal_execution_runs').all() as Array<{ run_id: string }>).map(row => this.#get(row.run_id)!).filter(value => same(value.intent.scope, scope) && value.intent.task.goal.id === goalId)) }
+  listForGoal(scope: GoalScope, goalId: string, limit = 50): readonly GoalExecutionRun[] {
+    if (!scope || typeof scope.principalId !== 'string' || typeof scope.principalRecordId !== 'string'
+      || !Number.isSafeInteger(scope.principalVersion) || scope.principalVersion < 1
+      || typeof scope.workspace !== 'string' || !scope.workspace.startsWith('/') || typeof scope.preset !== 'string'
+      || !Number.isSafeInteger(limit) || limit < 1 || limit > 100
+      || typeof goalId !== 'string' || !/^[A-Za-z0-9_.:-]{1,512}$/u.test(goalId)) fail('invalid-input')
+    const key = acceptanceCanonicalJson(scope)
+    const rows = this.#database.prepare('SELECT run_id FROM goal_execution_runs WHERE scope_key = ? AND goal_id = ? ORDER BY issued_at DESC, run_id ASC LIMIT ?')
+      .all(key, goalId, limit) as Array<{ run_id: string }>
+    return freeze(rows.map(row => this.#get(row.run_id)!))
+  }
   recoverIncomplete(): readonly GoalExecutionRun[] { const rows = (this.#database.prepare('SELECT run_id, dispatched_at FROM goal_execution_runs WHERE dispatched_at IS NOT NULL AND execution_json IS NULL').all() as Array<{ run_id: string; dispatched_at: number }>); const recovered: GoalExecutionRun[] = []; for (const row of rows) { const execution = JSON.stringify({ status: 'unknown', quiescent: false, completedAt: row.dispatched_at }); if (this.#write('UPDATE goal_execution_runs SET execution_json = ? WHERE run_id = ? AND execution_json IS NULL', execution, row.run_id) === 1) recovered.push(this.#get(row.run_id)!) }; return freeze(recovered) }
   close(): void { this.#database.close() }
 }

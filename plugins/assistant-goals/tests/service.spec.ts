@@ -12,10 +12,12 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it } from 'vitest'
 import { AssistantGoalsService } from '../src/service.ts'
+import { GoalExecutionStore } from '../src/execution-store.ts'
+import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
-async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void) {
+async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
@@ -35,7 +37,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }) } as never)
   if (duringGoalChange !== undefined) ctx.on('goal/changed', ({ agent }) => duringGoalChange(agent))
   const path = databasePath ?? join(root, 'goals.sqlite')
-  const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, ...(maxContextChars === undefined ? {} : { maxContextChars }) })
+  const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, verifyNativeRounds, ...(maxContextChars === undefined ? {} : { maxContextChars }) })
   const create = async (id: string, owner?: string) => {
     const handle = await ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'fixture', model: 'fixture' } })
     if (owner !== undefined) owners.set(handle.agent, owner)
@@ -47,6 +49,62 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
 const checkpoint = { nextStep: 'Check repository state', blockers: [], assumptions: [{ statement: 'Latest build was green', expiresAt: 0 }], evidenceRefs: ['run:one'], dependencies: [] }
 
 describe('owner-scoped native goal context', () => {
+  it('drops a previously achieved feedback result when the Host verifier is unloaded', async () => {
+    const f = await harness(undefined, undefined, undefined, true)
+    const agent = await f.create('feedback-unload', 'owner'); f.human.add(agent)
+    const record = f.service.create(agent, 'Check independent evidence')
+    const now = Date.now()
+    const task = { kind: 'goal-step' as const, ref: 'feedback-run', goal: { id: record.id,
+      definitionVersion: record.definition.version, definitionDigest: record.definition.digest,
+      stepId: 'round-1', runId: 'feedback-run', sessionId: record.native.sessionId,
+      nativeGoalId: record.native.goalId, nativeRevision: record.native.revision } }
+    const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v2', id: 'feedback-contract', task,
+      objective: record.definition.objective, scope: { workspace: f.root, preset: 'primary' },
+      owner: { principalRecordId: record.scope.principalRecordId, principalVersion: record.scope.principalVersion },
+      profile: { id: 'feedback-profile', version: 1, digest: 'a'.repeat(64) }, issuedAt: now, expiresAt: now + 60_000,
+      criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'source', digest: 'a'.repeat(64) }, artifactPath: 'report.md', requiredText: ['Done'], quotes: [] }],
+      bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 } })
+    const execution = { status: 'succeeded' as const, quiescent: true, completedAt: now }
+    const store = new GoalExecutionStore(`${f.path}.executions`)
+    try {
+      store.prepare({ runId: task.ref, task, scope: record.scope, objective: record.definition.objective,
+        admission: { issuedAt: now, expiresAt: now + 60_000, maxGoalRounds: 3, round: 1,
+          authorizationDigest: acceptanceDigest({ scope: record.scope, action: 'execute', resource: { kind: 'goal', id: 'business-context' } }) } })
+      store.bindAcceptance(task.ref, { contractId: contract.id, contractDigest: contract.digest })
+      store.markDispatched(task.ref, now); store.finish(task.ref, execution)
+    } finally { store.close() }
+    const receipt = createTaskVerificationReceipt(contract, { protocol: 'task-verification/v2', id: 'feedback-receipt',
+      contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task,
+      results: [{ criterionId: 'result', status: 'passed', reason: 'verified', evidence: [] }],
+      startedAt: now, completedAt: now, validUntil: now + 60_000 })
+    // Read-only Host seam; the real producer/Verifier path is tested in Delivery.
+    const verifier = await f.ctx.plugin((ctx: Context) => {
+      ctx.provide('assistantVerifier', { inspectAcceptedTask: () => ({ contract, receipt, execution: { ...execution, executionRef: task.ref } }) } as never)
+    })
+    expect(f.service.describeForAgent(agent, record.id)).toContain('"status":"achieved"')
+    await verifier.dispose()
+    expect(f.service.describeForAgent(agent, record.id)).toContain('"status":"unavailable"')
+    expect(f.service.snapshot(agent)).not.toContain('"status":"achieved"')
+  })
+
+  it('scopes feedback inspection and refreshes authorization after asynchronous prompt assembly', async () => {
+    const f = await harness(undefined, undefined, undefined, true)
+    const agent = await f.create('feedback-owner', 'owner'); f.human.add(agent)
+    const record = f.service.create(agent, 'Private feedback objective')
+    expect(f.service.describeForAgent(agent, record.id)).toContain('assistant-goals/feedback/v1')
+    const other = await f.create('feedback-other', 'other')
+    expect(() => f.service.describeForAgent(other, record.id)).toThrow('goal not found')
+    expect(() => f.service.describeForAgent({ ...agent } as Agent, record.id)).toThrow('exact live agent')
+    f.ctx.on('system-prompt/assemble', async (_assembly, _context, next) => {
+      const result = await next()
+      f.owners.delete(agent)
+      return result
+    })
+    const assembly = await f.ctx.systemPrompt.assemble({ agent })
+    expect(assembly.contexts.find(item => item.name === 'assistant-goals:current-context')?.text).toBe('')
+    expect(JSON.stringify(assembly.contexts)).not.toContain('Private feedback objective')
+  })
+
   it('binds only newly created goals in a current owner turn; never adopts old unbound goals', async () => {
     const f = await harness(); const agent = await f.create('unowned')
     f.ctx.goals.create(agent, { objective: 'Private old goal' })
