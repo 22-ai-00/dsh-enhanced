@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process'
+import { realpath } from 'node:fs/promises'
 import { parseHostAttestationReceipt } from './attestation.js'
-import { ControlPlaneStore } from './store.js'
-import { inheritedHostAttestorEnvironment, inspectTrustedExecutable, type PluginControlTrustConfig } from './trust.js'
+import { ControlPlaneStore, ControlPlaneStoreError } from './store.js'
+import { inheritedHostAttestorEnvironment, openTrustedExecutable, verifyOpenTrustedExecutable,
+  type OpenTrustedExecutable, type PluginControlTrustConfig } from './trust.js'
 import type {
   HostAttestationOperation,
   HostAttestationPhase,
@@ -68,13 +70,22 @@ export function prepareConfiguredHostAttestation(store: ControlPlaneStore, plan:
     authority: attestor.authority, keyId: attestor.keyId })
 }
 
-async function execute(executable: string, args: readonly string[], environment: NodeJS.ProcessEnv,
+async function execute(executable: OpenTrustedExecutable, interpreter: OpenTrustedExecutable | undefined,
+  args: readonly string[], environment: NodeJS.ProcessEnv,
   timeoutMs: number, input: string | undefined, maximumOutput: number): Promise<string> {
+  if (process.platform !== 'linux') throw new HostAttestorError('FAILED', 'descriptor-pinned Host attestors require Linux')
+  try { await realpath('/proc/self/fd') } catch {
+    throw new HostAttestorError('FAILED', 'descriptor-pinned Host attestors require /proc/self/fd')
+  }
   return new Promise((resolve, reject) => {
-    const child = spawn(executable, [...args], { env: environment, shell: false, stdio: ['pipe', 'pipe', 'ignore'] })
+    const command = interpreter === undefined ? '/proc/self/fd/3' : '/proc/self/fd/4'
+    const commandArguments = interpreter === undefined ? [...args] : ['/proc/self/fd/3', ...args]
+    const stdio: Array<'pipe' | 'ignore' | number> = ['pipe', 'pipe', 'ignore', executable.handle.fd]
+    if (interpreter !== undefined) stdio.push(interpreter.handle.fd)
+    const child = spawn(command, commandArguments, { env: environment, shell: false, stdio })
     const chunks: Buffer[] = []; let bytes = 0; let timedOut = false; let outputLimit = false; let settled = false
     const fail = (error: Error): void => { if (!settled) { settled = true; reject(error) } }
-    child.stdout.on('data', (chunk: Buffer) => {
+    child.stdout!.on('data', (chunk: Buffer) => {
       bytes += chunk.length
       if (bytes > maximumOutput) { outputLimit = true; child.kill('SIGKILL') } else chunks.push(chunk)
     })
@@ -89,8 +100,9 @@ async function execute(executable: string, args: readonly string[], environment:
     })
     const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL') }, timeoutMs)
     child.once('close', () => clearTimeout(timer))
-    if (input === undefined) child.stdin.end()
-    else child.stdin.end(input, 'utf8')
+    child.stdin!.on('error', () => { /* early exit is classified by error/close */ })
+    if (input === undefined) child.stdin!.end()
+    else child.stdin!.end(input, 'utf8')
   })
 }
 
@@ -103,25 +115,26 @@ export async function invokeConfiguredHostAttestor(trust: PluginControlTrustConf
     || request.issuer.sha256 !== attestor.sha256 || request.issuer.authority !== attestor.authority
     || JSON.stringify(request.issuer.interpreter) !== JSON.stringify(attestor.interpreter)
     || request.issuer.keyId !== attestor.keyId) throw new HostAttestorError('FAILED', 'durable request is not bound to the configured Host attestor')
-  const before = await inspectTrustedExecutable(attestor.path, attestor.sha256)
-  const interpreterBefore = attestor.interpreter === null ? undefined
-    : await inspectTrustedExecutable(attestor.interpreter.path, attestor.interpreter.sha256)
-  const environment = inheritedHostAttestorEnvironment(trust)
-  const version = (await execute(attestor.path, ['--version'], environment, attestor.timeoutMs, undefined, 1_024)).trim()
-  if (version !== attestor.version) throw new HostAttestorError('VERSION_MISMATCH', 'registered Host attestor reported a different version')
-  const receiptSource = await execute(attestor.path, ['attest'], environment, attestor.timeoutMs, `${JSON.stringify(request)}\n`, 65_536)
-  const after = await inspectTrustedExecutable(attestor.path, attestor.sha256)
-  const interpreterAfter = attestor.interpreter === null ? undefined
-    : await inspectTrustedExecutable(attestor.interpreter.path, attestor.interpreter.sha256)
-  if (after.device !== before.device || after.inode !== before.inode || after.sha256 !== before.sha256) {
-    throw new HostAttestorError('EXECUTABLE_CHANGED', 'registered Host attestor identity changed while executing')
+  let executable: OpenTrustedExecutable | undefined
+  let interpreter: OpenTrustedExecutable | undefined
+  try {
+    executable = await openTrustedExecutable(attestor.path, attestor.sha256)
+    interpreter = attestor.interpreter === null ? undefined
+      : await openTrustedExecutable(attestor.interpreter.path, attestor.interpreter.sha256)
+    const environment = inheritedHostAttestorEnvironment(trust)
+    const version = (await execute(executable, interpreter, ['--version'], environment, attestor.timeoutMs, undefined, 1_024)).trim()
+    if (version !== attestor.version) throw new HostAttestorError('VERSION_MISMATCH', 'registered Host attestor reported a different version')
+    const receiptSource = await execute(executable, interpreter, ['attest'], environment, attestor.timeoutMs, `${JSON.stringify(request)}\n`, 65_536)
+    await verifyOpenTrustedExecutable(executable)
+    if (interpreter !== undefined) await verifyOpenTrustedExecutable(interpreter)
+    let parsed: unknown
+    try { parsed = JSON.parse(receiptSource) as unknown } catch { throw new HostAttestorError('FAILED', 'registered Host attestor did not return one JSON receipt') }
+    return parseHostAttestationReceipt(parsed)
+  } catch (error) {
+    if (error instanceof HostAttestorError || error instanceof ControlPlaneStoreError) throw error
+    throw new HostAttestorError('EXECUTABLE_CHANGED', 'registered Host attestor descriptor identity could not be retained')
+  } finally {
+    try { await interpreter?.handle.close() }
+    finally { await executable?.handle.close() }
   }
-  if (interpreterBefore !== undefined && interpreterAfter !== undefined
-    && (interpreterAfter.device !== interpreterBefore.device || interpreterAfter.inode !== interpreterBefore.inode
-      || interpreterAfter.sha256 !== interpreterBefore.sha256)) {
-    throw new HostAttestorError('EXECUTABLE_CHANGED', 'registered Host attestor interpreter changed while executing')
-  }
-  let parsed: unknown
-  try { parsed = JSON.parse(receiptSource) as unknown } catch { throw new HostAttestorError('FAILED', 'registered Host attestor did not return one JSON receipt') }
-  return parseHostAttestationReceipt(parsed)
 }

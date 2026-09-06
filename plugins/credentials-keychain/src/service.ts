@@ -84,6 +84,7 @@ export class CredentialsKeychainService extends Service {
   private readonly defaultLeaseMs: number
   private readonly maxSecretBytes: number
   private readonly providerTimeoutMs: number
+  private readonly now: () => number
   private readonly controllers = new Map<string, AbortController>()
   private readonly operations = new Set<Promise<unknown>>()
   private active = true
@@ -101,7 +102,8 @@ export class CredentialsKeychainService extends Service {
     this.defaultLeaseMs = config.defaultLeaseMs
     this.maxSecretBytes = config.maxSecretBytes
     this.providerTimeoutMs = config.providerTimeoutMs
-    this.ledger = new CredentialLedger({ path: config.databasePath, ...(options.now === undefined ? {} : { now: options.now }) })
+    this.now = options.now ?? Date.now
+    this.ledger = new CredentialLedger({ path: config.databasePath, now: this.now })
     ctx.effect(() => async () => {
       this.active = false
       for (const [leaseId, controller] of this.controllers) {
@@ -220,6 +222,7 @@ export class CredentialsKeychainService extends Service {
     try {
       const value = await readCredential(handle, { env: this.env, run: this.run,
         timeoutMs: this.providerTimeoutMs, maxSecretBytes: this.maxSecretBytes })
+      this.assertLeaseDeliverable(begun.record, controller)
       const result = await callback(value, controller.signal, {
         id: begun.record.id, handleId: handle.id, consumer, purpose: request.purpose,
         expiresAt: begun.record.expiresAt,
@@ -249,5 +252,33 @@ export class CredentialsKeychainService extends Service {
 
   private assertActive(): void {
     if (!this.active) throw new CredentialsKeychainError('disposed', 'credentials-keychain service is disposed')
+  }
+
+  private assertLeaseDeliverable(expected: CredentialLeaseRecord, controller: AbortController): void {
+    // The wall-clock deadline is authoritative even if the event-loop timer was delayed while a provider ran.
+    let current = this.ledger.get(expected.id)
+    if (current?.status === 'active' && current.expiresAt <= this.now()) {
+      this.ledger.settle({ leaseId: current.id, expectedVersion: current.version,
+        status: 'expired', failureCode: 'lease-expired' })
+      controller.abort(new CredentialLeaseAbortError('expired', 'credential lease expired'))
+      current = this.ledger.get(expected.id)
+    }
+    if (!this.active) throw new CredentialLeaseAbortError('disposed', 'credentials-keychain disposed')
+    if (controller.signal.aborted) {
+      throw this.leaseAbortError(current, controller.signal.reason)
+    }
+    if (current?.id !== expected.id || current.version !== expected.version
+      || current.status !== 'active' || current.expiresAt !== expected.expiresAt) {
+      throw this.leaseAbortError(current)
+    }
+  }
+
+  private leaseAbortError(current: CredentialLeaseRecord | undefined, reason?: unknown): CredentialLeaseAbortError {
+    if (reason instanceof CredentialLeaseAbortError) {
+      return new CredentialLeaseAbortError(reason.code, `credential lease ${reason.code}`)
+    }
+    if (current?.status === 'revoked') return new CredentialLeaseAbortError('revoked', 'credential lease revoked')
+    if (current?.status === 'expired') return new CredentialLeaseAbortError('expired', 'credential lease expired')
+    return new CredentialLeaseAbortError('disposed', 'credential lease is no longer active')
   }
 }
