@@ -175,11 +175,11 @@ function asSdkHttpResult<R>(request: Promise<unknown>): Promise<R> {
 /**
  * The SDK's token manager calls `httpInstance.post()` before the resource
  * request exists, so request-local Axios limits cannot cover a cache miss.
- * Keep the dedicated image client's entire HTTP stack bounded instead.
+ * Keep each SDK client's complete HTTP stack bounded instead.
  */
-function boundedImageHttpInstance(hardTimeoutMs: number, lifecycleSignal: AbortSignal): HttpInstance {
+function boundedHttpInstance(hardTimeoutMs: number, lifecycleSignal: AbortSignal): HttpInstance {
   if (!Number.isSafeInteger(hardTimeoutMs) || hardTimeoutMs < 1) {
-    throw new Error('lark-channel: invalid image HTTP timeout')
+    throw new Error('lark-channel: invalid HTTP timeout')
   }
   return {
     request<T = unknown, R = T, D = unknown>(options: HttpRequestOptions<D>): Promise<R> {
@@ -223,6 +223,42 @@ function boundedImageHttpInstance(hardTimeoutMs: number, lifecycleSignal: AbortS
       )
     },
   }
+}
+
+/**
+ * The official SDK accepts an AbortSignal only on its low-level request API.
+ * Race every SDK operation locally as well: an SDK/token-manager promise that
+ * ignores that signal must never retain a Delivery lease past this deadline.
+ * A later transport rejection is deliberately observed and discarded.
+ */
+function awaitBoundedSdkRequest<T>(signal: AbortSignal, request: () => Promise<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let settled = false
+    const finish = (complete: () => void): boolean => {
+      if (settled) return false
+      settled = true
+      signal.removeEventListener('abort', abort)
+      complete()
+      return true
+    }
+    const abort = () => { finish(() => reject(abortReason(signal))) }
+    signal.addEventListener('abort', abort, { once: true })
+    if (signal.aborted) {
+      abort()
+      return
+    }
+    let pending: Promise<T>
+    try {
+      pending = request()
+    } catch (error) {
+      finish(() => reject(error))
+      return
+    }
+    void pending.then(
+      value => { finish(() => resolve(value)) },
+      error => { finish(() => reject(error)) },
+    )
+  })
 }
 
 function awaitImageResourceRequest(
@@ -334,6 +370,8 @@ export interface OfficialLarkTransportOptions {
   appSecret: string
   domain: 'feishu' | 'lark'
   handshakeTimeoutMs: number
+  /** Defaults to 30 seconds for direct SDK consumers predating this option. */
+  requestTimeoutMs?: number
   imageDownloadTimeoutMs: number
 }
 
@@ -458,7 +496,11 @@ export function larkRequestUuid(idempotencyKey: string): string {
   return createHash('sha256').update(idempotencyKey).digest('hex').slice(0, 32)
 }
 
-export function createLarkProgressRequest(chatId: string, options: { replyTo: string; hidden: boolean }) {
+export function createLarkProgressRequest(
+  chatId: string,
+  options: { replyTo: string; hidden: boolean },
+  signal?: AbortSignal,
+) {
   return {
     method: 'POST' as const,
     url: `${LARK_PROGRESS_API}?receive_id_type=chat_id`,
@@ -469,10 +511,15 @@ export function createLarkProgressRequest(chatId: string, options: { replyTo: st
       enable_badge: false,
       update_feed_rank: false,
     },
+    ...(signal === undefined ? {} : { signal }),
   }
 }
 
-export function writeLarkProgressRequest(handle: LarkProgressHandle, events: readonly LarkProgressEvent[]) {
+export function writeLarkProgressRequest(
+  handle: LarkProgressHandle,
+  events: readonly LarkProgressEvent[],
+  signal?: AbortSignal,
+) {
   return {
     method: 'PUT' as const,
     url: LARK_PROGRESS_API,
@@ -485,6 +532,47 @@ export function writeLarkProgressRequest(handle: LarkProgressHandle, events: rea
         timestamp: event.timestamp,
       })),
     },
+    ...(signal === undefined ? {} : { signal }),
+  }
+}
+
+function createLarkMessageSendRequest(
+  chatId: string,
+  rendered: ReturnType<typeof renderLarkMessage>,
+  uuid: string,
+  options: LarkSendOptions,
+  signal: AbortSignal,
+) {
+  if (options.replyTo === undefined) {
+    return {
+      method: 'POST' as const,
+      url: LARK_MESSAGE_API,
+      params: { receive_id_type: 'chat_id' },
+      data: { receive_id: chatId, msg_type: rendered.msgType, content: rendered.content, uuid },
+      signal,
+    }
+  }
+  const replyTo = assertResourceIdentifier(options.replyTo, 'reply message')
+  return {
+    method: 'POST' as const,
+    url: `${LARK_MESSAGE_API}/${encodeURIComponent(replyTo)}/reply`,
+    data: {
+      msg_type: rendered.msgType,
+      content: rendered.content,
+      uuid,
+      ...(options.replyInThread === undefined ? {} : { reply_in_thread: options.replyInThread }),
+    },
+    signal,
+  }
+}
+
+function createLarkReactionRequest(messageId: string, emojiType: string, signal: AbortSignal) {
+  const message = assertResourceIdentifier(messageId, 'message')
+  return {
+    method: 'POST' as const,
+    url: `${LARK_MESSAGE_API}/${encodeURIComponent(message)}/reactions`,
+    data: { reaction_type: { emoji_type: emojiType } },
+    signal,
   }
 }
 
@@ -1123,6 +1211,7 @@ export class OfficialLarkTransport implements LarkTransport {
   private readonly dispatcher: EventDispatcher
   private readonly ws: WSClient
   private readonly handshakeTimeoutMs: number
+  private readonly requestTimeoutMs: number
   private readonly imageDownloadTimeoutMs: number
   private readonly lifecycleController = new AbortController()
   private handlers: LarkTransportHandlers | undefined
@@ -1134,12 +1223,17 @@ export class OfficialLarkTransport implements LarkTransport {
     const shared = { appId: options.appId, appSecret: options.appSecret, domain,
       logger: silentLogger, loggerLevel: LoggerLevel.error, source: 'dsh-enhanced-lark-channel' }
     this.handshakeTimeoutMs = options.handshakeTimeoutMs
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 30_000
     this.imageDownloadTimeoutMs = options.imageDownloadTimeoutMs
-    this.client = new Client({ ...shared, appType: AppType.SelfBuild })
+    this.client = new Client({
+      ...shared,
+      appType: AppType.SelfBuild,
+      httpInstance: boundedHttpInstance(this.requestTimeoutMs, this.lifecycleController.signal),
+    })
     this.imageClient = new Client({
       ...shared,
       appType: AppType.SelfBuild,
-      httpInstance: boundedImageHttpInstance(options.imageDownloadTimeoutMs, this.lifecycleController.signal),
+      httpInstance: boundedHttpInstance(options.imageDownloadTimeoutMs, this.lifecycleController.signal),
     })
     this.dispatcher = new EventDispatcher({ logger: silentLogger, loggerLevel: LoggerLevel.error })
     this.dispatcher.register({
@@ -1230,6 +1324,53 @@ export class OfficialLarkTransport implements LarkTransport {
     this.ws.close({ force: true })
   }
 
+  private requestDeadline(callerSignal?: AbortSignal): {
+    signal: AbortSignal
+    timeoutSignal: AbortSignal
+    dispose(): void
+  } {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(new Error('lark-channel: OpenAPI request deadline exceeded')), this.requestTimeoutMs)
+    timer.unref?.()
+    const timeoutSignal = controller.signal
+    const signals = callerSignal === undefined
+      ? [timeoutSignal, this.lifecycleController.signal]
+      : [callerSignal, timeoutSignal, this.lifecycleController.signal]
+    return { signal: AbortSignal.any(signals), timeoutSignal, dispose: () => clearTimeout(timer) }
+  }
+
+  private async boundedSdkRequest<T>(
+    request: (signal: AbortSignal) => Promise<T>,
+    failureMessage: string,
+    callerSignal?: AbortSignal,
+  ): Promise<T> {
+    const deadline = this.requestDeadline(callerSignal)
+    let started = false
+    try {
+      return await awaitBoundedSdkRequest(deadline.signal, () => {
+        started = true
+        return request(deadline.signal)
+      })
+    } catch (error) {
+      if (deadline.timeoutSignal.aborted) {
+        // A timeout can happen after the provider has accepted the request.
+        // The Delivery adapter deliberately maps send_timeout to unknown_after_send.
+        throw new LarkTransportError('send_timeout', `${failureMessage} timed out`)
+      }
+      if (callerSignal?.aborted || this.lifecycleController.signal.aborted) {
+        if (started) {
+          throw new LarkTransportError('unknown', `${failureMessage} outcome is unknown after cancellation`)
+        }
+        throw new LarkTransportError('not_connected', `${failureMessage} was cancelled`)
+      }
+      if (error instanceof LarkTransportError) throw error
+      const classified = classifyLarkSdkFailure(error)
+      throw new LarkTransportError(classified.code, `${failureMessage} failed`, classified.retryAfterMs)
+    } finally {
+      deadline.dispose()
+    }
+  }
+
   async downloadMessageImage(
     messageId: string,
     fileKey: string,
@@ -1293,11 +1434,12 @@ export class OfficialLarkTransport implements LarkTransport {
   }
 
   async addReaction(messageId: string, emojiType: string): Promise<string> {
-    try {
-      const response = await this.client.im.v1.messageReaction.create({
-        path: { message_id: messageId },
-        data: { reaction_type: { emoji_type: emojiType } },
-      })
+    return await this.boundedSdkRequest(async deadlineSignal => {
+      const response = await this.client.request<{
+        code?: number
+        msg?: string
+        data?: { reaction_id?: string }
+      }>(createLarkReactionRequest(messageId, emojiType, deadlineSignal))
       if (response.code !== undefined && response.code !== 0) {
         throw providerError({ code: response.code, msg: response.msg })
       }
@@ -1306,20 +1448,16 @@ export class OfficialLarkTransport implements LarkTransport {
         throw new LarkTransportError('unknown', 'Lark accepted reaction omitted reaction identity')
       }
       return reactionId
-    } catch (error) {
-      if (error instanceof LarkTransportError) throw error
-      const classified = classifyLarkSdkFailure(error)
-      throw new LarkTransportError(classified.code, 'Lark reaction request failed', classified.retryAfterMs)
-    }
+    }, 'Lark reaction request')
   }
 
   async createProgress(chatId: string, options: { replyTo: string; hidden: boolean }): Promise<LarkProgressHandle> {
-    try {
+    return await this.boundedSdkRequest(async deadlineSignal => {
       const response = await this.client.request<{
         code?: number
         msg?: string
         data?: { cot_id?: string; message_id?: string }
-      }>(createLarkProgressRequest(chatId, options))
+      }>(createLarkProgressRequest(chatId, options, deadlineSignal))
       if (response.code !== undefined && response.code !== 0) {
         throw providerError({ code: response.code, msg: response.msg })
       }
@@ -1329,26 +1467,18 @@ export class OfficialLarkTransport implements LarkTransport {
         throw new LarkTransportError('unknown', 'Lark accepted progress request omitted progress identity')
       }
       return { cotId, messageId }
-    } catch (error) {
-      if (error instanceof LarkTransportError) throw error
-      const classified = classifyLarkSdkFailure(error)
-      throw new LarkTransportError(classified.code, 'Lark progress request failed', classified.retryAfterMs)
-    }
+    }, 'Lark progress request')
   }
 
   async writeProgress(handle: LarkProgressHandle, events: readonly LarkProgressEvent[]): Promise<void> {
-    try {
+    await this.boundedSdkRequest(async deadlineSignal => {
       const response = await this.client.request<{ code?: number; msg?: string }>(
-        writeLarkProgressRequest(handle, events),
+        writeLarkProgressRequest(handle, events, deadlineSignal),
       )
       if (response.code !== undefined && response.code !== 0) {
         throw providerError({ code: response.code, msg: response.msg })
       }
-    } catch (error) {
-      if (error instanceof LarkTransportError) throw error
-      const classified = classifyLarkSdkFailure(error)
-      throw new LarkTransportError(classified.code, 'Lark progress update failed', classified.retryAfterMs)
-    }
+    }, 'Lark progress update')
   }
 
   async updateRawCard(
@@ -1359,61 +1489,42 @@ export class OfficialLarkTransport implements LarkTransport {
     if (signal.aborted || this.lifecycleController.signal.aborted) {
       throw new LarkTransportError('not_connected', 'Lark card update was cancelled')
     }
-    const combined = AbortSignal.any([signal, this.lifecycleController.signal])
-    try {
+    await this.boundedSdkRequest(async deadlineSignal => {
       const response = await this.client.request<{ code?: number; msg?: string }>(
-        createLarkRawCardUpdateRequest(messageId, card, combined),
+        createLarkRawCardUpdateRequest(messageId, card, deadlineSignal),
       )
       if (response.code !== undefined && response.code !== 0) {
         throw providerError({ code: response.code, msg: response.msg })
       }
-    } catch (error) {
-      if (error instanceof LarkTransportError) throw error
-      if (combined.aborted) throw new LarkTransportError('not_connected', 'Lark card update was cancelled')
-      const classified = classifyLarkSdkFailure(error)
-      throw new LarkTransportError(classified.code, 'Lark card update failed', classified.retryAfterMs)
-    }
+    }, 'Lark card update', signal)
   }
 
   async send(chatId: string, input: LarkSendInput, options: LarkSendOptions = {}): Promise<LarkSendResult> {
     const rendered = renderLarkMessage(input)
     const uuid = larkRequestUuid(options.requestKey ?? `${chatId}:${rendered.content}`)
-    try {
-      const response = options.replyTo === undefined
-        ? await this.client.im.v1.message.create({
-            params: { receive_id_type: 'chat_id' },
-            data: { receive_id: chatId, msg_type: rendered.msgType, content: rendered.content, uuid },
-          })
-        : await this.client.im.v1.message.reply({
-            path: { message_id: options.replyTo },
-            data: { msg_type: rendered.msgType, content: rendered.content, uuid,
-              ...(options.replyInThread === undefined ? {} : { reply_in_thread: options.replyInThread }) },
-          })
+    return await this.boundedSdkRequest(async deadlineSignal => {
+      const response = await this.client.request<{
+        code?: number
+        msg?: string
+        data?: { message_id?: string }
+      }>(createLarkMessageSendRequest(chatId, rendered, uuid, options, deadlineSignal))
       if (response.code !== 0) throw providerError({ code: response.code, msg: response.msg })
       const messageId = response.data?.message_id
       if (messageId === undefined) throw new LarkTransportError('unknown', 'Lark accepted response omitted message identity')
       return { messageId }
-    } catch (error) {
-      if (error instanceof LarkTransportError) throw error
-      const classified = classifyLarkSdkFailure(error)
-      throw new LarkTransportError(classified.code, 'Lark SDK request failed', classified.retryAfterMs)
-    }
+    }, 'Lark SDK request')
   }
 
   private async fetchBotIdentity(): Promise<BotIdentity> {
-    try {
+    return await this.boundedSdkRequest(async deadlineSignal => {
       const response = await this.client.request<{ bot?: { open_id?: string; app_name?: string } }>({
-        url: '/open-apis/bot/v3/info', method: 'GET',
+        url: '/open-apis/bot/v3/info', method: 'GET', signal: deadlineSignal,
       })
       if (response.bot?.open_id === undefined) {
         throw new LarkTransportError('permission_denied', 'Lark bot identity is unavailable')
       }
       return { openId: response.bot.open_id, name: response.bot.app_name ?? 'bot' }
-    } catch (error) {
-      if (error instanceof LarkTransportError) throw error
-      const classified = classifyLarkSdkFailure(error)
-      throw new LarkTransportError(classified.code, 'Lark bot identity request failed', classified.retryAfterMs)
-    }
+    }, 'Lark bot identity request')
   }
 }
 

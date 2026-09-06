@@ -4,7 +4,7 @@ import { ToolCallId } from '@deepseek-ai/dsh-llm'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import ApprovalService, { type ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { makeBridgeHarness, textResponse, type BridgeHarness } from './harness.ts'
+import { makeBridgeHarness, maxTokensResponse, textResponse, type BridgeHarness } from './harness.ts'
 
 async function initialize(harness: BridgeHarness): Promise<void> {
   await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
@@ -81,6 +81,16 @@ describe('official ACP lifecycle contracts', () => {
       .resolves.toEqual({ stopReason: 'end_turn' })
     await vi.waitFor(() => { expect(messageText(harness!, b)).toBe('B done') })
     expect(messageText(harness, a)).not.toContain('B done')
+  })
+
+  it('reports a native max-tokens turn end as the ACP max_tokens stop reason', async () => {
+    harness = await makeBridgeHarness({ script: [maxTokensResponse('partial answer')] })
+    await initialize(harness)
+    const sessionId = await newSession(harness)
+
+    await expect(harness.client.prompt({ sessionId, prompt: [{ type: 'text', text: 'go' }] }))
+      .resolves.toEqual({ stopReason: 'max_tokens' })
+    expect(messageText(harness, sessionId)).toBe('partial answer')
   })
 
   it('session/close cancels work, removes the session, and leaves peers alive', async () => {

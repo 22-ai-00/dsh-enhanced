@@ -122,7 +122,7 @@ async function makeHarness(): Promise<Harness> {
     defaultId: 'standard',
     list: () => Promise.resolve([
       { id: 'standard', name: '标准模式' },
-      { id: 'code', name: 'PTC 模式' },
+      { id: 'ptc', name: 'PTC 模式' },
       { id: 'minimal', name: '极简模式' },
       { id: 'cordis', name: '创造模式' },
     ]),
@@ -232,7 +232,7 @@ describe('native-first DSH ACP bridge', () => {
       configId: REASONING_CONFIG_ID,
       value: reasoningValue('high'),
     })
-    expect(harness.modeSelections).toEqual([selectedMode])
+    expect(harness.modeSelections).toEqual([selectedMode === 'code' ? 'ptc' : selectedMode])
     expect(selected.configOptions.find(option => option.id === REASONING_CONFIG_ID)).toMatchObject({
       currentValue: reasoningValue('high'),
     })
@@ -260,6 +260,19 @@ describe('native-first DSH ACP bridge', () => {
     expect(harness.adapter.requests[1]?.reasoningEffort).toBeUndefined()
 
     await expect(harness.client.setSessionMode({ sessionId, modeId: nextMode })).rejects.toThrow(/already started/)
+  })
+
+  it('maps the public ACP code mode to the native PTC preset and preserves code in updates', async () => {
+    harness = await makeHarness()
+    await harness.client.initialize({ protocolVersion: PROTOCOL_VERSION, clientCapabilities: {} })
+    const { sessionId } = await harness.client.newSession({ cwd: process.cwd(), mcpServers: [] })
+
+    await harness.client.setSessionMode({ sessionId, modeId: 'code' })
+
+    expect(harness.modeSelections).toEqual(['ptc'])
+    expect(harness.updates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sessionUpdate: 'current_mode_update', currentModeId: 'code' }),
+    ]))
   })
 
   it('pushes refreshed ACP selectors when the native DSH model directory changes', async () => {

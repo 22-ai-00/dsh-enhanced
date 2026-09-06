@@ -155,7 +155,7 @@ describe('ACP native session controls', () => {
       composedPreset: () => current,
       list: () => Promise.resolve([
         { id: 'standard', name: '标准模式', description: '标准描述' },
-        { id: 'code', name: 'PTO 模式', description: 'Code 描述' },
+        { id: 'ptc', name: 'PTC 模式', description: 'Code 描述' },
         { id: 'minimal', name: '极简模式', description: '极简描述' },
         { id: 'cordis', name: '创造模式', description: '创造描述' },
       ]),
@@ -171,7 +171,7 @@ describe('ACP native session controls', () => {
       currentModeId: 'standard',
       availableModes: [
         { id: 'standard', name: '标准模式', description: '标准描述' },
-        { id: 'code', name: 'PTO 模式', description: 'Code 描述' },
+        { id: 'code', name: 'PTC 模式', description: 'Code 描述' },
         { id: 'minimal', name: '极简模式', description: '极简描述' },
         { id: 'cordis', name: '创造模式', description: '创造描述' },
       ],
@@ -184,6 +184,50 @@ describe('ACP native session controls', () => {
     events.push({ type: 'turn/start', data: { turn: 1 } })
     await expect(setNativeMode(presets, agent, 'code', 'linux')).rejects.toThrow(/already started/)
     expect(current).toBe('minimal')
+  })
+
+  it('uses DSH’s ptc preset behind the stable ACP code mode and recognizes old code sessions', async () => {
+    const events: unknown[] = []
+    let current = 'standard'
+    const recompose = (id: string) => {
+      current = id
+      return Promise.resolve({ id })
+    }
+    const agent = {
+      ctx: {},
+      session: { snapshotEvents: () => events, append: (type: string, data: unknown) => events.push({ type, data }) },
+    } as unknown as Agent
+    const presets: NativeAgentPresetControl = {
+      composedPreset: () => current,
+      list: () => Promise.resolve([{ id: 'standard' }, { id: 'ptc', name: 'PTC' }, { id: 'minimal' }, { id: 'cordis' }]),
+      mount: (_agentCtx, id) => Promise.resolve({ id: id ?? current }),
+      recompose: (_agentCtx, id) => recompose(id),
+      resolve: id => Promise.resolve({ id: id ?? current }),
+    }
+
+    await expect(setNativeMode(presets, agent, 'code', 'linux')).resolves.toEqual({ agentPreset: 'ptc' })
+    await expect(modeState(presets, agent, 'linux')).resolves.toMatchObject({ currentModeId: 'code' })
+
+    current = 'code'
+    await expect(modeState(presets, agent, 'linux')).resolves.toMatchObject({ currentModeId: 'code' })
+
+    const legacySelections: string[] = []
+    const legacyAgent = {
+      ctx: {},
+      session: { snapshotEvents: () => [], append: () => undefined },
+    } as unknown as Agent
+    const legacyPresets: NativeAgentPresetControl = {
+      composedPreset: () => 'code',
+      list: () => Promise.resolve([{ id: 'standard' }, { id: 'code' }, { id: 'minimal' }, { id: 'cordis' }]),
+      mount: (_agentCtx, id) => Promise.resolve({ id: id ?? 'code' }),
+      recompose: (_agentCtx, id) => {
+        legacySelections.push(id)
+        return Promise.resolve({ id })
+      },
+      resolve: id => Promise.resolve({ id: id ?? 'code' }),
+    }
+    await expect(setNativeMode(legacyPresets, legacyAgent, 'code', 'linux')).resolves.toEqual({ agentPreset: 'code' })
+    expect(legacySelections).toEqual(['code'])
   })
 
   it('hides and rejects the Bash-only minimal mode on Windows', async () => {
@@ -199,7 +243,7 @@ describe('ACP native session controls', () => {
       composedPreset: () => 'standard',
       list: () => Promise.resolve([
         { id: 'standard' },
-        { id: 'code' },
+        { id: 'ptc' },
         { id: 'minimal' },
         { id: 'cordis' },
       ]),

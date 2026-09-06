@@ -165,7 +165,10 @@ const keys: Record<HealthProviderId, Readonly<Record<string, HealthMetricSpecifi
     lastTrustedEpisodeAt: 'number', lastReconciledAt: 'number', autonomousRollbacks: 'number',
     qualityEligibleEpisodes: 'optional-number', operationalEpisodes: 'optional-number',
     legacyQuarantinedEpisodes: 'optional-number', unattributedQualityEligibleEpisodes: 'optional-number',
-    lastQualityEligibleEpisodeAt: 'optional-number' },
+    lastQualityEligibleEpisodeAt: 'optional-number',
+    // Evolution v8 adds this independently optional counter. Older producers
+    // did not expose task-learning projection integrity at all.
+    taskLearningProjectionIntegrityErrors: 'optional-number' },
   assistantDelivery: { pendingInbox: 'number', deadLetterInbox: 'number', pendingOutbox: 'number',
     deadLetterOutbox: 'number', unknownOutbox: 'number', adapters: 'number',
     actionableDeadLetterInbox: 'optional-number', resolvedDeadLetterInbox: 'optional-number',
@@ -247,6 +250,11 @@ function operationalAssessments(
       add((metric('conflictedTaskProjections') as number | undefined) !== undefined
         && (metric('conflictedTaskProjections') as number) > 0,
       'degraded', 'evaluation-task-conflicts')
+      break
+    case 'assistantEvolution':
+      add((metric('taskLearningProjectionIntegrityErrors') as number | undefined) !== undefined
+        && (metric('taskLearningProjectionIntegrityErrors') as number) > 0,
+      'degraded', 'task-learning-projection-integrity-errors')
       break
     case 'assistantRecovery':
       add(metric('latestProductionStatus') === 'failed'

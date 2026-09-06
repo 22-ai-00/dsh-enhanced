@@ -74,7 +74,7 @@ dsh --profile web --dump-config
 
 SQLite occurrence id 由 automation、trigger 类型和 scheduledAt/eventId 稳定派生并唯一约束。task 只在短事务中 claim；全局 duty lease 使用单调 fencing token，旧 owner 无法 heartbeat 或提交新 owner 的结果。过期但尚未启动的 `claimed` task 可安全重排；已经 `running` 的 task 默认变成 `unknown`。只有 immutable definition 明确声明 `retrySafety: idempotent` 且还有 retry 配额时，才会自动重排。
 
-这不等于“外部副作用 exactly once”。模型可能已经调用外部工具，而进程在 run commit 前崩溃；默认的 `unknown` 正是对这段不可判定窗口的诚实记录。`overlap` 支持 `skip`、`queue-one` 和 `cancel-previous`，取消是请求而不是远端副作用回滚保证。
+这不等于“外部副作用 exactly once”。模型可能已经调用外部工具，而进程在 run commit 前崩溃；默认的 `unknown` 正是对这段不可判定窗口的诚实记录。`overlap` 支持 `skip`、`queue-one` 和 `cancel-previous`，取消是请求而不是远端副作用回滚保证。`cancel-previous` 即使本地并发槽已满也会先在同一 duty fence 下持久标记旧 task，再由协调器中止本地 runner；新 occurrence 等旧 lease/槽真实释放后才 claim。`queue-one` 在已有 active task 时只保留最新一个尚未尝试的 occurrence，其余以 `overlap-queue-one-coalesced` 终结并保留 occurrence 审计；已有 attempt 的可恢复 retry 不会被该合并丢弃。
 
 完整 JSON artifact 先通过同目录临时文件、fsync、atomic rename 写入，再提交 terminal run；SQLite 只保存有限 preview 和相对 artifact ref。artifact 写入失败会立即提交 content-free `unknown` + `artifact-write-failed` receipt，不等 running lease 过期，也不把可能已发生的模型/工具效果说成没有发生。execution 与 delivery 是两个状态域：若可选的 `assistant-delivery` 存在，带固定 `deliveryBindingId` 的成功 run 会以 `automation:<occurrenceId>:<bindingId>` 幂等写入它的 outbox；投递失败不会把成功 execution 改写成失败，后续 tick 只重试同一 enqueue。定义还可带有界的 `deliverySuppressExact`；空输出或精确匹配值会在同一账本中进入 terminal `suppressed`，不会送到 Delivery。该字段必须同时绑定 `deliveryBindingId`，Heartbeat 用它抑制 `HEARTBEAT_OK`。
 

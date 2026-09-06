@@ -141,6 +141,7 @@ dsh-lark-setup --profile web --refresh-agent-policy --allow-agent-tools
 - `ask_user_question` 的卡片是另一条即时交互路径：本包有向原飞书会话发送/原位更新 CardKit 2.0 卡片、并接收 `card.action.trigger` callback 的网络权限。选项仅以签名 callback capability 提交；自由文本只接受 exact owner 对原卡的明确回复。它不把卡片点击或匹配回复写成普通 Inbox/新 turn，且问题内容会在原会话显示，群聊并不保密。
 - 行为学习审批卡会把签名覆盖的 scope、情境、guidance、版本、证据和回滚原因逐字段以纯文本展示；提案内容不会作为 Markdown 或卡片组件解释。点击后卡片只确认 Policy 决策已写入持久账本，明确不把“批准”误报成“变更已生效”。
 - 网络仅访问所选飞书/Lark OpenAPI、token 与 WebSocket endpoint；图片读取使用固定消息资源端点，不接受消息或模型提供的 URL，并关闭重定向。
+- `requestTimeoutMs`（默认 30 秒）为常规 OpenAPI 请求设置硬 deadline，`imageDownloadTimeoutMs` 独立限制图片下载。SDK 会把可下传的 AbortSignal 交给底层 HTTP；若调用已经被服务端接收后超时，最终消息保留 Delivery 的 `unknown_after_send` 语义，绝不自动重发或假称未发送。
 - App Secret 不写 Delivery 数据库、工具参数、health、route、日志或异常；Linux protected-file 没有额外静态加密，同 UID、root 和可读备份仍能取得内容。
 - Delivery SQLite 保存标准化文本、路由 id 和最多 10 个受限附件描述符；不保存 raw 事件、token 或下载 URL。图片字节只交给 AttachmentStore。
 - 私聊详细进度只使用 Delivery 生成的限长、常见凭据脱敏 preview；它不是秘密扫描器。群聊始终不发送参数或结果，reasoning/thinking 内容在任何会话都不外发。

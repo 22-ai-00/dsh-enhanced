@@ -73,6 +73,15 @@ export function textResponse(text: string): StreamChunk[] {
   ]
 }
 
+export function maxTokensResponse(text: string): StreamChunk[] {
+  return [
+    { type: 'block-start', index: 0, blockType: 'text' },
+    { type: 'text-delta', index: 0, text },
+    { type: 'block-end', index: 0, block: { type: 'text', text } },
+    { type: 'finish', reason: { kind: 'max-tokens' } },
+  ]
+}
+
 export type CapturedUpdate = SessionNotification['update']
 
 export interface BridgeHarness {
@@ -108,7 +117,7 @@ export async function makeBridgeHarness(options: {
     defaultId: 'standard',
     list: () => Promise.resolve([
       { id: 'standard', name: 'Standard' },
-      { id: 'code', name: 'PTC' },
+      { id: 'ptc', name: 'PTC' },
       { id: 'minimal', name: 'Minimal' },
       { id: 'cordis', name: 'Creator' },
     ]),

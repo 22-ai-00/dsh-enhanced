@@ -2611,6 +2611,7 @@ export class AutomationStore {
       const candidates = this.database.prepare(`
         SELECT task.* FROM automation_tasks task
         JOIN automation_definitions definition ON definition.id = task.automation_id
+        JOIN automation_occurrences occurrence ON occurrence.id = task.occurrence_id
         WHERE task.status = 'scheduled' AND (
           definition.status = 'active'
           OR (
@@ -2619,13 +2620,70 @@ export class AutomationStore {
             AND ${pausedGrowthTaskAdmission('task', 'definition')}
           )
         )
-        ORDER BY task.created_at, task.id LIMIT 100
+        ORDER BY occurrence.scheduled_at ASC, occurrence.trigger_key ASC, task.id ASC LIMIT 100
       `).all(growthAutomationOwner) as unknown as TaskRow[]
       for (const candidate of candidates) {
         const result = this.claimTaskInTransaction(candidate, input, input.hostAvailability)
         if (result !== undefined) return result
       }
       return undefined
+    })
+  }
+
+  /**
+   * Make cancel-previous visible even when the coordinator has no free local
+   * runner slot.  The cancellation request is fenced by the duty lease and is
+   * committed with the still-scheduled successor as its durable cause; a
+   * later tick claims that successor only after the prior lease is released.
+   */
+  requestCancellationForSupersededTasks(input: {
+    ownerId: string
+    fencingToken: number
+    now: number
+  }): readonly string[] {
+    return this.transaction(() => {
+      this.requireDuty(input.ownerId, input.fencingToken, input.now)
+      const successors = this.database.prepare(`
+        SELECT task.*
+        FROM automation_tasks task
+        JOIN automation_definitions definition ON definition.id = task.automation_id
+        WHERE task.status = 'scheduled'
+          AND task.attempt_count = 0
+          AND (
+            definition.status = 'active'
+            OR (
+              definition.status = 'paused'
+              AND definition.system_owner = ?
+              AND ${pausedGrowthTaskAdmission('task', 'definition')}
+            )
+          )
+          AND json_extract(definition.definition_json, '$.overlap') = 'cancel-previous'
+      `).all(growthAutomationOwner) as unknown as TaskRow[]
+      return [...new Set(successors.flatMap(task =>
+        this.requestCancellationForNewerOccurrenceInTransaction(task, input.now)))]
+    })
+  }
+
+  /** Bound queue-one backlog while its active predecessor still owns a slot. */
+  coalesceQueuedTasks(input: {
+    ownerId: string
+    fencingToken: number
+    now: number
+  }): readonly string[] {
+    return this.transaction(() => {
+      this.requireDuty(input.ownerId, input.fencingToken, input.now)
+      const automations = this.database.prepare(`
+        SELECT DISTINCT task.automation_id, occurrence.dry_run, task.occurrence_id
+        FROM automation_tasks task
+        JOIN automation_definitions definition ON definition.id = task.automation_id
+        JOIN automation_occurrences occurrence ON occurrence.id = task.occurrence_id
+        WHERE task.status IN ('claimed', 'running')
+          AND definition.status = 'active'
+          AND json_extract(definition.definition_json, '$.overlap') = 'queue-one'
+      `).all() as Array<Pick<TaskRow, 'automation_id' | 'occurrence_id'> & Pick<OccurrenceRow, 'dry_run'>>
+      return automations.flatMap(row => this.coalesceQueueOneInTransaction(
+        row.automation_id, row.occurrence_id, input.now,
+      ))
     })
   }
 
@@ -3573,9 +3631,15 @@ export class AutomationStore {
     const active = this.database.prepare(`
       SELECT * FROM automation_tasks
       WHERE automation_id = ? AND id != ? AND status IN ('claimed', 'running')
+        AND (SELECT dry_run FROM automation_occurrences WHERE id = automation_tasks.occurrence_id)
+          = (SELECT dry_run FROM automation_occurrences WHERE id = ?)
       ORDER BY created_at, id
-    `).all(row.automation_id, row.id) as unknown as TaskRow[]
-    if (active.length > 0 && automation.definition.overlap === 'queue-one') return undefined
+    `).all(row.automation_id, row.id, row.occurrence_id) as unknown as TaskRow[]
+    if (active.length > 0 && automation.definition.overlap === 'queue-one') {
+      const superseded = this.coalesceQueueOneInTransaction(row.automation_id, row.occurrence_id, input.now)
+      if (superseded.includes(row.id)) return this.getTask(row.id)
+      return undefined
+    }
     if (active.length > 0 && automation.definition.overlap === 'skip') {
       this.database.prepare(`
         UPDATE automation_tasks SET status = 'cancelled', cancel_requested = 1, updated_at = ? WHERE id = ?
@@ -3586,10 +3650,12 @@ export class AutomationStore {
       return this.getTask(row.id)
     }
     if (active.length > 0 && automation.definition.overlap === 'cancel-previous') {
-      this.database.prepare(`
-        UPDATE automation_tasks SET cancel_requested = 1, updated_at = ?
-        WHERE automation_id = ? AND id != ? AND status IN ('claimed', 'running')
-      `).run(input.now, row.automation_id, row.id)
+      this.requestCancellationForNewerOccurrenceInTransaction(row, input.now)
+      // A cancellation is cooperative and fenced. Do not claim the
+      // successor until every active predecessor has actually released its
+      // lease/slot; otherwise maxConcurrency > 1 and direct claims can run
+      // both sides of a purported replacement concurrently.
+      return undefined
     }
     const attemptNumber = row.attempt_count + 1
     const attemptId = `attempt-${row.id}-${attemptNumber}`
@@ -3611,6 +3677,74 @@ export class AutomationStore {
       snapshot.hash, snapshot.json, input.now, input.now,
     )
     return this.getTask(row.id)
+  }
+
+  /**
+   * Request cancellation only when a fresh successor is strictly later than
+   * an active occurrence. Equal timestamps have no causal order, and retry
+   * rows retain their existing occurrence rather than superseding it.
+   */
+  private requestCancellationForNewerOccurrenceInTransaction(successor: TaskRow, now: number): string[] {
+    if (successor.attempt_count !== 0) return []
+    const successorOccurrence = this.database.prepare(`
+      SELECT scheduled_at, dry_run FROM automation_occurrences WHERE id = ?
+    `).get(successor.occurrence_id) as Pick<OccurrenceRow, 'scheduled_at' | 'dry_run'> | undefined
+    if (successorOccurrence === undefined) {
+      throw new AutomationStoreError('invalid-state', 'scheduled successor has no occurrence')
+    }
+    const active = this.database.prepare(`
+      SELECT task.id
+      FROM automation_tasks task
+      JOIN automation_occurrences occurrence ON occurrence.id = task.occurrence_id
+      WHERE task.automation_id = ?
+        AND task.id != ?
+        AND task.status IN ('claimed', 'running')
+        AND occurrence.dry_run = ?
+        AND occurrence.scheduled_at < ?
+      ORDER BY occurrence.scheduled_at ASC, task.id ASC
+    `).all(
+      successor.automation_id, successor.id, successorOccurrence.dry_run, successorOccurrence.scheduled_at,
+    ) as Array<Pick<TaskRow, 'id'>>
+    for (const task of active) {
+      this.database.prepare(`
+        UPDATE automation_tasks SET cancel_requested = 1, updated_at = ?
+        WHERE id = ? AND status IN ('claimed', 'running')
+      `).run(now, task.id)
+    }
+    return active.map(task => task.id)
+  }
+
+  /**
+   * Keep the latest not-yet-attempted occurrence only. A scheduled retry
+   * already has attempt history and must remain auditable/recoverable, so
+   * occurrence coalescing never changes it.
+   */
+  private coalesceQueueOneInTransaction(automationId: string, occurrenceId: string, now: number): string[] {
+    const occurrence = this.database.prepare(`SELECT dry_run FROM automation_occurrences WHERE id = ?`)
+      .get(occurrenceId) as Pick<OccurrenceRow, 'dry_run'> | undefined
+    if (occurrence === undefined) throw new AutomationStoreError('invalid-state', 'queue-one task has no occurrence')
+    const pending = this.database.prepare(`
+      SELECT task.*
+      FROM automation_tasks task
+      JOIN automation_occurrences occurrence ON occurrence.id = task.occurrence_id
+      WHERE task.automation_id = ? AND task.status = 'scheduled' AND task.attempt_count = 0
+        AND occurrence.dry_run = ?
+      ORDER BY occurrence.scheduled_at DESC, occurrence.trigger_key DESC, task.id DESC
+    `).all(automationId, occurrence.dry_run) as unknown as TaskRow[]
+    const superseded = pending.slice(1)
+    for (const task of superseded) {
+      this.database.prepare(`
+        UPDATE automation_tasks
+        SET status = 'cancelled', cancel_requested = 1, updated_at = ?
+        WHERE id = ? AND status = 'scheduled' AND attempt_count = 0
+      `).run(now, task.id)
+      this.database.prepare(`
+        UPDATE automation_occurrences
+        SET status = 'skipped', reason = 'overlap-queue-one-coalesced', updated_at = ?
+        WHERE id = ? AND status = 'pending'
+      `).run(now, task.occurrence_id)
+    }
+    return superseded.map(task => task.id)
   }
 
   private exactHostAvailability(
