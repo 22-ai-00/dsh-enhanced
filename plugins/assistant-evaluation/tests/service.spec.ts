@@ -39,7 +39,7 @@ describe('assistant evaluation service', () => {
     expect(service.query({ scope: stored.scope, limit: 10 })).toEqual([stored])
     expect(service.summary({ scope: stored.scope, fromOccurredAt: 0, toOccurredAt: 5_000 }).total).toBe(1)
     expect(service.health()).toMatchObject({
-      ready: true, schemaVersion: 9, outcomes: 1, trustedOutcomes: 1,
+      ready: true, schemaVersion: 10, outcomes: 1, trustedOutcomes: 1,
       taskProjections: 1, conflictedTaskProjections: 0, pendingProjections: 1,
     })
     expect(service.limits()).toMatchObject({ maxSituationBytes: 200, maxQueryLimit: 100, maxEvidenceRefs: 32 })

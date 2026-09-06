@@ -13,6 +13,9 @@ async function database(): Promise<string> { const path = await mkdtemp(join(tmp
 function contract(workspace: string, id = 'contract-1', expiresAt = 10_000, ref = 'run-1'): TaskAcceptanceContract {
   return createTaskAcceptanceContract({ protocol: 'task-acceptance/v1', id, scope: { workspace, preset: 'test' }, owner: { principalRecordId: 'owner-1', principalVersion: 1 }, task: { kind: 'automation-run', ref }, objective: 'objective', profile: { id: 'profile-1', version: 1, digest: 'a'.repeat(64) }, issuedAt: 1, expiresAt, criteria: [{ id: 'process-1', kind: 'process-behavior', authority: { id: 'runner-1', digest: 'b'.repeat(64) }, artifactPath: 'result.txt', stdin: '', expectedStdout: '', expectedExitCode: 0 }], bounds: { maxDurationMs: 100, maxEvidenceBytes: 1024 } })
 }
+function goalContract(workspace: string, id = 'goal-contract-1', nativeRevision = 1): TaskAcceptanceContract {
+  return createTaskAcceptanceContract({ protocol: 'task-acceptance/v2', id, scope: { workspace, preset: 'test' }, owner: { principalRecordId: 'owner-1', principalVersion: 1 }, task: { kind: 'goal-step', ref: 'goal-run-1', goal: { id: 'goal-1', definitionVersion: 1, definitionDigest: 'a'.repeat(64), stepId: 'step-1', runId: 'goal-run-1', sessionId: 'session-1', nativeGoalId: 'native-1', nativeRevision } }, objective: 'objective', profile: { id: 'profile-1', version: 1, digest: 'a'.repeat(64) }, issuedAt: 1, expiresAt: 10_000, criteria: [{ id: 'process-1', kind: 'process-behavior', authority: { id: 'runner-1', digest: 'b'.repeat(64) }, artifactPath: 'result.txt', stdin: '', expectedStdout: '', expectedExitCode: 0 }], bounds: { maxDurationMs: 100, maxEvidenceBytes: 1024 } })
+}
 function receipt(contract: TaskAcceptanceContract, id: string, status: 'passed' | 'failed' | 'unknown' = 'passed', completedAt = 30): TaskVerificationReceipt {
   return createTaskVerificationReceipt(contract, { protocol: 'task-verification/v1', id, contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task: contract.task, results: [{ criterionId: 'process-1', status, reason: status === 'unknown' ? 'unavailable' : 'verified', evidence: [] }], startedAt: 11, completedAt, validUntil: Math.min(9_000, contract.expiresAt) })
 }
@@ -70,6 +73,15 @@ describe('acceptance SQLite ledger', () => {
     second.markExecutionFinished(input.id, { status: 'succeeded', quiescent: true, completedAt: 10, executionRef: 'execution-1' })
     expect(() => second.markExecutionFinished(input.id, { status: 'failed', quiescent: true, completedAt: 10, executionRef: 'execution-1' })).toThrow(/immutable/)
     second.close()
+  })
+
+  it('rejects a goal-step lookup whose ref matches but complete binding differs', async () => {
+    const path = await database(); const workspace = await mkdtemp(join(tmpdir(), 'acceptance-goal-workspace-')); cleanup.push(workspace)
+    const input = goalContract(workspace); const store = new AcceptanceStore(path); store.accept(input)
+    expect(store.getTaskContract({ scope: input.scope, owner: input.owner, task: input.task })).toEqual(input)
+    const wrong = goalContract(workspace, 'other-goal-contract', 2)
+    expect(() => store.getTaskContract({ scope: wrong.scope, owner: wrong.owner, task: wrong.task })).toThrow(/task binding differs/)
+    store.close()
   })
 
   it('fences competing connections and reclaims only an expired lease', async () => {

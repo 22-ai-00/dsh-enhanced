@@ -15,8 +15,11 @@ declare module '@deepseek-ai/cordis' {
   interface Context { assistantVerifier: AssistantVerifierService }
 }
 
-const producerNames = ['assistantAutomations', 'assistantDelivery'] as const
+const producerNames = ['assistantAutomations', 'assistantDelivery', 'assistantGoals'] as const
 type ProducerName = typeof producerNames[number]
+const producerTaskKinds: Readonly<Record<ProducerName, TaskAcceptanceContract['task']['kind']>> = Object.freeze({
+  assistantAutomations: 'automation-run', assistantDelivery: 'foreground-turn', assistantGoals: 'goal-step',
+})
 interface Binding { producer: TaskAcceptanceProducer; generation: string; dispose(): void }
 
 function isProducer(value: unknown): value is TaskAcceptanceProducer {
@@ -135,7 +138,7 @@ export class AssistantVerifierService extends Service<Config> {
       protocol: 'assistant-verifier/host-producer/v1', generation, owner: this, requiresAcceptance: this.#requireAcceptance,
       prepare: (input: AcceptanceTask): AcceptanceHandle | null => {
         current()
-        if ((name === 'assistantAutomations') !== (input.task.kind === 'automation-run')) throw new Error('assistant-verifier: wrong Host task kind')
+        if (input.task.kind !== producerTaskKinds[name]) throw new Error('assistant-verifier: wrong Host task kind')
         const accepted = this.#prepare(input)
         if (accepted === null) return null
         const handle = Object.freeze({ contractId: accepted.id, contractDigest: accepted.digest })
@@ -185,7 +188,7 @@ export class AssistantVerifierService extends Service<Config> {
       return null
     }
     const now = this.#now()
-    return this.#store.accept(createTaskAcceptanceContract({ protocol: 'task-acceptance/v1',
+    return this.#store.accept(createTaskAcceptanceContract({ protocol: input.task.kind === 'goal-step' ? 'task-acceptance/v2' : 'task-acceptance/v1',
       id: `acceptance-${acceptanceDigest([input.scope, input.owner, input.task])}`, ...input,
       profile: { id: selected.profile.id, version: selected.profile.version, digest: selected.digest },
       issuedAt: now, expiresAt: now + selected.profile.validityMs,
@@ -218,7 +221,9 @@ export class AssistantVerifierService extends Service<Config> {
     }
     for (const contract of awaiting) {
       this.#awaitingCursor = contract.id
-      const name = contract.task.kind === 'automation-run' ? 'assistantAutomations' : 'assistantDelivery'
+      const name: ProducerName = contract.task.kind === 'automation-run'
+        ? 'assistantAutomations'
+        : contract.task.kind === 'foreground-turn' ? 'assistantDelivery' : 'assistantGoals'
       const binding = this.#bindings.get(name)
       if (binding !== undefined) await this.#reconcileExecution(name, binding, contract)
     }
@@ -241,7 +246,7 @@ export class AssistantVerifierService extends Service<Config> {
       const now = this.#now()
       let receipt = null
       if (now < contract.expiresAt && now >= startedAt) {
-        const payload = { protocol: 'task-verification/v1', id: `verification-${contract.id}-${job.fencingToken}`,
+        const payload = { protocol: contract.protocol === 'task-acceptance/v2' ? 'task-verification/v2' as const : 'task-verification/v1' as const, id: `verification-${contract.id}-${job.fencingToken}`,
           contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner,
           task: contract.task, results, startedAt, completedAt: now, validUntil: contract.expiresAt }
         try { receipt = createTaskVerificationReceipt(contract, payload) }

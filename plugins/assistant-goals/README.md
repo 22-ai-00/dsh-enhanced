@@ -23,6 +23,8 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
   config:
     databasePath: !!js dshHomePath('assistant-goals.sqlite')
     maxContextChars: 12000
+    verifyNativeRounds: false
+    stepMaxDurationMs: 60000
 ```
 
 `databasePath` 默认 `~/.dsh/assistant-goals.sqlite`，必须是绝对路径（仅测试使用 `:memory:`）。`maxContextChars` 为每次自动上下文的字符上限，范围 1,024–65,536。数据超限时返回明确提示，不截断 JSON 或伪造完整证据。
@@ -90,17 +92,26 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
 
 ## 诊断与边界
 
+`verifyNativeRounds: true` 为已经启用的原生 goal-round-driver 接入独立步骤验收。它还需要 Delivery 的 `agentGoalContinuationTimeoutMs` 为正、上述 goal Policy 额外允许 `execute`，以及同一 Host 的 `assistant-verifier`。Verifier profile 使用 `taskKind: goal-step`，精确匹配实际 owner record/version、workspace/preset 和当前目标 objective；成功条件与 authority 按 Verifier README 配置。没有匹配 profile 时，即使 Verifier 设置 `requireAcceptance: false`，该目标回合也会在模型调用前停止。默认不开启此行为，也不自动挂载 driver。
+
+每个真实原生回合在模型调用前持久保存定义版本、原 Session/GoalId/revision、step/run、轮次上限、Policy 授权摘要、期限及 v2 验收绑定，并先完成 Session flush。`stepMaxDurationMs` 为单步骤期限，默认 60,000ms，范围 1–300,000ms。目标 objective 修改递增语义定义版本；pause/resume 或修改轮次上限只改变 native revision。模型请求与工具执行前重查 owner、定义、revision、轮次上限和期限，目标完成后也不再放行该回合的新工具。
+
+实际回合终态和 Session checkpoint 供 Verifier 独立回读；验收结果进入 Evaluation 的独立 `goal-step` 投影。普通前台仍按原始入站消息验收。原生 complete、步骤运行成功和整个业务目标达成分别记录，单个步骤回执不会自动完成业务目标；历史旧定义成功也不能成为新定义的执行权限。Host 可通过 `executionRuns(agent, goalId)` 获取当前 owner 的 run/contract 绑定，再用 Verifier `inspect(contractId)` 查看独立结果。
+
+取消、超时或失去授权后，旧 Agent handle 保留拒绝护栏，迟到工具即使用新 signal 也不能继续执行。支持范围是 Delivery 的实际生命周期：结束后释放旧 handle，下一个 owner 回合从同一 Session 创建新的 handle；不能复用被取消的旧 Agent。停止等待不证明不合作工具、子进程或外部动作已终止，相关回执保持 `unknown / quiescent:false`。重启时已 dispatch 且没有终态的 run 记为 unknown，先查证，绝不自动重放；仅 prepared 的意图也不会恢复提交。`health().execution` 分别报告 enabled、verifierConnected 和 activeRounds。
+
 可信 Host 可读取 `ctx.assistantGoals.health()` 的 `ready`、`goals`、`awaitingVerification`、`observationFailures`。`ready: false` 时先检查必需服务；空目录时检查 Delivery 配对、当前人类 turn、workspace/preset 和上述 Policy 授权。观察失败会计数，原生 goal 自身不会因此被改写。计数仅供 Host 诊断，不向模型提供跨 owner 目录。
 
 - 原始目标保持不变；原生 edit 更新当前目标投影。笔记和证据引用都是未验证的数据，不获得权限，也不构成 achieved 回执。
 - 每次新上下文/工具访问重查 live Agent、owner record/version 和 Policy。SystemPrompt 已经写入 Session 的历史快照不会被此插件擦除；不能把撤销新读取权限等同于历史清除或跨 owner 复用旧 Session 的隔离保证。
 - Delivery 桥接覆盖创建、业务笔记和 owner 的 edit/pause/resume/clear；没有给模型增加独立验收成功写入入口，native complete 仍由受支持的原生入口或可信 Host 管理。
-- 本包尚未提供成功条件验收绑定、期限/费用预算、授权 lease、自动唤醒、原生 Session 执行恢复或多步骤调度。它们属于完整目标编排的后续工作。
+- 本包已有可选的原生回合验收绑定和单步骤期限；跨步骤费用/token 预算预留、授权 lease、自动唤醒、原生 Session 自动恢复和多步骤调度仍待实现。
 
 ## 权限与数据
 
 - **文件系统**：保存目标原文、owner scope、笔记、focus 和追加历史到独立 SQLite；使用 WAL 与 FULL 同步。新建数据库权限为 `0600`，启动前后检查数据库及已有 WAL/SHM 的私有权限、所有权和链接。目录创建为 `0700`，直接父目录须属于当前用户且不可被组或其他用户写入，不修改既有父目录权限；这不是对同 UID 恶意进程或路径替换的 OS 隔离保证。数据库不加密，应置于可信私有目录。启动时重建并核对历史与当前状态，拒绝损坏/截断记录及无效 focus；这不是密码学防篡改日志。当前没有历史自动清理。
 - **网络**：本插件不直接联网；注入的上下文及工具结果会随宿主请求发送给所选模型提供商。
+- **步骤账本**：开启验收时另写 `databasePath + '.executions'` 及其 WAL/SHM，保存目标原文、scope、定义/原生身份、期限、授权摘要、契约绑定及执行终态，使用同样的私有文件要求。两套 SQLite 与 Session 不是一个原子事务；dispatch 标记后的未知窗口不自动重放。卸载保留两套数据文件。
 - **子进程、凭据、浏览器、安装脚本**：无。
 - **卸载**：移除 bundle 后注册和数据库连接随 Cordis 生命周期释放，数据保留；停用所有使用该库的 Host 后可手工删除数据库及其 WAL/SHM。插件不写自定义 Session event，原生目标仍由 DSH 管理。
 

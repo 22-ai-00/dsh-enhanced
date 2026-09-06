@@ -648,6 +648,9 @@ importers:
       '@dsh-enhanced/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
+      '@dsh-enhanced/assistant-verifier':
+        specifier: workspace:*
+        version: link:../assistant-verifier
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
@@ -761,6 +764,9 @@ importers:
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
+      '@dsh-enhanced/assistant-verifier':
+        specifier: workspace:*
+        version: link:../assistant-verifier
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0

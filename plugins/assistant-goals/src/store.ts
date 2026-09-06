@@ -2,15 +2,16 @@ import { createHash } from 'node:crypto'
 import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { isAbsolute, dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { GoalStoreError } from './types.js'
-import type { GoalCheckpoint, GoalRecord, GoalScope, NativeGoalState } from './types.js'
+import type { GoalCheckpoint, GoalDefinition, GoalRecord, GoalScope, NativeGoalState } from './types.js'
 
-const schemaVersion = 1
+const schemaVersion = 2
 const message = 'goal store operation rejected'
 const phases = new Set<NativeGoalState['phase']>(['active', 'paused', 'blocked', 'complete', 'cleared'])
 
 type GoalRow = {
-  id: string; scope_json: string; original_objective: string; native_json: string; checkpoint_json: string
+  id: string; scope_json: string; original_objective: string; definition_json: string; native_json: string; checkpoint_json: string
   version: number; created_at: number; updated_at: number
 }
 
@@ -39,7 +40,7 @@ function privateDatabaseFiles(path: string): void {
   }
 }
 
-function prepareFile(path: string): void {
+export function prepareGoalStoreDatabaseFile(path: string): void {
   if (!isAbsolute(path)) fail('unsafe-file')
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   privateDirectory(dirname(path))
@@ -56,14 +57,14 @@ function prepareFile(path: string): void {
 }
 
 function validateSchema(database: DatabaseSync): void {
-  const version = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
+  let version = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
   const objects = database.prepare("SELECT type, name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name").all() as Array<{ type: string; name: string }>
   if (version === 0) {
     if (objects.length !== 0) fail('schema')
     database.exec(`
       BEGIN IMMEDIATE;
       CREATE TABLE goal_records (
-        id TEXT PRIMARY KEY, scope_json TEXT NOT NULL, original_objective TEXT NOT NULL, native_json TEXT NOT NULL,
+        id TEXT PRIMARY KEY, scope_json TEXT NOT NULL, original_objective TEXT NOT NULL, definition_json TEXT NOT NULL, native_json TEXT NOT NULL,
         checkpoint_json TEXT NOT NULL, version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       ) STRICT;
       CREATE TABLE goal_history (
@@ -76,9 +77,30 @@ function validateSchema(database: DatabaseSync): void {
         PRIMARY KEY(scope_json, session_id),
         FOREIGN KEY(record_id) REFERENCES goal_records(id) ON DELETE RESTRICT
       ) STRICT, WITHOUT ROWID;
-      PRAGMA user_version = 1;
+      PRAGMA user_version = 2;
       COMMIT;
     `)
+  }
+  if (version === 1) {
+    const columns = (database.prepare('PRAGMA table_info(goal_records)').all() as Array<{ name: string }>).map(row => row.name)
+    if (!same(columns, ['id', 'scope_json', 'original_objective', 'native_json', 'checkpoint_json', 'version', 'created_at', 'updated_at'])) fail('schema')
+    database.exec('BEGIN IMMEDIATE; ALTER TABLE goal_records ADD COLUMN definition_json TEXT NOT NULL DEFAULT \'{}\';')
+    const rows = database.prepare('SELECT id FROM goal_records').all() as Array<{ id: string }>
+    const history = database.prepare("SELECT record_id, payload_json FROM goal_history WHERE kind = 'native' ORDER BY record_id, sequence").all() as Array<{ record_id: string; payload_json: string }>
+    const natives = new Map<string, NativeGoalState[]>()
+    for (const row of history) {
+      const values = natives.get(row.record_id) ?? []
+      values.push(nativeInput(parse(row.payload_json))); natives.set(row.record_id, values)
+    }
+    for (const row of rows) {
+      const values = natives.get(row.id)
+      if (!values || values.length === 0) fail('schema')
+      const definition = definitionFromHistory(values!)
+      database.prepare('UPDATE goal_records SET definition_json = ? WHERE id = ?').run(JSON.stringify(definition), row.id)
+    }
+    validateStoredPayloads(database)
+    database.exec('PRAGMA user_version = 2; COMMIT;')
+    version = 2
   }
   if (version !== 0 && version !== schemaVersion) fail('schema')
   const expected = JSON.stringify(['goal_focus', 'goal_history', 'goal_records'])
@@ -87,7 +109,7 @@ function validateSchema(database: DatabaseSync): void {
   const recordColumns = (database.prepare('PRAGMA table_info(goal_records)').all() as Array<{ name: string }>).map(row => row.name)
   const historyColumns = (database.prepare('PRAGMA table_info(goal_history)').all() as Array<{ name: string }>).map(row => row.name)
   const focusColumns = (database.prepare('PRAGMA table_info(goal_focus)').all() as Array<{ name: string }>).map(row => row.name)
-  if (!same(recordColumns, ['id', 'scope_json', 'original_objective', 'native_json', 'checkpoint_json', 'version', 'created_at', 'updated_at'])
+  if (!same(recordColumns.sort(), ['id', 'scope_json', 'original_objective', 'definition_json', 'native_json', 'checkpoint_json', 'version', 'created_at', 'updated_at'].sort())
     || !same(historyColumns, ['record_id', 'sequence', 'kind', 'payload_json', 'recorded_at'])
     || !same(focusColumns, ['scope_json', 'session_id', 'record_id'])) fail('schema')
   const sql = database.prepare("SELECT name, sql FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ name: string; sql: string }>
@@ -99,7 +121,7 @@ function validateSchema(database: DatabaseSync): void {
 }
 
 function openDatabase(path: string): DatabaseSync {
-  if (path !== ':memory:') prepareFile(path)
+  if (path !== ':memory:') prepareGoalStoreDatabaseFile(path)
   const database = new DatabaseSync(path, { enableForeignKeyConstraints: true })
   try {
     database.exec('PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 250; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;')
@@ -157,6 +179,23 @@ function nativeInput(value: unknown): NativeGoalState {
   return freeze({ sessionId: text(input.sessionId, 512), goalId: text(input.goalId, 512), revision: integer(input.revision, 1), objective: text(input.objective, 16_384), phase: input.phase as NativeGoalState['phase'], roundsStarted, maxGoalRounds, updatedAt: integer(input.updatedAt, 0) })
 }
 
+function definitionInput(value: unknown): GoalDefinition {
+  const input = object(value, ['version', 'digest', 'objective'])
+  const objective = text(input.objective, 16_384)
+  const version = integer(input.version, 1)
+  const digest = text(input.digest, 128)
+  if (digest !== acceptanceDigest({ objective })) fail('invalid-input')
+  return freeze({ version, digest, objective })
+}
+
+function definitionFromHistory(natives: readonly NativeGoalState[]): GoalDefinition {
+  let objective = natives[0]!.objective; let version = 1
+  for (const native of natives.slice(1)) {
+    if (native.objective !== objective) { objective = native.objective; version += 1 }
+  }
+  return freeze({ version, digest: acceptanceDigest({ objective }), objective })
+}
+
 function checkpointInput(value: unknown): GoalCheckpoint {
   const input = object(value, ['nextStep', 'blockers', 'assumptions', 'evidenceRefs', 'dependencies'])
   const blockers = array(input.blockers, 16).map(item => text(item, 2000))
@@ -184,13 +223,13 @@ function emptyCheckpoint(): GoalCheckpoint { return freeze({ nextStep: '', block
 
 function validateStoredPayloads(database: DatabaseSync): void {
   try {
-    const records = database.prepare('SELECT id, scope_json, original_objective, native_json, checkpoint_json, version, created_at, updated_at FROM goal_records').all() as GoalRow[]
-    const byId = new Map<string, { row: GoalRow; scope: GoalScope; native: NativeGoalState; checkpoint: GoalCheckpoint }>()
+    const records = database.prepare('SELECT id, scope_json, original_objective, definition_json, native_json, checkpoint_json, version, created_at, updated_at FROM goal_records').all() as GoalRow[]
+    const byId = new Map<string, { row: GoalRow; scope: GoalScope; native: NativeGoalState; checkpoint: GoalCheckpoint; definition: GoalDefinition }>()
     for (const row of records) {
-      const native = nativeInput(parse(row.native_json)); const scope = scopeInput(parse(row.scope_json)); const checkpoint = checkpointInput(parse(row.checkpoint_json))
+      const native = nativeInput(parse(row.native_json)); const scope = scopeInput(parse(row.scope_json)); const checkpoint = checkpointInput(parse(row.checkpoint_json)); const definition = definitionInput(parse(row.definition_json))
       if (idFor(native) !== row.id || typeof row.original_objective !== 'string' || row.original_objective.length === 0 || row.original_objective.length > 16_384
         || !Number.isSafeInteger(row.version) || row.version < 1 || !Number.isSafeInteger(row.created_at) || row.created_at < 0 || !Number.isSafeInteger(row.updated_at) || row.updated_at < row.created_at) fail('schema')
-      byId.set(row.id, { row, scope, native, checkpoint })
+      byId.set(row.id, { row, scope, native, checkpoint, definition })
     }
     const history = database.prepare('SELECT record_id, sequence, kind, payload_json, recorded_at FROM goal_history ORDER BY record_id, sequence').all() as Array<{ record_id: string; sequence: number; kind: string; payload_json: string; recorded_at: number }>
     const historyById = new Map<string, typeof history>()
@@ -220,8 +259,10 @@ function validateStoredPayloads(database: DatabaseSync): void {
         } else fail('schema')
       }
       const initialNative = nativeInput(parse(auditEvents[0]!.payload_json))
+      const historyDefinition = definitionFromHistory(auditEvents.filter(event => event.kind === 'native').map(event => nativeInput(parse(event.payload_json))))
       if (!currentNative || !currentCheckpoint || initialNative.objective !== stored.row.original_objective || stored.row.created_at !== auditEvents[0]!.recorded_at
-        || stored.row.updated_at !== recordedAt || !same(currentNative, stored.native) || !same(currentCheckpoint, stored.checkpoint)) fail('schema')
+        || stored.row.updated_at !== recordedAt || !same(currentNative, stored.native) || !same(currentCheckpoint, stored.checkpoint)
+        || !same(historyDefinition, stored.definition)) fail('schema')
     }
     const focus = database.prepare('SELECT scope_json, session_id, record_id FROM goal_focus').all() as Array<{ scope_json: string; session_id: string; record_id: string }>
     for (const row of focus) {
@@ -243,12 +284,12 @@ export class GoalStore {
   }
 
   #read(id: string): GoalRecord | undefined {
-    const row = this.#database.prepare('SELECT id, scope_json, original_objective, native_json, checkpoint_json, version, created_at, updated_at FROM goal_records WHERE id = ?').get(id) as GoalRow | undefined
+    const row = this.#database.prepare('SELECT id, scope_json, original_objective, definition_json, native_json, checkpoint_json, version, created_at, updated_at FROM goal_records WHERE id = ?').get(id) as GoalRow | undefined
     if (!row) return undefined
-    const scope = scopeInput(parse(row.scope_json)); const native = nativeInput(parse(row.native_json)); const checkpoint = checkpointInput(parse(row.checkpoint_json))
+    const scope = scopeInput(parse(row.scope_json)); const native = nativeInput(parse(row.native_json)); const checkpoint = checkpointInput(parse(row.checkpoint_json)); const definition = definitionInput(parse(row.definition_json))
     if (row.id !== id || !Number.isSafeInteger(row.version) || row.version < 1 || !Number.isSafeInteger(row.created_at) || row.created_at < 0 || !Number.isSafeInteger(row.updated_at) || row.updated_at < row.created_at || row.original_objective.length === 0 || row.original_objective.length > 16_384) fail('schema')
     if (idFor(native) !== id) fail('schema')
-    return freeze({ id, scope, originalObjective: row.original_objective, native, checkpoint, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at })
+    return freeze({ id, scope, originalObjective: row.original_objective, definition, native, checkpoint, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at })
   }
 
   #history(id: string, kind: 'native' | 'checkpoint', payload: unknown, recordedAt: number): void {
@@ -277,8 +318,9 @@ export class GoalStore {
       if (!existing) {
         if (!allowCreate) return undefined
         const checkpoint = emptyCheckpoint(); const createdAt = native.updatedAt
-        this.#database.prepare('INSERT INTO goal_records(id, scope_json, original_objective, native_json, checkpoint_json, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
-          .run(id, JSON.stringify(scope), native.objective, JSON.stringify(native), JSON.stringify(checkpoint), 1, createdAt, createdAt)
+        const definition = definitionFromHistory([native])
+        this.#database.prepare('INSERT INTO goal_records(id, scope_json, original_objective, definition_json, native_json, checkpoint_json, version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)')
+          .run(id, JSON.stringify(scope), native.objective, JSON.stringify(definition), JSON.stringify(native), JSON.stringify(checkpoint), 1, createdAt, createdAt)
         this.#history(id, 'native', native, createdAt); this.#history(id, 'checkpoint', checkpoint, createdAt)
         return this.#read(id)!
       }
@@ -291,8 +333,10 @@ export class GoalStore {
       }
       if (native.roundsStarted < existing.native.roundsStarted) fail('conflict')
       const updatedAt = Math.max(existing.updatedAt, native.updatedAt, Date.now())
-      const next = freeze({ ...existing, native, version: existing.version + 1, updatedAt })
-      this.#database.prepare('UPDATE goal_records SET native_json = ?, version = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(native), next.version, updatedAt, id)
+      const definition = native.objective === existing.native.objective ? existing.definition
+        : freeze({ version: existing.definition.version + 1, objective: native.objective, digest: acceptanceDigest({ objective: native.objective }) })
+      const next = freeze({ ...existing, definition, native, version: existing.version + 1, updatedAt })
+      this.#database.prepare('UPDATE goal_records SET definition_json = ?, native_json = ?, version = ?, updated_at = ? WHERE id = ?').run(JSON.stringify(definition), JSON.stringify(native), next.version, updatedAt, id)
       this.#history(id, 'native', native, updatedAt)
       return next
     })

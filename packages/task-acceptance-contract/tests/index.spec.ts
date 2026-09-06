@@ -7,6 +7,7 @@ import {
   validateTaskAcceptanceContract,
   validateTaskVerificationReceipt,
   type TaskAcceptanceContractInput,
+  type TaskAcceptanceContractV2Input,
 } from '../src/index.ts'
 
 const sha = 'a'.repeat(64)
@@ -21,6 +22,13 @@ const contractInput = (): TaskAcceptanceContractInput => ({
   criteria: [{ id: 'program', kind: 'process-behavior', authority: { id: 'node-22', digest: sha }, artifactPath: 'fixtures/program.mjs', stdin: '', expectedStdout: 'hello\\n', expectedExitCode: 0 }],
   bounds: { maxDurationMs: 30_000, maxEvidenceBytes: 10_000 },
 })
+const goalStepContractInput = (): TaskAcceptanceContractV2Input => ({
+  ...contractInput(), protocol: 'task-acceptance/v2', id: 'goal-acceptance-1',
+  task: { kind: 'goal-step', ref: 'run-1', goal: {
+    id: 'goal-1', definitionVersion: 2, definitionDigest: sha, stepId: 'step-1',
+    runId: 'run-1', sessionId: 'session-1', nativeGoalId: 'native-goal-1', nativeRevision: 3,
+  } },
+})
 function receiptInput(contract = createTaskAcceptanceContract(contractInput())) {
   return {
     protocol: 'task-verification/v1' as const, id: 'receipt-1', contractId: contract.id, contractDigest: contract.digest,
@@ -33,11 +41,38 @@ function receiptInput(contract = createTaskAcceptanceContract(contractInput())) 
 describe('task acceptance contract', () => {
   test('deep-freezes canonical output while retaining byte-exact objective and stdout', () => {
     const contract = createTaskAcceptanceContract(contractInput())
+    expect(contract.digest).toBe('73fb01ba3f6e15b8ed10336f98616038caf25fb34df725dbe268fd8cad2996e7')
     expect(contract.objective).toBe('Emit exactly: hello\\n')
     expect(contract.criteria[0]?.kind === 'process-behavior' && contract.criteria[0].expectedStdout).toBe('hello\\n')
     expect(Object.isFrozen(contract)).toBe(true)
     expect(Object.isFrozen(contract.criteria)).toBe(true)
     expect(acceptanceDigest({ b: 1, a: 2 })).toBe(acceptanceDigest({ a: 2, b: 1 }))
+  })
+
+  test('preserves v1 digest while version-gating legacy and goal-step task identities', () => {
+    expect(() => createTaskAcceptanceContract({ ...contractInput(), task: goalStepContractInput().task })).toThrow(/task kind|shape/i)
+    expect(() => createTaskAcceptanceContract({ ...goalStepContractInput(), task: contractInput().task })).toThrow(/task kind|shape/i)
+    const contract = createTaskAcceptanceContract(goalStepContractInput())
+    expect(contract.protocol).toBe('task-acceptance/v2')
+    expect(contract.task.kind).toBe('goal-step')
+    expect(contract.digest).not.toBe(createTaskAcceptanceContract({ ...goalStepContractInput(), task: { ...goalStepContractInput().task, goal: { ...goalStepContractInput().task.goal, nativeRevision: 4 } } }).digest)
+  })
+
+  test('binds every goal-step field and requires the matching v2 receipt protocol', () => {
+    const contract = createTaskAcceptanceContract(goalStepContractInput())
+    const v2Receipt = {
+      ...receiptInput(contract), protocol: 'task-verification/v2' as const,
+    }
+    expect(createTaskVerificationReceipt(contract, v2Receipt).protocol).toBe('task-verification/v2')
+    for (const field of ['id', 'definitionVersion', 'definitionDigest', 'stepId', 'runId', 'sessionId', 'nativeGoalId', 'nativeRevision'] as const) {
+      const original = contract.task.kind === 'goal-step' ? contract.task.goal : undefined
+      const changed = field === 'definitionVersion' || field === 'nativeRevision' ? (original![field] as number) + 1 : field === 'definitionDigest' ? 'b'.repeat(64) : `${original![field]}-other`
+      const task = { ...contract.task, goal: { ...original!, [field]: changed } }
+      expect(() => createTaskVerificationReceipt(contract, { ...v2Receipt, task })).toThrow(/identity/i)
+    }
+    expect(() => createTaskVerificationReceipt(contract, { ...v2Receipt, protocol: 'task-verification/v1' })).toThrow(/protocol/i)
+    const legacy = createTaskAcceptanceContract(contractInput())
+    expect(() => createTaskVerificationReceipt(legacy, { ...receiptInput(legacy), protocol: 'task-verification/v2', task: goalStepContractInput().task })).toThrow(/protocol/i)
   })
 
   test('rejects tampering, unsafe input, duplicate criteria, and changed byte expectations', () => {

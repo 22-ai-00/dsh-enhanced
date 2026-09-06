@@ -16,6 +16,23 @@ const checkpoint = (changes: Partial<GoalCheckpoint> = {}): GoalCheckpoint => ({
 const database = async (): Promise<string> => join(await mkdtemp(join(tmpdir(), 'assistant-goals-')), 'goals.sqlite')
 
 describe('GoalStore', () => {
+  it('migrates a v1 native history into semantic definitions and can reopen it again', async () => {
+    const path = await database()
+    const store = new GoalStore(path)
+    const original = store.observe(scope(), native(), true)!
+    store.observe(scope(), native({ revision: 2, objective: 'revised goal', updatedAt: 200 }), false)
+    store.observe(scope(), native({ revision: 3, objective: 'revised goal', phase: 'paused', updatedAt: 300 }), false)
+    store.close()
+    const old = new DatabaseSync(path)
+    old.exec('ALTER TABLE goal_records DROP COLUMN definition_json; PRAGMA user_version = 1;')
+    old.close()
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const migrated = new GoalStore(path)
+      expect(migrated.get(scope(), original.id)).toMatchObject({ originalObjective: 'write the report', definition: { version: 2, objective: 'revised goal' }, native: { revision: 3, phase: 'paused' } })
+      migrated.close()
+    }
+  })
+
   it('observes native state, enforces checkpoint CAS, and survives restart', async () => {
     const path = await database()
     const store = new GoalStore(path)
@@ -53,6 +70,28 @@ describe('GoalStore', () => {
     const reopened = new GoalStore(path)
     expect(reopened.get(scope(), created.id)).toEqual(advanced)
     reopened.close()
+  })
+
+  it('versions only semantic native objective edits and reconstructs the definition from history', async () => {
+    const path = await database()
+    const store = new GoalStore(path)
+    const first = store.observe(scope(), native(), true)!
+    expect(first.definition).toMatchObject({ version: 1, objective: 'write the report' })
+    const paused = store.observe(scope(), native({ revision: 2, phase: 'paused', updatedAt: 200 }), true)!
+    expect(paused.definition).toEqual(first.definition)
+    const edited = store.observe(scope(), native({ revision: 3, objective: 'revised report', phase: 'active', updatedAt: 300 }), true)!
+    expect(edited.definition).toMatchObject({ version: 2, objective: 'revised report' })
+    store.close()
+    expect(new GoalStore(path).get(scope(), first.id)?.definition).toEqual(edited.definition)
+  })
+
+  it('rejects a persisted definition that does not replay from native history', async () => {
+    const path = await database(); const store = new GoalStore(path)
+    const record = store.observe(scope(), native(), true)!; store.close()
+    const db = new DatabaseSync(path)
+    db.prepare('UPDATE goal_records SET definition_json = ? WHERE id = ?').run(JSON.stringify({ version: 2, objective: 'forged', digest: '0'.repeat(64) }), record.id)
+    db.close()
+    expect(() => new GoalStore(path)).toThrow(GoalStoreError)
   })
 
   it('keeps owners isolated and denies takeover of an existing native identity', () => {

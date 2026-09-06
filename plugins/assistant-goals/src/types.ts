@@ -25,15 +25,44 @@ export interface GoalCheckpoint {
   dependencies: readonly string[]
 }
 
+/** Immutable semantic definition; native lifecycle revisions do not advance it. */
+export interface GoalDefinition {
+  version: number
+  digest: string
+  objective: string
+}
+
 export interface GoalRecord {
   id: string
   scope: GoalScope
   originalObjective: string
+  definition: GoalDefinition
   native: NativeGoalState
   checkpoint: GoalCheckpoint
   version: number
   createdAt: number
   updatedAt: number
+}
+
+export interface GoalStepTask {
+  kind: 'goal-step'
+  ref: string
+  goal: { id: string; definitionVersion: number; definitionDigest: string; stepId: string; runId: string; sessionId: string; nativeGoalId: string; nativeRevision: number }
+}
+
+export interface GoalExecutionIntent {
+  runId: string
+  scope: GoalScope
+  objective: string
+  admission: { issuedAt: number; expiresAt: number; maxGoalRounds: number; round: number; authorizationDigest: string }
+  task: GoalStepTask
+}
+
+export interface GoalExecutionRun {
+  intent: GoalExecutionIntent
+  acceptance?: { contractId: string; contractDigest: string }
+  dispatchedAt?: number
+  execution?: { status: 'succeeded' | 'unknown'; quiescent: boolean; completedAt: number }
 }
 
 /** Owner-authorized lifecycle change for the currently bound native goal. */

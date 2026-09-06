@@ -19,28 +19,51 @@ export interface TargetReadbackCriterion {
   readonly expectedRevision?: string
 }
 export type AcceptanceCriterion = ProcessBehaviorCriterion | DocumentCitationsCriterion | TargetReadbackCriterion
-export interface TaskAcceptanceContractInput {
-  readonly protocol: 'task-acceptance/v1'; readonly id: string
+export interface GoalStepBinding {
+  readonly id: string; readonly definitionVersion: number; readonly definitionDigest: string
+  readonly stepId: string; readonly runId: string; readonly sessionId: string
+  readonly nativeGoalId: string; readonly nativeRevision: number
+}
+export type AcceptanceTaskIdentity =
+  | Readonly<{ kind: 'automation-run' | 'foreground-turn'; ref: string }>
+  | Readonly<{ kind: 'goal-step'; ref: string; goal: GoalStepBinding }>
+
+interface TaskAcceptanceContractBase {
+  readonly id: string
   readonly scope: Readonly<{ workspace: string; preset: string }>
   readonly owner: Readonly<{ principalRecordId: string; principalVersion: number }>
-  readonly task: Readonly<{ kind: 'automation-run' | 'foreground-turn'; ref: string }>
   readonly objective: string
   readonly profile: Readonly<{ id: string; version: number; digest: string }>
   readonly issuedAt: number; readonly expiresAt: number; readonly criteria: readonly AcceptanceCriterion[]
   readonly bounds: Readonly<{ maxDurationMs: number; maxEvidenceBytes: number }>
 }
-export interface TaskAcceptanceContract extends TaskAcceptanceContractInput { readonly digest: string }
+export interface TaskAcceptanceContractV1Input extends TaskAcceptanceContractBase {
+  readonly protocol: 'task-acceptance/v1'; readonly id: string
+  readonly task: Readonly<{ kind: 'automation-run' | 'foreground-turn'; ref: string }>
+}
+export interface TaskAcceptanceContractV2Input extends TaskAcceptanceContractBase {
+  readonly protocol: 'task-acceptance/v2'
+  readonly task: Readonly<{ kind: 'goal-step'; ref: string; goal: GoalStepBinding }>
+}
+export type TaskAcceptanceContractInput = TaskAcceptanceContractV1Input | TaskAcceptanceContractV2Input
+export type TaskAcceptanceContract = TaskAcceptanceContractInput & Readonly<{ digest: string }>
 export interface CriterionResult {
   readonly criterionId: string; readonly status: 'passed' | 'failed' | 'unknown'; readonly reason: string
   readonly evidence: readonly Readonly<{ kind: string; ref: string; digest: string }>[]; readonly artifactDigest?: string
 }
-export interface TaskVerificationReceiptInput {
-  readonly protocol: 'task-verification/v1'; readonly id: string; readonly contractId: string; readonly contractDigest: string
+interface TaskVerificationReceiptBase {
+  readonly id: string; readonly contractId: string; readonly contractDigest: string
   readonly scope: Readonly<{ workspace: string; preset: string }>
   readonly owner: Readonly<{ principalRecordId: string; principalVersion: number }>
-  readonly task: Readonly<{ kind: 'automation-run' | 'foreground-turn'; ref: string }>
   readonly results: readonly CriterionResult[]; readonly startedAt: number; readonly completedAt: number; readonly validUntil: number
 }
-export interface TaskVerificationReceipt extends TaskVerificationReceiptInput {
-  readonly objectiveStatus: 'achieved' | 'not-achieved' | 'unknown'; readonly digest: string
+export interface TaskVerificationReceiptV1Input extends TaskVerificationReceiptBase {
+  readonly protocol: 'task-verification/v1'; readonly id: string; readonly contractId: string; readonly contractDigest: string
+  readonly task: Readonly<{ kind: 'automation-run' | 'foreground-turn'; ref: string }>
 }
+export interface TaskVerificationReceiptV2Input extends TaskVerificationReceiptBase {
+  readonly protocol: 'task-verification/v2'
+  readonly task: Readonly<{ kind: 'goal-step'; ref: string; goal: GoalStepBinding }>
+}
+export type TaskVerificationReceiptInput = TaskVerificationReceiptV1Input | TaskVerificationReceiptV2Input
+export type TaskVerificationReceipt = TaskVerificationReceiptInput & Readonly<{ objectiveStatus: 'achieved' | 'not-achieved' | 'unknown'; digest: string }>

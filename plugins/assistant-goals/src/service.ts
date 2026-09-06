@@ -10,11 +10,16 @@ import { join } from 'node:path'
 import { GoalStore } from './store.js'
 import type { GoalCheckpoint, GoalControlInput, GoalRecord, GoalScope, NativeGoalState } from './types.js'
 import { registerGoalTools } from './tools.js'
+import { GoalExecutionRuntime } from './execution.js'
+import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import type { TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 
-export interface Config { databasePath?: string; maxContextChars?: number }
+export interface Config { databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; stepMaxDurationMs?: number }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-goals.sqlite')),
   maxContextChars: Schema.number().step(1).min(1024).max(65536).default(12000),
+  verifyNativeRounds: Schema.boolean().default(false),
+  stepMaxDurationMs: Schema.number().step(1).min(1).max(300000).default(60000),
 })
 
 declare module '@deepseek-ai/cordis' { interface Context { assistantGoals: AssistantGoalsService } }
@@ -23,7 +28,7 @@ declare module '@deepseek-ai/cordis' { interface Context { assistantGoals: Assis
 function render(record: GoalRecord, now: number, maxChars: number): string {
   const data = {
     id: record.id, version: record.version, originalObjective: record.originalObjective,
-    currentObjective: record.native.objective,
+    currentObjective: record.native.objective, definition: record.definition,
     native: record.native,
     outcome: record.native.phase === 'complete' ? 'awaiting-verification' : 'unverified',
     checkpoint: { ...record.checkpoint, assumptions: record.checkpoint.assumptions.map(item => ({ ...item, stale: item.expiresAt <= now })) },
@@ -40,13 +45,23 @@ export class AssistantGoalsService extends Service {
   #active = true
   #maxChars: number
   #observationFailures = 0
+  #execution: GoalExecutionRuntime
 
   constructor(ctx: Context, input: Config = {}) {
     super(ctx, 'assistantGoals')
     this.#maxChars = input.maxContextChars ?? 12000
     if (!Number.isSafeInteger(this.#maxChars) || this.#maxChars < 1024 || this.#maxChars > 65536) throw new Error('assistant-goals: invalid context budget')
-    this.#store = new GoalStore(input.databasePath ?? join(homedir(), '.dsh', 'assistant-goals.sqlite'))
+    const path = input.databasePath ?? join(homedir(), '.dsh', 'assistant-goals.sqlite')
+    const duration = input.stepMaxDurationMs ?? 60000
+    if (!Number.isSafeInteger(duration) || duration < 1 || duration > 300000 || (input.verifyNativeRounds !== undefined && typeof input.verifyNativeRounds !== 'boolean')) throw new Error('assistant-goals: invalid execution limits')
+    this.#store = new GoalStore(path)
     ctx.effect(() => () => { this.#active = false; this.#store.close() }, 'assistant-goals.store')
+    this.#execution = new GoalExecutionRuntime(ctx, input.verifyNativeRounds === true ? (path === ':memory:' ? path : `${path}.executions`) : undefined, duration, agent => {
+      const scope = this.#scope(agent, 'execute')
+      const record = this.#observe(agent, false)
+      if (record === undefined) throw new Error('assistant-goals: current bound goal required')
+      return { scope, record }
+    })
     ctx.inject(['agents', 'goals', 'assistantDelivery', 'assistantPolicy'], runtime => {
       runtime.on('goal/changed', ({ agent, change }) => {
         try {
@@ -247,8 +262,13 @@ export class AssistantGoalsService extends Service {
   }
 
   describe = (record: GoalRecord): string => { return render(record, Date.now(), 131072) }
-  health = (): { ready: boolean; goals: number; awaitingVerification: number; observationFailures: number } => {
+  trustedAcceptanceProducerGeneration = () => this.#execution.generation()
+  registerTaskAcceptanceSink = (registration: TaskAcceptanceRegistration) => this.#execution.register(registration)
+  inspectAcceptedExecution = (contract: TaskAcceptanceContract) => this.#execution.inspect(contract)
+  executionRuns = (agent: Agent | undefined, goalId: string) => this.#execution.list(this.#scope(agent, 'inspect'), goalId)
+  whenIdle = () => this.#execution.whenIdle()
+  health = () => {
     if (!this.#active) throw new Error('assistant-goals: disposed')
-    return { ready: ['agents', 'goals', 'assistantDelivery', 'assistantPolicy'].every(name => this.ctx.get(name as never) !== undefined), ...this.#store.health(), observationFailures: this.#observationFailures }
+    return { ready: ['agents', 'goals', 'assistantDelivery', 'assistantPolicy'].every(name => this.ctx.get(name as never) !== undefined), ...this.#store.health(), observationFailures: this.#observationFailures, execution: this.#execution.health() }
   }
 }

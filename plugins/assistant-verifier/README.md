@@ -2,7 +2,7 @@
 
 独立核对事先确定的任务验收条件，分别记录执行状态与目标是否达成。验收契约、验证任务和结果回执保存在本地 SQLite，验证重试不会重新执行原任务。
 
-当前已接通前台与 Automations 的 AgentLoop 生产入口、Evaluation canonical 判断和 owner 反馈修订，尚未正式发布。工程验证与完整自治目标的剩余工作见 [实施账本](../../docs/agent-autonomy-implementation.md)。
+当前已接通前台、Automations 的 AgentLoop 生产入口和 Goals 的可选原生回合入口，以及 Evaluation canonical 判断和前台/Automation owner 反馈修订，尚未正式发布。工程验证与完整自治目标的剩余工作见 [实施账本](../../docs/agent-autonomy-implementation.md)。
 
 ## 安装与默认行为
 
@@ -18,6 +18,8 @@ dsh --profile web --dump-config
 本包接入 Delivery 的普通前台 AgentLoop 任务，以及 Automations 的 production AgentLoop 任务，原始目标分别来自入站文字与已批准 definition 的 prompt。`/stop` 等控制命令、preview 和独立的 Host runbook executor 不在这个入口范围；它们继续使用各自的执行协议。Host runbook 没有原始用户 prompt，不能用生成的文字冒充其目标契约；该类执行也不能作为行为学习的目标样本。
 
 同一 Delivery/Automations 服务生命周期内，一旦注册过必需验收，验证器短暂卸载或重新注册为可选都不能降低要求。缺失时停止新提交；恢复验证器后继续。管理员永久关闭必需验收需要调整 Host 配置并重启相应生产服务。
+
+Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和 `taskKind: goal-step`，绑定目标定义、step/run、原 Session 与 native goal/revision。前台和 Automation 保留 v1。启用 Goals `verifyNativeRounds` 后，该生产者总是要求精确的 goal-step profile；owner 反馈修订协议仍仅覆盖原有两种任务，不会把目标步骤错当普通前台。
 
 ## 验收配置
 

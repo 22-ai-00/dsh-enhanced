@@ -79,13 +79,13 @@ interface OutcomeRow {
   evaluator_id: string
   evaluator_version: string
   task_subject_key: string | null
-  task_subject_kind: 'automation-run' | 'foreground-turn' | 'outcome' | null
+  task_subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome' | null
   task_subject_ref: string | null
 }
 
 interface ProjectedOutcomeRow extends OutcomeRow {
   task_subject_key: string
-  task_subject_kind: 'automation-run' | 'foreground-turn' | 'outcome'
+  task_subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
   task_subject_ref: string
   task_objective_conflicted: 0 | 1
   task_primary_outcome_id: string
@@ -380,7 +380,7 @@ export function evaluationLearningProjectionDigest(input: {
     evaluator: Readonly<{ id: string; version: string }>
   }>
   projection: Readonly<{
-    subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
     subjectRef: string
     disposition: 'upsert' | 'retract'
     evidenceOutcomeId?: string
@@ -419,7 +419,7 @@ export function evaluationLearningProjectionDigest(input: {
 
 interface TaskSubject {
   key: string
-  kind: 'automation-run' | 'foreground-turn' | 'outcome'
+  kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
   ref: string
 }
 
@@ -428,8 +428,8 @@ function taskSubject(
   outcomeId: string,
   references: readonly EvaluationEvidenceRef[],
 ): TaskSubject {
-  const typed: Array<{ kind: 'automation-run' | 'foreground-turn'; ref: string }> = references.flatMap(reference => (
-    reference.kind === 'automation-run' || reference.kind === 'foreground-turn'
+  const typed: Array<{ kind: 'automation-run' | 'foreground-turn' | 'goal-step'; ref: string }> = references.flatMap(reference => (
+    reference.kind === 'automation-run' || reference.kind === 'foreground-turn' || reference.kind === 'goal-step'
       ? [{ kind: reference.kind, ref: reference.ref }]
       : []
   ))
@@ -1354,7 +1354,7 @@ export class EvaluationStore {
       SELECT subject_kind, subject_ref, learning_version, learning_digest, learning_disposition
       FROM evaluation_task_projections WHERE subject_key = ?
     `).get(subjectKey) as {
-      subject_kind: 'automation-run' | 'foreground-turn' | 'outcome'
+      subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
       subject_ref: string
       learning_version: number
       learning_digest: string | null
@@ -1514,7 +1514,7 @@ export class EvaluationStore {
     const entries = input.evidence.map((raw, index) => {
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)
         || raw.disposition !== 'upsert'
-        || (raw.subjectKind !== 'automation-run' && raw.subjectKind !== 'foreground-turn' && raw.subjectKind !== 'outcome')
+        || (raw.subjectKind !== 'automation-run' && raw.subjectKind !== 'foreground-turn' && raw.subjectKind !== 'goal-step' && raw.subjectKind !== 'outcome')
         || !Number.isSafeInteger(raw.version) || raw.version < 1
         || raw.version > 1_000_000_000
         || typeof raw.digest !== 'string' || !/^[a-f\d]{64}$/u.test(raw.digest)) {

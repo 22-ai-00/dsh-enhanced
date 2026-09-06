@@ -126,6 +126,8 @@ dsh-benchmark report --database ./private/results.sqlite --plan my-plan --output
 
 ## 兼容性
 
+Goals 的独立 Verifier v2 回执使用 `goal-step` 任务身份，按 `goal:<goal-id>:definition:<version>` 归因；同一 ref 的前台或 Automation 任务不会与之合并。schema 10 迁移保留既有投影、证据与视图。原有 owner 反馈修订入口仍只支持前台和 Automation，目标步骤成功也不自动宣告整个长期目标完成。
+
 对齐仓库的 [DSH / Cordis 兼容性基线](../../docs/compatibility.md)。Host 提供 Cordis、Agent 和 ToolRuntime；插件自身携带 Schemastery。
 
 Host 可通过 `getTrustedAutomationRunLearningProjection({ scope, runId })` 精确读取一个 run 的 ready canonical learning projection，无需扫描受 limit 限制的原始 audit 列表。不存在或 objective-conflict 时不返回证明；返回值沿用同一 canonical projection、revision、digest 和 scope watermark。调用方须检查 disposition 和执行/目标状态，并在产生依赖该证据的写入时使用 `withTrustedLearningWriterFence`。

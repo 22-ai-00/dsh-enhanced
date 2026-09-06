@@ -109,8 +109,8 @@ const thresholds = {
 }
 
 describe('current schema', () => {
-  test('creates and reopens a fresh version-13 database without replaying a migration', () => {
-    const path = databasePath('fresh-v12-reopen')
+  test('creates and reopens a fresh version-14 database without replaying a migration', () => {
+    const path = databasePath('fresh-v13-reopen')
     const created = openEvolutionDatabase(path)
     expect((created.prepare('PRAGMA user_version').get() as { user_version: number }).user_version)
       .toBe(evolutionSchemaVersion)
@@ -126,6 +126,90 @@ describe('current schema', () => {
       WHERE type = 'table' AND name = 'evolution_scope_learning_watermarks'
     `).get()).toEqual({ count: 1 })
     reopened.close()
+  })
+
+  test('keeps goal-step learning identity distinct from foreground and survives replay', () => {
+    const target = store()
+    const sharedRef = 'run-identity-1'
+    const digest = (value: string) => createHash('sha256').update(value).digest('hex')
+    const goal = target.applyTaskLearningProjection({
+      scopeKey: alphaScope, scopeWatermark: 1, subjectKind: 'goal-step', subjectRef: sharedRef,
+      version: 1, digest: digest('goal-step'), disposition: 'upsert',
+      situation: 'goal:goal-1:definition:1', outcome: 'failed', detail: 'goal evaluation',
+      evidenceRef: 'evaluation:goal-1', occurredAt: 1_000,
+    })
+    const foreground = target.applyTaskLearningProjection({
+      scopeKey: alphaScope, scopeWatermark: 2, subjectKind: 'foreground-turn', subjectRef: sharedRef,
+      version: 1, digest: digest('foreground'), disposition: 'upsert',
+      situation: 'foreground:run-identity-1', outcome: 'succeeded', detail: 'foreground evaluation',
+      evidenceRef: 'evaluation:foreground-1', occurredAt: 1_001,
+    })
+    expect(goal.replayed).toBe(false)
+    expect(foreground.replayed).toBe(false)
+    expect(target.getTaskLearningProjection({ scopeKey: alphaScope, subjectKind: 'goal-step', subjectRef: sharedRef }))
+      .toMatchObject({ subjectKind: 'goal-step', situation: 'goal:goal-1:definition:1' })
+    expect(target.getTaskLearningProjection({ scopeKey: alphaScope, subjectKind: 'foreground-turn', subjectRef: sharedRef }))
+      .toMatchObject({ subjectKind: 'foreground-turn', situation: 'foreground:run-identity-1' })
+    expect(target.applyTaskLearningProjection({
+      scopeKey: alphaScope, scopeWatermark: 2, subjectKind: 'goal-step', subjectRef: sharedRef,
+      version: 1, digest: digest('goal-step'), disposition: 'upsert',
+      situation: 'goal:goal-1:definition:1', outcome: 'failed', detail: 'goal replay',
+      evidenceRef: 'evaluation:goal-1', occurredAt: 1_000,
+    }).replayed).toBe(true)
+  })
+
+  test('migrates schema 13 task learning rows without losing state, revisions, or foreign keys', () => {
+    const path = databasePath('v13-goal-step-migration')
+    const target = new EvolutionStore({ path, now: () => 2_000 })
+    const digest = createHash('sha256').update('v13-projection').digest('hex')
+    const applied = target.applyTaskLearningProjection({
+      scopeKey: alphaScope, scopeWatermark: 1, subjectKind: 'automation-run', subjectRef: 'legacy-run',
+      version: 1, digest, disposition: 'upsert', situation: 'automation:legacy', outcome: 'failed',
+      detail: 'preserved migration fixture', evidenceRef: 'evaluation:legacy', occurredAt: 1_000,
+    })
+    target.close()
+    const legacy = new DatabaseSync(path)
+    legacy.exec(`
+      DROP INDEX evolution_task_learning_state_situation;
+      DROP INDEX evolution_task_learning_revisions_applied;
+      ALTER TABLE evolution_task_learning_state RENAME TO evolution_task_learning_state_v13_fixture;
+      ALTER TABLE evolution_task_learning_revisions RENAME TO evolution_task_learning_revisions_v13_fixture;
+      CREATE TABLE evolution_task_learning_state (
+        scope_key TEXT NOT NULL, scope_watermark INTEGER NOT NULL CHECK (scope_watermark >= 0),
+        subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'outcome')),
+        subject_ref TEXT NOT NULL, version INTEGER NOT NULL CHECK (version >= 1),
+        digest TEXT NOT NULL CHECK (length(digest) = 64), disposition TEXT NOT NULL CHECK (disposition IN ('upsert', 'retract')),
+        situation TEXT NOT NULL, episode_id TEXT, updated_at INTEGER NOT NULL,
+        PRIMARY KEY(scope_key, subject_kind, subject_ref),
+        CHECK ((disposition = 'upsert' AND episode_id IS NOT NULL) OR (disposition = 'retract' AND episode_id IS NULL)),
+        FOREIGN KEY(episode_id) REFERENCES evolution_episodes(id) ON DELETE RESTRICT
+      ) STRICT, WITHOUT ROWID;
+      CREATE TABLE evolution_task_learning_revisions (
+        scope_key TEXT NOT NULL, scope_watermark INTEGER NOT NULL CHECK (scope_watermark >= 0),
+        subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'outcome')),
+        subject_ref TEXT NOT NULL, version INTEGER NOT NULL CHECK (version >= 1),
+        digest TEXT NOT NULL CHECK (length(digest) = 64), disposition TEXT NOT NULL CHECK (disposition IN ('upsert', 'retract')),
+        situation TEXT NOT NULL, episode_id TEXT, applied_at INTEGER NOT NULL,
+        PRIMARY KEY(scope_key, subject_kind, subject_ref, version),
+        CHECK ((disposition = 'upsert' AND episode_id IS NOT NULL) OR (disposition = 'retract' AND episode_id IS NULL)),
+        FOREIGN KEY(episode_id) REFERENCES evolution_episodes(id) ON DELETE RESTRICT
+      ) STRICT, WITHOUT ROWID;
+      INSERT INTO evolution_task_learning_state SELECT * FROM evolution_task_learning_state_v13_fixture;
+      INSERT INTO evolution_task_learning_revisions SELECT * FROM evolution_task_learning_revisions_v13_fixture;
+      DROP TABLE evolution_task_learning_state_v13_fixture;
+      DROP TABLE evolution_task_learning_revisions_v13_fixture;
+      UPDATE schema_meta SET value = '13' WHERE key = 'schema-version';
+      PRAGMA user_version = 13;
+    `)
+    legacy.close()
+    const migrated = openEvolutionDatabase(path)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(14)
+    expect(migrated.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+    expect(migrated.prepare(`SELECT subject_kind, subject_ref, episode_id FROM evolution_task_learning_state`).all())
+      .toEqual([{ subject_kind: 'automation-run', subject_ref: 'legacy-run', episode_id: applied.episode!.id }])
+    expect(migrated.prepare(`SELECT subject_kind, subject_ref, version, digest FROM evolution_task_learning_revisions`).all())
+      .toEqual([{ subject_kind: 'automation-run', subject_ref: 'legacy-run', version: 1, digest }])
+    migrated.close()
   })
 })
 
@@ -447,8 +531,8 @@ describe('schema v4 migration through the v2 quarantine', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(13)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
+    expect(evolutionSchemaVersion).toBe(14)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(14)
     expect(migrated.prepare(`
       SELECT scope_key, trust, evidence_kind, evidence_ref, learning_eligible,
         rule_id, claimed_rule_id FROM evolution_episodes
@@ -542,8 +626,8 @@ describe('schema v6 immutable Evaluation identity migration', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(13)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
+    expect(evolutionSchemaVersion).toBe(14)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(14)
     expect(migrated.prepare(`
       SELECT id, evidence_kind, evidence_ref, learning_eligible
       FROM evolution_episodes ORDER BY id
@@ -637,8 +721,8 @@ describe('schema v7 Evaluation provenance migration', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(13)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
+    expect(evolutionSchemaVersion).toBe(14)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(14)
     expect(migrated.prepare(`
       SELECT id, evidence_kind, evidence_ref, learning_eligible
       FROM evolution_episodes WHERE id LIKE 'episode-v6%' ORDER BY id
@@ -735,7 +819,7 @@ describe('schema v8 learning-subject identity migration', () => {
     legacy.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(14)
     expect(migrated.prepare(`
       SELECT id, evidence_kind, evidence_ref, learning_subject_ref, learning_eligible
       FROM evolution_episodes ORDER BY id

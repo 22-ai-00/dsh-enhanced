@@ -88,7 +88,7 @@ export interface StoredOutcome extends OutcomeEnvelope {
 
 export interface EvaluationTaskProjection {
   /** Stable scope-bound task identity. Automation outcomes share the exact run reference. */
-  subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
+  subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
   subjectRef: string
   /** Conflicting trusted owner judgements are quarantined instead of resolved by arrival order. */
   status: 'ready' | 'objective-conflict'
@@ -171,7 +171,7 @@ export interface TrustedTaskLearningProjectionReceipt {
   execution?: Readonly<TrustedTaskExecutionComponent>
   objective?: Readonly<TrustedTaskObjectiveComponent>
   projection: Readonly<{
-    subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -183,7 +183,7 @@ export interface TrustedTaskLearningProjectionReceipt {
 
 /** Exact current task identity frozen into an Evolution evidence window. */
 export interface EvaluationLearningEvidenceTuple {
-  subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
+  subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
   subjectRef: string
   version: number
   digest: string

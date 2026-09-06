@@ -115,7 +115,8 @@
     "@dsh-enhanced/assistant-evolution": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "@dsh-enhanced/assistant-verifier": "workspace:*"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
