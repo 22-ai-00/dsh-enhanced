@@ -10,6 +10,7 @@ export type PolicyResourceKind =
   // resource, and can never be authorized by the evolution plugin itself.
   | 'evolution'
   | 'filesystem'
+  | 'goal'
   | 'memory'
   | 'message'
   | 'network'

@@ -58,3 +58,9 @@ plugins/<name>/
 `release:publish` 紧前会再次检查 tag、`origin/main` 和 tracked index/worktree；未跟踪构建产物不影响发布，但任何 staged/unstaged tracked 改动都会拒绝。发布成功后，`release:record` 复用同一套版本与包集合校验，只更新 `release-manifest.json`：提升 `current`、追加 `history` 并清空 `pending`。workflow 只提交这个账本文件，并在推送前再次确认 `origin/main` 没有从发布源码提交前进。按下述 immutable tag ruleset 部署后，tag 会稳定指向发布源码，而账本记录位于其后的独立提交；workflow 自身不创建也不移动 tag。
 
 这些远端复核只能缩小 TOCTOU 窗口，不能证明检查与 npm registry 写入之间具有原子性。仓库必须为 `v*` 配置 immutable tag ruleset（禁止删除和 force-update），发布期间冻结 `main` 合入，或让所有 main 写入者共享一个会实际阻塞写入的互斥机制；protected environment 的审批只能约束 job/secret 使用，不能单独锁定分支。递归 npm 发布也不是原子事务；暂时性失败应通过 Actions rerun，或用 `workflow_dispatch` 输入同一个现有 tag 重试，不能创建替代 tag 或改变 pending/source。整体发版统一推进版本，同时仍保留每个包作为独立 npm 安装、回滚和审计边界。
+
+## 持续目标上下文
+
+`assistant-goals` 是独立、可移除的业务 bundle。DSH `goals` 仍拥有原生状态、revision、轮次和 activation；本插件只在真实 Delivery owner 当前人类 turn 创建原生目标时绑定不可变 owner lineage，保存目标原文、原生状态投影与未验证的规划笔记。它不复制 AgentLoop、调度器或原生 goal 状态机。
+
+业务记录以原 SessionId + GoalId 确定身份，scope 包含 principal record/version、workspace 和 preset。当前会话的 focus 是业务数据库中的引用，可以读取同 owner 其他会话的上下文，不改变原生执行归属。卸载插件不留下无法被标准 Session reader 识别的自定义事件。原生 `complete` 显示为待验收，不能写入可信 achieved；后续目标编排须复用 Automations 的持久唤醒与 Verifier 的独立结果协议。

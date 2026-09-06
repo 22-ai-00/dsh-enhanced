@@ -23,7 +23,7 @@
 | 02 | P0 | Delivery 提供 owner 任务评价修订与撤回；Evaluation 保留历史且每任务只一票 | 同值重试幂等、旧消息重放不覆盖新修订、冲突/撤回传到所有成长消费者和已推广版本 | 已验证 |
 | 03 | P0/C | 不可变 TaskAcceptanceContract，独立代码、文档引用和目标系统回读 verifier；接入前台与 Automation AgentLoop 结果生产者 | 真实失败不能因为退出码或模型自评判成功；契约篡改、错 run、过期回执拒绝；unknown 触发验证下一步 | 已验证 |
 | 04 | P0/F | 固定任务集、留出集、基线 runner 和版本化结果记录；包含代码、研究、跨日、主动性、注入和撤销 | 同输入同模型同预算可重跑；记录成功率、成本、延迟、返工、多次分布和消融；留出不参与候选生成 | 实现中 |
-| 05 | P1/A | 业务目标编排 bundle：成功条件、期限、依赖、预算、授权、假设、阻塞、唤醒和证据；关联原生 goal/session/run | 跨会话与重启恢复，多步骤任务真实完成；过时假设重查，用户目标变化传播，无重复外部提交 | 待做 |
+| 05 | P1/A | 业务目标编排 bundle：成功条件、期限、依赖、预算、授权、假设、阻塞、唤醒和证据；关联原生 goal/session/run | 跨会话与重启恢复，多步骤任务真实完成；过时假设重查，用户目标变化传播，无重复外部提交 | 实现中 |
 | 06 | P1/A | 任务策略选择：直接执行、调查、实验、独立复核、候选比较和原生 subagent；route 结果归因 | 困难任务改变方法，工具故障与推理失败可区分；协调成本有记录；固定预算比较策略收益 | 待做 |
 | 07 | P1/B | Memory 根据当前 goal/step/query 召回；来源、适用条件、反例、失效和冲突；有预算的工具证据压缩 | 对照任务发现相关记忆并改善决策；当前任务变化重查；恢复保留原始引用，owner/scope 边界不泄漏 | 实现中 |
 | 08 | P2 | Policy 长期能力包与短期 lease：资源、动作、目的地、敏感度、期限、次数、费用、撤销；提交绑定 digest/前置版本/幂等键 | 正常预授权动作不用逐条审批；超范围、授权过期、撤销竞态、重放、重定向与数据外发被实际阻止 | 待做 |
@@ -85,3 +85,11 @@
 - 04 第二切片工程验证：修复独立复核发现的浅冻结、未核对 totalTokens、清理中途失败与 SQLite 错误脱敏问题。54 项 benchmark 测试、Evaluation 全包 97 项测试通过。最终 `CI=true pnpm check` 退出码 **0**（`/tmp/dsh-native-benchmark-check-v3.log`、`.exit`）：23 插件/3 共享库，零 lint 警告、类型检查、主测试 215 文件/3,092 通过（4 文件/82 跳过）、递归测试、构建及 dry-run pack 通过；检查确认命令 bin、corpus/native 子入口已打包，没有数据库、测试或本机适配器。v2 的 no-unsafe-finally lint 失败已修复，不算通过证据。清理与执行同时失败时优先报告资源清理失败并记为 unknown，不报告成功；该组合下不额外保留原始执行错误。
 - 04 真实模型首轮：复用用户现有 web 模型线路，通过本机可信桥接进入 `0.1.2-rc.1` 原生 AgentLoop。初次桥接方法名及新旧 LLM adapter API 不兼容导致 v1/v2 在网络 dispatch 前停止 unknown；保留原账本，修复后另建完整 v3 计划。v3 命令退出码 **0**，2 道公开开发题 × 2 persona × 2 重复，共 8 cell 全部取得完整观测，输入 2,084 / 输出 164 tokens，金额未知。两个方案各 achieved 2/4，配对增益为 0；研究计算题未满足完整验收，注入题通过。此结果只证明真实链路与首组小样本基线，不证明候选更聪明、完整任务集或生产 web 安装完成。脱敏计划/结果见 [首轮证据](evidence/benchmark-web-smoke-2026-09-06.json)。
 - 04 下一步：增加可诊断的独立验收证据、其余任务域、真实能力组合和消融，再做独立留出与真实场景验证；05–18 的完整要求保持不变。web 提供商使用其匹配的旧版运行时桥接，新版 Host 安装/交互集成仍在 17 验收，不能将复用模型线路表述成已完成 profile 升级。
+
+- 05 第一切片：新增独立 `assistant-goals` bundle，绑定当前真实 Delivery owner turn 新建的原生 goal，保存不可变原始目标、native revision/phase、下一步、阻塞、到期假设、证据引用和同 scope 无环依赖；SQLite CAS 和追加历史防止并发覆盖。focus 可以跨会话读取上下文，但不迁移、创建或重启原生 goal。SystemPrompt 每模型步骤重新核对 live Agent、owner lineage 与 Policy，过期假设标记 stale；原生 complete 仅记 awaiting-verification。
+- 05 范围：本切片不是完整业务目标编排。成功条件绑定独立验收、期限/预算/授权 lease、自动唤醒、原生 Session 执行恢复、多步骤推进、假设主动重查、目标修改对依赖传播和外部提交幂等仍待完成。全新 Web owner 配对入口与自治能力安装仍归 17；没有把复用 Web 模型线路当作完成 Web 产品安装。
+
+- 05 入口复核纠正：原生 `create_goal` 拒绝 Delivery 的 `delivery` 消息来源；因此新增 `goal_create`，用真实 owner 当前回合与 Policy create/observe 授权桥接原生 GoalService，不伪造 `user` 来源。验收须实际调用该工具，不能只凭 Host pre-step 直接创建来证明聊天入口可用。首次全仓检查 v1 的跨包测试 source 导入/rootDir 和缺少插件 config 参数已修复，失败运行不计作通过。
+- 05 首切片工程验收：18 项 Goals 测试、真实 Delivery 的工具创建/原生 direct-human 拒绝/重启恢复与 owner handoff 两项集成测试、Policy 明确授权回归均通过；存储与服务分别经独立只读复核通过。历史截断/当前投影不一致、错误 focus、非私有 WAL/SHM/目录被拒绝；合法原生 objective 编辑后可恢复。原生 complete 后创建新 GoalId 时，旧业务记录仍保留 awaiting-verification。
+- 05 最终根 `CI=true pnpm check` 退出码 **0**（`/tmp/dsh-goals-check-v2.log`、`.exit`）：24 插件/3 共享库，零 lint 警告、全包类型检查、主测试 218 文件/3,113 通过（4 文件/82 跳过）、递归测试、完整构建及全部 dry-run pack 通过。检查新增 bundle 清单含 lib、patch、README、LICENSE，不含测试/数据库。本批没有新增云模型调用；这些是工程与实际 Host 链路证据，不是智能收益或完整 Web 部署验收。
+- 下一步继续 05 的目标生命周期：Delivery owner 的原生 edit/pause/resume 等控制桥接、成功条件与独立验收绑定、期限/预算/授权，以及复用 Automations 的持久唤醒与原生 Session 续跑。04 的其余任务域/消融/独立留出和 17 的 Web 身份及一键安装仍保留。当前 18 个工作包为 3 项已验证、4 项实现中，其余待做；工作量不等，不能把该比例当作智能能力完成度。

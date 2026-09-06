@@ -53,6 +53,20 @@ describe('assistant policy Cordis service', () => {
     await ctx.fiber.restart()
   })
 
+  test('requires an explicit goal grant and keeps unrelated actions denied', async () => {
+    const ctx = new Context()
+    const service = new AssistantPolicyService(ctx, {
+      databasePath: await databasePath(),
+      rules: [{ id: 'inspect-goal', effect: 'allow', actions: ['inspect'], resource: { kind: 'goal', id: 'business-context' } }],
+    })
+    const goalRequest: PolicyRequest = { ...request, resource: { kind: 'goal', id: 'business-context' } }
+    expect(service.evaluate({ ...goalRequest, action: 'inspect' }).effect).toBe('allow')
+    expect(service.evaluate({ ...goalRequest, action: 'checkpoint' }).effect).toBe('deny')
+    expect(service.evaluate({ ...goalRequest, action: 'execute' }).effect).toBe('deny')
+    expect(service.evaluate({ ...goalRequest, action: 'inspect', resource: { kind: 'goal', id: 'other' } }).effect).toBe('deny')
+    await ctx.fiber.restart()
+  })
+
   test('rejects absent, null, and relative database configuration', async () => {
     for (const config of [undefined, null, { databasePath: 'relative.sqlite', rules: [] }]) {
       const ctx = new Context()

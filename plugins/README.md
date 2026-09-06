@@ -51,6 +51,8 @@
 
 | [assistant-verifier](assistant-verifier) | `@dsh-enhanced/assistant-verifier` | 实验性 | 事前冻结 AgentLoop 任务验收，独立核对结果并记录可信反馈修订。 |
 
+| [assistant-goals](assistant-goals) | `@dsh-enhanced/assistant-goals` | 实验性 | 按 owner 持久保存原生目标的上下文、下一步和阻塞；跨会话检索，完成状态等待独立验收。 |
+
 <!-- plugin-catalog:end -->
 
 状态建议使用“实验性 / Beta / 稳定 / 已弃用”。新增、重命名、弃用或移除插件时必须同步维护此表。

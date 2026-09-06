@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-enhanced-assistant-goals
+      name: '@dsh-enhanced/assistant-goals'
