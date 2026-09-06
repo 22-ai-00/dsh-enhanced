@@ -2,7 +2,22 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 16
+export const deliverySchemaVersion = 17
+
+const ownerObjectiveRevisionSchema = `
+  CREATE TABLE delivery_owner_objective_commands (
+    inbox_id TEXT PRIMARY KEY,
+    source_outbox_id TEXT NOT NULL,
+    principal_record_id TEXT NOT NULL,
+    principal_version INTEGER NOT NULL,
+    version INTEGER NOT NULL,
+    objective_status TEXT NOT NULL,
+    command_json TEXT NOT NULL,
+    result_json TEXT NOT NULL
+  ) STRICT;
+  CREATE INDEX delivery_owner_objective_current ON delivery_owner_objective_commands(source_outbox_id, version);
+`
+
 
 /**
  * A database-local, durable total order for every admitted Inbox. The trigger
@@ -595,6 +610,10 @@ function migrateObserved(database: DatabaseSync): void {
       `delivery schema ${version} is newer than supported schema ${deliverySchemaVersion}`,
     )
   }
+  if (version === 16) {
+    database.exec(`${ownerObjectiveRevisionSchema} PRAGMA user_version = 17;`)
+    version = 17
+  }
   if (version === deliverySchemaVersion) return
   if (version === 1) {
     database.exec(`
@@ -807,6 +826,10 @@ function migrateObserved(database: DatabaseSync): void {
     assertApprovalOutboxRouteSchema(database)
     version = 16
   }
+  if (version === 16) {
+    database.exec(`${ownerObjectiveRevisionSchema} PRAGMA user_version = 17;`)
+    version = 17
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1016,7 +1039,8 @@ function migrateObserved(database: DatabaseSync): void {
 
     ${inboxAdmissionSchema}
 
-    PRAGMA user_version = 16;
+    ${ownerObjectiveRevisionSchema}
+    PRAGMA user_version = 17;
   `)
 }
 

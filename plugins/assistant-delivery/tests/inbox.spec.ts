@@ -750,6 +750,7 @@ describe('durable inbox', () => {
       DROP TRIGGER dead_letter_outbox_resolution_fence;
       DROP TRIGGER dead_letter_outbox_cancelled_unknown_fence;
       DROP TABLE dead_letter_resolutions;
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 8;
     `)
     legacy.prepare(`

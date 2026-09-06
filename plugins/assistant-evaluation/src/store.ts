@@ -23,6 +23,8 @@ import type {
   EvaluationScope,
   ExecutionStatus,
   ObjectiveStatus,
+  OwnerObjectiveCommand,
+  OwnerObjectiveState,
   OutcomeEnvelope,
   OutcomeQuery,
   OutcomeSourceKind,
@@ -36,7 +38,7 @@ import type {
   TrustedTaskLearningProjectionReceipt,
 } from './types.js'
 
-export type EvaluationStoreErrorCode = 'idempotency-conflict' | 'invalid-input' | 'not-found'
+export type EvaluationStoreErrorCode = 'idempotency-conflict' | 'invalid-input' | 'not-found' | 'version-conflict'
 
 export class EvaluationStoreError extends Error {
   constructor(readonly code: EvaluationStoreErrorCode, message: string) {
@@ -538,15 +540,99 @@ export class EvaluationStore {
     return row === undefined ? undefined : stored(row)
   }
 
-  append(input: OutcomeEnvelope): StoredOutcome {
+  /** Adopt a pre-revision owner row only through the exact Host delivery capability. */
+  adoptLegacyOwnerFeedback(claims: Readonly<import('./types.js').TrustedDeliveryEvaluationClaims>): void {
+    if (claims.ownerCommand === undefined || claims.initialIdempotencyKey === undefined) return
+    const scopeKey = canonicalEvaluationScope(claims.scope).scopeKey
+    this.#database.exec('BEGIN IMMEDIATE')
+    try {
+      const row = this.#database.prepare(`SELECT * FROM evaluation_outcomes WHERE idempotency_key = ? AND scope_key = ?`)
+        .get(claims.initialIdempotencyKey, scopeKey) as unknown as OutcomeRow | undefined
+      if (row !== undefined && isAuthenticatedOwnerFeedback(row)) {
+        const evidence = JSON.parse(row.evidence_json) as EvaluationEvidenceRef[]
+        if (!evidence.some(ref => ref.kind === 'automation-run' && ref.ref === claims.runId)
+          || !evidence.some(ref => ref.kind === 'delivery-outbox' && ref.ref === claims.outboxId)) {
+          throw new EvaluationStoreError('invalid-input', 'legacy feedback does not match exact delivered result')
+        }
+        this.#database.prepare(`INSERT INTO evaluation_owner_revisions
+          (outcome_id, subject_key, lineage, version, previous_outcome_id, action, command_json)
+          VALUES (?, ?, ?, 1, NULL, 'initial', ?) ON CONFLICT DO NOTHING`)
+          .run(row.id, row.task_subject_key!, JSON.stringify([claims.ownerCommand.principalRecordId, claims.ownerCommand.principalVersion]), JSON.stringify({
+            ...claims.ownerCommand, action: 'legacy-adoption', outboxId: claims.outboxId,
+            runId: claims.runId, bindingId: claims.bindingId, principalId: claims.principalId,
+          }))
+      }
+      this.#database.exec('COMMIT')
+    } catch (error) { this.#database.exec('ROLLBACK'); throw error }
+  }
+
+  ownerObjectiveState(scope: EvaluationScope, runId: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined {
+    const subject = taskSubject(canonicalEvaluationScope(scope).scopeKey, '', [{ kind: 'automation-run', ref: runId }])
+    const row = this.#database.prepare(`
+      SELECT revision.version, outcome.objective_status
+      FROM evaluation_owner_revisions revision JOIN evaluation_outcomes outcome ON outcome.id = revision.outcome_id
+      WHERE revision.subject_key = ? AND revision.lineage = ? ORDER BY revision.version DESC LIMIT 1
+    `).get(subject.key, JSON.stringify([principalRecordId, principalVersion])) as { version: number; objective_status: ObjectiveStatus } | undefined
+    return row === undefined ? undefined : { version: row.version, objectiveStatus: row.objective_status }
+  }
+
+  private ownerCommandResult(outcome: StoredOutcome): StoredOutcome {
+    const row = this.#database.prepare(`SELECT version FROM evaluation_owner_revisions WHERE outcome_id = ?`)
+      .get(outcome.id) as { version: number } | undefined
+    return row === undefined ? outcome : { ...outcome, ownerFeedbackState: { version: row.version, objectiveStatus: outcome.objectiveStatus } }
+  }
+
+  append(input: OutcomeEnvelope, ownerCommand?: Readonly<OwnerObjectiveCommand>): StoredOutcome {
     const normalized = this.#normalize(input)
     const payloadHash = digest(normalized)
     const id = `outcome-${randomUUID()}`
     const subject = taskSubject(normalized.scopeKey, id, normalized.evidence)
     const recordedAt = timestamp(this.#now(), 'recordedAt')
     const metric = normalized.metrics
+    let committed = false
     this.#database.exec('BEGIN IMMEDIATE')
     try {
+      let previous: { outcome_id: string; version: number; objective_status: ObjectiveStatus } | undefined
+      const commandHash = digest({ input: normalized, ownerCommand: ownerCommand ?? null })
+      if (ownerCommand !== undefined) {
+        const replay = this.#database.prepare(`SELECT * FROM evaluation_owner_commands WHERE operation_id = ?`)
+          .get(ownerCommand.operationId) as { payload_hash: string; outcome_id: string | null; failure_code: string | null } | undefined
+        if (replay !== undefined) {
+          if (replay.payload_hash !== commandHash) throw new EvaluationStoreError('idempotency-conflict', 'owner command identity reused')
+          if (replay.failure_code !== null) throw new EvaluationStoreError(replay.failure_code === 'idempotency-conflict' ? 'idempotency-conflict' : 'version-conflict', 'owner judgement changed; inspect current feedback and retry')
+          const result = this.getOutcome(input.scope, replay.outcome_id!)!
+          this.#database.exec('COMMIT')
+          return this.ownerCommandResult(result)
+        }
+        previous = this.#database.prepare(`
+          SELECT revision.outcome_id, revision.version, outcome.objective_status
+          FROM evaluation_owner_revisions revision JOIN evaluation_outcomes outcome ON outcome.id = revision.outcome_id
+          WHERE revision.subject_key = ? AND revision.lineage = ? ORDER BY revision.version DESC LIMIT 1
+        `).get(subject.key, JSON.stringify([ownerCommand.principalRecordId, ownerCommand.principalVersion])) as typeof previous
+        if (ownerCommand.action !== 'initial' && (previous === undefined
+          || previous.version !== ownerCommand.expectedVersion || previous.objective_status !== ownerCommand.previousStatus)) {
+          this.#database.prepare(`INSERT INTO evaluation_owner_commands VALUES (?, ?, NULL, 'version-conflict')`)
+            .run(ownerCommand.operationId, commandHash)
+          this.#database.exec('COMMIT')
+          committed = true
+          throw new EvaluationStoreError('version-conflict', 'owner judgement changed; inspect current feedback and retry')
+        }
+        if (previous !== undefined && (ownerCommand.action === 'initial'
+          || previous.objective_status === normalized.objectiveStatus)) {
+          if (previous.objective_status !== normalized.objectiveStatus) {
+            this.#database.prepare(`INSERT INTO evaluation_owner_commands VALUES (?, ?, NULL, 'idempotency-conflict')`)
+              .run(ownerCommand.operationId, commandHash)
+            this.#database.exec('COMMIT')
+            committed = true
+            throw new EvaluationStoreError('idempotency-conflict', 'initial judgement already exists; use an explicit correction')
+          }
+          this.#database.prepare(`INSERT INTO evaluation_owner_commands VALUES (?, ?, ?, NULL)`)
+            .run(ownerCommand.operationId, commandHash, previous.outcome_id)
+          const result = this.getOutcome(input.scope, previous.outcome_id)!
+          this.#database.exec('COMMIT')
+          return this.ownerCommandResult(result)
+        }
+      }
       this.#database.prepare(`
         INSERT INTO evaluation_outcomes(
           id, idempotency_key, payload_hash, scope_key, workspace, preset, situation,
@@ -594,6 +680,13 @@ export class EvaluationStore {
         winnerSubject.ref,
         winner.recorded_at,
       )
+      if (ownerCommand !== undefined) {
+        this.#database.prepare(`INSERT INTO evaluation_owner_revisions VALUES (?, ?, ?, ?, ?, ?, ?)`)
+          .run(winner.id, winnerSubject.key, JSON.stringify([ownerCommand.principalRecordId, ownerCommand.principalVersion]), (previous?.version ?? 0) + 1,
+            previous?.outcome_id ?? null, ownerCommand.action, JSON.stringify(ownerCommand))
+        this.#database.prepare(`INSERT INTO evaluation_owner_commands VALUES (?, ?, ?, NULL)`)
+          .run(ownerCommand.operationId, commandHash, winner.id)
+      }
       const refreshed = this.#refreshTaskProjection(winnerSubject.key)
       if (winner.trust === 'trusted' && refreshed.learningVersionChanged) {
         this.#database.prepare(`
@@ -606,9 +699,9 @@ export class EvaluationStore {
         this.#advanceScopeWatermark(winner.scope_key, winner.recorded_at)
       }
       this.#database.exec('COMMIT')
-      return stored(winner)
+      return ownerCommand === undefined ? stored(winner) : this.ownerCommandResult(stored(winner))
     } catch (error) {
-      this.#database.exec('ROLLBACK')
+      if (!committed) this.#database.exec('ROLLBACK')
       throw error
     }
   }
@@ -1257,8 +1350,10 @@ export class EvaluationStore {
       const terminals = rows.filter(row => isAuthoritativeAutomationTerminal(row))
       execution = latest(terminals)
 
-      const owners = rows.filter(row => isAuthenticatedOwnerFeedback(row)
-        && row.objective_status !== 'unknown')
+      const superseded = new Set((this.#database.prepare(`
+        SELECT previous_outcome_id FROM evaluation_owner_revisions WHERE subject_key = ? AND previous_outcome_id IS NOT NULL
+      `).all(subjectKey) as { previous_outcome_id: string }[]).map(row => row.previous_outcome_id))
+      const owners = rows.filter(row => isAuthenticatedOwnerFeedback(row) && !superseded.has(row.id))
       const ownerStatuses = new Set(owners.map(row => row.objective_status))
       if (ownerStatuses.size > 1) objectiveConflicted = true
       else if (owners.length > 0) objective = latest(owners)

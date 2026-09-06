@@ -458,6 +458,7 @@ describe('stable owner route authority', () => {
       DROP TRIGGER IF EXISTS dead_letter_outbox_cancelled_unknown_fence;
       DROP INDEX IF EXISTS dead_letter_resolution_projection;
       DROP TABLE dead_letter_resolutions;
+      DROP TABLE IF EXISTS delivery_owner_objective_commands;
       PRAGMA user_version = 8;
     `)
     raw.close()

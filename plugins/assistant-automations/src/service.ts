@@ -441,6 +441,7 @@ export class AssistantAutomationsService extends Service implements
       }),
     ))
     this.coordinator = new AutomationCoordinator({
+      beforeDispatch: () => this.revalidatePromotedWorkflows(true),
       store: this.store,
       artifacts,
       runner,
@@ -472,8 +473,14 @@ export class AssistantAutomationsService extends Service implements
     ctx.inject(['assistantEvaluation'], evaluationCtx => {
       const evaluation = evaluationCtx.get('assistantEvaluation') as AssistantEvaluationService
       this.evaluation = evaluation
+      const unsubscribe = evaluation.onTrustedTaskChange?.(() => this.revalidatePromotedWorkflows())
+      this.revalidatePromotedWorkflows()
       return () => {
-        if (this.evaluation === evaluation) this.evaluation = undefined
+        unsubscribe?.()
+        if (this.evaluation === evaluation) {
+          this.evaluation = undefined
+          if (this.active) this.revalidatePromotedWorkflows()
+        }
       }
     })
     // Optional: when a learning plugin is composed, finished runs become evidence.
@@ -1223,6 +1230,75 @@ export class AssistantAutomationsService extends Service implements
     return current
   }
 
+  private readonly workflowInvalidationListeners = new Set<(experimentId: string, artifact: { id: string; version: number; digest: string }) => void>()
+
+  onWorkflowEvidenceInvalidated(listener: (experimentId: string, artifact: { id: string; version: number; digest: string }) => void): () => void {
+    this.workflowInvalidationListeners.add(listener)
+    for (const artifact of this.growthStore.listDeployedArtifacts()) {
+      const version = this.growthStore.rollbackVersion(artifact.experimentId)
+      if (artifact.state === 'rolled-back' && version !== undefined) listener(artifact.experimentId,
+        { id: artifact.artifactId, version, digest: artifact.definitionHash })
+    }
+    return () => { this.workflowInvalidationListeners.delete(listener) }
+  }
+
+  /** Revalidate deployed proof before scheduling, on authoritative writes, and after restart. */
+  private revalidatePromotedWorkflows(strict = false): void {
+    let unsafe = false
+    for (let artifact of this.growthStore.listDeployedArtifacts()) {
+      try {
+        if (artifact.state === 'rolled-back') {
+          const version = this.growthStore.rollbackVersion(artifact.experimentId)
+          if (version !== undefined) for (const listener of this.workflowInvalidationListeners) listener(artifact.experimentId,
+            { id: artifact.artifactId, version, digest: artifact.definitionHash })
+          continue
+        }
+        if (artifact.state === 'canary-pending') {
+          const live = this.store.get(artifact.automationId)
+          if (live?.status !== 'active' || live.version !== artifact.definitionVersion + 1
+            || live.owner !== GROWTH_AUTOMATION_OWNER || this.store.getDefinitionHash(live.id) !== artifact.definitionHash) continue
+          if (this.currentCanaryProof(artifact) !== undefined) continue
+          // Recover activation whose acknowledgement was lost before examining its proof.
+          const recoveredRequest: GrowthAutomationArtifactRequest = {
+            contractVersion: 1, operationId: `${artifact.experimentId}:promotion`,
+            experimentId: artifact.experimentId, candidateId: artifact.candidateId,
+            candidateRevision: artifact.candidateRevision, candidateDigest: artifact.candidateDigest,
+            artifactId: artifact.artifactId, artifactVersion: artifact.definitionVersion, artifactDigest: artifact.definitionHash,
+          }
+          artifact = this.growthStore.completePromotion({ automation: live, request: recoveredRequest,
+            receipt: withGrowthPortReceiptDigest({ ...growthIdentity(recoveredRequest),
+              artifactId: artifact.artifactId, artifactVersion: artifact.definitionVersion,
+              artifactDigest: artifact.definitionHash, outcome: 'promoted' as const,
+              resultingArtifactVersion: live.version, resultingArtifactDigest: artifact.definitionHash,
+            }),
+          })
+        }
+        if (artifact.state !== 'promoted') continue
+        // Deployed artifacts require current exact-run success, while a newer
+        // positive owner judgement may strengthen an already successful proof.
+        if (this.currentCanaryProof(artifact) !== undefined) continue
+        this.rollbackWorkflowAutomation({
+          contractVersion: 1, operationId: `${artifact.experimentId}:rollback`,
+          experimentId: artifact.experimentId, candidateId: artifact.candidateId,
+          candidateRevision: artifact.candidateRevision, candidateDigest: artifact.candidateDigest,
+          artifactId: artifact.artifactId, artifactVersion: artifact.definitionVersion,
+          artifactDigest: artifact.definitionHash,
+        })
+        for (const listener of this.workflowInvalidationListeners) listener(artifact.experimentId,
+          { id: artifact.artifactId, version: artifact.definitionVersion, digest: artifact.definitionHash })
+      } catch {
+        // Keep the durable artifact / pending rollback for retry. A different
+        // deployed definition is unrelated and must not be paused or block it.
+        const live = this.store.get(artifact.automationId)
+        if (live?.status === 'active' && live.owner === GROWTH_AUTOMATION_OWNER
+          && this.store.getDefinitionHash(live.id) === artifact.definitionHash
+          && (live.version === artifact.definitionVersion
+            || (artifact.state === 'canary-pending' && live.version === artifact.definitionVersion + 1))) unsafe = true
+      }
+    }
+    if (strict && unsafe) throw new AssistantAutomationsError('runtime-conflict', 'exact deployed canary rollback must finish before dispatch')
+  }
+
   promoteWorkflowAutomation(inputValue: Readonly<GrowthAutomationArtifactRequest>): GrowthPromotionReceipt {
     this.assertActive()
     const input = validateGrowthAutomationArtifactRequest(inputValue)
@@ -1255,16 +1331,16 @@ export class AssistantAutomationsService extends Service implements
             desiredStatus: 'active',
             definition: definition.definition,
           })
-      const stored = this.growthStore.completePromotion({ request: input, automation: promoted })
       const receipt = withGrowthPortReceiptDigest({
         ...growthIdentity(input),
         artifactId: input.artifactId,
         artifactVersion: input.artifactVersion,
         artifactDigest: input.artifactDigest,
         outcome: 'promoted' as const,
-        resultingArtifactVersion: stored.definitionVersion,
-        resultingArtifactDigest: stored.definitionHash,
+        resultingArtifactVersion: promoted.version,
+        resultingArtifactDigest: input.artifactDigest,
       })
+      this.growthStore.completePromotion({ request: input, automation: promoted, receipt })
       return validateGrowthPromotionReceipt(
         this.growthStore.completeOperation('promotion', input, receipt), input,
       )
@@ -1300,7 +1376,6 @@ export class AssistantAutomationsService extends Service implements
       })
       automation = this.store.get(automation.id)!
     }
-    this.growthStore.completeRollback({ request: input, automation })
     const receipt = withGrowthPortReceiptDigest({
       ...growthIdentity(input),
       artifactId: input.artifactId,
@@ -1308,6 +1383,7 @@ export class AssistantAutomationsService extends Service implements
       artifactDigest: input.artifactDigest,
       outcome: 'rolled-back' as const,
     })
+    this.growthStore.completeRollback({ request: input, automation, receipt })
     return validateGrowthRollbackReceipt(
       this.growthStore.completeOperation('rollback', input, receipt), input,
     )

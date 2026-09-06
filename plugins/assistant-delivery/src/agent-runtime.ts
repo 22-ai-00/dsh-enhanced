@@ -46,7 +46,8 @@ import {
   feedbackUsage,
   parseFeedbackCommand,
 } from './feedback-command.js'
-import type { FeedbackSignalSelection, ObjectiveFeedbackStatus } from './feedback-command.js'
+import type { FeedbackSignalSelection, ObjectiveCommand, ObjectiveCommandResult } from './feedback-command.js'
+import { objectiveStateMessage } from './feedback-command.js'
 import type { InboundImageMaterializer } from './inbound-images.js'
 import {
   learningCommandUsage,
@@ -149,8 +150,8 @@ interface DshDeliveryRuntimeOptions {
   dispatchObjectiveFeedback(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
-    objectiveStatus: ObjectiveFeedbackStatus,
-  ): Promise<'conflict' | 'invalid-target' | 'recorded' | 'unavailable' | 'unknown'>
+    objectiveStatus: ObjectiveCommand | import('./feedback-command.js').ObjectiveFeedbackStatus,
+  ): Promise<ObjectiveCommandResult>
   dispatchWorkflowCommand(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
@@ -2279,13 +2280,17 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     markDispatching()
     signal.throwIfAborted()
 
-    if (parsed.kind === 'objective') {
+    if (parsed.kind === 'objective' || parsed.kind === 'objective-revision' || parsed.kind === 'objective-status') {
       const objective = await this.options.dispatchObjectiveFeedback(
         binding,
         envelope,
-        parsed.objectiveStatus,
+        parsed.kind === 'objective' ? parsed.objectiveStatus : parsed,
       )
       signal.throwIfAborted()
+      if (typeof objective === 'object') {
+        this.options.replyCommand(binding, envelope.eventId, { text: (parsed.kind === 'objective-status' ? '' : `已把该次任务结果记录为 ${objective.objectiveStatus}；同一次任务只计一票。\n`) + objectiveStateMessage(objective), format: 'plain' })
+        return { outcome: 'processed' }
+      }
       if (objective === 'unknown') {
         return {
           outcome: 'not-processed',
@@ -2309,13 +2314,13 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       if (objective === 'conflict') {
         this.options.replyCommand(binding, envelope.eventId, {
-          text: '该次任务已经记录了不同的任务结果；为避免重复计票，本次未覆盖原记录。',
+          text: '该次任务已经记录了不同的任务结果或反馈版本已变化，本次未覆盖。请回复原任务结果发送 /feedback status，使用当前版本更正或撤回。',
           format: 'plain',
         })
         return { outcome: 'processed' }
       }
       this.options.replyCommand(binding, envelope.eventId, {
-        text: `已把该次任务结果记录为 ${parsed.objectiveStatus}；同一次任务只计一票。`,
+        text: parsed.kind === 'objective-status' ? '尚未记录任务反馈，请回复原任务结果发送 /feedback achieved、partial 或 not-achieved。' : `已把该次任务结果记录为 ${parsed.objectiveStatus}；同一次任务只计一票。回复原结果发送 /feedback status 可更正或撤回。`,
         format: 'plain',
       })
       return { outcome: 'processed' }

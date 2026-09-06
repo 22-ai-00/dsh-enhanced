@@ -504,7 +504,7 @@ export class GrowthExperimentsStore {
         'canary-pending': ['conflicted', 'canary-pending', 'promotion-pending', 'rollback-pending'],
         'promotion-pending': ['conflicted', 'promoted', 'rollback-pending'],
         'rollback-pending': ['rolled-back'],
-        conflicted: [], expired: [], promoted: [], rejected: [], 'rolled-back': [],
+        conflicted: [], expired: [], promoted: ['rollback-pending'], rejected: [], 'rolled-back': [],
       }
       if (!allowedTransitions[row.state].includes(input.state)) {
         throw new GrowthExperimentsStoreError('version-conflict', 'growth experiment transition is forbidden')
@@ -638,7 +638,7 @@ export class GrowthExperimentsStore {
     if (current.version !== input.expectedVersion) {
       throw new GrowthExperimentsStoreError('version-conflict', 'growth experiment state changed')
     }
-    if (terminalExperimentStates.has(current.state) || current.state === 'rollback-pending') return current
+    if ((terminalExperimentStates.has(current.state) && current.state !== 'promoted') || current.state === 'rollback-pending') return current
     if (current.artifactId === undefined && current.state === 'approval-requesting') {
       return this.transitionExperiment({
         experimentId: current.id, expectedVersion: current.version, expectedState: current.state,

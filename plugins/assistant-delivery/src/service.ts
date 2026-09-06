@@ -58,6 +58,7 @@ import { isExactDeliveryCommand, parseDeliveryCommand } from './session-commands
 import { deliveryT1PreferenceKeys, deliveryT1PreferenceValues } from './learning-command.js'
 import {
   feedbackSignalInput,
+  parseFeedbackCommand,
   classifyNaturalPreferenceDirective,
   observedResponseLanguage,
   type FeedbackSignalSelection,
@@ -2683,8 +2684,10 @@ export class AssistantDeliveryService extends Service {
   private async dispatchObjectiveFeedback(
     binding: Readonly<ConversationBinding>,
     envelope: Readonly<InboundEnvelope>,
-    objectiveStatus: import('./feedback-command.js').ObjectiveFeedbackStatus,
-  ): Promise<'conflict' | 'invalid-target' | 'recorded' | 'unavailable' | 'unknown'> {
+    command: import('./feedback-command.js').ObjectiveCommand | import('./feedback-command.js').ObjectiveFeedbackStatus,
+  ): Promise<import('./feedback-command.js').ObjectiveCommandResult> {
+    const parsed = typeof command === 'string' ? { kind: 'objective' as const, objectiveStatus: command } : command
+    const objectiveStatus = parsed.kind === 'objective-status' ? 'achieved' : parsed.objectiveStatus
     const replyTarget = envelope.metadata?.replyToProviderMessageId
     if (typeof replyTarget !== 'string') return 'invalid-target'
     if (!this.isOwnerFeedbackController(binding, envelope)) return 'invalid-target'
@@ -2697,6 +2700,9 @@ export class AssistantDeliveryService extends Service {
       || JSON.stringify(target.intent.target.principal) !== JSON.stringify(binding.principal)) {
       return 'invalid-target'
     }
+    const hostCommand = parseDeliveryCommand(inbox.envelope)
+    if (hostCommand?.name !== 'feedback' || (inbox.envelope.attachments?.length ?? 0) !== 0
+      || JSON.stringify(parseFeedbackCommand(hostCommand.rawInput)) !== JSON.stringify(parsed)) return 'invalid-target'
     const metadata = target.intent.metadata
     // Ordinary Agent replies have no learning metadata.  They are eligible
     // only for Delivery's local, atomic verified-workflow receipt; the Store
@@ -2713,16 +2719,18 @@ export class AssistantDeliveryService extends Service {
         sourceEventId,
       )
       if (sourceInbox === undefined) return 'invalid-target'
+      if (parsed.kind === 'objective-status') return this.deliveryStore.verifiedWorkflowObjectiveState(target.id, this.ownerLineageForBinding(binding)) ?? 'recorded'
       try {
-        const recorded = this.deliveryStore.commitVerifiedWorkflowTraceFeedback({
+        const result = this.deliveryStore.commitVerifiedWorkflowTraceFeedback({
           binding,
           feedbackInboxId: inbox.id,
           sourceInboxId: sourceInbox.id,
           sourceOutboxId: target.id,
           objectiveStatus,
+          ...(parsed.kind === 'objective-revision' ? { command: parsed } : {}),
         })
-        if (recorded.outcome === 'trace-recorded') void this.drainWorkflowTraces()
-        return 'recorded'
+        await this.drainWorkflowTraces()
+        return result.ownerFeedbackState ?? 'recorded'
       } catch (error) {
         if (error instanceof DeliveryStoreError) {
           if (error.code === 'idempotency-conflict' || error.code === 'version-conflict') {
@@ -2779,6 +2787,8 @@ export class AssistantDeliveryService extends Service {
       || proof.proofDigest !== proofDigest) return 'invalid-target'
     const sink = this.evaluationSink
     if (sink === undefined) return 'unavailable'
+    if (parsed.kind !== 'objective' && (sink.registration.ownerRevisionProtocol !== 'owner-objective-revision/v1'
+      || typeof sink.registration.inspect !== 'function')) return 'unavailable'
     // One immutable Automation run is one learning subject. The objective
     // status and Inbox event deliberately do not enter the key: replays and
     // repeated equal judgements collapse, while an opposite judgement becomes
@@ -2786,21 +2796,30 @@ export class AssistantDeliveryService extends Service {
     const digest = createHash('sha256').update('assistant-delivery-objective-feedback-v2\0')
       .update(JSON.stringify([binding.workspace, binding.agentPreset, target.id, runId]))
       .digest('hex')
+    const lineage = this.ownerLineageForBinding(binding)
+    if (lineage === undefined) return 'invalid-target'
+    const operationId = `owner-feedback:${createHash('sha256').update(JSON.stringify([inbox.id, inbox.envelopeHash])).digest('hex')}`
     const claims: TrustedDeliveryEvaluationClaims = Object.freeze({
       scope: Object.freeze({ workspace: binding.workspace, preset: binding.agentPreset }),
       situation,
       objectiveStatus,
+      ownerCommand: { ...lineage, operationId,
+        action: parsed.kind === 'objective-revision' ? parsed.action : 'initial' as const,
+        ...(parsed.kind === 'objective-revision' ? { expectedVersion: parsed.expectedVersion, previousStatus: parsed.previousStatus } : {}),
+      },
       runId,
       outboxId: target.id,
       chatId: binding.conversation.chat,
       principalId: externalPrincipalId(binding.principal),
       bindingId: binding.id,
       occurredAt,
-      idempotencyKey: `assistant-delivery:objective-feedback-v2:${digest}`,
+      initialIdempotencyKey: `assistant-delivery:objective-feedback-v2:${digest}`,
+      idempotencyKey: parsed.kind === 'objective-revision' ? operationId : `assistant-delivery:objective-feedback-v2:${digest}`,
     })
     try {
       const capabilityReceipt = sink.registration.issueCapability(claims)
       if (this.evaluationSink?.token !== sink.token) return 'unknown'
+      if (parsed.kind === 'objective-status') return sink.registration.inspect?.(capabilityReceipt) ?? 'recorded'
       const receipt = await Promise.resolve(sink.registration.append({
         capabilityReceipt,
         runId,
@@ -2811,13 +2830,13 @@ export class AssistantDeliveryService extends Service {
         idempotencyKey: claims.idempotencyKey,
       }))
       if (typeof receipt !== 'object' || receipt === null
-        || (receipt as Partial<{ idempotencyKey: string }>).idempotencyKey !== claims.idempotencyKey) {
+        || typeof (receipt as Partial<{ idempotencyKey: string }>).idempotencyKey !== 'string') {
         return 'unknown'
       }
-      return 'recorded'
+      return receipt.ownerFeedbackState ?? 'recorded'
     } catch (error) {
       if (typeof error === 'object' && error !== null && 'code' in error
-        && (error as { code?: unknown }).code === 'idempotency-conflict') return 'conflict'
+        && ['idempotency-conflict', 'version-conflict'].includes(String((error as { code?: unknown }).code))) return 'conflict'
       return 'unknown'
     }
   }

@@ -10,7 +10,7 @@ import {
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evaluationSchemaVersion = 7
+export const evaluationSchemaVersion = 8
 
 export type EvaluationDatabaseErrorCode = 'invalid-path' | 'unsafe-file' | 'schema-too-new'
 
@@ -490,6 +490,28 @@ function migrate(database: DatabaseSync): void {
 
         UPDATE evaluation_schema_meta SET value = '7' WHERE key = 'schema-version';
         PRAGMA user_version = 7;
+      `)
+    }
+    if (schemaVersion(database) === 7) {
+      database.exec(`
+        CREATE TABLE evaluation_owner_revisions (
+          outcome_id TEXT PRIMARY KEY REFERENCES evaluation_outcomes(id),
+          subject_key TEXT NOT NULL,
+          lineage TEXT NOT NULL,
+          version INTEGER NOT NULL,
+          previous_outcome_id TEXT,
+          action TEXT NOT NULL,
+          command_json TEXT NOT NULL,
+          UNIQUE(subject_key, lineage, version)
+        ) STRICT;
+        CREATE TABLE evaluation_owner_commands (
+          operation_id TEXT PRIMARY KEY,
+          payload_hash TEXT NOT NULL,
+          outcome_id TEXT REFERENCES evaluation_outcomes(id),
+          failure_code TEXT
+        ) STRICT;
+        UPDATE evaluation_schema_meta SET value = '8' WHERE key = 'schema-version';
+        PRAGMA user_version = 8;
       `)
     }
     if (schemaVersion(database) !== evaluationSchemaVersion) {

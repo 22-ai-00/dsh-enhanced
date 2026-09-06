@@ -823,14 +823,23 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     const registration: TrustedDeliveryEvaluationRegistration = Object.freeze({
       protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
       producer: 'assistant-delivery' as const,
+      ownerRevisionProtocol: 'owner-objective-revision/v1' as const,
       generation,
       owner: this,
       issueCapability: (claims: TrustedDeliveryEvaluationClaims): unknown => {
         this.assertCurrentProducer(producer, generation, registered, 'delivery')
         const normalized = this.deliveryClaims(claims)
+        this.store.adoptLegacyOwnerFeedback(normalized)
         const capability = Object.freeze(Object.create(null) as object)
         capabilities.set(capability, normalized)
         return capability
+      },
+      inspect: (capabilityReceipt: unknown) => {
+        this.assertCurrentProducer(producer, generation, registered, 'delivery')
+        if (typeof capabilityReceipt !== 'object' || capabilityReceipt === null) throw new AssistantEvaluationError('forbidden', 'invalid owner capability')
+        const claims = capabilities.get(capabilityReceipt)
+        if (claims?.ownerCommand === undefined) throw new AssistantEvaluationError('forbidden', 'missing owner lineage')
+        return this.store.ownerObjectiveState(claims.scope, claims.runId, claims.ownerCommand.principalRecordId, claims.ownerCommand.principalVersion)
       },
       append: (input: TrustedDeliveryEvaluationAppendInput): StoredOutcome => {
         this.assertCurrentProducer(producer, generation, registered, 'delivery')
@@ -866,7 +875,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
           occurredAt: claims.occurredAt,
           idempotencyKey: claims.idempotencyKey,
           evaluator: { id: 'assistant-delivery-owner-feedback', version: '2' },
-        })
+        }, claims.ownerCommand)
       },
     })
     this.activeDeliveryRegistrations.add(registration)
@@ -966,11 +975,26 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
   ): Readonly<TrustedDeliveryEvaluationClaims> {
     if (typeof input !== 'object' || input === null || Array.isArray(input)
       || (input.objectiveStatus !== 'achieved' && input.objectiveStatus !== 'partial'
-        && input.objectiveStatus !== 'not-achieved')
+        && input.objectiveStatus !== 'not-achieved'
+        && !(input.objectiveStatus === 'unknown' && input.ownerCommand?.action === 'withdraw'))
       || !Number.isSafeInteger(input.occurredAt) || input.occurredAt < 0) {
       throw new AssistantEvaluationError('forbidden', 'delivery Evaluation claims are invalid')
     }
+    const command = input.ownerCommand
+    if (command !== undefined && ((command.action === 'withdraw') !== (input.objectiveStatus === 'unknown')
+      || (command.action === 'initial' && (command.expectedVersion !== undefined || command.previousStatus !== undefined))
+      || !['initial', 'correct', 'withdraw'].includes(command.action)
+      || !Number.isSafeInteger(command.principalVersion) || command.principalVersion < 1
+      || (command.action !== 'initial' && (!Number.isSafeInteger(command.expectedVersion)
+        || command.expectedVersion! < 1 || !['achieved', 'partial', 'not-achieved', 'unknown'].includes(command.previousStatus!))))) {
+      throw new AssistantEvaluationError('forbidden', 'owner revision precondition is invalid')
+    }
     return Object.freeze({
+      ...(input.initialIdempotencyKey === undefined ? {} : { initialIdempotencyKey: hostIdentifier(input.initialIdempotencyKey, 'initial feedback key', 200) }),
+      ...(command === undefined ? {} : { ownerCommand: Object.freeze({ ...command,
+        operationId: hostIdentifier(command.operationId, 'owner operation', 200),
+        principalRecordId: hostIdentifier(command.principalRecordId, 'owner lineage', 1000),
+      }) }),
       scope: Object.freeze({ ...canonicalEvaluationScope(input.scope).scope }),
       situation: hostIdentifier(input.situation, 'situation', this.config.maxSituationBytes),
       runId: hostIdentifier(input.runId, 'runId', 1_000),
@@ -984,8 +1008,19 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     })
   }
 
-  private appendTrusted(input: OutcomeEnvelope): StoredOutcome {
-    const outcome = this.store.append(input)
+  private readonly taskChangeListeners = new Set<() => void>()
+
+  /** Host lifecycle subscription; consumers must re-read canonical proof and recover on startup. */
+  onTrustedTaskChange(listener: () => void): () => void {
+    this.taskChangeListeners.add(listener)
+    return () => { this.taskChangeListeners.delete(listener) }
+  }
+
+  private appendTrusted(input: OutcomeEnvelope, command?: Readonly<import('./types.js').OwnerObjectiveCommand>): StoredOutcome {
+    const outcome = this.store.append(input, command)
+    for (const listener of this.taskChangeListeners) {
+      try { listener() } catch { /* Consumer startup / dispatch revalidation retries durable evidence. */ }
+    }
     void this.reconcileProjections({ limit: 1 }).catch(() => {})
     return outcome
   }

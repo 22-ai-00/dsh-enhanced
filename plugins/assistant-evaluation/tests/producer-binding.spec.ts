@@ -319,3 +319,28 @@ describe('trusted producer binding lifecycle', () => {
     expect(service.ownsTrustedDeliveryEvaluationRegistration(nextDeliveryRegistration)).toBe(false)
   })
 })
+
+test('trusted Delivery capability rejects inconsistent revision tags and forged append identities', () => {
+  const ctx = new Context(); contexts.push(ctx)
+  let sink: Readonly<TrustedDeliveryEvaluationRegistration> | undefined
+  ctx.provide('assistantDelivery' as never, {
+    trustedEvaluationProducerGeneration: () => 'revision-boundary',
+    registerTrustedDeliveryEvaluationSink(registration: Readonly<TrustedDeliveryEvaluationRegistration>) {
+      sink = registration
+      return () => { sink = undefined }
+    },
+  } as never)
+  new AssistantEvaluationService(ctx, { databasePath: ':memory:' })
+  const claims = deliveryClaims('revision-boundary')
+  const lineage = { principalRecordId: 'record', principalVersion: 1, operationId: 'op' }
+  for (const ownerCommand of [
+    { ...lineage, action: 'withdraw' as const, expectedVersion: 1, previousStatus: 'achieved' as const },
+    { ...lineage, action: 'initial' as const, expectedVersion: 1, previousStatus: 'achieved' as const },
+  ]) expect(() => sink!.issueCapability({ ...claims, ownerCommand })).toThrow(/claims|precondition/)
+  expect(() => sink!.issueCapability({ ...claims, objectiveStatus: 'unknown', ownerCommand: {
+    ...lineage, action: 'correct', expectedVersion: 1, previousStatus: 'achieved',
+  } })).toThrow(/claims/)
+  const capabilityReceipt = sink!.issueCapability({ ...claims, ownerCommand: { ...lineage, action: 'initial' } })
+  expect(() => sink!.append({ capabilityReceipt, runId: claims.runId, outboxId: claims.outboxId,
+    chatId: claims.chatId, bindingId: claims.bindingId, principalId: 'forged', idempotencyKey: claims.idempotencyKey })).toThrow(/identity changed/)
+})

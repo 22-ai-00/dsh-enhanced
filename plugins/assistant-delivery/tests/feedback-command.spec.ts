@@ -215,3 +215,12 @@ describe('Delivery feedback command grammar', () => {
     }).idempotencyKey).not.toBe(event.idempotencyKey)
   })
 })
+
+ test('owner objective correction grammar requires exact positive CAS version and closed labels', () => {
+  expect(parseFeedbackCommand('status')).toEqual({ kind: 'objective-status' })
+  expect(parseFeedbackCommand('correct 2 partial achieved')).toEqual({ kind: 'objective-revision', action: 'correct', expectedVersion: 2, previousStatus: 'partial', objectiveStatus: 'achieved' })
+  expect(parseFeedbackCommand('withdraw 3 achieved')).toEqual({ kind: 'objective-revision', action: 'withdraw', expectedVersion: 3, previousStatus: 'achieved', objectiveStatus: 'unknown' })
+  for (const input of ['correct achieved', 'correct 0 achieved partial', 'correct 01 achieved partial', 'correct 2 arbitrary achieved', 'correct 2 achieved unknown', 'withdraw 2 achieved extra', 'correct 99999999999999999 achieved partial']) {
+    expect(parseFeedbackCommand(input)).toEqual({ kind: 'invalid' })
+  }
+})

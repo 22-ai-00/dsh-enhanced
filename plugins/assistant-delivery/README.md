@@ -193,6 +193,9 @@ Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正�
 ```text
 /feedback helpful|not-helpful|too-long|too-short|wrong-format|wrong-action|unwanted-reminder
 /feedback achieved|partial|not-achieved
+/feedback status
+/feedback correct <version> <previous-status> <achieved|partial|not-achieved>
+/feedback withdraw <version> <previous-status>
 /feedback verbosity concise|balanced|detailed
 /feedback structure prose|bullets|mixed
 /feedback language zh-CN|en
@@ -207,6 +210,10 @@ Automation 成功结果的直接回复；Automation 结果只能通过 Host-only
 这条路径：Delivery 会重新核对 immutable run、workspace、binding 与输出 digest，并自行生成保留的
 `dsh.learning.*` 证据；普通 `enqueueBackground(...)` 不能提交这些保留 metadata。同一 immutable run
 的相同目标状态幂等重放为同一 Evaluation outcome，之后提交相反状态会报告冲突，不会形成第二票。
+
+更正和撤回也必须直接回复同一条任务结果。`/feedback status` 返回当前状态、版本和可复制的命令；例如先有 `achieved` v1，可发送 `/feedback correct 1 achieved partial`，再发送 `/feedback withdraw 2 partial`。撤回后状态为 `unknown`，不会退回较早的 terminal/evaluator 成功标签；可通过 `/feedback correct 3 unknown achieved` 明确恢复。旧的三种单词命令仍仅表示初次判断，不能覆盖当前状态。
+
+Host 从持久 Inbox、exact Outbox 和已认证 owner 的 record id/version 生成命令身份。每次接受的变化保留 append-only audit、前置版本/状态与投影 outbox；同值不加票，provider 重投返回原结果，已拒绝的乱序命令不会在稍后变成成功。冲突时应重新发送 `/feedback status` 并使用新命令。升级前的 Automation 判断可由同一 exact delivery 的 Host capability 惰性认领为 v1，不修改历史原始 outcome。
 
 普通 Agent 回复另有一条更窄的本地 workflow 证据路径：active owner 必须精确回复该条已持久、已投递的 reply，且原始入站正文必须逐字命中已审查的闭集静态 catalog。只有 `achieved` 与该 catalog 同时成立，Delivery 才原子记录 content-free `verified-repetition` trace，并把静态模板保留在私有 registry；正文、模型输出和 owner 自由文本不会投影到 Growth。`partial`、`not-achieved`、未命中 catalog、preview、失败运行、旧 schema、手写 background intent 或不能由 durable Inbox/Outbox route 重新证明的目标只留下不可改写的本地 `no-trace` 回执，绝不宣称任务成功或形成学习样本。
 
@@ -332,3 +339,7 @@ pnpm --dir plugins/assistant-delivery pack --dry-run
 ```
 
 兼容性基线见 [docs/compatibility.md](../../docs/compatibility.md)。
+
+更正/撤回/状态入口要求 Evaluation 注册 `owner-objective-revision/v1` capability；旧 Evaluation 仅能处理原始初次判断，修订命令明确返回服务不可用，不能退化为独立评价票。
+
+旧 foreground receipt 未保存 principal version：仅当前仍为同一 record 的初始 v1 身份可修订；身份已更新时保守拒绝继承旧判断修订权。新记录完整保存 record+version。
