@@ -801,6 +801,24 @@ export class EvaluationStore {
     return row === undefined ? undefined : projected(row)
   }
 
+  /** Exact run lookup without an audit query limit or a second success definition. */
+  getAutomationRunLearningProjection(
+    scopeInput: EvaluationScope,
+    runIdInput: string,
+  ): TrustedTaskLearningProjectionReceipt | undefined {
+    const { scopeKey } = canonicalEvaluationScope(scopeInput)
+    const runId = boundedText(runIdInput, 'runId', 200)
+    const row = this.#database.prepare(`
+      SELECT task.* FROM evaluation_task_projection_view task
+      WHERE task.scope_key = ? AND task.task_subject_kind = 'automation-run'
+        AND task.task_subject_ref = ?
+    `).get(scopeKey, runId) as unknown as ProjectedOutcomeRow | undefined
+    if (row === undefined) return undefined
+    const task = projected(row)
+    if (task.projection.status !== 'ready') return undefined
+    return this.getTaskLearningProjection(scopeInput, task.projection.primaryOutcomeId)
+  }
+
   /**
    * Resolve an append-only outbox trigger to the latest canonical state of its
    * task. The trigger may be arbitrarily old; version/digest always describe

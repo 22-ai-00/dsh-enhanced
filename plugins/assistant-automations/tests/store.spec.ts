@@ -48,7 +48,7 @@ describe('automation SQLite store', () => {
     expect((await stat(join(fixture.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(fixture.path)).mode & 0o777).toBe(0o600)
     const database = new DatabaseSync(fixture.path, { readOnly: true })
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 11 })
     expect(database.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all())
       .toEqual(expect.arrayContaining([
@@ -108,7 +108,7 @@ describe('automation SQLite store', () => {
     await chmod(path, 0o600)
 
     const migrated = openAutomationDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 11 })
     expect(migrated.prepare(`
       SELECT id, lifecycle_generation, presentation_revision, alert_status, alert_ref
       FROM automation_incidents ORDER BY id
@@ -150,7 +150,7 @@ describe('automation SQLite store', () => {
     await chmod(path, 0o600)
 
     const migrated = openAutomationDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 11 })
     const rows = migrated.prepare(`
       SELECT status, attempt_count, last_error_code FROM automation_evaluation_outbox ORDER BY id
     `).all()
@@ -205,7 +205,7 @@ describe('automation SQLite store', () => {
         delivery_status: 'pending', delivery_ref: null, failure_class: 'unknown',
       },
     ])
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 11 })
     migrated.close()
   })
 
@@ -247,7 +247,7 @@ describe('automation SQLite store', () => {
     `).get()).toEqual({
       state: 'open', probe_token: null, probe_lease_until: null, probe_task_id: null, version: 7,
     })
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 10 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 11 })
     expect(migrated.prepare(`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_incidents'
     `).get()).toEqual({ name: 'automation_incidents' })

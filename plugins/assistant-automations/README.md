@@ -106,7 +106,7 @@ Evaluation/Evolution 可直接调用 `resolveQualityEvidence(...)`，用 Evaluat
 
 每个 **production** terminal run 还会原子写入独立的 Evaluation outbox；payload 固化 `executionMode: production`，并经 Evaluation 实例绑定的 process-local capability 写入可信账本。preview 从源头不创建该 outbox；升级前残留的 preview row 也会按 Automation 权威 run mode 直接终结，绝不发送。`assistant-evaluation` 未安装或暂时失败不会重跑任务，也不会阻塞 Evolution。发送使用稳定幂等键、超时、指数退避和有界尝试，永久失败进入 `dead-letter`，只保存有界错误类别而不保存异常正文。`health()` 分开公开当前 `pendingEvaluations`、`retryingEvaluations`、`deadLetterEvaluations`、最老 pending 时间，以及只用于做增量/速率观测的累计 `failedEvaluationAttempts`；历史失败总数本身不表示当前不健康。
 
-schema v8 建立了需要停写的单 writer 升级边界；当前 schema v10 延续这一要求，不承诺旧 binary
+schema v8 建立了需要停写的单 writer 升级边界；当前 schema v11 延续这一要求，不承诺旧 binary
 与新 binary 的 N/N-1 并发兼容。v9 增加 incident lifecycle/presentation ledger，v10 增加受监督
 Growth 的 operation 与 paused artifact 账本。部署必须先停止所有旧 scheduler owner，再备份 SQLite/WAL，
 启动一个 v10 binary 完成迁移并验证后才恢复 supervisor；旧 binary 看到更高 `user_version` 会 fail closed，
@@ -163,3 +163,5 @@ P0 是单机 scheduler，不支持共享网络文件系统、多主共识、DAG�
 ## 兼容性
 
 已针对 DeepSeek Harness `0.1.2-rc.1` 验证。详见仓库[兼容性基线](../../docs/compatibility.md)。
+
+Growth 的 canary 检查只接受 Evaluation 按 exact run 返回的 ready canonical learning projection：必须是 upsert，可信执行成功且目标 achieved。原始 append-only 成功不构成 promotion 证明。schema v11 保存 canonical revision、digest、scope watermark 与完整 scope/run 证明；promotion 重新读取当前证明，并在当前 scope watermark 的 Evaluation writer fence 内提交激活。canary 证据冲突、撤回、scope 不匹配或未完成投影都拒绝激活；同 scope 的无关 canonical 进展会刷新 fence watermark，不会改变已检查 canary 的身份。旧版保存的成功证明不会自动升级为新授权，须重新进行实验；已完成的 promotion 操作仍可幂等重放。Evaluation 未提供 exact canonical lookup 时检查保持 pending。

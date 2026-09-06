@@ -515,6 +515,15 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
     return this.store.getTaskLearningProjection(scope, hostOutcomeId(input.outcomeId))
   }
 
+  /** Host-only exact canonical run proof; conflicted tasks have no ready proof. */
+  getTrustedAutomationRunLearningProjection(input: {
+    scope: EvaluationHostScope
+    runId: string
+  }): TrustedTaskLearningProjectionReceipt | undefined {
+    this.assertActive()
+    return this.store.getAutomationRunLearningProjection(exactEvaluationHostScope(input.scope), input.runId)
+  }
+
   /**
    * Synchronous cross-ledger writer fence.  Evaluation's writer lock is always
    * acquired before the callback may acquire Evolution's writer lock.
