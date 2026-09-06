@@ -19,7 +19,7 @@
 
 | ID | 对应路线 | 工作包与落点 | 必须取得的验收证据 | 状态 |
 | --- | --- | --- | --- | --- |
-| 01 | P0 | Automations Canary 使用 Evaluation canonical projection，在激活提交时取得 writer fence；绑定任务版本、digest 和 scope watermark | 冲突前置、inspection 后纠正、并发纠正、重启重放均不能用旧成功升级；合法晋升与重试通过 | 实现中 |
+| 01 | P0 | Automations Canary 使用 Evaluation canonical projection，在激活提交时取得 writer fence；绑定任务版本、digest 和 scope watermark | 冲突前置、inspection 后纠正、并发纠正、重启重放均不能用旧成功升级；合法晋升与重试通过 | 已验证 |
 | 02 | P0 | Delivery 提供 owner 任务评价修订与撤回；Evaluation 保留历史且每任务只一票 | 同值重试幂等、旧消息重放不覆盖新修订、冲突/撤回传到所有成长消费者和已推广版本 | 待做 |
 | 03 | P0/C | 不可变 TaskAcceptanceContract，独立代码、文档引用和目标系统回读 verifier；接入前台与 Automation 结果生产者 | 真实失败不能因为退出码或模型自评判成功；契约篡改、错 run、过期回执拒绝；unknown 触发验证下一步 | 待做 |
 | 04 | P0/F | 固定任务集、留出集、基线 runner 和版本化结果记录；包含代码、研究、跨日、主动性、注入和撤销 | 同输入同模型同预算可重跑；记录成功率、成本、延迟、返工、多次分布和消融；留出不参与候选生成 | 待做 |
@@ -35,7 +35,7 @@
 | 14 | P4/F | 真正执行历史输入的 baseline/candidate replay 与有质量验收的 shadow，受限 canary 和自动晋升 | 独立验证通过、同预算留出增益、关键回归通过三个 gate；无副作用单独证明；失败候选不晋升 | 待做 |
 | 15 | P4 | 推广后 deployment cohort 质量监控，涵盖 guidance/workflow/skill/plugin | 退化自动关闭 exact 版本；撤票回滚；新增正向证据不会误撤有效部署；重启仍能继续观察 | 待做 |
 | 16 | P4 | 沿 Control Plane 接真实发布/启用 adapter，签名、不可变版本、有限实验生命周期与存储 | 真实受授权环境完成构建、发布、验签、启用、监测和回滚；完整证据可重放；隐藏评测不可读取或修改 | 待做 |
-| 17 | 安装 | 安装场景/目录一致；提供自治能力入口、预检、预算与模型引导、隔离环境 bootstrap、诊断/升级/卸载 | 全新临时 profile 从安装到完成示例目标；缺依赖给出可操作修复；重复安装幂等，保留自定义配置和既有任务 | 待做 |
+| 17 | 安装 | 安装场景/目录一致；提供自治能力入口、预检、预算与模型引导、隔离环境 bootstrap、诊断/升级/卸载 | 全新临时 profile 从安装到完成示例目标；缺依赖给出可操作修复；重复安装幂等，保留自定义配置和既有任务 | 实现中 |
 | 18 | 综合 | 仓库维护纵向切片：一次授权→CI/issue→目标→隔离修复→独立验证→允许分支 PR→CI/评审跟进→复用策略 | 真实模型、目标仓库和授权系统的端到端证据；同类后续任务在同预算下有可测改进；停止和回滚有效 | 待做 |
 
 ## 实施顺序
@@ -47,9 +47,16 @@
 ## 当前证据与后续动作
 
 - 起点：`dev`，工作区干净，基线 `1b65852`。已有 23 个插件和 2 个共享库；安装器已有场景组合、真实 Host 激活检查和服务诊断，应该继续扩展这些入口。
-- 01 正在实现 canonical Canary 与 promotion fence；完整根检查已经启动，结果待记录。
-- 安装目录发现已过时的 Growth Experiments 描述：实际 supervised 已包含它，目录仍称不进入默认成长配置。本批先修正文档，安装功能验收仍单独保留。
+- 01 已验证，提交 `6b82214`、`0c6e850`：exact-run canonical 查询，schema v11 保存任务版本/digest/inspection watermark，晋升在 Evaluation 写锁内复核并激活。保持任务身份不变时使用当前 scope watermark，避免其他任务的新证据卡住候选；与 Evolution 共用同一证据校验和锁，只由依赖 Evolution 投递的消费者等待其 outbox。历史 v10 proof 不授予晋升权限。
+- 01 行为覆盖：owner 冲突、inspection 后纠正、取锁前纠正、持锁期间竞争写、旧成功冷恢复、合法回执重放、真实 promotion 版本迁移、旧 schema 升级、错误 scope/run、独立组合没有 Evolution、同 scope 的无关任务进展。Automations 209、Evaluation 36、Growth 14 项包测试通过；两轮独立审查修复了 promotion 后 replay 失效问题，最终规格与质量均通过。
+- 安装诊断修复 `b6cb037`：区分端口冲突、权限拒绝和其他网络错误，避免把沙箱 `EPERM` 错报为端口占用；64 项安装器回归通过，新 profile 测试在允许本机监听后通过，独立复核通过。Growth Experiments 目录已与 supervised 安装场景对齐；完整安装工作包仍未完成。
+- 初次根 `pnpm check`：manifest/lint/typecheck 通过，测试阶段 2,893 通过、81 跳过、1 失败（沙箱禁止本机端口监听）。没有把这次运行记为全套通过；代码定稿后需在允许本机监听的环境重新运行。
+- 后续全仓检查发现独立组合缺少 Evolution 时的投递等待问题，已在 `0c6e850` 修复；另发现既有 Evolution 测试同毫秒记录依赖随机 ID 排序，`a670538` 使用注入时钟明确先后版本，保留业务断言，Evolution 157 项测试与类型检查通过并独立复核。
+- 最终在 `a670538` 代码上执行根 `pnpm check`，退出码 0：manifest、零 lint 警告、所有包类型检查、主测试运行 200 文件/2,909 测试通过（4 文件/81 测试跳过）、递归包测试、完整构建、所有插件与共享库 dry-run pack 全部通过。跳过项和模拟模型不算真实外部部署或智能收益证据。之后仅更新此账本并取消跟踪本地代理临时报告。
+- 纯 core/Web 的 Memory 身份接线待补：meta patch 默认 `approvalMode: delivery-required`，`PersonalMemoryService.agentContext()` 要求 Delivery owner；显式 headless principal 仅为程序化集成入口。当前 core 组合测试用 Host 测试 seam 提供 Delivery 身份，安装测试用替身 DSH，均不能证明纯 Web 用户可开箱完成记忆任务。工作包 17 要补实际本机 owner 身份与审批路径，不能以匿名 namespace 或模型自报 principal 绕过现有边界。
+- 本机全局 `dsh --version` 为 `0.1.0-rc.8`，低于当前 `0.1.2-rc.1` 测试基线；真实 profile 验证须使用隔离安装的目标 Host，不能直接用全局旧 CLI 的结果作兼容性结论。
 - ChatGPT 参与方案与关键取舍评审；首次连接选择待用户确认。连接未完成不代表已获得 ChatGPT 评审。
+- 下一项：02 的 owner 评价修订与撤回，贯通 Delivery、Evaluation canonical revision、学习消费者和已推广版本；随后完成 03 的独立结果验证与 04 的比较基线。其余工作包完整保留。
 
 ## 完成审计
 
