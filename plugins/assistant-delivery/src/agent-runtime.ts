@@ -9,6 +9,7 @@ import {
   type ModelSelection,
 } from '@deepseek-ai/dsh-agent'
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-goal'
 import {
   contentHasImage,
   createUserMessage,
@@ -107,6 +108,8 @@ interface DshDeliveryRuntimeOptions {
   model: string
   maxOutputTokens: number
   maxAutoContinuationTurns: number
+  /** Zero retains the historic foreground-disposal behavior. */
+  goalContinuationTimeoutMs: number
   maxTextBytes: number
   prepareForegroundTaskAcceptance(
     binding: Readonly<ConversationBinding>,
@@ -222,6 +225,24 @@ interface ActiveSessionControl {
   removeOuterAbort(): void
   resolveCancelRequested(): void
   resolveReplySafe(): void
+}
+
+/** Minimal native-goal surface so Delivery stays optional and avoids a hard runtime dependency. */
+interface NativeGoalView {
+  readonly id: unknown
+  readonly revision: number
+  readonly phase: 'active' | 'paused' | 'blocked' | 'complete'
+  readonly activation: 'armed' | 'disarmed'
+}
+
+interface NativeGoalService {
+  get(agent: Agent): NativeGoalView | undefined
+  disarm(agent: Agent): NativeGoalView | undefined
+}
+
+interface GoalContinuationWait {
+  settle(): Promise<boolean>
+  dispose(): void
 }
 
 const MAX_CATALOG_MODELS = 50
@@ -1382,6 +1403,203 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     control.removeOuterAbort()
     control.resolveReplySafe()
     if (this.activeSessionControls.get(sessionId) === control) this.activeSessionControls.delete(sessionId)
+  }
+
+  /**
+   * Keep one Delivery-owned handle alive just long enough for the host's native
+   * goal driver to retire the exact armed goal it observed. Delivery never
+   * queues a round itself: the driver remains the only continuation producer.
+   */
+  private waitForNativeGoalContinuation(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+    agent: Agent,
+    signal: AbortSignal,
+  ): GoalContinuationWait | undefined {
+    if (this.options.goalContinuationTimeoutMs === 0) return undefined
+    const goals = this.ctx.get('goals') as NativeGoalService | undefined
+    const agents = this.ctx.get('agents')
+    if (goals === undefined || agents?.get(agent.id) !== agent) return undefined
+    let initial: NativeGoalView | undefined
+    try {
+      initial = goals.get(agent)
+    } catch {
+      return undefined
+    }
+    // Install this watcher before the foreground followup. A goal can be
+    // resumed or created by that turn, and the native round driver observes
+    // the same idle boundary immediately afterwards.
+    if (initial?.phase !== 'active' || initial.activation !== 'armed') initial = undefined
+    let goalId = initial === undefined ? undefined : String(initial.id)
+    const session = agent.session
+    let settled = false
+    // `goal/changed` is synchronous. In particular, disarming our own goal can
+    // emit it before cancelUnknown() has reached finish(false), so remember that
+    // this is a forced, unknown outcome before mutating the native goal.
+    let cancelling = false
+    let activeGoalSteps = 0
+    let settleRequested = false
+    let resolve!: (value: boolean) => void
+    const completion = new Promise<boolean>(done => { resolve = done })
+    let timeout: ReturnType<typeof setTimeout> | undefined
+    let removeGoalChanged: (() => void) | undefined
+    let removeStatus: (() => void) | undefined
+    let removeAbort: (() => void) | undefined
+    let removePreStep: (() => void) | undefined
+    let removePreExecute: (() => void) | undefined
+    let removeToolGuard: (() => void) | undefined
+    const releaseFences = (): void => {
+      removeGoalChanged?.()
+      removeStatus?.()
+      removeAbort?.()
+      removePreStep?.()
+      removePreExecute?.()
+      removeToolGuard?.()
+      removeGoalChanged = undefined
+      removeStatus = undefined
+      removeAbort = undefined
+      removePreStep = undefined
+      removePreExecute = undefined
+      removeToolGuard = undefined
+    }
+    const finish = (quiescent: boolean, retainFences = false): void => {
+      if (settled) return
+      settled = true
+      if (timeout !== undefined) clearTimeout(timeout)
+      if (!retainFences) releaseFences()
+      resolve(quiescent)
+    }
+    const isAuthorized = (): boolean => {
+      try {
+        return this.options.isInboundAuthorized(binding, envelope)
+      } catch {
+        return false
+      }
+    }
+    const pinArmedGoal = (): boolean => {
+      if (goalId !== undefined || settleRequested) return goalId !== undefined
+      try {
+        const current = goals.get(agent)
+        if (current?.phase !== 'active' || current.activation !== 'armed') return false
+        initial = current
+        goalId = String(current.id)
+        return true
+      } catch {
+        return false
+      }
+    }
+    type NativeGoalDisposition = 'settled' | 'replacement' | 'unavailable' | 'still-running'
+    const disposition = (): NativeGoalDisposition => {
+      // A replacement is deliberately not adopted. It needs its own explicit
+      // foreground owner/acceptance boundary.
+      if (goalId === undefined || initial === undefined) return 'still-running'
+      if (agents?.get(agent.id) !== agent || agent.session !== session) return 'unavailable'
+      try {
+        const current = goals.get(agent)
+        if (current === undefined) return 'settled'
+        if (String(current.id) !== goalId) return 'replacement'
+        return current.phase !== 'active' || current.activation !== 'armed'
+          ? 'settled'
+          : 'still-running'
+      } catch {
+        return 'unavailable'
+      }
+    }
+    const disarmAndCancel = (reason: string): void => {
+      try {
+        const current = goals.get(agent)
+      if (goalId === undefined || current === undefined || String(current.id) !== goalId) return
+        if (current.phase === 'active' && current.activation === 'armed') goals.disarm(agent)
+      } catch {}
+      try {
+        agent.cancel({ kind: 'hook', reason })
+      } catch {}
+    }
+    const maybeFinish = (): void => {
+      if (settled || cancelling || activeGoalSteps !== 0 || goalId === undefined) return
+      const current = disposition()
+      if (current === 'settled') finish(true)
+      // Missing identity/readback and replacement are intentionally unknown:
+      // neither proves that the exact pinned goal drained.
+      else if (current !== 'still-running') finish(false)
+    }
+    const cancelUnknown = (reason: string): void => {
+      if (settled || cancelling) return
+      cancelling = true
+      disarmAndCancel(reason)
+      // A hard timeout or /stop must settle this foreground operation even if
+      // a third-party tool ignores cancellation. Keep the fences until the
+      // Delivery-owned handle is disposed, rather than waiting for idle here.
+      finish(false, true)
+    }
+    const guardContinuationAuthorization = (): boolean => {
+      if (cancelling) return false
+      if (isAuthorized()) return true
+      cancelUnknown('assistant-delivery-goal-continuation-authorization-revoked')
+      return false
+    }
+    removeGoalChanged = this.ctx.on('goal/changed', ({ agent: changed }) => {
+      if (changed !== agent) return
+      pinArmedGoal()
+      maybeFinish()
+    })
+    removeStatus = this.ctx.on('agent/status', ({ agent: changed, status }) => {
+      // The round driver can wake after an idle status, so idle alone is not a
+      // completion signal. It is only useful after the goal itself disarmed.
+      if (changed === agent && status === 'idle') maybeFinish()
+    })
+    const aborted = (): void => cancelUnknown('assistant-delivery-goal-continuation-cancelled')
+    signal.addEventListener('abort', aborted, { once: true })
+    removeAbort = () => signal.removeEventListener('abort', aborted)
+    removePreStep = agent.ctx.on('agent/pre-step', async ({ messages }, next) => {
+      const goalMessage = messages.find(message => message.source.kind === 'goal'
+        && goalId !== undefined && String(message.source.goalId) === goalId)
+      if (goalMessage === undefined) return await next()
+      if (!guardContinuationAuthorization()) return { kind: 'reject' }
+      activeGoalSteps += 1
+      try {
+        return await next()
+      } finally {
+        activeGoalSteps -= 1
+        if (cancelling) void agent.whenIdle().then(() => finish(false), () => finish(false))
+        else maybeFinish()
+      }
+    }, { prepend: true })
+    removePreExecute = agent.ctx.on('tools/pre-execute', async (_execution, next) => {
+      if (guardContinuationAuthorization()) return await next()
+      return { kind: 'deny' as const, reason: 'assistant-delivery: goal continuation authorization revoked' }
+    }, { prepend: true })
+    removeToolGuard = agent.ctx.tools.guard(() => guardContinuationAuthorization()
+      ? undefined
+      : 'assistant-delivery: goal continuation authorization revoked')
+    const beginSettling = (): Promise<boolean> => {
+      if (settled) return completion
+      settleRequested = true
+      if (goalId === undefined) {
+        finish(true)
+        return completion
+      }
+      timeout = setTimeout(
+        () => cancelUnknown('assistant-delivery-goal-continuation-timeout'),
+        this.options.goalContinuationTimeoutMs,
+      )
+      timeout.unref?.()
+      // A driver may have already claimed its first round before the original
+      // Delivery turn reached its reply boundary. All step and tool guards
+      // were installed above, before that round could begin.
+      if (signal.aborted) cancelUnknown('assistant-delivery-goal-continuation-cancelled')
+      else if (!isAuthorized()) cancelUnknown('assistant-delivery-goal-continuation-authorization-revoked')
+      else maybeFinish()
+      return completion
+    }
+    if (signal.aborted) aborted()
+    return {
+      settle: beginSettling,
+      dispose: () => {
+        if (!settled) cancelUnknown('assistant-delivery-goal-continuation-teardown')
+        releaseFences()
+      },
+    }
   }
 
   private async disposeAfterReplyBoundary(sessionId: string, handle: AgentHandle | undefined): Promise<boolean> {
@@ -2992,6 +3210,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let dispatched = false
     let acceptance: AcceptanceHandle | undefined
     let acceptanceSucceeded = false
+    let goalContinuation: GoalContinuationWait | undefined
     let removeAbort: (() => void) | undefined
     let removeProgress: (() => void) | undefined
     let progressOpen = true
@@ -3088,6 +3307,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       signal.throwIfAborted()
       const authorizationFailure = preDispatchAuthorizationFailure()
       if (authorizationFailure !== undefined) return authorizationFailure
+      // Mount the native-goal fences before the foreground message is queued:
+      // an owner tool can create/resume a goal in that very first turn and the
+      // host driver is otherwise free to claim its first round at idle.
+      goalContinuation = this.waitForNativeGoalContinuation(binding, envelope, agent, signal)
       acceptance = this.options.prepareForegroundTaskAcceptance(binding, envelope)
       markDispatching()
       // Once the durable marker exists, even a synchronous followup failure is ambiguous:
@@ -3274,6 +3497,14 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         }
         break
       }
+      let goalContinuationQuiescent = true
+      if (goalContinuation !== undefined) {
+        goalContinuationQuiescent = await goalContinuation.settle()
+        if (!await sessions.flush(agent.session)) {
+          publishProgress({ kind: 'failed', code: 'session-persistence-unavailable' })
+          return { outcome: 'not-processed', failureCode: 'session-flush-failed', retryable: false }
+        }
+      }
       signal.throwIfAborted()
       // Agent answers are authored as Markdown (tables, bold, inline code), so request Markdown
       // rendering; sending them as plain text shows the raw `|---|` and `**` syntax to the user.
@@ -3287,7 +3518,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         this.ctx.logger.warn('assistant-delivery: completed-turn preference projection is ambiguous')
       }
       publishProgress({ kind: 'completed' })
-      acceptanceSucceeded = true
+      acceptanceSucceeded = goalContinuationQuiescent
       return { outcome: 'processed' }
     } catch (error) {
       if (causedByUserCancellation(error)) {
@@ -3326,6 +3557,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       )
       return { outcome: 'not-processed', failureCode: 'agent-resume-failed', retryable: true }
     } finally {
+      goalContinuation?.dispose()
       removeAbort?.()
       removeProgress?.()
       progressOpen = false

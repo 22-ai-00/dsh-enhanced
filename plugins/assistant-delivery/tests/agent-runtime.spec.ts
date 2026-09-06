@@ -165,19 +165,27 @@ async function persistenceCoordinatorConstructor(): Promise<PersistenceCoordinat
 async function nativeGoalPlugins(): Promise<Readonly<{
   GoalService: new (ctx: Context) => unknown
   goalTools: { inject: readonly string[], apply: (ctx: Context, config: object) => void }
+  goalRoundDriver: { inject: readonly string[], apply: (ctx: Context) => void }
 }>> {
   const goalsRequire = createRequire(new URL('../../assistant-goals/package.json', import.meta.url))
   const goalEntry = goalsRequire.resolve('@deepseek-ai/dsh-goal')
   const toolEntry = goalsRequire.resolve('@deepseek-ai/dsh-tool-goal')
-  const [goal, tools] = await Promise.all([
+  const driverEntry = goalsRequire.resolve('@deepseek-ai/dsh-goal-round-driver')
+  const [goal, tools, driver] = await Promise.all([
     import(pathToFileURL(goalEntry).href),
     import(pathToFileURL(toolEntry).href),
-  ]) as [{ default: new (ctx: Context) => unknown }, { inject: readonly string[], apply: (ctx: Context, config: object) => void }]
-  return { GoalService: goal.default, goalTools: { inject: tools.inject, apply: tools.apply } }
+    import(pathToFileURL(driverEntry).href),
+  ]) as [
+    { default: new (ctx: Context) => unknown },
+    { inject: readonly string[], apply: (ctx: Context, config: object) => void },
+    { inject: readonly string[], apply: (ctx: Context) => void },
+  ]
+  return { GoalService: goal.default, goalTools: { inject: tools.inject, apply: tools.apply }, goalRoundDriver: { inject: driver.inject, apply: driver.apply } }
 }
 
 function nativeGoals(ctx: Context): Readonly<{
   complete(agent: Agent, ref: { id: string, revision: number }): unknown
+  get(agent: Agent): { id: string, phase: string, activation: string, roundsStarted: number, maxGoalRounds: number } | undefined
 }> {
   return (ctx as unknown as { goals: ReturnType<typeof nativeGoals> }).goals
 }
@@ -249,6 +257,7 @@ interface PermissionHarnessOptions {
   replyBudget?: number
   maxTextBytes?: number
   maxAutoContinuationTurns?: number
+  goalContinuationTimeoutMs?: number
   allowPresetProbeExecution?: boolean
 }
 
@@ -603,7 +612,10 @@ async function runtimeHarness(
     ...(permissions?.maxTextBytes === undefined ? {} : { maxTextBytes: permissions.maxTextBytes }),
     ...(permissions?.maxAutoContinuationTurns === undefined
       ? {}
-      : { agentMaxAutoContinuationTurns: permissions.maxAutoContinuationTurns }) })
+      : { agentMaxAutoContinuationTurns: permissions.maxAutoContinuationTurns }),
+    ...(permissions?.goalContinuationTimeoutMs === undefined
+      ? {}
+      : { agentGoalContinuationTimeoutMs: permissions.goalContinuationTimeoutMs }) })
   const llm = new ReplyAdapter('Mock provider', ['delivery-model'], image?.inputModalities ?? ['text'])
   ctx.llm.registerAdapter(['mock'], llm)
   const alternate = new ReplyAdapter('Alternate provider', ['fast', 'precise'])
@@ -7271,7 +7283,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     const goalPolicy = {
       id: 'owner-business-goals', effect: 'allow' as const,
       subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'lark/bot-1/tenant-a/ou_owner' },
-      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot'],
+      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'edit', 'pause', 'resume', 'clear'],
       resource: { kind: 'goal' as const, id: 'business-context' },
       context: { initiators: ['external' as const] },
     }
@@ -7375,6 +7387,179 @@ describe('real rc.1 delivery Agent runtime', () => {
     await reopened.ctx.fiber.restart()
   })
 
+  test('controls a live owner goal through edit pause resume stale revision and clear', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goal-control-'))
+    roots.push(root)
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const goalPolicy = {
+      id: 'owner-business-goal-control', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId },
+      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'edit', 'pause', 'resume', 'clear'],
+      resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] },
+    }
+    const toolPolicy = (name: string) => ({
+      id: `owner-${name}`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: name }, context: { initiators: ['external' as const] },
+    })
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [goalPolicy, toolPolicy('goal_create'), toolPolicy('goal_checkpoint'), toolPolicy('goal_control')],
+      presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    })
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(native.goalTools as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+    let controlled: ReturnType<AssistantGoalsService['list']>[number] | undefined
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      if (fixture.service.currentPreferenceTurn(agent) === undefined || controlled !== undefined) return await next()
+      const create = await fixture.ctx.tools.execute({
+        callId: ToolCallId('owner-goal-control-create'), name: 'goal_create', agent, signal,
+        arguments: { objective: 'Preserve the original objective', max_goal_rounds: 2 },
+      })
+      if (create.isError) throw new Error(`goal_control setup create failed: ${JSON.stringify(create.content)}`)
+      const initial = fixture.ctx.assistantGoals.list(agent).at(0)
+      if (initial === undefined) throw new Error('goal_control setup goal missing')
+      const checkpoint = await fixture.ctx.tools.execute({
+        callId: ToolCallId('owner-goal-control-checkpoint'), name: 'goal_checkpoint', agent, signal,
+        arguments: { goal_id: initial.id, expected_version: initial.version, next_step: 'Retain this checkpoint', blockers: [], assumptions: [], evidence_refs: ['delivery:owner'], dependencies: [] },
+      })
+      if (checkpoint.isError) throw new Error('goal_control setup checkpoint failed')
+      const edit = await fixture.ctx.tools.execute({
+        callId: ToolCallId('owner-goal-control-edit'), name: 'goal_control', agent, signal,
+        arguments: { goal_id: initial.id, expected_revision: 1, operation: 'edit', objective: 'Revised native objective' },
+      })
+      if (edit.isError) throw new Error(`goal_control edit failed: ${JSON.stringify(edit.content)}`)
+      const stalePause = await fixture.ctx.tools.execute({
+        callId: ToolCallId('owner-goal-control-stale'), name: 'goal_control', agent, signal,
+        arguments: { goal_id: initial.id, expected_revision: 1, operation: 'pause' },
+      })
+      if (!stalePause.isError) throw new Error('goal_control accepted a stale native revision')
+      for (const [callId, expectedRevision, operation] of [
+        ['owner-goal-control-pause', 2, 'pause'], ['owner-goal-control-resume', 3, 'resume'], ['owner-goal-control-clear', 4, 'clear'],
+      ] as const) {
+        const result = await fixture.ctx.tools.execute({ callId: ToolCallId(callId), name: 'goal_control', agent, signal,
+          arguments: { goal_id: initial.id, expected_revision: expectedRevision, operation } })
+        if (result.isError) throw new Error(`goal_control ${operation} failed: ${JSON.stringify(result.content)}`)
+      }
+      controlled = fixture.ctx.assistantGoals.list(agent).at(0)
+      return await next()
+    })
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await fixture.service.acceptInbound(message('evt-native-goal-control', 'Control my durable delivery goal'))
+    await drive(fixture.service)
+    expect(controlled).toMatchObject({
+      originalObjective: 'Preserve the original objective', native: { objective: 'Revised native objective', phase: 'cleared', revision: 5 },
+      checkpoint: { nextStep: 'Retain this checkpoint', evidenceRefs: ['delivery:owner'] },
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('keeps a paused owner goal disarmed across restore until goal_control resume drives native rounds', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goal-round-driver-'))
+    roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const goalPolicy = {
+      id: 'owner-business-goal-round-driver', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId },
+      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'pause', 'resume'],
+      resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] },
+    }
+    const toolPolicy = (name: string) => ({
+      id: `owner-round-driver-${name}`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: name }, context: { initiators: ['external' as const] },
+    })
+    const mountGoals = async (ctx: Context) => {
+      const native = await nativeGoalPlugins()
+      await ctx.plugin(native.GoalService as never, {} as never)
+      await ctx.plugin(native.goalTools as never, {} as never)
+      await ctx.plugin(native.goalRoundDriver as never, {} as never)
+      await ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+    }
+    const options = {
+      policyRules: [goalPolicy, toolPolicy('goal_create'), toolPolicy('goal_checkpoint'), toolPolicy('goal_control')],
+      presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+      goalContinuationTimeoutMs: 5_000,
+    }
+    const first = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, options)
+    await mountGoals(first.ctx)
+    let paused: ReturnType<AssistantGoalsService['list']>[number] | undefined
+    first.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      if (first.service.currentPreferenceTurn(agent) === undefined || paused !== undefined) return await next()
+      const created = await first.ctx.tools.execute({ callId: ToolCallId('round-driver-create'), name: 'goal_create', agent, signal,
+        arguments: { objective: 'Drive exactly two retained goal rounds', max_goal_rounds: 2 } })
+      if (created.isError) throw new Error(`round-driver create failed: ${JSON.stringify(created.content)}`)
+      const record = first.ctx.assistantGoals.list(agent).at(0)
+      if (record === undefined) throw new Error('round-driver goal was not indexed')
+      const checkpoint = await first.ctx.tools.execute({ callId: ToolCallId('round-driver-checkpoint'), name: 'goal_checkpoint', agent, signal,
+        arguments: { goal_id: record.id, expected_version: record.version, next_step: 'Resume only when the owner requests it', blockers: [], assumptions: [], evidence_refs: ['delivery:round-driver'], dependencies: [] } })
+      if (checkpoint.isError) throw new Error('round-driver checkpoint failed')
+      const pause = await first.ctx.tools.execute({ callId: ToolCallId('round-driver-pause'), name: 'goal_control', agent, signal,
+        arguments: { goal_id: record.id, expected_revision: record.native.revision, operation: 'pause' } })
+      if (pause.isError) throw new Error(`round-driver pause failed: ${JSON.stringify(pause.content)}`)
+      paused = first.ctx.assistantGoals.list(agent).at(0)
+      return await next()
+    })
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await first.service.acceptInbound(message('evt-native-goal-round-driver-create', 'Pause a durable goal before automatic work'))
+    await drive(first.service)
+    expect(paused).toMatchObject({ native: { phase: 'paused' }, checkpoint: { nextStep: 'Resume only when the owner requests it' } })
+    const goalId = paused!.id
+    const nativeGoalId = paused!.native.goalId
+    await first.ctx.fiber.restart()
+
+    const reopened = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, options)
+    await mountGoals(reopened.ctx)
+    let resumedSnapshot = ''
+    let resumedRecord: ReturnType<AssistantGoalsService['list']>[number] | undefined
+    let autonomousControl: Awaited<ReturnType<typeof reopened.ctx.tools.execute>> | undefined
+    let resumedAgent: Agent | undefined
+    reopened.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      if (reopened.service.currentPreferenceTurn(agent) === undefined) {
+        const live = nativeGoals(reopened.ctx).get(agent)
+        if (live !== undefined && live.roundsStarted > 0 && autonomousControl === undefined) {
+          autonomousControl = await reopened.ctx.tools.execute({
+            callId: ToolCallId('round-driver-autonomous-control'), name: 'goal_control', agent, signal,
+            arguments: { goal_id: goalId, expected_revision: live.id === nativeGoalId ? 3 : 1, operation: 'pause' },
+          })
+        }
+        return await next()
+      }
+      if (resumedRecord !== undefined) return await next()
+      const existing = reopened.ctx.assistantGoals.list(agent).at(0)
+      if (existing === undefined || existing.id !== goalId || existing.native.phase !== 'paused') throw new Error('paused goal was not restored as owner context')
+      const resume = await reopened.ctx.tools.execute({ callId: ToolCallId('round-driver-resume'), name: 'goal_control', agent, signal,
+        arguments: { goal_id: goalId, expected_revision: existing.native.revision, operation: 'resume' } })
+      if (resume.isError) throw new Error(`round-driver resume failed: ${JSON.stringify(resume.content)}`)
+      resumedSnapshot = reopened.ctx.assistantGoals.snapshot(agent)
+      resumedRecord = reopened.ctx.assistantGoals.list(agent).at(0)
+      resumedAgent = agent
+      return await next()
+    })
+    await reopened.service.acceptInbound(message('evt-native-goal-round-driver-resume', 'Resume the paused delivery goal'))
+    await drive(reopened.service)
+    const sessionId = runtimeStore(reopened.service).getActiveBinding(conversation)?.sessionId
+    const rounds = sessionId === undefined ? [] : saved.get(sessionId)?.events.flatMap(event => {
+      const candidate = event as unknown as { type: string, data?: { source?: { kind?: string, round?: number } } }
+      return candidate.type === 'user/message' && candidate.data?.source?.kind === 'goal' ? [candidate.data.source] : []
+    }) ?? []
+    expect(resumedSnapshot).toContain('Resume only when the owner requests it')
+    expect(resumedRecord).toMatchObject({ id: goalId, native: { goalId: nativeGoalId } })
+    expect(rounds).toHaveLength(2)
+    expect(rounds.map(round => round.round)).toEqual([1, 2])
+    expect(reopened.llm.requests).toHaveLength(3)
+    expect(JSON.stringify(reopened.llm.requests.slice(1))).toContain('Resume only when the owner requests it')
+    expect(autonomousControl).toMatchObject({ isError: true })
+    expect(nativeGoals(reopened.ctx).get(resumedAgent!)).toMatchObject({
+      id: nativeGoalId, roundsStarted: 2, maxGoalRounds: 2,
+    })
+    await reopened.ctx.fiber.restart()
+  })
+
   test('does not expose or adopt an old owner goal after a real owner handoff', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goal-handoff-'))
     roots.push(root)
@@ -7384,7 +7569,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     const goalRule = (id: string) => ({
       id, effect: 'allow' as const,
       subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: id },
-      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot'],
+      actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'edit', 'pause', 'resume', 'clear'],
       resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] },
     })
     const toolRule = (id: string) => ({
@@ -7402,15 +7587,20 @@ describe('real rc.1 delivery Agent runtime', () => {
       subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: id },
       actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_create' }, context: { initiators: ['external' as const] },
     })
+    const controlToolRule = (id: string) => ({
+      id: `${id}-control`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: id },
+      actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_control' }, context: { initiators: ['external' as const] },
+    })
     const replacementRules = [
       { id: 'replacement-ingest', effect: 'allow' as const, subject: { kind: 'external' as const, id: externalId(replacement) },
         actions: ['ingest'], resource: { kind: 'message' as const, id: '*' }, context: { initiators: ['external' as const] } },
       { id: 'replacement-reply', effect: 'allow' as const, subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: externalId(replacement) },
         actions: ['reply'], resource: { kind: 'message' as const, id: '*' }, context: { initiators: ['external' as const] } },
-      goalRule(externalId(replacement)), toolRule(externalId(replacement)), contextToolRule(externalId(replacement)), createToolRule(externalId(replacement)),
+      goalRule(externalId(replacement)), toolRule(externalId(replacement)), contextToolRule(externalId(replacement)), createToolRule(externalId(replacement)), controlToolRule(externalId(replacement)),
     ]
     const fixture = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
-      policyRules: [goalRule(externalId(principal)), toolRule(externalId(principal)), contextToolRule(externalId(principal)), createToolRule(externalId(principal)), ...replacementRules],
+      policyRules: [goalRule(externalId(principal)), toolRule(externalId(principal)), contextToolRule(externalId(principal)), createToolRule(externalId(principal)), controlToolRule(externalId(principal)), ...replacementRules],
       presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
     })
     const native = await nativeGoalPlugins()
@@ -7421,6 +7611,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     let oldRecord: ReturnType<AssistantGoalsService['list']>[number] | undefined
     let replacementContext: unknown
     let replacementCheckpoint: Awaited<ReturnType<typeof fixture.ctx.tools.execute>> | undefined
+    let replacementControl: Awaited<ReturnType<typeof fixture.ctx.tools.execute>> | undefined
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       const turn = fixture.service.currentPreferenceTurn(agent)
       if (turn?.principalId === externalId(principal) && oldRecord === undefined) {
@@ -7447,6 +7638,10 @@ describe('real rc.1 delivery Agent runtime', () => {
           callId: ToolCallId('replacement-old-goal-checkpoint'), name: 'goal_checkpoint', agent, signal,
           arguments: { goal_id: oldRecord.id, expected_version: oldRecord.version, next_step: 'Take over', blockers: [], assumptions: [], evidence_refs: [], dependencies: [] },
         })
+        replacementControl = await fixture.ctx.tools.execute({
+          callId: ToolCallId('replacement-old-goal-control'), name: 'goal_control', agent, signal,
+          arguments: { goal_id: oldRecord.id, expected_revision: oldRecord.native.revision, operation: 'pause' },
+        })
       }
       return await next()
     })
@@ -7467,6 +7662,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     expect((replacementContext as { value: { context: string } }).value.context).toContain('"goals":[]')
     expect(JSON.stringify(replacementContext)).not.toContain('Protect the old owner delivery report')
     expect(replacementCheckpoint).toMatchObject({ isError: true })
+    expect(replacementControl).toMatchObject({ isError: true })
     expect(JSON.stringify(replacementCheckpoint)).not.toContain('Protect the old owner delivery report')
     await fixture.ctx.fiber.restart()
   })

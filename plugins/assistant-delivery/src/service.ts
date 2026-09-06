@@ -380,6 +380,8 @@ export interface Config {
   agentModel?: string
   agentMaxOutputTokens?: number
   agentMaxAutoContinuationTurns?: number
+  /** Opt-in foreground wait for an armed native goal round driver. Zero disables it. */
+  agentGoalContinuationTimeoutMs?: number
   modelPickerTtlMs?: number
   permissionPickerTtlMs?: number
   toolApprovalTtlMs?: number
@@ -435,6 +437,7 @@ const configSchema = Schema.object({
   agentModel: Schema.string().min(1).default('deepseek-v4-flash'),
   agentMaxOutputTokens: Schema.number().step(1).min(1).default(8_192),
   agentMaxAutoContinuationTurns: Schema.number().step(1).min(0).max(8).default(2),
+  agentGoalContinuationTimeoutMs: Schema.number().step(1).min(0).max(300_000).default(0),
   modelPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   permissionPickerTtlMs: Schema.number().step(1).min(60_000).max(86_400_000).default(900_000),
   toolApprovalTtlMs: Schema.number().step(1).min(1_000).max(300_000).default(300_000),
@@ -928,6 +931,7 @@ export class AssistantDeliveryService extends Service {
         getAgentPresets: () => runtimeCtx.get('agentPresets'),
         provider: config.agentProvider, model: config.agentModel, maxOutputTokens: config.agentMaxOutputTokens,
         maxAutoContinuationTurns: config.agentMaxAutoContinuationTurns,
+        goalContinuationTimeoutMs: config.agentGoalContinuationTimeoutMs,
         maxTextBytes: config.maxTextBytes,
         prepareForegroundTaskAcceptance: (binding, envelope) => this.prepareForegroundTaskAcceptance(binding, envelope),
         completeForegroundTaskAcceptance: (handle, input) => this.completeForegroundTaskAcceptance(handle, input),

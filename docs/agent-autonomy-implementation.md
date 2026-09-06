@@ -93,3 +93,7 @@
 - 05 首切片工程验收：18 项 Goals 测试、真实 Delivery 的工具创建/原生 direct-human 拒绝/重启恢复与 owner handoff 两项集成测试、Policy 明确授权回归均通过；存储与服务分别经独立只读复核通过。历史截断/当前投影不一致、错误 focus、非私有 WAL/SHM/目录被拒绝；合法原生 objective 编辑后可恢复。原生 complete 后创建新 GoalId 时，旧业务记录仍保留 awaiting-verification。
 - 05 最终根 `CI=true pnpm check` 退出码 **0**（`/tmp/dsh-goals-check-v2.log`、`.exit`）：24 插件/3 共享库，零 lint 警告、全包类型检查、主测试 218 文件/3,113 通过（4 文件/82 跳过）、递归测试、完整构建及全部 dry-run pack 通过。检查新增 bundle 清单含 lib、patch、README、LICENSE，不含测试/数据库。本批没有新增云模型调用；这些是工程与实际 Host 链路证据，不是智能收益或完整 Web 部署验收。
 - 下一步继续 05 的目标生命周期：Delivery owner 的原生 edit/pause/resume 等控制桥接、成功条件与独立验收绑定、期限/预算/授权，以及复用 Automations 的持久唤醒与原生 Session 续跑。04 的其余任务域/消融/独立留出和 17 的 Web 身份及一键安装仍保留。当前 18 个工作包为 3 项已验证、4 项实现中，其余待做；工作量不等，不能把该比例当作智能能力完成度。
+
+- 05 生命周期切片：增加 `goal_control` 的 edit/pause/resume/clear，使用当前 owner 回合、独立 Policy action、同 Session/GoalId 绑定及原生 revision CAS。输入冻结，原生提交后再检查授权与业务读回；失败显式报告部分完成。clear 保留 tombstone；控制不声称完成目标或终止 OS 进程。设计与后续契约边界见 [目标编排接线](goal-orchestration-design.md)。
+- 05 验收接线决策：保留普通前台任务的 byte-exact 入站要求，不把当前活动目标自动替换到该任务契约中。后续通过显式 Host 目标步骤生产入口冻结目标定义/step/run 的关联；历史任务成功、当前目标达成和当前执行权限分别判断。仅靠模型提交 goalId/contractId 或复用过往成功不能建立可信目标验收。
+- 用户要求跨设备暂时收尾：本次全部修改以 WIP 保存，完整目标未完成。生命周期包当前 24 项测试通过、独立静态审查 PASS；Delivery 续跑仅类型检查通过，实际驱动与超时/停止/撤权验收尚未完成，存在护栏清理顺序与终态授权复核待修项。未执行本次完整 `pnpm check`。接手以 [跨设备交接](autonomy-handoff-2026-09-06.md) 的已知缺口和命令为准，保持续跑配置默认关闭。

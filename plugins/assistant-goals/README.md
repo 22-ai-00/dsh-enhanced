@@ -36,7 +36,7 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
     kind: agent
     id: primary
     workspace: /absolute/path/to/workspace
-  actions: [create, observe, inspect, snapshot, focus, checkpoint]
+  actions: [create, edit, pause, resume, clear, observe, inspect, snapshot, focus, checkpoint]
   resource:
     kind: goal
     id: business-context
@@ -46,7 +46,7 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
 
 ## 使用
 
-在已认证 owner 的当前人类回合中，用 `goal_create {"objective":"完成九月交付报告","max_goal_rounds":2}` 创建目标。DSH 原生 `create_goal` 只接受 `source.kind: user`；Delivery 保留真实 `delivery` 来源，由本插件核验 owner 当前 turn 后调用原生 GoalService，不伪造直接用户消息。工具执行权限还须按现有 Host/Policy 授权 `goal_create`、`goal_context` 和 `goal_checkpoint`。
+在已认证 owner 的当前人类回合中，用 `goal_create {"objective":"完成九月交付报告","max_goal_rounds":2}` 创建目标。DSH 原生 `create_goal` 只接受 `source.kind: user`；Delivery 保留真实 `delivery` 来源，由本插件核验 owner 当前 turn 后调用原生 GoalService，不伪造直接用户消息。工具执行权限还须按现有 Host/Policy 授权 `goal_create`、`goal_context`、`goal_checkpoint` 和 `goal_control`。
 
 插件在 `goal/changed` 时建立业务记录。安装前已有或身份不明时创建的目标不会被追认，以免归属转移泄漏历史。创建不覆盖尚未完成的原生目标；原生状态为 complete 后可按 DSH 规则创建新的 GoalId，旧业务记录仍保留为待验收；如果目标已经创建而业务索引失败，会明确报告部分完成，先检查原生目标再重试。已有 Host goal-round-driver 若已启用，会按其原生规则继续执行新目标；本插件自身不启用该 driver。
 
@@ -70,13 +70,31 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
 
 新会话使用 `goal_context {"goal_id":"已保存的业务记录 ID","focus":true}` 后，后续模型步骤会收到该目标上下文。focus 只保存引用，不创建、转移、恢复或完成原生目标；开始新的原生目标会切换到新记录。跨会话 focus 和笔记在插件重启后保留。过期假设标记为 `stale`，当前没有自动重查执行器。
 
+## 修改、暂停和恢复
+
+在原目标所属的当前 owner 会话中调用 `goal_control`，`expected_revision` 使用 `goal_context` 返回的 **native.revision**，与保存笔记的 `expected_version` 不同：
+
+```json
+{
+  "goal_id": "返回的业务记录 ID",
+  "expected_revision": 1,
+  "operation": "pause"
+}
+```
+
+操作支持 `edit`、`pause`、`resume`、`clear`。edit 至少提供 `objective` 或 `max_goal_rounds`；其他操作不接受这两个字段。每次操作读取当前原生目标，由 DSH 以调用方的 `expected_revision` 做 CAS，旧值会被拒绝。修改保留 `originalObjective` 和检查点；clear 清除当前原生目标但保留业务记录及历史，不删除数据。
+
+这些操作要求实时 owner 当前回合，并分别获得同名 Policy action 的授权。跨会话 focus 不能据此控制原会话目标；恢复必须在原 Session 完成。原生进程重启后 activation 为 disarmed，存储的 focus 和笔记不会自动重新授权执行。resume 使用原生机制重新激活；它不重置已使用的目标轮次。暂停停止后续原生续跑，不宣称已经终止正在执行的工具、子进程或外部动作。
+
+若原生操作已提交，而随后 owner 被撤销、服务退出或业务读回失败，工具明确报告部分完成。先检查原生现状再决定后续操作，不用旧 revision 盲目重放。这里没有两套数据库的原子事务承诺。
+
 ## 诊断与边界
 
 可信 Host 可读取 `ctx.assistantGoals.health()` 的 `ready`、`goals`、`awaitingVerification`、`observationFailures`。`ready: false` 时先检查必需服务；空目录时检查 Delivery 配对、当前人类 turn、workspace/preset 和上述 Policy 授权。观察失败会计数，原生 goal 自身不会因此被改写。计数仅供 Host 诊断，不向模型提供跨 owner 目录。
 
 - 原始目标保持不变；原生 edit 更新当前目标投影。笔记和证据引用都是未验证的数据，不获得权限，也不构成 achieved 回执。
 - 每次新上下文/工具访问重查 live Agent、owner record/version 和 Policy。SystemPrompt 已经写入 Session 的历史快照不会被此插件擦除；不能把撤销新读取权限等同于历史清除或跨 owner 复用旧 Session 的隔离保证。
-- Delivery 桥接目前覆盖创建与业务笔记；尚未提供 owner 的原生 edit/pause/resume/complete 工具桥接。这些状态仍由受支持的原生入口或可信 Host 管理。
+- Delivery 桥接覆盖创建、业务笔记和 owner 的 edit/pause/resume/clear；没有给模型增加独立验收成功写入入口，native complete 仍由受支持的原生入口或可信 Host 管理。
 - 本包尚未提供成功条件验收绑定、期限/费用预算、授权 lease、自动唤醒、原生 Session 执行恢复或多步骤调度。它们属于完整目标编排的后续工作。
 
 ## 权限与数据
