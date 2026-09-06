@@ -242,6 +242,15 @@ interface NativeGoalService {
 
 interface GoalContinuationWait {
   settle(): Promise<boolean>
+  /** Remaining continuation budget to use for Agent teardown, if it was armed. */
+  teardownTimeoutMs(): number | undefined
+  /** Recheck cancellation and authority after teardown, before accepting success. */
+  isQuiescent(): boolean
+  /**
+   * Release the continuation fences only after the Agent handle has actually
+   * torn down.  A cancelled Delivery task may stop waiting for that teardown,
+   * but it must not let a late callback escape its authorization fence.
+   */
   dispose(): void
 }
 
@@ -1433,6 +1442,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let goalId = initial === undefined ? undefined : String(initial.id)
     const session = agent.session
     let settled = false
+    let settledQuiescent = false
     // `goal/changed` is synchronous. In particular, disarming our own goal can
     // emit it before cancelUnknown() has reached finish(false), so remember that
     // this is a forced, unknown outcome before mutating the native goal.
@@ -1442,10 +1452,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let resolve!: (value: boolean) => void
     const completion = new Promise<boolean>(done => { resolve = done })
     let timeout: ReturnType<typeof setTimeout> | undefined
+    let deadlineAt: number | undefined
     let removeGoalChanged: (() => void) | undefined
     let removeStatus: (() => void) | undefined
     let removeAbort: (() => void) | undefined
     let removePreStep: (() => void) | undefined
+    let removeRequest: (() => void) | undefined
     let removePreExecute: (() => void) | undefined
     let removeToolGuard: (() => void) | undefined
     const releaseFences = (): void => {
@@ -1453,20 +1465,21 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       removeStatus?.()
       removeAbort?.()
       removePreStep?.()
+      removeRequest?.()
       removePreExecute?.()
       removeToolGuard?.()
       removeGoalChanged = undefined
       removeStatus = undefined
       removeAbort = undefined
       removePreStep = undefined
+      removeRequest = undefined
       removePreExecute = undefined
       removeToolGuard = undefined
     }
-    const finish = (quiescent: boolean, retainFences = false): void => {
+    const finish = (quiescent: boolean): void => {
       if (settled) return
       settled = true
-      if (timeout !== undefined) clearTimeout(timeout)
-      if (!retainFences) releaseFences()
+      settledQuiescent = quiescent
       resolve(quiescent)
     }
     const isAuthorized = (): boolean => {
@@ -1508,35 +1521,68 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     const disarmAndCancel = (reason: string): void => {
       try {
         const current = goals.get(agent)
-      if (goalId === undefined || current === undefined || String(current.id) !== goalId) return
-        if (current.phase === 'active' && current.activation === 'armed') goals.disarm(agent)
+        if (goalId !== undefined && current !== undefined && String(current.id) === goalId
+          && current.phase === 'active' && current.activation === 'armed') {
+          goals.disarm(agent)
+        }
       } catch {}
       try {
         agent.cancel({ kind: 'hook', reason })
       } catch {}
     }
+    const finishNaturally = (): void => {
+      // Goal state is only an observation.  It cannot turn a cancelled or
+      // revoked foreground authority into a successful, quiescent outcome.
+      if (signal.aborted) {
+        cancelUnknown('assistant-delivery-goal-continuation-cancelled')
+      } else if (!isAuthorized()) {
+        cancelUnknown('assistant-delivery-goal-continuation-authorization-revoked')
+      } else {
+        finish(true)
+      }
+    }
     const maybeFinish = (): void => {
       if (settled || cancelling || activeGoalSteps !== 0 || goalId === undefined) return
+      // A terminal goal record does not prove that its final model/tool turn
+      // has retired.  `whenIdle()` is deliberately avoided here because it
+      // can follow a later wakeup forever; the current Agent state and inbox
+      // are the bounded observation needed before declaring quiescence.
+      if (agent.status !== 'idle' || agent.inbox.hasPending) return
       const current = disposition()
-      if (current === 'settled') finish(true)
+      if (current === 'settled') finishNaturally()
       // Missing identity/readback and replacement are intentionally unknown:
       // neither proves that the exact pinned goal drained.
       else if (current !== 'still-running') finish(false)
     }
     const cancelUnknown = (reason: string): void => {
-      if (settled || cancelling) return
+      if (cancelling) return
       cancelling = true
       disarmAndCancel(reason)
       // A hard timeout or /stop must settle this foreground operation even if
       // a third-party tool ignores cancellation. Keep the fences until the
       // Delivery-owned handle is disposed, rather than waiting for idle here.
-      finish(false, true)
+      if (!settled) finish(false)
     }
     const guardContinuationAuthorization = (): boolean => {
       if (cancelling) return false
       if (isAuthorized()) return true
       cancelUnknown('assistant-delivery-goal-continuation-authorization-revoked')
       return false
+    }
+    const teardownTimeoutMs = (): number | undefined => deadlineAt === undefined
+      ? undefined
+      : Math.max(0, deadlineAt - Date.now())
+    const isQuiescent = (): boolean => {
+      if (!settledQuiescent || cancelling) return false
+      // The goal can reach a terminal native state before the Agent scope has
+      // finished disposing.  Authority is still live at that point.
+      if (signal.aborted || !isAuthorized()) {
+        cancelUnknown(signal.aborted
+          ? 'assistant-delivery-goal-continuation-cancelled'
+          : 'assistant-delivery-goal-continuation-authorization-revoked')
+        return false
+      }
+      return true
     }
     removeGoalChanged = this.ctx.on('goal/changed', ({ agent: changed }) => {
       if (changed !== agent) return
@@ -1551,19 +1597,39 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     const aborted = (): void => cancelUnknown('assistant-delivery-goal-continuation-cancelled')
     signal.addEventListener('abort', aborted, { once: true })
     removeAbort = () => signal.removeEventListener('abort', aborted)
-    removePreStep = agent.ctx.on('agent/pre-step', async ({ messages }, next) => {
-      const goalMessage = messages.find(message => message.source.kind === 'goal'
-        && goalId !== undefined && String(message.source.goalId) === goalId)
-      if (goalMessage === undefined) return await next()
+    removePreStep = agent.ctx.on('agent/pre-step', async (_input, next) => {
+      // The native loop supplies only the inbox claim for a later model step;
+      // after a tool result it need not repeat the original `goal` source.
+      // Once this watcher fixed a GoalId, every later model step on the owned
+      // Agent is therefore fenced until its handle tears down.
+      if (goalId === undefined) return await next()
       if (!guardContinuationAuthorization()) return { kind: 'reject' }
       activeGoalSteps += 1
       try {
-        return await next()
+        const result = await next()
+        // A pre-step waterfall's `next()` can finish before the next model
+        // boundary.  Recheck immediately after it so a revocation in that
+        // window still cancels the owned Agent before another request/tool.
+        if (!guardContinuationAuthorization()) return { kind: 'reject' }
+        return result
       } finally {
         activeGoalSteps -= 1
-        if (cancelling) void agent.whenIdle().then(() => finish(false), () => finish(false))
-        else maybeFinish()
+        // Do not wait for `whenIdle()`: an uncooperative tool can keep it
+        // pending forever.  The timeout/cancellation path already settled
+        // non-quiescent, and the fences remain until handle teardown.
+        maybeFinish()
       }
+    }, { prepend: true })
+    removeRequest = agent.ctx.on('agent/request', async (_payload, next) => {
+      if (goalId === undefined) return await next()
+      if (!guardContinuationAuthorization()) {
+        throw new Error('assistant-delivery: goal continuation authorization revoked before model request')
+      }
+      const request = await next()
+      if (!guardContinuationAuthorization()) {
+        throw new Error('assistant-delivery: goal continuation authorization revoked while preparing model request')
+      }
+      return request
     }, { prepend: true })
     removePreExecute = agent.ctx.on('tools/pre-execute', async (_execution, next) => {
       if (guardContinuationAuthorization()) return await next()
@@ -1573,10 +1639,16 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       ? undefined
       : 'assistant-delivery: goal continuation authorization revoked')
     const beginSettling = (): Promise<boolean> => {
+      if (!settleRequested) {
+        settleRequested = true
+        // A goal may create and complete during the foreground pre-step,
+        // before Delivery reaches `settle()`.  That still leaves its Agent
+        // scope to tear down, so it needs the same bounded deadline.
+        deadlineAt = Date.now() + this.options.goalContinuationTimeoutMs
+      }
       if (settled) return completion
-      settleRequested = true
       if (goalId === undefined) {
-        finish(true)
+        finishNaturally()
         return completion
       }
       timeout = setTimeout(
@@ -1595,33 +1667,96 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     if (signal.aborted) aborted()
     return {
       settle: beginSettling,
+      teardownTimeoutMs,
+      isQuiescent,
       dispose: () => {
+        if (timeout !== undefined) clearTimeout(timeout)
         if (!settled) cancelUnknown('assistant-delivery-goal-continuation-teardown')
         releaseFences()
       },
     }
   }
 
-  private async disposeAfterReplyBoundary(sessionId: string, handle: AgentHandle | undefined): Promise<boolean> {
+  private async disposeAfterReplyBoundary(
+    sessionId: string,
+    handle: AgentHandle | undefined,
+    afterDisposed?: () => void,
+    abandonDisposal = false,
+    timeoutMs?: number,
+  ): Promise<boolean> {
     const control = this.activeSessionControls.get(sessionId)
     control?.resolveReplySafe()
-    if (handle === undefined) return true
+    if (handle === undefined) {
+      afterDisposed?.()
+      return true
+    }
     const disposal = Promise.resolve().then(() => handle.dispose())
-    const disposition = control === undefined
-      ? await disposal.then(() => 'disposed' as const)
-      : await Promise.race([
-          disposal.then(() => 'disposed' as const),
-          control.cancelRequested.then(() => 'cancelled' as const),
-        ])
-    if (disposition === 'cancelled') {
+    let clearDeadline: (() => void) | undefined
+    const deadline = timeoutMs === undefined
+      ? undefined
+      : timeoutMs <= 0
+        ? Promise.resolve<'timed-out'>('timed-out')
+        : new Promise<'timed-out'>(resolve => {
+          const timeout = setTimeout(() => resolve('timed-out'), timeoutMs)
+          timeout.unref?.()
+          clearDeadline = () => clearTimeout(timeout)
+        })
+    let removeAbort: (() => void) | undefined
+    const aborted = control === undefined
+      ? undefined
+      : new Promise<'aborted'>(resolve => {
+          const abort = (): void => resolve('aborted')
+          control.controller.signal.addEventListener('abort', abort, { once: true })
+          removeAbort = () => control.controller.signal.removeEventListener('abort', abort)
+          if (control.controller.signal.aborted) abort()
+        })
+    let released = false
+    const releaseAfterDisposal = (): void => {
+      if (released) return
+      released = true
+      try {
+        afterDisposed?.()
+      } catch (error) {
+        this.ctx.logger.warn(`assistant-delivery: continuation fence release failed: ${String(error)}`)
+      }
+    }
+    let disposition: 'disposed' | 'rejected' | 'cancelled' | 'abandoned' | 'aborted' | 'timed-out'
+    try {
+      disposition = control === undefined
+        ? (abandonDisposal ? 'abandoned' as const : await Promise.race([
+            disposal.then(() => 'disposed' as const, () => 'rejected' as const),
+            ...(deadline === undefined ? [] : [deadline]),
+          ]))
+        : await Promise.race([
+            disposal.then(() => 'disposed' as const, () => 'rejected' as const),
+            control.cancelRequested.then(() => 'cancelled' as const),
+            ...(aborted === undefined ? [] : [aborted]),
+            ...(deadline === undefined ? [] : [deadline]),
+            ...(abandonDisposal ? [Promise.resolve('abandoned' as const)] : []),
+          ])
+    } finally {
+      removeAbort?.()
+      clearDeadline?.()
+    }
+    if (disposition === 'cancelled' || disposition === 'abandoned'
+      || disposition === 'aborted' || disposition === 'timed-out') {
       // The Delivery turn is already cancelled and cannot enqueue another
       // reply. Teardown remains owned, but a third-party disposer must not
       // hold the conversation transition or its fresh generation hostage.
-      void disposal.catch(error => {
-        this.ctx.logger.warn(
-          `assistant-delivery: cancelled session disposer failed for ${sessionFingerprint(sessionId)}: ${String(error)}`,
-        )
-      })
+      void disposal.then(
+        () => releaseAfterDisposal(),
+        error => {
+          this.ctx.logger.warn(
+            `assistant-delivery: detached session disposer failed for ${sessionFingerprint(sessionId)}: ${String(error)}`,
+          )
+          releaseAfterDisposal()
+        },
+      )
+      return false
+    }
+    releaseAfterDisposal()
+    if (disposition === 'rejected') {
+      this.ctx.logger.warn(`assistant-delivery: session disposer failed for ${sessionFingerprint(sessionId)}`)
       return false
     }
     return true
@@ -3211,6 +3346,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let acceptance: AcceptanceHandle | undefined
     let acceptanceSucceeded = false
     let goalContinuation: GoalContinuationWait | undefined
+    let goalContinuationQuiescent = true
     let removeAbort: (() => void) | undefined
     let removeProgress: (() => void) | undefined
     let progressOpen = true
@@ -3497,17 +3633,11 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         }
         break
       }
-      let goalContinuationQuiescent = true
-      if (goalContinuation !== undefined) {
-        goalContinuationQuiescent = await goalContinuation.settle()
-        if (!await sessions.flush(agent.session)) {
-          publishProgress({ kind: 'failed', code: 'session-persistence-unavailable' })
-          return { outcome: 'not-processed', failureCode: 'session-flush-failed', retryable: false }
-        }
-      }
       signal.throwIfAborted()
-      // Agent answers are authored as Markdown (tables, bold, inline code), so request Markdown
-      // rendering; sending them as plain text shows the raw `|---|` and `**` syntax to the user.
+      // The foreground reply has already crossed its durable reply path.
+      // Retain the same Agent afterwards only for the native goal driver; its
+      // unknown result must never turn the original reply into a claim that
+      // the business goal was achieved.
       const learning = await this.options.replyCompletedPreferenceTurn(
         agent,
         binding,
@@ -3517,6 +3647,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       if (learning === 'unknown') {
         this.ctx.logger.warn('assistant-delivery: completed-turn preference projection is ambiguous')
       }
+      if (goalContinuation !== undefined) {
+        goalContinuationQuiescent = await goalContinuation.settle()
+      }
+      signal.throwIfAborted()
       publishProgress({ kind: 'completed' })
       acceptanceSucceeded = goalContinuationQuiescent
       return { outcome: 'processed' }
@@ -3557,15 +3691,21 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       )
       return { outcome: 'not-processed', failureCode: 'agent-resume-failed', retryable: true }
     } finally {
-      goalContinuation?.dispose()
       removeAbort?.()
       removeProgress?.()
       progressOpen = false
       let disposed = false
       try {
-        disposed = await this.disposeAfterReplyBoundary(binding.sessionId, handle)
+        disposed = await this.disposeAfterReplyBoundary(
+          binding.sessionId,
+          handle,
+          () => goalContinuation?.dispose(),
+          !goalContinuationQuiescent,
+          goalContinuation?.teardownTimeoutMs(),
+        )
       } finally {
         acceptanceSucceeded = acceptanceSucceeded && disposed && !signal.aborted
+          && (goalContinuation?.isQuiescent() ?? true)
         if (acceptance !== undefined) {
           try {
             await this.options.completeForegroundTaskAcceptance(acceptance, {
