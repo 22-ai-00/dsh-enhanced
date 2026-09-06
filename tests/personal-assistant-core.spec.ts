@@ -35,10 +35,12 @@ function foreground(): Agent {
 
 class CoreAdapter extends LlmAdapter {
   readonly requests: GenerateOptions[] = []
+  onFirstRequest?: () => void
 
   override async * stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
     this.requests.push(options)
     if (this.requests.length === 1) {
+      this.onFirstRequest?.()
       for (const [index, call] of [
         { name: 'memory_search', arguments: '{"query":"coffee Helix","limit":5}' },
         { name: 'wiki_search', arguments: '{"query":"agent architecture","limit":5}' },
@@ -163,6 +165,25 @@ describe('four-core personal assistant composition', () => {
     })
     ctx.personalMemory.decideProposal({ proposalId: memory.proposalId, principal: ownerPrincipal, expectedVersion: 1,
       decision: 'approved', reason: 'confirmed' })
+    const transientMemory = ctx.personalMemory.propose(agent, {
+      idempotencyKey: 'core:transient-memory', principal: ownerPrincipal,
+      mutation: { op: 'add', identity: { owner: 'user', scope: 'workspace', workspace: '/work/alpha' },
+        entry: { kind: 'fact', content: 'Transient deployment note: use the staging endpoint.', sensitivity: 'private',
+          trust: 'user-confirmed', confidence: 1, provenance: { source: 'user', observedAt: 1 } } },
+    })
+    const transientRecord = ctx.personalMemory.decideProposal({ proposalId: transientMemory.proposalId,
+      principal: ownerPrincipal, expectedVersion: 1, decision: 'approved', reason: 'confirmed' }).record!
+    // Change the real store between two model steps. The latest Host snapshot
+    // must supersede the old fact; the native Session retains prior history.
+    adapter.onFirstRequest = () => {
+      const removal = ctx.personalMemory.propose(agent, {
+        idempotencyKey: 'core:remove-transient', principal: ownerPrincipal,
+        mutation: { op: 'remove', identity: { owner: 'user', scope: 'workspace', workspace: '/work/alpha' },
+          id: transientRecord.id, expectedVersion: transientRecord.version },
+      })
+      ctx.personalMemory.decideProposal({ proposalId: removal.proposalId, principal: ownerPrincipal,
+        expectedVersion: 1, decision: 'approved', reason: 'obsolete' })
+    }
     const wiki = ctx.personalWiki.propose(agent, {
       idempotencyKey: 'core:wiki', principal: ownerPrincipal, mutation: { op: 'create', input: {
         title: 'Agent architecture', type: 'concept', authority: 'curated', status: 'active', tags: ['agent'], aliases: [],
@@ -174,7 +195,7 @@ describe('four-core personal assistant composition', () => {
       decision: 'approved', reason: 'reviewed' })
     const automation = ctx.assistantAutomations.propose(agent, {
       idempotencyKey: 'core:automation', principal: ownerPrincipal, mutation: { op: 'create', automationId: 'auto-context',
-        definition: { name: 'Context review', prompt: 'Retrieve approved personal context.',
+        definition: { name: 'Context review', prompt: 'Retrieve approved personal context and the transient deployment note.',
           schedule: { kind: 'at', at: '2030-01-01T00:00:00.000Z' }, workspace: '/work/alpha', agentPreset: 'primary',
           provider: 'mock', model: 'core-model', allowedTools: ['memory_search', 'wiki_search'], timeoutMs: 60_000,
           maxOutputTokens: 512, maxToolCalls: 2, misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never',
@@ -188,6 +209,12 @@ describe('four-core personal assistant composition', () => {
     await ctx.assistantAutomations.whenIdle()
 
     expect(adapter.requests[0]!.tools?.map(tool => tool.name).sort()).toEqual(['memory_search', 'wiki_search'])
+    expect(JSON.stringify(adapter.requests[0]!.messages)).toContain('Transient deployment note: use the staging endpoint.')
+    expect(JSON.stringify(adapter.requests[0]!.messages)).toContain('provenance:')
+    const currentContext = adapter.requests[1]!.messages.findLast(message =>
+      message.source.kind === 'plugin' && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+    expect(JSON.stringify(currentContext)).toContain('Preferred editor is Helix')
+    expect(JSON.stringify(currentContext)).not.toContain('Transient deployment note: use the staging endpoint.')
     expect(JSON.stringify(adapter.requests[1]!.messages)).toContain('Preferred editor is Helix')
     expect(JSON.stringify(adapter.requests[1]!.messages)).toContain('Memory and knowledge remain separate')
     expect(ctx.assistantAutomations.history(agent, { automationId: 'auto-context' }).runs[0]).toMatchObject({

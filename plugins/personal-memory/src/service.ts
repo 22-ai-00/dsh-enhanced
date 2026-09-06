@@ -3,6 +3,7 @@ import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {
   AssistantDeliveryService,
 } from '@dsh-enhanced/assistant-delivery'
@@ -217,8 +218,14 @@ export class PersonalMemoryService extends Service {
       }, 'personal-memory.reconcile')
     }
     ctx.on('agent/session-start', ({ agent }) => {
+      if (ctx.get('systemPrompt') !== undefined) return
       this.injectSessionSnapshot(agent)
     })
+    ctx.inject(['systemPrompt'], promptCtx => promptCtx.systemPrompt.context({
+      name: 'personal-memory:task-context',
+      order: 240,
+      text: ({ agent }) => this.taskSnapshot(agent),
+    }))
     ctx.inject(['tools'], (toolsCtx) => {
       registerMemoryTools(toolsCtx, this)
     })
@@ -591,6 +598,42 @@ export class PersonalMemoryService extends Service {
       content: [{ type: 'text', text: snapshot.text }],
       source: { kind: 'plugin', plugin: 'personal-memory' },
     }))
+  }
+
+  /** Fresh data at every model step; the Host persists superseding snapshots. */
+  private taskSnapshot(agent: Agent | undefined): string {
+    if (!this.active || agent === undefined) return ''
+    try {
+      const context = this.agentContext(agent)
+      const decision = this.policy.authorizeAgent(agent, 'snapshot', { kind: 'memory', id: 'visible' })
+      if (decision.effect !== 'allow') return ''
+      // Read the current surface, so replaced/compacted messages cannot become
+      // the active task again. Tool results and our own snapshots are not tasks.
+      const messages = agent.session.deriveMessages()
+      const task = messages.findLast(message => {
+        if (message.role !== 'user' || !message.content.some(block => block.type === 'text')) return false
+        const kind: string | undefined = message.source?.kind
+        return kind === 'user' || kind === 'delivery'
+          || (message.source?.kind === 'plugin'
+            && message.source.plugin === '@dsh-enhanced/assistant-automations')
+      })
+      let query = ''
+      for (const block of task?.content ?? []) {
+        if (block.type !== 'text') continue
+        query += `${query === '' ? '' : '\n'}${block.text}`.slice(0, 2_048 - query.length)
+        if (query.length >= 2_048) break
+      }
+      return this.memoryStore.snapshot({
+        context, query,
+        limit: this.config.snapshotLimit,
+        maxBytes: this.config.snapshotMaxBytes,
+        maxTokens: this.config.snapshotMaxTokens,
+      }).text
+    } catch {
+      // Missing/revoked owner scope must clear the contribution, not retain an
+      // earlier owner's data or interrupt unrelated task execution.
+      return ''
+    }
   }
 
   private assertMutationIdentity(context: MemoryAgentContext, mutation: MemoryMutation): void {

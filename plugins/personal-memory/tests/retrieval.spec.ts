@@ -214,6 +214,35 @@ describe('personal memory retrieval', () => {
     memory.close()
   })
 
+  test('task snapshots select relevant facts plus confirmed preferences, with provenance', async () => {
+    const memory = await store()
+    const identity = { owner: 'user', scope: 'user-global' } as const
+    add(memory, identity, 'Garden watering every morning')
+    const relevant = add(memory, identity, 'Redis timeout retry needs idempotency', {
+      provenance: { source: 'incident-review', observedAt: 12_000, uri: 'https://example.test/incidents/42' },
+    })
+    add(memory, identity, 'Reply in Chinese', { kind: 'preference' })
+    const snapshot = memory.snapshot({ context, query: 'Redis timeout', limit: 10, maxBytes: 2_048, maxTokens: 512 })
+    expect(snapshot.records.map(record => record.content)).toEqual([
+      'Redis timeout retry needs idempotency', 'Reply in Chinese',
+    ])
+    expect(snapshot.text).toContain(relevant.id)
+    expect(snapshot.text).toContain('incident-review')
+    expect(snapshot.text).toContain('https://example.test/incidents/42')
+    expect(snapshot.text).toContain('12000')
+    memory.close()
+  })
+
+  test('sensitive matches do not consume the public snapshot top-K', async () => {
+    const memory = await store()
+    const identity = { owner: 'user', scope: 'user-global' } as const
+    add(memory, identity, 'Redis timeout', { sensitivity: 'sensitive' })
+    add(memory, identity, 'Redis retry', { trust: 'agent-observed' })
+    const snapshot = memory.snapshot({ context, query: 'Redis', limit: 1, maxBytes: 1_024, maxTokens: 256 })
+    expect(snapshot.records.map(record => record.content)).toEqual(['Redis retry'])
+    memory.close()
+  })
+
   test('escapes memory content so untrusted records cannot close the source boundary', async () => {
     const memory = await store()
     add(

@@ -52,7 +52,9 @@ dsh --profile web --dump-config
 - `ctx.personalMemory.exportJson(agent)`：导出版本化 JSON，不包含哈希、状态、时间戳、token 表或审计表。
 - `ctx.personalMemory.proposeImport(...)`：先验证整个有界文档，再为每条记录创建审批提案；Agent 路径同样由 Delivery 派生审批 authority，未批准前不会写入 memory record。仅在未组合 Delivery 的可信本地/headless 集成中，程序化调用方可以显式传入 principal；一旦 Delivery 可用就不能用该字段覆盖绑定 owner。
 
-每次 `agent/session-start` 最多注入一次冻结快照。快照合并 user-global、当前 workspace、当前 agent-global 和当前 agent-workspace，受 top-K、字节和粗略 token 三重预算约束；`sensitive` 记录不会进入环境快照。内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”，所有 XML 元字符在预算计算前转义，记录无法闭合数据边界。`memory_search`、`memory_search_confirmed` 与 `memory_manage` 的模型可见结果也使用有界、转义的独立 framing。缺少绝对 cwd 或 agent preset 时不搜索、不提案、不注入，也不会退化到共享域。
+安装了原生 `systemPrompt` 服务时，每次模型步骤组装上下文都会重新检查当前 owner、Policy 和记忆状态，并从 Session 当前有效消息中提取最近的用户输入或 Automation 任务（最多 2048 字符）进行关键词召回。任务相关记录优先，再补充用户确认的偏好与约定；工具结果、历史快照和自动补全文本不会替代当前任务。召回合并 user-global、当前 workspace、当前 agent-global 和当前 agent-workspace，受 top-K、字节和粗略 token 三重预算约束；`sensitive` 记录在 top-K 之前排除。每条包含 id、版本、来源、观测时间及可选原始引用、失效时间与替代关系。尚未接入结构化 goal/step 召回或工具证据压缩。
+
+内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”；XML 元字符和模板花括号在预算计算前转义。原生 Host 持久保存发生变化的新快照，用它取代先前快照的有效语义；撤回、过期或权限撤销会影响下一步的当前快照，**不会删除 Session 中已经提供过的历史快照、工具结果或模型输出**。因此不能把本功能当作会话历史的数据擦除或跨 owner 会话迁移保护。没有 `systemPrompt` 的程序化集成保留旧的 `agent/session-start` 一次性冻结快照，不能承诺逐步更新。`memory_search`、`memory_search_confirmed` 与 `memory_manage` 的模型可见结果也使用有界、转义的独立 framing。缺少绝对 cwd、agent preset 或已验证 owner 时不搜索、不提案、不贡献新快照，也不会退化到共享域。
 
 ## 数据与一致性
 
@@ -79,7 +81,7 @@ JSON 导入是一组独立、可重放的提案，不承诺跨所有记录的一
 | `maxContentBytes` | 4096 | 单条内容最大 UTF-8 字节数 |
 | `maxRecordsPerIdentity` | 1000 | 每个完整身份域的活动记录上限 |
 | `searchLimit` | 20 | 未显式指定时的搜索上限 |
-| `snapshotLimit` | 20 | 会话快照候选上限 |
+| `snapshotLimit` | 20 | 当前快照记录上限 |
 | `snapshotMaxBytes` | 8192 | 快照最大 UTF-8 字节数 |
 | `snapshotMaxTokens` | 2048 | 快照粗略 token 上限 |
 | `defaultProposalTtlMs` | 900000 | 默认提案有效期（15 分钟） |

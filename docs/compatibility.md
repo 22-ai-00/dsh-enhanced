@@ -5,6 +5,7 @@
 - DeepSeek Harness 运行时与 npm 测试依赖：`0.1.2-rc.1`。该版本移除了 `dsh-llm` 的非稳定 `deepFreeze` 导出，并以 `Session.snapshotEvents()` 取代公开 `Session.events`；本仓库的兼容层不得继续依赖这些 rc.8 实现细节。
 - `@deepseek-ai/dsh-user-questions@0.1.2-rc.1` 定义 `ctx.userQuestions.ask()` 与 `user-questions/request` answerer waterfall。带 `agent` 的请求只会派发到 exact live runtime root 的 Agent scope；随产品交付的 Web Host 通过 Remote Events 在该 scope 贡献 answerer。没有 answerer 接受请求时以 `NO_PROVIDER` 失败，不会无限等待。
 - `0.1.2-rc.1` 不再发布 `@deepseek-ai/dsh-host-apiproxy`，`dsh-user-questions` 也不发布独立的 question request/answer 审计流。渠道集成若要承接 `ask_user_question`，必须直接在同一 Agent scope 注册 `user-questions/request` answerer；旧版 Host question bridge 的并发结算语义不属于当前公开契约。
+- `@deepseek-ai/dsh-system-prompt@0.1.2-rc.1`：Personal Memory 使用可选 Host peer 的 `context()` 在每次模型步骤组装时贡献任务相关记忆；当前任务取自 `Session.deriveMessages()` 的有效 surface，忽略已被 compaction replacement 移除的消息。注册随 Cordis injection 释放。AgentLoop 将变化后的 context 追加为持久 user-role snapshot，并声明它覆盖旧快照的有效语义；该 API 不会从历史消息中擦除原始记忆。无该服务时仅保留启动快照兼容路径。升级时须重跑实际 AgentLoop 两步之间记忆撤回与 provenance 测试。
 - 官方 ACP 行为复查基线：`@deepseek-ai/dsh-acp@0.1.0-rc.5`（上游源码提交 `47f943859bef60e4160492346772ded9b24f765a`）
 - `@deepseek-ai/cordis`：`4.0.2`
 - Node.js：`^22.19.0 || >=24.0.0`
