@@ -1,6 +1,6 @@
 # 业务目标编排：执行与验收接线
 
-> 本次跨设备保存为 WIP：Delivery 有界续跑尚未完成运行时验收，已知缺口见 [交接记录](autonomy-handoff-2026-09-06.md)。以下边界同时描述实现意图，不能当作已验证行为。
+> `fdcee5c` 的跨设备检查点曾将 Delivery 有界续跑保存为 WIP。接手已修复并通过真实原生驱动、取消和 teardown 边界测试及独立复核；全仓结果见 [落地账本](agent-autonomy-implementation.md)。以下明确标为待实现的独立执行契约、预算和持久唤醒仍未完成。
 
 本设计延续 [完整落地账本](agent-autonomy-implementation.md) 的工作包 05、08、17。当前切片涵盖 owner 目标创建、业务上下文、原生生命周期控制与 Delivery 有界续跑；以下执行契约、预算授权、跨日自动恢复和目标验收仍须实现，不能因设计存在而记为完成。
 
@@ -27,6 +27,8 @@ Delivery 的前台任务验收保留当前入站 `envelope.text`，在 `markDisp
 
 Delivery 的 `agentGoalContinuationTimeoutMs` 默认关闭。启用后，在当前前台任务内等待原生驱动继续执行，待原生目标停止再释放 Agent；超时、停止或当前授权失效则取消并保留未知结果。它保留原 Session、GoalId 和轮次累计，不把普通用户消息替换成目标原文。该等待占用当前任务的串行位置，不是后台调度或新目标执行契约；原先的前台回执也不能作为整个业务目标达成的证明。
 
+续跑修复采用先将原前台回复持久入队、再等待原生驱动的顺序；原生驱动仍可在前台结束的 idle 边界开始工作，不能把这一顺序理解成“用户已收到回复后才会开始目标轮”。入队、送达、原任务验收和业务目标达成是四个独立事实。护栏覆盖后续模型步骤（包括不再带有 goal 源消息的工具结果后步骤），并保留到 Agent 的实际异步 teardown 结束；Delivery 停止等待不表示第三方工具或进程已经终止。
+
 ## 下一步执行契约
 
 新增明确的 Host 目标步骤生产入口，复用 Verifier 的注册代际、契约冻结、真实执行回读、独立 authority 与结果 outbox。选择显式 goal-execution 生产者或严格版本化的 goal-step 关联；不要让模型通过传入任意 taskRef/contractId 将他人的成功附到自己目标。
@@ -36,6 +38,29 @@ Delivery 的 `agentGoalContinuationTimeoutMs` 默认关闭。启用后，在当�
 原生 goal 修改、owner 撤销、lease 过期或定义变更应阻止新动作及旧步骤提交。历史“当时已观察到成功”的任务回执保留，不通过删除历史掩盖曾经发生的行为；该历史回执也不能成为现在继续执行的授权。对已发出但不能证明结束的动作记录 unknown，并走回读/补偿，不自动再发一次。
 
 GoalStore 与 Session 不构成一个原子数据库。协议须采用持久执行意图、CAS/fence、原生 Session flush、回执对账与明确的未知状态，覆盖每个提交窗口；不能以两次普通写入冒充原子事务。
+
+### 实施落点与恢复协议（待实现）
+
+当前代码核对表明，普通 Automation Agent runner 在 `assistant-automations/src/runner.ts` 中使用 `agents.create()` 创建运行 Session。不能将它直接当作原生目标恢复入口。采用 Automations 已有的 Host executor 注册和持久 `at` 调度，Goals 持有明确的目标步骤执行器；执行器通过受保护的 Host 入口恢复原 Session。跨会话 focus 不能调用该入口。
+
+| 层 | 实施文件 | 必须一起改变的契约 |
+| --- | --- | --- |
+| 验收身份 | `packages/task-acceptance-contract/src/{types,wire}.ts` | 显式版本化的 goal-step 身份与严格 parser；保留 v1 前台/Automation 原意 |
+| 目标账本 | `plugins/assistant-goals/src/{types,store,service}.ts` | 定义历史、步骤意图、run、预算预留、期限、授权摘要、wake 与验收绑定，SQLite 迁移和 CAS |
+| 可信验收生产者 | `plugins/assistant-verifier/src/{host,service,store}.ts` | Goals 的独立注册代际、精确 kind 路由、prepare 和 durable execution readback |
+| 持久唤醒 | `plugins/assistant-automations/src/{host-executors,coordinator,runner}.ts` 与 Goals 执行器 | 复用 occurrence/task/run、scheduler lease 和 Host executor descriptor，禁止重新实现定时轮询器 |
+| 结果消费 | `plugins/assistant-evaluation/src/service.ts` 与 Goals | 显式识别 goal-step，精确回执绑定、去重与可重放投影，不把未知 kind 当 foreground-turn |
+
+执行意图按以下顺序推进，各状态必须有重启后的对账动作：
+
+1. `prepared`：Host 冻结 definition/step/run、原 Session/GoalId、owner lineage、权限、预算和期限，持久化意图与验收绑定；此时还没有模型或外部提交。
+2. `scheduled`：通过幂等的 Host `at` 定义物化 wake。若创建唤醒已提交但 ACK 丢失，按原幂等身份回读，不能另建一个 wake。
+3. `claimed`：持有 scheduler lease 的 executor 对目标意图 CAS，重查定义、原生目标、owner、授权、期限和预算，再恢复原 Session；发现其他仍运行的 owning Agent 时不能并发接管。
+4. `dispatching`：先持久化已提交边界，再向原生运行时交付精确 step。进程在这里崩溃后，无法证明未提交时必须是 `unknown`；恢复先检查 Session/外部系统，禁止自动重放可能有副作用的工作。
+5. `awaiting-verification`：持久化执行终态与 Session checkpoint，Verifier 从生产者回读；模型 complete 或进程退出 0 都不能直接产生 achieved。
+6. `verified` / `needs-attention`：消费绑定 definition/step/run 的独立回执；迟到旧定义成功只保留历史，不能完成新定义。unknown 按缺失证据生成新的调查步骤，新步骤仍需要新的授权和预算检查。
+
+定义编辑与 pause/resume revision 分开记账。用户修改成功条件或资源范围生成新的定义版本并使未提交旧步骤过期；暂停不重置累计预算。已发出步骤继续保存当时的证据，不能通过删记录规避对账。该协议尚未实现，表格和状态说明不计作 WP05 完成证据。
 
 ## 独立验收与下一步
 

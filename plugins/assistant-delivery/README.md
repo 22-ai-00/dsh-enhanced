@@ -49,7 +49,7 @@ Patch 通过 `inject: [assistantPolicy]` 固定加载策略依赖；入站 Agent
 | `agentProvider` / `agentModel` | `deepseek-official` / `deepseek-v4-flash` | 渠道 Agent 的部署默认模型；会话可用 `/model` 覆盖 |
 | `agentMaxOutputTokens` | `8192` | 单轮模型输出上限 |
 | `agentMaxAutoContinuationTurns` | `2` | 截断、空响应或超出渠道正文预算时的后台自动恢复轮数；范围 `0`–`8`，设为 `0` 可关闭 |
-| `agentGoalContinuationTimeoutMs` | `0` | 等待当前已 armed 的原生目标继续执行的时间上限；范围 `0`–`300000` 毫秒，默认关闭，需 Host 挂载原生 GoalService 与 goal-round-driver |
+| `agentGoalContinuationTimeoutMs` | `0` | 在原始前台回复已入队后，保留同一 Agent 等待当前已 armed 的原生目标继续执行的时间上限；范围 `0`–`300000` 毫秒，默认关闭，需 Host 挂载原生 GoalService 与 goal-round-driver |
 | `modelPickerTtlMs` | `900000` | `/model` 选择卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 | `permissionPickerTtlMs` | `900000` | `/permissions` 三档权限卡片的签名提交有效期；范围 1 分钟至 24 小时 |
 | `toolApprovalTtlMs` | `300000` | 当前 open turn 的即时工具审批有效期；范围 1 秒至 5 分钟 |
@@ -190,7 +190,9 @@ DSH `0.1.2-rc.1` 的 `ctx.userQuestions.ask()` 会把带 `agent` 的请求派发
 Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正文超过 `maxTextBytes` 时，Delivery 默认在同一 session 中发起最多两轮后台恢复：先续写缺失部分；若仍未结束，最后一次机会优先根据当前请求和其后全部已有回答片段压缩为预算内的完整答案，不会把同一长会话中更早已完成的任务混入结论。空回答会重新生成，首轮即超长的回答会直接压缩。每个片段先持久化，再开始下一轮；恢复轮沿用已经选定的 provider、model 和 effort，但 source 明确标记为 Delivery 的内部 notice。恢复轮禁止工具执行：DSH `0.1.2-rc.1` 仍可能把 scoped tool schema 序列化给 provider，但任何调用都会在审批和执行前被拒绝，并立即结束该恢复轮；工具状态也不会展示给用户，后续恢复仍受同一总轮数限制。最终只投递一次合并后的完整回复并标记完成，不需要用户发送”继续”。
 后台恢复是新的、有界模型 turn，可能产生额外模型用量，不是对同一个已提交请求的透明重试。若恢复轮失败或次数耗尽、没有新增正文，或已经持久化但无法建立安全调度边界，Delivery 才保留当前最佳正文、附加明确的未完成提示并标记失败；完全没有可用正文时发送重试提示。失败提示不再要求用户发送“继续”这类协议词。若任何片段无法确认持久化，则不投递该结果，也不宣称完成。这些失败回复不会进入 completed-turn preference projection。`agentMaxAutoContinuationTurns` 设为 `0` 时保留直接失败提示行为。
 
-`agentGoalContinuationTimeoutMs` 当前为默认关闭的 WIP，尚未完成运行时验收，请保持为 `0`。实现尝试在原 Session 保留 Agent 并等待原生目标驱动续跑；当前等待在普通回复入队前，顺序仍待核对。轮次仍由 DSH 的 `maxGoalRounds` 限制。此阶段占用当前任务的串行执行位置，并会产生额外模型和工具用量；时间上限不是 token 或费用硬上限。护栏清理顺序、终态授权检查及超时/停止/撤权行为仍待修复验证，详见 [交接记录](../../docs/autonomy-handoff-2026-09-06.md)。该配置不提供跨日后台调度、跨 Session 目标迁移或独立的目标达成验收。
+`agentGoalContinuationTimeoutMs` 默认是 `0`，保持既有的前台回复后立即释放 Agent 行为。设为正值时，Delivery 先完成并入队原始前台回复，再保留同一 Session、Agent 与已固定的 GoalId，让 Host 的原生 `goal-round-driver` 在其自己的调度边界续跑；Delivery 不创建目标轮、不接管轮次，累计上限仍由 DSH 的 `maxGoalRounds` 限制。原回复只是该入站任务的结果，绝不表示业务目标已经达成。
+
+续跑占用当前任务的串行位置，可能产生额外模型和工具用量；时间上限不是 token 或费用硬上限。每个目标模型步骤以及工具执行前都会重查当前入站授权。目标自然停止前以及实际 teardown 完成后同样重查授权和取消信号；读取失败、替换 GoalId、超时、disposer 失败、`/stop`、`/new` 或授权撤销均记录为 non-quiescent 的未知结果，并取消该目标的后续续跑。续跑的剩余时间上限也约束 Agent teardown：超时和取消不会等待不响应取消的工具、`whenIdle()` 或 disposer；即使 Delivery 已返回，护栏仍保留到异步 Agent disposer 实际 settle（成功或失败），防止迟到的模型或工具动作越过撤权边界。该配置不提供跨日后台调度、跨 Session 目标迁移或独立的目标达成验收。
 
 `/feedback` 的完整固定语法如下；不接受附件或额外自由文本：
 
