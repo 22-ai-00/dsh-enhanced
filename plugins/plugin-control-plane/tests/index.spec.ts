@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { discover, exampleIntegrityPinnedCatalog, loadCatalog, loadCatalogWithMetadata, name, parseCatalog, version } from '../src/index.ts'
-import { chmod, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -80,7 +80,11 @@ describe('dsh-enhanced-plugin-control-plane', () => {
   })
 
   it('accepts only owner-controlled regular catalog files and rejects writable aliases', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'plugin-control-catalog-owner-'))
+    // The parent must be canonical so that only the deliberate `alias` symlink
+    // below exercises the loader's symlink rejection. On macOS `os.tmpdir()`
+    // resolves through `/var -> /private/var`, which would otherwise reject the
+    // legitimate `target` read too.
+    const root = await mkdtemp(join(await realpath(tmpdir()), 'plugin-control-catalog-owner-'))
     try {
       const target = join(root, 'catalog.json')
       await writeFile(target, JSON.stringify({ schemaVersion: 1, entries: [] }), { mode: 0o600 })

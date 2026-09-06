@@ -48,10 +48,24 @@ const signatureDigest = (signature: string): string => createHash('sha256').upda
 let cachedInterpreter: { path: string; sha256: string } | undefined
 let cachedInterpreterRoot: string | undefined
 
+/**
+ * Create a temporary directory whose path is already canonical.
+ *
+ * The production loaders require `realpath(path) === resolve(path)` so that a
+ * symlinked component can never redirect a trusted read. On macOS `os.tmpdir()`
+ * is itself reached through the `/var -> /private/var` symlink, so a raw
+ * `mkdtemp(tmpdir())` root would fail that check for reasons unrelated to the
+ * behaviour under test. Canonicalising the parent keeps the fixtures portable
+ * without weakening the assertion.
+ */
+async function canonicalMkdtemp(prefix: string): Promise<string> {
+  return await mkdtemp(join(await realpath(tmpdir()), prefix))
+}
+
 async function fixtureInterpreter(): Promise<{ path: string; sha256: string }> {
   if (cachedInterpreter !== undefined) return cachedInterpreter
   const sourcePath = await realpath(process.execPath)
-  const root = await mkdtemp(join(tmpdir(), 'plugin-release-node-')); await chmod(root, 0o700)
+  const root = await canonicalMkdtemp('plugin-release-node-'); await chmod(root, 0o700)
   const path = join(root, 'node')
   await copyFile(sourcePath, path); await chmod(path, 0o700)
   cachedInterpreterRoot = root
@@ -360,7 +374,7 @@ function signedReconciliationReceipt(
 }
 
 async function artifactFixture(): Promise<SourceReleaseArtifact> {
-  const root = await mkdtemp(join(tmpdir(), 'plugin-release-artifacts-')); roots.push(root)
+  const root = await canonicalMkdtemp('plugin-release-artifacts-'); roots.push(root)
   await chmod(root, 0o700)
   const tarballPath = join(root, 'health-helper.tgz')
   const sbomPath = join(root, 'sbom.json')
@@ -394,7 +408,7 @@ async function artifactFixture(): Promise<SourceReleaseArtifact> {
 }
 
 async function catalogAdmissionFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'plugin-release-catalog-receipt-')); roots.push(root); await chmod(root, 0o700)
+  const root = await canonicalMkdtemp('plugin-release-catalog-receipt-'); roots.push(root); await chmod(root, 0o700)
   const catalogPath = join(root, 'catalog.json')
   const policy: SourceReleasePolicy = { ...releasePolicy, catalogPath }
   const uncheckedPlan = sourcePlan({ status: 'awaiting-catalog-admission' })
@@ -482,7 +496,7 @@ async function realAdapterInvocationFixture(replaceDuringCapabilities = false): 
   receipt: SourceReleaseReceipt
   markerPath: string
 }> {
-  const root = await mkdtemp(join(tmpdir(), 'plugin-release-invocation-')); roots.push(root); await chmod(root, 0o700)
+  const root = await canonicalMkdtemp('plugin-release-invocation-'); roots.push(root); await chmod(root, 0o700)
   const dshHome = join(root, 'dsh-home'); await mkdir(dshHome, { mode: 0o700 })
   const catalogPath = join(root, 'catalog.json'); await writeFile(catalogPath, '{"schemaVersion":1,"entries":[]}', { mode: 0o600 })
   const artifact = await artifactFixture()
@@ -1036,7 +1050,7 @@ interface TrustKeyFixture {
 }
 
 async function trustFixture() {
-  const root = await mkdtemp(join(tmpdir(), 'plugin-release-trust-')); roots.push(root); await chmod(root, 0o700)
+  const root = await canonicalMkdtemp('plugin-release-trust-'); roots.push(root); await chmod(root, 0o700)
   const dshHome = join(root, 'dsh-home'); await mkdir(dshHome, { mode: 0o700 })
   const executorPath = join(root, 'executor'); const executorBytes = Buffer.from('native executor fixture')
   await writeFile(executorPath, executorBytes, { mode: 0o700 }); await chmod(executorPath, 0o700)
