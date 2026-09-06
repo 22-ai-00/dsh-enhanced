@@ -44,9 +44,11 @@
 
 存在实现依赖时按工作包继续推进，不能把等待外部部署或长期观察当成整个开发停摆的理由。真实运行依赖的具体账号、目标资源或授权只在必要时询问；仓库实现与可复现的本地验证先完成。
 
+外部审查的逐项处理见 [外部审查吸纳与验证](external-audit-triage-2026-09-06.md)。在 03 开始前先修复已复现的凭据交付竞态、attestor 路径替换、安装版本混用、调度重叠语义、ACP 协议、Health 指标与 Lark 请求期限问题；这批基础修复不替代任何完整工作包。core 本地身份/审批、Memory retention 生产入口、Wiki 分区和 unknown-send 恢复仍须按真实产品路径验收。
+
 ## 当前证据与后续动作
 
-- 起点：`dev`，工作区干净，基线 `1b65852`。已有 23 个插件和 2 个共享库；安装器已有场景组合、真实 Host 激活检查和服务诊断，应该继续扩展这些入口。
+- 起点：`dev`，工作区干净，基线 `1b65852`。已有 22 个插件和 2 个共享库（本轮以实际 package 清单复核，修正此前的 23 个误计）；安装器已有场景组合、真实 Host 激活检查和服务诊断，应该继续扩展这些入口。
 - 01 已验证，提交 `6b82214`、`0c6e850`：exact-run canonical 查询，schema v11 保存任务版本/digest/inspection watermark，晋升在 Evaluation 写锁内复核并激活。保持任务身份不变时使用当前 scope watermark，避免其他任务的新证据卡住候选；与 Evolution 共用同一证据校验和锁，只由依赖 Evolution 投递的消费者等待其 outbox。历史 v10 proof 不授予晋升权限。
 - 01 行为覆盖：owner 冲突、inspection 后纠正、取锁前纠正、持锁期间竞争写、旧成功冷恢复、合法回执重放、真实 promotion 版本迁移、旧 schema 升级、错误 scope/run、独立组合没有 Evolution、同 scope 的无关任务进展。Automations 209、Evaluation 36、Growth 14 项包测试通过；两轮独立审查修复了 promotion 后 replay 失效问题，最终规格与质量均通过。
 - 安装诊断修复 `b6cb037`：区分端口冲突、权限拒绝和其他网络错误，避免把沙箱 `EPERM` 错报为端口占用；64 项安装器回归通过，新 profile 测试在允许本机监听后通过，独立复核通过。Growth Experiments 目录已与 supervised 安装场景对齐；完整安装工作包仍未完成。
@@ -62,6 +64,8 @@
 - 02 推广后验证：实际 Coordinator 调度、Evaluation 变更/卸载、重启均重查 canonical canary；负向/未知/冲突证据暂停 exact 部署版本，新增正向证据保持有效部署。晋升、回滚及激活回执丢失恢复都原子保存 artifact 与 receipt。7 条真实服务栈回归覆盖撤回、纠正、失 ACK、服务缺失和提交后崩溃恢复；两轮独立审查发现并修复了 lineage、失败重放、升级与原子提交窗口问题，最终全部通过。
 - 本批最终工程验证：在 `2780fdf` 代码上执行根 `pnpm check`，持久退出码为 0（本机日志 `/tmp/dsh-autonomy-check-v6.log`，退出码 `/tmp/dsh-autonomy-check-v6.exit`）。manifest、零 lint 警告、所有包类型检查、主测试 200 文件/2,928 测试通过（4 文件/81 测试跳过）、递归包测试、完整构建与全部 dry-run pack 通过。之后仅更新账本。此前 v5 已输出全部打包结果，但跨轮后句柄丢失，故未将它当作有明确退出码的最终证据。
 - 下一项：03 的独立结果验证与 04 的比较基线。03 须覆盖执行前不可变契约、独立代码行为/文档引用/目标回读、前台及 Automation 生产入口和 unknown 后续验证；私有 Host capability 不能冒充 08–10 的操作系统隔离。其余工作包完整保留。
+- 外部审查修复批次：凭据交付前重新检查 lease；Host attestor 绑定已验证文件描述符；调度取消及 queue-one 按 occurrence 时间与 preview/production 域处理；ACP code/ptc 与 stop reason 映射；Lark 操作级 deadline 贯穿 token 后资源请求；Evolution 完整性指标进入 Health；安装选定同一精确 npm cohort 并在修改 profile 前预检，远程 bootstrap 保持发布标签对应哈希。全仓检查另暴露并修复 Delivery 并发开库的 WAL 转换锁竞态。各项经独立复核，细节与限制见外部审查记录。
+- 本批最终本机工程验证：冻结实现后执行根 `pnpm check`，退出码 0（`/tmp/dsh-autonomy-audit-check-v2.log` 与 `.exit`）。manifest 确认 22 个插件、2 个共享库；零 lint 警告、所有类型检查、主测试 201 文件/2,966 测试通过（4 文件/82 测试跳过）、递归包测试、完整构建与全部 dry-run pack 通过。首次检查的真实 WAL 锁失败已修复，未将失败运行当作最终证据。随后因 GitHub OAuth 缺少 `workflow` scope，移除本轮 CI 配置改动并保留既有 workflow，只更新文档说明；产品代码不变。本机 macOS 跳过的 Linux 实际进程验证、真实飞书/远端发布及长期收益仍未完成。
 
 ## 完成审计
 

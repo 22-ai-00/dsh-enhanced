@@ -89,7 +89,7 @@ Options:
 EOF
   if [[ "$source_mode" == 'npm' ]]; then
     cat <<'EOF'
-  --plugin-version <value>  Version/tag applied to every @dsh-enhanced package (default: latest)
+  --plugin-version <value>  Exact version or npm dist-tag for one @dsh-enhanced cohort (default: latest)
 EOF
   fi
   cat <<'EOF'
@@ -763,6 +763,83 @@ dsh_enhanced_detect_traex_command() {
 # Mirror model-setup.ts's AGENT_ROUTES so the shell can branch without Node.
 dsh_enhanced_is_agent_route() {
   [[ "$1" == 'traex-agent' ]]
+}
+
+# npm resolves a dist-tag (including `latest`) independently for every package.
+# Resolve it once from the meta bundle, then make the whole install cohort use
+# that exact version.  Tags stay supported for callers that deliberately use a
+# release channel; ranges are rejected because they cannot describe one cohort.
+dsh_enhanced_is_exact_plugin_version() {
+  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+}
+
+dsh_enhanced_validate_plugin_selector() {
+  local selector="$1"
+  if dsh_enhanced_is_exact_plugin_version "$selector"; then return 0; fi
+  # npm dist-tags are deliberately a narrow token here.  It keeps existing tag
+  # support without accepting a range or a selector that is ambiguous in a
+  # package spec.  Arguments are still passed as separate argv values.
+  if [[ "$selector" =~ ^[A-Za-z][A-Za-z0-9._-]*$ ]]; then return 0; fi
+  dsh_enhanced_fail 2 '插件版本必须是精确 SemVer 或 npm dist-tag；不支持 range。'
+  return $?
+}
+
+dsh_enhanced_npm_exact_version_from_json() {
+  local raw="$1"
+  node -e '
+    const parsed = JSON.parse(process.argv[1])
+    if (typeof parsed !== "string") process.exit(1)
+    process.stdout.write(parsed)
+  ' "$raw"
+}
+
+dsh_enhanced_resolve_npm_cohort() {
+  local selector="$1"
+  local dry_run="$2"
+  shift 2
+  local anchor='@dsh-enhanced/personal-assistant'
+  local slug package_spec raw resolved available
+  DSH_ENHANCED_RESOLVED_PLUGIN_VERSION=''
+  dsh_enhanced_validate_plugin_selector "$selector" || return $?
+
+  if [[ "$dry_run" == '1' ]]; then
+    if dsh_enhanced_is_exact_plugin_version "$selector"; then
+      DSH_ENHANCED_RESOLVED_PLUGIN_VERSION="$selector"
+      printf 'npm cohort（dry-run）：将核验所有 bundle 都已发布为 %s；不会访问 npm registry。\n' "$selector"
+    else
+      DSH_ENHANCED_RESOLVED_PLUGIN_VERSION="<npm-anchor:$selector>"
+      printf 'npm cohort（dry-run）：将先解析 %s@%s 的精确版本，再核验所有 bundle；不会访问 npm registry。\n' \
+        "$anchor" "$selector"
+    fi
+    return 0
+  fi
+
+  package_spec="$anchor@$selector"
+  if ! raw="$(npm view "$package_spec" version --json)"; then
+    dsh_enhanced_fail 1 "无法从 npm 解析 $package_spec 的版本。"
+    return $?
+  fi
+  if ! resolved="$(dsh_enhanced_npm_exact_version_from_json "$raw")" \
+    || ! dsh_enhanced_is_exact_plugin_version "$resolved"; then
+    dsh_enhanced_fail 1 "npm 为 $package_spec 返回了无效的版本数据。"
+    return $?
+  fi
+
+  printf 'npm cohort：%s@%s 解析为精确版本 %s。\n' "$anchor" "$selector" "$resolved"
+  for slug in "$@"; do
+    package_spec="@dsh-enhanced/$slug@$resolved"
+    if ! raw="$(npm view "$package_spec" version --json)"; then
+      dsh_enhanced_fail 1 "npm 未发布所需 cohort bundle：$package_spec。尚未修改 profile。"
+      return $?
+    fi
+    if ! available="$(dsh_enhanced_npm_exact_version_from_json "$raw")" \
+      || [[ "$available" != "$resolved" ]]; then
+      dsh_enhanced_fail 1 "npm 未发布所需 cohort bundle：$package_spec。尚未修改 profile。"
+      return $?
+    fi
+  done
+  DSH_ENHANCED_RESOLVED_PLUGIN_VERSION="$resolved"
+  printf 'npm cohort：已核验 %s 个 bundle 均为 %s；现在才会修改 profile。\n' "$#" "$resolved"
 }
 
 # Ensure the provider bundle backing an agent route is installed into the
@@ -2059,9 +2136,8 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 'DSH_ENHANCED_WEB_PORT 必须是 1..65535。'
     return $?
   fi
-  if [[ "$source_mode" == 'npm' && ( -z "$plugin_version" || "$plugin_version" == -* ) ]]; then
-    dsh_enhanced_fail 2 '插件版本值不合法。'
-    return $?
+  if [[ "$source_mode" == 'npm' ]]; then
+    dsh_enhanced_validate_plugin_selector "$plugin_version" || return $?
   fi
 
   local dsh_home="${DSH_HOME:-$HOME/.dsh}"
@@ -2168,6 +2244,42 @@ dsh_enhanced_install() {
     fi
   fi
 
+  # Resolve an interactive model choice before forming the npm cohort.  In
+  # particular, choosing TraeX must add its provider to the same preflight as
+  # every other bundle; otherwise a partially published provider could fail
+  # only after the core profile had already changed.
+  if [[ -n "$model_provider" ]]; then
+    model_mode='configure'
+  fi
+  local model_configured='0'
+  local agent_route_verified='0'
+  local agent_login_verified='0'
+  if [[ "$dry_run" != '1' ]] && dsh_enhanced_model_is_configured "$profile" "$dsh_home"; then
+    model_configured='1'
+  fi
+  if [[ "$model_mode" == 'auto' ]]; then
+    if [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
+      # Non-interactive runs never invent a route: keep whatever the profile
+      # already composes (the built-in deepseek-official default at minimum).
+      model_mode='skip'
+    else
+      model_mode="$(dsh_enhanced_choose_model_mode "$model_configured")" || {
+        dsh_enhanced_fail 2 '模型配置选项无效。'
+        return $?
+      }
+    fi
+  fi
+  if [[ "$model_mode" == 'configure' && -z "$model_provider" ]]; then
+    if [[ "$dry_run" == '1' || ( ! -t 0 || ! -t 1 ) ]]; then
+      dsh_enhanced_fail 2 '非交互配置模型需要 --model-provider（自定义网关还需 --model-name 与 --model-base-url）。'
+      return $?
+    fi
+    dsh_enhanced_prompt_model_route model_provider model_name model_base_url model_api model_display_name || {
+      dsh_enhanced_fail 2 '模型配置输入无效。'
+      return $?
+    }
+  fi
+
   local selected_slugs=()
   local slug
   local existing_slug
@@ -2231,6 +2343,14 @@ dsh_enhanced_install() {
     dsh_enhanced_append_slug 'assistant-evaluation'
   fi
 
+  local resolved_plugin_version="$plugin_version"
+  if [[ "$source_mode" == 'npm' ]]; then
+    # Do this before `dsh plugin add`: a partially published release must fail
+    # as a unit instead of leaving a profile with independently resolved tags.
+    dsh_enhanced_resolve_npm_cohort "$plugin_version" "$dry_run" "${selected_slugs[@]}" || return $?
+    resolved_plugin_version="$DSH_ENHANCED_RESOLVED_PLUGIN_VERSION"
+  fi
+
   local targets=()
   for slug in "${selected_slugs[@]}"; do
     if [[ "$source_mode" == 'local' ]]; then
@@ -2241,7 +2361,7 @@ dsh_enhanced_install() {
       fi
       targets+=("$plugin_path")
     else
-      targets+=("@dsh-enhanced/$slug@$plugin_version")
+      targets+=("@dsh-enhanced/$slug@$resolved_plugin_version")
     fi
   done
 
@@ -2301,48 +2421,11 @@ dsh_enhanced_install() {
     dsh_enhanced_apply_supervised_growth "$profile" "$dsh_home" "$ack_existing_automations" "$dry_run" || return $?
   fi
 
-  # Configure the deployment default model before offering a route check.  An
-  # explicit --model-provider is a non-interactive configure; otherwise --model
-  # (default auto) decides, detecting whether the composed profile already
-  # resolves a usable provider/model so a returning owner is not re-prompted.
-  if [[ -n "$model_provider" ]]; then
-    model_mode='configure'
-  fi
-  local model_configured='0'
-  local agent_route_verified='0'
-  local agent_login_verified='0'
-  if [[ "$dry_run" != '1' ]] && dsh_enhanced_model_is_configured "$profile" "$dsh_home"; then
-    model_configured='1'
-  fi
-  if [[ "$model_mode" == 'auto' ]]; then
-    if [[ "$assume_yes" == '1' || ! -t 0 || ! -t 1 ]]; then
-      # Non-interactive runs never invent a route: keep whatever the profile
-      # already composes (the built-in deepseek-official default at minimum).
-      model_mode='skip'
-    else
-      model_mode="$(dsh_enhanced_choose_model_mode "$model_configured")" || {
-        dsh_enhanced_fail 2 '模型配置选项无效。'
-        return $?
-      }
-    fi
-  fi
   if [[ "$model_mode" == 'configure' ]]; then
-    if [[ -z "$model_provider" ]]; then
-      if [[ "$dry_run" == '1' || ( ! -t 0 || ! -t 1 ) ]]; then
-        # Without an explicit --model-provider there is nothing to write in a
-        # non-interactive or dry-run configure; guide the owner to the flags.
-        dsh_enhanced_fail 2 '非交互配置模型需要 --model-provider（自定义网关还需 --model-name 与 --model-base-url）。'
-        return $?
-      fi
-      dsh_enhanced_prompt_model_route model_provider model_name model_base_url model_api model_display_name || {
-        dsh_enhanced_fail 2 '模型配置输入无效。'
-        return $?
-      }
-    fi
-    # An agent route chosen interactively (or after the main install set) may
-    # not have had its provider bundle selected above; ensure it is present.
+    # A TraeX provider selected above is already in the preflighted cohort;
+    # keep this idempotent check for a pre-existing installed profile.
     dsh_enhanced_ensure_agent_bundle "$model_provider" "$profile" "$dsh_home" \
-      "$source_mode" "$repo_root" "$plugin_version" "$dry_run" || return $?
+      "$source_mode" "$repo_root" "$resolved_plugin_version" "$dry_run" || return $?
 
     if dsh_enhanced_is_agent_route "$model_provider"; then
       if [[ "$model_route_mode" == 'auto' ]]; then

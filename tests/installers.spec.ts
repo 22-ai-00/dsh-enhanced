@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +20,14 @@ const npmInstaller = join(installDirectory, 'install-npm.sh')
 const restartScript = join(installDirectory, 'restart.sh')
 const installerLibrary = join(installDirectory, 'common.sh')
 const temporaryRoots: string[] = []
+const pinnedInstallerSource = readFileSync(npmInstaller, 'utf8')
+const pinnedReleaseRef = pinnedInstallerSource.match(/^DSH_ENHANCED_PINNED_RELEASE_REF='([^']+)'$/mu)?.[1]
+const pinnedRemoteCommon = pinnedReleaseRef === undefined ? undefined : spawnSync('git', [
+  'show', `${pinnedReleaseRef}:scripts/install/common.sh`,
+], {
+  cwd: repoRoot,
+  encoding: 'buffer',
+})
 
 /**
  * Run an installer entry point.
@@ -105,6 +114,24 @@ describe('one-click installers', () => {
     expect(source).toContain('if [[ -n "${selected_slugs[0]+set}" ]]')
     expect(source).toContain('if [[ -n "${add_ons[0]+set}" ]]')
     expect(source).toContain('${overlay_args[@]+"${overlay_args[@]}"}')
+  })
+
+  test.skipIf(pinnedRemoteCommon === undefined || pinnedRemoteCommon.status !== 0)('remote bootstrap hash matches its pinned release asset when that tag is available locally', async () => {
+    // A shallow checkout may not contain release tags.  The test deliberately
+    // skips there instead of using the network; release-version fixture tests
+    // separately cover future pin rewriting.
+    const pinnedHash = pinnedInstallerSource.match(/^DSH_ENHANCED_PINNED_COMMON_SHA256='([0-9a-f]{64})'$/mu)?.[1]
+
+    expect(pinnedHash).toBe(createHash('sha256').update(pinnedRemoteCommon!.stdout).digest('hex'))
+  })
+
+  test('collects an interactive model route before its npm cohort is preflighted', async () => {
+    const source = await readFile(installerLibrary, 'utf8')
+    const routeSelection = source.indexOf('dsh_enhanced_prompt_model_route model_provider model_name model_base_url model_api model_display_name')
+    const cohortPreflight = source.indexOf('dsh_enhanced_resolve_npm_cohort "$plugin_version" "$dry_run"')
+
+    expect(routeSelection).toBeGreaterThan(-1)
+    expect(cohortPreflight).toBeGreaterThan(routeSelection)
   })
 
   test('local installer defaults to the safe core scenario with capability discovery and excludes optional bundles', async () => {
@@ -206,7 +233,200 @@ describe('one-click installers', () => {
     expect(result.stdout).not.toContain('@dsh-enhanced/hello@')
   })
 
-  test('npm supervised install defaults every required bundle to latest', async () => {
+  test('npm cohort preflight resolves latest once from the personal-assistant anchor and verifies every bundle', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'npm.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+printf '%s\\n' "$*" >> "$NPM_LOG"
+case "$1" in
+  view)
+    case "$2" in
+      @dsh-enhanced/personal-assistant@latest|@dsh-enhanced/personal-assistant@1.4.0|@dsh-enhanced/plugin-control-plane@1.4.0|@dsh-enhanced/traex-acp-provider@1.4.0)
+        printf '%s\\n' '"1.4.0"'
+        ;;
+      *) exit 9 ;;
+    esac
+    ;;
+  *) exit 9 ;;
+esac
+`)
+
+    const result = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_resolve_npm_cohort "$2" "$3" personal-assistant plugin-control-plane traex-acp-provider; printf "resolved=%s\\n" "$DSH_ENHANCED_RESOLVED_PLUGIN_VERSION"',
+      'installer-test', installerLibrary, 'latest', '0',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NPM_LOG: logPath },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('resolved=1.4.0')
+    expect(await readFile(logPath, 'utf8')).toBe([
+      'view @dsh-enhanced/personal-assistant@latest version --json',
+      'view @dsh-enhanced/personal-assistant@1.4.0 version --json',
+      'view @dsh-enhanced/plugin-control-plane@1.4.0 version --json',
+      'view @dsh-enhanced/traex-acp-provider@1.4.0 version --json',
+      '',
+    ].join('\n'))
+  })
+
+  test('npm cohort preflight rejects a partial publication before any profile command can run', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'npm.log')
+    const profileLogPath = join(root, 'profile.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+printf '%s\\n' "$*" >> "$NPM_LOG"
+case "$2" in
+  @dsh-enhanced/personal-assistant@latest|@dsh-enhanced/personal-assistant@1.4.0|@dsh-enhanced/plugin-control-plane@1.4.0)
+    printf '%s\\n' '"1.4.0"'
+    ;;
+  @dsh-enhanced/assistant-delivery@1.4.0)
+    printf '%s\\n' '"1.3.9"'
+    ;;
+  *) exit 9 ;;
+esac
+`)
+
+    const result = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_resolve_npm_cohort latest 0 personal-assistant plugin-control-plane assistant-delivery || exit $?; printf profile-mutated >> "$PROFILE_LOG"',
+      'installer-test', installerLibrary,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NPM_LOG: logPath, PROFILE_LOG: profileLogPath },
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('@dsh-enhanced/assistant-delivery@1.4.0')
+    await expect(readFile(profileLogPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('npm cohort preflight resolves the same anchor again on a repeated install', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'npm.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+printf '%s\\n' "$*" >> "$NPM_LOG"
+printf '%s\\n' '"1.4.0"'
+`)
+
+    const result = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_resolve_npm_cohort latest 0 personal-assistant plugin-control-plane && dsh_enhanced_resolve_npm_cohort latest 0 personal-assistant plugin-control-plane',
+      'installer-test', installerLibrary,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NPM_LOG: logPath },
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect((await readFile(logPath, 'utf8')).match(/@latest version --json/g)?.length).toBe(2)
+    expect((await readFile(logPath, 'utf8')).match(/@1\.4\.0 version --json/g)?.length).toBe(4)
+  })
+
+  test('npm cohort preflight keeps an explicit exact version and makes dry-run registry-free', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'npm.log')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+printf '%s\\n' "$*" >> "$NPM_LOG"
+case "$2" in
+  @dsh-enhanced/personal-assistant@1.4.0|@dsh-enhanced/plugin-control-plane@1.4.0) printf '%s\\n' '"1.4.0"' ;;
+  *) exit 9 ;;
+esac
+`)
+
+    const explicit = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_resolve_npm_cohort 1.4.0 0 personal-assistant plugin-control-plane; printf "resolved=%s\\n" "$DSH_ENHANCED_RESOLVED_PLUGIN_VERSION"',
+      'installer-test', installerLibrary,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NPM_LOG: logPath },
+    })
+    const dryRun = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_resolve_npm_cohort latest 1 personal-assistant plugin-control-plane; printf "resolved=%s\\n" "$DSH_ENHANCED_RESOLVED_PLUGIN_VERSION"',
+      'installer-test', installerLibrary,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NPM_LOG: logPath },
+    })
+    const environmentDefault = spawnSync('/bin/bash', [
+      npmInstaller, '--dry-run', '--lark', 'skip',
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: {
+        PATH: `${fakeBin}:${process.env.PATH ?? ''}`,
+        DSH_HOME: join(root, 'dsh-home'),
+        DSH_ENHANCED_VERSION: '1.4.0',
+        NPM_LOG: logPath,
+      },
+    })
+
+    expect(explicit.status, explicit.stderr).toBe(0)
+    expect(explicit.stdout).toContain('resolved=1.4.0')
+    expect(await readFile(logPath, 'utf8')).toContain('view @dsh-enhanced/personal-assistant@1.4.0 version --json')
+    expect(dryRun.status, dryRun.stderr).toBe(0)
+    expect(dryRun.stdout).toContain('resolved=<npm-anchor:latest>')
+    expect(dryRun.stdout).toContain('不会访问 npm registry')
+    expect(environmentDefault.status, environmentDefault.stderr).toBe(0)
+    expect(environmentDefault.stdout).toContain('@dsh-enhanced/personal-assistant@1.4.0')
+    expect((await readFile(logPath, 'utf8')).match(/\n/g)?.length).toBe(3)
+  })
+
+  test('npm cohort preflight rejects malformed registry data and unsafe selectors without running a command', async () => {
+    const root = await temporaryDshHome()
+    const fakeBin = join(root, 'bin')
+    const logPath = join(root, 'npm.log')
+    const markerPath = join(root, 'selector-ran')
+    await mkdir(fakeBin, { recursive: true })
+    await writeExecutable(join(fakeBin, 'npm'), `#!/bin/bash
+printf '%s\\n' "$*" >> "$NPM_LOG"
+printf '%s\\n' '{not-json'
+`)
+
+    const malformed = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_resolve_npm_cohort latest 0 personal-assistant',
+      'installer-test', installerLibrary,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NPM_LOG: logPath },
+    })
+    const unsafe = spawnSync('/bin/bash', [
+      '-c',
+      'source "$1"; dsh_enhanced_resolve_npm_cohort "latest; touch $2" 0 personal-assistant',
+      'installer-test', installerLibrary, markerPath,
+    ], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}`, NPM_LOG: logPath },
+    })
+
+    expect(malformed.status).toBe(1)
+    expect(malformed.stderr).toContain('无效的版本数据')
+    expect(unsafe.status).toBe(2)
+    expect(unsafe.stderr).toContain('不支持 range')
+    await expect(readFile(markerPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(logPath, 'utf8')).toBe('view @dsh-enhanced/personal-assistant@latest version --json\n')
+  })
+
+  test('npm supervised dry-run describes one unresolved anchor cohort for every required bundle', async () => {
     const dshHome = await temporaryDshHome()
     const installer = await readFile(npmInstaller, 'utf8')
     const release = installer.match(/^DSH_ENHANCED_PINNED_RELEASE_REF='v([^']+)'$/mu)?.[1]
@@ -219,7 +439,8 @@ describe('one-click installers', () => {
     expect(result.status, result.stderr).toBe(0)
     const selected = [...result.stdout.matchAll(/@dsh-enhanced\/([a-z0-9-]+)@([^\s]+)/gu)]
     expect(selected.length).toBeGreaterThan(0)
-    expect(new Set(selected.map(match => match[2]))).toEqual(new Set(['latest']))
+    expect(result.stdout).toContain('npm cohort（dry-run）：将先解析 @dsh-enhanced/personal-assistant@latest 的精确版本')
+    expect(result.stdout).toContain('<npm-anchor:latest>')
     const slugs = new Set(selected.map(match => match[1]))
     for (const required of [
       'personal-assistant', 'assistant-delivery', 'assistant-evaluation',

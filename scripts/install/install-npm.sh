@@ -9,11 +9,12 @@ DSH_ENHANCED_PINNED_RELEASE_REF='v0.1.24'
 DSH_ENHANCED_PINNED_COMMON_SHA256='2ef41724f752a9030a158822288d0e3326e7b046102ead5013594679120ba821'
 DSH_ENHANCED_PINNED_VERIFIED_HOST_RANGE='>=0.1.0-rc.8'
 
-# Bundles default to npm `latest` (resolved in common.sh) so every install picks
-# up the newest published @dsh-enhanced/* release without waiting for an
-# installer refresh. Override with --plugin-version or DSH_ENHANCED_VERSION to
-# pin a specific tag. The pinned ref, SHA-256, and host range above stay aligned
-# with the fixed release used by the remote fallback.
+# The local checkout's common.sh resolves npm `latest` once from the
+# personal-assistant anchor. The remote fallback intentionally stays on the
+# released ref above until release:prepare updates this ref and digest together.
+# Override with --plugin-version or DSH_ENHANCED_VERSION using an exact version
+# or dist-tag. The pinned ref, SHA-256, and host range above stay aligned with
+# the fixed release used by the remote fallback.
 
 SCRIPT_DIRECTORY=''
 if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" ]]; then
