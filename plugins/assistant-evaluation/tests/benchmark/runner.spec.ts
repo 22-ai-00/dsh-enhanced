@@ -23,6 +23,17 @@ function observed(request: BenchmarkExecutionRequest): BenchmarkObservation {
 }
 
 describe('durable benchmark controller', () => {
+  it('supports explicitly unpriced token budgets without inventing a monetary measurement', async () => {
+    const store = new BenchmarkStore(':memory:')
+    const input = plan(); input.budget.costUsdMicros = null
+    try {
+      const results = await runBenchmark(store, input, { async execute(request) {
+        const value = observed(request); value.metrics.costUsdMicros = null; return value
+      } })
+      expect(results).toHaveLength(4)
+      expect(results.every(result => result.status === 'completed' && result.metrics.costUsdMicros === null)).toBe(true)
+    } finally { store.close() }
+  })
   it('records intent before dispatch and never replays completed cells', async () => {
     const store = new BenchmarkStore(':memory:')
     try {

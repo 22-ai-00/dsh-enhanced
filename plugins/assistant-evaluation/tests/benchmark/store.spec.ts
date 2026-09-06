@@ -2,7 +2,7 @@ import { chmodSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { BenchmarkStore } from '../../src/benchmark/store.ts'
 import { benchmarkSchedule } from '../../src/benchmark/schema.ts'
 import type { BenchmarkPlan, BenchmarkResult } from '../../src/benchmark/types.ts'
@@ -25,6 +25,14 @@ const result = (input: BenchmarkPlan, index: number, startedAt = 10): BenchmarkR
 })
 
 describe('BenchmarkStore', () => {
+  test('does not promote foreign database errors into public diagnostics', () => {
+    const store = new BenchmarkStore(join(root(), 'benchmark.sqlite'))
+    const injected = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementationOnce(() => { throw new Error('SECRET_SQLITE_SENTINEL') })
+    try {
+      expect(() => store.create(plan())).toThrow(/^benchmark journal transaction unavailable$/u)
+    } finally { injected.mockRestore(); store.close() }
+  })
+
   test('freezes a plan and replays the same manifest only', () => {
     const store = new BenchmarkStore(join(root(), 'benchmark.sqlite'))
     const input = plan()
