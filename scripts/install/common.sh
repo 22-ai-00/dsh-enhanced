@@ -1257,8 +1257,24 @@ dsh_enhanced_check_web_port_available() {
     dsh_enhanced_fail 2 'Web 端口必须是 1..65535。'
     return $?
   fi
-  if ! node -e "const net=require('node:net'); const port=Number(process.argv[1]); const server=net.createServer(); server.once('error', error => { process.stderr.write(String(error.message)); process.exit(1) }); server.listen({host:'127.0.0.1',port,exclusive:true}, () => server.close(() => process.exit(0)))" "$port"; then
-    dsh_enhanced_fail 1 "Web 端口 127.0.0.1:$port 已被占用；请先停止冲突服务或为该 profile 配置独立端口。"
+  if ! node - "$port" <<'NODE'
+const net = require('node:net')
+const port = Number(process.argv[2])
+const server = net.createServer()
+server.once('error', error => {
+  const address = `127.0.0.1:${port}`
+  const reason = error.code === 'EADDRINUSE'
+    ? `Web 端口 ${address} 已被占用；请先停止冲突服务或为该 profile 配置独立端口。`
+    : error.code === 'EPERM' || error.code === 'EACCES'
+      ? `当前环境没有监听 Web 端口 ${address} 的权限；请检查沙箱或系统网络限制，并在允许本机监听的环境中重试。`
+      : `无法监听 Web 端口 ${address}；请根据系统错误检查本机网络配置。`
+  process.stderr.write(`${reason}\n系统错误：${error.code ?? 'UNKNOWN'}: ${error.message}\n`)
+  process.exitCode = 1
+})
+server.listen({ host: '127.0.0.1', port, exclusive: true }, () => server.close())
+NODE
+  then
+    dsh_enhanced_fail 1 'Web 端口预检未通过。'
     return $?
   fi
   printf 'doctor：Web 端口 127.0.0.1:%s 可用。\n' "$port"

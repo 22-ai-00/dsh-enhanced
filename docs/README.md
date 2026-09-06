@@ -23,6 +23,7 @@
 
 ## 个人助理设计
 
+- [自治智能体落地与验收账本](agent-autonomy-implementation.md)：完整路线的实现工作包、依赖、当前进度与逐项验收证据。
 - [高智能自治智能体现状与路线](agent-intelligence-autonomy-roadmap-2026-09-06.md)：2026-09-06 源码审计、智能与主动性缺口、高权限隔离设计和分阶段验收。
 - [自主成长专项证据](agent-growth-gap-evidence-2026-09-06.md)：学习真源、工作流实验、晋升与推广后质量反馈的具体实现边界。
 - [插件生态研究与建设清单](dsh-personal-assistant-plugin-landscape.md)：社区方案、能力拆分和风险对照。
