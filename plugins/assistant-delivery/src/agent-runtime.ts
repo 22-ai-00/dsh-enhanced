@@ -66,6 +66,8 @@ import {
   type PermissionDispatchRecovery,
 } from './session-commands.js'
 import { DeliveryStoreError } from './store.js'
+import { DeliverySessionLeases, SessionLeaseUnavailable } from './session-lease-runtime.js'
+import type { SessionLeasePort, SessionExecutionLease } from './session-lease-runtime.js'
 import {
   parseWorkflowCommand,
   workflowCommandUsage,
@@ -99,6 +101,7 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 interface DshDeliveryRuntimeOptions {
+  sessionLease: SessionLeasePort
   sessionNamespace: string
   workspace: string
   agentPreset: string
@@ -1353,12 +1356,20 @@ function finalAssistant(
 export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   readonly dispatchControl = 'explicit' as const
   private readonly activeSessionControls = new Map<string, ActiveSessionControl>()
+  private readonly sessionLeases: DeliverySessionLeases
 
   constructor(
     private readonly ctx: Context,
     private readonly policy: AssistantPolicyService,
     private readonly options: DshDeliveryRuntimeOptions,
-  ) {}
+  ) { this.sessionLeases = new DeliverySessionLeases(ctx, options.sessionLease) }
+
+  private async resumeAgent(options: Parameters<Context['agents']['resume']>[0]): Promise<AgentHandle> {
+    const id = String(options.resumeSessionId)
+    this.sessionLeases.assert(id)
+    try { return await this.ctx.agents.resume(options) }
+    catch (error) { this.sessionLeases.failedResume(id); throw error }
+  }
 
   async cancelActive(binding: Readonly<ConversationBinding>, command: 'new' | 'stop'): Promise<boolean> {
     const sessionId = binding.sessionId
@@ -1375,6 +1386,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       if (!control.controller.signal.aborted) {
         control.controller.abort(new UserSessionCancellation(control.command))
       }
+      this.sessionLeases.cancel(sessionId, new UserSessionCancellation(control.command))
     }
     // `whenIdle()` follows every later wakeup. Waiting on it here lets an
     // unrelated followup keep `/stop` or `/new` alive forever. Clear pending
@@ -1690,7 +1702,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       afterDisposed?.()
       return true
     }
-    const disposal = Promise.resolve().then(() => handle.dispose())
+    const disposal = Promise.resolve().then(() => handle.dispose()).then(() => this.sessionLeases.disposed(handle.agent))
     let clearDeadline: (() => void) | undefined
     const deadline = timeoutMs === undefined
       ? undefined
@@ -1959,6 +1971,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   ): Promise<void> {
     const agent = agentCtx.agent
     if (agent === undefined) throw new Error('assistant-delivery: unpublished Agent identity is missing')
+    this.sessionLeases.attach(agent)
     if (agent.session.header.cwd !== workspace || agent.session.header.agentPreset !== presetId) {
       throw new DurableAgentIdentityError(
         'assistant-delivery: durable Agent identity does not match its conversation binding',
@@ -2010,7 +2023,9 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   }
 
   private async reconcileNativeFullPermissionReviewer(session: Session): Promise<void> {
+    this.sessionLeases.assert(String(session.id))
     const result = await this.policy.reconcileNativeFullReviewer(session)
+    this.sessionLeases.assert(String(session.id))
     if (result === 'unavailable') {
       throw new ApprovalReviewerReaderUnavailableError(
         new Error('assistant-policy: native full reviewer reconciliation is unavailable'),
@@ -2155,7 +2170,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       signal.throwIfAborted()
       await requireWorkspace(binding.workspace)
       signal.throwIfAborted()
-      handle = await agents.resume({
+      handle = await this.resumeAgent({
         resumeSessionId: SessionId(binding.sessionId),
         signal,
         agentOptions: {
@@ -2482,9 +2497,14 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         agentPresets,
       )
     }
+    const lease = this.sessionLeases.open({ kind: 'construction', sessionId: String(id),
+      conversation: input.envelope.conversation, principal: input.envelope.principal,
+      workspace, agentPreset: presetId, generation: input.generation,
+      ...(input.previous === undefined ? {} : { previous: input.previous }) }, input.signal)
     let handle: AgentHandle | undefined
     let adopted = false
     try {
+      lease.dispatch()
       const agentOptions = {
         provider: selected.provider,
         model: selected.model,
@@ -2495,12 +2515,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       const persisted = persistence === undefined
         ? false
-        : (await persistence.list(input.signal)).some(header => String(header.id) === String(id))
+        : (await persistence.list(lease.signal)).some(header => String(header.id) === String(id))
       if (persisted) {
-        handle = await agents.resume({
+        handle = await this.resumeAgent({
           resumeSessionId: id,
           agentOptions,
-          signal: input.signal,
+          signal: lease.signal,
           setup,
         })
         adopted = true
@@ -2510,7 +2530,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           sessionId: id,
           meta: { cwd: workspace, agentPreset: presetId },
           agentOptions,
-          signal: input.signal,
+          signal: lease.signal,
           setup,
         })
       }
@@ -2522,8 +2542,13 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       return { sessionId: String(id), workspace, agentPreset: presetId,
         policyRef: input.previous?.policyRef ?? this.options.policyRef }
+    } catch (error) {
+      if (handle === undefined) this.sessionLeases.failedResume(String(id))
+      throw error
     } finally {
-      await handle?.dispose()
+      try {
+        if (handle !== undefined) { await handle.dispose(); this.sessionLeases.disposed(handle.agent) }
+      } finally { lease.close() }
     }
   }
 
@@ -3006,7 +3031,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         ? binding.agentPreset
         : (await agentPresets.resolve(binding.agentPreset)).id
       await requireWorkspace(binding.workspace)
-      handle = await agents.resume({
+      handle = await this.resumeAgent({
         resumeSessionId: SessionId(binding.sessionId),
         signal,
         agentOptions: {
@@ -3179,18 +3204,43 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         format: 'plain',
       }, outerSignal, markDispatching)
     }
-    const control = this.beginSessionControl(binding.sessionId, outerSignal)
+    let lease: SessionExecutionLease
+    try { lease = this.sessionLeases.open({ kind: 'bound', binding }, outerSignal) }
+    catch (error) {
+      if (error instanceof SessionLeaseUnavailable) {
+        if (error.kind === 'unknown' && !outerSignal.aborted) {
+          try {
+            if (this.options.isInboundAuthorized(binding, envelope)) this.options.replyCommand(binding, envelope.eventId, {
+              text: '上一次执行是否已经停止还无法确认，因此暂时无法继续这个会话。请先核对外部操作；需要独立开始新任务可发送 /new，旧会话会保留。',
+              format: 'plain',
+            })
+          } catch { /* Keep the exact unknown execution diagnostic even if its notice is unavailable. */ }
+        }
+        return {
+          outcome: 'not-processed', failureCode: `session-lease-${error.kind}`,
+          retryable: error.kind === 'busy', retryAfterMs: this.options.sessionLease.leaseMs,
+        }
+      }
+      throw error
+    }
+    let control: ActiveSessionControl | undefined
     try {
+      control = this.beginSessionControl(binding.sessionId, lease.signal)
+      lease.dispatch()
       return await this.processControlled(
         binding,
         envelope,
         control.controller.signal,
         sessionCommand,
         prepared,
-        markDispatching,
+        markDispatching === undefined ? undefined : () => {
+          lease.assert()
+          markDispatching()
+          lease.assert()
+        },
       )
     } catch (error) {
-      if (control.command !== undefined && causedByUserCancellation(error)) {
+      if (control?.command !== undefined && causedByUserCancellation(error)) {
         return permissionCommand(sessionCommand) === undefined
           ? { outcome: 'processed' }
           : {
@@ -3201,7 +3251,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       throw error
     } finally {
-      this.endSessionControl(binding.sessionId, control)
+      if (control !== undefined) this.endSessionControl(binding.sessionId, control)
+      lease.close()
     }
   }
 
@@ -3367,7 +3418,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         ? binding.agentPreset
         : (await agentPresets.resolve(binding.agentPreset)).id
       await requireWorkspace(binding.workspace)
-      handle = await agents.resume({ resumeSessionId: SessionId(binding.sessionId), signal,
+      handle = await this.resumeAgent({ resumeSessionId: SessionId(binding.sessionId), signal,
         agentOptions: { provider: selected.provider, model: selected.model,
           maxTokens: this.options.maxOutputTokens },
         setup: async agentCtx => {

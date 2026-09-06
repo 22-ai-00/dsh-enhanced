@@ -7766,10 +7766,17 @@ describe('real rc.1 delivery Agent runtime', () => {
       }],
     })
     const accepted = await fixture.service.acceptInbound(message('evt-native-goal-timeout', 'Run the bounded goal'))
+    const binding = runtimeStore(fixture.service).getActiveBinding(conversation)
+    if (binding === undefined) throw new Error('native goal timeout fixture has no active binding')
+    const secondHost = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
     const running = fixture.service.tick().then(() => fixture.service.whenIdle())
     let deadline: ReturnType<typeof setTimeout> | undefined
     try {
       await started
+      // This is a second Host Store on the same durable database, not a mocked
+      // lease manager. The running model/tool owns the bound session fence.
+      expect(secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-delivery-host', 1_000))
+        .toMatchObject({ kind: 'busy' })
       // The first response is durably queued while native work is still live.
       await vi.waitFor(() => expect(runtimeStore(fixture.service).listOutbox().some(
         item => item.intent.replyToEventId === 'evt-native-goal-timeout',
@@ -7778,8 +7785,15 @@ describe('real rc.1 delivery Agent runtime', () => {
         await fixture.service.acceptInbound(message('evt-native-goal-timeout-stop', '/stop', 'command'))
       }
       if (cancellation === 'lease-loss') {
-        // The coordinator's next lease heartbeat aborts the real outer signal.
-        vi.spyOn(runtimeStore(fixture.service), 'renewInboxClaim').mockReturnValue(false)
+        // Expire the durable Session lease underneath the first Host. Its
+        // dispatched state must become an unknown fence, never a takeover.
+        const database = new DatabaseSync(join(root, 'delivery.sqlite'))
+        try {
+          database.prepare('UPDATE delivery_session_leases SET lease_until = 0 WHERE session_id = ?')
+            .run(binding.sessionId)
+        } finally { database.close() }
+        expect(secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-delivery-host', 1_000))
+          .toMatchObject({ kind: 'unknown' })
       }
       await expect(Promise.race([
         running,
@@ -7797,6 +7811,17 @@ describe('real rc.1 delivery Agent runtime', () => {
       })
       expect(late.isError).toBe(true)
       expect(fixture.presetExecute).toHaveBeenCalledOnce()
+      if (cancellation === 'timeout') {
+        // A reply-bound timeout does not release a Session that still has an
+        // in-flight tool and an undisposed Agent.
+        expect(secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-delivery-host', 1_000))
+          .toMatchObject({ kind: 'unknown' })
+        releaseTool()
+        await vi.waitFor(() => expect(fixture.ctx.agents.get(retainedAgent!.id)).toBeUndefined())
+        const takeover = secondHost.claimSessionLease({ kind: 'bound', binding }, 'second-delivery-host', 1_000)
+        expect(takeover.kind).toBe('claimed')
+        if (takeover.kind === 'claimed') expect(secondHost.finishSessionLease(takeover.lease, { quiescent: true })).toBe(true)
+      }
       await fixture.ctx.assistantVerifier.tick()
       expect(fixture.ctx.assistantVerifier.continuations()).toMatchObject([{
         contract: { objective: 'Run the bounded goal', task: { kind: 'foreground-turn', ref: accepted.inboxId } },
@@ -7809,8 +7834,103 @@ describe('real rc.1 delivery Agent runtime', () => {
       releaseTool()
       await running
       await fixture.service.whenIdle()
+      secondHost.close()
       await fixture.ctx.fiber.restart()
     }
+  })
+
+  test('releases each quiescent foreground Session fence before the next inbound turn', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-session-lease-normal-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-session-lease-first', 'First fenced reply'))
+    await drive(fixture.service)
+    const binding = runtimeStore(fixture.service).getActiveBinding(conversation)
+    if (binding === undefined) throw new Error('normal Session lease fixture has no active binding')
+    const first = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+    let firstFence: number
+    try {
+      const row = first.prepare('SELECT fencing_token, state FROM delivery_session_leases WHERE session_id = ?')
+        .get(binding.sessionId) as { fencing_token: number; state: string }
+      expect(row).toMatchObject({ state: 'released' })
+      firstFence = row.fencing_token
+    } finally { first.close() }
+
+    await fixture.service.acceptInbound(message('evt-session-lease-second', 'Second fenced reply'))
+    await drive(fixture.service)
+    const second = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+    try {
+      const row = second.prepare('SELECT fencing_token, state FROM delivery_session_leases WHERE session_id = ?')
+        .get(binding.sessionId) as { fencing_token: number; state: string }
+      expect(row).toMatchObject({ state: 'released' })
+      expect(row.fencing_token).toBe(firstFence + 1)
+    } finally { second.close() }
+    expect(fixture.llm.requests).toHaveLength(2)
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('contains a cold-recovered unknown Session lease until the owner starts a new Session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-session-lease-recovery-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    await fixture.service.acceptInbound(message('evt-session-lease-recovery-first', 'Complete the first Session turn'))
+    await drive(fixture.service)
+    const oldBinding = runtimeStore(fixture.service).getActiveBinding(conversation)
+    if (oldBinding === undefined) throw new Error('cold recovery fixture has no initial binding')
+
+    // Simulate the exact durable crash window after dispatch. This uses the
+    // actual Store CAS and shared SQLite row rather than a lease-manager mock.
+    const crashedHost = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    try {
+      const claimed = crashedHost.claimSessionLease({ kind: 'bound', binding: oldBinding }, 'crashed-delivery-host', 1_000)
+      if (claimed.kind !== 'claimed') throw new Error(`could not prepare crash lease: ${claimed.kind}`)
+      expect(crashedHost.markSessionLeaseDispatched(claimed.lease)).toBe(true)
+      const database = new DatabaseSync(join(root, 'delivery.sqlite'))
+      try {
+        database.prepare('UPDATE delivery_session_leases SET lease_until = 0 WHERE session_id = ?')
+          .run(oldBinding.sessionId)
+      } finally { database.close() }
+    } finally { crashedHost.close() }
+
+    const modelRequestsBeforeUnknown = fixture.llm.requests.length
+    const blocked = await fixture.service.acceptInbound(message('evt-session-lease-recovery-blocked', 'Do not resume the unknown Session'))
+    await drive(fixture.service)
+    expect(fixture.llm.requests).toHaveLength(modelRequestsBeforeUnknown)
+    expect(runtimeStore(fixture.service).getInbox(blocked.inboxId)).toMatchObject({
+      status: 'dead_letter', failureCode: 'session-lease-unknown',
+    })
+    expect(runtimeStore(fixture.service).listOutbox().find(item => item.intent.replyToEventId === 'evt-session-lease-recovery-blocked')?.intent.text)
+      .toContain('上一次执行是否已经停止还无法确认')
+    expect(runtimeStore(fixture.service).listOutbox().find(item => item.intent.replyToEventId === 'evt-session-lease-recovery-blocked')?.intent.text)
+      .toContain('/new')
+    const lease = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+    try {
+      expect(lease.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(oldBinding.sessionId))
+        .toMatchObject({ state: 'unknown' })
+    } finally { lease.close() }
+
+    await fixture.service.acceptInbound(message('evt-session-lease-recovery-new', '/new', 'command'))
+    await drive(fixture.service)
+    const freshBinding = runtimeStore(fixture.service).getActiveBinding(conversation)
+    if (freshBinding === undefined) throw new Error('new Session did not create an active binding')
+    expect(freshBinding.sessionId).not.toBe(oldBinding.sessionId)
+    expect(freshBinding.generation).toBe(oldBinding.generation + 1)
+
+    await fixture.service.acceptInbound(message('evt-session-lease-recovery-fresh', 'Run only in the new Session'))
+    await drive(fixture.service)
+    expect(fixture.llm.requests).toHaveLength(modelRequestsBeforeUnknown + 1)
+    const oldLease = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+    try {
+      expect(oldLease.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(oldBinding.sessionId))
+        .toMatchObject({ state: 'unknown' })
+    } finally { oldLease.close() }
+    await fixture.ctx.fiber.restart()
   })
 
   test.each(['timeout', 'reject', 'revoke'] as const)('keeps natural goal teardown bounded and unverified when its disposer cannot prove success (%s)', async failure => {

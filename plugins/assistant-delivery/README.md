@@ -175,6 +175,16 @@ DSH `0.1.2-rc.1` 的 `ctx.userQuestions.ask()` 会把带 `agent` 的请求派发
 
 真实 principal、tenant、token 不注入 prompt。每个 Delivery SQLite 在首次创建时持久生成随机实例命名空间；新 binding 的 session id 由该命名空间 + conversation + generation 确定生成。数据库重开会复用同一命名空间和既有 binding，数据库删除重建或另一个 profile 的独立数据库则得到不同命名空间，避免共享 DSH session 日志根时串用旧上下文；已持久 binding 始终按自身 `sessionId` 冷恢复，不受后续算法变化影响。`/new` 新建下一 generation 并保留旧 session。有 roster 时，binding 中的 preset 会在每次 create/resume 时重新解析并挂载到 Agent scope，因此 Web profile 可以继续关闭全局 Bash/FS，而渠道 Agent 仍获得自己的 preset 工具；无 roster 的 headless profile则沿用宿主全局组合。lookup/create 进程内 single-flight，SQLite unique constraint 是最终冲突边界。
 
+## 持久 Session 排他
+
+内置 DSH 运行时在恢复已有 Session 或构造新 Session 之前取得持久排他凭证，覆盖普通对话、权限命令、会话压缩及首次创建和 `/new`。自动补全和原生目标续跑沿用该凭证。数据库 schema 19 的 `delivery_session_leases` 以 Session ID 为主键，保存原始会话/主体/工作区/preset/generation 身份、主体 record/version、持有者、单调 fencing token、期限和状态；这些字段不来自模型参数。即使进程在新 Session 已保存、binding 尚未建立时崩溃，其他主体也不能接管该遗留 Session。
+
+Session 续约间隔取有效 lease 的约三分之一，有效期限使用 `min(leaseMs, 300000)`；不改变 Inbox/Outbox 的原配置。每次续约、模型请求及工具执行前重查数据库中的有效 token 与当前绑定/主体权限。丢失租约会取消本地 Agent；旧 Agent 即使换新 signal 也不能继续提交新模型或工具动作。首次派发前的过期 `prepared` 可重新授权并取得更大的 token；`dispatched` 超时只变为 `unknown`，不会自动接管。scope 身份保留，合法版本变化须重新核对当前授权。
+
+等待其他有效 Session 持有者的 Inbox 回到队列，不耗尽业务重试额度；每次领取仍使用新的单调 fence，attempt 历史保留。清理提前返回、挂起工具或未结束模型流时保存 `unknown`。只有同一凭证对应的真实 Agent teardown 完成、已跟踪模型流与工具执行均结束，才释放排他；不能把超时或原生 `complete` 当成 quiescent 证明。冷恢复没有原进程的清理证据，因此未知会话不自动重放。后续入站会收到核对提示；`/new` 可以独立开始新任务，旧 Session 与未知状态保留。当前没有模型可调用的“强制解除未知”入口。
+
+这是共享同一 Delivery 数据库、使用当前内置运行时的 Host 之间的执行协议，不是任意同 UID 进程、任意自定义运行时或外部动作的 OS 隔离。已经开始的不合作外部动作仍需回读或补偿。升级前应排空并停止所有旧 writer，统一使用当前版本；已打开旧数据库的旧代码不了解这个协议，不能与新 Host 混跑后宣称排他成立。插件卸载保留账本，不自动清理。Goals 的持久后台唤醒仍待接入同一入口、后台 owner 证明与既有 Automations 调度，当前不因本协议自动唤醒目标。
+
 ## 会话命令与持久上下文
 
 - `/help`：列出当前实际可用的命令。

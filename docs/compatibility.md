@@ -37,3 +37,5 @@ DSH 尚处于预发布阶段，插件机制可能发生破坏性变化。`pnpm-w
 3. 运行 `pnpm check`。
 4. 用目标 DSH 的 `--dump-config` 验证每个 bundle，再做真实 profile 冒烟。
 5. 在本页记录新的已验证版本，并在插件 README 中说明任何功能差异。
+
+Delivery Session 排他按同一 `0.1.2-rc.1` AgentLoop factory 的实际生命周期接线：setup/发布失败会 await 内部 teardown 后抛出；成功 handle 的 dispose 等待 machine idle、异步 scope 清理和 unregister。插件仍独立跟踪在途流/工具，不能仅凭 registry 移除或超时判断已清理。升级 Host 时需重跑失败 setup、取消、挂起工具/流、迟到调用、双连接竞争、新 Session orphan 归属及 `/new` 冷恢复用例。Delivery schema 19 不提供对已打开的旧 writer 的运行时兼容排他，部署前须排空旧 Host。
