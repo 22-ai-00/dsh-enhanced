@@ -96,6 +96,46 @@ jobs:
       - name: Verify repository
         run: pnpm check
 
+  macos-verify:
+    # The installers document macOS LaunchAgent support and the Control Plane
+    # loaders compare `realpath` against `resolve`, which behaves differently on
+    # a host whose temporary directory is reached through the `/var ->
+    # /private/var` symlink. Running the suite here keeps that claimed platform
+    # verified instead of trusting the Linux job for it. Linux-only suites
+    # (bubblewrap sandbox, root-owned system dirs) skip themselves by platform.
+    runs-on: macos-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v5.0.0
+        with:
+          version: 11.7.0
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Record the system Bash version
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The installer must stay compatible with the bundled Bash 3.2, which
+          # has no `BASHPID` and differs on empty-array expansion under nounset.
+          /bin/bash --version | head -1
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify repository
+        run: pnpm check
+
   windows-acp-smoke:
     runs-on: windows-2025
     timeout-minutes: 15
