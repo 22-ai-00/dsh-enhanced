@@ -1,5 +1,7 @@
 import { Context } from '@deepseek-ai/cordis'
 import { agentEvents, Inbox, type Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage } from '@deepseek-ai/dsh-llm'
+import SystemPrompt, { renderContextSnapshot } from '@deepseek-ai/dsh-system-prompt'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { Session, SessionId, SESSION_FORMAT_VERSION, type UserMessage } from '@deepseek-ai/dsh-session'
 import { mkdtemp, rm } from 'node:fs/promises'
@@ -51,6 +53,7 @@ function stubAgent(options: { cwd?: string; preset?: string } = {}) {
 }
 
 async function harness(options: {
+  runtimePrompt?: boolean
   allow?: boolean
   approvalMode?: 'delivery-or-headless' | 'delivery-required'
   maxImportRecords?: number
@@ -71,6 +74,7 @@ async function harness(options: {
   }
 } = {}) {
   const ctx = new Context()
+  if (options.runtimePrompt) new SystemPrompt(ctx, {})
   const databasePaths = await paths()
   const policy = new AssistantPolicyService(ctx, {
     databasePath: databasePaths.policy,
@@ -117,6 +121,94 @@ function addInput(content: string, idempotencyKey = `add:${content}`) {
 }
 
 describe('personal memory Cordis service', () => {
+  test('runtime memory follows task changes and committed removal without startup injections', async () => {
+    const { ctx, service } = await harness({ runtimePrompt: true })
+    const { agent, injections } = stubAgent({ cwd: '/work/alpha', preset: 'primary' })
+    const approve = (input: ReturnType<typeof addInput>) => {
+      const proposal = service.propose(agent, input)
+      return service.decideProposal({ proposalId: proposal.proposalId, principal: input.principal,
+        expectedVersion: 1, decision: 'approved', reason: 'confirmed' })
+    }
+    const redis = approve(addInput('Redis retry needs idempotency'))
+    approve(addInput('Garden watering schedule'))
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Redis retry' }] }), { surfaceOp: 'append' })
+    agentEvents(ctx, agent).emit('agent/session-start', { source: 'startup' })
+    const render = async () => renderContextSnapshot(await ctx.systemPrompt.assemble({ agent }))
+    expect(await render()).toContain('Redis retry needs idempotency')
+    expect(await render()).not.toContain('Garden watering schedule')
+    expect(injections).toEqual([])
+    // Runtime snapshots and generated answer-completion prompts are not new
+    // owner tasks, even when their text happens to match another memory.
+    for (const plugin of ['@deepseek-ai/dsh-system-prompt', '@dsh-enhanced/assistant-delivery']) {
+      agent.session.append('user/message', createUserMessage({ source: { kind: 'plugin', plugin },
+        content: [{ type: 'text', text: 'Garden' }] }), { surfaceOp: 'append' })
+    }
+    expect(await render()).toContain('Redis retry needs idempotency')
+    expect(await render()).not.toContain('Garden watering schedule')
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Garden' }] }), { surfaceOp: 'append' })
+    expect(await render()).toContain('Garden watering schedule')
+    expect(await render()).not.toContain('Redis retry needs idempotency')
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Redis' }] }), { surfaceOp: 'append' })
+    const proposal = service.propose(agent, {
+      idempotencyKey: 'remove:redis', principal: 'owner:lark:123',
+      mutation: { op: 'remove', identity: { owner: 'user', scope: 'user-global' },
+        id: redis.record!.id, expectedVersion: redis.record!.version },
+    })
+    service.decideProposal({ proposalId: proposal.proposalId, principal: 'owner:lark:123',
+      expectedVersion: 1, decision: 'approved', reason: 'obsolete' })
+    expect(await render()).toBe('')
+    await ctx.fiber.restart()
+  })
+
+  test('runtime memory treats template braces as data and clears on revoked access', async () => {
+    const { ctx, service, policy } = await harness({ runtimePrompt: true })
+    const { agent } = stubAgent({ cwd: '/work/alpha', preset: 'primary' })
+    const proposal = service.propose(agent, addInput('Redis {{unknown_secret}} example'))
+    service.decideProposal({ proposalId: proposal.proposalId, principal: 'owner:lark:123',
+      expectedVersion: 1, decision: 'approved', reason: 'confirmed' })
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Redis' }] }), { surfaceOp: 'append' })
+    const rendered = renderContextSnapshot(await ctx.systemPrompt.assemble({ agent }))
+    expect(rendered).toContain('unknown_secret')
+    expect(rendered).toContain('untrusted data')
+    policy.setEmergencyStop({ enabled: true, actor: 'owner:lark:123', reason: 'revoke access' })
+    expect(renderContextSnapshot(await ctx.systemPrompt.assemble({ agent }))).toBe('')
+    await ctx.fiber.restart()
+  })
+
+  test('runtime memory rechecks the live owner namespace on every assembly', async () => {
+    let ownerAvailable = true
+    let principalVersion = 1
+    const route = () => ({
+      routeVersion: 2 as const, sourceId: 'dsh-enhanced-personal-memory',
+      bindingId: 'binding-owner', bindingVersion: 1, bindingGeneration: 1,
+      workspace: '/work/alpha', principal: 'owner:lark:123',
+      principalRecordId: 'principal-owner', principalVersion,
+    })
+    const { ctx, service } = await harness({ runtimePrompt: true, delivery: {
+      prepareAgentApproval: route,
+      preferencePrincipalForAgent: agent => ownerAvailable ? {
+        scope: { workspace: '/work/alpha', preset: 'primary' },
+        principalId: route().principal,
+        principalLineage: { principalRecordId: route().principalRecordId, principalVersion },
+        bindingId: route().bindingId, bindingVersion: 1, bindingGeneration: 1, sessionId: String(agent.id),
+      } : undefined,
+    } })
+    const { agent } = stubAgent({ cwd: '/work/alpha', preset: 'primary' })
+    const proposal = service.propose(agent, addInput('Redis private owner context'))
+    service.decideProposal({ proposalId: proposal.proposalId, principal: 'owner:lark:123',
+      expectedVersion: 1, decision: 'approved', reason: 'confirmed' })
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'user' },
+      content: [{ type: 'text', text: 'Redis' }] }), { surfaceOp: 'append' })
+    const render = async () => renderContextSnapshot(await ctx.systemPrompt.assemble({ agent }))
+    expect(await render()).toContain('Redis private owner context')
+    principalVersion = 2
+    expect(await render()).toBe('')
+    principalVersion = 1
+    expect(await render()).toContain('Redis private owner context')
+    ownerAvailable = false
+    expect(await render()).toBe('')
+    await ctx.fiber.restart()
+  })
   test('derives approval authority from the exact active delivery route and dispatches it durably', async () => {
     const calls: Array<{ agent: Agent | undefined; sourceId: string }> = []
     const route = {

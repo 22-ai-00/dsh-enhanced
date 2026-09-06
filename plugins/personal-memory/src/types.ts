@@ -93,6 +93,8 @@ export interface MemorySearchHit {
 
 export interface MemorySnapshotRequest {
   context: MemoryAgentContext
+  /** Current task text. Relevant records precede confirmed standing preferences. */
+  query?: string
   limit: number
   maxBytes: number
   maxTokens: number
