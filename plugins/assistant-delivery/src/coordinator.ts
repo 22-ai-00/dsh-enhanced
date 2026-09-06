@@ -837,6 +837,9 @@ export class InboundCoordinator {
       this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken, outcome: 'processed' })
       return
     }
+    if (result.failureCode === 'session-lease-busy'
+      && this.options.store.deferInboxForSessionLease({ inboxId, ownerId: this.options.ownerId,
+        fencingToken, retryAt: this.now() + Math.max(this.options.retryBaseMs, result.retryAfterMs ?? 0) })) return
     if (!result.retryable) {
       this.options.store.finishInbox({ inboxId, ownerId: this.options.ownerId, fencingToken,
         outcome: 'dead_letter', failureCode: result.failureCode })

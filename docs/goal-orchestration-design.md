@@ -90,3 +90,9 @@ GoalStore 与 Session 不构成一个原子数据库。协议须采用持久执�
 持久唤醒仍待实现。Automations 的 Host executor/reconcileSystem 可以复用现有 occurrence、task lease 和 owner/definition 校验；但 task lease 只排他同一调度任务，不能阻止同 Session 前台入站。安全接线还需 Delivery 受保护的后台恢复入口、共享持久 Session fence、同 owner record/version 与 Session/GoalId/revision 重查，以及 dispatch 前的 run intent CAS。普通 Automation runner 新建 Session，前台 `currentPreferenceTurn` 又必须证明真实人类入站，二者均不能直接冒充后台原 Session 恢复。未知已 dispatch 仍只对账、不重放。
 
 Session lease 设计还必须保证同一 Session 不能从另一 binding 取得并行租约；仅按 binding ID 建主键不足以构成该保证。租约到期只代表持有者失去后续提交权限，不能证明已 dispatch 的外部动作停止。持久状态须区分未 dispatch 的可重取意图与需要对账的 dispatched/unknown；旧执行无法证明 quiescent 时，不能仅因超时启动同 Session 的替代执行。
+
+## Session 排他接线（2026-09-06）
+
+Delivery schema 19 已为内置前台、权限/compact 和首次/new construction 接入同一 Session ID 主键 lease。claim 与续约重读绑定及主体，fence 单调；有效持有者导致等待，未知执行禁止接管。released construction 的不可变会话身份防止 binding 提交前窗口被另一主体复用。正常 handle 清理和在途流/工具结束才释放；提前返回先记 unknown，同一原持有者迟到的完整清理可以结算，重启没有这份证明则继续保持 unknown。等待 Session 的 Inbox 不扣业务重试次数，审计 fence 仍递增。
+
+这一层已供当前内置运行时使用；尚未暴露 Goals 后台 owner capability，也尚未把 Automations 的持久 wake 交付到同一 runtime。完整后台恢复继续要求原目标授权、Session/GoalId/revision/definition、预算与 wake run intent 一起核对。不能因为排他基础完成，就将跨日目标闭环记为通过。

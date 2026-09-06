@@ -926,6 +926,14 @@ export class AssistantDeliveryService extends Service {
       maxConcurrency: config.maxConcurrency, retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs })
     ctx.inject(['agents', 'sessions', 'llm'], runtimeCtx => {
       const unregister = this.registerInboundRuntime(new DshDeliveryRuntime(runtimeCtx, policy, {
+        sessionLease: {
+          leaseMs: Math.min(config.leaseMs, 300_000),
+          claim: (target, holderId, leaseMs) => this.deliveryStore.claimSessionLease(target, holderId, leaseMs),
+          dispatch: lease => this.deliveryStore.markSessionLeaseDispatched(lease),
+          valid: lease => this.deliveryStore.hasSessionLease(lease),
+          renew: (lease, leaseMs) => this.deliveryStore.renewSessionLease(lease, leaseMs),
+          finish: (lease, input) => this.deliveryStore.finishSessionLease(lease, input),
+        },
         sessionNamespace: this.deliveryStore.instanceId(),
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         getAgentPresets: () => runtimeCtx.get('agentPresets'),

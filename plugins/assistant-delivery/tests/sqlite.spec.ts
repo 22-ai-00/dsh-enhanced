@@ -95,7 +95,7 @@ describe('delivery SQLite boundary', () => {
       'approval_outbox_routes',
       'delivery_preference_projection_outbox',
       'delivery_inbox_admission_clock', 'delivery_inbox_admissions',
-      'delivery_task_acceptance_executions',
+      'delivery_task_acceptance_executions', 'delivery_session_leases',
     ]))
     const modelColumns = (database.prepare('PRAGMA table_info(conversation_model_selections)').all() as { name: string }[])
       .map(row => row.name)

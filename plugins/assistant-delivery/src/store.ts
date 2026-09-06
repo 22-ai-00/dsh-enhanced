@@ -54,6 +54,7 @@ import {
 import { parseFeedbackCommand } from './feedback-command.js'
 import type { AcceptanceContract, AcceptedExecution } from './acceptance.js'
 import { openDeliveryDatabase } from './sqlite.js'
+import type { SessionLease, SessionLeaseClaim, SessionLeaseTarget } from './session-lease-types.js'
 import {
   deriveDeterministicallyDeidentifiedWorkflowTemplate,
   getDeterministicallyDeidentifiedWorkflowTemplate,
@@ -1855,6 +1856,41 @@ function getPairingStatement(database: DatabaseSync): StatementSync {
   `)
 }
 
+interface SessionLeaseRow {
+  session_id: string
+  holder_id: string
+  fencing_token: number
+  lease_until: number
+  state: 'prepared' | 'dispatched' | 'unknown' | 'released'
+  target_json: string
+  principal_record_id: string
+  principal_version: number
+}
+
+function sameLeaseBinding(left: Readonly<ConversationBinding>, right: Readonly<ConversationBinding>): boolean {
+  return left.id === right.id && left.sessionId === right.sessionId && left.generation === right.generation
+    && left.version === right.version && left.status === 'active' && right.status === 'active'
+    && left.workspace === right.workspace && left.agentPreset === right.agentPreset
+    && JSON.stringify(canonicalConversation(left.conversation)) === JSON.stringify(canonicalConversation(right.conversation))
+    && JSON.stringify(canonicalPrincipal(left.principal)) === JSON.stringify(canonicalPrincipal(right.principal))
+}
+
+function leaseSessionIdentity(target: SessionLeaseTarget): string {
+  const value = target.kind === 'bound' ? target.binding : target
+  return JSON.stringify({ sessionId: value.sessionId, conversation: canonicalConversation(value.conversation),
+    principal: canonicalPrincipal(value.principal), workspace: value.workspace,
+    agentPreset: value.agentPreset, generation: value.generation })
+}
+
+function leaseTargetJson(target: SessionLeaseTarget): string {
+  if (target?.kind !== 'bound' && target?.kind !== 'construction') throw new DeliveryStoreError('invalid-binding', 'invalid session lease target')
+  if (target.kind === 'bound') {
+    const binding = target.binding
+    return JSON.stringify({ kind: 'bound', binding: { id: binding.id, conversation: canonicalConversation(binding.conversation), principal: canonicalPrincipal(binding.principal), workspace: binding.workspace, agentPreset: binding.agentPreset, sessionId: binding.sessionId, generation: binding.generation, version: binding.version, status: 'active' } })
+  }
+  return JSON.stringify({ kind: 'construction', sessionId: target.sessionId, conversation: canonicalConversation(target.conversation), principal: canonicalPrincipal(target.principal), workspace: target.workspace, agentPreset: target.agentPreset, generation: target.generation, ...(target.previous === undefined ? {} : { previous: { id: target.previous.id, conversation: canonicalConversation(target.previous.conversation), principal: canonicalPrincipal(target.previous.principal), workspace: target.previous.workspace, agentPreset: target.previous.agentPreset, sessionId: target.previous.sessionId, generation: target.previous.generation, version: target.previous.version, status: 'active' } }) })
+}
+
 export class DeliveryStore {
   private readonly database: DatabaseSync
   private readonly databaseInstanceId: string
@@ -3393,7 +3429,9 @@ export class DeliveryStore {
       `).all(now, input.maxAttempts, input.limit) as unknown as { id: string }[]
       for (const candidate of candidates) {
         const current = this.getInbox(candidate.id)!
-        const fencingToken = current.attemptCount + 1
+        const previousFence = this.database.prepare('SELECT COALESCE(MAX(fencing_token), 0) AS maximum FROM inbox_attempts WHERE inbox_id = ?')
+          .get(current.id) as { maximum: number }
+        const fencingToken = previousFence.maximum + 1
         const changed = this.database.prepare(`
           UPDATE inbox_messages SET status = 'claimed', claimed_by = ?, fencing_token = ?, lease_until = ?,
             attempt_count = attempt_count + 1, next_attempt_at = NULL,
@@ -3454,6 +3492,45 @@ export class DeliveryStore {
       `).run(input.outcome, input.failureCode ?? null, now, input.inboxId, input.ownerId, input.fencingToken)
     })
     return this.getInbox(input.inboxId)!
+  }
+
+  /** Return an undispatched Inbox to its queue while another live session holds the lane. */
+  deferInboxForSessionLease(input: { inboxId: string; ownerId: string; fencingToken: number; retryAt: number }): boolean {
+    this.assertOpen()
+    let inboxId: string
+    let ownerId: string
+    try {
+      inboxId = validateBindingText(input.inboxId, 'inboxId', 256)
+      ownerId = validateBindingText(input.ownerId, 'ownerId', 256)
+    } catch { return false }
+    const now = this.now()
+    if (!Number.isSafeInteger(input.fencingToken) || input.fencingToken < 1
+      || !Number.isSafeInteger(input.retryAt) || input.retryAt < now) return false
+    return this.transaction(() => {
+      const changed = this.database.prepare(`
+        UPDATE inbox_messages AS inbox
+        SET status = 'retry_wait', next_attempt_at = ?, attempt_count = attempt_count - 1,
+          claimed_by = NULL, lease_until = NULL, failure_code = 'session-lease-busy', updated_at = ?
+        WHERE inbox.id = ? AND inbox.status = 'claimed' AND inbox.claimed_by = ?
+          AND inbox.fencing_token = ? AND inbox.lease_until > ? AND inbox.attempt_count >= 1
+          AND inbox.failure_code IS NULL
+          AND EXISTS (
+            SELECT 1 FROM conversation_bindings AS binding
+            JOIN delivery_session_leases AS lease ON lease.session_id = binding.session_id
+            WHERE binding.id = inbox.binding_id AND lease.state IN ('prepared', 'dispatched')
+              AND lease.lease_until > ?
+          )
+      `).run(input.retryAt, now, inboxId, ownerId, input.fencingToken, now, now)
+      if (Number(changed.changes) !== 1) return false
+      const settled = this.database.prepare(`
+        UPDATE inbox_attempts SET status = 'retry_wait', failure_code = 'session-lease-busy', finished_at = ?
+        WHERE inbox_id = ? AND owner_id = ? AND fencing_token = ? AND status = 'claimed'
+      `).run(now, inboxId, ownerId, input.fencingToken)
+      if (Number(settled.changes) !== 1) {
+        throw new DeliveryStoreError('conflict', 'session lease defer attempt settlement is missing')
+      }
+      return true
+    })
   }
 
   markInboxDispatching(input: {
@@ -7075,6 +7152,142 @@ export class DeliveryStore {
     if (changed.changes !== 1) {
       throw new DeliveryStoreError('version-conflict', 'workflow template revocation lost its exact version')
     }
+  }
+
+  claimSessionLease(target: SessionLeaseTarget, holderId: string, leaseMs: number): SessionLeaseClaim {
+    this.assertOpen()
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 300_000) return { kind: 'denied' }
+    let targetJson: string
+    let sessionId: string
+    try {
+      targetJson = leaseTargetJson(target)
+      sessionId = validateBindingText(target.kind === 'bound' ? target.binding.sessionId : target.sessionId, 'sessionId', 512)
+      holderId = validateBindingText(holderId, 'holderId', 256)
+    } catch { return { kind: 'denied' } }
+    const now = this.now()
+    const leaseUntil = now + leaseMs
+    if (!Number.isSafeInteger(now) || now < 0 || !Number.isSafeInteger(leaseUntil)) return { kind: 'denied' }
+    return this.transaction(() => {
+      const authority = this.sessionLeaseAuthority(target)
+      if (authority === undefined) return { kind: 'denied' }
+      const row = this.database.prepare('SELECT session_id, holder_id, fencing_token, lease_until, state, target_json, principal_record_id, principal_version FROM delivery_session_leases WHERE session_id = ?').get(sessionId) as SessionLeaseRow | undefined
+      if (row === undefined) {
+        this.database.prepare("INSERT INTO delivery_session_leases(session_id, holder_id, fencing_token, lease_until, state, target_json, principal_record_id, principal_version) VALUES (?, ?, 1, ?, 'prepared', ?, ?, ?)")
+          .run(sessionId, holderId, leaseUntil, targetJson, authority.id, authority.version)
+        return { kind: 'claimed', lease: Object.freeze({ sessionId, holderId, fencingToken: 1, leaseUntil }) }
+      }
+      // A released construction can outlive a crash before createBinding. Its Session
+      // remains owned by the original identity, even though no binding exists yet.
+      try {
+        if (row.principal_record_id !== authority.id
+          || leaseSessionIdentity(JSON.parse(row.target_json) as SessionLeaseTarget) !== leaseSessionIdentity(target)) return { kind: 'denied' }
+      } catch { return { kind: 'denied' } }
+      if (row.state === 'unknown') return { kind: 'unknown' }
+      if (row.state === 'dispatched') {
+        if (row.lease_until > now) return { kind: 'busy' }
+        this.database.prepare("UPDATE delivery_session_leases SET state = 'unknown' WHERE session_id = ? AND fencing_token = ? AND state = 'dispatched'")
+          .run(sessionId, row.fencing_token)
+        return { kind: 'unknown' }
+      }
+      if (row.state !== 'prepared' && row.state !== 'released') return { kind: 'unknown' }
+      if (row.state === 'prepared' && row.lease_until > now) return { kind: 'busy' }
+      const token = row.fencing_token + 1
+      if (!Number.isSafeInteger(token)) return { kind: 'denied' }
+      this.database.prepare("UPDATE delivery_session_leases SET holder_id = ?, fencing_token = ?, lease_until = ?, state = 'prepared', target_json = ?, principal_record_id = ?, principal_version = ? WHERE session_id = ? AND fencing_token = ?")
+        .run(holderId, token, leaseUntil, targetJson, authority.id, authority.version, sessionId, row.fencing_token)
+      return { kind: 'claimed', lease: Object.freeze({ sessionId, holderId, fencingToken: token, leaseUntil }) }
+    })
+  }
+
+  markSessionLeaseDispatched(lease: SessionLease): boolean {
+    this.assertOpen()
+    return this.transaction(() => {
+      const row = this.sessionLeaseCurrent(lease, true)
+      if (row === undefined || row.state !== 'prepared') return false
+      return Number(this.database.prepare("UPDATE delivery_session_leases SET state = 'dispatched' WHERE session_id = ? AND holder_id = ? AND fencing_token = ? AND state = 'prepared'")
+        .run(lease.sessionId, lease.holderId, lease.fencingToken).changes) === 1
+    })
+  }
+
+  hasSessionLease(lease: SessionLease): boolean {
+    this.assertOpen()
+    return this.transaction(() => {
+      const row = this.sessionLeaseCurrent(lease, true)
+      return row !== undefined && (row.state === 'prepared' || row.state === 'dispatched')
+    })
+  }
+
+  renewSessionLease(lease: SessionLease, leaseMs: number): boolean {
+    this.assertOpen()
+    if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 300_000) return false
+    return this.transaction(() => {
+      const row = this.sessionLeaseCurrent(lease, true)
+      if (row === undefined || (row.state !== 'prepared' && row.state !== 'dispatched')) return false
+      const until = this.now() + leaseMs
+      if (!Number.isSafeInteger(until)) return false
+      return Number(this.database.prepare("UPDATE delivery_session_leases SET lease_until = ? WHERE session_id = ? AND holder_id = ? AND fencing_token = ? AND state IN ('prepared', 'dispatched')")
+        .run(until, lease.sessionId, lease.holderId, lease.fencingToken).changes) === 1
+    })
+  }
+
+  finishSessionLease(lease: SessionLease, result: { quiescent: boolean }): boolean {
+    this.assertOpen()
+    if (!lease || typeof result?.quiescent !== 'boolean' || !this.sessionLeaseShape(lease)) return false
+    return Number(this.database.prepare("UPDATE delivery_session_leases SET state = ? WHERE session_id = ? AND holder_id = ? AND fencing_token = ? AND state IN ('prepared', 'dispatched', 'unknown')")
+      .run(result.quiescent ? 'released' : 'unknown', lease.sessionId, lease.holderId, lease.fencingToken).changes) === 1
+  }
+
+  private sessionLeaseShape(lease: SessionLease): boolean {
+    return lease !== null && typeof lease === 'object'
+      && typeof lease.sessionId === 'string' && typeof lease.holderId === 'string'
+      && Number.isSafeInteger(lease.fencingToken) && lease.fencingToken >= 1
+      && Number.isSafeInteger(lease.leaseUntil) && lease.leaseUntil >= 0
+  }
+
+  /** Re-reads target authority; no runtime-supplied binding is trusted after claim. */
+  private sessionLeaseAuthority(target: SessionLeaseTarget): DeliveryPrincipal | undefined {
+    try {
+      if (target?.kind !== 'bound' && target?.kind !== 'construction') return undefined
+      if (target.kind === 'bound') {
+        const current = this.getBinding(target.binding.id)
+        if (current === undefined || !sameLeaseBinding(current, target.binding)) return undefined
+        const principal = this.getPrincipal(current.principal)
+        return principal?.status === 'active' ? principal : undefined
+      }
+      const conversation = canonicalConversation(target.conversation)
+      const principalKey = canonicalPrincipal(target.principal)
+      const sessionId = validateBindingText(target.sessionId, 'sessionId', 512)
+      const workspace = validateBindingText(target.workspace, 'workspace', 4_096)
+      const preset = validateBindingText(target.agentPreset, 'agentPreset', 128)
+      if (!isAbsolute(workspace) || !Number.isSafeInteger(target.generation) || target.generation < 1) return undefined
+      const principal = this.getPrincipal(principalKey)
+      if (principal?.status !== 'active') return undefined
+      const existingSession = this.database.prepare('SELECT id FROM conversation_bindings WHERE session_id = ?').get(sessionId) as { id: string } | undefined
+      if (existingSession !== undefined) return undefined
+      const existing = this.getActiveBinding(conversation)
+      if (target.previous !== undefined) {
+        const previous = this.getBinding(target.previous.id)
+        if (previous === undefined || !sameLeaseBinding(previous, target.previous)
+          || previous.generation + 1 !== target.generation
+          || JSON.stringify(canonicalConversation(previous.conversation)) !== JSON.stringify(conversation)
+          || JSON.stringify(canonicalPrincipal(previous.principal)) !== JSON.stringify(principalKey)
+          || previous.workspace !== workspace || previous.agentPreset !== preset
+          || existing === undefined || !sameLeaseBinding(existing, target.previous)) return undefined
+      } else if (existing !== undefined || this.nextBindingGenerationByHash(conversationHash(conversation)) !== target.generation) return undefined
+      return principal
+    } catch { return undefined }
+  }
+
+  private sessionLeaseCurrent(lease: SessionLease, requireLiveAuthority: boolean): SessionLeaseRow | undefined {
+    if (!this.sessionLeaseShape(lease)) return undefined
+    const row = this.database.prepare('SELECT session_id, holder_id, fencing_token, lease_until, state, target_json, principal_record_id, principal_version FROM delivery_session_leases WHERE session_id = ? AND holder_id = ? AND fencing_token = ?')
+      .get(lease.sessionId, lease.holderId, lease.fencingToken) as SessionLeaseRow | undefined
+    if (row === undefined || row.lease_until <= this.now()) return undefined
+    if (!requireLiveAuthority) return row
+    let target: SessionLeaseTarget
+    try { target = JSON.parse(row.target_json) as SessionLeaseTarget } catch { return undefined }
+    const principal = this.sessionLeaseAuthority(target)
+    return principal !== undefined && principal.id === row.principal_record_id && principal.version === row.principal_version ? row : undefined
   }
 
   close(): void {

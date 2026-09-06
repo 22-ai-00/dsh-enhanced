@@ -2,7 +2,20 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const deliverySchemaVersion = 18
+export const deliverySchemaVersion = 19
+
+const sessionLeaseSchema = `
+  CREATE TABLE IF NOT EXISTS delivery_session_leases (
+    session_id TEXT PRIMARY KEY,
+    holder_id TEXT NOT NULL,
+    fencing_token INTEGER NOT NULL CHECK (fencing_token >= 1),
+    lease_until INTEGER NOT NULL CHECK (lease_until >= 0),
+    state TEXT NOT NULL CHECK (state IN ('prepared', 'dispatched', 'unknown', 'released')),
+    target_json TEXT NOT NULL,
+    principal_record_id TEXT NOT NULL,
+    principal_version INTEGER NOT NULL CHECK (principal_version >= 1)
+  ) STRICT;
+`
 
 const taskAcceptanceExecutionSchema = `
   CREATE TABLE IF NOT EXISTS delivery_task_acceptance_executions (
@@ -464,6 +477,23 @@ const approvalOutboxRouteSchema = `
     ON approval_outbox_routes(binding_id, binding_version, binding_generation);
 `
 
+function assertSessionLeaseSchema(database: DatabaseSync): void {
+  const columns = database.prepare('PRAGMA table_info(delivery_session_leases)').all() as Array<{ name: string; type: string; notnull: number; pk: number }>
+  const expected = [
+    ['session_id', 'TEXT', 1, 1], ['holder_id', 'TEXT', 1, 0], ['fencing_token', 'INTEGER', 1, 0],
+    ['lease_until', 'INTEGER', 1, 0], ['state', 'TEXT', 1, 0], ['target_json', 'TEXT', 1, 0],
+    ['principal_record_id', 'TEXT', 1, 0], ['principal_version', 'INTEGER', 1, 0],
+  ] as const
+  const sql = (database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'delivery_session_leases'").get() as { sql: string } | undefined)?.sql
+  if (!sql || columns.length !== expected.length || expected.some((entry, index) => {
+    const column = columns[index]
+    return column === undefined || column.name !== entry[0] || column.type !== entry[1] || column.notnull !== entry[2] || column.pk !== entry[3]
+  }) || !/\bSTRICT\b/u.test(sql) || !/fencing_token\s*>=\s*1/u.test(sql)
+    || !/state\s+IN\s*\(\s*'prepared'\s*,\s*'dispatched'\s*,\s*'unknown'\s*,\s*'released'\s*\)/iu.test(sql)) {
+    throw new Error('delivery session lease schema is invalid')
+  }
+}
+
 function assertApprovalOutboxRouteSchema(database: DatabaseSync): void {
   const columns = database.prepare('PRAGMA table_info(approval_outbox_routes)').all() as Array<{
     name: string
@@ -851,6 +881,10 @@ function migrateObserved(database: DatabaseSync): void {
     database.exec(`${taskAcceptanceExecutionSchema} PRAGMA user_version = 18;`)
     version = 18
   }
+  if (version === 18) {
+    database.exec(`${sessionLeaseSchema} PRAGMA user_version = 19;`)
+    version = 19
+  }
   if (version === deliverySchemaVersion) return
   database.exec(`
     ${deliveryInstanceSchema}
@@ -1062,7 +1096,8 @@ function migrateObserved(database: DatabaseSync): void {
 
     ${ownerObjectiveRevisionSchema}
     ${taskAcceptanceExecutionSchema}
-    PRAGMA user_version = 18;
+    ${sessionLeaseSchema}
+    PRAGMA user_version = 19;
   `)
 }
 
@@ -1072,6 +1107,7 @@ function migrate(database: DatabaseSync): void {
   try {
     migrateObserved(database)
     assertApprovalOutboxRouteSchema(database)
+    assertSessionLeaseSchema(database)
     database.exec('COMMIT')
   } catch (error) {
     try { database.exec('ROLLBACK') } catch {}
