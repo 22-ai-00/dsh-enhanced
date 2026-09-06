@@ -20,13 +20,22 @@ const restartScript = join(installDirectory, 'restart.sh')
 const installerLibrary = join(installDirectory, 'common.sh')
 const temporaryRoots: string[] = []
 
-function runInstaller(script: string, args: readonly string[], dshHome: string) {
+/**
+ * Run an installer entry point.
+ *
+ * `platform` pins `uname -s` detection the same way {@link runRestart} does, so
+ * assertions about a platform-specific resident service (systemd units on
+ * Linux, launchd on macOS) stay deterministic on any development host instead
+ * of only passing on the CI runner's operating system.
+ */
+function runInstaller(script: string, args: readonly string[], dshHome: string, platform?: string) {
   return spawnSync('/bin/bash', [script, ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
     env: {
       PATH: process.env.PATH ?? '',
       DSH_HOME: dshHome,
+      ...(platform === undefined ? {} : { DSH_ENHANCED_PLATFORM_OVERRIDE: platform }),
     },
   })
 }
@@ -693,6 +702,9 @@ fi
         INSTALL_LOG: logPath,
         FAKE_PREFIX: root,
         DSH_ENHANCED_SERVICE_STABILITY_SECONDS: '0',
+        // The fake bin stubs systemd tooling, so pin the detected platform
+        // instead of inheriting the host's own `uname -s`.
+        DSH_ENHANCED_PLATFORM_OVERRIDE: 'Linux',
       },
     })
 
@@ -873,16 +885,30 @@ fi
     await writeFile(settingsPath, originalSettings, 'utf8')
     await writeFile(profilePatch, originalPatch, 'utf8')
 
+    // `$$` is the pid of the subshell that installed the EXIT/TERM traps: inside
+    // a `name() ( ... )` subshell function bash keeps `$$` pointing at that
+    // shell, so the signal reaches the rollback owner. `$BASHPID` is unset on
+    // macOS bash 3.2, and deriving a pid via `exec sh -c 'echo $PPID'` returns
+    // the command substitution's own child instead, which exits 143 without ever
+    // running the restore.
+    //
+    // Signalling `$$` is fatal to the shell that runs it, so the transaction runs
+    // in a nested shell; the outer shell survives to observe its 143 and to keep
+    // the rollback assertions below reachable.
     const result = spawnSync('/bin/bash', [
       '-c', [
+        'inner=$(cat <<\'SCRIPT\'',
         'source "$1"',
         'dsh_enhanced_apply_model() {',
         `  printf 'agent-default-model:\\n  provider: traex-agent\\n' > "$2/settings.yaml"`,
         `  printf '%s\\n' '- id: dsh-enhanced-traex-acp-provider' > "$2/profiles/$1/cordis.patch.yml"`,
-        '  kill -TERM "$BASHPID"',
+        '  kill -TERM "$$"',
         '}',
         'dsh_enhanced_verify_model_route() { return 1; }',
         'dsh_enhanced_apply_verified_agent_model "$2" "$3" traex-agent "" "" "" "" 0 1',
+        'SCRIPT',
+        ')',
+        '/bin/bash -c "$inner" installer-test "$1" "$2" "$3"',
         'status=$?',
         '[[ "$status" == 143 ]]',
       ].join('\n'),
@@ -950,7 +976,9 @@ fi
   test('fresh configure mode preserves Agent tool reachability unless it is explicitly authorized', async () => {
     const dshHome = await temporaryDshHome()
 
-    const result = runInstaller(localInstaller, ['--dry-run', '--lark', 'configure'], dshHome)
+    // The trailing assertions describe the Linux systemd preflight, so pin the
+    // platform rather than depending on the host running this suite.
+    const result = runInstaller(localInstaller, ['--dry-run', '--lark', 'configure'], dshHome, 'Linux')
 
     expect(result.status, result.stderr).toBe(0)
     const larkSetup = join(dshHome, 'profiles', 'web', 'node_modules', '.bin', 'dsh-lark-setup')
@@ -1323,13 +1351,23 @@ dsh_enhanced_prepare_linux_resident_service 0 force`,
 
     // Keeping the existing Feishu bot leaves a managed resident service, so a
     // model (re)configuration must restart it to load the new default/route.
-    const result = runInstaller(localInstaller, [
+    // The restart is delegated to the platform's own supervisor, so pin the
+    // detected platform and assert both real branches.
+    const linux = runInstaller(localInstaller, [
       '--dry-run', '--lark', 'keep', '--model-provider', 'deepseek-official', '--model-name', 'deepseek-v4-flash',
-    ], dshHome)
+    ], dshHome, 'Linux')
 
-    expect(result.status, result.stderr).toBe(0)
-    expect(result.stdout).toContain('常驻服务：将重启以加载新模型配置。')
-    expect(result.stdout).toContain('systemctl --user restart dsh-profile-web.service')
+    expect(linux.status, linux.stderr).toBe(0)
+    expect(linux.stdout).toContain('常驻服务：将重启以加载新模型配置。')
+    expect(linux.stdout).toContain('systemctl --user restart dsh-profile-web.service')
+
+    const darwin = runInstaller(localInstaller, [
+      '--dry-run', '--lark', 'keep', '--model-provider', 'deepseek-official', '--model-name', 'deepseek-v4-flash',
+    ], dshHome, 'Darwin')
+
+    expect(darwin.status, darwin.stderr).toBe(0)
+    expect(darwin.stdout).toContain('常驻服务：将重启以加载新模型配置。')
+    expect(darwin.stdout).toContain('launchctl kickstart -k')
   })
 
   test('does not restart a service when the model step is skipped or no service is managed', async () => {
