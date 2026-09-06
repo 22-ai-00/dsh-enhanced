@@ -92,6 +92,22 @@ scope、situation、producer/evaluator id、证据引用和指标属于本地评
 - scope 路径做绝对路径的语法规范化，不主动访问文件系统解析符号链接。
 - 当前面向单机个人助理，SQLite 依赖仓库兼容基线规定的 Node.js 版本。
 
+## 配对评测 Host SDK（实验性）
+
+`@dsh-enhanced/assistant-evaluation/benchmark` 提供 `parseBenchmarkPlan`、`benchmarkPlanDigest`、`benchmarkSchedule`、`BenchmarkStore`、`runBenchmark` 和 `benchmarkReport`。这是可独立导入的 Host 集成入口，不自动启用，也不注册模型工具。它使用单独的 benchmark SQLite 文件，不改变日常任务评价数据库。
+
+计划冻结数据集版本与摘要、逐题输入/验收摘要、模型、prompt、skills、tools、policy 和 runtime 的 SHA-256 配置/内容摘要。模型摘要应覆盖实际 provider、具体模型版本、采样参数和计价配置，不能只记录别名。能力比较要求模型相同；模型比较只能改变模型配置。消融必须与唯一候选保持版本一致，并只关闭记忆、规划、复核或成长中的一项。变体共享完全相同的预算与逐题 seed；执行顺序轮换。seed 记录不意味着模型服务一定支持确定性采样，adapter 必须如实记录提供商能力。
+
+可信 Host 先构造 `BenchmarkPlan`，创建 `new BenchmarkStore(absolutePrivateDatabasePath)`，再调用 `await runBenchmark(store, plan, executor, signal)`，用 `benchmarkReport(plan, store.results(plan.id))` 获取报告，最后关闭 store。`executor.execute(request)` 必须实际创建隔离且等价的任务环境，按冻结配置调用原生 AgentLoop、限制计量预算、收集 Host 计量、等待资源停止并使用独立 verifier 判定结果。请求只含计划中的任务身份及摘要，输入和答案由可信数据集提供方分别交给执行器与验收器；不得让模型自行填写 observation。控制器对版本/摘要漂移、缺失预算计量、超预算与未停止的执行返回 unknown。
+
+每个 cell 在执行前持久保存运行意图。相同计划可继续尚未开始的 cell，但完成的 cell 不再执行；同 ID 不接受修改后的计划或结果。启动时遇到运行中意图会拒绝，不能因为进程重启就重放可能有副作用的任务。管理员可以用 `store.interrupt(planId, timestamp)` 将遗留意图记为 interrupted/unknown；这不会停止实际进程，也不会恢复该计划的后续执行。先确认旧执行已停止，再创建新的完整比较计划，不能选择性重跑失败题来提高分数。
+
+超时和取消发出 AbortSignal 后有界返回，迟到结果不能改写账本；unknown 传输或生命周期状态阻止后续 cell。该机制不能强制终止同 UID 任意代码、子进程或远端调用，实际撤销/隔离仍由 Host adapter 和独立 broker 实现。数据库文件要求当前用户拥有、私有权限、非符号链接/硬链接；这不是对同 UID 对手的隔离。
+
+报告保留所有计划 cell 作为已验证成功率分母，unknown 和缺测单列，缺失费用/token/返工/人工介入量不会补成零。提供配对胜负、差值和均值/中位数/P95；区间按任务聚类 bootstrap，同题重复不当作独立任务。任一比较臂有缺测或 unknown 就不报告收益差值与区间，不能把基线的未知结果当作失败来制造增益；单臂有 unknown 也不报告其成功率区间。少于两个任务不提供区间。小样本或同质任务仍不足以证明泛化收益，报告始终 `promotionAuthorized: false`。
+
+**当前完成范围：** 冻结协议、持久账本、有界协调器与统计计算。固定任务内容、Automations 原生 Host adapter、面向用户的操作入口、真实云模型比较与独立隐藏留出部署尚未完成，不能把 SDK 的替身测试视为工作包 04 完成。`split: holdout` 只声明数据集用途，不能证明保密；同 UID 文件或公开仓库中的题目/答案不属于安全隐藏留出。后续实现及验收见 [评测实施文档](../../docs/benchmark-implementation.md)。
+
 ## 兼容性
 
 对齐仓库的 [DSH / Cordis 兼容性基线](../../docs/compatibility.md)。Host 提供 Cordis、Agent 和 ToolRuntime；插件自身携带 Schemastery。
