@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import type {} from '@deepseek-ai/dsh-goal'
 import { AttachmentId, type AttachmentStore, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { PresetSpec } from '@deepseek-ai/dsh-permission-presets'
 import {
@@ -244,6 +245,7 @@ function realPersistence(
 }
 
 interface PermissionHarnessOptions {
+  ownerRoutes?: import('../src/types.js').OwnerRouteAuthority[]
   policyRules?: PolicyRule[]
   policyBudgets?: PolicyBudgetConfig[]
   providePresets?: boolean
@@ -606,6 +608,7 @@ async function runtimeHarness(
   }
   if (image?.attachments !== undefined) ctx.provide('attachments', image.attachments)
   await ctx.plugin(AssistantDeliveryService, { databasePath: join(root, 'delivery.sqlite'), spoolPath: join(root, 'spool'),
+    ...(permissions?.ownerRoutes === undefined ? {} : { ownerRoutes: permissions.ownerRoutes }),
     schedulerEnabled: false, defaultWorkspace: workspace, defaultAgentPreset: agentPreset, agentProvider: defaultRoute.provider,
     agentModel: defaultRoute.model,
     ...(permissions?.leaseMs === undefined ? {} : { leaseMs: permissions.leaseMs }),
@@ -644,6 +647,83 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
   await service.whenIdle()
   await service.tick()
   await service.whenIdle()
+}
+
+async function scheduledGoalHarness(root: string, saved: Map<string, SavedSession>, runTimeoutMs = 5_000) {
+  const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+  const fixture = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+    presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    ownerRoutes: [{ id: 'goal-owner', conversation, principal, workspace: root, agentPreset: 'primary', policyRef: 'owner-dm', minimumGeneration: 1 }],
+    policyBudgets: [{ id: 'goal-wake-runs', metric: 'automation-runs', limit: 10, periodMs: NON_ROLLING_TEST_BUDGET_PERIOD_MS, scope: 'global' }],
+    policyRules: [
+      { id: 'wake-goal', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: ownerId },
+        actions: ['create', 'observe', 'inspect', 'snapshot', 'schedule', 'pause', 'execute'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external', 'background'] } },
+      { id: 'wake-human-tools', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: ownerId },
+        actions: ['execute'], resource: { kind: 'tool', id: 'goal_*' }, context: { initiators: ['external'] } },
+      { id: 'wake-native-probe', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: ownerId },
+        actions: ['execute'], resource: { kind: 'tool', id: 'preset_probe' }, context: { initiators: ['background'] } },
+      { id: 'wake-automation', effect: 'allow', subject: { kind: 'background', id: '*', workspace: root, principal: ownerId },
+        actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+      { id: 'wake-host', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: root, principal: ownerId },
+        actions: ['wake'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
+    ],
+  })
+  const native = await nativeGoalPlugins()
+  await fixture.ctx.plugin(native.GoalService as never, {} as never)
+  await fixture.ctx.plugin(native.goalTools as never, {} as never)
+  await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+  await fixture.ctx.plugin(AssistantAutomationsService, { databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0 })
+  await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, stepMaxDurationMs: runTimeoutMs + 5_000,
+    executionBudget: { modelCalls: 5, toolCalls: 5, inputTokens: 500, outputTokens: 500, durationMs: 60_000, maxOutputTokensPerCall: 128 },
+    backgroundWake: { ownerRouteId: 'goal-owner', budgetId: 'goal-wake-runs', maxDelayMs: 30_000, runTimeoutMs },
+  })
+  fixture.ctx.assistantGoals.registerBudgetMeter({ id: 'wake-meter', provider: 'mock', model: 'delivery-model',
+    inputTokenUpperBound: () => 10, inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null })
+  if (runtimeStore(fixture.service).getPrincipal(principal) === undefined) {
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+  }
+  const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+  const objective = 'Resume the scheduled report in its original Session'
+  await writeFile(join(root, 'wake-report.md'), 'Confirmed scheduled report')
+  const authority = { kind: 'document' as const, id: 'wake-source', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
+  const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+  await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
+    authorities: [authority], profiles: [{ id: 'wake-step', version: 1, scope: { workspace: root, preset: 'primary' },
+      owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000,
+      bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'report', kind: 'document-citations', authority: { id: 'wake-source', digest }, artifactPath: 'wake-report.md', requiredText: ['Confirmed scheduled report'], quotes: [] }],
+    }],
+  })
+  const schedule = async () => {
+    let scheduled: { id: string; wakeAt: number } | undefined
+    const remove = fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      if (fixture.service.currentPreferenceTurn(agent) === undefined || nativeGoals(fixture.ctx).get(agent) !== undefined) return await next()
+      const created = await fixture.ctx.tools.execute({ callId: ToolCallId('wake-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 1 } })
+      expect(created.isError).not.toBe(true)
+      const record = fixture.ctx.assistantGoals.list(agent)[0]!
+      const result = await fixture.ctx.tools.execute({ callId: ToolCallId('wake-schedule'), name: 'goal_schedule', agent, signal,
+        arguments: { goal_id: record.id, expected_revision: record.native.revision, wake_at: Date.now() + 1_500 } })
+      expect(result.isError, JSON.stringify(result)).not.toBe(true)
+      const context = result.content.filter(block => block.type === 'text').map(block => block.text).join('')
+      expect(context).not.toContain(ownerId)
+      scheduled = JSON.parse(context).wake
+      return await next()
+    })
+    try { await fixture.service.acceptInbound(message('evt-goal-schedule', objective)); await drive(fixture.service) } finally { remove() }
+    if (scheduled === undefined) throw new Error('goal schedule tool did not produce a wake')
+    return scheduled
+  }
+  const readWake = (id: string) => {
+    const database = new DatabaseSync(join(root, 'goals.sqlite.wakes'), { readOnly: true })
+    try { return database.prepare('SELECT state, intent_json, dispatched_at FROM goal_wakes WHERE id = ?').get(id) as { state: string; intent_json: string; dispatched_at: number | null } }
+    finally { database.close() }
+  }
+  const runAt = async (at: number) => {
+    await vi.waitFor(() => expect(Date.now()).toBeGreaterThanOrEqual(at), { timeout: 4_000 })
+    await fixture.ctx.assistantAutomations.tick(); await fixture.ctx.assistantAutomations.whenIdle()
+    await fixture.ctx.assistantGoals.whenIdle()
+  }
+  return { ...fixture, schedule, readWake, runAt }
 }
 
 function runtimeStore(service: AssistantDeliveryService): {
@@ -852,6 +932,142 @@ function attachmentFixture() {
 }
 
 describe('real rc.1 delivery Agent runtime', () => {
+  test('persists a scheduled goal across Host reload and resumes only its original native Session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-reload-')); roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const first = await scheduledGoalHarness(root, saved)
+    const wake = await first.schedule()
+    const before = JSON.parse(first.readWake(wake.id).intent_json)
+    expect(first.llm.requests).toHaveLength(1)
+    expect(before.native).toMatchObject({ phase: 'paused', roundsStarted: 0, maxGoalRounds: 1 })
+    await first.ctx.fiber.restart()
+    const restarted = await scheduledGoalHarness(root, saved)
+    const observations: Array<{ session: string; human: boolean }> = []
+    restarted.ctx.on('agent/pre-step', async ({ agent }, next) => {
+      observations.push({ session: String(agent.session.id), human: restarted.service.currentPreferenceTurn(agent) !== undefined })
+      const prohibited = await restarted.ctx.tools.execute({ callId: ToolCallId('wake-cannot-create'), name: 'goal_create', agent,
+        signal: new AbortController().signal, arguments: { objective: 'Do not forge a new owner request' } })
+      expect(prohibited.isError).toBe(true)
+      return await next()
+    })
+    await restarted.runAt(wake.wakeAt)
+    expect(restarted.llm.requests).toHaveLength(1)
+    expect(observations).toEqual([{ session: before.native.sessionId, human: false }])
+    expect(restarted.readWake(wake.id)).toMatchObject({ state: 'succeeded', dispatched_at: expect.any(Number) })
+    const persisted = saved.get(before.native.sessionId)!
+    expect(persisted.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'goal')).toHaveLength(1)
+    const verification = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
+    let contracts: Array<{ id: string }>
+    try { contracts = verification.prepare('SELECT id FROM acceptance_contracts').all() as Array<{ id: string }> }
+    finally { verification.close() }
+    const steps = contracts.map(({ id }) => restarted.ctx.assistantVerifier.inspectAcceptedTask(id)!)
+    expect(steps[0]).toMatchObject({ state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'achieved', results: [{ status: 'passed' }] } })
+    expect(steps).toHaveLength(1)
+    expect(steps[0]).toMatchObject({ contract: { task: { kind: 'goal-step', goal: { sessionId: before.native.sessionId, nativeGoalId: before.native.goalId } } } })
+    await restarted.ctx.assistantAutomations.tick(); await restarted.ctx.assistantAutomations.whenIdle()
+    expect(restarted.llm.requests).toHaveLength(1)
+    await restarted.ctx.fiber.restart()
+  })
+
+  test('scheduled goal revokes before its wake CAS and never starts a model request', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-revoked-')); roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await scheduledGoalHarness(root, saved)
+    const wake = await fixture.schedule()
+    const beforeRequests = fixture.llm.requests.length
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+    expect(runtimeStore(fixture.service).revokePrincipal(owner.id, owner.version)).toMatchObject({ status: 'revoked' })
+
+    await fixture.runAt(wake.wakeAt)
+
+    // The Host re-reads active owner lineage before giving Goals' one-shot
+    // capability to the runtime; no native resume/model request is possible.
+    expect(fixture.llm.requests).toHaveLength(beforeRequests)
+    expect(fixture.readWake(wake.id)).toMatchObject({ state: 'denied', dispatched_at: null })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test.each(['deadline', 'stop'] as const)('scheduled goal %s leaves an uncooperative native tool unknown and fences a late call', async cancellation => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-deadline-')); roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const fixture = await scheduledGoalHarness(root, saved, 5_000)
+    const wake = await fixture.schedule()
+    let retainedAgent: Agent | undefined
+    fixture.ctx.on('agent/pre-step', async ({ agent }, next) => {
+      if (fixture.service.currentPreferenceTurn(agent) === undefined) retainedAgent = agent
+      return await next()
+    })
+    let startTool!: () => void
+    let releaseTool!: () => void
+    const started = new Promise<void>(resolve => { startTool = resolve })
+    const held = new Promise<void>(resolve => { releaseTool = resolve })
+    fixture.presetExecute.mockImplementationOnce(async () => { startTool(); await held; return { mounted: true } })
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      fixture.llm.requests.push(options)
+      const callId = ToolCallId('scheduled-goal-deadline-probe')
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+      yield { type: 'tool-call-delta', index: 0, id: callId, name: 'preset_probe', argumentsDelta: '{}' }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'preset_probe', arguments: '{}' } }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    })
+    const running = fixture.runAt(wake.wakeAt)
+    let deadline: ReturnType<typeof setTimeout> | undefined
+    try {
+      await Promise.race([started, running.then(() => { throw new Error('scheduled goal ended before tool start') })])
+      if (cancellation === 'stop') {
+        const cancel = vi.spyOn(retainedAgent!, 'cancel')
+        await fixture.service.acceptInbound(message('evt-scheduled-goal-stop', '/stop', 'command'))
+        expect(cancel).toHaveBeenCalled()
+      }
+      await expect(Promise.race([
+        running,
+        new Promise<never>((_resolve, reject) => {
+          deadline = setTimeout(() => reject(new Error('scheduled goal deadline did not bound its hung tool')), 6_000)
+        }),
+      ])).resolves.toBeUndefined()
+      expect(fixture.readWake(wake.id)).toMatchObject({ state: 'unknown', dispatched_at: expect.any(Number) })
+      expect(retainedAgent).toBeDefined()
+      expect(fixture.ctx.agents.get(retainedAgent!.id)).toBe(retainedAgent)
+      const late = await retainedAgent!.ctx.tools.execute({
+        callId: ToolCallId('scheduled-goal-deadline-late'), name: 'preset_probe', agent: retainedAgent!,
+        signal: new AbortController().signal, arguments: {},
+      })
+      expect(late.isError).toBe(true)
+      expect(fixture.presetExecute).toHaveBeenCalledOnce()
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline)
+      releaseTool()
+      await vi.waitFor(() => expect(retainedAgent === undefined || fixture.ctx.agents.get(retainedAgent.id)).toBeUndefined())
+      await fixture.ctx.fiber.restart()
+    }
+  }, 15_000)
+
+  test.each(['non-goal', 'foreign-goal'] as const)('scheduled goal restore rejects a persisted %s Inbox message before dispatch', async kind => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-persisted-inbox-')); roots.push(root)
+    const saved = new Map<string, SavedSession>()
+    const first = await scheduledGoalHarness(root, saved)
+    const wake = await first.schedule()
+    const sessionId = JSON.parse(first.readWake(wake.id).intent_json).native.sessionId as string
+    await first.ctx.fiber.restart()
+    const persisted = saved.get(sessionId)!
+    const source = kind === 'non-goal'
+      ? { kind: 'plugin' as const, plugin: '@dsh-enhanced/test', form: 'notice' as const, summary: 'retained stale inbox item' }
+      : { kind: 'goal' as const, goalId: JSON.parse(first.readWake(wake.id).intent_json).native.goalId, revision: 999, round: 999 }
+    // The real SessionPreparation and native Inbox projection replay this
+    // serialized event on reload; no publication-time injection substitutes it.
+    saved.set(sessionId, { ...persisted, events: [...persisted.events, {
+      type: 'agent/inbox/spliced', seq: SessionSeq(persisted.events.length), time: Date.now(),
+      data: { target: 'next-turn', start: 0, inserted: [createUserMessage({ content: [{ type: 'text', text: 'stale work' }], source })] },
+    }] })
+    const restarted = await scheduledGoalHarness(root, saved)
+    await restarted.runAt(wake.wakeAt)
+    expect(restarted.llm.requests).toHaveLength(0)
+    expect(restarted.presetExecute).not.toHaveBeenCalled()
+    expect(restarted.readWake(wake.id)).toMatchObject({ state: 'denied', dispatched_at: null })
+    await restarted.ctx.fiber.restart()
+  })
+
   test('namespaces model-picker operations by conversation as well as provider event id', () => {
     const first = modelPickerOperationId(conversation, 'same-event')
     expect(modelPickerOperationId(conversation, 'same-event')).toBe(first)

@@ -49,6 +49,7 @@
     }
   },
   "peerDependencies": {
+    "@dsh-enhanced/assistant-automations": ">0.1.7 <0.2.0",
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-goal": ">=0.1.2-rc.1 <0.2.0",
@@ -62,6 +63,7 @@
     "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0"
   },
   "peerDependenciesMeta": {
+    "@dsh-enhanced/assistant-automations": { "optional": true },
     "@deepseek-ai/cordis": {
       "optional": true
     },
@@ -97,6 +99,7 @@
     }
   },
   "devDependencies": {
+    "@dsh-enhanced/assistant-automations": "workspace:*",
     "@deepseek-ai/cordis": "catalog:",
     "@types/node": "catalog:",
     "typescript": "catalog:",

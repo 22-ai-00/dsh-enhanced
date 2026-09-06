@@ -6,5 +6,6 @@ export { AssistantGoalsService, Config, version }
 export type * from './types.js'
 export type { GoalBudgetConfig, GoalBudgetMeter } from './budget.js'
 export type { GoalBudgetLimits, GoalBudgetSnapshot } from './budget-store.js'
+export type { GoalWakeConfig } from './wake.js'
 export function apply(ctx: Context, config: Config = {}): void { new AssistantGoalsService(ctx, config) }
 export default AssistantGoalsService

@@ -8,6 +8,8 @@
 
 > Session 排他更新：Delivery schema 19 已把已有 Session 恢复与首次/new construction 纳入同一持久凭证。有效占用等待，已派发而无法证明停止的执行保持 unknown；旧 Agent 和迟到调用失去权限，只有真实 teardown 与已跟踪操作结束才释放。冷恢复会提示核对，`/new` 保留旧 Session 并独立开始。后台 owner 入口、Automations 持久 wake 与跨日实跑仍待完成，本层不代表完整 WP05 或 OS 隔离通过。最终工程证据以落地账本末尾为准。
 
+> 单次 wake 更新：默认关闭的 `backgroundWake` 已接入 owner 当前回合授权、Automations 两阶段 at 物化、原 Session/GoalId/revision 恢复与 dispatch CAS。六项真实恢复专项通过，含独立步骤验收、撤权、持久旧 Inbox 拒绝、deadline、/stop 和迟到工具拒绝；最终全仓证据见落地账本末尾。进程崩溃遗留 dispatched 与 unknown 均不重放，跨日生产运行和业务目标整体验收仍待完成。
+
 ## 完整目标
 
 完整落实此前分析和规划，让项目成为高智能、高主动、能长期自主推进任务并持续自我改进的智能体；高权限与可验证的安全边界兼顾，同时安装、配置、升级和通过 Web 对话都方便友好。保留账本全部 18 个工作包，不能把目标缩成当前已实现的切片。

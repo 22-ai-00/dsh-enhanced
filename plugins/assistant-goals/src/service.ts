@@ -17,13 +17,21 @@ import type { GoalBudgetConfig, GoalBudgetMeter } from './budget.js'
 import type { GoalBudgetSnapshot } from './budget-store.js'
 import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import type { TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
+import { GoalWakeRuntime, validateGoalWakeConfig, type GoalWakeConfig } from './wake.js'
+import type { GoalWake } from './wake-store.js'
+import type { DeliveryGoalWakeInput } from '@dsh-enhanced/assistant-delivery'
 
-export interface Config { databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig }
+export interface Config { databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-goals.sqlite')),
   maxContextChars: Schema.number().step(1).min(1024).max(65536).default(12000),
   verifyNativeRounds: Schema.boolean().default(false),
   stepMaxDurationMs: Schema.number().step(1).min(1).max(300000).default(60000),
+  backgroundWake: Schema.union([Schema.object({
+    ownerRouteId: Schema.string().required(), budgetId: Schema.string().required(),
+    maxDelayMs: Schema.number().step(1).min(1).max(31 * 86_400_000).default(86_400_000),
+    runTimeoutMs: Schema.number().step(1).min(1_000).max(300_000).default(60_000),
+  })]),
   executionBudget: Schema.union([Schema.object({
     modelCalls: Schema.number().step(1).min(0).max(1_000_000_000).required(),
     toolCalls: Schema.number().step(1).min(0).max(1_000_000_000).required(),
@@ -63,6 +71,7 @@ export class AssistantGoalsService extends Service {
   #observationFailures = 0
   #execution: GoalExecutionRuntime
   #budget: GoalBudgetRuntime | undefined
+  #wake: GoalWakeRuntime | undefined
 
   constructor(ctx: Context, input: Config = {}) {
     super(ctx, 'assistantGoals')
@@ -73,6 +82,8 @@ export class AssistantGoalsService extends Service {
     if (!Number.isSafeInteger(duration) || duration < 1 || duration > 300000 || (input.verifyNativeRounds !== undefined && typeof input.verifyNativeRounds !== 'boolean')) throw new Error('assistant-goals: invalid execution limits')
     const budget = input.executionBudget === undefined ? undefined : validateGoalBudgetConfig(input.executionBudget)
     if (budget !== undefined && input.verifyNativeRounds !== true) throw new Error('assistant-goals: execution budget requires verified native rounds')
+    const wake = input.backgroundWake === undefined ? undefined : validateGoalWakeConfig(input.backgroundWake)
+    if (wake !== undefined && (budget === undefined || path === ':memory:')) throw new Error('assistant-goals: background wake requires durable verified execution and budgets')
     this.#store = new GoalStore(path)
     ctx.effect(() => () => { this.#active = false; this.#store.close() }, 'assistant-goals.store')
     this.#execution = new GoalExecutionRuntime(ctx, input.verifyNativeRounds === true ? (path === ':memory:' ? path : `${path}.executions`) : undefined, duration, agent => {
@@ -82,6 +93,14 @@ export class AssistantGoalsService extends Service {
       return { scope, record }
     })
     if (budget !== undefined) this.#budget = new GoalBudgetRuntime(ctx, path === ':memory:' ? path : `${path}.budgets`, budget, this.#execution.budgetState)
+    if (wake !== undefined) this.#wake = new GoalWakeRuntime(ctx, `${path}.wakes`, wake, (scope, goalId, agent) => {
+      if (!this.#active) throw new Error('assistant-goals: disposed')
+      if (agent !== undefined) {
+        if (acceptanceDigest(this.#scope(agent, 'execute')) !== acceptanceDigest(scope)) throw new Error('assistant-goals: wake owner changed')
+        this.#observe(agent, false)
+      }
+      return this.#store.get(scope, goalId)
+    }, () => this.#execution.health().verifierConnected && this.#budget !== undefined)
     ctx.inject(['agents', 'goals', 'assistantDelivery', 'assistantPolicy'], runtime => {
       runtime.on('goal/changed', ({ agent, change }) => {
         try {
@@ -217,6 +236,62 @@ export class AssistantGoalsService extends Service {
     }
   }
 
+  /** Explicit owner authorization for one delayed resume, never an autonomous human-turn substitute. */
+  schedule = async (agent: Agent | undefined, goalId: string, expectedRevision: number, at: number, signal: AbortSignal): Promise<GoalWake> => {
+    const wake = this.#wake
+    if (wake === undefined) throw new Error('assistant-goals: background wake is not enabled')
+    const scope = this.#scope(agent, 'schedule')
+    this.#requireOwnerTurn(agent!, scope)
+    let record = this.inspect(agent, goalId)
+    wake.preflight(record)
+    const now = Date.now()
+    const budget = this.#budget!.inspect(record)
+    const expiresAt = Math.min(at + wake.config.runTimeoutMs, budget.limits.expiresAt)
+    if (!Number.isSafeInteger(at) || at < now || at - now > wake.config.maxDelayMs
+      || !Number.isSafeInteger(expectedRevision) || record.native.revision !== expectedRevision
+      || record.native.sessionId !== String(agent!.session.id) || !['active', 'paused'].includes(record.native.phase)
+      || record.native.roundsStarted >= record.native.maxGoalRounds || expiresAt - at < 1_000
+      || budget.modelCalls >= budget.limits.modelCalls || budget.outputTokens >= budget.limits.outputTokens) {
+      throw new Error('assistant-goals: invalid or exhausted scheduled goal')
+    }
+    signal.throwIfAborted()
+    if (record.native.phase === 'active') record = this.control(agent, { goalId, expectedRevision, operation: 'pause' })
+    // Pausing and flushing the native Session precedes publication of any active wake.
+    // Failure here leaves the goal paused; the caller must inspect rather than assume scheduling succeeded.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const abort = () => { cleanup(); reject(new Error('assistant-goals: schedule checkpoint cancelled')) }
+        const timer = setTimeout(abort, wake.config.runTimeoutMs)
+        timer.unref?.()
+        const cleanup = () => { clearTimeout(timer); signal.removeEventListener('abort', abort) }
+        signal.addEventListener('abort', abort, { once: true })
+        if (signal.aborted) abort()
+        Promise.resolve(this.ctx.get('sessions')!.flush(agent!.session)).then(ok => {
+          cleanup(); if (ok) resolve(); else reject(new Error('checkpoint failed'))
+        }, error => { cleanup(); reject(error) })
+      })
+      signal.throwIfAborted()
+      const currentScope = this.#scope(agent, 'schedule')
+      this.#requireOwnerTurn(agent!, currentScope)
+      const current = this.inspect(agent, goalId)
+      if (acceptanceDigest(currentScope) !== acceptanceDigest(scope)
+        || acceptanceDigest(current.native) !== acceptanceDigest(record.native)
+        || acceptanceDigest(current.definition) !== acceptanceDigest(record.definition)) throw new Error('scheduled goal changed')
+      const attestation = this.ctx.get('assistantDelivery')!.preferencePrincipalForAgent(agent!)
+      if (attestation === undefined) throw new Error('owner binding lost')
+      const identity = { scope, goalId, definition: record.definition, native: record.native,
+        attestation, at, expiresAt, ownerRouteId: wake.config.ownerRouteId, budgetId: wake.config.budgetId }
+      return wake.materialize({ id: `goal-wake-${acceptanceDigest(identity)}`, ...identity })
+    } catch {
+      throw new Error('assistant-goals: goal is paused but wake scheduling could not be confirmed; inspect the goal and schedule before retrying')
+    }
+  }
+  scheduledWakes = (agent: Agent | undefined, goalId: string): readonly GoalWake[] => {
+    const record = this.inspect(agent, goalId)
+    return this.#wake?.inspect(record.scope, record.id) ?? []
+  }
+  ownsWakeExecution = (input: DeliveryGoalWakeInput): boolean => this.#wake?.owns(input) === true
+
   #controlInput(value: GoalControlInput): GoalControlInput {
     if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) throw new Error('assistant-goals: invalid control input')
     const input = value as unknown as Record<string, unknown>
@@ -315,6 +390,6 @@ export class AssistantGoalsService extends Service {
   whenIdle = () => this.#execution.whenIdle()
   health = () => {
     if (!this.#active) throw new Error('assistant-goals: disposed')
-    return { ready: ['agents', 'goals', 'assistantDelivery', 'assistantPolicy'].every(name => this.ctx.get(name as never) !== undefined), ...this.#store.health(), observationFailures: this.#observationFailures, execution: this.#execution.health(), budget: this.#budget?.health() ?? { enabled: false } }
+    return { ready: ['agents', 'goals', 'assistantDelivery', 'assistantPolicy'].every(name => this.ctx.get(name as never) !== undefined), ...this.#store.health(), observationFailures: this.#observationFailures, execution: this.#execution.health(), budget: this.#budget?.health() ?? { enabled: false }, wake: this.#wake?.health() ?? { enabled: false } }
   }
 }

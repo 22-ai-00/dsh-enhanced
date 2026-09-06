@@ -25,6 +25,9 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
     maxContextChars: 12000
     verifyNativeRounds: false
     stepMaxDurationMs: 60000
+#    backgroundWake:
+#      ownerRouteId: local/owner
+#      budgetId: goal-budget/owner
 ```
 
 `databasePath` 默认 `~/.dsh/assistant-goals.sqlite`，必须是绝对路径（仅测试使用 `:memory:`）。`maxContextChars` 为每次自动上下文的字符上限，范围 1,024–65,536。数据超限时返回明确提示，不截断 JSON 或伪造完整证据。
@@ -112,7 +115,15 @@ executionBudget:
 
 每次实际模型请求在提供商调用前，用 SQLite 事务预留一次调用、完整输入上界和输出上限；请求的 `maxTokens` 同时限制为每次上限与剩余额度。只有流完整结束且 usage 有效、不超过预留时才结算。输入按 uncached + cacheRead + cacheWrite 累计，reasoning 属于 output 不重复累计；若有 `totalTokens`，必须等于完整输入与输出之和。取消、异常、缺失/无效 usage 或崩溃保留全额预留，不自动退款或重放。工具执行体进入前计一次工具额度，失败也不退还；没有预算的工具不会进入执行体。
 
-计量等待、流读取与目标回合受同一绝对期限和取消信号约束；计量器撤销会取消使用它的在途调用。期限取消和停止等待不证明提供商、第三方工具或 OS 进程已经停止，未知执行仍保持待对账。`goal_context` / 新模型上下文的 `executionBudget` 展示累计与 held 预留；可信 Host 可用 `inspectBudget(agent, goalId)` 和 `health().budget` 查看状态。这里尚无授权 lease、跨日自动唤醒或原生 Session 自动恢复。
+计量等待、流读取与目标回合受同一绝对期限和取消信号约束；计量器撤销会取消使用它的在途调用。期限取消和停止等待不证明提供商、第三方工具或 OS 进程已经停止，未知执行仍保持待对账。`goal_context` / 新模型上下文的 `executionBudget` 展示累计与 held 预留；可信 Host 可用 `inspectBudget(agent, goalId)` 和 `health().budget` 查看状态。
+
+## 单次计划唤醒（可选）
+
+后台唤醒默认关闭，Host 还须安装并连接 `assistant-automations`。`backgroundWake.maxDelayMs` 默认一天、最多 31 天；`runTimeoutMs` 默认 60 秒，范围 1–300 秒。实际到期时间还受目标创建时起算的累计预算期限限制。配置要求 `verifyNativeRounds: true` 和持久 `executionBudget`。调度时核对有效 Delivery owner route，以及 Policy 中 metric 为 `automation-runs` 的 `backgroundWake.budgetId`；实际模型调用还必须通过该路由的可信 Host meter 检查，缺少 meter 时不会调用提供商。
+
+`goal_schedule` 设置 `wake_at`（UTC epoch 毫秒）需要当前认证 owner 的人类回合；省略 `wake_at` 时只检查已有计划。它以原生 revision CAS 暂停目标、完成 Session checkpoint，并为同一业务 Goal、原 Session、原生 GoalId、revision、owner record/version 和定义建立一次性 `at` 意图。恢复仍限定在该原 Session/Goal/revision；没有 recurring、跨目标、跨 owner 或“全部目标”调度。
+
+协议依次持久化 Automations 的 **paused** 定义、Goals 的不可变 definition-hash 绑定、再激活定义。Delivery 在恢复前重读 owner route、目标和期限；紧邻原生恢复前 Goals 用 occurrence CAS 写入 dispatch。已派发后的退出、lease 到期、撤权、期限或 teardown 都不证明执行停止，因而 unknown 不自动重放；进程崩溃留下的 dispatched 记录同样禁止重放，保持未确认状态等待对账；没有 dispatch CAS 的 scheduler 终态只收敛为 denied。Session 忙碌或前置授权失败会拒绝本次 wake，不自动延期；由 owner 检查后决定下一步。Automations、Goals、Delivery 与 Session 不是原子事务。
 
 ## 诊断与边界
 
@@ -131,7 +142,7 @@ executionBudget:
 - 原始目标保持不变；原生 edit 更新当前目标投影。笔记和证据引用都是未验证的数据，不获得权限，也不构成 achieved 回执。
 - 每次新上下文/工具访问重查 live Agent、owner record/version 和 Policy。SystemPrompt 已经写入 Session 的历史快照不会被此插件擦除；不能把撤销新读取权限等同于历史清除或跨 owner 复用旧 Session 的隔离保证。
 - Delivery 桥接覆盖创建、业务笔记和 owner 的 edit/pause/resume/clear；没有给模型增加独立验收成功写入入口，native complete 仍由受支持的原生入口或可信 Host 管理。
-- 本包已有可选的原生回合验收绑定、单步骤期限与跨步骤累计预算；授权 lease、自动唤醒、原生 Session 自动恢复和持久多步骤调度仍待实现。
+- 本包已有可选的原生回合验收绑定、单步骤期限、跨步骤累计预算和一次性计划唤醒；持久多步骤编排、跨日生产运行验证和业务目标整体独立验收仍待完成。
 
 ## 权限与数据
 
@@ -139,6 +150,7 @@ executionBudget:
 - **网络**：本插件不直接联网；注入的上下文及工具结果会随宿主请求发送给所选模型提供商。
 - **步骤账本**：开启验收时另写 `databasePath + '.executions'` 及其 WAL/SHM，保存目标原文、scope、定义/原生身份、期限、授权摘要、契约绑定及执行终态，使用同样的私有文件要求。执行账本 schema 2 在事务中迁移旧记录并添加 owner/目标/时间查询索引，每次读取核对派生键与原意图。两套 SQLite 与 Session 不是一个原子事务；dispatch 标记后的未知窗口不自动重放。卸载保留两套数据文件。
 - **预算账本**：启用累计预算时另写 `databasePath + '.budgets'` 及其 WAL/SHM，保存 owner scope、业务目标 ID、不可变上限/期限、run/request ID、预留和结算 token/费用、工具次数；不保存请求正文。沿用私有文件、WAL/FULL、启动完整性检查要求，卸载保留文件。预算库、执行库与 Session 分别提交，未知预留保持占额，没有自动清理或退款入口。
+- **唤醒账本与后台执行**：启用 `backgroundWake` 后另写 `databasePath + '.wakes'` 及 WAL/SHM，保存原始目标、owner/binding 身份、原 Session/GoalId/revision、定义 hash、时间和派发状态，沿用私有权限及 WAL/FULL。还会通过 Automations 写入持久 at 定义、occurrence 与执行记录，通过 Delivery 重新加载原 Session；后台模型和获准工具使用当前 Host 的 preset、Policy 与预算权限，可能产生模型费用及外部动作。卸载保留这些数据库和调度记录，但注销执行器、撤销当前 wake capability；不能以卸载推断在途外部动作已终止。
 - **子进程与验收网络**：本插件不直接启动进程或请求外部目标；启用步骤验收后会调用 Host Verifier 的检查周期，由它按已批准的 profile/authority 执行程序验证、文档获取或目标回读，沿用其期限、证据预算和权限范围，见 [Verifier 权限说明](../assistant-verifier/README.md)。
 - **凭据、浏览器、安装脚本**：无直接访问。
 - **卸载**：移除 bundle 后注册和数据库连接随 Cordis 生命周期释放，数据保留；停用所有使用该库的 Host 后可手工删除数据库及其 WAL/SHM。插件不写自定义 Session event，原生目标仍由 DSH 管理。

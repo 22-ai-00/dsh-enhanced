@@ -330,6 +330,12 @@ Automation incident 使用 `automation-incident:<incidentId>:g<generation>` 同�
 - 当前 DSH `0.1.2-rc.1` 的 `followup()` 没有跨进程 `sourceEventId` 唯一接纳/完成 handle，因此本包诚实承诺“持久 event 去重 + at-most-once 自动 Agent dispatch”，不声称端到端 exactly-once。若宿主未来提供该 seam，可升级为安全的 at-least-once wake。
 - Outbox adapter 抛异常一律视为可能已发送；不会按照普通 5xx 重试。
 
+## Goals 单次唤醒边界
+
+Delivery 只向 Goals 的已注册 Host capability 提供一次受限恢复：它重读当前 owner route、binding、原 Session、GoalId、revision 和 deadline，在重新加载原 Session 后重查状态，仅在 Goals 的 dispatch CAS 成功后恢复原生目标。它不把历史 Session snapshot、runtime context 或任意 `user/message` 当作新的 owner 输入；DSH 会把 runtime context snapshot 持久化为 user-role message，它不能替代人类回合证明。
+
+Cordis 按上下文读取 service 时可能产生不同 proxy 对象，Host 不能用对象 `===` 判断同一 Delivery service 或 capability 所属。恢复、撤权、lease 到期、取消和 teardown 只能阻止新的边界动作；它们不证明已有模型、工具、子进程或外部动作已经停止。无法确认终态时返回 unknown，Goals 不自动重放。
+
 ## 权限与数据边界
 
 - **文件系统：**读写配置的 SQLite 与私有 spool 目录，并在 fresh Agent create 前创建缺失的 workspace；cold resume 只验证原目录仍存在。图片字节通过宿主 AttachmentStore 持久化；标准 `attachment-local` 将其写入 `$DSH_HOME/attachments/v1`，Delivery 自己不把字节写进 SQLite、spool 或 session 日志。Delivery 本身不读取任意 workspace 文件。挂载 preset 后，获 Policy 允许的文件工具可在 DSH 文件权限边界内读取 workspace。
