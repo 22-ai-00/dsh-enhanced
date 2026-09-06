@@ -9,6 +9,7 @@ import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import type {} from '@deepseek-ai/dsh-plan-mode'
 import type {} from '@deepseek-ai/dsh-session-title'
 import type {} from '@deepseek-ai/dsh-tool-todo'
+import { acpModeIdForPreset } from './control.ts'
 
 export interface SessionEventMapper {
   map(event: SessionEvent): SessionUpdate[]
@@ -172,7 +173,9 @@ export function createSessionEventMapper(
         case 'agent-preset/selected':
           return [{
             sessionUpdate: 'current_mode_update',
-            currentModeId: event.data.agentPreset,
+            // Durable events retain the DSH preset id (`ptc`), while ACP
+            // clients receive the stable public mode id (`code`).
+            currentModeId: acpModeIdForPreset(event.data.agentPreset) ?? event.data.agentPreset,
             _meta: rawMeta(event),
           }]
 

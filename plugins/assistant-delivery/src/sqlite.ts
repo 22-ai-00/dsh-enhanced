@@ -1057,6 +1057,36 @@ function migrate(database: DatabaseSync): void {
   }
 }
 
+// SQLite's journal-mode transition is outside the migration transaction. A
+// simultaneous opener can therefore finish migration while another connection
+// is still changing mode, which returns SQLITE_BUSY even after busy_timeout.
+// Keep the migration mutex intact and retry only that transient transition.
+const walRetryWait = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT))
+
+function enableWal(database: DatabaseSync): void {
+  const deadline = performance.now() + 5_000
+  // busy_timeout applies to each statement. Disable it only for this bounded
+  // retry loop so one SQLite wait cannot extend the five-second overall cap.
+  database.exec('PRAGMA busy_timeout = 0')
+  try {
+    while (true) {
+      try {
+        const row = database.prepare('PRAGMA journal_mode = WAL').get() as { journal_mode: string }
+        if (row.journal_mode.toLowerCase() !== 'wal') {
+          throw new Error(`delivery database refused WAL mode: ${row.journal_mode}`)
+        }
+        return
+      } catch (error) {
+        const retryable = error instanceof Error && /database is (?:busy|locked)/i.test(error.message)
+        if (!retryable || performance.now() >= deadline) throw error
+        Atomics.wait(walRetryWait, 0, 0, 10)
+      }
+    }
+  } finally {
+    database.exec('PRAGMA busy_timeout = 5000')
+  }
+}
+
 export function openDeliveryDatabase(path: string): DatabaseSync {
   if (path !== ':memory:' && !isAbsolute(path)) {
     throw new DeliveryDatabaseError('invalid-path', 'delivery database path must be absolute')
@@ -1073,7 +1103,7 @@ export function openDeliveryDatabase(path: string): DatabaseSync {
     database.exec('PRAGMA synchronous = FULL')
     migrate(database)
     if (path !== ':memory:') {
-      database.exec('PRAGMA journal_mode = WAL')
+      enableWal(database)
       chmodSync(path, 0o600)
     }
     return database

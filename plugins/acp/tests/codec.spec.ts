@@ -94,6 +94,7 @@ describe('DSH session event to ACP updates', () => {
       ],
     }))
     const mode = mapper.map(event('agent-preset/selected', { agentPreset: 'minimal' }))
+    const ptc = mapper.map(event('agent-preset/selected', { agentPreset: 'ptc' }))
     const title = mapper.map(event('session/title', {
       title: 'ACP integration',
       messageSeqs: [SessionSeq(1)],
@@ -109,6 +110,7 @@ describe('DSH session event to ACP updates', () => {
       ],
     })])
     expect(mode).toEqual([expect.objectContaining({ sessionUpdate: 'current_mode_update', currentModeId: 'minimal' })])
+    expect(ptc).toEqual([expect.objectContaining({ sessionUpdate: 'current_mode_update', currentModeId: 'code' })])
     expect(title).toEqual([expect.objectContaining({
       sessionUpdate: 'session_info_update',
       title: 'ACP integration',

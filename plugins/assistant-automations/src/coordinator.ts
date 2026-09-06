@@ -254,6 +254,17 @@ export class AutomationCoordinator {
       maxCatchUp: this.maxCatchUp,
       hostAvailability: materializeAvailability,
     })
+    this.store.requestCancellationForSupersededTasks({
+      ownerId: this.ownerId,
+      fencingToken: this.fencingToken!,
+      now,
+    })
+    this.store.coalesceQueuedTasks({
+      ownerId: this.ownerId,
+      fencingToken: this.fencingToken!,
+      now,
+    })
+    this.abortRequestedActive()
     while (this.active.size < this.maxConcurrency) {
       const claimAvailability = this.hostAvailability(
         this.store.listClaimableHostExecutionRequirements(), 'claim',
@@ -265,6 +276,10 @@ export class AutomationCoordinator {
         leaseMs: this.taskLeaseMs,
         hostAvailability: claimAvailability,
       })
+      // claimNextTask may have durably requested a causal cancel-previous
+      // replacement. Abort it before observing the resulting no-claim so the
+      // next tick can acquire the successor only after the slot is released.
+      this.abortRequestedActive()
       if (claimed === undefined) break
       if (claimed.status !== 'claimed') continue
       this.abortRequestedActive()

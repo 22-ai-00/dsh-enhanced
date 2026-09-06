@@ -1,5 +1,5 @@
 import { Readable } from 'node:stream'
-import { Client, defaultHttpInstance, normalize, type RawMessageEvent } from '@larksuiteoapi/node-sdk'
+import { AppType, Client, defaultHttpInstance, Domain, LoggerLevel, normalize, type RawMessageEvent } from '@larksuiteoapi/node-sdk'
 import { describe, expect, test, vi } from 'vitest'
 import {
   classifyLarkSdkFailure,
@@ -1036,6 +1036,238 @@ describe('Lark SDK boundary', () => {
     } finally {
       await transport.disconnect()
       request.mockRestore()
+    }
+  })
+
+  test('bounds an unsettled raw-card transport, forwards its abort signal, and releases the caller', async () => {
+    let forwarded: AbortSignal | undefined
+    const request = vi.spyOn(Client.prototype, 'request').mockImplementation(async options => {
+      forwarded = (options as { signal?: AbortSignal }).signal
+      return await new Promise<never>(() => {})
+    })
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 5, imageDownloadTimeoutMs: 1_000,
+    })
+    try {
+      const failure: unknown = await settleBeforeTestDeadline(
+        transport.updateRawCard('om_original', { schema: '2.0' }, new AbortController().signal)
+          .then(() => undefined, (error: unknown) => error),
+      )
+      expect(failure).toMatchObject({ code: 'send_timeout', message: 'Lark card update timed out' })
+      await vi.waitFor(() => expect(forwarded?.aborted).toBe(true), { timeout: 100, interval: 2 })
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
+  })
+
+  test('does not start a raw-card request after caller cancellation', async () => {
+    const request = vi.spyOn(Client.prototype, 'request').mockResolvedValue({ code: 0 })
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000,
+    })
+    const caller = new AbortController()
+    caller.abort(new Error('lease revoked'))
+    try {
+      await expect(transport.updateRawCard('om_original', { schema: '2.0' }, caller.signal))
+        .rejects.toMatchObject({ code: 'not_connected', message: 'Lark card update was cancelled' })
+      expect(request).not.toHaveBeenCalled()
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
+  })
+
+  test('keeps an in-flight raw-card update ambiguous when its caller is cancelled', async () => {
+    const request = vi.spyOn(Client.prototype, 'request').mockImplementation(async () => await new Promise<never>(() => {}))
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000,
+    })
+    const caller = new AbortController()
+    try {
+      const pending = transport.updateRawCard('om_original', { schema: '2.0' }, caller.signal)
+      await vi.waitFor(() => expect(request).toHaveBeenCalledOnce())
+      caller.abort(new Error('lease revoked'))
+      await expect(pending).rejects.toMatchObject({
+        code: 'unknown', message: 'Lark card update outcome is unknown after cancellation',
+      })
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
+  })
+
+  test('cleans up the hard-deadline timer after a regular request succeeds', async () => {
+    vi.useFakeTimers()
+    const request = vi.spyOn(Client.prototype, 'request').mockResolvedValue({ code: 0 })
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000,
+    })
+    try {
+      const timerCountBeforeRequest = vi.getTimerCount()
+      await transport.updateRawCard('om_original', { schema: '2.0' }, new AbortController().signal)
+      expect(vi.getTimerCount()).toBe(timerCountBeforeRequest)
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+      vi.useRealTimers()
+    }
+  })
+
+  test('passes the bounded abort signal to both native progress requests', async () => {
+    const request = vi.spyOn(Client.prototype, 'request')
+      .mockResolvedValueOnce({ code: 0, data: { cot_id: 'cot-1', message_id: 'om_cot' } })
+      .mockResolvedValueOnce({ code: 0 })
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000,
+    })
+    try {
+      const handle = await transport.createProgress('oc_chat', { replyTo: 'om_parent', hidden: false })
+      await transport.writeProgress(handle, [{ eventType: 'RUN_STARTED', content: '{}', timestamp: '1' }])
+      const inputs = request.mock.calls.map(call => call[0] as { signal?: AbortSignal })
+      expect(inputs).toHaveLength(2)
+      expect(inputs.every(input => input.signal !== undefined && !input.signal.aborted)).toBe(true)
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
+  })
+
+  test('returns successful create and reply responses through the bounded message path', async () => {
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000,
+    })
+    const request = vi.spyOn(Client.prototype, 'request')
+      .mockResolvedValueOnce({ code: 0, data: { message_id: 'om_created' } })
+      .mockResolvedValueOnce({ code: 0, data: { message_id: 'om_replied' } })
+    try {
+      await expect(transport.send('oc_chat', { text: 'hello' })).resolves.toEqual({ messageId: 'om_created' })
+      await expect(transport.send('oc_chat', { text: 'hello' }, { replyTo: 'om_parent' }))
+        .resolves.toEqual({ messageId: 'om_replied' })
+      expect(request.mock.calls.map(call => call[0])).toEqual([
+        expect.objectContaining({
+          method: 'POST', url: '/open-apis/im/v1/messages', params: { receive_id_type: 'chat_id' },
+          signal: expect.any(AbortSignal),
+        }),
+        expect.objectContaining({
+          method: 'POST', url: '/open-apis/im/v1/messages/om_parent/reply', signal: expect.any(AbortSignal),
+        }),
+      ])
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
+  })
+
+  test('maps an unsettled message send to the existing ambiguous timeout outcome', async () => {
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 5, imageDownloadTimeoutMs: 1_000,
+    })
+    const request = vi.spyOn(Client.prototype, 'request').mockImplementation(async () => await new Promise<never>(() => {}))
+    try {
+      await expect(settleBeforeTestDeadline(transport.send('oc_chat', { text: 'hello' }))).rejects.toMatchObject({
+        code: 'send_timeout', message: 'Lark SDK request timed out',
+      })
+    } finally {
+      await transport.disconnect()
+      request.mockRestore()
+    }
+  })
+
+  test('regression control: a typed SDK send without an operation signal dispatches after an outer deadline', async () => {
+    type AxiosConfig = { url?: string; signal?: AbortSignal }
+    let resolveToken!: (value: unknown) => void
+    let tokenSignal: AbortSignal | undefined
+    const http = defaultHttpInstance as unknown as {
+      defaults: { adapter: unknown }
+      post(url: string, data?: unknown, options?: { signal?: AbortSignal }): Promise<unknown>
+    }
+    const originalAdapter = http.defaults.adapter
+    const adapter = vi.fn(async (config: AxiosConfig) => ({
+      data: { code: 0, data: { message_id: 'om_late' } }, status: 200, statusText: 'OK', headers: {}, config,
+    }))
+    http.defaults.adapter = adapter
+    const tokenPost = vi.spyOn(http, 'post').mockImplementation(async (_url, _data, options) => {
+      tokenSignal = options?.signal
+      return await new Promise(resolve => { resolveToken = resolve })
+    })
+    const legacyClient = new Client({
+      appId: 'cli_legacy_late_token', appSecret: 'secret', domain: Domain.Feishu,
+      appType: AppType.SelfBuild, loggerLevel: LoggerLevel.error,
+    })
+    try {
+      const legacySend = legacyClient.im.v1.message.create({
+        params: { receive_id_type: 'chat_id' },
+        data: { receive_id: 'oc_chat', msg_type: 'text', content: 'hello', uuid: 'legacy-uuid' },
+      })
+      await expect(settleBeforeTestDeadline(legacySend, 5)).rejects.toThrow('test-only promise did not settle')
+      await vi.waitFor(() => expect(tokenPost).toHaveBeenCalledOnce(), { timeout: 100, interval: 2 })
+      expect(tokenSignal).toBeUndefined()
+      resolveToken({ code: 0, tenant_access_token: 'tenant-access-token', expire: 7_200 })
+      await expect(legacySend).resolves.toMatchObject({ code: 0 })
+      expect(adapter.mock.calls).toHaveLength(1)
+      expect(String(adapter.mock.calls[0]?.[0].url)).toContain('/open-apis/im/v1/messages')
+    } finally {
+      tokenPost.mockRestore()
+      http.defaults.adapter = originalAdapter
+    }
+  })
+
+  test('late successful token acquisition cannot dispatch a message after the operation deadline', async () => {
+    type AxiosConfig = { url?: string; signal?: AbortSignal }
+    let resolveToken!: (value: unknown) => void
+    let tokenSignal: AbortSignal | undefined
+    let lateResourceSignal: { aborted?: boolean } | undefined
+    const http = defaultHttpInstance as unknown as {
+      defaults: { adapter: unknown }
+      post(url: string, data?: unknown, options?: { signal?: AbortSignal }): Promise<unknown>
+    }
+    const originalAdapter = http.defaults.adapter
+    const adapter = vi.fn(async (config: AxiosConfig) => {
+      throw new Error(`wire dispatch must not happen after deadline: ${String(config.url)}`)
+    })
+    http.defaults.adapter = adapter
+    const resourceRequest = vi.spyOn(defaultHttpInstance, 'request')
+    const requestInterceptor = defaultHttpInstance.interceptors.request.use(config => {
+      if (String(config.url).includes('/open-apis/im/v1/messages')) {
+        lateResourceSignal = config.signal
+      }
+      return config
+    })
+    const tokenPost = vi.spyOn(http, 'post').mockImplementation(async (_url, _data, options) => {
+      tokenSignal = options?.signal
+      return await new Promise(resolve => { resolveToken = resolve })
+    })
+    const transport = new OfficialLarkTransport({
+      appId: 'cli_token_late_success', appSecret: 'secret', domain: 'feishu',
+      handshakeTimeoutMs: 1_000, requestTimeoutMs: 5, imageDownloadTimeoutMs: 1_000,
+    })
+    try {
+      await expect(settleBeforeTestDeadline(transport.send('oc_chat', { text: 'hello' }))).rejects.toMatchObject({
+        code: 'send_timeout', message: 'Lark SDK request timed out',
+      })
+      await vi.waitFor(() => expect(tokenPost).toHaveBeenCalledOnce(), { timeout: 100, interval: 2 })
+      // The SDK's token manager does not accept the operation signal. This
+      // mock intentionally ignores it and succeeds after the caller returned.
+      expect(tokenSignal?.aborted).toBe(false)
+      resolveToken({ code: 0, tenant_access_token: 'tenant-access-token', expire: 7_200 })
+      await vi.waitFor(() => expect(resourceRequest).toHaveBeenCalledOnce(), { timeout: 100, interval: 2 })
+      expect((resourceRequest.mock.calls[0]?.[0] as AxiosConfig | undefined)?.signal?.aborted).toBe(true)
+      expect(lateResourceSignal?.aborted).toBe(true)
+      expect(adapter).not.toHaveBeenCalled()
+    } finally {
+      await transport.disconnect()
+      tokenPost.mockRestore()
+      resourceRequest.mockRestore()
+      defaultHttpInstance.interceptors.request.eject(requestInterceptor)
+      http.defaults.adapter = originalAdapter
     }
   })
 

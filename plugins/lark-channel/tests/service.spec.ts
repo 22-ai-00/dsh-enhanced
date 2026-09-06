@@ -31,9 +31,10 @@ describe('Lark Cordis service', () => {
     })
     ctx.provide('assistantDelivery', { registerAdapter })
     const channel = transport()
-    const createTransport = vi.fn((input: { appSecret: string; imageDownloadTimeoutMs: number }) => {
+    const createTransport = vi.fn((input: { appSecret: string; imageDownloadTimeoutMs: number; requestTimeoutMs?: number }) => {
       expect(input.appSecret).toBe('super-secret-value')
       expect(input.imageDownloadTimeoutMs).toBe(30_000)
+      expect(input.requestTimeoutMs).toBe(30_000)
       return channel
     })
     const service = new LarkChannelService(ctx, {

@@ -14,6 +14,7 @@ describe('lark-channel bundle contract', () => {
     expect(Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET' }))
       .toMatchObject({ appSecretEnv: 'LARK_APP_SECRET', enabled: false, requireMentionInGroups: true,
         showProgress: true, progressDetails: 'direct', statusReactions: true, imageDownloadTimeoutMs: 30_000,
+        requestTimeoutMs: 30_000,
         userQuestionTtlMs: 86_400_000 })
     expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'not-valid' }))
       .toThrow()
@@ -38,6 +39,16 @@ describe('lark-channel bundle contract', () => {
       appSecretEnv: 'LARK_APP_SECRET', imageDownloadTimeoutMs: 999 })).toThrow()
     expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
       appSecretEnv: 'LARK_APP_SECRET', imageDownloadTimeoutMs: 120_001 })).toThrow()
+  })
+
+  test('bounds regular OpenAPI requests independently from image downloads and the websocket handshake', () => {
+    expect(Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', requestTimeoutMs: 45_000 }))
+      .toMatchObject({ requestTimeoutMs: 45_000 })
+    expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', requestTimeoutMs: 999 })).toThrow()
+    expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef',
+      appSecretEnv: 'LARK_APP_SECRET', requestTimeoutMs: 120_001 })).toThrow()
   })
 
   test('bounds how long a live user-question card can resume its waiting turn', () => {

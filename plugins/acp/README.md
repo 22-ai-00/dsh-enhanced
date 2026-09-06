@@ -34,7 +34,7 @@ Windows 支持目前为实验性，尚未在真实 Windows 用户环境和主流
 
 ## 功能
 
-- Linux 和 macOS 提供 `standard`、`code`、`minimal` 和 `cordis` 四种 DSH Agent 模式。原生 Windows 提供 `standard`、`code` 和 `cordis`；依赖 persistent Bash 与 `/bin/bash` 的 `minimal` 会被隐藏并拒绝启用。
+- Linux 和 macOS 提供 `standard`、`code`、`minimal` 和 `cordis` 四种 DSH Agent 模式。ACP 中稳定的 `code` 模式映射到 DSH 原生的 `ptc` 预设；旧 profile 中记录的 `code` 预设仍可识别。原生 Windows 提供 `standard`、`code` 和 `cordis`；依赖 persistent Bash 与 `/bin/bash` 的 `minimal` 会被隐藏并拒绝启用。
 - 使用 DSH 当前可用的模型和推理等级，并将它们提供给支持选择器的 ACP 客户端。
 - 向客户端传输回复、推理、工具调用与结果、计划、会话标题和 token 用量。
 - 沿用 DSH 的工具、沙箱、权限确认、取消和会话持久化机制。

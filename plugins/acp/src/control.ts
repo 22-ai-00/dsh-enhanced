@@ -61,6 +61,23 @@ const MODES: SessionModeState['availableModes'] = [
 ]
 
 const MODE_IDS = new Set(MODES.map(mode => mode.id))
+const PRESET_ID_BY_MODE_ID = new Map([
+  ['standard', 'standard'],
+  // ACP has exposed this mode as "code" since the plugin's first release.
+  // DSH itself ships the corresponding composition under the `ptc` directory.
+  ['code', 'ptc'],
+  ['minimal', 'minimal'],
+  ['cordis', 'cordis'],
+])
+const MODE_ID_BY_PRESET_ID = new Map([...PRESET_ID_BY_MODE_ID].map(([modeId, presetId]) => [presetId, modeId]))
+// A profile composed by an older plugin can have recorded the old, non-DSH
+// `code` preset id. Keep it renderable and switchable while profiles migrate.
+const LEGACY_MODE_ID_BY_PRESET_ID = new Map([['code', 'code']])
+
+/** Translate DSH's durable preset id into the stable ACP mode id. */
+export function acpModeIdForPreset(presetId: string): string | undefined {
+  return MODE_ID_BY_PRESET_ID.get(presetId) ?? LEGACY_MODE_ID_BY_PRESET_ID.get(presetId)
+}
 
 function modeAvailable(modeId: string, platform: NodeJS.Platform): boolean {
   return platform !== 'win32' || modeId !== 'minimal'
@@ -311,17 +328,19 @@ export async function modeState(
   agent: Agent,
   platform: NodeJS.Platform = process.platform,
 ): Promise<SessionModeState> {
-  const currentModeId = presets.composedPreset(agent.ctx)
-  if (currentModeId === undefined) throw new Error('the DSH session has no composed agent preset')
-  if (!MODE_IDS.has(currentModeId)) {
-    throw new Error(`unsupported DSH agent preset for ACP mode: ${currentModeId}`)
+  const currentPresetId = presets.composedPreset(agent.ctx)
+  if (currentPresetId === undefined) throw new Error('the DSH session has no composed agent preset')
+  const currentModeId = acpModeIdForPreset(currentPresetId)
+  if (currentModeId === undefined) {
+    throw new Error(`unsupported DSH agent preset for ACP mode: ${currentPresetId}`)
   }
   assertModeAvailable(currentModeId, platform)
   const nativeModes = new Map((await presets.list()).map(preset => [preset.id, preset]))
   return {
     currentModeId,
     availableModes: MODES.filter(mode => modeAvailable(mode.id, platform)).map((mode) => {
-      const native = nativeModes.get(mode.id)
+      const native = nativeModes.get(PRESET_ID_BY_MODE_ID.get(mode.id)!)
+        ?? nativeModes.get(mode.id)
       return {
         ...mode,
         ...(native?.name === undefined ? {} : { name: native.name }),
@@ -343,7 +362,16 @@ export async function setNativeMode(
   if (agent.session.snapshotEvents().some(event => event.type === 'turn/start')) {
     throw new Error(`session "${agent.session.id}" has already started; its agent preset is fixed`)
   }
-  const preset = await presets.recompose(agent.ctx, modeId)
+  const canonicalPresetId = PRESET_ID_BY_MODE_ID.get(modeId)!
+  const nativePresetIds = new Set((await presets.list()).map(preset => preset.id))
+  // `code` was emitted by earlier plugin releases. Prefer DSH's canonical PTC
+  // composition, but preserve the ability to open and select an old profile.
+  const presetId = nativePresetIds.has(canonicalPresetId)
+    ? canonicalPresetId
+    : modeId === 'code' && nativePresetIds.has('code')
+      ? 'code'
+      : canonicalPresetId
+  const preset = await presets.recompose(agent.ctx, presetId)
   agent.session.append('agent-preset/selected', { agentPreset: preset.id })
   return { agentPreset: preset.id }
 }

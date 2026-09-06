@@ -1750,6 +1750,7 @@ describe('Lark Web-profile onboarding patch', () => {
       showProgress: true,
       progressDetails: 'direct',
       statusReactions: true,
+      requestTimeoutMs: 30_000,
       imageDownloadTimeoutMs: 30_000,
     })
     const rules = rows.find((row: { id: string }) => row.id === 'dsh-enhanced-personal-assistant')

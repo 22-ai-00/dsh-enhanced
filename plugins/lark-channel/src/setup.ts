@@ -3439,6 +3439,7 @@ export async function runLarkSetup(
           appSecret: ownerInput.appSecret,
           domain: ownerInput.domain,
           handshakeTimeoutMs: 15_000,
+          requestTimeoutMs: 30_000,
           imageDownloadTimeoutMs: 30_000,
         })
         return discoverOwner(

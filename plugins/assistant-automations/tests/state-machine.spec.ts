@@ -196,9 +196,18 @@ describe('task recovery and overlap', () => {
       if (overlap === 'skip') expect(next).toMatchObject({ status: 'cancelled' })
       if (overlap === 'queue-one') expect(next).toBeUndefined()
       if (overlap === 'cancel-previous') {
-        expect(next).toMatchObject({ status: 'claimed' })
+        expect(next).toBeUndefined()
         expect(store.listTasks({ automationId: `auto-${overlap}`, limit: 10 })[0])
           .toMatchObject({ status: 'running', cancelRequested: true })
+        // cancel-previous only requests cancellation. The successor may not
+        // claim until the prior terminal transition releases its lease.
+        store.completeTask({
+          taskId: tasks[0]!.id, ownerId: 'owner-a', fencingToken: 1, now: 1_103,
+          outcome: 'cancelled', outputPreview: 'cancelled', usage: {},
+        })
+        expect(store.claimTask({
+          taskId: tasks[1]!.id, ownerId: 'owner-a', fencingToken: 1, now: 1_104, leaseMs: 1_000,
+        })).toMatchObject({ status: 'claimed' })
       }
     }
     store.close()
@@ -390,15 +399,32 @@ describe('task recovery and overlap', () => {
     })!
     store.startTask({ taskId: first.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
       now: 1_302, leaseMs: 1_000, sessionId: 'probe-a' })
-    const second = store.claimNextTask({
-      ownerId: 'owner-a', fencingToken: duty.fencingToken, now: 1_303, leaseMs: 1_000,
-    })!
-    store.startTask({ taskId: second.id, ownerId: 'owner-a', fencingToken: duty.fencingToken,
-      now: 1_304, leaseMs: 1_000, sessionId: 'probe-b' })
-
     expect(store.acquireCircuitExecutionForTask({ taskId: first.id, now: 1_305, leaseMs: 1_000 }))
       .toMatchObject({ kind: 'probe', circuit: { state: 'probing', probeTaskId: first.id } })
-    expect(store.acquireCircuitExecutionForTask({ taskId: second.id, now: 1_306, leaseMs: 1_000 }))
+    // A database produced by older overlap semantics can contain two active
+    // tasks. Construct that legacy state with the first task's exact immutable
+    // snapshot so this test continues to verify the circuit fence itself,
+    // independently of current scheduler admission.
+    const secondOccurrence = store.listOccurrences({ automationId: 'auto-probe-single-flight', limit: 10 })
+      .find(value => value.triggerKind === 'manual' && value.triggerKey === 'probe-b')!
+    const secondId = `task-${secondOccurrence.id}`
+    const legacy = new DatabaseSync(value.path)
+    legacy.prepare(`
+      UPDATE automation_tasks
+      SET status = 'running', claimed_by = ?, fencing_token = ?, lease_until = ?, attempt_count = 1, updated_at = ?
+      WHERE id = ? AND status = 'scheduled'
+    `).run('owner-a', duty.fencingToken, 2_304, 1_304, secondId)
+    legacy.prepare(`
+      INSERT INTO automation_attempts(
+        id, task_id, attempt_number, owner_id, fencing_token, status, session_id, failure_code,
+        started_at, finished_at, automation_snapshot_hash, automation_snapshot_json, created_at, updated_at
+      ) SELECT ?, ?, 1, owner_id, fencing_token, 'running', 'probe-b', NULL,
+        ?, NULL, automation_snapshot_hash, automation_snapshot_json, ?, ?
+      FROM automation_attempts WHERE task_id = ? AND attempt_number = 1
+    `).run(`attempt-${secondId}-1`, secondId, 1_304, 1_304, 1_304, first.id)
+    legacy.close()
+    expect(store.getTaskRecord(secondId)).toMatchObject({ status: 'running', fencingToken: duty.fencingToken })
+    expect(store.acquireCircuitExecutionForTask({ taskId: secondId, now: 1_306, leaseMs: 1_000 }))
       .toMatchObject({ kind: 'blocked', circuit: { state: 'probing', probeTaskId: first.id } })
     // A retry by the same fenced task is idempotent, not a second probe grant.
     expect(store.acquireCircuitExecutionForTask({ taskId: first.id, now: 1_307, leaseMs: 1_000 }))

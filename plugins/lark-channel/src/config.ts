@@ -17,6 +17,7 @@ export interface Config {
   maxTextBytes?: number
   staleAfterMs?: number
   handshakeTimeoutMs?: number
+  requestTimeoutMs?: number
   imageDownloadTimeoutMs?: number
   userQuestionTtlMs?: number
 }
@@ -38,6 +39,7 @@ const schema = Schema.object({
   maxTextBytes: Schema.number().step(1).min(1).max(1024 * 1024).default(65_536),
   staleAfterMs: Schema.number().step(1).min(1_000).max(86_400_000).default(300_000),
   handshakeTimeoutMs: Schema.number().step(1).min(1_000).max(120_000).default(15_000),
+  requestTimeoutMs: Schema.number().step(1).min(1_000).max(120_000).default(30_000),
   imageDownloadTimeoutMs: Schema.number().step(1).min(1_000).max(120_000).default(30_000),
   userQuestionTtlMs: Schema.number().step(1).min(60_000).max(7 * 24 * 60 * 60 * 1_000)
     .default(24 * 60 * 60 * 1_000),
@@ -53,6 +55,7 @@ const fields = new Set([
   'domain',
   'enabled',
   'handshakeTimeoutMs',
+  'requestTimeoutMs',
   'imageDownloadTimeoutMs',
   'maxTextBytes',
   'progressDetails',

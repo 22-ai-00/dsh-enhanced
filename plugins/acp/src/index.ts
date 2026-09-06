@@ -460,9 +460,7 @@ export function apply(ctx: Context, config: AcpConfig = {}): void {
             const end = inflight.endReason
             inflight.resolve(end === undefined
               ? 'cancelled'
-              : end.kind === 'max-tokens'
-                ? 'end_turn'
-                : turnEndToStopReason(end))
+              : turnEndToStopReason(end))
           })
         })
         return { stopReason }

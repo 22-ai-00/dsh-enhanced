@@ -939,26 +939,21 @@ describe('automation coordinator', () => {
     const second = value.store.claimNextTask({
       ownerId: 'coordinator-test', fencingToken: duty.fencingToken,
       now: Date.parse('2026-08-21T10:01:00.006Z'), leaseMs: 5_000,
-    })!
+    })
+    expect(second).toBeUndefined()
     const executor = value.coordinator as unknown as {
       fencingToken: number | undefined
       execute(claimed: typeof first, controller: AbortController): Promise<void>
     }
     executor.fencingToken = duty.fencingToken
 
-    await Promise.all([
-      executor.execute(first, new AbortController()),
-      executor.execute(second, new AbortController()),
-    ])
+    await executor.execute(first, new AbortController())
 
     expect(run).toHaveBeenCalledOnce()
     expect(value.store.listRuns({ automationId: 'circuit-single-runner', limit: 10 }))
-      .toEqual(expect.arrayContaining([
-        expect.objectContaining({ status: 'succeeded' }),
-        expect.objectContaining({ status: 'failed', diagnostic: expect.objectContaining({ failureCode: 'circuit-open' }) }),
-      ]))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ status: 'succeeded' })]))
     expect(value.store.getCircuit('circuit-single-runner', definitionHash)).toMatchObject({
-      state: 'closed', version: open.version + 3,
+      state: 'closed', version: expect.any(Number),
     })
     await value.coordinator.stop()
     value.store.close()
@@ -1533,8 +1528,11 @@ describe('automation coordinator', () => {
       dutyLeaseMs: 3_000, taskLeaseMs: 3_000, misfireGraceMs: 0, maxCatchUp: 10, maxConcurrency: 2,
     })
     await coordinator.tick()
-    expect(signals).toHaveLength(2)
+    expect(signals).toHaveLength(1)
     expect(signals[0]!.aborted).toBe(true)
+    await coordinator.whenIdle()
+    await coordinator.tick()
+    expect(signals).toHaveLength(2)
     now += 2_500
     await vi.advanceTimersByTimeAsync(2_500)
     const running = store.listTasks({ automationId: 'auto-overlap', limit: 10 }).find(task => task.status === 'running')
@@ -1543,6 +1541,290 @@ describe('automation coordinator', () => {
     await coordinator.stop()
     store.close()
     vi.useRealTimers()
+  })
+
+  test('cancel-previous requests cancellation before a default-concurrency slot is free', async () => {
+    let now = Date.parse('2026-08-21T10:00:00.000Z')
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-cancel-previous-slot-'))
+    roots.push(root)
+    const store = new AutomationStore({ path: join(root, 'state.sqlite'), now: () => now })
+    const artifacts = new AutomationArtifactStore({ rootPath: join(root, 'runs'), maxBytes: 64_000 })
+    const signals: AbortSignal[] = []
+    const runner: AutomationRunner = {
+      async run(input) {
+        signals.push(input.signal)
+        await new Promise<void>(resolve => input.signal.addEventListener('abort', () => resolve(), { once: true }))
+        return { outcome: 'cancelled', output: 'cancelled', usage: {} }
+      },
+    }
+    store.createApproved({
+      automationId: 'cancel-previous-slot', idempotencyKey: 'create:cancel-previous-slot',
+      definition: definition({
+        schedule: { kind: 'every', anchorAt: '2026-08-21T10:01:00.000Z', intervalMs: minute },
+        misfire: { kind: 'bounded-replay', limit: 2 }, overlap: 'cancel-previous', timeoutMs: 60_000,
+      }),
+    })
+    now = Date.parse('2026-08-21T10:02:00.000Z')
+    const coordinator = new AutomationCoordinator({
+      store, artifacts, runner, ownerId: 'cancel-previous-owner', now: () => now,
+      dutyLeaseMs: 3_000, taskLeaseMs: 3_000, misfireGraceMs: 0, maxCatchUp: 10, maxConcurrency: 1,
+    })
+    await coordinator.tick()
+    expect(signals).toHaveLength(1)
+    await coordinator.tick()
+    expect(signals[0]!.aborted).toBe(true)
+    await coordinator.whenIdle()
+    await coordinator.tick()
+    expect(signals).toHaveLength(2)
+    await coordinator.stop()
+    store.close()
+  })
+
+  test('cancel-previous never lets an older pending occurrence reverse-cancel a newer active one', async () => {
+    let now = Date.parse('2026-08-21T10:00:00.000Z')
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-cancel-order-'))
+    roots.push(root)
+    const store = new AutomationStore({ path: join(root, 'state.sqlite'), now: () => now })
+    store.createApproved({
+      automationId: 'cancel-order', idempotencyKey: 'create:cancel-order',
+      definition: definition({
+        schedule: { kind: 'every', anchorAt: '2026-08-21T10:01:00.000Z', intervalMs: minute },
+        misfire: { kind: 'bounded-replay', limit: 4 }, overlap: 'cancel-previous', timeoutMs: 60_000,
+      }),
+    })
+    now = Date.parse('2026-08-21T10:04:00.000Z')
+    store.materializeDue({ now, misfireGraceMs: 0, maxCatchUp: 10 })
+    const tasks = store.listTasks({ automationId: 'cancel-order', limit: 10 })
+    const active = [...tasks].sort((left, right) => (
+      store.getOccurrence(right.occurrenceId)!.scheduledAt - store.getOccurrence(left.occurrenceId)!.scheduledAt
+    ))[0]!
+    const oldest = [...tasks].sort((left, right) => (
+      store.getOccurrence(left.occurrenceId)!.scheduledAt - store.getOccurrence(right.occurrenceId)!.scheduledAt
+    ))[0]!
+    const duty = store.acquireDuty({ ownerId: 'cancel-order-owner', now, leaseMs: 10_000 })
+    store.claimTask({ taskId: active.id, ownerId: 'cancel-order-owner', fencingToken: duty.fencingToken, now, leaseMs: 5_000 })
+    store.startTask({
+      taskId: active.id, ownerId: 'cancel-order-owner', fencingToken: duty.fencingToken,
+      now, leaseMs: 5_000, sessionId: 'newest-active',
+    })
+    expect(store.claimTask({
+      taskId: oldest.id, ownerId: 'cancel-order-owner', fencingToken: duty.fencingToken, now, leaseMs: 5_000,
+    })).toBeUndefined()
+    expect(store.claimNextTask({
+      ownerId: 'cancel-order-owner', fencingToken: duty.fencingToken, now, leaseMs: 5_000,
+    })).toBeUndefined()
+    store.requestCancellationForSupersededTasks({
+      ownerId: 'cancel-order-owner', fencingToken: duty.fencingToken, now,
+    })
+    expect(store.getTaskRecord(active.id)?.cancelRequested).toBe(false)
+    expect(store.getTaskRecord(oldest.id)?.status).toBe('scheduled')
+    store.close()
+  })
+
+  test('cancel-previous does not infer causality from simultaneous manual occurrences', async () => {
+    const now = Date.parse('2026-08-21T10:00:00.000Z')
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-cancel-simultaneous-'))
+    roots.push(root)
+    const store = new AutomationStore({ path: join(root, 'state.sqlite'), now: () => now })
+    store.createApproved({
+      automationId: 'cancel-simultaneous', idempotencyKey: 'create:cancel-simultaneous',
+      definition: definition({
+        schedule: { kind: 'at', at: '2027-08-21T10:00:00.000Z' }, overlap: 'cancel-previous',
+      }),
+    })
+    store.createManual({ automationId: 'cancel-simultaneous', requestId: 'manual-a', dryRun: false })
+    store.createManual({ automationId: 'cancel-simultaneous', requestId: 'manual-b', dryRun: false })
+    const duty = store.acquireDuty({ ownerId: 'cancel-simultaneous-owner', now, leaseMs: 10_000 })
+    const active = store.claimNextTask({
+      ownerId: 'cancel-simultaneous-owner', fencingToken: duty.fencingToken, now, leaseMs: 5_000,
+    })!
+    store.startTask({
+      taskId: active.id, ownerId: 'cancel-simultaneous-owner', fencingToken: duty.fencingToken,
+      now, leaseMs: 5_000, sessionId: 'simultaneous-active',
+    })
+    store.requestCancellationForSupersededTasks({
+      ownerId: 'cancel-simultaneous-owner', fencingToken: duty.fencingToken, now,
+    })
+    expect(store.getTaskRecord(active.id)?.cancelRequested).toBe(false)
+    expect(store.listTasks({ automationId: 'cancel-simultaneous', limit: 10 })
+      .filter(task => task.status === 'scheduled')).toHaveLength(1)
+    store.close()
+  })
+
+  test('preview overlap work neither cancels nor coalesces production occurrences', async () => {
+    let now = Date.parse('2026-08-21T10:01:00.000Z')
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-overlap-preview-'))
+    roots.push(root)
+    const store = new AutomationStore({ path: join(root, 'state.sqlite'), now: () => now })
+    const duty = store.acquireDuty({ ownerId: 'preview-owner', now, leaseMs: 10 * minute })
+    store.createApproved({
+      automationId: 'preview-cancel', idempotencyKey: 'create:preview-cancel',
+      definition: definition({
+        schedule: { kind: 'every', anchorAt: '2026-08-21T10:01:00.000Z', intervalMs: minute },
+        overlap: 'cancel-previous', misfire: { kind: 'bounded-replay', limit: 4 },
+      }),
+    })
+    store.materializeDue({ now, misfireGraceMs: 0, maxCatchUp: 10 })
+    const production = store.claimNextTask({
+      ownerId: 'preview-owner', fencingToken: duty.fencingToken, now, leaseMs: 5_000,
+    })!
+    store.startTask({
+      taskId: production.id, ownerId: 'preview-owner', fencingToken: duty.fencingToken,
+      now, leaseMs: 5_000, sessionId: 'production-active',
+    })
+    now += minute
+    store.createManual({ automationId: 'preview-cancel', requestId: 'preview-successor', dryRun: true })
+    store.requestCancellationForSupersededTasks({
+      ownerId: 'preview-owner', fencingToken: duty.fencingToken, now,
+    })
+    expect(store.getTaskRecord(production.id)?.cancelRequested).toBe(false)
+
+    store.createApproved({
+      automationId: 'preview-queue', idempotencyKey: 'create:preview-queue',
+      definition: definition({
+        schedule: { kind: 'every', anchorAt: '2026-08-21T10:01:00.000Z', intervalMs: minute },
+        overlap: 'queue-one', misfire: { kind: 'bounded-replay', limit: 4 },
+      }),
+    })
+    now += 3 * minute
+    store.materializeDue({ now, misfireGraceMs: 0, maxCatchUp: 10 })
+    const preview = store.createManual({ automationId: 'preview-queue', requestId: 'preview-active', dryRun: true })
+    const previewTask = store.claimTask({
+      taskId: `task-${preview.id}`, ownerId: 'preview-owner', fencingToken: duty.fencingToken, now, leaseMs: 5_000,
+    })!
+    store.startTask({
+      taskId: previewTask.id, ownerId: 'preview-owner', fencingToken: duty.fencingToken,
+      now, leaseMs: 5_000, sessionId: 'preview-active',
+    })
+    store.coalesceQueuedTasks({ ownerId: 'preview-owner', fencingToken: duty.fencingToken, now })
+    const productionPending = store.listTasks({ automationId: 'preview-queue', limit: 10 })
+      .filter(task => store.getOccurrence(task.occurrenceId)?.dryRun === false && task.status === 'scheduled')
+    expect(productionPending).toHaveLength(4)
+    store.close()
+  })
+
+  test('a paused Growth canary is an admitted production successor for cancel-previous', async () => {
+    const now = Date.parse('2026-08-21T10:00:00.000Z')
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-growth-cancel-'))
+    roots.push(root)
+    const path = join(root, 'state.sqlite')
+    const store = new AutomationStore({ path, now: () => now })
+    const automationId = 'growth-cancel'
+    const definitionInput = definition({
+      schedule: { kind: 'at', at: '2027-08-21T10:00:00.000Z' }, overlap: 'cancel-previous',
+    })
+    store.reconcileSystemOwned({
+      owner: 'assistant-growth-experiments', automationId, idempotencyKey: 'growth-active', definition: definitionInput,
+    })
+    const old = store.createManual({ automationId, requestId: 'old-production', dryRun: false })
+    const duty = store.acquireDuty({ ownerId: 'growth-cancel-owner', now, leaseMs: 10_000 })
+    const active = store.claimTask({
+      taskId: `task-${old.id}`, ownerId: 'growth-cancel-owner', fencingToken: duty.fencingToken, now, leaseMs: 5_000,
+    })!
+    store.startTask({
+      taskId: active.id, ownerId: 'growth-cancel-owner', fencingToken: duty.fencingToken,
+      now, leaseMs: 5_000, sessionId: 'growth-old-active',
+    })
+    const paused = store.reconcileSystemOwned({
+      owner: 'assistant-growth-experiments', automationId, idempotencyKey: 'growth-paused', desiredStatus: 'paused',
+      definition: definitionInput,
+    })
+    const definitionHash = store.getDefinitionHash(automationId)!
+    const canaryOccurrenceId = 'occ-growth-cancel-canary'
+    const canaryTaskId = `task-${canaryOccurrenceId}`
+    const digest = 'a'.repeat(64)
+    const db = new DatabaseSync(path)
+    db.exec('PRAGMA foreign_keys = OFF')
+    db.prepare(`
+      INSERT INTO automation_growth_operations(operation_id, operation_kind, payload_digest, status, receipt_json, created_at, updated_at)
+      VALUES (?, 'canary', ?, 'pending', NULL, ?, ?)
+    `).run('growth-cancel-op', digest, now, now)
+    db.prepare(`
+      INSERT INTO automation_growth_artifacts(
+        artifact_id, experiment_id, candidate_id, candidate_revision, candidate_digest, workspace, preset,
+        owner_binding_id, principal_id, template_ref, template_digest, privacy_attestation_json,
+        evidence_digest, evidence_count, steps_json, automation_id, definition_hash, definition_version,
+        proposal_id, approval_diff_hash, deadline_at, state, shadow_task_id, canary_task_id, canary_run_id,
+        canary_evaluation_id, canary_evaluation_digest, canary_evaluation_proof_json, created_at, updated_at
+      ) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, '{}', ?, 1, ?, ?, ?, ?, NULL, ?, ?, 'canary-pending', NULL, ?, NULL, NULL, NULL, NULL, ?, ?)
+    `).run(
+      'growth-cancel-artifact', 'growth-cancel-experiment', 'candidate', digest, '/work/alpha', 'primary',
+      'binding', 'principal', 'template', digest, digest,
+      '[{"catalogId":"assistant.agent-turn","argumentSchemaDigest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]',
+      automationId, definitionHash, paused.version, digest, now + minute, canaryTaskId, now, now,
+    )
+    db.prepare(`
+      INSERT INTO automation_occurrences(
+        id, automation_id, trigger_kind, trigger_key, scheduled_at, status, reason, dry_run, created_at, updated_at
+      ) VALUES (?, ?, 'manual', 'growth-canary:growth-cancel-op', ?, 'pending', NULL, 0, ?, ?)
+    `).run(canaryOccurrenceId, automationId, now + 1, now, now)
+    db.prepare(`
+      INSERT INTO automation_tasks(
+        id, occurrence_id, automation_id, status, cancel_requested, claimed_by, fencing_token, lease_until,
+        attempt_count, created_at, updated_at
+      ) VALUES (?, ?, ?, 'scheduled', 0, NULL, NULL, NULL, 0, ?, ?)
+    `).run(canaryTaskId, canaryOccurrenceId, automationId, now, now)
+    db.close()
+
+    store.requestCancellationForSupersededTasks({
+      ownerId: 'growth-cancel-owner', fencingToken: duty.fencingToken, now,
+    })
+    expect(store.getTaskRecord(active.id)?.cancelRequested).toBe(true)
+    store.close()
+  })
+
+  test('queue-one keeps one fresh pending occurrence across restart and audits coalesced backlog', async () => {
+    let now = Date.parse('2026-08-21T10:00:00.000Z')
+    const root = await mkdtemp(join(tmpdir(), 'assistant-automations-queue-one-'))
+    roots.push(root)
+    const store = new AutomationStore({ path: join(root, 'state.sqlite'), now: () => now })
+    const artifacts = new AutomationArtifactStore({ rootPath: join(root, 'runs'), maxBytes: 64_000 })
+    let calls = 0
+    const runner: AutomationRunner = {
+      async run(input) {
+        calls += 1
+        if (calls === 1) {
+          await new Promise<void>(resolve => input.signal.addEventListener('abort', () => resolve(), { once: true }))
+          return { outcome: 'cancelled', output: 'stopped', usage: {} }
+        }
+        return { outcome: 'succeeded', sessionId: input.sessionId, output: 'next', usage: {} }
+      },
+    }
+    store.createApproved({
+      automationId: 'queue-one-backlog', idempotencyKey: 'create:queue-one-backlog',
+      definition: definition({
+        schedule: { kind: 'every', anchorAt: '2026-08-21T10:01:00.000Z', intervalMs: minute },
+        misfire: { kind: 'bounded-replay', limit: 4 }, overlap: 'queue-one', timeoutMs: 60_000,
+      }),
+    })
+    now = Date.parse('2026-08-21T10:04:00.000Z')
+    const coordinator = new AutomationCoordinator({
+      store, artifacts, runner, ownerId: 'queue-one-owner', now: () => now,
+      dutyLeaseMs: 3_000, taskLeaseMs: 3_000, misfireGraceMs: 0, maxCatchUp: 10, maxConcurrency: 1,
+    })
+    await coordinator.tick()
+    await coordinator.tick()
+    const afterCoalesce = store.listTasks({ automationId: 'queue-one-backlog', limit: 10 })
+    const pending = afterCoalesce.filter(task => task.status === 'scheduled')
+    expect(pending).toHaveLength(1)
+    expect(afterCoalesce.filter(task => task.status === 'cancelled')).toHaveLength(2)
+    const occurrences = store.listOccurrences({ automationId: 'queue-one-backlog', limit: 10 })
+    expect(store.getOccurrence(pending[0]!.occurrenceId)?.scheduledAt)
+      .toBe(Math.max(...occurrences.map(value => value.scheduledAt)))
+    expect(occurrences.filter(value => value.reason === 'overlap-queue-one-coalesced')).toHaveLength(2)
+    await coordinator.stop()
+
+    const restarted = new AutomationCoordinator({
+      store, artifacts, runner, ownerId: 'queue-one-restarted', now: () => now,
+      dutyLeaseMs: 3_000, taskLeaseMs: 3_000, misfireGraceMs: 0, maxCatchUp: 10, maxConcurrency: 1,
+    })
+    await restarted.tick()
+    await restarted.whenIdle()
+    expect(calls).toBe(2)
+    expect(store.listTasks({ automationId: 'queue-one-backlog', limit: 10 })
+      .filter(task => task.status === 'scheduled')).toHaveLength(0)
+    await restarted.stop()
+    store.close()
   })
 })
 

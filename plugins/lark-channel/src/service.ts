@@ -133,6 +133,7 @@ export class LarkChannelService extends Service {
       appSecret,
       domain: config.domain,
       handshakeTimeoutMs: config.handshakeTimeoutMs,
+      requestTimeoutMs: config.requestTimeoutMs,
       imageDownloadTimeoutMs: config.imageDownloadTimeoutMs,
     })
     const adapter = new LarkDeliveryAdapter({

@@ -73,6 +73,7 @@ function harness(options: {
   growthExperimentsHealth?: unknown
   controlPlaneHealth?: unknown
   conflictedProposals?: number
+  taskLearningProjectionIntegrityErrors?: number
   failedLeases?: number
   preferenceEnabled?: boolean
   requiredProviders?: Array<'assistantPolicy' | 'personalMemory' | 'personalWiki' | 'assistantAutomations'
@@ -108,6 +109,9 @@ function harness(options: {
     unattributedTrustedEpisodes: 4, lastTrustedEpisodeAt: 120_000, lastReconciledAt: 121_000,
     unattributedQualityEligibleEpisodes: 1, lastQualityEligibleEpisodeAt: 119_000,
     autonomousRollbacks: 1,
+    taskLearningProjections: 2, retractedTaskLearningProjections: 1,
+    taskLearningProjectionRevisions: 3,
+    taskLearningProjectionIntegrityErrors: options.taskLearningProjectionIntegrityErrors ?? 0,
     scope: 'SENTINEL-EVOLUTION-SCOPE', guidance: 'SENTINEL-EVOLUTION-GUIDANCE' })
   const deadLetterInbox = options.deadLetterInbox ?? 0
   const deadLetterOutbox = options.deadLetterOutbox ?? 0
@@ -487,6 +491,42 @@ describe('assistant health service', () => {
     })
   })
 
+  test('projects Evolution task-learning projection integrity errors without breaking quality projection compatibility', () => {
+    const healthy = harness()
+    expect(healthy.service.report(agent())).toMatchObject({
+      severity: 'healthy',
+      providers: expect.arrayContaining([expect.objectContaining({
+        id: 'assistantEvolution',
+        metrics: expect.objectContaining({ taskLearningProjectionIntegrityErrors: 0 }),
+      })]),
+    })
+
+    const degraded = harness({ taskLearningProjectionIntegrityErrors: 2 })
+    expect(degraded.service.report(agent())).toMatchObject({
+      severity: 'degraded',
+      assessments: [{
+        providerId: 'assistantEvolution', severity: 'degraded',
+        code: 'task-learning-projection-integrity-errors',
+      }],
+      warnings: ['provider-degraded:assistantEvolution:task-learning-projection-integrity-errors'],
+    })
+
+    for (const invalidValue of [-1, '1'] as const) {
+      const invalidContext = new Context(); contexts.push(invalidContext)
+      new FakePolicy(invalidContext)
+      new Provider(invalidContext, 'assistantEvolution', {
+        activeRules: 0, retiredRules: 0, pendingProposals: 0, conflictedProposals: 0,
+        trustedEpisodes: 0, unattributedTrustedEpisodes: 0, lastTrustedEpisodeAt: 0,
+        lastReconciledAt: 0, autonomousRollbacks: 0,
+        taskLearningProjectionIntegrityErrors: invalidValue,
+      })
+      const invalid = new AssistantHealthService(invalidContext, { requiredProviders: [] })
+      expect(invalid.report(agent()).providers).toContainEqual({
+        id: 'assistantEvolution', status: 'error', metrics: {},
+      })
+    }
+  })
+
   test('projects only bounded growth-experiment metrics and blocks on an exhausted required rollback', () => {
     const fixture = harness({
       requiredProviders: ['assistantGrowthExperiments'],
@@ -587,6 +627,7 @@ describe('assistant health service', () => {
           qualityEligibleEpisodes: 4, operationalEpisodes: 5, legacyQuarantinedEpisodes: 2,
           unattributedQualityEligibleEpisodes: 1, lastQualityEligibleEpisodeAt: 119_000,
           lastTrustedEpisodeAt: 120_000, lastReconciledAt: 121_000, autonomousRollbacks: 1,
+          taskLearningProjectionIntegrityErrors: 0,
         } },
         { id: 'assistantDelivery', status: 'ready', metrics: {
           pendingInbox: 0, deadLetterInbox: 0, pendingOutbox: 2, deadLetterOutbox: 0,

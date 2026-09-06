@@ -1,9 +1,10 @@
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { chmod, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { deliverySchemaVersion, DeliveryDatabaseError, openDeliveryDatabase } from '../src/sqlite.ts'
 
 const roots: string[] = []
@@ -35,7 +36,19 @@ async function openDeliveryConcurrently(path: string, start: string, count = 12)
   })
   const openers = Array.from({ length: count }, () => openChild())
   await writeFile(start, 'go', { mode: 0o600 })
-  await Promise.all(openers)
+  // Do not leave child SQLite handles alive when an opener fails: afterEach
+  // removes this directory and must observe every child has closed first.
+  const results = await Promise.allSettled(openers)
+  const failure = results.find((result): result is PromiseRejectedResult => result.status === 'rejected')
+  if (failure) throw failure.reason
+}
+
+async function waitForFile(path: string, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`)
+    await new Promise(resolve => setTimeout(resolve, 5))
+  }
 }
 
 const deliveryAttachmentsV6Schema = `
@@ -262,6 +275,99 @@ describe('delivery SQLite boundary', () => {
       'lane_principal_record_id', 'lane_principal_version', 'admission_sequence', 'terminal_at',
     ]))
     migrated.close()
+  })
+
+  test('retries WAL conversion after a separately signalled reader releases its lock', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-wal-lock-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const ready = join(root, 'reader-locked')
+    // The migration path must already be a no-op. This reader therefore
+    // blocks only WAL's exclusive journal-mode transition, not BEGIN IMMEDIATE.
+    openDeliveryDatabase(path).close()
+    const raw = new DatabaseSync(path)
+    raw.exec('PRAGMA journal_mode = DELETE')
+    raw.close()
+    const childSource = `
+      import { writeFileSync } from 'node:fs';
+      import { DatabaseSync } from 'node:sqlite';
+      const database = new DatabaseSync(${JSON.stringify(path)});
+      database.exec('PRAGMA journal_mode = DELETE');
+      database.exec('BEGIN');
+      database.prepare('SELECT count(*) FROM sqlite_master').get();
+      writeFileSync(${JSON.stringify(ready)}, 'locked', { mode: 0o600 });
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 250);
+      database.exec('ROLLBACK');
+      database.close();
+    `
+    const child = spawn(process.execPath, [
+      '--no-warnings', '--experimental-transform-types',
+      '--input-type=module', '--eval', childSource,
+    ], { stdio: ['ignore', 'ignore', 'pipe'] })
+    let stderr = ''
+    child.stderr.setEncoding('utf8')
+    child.stderr.on('data', chunk => { stderr += String(chunk) })
+    const childClosed = new Promise<void>((resolve, reject) => {
+      child.once('error', reject)
+      child.once('close', code => {
+        if (code === 0) resolve()
+        else reject(new Error(`WAL read-lock holder exited ${code}: ${stderr}`))
+      })
+    })
+    await waitForFile(ready)
+
+    let database: DatabaseSync | undefined
+    try {
+      database = openDeliveryDatabase(path)
+      expect(database.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
+    } finally {
+      database?.close()
+      await childClosed
+    }
+  })
+
+  test('takes the transient-lock WAL retry path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-wal-retry-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const prepare = DatabaseSync.prototype.prepare
+    let injected = false
+    const spy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function (this: DatabaseSync, sql: string) {
+      if (sql === 'PRAGMA journal_mode = WAL' && !injected) {
+        injected = true
+        throw new Error('database is locked')
+      }
+      return prepare.call(this, sql)
+    })
+    try {
+      const database = openDeliveryDatabase(path)
+      expect(injected).toBe(true)
+      expect(database.prepare('PRAGMA busy_timeout').get()).toEqual({ timeout: 5000 })
+      database.close()
+    } finally {
+      spy.mockRestore()
+    }
+  })
+
+  test('does not retry a non-lock WAL failure', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-wal-non-lock-'))
+    roots.push(root)
+    const path = join(root, 'delivery.sqlite')
+    const prepare = DatabaseSync.prototype.prepare
+    let calls = 0
+    const spy = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function (this: DatabaseSync, sql: string) {
+      if (sql === 'PRAGMA journal_mode = WAL') {
+        calls += 1
+        throw new Error('synthetic WAL corruption')
+      }
+      return prepare.call(this, sql)
+    })
+    try {
+      expect(() => openDeliveryDatabase(path)).toThrow('synthetic WAL corruption')
+      expect(calls).toBe(1)
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   test('converges concurrent openers from the published v8 schema', async () => {
