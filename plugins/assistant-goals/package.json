@@ -58,7 +58,8 @@
     "@deepseek-ai/dsh-tools": ">=0.1.2-rc.1 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">0.1.7 <0.2.0",
-    "@dsh-enhanced/assistant-verifier": ">0.1.7 <0.2.0"
+    "@dsh-enhanced/assistant-verifier": ">0.1.7 <0.2.0",
+    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -89,6 +90,9 @@
       "optional": true
     },
     "@dsh-enhanced/assistant-verifier": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
       "optional": true
     }
   },

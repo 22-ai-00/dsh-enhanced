@@ -90,6 +90,30 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
 
 若原生操作已提交，而随后 owner 被撤销、服务退出或业务读回失败，工具明确报告部分完成。先检查原生现状再决定后续操作，不用旧 revision 盲目重放。这里没有两套数据库的原子事务承诺。
 
+## 原生回合的累计预算
+
+可选 `executionBudget` 要求同时开启 `verifyNativeRounds`；默认不配置、不启用。它按 owner scope 与业务目标 ID 累计所有原生回合，普通前台回复不计入。下面是配置形状，数值仅为示例：
+
+```yaml
+verifyNativeRounds: true
+executionBudget:
+  modelCalls: 20
+  toolCalls: 40
+  inputTokens: 100000
+  outputTokens: 30000
+  costUsdMicros: 2000000
+  durationMs: 86400000
+  maxOutputTokensPerCall: 4096
+```
+
+次数、token 和可选费用上限为 0–1,000,000,000 的整数；费用单位是百万分之一美元。`durationMs` 为 1ms–31 天，从业务目标创建时间起算；`maxOutputTokensPerCall` 为 1–1,000,000,000。暂停、恢复、修改目标定义或插件重启不会重置已保存的上限、计数和期限；已有目标的配置变更会拒绝冲突，不自动扩额。新建且重新获 owner 授权的业务目标拥有独立预算，本功能不是账户级总预算。
+
+启用前，可信 Host 必须调用 `ctx.assistantGoals.registerBudgetMeter()`，为实际 `provider` / `model` 精确路由注册 `GoalBudgetMeter`。`inputTokenUpperBound(options)` 必须给出实际完整请求（包括消息、工具、多模态及提供商封装）的输入 token 上界；两个 `*UsdMicrosPerMillionTokens` 费率必须保守覆盖输入/缓存和输出/推理的全部收费类别。此 API 没有模型工具入口，返回的 disposer 应纳入 Host 的 Cordis 生命周期。包内不预装通用计量器或生产路由价格；缺少计量器拒绝调用，配置了费用上限但任一费率未知也拒绝调用。未配置费用时可将两个费率都设为 `null`，只约束次数与 token。可信计量声明和适配器遵守输出上限是保证的前提，不能把估算或未知价格称为提供商账单硬限。
+
+每次实际模型请求在提供商调用前，用 SQLite 事务预留一次调用、完整输入上界和输出上限；请求的 `maxTokens` 同时限制为每次上限与剩余额度。只有流完整结束且 usage 有效、不超过预留时才结算。输入按 uncached + cacheRead + cacheWrite 累计，reasoning 属于 output 不重复累计；若有 `totalTokens`，必须等于完整输入与输出之和。取消、异常、缺失/无效 usage 或崩溃保留全额预留，不自动退款或重放。工具执行体进入前计一次工具额度，失败也不退还；没有预算的工具不会进入执行体。
+
+计量等待、流读取与目标回合受同一绝对期限和取消信号约束；计量器撤销会取消使用它的在途调用。期限取消和停止等待不证明提供商、第三方工具或 OS 进程已经停止，未知执行仍保持待对账。`goal_context` / 新模型上下文的 `executionBudget` 展示累计与 held 预留；可信 Host 可用 `inspectBudget(agent, goalId)` 和 `health().budget` 查看状态。这里尚无授权 lease、跨日自动唤醒或原生 Session 自动恢复。
+
 ## 诊断与边界
 
 `verifyNativeRounds: true` 为已经启用的原生 goal-round-driver 接入独立步骤验收。它还需要 Delivery 的 `agentGoalContinuationTimeoutMs` 为正、上述 goal Policy 额外允许 `execute`，以及同一 Host 的 `assistant-verifier`。Verifier profile 使用 `taskKind: goal-step`，精确匹配实际 owner record/version、workspace/preset 和当前目标 objective；成功条件与 authority 按 Verifier README 配置。没有匹配 profile 时，即使 Verifier 设置 `requireAcceptance: false`，该目标回合也会在模型调用前停止。默认不开启此行为，也不自动挂载 driver。
@@ -107,13 +131,14 @@ Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionR
 - 原始目标保持不变；原生 edit 更新当前目标投影。笔记和证据引用都是未验证的数据，不获得权限，也不构成 achieved 回执。
 - 每次新上下文/工具访问重查 live Agent、owner record/version 和 Policy。SystemPrompt 已经写入 Session 的历史快照不会被此插件擦除；不能把撤销新读取权限等同于历史清除或跨 owner 复用旧 Session 的隔离保证。
 - Delivery 桥接覆盖创建、业务笔记和 owner 的 edit/pause/resume/clear；没有给模型增加独立验收成功写入入口，native complete 仍由受支持的原生入口或可信 Host 管理。
-- 本包已有可选的原生回合验收绑定和单步骤期限；跨步骤费用/token 预算预留、授权 lease、自动唤醒、原生 Session 自动恢复和多步骤调度仍待实现。
+- 本包已有可选的原生回合验收绑定、单步骤期限与跨步骤累计预算；授权 lease、自动唤醒、原生 Session 自动恢复和持久多步骤调度仍待实现。
 
 ## 权限与数据
 
 - **文件系统**：保存目标原文、owner scope、笔记、focus 和追加历史到独立 SQLite；使用 WAL 与 FULL 同步。新建数据库权限为 `0600`，启动前后检查数据库及已有 WAL/SHM 的私有权限、所有权和链接。目录创建为 `0700`，直接父目录须属于当前用户且不可被组或其他用户写入，不修改既有父目录权限；这不是对同 UID 恶意进程或路径替换的 OS 隔离保证。数据库不加密，应置于可信私有目录。启动时重建并核对历史与当前状态，拒绝损坏/截断记录及无效 focus；这不是密码学防篡改日志。当前没有历史自动清理。
 - **网络**：本插件不直接联网；注入的上下文及工具结果会随宿主请求发送给所选模型提供商。
 - **步骤账本**：开启验收时另写 `databasePath + '.executions'` 及其 WAL/SHM，保存目标原文、scope、定义/原生身份、期限、授权摘要、契约绑定及执行终态，使用同样的私有文件要求。执行账本 schema 2 在事务中迁移旧记录并添加 owner/目标/时间查询索引，每次读取核对派生键与原意图。两套 SQLite 与 Session 不是一个原子事务；dispatch 标记后的未知窗口不自动重放。卸载保留两套数据文件。
+- **预算账本**：启用累计预算时另写 `databasePath + '.budgets'` 及其 WAL/SHM，保存 owner scope、业务目标 ID、不可变上限/期限、run/request ID、预留和结算 token/费用、工具次数；不保存请求正文。沿用私有文件、WAL/FULL、启动完整性检查要求，卸载保留文件。预算库、执行库与 Session 分别提交，未知预留保持占额，没有自动清理或退款入口。
 - **子进程与验收网络**：本插件不直接启动进程或请求外部目标；启用步骤验收后会调用 Host Verifier 的检查周期，由它按已批准的 profile/authority 执行程序验证、文档获取或目标回读，沿用其期限、证据预算和权限范围，见 [Verifier 权限说明](../assistant-verifier/README.md)。
 - **凭据、浏览器、安装脚本**：无直接访问。
 - **卸载**：移除 bundle 后注册和数据库连接随 Cordis 生命周期释放，数据保留；停用所有使用该库的 Host 后可手工删除数据库及其 WAL/SHM。插件不写自定义 Session event，原生目标仍由 DSH 管理。

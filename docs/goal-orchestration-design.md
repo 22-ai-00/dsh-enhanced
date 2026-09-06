@@ -1,8 +1,8 @@
 # 业务目标编排：执行与验收接线
 
-> `fdcee5c` 的跨设备检查点曾将 Delivery 有界续跑保存为 WIP。接手已修复并通过真实原生驱动、取消和 teardown 边界测试及独立复核；全仓结果见 [落地账本](agent-autonomy-implementation.md)。已实现可选的原生回合独立验收；跨步骤预算和持久唤醒仍未完成。
+> `fdcee5c` 的跨设备检查点曾将 Delivery 有界续跑保存为 WIP。接手已修复并通过真实原生驱动、取消和 teardown 边界测试及独立复核；全仓结果见 [落地账本](agent-autonomy-implementation.md)。已实现可选的原生回合独立验收与累计预算；持久唤醒仍未完成。
 
-本设计延续 [完整落地账本](agent-autonomy-implementation.md) 的工作包 05、08、17。当前切片涵盖 owner 目标创建、业务上下文、原生生命周期控制与 Delivery 有界续跑；已接入原生回合的 v2 独立执行契约、期限和真实回读；跨步骤预算授权、跨日自动恢复与完整目标验收仍须实现，不能因设计存在而记为完成。
+本设计延续 [完整落地账本](agent-autonomy-implementation.md) 的工作包 05、08、17。当前切片涵盖 owner 目标创建、业务上下文、原生生命周期控制与 Delivery 有界续跑；已接入原生回合的 v2 独立执行契约、期限和真实回读；长期授权 lease、跨日自动恢复与完整目标验收仍须实现，不能因设计存在而记为完成。
 
 ## 保留两种不同的要求
 
@@ -60,7 +60,7 @@ GoalStore 与 Session 不构成一个原子数据库。协议须采用持久执�
 5. `awaiting-verification`：持久化执行终态与 Session checkpoint，Verifier 从生产者回读；模型 complete 或进程退出 0 都不能直接产生 achieved。
 6. `verified` / `needs-attention`：消费绑定 definition/step/run 的独立回执；迟到旧定义成功只保留历史，不能完成新定义。unknown 按缺失证据生成新的调查步骤，新步骤仍需要新的授权和预算检查。
 
-定义编辑与 pause/resume revision 分开记账。用户修改成功条件或资源范围生成新的定义版本并使未提交旧步骤过期；暂停不重置累计预算。已发出步骤继续保存当时的证据，不能通过删记录规避对账。当前只实现立即执行的原生回合 prepared/dispatching/awaiting-verification 及 Verifier/Evaluation 接线。scheduled/claimed 持久唤醒、跨步骤预算预留、自动调查步骤、目标整体结果投影和外部提交补偿仍未实现；完整 WP05 未完成。
+定义编辑与 pause/resume revision 分开记账。用户修改成功条件或资源范围生成新的定义版本并使未提交旧步骤过期；暂停不重置累计预算。已发出步骤继续保存当时的证据，不能通过删记录规避对账。当前只实现立即执行的原生回合 prepared/dispatching/awaiting-verification 及 Verifier/Evaluation 接线。scheduled/claimed 持久唤醒、自动调查步骤、目标整体结果投影和外部提交补偿仍未实现；完整 WP05 未完成。
 
 ## 独立验收与下一步
 
@@ -82,3 +82,11 @@ GoalStore 与 Session 不构成一个原子数据库。协议须采用持久执�
 上述各项最终需要真实模型和部署证据；确定性 Host 测试只证明相应工程机制。整体智能收益继续由工作包 04 的同预算基线与留出评测衡量。
 
 当前立即执行协议先保存私有执行意图和验收绑定，flush 原 Session 后标记 dispatch，再放行首个模型请求；后续模型步骤复用同一 run。终态需要真实 turn/end 和成功 checkpoint，取消/不确定清理保留 unknown。恢复不重放旧 run。执行账本为 Goals 数据库旁的 `.executions` 文件，用户目标历史库迁移到 schema 2，Evaluation schema 10 单独识别 goal-step。配置与权限详见 Goals README。以上机制依赖 Delivery 结束时释放旧 Agent、后续从原 Session 创建新 handle；取消后的旧 handle 继续拒绝迟到动作。
+
+## 原生累计预算切片（2026-09-06）
+
+可选 `executionBudget` 已接到原生回合：业务目标级不可变上限和绝对期限跨定义编辑、pause/resume 与重启保留；模型调用前持久预留，可信完整 usage 后结算，不确定结果保留全额。输入上界与费用声明来自精确 provider/model 的 Host-only meter，缺失声明拒绝；普通前台不计入。该能力需要 `verifyNativeRounds`，默认不启用，不预装生产计量器。
+
+持久唤醒仍待实现。Automations 的 Host executor/reconcileSystem 可以复用现有 occurrence、task lease 和 owner/definition 校验；但 task lease 只排他同一调度任务，不能阻止同 Session 前台入站。安全接线还需 Delivery 受保护的后台恢复入口、共享持久 Session fence、同 owner record/version 与 Session/GoalId/revision 重查，以及 dispatch 前的 run intent CAS。普通 Automation runner 新建 Session，前台 `currentPreferenceTurn` 又必须证明真实人类入站，二者均不能直接冒充后台原 Session 恢复。未知已 dispatch 仍只对账、不重放。
+
+Session lease 设计还必须保证同一 Session 不能从另一 binding 取得并行租约；仅按 binding ID 建主键不足以构成该保证。租约到期只代表持有者失去后续提交权限，不能证明已 dispatch 的外部动作停止。持久状态须区分未 dispatch 的可重取意图与需要对账的 dispatched/unknown；旧执行无法证明 quiescent 时，不能仅因超时启动同 Session 的替代执行。

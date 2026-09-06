@@ -12,21 +12,33 @@ import type { GoalCheckpoint, GoalControlInput, GoalRecord, GoalScope, NativeGoa
 import { registerGoalTools } from './tools.js'
 import { GoalExecutionRuntime } from './execution.js'
 import { buildGoalFeedback, type GoalFeedback } from './feedback.js'
+import { GoalBudgetRuntime, validateGoalBudgetConfig } from './budget.js'
+import type { GoalBudgetConfig, GoalBudgetMeter } from './budget.js'
+import type { GoalBudgetSnapshot } from './budget-store.js'
 import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import type { TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 
-export interface Config { databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; stepMaxDurationMs?: number }
+export interface Config { databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-goals.sqlite')),
   maxContextChars: Schema.number().step(1).min(1024).max(65536).default(12000),
   verifyNativeRounds: Schema.boolean().default(false),
   stepMaxDurationMs: Schema.number().step(1).min(1).max(300000).default(60000),
+  executionBudget: Schema.union([Schema.object({
+    modelCalls: Schema.number().step(1).min(0).max(1_000_000_000).required(),
+    toolCalls: Schema.number().step(1).min(0).max(1_000_000_000).required(),
+    inputTokens: Schema.number().step(1).min(0).max(1_000_000_000).required(),
+    outputTokens: Schema.number().step(1).min(0).max(1_000_000_000).required(),
+    costUsdMicros: Schema.number().step(1).min(0).max(1_000_000_000),
+    durationMs: Schema.number().step(1).min(1).max(31 * 86_400_000).required(),
+    maxOutputTokensPerCall: Schema.number().step(1).min(1).max(1_000_000_000).required(),
+  })]),
 })
 
 declare module '@deepseek-ai/cordis' { interface Context { assistantGoals: AssistantGoalsService } }
 
 /** Escape model-visible data, including SystemPrompt template delimiters. */
-function render(record: GoalRecord, now: number, maxChars: number, verification?: GoalFeedback): string {
+function render(record: GoalRecord, now: number, maxChars: number, verification?: GoalFeedback, budget?: GoalBudgetSnapshot): string {
   const data = {
     id: record.id, version: record.version, originalObjective: record.originalObjective,
     currentObjective: record.native.objective, definition: record.definition,
@@ -34,6 +46,7 @@ function render(record: GoalRecord, now: number, maxChars: number, verification?
     outcome: record.native.phase === 'complete' ? 'awaiting-verification' : 'unverified',
     checkpoint: { ...record.checkpoint, assumptions: record.checkpoint.assumptions.map(item => ({ ...item, stale: item.expiresAt <= now })) },
     ...(verification === undefined ? {} : { stepFeedback: verification }),
+    ...(budget === undefined ? {} : { executionBudget: budget }),
   }
   const json = JSON.stringify(data).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('{', '&#123;').replaceAll('}', '&#125;')
   // Never truncate a JSON/source claim into a misleading partial document.
@@ -49,6 +62,7 @@ export class AssistantGoalsService extends Service {
   #maxChars: number
   #observationFailures = 0
   #execution: GoalExecutionRuntime
+  #budget: GoalBudgetRuntime | undefined
 
   constructor(ctx: Context, input: Config = {}) {
     super(ctx, 'assistantGoals')
@@ -57,6 +71,8 @@ export class AssistantGoalsService extends Service {
     const path = input.databasePath ?? join(homedir(), '.dsh', 'assistant-goals.sqlite')
     const duration = input.stepMaxDurationMs ?? 60000
     if (!Number.isSafeInteger(duration) || duration < 1 || duration > 300000 || (input.verifyNativeRounds !== undefined && typeof input.verifyNativeRounds !== 'boolean')) throw new Error('assistant-goals: invalid execution limits')
+    const budget = input.executionBudget === undefined ? undefined : validateGoalBudgetConfig(input.executionBudget)
+    if (budget !== undefined && input.verifyNativeRounds !== true) throw new Error('assistant-goals: execution budget requires verified native rounds')
     this.#store = new GoalStore(path)
     ctx.effect(() => () => { this.#active = false; this.#store.close() }, 'assistant-goals.store')
     this.#execution = new GoalExecutionRuntime(ctx, input.verifyNativeRounds === true ? (path === ':memory:' ? path : `${path}.executions`) : undefined, duration, agent => {
@@ -65,6 +81,7 @@ export class AssistantGoalsService extends Service {
       if (record === undefined) throw new Error('assistant-goals: current bound goal required')
       return { scope, record }
     })
+    if (budget !== undefined) this.#budget = new GoalBudgetRuntime(ctx, path === ':memory:' ? path : `${path}.budgets`, budget, this.#execution.budgetState)
     ctx.inject(['agents', 'goals', 'assistantDelivery', 'assistantPolicy'], runtime => {
       runtime.on('goal/changed', ({ agent, change }) => {
         try {
@@ -256,7 +273,7 @@ export class AssistantGoalsService extends Service {
       const scope = this.#scope(agent, 'snapshot')
       const current = this.#observe(agent!, false)
       const record = this.#store.focused(scope, String(agent!.session.id)) ?? current
-      return record === undefined ? '' : render(record, Date.now(), this.#maxChars, this.#feedback(record))
+      return record === undefined ? '' : render(record, Date.now(), this.#maxChars, this.#feedback(record), this.#budget?.inspect(record))
     } catch { return '' }
   }
 
@@ -278,8 +295,13 @@ export class AssistantGoalsService extends Service {
   describe = (record: GoalRecord): string => { return render(record, Date.now(), 131072) }
   describeForAgent = (agent: Agent | undefined, goalId: string): string => {
     const record = this.inspect(agent, goalId)
-    return render(record, Date.now(), 131072, this.#feedback(record))
+    return render(record, Date.now(), 131072, this.#feedback(record), this.#budget?.inspect(record))
   }
+  registerBudgetMeter = (meter: GoalBudgetMeter): (() => void) => {
+    if (this.#budget === undefined) throw new Error('assistant-goals: execution budget is not enabled')
+    return this.#budget.register(meter)
+  }
+  inspectBudget = (agent: Agent | undefined, goalId: string) => this.#budget?.inspect(this.inspect(agent, goalId))
   #feedback(record: GoalRecord): GoalFeedback | undefined {
     if (!this.#execution.health().enabled) return undefined
     const verifier = this.ctx.get('assistantVerifier', false)
@@ -293,6 +315,6 @@ export class AssistantGoalsService extends Service {
   whenIdle = () => this.#execution.whenIdle()
   health = () => {
     if (!this.#active) throw new Error('assistant-goals: disposed')
-    return { ready: ['agents', 'goals', 'assistantDelivery', 'assistantPolicy'].every(name => this.ctx.get(name as never) !== undefined), ...this.#store.health(), observationFailures: this.#observationFailures, execution: this.#execution.health() }
+    return { ready: ['agents', 'goals', 'assistantDelivery', 'assistantPolicy'].every(name => this.ctx.get(name as never) !== undefined), ...this.#store.health(), observationFailures: this.#observationFailures, execution: this.#execution.health(), budget: this.#budget?.health() ?? { enabled: false } }
   }
 }
