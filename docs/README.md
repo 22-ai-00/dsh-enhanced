@@ -23,6 +23,8 @@
 
 ## 个人助理设计
 
+- [高智能自治智能体现状与路线](agent-intelligence-autonomy-roadmap-2026-09-06.md)：2026-09-06 源码审计、智能与主动性缺口、高权限隔离设计和分阶段验收。
+- [自主成长专项证据](agent-growth-gap-evidence-2026-09-06.md)：学习真源、工作流实验、晋升与推广后质量反馈的具体实现边界。
 - [插件生态研究与建设清单](dsh-personal-assistant-plugin-landscape.md)：社区方案、能力拆分和风险对照。
 - [全自研插件路线图](dsh-personal-assistant-self-built-plugin-roadmap.md)：个人助理的总体边界、阶段和未实现项。
 - [持续成长的个人助理](continuous-personal-assistant-growth.md)：自评测、偏好学习、改进循环、自治等级和长期验收目标。
