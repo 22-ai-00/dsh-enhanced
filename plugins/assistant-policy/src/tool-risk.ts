@@ -33,12 +33,44 @@ const BASH_ARGUMENT_KEYS = new Set([
 
 // These are argv shapes, not shell-string prefixes. Extending this list should
 // be a deliberate policy change because an unrecognised form falls back to ask.
+//
+// Every entry must be read-only, must not reach the network, must not read a
+// credential path, and must not depend on an operand whose target could escape
+// the workspace: an operand-taking command belongs in its own classifier (see
+// `classifyLs`) instead. `isDeterministicallySensitive` still runs first, so a
+// shape here is only reached once the raw string cleared the secret, network,
+// privilege and destructive checks.
 const SAFE_EXACT_COMMANDS: readonly (readonly string[])[] = [
   ['pwd'],
   ['git', 'status', '--short'],
+  ['git', 'status', '--porcelain'],
   ['git', 'branch', '--show-current'],
   ['git', 'rev-parse', '--show-toplevel'],
+  ['git', 'rev-parse', '--abbrev-ref', 'HEAD'],
   ['git', 'diff', '--no-ext-diff', '--stat'],
+  ['git', 'diff', '--no-ext-diff', '--stat', '--cached'],
+  ['git', 'diff', '--no-ext-diff', '--name-only'],
+  // Explicitly bounded history reads. They take no path operand, so they cannot
+  // be pointed outside the repository the workspace already contains, and the
+  // row count is part of the matched shape rather than a free parameter.
+  ['git', 'log', '--oneline', '-n', '10'],
+  ['git', 'log', '--oneline', '-n', '20'],
+  // Version probes. These are the interpreter/tool identity checks an agent
+  // needs before choosing a code path, and they neither read project data nor
+  // mutate anything. `npm`/`pnpm` stay out of the network-subcommand paths
+  // rejected earlier because `--version` is purely local.
+  ['node', '--version'],
+  ['node', '-v'],
+  ['npm', '--version'],
+  ['pnpm', '--version'],
+  ['python3', '--version'],
+  ['go', 'version'],
+  ['cargo', '--version'],
+  ['rustc', '--version'],
+  ['tsc', '--version'],
+  ['git', '--version'],
+  ['uname', '-s'],
+  ['uname', '-m'],
 ]
 
 const SAFE_LS_OPTIONS = new Set(['-1', '-a', '-al', '-l', '-la'])
