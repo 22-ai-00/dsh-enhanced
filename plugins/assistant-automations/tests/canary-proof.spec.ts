@@ -132,7 +132,7 @@ test('v10 saved proofs migrate without granting legacy success activation author
   const reopened = new GrowthAutomationStore(h.path)
   cleanup.push(() => reopened.close())
   Object.assign(h.service, { growthStore: reopened })
-  expect(h.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 11 })
+  expect(h.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 })
   expect(() => h.service.inspectWorkflowCanary(inspect)).toThrow(/evidence/)
   expect(() => h.service.promoteWorkflowAutomation(request)).toThrow(/evidence/)
   expect(h.activate).not.toHaveBeenCalled()

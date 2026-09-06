@@ -79,13 +79,13 @@ interface OutcomeRow {
   evaluator_id: string
   evaluator_version: string
   task_subject_key: string | null
-  task_subject_kind: 'automation-run' | 'outcome' | null
+  task_subject_kind: 'automation-run' | 'foreground-turn' | 'outcome' | null
   task_subject_ref: string | null
 }
 
 interface ProjectedOutcomeRow extends OutcomeRow {
   task_subject_key: string
-  task_subject_kind: 'automation-run' | 'outcome'
+  task_subject_kind: 'automation-run' | 'foreground-turn' | 'outcome'
   task_subject_ref: string
   task_objective_conflicted: 0 | 1
   task_primary_outcome_id: string
@@ -380,7 +380,7 @@ export function evaluationLearningProjectionDigest(input: {
     evaluator: Readonly<{ id: string; version: string }>
   }>
   projection: Readonly<{
-    subjectKind: 'automation-run' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
     subjectRef: string
     disposition: 'upsert' | 'retract'
     evidenceOutcomeId?: string
@@ -419,7 +419,7 @@ export function evaluationLearningProjectionDigest(input: {
 
 interface TaskSubject {
   key: string
-  kind: 'automation-run' | 'outcome'
+  kind: 'automation-run' | 'foreground-turn' | 'outcome'
   ref: string
 }
 
@@ -428,14 +428,20 @@ function taskSubject(
   outcomeId: string,
   references: readonly EvaluationEvidenceRef[],
 ): TaskSubject {
-  const automationRunRefs = new Set(references
-    .filter(reference => reference.kind === 'automation-run')
-    .map(reference => reference.ref))
-  if (automationRunRefs.size === 1) {
-    const ref = [...automationRunRefs][0]!
+  const typed: Array<{ kind: 'automation-run' | 'foreground-turn'; ref: string }> = references.flatMap(reference => (
+    reference.kind === 'automation-run' || reference.kind === 'foreground-turn'
+      ? [{ kind: reference.kind, ref: reference.ref }]
+      : []
+  ))
+  const identities = new Map(typed.map(reference => [`${reference.kind}\u0000${reference.ref}`, reference]))
+  // A row that names more than one task subject is intentionally quarantined
+  // to its own audit outcome.  It must never bridge an Automation and a
+  // foreground turn (or two runs) into one learning subject.
+  if (identities.size === 1) {
+    const { kind, ref } = [...identities.values()][0]!
     return Object.freeze({
-      key: JSON.stringify([scopeKey, 'automation-run', ref]),
-      kind: 'automation-run' as const,
+      key: JSON.stringify([scopeKey, kind, ref]),
+      kind,
       ref,
     })
   }
@@ -483,8 +489,24 @@ function isAuthenticatedOwnerFeedback(row: OutcomeRow): boolean {
     && row.source_id === 'assistant-delivery/typed-owner-feedback'
     && row.evaluator_id === 'assistant-delivery-owner-feedback'
     && row.evaluator_version === '2'
-    && containsEvidence(row, 'automation-run')
+    && (containsEvidence(row, 'automation-run') || containsEvidence(row, 'foreground-turn'))
     && containsEvidence(row, 'delivery-outbox')
+}
+
+function isTrustedVerifierReceipt(row: OutcomeRow): boolean {
+  return row.trust === 'trusted'
+    && row.source_kind === 'evaluator'
+    && row.source_id === 'assistant-verifier'
+    && row.evaluator_id === 'assistant-verifier'
+    && row.evaluator_version === '1'
+    && containsEvidence(row, 'acceptance-contract')
+    && containsEvidence(row, 'verification-receipt')
+}
+
+function isAuthoritativeForegroundTerminal(row: OutcomeRow): boolean {
+  return isTrustedVerifierReceipt(row)
+    && row.source_kind === 'evaluator'
+    && containsEvidence(row, 'foreground-turn')
 }
 
 export class EvaluationStore {
@@ -543,6 +565,9 @@ export class EvaluationStore {
   /** Adopt a pre-revision owner row only through the exact Host delivery capability. */
   adoptLegacyOwnerFeedback(claims: Readonly<import('./types.js').TrustedDeliveryEvaluationClaims>): void {
     if (claims.ownerCommand === undefined || claims.initialIdempotencyKey === undefined) return
+    // Pre-revision rows only represented Automation runs. Foreground turns were
+    // introduced with the typed subject claims and cannot be guessed from them.
+    if ((claims.subjectKind ?? 'automation-run') !== 'automation-run') return
     const scopeKey = canonicalEvaluationScope(claims.scope).scopeKey
     this.#database.exec('BEGIN IMMEDIATE')
     try {
@@ -566,13 +591,21 @@ export class EvaluationStore {
     } catch (error) { this.#database.exec('ROLLBACK'); throw error }
   }
 
-  ownerObjectiveState(scope: EvaluationScope, runId: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined {
-    const subject = taskSubject(canonicalEvaluationScope(scope).scopeKey, '', [{ kind: 'automation-run', ref: runId }])
+  ownerObjectiveState(scope: EvaluationScope, runId: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined
+  ownerObjectiveState(scope: EvaluationScope, subjectKind: 'automation-run' | 'foreground-turn', subjectRef: string, principalRecordId: string, principalVersion: number): OwnerObjectiveState | undefined
+  ownerObjectiveState(scope: EvaluationScope, subjectKindOrRef: 'automation-run' | 'foreground-turn' | string, subjectRefOrPrincipal: string, principalRecordIdOrVersion: string | number, principalVersion?: number): OwnerObjectiveState | undefined {
+    // Arity, not the opaque legacy run id, selects the generic overload.
+    const generic = principalVersion !== undefined
+    const subjectKind = generic ? subjectKindOrRef : 'automation-run'
+    const subjectRef = generic ? subjectRefOrPrincipal : subjectKindOrRef
+    const principalRecordId = generic ? principalRecordIdOrVersion as string : subjectRefOrPrincipal
+    const version = generic ? principalVersion! : principalRecordIdOrVersion as number
+    const subject = taskSubject(canonicalEvaluationScope(scope).scopeKey, '', [{ kind: subjectKind, ref: subjectRef }])
     const row = this.#database.prepare(`
       SELECT revision.version, outcome.objective_status
       FROM evaluation_owner_revisions revision JOIN evaluation_outcomes outcome ON outcome.id = revision.outcome_id
       WHERE revision.subject_key = ? AND revision.lineage = ? ORDER BY revision.version DESC LIMIT 1
-    `).get(subject.key, JSON.stringify([principalRecordId, principalVersion])) as { version: number; objective_status: ObjectiveStatus } | undefined
+    `).get(subject.key, JSON.stringify([principalRecordId, version])) as { version: number; objective_status: ObjectiveStatus } | undefined
     return row === undefined ? undefined : { version: row.version, objectiveStatus: row.objective_status }
   }
 
@@ -1321,7 +1354,7 @@ export class EvaluationStore {
       SELECT subject_kind, subject_ref, learning_version, learning_digest, learning_disposition
       FROM evaluation_task_projections WHERE subject_key = ?
     `).get(subjectKey) as {
-      subject_kind: 'automation-run' | 'outcome'
+      subject_kind: 'automation-run' | 'foreground-turn' | 'outcome'
       subject_ref: string
       learning_version: number
       learning_digest: string | null
@@ -1348,7 +1381,9 @@ export class EvaluationStore {
       delivery = primary
     } else {
       const terminals = rows.filter(row => isAuthoritativeAutomationTerminal(row))
-      execution = latest(terminals)
+      execution = projection.subject_kind === 'automation-run'
+        ? latest(terminals)
+        : latest(rows.filter(row => isAuthoritativeForegroundTerminal(row)))
 
       const superseded = new Set((this.#database.prepare(`
         SELECT previous_outcome_id FROM evaluation_owner_revisions WHERE subject_key = ? AND previous_outcome_id IS NOT NULL
@@ -1360,12 +1395,14 @@ export class EvaluationStore {
       else {
         const trustedObjectives = rows.filter(row => row.trust === 'trusted'
           && row.source_kind !== 'user-feedback'
-          && row.objective_status !== 'unknown')
+          // The newest verifier receipt is authoritative even when it is
+          // unknown: it retracts a stale achieved proof after expiry/recheck.
+          && (row.objective_status !== 'unknown' || isTrustedVerifierReceipt(row)))
         const ranked = trustedObjectives.map(row => ({
           row,
           // Independent trusted evaluators supersede the terminal producer's
           // initial objective, while an owner judgement has already won above.
-          rank: isAuthoritativeAutomationTerminal(row) ? 1 : 2,
+          rank: isAuthoritativeAutomationTerminal(row) ? 1 : isTrustedVerifierReceipt(row) ? 3 : 2,
         })).sort((left, right) => left.rank - right.rank || newer(left.row, right.row))
         objective = ranked.at(-1)?.row
       }
@@ -1378,7 +1415,7 @@ export class EvaluationStore {
 
       const rankedPrimary = rows.map(row => ({
         row,
-        rank: isAuthoritativeAutomationTerminal(row)
+        rank: isAuthoritativeAutomationTerminal(row) || isAuthoritativeForegroundTerminal(row)
           ? 4
           : isAuthenticatedOwnerFeedback(row)
             ? 3
@@ -1477,7 +1514,7 @@ export class EvaluationStore {
     const entries = input.evidence.map((raw, index) => {
       if (typeof raw !== 'object' || raw === null || Array.isArray(raw)
         || raw.disposition !== 'upsert'
-        || (raw.subjectKind !== 'automation-run' && raw.subjectKind !== 'outcome')
+        || (raw.subjectKind !== 'automation-run' && raw.subjectKind !== 'foreground-turn' && raw.subjectKind !== 'outcome')
         || !Number.isSafeInteger(raw.version) || raw.version < 1
         || raw.version > 1_000_000_000
         || typeof raw.digest !== 'string' || !/^[a-f\d]{64}$/u.test(raw.digest)) {

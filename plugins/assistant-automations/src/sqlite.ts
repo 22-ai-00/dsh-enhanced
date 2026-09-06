@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const automationSchemaVersion = 11
+export const automationSchemaVersion = 14
 
 const growthTablesV10 = `
   CREATE TABLE automation_growth_operations (
@@ -387,7 +387,15 @@ function migrate(database: DatabaseSync): void {
     ) STRICT;
 
     ${growthTablesV10}
-    PRAGMA user_version = 11;
+    CREATE TABLE automation_task_acceptance (
+      task_id TEXT PRIMARY KEY REFERENCES automation_tasks(id),
+      contract_id TEXT NOT NULL, contract_digest TEXT NOT NULL CHECK(length(contract_digest) = 64),
+      workspace TEXT NOT NULL, preset TEXT NOT NULL,
+      principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL CHECK(principal_version >= 1),
+      binding_id TEXT NOT NULL, binding_version INTEGER NOT NULL CHECK(binding_version >= 1), binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
+      dispatched_at INTEGER NOT NULL, submitted INTEGER NOT NULL DEFAULT 0 CHECK(submitted IN (0, 1)), quiescent INTEGER NOT NULL DEFAULT 0 CHECK(quiescent IN (0, 1))
+    ) STRICT;
+    PRAGMA user_version = 14;
     COMMIT;
     `)
     return
@@ -706,12 +714,52 @@ function migrate(database: DatabaseSync): void {
       PRAGMA user_version = 11;
       COMMIT;
     `)
+    version = 11
   }
   if (version === 9) {
     database.exec(`
       BEGIN IMMEDIATE;
       ${growthTablesV10}
       PRAGMA user_version = 11;
+      COMMIT;
+    `)
+    version = 11
+  }
+  if (version === 11) {
+    const acceptanceExists = database.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'automation_task_acceptance'`).get() !== undefined
+    database.exec(acceptanceExists ? `BEGIN IMMEDIATE; PRAGMA user_version = 12; COMMIT;` : `
+      BEGIN IMMEDIATE;
+      CREATE TABLE automation_task_acceptance (
+        task_id TEXT PRIMARY KEY REFERENCES automation_tasks(id),
+        contract_id TEXT NOT NULL, contract_digest TEXT NOT NULL CHECK(length(contract_digest) = 64),
+        workspace TEXT NOT NULL, preset TEXT NOT NULL,
+        principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL CHECK(principal_version >= 1),
+        binding_id TEXT NOT NULL, binding_version INTEGER NOT NULL CHECK(binding_version >= 1),
+        dispatched_at INTEGER NOT NULL, submitted INTEGER NOT NULL DEFAULT 0 CHECK(submitted IN (0, 1))
+      ) STRICT;
+      PRAGMA user_version = 12;
+      COMMIT;
+    `)
+    version = 12
+  }
+  if (version === 12) {
+    const hasBindingGeneration = (database.prepare(`PRAGMA table_info(automation_task_acceptance)`).all() as Array<{ name: string }>)
+      .some(column => column.name === 'binding_generation')
+    database.exec(hasBindingGeneration ? `BEGIN IMMEDIATE; PRAGMA user_version = 13; COMMIT;` : `
+      BEGIN IMMEDIATE;
+      ALTER TABLE automation_task_acceptance ADD COLUMN binding_generation INTEGER NOT NULL DEFAULT 1 CHECK(binding_generation >= 1);
+      PRAGMA user_version = 13;
+      COMMIT;
+    `)
+    version = 13
+  }
+  if (version === 13) {
+    const hasQuiescent = (database.prepare(`PRAGMA table_info(automation_task_acceptance)`).all() as Array<{ name: string }>)
+      .some(column => column.name === 'quiescent')
+    database.exec(hasQuiescent ? `BEGIN IMMEDIATE; PRAGMA user_version = 14; COMMIT;` : `
+      BEGIN IMMEDIATE;
+      ALTER TABLE automation_task_acceptance ADD COLUMN quiescent INTEGER NOT NULL DEFAULT 0 CHECK(quiescent IN (0, 1));
+      PRAGMA user_version = 14;
       COMMIT;
     `)
   }

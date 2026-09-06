@@ -1,0 +1,84 @@
+{
+  "name": "@dsh-enhanced/assistant-verifier",
+  "version": "0.1.0",
+  "description": "Independent, bounded task acceptance verification with durable contracts and receipts.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
+    "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "engines": {
+    "node": "^22.19.0 || >=24.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/22-ai-00/dsh-enhanced.git",
+    "directory": "plugins/assistant-verifier"
+  },
+  "keywords": [
+    "deepseek",
+    "deepseek-harness",
+    "dsh-plugin"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@dsh-enhanced/assistant-automations": ">=0.1.24 <0.2.0",
+    "@dsh-enhanced/assistant-delivery": ">=0.1.24 <0.2.0",
+    "@dsh-enhanced/assistant-evaluation": ">=0.1.24 <0.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-automations": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-delivery": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-evaluation": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "catalog:",
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:",
+    "@dsh-enhanced/assistant-automations": "workspace:*",
+    "@dsh-enhanced/assistant-delivery": "workspace:*",
+    "@dsh-enhanced/assistant-evaluation": "workspace:*"
+  },
+  "dependencies": {
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*",
+    "@deepseek-ai/schemastery": "catalog:"
+  }
+}

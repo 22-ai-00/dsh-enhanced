@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evolutionSchemaVersion = 12
+export const evolutionSchemaVersion = 13
 
 export class EvolutionDatabaseError extends Error {
   constructor(
@@ -342,8 +342,9 @@ function migrateV7ToV8(database: DatabaseSync): void {
 const taskLearningProjectionSchema = `
   CREATE TABLE evolution_task_learning_state (
     scope_key TEXT NOT NULL,
-    scope_watermark INTEGER NOT NULL CHECK (scope_watermark >= 1),
-    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'outcome')),
+    -- Zero is the v11 migration sentinel, never a fresh authoritative watermark.
+    scope_watermark INTEGER NOT NULL CHECK (scope_watermark >= 0),
+    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'outcome')),
     subject_ref TEXT NOT NULL,
     version INTEGER NOT NULL CHECK (version >= 1),
     digest TEXT NOT NULL CHECK (length(digest) = 64),
@@ -361,8 +362,8 @@ const taskLearningProjectionSchema = `
 
   CREATE TABLE evolution_task_learning_revisions (
     scope_key TEXT NOT NULL,
-    scope_watermark INTEGER NOT NULL CHECK (scope_watermark >= 1),
-    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'outcome')),
+    scope_watermark INTEGER NOT NULL CHECK (scope_watermark >= 0),
+    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'outcome')),
     subject_ref TEXT NOT NULL,
     version INTEGER NOT NULL CHECK (version >= 1),
     digest TEXT NOT NULL CHECK (length(digest) = 64),
@@ -682,8 +683,35 @@ function createCurrentSchema(database: DatabaseSync): void {
 
     ${applicationReceiptSchema}
 
-    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '12');
-    PRAGMA user_version = 12;
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '${evolutionSchemaVersion}');
+    PRAGMA user_version = ${evolutionSchemaVersion};
+  `)
+}
+
+/** SQLite cannot widen a CHECK constraint in place. Preserve v12 rows while
+ * rebuilding only the canonical task-revision tables. */
+function migrateV12ToV13(database: DatabaseSync): void {
+  database.exec(`
+    DROP INDEX IF EXISTS evolution_task_learning_state_situation;
+    DROP INDEX IF EXISTS evolution_task_learning_revisions_applied;
+    ALTER TABLE evolution_task_learning_state RENAME TO evolution_task_learning_state_v12;
+    ALTER TABLE evolution_task_learning_revisions RENAME TO evolution_task_learning_revisions_v12;
+    ${taskLearningProjectionSchema}
+    INSERT INTO evolution_task_learning_state (
+      scope_key, scope_watermark, subject_kind, subject_ref, version, digest,
+      disposition, situation, episode_id, updated_at
+    ) SELECT scope_key, scope_watermark, subject_kind, subject_ref, version, digest,
+      disposition, situation, episode_id, updated_at FROM evolution_task_learning_state_v12;
+    INSERT INTO evolution_task_learning_revisions (
+      scope_key, scope_watermark, subject_kind, subject_ref, version, digest,
+      disposition, situation, episode_id, applied_at
+    ) SELECT scope_key, scope_watermark, subject_kind, subject_ref, version, digest,
+      disposition, situation, episode_id, applied_at FROM evolution_task_learning_revisions_v12;
+    DROP TABLE evolution_task_learning_state_v12;
+    DROP TABLE evolution_task_learning_revisions_v12;
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '13')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+    PRAGMA user_version = 13;
   `)
 }
 
@@ -713,6 +741,7 @@ function migrate(database: DatabaseSync): void {
       else if (version === 9) migrateV9ToV10(database)
       else if (version === 10) migrateV10ToV11(database)
       else if (version === 11) migrateV11ToV12(database)
+      else if (version === 12) migrateV12ToV13(database)
       version = schemaVersion(database)
     }
     database.exec('COMMIT')

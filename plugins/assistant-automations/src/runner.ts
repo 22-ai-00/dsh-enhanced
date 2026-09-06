@@ -32,6 +32,7 @@ import type {
   AutomationSideEffectState,
   HostAutomationDefinition,
 } from './types.js'
+import type { AcceptanceOwner } from './acceptance.js'
 
 interface AutomationGuidanceInjector {
   injectAutomationGuidance(agent: Agent, execution: AutomationExecutionContext): void
@@ -223,6 +224,16 @@ export function assertAutomationRunBudget(
 export interface DshAutomationRunnerOptions {
   /** Explicit escape hatch for deployments whose unattended routes have no configured Policy budget. */
   readonly allowUnbudgetedExecution?: boolean
+  /** Host-only pre-prompt boundary; no Agent/model payload can reach it. */
+  readonly prepareAcceptance?: (input: {
+    taskId: string
+    automationId: string
+    scope: { workspace: string; preset: string }
+    objective: string
+    owner?: AcceptanceOwner
+    binding?: { id: string; version: number; generation: number }
+  }) => void
+  readonly acceptanceEnabled?: () => boolean
 }
 
 function requireAdapterToolCallProtocol(
@@ -242,6 +253,8 @@ function requireAdapterToolCallProtocol(
 
 export class DshAutomationRunner implements AutomationRunner {
   private readonly allowUnbudgetedExecution: boolean
+  private readonly prepareAcceptance: DshAutomationRunnerOptions['prepareAcceptance']
+  private readonly acceptanceEnabled: DshAutomationRunnerOptions['acceptanceEnabled']
 
   constructor(
     private readonly ctx: Context,
@@ -249,6 +262,8 @@ export class DshAutomationRunner implements AutomationRunner {
     options: DshAutomationRunnerOptions = {},
   ) {
     this.allowUnbudgetedExecution = options.allowUnbudgetedExecution ?? false
+    this.prepareAcceptance = options.prepareAcceptance
+    this.acceptanceEnabled = options.acceptanceEnabled
   }
 
   async run(input: AutomationRunnerInput): Promise<AutomationRunnerResult> {
@@ -414,6 +429,42 @@ export class DshAutomationRunner implements AutomationRunner {
         && typeof evolution?.injectAutomationGuidance === 'function') {
         evolution.injectAutomationGuidance(agent, execution)
       }
+      // Resolve the real Delivery owner only after setup installed the immutable
+      // approval binding.  Never derive an acceptance principal from the
+      // definition's display principal or any model-controlled value.
+      if (execution.mode === 'production' && this.prepareAcceptance !== undefined && this.acceptanceEnabled?.() === true) {
+        const delivery = this.ctx.get('assistantDelivery') as
+          | Pick<AssistantDeliveryService, 'prepareAgentApproval'>
+          | undefined
+        let owner: AcceptanceOwner | undefined
+        let binding: { id: string; version: number; generation: number } | undefined
+        if (typeof delivery?.prepareAgentApproval === 'function') {
+          try {
+            const route = delivery.prepareAgentApproval(agent, {
+              sourceId: 'dsh-enhanced-assistant-verifier',
+            })
+            if (route.routeVersion !== 2 || route.sourceId !== 'dsh-enhanced-assistant-verifier'
+              || route.workspace !== definition.workspace || route.bindingId.trim() === ''
+              || !Number.isSafeInteger(route.bindingVersion) || route.bindingVersion < 1
+              || !Number.isSafeInteger(route.bindingGeneration) || route.bindingGeneration < 1
+              || route.principalRecordId.trim() === '' || !Number.isSafeInteger(route.principalVersion)
+              || route.principalVersion < 1) {
+              throw new Error('assistant-automations: Delivery acceptance owner route is invalid')
+            }
+            owner = Object.freeze({ principalRecordId: route.principalRecordId, principalVersion: route.principalVersion })
+            binding = Object.freeze({ id: route.bindingId, version: route.bindingVersion, generation: route.bindingGeneration })
+          } catch (error) {
+            // The sink decides whether a missing authenticated owner is an
+            // optional no-profile skip or a required fail-closed boundary.
+            if (typeof error !== 'object' || error === null
+              || !('code' in error) || error.code !== 'missing-binding') throw error
+          }
+        }
+        this.prepareAcceptance({ taskId: input.task.id, automationId: input.automation.id,
+          scope: Object.freeze({ workspace: definition.workspace, preset: presetId }), objective: definition.prompt,
+          ...(owner === undefined ? {} : { owner }), ...(binding === undefined ? {} : { binding }),
+        })
+      }
       const abort = () => agent.cancel({ kind: 'hook', reason: 'assistant-automations-signal' })
       input.signal.addEventListener('abort', abort, { once: true })
       removeAbort = () => input.signal.removeEventListener('abort', abort)
@@ -464,6 +515,7 @@ export class DshAutomationRunner implements AutomationRunner {
           sideEffectState,
           budgetSettlementState,
         }),
+        quiescent: !input.signal.aborted,
       }
       removeAbort?.()
       removeAbort = undefined

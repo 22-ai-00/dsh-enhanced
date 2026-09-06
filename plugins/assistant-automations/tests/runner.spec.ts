@@ -226,6 +226,7 @@ describe('fresh rc.1 automation Agent runner', () => {
     const result = await fixture.runner.run(input())
     expect(result).toEqual({
       outcome: 'succeeded', sessionId: 'automation-occ-runner-1', output: 'final answer',
+      quiescent: true,
       usage: { inputTokens: 30, outputTokens: 8, cacheReadTokens: 2, toolCalls: 1 },
       diagnostic: {
         schemaVersion: 1, failureClass: 'none', failurePhase: 'none', failureCode: 'none',
@@ -319,6 +320,33 @@ describe('fresh rc.1 automation Agent runner', () => {
       principal: 'lark/main/tenant/owner', principalRecordId: 'principal-owner', principalVersion: 4,
     }])
     expect(fixture.unbindApprovalRoute).toHaveBeenCalledOnce()
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('prepares the immutable acceptance owner after Delivery binding and before followup', async () => {
+    const fixture = await harness({
+      approvalRoute: {
+        bindingId: 'binding-owner', workspace: process.cwd(), agentPreset: 'primary', principal: 'lark/main/tenant/owner',
+      },
+      requestedTools: [],
+    })
+    const prepared: unknown[] = []
+    const runner = new DshAutomationRunner(fixture.ctx, fixture.ctx.assistantPolicy, {
+      allowUnbudgetedExecution: true,
+      acceptanceEnabled: () => true,
+      prepareAcceptance: value => {
+        expect(fixture.adapter.requests).toEqual([])
+        prepared.push(value)
+      },
+    })
+    await expect(runner.run(input(definition({ approvalBindingId: 'binding-owner', allowedTools: [] }))))
+      .resolves.toMatchObject({ outcome: 'succeeded' })
+    expect(prepared).toEqual([{
+      taskId: 'task-runner', automationId: 'auto-runner', objective: 'Use the allowed tool once.',
+      scope: { workspace: process.cwd(), preset: 'primary' },
+      owner: { principalRecordId: 'principal-owner', principalVersion: 4 },
+      binding: { id: 'binding-owner', version: 3, generation: 2 },
+    }])
     await fixture.ctx.fiber.restart()
   })
 

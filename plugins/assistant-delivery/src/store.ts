@@ -52,6 +52,7 @@ import {
   workflowDispatchRecoveryCode,
 } from './session-commands.js'
 import { parseFeedbackCommand } from './feedback-command.js'
+import type { AcceptanceContract, AcceptedExecution } from './acceptance.js'
 import { openDeliveryDatabase } from './sqlite.js'
 import {
   deriveDeterministicallyDeidentifiedWorkflowTemplate,
@@ -3536,6 +3537,137 @@ export class DeliveryStore {
     })
   }
 
+  /** Immutable pre-prompt binding for a foreground acceptance contract. */
+  bindForegroundTaskAcceptance(input: {
+    inboxId: string
+    contractId: string
+    contractDigest: string
+    scope: { workspace: string; preset: string }
+    owner: { principalRecordId: string; principalVersion: number }
+    binding: Pick<ConversationBinding, 'id' | 'version' | 'generation'>
+    dispatchedAt: number
+  }): void {
+    this.assertOpen()
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u.test(input.contractId)
+      || !/^[a-f0-9]{64}$/u.test(input.contractDigest)
+      || !Number.isSafeInteger(input.dispatchedAt) || input.dispatchedAt < 0
+      || !Number.isSafeInteger(input.owner.principalVersion) || input.owner.principalVersion < 1
+      || !Number.isSafeInteger(input.binding.version) || input.binding.version < 1
+      || !Number.isSafeInteger(input.binding.generation) || input.binding.generation < 1) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground acceptance binding is invalid')
+    }
+    const text = [input.inboxId, input.scope.workspace, input.scope.preset, input.owner.principalRecordId, input.binding.id]
+    if (text.some(value => typeof value !== 'string' || value.trim() === '' || Buffer.byteLength(value, 'utf8') > 4_096)) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground acceptance binding text is invalid')
+    }
+    this.transaction(() => {
+      const existing = this.database.prepare('SELECT * FROM delivery_task_acceptance_executions WHERE inbox_id = ?')
+        .get(input.inboxId) as {
+          contract_id: string; contract_digest: string; workspace: string; preset: string
+          principal_record_id: string; principal_version: number; binding_id: string
+          binding_version: number; binding_generation: number
+        } | undefined
+      if (existing !== undefined) {
+        if (existing.contract_id !== input.contractId || existing.contract_digest !== input.contractDigest
+          || existing.workspace !== input.scope.workspace || existing.preset !== input.scope.preset
+          || existing.principal_record_id !== input.owner.principalRecordId || existing.principal_version !== input.owner.principalVersion
+          || existing.binding_id !== input.binding.id || existing.binding_version !== input.binding.version
+          || existing.binding_generation !== input.binding.generation) {
+          throw new DeliveryStoreError('idempotency-conflict', 'foreground acceptance binding changed')
+        }
+        throw new DeliveryStoreError('idempotency-conflict', 'accepted foreground task has already crossed its dispatch boundary')
+      }
+      const admitted = this.database.prepare(`
+        SELECT inbox.id FROM inbox_messages AS inbox
+        JOIN conversation_bindings AS binding ON binding.id = inbox.binding_id
+        JOIN delivery_principals AS principal ON principal.id = binding.principal_id
+        WHERE inbox.id = ? AND inbox.status = 'claimed' AND inbox.binding_id = ?
+          AND binding.status = 'active' AND binding.version = ? AND binding.generation = ?
+          AND principal.status = 'active' AND principal.role = 'owner'
+          AND principal.id = ? AND principal.version = ?
+          AND binding.workspace = ? AND binding.agent_preset = ?
+      `).get(input.inboxId, input.binding.id, input.binding.version, input.binding.generation,
+        input.owner.principalRecordId, input.owner.principalVersion, input.scope.workspace, input.scope.preset)
+      if (admitted === undefined) throw new DeliveryStoreError('invalid-binding', 'foreground acceptance is not bound to the claimed owner inbox')
+      this.database.prepare(`INSERT INTO delivery_task_acceptance_executions(
+        inbox_id, contract_id, contract_digest, workspace, preset, principal_record_id, principal_version,
+        binding_id, binding_version, binding_generation, dispatched_at, status, quiescent
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)`).run(
+        input.inboxId, input.contractId, input.contractDigest, input.scope.workspace, input.scope.preset,
+        input.owner.principalRecordId, input.owner.principalVersion, input.binding.id, input.binding.version,
+        input.binding.generation, input.dispatchedAt,
+      )
+    })
+  }
+
+  finishForegroundTaskAcceptance(input: {
+    contractId: string
+    status: AcceptedExecution['status']
+    quiescent: boolean
+    completedAt: number
+  }): void {
+    this.assertOpen()
+    if (!['succeeded', 'failed', 'timed-out', 'cancelled', 'unknown'].includes(input.status)
+      || !Number.isSafeInteger(input.completedAt) || input.completedAt < 0) {
+      throw new DeliveryStoreError('invalid-binding', 'foreground acceptance completion is invalid')
+    }
+    const status = input.quiescent && input.status === 'succeeded' ? 'succeeded' : 'unknown'
+    const quiescent = status === 'succeeded' ? 1 : 0
+    const changed = this.database.prepare(`UPDATE delivery_task_acceptance_executions
+      SET status = ?, quiescent = ?, completed_at = ?, execution_ref = inbox_id
+      WHERE contract_id = ? AND status = 'pending' AND dispatched_at <= ?`).run(status, quiescent, input.completedAt, input.contractId, input.completedAt)
+    if (changed.changes !== 1) {
+      const current = this.database.prepare('SELECT status, quiescent, completed_at FROM delivery_task_acceptance_executions WHERE contract_id = ?')
+        .get(input.contractId) as { status: string; quiescent: number; completed_at: number } | undefined
+      if (current?.status === status && current.quiescent === quiescent && current.completed_at === input.completedAt) return
+      throw new DeliveryStoreError('conflict', 'foreground acceptance binding is absent or its completion changed')
+    }
+  }
+
+  inspectForegroundAcceptedExecution(contract: AcceptanceContract): AcceptedExecution | null {
+    const row = this.database.prepare(`SELECT * FROM delivery_task_acceptance_executions
+      WHERE contract_id = ?`).get(contract.id) as {
+        inbox_id: string; contract_id: string; contract_digest: string; workspace: string; preset: string
+        principal_record_id: string; principal_version: number; binding_id: string; binding_version: number
+        binding_generation: number; dispatched_at: number; status: AcceptedExecution['status']; quiescent: number
+        completed_at: number | null; execution_ref: string | null
+      } | undefined
+    if (row === undefined || row.contract_digest !== contract.digest || contract.task.kind !== 'foreground-turn'
+      || contract.task.ref !== row.inbox_id || row.workspace !== contract.scope.workspace || row.preset !== contract.scope.preset
+      || row.principal_record_id !== contract.owner.principalRecordId || row.principal_version !== contract.owner.principalVersion
+      || row.completed_at === null || row.execution_ref === null) return null
+    return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest,
+      dispatchedAt: row.dispatched_at, status: row.status, quiescent: row.quiescent === 1,
+      completedAt: row.completed_at, executionRef: row.execution_ref })
+  }
+
+  /**
+   * Re-read the immutable acceptance fence for one exact owner reply target.
+   * This deliberately exposes only the completed execution receipt: callers
+   * cannot manufacture a foreground subject by naming an arbitrary Inbox.
+   */
+  inspectForegroundAcceptedExecutionForOwner(input: {
+    inboxId: string
+    scope: { workspace: string; preset: string }
+    owner: { principalRecordId: string; principalVersion: number }
+    bindingId: string
+  }): AcceptedExecution | null {
+    const row = this.database.prepare(`SELECT contract_id, contract_digest, dispatched_at, status, quiescent, completed_at, execution_ref
+      FROM delivery_task_acceptance_executions
+      WHERE inbox_id = ? AND workspace = ? AND preset = ? AND principal_record_id = ?
+        AND principal_version = ? AND binding_id = ?`).get(
+      input.inboxId, input.scope.workspace, input.scope.preset, input.owner.principalRecordId,
+      input.owner.principalVersion, input.bindingId,
+    ) as {
+      contract_id: string; contract_digest: string; dispatched_at: number; status: AcceptedExecution['status']
+      quiescent: number; completed_at: number | null; execution_ref: string | null
+    } | undefined
+    if (row === undefined || row.completed_at === null || row.execution_ref !== input.inboxId) return null
+    return Object.freeze({ contractId: row.contract_id, contractDigest: row.contract_digest,
+      dispatchedAt: row.dispatched_at, status: row.status, quiescent: row.quiescent === 1,
+      completedAt: row.completed_at, executionRef: row.execution_ref })
+  }
+
   renewInboxClaim(input: {
     inboxId: string
     ownerId: string
@@ -3629,8 +3761,9 @@ export class DeliveryStore {
           : existingPermissionRecovery === undefined
             ? undefined
             : permissionDispatchRecoveryCode(existingPermissionRecovery)
-        const ambiguous = row.failure_code === 'dispatch-started'
-          && permissionRecovery === undefined && !feedbackRecovery && !learningRecovery && !workflowRecovery
+        const acceptedDispatch = this.database.prepare('SELECT inbox_id FROM delivery_task_acceptance_executions WHERE inbox_id = ?').get(row.id) !== undefined
+        const ambiguous = acceptedDispatch || (row.failure_code === 'dispatch-started'
+          && permissionRecovery === undefined && !feedbackRecovery && !learningRecovery && !workflowRecovery)
         const exhausted = row.attempt_count >= input.maxAttempts
           && permissionRecovery === undefined && !feedbackRecovery && !learningRecovery && !workflowRecovery
         const changed = this.database.prepare(`

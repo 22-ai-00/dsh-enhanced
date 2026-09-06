@@ -41,6 +41,7 @@ import type {
   PreparedInboundMessage,
 } from './coordinator.js'
 import { externalPrincipalId } from './canonical.js'
+import type { AcceptanceHandle } from './acceptance.js'
 import {
   feedbackSignalInput,
   feedbackUsage,
@@ -107,6 +108,14 @@ interface DshDeliveryRuntimeOptions {
   maxOutputTokens: number
   maxAutoContinuationTurns: number
   maxTextBytes: number
+  prepareForegroundTaskAcceptance(
+    binding: Readonly<ConversationBinding>,
+    envelope: Readonly<InboundEnvelope>,
+  ): AcceptanceHandle | undefined
+  completeForegroundTaskAcceptance(
+    handle: AcceptanceHandle,
+    input: { status: 'succeeded' | 'failed' | 'timed-out' | 'cancelled' | 'unknown'; quiescent: boolean },
+  ): Promise<void>
   permissionPickerTtlMs: number
   getModelSelection(conversation: ConversationRef): ConversationModelSelection | undefined
   /** Atomically remove a stale explicit effort without overwriting a newer model choice. */
@@ -1375,10 +1384,10 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     if (this.activeSessionControls.get(sessionId) === control) this.activeSessionControls.delete(sessionId)
   }
 
-  private async disposeAfterReplyBoundary(sessionId: string, handle: AgentHandle | undefined): Promise<void> {
+  private async disposeAfterReplyBoundary(sessionId: string, handle: AgentHandle | undefined): Promise<boolean> {
     const control = this.activeSessionControls.get(sessionId)
     control?.resolveReplySafe()
-    if (handle === undefined) return
+    if (handle === undefined) return true
     const disposal = Promise.resolve().then(() => handle.dispose())
     const disposition = control === undefined
       ? await disposal.then(() => 'disposed' as const)
@@ -1395,8 +1404,9 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           `assistant-delivery: cancelled session disposer failed for ${sessionFingerprint(sessionId)}: ${String(error)}`,
         )
       })
-      return
+      return false
     }
+    return true
   }
 
   /** Wait for only the turn that claims Delivery's exact message identity. */
@@ -2980,6 +2990,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     const selected = agentSelection(selectedRoute)
     let handle: AgentHandle | undefined
     let dispatched = false
+    let acceptance: AcceptanceHandle | undefined
+    let acceptanceSucceeded = false
     let removeAbort: (() => void) | undefined
     let removeProgress: (() => void) | undefined
     let progressOpen = true
@@ -3076,6 +3088,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       signal.throwIfAborted()
       const authorizationFailure = preDispatchAuthorizationFailure()
       if (authorizationFailure !== undefined) return authorizationFailure
+      acceptance = this.options.prepareForegroundTaskAcceptance(binding, envelope)
       markDispatching()
       // Once the durable marker exists, even a synchronous followup failure is ambiguous:
       // implementations may enqueue before throwing, so no retry is safe.
@@ -3274,6 +3287,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         this.ctx.logger.warn('assistant-delivery: completed-turn preference projection is ambiguous')
       }
       publishProgress({ kind: 'completed' })
+      acceptanceSucceeded = true
       return { outcome: 'processed' }
     } catch (error) {
       if (causedByUserCancellation(error)) {
@@ -3315,7 +3329,21 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       removeAbort?.()
       removeProgress?.()
       progressOpen = false
-      await this.disposeAfterReplyBoundary(binding.sessionId, handle)
+      let disposed = false
+      try {
+        disposed = await this.disposeAfterReplyBoundary(binding.sessionId, handle)
+      } finally {
+        acceptanceSucceeded = acceptanceSucceeded && disposed && !signal.aborted
+        if (acceptance !== undefined) {
+          try {
+            await this.options.completeForegroundTaskAcceptance(acceptance, {
+              status: acceptanceSucceeded ? 'succeeded' : 'unknown', quiescent: acceptanceSucceeded,
+            })
+          } catch (error) {
+            this.ctx.logger.warn(`assistant-delivery: acceptance completion failed: ${String(error)}`)
+          }
+        }
+      }
     }
   }
 }

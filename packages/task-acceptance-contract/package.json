@@ -1,0 +1,17 @@
+{
+  "name": "@dsh-enhanced/task-acceptance-contract",
+  "version": "0.1.0",
+  "description": "Strict immutable acceptance and verification wire contracts for DSH assistant plugins.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./lib/index.js",
+  "types": "./lib/index.d.ts",
+  "exports": { ".": { "types": "./lib/index.d.ts", "default": "./lib/index.js" }, "./package.json": "./package.json" },
+  "files": ["lib", "README.md", "LICENSE"],
+  "scripts": { "build": "tsc -p tsconfig.build.json", "prepack": "pnpm run build", "prepublishOnly": "node ../../scripts/require-pnpm-publish.mjs", "test": "vitest run", "typecheck": "tsc -p tsconfig.json --noEmit" },
+  "engines": { "node": "^22.19.0 || >=24.0.0" },
+  "publishConfig": { "access": "public" },
+  "repository": { "type": "git", "url": "git+https://github.com/22-ai-00/dsh-enhanced.git", "directory": "packages/task-acceptance-contract" },
+  "keywords": ["deepseek", "deepseek-harness", "acceptance", "verification"],
+  "devDependencies": { "@types/node": "catalog:", "typescript": "catalog:", "vitest": "catalog:" }
+}

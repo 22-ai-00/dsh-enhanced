@@ -328,13 +328,14 @@ describe('supervised growth analyst', () => {
     unbind()
   })
 
-  test('migrates v9 databases with an empty durable analyst ledger', () => {
+  test.each([false, true])('migrates v9 databases preserving legacy task-learning rows (seeded=%s)', seeded => {
     const path = join('/tmp', `assistant-evolution-v9-${Math.random()}.sqlite`)
     roots.push(path)
     const database = new DatabaseSync(path)
     database.exec(`
       CREATE TABLE schema_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
       INSERT INTO schema_meta(key, value) VALUES ('schema-version', '9');
+      CREATE TABLE evolution_episodes (id TEXT PRIMARY KEY) STRICT;
       CREATE TABLE evolution_proposals (
         id TEXT PRIMARY KEY, policy_proposal_id TEXT UNIQUE, idempotency_key TEXT NOT NULL UNIQUE,
         requester TEXT NOT NULL, principal TEXT NOT NULL, scope_key TEXT NOT NULL,
@@ -358,13 +359,32 @@ describe('supervised growth analyst', () => {
       ) STRICT, WITHOUT ROWID;
       PRAGMA user_version = 9;
     `)
+    if (seeded) {
+      database.prepare('INSERT INTO evolution_episodes (id) VALUES (?)').run('legacy-episode')
+      database.prepare(`INSERT INTO evolution_task_learning_state
+        (scope_key, subject_kind, subject_ref, version, digest, disposition, situation, episode_id, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run('legacy-scope', 'automation-run', 'legacy-run', 3,
+          'a'.repeat(64), 'upsert', 'legacy-situation', 'legacy-episode', 1234)
+      database.prepare(`INSERT INTO evolution_task_learning_revisions
+        (scope_key, subject_kind, subject_ref, version, digest, disposition, situation, episode_id, applied_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run('legacy-scope', 'automation-run', 'legacy-run', 3,
+          'a'.repeat(64), 'upsert', 'legacy-situation', 'legacy-episode', 1234)
+    }
     database.close()
 
     const migrated = openEvolutionDatabase(path)
-    expect(evolutionSchemaVersion).toBe(12)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(12)
+    expect(evolutionSchemaVersion).toBe(13)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(13)
     expect((migrated.prepare('SELECT COUNT(*) AS count FROM evolution_supervised_analyst_reviews')
       .get() as { count: number }).count).toBe(0)
+    if (seeded) {
+      const common = { scope_key: 'legacy-scope', subject_kind: 'automation-run', subject_ref: 'legacy-run',
+        version: 3, digest: 'a'.repeat(64), disposition: 'upsert', situation: 'legacy-situation',
+        episode_id: 'legacy-episode', scope_watermark: 0 }
+      expect(migrated.prepare('SELECT * FROM evolution_task_learning_state').get()).toEqual({ ...common, updated_at: 1234 })
+      expect(migrated.prepare('SELECT * FROM evolution_task_learning_revisions').get()).toEqual({ ...common, applied_at: 1234 })
+      expect(migrated.prepare('PRAGMA foreign_key_check').all()).toEqual([])
+    }
     migrated.close()
   })
 })

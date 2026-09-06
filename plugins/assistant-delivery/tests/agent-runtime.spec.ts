@@ -30,8 +30,10 @@ import {
 import SessionProjection from '@deepseek-ai/dsh-session-projection'
 import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import ApprovalService, { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
-import { approvalReviewerOf, AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
+import { approvalReviewerOf, AssistantPolicyService, type PolicyRule, type PolicyBudgetConfig } from '@dsh-enhanced/assistant-policy'
+import { AssistantAutomationsService, type AutomationProposalResult } from '@dsh-enhanced/assistant-automations'
+import { AssistantEvaluationService, TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import { createHash } from 'node:crypto'
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
@@ -213,6 +215,8 @@ function realPersistence(
 }
 
 interface PermissionHarnessOptions {
+  policyRules?: PolicyRule[]
+  policyBudgets?: PolicyBudgetConfig[]
   providePresets?: boolean
   provideApproval?: boolean
   allowAgentReply?: boolean
@@ -508,6 +512,7 @@ async function runtimeHarness(
   }
   ctx.provide('sessionPersistence' as never, (sessionPersistence?.(ctx) ?? fallbackPersistence) as never)
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [
+    ...(permissions?.policyRules ?? []),
     { id: 'local-pair', effect: 'allow', subject: { kind: 'external', id: 'local:test' }, actions: ['pair.issue'],
       resource: { kind: 'message', id: 'pairing' }, context: { initiators: ['foreground'] } },
     { id: 'owner-ingest', effect: 'allow', subject: { kind: 'external', id: 'lark/bot-1/tenant-a/ou_owner' },
@@ -535,13 +540,13 @@ async function runtimeHarness(
     { id: 'linked-agent-reply', effect: 'allow', subject: {
       kind: 'agent' as const, id: agentPreset, workspace, principal: 'lark/bot-1/tenant-a/ou_linked',
     }, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
-  ], ...(permissions?.replyBudget === undefined ? {} : { budgets: [{
+  ], budgets: [...(permissions?.policyBudgets ?? []), ...(permissions?.replyBudget === undefined ? [] : [{
     id: 'permission-replies',
     metric: 'replies',
     limit: permissions.replyBudget,
     periodMs: NON_ROLLING_TEST_BUDGET_PERIOD_MS,
     scope: 'subject' as const,
-  }] }) })
+  }])] })
   const permissionPresets = permissions === undefined || permissions.providePresets === false
     ? undefined
     : permissionPresetFixture(permissions)
@@ -2061,6 +2066,274 @@ describe('real rc.1 delivery Agent runtime', () => {
     await f.ctx.fiber.restart()
   })
 
+  test.each(['Confirmed result', 'Unrelated result'])('runs a public approved Automation through AgentLoop and independently verifies %s', async report => {
+    const root = await mkdtemp(join(tmpdir(), 'automation-acceptance-agentloop-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'empty', undefined, {
+      providePresets: false, provideApproval: false,
+      policyRules: [
+        { id: 'automation-propose', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root },
+          actions: ['propose'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'automation-execute', effect: 'allow', subject: { kind: 'background', id: '*', workspace: root },
+          actions: ['execute'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } },
+      ],
+      policyBudgets: [{ id: 'accepted-runs', metric: 'automation-runs', limit: 10,
+        periodMs: NON_ROLLING_TEST_BUDGET_PERIOD_MS, scope: 'subject' }],
+    })
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      const objective = 'Produce the confirmed report.'
+      await fixture.ctx.plugin(AssistantAutomationsService, {
+        databasePath: join(root, 'automations.sqlite'), runsPath: join(root, 'runs'), schedulerEnabled: false,
+        reconcileIntervalMs: 0,
+        proposalDefaults: { provider: 'mock', model: 'delivery-model', allowedTools: [], timeoutMs: 10_000,
+          maxOutputTokens: 512, maxToolCalls: 0, misfireKind: 'latest', misfireLimit: 1,
+          overlap: 'skip', retrySafety: 'never', maxRetries: 0, budgetId: 'accepted-runs', budgetAmount: 1 },
+      })
+      let foregroundAgent: Agent | undefined
+      fixture.ctx.on('agent/inbox/claimed', event => {
+        if (event.message.source.kind === 'delivery') foregroundAgent = event.agent
+      })
+      let proposal: AutomationProposalResult | undefined
+      let accepted: { id: string; task: { kind: string; ref: string }; objective: string } | undefined
+      const original = fixture.llm.stream.bind(fixture.llm)
+      vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+        if (proposal === undefined) {
+          expect(foregroundAgent).toBeDefined()
+          proposal = fixture.ctx.assistantAutomations.propose(foregroundAgent, { idempotencyKey: 'acceptance-create',
+            mutation: { op: 'create', automationId: 'accepted-automation', definition: {
+              name: 'Accepted report', prompt: objective, allowedTools: [],
+              schedule: { kind: 'at', at: new Date(Date.now() - 1).toISOString() },
+            } } })
+        } else {
+          const database = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
+          try {
+            const row = database.prepare('SELECT payload FROM acceptance_contracts').get() as { payload: string }
+            accepted = JSON.parse(row.payload) as typeof accepted
+            expect(accepted).toMatchObject({ objective, task: { kind: 'automation-run' } })
+          } finally { database.close() }
+        }
+        yield* original(options)
+      })
+      await fixture.service.acceptInbound(message('evt-create-accepted-automation', 'Create the report automation'))
+      await drive(fixture.service)
+      expect(proposal).toMatchObject({ status: 'pending' })
+      const approved = fixture.ctx.assistantAutomations.decideProposal({ proposalId: proposal!.proposalId,
+        principal: 'lark/bot-1/tenant-a/ou_owner', expectedVersion: proposal!.version, decision: 'approved', reason: 'owner reviewed exact task' })
+      expect(approved.status).toBe('approved')
+      const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+      await writeFile(join(root, 'report.md'), report)
+      const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1000, maxResponseBytes: 4096 }
+      const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+      await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+      await fixture.ctx.plugin(AssistantVerifierService, {
+        databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: true,
+        authorities: [authority], profiles: [{ id: 'report', version: 1, scope: { workspace: root, preset: 'primary' },
+          owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'automation-run', objective,
+          validityMs: 60_000, bounds: { maxDurationMs: 1000, maxEvidenceBytes: 4096 },
+          criteria: [{ id: 'report', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md',
+            requiredText: ['Confirmed result'], quotes: [] }],
+        }],
+      })
+      await fixture.ctx.assistantAutomations.tick()
+      await fixture.ctx.assistantAutomations.whenIdle()
+      const database = new DatabaseSync(join(root, 'automations.sqlite'), { readOnly: true })
+      try {
+        const runs = database.prepare('SELECT * FROM automation_runs').all()
+        expect(fixture.llm.requests, JSON.stringify(runs)).toHaveLength(2)
+      } finally { database.close() }
+      await fixture.ctx.assistantVerifier.tick()
+      expect(fixture.ctx.assistantVerifier.inspect(accepted!.id)).toMatchObject({ state: 'done',
+        execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: report === 'Confirmed result' ? 'achieved' : 'not-achieved' } })
+      expect(fixture.ctx.assistantEvaluation.query({ scope: { workspace: root, preset: 'primary' } }))
+        .toEqual(expect.arrayContaining([expect.objectContaining({ source: { kind: 'evaluator', id: 'assistant-verifier' },
+          objectiveStatus: report === 'Confirmed result' ? 'achieved' : 'not-achieved' })]))
+    } finally { await fixture.ctx.fiber.restart() }
+  })
+
+  test.each([
+    { report: 'Confirmed result', automaticCompletion: false },
+    { report: 'Unrelated result', automaticCompletion: false },
+    { report: 'Confirmed result', automaticCompletion: true },
+    { report: 'Unrelated result', automaticCompletion: true },
+  ])('freezes foreground acceptance before the model and independently measures $report (continuation=$automaticCompletion)', async ({ report, automaticCompletion }) => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-acceptance-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+      await writeFile(join(root, 'report.md'), report)
+      const authority = { kind: 'document' as const, id: 'sources',
+        sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1000, maxResponseBytes: 4096 }
+      const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+      const objective = 'Produce the confirmed report.'
+      await fixture.ctx.plugin(AssistantEvaluationService, {
+        databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0,
+      })
+      await fixture.ctx.plugin(AssistantVerifierService, {
+        databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: true,
+        authorities: [authority], profiles: [{ id: 'report', version: 1,
+          scope: { workspace: root, preset: 'primary' },
+          owner: { principalRecordId: owner.id, principalVersion: owner.version },
+          taskKind: 'foreground-turn', objective, validityMs: 60_000,
+          bounds: { maxDurationMs: 1000, maxEvidenceBytes: 4096 },
+          criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest },
+            artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
+        }],
+      })
+      const originalStream = fixture.llm.stream.bind(fixture.llm)
+      let accepted: { id: string; digest: string; task: { kind: string; ref: string }; objective: string } | undefined
+      vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+        const database = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
+        try {
+          const row = database.prepare('SELECT payload FROM acceptance_contracts').get() as { payload: string }
+          expect(database.prepare('SELECT count(*) AS count FROM acceptance_contracts').get()).toMatchObject({ count: 1 })
+          accepted = JSON.parse(row.payload) as typeof accepted
+          expect(accepted?.objective).toBe(objective)
+          expect(accepted?.task.kind).toBe('foreground-turn')
+        } finally { database.close() }
+        if (automaticCompletion && fixture.llm.requests.length === 0) {
+          fixture.llm.requests.push(options)
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'Partial answer ' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Partial answer ' } }
+          yield { type: 'finish', reason: { kind: 'max-tokens' } }
+          return
+        }
+        await fixture.ctx.assistantVerifier.tick()
+        expect(fixture.ctx.assistantVerifier.inspect(accepted!.id)?.state).toBe('awaiting-execution')
+        yield* originalStream(options)
+      })
+      const input = message('evt-acceptance-report', objective)
+      const inbox = await fixture.service.acceptInbound(input)
+      await drive(fixture.service)
+      expect(fixture.llm.requests).toHaveLength(automaticCompletion ? 2 : 1)
+      expect(accepted?.task.ref).toBe(inbox.inboxId)
+      await fixture.ctx.assistantVerifier.tick()
+      expect(fixture.ctx.assistantVerifier.inspect(accepted!.id)).toMatchObject({
+        state: 'done', execution: { status: 'succeeded', quiescent: true },
+        receipt: { objectiveStatus: report === 'Confirmed result' ? 'achieved' : 'not-achieved' },
+      })
+      expect(fixture.ctx.assistantEvaluation.query({ scope: { workspace: root, preset: 'primary' } })).toEqual([
+        expect.objectContaining({ objectiveStatus: report === 'Confirmed result' ? 'achieved' : 'not-achieved',
+          evidence: expect.arrayContaining([{ kind: 'foreground-turn', ref: inbox.inboxId }]) }),
+      ])
+      await fixture.service.acceptInbound(input)
+      await drive(fixture.service)
+      await fixture.ctx.assistantVerifier.tick()
+      expect(fixture.llm.requests).toHaveLength(automaticCompletion ? 2 : 1)
+      expect(fixture.ctx.assistantEvaluation.health().outcomes).toBe(1)
+    } finally { await fixture.ctx.fiber.restart() }
+  })
+
+  test('routes real accepted foreground owner corrections and withdrawal to canonical Evaluation without reviving stale feedback', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-foreground-owner-evaluation-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+      await writeFile(join(root, 'report.md'), 'Confirmed result')
+      const authority = { kind: 'document' as const, id: 'sources',
+        sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
+      const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+      const objective = 'Evaluate foreground owner feedback.'
+      let evaluation = await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+      await fixture.ctx.plugin(AssistantVerifierService, {
+        databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: true, authorities: [authority],
+        profiles: [{ id: 'foreground-owner', version: 1, scope: { workspace: root, preset: 'primary' },
+          owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'foreground-turn', objective,
+          validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+          criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest },
+            artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
+        }],
+      })
+      const accepted = await fixture.service.acceptInbound(message('evt-foreground-owner-source', objective))
+      await drive(fixture.service)
+      await fixture.ctx.assistantVerifier.tick()
+      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
+        .toMatchObject({ executionStatus: 'succeeded', objectiveStatus: 'achieved' })
+      const replyToProviderMessageId = replyProviderMessageId(fixture.service, 'evt-foreground-owner-source')
+      const feedback = async (eventId: string, command: string) => {
+        const input = { ...message(eventId, `/feedback ${command}`, 'command'), metadata: { replyToProviderMessageId } }
+        await fixture.service.acceptInbound(input)
+        await drive(fixture.service)
+        return input
+      }
+      await evaluation.dispose()
+      await feedback('evt-foreground-owner-unavailable', 'not-achieved')
+      expect(fixture.sends.at(-1)?.text).toContain('本次任务结果未记录')
+      evaluation = await fixture.ctx.plugin(AssistantEvaluationService, { databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0 })
+      await feedback('evt-foreground-owner-initial', 'not-achieved')
+      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
+        .toMatchObject({ objectiveStatus: 'not-achieved', projection: { subjectKind: 'foreground-turn', subjectRef: accepted.inboxId } })
+      const correction = await feedback('evt-foreground-owner-correct', 'correct 1 not-achieved achieved')
+      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
+        .toMatchObject({ objectiveStatus: 'achieved' })
+      await feedback('evt-foreground-owner-withdraw', 'withdraw 2 achieved')
+      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
+        .toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
+      await expect(fixture.service.acceptInbound(correction)).resolves.toMatchObject({ duplicate: true })
+      await drive(fixture.service)
+      expect(fixture.ctx.assistantEvaluation.queryTasks({ scope: { workspace: root, preset: 'primary' } })[0])
+        .toMatchObject({ objectiveStatus: 'unknown', projection: { learningDisposition: 'retract' } })
+    } finally { await fixture.ctx.fiber.restart() }
+  })
+
+  test('blocks the real foreground model submission when required acceptance has no matching profile', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-required-acceptance-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      await fixture.ctx.plugin(AssistantVerifierService, {
+        databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: true,
+      })
+      await fixture.service.acceptInbound(message('evt-no-acceptance-profile', 'An unapproved task'))
+      await drive(fixture.service)
+      expect(fixture.llm.requests).toHaveLength(0)
+      const database = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
+      try { expect(database.prepare('SELECT count(*) AS count FROM acceptance_contracts').get()).toMatchObject({ count: 0 }) }
+      finally { database.close() }
+    } finally { await fixture.ctx.fiber.restart() }
+  })
+
+  test('keeps required foreground acceptance fail-closed after verifier unload and a false replacement', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-acceptance-latch-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    try {
+      const pairing = fixture.service.issuePairing('test', principal)
+      fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+      const authority = { kind: 'document' as const, id: 'sources',
+        sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
+      const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+      const required = await fixture.ctx.plugin(AssistantVerifierService, {
+        databasePath: join(root, 'required.sqlite'), tickIntervalMs: 0, requireAcceptance: true,
+        authorities: [authority],
+        profiles: [{ id: 'required', version: 1, scope: { workspace: root, preset: 'primary' },
+          owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'foreground-turn',
+          objective: 'Only this accepted task.', validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+          criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest },
+            artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }] }],
+      })
+      await required.dispose()
+      const replacement = await fixture.ctx.plugin(AssistantVerifierService, {
+        databasePath: join(root, 'replacement.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
+      })
+      await fixture.service.acceptInbound(message('evt-acceptance-latch', 'A new unmatched foreground task.'))
+      await drive(fixture.service)
+      expect(fixture.llm.requests).toHaveLength(0)
+      await replacement.dispose()
+    } finally { await fixture.ctx.fiber.restart() }
+  })
+
   test('persists one owner session, resumes across turns/restart, and deduplicates provider events', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-agent-'))
     roots.push(root)
@@ -2220,13 +2493,35 @@ describe('real rc.1 delivery Agent runtime', () => {
     await reopened.ctx.fiber.restart()
   })
 
-  test('/stop cancels the live DSH turn out of band and preserves the current session', async () => {
+  test.each([false, true])('/stop cancels the live DSH turn out of band and preserves the current session (acceptance=%s)', async withAcceptance => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-stop-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
     const fixture = await runtimeHarness(root, saved)
     const pairing = fixture.service.issuePairing('test', principal)
     fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+
+    if (withAcceptance) {
+      const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+      await writeFile(join(root, 'report.md'), 'Confirmed result')
+      const authority = { kind: 'document' as const, id: 'sources',
+        sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1000, maxResponseBytes: 4096 }
+      const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+      await fixture.ctx.plugin(AssistantEvaluationService, {
+        databasePath: join(root, 'evaluation.sqlite'), projectionIntervalMs: 0,
+      })
+      await fixture.ctx.plugin(AssistantVerifierService, {
+        databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: true,
+        authorities: [authority], profiles: [{ id: 'report', version: 1,
+          scope: { workspace: root, preset: 'primary' },
+          owner: { principalRecordId: owner.id, principalVersion: owner.version },
+          taskKind: 'foreground-turn', objective: 'keep working', validityMs: 60_000,
+          bounds: { maxDurationMs: 1000, maxEvidenceBytes: 4096 },
+          criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest },
+            artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
+        }],
+      })
+    }
 
     let markStarted!: () => void
     const started = new Promise<void>(resolve => { markStarted = resolve })
@@ -2267,6 +2562,15 @@ describe('real rc.1 delivery Agent runtime', () => {
     expect(runtimeStore(fixture.service).getInbox(first.inboxId)).toMatchObject({ status: 'processed' })
     expect(runtimeStore(fixture.service).getInbox(stop.inboxId)).toMatchObject({ status: 'processed' })
     expect(fixture.llm.requests).toHaveLength(1)
+    if (withAcceptance) {
+      await fixture.ctx.assistantVerifier.tick()
+      expect(fixture.ctx.assistantVerifier.continuations()).toMatchObject([{
+        contract: { task: { kind: 'foreground-turn', ref: first.inboxId } },
+        execution: { status: 'unknown', quiescent: false }, receipt: { objectiveStatus: 'unknown' },
+      }])
+      expect(fixture.ctx.assistantEvaluation.query({ scope: { workspace: root, preset: 'primary' } }))
+        .toMatchObject([{ objectiveStatus: 'unknown' }])
+    }
     expect(fixture.sends.map(value => value.text)).toEqual([
       '已处理停止请求；当前 session 与已完成上下文保留。',
     ])
@@ -3891,6 +4195,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       owner: Object.freeze({
         ownsTrustedAutomationEvaluationRegistration: () => false,
         ownsTrustedDeliveryEvaluationRegistration: () => false,
+        ownsTrustedVerifierEvaluationRegistration: () => false,
       }),
       issueCapability: () => Object.freeze(Object.create(null) as object),
       append: () => { throw new Error('unreachable fake Evaluation append') },
@@ -3903,6 +4208,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     const registrationOwner = Object.freeze({
       ownsTrustedAutomationEvaluationRegistration: () => false,
       ownsTrustedDeliveryEvaluationRegistration: (value: object) => ownedRegistrations.has(value),
+      ownsTrustedVerifierEvaluationRegistration: () => false,
     })
     const exactRegistration = Object.freeze({
       protocol: TRUSTED_EVALUATION_PRODUCER_PROTOCOL,
