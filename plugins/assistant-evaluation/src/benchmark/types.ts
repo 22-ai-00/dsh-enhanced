@@ -19,7 +19,8 @@ export interface BenchmarkBudget {
   durationMs: number
   inputTokens: number
   outputTokens: number
-  costUsdMicros: number
+  /** Null explicitly selects token-only budgeting for providers without a known tariff. */
+  costUsdMicros: number | null
   toolCalls: number
 }
 

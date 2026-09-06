@@ -97,10 +97,12 @@ export async function runBenchmark(
         try {
           const value = observation(outcome.value, request)
           const metrics = { ...value.metrics, latencyMs: elapsed }
-          const budgetKeys = ['inputTokens', 'outputTokens', 'costUsdMicros', 'toolCalls'] as const
+          const budgetKeys = ['inputTokens', 'outputTokens', 'toolCalls'] as const
+          const missingCost = plan.budget.costUsdMicros !== null && metrics.costUsdMicros === null
+          const exceededCost = plan.budget.costUsdMicros !== null && metrics.costUsdMicros !== null && metrics.costUsdMicros > plan.budget.costUsdMicros
           if (!value.quiescent) result = unknown('not-quiescent', metrics)
-          else if (budgetKeys.some(key => metrics[key] === null)) result = unknown('invalid-observation', metrics)
-          else if (elapsed > plan.budget.durationMs || budgetKeys.some(key => metrics[key]! > plan.budget[key])) result = unknown('budget-exceeded', metrics)
+          else if (missingCost || budgetKeys.some(key => metrics[key] === null)) result = unknown('invalid-observation', metrics)
+          else if (exceededCost || elapsed > plan.budget.durationMs || budgetKeys.some(key => metrics[key]! > plan.budget[key])) result = unknown('budget-exceeded', metrics)
           else result = {
             cell, status: 'completed', verdict: value.verdict, metrics,
             evidenceDigest: value.evidenceDigest, reason: 'verified',

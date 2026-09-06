@@ -107,7 +107,8 @@ export function parseBenchmarkPlan(value: unknown): Readonly<BenchmarkPlan> {
   }
   const budget = benchmarkObject(plan.budget, ['durationMs', 'inputTokens', 'outputTokens', 'costUsdMicros', 'toolCalls'])
   benchmarkInteger(budget.durationMs, 1, 86_400_000)
-  for (const key of ['inputTokens', 'outputTokens', 'costUsdMicros', 'toolCalls']) benchmarkInteger(budget[key], 0, 1_000_000_000)
+  for (const key of ['inputTokens', 'outputTokens', 'toolCalls']) benchmarkInteger(budget[key], 0, 1_000_000_000)
+  if (budget.costUsdMicros !== null) benchmarkInteger(budget.costUsdMicros, 0, 1_000_000_000)
   benchmarkInteger(plan.repeats, 2, 20); benchmarkInteger(plan.seed, 0, 0xffffffff)
   return parsed
 }
@@ -148,9 +149,10 @@ function parseResult(plan: BenchmarkPlan, expectedCells: ReadonlyMap<string, Ben
   if (raw.status === 'completed') benchmarkHash(raw.evidenceDigest)
   const metrics = parseBenchmarkMetrics(raw.metrics)
   if (raw.status === 'completed') {
-    for (const key of ['inputTokens', 'outputTokens', 'costUsdMicros', 'toolCalls'] as const) {
+    for (const key of ['inputTokens', 'outputTokens', 'toolCalls'] as const) {
       benchmarkAssert(metrics[key] !== null && metrics[key]! <= plan.budget[key], 'completed result lacks in-budget measurement')
     }
+    if (plan.budget.costUsdMicros !== null) benchmarkAssert(metrics.costUsdMicros !== null && metrics.costUsdMicros <= plan.budget.costUsdMicros, 'completed result lacks in-budget cost measurement')
     benchmarkAssert(metrics.latencyMs !== null && metrics.latencyMs <= plan.budget.durationMs, 'completed result lacks in-budget latency')
   }
   benchmarkInteger(raw.startedAt); benchmarkInteger(raw.completedAt)

@@ -130,8 +130,8 @@ export class BenchmarkStore {
   #transaction<T>(operation: () => T): T {
     try {
       this.#database.exec('BEGIN IMMEDIATE')
-    } catch (error) {
-      throw new BenchmarkError(`benchmark journal is busy: ${error instanceof Error ? error.message : String(error)}`)
+    } catch {
+      throw new BenchmarkError('benchmark journal transaction unavailable')
     }
     try {
       const value = operation()
