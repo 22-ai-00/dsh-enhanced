@@ -891,6 +891,7 @@ export class EvaluationStore {
     scopeInput: EvaluationScope,
     fenceInput: EvaluationLearningWriterFence,
     callback: () => T,
+    options: Readonly<{ requireProjectionDelivery?: boolean }> = {},
   ): EvaluationLearningWriterFenceResult<T> {
     const { scopeKey } = canonicalEvaluationScope(scopeInput)
     const fence = this.#normalizeLearningWriterFence(fenceInput)
@@ -903,7 +904,7 @@ export class EvaluationStore {
         this.#database.exec('COMMIT')
         return Object.freeze({ matched: false as const, reason: 'watermark-changed' as const })
       }
-      const pending = this.#database.prepare(`
+      const pending = options.requireProjectionDelivery === false ? undefined : this.#database.prepare(`
         SELECT 1 AS present
         FROM evaluation_projection_outbox outbox
         JOIN evaluation_outcomes outcome ON outcome.id = outbox.evaluation_id

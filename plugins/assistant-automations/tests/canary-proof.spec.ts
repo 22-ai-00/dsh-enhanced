@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -13,7 +14,7 @@ import { GrowthAutomationStore } from '../src/growth.ts'
 
 const cleanup: (() => void)[] = []
 afterEach(() => { cleanup.splice(0).reverse().forEach(close => close()) })
-const hash = 'a'.repeat(64)
+const hash = createHash('sha256').update(JSON.stringify({})).digest('hex')
 const scope = { workspace: '/work/alpha', preset: 'primary' }
 const request = { contractVersion: 1 as const, operationId: 'promote', experimentId: 'experiment',
   candidateId: 'candidate', candidateRevision: 1, candidateDigest: hash,
@@ -50,10 +51,6 @@ function harness() {
     requireLiveGrowthArtifact: () => definition,
     reconcileSystem: activate,
   })
-  // Keep activation assertions independent of unrelated template materialization.
-  vi.spyOn(growthStore, 'completePromotion').mockImplementation(() => ({
-    ...growthStore.requireArtifact(request), definitionVersion: 2, definitionHash: hash,
-  }))
   let sequence = 0
   const append = (objectiveStatus: 'achieved' | 'not-achieved', owner = false,
     target: Readonly<{ runId: string; situation: string }> = { runId: 'run-canary', situation: 'automation:automation' }) => {
@@ -119,8 +116,8 @@ test('valid proof persists canonical revision and promotion holds the Evaluation
 test('a correction committed immediately before the writer fence wins over promotion', () => {
   const h = harness(); h.append('achieved')
   h.service.inspectWorkflowCanary(inspect)
-  const fence = h.evaluation.withTrustedLearningWriterFence.bind(h.evaluation)
-  vi.spyOn(h.evaluation, 'withTrustedLearningWriterFence').mockImplementation((input, callback) => {
+  const fence = h.evaluation.withTrustedCanonicalLearningWriterFence.bind(h.evaluation)
+  vi.spyOn(h.evaluation, 'withTrustedCanonicalLearningWriterFence').mockImplementation((input, callback) => {
     h.append('not-achieved', true)
     return fence(input, callback)
   })
@@ -150,6 +147,18 @@ test('unchanged inspection proof replays after reopening its durable ledger', ()
   expect(h.service.inspectWorkflowCanary(inspect)).toEqual(receipt)
 })
 
+test('inspection replay survives a real promotion version transition but still detects correction', () => {
+  const h = harness(); h.append('achieved')
+  const inspection = h.service.inspectWorkflowCanary(inspect)
+  expect(h.service.promoteWorkflowAutomation(request).outcome).toBe('promoted')
+  expect(h.growthStore.byExperiment('experiment')).toMatchObject({
+    state: 'promoted', definitionVersion: 2,
+  })
+  expect(h.service.inspectWorkflowCanary(inspect)).toEqual(inspection)
+  h.append('not-achieved', true)
+  expect(() => h.service.inspectWorkflowCanary(inspect)).toThrow(/evidence/i)
+})
+
 test('unrelated canonical progress refreshes the scope fence without changing saved canary identity', () => {
   const h = harness(); h.append('achieved')
   const receipt = h.service.inspectWorkflowCanary(inspect)
@@ -174,12 +183,13 @@ test('a proof from a different run or scope never passes inspection', () => {
   expect(h.activate).not.toHaveBeenCalled()
 })
 
-test('pending Evaluation projection delivery cannot activate', () => {
+test('pending Evolution delivery does not block a canonical Evaluation fence', () => {
   const h = harness(); h.append('achieved')
   h.service.inspectWorkflowCanary(inspect)
   const db = new DatabaseSync(h.evalPath)
   cleanup.push(() => db.close())
   db.exec("UPDATE evaluation_projection_outbox SET status = 'pending'")
-  expect(() => h.service.promoteWorkflowAutomation(request)).toThrow(/projection-pending/)
-  expect(h.activate).not.toHaveBeenCalled()
+  expect(h.service.promoteWorkflowAutomation(request).outcome).toBe('promoted')
+  expect(h.activate).toHaveBeenCalledTimes(1)
+  expect(db.prepare("SELECT status FROM evaluation_projection_outbox").get()).toEqual({ status: 'pending' })
 })

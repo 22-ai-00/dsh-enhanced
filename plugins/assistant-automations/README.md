@@ -109,7 +109,7 @@ Evaluation/Evolution 可直接调用 `resolveQualityEvidence(...)`，用 Evaluat
 schema v8 建立了需要停写的单 writer 升级边界；当前 schema v11 延续这一要求，不承诺旧 binary
 与新 binary 的 N/N-1 并发兼容。v9 增加 incident lifecycle/presentation ledger，v10 增加受监督
 Growth 的 operation 与 paused artifact 账本。部署必须先停止所有旧 scheduler owner，再备份 SQLite/WAL，
-启动一个 v10 binary 完成迁移并验证后才恢复 supervisor；旧 binary 看到更高 `user_version` 会 fail closed，
+启动一个 v11 binary 完成迁移并验证后才恢复 supervisor；v11 为 Growth artifact 增加 canonical canary proof 列；旧 binary 看到更高 `user_version` 会 fail closed，
 而不是假装可安全降级。
 
 ## 配置

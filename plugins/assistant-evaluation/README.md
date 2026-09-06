@@ -97,3 +97,5 @@ scope、situation、producer/evaluator id、证据引用和指标属于本地评
 对齐仓库的 [DSH / Cordis 兼容性基线](../../docs/compatibility.md)。Host 提供 Cordis、Agent 和 ToolRuntime；插件自身携带 Schemastery。
 
 Host 可通过 `getTrustedAutomationRunLearningProjection({ scope, runId })` 精确读取一个 run 的 ready canonical learning projection，无需扫描受 limit 限制的原始 audit 列表。不存在或 objective-conflict 时不返回证明；返回值沿用同一 canonical projection、revision、digest 和 scope watermark。调用方须检查 disposition 和执行/目标状态，并在产生依赖该证据的写入时使用 `withTrustedLearningWriterFence`。
+
+`withTrustedCanonicalLearningWriterFence` 为依赖 Evaluation canonical 状态本身的 Host 写入提供同样的 scope watermark、精确 task tuple 和同步写锁校验，但不要求投递给 Evolution 的 outbox 已完成。`withTrustedLearningWriterFence` 继续为 Evolution 依赖方保留 projection-pending gate；两者都不会代替或伪造 outbox 投递。
