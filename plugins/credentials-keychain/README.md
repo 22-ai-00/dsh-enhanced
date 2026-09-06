@@ -115,6 +115,7 @@ handles:
 - consumer id 从调用方 Cordis fiber 的插件 `name` 推导，不能由 request 字符串指定。
 - handle 同时校验 consumer、purpose、TTL 上限和 `assistant-policy`；任一未知值默认拒绝。
 - `withSecret(caller, request, callback)` 只在 callback 期间传值，并提供 AbortSignal。完成、provider 失败、TTL、运维撤销和服务卸载都会写入 lease/audit ledger。
+- provider 返回后、调用 callback 前会同步复核服务状态、AbortSignal 和账本中的 lease 版本/状态/时限；读取期间发生的撤销、过期或卸载不会交付值。callback 已开始后仍依赖 AbortSignal 的合作式中断，不能收回已经交付给 consumer 的值。
 - idempotency key 只执行一次；已完成/失败/过期请求不会再次调用 callback。
 - 运维撤销只中断精确 lease，不自动删除 OS 凭据。
 - JavaScript string 无法可靠清零；consumer 必须不缓存、不记录、不返回 secret，并在 AbortSignal 后立即释放持有 secret 的 SDK/连接。

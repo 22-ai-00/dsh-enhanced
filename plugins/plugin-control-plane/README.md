@@ -96,7 +96,9 @@ dsh-plugin-control activate \
 
 ## 固定 Host attestor 执行契约
 
-配置 `hostAttestor` 后，每个 awaited phase 由 owner CLI 单步推进：
+配置 `hostAttestor` 后，每个 awaited phase 由 owner CLI 单步推进。可执行 attestor 与已固定摘要的解释器会以 `O_NOFOLLOW` 打开，贯穿版本探测和实际 attestation 保持相同文件描述符，并通过 Linux `/proc/self/fd` 启动；结束后复核 inode 与摘要。缺少 Linux/procfs 时拒绝执行，不回退到可被替换的 pathname，其他平台可使用人工 attestation。描述符固定防止路径替换选中另一 inode，不能隔离同 UID 进程对文件内容或信任配置的修改，生产信任根仍需独立 owner/broker 权限边界。
+
+执行步骤：
 
 ```sh
 dsh-plugin-control probe \
