@@ -1,8 +1,14 @@
 # 业务目标编排：执行与验收接线
 
-> `fdcee5c` 的跨设备检查点曾将 Delivery 有界续跑保存为 WIP。接手已修复并通过真实原生驱动、取消和 teardown 边界测试及独立复核；全仓结果见 [落地账本](agent-autonomy-implementation.md)。已实现可选的原生回合独立验收与累计预算；持久唤醒仍未完成。
+> `fdcee5c` 的跨设备检查点曾将 Delivery 有界续跑保存为 WIP。接手后的边界修复和可选原生回合独立验收、累计预算、一次性持久唤醒均有实现切片；这不等于跨日生产运行或全部业务目标独立验收已经完成。
 
-本设计延续 [完整落地账本](agent-autonomy-implementation.md) 的工作包 05、08、17。当前切片涵盖 owner 目标创建、业务上下文、原生生命周期控制与 Delivery 有界续跑；已接入原生回合的 v2 独立执行契约、期限和真实回读；长期授权 lease、跨日自动恢复与完整目标验收仍须实现，不能因设计存在而记为完成。
+本设计延续 [完整落地账本](agent-autonomy-implementation.md) 的工作包 05、08、17。当前切片涵盖 owner 目标创建、业务上下文、原生生命周期控制、Delivery 有界续跑、v2 独立执行契约、期限、真实回读和一次性 wake；长期授权 lease、跨日生产运行验证与完整业务目标验收仍须实现，不能因设计存在而记为完成。
+
+## 一次性 wake 的持久边界
+
+Wake 默认关闭，要求 verified native rounds、持久预算与可信 meter、有效 owner route、以及 `automation-runs` Policy budget。`goal_schedule` 只在当前 owner 人类回合暂停并 checkpoint 原生目标后创建单个 `at` 意图，身份固定为业务定义、owner record/version、workspace/preset、原 Session、原生 GoalId/revision；它不创建 recurring 或全目标调度。
+
+Automations 先提交 paused 定义，Goals 再保存 definition-hash 绑定，最后才 activate。执行前所有 authority 重新读取；原生 resume 前 occurrence CAS 把 wake 标为 dispatched。已派发后无法确认停止的执行返回 unknown；进程崩溃遗留的 dispatched 也不重放，等待对账；scheduler 若在 CAS 前得到终态，Goals 仅标 denied。Cordis service proxy 不能用对象 identity 作 authority 判断，runtime-context snapshot 也不是新 user 输入。
 
 ## 保留两种不同的要求
 

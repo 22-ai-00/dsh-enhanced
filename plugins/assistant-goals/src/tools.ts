@@ -1,12 +1,28 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { AssistantGoalsService } from './service.js'
+import type { GoalWake } from './wake-store.js'
+
+const wakeView = (wake: GoalWake) => ({ id: wake.intent.id, goalId: wake.intent.goalId,
+  state: wake.state, wakeAt: wake.intent.at, expiresAt: wake.intent.expiresAt,
+  ...(wake.completedAt === undefined ? {} : { completedAt: wake.completedAt }) })
 
 const output = {
   schema: { type: 'object' as const, additionalProperties: false, properties: { context: { type: 'string' as const, required: true } } },
   render: (_args: unknown, value: { context: string }) => [{ type: 'text' as const, text: value.context }],
 } as const
 export function registerGoalTools(ctx: Context, service: AssistantGoalsService): void {
+  ctx.tools.register(defineTool({
+    name: 'goal_schedule',
+    description: 'Authorize one delayed resume of this session business goal. Requires the current authenticated owner request, enabled background wake, Policy and budgets. Pauses the goal, checkpoints it, and schedules the original Session via Automations. wake_at is UTC epoch milliseconds. Omitting wake_at only inspects existing schedules. Unknown work is never automatically replayed.',
+    parameters: { goal_id: { type: 'string', required: true }, expected_revision: { type: 'integer' }, wake_at: { type: 'integer' } }, output,
+    async execute(args, exec) {
+      if (args.wake_at === undefined) return { context: JSON.stringify({ wakes: service.scheduledWakes(exec.agent, args.goal_id).map(wakeView) }) }
+      if (args.expected_revision === undefined) throw new Error('goal_schedule requires expected_revision')
+      const wake = await service.schedule(exec.agent, args.goal_id, args.expected_revision, args.wake_at, exec.signal)
+      return { context: JSON.stringify({ wake: wakeView(wake) }) }
+    },
+  }))
   ctx.tools.register(defineTool({
     name: 'goal_create',
     description: 'Create a native DSH goal from the current authenticated owner request and persist its business context. Requires a live owner human turn and explicit Policy permission. The native goal driver, if enabled by the Host, controls continuation.',

@@ -68,6 +68,7 @@ import {
 import { DeliveryStoreError } from './store.js'
 import { DeliverySessionLeases, SessionLeaseUnavailable } from './session-lease-runtime.js'
 import type { SessionLeasePort, SessionExecutionLease } from './session-lease-runtime.js'
+import { isDeliveryGoalWakeDeadline, type DeliveryGoalWakeInput, type DeliveryGoalWakeResult } from './goal-wake-types.js'
 import {
   parseWorkflowCommand,
   workflowCommandUsage,
@@ -236,11 +237,14 @@ interface NativeGoalView {
   readonly revision: number
   readonly phase: 'active' | 'paused' | 'blocked' | 'complete'
   readonly activation: 'armed' | 'disarmed'
+  readonly roundsStarted: number
+  readonly maxGoalRounds: number
 }
 
 interface NativeGoalService {
   get(agent: Agent): NativeGoalView | undefined
   disarm(agent: Agent): NativeGoalView | undefined
+  resume(agent: Agent, ref: { id: unknown; revision: number }): NativeGoalView
 }
 
 interface GoalContinuationWait {
@@ -1968,6 +1972,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     principal: string,
     selected: ModelSelection,
     agentPresets: Pick<AgentPresets, 'mount'> | undefined,
+    initiator: 'background' | 'external' = 'external',
   ): Promise<void> {
     const agent = agentCtx.agent
     if (agent === undefined) throw new Error('assistant-delivery: unpublished Agent identity is missing')
@@ -1977,8 +1982,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         'assistant-delivery: durable Agent identity does not match its conversation binding',
       )
     }
-    const unbind = this.policy.bindInitiator(agent, 'external', principal)
-    agentCtx.effect(() => unbind, 'assistant-delivery.external-initiator')
+    const unbind = this.policy.bindInitiator(agent, initiator, principal)
+    agentCtx.effect(() => unbind, `assistant-delivery.${initiator}-initiator`)
     installModelSelection(agentCtx, { current: selected, assembled: undefined })
     await agentPresets?.mount(agentCtx, presetId)
   }
@@ -2550,6 +2555,244 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         if (handle !== undefined) { await handle.dispose(); this.sessionLeases.disposed(handle.agent) }
       } finally { lease.close() }
     }
+  }
+
+  /**
+   * Resume one previously owner-scheduled native Goal.  This is deliberately
+   * not an inbound-message path: it creates no delivery source and never
+   * calls followup().  The native round driver remains the only producer of
+   * `source.kind === 'goal'` work.
+   */
+  async resumeScheduledGoal(
+    binding: Readonly<ConversationBinding>,
+    input: Readonly<DeliveryGoalWakeInput>,
+  ): Promise<DeliveryGoalWakeResult> {
+    const denied = (): DeliveryGoalWakeResult => ({ outcome: 'denied', dispatched: false, quiescent: false })
+    const now = Date.now()
+    if (!this.validGoalWakeInput(binding, input, now)) return denied()
+    const duration = input.deadlineAt - now
+    const deadline = new AbortController()
+    const expire = setTimeout(() => deadline.abort(new Error('assistant-delivery: scheduled goal wake expired')), duration)
+    expire.unref?.()
+    const abort = (): void => deadline.abort(input.signal.reason)
+    input.signal.addEventListener('abort', abort, { once: true })
+    if (input.signal.aborted) abort()
+    const signal = deadline.signal
+    let lease: SessionExecutionLease | undefined
+    let control: ActiveSessionControl | undefined
+    let handle: AgentHandle | undefined
+    let releaseFences: (() => void) | undefined
+    let dispatched = false
+    let terminal = false
+    let disposed = false
+    try {
+      signal.throwIfAborted()
+      const persisted = this.options.getModelSelection(binding.conversation)
+      const requested = toModelRoute(persisted ?? { provider: this.options.provider, model: this.options.model })
+      const resolved = await this.resolveExecutionRoute(binding.conversation, persisted, requested, signal)
+      if ('retry' in resolved) { return denied() }
+      const selected = agentSelection(resolved.route)
+      const presets = this.options.getAgentPresets()
+      const presetId = presets === undefined ? binding.agentPreset : (await presets.resolve(binding.agentPreset)).id
+      signal.throwIfAborted()
+      await requireWorkspace(binding.workspace)
+      signal.throwIfAborted()
+      try { lease = this.sessionLeases.open({ kind: 'bound', binding }, signal) } catch (error) {
+        if (error instanceof SessionLeaseUnavailable) {
+          return { outcome: error.kind, dispatched: false, quiescent: false }
+        }
+        throw error
+      }
+      control = this.beginSessionControl(binding.sessionId, lease.signal)
+      lease.dispatch()
+      handle = await this.resumeAgent({
+        resumeSessionId: SessionId(binding.sessionId),
+        signal: control.controller.signal,
+        agentOptions: { provider: selected.provider, model: selected.model, maxTokens: this.options.maxOutputTokens },
+        setup: async agentCtx => {
+          // Restored inbox entries may wake immediately on Session publication.
+          // Install the background-only gate before that publication boundary.
+          if (agentCtx.agent === undefined) throw new Error('assistant-delivery: wake Agent missing')
+          releaseFences = this.installScheduledGoalFences(agentCtx.agent, input)
+          await this.setupAgent(
+            agentCtx, binding.workspace, presetId, input.attestation.principalId, selected, presets, 'background',
+          )
+          const llm = this.ctx.get('llm')
+          if (llm === undefined) throw new Error('assistant-delivery: llm service is required')
+          requireAdapterToolCallProtocol(llm, selected.provider, selected.model, presetId, agentCtx.tools.schemas(agentCtx.agent).length)
+        },
+      })
+      const agent = handle.agent
+      this.assertScheduledGoal(input, agent, 'before-resume')
+      await this.reconcileNativeFullPermissionReviewer(agent.session)
+      this.assertScheduledGoal(input, agent, 'before-resume')
+      const goals = this.ctx.get('goals') as NativeGoalService | undefined
+      const current = goals?.get(agent)
+      if (goals === undefined || current === undefined || String(current.id) !== input.native.goalId
+        || current.revision !== input.native.revision || current.phase !== 'paused'
+        || current.activation !== 'disarmed' || current.roundsStarted >= current.maxGoalRounds) {
+        return denied()
+      }
+      if (agent.status !== 'idle' || agent.inbox.hasPending) {
+        return denied()
+      }
+      this.assertScheduledGoal(input, agent, 'before-resume')
+      input.beforeResume(agent)
+      // `beforeResume` is the durable goal-wake CAS. Once it returned, native
+      // resume might have committed before throwing, so this invocation is no
+      // longer retry-safe regardless of the result of `goals.resume()`.
+      dispatched = true
+      this.assertScheduledGoal(input, agent, 'before-resume')
+      goals.resume(agent, { id: current.id, revision: current.revision })
+      terminal = await this.waitForScheduledGoalTerminal(agent, input, control.controller.signal)
+    } catch (error) {
+      if (!(error instanceof SessionLeaseUnavailable) && !signal.aborted) {
+        this.ctx.logger.warn(`assistant-delivery: scheduled goal wake failed: ${String(error)}`)
+      }
+      terminal = false
+      try {
+        const agent = handle?.agent
+        const goals = this.ctx.get('goals') as NativeGoalService | undefined
+        if (agent !== undefined) {
+          try { goals?.disarm(agent) } catch {}
+          agent.cancel({ kind: 'hook', reason: 'assistant-delivery-scheduled-goal-wake-cancelled' })
+        }
+      } catch {}
+    } finally {
+      input.signal.removeEventListener('abort', abort)
+      clearTimeout(expire)
+      try {
+        const remaining = Math.max(0, input.deadlineAt - Date.now())
+        disposed = await this.disposeAfterReplyBoundary(
+          binding.sessionId,
+          handle,
+          releaseFences,
+          !terminal,
+          remaining,
+        )
+      } finally {
+        if (handle === undefined) releaseFences?.()
+        if (control !== undefined) this.endSessionControl(binding.sessionId, control)
+        lease?.close()
+      }
+    }
+    const quiescent = terminal && disposed && !signal.aborted
+    return { outcome: quiescent ? 'succeeded' : 'unknown', dispatched, quiescent }
+  }
+
+  private validGoalWakeInput(
+    binding: Readonly<ConversationBinding>, input: Readonly<DeliveryGoalWakeInput>, now: number,
+  ): boolean {
+    if (input === null || typeof input !== 'object' || input.signal === undefined
+      || typeof input.signal.aborted !== 'boolean' || typeof input.signal.addEventListener !== 'function'
+      || typeof input.signal.removeEventListener !== 'function' || input.signal.aborted
+      || !isDeliveryGoalWakeDeadline(input.deadlineAt, now) || typeof input.assertCurrent !== 'function'
+      || typeof input.beforeResume !== 'function' || typeof input.native?.goalId !== 'string'
+      || input.native.goalId.length === 0 || input.native.goalId.length > 512
+      || !Number.isSafeInteger(input.native.revision) || input.native.revision < 1) return false
+    const attestation = input.attestation
+    return attestation !== null && typeof attestation === 'object'
+      && attestation.bindingId === binding.id && attestation.bindingVersion === binding.version
+      && attestation.bindingGeneration === binding.generation && attestation.sessionId === binding.sessionId
+      && attestation.scope?.workspace === binding.workspace && attestation.scope.preset === binding.agentPreset
+      && attestation.principalId === externalPrincipalId(binding.principal)
+      && typeof attestation.principalLineage?.principalRecordId === 'string'
+      && attestation.principalLineage.principalRecordId.length > 0
+      && Number.isSafeInteger(attestation.principalLineage.principalVersion)
+      && attestation.principalLineage.principalVersion >= 1
+  }
+
+  private assertScheduledGoal(input: Readonly<DeliveryGoalWakeInput>, agent: Agent,
+    phase: 'before-resume' | 'running' | 'terminal'): void {
+    this.sessionLeases.assert(String(agent.session.id))
+    input.signal.throwIfAborted()
+    if (Date.now() >= input.deadlineAt) throw new Error('assistant-delivery: scheduled goal wake expired')
+    input.assertCurrent(agent, phase)
+  }
+
+  private installScheduledGoalFences(agent: Agent, input: Readonly<DeliveryGoalWakeInput>): () => void {
+    const goalTurn = (): void => {
+      const events = agent.session.snapshotEvents()
+      const start = events.findLast(event => event.type === 'turn/start')
+      // DSH persists runtime context snapshots as user/message too; they are
+      // context for this turn, never a second input or a grant of authority.
+      const messages = start === undefined ? [] : events.filter(event => event.seq > start.seq && event.type === 'user/message'
+        && !(event.data.source.kind === 'plugin' && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt'
+          && event.data.source.form === 'snapshot'))
+      if (start === undefined || events.some(event => event.seq > start.seq && event.type === 'turn/end')
+        || messages.length !== 1 || messages[0]?.type !== 'user/message') throw new Error('assistant-delivery: exact native goal turn required')
+      const source = messages[0].data.source
+      const native = (this.ctx.get('goals') as NativeGoalService | undefined)?.get(agent)
+      if (source.kind !== 'goal' || String(source.goalId) !== input.native.goalId
+        || source.revision !== input.native.revision + 1 || source.round < 1
+        || native === undefined || native.phase !== 'active' || String(native.id) !== input.native.goalId
+        || native.revision !== source.revision || native.roundsStarted !== source.round) throw new Error('assistant-delivery: foreign wake input denied')
+    }
+    const reject = (): never => {
+      try { agent.cancel({ kind: 'hook', reason: 'assistant-delivery-scheduled-goal-wake-revoked' }) } catch {}
+      throw new Error('assistant-delivery: scheduled goal wake authorization changed')
+    }
+    const request = agent.ctx.on('agent/request', async (_payload, next) => {
+      try { goalTurn(); this.assertScheduledGoal(input, agent, 'running') } catch { return reject() }
+      const result = await next()
+      try { goalTurn(); this.assertScheduledGoal(input, agent, 'running') } catch { return reject() }
+      return result
+    }, { prepend: true })
+    const preExecute = agent.ctx.on('tools/pre-execute', async (_payload, next) => {
+      try { goalTurn(); this.assertScheduledGoal(input, agent, 'running') }
+      catch { return { kind: 'deny' as const, reason: 'assistant-delivery: scheduled goal wake authorization changed' } }
+      const result = await next()
+      try { goalTurn(); this.assertScheduledGoal(input, agent, 'running') }
+      catch { return { kind: 'deny' as const, reason: 'assistant-delivery: scheduled goal wake authorization changed' } }
+      return result
+    }, { prepend: true })
+    const guard = agent.ctx.tools.guard(() => {
+      try { goalTurn(); this.assertScheduledGoal(input, agent, 'running'); return undefined }
+      catch { return 'assistant-delivery: scheduled goal wake authorization changed' }
+    })
+    return () => { request(); preExecute(); guard() }
+  }
+
+  private waitForScheduledGoalTerminal(
+    agent: Agent, input: Readonly<DeliveryGoalWakeInput>, signal: AbortSignal,
+  ): Promise<boolean> {
+    return new Promise(resolve => {
+      let settled = false
+      const finish = (value: boolean): void => {
+        if (settled) return
+        settled = true
+        removeGoal()
+        removeStatus()
+        signal.removeEventListener('abort', aborted)
+        resolve(value)
+      }
+      const check = (): void => {
+        try {
+          this.sessionLeases.assert(String(agent.session.id))
+          input.signal.throwIfAborted()
+          if (Date.now() >= input.deadlineAt) throw new Error('assistant-delivery: scheduled goal wake expired')
+          const goals = this.ctx.get('goals') as NativeGoalService | undefined
+          const current = goals?.get(agent)
+          if (current === undefined || String(current.id) !== input.native.goalId) return finish(false)
+          if (current.phase === 'active') {
+            input.assertCurrent(agent, 'running')
+            return
+          }
+          if (agent.status !== 'idle' || agent.inbox.hasPending) return
+          input.assertCurrent(agent, 'terminal')
+          finish(true)
+        } catch {
+          try { agent.cancel({ kind: 'hook', reason: 'assistant-delivery-scheduled-goal-wake-revoked' }) } catch {}
+          finish(false)
+        }
+      }
+      const removeGoal = this.ctx.on('goal/changed', ({ agent: changed }) => { if (changed === agent) check() })
+      const removeStatus = this.ctx.on('agent/status', ({ agent: changed }) => { if (changed === agent) check() })
+      const aborted = (): void => finish(false)
+      signal.addEventListener('abort', aborted, { once: true })
+      if (signal.aborted) aborted()
+      else check()
+    })
   }
 
   async prepare(

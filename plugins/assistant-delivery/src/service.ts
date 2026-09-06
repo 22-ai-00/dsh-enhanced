@@ -42,6 +42,7 @@ import {
 } from './coordinator.js'
 import { DeliveryStore, DeliveryStoreError, type OwnerRouteDispatchGuard } from './store.js'
 import { DshDeliveryRuntime } from './agent-runtime.js'
+import type { DeliveryGoalWakeInput, DeliveryGoalWakeResult } from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptanceHandle, TaskAcceptanceRegistration } from './acceptance.js'
 import { InboundImageMaterializer } from './inbound-images.js'
 import { registerDeliveryTools } from './tools.js'
@@ -1559,6 +1560,53 @@ export class AssistantDeliveryService extends Service {
       active = false
       if (this.runtime === runtime) this.runtime = undefined
     }
+  }
+
+  /** Only the live Goals service can mint this process-local wake capability. */
+  async resumeScheduledGoal(input: DeliveryGoalWakeInput): Promise<DeliveryGoalWakeResult> {
+    this.assertActive()
+    const runtime = this.runtime
+    const denied = (): never => { throw new AssistantDeliveryError('policy-denied', 'scheduled goal authority is no longer current') }
+    const current = (): ConversationBinding => {
+      this.assertActive()
+      // Cordis creates contextual service proxies on read; proxy identity is
+      // not a generation proof. The currently installed service must own the
+      // exact process-local capability on every boundary.
+      const producer = this.ctx.get('assistantGoals' as never, false) as unknown as
+        { ownsWakeExecution?(value: DeliveryGoalWakeInput): boolean } | undefined
+      if (this.runtime !== runtime || !(runtime instanceof DshDeliveryRuntime)
+        || producer?.ownsWakeExecution?.(input) !== true) return denied()
+      input.signal.throwIfAborted()
+      if (!Number.isSafeInteger(input.deadlineAt) || Date.now() >= input.deadlineAt) return denied()
+      const expected = input.attestation
+      const resolved = this.deliveryStore.getPreferencePrincipalForSession({ sessionId: expected.sessionId,
+        workspace: expected.scope.workspace, preset: expected.scope.preset })
+      if (resolved === undefined) return denied()
+      const { binding, principal } = resolved
+      if (binding.id !== expected.bindingId || binding.version !== expected.bindingVersion
+        || binding.generation !== expected.bindingGeneration || binding.sessionId !== expected.sessionId
+        || externalPrincipalId(binding.principal) !== expected.principalId
+        || principal.id !== expected.principalLineage.principalRecordId
+        || principal.version !== expected.principalLineage.principalVersion) return denied()
+      const decision = this.policy.authorize({ subject: { kind: 'background', id: 'assistant-goals-wake/v1',
+        workspace: binding.workspace, principal: expected.principalId }, action: 'wake',
+      resource: { kind: 'goal', id: 'business-context' }, context: { initiator: 'background' } })
+      if (decision.effect !== 'allow') return denied()
+      return binding
+    }
+    const binding = current()
+    const result = await (runtime as DshDeliveryRuntime).resumeScheduledGoal(binding, Object.freeze({ ...input,
+      assertCurrent: (agent: Agent, phase: 'before-resume' | 'running' | 'terminal') => {
+        current()
+        if (String(agent.session.id) !== binding.sessionId || agent.session.header.cwd !== binding.workspace
+          || agent.session.header.agentPreset !== binding.agentPreset) return denied()
+        input.assertCurrent(agent, phase)
+        current()
+      },
+      beforeResume: (agent: Agent) => { current(); input.beforeResume(agent); current() },
+    }))
+    if (result.outcome === 'succeeded') current()
+    return result
   }
 
   /** Private verifier producer generation; invalidated with this service. */
