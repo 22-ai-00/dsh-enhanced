@@ -145,9 +145,10 @@ describe('personal memory store', () => {
       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
       ORDER BY name
     `).all() as { name: string }[]
-    expect(version.user_version).toBe(5)
+    expect(version.user_version).toBe(6)
     expect(tables.map(table => table.name)).toEqual([
       'memory_audit',
+      'memory_evidence_anchors',
       'memory_promotion_cancellations',
       'memory_promotion_compensations',
       'memory_promotion_results',
@@ -333,9 +334,9 @@ describe('personal memory store', () => {
     store.close()
 
     const migrated = new DatabaseSync(path)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(5)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(6)
     expect(migrated.prepare('SELECT value FROM schema_meta WHERE key = ?').get('schema-version'))
-      .toEqual({ value: '5' })
+      .toEqual({ value: '6' })
     expect(migrated.prepare('SELECT value FROM legacy_marker').get()).toEqual({ value: 'preserved' })
     expect(migrated.prepare(`
       SELECT namespace_mode, namespace_key FROM memory_records WHERE id = 'legacy-memory'

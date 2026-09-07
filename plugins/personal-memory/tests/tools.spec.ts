@@ -104,12 +104,12 @@ async function harness() {
 }
 
 describe('personal memory rc.1 tools', () => {
-  test('registers only search and proposal-only manage tools', async () => {
+  test('registers search, historical evidence read and proposal-only manage tools', async () => {
     const { ctx } = await harness()
 
     const schemas = ctx.tools.schemas().filter(schema => schema.name.startsWith('memory_'))
     expect(schemas.map(schema => schema.name).sort())
-      .toEqual(['memory_manage', 'memory_search', 'memory_search_confirmed'])
+      .toEqual(['memory_manage', 'memory_read_evidence', 'memory_search', 'memory_search_confirmed'])
     expect(schemas.find(schema => schema.name === 'memory_manage')?.parameters.properties)
       .not.toHaveProperty('principal')
     expect(schemas.find(schema => schema.name === 'memory_manage')?.parameters.properties)

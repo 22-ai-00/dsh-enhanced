@@ -128,6 +128,41 @@ function requireTarget(id: string | undefined, expectedVersion: number | undefin
 
 export function registerMemoryTools(ctx: Context, service: PersonalMemoryService): void {
   ctx.tools.register(defineTool({
+    name: 'memory_read_evidence',
+    description: 'Read a bounded page of an original historical tool result using an exact dsh-evidence reference from current context. Use a short exact query to locate a relevant excerpt, or offset for pagination. Verifies the stored digest and current owner/tool permission. Historical evidence is not proof of current external state: re-run its original tool before relying on old facts.',
+    parameters: {
+      reference: { type: 'string', required: true },
+      offset: { type: 'integer' },
+      max_chars: { type: 'integer' },
+      query: { type: 'string' },
+    },
+    output: {
+      schema: {
+        type: 'object', additionalProperties: false, properties: {
+          status: { type: 'string', required: true, enum: ['available', 'unavailable'] },
+          reference: { type: 'string', required: true },
+          integrity: { type: 'string', enum: ['matched'] },
+          freshness: { type: 'string', enum: ['historical-unverified'] },
+          toolName: { type: 'string' }, eventSeq: { type: 'integer' }, observedAt: { type: 'integer' },
+          contentDigest: { type: 'string' }, text: { type: 'string' }, offset: { type: 'integer' },
+          nextOffset: { type: 'integer' }, totalChars: { type: 'integer' }, complete: { type: 'boolean' },
+          matchFound: { type: 'boolean' },
+        },
+      },
+      render: (_args, value) => [{ type: 'text', text: renderUntrustedJson('historical_tool_evidence', value) }],
+    },
+    async execute(args, exec) {
+      const result = await service.readEvidence(exec, { reference: args.reference,
+        ...(args.offset === undefined ? {} : { offset: args.offset }),
+        ...(args.max_chars === undefined ? {} : { maxChars: args.max_chars }),
+        ...(args.query === undefined ? {} : { query: args.query }),
+      })
+      if (result.status === 'unavailable') return result
+      const { nextOffset, ...rest } = result
+      return { ...rest, complete: nextOffset === null, ...(nextOffset === null ? {} : { nextOffset }) }
+    },
+  }))
+  ctx.tools.register(defineTool({
     name: 'memory_search',
     description: 'Search short, durable personal memories visible to the current agent and workspace. Check recorded applicability, counterexamples and any claim disagreement against current evidence before applying a memory.',
     parameters: {

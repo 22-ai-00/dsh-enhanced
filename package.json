@@ -50,6 +50,7 @@
     "@deepseek-ai/dsh-scope": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
     "@deepseek-ai/dsh-session-persistence": "catalog:",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "catalog:",
     "@deepseek-ai/dsh-session-projection": "catalog:",
     "@deepseek-ai/dsh-settings": "catalog:",
     "@deepseek-ai/dsh-shell": "catalog:",
@@ -86,6 +87,9 @@
     "@deepseek-ai/dsh-agent-default-model": "catalog:",
     "@deepseek-ai/dsh-session-query": "catalog:",
     "@deepseek-ai/dsh-typert-registry": "catalog:",
-    "@playwright/test": "1.58.2"
+    "@playwright/test": "1.58.2",
+    "@deepseek-ai/dsh-fs": "catalog:",
+    "@deepseek-ai/dsh-fs-local": "catalog:",
+    "@deepseek-ai/dsh-tool-fs": "catalog:"
   }
 }

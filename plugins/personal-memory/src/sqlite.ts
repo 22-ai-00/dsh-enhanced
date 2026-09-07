@@ -2,7 +2,7 @@ import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const memorySchemaVersion = 5
+export const memorySchemaVersion = 6
 
 export class MemoryDatabaseError extends Error {
   constructor(
@@ -203,6 +203,36 @@ function createV4CompensationTable(database: DatabaseSync): void {
   `)
 }
 
+function createV6EvidenceTable(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE memory_evidence_anchors (
+      reference TEXT PRIMARY KEY CHECK (
+        reference GLOB 'dsh-evidence:v1:*'
+        AND length(reference) = 80
+        AND substr(reference, 17) NOT GLOB '*[^0-9a-f]*'
+      ),
+      ${namespaceColumns},
+      workspace TEXT NOT NULL CHECK (workspace <> ''),
+      agent_preset TEXT NOT NULL CHECK (agent_preset <> ''),
+      session_id TEXT NOT NULL CHECK (session_id <> ''),
+      event_seq INTEGER NOT NULL CHECK (event_seq >= 0),
+      tool_name TEXT NOT NULL CHECK (tool_name <> ''),
+      source_path TEXT NOT NULL,
+      source_target_digest TEXT NOT NULL CHECK (length(source_target_digest) = 64 AND source_target_digest NOT GLOB '*[^0-9a-f]*'),
+      call_id TEXT NOT NULL CHECK (call_id <> ''),
+      content_digest TEXT NOT NULL CHECK (
+        length(content_digest) = 64 AND content_digest NOT GLOB '*[^0-9a-f]*'
+      ),
+      observed_at INTEGER NOT NULL CHECK (observed_at >= 0),
+      ${namespaceConstraint},
+      UNIQUE(namespace_key, workspace, agent_preset, session_id, event_seq)
+    ) STRICT;
+
+    CREATE INDEX memory_evidence_anchors_scope_newest
+      ON memory_evidence_anchors(namespace_key, workspace, agent_preset, observed_at DESC, reference DESC);
+  `)
+}
+
 function createV3Indexes(database: DatabaseSync): void {
   database.exec(`
     CREATE INDEX memory_records_scope
@@ -279,12 +309,13 @@ function enableWal(database: DatabaseSync): void {
 function createFresh(database: DatabaseSync): void {
   database.exec(`
     CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '5');
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '6');
   `)
   createV3Tables(database)
   createV4CompensationTable(database)
   createV3Indexes(database)
   migrateV4ToV5(database)
+  migrateV5ToV6(database)
 }
 
 function migrateV3ToV4(database: DatabaseSync): void {
@@ -300,6 +331,14 @@ function migrateV4ToV5(database: DatabaseSync): void {
     ALTER TABLE memory_records ADD COLUMN knowledge_json TEXT;
     UPDATE schema_meta SET value = '5' WHERE key = 'schema-version';
     PRAGMA user_version = 5;
+  `)
+}
+
+function migrateV5ToV6(database: DatabaseSync): void {
+  createV6EvidenceTable(database)
+  database.exec(`
+    UPDATE schema_meta SET value = '6' WHERE key = 'schema-version';
+    PRAGMA user_version = 6;
   `)
 }
 
@@ -408,7 +447,7 @@ function migrate(database: DatabaseSync): void {
     }
     if (row.user_version === 0) {
       createFresh(database)
-      database.exec('PRAGMA user_version = 5')
+      database.exec('PRAGMA user_version = 6')
     } else {
       if (row.user_version === 1) migrateV1ToV2(database)
       row = database.prepare('PRAGMA user_version').get() as { user_version: number }
@@ -417,6 +456,8 @@ function migrate(database: DatabaseSync): void {
       if (row.user_version === 3) migrateV3ToV4(database)
       row = database.prepare('PRAGMA user_version').get() as { user_version: number }
       if (row.user_version === 4) migrateV4ToV5(database)
+      row = database.prepare('PRAGMA user_version').get() as { user_version: number }
+      if (row.user_version === 5) migrateV5ToV6(database)
     }
     database.exec('COMMIT')
   } catch (error) {
