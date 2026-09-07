@@ -16,6 +16,10 @@
 
 > Web Session 执行保护更新（2026-09-07）：已验证实际 `SessionController@0.1.2-rc.1` 的 cold follow 和 live prompt 两条借用路径。未持有本地凭证的 Agent 无法执行 Delivery Session；向正在运行的同一 Agent 追加原生用户消息会取消租约，已派发任务保存 `dead_letter / processor-ambiguous` 且不重放。普通未托管 Web 会话仍能创建并完成原生用户轮。最终根检查 `/tmp/dsh-web-lease-check-v3.log` 与 `.exit=0`：主 234 文件/3,343 测试、Delivery 653、Policy 186，全部类型检查/构建/dry-run pack 通过。取消 Web Agent 不等于释放 Controller 持有的生命周期；下一步必须把 Web owner/Policy、恢复准入与 teardown 一起接通。尚未验证浏览器端到端、完整自治安装或跨日收益；全部 18 项目标仍未完成。C2C 仅有本地执行记录，未取得实际 ChatGPT 评审。
 
+> 共享 factory 生命周期更新（2026-09-07）：Delivery service 的运行时注入范围现在构造唯一租约管理器，内置 create/resume 复用宿主 factory，并保留调用方独立 fiber 的真实清理责任。实际 Controller 冷 follow、Host notice 完成、独立 Web scope 卸载后 Delivery 更高 fence 续接、setup/commit 回滚及上游迟到 preparation 已纳入回归。独立复核发现并修复了公开 resume 取消早于底层加载清理的窗口：setup 前的 resume 失败按原生 factory 代次/可见性、owner fiber 与组合 signal 核对全部三条取消路径；普通已结束的加载错误保留恢复重试，取消或缺少证明时保持 unknown，不把迟到 cleanup 猜测为自动解锁依据。最终完整检查与独立复核证据见落地账本末尾。
+
+> 下一步接线位置已确定：在原生 `session-controller` bundle 行的构造入口提供限定作用域的 `agents` facade，复用共享原始 registry；不能改装已构造 Controller 的私有闭包。当前 facade 只存在于真实测试，生产仍缺 service 颁发的固定 owner capability、Web 新 Session binding、当前人类输入与原生 source 的确切关联、Policy 和 idle/wake 生命周期交接。不能公开内部 raw lease manager 当作 Web 授权，也不能把 Web conversation 冒充为现有 Lark owner 的路由；canonical transport identity 与 owner lineage 需要显式处理。完整 18 项目标保持未完成。
+
 ## 完整目标
 
 完整落实此前分析和规划，让项目成为高智能、高主动、能长期自主推进任务并持续自我改进的智能体；高权限与可验证的安全边界兼顾，同时安装、配置、升级和通过 Web 对话都方便友好。保留账本全部 18 个工作包，不能把目标缩成当前已实现的切片。

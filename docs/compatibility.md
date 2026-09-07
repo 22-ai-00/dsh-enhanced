@@ -44,3 +44,11 @@ Delivery Session 排他按同一 `0.1.2-rc.1` AgentLoop factory 的实际生命�
 Web Session 排他回归使用 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1` 的真实 `SessionController`，并在根开发依赖固定同版本的 AgentDefaultModel、SessionQuery 和 TypertRegistry；它们不作为 Delivery 的新运行时依赖发布。实际 `follow()` 在冷快照 yield 后通过原生 AgentLoop 恢复 Session，`prompt(request, signal)` 既能借用这个新 Agent，也能借用正在执行的同一 Agent。Delivery 通过持久归属检查拒绝前者，通过原生 `agent/inbox/inserted` / `claimed` 的 direct-user 输入取消后者的租约；不能把消息来源标签当作对任意 Host 插件的隔离。升级时必须重跑 cold follow、live prompt 取消后不重放、普通未托管 Web Session 正常执行三项回归。
 
 上述测试直接调用生产 Controller 与 Session persistence coordinator，模型为确定性 adapter，未验证浏览器认证、HTTP/WS 传输或完整 Web owner 产品入口。取消 Agent 不会自动释放 Web Controller 持有的会话生命周期，因此取消后不能假定 Delivery 已能重新取得该 Session。当前 Web 的身份关联、恢复准入和 teardown 还需一起接入；仅替换 create/prompt/cancel 无法覆盖内部历史恢复和 Typert Agent lookup。
+
+共享 factory 生命周期依赖同一版本 `CreateAgentOptions.setup` / `ResumeAgentOptions.setup` 的 `AgentSetupCommit`、原生回滚等待及 memoized `AgentHandle.dispose()`。Delivery 包装器在 setup 内绑定 lease，并在调用方 commit 前后重查；冷加载也计为在途。通过 `ownerCtx.reflect.trace()` 调用共享原始 registry，保留调用方 owner fiber，支持后续在 Controller 构造处提供限定作用域的 registry facade，不能创建第二个 AgentRegistry/factory。调用方卸载时额外 await 原生 disposer；不根据 `agent/disposed` 通知单独推断 quiescent。此 seam 目前仍为内部实现，未向普通 Web 请求开放 owner 授权。
+
+特别注意原生 `resumeWith()` 的 `raceAbortCall()`：调用方、owner fiber 或 factory 取消可先拒绝公开 resume Promise，未合作的 `persistence.prepare()` 可在之后返回并由上游 dispose。公开 API 不提供区分错误来源和观察该迟到清理的凭证。包装器通过 Cordis 同步 `internal/service` 通知跟踪 `agentLoop` 有效代次，并在错误返回时核对同代原生 provider 仍可见、调用方 `FiberState.ACTIVE`、组合 signal 未取消；只有排除 rc.1 的全部三条取消路径，才能把普通加载错误作为已结束的 load。provider 消失/替换、调用方卸载、signal 取消或非原生 factory 无法提供该证明时，保留 unknown；迟到 preparation 的清理不会自动解锁。setup 已收到 Agent 后的失败仍依赖原生等待 Agent rollback 的契约。升级 Cordis/AgentLoop 必须重查同步服务代次通知、三个取消来源与错误返回时序，不能靠错误消息猜测。
+
+construction 自身的 owner effect 把卸载记入不可复位的组合取消信号；即使同一 fiber 很快重启并再次 ACTIVE，也不能清除旧构造的取消。`FiberState` 在 Cordis 4.0.2 发布物中是擦除的 const enum；实现用对应成员类型约束数值，避免转译器尝试读取不存在的运行时导出，升级时类型检查必须继续核对该值。
+
+上述 factory 代次证明限定于官方 AgentLoop 向当前 AgentRegistry 注册 factory 的标准生命周期；其 setFactory effect 随 provider fiber 清理。AgentRegistry 没有公开私有 factory 槽的变更通知，不宣称追踪任意 Host 代码脱离该生命周期更换 factory 的行为。
