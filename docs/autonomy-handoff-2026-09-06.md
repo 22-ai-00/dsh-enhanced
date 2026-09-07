@@ -14,6 +14,8 @@
 
 > 创建预检与诊断更新（2026-09-07）：Goals 创建/编辑前已精确检查 step/whole profiles，缺规格或期限不足不会先修改原生目标；同一定义的整体标准与绝对期限保持冻结。Health 已接 Goals，并修复实际三个 Verifier 生产者被旧白名单误拒绝的问题。最终根检查 `/tmp/dsh-goal-readiness-check-v2.log` 与 `.exit=0`：主 234 文件/3,332 测试，Goals 72、Health 45、Verifier 51、Delivery 642，全构建/dry-run pack 及独立复核通过。真实 `web` profile 当前解析到 DSH `0.1.2-rc.1` 且已有浏览器认证，后续应复用现有界面补 Web 到 Delivery owner/权限的关联；不要根据旧 Web 缓存重复实现认证或另建聊天界面。默认自治安装、生产计量和真实跨日验证仍未完成，完整 18 项范围不变。
 
+> Web Session 执行保护更新（2026-09-07）：已验证实际 `SessionController@0.1.2-rc.1` 的 cold follow 和 live prompt 两条借用路径。未持有本地凭证的 Agent 无法执行 Delivery Session；向正在运行的同一 Agent 追加原生用户消息会取消租约，已派发任务保存 `dead_letter / processor-ambiguous` 且不重放。普通未托管 Web 会话仍能创建并完成原生用户轮。最终根检查 `/tmp/dsh-web-lease-check-v3.log` 与 `.exit=0`：主 234 文件/3,343 测试、Delivery 653、Policy 186，全部类型检查/构建/dry-run pack 通过。取消 Web Agent 不等于释放 Controller 持有的生命周期；下一步必须把 Web owner/Policy、恢复准入与 teardown 一起接通。尚未验证浏览器端到端、完整自治安装或跨日收益；全部 18 项目标仍未完成。C2C 仅有本地执行记录，未取得实际 ChatGPT 评审。
+
 ## 完整目标
 
 完整落实此前分析和规划，让项目成为高智能、高主动、能长期自主推进任务并持续自我改进的智能体；高权限与可验证的安全边界兼顾，同时安装、配置、升级和通过 Web 对话都方便友好。保留账本全部 18 个工作包，不能把目标缩成当前已实现的切片。

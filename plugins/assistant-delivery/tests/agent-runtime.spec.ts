@@ -4,6 +4,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
+import SessionController from '@deepseek-ai/dsh-api-session-controller'
 import type {} from '@deepseek-ai/dsh-goal'
 import { AttachmentId, type AttachmentStore, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { PresetSpec } from '@deepseek-ai/dsh-permission-presets'
@@ -29,6 +31,8 @@ import {
   type SessionId,
 } from '@deepseek-ai/dsh-session'
 import SessionProjection from '@deepseek-ai/dsh-session-projection'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
+import TypertRegistry from '@deepseek-ai/dsh-typert-registry'
 import { defineTool, type ToolExecutionResult } from '@deepseek-ai/dsh-tools'
 import ApprovalService, { setApprovalPolicy } from '@deepseek-ai/dsh-user-approval'
 import { approvalReviewerOf, AssistantPolicyService, type PolicyRule, type PolicyBudgetConfig } from '@dsh-enhanced/assistant-policy'
@@ -143,6 +147,8 @@ interface PersistenceBackend {
 
 interface PersistenceCoordinator {
   assertEventsSupported(meta: SessionHeader, events: readonly SessionEvent[]): void
+  borrowSession(id: SessionId, signal?: AbortSignal): Promise<unknown>
+  inspect(id: SessionId, signal?: AbortSignal): Promise<unknown>
   prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>
 }
 
@@ -239,6 +245,8 @@ function realPersistence(
     return {
       coordinator,
       list: () => backend.list(),
+      borrowSession: (id: SessionId, signal?: AbortSignal) => coordinator.borrowSession(id, signal),
+      inspect: (id: SessionId, signal?: AbortSignal) => coordinator.inspect(id, signal),
       prepare: (id: SessionId, signal?: AbortSignal) => coordinator.prepare(id, signal),
     }
   }
@@ -1500,7 +1508,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     await f.ctx.fiber.restart()
   })
 
-  test('releases automatic tool barriers before a queued normal turn executes tools', async () => {
+  test('releases automatic tool barriers before a queued Host notice executes tools', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-auto-tool-barrier-lifecycle-'))
     roots.push(root)
     const saved = new Map<string, SavedSession>()
@@ -1523,10 +1531,12 @@ describe('real rc.1 delivery Agent runtime', () => {
     )
     const first = '自动补全前半段，'
     const automaticRemainder = '自动补全已完成。'
-    const normalAnswer = '普通用户 turn 的工具调用已完成。'
+    const normalAnswer = 'Host notice turn 的工具调用已完成。'
     const normalMessage = createUserMessage({
-      content: [{ type: 'text', text: '下一条普通用户消息需要调用 preset_probe。' }],
-      source: { kind: 'user' },
+      content: [{ type: 'text', text: '下一条 Host 测试消息需要调用 preset_probe。' }],
+      // Exercise synchronous barrier cleanup for trusted Host work. Native Web user
+      // input must now cancel the lease; the actual Controller regressions cover it.
+      source: { kind: 'plugin', plugin: 'assistant-delivery-test', form: 'notice', summary: 'Verify automatic barrier cleanup' },
     })
     let normalQueued = false
     let normalTurn: number | undefined
@@ -2627,6 +2637,140 @@ describe('real rc.1 delivery Agent runtime', () => {
     expect(JSON.stringify(restarted.llm.requests[0]!.messages)).toContain('second')
     expect(restarted.sends.map(value => value.text)).toEqual(['reply-1'])
     await restarted.ctx.fiber.restart()
+  })
+
+  test('blocks a cold Web follow of a Delivery-owned session without its execution lease', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-lease-'))
+    roots.push(root)
+    const stored = new Map<string, DurableStoredSession>()
+    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await first.service.acceptInbound(message('evt-web-lease-owner-turn', 'Delivery owns this session'))
+    await drive(first.service)
+    const binding = runtimeStore(first.service).getActiveBinding(conversation)!
+    expect(first.llm.requests).toHaveLength(1)
+    expect(stored.has(binding.sessionId)).toBe(true)
+    await first.ctx.fiber.restart()
+
+    const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    await reopened.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
+    // SessionQueryEngine is declared abstract because search backends extend it, while its
+    // production base implements the live/cold observeSession path exercised here.
+    await reopened.ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)
+    await reopened.ctx.plugin(TypertRegistry)
+    const controller = new SessionController(reopened.ctx, {})
+    const abort = new AbortController()
+    const follower = controller.follow(
+      { address: { kind: 'session', sessionId: binding.sessionId as SessionId } },
+      abort.signal,
+    )[Symbol.asyncIterator]()
+    let promotion: ReturnType<typeof follower.next> | undefined
+    try {
+      const opening = await follower.next()
+      expect(opening.value).toMatchObject({ type: 'snapshot', header: { id: binding.sessionId } })
+      // `follow()` promotes only after yielding its cold snapshot. Keeping this next call pending
+      // drives that production continuation without consuming an unrelated live event.
+      promotion = follower.next()
+      await vi.waitFor(() => expect(reopened.ctx.agents.get(binding.sessionId as SessionId)).toBeDefined())
+      const promoted = reopened.ctx.agents.get(binding.sessionId as SessionId)!
+      const cancel = vi.spyOn(promoted, 'cancel')
+      await expect(controller.prompt({
+        sessionId: binding.sessionId as SessionId,
+        requestId: 'web-lease-regression' as never,
+        mode: 'queue',
+        content: [{ type: 'text', text: 'This Web prompt must not reach the model.' }],
+      }, new AbortController().signal)).resolves.toEqual({ accepted: true })
+      await vi.waitFor(() => expect(cancel).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'hook', reason: 'assistant-delivery-session-lease-required' }),
+      ))
+      expect(reopened.llm.requests).toHaveLength(0)
+      expect(reopened.presetExecute).not.toHaveBeenCalled()
+      expect(reopened.sends).toHaveLength(0)
+    } finally {
+      abort.abort()
+      if (promotion !== undefined) await Promise.allSettled([promotion])
+      await follower.return?.()
+      await reopened.ctx.fiber.restart()
+    }
+  })
+
+  test('cancels an active Delivery turn when Web prompts its leased live Agent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-live-lease-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      fixture.llm.requests.push(options)
+      entered.resolve()
+      await release.promise
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'Delivery reply that must be cancelled.' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Delivery reply that must be cancelled.' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    const accepted = await fixture.service.acceptInbound(message('evt-web-live-owner-turn', 'Keep this Delivery turn active.'))
+    const running = fixture.service.tick().then(() => fixture.service.whenIdle())
+    try {
+      await entered.promise
+      const binding = runtimeStore(fixture.service).getActiveBinding(conversation)!
+      const live = fixture.ctx.agents.get(binding.sessionId as SessionId)
+      expect(live).toBeDefined()
+      await fixture.ctx.plugin(TypertRegistry)
+      const controller = new SessionController(fixture.ctx, {})
+      await expect(controller.prompt({
+        sessionId: binding.sessionId as SessionId,
+        requestId: 'web-live-lease-regression' as never,
+        mode: 'queue',
+        content: [{ type: 'text', text: 'This Web prompt must cancel the leased Delivery Agent.' }],
+      }, new AbortController().signal)).resolves.toEqual({ accepted: true })
+      expect(fixture.llm.requests).toHaveLength(1)
+      expect(fixture.presetExecute).not.toHaveBeenCalled()
+      release.resolve()
+      await running
+      await vi.waitFor(() => expect(fixture.ctx.agents.get(binding.sessionId as SessionId)).toBeUndefined())
+      expect(fixture.sends).toHaveLength(0)
+      expect(runtimeStore(fixture.service).getInbox(accepted.inboxId))
+        .toMatchObject({ status: 'dead_letter', failureCode: 'processor-ambiguous' })
+      await fixture.service.tick()
+      await fixture.service.whenIdle()
+      expect(fixture.llm.requests).toHaveLength(1)
+    } finally {
+      release.resolve()
+      await Promise.allSettled([running])
+      await fixture.ctx.fiber.restart()
+    }
+  })
+
+  test('keeps an unmanaged Web SessionController prompt runnable through native AgentLoop', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-unmanaged-'))
+    roots.push(root)
+    const fixture = await runtimeHarness(root, new Map())
+    try {
+      await fixture.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
+      await fixture.ctx.plugin(TypertRegistry)
+      const controller = new SessionController(fixture.ctx, {})
+      const created = await controller.create({ cwd: root })
+      await expect(controller.prompt({
+        sessionId: created.sessionId,
+        requestId: 'web-unmanaged-regression' as never,
+        mode: 'queue',
+        content: [{ type: 'text', text: 'Run one ordinary Web Session turn.' }],
+      }, new AbortController().signal)).resolves.toEqual({ accepted: true })
+      await vi.waitFor(() => expect(fixture.llm.requests).toHaveLength(1))
+      const agent = fixture.ctx.agents.get(created.sessionId)
+      await vi.waitFor(() => expect(agent?.session.snapshotEvents().some(event => event.type === 'turn/end')).toBe(true))
+      expect(agent?.session.snapshotEvents().findLast(event => event.type === 'turn/end'))
+        .toMatchObject({ data: { reason: { kind: 'completed' } } })
+      expect(fixture.llm.requests[0]?.messages.at(-1)?.source).toMatchObject({ kind: 'user' })
+      expect(fixture.sends).toHaveLength(0)
+    } finally {
+      await fixture.ctx.fiber.restart()
+    }
   })
 
   test('isolates new sessions by durable Delivery database instance while preserving cold resume', async () => {

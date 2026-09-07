@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import type { GenerateOptions, StreamChunk } from '@deepseek-ai/dsh-llm'
+import type { GenerateOptions, StreamChunk, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionLease, SessionLeaseClaim, SessionLeaseTarget } from './session-lease-types.js'
 
 export interface SessionLeasePort {
   leaseMs: number
+  /** Whether this durable Session is Delivery-owned and must have a local execution lease. */
+  requiresLease(sessionId: string): boolean
   claim(target: SessionLeaseTarget, holderId: string, leaseMs: number): SessionLeaseClaim
   dispatch(lease: SessionLease): boolean
   valid(lease: SessionLease): boolean
@@ -96,29 +98,37 @@ export class DeliverySessionLeases {
   readonly #agents = new WeakMap<Agent, SessionExecutionLease>()
   #live = true
   constructor(private readonly ctx: Context, private readonly port: SessionLeasePort) {
+    const nativeInput = ({ agent, message }: { agent: Agent; message: UserMessage }): void => {
+      // Web can borrow the exact live Agent, not just resume a second object.
+      // Native direct-user ingress is not a Delivery owner admission. Invalidate
+      // the whole lease so a queued/steered turn cannot run after cancellation.
+      if (message.source === undefined || message.source.kind === 'user') this.#agents.get(agent)?.cancel()
+    }
+    ctx.on('agent/inbox/inserted', nativeInput, { prepend: true })
+    ctx.on('agent/inbox/claimed', nativeInput, { prepend: true })
     ctx.on('agent/request', async ({ agent }, next) => {
-      const lease = this.#agents.get(agent)
-      lease?.assertAgent(agent!)
+      this.#assertAgent(agent)
       const result = await next()
-      lease?.assertAgent(agent!)
+      this.#assertAgent(agent)
       return result
     }, { prepend: true })
     ctx.on('tools/pre-execute', async ({ agent }, next) => {
-      const lease = agent === undefined ? undefined : this.#agents.get(agent)
-      lease?.assertAgent(agent!)
+      this.#assertAgent(agent)
       const result = await next()
-      lease?.assertAgent(agent!)
+      this.#assertAgent(agent)
       return result
     }, { prepend: true })
     ctx.on('tools/execute', async ({ agent }, next) => {
-      const lease = agent === undefined ? undefined : this.#agents.get(agent)
-      lease?.assertAgent(agent!)
+      const lease = this.#assertAgent(agent)
       const done = lease?.enter()
-      try { return await next() } finally { done?.() }
+      try {
+        const result = await next()
+        this.#assertAgent(agent)
+        return result
+      } finally { done?.() }
     }, { prepend: true })
     ctx.inject(['tools'], runtime => runtime.tools.guard(({ agent }) => {
-      const lease = agent === undefined ? undefined : this.#agents.get(agent)
-      try { lease?.assertAgent(agent!); return undefined }
+      try { this.#assertAgent(agent); return undefined }
       catch { return 'assistant-delivery: session lease no longer authorizes this tool' }
     }))
     ctx.on('llm/stream', this.#stream.bind(this), { prepend: true })
@@ -158,11 +168,26 @@ export class DeliverySessionLeases {
   }
   async *#stream(_options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
     const agent = this.ctx.get('agents')?.currentInitiator()
-    const lease = agent === undefined ? undefined : this.#agents.get(agent)
-    lease?.assertAgent(agent!)
+    const lease = this.#assertAgent(agent)
     const done = lease?.enter()
     try {
-      for await (const chunk of next()) { lease?.assertAgent(agent!); yield chunk }
+      for await (const chunk of next()) { this.#assertAgent(agent); yield chunk }
+      this.#assertAgent(agent)
     } finally { done?.() }
+  }
+  #assertAgent(agent: Agent | undefined): SessionExecutionLease | undefined {
+    if (agent === undefined) return undefined
+    const lease = this.#agents.get(agent)
+    if (lease !== undefined) {
+      lease.assertAgent(agent)
+      return lease
+    }
+    try {
+      if (!this.port.requiresLease(String(agent.session.id))) return undefined
+    } catch {
+      // A failed ownership lookup must not grant native/Web execution.
+    }
+    try { agent.cancel({ kind: 'hook', reason: 'assistant-delivery-session-lease-required' }) } catch {}
+    throw new SessionLeaseUnavailable('denied')
   }
 }

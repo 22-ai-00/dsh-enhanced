@@ -21,6 +21,46 @@ async function fixture() {
 }
 
 describe('session leases', () => {
+  test('requires execution authority for legacy bindings even after owner revocation and restart', async () => {
+    const f = await fixture()
+    try {
+      // No lease has ever been claimed: migrated bindings still establish ownership.
+      expect(f.store.requiresSessionLease(f.binding.sessionId)).toBe(true)
+      expect(f.store.requiresSessionLease('ordinary-native-session')).toBe(false)
+      const owner = f.store.getPrincipal(f.principal)!
+      f.store.revokePrincipal(owner.id, owner.version)
+      expect(f.store.requiresSessionLease(f.binding.sessionId)).toBe(true)
+    } finally { f.store.close() }
+    const reopened = new DeliveryStore({ path: f.path })
+    try { expect(reopened.requiresSessionLease(f.binding.sessionId)).toBe(true) }
+    finally { reopened.close() }
+    expect(() => reopened.requiresSessionLease('ordinary-native-session')).toThrow()
+  })
+
+  test('observes construction ownership from another connection and retains released orphans', async () => {
+    const f = await fixture()
+    const observer = new DeliveryStore({ path: f.path })
+    const target = { kind: 'construction' as const, sessionId: 'new-orphan-session',
+      conversation: { ...f.conversation, chat: 'new-orphan-chat' }, principal: f.principal,
+      workspace: '/work/a', agentPreset: 'primary', generation: 1 }
+    try {
+      expect(observer.requiresSessionLease(target.sessionId)).toBe(false)
+      const claim = f.store.claimSessionLease(target, 'host', 5)
+      if (claim.kind !== 'claimed') throw new Error('construction claim failed')
+      expect(observer.requiresSessionLease(target.sessionId)).toBe(true)
+      expect(f.store.markSessionLeaseDispatched(claim.lease)).toBe(true)
+      expect(observer.requiresSessionLease(target.sessionId)).toBe(true)
+      expect(f.store.finishSessionLease(claim.lease, { quiescent: false })).toBe(true)
+      expect(observer.requiresSessionLease(target.sessionId)).toBe(true)
+      expect(f.store.finishSessionLease(claim.lease, { quiescent: true })).toBe(true)
+      expect(observer.getBindingBySession(target.sessionId)).toBeUndefined()
+      expect(observer.requiresSessionLease(target.sessionId)).toBe(true)
+    } finally { observer.close(); f.store.close() }
+    const reopened = new DeliveryStore({ path: f.path })
+    try { expect(reopened.requiresSessionLease(target.sessionId)).toBe(true) }
+    finally { reopened.close() }
+  })
+
   test('migrates a v18 database without disturbing existing data', async () => {
     const f = await fixture(); f.store.close()
     const database = new DatabaseSync(f.path); database.exec('DROP TABLE delivery_session_leases; PRAGMA user_version = 18;'); database.close()

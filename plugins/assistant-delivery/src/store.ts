@@ -7154,6 +7154,17 @@ export class DeliveryStore {
     }
   }
 
+  /** Ownership survives release, revocation and restart; it is not an active-lease query. */
+  requiresSessionLease(sessionId: string): boolean {
+    this.assertOpen()
+    sessionId = validateBindingText(sessionId, 'sessionId', 512)
+    const row = this.database.prepare(`
+      SELECT (EXISTS (SELECT 1 FROM conversation_bindings WHERE session_id = ?)
+        OR EXISTS (SELECT 1 FROM delivery_session_leases WHERE session_id = ?)) AS managed
+    `).get(sessionId, sessionId) as { managed: number }
+    return row.managed === 1
+  }
+
   claimSessionLease(target: SessionLeaseTarget, holderId: string, leaseMs: number): SessionLeaseClaim {
     this.assertOpen()
     if (!Number.isSafeInteger(leaseMs) || leaseMs < 1 || leaseMs > 300_000) return { kind: 'denied' }

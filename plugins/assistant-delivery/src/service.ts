@@ -928,6 +928,7 @@ export class AssistantDeliveryService extends Service {
     ctx.inject(['agents', 'sessions', 'llm'], runtimeCtx => {
       const unregister = this.registerInboundRuntime(new DshDeliveryRuntime(runtimeCtx, policy, {
         sessionLease: {
+          requiresLease: sessionId => this.deliveryStore.requiresSessionLease(sessionId),
           leaseMs: Math.min(config.leaseMs, 300_000),
           claim: (target, holderId, leaseMs) => this.deliveryStore.claimSessionLease(target, holderId, leaseMs),
           dispatch: lease => this.deliveryStore.markSessionLeaseDispatched(lease),

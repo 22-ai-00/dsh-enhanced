@@ -5,6 +5,9 @@ packages:
 catalog:
   '@agentclientprotocol/sdk': 0.25.1
   '@deepseek-ai/dsh-agent': 0.1.2-rc.1
+  '@deepseek-ai/dsh-api-session-controller': 0.1.2-rc.1
+  '@deepseek-ai/dsh-session-query': 0.1.2-rc.1
+  '@deepseek-ai/dsh-typert-registry': 0.1.2-rc.1
   '@deepseek-ai/dsh-attachment': 0.1.2-rc.1
   '@deepseek-ai/dsh-attachment-local': 0.1.2-rc.1
   '@deepseek-ai/dsh-commands': 0.1.2-rc.1
@@ -63,6 +66,9 @@ allowBuilds:
   protobufjs: false
 
 minimumReleaseAgeExclude:
+  - '@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1'
+  - '@deepseek-ai/dsh-session-query@0.1.2-rc.1'
+  - '@deepseek-ai/dsh-typert-registry@0.1.2-rc.1'
   - '@deepseek-ai/dsh-agent-default-model@0.1.2-rc.1'
   - '@deepseek-ai/dsh-agent-loop-testkit@0.1.2-rc.1'
   - '@deepseek-ai/dsh-agent-loop@0.1.2-rc.1'
