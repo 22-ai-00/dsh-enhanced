@@ -8,6 +8,7 @@ import {
   validateTaskVerificationReceipt,
   type TaskAcceptanceContractInput,
   type TaskAcceptanceContractV2Input,
+  type TaskAcceptanceContractV3Input,
 } from '../src/index.ts'
 
 const sha = 'a'.repeat(64)
@@ -27,6 +28,13 @@ const goalStepContractInput = (): TaskAcceptanceContractV2Input => ({
   task: { kind: 'goal-step', ref: 'run-1', goal: {
     id: 'goal-1', definitionVersion: 2, definitionDigest: sha, stepId: 'step-1',
     runId: 'run-1', sessionId: 'session-1', nativeGoalId: 'native-goal-1', nativeRevision: 3,
+  } },
+})
+const goalOutcomeContractInput = (): TaskAcceptanceContractV3Input => ({
+  ...contractInput(), protocol: 'task-acceptance/v3', id: 'goal-outcome-acceptance-1',
+  task: { kind: 'goal-outcome', ref: 'assessment-1', goal: {
+    id: 'goal-1', definitionVersion: 2, definitionDigest: sha, assessmentId: 'assessment-1',
+    sessionId: 'session-1', nativeGoalId: 'native-goal-1',
   } },
 })
 function receiptInput(contract = createTaskAcceptanceContract(contractInput())) {
@@ -73,6 +81,35 @@ describe('task acceptance contract', () => {
     expect(() => createTaskVerificationReceipt(contract, { ...v2Receipt, protocol: 'task-verification/v1' })).toThrow(/protocol/i)
     const legacy = createTaskAcceptanceContract(contractInput())
     expect(() => createTaskVerificationReceipt(legacy, { ...receiptInput(legacy), protocol: 'task-verification/v2', task: goalStepContractInput().task })).toThrow(/protocol/i)
+  })
+
+  test('round-trips a goal outcome only through v3 and binds its complete assessment identity', () => {
+    const contract = createTaskAcceptanceContract(goalOutcomeContractInput())
+    expect(contract.protocol).toBe('task-acceptance/v3')
+    expect(contract.task.kind).toBe('goal-outcome')
+    if (contract.task.kind !== 'goal-outcome') throw new Error('expected goal outcome task')
+    const outcomeTask = contract.task
+    expect(Object.isFrozen(outcomeTask.goal)).toBe(true)
+    const receiptInputV3 = { ...receiptInput(contract), protocol: 'task-verification/v3' as const }
+    const receipt = createTaskVerificationReceipt(contract, receiptInputV3)
+    expect(receipt.protocol).toBe('task-verification/v3')
+    expect(validateTaskVerificationReceipt(contract, receipt)).toEqual(receipt)
+
+    expect(() => createTaskAcceptanceContract({ ...goalOutcomeContractInput(), task: goalStepContractInput().task })).toThrow(/task kind|shape/i)
+    expect(() => createTaskAcceptanceContract({ ...goalOutcomeContractInput(), protocol: 'task-acceptance/v2' })).toThrow(/task kind|shape/i)
+    expect(() => createTaskAcceptanceContract({ ...goalOutcomeContractInput(), task: { ...goalOutcomeContractInput().task, ref: 'other-assessment' } })).toThrow(/assessment identity/i)
+    expect(() => createTaskAcceptanceContract({ ...goalOutcomeContractInput(), task: { ...goalOutcomeContractInput().task, goal: { ...goalOutcomeContractInput().task.goal, assessmentId: 'other-assessment' } } })).toThrow(/assessment identity/i)
+    expect(() => createTaskAcceptanceContract({ ...goalOutcomeContractInput(), task: { ...goalOutcomeContractInput().task, goal: { ...goalOutcomeContractInput().task.goal, nativeRevision: 3 } } })).toThrow(/shape/i)
+
+    for (const field of ['id', 'definitionVersion', 'definitionDigest', 'assessmentId', 'sessionId', 'nativeGoalId'] as const) {
+      const goal = outcomeTask.goal
+      const value = goal![field]
+      const changed = typeof value === 'number' ? value + 1 : field === 'definitionDigest' ? 'b'.repeat(64) : `${value}-other`
+      expect(() => createTaskVerificationReceipt(contract, { ...receiptInputV3, task: { ...outcomeTask, goal: { ...goal, [field]: changed } } })).toThrow(/identity/i)
+    }
+    expect(() => createTaskVerificationReceipt(contract, { ...receiptInputV3, protocol: 'task-verification/v2' })).toThrow(/protocol/i)
+    expect(() => createTaskVerificationReceipt(contract, { ...receiptInputV3, task: goalStepContractInput().task })).toThrow(/identity|task kind/i)
+    expect(() => validateTaskAcceptanceContract({ ...contract, task: { ...outcomeTask, goal: { ...outcomeTask.goal, definitionDigest: 'b'.repeat(64) } } })).toThrow(/digest/i)
   })
 
   test('rejects tampering, unsafe input, duplicate criteria, and changed byte expectations', () => {

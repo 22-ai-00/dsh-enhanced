@@ -142,7 +142,7 @@ function owner(value: unknown, code: AcceptanceContractErrorCode): Readonly<{ pr
   const item = record(value, code, 'owner'); exactKeys(item, ['principalRecordId', 'principalVersion'], code, 'owner')
   return freeze({ principalRecordId: id(item.principalRecordId, code, 'principalRecordId'), principalVersion: positiveInteger(item.principalVersion, code, 'principalVersion') })
 }
-function task(value: unknown, code: AcceptanceContractErrorCode, protocol: 'v1' | 'v2'): AcceptanceTaskIdentity {
+function task(value: unknown, code: AcceptanceContractErrorCode, protocol: 'v1' | 'v2' | 'v3'): AcceptanceTaskIdentity {
   const item = record(value, code, 'task')
   if (protocol === 'v1') {
     exactKeys(item, ['kind', 'ref'], code, 'task')
@@ -150,6 +150,17 @@ function task(value: unknown, code: AcceptanceContractErrorCode, protocol: 'v1' 
     return freeze({ kind: item.kind, ref: id(item.ref, code, 'task ref') })
   }
   exactKeys(item, ['kind', 'ref', 'goal'], code, 'task')
+  if (protocol === 'v3') {
+    if (item.kind !== 'goal-outcome') fail(code, 'task kind is invalid')
+    const goal = record(item.goal, code, 'task goal')
+    exactKeys(goal, ['id', 'definitionVersion', 'definitionDigest', 'assessmentId', 'sessionId', 'nativeGoalId'], code, 'task goal')
+    if (goal.assessmentId !== item.ref) fail(code, 'goal assessment identity must equal task ref')
+    return freeze({ kind: 'goal-outcome', ref: id(item.ref, code, 'task ref'), goal: freeze({
+      id: id(goal.id, code, 'goal id'), definitionVersion: positiveInteger(goal.definitionVersion, code, 'goal definitionVersion'),
+      definitionDigest: digest(goal.definitionDigest, code, 'goal definitionDigest'), assessmentId: id(goal.assessmentId, code, 'goal assessmentId'),
+      sessionId: id(goal.sessionId, code, 'goal sessionId'), nativeGoalId: id(goal.nativeGoalId, code, 'goal nativeGoalId'),
+    }) })
+  }
   if (item.kind !== 'goal-step') fail(code, 'task kind is invalid')
   const goal = record(item.goal, code, 'task goal')
   exactKeys(goal, ['id', 'definitionVersion', 'definitionDigest', 'stepId', 'runId', 'sessionId', 'nativeGoalId', 'nativeRevision'], code, 'task goal')
@@ -236,7 +247,7 @@ function criterion(value: unknown, code: AcceptanceContractErrorCode, budget: { 
 function contractPayload(value: unknown, code: AcceptanceContractErrorCode): TaskAcceptanceContractInput {
   const item = record(value, code, 'contract')
   exactKeys(item, ['protocol', 'id', 'scope', 'owner', 'task', 'objective', 'profile', 'issuedAt', 'expiresAt', 'criteria', 'bounds'], code, 'contract')
-  if (item.protocol !== 'task-acceptance/v1' && item.protocol !== 'task-acceptance/v2') fail(code, 'contract protocol is invalid')
+  if (item.protocol !== 'task-acceptance/v1' && item.protocol !== 'task-acceptance/v2' && item.protocol !== 'task-acceptance/v3') fail(code, 'contract protocol is invalid')
   const issuedAt = timestamp(item.issuedAt, code, 'issuedAt'); const expiresAt = timestamp(item.expiresAt, code, 'expiresAt')
   if (expiresAt <= issuedAt || expiresAt - issuedAt > 7 * 24 * 60 * 60 * 1_000) fail(code, 'contract validity is invalid')
   const profile = record(item.profile, code, 'profile'); exactKeys(profile, ['id', 'version', 'digest'], code, 'profile')
@@ -245,9 +256,11 @@ function contractPayload(value: unknown, code: AcceptanceContractErrorCode): Tas
   const parsedCriteria = criteria.map(entry => criterion(entry, code, budget)); const ids = new Set(parsedCriteria.map(entry => entry.id))
   if (ids.size !== parsedCriteria.length) fail(code, 'criterion ids must be unique')
   const objective = text(item.objective, code, 'objective', 8_192, true)
-  const base = { id: id(item.id, code, 'contract id'), scope: scope(item.scope, code), owner: owner(item.owner, code), task: task(item.task, code, item.protocol === 'task-acceptance/v1' ? 'v1' : 'v2'), objective, profile: freeze({ id: id(profile.id, code, 'profile id'), version: positiveInteger(profile.version, code, 'profile version'), digest: digest(profile.digest, code, 'profile digest') }), issuedAt, expiresAt, criteria: freeze(parsedCriteria), bounds: freeze({ maxDurationMs: positiveInteger(bounds.maxDurationMs, code, 'maxDurationMs', 300_000), maxEvidenceBytes: positiveInteger(bounds.maxEvidenceBytes, code, 'maxEvidenceBytes', 1_048_576) }) }
+  const taskProtocol = item.protocol === 'task-acceptance/v1' ? 'v1' : item.protocol === 'task-acceptance/v2' ? 'v2' : 'v3'
+  const base = { id: id(item.id, code, 'contract id'), scope: scope(item.scope, code), owner: owner(item.owner, code), task: task(item.task, code, taskProtocol), objective, profile: freeze({ id: id(profile.id, code, 'profile id'), version: positiveInteger(profile.version, code, 'profile version'), digest: digest(profile.digest, code, 'profile digest') }), issuedAt, expiresAt, criteria: freeze(parsedCriteria), bounds: freeze({ maxDurationMs: positiveInteger(bounds.maxDurationMs, code, 'maxDurationMs', 300_000), maxEvidenceBytes: positiveInteger(bounds.maxEvidenceBytes, code, 'maxEvidenceBytes', 1_048_576) }) }
   if (item.protocol === 'task-acceptance/v1') return freeze({ protocol: 'task-acceptance/v1', ...base, task: task(item.task, code, 'v1') }) as TaskAcceptanceContractInput
-  return freeze({ protocol: 'task-acceptance/v2', ...base, task: task(item.task, code, 'v2') }) as TaskAcceptanceContractInput
+  if (item.protocol === 'task-acceptance/v2') return freeze({ protocol: 'task-acceptance/v2', ...base, task: task(item.task, code, 'v2') }) as TaskAcceptanceContractInput
+  return freeze({ protocol: 'task-acceptance/v3', ...base, task: task(item.task, code, 'v3') }) as TaskAcceptanceContractInput
 }
 
 export function createTaskAcceptanceContract(input: unknown): TaskAcceptanceContract {
@@ -287,9 +300,10 @@ function derive(results: readonly CriterionResult[]): 'achieved' | 'not-achieved
 function receiptPayload(contract: TaskAcceptanceContract, value: unknown, code: AcceptanceContractErrorCode): TaskVerificationReceiptInput {
   const item = record(value, code, 'receipt')
   exactKeys(item, ['protocol', 'id', 'contractId', 'contractDigest', 'scope', 'owner', 'task', 'results', 'startedAt', 'completedAt', 'validUntil'], code, 'receipt')
-  const isV1 = contract.protocol === 'task-acceptance/v1'
-  if (item.protocol !== (isV1 ? 'task-verification/v1' : 'task-verification/v2')) fail(code, 'receipt protocol is invalid')
-  if (id(item.contractId, code, 'contractId') !== contract.id || digest(item.contractDigest, code, 'contractDigest') !== contract.digest || !equalJson(scope(item.scope, code), contract.scope) || !equalJson(owner(item.owner, code), contract.owner) || !equalJson(task(item.task, code, isV1 ? 'v1' : 'v2'), contract.task)) fail(code, 'receipt identity does not bind the contract')
+  const taskProtocol = contract.protocol === 'task-acceptance/v1' ? 'v1' : contract.protocol === 'task-acceptance/v2' ? 'v2' : 'v3'
+  const receiptProtocol = contract.protocol === 'task-acceptance/v1' ? 'task-verification/v1' : contract.protocol === 'task-acceptance/v2' ? 'task-verification/v2' : 'task-verification/v3'
+  if (item.protocol !== receiptProtocol) fail(code, 'receipt protocol is invalid')
+  if (id(item.contractId, code, 'contractId') !== contract.id || digest(item.contractDigest, code, 'contractDigest') !== contract.digest || !equalJson(scope(item.scope, code), contract.scope) || !equalJson(owner(item.owner, code), contract.owner) || !equalJson(task(item.task, code, taskProtocol), contract.task)) fail(code, 'receipt identity does not bind the contract')
   const startedAt = timestamp(item.startedAt, code, 'startedAt'); const completedAt = timestamp(item.completedAt, code, 'completedAt'); const validUntil = timestamp(item.validUntil, code, 'validUntil')
   if (startedAt < contract.issuedAt || completedAt < startedAt || completedAt > contract.expiresAt || validUntil < completedAt || validUntil > contract.expiresAt) fail(code, 'receipt time is outside contract validity')
   const results = array(item.results, code, 'results', contract.criteria.length, contract.criteria.length).map(entry => result(entry, code))
@@ -298,7 +312,9 @@ function receiptPayload(contract: TaskAcceptanceContract, value: unknown, code: 
   const evidenceBytes = Buffer.byteLength(acceptanceCanonicalJson(results.map(entry => entry.evidence)), 'utf8')
   if (evidenceBytes > contract.bounds.maxEvidenceBytes) fail(code, 'receipt evidence exceeds contract maxEvidenceBytes')
   const base = { id: id(item.id, code, 'receipt id'), contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task: contract.task, results: freeze(results), startedAt, completedAt, validUntil }
-  return freeze(isV1 ? { protocol: 'task-verification/v1' as const, ...base } : { protocol: 'task-verification/v2' as const, ...base }) as TaskVerificationReceiptInput
+  if (contract.protocol === 'task-acceptance/v1') return freeze({ protocol: 'task-verification/v1' as const, ...base }) as TaskVerificationReceiptInput
+  if (contract.protocol === 'task-acceptance/v2') return freeze({ protocol: 'task-verification/v2' as const, ...base }) as TaskVerificationReceiptInput
+  return freeze({ protocol: 'task-verification/v3' as const, ...base }) as TaskVerificationReceiptInput
 }
 export function createTaskVerificationReceipt(contract: TaskAcceptanceContract, input: unknown): TaskVerificationReceipt {
   const validContract = validateTaskAcceptanceContract(contract)

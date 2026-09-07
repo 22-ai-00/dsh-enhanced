@@ -24,9 +24,14 @@ export interface GoalStepBinding {
   readonly stepId: string; readonly runId: string; readonly sessionId: string
   readonly nativeGoalId: string; readonly nativeRevision: number
 }
+export interface GoalOutcomeBinding {
+  readonly id: string; readonly definitionVersion: number; readonly definitionDigest: string
+  readonly assessmentId: string; readonly sessionId: string; readonly nativeGoalId: string
+}
 export type AcceptanceTaskIdentity =
   | Readonly<{ kind: 'automation-run' | 'foreground-turn'; ref: string }>
   | Readonly<{ kind: 'goal-step'; ref: string; goal: GoalStepBinding }>
+  | Readonly<{ kind: 'goal-outcome'; ref: string; goal: GoalOutcomeBinding }>
 
 interface TaskAcceptanceContractBase {
   readonly id: string
@@ -45,7 +50,11 @@ export interface TaskAcceptanceContractV2Input extends TaskAcceptanceContractBas
   readonly protocol: 'task-acceptance/v2'
   readonly task: Readonly<{ kind: 'goal-step'; ref: string; goal: GoalStepBinding }>
 }
-export type TaskAcceptanceContractInput = TaskAcceptanceContractV1Input | TaskAcceptanceContractV2Input
+export interface TaskAcceptanceContractV3Input extends TaskAcceptanceContractBase {
+  readonly protocol: 'task-acceptance/v3'
+  readonly task: Readonly<{ kind: 'goal-outcome'; ref: string; goal: GoalOutcomeBinding }>
+}
+export type TaskAcceptanceContractInput = TaskAcceptanceContractV1Input | TaskAcceptanceContractV2Input | TaskAcceptanceContractV3Input
 export type TaskAcceptanceContract = TaskAcceptanceContractInput & Readonly<{ digest: string }>
 export interface CriterionResult {
   readonly criterionId: string; readonly status: 'passed' | 'failed' | 'unknown'; readonly reason: string
@@ -65,5 +74,9 @@ export interface TaskVerificationReceiptV2Input extends TaskVerificationReceiptB
   readonly protocol: 'task-verification/v2'
   readonly task: Readonly<{ kind: 'goal-step'; ref: string; goal: GoalStepBinding }>
 }
-export type TaskVerificationReceiptInput = TaskVerificationReceiptV1Input | TaskVerificationReceiptV2Input
+export interface TaskVerificationReceiptV3Input extends TaskVerificationReceiptBase {
+  readonly protocol: 'task-verification/v3'
+  readonly task: Readonly<{ kind: 'goal-outcome'; ref: string; goal: GoalOutcomeBinding }>
+}
+export type TaskVerificationReceiptInput = TaskVerificationReceiptV1Input | TaskVerificationReceiptV2Input | TaskVerificationReceiptV3Input
 export type TaskVerificationReceipt = TaskVerificationReceiptInput & Readonly<{ objectiveStatus: 'achieved' | 'not-achieved' | 'unknown'; digest: string }>

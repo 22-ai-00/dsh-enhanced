@@ -11,8 +11,10 @@ import {
   type TrustedDeliveryEvaluationClaims,
   type TrustedDeliveryEvaluationRegistration,
 } from '@dsh-enhanced/assistant-evaluation'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
+import type { AcceptedExecution, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
@@ -176,6 +178,19 @@ class FakeAutomationQualityResolver {
   validateQualityEvidence(receipt: { runId: string }): boolean {
     return this.receipts.get(receipt.runId) === receipt
   }
+}
+
+class GoalOutcomeVerifierProducer implements TaskAcceptanceProducer {
+  readonly generation = `evolution-service-test-goals:${crypto.randomUUID()}`
+  registration: TaskAcceptanceRegistration | undefined
+  proof: AcceptedExecution | null = null
+
+  trustedAcceptanceProducerGeneration(): string { return this.generation }
+  registerTaskAcceptanceSink(registration: TaskAcceptanceRegistration): () => void {
+    this.registration = registration
+    return () => { if (this.registration === registration) this.registration = undefined }
+  }
+  async inspectAcceptedExecution(): Promise<AcceptedExecution | null> { return this.proof }
 }
 
 class FakeDeliveryEvaluationProducer {
@@ -436,6 +451,63 @@ async function recordAttributedOutcomes(
 }
 
 describe('assistant evolution service', () => {
+  test('accepts and retracts actual v3 whole-goal Evaluation projections without merging goal steps', async () => {
+    let now = 1_000
+    const fixture = await harness({ now: () => now })
+    await writeFile(join(fixture.root, 'report.md'), 'Verified whole goal\n')
+    const producer = new GoalOutcomeVerifierProducer()
+    fixture.ctx.provide('assistantGoals' as never, producer as never)
+    const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 1_024 }
+    const authorities = createVerifierAuthorities({ authorities: [authority] })
+    const scope = { workspace: fixture.root, preset: 'primary' }
+    const owner = { principalRecordId: 'owner-1', principalVersion: 1 }
+    const objective = 'Verify the whole business goal'
+    const verifier = new AssistantVerifierService(fixture.ctx, {
+      databasePath: join(fixture.root, 'verifier.sqlite'), tickIntervalMs: 0, requireAcceptance: true,
+      authorities: [authority], profiles: [{
+        id: 'whole-goal-profile', version: 1, scope, owner, taskKind: 'goal-outcome', objective,
+        validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+        criteria: [{ id: 'document', kind: 'document-citations', authority: { id: 'sources', digest: authorities[0]!.digest }, artifactPath: 'report.md', requiredText: ['Verified whole goal'], quotes: [] }],
+      }],
+    }, { now: () => now })
+    await new Promise<void>(resolve => setImmediate(resolve))
+    await new Promise<void>(resolve => setImmediate(resolve))
+
+    const task = (assessmentId: string): AcceptanceTask => ({ scope, owner, objective,
+      task: { kind: 'goal-outcome', ref: assessmentId, goal: {
+        id: 'goal-42', definitionVersion: 7, definitionDigest: 'a'.repeat(64), assessmentId,
+        sessionId: 'session-1', nativeGoalId: 'native-goal-1',
+      } },
+    })
+    const complete = async (input: AcceptanceTask, proof: Pick<AcceptedExecution, 'status' | 'quiescent'>) => {
+      const handle = producer.registration!.prepare(input)!
+      const dispatchedAt = now
+      now += 1_000
+      producer.proof = { ...handle, dispatchedAt, completedAt: now, executionRef: input.task.ref, ...proof }
+      await producer.registration!.completed(handle)
+      await verifier.tick()
+      await fixture.evaluation.reconcileProjections()
+      await fixture.evaluation.whenProjectionIdle()
+      const evaluation = fixture.evaluation.queryTasks({ scope, limit: 10 })
+        .find(entry => entry.projection.subjectKind === 'goal-outcome' && entry.projection.subjectRef === input.task.ref)
+      if (evaluation === undefined) throw new Error('whole-goal verifier receipt was not projected by Evaluation')
+      return { handle, evaluationId: evaluation.id }
+    }
+
+    const achieved = await complete(task('assessment-achieved'), { status: 'succeeded', quiescent: true })
+    const accepted = fixture.service.projectTrustedEvaluationTaskRevision({ scope, evaluationId: achieved.evaluationId })
+    expect(accepted).toMatchObject({ subjectKind: 'goal-outcome', subjectRef: 'assessment-achieved', disposition: 'upsert' })
+    expect(fixture.service.projectEvaluationOutcome({ scope: canonicalEvolutionHostScope(scope), evaluationId: achieved.evaluationId }))
+      .toMatchObject({ situation: 'goal:goal-42:definition:7', outcome: 'succeeded' })
+
+    const unknown = await complete(task('assessment-unknown'), { status: 'unknown', quiescent: false })
+    const retracted = fixture.service.projectTrustedEvaluationTaskRevision({ scope, evaluationId: unknown.evaluationId })
+    expect(retracted).toMatchObject({ subjectKind: 'goal-outcome', subjectRef: 'assessment-unknown', disposition: 'retract' })
+    expect(() => fixture.service.projectEvaluationOutcome({ scope: canonicalEvolutionHostScope(scope), evaluationId: unknown.evaluationId }))
+      .toThrowError(expect.objectContaining<Partial<AssistantEvolutionError>>({ code: 'forbidden' }))
+    await fixture.ctx.fiber.restart()
+  })
+
   test('Host inspection requires a canonical immutable explicit scope and background Policy owner', async () => {
     const fixture = await harness()
     for (let index = 1; index <= 4; index += 1) {

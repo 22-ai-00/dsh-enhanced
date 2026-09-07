@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const evolutionSchemaVersion = 14
+export const evolutionSchemaVersion = 15
 
 export class EvolutionDatabaseError extends Error {
   constructor(
@@ -344,7 +344,7 @@ const taskLearningProjectionSchema = `
     scope_key TEXT NOT NULL,
     -- Zero is the v11 migration sentinel, never a fresh authoritative watermark.
     scope_watermark INTEGER NOT NULL CHECK (scope_watermark >= 0),
-    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'goal-step', 'outcome')),
+    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'goal-step', 'goal-outcome', 'outcome')),
     subject_ref TEXT NOT NULL,
     version INTEGER NOT NULL CHECK (version >= 1),
     digest TEXT NOT NULL CHECK (length(digest) = 64),
@@ -363,7 +363,7 @@ const taskLearningProjectionSchema = `
   CREATE TABLE evolution_task_learning_revisions (
     scope_key TEXT NOT NULL,
     scope_watermark INTEGER NOT NULL CHECK (scope_watermark >= 0),
-    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'goal-step', 'outcome')),
+    subject_kind TEXT NOT NULL CHECK (subject_kind IN ('automation-run', 'foreground-turn', 'goal-step', 'goal-outcome', 'outcome')),
     subject_ref TEXT NOT NULL,
     version INTEGER NOT NULL CHECK (version >= 1),
     digest TEXT NOT NULL CHECK (length(digest) = 64),
@@ -742,6 +742,33 @@ function migrateV13ToV14(database: DatabaseSync): void {
   `)
 }
 
+/** Preserve all immutable task-learning rows while admitting whole-goal
+ * assessments as a subject distinct from individual goal steps. */
+function migrateV14ToV15(database: DatabaseSync): void {
+  database.exec(`
+    DROP INDEX IF EXISTS evolution_task_learning_state_situation;
+    DROP INDEX IF EXISTS evolution_task_learning_revisions_applied;
+    ALTER TABLE evolution_task_learning_state RENAME TO evolution_task_learning_state_v14;
+    ALTER TABLE evolution_task_learning_revisions RENAME TO evolution_task_learning_revisions_v14;
+    ${taskLearningProjectionSchema}
+    INSERT INTO evolution_task_learning_state (
+      scope_key, scope_watermark, subject_kind, subject_ref, version, digest,
+      disposition, situation, episode_id, updated_at
+    ) SELECT scope_key, scope_watermark, subject_kind, subject_ref, version, digest,
+      disposition, situation, episode_id, updated_at FROM evolution_task_learning_state_v14;
+    INSERT INTO evolution_task_learning_revisions (
+      scope_key, scope_watermark, subject_kind, subject_ref, version, digest,
+      disposition, situation, episode_id, applied_at
+    ) SELECT scope_key, scope_watermark, subject_kind, subject_ref, version, digest,
+      disposition, situation, episode_id, applied_at FROM evolution_task_learning_revisions_v14;
+    DROP TABLE evolution_task_learning_state_v14;
+    DROP TABLE evolution_task_learning_revisions_v14;
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '15')
+      ON CONFLICT(key) DO UPDATE SET value = excluded.value;
+    PRAGMA user_version = 15;
+  `)
+}
+
 /** Serialize every schema transition and re-read the version after the lock. */
 function migrate(database: DatabaseSync): void {
   const initial = schemaVersion(database)
@@ -770,6 +797,7 @@ function migrate(database: DatabaseSync): void {
       else if (version === 11) migrateV11ToV12(database)
       else if (version === 12) migrateV12ToV13(database)
       else if (version === 13) migrateV13ToV14(database)
+      else if (version === 14) migrateV14ToV15(database)
       version = schemaVersion(database)
     }
     database.exec('COMMIT')

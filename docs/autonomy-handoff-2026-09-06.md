@@ -10,6 +10,8 @@
 
 > 单次 wake 更新：默认关闭的 `backgroundWake` 已接入 owner 当前回合授权、Automations 两阶段 at 物化、原 Session/GoalId/revision 恢复与 dispatch CAS。六项真实恢复专项通过，含独立步骤验收、撤权、持久旧 Inbox 拒绝、deadline、/stop 和迟到工具拒绝；最终全仓证据见落地账本末尾。进程崩溃遗留 dispatched 与 unknown 均不重放，跨日生产运行和业务目标整体验收仍待完成。
 
+> 整体目标验收更新（2026-09-07）：可选 v3 `goal-outcome` 已冻结整体成功条件并贯通 Verifier → Evaluation → Evolution。真实驱动两轮测试验证步骤通过但整体失败、下一轮按失败条件修复、整体通过后准确完成原生目标；恢复/释放/迟到验收保持 unknown 或待完成，不重放业务执行。最终根检查 `/tmp/dsh-goal-outcome-check-v5.log` 与 `.exit=0`：主 234 文件/3,320 测试，Delivery 642、Goals 68、Verifier 47，全构建/dry-run pack 及独立复核通过。下文旧 WIP 段落是历史记录；最新证据与限制以落地账本末尾为准。跨库 Session flush/原子提交、真实跨日闭环、生产计量与 Web owner/安装仍未验收；全部 18 项目标保持未完成。
+
 ## 完整目标
 
 完整落实此前分析和规划，让项目成为高智能、高主动、能长期自主推进任务并持续自我改进的智能体；高权限与可验证的安全边界兼顾，同时安装、配置、升级和通过 Web 对话都方便友好。保留账本全部 18 个工作包，不能把目标缩成当前已实现的切片。

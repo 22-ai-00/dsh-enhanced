@@ -653,7 +653,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
     evaluationId: string
   }): Readonly<{
     triggerOutcomeId: string
-    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -1529,6 +1529,7 @@ export class AssistantEvolutionService extends Service implements TrustedDeliver
       || (receipt.projection.subjectKind !== 'automation-run'
         && receipt.projection.subjectKind !== 'foreground-turn'
         && receipt.projection.subjectKind !== 'goal-step'
+        && receipt.projection.subjectKind !== 'goal-outcome'
         && receipt.projection.subjectKind !== 'outcome')
       || hostText(receipt.projection.subjectRef, 'projection.subjectRef', 1_000)
         !== receipt.projection.subjectRef

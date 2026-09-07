@@ -22,5 +22,13 @@ identity (`automation-run` or `foreground-turn`) and canonical digest form.
 `goal-step` task with its immutable goal definition digest and version, step,
 run, session, native goal ID, and native revision. A verification receipt must
 use the matching protocol version and reproduce the complete task identity.
+`v3` is reserved for whole-goal assessment: it only accepts a `goal-outcome`
+task whose `ref` is its assessment ID and whose binding contains the immutable
+goal definition ID, version and digest, assessment ID, session ID, and native
+goal ID. It deliberately has no step, run, or native revision fields. The
+immutable contract itself freezes the acceptance criteria, profile, and bounds;
+an assessment must not substitute a separate criteria digest. A v3 receipt
+must use `task-verification/v3` and reproduce that complete binding. Existing
+v1 and v2 canonical payloads and digests remain unchanged.
 The wire library validates and binds these values; a Host producer remains
 responsible for obtaining them from an authoritative goal lifecycle.

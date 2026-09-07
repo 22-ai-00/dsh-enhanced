@@ -34,7 +34,7 @@ class Producer implements TaskAcceptanceProducer {
   async inspectAcceptedExecution(_contract: TaskAcceptanceContract) { this.inspected++; return this.proof }
 }
 
-async function harness(kind: AcceptanceTask['task']['kind'] = 'automation-run', required = false) {
+async function harness(kind: 'automation-run' | 'foreground-turn' | 'goal-step' = 'automation-run', required = false) {
   const root = await mkdtemp(join(tmpdir(), 'task-verifier-service-')); roots.push(root)
   await writeFile(join(root, 'report.md'), 'Confirmed result\n')
   const ctx = new Context(); contexts.push(ctx)
