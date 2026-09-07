@@ -23,6 +23,8 @@ const limits = {
   memoryMiB: 64,
   pidsLimit: 32,
   cpus: 0.5,
+  workspaceMiB: 4,
+  workspaceInodes: 64,
 }
 
 async function workspace(): Promise<string> {
@@ -32,7 +34,7 @@ async function workspace(): Promise<string> {
   return path
 }
 
-async function run(command: string, options: { deadlineMs?: number, signal?: AbortSignal, outputBytes?: number } = {}) {
+async function run(command: string, options: { deadlineMs?: number, signal?: AbortSignal, outputBytes?: number, artifacts?: string[] } = {}) {
   const path = await workspace()
   await writeFile(join(path, 'input'), 'only-the-workspace-is-mounted', { mode: 0o600 })
   const controller = options.signal === undefined ? new AbortController() : undefined
@@ -42,6 +44,7 @@ async function run(command: string, options: { deadlineMs?: number, signal?: Abo
     image,
     dockerPath,
     workspacePath: path,
+    artifacts: options.artifacts ?? [],
     command,
     deadline: Date.now() + (options.deadlineMs ?? 30_000),
     limits: { ...limits, ...(options.outputBytes === undefined ? {} : { maxOutputBytes: options.outputBytes }) },
@@ -81,5 +84,31 @@ dockerTests('Linux Docker isolation runner (opt in)', () => {
     expect(result).toMatchObject({ status: 'succeeded', quiescent: true, exitCode: 0 })
     expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(1)
   }, 30_000)
+
+  test('enforces the workspace byte quota with actual ENOSPC', async () => {
+    const bytes = await run('dd if=/dev/zero of=bytes bs=1M count=8; code=$?; df -k /workspace; exit "$code"')
+    expect(bytes).toMatchObject({ status: 'failed', quiescent: true })
+    expect(bytes.stderr).toContain('No space left on device')
+    expect(bytes.stdout).toMatch(/tmpfs\s+4096\s+4096\s+0/)
+  }, 30_000)
+
+  test('enforces the workspace inode quota with actual ENOSPC', async () => {
+    const inodes = await run('i=0; while [ "$i" -lt 100 ]; do touch "i$i" || break; i=$((i+1)); done; printf "CREATED=%s\\n" "$i"; df -i /workspace')
+    expect(inodes).toMatchObject({ status: 'succeeded', quiescent: true })
+    expect(inodes.stderr).toContain('No space left on device')
+    expect(inodes.stdout).toContain('CREATED=62')
+    expect(inodes.stdout).toMatch(/tmpfs\s+64\s+64\s+0/)
+  }, 30_000)
+
+  test('exports only regular UTF-8, non-linked artifacts through the keeper', async () => {
+    const good = await run('printf artifact > out', { artifacts: ['out'] })
+    expect(good).toMatchObject({ status: 'succeeded', quiescent: true, artifacts: [{ path: 'out', content: 'artifact' }] })
+    const linked = await run('printf x > target; ln target linked', { artifacts: ['linked'] })
+    expect(linked).toMatchObject({ status: 'failed', quiescent: true, reason: 'artifact-export-rejected' })
+    const symlink = await run('ln -s target link', { artifacts: ['link'] })
+    expect(symlink).toMatchObject({ status: 'failed', quiescent: true, reason: 'artifact-export-rejected' })
+    const invalid = await run("printf '\\377' > bad", { artifacts: ['bad'] })
+    expect(invalid).toMatchObject({ status: 'failed', quiescent: true, reason: 'artifact-export-rejected' })
+  }, 60_000)
 
 })

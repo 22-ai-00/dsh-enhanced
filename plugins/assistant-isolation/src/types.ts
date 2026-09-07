@@ -33,6 +33,8 @@ export interface IsolationLimits {
   maxArtifactBytes: number
   maxFiles: number
   memoryMiB: number
+  workspaceMiB: number
+  workspaceInodes: number
   pidsLimit: number
   cpus: number
 }
@@ -60,6 +62,9 @@ export interface IsolationJob {
   containerName: string
   deadline: number
   reservedDurationMs: number
+  /** Conservative worker + workspace + keeper reservation; zero denotes legacy work. */
+  reservedMemoryMiB: number
+  reservedWorkspaceInodes: number
   status: IsolationStatus
   version: number
   createdAt: number
@@ -73,6 +78,7 @@ export interface IsolationRunInput {
   image: string
   dockerPath: string
   workspacePath: string
+  artifacts?: string[]
   command: string
   deadline: number
   limits: IsolationLimits
@@ -82,6 +88,7 @@ export interface IsolationRunInput {
 }
 
 export interface IsolationProcessResult {
+  artifacts?: IsolationFile[]
   status: IsolationResult['status']
   quiescent: boolean
   exitCode?: number

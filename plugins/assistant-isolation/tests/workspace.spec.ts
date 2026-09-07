@@ -1,20 +1,31 @@
-import { chmod, link, mkdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, rm, stat } from 'node:fs/promises'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createServer } from 'node:net'
 import { afterEach, describe, expect, it } from 'vitest'
-import { collectArtifacts, normalizeRequest, stageWorkspace } from '../src/workspace.ts'
+import { normalizeRequest, stageWorkspace } from '../src/workspace.ts'
+import { validateConfig } from '../src/config.ts'
 import type { IsolationLimits, IsolationRequest } from '../src/types.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
-const limits: IsolationLimits = { maxDurationMs: 1_000, maxInputBytes: 32, maxOutputBytes: 1024, maxArtifactBytes: 16, maxFiles: 3, memoryMiB: 64, pidsLimit: 8, cpus: 1 }
+const limits: IsolationLimits = { maxDurationMs: 1_000, maxInputBytes: 64, maxOutputBytes: 1024, maxArtifactBytes: 16, maxFiles: 3, memoryMiB: 64, workspaceMiB: 4, workspaceInodes: 64, pidsLimit: 8, cpus: 1 }
 const request = (files: IsolationRequest['files'] = [{ path: 'input.txt', content: 'hello' }]): IsolationRequest => ({ grantId: 'grant', idempotencyKey: 'key', command: 'printf ok', files })
 const jobId = '00000000-0000-4000-8000-000000000000'
 function root(): string { const value = mkdtempSync(join(tmpdir(), 'isolation-workspace-')); roots.push(value); return value }
 
 describe('isolation workspace boundaries', () => {
+  it('rejects invalid workspace/pool bounds and counts staged parent directories before creation', () => {
+    expect(validateConfig({}).limits).toMatchObject({ workspaceMiB: 64, workspaceInodes: 4096 })
+    for (const value of [0, -1, 1.5, NaN, Infinity, 1025]) expect(() => validateConfig({ limits: { workspaceMiB: value } })).toThrow(/limits/)
+    expect(() => validateConfig({ maxReservedMemoryMiB: 351 })).toThrow(/pool/)
+    expect(() => validateConfig({ maxReservedWorkspaceInodes: 4095 })).toThrow(/pool/)
+    const nested = request([{ path: 'a/b/c', content: '' }])
+    expect(() => normalizeRequest(nested, { ...limits, workspaceInodes: 3 })).toThrow(/inode/)
+    expect(normalizeRequest(nested, { ...limits, workspaceInodes: 4 }).files).toEqual(nested.files)
+    expect(() => normalizeRequest(request([{ path: 'a'.repeat(64), content: '' }]), limits)).toThrow(/input/)
+  })
+
   it('canonicalizes request fields before digesting and rejects traversal, collisions, and over-budget input', () => {
     const normalized = normalizeRequest({ ...request([{ path: 'z.txt', content: 'a' }, { path: 'a.txt', content: 'b' }]), artifacts: ['z/out', 'a/out'] }, limits)
     expect(normalized.files?.map(file => file.path)).toEqual(['a.txt', 'z.txt'])
@@ -22,7 +33,7 @@ describe('isolation workspace boundaries', () => {
     expect(normalized.timeoutMs).toBe(limits.maxDurationMs)
     expect(() => normalizeRequest({ ...request([{ path: '../escape', content: '' }]) }, limits)).toThrow(/workspace/)
     expect(() => normalizeRequest({ ...request([{ path: 'a', content: '' }, { path: 'a/b', content: '' }]) }, limits)).toThrow(/workspace/)
-    expect(() => normalizeRequest({ ...request([{ path: 'a', content: 'x'.repeat(30) }]) }, limits)).toThrow(/workspace/)
+    expect(() => normalizeRequest({ ...request([{ path: 'a', content: 'x'.repeat(64) }]) }, limits)).toThrow(/workspace/)
     expect(() => normalizeRequest({ ...request(), command: 'x\0y' }, limits)).toThrow(/workspace/)
   })
 
@@ -36,29 +47,4 @@ describe('isolation workspace boundaries', () => {
     await expect(stageWorkspace(state, jobId, normalizeRequest(request(), limits))).rejects.toThrow(/collision/)
   })
 
-  it('collects only regular unlinked files under the workspace and enforces one total byte budget', async () => {
-    const workspace = await stageWorkspace(root(), jobId, normalizeRequest(request([]), limits))
-    await writeFile(join(workspace, 'one.txt'), 'one')
-    await writeFile(join(workspace, 'two.txt'), 'two')
-    await expect(collectArtifacts(workspace, ['two.txt', 'one.txt'], limits)).resolves.toEqual([{ path: 'one.txt', content: 'one' }, { path: 'two.txt', content: 'two' }])
-    await writeFile(join(workspace, 'large.txt'), 'x'.repeat(17))
-    await expect(collectArtifacts(workspace, ['large.txt'], limits)).rejects.toThrow(/workspace/)
-    await link(join(workspace, 'one.txt'), join(workspace, 'hard.txt'))
-    await expect(collectArtifacts(workspace, ['hard.txt'], limits)).rejects.toThrow(/workspace/)
-  })
-
-  it('rejects symlink, symlink-parent, directory, and Unix socket artifact canaries', async () => {
-    const workspace = await stageWorkspace(root(), jobId, normalizeRequest(request([]), limits))
-    await writeFile(join(workspace, 'file.txt'), 'safe')
-    await symlink(join(workspace, 'file.txt'), join(workspace, 'link.txt'))
-    await mkdir(join(workspace, 'directory'))
-    await mkdir(join(workspace, 'linked-parent'))
-    await symlink(join(workspace, 'linked-parent'), join(workspace, 'parent-link'))
-    await expect(collectArtifacts(workspace, ['link.txt'], limits)).rejects.toThrow(/workspace/)
-    await expect(collectArtifacts(workspace, ['directory'], limits)).rejects.toThrow(/workspace/)
-    await expect(collectArtifacts(workspace, ['parent-link/file.txt'], limits)).rejects.toThrow(/workspace/)
-    const socket = join(workspace, 'server.sock'); const server = createServer()
-    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socket, resolve) })
-    try { await expect(collectArtifacts(workspace, ['server.sock'], limits)).rejects.toThrow(/workspace/) } finally { await new Promise<void>(resolve => server.close(() => resolve())) }
-  })
 })
