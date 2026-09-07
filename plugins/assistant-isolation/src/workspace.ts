@@ -1,6 +1,5 @@
-import { constants } from 'node:fs'
-import { chmod, lstat, mkdir, open, realpath } from 'node:fs/promises'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { chmod, lstat, mkdir, open } from 'node:fs/promises'
+import { isAbsolute, resolve } from 'node:path'
 import type { IsolationFile, IsolationLimits, IsolationRequest } from './types.js'
 
 const maxText = 16_384
@@ -12,9 +11,9 @@ const bytes = (value: string): number => Buffer.byteLength(value, 'utf8')
 const pathOrder = (left: string, right: string): number => left < right ? -1 : left > right ? 1 : 0
 
 function limitsInput(value: IsolationLimits): IsolationLimits {
-  if (!value || typeof value !== 'object' || Object.keys(value).length !== 8
+  if (!value || typeof value !== 'object' || Object.keys(value).length !== 10
     || !positive(value.maxDurationMs) || !positive(value.maxInputBytes) || !positive(value.maxOutputBytes) || !positive(value.maxArtifactBytes)
-    || !positive(value.maxFiles) || !positive(value.memoryMiB) || !positive(value.pidsLimit) || !Number.isFinite(value.cpus) || value.cpus <= 0) fail('invalid limits')
+    || !positive(value.workspaceMiB) || !positive(value.workspaceInodes) || !positive(value.maxFiles) || !positive(value.memoryMiB) || !positive(value.pidsLimit) || !Number.isFinite(value.cpus) || value.cpus <= 0) fail('invalid limits')
   return value
 }
 
@@ -60,8 +59,15 @@ export function normalizeRequest(request: IsolationRequest, limits: IsolationLim
   if (files.some((file, index) => index > 0 && file.path === files[index - 1]!.path)) fail('duplicate files')
   assertNoFileParentConflict(files)
   const artifacts = request.artifacts === undefined ? [] : canonicalPaths(request.artifacts, 'artifacts', configured.maxFiles)
-  const inputBytes = bytes(request.command) + files.reduce((total, file) => total + bytes(file.content), 0)
+  const inputBytes = bytes(request.command) + files.reduce((total, file) => total + bytes(file.path) + bytes(file.content), 0) + artifacts.reduce((total, path) => total + bytes(path), 0)
   if (!Number.isSafeInteger(inputBytes) || inputBytes > configured.maxInputBytes) fail('input exceeds limit')
+  const inputEntries = new Set<string>()
+  for (const file of files) {
+    const parts = file.path.split('/')
+    for (let index = 1; index <= parts.length; index++) inputEntries.add(parts.slice(0, index).join('/'))
+  }
+  if (inputEntries.size + 1 > configured.workspaceInodes) fail('input exceeds workspace inode limit')
+  if (files.reduce((total, file) => total + bytes(file.content), 0) > configured.workspaceMiB * 1_048_576) fail('input exceeds workspace byte limit')
   return Object.freeze({ grantId: request.grantId, idempotencyKey: request.idempotencyKey, command: request.command, ...(files.length ? { files: files.map(file => Object.freeze(file)) } : {}), ...(artifacts.length ? { artifacts } : {}), timeoutMs })
 }
 
@@ -96,37 +102,4 @@ export async function stageWorkspace(stateRoot: string, jobId: string, request: 
     try { await handle.writeFile(file.content, 'utf8'); await handle.chmod(0o600) } finally { await handle.close() }
   }
   return workspace
-}
-
-function contained(root: string, target: string): boolean { const path = relative(root, target); return path !== '' && !path.startsWith(`..${sep}`) && path !== '..' && !isAbsolute(path) }
-
-async function artifactHandle(workspace: string, root: string, path: string) {
-  let current = workspace
-  const parts = path.split('/')
-  for (const part of parts.slice(0, -1)) { current = resolve(current, part); const entry = await lstat(current); if (!entry.isDirectory() || entry.isSymbolicLink()) fail('artifact parent is unsafe') }
-  const target = resolve(current, parts[parts.length - 1]!); const link = await lstat(target)
-  if (link.isSymbolicLink() || !link.isFile()) fail('artifact is not a regular file')
-  const canonical = await realpath(target); if (!contained(root, canonical)) fail('artifact escapes workspace')
-  return open(target, constants.O_RDONLY | constants.O_NOFOLLOW)
-}
-
-/** Reads only settled, regular, non-linked artifacts from a private staged workspace. */
-export async function collectArtifacts(workspacePath: string, paths: string[], limits: IsolationLimits): Promise<IsolationFile[]> {
-  const configured = limitsInput(limits)
-  if (!isAbsolute(workspacePath)) fail('workspace must be absolute')
-  const requested = canonicalPaths(paths, 'artifacts', configured.maxFiles)
-  const workspaceEntry = await lstat(workspacePath); if (!workspaceEntry.isDirectory() || workspaceEntry.isSymbolicLink()) fail('workspace is unsafe')
-  const root = await realpath(workspacePath); const files: IsolationFile[] = []; let total = 0
-  for (const path of requested) {
-    const handle = await artifactHandle(workspacePath, root, path)
-    try {
-      const info = await handle.stat()
-      if (!info.isFile() || info.nlink !== 1 || !Number.isSafeInteger(info.size) || info.size < 0 || info.size > configured.maxArtifactBytes - total) fail('artifact is not a bounded regular file')
-      const content = Buffer.alloc(info.size); let offset = 0
-      while (offset < content.length) { const read = await handle.read(content, offset, content.length - offset, offset); if (read.bytesRead === 0) fail('artifact changed while reading'); offset += read.bytesRead }
-      const extra = Buffer.alloc(1); if ((await handle.read(extra, 0, 1, info.size)).bytesRead !== 0) fail('artifact grew while reading')
-      total += content.length; files.push(Object.freeze({ path, content: new TextDecoder('utf-8', { fatal: true }).decode(content) }))
-    } finally { await handle.close() }
-  }
-  return files
 }

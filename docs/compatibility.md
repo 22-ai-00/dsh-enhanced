@@ -74,3 +74,5 @@ PersonalMemory 工具证据恢复使用 `@deepseek-ai/dsh-fs`、`dsh-fs-local`�
 
 
 `assistant-isolation` 使用同一 `dsh-agent`、`dsh-tools`、`dsh-session@0.1.2-rc.1` 与 Cordis 4.0.2 的原生 ToolRuntime cancellation/execute waterfall。公开 Service 方法须保持实例绑定，以兼容 Cordis trace proxy；detached Node supervisor 清空继承的 execArgv，避免父进程 `--input-type` 或测试 loader 阻止启动。运行时仅支持非 root Linux Host 与固定本地 Docker Unix socket；测试环境 Docker 29.4.1、cgroup v1/cgroupfs 和预装的不可变本地 bash fixture image，未把镜像 tag 或未验证的远端镜像作为运行时默认。升级应重跑真实 AgentLoop、外部 CLI revoke、进程组 SIGKILL、网络 canary 与打包后的 supervisor 路径验证。该包不改动 DSH 本身的依赖基线，也不自动激活 Delivery/Policy peers。
+
+Isolation 工作区要求 Linux Docker local volume driver 支持 tmpfs `size`/`nr_inodes`/UID/GID 选项。不可变镜像须包含可信 `/bin/busybox` 的 sleep/stat/cat 与 `/bin/sh`，拒绝声明 VOLUME 的镜像；仍不自动拉取镜像。SQLite v1→v2 增加持久资源预留，降级前需保留数据库并停止旧运行体，不能由旧版本打开 v2 绕过预算。

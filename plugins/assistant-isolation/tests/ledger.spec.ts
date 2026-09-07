@@ -12,6 +12,7 @@ const clock = () => 10_000
 const identity: IsolationIdentity = { principalDigest: 'principal', principalRecordId: 'record', principalVersion: 1, workspace: '/work', agentPreset: 'default' }
 const grant = (revision = 1): IsolationGrant => ({ ...identity, id: 'grant', revision, expiresAt: 100_000, maxRuns: 2, maxTotalDurationMs: 2_000 })
 const input = (key = 'key') => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: `digest-${key}`, durationMs: 500 })
+const reservation = (memoryMiB = 64, workspaceInodes = 100) => ({ memoryMiB, workspaceInodes, maxMemoryMiB: 100, maxWorkspaceInodes: 200 })
 const unknown = (jobId: string, quiescent = false): IsolationResult => ({ jobId, status: 'unknown', quiescent, stdout: '', stderr: '', artifacts: [] })
 function path(): string { const root = mkdtempSync(join(tmpdir(), 'isolation-ledger-')); roots.push(root); chmodSync(root, 0o700); return join(root, 'ledger.sqlite') }
 function error(fn: () => unknown): IsolationLedgerError { try { fn() } catch (caught) { expect(caught).toBeInstanceOf(IsolationLedgerError); return caught as IsolationLedgerError }; throw new Error('expected ledger error') }
@@ -23,7 +24,8 @@ describe('IsolationLedger', () => {
     expect((database.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode).toBe('wal')
     expect((statSync(file).mode & 0o777)).toBe(0o600)
     expect((statSync(join(file, '..')).mode & 0o777)).toBe(0o700)
-    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('1')
+    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('2')
+    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
     database.close()
   })
 
@@ -89,6 +91,60 @@ describe('IsolationLedger', () => {
     expect(new Set([...first, ...second].map(job => job.id)).size).toBe(1001)
     expect(ledger.recoverable(second[0]!.id)).toHaveLength(0)
     ledger.close()
+  })
+
+  it('atomically reserves global memory and inode pools without double-charging idempotency', () => {
+    const file = path(); const first = new IsolationLedger(file, { now: clock }); const second = new IsolationLedger(file, { now: clock })
+    first.syncGrants([{ ...grant(), maxRuns: 10, maxTotalDurationMs: 10_000 }])
+    const prepared = first.prepare({ ...input('pool-a'), resourceReservation: reservation(60, 80) })
+    expect(prepared.job).toMatchObject({ reservedMemoryMiB: 60, reservedWorkspaceInodes: 80 })
+    expect(second.prepare({ ...input('pool-a'), resourceReservation: reservation(60, 80) })).toMatchObject({ created: false, job: { id: prepared.job.id } })
+    expect(error(() => second.prepare({ ...input('pool-memory'), resourceReservation: reservation(41, 10) })).code).toBe('unauthorized')
+    expect(error(() => second.prepare({ ...input('pool-inodes'), resourceReservation: reservation(40, 121) })).code).toBe('unauthorized')
+    const auditDatabase = new DatabaseSync(file)
+    const audit = auditDatabase.prepare("SELECT detail FROM isolation_audit WHERE action='job-prepared' ORDER BY sequence DESC LIMIT 1").get() as { detail: string }
+    expect(audit.detail).toContain('reservation:memoryMiB:60,workspaceInodes:80')
+    auditDatabase.close()
+    first.close(); second.close()
+  })
+
+  it('holds reservations for every non-quiescent result and releases only after cleanup', () => {
+    const ledger = new IsolationLedger(':memory:', { now: clock }); ledger.syncGrants([{ ...grant(), maxRuns: 10, maxTotalDurationMs: 10_000 }])
+    const stranded = ledger.prepare({ ...input('stranded'), resourceReservation: reservation(60, 100) }).job
+    const settled = ledger.settle(stranded.id, stranded.version, unknown(stranded.id))
+    expect(error(() => ledger.prepare({ ...input('blocked'), resourceReservation: reservation(41, 100) })).code).toBe('unauthorized')
+    const cleaned = ledger.settle(settled.id, settled.version, unknown(settled.id, true))
+    expect(ledger.prepare({ ...input('released'), resourceReservation: reservation(41, 100) }).created).toBe(true)
+    expect(error(() => ledger.settle(cleaned.id, cleaned.version, { ...unknown(cleaned.id), status: 'succeeded', quiescent: false })).code).toBe('invalid-input')
+    ledger.close()
+  })
+
+  it('migrates a v1 database, retains legacy records, and fails closed until cleanup', () => {
+    const file = path(); const database = new DatabaseSync(file)
+    database.exec(`CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
+      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '1');
+      CREATE TABLE isolation_grants (id TEXT PRIMARY KEY, digest TEXT NOT NULL, revision INTEGER NOT NULL, expires_at INTEGER NOT NULL, max_runs INTEGER NOT NULL, max_total_duration_ms INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), revoke_reason TEXT, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL) STRICT;
+      CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
+      CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
+      CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
+      CREATE TABLE isolation_audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL, action TEXT NOT NULL, job_id TEXT, grant_id TEXT, detail TEXT NOT NULL) STRICT;
+      CREATE TABLE isolation_controller (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;
+      PRAGMA user_version = 1;`)
+    database.prepare('INSERT INTO isolation_grants(id,digest,revision,expires_at,max_runs,max_total_duration_ms,revoked,principal_digest,principal_record_id,principal_version,workspace,agent_preset) VALUES (?,?,?,?,?,?,0,?,?,?,?,?)').run('grant', JSON.stringify(grant()), 1, 100_000, 10, 10_000, identity.principalDigest, identity.principalRecordId, identity.principalVersion, identity.workspace, identity.agentPreset)
+    database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,status,version,created_at,updated_at) VALUES ('legacy','grant',1,?,?,?,?,?,?,?,?,?,100000,500,'prepared',1,10000,10000)").run(identity.principalDigest, identity.principalRecordId, identity.principalVersion, identity.workspace, identity.agentPreset, 'session', 'legacy-key', 'legacy-digest', 'dsh-isolation-legacy')
+    database.close()
+    const ledger = new IsolationLedger(file, { now: clock })
+    expect(ledger.get('legacy')).toMatchObject({ reservedMemoryMiB: 0, reservedWorkspaceInodes: 0, status: 'prepared' })
+    expect(error(() => ledger.prepare({ ...input('new'), resourceReservation: reservation() })).code).toBe('unauthorized')
+    const legacy = ledger.get('legacy')!
+    ledger.settle(legacy.id, legacy.version, unknown(legacy.id, true))
+    expect(ledger.prepare({ ...input('new'), resourceReservation: reservation() }).created).toBe(true)
+    ledger.close()
+    const reopened = new DatabaseSync(file)
+    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
+    expect((reopened.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('2')
+    expect((reopened.prepare("SELECT COUNT(*) AS count FROM isolation_jobs WHERE id='legacy'").get() as { count: number }).count).toBe(1)
+    reopened.close()
   })
 
 })

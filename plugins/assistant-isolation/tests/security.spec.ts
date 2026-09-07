@@ -43,7 +43,7 @@ function input(workspacePath: string, name: string, command: string, authorizeSt
     jobId: randomUUID(), containerName: name, image, dockerPath, workspacePath, command,
     deadline: Date.now() + 20_000,
     limits: { maxDurationMs: 20_000, maxInputBytes: 1024, maxOutputBytes: 4096, maxArtifactBytes: 1024,
-      maxFiles: 8, memoryMiB: 64, pidsLimit: 32, cpus: 0.5 },
+      maxFiles: 8, memoryMiB: 64, pidsLimit: 32, cpus: 0.5, workspaceMiB: 4, workspaceInodes: 64 },
     signal: new AbortController().signal, authorizeStart,
   }
 }
@@ -92,11 +92,16 @@ dockerTests('Docker isolation security boundary (opt in)', () => {
       const containerConfig = container?.Config as Record<string, unknown> | undefined
       expect(host).toMatchObject({ NetworkMode: 'none', ReadonlyRootfs: true, Memory: 64 * 1024 * 1024,
         MemorySwap: 64 * 1024 * 1024, PidsLimit: 32, NanoCpus: 500_000_000 })
+      expect(host?.LogConfig).toMatchObject({ Type: 'none' })
+      const [keeper] = JSON.parse(await docker(config, ['inspect', `${name}-keeper`])) as Array<{ HostConfig: Record<string, unknown>; Mounts: Array<Record<string, unknown>> }>
+      expect(keeper?.HostConfig).toMatchObject({ NetworkMode: 'none', ReadonlyRootfs: true, Memory: 32 * 1024 * 1024, MemorySwap: 32 * 1024 * 1024, PidsLimit: 16, LogConfig: { Type: 'none' } })
+      expect(keeper?.Mounts).toHaveLength(1)
+      expect(keeper?.Mounts[0]).toMatchObject({ Type: 'volume', Name: `${name}-workspace`, Destination: '/workspace' })
       expect(host?.CapDrop).toContain('ALL')
       expect(host?.SecurityOpt).toContain('no-new-privileges')
       expect(containerConfig).toMatchObject({ WorkingDir: '/workspace', Entrypoint: ['/bin/sh'] })
       expect(mounts).toHaveLength(1)
-      expect(mounts?.[0]).toMatchObject({ Type: 'bind', Source: workspace, Destination: '/workspace', RW: true })
+      expect(mounts?.[0]).toMatchObject({ Type: 'volume', Name: `${name}-workspace`, Destination: '/workspace', RW: true })
       inspected = true
       return true
     })) } finally {

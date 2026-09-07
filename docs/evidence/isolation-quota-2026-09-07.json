@@ -1,0 +1,602 @@
+{
+  "schema": "dsh-isolation-quota-evidence/v1",
+  "recordedAt": "2026-09-07T12:58:23.695714+00:00",
+  "baseCommit": "c60fcba3edb712d0b73a3dffb67d4ca836119ee8",
+  "scope": "WP08-10 quota slice; full 18-work-package objective remains incomplete",
+  "platform": [
+    {
+      "command": [
+        "node",
+        "--version"
+      ],
+      "exitCode": 0,
+      "stdout": "v24.7.0",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "uname",
+        "-sr"
+      ],
+      "exitCode": 0,
+      "stdout": "Linux 5.15.120.bsk.3-amd64",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/usr/bin/docker",
+        "-H",
+        "unix:///var/run/docker.sock",
+        "info",
+        "--format",
+        "{{.ServerVersion}} {{.OSType}} {{.CgroupVersion}} {{.CgroupDriver}}"
+      ],
+      "exitCode": 0,
+      "stdout": "29.4.1 linux 1 cgroupfs",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "/usr/bin/docker",
+        "-H",
+        "unix:///var/run/docker.sock",
+        "image",
+        "inspect",
+        "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+        "--format",
+        "{{.Id}}"
+      ],
+      "exitCode": 0,
+      "stdout": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "stderr": ""
+    }
+  ],
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "primaryFiles": 256,
+    "primaryTests": 3520,
+    "isolationFiles": 10,
+    "isolationTests": 34,
+    "plugins": 26,
+    "sharedPackages": 3,
+    "packCount": 29,
+    "isolationPackFiles": [
+      "cordis.patch.yml",
+      "lib/cli.d.ts",
+      "lib/cli.d.ts.map",
+      "lib/cli.js",
+      "lib/cli.js.map",
+      "lib/config.d.ts",
+      "lib/config.d.ts.map",
+      "lib/config.js",
+      "lib/config.js.map",
+      "lib/index.d.ts",
+      "lib/index.d.ts.map",
+      "lib/index.js",
+      "lib/index.js.map",
+      "lib/ledger.d.ts",
+      "lib/ledger.d.ts.map",
+      "lib/ledger.js",
+      "lib/ledger.js.map",
+      "lib/runner.d.ts",
+      "lib/runner.d.ts.map",
+      "lib/runner.js",
+      "lib/runner.js.map",
+      "lib/service.d.ts",
+      "lib/service.d.ts.map",
+      "lib/service.js",
+      "lib/service.js.map",
+      "lib/tools.d.ts",
+      "lib/tools.d.ts.map",
+      "lib/tools.js",
+      "lib/tools.js.map",
+      "lib/types.d.ts",
+      "lib/types.d.ts.map",
+      "lib/types.js",
+      "lib/types.js.map",
+      "lib/version.d.ts",
+      "lib/version.d.ts.map",
+      "lib/version.js",
+      "lib/version.js.map",
+      "lib/workspace.d.ts",
+      "lib/workspace.d.ts.map",
+      "lib/workspace.js",
+      "lib/workspace.js.map",
+      "LICENSE",
+      "package.json",
+      "README.md",
+      "runtime/supervisor.mjs"
+    ]
+  },
+  "runtimeEvidence": [
+    "Real Linux Docker local tmpfs byte/inode ENOSPC, isolated native AgentLoop/ToolRuntime, keeper input copy and bounded stat/cat artifact export after worker removal.",
+    "Actual Host HTTP canary, no Host bind mount/socket/environment, worker and keeper HostConfig inspection including fixed keeper 32 MiB / 16 PIDs and log driver none.",
+    "Native cancellation, separate packaged CLI revoke, Host process-group SIGKILL with setsid descendant heartbeat; worker, keeper and volume absence are checked.",
+    "Actual quota-volume deletion failure retains unknown reservation; next controller removes resources and releases ordinary cleanup occupancy without replay.",
+    "Actual volume create followed by lost completion ACK remains unknown/nonquiescent; new Host recovery still retains occupancy despite current absence, and a later pool request is denied.",
+    "Actual image commit adds VOLUME, which provisioning rejects; derived local test image and source container are removed. No image pull.",
+    "Artifact broker rejects parent/final symlinks, hardlinks, directory/FIFO, per-file and aggregate byte excess and malformed UTF-8; model/owner/Policy identity in integration is a fixture, not a production external account."
+  ],
+  "negativeControl": {
+    "expectedExitCode": 1,
+    "observedFailedTests": 2,
+    "id": "negative-v1",
+    "sourceSha256": "f8bdf81e9ff1f4cc5bbbc8009477ac97cff08064b5cbca208de134524af63484",
+    "restored": true,
+    "mutation": "workspace volume options: replace configured size/inodes with 32 MiB and 4096 inodes; no other restrictions changed"
+  },
+  "probes": [
+    {
+      "path": "/tmp/dsh-quota-probe.json",
+      "sha256": "3f641076bed05536cd9e93914697920dc48a098e115554dbaeb7e2be1f632483",
+      "operations": [
+        {
+          "args": [
+            "volume",
+            "create",
+            "--driver",
+            "local",
+            "--opt",
+            "type=tmpfs",
+            "--opt",
+            "device=tmpfs",
+            "--opt",
+            "o=size=4m,nr_inodes=64,uid=1001,gid=1001,mode=0700,nosuid,nodev",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "run",
+            "-d",
+            "--name",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-keeper",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            "1001:1001",
+            "--memory",
+            "32m",
+            "--memory-swap",
+            "32m",
+            "--pids-limit",
+            "16",
+            "--mount",
+            "type=volume,src=dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb,dst=/workspace,volume-nocopy",
+            "--entrypoint",
+            "/bin/sh",
+            "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+            "-c",
+            "while :; do sleep 60; done"
+          ],
+          "exit": 0,
+          "stdout": "7714a3171d136959e359ff1930d297c57d0341ee0735646cbe507bac9312ee67\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "run",
+            "--name",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-worker",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            "1001:1001",
+            "--memory",
+            "32m",
+            "--memory-swap",
+            "32m",
+            "--pids-limit",
+            "16",
+            "--mount",
+            "type=volume,src=dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb,dst=/workspace,volume-nocopy",
+            "--entrypoint",
+            "/bin/sh",
+            "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+            "-c",
+            "echo persisted > /workspace/marker; dd if=/dev/zero of=/workspace/big bs=1048576 count=8; df -k /workspace; rm /workspace/big; i=0; while [ \"$i\" -lt 100 ]; do touch /workspace/f$i || break; i=$((i+1)); done; echo FILES=$i; df -i /workspace"
+          ],
+          "exit": 0,
+          "stdout": "Filesystem           1K-blocks      Used Available Use% Mounted on\ntmpfs                     4096      4096         0 100% /workspace\nFILES=62\nFilesystem              Inodes      Used Available Use% Mounted on\ntmpfs                       64        64         0 100% /workspace\n",
+          "stderr": "dd: error writing '/workspace/big': No space left on device\n4+0 records in\n3+0 records out\n4190208 bytes (4.0MB) copied, 0.002250 seconds, 1.7GB/s\ntouch: /workspace/f62: No space left on device\n"
+        },
+        {
+          "args": [
+            "rm",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-worker"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-worker\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "exec",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-keeper",
+            "/bin/sh",
+            "-c",
+            "cat /workspace/marker; ls /workspace | wc -l"
+          ],
+          "exit": 0,
+          "stdout": "persisted\n63\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "stop",
+            "-t",
+            "1",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-keeper"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-keeper\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "start",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-keeper"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-keeper\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "exec",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-keeper",
+            "/bin/sh",
+            "-c",
+            "test ! -e /workspace/marker && echo LOST_AFTER_LAST_UNMOUNT"
+          ],
+          "exit": 0,
+          "stdout": "LOST_AFTER_LAST_UNMOUNT\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "rm",
+            "-f",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-worker",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-keeper"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-keeper\n",
+          "stderr": "Error response from daemon: No such container: dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb-worker\n"
+        },
+        {
+          "args": [
+            "volume",
+            "rm",
+            "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-probe-632b1df6-5565-4665-8e15-1a9a9600f0eb\n",
+          "stderr": ""
+        }
+      ]
+    },
+    {
+      "path": "/tmp/dsh-quota-copy-probe.json",
+      "sha256": "cc9c1a53bba0d7bc771216a2cce4034ac3bc3040fc408fa6f38abd0e64408621",
+      "operations": [
+        {
+          "args": [
+            "volume",
+            "create",
+            "--opt",
+            "type=tmpfs",
+            "--opt",
+            "device=tmpfs",
+            "--opt",
+            "o=size=4m,nr_inodes=64,uid=1001,gid=1001,mode=0700,nosuid,nodev",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "run",
+            "-d",
+            "--name",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-keeper",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            "1001:1001",
+            "--memory",
+            "32m",
+            "--memory-swap",
+            "32m",
+            "--pids-limit",
+            "16",
+            "--mount",
+            "type=volume,src=dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b,dst=/workspace,volume-nocopy",
+            "--entrypoint",
+            "/bin/busybox",
+            "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+            "sleep",
+            "3600"
+          ],
+          "exit": 0,
+          "stdout": "c567ade80d37b758fb10ee86760479eff5ad3c5005833df188aab143a4a7193e\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "cp",
+            "-a",
+            "/tmp/dsh-quota-copy-09cranx8/.",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-keeper:/workspace"
+          ],
+          "exit": 0,
+          "stdout": "",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "run",
+            "--name",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-worker",
+            "--pull",
+            "never",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--user",
+            "1001:1001",
+            "--memory",
+            "32m",
+            "--memory-swap",
+            "32m",
+            "--pids-limit",
+            "16",
+            "--mount",
+            "type=volume,src=dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b,dst=/workspace,volume-nocopy",
+            "--entrypoint",
+            "/bin/sh",
+            "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+            "-c",
+            "set -e; cat /workspace/input.txt; cp /workspace/input.txt /workspace/output.txt; ln /workspace/output.txt /workspace/hard.txt; ln -s /etc /workspace/sym"
+          ],
+          "exit": 0,
+          "stdout": "copied-input",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "rm",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-worker"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-worker\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "exec",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-keeper",
+            "/bin/busybox",
+            "stat",
+            "-c",
+            "%f:%h:%s",
+            "/workspace",
+            "/workspace/input.txt",
+            "/workspace/output.txt",
+            "/workspace/sym"
+          ],
+          "exit": 0,
+          "stdout": "41c0:2:120\n8180:1:12\n8180:2:12\na1ff:1:4\n",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "exec",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-keeper",
+            "/bin/busybox",
+            "cat",
+            "/workspace/output.txt"
+          ],
+          "exit": 0,
+          "stdout": "copied-input",
+          "stderr": ""
+        },
+        {
+          "args": [
+            "rm",
+            "-f",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-worker",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-keeper"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-keeper\n",
+          "stderr": "Error response from daemon: No such container: dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b-worker\n"
+        },
+        {
+          "args": [
+            "volume",
+            "rm",
+            "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b"
+          ],
+          "exit": 0,
+          "stdout": "dsh-quota-copy-e41e762a-e3d1-42a4-ba86-f680398dde0b\n",
+          "stderr": ""
+        }
+      ]
+    }
+  ],
+  "commands": [
+    {
+      "id": "unit-v1",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/ledger.spec.ts tests/workspace.spec.ts tests/index.spec.ts",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-quota-unit-v1.log",
+      "outputSha256": "846f9cc0abf7e38496b912f3183a88e24ff6fff424a4fa692dbcecf8a7d1e5d5"
+    },
+    {
+      "id": "typecheck-v1",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "exitCode": 2,
+      "outputPath": "/tmp/dsh-quota-typecheck-v1.log",
+      "outputSha256": "47a92cf1badc36527ec6ca3ce479e1ebe40422872df370913e0f21012b045dc6"
+    },
+    {
+      "id": "typecheck-v2",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "exitCode": 2,
+      "outputPath": "/tmp/dsh-quota-typecheck-v2.log",
+      "outputSha256": "47a92cf1badc36527ec6ca3ce479e1ebe40422872df370913e0f21012b045dc6"
+    },
+    {
+      "id": "typecheck-v3",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "exitCode": 2,
+      "outputPath": "/tmp/dsh-quota-typecheck-v3.log",
+      "outputSha256": "d24621007b8aebe1bf5f90baead7cad3dc63231fd825f51dd0e5cfcd1b8c87d8"
+    },
+    {
+      "id": "typecheck-v4",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-quota-typecheck-v4.log",
+      "outputSha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    },
+    {
+      "id": "build-v1",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation build",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-quota-build-v1.log",
+      "outputSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "id": "docker-v1",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation test",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-quota-docker-v1.log",
+      "outputSha256": "9978ecc3eca3636ab1fc81c20e8c896df0555ac64c83a275566af30c69ca42aa"
+    },
+    {
+      "id": "typecheck-v5",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-quota-typecheck-v5.log",
+      "outputSha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    },
+    {
+      "id": "docker-v2",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation test",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-quota-docker-v2.log",
+      "outputSha256": "14bf9766f7ee83775d473a8f062f2e3d9fec3de771638569941289562713aa63"
+    },
+    {
+      "id": "negative-v1",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/runner.spec.ts -t 'enforces the workspace'",
+      "exitCode": 1,
+      "outputPath": "/tmp/dsh-quota-negative-v1.log",
+      "outputSha256": "245285f2fa20845cf61a487e3909438fe97a42c9fcebe1fd4fdecb5867d21be1"
+    },
+    {
+      "id": "check-v1",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "exitCode": 1,
+      "outputPath": "/tmp/dsh-quota-check-v1.log",
+      "outputSha256": "47c3793c18889093ed28aabbbcbc73722b7a0a508d3a6aa3c7e8293d68b2abea"
+    },
+    {
+      "id": "focused-v1",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/provisioning.spec.ts tests/recovery.spec.ts tests/security.spec.ts",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-quota-focused-v1.log",
+      "outputSha256": "d978a05944d1f06ad468aff8b8ca12b39a3195ae7866e147a7b35d9144d69b2e"
+    },
+    {
+      "id": "check-v2",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-quota-check-v2.log",
+      "outputSha256": "4d0b16e8347a6e18f21d307b34d88cfb2a0549196fae2f5399d1fe997d3bd1a7"
+    }
+  ],
+  "sourceSha256": {
+    "docs/architecture.md": "560869bc31b0d0b2a2f4496364afe8e4bde52715db7dcf5cd980d73170202ef2",
+    "docs/compatibility.md": "cb01dd3511beb42f80f8ebf0458a9af50078ee4f7a7b94fa55108f036cbeb845",
+    "plugins/assistant-isolation/LICENSE": "37f12999eefa6bde963be1da5403c897ecd2736ee99988ff26693335f68606e7",
+    "plugins/assistant-isolation/README.md": "f82bf12851a975819d99ff58ebdc4e0d977d22e785aefe1b06a114583cb4ce90",
+    "plugins/assistant-isolation/cordis.patch.yml": "41443666c9a519eb69249bd14d0d1387e5d5f1a6cda225848dd1ec7c69aceb54",
+    "plugins/assistant-isolation/package.json": "ab478b9ba4bec9187d21583c483f88ad8ae17b7eb13a2585fb0dd4ee0660128a",
+    "plugins/assistant-isolation/runtime/supervisor.mjs": "f8bdf81e9ff1f4cc5bbbc8009477ac97cff08064b5cbca208de134524af63484",
+    "plugins/assistant-isolation/src/cli.ts": "3110bbc6b4e667aabad058e60cacf0e53d4929118d742dd0ea1eeab560b11dbb",
+    "plugins/assistant-isolation/src/config.ts": "1aac1916cd81fb8209b6d2e1d412326bf98b216efd09e86b5be9ffdfe4d90aa0",
+    "plugins/assistant-isolation/src/index.ts": "7b045fcc945400ffef662076e435d7723fd5fd35278efa284336b6976ebf3e30",
+    "plugins/assistant-isolation/src/ledger.ts": "7473a02f651246c13bd0d54de2db1b5ac081013dd5b033d39119281abf632a99",
+    "plugins/assistant-isolation/src/runner.ts": "ed7b5edf3e73730c8e3ec3ad66a5ed7ac3b7605970df3aa61d6a987306b22535",
+    "plugins/assistant-isolation/src/service.ts": "ef0356d74d3334f2fb52f5899fe1b4e66194b2c8c8becf7eea9108506b3d43cd",
+    "plugins/assistant-isolation/src/tools.ts": "d2313e662e5ac662222f7b6cf56c6df108081208c502ff862d4250b97348435e",
+    "plugins/assistant-isolation/src/types.ts": "260b7049c99dda76ee86c24f4437911abbcff9a4bf366ea5931676ff20bf842c",
+    "plugins/assistant-isolation/src/version.ts": "e1b18323af74400f9b81251674b87f8732fdc8009bfcad168de2b5e890c22f71",
+    "plugins/assistant-isolation/src/workspace.ts": "51aac5d2dcc39c0d6925ace1e549154cc2509f7fb7eb223a7a5b496de8a93d72",
+    "plugins/assistant-isolation/tests/artifacts.spec.ts": "c876e4323ddb04406ada1a56e5bb1c9a22483c402310c342886e5f302c78a8b6",
+    "plugins/assistant-isolation/tests/crash.spec.ts": "cc43fefda26f8ed31f315ed92edc30267a7221ae11c31aaedacc4861716e216e",
+    "plugins/assistant-isolation/tests/index.spec.ts": "db070cb32e0bc746b0116fe6a0a0d6aab0c056840b2a5c0591d652936bbba5a8",
+    "plugins/assistant-isolation/tests/ledger.spec.ts": "19eb7bfb3acae35ec25545bab1a6acb320f10b366c2c00b9e2c9e1801d26e26a",
+    "plugins/assistant-isolation/tests/provisioning.spec.ts": "01d48fb324e1ff4e7287db85427656c6a5b2537e55b237e49b027789d48d9c19",
+    "plugins/assistant-isolation/tests/recovery.spec.ts": "d1f8109834fec9c8f87c4e7b8e9b91d581ce9cf3ec91442598de5e13eb9289ea",
+    "plugins/assistant-isolation/tests/runner.spec.ts": "71f34bfa13a1ad60b6404c14bee2a9e0480489ce7af3f458ca36124b59031dca",
+    "plugins/assistant-isolation/tests/security.spec.ts": "e8c05383293174a897bb681663f6f2c960889e8c4d55fec9d133a396748e493d",
+    "plugins/assistant-isolation/tests/service.spec.ts": "ade7970249ae96a5c1fc713f12b71f8193671a1480f19da41a28b243c8d6dad9",
+    "plugins/assistant-isolation/tests/workspace.spec.ts": "eb0abf97073871e8d0be9df9a4f7d676ac5621177bafe4191cd1292ab5b59955",
+    "plugins/assistant-isolation/tsconfig.build.json": "b8b6960a9b3403690455e9c7314abc6b86d3832c6342ee43a1faaf1d3af52292",
+    "plugins/assistant-isolation/tsconfig.json": "e5d869d2ba42bc4d7e8a136364ae61b919767fceb9e6a3da084342aadc4f132a"
+  },
+  "independentReview": {
+    "status": "code review performed; final evidence review interrupted",
+    "readOnly": true,
+    "findings": "Reviewer identified unsafe release of ambiguous creation reservations after restart; root fixed it and added real recovery coverage. Reviewer subsequently confirmed the changed recovery condition.",
+    "limitation": "Subagent ended with a usage-limit error before final evidence/hash/pack review; no final independent PASS claimed.",
+    "rootAcceptance": "Root verified full pnpm check exit 0, required pack contents, source/log/probe hashes and negative-control restoration; full objective remains incomplete."
+  },
+  "c2c": {
+    "taskId": "c2c_6a42",
+    "localRecords": 13,
+    "chatgptWebReview": false
+  },
+  "remaining": [
+    "Verified daemon-epoch/operator reconciliation for ambiguous create receipts; these cannot be released by current absence alone.",
+    "Continuous unknown cleanup, cumulative audit/result retention, runtime bootstrap and real profile/model deployment.",
+    "Independent external action/credential broker, finite short action leases without per-action approval, rollback/compensation.",
+    "Pool applies to one state root and does not cap unrelated Docker/kernel overhead or other state roots; keeper stop/restart does not preserve tmpfs data.",
+    "Complete all remaining original 18 work-package acceptance requirements; no minimum-day or two-week observation gate."
+  ]
+}

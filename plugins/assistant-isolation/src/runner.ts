@@ -15,6 +15,7 @@ interface SupervisorConfig {
   containerName: string
   image: string
   workspacePath: string
+  artifacts: string[]
   command: string
   deadline: number
   limits: IsolationLimits
@@ -38,9 +39,12 @@ function failure(reason: string, quiescent = true): IsolationProcessResult {
 }
 
 function validLimits(limits: IsolationLimits): boolean {
-  return [limits.maxDurationMs, limits.maxInputBytes, limits.maxOutputBytes, limits.maxArtifactBytes,
-    limits.maxFiles, limits.memoryMiB, limits.pidsLimit, limits.cpus]
-    .every(value => Number.isFinite(value) && value > 0)
+  const maxima: IsolationLimits = { maxDurationMs: 300_000, maxInputBytes: 1_048_576, maxOutputBytes: 262_144,
+    maxArtifactBytes: 1_048_576, maxFiles: 128, memoryMiB: 4096, pidsLimit: 512, cpus: 8, workspaceMiB: 1024, workspaceInodes: 65_536 }
+  return Object.entries(maxima).every(([key, maximum]) => {
+    const value = limits[key as keyof IsolationLimits]
+    return Number.isFinite(value) && value > 0 && value <= maximum && (key === 'cpus' ? value >= 0.1 : Number.isSafeInteger(value))
+  })
 }
 
 function validate(input: IsolationRunInput): string | undefined {
@@ -48,6 +52,7 @@ function validate(input: IsolationRunInput): string | undefined {
   if (!IMAGE.test(input.image)) return 'image-must-be-a-sha256-digest'
   if (!input.dockerPath.startsWith('/')) return 'docker-path-must-be-absolute'
   if (!input.workspacePath.startsWith('/') || /[\p{Cc},]/u.test(input.workspacePath)) return 'invalid-workspace-path'
+  if (input.artifacts !== undefined && (!Array.isArray(input.artifacts) || input.artifacts.length > input.limits.maxFiles || !input.artifacts.every(path => typeof path === 'string' && path.length > 0 && path.length <= 4096 && !path.startsWith('/') && !/[\p{Cc}\\]/u.test(path) && path.split('/').every(part => part !== '' && part !== '.' && part !== '..')))) return 'invalid-artifacts'
   if (typeof input.command !== 'string' || input.command.length === 0) return 'invalid-command'
   if (!Number.isSafeInteger(input.deadline) || input.deadline <= Date.now()) return 'deadline-expired'
   if (!validLimits(input.limits)) return 'invalid-limits'
@@ -74,6 +79,7 @@ export async function runIsolatedProcess(input: IsolationRunInput): Promise<Isol
     containerName: input.containerName,
     image: input.image,
     workspacePath: input.workspacePath,
+    artifacts: input.artifacts ?? [],
     command: input.command,
     deadline: input.deadline,
     limits: input.limits,
@@ -95,11 +101,13 @@ export async function runIsolatedProcess(input: IsolationRunInput): Promise<Isol
     let ready = false
     let cancelSent = false
     let grace: NodeJS.Timeout | undefined
+    let deadlineTimer: NodeJS.Timeout | undefined
 
     const settle = (result: IsolationProcessResult): void => {
       if (settled) return
       settled = true
       if (grace !== undefined) clearTimeout(grace)
+      if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
       input.signal.removeEventListener('abort', abort)
       supervisor.removeAllListeners('message')
       supervisor.removeAllListeners('error')
@@ -116,6 +124,8 @@ export async function runIsolatedProcess(input: IsolationRunInput): Promise<Isol
     }
     const abort = (): void => cancel('aborted')
 
+    deadlineTimer = setTimeout(() => cancel('deadline-expired'), Math.max(1, input.deadline - Date.now()))
+    deadlineTimer.unref()
     input.signal.addEventListener('abort', abort, { once: true })
     supervisor.once('error', (error) => settle(failure(`supervisor-spawn-failed:${error.message}`, false)))
     supervisor.once('exit', (code, signal) => {
@@ -167,14 +177,22 @@ export async function removeIsolatedContainer(dockerPath: string, name: string):
       timer = setTimeout(() => { child.kill('SIGKILL'); finish(null, true) }, 10_000)
       timer.unref()
     })
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const removed = await invoke(['rm', '-f', name])
-      if (removed.code === 0 && !removed.timedOut) return true
-      const observed = await invoke(['inspect', '--type', 'container', name], true)
-      if (!observed.timedOut && observed.code !== 0 && /no such (object|container)/i.test(observed.stderr)) return true
-      if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 100))
+    const remove = async (kind: 'container' | 'volume', target: string): Promise<boolean> => {
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const removed = await invoke(kind === 'volume' ? ['volume', 'rm', target] : ['rm', '-f', target])
+        if (removed.code === 0 && !removed.timedOut) return true
+        const observed = await invoke(['inspect', '--type', kind, target], true)
+        if (!observed.timedOut && observed.code !== 0 && /no such (object|container|volume)/i.test(observed.stderr)) return true
+        if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 100))
+      }
+      return false
     }
-    return false
+    // The three names are derived exclusively from the validated worker name.
+    // Never report recovery until each resource is positively gone.
+    const worker = await remove('container', name)
+    const keeper = await remove('container', `${name}-keeper`)
+    const volume = await remove('volume', `${name}-workspace`)
+    return worker && keeper && volume
   } catch { return false } finally {
     if (configDirectory !== undefined) await rm(configDirectory, { recursive: true, force: true }).catch(() => undefined)
   }

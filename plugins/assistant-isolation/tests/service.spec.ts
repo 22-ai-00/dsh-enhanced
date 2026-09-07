@@ -6,7 +6,7 @@ import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -49,12 +49,23 @@ class IsolationToolAdapter extends LlmAdapter {
   }
 }
 
-async function marker(workspaces: string): Promise<void> {
-  for (let remaining = 100; remaining > 0; remaining -= 1) {
-    const entries = await readdir(workspaces).catch(() => [])
-    for (const entry of entries) if ((await readdir(join(workspaces, entry, 'workspace'), { encoding: 'utf8' }).catch((): string[] => [])).includes('started')) return
-    await new Promise(resolve => setTimeout(resolve, 50))
-  }
+async function marker(stateRoot: string): Promise<void> {
+  const database = new DatabaseSync(join(stateRoot, 'ledger.sqlite'))
+  try {
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      const rows = database.prepare("SELECT container_name FROM isolation_jobs WHERE status = 'running'").all() as Array<{ container_name: string }>
+      for (const row of rows) {
+        try {
+          await promisify(execFile)(process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker',
+            ['-H', 'unix:///var/run/docker.sock', 'exec', row.container_name, '/bin/busybox', 'test', '-f', '/workspace/started'],
+            { timeout: 2000, maxBuffer: 4096, env: { PATH: process.env.PATH, LANG: 'C' } })
+          return
+        } catch { /* A running ledger CAS can precede Docker start; observe the actual worker. */ }
+      }
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+  } finally { database.close() }
   throw new Error('isolated command did not create its start marker')
 }
 
@@ -89,7 +100,7 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
         async execute() { hostMarker = true; return {} },
       }))
       servicePlugin = await ctx.plugin(AssistantIsolationService, {
-        stateRoot, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', maxConcurrentJobs: 1,
+        stateRoot, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', maxConcurrentJobs: 2, maxReservedMemoryMiB: 352, maxReservedWorkspaceInodes: 4096,
         grants: [{ id: 'offline', revision: 1, principalDigest: isolationPrincipalDigest('owner'), principalRecordId: 'record-owner', principalVersion: 1,
           workspace: project, agentPreset: 'primary', expiresAt: Date.now() + 120_000, maxRuns: 20, maxTotalDurationMs: 600_000 }],
       }) as unknown as { dispose(): Promise<void> }
@@ -120,7 +131,13 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
 
       adapter.command = 'touch started; sleep 30'
       agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Start then cancel.' }] }))
-      await marker(join(stateRoot, 'workspaces'))
+      await marker(stateRoot)
+      await expect(ctx.assistantIsolation.run(agent, { grantId: 'offline', idempotencyKey: 'pool-denied', command: 'printf must-not-run' }, signal)).rejects.toThrow(/resource|reservation|pool/i)
+      const poolDb = new DatabaseSync(join(stateRoot, 'ledger.sqlite'))
+      try {
+        expect(poolDb.prepare("SELECT COUNT(*) AS count FROM isolation_jobs WHERE idempotency_key = 'pool-denied'").get()).toMatchObject({ count: 0 })
+        expect(poolDb.prepare("SELECT reserved_memory_mib, reserved_workspace_inodes FROM isolation_jobs WHERE idempotency_key = 'native-3'").get()).toMatchObject({ reserved_memory_mib: 352, reserved_workspace_inodes: 4096 })
+      } finally { poolDb.close() }
       agent.cancel({ kind: 'user' })
       await agent.whenIdle()
       // Native cancellation may suppress a tool/result projection. The private
@@ -137,7 +154,7 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
       } finally { cancelledDb.close() }
 
       const pending = ctx.assistantIsolation.run(agent, { grantId: 'offline', idempotencyKey: 'revoked-running', command: 'touch started; sleep 30', timeoutMs: 20_000 }, signal)
-      await marker(join(stateRoot, 'workspaces'))
+      await marker(stateRoot)
       const revoked = await promisify(execFile)(process.execPath, [fileURLToPath(new URL('../lib/cli.js', import.meta.url)), 'revoke', stateRoot, 'offline', '1', process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker'], {
         timeout: 15_000, maxBuffer: 16_384, env: { PATH: process.env.PATH, LANG: 'C' },
       })

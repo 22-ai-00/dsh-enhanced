@@ -7,37 +7,39 @@ const SOCKET = 'unix:///var/run/docker.sock'
 const OPERATION_TIMEOUT_MS = 10_000
 const NAME = /^dsh-isolation-[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
 const IMAGE = /^sha256:[0-9a-f]{64}$/
-
 let config
-let created = false
+let workerOwned = false
+let keeperOwned = false
+let volumeOwned = false
 let started = false
 let finalizing = false
 let complete = false
 let deadlineTimer
 let stdout = ''
 let stderr = ''
-let dockerConfigDirectory
-let creationSettled = Promise.resolve()
+let dockerDirectory
+let provisioning = Promise.resolve()
+let cancelReason
+let creationAmbiguous = false
+const workerName = () => config.containerName
+const keeperName = () => `${workerName()}-keeper`
+const volumeName = () => `${workerName()}-workspace`
 
 function environment() {
   return { PATH: process.env.PATH || '/usr/bin:/bin', LANG: 'C', LC_ALL: 'C' }
 }
-
 function send(message) {
   if (process.connected) { try { process.send(message) } catch {} }
 }
-
-function boundedText(buffer, limit) {
-  // Decode complete UTF-8 only. Invalid/binary output never expands into an
-  // unbounded sequence of replacement characters on the Host boundary.
-  try { return new TextDecoder('utf-8', { fatal: true }).decode(buffer.subarray(0, limit)) }
-  catch { return '' }
+function decode(buffer) {
+  try { return new TextDecoder('utf-8', { fatal: true }).decode(buffer) }
+  catch { return undefined }
 }
-
-function docker(args, options = {}) {
-  const limit = options.outputLimit ?? 64 * 1024
-  const timeoutMs = options.timeoutMs ?? OPERATION_TIMEOUT_MS
-  return new Promise((resolve) => {
+function succeeded(result) {
+  return result.code === 0 && !result.timeout && !result.overflow
+}
+function docker(args, { outputLimit = 65_536, timeoutMs = OPERATION_TIMEOUT_MS } = {}) {
+  return new Promise(resolve => {
     let child
     let out = Buffer.alloc(0)
     let err = Buffer.alloc(0)
@@ -45,18 +47,21 @@ function docker(args, options = {}) {
     let timeout = false
     let settled = false
     let timer
-    const finish = (value) => {
+    const finish = result => {
       if (settled) return
       settled = true
       if (timer !== undefined) clearTimeout(timer)
-      resolve({ ...value, stdout: boundedText(out, limit), stderr: boundedText(err, Math.max(0, limit - out.length)), overflow, timeout })
+      const decoded = decode(out)
+      resolve({ ...result, stdout: decoded ?? '', stderr: decode(err) ?? '', stdoutBytes: out.length,
+        stdoutUtf8: decoded !== undefined, overflow, timeout })
     }
     try {
-      child = spawn(config.dockerPath, ['--config', dockerConfigDirectory, '-H', SOCKET, ...args], { shell: false, env: environment(), stdio: ['ignore', 'pipe', 'pipe'] })
+      child = spawn(config.dockerPath, ['--config', dockerDirectory, '-H', SOCKET, ...args], {
+        shell: false, env: environment(), stdio: ['ignore', 'pipe', 'pipe'],
+      })
     } catch (error) { finish({ code: null, error: String(error) }); return }
     const collect = (target, chunk) => {
-      const available = Math.max(0, limit - out.length - err.length)
-      const kept = chunk.subarray(0, available)
+      const kept = chunk.subarray(0, Math.max(0, outputLimit - out.length - err.length))
       if (target === 'out') out = Buffer.concat([out, kept])
       else err = Buffer.concat([err, kept])
       if (kept.length !== chunk.length && !overflow) { overflow = true; child.kill('SIGTERM') }
@@ -64,123 +69,209 @@ function docker(args, options = {}) {
     child.stdout.on('data', chunk => collect('out', chunk))
     child.stderr.on('data', chunk => collect('err', chunk))
     child.once('error', error => finish({ code: null, error: error.message }))
-    child.once('exit', (code, signal) => finish({ code, signal }))
+    // close, not exit: collect the final pipe bytes before accepting an artifact.
+    child.once('close', (code, signal) => finish({ code, signal }))
     timer = setTimeout(() => { timeout = true; child.kill('SIGKILL') }, timeoutMs)
     timer.unref()
   })
 }
-
-async function inspect() {
-  const result = await docker(['inspect', '--type', 'container', '--format', '{{json .State}}', config.containerName])
-  if (result.timeout || result.overflow) return undefined
-  if (result.code !== 0) return /no such (object|container)/i.test(result.stderr) ? { missing: true } : undefined
-  try {
-    const state = JSON.parse(result.stdout.trim())
-    if (typeof state?.Running !== 'boolean') return undefined
-    return { missing: false, running: state.Running, exitCode: typeof state.ExitCode === 'number' ? state.ExitCode : undefined }
-  } catch { return undefined }
+async function absent(type, name) {
+  const result = await docker(['inspect', '--type', type, name])
+  return !result.timeout && !result.overflow && result.code !== 0
+    && /no such (object|container|volume)/i.test(result.stderr)
 }
-
-async function cleanup() {
-  if (!created) return true
-  await docker(['kill', config.containerName])
+async function erase(type, name) {
   for (let attempt = 0; attempt < 3; attempt++) {
-    // Another trusted controller/CLI may already be removing this container.
-    // A failed wait/kill during that race is not proof that it is still alive.
-    const removed = await docker(['rm', '-f', config.containerName])
-    if (removed.code === 0 && !removed.timeout && !removed.overflow) return true
-    if ((await inspect())?.missing === true) return true
+    const result = await docker(type === 'volume' ? ['volume', 'rm', name] : ['rm', '-f', name])
+    if (succeeded(result) || await absent(type, name)) return true
     if (attempt < 2) await new Promise(resolve => setTimeout(resolve, 100))
   }
   return false
 }
-
+async function removeWorker() {
+  if (!workerOwned) return true
+  await docker(['kill', workerName()])
+  return erase('container', workerName())
+}
+async function removeStorage() {
+  const keeperRemoved = !keeperOwned || await erase('container', keeperName())
+  const volumeRemoved = !volumeOwned || await erase('volume', volumeName())
+  return keeperRemoved && volumeRemoved
+}
+function artifactPath(path) {
+  return typeof path === 'string' && path.length > 0 && path.length <= 4096 && !path.startsWith('/')
+    && !/[\p{Cc}\\]/u.test(path) && path.split('/').every(part => part && part !== '.' && part !== '..')
+}
+function exportInterruption() {
+  if (cancelReason !== undefined) return cancelReason
+  return Date.now() >= config.deadline ? 'deadline-expired' : undefined
+}
+function exportTimeout() {
+  return Math.max(1, Math.min(OPERATION_TIMEOUT_MS, config.deadline - Date.now()))
+}
+async function stat(path, regular) {
+  if (exportInterruption()) return undefined
+  const result = await docker(['exec', keeperName(), '/bin/busybox', 'stat', '-c', '%f:%h:%s', '--', path], { timeoutMs: exportTimeout() })
+  if (!succeeded(result) || exportInterruption() || !/^[0-9a-fA-F]+:\d+:\d+\n?$/.test(result.stdout)) return undefined
+  const fields = result.stdout.trim().split(':')
+  const mode = Number.parseInt(fields[0], 16)
+  const links = Number(fields[1])
+  const size = Number(fields[2])
+  if (![mode, links, size].every(Number.isSafeInteger)) return undefined
+  // BusyBox stat without -L examines the link itself. Each parent is examined
+  // separately after worker removal, so no worker can race path resolution.
+  if (regular ? (mode & 0o170000) !== 0o100000 || links !== 1 : (mode & 0o170000) !== 0o40000) return undefined
+  return { size }
+}
+async function exportArtifacts() {
+  const files = []
+  let total = 0
+  for (const path of config.artifacts) {
+    if (exportInterruption() || !artifactPath(path)) return undefined
+    let parent = '/workspace'
+    if (!await stat(parent, false)) return undefined
+    const parts = path.split('/')
+    for (const part of parts.slice(0, -1)) {
+      parent += `/${part}`
+      if (!await stat(parent, false)) return undefined
+    }
+    const target = `/workspace/${path}`
+    const entry = await stat(target, true)
+    if (!entry || entry.size > config.limits.maxArtifactBytes - total || exportInterruption()) return undefined
+    const result = await docker(['exec', keeperName(), '/bin/busybox', 'cat', '--', target], {
+      outputLimit: entry.size, timeoutMs: exportTimeout(),
+    })
+    if (!succeeded(result) || !result.stdoutUtf8 || result.stdoutBytes !== entry.size || exportInterruption()) return undefined
+    total += entry.size
+    files.push({ path, content: result.stdout })
+  }
+  return files
+}
 async function finish(status, reason, exitCode) {
   if (finalizing) return
   finalizing = true
   if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
-  // A create request can still reach the daemon after the parent times out.
-  // Do not inspect/remove (or report quiescence) until that bounded request has
-  // settled, otherwise a late successful create could become an orphan.
-  await creationSettled
-  const quiescent = await cleanup()
-  if (dockerConfigDirectory !== undefined) await rm(dockerConfigDirectory, { recursive: true, force: true }).catch(() => undefined)
+  // Cleanup cannot overtake a create/copy request still owned by this process.
+  await provisioning
+  const workerRemoved = await removeWorker()
+  let artifacts = []
+  if (status === 'succeeded' && workerRemoved && keeperOwned) {
+    const exported = await exportArtifacts()
+    const interrupted = exportInterruption()
+    if (interrupted !== undefined) {
+      status = interrupted === 'deadline-expired' ? 'timed-out' : 'cancelled'
+      reason = interrupted
+    } else if (exported === undefined) {
+      status = 'failed'
+      reason = 'artifact-export-rejected'
+    } else artifacts = exported
+  }
+  const storageRemoved = await removeStorage()
+  // A timed-out CLI can leave an in-flight daemon create request. A momentary
+  // absence is not a release receipt for such a request; retain its reservation.
+  const quiescent = workerRemoved && storageRemoved && !creationAmbiguous
+  if (creationAmbiguous) reason = 'docker-creation-unconfirmed'
+  if (!quiescent || status !== 'succeeded') artifacts = []
+  if (dockerDirectory !== undefined) await rm(dockerDirectory, { recursive: true, force: true }).catch(() => undefined)
   complete = true
-  send({ type: 'result', result: { status: quiescent ? status : 'unknown', quiescent, ...(exitCode === undefined ? {} : { exitCode }), stdout, stderr, ...(reason === undefined ? {} : { reason }) } })
+  send({ type: 'result', result: { status: quiescent ? status : 'unknown', quiescent,
+    ...(exitCode === undefined ? {} : { exitCode }), stdout, stderr, artifacts,
+    ...(reason === undefined ? {} : { reason }) } })
   if (process.connected) process.disconnect()
 }
-
 async function begin() {
-  const attached = await docker(['start', '--attach', config.containerName], {
-    outputLimit: config.limits.maxOutputBytes,
-    timeoutMs: Math.max(1, config.deadline - Date.now()),
+  const attached = await docker(['start', '--attach', workerName()], {
+    outputLimit: config.limits.maxOutputBytes, timeoutMs: Math.max(1, config.deadline - Date.now()),
   })
   stdout = attached.stdout
   stderr = attached.stderr
   if (finalizing) return
   if (attached.overflow) { await finish('failed', 'output-limit-exceeded'); return }
   if (attached.timeout) { await finish('unknown', 'docker-start-timeout'); return }
-  const state = await inspect()
-  if (state === undefined || state.missing || state.running) { await finish('unknown', 'container-state-unconfirmed'); return }
-  await finish(state.exitCode === 0 ? 'succeeded' : 'failed', state.exitCode === 0 ? undefined : 'container-exited-nonzero', state.exitCode)
+  const inspected = await docker(['inspect', '--type', 'container', '--format', '{{json .State}}', workerName()])
+  let state
+  try { state = JSON.parse(inspected.stdout) } catch {}
+  if (!succeeded(inspected) || typeof state?.Running !== 'boolean' || state.Running || !Number.isSafeInteger(state.ExitCode)) {
+    await finish('unknown', 'container-state-unconfirmed')
+    return
+  }
+  await finish(state.ExitCode === 0 ? 'succeeded' : 'failed', state.ExitCode === 0 ? undefined : 'container-exited-nonzero', state.ExitCode)
 }
-
 function valid(input) {
   return input && NAME.test(input.containerName) && IMAGE.test(input.image)
     && typeof input.dockerPath === 'string' && input.dockerPath.startsWith('/')
     && typeof input.workspacePath === 'string' && input.workspacePath.startsWith('/') && !/[\p{Cc},]/u.test(input.workspacePath)
     && typeof input.command === 'string' && Number.isSafeInteger(input.deadline)
     && input.limits && Object.values(input.limits).every(value => typeof value === 'number' && Number.isFinite(value) && value > 0)
+    && Array.isArray(input.artifacts) && input.artifacts.length <= input.limits.maxFiles && input.artifacts.every(artifactPath)
 }
-
-async function configure(next) {
-  if (config !== undefined || !valid(next)) { send({ type: 'error', reason: 'invalid-supervisor-config' }); return }
-  if (process.platform !== 'linux' || typeof process.getuid !== 'function' || typeof process.getgid !== 'function' || process.getuid() === 0) { send({ type: 'error', reason: 'non-root-linux-host-required' }); return }
-  config = next
+function sandbox(keeper = false) {
+  const memory = keeper ? '32m' : `${Math.floor(config.limits.memoryMiB)}m`
+  const flags = ['--network', 'none', '--read-only', '--log-driver', 'none', '--cap-drop', 'ALL',
+    '--security-opt', 'no-new-privileges', '--user', `${process.getuid()}:${process.getgid()}`,
+    '--pids-limit', keeper ? '16' : String(Math.floor(config.limits.pidsLimit)), '--memory', memory, '--memory-swap', memory,
+    '--shm-size', '1m', '--cpus', String(config.limits.cpus)]
+  if (!keeper) {
+    const tmpMiB = Math.max(1, Math.min(64, Math.floor(config.limits.memoryMiB / 4)))
+    flags.push('--tmpfs', `/tmp:rw,nosuid,nodev,size=${tmpMiB}m,nr_inodes=${Math.floor(config.limits.workspaceInodes)}`)
+  }
+  return flags
+}
+function creationResult(result) {
+  if (result.timeout || result.overflow || result.code === null) creationAmbiguous = true
+  return !finalizing && succeeded(result)
+}
+async function provision() {
+  const inspected = await docker(['image', 'inspect', '--format', '{{json .Config.Volumes}}', config.image])
+  if (finalizing || !succeeded(inspected) || !['null', '{}'].includes(inspected.stdout.trim())) return false
+  // Mark each unique resource owned before sending its create request, including
+  // the timeout / lost-ack window. No resource name comes from the model.
+  volumeOwned = true
+  const options = `o=size=${Math.floor(config.limits.workspaceMiB)}m,nr_inodes=${Math.floor(config.limits.workspaceInodes)},uid=${process.getuid()},gid=${process.getgid()},mode=0700,nosuid,nodev`
+  if (!creationResult(await docker(['volume', 'create', '--driver', 'local', '--opt', 'type=tmpfs', '--opt', 'device=tmpfs', '--opt', options, volumeName()]))) return false
+  keeperOwned = true
+  if (!creationResult(await docker(['create', '--pull', 'never', '--name', keeperName(), ...sandbox(true),
+    '--mount', `type=volume,src=${volumeName()},dst=/workspace,volume-nocopy`, '--entrypoint', '/bin/busybox', config.image, 'sleep', '3600']))) return false
+  if (!succeeded(await docker(['start', keeperName()])) || finalizing) return false
+  if (!succeeded(await docker(['cp', '-a', `${config.workspacePath}/.`, `${keeperName()}:/workspace`])) || finalizing) return false
+  workerOwned = true
+  return creationResult(await docker(['create', '--pull', 'never', '--name', workerName(), ...sandbox(),
+    '--mount', `type=volume,src=${volumeName()},dst=/workspace,volume-nocopy`, '--workdir', '/workspace',
+    '--entrypoint', '/bin/sh', config.image, '-c', config.command]))
+}
+async function configure(input) {
+  if (config !== undefined || !valid(input)) { send({ type: 'error', reason: 'invalid-supervisor-config' }); return }
+  if (process.platform !== 'linux' || typeof process.getuid !== 'function' || typeof process.getgid !== 'function' || process.getuid() === 0) {
+    send({ type: 'error', reason: 'non-root-linux-host-required' })
+    return
+  }
+  config = input
   try {
-    dockerConfigDirectory = await mkdtemp(join(tmpdir(), 'dsh-isolation-docker-'))
-    await chmod(dockerConfigDirectory, 0o700)
-  } catch {
-    await finish('failed', 'docker-config-directory-unavailable')
-    return
-  }
-  if (finalizing) {
-    await rm(dockerConfigDirectory, { recursive: true, force: true }).catch(() => undefined)
-    return
-  }
-  const remaining = config.deadline - Date.now()
-  if (remaining <= 0) { await finish('timed-out', 'deadline-expired-before-create'); return }
-  deadlineTimer = setTimeout(() => { void finish('timed-out', 'deadline-expired') }, remaining)
+    dockerDirectory = await mkdtemp(join(tmpdir(), 'dsh-isolation-docker-'))
+    await chmod(dockerDirectory, 0o700)
+  } catch { await finish('failed', 'docker-config-directory-unavailable'); return }
+  if (finalizing) { await rm(dockerDirectory, { recursive: true, force: true }).catch(() => undefined); return }
+  if (config.deadline <= Date.now()) { await finish('timed-out', 'deadline-expired-before-create'); return }
+  deadlineTimer = setTimeout(() => { void finish('timed-out', 'deadline-expired') }, config.deadline - Date.now())
   deadlineTimer.unref()
-  const memory = `${Math.floor(config.limits.memoryMiB)}m`
-  const tmpfsMiB = Math.max(1, Math.min(64, Math.floor(config.limits.memoryMiB / 4)))
-  let markCreationSettled
-  creationSettled = new Promise(resolve => { markCreationSettled = resolve })
-  // Treat an in-flight create as owned. cleanup() will inspect the unique name
-  // after the bounded CLI operation settles, whether create succeeded or not.
-  created = true
-  const createdResult = await docker([
-    'create', '--pull', 'never', '--name', config.containerName, '--network', 'none', '--read-only',
-    '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', `${process.getuid()}:${process.getgid()}`,
-    '--pids-limit', String(Math.floor(config.limits.pidsLimit)), '--memory', memory, '--memory-swap', memory,
-    '--cpus', String(config.limits.cpus), '--tmpfs', `/tmp:rw,nosuid,nodev,size=${tmpfsMiB}m`,
-    '--mount', `type=bind,src=${config.workspacePath},dst=/workspace,readonly=false`, '--workdir', '/workspace',
-    '--entrypoint', '/bin/sh', config.image, '-c', config.command,
-  ])
-  markCreationSettled()
+  let markSettled
+  provisioning = new Promise(resolve => { markSettled = resolve })
+  let prepared = false
+  try { prepared = await provision() } finally { markSettled() }
   if (finalizing) return
-  if (createdResult.code !== 0 || createdResult.timeout || createdResult.overflow) {
-    await finish('failed', createdResult.timeout ? 'docker-create-timeout' : 'docker-create-failed')
-    return
-  }
+  if (!prepared) { await finish('failed', 'docker-create-failed'); return }
   if (!process.connected) { await finish('unknown', 'parent-disconnected-before-authorization'); return }
   send({ type: 'ready' })
 }
-
 process.on('message', message => {
   if (!message || typeof message !== 'object') return
   if (message.type === 'configure') void configure(message.config)
   else if (message.type === 'start' && config !== undefined && !finalizing && !started) { started = true; void begin() }
-  else if (message.type === 'cancel' && config !== undefined) void finish('cancelled', typeof message.reason === 'string' ? message.reason : 'cancelled')
+  else if (message.type === 'cancel' && config !== undefined) {
+    cancelReason = typeof message.reason === 'string' ? message.reason : 'cancelled'
+    void finish(cancelReason === 'deadline-expired' ? 'timed-out' : 'cancelled', cancelReason)
+  }
 })
-process.on('disconnect', () => { if (config !== undefined && !complete) void finish('unknown', 'parent-ipc-disconnected') })
+process.on('disconnect', () => {
+  if (config !== undefined && !complete) { cancelReason = 'parent-ipc-disconnected'; void finish('unknown', cancelReason) }
+})

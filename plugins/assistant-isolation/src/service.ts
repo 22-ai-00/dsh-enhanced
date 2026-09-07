@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import { Config, validateConfig } from './config.js'
 import { IsolationLedger, type IsolationControllerAuthority } from './ledger.js'
 import { removeIsolatedContainer, runIsolatedProcess } from './runner.js'
-import { collectArtifacts, normalizeRequest, stageWorkspace } from './workspace.js'
+import { normalizeRequest, stageWorkspace } from './workspace.js'
 import { registerIsolationTools } from './tools.js'
 import type { IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
 
@@ -19,7 +19,7 @@ const digest = (value: unknown): string => createHash('sha256').update(JSON.stri
 const controllerTtlMs = 30_000
 declare module '@deepseek-ai/cordis' { interface Context { assistantIsolation: AssistantIsolationService } }
 
-/** Trusted Host broker. Only the one-job scratch directory crosses into Docker. */
+/** Trusted Host broker. Only bounded input copies cross into the job-specific Docker volume. */
 export class AssistantIsolationService extends Service {
   static Config = Config
   readonly #config: ReturnType<typeof validateConfig>
@@ -87,7 +87,10 @@ export class AssistantIsolationService extends Service {
       if (page.length === 0) break
       cursor = page.at(-1)!.id
       for (const job of page) {
-        const quiescent = await removeIsolatedContainer(this.#config.dockerPath, job.containerName)
+        const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName)
+        // An absent object does not prove a timed-out daemon create request
+        // completed. Restart must not erase that uncertainty or free its pool.
+        const quiescent = removed && job.result?.reason !== 'docker-creation-unconfirmed'
         const result: IsolationResult = job.result ? { ...job.result, quiescent } : {
           jobId: job.id, status: 'unknown', quiescent, stdout: '', stderr: '', artifacts: [], reason: 'controller-recovery-no-replay',
         }
@@ -104,6 +107,9 @@ export class AssistantIsolationService extends Service {
     const identity = this.#identity(agent, request.grantId)
     const prepared = this.#ledger.prepare({ identity, sessionId: String(agent!.session.id), grantId: request.grantId,
       idempotencyKey: request.idempotencyKey, requestDigest: digest({ request, image: this.#config.image, limits: this.#config.limits }),
+      resourceReservation: { memoryMiB: this.#config.limits.memoryMiB + this.#config.limits.workspaceMiB + 32,
+        workspaceInodes: this.#config.limits.workspaceInodes, maxMemoryMiB: this.#config.maxReservedMemoryMiB,
+        maxWorkspaceInodes: this.#config.maxReservedWorkspaceInodes },
       durationMs: request.timeoutMs!, maxActiveJobs: this.#config.maxConcurrentJobs, authority: this.#authority })
     if (!prepared.created) {
       const current = this.#jobs.get(prepared.job.id)
@@ -140,7 +146,7 @@ export class AssistantIsolationService extends Service {
       if (!authorized()) throw new Error('authorization-denied-before-create')
       mayHaveCreated = true
       const processResult = await runIsolatedProcess({ jobId: job.id, containerName: job.containerName, image: this.#config.image,
-        dockerPath: this.#config.dockerPath, workspacePath, command: request.command, deadline: job.deadline,
+        dockerPath: this.#config.dockerPath, workspacePath, artifacts: request.artifacts ?? [], command: request.command, deadline: job.deadline,
         limits: this.#config.limits, signal: AbortSignal.any([signal, abort.signal]),
         authorizeStart: () => {
           if (!authorized()) return false
@@ -148,11 +154,7 @@ export class AssistantIsolationService extends Service {
           return true
         },
       })
-      result = { ...processResult, jobId: job.id, artifacts: [] }
-      if (result.quiescent && result.status === 'succeeded') {
-        try { result.artifacts = await collectArtifacts(workspacePath, request.artifacts ?? [], this.#config.limits) }
-        catch { result = { ...result, status: 'failed', reason: 'artifact-export-rejected', artifacts: [] } }
-      }
+      result = { ...processResult, jobId: job.id, artifacts: processResult.artifacts ?? [] }
     } catch {
       if (mayHaveCreated) result = { ...result, status: 'unknown', quiescent: await removeIsolatedContainer(this.#config.dockerPath, job.containerName), reason: 'runner-exception-no-replay' }
     }
