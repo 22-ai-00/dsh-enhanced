@@ -1,5 +1,7 @@
 # 自主智能体目标：跨设备交接
 
+> 2026-09-07 最新接线：显式 `--scenario autonomy` 已接入有限离线 Web owner 安装、生产 Docker probe、幂等 grant 与原生隔离工具预授权。真实安装揭示并修复了 Isolation/Actions default export 丢失可信插件名的问题。当前证据与限制见[落地账本](agent-autonomy-implementation.md)及[安装证据](evidence/autonomy-install-2026-09-07.json)；完整目标仍进行中，下一步接可信隔离 artifact 到 Goals/Verifier。长期主动性观察与按天估算均不设交付等待期。
+
 > 有限动作 broker 更新（2026-09-07）：新增实验性 `assistant-actions`，可信 Host 通过短期凭据 lease，只向 operator 精确授权的 GitHub 仓库/分支/文件执行带 expected-head 的原子 commit。持久动作账本保留未知结果、阻止同 key 重放及同目的地/旧 head 的新 key 重试；撤权不承诺撤销已送达的提交。真实 ToolRuntime、Isolation 路由、Policy、受保护凭据文件和本地 HTTP 协议夹具已组合验证；没有调用真实 GitHub mutation。最终全仓与独立结论见落地账本末尾及[动作证据](evidence/action-broker-2026-09-07.json)。完整 18 项继续推进。
 
 > 隔离存储更新（2026-09-07）：schema v5 新增全状态目录观测准入、有限记录数和持久 storage reservation。结果正文清理默认关闭，显式启用后仅处理已确认停止的已知终态，保留原结果摘要、清理标记、幂等记录和累计预算；所有 unknown 正文保留。Host 后台与独立 `dsh-isolation maintain` 共用有界维护，WAL 忙时保留读者，SQLite freelist 不抵扣暂存预留。当前保护不是文件系统硬配额；最新验证与限制见落地账本末尾及[存储证据](evidence/isolation-storage-2026-09-07.json)。全部 18 项仍未完成，按依赖与验证继续，不按人工天/周等待。

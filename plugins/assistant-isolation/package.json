@@ -90,7 +90,8 @@
     "@deepseek-ai/dsh-agent-loop": "catalog:",
     "@deepseek-ai/dsh-llm": "catalog:",
     "@deepseek-ai/dsh-session-projection": "catalog:",
-    "@deepseek-ai/dsh-system-prompt": "catalog:"
+    "@deepseek-ai/dsh-system-prompt": "catalog:",
+    "@deepseek-ai/dsh-user-approval": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:"

@@ -1,0 +1,263 @@
+{
+  "schema": "autonomy-install-evidence/v1",
+  "recordedAt": "2026-09-07T16:45:31.872107+00:00",
+  "baseCommit": "fc112376f2193bf943dc070a54431ff36f5a49cd",
+  "scope": "WP17 finite offline Web installation; WP08-10 native preauthorization and grant-operation budget corrections. Full 18-work-package goal remains active.",
+  "sourceHashes": {
+    "README.md": "17c5abccb75c0fc81835f22d31aaf07bafbd2555ad691cfa1d6a37672a150b52",
+    "docs/agent-autonomy-implementation.md": "c4c40e6a3931d15df4c6da24b1423bfd2817c693da4e222d69b3f862f6d108cb",
+    "docs/autonomy-handoff-2026-09-06.md": "8ab3bbffb2b0c23b632d357cf98fe6bc3a724815bc6cdcfa7c1c356535d51b98",
+    "docs/compatibility.md": "e1f8713370aeecf273e8c51f62dff97e4086022d9fed950de926bf4a7be2c036",
+    "package.json": "1506982568cdd89a3ddab3189c16a59df2603f0af77b6857587b73f15647861e",
+    "plugins/assistant-actions/README.md": "053d8b4610325b7b549db0021c590348e5e9f950567ad666ee6ef5434d08deed",
+    "plugins/assistant-actions/src/index.ts": "701957ec25f8b44ae0a54fac3db73d0727c6cd049a41d1b108f45420f5d31183",
+    "plugins/assistant-actions/tests/index.spec.ts": "2a52c97c15476f7b1113ca56e4567062d5b397c20c1339164456f477b3e7518f",
+    "plugins/assistant-isolation/README.md": "5b9c61a998f78ff75ba3f4026e4868872f6302445c0b875527d6c2ad124e02ec",
+    "plugins/assistant-isolation/package.json": "37cd79b8dec9a25ddd1181052df8ca12403cc31e9dcd608724f7ab12e1d90db0",
+    "plugins/assistant-isolation/src/cli.ts": "7dfe459e0784668c6d9bede1c71fb6bebf264a57e89fa42dc584e27bd76bf688",
+    "plugins/assistant-isolation/src/index.ts": "dbafacd5650c51dbb3f6923098659ef2cd67dfff0948375f8dd0ddb4e8f0eeb1",
+    "plugins/assistant-isolation/src/ledger.ts": "163d442f7197c332f447c58d73f4ef3022315e07806cca8dcfcfee00621ba648",
+    "plugins/assistant-isolation/src/probe.ts": "dc2bb2c496c6420fb418a73e5167875648c7374e99307f8e732aa1445df9ce25",
+    "plugins/assistant-isolation/src/service.ts": "2f99eeba4b8f2756dd91337cf7598900a3595b8747dfd2230b910dddce738b35",
+    "plugins/assistant-isolation/src/tools.ts": "c49f0caa4bde714ce6c89f721fb77db213506e1877c46984a842cff5fb72e75b",
+    "plugins/assistant-isolation/tests/index.spec.ts": "2eba844b448aecc39e5c4f3a213d57e4ca9052e6b1cdcf81c64bdb54ebeac556",
+    "plugins/assistant-isolation/tests/service.spec.ts": "036bfa72f86a8c489e5a75a0bd3d3a52a1d8e5638210633d7c1a5df666cd2c72",
+    "plugins/assistant-policy/README.md": "89179a00792e796f1725ba2cd4dfe5353f61cc64de9d9a8f77a3cbfcc6d25a81",
+    "plugins/assistant-policy/src/service.ts": "049b43087363f693d0037da11e2bb8b1e9c2e12233f72a235be4fa434f153651",
+    "plugins/assistant-policy/tests/preauthorized-tool.spec.ts": "3e7cd3f1333cd0559d0e1ce5593360a256ce0817149dc4c72486ba30e7bf5b07",
+    "plugins/assistant-web-owner/README.md": "2117f2e593ca09fc269eb7d0bd4f129fcffde386b4cd7f5071bf95626c07884a",
+    "plugins/assistant-web-owner/package.json": "e1c5c6ebe6d0ae64586559397578d349d1ab04efaebd6937c58a5c25be080f76",
+    "plugins/assistant-web-owner/src/autonomy.ts": "feb90fe50746d320b2c66e36c0e89370b53d203ae774a2cccfeb05e8bc4d66f9",
+    "plugins/assistant-web-owner/src/setup.ts": "41c05c581bbb709fedf5460e439a4e62add880c495c00b94d0afcc4d7551e941",
+    "plugins/assistant-web-owner/tests/autonomy.spec.ts": "49b34f22460815959654e890ef5ba3f6b4552945a2054240f82e726378496249",
+    "pnpm-lock.yaml": "7ed74897a617f241aca12fd27a42cd3ca2cc946ffc12e305e32e1a80b1ea8450",
+    "scripts/e2e/README.md": "b83ece41dcb498dba039057a9c573c4182751290adf3e74d8b0cfbe36c9bde0a",
+    "scripts/e2e/autonomy-model.mjs": "bf7c898a93cbe426a67cd8da9310cc1635348f5af905450a9ed55e76a8d71ee6",
+    "scripts/e2e/autonomy.spec.mjs": "d2b9fa3a6a78f6fda1202964bbf1283c83247a844c94c51dc14d6b7eece99d68",
+    "scripts/e2e/playwright-autonomy.config.mjs": "a48f77e3890104f72401d290dbfe8b502d6095b4270ec8e8e210d31ec4813bb0",
+    "scripts/install/README.md": "50f33f2f9eeabd217558eb025efa9fa2cf4d5d9ce4d04aa061a5e9dc48289114",
+    "scripts/install/common.sh": "fd8ac9495039f458871918eb59be121f20029d106f9fe5d5b7af6af29648f89c",
+    "tests/installers-autonomy.spec.ts": "cff54c777ddaae521ad56a0cf3fb74b66f3daea3189c2950acdc877bb3293be7"
+  },
+  "commands": [
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-policy build && CI=true pnpm --filter @dsh-enhanced/assistant-isolation build && CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "log": "/tmp/dsh-autonomy-install-initial-build.log",
+      "exitCode": 2,
+      "sha256": "9218895845c77a680d56cb8df0c5682af128993377becb2cbdd159aa7e44405f",
+      "exitFile": "/tmp/dsh-autonomy-install-initial-build.log.exit",
+      "exitSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-actions exec vitest run tests/service.spec.ts",
+      "log": "/tmp/dsh-autonomy-install-integration-initial.log",
+      "exitCode": 0,
+      "sha256": "7ae8e6e8d5d81b403780fe69592c66d5635f828678c1d4e50837273d96fb8d78",
+      "exitFile": "/tmp/dsh-autonomy-install-integration-initial.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true pnpm install --no-frozen-lockfile --ignore-scripts && CI=true pnpm --filter @dsh-enhanced/assistant-isolation build && CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck && CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/service.spec.ts",
+      "log": "/tmp/dsh-autonomy-install-isolation-focused.log",
+      "exitCode": 1,
+      "sha256": "87e6c30a50cb1300a438b39e178ff542219bd65662d1c844d7332cf6e6f7e268",
+      "exitFile": "/tmp/dsh-autonomy-install-isolation-focused.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/service.spec.ts",
+      "log": "/tmp/dsh-autonomy-install-isolation-focused-v2.log",
+      "exitCode": 1,
+      "sha256": "e8223f711729e865726623ff17c03009025a39a4970a7327c3dc281b86bca11d",
+      "exitFile": "/tmp/dsh-autonomy-install-isolation-focused-v2.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/service.spec.ts -t \"record ceiling\"",
+      "log": "/tmp/dsh-autonomy-install-predicate-diagnostic.log",
+      "exitCode": 1,
+      "sha256": "922bb4e7d4022aa25f0d7510be8ca7f6a36c3ae9536ce1bd900fb6370968f514",
+      "exitFile": "/tmp/dsh-autonomy-install-predicate-diagnostic.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation build && CI=true pnpm --filter @dsh-enhanced/assistant-web-owner build && CI=true pnpm --filter @dsh-enhanced/assistant-web-owner typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-web-owner test && CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/service.spec.ts",
+      "log": "/tmp/dsh-autonomy-install-focused-v3.log",
+      "exitCode": 1,
+      "sha256": "beddfa311f12158fd7c0c79dcc98b72901bb8aec9806ff4c9d56a9a7bd1a73ed",
+      "exitFile": "/tmp/dsh-autonomy-install-focused-v3.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/service.spec.ts",
+      "log": "/tmp/dsh-autonomy-install-isolation-focused-v4.log",
+      "exitCode": 0,
+      "sha256": "a196f7dce34761bb840663df5ce91aa297be039dca32073deba1a3a7189f6897",
+      "exitFile": "/tmp/dsh-autonomy-install-isolation-focused-v4.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true pnpm exec vitest run tests/installers-autonomy.spec.ts tests/installers-web.spec.ts && CI=true node plugins/assistant-isolation/lib/cli.js probe sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "log": "/tmp/dsh-autonomy-install-installer-focused.log",
+      "exitCode": 0,
+      "sha256": "ff1c13a66f85e48b5b5b1619443afd70b9c5a1e43c35b02628bfde5aaf03321f",
+      "exitFile": "/tmp/dsh-autonomy-install-installer-focused.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-autonomy-install-browser-initial.log",
+      "exitCode": 1,
+      "sha256": "d45b32c3a0d62f32d907c6b4a66ada75178720fef3034bcfbfe07ad53c100ac4",
+      "exitFile": "/tmp/dsh-autonomy-install-browser-initial.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-autonomy-install-browser-v2.log",
+      "exitCode": 1,
+      "sha256": "72a5a42958cc1fdb342e0eb75bc0ac0028715e29d7ff13b43ce91e04f9255ab0",
+      "exitFile": "/tmp/dsh-autonomy-install-browser-v2.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-autonomy-install-browser-v3.log",
+      "exitCode": 1,
+      "sha256": "0d786b01c6607d4f7d86dedbbea7dfb95d1a0927530714c8b7a147e13ec0b92a",
+      "exitFile": "/tmp/dsh-autonomy-install-browser-v3.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-autonomy-install-browser-diagnostic.log",
+      "exitCode": 1,
+      "sha256": "3fb00d9148d2bb832943bf909c602e14ba20948d7682a08a4cf8de66cce64dff",
+      "exitFile": "/tmp/dsh-autonomy-install-browser-diagnostic.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-autonomy-install-browser-diagnostic-v2.log",
+      "exitCode": 1,
+      "sha256": "a80ddebe3d2d7c0743b9d1f0cc4439561f270a60492bf90bedb61b6cfff2321a",
+      "exitFile": "/tmp/dsh-autonomy-install-browser-diagnostic-v2.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-autonomy-install-browser-v4.log",
+      "exitCode": 0,
+      "sha256": "9c8a3006472a1917803fe08ffaac423b5ed7a76ade62d798420d63a58a1c21b2",
+      "exitFile": "/tmp/dsh-autonomy-install-browser-v4.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-autonomy-install-fullcheck.log",
+      "exitCode": 0,
+      "sha256": "f9c803bea2b9dd5a3014f79ee889fe1b16a9c0dfd7f4f3fc7c1c1ca99166e3a2",
+      "exitFile": "/tmp/dsh-autonomy-install-fullcheck.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true pnpm lint && CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-autonomy-install-browser-final.log",
+      "exitCode": 0,
+      "sha256": "2f5efe8fb70c4a3c57039e04e9d58af0471807406c520a173563fecac0173381",
+      "exitFile": "/tmp/dsh-autonomy-install-browser-final.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    }
+  ],
+  "browserProof": {
+    "installer": "actual local installer and repeated shipped setup",
+    "image": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+    "sessionId": "session-d477806e-5a4c-45e9-835b-96cad85d46f1",
+    "nativeTool": "isolation_run",
+    "approvals": 0,
+    "jobs": 1,
+    "prompts": 2,
+    "reservedDurationMs": 20000,
+    "result": {
+      "status": "succeeded",
+      "quiescent": true,
+      "stdout": "42",
+      "artifact": "answer.txt:42"
+    },
+    "grantExpiryPreserved": true,
+    "calls": [
+      {
+        "call": 1,
+        "type": "isolation-tool",
+        "hasActionTool": true,
+        "hasIsolationTool": true
+      },
+      {
+        "call": 2,
+        "type": "reply",
+        "hasActionTool": true,
+        "hasIsolationTool": true
+      },
+      {
+        "call": 3,
+        "type": "isolation-tool",
+        "hasActionTool": true,
+        "hasIsolationTool": true
+      },
+      {
+        "call": 4,
+        "type": "reply",
+        "hasActionTool": true,
+        "hasIsolationTool": true
+      }
+    ],
+    "model": "deterministic fixture; no real-model intelligence or full autonomy claim"
+  },
+  "browserArtifacts": {
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/host.log": "1c469d39d864a95d4ac9b0f483c8fa6dd38c29815e6a426d6a85aa3f69988468",
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/install.log": "7551881fbc525e2f76e59d66ac60d89628dc9b1ececa5e9105ace29588a6b354",
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/model.jsonl": "d2253836f5ccd09ca25f2b0d2ecc111f8b97e030694306e689afaf526043c6c8",
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/proof.json": "b82aeab045b926e4c7be24d207cbcbe4edbfcc9d1d90bf91f18ced7eaf8a77b7",
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/transport.json": "d3fe97d6d738a0463fceb5c9b7a62ddcf4c7a2b4816636b102856df3722beab0"
+  },
+  "verification": {
+    "fullCheck": "PASS",
+    "rootTests": {
+      "files": 274,
+      "tests": 3623
+    },
+    "policyTests": 193,
+    "isolationTests": 92,
+    "webOwnerTests": 16,
+    "actionsTests": 29,
+    "plugins": 27,
+    "sharedPackages": 3,
+    "dryRunPacks": 30,
+    "independentReview": {
+      "status": "PASS",
+      "reviewer": "/root/broker_explore",
+      "scope": "Finite autonomy installation and exact native Isolation preauthorization only",
+      "sourceHashesChecked": 34,
+      "commandRecordsChecked": 16,
+      "browserArtifactsChecked": 5,
+      "mismatches": 0,
+      "testsRerunByReviewer": false,
+      "readOnlyConduct": "Reviewer used read-only operations; current session permissions do not enforce a read-only sandbox."
+    }
+  },
+  "findingsFixed": [
+    "Grant-operation Policy polling previously reauthorized and could charge repeatedly; new-job-only authorization uses isolation:<jobId>. Native tool-call budgets remain separate.",
+    "Native finite-grant risk preauthorization required an instance-bound method under Cordis trace proxy.",
+    "Loader unwraps default exports: bare Service classes lost the trusted plugin name and silently rolled back Isolation/Actions tool registration. Defaults now preserve plugin metadata.",
+    "Setup now probes the effective Docker executable and captures explicit YAML fields before merging so inherited credential defaults remain correctly recognized."
+  ],
+  "failedAttempts": "Command records retain all failed fixtures/builds/browser runs. Browser prerequisites first needed an installed Chromium path and an independent preflight port; later real runtime failures exposed the default-export registration bug. Diagnostic model instrumentation was removed.",
+  "limits": [
+    "Deterministic model fixture; no real-model intelligence, verified business goal or comparative autonomy benchmark.",
+    "No GitHub action was sent and no external credential/grant was configured. Existing user profiles and daemon services were not activated or stopped.",
+    "Goal create/control/schedule remain excluded in the managed scope; trusted isolated-artifact verification and background owner wake still need integration.",
+    "Readiness proves a fixed production-runner task, not arbitrary custom resource configurations. Unknown cleanup retains private probe metadata and requires operator investigation.",
+    "No image pull, Docker provisioning, package release or complete WP17/18 delivery.",
+    "C2C c2c_a938 contains local records only; no available in-app browser and no ChatGPT web planning/review."
+  ]
+}

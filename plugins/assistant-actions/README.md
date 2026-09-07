@@ -63,3 +63,5 @@ The Host polls current authorization during an operation and aborts the HTTP req
 - Browser: none. Install scripts: standard build/prepack only; no token acquisition, image pull, infrastructure provisioning or profile activation.
 
 Tests exercise real SQLite, native ToolRuntime/Policy, Keychain, HTTP sockets, lost acknowledgments, revocation, exact-object preauthorization, and no-repeat recovery. Local HTTP servers model GitHub's protocol; they do not prove a live GitHub account/token deployment or atomic server behavior. Isolation's actual Docker suite independently covers the offline worker boundary. Full real-model repository maintenance, PR follow-up, compensated rollback and user-friendly bootstrap remain unfinished.
+
+The default export is the Cordis plugin object carrying its stable name, Config, apply and inject metadata. Programmatic construction uses the named `AssistantActionsService` export. This preserves the exact caller identity required by Policy when the DSH Loader unwraps the module default.

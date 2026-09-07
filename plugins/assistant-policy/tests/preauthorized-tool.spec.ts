@@ -92,9 +92,9 @@ async function execute(ctx: Context, owner: Agent, name = 'action_github_commit'
   })
 }
 
-function trustedActionsCaller(ctx: Context): Context {
+function trustedActionsCaller(ctx: Context, name = 'dsh-enhanced-assistant-actions'): Context {
   const plugin = () => {}
-  Object.defineProperty(plugin, 'name', { value: 'dsh-enhanced-assistant-actions' })
+  Object.defineProperty(plugin, 'name', { value: name })
   return ctx.plugin(plugin).ctx
 }
 
@@ -103,6 +103,23 @@ afterEach(async () => {
 })
 
 describe('trusted Host tool preauthorization', () => {
+  test('reserves isolation preauthorization to its exact plugin and keeps revoked grants closed', async () => {
+    const current = await fixture()
+    let executions = 0
+    let active = true
+    const tool = definition('isolation_run', () => { executions += 1 })
+    current.ctx.tools.register(tool)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), tool, () => true)).toThrow(/reserved/)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-isolation'), tool, () => active)
+    expect((await execute(current.ctx, current.owner, 'isolation_run')).isError).toBe(false)
+    expect(current.asks()).toBe(0)
+    active = false
+    expect((await execute(current.ctx, current.owner, 'isolation_run')).isError).toBe(true)
+    expect(current.asks()).toBe(1)
+    expect(executions).toBe(1)
+    await current.ctx.fiber.restart()
+  })
+
   test('executes an exact granted tool without asking, while ungranted calls still ask and fail closed', async () => {
     const current = await fixture()
     let executions = 0

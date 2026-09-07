@@ -366,6 +366,15 @@ export class IsolationLedger {
     this.#requireController(controller, this.#nowValue())
     return frozen({ checkpoint, reclaimMode: auto.auto_vacuum === 2 ? 'incremental' : 'page-reuse' })
   }
+  /** Read-only current grant check for the exact native tool preauthorization. */
+  permitsGrant(value: IsolationIdentity, grantId: string): boolean {
+    const requested = identity(value)
+    const current = this.#grant(grantId)
+    return !!current && current.revoked === 0 && current.expires_at > this.#nowValue()
+      && current.principal_digest === requested.principalDigest && current.principal_record_id === requested.principalRecordId
+      && current.principal_version === requested.principalVersion && current.workspace === requested.workspace
+      && current.agent_preset === requested.agentPreset
+  }
   usable(jobId: string): boolean { const job = this.#job(jobId); if (!job || !['prepared', 'running'].includes(job.status) || job.deadline <= this.#nowValue()) return false; const current = this.#grant(job.grantId); return !!current && !current.revoked && current.revision === job.grantRevision && current.expires_at > this.#nowValue() && current.principal_digest === job.identity.principalDigest && current.principal_record_id === job.identity.principalRecordId && current.principal_version === job.identity.principalVersion && current.workspace === job.identity.workspace && current.agent_preset === job.identity.agentPreset }
   close(): void { this.#database.close() }
 }

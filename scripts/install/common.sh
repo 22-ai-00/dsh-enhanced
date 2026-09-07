@@ -63,9 +63,13 @@ Install a minimal, runnable dsh-enhanced personal-assistant scenario.
 
 Options:
   --profile <name>          DSH profile (default: web)
-  --scenario <name>         auto, core, web, lark, supervised, or full (default: auto)
-  --workspace <absolute>    Web owner workspace (web only; default: current directory)
-  --agent-preset <id>       Web owner Agent preset (web only; default: standard)
+  --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto)
+  --workspace <absolute>    Web owner workspace (web/autonomy; default: current directory)
+  --agent-preset <id>       Web owner Agent preset (web/autonomy; default: standard)
+  --isolation-image <id>    Immutable sha256 image for autonomy
+  --isolation-max-runs <n>  Autonomy grant run limit (default: 20)
+  --isolation-lease-minutes <n> Autonomy grant lease (default: 60)
+  --isolation-runtime-minutes <n> Cumulative reserved runtime budget (default: 10)
   --mode <mode>             standard or supervised-growth (default: standard)
   --with <add-on>           Add coding, traex, health, heartbeat, events, or bridge (repeatable)
   --ack-existing-automations
@@ -114,6 +118,7 @@ Scenarios:
   core       Local Web/direct core plus read-only plugin discovery.  No channel, daemon, or scheduler.
   web        Experimental local Web owner: core plus Delivery, Goals, and Web owner setup.
              It does not configure Lark or a resident service.
+  autonomy   Explicit offline, finite Web-owner execution setup. Credentials and external targets remain independently configured.
   lark       Core plus durable Delivery, bounded automatic preference learning,
              OS credential storage, and Feishu/Lark onboarding.
   supervised Lark plus Evaluation, deterministic Recovery, Health gates, and risk-tiered evolution.
@@ -1926,13 +1931,18 @@ dsh_enhanced_apply_web_owner() {
   local workspace="$3"
   local preset="$4"
   local dry_run="$5"
+  local isolation_image="${6:-}"
+  local isolation_max_runs="${7:-}"
+  local isolation_lease_ms="${8:-}"
+  local isolation_runtime_ms="${9:-}"
   local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-web-owner-setup"
   if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
     dsh_enhanced_fail 1 "找不到安装后的 dsh-web-owner-setup：$setup_bin"
     return $?
   fi
-  dsh_enhanced_run "$dry_run" "$setup_bin" --dsh-home "$dsh_home" --profile "$profile" \
-    --workspace "$workspace" --preset "$preset"
+  local args=(--dsh-home "$dsh_home" --profile "$profile" --workspace "$workspace" --preset "$preset")
+  if [[ -n "$isolation_image" ]]; then args+=(--isolation-image "$isolation_image" --isolation-max-runs "$isolation_max_runs" --isolation-lease-ms "$isolation_lease_ms" --isolation-runtime-ms "$isolation_runtime_ms"); fi
+  dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
 }
 
 dsh_enhanced_install() {
@@ -1961,6 +1971,11 @@ dsh_enhanced_install() {
   local web_workspace_explicit='0'
   local web_preset='standard'
   local web_preset_explicit='0'
+  local isolation_option_explicit='0'
+  local isolation_image=''
+  local isolation_max_runs='20'
+  local isolation_lease_minutes='60'
+  local isolation_runtime_minutes='10'
   local dsh_version="${DSH_VERSION:-$DSH_ENHANCED_DEFAULT_DSH_VERSION}"
   local plugin_version="${DSH_ENHANCED_VERSION:-latest}"
   local manage_service='1'
@@ -1995,6 +2010,18 @@ dsh_enhanced_install() {
         web_preset_explicit='1'
         shift 2
         ;;
+      --isolation-image)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-image 需要一个值。'; return $?; }
+        isolation_option_explicit=1; isolation_image="$2"; shift 2 ;;
+      --isolation-max-runs)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-max-runs 需要一个值。'; return $?; }
+        isolation_option_explicit=1; isolation_max_runs="$2"; shift 2 ;;
+      --isolation-lease-minutes)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-lease-minutes 需要一个值。'; return $?; }
+        isolation_option_explicit=1; isolation_lease_minutes="$2"; shift 2 ;;
+      --isolation-runtime-minutes)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--isolation-runtime-minutes 需要一个值。'; return $?; }
+        isolation_option_explicit=1; isolation_runtime_minutes="$2"; shift 2 ;;
       --mode)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--mode 需要一个值。'; return $?; }
         deployment_mode="$2"
@@ -2113,8 +2140,8 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 '--lark 只能是 auto、keep、configure 或 skip。'
     return $?
   esac
-  case "$scenario" in auto|core|web|lark|supervised|full) ;; *)
-    dsh_enhanced_fail 2 '--scenario 只能是 auto、core、web、lark、supervised 或 full。'
+  case "$scenario" in auto|core|web|autonomy|lark|supervised|full) ;; *)
+    dsh_enhanced_fail 2 '--scenario 只能是 auto、core、web、autonomy、lark、supervised 或 full。'
     return $?
   esac
   case "$deployment_mode" in standard|supervised-growth) ;; *)
@@ -2236,7 +2263,18 @@ dsh_enhanced_install() {
     fi
     deployment_mode='supervised-growth'
   fi
-  if [[ "$scenario" == 'web' ]]; then
+  if [[ "$scenario" == 'autonomy' ]]; then
+    if [[ ! "$isolation_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then dsh_enhanced_fail 2 '--scenario autonomy 需要 --isolation-image sha256:<64位小写hex>。'; return $?; fi
+    local value_limit value maximum label
+    for value_limit in "$isolation_max_runs:10000:--isolation-max-runs" "$isolation_lease_minutes:10080:--isolation-lease-minutes" "$isolation_runtime_minutes:1440:--isolation-runtime-minutes"; do
+      IFS=: read -r value maximum label <<< "$value_limit"
+      if [[ ! "$value" =~ ^[1-9][0-9]*$ || ${#value} -gt 5 || $((10#$value)) -lt 1 || $((10#$value)) -gt "$maximum" ]]; then dsh_enhanced_fail 2 "$label 必须是有效上限内的正整数。"; return $?; fi
+    done
+  elif [[ "$isolation_option_explicit" == '1' ]]; then
+    dsh_enhanced_fail 2 '--isolation-* 仅适用于 --scenario autonomy。'
+    return $?
+  fi
+  if [[ "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then
     if [[ "$web_workspace_explicit" != '1' ]]; then web_workspace="$PWD"; fi
     if [[ "$web_workspace" != /* ]]; then
       dsh_enhanced_fail 2 '--workspace 必须是绝对路径。'
@@ -2251,16 +2289,16 @@ dsh_enhanced_install() {
       return $?
     fi
     if [[ "$lark_mode" == 'configure' || "$lark_mode" == 'keep' || "$existing_lark_configured" == '1' ]]; then
-      dsh_enhanced_fail 2 'web 场景不能与 Lark configure/keep 或已有启用的 Lark channel 共用同一 profile。'
+      dsh_enhanced_fail 2 "$scenario 场景不能与 Lark configure/keep 或已有启用的 Lark channel 共用同一 profile。"
       return $?
     fi
     if [[ "$agent_tools_mode" != 'preserve' ]]; then
-      dsh_enhanced_fail 2 'web 场景固定当前 owner capability 规则；--agent-tools 必须为 preserve。'
+      dsh_enhanced_fail 2 "$scenario 场景固定当前 owner capability 规则；--agent-tools 必须为 preserve。"
       return $?
     fi
     lark_mode='skip'
   elif [[ "$web_workspace_explicit" == '1' || "$web_preset_explicit" == '1' ]]; then
-    dsh_enhanced_fail 2 '--workspace 和 --agent-preset 仅适用于 --scenario web。'
+    dsh_enhanced_fail 2 '--workspace 和 --agent-preset 仅适用于 --scenario web 或 autonomy。'
     return $?
   fi
   if [[ "$scenario" == 'core' && ( "$lark_mode" == 'configure' || "$lark_mode" == 'keep' ) ]]; then
@@ -2361,6 +2399,9 @@ dsh_enhanced_install() {
     web)
       for slug in assistant-delivery assistant-goals assistant-web-owner; do dsh_enhanced_append_slug "$slug"; done
       ;;
+    autonomy)
+      for slug in assistant-delivery assistant-goals assistant-web-owner assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier; do dsh_enhanced_append_slug "$slug"; done
+      ;;
     lark)
       for slug in "${DSH_ENHANCED_LARK_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
       ;;
@@ -2436,9 +2477,13 @@ dsh_enhanced_install() {
   printf '  - %s\n' "${targets[@]}"
   printf '\n安装到 DSH profile：\n'
   dsh_enhanced_run "$dry_run" dsh plugin --profile "$profile" add "${targets[@]}" || return $?
-  if [[ "$scenario" == 'web' ]]; then
+  if [[ "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then
     printf '\nWeb owner 初始化：\n'
-    dsh_enhanced_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" || return $?
+    if [[ "$scenario" == 'autonomy' ]]; then
+      dsh_enhanced_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" "$isolation_image" "$isolation_max_runs" "$((10#$isolation_lease_minutes * 60000))" "$((10#$isolation_runtime_minutes * 60000))" || return $?
+    else
+      dsh_enhanced_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" || return $?
+    fi
   fi
   printf '\n校验组合后的 profile：\n'
   if [[ "$dry_run" == '1' ]]; then
@@ -2460,7 +2505,7 @@ dsh_enhanced_install() {
   if dsh_enhanced_effective_lark_is_configured "$patch_path" "$existing_home_patch_path"; then
     lark_configured='1'
   fi
-  if [[ "$scenario" == 'core' || "$scenario" == 'web' ]]; then
+  if [[ "$scenario" == 'core' || "$scenario" == 'web' || "$scenario" == 'autonomy' ]]; then
     lark_mode='skip'
     printf '\n飞书处理：%s 场景未安装 channel，已跳过。\n' "$scenario"
   elif [[ "$lark_mode" == 'auto' ]]; then
@@ -2478,7 +2523,7 @@ dsh_enhanced_install() {
       return $?
     fi
   fi
-  if [[ "$scenario" != 'core' ]]; then
+  if [[ "$scenario" != 'core' && "$scenario" != 'web' && "$scenario" != 'autonomy' ]]; then
     if [[ "$lark_mode" == 'configure' && "$dry_run" != '1' && ( ! -t 0 || ! -t 1 ) ]]; then
       dsh_enhanced_fail 1 '飞书向导需要交互式终端；尚未修改 lingering 或开始飞书授权。请直接运行脚本，或使用 --lark skip。'
       return $?
@@ -2574,6 +2619,8 @@ dsh_enhanced_install() {
   printf '检查配置：dsh --profile %s --dump-config\n' "$profile"
   if [[ "$scenario" == 'core' || "$scenario" == 'web' ]]; then
     printf '立即使用：dsh --profile %s\n' "$profile"
+  elif [[ "$scenario" == 'autonomy' ]]; then
+    printf '自治安装已完成离线有限执行配置；凭据、外部目标验证与完整自治仍需单独配置。\n'
   fi
   if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then
     case "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" in

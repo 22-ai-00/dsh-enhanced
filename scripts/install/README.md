@@ -36,6 +36,21 @@
 
 `web` 是实验入口：它安装 core、Delivery、Goals 与 Web owner，并在第一次配置组合/activation probe 前运行 profile 内的 `dsh-web-owner-setup`，使用 `web/account=<profile>/tenant=local/user=operator` 的固定本机 owner。它不接入 Lark、不启动常驻服务，也不提高原生权限默认值。该入口尚不代表完整自治或真实模型验收；仍应按部署的模型、权限和工作区边界单独验证。Web owner 复用有效的 Delivery databasePath（默认是 `$DSH_HOME/assistant-delivery/state.sqlite`），不会替换或复活已有 owner；若另一 profile 的 Lark 也共享该数据库，setup 会拒绝，需使用独立的 `DSH_HOME`。为避免同一 profile 的 owner 语义混杂，已有启用 Lark channel、`--lark configure|keep`，或 `--agent-tools` 非 `preserve` 时会被拒绝。
 
+`autonomy` 是显式选择的实验性离线执行入口，安装 Web 场景以及 Isolation、Actions、Keychain、Evaluation 和 Verifier。当前使用本仓库本地安装器；这些新增能力尚未作为完整自治产品发布。
+
+```sh
+./scripts/install/install-local.sh --scenario autonomy --workspace "$PWD" \
+  --isolation-image sha256:<已存在的本机镜像ID> \
+  --isolation-max-runs 20 --isolation-lease-minutes 60 \
+  --isolation-runtime-minutes 10 --yes
+```
+
+安装前需准备非 root Linux Host、可访问的本机 Docker 和兼容 Isolation 的固定镜像（要求见 [Isolation 文档](../../plugins/assistant-isolation/README.md)）。安装器不拉取镜像、不安装或重启 Docker。setup 使用最终配置的 Docker 路径，通过生产 supervisor 实际执行非 root、只读根目录、隔离工作卷与 artifact 导出探测，成功后才初始化 owner 并写入 grant。失败会给出运行时原因；清理状态未知时保留私有 probe 证据目录，需要先排查其中记录的资源。探测只证明该固定任务的执行链路，不证明任意自定义任务或完整自治。
+
+首次 grant 精确绑定本机 Web owner 版本、workspace 和 preset，默认 20 次、60 分钟期限、10 分钟累计预留执行时长；次数最多 10000、期限最多 7 天、累计时长最多 1 天。单次任务仍受 Isolation 的独立限制。重复 setup 保留原过期时间、撤销记录和已使用预算，即使过期也不自动续权；修改原绑定、镜像或预算需显式迁移。profile 私有 Isolation/Actions 状态和 Keychain 路径与其他 profile 分开，已有合法自定义路径保留。
+
+在该受管作用域中，模型只能调用受支持的隔离、目标上下文/检查点和获准的有限 Actions 工具，不能退回宿主 shell。Actions 默认无 grant，Keychain 不创建凭据。模型配置沿用安装器的独立引导；GitHub 目标/凭据、独立目标验收、后台唤醒以及完整自治生命周期仍需后续配置与验证。不要通过删除账本重置授权。
+
 核心 profile 中的 `plugin_discover` 可立即按能力检索内置、完整性固定的首方候选目录；它不会下载或启用任何包。Agent 只能生成待审批 plan，owner 仍需用 `dsh-plugin-control approve` 与 `activate` 在 staging profile 中显式启用。写入 `~/.dsh/plugin-control/catalog.json` 的 owner catalog 会取代内置目录。
 
 默认 Permission 是 `workspace-write + ask`；完整访问需要明确确认：

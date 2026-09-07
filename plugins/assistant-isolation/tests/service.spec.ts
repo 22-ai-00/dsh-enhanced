@@ -1,3 +1,4 @@
+import IsolationPlugin from '../src/index.ts'
 import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
@@ -5,6 +6,7 @@ import { LlmAdapter, LlmRuntime, ToolCallId, createUserMessage, type GenerateOpt
 import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
+import ApprovalService from '@deepseek-ai/dsh-user-approval'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -17,6 +19,7 @@ import { fileURLToPath } from 'node:url'
 import { IsolationLedger } from '../src/ledger.ts'
 import { AssistantIsolationService, isolationPrincipalDigest } from '../src/service.ts'
 import { maintainIsolation } from '../src/cli.ts'
+import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 
 const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
 const enabled = process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() !== 0
@@ -82,25 +85,42 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
       await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
       await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
       ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record-owner', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }) } as never)
-      ctx.provide('assistantPolicy' as never, { authorizeAgent: () => ({ effect: 'allow' }) } as never)
+      await ctx.plugin(AssistantPolicyService, {
+        databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'deny',
+        rules: [{ id: 'allow-native-isolation-tool', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: 'isolation_run' } }, { id: 'allow-one-isolation-run', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: 'isolation:offline' }, budget: { id: 'isolation-runs', amount: 1 } }],
+        budgets: [{ id: 'isolation-runs', metric: 'isolation-runs', limit: 1, periodMs: 60_000, scope: 'subject' }],
+      })
+      await ctx.plugin(ApprovalService, { policy: 'ask' })
+      let asks = 0; ctx.on('approval/request', async () => { asks++; return 'rejected' })
       const config = { stateRoot, image, storage: { maxJobRecords: 1 }, grants: [{ id: 'offline', revision: 1,
         principalDigest: isolationPrincipalDigest('owner'), principalRecordId: 'record-owner', principalVersion: 1,
         workspace: root, agentPreset: 'primary', expiresAt: Date.now() + 120_000, maxRuns: 2, maxTotalDurationMs: 60_000 }] }
-      plugin = await ctx.plugin(AssistantIsolationService, config) as unknown as { dispose(): Promise<void> }
+      plugin = await ctx.plugin(IsolationPlugin, config) as unknown as { dispose(): Promise<void> }
       handle = await ctx.agents.create({ sessionId: SessionId('retention-service'), meta: { cwd: root, agentPreset: 'primary' } })
-      const request = { grantId: 'offline', idempotencyKey: 'original', command: 'head -c 10000 /dev/zero | tr "\\000" x', timeoutMs: 20_000 }
+      const request = { grantId: 'offline', idempotencyKey: 'original', command: 'sleep 1; head -c 10000 /dev/zero | tr "\\000" x', timeoutMs: 20_000 }
       const signal = new AbortController().signal
-      const first = await ctx.assistantIsolation.run(handle.agent, request, signal)
+      handle.agent.session.append('turn/start', { turn: 1 })
+      handle.agent.session.append('approval/policy', { policy: 'ask' })
+      const nativeInput = { callId: ToolCallId('finite-offline'), rootCallId: ToolCallId('finite-offline'), token: Symbol('test') as never, name: 'isolation_run', arguments: { grant_id: request.grantId, idempotency_key: request.idempotencyKey, command: request.command, timeout_ms: request.timeoutMs }, signal, agent: handle.agent }
+      expect(ctx.assistantIsolation.preauthorize(nativeInput), 'finite grant must pass broker predicate').toBe(true)
+      expect(ctx.assistantPolicy.isPreauthorizedTool(nativeInput), 'exact tool registration must be preauthorized').toBe(true)
+      const native = await ctx.tools.execute(nativeInput)
+      expect(native.isError, JSON.stringify(native)).toBe(false); expect(asks).toBe(0)
+      const text = native.content[0]; if (text?.type !== 'text') throw new Error('missing isolation result')
+      const first = JSON.parse(text.text.slice(text.text.indexOf('\n') + 1))
       expect(first).toMatchObject({ status: 'succeeded', quiescent: true, stdout: 'x'.repeat(10_000) })
       expect(first.retention).toBeUndefined()
       await expect(ctx.assistantIsolation.run(handle.agent, { ...request, idempotencyKey: 'denied' }, signal)).rejects.toThrow(/record/i)
       await symlink('/tmp', join(stateRoot, 'unobservable'))
       expect(await ctx.assistantIsolation.run(handle.agent, request, signal)).toEqual(first)
+      expect(ctx.assistantPolicy.queryAudit({ limit: 100 }).filter(event => event.action === 'execute' && event.resourceHash === isolationPrincipalDigest('isolation:offline') && event.outcome === 'allowed')).toHaveLength(1)
+      expect(ctx.assistantPolicy.authorizeAgent(handle.agent, 'execute', { kind: 'tool', id: 'isolation:offline' }, { idempotencyKey: 'second-isolation-job' }))
+        .toMatchObject({ effect: 'deny', reasonCode: 'budget-exhausted' })
       await expect(ctx.assistantIsolation.run(handle.agent, { ...request, idempotencyKey: 'observation-denied' }, signal)).rejects.toThrow(/observation unavailable/i)
       await rm(join(stateRoot, 'unobservable'))
       await plugin.dispose(); plugin = undefined
       expect((await maintainIsolation(stateRoot, 1)).pruned).toBe(1)
-      plugin = await ctx.plugin(AssistantIsolationService, config) as unknown as { dispose(): Promise<void> }
+      plugin = await ctx.plugin(IsolationPlugin, config) as unknown as { dispose(): Promise<void> }
       const replay = await ctx.assistantIsolation.run(handle.agent, request, signal)
       expect(replay).toMatchObject({ jobId: first.jobId, status: 'succeeded', stdout: '', retention: { kind: 'pruned', stdout: { bytes: 10_000 } } })
       const database = new DatabaseSync(join(stateRoot, 'ledger.sqlite'))
@@ -130,7 +150,10 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
           scope: { workspace: project, preset: 'primary' }, sessionId: String(agent.session.id) }
       } } as never)
       const policyResources: unknown[] = []
-      ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string, resource: unknown) => {
+      ctx.provide('assistantPolicy' as never, { evaluateAgent: (_agent: Agent, action: string, resource: unknown) => {
+        policyResources.push([action, resource])
+        return { effect: action === 'execute' && JSON.stringify(resource) === JSON.stringify({ kind: 'tool', id: 'isolation:offline' }) ? 'allow' : 'deny' }
+      }, authorizeAgent: (_agent: Agent, action: string, resource: unknown) => {
         policyResources.push([action, resource])
         return { effect: action === 'execute' && JSON.stringify(resource) === JSON.stringify({ kind: 'tool', id: 'isolation:offline' }) ? 'allow' : 'deny' }
       } } as never)

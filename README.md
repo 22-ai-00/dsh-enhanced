@@ -40,6 +40,8 @@ dsh plugin --profile web add ./plugins/hello
 ./scripts/install/restart.sh
 ```
 
+需要试用有限离线执行时，可显式使用 `--scenario autonomy --isolation-image sha256:<本机固定镜像ID>`。安装器会实际探测 Docker 并为本机 Web owner 配置有次数、期限和累计时长的隔离授权；参数与前置条件见[安装文档](scripts/install/README.md)。这是当前 dev 的实验入口，完整目标验收、外部动作凭据和持续自治仍在实现。
+
 希望通过飞书日常对话自动学习语言等有界偏好时，使用普通 Lark 场景即可；它不要求 Evaluation、Heartbeat、Health 或 Recovery：
 
 ```sh

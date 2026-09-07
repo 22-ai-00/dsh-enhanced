@@ -4,6 +4,7 @@ import { lstat, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, normalize } from 'node:path'
 import { isDeepStrictEqual, promisify } from 'node:util'
+import { autonomyDockerPath, prepareAutonomyProfile, validateAutonomyOptions, type AutonomySetupOptions } from './autonomy.js'
 import { ensurePrincipalLocally } from '@dsh-enhanced/assistant-delivery'
 import { isMap, isScalar, isSeq, parseDocument, type Document, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 
@@ -12,12 +13,14 @@ export interface WebOwnerSetupInput {
   profile: string
   workspace: string
   preset: string
+  isolation?: AutonomySetupOptions
 }
 
 const key = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u
 const slugs = ['personal-assistant', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner'] as const
 function fail(message: string): never { throw new Error(`assistant-web-owner setup: ${message}`) }
 function validate(input: WebOwnerSetupInput): void {
+  if (input.isolation) validateAutonomyOptions(input.isolation)
   if (!key.test(input.profile) || !/^[a-z0-9][a-z0-9-]*$/u.test(input.preset)) fail('invalid profile or preset')
   for (const value of [input.dshHome, input.workspace]) {
     if (!isAbsolute(value) || value.includes('\0') || value.includes('*')) fail('home and workspace must be literal absolute paths')
@@ -158,7 +161,13 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
     const before = await readPatch(path)
     const plan = prepareWebOwnerProfile(input, before, effectiveSource)
     await mkdir(input.workspace, { recursive: true })
-    ensurePrincipalLocally({ databasePath: plan.databasePath, principal: plan.principal })
+    if (input.isolation) {
+      const preflight = prepareAutonomyProfile({ ...input, isolation: input.isolation }, plan.patch, effectiveSource)
+      const { probeIsolationRuntime } = await import('@dsh-enhanced/assistant-isolation')
+      await probeIsolationRuntime(input.isolation.image, autonomyDockerPath(preflight))
+    }
+    const owner = ensurePrincipalLocally({ databasePath: plan.databasePath, principal: plan.principal })
+    if (input.isolation) plan.patch = prepareAutonomyProfile({ ...input, isolation: input.isolation }, plan.patch, effectiveSource, owner)
     if (plan.patch === before) return path
     await writeFile(temporary, plan.patch, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
     if (await readPatch(path) !== before) fail('profile changed during setup; retry with its latest configuration')
@@ -169,18 +178,26 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
 
 export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>]\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup.\n')
+    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-image sha256:<id> --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup.\n')
     return
   }
   const input: WebOwnerSetupInput = { dshHome: process.env.DSH_HOME ?? join(homedir(), '.dsh'), profile: 'web', workspace: '', preset: 'standard' }
+  const isolation: AutonomySetupOptions = { image: '', maxRuns: 20, leaseMs: 3_600_000, maxTotalDurationMs: 600_000 }
+  let isolated = false
+  const numeric = { '--isolation-max-runs': 'maxRuns', '--isolation-lease-ms': 'leaseMs', '--isolation-runtime-ms': 'maxTotalDurationMs' } as const
   const fields = { '--dsh-home': 'dshHome', '--profile': 'profile', '--workspace': 'workspace', '--preset': 'preset' } as const
   for (let index = 0; index < argv.length; index++) {
     const option = argv[index]!
-    if (!(option in fields)) fail(`unknown option ${option}`)
+    if (!(option in fields) && option !== '--isolation-image' && !(option in numeric)) fail(`unknown option ${option}`)
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) fail(`${option} requires a value`)
-    input[fields[option as keyof typeof fields]] = value
+    if (option === '--isolation-image') { isolation.image = value; isolated = true }
+    else if (option in numeric) {
+      if (!/^[1-9][0-9]*$/.test(value)) fail(`${option} requires a positive integer`)
+      isolation[numeric[option as keyof typeof numeric]] = Number(value); isolated = true
+    } else input[fields[option as keyof typeof fields]] = value
   }
+  if (isolated) input.isolation = isolation
   validate(input)
   let effective: string
   try {
@@ -190,5 +207,6 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
     effective = result.stdout
   } catch { fail('could not read the effective DSH profile; check installed bundles and dsh --dump-config') }
   const path = await configureWebOwner(input, effective)
+  if (input.isolation) process.stdout.write(`Isolated execution probe passed. Finite grant: autonomy-${input.profile}. Existing grant expiry and used budget are preserved. GitHub action credentials and autonomous goal verification are not configured by this step.\n`)
   process.stdout.write(`Web owner configured for ${input.profile}: ${path}\nWorkspace: ${input.workspace}; preset: ${input.preset}. Model connectivity and runtime readiness require the installer checks.\n`)
 }

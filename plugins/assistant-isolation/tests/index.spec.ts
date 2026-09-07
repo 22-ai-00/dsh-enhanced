@@ -3,7 +3,7 @@ import { readFileSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { apply, name, version } from '../src/index.ts'
+import plugin, { apply, name, version } from '../src/index.ts'
 
 const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string; files: string[] }
 describe('assistant-isolation bundle', () => {
@@ -11,6 +11,7 @@ describe('assistant-isolation bundle', () => {
     const root = mkdtempSync(join(tmpdir(), 'isolation-bundle-'))
     const ctx = new Context()
     try {
+      expect(plugin.name).toBe(name)
       expect(name).toBe('dsh-enhanced-assistant-isolation')
       expect(version).toBe(manifest.version)
       expect(manifest.files).toContain('runtime')
