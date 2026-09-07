@@ -8,7 +8,7 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { GoalStore } from './store.js'
-import type { GoalCheckpoint, GoalControlInput, GoalRecord, GoalScope, NativeGoalState } from './types.js'
+import type { GoalCheckpoint, GoalControlInput, GoalRecord, GoalScope, GoalTaskContext, NativeGoalState } from './types.js'
 import { registerGoalTools } from './tools.js'
 import { GoalExecutionRuntime } from './execution.js'
 import { buildGoalFeedback, type GoalFeedback } from './feedback.js'
@@ -204,6 +204,23 @@ export class AssistantGoalsService extends Service {
     const previous = this.#store.findNative(scope, String(agent.session.id), goalId)
     if (previous === undefined) return
     this.#store.observe(scope, { ...previous.native, revision, phase: 'cleared', updatedAt: Math.max(Date.now(), previous.native.updatedAt) }, false)
+  }
+
+  /** Owner-scoped retrieval context, including explicit focus; never execution authority. */
+  taskContext = (agent: Agent | undefined): GoalTaskContext | undefined => {
+    try {
+      const scope = this.#scope(agent, 'snapshot')
+      const native = this.ctx.get('goals')?.get(agent!)
+      const current = native === undefined ? undefined : this.#store.findNative(scope, String(agent!.session.id), String(native.id))
+      const record = this.#store.focused(scope, String(agent!.session.id)) ?? current
+      if (record === undefined || record.native.phase !== 'active') return undefined
+      if (record.native.sessionId === String(agent!.session.id)
+        && (native === undefined || record.native.goalId !== String(native.id)
+          || record.native.revision !== native.revision || native.phase !== 'active')) return undefined
+      return Object.freeze({ protocol: 'goal-task-context/v1', scope: Object.freeze({ ...scope }), active: true,
+        goal: Object.freeze({ id: record.id, definition: Object.freeze({ version: record.definition.version, digest: record.definition.digest }), native: Object.freeze({ ...record.native }), objective: record.native.objective }),
+        checkpoint: Object.freeze({ nextStep: record.checkpoint.nextStep }) })
+    } catch { return undefined }
   }
 
   create = (agent: Agent | undefined, objective: string, maxGoalRounds?: number): GoalRecord => {

@@ -59,7 +59,7 @@
 - 本机全局 `dsh --version` 为 `0.1.0-rc.8`，低于当前 `0.1.2-rc.1` 测试基线；真实 profile 验证须使用隔离安装的目标 Host，不能直接用全局旧 CLI 的结果作兼容性结论。
 - 计划由 ChatGPT 参与方案与关键取舍评审；首次连接选择待用户确认。本批实际调用 Codex with ChatGPT 的 workspace-info 返回内部错误，尚未获得 ChatGPT 评审；未启用外部隧道。
 - 07 第一切片 `37d1e06`：Personal Memory 用原生 SystemPrompt 动态 context，从当前 Session 有效输入提取有界 query，每模型步骤重新检查 owner、Policy 与记录状态；相关记忆优先，再补用户确认的偏好和约定，附来源、原始引用、版本与失效信息。敏感记录在 top-K 前排除，转义覆盖模板花括号。95 项 Memory 测试、类型检查和真实 AgentLoop 两步骤之间撤回的集成测试通过，独立审查通过；无 SystemPrompt 时保留旧启动快照兼容路径。
-- 07 限制：目标 Host 追加新的 superseding runtime snapshot，保留已提供过的历史快照、工具结果和模型输出；当前切片只更新有效快照，不能证明历史擦除或跨 owner 会话迁移隔离。结构化 goal/step 检索、适用条件与反例、冲突决策、工具证据压缩和实测决策收益仍待实现与验证，完整工作包未完成。
+- 07 限制：目标 Host 追加新的 superseding runtime snapshot，保留已提供过的历史快照、工具结果和模型输出；当前切片只更新有效快照，不能证明历史擦除或跨 owner 会话迁移隔离。第一切片尚无结构化 goal/step 检索；下述第二切片补齐该接线。适用条件与反例、冲突决策、工具证据压缩和实测决策收益仍待实现与验证，完整工作包未完成。
 - 02 已验证，提交 `2780fdf`：普通任务与 Automation 的 `/feedback status`、`correct`、`withdraw` 接入真实 Host 入口；Evaluation schema 8 和 Delivery schema 17 保存版本化 owner 判断及成功/失败命令回执。只有明确链接的旧判断被替代；独立矛盾继续隔离，撤回不复活旧成功。owner record+version、精确回复目标与 CAS 一起校验；旧 Evaluation 缺少修订协议时拒绝，旧 foreground 数据无法证明原 principal version 时拒绝跨版本继承。
 - 02 推广后验证：实际 Coordinator 调度、Evaluation 变更/卸载、重启均重查 canonical canary；负向/未知/冲突证据暂停 exact 部署版本，新增正向证据保持有效部署。晋升、回滚及激活回执丢失恢复都原子保存 artifact 与 receipt。7 条真实服务栈回归覆盖撤回、纠正、失 ACK、服务缺失和提交后崩溃恢复；两轮独立审查发现并修复了 lineage、失败重放、升级与原子提交窗口问题，最终全部通过。
 - 本批最终工程验证：在 `2780fdf` 代码上执行根 `pnpm check`，持久退出码为 0（本机日志 `/tmp/dsh-autonomy-check-v6.log`，退出码 `/tmp/dsh-autonomy-check-v6.exit`）。manifest、零 lint 警告、所有包类型检查、主测试 200 文件/2,928 测试通过（4 文件/81 测试跳过）、递归包测试、完整构建与全部 dry-run pack 通过。之后仅更新账本。此前 v5 已输出全部打包结果，但跨轮后句柄丢失，故未将它当作有明确退出码的最终证据。
@@ -218,3 +218,13 @@
 - 本批最终工程检查：产品与测试冻结后根 `CI=true pnpm check` 退出 **0**（`/tmp/dsh-web-real-check-v1.log` 与 `.exit`）：25 插件/3 共享库，清单、零 lint 警告、全部类型检查、主 **240 文件 / 3,393 项** 全通过且无跳过，Delivery **684 项**、Goals **72 项**、Verifier **51 项**、Web owner **9 项** 包测试通过，完整构建和全部 dry-run pack 成功。Delivery 包包含更新后的 `lib/native-web-owner` JS/声明/maps，Web owner 包仍保留 client、完整第三方许可证、setup bin、Host lib/patch/README/LICENSE；实验脚本、测试和数据库未进入包。最终全仓运行也覆盖了改为布尔身份比较的回归断言；此后只补充文档与证据。
 - Codex with ChatGPT 本地任务 `c2c_real_goal` / `c2c_web_idle` 分别记录真实模型成功/失败、测试装配失败、实际运行时红绿对照、既有浏览器与最终全仓检查。当前工具仍缺少技能要求的内置浏览器，未取得 ChatGPT 规划或复审；这些本地记录与独立代理审查分别记账，不冒充 ChatGPT 评审。远端 compact 的模型 capacity 报错属于会话压缩请求失败；本次以磁盘、持久证据与实际命令退出码恢复工作，未因此回滚仓库。
 - 本批独立只读复核 **PASS**：直接核对最终源码、v7 真实调用与持久审批、v2/v3 回执、产物哈希、受控红测与最终全仓日志/退出码，主协调采纳。checkpoint 阻塞窗口未单独注入撤权/期限，现有 drain 测试与定时器检查顺序覆盖相关路径；畸形 provider usage chunk 降级仍非本次专门验收范围。上述非阻断覆盖限制与完整 18 项目标继续保留。
+
+
+## 07 第二切片：当前目标与步骤驱动的 Memory（2026-09-07）
+
+- 原问题：原生 Goal 自主续跑时，Memory 只使用最近有效人类输入；即使 checkpoint 已切换到具体修复步骤，仍优先召回宽泛目标的旧清单。现在 Goals 提供只读 `goal-task-context/v1`，Memory 每次原生上下文组装重新获取当前目标或同 owner 的显式 focus，以 nextStep → human query → objective 顺序检索、去重，再补确认的偏好/约定。各 query 有界，合并结果共用原有 top-K、字节和 token 预算。
+- 身份与权限：Goals 每次复核 live Agent、Delivery owner 和 Policy snapshot；同会话目标还须匹配 live native ID/revision/active。Memory 再绑定 principal record/version/digest、workspace/preset。跨会话 focus 仅提供检索上下文，不迁移执行权；checkpoint 仅作关键词，不提升规划文本的可信度。可选 Goals 服务不存在、旧版本无方法、协议不符、异常或 scope 不匹配时保留原 human-query 路径。
+- 原生运行时证据：实际 DSH `AgentLoop`、`GoalService`、`goal-round-driver`、SystemPrompt、Session persistence 和 Delivery Web owner lease 运行前台及两个原生 Goal 回合，检查真实 adapter 请求的最新有效 memory snapshot。步骤由 citrus 改为 orchid 后召回随之改变；中途撤回 orchid 时下一请求改为剩余可用记忆，并保留原始 evidence URI 和预算约束。模型是确定性 adapter，记忆经公开 Store 审批提交 API 播种；该实验不代表真实模型能力或浏览器审批验收。
+- 正向与反向测试：四个相关测试文件 270 项通过。仅将构建产物中 Goal context 的读取替换为 `undefined` 后，两项原生回归均实际失败，得到泛化清单而非 citrus 经验；随后恢复产物原字节。失败记录保留，不以跳过其他测试的反向实验冒充全套成功。
+- 工程验收记录与源码/日志 hash 保存在 [Goal Memory 证据](evidence/goal-task-memory-2026-09-07.json)。首轮全量检查在测试夹具的严格可选属性类型检查失败，已修复。最终 `CI=true pnpm check` 退出码 0：25 插件/3 共享库、lint 无警告、全量 typecheck、根 240 文件/3,400 测试、各包测试（Delivery 686、Goals 74、Memory 98）、clean build 与全部 28 dry-run pack 通过；已检查两个受影响插件的打包文件列表。另清空全部 28 个包的生成 lib 后执行 `CI=true pnpm build`，退出码 0；重建的 Memory service 与通过运行时测试的产物 hash 相同。独立 verifier 只读审查 PASS，主代理核对实际命令、退出码和源码后接受此切片。独立安装范围按 Goals 实际包版本 `0.1.0` 校正为可选 peer `>=0.1.0 <0.2.0`，冻结锁文件安装通过；没有发布包或启用真实用户 profile。
+- 完整工作包 07 仍为实现中。仍缺适用条件/反例的真实检索决策、语义冲突处理、保留原始引用的工具证据压缩、恢复时旧知识重新验证，以及同模型/同预算的实测决策收益。有效快照刷新也不等于删除历史 Session 内容。其他工作包状态不变，完整 18 项目标继续。

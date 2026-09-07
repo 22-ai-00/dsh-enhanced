@@ -54,6 +54,7 @@ function stubAgent(options: { cwd?: string; preset?: string } = {}) {
 
 async function harness(options: {
   runtimePrompt?: boolean
+  snapshotLimit?: number
   allow?: boolean
   approvalMode?: 'delivery-or-headless' | 'delivery-required'
   maxImportRecords?: number
@@ -92,7 +93,7 @@ async function harness(options: {
     databasePath: databasePaths.memory,
     approvalMode: options.approvalMode
       ?? (options.delivery === undefined ? 'delivery-or-headless' : 'delivery-required'),
-    snapshotLimit: 10,
+    snapshotLimit: options.snapshotLimit ?? 10,
     snapshotMaxBytes: 1_024,
     snapshotMaxTokens: 256,
     defaultProposalTtlMs: 60_000,
@@ -121,6 +122,49 @@ function addInput(content: string, idempotencyKey = `add:${content}`) {
 }
 
 describe('personal memory Cordis service', () => {
+  test('uses only a matching live Goals task and falls back to the latest human query when it is absent, revoked, or invalid', async () => {
+    let step = 'nginx rollback'; let mode = 'valid'
+    const route = { routeVersion: 2 as const, sourceId: 'dsh-enhanced-personal-memory', bindingId: 'binding-owner', bindingVersion: 1, bindingGeneration: 1,
+      workspace: '/work/alpha', principal: 'owner:lark:123', principalRecordId: 'principal-owner', principalVersion: 1 }
+    const { ctx, service } = await harness({ runtimePrompt: true, snapshotLimit: 1, delivery: {
+      prepareAgentApproval: () => route,
+      preferencePrincipalForAgent: agent => ({ scope: { workspace: '/work/alpha', preset: 'primary' }, principalId: route.principal,
+        principalLineage: { principalRecordId: route.principalRecordId, principalVersion: route.principalVersion }, bindingId: route.bindingId, bindingVersion: 1, bindingGeneration: 1, sessionId: String(agent.id) }),
+    } })
+    const { agent } = stubAgent({ cwd: '/work/alpha', preset: 'primary' })
+    const approve = (content: string) => { const proposal = service.propose(agent, addInput(content)); return service.decideProposal({ proposalId: proposal.proposalId, principal: route.principal, expectedVersion: 1, decision: 'approved', reason: 'confirmed' }) }
+    approve('Redis latest human query guidance'); approve('nginx rollback runbook')
+    agent.session.append('user/message', createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Redis latest human query' }] }), { surfaceOp: 'append' })
+    const render = async () => renderContextSnapshot(await ctx.systemPrompt.assemble({ agent }))
+    expect(await render()).toContain('Redis latest human query guidance')
+    const goalService: { taskContext?: () => unknown } = { taskContext: () => {
+      if (mode === 'missing') return undefined
+      if (mode === 'throw') throw new Error('unloaded')
+      const scope = { principalId: route.principal, principalRecordId: route.principalRecordId, principalVersion: route.principalVersion, workspace: '/work/alpha', preset: 'primary' }
+      if (mode === 'version') scope.principalVersion += 1
+      if (mode === 'record') scope.principalRecordId = 'another-owner-record'
+      if (mode === 'principal') scope.principalId = 'another-owner'
+      if (mode === 'workspace') scope.workspace = '/work/other'
+      if (mode === 'preset') scope.preset = 'other'
+      return { protocol: mode === 'protocol' ? 'future-protocol' : 'goal-task-context/v1', active: mode !== 'inactive', scope,
+        goal: { id: 'goal', objective: 'nginx delivery', definition: { version: 1, digest: 'a'.repeat(64) }, native: { sessionId: String(agent.id), goalId: 'native', revision: 1, objective: 'nginx delivery', phase: 'active', roundsStarted: 0, maxGoalRounds: 2, updatedAt: 1 } },
+        checkpoint: mode === 'malformed' ? undefined : { nextStep: step } }
+    } }
+    ctx.provide('assistantGoals' as never, goalService as never)
+    expect(await render()).toContain('nginx rollback runbook')
+    expect(await render()).not.toContain('Redis latest human query guidance')
+    step = 'Redis latest human query'; expect(await render()).toContain('Redis latest human query guidance')
+    step = 'nginx rollback'
+    for (mode of ['version', 'record', 'principal', 'workspace', 'preset', 'protocol', 'inactive', 'malformed', 'missing', 'throw']) {
+      const snapshot = await render()
+      expect(snapshot, mode).toContain('Redis latest human query guidance')
+      expect(snapshot, mode).not.toContain('nginx rollback runbook')
+    }
+    delete goalService.taskContext
+    expect(await render()).toContain('Redis latest human query guidance')
+    await ctx.fiber.restart()
+  })
+
   test('runtime memory follows task changes and committed removal without startup injections', async () => {
     const { ctx, service } = await harness({ runtimePrompt: true })
     const { agent, injections } = stubAgent({ cwd: '/work/alpha', preset: 'primary' })

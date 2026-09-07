@@ -174,3 +174,10 @@ executionBudget:
 额外私有文件为 `databasePath + '.outcomes'` 及 WAL/SHM：保存冻结目标条件、assessment、触发 run 与执行证据，沿用 WAL/FULL 和私有权限，卸载保留数据。整体验证可能通过 Verifier 执行管理员批准的子进程、文档抓取或目标回读，权限与步骤验证相同。当前默认关闭；确定性模型的真实驱动测试不等于跨日实跑、云模型能力收益或生产 Web 安装完成。
 
 Verifier 回执、Goals 数据库投影与原生 Session 事件独立提交。`nativeCompletion: complete` 表示当前读回的原生状态，不是跨库原子提交或操作系统崩溃后的 exactly-once 保证；原生完成追加不等待独立 Session flush。恢复只在已有状态、准确轮次与当前授权可核对时收敛，投影/Session 不一致需要继续对账。
+
+
+## Host 任务检索上下文
+
+`assistantGoals.taskContext(agent)` 返回只读 `goal-task-context/v1`：owner scope、目标 ID/definition version/digest、原生状态、objective 和 checkpoint nextStep。每次读取重新检查 live Agent、Delivery owner 和 Policy `snapshot` 授权；默认使用当前原生目标，也可使用同 owner 在本会话明确设置的 focus。当前会话的投影须匹配 live 原生 GoalId/revision/active 状态，终态、身份失效或拒绝授权返回 `undefined`。
+
+这是 Personal Memory 等 Host 消费者的检索输入。跨会话 focus 不授予执行权，checkpoint 不成为可信事实；本接口不修改原生目标或业务索引、不创建模型调用或唤醒任务。Memory 可独立安装，并在该接口不可用时继续按原用户输入召回。

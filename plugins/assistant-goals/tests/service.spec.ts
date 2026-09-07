@@ -71,6 +71,34 @@ async function installGoalVerifier(f: Awaited<ReturnType<typeof harness>>, profi
 const checkpoint = { nextStep: 'Check repository state', blockers: [], assumptions: [{ statement: 'Latest build was green', expiresAt: 0 }], evidenceRefs: ['run:one'], dependencies: [] }
 
 describe('owner-scoped native goal context', () => {
+  it('returns only the current active owner-scoped task projection and refreshes edits', async () => {
+    const f = await harness(); const agent = await f.create('task-context', 'owner'); f.human.add(agent)
+    const created = f.service.create(agent, 'Original current objective')
+    expect(f.service.taskContext(agent)).toMatchObject({ protocol: 'goal-task-context/v1', active: true,
+      scope: created.scope, goal: { id: created.id, definition: { version: created.definition.version, digest: created.definition.digest }, native: { goalId: created.native.goalId }, objective: 'Original current objective' }, checkpoint: { nextStep: '' } })
+    const checkpointed = f.service.checkpoint(agent, created.id, created.version, { ...checkpoint, nextStep: 'Inspect the changed source' })
+    const edited = f.service.control(agent, { goalId: created.id, expectedRevision: checkpointed.native.revision, operation: 'edit', objective: 'Edited current objective' })
+    expect(f.service.taskContext(agent)).toMatchObject({ goal: { id: edited.id, definition: { version: edited.definition.version, digest: edited.definition.digest }, native: { revision: edited.native.revision }, objective: 'Edited current objective' }, checkpoint: { nextStep: 'Inspect the changed source' } })
+    const other = await f.create('task-context-other', 'other')
+    expect(f.service.taskContext(other)).toBeUndefined()
+    f.owners.delete(agent)
+    expect(f.service.taskContext(agent)).toBeUndefined()
+    f.owners.set(agent, 'owner')
+    expect(f.service.taskContext(agent)?.goal.id).toBe(edited.id)
+    f.ctx.goals.complete(agent, { id: edited.native.goalId as never, revision: edited.native.revision })
+    expect(f.service.taskContext(agent)).toBeUndefined()
+  })
+
+  it('uses an explicit same-owner focus as retrieval context but hides it when snapshot authority is revoked', async () => {
+    const f = await harness(); const first = await f.create('task-focus-first', 'owner'); const second = await f.create('task-focus-second', 'owner')
+    f.human.add(first); const record = f.service.create(first, 'Focused owner objective')
+    const saved = f.service.checkpoint(first, record.id, record.version, { ...checkpoint, nextStep: 'Use focused next step' })
+    f.service.focus(second, saved.id)
+    expect(f.service.taskContext(second)).toMatchObject({ active: true, goal: { id: saved.id, definition: { version: saved.definition.version, digest: saved.definition.digest } }, checkpoint: { nextStep: 'Use focused next step' } })
+    f.denyAction('snapshot')
+    expect(f.service.taskContext(second)).toBeUndefined()
+  })
+
   it('drops a previously achieved feedback result when the Host verifier is unloaded', async () => {
     const f = await harness(undefined, undefined, undefined, true)
     const agent = await f.create('feedback-unload', 'owner'); f.human.add(agent)

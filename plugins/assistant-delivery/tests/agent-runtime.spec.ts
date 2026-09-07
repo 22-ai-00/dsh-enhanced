@@ -44,6 +44,8 @@ import { AssistantEvaluationService, TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import { AssistantGoalsService } from '../../assistant-goals/lib/index.js'
+import { PersonalMemoryService } from '../../personal-memory/lib/index.js'
+import { MemoryStore } from '../../personal-memory/lib/store.js'
 import { createHash } from 'node:crypto'
 import { access, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -2934,6 +2936,87 @@ describe('real rc.1 delivery Agent runtime', () => {
       const released = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
       try { expect(released.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'released' }) } finally { released.close() }
     } finally { releaseFlush?.(); flush.mockRestore(); await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
+  test.each([false, true])('native Goal rounds refresh task memory after a checkpoint change (withdraw next memory: %s)', async withdraw => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-native-goal-memory-')); roots.push(root)
+    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const principalId = 'web/browser/local/owner'
+    const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: principalId }
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [
+        { id: 'web-ingest', effect: 'allow', subject: { kind: 'external', id: principalId }, actions: ['ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'web-reply', effect: 'allow', subject, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'web-goal', effect: 'allow', subject, actions: ['create', 'observe', 'inspect', 'snapshot', 'checkpoint'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
+        { id: 'web-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
+        { id: 'web-memory', effect: 'allow', subject, actions: ['snapshot'], resource: { kind: 'memory', id: 'visible' }, context: { initiators: ['external'] } },
+      ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    }, realPersistence(PersistenceCoordinator, new Map()))
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
+    const owner = operator.getPrincipal(webPrincipal)!
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+    await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    await fixture.ctx.plugin(PersonalMemoryService, { databasePath: join(root, 'memory.sqlite'), snapshotLimit: 1, snapshotMaxBytes: 2_048, snapshotMaxTokens: 512 })
+    // Seed approved knowledge via the Store API using the actual paired owner.
+    // This tests retrieval, not the separately tested user approval transport.
+    const memories = new MemoryStore({ path: join(root, 'memory.sqlite') })
+    const namespace = { mode: 'delivery' as const, principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version }
+    const identity = { owner: 'user' as const, scope: 'workspace' as const, workspace: root }
+    const seed = (key: string, content: string) => memories.applyApprovedMutation({ op: 'add', idempotencyKey: key, namespace, identity,
+      entry: { kind: 'experience', content, trust: 'user-confirmed', sensitivity: 'private', confidence: 1,
+        provenance: { source: 'prior-verified-run', observedAt: Date.now(), uri: `evidence://${key}` } } })
+    seed('generic', 'Maintain Atlas project: the generic maintenance checklist is available.')
+    seed('citrus', 'Citrus recovery requires the previously verified journal repair command.')
+    const orchid = seed('orchid', 'Orchid recovery requires checking the previously verified migration marker.')
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions', 'goals'], apply(ctx: Context) {
+      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary', maxExecutionMs: 10_000 })
+    } })
+    try {
+      await fiber
+      const handle = await access!.create({ sessionId: 'native-goal-memory' as SessionId, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      let step = 0
+      fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+        if (agent !== handle.agent) return await next()
+        step += 1
+        if (step === 1) {
+          const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-memory-create'), name: 'goal_create', agent, signal,
+            arguments: { objective: 'Maintain Atlas project', max_goal_rounds: 2 } })
+          if (created.isError) throw new Error(JSON.stringify(created.content))
+        }
+        if (step <= 2) {
+          const record = fixture.ctx.assistantGoals.list(agent)[0]!
+          fixture.ctx.assistantGoals.checkpoint(agent, record.id, record.version, {
+            nextStep: step === 1 ? 'citrus' : 'orchid', blockers: [], assumptions: [], evidenceRefs: [], dependencies: [],
+          })
+          if (step === 2 && withdraw) memories.applyApprovedMutation({ op: 'remove', namespace, identity, idempotencyKey: 'withdraw-orchid', id: orchid.id, expectedVersion: orchid.version })
+        }
+        return await next()
+      })
+      const content = [{ type: 'text' as const, text: 'Maintain Atlas project' }]
+      await access!.prompt({ sessionId: 'native-goal-memory', requestId: 'memory-request', text: content[0]!.text, content }, async () => {
+        handle.agent.followup(createUserMessage({ content, source: { kind: 'user', rpcId: 'memory-request' as never } }))
+        return { accepted: true }
+      }, new AbortController().signal)
+      await vi.waitFor(() => expect(fixture.llm.requests).toHaveLength(3), { timeout: 5_000 })
+      const memoryIn = (request: GenerateOptions) => {
+        const snapshot = request.messages.findLast(message => message.source?.kind === 'plugin' && message.source.plugin === '@deepseek-ai/dsh-system-prompt')
+        const text = snapshot?.content.flatMap(block => block.type === 'text' ? [block.text] : []).join('\n') ?? ''
+        return text.match(/<memory_source>[\s\S]*?<\/memory_source>/)?.[0] ?? ''
+      }
+      expect(memoryIn(fixture.llm.requests[1]!)).toContain('Citrus recovery requires')
+      expect(memoryIn(fixture.llm.requests[1]!)).toContain('evidence://citrus')
+      expect(memoryIn(fixture.llm.requests[1]!)).not.toContain('generic maintenance')
+      const afterChange = memoryIn(fixture.llm.requests[2]!)
+      expect(afterChange).toContain(withdraw ? 'generic maintenance' : 'Orchid recovery requires')
+      expect(afterChange).not.toContain('Citrus recovery requires')
+      if (withdraw) expect(afterChange).not.toContain('Orchid recovery requires')
+      expect(Buffer.byteLength(afterChange)).toBeLessThanOrEqual(2_048)
+      await vi.waitFor(() => expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined(), { timeout: 5_000 })
+    } finally { await fiber.dispose(); memories.close(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
   test.each(['revoke', 'timeout', 'unload', 'forged-user'] as const)('native Web owner drains an active input on %s without replay', async reason => {

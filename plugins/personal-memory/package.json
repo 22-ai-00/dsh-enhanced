@@ -60,7 +60,8 @@
     "@deepseek-ai/dsh-system-prompt": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-tools": ">=0.1.2-rc.1 <0.2.0",
     "@dsh-enhanced/assistant-delivery": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0"
+    "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -86,6 +87,9 @@
     },
     "@dsh-enhanced/assistant-policy": {
       "optional": true
+    },
+    "@dsh-enhanced/assistant-goals": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -99,6 +103,7 @@
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@types/node": "catalog:",
     "typescript": "catalog:",
-    "vitest": "catalog:"
+    "vitest": "catalog:",
+    "@dsh-enhanced/assistant-goals": "workspace:*"
   }
 }

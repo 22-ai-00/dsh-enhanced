@@ -70,6 +70,31 @@ function add(
 }
 
 describe('personal memory retrieval', () => {
+  test('prioritizes active task step evidence ahead of a generic objective match without widening snapshot bounds', async () => {
+    const memory = await store()
+    add(memory, { owner: 'user', scope: 'workspace', workspace: '/work/alpha' }, 'deploy goal overview and old checklist')
+    add(memory, { owner: 'user', scope: 'workspace', workspace: '/work/alpha' }, 'rollback nginx canary after 502 response', { confidence: 0.9 })
+    const snapshot = memory.snapshot({ context, query: 'deploy goal', task: { objective: 'deploy goal overview', nextStep: 'rollback nginx canary', query: 'latest human request' }, limit: 1, maxBytes: 512, maxTokens: 128 })
+    expect(snapshot.records.map(record => record.content)).toEqual(['rollback nginx canary after 502 response'])
+    expect(snapshot.bytes).toBeLessThanOrEqual(512); expect(snapshot.tokens).toBeLessThanOrEqual(128)
+    const legacy = memory.snapshot({ context, query: 'deploy goal', limit: 1, maxBytes: 512, maxTokens: 128 })
+    expect(legacy.records.map(record => record.content)).toEqual(['deploy goal overview and old checklist'])
+    memory.close()
+  })
+
+  test('keeps sensitive, expired, and removed records out of task-ranked snapshots before top-K', async () => {
+    const memory = await store()
+    add(memory, { owner: 'user', scope: 'user-global' }, 'rotate api token', { sensitivity: 'sensitive' })
+    add(memory, { owner: 'user', scope: 'user-global' }, 'rotate expired certificate', { expiresAt: 1 })
+    const removed = add(memory, { owner: 'user', scope: 'user-global' }, 'rotate revoked credential')
+    memory.applyApprovedMutation({ op: 'remove', idempotencyKey: 'remove:revoked', namespace: namespaceA,
+      identity: { owner: 'user', scope: 'user-global' }, id: removed.id, expectedVersion: removed.version })
+    add(memory, { owner: 'user', scope: 'user-global' }, 'rotate documented public key')
+    const snapshot = memory.snapshot({ context, task: { objective: 'rotate credentials', nextStep: 'rotate api token', query: 'rotate' }, limit: 1, maxBytes: 512, maxTokens: 128 })
+    expect(snapshot.records.map(record => record.content)).toEqual(['rotate documented public key'])
+    memory.close()
+  })
+
   test('merges the four visible scopes without leaking another workspace or preset', async () => {
     const memory = await store()
     add(memory, { owner: 'user', scope: 'user-global' }, 'global user memory')

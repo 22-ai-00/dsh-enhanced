@@ -95,6 +95,8 @@ export interface MemorySnapshotRequest {
   context: MemoryAgentContext
   /** Current task text. Relevant records precede confirmed standing preferences. */
   query?: string
+  /** Host-attested active Goal context; never contains a caller-selected namespace. */
+  task?: { objective: string; nextStep: string; query: string }
   limit: number
   maxBytes: number
   maxTokens: number
