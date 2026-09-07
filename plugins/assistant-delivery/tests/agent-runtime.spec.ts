@@ -983,13 +983,15 @@ describe('real rc.1 delivery Agent runtime', () => {
   test('persists a scheduled goal across Host reload and resumes only its original native Session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-reload-')); roots.push(root)
     const saved = new Map<string, SavedSession>()
-    const first = await scheduledGoalHarness(root, saved)
+    // This success case includes a full Host reload under suite load. Keep
+    // deliberate timeout/revocation cases on their own tighter budgets.
+    const first = await scheduledGoalHarness(root, saved, 15_000)
     const wake = await first.schedule()
     const before = JSON.parse(first.readWake(wake.id).intent_json)
     expect(first.llm.requests).toHaveLength(1)
     expect(before.native).toMatchObject({ phase: 'paused', roundsStarted: 0, maxGoalRounds: 1 })
     await first.ctx.fiber.restart()
-    const restarted = await scheduledGoalHarness(root, saved)
+    const restarted = await scheduledGoalHarness(root, saved, 15_000)
     const observations: Array<{ session: string; human: boolean }> = []
     restarted.ctx.on('agent/pre-step', async ({ agent }, next) => {
       observations.push({ session: String(agent.session.id), human: restarted.service.currentPreferenceTurn(agent) !== undefined })
@@ -1015,7 +1017,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     await restarted.ctx.assistantAutomations.tick(); await restarted.ctx.assistantAutomations.whenIdle()
     expect(restarted.llm.requests).toHaveLength(1)
     await restarted.ctx.fiber.restart()
-  })
+  }, 30_000)
 
   test('scheduled goal revokes before its wake CAS and never starts a model request', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-revoked-')); roots.push(root)

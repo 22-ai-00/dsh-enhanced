@@ -1,0 +1,165 @@
+import { Service, type Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@dsh-enhanced/assistant-delivery'
+import type {} from '@dsh-enhanced/assistant-policy'
+import { createHash, randomUUID } from 'node:crypto'
+import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
+import { rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { Config, validateConfig } from './config.js'
+import { IsolationLedger, type IsolationControllerAuthority } from './ledger.js'
+import { removeIsolatedContainer, runIsolatedProcess } from './runner.js'
+import { collectArtifacts, normalizeRequest, stageWorkspace } from './workspace.js'
+import { registerIsolationTools } from './tools.js'
+import type { IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
+
+export { Config }
+export const isolationPrincipalDigest = (principal: string): string => createHash('sha256').update(principal).digest('hex')
+const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+const controllerTtlMs = 30_000
+declare module '@deepseek-ai/cordis' { interface Context { assistantIsolation: AssistantIsolationService } }
+
+/** Trusted Host broker. Only the one-job scratch directory crosses into Docker. */
+export class AssistantIsolationService extends Service {
+  static Config = Config
+  readonly #config: ReturnType<typeof validateConfig>
+  readonly #ledger: IsolationLedger
+  readonly #authority: IsolationControllerAuthority
+  readonly #ready: Promise<void>
+  readonly #jobs = new Map<string, { abort: AbortController; done: Promise<IsolationResult> }>()
+  #active = true
+  #timer: NodeJS.Timeout
+
+  constructor(ctx: Context, input: Config = {}) {
+    super(ctx, 'assistantIsolation')
+    this.#config = validateConfig(input)
+    const root = this.#config.stateRoot
+    mkdirSync(root, { recursive: true, mode: 0o700 })
+    if (realpathSync(root) !== root || !lstatSync(root).isDirectory() || lstatSync(root).uid !== process.getuid?.()) throw new Error('assistant-isolation: private owned state root required')
+    chmodSync(root, 0o700)
+    this.#ledger = new IsolationLedger(join(root, 'ledger.sqlite'))
+    try {
+      this.#authority = this.#ledger.claimController(randomUUID(), controllerTtlMs)
+      this.#ledger.syncGrants(this.#config.grants, this.#authority)
+    } catch (error) { this.#ledger.close(); throw error }
+    this.#timer = setInterval(() => {
+      try { if (this.#ledger.renewController(this.#authority, controllerTtlMs)) return } catch { /* Losing the fence stops execution. */ }
+      this.#active = false
+      for (const job of this.#jobs.values()) job.abort.abort()
+    }, 5000)
+    this.#timer.unref()
+    this.#ready = this.#recover()
+    // Store the failure for run() without an unhandled background rejection.
+    void this.#ready.catch(() => { this.#active = false })
+    ctx.effect(() => async () => {
+      this.#active = false
+      for (const job of this.#jobs.values()) job.abort.abort()
+      await Promise.allSettled([this.#ready, ...Array.from(this.#jobs.values(), job => job.done)])
+      clearInterval(this.#timer)
+      try { this.#ledger.releaseController(this.#authority) } finally { this.#ledger.close() }
+    }, 'assistant-isolation.controller')
+    // These scopes remain managed even when a grant expires or is revoked.
+    // Trusted Host plugins are outside the worker boundary; model tool calls
+    // cannot switch to an arbitrary Host shell or a nested code dispatcher.
+    ctx.inject(['tools'], runtime => runtime.on('tools/execute', async (execution, next) => {
+      const header = execution.agent?.session.header
+      if (header !== undefined && this.#config.grants.some(grant => grant.workspace === header.cwd && grant.agentPreset === header.agentPreset)
+        && !['isolation_run', 'goal_context', 'goal_checkpoint'].includes(execution.name)) throw new Error('assistant-isolation: this scope requires isolated execution')
+      return await next()
+    }))
+    ctx.inject(['agents', 'assistantDelivery', 'assistantPolicy', 'tools'], runtime => registerIsolationTools(runtime, this))
+  }
+
+  #identity(agent: Agent | undefined, grantId: string): IsolationIdentity {
+    if (!this.#active || !this.#ledger.hasController(this.#authority)) throw new Error('assistant-isolation: controller unavailable')
+    if (agent === undefined || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-isolation: exact live agent required')
+    const owner = this.ctx.get('assistantDelivery')?.preferencePrincipalForAgent(agent)
+    if (owner === undefined || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-isolation: authenticated owner required')
+    if (this.ctx.get('assistantPolicy')?.authorizeAgent(agent, 'execute', { kind: 'tool', id: `isolation:${grantId}` }).effect !== 'allow') throw new Error('assistant-isolation: policy denied')
+    return { principalDigest: isolationPrincipalDigest(owner.principalId), ...owner.principalLineage,
+      workspace: owner.scope.workspace, agentPreset: owner.scope.preset }
+  }
+
+  async #recover(): Promise<void> {
+    let cursor = ''
+    for (;;) {
+      const page = this.#ledger.recoverable(cursor)
+      if (page.length === 0) break
+      cursor = page.at(-1)!.id
+      for (const job of page) {
+        const quiescent = await removeIsolatedContainer(this.#config.dockerPath, job.containerName)
+        const result: IsolationResult = job.result ? { ...job.result, quiescent } : {
+          jobId: job.id, status: 'unknown', quiescent, stdout: '', stderr: '', artifacts: [], reason: 'controller-recovery-no-replay',
+        }
+        this.#ledger.settle(job.id, job.version, result, this.#authority)
+        if (quiescent) await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true })
+      }
+    }
+  }
+
+  run = async (agent: Agent | undefined, input: IsolationRequest, signal: AbortSignal): Promise<IsolationResult> => {
+    await this.#ready
+    signal.throwIfAborted()
+    const request = normalizeRequest(input, this.#config.limits)
+    const identity = this.#identity(agent, request.grantId)
+    const prepared = this.#ledger.prepare({ identity, sessionId: String(agent!.session.id), grantId: request.grantId,
+      idempotencyKey: request.idempotencyKey, requestDigest: digest({ request, image: this.#config.image, limits: this.#config.limits }),
+      durationMs: request.timeoutMs!, maxActiveJobs: this.#config.maxConcurrentJobs, authority: this.#authority })
+    if (!prepared.created) {
+      const current = this.#jobs.get(prepared.job.id)
+      const result = current ? await current.done : prepared.job.result ?? {
+        jobId: prepared.job.id, status: 'unknown' as const, quiescent: false, stdout: '', stderr: '', artifacts: [], reason: 'job-in-progress-no-replay',
+      }
+      if (digest(this.#identity(agent, request.grantId)) !== digest(identity)) throw new Error('assistant-isolation: owner changed')
+      return structuredClone(result)
+    }
+    const abort = new AbortController()
+    const combined = AbortSignal.any([signal, abort.signal])
+    const done = this.#execute(agent!, identity, prepared.job, request, combined)
+    this.#jobs.set(prepared.job.id, { abort, done })
+    try {
+      const result = await done
+      if (digest(this.#identity(agent, request.grantId)) !== digest(identity)) throw new Error('assistant-isolation: owner changed')
+      return structuredClone(result)
+    } finally { this.#jobs.delete(prepared.job.id) }
+  }
+
+  async #execute(agent: Agent, identity: IsolationIdentity, initial: IsolationJob, request: IsolationRequest, signal: AbortSignal): Promise<IsolationResult> {
+    let job = initial
+    const abort = new AbortController()
+    const authorized = (): boolean => {
+      try { return !signal.aborted && this.#ledger.usable(job.id)
+        && digest(this.#identity(agent, job.grantId)) === digest(identity) } catch { return false }
+    }
+    const timer = setInterval(() => { if (!authorized()) abort.abort() }, 250)
+    timer.unref()
+    let mayHaveCreated = false
+    let result: IsolationResult = { jobId: job.id, status: 'failed', quiescent: true, stdout: '', stderr: '', artifacts: [], reason: 'preparation-failed' }
+    try {
+      const workspacePath = await stageWorkspace(this.#config.stateRoot, job.id, request)
+      if (!authorized()) throw new Error('authorization-denied-before-create')
+      mayHaveCreated = true
+      const processResult = await runIsolatedProcess({ jobId: job.id, containerName: job.containerName, image: this.#config.image,
+        dockerPath: this.#config.dockerPath, workspacePath, command: request.command, deadline: job.deadline,
+        limits: this.#config.limits, signal: AbortSignal.any([signal, abort.signal]),
+        authorizeStart: () => {
+          if (!authorized()) return false
+          job = this.#ledger.start(job.id, job.version, this.#authority)
+          return true
+        },
+      })
+      result = { ...processResult, jobId: job.id, artifacts: [] }
+      if (result.quiescent && result.status === 'succeeded') {
+        try { result.artifacts = await collectArtifacts(workspacePath, request.artifacts ?? [], this.#config.limits) }
+        catch { result = { ...result, status: 'failed', reason: 'artifact-export-rejected', artifacts: [] } }
+      }
+    } catch {
+      if (mayHaveCreated) result = { ...result, status: 'unknown', quiescent: await removeIsolatedContainer(this.#config.dockerPath, job.containerName), reason: 'runner-exception-no-replay' }
+    }
+    finally { clearInterval(timer) }
+    // A lost controller cannot write success into a successor's ledger.
+    try { this.#ledger.settle(job.id, job.version, result, this.#authority) }
+    finally { if (result.quiescent) await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true }) }
+    return result
+  }
+}

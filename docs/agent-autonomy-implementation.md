@@ -27,9 +27,9 @@
 | 05 | P1/A | 业务目标编排 bundle：成功条件、期限、依赖、预算、授权、假设、阻塞、唤醒和证据；关联原生 goal/session/run | 跨会话与重启恢复，多步骤任务真实完成；过时假设重查，用户目标变化传播，无重复外部提交 | 实现中 |
 | 06 | P1/A | 任务策略选择：直接执行、调查、实验、独立复核、候选比较和原生 subagent；route 结果归因 | 困难任务改变方法，工具故障与推理失败可区分；协调成本有记录；固定预算比较策略收益 | 待做 |
 | 07 | P1/B | Memory 根据当前 goal/step/query 召回；来源、适用条件、反例、失效和冲突；有预算的工具证据压缩 | 对照任务发现相关记忆并改善决策；当前任务变化重查；恢复保留原始引用，owner/scope 边界不泄漏 | 实现中 |
-| 08 | P2 | Policy 长期能力包与短期 lease：资源、动作、目的地、敏感度、期限、次数、费用、撤销；提交绑定 digest/前置版本/幂等键 | 正常预授权动作不用逐条审批；超范围、授权过期、撤销竞态、重放、重定向与数据外发被实际阻止 | 待做 |
-| 09 | P2 | 独立动作/凭据 broker 与隔离 worker，先交付一个受支持生产平台 | worker 任意代码和子进程不能读取 token/信任根，不能绕过出网与动作代理；崩溃恢复不重复提交 | 待做 |
-| 10 | P2 | 外部停止、不可由 worker 覆写的审计、版本回滚和不可逆动作补偿 | 实际终止 worker、撤 lease/凭据/出口；审计保留；部分失败有明确补偿结果 | 待做 |
+| 08 | P2 | Policy 长期能力包与短期 lease：资源、动作、目的地、敏感度、期限、次数、费用、撤销；提交绑定 digest/前置版本/幂等键 | 正常预授权动作不用逐条审批；超范围、授权过期、撤销竞态、重放、重定向与数据外发被实际阻止 | 实现中 |
+| 09 | P2 | 独立动作/凭据 broker 与隔离 worker，先交付一个受支持生产平台 | worker 任意代码和子进程不能读取 token/信任根，不能绕过出网与动作代理；崩溃恢复不重复提交 | 实现中 |
+| 10 | P2 | 外部停止、不可由 worker 覆写的审计、版本回滚和不可逆动作补偿 | 实际终止 worker、撤 lease/凭据/出口；审计保留；部分失败有明确补偿结果 | 实现中 |
 | 11 | P3/D | 统一事件 envelope 与目标关联，代码库及任务/日历至少两个真实来源，复用已有连接器 | 来源/版本/时间/可信度/去重/授权可追溯；重复和乱序事件不会重复动作；目标完成后退订 | 待做 |
 | 12 | P3/D | 机会排序、静默准备/提醒/预授权执行、静默时段、合并、冷却与每目标预算 | 收益/成功率/成本/打扰/损失可解释；拒绝后冷却；交付前验证功能、指标记录与安全边界，采纳/漏报/打扰/主动收益在交付后持续观察打磨，无固定观察期 | 待做 |
 | 13 | P4/E | typed workflow/skill：输入、前置条件、依赖步骤、参数、工具、验收和失败补偿；从失败及重复轨迹生成候选 | 至少 3–5 类实际高频流程；提取与授权分离；候选绑定父版本、触发条件、失败原因、指标、权限差异及回滚目标 | 待做 |
@@ -269,3 +269,11 @@
 - 最终工程检查：`CI=true pnpm check`（`/tmp/dsh-tool-evidence-check-v2.log`、`.exit=0`）通过，25 插件/3 共享库，零 lint 警告、全量类型检查、根 246 文件/3486 测试、Memory 包 138 测试、全部包测试与构建，以及 28 个 dry-run pack。Memory 实际 64 个打包文件含四个 evidence 模块的 JS/声明、patch、README 与 LICENSE，不含测试或数据库。首轮全仓唯一失败是新增 4 个 DSH catalog 包漏了对应的 minimumReleaseAgeExclude 精确版本；已补清单并完整重跑，未改弱测试。
 - 受控反向测试：只去除历史 FS source path/target digest 两处绑定检查，保留当前文件授权和读取期间版本复核，实际 `retargeted-file` 场景因模型读到旧 `NEEDLE=journal-v2` 而失败（退出 1）。finally 恢复原始文件字节，恢复 hash 与最终源码一致；最终完整检查覆盖恢复后的正向代码。[证据文件](evidence/tool-evidence-recovery-2026-09-07.json) 保存 18 个源码/配置和 20 个终态命令日志 hash、失败历史、恢复证明及打包清单。Codex with ChatGPT 任务 `c2c_76d1` 保存 21 条本地记录（含一条命令元数据顺序校正）；本会话无内置浏览器，未取得 ChatGPT 规划或评审。
 - 独立只读 verifier 最终 **PASS**：复算全部 18 个源码/配置与 20 个日志 hash，核对真实退出码、原生 provenance、owner/source 身份绑定、当前授权回读、反向失败与恢复以及包文件；主协调据此接受本 WP07 文件证据切片。完整 18 项目标保持未完成。
+
+- 08–10 第一批实际隔离接线：新增独立 `assistant-isolation` bundle，原生 `isolation_run` 将任意离线 shell 与显式输入送入 Linux Docker；只挂载新建工作区，Host 的 owner、Policy、SQLite 授权/审计与监督器不进入 worker。有限 grant 绑定 owner record/version/digest、workspace/preset、Session、镜像/限制/请求摘要及幂等键；额度预留、单 Controller lease/fence、撤销后同 revision 不复活、unknown 不重放已接生产路径。配置范围内禁止改走 Host bash/run_code/subagent，普通 native approval 仍保留，不能据此把完整 08 标为完成。
+- 实际停止证据：原生 Agent 取消、独立 `dsh-isolation revoke` 进程、Host 整个进程组 `SIGKILL` 后的 detached supervisor，均用真实容器验证。后代通过 `setsid` 独立会话仍随容器终止；启动前崩溃预留在重开后记录 unknown/quiescent，不重放命令。外部 CLI 与监督器并发删除时，删除/等待失败不直接当作清理结论；有界重试后仅以成功删除或 inspect 明确不存在确认 quiescence。无法证明仍保持 unknown/false。修复后真实 revoke 综合场景连续三次通过。
+- 隔离验证包含 Host 文件、`/proc`、环境与 Docker socket canary、真实 Host HTTP 端点、Docker 配置的 CPU/内存/PID/只读/能力检查、伪造 stdout 控制 JSON、超时与输出字节限制、链接/路径/类型/字节受限 artifact 导出和 1001 条恢复分页。网络负控暂时移除 `--network none` 后实际访问 Host canary 一次，断言如预期失败，代码字节恢复；后续正常运行仍阻止访问。模型和 Delivery/Policy 身份在 focused AgentLoop 测试中是明确夹具，不能冒充真实模型、账号或完整 profile 验收。
+- 全仓检查暴露成功唤醒夹具的 5 秒绝对窗口在并发 Host 重载中耗尽；未改代码定向复跑通过，源路径确认已 dispatch 的超时应保留 unknown。只给这个成功 case 的两个 harness 调用 15 秒及 test 总 30 秒，保留默认值、生产期限、撤销/超时 case 与全部成功断言。64 核主机的高并发 SQLite 写入还触发既有 verifier fixture 超时；最终执行环境显式 `VITEST_MAX_WORKERS=8`，不修改该用例或生产语义。早期失败日志保留，不计作通过。
+- 08–10 仍为实现中：当前 scratch bind mount 没有自动总磁盘/inode 配额，审计保留与持续 unknown 清理、独立动作/凭据 broker、真正无逐条审批的短期动作 lease、版本回滚/不可逆补偿、生产 bootstrap 及真实 profile/模型尚待后续实现。下一步先实测有界工作卷的生命周期与输入/产物通道；tmpfs 卷停止时可能卸载丢数据，不能先假定 stopped-container 的 `docker cp` 方案可用。全部 18 项目标保持不变，按依赖/证据推进，无按天等待或两周观察门槛。
+
+- 本批最终工程验收与证据：[isolation-runtime-2026-09-07.json](evidence/isolation-runtime-2026-09-07.json)。根 `CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=<记录的本地镜像 ID> pnpm check` 明确退出 **0**（`/tmp/dsh-isolation-check-v4.log`、`.exit`）；清单/零 lint 警告/类型检查、主测试 **253 文件/3,507 项**、各包测试、完整构建与 **26 插件 + 3 共享库** dry-run pack 通过。Isolation 独立包 7 文件/21 项，Delivery 687 项；已核对新增包实际包含 `runtime/supervisor.mjs`、`lib/cli.js`，没有测试、数据库或源码目录。独立只读复核 PASS 限于本批实现；C2C 保存本地执行证据，未获得 ChatGPT 网页复审。
