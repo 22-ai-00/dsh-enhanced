@@ -2938,7 +2938,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     } finally { releaseFlush?.(); flush.mockRestore(); await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
-  test.each([false, true])('native Goal rounds refresh task memory after a checkpoint change (withdraw next memory: %s)', async withdraw => {
+  test.each([{ withdraw: false, conflict: false }, { withdraw: true, conflict: false }, { withdraw: false, conflict: true }])('native Goal rounds refresh task memory after a checkpoint change (%j)', async ({ withdraw, conflict }) => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-native-goal-memory-')); roots.push(root)
     const PersistenceCoordinator = await persistenceCoordinatorConstructor()
     const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
@@ -2965,12 +2965,13 @@ describe('real rc.1 delivery Agent runtime', () => {
     const memories = new MemoryStore({ path: join(root, 'memory.sqlite') })
     const namespace = { mode: 'delivery' as const, principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version }
     const identity = { owner: 'user' as const, scope: 'workspace' as const, workspace: root }
-    const seed = (key: string, content: string) => memories.applyApprovedMutation({ op: 'add', idempotencyKey: key, namespace, identity,
-      entry: { kind: 'experience', content, trust: 'user-confirmed', sensitivity: 'private', confidence: 1,
+    const seed = (key: string, content: string, knowledge?: import('../../personal-memory/lib/types.js').MemoryKnowledge) => memories.applyApprovedMutation({ op: 'add', idempotencyKey: key, namespace, identity,
+      entry: { kind: 'experience', content, ...(knowledge === undefined ? {} : { knowledge }), trust: 'user-confirmed', sensitivity: 'private', confidence: 1,
         provenance: { source: 'prior-verified-run', observedAt: Date.now(), uri: `evidence://${key}` } } })
     seed('generic', 'Maintain Atlas project: the generic maintenance checklist is available.')
-    seed('citrus', 'Citrus recovery requires the previously verified journal repair command.')
-    const orchid = seed('orchid', 'Orchid recovery requires checking the previously verified migration marker.')
+    seed('citrus', 'Citrus recovery requires the previously verified journal repair command.', { applicability: ['Citrus schema v2'], counterexamples: ['Citrus schema v1 has no journal'] })
+    const orchid = seed('orchid', 'Orchid recovery requires checking the previously verified migration marker.', { claim: { key: 'orchid.recovery.mode', value: 'marker' } })
+    if (conflict) seed('alternative', 'The migrated deployment requires immutable snapshots.', { claim: { key: 'orchid.recovery.mode', value: 'snapshot' }, applicability: ['migrated deployment'] })
     let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
     const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions', 'goals'], apply(ctx: Context) {
       access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary', maxExecutionMs: 10_000 })
@@ -3009,9 +3010,15 @@ describe('real rc.1 delivery Agent runtime', () => {
       }
       expect(memoryIn(fixture.llm.requests[1]!)).toContain('Citrus recovery requires')
       expect(memoryIn(fixture.llm.requests[1]!)).toContain('evidence://citrus')
+      expect(memoryIn(fixture.llm.requests[1]!)).toContain('Citrus schema v1 has no journal')
+      expect(memoryIn(fixture.llm.requests[1]!)).toContain('applicability unverified')
       expect(memoryIn(fixture.llm.requests[1]!)).not.toContain('generic maintenance')
       const afterChange = memoryIn(fixture.llm.requests[2]!)
-      expect(afterChange).toContain(withdraw ? 'generic maintenance' : 'Orchid recovery requires')
+      if (conflict) {
+        expect(afterChange).toContain('claim disagreement: orchid.recovery.mode')
+        expect(afterChange).toContain('no value selected')
+        expect(afterChange).not.toContain('Orchid recovery requires')
+      } else expect(afterChange).toContain(withdraw ? 'generic maintenance' : 'Orchid recovery requires')
       expect(afterChange).not.toContain('Citrus recovery requires')
       if (withdraw) expect(afterChange).not.toContain('Orchid recovery requires')
       expect(Buffer.byteLength(afterChange)).toBeLessThanOrEqual(2_048)

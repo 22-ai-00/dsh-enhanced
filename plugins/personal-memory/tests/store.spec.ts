@@ -74,6 +74,47 @@ function entry(content: string, overrides: Partial<MemoryEntryInput> = {}): Memo
 }
 
 describe('personal memory store', () => {
+  test('persists, exports, and versions knowledge metadata without collapsing different applicability', async () => {
+    const path = await temporaryPath()
+    const store = new MemoryStore({ path, now: () => 10_000 })
+    const firstEntry = entry('Use the migration journal', { knowledge: { applicability: ['  Atlas v2  '], counterexamples: ['Atlas v1 lacks a journal'], claim: { key: 'atlas.recovery', value: 'journal' } } })
+    const first = store.applyApprovedMutation({ op: 'add', namespace: namespaceA, identity: userWorkspace, idempotencyKey: 'knowledge-first', entry: firstEntry })
+    expect(first.knowledge?.applicability).toEqual(['Atlas v2'])
+    expect(Object.isFrozen(first.knowledge?.applicability)).toBe(true)
+    const second = store.applyApprovedMutation({ op: 'add', namespace: namespaceA, identity: userWorkspace, idempotencyKey: 'knowledge-second', entry: entry(first.content, { knowledge: { applicability: ['Atlas v3'] } }) })
+    expect(second.contentHash).not.toBe(first.contentHash)
+    expect(() => store.normalizeMutation({ op: 'add', identity: userWorkspace, entry: firstEntry }, { namespace: namespaceA })).toThrowError(expect.objectContaining({ code: 'duplicate-content' }))
+    const normalized = store.normalizeMutation({ op: 'replace', identity: userWorkspace, id: first.id, expectedVersion: first.version, entry: entry(first.content, { knowledge: { claim: { key: 'atlas.recovery', value: 'snapshot' } } }) }, { namespace: namespaceA })
+    const changed = store.applyApprovedMutation({ ...normalized, namespace: namespaceA, idempotencyKey: 'knowledge-replace' })
+    expect(changed.version).toBe(2)
+    expect(changed.contentHash).not.toBe(first.contentHash)
+    expect(store.exportDocument({ namespace: namespaceA, workspace: '/work/alpha', agentPreset: 'primary' })).toMatchObject({ version: 2, records: expect.arrayContaining([expect.objectContaining({ entry: expect.objectContaining({ knowledge: changed.knowledge }) })]) })
+    store.close()
+    const reopened = new MemoryStore({ path, now: () => 10_000 })
+    expect(reopened.get(namespaceA, userWorkspace, first.id)?.knowledge).toEqual(changed.knowledge)
+    const hits = reopened.search({ context: { namespace: namespaceA, workspace: '/work/alpha', agentPreset: 'primary' }, query: 'snapshot' })
+    expect(hits.map(hit => hit.record.id)).toEqual([first.id])
+    reopened.close()
+  })
+
+  test.each([
+    null, [], { unknown: true }, { applicability: ['x', 'x', 'x', 'x', 'x'] },
+    { counterexamples: [''] }, { applicability: ['汉'.repeat(86)] },
+    { claim: { key: 'Not Canonical', value: 'x' } }, { claim: { key: 'valid', value: '' } },
+    { claim: { key: 'valid', value: 'x', authority: 'approved' } },
+  ])('rejects invalid knowledge before creating a mutation (%j)', async knowledge => {
+    const store = new MemoryStore({ path: await temporaryPath() })
+    expect(() => store.normalizeMutation({ op: 'add', identity: userGlobal, entry: entry('bounded', { knowledge: knowledge as never }) }, { namespace: namespaceA })).toThrowError(expect.objectContaining({ code: 'invalid-entry' }))
+    expect(store.list(namespaceA, userGlobal)).toEqual([])
+    store.close()
+  })
+
+  test('charges knowledge metadata to the existing content byte budget', async () => {
+    const store = new MemoryStore({ path: await temporaryPath(), maxContentBytes: 128 })
+    expect(() => store.applyApprovedMutation({ op: 'add', namespace: namespaceA, identity: userGlobal, idempotencyKey: 'oversize', entry: entry('x'.repeat(100), { knowledge: { applicability: ['x'.repeat(100)] } }) })).toThrowError(expect.objectContaining({ code: 'content-too-large' }))
+    store.close()
+  })
+
   test('canonicalizes dispatch field order in synthetic conflict fingerprints', () => {
     const canonical = {
       sourceId: 'dsh-enhanced-personal-memory',
@@ -104,7 +145,7 @@ describe('personal memory store', () => {
       WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
       ORDER BY name
     `).all() as { name: string }[]
-    expect(version.user_version).toBe(4)
+    expect(version.user_version).toBe(5)
     expect(tables.map(table => table.name)).toEqual([
       'memory_audit',
       'memory_promotion_cancellations',
@@ -292,9 +333,9 @@ describe('personal memory store', () => {
     store.close()
 
     const migrated = new DatabaseSync(path)
-    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(4)
+    expect((migrated.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(5)
     expect(migrated.prepare('SELECT value FROM schema_meta WHERE key = ?').get('schema-version'))
-      .toEqual({ value: '4' })
+      .toEqual({ value: '5' })
     expect(migrated.prepare('SELECT value FROM legacy_marker').get()).toEqual({ value: 'preserved' })
     expect(migrated.prepare(`
       SELECT namespace_mode, namespace_key FROM memory_records WHERE id = 'legacy-memory'

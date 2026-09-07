@@ -2,7 +2,7 @@ import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const memorySchemaVersion = 4
+export const memorySchemaVersion = 5
 
 export class MemoryDatabaseError extends Error {
   constructor(
@@ -279,11 +279,12 @@ function enableWal(database: DatabaseSync): void {
 function createFresh(database: DatabaseSync): void {
   database.exec(`
     CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '4');
+    INSERT INTO schema_meta(key, value) VALUES ('schema-version', '5');
   `)
   createV3Tables(database)
   createV4CompensationTable(database)
   createV3Indexes(database)
+  migrateV4ToV5(database)
 }
 
 function migrateV3ToV4(database: DatabaseSync): void {
@@ -291,6 +292,14 @@ function migrateV3ToV4(database: DatabaseSync): void {
   database.exec(`
     UPDATE schema_meta SET value = '4' WHERE key = 'schema-version';
     PRAGMA user_version = 4;
+  `)
+}
+
+function migrateV4ToV5(database: DatabaseSync): void {
+  database.exec(`
+    ALTER TABLE memory_records ADD COLUMN knowledge_json TEXT;
+    UPDATE schema_meta SET value = '5' WHERE key = 'schema-version';
+    PRAGMA user_version = 5;
   `)
 }
 
@@ -399,13 +408,15 @@ function migrate(database: DatabaseSync): void {
     }
     if (row.user_version === 0) {
       createFresh(database)
-      database.exec('PRAGMA user_version = 4')
+      database.exec('PRAGMA user_version = 5')
     } else {
       if (row.user_version === 1) migrateV1ToV2(database)
       row = database.prepare('PRAGMA user_version').get() as { user_version: number }
       if (row.user_version === 2) migrateV2ToV3(database)
       row = database.prepare('PRAGMA user_version').get() as { user_version: number }
       if (row.user_version === 3) migrateV3ToV4(database)
+      row = database.prepare('PRAGMA user_version').get() as { user_version: number }
+      if (row.user_version === 4) migrateV4ToV5(database)
     }
     database.exec('COMMIT')
   } catch (error) {

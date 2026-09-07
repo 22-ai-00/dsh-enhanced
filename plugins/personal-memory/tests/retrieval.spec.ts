@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
+import { afterEach, describe, expect, test, vi } from 'vitest'
 import { MemoryStore } from '../src/store.ts'
 import type { MemoryAgentContext, MemoryEntryInput, MemoryIdentity, MemoryOwnerNamespace } from '../src/types.ts'
 
@@ -70,6 +70,103 @@ function add(
 }
 
 describe('personal memory retrieval', () => {
+  test('uses one read view when another connection removes a hit between ranking and disagreement lookup', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'personal-memory-read-view-')); temporaryRoots.push(root)
+    const path = join(root, 'memory.sqlite')
+    const memory = new MemoryStore({ path, now: () => 100_000 })
+    const writer = new MemoryStore({ path, now: () => 100_000 })
+    const identity = { owner: 'user' as const, scope: 'user-global' as const }
+    const first = add(memory, identity, 'Atlas recovery uses journal', { knowledge: { claim: { key: 'recovery.mode', value: 'journal' } } })
+    const second = add(memory, identity, 'Beta recovery uses snapshots', { knowledge: { claim: { key: 'recovery.mode', value: 'snapshot' } } })
+    const search = memory.search.bind(memory)
+    let removed = false
+    const spy = vi.spyOn(memory, 'search').mockImplementation(request => {
+      const hits = search(request)
+      if (!removed) {
+        writer.applyApprovedMutation({ op: 'remove', namespace: namespaceA, identity, idempotencyKey: 'during-read', id: first.id, expectedVersion: first.version })
+        removed = true
+      }
+      return hits
+    })
+    try {
+      const snapshot = memory.snapshot({ context, query: 'Atlas', limit: 4, maxBytes: 4_096, maxTokens: 1_024 })
+      expect(removed).toBe(true)
+      expect(snapshot.text).toContain('claim disagreement')
+      expect(snapshot.records.map(record => record.id).sort()).toEqual([first.id, second.id].sort())
+      spy.mockRestore()
+      const next = memory.snapshot({ context, query: 'Beta', limit: 1, maxBytes: 2_048, maxTokens: 512 })
+      expect(next.records.map(record => record.id)).toEqual([second.id])
+      expect(next.text).not.toContain('claim disagreement')
+      // Validation failure also releases the read savepoint; later writes succeed.
+      expect(() => memory.search({ context, query: 'x', limit: 0 })).toThrow()
+      expect(add(memory, identity, 'After failed read').content).toBe('After failed read')
+    } finally { spy.mockRestore(); memory.close(); writer.close() }
+  })
+
+  test('retrieves a relevant counterexample with its attributed applicability and original reference', async () => {
+    const memory = await store()
+    const record = add(memory, { owner: 'user', scope: 'workspace', workspace: '/work/alpha' }, 'Use the recovery journal', {
+      knowledge: { applicability: ['Atlas schema v2'], counterexamples: ['Zephyr schema v1 has no journal'], claim: { key: 'atlas.recovery', value: 'journal' } },
+      provenance: { source: 'verified-incident', observedAt: 10_000, uri: 'evidence://incident/7' },
+    })
+    const snapshot = memory.snapshot({ context, task: { objective: 'recover service', nextStep: 'Zephyr', query: '' }, limit: 1, maxBytes: 2_048, maxTokens: 512 })
+    expect(snapshot.records.map(item => item.id)).toEqual([record.id])
+    expect(snapshot.text).toContain('Zephyr schema v1 has no journal')
+    expect(snapshot.text).toContain('Atlas schema v2')
+    expect(snapshot.text).toContain('applicability unverified')
+    expect(snapshot.text).toContain('evidence://incident/7')
+    memory.close()
+  })
+
+  test.each([1, 4])('preserves claim disagreement even when only one side matches the task (limit %i)', async limit => {
+    const memory = await store()
+    const first = add(memory, { owner: 'user', scope: 'user-global' }, 'Atlas emergency recovery uses a journal', { knowledge: { claim: { key: 'recovery.mode', value: 'journal' }, applicability: ['old schema'] } })
+    const second = add(memory, { owner: 'user', scope: 'workspace', workspace: '/work/alpha' }, 'New release uses immutable snapshots', { knowledge: { claim: { key: 'recovery.mode', value: 'snapshot' }, counterexamples: ['the journal is invalid after migration'] } })
+    const explicit = memory.search({ context, query: 'Atlas emergency', limit: 1, sensitivities: ['private'] })
+    expect(explicit).toHaveLength(1)
+    expect(explicit[0]?.disagreement).toMatchObject({ key: 'recovery.mode', recordCount: 2 })
+    expect(explicit[0]?.disagreement?.recordIds).toContain(second.id)
+    const snapshot = memory.snapshot({ context, query: 'Atlas emergency', limit, maxBytes: 4_096, maxTokens: 1_024 })
+    expect(snapshot.text).toContain('claim disagreement: recovery.mode')
+    if (limit === 1) {
+      expect(snapshot.records).toEqual([])
+      expect(snapshot.text).toContain('no value selected')
+      expect(snapshot.text).toContain(first.id); expect(snapshot.text).toContain(second.id)
+      expect(snapshot.text).not.toContain(first.content); expect(snapshot.text).not.toContain(second.content)
+    } else {
+      expect(snapshot.records.map(item => item.id).sort()).toEqual([first.id, second.id].sort())
+      expect(snapshot.text).toContain('the journal is invalid after migration')
+    }
+    const small = memory.snapshot({ context, query: 'Atlas emergency', limit: 4, maxBytes: 400, maxTokens: 100 })
+    expect(small.text).toContain('claim disagreement')
+    expect(small.records).toEqual([])
+    expect(small.bytes).toBeLessThanOrEqual(400)
+    memory.applyApprovedMutation({ op: 'remove', namespace: namespaceA, identity: { owner: 'user', scope: 'workspace', workspace: '/work/alpha' }, idempotencyKey: 'resolve-disagreement', id: second.id, expectedVersion: second.version })
+    const after = memory.snapshot({ context, query: 'Atlas emergency', limit: 1, maxBytes: 2_048, maxTokens: 512 })
+    expect(after.records.map(item => item.id)).toEqual([first.id])
+    expect(after.text).not.toContain('claim disagreement')
+    memory.close()
+  })
+
+  test('does not expose invisible, sensitive, expired, or removed disagreement partners', async () => {
+    const memory = await store()
+    const knowledge = { claim: { key: 'region.primary', value: 'hidden-region' } }
+    add(memory, { owner: 'user', scope: 'user-global' }, 'Other owner secret', { knowledge }, namespaceB)
+    add(memory, { owner: 'user', scope: 'workspace', workspace: '/work/beta' }, 'Other workspace secret', { knowledge })
+    add(memory, { owner: 'agent', scope: 'user-global', agentPreset: 'secondary' }, 'Other preset secret', { knowledge })
+    add(memory, { owner: 'user', scope: 'user-global' }, 'Sensitive secret', { knowledge, sensitivity: 'sensitive' })
+    add(memory, { owner: 'user', scope: 'user-global' }, 'Expired secret', { knowledge, expiresAt: 1 })
+    const removed = add(memory, { owner: 'user', scope: 'user-global' }, 'Removed secret', { knowledge })
+    memory.applyApprovedMutation({ op: 'remove', namespace: namespaceA, identity: { owner: 'user', scope: 'user-global' }, idempotencyKey: 'removed-secret', id: removed.id, expectedVersion: removed.version })
+    const visible = add(memory, { owner: 'user', scope: 'user-global' }, 'Visible region guidance', { knowledge: { claim: { key: 'region.primary', value: 'eu-west' } } })
+    const snapshot = memory.snapshot({ context, query: 'region', limit: 1, maxBytes: 2_048, maxTokens: 512 })
+    expect(snapshot.records.map(item => item.id)).toEqual([visible.id])
+    expect(snapshot.text).not.toContain('claim disagreement')
+    expect(snapshot.text).not.toContain('hidden-region')
+    expect(memory.search({ context, query: 'Visible region guidance', limit: 1 })[0]?.disagreement).toBeUndefined()
+    memory.close()
+  })
+
   test('prioritizes active task step evidence ahead of a generic objective match without widening snapshot bounds', async () => {
     const memory = await store()
     add(memory, { owner: 'user', scope: 'workspace', workspace: '/work/alpha' }, 'deploy goal overview and old checklist')

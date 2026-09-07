@@ -361,7 +361,7 @@ export class PersonalMemoryService extends Service {
     }
     if (typeof document !== 'object' || document === null
       || document.format !== 'dsh-personal-memory'
-      || document.version !== 1
+      || (document.version !== 1 && document.version !== 2)
       || !Array.isArray(document.records)
       || document.records.length > this.config.maxImportRecords) {
       throw new PersonalMemoryError('invalid-import', 'memory import format, version, or record count is invalid')

@@ -48,6 +48,13 @@ export interface MemoryProvenance {
   uri?: string
 }
 
+/** Approval-bound applicability metadata; it is not independently verified truth. */
+export interface MemoryKnowledge {
+  applicability?: readonly string[]
+  counterexamples?: readonly string[]
+  claim?: { key: string; value: string }
+}
+
 export interface MemoryEntryInput {
   kind: MemoryKind
   content: string
@@ -57,6 +64,7 @@ export interface MemoryEntryInput {
   provenance: MemoryProvenance
   expiresAt?: number
   supersedes?: string
+  knowledge?: MemoryKnowledge
 }
 
 export interface MemoryRecord extends MemoryEntryInput, MemoryIdentity {
@@ -89,6 +97,8 @@ export interface MemorySearchHit {
   record: MemoryRecord
   score: number
   matchedTokens: readonly string[]
+  /** Different explicit values among records visible to this search, before query/top-K. */
+  disagreement?: { key: string; recordCount: number; recordIds: readonly string[] }
 }
 
 export interface MemorySnapshotRequest {
@@ -252,7 +262,7 @@ export interface MemoryExportRecord {
 
 export interface MemoryExportDocument {
   format: 'dsh-personal-memory'
-  version: 1
+  version: 1 | 2
   records: readonly MemoryExportRecord[]
 }
 

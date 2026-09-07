@@ -9,6 +9,7 @@ import {
 import { APPROVAL_DISPLAY_BUDGET } from '@dsh-enhanced/assistant-policy'
 import { MemoryDatabaseError, openMemoryDatabase } from './sqlite.js'
 import { tokenizeMemory } from './tokenize.js'
+import { memoryKnowledgeText, normalizeMemoryKnowledge } from './knowledge.js'
 import type {
   ApprovedMemoryMutation,
   MemoryAgentContext,
@@ -16,6 +17,7 @@ import type {
   MemoryExportDocument,
   MemoryIdentity,
   MemoryKind,
+  MemoryKnowledge,
   MemoryMutation,
   MemoryOwnerNamespace,
   MemoryPromotionCancellationInput,
@@ -102,6 +104,7 @@ interface RecordRow {
   trust: MemoryTrust
   confidence: number
   provenance_json: string
+  knowledge_json: string | null
   supersedes: string | null
   expires_at: number | null
   status: MemoryStatus
@@ -482,8 +485,37 @@ function identityPriority(record: MemoryRecord): number {
   return (record.owner === 'user' ? 2 : 0) + (record.scope === 'workspace' ? 1 : 0)
 }
 
-function contentHash(content: string): string {
-  return createHash('sha256').update(content).digest('hex')
+function contentHash(content: string, knowledge?: MemoryKnowledge): string {
+  // Preserve legacy content digests and promotion receipts exactly.
+  const payload = knowledge === undefined ? content : `memory-knowledge/v1\0${stableJson({ content, knowledge })}`
+  return createHash('sha256').update(payload).digest('hex')
+}
+
+function memoryDedupKey(record: MemoryRecord): string {
+  return stableJson([record.contentHash, record.knowledge ?? null])
+}
+
+function memoryClaimGroups(records: readonly MemoryRecord[]): Map<string, MemoryRecord[]> {
+  const claims = new Map<string, MemoryRecord[]>()
+  const seenByClaim = new Map<string, Set<string>>()
+  for (const record of records) {
+    const key = record.knowledge?.claim?.key
+    if (key === undefined) continue
+    const group = claims.get(key) ?? []
+    const seen = seenByClaim.get(key) ?? new Set<string>()
+    const dedupKey = memoryDedupKey(record)
+    if (!seen.has(dedupKey)) {
+      seen.add(dedupKey)
+      group.push(record)
+    }
+    claims.set(key, group)
+    seenByClaim.set(key, seen)
+  }
+  for (const [key, group] of claims) {
+    if (new Set(group.map(member => member.knowledge!.claim!.value)).size <= 1) claims.delete(key)
+    else group.sort((left, right) => left.id.localeCompare(right.id, 'en'))
+  }
+  return claims
 }
 
 export function hashMemoryMutation(mutation: MemoryMutation): string {
@@ -528,6 +560,7 @@ export class MemoryStore {
   readonly #maxRecordsPerIdentity: number
   readonly #now: () => number
   #closed = false
+  #reading = false
 
   constructor(options: MemoryStoreOptions) {
     this.#maxContentBytes = options.maxContentBytes ?? 4_096
@@ -648,7 +681,25 @@ export class MemoryStore {
     }
   }
 
+  #readSnapshot<T>(operation: () => T): T {
+    if (this.#reading) return operation()
+    this.#database.exec('SAVEPOINT memory_snapshot')
+    this.#reading = true
+    try {
+      const result = operation()
+      this.#database.exec('RELEASE memory_snapshot')
+      return result
+    } catch (error) {
+      this.#database.exec('ROLLBACK TO memory_snapshot; RELEASE memory_snapshot')
+      throw error
+    } finally { this.#reading = false }
+  }
+
   search(request: MemorySearchRequest): MemorySearchHit[] {
+    return this.#readSnapshot(() => this.#search(request))
+  }
+
+  #search(request: MemorySearchRequest): MemorySearchHit[] {
     const context = normalizeAgentContext(request.context)
     const limit = request.limit ?? 20
     if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 100) {
@@ -678,6 +729,7 @@ export class MemoryStore {
       (kinds === undefined || kinds.has(record.kind))
       && (trusts === undefined || trusts.has(record.trust))
       && (sensitivities === undefined || sensitivities.has(record.sensitivity)))
+    const disagreements = memoryClaimGroups(records.filter(record => record.sensitivity === 'private'))
     const candidates = records.flatMap((record): MemorySearchHit[] => {
       const recordTokens = this.#tokens(record.id)
       const matchedTokens = recordTokens.filter(token => queryTokenSet.has(token))
@@ -688,10 +740,12 @@ export class MemoryStore {
       const kindScore = kindMatch ? 3 : 0
       const trustScore = record.trust === 'user-confirmed' ? 2 : record.trust === 'agent-observed' ? 1 : 0
       const score = phraseScore + kindScore + matchedTokens.length * 2 + trustScore + record.confidence
+      const partners = record.sensitivity !== 'private' || record.knowledge?.claim === undefined ? undefined : disagreements.get(record.knowledge.claim.key)
       return [Object.freeze({
         record,
         score,
         matchedTokens: Object.freeze(matchedTokens),
+        ...(partners === undefined ? {} : { disagreement: Object.freeze({ key: record.knowledge!.claim!.key, recordCount: partners.length, recordIds: Object.freeze(partners.slice(0, 4).map(partner => partner.id)) }) }),
       })]
     })
     candidates.sort((left, right) =>
@@ -702,8 +756,8 @@ export class MemoryStore {
     const hashes = new Set<string>()
     const output: MemorySearchHit[] = []
     for (const candidate of candidates) {
-      if (hashes.has(candidate.record.contentHash)) continue
-      hashes.add(candidate.record.contentHash)
+      if (hashes.has(memoryDedupKey(candidate.record))) continue
+      hashes.add(memoryDedupKey(candidate.record))
       output.push(candidate)
       if (output.length === limit) break
     }
@@ -711,6 +765,10 @@ export class MemoryStore {
   }
 
   snapshot(request: MemorySnapshotRequest): MemorySnapshot {
+    return this.#readSnapshot(() => this.#snapshot(request))
+  }
+
+  #snapshot(request: MemorySnapshotRequest): MemorySnapshot {
     if (!Number.isSafeInteger(request.limit) || request.limit <= 0 || request.limit > 100) {
       throw new MemoryStoreError('invalid-entry', 'memory snapshot limit must be between 1 and 100')
     }
@@ -734,9 +792,16 @@ export class MemoryStore {
     const selected: MemoryRecord[] = []
     const lines: string[] = []
     const hashes = new Set<string>()
-    for (const hit of [...hits, ...standing]) {
-      if (hashes.has(hit.record.contentHash)) continue
-      const record = hit.record
+    const handledClaims = new Set<string>()
+    // Inspect every visible private partner before top-K/byte truncation can hide
+    // the opposing value. Natural-language conditions may explain the difference;
+    // this is a disagreement to investigate, not an automatic truth decision.
+    const claims = memoryClaimGroups(this.#visibleRecords(normalizeAgentContext(request.context)).filter(record => record.sensitivity === 'private'))
+    const fits = (extra: readonly string[]): boolean => {
+      const bytes = Buffer.byteLength(`${prefix}${[...lines, ...extra].join('\n')}\n${suffix}`, 'utf8')
+      return bytes <= request.maxBytes && estimateTokens(bytes) <= request.maxTokens
+    }
+    const render = (record: MemoryRecord): string => {
       const provenance = JSON.stringify({
         source: record.provenance.source,
         observedAt: record.provenance.observedAt,
@@ -744,16 +809,51 @@ export class MemoryStore {
         ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
         ...(record.supersedes === undefined ? {} : { supersedes: record.supersedes }),
       })
-      const line = `- [${record.kind}; ${record.trust}; ${record.id}; v${record.version}] ${escapeXmlText(record.content)} (provenance: ${escapeXmlText(provenance)})`
-      const text = `${prefix}${[...lines, line].join('\n')}\n${suffix}`
-      const bytes = Buffer.byteLength(text, 'utf8')
-      if (bytes > request.maxBytes || estimateTokens(bytes) > request.maxTokens) continue
-      lines.push(line)
-      selected.push(hit.record)
-      hashes.add(hit.record.contentHash)
-      if (selected.length === request.limit) break
+      const knowledge = record.knowledge === undefined ? ''
+        : ` (recorded knowledge; ${record.owner}/${record.scope}; applicability unverified: ${escapeXmlText(JSON.stringify(record.knowledge))})`
+      return `- [${record.kind}; ${record.trust}; ${record.id}; v${record.version}] ${escapeXmlText(record.content)} (provenance: ${escapeXmlText(provenance)})${knowledge}`
     }
-    if (selected.length === 0) return Object.freeze({ records: Object.freeze([]), text: '', bytes: 0, tokens: 0 })
+    let slots = 0
+    for (const hit of [...hits, ...standing]) {
+      const record = hit.record
+      const hash = memoryDedupKey(record)
+      if (hashes.has(hash)) continue
+      const claim = record.knowledge?.claim
+      const group = claim === undefined ? undefined : claims.get(claim.key)
+      const disagreement = group !== undefined
+      if (disagreement) {
+        if (handledClaims.has(claim!.key)) continue
+        handledClaims.add(claim!.key)
+        const heading = `- [claim disagreement: ${escapeXmlText(claim!.key)}] Different recorded values; check applicability and original evidence before choosing.`
+        const complete = [heading, ...group.map(render)]
+        if (slots + group.length <= request.limit && fits(complete)) {
+          lines.push(...complete)
+          selected.push(...group)
+          slots += group.length
+          for (const member of group) hashes.add(memoryDedupKey(member))
+        } else {
+          // Never publish a single apparently uncontested side when its partner
+          // was omitted only because of the common snapshot budget.
+          for (let count = Math.min(group.length, 4); count >= 0; count -= 1) {
+            const refs = group.slice(0, count).map(member => `${member.id}@v${member.version}`).join(', ')
+            const marker = `${heading} ${group.length} records; bodies omitted by budget; no value selected.${refs === '' ? '' : ` Record refs: ${refs}.`}${count < group.length ? ` ${group.length - count} refs omitted; search the claim key.` : ''}`
+            if (!fits([marker])) continue
+            lines.push(marker)
+            slots += 1
+            break
+          }
+        }
+      } else {
+        const line = render(record)
+        if (!fits([line])) continue
+        lines.push(line)
+        selected.push(record)
+        hashes.add(hash)
+        slots += 1
+      }
+      if (slots === request.limit) break
+    }
+    if (lines.length === 0) return Object.freeze({ records: Object.freeze([]), text: '', bytes: 0, tokens: 0 })
     const text = `${prefix}${lines.join('\n')}\n${suffix}`
     const bytes = Buffer.byteLength(text, 'utf8')
     return Object.freeze({
@@ -780,13 +880,14 @@ export class MemoryStore {
         trust: record.trust,
         confidence: record.confidence,
         provenance: Object.freeze({ ...record.provenance }),
+        ...(record.knowledge === undefined ? {} : { knowledge: record.knowledge }),
         ...(record.expiresAt === undefined ? {} : { expiresAt: record.expiresAt }),
         ...(record.supersedes === undefined ? {} : { supersedes: record.supersedes }),
       }),
     }))
     return Object.freeze({
       format: 'dsh-personal-memory',
-      version: 1,
+      version: records.some(record => record.entry.knowledge !== undefined) ? 2 : 1,
       records: Object.freeze(records),
     })
   }
@@ -801,7 +902,7 @@ export class MemoryStore {
     if (mutation.op === 'add') {
       const entry = this.#publicEntry(this.#validateEntry(mutation.entry))
       if (preflight) {
-        this.#assertNoDuplicate(columns, contentHash(entry.content))
+        this.#assertNoDuplicate(columns, contentHash(entry.content, entry.knowledge), undefined, entry.knowledge)
         this.#assertRecordCapacity(columns)
       }
       return Object.freeze({ op: 'add', identity: Object.freeze(identity), entry: Object.freeze(entry) })
@@ -825,7 +926,7 @@ export class MemoryStore {
       })
     }
     const entry = this.#publicEntry(this.#validateEntry(mutation.entry))
-    if (preflight) this.#assertNoDuplicate(columns, contentHash(entry.content), mutation.id)
+    if (preflight) this.#assertNoDuplicate(columns, contentHash(entry.content, entry.knowledge), mutation.id, entry.knowledge)
     return Object.freeze({
       op: 'replace',
       identity: Object.freeze(identity),
@@ -1469,7 +1570,7 @@ export class MemoryStore {
 
   #add(identity: IdentityColumns, input: MemoryEntryInput): MemoryRecord {
     const entry = this.#validateEntry(input)
-    this.#assertNoDuplicate(identity, entry.contentHash)
+    this.#assertNoDuplicate(identity, entry.contentHash, undefined, entry.knowledge)
     this.#assertRecordCapacity(identity)
     const id = randomUUID()
     const now = this.#now()
@@ -1478,9 +1579,9 @@ export class MemoryStore {
         id, namespace_mode, namespace_key, principal_digest, principal_record_id, principal_version,
         headless_lineage_id, headless_lineage_version,
         owner, scope, workspace, agent_preset, kind, content, content_hash,
-        sensitivity, trust, confidence, provenance_json, supersedes, expires_at,
+        sensitivity, trust, confidence, provenance_json, knowledge_json, supersedes, expires_at,
         status, created_at, updated_at, version
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 1)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, 1)
     `).run(
       id,
       ...namespaceSqlValues(identity),
@@ -1495,12 +1596,13 @@ export class MemoryStore {
       entry.trust,
       entry.confidence,
       JSON.stringify(entry.provenance),
+      entry.knowledge === undefined ? null : JSON.stringify(entry.knowledge),
       entry.supersedes ?? null,
       entry.expiresAt ?? null,
       now,
       now,
     )
-    this.#replaceTokens(id, entry.content)
+    this.#replaceTokens(id, `${entry.content}\n${memoryKnowledgeText(entry.knowledge)}`)
     return this.#toRecord(this.#selectRecord(identity, id)!)
   }
 
@@ -1533,11 +1635,11 @@ export class MemoryStore {
       throw new MemoryStoreError('version-conflict', 'memory record version changed')
     }
     const entry = this.#validateEntry(input)
-    this.#assertNoDuplicate(identity, entry.contentHash, id)
+    this.#assertNoDuplicate(identity, entry.contentHash, id, entry.knowledge)
     const result = this.#database.prepare(`
       UPDATE memory_records SET
         kind = ?, content = ?, content_hash = ?, sensitivity = ?, trust = ?,
-        confidence = ?, provenance_json = ?, supersedes = ?, expires_at = ?,
+        confidence = ?, provenance_json = ?, knowledge_json = ?, supersedes = ?, expires_at = ?,
         updated_at = ?, version = version + 1
       WHERE id = ? AND version = ?
     `).run(
@@ -1548,6 +1650,7 @@ export class MemoryStore {
       entry.trust,
       entry.confidence,
       JSON.stringify(entry.provenance),
+      entry.knowledge === undefined ? null : JSON.stringify(entry.knowledge),
       entry.supersedes ?? null,
       entry.expiresAt ?? null,
       this.#now(),
@@ -1555,7 +1658,7 @@ export class MemoryStore {
       expectedVersion,
     )
     if (result.changes !== 1) throw new MemoryStoreError('version-conflict', 'memory record version changed')
-    this.#replaceTokens(id, entry.content)
+    this.#replaceTokens(id, `${entry.content}\n${memoryKnowledgeText(entry.knowledge)}`)
     return this.#toRecord(this.#selectRecord(identity, id)!)
   }
 
@@ -1577,7 +1680,12 @@ export class MemoryStore {
   #validateEntry(input: MemoryEntryInput): MemoryEntryInput & { contentHash: string } {
     const content = normalizeContent(input.content)
     if (content === '') throw new MemoryStoreError('invalid-entry', 'memory content must not be empty')
-    if (Buffer.byteLength(content, 'utf8') > this.#maxContentBytes) {
+    let knowledge: MemoryKnowledge | undefined
+    try { knowledge = normalizeMemoryKnowledge(input.knowledge) } catch (error) {
+      throw new MemoryStoreError('invalid-entry', error instanceof Error ? error.message : 'invalid memory knowledge')
+    }
+    const knowledgeBytes = knowledge === undefined ? 0 : Buffer.byteLength(JSON.stringify(knowledge), 'utf8')
+    if (Buffer.byteLength(content, 'utf8') + knowledgeBytes > this.#maxContentBytes) {
       throw new MemoryStoreError('content-too-large', 'memory content exceeds the configured byte limit')
     }
     if (!['fact', 'preference', 'instruction', 'experience'].includes(input.kind)) {
@@ -1598,19 +1706,21 @@ export class MemoryStore {
     if (input.expiresAt !== undefined && !Number.isSafeInteger(input.expiresAt)) {
       throw new MemoryStoreError('invalid-entry', 'memory expiresAt must be a safe integer timestamp')
     }
+    const { knowledge: _knowledge, ...rest } = input
     return {
-      ...input,
+      ...rest,
       content,
-      contentHash: contentHash(content),
+      contentHash: contentHash(content, knowledge),
+      ...(knowledge === undefined ? {} : { knowledge }),
       provenance: { ...input.provenance },
     }
   }
 
-  #assertNoDuplicate(identity: IdentityColumns, hash: string, excludedId?: string): void {
+  #assertNoDuplicate(identity: IdentityColumns, hash: string, excludedId?: string, knowledge?: MemoryKnowledge): void {
     const duplicate = this.#database.prepare(`
       SELECT id FROM memory_records
       WHERE namespace_key = ? AND owner = ? AND scope = ? AND workspace = ? AND agent_preset = ?
-        AND content_hash = ? AND status = 'active'
+        AND content_hash = ? AND knowledge_json IS ? AND status = 'active'
         AND (expires_at IS NULL OR expires_at > ?)
         AND (? IS NULL OR id <> ?)
       LIMIT 1
@@ -1621,6 +1731,7 @@ export class MemoryStore {
       identity.workspace,
       identity.agentPreset,
       hash,
+      knowledge === undefined ? null : JSON.stringify(knowledge),
       this.#now(),
       excludedId ?? null,
       excludedId ?? null,
@@ -1636,6 +1747,7 @@ export class MemoryStore {
       trust: input.trust,
       confidence: input.confidence,
       provenance: Object.freeze({ ...input.provenance }),
+      ...(input.knowledge === undefined ? {} : { knowledge: input.knowledge }),
       ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
       ...(input.supersedes === undefined ? {} : { supersedes: input.supersedes }),
     }
@@ -2211,6 +2323,7 @@ export class MemoryStore {
   }
 
   #toRecord(row: RecordRow): MemoryRecord {
+    const knowledge = row.knowledge_json === null ? undefined : normalizeMemoryKnowledge(JSON.parse(row.knowledge_json))
     return Object.freeze({
       id: row.id,
       namespace: namespaceFromRow(row),
@@ -2225,6 +2338,7 @@ export class MemoryStore {
       trust: row.trust,
       confidence: row.confidence,
       provenance: Object.freeze(JSON.parse(row.provenance_json) as MemoryRecord['provenance']),
+      ...(knowledge === undefined ? {} : { knowledge }),
       ...(row.supersedes === null ? {} : { supersedes: row.supersedes }),
       ...(row.expires_at === null ? {} : { expiresAt: row.expires_at }),
       status: row.status,
