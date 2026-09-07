@@ -4,9 +4,17 @@
 
 ## 安装与配置
 
-兼容 DSH `0.1.2-rc.1`。这是可选实验性 bundle，尚未正式发布；开发安装先在仓库运行 `pnpm build`，再把本目录作为本地插件安装到测试 profile。必须先配置 Delivery、Policy 和本地 Web owner，随后启用此 bundle；它不是默认自治安装器。
+兼容 DSH `0.1.2-rc.1`。这是可选实验性 bundle，尚未正式发布。本地源码安装可使用现有安装器的显式 Web 场景；默认 `core` 不会自动启用它：
 
-Web principal 必须是 `channel: web`，其 account、tenant、user 由可信本地安装者固定。Delivery 的 `pairPrincipalLocally({ databasePath, principal })` 是已有的离线 owner 交接入口：它会撤销此前 active owner，不能用它静默关联已有 Lark owner。当前不支持跨渠道 owner 别名或多用户 Web 身份映射。
+```sh
+./scripts/install/install-local.sh --scenario web --workspace /absolute/workspace --yes --no-service
+```
+
+该入口安装 core、Delivery、Goals 和 Web owner；先通过本地 `dsh-web-owner-setup` 初始化 owner 与完整 profile 配置，再探测真实 Host 激活。它复用有效 Delivery 数据库路径，固定 principal 为 `web/<profile>/local/operator`。不配置飞书或常驻服务，不会自行更改全局模型/权限选择；模型设置和验证仍沿现有安装器选项。完整目标执行、独立验收和隔离配置并未因此自动完成。
+
+单独使用 CLI 时先安装这些 bundle，停止目标 Host，再运行 `dsh-web-owner-setup --profile web --workspace /absolute/workspace`。它保留 YAML 标签、自定义配置和 Policy 规则；重复运行保留 owner ID/version、已有绑定和任务。修改过的受管规则或不同 owner/scope 会拒绝覆盖。新增精确 owner 的外部 ingest/capability 规则只提供能力可达性，现有 deny、原生 sandbox 和审批约束仍生效。
+
+Web principal 必须是 `channel: web`，其 account、tenant、user 由可信本地安装者固定。安装器使用 `ensurePrincipalLocally()`：只在空库初始化，或原样保留完全匹配的 active owner，不替换其他 owner、不复活已撤权身份。已有 Lark 或不同 owner 使用同一数据库时会拒绝，可为独立部署选择另一个 `DSH_HOME`。高级离线交接 API `pairPrincipalLocally()` 仍保留其原本的显式交接语义；本安装器不调用它。当前不支持跨渠道 owner 别名或多用户 Web 身份映射。
 
 本 bundle patch 先禁用上游 `session-controller` 行，再插入 `dsh-enhanced-assistant-web-owner`。在该 bundle 后追加完整配置 patch：
 
@@ -36,7 +44,9 @@ Policy 至少需要显式允许该 `web/account/tenant/user` 的 `ingest`，以�
 
 ## 权限与数据
 
-此包不创建监听端口、凭证、浏览器认证或安装脚本；复用已有的已认证单 owner Web 控制面。它通过宿主服务驱动 Agent 已有的文件、网络、子进程、凭证和浏览器能力，仍受 Policy 与原生审批约束。
+运行时不创建监听端口、凭证或浏览器认证，复用已有的已认证单 owner Web 控制面。离线 setup CLI 调用本机 `dsh --dump-config` 读取配置，不执行任意 YAML JS；写入目标 profile patch、Delivery owner 数据库和所选工作区目录，使用安装锁与原子文件替换。配对与 YAML 不能跨库原子提交，写文件失败可能留下尚未启用的首次身份；同身份重试不会轮换权限。CLI 不读取凭证存储、不发模型请求，也无安装生命周期脚本。
+
+运行时通过宿主服务驱动 Agent 已有的文件、网络、子进程、凭证和浏览器能力，仍受 Policy 与原生审批约束。
 
 Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租约；原生 Session 保存实际对话。返回的固定 capability 只给受信 Host 配置使用，并非对同进程插件或同 UID 进程的 OS 隔离边界。
 
