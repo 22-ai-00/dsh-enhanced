@@ -32,3 +32,18 @@ must use `task-verification/v3` and reproduce that complete binding. Existing
 v1 and v2 canonical payloads and digests remain unchanged.
 The wire library validates and binds these values; a Host producer remains
 responsible for obtaining them from an authoritative goal lifecycle.
+
+`task-acceptance/v4` and `task-verification/v4` are reserved for isolated
+process behavior assessment of a `goal-step` or `goal-outcome`. Every v4
+criterion must be `isolated-process-behavior`, which binds only a sealed
+authority reference, a normalized relative artifact path, and a test-set ID.
+It cannot carry stdin, expected output, expected values, or test vectors. v1,
+v2, and v3 reject that criterion kind and retain their canonical payloads and
+digests. `acceptanceProtocolForTask(task, criteria)` selects the matching
+protocol from a complete task identity and criterion set.
+
+`validateGoalArtifactAdmission` accepts and deeply freezes the narrow
+`goal-artifact-admission/v1` linkage `{ contractId, contractDigest, runId,
+turn }`. It validates the exact shape and requires a positive turn. The
+linkage is data binding for durable goal and isolation records; it is not an
+authority grant or a substitute for independent verification.

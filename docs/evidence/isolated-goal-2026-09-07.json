@@ -1,0 +1,590 @@
+{
+  "schema": "isolated-goal-evidence/v1",
+  "recordedAt": "2026-09-07T17:39:22.155300+00:00",
+  "baseCommit": "6c8524bbda732e7a1e821ae3a2bb36297439cb29",
+  "scope": "WP05/08/17: admitted Isolation artifact provenance, private independent Docker verification and finite exact goal_create; full 18-work-package goal remains active.",
+  "sourceHashes": {
+    "docs/agent-autonomy-implementation.md": "03023e7b50380a690aef1838a8eb57a478ab7f83ca3c081d8c8eb0a792d396b6",
+    "docs/architecture.md": "bfa7599d037880635cb3e41415a4ad1baf704beb950ff1913005e144c3cd8e84",
+    "docs/autonomy-handoff-2026-09-06.md": "b7e9e5b14c96388e454ab4b6d18ee05e35e08be24e90109d162d8fcd14872a91",
+    "package.json": "5b07039e07e0d71fdbaccec3aeb94d2ef46aece1cf4a7ed3e723416a91628886",
+    "packages/task-acceptance-contract/README.md": "eff8a4c303086d594243fcc545856b1e67a5cab955e17392dce66f27c408d075",
+    "packages/task-acceptance-contract/src/types.ts": "8fded87539ac903c0ff2d71cccfc7951ea97b28a86303b00addb90ec239bd204",
+    "packages/task-acceptance-contract/src/wire.ts": "79fe027e92a4bfa607c55e27d03322b7ee78f820741445f1af77564a4522bd80",
+    "packages/task-acceptance-contract/tests/index.spec.ts": "a528131b651ce6e32fde5a5079b524830165c77a26dfa5fcce515c4bb98d9bff",
+    "plugins/assistant-actions/src/service.ts": "f17fbd814c37ff1b5da2c0dcb2e0e8aae4ef9c0c751e467d97cebd1965fc8fa1",
+    "plugins/assistant-goals/README.md": "64b91b28af67111ae24b8ab518aba1a8f5d6e70210a8356002ede3c703bcb7e7",
+    "plugins/assistant-goals/src/budget.ts": "5a669f03bbc427575b1762f9a8d662c6c71b1a1b6f8fffa87a9772712f0f0f43",
+    "plugins/assistant-goals/src/execution.ts": "420ecd11fd2147fc52f948c90789e4bcb641e00e75b8ccdabf90cdf19601e2c5",
+    "plugins/assistant-goals/src/feedback.ts": "8173cd46f1f5ba7a752f47e9f93614c28535a6cad21fff7af1a34c6fe31767bb",
+    "plugins/assistant-goals/src/index.ts": "08316f1dd2629ae0f03b0e07cc9e6058f6cdf04b978bea2af4e693b91ead9bd6",
+    "plugins/assistant-goals/src/outcome-store.ts": "a947f934db0c0a0495e9414b2ca291e5f92476797fd6bc100891adab056b4250",
+    "plugins/assistant-goals/src/outcome.ts": "dadec679b29e353d2658d3e299896ddc4fde901d7dcb2956eef8a480d22c86b8",
+    "plugins/assistant-goals/src/service.ts": "cd437cb9cebdfc1d400033afe2af28006b387e1130023eadb054896de7a38c1f",
+    "plugins/assistant-goals/src/tools.ts": "50de81aed80ed8ceaa67a8c4918d0d1614364dac383f5abbf3395a9b780c2edb",
+    "plugins/assistant-goals/tests/feedback.spec.ts": "ab9e4e03dfc094a40c8a1a17cfb7600f3ec318d41075dcf5da2b396186390f8a",
+    "plugins/assistant-goals/tests/outcome-store.spec.ts": "de3cfb727d8f49541708619ad16868b00760dcc9b6abe2325a1abc67a4364cc5",
+    "plugins/assistant-isolation/README.md": "87f5ea0a346ba8b1c2add5ea362548e7d5f5639aa8aa685769bd78da10f66e2a",
+    "plugins/assistant-isolation/package.json": "f624f4277665818a87b1c02d3b4ad6bb13f28557eb2fc316a362771135f080e5",
+    "plugins/assistant-isolation/src/index.ts": "ec2d340143835784084c1af689bc0771e055759298dc1b129c2e2935bf59a3ee",
+    "plugins/assistant-isolation/src/ledger.ts": "da5b9b5777b7df651382b4cb560131ab1b4be01c440ea76066284dde91724b2b",
+    "plugins/assistant-isolation/src/service.ts": "96a1b5b53174f30455fd3c6478b629abfe0922b2b1d775fb582ad05ef506188e",
+    "plugins/assistant-isolation/src/types.ts": "060e313eebb56ac302b6be2c3b7bbe7479c3ffe8e501affd6bf2c8039e156381",
+    "plugins/assistant-isolation/src/verifier-runner.ts": "e317a54456b7e94ce7217b771537b44ad7c310ce440fb50d9ac6ff42fca05d74",
+    "plugins/assistant-isolation/tests/ledger.spec.ts": "0de4a8c6ea6e6ecbfdd21ebf07b4859b08f82264ff5b81ea9130ad6a3b0c8d11",
+    "plugins/assistant-isolation/tests/service.spec.ts": "a8822fd43c237d52403653532e5ee14f72ae05dc685c41e7e0c05710017def7f",
+    "plugins/assistant-isolation/tests/verifier-runner.spec.ts": "def3b8b369638d2b22193087ba88d74854ebc6b1384c4c6e837c7c1c1c5944c2",
+    "plugins/assistant-policy/src/service.ts": "3493a96ce36956c2b007f6a8c4521c939a6bc8f76a2ee21f8da0bb132419dbbb",
+    "plugins/assistant-policy/tests/preauthorized-tool.spec.ts": "951c2323ee5ce1070115769751396f5c1dce291ae84acbdec77fe7a9e10552a8",
+    "plugins/assistant-verifier/README.md": "c01bff6cfc5039875fbbe11d186c85a58da5af852ad32f6ea6d0f20c4ea6bb15",
+    "plugins/assistant-verifier/package.json": "e595a90c750853229e216d7e32fa7c19383e3b903b6b5da52583e38c9cc08bdd",
+    "plugins/assistant-verifier/src/config.ts": "1fc091cfc23681527b17c99c85b1235b61b817cbe8084152743ecbddfb7c8961",
+    "plugins/assistant-verifier/src/drivers.ts": "212df242423f136a20cb344d35fe1d5301e489ec6c0ce9d5d4b3d68d447af16a",
+    "plugins/assistant-verifier/src/host.ts": "e7a3d9531fb1550bab0c6109b85ae6b7c9d7e1184b4c46c357658a586a37d166",
+    "plugins/assistant-verifier/src/service.ts": "69ac28682e3dc42186faca7c1bad43b0d62340753a6f1832242818d9e6d0aed0",
+    "plugins/assistant-verifier/tests/isolated-driver.spec.ts": "d55a5d258c6d94b13b6b508f63546dab35475cc6875ddb13c047e4887ff97735",
+    "plugins/assistant-verifier/tests/isolated-service.spec.ts": "4376e197c6a45fd85519b7fdd7da1467c7349371685a2151fd22a2e9d6136853",
+    "pnpm-lock.yaml": "d17228a47c95bdec65b24f869e1e233f0c013a525a7c61e2e77a20bffc7de94f",
+    "scripts/e2e/autonomy-goal-model.mjs": "57ca261a5d5478368bd43f0c50b17eb70fcc7180ea9ee4f82cb2e4db2f66b5c9",
+    "scripts/e2e/autonomy-goal.spec.mjs": "98fe58a3f2f345d1870a5db687b30c5e3c550902354cf114e0a8603c416e7d47",
+    "scripts/e2e/autonomy-model.mjs": "29bf8116fcba073928c2279084e6d1a2f89cf8cbad9b5c5c4665c2f7a4cbbf3e",
+    "scripts/e2e/autonomy.spec.mjs": "c17ab2c7e1cf659c12c7e0e7762f074759a8e51e16b44c98209dd1668b069b2e",
+    "scripts/e2e/playwright-autonomy.config.mjs": "aea2942fd6d1eaa3308bce102778ae7a181f67948e0da58c848c7168503d2261",
+    "tests/release-version.spec.ts": "ba1e05ffdba3054a284a9ba722d0b940b5f5061538e2ac8e581e893accf6d1ad"
+  },
+  "commands": [
+    {
+      "command": "CI=true pnpm install --no-frozen-lockfile",
+      "log": "/tmp/dsh-isolated-goal-install.log",
+      "exitCode": 0,
+      "sha256": "1e8583fb62d7244089ec68291d9e201ee3ee10850422412928d1790b5e5cd028",
+      "exitFile": "/tmp/dsh-isolated-goal-install.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-install.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-install.log.exit"
+    },
+    {
+      "command": "CI=true pnpm run build:bootstrap",
+      "log": "/tmp/dsh-isolated-goal-bootstrap.log",
+      "exitCode": 2,
+      "sha256": "3789ba737f4a28c470155ab4c98e43cf03dea7689814b03ac1c1907b6a8d7779",
+      "exitFile": "/tmp/dsh-isolated-goal-bootstrap.log.exit",
+      "exitSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-bootstrap.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-bootstrap.log.exit"
+    },
+    {
+      "command": "CI=true pnpm run build:bootstrap",
+      "log": "/tmp/dsh-isolated-goal-bootstrap2.log",
+      "exitCode": 2,
+      "sha256": "ed1b0ced5c30ba5ed9b58f8eca4337c1520c97e7af563c4f32cbc5c959f442da",
+      "exitFile": "/tmp/dsh-isolated-goal-bootstrap2.log.exit",
+      "exitSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-bootstrap2.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-bootstrap2.log.exit"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm run build:bootstrap && CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation --filter @dsh-enhanced/assistant-verifier --filter @dsh-enhanced/assistant-goals --filter @dsh-enhanced/task-acceptance-contract test",
+      "log": "/tmp/dsh-isolated-goal-targeted.log",
+      "exitCode": 1,
+      "sha256": "03131825355dd229516370bbfe37e7a272c399c93a8c90665f1fd4a7e7a3e2b5",
+      "exitFile": "/tmp/dsh-isolated-goal-targeted.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-targeted.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-targeted.log.exit"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm run build:bootstrap && CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation --filter @dsh-enhanced/assistant-verifier --filter @dsh-enhanced/assistant-goals --filter @dsh-enhanced/task-acceptance-contract test",
+      "log": "/tmp/dsh-isolated-goal-focused2.log",
+      "exitCode": 0,
+      "sha256": "60caf1073f2d56db00657d8182feb12d08a569c0826fdd4d71b5d5af2d8f4181",
+      "exitFile": "/tmp/dsh-isolated-goal-focused2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-focused2.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-focused2.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy autonomy-goal.spec.mjs",
+      "log": "/tmp/dsh-isolated-goal-browser1.log",
+      "exitCode": 1,
+      "sha256": "cf684b317b9fa82a6ccb111fe5050dd05a9185c1c3d7d3c2bfbab1bcb01b7201",
+      "exitFile": "/tmp/dsh-isolated-goal-browser1.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-browser1.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-browser1.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy autonomy-goal.spec.mjs",
+      "log": "/tmp/dsh-isolated-goal-browser2.log",
+      "exitCode": 0,
+      "sha256": "f772c3b42988a3c7683beac9efc58c949405f9b97e40887daad16dcacae06f3d",
+      "exitFile": "/tmp/dsh-isolated-goal-browser2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-browser2.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-browser2.log.exit"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-isolated-goal-fullcheck.log",
+      "exitCode": 1,
+      "sha256": "8bfca37f483ca91a4646c1e6314f42b39ea2e74a6eb3ec8e3d57430d9ad52768",
+      "exitFile": "/tmp/dsh-isolated-goal-fullcheck.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-fullcheck.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-fullcheck.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-isolated-goal-browser-final.log",
+      "exitCode": 1,
+      "sha256": "ee117734a484fd0016c7d58158f750d2befb8ae449c08af4971264a1761e1733",
+      "exitFile": "/tmp/dsh-isolated-goal-browser-final.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-browser-final.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-browser-final.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-isolated-goal-browser-final2.log",
+      "exitCode": 0,
+      "sha256": "4d0cd8517b24647faa81a273284fd1d6ac7f1dcc463be2dc965ffae6d68677dc",
+      "exitFile": "/tmp/dsh-isolated-goal-browser-final2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-browser-final2.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-browser-final2.log.exit"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-isolated-goal-fullcheck-final.log",
+      "exitCode": 0,
+      "sha256": "2d8267e38fb58d6e43d787eeb68dd74e3d15f6609f21cf43585f1e279a3aa17f",
+      "exitFile": "/tmp/dsh-isolated-goal-fullcheck-final.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/isolated-goal-validation/dsh-isolated-goal-fullcheck-final.log",
+      "workspaceExit": ".cache/isolated-goal-validation/dsh-isolated-goal-fullcheck-final.log.exit"
+    }
+  ],
+  "browserProofs": {
+    "autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval": {
+      "installer": "actual local installer and repeated shipped setup",
+      "image": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "sessionId": "session-1bbe6803-d50a-4904-a9f4-94a1fe4eb504",
+      "nativeTool": "isolation_run",
+      "approvals": 0,
+      "jobs": 1,
+      "prompts": 2,
+      "reservedDurationMs": 20000,
+      "result": {
+        "status": "succeeded",
+        "quiescent": true,
+        "stdout": "42",
+        "artifact": "answer.txt:42"
+      },
+      "grantExpiryPreserved": true,
+      "calls": [
+        {
+          "call": 1,
+          "type": "isolation-tool",
+          "hasGoalTool": true,
+          "hasActionTool": true,
+          "hasIsolationTool": true
+        },
+        {
+          "call": 2,
+          "type": "reply",
+          "hasGoalTool": true,
+          "hasActionTool": true,
+          "hasIsolationTool": true
+        },
+        {
+          "call": 3,
+          "type": "isolation-tool",
+          "hasGoalTool": true,
+          "hasActionTool": true,
+          "hasIsolationTool": true
+        },
+        {
+          "call": 4,
+          "type": "reply",
+          "hasGoalTool": true,
+          "hasActionTool": true,
+          "hasIsolationTool": true
+        }
+      ],
+      "model": "deterministic fixture; no real-model intelligence or full autonomy claim"
+    },
+    "autonomy-goal-native-goals-527f7-lete-without-another-prompt": {
+      "image": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "sessionId": "session-89d43297-9f98-4b36-baab-86a22316ba4a",
+      "nativePhase": "complete",
+      "native": {
+        "sessionId": "session-89d43297-9f98-4b36-baab-86a22316ba4a",
+        "goalId": "goal-6f463518-9732-45b3-aa48-ce92408b1d44",
+        "revision": 2,
+        "objective": "Create a shell program that reads two integers and prints their sum",
+        "phase": "complete",
+        "roundsStarted": 2,
+        "maxGoalRounds": 3,
+        "updatedAt": 1788802139121
+      },
+      "prompts": 1,
+      "approvals": 0,
+      "setup": "actual autonomy installer plus explicit test-only Goals/Verifier profiles and model-meter overlay",
+      "sourceJobs": [
+        {
+          "id": "479092d6-0b8a-4763-be0a-c9346e0b6472",
+          "binding": {
+            "admission": {
+              "protocol": "goal-artifact-admission/v1",
+              "contractId": "acceptance-c76bf9e9fdccbb0d67862af0c57f5c1258642e3b6b1f6502f702cd5b86ec7971",
+              "contractDigest": "aa79183b203902e2324953836ed8128ffa03ec6f34b4b7aebd692c87dc01e92c",
+              "runId": "goal-run-f0a40b2cc9650531fdcb956c036750eb51f8bd1006515dae5cf11055ec4bc59f",
+              "turn": 2
+            },
+            "paths": [
+              "answer.sh"
+            ]
+          }
+        },
+        {
+          "id": "7dfb2387-1718-4aa3-b83e-226256f4733a",
+          "binding": {
+            "admission": {
+              "protocol": "goal-artifact-admission/v1",
+              "contractId": "acceptance-c11624f9987e06dd87d70a814fbce2b5f030a7221822738ee33764e811e0d8f9",
+              "contractDigest": "79fb90746d63d378e1957e42686eee0f7ca17842cc38fb0b08d2eb83ec6e4625",
+              "runId": "goal-run-2dc3f288f243a486916fce551db73f372954e6e0f2e53054cd81a7e4b643c7ba",
+              "turn": 3
+            },
+            "paths": [
+              "answer.sh"
+            ]
+          }
+        }
+      ],
+      "verificationJobs": [
+        {
+          "id": "b74714bc-dc04-4baf-b261-ce5131b0e635",
+          "status": "succeeded"
+        },
+        {
+          "id": "3f01838c-2043-48f3-8bb5-00704df64c3c",
+          "status": "succeeded"
+        },
+        {
+          "id": "cd3b7fec-35e0-4beb-bf2b-c9c2b0c7549a",
+          "status": "succeeded"
+        },
+        {
+          "id": "5a7c37f9-09d1-425f-89ff-03e8484e1002",
+          "status": "succeeded"
+        },
+        {
+          "id": "5acca734-8585-4756-bf8a-9a5a7f10db48",
+          "status": "succeeded"
+        },
+        {
+          "id": "760f4423-9439-4db2-8a07-0f9fcbd4f853",
+          "status": "succeeded"
+        }
+      ],
+      "receipts": [
+        {
+          "completedAt": 1788802134040,
+          "contractDigest": "aa79183b203902e2324953836ed8128ffa03ec6f34b4b7aebd692c87dc01e92c",
+          "contractId": "acceptance-c76bf9e9fdccbb0d67862af0c57f5c1258642e3b6b1f6502f702cd5b86ec7971",
+          "digest": "3601bd4bc884d0902371301afb560683e70cdd0088dd74ed7102c5e465fe4421",
+          "id": "verification-acceptance-c76bf9e9fdccbb0d67862af0c57f5c1258642e3b6b1f6502f702cd5b86ec7971-1",
+          "objectiveStatus": "not-achieved",
+          "owner": {
+            "principalRecordId": "principal_ea3bd0c1-5ecd-4856-978c-9c884547482f",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "e9cbaeec12a6d507ef02b26e1b7af00508cd255d671e7e449aabb7f7a5071e3a",
+              "criterionId": "sum-behavior",
+              "evidence": [],
+              "reason": "isolated-unexpected-stdout",
+              "status": "failed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-Be3p8H/workspace"
+          },
+          "startedAt": 1788802133263,
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "65807a09bde4fb3348963b178fb0ae9a3d2583bbbe91b87c2e2e84c7dae57512",
+              "nativeGoalId": "goal-6f463518-9732-45b3-aa48-ce92408b1d44",
+              "nativeRevision": 1,
+              "runId": "goal-run-f0a40b2cc9650531fdcb956c036750eb51f8bd1006515dae5cf11055ec4bc59f",
+              "sessionId": "session-89d43297-9f98-4b36-baab-86a22316ba4a",
+              "stepId": "round-1"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-f0a40b2cc9650531fdcb956c036750eb51f8bd1006515dae5cf11055ec4bc59f"
+          },
+          "validUntil": 1788802371978
+        },
+        {
+          "completedAt": 1788802134898,
+          "contractDigest": "b30ead6f302a0743c39c5d15bc3a4e1ebbef45498e780241469d35ac8fae4a25",
+          "contractId": "acceptance-e9ba6392d03e576feb98021f06bf845540e00cd65b7881345e5acfc394351928",
+          "digest": "80575792abb23fc68a38ce78e863f7fbef3a09da29a735371b34c9d04c3e2e4a",
+          "id": "verification-acceptance-e9ba6392d03e576feb98021f06bf845540e00cd65b7881345e5acfc394351928-1",
+          "objectiveStatus": "not-achieved",
+          "owner": {
+            "principalRecordId": "principal_ea3bd0c1-5ecd-4856-978c-9c884547482f",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "e9cbaeec12a6d507ef02b26e1b7af00508cd255d671e7e449aabb7f7a5071e3a",
+              "criterionId": "sum-behavior",
+              "evidence": [],
+              "reason": "isolated-unexpected-stdout",
+              "status": "failed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-Be3p8H/workspace"
+          },
+          "startedAt": 1788802134081,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-7b85e8a607176e402621a5ad1a96fa80e3198edb3699f2d2eab2ce8cb945f6a7",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "65807a09bde4fb3348963b178fb0ae9a3d2583bbbe91b87c2e2e84c7dae57512",
+              "nativeGoalId": "goal-6f463518-9732-45b3-aa48-ce92408b1d44",
+              "sessionId": "session-89d43297-9f98-4b36-baab-86a22316ba4a"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-7b85e8a607176e402621a5ad1a96fa80e3198edb3699f2d2eab2ce8cb945f6a7"
+          },
+          "validUntil": 1788802371855
+        },
+        {
+          "completedAt": 1788802137580,
+          "contractDigest": "79fb90746d63d378e1957e42686eee0f7ca17842cc38fb0b08d2eb83ec6e4625",
+          "contractId": "acceptance-c11624f9987e06dd87d70a814fbce2b5f030a7221822738ee33764e811e0d8f9",
+          "digest": "097766e5dd17b37f4ee9fc8d90cbc691464e5c3319e6859c109fed073933fc61",
+          "id": "verification-acceptance-c11624f9987e06dd87d70a814fbce2b5f030a7221822738ee33764e811e0d8f9-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_ea3bd0c1-5ecd-4856-978c-9c884547482f",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+              "criterionId": "sum-behavior",
+              "evidence": [
+                {
+                  "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                  "kind": "isolated-artifact",
+                  "ref": "7dfb2387-1718-4aa3-b83e-226256f4733a"
+                },
+                {
+                  "digest": "ecc505b96f94374bf7f13577910e5eca979dc379ba7f7ba621fd917cea671f52",
+                  "kind": "isolated-verification-jobs",
+                  "ref": "sum-checker"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-Be3p8H/workspace"
+          },
+          "startedAt": 1788802136203,
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "65807a09bde4fb3348963b178fb0ae9a3d2583bbbe91b87c2e2e84c7dae57512",
+              "nativeGoalId": "goal-6f463518-9732-45b3-aa48-ce92408b1d44",
+              "nativeRevision": 1,
+              "runId": "goal-run-2dc3f288f243a486916fce551db73f372954e6e0f2e53054cd81a7e4b643c7ba",
+              "sessionId": "session-89d43297-9f98-4b36-baab-86a22316ba4a",
+              "stepId": "round-2"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-2dc3f288f243a486916fce551db73f372954e6e0f2e53054cd81a7e4b643c7ba"
+          },
+          "validUntil": 1788802374948
+        },
+        {
+          "completedAt": 1788802139083,
+          "contractDigest": "03820ead6dd0b0df6561732251b3d392c76a06f9d976aee2103ca56a9dc6c4ce",
+          "contractId": "acceptance-0ff04d2e35853ccce352cfe5d59f3a74ab1ff665774589802acaad96a90844f0",
+          "digest": "f12bc9cdb35dc14345f27cfd7c35844aa38a7f00fb18f2996ed91050c9d70290",
+          "id": "verification-acceptance-0ff04d2e35853ccce352cfe5d59f3a74ab1ff665774589802acaad96a90844f0-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_ea3bd0c1-5ecd-4856-978c-9c884547482f",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+              "criterionId": "sum-behavior",
+              "evidence": [
+                {
+                  "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                  "kind": "isolated-artifact",
+                  "ref": "7dfb2387-1718-4aa3-b83e-226256f4733a"
+                },
+                {
+                  "digest": "128eb4dc4faa488022d5d645fdea6decc9785b26d1d3b3ca9cc43775e02896dc",
+                  "kind": "isolated-verification-jobs",
+                  "ref": "sum-checker"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-Be3p8H/workspace"
+          },
+          "startedAt": 1788802137610,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-3792105523b0946f0db7345e53c3f6d7b2511545364527cd5c0117b3d4e1efd1",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "65807a09bde4fb3348963b178fb0ae9a3d2583bbbe91b87c2e2e84c7dae57512",
+              "nativeGoalId": "goal-6f463518-9732-45b3-aa48-ce92408b1d44",
+              "sessionId": "session-89d43297-9f98-4b36-baab-86a22316ba4a"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-3792105523b0946f0db7345e53c3f6d7b2511545364527cd5c0117b3d4e1efd1"
+          },
+          "validUntil": 1788802371855
+        }
+      ],
+      "calls": [
+        {
+          "call": 1,
+          "tool": "goal_create",
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": false,
+          "secretObserved": false
+        },
+        {
+          "call": 2,
+          "tool": null,
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": false,
+          "secretObserved": false
+        },
+        {
+          "call": 3,
+          "tool": "isolation_run",
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": false,
+          "secretObserved": false
+        },
+        {
+          "call": 4,
+          "tool": null,
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": false,
+          "secretObserved": false
+        },
+        {
+          "call": 5,
+          "tool": "isolation_run",
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": true,
+          "secretObserved": false
+        },
+        {
+          "call": 6,
+          "tool": null,
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": true,
+          "secretObserved": false
+        }
+      ],
+      "budgetReservations": 4,
+      "model": "deterministic fixture with exact fixture metering; not production model intelligence or pricing proof",
+      "acceptance": "operator-configured exact task profiles; not generic installer-generated success conditions"
+    }
+  },
+  "browserArtifacts": {
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/host.log": "245838b4bd70b29481e13115bca87619fadd1eb09f3db31d3e1d16baa5c845fa",
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/install.log": "4ff063abae55355451a84acb7a3459e06372cb3824580a61aad5edeb435e5e31",
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/model.jsonl": "3bfe3246ba8e3b6906c4478feaddded938de0051ce5f50cc11ab3a1bc086e71c",
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/proof.json": "a0752600e077172572492cca99a70d88191ffc227e9b38b43f9275a8dab43521",
+    ".cache/autonomy-e2e/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/transport.json": "69ba9794d638211221b21c4b9a24c3d1fd9fbba03978631fe801dd7f850adeb6",
+    ".cache/autonomy-e2e/autonomy-goal-native-goals-527f7-lete-without-another-prompt/host.log": "14491f91ea434c1a32515704310f5d0efc8160ed03b4f5fd839b54e1e5b28bc8",
+    ".cache/autonomy-e2e/autonomy-goal-native-goals-527f7-lete-without-another-prompt/install.log": "10f28ed6b6bca6cdab8a0eb49698a1daebc2961d1d5430446b605d5240e48cfd",
+    ".cache/autonomy-e2e/autonomy-goal-native-goals-527f7-lete-without-another-prompt/installed-profile.yaml": "d6b2f7e7c11b3de7a0115a26c71654f9c7712ce607a9ed991c4c1c2b495f562c",
+    ".cache/autonomy-e2e/autonomy-goal-native-goals-527f7-lete-without-another-prompt/model.jsonl": "404abe389b00294953d2b81eaeead358613091ed37c8658f60319dd2530b4dd7",
+    ".cache/autonomy-e2e/autonomy-goal-native-goals-527f7-lete-without-another-prompt/proof.json": "a7a5127228738ea866602adf94ea9aa91711207d8b7316ed9e282edc823d7eb7",
+    ".cache/autonomy-e2e/autonomy-goal-native-goals-527f7-lete-without-another-prompt/transport.json": "bf199d9d0d0ef04123a2ae14dcd821b7a9fd631b6fbdae2b08af09b4038315a0"
+  },
+  "verification": {
+    "fullCheck": "PASS",
+    "rootTests": {
+      "files": 277,
+      "tests": 3643
+    },
+    "policyTests": 194,
+    "isolationTests": 97,
+    "goalsTests": 76,
+    "verifierTests": 60,
+    "plugins": 27,
+    "sharedPackages": 3,
+    "dryRunPacks": 30,
+    "browserScenarios": 2,
+    "independentReview": {
+      "status": "PASS",
+      "reviewer": "broker_explore",
+      "mode": "independent read-only source and saved-evidence review",
+      "sourceHashesVerified": 47,
+      "commandLogsAndExitCodesVerified": 11,
+      "browserArtifactsVerified": 11,
+      "testsRerunByReviewer": false
+    },
+    "coordinatorAcceptance": "PASS for this scoped implementation; complete 18-work-package goal remains active"
+  },
+  "findingsFixed": [
+    "Distinct source and verification job IDs are now handled correctly; evidence binds source artifact and independent verification keys.",
+    "v4 whole-goal store, step feedback, service contract/receipt preparation and Host source bridge are connected while older protocol formats remain valid.",
+    "Goals default preserves trusted Loader plugin metadata; default-zero creation preauthorization does not attempt registration.",
+    "Finite creation preauthorization requires both exact isolated profiles, live owner turn, Policy, cumulative budget and exact route meter.",
+    "A legacy Policy budget test crossed its real wall-clock minute; that fixture now uses an explicit fixed Policy clock without changing production budget behavior.",
+    "Bootstrap includes Isolation before Verifier and its release-contract regression is updated.",
+    "Browser fixtures use published dsh-enhanced row IDs and edit an existing overlay or add one when the installed bundle has no root override."
+  ],
+  "limits": [
+    "Deterministic model with exact fixture metering, not real-model intelligence, production tokenizer/pricing or a comparison benchmark.",
+    "Real autonomy installer is followed by an explicit test-only Goals/Verifier/model-meter overlay; default installation still does not create generic trusted acceptance profiles or production meters.",
+    "Verification inputs/expected results remain Host-owned. Bounded pass/fail feedback is not a cryptographic secrecy guarantee.",
+    "Host plugins and same-UID operators remain trusted; unknown dispatch retains occupancy and is never automatically replayed or freed.",
+    "No actual GitHub mutation, real credential read, image pull, package release, shared daemon restart or live user-profile activation.",
+    "Background owner wake, production configuration, external readback/compensation and remaining work packages still need completion; no day/week waiting gate.",
+    "C2C c2c_a939 contains local execution records only; no available in-app browser or ChatGPT web planning/review."
+  ]
+}

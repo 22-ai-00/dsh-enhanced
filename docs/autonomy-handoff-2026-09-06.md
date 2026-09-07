@@ -1,5 +1,8 @@
 # 自主智能体目标：跨设备交接
 
+> 最新接线更新（2026-09-07，基线 `6c8524b`）：新增 v4 隔离产物来源绑定与独立容器验收，步骤和全目标使用同一原生 Goals 生命周期。真实 Web 临时 profile 已验证一次请求→首轮错误产物→独立验收失败→下一原生回合收到反馈并修正→step/outcome achieved→native complete，零逐条审批。模型与计量器是明确的确定性夹具，Goals/Verifier 精确配置是安装后显式 test overlay，不能称为安装器默认完成全部自治或真实模型智能证明。有限 `goal_create` 预授权默认关闭，开启必须有两个 isolated profiles、累计预算、精确线路 meter 和 live owner turn。最终命令、源码哈希与独立复核见 [本批证据](evidence/isolated-goal-2026-09-07.json)；全部 18 项仍为 3 已验证 / 7 实现中 / 8 待做，按依赖与证据推进，不按天等待，长期效果观察放在交付后的使用中。
+
+
 > 2026-09-07 最新接线：显式 `--scenario autonomy` 已接入有限离线 Web owner 安装、生产 Docker probe、幂等 grant 与原生隔离工具预授权。真实安装揭示并修复了 Isolation/Actions default export 丢失可信插件名的问题。当前证据与限制见[落地账本](agent-autonomy-implementation.md)及[安装证据](evidence/autonomy-install-2026-09-07.json)；完整目标仍进行中，下一步接可信隔离 artifact 到 Goals/Verifier。长期主动性观察与按天估算均不设交付等待期。
 
 > 有限动作 broker 更新（2026-09-07）：新增实验性 `assistant-actions`，可信 Host 通过短期凭据 lease，只向 operator 精确授权的 GitHub 仓库/分支/文件执行带 expected-head 的原子 commit。持久动作账本保留未知结果、阻止同 key 重放及同目的地/旧 head 的新 key 重试；撤权不承诺撤销已送达的提交。真实 ToolRuntime、Isolation 路由、Policy、受保护凭据文件和本地 HTTP 协议夹具已组合验证；没有调用真实 GitHub mutation。最终全仓与独立结论见落地账本末尾及[动作证据](evidence/action-broker-2026-09-07.json)。完整 18 项继续推进。

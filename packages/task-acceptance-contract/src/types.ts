@@ -8,6 +8,10 @@ export interface ProcessBehaviorCriterion {
   readonly artifactPath: string; readonly stdin: string; readonly expectedStdout: string
   readonly expectedExitCode: number
 }
+export interface IsolatedProcessBehaviorCriterion {
+  readonly id: string; readonly kind: 'isolated-process-behavior'; readonly authority: AuthorityRef
+  readonly artifactPath: string; readonly testSetId: string
+}
 export interface DocumentCitationsCriterion {
   readonly id: string; readonly kind: 'document-citations'; readonly authority: AuthorityRef
   readonly artifactPath: string; readonly requiredText: readonly string[]
@@ -18,7 +22,7 @@ export interface TargetReadbackCriterion {
   readonly objectId: string; readonly expected: readonly Readonly<{ pointer: string; value: AcceptanceJsonValue }>[]
   readonly expectedRevision?: string
 }
-export type AcceptanceCriterion = ProcessBehaviorCriterion | DocumentCitationsCriterion | TargetReadbackCriterion
+export type AcceptanceCriterion = ProcessBehaviorCriterion | IsolatedProcessBehaviorCriterion | DocumentCitationsCriterion | TargetReadbackCriterion
 export interface GoalStepBinding {
   readonly id: string; readonly definitionVersion: number; readonly definitionDigest: string
   readonly stepId: string; readonly runId: string; readonly sessionId: string
@@ -54,7 +58,12 @@ export interface TaskAcceptanceContractV3Input extends TaskAcceptanceContractBas
   readonly protocol: 'task-acceptance/v3'
   readonly task: Readonly<{ kind: 'goal-outcome'; ref: string; goal: GoalOutcomeBinding }>
 }
-export type TaskAcceptanceContractInput = TaskAcceptanceContractV1Input | TaskAcceptanceContractV2Input | TaskAcceptanceContractV3Input
+export interface TaskAcceptanceContractV4Input extends TaskAcceptanceContractBase {
+  readonly protocol: 'task-acceptance/v4'
+  readonly task: Readonly<{ kind: 'goal-step'; ref: string; goal: GoalStepBinding }> | Readonly<{ kind: 'goal-outcome'; ref: string; goal: GoalOutcomeBinding }>
+  readonly criteria: readonly IsolatedProcessBehaviorCriterion[]
+}
+export type TaskAcceptanceContractInput = TaskAcceptanceContractV1Input | TaskAcceptanceContractV2Input | TaskAcceptanceContractV3Input | TaskAcceptanceContractV4Input
 export type TaskAcceptanceContract = TaskAcceptanceContractInput & Readonly<{ digest: string }>
 export interface CriterionResult {
   readonly criterionId: string; readonly status: 'passed' | 'failed' | 'unknown'; readonly reason: string
@@ -78,5 +87,16 @@ export interface TaskVerificationReceiptV3Input extends TaskVerificationReceiptB
   readonly protocol: 'task-verification/v3'
   readonly task: Readonly<{ kind: 'goal-outcome'; ref: string; goal: GoalOutcomeBinding }>
 }
-export type TaskVerificationReceiptInput = TaskVerificationReceiptV1Input | TaskVerificationReceiptV2Input | TaskVerificationReceiptV3Input
+export interface TaskVerificationReceiptV4Input extends TaskVerificationReceiptBase {
+  readonly protocol: 'task-verification/v4'
+  readonly task: Readonly<{ kind: 'goal-step'; ref: string; goal: GoalStepBinding }> | Readonly<{ kind: 'goal-outcome'; ref: string; goal: GoalOutcomeBinding }>
+}
+export type TaskVerificationReceiptInput = TaskVerificationReceiptV1Input | TaskVerificationReceiptV2Input | TaskVerificationReceiptV3Input | TaskVerificationReceiptV4Input
 export type TaskVerificationReceipt = TaskVerificationReceiptInput & Readonly<{ objectiveStatus: 'achieved' | 'not-achieved' | 'unknown'; digest: string }>
+export interface GoalArtifactAdmission {
+  readonly protocol: 'goal-artifact-admission/v1'
+  readonly contractId: string
+  readonly contractDigest: string
+  readonly runId: string
+  readonly turn: number
+}

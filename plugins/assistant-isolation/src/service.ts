@@ -1,3 +1,4 @@
+import { validateGoalArtifactAdmission, validateTaskAcceptanceContract, type GoalArtifactAdmission, type TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -77,7 +78,7 @@ export class AssistantIsolationService extends Service {
       const header = execution.agent?.session.header
       if (header !== undefined && this.#config.grants.some(grant => grant.workspace === header.cwd && grant.agentPreset === header.agentPreset)
         && !['isolation_run', 'goal_context', 'goal_checkpoint'].includes(execution.name)
-        && !(execution.name === 'action_github_commit' && this.ctx.get('assistantPolicy')?.isPreauthorizedTool?.(execution))) throw new Error('assistant-isolation: this scope requires isolated execution')
+        && !(['action_github_commit', 'goal_create'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool?.(execution))) throw new Error('assistant-isolation: this scope requires isolated execution')
       return await next()
     }))
     ctx.inject(['agents', 'assistantDelivery', 'assistantPolicy', 'tools'], runtime => registerIsolationTools(runtime, this))
@@ -136,6 +137,24 @@ export class AssistantIsolationService extends Service {
     }
   }
 
+  /** Private Host readback; never exposed as a model tool or filesystem path. */
+  readAcceptedArtifact = (input: TaskAcceptanceContract, path: string) => {
+    if (!this.#active || !this.#ledger.hasController(this.#authority)) throw new Error('assistant-isolation: artifact source unavailable')
+    const contract = validateTaskAcceptanceContract(input)
+    if (contract.protocol !== 'task-acceptance/v4' || contract.task.kind !== 'goal-step') throw new Error('assistant-isolation: artifact source must be a goal step')
+    const job = this.#ledger.acceptedArtifactJob(contract.id, contract.digest, path)
+    if (!job || job.artifactBinding?.admission.runId !== contract.task.ref || job.sessionId !== contract.task.goal.sessionId
+      || job.identity.principalRecordId !== contract.owner.principalRecordId || job.identity.principalVersion !== contract.owner.principalVersion
+      || job.identity.workspace !== contract.scope.workspace || job.identity.agentPreset !== contract.scope.preset
+      || !job.dispatchAttempted || job.createdAt < contract.issuedAt || job.updatedAt >= contract.expiresAt || job.status !== 'succeeded'
+      || job.result?.quiescent !== true || job.result.retention !== undefined) throw new Error('assistant-isolation: accepted artifact unavailable')
+    const artifacts = job.result.artifacts.filter(artifact => artifact.path === path)
+    if (artifacts.length !== 1) throw new Error('assistant-isolation: accepted artifact unavailable')
+    const artifact = artifacts[0]!
+    return Object.freeze({ jobId: job.id, requestDigest: job.requestDigest, admission: job.artifactBinding.admission,
+      path, content: artifact.content, sha256: createHash('sha256').update(artifact.content).digest('hex') })
+  }
+
   /** Only the trusted registered isolation tool may skip a redundant risk prompt. */
   preauthorize = (execution: ToolExecution): boolean => {
     try {
@@ -157,7 +176,9 @@ export class AssistantIsolationService extends Service {
     const observation = await observeStorage(this.#config.stateRoot)
     signal.throwIfAborted()
     const identity = this.#identity(agent, request.grantId)
-    const prepared = this.#ledger.prepare({ identity, sessionId: String(agent!.session.id), grantId: request.grantId,
+    const producer = this.ctx.get('assistantGoals' as never, false) as { currentArtifactAdmission?(agent: Agent): GoalArtifactAdmission | undefined } | undefined
+    const admission = producer?.currentArtifactAdmission?.(agent!)
+    const prepared = this.#ledger.prepare({ ...(admission ? { artifactBinding: { admission: validateGoalArtifactAdmission(admission), paths: request.artifacts ?? [] } } : {}), identity, sessionId: String(agent!.session.id), grantId: request.grantId,
       idempotencyKey: request.idempotencyKey, requestDigest: digest({ request, image: this.#config.image, limits: this.#config.limits }),
       resourceReservation: { memoryMiB: this.#config.limits.memoryMiB + this.#config.limits.workspaceMiB + 32,
         workspaceInodes: this.#config.limits.workspaceInodes, maxMemoryMiB: this.#config.maxReservedMemoryMiB,
@@ -196,7 +217,13 @@ export class AssistantIsolationService extends Service {
     let job = initial
     const abort = new AbortController()
     const authorized = (): boolean => {
-      try { return !signal.aborted && this.#ledger.usable(job.id)
+      try {
+        if (job.artifactBinding) {
+          const producer = this.ctx.get('assistantGoals' as never, false) as { currentArtifactAdmission?(agent: Agent): GoalArtifactAdmission | undefined } | undefined
+          const admission = producer?.currentArtifactAdmission?.(agent)
+          if (!admission || digest(admission) !== digest(job.artifactBinding.admission)) return false
+        }
+        return !signal.aborted && this.#ledger.usable(job.id)
         && digest(this.#identity(agent, job.grantId)) === digest(identity) } catch { return false }
     }
     const timer = setInterval(() => { if (!authorized()) abort.abort() }, 250)

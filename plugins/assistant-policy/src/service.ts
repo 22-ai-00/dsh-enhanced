@@ -352,9 +352,10 @@ export class AssistantPolicyService extends Service {
   ): () => void {
     this.assertActive()
     const expectedCaller = definition.name === 'action_github_commit' ? 'dsh-enhanced-assistant-actions'
-      : definition.name === 'isolation_run' ? 'dsh-enhanced-assistant-isolation' : undefined
+      : definition.name === 'isolation_run' ? 'dsh-enhanced-assistant-isolation'
+      : definition.name === 'goal_create' ? 'dsh-enhanced-assistant-goals' : undefined
     if (expectedCaller === undefined || caller.fiber.name !== expectedCaller) {
-      throw new Error('assistant-policy: preauthorization is reserved for assistant-actions action_github_commit or assistant-isolation isolation_run')
+      throw new Error('assistant-policy: preauthorization is reserved for assistant-actions action_github_commit or assistant-isolation isolation_run or assistant-goals goal_create')
     }
     const entry: PreauthorizedTool = { definition, authorize }
     this.preauthorizedTools.add(entry)

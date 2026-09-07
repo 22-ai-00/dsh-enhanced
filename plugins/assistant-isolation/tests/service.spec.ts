@@ -85,11 +85,11 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
       await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
       await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
       ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record-owner', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }) } as never)
-      await ctx.plugin(AssistantPolicyService, {
+      new AssistantPolicyService(ctx, {
         databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'deny',
         rules: [{ id: 'allow-native-isolation-tool', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: 'isolation_run' } }, { id: 'allow-one-isolation-run', effect: 'allow', actions: ['execute'], resource: { kind: 'tool', id: 'isolation:offline' }, budget: { id: 'isolation-runs', amount: 1 } }],
         budgets: [{ id: 'isolation-runs', metric: 'isolation-runs', limit: 1, periodMs: 60_000, scope: 'subject' }],
-      })
+      }, { now: () => 10000 })
       await ctx.plugin(ApprovalService, { policy: 'ask' })
       let asks = 0; ctx.on('approval/request', async () => { asks++; return 'rejected' })
       const config = { stateRoot, image, storage: { maxJobRecords: 1 }, grants: [{ id: 'offline', revision: 1,

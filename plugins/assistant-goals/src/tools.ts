@@ -23,14 +23,16 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
       return { context: JSON.stringify({ wake: wakeView(wake) }) }
     },
   }))
-  ctx.tools.register(defineTool({
+  const createTool = defineTool({
     name: 'goal_create',
     description: 'Create a native DSH goal from the current authenticated owner request and persist its business context. Requires a live owner human turn and explicit Policy permission. The native goal driver, if enabled by the Host, controls continuation.',
     parameters: { objective: { type: 'string', required: true }, max_goal_rounds: { type: 'integer' } }, output,
     async execute(args, exec) {
       return { context: service.describe(service.create(exec.agent, args.objective, args.max_goal_rounds)) }
     },
-  }))
+  })
+  ctx.tools.register(createTool)
+  if (service.preauthorizedCreateEnabled) ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, createTool, execution => service.preauthorizeCreate(execution))
   ctx.tools.register(defineTool({
     name: 'goal_context',
     description: 'Inspect owner-scoped business goal history and next steps. Optional focus supplies context in this session without starting or transferring a native goal. Native completion and cited evidence are not verified success.',

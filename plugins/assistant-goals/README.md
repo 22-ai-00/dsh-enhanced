@@ -181,3 +181,11 @@ Verifier 回执、Goals 数据库投影与原生 Session 事件独立提交。`n
 `assistantGoals.taskContext(agent)` 返回只读 `goal-task-context/v1`：owner scope、目标 ID/definition version/digest、原生状态、objective 和 checkpoint nextStep。每次读取重新检查 live Agent、Delivery owner 和 Policy `snapshot` 授权；默认使用当前原生目标，也可使用同 owner 在本会话明确设置的 focus。当前会话的投影须匹配 live 原生 GoalId/revision/active 状态，终态、身份失效或拒绝授权返回 `undefined`。
 
 这是 Personal Memory 等 Host 消费者的检索输入。跨会话 focus 不授予执行权，checkpoint 不成为可信事实；本接口不修改原生目标或业务索引、不创建模型调用或唤醒任务。Memory 可独立安装，并在该接口不可用时继续按原用户输入召回。
+
+## 隔离验收与有限创建预授权
+
+v4 的 step / whole-goal profile 可引用 Verifier 的 `isolated-process-behavior`。原生回合已持久 acceptance 并完成 dispatch admission 后，Goals 才向 Host Isolation 提供不可变 artifact admission。它不是模型参数，也不是 focus 的历史上下文。回合结束后，step 和 whole-goal 通过独立容器验收；失败反馈可用于后续原生回合修正产物，只有整体条件通过才由既有 Goals 完成判定更新原生目标。
+
+`preauthorizedCreateMaxRounds` 默认 `0`，保持普通审批路径。显式设为 `1–32` 要求同时开启 `verifyNativeRounds`、`verifyGoalOutcome` 和 `executionBudget`；当前精确模型线路还必须已注册可用 Host meter。创建预授权只接受实时 owner 人类 turn、Policy 允许的 scope、精确 objective 对应的两个全 isolated profile，以及不超过配置的 `max_goal_rounds`。省略轮数时采用配置上限；额外参数、不匹配目标或不可用 meter 均不获得预授权。实际执行仍重查 Policy，deny 不会被绕过。
+
+预授权绑定 shipped Goals 插件注册的 exact `goal_create` 工具，不授予 `goal_control`、其他 shell 或跨 owner 操作权限。Isolation 管理的 scope 仅为这个已通过预授权的创建调用开放路由。生产计量器与任务验收 profile 仍须由 Host 配置，安装场景不会从任意自然语言自动产生可信成功条件。

@@ -358,3 +358,20 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 - 本批根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<本机固定镜像> pnpm check` 退出码 0：主测试 274 文件/3623 项，Policy 193 项、Isolation 20 文件/92 项、Web owner 16 项、Actions 29 项；manifest、零 lint 警告、类型、构建和 27 插件/3 共享包的全部 30 次 dry-run pack 通过。已检查包内 `lib/probe.js`、`runtime/supervisor.mjs`、`lib/autonomy.js` 与 setup CLI 均存在。
 - 本批验收详情与所有失败/修复后的命令记录见 [结构化证据](evidence/autonomy-install-2026-09-07.json)。真实临时 profile 的安装→重复 setup→浏览器原生工具→Docker→artifact 回传链路，不点击逐条审批，两个 prompt 只产生一个成功 job、一次 20000ms 预留与 `answer.txt=42`。模型为最多六次调用的确定性 fixture，不能作为真实模型智能、业务目标达成或全自治证明。
 - 后续优先把 WP05/17 接到当前 Web owner 的 `goal_create` 与同 Session native 下一轮，保留 exact tool/owner-turn/Policy gate；不直接放开 `goal_*`。Isolation artifact 目前仅为不可信工具输出，需提供 Host 冻结并复读的 job/request/scope/session/round/artifact digest 证据，接 Goals/Verifier 的不可变契约与独立裁决，不能靠模型 checkpoint 自证成功。后台 wake/owner route、外部目标/凭据、补偿、真实模型收益及完整 18 包继续推进；状态仍为 **3 已验证、7 实现中、8 待做**，无按天等待或固定观察期。
+
+## 2026-09-07：隔离产物到原生目标的独立验收
+
+本批从 `6c8524b` 继续 WP05/08/17 接线；全部 18 项仍为 **3 已验证、7 实现中、8 待做**。规划中的天/周只是原先估算，不作为执行节拍；已取消的两个工作周观察不再阻塞交付。
+
+- 共享 v4 契约只允许 Goals step/outcome 的全 isolated criteria，旧 v1/v2/v3 保持兼容。模型只见 artifactPath、authority 摘要和 testSet 引用；测试输入/预期结果保存在 Host Verifier authority，容器每次仅收到产物和当前输入，反馈不回传私有向量。
+- Isolation schema v6 在派发前记录真实 admitted native round 的 acceptance ID/digest、run、turn、声明路径；同 key 不重绑，最新同路径失败/unknown 遮蔽旧成功。Verifier 通过实时 Goals producer、持久 trigger run 和精确 step contract 核验 owner/scope/Session/定义，再读取成功、已静止、有效期内的未清理产物；运行中 admission 改变会取消。
+- 独立 `IsolatedVerifierRunner` 使用私有有限预算/控制器/资源账本，复用生产 Docker supervisor。来源 job 和验收 job 明确分离；相同验证 key 复读既有结果，未知派发不重放。预期结果留在 Host；不调用旧的 Host process-behavior runner 执行隔离产物。Host 插件和同 UID 管理者仍在可信控制面内。
+- 默认关闭的 `preauthorizedCreateMaxRounds` 仅为 exact `goal_create` 提供有限例外。开启要求 verified native rounds、whole outcome、累计预算和当前精确模型线路 meter；实时 owner 人类 turn、两个精确 isolated profiles、参数和轮数上限、只读 Policy preflight 均须通过。实际执行仍受 Policy deny；未授权其他 goal 控制或 Host shell。Goals default 保留 Loader 所需插件名；默认 0 不尝试预授权注册。
+- 实际 browser2 通过了一次请求、两轮原生 Goal、两个 source job、六个 independent verification job、四个已结算预算预留。step/outcome 都先 not-achieved 后 achieved，下一轮确实收到 independent failure feedback，最终原生 phase=complete，零逐条审批。测试先使用真实 autonomy installer，再显式追加任务 profiles、budget 与确定性模型/meter；不声称安装器能通用生成可信验收条件或生产 tokenizer/价格。
+- 静态审查及真实执行修复了不同 job ID 被错误要求相等、Goals v4 persistence/feedback 未接通、默认 0 预授权导致工具注册回滚、构建 bootstrap 顺序断言未更新等问题。实际 Docker 测试还暴露旧预算夹具恰跨分钟边界，现只固定该测试的 Policy 时钟，生产预算周期不变。
+
+完整命令和失败记录、最终源码/浏览器证据与独立复核保存在 [结构化证据](evidence/isolated-goal-2026-09-07.json)。C2C `c2c_a939` 只有本地执行记录；当前没有可用内置浏览器，未获得 ChatGPT 网页规划/评审。
+
+剩余优先项：生产精确模型 meter、可信任务验收输入与安装引导、Web 后台 wake/owner route、外部效果读回与 unknown 对账、补偿/回滚、真实模型收益，以及其余工作包。此次有限闭环不等于完整 18 包验收。
+
+最终 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<证据中的本地 immutable image> pnpm check` 退出 **0**：主 277 文件 / 3,643 测试，Policy 194、Isolation 97、Goals 76、Verifier 60 项通过，27 插件 / 3 共享库完成 lint/typecheck/build 与 30 份 dry-run pack。已检查 Isolation 77 个发布文件含独立 verifier runner 与生产 supervisor，Verifier 32 个、共享任务协议 19 个发布文件均无源码、测试或状态数据。最终两条 `pnpm test:autonomy` 浏览器场景退出 **0**，覆盖默认有限执行及显式目标配置的两轮修正闭环。独立源码与浏览器证据审查 PASS；最终哈希/命令复核以结构化证据为准。

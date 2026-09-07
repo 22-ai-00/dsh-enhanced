@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test'
 
 export default defineConfig({
   testDir: '.',
-  testMatch: 'autonomy.spec.mjs',
+  testMatch: ['autonomy.spec.mjs', 'autonomy-goal.spec.mjs'],
   timeout: 300_000,
   expect: { timeout: 20_000 },
   workers: 1,

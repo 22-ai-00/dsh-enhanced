@@ -2,12 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { isAbsolute, normalize, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
-  acceptanceCanonicalJson, acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt,
+  acceptanceCanonicalJson, acceptanceDigest, acceptanceProtocolForTask, createTaskAcceptanceContract, createTaskVerificationReceipt,
 } from '@dsh-enhanced/task-acceptance-contract'
 import type { CriterionResult, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { Config, compileAcceptanceProfiles } from './config.js'
 import type { AcceptanceProfile } from './config.js'
-import { verifyAcceptanceCriteria } from './drivers.js'
+import { verifyAcceptanceCriteria, type IsolatedVerificationContext } from './drivers.js'
+import type { IsolatedVerifierRunner } from '@dsh-enhanced/assistant-isolation'
 import type { AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration, VerifierEvaluationRegistration } from './host.js'
 import { AcceptanceStore } from './store.js'
 import type { Execution } from './store.js'
@@ -94,6 +95,7 @@ export class AssistantVerifierService extends Service<Config> {
   readonly #compiled: ReturnType<typeof compileAcceptanceProfiles>
   readonly #bindings = new Map<ProducerName, Binding>()
   readonly #registrations = new WeakSet<object>()
+  readonly #isolatedRunners = new Map<string, Promise<IsolatedVerifierRunner>>()
   readonly #generation = randomUUID()
   readonly #workerId = `verifier-${randomUUID()}`
   readonly #controller = new AbortController()
@@ -132,6 +134,7 @@ export class AssistantVerifierService extends Service<Config> {
       for (const binding of this.#bindings.values()) binding.dispose()
       this.#evaluation = undefined
       await this.#running?.catch(() => {})
+      await Promise.allSettled([...this.#isolatedRunners.values()].map(async runner => (await runner).close()))
       this.#store.close()
     }, 'assistant-verifier.database')
   }
@@ -283,7 +286,7 @@ export class AssistantVerifierService extends Service<Config> {
       return null
     }
     const now = this.#now()
-    return this.#store.accept(createTaskAcceptanceContract({ protocol: input.task.kind === 'goal-outcome' ? 'task-acceptance/v3' : input.task.kind === 'goal-step' ? 'task-acceptance/v2' : 'task-acceptance/v1',
+    return this.#store.accept(createTaskAcceptanceContract({ protocol: acceptanceProtocolForTask(input.task, selected.profile.criteria),
       id: `acceptance-${acceptanceDigest([input.scope, input.owner, input.task])}`, ...input,
       profile: { id: selected.profile.id, version: selected.profile.version, digest: selected.digest },
       issuedAt: now, expiresAt: now + selected.profile.validityMs,
@@ -317,10 +320,68 @@ export class AssistantVerifierService extends Service<Config> {
       }
       return previous
     }
-    return this.#store.accept(createTaskAcceptanceContract({ protocol: 'task-acceptance/v3',
+    return this.#store.accept(createTaskAcceptanceContract({ protocol: acceptanceProtocolForTask(input.task, original.criteria),
       id: `acceptance-${acceptanceDigest([input.scope, input.owner, input.task])}`, ...input,
       profile: original.profile, criteria: original.criteria, bounds: original.bounds,
       issuedAt: now, expiresAt: original.expiresAt }))
+  }
+
+  /** Resolve provenance through the live Host producer and its immutable step contract. */
+  #isolatedContext(binding: Binding | undefined): IsolatedVerificationContext {
+    const current = () => {
+      this.#assertActive()
+      if (binding === undefined || this.#bindings.get('assistantGoals') !== binding
+        || binding.producer.trustedAcceptanceProducerGeneration() !== binding.generation) {
+        throw new Error('assistant-verifier: artifact producer changed')
+      }
+      return binding.producer
+    }
+    return {
+      readArtifact: async (contract, path) => {
+        if (contract.protocol !== 'task-acceptance/v4') throw new Error('assistant-verifier: isolated contract required')
+        const producer = current()
+        const handle = await producer.inspectAcceptedArtifactSource?.(contract)
+        current()
+        const source = handle === undefined || handle === null ? null : this.#store.getContract(handle.contractId)
+        if (source === null || source.digest !== handle?.contractDigest || source.task.kind !== 'goal-step'
+          || source.protocol !== 'task-acceptance/v4'
+          || acceptanceDigest([source.scope, source.owner, source.objective]) !== acceptanceDigest([contract.scope, contract.owner, contract.objective])) {
+          throw new Error('assistant-verifier: artifact acceptance unavailable')
+        }
+        const definition = (task: typeof contract.task | typeof source.task) => {
+          const { id, definitionVersion, definitionDigest, sessionId, nativeGoalId } = task.goal
+          return { id, definitionVersion, definitionDigest, sessionId, nativeGoalId }
+        }
+        if (acceptanceDigest(definition(source.task)) !== acceptanceDigest(definition(contract.task))
+          || contract.task.kind === 'goal-step' && source.digest !== contract.digest) {
+          throw new Error('assistant-verifier: artifact belongs to another goal')
+        }
+        const isolation = this.ctx.get('assistantIsolation' as never, false) as unknown as {
+          readAcceptedArtifact?(contract: TaskAcceptanceContract, path: string): Awaited<ReturnType<IsolatedVerificationContext['readArtifact']>>
+        } | undefined
+        if (typeof isolation?.readAcceptedArtifact !== 'function') throw new Error('assistant-verifier: Isolation unavailable')
+        const artifact = isolation.readAcceptedArtifact(source, path)
+        current()
+        return artifact
+      },
+      run: async (authority, key, artifact, stdin, signal) => {
+        current()
+        let pending = this.#isolatedRunners.get(authority.digest)
+        if (pending === undefined) {
+          pending = import('@dsh-enhanced/assistant-isolation').then(({ IsolatedVerifierRunner }) => {
+            this.#assertActive()
+            return new IsolatedVerifierRunner({ stateRoot: authority.stateRoot, image: authority.image,
+              dockerPath: authority.dockerPath, authorityDigest: authority.digest, command: authority.command,
+              expiresAt: authority.expiresAt, maxRuns: authority.maxRuns, maxTotalDurationMs: authority.maxTotalDurationMs,
+              maxDurationMs: authority.maxDurationMs, maxOutputBytes: authority.maxOutputBytes })
+          })
+          this.#isolatedRunners.set(authority.digest, pending)
+        }
+        const runner = await pending
+        current()
+        return runner.run(key, artifact, stdin, signal)
+      },
+    }
   }
 
   async #reconcileExecution(name: ProducerName, binding: Binding, contract: TaskAcceptanceContract): Promise<void> {
@@ -360,7 +421,8 @@ export class AssistantVerifierService extends Service<Config> {
     const claimed = this.#store.claimDue({ workerId: this.#workerId, now: this.#now(), leaseMs: 305_000 })
     if (claimed !== null) {
       const { contract, job, execution } = claimed
-      const outcomeBinding = contract.task.kind === 'goal-outcome' ? this.#bindings.get('assistantGoals') : undefined
+      const requiresLiveGoal = contract.task.kind === 'goal-outcome' || contract.protocol === 'task-acceptance/v4'
+      const outcomeBinding = requiresLiveGoal ? this.#bindings.get('assistantGoals') : undefined
       const startedAt = this.#now()
       const unknown = (reason: string): readonly CriterionResult[] => contract.criteria.map(criterion => ({
         criterionId: criterion.id, status: 'unknown', reason, evidence: [],
@@ -368,10 +430,10 @@ export class AssistantVerifierService extends Service<Config> {
       let results: readonly CriterionResult[] = unknown('verification-unavailable')
       if (!execution.quiescent) results = unknown('execution-not-quiescent')
       else {
-        try { results = await this.#bounded(verifyAcceptanceCriteria(contract, this.#compiled.authorities, this.#controller.signal), contract.bounds.maxDurationMs) }
+        try { results = await this.#bounded(verifyAcceptanceCriteria(contract, this.#compiled.authorities, this.#controller.signal, this.#isolatedContext(outcomeBinding)), contract.bounds.maxDurationMs) }
         catch { results = unknown('verification-unavailable') }
       }
-      if (contract.task.kind === 'goal-outcome' && execution.quiescent) {
+      if (requiresLiveGoal && execution.quiescent) {
         try {
           if (outcomeBinding === undefined) throw new Error('whole-goal producer unavailable')
           const proof = await this.#bounded(outcomeBinding.producer.inspectAcceptedExecution(contract), 5_000)
@@ -388,7 +450,7 @@ export class AssistantVerifierService extends Service<Config> {
       const now = this.#now()
       let receipt = null
       if (now < contract.expiresAt && now >= startedAt) {
-        const payload = { protocol: contract.protocol === 'task-acceptance/v3' ? 'task-verification/v3' as const : contract.protocol === 'task-acceptance/v2' ? 'task-verification/v2' as const : 'task-verification/v1' as const, id: `verification-${contract.id}-${job.fencingToken}`,
+        const payload = { protocol: contract.protocol === 'task-acceptance/v4' ? 'task-verification/v4' as const : contract.protocol === 'task-acceptance/v3' ? 'task-verification/v3' as const : contract.protocol === 'task-acceptance/v2' ? 'task-verification/v2' as const : 'task-verification/v1' as const, id: `verification-${contract.id}-${job.fencingToken}`,
           contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner,
           task: contract.task, results, startedAt, completedAt: now, validUntil: contract.expiresAt }
         try { receipt = createTaskVerificationReceipt(contract, payload) }

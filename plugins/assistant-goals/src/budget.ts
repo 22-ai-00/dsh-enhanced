@@ -174,6 +174,12 @@ export class GoalBudgetRuntime {
     } finally { if (ownsMeter && this.#inflight.get(agent) === meter) this.#inflight.delete(agent) }
   }
 
+  hasMeter = (route: { provider?: string; model?: string }): boolean => {
+    const meter = this.#meters.get(JSON.stringify([route.provider, route.model]))
+    return this.#active && meter !== undefined && (this.config.costUsdMicros === undefined
+      || meter.inputUsdMicrosPerMillionTokens !== null && meter.outputUsdMicrosPerMillionTokens !== null)
+  }
+
   register = (input: GoalBudgetMeter): (() => void) => {
     if (!this.#active || input === null || typeof input !== 'object' || typeof input.inputTokenUpperBound !== 'function'
       || ![input.id, input.provider, input.model].every(item => typeof item === 'string' && item.length > 0 && item.length <= 256)

@@ -59,3 +59,15 @@ Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和
 测试使用实际文件、SQLite、子进程和本机 HTTP。组合测试通过真实 owner 配对、前台 AgentLoop、Automation 提案审批与调度入口验证契约先于模型调用落库，以及反馈纠正、撤回和服务卸载恢复；模型与外部 transport 仍为确定性替身。单元测试的 producer fixture 本身不作为生产接线证据。仓库验收为根 `pnpm check`，真实外部系统、隔离运行和长期收益另行验证。
 
 Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始 v3 契约派生新 assessment，完整保留条件、profile、验证预算和绝对有效期。模板身份、owner、定义或当前 profile 摘要改变会拒绝。v3 验证结束后再次读取同一 Host 的执行证明和注册代次，失效或不同的证明产生 unknown，不能签发 achieved。该能力不对 Delivery、Automations 或模型工具开放。
+
+## 隔离代码产物验收（v4）
+
+`isolated-process-behavior` 只用于 `goal-step` / `goal-outcome`，使用 `task-acceptance/v4` 与 `task-verification/v4`。条件包含 `id`、`authority: { id, digest }`、`artifactPath`、`testSetId`；不允许与旧 criterion 混用。v1/v2/v3 的原有格式和摘要保持兼容。
+
+对应 Host authority 为 `isolated-runner`，配置固定 `stateRoot`、已存在的 `sha256:…` 镜像、绝对 `dockerPath`、固定 `command`、绝对 `expiresAt`、`maxRuns`、`maxTotalDurationMs`、`maxDurationMs`、`maxOutputBytes`，以及 `testSets: [{ id, cases: [{ stdin, expectedStdout, expectedExitCode }] }]`。例如固定命令 `/bin/sh /workspace/artifact < /workspace/input` 在容器内运行复制的 shell 产物。authority 摘要覆盖全部配置和测试向量；验收 profile 必须引用编译后的精确摘要。不能把模型生成的测试向量当作 Host 验收条件。
+
+预期结果只保存在 Host authority 中。容器每次只收到 `artifact` 和当前 `input`；模型反馈、契约、回执不包含测试输入或预期输出。反馈会披露有限的通过/失败信息，这不是密码学意义的测试集保密。
+
+此能力需要同一 Host 中已启用的 `assistant-isolation`，它是可选 peer；普通验收不自动安装或激活 Isolation。Verifier 通过当前 Goals producer 找回真实 step acceptance，再核对 owner、workspace、preset、Session、原生目标、定义与 run。产物只能来自该次 admitted native round 派发前绑定的 Isolation job；新的失败/unknown 产物尝试会遮蔽旧成功，已清理正文或缺少 provenance 时返回 unknown。whole-goal 使用其持久 `triggerRunId`，不能换成上下文 focus 的目标。
+
+独立验收使用另一私有 stateRoot 和 Isolation 持久控制器、资源池与预算，不使用模型 Agent 身份，也不在 Host 上执行产物。每测试用例的幂等键绑定契约、criterion、源 job、内容摘要、authority、testSet 和序号。相同 key 重读已知结果；派发不明的任务保留 unknown 和占用，重启不重放。更改配置不会自动扩额或续期；需要 operator 明确处置私有账本和未确认的运行资源。Docker 文件系统、网络、子进程和凭据边界与 Isolation 一致；Host 插件和同 UID 管理者仍属于可信控制面。

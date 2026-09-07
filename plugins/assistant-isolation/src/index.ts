@@ -4,6 +4,7 @@ import { AssistantIsolationService, Config } from './service.js'
 
 export const name = 'dsh-enhanced-assistant-isolation'
 export { version, AssistantIsolationService, Config }
+export { IsolatedVerifierRunner, type IsolatedVerifierRunnerConfig } from './verifier-runner.js'
 export { probeIsolationRuntime } from './probe.js'
 export { isolationPrincipalDigest } from './service.js'
 export type * from './types.js'

@@ -3,7 +3,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { acceptanceDigest, validateTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
-import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import type { GoalArtifactAdmission, TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import type { AcceptanceHandle, AcceptedExecution, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 import { GoalExecutionStore } from './execution-store.js'
 import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
@@ -141,6 +141,17 @@ export class GoalExecutionRuntime {
       || run.intent.scope.principalRecordId !== contract.owner.principalRecordId
       || run.intent.scope.principalVersion !== contract.owner.principalVersion) throw new Error('assistant-goals: execution binding differs')
     return Object.freeze({ ...run.execution, ...run.acceptance, dispatchedAt: run.dispatchedAt, executionRef: run.intent.runId })
+  }
+
+  currentArtifactAdmission = (agent: Agent): GoalArtifactAdmission | undefined => {
+    const round = this.#rounds.get(agent)
+    if (!round || round.finishing || round.run.dispatchedAt === undefined) return undefined
+    this.#assertRound(round)
+    return Object.freeze({ protocol: 'goal-artifact-admission/v1', ...round.handle, runId: round.run.intent.runId, turn: round.turn })
+  }
+  artifactSource = async (contract: TaskAcceptanceContract): Promise<AcceptanceHandle | null> => {
+    const proof = await this.inspect(contract)
+    return proof?.status === 'succeeded' && proof.quiescent ? { contractId: contract.id, contractDigest: contract.digest } : null
   }
 
   list = (scope: GoalScope, goalId: string): readonly GoalExecutionRun[] => this.#store?.listForGoal(scope, goalId) ?? []

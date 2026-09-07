@@ -1020,6 +1020,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.2
+      '@dsh-enhanced/task-acceptance-contract':
+        specifier: workspace:*
+        version: link:../../packages/task-acceptance-contract
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
@@ -1168,6 +1171,9 @@ importers:
       '@dsh-enhanced/assistant-evaluation':
         specifier: workspace:*
         version: link:../assistant-evaluation
+      '@dsh-enhanced/assistant-isolation':
+        specifier: workspace:*
+        version: link:../assistant-isolation
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0

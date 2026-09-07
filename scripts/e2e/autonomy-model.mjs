@@ -47,6 +47,7 @@ class AutonomyE2eAdapter extends LlmAdapter {
     appendEvidence(process.env.DSH_WEB_E2E_MODEL_LOG, {
       call,
       type: first ? 'isolation-tool' : 'reply',
+      hasGoalTool: options.tools?.some(tool => tool.name === 'goal_create') === true,
       hasActionTool: options.tools?.some(tool => tool.name === 'action_github_commit') === true,
       hasIsolationTool: options.tools?.some(tool => tool.name === 'isolation_run') === true,
     })

@@ -33,6 +33,20 @@ function accepted(status: 'passed' | 'failed' | 'unknown' = 'passed', validUntil
   })
   return { contract, receipt, execution: { status: 'succeeded', quiescent: true, completedAt: 300, executionRef: 'run-1' } }
 }
+function acceptedV4() {
+  const value = run(); const goal = record()
+  const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v4', id: 'contract-v4',
+    scope: { workspace: goal.scope.workspace, preset: goal.scope.preset }, owner: { principalRecordId: goal.scope.principalRecordId, principalVersion: goal.scope.principalVersion },
+    task: value.intent.task, objective: value.intent.objective, profile: { id: 'goal-profile', version: 1, digest: sha }, issuedAt: 100, expiresAt: 5_000,
+    criteria: [{ id: 'isolated', kind: 'isolated-process-behavior', authority: { id: 'isolation-runner', digest: sha }, artifactPath: 'artifacts/behavior.sh', testSetId: 'private-set' }], bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+  })
+  const receipt = createTaskVerificationReceipt(contract, { protocol: 'task-verification/v4', id: 'receipt-v4', contractId: contract.id, contractDigest: contract.digest,
+    scope: contract.scope, owner: contract.owner, task: contract.task,
+    results: [{ criterionId: 'isolated', status: 'passed', reason: 'verified', evidence: [{ kind: 'isolated-artifact', ref: 'job-1:isolated', digest: sha }] }],
+    startedAt: 300, completedAt: 400, validUntil: 4_000,
+  })
+  return { contract, receipt, execution: { status: 'succeeded', quiescent: true, completedAt: 300, executionRef: 'run-1' } }
+}
 
 describe('goal feedback', () => {
   test('binds a current v2 receipt to the exact run and exposes bounded criteria without completing the goal', () => {
@@ -41,6 +55,13 @@ describe('goal feedback', () => {
     const feedback = buildGoalFeedback(record(), [input], id => id === proof.contract.id ? { contract: proof.contract, receipt: proof.receipt, execution: proof.execution } : null, 1_000)
     expect(feedback).toMatchObject({ goalOutcome: 'unverified', definition: { objective: { truncated: true } }, verification: { current: { status: 'achieved', criteria: [{ id: 'criterion-1', status: 'passed', evidence: [{ ref: 'report.md' }] }] }, pending: null } })
     expect(Object.isFrozen(feedback)).toBe(true)
+  })
+
+  test('binds a v4 isolated goal-step receipt without exposing a private test set', () => {
+    const proof = acceptedV4(); const input = run({ acceptance: { contractId: proof.contract.id, contractDigest: proof.contract.digest } })
+    const feedback = buildGoalFeedback(record(), [input], id => id === proof.contract.id ? { contract: proof.contract, receipt: proof.receipt, execution: proof.execution } : null, 1_000)
+    expect(feedback.verification.current).toMatchObject({ status: 'achieved', criteria: [{ id: 'isolated', definition: { kind: 'isolated-process-behavior', artifactPath: 'artifacts/behavior.sh' } }] })
+    expect(JSON.stringify(feedback)).not.toContain('private-set')
   })
 
   test('fails closed for forged receipt, task, owner, and execution bindings, and expires old successes', () => {
