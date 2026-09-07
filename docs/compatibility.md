@@ -83,3 +83,5 @@ Isolation 工作区要求 Linux Docker local volume driver 支持 tmpfs `size`/`
 有限自治安装沿用 DSH `0.1.2-rc.1`、Cordis `4.0.2` 与 Loader `1.0.3`。Loader 会先解包 ESM 的 default；Isolation/Actions 的 default 必须保留 `{ name, Config, apply }`（Actions 还包含 `inject`），不能用无相同插件名的 Service class 取代，否则 exact preauthorization 注册失败并回滚工具注册。命名 Service 导出继续供程序调用。Isolation 的公开预授权方法采用实例绑定以兼容 Cordis trace proxy。
 
 Web owner 仅在显式 autonomy setup 时动态加载可选 Isolation peer 的 `probeIsolationRuntime`；需要安装同仓匹配构建，普通 Web 无此运行时依赖。probe 使用合并后经验证的 literal Docker path。升级需跑 `pnpm test:autonomy` 的实际安装/default-export/原生工具链路；仅调用 named `apply` 的组件测试不能替代 Loader 路径验收。独立本机镜像、Docker 与非 root Linux 前置条件仍适用。
+
+`assistant-deepseek-budget` 对齐 `dsh-llm`、可选 `dsh-credentials@0.1.2-rc.1` 和当前 Goals Host meter API。通过自己的 `LlmAdapter` 注册固定路由，使用 `credentials.resolve(credentialRef(...))` 取得当前服务提供的凭据；不复用上游 `deepseek-official` 的可变 endpoint 配置。现有原生预算在 adapter dispatch 前预留，重试若形成新的原生请求必须重新经过预算。DeepSeek 协议契约具有固定到期时间，升级时须重新核对官方上下文/输出/usage 语义、禁重定向、工具回放、失效取消与实际安装验收。

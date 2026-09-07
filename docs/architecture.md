@@ -95,3 +95,9 @@ Isolation schema v2 在同一 SQLite 事务中预留 worker memory + workspace c
 
 
 单次 Goals wake 通过 Delivery 的版本化 Host capability 等待终态验收。Delivery 仅调用 Goals 提供的 `settle(agent, signal)` 并维持当前 Session lease；Goals 只等待该 Agent 已结束回合的步骤/全目标结算。此等待仍服从原期限和取消信号，不引入第二套目标循环。末轮 `blocked` 到独立验收后的 `complete` 多一次 revision，只有同 owner/定义/Session/最终执行及验收回执的证明才允许该转移；旧 Delivery 缺少结算能力时拒绝调度。
+
+## 固定模型路由的目标预算
+
+`assistant-deepseek-budget` 是可选独立 bundle，持有自己的 `deepseek-goal-metered` provider 和两个精确文本模型的 Goals meter。它不为其他 provider 同名配置背书，不读取可配置模型目录来推导预算。固定 HTTPS Chat Completions 请求禁止重定向，不使用内部自动重试；按有限响应字节和期限读取完整 JSON，然后才向原生 LLM stream 发布验证后的内容、usage 和终态。AgentLoop、工具执行、Goal 轮次和持久预算仍由现有服务拥有。
+
+计量依赖有期限的官方 API 契约：使用覆盖文档上下文口径的保守输入预留，成功时按包含缓存的实际输入结算；无法确认时保留原预留。它不声明金额上限，价格快照不能成为稳定账单保证。普通前台与辅助请求不属于 Goals 原生回合预算，仍受单次输出、响应字节和请求期限约束；完整账户预算另行接入。

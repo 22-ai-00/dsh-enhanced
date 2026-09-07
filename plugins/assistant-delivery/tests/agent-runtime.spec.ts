@@ -9,6 +9,7 @@ import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import * as ApiRemotes from '@deepseek-ai/dsh-api-remotes'
 import SessionController from '@deepseek-ai/dsh-api-session-controller'
 import * as NativeWebOwnerPlugin from '../../assistant-web-owner/lib/index.js'
+import DeepSeekBudgetPlugin from '../../assistant-deepseek-budget/lib/index.js'
 import type {} from '@deepseek-ai/dsh-goal'
 import { AttachmentId, type AttachmentStore, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { PresetSpec } from '@deepseek-ai/dsh-permission-presets'
@@ -9519,6 +9520,93 @@ describe('real rc.1 delivery Agent runtime', () => {
       } finally { executions.close() }
     }
     await fixture.ctx.fiber.restart()
+  })
+
+  test.each(['settled', 'insufficient-input', 'missing-usage', 'monetary'] as const)('uses the production DeepSeek route in native goal budgets: %s', async mode => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-deepseek-budget-'))
+    roots.push(root)
+    const objective = 'Verify a bounded production route without treating mock transport as cloud evidence'
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const fixture = await runtimeHarness(root, new Map(), { provider: 'deepseek-goal-metered', model: 'deepseek-v4-flash' }, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [
+        { id: 'deepseek-goal', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: ownerId }, actions: ['create', 'observe', 'inspect', 'snapshot', 'execute'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
+        { id: 'deepseek-create', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root, principal: ownerId }, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
+      ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, goalContinuationTimeoutMs: 5_000,
+    })
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(native.goalTools as never, {} as never)
+    await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    const budgetPath = join(root, 'goals.sqlite.budgets')
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, stepMaxDurationMs: 5_000,
+      executionBudget: { modelCalls: 1, toolCalls: 0, inputTokens: mode === 'insufficient-input' ? 2_097_151 : 2_097_152,
+        outputTokens: 7, durationMs: 5_000, maxOutputTokensPerCall: 7, ...(mode === 'monetary' ? { costUsdMicros: 1000000 } : {}) } } as never)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+    await writeFile(join(root, 'report.md'), 'Confirmed result')
+    const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
+    const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+    await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
+      authorities: [authority], profiles: [{ id: 'deepseek-goal-step', version: 1, scope: { workspace: root, preset: 'primary' },
+        owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000,
+        bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
+      }],
+    })
+    let goalId = ''
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
+        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('deepseek-create'), name: 'goal_create', agent, signal, arguments: { objective, max_goal_rounds: 2 } })
+        if (created.isError) throw new Error('production route goal setup rejected')
+        goalId = fixture.ctx.assistantGoals.list(agent).at(0)?.id ?? ''
+      }
+      return await next()
+    })
+    let requests = 0
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url, init) => {
+      expect(url).toBe('https://api.deepseek.com/chat/completions')
+      expect(init?.redirect).toBe('error')
+      const body = JSON.parse(String(init?.body))
+      requests++
+      expect(body).toMatchObject({ model: 'deepseek-v4-flash', stream: false })
+      if (requests > 1) expect(body.max_tokens).toBe(7)
+      else { expect(body.max_tokens).toBeGreaterThan(0); expect(body.max_tokens).toBeLessThanOrEqual(32768) }
+      if (requests > 2) throw new Error('unexpected duplicate production dispatch')
+      if (requests === 2) {
+        const ledger = new DatabaseSync(budgetPath, { readOnly: true })
+        try { expect(ledger.prepare('SELECT state,input_tokens_reserved,output_tokens_reserved FROM goal_budget_reservations').get()).toMatchObject({ state: 'held', input_tokens_reserved: 2_097_152, output_tokens_reserved: 7 }) } finally { ledger.close() }
+      }
+      return new Response(JSON.stringify({ id: `deepseek-test-${requests}`, object: 'chat.completion', model: body.model,
+        choices: [{ index: 0, message: { role: 'assistant', content: 'Confirmed result', reasoning_content: 'Check the result.' }, finish_reason: 'stop' }],
+        ...(mode === 'missing-usage' && requests === 2 ? {} : { usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12,
+          prompt_cache_hit_tokens: 3, prompt_cache_miss_tokens: 7, completion_tokens_details: { reasoning_tokens: 1 } } }),
+      }), { headers: { 'content-type': 'application/json' } })
+    })
+    const envKey = 'DSH_TEST_DEEPSEEK_GOAL_KEY'
+    const previousKey = process.env[envKey]
+    process.env[envKey] = 'test-only-not-a-credential'
+    try {
+      await fixture.ctx.plugin(DeepSeekBudgetPlugin, { enabled: true, apiKeyEnv: envKey, defaultMaxTokens: 7 })
+      expect(fixture.ctx.assistantGoals.health().registeredBudgetMeters).toBe(2)
+      await fixture.service.acceptInbound(message(`evt-deepseek-budget-${mode}`, objective))
+      await drive(fixture.service)
+      await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
+      expect(goalId).not.toBe('')
+      expect(requests).toBe(mode === 'settled' || mode === 'missing-usage' ? 2 : 1)
+      expect(fixture.llm.requests).toHaveLength(0)
+      const ledger = new DatabaseSync(budgetPath, { readOnly: true })
+      try {
+        const rows = ledger.prepare('SELECT state,input_tokens_reserved,output_tokens_reserved,input_tokens_actual,output_tokens_actual FROM goal_budget_reservations WHERE goal_id=?').all(goalId)
+        if (mode === 'insufficient-input' || mode === 'monetary') expect(rows).toHaveLength(0)
+        else expect(rows).toEqual([expect.objectContaining(mode === 'settled'
+          ? { state: 'settled', input_tokens_actual: 10, output_tokens_actual: 2 }
+          : { state: 'held', input_tokens_reserved: 2_097_152, output_tokens_reserved: 7, input_tokens_actual: null, output_tokens_actual: null })])
+      } finally { ledger.close() }
+    } finally {
+      await fixture.ctx.fiber.restart()
+      fetchMock.mockRestore()
+      if (previousKey === undefined) delete process.env[envKey]; else process.env[envKey] = previousKey
+    }
   })
 
   test('keeps a full native budget reservation held and the round unknown when the adapter omits usage', async () => {

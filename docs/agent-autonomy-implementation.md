@@ -408,3 +408,23 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 原有 `pnpm test:autonomy` 两条真实安装前台回归退出 **0**：普通有限离线工具及原生目标“错误产物→独立反馈→修正→整体验收”保持通过。本批共 5 条浏览器场景，最终诊断/定位修改另经仓库实际 Oxlint 检查退出 0；早先误调用未安装的 ESLint 返回 1，也保留在命令证据中。
 
 复核操作记录：verifier 的一次未转义 shell 查询意外执行了未配置 Chromium 路径的浏览器命令，三条用例均在启动浏览器前失败，覆盖了临时 live 输出。此前已单独保存的最终通过证据和源码未变，哈希复核通过；这次额外误执行单独记录，不替代最终通过命令，也不声称复核过程完全只读。
+
+
+## 2026-09-07：固定 DeepSeek 路由的生产 token 预算桥接
+
+本批从 `c611295` 继续 WP05/17 的生产模型计量前置能力；全部 18 项仍为 **3 已验证 / 7 实现中 / 8 待做**。按依赖和实际验收推进，天/周估算与已取消的两周主动性观察均不是等待条件。
+
+- 新增可选独立 bundle `assistant-deepseek-budget`（默认关闭），不新增 Agent loop。它以原生 LlmAdapter 接入固定 `deepseek-goal-metered` provider，精确支持 `deepseek-v4-flash` / `deepseek-v4-pro`，同时登记两个 GoalBudgetMeter，注册失败回滚、卸载撤销并终止等待中的请求。
+- 复核本机上游 DeepSeek adapter 后选择自有最小非流式 JSON adapter：上游公开接口无法为可配置 endpoint/自动重定向提供所需约束。固定官方 HTTPS endpoint、禁止 redirect、无自动 retry，实际发送受限 `max_tokens`、thinking 和 reasoning effort；支持文本、推理与工具往返，完整验证 response/model/finish/usage 后才发出 DSH blocks。
+- [官方 API](https://api-docs.deepseek.com/api/create-chat-completion/) 与 [context 文档](https://api-docs.deepseek.com/quick_start/pricing/) 的 1M 容量是当前契约依据；`2,097,152` 是覆盖十进制/二进制解释的保守工程上界，不是本地 tokenizer 实测。契约在 2026-10-08 失效，meter、派发及迟到输出会拒绝，需复核维护后更新。两个 USD 费率为 null，金额预算会在请求前拒绝；普通前台/辅助调用不计入 Goals 原生回合累计预算，token 控制不等于整个账户的账单硬限。
+- 凭据仅使用 reference，逐次解析当前 service；已观察过 service 后撤除、拒绝或异常不回退环境密钥，等待期间替换也拒绝派发。请求正文在凭据等待前冻结；调用取消、deadline、卸载、非协作凭据/fetch/body 等待均有界，消费者暂停后也不能得到卸载后的成功 finish。Host/同 UID 和依赖仍是可信控制面。
+- 根专项覆盖真实本地 HTTP 307 拒绝及无结束 body timeout、非协作 async 边界、凭据替换/消失、契约过期、请求突变和迟到 finish；真实 LlmRuntime/Goals 的注册、重复注册回滚、卸载，以及原生 Delivery 回合的预留/结算、输入不足、usage 缺失保留 held、未知费率拒绝也已纳入回归。
+- 实际 `install-local.sh --scenario autonomy` 后，使用原生 `dsh plugin add` 安装新包，再显式配置可信任务 profiles/budget；仅替换供应商 transport response，没有 fixture adapter 或 fixture meter。一条人类提示产生两轮原生 Goal、两次 source job 和六次独立验证 job；错误产物被独立拒绝，下一轮收到反馈后修复，step/outcome achieved 后 native complete。测试仅在临时 Host 预载 transport，没有真实付费 API 调用，不证明供应商在线兼容性或真实模型智能效果。
+
+早期编译、测试装配与实际 thinking wire 格式缺陷的失败记录均保留；最后者由真实 serializer 断言发现并已修复。所有终态命令、源码与浏览器 artifact hash 见 [结构化证据](evidence/deepseek-goal-budget-2026-09-07.json)。C2C `c2c_a942` 只有本地执行记录，内置浏览器不可用，未取得 ChatGPT 网页评审。下一步继续可信任务验收输入、精确 owner route/目标配置引导与安装接线；真实模型凭据/调用、外部动作对账与补偿、其他工作包尚未完成。
+
+最终根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<本机固定镜像> pnpm check` 退出 **0**：主 282 文件 / 3,685 测试，Delivery 693、Goals 82、Verifier 60、Isolation 102 及新插件 4 项包测试通过；manifest、零 lint 警告、typecheck、build 和 28 插件 / 3 共享库的 31 份 dry-run pack 完成。已检查新包 24 个发布文件，含 adapter、config、contract、index 的 lib 产物和 patch/README/LICENSE，没有源码、测试或状态数据库。第一次全仓检查仅漏掉新 catalog 依赖对应的精确版本发布年龄豁免，已补齐并通过第二次完整检查。
+
+下一切片的只读探索结论（尚未实现）：复用 `dsh-web-owner-setup` 的 profile 合并、幂等与原子写入入口，读取本地可信验收模板和已建立的精确 Web Session，派生 owner route、两个隔离验收 profile、预算与可选 wake。现有 `DeliveryStore` 构造会迁移/写库，不能用它冒充只读预检；应提供 schema 19 的真正只读快照。现有 setup 目录锁只串行化配置写入，不证明 Host 已停止；后续要分别报告配置已写入、需要重启和实际运行检查结果，不以 dump-config 或 PID 查询假定生效。
+
+最终三个实际安装浏览器场景均退出 **0**：`pnpm test:autonomy:deepseek` 一条生产 adapter/meter 接线闭环，`pnpm test:autonomy` 两条既有有限执行与原生目标回归。最新 DeepSeek 用例仍为单提示、两轮原生 Goal、四份独立回执（先失败后通过）、四条 settled reservation；每次保留 2,097,152 输入 / 1,024 输出，最终按 12 输入 / 8 输出结算。源码独立复核 PASS；最终命令与 artifact 哈希复核记录在结构化证据中。

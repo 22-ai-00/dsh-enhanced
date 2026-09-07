@@ -3,12 +3,13 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseDocument, isMap } from 'yaml'
 import { createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { objective } from './autonomy-goal-model.mjs'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
+const metered = process.env.DSH_AUTONOMY_DEEPSEEK_TEST === '1'
 const root = fileURLToPath(new URL('../../', import.meta.url))
 function configure(doc, id, values) {
   let row = doc.contents.items.find(item => isMap(item) && item.get('id') === id)
@@ -28,7 +29,7 @@ test('native goals correct an isolated artifact after private independent verifi
     const server = createServer(); server.once('error', reject)
     server.listen(0, '127.0.0.1', () => { const address = server.address(); server.close(error => error ? reject(error) : resolve(address.port)) })
   })
-  const env = { ...process.env, DSH_ENHANCED_WEB_PORT: String(port), CI: 'true', DSH_HOME: home, DSH_WEB_E2E_MODEL_LOG: modelLog }
+  const env = { ...process.env, DSH_ENHANCED_WEB_PORT: String(port), CI: 'true', DSH_HOME: home, DSH_WEB_E2E_MODEL_LOG: modelLog, ...(metered ? { DEEPSEEK_API_KEY: 'test-only-not-a-credential' } : {}) }
   const http = []; const transport = []; const streams = new Map(); const frames = []
   observePage(page, http, transport, streams, frames)
   let host; let authenticated = false; let failed = false
@@ -37,6 +38,10 @@ test('native goals correct an isolated artifact after private independent verifi
     const installed = await run('/bin/bash', ['scripts/install/install-local.sh', '--scenario', 'autonomy', '--profile', 'web',
       '--isolation-image', image, '--workspace', workspace, '--yes', '--no-service', '--model', 'skip', '--model-route', 'skip', '--dsh-version', '0.1.2-rc.1'], env, 180_000)
     await writeFile(testInfo.outputPath('install.log'), sanitize(installed), { mode: 0o600 })
+    if (metered) {
+      const added = await run('dsh', ['plugin', '--profile', 'web', 'add', resolve(root, 'plugins/assistant-deepseek-budget')], env, 60000)
+      await writeFile(testInfo.outputPath('add-budget-plugin.log'), sanitize(added), { mode: 0o600 })
+    }
     const patchPath = join(home, 'profiles/web/cordis.patch.yml')
     const before = await readFile(patchPath, 'utf8')
     await writeFile(testInfo.outputPath('installed-profile.yaml'), before, { mode: 0o600 })
@@ -58,13 +63,14 @@ test('native goals correct an isolated artifact after private independent verifi
       criteria: [{ id: 'sum-behavior', kind: 'isolated-process-behavior', authority: { id: compiled.id, digest: compiled.digest }, artifactPath: 'answer.sh', testSetId: 'sum-cases' }] }))
     configure(patch, 'dsh-enhanced-assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 0, authorities: [authority], profiles })
     configure(patch, 'dsh-enhanced-assistant-goals', { databasePath: join(home, 'assistant-goals/web.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 60000,
-      preauthorizedCreateMaxRounds: 3, executionBudget: { modelCalls: 6, toolCalls: 3, inputTokens: 200, outputTokens: 6000,
-        costUsdMicros: 0, durationMs: 240000, maxOutputTokensPerCall: 1024 } })
-    patch.add({ id: 'agent-default-model', config: { provider: 'browser-e2e', model: 'isolated-goal-proof' } })
+      preauthorizedCreateMaxRounds: 3, executionBudget: { modelCalls: 6, toolCalls: 3, inputTokens: metered ? 2_100_000 : 200, outputTokens: 6000,
+        ...(metered ? {} : { costUsdMicros: 0 }), durationMs: 240000, maxOutputTokensPerCall: 1024 } })
+    if (metered) configure(patch, 'dsh-enhanced-assistant-deepseek-budget', { enabled: true, defaultMaxTokens: 1024 })
+    patch.add({ id: 'agent-default-model', config: metered ? { provider: 'deepseek-goal-metered', model: 'deepseek-v4-flash' } : { provider: 'browser-e2e', model: 'isolated-goal-proof' } })
     patch.add({ id: 'session-title-llm', disabled: true })
-    patch.add({ insert: [{ id: 'autonomy-goal-e2e-model', name: resolve(root, 'scripts/e2e/autonomy-goal-model.mjs') }] })
+    patch.add({ insert: [{ id: 'autonomy-goal-e2e-model', name: resolve(root, metered ? 'scripts/e2e/autonomy-deepseek-transport.mjs' : 'scripts/e2e/autonomy-goal-model.mjs') }] })
     await writeFile(patchPath, String(patch), { mode: 0o600 })
-    host = await startHost(env)
+    host = await startHost(metered ? { ...env, NODE_OPTIONS: `${env.NODE_OPTIONS ?? ''} --import=${pathToFileURL(resolve(root, 'scripts/e2e/autonomy-deepseek-transport.mjs')).href}` } : env)
     const origin = new URL(host.url).origin
     try { await page.goto(host.url) } catch { throw new Error('Browser launch authentication failed (URL redacted)') }
     await expect(page).toHaveURL(`${origin}/`); authenticated = true
@@ -107,16 +113,17 @@ test('native goals correct an isolated artifact after private independent verifi
     expect(await page.getByRole('button', { name: 'Allow once', exact: true }).count()).toBe(0)
     expect(JSON.stringify(frames)).not.toContain('approval/asked')
     expect(JSON.stringify(frames)).not.toContain('policy/ask')
-    const budgets = query(`${goalsPath}.budgets`, 'SELECT state FROM goal_budget_reservations')
+    const budgets = query(`${goalsPath}.budgets`, 'SELECT state,input_tokens_reserved,output_tokens_reserved,input_tokens_actual,output_tokens_actual FROM goal_budget_reservations')
     expect(budgets).toHaveLength(4)
     expect(budgets.every(row => row.state === 'settled')).toBe(true)
+    if (metered) expect(budgets).toEqual(Array.from({ length: 4 }, () => ({ state: 'settled', input_tokens_reserved: 2_097_152, output_tokens_reserved: 1024, input_tokens_actual: 12, output_tokens_actual: 8 })))
     await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({
       image, sessionId, nativePhase: 'complete', native, prompts: 1, approvals: 0,
-      setup: 'actual autonomy installer plus explicit test-only Goals/Verifier profiles and model-meter overlay',
+      setup: metered ? 'actual autonomy installer and installed production DeepSeek budget bundle; explicit task profiles and mock provider transport' : 'actual autonomy installer plus explicit test-only Goals/Verifier profiles and model-meter overlay',
       sourceJobs: jobs.map(job => ({ id: job.id, binding: JSON.parse(job.artifact_binding_json) })),
       verificationJobs: verifierJobs.map(job => ({ id: job.id, status: job.status })),
-      receipts, calls, budgetReservations: budgets.length,
-      model: 'deterministic fixture with exact fixture metering; not production model intelligence or pricing proof',
+      receipts, calls, budgetReservations: budgets.length, budgets,
+      model: metered ? 'production serializer/adapter/meter with deterministic HTTP response fixture; no paid API or intelligence/pricing proof' : 'deterministic fixture with exact fixture metering; not production model intelligence or pricing proof',
       acceptance: 'operator-configured exact task profiles; not generic installer-generated success conditions',
     }, null, 2), { mode: 0o600 })
   } catch (error) { failed = true; throw error } finally {

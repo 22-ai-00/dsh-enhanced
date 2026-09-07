@@ -1,5 +1,7 @@
 # 自主智能体目标：跨设备交接
 
+> 2026-09-07 DeepSeek 预算接线（基线 `c611295`）：新增可选 `assistant-deepseek-budget`，固定 DeepSeek v4 adapter 与同生命周期的精确 route meter，按保守输入上界预留、实际输出限额发送并凭完整 usage 结算。金额费率未知时拒绝金额预算，凭据撤销、卸载、重定向与挂起请求均有边界检查；不会把 token 约束称为账单硬限。实际安装的原生目标闭环使用生产 adapter/meter 和明确的供应商响应夹具，没有真实付费 API 调用。最终命令与限制见 [本批证据](evidence/deepseek-goal-budget-2026-09-07.json) 和落地账本；完整 18 项继续按依赖与证据推进，无按天或长期观察等待。
+
 > 2026-09-07 目标重启接线更新（基线 `5e116b9`）：真实安装与新进程恢复已揭示并修复“原生 idle/blocked 早于独立验收、后台提前释放 Agent”的竞态；Delivery 增加版本化的当前 Agent 结算等待，末轮 blocked→complete 的额外 revision 只凭精确实际执行与全目标 achieved 回执接纳。有限 `goal_schedule` 预授权默认关闭并保留原生 Policy；按依赖与证据推进，不为日历排期或长期观察等待。最终浏览器、全仓命令和限制见 [本批证据](evidence/goal-wake-runtime-2026-09-07.json) 与落地账本；完整 18 项目标继续推进。
 
 > 最新接线更新（2026-09-07，基线 `6c8524b`）：新增 v4 隔离产物来源绑定与独立容器验收，步骤和全目标使用同一原生 Goals 生命周期。真实 Web 临时 profile 已验证一次请求→首轮错误产物→独立验收失败→下一原生回合收到反馈并修正→step/outcome achieved→native complete，零逐条审批。模型与计量器是明确的确定性夹具，Goals/Verifier 精确配置是安装后显式 test overlay，不能称为安装器默认完成全部自治或真实模型智能证明。有限 `goal_create` 预授权默认关闭，开启必须有两个 isolated profiles、累计预算、精确线路 meter 和 live owner turn。最终命令、源码哈希与独立复核见 [本批证据](evidence/isolated-goal-2026-09-07.json)；全部 18 项仍为 3 已验证 / 7 实现中 / 8 待做，按依赖与证据推进，不按天等待，长期效果观察放在交付后的使用中。

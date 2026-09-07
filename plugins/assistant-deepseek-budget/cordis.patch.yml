@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-enhanced-assistant-deepseek-budget
+      name: '@dsh-enhanced/assistant-deepseek-budget'

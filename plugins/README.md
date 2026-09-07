@@ -52,12 +52,14 @@
 | [assistant-verifier](assistant-verifier) | `@dsh-enhanced/assistant-verifier` | 实验性 | 事前冻结 AgentLoop 任务验收，独立核对结果并记录可信反馈修订。 |
 
 | [assistant-goals](assistant-goals) | `@dsh-enhanced/assistant-goals` | 实验性 | 按 owner 持久保存原生目标的上下文、下一步和阻塞；跨会话检索，完成状态等待独立验收。 |
+| [assistant-deepseek-budget](assistant-deepseek-budget) | `@dsh-enhanced/assistant-deepseek-budget` | 实验性 | 官方 DeepSeek 文本模型的固定路由与持续目标 token 预算计量；保守预留，禁止重定向，不声明硬金额上限。 |
 
 | [assistant-web-owner](assistant-web-owner) | `@dsh-enhanced/assistant-web-owner` | 实验性 | 原生 Web 的固定 owner、可信文本回合与 Session 生命周期接入。 |
 
 | [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux Docker 执行、私有审计与外部撤销；生产磁盘配额及动作代理待补。 |
 
 | [assistant-actions](assistant-actions) | `@dsh-enhanced/assistant-actions` | 实验性 | 有限 owner 授权的 GitHub 提交 broker、短期凭据 lease 与 unknown 不重放；不默认启用。 |
+
 
 <!-- plugin-catalog:end -->
 

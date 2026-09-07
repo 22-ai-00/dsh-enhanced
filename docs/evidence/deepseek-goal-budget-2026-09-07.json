@@ -1,0 +1,1414 @@
+{
+  "schema": "deepseek-goal-budget-evidence/v1",
+  "recordedAt": "2026-09-07T20:04:30.013964+00:00",
+  "baseCommit": "c61129539c6080683bb6b6f61279866c9e1e3af5",
+  "scope": "WP05/17 fixed DeepSeek route adapter + conservative token meter. Full 18-package objective remains active (3 verified, 7 implementing, 8 todo); no calendar wait or two-week observation gate.",
+  "sourceHashes": {
+    "docs/agent-autonomy-implementation.md": "939aa5dd823c7c966b383a80fb6d9067db07f319a16504fddb79c317249d9ec9",
+    "docs/architecture.md": "e95f10d9a6567f7d53c794668f18b08518432679fb54efeedda5c8079bdba8fd",
+    "docs/autonomy-handoff-2026-09-06.md": "3fb464e07bea2047b2017da88f1a3ddaaba5b41aebf719c0b117042bfa2865c4",
+    "docs/compatibility.md": "dc6f383e800f8592b297f3a14af25893db0f9cc939ebe7ed092d57a95970349b",
+    "package.json": "907804acf667f63d5c2dfcd47f375063e845044dc747e7159a14abfb303579b7",
+    "plugins/README.md": "832c87729f195937c75986198fdd8a79f8c2ca30c4d8b9656582a763ccce981d",
+    "plugins/assistant-deepseek-budget/LICENSE": "37f12999eefa6bde963be1da5403c897ecd2736ee99988ff26693335f68606e7",
+    "plugins/assistant-deepseek-budget/README.md": "9b1f3ef59efbfbbcf0621e8771a5843366b9a9b72322ee1ffdf9b4cd91c53751",
+    "plugins/assistant-deepseek-budget/cordis.patch.yml": "a5afcc41e2786826ca9110fc45facd1ba97d96d220b64688b20d07af5262aaa9",
+    "plugins/assistant-deepseek-budget/package.json": "b565a23a98d71e997d50e13f23f8453c702f562cc7dbf0e3ff5dc0dfc6f5a775",
+    "plugins/assistant-deepseek-budget/src/adapter.ts": "7f74ad17b6c9d3fd47e43c9423d3002ed146b3349e6697e6a8c51c9107d9de33",
+    "plugins/assistant-deepseek-budget/src/config.ts": "7d5455746ae8949289552800f9bd72fa82b9d6f9aeaf47c7064f14a6301acb0a",
+    "plugins/assistant-deepseek-budget/src/contract.ts": "b9b5a7c7d853692f72f7957fed69794c3587f7295f7ebca1f1204cd9ae4596c8",
+    "plugins/assistant-deepseek-budget/src/index.ts": "eff636c60f0a8e940940660d58fc4babf3884d02eabfc99c565df401a2069bfe",
+    "plugins/assistant-deepseek-budget/src/version.ts": "e1b18323af74400f9b81251674b87f8732fdc8009bfcad168de2b5e890c22f71",
+    "plugins/assistant-deepseek-budget/tests/index.spec.ts": "83d6abbb8dc6761b2a59e734f32e0ac395ebe7a9bdf155887d1948d0c8ddb834",
+    "plugins/assistant-deepseek-budget/tsconfig.build.json": "b8b6960a9b3403690455e9c7314abc6b86d3832c6342ee43a1faaf1d3af52292",
+    "plugins/assistant-deepseek-budget/tsconfig.json": "e5d869d2ba42bc4d7e8a136364ae61b919767fceb9e6a3da084342aadc4f132a",
+    "plugins/assistant-delivery/tests/agent-runtime.spec.ts": "5748cc4788b259dcdeed551c169d813be5f3c405be7f4008340aa4b190f743f6",
+    "plugins/assistant-goals/README.md": "08f12c686146e4ef0d9ee20089842c9735805bcd13e6c87c5f33386798dc9d3a",
+    "pnpm-lock.yaml": "6ea77a6f1cade459e92b4ccddb3759adfad625dbf065b7cedc8e0eb75b128f1c",
+    "pnpm-workspace.yaml": "1a52c7086d5fc6337805b3ddd90cf34740dfe0cbb16fb327f3fcdfaef954c130",
+    "scripts/e2e/autonomy-deepseek-transport.mjs": "5f15b86d75e66ebd16387c1acbdc162763260b132550bbb696b9d2aaf428cc4c",
+    "scripts/e2e/autonomy-goal.spec.mjs": "0c5d079b82969d9e0553b2feb285fcea74e015f5328363f9618191f72ea1ab45",
+    "scripts/e2e/playwright-deepseek.config.mjs": "3f39ecf23db963fd92470f5dbe5c5c3ae979705d2783b672e446ae9540c2c6dd",
+    "tests/deepseek-http-boundary.spec.ts": "096276ac51e1fd98b6b8eecc3d787429ab1cdc2a5c374623dfcf2dde1add4f48",
+    "tests/deepseek-registration.spec.ts": "eb336d387f37ac00540891374442792f260182e9f710f8f8770a4475f036713f"
+  },
+  "commands": [
+    {
+      "command": "CI=true pnpm install --no-frozen-lockfile",
+      "log": "/tmp/dsh-deepseek-budget-install-v1.log",
+      "exitCode": 0,
+      "sha256": "6ddd8bfad352c7b9cb8bb8dba0442478f8eac086e6fd2bb2e2b6ebebf379d9c1",
+      "exitFile": "/tmp/dsh-deepseek-budget-install-v1.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-install-v1.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-install-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm install --no-frozen-lockfile && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run build && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run test && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"uses the production DeepSeek route\"",
+      "log": "/tmp/dsh-deepseek-budget-targeted-v1.log",
+      "exitCode": 2,
+      "sha256": "c1f81225046428e624c1391f0eeb10d4a46acdf36390692b0c2d6060abed8bf3",
+      "exitFile": "/tmp/dsh-deepseek-budget-targeted-v1.log.exit",
+      "exitSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v1.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run build && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run test && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"uses the production DeepSeek route\"",
+      "log": "/tmp/dsh-deepseek-budget-targeted-v2.log",
+      "exitCode": 2,
+      "sha256": "2541b522a354810a36939a79ddcf0da35d77e6073836a1180a71fc703fcc2748",
+      "exitFile": "/tmp/dsh-deepseek-budget-targeted-v2.log.exit",
+      "exitSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v2.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v2.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run build && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run test && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"uses the production DeepSeek route\"",
+      "log": "/tmp/dsh-deepseek-budget-targeted-v3.log",
+      "exitCode": 2,
+      "sha256": "49f5fbe80b1a40e084ea8905feb7f43b4ad456a9d6c9dab0ce3936dba016b415",
+      "exitFile": "/tmp/dsh-deepseek-budget-targeted-v3.log.exit",
+      "exitSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v3.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v3.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run build && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run test && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"uses the production DeepSeek route\"",
+      "log": "/tmp/dsh-deepseek-budget-targeted-v4.log",
+      "exitCode": 1,
+      "sha256": "d8e366106f2bbea7641719028c31c6b215cc0fce0d35fe60311a8dabd959754e",
+      "exitFile": "/tmp/dsh-deepseek-budget-targeted-v4.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v4.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v4.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run build && CI=true pnpm exec vitest run tests/deepseek-http-boundary.spec.ts && CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"uses the production DeepSeek route\"",
+      "log": "/tmp/dsh-deepseek-budget-targeted-v5.log",
+      "exitCode": 1,
+      "sha256": "33c2cdc233c7333371472bf5dbef66ef4f03e19b9f30c5fd8111490a7b405e44",
+      "exitFile": "/tmp/dsh-deepseek-budget-targeted-v5.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v5.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v5.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run build && CI=true pnpm exec vitest run tests/deepseek-http-boundary.spec.ts && CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"uses the production DeepSeek route\"",
+      "log": "/tmp/dsh-deepseek-budget-targeted-v6.log",
+      "exitCode": 0,
+      "sha256": "ee2d44e9c6ae0cdcdf54e79cfec42bf5da77976825a2784f68a4ef0060dfb518",
+      "exitFile": "/tmp/dsh-deepseek-budget-targeted-v6.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v6.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-targeted-v6.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:deepseek",
+      "log": "/tmp/dsh-deepseek-budget-browser-v1.log",
+      "exitCode": 0,
+      "sha256": "2da59463e1884d9110b41db0a419be68c5016935a59aa2fb25d5c8b49308d6e2",
+      "exitFile": "/tmp/dsh-deepseek-budget-browser-v1.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-browser-v1.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-browser-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm exec vitest run tests/deepseek-registration.spec.ts && CI=true pnpm --filter @dsh-enhanced/assistant-deepseek-budget run test && CI=true pnpm --filter @dsh-enhanced/assistant-delivery run typecheck && CI=true pnpm run lint",
+      "log": "/tmp/dsh-deepseek-budget-lifecycle-v1.log",
+      "exitCode": 0,
+      "sha256": "5ef5c9bd99fcf9ffc38148983e2429bbfa4dc69b466d96383bfe411df1740474",
+      "exitFile": "/tmp/dsh-deepseek-budget-lifecycle-v1.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-lifecycle-v1.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-lifecycle-v1.log.exit"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-deepseek-budget-check-v1.log",
+      "exitCode": 1,
+      "sha256": "2defe4c50e9f902fba46b57dba424ce14614789ebda223d97dbf452cca4655b1",
+      "exitFile": "/tmp/dsh-deepseek-budget-check-v1.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-check-v1.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-check-v1.log.exit"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-deepseek-budget-check-v2.log",
+      "exitCode": 0,
+      "sha256": "f0fb60ebb6f3249721ca48964ecbf4f5b0d93dd1aa4df26be55dc7c6c6538779",
+      "exitFile": "/tmp/dsh-deepseek-budget-check-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-check-v2.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-check-v2.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:deepseek",
+      "log": "/tmp/dsh-deepseek-budget-browser-final.log",
+      "exitCode": 0,
+      "sha256": "58cc4157674180c9911ef9b7668391b89157bfe8eb5de16d6aeb6f38bd600cc1",
+      "exitFile": "/tmp/dsh-deepseek-budget-browser-final.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-browser-final.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-browser-final.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-deepseek-budget-foreground-final.log",
+      "exitCode": 0,
+      "sha256": "fde3bf4d746c495beeeb09a383b15964eb290581e7cedeb51bfea8e6fa566234",
+      "exitFile": "/tmp/dsh-deepseek-budget-foreground-final.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-foreground-final.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-foreground-final.log.exit"
+    },
+    {
+      "command": "CI=true pnpm run lint && git diff --check",
+      "log": "/tmp/dsh-deepseek-budget-final-static.log",
+      "exitCode": 0,
+      "sha256": "decfb35129f4a3eb2629ca3980e9707d043c8162c302770aee3339015da2af54",
+      "exitFile": "/tmp/dsh-deepseek-budget-final-static.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/deepseek-budget-validation/dsh-deepseek-budget-final-static.log",
+      "workspaceExit": ".cache/deepseek-budget-validation/dsh-deepseek-budget-final-static.log.exit"
+    }
+  ],
+  "artifactHashes": {
+    ".cache/deepseek-budget-validation/deepseek-browser-v1/.last-run.json": "91d1c43004802cd49950d78eb11c8fa7d05da8ffffe219a8b13b2f561bc00903",
+    ".cache/deepseek-budget-validation/deepseek-browser-v1/autonomy-goal-native-goals-527f7-lete-without-another-prompt/add-budget-plugin.log": "93c687f0af6cf929f96dd124ee8cb48278069b7a96602784783c475100936937",
+    ".cache/deepseek-budget-validation/deepseek-browser-v1/autonomy-goal-native-goals-527f7-lete-without-another-prompt/install.log": "72e8e51ad287627ce025381e9036675662ae9ed1b02793adb7de00cb4313eb87",
+    ".cache/deepseek-budget-validation/deepseek-browser-v1/autonomy-goal-native-goals-527f7-lete-without-another-prompt/host.log": "41fde162308d72b8091b387f874056a322798c185ff8c0ad7be97c074fba8470",
+    ".cache/deepseek-budget-validation/deepseek-browser-v1/autonomy-goal-native-goals-527f7-lete-without-another-prompt/model.jsonl": "3f00b0369e0951333024d3c713627a3e220c9d60272aaccb89d5f52e799c2acc",
+    ".cache/deepseek-budget-validation/deepseek-browser-v1/autonomy-goal-native-goals-527f7-lete-without-another-prompt/transport.json": "1221c759a48b1f66753cb0a0bd2b9068a1a883d665b57c4159a72adc22b44ab1",
+    ".cache/deepseek-budget-validation/deepseek-browser-v1/autonomy-goal-native-goals-527f7-lete-without-another-prompt/installed-profile.yaml": "ef65780dc7250cc2b9bb339daff30f917279305513b41cd681ff2cc6c7550d0f",
+    ".cache/deepseek-budget-validation/deepseek-browser-v1/autonomy-goal-native-goals-527f7-lete-without-another-prompt/proof.json": "9ea91502a50ee66c150d977a0287d8d8ec194714483f752bdbe01eebd3f94217",
+    ".cache/deepseek-budget-validation/deepseek-final/.last-run.json": "91d1c43004802cd49950d78eb11c8fa7d05da8ffffe219a8b13b2f561bc00903",
+    ".cache/deepseek-budget-validation/deepseek-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/add-budget-plugin.log": "ab7d88ecb08fa86bc4cb0f4621b5703cf7d3d2bc1a134661bebf071985802a91",
+    ".cache/deepseek-budget-validation/deepseek-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/install.log": "cd9f10f87e47cc76c84b3e89050e48a253337e7557a4c3c53f1a24ba3db0d0a7",
+    ".cache/deepseek-budget-validation/deepseek-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/host.log": "1d2d8be8054c1b91b359ba783c7c2fd6e1cd0fa10fa9a623fd8e4354ec34ec66",
+    ".cache/deepseek-budget-validation/deepseek-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/model.jsonl": "3f00b0369e0951333024d3c713627a3e220c9d60272aaccb89d5f52e799c2acc",
+    ".cache/deepseek-budget-validation/deepseek-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/transport.json": "f526c201bb742d984986f35046b60fe039833cd25aef60b8928d667b8b8ed466",
+    ".cache/deepseek-budget-validation/deepseek-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/installed-profile.yaml": "da4a3c5c4536bbfe0eaf95bcd7ff51d4cb4c81f8b869b24d9e951a068ee7f0f3",
+    ".cache/deepseek-budget-validation/deepseek-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/proof.json": "229f8af492e0e035e9c1409c7f2dee6fc12dfc9b90bbba54558179345adeb3ec",
+    ".cache/deepseek-budget-validation/foreground-final/.last-run.json": "91d1c43004802cd49950d78eb11c8fa7d05da8ffffe219a8b13b2f561bc00903",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/install.log": "45101a74d9bbb899540c2c2967a1b4ab4b2670cbfc5d63a73e4a35f1a7d3567c",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/host.log": "2c8ac4f75d005a99f061efbe3f5a4c2e104e658a18e2bcceac365988b58e084a",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/doctor.log": "19a927affad97432ea513e0ff3cb712735b6de5e0a7a1a2669d98d239c3d063a",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/model.jsonl": "3bfe3246ba8e3b6906c4478feaddded938de0051ce5f50cc11ab3a1bc086e71c",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/doctor-proof.json": "4e0f6f3d7bdc8ef60c989c6eca11fc9c44e30450d40e181047deaf1b6544c496",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/doctor-revoked.log": "f9128fa9431ddd6d2eacc85f74044076f00ddc7bc6ddca281e9154cbb8c1a093",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/transport.json": "dd34d987ab335c5ceae8743b2d49f09feff9deba18badee8bbb9b00bcf5354f8",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/proof.json": "18caf38a72a63f647ebaaf9156a7db6c6c0369f76874fab268b240c50fb5e6d4",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/install.log": "6f02650721ad76080996e8ce767a22c1341bc4750a601dda654cb5570c38b4e5",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/host.log": "b77db777e63dd3644927a1ad1354ac5b368e7ed33171d21ca0b250e99809a553",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/model.jsonl": "404abe389b00294953d2b81eaeead358613091ed37c8658f60319dd2530b4dd7",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/transport.json": "aece63f6aa195105de8c64a42ac2c5dd2822b2eec9d921585a20500c7195c7ea",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/installed-profile.yaml": "032ee64517aed7607cf1efa9adfb7d424afcdb197cf247fe4ec849632f2681f9",
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/proof.json": "3075f11c7e0d99db5f2e14bcd32377ba6993a41c2db4085c1debcc24b1997613"
+  },
+  "browserProofs": {
+    ".cache/deepseek-budget-validation/deepseek-browser-v1/autonomy-goal-native-goals-527f7-lete-without-another-prompt/proof.json": {
+      "image": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "sessionId": "session-7c13890a-d044-490b-bd7b-4ce4dbb3e859",
+      "nativePhase": "complete",
+      "native": {
+        "sessionId": "session-7c13890a-d044-490b-bd7b-4ce4dbb3e859",
+        "goalId": "goal-c030475f-2ecf-44d9-9399-fe1092f90bae",
+        "revision": 2,
+        "objective": "Create a shell program that reads two integers and prints their sum",
+        "phase": "complete",
+        "roundsStarted": 2,
+        "maxGoalRounds": 3,
+        "updatedAt": 1788810161680
+      },
+      "prompts": 1,
+      "approvals": 0,
+      "setup": "actual autonomy installer and installed production DeepSeek budget bundle; explicit task profiles and mock provider transport",
+      "sourceJobs": [
+        {
+          "id": "d743ba04-e0a1-4ab7-9700-b95cf54b6c58",
+          "binding": {
+            "admission": {
+              "protocol": "goal-artifact-admission/v1",
+              "contractId": "acceptance-4c3786348581e4c7a8f5caefc5f61fbf701ecefb074d59996afc0d97cacc1e24",
+              "contractDigest": "e372afcf65f41bf66008bbb63845beebca6b0ca4f611c5891b4d0894b45d2b3c",
+              "runId": "goal-run-f98a2286b067354bf3fdce0ba3bd44bcd738b196edd643cc5e615b03254a68f5",
+              "turn": 2
+            },
+            "paths": [
+              "answer.sh"
+            ]
+          }
+        },
+        {
+          "id": "22b926a1-21a2-491a-8610-d7bab336d9b8",
+          "binding": {
+            "admission": {
+              "protocol": "goal-artifact-admission/v1",
+              "contractId": "acceptance-4224e0108523f4fc5e17eece83fa9cd816ae902342bb485fb830bfe1afadc8f3",
+              "contractDigest": "1ba5d4dd9b9b1864f9e5513120fe16f5c71d8db347d226872d61e9222c4cd87d",
+              "runId": "goal-run-07d8e394716a0153a5647d38cac4f4418d1636b1ca951f161be90178c408c071",
+              "turn": 3
+            },
+            "paths": [
+              "answer.sh"
+            ]
+          }
+        }
+      ],
+      "verificationJobs": [
+        {
+          "id": "9b9a31aa-53f8-4ca5-9afc-9a50af60616b",
+          "status": "succeeded"
+        },
+        {
+          "id": "6437821b-75c9-450f-8db7-c99da15110fd",
+          "status": "succeeded"
+        },
+        {
+          "id": "cb2209f1-0e52-4f6e-b52f-0afd0c796d3c",
+          "status": "succeeded"
+        },
+        {
+          "id": "8829b2aa-45e9-4354-8661-2d5bdcc14dc4",
+          "status": "succeeded"
+        },
+        {
+          "id": "c29555bc-eb9e-4202-b296-aa70cc49f323",
+          "status": "succeeded"
+        },
+        {
+          "id": "2475a92c-83cd-4b4c-992c-17fe4425c19a",
+          "status": "succeeded"
+        }
+      ],
+      "receipts": [
+        {
+          "completedAt": 1788810156768,
+          "contractDigest": "e372afcf65f41bf66008bbb63845beebca6b0ca4f611c5891b4d0894b45d2b3c",
+          "contractId": "acceptance-4c3786348581e4c7a8f5caefc5f61fbf701ecefb074d59996afc0d97cacc1e24",
+          "digest": "339a5bfa921f6fce433598e7c6591a82187a4630735c30cae3ac1da6ad984789",
+          "id": "verification-acceptance-4c3786348581e4c7a8f5caefc5f61fbf701ecefb074d59996afc0d97cacc1e24-1",
+          "objectiveStatus": "not-achieved",
+          "owner": {
+            "principalRecordId": "principal_7e273f6b-3293-47d8-b43c-f58df61d5ac6",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "e9cbaeec12a6d507ef02b26e1b7af00508cd255d671e7e449aabb7f7a5071e3a",
+              "criterionId": "sum-behavior",
+              "evidence": [],
+              "reason": "isolated-unexpected-stdout",
+              "status": "failed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-dt5YVa/workspace"
+          },
+          "startedAt": 1788810156049,
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "6478d411104f8325fe4d5abc466eca9f89c332c23f3cacf89a27825a0915d883",
+              "nativeGoalId": "goal-c030475f-2ecf-44d9-9399-fe1092f90bae",
+              "nativeRevision": 1,
+              "runId": "goal-run-f98a2286b067354bf3fdce0ba3bd44bcd738b196edd643cc5e615b03254a68f5",
+              "sessionId": "session-7c13890a-d044-490b-bd7b-4ce4dbb3e859",
+              "stepId": "round-1"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-f98a2286b067354bf3fdce0ba3bd44bcd738b196edd643cc5e615b03254a68f5"
+          },
+          "validUntil": 1788810394762
+        },
+        {
+          "completedAt": 1788810157524,
+          "contractDigest": "46f02d0fad554e699406f4f740f10a75a46e44e0aed2eaf42e52846b422f8167",
+          "contractId": "acceptance-29a260f369137735f1942def226e7570cdc4cca0fe7dba324e1e328fa43cabe9",
+          "digest": "440f72d35987495e4c1a6bb7e44e02bc68af1bd77263d1c2385585c076522729",
+          "id": "verification-acceptance-29a260f369137735f1942def226e7570cdc4cca0fe7dba324e1e328fa43cabe9-1",
+          "objectiveStatus": "not-achieved",
+          "owner": {
+            "principalRecordId": "principal_7e273f6b-3293-47d8-b43c-f58df61d5ac6",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "e9cbaeec12a6d507ef02b26e1b7af00508cd255d671e7e449aabb7f7a5071e3a",
+              "criterionId": "sum-behavior",
+              "evidence": [],
+              "reason": "isolated-unexpected-stdout",
+              "status": "failed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-dt5YVa/workspace"
+          },
+          "startedAt": 1788810156805,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-593af78833a59d6688023d8086766b0762247e2faca8cf4ac887dc5db0fe692b",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "6478d411104f8325fe4d5abc466eca9f89c332c23f3cacf89a27825a0915d883",
+              "nativeGoalId": "goal-c030475f-2ecf-44d9-9399-fe1092f90bae",
+              "sessionId": "session-7c13890a-d044-490b-bd7b-4ce4dbb3e859"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-593af78833a59d6688023d8086766b0762247e2faca8cf4ac887dc5db0fe692b"
+          },
+          "validUntil": 1788810394656
+        },
+        {
+          "completedAt": 1788810160168,
+          "contractDigest": "1ba5d4dd9b9b1864f9e5513120fe16f5c71d8db347d226872d61e9222c4cd87d",
+          "contractId": "acceptance-4224e0108523f4fc5e17eece83fa9cd816ae902342bb485fb830bfe1afadc8f3",
+          "digest": "75a09f0edf78b7c48d3112ed17a0ec668716ecfb89ed7a06b8205f9771d5829f",
+          "id": "verification-acceptance-4224e0108523f4fc5e17eece83fa9cd816ae902342bb485fb830bfe1afadc8f3-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_7e273f6b-3293-47d8-b43c-f58df61d5ac6",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+              "criterionId": "sum-behavior",
+              "evidence": [
+                {
+                  "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                  "kind": "isolated-artifact",
+                  "ref": "22b926a1-21a2-491a-8610-d7bab336d9b8"
+                },
+                {
+                  "digest": "4be3178eabf1ff4e5f31b8f6f6f89b97d5059c4a7e91b75820d2ceb2eac2359e",
+                  "kind": "isolated-verification-jobs",
+                  "ref": "sum-checker"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-dt5YVa/workspace"
+          },
+          "startedAt": 1788810158770,
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "6478d411104f8325fe4d5abc466eca9f89c332c23f3cacf89a27825a0915d883",
+              "nativeGoalId": "goal-c030475f-2ecf-44d9-9399-fe1092f90bae",
+              "nativeRevision": 1,
+              "runId": "goal-run-07d8e394716a0153a5647d38cac4f4418d1636b1ca951f161be90178c408c071",
+              "sessionId": "session-7c13890a-d044-490b-bd7b-4ce4dbb3e859",
+              "stepId": "round-2"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-07d8e394716a0153a5647d38cac4f4418d1636b1ca951f161be90178c408c071"
+          },
+          "validUntil": 1788810397567
+        },
+        {
+          "completedAt": 1788810161651,
+          "contractDigest": "b86dcf47f55d8c02a49bcf318630811537c7119ec0cac968259dae47c0943952",
+          "contractId": "acceptance-43490649f7e41e55492fdde56146dcd8ab8b61c05b8ac721df9d2b2eaa85cbf6",
+          "digest": "ac6539c0b56e1205a7d16e476afacd5c1661449500419dcd788230ef0ef1ef10",
+          "id": "verification-acceptance-43490649f7e41e55492fdde56146dcd8ab8b61c05b8ac721df9d2b2eaa85cbf6-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_7e273f6b-3293-47d8-b43c-f58df61d5ac6",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+              "criterionId": "sum-behavior",
+              "evidence": [
+                {
+                  "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                  "kind": "isolated-artifact",
+                  "ref": "22b926a1-21a2-491a-8610-d7bab336d9b8"
+                },
+                {
+                  "digest": "fb0b416cbc20f90e70abd9893cb96038c68f0766b66e7a4440d2e593d5255f39",
+                  "kind": "isolated-verification-jobs",
+                  "ref": "sum-checker"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-dt5YVa/workspace"
+          },
+          "startedAt": 1788810160200,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-edbbca6390859b69e44848dc633981bd043f900a3388a58cc894fb302ecd431d",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "6478d411104f8325fe4d5abc466eca9f89c332c23f3cacf89a27825a0915d883",
+              "nativeGoalId": "goal-c030475f-2ecf-44d9-9399-fe1092f90bae",
+              "sessionId": "session-7c13890a-d044-490b-bd7b-4ce4dbb3e859"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-edbbca6390859b69e44848dc633981bd043f900a3388a58cc894fb302ecd431d"
+          },
+          "validUntil": 1788810394656
+        }
+      ],
+      "calls": [
+        {
+          "call": 1,
+          "tool": "goal_create",
+          "feedbackObserved": false,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 2,
+          "tool": null,
+          "feedbackObserved": false,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 3,
+          "tool": "isolation_run",
+          "feedbackObserved": false,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 4,
+          "tool": null,
+          "feedbackObserved": false,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 5,
+          "tool": "isolation_run",
+          "feedbackObserved": true,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 6,
+          "tool": null,
+          "feedbackObserved": true,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        }
+      ],
+      "budgetReservations": 4,
+      "budgets": [
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        }
+      ],
+      "model": "production serializer/adapter/meter with deterministic HTTP response fixture; no paid API or intelligence/pricing proof",
+      "acceptance": "operator-configured exact task profiles; not generic installer-generated success conditions"
+    },
+    ".cache/deepseek-budget-validation/deepseek-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/proof.json": {
+      "image": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "sessionId": "session-35de4597-687a-45a5-a29d-d99a6e9e0c7d",
+      "nativePhase": "complete",
+      "native": {
+        "sessionId": "session-35de4597-687a-45a5-a29d-d99a6e9e0c7d",
+        "goalId": "goal-e111b928-0e16-4374-ae01-d8525b3c6e2b",
+        "revision": 2,
+        "objective": "Create a shell program that reads two integers and prints their sum",
+        "phase": "complete",
+        "roundsStarted": 2,
+        "maxGoalRounds": 3,
+        "updatedAt": 1788811273187
+      },
+      "prompts": 1,
+      "approvals": 0,
+      "setup": "actual autonomy installer and installed production DeepSeek budget bundle; explicit task profiles and mock provider transport",
+      "sourceJobs": [
+        {
+          "id": "3ee7ad20-534a-4de5-8c68-8bea29e50e91",
+          "binding": {
+            "admission": {
+              "protocol": "goal-artifact-admission/v1",
+              "contractId": "acceptance-4045618760a0bb8bb4702db911b035e41ce44fb11623e2dbdb53965176a4c106",
+              "contractDigest": "871dae900f58d2bed54ef4670089f1928db72f0949cdd65e73de6a48505070fe",
+              "runId": "goal-run-65f0d91d6ce55de96546ddafe6a2f46ea345f4f87b77b7c3bd6e630fbbec05f8",
+              "turn": 2
+            },
+            "paths": [
+              "answer.sh"
+            ]
+          }
+        },
+        {
+          "id": "61f5f4a8-0c9b-4fa5-a5f9-800d8ef90bd1",
+          "binding": {
+            "admission": {
+              "protocol": "goal-artifact-admission/v1",
+              "contractId": "acceptance-953601ab1876fd1bc7ee7ee9dc96dad229f70d568608ec2a628f4af62ad17888",
+              "contractDigest": "ef1b8e61933e73c08e78df3c0479f9d3f44b73e4cdf5d30878fd38850bab9576",
+              "runId": "goal-run-7dee3fbfae10a510c1eb55dc6d529038c1b6da6c56327b04f67db529078912fc",
+              "turn": 3
+            },
+            "paths": [
+              "answer.sh"
+            ]
+          }
+        }
+      ],
+      "verificationJobs": [
+        {
+          "id": "73754c2a-84fd-4256-805d-54c6044077fd",
+          "status": "succeeded"
+        },
+        {
+          "id": "b292ce00-781a-4eb5-8271-6407b1779d91",
+          "status": "succeeded"
+        },
+        {
+          "id": "3fde9e04-165b-4d54-a770-8e7f715158bf",
+          "status": "succeeded"
+        },
+        {
+          "id": "b5879a58-780c-4fa6-9774-081551f74307",
+          "status": "succeeded"
+        },
+        {
+          "id": "07143088-85d0-4725-be22-754f5eb28610",
+          "status": "succeeded"
+        },
+        {
+          "id": "81ea73a2-176a-4858-85d7-6a88f3248347",
+          "status": "succeeded"
+        }
+      ],
+      "receipts": [
+        {
+          "completedAt": 1788811268155,
+          "contractDigest": "871dae900f58d2bed54ef4670089f1928db72f0949cdd65e73de6a48505070fe",
+          "contractId": "acceptance-4045618760a0bb8bb4702db911b035e41ce44fb11623e2dbdb53965176a4c106",
+          "digest": "8841b2044855dc8ac25457ba84de7d21bd7d65bd0463b8ef98d555d5596be57c",
+          "id": "verification-acceptance-4045618760a0bb8bb4702db911b035e41ce44fb11623e2dbdb53965176a4c106-1",
+          "objectiveStatus": "not-achieved",
+          "owner": {
+            "principalRecordId": "principal_3df87cf0-c827-4d46-afcf-8241fdd026e6",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "e9cbaeec12a6d507ef02b26e1b7af00508cd255d671e7e449aabb7f7a5071e3a",
+              "criterionId": "sum-behavior",
+              "evidence": [],
+              "reason": "isolated-unexpected-stdout",
+              "status": "failed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-iabN9W/workspace"
+          },
+          "startedAt": 1788811267415,
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "9051370553d4ec94a8a67f569b2c45168ff3a1af708ce73fc05da3dd100f4059",
+              "nativeGoalId": "goal-e111b928-0e16-4374-ae01-d8525b3c6e2b",
+              "nativeRevision": 1,
+              "runId": "goal-run-65f0d91d6ce55de96546ddafe6a2f46ea345f4f87b77b7c3bd6e630fbbec05f8",
+              "sessionId": "session-35de4597-687a-45a5-a29d-d99a6e9e0c7d",
+              "stepId": "round-1"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-65f0d91d6ce55de96546ddafe6a2f46ea345f4f87b77b7c3bd6e630fbbec05f8"
+          },
+          "validUntil": 1788811506186
+        },
+        {
+          "completedAt": 1788811268933,
+          "contractDigest": "78e5a2e623f71adc9900673d94f9b66f558f2e73610ff6d4546337f0bd70384e",
+          "contractId": "acceptance-de74c9e4197956c8468dff9ea79de1b8849cb2ee2144060fa5389b35f3ab89b3",
+          "digest": "19b0128b544983df40e30f5001bc0c0b7ca7e5ba7de838b1d3aca7a24a7c922c",
+          "id": "verification-acceptance-de74c9e4197956c8468dff9ea79de1b8849cb2ee2144060fa5389b35f3ab89b3-1",
+          "objectiveStatus": "not-achieved",
+          "owner": {
+            "principalRecordId": "principal_3df87cf0-c827-4d46-afcf-8241fdd026e6",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "e9cbaeec12a6d507ef02b26e1b7af00508cd255d671e7e449aabb7f7a5071e3a",
+              "criterionId": "sum-behavior",
+              "evidence": [],
+              "reason": "isolated-unexpected-stdout",
+              "status": "failed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-iabN9W/workspace"
+          },
+          "startedAt": 1788811268192,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-e0aab14e446612e632d90dcf4645e34494231a43fe402092e7c1e703eb6c098d",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "9051370553d4ec94a8a67f569b2c45168ff3a1af708ce73fc05da3dd100f4059",
+              "nativeGoalId": "goal-e111b928-0e16-4374-ae01-d8525b3c6e2b",
+              "sessionId": "session-35de4597-687a-45a5-a29d-d99a6e9e0c7d"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-e0aab14e446612e632d90dcf4645e34494231a43fe402092e7c1e703eb6c098d"
+          },
+          "validUntil": 1788811506079
+        },
+        {
+          "completedAt": 1788811271667,
+          "contractDigest": "ef1b8e61933e73c08e78df3c0479f9d3f44b73e4cdf5d30878fd38850bab9576",
+          "contractId": "acceptance-953601ab1876fd1bc7ee7ee9dc96dad229f70d568608ec2a628f4af62ad17888",
+          "digest": "4e021fa3b29b9b604d29ac7012ca6ffa0a61482f1667b4eb74b1544fc521e72b",
+          "id": "verification-acceptance-953601ab1876fd1bc7ee7ee9dc96dad229f70d568608ec2a628f4af62ad17888-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_3df87cf0-c827-4d46-afcf-8241fdd026e6",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+              "criterionId": "sum-behavior",
+              "evidence": [
+                {
+                  "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                  "kind": "isolated-artifact",
+                  "ref": "61f5f4a8-0c9b-4fa5-a5f9-800d8ef90bd1"
+                },
+                {
+                  "digest": "60b78022b1838ff2692f0c2a4b9b206b4d81a7244146ab4fd8d4b6703104c9a5",
+                  "kind": "isolated-verification-jobs",
+                  "ref": "sum-checker"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-iabN9W/workspace"
+          },
+          "startedAt": 1788811270244,
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "9051370553d4ec94a8a67f569b2c45168ff3a1af708ce73fc05da3dd100f4059",
+              "nativeGoalId": "goal-e111b928-0e16-4374-ae01-d8525b3c6e2b",
+              "nativeRevision": 1,
+              "runId": "goal-run-7dee3fbfae10a510c1eb55dc6d529038c1b6da6c56327b04f67db529078912fc",
+              "sessionId": "session-35de4597-687a-45a5-a29d-d99a6e9e0c7d",
+              "stepId": "round-2"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-7dee3fbfae10a510c1eb55dc6d529038c1b6da6c56327b04f67db529078912fc"
+          },
+          "validUntil": 1788811508980
+        },
+        {
+          "completedAt": 1788811273159,
+          "contractDigest": "5861eb292842afb180861214befadfa5d63030eed591a0f222f429295e797fac",
+          "contractId": "acceptance-98357e4001835887ef5de06ebdb19612f5990c316cd5f078d082afd347af3390",
+          "digest": "ae7dfe5c5a64ede514190a0041a812c6b12052b9f1c612dc104af04282afcf6e",
+          "id": "verification-acceptance-98357e4001835887ef5de06ebdb19612f5990c316cd5f078d082afd347af3390-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_3df87cf0-c827-4d46-afcf-8241fdd026e6",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+              "criterionId": "sum-behavior",
+              "evidence": [
+                {
+                  "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                  "kind": "isolated-artifact",
+                  "ref": "61f5f4a8-0c9b-4fa5-a5f9-800d8ef90bd1"
+                },
+                {
+                  "digest": "347605c7e39bb73488e6177d929a961be1aa4b81683d3ace6dea103fa2a2146d",
+                  "kind": "isolated-verification-jobs",
+                  "ref": "sum-checker"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-iabN9W/workspace"
+          },
+          "startedAt": 1788811271698,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-0acc8573f9627bfed7d7f75b190a0472c53fca96ecceea49ebd67fbf482e997a",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "9051370553d4ec94a8a67f569b2c45168ff3a1af708ce73fc05da3dd100f4059",
+              "nativeGoalId": "goal-e111b928-0e16-4374-ae01-d8525b3c6e2b",
+              "sessionId": "session-35de4597-687a-45a5-a29d-d99a6e9e0c7d"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-0acc8573f9627bfed7d7f75b190a0472c53fca96ecceea49ebd67fbf482e997a"
+          },
+          "validUntil": 1788811506079
+        }
+      ],
+      "calls": [
+        {
+          "call": 1,
+          "tool": "goal_create",
+          "feedbackObserved": false,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 2,
+          "tool": null,
+          "feedbackObserved": false,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 3,
+          "tool": "isolation_run",
+          "feedbackObserved": false,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 4,
+          "tool": null,
+          "feedbackObserved": false,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 5,
+          "tool": "isolation_run",
+          "feedbackObserved": true,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        },
+        {
+          "call": 6,
+          "tool": null,
+          "feedbackObserved": true,
+          "secretObserved": false,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response"
+        }
+      ],
+      "budgetReservations": 4,
+      "budgets": [
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        }
+      ],
+      "model": "production serializer/adapter/meter with deterministic HTTP response fixture; no paid API or intelligence/pricing proof",
+      "acceptance": "operator-configured exact task profiles; not generic installer-generated success conditions"
+    },
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/proof.json": {
+      "installer": "actual local installer and repeated shipped setup",
+      "image": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "sessionId": "session-b27dd267-fc35-42c3-a9bf-bf2a49c51cf7",
+      "nativeTool": "isolation_run",
+      "approvals": 0,
+      "jobs": 1,
+      "prompts": 2,
+      "reservedDurationMs": 20000,
+      "result": {
+        "status": "succeeded",
+        "quiescent": true,
+        "stdout": "42",
+        "artifact": "answer.txt:42"
+      },
+      "grantExpiryPreserved": true,
+      "calls": [
+        {
+          "call": 1,
+          "type": "isolation-tool",
+          "hasGoalTool": true,
+          "hasActionTool": true,
+          "hasIsolationTool": true
+        },
+        {
+          "call": 2,
+          "type": "reply",
+          "hasGoalTool": true,
+          "hasActionTool": true,
+          "hasIsolationTool": true
+        },
+        {
+          "call": 3,
+          "type": "isolation-tool",
+          "hasGoalTool": true,
+          "hasActionTool": true,
+          "hasIsolationTool": true
+        },
+        {
+          "call": 4,
+          "type": "reply",
+          "hasGoalTool": true,
+          "hasActionTool": true,
+          "hasIsolationTool": true
+        }
+      ],
+      "model": "deterministic fixture; no real-model intelligence or full autonomy claim"
+    },
+    ".cache/deepseek-budget-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/proof.json": {
+      "image": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "sessionId": "session-a7a0673d-c37a-49b9-84db-2b4d61340024",
+      "nativePhase": "complete",
+      "native": {
+        "sessionId": "session-a7a0673d-c37a-49b9-84db-2b4d61340024",
+        "goalId": "goal-445865a7-2c64-4c75-9517-987a2894b766",
+        "revision": 2,
+        "objective": "Create a shell program that reads two integers and prints their sum",
+        "phase": "complete",
+        "roundsStarted": 2,
+        "maxGoalRounds": 3,
+        "updatedAt": 1788811379578
+      },
+      "prompts": 1,
+      "approvals": 0,
+      "setup": "actual autonomy installer plus explicit test-only Goals/Verifier profiles and model-meter overlay",
+      "sourceJobs": [
+        {
+          "id": "7c9d14b9-4073-4f04-9ba4-53d3ab2b1547",
+          "binding": {
+            "admission": {
+              "protocol": "goal-artifact-admission/v1",
+              "contractId": "acceptance-33607d5c8ad0f33d5029afb2729cf251f40d5a5b28a3460b9ee243ff93fb7251",
+              "contractDigest": "7b047f73955d3576404171ae5fb5cd1809ad04f01ed0343b8924cc48d3e61e81",
+              "runId": "goal-run-21880194f80331521653c811ac70fcb002aca675a271e7c0d41b601928bb995b",
+              "turn": 2
+            },
+            "paths": [
+              "answer.sh"
+            ]
+          }
+        },
+        {
+          "id": "f059fa77-0390-4f2d-8148-4dce3bbb6187",
+          "binding": {
+            "admission": {
+              "protocol": "goal-artifact-admission/v1",
+              "contractId": "acceptance-37d3ae4a18cb8a1b398c451aa4459f4784abbae8712851ab2891f4ee83e5fb4e",
+              "contractDigest": "8356374455f6f1d51d7a98ad8ae442d4142cf2deb11116a5aa83a6c967c3e563",
+              "runId": "goal-run-c709849c9676256bc77625905aabfd8f646a5da7f35aad09af9ab51ed24e49fe",
+              "turn": 3
+            },
+            "paths": [
+              "answer.sh"
+            ]
+          }
+        }
+      ],
+      "verificationJobs": [
+        {
+          "id": "598350e6-8a58-4f35-a359-9bb6c863a3dc",
+          "status": "succeeded"
+        },
+        {
+          "id": "060b0886-00e1-436c-af40-ea3784ba7b4a",
+          "status": "succeeded"
+        },
+        {
+          "id": "0a1a07ed-1aeb-49e1-9265-242b63f41598",
+          "status": "succeeded"
+        },
+        {
+          "id": "814e529c-117a-49e7-b946-7cb001cbab02",
+          "status": "succeeded"
+        },
+        {
+          "id": "70a8f189-61f6-4073-b1b0-da9d072d7475",
+          "status": "succeeded"
+        },
+        {
+          "id": "be8bcb77-8933-4229-8f70-8e8de0e7ed64",
+          "status": "succeeded"
+        }
+      ],
+      "receipts": [
+        {
+          "completedAt": 1788811374621,
+          "contractDigest": "7b047f73955d3576404171ae5fb5cd1809ad04f01ed0343b8924cc48d3e61e81",
+          "contractId": "acceptance-33607d5c8ad0f33d5029afb2729cf251f40d5a5b28a3460b9ee243ff93fb7251",
+          "digest": "d36310d35de1ddd81f8231643446e779cb7a48be787e00d9df753b6df381eefb",
+          "id": "verification-acceptance-33607d5c8ad0f33d5029afb2729cf251f40d5a5b28a3460b9ee243ff93fb7251-1",
+          "objectiveStatus": "not-achieved",
+          "owner": {
+            "principalRecordId": "principal_83425898-b6a8-47a6-a8bd-0ebead28a9d0",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "e9cbaeec12a6d507ef02b26e1b7af00508cd255d671e7e449aabb7f7a5071e3a",
+              "criterionId": "sum-behavior",
+              "evidence": [],
+              "reason": "isolated-unexpected-stdout",
+              "status": "failed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-QvQvdy/workspace"
+          },
+          "startedAt": 1788811373870,
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "625cd4c5050c824d3809cd5a6a301ab042c4f535696e20f65badba7c97c18916",
+              "nativeGoalId": "goal-445865a7-2c64-4c75-9517-987a2894b766",
+              "nativeRevision": 1,
+              "runId": "goal-run-21880194f80331521653c811ac70fcb002aca675a271e7c0d41b601928bb995b",
+              "sessionId": "session-a7a0673d-c37a-49b9-84db-2b4d61340024",
+              "stepId": "round-1"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-21880194f80331521653c811ac70fcb002aca675a271e7c0d41b601928bb995b"
+          },
+          "validUntil": 1788811612621
+        },
+        {
+          "completedAt": 1788811375389,
+          "contractDigest": "10d29f4155b32297ec2d6d718b5dbe386987bf36a7fb3da9a2ab891ecfb18297",
+          "contractId": "acceptance-06ae251594af3f1c122d8091262acdff56272b5714982181203a89ac16cab388",
+          "digest": "0053d0a2d3b2f7209c3cabc4713cad60917a4530a10774cd32d3cd0ec8e01fae",
+          "id": "verification-acceptance-06ae251594af3f1c122d8091262acdff56272b5714982181203a89ac16cab388-1",
+          "objectiveStatus": "not-achieved",
+          "owner": {
+            "principalRecordId": "principal_83425898-b6a8-47a6-a8bd-0ebead28a9d0",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "e9cbaeec12a6d507ef02b26e1b7af00508cd255d671e7e449aabb7f7a5071e3a",
+              "criterionId": "sum-behavior",
+              "evidence": [],
+              "reason": "isolated-unexpected-stdout",
+              "status": "failed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-QvQvdy/workspace"
+          },
+          "startedAt": 1788811374658,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-5d7cd6cb88a4bae6452ae636d4261c641a4a705bf50d2ea81ee66a1300a8f1e0",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "625cd4c5050c824d3809cd5a6a301ab042c4f535696e20f65badba7c97c18916",
+              "nativeGoalId": "goal-445865a7-2c64-4c75-9517-987a2894b766",
+              "sessionId": "session-a7a0673d-c37a-49b9-84db-2b4d61340024"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-5d7cd6cb88a4bae6452ae636d4261c641a4a705bf50d2ea81ee66a1300a8f1e0"
+          },
+          "validUntil": 1788811612517
+        },
+        {
+          "completedAt": 1788811378085,
+          "contractDigest": "8356374455f6f1d51d7a98ad8ae442d4142cf2deb11116a5aa83a6c967c3e563",
+          "contractId": "acceptance-37d3ae4a18cb8a1b398c451aa4459f4784abbae8712851ab2891f4ee83e5fb4e",
+          "digest": "0f1290d131552bd3c97c728e86a21fc4f8eea06fbda629485c027dc1619532a7",
+          "id": "verification-acceptance-37d3ae4a18cb8a1b398c451aa4459f4784abbae8712851ab2891f4ee83e5fb4e-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_83425898-b6a8-47a6-a8bd-0ebead28a9d0",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+              "criterionId": "sum-behavior",
+              "evidence": [
+                {
+                  "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                  "kind": "isolated-artifact",
+                  "ref": "f059fa77-0390-4f2d-8148-4dce3bbb6187"
+                },
+                {
+                  "digest": "53424f1232aed108868e84d40958eaa35f0a04980e7d0353fb2abd72b9bc9d3e",
+                  "kind": "isolated-verification-jobs",
+                  "ref": "sum-checker"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-QvQvdy/workspace"
+          },
+          "startedAt": 1788811376632,
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "625cd4c5050c824d3809cd5a6a301ab042c4f535696e20f65badba7c97c18916",
+              "nativeGoalId": "goal-445865a7-2c64-4c75-9517-987a2894b766",
+              "nativeRevision": 1,
+              "runId": "goal-run-c709849c9676256bc77625905aabfd8f646a5da7f35aad09af9ab51ed24e49fe",
+              "sessionId": "session-a7a0673d-c37a-49b9-84db-2b4d61340024",
+              "stepId": "round-2"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-c709849c9676256bc77625905aabfd8f646a5da7f35aad09af9ab51ed24e49fe"
+          },
+          "validUntil": 1788811615435
+        },
+        {
+          "completedAt": 1788811379549,
+          "contractDigest": "3afad4d63c71c49e87878a66ea590579384a2fd7fed36d0b022c3ea021d0ca9b",
+          "contractId": "acceptance-711e1bbfbcdcbd278b3b2e7139eb809af18bc14c584e98b58f0cdfb99e2a649c",
+          "digest": "c720bf285a7b462abb2a68e574bfafef18400f025160e7998ba702d90cc7d5f7",
+          "id": "verification-acceptance-711e1bbfbcdcbd278b3b2e7139eb809af18bc14c584e98b58f0cdfb99e2a649c-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_83425898-b6a8-47a6-a8bd-0ebead28a9d0",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v4",
+          "results": [
+            {
+              "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+              "criterionId": "sum-behavior",
+              "evidence": [
+                {
+                  "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                  "kind": "isolated-artifact",
+                  "ref": "f059fa77-0390-4f2d-8148-4dce3bbb6187"
+                },
+                {
+                  "digest": "002e06f788fb530b184d9bb52dee51256b354c61bc297221b526d9aec240c622",
+                  "kind": "isolated-verification-jobs",
+                  "ref": "sum-checker"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-autonomy-e2e-QvQvdy/workspace"
+          },
+          "startedAt": 1788811378115,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-6192fe14f023f277e00220b9a5792e92efeb8a56976c2142ba2ea9f6da6d3c49",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "625cd4c5050c824d3809cd5a6a301ab042c4f535696e20f65badba7c97c18916",
+              "nativeGoalId": "goal-445865a7-2c64-4c75-9517-987a2894b766",
+              "sessionId": "session-a7a0673d-c37a-49b9-84db-2b4d61340024"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-6192fe14f023f277e00220b9a5792e92efeb8a56976c2142ba2ea9f6da6d3c49"
+          },
+          "validUntil": 1788811612517
+        }
+      ],
+      "calls": [
+        {
+          "call": 1,
+          "tool": "goal_create",
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": false,
+          "secretObserved": false
+        },
+        {
+          "call": 2,
+          "tool": null,
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": false,
+          "secretObserved": false
+        },
+        {
+          "call": 3,
+          "tool": "isolation_run",
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": false,
+          "secretObserved": false
+        },
+        {
+          "call": 4,
+          "tool": null,
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": false,
+          "secretObserved": false
+        },
+        {
+          "call": 5,
+          "tool": "isolation_run",
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": true,
+          "secretObserved": false
+        },
+        {
+          "call": 6,
+          "tool": null,
+          "hasGoalTool": true,
+          "hasIsolationTool": true,
+          "feedbackObserved": true,
+          "secretObserved": false
+        }
+      ],
+      "budgetReservations": 4,
+      "budgets": [
+        {
+          "state": "settled",
+          "input_tokens_reserved": 12,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 12,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 4
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 12,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 12,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 4
+        }
+      ],
+      "model": "deterministic fixture with exact fixture metering; not production model intelligence or pricing proof",
+      "acceptance": "operator-configured exact task profiles; not generic installer-generated success conditions"
+    }
+  },
+  "fullCheck": {
+    "log": "/tmp/dsh-deepseek-budget-check-v2.log",
+    "exitCode": 0,
+    "mainFiles": 282,
+    "mainTests": 3685,
+    "deliveryPackageTests": 693,
+    "goalsPackageTests": 82,
+    "newPluginPackageTests": 4,
+    "pluginCount": 28,
+    "sharedPackageCount": 3,
+    "dryRunPacks": 31
+  },
+  "packInspection": {
+    "source": "/tmp/dsh-deepseek-budget-check-v2.log",
+    "files": [
+      "cordis.patch.yml",
+      "lib/adapter.d.ts",
+      "lib/adapter.d.ts.map",
+      "lib/adapter.js",
+      "lib/adapter.js.map",
+      "lib/config.d.ts",
+      "lib/config.d.ts.map",
+      "lib/config.js",
+      "lib/config.js.map",
+      "lib/contract.d.ts",
+      "lib/contract.d.ts.map",
+      "lib/contract.js",
+      "lib/contract.js.map",
+      "lib/index.d.ts",
+      "lib/index.d.ts.map",
+      "lib/index.js",
+      "lib/index.js.map",
+      "lib/version.d.ts",
+      "lib/version.d.ts.map",
+      "lib/version.js",
+      "lib/version.js.map",
+      "LICENSE",
+      "package.json",
+      "README.md"
+    ],
+    "assertions": "24 files; required lib/adapter, config, contract, index, patch, README, LICENSE; no source/tests/state database"
+  },
+  "providerContract": {
+    "id": "deepseek-chat-completions-2026-09-07",
+    "expiresAt": "2026-10-08T00:00:00.000Z",
+    "sources": [
+      "https://api-docs.deepseek.com/api/create-chat-completion/",
+      "https://api-docs.deepseek.com/quick_start/pricing/"
+    ],
+    "inference": "2,097,152 tokens conservatively covers documented 1M context in decimal or binary interpretation; not local tokenization or measured billing. Exact provider and model, fixed HTTPS endpoint, redirect:error and bounded max_tokens. Both USD tariffs are null.",
+    "paidProviderCalls": 0
+  },
+  "failuresRetained": [
+    "targeted-v1: TypeScript role union, unknown usage integers, exact optional fields and meter options typing; stopped before tests.",
+    "targeted-v2: missing comma after options snapshot; stopped before tests.",
+    "targeted-v3: unknown completion token count narrowing; stopped before tests.",
+    "targeted-v4: four native tests failed because fixture asserted the native output cap on the ordinary foreground call before counting; root corrected fixture.",
+    "targeted-v5: real serializer assertion detected incorrect thinking shape; root changed enabled:true to type:enabled, preserved official high default and mixed tool/text replay.",
+    "check-v1: 3684 of 3685 main tests passed; sole failure was new catalog dsh-credentials missing the required exact-version minimumReleaseAgeExclude entry. Root added the entry and reran the full check."
+  ],
+  "limits": [
+    "Browser uses actual installed DSH, shipped adapter and meter, native AgentLoop/Goal, production Docker Isolation and independent Verifier; only provider response is deterministic test transport, no paid API or model intelligence proof.",
+    "Task acceptance profiles and budget are still explicit post-install test overlay, not general user-facing goal admission setup.",
+    "Foreground and auxiliary calls are outside native Goal cumulative budgets; provider contract assumptions and trusted Host remain prerequisites. No hard account invoice ceiling.",
+    "Contract expires 2026-10-08 and fails closed until maintained; missing or inconsistent usage preserves held Goal budget.",
+    "Plugin remains optional/default disabled, not published or activated in real user profiles; credential availability and online API compatibility remain unverified."
+  ],
+  "c2c": {
+    "task": "c2c_a942",
+    "mode": "local execution records only",
+    "chatgptWebReview": false,
+    "reason": "Required in-app browser unavailable; no external browser used."
+  },
+  "independentReview": {
+    "source": "PASS by goal_wake_verify; read-only, no commands run. Checked service removal latch, sanitized errors, README and host peer conventions.",
+    "finalEvidence": {
+      "status": "PASS",
+      "reviewer": "goal_wake_verify",
+      "mode": "read-only, no pnpm/tests/build or file writes",
+      "sourceHashesMatched": 27,
+      "commandRecordsMatched": 14,
+      "commandAndExitFileCopiesMatched": 56,
+      "artifactHashesMatched": 31,
+      "packFilesMatched": 24,
+      "finalBrowserScenariosPassed": 3,
+      "claims": "Checked actual logs, zero exits, pack contents, final native completion and mock-transport limitations; full 18-package goal remains active."
+    },
+    "coordinatorAcceptance": "Accepted current adapter/meter slice after independent source and evidence PASS; no claim of paid API compatibility or full autonomy completion."
+  }
+}
