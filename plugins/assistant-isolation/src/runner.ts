@@ -3,6 +3,7 @@ import type { ChildProcess } from 'node:child_process'
 import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { captureDaemonWitness, processWitness, sameDaemonWitness, type ProcessWitness } from './runtime-witness.js'
 import type { IsolationLimits, IsolationProcessResult, IsolationRunInput } from './types.js'
 
 const DOCKER_SOCKET = 'unix:///var/run/docker.sock'
@@ -74,6 +75,10 @@ export async function runIsolatedProcess(input: IsolationRunInput): Promise<Isol
   if (invalid !== undefined) return failure(invalid)
   if (input.signal.aborted) return { status: 'cancelled', quiescent: true, stdout: '', stderr: '', reason: 'aborted-before-create' }
 
+  const daemonBefore = await captureDaemonWitness({ dockerPath: input.dockerPath })
+  if (input.signal.aborted) return { status: 'cancelled', quiescent: true, stdout: '', stderr: '', reason: 'aborted-before-create' }
+  if (Date.now() >= input.deadline) return failure('deadline-expired-before-create')
+
   const config: SupervisorConfig = {
     dockerPath: input.dockerPath,
     containerName: input.containerName,
@@ -96,9 +101,11 @@ export async function runIsolatedProcess(input: IsolationRunInput): Promise<Isol
   supervisor.stdout?.resume()
   supervisor.stderr?.resume()
 
+  let supervisorWitness: ProcessWitness | undefined
   return await new Promise<IsolationProcessResult>((resolve) => {
     let settled = false
     let ready = false
+    let finalReceipt = false
     let cancelSent = false
     let grace: NodeJS.Timeout | undefined
     let deadlineTimer: NodeJS.Timeout | undefined
@@ -129,12 +136,24 @@ export async function runIsolatedProcess(input: IsolationRunInput): Promise<Isol
     input.signal.addEventListener('abort', abort, { once: true })
     supervisor.once('error', (error) => settle(failure(`supervisor-spawn-failed:${error.message}`, false)))
     supervisor.once('exit', (code, signal) => {
-      if (!settled) settle({ status: 'unknown', quiescent: false, stdout: '', stderr: '', reason: `supervisor-exited:${code ?? signal ?? 'unknown'}` })
+      if (!settled && !finalReceipt) settle({ status: 'unknown', quiescent: false, stdout: '', stderr: '', reason: `supervisor-exited:${code ?? signal ?? 'unknown'}` })
     })
     supervisor.on('message', async (message: SupervisorMessage) => {
       if (settled) return
       if (message?.type === 'error') { settle(failure(message.reason, false)); return }
-      if (message?.type === 'result') { settle(message.result); return }
+      if (message?.type === 'result') {
+        if (finalReceipt) return
+        finalReceipt = true
+        // Only the supervisor's final receipt brackets the create operations.
+        // This is private diagnostic evidence, never by itself a release permit.
+        const daemonAfter = message.result.status === 'unknown' && !message.result.quiescent && daemonBefore && supervisorWitness
+          ? await captureDaemonWitness({ dockerPath: input.dockerPath }) : undefined
+        if (daemonBefore && daemonAfter && supervisorWitness && sameDaemonWitness(daemonBefore, daemonAfter)
+          && supervisorWitness.bootId === daemonBefore.process.bootId) {
+          settle({ ...message.result, creationWitness: { daemon: daemonAfter, supervisor: supervisorWitness } })
+        } else settle(message.result)
+        return
+      }
       if (message?.type !== 'ready' || ready) return
       ready = true
       if (input.signal.aborted || Date.now() >= input.deadline) { cancel(input.signal.aborted ? 'aborted' : 'deadline-expired'); return }
@@ -146,7 +165,16 @@ export async function runIsolatedProcess(input: IsolationRunInput): Promise<Isol
       }
       if (!send(supervisor, { type: 'start' })) settle({ status: 'unknown', quiescent: false, stdout: '', stderr: '', reason: 'supervisor-ipc-closed-before-start' })
     })
-    if (!send(supervisor, { type: 'configure', config })) settle({ status: 'unknown', quiescent: false, stdout: '', stderr: '', reason: 'supervisor-ipc-closed-before-configure' })
+    const configure = async (): Promise<void> => {
+      supervisorWitness = supervisor.pid === undefined ? undefined : await processWitness(supervisor.pid)
+      if (settled) return
+      if (cancelSent || input.signal.aborted || Date.now() >= input.deadline) {
+        settle({ status: input.signal.aborted ? 'cancelled' : 'timed-out', quiescent: true, stdout: '', stderr: '', reason: 'cancelled-before-configure' })
+        return
+      }
+      if (!send(supervisor, { type: 'configure', config })) settle({ status: 'unknown', quiescent: false, stdout: '', stderr: '', reason: 'supervisor-ipc-closed-before-configure' })
+    }
+    void configure()
   })
 }
 

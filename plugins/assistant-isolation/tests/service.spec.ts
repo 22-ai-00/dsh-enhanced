@@ -115,6 +115,12 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
       const first = await ctx.assistantIsolation.run(agent, request, signal)
       expect(first).toMatchObject({ status: 'succeeded', quiescent: true, exitCode: 0, artifacts: [{ path: 'result.txt', content: 'artifact' }] })
       expect(first.stdout).toContain('direct-output')
+      expect(first).not.toHaveProperty('creationWitness')
+      const audit = new DatabaseSync(join(stateRoot, 'ledger.sqlite'))
+      try {
+        expect(audit.prepare('SELECT action FROM isolation_audit WHERE job_id=? ORDER BY sequence').all(first.jobId).map(row => row.action))
+          .toEqual(['job-prepared', 'supervisor-spawn-intent', 'job-started', 'job-settled'])
+      } finally { audit.close() }
       expect(policyResources).toContainEqual(['execute', { kind: 'tool', id: 'isolation:offline' }])
       await expect(ctx.assistantIsolation.run(agent, { ...request, command: 'printf changed' }, signal)).rejects.toThrow()
       expect(await ctx.assistantIsolation.run(agent, request, signal)).toEqual(first)
@@ -161,9 +167,14 @@ dockerTests('AssistantIsolationService real AgentLoop and Docker integration (op
       expect(JSON.parse(revoked.stdout)).toEqual({ revoked: true, containersRemoved: true })
       const revokedResult = await pending
       // A concurrent external kill can remove state before the supervisor
-      // observes it. That stays unknown, with confirmed quiescence.
-      expect(revokedResult.quiescent, JSON.stringify(revokedResult)).toBe(true)
+      // observes it. A dispatched unknown retains occupancy under schema v3.
+      expect(revokedResult.quiescent, JSON.stringify(revokedResult)).toBe(revokedResult.status !== 'unknown')
       expect(['cancelled', 'unknown', 'failed']).toContain(revokedResult.status)
+      const settledLedger = new IsolationLedger(join(stateRoot, 'ledger.sqlite'))
+      try {
+        expect(settledLedger.get(revokedResult.jobId)?.result).toEqual(revokedResult)
+        expect(settledLedger.recoverable().some(job => job.id === revokedResult.jobId)).toBe(revokedResult.status === 'unknown')
+      } finally { settledLedger.close() }
       expect((await hostCall()).isError).toBe(true)
       expect(hostMarker).toBe(false)
 

@@ -6,6 +6,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { join } from 'node:path'
+import type { CreationWitness } from './runtime-witness.js'
 import { Config, validateConfig } from './config.js'
 import { IsolationLedger, type IsolationControllerAuthority } from './ledger.js'
 import { removeIsolatedContainer, runIsolatedProcess } from './runner.js'
@@ -90,9 +91,9 @@ export class AssistantIsolationService extends Service {
         const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName)
         // An absent object does not prove a timed-out daemon create request
         // completed. Restart must not erase that uncertainty or free its pool.
-        const quiescent = removed && job.result?.reason !== 'docker-creation-unconfirmed'
+        const quiescent = removed && !job.dispatchAttempted && job.result?.reason !== 'docker-creation-unconfirmed'
         const result: IsolationResult = job.result ? { ...job.result, quiescent } : {
-          jobId: job.id, status: 'unknown', quiescent, stdout: '', stderr: '', artifacts: [], reason: 'controller-recovery-no-replay',
+          jobId: job.id, status: 'unknown', quiescent, stdout: '', stderr: '', artifacts: [], reason: job.dispatchAttempted ? 'controller-recovery-dispatch-unconfirmed' : 'controller-recovery-no-replay',
         }
         this.#ledger.settle(job.id, job.version, result, this.#authority)
         if (quiescent) await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true })
@@ -140,10 +141,12 @@ export class AssistantIsolationService extends Service {
     const timer = setInterval(() => { if (!authorized()) abort.abort() }, 250)
     timer.unref()
     let mayHaveCreated = false
+    let creationWitness: CreationWitness | undefined
     let result: IsolationResult = { jobId: job.id, status: 'failed', quiescent: true, stdout: '', stderr: '', artifacts: [], reason: 'preparation-failed' }
     try {
       const workspacePath = await stageWorkspace(this.#config.stateRoot, job.id, request)
       if (!authorized()) throw new Error('authorization-denied-before-create')
+      job = this.#ledger.markDispatched(job.id, job.version, this.#authority)
       mayHaveCreated = true
       const processResult = await runIsolatedProcess({ jobId: job.id, containerName: job.containerName, image: this.#config.image,
         dockerPath: this.#config.dockerPath, workspacePath, artifacts: request.artifacts ?? [], command: request.command, deadline: job.deadline,
@@ -154,13 +157,19 @@ export class AssistantIsolationService extends Service {
           return true
         },
       })
-      result = { ...processResult, jobId: job.id, artifacts: processResult.artifacts ?? [] }
+      const { creationWitness: witness, ...publicResult } = processResult
+      creationWitness = witness
+      result = { ...publicResult, jobId: job.id, artifacts: processResult.artifacts ?? [],
+        quiescent: publicResult.status === 'unknown' ? false : publicResult.quiescent }
     } catch {
-      if (mayHaveCreated) result = { ...result, status: 'unknown', quiescent: await removeIsolatedContainer(this.#config.dockerPath, job.containerName), reason: 'runner-exception-no-replay' }
+      if (mayHaveCreated) {
+        await removeIsolatedContainer(this.#config.dockerPath, job.containerName)
+        result = { ...result, status: 'unknown', quiescent: false, reason: 'runner-exception-no-replay' }
+      }
     }
     finally { clearInterval(timer) }
     // A lost controller cannot write success into a successor's ledger.
-    try { this.#ledger.settle(job.id, job.version, result, this.#authority) }
+    try { this.#ledger.settle(job.id, job.version, result, this.#authority, creationWitness) }
     finally { if (result.quiescent) await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true }) }
     return result
   }

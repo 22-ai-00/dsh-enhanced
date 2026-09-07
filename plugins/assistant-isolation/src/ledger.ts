@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
+import { validateCreationWitness, type CreationWitness } from './runtime-witness.js'
 import type { IsolationGrant, IsolationIdentity, IsolationJob, IsolationResult, IsolationStatus } from './types.js'
 
 export type IsolationLedgerErrorCode = 'conflict' | 'invalid-input' | 'invalid-path' | 'invalid-state' | 'not-found' | 'schema' | 'schema-too-new' | 'unauthorized'
@@ -11,7 +12,7 @@ export class IsolationLedgerError extends Error {
 }
 export interface IsolationControllerAuthority { ownerId: string; fence: number }
 
-const schemaVersion = 2
+const schemaVersion = 3
 const outputMaximum = 1_048_576
 const artifactMaximum = 128
 const textMaximum = 16_384
@@ -50,7 +51,7 @@ function result(value: IsolationResult): IsolationResult {
 }
 
 type GrantRow = { id: string; digest: string; revision: number; expires_at: number; max_runs: number; max_total_duration_ms: number; revoked: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string }
-type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null }
+type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null }
 type ResourceReservation = { memoryMiB: number; workspaceInodes: number; maxMemoryMiB: number; maxWorkspaceInodes: number }
 
 function open(path: string): DatabaseSync {
@@ -67,20 +68,26 @@ function open(path: string): DatabaseSync {
     if (version > schemaVersion) fail('schema-too-new')
     if (version === 0) database.exec(`BEGIN IMMEDIATE;
       CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '2');
+      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '3');
       CREATE TABLE isolation_grants (id TEXT PRIMARY KEY, digest TEXT NOT NULL, revision INTEGER NOT NULL, expires_at INTEGER NOT NULL, max_runs INTEGER NOT NULL, max_total_duration_ms INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), revoke_reason TEXT, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL) STRICT;
-      CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
+      CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
       CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
       CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
       CREATE TABLE isolation_audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL, action TEXT NOT NULL, job_id TEXT, grant_id TEXT, detail TEXT NOT NULL) STRICT;
       CREATE TABLE isolation_controller (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;
-      PRAGMA user_version = 2; COMMIT;`)
+      PRAGMA user_version = 3; COMMIT;`)
     if (version === 1) database.exec(`BEGIN IMMEDIATE;
       ALTER TABLE isolation_jobs ADD COLUMN reserved_memory_mib INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE isolation_jobs ADD COLUMN reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0;
       UPDATE schema_meta SET value='2' WHERE key='schema-version';
       PRAGMA user_version = 2; COMMIT;`)
-    if (version !== 0 && version !== 1 && version !== schemaVersion) fail('schema')
+    // Old prepared/running records cannot prove that no supervisor was spawned.
+    if (version === 1 || version === 2) database.exec(`BEGIN IMMEDIATE;
+      ALTER TABLE isolation_jobs ADD COLUMN dispatch_attempted INTEGER NOT NULL DEFAULT 1 CHECK(dispatch_attempted IN (0,1));
+      ALTER TABLE isolation_jobs ADD COLUMN creation_witness_json TEXT;
+      UPDATE schema_meta SET value='3' WHERE key='schema-version';
+      PRAGMA user_version = 3; COMMIT;`)
+    if (version !== 0 && version !== 1 && version !== 2 && version !== schemaVersion) fail('schema')
     if (path !== ':memory:') chmodSync(path, 0o600)
     return database
   } catch (error) { database.close(); throw error }
@@ -109,10 +116,16 @@ export class IsolationLedger {
   #decodeJob(row: JobRow): IsolationJob {
     const jobIdentity = identity({ principalDigest: row.principal_digest, principalRecordId: row.principal_record_id, principalVersion: row.principal_version, workspace: row.workspace, agentPreset: row.agent_preset })
     if (!text(row.id) || !text(row.grant_id) || !safePositive(row.grant_revision) || !text(row.session_id) || !text(row.idempotency_key) || !text(row.request_digest) || !text(row.container_name) || !positiveTime(row.deadline) || !safePositive(row.reserved_duration_ms) || !safeTime(row.reserved_memory_mib) || !safeTime(row.reserved_workspace_inodes) || !safePositive(row.version) || !safeTime(row.created_at) || !safeTime(row.updated_at) || row.updated_at < row.created_at || !['prepared', 'running', 'succeeded', 'failed', 'cancelled', 'timed-out', 'unknown'].includes(row.status)) fail('schema')
+    if (![0, 1].includes(row.dispatch_attempted)) fail('schema')
+    let witness: CreationWitness | undefined
+    if (row.creation_witness_json !== null) {
+      try { witness = validateCreationWitness(JSON.parse(row.creation_witness_json)) } catch { fail('schema') }
+      if (!row.dispatch_attempted) fail('schema')
+    }
     let parsed: IsolationResult | undefined
     if (row.result_json !== null) { try { parsed = result(JSON.parse(row.result_json) as IsolationResult) } catch { fail('schema') }; if (parsed.jobId !== row.id || (row.status === 'prepared' || row.status === 'running') || parsed.status !== row.status) fail('schema') }
     else if (row.status !== 'prepared' && row.status !== 'running') fail('schema')
-    return frozen({ id: row.id, grantId: row.grant_id, grantRevision: row.grant_revision, identity: jobIdentity, sessionId: row.session_id, idempotencyKey: row.idempotency_key, requestDigest: row.request_digest, containerName: row.container_name, deadline: row.deadline, reservedDurationMs: row.reserved_duration_ms, reservedMemoryMiB: row.reserved_memory_mib, reservedWorkspaceInodes: row.reserved_workspace_inodes, status: row.status, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at, ...(parsed ? { result: parsed } : {}) })
+    return frozen({ id: row.id, grantId: row.grant_id, grantRevision: row.grant_revision, identity: jobIdentity, sessionId: row.session_id, idempotencyKey: row.idempotency_key, requestDigest: row.request_digest, containerName: row.container_name, deadline: row.deadline, reservedDurationMs: row.reserved_duration_ms, reservedMemoryMiB: row.reserved_memory_mib, reservedWorkspaceInodes: row.reserved_workspace_inodes, dispatchAttempted: row.dispatch_attempted === 1, ...(witness ? { creationWitness: witness } : {}), status: row.status, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at, ...(parsed ? { result: parsed } : {}) })
   }
   syncGrants(grants: IsolationGrant[], authority?: IsolationControllerAuthority): void {
     if (!Array.isArray(grants)) fail('invalid-input')
@@ -151,9 +164,27 @@ export class IsolationLedger {
         if (!safeTime(resources.memory) || !safeTime(resources.inodes) || resources.memory > reservation.maxMemoryMiB - reservation.memoryMiB || resources.inodes > reservation.maxWorkspaceInodes - reservation.workspaceInodes) fail('unauthorized', 'isolation resource pool exhausted')
       }
       const id = randomUUID(); const deadline = Math.min(now + input.durationMs, current.expires_at)
-      this.#database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'prepared',1,?,?)").run(id, input.grantId, current.revision, who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.idempotencyKey, input.requestDigest, `dsh-isolation-${id}`, deadline, input.durationMs, reservation?.memoryMiB ?? 0, reservation?.workspaceInodes ?? 0, now, now)
+      this.#database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,dispatch_attempted,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0, 'prepared',1,?,?)").run(id, input.grantId, current.revision, who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.idempotencyKey, input.requestDigest, `dsh-isolation-${id}`, deadline, input.durationMs, reservation?.memoryMiB ?? 0, reservation?.workspaceInodes ?? 0, now, now)
       this.#audit(now, 'job-prepared', id, input.grantId, `revision:${current.revision}${reservation ? `;reservation:memoryMiB:${reservation.memoryMiB},workspaceInodes:${reservation.workspaceInodes}` : ''}`)
       return { job: this.#job(id)!, created: true }
+    })
+  }
+  /** Commit the crash boundary before a supervisor can receive create authority. */
+  markDispatched(jobId: string, expectedVersion: number, authority: IsolationControllerAuthority): IsolationJob {
+    if (!text(jobId) || !safePositive(expectedVersion)) fail('invalid-input')
+    const controller = this.#authority(authority)
+    if (!controller) fail('invalid-input')
+    return this.#transaction(() => {
+      const now = this.#nowValue()
+      this.#requireController(controller, now)
+      const job = this.#job(jobId)
+      if (!job) fail('not-found')
+      if (job.version !== expectedVersion) fail('conflict')
+      if (job.status !== 'prepared' || job.dispatchAttempted || !this.usable(jobId)) fail('invalid-state')
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET dispatch_attempted=1, version=version+1, updated_at=? WHERE id=? AND version=? AND status='prepared' AND dispatch_attempted=0").run(now, jobId, expectedVersion)
+      if (changed.changes !== 1) fail('conflict')
+      this.#audit(now, 'supervisor-spawn-intent', jobId, job.grantId, 'create-authority-may-be-dispatched')
+      return this.#job(jobId)!
     })
   }
   start(jobId: string, expectedVersion: number, authority?: IsolationControllerAuthority): IsolationJob {
@@ -162,23 +193,31 @@ export class IsolationLedger {
     return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict', 'job version differs'); if (job.status !== 'prepared') fail('invalid-state')
       const current = this.#grant(job.grantId)
       if (!current || current.revoked || current.revision !== job.grantRevision || current.expires_at <= now || job.deadline <= now || current.principal_digest !== job.identity.principalDigest || current.principal_record_id !== job.identity.principalRecordId || current.principal_version !== job.identity.principalVersion || current.workspace !== job.identity.workspace || current.agent_preset !== job.identity.agentPreset) fail('unauthorized')
-      const changed = this.#database.prepare("UPDATE isolation_jobs SET status='running', version=version+1, updated_at=? WHERE id=? AND version=? AND status='prepared'").run(now, jobId, expectedVersion)
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET status='running', dispatch_attempted=1, version=version+1, updated_at=? WHERE id=? AND version=? AND status='prepared'").run(now, jobId, expectedVersion)
       if (changed.changes !== 1) fail('conflict'); this.#audit(now, 'job-started', jobId, job.grantId, 'running'); return this.#job(jobId)!
     })
   }
-  settle(jobId: string, expectedVersion: number, input: IsolationResult, authority?: IsolationControllerAuthority): IsolationJob {
+  settle(jobId: string, expectedVersion: number, input: IsolationResult, authority?: IsolationControllerAuthority, creationWitness?: CreationWitness): IsolationJob {
     if (!text(jobId) || !safePositive(expectedVersion)) fail('invalid-input'); const value = result(input); if (value.jobId !== jobId || (value.status !== 'unknown' && !value.quiescent)) fail('invalid-input', 'result job id differs or non-unknown result is not quiescent')
+    let witness: CreationWitness | undefined
+    if (creationWitness !== undefined) {
+      try { witness = validateCreationWitness(creationWitness) } catch { fail('invalid-input') }
+      if (value.status !== 'unknown' || value.quiescent) fail('invalid-input')
+    }
+    if (value.reason === 'docker-creation-unconfirmed' && value.quiescent) fail('invalid-input')
     const controller = this.#authority(authority)
     return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const job = this.#job(jobId); if (!job) fail('not-found'); if (job.version !== expectedVersion) fail('conflict', 'job version differs')
+      if (witness && !job.dispatchAttempted) fail('invalid-state')
+      if (job.dispatchAttempted && value.status === 'unknown' && value.quiescent) fail('invalid-state', 'dispatch requires independent quiescence evidence')
       if (job.status !== 'prepared' && job.status !== 'running') {
         if (job.result && equal(job.result, value)) return job
-        const cleanup = job.status === 'unknown' && job.result?.status === 'unknown' && job.result.quiescent === false && value.status === 'unknown' && value.quiescent === true
+        const cleanup = !job.dispatchAttempted && job.result?.reason !== 'docker-creation-unconfirmed' && job.status === 'unknown' && job.result?.status === 'unknown' && job.result.quiescent === false && value.status === 'unknown' && value.quiescent === true
           && equal({ ...job.result, quiescent: true }, value)
         if (!cleanup) fail('invalid-state')
         const changed = this.#database.prepare("UPDATE isolation_jobs SET result_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status='unknown'").run(JSON.stringify(value), now, jobId, expectedVersion)
         if (changed.changes !== 1) fail('conflict'); this.#audit(now, 'job-quiesced', jobId, job.grantId, 'unknown'); return this.#job(jobId)!
       }
-      const changed = this.#database.prepare('UPDATE isolation_jobs SET status=?, result_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status IN (\'prepared\',\'running\')').run(value.status, JSON.stringify(value), now, jobId, expectedVersion)
+      const changed = this.#database.prepare('UPDATE isolation_jobs SET status=?, result_json=?, creation_witness_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status IN (\'prepared\',\'running\')').run(value.status, JSON.stringify(value), witness ? JSON.stringify(witness) : null, now, jobId, expectedVersion)
       if (changed.changes !== 1) fail('conflict'); this.#audit(now, 'job-settled', jobId, job.grantId, value.status); return this.#job(jobId)!
     })
   }

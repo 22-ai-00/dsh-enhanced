@@ -1,0 +1,374 @@
+{
+  "schema": "autonomy-isolation-dispatch-evidence/v1",
+  "recordedAt": "2026-09-07T13:45:37.316782+00:00",
+  "baseCommit": "8c215cbd0e27a46a7eb27bc1b1c170ae08c53a4e",
+  "scope": "WP08-10 dispatch crash safety and private runtime diagnostics; automatic unknown release is NOT implemented",
+  "sourceHashes": {
+    "plugins/assistant-delivery/tests/agent-runtime.spec.ts": "3c37cab03bfe188ac2a2ae8d5ae02de141fb67fadc3886d1ccefe22ebbff681e",
+    "plugins/assistant-isolation/README.md": "092baff8f62a51a14f87983347f113f4c1c12d9fee71a391edf3f4700796c817",
+    "plugins/assistant-isolation/src/ledger.ts": "9bfeb250834cb0188894d93b198fdca19fbd380b9a2a45484d9242a749cf56cb",
+    "plugins/assistant-isolation/src/runner.ts": "31b6867715ae1e61f872330e2e41c50865f64114e27285e2e933def0b5f0c6b3",
+    "plugins/assistant-isolation/src/runtime-witness.ts": "9e1939f6320dc98164198f0e8440e617497edb623ca6f128bbe08875ac95a8d7",
+    "plugins/assistant-isolation/src/service.ts": "f7c295eff8b9d4b753b3eac8eac410fdaeb090d384f493fcccd759cb04782ce6",
+    "plugins/assistant-isolation/src/types.ts": "5867de6ec0736488d682118a640b3ed3650f0a823003b546be6f1d1dd33ede1a",
+    "plugins/assistant-isolation/tests/dispatch-recovery.spec.ts": "9a3486ae7a1260f88f2a2a0fd053711e4d66b52571d9e49000ebc1483c6db79d",
+    "plugins/assistant-isolation/tests/ledger.spec.ts": "43300bbb36b6c2ee4462f5886b18083bd98c9594a56dcfa11d3bfdb29e08d05e",
+    "plugins/assistant-isolation/tests/runtime-witness.spec.ts": "75a19e65e566469c644a63f1353497cdc37aceef5fdf66b1bb87a7635ac9e5a7",
+    "plugins/assistant-isolation/tests/service.spec.ts": "4505e9d6b8c392b0ce6257ab37b03032ae1a340708d3bad51e041a3a13e0f019",
+    "scripts/isolation/daemon-witness-probe.py": "ac8e7b785b6056f28e36ff3be62da2af950c3a47385e9f38cafff0ba6166794a"
+  },
+  "commands": [
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation run build",
+      "scope": "intermediate",
+      "log": "/tmp/dsh-witness-build.log",
+      "exitFile": "/tmp/dsh-witness-build.exit",
+      "exitCode": 0,
+      "sha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation run typecheck",
+      "scope": "intermediate",
+      "log": "/tmp/dsh-witness-typecheck.log",
+      "exitFile": "/tmp/dsh-witness-typecheck.exit",
+      "exitCode": 0,
+      "sha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/ledger.spec.ts tests/runtime-witness.spec.ts",
+      "scope": "failed-esm-mock",
+      "log": "/tmp/dsh-witness-focused.log",
+      "exitFile": "/tmp/dsh-witness-focused.exit",
+      "exitCode": 1,
+      "sha256": "f17e1b335dbc398c0bfa566c2378d204cb76f4ba5a1b5032c3928b3323d63184"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation run build",
+      "scope": "intermediate",
+      "log": "/tmp/dsh-dispatch-build.log",
+      "exitFile": "/tmp/dsh-dispatch-build.exit",
+      "exitCode": 0,
+      "sha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/ledger.spec.ts tests/runtime-witness.spec.ts tests/dispatch-recovery.spec.ts tests/provisioning.spec.ts",
+      "scope": "intermediate",
+      "log": "/tmp/dsh-dispatch-focused-v2.log",
+      "exitFile": "/tmp/dsh-dispatch-focused-v2.exit",
+      "exitCode": 0,
+      "sha256": "b3a1d78ed6395ed8d93cf2a1fa760dae8831ef9bcac20190ed74fc1d31715708"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/dispatch-recovery.spec.ts",
+      "scope": "expected-negative",
+      "log": "/tmp/dsh-dispatch-negative.log",
+      "exitFile": "/tmp/dsh-dispatch-negative.exit",
+      "exitCode": 1,
+      "sha256": "c488b0ad947fea3543b3ed56155e9f3fd968907873169b93191df8bd310335b5"
+    },
+    {
+      "command": "python3 /tmp/dsh-witness-restart.py",
+      "scope": "initial-private-daemon-probe",
+      "log": "/tmp/dsh-witness-restart.log",
+      "exitFile": "/tmp/dsh-witness-restart.exit",
+      "exitCode": 0,
+      "sha256": "47fea2ed758e77962158c67d82df5d46d2e7a0977d547959f825bd7a60e254aa"
+    },
+    {
+      "command": "python3 scripts/isolation/daemon-witness-probe.py",
+      "scope": "final-private-daemon-probe",
+      "log": "/tmp/dsh-witness-restart-v2.log",
+      "exitFile": "/tmp/dsh-witness-restart-v2.exit",
+      "exitCode": 0,
+      "sha256": "df42d6bb42de8639254d975ff1d8d09188eac24427684feb1009036bdfb9151f"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "scope": "failed-existing-delivery-success-fixture",
+      "log": "/tmp/dsh-dispatch-check-v1.log",
+      "exitFile": "/tmp/dsh-dispatch-check-v1.exit",
+      "exitCode": 1,
+      "sha256": "b09ad7ef070b7b3b62959745115edc4d4c1685ea473992324088b11b3cd22be8"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=8 pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t 'persists a scheduled goal across Host reload'",
+      "scope": "unchanged-failing-case-rerun",
+      "log": "/tmp/dsh-dispatch-delivery-focus.log",
+      "exitFile": "/tmp/dsh-dispatch-delivery-focus.exit",
+      "exitCode": 0,
+      "sha256": "63dcd8694903202ff0a0df8db2d12c97f3e99eec7de64818d63935691de96144"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "scope": "full-check",
+      "log": "/tmp/dsh-dispatch-check-v2.log",
+      "exitFile": "/tmp/dsh-dispatch-check-v2.exit",
+      "exitCode": 0,
+      "sha256": "0168644967370a0211c7889390f1ec220c361ff6f79ae15d5aba32ef003a2aae"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation run typecheck && CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/ledger.spec.ts tests/runtime-witness.spec.ts tests/dispatch-recovery.spec.ts tests/service.spec.ts && CI=true pnpm lint",
+      "scope": "final-assertion-only-followup",
+      "log": "/tmp/dsh-dispatch-final-focused.log",
+      "exitFile": "/tmp/dsh-dispatch-final-focused.exit",
+      "exitCode": 0,
+      "sha256": "dfddebf5b3e69c76e6ecab057387204312c1ddfe86974d814e7c4f095d6a6796"
+    }
+  ],
+  "fullCheck": {
+    "exitCode": 0,
+    "plugins": 26,
+    "sharedPackages": 3,
+    "rootTestFiles": 258,
+    "rootTests": 3531,
+    "isolationTestFiles": 12,
+    "isolationTests": 45,
+    "packCount": 29,
+    "isolationPackFiles": [
+      "cordis.patch.yml",
+      "lib/cli.d.ts",
+      "lib/cli.d.ts.map",
+      "lib/cli.js",
+      "lib/cli.js.map",
+      "lib/config.d.ts",
+      "lib/config.d.ts.map",
+      "lib/config.js",
+      "lib/config.js.map",
+      "lib/index.d.ts",
+      "lib/index.d.ts.map",
+      "lib/index.js",
+      "lib/index.js.map",
+      "lib/ledger.d.ts",
+      "lib/ledger.d.ts.map",
+      "lib/ledger.js",
+      "lib/ledger.js.map",
+      "lib/runner.d.ts",
+      "lib/runner.d.ts.map",
+      "lib/runner.js",
+      "lib/runner.js.map",
+      "lib/runtime-witness.d.ts",
+      "lib/runtime-witness.d.ts.map",
+      "lib/runtime-witness.js",
+      "lib/runtime-witness.js.map",
+      "lib/service.d.ts",
+      "lib/service.d.ts.map",
+      "lib/service.js",
+      "lib/service.js.map",
+      "lib/tools.d.ts",
+      "lib/tools.d.ts.map",
+      "lib/tools.js",
+      "lib/tools.js.map",
+      "lib/types.d.ts",
+      "lib/types.d.ts.map",
+      "lib/types.js",
+      "lib/types.js.map",
+      "lib/version.d.ts",
+      "lib/version.d.ts.map",
+      "lib/version.js",
+      "lib/version.js.map",
+      "lib/workspace.d.ts",
+      "lib/workspace.d.ts.map",
+      "lib/workspace.js",
+      "lib/workspace.js.map",
+      "LICENSE",
+      "package.json",
+      "README.md",
+      "runtime/supervisor.mjs"
+    ]
+  },
+  "postFullCheck": {
+    "change": "service.spec.ts external-revocation assertion now requires dispatched unknown occupancy; additionally checks persisted result and recoverable membership. Production code unchanged.",
+    "validation": "final focused typecheck, 4 files/22 tests and whole-repository lint passed; terminal output was captured from exec tool chunks without rerunning the command."
+  },
+  "negative": {
+    "exitCode": 1,
+    "byteExactRestore": true,
+    "restoredHashes": {
+      "plugins/assistant-isolation/src/ledger.ts": "9bfeb250834cb0188894d93b198fdca19fbd380b9a2a45484d9242a749cf56cb",
+      "plugins/assistant-isolation/src/service.ts": "f7c295eff8b9d4b753b3eac8eac410fdaeb090d384f493fcccd759cb04782ce6"
+    }
+  },
+  "privateDaemonProbe": {
+    "root": "/tmp/dsh-witness-restart-ocqsjz7h",
+    "stages": [
+      {
+        "name": "both-original-processes-live",
+        "eligible": false
+      },
+      {
+        "name": "supervisor-reaped-daemon-live",
+        "eligible": false
+      },
+      {
+        "name": "daemon-offline",
+        "eligible": false
+      },
+      {
+        "name": "same-store-daemon-restart",
+        "eligible": true,
+        "old": {
+          "process": {
+            "bootId": "2c2f112c-5c26-4a78-ab47-01af6e55402d",
+            "pid": 3579605,
+            "startTicks": "1540243641"
+          },
+          "engineId": "5b4f0225-1210-4eec-a30c-45e3dd32203d",
+          "dockerPath": "/usr/bin/docker",
+          "socketPath": "/tmp/dsh-witness-restart-ocqsjz7h/docker.sock",
+          "pidFile": "/tmp/dsh-witness-restart-ocqsjz7h/docker.pid"
+        },
+        "current": {
+          "process": {
+            "bootId": "2c2f112c-5c26-4a78-ab47-01af6e55402d",
+            "pid": 3580771,
+            "startTicks": "1540243787"
+          },
+          "engineId": "5b4f0225-1210-4eec-a30c-45e3dd32203d",
+          "dockerPath": "/usr/bin/docker",
+          "socketPath": "/tmp/dsh-witness-restart-ocqsjz7h/docker.sock",
+          "pidFile": "/tmp/dsh-witness-restart-ocqsjz7h/docker.pid"
+        }
+      },
+      {
+        "name": "different-engine-id",
+        "eligible": false
+      },
+      {
+        "name": "real-volume-survives-restart-and-is-removed",
+        "passed": true
+      }
+    ],
+    "passed": true,
+    "processExitCodes": [
+      0,
+      0
+    ],
+    "scope": "isolated rootless daemon identity only; no worker cgroup enforcement or automatic quota release claim"
+  },
+  "systemdReadOnly": {
+    "observations": [
+      {
+        "command": [
+          "systemctl",
+          "show",
+          "docker.service",
+          "--property=MainPID,InvocationID,ActiveState,SubState,TriggeredBy,Triggers,Listen,ExecStart"
+        ],
+        "exitCode": 0,
+        "stdout": "MainPID=1639466\nExecStart={ path=/usr/bin/dockerd ; argv[]=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock ; ignore_errors=no ; start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }\nTriggers=\nTriggeredBy=docker.socket\nActiveState=active\nSubState=running\nInvocationID=5d6a96652301484db5022a36a6b7e009\n",
+        "stderr": ""
+      },
+      {
+        "command": [
+          "systemctl",
+          "show",
+          "docker.socket",
+          "--property=MainPID,InvocationID,ActiveState,SubState,TriggeredBy,Triggers,Listen,ExecStart"
+        ],
+        "exitCode": 0,
+        "stdout": "Listen=/run/docker.sock (Stream)\nTriggers=docker.service\nTriggeredBy=\nActiveState=active\nSubState=running\nInvocationID=f9d61bcbf668421085220b6bb04b3d1c\n",
+        "stderr": ""
+      },
+      {
+        "read": "/proc/1639466/cmdline",
+        "content": "/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock "
+      }
+    ],
+    "limitation": "unit activation chain is not direct kernel fd ownership evidence; no runtime release enabled"
+  },
+  "limitations": [
+    "Runtime witnesses are diagnostic-only; socket ownership and a proven end to old daemon requests still need an independent release protocol.",
+    "Unknown dispatched and legacy jobs retain capacity even after resource removal.",
+    "Rootless probe has no delegated cgroup guarantee and proves no worker isolation.",
+    "Full 18-package autonomy goal remains active: 3 verified, 7 implementing, 8 todo."
+  ],
+  "c2c": {
+    "task": "c2c_6671",
+    "canonicalRecords": [
+      {
+        "log": "/tmp/dsh-witness-build.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-witness-typecheck.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-witness-focused.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-dispatch-build.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-dispatch-focused-v2.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-dispatch-negative.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-witness-restart.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-witness-restart-v2.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-dispatch-check-v1.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-dispatch-delivery-focus.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-dispatch-check-v2.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      },
+      {
+        "log": "/tmp/dsh-dispatch-final-focused.log",
+        "exitCode": 0,
+        "stdout": "✓ 已记录执行摘要与输出",
+        "stderr": ""
+      }
+    ],
+    "supersededShortCommandLabels": 7,
+    "unsupportedJsonOptionAttempts": 7,
+    "chatgptWebReview": false,
+    "reason": "Required in-app browser is unavailable; no substitute external browser used."
+  },
+  "independentReview": {
+    "status": "PASS",
+    "reviewer": "/root/quota_verify",
+    "reviewedAt": "2026-09-07T13:47:14.317394+00:00",
+    "scope": "Dispatch-crash safety and diagnostic-only runtime witnesses. All 12 source hashes and terminal evidence reviewed. No automatic release acceptance.",
+    "postFullCheck": "The assertion-only service test correction is covered by final isolation typecheck, 4 files/22 tests and repository lint; production and package hashes remain covered by check-v2.",
+    "rootAcceptance": "Root independently recalculated all source/log hashes and exit files and accepts this slice. Full autonomy goal remains active."
+  }
+}

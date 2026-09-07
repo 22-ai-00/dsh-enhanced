@@ -24,8 +24,8 @@ describe('IsolationLedger', () => {
     expect((database.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode).toBe('wal')
     expect((statSync(file).mode & 0o777)).toBe(0o600)
     expect((statSync(join(file, '..')).mode & 0o777)).toBe(0o700)
-    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('2')
-    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
+    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('3')
+    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3)
     database.close()
   })
 
@@ -71,10 +71,9 @@ describe('IsolationLedger', () => {
     ledger.syncGrants([grant()], old); const job = ledger.prepare({ ...input(), authority: old }).job
     expect(error(() => ledger.start(job.id, job.version, { ownerId: 'first-host', fence: old.fence + 1 })).code).toBe('unauthorized')
     const running = ledger.start(job.id, job.version, old); const stranded = ledger.settle(running.id, running.version, unknown(running.id), old)
-    const cleaned = ledger.settle(stranded.id, stranded.version, unknown(stranded.id, true), old)
-    expect(cleaned.result?.quiescent).toBe(true)
-    expect(ledger.get(stranded.id)?.result).toMatchObject({ status: 'unknown', quiescent: true })
-    expect(ledger.recoverable()).toHaveLength(0)
+    expect(error(() => ledger.settle(stranded.id, stranded.version, unknown(stranded.id, true), old)).code).toBe('invalid-state')
+    expect(ledger.get(stranded.id)?.result).toMatchObject({ status: 'unknown', quiescent: false })
+    expect(ledger.recoverable()).toHaveLength(1)
     ledger.releaseController(old); const fresh = ledger.claimController('second-host', 100)
     expect(error(() => ledger.prepare({ ...input('later'), authority: old })).code).toBe('unauthorized')
     expect(ledger.hasController(fresh)).toBe(true)
@@ -137,14 +136,65 @@ describe('IsolationLedger', () => {
     expect(ledger.get('legacy')).toMatchObject({ reservedMemoryMiB: 0, reservedWorkspaceInodes: 0, status: 'prepared' })
     expect(error(() => ledger.prepare({ ...input('new'), resourceReservation: reservation() })).code).toBe('unauthorized')
     const legacy = ledger.get('legacy')!
-    ledger.settle(legacy.id, legacy.version, unknown(legacy.id, true))
-    expect(ledger.prepare({ ...input('new'), resourceReservation: reservation() }).created).toBe(true)
+    expect(legacy.dispatchAttempted).toBe(true)
+    expect(error(() => ledger.settle(legacy.id, legacy.version, unknown(legacy.id, true))).code).toBe('invalid-state')
+    ledger.settle(legacy.id, legacy.version, unknown(legacy.id))
+    expect(error(() => ledger.prepare({ ...input('new'), resourceReservation: reservation() })).code).toBe('unauthorized')
     ledger.close()
     const reopened = new DatabaseSync(file)
-    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(2)
-    expect((reopened.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('2')
+    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(3)
+    expect((reopened.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('3')
     expect((reopened.prepare("SELECT COUNT(*) AS count FROM isolation_jobs WHERE id='legacy'").get() as { count: number }).count).toBe(1)
     reopened.close()
+  })
+
+  it('persists spawn intent before start, fences stale intent, and holds every ambiguous outcome', () => {
+    const file = path()
+    const ledger = new IsolationLedger(file, { now: clock })
+    const authority = ledger.claimController('host', 100)
+    ledger.syncGrants([grant()], authority)
+    const prepared = ledger.prepare({ ...input(), resourceReservation: reservation(), authority }).job
+    expect(prepared.dispatchAttempted).toBe(false)
+    expect(error(() => ledger.markDispatched(prepared.id, prepared.version, { ...authority, fence: authority.fence + 1 })).code).toBe('unauthorized')
+    const dispatched = ledger.markDispatched(prepared.id, prepared.version, authority)
+    expect(dispatched).toMatchObject({ status: 'prepared', dispatchAttempted: true, version: prepared.version + 1 })
+    expect(error(() => ledger.markDispatched(prepared.id, prepared.version, authority)).code).toBe('conflict')
+    expect(error(() => ledger.markDispatched(dispatched.id, dispatched.version, authority)).code).toBe('invalid-state')
+    ledger.close()
+    const reopened = new IsolationLedger(file, { now: clock })
+    try {
+      expect(reopened.get(prepared.id)?.dispatchAttempted).toBe(true)
+      const failed = reopened.settle(dispatched.id, dispatched.version, { ...unknown(dispatched.id), reason: 'supervisor-exited:1' }, authority)
+      expect(error(() => reopened.settle(failed.id, failed.version, { ...failed.result!, quiescent: true }, authority)).code).toBe('invalid-state')
+      expect(error(() => reopened.prepare({ ...input('blocked'), resourceReservation: reservation() })).code).toBe('unauthorized')
+      const db = new DatabaseSync(file)
+      try { expect(db.prepare("SELECT action FROM isolation_audit WHERE job_id=? ORDER BY sequence").all(prepared.id).map(row => row.action)).toEqual(['job-prepared', 'supervisor-spawn-intent', 'job-settled']) }
+      finally { db.close() }
+    } finally { reopened.close() }
+  })
+
+  it('migrates v2 jobs conservatively and preserves private evidence outside the public result', () => {
+    const file = path()
+    let ledger = new IsolationLedger(file, { now: clock })
+    ledger.syncGrants([grant()])
+    const legacy = ledger.prepare({ ...input('v2'), resourceReservation: reservation() }).job
+    ledger.close()
+    const db = new DatabaseSync(file)
+    db.exec("ALTER TABLE isolation_jobs DROP COLUMN creation_witness_json; ALTER TABLE isolation_jobs DROP COLUMN dispatch_attempted; PRAGMA user_version=2; UPDATE schema_meta SET value='2' WHERE key='schema-version';")
+    db.close()
+    ledger = new IsolationLedger(file, { now: clock })
+    try {
+      expect(ledger.get(legacy.id)).toMatchObject({ dispatchAttempted: true, reservedMemoryMiB: 64, reservedWorkspaceInodes: 100 })
+      const process = { bootId: '00000000-0000-0000-0000-000000000000', pid: 1, startTicks: '1' }
+      const witness = { daemon: { process, engineId: 'engine', dockerPath: '/usr/bin/docker', socketPath: '/run/docker.sock', pidFile: '/run/docker.pid' }, supervisor: { ...process, pid: 2 } }
+      const settled = ledger.settle(legacy.id, legacy.version, unknown(legacy.id), undefined, witness)
+      expect(settled.creationWitness).toEqual(witness)
+      expect(settled.result).not.toHaveProperty('creationWitness')
+      expect(error(() => ledger.settle(settled.id, settled.version, unknown(settled.id, true))).code).toBe('invalid-state')
+      ledger.close()
+      ledger = new IsolationLedger(file, { now: clock })
+      expect(ledger.get(legacy.id)?.creationWitness).toEqual(witness)
+    } finally { ledger.close() }
   })
 
 })
