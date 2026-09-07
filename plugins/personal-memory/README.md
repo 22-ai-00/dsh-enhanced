@@ -60,9 +60,29 @@ dsh --profile web --dump-config
 
 内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”；XML 元字符和模板花括号在预算计算前转义。原生 Host 持久保存发生变化的新快照，用它取代先前快照的有效语义；撤回、过期或权限撤销会影响下一步的当前快照，**不会删除 Session 中已经提供过的历史快照、工具结果或模型输出**。因此不能把本功能当作会话历史的数据擦除或跨 owner 会话迁移保护。没有 `systemPrompt` 的程序化集成保留旧的 `agent/session-start` 一次性冻结快照，不能承诺逐步更新。`memory_search`、`memory_search_confirmed` 与 `memory_manage` 的模型可见结果也使用有界、转义的独立 framing。缺少绝对 cwd、agent preset 或已验证 owner 时不搜索、不提案、不贡献新快照，也不会退化到共享域。
 
+## 适用条件、反例与事实分歧
+
+`memory_manage` 的 entry 可带有界 `knowledge`，例如：
+
+```json
+{
+  "applicability": ["仅适用于 schema v2，且迁移日志已核验"],
+  "counterexamples": ["schema v1 没有迁移日志；曾因照搬此流程恢复失败"],
+  "claim": { "key": "atlas.recovery.mode", "value": "journal" }
+}
+```
+
+条件和反例各最多 4 条，每条 1–256 UTF-8 字节；claim key 是 1–128 字符的小写 ASCII 标识符（字母、数字、`.`、`_`、`:`、`-`），value 最多 256 UTF-8 字节。内容与完整 knowledge 共用 `maxContentBytes`。完整字段进入审批 diff、幂等指纹、版本 CAS 和保存结果；修改条件或反例需要新的提案，不能复用原审批。条件不同的同文经验可分别保存，不会因正文相同而被去重。
+
+检索也索引条件、反例和 claim，所以当前任务能找到相关的失败经验。快照和工具结果保留这些原文及 provenance；快照明确标记适用性尚未核验。关键词命中只说明相关，不证明条件成立，也不会自动把某条经验判为事实或赋予新权限。
+
+每次检索与快照的排名、状态和冲突伙伴使用同一 SQLite 读视图，不阻塞其他 WAL writer；并发修改会在下一次读取体现。同一可见 claim key 有不同记录值时，快照会共同呈现来源和条件；预算无法容纳所有相关记录时，只给出分歧提示与有界记录引用，不留下看似无争议的单一正文。显式搜索的 `disagreement` 包含 key、记录数及最多 4 个记录 ID，在 query/top-K 截断前计算。自动补充的分歧信息仅来自当前 owner/scope 内有效、非敏感的记录；撤回、到期和身份变更会在下次读取生效。相同 key 的不同值可能源于不同适用条件，应核对当前系统和原始证据；本功能不解析任意自然语言矛盾，也不自行决定哪个值正确。
+
+带 knowledge 的导出文档使用版本 2，导入仍须逐条批准；没有 knowledge 的导出继续使用版本 1，当前版本同时接受两种格式。旧 reader 会拒绝版本 2，避免悄悄丢掉条件后复用经验。升级到数据库 schema 5 前应停止旧 Host writer；迁移只新增 nullable knowledge 列，保留旧记录、pending 提案和既有回执指纹，不能让旧版本继续写入新库。
+
 ## 数据与一致性
 
-SQLite 使用 WAL、`busy_timeout`、外键、FULL synchronous 和前向 schema 版本；目录为 `0700`，数据库为 `0600`。记录包含 stable id、内容哈希、provenance、trust、confidence、sensitivity、TTL、supersedes 和 version。replace/remove 在批准后重新读取 target version 并以 CAS 提交；审批与内存位于两个数据库，若进程恰好在 policy 批准后退出，可用原决定安全重放。并发变化会把提案标为 `conflicted`，不会覆盖新值。
+SQLite 使用 WAL、`busy_timeout`、外键、FULL synchronous 和前向 schema 版本；目录为 `0700`，数据库为 `0600`。记录包含 stable id、内容哈希、provenance、trust、confidence、sensitivity、TTL、supersedes、可选 knowledge 和 version。replace/remove 在批准后重新读取 target version 并以 CAS 提交；审批与内存位于两个数据库，若进程恰好在 policy 批准后退出，可用原决定安全重放。并发变化会把提案标为 `conflicted`，不会覆盖新值。
 
 创建提案时先在 Memory 数据库持久化 creation intent，再调用 Policy 原子创建 proposal + dispatch，最后在
 同一个本地事务 attach Policy ID 并删除 intent。任一步崩溃后，reconcile 都能从 intent 自动续做，不依赖

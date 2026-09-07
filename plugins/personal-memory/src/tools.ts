@@ -1,7 +1,23 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { PersonalMemoryService } from './service.js'
-import type { MemoryEntryInput, MemoryIdentity, MemoryMutation } from './types.js'
+import type { MemoryEntryInput, MemoryIdentity, MemoryKnowledge, MemoryMutation } from './types.js'
+
+const KNOWLEDGE_SCHEMA = {
+  type: 'object', additionalProperties: false, properties: {
+    applicability: { type: 'array', items: { type: 'string' } },
+    counterexamples: { type: 'array', items: { type: 'string' } },
+    claim: { type: 'object', additionalProperties: false, properties: { key: { type: 'string', required: true }, value: { type: 'string', required: true } } },
+  },
+} as const
+
+function knowledgeOutput(knowledge: MemoryKnowledge) {
+  return {
+    ...(knowledge.applicability === undefined ? {} : { applicability: [...knowledge.applicability] }),
+    ...(knowledge.counterexamples === undefined ? {} : { counterexamples: [...knowledge.counterexamples] }),
+    ...(knowledge.claim === undefined ? {} : { claim: { ...knowledge.claim } }),
+  }
+}
 
 const SEARCH_OUTPUT = {
   type: 'object',
@@ -23,6 +39,9 @@ const SEARCH_OUTPUT = {
           confidence: { type: 'number', required: true },
           score: { type: 'number', required: true },
           version: { type: 'integer', required: true },
+          knowledge: KNOWLEDGE_SCHEMA,
+          disagreement: { type: 'object', additionalProperties: false, properties: { key: { type: 'string', required: true }, recordCount: { type: 'integer', required: true }, recordIds: { type: 'array', required: true, items: { type: 'string' } } } },
+          provenance: { type: 'object', additionalProperties: false, properties: { source: { type: 'string', required: true }, observedAt: { type: 'integer', required: true }, uri: { type: 'string' } } },
         },
       },
     },
@@ -80,6 +99,7 @@ function requireEntry(entry: {
   uri?: string
   expires_at?: number
   supersedes?: string
+  knowledge?: MemoryKnowledge
 } | undefined): MemoryEntryInput {
   if (entry === undefined) throw new Error('memory_manage add/replace requires entry')
   return {
@@ -95,6 +115,7 @@ function requireEntry(entry: {
     },
     ...(entry.expires_at === undefined ? {} : { expiresAt: entry.expires_at }),
     ...(entry.supersedes === undefined ? {} : { supersedes: entry.supersedes }),
+    ...(entry.knowledge === undefined ? {} : { knowledge: entry.knowledge }),
   }
 }
 
@@ -108,7 +129,7 @@ function requireTarget(id: string | undefined, expectedVersion: number | undefin
 export function registerMemoryTools(ctx: Context, service: PersonalMemoryService): void {
   ctx.tools.register(defineTool({
     name: 'memory_search',
-    description: 'Search short, durable personal memories visible to the current agent and workspace.',
+    description: 'Search short, durable personal memories visible to the current agent and workspace. Check recorded applicability, counterexamples and any claim disagreement against current evidence before applying a memory.',
     parameters: {
       query: { type: 'string', required: true },
       limit: { type: 'integer' },
@@ -124,7 +145,7 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
         authorizationIdempotencyKey: `memory-search:${String(exec.rootCallId)}:${String(exec.callId)}`,
       })
       return {
-        hits: hits.map(({ record, score }) => ({
+        hits: hits.map(({ record, score, disagreement }) => ({
           id: record.id,
           owner: record.owner,
           scope: record.scope,
@@ -134,6 +155,9 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
           confidence: record.confidence,
           score,
           version: record.version,
+          ...(record.knowledge === undefined ? {} : { knowledge: knowledgeOutput(record.knowledge) }),
+          provenance: record.provenance,
+          ...(disagreement === undefined ? {} : { disagreement: { ...disagreement, recordIds: [...disagreement.recordIds] } }),
         })),
       }
     },
@@ -160,7 +184,7 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
         authorizationIdempotencyKey: `memory-search-confirmed:${String(exec.rootCallId)}:${String(exec.callId)}`,
       })
       return {
-        hits: hits.map(({ record, score }) => ({
+        hits: hits.map(({ record, score, disagreement }) => ({
           id: record.id,
           owner: record.owner,
           scope: record.scope,
@@ -170,6 +194,9 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
           confidence: record.confidence,
           score,
           version: record.version,
+          ...(record.knowledge === undefined ? {} : { knowledge: knowledgeOutput(record.knowledge) }),
+          provenance: record.provenance,
+          ...(disagreement === undefined ? {} : { disagreement: { ...disagreement, recordIds: [...disagreement.recordIds] } }),
         })),
       }
     },
@@ -201,6 +228,7 @@ export function registerMemoryTools(ctx: Context, service: PersonalMemoryService
           uri: { type: 'string' },
           expires_at: { type: 'integer' },
           supersedes: { type: 'string' },
+          knowledge: KNOWLEDGE_SCHEMA,
         },
       },
     },

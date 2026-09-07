@@ -228,3 +228,15 @@
 - 正向与反向测试：四个相关测试文件 270 项通过。仅将构建产物中 Goal context 的读取替换为 `undefined` 后，两项原生回归均实际失败，得到泛化清单而非 citrus 经验；随后恢复产物原字节。失败记录保留，不以跳过其他测试的反向实验冒充全套成功。
 - 工程验收记录与源码/日志 hash 保存在 [Goal Memory 证据](evidence/goal-task-memory-2026-09-07.json)。首轮全量检查在测试夹具的严格可选属性类型检查失败，已修复。最终 `CI=true pnpm check` 退出码 0：25 插件/3 共享库、lint 无警告、全量 typecheck、根 240 文件/3,400 测试、各包测试（Delivery 686、Goals 74、Memory 98）、clean build 与全部 28 dry-run pack 通过；已检查两个受影响插件的打包文件列表。另清空全部 28 个包的生成 lib 后执行 `CI=true pnpm build`，退出码 0；重建的 Memory service 与通过运行时测试的产物 hash 相同。独立 verifier 只读审查 PASS，主代理核对实际命令、退出码和源码后接受此切片。独立安装范围按 Goals 实际包版本 `0.1.0` 校正为可选 peer `>=0.1.0 <0.2.0`，冻结锁文件安装通过；没有发布包或启用真实用户 profile。
 - 完整工作包 07 仍为实现中。仍缺适用条件/反例的真实检索决策、语义冲突处理、保留原始引用的工具证据压缩、恢复时旧知识重新验证，以及同模型/同预算的实测决策收益。有效快照刷新也不等于删除历史 Session 内容。其他工作包状态不变，完整 18 项目标继续。
+
+
+## 07 第三切片：有条件的经验与分歧证据（2026-09-07）
+
+- 基线 `15f32d6` 已能按 goal/step/query 召回；本切片在同一 Memory 库增加有界 knowledge（适用条件、反例、显式 claim key/value），并打通 `memory_manage` → 完整审批 diff/幂等指纹 → 版本 CAS → 保存/搜索/快照/导出/导入。条件改变不复用原审批，同文不同条件不被正文去重吞掉。自然语言条件只作为有来源的待核对笔记，不靠词法匹配判真。
+- 元数据进入检索 token 和实际原生上下文；模型可在当前步骤找到相关反例，并看到 owner/scope、原始 provenance、适用条件和未核验标记。同一显式 claim key 的不同值在查询/top-K 前被识别，完整组能装下时一起呈现；装不下时给有界分歧提示和原记录 ID，不仅留下某一侧正文。普通搜索和 confirmed 搜索也返回有界 disagreement 信息，自动关联只来自当前有效 scope 内非敏感记录。
+- 一致性修复：查询命中与最终冲突汇总共用 deferred SQLite read savepoint。跨连接回归在首次排名后立即从另一连接撤回首条记录，本次仍看到完整旧组、下一次看到新态；移除外层 read wrapper 的反向实验实际返回被撤回的单侧正文而失败。该读视图不等于历史擦除，也不声称当前读取能看到开始之后的所有提交。
+- 性能修复：同一 claim 组按原有精确 key 使用 Set 去重，避免反复序列化已有记录；组内排序与分歧判断保持不变。1000 条同 key 的合成记录、每版 3 次快照，本机均值从 5237.308 ms 降至 106.697 ms，每次均保留完整记录数与“不选择单侧值”提示。证据文件保留脚本和原始采样；该结果只描述本地快照耗时，不代表模型决策收益或生产延迟承诺。
+- schema 4→5 只增加可空 knowledge 列，旧 content hash、proposal/intent/audit JSON 和回执不改写；实际迁移回归保持 pending 审批幂等与旧 mutation 重放，随后可继续批准。无 knowledge 的导出保留版本 1，有 knowledge 的导出使用版本 2 防止旧 reader 悄悄丢条件；两种文档均经实际提案与批准完成导入。升级前需停止旧 Host writer。
+- 定向证据：Memory 8 文件/119 测试通过，原生 AgentLoop 的三个 Goal 回合场景通过；它们检查真实 adapter 请求里的反例、来源和 snapshotLimit=1 下的分歧提示。关闭 conflict grouping 后原生冲突场景实际失败（另外两项通过）；关闭跨连接读视图后单独回归实际失败。所有变体均 finally 恢复原字节，失败历史保留。完整命令、源码/日志 hash 和最终全量检查见 [Memory knowledge 证据](evidence/memory-knowledge-2026-09-07.json)。
+- 独立审查已促成对 promotion compensation SQL 参数与自动关联敏感记录边界的修复。首轮全量检查在测试 schema 访问的严格类型检查失败，修正后第二轮通过；完成 Set 优化后再次清空全部 28 个包的 lib，最终 `CI=true pnpm check`（check-v3）退出码 0：零 lint 警告、类型检查、主测试 240 文件/3422 项、全部递归包测试、构建和 28 个 dry-run pack 均通过。已核对 Memory 打包清单含新增 knowledge 实现与声明、README、LICENSE 和 patch，未包含测试或数据库。
+- 工作包 07 仍为实现中：显式 claim 分歧保护不等于任意自然语言矛盾识别，条件仍须结合当前系统验证；语义工具证据压缩、恢复时知识重新核验、同模型/同预算的真实决策收益和独立留出仍未完成。下一步沿已有 Evaluation benchmark 补真实 Memory variant/开发任务与 Codex cache/reasoning usage 计量，不能用 persona 替身或单次成功代替收益对照。18 个工作包的完整目标和状态保持不变。

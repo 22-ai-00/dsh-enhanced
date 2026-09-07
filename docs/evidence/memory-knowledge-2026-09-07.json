@@ -1,0 +1,283 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-07T09:11:45.279922+00:00",
+  "baseCommit": "15f32d64d927e0099ff6dcea7cafb10a53a96ec9",
+  "workPackage": "07",
+  "scope": "Approved knowledge notes, explicit claim disagreement and consistent task memory reads; engineering behavior, not measured model gains",
+  "sourceSha256": {
+    "plugins/assistant-delivery/tests/agent-runtime.spec.ts": "a9b2050bcbdfda4b89ef6fd27a92ddc94d2b5a4673d66f9a04f8b5e8342c9a15",
+    "plugins/personal-memory/src/service.ts": "66b70a1a01f7a6a814c60d60f4f8a3c5bf69079366e05277651f535864730c2b",
+    "plugins/personal-memory/src/sqlite.ts": "b4a0876770f21bdd74f8b17860d8d2573b4eb050c5ba0631d514657a3ed973bc",
+    "plugins/personal-memory/src/store.ts": "4aafe8e34216922384b48a45192cdfaa238d3b27733a97a03c4ae8293fb9fff8",
+    "plugins/personal-memory/src/tools.ts": "6627c379c4793aa7a66ed9b1edef810c0541357be54cbfe628ade6422453eab4",
+    "plugins/personal-memory/src/types.ts": "b35559aaf71861cbc4a1a7402da5bfee8148810e60abb4b233a57487a25d7ee1",
+    "plugins/personal-memory/tests/proposals.spec.ts": "c8bffb0d2b0a55308b2e8cade35daf6560f41e8a6f40e03d7a9fa4dc579dc8fb",
+    "plugins/personal-memory/tests/retrieval.spec.ts": "3f30e9debf65ac74dfda99c332e2cd5b2d9f2c5053a185e1571ccc24dc64e60d",
+    "plugins/personal-memory/tests/service.spec.ts": "5470b2386217918564fb289a20baadeba878818ba347ea00a79e8a86e9c9e44c",
+    "plugins/personal-memory/tests/store.spec.ts": "82a3a5514c5a2007153aa4e8019ec3c300e574a4f8853982ea32d9289068535e",
+    "plugins/personal-memory/tests/tools.spec.ts": "6211fd74e440b159608feda4eb27cae7ba7932a8bc6523759d0126c9ccd8f127",
+    "plugins/personal-memory/src/knowledge.ts": "d481c80fdcc8013f3b5401a98550891dcb5ec329df484d4e09151566421512d6"
+  },
+  "runtime": {
+    "dsh": "0.1.2-rc.1",
+    "node": "v24.7.0",
+    "model": "deterministic mock adapter"
+  },
+  "contracts": {
+    "databaseSchema": 5,
+    "legacyExportVersion": 1,
+    "knowledgeExportVersion": 2,
+    "migration": "Adds nullable knowledge_json without rewriting legacy records, approval/intent/audit JSON or hashes; old writer must stop before upgrade.",
+    "knowledge": "Bounded attributed applicability/counterexamples and explicit key/value; no lexical proof of applicability.",
+    "disagreement": "Group differing explicit claim values from current owner/scope private active records before query/top-K; show complete group or bounded marker without unilateral body.",
+    "readView": "Deferred read savepoint shares hits, tokens, standing records and partners; peer WAL writer can commit and next read sees its result."
+  },
+  "directedTests": {
+    "memoryPassed": 119,
+    "memoryFiles": 8,
+    "memoryRun": "tests-v5",
+    "nativePassed": 3,
+    "nativeUnselected": 218,
+    "nativeRun": "native-v1",
+    "phaseLimit": "The native directed run precedes the later privacy/read-view changes. Final full check covers the final native cases."
+  },
+  "controlledMutations": [
+    {
+      "run": "red-v2",
+      "file": "plugins/personal-memory/lib/store.js",
+      "before": "return claims;",
+      "after": "return new Map();",
+      "expectedFailed": 1,
+      "passed": 2,
+      "unselected": 218,
+      "observed": "Native Goal step received unilateral Orchid body instead of conflict marker.",
+      "phaseLimit": "Taken before adding read-view wrapper; restore hash binds the compiled file, not src/store.ts."
+    },
+    {
+      "run": "read-red-v1",
+      "file": "plugins/personal-memory/src/store.ts",
+      "before": "return this.#readSnapshot(() => this.#snapshot(request))",
+      "after": "return this.#snapshot(request)",
+      "expectedFailed": 1,
+      "unselected": 18,
+      "observed": "Cross-connection remove caused old Atlas hit to appear without disagreement; original source restored exactly.",
+      "phaseLimit": "Taken before the per-claim Set optimization; restored hash binds the source at that phase."
+    }
+  ],
+  "executions": [
+    {
+      "name": "build-v1",
+      "command": "CI=true pnpm --filter @dsh-enhanced/personal-memory build",
+      "exitCode": 2,
+      "localLog": "/tmp/dsh-memory-knowledge-build-v1.log",
+      "logSha256": "ebe7e8fa296bd654cdd8f1a55c4dda002da720f8a6f9d31ec612fd1d6c9446ab"
+    },
+    {
+      "name": "build-v2",
+      "command": "CI=true pnpm --filter @dsh-enhanced/personal-memory build",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-build-v2.log",
+      "logSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "name": "build-v3",
+      "command": "CI=true pnpm --filter @dsh-enhanced/personal-memory build",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-build-v3.log",
+      "logSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "name": "build-v4",
+      "command": "CI=true pnpm --filter @dsh-enhanced/personal-memory build",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-build-v4.log",
+      "logSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "name": "build-v5",
+      "command": "CI=true pnpm --filter @dsh-enhanced/personal-memory build",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-build-v5.log",
+      "logSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "name": "tests-v1",
+      "command": "CI=true pnpm exec vitest run plugins/personal-memory/tests",
+      "exitCode": 1,
+      "localLog": "/tmp/dsh-memory-knowledge-tests-v1.log",
+      "logSha256": "13d7e1d582a9f7258287e1106a02851cf8b00926dd064646136cd3f1c65435ad"
+    },
+    {
+      "name": "tests-v2",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/personal-memory/tests",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-tests-v2.log",
+      "logSha256": "e8a1f9f7a09bc5adf05ad8cd20c75d1edd56402d3c3e2ffc6f8eecdf9d158c66"
+    },
+    {
+      "name": "tests-v3",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/personal-memory/tests",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-tests-v3.log",
+      "logSha256": "b64bcfa74cddeecf478919c415ddea2e5b8dba5edcca2630cd6a876c84dedf96"
+    },
+    {
+      "name": "tests-v4",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/personal-memory/tests",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-tests-v4.log",
+      "logSha256": "ea5e65457f4c358792792adb0df95f5b982f40b74247b54ab06abb76758da392"
+    },
+    {
+      "name": "native-v1",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-delivery/tests/agent-runtime.spec.ts -t 'native Goal rounds refresh task memory'",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-native-v1.log",
+      "logSha256": "a6c39996dbd2005d6f3d66693b410978ae9506e5756b7ceeac16f367dbe08187"
+    },
+    {
+      "name": "red-v1",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-delivery/tests/agent-runtime.spec.ts -t 'native Goal rounds refresh task memory'",
+      "exitCode": 1,
+      "localLog": "/tmp/dsh-memory-knowledge-red-v1.log",
+      "logSha256": "4af66e03ce91f41c6f1ddc82b87791d63f1b3c61ba5bb307d5d79c40ec9d009c",
+      "controlledMutation": "Replace return claims with return new Map in compiled lib/store.js",
+      "restoredSha256": "5657142ac2c0cf284715728a67f95b0d8850e618caac073a671da279a0edf067"
+    },
+    {
+      "name": "red-v2",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-delivery/tests/agent-runtime.spec.ts -t 'native Goal rounds refresh task memory'",
+      "exitCode": 1,
+      "localLog": "/tmp/dsh-memory-knowledge-red-v2.log",
+      "logSha256": "347cb3e27c6707a5e75094c4578688b09f9417fe96674c99ca2a96f2440db0e6",
+      "controlledMutation": "Replace return claims with return new Map in compiled lib/store.js",
+      "restoredSha256": "b1d39b3acf211d6fe700d04305a37989446199e1cd04b85c418bf3bbe0504c1c"
+    },
+    {
+      "name": "read-red-v1",
+      "command": "CI=true pnpm exec vitest run plugins/personal-memory/tests/retrieval.spec.ts -t 'uses one read view'",
+      "exitCode": 1,
+      "localLog": "/tmp/dsh-memory-knowledge-read-red-v1.log",
+      "logSha256": "59e9eea0874b8f93827ccf0d915de4a3a41c9b16b72ceae3e093b53b86f6a623",
+      "controlledMutation": "Disable snapshot outer read wrapper in src/store.ts",
+      "restoredSha256": "3b5677f4640e4486f81af264f5826d9c1e56e4cc767a20af6d5289c2dd2f9ebb"
+    },
+    {
+      "name": "check-v1",
+      "command": "CI=true pnpm check",
+      "exitCode": 2,
+      "localLog": "/tmp/dsh-memory-knowledge-check-v1.log",
+      "logSha256": "e716ce64fea1f014f116339ee7d8ced173d09d94cc480ca98f9460a72ab3de77"
+    },
+    {
+      "name": "check-v2",
+      "command": "CI=true pnpm check",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-check-v2.log",
+      "logSha256": "c40360b3a9cadfeb300077422aec0e6fa536e343f14e30d2d12369d24550582b"
+    },
+    {
+      "name": "perf-before",
+      "command": "node /tmp/dsh-memory-knowledge-perf.mjs",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-perf-before.log",
+      "logSha256": "7630f0f04d34a4313ecd57deed02fd2554b0b6f6940bc5b7ad6677f260a941b5"
+    },
+    {
+      "name": "build-v6",
+      "command": "CI=true pnpm --filter @dsh-enhanced/personal-memory build",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-build-v6.log",
+      "logSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "name": "perf-after",
+      "command": "node /tmp/dsh-memory-knowledge-perf.mjs",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-perf-after.log",
+      "logSha256": "5e30da623ac7ed78093fdc967a5a8fb5799eb5861c62dc2dadf279b1316c3f72"
+    },
+    {
+      "name": "tests-v5",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/personal-memory/tests",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-tests-v5.log",
+      "logSha256": "8d6feca6f84d9aad4bfb961c4a264ab8fbec660c4a735c2b334ad9626f2336e4"
+    },
+    {
+      "name": "check-v3",
+      "command": "CI=true pnpm check",
+      "exitCode": 0,
+      "localLog": "/tmp/dsh-memory-knowledge-check-v3.log",
+      "logSha256": "d142ade8a3cf39b5a9c6395212eedd7bc8e63da5cff64920e1c1b03054227ae5"
+    }
+  ],
+  "limitations": [
+    "No real-model gain, hidden holdout, production browser approval or cross-day result claimed.",
+    "Explicit key/value disagreement is not general semantic contradiction detection.",
+    "Applicability notes require current evidence; neither keyword hits nor user confirmation prove present applicability.",
+    "Snapshot budget may omit record bodies and some references, reported explicitly; no automatic conflict resolution.",
+    "Read-view consistency does not erase historical snapshots or instantly observe writes after the read begins.",
+    "Semantic tool-result compression and same-budget real model comparisons remain outstanding."
+  ],
+  "c2c": {
+    "taskId": "c2c_8b07",
+    "kind": "local execution evidence",
+    "chatgptReview": false,
+    "reason": "Required built-in browser unavailable."
+  },
+  "fullCheck": {
+    "status": "passed",
+    "run": "check-v3",
+    "command": "CI=true pnpm check",
+    "exitCode": 0,
+    "localLog": "/tmp/dsh-memory-knowledge-check-v3.log",
+    "logSha256": "d142ade8a3cf39b5a9c6395212eedd7bc8e63da5cff64920e1c1b03054227ae5",
+    "preparation": "Removed all 28 generated lib directories after checking no symlinks or tracked files.",
+    "manifest": {
+      "plugins": 25,
+      "sharedPackages": 3
+    },
+    "lint": "zero warnings",
+    "typecheck": "passed",
+    "rootTestFiles": 240,
+    "rootTestsPassed": 3422,
+    "deliveryTestsPassed": 687,
+    "memoryTestsPassed": 119,
+    "dryRunPacks": 28,
+    "memoryPackInspection": "Includes lib/knowledge.js and .d.ts, README, LICENSE, cordis.patch.yml; no tests or SQLite data."
+  },
+  "performance": {
+    "scope": "Local synthetic snapshot latency only, not model quality or a production service-level guarantee.",
+    "records": 1000,
+    "samplesPerVariant": 3,
+    "before": {
+      "records": 1000,
+      "samplesMs": [
+        5082.464,
+        5288.852,
+        5340.608
+      ],
+      "meanMs": 5237.308
+    },
+    "after": {
+      "records": 1000,
+      "samplesMs": [
+        113.711,
+        107.49,
+        98.891
+      ],
+      "meanMs": 106.69733333333333
+    },
+    "change": "Per-claim Set uses the exact same dedup key once per record instead of repeatedly serializing earlier group members. Final ID sorting remains unchanged.",
+    "assertion": "All samples retained the 1000-record disagreement marker and selected no unilateral value.",
+    "script": "import { MemoryStore } from '<workspace>/plugins/personal-memory/lib/store.js'\nconst memory = new MemoryStore({ path: ':memory:', now: () => 100_000 })\nconst namespace = { mode: 'delivery', principalDigest: 'a'.repeat(64), principalRecordId: 'perf-owner', principalVersion: 1 }\nconst identity = { owner: 'user', scope: 'user-global' }\nfor (let i = 0; i < 1000; i++) memory.applyApprovedMutation({ op: 'add', namespace, identity, idempotencyKey: `record-${i}`, entry: {\n  kind: 'experience', content: `Atlas recovery procedure ${i}`, sensitivity: 'private', trust: 'user-confirmed', confidence: 1,\n  provenance: { source: 'synthetic-performance-fixture', observedAt: 1 },\n  knowledge: { applicability: ['Applicable only after inspecting the current migration state.'], counterexamples: ['A prior deployment failed when the migration state was assumed.'], claim: { key: 'atlas.recovery.mode', value: `mode-${i}` } },\n} })\nconst samples = []\nfor (let i = 0; i < 3; i++) {\n  const started = performance.now()\n  const snapshot = memory.snapshot({ context: { namespace, workspace: '/work/atlas', agentPreset: 'primary' }, query: 'Atlas recovery', limit: 1, maxBytes: 2048, maxTokens: 512 })\n  if (!snapshot.text.includes('1000 records; bodies omitted by budget; no value selected.')) throw new Error('lost disagreement')\n  samples.push(Number((performance.now() - started).toFixed(3)))\n}\nconsole.log(JSON.stringify({ records: 1000, samplesMs: samples, meanMs: samples.reduce((a, b) => a + b) / samples.length }))\nmemory.close()\n",
+    "reproduce": "Replace <workspace> in script import with absolute repository path; build personal-memory, save script as .mjs and run node. Before measurement used store.ts SHA 3b5677f4640e4486f81af264f5826d9c1e56e4cc767a20af6d5289c2dd2f9ebb; after uses sourceSha256."
+  },
+  "independentReview": {
+    "status": "PASS",
+    "reviewer": "goal_memory_verifier (verifier role)",
+    "scope": "Read-only review of metadata persistence/approval/migration, private visible disagreement groups, budget markers, read consistency, Set equivalence, current source hashes and actual check-v3 evidence.",
+    "limitations": "Deterministic native adapter coverage does not establish real-model gains, hidden holdout results or long-term effects."
+  }
+}

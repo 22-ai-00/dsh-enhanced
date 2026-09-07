@@ -114,7 +114,31 @@ describe('personal memory rc.1 tools', () => {
       .not.toHaveProperty('principal')
     expect(schemas.find(schema => schema.name === 'memory_manage')?.parameters.properties)
       .not.toHaveProperty('ttl_ms')
+    expect(schemas.find(schema => schema.name === 'memory_manage'))
+      .toMatchObject({ parameters: { properties: { entry: { properties: { knowledge: expect.any(Object) } } } } })
     await ctx.fiber.restart()
+  })
+
+  test.each(['memory_search', 'memory_search_confirmed'])('%s preserves applicability and disagreements through the model tool output', async name => {
+    const fixture = await harness()
+    for (const [key, content] of [['legacy', 'Legacyroute recovery'], ['current', 'New deployment recovery'], ['sensitive', 'Sensitive private decision']] as const) {
+      const proposal = fixture.ctx.personalMemory.propose(fixture.agent, { idempotencyKey: `claim:${key}`, mutation: {
+        op: 'add', identity: { owner: 'user', scope: 'user-global' }, entry: {
+          kind: 'preference', content, sensitivity: key === 'sensitive' ? 'sensitive' : 'private', trust: 'user-confirmed', confidence: 1,
+          provenance: { source: 'owner review', observedAt: 10_000, uri: `evidence://${key}` },
+          knowledge: { claim: { key: 'recovery.preference', value: key }, applicability: [key], counterexamples: ['requires current evidence'] },
+        },
+      } })
+      fixture.ctx.personalMemory.decideProposal({ proposalId: proposal.proposalId, principal: 'lark/main/tenant/owner', expectedVersion: 1, decision: 'approved', reason: 'confirmed' })
+    }
+    const result = await fixture.ctx.tools.execute({ callId: ToolCallId(`conflict-${name}`), name, agent: fixture.agent,
+      signal: new AbortController().signal, arguments: { query: 'Legacyroute', limit: 1 } })
+    expect(result.isError).toBe(false)
+    expect(result.isError ? undefined : result.value).toMatchObject({ hits: [{
+      content: 'Legacyroute recovery', knowledge: { applicability: ['legacy'], counterexamples: ['requires current evidence'] },
+      provenance: { uri: 'evidence://legacy' }, disagreement: { key: 'recovery.preference', recordCount: 2 },
+    }] })
+    await fixture.ctx.fiber.restart()
   })
 
   test('memory_manage creates a proposal without committing memory', async () => {
@@ -137,6 +161,7 @@ describe('personal memory rc.1 tools', () => {
           confidence: 1,
           source: 'user',
           observed_at: 10_000,
+          knowledge: { applicability: ['manual brew'], counterexamples: ['instant coffee'], claim: { key: 'coffee.method', value: 'hand-brewed' } },
         },
       },
     })
@@ -152,8 +177,8 @@ describe('personal memory rc.1 tools', () => {
       decision: 'approved',
       reason: 'confirmed',
     })
-    expect(fixture.ctx.personalMemory.search(fixture.agent, { query: 'coffee' })[0]?.record.content)
-      .toBe('User prefers hand-brewed coffee')
+    expect(fixture.ctx.personalMemory.search(fixture.agent, { query: 'coffee' })[0]?.record)
+      .toMatchObject({ content: 'User prefers hand-brewed coffee', knowledge: { applicability: ['manual brew'], counterexamples: ['instant coffee'], claim: { key: 'coffee.method', value: 'hand-brewed' } } })
     const replay = await fixture.ctx.tools.execute({
       callId: ToolCallId('memory-manage-2'),
       name: 'memory_manage',
@@ -172,6 +197,7 @@ describe('personal memory rc.1 tools', () => {
           confidence: 1,
           source: 'user',
           observed_at: 10_000,
+          knowledge: { applicability: ['manual brew'], counterexamples: ['instant coffee'], claim: { key: 'coffee.method', value: 'hand-brewed' } },
         },
       },
     })
@@ -220,6 +246,7 @@ describe('personal memory rc.1 tools', () => {
         content: 'Preferred editor is Helix',
         kind: 'preference',
         scope: 'workspace',
+        provenance: { source: 'user', observedAt: 10_000 },
         score: expect.any(Number),
       })],
     })

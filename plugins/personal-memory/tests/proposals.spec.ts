@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -75,6 +76,49 @@ function proposalInput(content = 'Remember this stable fact') {
 }
 
 describe('approval-gated memory proposals', () => {
+  test('schema v4 migration preserves pending approvals and legacy mutation receipts exactly', async () => {
+    const f = await harness()
+    const input = proposalInput()
+    const created = f.manager.propose(input)
+    const oldMutation = { op: 'add' as const, identity, entry: entry('Already approved legacy memory') }
+    const prior = f.memory.applyApprovedMutation({ ...oldMutation, namespace, idempotencyKey: 'legacy-approved' })
+    f.memory.close()
+    const old = new DatabaseSync(f.memoryPath)
+    // Reconstruct the exact pre-knowledge v4 layout; all other tables are unchanged.
+    old.exec("ALTER TABLE memory_records DROP COLUMN knowledge_json; UPDATE schema_meta SET value = '4' WHERE key = 'schema-version'; PRAGMA user_version = 4")
+    const beforeProposal = old.prepare('SELECT * FROM memory_proposals').all()
+    const beforeAudit = old.prepare('SELECT * FROM memory_audit').all()
+    const beforeRecord = old.prepare('SELECT * FROM memory_records').all()
+    old.close()
+    const memory = new MemoryStore({ path: f.memoryPath, now: () => 100_000 })
+    const inspect = new DatabaseSync(f.memoryPath)
+    expect(inspect.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
+    expect(inspect.prepare('SELECT * FROM memory_proposals').all()).toEqual(beforeProposal)
+    expect(inspect.prepare('SELECT * FROM memory_audit').all()).toEqual(beforeAudit)
+    expect(inspect.prepare('SELECT * FROM memory_records').all()).toEqual(beforeRecord.map(row => ({ ...row, knowledge_json: null })))
+    inspect.close()
+    const manager = new MemoryProposalManager(memory, f.policy)
+    expect(manager.propose(input)).toEqual({ ...created, replayed: true })
+    expect(memory.applyApprovedMutation({ ...oldMutation, namespace, idempotencyKey: 'legacy-approved' })).toEqual(prior)
+    const approved = manager.decide({ proposalId: created.proposalId, principal: input.principal, expectedVersion: 1, decision: 'approved', reason: 'owner confirmation' })
+    expect(approved.record?.content).toBe(input.mutation.entry.content)
+    expect(memory.exportDocument({ namespace, workspace: '/work/alpha', agentPreset: 'primary' }).version).toBe(1)
+    memory.close(); await f.ctx.fiber.restart()
+  })
+
+  test('binds the entire knowledge payload into approval and rejects changed-note replays', async () => {
+    const f = await harness()
+    const input = proposalInput('Recovery procedure')
+    input.mutation.entry.knowledge = { applicability: ['schema v2'], counterexamples: ['schema v1 corrupts the journal'], claim: { key: 'recovery.mode', value: 'journal' } }
+    const proposal = f.manager.propose(input)
+    expect(proposal.diff).toContain('schema v1 corrupts the journal')
+    expect(f.memory.list(namespace, identity)).toEqual([])
+    expect(() => f.manager.propose({ ...input, mutation: { ...input.mutation, entry: { ...input.mutation.entry, knowledge: { ...input.mutation.entry.knowledge, counterexamples: ['different evidence'] } } } })).toThrowError(expect.objectContaining({ code: 'idempotency-conflict' }))
+    const approved = f.manager.decide({ proposalId: proposal.proposalId, principal: input.principal, expectedVersion: 1, decision: 'approved', reason: 'confirmed all notes' })
+    expect(approved.record?.knowledge).toEqual(input.mutation.entry.knowledge)
+    f.memory.close(); await f.ctx.fiber.restart()
+  })
+
   test('creates an exact durable proposal and replays it idempotently', async () => {
     const { manager, memory, ctx } = await harness()
 

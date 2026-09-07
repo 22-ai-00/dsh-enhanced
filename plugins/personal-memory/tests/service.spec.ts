@@ -522,11 +522,14 @@ describe('personal memory Cordis service', () => {
     expect(() => service.search(agent, { query: 'after close' })).toThrow(/disposed/i)
   })
 
-  test('exports versioned JSON without database internals and imports only through proposals', async () => {
+  test.each([false, true])('exports versioned JSON and imports only through proposals (knowledge: %s)', async withKnowledge => {
     const source = await harness()
     const sourceAgent = stubAgent({ cwd: '/work/alpha', preset: 'primary' }).agent
     for (const [index, content] of ['Exported fact', 'Exported preference'].entries()) {
-      const proposal = source.service.propose(sourceAgent, addInput(content, `export:${index}`))
+      const input = addInput(content, `export:${index}`)
+      const proposal = source.service.propose(sourceAgent, { ...input, mutation: { ...input.mutation, entry: { ...input.mutation.entry,
+        ...(withKnowledge ? { knowledge: { applicability: ['Atlas v2'], counterexamples: ['Atlas v1'], claim: { key: `export.fact.${index}`, value: content } } } : {}),
+      } } })
       source.service.decideProposal({
         proposalId: proposal.proposalId,
         principal: 'owner:lark:123',
@@ -537,7 +540,7 @@ describe('personal memory Cordis service', () => {
     }
     const json = source.service.exportJson(sourceAgent)
     const decoded = JSON.parse(json) as Record<string, unknown>
-    expect(decoded).toMatchObject({ format: 'dsh-personal-memory', version: 1 })
+    expect(decoded).toMatchObject({ format: 'dsh-personal-memory', version: withKnowledge ? 2 : 1 })
     expect(json).not.toMatch(/contentHash|createdAt|updatedAt|status|memory_audit|memory_tokens/)
 
     const target = await harness()
@@ -558,7 +561,12 @@ describe('personal memory Cordis service', () => {
         reason: 'approve import',
       })
     }
-    expect(target.service.search(targetAgent, { query: 'Exported' })).toHaveLength(2)
+    const imported = target.service.search(targetAgent, { query: 'Exported' })
+    expect(imported).toHaveLength(2)
+    for (const hit of imported) {
+      if (withKnowledge) expect(hit.record.knowledge).toMatchObject({ applicability: ['Atlas v2'], counterexamples: ['Atlas v1'] })
+      else expect(hit.record.knowledge).toBeUndefined()
+    }
     await source.ctx.fiber.restart()
     await target.ctx.fiber.restart()
   })
