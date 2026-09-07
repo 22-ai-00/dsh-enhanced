@@ -25,7 +25,7 @@
 | 03 | P0/C | 不可变 TaskAcceptanceContract，独立代码、文档引用和目标系统回读 verifier；接入前台与 Automation AgentLoop 结果生产者 | 真实失败不能因为退出码或模型自评判成功；契约篡改、错 run、过期回执拒绝；unknown 触发验证下一步 | 已验证 |
 | 04 | P0/F | 固定任务集、留出集、基线 runner 和版本化结果记录；包含代码、研究、跨日、主动性、注入和撤销 | 同输入同模型同预算可重跑；记录成功率、成本、延迟、返工、多次分布和消融；留出不参与候选生成 | 实现中 |
 | 05 | P1/A | 业务目标编排 bundle：成功条件、期限、依赖、预算、授权、假设、阻塞、唤醒和证据；关联原生 goal/session/run | 跨会话与重启恢复，多步骤任务真实完成；过时假设重查，用户目标变化传播，无重复外部提交 | 实现中 |
-| 06 | P1/A | 任务策略选择：直接执行、调查、实验、独立复核、候选比较和原生 subagent；route 结果归因 | 困难任务改变方法，工具故障与推理失败可区分；协调成本有记录；固定预算比较策略收益 | 待做 |
+| 06 | P1/A | 任务策略选择：直接执行、调查、实验、独立复核、候选比较和原生 subagent；route 结果归因 | 困难任务改变方法，工具故障与推理失败可区分；协调成本有记录；固定预算比较策略收益 | 实现中 |
 | 07 | P1/B | Memory 根据当前 goal/step/query 召回；来源、适用条件、反例、失效和冲突；有预算的工具证据压缩 | 对照任务发现相关记忆并改善决策；当前任务变化重查；恢复保留原始引用，owner/scope 边界不泄漏 | 实现中 |
 | 08 | P2 | Policy 长期能力包与短期 lease：资源、动作、目的地、敏感度、期限、次数、费用、撤销；提交绑定 digest/前置版本/幂等键 | 正常预授权动作不用逐条审批；超范围、授权过期、撤销竞态、重放、重定向与数据外发被实际阻止 | 实现中 |
 | 09 | P2 | 独立动作/凭据 broker 与隔离 worker，先交付一个受支持生产平台 | worker 任意代码和子进程不能读取 token/信任根，不能绕过出网与动作代理；崩溃恢复不重复提交 | 实现中 |
@@ -444,3 +444,22 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 源码独立只读复核 PASS；命令、失败记录与实际产物见 [配置证据](evidence/goal-admission-setup-2026-09-07.json)。C2C `c2c_a943` 仅保存本地执行记录，内置浏览器不可用，未取得 ChatGPT 网页评审。全部 18 项仍为 3 已验证 / 7 实现中 / 8 待做，按依赖与证据连续推进；真实模型、其他工作包与完整安装体验继续验收，长期主动性观察留在交付后，不为人工天/周排期等待。
 
 最终安装浏览器验收共 3 条通过：`pnpm test:autonomy:setup` 的新 CLI/实际重启闭环 1 条，`pnpm test:autonomy` 的原有隔离产物闭环与有限执行安装 2 条。原有用例仍保留自身显式模型/验收夹具，不将它们误称为新 CLI 场景。
+
+
+### WP06：原生策略子任务与共用目标预算（2026-09-07）
+
+- 基线 `eb48662`。继续依赖/证据驱动执行；18 项当前为 **3 已验证 / 8 实现中 / 7 待做**。WP06 从待做进入实现中，未把同预算策略收益、真实模型质量改进或完整任务策略选择标为完成。
+- Goals 可选 `strategy` 从当前已准入的原生目标回合调用 `goal_strategy`：调查给定材料、推理复核、两个候选视角比较。复用 DSH 原生 subagents 与 in-process driver，子结果只有 unverified advice，不能写独立 Verifier 成功或完成目标；清楚的下一步仍直接执行，复杂任务可根据步骤失败反馈调整方法。
+- 首个子请求以 native descriptor/nonce、exact live child、原 parentSession、当前父 run/owner/定义和固定 route 绑定同一持久目标预算；子调用有独立 accounting run ID，协调调用/token/已知金额及 held 预留进入工具结果和后续目标上下文。没有新发子预算；父工具也扣原目标工具次数。
+- 原生 `agent/request` 仅配置模型，不能删除工具呈现。运行时在 native setup 安装私有 persona，再在首个 SystemPrompt assembly 删除工具与工具说明并清除 marker。marker 不授予预算；隐藏 descriptor 到达后仍须独立 CAS 准入。child scope 永久拒绝工具执行和失效请求，派发前的预算层再次拒绝非空 tools，包含晚注册的 scoped tools。
+- 策略 schema 1 私有 SQLite 记录 prepare/starting/children/settlement；构造尝试不等于 paid dispatch。期限、50ms 父授权重查、取消和有界 dispose 覆盖等待首 chunk/迟到返回；未知保留，不自动回放或退款。安装后的私有 Goal admission JSON 可选 strategy，写入精确 owner/workspace/preset 的 delegate 与工具规则，原预算和隔离授权不扩张。
+- 原生运行时定向 v11 命令退出码 **0**，5 项覆盖真实 compare 的 advice/全部结算、第二 child 预算前拒绝、实际 scoped tool-call 在测试 Policy 明确允许后仍由策略 guard 拒绝、首 chunk 等待中 owner 撤权，以及 start 在策略期限后返回的真实 run 被 dispose。使用真实原生 preset、AgentLoop、SubagentRuntime、Session persistence、Delivery owner 和 Verifier；其中正常用例还恢复同一持久 child Session，验证旧 nonce 没有 permit 时无新 adapter 请求。模型响应是确定性 fixture，不代表真实模型能力提升。
+- 先前 v4 的计数断言不足以证明 advice。补终态和 held 断言后 v5–v8 暴露工具呈现接线问题，修复后 v10/v11 通过；早期缺少真实 preset 的 fixture、配置变量作用域及类型问题也保留为失败日志，不混作完成证据。
+
+最终根 `CI=true pnpm check` v3 退出 **0**：主测试 277 文件 / 3,686 项通过，默认未提供 Docker 镜像而跳过 10 文件 / 27 项；递归 Delivery 701、Goals 92、Policy 196、Web owner 30 项通过，manifest、零 lint 警告、typecheck、build 及 28 插件 / 3 共享库的 31 份 dry-run pack 完成。已检查 Goals 76 个文件含策略身份、存储和运行时产物，Delivery 96 个、Web owner 37 个发布文件没有测试或状态数据库。v1/v2 的失败是旧 2s wake 测试在并行启动时尚未进入目标验收 gate 就到期；改为显式入口握手和该用例专有的 8s wake / 12s verifier 窗口，仍断言 dispatched→unknown、恰好两次模型请求且无重试。生产和默认 harness 时限未改，独立复核接受此调整。
+
+实际安装的策略开启浏览器场景退出 **0**：3 个真实 Host 进程、同一 Session、两轮目标修正，step/outcome 均先失败后通过，最终 native complete、wake succeeded、零逐条审批。两个原生策略 child 只给 advice，序列化模型请求确实无 tools；全部 7 条目标模型 reservation settled（其中 2 条为策略 child），每次预留 2,097,152 输入 / 1,024 输出，按 fixture 的 12 / 8 实际用量结算。调用记录另含一次准备会话响应与 10 次供应商 HTTP 响应夹具，不声称真实付费 API 或同预算智能增益。该场景实际运行 Docker，不能据此把全仓跳过项记为通过。
+
+默认关闭策略的同一安装/重启浏览器回归也退出 **0**，保持原两轮闭环和 4 条 settled 模型预算记录；本批策略开启/关闭共 2 条安装浏览器场景通过。
+
+命令、失败、最终源码和浏览器产物哈希见 [结构化证据](evidence/goal-strategy-native-2026-09-07.json)。C2C `c2c_a944` 仅保存本地执行记录；所需内置浏览器不可用，未取得 ChatGPT 网页规划或评审。完整 WP06 的工具故障/推理失败归因与固定预算策略收益比较、其他工作包继续推进。

@@ -5,6 +5,9 @@ import type { GenerateOptions, TokenUsage, StreamChunk } from '@deepseek-ai/dsh-
 import { GoalBudgetStore } from './budget-store.js'
 import type { GoalBudgetLimits, GoalBudgetScope } from './budget-store.js'
 import type { GoalExecutionRun, GoalRecord } from './types.js'
+import { isStrategyChild } from './strategy-identity.js'
+
+export type GoalBudgetDelegateResolver = (agent: Agent) => { parent: Agent; runId: string; signal: AbortSignal; provider: string; model: string; accountingRunId: string } | undefined
 
 export interface GoalBudgetConfig {
   modelCalls: number; toolCalls: number; inputTokens: number; outputTokens: number
@@ -71,13 +74,14 @@ export class GoalBudgetRuntime {
   readonly #inflight = new Map<Agent, Readonly<GoalBudgetMeter>>()
   readonly #deadlines = new Map<Agent, { runId: string; timer: ReturnType<typeof setTimeout> }>()
   #active = true
+  #delegateResolver: GoalBudgetDelegateResolver | undefined
 
   constructor(private readonly ctx: Context, path: string, readonly config: Readonly<GoalBudgetConfig>,
     private readonly current: (agent: Agent) => { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal } | undefined) {
     this.#store = new GoalBudgetStore(path)
     ctx.on('agent/request', async ({ agent }, next) => {
       const request = await next()
-      const bound = this.current(agent)
+      const bound = this.#current(agent)
       if (bound === undefined) return request
       const budget = this.inspect(bound.record)
       if (budget.modelCalls >= budget.limits.modelCalls || budget.outputTokens >= budget.limits.outputTokens) fail()
@@ -98,12 +102,12 @@ export class GoalBudgetRuntime {
     ctx.on('llm/stream', this.#stream.bind(this))
     ctx.on('tools/execute', async (execution, next) => {
       const agent = execution.agent
-      const bound = agent === undefined ? undefined : this.current(agent)
+      const bound = agent === undefined ? undefined : this.#current(agent)
       if (agent === undefined || bound === undefined) return await next()
       try {
         execution.signal.throwIfAborted()
         this.#store.consumeTool(this.#binding(bound.record), `goal-tool-${randomUUID()}`, Date.now())
-        if (this.current(agent)?.run.intent.runId !== bound.run.intent.runId) fail()
+        if (this.#current(agent)?.run.intent.runId !== bound.run.intent.runId) fail()
         return await next()
       } catch (error) {
         agent.cancel({ kind: 'hook', reason: 'assistant-goals-tool-budget-rejected' })
@@ -123,7 +127,7 @@ export class GoalBudgetRuntime {
 
   async *#stream(options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
     const agent = this.ctx.get('agents')?.currentInitiator()
-    const bound = agent === undefined ? undefined : this.current(agent)
+    const bound = agent === undefined ? undefined : this.#current(agent)
     if (agent === undefined || bound === undefined) { yield* next(); return }
     const binding = this.#binding(bound.record)
     const meter = this.#meters.get(JSON.stringify([options.provider, options.model]))
@@ -131,6 +135,7 @@ export class GoalBudgetRuntime {
     let ownsMeter = false
     try {
       if (meter === undefined || this.#inflight.has(agent)) fail()
+      if (bound.delegateRoute && (options.provider !== bound.delegateRoute.provider || options.model !== bound.delegateRoute.model || (options.tools?.length ?? 0) !== 0)) fail()
       this.#assert(agent, bound.run, meter)
       if (!integer(options.maxTokens) || options.maxTokens < 1 || options.maxTokens > this.config.maxOutputTokensPerCall) fail()
       this.#inflight.set(agent, meter)
@@ -142,7 +147,7 @@ export class GoalBudgetRuntime {
       const reservedCost = this.config.costUsdMicros === undefined ? null : cost(upper, options.maxTokens, meter)
       if (this.config.costUsdMicros !== undefined && reservedCost === null) fail()
       const id = `goal-budget-${randomUUID()}`
-      this.#store.reserve(binding, { id, runId: bound.run.intent.runId, inputTokens: upper,
+      this.#store.reserve(binding, { id, runId: bound.accountingRunId ?? bound.run.intent.runId, inputTokens: upper,
         outputTokens: options.maxTokens, costUsdMicros: this.config.costUsdMicros === undefined ? null : reservedCost }, Date.now())
       // No refunds on dispatch uncertainty. A process crash leaves this full reservation occupied.
       let observed: TokenUsage | undefined
@@ -174,6 +179,28 @@ export class GoalBudgetRuntime {
     } finally { if (ownsMeter && this.#inflight.get(agent) === meter) this.#inflight.delete(agent) }
   }
 
+  /** Host-only resolver for our fixed no-tools native strategy children. */
+  registerDelegateResolver(resolve: GoalBudgetDelegateResolver): () => void {
+    if (!this.#active || this.#delegateResolver) fail()
+    this.#delegateResolver = resolve
+    return () => {
+      if (this.#delegateResolver === resolve) this.#delegateResolver = undefined
+    }
+  }
+
+  #current(agent: Agent): { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal; delegateRoute?: { provider: string; model: string }; accountingRunId?: string } | undefined {
+    if (!isStrategyChild(agent)) return this.current(agent)
+    // A persisted strategy child must never fall back to an unmetered request,
+    // including after restart or after its short-lived resolver is removed.
+    const delegated = this.#delegateResolver?.(agent)
+    if (!delegated || delegated.signal.aborted || delegated.parent === agent
+      || this.ctx.get('agents')?.get(delegated.parent.id) !== delegated.parent) fail()
+    const bound = this.current(delegated.parent)
+    if (!bound || bound.signal.aborted || bound.run.intent.runId !== delegated.runId) fail()
+    return { ...bound, signal: AbortSignal.any([bound.signal, delegated.signal]),
+      delegateRoute: { provider: delegated.provider, model: delegated.model }, accountingRunId: delegated.accountingRunId }
+  }
+
   hasMeter = (route: { provider?: string; model?: string }): boolean => {
     const meter = this.#meters.get(JSON.stringify([route.provider, route.model]))
     return this.#active && meter !== undefined && (this.config.costUsdMicros === undefined
@@ -196,6 +223,7 @@ export class GoalBudgetRuntime {
     }
   }
   inspect = (record: GoalRecord) => this.#store.snapshot(this.#binding(record))
+  runUsage = (record: GoalRecord, runId: string) => this.#store.runUsage(this.#binding(record), runId)
   /** Candidate read path for Policy predicates; it never configures or consumes a budget. */
   preview = (record: GoalRecord) => this.#store.preview({ scope: record.scope, goalId: record.id }, this.#limits(record))
   health = () => ({ enabled: true, registeredMeters: this.#meters.size, activeCalls: this.#inflight.size })
@@ -217,7 +245,7 @@ export class GoalBudgetRuntime {
       costUsdMicros: this.config.costUsdMicros ?? null, expiresAt: record.createdAt + this.config.durationMs }
   }
   #assert(agent: Agent, run: GoalExecutionRun, meter: Readonly<GoalBudgetMeter>): void {
-    const bound = this.current(agent)
+    const bound = this.#current(agent)
     if (!this.#active || this.ctx.get('agents')?.get(agent.id) !== agent
       || this.#meters.get(JSON.stringify([meter.provider, meter.model])) !== meter
       || bound?.run.intent.runId !== run.intent.runId

@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { isAbsolute, join, normalize } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
-import { Config as GoalsConfig, type GoalBudgetConfig } from '@dsh-enhanced/assistant-goals'
+import { Config as GoalsConfig, validateGoalStrategyConfig, type GoalBudgetConfig, type GoalStrategyConfig } from '@dsh-enhanced/assistant-goals'
 import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptanceProfile, type VerifierAuthorityInput } from '@dsh-enhanced/assistant-verifier'
 import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
 import type { ActiveWebOwnerBindingSnapshot } from '@dsh-enhanced/assistant-delivery'
@@ -16,6 +16,7 @@ export interface GoalAdmissionTask {
   maxGoalRounds: number
   stepMaxDurationMs: number
   executionBudget: Omit<GoalBudgetConfig, 'costUsdMicros'>
+  strategy?: Partial<GoalStrategyConfig>
   verification: {
     artifactPath: string; command: string; maxRuns: number; maxTotalDurationMs: number
     maxDurationMs: number; maxOutputBytes: number
@@ -37,12 +38,13 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
   if (Buffer.byteLength(source, 'utf8') > 1024 * 1024) fail('task file exceeds 1 MiB')
   let input: unknown
   try { input = JSON.parse(source) } catch { fail('task file must be JSON') }
-  shape(input, ['version', 'objective', 'model', 'maxGoalRounds', 'stepMaxDurationMs', 'executionBudget', 'verification'], ['apiKeyEnv', 'wake'])
+  shape(input, ['version', 'objective', 'model', 'maxGoalRounds', 'stepMaxDurationMs', 'executionBudget', 'verification'], ['apiKeyEnv', 'wake', 'strategy'])
   if (input.version !== 1 || typeof input.objective !== 'string' || input.objective.length === 0 || input.objective.trim() !== input.objective
     || Buffer.byteLength(input.objective) > 8192 || /[\p{Cc}]/u.test(input.objective)
     || !DEEPSEEK_MODELS.includes(input.model as GoalAdmissionTask['model'])) fail('invalid objective or model')
   if (input.apiKeyEnv !== undefined && (typeof input.apiKeyEnv !== 'string' || !/^[A-Z_][A-Z0-9_]{0,127}$/u.test(input.apiKeyEnv))) fail('use a credential reference, not a key')
   integer(input.maxGoalRounds, 1, 32); integer(input.stepMaxDurationMs, 1000, 300000)
+  if (input.strategy !== undefined) input.strategy = validateGoalStrategyConfig(input.strategy as Partial<GoalStrategyConfig>)
   shape(input.executionBudget, ['modelCalls', 'toolCalls', 'inputTokens', 'outputTokens', 'durationMs', 'maxOutputTokensPerCall'])
   const budget = input.executionBudget
   for (const name of ['modelCalls', 'toolCalls', 'inputTokens', 'outputTokens']) integer(budget[name], 1, 1_000_000_000)
@@ -112,6 +114,8 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   for (const slug of ['assistant-isolation', 'assistant-web-owner']) config(slug)
   const delivery = config('assistant-delivery'); const goals = config('assistant-goals'); const verifier = config('assistant-verifier')
   const provider = config('assistant-deepseek-budget'); const personal = config('personal-assistant')
+  const policy = map(personal.get('assistantPolicy', true))
+  const principalId = `web/${input.profile}/local/operator`
   const profile = inspectAutonomyProfile(target.document.toString(), input.profile, input.dshHome)
   const { binding, owner } = snapshot
   if (profile.grant.workspace !== input.workspace || profile.grant.agentPreset !== input.preset || binding.workspace !== input.workspace || binding.agentPreset !== input.preset
@@ -154,6 +158,13 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   set(goals, 'verifyNativeRounds', true, [false]); set(goals, 'verifyGoalOutcome', true, [false])
   set(goals, 'preauthorizedCreateMaxRounds', task.maxGoalRounds, [0]); set(goals, 'stepMaxDurationMs', task.stepMaxDurationMs, [60000])
   set(goals, 'executionBudget', task.executionBudget)
+  if (task.strategy !== undefined) {
+    set(goals, 'strategy', task.strategy)
+    append(policy, 'rules', [
+      { id: `${admissionId}-strategy-goal`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['delegate'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: task.wake === undefined ? ['external'] : ['external', 'background'] } },
+      { id: `${admissionId}-strategy-tool`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: 'goal_strategy' }, context: { initiators: task.wake === undefined ? ['external'] : ['external', 'background'] } },
+    ])
+  }
   set(provider, 'enabled', true, [false]); set(provider, 'apiKeyEnv', task.apiKeyEnv ?? 'DEEPSEEK_API_KEY', ['DEEPSEEK_API_KEY'])
   set(provider, 'defaultMaxTokens', task.executionBudget.maxOutputTokensPerCall, [8192])
   if (!managed) {
@@ -174,10 +185,9 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     const budgetId = `${admissionId}-runs`
     set(goals, 'backgroundWake', { ownerRouteId: admissionId, budgetId, maxDelayMs: task.wake.maxDelayMs, runTimeoutMs: task.wake.runTimeoutMs })
     set(goals, 'preauthorizedSchedule', true, [false])
-    const automation = map(personal.get('assistantAutomations', true)); const policy = map(personal.get('assistantPolicy', true))
+    const automation = map(personal.get('assistantAutomations', true))
     set(automation, 'schedulerEnabled', true, [false])
     append(policy, 'budgets', [{ id: budgetId, metric: 'automation-runs', limit: task.wake.maxRuns, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
-    const principalId = `web/${input.profile}/local/operator`
     append(policy, 'rules', [
       { id: `${admissionId}-goal`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['observe', 'inspect', 'snapshot', 'execute'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
       ...['isolation_run', 'goal_context'].map(tool => ({ id: `${admissionId}-${tool}`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: tool }, context: { initiators: ['background'] } })),

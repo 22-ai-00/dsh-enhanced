@@ -13,6 +13,21 @@ const limits = (expiresAt = 100): { modelCalls: number; toolCalls: number; input
 const request = (id = 'request-a') => ({ id, runId: 'run-a', inputTokens: 6, outputTokens: 4, costUsdMicros: 30 })
 
 describe('GoalBudgetStore', () => {
+  it('attributes settled and uncertain child cost within the exact parent goal budget', () => {
+    const store = new GoalBudgetStore(':memory:')
+    store.configure(binding, limits())
+    store.reserve(binding, { ...request(), runId: 'strategy-child' }, 1)
+    store.settle('request-a', { inputTokens: 2, outputTokens: 1, costUsdMicros: 5 }, 2)
+    store.reserve(binding, { ...request('request-b'), runId: 'strategy-child' }, 3)
+    expect(store.runUsage(binding, 'strategy-child')).toEqual({ modelCalls: 2, heldCalls: 1, inputTokens: 8, outputTokens: 5, costUsdMicros: 35 })
+    expect(store.runUsage(binding, 'parent-run')).toEqual({ modelCalls: 0, heldCalls: 0, inputTokens: 0, outputTokens: 0, costUsdMicros: 0 })
+    const other = { ...binding, goalId: 'other-goal' }
+    store.configure(other, { ...limits(), costUsdMicros: null })
+    expect(store.runUsage(other, 'strategy-child')).toEqual({ modelCalls: 0, heldCalls: 0, inputTokens: 0, outputTokens: 0, costUsdMicros: null })
+    expect(() => store.runUsage({ ...binding, scope: { ...scope, principalVersion: 2 } }, 'strategy-child')).toThrow(GoalStoreError)
+    expect(store.snapshot(binding)).toMatchObject({ modelCalls: 2, heldCalls: 1, inputTokens: 8 })
+    store.close()
+  })
   it('makes per-goal limits immutable and scope reads exact', () => {
     const store = new GoalBudgetStore(':memory:')
     expect(store.configure(binding, limits())).toMatchObject({ limits: limits(), modelCalls: 0, heldCalls: 0 })

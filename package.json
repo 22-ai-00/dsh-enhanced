@@ -94,6 +94,7 @@
     "@playwright/test": "1.58.2",
     "@deepseek-ai/dsh-fs": "catalog:",
     "@deepseek-ai/dsh-fs-local": "catalog:",
-    "@deepseek-ai/dsh-tool-fs": "catalog:"
+    "@deepseek-ai/dsh-tool-fs": "catalog:",
+    "@deepseek-ai/dsh-subagent": "catalog:"
   }
 }

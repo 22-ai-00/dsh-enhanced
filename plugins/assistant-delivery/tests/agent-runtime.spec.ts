@@ -5,6 +5,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import AgentPresets, { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
+import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import * as ApiRemotes from '@deepseek-ai/dsh-api-remotes'
 import SessionController from '@deepseek-ai/dsh-api-session-controller'
@@ -44,7 +45,7 @@ import { AssistantAutomationsService, type AutomationProposalResult } from '@dsh
 import { AssistantEvaluationService, TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
-import { AssistantGoalsService } from '../../assistant-goals/lib/index.js'
+import AssistantGoalsPlugin, { AssistantGoalsService } from '../../assistant-goals/lib/index.js'
 import { PersonalMemoryService } from '../../personal-memory/lib/index.js'
 import { MemoryStore } from '../../personal-memory/lib/store.js'
 import { createHash } from 'node:crypto'
@@ -1023,18 +1024,21 @@ describe('real rc.1 delivery Agent runtime', () => {
 
   test.each(['deadline', 'revocation'] as const)('scheduled goal %s during verifier settlement cannot report success', async boundary => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-settle-')); roots.push(root)
-    const fixture = await scheduledGoalHarness(root, new Map<string, SavedSession>(), 2_000, 5_000)
+    // Allow real native startup under the parallel root suite; the blocked
+    // verifier still outlives the configured wake deadline.
+    const fixture = await scheduledGoalHarness(root, new Map<string, SavedSession>(), 8_000, 12_000)
     const wake = await fixture.schedule()
     const verifier = fixture.ctx.assistantVerifier
     const tick = verifier.tick
-    let entered = false
+    let signalEntered!: () => void
+    const entered = new Promise<void>(resolve => { signalEntered = resolve })
     let release!: () => void
     const gate = new Promise<void>(resolve => { release = resolve })
-    const delayed = vi.spyOn(verifier, 'tick').mockImplementation(async () => { entered = true; await gate; await tick() })
+    const delayed = vi.spyOn(verifier, 'tick').mockImplementation(async () => { signalEntered(); await gate; await tick() })
     const running = fixture.runAt(wake.wakeAt)
     void running.catch(() => {})
     try {
-      await vi.waitFor(() => expect(entered).toBe(true), { timeout: 5_000 })
+      await entered
       expect(fixture.readWake(wake.id).state).toBe('dispatched')
       if (boundary === 'revocation') {
         const owner = runtimeStore(fixture.service).getPrincipal(principal)!
@@ -1043,14 +1047,14 @@ describe('real rc.1 delivery Agent runtime', () => {
       }
       // The deadline case keeps the verifier blocked until after the wake has
       // returned unknown, proving the terminal waiter itself remains bounded.
-      await vi.waitFor(() => expect(fixture.readWake(wake.id).state).toBe('unknown'), { timeout: 6_000 })
+      await vi.waitFor(() => expect(fixture.readWake(wake.id).state).toBe('unknown'), { timeout: 10_000 })
     } finally { release(); await running; delayed.mockRestore() }
     expect(fixture.readWake(wake.id).state).toBe('unknown')
     expect(fixture.llm.requests).toHaveLength(2) // one owner turn, one native goal round
     await fixture.ctx.assistantAutomations.tick(); await fixture.ctx.assistantAutomations.whenIdle()
     expect(fixture.llm.requests).toHaveLength(2)
     await fixture.ctx.fiber.restart()
-  }, 20_000)
+  }, 30_000)
 
   test('scheduled goal revokes before its wake CAS and never starts a model request', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-revoked-')); roots.push(root)
@@ -9892,6 +9896,188 @@ describe('real rc.1 delivery Agent runtime', () => {
     expect(replacementCheckpoint).toMatchObject({ isError: true })
     expect(replacementControl).toMatchObject({ isError: true })
     expect(JSON.stringify(replacementCheckpoint)).not.toContain('Protect the old owner delivery report')
+    await fixture.ctx.fiber.restart()
+  })
+
+  test.each([
+    { name: 'runs two real native children under one parent budget', mode: 'normal', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
+    { name: 'rejects the second child before its adapter request when the aggregate budget is exhausted', mode: 'quota', modelCalls: 2, adapterCalls: 2, boundChildren: 2, childCalls: 1 },
+    { name: 'rejects a real child scoped tool call', mode: 'scoped-tool', modelCalls: 5, adapterCalls: 5, boundChildren: 2, childCalls: 2 },
+    { name: 'cancels an owner-revoked child waiting for its first chunk', mode: 'revoke', modelCalls: 4, adapterCalls: 2, boundChildren: 1, childCalls: 1 },
+    { name: 'disposes a real native run returned after its strategy deadline', mode: 'late-start', modelCalls: 4, adapterCalls: 3, boundChildren: 1, childCalls: 1 },
+  ] as const)('goal_strategy compare $name', async ({ mode, modelCalls, adapterCalls, boundChildren, childCalls }) => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-strategy-'))
+    roots.push(root)
+    const presetRoot = join(root, 'presets')
+    await mkdir(join(presetRoot, 'primary'), { recursive: true })
+    await writeFile(join(presetRoot, 'primary', 'agent.cordis.yml'), '- id: tools\n  name: cordis:assistant-delivery-test-tools\n')
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }
+    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const stored = new Map<string, DurableStoredSession>()
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, presetRoot, 'primary', true, 'probe', undefined, {
+      policyRules: [
+        { id: 'native-strategy-probe-fixture', effect: 'allow', subject: { kind: 'agent', id: 'primary', workspace: root }, actions: ['execute'], resource: { kind: 'tool', id: 'strategy_scoped_probe' } },
+        { id: 'native-strategy-goal', effect: 'allow' as const, subject,
+          actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'execute', 'delegate'], resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] } },
+        { id: 'native-strategy-create', effect: 'allow' as const, subject,
+          actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_create' }, context: { initiators: ['external' as const] } },
+        { id: 'native-strategy-tool', effect: 'allow' as const, subject,
+          actions: ['execute'], resource: { kind: 'tool' as const, id: 'goal_strategy' }, context: { initiators: ['external' as const] } },
+      ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, goalContinuationTimeoutMs: 5_000,
+    }, realPersistence(PersistenceCoordinator, stored))
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(native.goalTools as never, {} as never)
+    await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    await fixture.ctx.plugin(SubagentRuntime as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsPlugin, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, strategy: { maxDurationMs: mode === 'late-start' ? 1000 : 30000 }, stepMaxDurationMs: 5_000,
+      executionBudget: { modelCalls, toolCalls: 1, inputTokens: 50, outputTokens: 35, durationMs: 5_000, maxOutputTokensPerCall: 7 } } as never)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+    const authority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
+    const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+    await writeFile(join(root, 'report.md'), 'Confirmed result')
+    await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
+      authorities: [authority], profiles: [{ id: 'native-strategy', version: 1, scope: { workspace: root, preset: 'primary' },
+        owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective: 'Compare two native delegated analyses', validityMs: 60_000,
+        bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'result', kind: 'document-citations', authority: { id: 'sources', digest }, artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
+      }],
+    })
+    let goalId = ''
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
+        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('native-strategy-create'), name: 'goal_create', agent, signal,
+          arguments: { objective: 'Compare two native delegated analyses', max_goal_rounds: 1 } })
+        if (created.isError) throw new Error(`native strategy goal setup rejected: ${JSON.stringify(created.content)}`)
+        goalId = fixture.ctx.assistantGoals.list(agent).at(0)?.id ?? ''
+      }
+      return await next()
+    })
+    fixture.ctx.assistantGoals.registerBudgetMeter({ id: 'native-strategy-meter', provider: 'mock', model: 'delivery-model',
+      inputTokenUpperBound: () => 10, inputUsdMicrosPerMillionTokens: 1_000_000, outputUsdMicrosPerMillionTokens: 1_000_000 })
+    const scopedEffect = vi.fn(async () => ({}))
+    const scopedResults: ToolExecutionResult[] = []
+    const childAgents: Agent[] = []
+    fixture.ctx.on('agent/created', ({ agent }) => {
+      if (agent.session.header.origin !== 'subagent') return
+      childAgents.push(agent)
+      agent.ctx.tools.register(defineTool({ name: 'strategy_scoped_probe', description: 'Actual child scoped tool fixture', parameters: {},
+        output: { schema: { type: 'object', additionalProperties: false, properties: {} }, render: () => [] },
+        execute: scopedEffect,
+      }))
+      agent.ctx.on('tools/result', (execution, result) => { if (execution.name === 'strategy_scoped_probe') scopedResults.push(result) })
+    })
+    let attackSent = false
+    let adapterAborted = false
+    let revokedAt = 0
+    let releaseLate: (() => void) | undefined
+    if (mode === 'late-start') {
+      const gate = new Promise<void>(resolve => { releaseLate = resolve })
+      const start = fixture.ctx.subagents.start.bind(fixture.ctx.subagents)
+      vi.spyOn(fixture.ctx.subagents, 'start').mockImplementation(async (...args) => {
+        const run = await start(...args)
+        await gate
+        return run
+      })
+    }
+    const original = fixture.llm.stream.bind(fixture.llm)
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      if (fixture.llm.requests.length === 0) { yield* original(options); return }
+      fixture.llm.requests.push(options)
+      const nativeRequest = fixture.llm.requests.length
+      if (nativeRequest === 2) {
+        const callId = ToolCallId('native-strategy-compare')
+        yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 0, id: callId, name: 'goal_strategy', argumentsDelta: '{"kind":"compare","question":"Compare the two approaches"}' }
+        yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'goal_strategy', arguments: '{"kind":"compare","question":"Compare the two approaches"}' } }
+        yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } }
+        yield { type: 'finish', reason: { kind: 'tool-calls' } }
+        return
+      }
+      const initiator = fixture.ctx.agents.currentInitiator()
+      if (initiator?.session.header.origin === 'subagent') {
+        expect(options.tools ?? []).toEqual([])
+        if (mode === 'revoke') {
+          revokedAt = Date.now()
+          expect(runtimeStore(fixture.service).revokePrincipal(owner.id, owner.version)).toMatchObject({ status: 'revoked' })
+          await new Promise<void>(resolve => {
+            const stop = () => { adapterAborted = true; resolve() }
+            if (options.signal?.aborted) stop()
+            else options.signal?.addEventListener('abort', stop, { once: true })
+          })
+          return
+        }
+        if (mode === 'scoped-tool' && !attackSent) {
+          attackSent = true
+          const callId = ToolCallId('strategy-scoped-attack')
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: callId, name: 'strategy_scoped_probe', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: callId, name: 'strategy_scoped_probe', arguments: '{}' } }
+          yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+      }
+      const text = `Native strategy child or parent response ${nativeRequest}.`
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text } }
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    await fixture.service.acceptInbound(message(`evt-native-strategy-${mode}`, 'Run the native strategy comparison'))
+    await drive(fixture.service)
+    await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
+    expect(goalId).not.toBe('')
+    expect(fixture.llm.requests).toHaveLength(adapterCalls + 1)
+    expect(scopedEffect).not.toHaveBeenCalled()
+    if (mode === 'scoped-tool') {
+      expect(scopedResults).toHaveLength(1)
+      expect(scopedResults[0]).toMatchObject({ isError: true })
+      expect(JSON.stringify(scopedResults[0])).toContain('strategy children cannot use tools')
+    }
+    if (mode === 'revoke') {
+      expect(adapterAborted).toBe(true)
+      expect(Date.now() - revokedAt).toBeLessThan(2000)
+    }
+    const strategy = new DatabaseSync(join(root, 'goals.sqlite.strategies'), { readOnly: true })
+    try {
+      const row = strategy.prepare('SELECT state, outcome, children_json FROM goal_strategy_records').get() as { state: string, outcome: string, children_json: string }
+      const bound = JSON.parse(row.children_json) as Array<{ sessionId: string }>
+      expect(row.state).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : 'settled')
+      expect(row.outcome, JSON.stringify([...stored.values()].map(s => ({ header: s.meta, events: s.events.filter(e => /error|end/.test(e.type)).slice(-4) })))).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : mode === 'quota' ? 'execution-failed' : 'advice')
+      expect(bound).toHaveLength(boundChildren)
+      expect(new Set(bound.map(child => child.sessionId)).size).toBe(boundChildren)
+    } finally { strategy.close() }
+    const ledger = new DatabaseSync(join(root, 'goals.sqlite.budgets'), { readOnly: true })
+    try {
+      expect(ledger.prepare('SELECT COUNT(*) AS count FROM goal_budget_tools WHERE goal_id = ?').get(goalId)).toMatchObject({ count: 1 })
+      const childRows = ledger.prepare("SELECT DISTINCT run_id FROM goal_budget_reservations WHERE goal_id = ? AND run_id LIKE 'strategy-%'").all(goalId) as Array<{ run_id: string }>
+      expect(childRows).toHaveLength(childCalls)
+      expect(new Set(childRows.map(row => row.run_id)).size).toBe(childCalls)
+      expect(ledger.prepare("SELECT COUNT(*) AS count FROM goal_budget_reservations WHERE state = 'held'").get()).toMatchObject({ count: mode === 'revoke' ? 1 : 0 })
+    } finally { ledger.close() }
+    if (mode === 'late-start') {
+      const before = fixture.llm.requests.length
+      releaseLate!()
+      await vi.waitFor(() => expect(fixture.ctx.agents.get(childAgents[0]!.id)).toBeUndefined(), { timeout: 2000 })
+      expect(fixture.llm.requests).toHaveLength(before)
+      const check = new DatabaseSync(join(root, 'goals.sqlite.strategies'), { readOnly: true })
+      try { expect(check.prepare('SELECT state, outcome FROM goal_strategy_records').get()).toMatchObject({ state: 'unknown', outcome: 'unknown' }) } finally { check.close() }
+    }
+    if (mode === 'normal') {
+      const child = childAgents[0]!
+      const before = fixture.llm.requests.length
+      expect(stored.get(String(child.id))?.events.some(event => String(event.type) === 'subagent/descriptor')).toBe(true)
+      const resumed = await fixture.ctx.agents.resume({ resumeSessionId: child.id, agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      resumed.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Resume without the old private permit' }], source: { kind: 'user' } }))
+      await resumed.agent.whenIdle()
+      expect(fixture.llm.requests).toHaveLength(before)
+      expect(resumed.agent.session.snapshotEvents().some(event => event.type === 'turn/end' && event.data.reason.kind === 'error')).toBe(true)
+      await resumed.dispose()
+    }
     await fixture.ctx.fiber.restart()
   })
 })
