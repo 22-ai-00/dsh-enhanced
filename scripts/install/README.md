@@ -49,6 +49,10 @@
 
 首次 grant 精确绑定本机 Web owner 版本、workspace 和 preset，默认 20 次、60 分钟期限、10 分钟累计预留执行时长；次数最多 10000、期限最多 7 天、累计时长最多 1 天。单次任务仍受 Isolation 的独立限制。重复 setup 保留原过期时间、撤销记录和已使用预算，即使过期也不自动续权；修改原绑定、镜像或预算需显式迁移。profile 私有 Isolation/Actions 状态和 Keychain 路径与其他 profile 分开，已有合法自定义路径保留。
 
+autonomy 安装在 Host 激活检查后还会执行有限隔离诊断；已撤销、过期或耗尽的旧 grant 会使这一步失败，重复安装不会恢复它。日常复查使用 `./scripts/install/doctor.sh --profile web --require-isolation`。它读取已组合配置、Delivery owner 和 Isolation 的持久账本，报告累计次数/预留时长、剩余额度及 unknown 作业，再用同一镜像和 Docker 路径做临时探测；探测后重新核对配置及授权。该命令不启动第二个 Host，不配对、迁移账本、续期或消费业务 grant，可在已有 Host 运行时诊断。
+
+诊断当前只支持 installer-managed Web owner 与单一 `autonomy-<profile>` grant、Delivery schema 19 和 Isolation schema 6；缺失、旧版或不一致的状态明确失败，需先按正常升级/迁移流程处理。通过表示该时刻的有限隔离检查通过，仍不能证明后续动态 Policy、实际资源准入、模型计量、Goal 独立验收或外部 Actions 可用；这些能力在结果中明确未检查。不要通过删除账本或重跑 setup 绕过已消耗的授权。
+
 在该受管作用域中，模型只能调用受支持的隔离、目标上下文/检查点和获准的有限 Actions 工具，不能退回宿主 shell。Actions 默认无 grant，Keychain 不创建凭据。模型配置沿用安装器的独立引导；GitHub 目标/凭据、独立目标验收、后台唤醒以及完整自治生命周期仍需后续配置与验证。不要通过删除账本重置授权。
 
 核心 profile 中的 `plugin_discover` 可立即按能力检索内置、完整性固定的首方候选目录；它不会下载或启用任何包。Agent 只能生成待审批 plan，owner 仍需用 `dsh-plugin-control approve` 与 `activate` 在 staging profile 中显式启用。写入 `~/.dsh/plugin-control/catalog.json` 的 owner catalog 会取代内置目录。
@@ -118,6 +122,7 @@ DSH_ENHANCED_MODEL_API_KEY=… "$DSH_HOME"/profiles/web/node_modules/.bin/dsh-mo
 ```sh
 ./scripts/install/doctor.sh --profile web
 ./scripts/install/doctor.sh --profile web --require-service
+./scripts/install/doctor.sh --profile web --require-isolation
 ```
 
 `--require-service` 在 Linux 同时验证 systemd user unit、稳定性窗口和 lingering；若检测到循环崩溃会停止该 unit 并输出 journal，若未启用 lingering，注销会停止 user service，按 doctor 提示运行 `sudo loginctl enable-linger "$(id -u)"`。未带 `--require-service` 的 doctor 会避免对已启用 Lark 的 profile 启动第二个 Host；macOS LaunchAgent 与 Windows 当前用户计划任务只能在用户登录会话中运行；Windows 的任务会在失败后重启，但不宣称注销后继续运行。

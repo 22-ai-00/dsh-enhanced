@@ -375,3 +375,18 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 剩余优先项：生产精确模型 meter、可信任务验收输入与安装引导、Web 后台 wake/owner route、外部效果读回与 unknown 对账、补偿/回滚、真实模型收益，以及其余工作包。此次有限闭环不等于完整 18 包验收。
 
 最终 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<证据中的本地 immutable image> pnpm check` 退出 **0**：主 277 文件 / 3,643 测试，Policy 194、Isolation 97、Goals 76、Verifier 60 项通过，27 插件 / 3 共享库完成 lint/typecheck/build 与 30 份 dry-run pack。已检查 Isolation 77 个发布文件含独立 verifier runner 与生产 supervisor，Verifier 32 个、共享任务协议 19 个发布文件均无源码、测试或状态数据。最终两条 `pnpm test:autonomy` 浏览器场景退出 **0**，覆盖默认有限执行及显式目标配置的两轮修正闭环。独立源码与浏览器证据审查 PASS；最终哈希/命令复核以结构化证据为准。
+
+### WP17 持久授权与隔离运行诊断（2026-09-07，基线 `22fccd5`）
+
+本批按依赖与证据继续，全部 18 项仍为 **3 已验证 / 7 实现中 / 8 待做**；人工天/周估算和已取消的两周观察期均不作为等待条件。
+
+- 新增已安装 CLI `dsh-autonomy-doctor` 与 `doctor.sh --require-isolation`；autonomy 安装在正常 Host 激活检查后自动调用。独立诊断只组合配置，不启动第二个 Host。它核验固定 Web owner、真实工作区路径、精确 grant scope、Delivery owner lineage/version，以及 schema 6 Isolation 持久授权；撤销、过期、预算耗尽、配置漂移或缺失/旧状态均失败，不以再次安装恢复授权。
+- Isolation 的新 Host-only API 用只读 SQLite 事务读取同一快照，累计所有历史 revision 的次数/预留时长；unknown 不退费。目录真实路径、当前 UID、私有权限和文件类型不合格时直接返回 unavailable，不 chmod、不迁移、不取得 controller，也不读取命令/产物。`available` 只表示 grant 快照满足这些检查。
+- 探测使用最终配置的 immutable image/Docker executable 和现有生产 supervisor，在独立临时目录执行有界任务并回读 artifact；不占业务 grant。完成后再次核验配置、owner 和授权。输出明确排除动态 Policy、实时资源准入、模型硬预算、Goal 独立验收和外部 Actions，不能把一次诊断解释成完整自治已就绪。
+- 浏览器回归在实际安装的临时 profile/运行中 Host 上调用诊断，核对原 controller、业务 jobs/grant、patch、模型调用数均保留；随后停止 Host，在临时账本种入撤销状态，再验证失败且不恢复授权。种入撤销用于验证诊断，不冒充外部停止 CLI 集成。原有两轮原生 Goal/独立隔离验收场景继续作为回归。
+- 生产 meter 核对：本机 DSH 0.1.2-rc.1 的 DeepSeek adapter 确实写出 `max_tokens` 并请求 usage，但上下文容量来自可配置目录值，当前没有可信的请求前 `inputTokenUpperBound`。private Codex adapter 明确移除 Host 的 `maxTokens` hint。没有把二者登记成未经证明的严格 meter；外部供应商契约、输入上界及真实生产计量仍待完成。
+- 后续 WP05 应复用已有 `goal_schedule`/Automations 持久 wake/Delivery 同 Session 恢复链，补实际安装 DSH 进程与磁盘 Session 的重启验收；已有 harness reload 不是该环境证明。后台默认仍关闭，生产模型、任务验收配置、外部效果读回/补偿和其他工作包继续推进。
+
+本批完整命令（含失败）、最终源码与浏览器 artifact hash 保存在 [结构化证据](evidence/autonomy-doctor-2026-09-07.json)。C2C `c2c_a940` 只有本地执行记录；所需内置浏览器不可用，未取得 ChatGPT 网页规划/评审。
+
+最终根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<证据中的本机镜像> pnpm check` 退出 **0**：主 279 文件 / 3,654 测试，Isolation 22 文件 / 102 项、Web owner 4 文件 / 21 项；manifest、零 lint 警告、typecheck、build 和 30 份 dry-run pack 全部通过。已检查 Isolation 81 个文件包含 `lib/diagnostics.*`，Web owner 29 个文件包含 `bin/dsh-autonomy-doctor.js` 和 `lib/doctor.*`，无源码、测试或数据库。最终两条 `pnpm test:autonomy` 场景退出 **0**；诊断时原有 1 job、20,000ms 预留、19 次/580,000ms 剩余预算及 4 次模型调用均保留，临时撤销后返回 exit 1 且不续权。独立源码复核 PASS；最终命令/artifact 哈希复核记录在结构化证据中。

@@ -1729,6 +1729,18 @@ dsh_enhanced_verify_linux_service_stability() {
   printf 'doctor：systemd 服务稳定运行（NRestarts=%s）。\n' "$second_restarts"
 }
 
+# Explicit post-install diagnostics can run alongside an existing Host.
+dsh_enhanced_doctor_isolation() {
+  local profile="$1"
+  local dsh_home="$2"
+  local executable="$dsh_home/profiles/$profile/node_modules/.bin/dsh-autonomy-doctor"
+  if [[ ! -x "$executable" ]]; then
+    dsh_enhanced_fail 1 'doctor：未安装自治诊断入口，请安装匹配版本的 assistant-web-owner；不会重建或续期授权。'
+    return $?
+  fi
+  "$executable" --dsh-home "$dsh_home" --profile "$profile"
+}
+
 # The installer calls this before creating a brand-new profile and after it has
 # composed the final profile.  It deliberately never starts an Agent or sends a
 # model request; model readiness is an explicit separate choice.
@@ -2613,6 +2625,13 @@ dsh_enhanced_install() {
     fi
   else
     dsh_enhanced_doctor postflight "$profile" "$dsh_home" "$web_port" "$require_service" || return $?
+  fi
+  if [[ "$scenario" == 'autonomy' ]]; then
+    if [[ "$dry_run" == '1' ]]; then
+      dsh_enhanced_print_command "$dsh_home/profiles/$profile/node_modules/.bin/dsh-autonomy-doctor" --dsh-home "$dsh_home" --profile "$profile"
+    else
+      dsh_enhanced_doctor_isolation "$profile" "$dsh_home" || return $?
+    fi
   fi
 
   printf '\n安装流程完成。\n'
