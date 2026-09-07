@@ -52,3 +52,10 @@ Web Session 排他回归使用 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc
 construction 自身的 owner effect 把卸载记入不可复位的组合取消信号；即使同一 fiber 很快重启并再次 ACTIVE，也不能清除旧构造的取消。`FiberState` 在 Cordis 4.0.2 发布物中是擦除的 const enum；实现用对应成员类型约束数值，避免转译器尝试读取不存在的运行时导出，升级时类型检查必须继续核对该值。
 
 上述 factory 代次证明限定于官方 AgentLoop 向当前 AgentRegistry 注册 factory 的标准生命周期；其 setFactory effect 随 provider fiber 清理。AgentRegistry 没有公开私有 factory 槽的变更通知，不宣称追踪任意 Host 代码脱离该生命周期更换 factory 的行为。
+
+
+### 可选原生 Web owner（2026-09-07）
+
+`assistant-web-owner` 的生产边界以 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1` 与 Cordis `4.0.2` 实际实现验证：保留原 Controller 的 Remote 原型元数据，在构造入口提供独立 fiber 的受限 Agent facade；`SessionSkillCatalog` 必须在其构造时加 owner gate，`api-session/*` 也必须在全局 ApiRemotes 转发前过滤。不能用简单 Proxy 包装原 registry（Cordis trace 可能还原原始服务），也不能在已运行 Controller 上仅覆盖 prompt。bundle patch 通过禁用原行再插入新行替换，`name` 本身不是可改写字段。
+
+Delivery 的新集成测试显式使用同版本 `dsh-api-gateway` 与 `dsh-api-remotes`，覆盖真实 Gateway 调用和两个 `$events` 消费者；不据此声称浏览器或 HTTP/WS 验收。新增包尚未发布，也未改动本机实际 `web` profile。

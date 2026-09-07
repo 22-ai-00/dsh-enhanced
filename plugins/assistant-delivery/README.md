@@ -141,7 +141,7 @@ ownerRoutes:
 
 不同 Host 必须部署同一份 authority 配置。同一 idempotency key 的配置漂移会由 authority hash receipt 拒绝；本功能刻意不增加数据库 schema，因此使用不同新 key 的两个 Host 不会通过账本互相证明配置一致，部署层仍需用同一受控 profile 发布并校验配置。
 
-`pairPrincipalLocally()` 是给安装向导使用的更窄离线入口：调用方必须已经拥有私有 Delivery SQLite 的本机文件权限，并提供完整 typed principal；函数内部仍走一次 challenge/confirm 事务，只返回 principal 记录，不返回 code。`lark-channel` 向导先用一次性 DM 短语确认具体 `open_id`，再调用该入口；普通 Agent、外部消息和后台任务都无法访问它。
+`pairPrincipalLocally()` 是给安装向导使用的更窄离线入口：调用方必须已经拥有私有 Delivery SQLite 的本机文件权限，并提供完整 typed principal；函数内部以 owner 交接事务启用指定 principal 并撤销此前 active owner，只返回 principal 记录；它不是跨渠道别名关联。`lark-channel` 向导先用一次性 DM 短语确认具体 `open_id`，再调用该入口；普通 Agent、外部消息和后台任务都无法访问它。
 
 ## Adapter contract
 
@@ -375,3 +375,12 @@ pnpm --dir plugins/assistant-delivery pack --dry-run
 更正/撤回/状态入口要求 Evaluation 注册 `owner-objective-revision/v1` capability；旧 Evaluation 仅能处理原始初次判断，修订命令明确返回服务不可用，不能退化为独立评价票。
 
 旧 foreground receipt 未保存 principal version：仅当前仍为同一 record 的初始 v1 身份可修订；身份已更新时保守拒绝继承旧判断修订权。新记录完整保存 record+version。
+
+
+## 原生 Web owner 接入
+
+可选的 `@dsh-enhanced/assistant-web-owner` 消费受信 Host API `bindNativeWebOwner(ctx, config)`。每个 Delivery 服务只允许一个活动 Web Controller capability；身份必须是已配对、当前 active owner 的 `web` principal，workspace/preset 和 owner record/version 在颁发时固定。此 API 不暴露内部 lease manager，也不对任意同进程 Host 代码宣称沙箱隔离。
+
+新 Web Session 先在同一 construction lease 下创建并 flush，再在 SQLite 事务中创建 binding 并提升该 lease 的 target；中间不会失去占用或出现第二执行者。文本 Inbox 直接原子 claimed，native-admission/native-dispatch-started 标记保证崩溃后不被普通入站 worker 重放。原生 inserted/claimed 的确切消息证明连接到既有当前 owner 回合与前台验收协议。空闲、超时、撤权或 scope 卸载调用实际 memoized disposer；未完成清理不记 quiescent。
+
+当前 Web 只支持单已认证控制面的文本交互；图片、完整 queue/steer、跨渠道 owner 别名、子 Agent 历史、自动安装和浏览器实跑仍未验收。配置、Policy 与权限见 [Web owner 包说明](../assistant-web-owner/README.md)。

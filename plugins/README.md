@@ -53,6 +53,8 @@
 
 | [assistant-goals](assistant-goals) | `@dsh-enhanced/assistant-goals` | 实验性 | 按 owner 持久保存原生目标的上下文、下一步和阻塞；跨会话检索，完成状态等待独立验收。 |
 
+| [assistant-web-owner](assistant-web-owner) | `@dsh-enhanced/assistant-web-owner` | 实验性 | 原生 Web 的固定 owner、可信文本回合与 Session 生命周期接入。 |
+
 <!-- plugin-catalog:end -->
 
 状态建议使用“实验性 / Beta / 稳定 / 已弃用”。新增、重命名、弃用或移除插件时必须同步维护此表。

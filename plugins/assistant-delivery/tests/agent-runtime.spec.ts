@@ -3,9 +3,12 @@ import Loader from '@deepseek-ai/cordis-plugin-loader'
 import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
-import AgentPresets from '@deepseek-ai/dsh-agent-presets'
+import AgentPresets, { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
+import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
+import * as ApiRemotes from '@deepseek-ai/dsh-api-remotes'
 import SessionController from '@deepseek-ai/dsh-api-session-controller'
+import * as NativeWebOwnerPlugin from '../../assistant-web-owner/lib/index.js'
 import type {} from '@deepseek-ai/dsh-goal'
 import { AttachmentId, type AttachmentStore, type ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import type { PresetSpec } from '@deepseek-ai/dsh-permission-presets'
@@ -2728,6 +2731,148 @@ describe('real rc.1 delivery Agent runtime', () => {
       await follower.return?.()
       await reopened.ctx.fiber.restart()
     }
+  })
+
+  test('production Web owner admits a real native human turn, creates a business Goal and releases its idle Session', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-owner-')); roots.push(root)
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'web/browser/local/owner' }
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [
+        { id: 'web-ingest', effect: 'allow', subject: { kind: 'external', id: 'web/browser/local/owner' }, actions: ['ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'web-reply', effect: 'allow', subject, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'web-goal', effect: 'allow', subject, actions: ['create', 'observe', 'inspect', 'snapshot'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
+        { id: 'web-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
+      ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
+    })
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+    operator.handoffOwner(webPrincipal)
+    fixture.ctx.sessionProjections.register(agentPresetProjectionDefinition)
+    let webFiber: { dispose(): Promise<void> } | undefined
+    const eventAbort = new AbortController()
+    const eventStreams: Promise<void>[] = []
+    const forwarded: Array<Array<{ event?: string; args?: unknown[] }>> = [[], []]
+    let ownerHistory: AsyncIterator<unknown> | undefined
+    try {
+      fixture.ctx.provide('attachments', attachmentFixture().attachments)
+      fixture.ctx.provide('workspaceRegistry' as never, { get: () => undefined } as never)
+      await fixture.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
+      await fixture.ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)
+      await fixture.ctx.plugin(TypertRegistry)
+      fixture.ctx.typert.register((await import('@deepseek-ai/dsh-api-session-controller/typert')).TYPERT as never)
+      fixture.ctx.typert.register((await import('@deepseek-ai/dsh-goal/typert')).TYPERT as never)
+      await fixture.ctx.plugin(TypertGatewayService, {})
+      await fixture.ctx.plugin(ApiRemotes)
+      const gateway = fixture.ctx.typertGateway
+      for (const frames of forwarded) {
+        const stream = await gateway.wireStream.open('$events', { args: {} }, eventAbort.signal)
+        eventStreams.push((async () => {
+          try { for await (const frame of stream) frames.push(frame as { event?: string; args?: unknown[] }) }
+          catch (error) { if (!eventAbort.signal.aborted) throw error }
+        })())
+      }
+      await vi.waitFor(() => expect(forwarded.every(frames => frames.length > 0)).toBe(true))
+      const native = await nativeGoalPlugins()
+      await fixture.ctx.plugin(native.GoalService as never, {} as never)
+      await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+      const fiber = fixture.ctx.plugin(NativeWebOwnerPlugin, { principal: { account: 'browser', tenant: 'local', user: 'owner' }, workspace: root, preset: 'primary' })
+      await fiber; webFiber = fiber
+      const controller = fixture.ctx.get('sessionController')!
+      expect(controller).toBeDefined()
+      const created = await gateway.invoke({ namespace: 'session', method: 'create', args: { request: { cwd: root, agentPreset: 'primary' } } }) as { sessionId: SessionId }
+      const binding = operator.getBindingBySession(String(created.sessionId))!
+      expect(binding.principal).toEqual(webPrincipal)
+      ownerHistory = controller.follow({ address: { kind: 'session', sessionId: created.sessionId } }, eventAbort.signal)[Symbol.asyncIterator]()
+      expect((await ownerHistory.next()).value).toMatchObject({ type: 'snapshot', header: { id: created.sessionId } })
+      let humanTurn = false
+      let goalCreated = false
+      fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+        if (agent.id !== created.sessionId) return await next()
+        const human = fixture.service.currentPreferenceTurn(agent)
+        expect(human).toMatchObject({ sessionId: created.sessionId, principalId: 'web/browser/local/owner' })
+        humanTurn = human !== undefined
+        const result = await fixture.ctx.tools.execute({ callId: ToolCallId('web-native-goal'), name: 'goal_create', agent, signal,
+          arguments: { objective: 'Finish the Web owner project', max_goal_rounds: 2 } })
+        if (result.isError) throw new Error(JSON.stringify(result.content))
+        goalCreated = true
+        expect(fixture.ctx.assistantGoals.list(agent)).toHaveLength(1)
+        return await next()
+      })
+      await expect(gateway.invoke({ namespace: 'session', method: 'prompt', args: { request: { sessionId: created.sessionId, requestId: 'native-owner-message',
+        mode: 'queue', content: [{ type: 'text', text: 'Finish the Web owner project' }] } }, signal: new AbortController().signal })).resolves.toEqual({ accepted: true })
+      await vi.waitFor(() => expect(goalCreated).toBe(true), { timeout: 5_000 })
+      await vi.waitFor(() => expect(operator.getInboxByProviderEvent('web', 'browser', 'native-owner-message')?.status).toBe('processed'), { timeout: 5_000 })
+      expect(humanTurn).toBe(true)
+      expect(fixture.llm.requests).toHaveLength(1)
+      expect(fixture.ctx.agents.get(created.sessionId)).toBeUndefined()
+      const db = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try { expect(db.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(created.sessionId)).toMatchObject({ state: 'released' }) }
+      finally { db.close() }
+      expect(() => fixture.service.bindNativeWebOwner(fixture.ctx, { principal: webPrincipal, workspace: root, preset: 'primary' })).toThrow('already bound')
+      const foreign = await fixture.ctx.agents.create({ sessionId: 'foreign-session' as SessionId, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      try {
+        fixture.ctx.emit('agent/error', { agent: foreign.agent, error: new Error('foreign-private-error') } as never)
+        foreign.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'foreign-private-message' }], source: { kind: 'user' } }))
+        await vi.waitFor(() => expect(foreign.agent.session.snapshotEvents().some(event => event.type === 'turn/end')).toBe(true))
+        await expect(gateway.invoke({ namespace: 'session', method: 'page', args: { request: { address: { kind: 'session', sessionId: foreign.agent.id }, throughSeq: 100 } } })).rejects.toThrow('denied')
+        await expect(gateway.invoke({ namespace: 'skills', method: 'list', args: { request: { sessionId: foreign.agent.id } }, signal: new AbortController().signal })).rejects.toThrow('denied')
+        await expect(gateway.invoke({ namespace: 'goals', method: 'create', args: { agentId: foreign.agent.id, request: { objective: 'foreign-goal' } } })).rejects.toThrow('denied')
+      } finally { await foreign.dispose() }
+      fixture.ctx.emit('api-session/activity', created.sessionId, 123456)
+      await vi.waitFor(() => expect(forwarded.every(frames => frames.some(frame => frame.event === 'api-session/activity' && frame.args?.[1] === 123456))).toBe(true))
+      for (const frames of forwarded) {
+        expect(JSON.stringify(frames)).not.toContain('foreign-')
+        expect(frames.filter(frame => frame.event === 'api-session/added' && (frame.args?.[0] as { sessionId?: string })?.sessionId === created.sessionId)).toHaveLength(1)
+      }
+      const owner = operator.getPrincipal(webPrincipal)!
+      operator.revokePrincipal(owner.id, owner.version)
+      await expect(controller.inspect(created.sessionId)).rejects.toThrow('denied')
+      // Native follow has already buffered this turn. Revocation must prevent
+      // its next frame from crossing the previously opened read boundary.
+      await expect(ownerHistory.next()).rejects.toThrow('denied')
+    } finally { eventAbort.abort(); await ownerHistory?.return?.(); await Promise.all(eventStreams); await webFiber?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
+  test.each(['revoke', 'timeout', 'unload', 'forged-user'] as const)('native Web owner drains an active input on %s without replay', async reason => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-cancel-')); roots.push(root)
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [{ id: 'web-ingest', effect: 'allow', subject: { kind: 'external', id: 'web/browser/local/owner' }, actions: ['ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } }],
+    })
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions', 'llm'], apply(ctx: Context) {
+      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary', maxExecutionMs: reason === 'timeout' ? 300 : 10_000 })
+    } })
+    let started = 0
+    fixture.ctx.on('agent/pre-step', async ({ signal }, next) => {
+      started += 1
+      await new Promise<void>(resolve => { if (signal.aborted) resolve(); else signal.addEventListener('abort', () => resolve(), { once: true }) })
+      signal.throwIfAborted()
+      return await next()
+    })
+    try {
+      await fiber
+      const handle = await access!.create({ sessionId: 'native-cancel' as SessionId, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      const content = [{ type: 'text' as const, text: 'Run the owner task' }]
+      await access!.prompt({ sessionId: 'native-cancel', requestId: 'cancel-me', text: content[0]!.text, content }, async () => {
+        handle.agent.followup(createUserMessage({ content, source: { kind: 'user', rpcId: 'cancel-me' as never } }))
+        return { accepted: true }
+      }, new AbortController().signal)
+      await vi.waitFor(() => expect(started).toBe(1))
+      if (reason === 'revoke') { const owner = operator.getPrincipal(webPrincipal)!; operator.revokePrincipal(owner.id, owner.version) }
+      if (reason === 'unload') await fiber.dispose()
+      if (reason === 'forged-user') handle.agent.followup(createUserMessage({ content: [{ type: 'text', text: 'Run the owner task' }], source: { kind: 'user', rpcId: 'cancel-me' as never } }))
+      await vi.waitFor(() => expect(operator.getInboxByProviderEvent('web', 'browser', 'cancel-me')?.status).toBe('dead_letter'), { timeout: 3_000 })
+      expect(started).toBe(1)
+      expect(fixture.llm.requests).toHaveLength(0)
+      expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined()
+      const db = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try { expect(db.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'released' }) }
+      finally { db.close() }
+      await fixture.service.tick()
+      expect(started).toBe(1)
+    } finally { await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
   test('allows a scoped Web follow under an admitted Delivery lease, then drains it on scope unload', async () => {

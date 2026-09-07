@@ -17,3 +17,5 @@ export function apply(ctx: Context, config: import('./service.js').Config): void
 }
 
 export default AssistantDeliveryService
+
+export type { NativeWebOwnerAccess, NativeWebOwnerConfig } from './native-web-owner.js'
