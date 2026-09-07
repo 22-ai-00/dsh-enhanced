@@ -2216,6 +2216,48 @@ export class DeliveryStore {
     })
   }
 
+  /**
+   * Bootstrap one empty Delivery database for a fixed local operator.  This is
+   * deliberately narrower than handoffOwner(): once any principal history
+   * exists it can only return the exact, sole active owner without changing a
+   * row, its bindings, or any linked authority.
+   */
+  ensureOwner(input: ExternalPrincipalKey): DeliveryPrincipal {
+    this.assertOpen()
+    const principal = canonicalPrincipal(input)
+    const json = principalJson(principal)
+    const hash = digest(json)
+    const now = this.now()
+    return this.transaction(() => {
+      const total = (this.database.prepare('SELECT COUNT(*) AS count FROM delivery_principals')
+        .get() as { count: number }).count
+      if (total === 0) {
+        const id = `principal_${randomUUID()}`
+        this.database.prepare(`
+          INSERT INTO delivery_principals (
+            id, key_hash, principal_json, role, status, linked_to_id, created_at, updated_at, version
+          ) VALUES (?, ?, ?, 'owner', 'active', NULL, ?, ?, 1)
+        `).run(id, hash, json, now, now)
+        return principalFromRow(this.database.prepare(`
+          SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+          FROM delivery_principals WHERE id = ?
+        `).get(id) as unknown as PrincipalRow)
+      }
+      const exact = this.database.prepare(`
+        SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals WHERE key_hash = ? AND principal_json = ?
+      `).get(hash, json) as PrincipalRow | undefined
+      const activeOwners = this.database.prepare(`
+        SELECT id FROM delivery_principals WHERE role = 'owner' AND status = 'active'
+      `).all() as { id: string }[]
+      if (exact === undefined || exact.role !== 'owner' || exact.status !== 'active'
+        || exact.linked_to_id !== null || activeOwners.length !== 1 || activeOwners[0]?.id !== exact.id) {
+        throw new DeliveryStoreError('unauthorized-principal', 'local owner initialization cannot alter existing authority')
+      }
+      return principalFromRow(exact)
+    })
+  }
+
   isAuthorizedPrincipal(input: ExternalPrincipalKey): boolean {
     this.assertOpen()
     const row = this.database.prepare('SELECT status FROM delivery_principals WHERE key_hash = ?')

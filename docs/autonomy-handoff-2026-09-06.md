@@ -1,5 +1,7 @@
 # 自主智能体目标：跨设备交接
 
+> 最新安装更新（2026-09-07）：显式 `--scenario web` 已接到现有安装器，先安全初始化 owner/物化 profile 配置再探测启动。全新临时 DSH_HOME 的实际 DSH `0.1.2-rc.1` 安装和 Host activation 通过；重复 setup 保持 owner lineage 与配置不变。默认 core、真实用户 profile 和全局模型/权限设置未被擅自改变。最新完整检查与独立复核见落地账本末尾。浏览器消息端到端、完整自治配置、真实模型、跨日运行与其他工作包继续待做；这不是完整 18 项验收完成。
+
 > 最新 Web owner 入口更新（2026-09-07）：可选实验性 `assistant-web-owner` 已接通原生文本 → 固定 Delivery owner/Policy → 业务 Goal，以及共享 Session lease 与真实 teardown。实际 Gateway 的两个事件订阅端、foreign RPC 拒绝、撤权/超时/卸载/相同内容伪造消息取消和历史订阅撤权均已有回归证据。插件尚未发布或激活到真实 web profile；浏览器/HTTP/WS、完整安装、图片与忙时排队、真实模型及跨日验证仍待完成。完整根检查、独立复核与 C2C 记录以落地账本末尾为准；下文保存历史进度，不把旧 WIP 限制误当当前实现。全部 18 项目标仍未完成。
 
 用户要求暂时收尾并提交全部当前修改，换设备继续。本次为 **WIP 检查点**，不是完整验收或发布。主分支为 `dev`；接手先拉取远端，再读本文件及 [完整落地账本](agent-autonomy-implementation.md)。

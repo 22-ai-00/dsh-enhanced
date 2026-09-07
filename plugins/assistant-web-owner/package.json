@@ -6,6 +6,9 @@
   "type": "module",
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
+  "bin": {
+    "dsh-web-owner-setup": "./bin/dsh-web-owner-setup.js"
+  },
   "exports": {
     ".": {
       "types": "./lib/index.d.ts",
@@ -15,6 +18,7 @@
     "./package.json": "./package.json"
   },
   "files": [
+    "bin",
     "lib",
     "cordis.patch.yml",
     "README.md",
@@ -76,6 +80,7 @@
     "vitest": "catalog:"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "catalog:"
+    "@deepseek-ai/schemastery": "catalog:",
+    "yaml": "2.9.0"
   }
 }

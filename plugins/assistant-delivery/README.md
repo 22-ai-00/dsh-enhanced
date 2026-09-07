@@ -1,5 +1,7 @@
 # @dsh-enhanced/assistant-delivery
 
+本地安装初始化可使用 `ensurePrincipalLocally({ databasePath, principal })`：只在空库创建 owner，已有相同 active owner 时原样返回；不同身份、linked 或 revoked 均拒绝。它不具有 `pairPrincipalLocally()` 的 owner 交接副作用，适合可重复安装流程；显式交接继续使用原 API。
+
 `assistant-delivery` 是个人助理唯一的、与厂商无关的消息核心。它把外部身份、一次性配对、conversation→DSH session 绑定、持久 Inbox/Outbox、adapter 生命周期、receipt、重试、对账和 dead letter 放在一个可审计边界内；飞书、Telegram 等包只实现协议适配。
 
 本包不声明 exactly-once。它保证发送前先持久化 intent；若平台可能已经接收但响应丢失，则保留 `unknown_after_send`，只走 adapter 对账或显式 operator 决策，不盲目重发。

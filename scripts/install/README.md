@@ -12,6 +12,9 @@
 # 本机 Web/direct 核心
 ./scripts/install/install-local.sh --scenario core --yes
 
+# 实验性本机 Web owner：固定本机 workspace 与 preset，不配置飞书或常驻服务
+./scripts/install/install-local.sh --scenario web --workspace "$PWD" --agent-preset standard --yes
+
 # 飞书/Lark 持久消息、owner onboarding 与日常使用自动偏好学习
 ./scripts/install/install-local.sh --scenario lark --lark configure
 
@@ -30,6 +33,8 @@
 `supervised` 在此基础上额外安装 Evaluation、Evolution、Growth Experiments、Heartbeat、Recovery 与 Health；v2 激活器用同一 nonce 执行 preview→active 的固定 Host runbook。Recovery bootstrap 本身不依赖模型；独立 `supervised-growth-analyst` 每天最多运行一次，只能读取一个 Host 选出的 adoption candidate 并生成 owner 审批 proposal，不能投递普通模型正文。成长 overlay 会把 Heartbeat 连同 Delivery、Evaluation、Preference Learning、Evolution、Growth Experiments、Recovery、Lark Channel 和四个核心 service 标记为 Health required，并为审批后的 workflow replay/shadow/单次 canary 配置独立的低额度预算与 exact owner route。升级时旧 `supervised-growth` model heartbeat 会被安全暂停；TraeX 仍只在显式 `--with traex` 时安装。
 
 `--with coding|traex|health|heartbeat|events|bridge` 可为其他场景追加能力。`--scenario full` 只用于迁移旧的全量默认集合；新安装不应使用它。`--mode supervised-growth` 保持兼容，等价于 supervised 场景。
+
+`web` 是实验入口：它安装 core、Delivery、Goals 与 Web owner，并在第一次配置组合/activation probe 前运行 profile 内的 `dsh-web-owner-setup`，使用 `web/account=<profile>/tenant=local/user=operator` 的固定本机 owner。它不接入 Lark、不启动常驻服务，也不提高原生权限默认值。该入口尚不代表完整自治或真实模型验收；仍应按部署的模型、权限和工作区边界单独验证。Web owner 复用有效的 Delivery databasePath（默认是 `$DSH_HOME/assistant-delivery/state.sqlite`），不会替换或复活已有 owner；若另一 profile 的 Lark 也共享该数据库，setup 会拒绝，需使用独立的 `DSH_HOME`。为避免同一 profile 的 owner 语义混杂，已有启用 Lark channel、`--lark configure|keep`，或 `--agent-tools` 非 `preserve` 时会被拒绝。
 
 核心 profile 中的 `plugin_discover` 可立即按能力检索内置、完整性固定的首方候选目录；它不会下载或启用任何包。Agent 只能生成待审批 plan，owner 仍需用 `dsh-plugin-control approve` 与 `activate` 在 staging profile 中显式启用。写入 `~/.dsh/plugin-control/catalog.json` 的 owner catalog 会取代内置目录。
 

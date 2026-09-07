@@ -63,7 +63,9 @@ Install a minimal, runnable dsh-enhanced personal-assistant scenario.
 
 Options:
   --profile <name>          DSH profile (default: web)
-  --scenario <name>         auto, core, lark, supervised, or full (default: auto)
+  --scenario <name>         auto, core, web, lark, supervised, or full (default: auto)
+  --workspace <absolute>    Web owner workspace (web only; default: current directory)
+  --agent-preset <id>       Web owner Agent preset (web only; default: standard)
   --mode <mode>             standard or supervised-growth (default: standard)
   --with <add-on>           Add coding, traex, health, heartbeat, events, or bridge (repeatable)
   --ack-existing-automations
@@ -110,6 +112,8 @@ Agent tool modes:
 Scenarios:
   Capabilities are additive: core ⊂ lark ⊂ supervised.
   core       Local Web/direct core plus read-only plugin discovery.  No channel, daemon, or scheduler.
+  web        Experimental local Web owner: core plus Delivery, Goals, and Web owner setup.
+             It does not configure Lark or a resident service.
   lark       Core plus durable Delivery, bounded automatic preference learning,
              OS credential storage, and Feishu/Lark onboarding.
   supervised Lark plus Evaluation, deterministic Recovery, Health gates, and risk-tiered evolution.
@@ -575,6 +579,7 @@ dsh_enhanced_choose_scenario() {
     printf '  2) 飞书/Lark 常驻助理（需要 owner onboarding）\n' >&2
   fi
   printf '  3) 分级自治成长（飞书 + Recovery；低风险自动，高影响 owner 审批）\n' >&2
+  printf '  4) 实验性本机 Web owner（不配置飞书或常驻服务）\n' >&2
   printf '请选择 [1]：' >&2
   local choice
   IFS= read -r choice
@@ -582,6 +587,7 @@ dsh_enhanced_choose_scenario() {
     ''|'1') printf 'core' ;;
     '2') printf 'lark' ;;
     '3') printf 'supervised' ;;
+    '4') printf 'web' ;;
     *) return 2 ;;
   esac
 }
@@ -1914,6 +1920,21 @@ dsh_enhanced_apply_supervised_growth() {
   dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
 }
 
+dsh_enhanced_apply_web_owner() {
+  local profile="$1"
+  local dsh_home="$2"
+  local workspace="$3"
+  local preset="$4"
+  local dry_run="$5"
+  local setup_bin="$dsh_home/profiles/$profile/node_modules/.bin/dsh-web-owner-setup"
+  if [[ "$dry_run" != '1' && ! -x "$setup_bin" ]]; then
+    dsh_enhanced_fail 1 "找不到安装后的 dsh-web-owner-setup：$setup_bin"
+    return $?
+  fi
+  dsh_enhanced_run "$dry_run" "$setup_bin" --dsh-home "$dsh_home" --profile "$profile" \
+    --workspace "$workspace" --preset "$preset"
+}
+
 dsh_enhanced_install() {
   local source_mode="$1"
   local repo_root="$2"
@@ -1936,6 +1957,10 @@ dsh_enhanced_install() {
   local model_api=''
   local model_display_name=''
   local web_port="${DSH_ENHANCED_WEB_PORT:-3080}"
+  local web_workspace=''
+  local web_workspace_explicit='0'
+  local web_preset='standard'
+  local web_preset_explicit='0'
   local dsh_version="${DSH_VERSION:-$DSH_ENHANCED_DEFAULT_DSH_VERSION}"
   local plugin_version="${DSH_ENHANCED_VERSION:-latest}"
   local manage_service='1'
@@ -1956,6 +1981,18 @@ dsh_enhanced_install() {
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--scenario 需要一个值。'; return $?; }
         scenario="$2"
         scenario_explicit='1'
+        shift 2
+        ;;
+      --workspace)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--workspace 需要一个值。'; return $?; }
+        web_workspace="$2"
+        web_workspace_explicit='1'
+        shift 2
+        ;;
+      --agent-preset)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--agent-preset 需要一个值。'; return $?; }
+        web_preset="$2"
+        web_preset_explicit='1'
         shift 2
         ;;
       --mode)
@@ -2076,8 +2113,8 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 '--lark 只能是 auto、keep、configure 或 skip。'
     return $?
   esac
-  case "$scenario" in auto|core|lark|supervised|full) ;; *)
-    dsh_enhanced_fail 2 '--scenario 只能是 auto、core、lark、supervised 或 full。'
+  case "$scenario" in auto|core|web|lark|supervised|full) ;; *)
+    dsh_enhanced_fail 2 '--scenario 只能是 auto、core、web、lark、supervised 或 full。'
     return $?
   esac
   case "$deployment_mode" in standard|supervised-growth) ;; *)
@@ -2199,6 +2236,33 @@ dsh_enhanced_install() {
     fi
     deployment_mode='supervised-growth'
   fi
+  if [[ "$scenario" == 'web' ]]; then
+    if [[ "$web_workspace_explicit" != '1' ]]; then web_workspace="$PWD"; fi
+    if [[ "$web_workspace" != /* ]]; then
+      dsh_enhanced_fail 2 '--workspace 必须是绝对路径。'
+      return $?
+    fi
+    if [[ "$web_workspace" == *'*'* || "$web_workspace" == *$'\n'* || "$web_workspace" == *$'\r'* ]]; then
+      dsh_enhanced_fail 2 '--workspace 不能包含通配符或换行。'
+      return $?
+    fi
+    if [[ ! "$web_preset" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+      dsh_enhanced_fail 2 '--agent-preset 必须匹配 ^[a-z0-9][a-z0-9-]*$。'
+      return $?
+    fi
+    if [[ "$lark_mode" == 'configure' || "$lark_mode" == 'keep' || "$existing_lark_configured" == '1' ]]; then
+      dsh_enhanced_fail 2 'web 场景不能与 Lark configure/keep 或已有启用的 Lark channel 共用同一 profile。'
+      return $?
+    fi
+    if [[ "$agent_tools_mode" != 'preserve' ]]; then
+      dsh_enhanced_fail 2 'web 场景固定当前 owner capability 规则；--agent-tools 必须为 preserve。'
+      return $?
+    fi
+    lark_mode='skip'
+  elif [[ "$web_workspace_explicit" == '1' || "$web_preset_explicit" == '1' ]]; then
+    dsh_enhanced_fail 2 '--workspace 和 --agent-preset 仅适用于 --scenario web。'
+    return $?
+  fi
   if [[ "$scenario" == 'core' && ( "$lark_mode" == 'configure' || "$lark_mode" == 'keep' ) ]]; then
     dsh_enhanced_fail 2 'core 场景不包含飞书；请改用 --scenario lark 或 --scenario supervised。'
     return $?
@@ -2294,6 +2358,9 @@ dsh_enhanced_install() {
   }
   for slug in "${DSH_ENHANCED_CORE_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
   case "$scenario" in
+    web)
+      for slug in assistant-delivery assistant-goals assistant-web-owner; do dsh_enhanced_append_slug "$slug"; done
+      ;;
     lark)
       for slug in "${DSH_ENHANCED_LARK_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
       ;;
@@ -2369,6 +2436,10 @@ dsh_enhanced_install() {
   printf '  - %s\n' "${targets[@]}"
   printf '\n安装到 DSH profile：\n'
   dsh_enhanced_run "$dry_run" dsh plugin --profile "$profile" add "${targets[@]}" || return $?
+  if [[ "$scenario" == 'web' ]]; then
+    printf '\nWeb owner 初始化：\n'
+    dsh_enhanced_apply_web_owner "$profile" "$dsh_home" "$web_workspace" "$web_preset" "$dry_run" || return $?
+  fi
   printf '\n校验组合后的 profile：\n'
   if [[ "$dry_run" == '1' ]]; then
     dsh_enhanced_print_command dsh --profile "$profile" --dump-config
@@ -2389,9 +2460,9 @@ dsh_enhanced_install() {
   if dsh_enhanced_effective_lark_is_configured "$patch_path" "$existing_home_patch_path"; then
     lark_configured='1'
   fi
-  if [[ "$scenario" == 'core' ]]; then
+  if [[ "$scenario" == 'core' || "$scenario" == 'web' ]]; then
     lark_mode='skip'
-    printf '\n飞书处理：core 场景未安装 channel，已跳过。\n'
+    printf '\n飞书处理：%s 场景未安装 channel，已跳过。\n' "$scenario"
   elif [[ "$lark_mode" == 'auto' ]]; then
     if [[ "$assume_yes" == '1' ]]; then
       if [[ "$lark_configured" == '1' ]]; then lark_mode='keep'; else lark_mode='configure'; fi
@@ -2501,7 +2572,7 @@ dsh_enhanced_install() {
 
   printf '\n安装流程完成。\n'
   printf '检查配置：dsh --profile %s --dump-config\n' "$profile"
-  if [[ "$scenario" == 'core' ]]; then
+  if [[ "$scenario" == 'core' || "$scenario" == 'web' ]]; then
     printf '立即使用：dsh --profile %s\n' "$profile"
   fi
   if [[ "$manage_service" == '1' && "$lark_mode" != 'skip' ]]; then

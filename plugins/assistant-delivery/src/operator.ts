@@ -6,6 +6,16 @@ export interface LocalPairingInput {
   principal: ExternalPrincipalKey
 }
 
+/** Trusted one-time local bootstrap for a fixed owner; unlike pairing it never rotates authority. */
+export function ensurePrincipalLocally(input: LocalPairingInput): DeliveryPrincipal {
+  const store = new DeliveryStore({ path: input.databasePath })
+  try {
+    return store.ensureOwner(input.principal)
+  } finally {
+    store.close()
+  }
+}
+
 /**
  * Trusted, local-only control plane for onboarding an exact channel identity.
  * The caller must already have filesystem access to the private delivery DB.

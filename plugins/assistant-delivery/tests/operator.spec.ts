@@ -3,7 +3,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, test } from 'vitest'
 import * as delivery from '../src/index.ts'
-import { DeliveryStore } from '../src/store.ts'
+import { DeliveryStore, DeliveryStoreError } from '../src/store.ts'
 
 const roots: string[] = []
 
@@ -12,6 +12,99 @@ afterEach(async () => {
 })
 
 describe('trusted local pairing control plane', () => {
+  test('initializes only an empty database and preserves the exact owner and bindings idempotently', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-ensure-owner-'))
+    roots.push(root)
+    const databasePath = join(root, 'delivery.sqlite')
+    const principal = { channel: 'web', account: 'local', tenant: 'local', user: 'operator' }
+    const ensure = (delivery as Record<string, unknown>).ensurePrincipalLocally as (input: {
+      databasePath: string; principal: typeof principal
+    }) => ReturnType<DeliveryStore['getPrincipal']>
+    expect(ensure).toBeTypeOf('function')
+    const first = ensure({ databasePath, principal })!
+    const store = new DeliveryStore({ path: databasePath })
+    try {
+      const binding = store.createBinding({
+        conversation: { channel: 'web', account: 'local', tenant: 'local', kind: 'dm', chat: 'session-a' },
+        principal, workspace: '/work/web', agentPreset: 'standard', sessionId: 'session-a', policyRef: 'owner-dm',
+      })
+      expect(ensure({ databasePath, principal })).toEqual(first)
+      expect(store.getPrincipal(principal)).toEqual(first)
+      expect(store.getBinding(binding.id)).toEqual(binding)
+    } finally { store.close() }
+  })
+
+  test('refuses another owner and never changes the existing authority', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-ensure-other-'))
+    roots.push(root)
+    const databasePath = join(root, 'delivery.sqlite')
+    const first = { channel: 'web', account: 'local', tenant: 'local', user: 'first' }
+    const second = { channel: 'web', account: 'local', tenant: 'local', user: 'second' }
+    const ensure = (delivery as Record<string, unknown>).ensurePrincipalLocally as (input: {
+      databasePath: string; principal: typeof first
+    }) => ReturnType<DeliveryStore['getPrincipal']>
+    const owner = ensure({ databasePath, principal: first })!
+    expect(() => ensure({ databasePath, principal: second })).toThrowError(expect.objectContaining<Partial<DeliveryStoreError>>({ code: 'unauthorized-principal' }))
+    const store = new DeliveryStore({ path: databasePath })
+    try {
+      expect(store.getPrincipal(first)).toEqual(owner)
+      expect(store.getPrincipal(second)).toBeUndefined()
+    } finally { store.close() }
+  })
+
+  test('never revives a revoked owner', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-ensure-revoked-'))
+    roots.push(root)
+    const databasePath = join(root, 'delivery.sqlite')
+    const principal = { channel: 'web', account: 'local', tenant: 'local', user: 'operator' }
+    const ensure = (delivery as Record<string, unknown>).ensurePrincipalLocally as (input: {
+      databasePath: string; principal: typeof principal
+    }) => ReturnType<DeliveryStore['getPrincipal']>
+    const owner = ensure({ databasePath, principal })!
+    const store = new DeliveryStore({ path: databasePath })
+    try { store.revokePrincipal(owner.id, owner.version) } finally { store.close() }
+    expect(() => ensure({ databasePath, principal })).toThrowError(expect.objectContaining<Partial<DeliveryStoreError>>({ code: 'unauthorized-principal' }))
+    const reopened = new DeliveryStore({ path: databasePath })
+    try { expect(reopened.getPrincipal(principal)).toMatchObject({ id: owner.id, status: 'revoked', version: owner.version + 1 }) } finally { reopened.close() }
+  })
+
+  test('refuses linked authority but permits an exact owner with revoked history', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-ensure-history-'))
+    roots.push(root)
+    const databasePath = join(root, 'delivery.sqlite')
+    const ownerPrincipal = { channel: 'web', account: 'local', tenant: 'local', user: 'operator' }
+    const linkedPrincipal = { channel: 'web', account: 'local', tenant: 'local', user: 'linked' }
+    const ensure = (delivery as Record<string, unknown>).ensurePrincipalLocally as (input: {
+      databasePath: string; principal: typeof ownerPrincipal
+    }) => ReturnType<DeliveryStore['getPrincipal']>
+    const owner = ensure({ databasePath, principal: ownerPrincipal })!
+    const store = new DeliveryStore({ path: databasePath })
+    try {
+      const issued = store.issuePairing(linkedPrincipal, { ttlMs: 60_000, maxAttempts: 1 })
+      const linked = store.confirmPairing({ challengeId: issued.challenge.id, principal: linkedPrincipal, code: issued.code })
+      expect(linked).toMatchObject({ role: 'linked', status: 'active' })
+      expect(() => ensure({ databasePath, principal: linkedPrincipal })).toThrowError(expect.objectContaining<Partial<DeliveryStoreError>>({ code: 'unauthorized-principal' }))
+      store.revokePrincipal(linked.id, linked.version)
+    } finally { store.close() }
+    expect(ensure({ databasePath, principal: ownerPrincipal })).toEqual(owner)
+  })
+
+  test('two already-open stores admit only the first owner', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-ensure-race-'))
+    roots.push(root)
+    const databasePath = join(root, 'delivery.sqlite')
+    const first = { channel: 'web', account: 'local', tenant: 'local', user: 'first' }
+    const second = { channel: 'web', account: 'local', tenant: 'local', user: 'second' }
+    const left = new DeliveryStore({ path: databasePath })
+    const right = new DeliveryStore({ path: databasePath })
+    try {
+      const owner = left.ensureOwner(first)
+      expect(() => right.ensureOwner(second)).toThrowError(expect.objectContaining<Partial<DeliveryStoreError>>({ code: 'unauthorized-principal' }))
+      expect(right.getPrincipal(first)).toEqual(owner)
+      expect(right.getPrincipal(second)).toBeUndefined()
+    } finally { left.close(); right.close() }
+  })
+
   test('pairs one exact principal without returning a pairing secret', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-operator-'))
     roots.push(root)
