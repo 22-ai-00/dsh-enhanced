@@ -55,6 +55,14 @@ autonomy 安装在 Host 激活检查后还会执行有限隔离诊断；已撤�
 
 在该受管作用域中，模型只能调用受支持的隔离、目标上下文/检查点和获准的有限 Actions 工具，不能退回宿主 shell。Actions 默认无 grant，Keychain 不创建凭据。模型配置沿用安装器的独立引导；GitHub 目标/凭据、独立目标验收、后台唤醒以及完整自治生命周期仍需后续配置与验证。不要通过删除账本重置授权。
 
+## 为已有 Web Session 配置有限 Goal admission
+
+`autonomy` 安装完成后，`dsh-web-owner-setup` 可通过 `--goal-admission <private-json>` 和 `--session-id "$existingSessionId"` 写入一个有限目标 admission。先停止目标 Host，任务 JSON 必须是工作区外的绝对路径、当前用户所有并为 `0600`；随后重启 Host 才会读取新 patch。该 CLI 当前没有专用 Session ID 发现命令，也不保证 Web UI 显示它；操作者必须已持有准确的既有 idle Web owner Session ID。
+
+任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次调用预留至少 `2097152` input tokens；没有 USD 硬预算，也不接受 `costUsdMicros`。它固定 provider endpoint，使用 credential reference（如 `DEEPSEEK_API_KEY`），不接受明文 key。任务还必须提供有限的 isolated verification cases；可选 wake 也有独立次数、延迟和运行期限。重启后需在已有 Session 中选择 `deepseek-goal-metered` 下的任务模型；已有 Session/settings 模型选择不会被 CLI 自动迁移。
+
+此操作不会续期或重置 installer-managed Isolation grant；与本次任务要求冲突的已有受管配置或同 ID 条目会拒绝，不被覆盖。该精确 Session 只用于核验 owner 和可选 wake route，profiles 绑定 owner、scope 和 objective。成功只表示本地配置、已有 Web owner snapshot 和持久 grant 在写入时一致；不代表真实模型/网络调用、业务 Goal 完成、独立验收成功或完整自治功能已交付。详见 [Web owner Goal admission](../../plugins/assistant-web-owner/README.md#有限-goal-admission实验性)。
+
 核心 profile 中的 `plugin_discover` 可立即按能力检索内置、完整性固定的首方候选目录；它不会下载或启用任何包。Agent 只能生成待审批 plan，owner 仍需用 `dsh-plugin-control approve` 与 `activate` 在 staging profile 中显式启用。写入 `~/.dsh/plugin-control/catalog.json` 的 owner catalog 会取代内置目录。
 
 默认 Permission 是 `workspace-write + ask`；完整访问需要明确确认：

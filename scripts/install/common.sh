@@ -2412,7 +2412,7 @@ dsh_enhanced_install() {
       for slug in assistant-delivery assistant-goals assistant-web-owner; do dsh_enhanced_append_slug "$slug"; done
       ;;
     autonomy)
-      for slug in assistant-delivery assistant-goals assistant-web-owner assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier; do dsh_enhanced_append_slug "$slug"; done
+      for slug in assistant-delivery assistant-goals assistant-web-owner assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier assistant-deepseek-budget; do dsh_enhanced_append_slug "$slug"; done
       ;;
     lark)
       for slug in "${DSH_ENHANCED_LARK_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done

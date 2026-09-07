@@ -11,6 +11,8 @@ export * from './types.js'
 export * from './operator.js'
 export * from './learning-command.js'
 export { externalPrincipalId, ownerRouteAuthorityHash } from './canonical.js'
+export { inspectActiveWebOwnerBindingLocally } from './operator-snapshot.js'
+export type { ActiveWebOwnerBindingInspection, ActiveWebOwnerBindingQuery, ActiveWebOwnerBindingSnapshot } from './operator-snapshot.js'
 
 export function apply(ctx: Context, config: import('./service.js').Config): void {
   new AssistantDeliveryService(ctx, config)

@@ -428,3 +428,19 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 下一切片的只读探索结论（尚未实现）：复用 `dsh-web-owner-setup` 的 profile 合并、幂等与原子写入入口，读取本地可信验收模板和已建立的精确 Web Session，派生 owner route、两个隔离验收 profile、预算与可选 wake。现有 `DeliveryStore` 构造会迁移/写库，不能用它冒充只读预检；应提供 schema 19 的真正只读快照。现有 setup 目录锁只串行化配置写入，不证明 Host 已停止；后续要分别报告配置已写入、需要重启和实际运行检查结果，不以 dump-config 或 PID 查询假定生效。
 
 最终三个实际安装浏览器场景均退出 **0**：`pnpm test:autonomy:deepseek` 一条生产 adapter/meter 接线闭环，`pnpm test:autonomy` 两条既有有限执行与原生目标回归。最新 DeepSeek 用例仍为单提示、两轮原生 Goal、四份独立回执（先失败后通过）、四条 settled reservation；每次保留 2,097,152 输入 / 1,024 输出，最终按 12 输入 / 8 输出结算。源码独立复核 PASS；最终命令与 artifact 哈希复核记录在结构化证据中。
+
+
+### WP05/17：已有 Web Session 的私有目标配置（2026-09-07，基线 `16f9515`）
+
+实际安装中的 `dsh-web-owner-setup --goal-admission <private.json> --session-id <id>` 已接通离线配置。工作区外、当前用户私有且有界的 JSON 指定精确 objective、固定 DeepSeek 模型、原生回合预算、独立隔离验收和可选 wake。CLI 读取既有 owner/binding 与持久 grant，不迁移数据库、不配对、不获取执行 lease、不续期或重置 grant；写入前后复核，重复相同任务保持 patch 字节。配置锁只串行 setup，不能声称 Host 生命周期锁或跨库原子事务。验收 profiles 绑定 owner/scope/objective，精确 Session 用于 owner 检查与后台 route，不冒充所有前台会话的隔离边界。
+
+- Delivery 新增真正 read-only 的 schema 19 snapshot；拒绝非私有数据库、非 canonical Web dm、旧 schema、owner/version/scope 不符与非 released lease。旧包缺新 API 时，CLI 在 IO 前明确要求升级。
+- autonomy 安装器预装默认禁用的 DeepSeek bundle；本次任务配置才启用模型路由。原生 Session/settings 保留自己的模型选择，因此重启后必须在原生模型菜单选任务模型；CLI 输出和用户说明均明确此步。当前仍缺专用 Session ID 发现与完整图形配置入口，WP17 不标完成。
+- 背景 Policy 只允许目标上下文、`isolation_run`、精确 `isolation:<grantId>`、绑定回复和持久 wake 所需操作；其他 grant、宿主 bash、goal 控制及外部提交仍拒绝。真实后台测试发现漏配的二级 grant 授权，补充后才取得通过证据。
+- 实际浏览器从安装、准备会话、停 Host、调用已安装 CLI 两次、重新认证/选模型，到调度后再次停止并启动 Host。3 个真实 Host 进程中，后台在同一 Session 完成两轮：错误产物→step/outcome not-achieved→读取独立反馈→修正→step/outcome achieved→native complete，wake succeeded；4 条模型 reservation 均 settled，每次预留 2,097,152 输入 / 1,024 输出，按 12 / 8 实际用量结算，无逐条审批。付费 HTTP 响应明确为夹具，另有 1 次仅准备会话的 fixture adapter；生产 Goals、meter、Verifier 和 Docker 都实际运行，但没有真实付费模型或智能增益证明。
+
+根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<本机固定镜像> pnpm check` 退出 **0**：主 284 文件 / 3,695 项，递归 Delivery 696、Goals 82、Web owner 29 项通过，零 lint 警告、typecheck/build 及 28 插件 / 3 共享库的 31 份 dry-run pack 通过。主测试收集后追加的旧 API 用例已由递归 Web owner 测试和最终 8 项专项覆盖；最终 guard/grant 修复另通过 Web owner 类型检查、构建及根 lint。实际打包包含 setup bin、goal-admission/goal-setup 和 Delivery operator-snapshot 产物，无测试或状态数据库。浏览器 v1/v3 的定位错误、v2 的持久模型选择和 v4 的漏配后台 grant 均保留失败记录，v5 完整闭环才计为成功。
+
+源码独立只读复核 PASS；命令、失败记录与实际产物见 [配置证据](evidence/goal-admission-setup-2026-09-07.json)。C2C `c2c_a943` 仅保存本地执行记录，内置浏览器不可用，未取得 ChatGPT 网页评审。全部 18 项仍为 3 已验证 / 7 实现中 / 8 待做，按依赖与证据连续推进；真实模型、其他工作包与完整安装体验继续验收，长期主动性观察留在交付后，不为人工天/周排期等待。
+
+最终安装浏览器验收共 3 条通过：`pnpm test:autonomy:setup` 的新 CLI/实际重启闭环 1 条，`pnpm test:autonomy` 的原有隔离产物闭环与有限执行安装 2 条。原有用例仍保留自身显式模型/验收夹具，不将它们误称为新 CLI 场景。

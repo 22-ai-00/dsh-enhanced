@@ -29,7 +29,8 @@
     "test:web-owner:real": "playwright test --config scripts/e2e/playwright-real.config.mjs",
     "typecheck": "pnpm run build && pnpm --recursive --if-present run typecheck",
     "validate": "node ./scripts/validate-workspace.mjs",
-    "test:autonomy:deepseek": "playwright test --config scripts/e2e/playwright-deepseek.config.mjs"
+    "test:autonomy:deepseek": "playwright test --config scripts/e2e/playwright-deepseek.config.mjs",
+    "test:autonomy:setup": "playwright test --config scripts/e2e/playwright-goal-setup.config.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",

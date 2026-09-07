@@ -101,3 +101,5 @@ Isolation schema v2 在同一 SQLite 事务中预留 worker memory + workspace c
 `assistant-deepseek-budget` 是可选独立 bundle，持有自己的 `deepseek-goal-metered` provider 和两个精确文本模型的 Goals meter。它不为其他 provider 同名配置背书，不读取可配置模型目录来推导预算。固定 HTTPS Chat Completions 请求禁止重定向，不使用内部自动重试；按有限响应字节和期限读取完整 JSON，然后才向原生 LLM stream 发布验证后的内容、usage 和终态。AgentLoop、工具执行、Goal 轮次和持久预算仍由现有服务拥有。
 
 计量依赖有期限的官方 API 契约：使用覆盖文档上下文口径的保守输入预留，成功时按包含缓存的实际输入结算；无法确认时保留原预留。它不声明金额上限，价格快照不能成为稳定账单保证。普通前台与辅助请求不属于 Goals 原生回合预算，仍受单次输出、响应字节和请求期限约束；完整账户预算另行接入。
+
+已有 Web owner 的目标配置继续由 `assistant-web-owner` 的安装内 CLI 负责。离线 `--goal-admission` 路径动态加载可选 Goals/Verifier/DeepSeek peers，将工作区外私有任务规格编译成 owner/scope/objective 精确验收、有限预算及可选的 Session wake route；每个 bundle 仍独立安装，autonomy 安装器只预装禁用的模型 bundle。Delivery 提供只读 owner/binding 快照，配置器不构造会迁移数据库的 DeliveryStore，也不获取运行 lease、续期 grant 或创建 Goal。配置锁只序列化 setup，DB 快照与文件替换不构成跨库事务；Host 停止后配置，重启后运行时再次核对权限。持久 Session/settings 模型选择由原生 UI 管理，改默认配置不会迁移既有选择。
