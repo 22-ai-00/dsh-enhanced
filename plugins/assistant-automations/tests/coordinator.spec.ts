@@ -554,7 +554,7 @@ describe('automation coordinator', () => {
     await value.coordinator.stop()
     value.store.close()
     vi.useRealTimers()
-  }, 2_000)
+  })
 
   test('cleans execution timers and commits unknown when circuit projection throws', async () => {
     vi.useFakeTimers()

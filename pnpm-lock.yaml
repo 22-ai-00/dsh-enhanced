@@ -687,9 +687,15 @@ importers:
       '@dsh-enhanced/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
+      '@dsh-enhanced/assistant-policy':
+        specifier: workspace:*
+        version: link:../assistant-policy
       '@dsh-enhanced/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
+      '@dsh-enhanced/personal-memory':
+        specifier: workspace:*
+        version: link:../personal-memory
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0

@@ -11,7 +11,7 @@ const digest = (value: string): string => value.repeat(64).slice(0, 64)
 const config = (): NativeBenchmarkConfig => ({
   id: 'native-public-development', cases: [developmentCases()[0]!.id],
   variants: [{ id: 'baseline', role: 'baseline', persona: 'Answer JSON.' }, { id: 'candidate', role: 'candidate', persona: 'Answer JSON carefully.' }],
-  model: { provider: 'fixture', model: 'fixture-model', temperature: 0, maxOutputTokens: 20, inputUsdMicrosPerMillionTokens: 1, outputUsdMicrosPerMillionTokens: 1, adapterDigest: digest('a'), tokenCounterDigest: digest('b') },
+  model: { provider: 'fixture', model: 'fixture-model', temperature: 0, maxOutputTokens: 20, inputUsdMicrosPerMillionTokens: 1, outputUsdMicrosPerMillionTokens: 1, cacheReadUsdMicrosPerMillionTokens: 1, cacheWriteUsdMicrosPerMillionTokens: 1, adapterDigest: digest('a'), tokenCounterDigest: digest('b') },
   budget: { durationMs: 1_000, inputTokens: 100, outputTokens: 20, costUsdMicros: 100, toolCalls: 0 }, repeats: 2, seed: 7,
 })
 

@@ -727,7 +727,10 @@ describe('release version workflow', () => {
       'pnpm run build:packages'
       + ' && pnpm --filter @dsh-enhanced/assistant-policy run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-evaluation run build'
-      + ' && pnpm --filter @dsh-enhanced/assistant-delivery run build',
+      + ' && pnpm --filter @dsh-enhanced/assistant-delivery run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-verifier run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-automations run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-goals run build',
     )
     expect(manifest.scripts.test).toMatch(/^pnpm run build &&/)
     expect(manifest.scripts.test).toContain('vitest run --testTimeout=15000 tests')

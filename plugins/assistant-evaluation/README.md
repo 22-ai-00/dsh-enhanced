@@ -106,21 +106,25 @@ scope、situation、producer/evaluator id、证据引用和指标属于本地评
 
 报告保留所有计划 cell 作为已验证成功率分母，unknown 和缺测单列，缺失费用/token/返工/人工介入量不会补成零。提供配对胜负、差值和均值/中位数/P95；区间按任务聚类 bootstrap，同题重复不当作独立任务。任一比较臂有缺测或 unknown 就不报告收益差值与区间，不能把基线的未知结果当作失败来制造增益；单臂有 unknown 也不报告其成功率区间。少于两个任务不提供区间。小样本或同质任务仍不足以证明泛化收益，报告始终 `promotionAuthorized: false`。
 
-**当前完成范围：** 冻结协议、持久账本、有界协调器、统计计算、8 道公开合成开发题（研究/注入各 4 道）、原生 AgentLoop 执行器及 `dsh-benchmark` 命令。原生执行器每个 cell 创建独立 Context/Session/临时目录，只做一次无工具模型请求，当前只比较 persona；记忆/规划/复核/成长插件均关闭，不能冒充完整功能消融。真实模型比较、其他六个任务域、实际生产 profile 安装与独立留出隔离仍须分别验收。
+**当前完成范围：** 冻结协议、持久账本、有界协调器、统计计算、原生 AgentLoop 执行器及 `dsh-benchmark` 命令。默认 `research-v1` 保留 8 道公开研究/注入开发题与 persona 比较；`memory-v2` 增加 6 道公开记忆开发题，覆盖条件、反例、分歧、可见性、撤回和注入。每 cell 使用独立 Context/Session/临时数据库，只做一次无工具模型请求。Memory 两臂使用相同任务、persona、模型、种子记忆和预算，均经过真实 Personal Memory 提案与 Host 审批，只有候选允许自动 snapshot 检索。此对照测量检索可用性，不把额外知识带来的结果变化解释为模型本身变聪明；完整跨日任务、规划/复核/成长组合、生产安装和独立留出仍待分别验收。
 
 ### 开发集命令
 
 ```sh
 dsh-benchmark doctor
 dsh-benchmark corpus
+dsh-benchmark doctor --suite memory-v2
+dsh-benchmark corpus --suite memory-v2
 dsh-benchmark plan --config ./benchmark.json --output ./plan.json
 dsh-benchmark run --config ./benchmark.json --adapter /absolute/trusted-adapter.mjs --database ./private/results.sqlite --output ./report.json
 dsh-benchmark report --database ./private/results.sqlite --plan my-plan --output ./report-copy.json
 ```
 
-`doctor` 检查所需 Host 包可解析，不证明模型或凭据可用。`plan` 不调用模型，并显示整组最大 token 与费用预算。`run` 读取配置、冻结计划，再载入操作者指定的可信模块；模块须导出 `createNativeAdapter(model)`，返回 `LlmAdapter`、`inputTokenUpperBound(options)` 和 `dispose()`，入口 SHA-256 必须同时匹配 `adapterDigest` 与 `tokenCounterDigest`。这是有宿主权限的扩展，不能执行候选生成的不受信任模块；摘要不覆盖传递依赖，也不是同 UID 文件系统攻击防护。原生依赖保持 optional peer，通过 `./benchmark/native` 单独导入；轻量 SDK 不强制加载 AgentLoop。
+`doctor` 检查所需 Host 包可解析，不证明模型或凭据可用。`plan` 不调用模型，并分别显示整组可保证上限与观测阈值；无法保证的 maximum 字段为 null。`run` 读取配置、冻结计划，再载入操作者指定的可信模块；模块须导出 `createNativeAdapter(model, { ctx, workspace })`，返回 `LlmAdapter`、输入计数函数和 `dispose()`；工厂调用时 live SessionStore/AgentRegistry 已存在，现有只接收 model 的工厂可继续使用。默认计数函数为 `inputTokenUpperBound(options)`；显式 estimate 模式使用 `inputTokenEstimate(options)`，入口 SHA-256 必须同时匹配 `adapterDigest` 与 `tokenCounterDigest`。这是有宿主权限的扩展，不能执行候选生成的不受信任模块；摘要不覆盖传递依赖，也不是同 UID 文件系统攻击防护。原生依赖保持 optional peer，通过 `./benchmark/native` 单独导入；轻量 SDK 不强制加载 AgentLoop。Memory suite 另外要求 `personal-memory` 与 `assistant-policy >=0.1.24 <0.2.0`，只在选择该 suite 后加载，不改日常 bundle 激活。先停止 agent，再释放 Context/SQLite 和 adapter，最后移除临时目录。
 
-配置示例、计量协议和限制见 [评测实施文档](../../docs/benchmark-implementation.md)。预算为每 cell 上限；金额单位为美元的百万分之一，计价为每百万 tokens 对应的该单位。`costUsdMicros: null` 明确选择仅 token 预算，模型输入/输出价格也可同时为 null；报告中的未知费用不会填成零。声明金额上限时必须提供价格。可信适配器须关闭隐藏自动重试、提供可靠的输入上界，并规范化提供商计量；原生执行器拒绝未规范化的缓存/推理分项，避免漏算或重复计算。超时或 unknown 会停止后续 cell，不声称撤销远端已经发生的计费。
+配置示例、计量协议和限制见 [评测实施文档](../../docs/benchmark-implementation.md)。预算为每 cell 上限；金额单位为美元的百万分之一，计价为每百万 tokens 对应的该单位。`costUsdMicros: null` 明确选择仅 token 预算，模型输入/输出价格也可同时为 null；报告中的未知费用不会填成零。声明金额上限时必须提供非缓存输入、cache read、cache write、输出四类费率，且必须使用输入上界和提供商输出上限；输入预留采用三类输入的最高费率。DSH 的非缓存 input 与两类 cache 相加为实际输入，reasoning 已包含在 output 中，不重复计费。实际使用了缺价的 cache 时，费用保持 null。可信适配器须关闭隐藏自动重试。
+
+某些订阅线路不支持温度或远端输出上限：可以明确设置 `temperature: null`、`inputLimitMode: "estimate"`、`outputLimitMode: "observed"`，且只使用 token 预算。此时输入估算用于调用前筛选，实际 usage 用于调用后核验；超额、缺 usage 或 unknown 会停止后续 cell，不能追回远端消费。计划将不可保证的 maximum token 字段标为 null。仓库提供 [Codex 适配器](../../scripts/benchmark/codex-subscription-adapter.mjs)，复用现有登录与 live Session 身份，仅由操作者显式选择；可选 `DSH_BENCHMARK_TRACE` 将公开开发集输入、输出和 usage 记录到本地指定文件，请仅在需要诊断时启用。
 
 命令使用网络/凭据的权限由可信模型适配器决定；自身读取配置和模块，写独立私有 SQLite 与独占新建的 JSON 报告，创建并清理临时工作目录，不安装提供商、不修改日常 profile。报告不包含模型原始答案，判定绑定答案哈希与开发集验收摘要。`split: holdout` 只声明用途，同 UID 文件或公开仓库中的题目/答案不属于安全隐藏留出。
 
@@ -141,3 +145,6 @@ Delivery's authenticated capability can explicitly correct or withdraw one exact
 Legacy schema 7 owner rows are adopted lazily through the exact Host delivery capability and stable initial idempotency key. Adoption verifies the run and Outbox references without rewriting raw history. Host consumers receive revision notifications and must also revalidate durable proof on startup / dispatch; a failed listener cannot prevent other consumers or the projection outbox from progressing.
 
 整体目标的独立 v3 回执使用 `goal-outcome/<assessmentId>` subject，与同 ref 的步骤、前台和 Automation 分离，仍按完整目标定义归因。schema 11 在事务内迁移旧 task projections 并保留历史；owner 反馈修订工具的原支持范围不变。
+
+
+`memory-v1` 保留首轮公开试验的原始题目与判定，可按原计划复现。`memory-v2` 是单独版本，明确当前资料 ID、Memory provenance URI 与 `claim:<key>` 的引用约定；改进题目说明后必须建立新计划，不会重写 v1 的失败结果。
