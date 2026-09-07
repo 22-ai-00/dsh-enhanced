@@ -1,3 +1,5 @@
+import type { CreationWitness } from './runtime-witness.js'
+
 /** Owner identity is attested by the Host, never supplied in a model tool call. */
 export interface IsolationIdentity {
   principalDigest: string
@@ -65,6 +67,10 @@ export interface IsolationJob {
   /** Conservative worker + workspace + keeper reservation; zero denotes legacy work. */
   reservedMemoryMiB: number
   reservedWorkspaceInodes: number
+  /** Persisted before handing any create authority to a supervisor. */
+  dispatchAttempted: boolean
+  /** Host-only diagnostic evidence; never an authorization to release resources. */
+  creationWitness?: CreationWitness
   status: IsolationStatus
   version: number
   createdAt: number
@@ -88,6 +94,8 @@ export interface IsolationRunInput {
 }
 
 export interface IsolationProcessResult {
+  /** Private Host evidence, excluded from model-facing results. */
+  creationWitness?: CreationWitness
   artifacts?: IsolationFile[]
   status: IsolationResult['status']
   quiescent: boolean

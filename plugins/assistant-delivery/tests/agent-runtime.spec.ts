@@ -663,7 +663,7 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
   await service.whenIdle()
 }
 
-async function scheduledGoalHarness(root: string, saved: Map<string, SavedSession>, runTimeoutMs = 5_000) {
+async function scheduledGoalHarness(root: string, saved: Map<string, SavedSession>, runTimeoutMs = 5_000, verificationTimeoutMs = 1_000) {
   const ownerId = 'lark/bot-1/tenant-a/ou_owner'
   const fixture = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
     presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
@@ -700,12 +700,12 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
   const owner = runtimeStore(fixture.service).getPrincipal(principal)!
   const objective = 'Resume the scheduled report in its original Session'
   await writeFile(join(root, 'wake-report.md'), 'Confirmed scheduled report')
-  const authority = { kind: 'document' as const, id: 'wake-source', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
+  const authority = { kind: 'document' as const, id: 'wake-source', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: verificationTimeoutMs, maxResponseBytes: 4_096 }
   const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
   await fixture.ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
     authorities: [authority], profiles: [{ id: 'wake-step', version: 1, scope: { workspace: root, preset: 'primary' },
       owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective, validityMs: 60_000,
-      bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'report', kind: 'document-citations', authority: { id: 'wake-source', digest }, artifactPath: 'wake-report.md', requiredText: ['Confirmed scheduled report'], quotes: [] }],
+      bounds: { maxDurationMs: verificationTimeoutMs, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'report', kind: 'document-citations', authority: { id: 'wake-source', digest }, artifactPath: 'wake-report.md', requiredText: ['Confirmed scheduled report'], quotes: [] }],
     }],
   })
   const schedule = async () => {
@@ -984,14 +984,15 @@ describe('real rc.1 delivery Agent runtime', () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-reload-')); roots.push(root)
     const saved = new Map<string, SavedSession>()
     // This success case includes a full Host reload under suite load. Keep
-    // deliberate timeout/revocation cases on their own tighter budgets.
-    const first = await scheduledGoalHarness(root, saved, 15_000)
+    // deliberate timeout/revocation cases on their own tighter budgets. The
+    // independent file verifier also needs headroom for real I/O under load.
+    const first = await scheduledGoalHarness(root, saved, 15_000, 5_000)
     const wake = await first.schedule()
     const before = JSON.parse(first.readWake(wake.id).intent_json)
     expect(first.llm.requests).toHaveLength(1)
     expect(before.native).toMatchObject({ phase: 'paused', roundsStarted: 0, maxGoalRounds: 1 })
     await first.ctx.fiber.restart()
-    const restarted = await scheduledGoalHarness(root, saved, 15_000)
+    const restarted = await scheduledGoalHarness(root, saved, 15_000, 5_000)
     const observations: Array<{ session: string; human: boolean }> = []
     restarted.ctx.on('agent/pre-step', async ({ agent }, next) => {
       observations.push({ session: String(agent.session.id), human: restarted.service.currentPreferenceTurn(agent) !== undefined })
@@ -1011,7 +1012,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     try { contracts = verification.prepare('SELECT id FROM acceptance_contracts').all() as Array<{ id: string }> }
     finally { verification.close() }
     const steps = contracts.map(({ id }) => restarted.ctx.assistantVerifier.inspectAcceptedTask(id)!)
-    expect(steps[0]).toMatchObject({ state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'achieved', results: [{ status: 'passed' }] } })
+    expect(steps[0], JSON.stringify(steps[0])).toMatchObject({ state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'achieved', results: [{ status: 'passed' }] } })
     expect(steps).toHaveLength(1)
     expect(steps[0]).toMatchObject({ contract: { task: { kind: 'goal-step', goal: { sessionId: before.native.sessionId, nativeGoalId: before.native.goalId } } } })
     await restarted.ctx.assistantAutomations.tick(); await restarted.ctx.assistantAutomations.whenIdle()

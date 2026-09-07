@@ -285,3 +285,18 @@
 - 本切片不等于完整 08–10：仍需 daemon epoch/可信运维对账来处理创建回执不明的作业、持续 unknown 清理、审计/结果保留、独立动作/凭据 broker、无逐条审批的短期动作 lease、补偿/回滚、生产 bootstrap 和真实 profile/模型闭环。同 ledger 资源池不是全机 Docker/kernel 开销或不同 stateRoot 的统一硬约束。全部 18 项仍为 3 已验证 / 7 实现中 / 8 待做，按依赖和证据继续，无按天等待或两周观察门槛。
 - 本批最终根 `CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check` 退出 **0**（`/tmp/dsh-quota-check-v2.log` / `.exit`）：26 插件/3 共享库、零 lint 警告、所有类型检查、主测试 **256 文件 / 3520 项通过**、Isolation **10 文件 / 34 项通过**、递归包测试、完整构建与 **29 个 dry-run pack** 均通过。已检查 Isolation 包含编译后的 CLI、runtime supervisor、patch/README/LICENSE，不含测试/源码/数据库。此前测试字符串转义/optional 字段类型错误与一次 lint 失败分别记录，未当作最终通过。
 - [配额证据](evidence/isolation-quota-2026-09-07.json) 保存实际存储探测、反向失败/恢复、13 条完整终态命令日志和最终源文件哈希。Codex with ChatGPT 任务 `c2c_6a42` 记录 13 条本地执行结果；所需内置浏览器仍不可用，未取得 ChatGPT 网页规划或评审。独立 verifier 已检查实现并发现创建歧义恢复漏洞，随后确认修复条件；最后证据/hash/pack 复核因子代理 usage limit 中断，**不声称最终独立 PASS**。主协调自行核对最终全仓退出码与证据接受当前实现；独立终审及完整 18 项目标继续保留。
+
+
+### 2026-09-07：隔离启动前持久记录与重启诊断（WP08–10 切片，基线 `8c215cb`）
+
+- 修复真实恢复窗口：Host 在 fork 监督器后、`start` CAS 前崩溃时，旧 `prepared` 作业仍可能发送晚到 Docker create。现在 fork 前用当前 controller fence/version 持久提交 `supervisor-spawn-intent`；`start` 同样设置已派发标记。schema v3 原子迁移 v1/v2，旧行缺少未派发证明时统一按已尝试处理，新 prepare 显式写未派发，不沿用迁移列的保守默认值。
+- Service 恢复与 Ledger settle 双层阻止已派发 unknown 变为 quiescent；覆盖 IPC 关闭、监督器退出、异常清理和创建回执超时，而非仅按某一 reason 判断。实际清理仍尝试执行，未知结果与资源预留保留、不重放。仅能证明尚未派发的新作业继续允许普通恢复清理后释放。该规则有明确可用性代价；完整安全对账尚未启用，不能删除账本来释放配额。
+- 新的私有运行时见证记录 Linux boot ID、PID/start ticks、Docker Engine ID 和规范化路径。读取失败、boot ID 缺失、PID 文件/套接字替换均保守拒绝；有界 Docker info 前后重查元数据，PID 文件非阻塞打开并关闭句柄。只有收到监督器最终 IPC 且前后 daemon 相同时才保存诊断见证；它单独入库，模型结果中移除该字段。Host 在最终回执前崩溃时不会伪造见证。
+- 真实崩溃回归使用可控 CLI 屏障：Host 进程组被 SIGKILL，继任 controller 已检查当前资源不存在，随后旧监督器的真实 volume create 才发生。修复后仍占用；暂时去掉两个 hold 条件时实际得到错误 quiescent:true，测试退出 1，finally 逐字节恢复源码。未以固定观察时长代替这个因果窗口。
+- 可复现的 `scripts/isolation/daemon-witness-probe.py` 在独立 rootless Docker 中验证：旧 supervisor/daemon 存活拒绝、daemon 离线拒绝、同数据目录重启后 Engine ID 相同且 PID/start ticks 改变、不同 Engine ID 拒绝，以及真实卷跨重启保留后被删除。私有进程组全部停止，共享 daemon 未重启。该探针仅验证候选诊断，不证明其无 cgroup 委派的运行环境可承担 worker 隔离。
+- 自动释放未接入：本机 socket activation 使 SO_PEERCRED 对端为 systemd PID 1，受保护 PID 文件与当前 Engine ID 还不足以单独证明套接字属于该 daemon；仍需可信绑定、旧请求停止屏障及清理后持久 CAS。`eligibleRestartWitness` 无生产调用，不把诊断候选当作放行凭证。持续清理、审计保留、动作/凭据 broker、补偿/回滚、安装 bootstrap 及真实 profile/模型闭环继续待做。18 项状态保持 3 已验证 / 7 实现中 / 8 待做，不受人工天/周估算限制，也无两周观察交付门槛。
+- 全仓首轮主测试 258 文件 / 3531 项中，新增隔离回归全部通过；唯一失败为既有 Delivery 重载成功夹具的 1 秒独立文件验收出现 unknown。未改代码单独复跑该用例通过。仅给该成功夹具两个调用的 verifier 期限显式 5 秒，保留其他用例默认 1 秒及所有生产超时/撤权语义，补完整 receipt 失败诊断；最终全仓与独立复核结果附后。
+
+- 最终根 `CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=<记录的本地镜像 ID> pnpm check`（`/tmp/dsh-dispatch-check-v2.log` / `.exit`）退出 **0**：26 插件/3 共享库、零 lint 警告、全量类型检查、主 **258 文件 / 3531 测试**、Isolation **12 文件 / 45 测试**、全部递归包测试/构建及 **29 个 dry-run pack** 通过；Isolation 49 个文件包含新增 witness JS/声明、CLI、监督器、patch/README/LICENSE，不含源码/测试/数据库。
+- 全量测试阶段之后，仅纠正 service 撤销回归的旧预期：已派发 unknown 应保留占用，并追加实际持久结果/恢复列表检查。生产文件未再改动。随后单独执行 Isolation typecheck、4 文件/22 测试及全仓 lint 全部退出 0；不把全仓检查冒称为覆盖这次后续测试断言修改。
+- [结构化证据](evidence/isolation-dispatch-2026-09-07.json) 保存 12 个源码/脚本哈希、12 条终态命令日志/退出码、真实反向失败与逐字节恢复、独立 daemon 重启及 systemd 只读观测。C2C `c2c_6671` 已记录逐命令输出；所需内置浏览器不可用，未取得 ChatGPT 网页审查。独立 verifier 最终 **PASS** 限于本批安全修复与诊断基础，主协调复算全部源码/日志哈希与退出码后接受。完整 18 项目标保持未完成，下一步验证 systemd 服务/监听关系能否形成可信绑定，再完成安全释放协议与动作 broker。
