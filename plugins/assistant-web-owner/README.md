@@ -58,3 +58,11 @@ Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租�
 单元与组合测试覆盖实际 AgentLoop、SessionController、Typert Gateway、双事件订阅、SQLite、业务 Goal 及空闲后恢复。另有独立浏览器命令 `CI=true pnpm test:web-owner`：全新临时 profile 安装、真实认证/HTTP/WS、原生审批、Goal 落库、Host 重启后新浏览器上下文恢复同一会话，详见仓库 `scripts/e2e/README.md`。模型仍为确定性 adapter；这些证据不证明真实模型收益、可信目标达成或长期自治。该命令需要本地 DSH 与 Chromium，不包含在普通 `pnpm check` 中。
 
 可选的 `CI=true pnpm test:web-owner:real` 使用现有 Codex subscription 登录，验证真实模型生成程序、原生目标续跑、独立步骤/整体回执以及最终释放。它有精确工具范围和模型调用/时间上限，属于有引导的小任务实验，不证明长期自治、生产 token/费用硬预算或 OS 隔离；前置条件与证据边界见同一浏览器说明。
+
+## 有限离线执行安装
+
+仓库安装器 `--scenario autonomy` 调用本包 setup 的可选 `--isolation-image`、`--isolation-max-runs`、`--isolation-lease-ms`、`--isolation-runtime-ms`。普通 Web setup 不加载 Isolation；显式选择时需安装匹配版本的 Isolation、Actions 和 Keychain。
+
+该路径先验证最终合并配置，再使用实际配置的 Docker executable 和生产 supervisor 做固定任务探测，成功后初始化本机 owner 并原子写入有限 grant。重复执行不延长 grant、不重置账本、不替换或复活 owner；冲突配置拒绝并要求明确迁移。支持每 profile 独立状态路径，保留合法自定义 literal 路径；不执行自定义 YAML JS 路径表达式。setup 在失败前可能创建工作区目录，owner 数据库与 patch 也不能跨库原子提交。
+
+此选项额外使用本机 Docker、子进程和私有临时 staging；不拉取镜像或配置外部凭据。未知清理状态的探测目录保留以供排查。具体参数、前置条件和未完成的自治能力见[安装说明](../../scripts/install/README.md)。

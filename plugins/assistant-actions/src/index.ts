@@ -6,4 +6,5 @@ export const inject = ['assistantPolicy', 'credentialsKeychain', 'assistantDeliv
 export { AssistantActionsService, Config, version }
 export type * from './types.js'
 export function apply(ctx: Context, config: Config = {}): void { new AssistantActionsService(ctx, config) }
-export default AssistantActionsService
+// Loader unwraps the default export; preserve the trusted plugin identity there.
+export default { name, Config, apply, inject }

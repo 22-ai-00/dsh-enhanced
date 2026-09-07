@@ -4,8 +4,10 @@ import { AssistantIsolationService, Config } from './service.js'
 
 export const name = 'dsh-enhanced-assistant-isolation'
 export { version, AssistantIsolationService, Config }
+export { probeIsolationRuntime } from './probe.js'
 export { isolationPrincipalDigest } from './service.js'
 export type * from './types.js'
 
 export function apply(ctx: Context, config: Config = {}): void { new AssistantIsolationService(ctx, config) }
-export default AssistantIsolationService
+// Loader unwraps the default export; preserve the trusted plugin identity there.
+export default { name, Config, apply }

@@ -1,4 +1,5 @@
 import { Service, type Context } from '@deepseek-ai/cordis'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@dsh-enhanced/assistant-delivery'
 import type {} from '@dsh-enhanced/assistant-policy'
@@ -108,7 +109,7 @@ export class AssistantIsolationService extends Service {
     if (agent === undefined || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-isolation: exact live agent required')
     const owner = this.ctx.get('assistantDelivery')?.preferencePrincipalForAgent(agent)
     if (owner === undefined || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-isolation: authenticated owner required')
-    if (this.ctx.get('assistantPolicy')?.authorizeAgent(agent, 'execute', { kind: 'tool', id: `isolation:${grantId}` }).effect !== 'allow') throw new Error('assistant-isolation: policy denied')
+    if (this.ctx.get('assistantPolicy')?.evaluateAgent(agent, 'execute', { kind: 'tool', id: `isolation:${grantId}` }).effect !== 'allow') throw new Error('assistant-isolation: policy denied')
     return { principalDigest: isolationPrincipalDigest(owner.principalId), ...owner.principalLineage,
       workspace: owner.scope.workspace, agentPreset: owner.scope.preset }
   }
@@ -135,6 +136,20 @@ export class AssistantIsolationService extends Service {
     }
   }
 
+  /** Only the trusted registered isolation tool may skip a redundant risk prompt. */
+  preauthorize = (execution: ToolExecution): boolean => {
+    try {
+      if (execution.signal.aborted || !execution.arguments || typeof execution.arguments !== 'object' || Array.isArray(execution.arguments)) return false
+      const args = execution.arguments as Record<string, unknown>
+      if (Object.keys(args).some(key => !['grant_id', 'idempotency_key', 'command', 'files', 'artifacts', 'timeout_ms'].includes(key))) return false
+      const request = normalizeRequest({ grantId: args.grant_id, idempotencyKey: args.idempotency_key, command: args.command,
+        ...(args.files === undefined ? {} : { files: args.files }), ...(args.artifacts === undefined ? {} : { artifacts: args.artifacts }),
+        ...(args.timeout_ms === undefined ? {} : { timeoutMs: args.timeout_ms }),
+      } as IsolationRequest, this.#config.limits)
+      return this.#ledger.permitsGrant(this.#identity(execution.agent, request.grantId), request.grantId)
+    } catch { return false }
+  }
+
   run = async (agent: Agent | undefined, input: IsolationRequest, signal: AbortSignal): Promise<IsolationResult> => {
     await this.#ready
     signal.throwIfAborted()
@@ -157,6 +172,14 @@ export class AssistantIsolationService extends Service {
       }
       if (digest(this.#identity(agent, request.grantId)) !== digest(identity)) throw new Error('assistant-isolation: owner changed')
       return structuredClone(result)
+    }
+    const authorization = this.ctx.get('assistantPolicy')?.authorizeAgent(agent, 'execute', { kind: 'tool', id: `isolation:${request.grantId}` }, {
+      idempotencyKey: `isolation:${prepared.job.id}`,
+    })
+    if (authorization?.effect !== 'allow') {
+      const result: IsolationResult = { jobId: prepared.job.id, status: 'failed', quiescent: true, stdout: '', stderr: '', artifacts: [], reason: 'policy-denied-before-dispatch' }
+      this.#ledger.settle(prepared.job.id, prepared.job.version, result, this.#authority)
+      throw new Error('assistant-isolation: policy denied')
     }
     const abort = new AbortController()
     const combined = AbortSignal.any([signal, abort.signal])

@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { probeIsolationRuntime } from './probe.js'
 import { randomUUID } from 'node:crypto'
 import { reconcileUnknownJob } from './reconcile.js'
 import { lstatSync, realpathSync } from 'node:fs'
@@ -93,7 +94,10 @@ export async function maintainIsolation(stateRoot: string, resultRetentionMs = 0
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [command, stateRoot, grantId, revision, dockerPath, ...extra] = process.argv.slice(2)
   try {
-    if (command === 'maintain') {
+    if (command === 'probe') {
+      if (!stateRoot || revision !== undefined) throw new Error('usage: dsh-isolation probe sha256:image-id [/absolute/docker]')
+      process.stdout.write(`${JSON.stringify(await probeIsolationRuntime(stateRoot, grantId))}\n`)
+    } else if (command === 'maintain') {
       if (stateRoot === undefined || dockerPath !== undefined || (grantId !== undefined && !/^(0|[1-9][0-9]*)$/.test(grantId))) throw new Error('usage: dsh-isolation maintain /absolute/private/state-root [result-retention-ms [after-job-id]]')
       process.stdout.write(`${JSON.stringify(await maintainIsolation(stateRoot, grantId === undefined ? 0 : Number(grantId), revision))}\n`)
     } else if (command === 'reconcile') {

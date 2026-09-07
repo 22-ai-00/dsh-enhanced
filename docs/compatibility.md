@@ -79,3 +79,7 @@ Isolation 工作区要求 Linux Docker local volume driver 支持 tmpfs `size`/`
 
 
 `assistant-actions` 使用 DSH `dsh-tools@0.1.2-rc.1` 的 exact `tools.get(name, agent)` 定义身份、pre-execute waterfall 与其后的单调 guard；升级时重跑预授权、shadow、撤销与 native tool 集成。它需要同仓版本 Policy 的 `registerPreauthorizedTool/isPreauthorizedTool/evaluateAgent`，Delivery 当前 owner lineage 与 Keychain callback lease。npm optional peers 仅表示 Host 提供依赖，入口仍要求这些服务注入；旧 Policy 不具备此能力。GitHub 固定 GraphQL `createCommitOnBranch` 的 expectedHeadOid 是远端版本前置条件，实际账号/权限与生产调用仍需独立验证。
+
+有限自治安装沿用 DSH `0.1.2-rc.1`、Cordis `4.0.2` 与 Loader `1.0.3`。Loader 会先解包 ESM 的 default；Isolation/Actions 的 default 必须保留 `{ name, Config, apply }`（Actions 还包含 `inject`），不能用无相同插件名的 Service class 取代，否则 exact preauthorization 注册失败并回滚工具注册。命名 Service 导出继续供程序调用。Isolation 的公开预授权方法采用实例绑定以兼容 Cordis trace proxy。
+
+Web owner 仅在显式 autonomy setup 时动态加载可选 Isolation peer 的 `probeIsolationRuntime`；需要安装同仓匹配构建，普通 Web 无此运行时依赖。probe 使用合并后经验证的 literal Docker path。升级需跑 `pnpm test:autonomy` 的实际安装/default-export/原生工具链路；仅调用 named `apply` 的组件测试不能替代 Loader 路径验收。独立本机镜像、Docker 与非 root Linux 前置条件仍适用。

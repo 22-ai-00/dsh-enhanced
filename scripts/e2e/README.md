@@ -33,3 +33,14 @@ The test-only tool guard restricts Goal creation to the exact objective and roun
 A test-only Host guard permits at most ten real model dispatches and a single five-minute window starting at the first dispatch. It records call and usage metadata, cancels active Agents at the deadline, and does not fabricate usage for unfinished streams. This is **not** the production cumulative token/cost budget: the subscription transport cannot impose a server-side output token ceiling, so this experiment does not register a Goal budget meter or claim a monetary hard limit. Cancellation does not prove the remote provider stopped billing or that arbitrary subprocess descendants terminated.
 
 Artifacts under `.cache/web-owner-real-e2e/` retain model-call metadata, the generated source, independent receipts and redacted Host/browser evidence. The profile and its Host are removed on completion or failure. The local checker runs under the same OS user; this experiment is not proof of the planned isolated worker/credential broker or hidden-evaluation boundary, long-term autonomy, or comparative model gains.
+
+## Finite offline autonomy installation
+
+```sh
+CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
+  DSH_ISOLATION_TEST_IMAGE=sha256:<existing-local-image-id> pnpm test:autonomy
+```
+
+This separate opt-in test runs the actual local installer (including install/build) in a fresh temporary home, repeats the shipped setup to check unchanged grant expiry, then sends two browser prompts through the actual Web Host. The deterministic six-call model fixture requests an offline `isolation_run` and then retrieves the same idempotency key. Assertions require no per-call approval, one persisted successful job, one duration reservation, owner/scope binding, and real artifact `answer.txt` containing `42`. This proves the installed native wiring and Docker execution, not real-model intelligence, business-goal achievement or complete autonomy.
+
+The test chooses an independent available preflight port and never stops an existing service. It needs a compatible local Docker image and non-root Host. Artifacts are under ignored `.cache/autonomy-e2e/`; temporary profiles and the test Host are removed, launch credentials are redacted, and traces/video are disabled. Unknown Docker resources follow the production fail-closed recovery semantics.
