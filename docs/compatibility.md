@@ -40,3 +40,7 @@ DSH 尚处于预发布阶段，插件机制可能发生破坏性变化。`pnpm-w
 5. 在本页记录新的已验证版本，并在插件 README 中说明任何功能差异。
 
 Delivery Session 排他按同一 `0.1.2-rc.1` AgentLoop factory 的实际生命周期接线：setup/发布失败会 await 内部 teardown 后抛出；成功 handle 的 dispose 等待 machine idle、异步 scope 清理和 unregister。插件仍独立跟踪在途流/工具，不能仅凭 registry 移除或超时判断已清理。升级 Host 时需重跑失败 setup、取消、挂起工具/流、迟到调用、双连接竞争、新 Session orphan 归属及 `/new` 冷恢复用例。Delivery schema 19 不提供对已打开的旧 writer 的运行时兼容排他，部署前须排空旧 Host。
+
+Web Session 排他回归使用 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1` 的真实 `SessionController`，并在根开发依赖固定同版本的 AgentDefaultModel、SessionQuery 和 TypertRegistry；它们不作为 Delivery 的新运行时依赖发布。实际 `follow()` 在冷快照 yield 后通过原生 AgentLoop 恢复 Session，`prompt(request, signal)` 既能借用这个新 Agent，也能借用正在执行的同一 Agent。Delivery 通过持久归属检查拒绝前者，通过原生 `agent/inbox/inserted` / `claimed` 的 direct-user 输入取消后者的租约；不能把消息来源标签当作对任意 Host 插件的隔离。升级时必须重跑 cold follow、live prompt 取消后不重放、普通未托管 Web Session 正常执行三项回归。
+
+上述测试直接调用生产 Controller 与 Session persistence coordinator，模型为确定性 adapter，未验证浏览器认证、HTTP/WS 传输或完整 Web owner 产品入口。取消 Agent 不会自动释放 Web Controller 持有的会话生命周期，因此取消后不能假定 Delivery 已能重新取得该 Session。当前 Web 的身份关联、恢复准入和 teardown 还需一起接入；仅替换 create/prompt/cancel 无法覆盖内部历史恢复和 Typert Agent lookup。

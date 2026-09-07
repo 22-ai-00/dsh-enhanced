@@ -33,13 +33,14 @@ async function service(rules: NonNullable<ConstructorParameters<typeof Assistant
 
 async function serviceWithConfig(
   config: Omit<ConstructorParameters<typeof AssistantPolicyService>[1], 'databasePath'>,
+  options: ConstructorParameters<typeof AssistantPolicyService>[2] = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-policy-guard-config-'))
   temporaryRoots.push(root)
   const ctx = new Context()
   return {
     ctx,
-    service: new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), ...config }),
+    service: new AssistantPolicyService(ctx, { databasePath: join(root, 'policy.sqlite'), ...config }, options),
   }
 }
 
@@ -751,7 +752,7 @@ describe('DSH 0.1.2-rc.1 tool guard', () => {
         budget: { id: 'bash-calls', amount: 1 },
       }],
       budgets: [{ id: 'bash-calls', metric: 'calls', limit: 1, periodMs: 60_000, scope: 'subject' }],
-    })
+    }, { now: () => 60_001 }) // Both calls must use the same budget period, even across a wall-clock minute.
     const owner = agent({ cwd: '/work/alpha', preset: 'primary' })
 
     expect(fixture.service.authorizeToolExecution(execution(owner))).toMatchObject({ effect: 'allow' })

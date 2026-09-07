@@ -30,6 +30,7 @@
     "@deepseek-ai/cordis": "catalog:",
     "@deepseek-ai/cordis-plugin-include": "catalog:",
     "@deepseek-ai/dsh-agent": "catalog:",
+    "@deepseek-ai/dsh-api-session-controller": "catalog:",
     "@deepseek-ai/dsh-agent-loop": "catalog:",
     "@deepseek-ai/dsh-agent-loop-testkit": "catalog:",
     "@deepseek-ai/dsh-attachment": "catalog:",
@@ -79,6 +80,9 @@
     "vitest": "catalog:",
     "yaml": "2.9.0",
     "@dsh-enhanced/task-acceptance-contract": "workspace:*",
-    "@dsh-enhanced/assistant-verifier": "workspace:*"
+    "@dsh-enhanced/assistant-verifier": "workspace:*",
+    "@deepseek-ai/dsh-agent-default-model": "catalog:",
+    "@deepseek-ai/dsh-session-query": "catalog:",
+    "@deepseek-ai/dsh-typert-registry": "catalog:"
   }
 }
