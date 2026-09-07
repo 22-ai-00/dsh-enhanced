@@ -52,7 +52,11 @@ dsh --profile web --dump-config
 - `ctx.personalMemory.exportJson(agent)`：导出版本化 JSON，不包含哈希、状态、时间戳、token 表或审计表。
 - `ctx.personalMemory.proposeImport(...)`：先验证整个有界文档，再为每条记录创建审批提案；Agent 路径同样由 Delivery 派生审批 authority，未批准前不会写入 memory record。仅在未组合 Delivery 的可信本地/headless 集成中，程序化调用方可以显式传入 principal；一旦 Delivery 可用就不能用该字段覆盖绑定 owner。
 
-安装了原生 `systemPrompt` 服务时，每次模型步骤组装上下文都会重新检查当前 owner、Policy 和记忆状态，并从 Session 当前有效消息中提取最近的用户输入或 Automation 任务（最多 2048 字符）进行关键词召回。任务相关记录优先，再补充用户确认的偏好与约定；工具结果、历史快照和自动补全文本不会替代当前任务。召回合并 user-global、当前 workspace、当前 agent-global 和当前 agent-workspace，受 top-K、字节和粗略 token 三重预算约束；`sensitive` 记录在 top-K 之前排除。每条包含 id、版本、来源、观测时间及可选原始引用、失效时间与替代关系。尚未接入结构化 goal/step 召回或工具证据压缩。
+安装了原生 `systemPrompt` 服务时，每次模型步骤组装上下文都会重新检查当前 owner、Policy 和记忆状态，并从 Session 当前有效消息中提取最近的用户输入或 Automation 任务（最多 2048 字符）进行关键词召回。任务相关记录优先，再补充用户确认的偏好与约定；工具结果、历史快照和自动补全文本不会替代当前任务。召回合并 user-global、当前 workspace、当前 agent-global 和当前 agent-workspace，受 top-K、字节和粗略 token 三重预算约束；`sensitive` 记录在 top-K 之前排除。每条包含 id、版本、来源、观测时间及可选原始引用、失效时间与替代关系。工具证据压缩仍未实现。
+
+同一 Host 安装 `assistant-goals` 时，Memory 还会在每步读取可选 `taskContext()`，按当前步骤 → 最近用户输入 → 目标 objective 的顺序召回并去重，再补确认的偏好和约定。Goals 每次检查 live owner 与 `snapshot` 授权；Memory 再核对 principal record/version/digest、workspace 和 preset，不能由模型选择别人的 namespace。同 owner 的显式 focus 可提供跨会话检索上下文，但不转移原生 Goal 执行权。checkpoint 的 nextStep 仅是规划文本，用作检索关键词，不成为可信事实或新权限。
+
+该组合的可选 peer 为 `@dsh-enhanced/assistant-goals >=0.1.0 <0.2.0`；它不会自动启用 Goals。旧版本未提供 `goal-task-context/v1`、服务缺失/卸载、读取失败或身份不匹配时继续按原用户 query 召回。每个 query 字段最多 2048 字符，合并结果仍共用原有 top-K、字节和 token 预算。原生 AgentLoop 回归覆盖步骤改变和记忆撤回后的下一次模型请求；这证明动态检索接线，不代表已经测得真实模型决策收益。
 
 内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”；XML 元字符和模板花括号在预算计算前转义。原生 Host 持久保存发生变化的新快照，用它取代先前快照的有效语义；撤回、过期或权限撤销会影响下一步的当前快照，**不会删除 Session 中已经提供过的历史快照、工具结果或模型输出**。因此不能把本功能当作会话历史的数据擦除或跨 owner 会话迁移保护。没有 `systemPrompt` 的程序化集成保留旧的 `agent/session-start` 一次性冻结快照，不能承诺逐步更新。`memory_search`、`memory_search_confirmed` 与 `memory_manage` 的模型可见结果也使用有界、转义的独立 framing。缺少绝对 cwd、agent preset 或已验证 owner 时不搜索、不提案、不贡献新快照，也不会退化到共享域。
 

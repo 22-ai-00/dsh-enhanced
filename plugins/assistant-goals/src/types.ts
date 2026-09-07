@@ -44,6 +44,15 @@ export interface GoalRecord {
   updatedAt: number
 }
 
+/** Read-only host context for task-scoped consumers; checkpoint text is planning, never trusted fact. */
+export interface GoalTaskContext {
+  protocol: 'goal-task-context/v1'
+  scope: GoalScope
+  active: boolean
+  goal: { id: string; definition: { version: number; digest: string }; native: NativeGoalState; objective: string }
+  checkpoint: { nextStep: string }
+}
+
 export interface GoalStepTask {
   kind: 'goal-step'
   ref: string

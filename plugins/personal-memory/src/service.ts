@@ -4,6 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import type {} from '@dsh-enhanced/assistant-goals'
 import type {
   AssistantDeliveryService,
 } from '@dsh-enhanced/assistant-delivery'
@@ -35,6 +36,7 @@ import type {
   MemoryRecord,
   MemorySearchHit,
   MemorySnapshot,
+  MemorySnapshotRequest,
   StoredMemoryProposal,
 } from './types.js'
 import {
@@ -610,7 +612,7 @@ export class PersonalMemoryService extends Service {
       // Read the current surface, so replaced/compacted messages cannot become
       // the active task again. Tool results and our own snapshots are not tasks.
       const messages = agent.session.deriveMessages()
-      const task = messages.findLast(message => {
+      const humanTask = messages.findLast(message => {
         if (message.role !== 'user' || !message.content.some(block => block.type === 'text')) return false
         const kind: string | undefined = message.source?.kind
         return kind === 'user' || kind === 'delivery'
@@ -618,13 +620,26 @@ export class PersonalMemoryService extends Service {
             && message.source.plugin === '@dsh-enhanced/assistant-automations')
       })
       let query = ''
-      for (const block of task?.content ?? []) {
+      for (const block of humanTask?.content ?? []) {
         if (block.type !== 'text') continue
         query += `${query === '' ? '' : '\n'}${block.text}`.slice(0, 2_048 - query.length)
         if (query.length >= 2_048) break
       }
+      let task: MemorySnapshotRequest['task']
+      try {
+        const goals = this.ctx.get('assistantGoals', false)
+        const goal = typeof goals?.taskContext === 'function' ? goals.taskContext(agent) : undefined
+        if (goal?.protocol === 'goal-task-context/v1' && goal.active === true
+          && context.namespace.mode === 'delivery'
+          && goal.scope.workspace === context.workspace && goal.scope.preset === context.agentPreset
+          && goal.scope.principalRecordId === context.namespace.principalRecordId
+          && goal.scope.principalVersion === context.namespace.principalVersion
+          && memoryPrincipalDigest(goal.scope.principalId) === context.namespace.principalDigest) {
+          task = { objective: goal.goal.objective.slice(0, 2_048), nextStep: goal.checkpoint.nextStep.slice(0, 2_048), query }
+        }
+      } catch { /* An absent, older, or invalid optional Goals service cannot suppress owner memory. */ }
       return this.memoryStore.snapshot({
-        context, query,
+        context, query, ...(task === undefined ? {} : { task }),
         limit: this.config.snapshotLimit,
         maxBytes: this.config.snapshotMaxBytes,
         maxTokens: this.config.snapshotMaxTokens,
