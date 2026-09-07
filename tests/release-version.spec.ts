@@ -726,6 +726,7 @@ describe('release version workflow', () => {
     expect(manifest.scripts['build:bootstrap']).toBe(
       'pnpm run build:packages'
       + ' && pnpm --filter @dsh-enhanced/assistant-policy run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-delivery run build:types'
       + ' && pnpm --filter @dsh-enhanced/assistant-evaluation run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-delivery run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-isolation run build'

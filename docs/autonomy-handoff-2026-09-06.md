@@ -90,3 +90,8 @@
 - 本机旧全局 DSH 为 0.1.0-rc.8，仓库基线 0.1.2-rc.1；接手在新设备重新核实。模型配置复用不等于 Web profile 已升级或验收。
 - 用户要求合理使用 Codex with ChatGPT；此前 workspace-info 返回内部错误，未取得实际 ChatGPT 评审，也未启用隧道。不能把该意图写成已完成审查。
 - 完整目标保持未完成。用户这次要求暂时收尾，不应在本设备继续自动扩展功能，也不应把暂停或跨设备交接标成目标达成。
+
+
+2026-09-07 后续推进（基线 `bc67ce3`）：固定预算策略比较新增严格冻结契约、全 cell 外层 meter 和真实临时 Delivery/JSONL owner 装配。正常原生 compare 证明外层 5 请求包含内层 Goal 4 请求及 2 child；空 Session 头已通过 ensureMaterialized 真实持久化后恢复。完整 executor、隔离验收、CLI/doctor、持久详细证据与真实模型比较仍待接线；18项仍3已验证。详见落地账本最新 WP04/06 条目与 `docs/goal-strategy-evaluation.md`，继续按成果推进，不按天/周等待。
+
+本批完整根检查已退出 0：291 文件 / 3,750 项，无跳过，31 份 dry-run pack 通过；新增公开接口与两包清空生成目录后的 bootstrap 均已验证。证据见 [strategy foundation](evidence/strategy-foundation-2026-09-07.json)，仍不把执行基础当作完整 executor 或真实策略收益。

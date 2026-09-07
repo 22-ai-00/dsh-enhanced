@@ -1,0 +1,374 @@
+{
+  "schemaVersion": 1,
+  "milestone": "WP04/06 native strategy benchmark execution foundations",
+  "date": "2026-09-07",
+  "baseCommit": "bc67ce3648ef90d22188897706f3e21da915b6ce",
+  "goalStatus": {
+    "verified": 3,
+    "implementing": 8,
+    "todo": 7,
+    "fullObjectiveComplete": false
+  },
+  "implemented": [
+    "Separate strict strategy execution plan with common/strategy capability manifests and journal-bound model-call/output/Goal-round limits.",
+    "Cell-wide preflight reservation/settlement meter with actual native foreground, parent and child coverage; unknown reservations retained.",
+    "Real private Delivery/Policy/JSONL owner bootstrap, explicit empty-session header materialization, local reply capture and cancellation.",
+    "Public benchmark strategy API and service-free Delivery types entry; clean two-package bootstrap."
+  ],
+  "limits": [
+    "No strategy-v1 executor or CLI suite, actual capability attestation, isolated corpus/Verifier assembly, immutable per-cell runtime evidence store, observed-only meter mode, or real-model efficacy comparison yet.",
+    "Meter traces are process-local observations; tests use deterministic adapters, not paid providers.",
+    "Owner shutdown cancels native agents but has no independent stop deadline; a future executor must preserve unknown for non-cooperative cleanup and stop subsequent cells.",
+    "Directory modes and tool restrictions are not an OS sandbox against same-UID Host code."
+  ],
+  "validation": {
+    "focused": {
+      "files": 3,
+      "testsPassed": 26,
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-final-focused-v1.log"
+    },
+    "native": {
+      "testsPassed": 9,
+      "testsSkippedByFilter": 227,
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-native-v4.log",
+      "normalCase": {
+        "outerCalls": 5,
+        "innerGoalCalls": 4,
+        "actualChildSessions": 2,
+        "outerToolCalls": 2,
+        "inputTokens": 50,
+        "outputTokens": 10,
+        "heldModelCalls": 0
+      }
+    },
+    "cleanBootstrap": {
+      "removedGeneratedDirectories": [
+        "plugins/assistant-evaluation/lib",
+        "plugins/assistant-delivery/lib"
+      ],
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-clean-bootstrap-v1.log"
+    },
+    "fullCheck": {
+      "status": "PASS",
+      "exitCode": 0,
+      "main": {
+        "filesPassed": 291,
+        "testsPassed": 3750,
+        "testsSkipped": 0
+      },
+      "recursive": {
+        "assistant-delivery": 705,
+        "assistant-evaluation": 158,
+        "assistant-goals": 99,
+        "assistant-isolation": 102,
+        "assistant-web-owner": 30
+      },
+      "dryRunPacks": 31,
+      "inspectedPackageFileCounts": {
+        "assistant-evaluation": 97,
+        "assistant-delivery": 96
+      },
+      "manifestLintTypecheckBuild": "PASS",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-check-v2.log",
+      "sha256": "e5fa9c1070c7f8c6b76c76463253a5ecc25eca7c7326132e7635df15dce6db94"
+    }
+  },
+  "review": {
+    "source": {
+      "status": "PASS",
+      "reviewer": "strategy_design_verify",
+      "mode": "independent read-only; no test/build rerun"
+    },
+    "finalEvidence": {
+      "status": "PASS",
+      "reviewer": "strategy_design_verify",
+      "mode": "independent read-only source/evidence review; no test/build rerun",
+      "verified": [
+        "All20source/24commandlog/1artifactSHA256 and24exitfiles match.",
+        "check-v2 exit0:291files/3750tests,no skips,31packs; package entries inspected.",
+        "check-v1 failure and native-v3 all-skip result retained and not counted as passing behavior.",
+        "Documented incomplete executor/CLI/attestation/durable-cell-evidence/real-model scope, shutdown deadline limitation and local-only C2C."
+      ],
+      "rootAcceptance": "PASS: final source review, exact change-set/hash audit and successful full check support this execution-foundation milestone only."
+    },
+    "codexWithChatgpt": {
+      "task": "c2c_a945",
+      "iteration": 2,
+      "localRecordsOnly": true,
+      "reason": "Required in-app browser unavailable; no ChatGPT web planning/review claimed."
+    }
+  },
+  "sources": [
+    {
+      "path": "docs/agent-autonomy-implementation.md",
+      "sha256": "804b7cd46383540fa9a15f4a93b9c2d3e1823bb9226096239d7b081ae4ffc369"
+    },
+    {
+      "path": "docs/autonomy-handoff-2026-09-06.md",
+      "sha256": "ef90333a85765b37ca94a3abda21978effd2af4d9b260435def93c3dceee4eda"
+    },
+    {
+      "path": "docs/compatibility.md",
+      "sha256": "cade1f1ee5f3c63202a316ff6a59e64fbf6d955ad562e4b7760d3652bf54ef2b"
+    },
+    {
+      "path": "docs/goal-strategy-evaluation.md",
+      "sha256": "304367a39d8882b01dd5efb43fad6d58828633cf1444826085da2570d5a24a5b"
+    },
+    {
+      "path": "package.json",
+      "sha256": "e8597e6fe6d9140a1c01d2d2f19cc97b97b71b9e568b3b0438a8a17d8e8b70ac"
+    },
+    {
+      "path": "plugins/assistant-delivery/README.md",
+      "sha256": "31f272a82ad99c3af6baba3b43f2d573fd3a0f5a75d59bf79d0c2c538b31fde4"
+    },
+    {
+      "path": "plugins/assistant-delivery/package.json",
+      "sha256": "7df1b555d66a57d367811e582dbacf0c9075504c3a6f805a902fc14e8cdd5f9a"
+    },
+    {
+      "path": "plugins/assistant-delivery/tests/agent-runtime.spec.ts",
+      "sha256": "fe449b34b4e9f3a13761357ef7c67fc3410e88488758c27ea00927ab802763dd"
+    },
+    {
+      "path": "plugins/assistant-delivery/tsconfig.types.json",
+      "sha256": "0659e5edeed97e391525b78df8ab58ae4a8efc605375d806162d5f8e00a7a901"
+    },
+    {
+      "path": "plugins/assistant-evaluation/README.md",
+      "sha256": "5ae0dfab558c5f3de5c99e5f32ff7eb6485360717b333fb0dfd8da89f0102513"
+    },
+    {
+      "path": "plugins/assistant-evaluation/package.json",
+      "sha256": "da79a67245ceccab7eca4acb3c52fd5dd18e0744717ea97320ab101721e629c4"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-meter.ts",
+      "sha256": "394fbf611c1a8f6e7ef12821bfe76a76675e99cde8ac48f43a32da428d48f367"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-owner.ts",
+      "sha256": "fc663fd72ac28261fccd58f71d94c55626897e0fe80e31484f550f5871a9385a"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-plan.ts",
+      "sha256": "a3732707ebd8fca8b981bb842c85821551d52592034ad3f9accf090c2fb3aaae"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy.ts",
+      "sha256": "4fd1593a92b680c54679e91b45339d0151641d07fa4d011e37e5f6d280abf714"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-meter.spec.ts",
+      "sha256": "cf70d8b0a10a40609c59e428f0200ae58c13a4b4a493878db986ff1734854a21"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-owner.spec.ts",
+      "sha256": "b54fad9cbf58c056ef0c3b386a4dd334bf927386aa63c6057865d241ed090918"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-plan.spec.ts",
+      "sha256": "c817f51b10376e469bb5389d5b514fd628b66f45403e7e10a2e321b4bd5f50e5"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "sha256": "ce472d37f4ae3f13a3b08ee41efdfbc11d4e3a7b1ee43e1bc723fe0224ee1060"
+    },
+    {
+      "path": "tests/release-version.spec.ts",
+      "sha256": "00ee0b72025a9f665879091dec0a26cb12d29ce7103c1edcb701f9bd7b5e4b15"
+    }
+  ],
+  "commands": [
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-plan.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-plan-v1.log",
+      "exitCode": 0,
+      "sha256": "a9827bf9479399147062af6ed2c2f19d39f11f81194b1a8a87e37e0768a7a120",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-plan-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm install --offline --ignore-scripts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-install-v1.log",
+      "exitCode": 1,
+      "sha256": "b18f3700ffba687b4ae2499464d1b8fd8e9c1399b58b67f9bca0eb847214ea21",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-install-v1.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm install --offline --ignore-scripts --no-frozen-lockfile",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-install-v2.log",
+      "exitCode": 0,
+      "sha256": "829ee5ba54f2ade107fb5579b0d1baa73a4556fa2d83c5baed2df5cdcb13711c",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-install-v2.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-plan.spec.ts tests/benchmark/strategy-meter.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v1.log",
+      "exitCode": 1,
+      "sha256": "66591930583ec79c98d8fc2f6b09f5d47e0a512ab430fd6be80554124a2fca7b",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v1.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-types-v1.log",
+      "exitCode": 2,
+      "sha256": "48aba9e97a11580e1a63dc82b102d555d9c239c60a6c7d0a67e86c0b3a3997cb",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-types-v1.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v1.log",
+      "exitCode": 1,
+      "sha256": "9e02b5af0746c709b157ef85a800cc797b36ecd110793d9c04003b2f01d2af80",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v1.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-plan.spec.ts tests/benchmark/strategy-meter.spec.ts tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v2.log",
+      "exitCode": 1,
+      "sha256": "9e02b5af0746c709b157ef85a800cc797b36ecd110793d9c04003b2f01d2af80",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v2.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm install --offline --ignore-scripts --no-frozen-lockfile",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-install-v3.log",
+      "exitCode": 0,
+      "sha256": "166c7a94a865ec73dd8e5491b3d5bd6e45edc1903133436a1fd4beff5502ad03",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-install-v3.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-plan.spec.ts tests/benchmark/strategy-meter.spec.ts tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v3.log",
+      "exitCode": 1,
+      "sha256": "7bbf08d16b2e5d71033fe9d5f6eb2ade73e9a77de6556f375e91374bf4612bfc",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v3.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v2.log",
+      "exitCode": 1,
+      "sha256": "2b97401370621ed43d3b362e368b08e80526f72028318680978565ef87c224aa",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v2.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v3.log",
+      "exitCode": 1,
+      "sha256": "b2e391fcb5f74bd70c7d3fb7815b46d1c7692aabe9cce8db15992d40776eafa1",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v3.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v4.log",
+      "exitCode": 1,
+      "sha256": "83141bf34d7fc4382b0da2fc4488600f6e1ae0e079538df1b7a32dcc5250cbfa",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v4.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v5.log",
+      "exitCode": 1,
+      "sha256": "2aad1f7fb40b485c0c21b29caaae7786aa8da84aec30f83d0fddd09d7b99b544",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-owner-v5.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-plan.spec.ts tests/benchmark/strategy-meter.spec.ts tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v4.log",
+      "exitCode": 0,
+      "sha256": "c92de4e60b81fe89f61fd4260a6b5ca943bc73268b8630dacbbb8c249d6a56f8",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v4.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run build && CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"goal_strategy compare runs two real native children\" --testTimeout=30000",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-native-v1.log",
+      "exitCode": 1,
+      "sha256": "54c6f302597f794bd1fceebc09282a992b2c7a0f0a43b26cbbdec21c9407e643",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-native-v1.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run build && CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"goal_strategy compare runs two real native children\" --testTimeout=30000",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-native-v2.log",
+      "exitCode": 2,
+      "sha256": "94422af3ee9a5ab33f2bd33824b7995014f64bc0d63116074cc884b76424a0de",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-native-v2.log.exit",
+      "interpretation": "Retained failed command; later fixes and reruns are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run build && CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"goal_strategy compare runs two real native children\" --testTimeout=30000",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-native-v3.log",
+      "exitCode": 0,
+      "sha256": "45e82798ed0bf97206b48c05488c6092028f0007722e016df562120b8e5084f1",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-native-v3.log.exit",
+      "interpretation": "Command exited zero, but all 236 tests were skipped by the overly narrow filter; no native behavior validated."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"goal_strategy compare\" --testTimeout=30000",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-native-v4.log",
+      "exitCode": 0,
+      "sha256": "b62a9fdfdfeadbf6fbc719e4d54fa37c9e47c75953af0da414b8423bcdf78f2d",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-native-v4.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-plan.spec.ts tests/benchmark/strategy-meter.spec.ts tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v5.log",
+      "exitCode": 0,
+      "sha256": "df4dcff5f6d692691a1a6a0bbc8b03f7b6ea59aba249c3b8d4af23475b46d6f0",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-evaluation-v5.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-plan.spec.ts tests/benchmark/strategy-meter.spec.ts tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-final-focused-v1.log",
+      "exitCode": 0,
+      "sha256": "3e331600548d57377f6999536aa3db601dd54675d9627787614abdf5b0769e62",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-final-focused-v1.log.exit"
+    },
+    {
+      "command": "python -c \"import shutil; shutil.rmtree(\\\"plugins/assistant-evaluation/lib\\\"); shutil.rmtree(\\\"plugins/assistant-delivery/lib\\\")\" && CI=true pnpm run build:bootstrap",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-clean-bootstrap-v1.log",
+      "exitCode": 0,
+      "sha256": "6885574c8287290c7b1ded2e092b7acbd01cbd5c3bdbe480db3a3f3704d8fa39",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-clean-bootstrap-v1.log.exit"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-check-v1.log",
+      "exitCode": 1,
+      "sha256": "8dc4f00300b1e884cdf3dab9f0d499596b57adb75ab35daa04cfe6ed03e92d19",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-check-v1.log.exit",
+      "interpretation": "Exit 1: 3749 main tests passed, one release-version test still expected the old bootstrap command. Expected build:types step updated; check-v2 reran the complete check and passed."
+    },
+    {
+      "command": "CI=true node .cache/strategy-foundation-validation/public-api.mjs",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-public-api-v1.log",
+      "exitCode": 0,
+      "sha256": "489e8389280d2753374aa46d0b6059f39ce5a8673a9c4c90cf45a5ed087e8fd0",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-public-api-v1.log.exit"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": ".cache/strategy-foundation-validation/dsh-strategy-foundation-check-v2.log",
+      "exitCode": 0,
+      "sha256": "e5fa9c1070c7f8c6b76c76463253a5ecc25eca7c7326132e7635df15dce6db94",
+      "exitFile": ".cache/strategy-foundation-validation/dsh-strategy-foundation-check-v2.log.exit"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": ".cache/strategy-foundation-validation/public-api.mjs",
+      "sha256": "8c142c7bbbaf7b736fa09536d6aa606c4cfaea477bae3cb33ba7e83fbd1d0b2a",
+      "scope": "Workspace built-public-entry import smoke only; not independently installed CLI."
+    }
+  ]
+}

@@ -482,3 +482,18 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<证据中的本机固定镜像> pnpm check` 退出 **0**：主 288 文件 / 3,724 项全通过，无跳过；递归 Goals 99、Delivery 705、Isolation 102、Web owner 30 项通过，manifest、零 lint 警告、typecheck/build 与 31 份 dry-run pack 成功。已检查 Goals 80 个发布文件包含 `lib/strategy-feedback.*`，Delivery 96 个文件，没有测试、源码或状态数据库。本轮提供实际 Docker 镜像，覆盖了上轮默认命令跳过的 27 项隔离测试。
 
 安装浏览器最终有两条通过证据：v1 的默认关闭策略场景，以及 v2 的策略开启场景。v1 整体退出 1：新增测试只读取序列化历史中的第一个目标快照，漏掉后面的策略验收关联，夹具在第 10 次请求报错并使原生目标暂停。修复仅让测试读取请求内全部实际快照；v2 退出 **0**，仍严格核对下一轮可见策略的 parent run、Session 和失败 receipt ID，并确认它不同于后来通过的 run。两场景均在 3 个真实 Host 进程中完成同一 Session 的两轮独立失败→修正→通过；策略开启时 7 条 reservation settled，默认关闭时 4 条。没有新增生产修复来迎合断言。最终根 lint 退出 0；全仓检查覆盖最终生产源码，测试快照读取修复由 v2 和最终 lint 覆盖。
+
+
+### WP04/06：固定预算策略比较的执行基础（2026-09-07，基线 `bc67ce3`）
+
+18 项仍为 **3 已验证 / 8 实现中 / 7 待做**。新增 Host 接口不等于完整策略 executor，也不形成智能增益结论。
+
+- 独立策略 parser 冻结 modelCalls、单请求输出、Goal 轮数与共同预算；共同 persona/tools/Policy/runtime 和候选 strategy guide/tool/Policy/runtime 分开声明，派生两分支版本，拒绝任意配置差异。完整契约进入 journal runtime digest，相同 ID 不能更换执行限额。实际挂载能力仍须由后续 executor 核对。
+- 外层 Context meter 在初始前台请求前安装，共享预留所有前台/父/child请求及工具执行；异步预检后重查状态，原子预留后才取得下游迭代器。缺 usage、错误流、提前关闭和取消保留预留；运行中的工具、空测量和未知请求不能 assertComplete。仅支持可信输入上界/供应商输出限制；estimate/observed 模式明确拒绝，费用为 null 时不声称金额上界。快照尚为进程内数据。
+- 真实临时 owner 装配经过 DSH Session/AgentLoop、JSONL、Policy 和 Delivery 的配对/入站/恢复/回复流程。空 Session 头须调用原生 ensureMaterialized，普通 flush 不保证它已落盘；未伪造事件或替换持久化 backend。工作区与 stateRoot 分离，runtimeRoot 独占创建，回复仅捕获到本地；shutdown 取消原生 agent、释放服务并保留证据目录。非合作资源不能据此声称已停止。
+- Evaluation 暴露 `./benchmark/strategy`；Delivery 暴露不加载服务的 `./types`。后者先于 Evaluation 在 bootstrap 生成，owner 动态载入真实 Delivery，避免服务声明构建环。两包 lib 清空后的 bootstrap 已成功；JSONL/persistence 为可选 Host peers，普通 Evaluation bundle 不自动激活。
+- 实际 native compare 定向回归共 9 项通过，其中正常场景同时通过外层 **5** 次调用 / 内层 Goal **4** 次调用的对账，差额是最初前台协调请求；两条真实 child Session 均有 settled 外层记录。第一次过窄名称过滤只得到 236 跳过，保留为未执行，未算作通过。
+
+后续依序组装 strategy-v1 原生 Goal/Verifier/隔离产物 executor、真实能力版本核对、CLI/doctor、计划与 cell 绑定的不可变详细证据，再执行公开真实模型开发比较及冻结留出。没有人工日历等待期；没有付费调用或真实策略收益证据。C2C 沿用 `c2c_a945` 的本地执行记录（iteration 2），内置浏览器仍不可用，未声称 ChatGPT 网页规划或复核。
+
+最终根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<证据中的本机固定镜像> pnpm check` v2 退出 **0**：主 291 文件 / 3,750 项通过，无跳过；递归 Delivery 705、Evaluation 158、Goals 99、Isolation 102、Web owner 30 项通过，manifest、零 lint 警告、typecheck/build 和 31 份 dry-run pack 完成。已检查新增 `lib/benchmark/strategy*` 与 Delivery `lib/types.*` 发布文件，无源码、测试或状态数据库。专项 26 项通过，清空两包生成目录后的 bootstrap 与构建后的公开入口导入均成功。v1 仅因 release-version 测试仍期待旧 bootstrap 字符串而失败；更新预期后完整重跑 v2。命令、失败记录和源码哈希见 [本批证据](evidence/strategy-foundation-2026-09-07.json)。
