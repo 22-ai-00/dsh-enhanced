@@ -22,7 +22,7 @@ export type EpisodeEvidenceKind = 'operational' | 'objective' | 'verification' |
 
 export type QualityEvidenceKind = Extract<EpisodeEvidenceKind, 'objective' | 'verification'>
 
-export type TaskLearningSubjectKind = 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+export type TaskLearningSubjectKind = 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
 export type TaskLearningDisposition = 'upsert' | 'retract'
 
 /** Reserved scope used only for rows that predate scoped evidence. */

@@ -8422,6 +8422,170 @@ describe('real rc.1 delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
+  test('keeps whole-goal v3 conditions frozen and feeds a failed assessment into the next native round', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-outcome-v3-rounds-'))
+    roots.push(root)
+    const ownerId = 'lark/bot-1/tenant-a/ou_owner'
+    const objective = 'Repair the required whole-goal report'
+    const rule = (name: string) => ({ id: `goal-outcome-v3-${name}`, effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['execute'],
+      resource: { kind: 'tool' as const, id: name }, context: { initiators: ['external' as const] } })
+    const goalRule = { id: 'goal-outcome-v3-goal', effect: 'allow' as const,
+      subject: { kind: 'agent' as const, id: 'primary', workspace: root, principal: ownerId }, actions: ['create', 'observe', 'inspect', 'focus', 'checkpoint', 'snapshot', 'execute'],
+      resource: { kind: 'goal' as const, id: 'business-context' }, context: { initiators: ['external' as const] } }
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [goalRule, rule('goal_create')], presets: canonicalPermissionPresets,
+      seedDefaultPreset: 'danger-full-access', provideApproval: false, goalContinuationTimeoutMs: 5_000,
+    })
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(native.goalTools as never, {} as never)
+    await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    await fixture.ctx.plugin(AssistantGoalsService, {
+      databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 5_000,
+    } as never)
+    const pairing = fixture.service.issuePairing('test', principal)
+    fixture.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+    await writeFile(join(root, 'report.md'), 'Missing required evidence')
+    await writeFile(join(root, 'step.md'), 'Step complete')
+    const authority = { kind: 'document' as const, id: 'sources',
+      sources: [{ id: 'reference', url: 'https://example.org/reference' }], timeoutMs: 1_000, maxResponseBytes: 4_096 }
+    const digest = createVerifierAuthorities({ authorities: [authority] })[0]!.digest
+    await fixture.ctx.plugin(AssistantVerifierService, {
+      databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false,
+      authorities: [authority], profiles: [
+        { id: 'goal-outcome-v3-step', version: 1, scope: { workspace: root, preset: 'primary' },
+          owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step', objective,
+          validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+          criteria: [{ id: 'step-result', kind: 'document-citations', authority: { id: 'sources', digest },
+            artifactPath: 'step.md', requiredText: ['Step complete'], quotes: [] }],
+        },
+        { id: 'goal-outcome-v3-whole', version: 1, scope: { workspace: root, preset: 'primary' },
+          owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-outcome', objective,
+          validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+          criteria: [{ id: 'whole-result', kind: 'document-citations', authority: { id: 'sources', digest },
+            artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
+        },
+      ],
+    })
+    fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+      if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
+        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-outcome-v3-create'), name: 'goal_create', agent, signal,
+          arguments: { objective, max_goal_rounds: 3 } })
+        if (created.isError) throw new Error(`whole-goal v3 setup rejected: ${JSON.stringify(created.content)}`)
+      }
+      return await next()
+    })
+    const goalRequests: GenerateOptions[] = []
+    let adapterError: unknown
+    const original = fixture.llm.stream.bind(fixture.llm)
+    vi.spyOn(fixture.llm, 'stream').mockImplementation(async function* (options) {
+      try {
+      if (fixture.llm.requests.length === 0) {
+        yield* original(options)
+        return
+      }
+      fixture.llm.requests.push(options)
+      goalRequests.push(options)
+      const prompt = options.messages.flatMap(message => {
+        const content = (message as unknown as { content?: unknown }).content
+        if (typeof content === 'string') return [content]
+        if (!Array.isArray(content)) return []
+        return content.flatMap(block => {
+          const text = block as { type?: unknown; text?: unknown }
+          return text.type === 'text' && typeof text.text === 'string' ? [text.text] : []
+        })
+      }).join('\n').replaceAll('&#123;', '{').replaceAll('&#125;', '}')
+      if (goalRequests.length === 1) {
+        // Owner creation has already persisted the exact v3 template before a
+        // native model adapter can consume this request.
+        const verification = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
+        try {
+          const row = verification.prepare("SELECT payload FROM acceptance_contracts WHERE task_kind = 'goal-outcome'").get() as { payload: string } | undefined
+          expect(row).toBeDefined()
+          expect(JSON.parse(row!.payload)).toMatchObject({ protocol: 'task-acceptance/v3', objective,
+            criteria: [{ id: 'whole-result', artifactPath: 'report.md', requiredText: ['Confirmed result'] }],
+          })
+        } finally { verification.close() }
+        expect(prompt).toContain('"goalAcceptance":{"status":"unverified"')
+        expect(prompt).toContain('"conditions"')
+        expect(prompt).toContain('"whole-result"')
+        expect(prompt).not.toContain('"goalAcceptance":{"status":"not-achieved"')
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'First native step completed.' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'First native step completed.' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+        return
+      }
+      expect(goalRequests).toHaveLength(2)
+      // The passed v2 step and failed v3 whole-goal assessment are independent
+      // facts. A passed step cannot stand in for the whole-goal receipt.
+      expect(prompt).toContain('"stepFeedback"')
+      expect(prompt).toContain('"step-result"')
+      expect(prompt).toContain('"status":"achieved"')
+      expect(prompt).toContain('"goalAcceptance":{"status":"not-achieved"')
+      expect(prompt).toContain('"id":"whole-result"')
+      expect(prompt).toContain('"status":"failed"')
+      expect(prompt).toContain('"reason":"required-text-missing"')
+      await writeFile(join(root, 'report.md'), 'Confirmed result')
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'Whole-goal evidence repaired.' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'Whole-goal evidence repaired.' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+      } catch (error) { adapterError = error; throw error }
+    })
+
+    await fixture.service.acceptInbound(message('evt-goal-outcome-v3-rounds', objective))
+    await drive(fixture.service)
+    await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
+
+    if (adapterError !== undefined) throw adapterError
+    expect(fixture.llm.requests).toHaveLength(3)
+    expect(goalRequests).toHaveLength(2)
+    const database = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
+    let steps: Array<{ id: string }> = []
+    let outcomes: Array<{ id: string; payload: string }> = []
+    try {
+      steps = database.prepare("SELECT id FROM acceptance_contracts WHERE task_kind = 'goal-step' ORDER BY rowid ASC").all() as Array<{ id: string }>
+      outcomes = database.prepare("SELECT id, payload FROM acceptance_contracts WHERE task_kind = 'goal-outcome' ORDER BY rowid ASC").all() as Array<{ id: string; payload: string }>
+    } finally { database.close() }
+    expect(steps).toHaveLength(2)
+    expect(outcomes).toHaveLength(2)
+    expect(fixture.ctx.assistantVerifier.inspect(steps[0]!.id)).toMatchObject({
+      state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'achieved' },
+    })
+    expect(fixture.ctx.assistantVerifier.inspect(steps[1]!.id)).toMatchObject({
+      state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'achieved' },
+    })
+    expect(fixture.ctx.assistantVerifier.inspect(outcomes[0]!.id)).toMatchObject({
+      state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'not-achieved' },
+    })
+    expect(fixture.ctx.assistantVerifier.inspect(outcomes[1]!.id)).toMatchObject({
+      state: 'done', execution: { status: 'succeeded', quiescent: true }, receipt: { objectiveStatus: 'achieved' },
+    })
+    const first = JSON.parse(outcomes[0]!.payload) as Record<string, unknown>
+    const second = JSON.parse(outcomes[1]!.payload) as Record<string, unknown>
+    expect(first).toMatchObject({ protocol: 'task-acceptance/v3', objective,
+      task: { kind: 'goal-outcome', goal: { definitionVersion: 1, definitionDigest: expect.any(String), sessionId: expect.any(String), nativeGoalId: expect.any(String) } },
+    })
+    expect(second).toMatchObject({ protocol: 'task-acceptance/v3', objective,
+      task: { kind: 'goal-outcome', goal: { definitionVersion: 1, definitionDigest: expect.any(String), sessionId: expect.any(String), nativeGoalId: expect.any(String) } },
+    })
+    // Every retry derives from the owner-created v3 template, retaining its
+    // exact standards and absolute expiry instead of refreshing either.
+    expect(second.criteria).toEqual(first.criteria)
+    expect(second.profile).toEqual(first.profile)
+    expect(second.bounds).toEqual(first.bounds)
+    expect(second.expiresAt).toBe(first.expiresAt)
+    const goals = new DatabaseSync(join(root, 'goals.sqlite'), { readOnly: true })
+    try {
+      const native = JSON.parse((goals.prepare('SELECT native_json FROM goal_records').get() as { native_json: string }).native_json) as { phase: string }
+      expect(native.phase).toBe('complete')
+    } finally { goals.close() }
+    await fixture.ctx.fiber.restart()
+  })
+
   test.each([
     { name: 'retains one settled native model call and rejects the second at the call cap',
       budget: { modelCalls: 1, toolCalls: 0, inputTokens: 20, outputTokens: 14, durationMs: 5_000, maxOutputTokensPerCall: 7 }, meter: 'priced' as const, nativeRequests: 1,

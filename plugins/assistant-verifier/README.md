@@ -19,7 +19,7 @@ dsh --profile web --dump-config
 
 同一 Delivery/Automations 服务生命周期内，一旦注册过必需验收，验证器短暂卸载或重新注册为可选都不能降低要求。缺失时停止新提交；恢复验证器后继续。管理员永久关闭必需验收需要调整 Host 配置并重启相应生产服务。
 
-Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和 `taskKind: goal-step`，绑定目标定义、step/run、原 Session 与 native goal/revision。前台和 Automation 保留 v1。启用 Goals `verifyNativeRounds` 后，该生产者总是要求精确的 goal-step profile；owner 反馈修订协议仍仅覆盖原有两种任务，不会把目标步骤错当普通前台。
+Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和 `taskKind: goal-step`，绑定目标定义、step/run、原 Session 与 native goal/revision。前台和 Automation 保留 v1。整体业务目标使用独立的 v3 `goal-outcome`，绑定定义摘要、原 Session/GoalId 和 assessment ID，不伪造 step/run/revision。启用 Goals `verifyNativeRounds` 后，该生产者总是要求精确的 goal-step profile；owner 反馈修订协议仍仅覆盖原有两种任务，不会把目标步骤错当普通前台。
 
 ## 验收配置
 
@@ -55,3 +55,5 @@ Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和
 遵循 [兼容基线](../../docs/compatibility.md)。实际 Host producer 须实现 `TaskAcceptanceProducer`，Evaluation 须实现对应私有注册协议；仅安装名称相同的旧版本不会获得新接口。模型不能通过公开工具创建可信验收结果。
 
 测试使用实际文件、SQLite、子进程和本机 HTTP。组合测试通过真实 owner 配对、前台 AgentLoop、Automation 提案审批与调度入口验证契约先于模型调用落库，以及反馈纠正、撤回和服务卸载恢复；模型与外部 transport 仍为确定性替身。单元测试的 producer fixture 本身不作为生产接线证据。仓库验收为根 `pnpm check`，真实外部系统、隔离运行和长期收益另行验证。
+
+Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始 v3 契约派生新 assessment，完整保留条件、profile、验证预算和绝对有效期。模板身份、owner、定义或当前 profile 摘要改变会拒绝。v3 验证结束后再次读取同一 Host 的执行证明和注册代次，失效或不同的证明产生 unknown，不能签发 achieved。该能力不对 Delivery、Automations 或模型工具开放。

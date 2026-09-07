@@ -18,8 +18,8 @@ declare module '@deepseek-ai/cordis' {
 
 const producerNames = ['assistantAutomations', 'assistantDelivery', 'assistantGoals'] as const
 type ProducerName = typeof producerNames[number]
-const producerTaskKinds: Readonly<Record<ProducerName, TaskAcceptanceContract['task']['kind']>> = Object.freeze({
-  assistantAutomations: 'automation-run', assistantDelivery: 'foreground-turn', assistantGoals: 'goal-step',
+const producerTaskKinds: Readonly<Record<ProducerName, readonly TaskAcceptanceContract['task']['kind'][]>> = Object.freeze({
+  assistantAutomations: ['automation-run'], assistantDelivery: ['foreground-turn'], assistantGoals: ['goal-step', 'goal-outcome'],
 })
 interface Binding { producer: TaskAcceptanceProducer; generation: string; dispose(): void }
 
@@ -154,9 +154,17 @@ export class AssistantVerifierService extends Service<Config> {
       protocol: 'assistant-verifier/host-producer/v1', generation, owner: this, requiresAcceptance: this.#requireAcceptance,
       prepare: (input: AcceptanceTask): AcceptanceHandle | null => {
         current()
-        if (input.task.kind !== producerTaskKinds[name]) throw new Error('assistant-verifier: wrong Host task kind')
+        if (!producerTaskKinds[name].includes(input.task.kind)) throw new Error('assistant-verifier: wrong Host task kind')
         const accepted = this.#prepare(input)
         if (accepted === null) return null
+        const handle = Object.freeze({ contractId: accepted.id, contractDigest: accepted.digest })
+        handles.set(handle, accepted)
+        return handle
+      },
+      prepareGoalAssessment: (input: AcceptanceTask, template: AcceptanceHandle): AcceptanceHandle => {
+        current()
+        if (name !== 'assistantGoals') throw new Error('assistant-verifier: wrong Host assessment producer')
+        const accepted = this.#prepareGoalAssessment(input, template)
         const handle = Object.freeze({ contractId: accepted.id, contractDigest: accepted.digest })
         handles.set(handle, accepted)
         return handle
@@ -195,7 +203,7 @@ export class AssistantVerifierService extends Service<Config> {
     ]) === match)
     const previous = this.#store.getTaskContract(input)
     if (previous !== null) {
-      if (previous.objective !== input.objective || selected?.digest !== previous.profile.digest
+      if (acceptanceDigest(previous.task) !== acceptanceDigest(input.task) || previous.objective !== input.objective || selected?.digest !== previous.profile.digest
         || previous.expiresAt <= this.#now()) throw new Error('assistant-verifier: accepted task changed or expired')
       return previous
     }
@@ -204,11 +212,44 @@ export class AssistantVerifierService extends Service<Config> {
       return null
     }
     const now = this.#now()
-    return this.#store.accept(createTaskAcceptanceContract({ protocol: input.task.kind === 'goal-step' ? 'task-acceptance/v2' : 'task-acceptance/v1',
+    return this.#store.accept(createTaskAcceptanceContract({ protocol: input.task.kind === 'goal-outcome' ? 'task-acceptance/v3' : input.task.kind === 'goal-step' ? 'task-acceptance/v2' : 'task-acceptance/v1',
       id: `acceptance-${acceptanceDigest([input.scope, input.owner, input.task])}`, ...input,
       profile: { id: selected.profile.id, version: selected.profile.version, digest: selected.digest },
       issuedAt: now, expiresAt: now + selected.profile.validityMs,
       criteria: selected.profile.criteria, bounds: selected.profile.bounds }))
+  }
+
+  #prepareGoalAssessment(input: AcceptanceTask, template: AcceptanceHandle): TaskAcceptanceContract {
+    const original = this.#store.getContract(template.contractId)
+    if (original?.digest !== template.contractDigest || original.task.kind !== 'goal-outcome'
+      || input.task.kind !== 'goal-outcome') throw new Error('assistant-verifier: invalid goal conditions template')
+    const identity = (task: typeof input.task) => {
+      if (task.kind !== 'goal-outcome') throw new Error('assistant-verifier: whole goal required')
+      const { assessmentId: _assessmentId, ...goal } = task.goal
+      return goal
+    }
+    if (acceptanceDigest([original.scope, original.owner, original.objective, identity(original.task)])
+      !== acceptanceDigest([input.scope, input.owner, input.objective, identity(input.task)])) {
+      throw new Error('assistant-verifier: goal assessment changed its definition or owner')
+    }
+    const selected = this.#compiled.profiles.find(({ digest }) => digest === original.profile.digest)
+    const now = this.#now()
+    if (selected === undefined || now + original.bounds.maxDurationMs >= original.expiresAt) {
+      throw new Error('assistant-verifier: original goal conditions unavailable or expired')
+    }
+    const previous = this.#store.getTaskContract(input)
+    if (previous !== null) {
+      if (acceptanceDigest(previous.task) !== acceptanceDigest(input.task) || previous.objective !== input.objective
+        || acceptanceDigest([previous.profile, previous.criteria, previous.bounds, previous.expiresAt])
+        !== acceptanceDigest([original.profile, original.criteria, original.bounds, original.expiresAt])) {
+        throw new Error('assistant-verifier: goal assessment changed its frozen conditions')
+      }
+      return previous
+    }
+    return this.#store.accept(createTaskAcceptanceContract({ protocol: 'task-acceptance/v3',
+      id: `acceptance-${acceptanceDigest([input.scope, input.owner, input.task])}`, ...input,
+      profile: original.profile, criteria: original.criteria, bounds: original.bounds,
+      issuedAt: now, expiresAt: original.expiresAt }))
   }
 
   async #reconcileExecution(name: ProducerName, binding: Binding, contract: TaskAcceptanceContract): Promise<void> {
@@ -248,6 +289,7 @@ export class AssistantVerifierService extends Service<Config> {
     const claimed = this.#store.claimDue({ workerId: this.#workerId, now: this.#now(), leaseMs: 305_000 })
     if (claimed !== null) {
       const { contract, job, execution } = claimed
+      const outcomeBinding = contract.task.kind === 'goal-outcome' ? this.#bindings.get('assistantGoals') : undefined
       const startedAt = this.#now()
       const unknown = (reason: string): readonly CriterionResult[] => contract.criteria.map(criterion => ({
         criterionId: criterion.id, status: 'unknown', reason, evidence: [],
@@ -258,11 +300,24 @@ export class AssistantVerifierService extends Service<Config> {
         try { results = await this.#bounded(verifyAcceptanceCriteria(contract, this.#compiled.authorities, this.#controller.signal), contract.bounds.maxDurationMs) }
         catch { results = unknown('verification-unavailable') }
       }
+      if (contract.task.kind === 'goal-outcome' && execution.quiescent) {
+        try {
+          if (outcomeBinding === undefined) throw new Error('whole-goal producer unavailable')
+          const proof = await this.#bounded(outcomeBinding.producer.inspectAcceptedExecution(contract), 5_000)
+          if (this.#bindings.get('assistantGoals') !== outcomeBinding
+            || outcomeBinding.producer.trustedAcceptanceProducerGeneration() !== outcomeBinding.generation
+            || proof === null || proof.contractId !== contract.id || proof.contractDigest !== contract.digest
+            || proof.dispatchedAt < contract.issuedAt || proof.dispatchedAt > execution.completedAt
+            || acceptanceDigest({ status: proof.status, quiescent: proof.quiescent, completedAt: proof.completedAt, executionRef: proof.executionRef }) !== acceptanceDigest(execution)) {
+            throw new Error('whole-goal assessment authority changed')
+          }
+        } catch { results = unknown('whole-goal-assessment-authority-changed') }
+      }
       if (!this.#active || this.#controller.signal.aborted) return
       const now = this.#now()
       let receipt = null
       if (now < contract.expiresAt && now >= startedAt) {
-        const payload = { protocol: contract.protocol === 'task-acceptance/v2' ? 'task-verification/v2' as const : 'task-verification/v1' as const, id: `verification-${contract.id}-${job.fencingToken}`,
+        const payload = { protocol: contract.protocol === 'task-acceptance/v3' ? 'task-verification/v3' as const : contract.protocol === 'task-acceptance/v2' ? 'task-verification/v2' as const : 'task-verification/v1' as const, id: `verification-${contract.id}-${job.fencingToken}`,
           contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner,
           task: contract.task, results, startedAt, completedAt: now, validUntil: contract.expiresAt }
         try { receipt = createTaskVerificationReceipt(contract, payload) }

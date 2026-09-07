@@ -1,0 +1,223 @@
+import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { acceptanceDigest, validateTaskAcceptanceContract, validateTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import type { TaskAcceptanceContract, AcceptanceTaskIdentity, AcceptanceCriterion } from '@dsh-enhanced/task-acceptance-contract'
+import type { AcceptanceHandle, AcceptedExecution, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
+import { GoalOutcomeStore } from './outcome-store.js'
+import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
+
+export interface GoalOutcomeView {
+  status: 'unverified' | 'pending' | 'achieved' | 'not-achieved' | 'unknown' | 'expired' | 'unavailable'
+  definitionVersion: number
+  conditions?: { contractId: string; profileId: string; profileVersion: number; digest: string; expiresAt: number; criteria: readonly AcceptanceCriterion[] }
+  assessmentId?: string
+  criteria?: readonly { id: string; status: string; reason: string }[]
+  verifiedAt?: number
+  nativeCompletion?: 'complete' | 'pending'
+}
+
+const same = (a: unknown, b: unknown): boolean => acceptanceDigest(a) === acceptanceDigest(b)
+const handle = (contract: TaskAcceptanceContract): AcceptanceHandle => ({ contractId: contract.id, contractDigest: contract.digest })
+
+/** Independent observations of one immutable whole-goal specification. */
+export class GoalOutcomeRuntime {
+  readonly #store: GoalOutcomeStore
+  #registration: TaskAcceptanceRegistration | undefined
+  #active = true
+  readonly #handles = new Map<string, { accepted: AcceptanceHandle; agent: Agent }>()
+  readonly #fences = new Map<string, { agent: Agent; check(): void }>()
+  constructor(private readonly ctx: Context, path: string,
+    private readonly current: (agent: Agent) => GoalRecord,
+    private readonly runs: (scope: GoalScope, goalId: string) => readonly GoalExecutionRun[]) {
+    this.#store = new GoalOutcomeStore(path)
+    this.#store.recoverIncomplete()
+    ctx.on('agent/disposed', ({ agent }) => {
+      if (!this.#active) return
+      for (const [runId, entry] of this.#handles) {
+        if (entry.agent !== agent) continue
+        const pending = this.#store.getByContract(entry.accepted.contractId)
+        if (pending?.dispatchedAt !== undefined && pending.execution === undefined) {
+          this.#store.finish(pending.contract.task.ref, { status: 'unknown', quiescent: false, completedAt: Date.now() })
+        }
+        this.#handles.delete(runId)
+      }
+      for (const [id, fence] of this.#fences) if (fence.agent === agent) this.#fences.delete(id)
+    })
+    ctx.effect(() => () => { this.#active = false; this.#registration = undefined; this.#handles.clear(); this.#fences.clear(); this.#store.recoverIncomplete(); this.#store.close() }, 'assistant-goals.outcomes')
+  }
+  register(registration: TaskAcceptanceRegistration): () => void {
+    if (!this.#active) throw new Error('assistant-goals: whole-goal runtime inactive')
+    if (this.#registration !== undefined) throw new Error('assistant-goals: whole-goal verifier already registered')
+    if (registration.prepareGoalAssessment === undefined) throw new Error('assistant-goals: whole-goal verifier lacks assessment capability')
+    if (!this.ctx.get('assistantVerifier', false)?.ownsTaskAcceptanceRegistration(registration)) throw new Error('assistant-goals: whole-goal verifier registration is foreign')
+    this.#registration = registration
+    return () => { if (this.#registration === registration) { this.#registration = undefined; this.#handles.clear(); this.#fences.clear(); this.#store.recoverIncomplete() } }
+  }
+  #ready(): TaskAcceptanceRegistration {
+    if (!this.#active || this.#registration === undefined
+      || !this.ctx.get('assistantVerifier', false)?.ownsTaskAcceptanceRegistration(this.#registration)) throw new Error('assistant-goals: whole-goal verifier unavailable')
+    return this.#registration
+  }
+  #task(record: GoalRecord, assessmentId: string): AcceptanceTaskIdentity {
+    return { kind: 'goal-outcome', ref: assessmentId, goal: { id: record.id,
+      definitionVersion: record.definition.version, definitionDigest: record.definition.digest, assessmentId,
+      sessionId: record.native.sessionId, nativeGoalId: record.native.goalId } }
+  }
+  #input(record: GoalRecord, assessmentId: string) {
+    return { scope: { workspace: record.scope.workspace, preset: record.scope.preset },
+      owner: { principalRecordId: record.scope.principalRecordId, principalVersion: record.scope.principalVersion },
+      objective: record.definition.objective, task: this.#task(record, assessmentId) }
+  }
+  /** Called only while the owner creates/edits the definition, before native work. */
+  bind(record: GoalRecord): void {
+    const registration = this.#ready()
+    const existing = this.#store.getDefinition(record.scope, record.id, record.definition.version)
+    if (existing !== undefined) {
+      if (!same(existing.definition, record.definition) || existing.sessionId !== record.native.sessionId
+        || existing.nativeGoalId !== record.native.goalId) throw new Error('assistant-goals: whole-goal definition changed')
+      return
+    }
+    const assessmentId = `goal-assessment-${acceptanceDigest([record.scope, record.id, record.definition, 'initial'])}`
+    const accepted = registration.prepare(this.#input(record, assessmentId))
+    const contract = accepted === null ? undefined : this.ctx.get('assistantVerifier', false)?.inspectAcceptedTask(accepted.contractId)?.contract
+    if (accepted === null || contract === undefined || contract.digest !== accepted.contractDigest
+      || contract.task.kind !== 'goal-outcome') throw new Error('assistant-goals: no exact whole-goal success specification')
+    this.#store.bind({ scope: record.scope, goalId: record.id, definition: record.definition,
+      sessionId: record.native.sessionId, nativeGoalId: record.native.goalId, template: contract })
+  }
+  /** Enrol a real native run in an assessment before its dispatch. */
+  prepare(agent: Agent, run: GoalExecutionRun): void {
+    const registration = this.#ready()
+    const record = this.current(agent)
+    const definition = this.#store.getDefinition(record.scope, record.id, record.definition.version)
+    if (definition === undefined || !same(definition.definition, record.definition)) throw new Error('assistant-goals: whole-goal conditions were not frozen by the owner')
+    const prior = this.#store.list(record.scope, record.id, 100).filter(item => item.definition.definition.version === record.definition.version)
+    const replay = this.#store.getByTriggerRun(record.scope, record.id, record.definition.version, run.intent.runId)
+    if (replay !== undefined) throw new Error('assistant-goals: prior assessment requires reconciliation')
+    const assessmentId = prior.length === 0 ? definition.template.task.ref
+      : `goal-assessment-${acceptanceDigest([record.scope, record.id, record.definition, run.intent.runId])}`
+    const accepted = registration.prepareGoalAssessment!(this.#input(record, assessmentId), handle(definition.template))
+    const contract = this.ctx.get('assistantVerifier', false)?.inspectAcceptedTask(accepted.contractId)?.contract
+    if (contract === undefined || contract.digest !== accepted.contractDigest) throw new Error('assistant-goals: whole-goal acceptance readback failed')
+    if (run.intent.admission.expiresAt + contract.bounds.maxDurationMs >= contract.expiresAt) throw new Error('assistant-goals: whole-goal deadline cannot cover the native round and verification')
+    this.#store.prepare(definition, contract, run.intent.runId)
+    this.#store.markDispatched(assessmentId, Date.now())
+    this.#handles.set(run.intent.runId, { accepted, agent })
+  }
+  async settled(agent: Agent, run: GoalExecutionRun, assertCurrent: () => void): Promise<void> {
+    if (!this.#active) return
+    const registration = this.#ready()
+    const accepted = this.#handles.get(run.intent.runId)?.accepted
+    if (accepted === undefined) return
+    this.#handles.delete(run.intent.runId)
+    const assessment = this.#store.getByContract(accepted.contractId)
+    if (assessment === undefined) throw new Error('assistant-goals: assessment intent missing')
+    const check = () => {
+      assertCurrent()
+      if (this.current(agent).native.roundsStarted !== run.intent.admission.round) throw new Error('assistant-goals: whole-goal assessment round changed')
+    }
+    let valid = run.execution?.status === 'succeeded' && run.execution.quiescent
+    try {
+      check()
+      const record = this.current(agent)
+      valid = valid && same(record.scope, assessment.definition.scope)
+        && record.id === assessment.definition.goalId && same(record.definition, assessment.definition.definition)
+        && record.native.sessionId === assessment.definition.sessionId && record.native.goalId === assessment.definition.nativeGoalId
+    } catch { valid = false }
+    this.#store.finish(assessment.contract.task.ref, { status: valid ? 'succeeded' : 'unknown', quiescent: valid, completedAt: Date.now() })
+    if (valid) this.#fences.set(accepted.contractId, { agent, check })
+    await registration.completed(accepted)
+    if (this.#registration !== registration) throw new Error('assistant-goals: assessment verifier changed')
+    await this.ctx.get('assistantVerifier', false)!.tick()
+    if (!valid) return
+    check()
+    if (this.#ready() !== registration) throw new Error('assistant-goals: assessment verifier changed')
+    const record = this.current(agent)
+    const outcome = this.view(record)
+    if (outcome.status !== 'achieved' || outcome.assessmentId !== assessment.contract.task.ref) return
+    this.reconcileCompletion(agent)
+  }
+  /** Reconcile a durable achieved receipt before another model step, including after reload. */
+  reconcileCompletion(agent: Agent): boolean {
+    this.#ready()
+    const record = this.current(agent)
+    const result = this.view(record)
+    if (result.status !== 'achieved' || result.assessmentId === undefined || record.native.phase === 'complete') return false
+    const assessment = this.#store.get(result.assessmentId)
+    const run = this.runs(record.scope, record.id).find(item => item.intent.runId === assessment?.triggerRunId)
+    if (run === undefined || assessment === undefined || run.execution?.status !== 'succeeded' || !run.execution.quiescent
+      || !same(assessment.definition.definition, record.definition) || !same(run.intent.scope, record.scope)
+      || run.intent.task.goal.definitionVersion !== record.definition.version || run.intent.task.goal.definitionDigest !== record.definition.digest
+      || run.intent.task.goal.nativeGoalId !== record.native.goalId || run.intent.task.goal.sessionId !== record.native.sessionId
+      || run.intent.admission.maxGoalRounds !== record.native.maxGoalRounds) return false
+    const exact = record.native.revision === run.intent.task.goal.nativeRevision && record.native.phase === 'active'
+      && record.native.roundsStarted === run.intent.admission.round
+    const exhausted = record.native.revision === run.intent.task.goal.nativeRevision + 1 && record.native.phase === 'blocked'
+      && record.native.roundsStarted === run.intent.admission.maxGoalRounds
+    // Pre-step runs before newly claimed goal messages are appended. A later
+    // admitted round requires its own assessment; revision alone cannot prove it.
+    if (!exact && !exhausted) return false
+    const goals = this.ctx.get('goals', false)
+    const native = goals?.get(agent)
+    if (goals === undefined || native === undefined || String(native.id) !== record.native.goalId || native.revision !== record.native.revision) return false
+    goals.complete(agent, { id: native.id, revision: native.revision })
+    return true
+  }
+  inspect = async (input: TaskAcceptanceContract): Promise<AcceptedExecution | null> => {
+    this.#ready()
+    const contract = validateTaskAcceptanceContract(input)
+    if (contract.task.kind !== 'goal-outcome') throw new Error('assistant-goals: foreign whole-goal task')
+    const assessment = this.#store.getByContract(contract.id)
+    if (assessment === undefined || !same(assessment.contract, contract)
+      || assessment.dispatchedAt === undefined || assessment.execution === undefined) return null
+    if (assessment.execution.quiescent) {
+      try {
+        const fence = this.#fences.get(contract.id)
+        if (fence === undefined) throw new Error('live assessment fence unavailable')
+        fence.check()
+        if (this.#fences.get(contract.id) !== fence) throw new Error('live assessment fence changed')
+      } catch {
+        return Object.freeze({ ...handle(contract), dispatchedAt: assessment.dispatchedAt, completedAt: assessment.execution.completedAt, executionRef: contract.task.ref, status: 'unknown', quiescent: false })
+      }
+    }
+    const trigger = this.runs(assessment.definition.scope, assessment.definition.goalId)
+      .find(run => run.intent.runId === assessment.triggerRunId)
+    if (assessment.execution.quiescent && (trigger?.execution?.quiescent !== true
+      || trigger.execution.status !== 'succeeded' || trigger.dispatchedAt === undefined
+      || trigger.intent.task.goal.definitionVersion !== contract.task.goal.definitionVersion
+      || trigger.intent.task.goal.definitionDigest !== contract.task.goal.definitionDigest)) {
+      throw new Error('assistant-goals: whole-goal assessment lacks actual settled work')
+    }
+    return Object.freeze({ ...assessment.execution, ...handle(contract), dispatchedAt: assessment.dispatchedAt, executionRef: contract.task.ref })
+  }
+  view(record: GoalRecord): GoalOutcomeView {
+    const base: GoalOutcomeView = { status: 'unverified', definitionVersion: record.definition.version }
+    if (!this.#active) return { ...base, status: 'unavailable' }
+    const definition = this.#store.getDefinition(record.scope, record.id, record.definition.version)
+    if (definition === undefined || !same(definition.definition, record.definition)) return base
+    const template = definition.template
+    base.conditions = { contractId: template.id, profileId: template.profile.id, profileVersion: template.profile.version,
+      digest: acceptanceDigest(template.criteria), expiresAt: template.expiresAt, criteria: template.criteria }
+    if (Date.now() >= template.expiresAt) return { ...base, status: 'expired' }
+    const latest = this.#store.list(record.scope, record.id, 100).find(item => item.definition.definition.version === record.definition.version)
+    if (latest === undefined) return base
+    base.assessmentId = latest.contract.task.ref
+    if (latest.execution === undefined) return { ...base, status: 'pending' }
+    if (!latest.execution.quiescent || latest.execution.status !== 'succeeded') return { ...base, status: 'unknown' }
+    try {
+      this.#ready()
+      const readback = this.ctx.get('assistantVerifier', false)!.inspectAcceptedTask(latest.contract.id)
+      if (readback?.receipt === null || readback === null) return { ...base, status: 'pending' }
+      const contract = validateTaskAcceptanceContract(readback.contract)
+      if (!same(contract, latest.contract)) throw new Error('assessment contract differs')
+      if (same(readback.execution, { status: 'unknown', quiescent: false, completedAt: latest.execution.completedAt, executionRef: contract.task.ref })) return { ...base, status: 'unknown' }
+      if (!same(readback.execution, { ...latest.execution, executionRef: contract.task.ref })) throw new Error('assessment readback differs')
+      const receipt = validateTaskVerificationReceipt(contract, readback.receipt)
+      if (receipt.validUntil <= Date.now() || receipt.completedAt > Date.now()) return { ...base, status: 'expired' }
+      return { ...base, status: receipt.objectiveStatus, verifiedAt: receipt.completedAt,
+        ...(receipt.objectiveStatus === 'achieved' ? { nativeCompletion: record.native.phase === 'complete' ? 'complete' as const : 'pending' as const } : {}),
+        criteria: receipt.results.map(result => ({ id: result.criterionId, status: result.status, reason: result.reason.slice(0, 256) })) }
+    } catch { return { ...base, status: 'unavailable' } }
+  }
+  health = () => ({ enabled: true, connected: this.#registration !== undefined })
+}

@@ -171,3 +171,5 @@ Automation execution context 安装，post-setup `injectAutomationGuidance` 会�
 - guidance 会进入模型上下文：不要在 guidance 中写入密钥或敏感数据。
 - 自动 rollback 是收缩行为能力的安全阀，不是通用“AI 自批”入口；部署若启用，Policy 只应授予 `rollback`，不要把它复用为 adopt、权限或外部副作用授权。
 - Host 控制面还需 Policy 明确允许 background subject `dsh-enhanced-assistant-recovery` 的 `inspect` 和按需 `rollback`；仅拿到 Cordis service 引用不等于获得权限。
+
+整体目标 v3 验收通过 Evaluation 以 `goal-outcome` subject 投影，不能与步骤验收合并。schema 15 迁移保留旧 task learning state/revisions、retract 与 episode 关联；整体成功仍只是该次独立观测，不代表能力提升已通过比较基线。

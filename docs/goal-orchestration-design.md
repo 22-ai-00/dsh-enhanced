@@ -51,11 +51,11 @@ GoalStore 与 Session 不构成一个原子数据库。协议须采用持久执�
 
 | 层 | 实施文件 | 必须一起改变的契约 |
 | --- | --- | --- |
-| 验收身份 | `packages/task-acceptance-contract/src/{types,wire}.ts` | 显式版本化的 goal-step 身份与严格 parser；保留 v1 前台/Automation 原意 |
+| 验收身份 | `packages/task-acceptance-contract/src/{types,wire}.ts` | 显式 v2 goal-step 与 v3 goal-outcome 身份及严格 parser；保留 v1 前台/Automation 原意 |
 | 目标账本 | `plugins/assistant-goals/src/{types,store,service}.ts` | 定义历史、步骤意图、run、预算预留、期限、授权摘要、wake 与验收绑定，SQLite 迁移和 CAS |
 | 可信验收生产者 | `plugins/assistant-verifier/src/{host,service,store}.ts` | Goals 的独立注册代际、精确 kind 路由、prepare 和 durable execution readback |
 | 持久唤醒 | `plugins/assistant-automations/src/{host-executors,coordinator,runner}.ts` 与 Goals 执行器 | 复用 occurrence/task/run、scheduler lease 和 Host executor descriptor，禁止重新实现定时轮询器 |
-| 结果消费 | `plugins/assistant-evaluation/src/service.ts` 与 Goals | 显式识别 goal-step，精确回执绑定、去重与可重放投影，不把未知 kind 当 foreground-turn |
+| 结果消费 | `plugins/assistant-evaluation/src/service.ts` 与 Goals | 显式识别 goal-step 与 goal-outcome，精确回执绑定、去重与可重放投影，不把未知 kind 当 foreground-turn |
 
 执行意图按以下顺序推进，各状态必须有重启后的对账动作：
 
@@ -66,13 +66,13 @@ GoalStore 与 Session 不构成一个原子数据库。协议须采用持久执�
 5. `awaiting-verification`：持久化执行终态与 Session checkpoint，Verifier 从生产者回读；模型 complete 或进程退出 0 都不能直接产生 achieved。
 6. `verified` / `needs-attention`：消费绑定 definition/step/run 的独立回执；迟到旧定义成功只保留历史，不能完成新定义。unknown 按缺失证据生成新的调查步骤，新步骤仍需要新的授权和预算检查。
 
-定义编辑与 pause/resume revision 分开记账。用户修改成功条件或资源范围生成新的定义版本并使未提交旧步骤过期；暂停不重置累计预算。已发出步骤继续保存当时的证据，不能通过删记录规避对账。当前只实现立即执行的原生回合 prepared/dispatching/awaiting-verification 及 Verifier/Evaluation 接线。scheduled/claimed 持久唤醒、自动调查步骤、目标整体结果投影和外部提交补偿仍未实现；完整 WP05 未完成。
+定义编辑与 pause/resume revision 分开记账。用户修改成功条件或资源范围生成新的定义版本并使未提交旧步骤过期；暂停不重置累计预算。已发出步骤继续保存当时的证据，不能通过删记录规避对账。当前已实现原生回合 prepared/dispatching/awaiting-verification、Verifier/Evaluation 接线及 owner 明确授权的单次 Automations at 唤醒。整体目标 v3 结果正在接入；自动调查步骤、完整跨日闭环和外部提交补偿仍待完成，完整 WP05 未完成。
 
 ## 独立验收与下一步
 
 目标达成来自目标成功条件的独立观测，不来自 native `complete`、模型自评、步骤退出码或“所有子步骤已完成”。结果需绑定目标定义及新鲜度；部分步骤完成只改善进度，不能消除剩余条件。
 
-已实现的步骤反馈回读使用完整冻结合同与当前回执，检查 owner/scope、goal definition、run/task 和实际执行终态；当前结果、待验收和有限历史分列，旧定义、过期和 unknown 不推导目标达成。回合终态触发现有 Verifier 单次有界检查；SystemPrompt assembly 等待前轮结算并重读授权与结果，避免 pre-step 之前生成的旧上下文遗漏失败。模型可以依据失败条件修订方案；反馈不是新的动作权限，也没有自动完成业务目标。
+已实现的步骤反馈回读使用完整冻结合同与当前回执，检查 owner/scope、goal definition、run/task 和实际执行终态；当前结果、待验收和有限历史分列，旧定义、过期和 unknown 不推导目标达成。回合终态触发现有 Verifier 单次有界检查；SystemPrompt assembly 等待前轮结算并重读授权与结果，避免 pre-step 之前生成的旧上下文遗漏失败。模型可以依据失败条件修订方案；步骤反馈不是新的动作权限。整体目标验收独立使用 v3 条件和 assessment，只有该回执达到 achieved 并通过当前授权和原生绑定检查，Host 才可完成目标。
 
 未知或失败应形成可执行的后续计划：重查过期假设、收集缺失证据、改变方法或请求具体资源。下一步仍受预算与授权约束。复用 Automations 的持久 at 唤醒、occurrence/task/run 幂等身份和 scheduler lease；不再创建第二套定时器。唤醒时重验 scope、定义、期限、预算和 lease，并恢复原 Session；跨会话迁移必须有明确的新关联协议。
 
@@ -87,7 +87,7 @@ GoalStore 与 Session 不构成一个原子数据库。协议须采用持久执�
 
 上述各项最终需要真实模型和部署证据；确定性 Host 测试只证明相应工程机制。整体智能收益继续由工作包 04 的同预算基线与留出评测衡量。
 
-当前立即执行协议先保存私有执行意图和验收绑定，flush 原 Session 后标记 dispatch，再放行首个模型请求；后续模型步骤复用同一 run。终态需要真实 turn/end 和成功 checkpoint，取消/不确定清理保留 unknown。恢复不重放旧 run。执行账本为 Goals 数据库旁的 `.executions` 文件，用户目标历史库迁移到 schema 2，Evaluation schema 10 单独识别 goal-step。配置与权限详见 Goals README。以上机制依赖 Delivery 结束时释放旧 Agent、后续从原 Session 创建新 handle；取消后的旧 handle 继续拒绝迟到动作。
+当前立即执行协议先保存私有执行意图和验收绑定，flush 原 Session 后标记 dispatch，再放行首个模型请求；后续模型步骤复用同一 run。终态需要真实 turn/end 和成功 checkpoint，取消/不确定清理保留 unknown。恢复不重放旧 run。执行账本为 Goals 数据库旁的 `.executions` 文件，用户目标历史库迁移到 schema 2，Evaluation schema 11 分别识别 goal-step 与 goal-outcome。配置与权限详见 Goals README。以上机制依赖 Delivery 结束时释放旧 Agent、后续从原 Session 创建新 handle；取消后的旧 handle 继续拒绝迟到动作。
 
 ## 原生累计预算切片（2026-09-06）
 

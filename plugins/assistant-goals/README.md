@@ -158,3 +158,15 @@ executionBudget:
 ## 兼容性
 
 见 [仓库基线](../../docs/compatibility.md) 和 [完整落地账本](../../docs/agent-autonomy-implementation.md)。测试使用确定性模型和 transport，不代表真实 Web 部署或智能收益已验收。
+
+## 整体目标验收
+
+可选 `verifyGoalOutcome: true` 要求同时开启 `verifyNativeRounds` 并使用持久数据库。管理员还需配置精确匹配 owner、workspace/preset 和 objective 的 Verifier `taskKind: goal-outcome` profile。创建或编辑目标时冻结 v3 整体成功条件；缺失时不能开始原生自主回合。创建本身与验收账本并非一个事务，工具报告部分失败时应先检查已有原生目标。
+
+每个真实原生回合有独立的 v2 步骤契约和 v3 整体目标 assessment。后续 assessment 保持初次条件、profile、预算和绝对截止时间不变，且截止时间必须覆盖原生回合及验证。`goalAcceptance` 向模型提供冻结条件、逐项失败与整体结果；步骤通过不能替代整体成功。更换目标定义会隔离旧结果，不能用旧定义的通过结果结束新目标。
+
+新鲜的整体 achieved 回执可由 Host 重新核对 live Agent、owner/Policy、定义、Session/GoalId 和原生 revision 后完成原生目标，停止额外模型调用。回执已保存但原生完成尚未提交时显示 `nativeCompletion: pending`，后续模型步骤前尝试按同一绑定恢复完成；绑定改变或授权缺失时不会完成。已派发但无法确认的 assessment 在恢复时保持 unknown；丢失现场校验能力的成功 execution 也不能据此新签发 achieved 回执。历史回执不代表外部系统持续保持同一状态。
+
+额外私有文件为 `databasePath + '.outcomes'` 及 WAL/SHM：保存冻结目标条件、assessment、触发 run 与执行证据，沿用 WAL/FULL 和私有权限，卸载保留数据。整体验证可能通过 Verifier 执行管理员批准的子进程、文档抓取或目标回读，权限与步骤验证相同。当前默认关闭；确定性模型的真实驱动测试不等于跨日实跑、云模型能力收益或生产 Web 安装完成。
+
+Verifier 回执、Goals 数据库投影与原生 Session 事件独立提交。`nativeCompletion: complete` 表示当前读回的原生状态，不是跨库原子提交或操作系统崩溃后的 exactly-once 保证；原生完成追加不等待独立 Session flush。恢复只在已有状态、准确轮次与当前授权可核对时收敛，投影/Session 不一致需要继续对账。

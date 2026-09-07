@@ -27,6 +27,8 @@ export interface TaskAcceptanceRegistration {
   readonly owner: object
   readonly requiresAcceptance: boolean
   prepare(input: AcceptanceTask): AcceptanceHandle | null
+  /** Reassess a goal using its original frozen conditions and absolute expiry. */
+  prepareGoalAssessment?(input: AcceptanceTask, template: AcceptanceHandle): AcceptanceHandle
   /** Re-read the durable terminal execution; a caller cannot supply a verdict. */
   completed(handle: AcceptanceHandle): Promise<void>
 }

@@ -38,6 +38,10 @@ export class GoalExecutionRuntime {
     path: string | undefined,
     private readonly maxDurationMs: number,
     private readonly current: (agent: Agent) => { scope: GoalScope; record: GoalRecord },
+    private readonly outcome?: {
+      prepare(agent: Agent, run: GoalExecutionRun): void
+      settled(agent: Agent, run: GoalExecutionRun, assertCurrent: () => void): Promise<void>
+    },
   ) {
     if (path !== undefined) {
       this.#store = new GoalExecutionStore(path)
@@ -212,6 +216,7 @@ export class GoalExecutionRuntime {
     signal.addEventListener('abort', abort, { once: true })
     try {
       this.#assertRound(round)
+      this.outcome?.prepare(agent, round.run)
       if (!await this.#bounded(this.ctx.get('sessions')!.flush(agent.session), signal)) throw new Error('assistant-goals: native round checkpoint failed')
       this.#assertRound(round)
       if (round.finishing) throw new Error('assistant-goals: admission cancelled')
@@ -284,6 +289,10 @@ export class GoalExecutionRuntime {
         // One existing bounded reconciliation cycle. Busy queues may still be
         // pending; the context reports that honestly instead of inferring success.
         await this.#bounded(verifier.tick(), new AbortController().signal)
+      }
+      const saved = this.#store!.get(round.run.intent.runId)!
+      if (this.#active && this.outcome !== undefined) {
+        await this.#bounded(this.outcome.settled(round.agent, saved, () => this.#assertRound(round, true)), new AbortController().signal)
       }
     }
   }

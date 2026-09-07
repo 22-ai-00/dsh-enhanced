@@ -169,7 +169,7 @@ interface TrustedEvaluationProjector {
     evaluationId: string
   }): Readonly<{
     triggerOutcomeId: string
-    subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -178,7 +178,7 @@ interface TrustedEvaluationProjector {
     status: 'applied' | 'replayed'
   }> | Promise<Readonly<{
     triggerOutcomeId: string
-    subjectKind: 'automation-run' | 'foreground-turn' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
     subjectRef: string
     version: number
     digest: string
@@ -986,7 +986,7 @@ export class AssistantEvaluationService extends Service implements TrustedEvalua
         const scope = canonicalEvaluationScope(contract.scope).scope
         let situation: string
         if (contract.task.kind === 'foreground-turn') situation = `foreground:${taskRef}`
-        else if (contract.task.kind === 'goal-step') {
+        else if (contract.task.kind === 'goal-step' || contract.task.kind === 'goal-outcome') {
           const goal = contract.task.goal
           situation = `goal:${hostIdentifier(goal.id, 'goal id', 1_000)}:definition:${goal.definitionVersion}`
         } else {

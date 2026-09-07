@@ -99,7 +99,7 @@ interface EpisodeRow {
 }
 
 interface CandidateEpisodeRow extends EpisodeRow {
-  task_subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+  task_subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
   task_subject_ref: string
   task_version: number
   task_digest: string
@@ -186,7 +186,7 @@ interface AutonomousRollbackRow {
 interface TaskLearningProjectionRow {
   scope_key: string
   scope_watermark: number
-  subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+  subject_kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
   subject_ref: string
   version: number
   digest: string
@@ -457,7 +457,7 @@ function supervisedGrowthAnalystReview(
       evidence: Object.freeze(evidence.map(entry => Object.freeze({ ...entry }))),
       scopeWatermark: row.scope_watermark,
       taskRevisions: Object.freeze((JSON.parse(row.task_revisions_json) as Array<{
-        subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+        subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
         subjectRef: string
         version: number
         digest: string
@@ -800,7 +800,7 @@ export class EvolutionStore {
   applyTaskLearningProjection(input: TaskLearningProjectionInput): TaskLearningProjectionResult {
     const scopeKey = this.#scopeKey(input.scopeKey)
     const subjectKind = input.subjectKind
-    if (subjectKind !== 'automation-run' && subjectKind !== 'foreground-turn' && subjectKind !== 'goal-step' && subjectKind !== 'outcome') {
+    if (subjectKind !== 'automation-run' && subjectKind !== 'foreground-turn' && subjectKind !== 'goal-step' && subjectKind !== 'goal-outcome' && subjectKind !== 'outcome') {
       throw new EvolutionStoreError('invalid-input', 'task learning subjectKind is invalid')
     }
     const subjectRef = this.#opaque(input.subjectRef, 'subjectRef', 1_000)
@@ -1008,7 +1008,7 @@ export class EvolutionStore {
 
   getTaskLearningProjection(input: {
     scopeKey: string
-    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
     subjectRef: string
   }): StoredTaskLearningProjection | undefined {
     const row = this.#database.prepare(`
@@ -1102,7 +1102,7 @@ export class EvolutionStore {
   /** Must be called after the new task state is durable in the current writer transaction. */
   #retireRulesDependingOnTaskRevision(input: {
     scopeKey: string
-    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+    subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
     subjectRef: string
     now: number
   }): void {
@@ -1881,7 +1881,7 @@ export class EvolutionStore {
     evidenceTotal: number
     scopeWatermark: number
     taskRevisions: readonly Readonly<{
-      subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+      subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
       subjectRef: string
       version: number
       digest: string
@@ -2851,14 +2851,14 @@ export class EvolutionStore {
 
   #sameTaskRevisions(
     current: readonly Readonly<{
-      subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+      subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
       subjectRef: string
       version: number
       digest: string
       disposition: 'upsert'
     }>[],
     expected: readonly Readonly<{
-      subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'outcome'
+      subjectKind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' | 'outcome'
       subjectRef: string
       version: number
       digest: string
@@ -3051,7 +3051,7 @@ export class EvolutionStore {
       const seen = new Set<string>()
       taskRevisions = Object.freeze(input.taskRevisions.map((entry, index) => {
         if (typeof entry !== 'object' || entry === null || Array.isArray(entry)
-          || (entry.subjectKind !== 'automation-run' && entry.subjectKind !== 'foreground-turn' && entry.subjectKind !== 'goal-step' && entry.subjectKind !== 'outcome')
+          || (entry.subjectKind !== 'automation-run' && entry.subjectKind !== 'foreground-turn' && entry.subjectKind !== 'goal-step' && entry.subjectKind !== 'goal-outcome' && entry.subjectKind !== 'outcome')
           || entry.disposition !== 'upsert'
           || !/^[a-f0-9]{64}$/u.test(entry.digest)) {
           throw new EvolutionStoreError('invalid-input', `evidence task revision ${index} is invalid`)
