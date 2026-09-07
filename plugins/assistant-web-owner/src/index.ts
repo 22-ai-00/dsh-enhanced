@@ -4,6 +4,8 @@ import type { SessionAddress, SessionControlFrame, SessionCreateRequest, Session
 import Schema from '@deepseek-ai/schemastery'
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { Workspace } from '@deepseek-ai/dsh-workspace'
+import { realpath } from 'node:fs/promises'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-web-owner'
@@ -64,7 +66,17 @@ function ownedAgents(originalRegistry: Context['agents'], access: NativeWebOwner
   }
 }
 
-function wrapController(ctx: Context, config: Config, access: NativeWebOwnerAccess, originalRegistry: Context['agents']): SessionController {
+async function resolveOwnedWorkspace(ctx: Context, config: Config): Promise<Workspace> {
+  // Delivery uses config.workspace as a durable scope key. Do not replace it
+  // with realpath output: instead refuse a spelling that would drift that key.
+  if (await realpath(config.workspace) !== config.workspace) fail('workspace must be its canonical path')
+  const registry = ctx.workspaceRegistry
+  const workspace = await registry.resolveByPath(config.workspace) ?? await registry.create(config.workspace)
+  if (workspace.path !== config.workspace) fail('workspace registry returned a non-canonical path')
+  return workspace
+}
+
+function wrapController(ctx: Context, config: Config, access: NativeWebOwnerAccess, originalRegistry: Context['agents'], workspace: Workspace): SessionController {
   const isolated = ctx
   const pendingAdded = new Map<SessionId, unknown>()
   let creating = 0
@@ -90,6 +102,11 @@ function wrapController(ctx: Context, config: Config, access: NativeWebOwnerAcce
         if (event === 'api-session/added' && creating > 0 && pendingAdded.size < 100) pendingAdded.set(id, args[0])
         return
       }
+      // Native session/disposed means the in-memory handle detached. This
+      // adapter deliberately evicts idle Agents while keeping their durable
+      // owner binding and history; forwarding "removed" would clear the UI's
+      // selected session before the user can send its first message.
+      if (event === 'api-session/removed') return
     }
     return emit(event, ...args)
   }) as Context['emit'] })
@@ -109,13 +126,16 @@ function wrapController(ctx: Context, config: Config, access: NativeWebOwnerAcce
   replace('list', async (request: never, signal: AbortSignal) => { const value = await call('list', [request, signal]) as { items: readonly { sessionId: SessionId }[] }; return { ...value, items: value.items.filter(item => access.ownsSession(item.sessionId)) } })
   replace('search', async (request: never, signal: AbortSignal) => { const value = await call('search', [request, signal]) as { items: readonly { sessionId: SessionId }[] }; return { ...value, items: value.items.filter(item => access.ownsSession(item.sessionId)) } })
   replace('create', async (request: SessionCreateRequest) => {
-    if (request.workspaceId !== undefined) fail('workspaceId is disabled for the Web owner')
+    if (request.workspaceId !== undefined && request.workspaceId !== workspace.id) fail('the configured workspaceId is required')
+    if (request.workspaceId !== undefined && request.cwd !== undefined) fail('workspaceId and cwd cannot be combined')
     if (request.cwd !== undefined && request.cwd !== config.workspace) fail('the configured workspace is required')
+    const current = ctx.workspaceRegistry.get(workspace.id)
+    if (current?.path !== config.workspace) fail('the configured workspaceId is no longer available')
     if (request.agentPreset !== undefined && request.agentPreset !== config.preset) fail('the configured preset is required')
     if (request.sessionId !== undefined && !access.ownsSession(request.sessionId)) fail('cannot adopt a session outside this Web owner')
     creating += 1
     try {
-      const value = await call('create', [{ sessionId: request.sessionId, cwd: config.workspace, agentPreset: config.preset }]) as { sessionId: SessionId }
+      const value = await call('create', [{ sessionId: request.sessionId, workspaceId: workspace.id, agentPreset: config.preset }]) as { sessionId: SessionId }
       assertOwned(access, value.sessionId)
       const added = pendingAdded.get(value.sessionId)
       if (added !== undefined) emit('api-session/added', added)
@@ -161,10 +181,16 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
   // The facade provider must own an independently activated fiber whose ctx
   // already has this isolation. Otherwise Cordis cannot notify its dependents.
   const isolated = ctx.isolate('agents')
-  await isolated.plugin({ inject: inject.filter(key => key !== 'agents'), apply(owner: Context) {
+  await isolated.plugin({ inject: inject.filter(key => key !== 'agents'), async apply(owner: Context) {
     const delivery = owner.get('assistantDelivery') as DeliveryBridge | undefined
     if (delivery === undefined) fail('assistantDelivery is required')
     const access = delivery.bindNativeWebOwner(owner, { principal: { channel: 'web', ...config.principal }, workspace: config.workspace, preset: config.preset, ...(config.maxExecutionMs === undefined ? {} : { maxExecutionMs: config.maxExecutionMs }) })
-    wrapController(owner, config, access, originalRegistry)
+    try {
+      const workspace = await resolveOwnedWorkspace(owner, config)
+      wrapController(owner, config, access, originalRegistry, workspace)
+    } catch (error) {
+      await access.dispose()
+      throw error
+    }
   } })
 }

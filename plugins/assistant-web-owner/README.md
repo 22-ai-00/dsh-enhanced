@@ -36,11 +36,14 @@ Policy 至少需要显式允许该 `web/account/tenant/user` 的 `ingest`，以�
 
 ## 当前行为与限制
 
-- 新会话固定绑定该 owner 与作用域，不能通过客户端 cwd、preset、workspaceId 或已有 Session ID 接管其他会话。
+- 启动时在 owner 已证明后解析或注册配置 workspace；配置路径必须是实际路径（`realpath`），避免 Delivery scope key 漂移。原生界面使用该 workspaceId，Controller 保留工作区与会话关联；直接调用可省略位置或提供相同 cwd。其他 workspaceId、不同 cwd/preset 或外部 Session ID 均拒绝。同一请求不能同时提供 cwd 和 workspaceId。
 - 文本先以确切 Inbox 原子领取，再通过原生 `source.kind=user`、requestId、内容和实际 inserted/claimed 消息对象建立一次性证明。只复制来源标签或重发相同文本不能获得第二次准入。
 - Session 列表、搜索、历史、控制流、技能目录及 `api-session/*` 广播过滤非 owner 会话；原生 Goal RPC 的 Agent lookup 使用同一受限入口。
-- 忙时拒绝新的输入，当前不支持输入图片、fork、子 Agent 历史地址或任意宿主路径打开。排队/steer 的完整交互、附件的一次性准入、浏览器端到端体验和长期跨日运行仍待完成。
+- 空闲释放只回收内存 Agent，保留已持久化的会话和界面选择；再次输入沿原生恢复路径执行。不会把原生 `session/disposed` 当作持久会话删除。
+- 忙时拒绝新的输入，当前不支持输入图片、fork、子 Agent 历史地址或任意宿主路径打开。排队/steer 的完整交互、附件的一次性准入与长期跨日运行仍待完成。
 - 中断的 native Inbox 不转成普通 Delivery 消息重放，包括尚未调用原生 prompt 的崩溃窗口。已有 Session/Goal/业务记录保留。
+
+Web client 在构建时复用 DSH `0.1.2-rc.1` Session Controller 的浏览器 bundle，只将 ModuleLoader 注册 id 改为本包 id；不会重新实现 session RPC 或 UI 状态。构建脚本会验证上游版本、完整 `dsh.client` 元数据、MIT 许可证、单一注册 id 和无自引用 require，格式变化时失败。生成产物携带上游完整 MIT 文本于 `lib/THIRD_PARTY_LICENSES`，并保留 client 文件的版权 notice；该方案依赖当前 DSH UI bundles 不通过 ModuleLoader require 原 Controller client id。其他 UI manifest 的旧 inject 边在该版本只影响 graph 到达顺序，Cordis client service injection 仍等待本 clone 提供 `sessions`。
 
 ## 权限与数据
 
@@ -50,4 +53,4 @@ Policy 至少需要显式允许该 `web/account/tenant/user` 的 `ingest`，以�
 
 Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租约；原生 Session 保存实际对话。返回的固定 capability 只给受信 Host 配置使用，并非对同进程插件或同 UID 进程的 OS 隔离边界。
 
-测试覆盖实际 AgentLoop、SessionController、Typert Gateway、ApiRemotes 的两个事件订阅端、SQLite 和业务 Goal 创建；模型为确定性 adapter。HTTP/WS 网络载体、浏览器认证、正式安装与真实模型收益不在这些测试证据内。
+单元与组合测试覆盖实际 AgentLoop、SessionController、Typert Gateway、双事件订阅、SQLite、业务 Goal 及空闲后恢复。另有独立浏览器命令 `CI=true pnpm test:web-owner`：全新临时 profile 安装、真实认证/HTTP/WS、原生审批、Goal 落库、Host 重启后新浏览器上下文恢复同一会话，详见仓库 `scripts/e2e/README.md`。模型仍为确定性 adapter；这些证据不证明真实模型收益、可信目标达成或长期自治。该命令需要本地 DSH 与 Chromium，不包含在普通 `pnpm check` 中。

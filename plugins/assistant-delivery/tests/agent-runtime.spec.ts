@@ -2735,6 +2735,7 @@ describe('real rc.1 delivery Agent runtime', () => {
 
   test('production Web owner admits a real native human turn, creates a business Goal and releases its idle Session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-owner-')); roots.push(root)
+    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
     const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
     const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'web/browser/local/owner' }
     const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
@@ -2744,7 +2745,7 @@ describe('real rc.1 delivery Agent runtime', () => {
         { id: 'web-goal', effect: 'allow', subject, actions: ['create', 'observe', 'inspect', 'snapshot'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
         { id: 'web-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
       ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
-    })
+    }, realPersistence(PersistenceCoordinator, new Map()))
     const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
     operator.handoffOwner(webPrincipal)
     fixture.ctx.sessionProjections.register(agentPresetProjectionDefinition)
@@ -2755,7 +2756,22 @@ describe('real rc.1 delivery Agent runtime', () => {
     let ownerHistory: AsyncIterator<unknown> | undefined
     try {
       fixture.ctx.provide('attachments', attachmentFixture().attachments)
-      fixture.ctx.provide('workspaceRegistry' as never, { get: () => undefined } as never)
+      const ownedWorkspace = {
+        id: 'web-owner-workspace', path: root, attachSession: vi.fn(async () => {}),
+      }
+      const foreignWorkspace = {
+        id: 'foreign-workspace', path: join(root, 'foreign'), attachSession: vi.fn(async () => {}),
+      }
+      const resolveByPath = vi.fn(async (_path: string) => undefined)
+      const createWorkspace = vi.fn(async (path: string) => {
+        if (path !== root) throw new Error('unexpected workspace registration')
+        return ownedWorkspace
+      })
+      fixture.ctx.provide('workspaceRegistry' as never, {
+        get: (id: string) => id === ownedWorkspace.id ? ownedWorkspace : id === foreignWorkspace.id ? foreignWorkspace : undefined,
+        resolveByPath,
+        create: createWorkspace,
+      } as never)
       await fixture.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
       await fixture.ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)
       await fixture.ctx.plugin(TypertRegistry)
@@ -2779,11 +2795,21 @@ describe('real rc.1 delivery Agent runtime', () => {
       await fiber; webFiber = fiber
       const controller = fixture.ctx.get('sessionController')!
       expect(controller).toBeDefined()
-      const created = await gateway.invoke({ namespace: 'session', method: 'create', args: { request: { cwd: root, agentPreset: 'primary' } } }) as { sessionId: SessionId }
+      expect(resolveByPath).toHaveBeenCalledWith(root)
+      expect(createWorkspace).toHaveBeenCalledWith(root)
+      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: 'unknown-workspace' } } })).rejects.toThrow('configured workspaceId')
+      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: foreignWorkspace.id } } })).rejects.toThrow('configured workspaceId')
+      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id, cwd: root } } })).rejects.toThrow('cannot be combined')
+      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { cwd: foreignWorkspace.path } } })).rejects.toThrow('configured workspace')
+      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id, agentPreset: 'foreign' } } })).rejects.toThrow('configured preset')
+      const created = await gateway.invoke({ namespace: 'session', method: 'create', args: { request: { workspaceId: ownedWorkspace.id } } }) as { sessionId: SessionId }
+      expect(ownedWorkspace.attachSession).toHaveBeenCalledWith(created.sessionId)
+      await expect(gateway.invoke({ namespace: 'session', method: 'create', args: { request: { sessionId: created.sessionId, cwd: root, agentPreset: 'primary' } } })).resolves.toMatchObject({ sessionId: created.sessionId })
       const binding = operator.getBindingBySession(String(created.sessionId))!
       expect(binding.principal).toEqual(webPrincipal)
       ownerHistory = controller.follow({ address: { kind: 'session', sessionId: created.sessionId } }, eventAbort.signal)[Symbol.asyncIterator]()
       expect((await ownerHistory.next()).value).toMatchObject({ type: 'snapshot', header: { id: created.sessionId } })
+      await vi.waitFor(() => expect(fixture.ctx.agents.get(created.sessionId)).toBeUndefined())
       let humanTurn = false
       let goalCreated = false
       fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
@@ -2805,6 +2831,9 @@ describe('real rc.1 delivery Agent runtime', () => {
       expect(humanTurn).toBe(true)
       expect(fixture.llm.requests).toHaveLength(1)
       expect(fixture.ctx.agents.get(created.sessionId)).toBeUndefined()
+      await vi.waitFor(() => expect(forwarded.every(frames => frames.some(frame => frame.event === 'api-session/added'
+        && (frame.args?.[0] as { sessionId?: string } | undefined)?.sessionId === created.sessionId))).toBe(true))
+      expect(forwarded.every(frames => !frames.some(frame => frame.event === 'api-session/removed' && frame.args?.[0] === created.sessionId))).toBe(true)
       const db = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
       try { expect(db.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(created.sessionId)).toMatchObject({ state: 'released' }) }
       finally { db.close() }
@@ -2822,7 +2851,8 @@ describe('real rc.1 delivery Agent runtime', () => {
       await vi.waitFor(() => expect(forwarded.every(frames => frames.some(frame => frame.event === 'api-session/activity' && frame.args?.[1] === 123456))).toBe(true))
       for (const frames of forwarded) {
         expect(JSON.stringify(frames)).not.toContain('foreign-')
-        expect(frames.filter(frame => frame.event === 'api-session/added' && (frame.args?.[0] as { sessionId?: string })?.sessionId === created.sessionId)).toHaveLength(1)
+        // Initial creation and deliberate cold resume refresh the same summary.
+        expect(frames.filter(frame => frame.event === 'api-session/added' && (frame.args?.[0] as { sessionId?: string })?.sessionId === created.sessionId)).toHaveLength(2)
       }
       const owner = operator.getPrincipal(webPrincipal)!
       operator.revokePrincipal(owner.id, owner.version)
