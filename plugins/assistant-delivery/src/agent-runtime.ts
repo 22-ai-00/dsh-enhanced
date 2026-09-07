@@ -2682,7 +2682,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       || typeof input.signal.aborted !== 'boolean' || typeof input.signal.addEventListener !== 'function'
       || typeof input.signal.removeEventListener !== 'function' || input.signal.aborted
       || !isDeliveryGoalWakeDeadline(input.deadlineAt, now) || typeof input.assertCurrent !== 'function'
-      || typeof input.beforeResume !== 'function' || typeof input.native?.goalId !== 'string'
+      || typeof input.beforeResume !== 'function' || typeof input.settle !== 'function' || typeof input.native?.goalId !== 'string'
       || input.native.goalId.length === 0 || input.native.goalId.length > 512
       || !Number.isSafeInteger(input.native.revision) || input.native.revision < 1) return false
     const attestation = input.attestation
@@ -2753,6 +2753,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   ): Promise<boolean> {
     return new Promise(resolve => {
       let settled = false
+      let verifying = false
       const finish = (value: boolean): void => {
         if (settled) return
         settled = true
@@ -2762,6 +2763,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         resolve(value)
       }
       const check = (): void => {
+        if (settled || verifying) return
         try {
           this.sessionLeases.assert(String(agent.session.id))
           input.signal.throwIfAborted()
@@ -2775,7 +2777,21 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
           }
           if (agent.status !== 'idle' || agent.inbox.hasPending) return
           input.assertCurrent(agent, 'terminal')
-          finish(true)
+          // Native idle/round-limit can precede the asynchronous step and
+          // whole-goal verifier. Keep the Agent and its lease alive until that
+          // exact terminal round settles; cancellation still ends this wait.
+          verifying = true
+          void Promise.resolve().then(() => input.settle(agent, signal)).then(() => {
+            if (settled) return
+            signal.throwIfAborted()
+            this.assertScheduledGoal(input, agent, 'terminal')
+            if (agent.status !== 'idle' || agent.inbox.hasPending) throw new Error('assistant-delivery: goal changed during terminal settlement')
+            finish(true)
+          }).catch(() => {
+            if (settled) return
+            try { agent.cancel({ kind: 'hook', reason: 'assistant-delivery-scheduled-goal-settlement-failed' }) } catch {}
+            finish(false)
+          })
         } catch {
           try { agent.cancel({ kind: 'hook', reason: 'assistant-delivery-scheduled-goal-wake-revoked' }) } catch {}
           finish(false)

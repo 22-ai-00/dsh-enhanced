@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
@@ -22,20 +23,42 @@ function record(root: string): GoalRecord {
 function intent(value: GoalRecord): GoalWakeIntent {
   return { id: `wake-${acceptanceDigest([value.scope, value.id, value.definition, value.native])}`, scope: value.scope, goalId: value.id, definition: value.definition, native: value.native, attestation: { scope: { workspace: value.scope.workspace, preset: value.scope.preset }, principalId: value.scope.principalId, principalLineage: { principalRecordId: value.scope.principalRecordId, principalVersion: value.scope.principalVersion }, bindingId: 'binding-a', bindingVersion: 1, bindingGeneration: 1, sessionId: value.native.sessionId }, at: Date.now() + 60_000, expiresAt: Date.now() + 120_000, ownerRouteId: 'local/owner', budgetId: 'goal-budget/owner' }
 }
-async function harness() {
+async function harness(withSettlementCapability = true) {
   const root = await mkdtemp(join(tmpdir(), 'goal-wake-runtime-')); roots.push(root)
   const ctx = new Context(); contexts.push(ctx)
-  await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), rules: [{ id: 'allow-wake-reconcile', effect: 'allow', subject: { kind: 'background', id: owner, workspace: root }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } }] })
-  const resumeScheduledGoal = vi.fn(async () => ({ outcome: 'denied' as const, dispatched: false, quiescent: false }))
-  ctx.provide('assistantDelivery' as never, { validateOwnerRoute: () => ({ principalRecordId: 'owner-row', principalVersion: 1 }), resumeScheduledGoal } as never)
+  await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), budgets: [{ id: 'goal-budget/owner', metric: 'automation-runs', limit: 10, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }], rules: [{ id: 'allow-wake-reconcile', effect: 'allow', subject: { kind: 'background', id: owner, workspace: root }, actions: ['reconcile'], resource: { kind: 'automation', id: '*' }, context: { initiators: ['background'] } }] })
+  let value = record(root); let proveCompletion = false; let settleCalls = 0
+  const resumeScheduledGoal = vi.fn(async (input: { beforeResume(agent: Agent): void; settle(agent: Agent, signal: AbortSignal): Promise<void> }) => {
+    const agent = { session: { id: value.native.sessionId } } as Agent
+    input.beforeResume(agent)
+    value = { ...value, native: { ...value.native, phase: 'blocked', revision: value.native.revision + 2, roundsStarted: value.native.maxGoalRounds } }
+    await input.settle(agent, new AbortController().signal)
+    return { outcome: 'succeeded' as const, dispatched: true, quiescent: true }
+  })
+  ctx.provide('assistantDelivery' as never, { validateOwnerRoute: () => ({ principalRecordId: 'owner-row', principalVersion: 1 }), resumeScheduledGoal,
+    ...(withSettlementCapability ? { goalWakeSettlementVersion: () => 1 } : {}) } as never)
   const automationPath = join(root, 'automations.sqlite')
   await ctx.plugin(AssistantAutomationsService, { databasePath: automationPath, runsPath: join(root, 'runs'), schedulerEnabled: false, reconcileIntervalMs: 0, allowUnbudgetedExecution: true })
-  const value = record(root); const wakePath = join(root, 'wakes.sqlite')
-  const runtime = new GoalWakeRuntime(ctx, wakePath, { ownerRouteId: 'local/owner', budgetId: 'goal-budget/owner', maxDelayMs: 86_400_000, runTimeoutMs: 60_000 }, (scope, goalId) => acceptanceDigest(scope) === acceptanceDigest(value.scope) && goalId === value.id ? value : undefined, () => true)
-  return { ctx, root, runtime, value, wakePath, automationPath, resumeScheduledGoal }
+  const wakePath = join(root, 'wakes.sqlite')
+  const runtime = new GoalWakeRuntime(ctx, wakePath, { ownerRouteId: 'local/owner', budgetId: 'goal-budget/owner', maxDelayMs: 86_400_000, runTimeoutMs: 60_000 }, (scope, goalId) => acceptanceDigest(scope) === acceptanceDigest(value.scope) && goalId === value.id ? value : undefined, () => true,
+    async (_agent, signal) => {
+      signal.throwIfAborted(); settleCalls += 1
+      value = { ...value, native: { ...value.native, phase: 'complete', revision: value.native.revision + 1 } }
+    }, () => proveCompletion)
+  return { ctx, root, runtime, get value() { return value }, wakePath, automationPath, resumeScheduledGoal,
+    proveCompletion(value: boolean) { proveCompletion = value }, get settleCalls() { return settleCalls } }
 }
 
 describe('durable goal wake scheduling protocol', () => {
+  it('rejects a Delivery runtime without the settlement capability before any wake is written', async () => {
+    const supported = await harness()
+    expect(() => supported.runtime.preflight(supported.value)).not.toThrow()
+    const f = await harness(false)
+    expect(() => f.runtime.preflight(f.value)).toThrow('wake authority is unavailable')
+    expect(f.runtime.inspect(f.value.scope, f.value.id)).toEqual([])
+    expect(f.resumeScheduledGoal).not.toHaveBeenCalled()
+  })
+
   it('leaves the real paused reconciliation unclaimable on a second Automations connection', async () => {
     const f = await harness(); await Promise.resolve(); expect(f.runtime.health().connected).toBe(true); let secondClaim: unknown = 'not-observed'
     const module = await import('../../assistant-automations/lib/store.js')
@@ -97,5 +120,28 @@ describe('durable goal wake scheduling protocol', () => {
     inspect.mockRestore()
     expect(f.runtime.inspect(f.value.scope, f.value.id).find(item => item.intent.id === wake.intent.id)).toMatchObject({ state: 'denied' })
     expect(f.resumeScheduledGoal).not.toHaveBeenCalled()
+  })
+
+  it('accepts the final blocked-to-complete revision only after an exact verified completion proof', async () => {
+    const execute = async (f: Awaited<ReturnType<typeof harness>>) => {
+      const wake = f.runtime.materialize({ ...intent(f.value), at: Date.now() - 10, expiresAt: Date.now() + 10_000 })
+      const registry = (f.ctx.assistantAutomations as unknown as { hostExecutors: { prove(input: unknown): unknown; execute(proof: unknown, input: unknown): Promise<{ outcome: string }> } }).hostExecutors
+      const catalogDigest = acceptanceDigest({ protocol: owner, operation: 'resume-paused-native-goal', version: 1 })
+      const execution = { kind: 'host', executorId: owner, executorContractVersion: 1, runbookId: 'resume-paused-native-goal', runbookVersion: 1,
+        catalogDigest, targetScope: { workspace: wake.intent.scope.workspace, preset: wake.intent.scope.preset }, scopeDigest: '0'.repeat(64), ownerRouteId: wake.intent.ownerRouteId, activationNonce: wake.intent.id }
+      const proof = registry.prove(execution)
+      return await registry.execute(proof, { occurrenceId: 'wake-occurrence', automationId: wake.intent.id, definitionHash: wake.definitionHash!,
+        executionMode: 'production', targetScope: { workspace: wake.intent.scope.workspace, preset: wake.intent.scope.preset }, principal: wake.intent.scope.principalId,
+        ownerRouteId: wake.intent.ownerRouteId, activationNonce: wake.intent.id, catalogDigest, signal: new AbortController().signal })
+    }
+    const denied = await harness()
+    await expect(execute(denied)).resolves.toMatchObject({ outcome: 'unknown' })
+    expect(denied.settleCalls).toBe(1)
+    expect(denied.runtime.inspect(denied.value.scope, denied.value.id)).toMatchObject([{ state: 'unknown' }])
+
+    const accepted = await harness(); accepted.proveCompletion(true)
+    await expect(execute(accepted)).resolves.toMatchObject({ outcome: 'succeeded' })
+    expect(accepted.settleCalls).toBe(1)
+    expect(accepted.runtime.inspect(accepted.value.scope, accepted.value.id)).toMatchObject([{ state: 'succeeded' }])
   })
 })

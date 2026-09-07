@@ -216,6 +216,8 @@ Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正�
 
 续跑占用当前任务的串行位置，可能产生额外模型和工具用量；时间上限不是 token 或费用硬上限。每个目标模型步骤以及工具执行前都会重查当前入站授权。目标自然停止前以及实际 teardown 完成后同样重查授权和取消信号；读取失败、替换 GoalId、超时、disposer 失败、`/stop`、`/new` 或授权撤销均记录为 non-quiescent 的未知结果，并取消该目标的后续续跑。续跑的剩余时间上限也约束 Agent teardown：超时和取消不会等待不响应取消的工具、`whenIdle()` 或 disposer；即使 Delivery 已返回，护栏仍保留到异步 Agent disposer 实际 settle（成功或失败），防止迟到的模型或工具动作越过撤权边界。该配置不提供跨日后台调度、跨 Session 目标迁移或独立的目标达成验收。
 
+Goals 的单次计划恢复使用单独的 Host capability。`goalWakeSettlementVersion()` 返回 1 时，`resumeScheduledGoal()` 要求 capability 提供 `settle(agent, signal)`，在原生终态和 idle 后等待当前 Agent 的独立验收，再重查 owner、Session、期限和最终状态后释放租约。缺少等待协议、结算失败或取消都不能报告成功；该能力版本不表示业务目标已经达成。
+
 `/feedback` 的完整固定语法如下；不接受附件或额外自由文本：
 
 ```text

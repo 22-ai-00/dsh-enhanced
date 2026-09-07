@@ -146,6 +146,13 @@ export class GoalBudgetStore {
     try { this.#database.prepare('INSERT INTO goal_budget_limits(scope_json, goal_id, model_calls, tool_calls, input_tokens, output_tokens, cost_usd_micros, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(key, input.goalId, value.modelCalls, value.toolCalls, value.inputTokens, value.outputTokens, value.costUsdMicros, value.expiresAt) } catch { fail('conflict') }
     return this.#snapshot(key, input.goalId)
   }
+  /** Read-only candidate view. It never inserts limits, requests, or reservations. */
+  preview(binding: GoalBudgetScope, limits: GoalBudgetLimits): GoalBudgetSnapshot {
+    const [input, key] = this.#key(binding); const candidate = limitsInput(limits); const existing = this.#limit(key, input.goalId)
+    if (existing === undefined) return freeze({ limits: candidate, modelCalls: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, costUsdMicros: candidate.costUsdMicros === null ? null : 0, heldCalls: 0 })
+    if (!equal(this.#limits(existing), candidate)) fail('conflict')
+    return this.#snapshot(key, input.goalId)
+  }
   reserve(binding: GoalBudgetScope, request: { id: string; runId: string; inputTokens: number; outputTokens: number; costUsdMicros: number | null }, now: number): GoalBudgetReservation {
     const [input, key] = this.#key(binding)
     const value = requestInput(request)

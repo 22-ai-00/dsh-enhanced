@@ -1,0 +1,873 @@
+{
+  "schema": "goal-wake-runtime-evidence/v1",
+  "recordedAt": "2026-09-07T19:07:36.330873+00:00",
+  "baseCommit": "5e116b95f8a64ebd4bfae9ff3ca107070f41557f",
+  "scope": "WP05: exact preauthorized scheduling and real installed process restart through final-round independent verification; all 18 work packages remain active.",
+  "sourceHashes": {
+    "docs/agent-autonomy-implementation.md": "1242df9c631b3d00d923c7f659e9c6982d216a3f5a546adc7a9d4a402f6cfcf7",
+    "docs/architecture.md": "02eaa8c80f1b73c27fe26c60be448dc582cda9891543fa9705eefe4898eb262d",
+    "docs/autonomy-handoff-2026-09-06.md": "5ffd6b00931bebaeed91e89ea5472c995d8f8781d129c7d5aa030dc32d2bb4ff",
+    "package.json": "7c6e04f1d102028e92cabd4bad520cf6b91abd164f1cfe6e5010f8236d01bf2e",
+    "plugins/assistant-delivery/README.md": "7ae6b01c2de3e8738e479e4e7d39ebf43c33d1ae84ce2d809b2a5ffe722a3b0e",
+    "plugins/assistant-delivery/src/agent-runtime.ts": "64668a91429da4879886e30064d5df218db926be2d9c80b08190b772e1d82e9a",
+    "plugins/assistant-delivery/src/goal-wake-types.ts": "c998e56139ed8195618cb32dc78cc0c43064c0b37deef7585033a3a1cfafff8d",
+    "plugins/assistant-delivery/src/service.ts": "7acec65e41c9e61584a157ec4ea20cec16ef3f64ff6fafafc0b4bbd8698e94b5",
+    "plugins/assistant-delivery/tests/agent-runtime.spec.ts": "72ee72708ddea59fa6adf43041fcd60fe0c9c5f0abcf6848c048fad3273eee49",
+    "plugins/assistant-goals/README.md": "f6729acbb1d9a250b8c35507248e653d7c4cec6619fca0fe0db4ebf0bde7754f",
+    "plugins/assistant-goals/src/budget-store.ts": "78bd8436a4e53f1a42cd3c58a155f1c746447b16e9a4cb74ae43ca5b6f1e4155",
+    "plugins/assistant-goals/src/budget.ts": "cf9065702f8cff908e18db8a5fce558110fccef6ddbfc53abac6d2d670d8c3c6",
+    "plugins/assistant-goals/src/outcome.ts": "4e63471d86ce0c5193af0076072b06d6fdf35babe1588d6999f7408a8b4e8442",
+    "plugins/assistant-goals/src/service.ts": "a68f60911c7043423e4c617db8be6dbbd1fd73b95ea10f941ffc3ae8c26cfe4e",
+    "plugins/assistant-goals/src/tools.ts": "577a88e02bd31be16f69c63fdcbcdc2bed3ada8c7b28bd0a224e7f96f9e9dc83",
+    "plugins/assistant-goals/src/wake.ts": "760886b8b72ff867b402c645cebe9d4301cd0afa658b3f7b993ec76801288a7c",
+    "plugins/assistant-goals/tests/budget-store.spec.ts": "3c4a65517d1803eda29f0131388e536b3afa84fb4e41815b347874e3d650612c",
+    "plugins/assistant-goals/tests/service.spec.ts": "1208b80ae5ee885467dfc7dbff9443f8b5cd6ab643dccdc3375a5ca3d05d222e",
+    "plugins/assistant-goals/tests/wake.spec.ts": "a94c84e545349ae08e5e7103147782b2e71b11d43aa3b09ea4e339d92a859d4c",
+    "plugins/assistant-isolation/src/service.ts": "3cd90622726d6bbf242565a8bb329468e144a09f9c4c4c82d3373d592e27d9b3",
+    "plugins/assistant-policy/src/service.ts": "1a997b6bf22f95b6fe24750af01899cadf728f65bea56f22a9f2184f1255906d",
+    "plugins/assistant-policy/tests/preauthorized-tool.spec.ts": "0177818d9acda27a5393225c55941d133c6cc6129ce301cbc9cd23c9bbf0a96b",
+    "scripts/e2e/autonomy-wake-model.mjs": "7c73f1e287c3697294c6656a00cf64085767591585f28d31323e1dfaca58d2a6",
+    "scripts/e2e/autonomy-wake.spec.mjs": "1d22a6a9ec4a5b26a35ab8e812282deda4d7d555e2cf58334abdf1664b52a632",
+    "scripts/e2e/playwright-wake.config.mjs": "99432443e74477e8449be8bc0074cfda1b80ed66a6c52399b15477d9657f4ccb"
+  },
+  "commands": [
+    {
+      "command": "CI=true pnpm run build:bootstrap && CI=true pnpm exec vitest run plugins/assistant-goals/tests/budget-store.spec.ts plugins/assistant-goals/tests/service.spec.ts plugins/assistant-policy/tests/preauthorized-tool.spec.ts",
+      "log": "/tmp/dsh-goal-wake-targeted-v1.log",
+      "exitCode": 1,
+      "sha256": "db04a21ae39fbdac7567daa404ac00532176461795d7053a6fa04acbaa84910d",
+      "exitFile": "/tmp/dsh-goal-wake-targeted-v1.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-targeted-v1.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-targeted-v1.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:wake --grep resume",
+      "log": "/tmp/dsh-goal-wake-browser-resume-v1.log",
+      "exitCode": 1,
+      "sha256": "2308e20ff9da3bb11952c0ac5cb800b840c0c2d6df7d1e3f957ea16cfdd8e0e3",
+      "exitFile": "/tmp/dsh-goal-wake-browser-resume-v1.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-resume-v1.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-resume-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm run build:bootstrap && CI=true pnpm exec vitest run plugins/assistant-goals/tests/budget-store.spec.ts plugins/assistant-goals/tests/service.spec.ts plugins/assistant-policy/tests/preauthorized-tool.spec.ts",
+      "log": "/tmp/dsh-goal-wake-targeted-v2.log",
+      "exitCode": 0,
+      "sha256": "3bf37da48f266ab518e60ce5c7bd651bcedf912cb87ee28fe1456237f0ea219f",
+      "exitFile": "/tmp/dsh-goal-wake-targeted-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-targeted-v2.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-targeted-v2.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:wake --grep resume",
+      "log": "/tmp/dsh-goal-wake-browser-resume-v2.log",
+      "exitCode": 1,
+      "sha256": "7f548b3d8de0da724a29079a7a568dfd908755bad7edbbf4c349d3270787a1e5",
+      "exitFile": "/tmp/dsh-goal-wake-browser-resume-v2.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-resume-v2.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-resume-v2.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:wake --grep resume",
+      "log": "/tmp/dsh-goal-wake-browser-resume-v3.log",
+      "exitCode": 1,
+      "sha256": "56ebf09132f98e337ebdf792f05fe9fe86e8e16625016cc67dcba7ca244c7d13",
+      "exitFile": "/tmp/dsh-goal-wake-browser-resume-v3.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-resume-v3.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-resume-v3.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:wake --grep resume",
+      "log": "/tmp/dsh-goal-wake-browser-resume-v4.log",
+      "exitCode": 1,
+      "sha256": "5a78048d10433a120020a3993dc937501a44ed95d708dd4525294e99cfffcda9",
+      "exitFile": "/tmp/dsh-goal-wake-browser-resume-v4.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-resume-v4.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-resume-v4.log.exit"
+    },
+    {
+      "command": "CI=true pnpm run build:bootstrap && CI=true pnpm exec vitest run plugins/assistant-goals/tests/budget-store.spec.ts plugins/assistant-goals/tests/service.spec.ts plugins/assistant-goals/tests/wake.spec.ts plugins/assistant-policy/tests/preauthorized-tool.spec.ts && CI=true pnpm exec vitest run plugins/assistant-delivery/tests/agent-runtime.spec.ts -t \"scheduled goal\"",
+      "log": "/tmp/dsh-goal-wake-targeted-v3.log",
+      "exitCode": 0,
+      "sha256": "40a36578c70e5155c5adeb210f88f157060ae37a12720b68a689a077a30152f3",
+      "exitFile": "/tmp/dsh-goal-wake-targeted-v3.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-targeted-v3.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-targeted-v3.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:wake",
+      "log": "/tmp/dsh-goal-wake-browser-v5.log",
+      "exitCode": 1,
+      "sha256": "fea7c9b20775ec5be4b08eba95f518f3915d8420d475324ad3d15bddd4444a5d",
+      "exitFile": "/tmp/dsh-goal-wake-browser-v5.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-v5.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-v5.log.exit"
+    },
+    {
+      "command": "CI=true pnpm exec vitest run plugins/assistant-delivery/tests/agent-runtime.spec.ts -t \"scheduled goal\"",
+      "log": "/tmp/dsh-goal-wake-targeted-v4.log",
+      "exitCode": 0,
+      "sha256": "c8dca928617948276a30bece3a0135fcd4a5b6fa6845b3cc3cbe4ce077ff8b6f",
+      "exitFile": "/tmp/dsh-goal-wake-targeted-v4.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-targeted-v4.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-targeted-v4.log.exit"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-goal-wake-check-v1.log",
+      "exitCode": 0,
+      "sha256": "0b1bb628e52c15786bd11e76d7b5537680237cb738fa6712d2a2e14ed1e5910a",
+      "exitFile": "/tmp/dsh-goal-wake-check-v1.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-check-v1.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-check-v1.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:wake",
+      "log": "/tmp/dsh-goal-wake-browser-final.log",
+      "exitCode": 0,
+      "sha256": "a27fba65ff4f48d5e3dfad43db1bdbb5dabae251867f097b5ccab3aed71341c0",
+      "exitFile": "/tmp/dsh-goal-wake-browser-final.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-final.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-browser-final.log.exit"
+    },
+    {
+      "command": "CI=true pnpm exec eslint scripts/e2e/autonomy-wake-model.mjs scripts/e2e/autonomy-wake.spec.mjs scripts/e2e/playwright-wake.config.mjs --max-warnings=0 && git diff --check",
+      "log": "/tmp/dsh-goal-wake-final-static.log",
+      "exitCode": 1,
+      "sha256": "354e6906aab93a247df71b89de6e724615a1afee370796a63264054ea389c83a",
+      "exitFile": "/tmp/dsh-goal-wake-final-static.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-final-static.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-final-static.log.exit"
+    },
+    {
+      "command": "CI=true pnpm run lint && git diff --check",
+      "log": "/tmp/dsh-goal-wake-final-static-v2.log",
+      "exitCode": 0,
+      "sha256": "decfb35129f4a3eb2629ca3980e9707d043c8162c302770aee3339015da2af54",
+      "exitFile": "/tmp/dsh-goal-wake-final-static-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-final-static-v2.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-final-static-v2.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ENHANCED_WEB_PORT=3197 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy",
+      "log": "/tmp/dsh-goal-wake-regression-final.log",
+      "exitCode": 0,
+      "sha256": "ccf5dc1aa92958bcec1ffa60ddc77411c4c59a3dd195923763c2a1ab36e94a4b",
+      "exitFile": "/tmp/dsh-goal-wake-regression-final.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/autonomy-wake-validation/dsh-goal-wake-regression-final.log",
+      "workspaceExit": ".cache/autonomy-wake-validation/dsh-goal-wake-regression-final.log.exit"
+    }
+  ],
+  "browserProofs": {
+    "revoked": {
+      "mode": "revoked",
+      "sessionId": "session-59e88dd9-e574-46e5-88e4-4ca6837fec83",
+      "processesStarted": 3,
+      "wakeBefore": {
+        "id": "goal-wake-74808f5d476f49794d3f2e80c23898c3efea15905a5280d13cafd396a399f84a",
+        "intent_json": "{\"id\":\"goal-wake-74808f5d476f49794d3f2e80c23898c3efea15905a5280d13cafd396a399f84a\",\"scope\":{\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_088ba5af-05f2-4e11-92ba-4bf47074eab6\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-TycA1A/workspace\",\"preset\":\"standard\"},\"goalId\":\"66e886602f9d5d996d52cc6a4c7183b4e6ecec7756d764c833235dd09216406c\",\"definition\":{\"version\":1,\"digest\":\"59b5557ca9fc5718e872bda0983ccfc8bc6f7a711cbc895790de0cc80ecd37a0\",\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\"},\"native\":{\"sessionId\":\"session-59e88dd9-e574-46e5-88e4-4ca6837fec83\",\"goalId\":\"goal-a9b144d2-2da7-4f39-965f-95dd7d391954\",\"revision\":2,\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\",\"phase\":\"paused\",\"roundsStarted\":0,\"maxGoalRounds\":1,\"updatedAt\":1788807771544},\"attestation\":{\"scope\":{\"workspace\":\"/tmp/dsh-wake-e2e-TycA1A/workspace\",\"preset\":\"standard\"},\"principalId\":\"web/web/local/operator\",\"principalLineage\":{\"principalRecordId\":\"principal_088ba5af-05f2-4e11-92ba-4bf47074eab6\",\"principalVersion\":1},\"bindingId\":\"binding_7716aa53-65b0-40ee-affe-5aa8af70477c\",\"bindingVersion\":1,\"bindingGeneration\":1,\"sessionId\":\"session-59e88dd9-e574-46e5-88e4-4ca6837fec83\"},\"at\":1788807786497,\"expiresAt\":1788807876497,\"ownerRouteId\":\"scheduled-web-owner\",\"budgetId\":\"scheduled-goal-runs\"}",
+        "state": "scheduled",
+        "definition_hash": "6e94b259356d1a6df630a2fe75ee05191052e725ae352debf1a6a07a93d5ae93",
+        "occurrence_id": null,
+        "dispatched_at": null,
+        "completed_at": null,
+        "scope_key": "{\"preset\":\"standard\",\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_088ba5af-05f2-4e11-92ba-4bf47074eab6\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-TycA1A/workspace\"}",
+        "goal_id": "66e886602f9d5d996d52cc6a4c7183b4e6ecec7756d764c833235dd09216406c"
+      },
+      "wakeAfter": {
+        "id": "goal-wake-74808f5d476f49794d3f2e80c23898c3efea15905a5280d13cafd396a399f84a",
+        "intent_json": "{\"id\":\"goal-wake-74808f5d476f49794d3f2e80c23898c3efea15905a5280d13cafd396a399f84a\",\"scope\":{\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_088ba5af-05f2-4e11-92ba-4bf47074eab6\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-TycA1A/workspace\",\"preset\":\"standard\"},\"goalId\":\"66e886602f9d5d996d52cc6a4c7183b4e6ecec7756d764c833235dd09216406c\",\"definition\":{\"version\":1,\"digest\":\"59b5557ca9fc5718e872bda0983ccfc8bc6f7a711cbc895790de0cc80ecd37a0\",\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\"},\"native\":{\"sessionId\":\"session-59e88dd9-e574-46e5-88e4-4ca6837fec83\",\"goalId\":\"goal-a9b144d2-2da7-4f39-965f-95dd7d391954\",\"revision\":2,\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\",\"phase\":\"paused\",\"roundsStarted\":0,\"maxGoalRounds\":1,\"updatedAt\":1788807771544},\"attestation\":{\"scope\":{\"workspace\":\"/tmp/dsh-wake-e2e-TycA1A/workspace\",\"preset\":\"standard\"},\"principalId\":\"web/web/local/operator\",\"principalLineage\":{\"principalRecordId\":\"principal_088ba5af-05f2-4e11-92ba-4bf47074eab6\",\"principalVersion\":1},\"bindingId\":\"binding_7716aa53-65b0-40ee-affe-5aa8af70477c\",\"bindingVersion\":1,\"bindingGeneration\":1,\"sessionId\":\"session-59e88dd9-e574-46e5-88e4-4ca6837fec83\"},\"at\":1788807786497,\"expiresAt\":1788807876497,\"ownerRouteId\":\"scheduled-web-owner\",\"budgetId\":\"scheduled-goal-runs\"}",
+        "state": "denied",
+        "definition_hash": "6e94b259356d1a6df630a2fe75ee05191052e725ae352debf1a6a07a93d5ae93",
+        "occurrence_id": null,
+        "dispatched_at": null,
+        "completed_at": 1788807786994,
+        "scope_key": "{\"preset\":\"standard\",\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_088ba5af-05f2-4e11-92ba-4bf47074eab6\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-TycA1A/workspace\"}",
+        "goal_id": "66e886602f9d5d996d52cc6a4c7183b4e6ecec7756d764c833235dd09216406c"
+      },
+      "automationTasks": [
+        {
+          "id": "task-occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b",
+          "occurrence_id": "occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b",
+          "automation_id": "goal-wake-74808f5d476f49794d3f2e80c23898c3efea15905a5280d13cafd396a399f84a",
+          "status": "failed",
+          "cancel_requested": 0,
+          "claimed_by": "assistant-automations-af8401c5-edfd-49d5-a793-957c61dd4671",
+          "fencing_token": 3,
+          "lease_until": null,
+          "attempt_count": 1,
+          "created_at": 1788807786979,
+          "updated_at": 1788807787000
+        }
+      ],
+      "automationRuns": [
+        {
+          "id": "run-task-occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b",
+          "occurrence_id": "occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b",
+          "automation_id": "goal-wake-74808f5d476f49794d3f2e80c23898c3efea15905a5280d13cafd396a399f84a",
+          "task_id": "task-occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b",
+          "attempt_id": "attempt-task-occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b-1",
+          "status": "failed",
+          "session_id": "automation-occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b-2",
+          "artifact_ref": "occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b.json",
+          "output_preview": "Host execution terminal code: goal-wake-execution-unconfirmed",
+          "usage_json": "{}",
+          "execution_mode": "production",
+          "definition_hash": "6e94b259356d1a6df630a2fe75ee05191052e725ae352debf1a6a07a93d5ae93",
+          "diagnostic_json": "{\"schemaVersion\":1,\"failureClass\":\"policy\",\"failurePhase\":\"host-execution\",\"failureCode\":\"goal-wake-execution-unconfirmed\",\"promptSubmissionState\":\"not-applicable\",\"sideEffectState\":\"possible\",\"retryability\":\"unsafe\",\"budgetSettlementState\":\"finalized\"}",
+          "delivery_status": null,
+          "delivery_ref": null,
+          "evidence_status": "pending",
+          "evidence_json": "{\"situation\":\"automation:goal-wake-74808f5d476f49794d3f2e80c23898c3efea15905a5280d13cafd396a399f84a\",\"outcome\":\"failed\",\"detail\":\"automation \\\"Scheduled business goal\\\": run failed\",\"idempotencyKey\":\"automation-run:run-task-occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b\",\"occurredAt\":1788807787000,\"workspace\":\"/tmp/dsh-wake-e2e-TycA1A/workspace\",\"agentPreset\":\"standard\",\"automationId\":\"goal-wake-74808f5d476f49794d3f2e80c23898c3efea15905a5280d13cafd396a399f84a\",\"runId\":\"run-task-occ-02a6cd269ecf68ced6f82145ad85b20ecc175cabcfb85b15079257f0a733e50b\"}",
+          "created_at": 1788807787000,
+          "updated_at": 1788807787000
+        }
+      ],
+      "finalDuty": {
+        "singleton": 1,
+        "owner_id": "assistant-automations-af8401c5-edfd-49d5-a793-957c61dd4671",
+        "fencing_token": 3,
+        "lease_until": 1788807801976,
+        "updated_at": 1788807786976
+      },
+      "calls": [
+        {
+          "call": 1,
+          "pid": 3126554,
+          "sessionId": "session-59e88dd9-e574-46e5-88e4-4ca6837fec83",
+          "human": true,
+          "tool": null,
+          "secretObserved": false
+        },
+        {
+          "call": 2,
+          "pid": 3127077,
+          "sessionId": "session-59e88dd9-e574-46e5-88e4-4ca6837fec83",
+          "human": true,
+          "tool": "goal_create",
+          "secretObserved": false
+        },
+        {
+          "call": 3,
+          "pid": 3127077,
+          "sessionId": "session-59e88dd9-e574-46e5-88e4-4ca6837fec83",
+          "human": true,
+          "tool": "goal_schedule",
+          "secretObserved": false
+        },
+        {
+          "call": 4,
+          "pid": 3127077,
+          "sessionId": "session-59e88dd9-e574-46e5-88e4-4ca6837fec83",
+          "human": true,
+          "tool": null,
+          "secretObserved": false
+        }
+      ],
+      "approvals": 0,
+      "nativeGoalId": "goal-a9b144d2-2da7-4f39-965f-95dd7d391954",
+      "prompts": 2,
+      "setup": "actual installer plus explicit test-only verifier/meter/background Policy and exact persisted-conversation owner route",
+      "limits": "deterministic model; stopped-profile owner revocation seed; SIGINT stop request after real dispatch with a 10s forced-stop fallback; no production metering or multi-day benefit claim"
+    },
+    "interrupt": {
+      "mode": "interrupt",
+      "sessionId": "session-3484f841-ca4e-4c66-9d7b-427f519508b4",
+      "processesStarted": 4,
+      "wakeBefore": {
+        "id": "goal-wake-655b7683367bf1178c00fc0f2bcacc7ba8e66aa5bb0d183e9cb6d60e56694751",
+        "intent_json": "{\"id\":\"goal-wake-655b7683367bf1178c00fc0f2bcacc7ba8e66aa5bb0d183e9cb6d60e56694751\",\"scope\":{\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_fa06bd2b-db47-4b22-a93f-3fef99a1d589\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-ylK62b/workspace\",\"preset\":\"standard\"},\"goalId\":\"c4ec6ef3ef2661068ee308bb53fdafd491f0a8f0d092202e0d63e17813954975\",\"definition\":{\"version\":1,\"digest\":\"59b5557ca9fc5718e872bda0983ccfc8bc6f7a711cbc895790de0cc80ecd37a0\",\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\"},\"native\":{\"sessionId\":\"session-3484f841-ca4e-4c66-9d7b-427f519508b4\",\"goalId\":\"goal-52b81c65-ff37-40e9-b581-78cb75a4ba89\",\"revision\":2,\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\",\"phase\":\"paused\",\"roundsStarted\":0,\"maxGoalRounds\":1,\"updatedAt\":1788807844881},\"attestation\":{\"scope\":{\"workspace\":\"/tmp/dsh-wake-e2e-ylK62b/workspace\",\"preset\":\"standard\"},\"principalId\":\"web/web/local/operator\",\"principalLineage\":{\"principalRecordId\":\"principal_fa06bd2b-db47-4b22-a93f-3fef99a1d589\",\"principalVersion\":1},\"bindingId\":\"binding_07591d63-d733-42ea-8201-70390abf361c\",\"bindingVersion\":1,\"bindingGeneration\":1,\"sessionId\":\"session-3484f841-ca4e-4c66-9d7b-427f519508b4\"},\"at\":1788807859833,\"expiresAt\":1788807949833,\"ownerRouteId\":\"scheduled-web-owner\",\"budgetId\":\"scheduled-goal-runs\"}",
+        "state": "scheduled",
+        "definition_hash": "e963c6ef8ed82220b1b2793cd36bbf4206d7852148a81b408ea6be67b0d219d1",
+        "occurrence_id": null,
+        "dispatched_at": null,
+        "completed_at": null,
+        "scope_key": "{\"preset\":\"standard\",\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_fa06bd2b-db47-4b22-a93f-3fef99a1d589\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-ylK62b/workspace\"}",
+        "goal_id": "c4ec6ef3ef2661068ee308bb53fdafd491f0a8f0d092202e0d63e17813954975"
+      },
+      "wakeAfter": {
+        "id": "goal-wake-655b7683367bf1178c00fc0f2bcacc7ba8e66aa5bb0d183e9cb6d60e56694751",
+        "intent_json": "{\"id\":\"goal-wake-655b7683367bf1178c00fc0f2bcacc7ba8e66aa5bb0d183e9cb6d60e56694751\",\"scope\":{\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_fa06bd2b-db47-4b22-a93f-3fef99a1d589\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-ylK62b/workspace\",\"preset\":\"standard\"},\"goalId\":\"c4ec6ef3ef2661068ee308bb53fdafd491f0a8f0d092202e0d63e17813954975\",\"definition\":{\"version\":1,\"digest\":\"59b5557ca9fc5718e872bda0983ccfc8bc6f7a711cbc895790de0cc80ecd37a0\",\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\"},\"native\":{\"sessionId\":\"session-3484f841-ca4e-4c66-9d7b-427f519508b4\",\"goalId\":\"goal-52b81c65-ff37-40e9-b581-78cb75a4ba89\",\"revision\":2,\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\",\"phase\":\"paused\",\"roundsStarted\":0,\"maxGoalRounds\":1,\"updatedAt\":1788807844881},\"attestation\":{\"scope\":{\"workspace\":\"/tmp/dsh-wake-e2e-ylK62b/workspace\",\"preset\":\"standard\"},\"principalId\":\"web/web/local/operator\",\"principalLineage\":{\"principalRecordId\":\"principal_fa06bd2b-db47-4b22-a93f-3fef99a1d589\",\"principalVersion\":1},\"bindingId\":\"binding_07591d63-d733-42ea-8201-70390abf361c\",\"bindingVersion\":1,\"bindingGeneration\":1,\"sessionId\":\"session-3484f841-ca4e-4c66-9d7b-427f519508b4\"},\"at\":1788807859833,\"expiresAt\":1788807949833,\"ownerRouteId\":\"scheduled-web-owner\",\"budgetId\":\"scheduled-goal-runs\"}",
+        "state": "dispatched",
+        "definition_hash": "e963c6ef8ed82220b1b2793cd36bbf4206d7852148a81b408ea6be67b0d219d1",
+        "occurrence_id": "occ-7b762f1e789c822ce167be1635b7da7c8c6dca7bba5879d273a7051573ac8a73",
+        "dispatched_at": 1788807860435,
+        "completed_at": null,
+        "scope_key": "{\"preset\":\"standard\",\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_fa06bd2b-db47-4b22-a93f-3fef99a1d589\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-ylK62b/workspace\"}",
+        "goal_id": "c4ec6ef3ef2661068ee308bb53fdafd491f0a8f0d092202e0d63e17813954975"
+      },
+      "automationTasks": [
+        {
+          "id": "task-occ-7b762f1e789c822ce167be1635b7da7c8c6dca7bba5879d273a7051573ac8a73",
+          "occurrence_id": "occ-7b762f1e789c822ce167be1635b7da7c8c6dca7bba5879d273a7051573ac8a73",
+          "automation_id": "goal-wake-655b7683367bf1178c00fc0f2bcacc7ba8e66aa5bb0d183e9cb6d60e56694751",
+          "status": "cancelled",
+          "cancel_requested": 0,
+          "claimed_by": "assistant-automations-f55eabeb-e33a-4864-9d62-28fb9385dd31",
+          "fencing_token": 3,
+          "lease_until": null,
+          "attempt_count": 1,
+          "created_at": 1788807860344,
+          "updated_at": 1788807861287
+        }
+      ],
+      "automationRuns": [
+        {
+          "id": "run-task-occ-7b762f1e789c822ce167be1635b7da7c8c6dca7bba5879d273a7051573ac8a73",
+          "occurrence_id": "occ-7b762f1e789c822ce167be1635b7da7c8c6dca7bba5879d273a7051573ac8a73",
+          "automation_id": "goal-wake-655b7683367bf1178c00fc0f2bcacc7ba8e66aa5bb0d183e9cb6d60e56694751",
+          "task_id": "task-occ-7b762f1e789c822ce167be1635b7da7c8c6dca7bba5879d273a7051573ac8a73",
+          "attempt_id": "attempt-task-occ-7b762f1e789c822ce167be1635b7da7c8c6dca7bba5879d273a7051573ac8a73-1",
+          "status": "cancelled",
+          "session_id": "automation-occ-7b762f1e789c822ce167be1635b7da7c8c6dca7bba5879d273a7051573ac8a73-2",
+          "artifact_ref": "occ-7b762f1e789c822ce167be1635b7da7c8c6dca7bba5879d273a7051573ac8a73.json",
+          "output_preview": "automation execution was cancelled",
+          "usage_json": "{}",
+          "execution_mode": "production",
+          "definition_hash": "e963c6ef8ed82220b1b2793cd36bbf4206d7852148a81b408ea6be67b0d219d1",
+          "diagnostic_json": "{\"schemaVersion\":1,\"failureClass\":\"cancelled\",\"failurePhase\":\"unknown\",\"failureCode\":\"execution-cancelled\",\"promptSubmissionState\":\"not-applicable\",\"sideEffectState\":\"unknown\",\"retryability\":\"unsafe\",\"budgetSettlementState\":\"unknown\"}",
+          "delivery_status": null,
+          "delivery_ref": null,
+          "evidence_status": "suppressed",
+          "evidence_json": null,
+          "created_at": 1788807861287,
+          "updated_at": 1788807861287
+        }
+      ],
+      "finalDuty": {
+        "singleton": 1,
+        "owner_id": "assistant-automations-21584f54-b655-407c-aa92-cc1d2edf1386",
+        "fencing_token": 4,
+        "lease_until": 1788807863466,
+        "updated_at": 1788807863466
+      },
+      "calls": [
+        {
+          "call": 1,
+          "pid": 3139549,
+          "sessionId": "session-3484f841-ca4e-4c66-9d7b-427f519508b4",
+          "human": true,
+          "tool": null,
+          "secretObserved": false
+        },
+        {
+          "call": 2,
+          "pid": 3140089,
+          "sessionId": "session-3484f841-ca4e-4c66-9d7b-427f519508b4",
+          "human": true,
+          "tool": "goal_create",
+          "secretObserved": false
+        },
+        {
+          "call": 3,
+          "pid": 3140089,
+          "sessionId": "session-3484f841-ca4e-4c66-9d7b-427f519508b4",
+          "human": true,
+          "tool": "goal_schedule",
+          "secretObserved": false
+        },
+        {
+          "call": 4,
+          "pid": 3140089,
+          "sessionId": "session-3484f841-ca4e-4c66-9d7b-427f519508b4",
+          "human": true,
+          "tool": null,
+          "secretObserved": false
+        },
+        {
+          "call": 5,
+          "pid": 3140691,
+          "sessionId": "session-3484f841-ca4e-4c66-9d7b-427f519508b4",
+          "human": false,
+          "tool": "isolation_run",
+          "secretObserved": false
+        }
+      ],
+      "approvals": 0,
+      "nativeGoalId": "goal-52b81c65-ff37-40e9-b581-78cb75a4ba89",
+      "prompts": 2,
+      "setup": "actual installer plus explicit test-only verifier/meter/background Policy and exact persisted-conversation owner route",
+      "limits": "deterministic model; stopped-profile owner revocation seed; SIGINT stop request after real dispatch with a 10s forced-stop fallback; no production metering or multi-day benefit claim"
+    },
+    "resume": {
+      "mode": "resume",
+      "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+      "processesStarted": 4,
+      "wakeBefore": {
+        "id": "goal-wake-42c8c215d30633b2abe5aacc428563297a33475ad2bfe1b02b4c500603d824e5",
+        "intent_json": "{\"id\":\"goal-wake-42c8c215d30633b2abe5aacc428563297a33475ad2bfe1b02b4c500603d824e5\",\"scope\":{\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_09cc825f-9454-47bd-9a5f-88228dff6732\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-o3KkHJ/workspace\",\"preset\":\"standard\"},\"goalId\":\"f34188208207b627c930ce968f4e0ba6cd490201e0fb727e81c59646e7767a54\",\"definition\":{\"version\":1,\"digest\":\"59b5557ca9fc5718e872bda0983ccfc8bc6f7a711cbc895790de0cc80ecd37a0\",\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\"},\"native\":{\"sessionId\":\"session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c\",\"goalId\":\"goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666\",\"revision\":2,\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\",\"phase\":\"paused\",\"roundsStarted\":0,\"maxGoalRounds\":1,\"updatedAt\":1788807691186},\"attestation\":{\"scope\":{\"workspace\":\"/tmp/dsh-wake-e2e-o3KkHJ/workspace\",\"preset\":\"standard\"},\"principalId\":\"web/web/local/operator\",\"principalLineage\":{\"principalRecordId\":\"principal_09cc825f-9454-47bd-9a5f-88228dff6732\",\"principalVersion\":1},\"bindingId\":\"binding_01912d75-44cb-4577-bb7e-5292560addc7\",\"bindingVersion\":1,\"bindingGeneration\":1,\"sessionId\":\"session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c\"},\"at\":1788807706139,\"expiresAt\":1788807796139,\"ownerRouteId\":\"scheduled-web-owner\",\"budgetId\":\"scheduled-goal-runs\"}",
+        "state": "scheduled",
+        "definition_hash": "c7e13027669cb30eb1d5bca081f2d2af6c8be2504f11668d2c10b8b57385b25a",
+        "occurrence_id": null,
+        "dispatched_at": null,
+        "completed_at": null,
+        "scope_key": "{\"preset\":\"standard\",\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_09cc825f-9454-47bd-9a5f-88228dff6732\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-o3KkHJ/workspace\"}",
+        "goal_id": "f34188208207b627c930ce968f4e0ba6cd490201e0fb727e81c59646e7767a54"
+      },
+      "wakeAfter": {
+        "id": "goal-wake-42c8c215d30633b2abe5aacc428563297a33475ad2bfe1b02b4c500603d824e5",
+        "intent_json": "{\"id\":\"goal-wake-42c8c215d30633b2abe5aacc428563297a33475ad2bfe1b02b4c500603d824e5\",\"scope\":{\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_09cc825f-9454-47bd-9a5f-88228dff6732\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-o3KkHJ/workspace\",\"preset\":\"standard\"},\"goalId\":\"f34188208207b627c930ce968f4e0ba6cd490201e0fb727e81c59646e7767a54\",\"definition\":{\"version\":1,\"digest\":\"59b5557ca9fc5718e872bda0983ccfc8bc6f7a711cbc895790de0cc80ecd37a0\",\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\"},\"native\":{\"sessionId\":\"session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c\",\"goalId\":\"goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666\",\"revision\":2,\"objective\":\"Schedule a verified shell program that reads two integers and prints their sum\",\"phase\":\"paused\",\"roundsStarted\":0,\"maxGoalRounds\":1,\"updatedAt\":1788807691186},\"attestation\":{\"scope\":{\"workspace\":\"/tmp/dsh-wake-e2e-o3KkHJ/workspace\",\"preset\":\"standard\"},\"principalId\":\"web/web/local/operator\",\"principalLineage\":{\"principalRecordId\":\"principal_09cc825f-9454-47bd-9a5f-88228dff6732\",\"principalVersion\":1},\"bindingId\":\"binding_01912d75-44cb-4577-bb7e-5292560addc7\",\"bindingVersion\":1,\"bindingGeneration\":1,\"sessionId\":\"session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c\"},\"at\":1788807706139,\"expiresAt\":1788807796139,\"ownerRouteId\":\"scheduled-web-owner\",\"budgetId\":\"scheduled-goal-runs\"}",
+        "state": "succeeded",
+        "definition_hash": "c7e13027669cb30eb1d5bca081f2d2af6c8be2504f11668d2c10b8b57385b25a",
+        "occurrence_id": "occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d",
+        "dispatched_at": 1788807706695,
+        "completed_at": 1788807711136,
+        "scope_key": "{\"preset\":\"standard\",\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_09cc825f-9454-47bd-9a5f-88228dff6732\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-wake-e2e-o3KkHJ/workspace\"}",
+        "goal_id": "f34188208207b627c930ce968f4e0ba6cd490201e0fb727e81c59646e7767a54"
+      },
+      "automationTasks": [
+        {
+          "id": "task-occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d",
+          "occurrence_id": "occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d",
+          "automation_id": "goal-wake-42c8c215d30633b2abe5aacc428563297a33475ad2bfe1b02b4c500603d824e5",
+          "status": "succeeded",
+          "cancel_requested": 0,
+          "claimed_by": "assistant-automations-45f14b93-1bcc-4bb2-8b7b-483d5d524b27",
+          "fencing_token": 3,
+          "lease_until": null,
+          "attempt_count": 1,
+          "created_at": 1788807706607,
+          "updated_at": 1788807711142
+        }
+      ],
+      "automationRuns": [
+        {
+          "id": "run-task-occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d",
+          "occurrence_id": "occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d",
+          "automation_id": "goal-wake-42c8c215d30633b2abe5aacc428563297a33475ad2bfe1b02b4c500603d824e5",
+          "task_id": "task-occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d",
+          "attempt_id": "attempt-task-occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d-1",
+          "status": "succeeded",
+          "session_id": "automation-occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d-2",
+          "artifact_ref": "occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d.json",
+          "output_preview": "Host execution terminal code: none",
+          "usage_json": "{}",
+          "execution_mode": "production",
+          "definition_hash": "c7e13027669cb30eb1d5bca081f2d2af6c8be2504f11668d2c10b8b57385b25a",
+          "diagnostic_json": "{\"schemaVersion\":1,\"failureClass\":\"none\",\"failurePhase\":\"none\",\"failureCode\":\"none\",\"promptSubmissionState\":\"not-applicable\",\"sideEffectState\":\"possible\",\"retryability\":\"unsafe\",\"budgetSettlementState\":\"finalized\"}",
+          "delivery_status": null,
+          "delivery_ref": null,
+          "evidence_status": "pending",
+          "evidence_json": "{\"situation\":\"automation:goal-wake-42c8c215d30633b2abe5aacc428563297a33475ad2bfe1b02b4c500603d824e5\",\"outcome\":\"succeeded\",\"detail\":\"automation \\\"Scheduled business goal\\\": run succeeded\",\"idempotencyKey\":\"automation-run:run-task-occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d\",\"occurredAt\":1788807711142,\"workspace\":\"/tmp/dsh-wake-e2e-o3KkHJ/workspace\",\"agentPreset\":\"standard\",\"automationId\":\"goal-wake-42c8c215d30633b2abe5aacc428563297a33475ad2bfe1b02b4c500603d824e5\",\"runId\":\"run-task-occ-5defdfd4a6a7f1d5584a76d6b9566458f5abae9e77cc3a344a982a824802b85d\"}",
+          "created_at": 1788807711142,
+          "updated_at": 1788807711142
+        }
+      ],
+      "finalDuty": {
+        "singleton": 1,
+        "owner_id": "assistant-automations-d2badb9a-7f59-4d4f-99ea-43573942792f",
+        "fencing_token": 4,
+        "lease_until": 1788807714386,
+        "updated_at": 1788807714386
+      },
+      "calls": [
+        {
+          "call": 1,
+          "pid": 3109900,
+          "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+          "human": true,
+          "tool": null,
+          "secretObserved": false
+        },
+        {
+          "call": 2,
+          "pid": 3110419,
+          "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+          "human": true,
+          "tool": "goal_create",
+          "secretObserved": false
+        },
+        {
+          "call": 3,
+          "pid": 3110419,
+          "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+          "human": true,
+          "tool": "goal_schedule",
+          "secretObserved": false
+        },
+        {
+          "call": 4,
+          "pid": 3110419,
+          "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+          "human": true,
+          "tool": null,
+          "secretObserved": false
+        },
+        {
+          "call": 5,
+          "pid": 3110999,
+          "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+          "human": false,
+          "tool": "isolation_run",
+          "secretObserved": false
+        },
+        {
+          "call": 6,
+          "pid": 3110999,
+          "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+          "human": false,
+          "tool": null,
+          "secretObserved": false
+        }
+      ],
+      "approvals": 0,
+      "nativeGoalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+      "prompts": 2,
+      "setup": "actual installer plus explicit test-only verifier/meter/background Policy and exact persisted-conversation owner route",
+      "limits": "deterministic model; stopped-profile owner revocation seed; SIGINT stop request after real dispatch with a 10s forced-stop fallback; no production metering or multi-day benefit claim"
+    }
+  },
+  "acceptance": {
+    "restored": {
+      "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+      "goalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+      "revision": 5,
+      "objective": "Schedule a verified shell program that reads two integers and prints their sum",
+      "phase": "complete",
+      "roundsStarted": 1,
+      "maxGoalRounds": 1,
+      "updatedAt": 1788807711099
+    },
+    "history": [
+      {
+        "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+        "goalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+        "revision": 1,
+        "objective": "Schedule a verified shell program that reads two integers and prints their sum",
+        "phase": "active",
+        "roundsStarted": 0,
+        "maxGoalRounds": 1,
+        "updatedAt": 1788807691073
+      },
+      {
+        "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+        "goalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+        "revision": 2,
+        "objective": "Schedule a verified shell program that reads two integers and prints their sum",
+        "phase": "paused",
+        "roundsStarted": 0,
+        "maxGoalRounds": 1,
+        "updatedAt": 1788807691186
+      },
+      {
+        "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+        "goalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+        "revision": 3,
+        "objective": "Schedule a verified shell program that reads two integers and prints their sum",
+        "phase": "active",
+        "roundsStarted": 0,
+        "maxGoalRounds": 1,
+        "updatedAt": 1788807706704
+      },
+      {
+        "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+        "goalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+        "revision": 3,
+        "objective": "Schedule a verified shell program that reads two integers and prints their sum",
+        "phase": "active",
+        "roundsStarted": 1,
+        "maxGoalRounds": 1,
+        "updatedAt": 1788807706704
+      },
+      {
+        "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+        "goalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+        "revision": 4,
+        "objective": "Schedule a verified shell program that reads two integers and prints their sum",
+        "phase": "blocked",
+        "roundsStarted": 1,
+        "maxGoalRounds": 1,
+        "updatedAt": 1788807708098
+      },
+      {
+        "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+        "goalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+        "revision": 5,
+        "objective": "Schedule a verified shell program that reads two integers and prints their sum",
+        "phase": "complete",
+        "roundsStarted": 1,
+        "maxGoalRounds": 1,
+        "updatedAt": 1788807711099
+      }
+    ],
+    "stepExecutions": [
+      {
+        "status": "succeeded",
+        "quiescent": true,
+        "completedAt": 1788807708113
+      }
+    ],
+    "receipts": [
+      {
+        "completedAt": 1788807709550,
+        "contractDigest": "3e908ae159bc7dad66dc5fccbc2c903e248285bcdd7d384cdd2ae0c3d2410863",
+        "contractId": "acceptance-0964f4175a9b269259a5787aa51ce2fe383759066c61b8b97be9810d45712b48",
+        "digest": "87b0ea78e99e40dce73d6f2a7b395ab9bd93ec594e8f1ffe3120d1ac01e2425b",
+        "id": "verification-acceptance-0964f4175a9b269259a5787aa51ce2fe383759066c61b8b97be9810d45712b48-1",
+        "objectiveStatus": "achieved",
+        "owner": {
+          "principalRecordId": "principal_09cc825f-9454-47bd-9a5f-88228dff6732",
+          "principalVersion": 1
+        },
+        "protocol": "task-verification/v4",
+        "results": [
+          {
+            "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+            "criterionId": "sum-behavior",
+            "evidence": [
+              {
+                "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                "kind": "isolated-artifact",
+                "ref": "794a6d81-4c20-44e2-8b49-e421053e84a4"
+              },
+              {
+                "digest": "3a8e5241743f85023a1b1640127954d87be8e75125fda25fcfacea0aef6bcd76",
+                "kind": "isolated-verification-jobs",
+                "ref": "scheduled-sum-checker"
+              }
+            ],
+            "reason": "verified",
+            "status": "passed"
+          }
+        ],
+        "scope": {
+          "preset": "standard",
+          "workspace": "/tmp/dsh-wake-e2e-o3KkHJ/workspace"
+        },
+        "startedAt": 1788807708127,
+        "task": {
+          "goal": {
+            "definitionDigest": "59b5557ca9fc5718e872bda0983ccfc8bc6f7a711cbc895790de0cc80ecd37a0",
+            "definitionVersion": 1,
+            "id": "f34188208207b627c930ce968f4e0ba6cd490201e0fb727e81c59646e7767a54",
+            "nativeGoalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+            "nativeRevision": 3,
+            "runId": "goal-run-80b9d2cb74bf7ba2d0da5aa2ff64d139f73c03f2632410c75f9e07099bf5d08c",
+            "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+            "stepId": "round-1"
+          },
+          "kind": "goal-step",
+          "ref": "goal-run-80b9d2cb74bf7ba2d0da5aa2ff64d139f73c03f2632410c75f9e07099bf5d08c"
+        },
+        "validUntil": 1788807946828
+      },
+      {
+        "completedAt": 1788807711070,
+        "contractDigest": "05b283493bb2b56d9420c7ac629ceec5e5f8f3e18e02f3114b10f095cd1da454",
+        "contractId": "acceptance-4dc4e7ea9ebbc8d10b306f310b5ffeba2552dfffe7b3ba154810b5362910162d",
+        "digest": "1b395d9f83f646ea878965073a5e1ee88bfaca09350ed14bcd93b50d074c5c3d",
+        "id": "verification-acceptance-4dc4e7ea9ebbc8d10b306f310b5ffeba2552dfffe7b3ba154810b5362910162d-1",
+        "objectiveStatus": "achieved",
+        "owner": {
+          "principalRecordId": "principal_09cc825f-9454-47bd-9a5f-88228dff6732",
+          "principalVersion": 1
+        },
+        "protocol": "task-verification/v4",
+        "results": [
+          {
+            "artifactDigest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+            "criterionId": "sum-behavior",
+            "evidence": [
+              {
+                "digest": "69c298bf32aa004c16f231b122bd134d76a0a26a461e8858722c480691cdb1ba",
+                "kind": "isolated-artifact",
+                "ref": "794a6d81-4c20-44e2-8b49-e421053e84a4"
+              },
+              {
+                "digest": "a600e030d535e020b00d3fe81d98ba57005a937e1de7268597e4c2360e5a4519",
+                "kind": "isolated-verification-jobs",
+                "ref": "scheduled-sum-checker"
+              }
+            ],
+            "reason": "verified",
+            "status": "passed"
+          }
+        ],
+        "scope": {
+          "preset": "standard",
+          "workspace": "/tmp/dsh-wake-e2e-o3KkHJ/workspace"
+        },
+        "startedAt": 1788807709590,
+        "task": {
+          "goal": {
+            "assessmentId": "goal-assessment-4829f114446b5292a054b20bfb00bb057ae25c507cf6ee109869616df8aba18b",
+            "definitionDigest": "59b5557ca9fc5718e872bda0983ccfc8bc6f7a711cbc895790de0cc80ecd37a0",
+            "definitionVersion": 1,
+            "id": "f34188208207b627c930ce968f4e0ba6cd490201e0fb727e81c59646e7767a54",
+            "nativeGoalId": "goal-a4622ea6-acd3-443a-ad5f-aafd14e8b666",
+            "sessionId": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c"
+          },
+          "kind": "goal-outcome",
+          "ref": "goal-assessment-4829f114446b5292a054b20bfb00bb057ae25c507cf6ee109869616df8aba18b"
+        },
+        "validUntil": 1788807931083
+      }
+    ],
+    "sourceJobs": [
+      {
+        "id": "794a6d81-4c20-44e2-8b49-e421053e84a4",
+        "session_id": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+        "status": "succeeded"
+      }
+    ],
+    "verificationJobs": [
+      {
+        "id": "b5c0c78c-7204-4a9b-bd1b-3f4d68201590",
+        "status": "succeeded"
+      },
+      {
+        "id": "fe80eaef-b956-45b9-b4a6-6084986dc70c",
+        "status": "succeeded"
+      },
+      {
+        "id": "db5a699f-3c11-4e60-bf0e-88a661284e53",
+        "status": "succeeded"
+      },
+      {
+        "id": "b1b47bda-3327-483d-85e5-29319e399c7b",
+        "status": "succeeded"
+      }
+    ],
+    "resumedLease": {
+      "session_id": "session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c",
+      "holder_id": "delivery-session-dcd2c904-d8fd-43b3-9c83-efcc4a6e36d6",
+      "fencing_token": 6,
+      "lease_until": 1788807742051,
+      "state": "released",
+      "target_json": "{\"kind\":\"bound\",\"binding\":{\"id\":\"binding_01912d75-44cb-4577-bb7e-5292560addc7\",\"conversation\":{\"channel\":\"web\",\"account\":\"web\",\"tenant\":\"local\",\"kind\":\"dm\",\"chat\":\"session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c\"},\"principal\":{\"channel\":\"web\",\"account\":\"web\",\"tenant\":\"local\",\"user\":\"operator\"},\"workspace\":\"/tmp/dsh-wake-e2e-o3KkHJ/workspace\",\"agentPreset\":\"standard\",\"sessionId\":\"session-60e0a1a8-ed84-4f7d-9769-25be8fd0397c\",\"generation\":1,\"version\":1,\"status\":\"active\"}}",
+      "principal_record_id": "principal_09cc825f-9454-47bd-9a5f-88228dff6732",
+      "principal_version": 1
+    }
+  },
+  "browserArtifacts": {
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-33dda--process-boundaries-revoked/host-1.log": "7e6912a2641ec56cc72f4d1e8e85fe149ea3edc76b311a9fac920cbc3d7ebd6c",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-33dda--process-boundaries-revoked/host-2.log": "d711109c4670b01f09f4b25c34d6f5f853dc987082182f7b58c6e446e0dffe9c",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-33dda--process-boundaries-revoked/host-3.log": "7837b873d11341f6acaf231aa24af94d44953609217b5012bd5275238887be5c",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-33dda--process-boundaries-revoked/install.log": "fce01364411c146319ddafe6dca12ceb6c81042db1f399f2a66feda3d033eb14",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-33dda--process-boundaries-revoked/installed-profile.yaml": "6fd24fa78bf1418b4ecc6512bbdba995f4ac03e76e4a7bf84a36cf4ddea83ac6",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-33dda--process-boundaries-revoked/model.jsonl": "a2f8aebf0b46512c29430ccebb4901843fc49ecfddd12fb6284325cb5cffc3ee",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-33dda--process-boundaries-revoked/proof.json": "c49e69bda9b57f489a65f870c767a74576d60c62fe491909deb8e8933cd91edc",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-33dda--process-boundaries-revoked/scheduled.json": "6d26a85a1694e1acce05cef14c26f20f95a3310a2174c83b993c8e8751449339",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-33dda--process-boundaries-revoked/transport.json": "32c78f4d6a1186fd0d51ba73b81c77a40ab86e37a91742fa333dace412666ce4",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/host-1.log": "8f7955264661f7b29acd185f3d0a904263b5c6622a83e2f6ff94ed90531c236f",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/host-2.log": "a8ec2dc5726d5f22d6d7977ae29e22ed4e92f357959fcfd02708052fdb1d02eb",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/host-3.log": "7fc25412ae97631f7c13577333fa2a8e9a7be9ef6bebb7c8d61dad2a7819d69b",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/host-4.log": "d17e83f2102ea857f7cb518aae025df72642b0e91044cbfa56214033116d4a62",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/install.log": "66b248cb1d28b8ca0c0ff80ccfc5d9c39e77b7e2fe98908df3f2a073748386e3",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/installed-profile.yaml": "6b650deb2fe72660688b5d4bb78fa67237b98436215e39dddeca90d6748f0a46",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/model.jsonl": "2768c9f354f9d2fccf5b068b9206a5501366f2d5aa5bbf713201ca2a91b84db2",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/proof.json": "9abc00c9c459d7586f43a92433741ed6642d1e2dac82129007a634f8619e7f75",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/scheduled.json": "471e9bdf6363ed59fbf3dc2c9e03c56f975d7c33ad3ccd1c905bc2358009ce8a",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-50948-rocess-boundaries-interrupt/transport.json": "7287ad4d6c3ae5215a699f9f81d692a0e22f370ca4df86e0acb9d9b80449620f",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/acceptance.json": "649c1f477ad59b264b001efe0aae0f994c1165058297c72f9b68a47e78539c18",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/host-1.log": "426494c45e444765c36505394d994b0c051c7bfc021de5a3d44dea02a4948ca2",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/host-2.log": "6f739dd9432c2a7c4d861fcff778e4b8e8baea9ad67c87dde8604b28441a9cd7",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/host-3.log": "2f92a83a7ec5d4b6bdaed1fd483e74a536efe934b6ddaf6705f606c9d1dd90a5",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/host-4.log": "57c220913b6190140864434adeb53c249eb57bda9e442b9e7b662b92040a726b",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/install.log": "df1f70bd7e715daa10fd31295a52056a2dbffa066ec929a135d173be7955d734",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/installed-profile.yaml": "b0b1ec0c22668b52f60e767ca567b7d6b416c98c29b4667ab9572c4466abe405",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/model.jsonl": "8b05ac36cae87c72cbce0c1a425502f4f2d12989dc4a21f96fc28cd6a82c03be",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/proof.json": "0c03a3b7b5855c99702031eb4b2ff81e750ec12a77914a661e1952821feafcd7",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/scheduled.json": "1be3aef73115364e8aba20b53862ee0f450ac647ae2c656678b7bac1cc8a61f7",
+    ".cache/autonomy-wake-validation/wake-final/autonomy-wake-installed-sc-bc36b-s-process-boundaries-resume/transport.json": "966d073dd1541314f4a2c3aa44ddba94f33687f93cab2bcf6a277a37e2b3ef34",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/doctor-proof.json": "4e0f6f3d7bdc8ef60c989c6eca11fc9c44e30450d40e181047deaf1b6544c496",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/doctor-revoked.log": "79bbd90dd939798c492358c9c57cf216754781bf65b812e4ec43fe882dbbabd5",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/doctor.log": "af52ee4e1a85164c3d7027dddfb3f6a46ed88a731588cce99bf1eccd027f1b95",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/host.log": "1f78d4173e6ae70066e7415ab816fffceebee4baa088354edc155844b6c24d70",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/install.log": "f0644c402d126825176684db8516aea39dda0954a3fef874afb3c2f49f705e00",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/model.jsonl": "3bfe3246ba8e3b6906c4478feaddded938de0051ce5f50cc11ab3a1bc086e71c",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/proof.json": "047ce53416a3207663c1cd492ed9c11117202e85c11d619baa5f92b4232211b1",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-fresh-autonomy-in-03ce8-s-without-per-call-approval/transport.json": "55dfe81c00e9f1a044be931aa7dcd8742651e6a0a9968998f1e7f7d9729c762a",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/host.log": "7ca07b74c676b4a2b7c6d8a13fca4e5394b80f497913917dd33759f186b38bd7",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/install.log": "22927e86e8501c6cf656d598a68efde40fc49524d117f59d13b7fe749083261b",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/installed-profile.yaml": "547fc8c46526b455558c571e393c80adece520e19d74901e45298ba50c2d6d8d",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/model.jsonl": "404abe389b00294953d2b81eaeead358613091ed37c8658f60319dd2530b4dd7",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/proof.json": "6e1664346a183cfd62308451dadbce241c79e8f9fb85aab82df70322900bc569",
+    ".cache/autonomy-wake-validation/foreground-final/autonomy-goal-native-goals-527f7-lete-without-another-prompt/transport.json": "7e84df185a75c1de42e6ab55987dd2ec005276fefc2dcc737adfcc6b27902c16"
+  },
+  "verification": {
+    "fullCheck": "PASS",
+    "rootTests": {
+      "files": 279,
+      "tests": 3663
+    },
+    "plugins": 27,
+    "sharedPackages": 3,
+    "dryRunPacks": 30,
+    "packageTests": {
+      "assistant-goals": 82,
+      "assistant-delivery": 689,
+      "assistant-policy": 195,
+      "assistant-isolation": 102,
+      "assistant-verifier": 60
+    },
+    "packedFiles": {
+      "assistant-goals": 64,
+      "assistant-delivery": 92,
+      "assistant-policy": 66,
+      "assistant-isolation": 81
+    },
+    "wakeBrowserScenarios": 3,
+    "foregroundRegressionScenarios": 2,
+    "independentReview": "PASS",
+    "independentReviewEvidence": {
+      "reviewer": "goal_wake_verify",
+      "sourceHashes": 25,
+      "browserArtifactHashes": 44,
+      "commandLogAndExitFileHashes": 56,
+      "scope": "Current slice only; not full 18-work-package acceptance. See reviewOperationIncident for accidental non-read-only operation."
+    }
+  },
+  "findingsFixed": [
+    "Cordis Proxy cannot invoke private-backed getters; preauthorization flags are immutable own properties while authority retains private state.",
+    "An exact opt-in goal_schedule predicate joins Policy/Isolation; it reads current owner/native/budget/frozen acceptance without reserving or mutating them.",
+    "A real installed restart exposed native idle/blocked before asynchronous verification finished: step succeeded while verifier was verifying, whole awaiting, zero receipts, but wake had already succeeded.",
+    "Delivery now waits for this Agent settlement before disposal, remains bounded by cancellation/deadline, and rechecks current owner and terminal identity.",
+    "Only exact achieved whole-receipt plus successful final-run provenance permits the final blocked-to-complete extra revision.",
+    "A versioned Host capability rejects older Delivery semantics before schedule and dispatch.",
+    "Browser fixture dependencies and initial-notice persistence corrected; current-page diagnostics distinguish fresh contexts from Playwright default-page snapshots."
+  ],
+  "limits": [
+    "Actual installer, disk Session restoration, new Host PIDs, fresh browser contexts and real bounded Docker jobs; model and meter remain deterministic fixtures.",
+    "One exact persisted-conversation owner route and verifier/background Policy are explicitly configured after installation; default installer is not claimed to provide general autonomous Goals.",
+    "Revocation uses an operator seed in a stopped disposable owner ledger and disables fixed-owner Web UI; background services independently deny before Goal dispatch.",
+    "Interruption sends SIGINT after a real source job starts; unknown/dispatched work is not replayed after restart. This is not a proof against every abrupt OS or Docker failure.",
+    "Held-verifier deadline and owner-revocation tests use a controlled async gate; existing native stop/late-tool tests also pass. No long-term business improvement or real-model billing claim.",
+    "A succeeded wake means confirmed bounded lifecycle termination, not business achievement; separate whole-goal receipts establish achievement in the positive scenario.",
+    "No actual user-profile activation, external GitHub action, production credentials, image pull, shared daemon restart or package release.",
+    "C2C c2c_a941 contains local execution records only; required in-app browser is unavailable and no ChatGPT web review is claimed.",
+    "Remaining work packages and production metering/configuration continue; there is no day/week observation waiting gate."
+  ],
+  "reviewOperationIncident": {
+    "actor": "goal_wake_verify",
+    "cause": "Unescaped backticks in a shell search triggered command substitution.",
+    "accidentalSubcommand": "pnpm test:autonomy:wake",
+    "requiredChromiumEnvironmentProvided": false,
+    "result": "All three cases failed before browser launch because the default Chromium executable was unavailable.",
+    "subcommandExitCode": 1,
+    "outerShellExitCode": null,
+    "outerShellExitCodeReason": "Not available in reviewer report; not inferred from nested command.",
+    "additionalOuterError": "rg: unopened group after command substitution",
+    "effect": "Live .cache/autonomy-wake-e2e output was overwritten by failed-launch artifacts. No source changes.",
+    "preservedEvidence": [
+      ".cache/autonomy-wake-validation/wake-final",
+      ".cache/autonomy-wake-validation/foreground-final"
+    ],
+    "resolution": "Previously copied authoritative passing artifacts, source hashes, command logs and exit files were independently rechecked. Incident is separate from the 14 root validation records; no new passing run is claimed.",
+    "readonlyBoundary": "Read-only reviewer instruction was procedural, not an enforced filesystem or command sandbox."
+  }
+}

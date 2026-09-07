@@ -36,7 +36,9 @@ export class GoalWakeRuntime {
   #failures = 0
   constructor(private readonly ctx: Context, path: string, readonly config: Required<GoalWakeConfig>,
     private readonly record: (scope: GoalScope, goalId: string, agent?: Agent) => GoalRecord | undefined,
-    private readonly ready: () => boolean) {
+    private readonly ready: () => boolean,
+    private readonly settleExecution: (agent: Agent, signal: AbortSignal) => Promise<void>,
+    private readonly verifiedCompletion: (record: GoalRecord, wake: GoalWakeIntent['native']) => boolean) {
     this.#store = new GoalWakeStore(path)
     ctx.inject(['assistantAutomations', 'assistantDelivery', 'assistantPolicy'], runtime => {
       const automations = runtime.assistantAutomations
@@ -78,6 +80,7 @@ export class GoalWakeRuntime {
   }
   preflight(record: GoalRecord): void {
     if (!this.#live || !this.ready() || this.#automations === undefined) reject()
+    this.#requireSettlementCapability()
     const policy = this.ctx.get('assistantPolicy')
     if (policy?.getBudgetConfig(this.config.budgetId)?.metric !== 'automation-runs') reject()
     this.#route(record.scope, this.config.ownerRouteId)
@@ -87,8 +90,13 @@ export class GoalWakeRuntime {
       principalId: scope.principalId, workspace: scope.workspace, agentPreset: scope.preset })
     if (receipt?.principalRecordId !== scope.principalRecordId || receipt.principalVersion !== scope.principalVersion) reject()
   }
+  #requireSettlementCapability(): void {
+    const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
+    if (delivery?.goalWakeSettlementVersion?.() !== 1) reject()
+  }
   #current(intent: GoalWakeIntent, phase: 'before-resume' | 'running' | 'terminal', agent?: Agent): GoalRecord {
     if (!this.#live || !this.ready() || Date.now() >= intent.expiresAt) reject()
+    this.#requireSettlementCapability()
     const record = this.record(intent.scope, intent.goalId, agent)
     if (record === undefined || !same(record.scope, intent.scope) || !same(record.definition, intent.definition)
       || record.native.sessionId !== intent.native.sessionId || record.native.goalId !== intent.native.goalId
@@ -99,7 +107,9 @@ export class GoalWakeRuntime {
     const running = native.phase === 'active' && native.revision === intent.native.revision + 1
     const terminal = (native.phase === 'complete' || native.phase === 'blocked')
       && native.revision === intent.native.revision + 2
-    if (!(phase === 'before-resume' ? before : running || phase === 'terminal' && terminal)) reject()
+    const verifiedCompletion = native.phase === 'complete' && native.revision === intent.native.revision + 3
+      && this.verifiedCompletion(record, intent.native)
+    if (!(phase === 'before-resume' ? before : running || phase === 'terminal' && (terminal || verifiedCompletion))) reject()
     this.#route(intent.scope, intent.ownerRouteId)
     return record
   }
@@ -164,6 +174,14 @@ export class GoalWakeRuntime {
         this.#current(intent, 'before-resume', agent)
         this.#store.dispatch(intent.id, input.occurrenceId, Date.now())
         dispatched = true
+      },
+      settle: async (agent: Agent, settleSignal: AbortSignal) => {
+        const combined = AbortSignal.any([signal, settleSignal])
+        combined.throwIfAborted()
+        this.#current(intent, 'terminal', agent)
+        await this.settleExecution(agent, combined)
+        combined.throwIfAborted()
+        this.#current(intent, 'terminal', agent)
       },
     })
     this.#capabilities.add(capability)

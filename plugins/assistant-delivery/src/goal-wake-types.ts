@@ -17,6 +17,8 @@ export interface DeliveryGoalWakeInput {
   assertCurrent(agent: Agent, phase: 'before-resume' | 'running' | 'terminal'): void
   /** Persist the caller's exact wake-dispatch CAS immediately before native resume. */
   beforeResume(agent: Agent): void
+  /** Finish this Agent's admitted step/goal verification before disposal. */
+  settle(agent: Agent, signal: AbortSignal): Promise<void>
 }
 
 /** Wake execution reached a bounded terminal state; it says nothing about business completion. */

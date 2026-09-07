@@ -196,6 +196,8 @@ export class GoalBudgetRuntime {
     }
   }
   inspect = (record: GoalRecord) => this.#store.snapshot(this.#binding(record))
+  /** Candidate read path for Policy predicates; it never configures or consumes a budget. */
+  preview = (record: GoalRecord) => this.#store.preview({ scope: record.scope, goalId: record.id }, this.#limits(record))
   health = () => ({ enabled: true, registeredMeters: this.#meters.size, activeCalls: this.#inflight.size })
   #clearDeadline(agent: Agent): void {
     const value = this.#deadlines.get(agent)
@@ -204,11 +206,15 @@ export class GoalBudgetRuntime {
   #binding(record: GoalRecord): GoalBudgetScope {
     if (!this.#active) fail()
     const binding = { scope: record.scope, goalId: record.id }
-    const limits: GoalBudgetLimits = { modelCalls: this.config.modelCalls, toolCalls: this.config.toolCalls,
-      inputTokens: this.config.inputTokens, outputTokens: this.config.outputTokens,
-      costUsdMicros: this.config.costUsdMicros ?? null, expiresAt: record.createdAt + this.config.durationMs }
+    const limits = this.#limits(record)
     this.#store.configure(binding, limits)
     return binding
+  }
+  #limits(record: GoalRecord): GoalBudgetLimits {
+    if (!this.#active) fail()
+    return { modelCalls: this.config.modelCalls, toolCalls: this.config.toolCalls,
+      inputTokens: this.config.inputTokens, outputTokens: this.config.outputTokens,
+      costUsdMicros: this.config.costUsdMicros ?? null, expiresAt: record.createdAt + this.config.durationMs }
   }
   #assert(agent: Agent, run: GoalExecutionRun, meter: Readonly<GoalBudgetMeter>): void {
     const bound = this.current(agent)

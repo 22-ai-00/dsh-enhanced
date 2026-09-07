@@ -92,3 +92,6 @@ Isolation schema v2 在同一 SQLite 事务中预留 worker memory + workspace c
 任务协议 v4 为 Goals step/outcome 增加只含 testSet 引用的 isolated criterion；具体测试向量属于 Verifier Host authority。Isolation 普通依赖共享任务协议；Verifier 将 Isolation 声明为可选 Host peer，只在隔离验收时使用其私有 runner。Goals 通过共享 admission 值和 Host producer 方法交接来源，Isolation 不反向依赖 Goals 包。引导构建在 Delivery 后、Verifier 前先构建 Isolation，独立发布 bundle 的边界保持不变。
 
 来源 worker 与 verification worker 使用不同持久账本和有限授权。Verifier 从实时 Goals producer 获取 step acceptance，核验精确任务与 scope 后读 Isolation 的不可变产物；全目标验收由持久 trigger run 选取来源。固定验收命令在独立容器读取 artifact/input，Host 保存预期结果并生成 v4 回执。原生 GoalLoop 继续拥有调度；此路径没有新增模型循环，也不授予通用 Host 代码执行权。
+
+
+单次 Goals wake 通过 Delivery 的版本化 Host capability 等待终态验收。Delivery 仅调用 Goals 提供的 `settle(agent, signal)` 并维持当前 Session lease；Goals 只等待该 Agent 已结束回合的步骤/全目标结算。此等待仍服从原期限和取消信号，不引入第二套目标循环。末轮 `blocked` 到独立验收后的 `complete` 多一次 revision，只有同 owner/定义/Session/最终执行及验收回执的证明才允许该转移；旧 Delivery 缺少结算能力时拒绝调度。
