@@ -463,3 +463,22 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 默认关闭策略的同一安装/重启浏览器回归也退出 **0**，保持原两轮闭环和 4 条 settled 模型预算记录；本批策略开启/关闭共 2 条安装浏览器场景通过。
 
 命令、失败、最终源码和浏览器产物哈希见 [结构化证据](evidence/goal-strategy-native-2026-09-07.json)。C2C `c2c_a944` 仅保存本地执行记录；所需内置浏览器不可用，未取得 ChatGPT 网页规划或评审。完整 WP06 的工具故障/推理失败归因与固定预算策略收益比较、其他工作包继续推进。
+
+### WP06：策略执行诊断与原父步骤验收关联（2026-09-07，基线 `11d294c`）
+
+18 项保持 **3 已验证 / 8 实现中 / 7 待做**。本批使策略失败可诊断，并让后续模型步骤看到该策略对应的独立结果；未把诊断、关联或确定性响应测试称为真实策略收益。
+
+- 预算运行时只在自己的实际边界观察子任务失败：准入、请求限额、meter、预留、流、用量或结算。其他插件请求钩子报错不自动记作预算准入失败；不用异常文本猜测根因。`dispatched` 表示取得下游迭代器，不是供应商 HTTP 证明；false 不证明无效果，也不退还已持久预留。
+- 策略返回和历史记录终止原因、实际工具拒绝次数及输出限制检查结果。失败的流、缺失 usage 和取得迭代器之前的同步异常均保持已预留金额/token；工具拒绝与建议是否正确是不同事实。期限、撤权、取消和无法确认停止继续保留原 unknown 边界。
+- 私有策略账本升级 schema 2：事务内验证旧 schema/记录，追加终止原因，验证新 schema 后提交；失败回滚。旧 child 缺失 diagnostics，不补造零故障；旧终态 terminationReason=unknown，未完成记录恢复为 recovered-unknown。不会重放旧策略。
+- `strategy-feedback.ts` 按 exact parent run、Session、原生 Goal、定义、scope 和准入时间关联独立回执；每次读取重验，不缓存成功。后续成功、重复 run、错 owner/会话/定义、过期或伪造回执都不能替代该父步骤。最多 3 次策略/每父步骤 3 项条件，标记 `same-parent-step-only`；对应失败提示修订解法，执行故障提示检查执行，unknown 先对账，不授予完成/扩权或因果功劳。
+- 真实 native 定向 v2 共 **9 项通过**，覆盖原 compare/额度/工具拒绝/撤权/迟到 start，以及实际 adapter 流报错、usage 缺失、其他请求 hook 报错、下游流构造同步报错。最后一项诊断 stream/false，但仍有 1 条 held 预算预留。
+- 独立复核修复了过宽 request hook catch 和过早标记 downstream handoff；根集成还修复了迁移列序、迁移失败回滚和终止原因按实际停止状态判断。单测首次失败包括回执 reason 不符合协议格式、旧 SQLite 夹具权限不私有，均保留命令记录。
+
+固定预算比较仍须新增实际 `strategy-v1` executor、外层全调用 meter、冻结模型调用上限、详细证据对象和已安装 CLI。两个分支均使用 Goals/独立反馈，候选只增加策略；外层还须计入 Goal 开始前的前台协调调用，避免与旧单次无工具评测器混用。[比较协议](goal-strategy-evaluation.md)明确当前可复用入口、缺口和完整验收要求。
+
+本批最终命令、源码及浏览器证据见 [结构化证据](evidence/strategy-assessment-2026-09-07.json)。C2C `c2c_a945` 仅保存本地执行记录，内置浏览器不可用，未取得 ChatGPT 网页规划或评审；完整目标按依赖与证据继续，不按人工日/周或已取消的长期观察期等待。
+
+根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<证据中的本机固定镜像> pnpm check` 退出 **0**：主 288 文件 / 3,724 项全通过，无跳过；递归 Goals 99、Delivery 705、Isolation 102、Web owner 30 项通过，manifest、零 lint 警告、typecheck/build 与 31 份 dry-run pack 成功。已检查 Goals 80 个发布文件包含 `lib/strategy-feedback.*`，Delivery 96 个文件，没有测试、源码或状态数据库。本轮提供实际 Docker 镜像，覆盖了上轮默认命令跳过的 27 项隔离测试。
+
+安装浏览器最终有两条通过证据：v1 的默认关闭策略场景，以及 v2 的策略开启场景。v1 整体退出 1：新增测试只读取序列化历史中的第一个目标快照，漏掉后面的策略验收关联，夹具在第 10 次请求报错并使原生目标暂停。修复仅让测试读取请求内全部实际快照；v2 退出 **0**，仍严格核对下一轮可见策略的 parent run、Session 和失败 receipt ID，并确认它不同于后来通过的 run。两场景均在 3 个真实 Host 进程中完成同一 Session 的两轮独立失败→修正→通过；策略开启时 7 条 reservation settled，默认关闭时 4 条。没有新增生产修复来迎合断言。最终根 lint 退出 0；全仓检查覆盖最终生产源码，测试快照读取修复由 v2 和最终 lint 覆盖。

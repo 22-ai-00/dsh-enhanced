@@ -160,7 +160,11 @@ executionBudget:
 
 默认限制为 `maxDurationMs: 30000`、`maxPromptBytes: 32768`、`maxOutputBytes: 16384`、`maxRunsPerGoal: 16`，最多分别为 300000 / 65536 / 65536 / 32。期限同时受父回合和目标累计期限约束。父工具及全部子模型调用共用原目标预算；子调用用独立 run ID 记账，工具结果和后续目标上下文显示调用/token/已知费用及未结算预留。没有为子任务发放新的预算。
 
-使用 DSH 原生 `ctx.subagents.start()` 与 `startInProcessRun()`，不复制 AgentLoop。策略 schema 1 位于 `databasePath + '.strategies'`，保存 intent、父 run/Session、定义摘要、模型路由、子 Session、终态和输出摘要，不保存建议正文；原生 Session 仍保存模型交互。预算与策略账本分别提交，重启将未完成记录标为 unknown，不自动回放，也不退还未知模型预留。未确认停止的子任务不能记录为成功。只读策略建议不是操作系统沙箱承诺；Host 扩展仍属于受信任进程代码。
+使用 DSH 原生 `ctx.subagents.start()` 与 `startInProcessRun()`，不复制 AgentLoop。策略 schema 2 位于 `databasePath + '.strategies'`，保存 intent、父 run/Session、定义摘要、模型路由、子 Session、终态和输出摘要，不保存建议正文；原生 Session 仍保存模型交互。schema 1 在事务中验证并迁移，旧记录缺少的子任务诊断保持缺失，终止原因保持 unknown。预算与策略账本分别提交，重启将未完成记录标为 unknown，不自动回放，也不退还未知模型预留。未确认停止的子任务不能记录为成功。只读策略建议不是操作系统沙箱承诺；Host 扩展仍属于受信任进程代码。
+
+新子任务的 `diagnostics` 记录实际工具拒绝次数、输出是否满足非空/长度限制，以及预算运行时最后观察到的失败阶段（准入、请求限额、meter、预留、模型流、用量或结算）。阶段说明失败发生在哪里，不从异常文本猜测预算耗尽或推理错误。`failure.dispatched` 只表示取得了下游流迭代器；不证明真实供应商请求，false 也不证明没有外部效果，更不触发退款。策略工具和历史还给出期限、取消、父授权变化、执行失败或无法确认停止等终止原因。
+
+后续目标上下文最多展示 3 次策略及每个父步骤的 3 项验收条件。`parentStep` 每次重验当时 exact run/Session/定义的独立回执，不能用后续成功覆盖早先失败；缺失、过期或定义变化保持显式状态。`attribution: same-parent-step-only` 仅为关联，不给策略记因果功劳，也不把建议评价为正确。明确执行故障时先检查执行链，独立条件失败时修订解法，unknown 执行先对账。Host 的 `inspectStrategyAssessments(agent, goalId)` 与目标上下文使用同一 owner 授权和有界读模型。
 
 ## 权限与数据
 

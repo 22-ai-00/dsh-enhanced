@@ -9,7 +9,7 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { GoalBudgetRuntime } from './budget.js'
 import { STRATEGY_PROVIDER } from './strategy-identity.js'
 import { GoalStrategyStore } from './strategy-store.js'
-import type { StrategyKind, StrategyRecord } from './strategy-store.js'
+import type { StrategyChildDiagnostics, StrategyKind, StrategyRecord, StrategyTerminationReason } from './strategy-store.js'
 import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
 
 export interface GoalStrategyConfig { maxDurationMs: number; maxPromptBytes: number; maxOutputBytes: number; maxRunsPerGoal: number }
@@ -18,7 +18,8 @@ export interface GoalStrategyResult {
   strategyId: string
   outcome: 'advice' | 'execution-failed' | 'cancelled' | 'unknown'
   advice: string[]
-  children: Array<{ sessionId: string; stopReason: string; quiescent: boolean }>
+  terminationReason: StrategyTerminationReason
+  children: Array<{ sessionId: string; stopReason: string; quiescent: boolean; diagnostics?: StrategyChildDiagnostics }>
   unverified: true
 }
 
@@ -48,8 +49,8 @@ export function validateGoalStrategyInput(input: unknown): Readonly<GoalStrategy
 }
 
 type Current = { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal }
-type Permit = { id: string; label: string; parent: Agent; parentRunId: string; record: GoalRecord; expiresAt: number; signal: AbortSignal; provider: string; model: string; maxTokens: number | undefined; prompt: readonly ContentBlock[]; maxDepth: number; rejected: boolean; starting: boolean; child?: Agent }
-type ChildState = { sessionId: string; stopReason: string; quiescent: boolean; run?: SubagentRun; permit: Permit }
+type Permit = { id: string; label: string; parent: Agent; parentRunId: string; record: GoalRecord; expiresAt: number; signal: AbortSignal; provider: string; model: string; maxTokens: number | undefined; prompt: readonly ContentBlock[]; maxDepth: number; rejected: boolean; starting: boolean; toolRejections: number; child?: Agent }
+type ChildState = { sessionId: string; stopReason: string; quiescent: boolean; output: 'not-observed' | 'accepted' | 'empty-or-oversized'; run?: SubagentRun; permit: Permit }
 
 function bounded<T>(operation: Promise<T>, signal: AbortSignal, deadline: number): Promise<T> {
   return new Promise((resolve, reject) => {
@@ -85,6 +86,7 @@ export class GoalStrategyRuntime {
   readonly #runs = new Set<SubagentRun>()
   readonly #disposals = new WeakMap<SubagentRun, Promise<void>>()
   readonly #guarded = new WeakSet<Agent>()
+  readonly #observedToolGuards = new WeakSet<object>()
   #active = true
   #closed = false
   #removeResolver: (() => void) | undefined
@@ -131,7 +133,7 @@ export class GoalStrategyRuntime {
         const request = await next()
         return request
       })
-      runtime.tools.guard(execution => this.#recognized(execution.agent) ? 'assistant-goals: strategy children cannot use tools' : undefined)
+      runtime.tools.guard(execution => this.#toolGuard(execution))
       ctx.effect(() => () => removeProvider(), 'assistant-goals.strategy-provider')
     })
     ctx.effect(() => async () => {
@@ -182,20 +184,21 @@ export class GoalStrategyRuntime {
     timer.unref?.()
     // A provider may be waiting for its first stream chunk, so budget stream
     // assertions alone cannot observe a revoked owner or policy decision.
-    const watchdog = setInterval(() => { try { this.#assertCurrent(parent, current) } catch { controller.abort() } }, 50)
+    const watchdog = setInterval(() => { try { this.#assertCurrent(parent, current) } catch { parentAuthorityChanged = true; controller.abort() } }, 50)
     watchdog.unref?.()
     const children: ChildState[] = []
     const advice: string[] = []
     const childPrompts = prompts
     let unknown = false
+    let parentAuthorityChanged = false
     try {
       for (const childPrompt of childPrompts) {
         if (combined.aborted || Date.now() >= expiresAt) { unknown = true; break }
         const permit: Permit = { id, label: `strategy-${randomUUID()}`, parent, parentRunId: current.run.intent.runId, record: current.record,
           expiresAt, signal: combined, provider: route.provider, model: route.model, maxTokens: route.maxTokens,
-          prompt: promptBlock(childPrompt), maxDepth: delegationDepthOf(parent) + 1, starting: false, rejected: false }
+          prompt: promptBlock(childPrompt), maxDepth: delegationDepthOf(parent) + 1, starting: false, rejected: false, toolRejections: 0 }
         this.#permits.set(permit.label, permit)
-        const child: ChildState = { sessionId: 'pending', stopReason: 'pending', quiescent: false, permit }
+        const child: ChildState = { sessionId: 'pending', stopReason: 'pending', quiescent: false, output: 'not-observed', permit }
         children.push(child)
         try {
           const started = this.ctx.subagents.start(STRATEGY_PROVIDER, {
@@ -209,7 +212,8 @@ export class GoalStrategyRuntime {
           child.stopReason = result.stopReason
           if (result.stopReason === 'completed') {
             const text = outputText(result.output, this.config.maxOutputBytes)
-            if (text !== undefined) advice.push(text)
+            if (text !== undefined) { advice.push(text); child.output = 'accepted' }
+            else child.output = 'empty-or-oversized'
           }
         } catch {
           if (combined.aborted || Date.now() >= expiresAt) unknown = true
@@ -241,16 +245,24 @@ export class GoalStrategyRuntime {
     try {
       // Disposal is the authorization boundary: a changed owner after a result
       // makes the durable outcome unknown rather than reusable advice.
-      try { this.#assertCurrent(parent, current) } catch { unknown = true }
-      if (Date.now() >= expiresAt) unknown = true
-      if (this.#closed) return Object.freeze({ strategyId: id, outcome: 'unknown' as const, advice: [], children: [], unverified: true as const })
-      const snapshot = this.#store.inspect(current.record.scope, id)!
-      const finalChildren = children.filter(child => child.permit.child !== undefined).map(child => ({ sessionId: String(child.permit.child!.id), stopReason: child.stopReason, quiescent: child.quiescent }))
       const cancelled = signal.aborted || current.signal.aborted
+      try { this.#assertCurrent(parent, current) } catch { unknown = true; if (!cancelled && this.#active) parentAuthorityChanged = true }
+      if (Date.now() >= expiresAt) unknown = true
+      if (this.#closed) return Object.freeze({ strategyId: id, outcome: 'unknown' as const, terminationReason: 'unknown' as const, advice: [], children: [], unverified: true as const })
+      const snapshot = this.#store.inspect(current.record.scope, id)!
+      const finalChildren = children.filter(child => child.permit.child !== undefined).map(child => {
+        const failure = this.callbacks.budget.lastFailure(child.permit.child!)
+        return { sessionId: String(child.permit.child!.id), stopReason: child.stopReason, quiescent: child.quiescent,
+          diagnostics: { toolRejections: child.permit.toolRejections, output: child.output, ...(failure === undefined ? {} : { failure }) } }
+      })
       const outcome: GoalStrategyResult['outcome'] = unknown ? 'unknown' : cancelled ? 'cancelled'
         : advice.length === childPrompts.length && finalChildren.length === childPrompts.length ? 'advice' : 'execution-failed'
-      const settled = this.#store.settle(id, snapshot.version, { children: finalChildren, outcome, quiescent: finalChildren.every(child => child.quiescent), ...(advice.length ? { outputDigest: acceptanceDigest(advice) } : {}) }, Date.now())
-      return Object.freeze({ strategyId: id, outcome: settled.outcome ?? 'unknown', advice: outcome === 'advice' ? [...advice] : [], children: settled.children.map(child => ({ ...child })), unverified: true as const })
+      const terminationReason: StrategyTerminationReason = Date.now() >= expiresAt ? 'deadline'
+        : parentAuthorityChanged ? 'parent-authority-changed' : cancelled ? 'cancelled'
+          : finalChildren.some(child => !child.quiescent) ? 'unconfirmed-stop'
+            : unknown ? 'unknown' : outcome === 'advice' ? 'completed' : 'execution-failed'
+      const settled = this.#store.settle(id, snapshot.version, { children: finalChildren, outcome, quiescent: finalChildren.every(child => child.quiescent), terminationReason, ...(advice.length ? { outputDigest: acceptanceDigest(advice) } : {}) }, Date.now())
+      return Object.freeze({ strategyId: id, outcome: settled.outcome ?? 'unknown', terminationReason: settled.terminationReason ?? 'unknown', advice: outcome === 'advice' ? [...advice] : [], children: settled.children.map(child => ({ ...child })), unverified: true as const })
     } finally {
       release?.(); this.#operations.delete(lifetime)
     }
@@ -272,6 +284,19 @@ export class GoalStrategyRuntime {
     if (agent === undefined) return false
     const first = agent.session.snapshotEvents().find(event => String(event.type) === 'subagent/descriptor')
     return !!first && !!first.data && typeof first.data === 'object' && (first.data as { provider?: unknown }).provider === STRATEGY_PROVIDER
+  }
+
+  #toolGuard(execution: { agent?: Agent }): string | undefined {
+    const agent = execution.agent
+    if (!this.#recognized(agent)) return undefined
+    try {
+      const permit = this.#permitFor(agent!)
+      if (!this.#observedToolGuards.has(execution)) {
+        this.#observedToolGuards.add(execution)
+        permit.toolRejections = Math.min(1_000_000, permit.toolRejections + 1)
+      }
+    } catch {}
+    return 'assistant-goals: strategy children cannot use tools'
   }
 
   #track(operation: Promise<unknown>): void {

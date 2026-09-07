@@ -22,6 +22,7 @@ export interface GoalBudgetMeter {
   inputUsdMicrosPerMillionTokens: number | null
   outputUsdMicrosPerMillionTokens: number | null
 }
+export type GoalBudgetFailure = Readonly<{ stage: 'admission' | 'request-limit' | 'meter' | 'reserve' | 'stream' | 'usage' | 'settlement'; dispatched: boolean }>
 
 function fail(): never { throw new Error('assistant-goals: execution budget unavailable or exhausted') }
 const integer = (value: unknown, max = 1_000_000_000): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max
@@ -73,6 +74,8 @@ export class GoalBudgetRuntime {
   readonly #meters = new Map<string, Readonly<GoalBudgetMeter>>()
   readonly #inflight = new Map<Agent, Readonly<GoalBudgetMeter>>()
   readonly #deadlines = new Map<Agent, { runId: string; timer: ReturnType<typeof setTimeout> }>()
+  /** Host-only, per-child observation. It deliberately excludes error text. */
+  readonly #lastFailures = new WeakMap<Agent, GoalBudgetFailure>()
   #active = true
   #delegateResolver: GoalBudgetDelegateResolver | undefined
 
@@ -80,20 +83,28 @@ export class GoalBudgetRuntime {
     private readonly current: (agent: Agent) => { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal } | undefined) {
     this.#store = new GoalBudgetStore(path)
     ctx.on('agent/request', async ({ agent }, next) => {
+      const diagnostic = isStrategyChild(agent)
+      if (diagnostic) this.#lastFailures.delete(agent)
+      // Other request hooks are not evidence of a budget/admission failure.
       const request = await next()
-      const bound = this.#current(agent)
-      if (bound === undefined) return request
-      const budget = this.inspect(bound.record)
-      if (budget.modelCalls >= budget.limits.modelCalls || budget.outputTokens >= budget.limits.outputTokens) fail()
-      if (this.#deadlines.get(agent)?.runId !== bound.run.intent.runId) {
-        this.#clearDeadline(agent)
-        const deadline = Math.min(bound.record.createdAt + config.durationMs, bound.run.intent.admission.expiresAt)
-        const timer = setTimeout(() => agent.cancel({ kind: 'hook', reason: 'assistant-goals-budget-expired' }), Math.max(0, deadline - Date.now()))
-        timer.unref?.()
-        this.#deadlines.set(agent, { runId: bound.run.intent.runId, timer })
+      try {
+        const bound = this.#current(agent)
+        if (bound === undefined) return request
+        const budget = this.inspect(bound.record)
+        if (budget.modelCalls >= budget.limits.modelCalls || budget.outputTokens >= budget.limits.outputTokens) { if (diagnostic) this.#note(agent, 'request-limit', false); fail() }
+        if (this.#deadlines.get(agent)?.runId !== bound.run.intent.runId) {
+          this.#clearDeadline(agent)
+          const deadline = Math.min(bound.record.createdAt + config.durationMs, bound.run.intent.admission.expiresAt)
+          const timer = setTimeout(() => agent.cancel({ kind: 'hook', reason: 'assistant-goals-budget-expired' }), Math.max(0, deadline - Date.now()))
+          timer.unref?.()
+          this.#deadlines.set(agent, { runId: bound.run.intent.runId, timer })
+        }
+        return { ...request, maxTokens: Math.min(request.maxTokens ?? config.maxOutputTokensPerCall,
+          config.maxOutputTokensPerCall, budget.limits.outputTokens - budget.outputTokens) }
+      } catch (error) {
+        if (diagnostic && this.#lastFailures.get(agent) === undefined) this.#note(agent, 'admission', false)
+        throw error
       }
-      return { ...request, maxTokens: Math.min(request.maxTokens ?? config.maxOutputTokensPerCall,
-        config.maxOutputTokensPerCall, budget.limits.outputTokens - budget.outputTokens) }
     })
     ctx.on('session/event', (session, event) => {
       if (event.type === 'turn/end') for (const agent of this.#deadlines.keys()) if (agent.session === session) this.#clearDeadline(agent)
@@ -133,32 +144,50 @@ export class GoalBudgetRuntime {
     const meter = this.#meters.get(JSON.stringify([options.provider, options.model]))
     const deadline = Math.min(bound.record.createdAt + this.config.durationMs, bound.run.intent.admission.expiresAt)
     let ownsMeter = false
+    let stage: GoalBudgetFailure['stage'] = 'admission'
+    let dispatched = false
     try {
+      stage = 'meter'
       if (meter === undefined || this.#inflight.has(agent)) fail()
+      stage = 'admission'
       if (bound.delegateRoute && (options.provider !== bound.delegateRoute.provider || options.model !== bound.delegateRoute.model || (options.tools?.length ?? 0) !== 0)) fail()
       this.#assert(agent, bound.run, meter)
+      stage = 'request-limit'
       if (!integer(options.maxTokens) || options.maxTokens < 1 || options.maxTokens > this.config.maxOutputTokensPerCall) fail()
+      stage = 'admission'
       this.#inflight.set(agent, meter)
       ownsMeter = true
       const identity = requestIdentity(options)
+      stage = 'meter'
       const upper = await bounded(Promise.resolve(meter.inputTokenUpperBound(options)), bound.signal, deadline)
+      stage = 'admission'
       this.#assert(agent, bound.run, meter)
-      if (!integer(upper) || requestIdentity(options) !== identity) fail()
+      if (requestIdentity(options) !== identity) fail()
+      stage = 'meter'
+      if (!integer(upper)) fail()
       const reservedCost = this.config.costUsdMicros === undefined ? null : cost(upper, options.maxTokens, meter)
       if (this.config.costUsdMicros !== undefined && reservedCost === null) fail()
       const id = `goal-budget-${randomUUID()}`
+      stage = 'reserve'
       this.#store.reserve(binding, { id, runId: bound.accountingRunId ?? bound.run.intent.runId, inputTokens: upper,
         outputTokens: options.maxTokens, costUsdMicros: this.config.costUsdMicros === undefined ? null : reservedCost }, Date.now())
       // No refunds on dispatch uncertainty. A process crash leaves this full reservation occupied.
       let observed: TokenUsage | undefined
       let finished = false
+      stage = 'stream'
+      // True means a downstream iterator was obtained, not a paid HTTP request.
+      // False never proves absence of effects or permits refund of this reservation.
       const iterator = next()[Symbol.asyncIterator]()
+      dispatched = true
       try {
         while (true) {
+          stage = 'stream'
           const item = await bounded(iterator.next(), bound.signal, deadline)
           if (item.done) break
           const chunk = item.value
+          stage = 'admission'
           this.#assert(agent, bound.run, meter)
+          stage = 'stream'
           if (chunk.type === 'usage') observed = { ...chunk.usage }
           if (chunk.type === 'finish') {
             if (finished || !['stop', 'tool-calls', 'max-tokens'].includes(chunk.reason.kind)) fail()
@@ -167,13 +196,18 @@ export class GoalBudgetRuntime {
           yield chunk
         }
       } finally { try { void iterator.return?.().catch(() => {}) } catch {} }
+      stage = 'admission'
       this.#assert(agent, bound.run, meter)
+      stage = 'stream'
       if (!finished) fail()
+      stage = 'usage'
       const measured = usage(observed)
       if (measured.inputTokens > upper || measured.outputTokens > options.maxTokens) fail()
+      stage = 'settlement'
       this.#store.settle(id, { ...measured, costUsdMicros: this.config.costUsdMicros === undefined
         ? null : cost(measured.inputTokens, measured.outputTokens, meter) }, Date.now())
     } catch (error) {
+      if (isStrategyChild(agent)) this.#note(agent, stage, dispatched)
       agent.cancel({ kind: 'hook', reason: 'assistant-goals-budget-rejected' })
       throw error
     } finally { if (ownsMeter && this.#inflight.get(agent) === meter) this.#inflight.delete(agent) }
@@ -224,12 +258,16 @@ export class GoalBudgetRuntime {
   }
   inspect = (record: GoalRecord) => this.#store.snapshot(this.#binding(record))
   runUsage = (record: GoalRecord, runId: string) => this.#store.runUsage(this.#binding(record), runId)
+  lastFailure = (agent: Agent): GoalBudgetFailure | undefined => this.#lastFailures.get(agent)
   /** Candidate read path for Policy predicates; it never configures or consumes a budget. */
   preview = (record: GoalRecord) => this.#store.preview({ scope: record.scope, goalId: record.id }, this.#limits(record))
   health = () => ({ enabled: true, registeredMeters: this.#meters.size, activeCalls: this.#inflight.size })
   #clearDeadline(agent: Agent): void {
     const value = this.#deadlines.get(agent)
     if (value !== undefined) { clearTimeout(value.timer); this.#deadlines.delete(agent) }
+  }
+  #note(agent: Agent, stage: GoalBudgetFailure['stage'], dispatched: boolean): void {
+    this.#lastFailures.set(agent, Object.freeze({ stage, dispatched }))
   }
   #binding(record: GoalRecord): GoalBudgetScope {
     if (!this.#active) fail()

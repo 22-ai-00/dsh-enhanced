@@ -130,6 +130,14 @@ test(`installed Web owner CLI admits one private verified Goal after a stopped p
     const calls = await modelCalls(modelLog)
     expect(calls).toHaveLength(strategy ? 11 : 8); expect(calls[strategy ? 9 : 6].feedbackObserved).toBe(true); expect(calls.every(call => !call.secretObserved)).toBe(true)
     expect(calls.filter(call => call.strategyChild)).toHaveLength(strategy ? 2 : 0)
+    if (strategy) {
+      const assessment = calls[9].strategyAssessments.find(value => value.parentStep?.status === 'not-achieved')
+      const failed = receipts.find(receipt => receipt.task.kind === 'goal-step' && receipt.objectiveStatus === 'not-achieved')
+      const passed = receipts.find(receipt => receipt.task.kind === 'goal-step' && receipt.objectiveStatus === 'achieved')
+      expect(assessment).toMatchObject({ outcome: 'advice', attribution: 'same-parent-step-only', nextAction: 'revise-solution', definitionCurrent: true,
+        parentRunId: failed.task.goal.runId, parentSessionId: sessionId, parentStep: { runId: failed.task.goal.runId, status: 'not-achieved', verification: { receiptId: failed.id } } })
+      expect(assessment.parentRunId).not.toBe(passed.task.goal.runId)
+    }
     expect(await resumed.getByRole('button', { name: 'Allow once', exact: true }).count()).toBe(0)
     expect(JSON.stringify(frames)).not.toContain('approval/asked'); expect(JSON.stringify(frames)).not.toContain('policy/ask')
     await expect.poll(() => query(`${goalsPath}.wakes`, 'SELECT state FROM goal_wakes').map(value => value.state)).toEqual(['succeeded'])
