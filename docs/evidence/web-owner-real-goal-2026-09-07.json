@@ -1,0 +1,570 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-07T07:40:40.331178+00:00",
+  "baseCommit": "5b680fd079b5e98dffb8e97420792dc9290316a7",
+  "sourceSha256": {
+    "plugins/assistant-delivery/src/native-web-owner.ts": "7581e42f703174f4f4df242545bcb69f015a83fea281ade70363ab6b7e80f42d",
+    "scripts/e2e/web-owner-real.spec.mjs": "d6f8214bda31eb9e6a800ee817d85ab93454c622d1f8eedd0a439dcb66b3048c",
+    "scripts/e2e/web-owner-real-guard.mjs": "1f6e9eea63b8f93d4b2496e621b8f0d7961d09b29b519e132e065988ba24f2aa",
+    "scripts/e2e/web-owner-real-audit.mjs": "f0a9faadb0b46740235705f127686e60d8bd1046c42985b2a6ae18521f869c92",
+    "scripts/e2e/web-owner-helpers.mjs": "f8273926a98220c28cc1e66b8a0fbae9723de796da4231514d6bc54e38d09ba7",
+    "scripts/e2e/playwright-real.config.mjs": "9859dfeed98a142a1bf4115fc86736a65213e0603ea8bfff7dac426de11294b7",
+    "tests/web-owner-real-guard.spec.ts": "d6c4557b2724e927b21accd54968e53ecf00c151881efb12ecbffede6a5f5ba6",
+    "plugins/assistant-delivery/tests/agent-runtime.spec.ts": "fa4c4e8188bc009136d276992f3f8910eeb6432a22fd038215d63ad6d7e2117b"
+  },
+  "runtime": {
+    "dsh": "0.1.2-rc.1",
+    "playwright": "1.58.2",
+    "chromium": "146.0.7680.177"
+  },
+  "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm test:web-owner:real",
+  "exitCode": 0,
+  "localLog": "/tmp/dsh-web-real-goal-v7.log",
+  "testDurationSeconds": 31.0,
+  "generatedProgram": {
+    "name": "summarize.mjs",
+    "sha256": "f2fc7d1e5dc0b40aff75cbb6ad94ae6c0a134be31435cb81896f278b625d3183",
+    "content": "import { readFileSync } from 'node:fs';\n\nconst orders = JSON.parse(readFileSync(0, 'utf8'));\nconst totals = {};\n\nfor (const order of orders) {\n  if (order.status === 'cancelled') continue;\n  totals[order.currency] = (totals[order.currency] ?? 0) + order.amountCents;\n}\n\nconst sortedTotals = Object.fromEntries(\n  Object.entries(totals).sort(([left], [right]) => left.localeCompare(right)),\n);\n\nprocess.stdout.write(`${JSON.stringify(sortedTotals)}\\n`);\n"
+  },
+  "proof": {
+    "objective": "Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.",
+    "sourceArtifact": "summarize.mjs",
+    "noFixture": true,
+    "provider": "codex-subscription",
+    "directModel": "gpt-5.6-terra",
+    "dispatchLimit": 10,
+    "approvalReviewer": "user",
+    "finalLease": "released",
+    "sessionId": "session-dafdd46b-4d5c-41c2-9c4f-e05493f99d6e",
+    "goalId": "39465cf8e03bc5d2122097b7cc459f8b676ad666d97c7e8743d277ec88f05828",
+    "scope": {
+      "principalId": "web/web/local/operator",
+      "principalRecordId": "principal_66b4c80d-ab05-426f-b5f8-d8cd0c3a1756",
+      "principalVersion": 1,
+      "workspace": "/tmp/dsh-web-owner-real-Mkxyvq/workspace",
+      "preset": "standard"
+    },
+    "native": {
+      "sessionId": "session-dafdd46b-4d5c-41c2-9c4f-e05493f99d6e",
+      "goalId": "goal-56249420-ee71-448b-8544-fd6ece0ed356",
+      "revision": 2,
+      "objective": "Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.",
+      "phase": "complete",
+      "roundsStarted": 1,
+      "maxGoalRounds": 2,
+      "updatedAt": 1788766560503
+    },
+    "runner": {
+      "id": "node",
+      "digest": "ad3c5f6f0571e96f8f4f3beff38775fb5aa5d60a848f793e18dac0b178693e0a"
+    },
+    "approved": [
+      {
+        "eventId": "7d3d3d2b-cd8c-4186-bde4-5590eaf5a46c",
+        "agentId": "session-dafdd46b-4d5c-41c2-9c4f-e05493f99d6e",
+        "toolName": "goal_create",
+        "callId": "call_5eXDJf86zJG16fYrZAXFUZn9"
+      }
+    ],
+    "modelCalls": [
+      {
+        "event": "dispatch",
+        "call": 1,
+        "provider": "codex-subscription",
+        "model": "default"
+      },
+      {
+        "event": "settled",
+        "call": 1,
+        "drained": true,
+        "finish": "tool-calls",
+        "usage": {
+          "inputTokens": 7124,
+          "outputTokens": 77,
+          "cacheReadTokens": 5632,
+          "reasoningTokens": 12
+        }
+      },
+      {
+        "event": "dispatch",
+        "call": 2,
+        "provider": "codex-subscription",
+        "model": "default"
+      },
+      {
+        "event": "settled",
+        "call": 2,
+        "drained": true,
+        "finish": "stop",
+        "usage": {
+          "inputTokens": 3807,
+          "outputTokens": 21,
+          "cacheReadTokens": 11776,
+          "reasoningTokens": 12
+        }
+      },
+      {
+        "event": "dispatch",
+        "call": 3,
+        "provider": "codex-subscription",
+        "model": "default"
+      },
+      {
+        "event": "settled",
+        "call": 3,
+        "drained": true,
+        "finish": "tool-calls",
+        "usage": {
+          "inputTokens": 15759,
+          "outputTokens": 221,
+          "reasoningTokens": 57
+        }
+      },
+      {
+        "event": "dispatch",
+        "call": 4,
+        "provider": "codex-subscription",
+        "model": "default"
+      },
+      {
+        "event": "settled",
+        "call": 4,
+        "drained": true,
+        "finish": "stop",
+        "usage": {
+          "inputTokens": 2781,
+          "outputTokens": 12,
+          "cacheReadTokens": 14848,
+          "reasoningTokens": 0
+        }
+      }
+    ],
+    "stepContracts": [
+      {
+        "id": "acceptance-ba957795559392730b89b1aadce788700f9496f501228497e5db7433b52da2ee",
+        "protocol": "task-acceptance/v2",
+        "task": {
+          "goal": {
+            "definitionDigest": "b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f",
+            "definitionVersion": 1,
+            "id": "39465cf8e03bc5d2122097b7cc459f8b676ad666d97c7e8743d277ec88f05828",
+            "nativeGoalId": "goal-56249420-ee71-448b-8544-fd6ece0ed356",
+            "nativeRevision": 1,
+            "runId": "goal-run-640c016445a7d57e3042e8fa98ba9bc801b7d0cb88b13fa5f80357af1e967272",
+            "sessionId": "session-dafdd46b-4d5c-41c2-9c4f-e05493f99d6e",
+            "stepId": "round-1"
+          },
+          "kind": "goal-step",
+          "ref": "goal-run-640c016445a7d57e3042e8fa98ba9bc801b7d0cb88b13fa5f80357af1e967272"
+        },
+        "criteria": [
+          {
+            "artifactPath": "summarize.mjs",
+            "authority": {
+              "digest": "ad3c5f6f0571e96f8f4f3beff38775fb5aa5d60a848f793e18dac0b178693e0a",
+              "id": "node"
+            },
+            "expectedExitCode": 0,
+            "expectedStdout": "{\"EUR\":250,\"USD\":175}\n",
+            "id": "two-currencies",
+            "kind": "process-behavior",
+            "stdin": "[{\"currency\":\"USD\",\"amountCents\":100},{\"currency\":\"EUR\",\"amountCents\":250},{\"currency\":\"USD\",\"amountCents\":75}]\n"
+          }
+        ]
+      }
+    ],
+    "stepJobs": [
+      {
+        "state": "done",
+        "execution": {
+          "completedAt": 1788766559453,
+          "executionRef": "goal-run-640c016445a7d57e3042e8fa98ba9bc801b7d0cb88b13fa5f80357af1e967272",
+          "quiescent": true,
+          "status": "succeeded"
+        },
+        "receipt": {
+          "completedAt": 1788766559699,
+          "contractDigest": "3f93f6e361515a984697d403df65dab8da050eb52cf98139387c86aa5f79ed1e",
+          "contractId": "acceptance-ba957795559392730b89b1aadce788700f9496f501228497e5db7433b52da2ee",
+          "digest": "924add0d9954ba9e819c69ac5a92c866870a4158d3fe1b72800933eff54c016b",
+          "id": "verification-acceptance-ba957795559392730b89b1aadce788700f9496f501228497e5db7433b52da2ee-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_66b4c80d-ab05-426f-b5f8-d8cd0c3a1756",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v2",
+          "results": [
+            {
+              "artifactDigest": "f2fc7d1e5dc0b40aff75cbb6ad94ae6c0a134be31435cb81896f278b625d3183",
+              "criterionId": "two-currencies",
+              "evidence": [
+                {
+                  "digest": "daaf562fa2d6ad159970fc922e6f5088ef36ef6dd0b2cdd8934caf488469e0e9",
+                  "kind": "process-output",
+                  "ref": "summarize.mjs"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-web-owner-real-Mkxyvq/workspace"
+          },
+          "startedAt": 1788766559462,
+          "task": {
+            "goal": {
+              "definitionDigest": "b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f",
+              "definitionVersion": 1,
+              "id": "39465cf8e03bc5d2122097b7cc459f8b676ad666d97c7e8743d277ec88f05828",
+              "nativeGoalId": "goal-56249420-ee71-448b-8544-fd6ece0ed356",
+              "nativeRevision": 1,
+              "runId": "goal-run-640c016445a7d57e3042e8fa98ba9bc801b7d0cb88b13fa5f80357af1e967272",
+              "sessionId": "session-dafdd46b-4d5c-41c2-9c4f-e05493f99d6e",
+              "stepId": "round-1"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-640c016445a7d57e3042e8fa98ba9bc801b7d0cb88b13fa5f80357af1e967272"
+          },
+          "validUntil": 1788767149950
+        },
+        "reason": "verified"
+      }
+    ],
+    "outcomeContracts": [
+      {
+        "id": "acceptance-f1fbce2d00f3ef27aa88bfdad47208d3e78510c1d207f9016f138e8fed8ae7ed",
+        "protocol": "task-acceptance/v3",
+        "task": {
+          "goal": {
+            "assessmentId": "goal-assessment-ab6aca7aea2bc0cca7686de53e8ed48694ae78330d908324fc5b214c60c1d598",
+            "definitionDigest": "b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f",
+            "definitionVersion": 1,
+            "id": "39465cf8e03bc5d2122097b7cc459f8b676ad666d97c7e8743d277ec88f05828",
+            "nativeGoalId": "goal-56249420-ee71-448b-8544-fd6ece0ed356",
+            "sessionId": "session-dafdd46b-4d5c-41c2-9c4f-e05493f99d6e"
+          },
+          "kind": "goal-outcome",
+          "ref": "goal-assessment-ab6aca7aea2bc0cca7686de53e8ed48694ae78330d908324fc5b214c60c1d598"
+        },
+        "criteria": [
+          {
+            "artifactPath": "summarize.mjs",
+            "authority": {
+              "digest": "ad3c5f6f0571e96f8f4f3beff38775fb5aa5d60a848f793e18dac0b178693e0a",
+              "id": "node"
+            },
+            "expectedExitCode": 0,
+            "expectedStdout": "{\"EUR\":250,\"USD\":175}\n",
+            "id": "two-currencies",
+            "kind": "process-behavior",
+            "stdin": "[{\"currency\":\"USD\",\"amountCents\":100},{\"currency\":\"EUR\",\"amountCents\":250},{\"currency\":\"USD\",\"amountCents\":75}]\n"
+          },
+          {
+            "artifactPath": "summarize.mjs",
+            "authority": {
+              "digest": "ad3c5f6f0571e96f8f4f3beff38775fb5aa5d60a848f793e18dac0b178693e0a",
+              "id": "node"
+            },
+            "expectedExitCode": 0,
+            "expectedStdout": "{\"EUR\":-20,\"USD\":100}\n",
+            "id": "cancelled-and-negative",
+            "kind": "process-behavior",
+            "stdin": "[{\"currency\":\"USD\",\"amountCents\":100},{\"currency\":\"USD\",\"amountCents\":50,\"status\":\"cancelled\"},{\"currency\":\"EUR\",\"amountCents\":-25},{\"currency\":\"EUR\",\"amountCents\":5}]\n"
+          },
+          {
+            "artifactPath": "summarize.mjs",
+            "authority": {
+              "digest": "ad3c5f6f0571e96f8f4f3beff38775fb5aa5d60a848f793e18dac0b178693e0a",
+              "id": "node"
+            },
+            "expectedExitCode": 0,
+            "expectedStdout": "{}\n",
+            "id": "empty",
+            "kind": "process-behavior",
+            "stdin": "[]\n"
+          }
+        ]
+      }
+    ],
+    "outcomeJobs": [
+      {
+        "state": "done",
+        "execution": {
+          "completedAt": 1788766559724,
+          "executionRef": "goal-assessment-ab6aca7aea2bc0cca7686de53e8ed48694ae78330d908324fc5b214c60c1d598",
+          "quiescent": true,
+          "status": "succeeded"
+        },
+        "receipt": {
+          "completedAt": 1788766560468,
+          "contractDigest": "f193aebb96afee26aa64e1c39c225efd5782d8d3a654209cc2824470441cda6b",
+          "contractId": "acceptance-f1fbce2d00f3ef27aa88bfdad47208d3e78510c1d207f9016f138e8fed8ae7ed",
+          "digest": "fea33d7308cf72a3dc0d884f4cc95653e598b759e5d1d60e220f827bc76ca99d",
+          "id": "verification-acceptance-f1fbce2d00f3ef27aa88bfdad47208d3e78510c1d207f9016f138e8fed8ae7ed-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_66b4c80d-ab05-426f-b5f8-d8cd0c3a1756",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v3",
+          "results": [
+            {
+              "artifactDigest": "f2fc7d1e5dc0b40aff75cbb6ad94ae6c0a134be31435cb81896f278b625d3183",
+              "criterionId": "two-currencies",
+              "evidence": [
+                {
+                  "digest": "daaf562fa2d6ad159970fc922e6f5088ef36ef6dd0b2cdd8934caf488469e0e9",
+                  "kind": "process-output",
+                  "ref": "summarize.mjs"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            },
+            {
+              "artifactDigest": "f2fc7d1e5dc0b40aff75cbb6ad94ae6c0a134be31435cb81896f278b625d3183",
+              "criterionId": "cancelled-and-negative",
+              "evidence": [
+                {
+                  "digest": "5d13df47ede56c8c318a79185cd43305801d8fb8333c4440b0984a4bd01b4d24",
+                  "kind": "process-output",
+                  "ref": "summarize.mjs"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            },
+            {
+              "artifactDigest": "f2fc7d1e5dc0b40aff75cbb6ad94ae6c0a134be31435cb81896f278b625d3183",
+              "criterionId": "empty",
+              "evidence": [
+                {
+                  "digest": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                  "kind": "process-output",
+                  "ref": "summarize.mjs"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-web-owner-real-Mkxyvq/workspace"
+          },
+          "startedAt": 1788766559741,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-ab6aca7aea2bc0cca7686de53e8ed48694ae78330d908324fc5b214c60c1d598",
+              "definitionDigest": "b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f",
+              "definitionVersion": 1,
+              "id": "39465cf8e03bc5d2122097b7cc459f8b676ad666d97c7e8743d277ec88f05828",
+              "nativeGoalId": "goal-56249420-ee71-448b-8544-fd6ece0ed356",
+              "sessionId": "session-dafdd46b-4d5c-41c2-9c4f-e05493f99d6e"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-ab6aca7aea2bc0cca7686de53e8ed48694ae78330d908324fc5b214c60c1d598"
+          },
+          "validUntil": 1788767141451
+        },
+        "reason": "verified"
+      }
+    ],
+    "streams": [
+      "session/control",
+      "workspace/follow",
+      "$events",
+      "session/follow"
+    ]
+  },
+  "sessionAudit": {
+    "sessionId": "session-dafdd46b-4d5c-41c2-9c4f-e05493f99d6e",
+    "projectKey": "--tmp-dsh-web-owner-real-Mkxyvq-workspace--",
+    "reviewer": "user",
+    "events": [
+      {
+        "seq": 0,
+        "type": "permission/preset",
+        "data": {
+          "preset": "workspace-write"
+        }
+      },
+      {
+        "seq": 1,
+        "type": "sandbox/mode",
+        "data": {
+          "mode": "workspace-write"
+        }
+      },
+      {
+        "seq": 2,
+        "type": "approval/policy",
+        "data": {
+          "policy": "ask"
+        }
+      },
+      {
+        "seq": 73,
+        "type": "tool/call",
+        "data": {
+          "callId": "call_5eXDJf86zJG16fYrZAXFUZn9",
+          "name": "goal_create",
+          "arguments": {
+            "objective": "Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.",
+            "max_goal_rounds": 2
+          }
+        }
+      },
+      {
+        "seq": 74,
+        "type": "approval/asked",
+        "data": {
+          "id": "80673f46-f5d0-442a-804b-3f53e6722ed3",
+          "callId": "call_5eXDJf86zJG16fYrZAXFUZn9",
+          "toolName": "goal_create"
+        }
+      },
+      {
+        "seq": 75,
+        "type": "approval/decided",
+        "data": {
+          "id": "80673f46-f5d0-442a-804b-3f53e6722ed3",
+          "outcome": "allowed-once"
+        }
+      },
+      {
+        "seq": 76,
+        "type": "goal/change",
+        "data": {
+          "kind": "goal/change",
+          "version": 1,
+          "operation": "create",
+          "roundsStarted": 0,
+          "createdAt": 1788766541440,
+          "updatedAt": 1788766541440
+        }
+      },
+      {
+        "seq": 256,
+        "type": "tool/call",
+        "data": {
+          "callId": "call_Lj75ziOVB2CIN26XTJFB8SyI",
+          "name": "write",
+          "arguments": {
+            "file_path": "summarize.mjs"
+          }
+        }
+      },
+      {
+        "seq": 279,
+        "type": "goal/change",
+        "data": {
+          "kind": "goal/change",
+          "version": 1,
+          "operation": "complete",
+          "roundsStarted": 1,
+          "createdAt": 1788766541440,
+          "updatedAt": 1788766560503
+        }
+      }
+    ]
+  },
+  "priorFailedRuns": [
+    {
+      "run": 1,
+      "exitCode": 1,
+      "reason": "Host startup failure masked by cleanup ESRCH; helper and YAML-tag preservation fixed"
+    },
+    {
+      "run": 2,
+      "exitCode": 1,
+      "reason": "Browser approval was inline, not a dialog; background waiter leaked Host, then explicitly stopped"
+    },
+    {
+      "run": 3,
+      "exitCode": 1,
+      "reason": "Specialized todo UI invalidated generic Tool row selector; replaced with actual WS request/call matching"
+    },
+    {
+      "run": 4,
+      "exitCode": 1,
+      "reason": "get_goal missing from experiment allowlist"
+    },
+    {
+      "run": 5,
+      "exitCode": 1,
+      "reason": "Ten-call guard exhausted; native paused with unresolved verification"
+    },
+    {
+      "run": 6,
+      "exitCode": 1,
+      "reason": "Goal active at round0 after idle Web owner lease release; native driver checkpoint race"
+    }
+  ],
+  "limitations": [
+    "One guided small-task run, not comparative model quality or long-term autonomous improvement.",
+    "Exact visible criteria are independently executed by the installed Verifier; no hidden-evaluation boundary.",
+    "Test-only dispatch and absolute-time guard, not a production cumulative token/cost hard budget.",
+    "Subscription transport does not provide a server-side output-token cap; cancellation does not prove billing stopped.",
+    "Verifier runs as the same OS user; not isolated worker or credential-broker evidence.",
+    "No release, production activation, real-user profile modification, or multi-day execution.",
+    "Local C2C records and independent agent review are not actual ChatGPT planning/review.",
+    "All 18 work packages remain in scope; no work-package status promoted by this smoke test."
+  ],
+  "runtimeRegression": {
+    "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-delivery/tests/agent-runtime.spec.ts -t 'keeps a Web-owned Agent leased|production Web owner admits|native Web owner drains'",
+    "localLog": "/tmp/dsh-web-idle-tests-v7.log",
+    "exitCode": 0,
+    "passed": 6,
+    "excludedByNameFilter": 212,
+    "checkpointDelayMs": 250,
+    "storage": "Real native PersistenceCoordinator with the existing in-memory test backend; browser run separately uses actual compressed disk logs.",
+    "controlledRegression": {
+      "localLog": "/tmp/dsh-web-idle-red-v2.log",
+      "exitCode": 1,
+      "mutation": "Remove only the armed-active Goal idle hold; restore source byte-for-byte in finally",
+      "failure": "The same Agent is no longer live while its native checkpoint is held.",
+      "sourceRestored": true
+    },
+    "assertionFormatting": "The final test compares Agent identity as a boolean so the expected controlled failure does not invoke Cordis proxy pretty-printing. The final full check validates that assertion form."
+  },
+  "deterministicBrowserRegression": {
+    "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm test:web-owner",
+    "localLog": "/tmp/dsh-web-idle-browser-v1.log",
+    "exitCode": 0,
+    "passed": 1,
+    "testDurationSeconds": 8.6
+  },
+  "fullCheck": {
+    "command": "CI=true pnpm check",
+    "exitCode": 0,
+    "localLog": "/tmp/dsh-web-real-check-v1.log",
+    "rootTestFiles": 240,
+    "rootTestsPassed": 3393,
+    "rootTestsSkipped": 0,
+    "packageTests": {
+      "assistant-delivery": 684,
+      "assistant-goals": 72,
+      "assistant-verifier": 51,
+      "assistant-web-owner": 9
+    },
+    "manifest": true,
+    "lintWarnings": 0,
+    "typecheck": true,
+    "build": true,
+    "allDryRunPacks": true
+  },
+  "independentReview": {
+    "status": "PASS",
+    "kind": "read-only verifier agent; accepted by root coordinator",
+    "evidence": "Actual source, final exit/log, persisted model/browser proof, session audit, artifact hashes and controlled regression",
+    "notChatGPTReview": true,
+    "remainingCoverage": [
+      "No separate revocation/deadline injection during the held checkpoint; existing drain tests and static timer ordering cover those paths.",
+      "Malformed provider usage chunk fallback is not separately tested."
+    ]
+  }
+}

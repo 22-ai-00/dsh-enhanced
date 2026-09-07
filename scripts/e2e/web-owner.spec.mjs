@@ -1,112 +1,14 @@
 import { test, expect } from '@playwright/test'
-import { spawn } from 'node:child_process'
-import { once } from 'node:events'
 import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { stripVTControlCharacters } from 'node:util'
-import { DatabaseSync } from 'node:sqlite'
 import { parseDocument } from 'yaml'
+import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const objective = 'Browser owner end-to-end goal'
-const sanitize = text => stripVTControlCharacters(text).replace(/([?&]token=)[^\s"<>]+/g, '$1[redacted]')
-
-async function run(command, args, env) {
-  const child = spawn(command, args, { cwd: root, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] })
-  let output = ''
-  child.stdout.on('data', chunk => { output += chunk })
-  child.stderr.on('data', chunk => { output += chunk })
-  const timer = setTimeout(() => {
-    if (child.pid) {
-      try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error?.code !== 'ESRCH') throw error }
-    }
-  }, 90_000)
-  try {
-    const [code] = await once(child, 'close')
-    if (code !== 0) throw new Error(`${command} exited ${code}: ${sanitize(output).slice(-6000)}`)
-    return output
-  } finally { clearTimeout(timer) }
-}
-
-function query(path, sql, ...args) {
-  const db = new DatabaseSync(path, { readOnly: true })
-  try { return db.prepare(sql).all(...args) } finally { db.close() }
-}
-
-async function startHost(env) {
-  const child = spawn('dsh', ['--profile', 'web', '--host', '127.0.0.1', '--port', '0', '--no-open'], {
-    cwd: root, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'],
-  })
-  let output = ''
-  let settled = false
-  const closed = once(child, 'close').then(() => { settled = true })
-  // Observe rejection immediately, including spawn failure, without unhandled promises.
-  closed.catch(() => {})
-  const url = await new Promise((resolveUrl, reject) => {
-    const timer = setTimeout(() => reject(new Error('DSH Web did not announce readiness')), 30_000)
-    const receive = chunk => {
-      output += chunk
-      const match = stripVTControlCharacters(output).match(/http:\/\/127\.0\.0\.1:\d+\/\?token=[^\s]+/)
-      if (match) { clearTimeout(timer); resolveUrl(match[0]) }
-    }
-    child.stdout.on('data', receive)
-    child.stderr.on('data', receive)
-    child.once('error', error => { clearTimeout(timer); reject(error) })
-    child.once('close', code => { clearTimeout(timer); reject(new Error(`DSH stopped before readiness (${code}): ${sanitize(output).slice(-6000)}`)) })
-  }).catch(async error => {
-    if (child.pid && !settled) process.kill(-child.pid, 'SIGKILL')
-    await closed.catch(() => {})
-    throw error
-  })
-  return {
-    url,
-    async stop() {
-      if (settled) return
-      try { process.kill(-child.pid, 'SIGINT') } catch (error) { if (error?.code !== 'ESRCH') throw error }
-      const timer = setTimeout(() => {
-        if (!settled) {
-          try { process.kill(-child.pid, 'SIGKILL') } catch (error) { if (error?.code !== 'ESRCH') throw error }
-        }
-      }, 10_000)
-      try { await closed } finally { clearTimeout(timer) }
-    },
-    log: () => sanitize(output),
-  }
-}
-
-function observePage(page, http, transport, streams, frames) {
-  page.on('console', message => {
-    if (['error', 'warning'].includes(message.type())) transport.push({ kind: message.type(), message: sanitize(message.text()) })
-  })
-  page.on('pageerror', error => transport.push({ kind: 'page-error', message: sanitize(String(error)) }))
-  page.on('websocket', socket => {
-    transport.push({ kind: 'socket', path: new URL(socket.url()).pathname })
-    socket.on('socketerror', error => transport.push({ kind: 'socket-error', message: sanitize(String(error)) }))
-    socket.on('framesent', ({ payload }) => {
-      try {
-        const frame = JSON.parse(String(payload))
-        transport.push({ kind: 'sent', frame })
-        if (frame.type === 'open') streams.set(frame.streamId, frame.endpoint)
-      } catch { transport.push({ kind: 'sent-non-json' }) }
-    })
-    socket.on('framereceived', ({ payload }) => {
-      try {
-        const frame = JSON.parse(String(payload))
-        frames.push(frame)
-        transport.push({ kind: 'received', frame: frame.type === 'item'
-          ? { type: frame.type, streamId: frame.streamId, valueType: frame.value?.type, valueKeys: Object.keys(frame.value ?? {}), event: typeof frame.value?.event === 'string' ? frame.value.event : frame.value?.event?.type,
-            ...(frame.value?.event === 'api-session/added' || frame.value?.event === 'api-session/removed' ? { args: frame.value.args } : {}) }
-          : frame })
-      } catch { transport.push({ kind: 'received-non-json' }) }
-    })
-  })
-  page.on('response', response => {
-    if (new URL(response.url()).pathname.startsWith('/api/session/')) http.push(response)
-  })
-}
 
 test('fresh Web owner authenticates, streams a business goal, and resumes its session', async ({ page, context, playwright }, testInfo) => {
   const temp = await mkdtemp(join(tmpdir(), 'dsh-web-owner-e2e-'))
