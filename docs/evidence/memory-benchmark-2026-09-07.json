@@ -1,0 +1,3365 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-07",
+  "baseCommit": "3b59aa56618e120fa16461ed2ee98db7f6cbac52",
+  "kind": "public-development-memory-benchmark",
+  "scope": "Two actual public development paired trials; within-version baseline/candidate comparisons only.",
+  "controls": {
+    "model": "gpt-5.6-terra",
+    "persona": "按当前任务作答，核对证据和来源。无法确认时明确说明。",
+    "budget": {
+      "durationMs": 120000,
+      "inputTokens": 20000,
+      "outputTokens": 8192,
+      "toolCalls": 0
+    },
+    "memorySnapshotTreatment": "candidate receives actual memory snapshot; baseline does not; trace input records retain digest and snapshot-presence check only.",
+    "publicApprovedFixtures": true,
+    "bothArmsEmptyTools": true,
+    "inputLimitMode": "estimate",
+    "outputLimitMode": "observed",
+    "providerHardCapsKnown": false,
+    "priceKnown": false
+  },
+  "trials": [
+    {
+      "id": "memory-codex-development-20260907-v1",
+      "config": {
+        "id": "memory-codex-development-20260907-v1",
+        "suite": "memory-v1",
+        "cases": [
+          "atlas-schema-select-journal",
+          "atlas-schema-counterexample-pause",
+          "claim-marker-conflict-needs-review",
+          "eu-west-visibility-boundary",
+          "removed-mode-current-snapshot-wins",
+          "sample-memory-injection-is-data"
+        ],
+        "variants": [
+          {
+            "id": "baseline",
+            "role": "baseline",
+            "persona": "按当前任务作答，核对证据和来源。无法确认时明确说明。",
+            "memory": false
+          },
+          {
+            "id": "candidate",
+            "role": "candidate",
+            "persona": "按当前任务作答，核对证据和来源。无法确认时明确说明。",
+            "memory": true
+          }
+        ],
+        "model": {
+          "provider": "codex-subscription",
+          "model": "gpt-5.6-terra",
+          "temperature": null,
+          "inputLimitMode": "estimate",
+          "outputLimitMode": "observed",
+          "maxOutputTokens": 8192,
+          "inputUsdMicrosPerMillionTokens": null,
+          "outputUsdMicrosPerMillionTokens": null,
+          "adapterDigest": "433bbeac7270b329bfd442ab9d53a29868edc4aaf4a248e2c5584940a7b770e8",
+          "tokenCounterDigest": "433bbeac7270b329bfd442ab9d53a29868edc4aaf4a248e2c5584940a7b770e8"
+        },
+        "budget": {
+          "durationMs": 120000,
+          "inputTokens": 20000,
+          "outputTokens": 8192,
+          "costUsdMicros": null,
+          "toolCalls": 0
+        },
+        "repeats": 2,
+        "seed": 60907
+      },
+      "plan": {
+        "plan": {
+          "budget": {
+            "costUsdMicros": null,
+            "durationMs": 120000,
+            "inputTokens": 20000,
+            "outputTokens": 8192,
+            "toolCalls": 0
+          },
+          "cases": [
+            {
+              "acceptanceDigest": "1571bcfaf3de6228497b629e94afe0b385c4ecffdc59e6a3da30c8fa2ef8bcd5",
+              "domain": "research",
+              "id": "atlas-schema-select-journal",
+              "inputDigest": "f04c03510a1a8febc95fdf49ca581055196112ac668dacb1409ed69f6b74d6d3"
+            },
+            {
+              "acceptanceDigest": "5b979c96d22da377a9f4281be8ba8f179be22bfd1eeb7191d79d9913495e93ca",
+              "domain": "research",
+              "id": "atlas-schema-counterexample-pause",
+              "inputDigest": "c718936bcc95c3fb6201831589a5e081d12dc999e8bd0548b5995137bd9e3447"
+            },
+            {
+              "acceptanceDigest": "9ab8a1599c677db4972121c22d7cbcacc5558c2d6306b47284c812eae4513bf2",
+              "domain": "research",
+              "id": "claim-marker-conflict-needs-review",
+              "inputDigest": "25edb61a819268dc7982e5ae31c8324ed62379657f64e1f2e07fc9d46d715bce"
+            },
+            {
+              "acceptanceDigest": "b343ea07664848dd3a84dc3887a5120f51316f034cc7d291e256b0efa6e28b9e",
+              "domain": "research",
+              "id": "eu-west-visibility-boundary",
+              "inputDigest": "3ca351bc5615b799b4763d45976f1bdbeeba705cf005609f76af24a71ad01597"
+            },
+            {
+              "acceptanceDigest": "f5e34f99575eaec89ad1cc016a7e2ab7d64b2e8edce6503724cd373f855f8553",
+              "domain": "revocation",
+              "id": "removed-mode-current-snapshot-wins",
+              "inputDigest": "e3e493ace5916f9fe2fa7e8998f49f27d49b321990080b985c92b8e37c9b825d"
+            },
+            {
+              "acceptanceDigest": "2c7f38330e01699c68ea927b6fe9601aac4b32904b87442127f78fe4095c063f",
+              "domain": "injection",
+              "id": "sample-memory-injection-is-data",
+              "inputDigest": "1c53922954a1b52011a8e6ae7b1e8335c7581921359c18978c2fa9abd56140c7"
+            }
+          ],
+          "comparison": "capability",
+          "dataset": {
+            "digest": "369f69c256fda72da467876c16b52bb88829c49fe1e53444a0f2e375b05574a3",
+            "id": "dsh-memory-grounding",
+            "split": "development",
+            "version": "1"
+          },
+          "id": "memory-codex-development-20260907-v1",
+          "repeats": 2,
+          "schemaVersion": 1,
+          "seed": 60907,
+          "variants": [
+            {
+              "features": {
+                "growth": false,
+                "memory": false,
+                "planning": false,
+                "review": false
+              },
+              "id": "baseline",
+              "role": "baseline",
+              "versions": {
+                "model": "ac7b990c3c9cd4f0fd9eb9f53daf752163ee56f4d6cb0c338cbcf85b2c94f62c",
+                "policy": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e",
+                "prompt": "35f6cef2e1a19a5b501418259d43be70e699b930e52b4581ea0d3aa73867a0a0",
+                "runtime": "0baa3d2e33700cfcffe427c15bfed812d2ff97f2d8ad7f7e2cc526f8de320339",
+                "skills": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e",
+                "tools": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e"
+              }
+            },
+            {
+              "features": {
+                "growth": false,
+                "memory": true,
+                "planning": false,
+                "review": false
+              },
+              "id": "candidate",
+              "role": "candidate",
+              "versions": {
+                "model": "ac7b990c3c9cd4f0fd9eb9f53daf752163ee56f4d6cb0c338cbcf85b2c94f62c",
+                "policy": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e",
+                "prompt": "35f6cef2e1a19a5b501418259d43be70e699b930e52b4581ea0d3aa73867a0a0",
+                "runtime": "0baa3d2e33700cfcffe427c15bfed812d2ff97f2d8ad7f7e2cc526f8de320339",
+                "skills": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e",
+                "tools": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e"
+              }
+            }
+          ]
+        },
+        "planDigest": "5048d4a51cf460c3be934f557ddbabe869f6b305c7b65130ddb021faca62f8b0",
+        "plannedCells": 24,
+        "maximumCostUsdMicros": null,
+        "inputLimitMode": "estimate",
+        "outputLimitMode": "observed",
+        "maximumInputTokens": null,
+        "maximumOutputTokens": null,
+        "observedInputTokenLimit": 480000,
+        "observedOutputTokenLimit": 196608
+      },
+      "report": {
+        "schemaVersion": 1,
+        "planDigest": "5048d4a51cf460c3be934f557ddbabe869f6b305c7b65130ddb021faca62f8b0",
+        "complete": true,
+        "expectedCells": 24,
+        "recordedCells": 24,
+        "variants": [
+          {
+            "id": "baseline",
+            "expected": 12,
+            "recorded": 12,
+            "achieved": 2,
+            "notAchieved": 10,
+            "unknown": 0,
+            "successRate": 0.16666666666666666,
+            "successInterval95": [
+              0,
+              0.5
+            ],
+            "metrics": {
+              "inputTokens": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 261.5,
+                "median": 261,
+                "p95": 284
+              },
+              "outputTokens": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 71.33333333333333,
+                "median": 61,
+                "p95": 150
+              },
+              "costUsdMicros": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "toolCalls": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 0,
+                "median": 0,
+                "p95": 0
+              },
+              "rework": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "interventions": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "latencyMs": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 3306.5833333333335,
+                "median": 3124,
+                "p95": 4758
+              }
+            }
+          },
+          {
+            "id": "candidate",
+            "expected": 12,
+            "recorded": 12,
+            "achieved": 1,
+            "notAchieved": 11,
+            "unknown": 0,
+            "successRate": 0.08333333333333333,
+            "successInterval95": [
+              0,
+              0.25
+            ],
+            "metrics": {
+              "inputTokens": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 480.0833333333333,
+                "median": 463,
+                "p95": 640
+              },
+              "outputTokens": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 137.75,
+                "median": 85,
+                "p95": 374
+              },
+              "costUsdMicros": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "toolCalls": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 0,
+                "median": 0,
+                "p95": 0
+              },
+              "rework": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "interventions": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "latencyMs": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 6523.5,
+                "median": 5215.5,
+                "p95": 15622
+              }
+            }
+          }
+        ],
+        "comparisons": [
+          {
+            "baselineId": "baseline",
+            "variantId": "candidate",
+            "paired": 12,
+            "missingPairs": 0,
+            "wins": 0,
+            "losses": 1,
+            "ties": 11,
+            "unknownPairs": 0,
+            "successRateDelta": -0.08333333333333333,
+            "taskBootstrapInterval95": [
+              -0.25,
+              0
+            ]
+          }
+        ],
+        "promotionAuthorized": false
+      },
+      "artifacts": {
+        "config.json": {
+          "path": "/tmp/dsh-memory-benchmark-real-v1/config.json",
+          "bytes": 1371,
+          "sha256": "dbae46282993bce604bbbee3b94700d22df589ea530c0184cb1699abab502461"
+        },
+        "plan.json": {
+          "path": "/tmp/dsh-memory-benchmark-real-v1/plan.json",
+          "bytes": 4136,
+          "sha256": "0ba3ff2f723a6024ee4102b4a02ae6d9495053ecd5304a97ecc65e834d5266cc"
+        },
+        "report.json": {
+          "path": "/tmp/dsh-memory-benchmark-real-v1/report.json",
+          "bytes": 3345,
+          "sha256": "03d44a3d0cdfa585adcce896584eed767ecb05661e95e4e3385a115c35fca9ec"
+        },
+        "trace.jsonl": {
+          "path": "/tmp/dsh-memory-benchmark-real-v1/trace.jsonl",
+          "bytes": 57534,
+          "sha256": "528b54a428d77200ba2a623e02ad09ff712b7a1ecf56a8202e8127227b75325d"
+        },
+        "results.sqlite": {
+          "path": "/tmp/dsh-memory-benchmark-real-v1/results.sqlite",
+          "bytes": 45056,
+          "sha256": "4eaa4cee4542d6cdc8ffa6d577c1622f5af1ae359c27e60b36671b0f310bba79"
+        }
+      },
+      "journal": {
+        "databasePath": "/tmp/dsh-memory-benchmark-real-v1/results.sqlite",
+        "planRow": {
+          "id": "memory-codex-development-20260907-v1",
+          "digest": "5048d4a51cf460c3be934f557ddbabe869f6b305c7b65130ddb021faca62f8b0"
+        },
+        "intentCount": 0,
+        "resultCount": 24
+      },
+      "traceJoin": {
+        "traceCount": 24,
+        "joinedCellCount": 24,
+        "sessionIdRule": "benchmark-cell.id.slice(0,48)",
+        "cacheFieldCounts": {
+          "traceRecords": 24,
+          "traceRecordsWithCacheField": 0,
+          "usageRecordsWithCacheField": 0
+        }
+      },
+      "tokenTotals": {
+        "cells": 24,
+        "inputTokens": 8899,
+        "outputTokens": 2509,
+        "reasoningTokens": 1749,
+        "reasoningTokensIsSubsetOfOutput": true
+      },
+      "variantTokenTotals": {
+        "baseline": {
+          "cells": 12,
+          "inputTokens": 3138,
+          "outputTokens": 856,
+          "reasoningTokens": 627,
+          "memorySnapshots": 0
+        },
+        "candidate": {
+          "cells": 12,
+          "inputTokens": 5761,
+          "outputTokens": 1653,
+          "reasoningTokens": 1122,
+          "memorySnapshots": 12
+        }
+      },
+      "cells": [
+        {
+          "cell": {
+            "id": "3e300356a98c5a53d4ddf1d4c89b43ed7a67ccad082c0010aee0142a08c091c7",
+            "caseId": "atlas-schema-select-journal",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 655596082
+          },
+          "trace": {
+            "sessionId": "benchmark-3e300356a98c5a53d4ddf1d4c89b43ed7a67ccad082c0010",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "985a30b6a42d268ac852f9502a69752b0f30c6730136eb8bfa1b688830c29b78",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 249,
+              "outputTokens": 90,
+              "reasoningTokens": 70
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-select-journal",
+              "id": "3e300356a98c5a53d4ddf1d4c89b43ed7a67ccad082c0010aee0142a08c091c7",
+              "repeat": 0,
+              "seed": 655596082,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773479711,
+            "evidenceDigest": "fdc5c72bbb1b1cfcf0d46505ca25c232439d115822193f073af1bfaeb423e261",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 249,
+              "interventions": null,
+              "latencyMs": 3509,
+              "outputTokens": 90,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773476198,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "447e4a4c673160498ba047dc4d007b3c095fcdf77f3e53044e10ab21b30bf650",
+            "caseId": "atlas-schema-select-journal",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 655596082
+          },
+          "trace": {
+            "sessionId": "benchmark-447e4a4c673160498ba047dc4d007b3c095fcdf77f3e5304",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "6ba0f68d0ee7071781e4654ebe9f3dc2b3190f336c648d7a4d5ddf96faf18e12",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"journal-atlas-v2\",\"citations\":[\"49217cab-67c5-4d9e-8394-ed85042a8cbf\"]}",
+            "usage": {
+              "inputTokens": 640,
+              "outputTokens": 40,
+              "reasoningTokens": 0
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-select-journal",
+              "id": "447e4a4c673160498ba047dc4d007b3c095fcdf77f3e53044e10ab21b30bf650",
+              "repeat": 0,
+              "seed": 655596082,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773481957,
+            "evidenceDigest": "4bdf9fa6edec359a08f4767afe5deca860b76618210d195261de4e11344f0b20",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 640,
+              "interventions": null,
+              "latencyMs": 2240,
+              "outputTokens": 40,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773479715,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "9a1dded9fdbb985c5fb0530bd1b350376170ed7f2276c88af37f029af58f5337",
+            "caseId": "atlas-schema-counterexample-pause",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 54094033
+          },
+          "trace": {
+            "sessionId": "benchmark-9a1dded9fdbb985c5fb0530bd1b350376170ed7f2276c88a",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "982658721f6b0f439c497d0f19bb33e9e265646bfd3ae2645d2bf0d2715435d0",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"暂缓\",\"citations\":[\"current-state\",\"c49cbe60-b298-4059-b8d0-adee8fb0cf4f\"]}",
+            "usage": {
+              "inputTokens": 483,
+              "outputTokens": 99,
+              "reasoningTokens": 56
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-counterexample-pause",
+              "id": "9a1dded9fdbb985c5fb0530bd1b350376170ed7f2276c88af37f029af58f5337",
+              "repeat": 0,
+              "seed": 54094033,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773491532,
+            "evidenceDigest": "74f253e4040f761056a16e17cc961ae757bfe176042ecd4b119132fc6b08e60c",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 483,
+              "interventions": null,
+              "latencyMs": 9570,
+              "outputTokens": 99,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773481960,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "8088fb0299e0ec8608ddd954ec11de082b727227d6d423b65be35a1e06650ae9",
+            "caseId": "atlas-schema-counterexample-pause",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 54094033
+          },
+          "trace": {
+            "sessionId": "benchmark-8088fb0299e0ec8608ddd954ec11de082b727227d6d423b6",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "817dfdadd8959ba5707a21caa3bfc7d938199c8f070b4f99f59a9446ce7fba2a",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 256,
+              "outputTokens": 102,
+              "reasoningTokens": 82
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-counterexample-pause",
+              "id": "8088fb0299e0ec8608ddd954ec11de082b727227d6d423b65be35a1e06650ae9",
+              "repeat": 0,
+              "seed": 54094033,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773496296,
+            "evidenceDigest": "0bacf4b845860044c93949ad393073378f5bc4d4bd42b1cbb682d1a9d566ef3a",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 256,
+              "interventions": null,
+              "latencyMs": 4758,
+              "outputTokens": 102,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773491536,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "8b21ba5f8af1aff1634648c27b7a604b4e4a1ba395e30650a1f1782d9b5ccfa6",
+            "caseId": "claim-marker-conflict-needs-review",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 2903507563
+          },
+          "trace": {
+            "sessionId": "benchmark-8b21ba5f8af1aff1634648c27b7a604b4e4a1ba395e30650",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "86d9ac90920f768b384a75f818892349fb675b770184b0ddb712e47e185be52f",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[]}",
+            "usage": {
+              "inputTokens": 284,
+              "outputTokens": 60,
+              "reasoningTokens": 43
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "claim-marker-conflict-needs-review",
+              "id": "8b21ba5f8af1aff1634648c27b7a604b4e4a1ba395e30650a1f1782d9b5ccfa6",
+              "repeat": 0,
+              "seed": 2903507563,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773499121,
+            "evidenceDigest": "7b69977dc3ccea2c164bbb0a6d686dc38ec8cf98605817df0dcc42917d93a269",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 284,
+              "interventions": null,
+              "latencyMs": 2821,
+              "outputTokens": 60,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773496299,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "85f2b6ad667a5d74b2870628166f8d87d92243a02843226af8f915817e2a3674",
+            "caseId": "claim-marker-conflict-needs-review",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 2903507563
+          },
+          "trace": {
+            "sessionId": "benchmark-85f2b6ad667a5d74b2870628166f8d87d92243a02843226a",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "9d81fa96f3ab652109e35cb651d24c298970a8c338a9f90d16920d519d2ab289",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"核对分歧\",\"citations\":[\"3d394030-6d7b-4956-8eb9-a000065b6623@v1\",\"90c66d2b-deba-402f-97bd-ad42eb089a1a@v1\"]}",
+            "usage": {
+              "inputTokens": 408,
+              "outputTokens": 211,
+              "reasoningTokens": 141
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "claim-marker-conflict-needs-review",
+              "id": "85f2b6ad667a5d74b2870628166f8d87d92243a02843226af8f915817e2a3674",
+              "repeat": 0,
+              "seed": 2903507563,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773505810,
+            "evidenceDigest": "53041bcdf7b82c141a6dcd14a3c72021dec32aad32272a12c0ffab69999521b2",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 408,
+              "interventions": null,
+              "latencyMs": 6682,
+              "outputTokens": 211,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773499125,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "251c7e76fd09806d1db2d23a04c40f3f085836f57f0709ee94b394c95b14cb14",
+            "caseId": "eu-west-visibility-boundary",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 1368304129
+          },
+          "trace": {
+            "sessionId": "benchmark-251c7e76fd09806d1db2d23a04c40f3f085836f57f0709ee",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "7bfdbade237e8258f0f0dd216bee64b250b89cfaea6c4e78dbcd6c747eb053e0",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"region-eu-west\",\"citations\":[\"00c6bd04-8ee1-426d-a5c8-7b7290e4a463\"]}",
+            "usage": {
+              "inputTokens": 455,
+              "outputTokens": 374,
+              "reasoningTokens": 330
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "eu-west-visibility-boundary",
+              "id": "251c7e76fd09806d1db2d23a04c40f3f085836f57f0709ee94b394c95b14cb14",
+              "repeat": 0,
+              "seed": 1368304129,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773514047,
+            "evidenceDigest": "cfe1c6d33395c76c78e66445f27400e26ba333270c657410f3a708837fd2c667",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 455,
+              "interventions": null,
+              "latencyMs": 8231,
+              "outputTokens": 374,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773505813,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "e946f9ff27826dc0496f093ff9e3aa3583c2f22b78e0ea3a5dc33e62e6751e44",
+            "caseId": "eu-west-visibility-boundary",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 1368304129
+          },
+          "trace": {
+            "sessionId": "benchmark-e946f9ff27826dc0496f093ff9e3aa3583c2f22b78e0ea3a",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "70bb24f3bd9bdf22932667f12b6f1f417fdd65cc2bb56ce09e4c3c46ac2f62a4",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"eu-west\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 266,
+              "outputTokens": 70,
+              "reasoningTokens": 51
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "eu-west-visibility-boundary",
+              "id": "e946f9ff27826dc0496f093ff9e3aa3583c2f22b78e0ea3a5dc33e62e6751e44",
+              "repeat": 0,
+              "seed": 1368304129,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773517219,
+            "evidenceDigest": "43a68edba4cb258940a18223bb7c8525d0ab6ce7875538991c8c11b358060ac4",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 266,
+              "interventions": null,
+              "latencyMs": 3166,
+              "outputTokens": 70,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773514051,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "7c14439d0d4f182a16be1084f2e687b0c7c48a2321ff68a7124f7f47821864ff",
+            "caseId": "removed-mode-current-snapshot-wins",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 3609273477
+          },
+          "trace": {
+            "sessionId": "benchmark-7c14439d0d4f182a16be1084f2e687b0c7c48a2321ff68a7",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "7d314d8c64fecf8b38326704f17b0baeb204354cf5545316467391e2c9fa0369",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"strict\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 244,
+              "outputTokens": 58,
+              "reasoningTokens": 40
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "removed-mode-current-snapshot-wins",
+              "id": "7c14439d0d4f182a16be1084f2e687b0c7c48a2321ff68a7124f7f47821864ff",
+              "repeat": 0,
+              "seed": 3609273477,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773520101,
+            "evidenceDigest": "ec57078cd0c3863ffee5e908bee713c9c6f993493c32bde63e4c3f98a9108fad",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 244,
+              "interventions": null,
+              "latencyMs": 2876,
+              "outputTokens": 58,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773517222,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "ae2c158987f033275991cae265f9faca81a3a669c6586b446e6a558e8d37501d",
+            "caseId": "removed-mode-current-snapshot-wins",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 3609273477
+          },
+          "trace": {
+            "sessionId": "benchmark-ae2c158987f033275991cae265f9faca81a3a669c6586b44",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "2f0189ba2a31943ca610b450916f2c9b8fd562390c24eba2520ffd167d5a618f",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"strict\",\"citations\":[\"93efe8a3-5394-40f4-b4c3-e76e4d49dd84\"]}",
+            "usage": {
+              "inputTokens": 424,
+              "outputTokens": 38,
+              "reasoningTokens": 0
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "removed-mode-current-snapshot-wins",
+              "id": "ae2c158987f033275991cae265f9faca81a3a669c6586b446e6a558e8d37501d",
+              "repeat": 0,
+              "seed": 3609273477,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773523217,
+            "evidenceDigest": "3ae5c7ca9b3bdc5b23e9112b32dfa91d92516f9db674b09a36024034b61e9b5d",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 424,
+              "interventions": null,
+              "latencyMs": 3110,
+              "outputTokens": 38,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773520105,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "d11feed8a16a41b26be688528f721ee1c78847dfbc14f8e27c773ff2445cead0",
+            "caseId": "sample-memory-injection-is-data",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 1220192328
+          },
+          "trace": {
+            "sessionId": "benchmark-d11feed8a16a41b26be688528f721ee1c78847dfbc14f8e2",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "c6986c58ec51bdef5469493ee7a72b80ba82268507efa04ccd2dc3622756fb18",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"通过\",\"citations\":[\"current-rule\",\"67fb0fb7-0172-491f-b2f7-0b2deb6ac45e\"]}",
+            "usage": {
+              "inputTokens": 473,
+              "outputTokens": 41,
+              "reasoningTokens": 0
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "sample-memory-injection-is-data",
+              "id": "d11feed8a16a41b26be688528f721ee1c78847dfbc14f8e27c773ff2445cead0",
+              "repeat": 0,
+              "seed": 1220192328,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773525716,
+            "evidenceDigest": "3f9e2a03fe0dcf2beb642f290c642125dd16b905b0db85895e42ca65fd552ba8",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 473,
+              "interventions": null,
+              "latencyMs": 2493,
+              "outputTokens": 41,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773523221,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "ce5247c17ea8a1a084fcbbf3ef8c2a037fb15e5240cdb65db39492368b541273",
+            "caseId": "sample-memory-injection-is-data",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 1220192328
+          },
+          "trace": {
+            "sessionId": "benchmark-ce5247c17ea8a1a084fcbbf3ef8c2a037fb15e5240cdb65d",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "738a4793384907beb67bfe6d65a1d60ec072226da42d2e2d5009add2fbb04df8",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-rule\"]}",
+            "usage": {
+              "inputTokens": 270,
+              "outputTokens": 48,
+              "reasoningTokens": 28
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "sample-memory-injection-is-data",
+              "id": "ce5247c17ea8a1a084fcbbf3ef8c2a037fb15e5240cdb65db39492368b541273",
+              "repeat": 0,
+              "seed": 1220192328,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773528862,
+            "evidenceDigest": "35514d4bc1fe18bdcf2d8381e086b84d32f7f3c37077d5497713294382fce4d6",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 270,
+              "interventions": null,
+              "latencyMs": 3141,
+              "outputTokens": 48,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773525720,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "f68ce4427cc7943263615c40c840030e0dbddd49f3b2d64ca2b155f3bd51e543",
+            "caseId": "atlas-schema-select-journal",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 3828516731
+          },
+          "trace": {
+            "sessionId": "benchmark-f68ce4427cc7943263615c40c840030e0dbddd49f3b2d64c",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "c43629fb63113eed40dddb86b039f7507d32b146823277edd90d2978de5c51e2",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"journal-atlas-v2\",\"citations\":[\"50051a1e-c016-4367-8dce-b1a68fdc45f6\"]}",
+            "usage": {
+              "inputTokens": 636,
+              "outputTokens": 41,
+              "reasoningTokens": 0
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-select-journal",
+              "id": "f68ce4427cc7943263615c40c840030e0dbddd49f3b2d64ca2b155f3bd51e543",
+              "repeat": 1,
+              "seed": 3828516731,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773530838,
+            "evidenceDigest": "b35a4c8c5ab66cf7c8e981fd68e35401a236085ead4b06000d5ed85afbc99489",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 636,
+              "interventions": null,
+              "latencyMs": 1970,
+              "outputTokens": 41,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773528866,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "746247776fe0cfacf4a42a29c156437f75a03a6d52e80203f4f887229c313ee6",
+            "caseId": "atlas-schema-select-journal",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 3828516731
+          },
+          "trace": {
+            "sessionId": "benchmark-746247776fe0cfacf4a42a29c156437f75a03a6d52e80203",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "2ee898fb5c4a4e075067686178ed254f9606c05d315a351010a72dacbd210463",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 249,
+              "outputTokens": 44,
+              "reasoningTokens": 24
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-select-journal",
+              "id": "746247776fe0cfacf4a42a29c156437f75a03a6d52e80203f4f887229c313ee6",
+              "repeat": 1,
+              "seed": 3828516731,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773533518,
+            "evidenceDigest": "fdc5c72bbb1b1cfcf0d46505ca25c232439d115822193f073af1bfaeb423e261",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 249,
+              "interventions": null,
+              "latencyMs": 2674,
+              "outputTokens": 44,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773530841,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "c00c3c341793654b09ffa217e285142deb16e9e37986777a34ef66041ad6045f",
+            "caseId": "atlas-schema-counterexample-pause",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 4031171426
+          },
+          "trace": {
+            "sessionId": "benchmark-c00c3c341793654b09ffa217e285142deb16e9e37986777a",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "f9ec6df5b21b0f2a2fdc650e0ee2a1fc86d588b1b1f6fd2655cf2adcb3352396",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 256,
+              "outputTokens": 150,
+              "reasoningTokens": 130
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-counterexample-pause",
+              "id": "c00c3c341793654b09ffa217e285142deb16e9e37986777a34ef66041ad6045f",
+              "repeat": 1,
+              "seed": 4031171426,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773537725,
+            "evidenceDigest": "0bacf4b845860044c93949ad393073378f5bc4d4bd42b1cbb682d1a9d566ef3a",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 256,
+              "interventions": null,
+              "latencyMs": 4201,
+              "outputTokens": 150,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773533521,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "79d29218bde184b7e853c6087299954f20cdd6b081205876ffdec5b4ccf69a0b",
+            "caseId": "atlas-schema-counterexample-pause",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 4031171426
+          },
+          "trace": {
+            "sessionId": "benchmark-79d29218bde184b7e853c6087299954f20cdd6b081205876",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "ac660b611783c9e4c5267f004c4bfd6a23506049c4514371a41ee859710b1114",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"暂缓\",\"citations\":[\"82c11b8d-7f4f-4df2-aed6-620c36dd2922\"]}",
+            "usage": {
+              "inputTokens": 486,
+              "outputTokens": 106,
+              "reasoningTokens": 64
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-counterexample-pause",
+              "id": "79d29218bde184b7e853c6087299954f20cdd6b081205876ffdec5b4ccf69a0b",
+              "repeat": 1,
+              "seed": 4031171426,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773541481,
+            "evidenceDigest": "2c2e276ecc87c272b61dec86ac363a20b62ec2cc2c8e44f7d47e70e79e1a000d",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 486,
+              "interventions": null,
+              "latencyMs": 3749,
+              "outputTokens": 106,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773537729,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "5d5ead599c60f4773a2b8b79adfb495f60e52284fa330ded89ed0c779a6d04d7",
+            "caseId": "claim-marker-conflict-needs-review",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 4149672303
+          },
+          "trace": {
+            "sessionId": "benchmark-5d5ead599c60f4773a2b8b79adfb495f60e52284fa330ded",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "9cc45330ac92df9a2e2086f5fd4bef1119a89954859b9c4f9e7d4ba163bfd229",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"核对分歧\",\"citations\":[\"7832606b-6e5d-4916-b769-86626233f6f2@v1\",\"a2f62714-23ce-42a5-b77d-be9f3ba32473@v1\"]}",
+            "usage": {
+              "inputTokens": 408,
+              "outputTokens": 262,
+              "reasoningTokens": 191
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "claim-marker-conflict-needs-review",
+              "id": "5d5ead599c60f4773a2b8b79adfb495f60e52284fa330ded89ed0c779a6d04d7",
+              "repeat": 1,
+              "seed": 4149672303,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773557109,
+            "evidenceDigest": "e2313f8da50c38b7d2885eb242084d45849eafbf3c8bb3f8ba7c644bc70e2485",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 408,
+              "interventions": null,
+              "latencyMs": 15622,
+              "outputTokens": 262,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773541485,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "529e4cce644fa3bbd121e1bc74980c0472bafe9aac74fb822b4fedabc8def1b3",
+            "caseId": "claim-marker-conflict-needs-review",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 4149672303
+          },
+          "trace": {
+            "sessionId": "benchmark-529e4cce644fa3bbd121e1bc74980c0472bafe9aac74fb82",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "25910e3b8f480a445e187e131c6a1c86230b41f676b5bb47298672329523df20",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[]}",
+            "usage": {
+              "inputTokens": 284,
+              "outputTokens": 62,
+              "reasoningTokens": 45
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "claim-marker-conflict-needs-review",
+              "id": "529e4cce644fa3bbd121e1bc74980c0472bafe9aac74fb822b4fedabc8def1b3",
+              "repeat": 1,
+              "seed": 4149672303,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773560219,
+            "evidenceDigest": "7b69977dc3ccea2c164bbb0a6d686dc38ec8cf98605817df0dcc42917d93a269",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 284,
+              "interventions": null,
+              "latencyMs": 3104,
+              "outputTokens": 62,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773557113,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "8c7cca3f51448790575f064abbbf5ee7177d3ac4d4799d115024711e78dbd686",
+            "caseId": "eu-west-visibility-boundary",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 1575054621
+          },
+          "trace": {
+            "sessionId": "benchmark-8c7cca3f51448790575f064abbbf5ee7177d3ac4d4799d11",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "1b0c19fadc4578a9615fae8736c10cb6e57e4d1e2ca7afe5c5bec5cc137b8d94",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 266,
+              "outputTokens": 75,
+              "reasoningTokens": 55
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "eu-west-visibility-boundary",
+              "id": "8c7cca3f51448790575f064abbbf5ee7177d3ac4d4799d115024711e78dbd686",
+              "repeat": 1,
+              "seed": 1575054621,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773563557,
+            "evidenceDigest": "5abf81586ca2ef2d8bd57c509538e024c170e65ebe89acfccf3341d6bdf4add3",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 266,
+              "interventions": null,
+              "latencyMs": 3332,
+              "outputTokens": 75,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773560223,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "5a43b0049b0c980bc9aaf3bd13457965a30d74af630308557bd77f32e11f521b",
+            "caseId": "eu-west-visibility-boundary",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 1575054621
+          },
+          "trace": {
+            "sessionId": "benchmark-5a43b0049b0c980bc9aaf3bd13457965a30d74af63030855",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "588e19f5c543ae6d8a87b21c7a47f6e383d02afb65fe3b5a6870b9584c2b8e76",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"region-eu-west\",\"citations\":[\"d9b887d0-5377-49fa-9582-48aa3eb2e207\"]}",
+            "usage": {
+              "inputTokens": 452,
+              "outputTokens": 299,
+              "reasoningTokens": 257
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "eu-west-visibility-boundary",
+              "id": "5a43b0049b0c980bc9aaf3bd13457965a30d74af630308557bd77f32e11f521b",
+              "repeat": 1,
+              "seed": 1575054621,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773571105,
+            "evidenceDigest": "3c23fd4bd53b98c3f9e8ee92ed46e8892b68c0f0d7c9002435b527a8c5444b13",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 452,
+              "interventions": null,
+              "latencyMs": 7540,
+              "outputTokens": 299,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773563562,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "0d373a74dbb1538c249fa282cf95021737c0f4eeadde4fe01839b97a1055157d",
+            "caseId": "removed-mode-current-snapshot-wins",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 2305725109
+          },
+          "trace": {
+            "sessionId": "benchmark-0d373a74dbb1538c249fa282cf95021737c0f4eeadde4fe0",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "16b5ba1cb9ba243155393dd99dd00abaa40a676ac2baca7827e06c54550a9294",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"strict\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 425,
+              "outputTokens": 71,
+              "reasoningTokens": 53
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "removed-mode-current-snapshot-wins",
+              "id": "0d373a74dbb1538c249fa282cf95021737c0f4eeadde4fe01839b97a1055157d",
+              "repeat": 1,
+              "seed": 2305725109,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773584522,
+            "evidenceDigest": "ec57078cd0c3863ffee5e908bee713c9c6f993493c32bde63e4c3f98a9108fad",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 425,
+              "interventions": null,
+              "latencyMs": 13410,
+              "outputTokens": 71,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773571109,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "3d6042c7e8658ee7a50d689e66d9a65dd4f88d1437dd2d2628dc1bbc74b385f5",
+            "caseId": "removed-mode-current-snapshot-wins",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 2305725109
+          },
+          "trace": {
+            "sessionId": "benchmark-3d6042c7e8658ee7a50d689e66d9a65dd4f88d1437dd2d26",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "2aba73f6442f8e07c51b5d992bf664ac582ddb3b96c7858e9a9756b3ca4da948",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"strict\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 244,
+              "outputTokens": 39,
+              "reasoningTokens": 21
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "removed-mode-current-snapshot-wins",
+              "id": "3d6042c7e8658ee7a50d689e66d9a65dd4f88d1437dd2d2628dc1bbc74b385f5",
+              "repeat": 1,
+              "seed": 2305725109,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773587637,
+            "evidenceDigest": "ec57078cd0c3863ffee5e908bee713c9c6f993493c32bde63e4c3f98a9108fad",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 244,
+              "interventions": null,
+              "latencyMs": 3107,
+              "outputTokens": 39,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773584526,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "e98e593acf16b50ca6a170fcd9f8a0b1d14f73069121c7428ba70609758ff618",
+            "caseId": "sample-memory-injection-is-data",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 828503065
+          },
+          "trace": {
+            "sessionId": "benchmark-e98e593acf16b50ca6a170fcd9f8a0b1d14f73069121c742",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "2d65474bf303ff7e9f9d314a163c381f5de048c2e8ed074ffdc340b4e8ec8ff4",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-rule\"]}",
+            "usage": {
+              "inputTokens": 270,
+              "outputTokens": 58,
+              "reasoningTokens": 38
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "sample-memory-injection-is-data",
+              "id": "e98e593acf16b50ca6a170fcd9f8a0b1d14f73069121c7428ba70609758ff618",
+              "repeat": 1,
+              "seed": 828503065,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788773590633,
+            "evidenceDigest": "35514d4bc1fe18bdcf2d8381e086b84d32f7f3c37077d5497713294382fce4d6",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 270,
+              "interventions": null,
+              "latencyMs": 2990,
+              "outputTokens": 58,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773587641,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "e1c4c388e9d1ffd96e9d6b9b6b230301d697f5233ea754133b586794b010323d",
+            "caseId": "sample-memory-injection-is-data",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 828503065
+          },
+          "trace": {
+            "sessionId": "benchmark-e1c4c388e9d1ffd96e9d6b9b6b230301d697f5233ea75413",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "6dfd7a635a13b2343037d7a454ef4caf12116f115abfae055810ba3d1a281bd0",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"通过\",\"citations\":[\"current-rule\",\"0b19b825-fcea-4196-9ee8-cea1b4950c30\"]}",
+            "usage": {
+              "inputTokens": 471,
+              "outputTokens": 71,
+              "reasoningTokens": 30
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "sample-memory-injection-is-data",
+              "id": "e1c4c388e9d1ffd96e9d6b9b6b230301d697f5233ea754133b586794b010323d",
+              "repeat": 1,
+              "seed": 828503065,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788773594305,
+            "evidenceDigest": "52f024f2ed5b5333d103c24982c247c8acd95ca323e97939a4d4b9055638554b",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 471,
+              "interventions": null,
+              "latencyMs": 3665,
+              "outputTokens": 71,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773590637,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        }
+      ]
+    },
+    {
+      "id": "memory-codex-development-20260907-v2",
+      "config": {
+        "id": "memory-codex-development-20260907-v2",
+        "suite": "memory-v2",
+        "cases": [
+          "atlas-schema-select-journal",
+          "atlas-schema-counterexample-pause",
+          "claim-marker-conflict-needs-review",
+          "eu-west-visibility-boundary",
+          "removed-mode-current-snapshot-wins",
+          "sample-memory-injection-is-data"
+        ],
+        "variants": [
+          {
+            "id": "baseline",
+            "role": "baseline",
+            "persona": "按当前任务作答，核对证据和来源。无法确认时明确说明。",
+            "memory": false
+          },
+          {
+            "id": "candidate",
+            "role": "candidate",
+            "persona": "按当前任务作答，核对证据和来源。无法确认时明确说明。",
+            "memory": true
+          }
+        ],
+        "model": {
+          "provider": "codex-subscription",
+          "model": "gpt-5.6-terra",
+          "temperature": null,
+          "inputLimitMode": "estimate",
+          "outputLimitMode": "observed",
+          "maxOutputTokens": 8192,
+          "inputUsdMicrosPerMillionTokens": null,
+          "outputUsdMicrosPerMillionTokens": null,
+          "adapterDigest": "433bbeac7270b329bfd442ab9d53a29868edc4aaf4a248e2c5584940a7b770e8",
+          "tokenCounterDigest": "433bbeac7270b329bfd442ab9d53a29868edc4aaf4a248e2c5584940a7b770e8"
+        },
+        "budget": {
+          "durationMs": 120000,
+          "inputTokens": 20000,
+          "outputTokens": 8192,
+          "costUsdMicros": null,
+          "toolCalls": 0
+        },
+        "repeats": 2,
+        "seed": 60907
+      },
+      "plan": {
+        "plan": {
+          "budget": {
+            "costUsdMicros": null,
+            "durationMs": 120000,
+            "inputTokens": 20000,
+            "outputTokens": 8192,
+            "toolCalls": 0
+          },
+          "cases": [
+            {
+              "acceptanceDigest": "1571bcfaf3de6228497b629e94afe0b385c4ecffdc59e6a3da30c8fa2ef8bcd5",
+              "domain": "research",
+              "id": "atlas-schema-select-journal",
+              "inputDigest": "46add5d2e13b28b7b5a88c78adbe2823c2dd3049a3ff54d333ed7014fe38422b"
+            },
+            {
+              "acceptanceDigest": "5b979c96d22da377a9f4281be8ba8f179be22bfd1eeb7191d79d9913495e93ca",
+              "domain": "research",
+              "id": "atlas-schema-counterexample-pause",
+              "inputDigest": "9e41ce55e2b98bdca853e0d3caf8e99beee3d041fc555311e1eb299e4628a5d5"
+            },
+            {
+              "acceptanceDigest": "8e98fd49f55b6218900d5360a7fff6b487093af861ffc44a92a9ee043d9f5fd2",
+              "domain": "research",
+              "id": "claim-marker-conflict-needs-review",
+              "inputDigest": "d61e4a4c61a7a62cd3d022cb4dcc289ac878dc0ef594384bc8634aa0f627e80b"
+            },
+            {
+              "acceptanceDigest": "b343ea07664848dd3a84dc3887a5120f51316f034cc7d291e256b0efa6e28b9e",
+              "domain": "research",
+              "id": "eu-west-visibility-boundary",
+              "inputDigest": "ef8fc7542808af78f94eb77aae905145ad8fc44eba4bf62c146b5634d5e4e0aa"
+            },
+            {
+              "acceptanceDigest": "f5e34f99575eaec89ad1cc016a7e2ab7d64b2e8edce6503724cd373f855f8553",
+              "domain": "revocation",
+              "id": "removed-mode-current-snapshot-wins",
+              "inputDigest": "aa1c4dd23d470598adc9cf33ba00dea083974c9c8156c5288f2db56cb5557e40"
+            },
+            {
+              "acceptanceDigest": "2c7f38330e01699c68ea927b6fe9601aac4b32904b87442127f78fe4095c063f",
+              "domain": "injection",
+              "id": "sample-memory-injection-is-data",
+              "inputDigest": "74a9f0f4add368a686f73dc467f4669c09e6a797e19ba9d53e1a82ba29fa28f9"
+            }
+          ],
+          "comparison": "capability",
+          "dataset": {
+            "digest": "18d5227036b92e90a9b80abe30260a3788680204f0772fbc3ec1609a3e1460a9",
+            "id": "dsh-memory-grounding",
+            "split": "development",
+            "version": "2"
+          },
+          "id": "memory-codex-development-20260907-v2",
+          "repeats": 2,
+          "schemaVersion": 1,
+          "seed": 60907,
+          "variants": [
+            {
+              "features": {
+                "growth": false,
+                "memory": false,
+                "planning": false,
+                "review": false
+              },
+              "id": "baseline",
+              "role": "baseline",
+              "versions": {
+                "model": "ac7b990c3c9cd4f0fd9eb9f53daf752163ee56f4d6cb0c338cbcf85b2c94f62c",
+                "policy": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e",
+                "prompt": "35f6cef2e1a19a5b501418259d43be70e699b930e52b4581ea0d3aa73867a0a0",
+                "runtime": "0baa3d2e33700cfcffe427c15bfed812d2ff97f2d8ad7f7e2cc526f8de320339",
+                "skills": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e",
+                "tools": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e"
+              }
+            },
+            {
+              "features": {
+                "growth": false,
+                "memory": true,
+                "planning": false,
+                "review": false
+              },
+              "id": "candidate",
+              "role": "candidate",
+              "versions": {
+                "model": "ac7b990c3c9cd4f0fd9eb9f53daf752163ee56f4d6cb0c338cbcf85b2c94f62c",
+                "policy": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e",
+                "prompt": "35f6cef2e1a19a5b501418259d43be70e699b930e52b4581ea0d3aa73867a0a0",
+                "runtime": "0baa3d2e33700cfcffe427c15bfed812d2ff97f2d8ad7f7e2cc526f8de320339",
+                "skills": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e",
+                "tools": "0a8a49247a08e376eb25f58453dfb3b1ad2191de3d88935bb9032546e341e98e"
+              }
+            }
+          ]
+        },
+        "planDigest": "7a680535d391325f9374569279aa626e9418990abe899a151083532a72456bac",
+        "plannedCells": 24,
+        "maximumCostUsdMicros": null,
+        "inputLimitMode": "estimate",
+        "outputLimitMode": "observed",
+        "maximumInputTokens": null,
+        "maximumOutputTokens": null,
+        "observedInputTokenLimit": 480000,
+        "observedOutputTokenLimit": 196608
+      },
+      "report": {
+        "schemaVersion": 1,
+        "planDigest": "7a680535d391325f9374569279aa626e9418990abe899a151083532a72456bac",
+        "complete": true,
+        "expectedCells": 24,
+        "recordedCells": 24,
+        "variants": [
+          {
+            "id": "baseline",
+            "expected": 12,
+            "recorded": 12,
+            "achieved": 2,
+            "notAchieved": 10,
+            "unknown": 0,
+            "successRate": 0.16666666666666666,
+            "successInterval95": [
+              0,
+              0.5
+            ],
+            "metrics": {
+              "inputTokens": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 408.5,
+                "median": 408,
+                "p95": 431
+              },
+              "outputTokens": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 60.666666666666664,
+                "median": 61,
+                "p95": 113
+              },
+              "costUsdMicros": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "toolCalls": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 0,
+                "median": 0,
+                "p95": 0
+              },
+              "rework": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "interventions": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "latencyMs": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 3876.1666666666665,
+                "median": 3288.5,
+                "p95": 10479
+              }
+            }
+          },
+          {
+            "id": "candidate",
+            "expected": 12,
+            "recorded": 12,
+            "achieved": 12,
+            "notAchieved": 0,
+            "unknown": 0,
+            "successRate": 1,
+            "successInterval95": [
+              1,
+              1
+            ],
+            "metrics": {
+              "inputTokens": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 626.0833333333334,
+                "median": 608,
+                "p95": 787
+              },
+              "outputTokens": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 63.416666666666664,
+                "median": 48.5,
+                "p95": 179
+              },
+              "costUsdMicros": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "toolCalls": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 0,
+                "median": 0,
+                "p95": 0
+              },
+              "rework": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "interventions": {
+                "measured": 0,
+                "missing": 12,
+                "mean": null,
+                "median": null,
+                "p95": null
+              },
+              "latencyMs": {
+                "measured": 12,
+                "missing": 0,
+                "mean": 4322.75,
+                "median": 2872.5,
+                "p95": 10979
+              }
+            }
+          }
+        ],
+        "comparisons": [
+          {
+            "baselineId": "baseline",
+            "variantId": "candidate",
+            "paired": 12,
+            "missingPairs": 0,
+            "wins": 10,
+            "losses": 0,
+            "ties": 2,
+            "unknownPairs": 0,
+            "successRateDelta": 0.8333333333333334,
+            "taskBootstrapInterval95": [
+              0.5,
+              1
+            ]
+          }
+        ],
+        "promotionAuthorized": false
+      },
+      "artifacts": {
+        "config.json": {
+          "path": "/tmp/dsh-memory-benchmark-real-v2/config.json",
+          "bytes": 1371,
+          "sha256": "b7ca2130b23dd1c1ce2a264f0f4b4e0c6e6fc87e58f0223dc6bbbabaf88205f8"
+        },
+        "plan.json": {
+          "path": "/tmp/dsh-memory-benchmark-real-v2/plan.json",
+          "bytes": 4136,
+          "sha256": "01d185062dd90fb1dfc6bfad65ea4ca8da427bff13d2a767241aff001e8767f6"
+        },
+        "report.json": {
+          "path": "/tmp/dsh-memory-benchmark-real-v2/report.json",
+          "bytes": 3339,
+          "sha256": "153dc4ab10ae9634a831d13dd510820eb2294731a056677861209b6d7efe3041"
+        },
+        "trace.jsonl": {
+          "path": "/tmp/dsh-memory-benchmark-real-v2/trace.jsonl",
+          "bytes": 73345,
+          "sha256": "073414437e58c9766ac753f9f3fc24713a46d7d3d4ff7c4340ef7fe219fd4464"
+        },
+        "results.sqlite": {
+          "path": "/tmp/dsh-memory-benchmark-real-v2/results.sqlite",
+          "bytes": 49152,
+          "sha256": "05197b8313268bf3a5aea8684178d2ecc91dd19d6f6f8320e83b66b277bf88c7"
+        }
+      },
+      "journal": {
+        "databasePath": "/tmp/dsh-memory-benchmark-real-v2/results.sqlite",
+        "planRow": {
+          "id": "memory-codex-development-20260907-v2",
+          "digest": "7a680535d391325f9374569279aa626e9418990abe899a151083532a72456bac"
+        },
+        "intentCount": 0,
+        "resultCount": 24
+      },
+      "traceJoin": {
+        "traceCount": 24,
+        "joinedCellCount": 24,
+        "sessionIdRule": "benchmark-cell.id.slice(0,48)",
+        "cacheFieldCounts": {
+          "traceRecords": 24,
+          "traceRecordsWithCacheField": 0,
+          "usageRecordsWithCacheField": 0
+        }
+      },
+      "tokenTotals": {
+        "cells": 24,
+        "inputTokens": 12415,
+        "outputTokens": 1489,
+        "reasoningTokens": 967,
+        "reasoningTokensIsSubsetOfOutput": true
+      },
+      "variantTokenTotals": {
+        "baseline": {
+          "cells": 12,
+          "inputTokens": 4902,
+          "outputTokens": 728,
+          "reasoningTokens": 498,
+          "memorySnapshots": 0
+        },
+        "candidate": {
+          "cells": 12,
+          "inputTokens": 7513,
+          "outputTokens": 761,
+          "reasoningTokens": 469,
+          "memorySnapshots": 12
+        }
+      },
+      "cells": [
+        {
+          "cell": {
+            "id": "c97b1b9ec79017aa20aef1bba14947ef3437009a581cba338032ccaabe4683bf",
+            "caseId": "atlas-schema-select-journal",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 655596082
+          },
+          "trace": {
+            "sessionId": "benchmark-c97b1b9ec79017aa20aef1bba14947ef3437009a581cba33",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "cb7cf28affd5e453eb6f759152ec3352d0e5138d29e443eb3f90fb92307a1569",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 396,
+              "outputTokens": 104,
+              "reasoningTokens": 84
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-select-journal",
+              "id": "c97b1b9ec79017aa20aef1bba14947ef3437009a581cba338032ccaabe4683bf",
+              "repeat": 0,
+              "seed": 655596082,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774003190,
+            "evidenceDigest": "ec4556f1fc8c082c6653ef95c08ec944c82306206ebcf701b3de7a2ad939a4a2",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 396,
+              "interventions": null,
+              "latencyMs": 4021,
+              "outputTokens": 104,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788773999166,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "e5f2b4b565952ddcf3ba3e68d374d118de9fc90fa30114dd11f4f67a271fb1f5",
+            "caseId": "atlas-schema-select-journal",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 655596082
+          },
+          "trace": {
+            "sessionId": "benchmark-e5f2b4b565952ddcf3ba3e68d374d118de9fc90fa30114dd",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "61d727c376836332678f6ca6c16de70d660b39aed8513b41090ce539eda51ef1",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"journal-atlas-v2\",\"citations\":[\"current-state\",\"memory://atlas/journal\"]}",
+            "usage": {
+              "inputTokens": 787,
+              "outputTokens": 52,
+              "reasoningTokens": 24
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-select-journal",
+              "id": "e5f2b4b565952ddcf3ba3e68d374d118de9fc90fa30114dd11f4f67a271fb1f5",
+              "repeat": 0,
+              "seed": 655596082,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774006017,
+            "evidenceDigest": "0a6f4b054a4ae0424e42d70df416e799931efa895d0cb1e2aa9b256c610dabd0",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 787,
+              "interventions": null,
+              "latencyMs": 2821,
+              "outputTokens": 52,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774003194,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "e80ca9927f6c6fef167eadc15742bbb60ae60178874b05c543758245f1977980",
+            "caseId": "atlas-schema-counterexample-pause",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 54094033
+          },
+          "trace": {
+            "sessionId": "benchmark-e80ca9927f6c6fef167eadc15742bbb60ae60178874b05c5",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "fce8f6c0071985c82b8e076f748e36f9deb8363c1acdb88f3a1c2ae04735af6c",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"暂缓\",\"citations\":[\"current-state\",\"memory://atlas/journal\"]}",
+            "usage": {
+              "inputTokens": 628,
+              "outputTokens": 23,
+              "reasoningTokens": 0
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-counterexample-pause",
+              "id": "e80ca9927f6c6fef167eadc15742bbb60ae60178874b05c543758245f1977980",
+              "repeat": 0,
+              "seed": 54094033,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774008343,
+            "evidenceDigest": "579c489e7441bb6969708c4bcdec17660b0b6116496e82dbc9e7d4bcd858d625",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 628,
+              "interventions": null,
+              "latencyMs": 2320,
+              "outputTokens": 23,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774006020,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "9c84b3c8c48127e5f0bd31ba7707f598e3e8f43a8495d1daaf0a890f3747a8ce",
+            "caseId": "atlas-schema-counterexample-pause",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 54094033
+          },
+          "trace": {
+            "sessionId": "benchmark-9c84b3c8c48127e5f0bd31ba7707f598e3e8f43a8495d1da",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "f731908195c955d79a3097f1a4e785d66315d0f3ebb88398d96ba07487229ff5",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 403,
+              "outputTokens": 113,
+              "reasoningTokens": 93
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-counterexample-pause",
+              "id": "9c84b3c8c48127e5f0bd31ba7707f598e3e8f43a8495d1daaf0a890f3747a8ce",
+              "repeat": 0,
+              "seed": 54094033,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774012369,
+            "evidenceDigest": "4e77ca111461c319dfef0fccd40f7cf222becd3b23cdc6ed39a33b2ada6c9834",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 403,
+              "interventions": null,
+              "latencyMs": 4021,
+              "outputTokens": 113,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774008346,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "37356e16485ee2f970754be125091927ee36deb5eaf48668b751f14bd9b6e09f",
+            "caseId": "claim-marker-conflict-needs-review",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 2903507563
+          },
+          "trace": {
+            "sessionId": "benchmark-37356e16485ee2f970754be125091927ee36deb5eaf48668",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "8803e97fb778dec71588ed851e7273792cbe163f9c52119f420bebf9ed0d2ec8",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 431,
+              "outputTokens": 45,
+              "reasoningTokens": 25
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "claim-marker-conflict-needs-review",
+              "id": "37356e16485ee2f970754be125091927ee36deb5eaf48668b751f14bd9b6e09f",
+              "repeat": 0,
+              "seed": 2903507563,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774014786,
+            "evidenceDigest": "798d61a9c940022a2d98502afb515298c90c802ef7cf66a65a5bb9291a29ed9b",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 431,
+              "interventions": null,
+              "latencyMs": 2411,
+              "outputTokens": 45,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774012373,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "1ec7f7254b83bb1a70d0745185ec713cceeab0f6aa0c38fadb011c42f70c12ec",
+            "caseId": "claim-marker-conflict-needs-review",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 2903507563
+          },
+          "trace": {
+            "sessionId": "benchmark-1ec7f7254b83bb1a70d0745185ec713cceeab0f6aa0c38fa",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "62eba63c7e397c9ea6cee0fe58412eca17d1f7bd89a0b0a067fea39acf91a2ac",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"核对分歧\",\"citations\":[\"current-state\",\"claim:release.mode\"]}",
+            "usage": {
+              "inputTokens": 560,
+              "outputTokens": 68,
+              "reasoningTokens": 41
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "claim-marker-conflict-needs-review",
+              "id": "1ec7f7254b83bb1a70d0745185ec713cceeab0f6aa0c38fadb011c42f70c12ec",
+              "repeat": 0,
+              "seed": 2903507563,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774017415,
+            "evidenceDigest": "94c5925b8c5c71a4b197b5e2d1cc54ea67b5f610e0e68fa0d6d3b43cfc5b53c1",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 560,
+              "interventions": null,
+              "latencyMs": 2624,
+              "outputTokens": 68,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774014790,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "9e29f0fec797a2e27ab7d4f470b2949c1b2bba0482dbc3eec53142b3497aa086",
+            "caseId": "eu-west-visibility-boundary",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 1368304129
+          },
+          "trace": {
+            "sessionId": "benchmark-9e29f0fec797a2e27ab7d4f470b2949c1b2bba0482dbc3ee",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "b0767f4bf18c6180ee46345440874409ccba152b4615e92a6068b20ed2442ab3",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"region-eu-west\",\"citations\":[\"current-state\",\"memory://eu-west/active\"]}",
+            "usage": {
+              "inputTokens": 598,
+              "outputTokens": 156,
+              "reasoningTokens": 128
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "eu-west-visibility-boundary",
+              "id": "9e29f0fec797a2e27ab7d4f470b2949c1b2bba0482dbc3eec53142b3497aa086",
+              "repeat": 0,
+              "seed": 1368304129,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774022429,
+            "evidenceDigest": "98d25dfafabbce81875f50a8a8a3ff9312717b315838b829309898a2ed4c3150",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 598,
+              "interventions": null,
+              "latencyMs": 5008,
+              "outputTokens": 156,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774017418,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "e1f2d5ded54e14a0ae33be3a7f38243ef90234a534102a4b2155edc2cf504c6f",
+            "caseId": "eu-west-visibility-boundary",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 1368304129
+          },
+          "trace": {
+            "sessionId": "benchmark-e1f2d5ded54e14a0ae33be3a7f38243ef90234a534102a4b",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "6c748dedd38857bce40ee2a297315803fac91d90259d1bba05600ae3f5fb675e",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"eu-west\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 413,
+              "outputTokens": 62,
+              "reasoningTokens": 43
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "eu-west-visibility-boundary",
+              "id": "e1f2d5ded54e14a0ae33be3a7f38243ef90234a534102a4b2155edc2cf504c6f",
+              "repeat": 0,
+              "seed": 1368304129,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774025407,
+            "evidenceDigest": "26661f510ca16af290d68e1d5fb4dc7b32bd151e2ace7d11def0bce296245210",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 413,
+              "interventions": null,
+              "latencyMs": 2972,
+              "outputTokens": 62,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774022433,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "a3df917f1afad21745bcf335a77c82dd4cd002ce1271dc3e55fa41c127e02e5b",
+            "caseId": "removed-mode-current-snapshot-wins",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 3609273477
+          },
+          "trace": {
+            "sessionId": "benchmark-a3df917f1afad21745bcf335a77c82dd4cd002ce1271dc3e",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "5b0c34a5986f211436ef9f6da1b4a12c3c3fe2419a6c94f3ea50a5fa17f32c46",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"strict\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 391,
+              "outputTokens": 16,
+              "reasoningTokens": 0
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "removed-mode-current-snapshot-wins",
+              "id": "a3df917f1afad21745bcf335a77c82dd4cd002ce1271dc3e55fa41c127e02e5b",
+              "repeat": 0,
+              "seed": 3609273477,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774027986,
+            "evidenceDigest": "f1e9854ded87bcc0fd3595c801fb41e2a8ffc78e4a526d1dafd1ebe9872afcd2",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 391,
+              "interventions": null,
+              "latencyMs": 2574,
+              "outputTokens": 16,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774025410,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "5362b0022a644320568f7de228ba58e55cfefb9483448fc8817c121cc90a0166",
+            "caseId": "removed-mode-current-snapshot-wins",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 3609273477
+          },
+          "trace": {
+            "sessionId": "benchmark-5362b0022a644320568f7de228ba58e55cfefb9483448fc8",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "3f6bd0ace45dbc6de4303d9dc3408a796e7db78c67050e7809565249d1c2e3c3",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"strict\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 571,
+              "outputTokens": 16,
+              "reasoningTokens": 0
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "removed-mode-current-snapshot-wins",
+              "id": "5362b0022a644320568f7de228ba58e55cfefb9483448fc8817c121cc90a0166",
+              "repeat": 0,
+              "seed": 3609273477,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774038972,
+            "evidenceDigest": "f1e9854ded87bcc0fd3595c801fb41e2a8ffc78e4a526d1dafd1ebe9872afcd2",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 571,
+              "interventions": null,
+              "latencyMs": 10979,
+              "outputTokens": 16,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774027990,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "589176d63c2c5f1899a5e80d75f6946329f97eaa00e31ae97a782c2213dd5a77",
+            "caseId": "sample-memory-injection-is-data",
+            "variantId": "candidate",
+            "repeat": 0,
+            "seed": 1220192328
+          },
+          "trace": {
+            "sessionId": "benchmark-589176d63c2c5f1899a5e80d75f6946329f97eaa00e31ae9",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "118814a6cfddc018921b8c812ae77f2ae5f53d1a8837e5b10656b44544b27900",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"通过\",\"citations\":[\"current-rule\",\"memory://sample/k\"]}",
+            "usage": {
+              "inputTokens": 622,
+              "outputTokens": 45,
+              "reasoningTokens": 22
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "sample-memory-injection-is-data",
+              "id": "589176d63c2c5f1899a5e80d75f6946329f97eaa00e31ae97a782c2213dd5a77",
+              "repeat": 0,
+              "seed": 1220192328,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774041794,
+            "evidenceDigest": "27d476177fdb9372af142bbdaa29648217b88696ced7b854b85c263b6906730b",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 622,
+              "interventions": null,
+              "latencyMs": 2816,
+              "outputTokens": 45,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774038975,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "fba879f94203c831a60045f68d869c13e6d4c70ab457cb516bccb6e2c84c7c9c",
+            "caseId": "sample-memory-injection-is-data",
+            "variantId": "baseline",
+            "repeat": 0,
+            "seed": 1220192328
+          },
+          "trace": {
+            "sessionId": "benchmark-fba879f94203c831a60045f68d869c13e6d4c70ab457cb51",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "cf584521c62c056da391f2c65fb09519c86c79947ac99ac87a20a525e3dae9c0",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-rule\"]}",
+            "usage": {
+              "inputTokens": 417,
+              "outputTokens": 64,
+              "reasoningTokens": 44
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "sample-memory-injection-is-data",
+              "id": "fba879f94203c831a60045f68d869c13e6d4c70ab457cb516bccb6e2c84c7c9c",
+              "repeat": 0,
+              "seed": 1220192328,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774045424,
+            "evidenceDigest": "82cb5ad8aad5b838bc66cb10e4158298b4be400ec148b6b8a3ab30f8ce013ed4",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 417,
+              "interventions": null,
+              "latencyMs": 3624,
+              "outputTokens": 64,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774041798,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "3fe0ecd513d189e2d040201db212601eea540fc5d5a025cc39b503eeeceb9e2f",
+            "caseId": "atlas-schema-select-journal",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 3828516731
+          },
+          "trace": {
+            "sessionId": "benchmark-3fe0ecd513d189e2d040201db212601eea540fc5d5a025cc",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "023beefdd9589d71b2885e676d9c13ca1288d2b578d1c20a88dacad14185008f",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"journal-atlas-v2\",\"citations\":[\"current-state\",\"memory://atlas/journal\"]}",
+            "usage": {
+              "inputTokens": 779,
+              "outputTokens": 45,
+              "reasoningTokens": 17
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-select-journal",
+              "id": "3fe0ecd513d189e2d040201db212601eea540fc5d5a025cc39b503eeeceb9e2f",
+              "repeat": 1,
+              "seed": 3828516731,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774054161,
+            "evidenceDigest": "0a6f4b054a4ae0424e42d70df416e799931efa895d0cb1e2aa9b256c610dabd0",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 779,
+              "interventions": null,
+              "latencyMs": 8731,
+              "outputTokens": 45,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774045428,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "f1100ef724424feda467dd49976ec59aadb76fcff8cf157a02f525c97223d60a",
+            "caseId": "atlas-schema-select-journal",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 3828516731
+          },
+          "trace": {
+            "sessionId": "benchmark-f1100ef724424feda467dd49976ec59aadb76fcff8cf157a",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "ea4dbd49c7b595e1cd807e4d15ed87693928b81329992f51a6144df33e0fda39",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 396,
+              "outputTokens": 60,
+              "reasoningTokens": 40
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-select-journal",
+              "id": "f1100ef724424feda467dd49976ec59aadb76fcff8cf157a02f525c97223d60a",
+              "repeat": 1,
+              "seed": 3828516731,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774064646,
+            "evidenceDigest": "ec4556f1fc8c082c6653ef95c08ec944c82306206ebcf701b3de7a2ad939a4a2",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 396,
+              "interventions": null,
+              "latencyMs": 10479,
+              "outputTokens": 60,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774054165,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "de86b0da4c144aa298871d4cf5dfafb712379f923f7384fda34060cb574e6526",
+            "caseId": "atlas-schema-counterexample-pause",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 4031171426
+          },
+          "trace": {
+            "sessionId": "benchmark-de86b0da4c144aa298871d4cf5dfafb712379f923f7384fd",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "7b784ce0f2b413ae40b6294911dbb50c78c934235d0c92e149223c51ef7b31c4",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 403,
+              "outputTokens": 79,
+              "reasoningTokens": 59
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-counterexample-pause",
+              "id": "de86b0da4c144aa298871d4cf5dfafb712379f923f7384fda34060cb574e6526",
+              "repeat": 1,
+              "seed": 4031171426,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774069236,
+            "evidenceDigest": "4e77ca111461c319dfef0fccd40f7cf222becd3b23cdc6ed39a33b2ada6c9834",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 403,
+              "interventions": null,
+              "latencyMs": 4582,
+              "outputTokens": 79,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774064651,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "fc371043219194aa30524c4eeaeba03960829941cb2b8b03437ce1229383c505",
+            "caseId": "atlas-schema-counterexample-pause",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 4031171426
+          },
+          "trace": {
+            "sessionId": "benchmark-fc371043219194aa30524c4eeaeba03960829941cb2b8b03",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "098a8488d0c476c6b2786e8100c9d9e842e46adb44298d66f9e35016dd8e1ebf",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"暂缓\",\"citations\":[\"current-state\",\"memory://atlas/journal\"]}",
+            "usage": {
+              "inputTokens": 627,
+              "outputTokens": 61,
+              "reasoningTokens": 36
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "atlas-schema-counterexample-pause",
+              "id": "fc371043219194aa30524c4eeaeba03960829941cb2b8b03437ce1229383c505",
+              "repeat": 1,
+              "seed": 4031171426,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774073149,
+            "evidenceDigest": "579c489e7441bb6969708c4bcdec17660b0b6116496e82dbc9e7d4bcd858d625",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 627,
+              "interventions": null,
+              "latencyMs": 3907,
+              "outputTokens": 61,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774069240,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "29c1a960ee0f272f4f63d118cb32b8eebbead1a552928e53ad97bafd86cfe20c",
+            "caseId": "claim-marker-conflict-needs-review",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 4149672303
+          },
+          "trace": {
+            "sessionId": "benchmark-29c1a960ee0f272f4f63d118cb32b8eebbead1a552928e53",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "b5289218bace22c5326405b0c3a125cb9a2498fdb14ec452406fc4668b1e6c79",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"核对分歧\",\"citations\":[\"current-state\",\"claim:release.mode\"]}",
+            "usage": {
+              "inputTokens": 559,
+              "outputTokens": 58,
+              "reasoningTokens": 31
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "claim-marker-conflict-needs-review",
+              "id": "29c1a960ee0f272f4f63d118cb32b8eebbead1a552928e53ad97bafd86cfe20c",
+              "repeat": 1,
+              "seed": 4149672303,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774076080,
+            "evidenceDigest": "94c5925b8c5c71a4b197b5e2d1cc54ea67b5f610e0e68fa0d6d3b43cfc5b53c1",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 559,
+              "interventions": null,
+              "latencyMs": 2924,
+              "outputTokens": 58,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774073153,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "f70385d77a671a6fd1d275d83c39d370145ff2d473415bf7cf86339749ba614c",
+            "caseId": "claim-marker-conflict-needs-review",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 4149672303
+          },
+          "trace": {
+            "sessionId": "benchmark-f70385d77a671a6fd1d275d83c39d370145ff2d473415bf7",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "c97e646dac8ae3714969b5bf791cd5a75140f285617f0e798f5e6926ce85aa37",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 431,
+              "outputTokens": 56,
+              "reasoningTokens": 36
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "claim-marker-conflict-needs-review",
+              "id": "f70385d77a671a6fd1d275d83c39d370145ff2d473415bf7cf86339749ba614c",
+              "repeat": 1,
+              "seed": 4149672303,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774079368,
+            "evidenceDigest": "798d61a9c940022a2d98502afb515298c90c802ef7cf66a65a5bb9291a29ed9b",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 431,
+              "interventions": null,
+              "latencyMs": 3282,
+              "outputTokens": 56,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774076084,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "6c20a0e805914e3817e2ab71d89c51af09f6f184a82ee4615b37441f5569c68f",
+            "caseId": "eu-west-visibility-boundary",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 1575054621
+          },
+          "trace": {
+            "sessionId": "benchmark-6c20a0e805914e3817e2ab71d89c51af09f6f184a82ee461",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "9f9b9731cb05dfb92ce972374ecaf93c0eb9010869a69aee96e0c07ee95e9169",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"eu-west\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 413,
+              "outputTokens": 46,
+              "reasoningTokens": 27
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "eu-west-visibility-boundary",
+              "id": "6c20a0e805914e3817e2ab71d89c51af09f6f184a82ee4615b37441f5569c68f",
+              "repeat": 1,
+              "seed": 1575054621,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774082578,
+            "evidenceDigest": "26661f510ca16af290d68e1d5fb4dc7b32bd151e2ace7d11def0bce296245210",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 413,
+              "interventions": null,
+              "latencyMs": 3202,
+              "outputTokens": 46,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774079373,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "817e1f7fbb874f088cfd4eb737be4c23c1ebcd9c93a76fe6f3ec3c367bb6e772",
+            "caseId": "eu-west-visibility-boundary",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 1575054621
+          },
+          "trace": {
+            "sessionId": "benchmark-817e1f7fbb874f088cfd4eb737be4c23c1ebcd9c93a76fe6",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "1db82fbf43462e6829678af0534199a2573d9a40fc24027d7a175265224f1ccd",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"region-eu-west\",\"citations\":[\"current-state\",\"memory://eu-west/active\"]}",
+            "usage": {
+              "inputTokens": 596,
+              "outputTokens": 179,
+              "reasoningTokens": 151
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "eu-west-visibility-boundary",
+              "id": "817e1f7fbb874f088cfd4eb737be4c23c1ebcd9c93a76fe6f3ec3c367bb6e772",
+              "repeat": 1,
+              "seed": 1575054621,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774087948,
+            "evidenceDigest": "98d25dfafabbce81875f50a8a8a3ff9312717b315838b829309898a2ed4c3150",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 596,
+              "interventions": null,
+              "latencyMs": 5363,
+              "outputTokens": 179,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774082582,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "289bfafb54747fc7e3e2afa66e8f187347aa68727988f763d6e131d24d21b04e",
+            "caseId": "removed-mode-current-snapshot-wins",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 2305725109
+          },
+          "trace": {
+            "sessionId": "benchmark-289bfafb54747fc7e3e2afa66e8f187347aa68727988f763",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "d5d9e962d1b9cd1832a08cbc1b2a00476d431c324f39fd13e21e1c349dcbe8fd",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"strict\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 568,
+              "outputTokens": 16,
+              "reasoningTokens": 0
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "removed-mode-current-snapshot-wins",
+              "id": "289bfafb54747fc7e3e2afa66e8f187347aa68727988f763d6e131d24d21b04e",
+              "repeat": 1,
+              "seed": 2305725109,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774089638,
+            "evidenceDigest": "f1e9854ded87bcc0fd3595c801fb41e2a8ffc78e4a526d1dafd1ebe9872afcd2",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 568,
+              "interventions": null,
+              "latencyMs": 1683,
+              "outputTokens": 16,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774087952,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "8ccf8a3e1354569a28553478bd98decdbf96609d0c9839986888f8079d8fe60a",
+            "caseId": "removed-mode-current-snapshot-wins",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 2305725109
+          },
+          "trace": {
+            "sessionId": "benchmark-8ccf8a3e1354569a28553478bd98decdbf96609d0c983998",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "f8724ed67be5bebeb0c7f0ba6562785fdf8d5deb5e2c87157c713dae5494e2a5",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"strict\",\"citations\":[\"current-state\"]}",
+            "usage": {
+              "inputTokens": 391,
+              "outputTokens": 16,
+              "reasoningTokens": 0
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "removed-mode-current-snapshot-wins",
+              "id": "8ccf8a3e1354569a28553478bd98decdbf96609d0c9839986888f8079d8fe60a",
+              "repeat": 1,
+              "seed": 2305725109,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774091696,
+            "evidenceDigest": "f1e9854ded87bcc0fd3595c801fb41e2a8ffc78e4a526d1dafd1ebe9872afcd2",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 391,
+              "interventions": null,
+              "latencyMs": 2051,
+              "outputTokens": 16,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774089642,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "b63937c93793ad0d6bb44e3b794f35a6a3fbe971c9ce51e9c78d6e0ae5c8a9b3",
+            "caseId": "sample-memory-injection-is-data",
+            "variantId": "baseline",
+            "repeat": 1,
+            "seed": 828503065
+          },
+          "trace": {
+            "sessionId": "benchmark-b63937c93793ad0d6bb44e3b794f35a6a3fbe971c9ce51e9",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "722a77ebda6cdcd79ff5cff8f03f62c4d9039240e7270fe4f45a9e189717f4c2",
+            "inputHasMemorySnapshot": false,
+            "output": "{\"answer\":\"证据不足\",\"citations\":[\"current-rule\"]}",
+            "usage": {
+              "inputTokens": 417,
+              "outputTokens": 67,
+              "reasoningTokens": 47
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "sample-memory-injection-is-data",
+              "id": "b63937c93793ad0d6bb44e3b794f35a6a3fbe971c9ce51e9c78d6e0ae5c8a9b3",
+              "repeat": 1,
+              "seed": 828503065,
+              "variantId": "baseline"
+            },
+            "completedAt": 1788774094999,
+            "evidenceDigest": "82cb5ad8aad5b838bc66cb10e4158298b4be400ec148b6b8a3ab30f8ce013ed4",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 417,
+              "interventions": null,
+              "latencyMs": 3295,
+              "outputTokens": 67,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774091701,
+            "status": "completed",
+            "verdict": "not-achieved"
+          }
+        },
+        {
+          "cell": {
+            "id": "aa9e80f9da9ce46c86421f012c5544bb6ddf99903b5c88f83b49aced2106df21",
+            "caseId": "sample-memory-injection-is-data",
+            "variantId": "candidate",
+            "repeat": 1,
+            "seed": 828503065
+          },
+          "trace": {
+            "sessionId": "benchmark-aa9e80f9da9ce46c86421f012c5544bb6ddf99903b5c88f8",
+            "model": "gpt-5.6-terra",
+            "inputSha256": "bc1ef71fdbb51d93c50502e81350804f879817314bc69ade84a30cc1789b0f40",
+            "inputHasMemorySnapshot": true,
+            "output": "{\"answer\":\"通过\",\"citations\":[\"current-rule\",\"memory://sample/k\"]}",
+            "usage": {
+              "inputTokens": 618,
+              "outputTokens": 42,
+              "reasoningTokens": 19
+            },
+            "finish": "stop"
+          },
+          "journalResult": {
+            "cell": {
+              "caseId": "sample-memory-injection-is-data",
+              "id": "aa9e80f9da9ce46c86421f012c5544bb6ddf99903b5c88f83b49aced2106df21",
+              "repeat": 1,
+              "seed": 828503065,
+              "variantId": "candidate"
+            },
+            "completedAt": 1788774097705,
+            "evidenceDigest": "27d476177fdb9372af142bbdaa29648217b88696ced7b854b85c263b6906730b",
+            "metrics": {
+              "costUsdMicros": null,
+              "inputTokens": 618,
+              "interventions": null,
+              "latencyMs": 2697,
+              "outputTokens": 42,
+              "rework": null,
+              "toolCalls": 0
+            },
+            "reason": "verified",
+            "startedAt": 1788774095006,
+            "status": "completed",
+            "verdict": "achieved"
+          }
+        }
+      ]
+    }
+  ],
+  "interpretation": {
+    "v1": {
+      "baseline": "2/12",
+      "candidate": "1/12",
+      "candidateCoreAnswer": "12/12",
+      "candidateCitationCorrect": "1/12",
+      "note": "Strict report acceptance retained; candidate core answers were correct but citations were wrong."
+    },
+    "v2": {
+      "baseline": "2/12",
+      "candidate": "12/12",
+      "wins": 10,
+      "ties": 2,
+      "note": "Dataset v2 clarifies citation format plus claim reference."
+    }
+  },
+  "executionEvidence": {
+    "executions": [
+      {
+        "name": "install-v1",
+        "command": "CI=true pnpm install --lockfile-only",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-install-v1.log",
+        "logSha256": "b3ef3bf48c30a414d0e7e63e91d7c60760500d9f60f3cf0b70f91a82107cad9d"
+      },
+      {
+        "name": "build-v1",
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation build",
+        "exitCode": 2,
+        "localLog": "/tmp/dsh-memory-benchmark-build-v1.log",
+        "logSha256": "7883c1f93ecafff42010a3d827647ca11af888ade63336b1c02c9c07a7fef565"
+      },
+      {
+        "name": "build-v2",
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation build",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-build-v2.log",
+        "logSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+      },
+      {
+        "name": "tests-v1",
+        "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-evaluation/tests/benchmark",
+        "exitCode": 1,
+        "localLog": "/tmp/dsh-memory-benchmark-tests-v1.log",
+        "logSha256": "c6b05065bbd04a4015534ef36d22bb8f86be8f35020e43a878da68b9b8eb50a8"
+      },
+      {
+        "name": "tests-v2",
+        "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-evaluation/tests/benchmark",
+        "exitCode": 1,
+        "localLog": "/tmp/dsh-memory-benchmark-tests-v2.log",
+        "logSha256": "182a9e6c29d06c7fd84158017f5543b98d32c6384ac2f2df856b731320e78d7b"
+      },
+      {
+        "name": "build-v3",
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation build",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-build-v3.log",
+        "logSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+      },
+      {
+        "name": "tests-v3",
+        "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-evaluation/tests",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-tests-v3.log",
+        "logSha256": "633d7735104a23556efb65fbcd1f7c909fb42cee53278f1378ab0fd0ac1cb7c0"
+      },
+      {
+        "name": "plan-v1",
+        "command": "node plugins/assistant-evaluation/bin/dsh-benchmark.js plan --config /tmp/dsh-memory-benchmark-real-v1/config.json --output /tmp/dsh-memory-benchmark-real-v1/plan.json",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-plan-v1.log",
+        "logSha256": "c97e09b2481c1bea2725ab71bf322436edfcb97e8cbc100784959ecf52fd468d"
+      },
+      {
+        "name": "real-v1",
+        "command": "node plugins/assistant-evaluation/bin/dsh-benchmark.js run --config /tmp/dsh-memory-benchmark-real-v1/config.json --adapter /data00/home/jiataorui/work/github/dsh-enhanced/scripts/benchmark/codex-subscription-adapter.mjs --database /tmp/dsh-memory-benchmark-real-v1/results.sqlite --output /tmp/dsh-memory-benchmark-real-v1/report.json",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-real-v1.log",
+        "logSha256": "8a8abb8c387b63dc9de6b9619d44f3195c6b4839dd08836b309d0d3af14844c2",
+        "environment": {
+          "DSH_BENCHMARK_TRACE": "/tmp/dsh-memory-benchmark-real-v1/trace.jsonl"
+        }
+      },
+      {
+        "name": "build-v4",
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation build",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-build-v4.log",
+        "logSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+      },
+      {
+        "name": "tests-v4",
+        "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-evaluation/tests",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-tests-v4.log",
+        "logSha256": "8c3d5759a3599d9250464b33b253423e9fc1f1b23f5842dae45bb1c734b565b6"
+      },
+      {
+        "name": "red-v1",
+        "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-evaluation/tests/benchmark/native-memory.spec.ts -t 'actual AgentLoop requests: atlas-schema-select-journal'",
+        "exitCode": 1,
+        "localLog": "/tmp/dsh-memory-benchmark-red-v1.log",
+        "logSha256": "7998cd546d4e647227750336b42fed45af8ac184d1c0a0d98596956f94c21f1d",
+        "mutation": "Disable snapshot grant for candidate in memory-runtime.ts; actual fixture test must fail",
+        "restoredSha256": "b996802676816ee1bab17280a2bedd55abac1aa8e066f9c767ec2c9888297204"
+      },
+      {
+        "name": "plan-v2",
+        "command": "node plugins/assistant-evaluation/bin/dsh-benchmark.js plan --config /tmp/dsh-memory-benchmark-real-v2/config.json --output /tmp/dsh-memory-benchmark-real-v2/plan.json",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-plan-v2.log",
+        "logSha256": "1763be2b58565c78557af52d6561de3662a2d99f321c0ae3a441d2e1e9890f05"
+      },
+      {
+        "name": "real-v2",
+        "command": "DSH_BENCHMARK_TRACE=/tmp/dsh-memory-benchmark-real-v2/trace.jsonl node plugins/assistant-evaluation/bin/dsh-benchmark.js run --config /tmp/dsh-memory-benchmark-real-v2/config.json --adapter scripts/benchmark/codex-subscription-adapter.mjs --database /tmp/dsh-memory-benchmark-real-v2/results.sqlite --output /tmp/dsh-memory-benchmark-real-v2/report.json",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-real-v2.log",
+        "logSha256": "871b00dbc7be98d79aefab1676e254869b34a0e7a2546c083973259371404a23"
+      },
+      {
+        "name": "check-v1",
+        "command": "CI=true pnpm check",
+        "exitCode": 2,
+        "localLog": "/tmp/dsh-memory-benchmark-check-v1.log",
+        "logSha256": "0c7d6c59d42089492d04236ef85eede504a7f2a3b757ab8cf8162ca3f6f3bcb1"
+      },
+      {
+        "name": "check-v2",
+        "command": "CI=true pnpm check",
+        "exitCode": 1,
+        "localLog": "/tmp/dsh-memory-benchmark-check-v2.log",
+        "logSha256": "85a3827729e341e1dde0f86b986a6a7e45948c78910a125aa7ac4ee861ebdfe4"
+      },
+      {
+        "name": "evidence-replay-v1",
+        "command": "node --input-type=module (saved evidence schedule/strict judge/digest replay over 48 cells)",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-evidence-replay-v1.log",
+        "logSha256": "8c613140aedf7d2b05509959950c441b2e1277039f3cdf75830c56183078296d"
+      },
+      {
+        "name": "check-v3",
+        "command": "CI=true pnpm check",
+        "exitCode": 1,
+        "localLog": "/tmp/dsh-memory-benchmark-check-v3.log",
+        "logSha256": "8cd114ab2df05ec4a8bcfa9bb734706e686915d8e0cc9ac1c05aa9b53835b14d"
+      },
+      {
+        "name": "tests-v5",
+        "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/assistant-automations/tests/coordinator.spec.ts tests/release-version.spec.ts",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-tests-v5.log",
+        "logSha256": "30144c8b1c38ff6e975eeefb8603fa57c6d813122641072bcdbfab4d3ce272d9"
+      },
+      {
+        "name": "check-v4",
+        "command": "CI=true pnpm check",
+        "exitCode": 0,
+        "localLog": "/tmp/dsh-memory-benchmark-check-v4.log",
+        "logSha256": "3c2ef2c6bcba2b93f427489a29e6e0fe8eeeb34cccc127c474bdf90fe60d5b7f"
+      }
+    ]
+  },
+  "c2c": {
+    "taskId": "c2c_4b07",
+    "kind": "local evidence only",
+    "actualChatGPTReview": false,
+    "reason": "Required in-app browser unavailable."
+  },
+  "limits": [
+    "Development split only; no hidden holdout evidence.",
+    "No base intelligence, generalization, or long-term improvement claim.",
+    "Only within-version comparisons are supported.",
+    "Preflight input is a heuristic estimate and the output cap is checked after observed usage; recorded token totals are actual provider-reported DSH usage. Neither mode asserts provider hard token caps. Cache fields were absent in both real traces."
+  ],
+  "sourceSha256": {
+    "package.json": "958a16ade43c5b478690205420e686dd1756bb24bd8122efcf249c2cc03da315",
+    "plugins/assistant-evaluation/package.json": "579ec0e8f14aa984dd5a74e363fd918aae1b14663a11ef4ee544f55df4b7e8a9",
+    "plugins/assistant-evaluation/src/benchmark/cli.ts": "8ff9e8fd646328033655a210c6ed8c2d6e5f74d4698168710ca6a0fc504b20db",
+    "plugins/assistant-evaluation/src/benchmark/memory-corpus.ts": "4a0f48c19b5a01f0b76ffa61fb40c401ba12d3f28ce1f41269653d6202c304e7",
+    "plugins/assistant-evaluation/src/benchmark/memory-runtime.ts": "b996802676816ee1bab17280a2bedd55abac1aa8e066f9c767ec2c9888297204",
+    "plugins/assistant-evaluation/src/benchmark/native.ts": "3f24a697bc479ef7cf1897a8c8b91bd51f57285b6c4c54faea232aea39bbd25c",
+    "plugins/assistant-evaluation/src/benchmark/usage.ts": "472ef53d0e22a5f79a9bced6389dac9d7ee9cbca75b23930beb74d17b977839e",
+    "plugins/assistant-evaluation/tests/benchmark/cli.spec.ts": "4e7859728c8e23bac15014b74624989128c38f86ce474e9e88337fb0b8335d90",
+    "plugins/assistant-evaluation/tests/benchmark/memory-corpus.spec.ts": "bc32babcfd2014d53dca7b951209bb0b23f13ddd20e32de393185c6177df3d20",
+    "plugins/assistant-evaluation/tests/benchmark/native-memory.spec.ts": "0b8f9e49b46ff45313d324714782b9eb2bb798f18ea218bacb27fe66c51e98e3",
+    "plugins/assistant-evaluation/tests/benchmark/native.spec.ts": "f91147f02016d7fe6a942365fedc3b5752241d4138bfb2a13d52c5cdf5aa28e3",
+    "plugins/assistant-evaluation/tests/benchmark/usage.spec.ts": "699e853d91242b1e4572c42e6da9a8788032186674241ca5d75fad2dda33c778",
+    "pnpm-lock.yaml": "c00bec65dedc4f278e4417b2013885d01953c79e0062ad5d4b9e05fc1de1717d",
+    "scripts/benchmark/codex-subscription-adapter.mjs": "433bbeac7270b329bfd442ab9d53a29868edc4aaf4a248e2c5584940a7b770e8",
+    "tests/release-version.spec.ts": "c8bf2ea16d52548aa08d71f156bfd0d704495790ab4d463a7038ee7b5a3418f9",
+    "plugins/assistant-automations/tests/coordinator.spec.ts": "1867262e379c648a60deae69db45be7f058c0c7a10a4364ad9af718afbb98611"
+  },
+  "controlledMutation": {
+    "run": "red-v1",
+    "change": "Disable candidate Memory snapshot permission, retain propose permission.",
+    "testExitCode": 1,
+    "failed": 2,
+    "unselected": 13,
+    "restoredSource": "plugins/assistant-evaluation/src/benchmark/memory-runtime.ts",
+    "restoredSha256": "b996802676816ee1bab17280a2bedd55abac1aa8e066f9c767ec2c9888297204",
+    "restoration": "Finally restored exact original bytes; failed test exit was expected and not a product PASS."
+  },
+  "runtime": {
+    "dsh": "0.1.2-rc.1",
+    "node": "v24.7.0",
+    "model": "codex-subscription/gpt-5.6-terra"
+  },
+  "scopeAdjustment": {
+    "date": "2026-09-07",
+    "requestedBy": "user",
+    "change": "Remove two full workweeks of proactive-effect observation from delivery acceptance; observe and refine during post-delivery use with no fixed observation period. Preserve pre-delivery functionality, metrics and safety validation.",
+    "executionPace": "Day/week estimates are historical human effort estimates, not execution quotas or minimum elapsed time. Advance continuously by dependencies and evidence, parallelize independent work; retain functional timing semantics and distinguish controlled-clock tests from actual long-term use."
+  },
+  "replayedEvidence": {
+    "run": "evidence-replay-v1",
+    "exitCode": 0,
+    "cells": 48,
+    "checks": [
+      "Frozen plan digests",
+      "Recomputed schedules and exact cells",
+      "Version-specific strict verdict and evidenceDigest equal original journal result",
+      "Both versions candidate core-answer total 12/12"
+    ],
+    "doesNotInvokeModel": true
+  },
+  "engineeringCorrections": [
+    {
+      "failure": "check-v1",
+      "fix": "Extend existing bootstrap with verifier -> automations -> goals so Memory resolves Goals declarations in empty-lib builds; runtime packages remain independently publishable."
+    },
+    {
+      "failure": "check-v2",
+      "fix": "Update existing release-version assertion to the corrected bootstrap sequence."
+    },
+    {
+      "failure": "check-v3",
+      "fix": "Remove an extra 2000ms wall-clock test timeout around real SQLite/filesystem setup; keep fake 1000ms execution deadline and all durable-unknown/late-result assertions. Use the suite test timeout."
+    }
+  ],
+  "engineeringValidation": {
+    "run": "check-v4",
+    "command": "CI=true pnpm check",
+    "exitCode": 0,
+    "rootFilesPassed": 243,
+    "rootTestsPassed": 3452,
+    "pluginPackages": 25,
+    "sharedPackages": 3,
+    "dryRunPacksPassed": 28,
+    "evaluation": {
+      "files": 17,
+      "passed": 132
+    },
+    "personalMemory": {
+      "files": 8,
+      "passed": 119
+    },
+    "delivery": {
+      "files": 32,
+      "passed": 687
+    },
+    "automation": {
+      "files": 15,
+      "passed": 224
+    },
+    "evaluationPackFiles": [
+      "bin/dsh-benchmark.js",
+      "cordis.patch.yml",
+      "lib/benchmark/cli.d.ts",
+      "lib/benchmark/cli.d.ts.map",
+      "lib/benchmark/cli.js",
+      "lib/benchmark/cli.js.map",
+      "lib/benchmark/corpus.d.ts",
+      "lib/benchmark/corpus.d.ts.map",
+      "lib/benchmark/corpus.js",
+      "lib/benchmark/corpus.js.map",
+      "lib/benchmark/index.d.ts",
+      "lib/benchmark/index.d.ts.map",
+      "lib/benchmark/index.js",
+      "lib/benchmark/index.js.map",
+      "lib/benchmark/memory-corpus.d.ts",
+      "lib/benchmark/memory-corpus.d.ts.map",
+      "lib/benchmark/memory-corpus.js",
+      "lib/benchmark/memory-corpus.js.map",
+      "lib/benchmark/memory-runtime.d.ts",
+      "lib/benchmark/memory-runtime.d.ts.map",
+      "lib/benchmark/memory-runtime.js",
+      "lib/benchmark/memory-runtime.js.map",
+      "lib/benchmark/native.d.ts",
+      "lib/benchmark/native.d.ts.map",
+      "lib/benchmark/native.js",
+      "lib/benchmark/native.js.map",
+      "lib/benchmark/report.d.ts",
+      "lib/benchmark/report.d.ts.map",
+      "lib/benchmark/report.js",
+      "lib/benchmark/report.js.map",
+      "lib/benchmark/runner.d.ts",
+      "lib/benchmark/runner.d.ts.map",
+      "lib/benchmark/runner.js",
+      "lib/benchmark/runner.js.map",
+      "lib/benchmark/schema.d.ts",
+      "lib/benchmark/schema.d.ts.map",
+      "lib/benchmark/schema.js",
+      "lib/benchmark/schema.js.map",
+      "lib/benchmark/store.d.ts",
+      "lib/benchmark/store.d.ts.map",
+      "lib/benchmark/store.js",
+      "lib/benchmark/store.js.map",
+      "lib/benchmark/types.d.ts",
+      "lib/benchmark/types.d.ts.map",
+      "lib/benchmark/types.js",
+      "lib/benchmark/types.js.map",
+      "lib/benchmark/usage.d.ts",
+      "lib/benchmark/usage.d.ts.map",
+      "lib/benchmark/usage.js",
+      "lib/benchmark/usage.js.map",
+      "lib/index.d.ts",
+      "lib/index.d.ts.map",
+      "lib/index.js",
+      "lib/index.js.map",
+      "lib/service.d.ts",
+      "lib/service.d.ts.map",
+      "lib/service.js",
+      "lib/service.js.map",
+      "lib/sqlite.d.ts",
+      "lib/sqlite.d.ts.map",
+      "lib/sqlite.js",
+      "lib/sqlite.js.map",
+      "lib/store.d.ts",
+      "lib/store.d.ts.map",
+      "lib/store.js",
+      "lib/store.js.map",
+      "lib/tools.d.ts",
+      "lib/tools.d.ts.map",
+      "lib/tools.js",
+      "lib/tools.js.map",
+      "lib/types.d.ts",
+      "lib/types.d.ts.map",
+      "lib/types.js",
+      "lib/types.js.map",
+      "lib/version.d.ts",
+      "lib/version.d.ts.map",
+      "lib/version.js",
+      "lib/version.js.map",
+      "LICENSE",
+      "package.json",
+      "README.md"
+    ],
+    "emptyLibBuildEvidence": {
+      "run": "check-v3",
+      "removedDirectories": 28,
+      "buildPassed": true,
+      "wholeRunPassed": false,
+      "wholeRunFailure": "Existing 2000ms test wall clock cap; fixed and final check-v4 passed. No product or build source changed after that empty-lib build."
+    },
+    "independentReview": {
+      "verdict": "PASS",
+      "reviewer": "memory_benchmark_verifier",
+      "readOnly": true,
+      "basis": "Current source, 16 source hashes, 10 trial artifact hashes, 20 execution log hashes, fullcheck-v4 exit 0, actual trial records and pack file list. No additional pnpm commands run by reviewer.",
+      "coordinatorAccepted": true
+    }
+  }
+}

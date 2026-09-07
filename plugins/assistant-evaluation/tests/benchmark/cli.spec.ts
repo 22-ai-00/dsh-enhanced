@@ -41,6 +41,22 @@ describe('benchmark operator commands', () => {
     expect(result.planDigest).toMatch(/^[a-f0-9]{64}$/u)
     await expect(benchmarkCli(['plan', '--config', file, '--output', outputFile], output.io)).rejects.toThrow('already exists')
   })
+  it('lists the Memory suite and distinguishes observed limits from enforced maxima', async () => {
+    const output = capture()
+    expect(await benchmarkCli(['corpus', '--suite', 'memory-v1'], output.io)).toBe(0)
+    const corpus = JSON.parse(output.chunks.join(''))
+    expect(corpus.dataset.id).toBe('dsh-memory-grounding'); expect(corpus.tasks).toHaveLength(6)
+    expect(corpus.tasks.every((task: Record<string, unknown>) => !('acceptance' in task) && !('memories' in task))).toBe(true)
+    output.chunks.length = 0
+    expect(await benchmarkCli(['doctor', '--suite', 'memory-v1'], output.io)).toBe(0)
+    expect(JSON.parse(output.chunks.join('')).packages).toContainEqual({ name: '@dsh-enhanced/personal-memory', available: true })
+    const root = await workspace(); const file = join(root, 'observed.json'); const input = configuration('a'.repeat(64))
+    input.model.temperature = null; input.model.inputLimitMode = 'estimate'; input.model.outputLimitMode = 'observed'
+    await writeFile(file, JSON.stringify(input)); output.chunks.length = 0
+    expect(await benchmarkCli(['plan', '--config', file], output.io)).toBe(0)
+    expect(JSON.parse(output.chunks.join(''))).toMatchObject({ maximumInputTokens: null, maximumOutputTokens: null,
+      inputLimitMode: 'estimate', outputLimitMode: 'observed', observedInputTokenLimit: 4000, observedOutputTokenLimit: 400 })
+  })
   it('rejects adapter content drift before importing operator code', async () => {
     const root = await workspace(); const module = join(root, 'adapter.mjs'); const file = join(root, 'config.json')
     await writeFile(module, 'throw new Error("MUST_NOT_IMPORT");')

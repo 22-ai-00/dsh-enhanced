@@ -5,6 +5,7 @@ import { createRequire } from 'node:module'
 import { dirname, isAbsolute, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { developmentCorpus, developmentDataset } from './corpus.js'
+import { memoryDevelopmentCorpus, memoryDevelopmentDataset, memoryDevelopmentCorpusV2, memoryDevelopmentDatasetV2 } from './memory-corpus.js'
 import { benchmarkReport } from './report.js'
 import { benchmarkPlanDigest, benchmarkSchedule, BenchmarkError } from './schema.js'
 import { BenchmarkStore } from './store.js'
@@ -14,8 +15,8 @@ import type { NativeAdapterFactory, NativeBenchmarkConfig } from './native.js'
 const runtimePackages = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop',
   '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools'] as const
 const help = `dsh-benchmark: public development benchmarks through the native DSH AgentLoop
-  corpus
-  doctor
+  corpus [--suite research-v1|memory-v1|memory-v2]
+  doctor [--suite research-v1|memory-v1|memory-v2]
   plan --config FILE [--output FILE]
   run --config FILE --adapter ABSOLUTE_MODULE --database FILE [--output FILE]
   report --database FILE --plan ID [--output FILE]
@@ -102,12 +103,17 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
   let output: string | undefined
   let exitCode = 0
   if (command === 'corpus') {
-    options(argv.slice(1), [], [])
-    result = { dataset: developmentDataset, tasks: developmentCorpus.map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
+    const args = options(argv.slice(1), ['--suite'], [])
+    const suite = args.get('--suite') ?? 'research-v1'
+    if (!['research-v1', 'memory-v1', 'memory-v2'].includes(suite)) throw new BenchmarkError('invalid native suite')
+    result = { dataset: suite === 'memory-v2' ? memoryDevelopmentDatasetV2 : suite === 'memory-v1' ? memoryDevelopmentDataset : developmentDataset, tasks: (suite === 'memory-v2' ? memoryDevelopmentCorpusV2 : suite === 'memory-v1' ? memoryDevelopmentCorpus : developmentCorpus).map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
   } else if (command === 'doctor') {
-    options(argv.slice(1), [], [])
+    const args = options(argv.slice(1), ['--suite'], [])
+    const suite = args.get('--suite') ?? 'research-v1'
+    if (!['research-v1', 'memory-v1', 'memory-v2'].includes(suite)) throw new BenchmarkError('invalid native suite')
     const require = createRequire(import.meta.url)
-    const packages = runtimePackages.map(name => {
+    const names = [...runtimePackages, ...(suite !== 'research-v1' ? ['@dsh-enhanced/personal-memory', '@dsh-enhanced/assistant-policy'] : [])]
+    const packages = names.map(name => {
       try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }
     })
     result = { ready: packages.every(entry => entry.available), packages, next: 'Configure a trusted adapter, model token counter and per-cell budget. A ready runtime does not prove model access.' }
@@ -123,8 +129,11 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
     if (command === 'plan') {
       result = { plan, planDigest: benchmarkPlanDigest(plan), plannedCells: benchmarkSchedule(plan).length,
         maximumCostUsdMicros: plan.budget.costUsdMicros === null ? null : (BigInt(benchmarkSchedule(plan).length) * BigInt(plan.budget.costUsdMicros)).toString(),
-        maximumInputTokens: benchmarkSchedule(plan).length * plan.budget.inputTokens,
-        maximumOutputTokens: benchmarkSchedule(plan).length * plan.budget.outputTokens }
+        inputLimitMode: input.model.inputLimitMode ?? 'upper-bound', outputLimitMode: input.model.outputLimitMode ?? 'provider',
+        maximumInputTokens: input.model.inputLimitMode === 'estimate' ? null : benchmarkSchedule(plan).length * plan.budget.inputTokens,
+        maximumOutputTokens: input.model.outputLimitMode === 'observed' ? null : benchmarkSchedule(plan).length * plan.budget.outputTokens,
+        observedInputTokenLimit: benchmarkSchedule(plan).length * plan.budget.inputTokens,
+        observedOutputTokenLimit: benchmarkSchedule(plan).length * plan.budget.outputTokens }
     } else {
       const store = new BenchmarkStore(resolve(fields.get('--database')!))
       try {
