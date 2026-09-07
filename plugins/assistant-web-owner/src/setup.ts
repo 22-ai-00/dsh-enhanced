@@ -178,20 +178,23 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
 
 export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-image sha256:<id> --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup.\n')
+    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-image sha256:<id> --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nGoal setup: add --goal-admission <private-absolute-task.json> --session-id <existing-idle-session>. This selects the fixed DeepSeek route and independent isolated verification.\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup; configuration changes require restart.\n')
     return
   }
   const input: WebOwnerSetupInput = { dshHome: process.env.DSH_HOME ?? join(homedir(), '.dsh'), profile: 'web', workspace: '', preset: 'standard' }
   const isolation: AutonomySetupOptions = { image: '', maxRuns: 20, leaseMs: 3_600_000, maxTotalDurationMs: 600_000 }
   let isolated = false
+  let goalAdmission: string | undefined; let sessionId: string | undefined
   const numeric = { '--isolation-max-runs': 'maxRuns', '--isolation-lease-ms': 'leaseMs', '--isolation-runtime-ms': 'maxTotalDurationMs' } as const
   const fields = { '--dsh-home': 'dshHome', '--profile': 'profile', '--workspace': 'workspace', '--preset': 'preset' } as const
   for (let index = 0; index < argv.length; index++) {
     const option = argv[index]!
-    if (!(option in fields) && option !== '--isolation-image' && !(option in numeric)) fail(`unknown option ${option}`)
+    if (!(option in fields) && !['--isolation-image', '--goal-admission', '--session-id'].includes(option) && !(option in numeric)) fail(`unknown option ${option}`)
     const value = argv[++index]
     if (value === undefined || value.startsWith('--')) fail(`${option} requires a value`)
-    if (option === '--isolation-image') { isolation.image = value; isolated = true }
+    if (option === '--goal-admission') goalAdmission = value
+    else if (option === '--session-id') sessionId = value
+    else if (option === '--isolation-image') { isolation.image = value; isolated = true }
     else if (option in numeric) {
       if (!/^[1-9][0-9]*$/.test(value)) fail(`${option} requires a positive integer`)
       isolation[numeric[option as keyof typeof numeric]] = Number(value); isolated = true
@@ -199,6 +202,7 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
   }
   if (isolated) input.isolation = isolation
   validate(input)
+  if ((goalAdmission === undefined) !== (sessionId === undefined)) fail('goal-admission and session-id must be supplied together')
   let effective: string
   try {
     const result = await promisify(execFile)('dsh', ['--profile', input.profile, '--dump-config'], {
@@ -206,6 +210,12 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
     })
     effective = result.stdout
   } catch { fail('could not read the effective DSH profile; check installed bundles and dsh --dump-config') }
+  if (goalAdmission !== undefined && sessionId !== undefined) {
+    const { configureGoalAdmission } = await import('./goal-setup.js')
+    const result = await configureGoalAdmission(input, effective, goalAdmission, sessionId)
+    process.stdout.write(`Goal configuration written: ${result.path}\nAdmission: ${result.admissionId}. Existing authority and budget are preserved. Restart the target Host, then select the task's model under deepseek-goal-metered in the existing Session; saved Session/settings model choices are preserved. Model connectivity and runtime admission have not been tested.\n`)
+    return
+  }
   const path = await configureWebOwner(input, effective)
   if (input.isolation) process.stdout.write(`Isolated execution probe passed. Finite grant: autonomy-${input.profile}. Existing grant expiry and used budget are preserved. GitHub action credentials and autonomous goal verification are not configured by this step.\n`)
   process.stdout.write(`Web owner configured for ${input.profile}: ${path}\nWorkspace: ${input.workspace}; preset: ${input.preset}. Model connectivity and runtime readiness require the installer checks.\n`)

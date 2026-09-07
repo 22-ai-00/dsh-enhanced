@@ -1,5 +1,7 @@
 # 自主智能体目标：跨设备交接
 
+> 2026-09-07 私有目标配置接线（基线 `16f9515`）：已安装的 Web owner CLI 能以私有任务 JSON 和既有 Session 写入独立验收、有限预算和精确后台 route，重复字节幂等、只读 owner/grant 检查且不续权。真实浏览器经过 3 个 Host 进程、原生模型选择器和实际后台重启，完成两轮隔离产物修正、step/outcome 失败后通过、4 条预算结算及成功 wake。根检查和专项通过；付费模型响应仍为明确夹具，Session ID 发现/图形配置与完整 WP17 尚未完成。最终命令和限制见 [本批证据](evidence/goal-admission-setup-2026-09-07.json) 与落地账本，全部 18 项继续按依赖和证据推进。
+
 > 2026-09-07 DeepSeek 预算接线（基线 `c611295`）：新增可选 `assistant-deepseek-budget`，固定 DeepSeek v4 adapter 与同生命周期的精确 route meter，按保守输入上界预留、实际输出限额发送并凭完整 usage 结算。金额费率未知时拒绝金额预算，凭据撤销、卸载、重定向与挂起请求均有边界检查；不会把 token 约束称为账单硬限。实际安装的原生目标闭环使用生产 adapter/meter 和明确的供应商响应夹具，没有真实付费 API 调用。最终命令与限制见 [本批证据](evidence/deepseek-goal-budget-2026-09-07.json) 和落地账本；完整 18 项继续按依赖与证据推进，无按天或长期观察等待。
 
 > 2026-09-07 目标重启接线更新（基线 `5e116b9`）：真实安装与新进程恢复已揭示并修复“原生 idle/blocked 早于独立验收、后台提前释放 Agent”的竞态；Delivery 增加版本化的当前 Agent 结算等待，末轮 blocked→complete 的额外 revision 只凭精确实际执行与全目标 achieved 回执接纳。有限 `goal_schedule` 预授权默认关闭并保留原生 Policy；按依赖与证据推进，不为日历排期或长期观察等待。最终浏览器、全仓命令和限制见 [本批证据](evidence/goal-wake-runtime-2026-09-07.json) 与落地账本；完整 18 项目标继续推进。

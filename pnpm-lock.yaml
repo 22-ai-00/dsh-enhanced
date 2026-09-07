@@ -1245,12 +1245,21 @@ importers:
       '@deepseek-ai/dsh-workspace':
         specifier: 'catalog:'
         version: 0.1.2-rc.1(c4f266c8456c2e5dc1e1d3e663271a2c)
+      '@dsh-enhanced/assistant-deepseek-budget':
+        specifier: workspace:*
+        version: link:../assistant-deepseek-budget
       '@dsh-enhanced/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-goals':
+        specifier: workspace:*
+        version: link:../assistant-goals
       '@dsh-enhanced/assistant-isolation':
         specifier: workspace:*
         version: link:../assistant-isolation
+      '@dsh-enhanced/assistant-verifier':
+        specifier: workspace:*
+        version: link:../assistant-verifier
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0

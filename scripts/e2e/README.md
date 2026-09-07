@@ -44,3 +44,14 @@ CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
 This separate opt-in test runs the actual local installer (including install/build) in a fresh temporary home, repeats the shipped setup to check unchanged grant expiry, then sends two browser prompts through the actual Web Host. The deterministic six-call model fixture requests an offline `isolation_run` and then retrieves the same idempotency key. Assertions require no per-call approval, one persisted successful job, one duration reservation, owner/scope binding, and real artifact `answer.txt` containing `42`. This proves the installed native wiring and Docker execution, not real-model intelligence, business-goal achievement or complete autonomy.
 
 The test chooses an independent available preflight port and never stops an existing service. It needs a compatible local Docker image and non-root Host. Artifacts are under ignored `.cache/autonomy-e2e/`; temporary profiles and the test Host are removed, launch credentials are redacted, and traces/video are disabled. Unknown Docker resources follow the production fail-closed recovery semantics.
+
+## Installed Goal admission and restart
+
+```sh
+CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
+  DSH_ISOLATION_TEST_IMAGE=sha256:<existing-local-image-id> pnpm test:autonomy:setup
+```
+
+This scenario installs autonomy, prepares a real Web owner Session, stops its Host, then invokes the shipped `dsh-web-owner-setup --goal-admission ... --session-id ...` twice with a private task file outside the workspace. The CLI owns all Goal, verifier, budget and wake configuration; repeated setup must preserve patch bytes. After restart, the browser selects the admitted model using the native model menu because DSH preserves the old Session's model selection.
+
+The foreground schedules a wake and the test restarts the actual Host again. Assertions require two native rounds on the same Session, a failing artifact followed by a corrected artifact, separate step/outcome receipts, four settled production budget reservations and a succeeded persisted wake without per-action approvals. One preparation-only adapter reply and seven mocked paid HTTP responses make execution deterministic; production DeepSeek serialization/metering, Goals, verification and Docker execution remain real. This is not a paid DeepSeek request or a model-quality benchmark. Artifacts are under ignored `.cache/autonomy-goal-setup-e2e/` with the same authentication redaction and cleanup rules.

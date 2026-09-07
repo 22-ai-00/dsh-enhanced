@@ -67,6 +67,63 @@ Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租�
 
 此选项额外使用本机 Docker、子进程和私有临时 staging；不拉取镜像或配置外部凭据。未知清理状态的探测目录保留以供排查。具体参数、前置条件和未完成的自治能力见[安装说明](../../scripts/install/README.md)。
 
+## 有限 Goal admission（实验性）
+
+在已完成 `autonomy` 安装后，可用一次离线 setup 把**一个已有、空闲的 Web owner Session**配置为固定 DeepSeek 路由、有限 Goals 预算、独立隔离验收条件和可选 wake route。先停止目标 Host；准备工作区之外、当前用户所有且权限为 `0600` 的 JSON 任务文件。不要把 API key 写进文件，`apiKeyEnv` 只是 credential reference。
+
+当前没有专用的 Session ID 发现命令，也不保证 Web UI 会显示它。此操作要求操作者已持有准确的既有 Web owner Session ID；不要猜测、伪造或把其他渠道 Session 当作 Web owner Session。
+
+```sh
+# 已完成 autonomy 安装；Host 停止后执行
+chmod 600 /private/goal-admission.json
+existingSessionId='实际的既有空闲 Web owner Session ID'
+dsh-web-owner-setup --profile web --workspace /absolute/workspace \
+  --goal-admission /private/goal-admission.json --session-id "$existingSessionId"
+
+# 应用 patch 后才重启目标 Host
+dsh --profile web --no-open
+```
+
+重启后，在已有 Session 的模型选择器中选择 `deepseek-goal-metered` 下与任务一致的模型，再发送原始 objective。CLI 只配置默认路由；已有 Session 和用户 settings 保存的模型选择仍会保留，不会自动迁移到新模型。
+
+可用任务文件如下。每个字段都是有限值；未知字段、成本上限字段、明文凭据、模型别名和任意 endpoint 都会拒绝。
+
+```json
+{
+  "version": 1,
+  "objective": "Create a shell program that reads two integers and prints their sum",
+  "model": "deepseek-v4-flash",
+  "apiKeyEnv": "DEEPSEEK_API_KEY",
+  "maxGoalRounds": 3,
+  "stepMaxDurationMs": 60000,
+  "executionBudget": {
+    "modelCalls": 6,
+    "toolCalls": 3,
+    "inputTokens": 2100000,
+    "outputTokens": 6000,
+    "durationMs": 240000,
+    "maxOutputTokensPerCall": 1024
+  },
+  "verification": {
+    "artifactPath": "answer.sh",
+    "command": "/bin/sh /workspace/artifact < /workspace/input",
+    "maxRuns": 12,
+    "maxTotalDurationMs": 240000,
+    "maxDurationMs": 20000,
+    "maxOutputBytes": 4096,
+    "cases": [
+      { "stdin": "19 23", "expectedStdout": "42", "expectedExitCode": 0 },
+      { "stdin": "-8 5", "expectedStdout": "-3", "expectedExitCode": 0 }
+    ]
+  },
+  "wake": { "maxDelayMs": 60000, "runTimeoutMs": 90000, "maxRuns": 3 }
+}
+```
+
+模型固定为 `deepseek-v4-flash` 或 `deepseek-v4-pro`，endpoint 不可配置。每次目标模型调用会保守预留至少 `2,097,152` 输入 tokens；当前没有 USD 硬预算，任务不得添加 `costUsdMicros`。重复相同 admission 不改变 patch 字节、不会续期 Isolation grant、不会重置已用次数或扩大预算。与本次任务要求冲突的已有受管配置或同 ID 条目会拒绝，而不是被覆盖。
+
+该精确 Session 仅用于核验 owner 和可选 wake route；生成的 profiles 绑定 owner、scope 和 objective。setup 只写入并复核本地配置、已有 owner snapshot 与持久 grant；它不发 DeepSeek 请求、不创建 Goal、不证明凭据可用、网络连通、模型质量、隔离验收成功或完整 WP17/长期自治已经完成。grant 已过期、撤销、耗尽，owner/version 改变，或 Session 有 pending/dispatched/unknown lease 时必须先按正常运维流程处理，不能靠重跑此命令续权。
+
 发布文件同时包含 `dsh-autonomy-doctor --profile web`。此 CLI 读取有效 profile 和当前 Delivery owner、Isolation grant/累计预算快照，再运行独立的固定 Docker 探测，最后复核配置/授权没有失效；不会开启第二个 Host、配对 owner、迁移数据库、续期 grant 或重置预算。使用 SQLite 只读连接，不读取凭据/业务产物，也不请求模型。缺失或不支持的 schema、owner 版本改变、撤销、过期、耗尽和配置不一致都失败。当前支持 Delivery schema 19、Isolation schema 6 和安装器的单一受管 grant；要求匹配本批源码的 Isolation diagnostics API，缺失该 API 时明确要求升级，不回退到忽略持久授权的探测。新 bundle 尚未发布，正式发布时需保持实际首发版本与 peer 下界一致。
 
 结果只说明有限隔离检查，不能替代动态 Policy、实时资源准入、模型硬预算、Goal 验收或外部 Actions 检查。该 CLI 的临时探测使用现有 Isolation 资源边界和清理规则；未知清理保留证据，不消耗业务 grant。
