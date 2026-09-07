@@ -1,3 +1,4 @@
+import type { SystemdBinding } from './daemon-binding.js'
 import { spawn } from 'node:child_process'
 import { constants, readFileSync } from 'node:fs'
 import { chmod, lstat, mkdtemp, open, readFile, realpath, rm, stat } from 'node:fs/promises'
@@ -6,7 +7,13 @@ import { isAbsolute, join } from 'node:path'
 
 export interface ProcessWitness { bootId: string; pid: number; startTicks: string }
 export interface DaemonWitness { process: ProcessWitness; engineId: string; dockerPath: string; socketPath: string; pidFile: string }
-export interface CreationWitness { daemon: DaemonWitness; supervisor: ProcessWitness }
+export interface CreationWitness {
+  daemon: DaemonWitness
+  supervisor: ProcessWitness
+  /** Present only after the supervisor has reaped every CLI it started. */
+  requestsSettled?: boolean
+  binding?: SystemdBinding
+}
 
 const bootIdPattern = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/
 const ticksPattern = /^[1-9][0-9]{0,63}$/
@@ -22,13 +29,18 @@ const validProcess = (value: unknown): value is ProcessWitness => !!value && typ
   && typeof (value as ProcessWitness).startTicks === 'string' && ticksPattern.test((value as ProcessWitness).startTicks)
 
 export function validateCreationWitness(value: unknown): CreationWitness {
-  if (!value || typeof value !== 'object' || Object.keys(value).length !== 2 || !validProcess((value as CreationWitness).supervisor)) throw new TypeError('invalid creation witness')
+  if (!value || typeof value !== 'object' || ![2, 3, 4].includes(Object.keys(value).length) || Object.keys(value).some(key => !['daemon', 'supervisor', 'requestsSettled', 'binding'].includes(key)) || !validProcess((value as CreationWitness).supervisor)) throw new TypeError('invalid creation witness')
   const daemon = (value as CreationWitness).daemon
   if (!daemon || typeof daemon !== 'object' || Object.keys(daemon).length !== 5 || !validProcess(daemon.process)
     || typeof daemon.engineId !== 'string' || !engineIdPattern.test(daemon.engineId)
     || !validPath(daemon.dockerPath) || !validPath(daemon.socketPath) || !validPath(daemon.pidFile)) throw new TypeError('invalid creation witness')
   if (daemon.process.bootId !== (value as CreationWitness).supervisor.bootId) throw new TypeError('creation witness crosses boot generations')
-  return { daemon: { process: { ...daemon.process }, engineId: daemon.engineId, dockerPath: daemon.dockerPath, socketPath: daemon.socketPath, pidFile: daemon.pidFile }, supervisor: { ...(value as CreationWitness).supervisor } }
+  const witness = value as CreationWitness
+  if (witness.requestsSettled !== undefined && typeof witness.requestsSettled !== 'boolean') throw new TypeError('invalid settlement proof')
+  if (witness.binding !== undefined && (!witness.binding || Object.keys(witness.binding).length !== 3 || witness.binding.kind !== 'systemd'
+    || !/^[0-9a-f]{32}$/.test(witness.binding.serviceInvocationId) || !/^[0-9a-f]{32}$/.test(witness.binding.socketInvocationId))) throw new TypeError('invalid daemon binding')
+  return { ...(witness.requestsSettled === undefined ? {} : { requestsSettled: witness.requestsSettled }),
+    ...(witness.binding === undefined ? {} : { binding: { ...witness.binding } }), daemon: { process: { ...daemon.process }, engineId: daemon.engineId, dockerPath: daemon.dockerPath, socketPath: daemon.socketPath, pidFile: daemon.pidFile }, supervisor: { ...(value as CreationWitness).supervisor } }
 }
 
 async function bootId(): Promise<string | undefined> {

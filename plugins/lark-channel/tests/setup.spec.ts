@@ -2254,7 +2254,9 @@ setInterval(() => {}, 1000)`,
       dshHome,
       application: { appId: 'cli_0123456789abcdef', domain: 'feishu' as const },
       credentialProvider: 'macos-keychain' as const,
-      profileLockOptions: { timeoutMs: 1_000, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 },
+      // Wait for the first complete transaction, including durable writes under
+      // concurrent suite load; this test does not exercise lock expiry.
+      profileLockOptions: { timeoutMs: 10_000, pollMs: 5, staleMs: 2_000, heartbeatMs: 100 },
     }
     const first = executeLarkSetupProfileTransaction({
       ...common, args: args('web'), patchPath: webPatchPath, operations: operations('web'),
@@ -2272,7 +2274,7 @@ setInterval(() => {}, 1000)`,
     expect(events).toEqual(['web:staged', 'web:paired'])
     expect(await readFile(webPatchPath, 'utf8')).toContain('lark/primary/personal/ou_web')
     expect(await readFile(fooPatchPath, 'utf8')).toBe(fooBase)
-  })
+  }, 15_000)
 
   test('pairs against the effective custom Delivery database and permits an isolated profile database', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lark-custom-delivery-database-'))

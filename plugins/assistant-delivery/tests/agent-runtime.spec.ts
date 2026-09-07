@@ -2928,10 +2928,16 @@ describe('real rc.1 delivery Agent runtime', () => {
       const leased = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
       try { expect(leased.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'dispatched' }) } finally { leased.close() }
       expect(fixture.llm.requests).toHaveLength(1)
+      // Goal completion can release the Agent before the next polling tick.
+      // Observe the detached native event snapshot while keeping the actual
+      // registry teardown and durable lease-release assertions below.
+      let terminal: { phase: string; activation: string } | undefined
+      fixture.ctx.on('goal/changed', ({ agent, change }) => {
+        if (agent === handle.agent) terminal = change.goal
+      })
       releaseFlush?.()
       await vi.waitFor(() => expect(fixture.llm.requests).toHaveLength(2), { timeout: 5_000 })
       await vi.waitFor(() => {
-        const terminal = nativeGoals(fixture.ctx).get(handle.agent)
         expect(terminal?.activation).toBe('disarmed')
         expect(['blocked', 'complete']).toContain(terminal?.phase)
       }, { timeout: 5_000 })

@@ -21,6 +21,9 @@ let dockerDirectory
 let provisioning = Promise.resolve()
 let cancelReason
 let creationAmbiguous = false
+let mutationAmbiguous = false
+let requestsSettled = true
+const activeCommands = new Set()
 const workerName = () => config.containerName
 const keeperName = () => `${workerName()}-keeper`
 const volumeName = () => `${workerName()}-workspace`
@@ -51,6 +54,9 @@ function docker(args, { outputLimit = 65_536, timeoutMs = OPERATION_TIMEOUT_MS }
       if (settled) return
       settled = true
       if (timer !== undefined) clearTimeout(timer)
+      const mutating = ['create', 'start', 'cp', 'exec'].includes(args[0]) || (args[0] === 'volume' && args[1] === 'create')
+      if (mutating && (timeout || overflow || result.code === null)) mutationAmbiguous = true
+      if (mutating && (timeout || overflow || result.code !== 0 || result.signal || result.error)) requestsSettled = false
       const decoded = decode(out)
       resolve({ ...result, stdout: decoded ?? '', stderr: decode(err) ?? '', stdoutBytes: out.length,
         stdoutUtf8: decoded !== undefined, overflow, timeout })
@@ -60,6 +66,8 @@ function docker(args, { outputLimit = 65_536, timeoutMs = OPERATION_TIMEOUT_MS }
         shell: false, env: environment(), stdio: ['ignore', 'pipe', 'pipe'],
       })
     } catch (error) { finish({ code: null, error: String(error) }); return }
+    activeCommands.add(child)
+    child.once('close', () => activeCommands.delete(child))
     const collect = (target, chunk) => {
       const kept = chunk.subarray(0, Math.max(0, outputLimit - out.length - err.length))
       if (target === 'out') out = Buffer.concat([out, kept])
@@ -167,14 +175,19 @@ async function finish(status, reason, exitCode) {
     } else artifacts = exported
   }
   const storageRemoved = await removeStorage()
+  // A final receipt must not outrun an attached start or other CLI still alive.
+  // No new create can follow provisioning; begin() stops when finalizing is set.
+  const outstanding = [...activeCommands]
+  await Promise.all(outstanding.map(child => new Promise(resolve => child.once('close', resolve))))
   // A timed-out CLI can leave an in-flight daemon create request. A momentary
   // absence is not a release receipt for such a request; retain its reservation.
-  const quiescent = workerRemoved && storageRemoved && !creationAmbiguous
+  const quiescent = workerRemoved && storageRemoved && !mutationAmbiguous
   if (creationAmbiguous) reason = 'docker-creation-unconfirmed'
+  else if (mutationAmbiguous) reason = 'docker-mutation-unconfirmed'
   if (!quiescent || status !== 'succeeded') artifacts = []
   if (dockerDirectory !== undefined) await rm(dockerDirectory, { recursive: true, force: true }).catch(() => undefined)
   complete = true
-  send({ type: 'result', result: { status: quiescent ? status : 'unknown', quiescent,
+  send({ type: 'result', settlementProtocol: 'all-cli-closed/v1', requestsSettled: requestsSettled && !mutationAmbiguous, result: { status: quiescent ? status : 'unknown', quiescent,
     ...(exitCode === undefined ? {} : { exitCode }), stdout, stderr, artifacts,
     ...(reason === undefined ? {} : { reason }) } })
   if (process.connected) process.disconnect()

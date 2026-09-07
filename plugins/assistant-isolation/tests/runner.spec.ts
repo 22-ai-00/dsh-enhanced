@@ -61,9 +61,12 @@ dockerTests('Linux Docker isolation runner (opt in)', () => {
     expect(result.stderr).toContain('err')
   }, 30_000)
 
-  test('kills a process at the trusted absolute deadline', async () => {
+  test('stops at the deadline and retains interrupted start acknowledgements', async () => {
     const result = await run('sleep 30', { deadlineMs: 1_000 })
-    expect(result).toMatchObject({ status: 'timed-out', quiescent: true })
+    // Cleanup and the attached CLI deadline race. Normal close permits a stopped
+    // result; an interrupted mutation must preserve uncertainty and occupancy.
+    if (result.quiescent) expect(result).toMatchObject({ status: 'timed-out', quiescent: true })
+    else expect(result).toMatchObject({ status: 'unknown', quiescent: false, reason: 'docker-mutation-unconfirmed', creationWitness: { requestsSettled: false } })
   }, 30_000)
 
   test('cancels a setsid descendant with its container', async () => {
@@ -76,7 +79,7 @@ dockerTests('Linux Docker isolation runner (opt in)', () => {
 
   test('stops and fails when combined attached output reaches its bound', async () => {
     const result = await run('i=0; while [ "$i" -lt 200 ]; do printf 0123456789; i=$((i + 1)); done', { outputBytes: 128 })
-    expect(result).toMatchObject({ status: 'failed', quiescent: true, reason: 'output-limit-exceeded' })
+    expect(result).toMatchObject({ status: 'unknown', quiescent: false, reason: 'docker-mutation-unconfirmed', creationWitness: { requestsSettled: false } })
     expect(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr)).toBeLessThanOrEqual(128)
   }, 30_000)
   test('does not expand malformed UTF-8 beyond the output byte limit', async () => {
