@@ -4,7 +4,7 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { PermissionPresetService } from '@deepseek-ai/dsh-permission-presets'
 import type { Session } from '@deepseek-ai/dsh-session'
 import Schema from '@deepseek-ai/schemastery'
-import type { ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
+import type { ToolDefinition, ToolExecution, ToolGuard } from '@deepseek-ai/dsh-tools'
 import { registerAutoReviewAnswerer, type AutoReviewConfig } from './auto-review.js'
 import {
   approvalPermissionFingerprint,
@@ -152,6 +152,11 @@ interface BoundInitiator {
   readonly token: symbol
 }
 
+interface PreauthorizedTool {
+  readonly definition: ToolDefinition
+  readonly authorize: (execution: ToolExecution) => boolean
+}
+
 export type NativeFullReviewerReconciliation = 'not-applicable' | 'ready' | 'unavailable'
 
 const NATIVE_FULL_ADOPTIONS_GLOBAL_KEY = '__dshEnhancedAssistantPolicyNativeFullAdoptionsV1__'
@@ -225,6 +230,7 @@ export class AssistantPolicyService extends Service {
   private readonly nativeFullUnsettled = sharedNativeFullUnsettled()
   private readonly reviewerEventRegistration: ReturnType<typeof registerApprovalReviewerSessionEvent>
   private readonly policyContext: Context
+  private readonly preauthorizedTools = new Set<PreauthorizedTool>()
   private active = true
 
   constructor(ctx: Context, input: Config, options: AssistantPolicyServiceOptions = {}) {
@@ -293,6 +299,7 @@ export class AssistantPolicyService extends Service {
         // this continuation runs, so authorization must always fold the live
         // three-dimensional state again at the final synchronous boundary.
         if (getApprovalReviewer(agent.session) === 'none') return next()
+        if (this.isPreauthorizedTool(execution)) return next()
         const risk = classifyToolRisk({
           name: execution.name,
           arguments: execution.arguments,
@@ -331,6 +338,62 @@ export class AssistantPolicyService extends Service {
   async reconcileNativeFullReviewer(session: Session): Promise<NativeFullReviewerReconciliation> {
     if (!this.active) return 'unavailable'
     return await this.ensureNativeFullReviewer(this.policyContext, session)
+  }
+
+  /**
+   * Register one trusted Host-owned, finite authorization predicate for an
+   * exact live tool definition. This only bypasses this service's risk prompt;
+   * the independent monotonic policy guard still evaluates every execution.
+   */
+  registerPreauthorizedTool(
+    caller: Context,
+    definition: ToolDefinition,
+    authorize: (execution: ToolExecution) => boolean,
+  ): () => void {
+    this.assertActive()
+    if (definition.name !== 'action_github_commit'
+      || caller.fiber.name !== 'dsh-enhanced-assistant-actions') {
+      throw new Error('assistant-policy: preauthorization is reserved for assistant-actions action_github_commit')
+    }
+    const entry: PreauthorizedTool = { definition, authorize }
+    this.preauthorizedTools.add(entry)
+    let registered = true
+    const remove = (): void => {
+      if (!registered) return
+      registered = false
+      this.preauthorizedTools.delete(entry)
+    }
+    try {
+      caller.effect(() => remove, 'assistant-policy.preauthorized-tool')
+    } catch (error) {
+      remove()
+      throw error
+    }
+    return remove
+  }
+
+  /**
+   * Fail closed unless a live exact tool definition has an active trusted
+   * predicate that accepts this still-live execution.
+   */
+  isPreauthorizedTool(execution: ToolExecution): boolean {
+    if (!this.active || execution.agent === undefined || execution.signal.aborted) return false
+    let definition: ToolDefinition | undefined
+    try {
+      definition = this.policyContext.get('tools')?.get(execution.name, execution.agent)
+    } catch {
+      return false
+    }
+    if (definition === undefined) return false
+    for (const entry of this.preauthorizedTools) {
+      if (entry.definition !== definition) continue
+      try {
+        if (entry.authorize(execution) === true) return true
+      } catch {
+        // Trusted callers can fail, but a failed grant must never widen access.
+      }
+    }
+    return false
   }
 
   private nativeFullCandidate(ctx: Context, session: Session): boolean {
@@ -743,6 +806,35 @@ export class AssistantPolicyService extends Service {
       resource,
       context: { initiator: authority?.initiator ?? 'foreground' },
     }, options)
+  }
+
+  /**
+   * Evaluate an agent action against the same live identity and initiator
+   * context as authorization, without auditing or consuming a budget.
+   */
+  evaluateAgent(
+    agent: Agent | undefined,
+    action: string,
+    resource: PolicyResource,
+  ): PolicyDecision {
+    this.assertActive()
+    if (agent === undefined) return denial('missing-agent')
+    const workspace = agent.session.header.cwd
+    if (workspace === undefined || !isAbsolute(workspace)) return denial('missing-workspace')
+    const preset = agent.session.header.agentPreset
+    if (preset === undefined || preset === '') return denial('missing-agent-preset')
+    const authority = this.initiators.get(agent)
+    return this.evaluate({
+      subject: {
+        kind: 'agent',
+        id: preset,
+        workspace,
+        ...(authority?.principal === undefined ? {} : { principal: authority.principal }),
+      },
+      action,
+      resource,
+      context: { initiator: authority?.initiator ?? 'foreground' },
+    })
   }
 
   authorizeToolExecution(execution: Readonly<ToolExecution>): PolicyDecision {

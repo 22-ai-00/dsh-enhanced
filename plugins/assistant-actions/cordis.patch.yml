@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-enhanced-assistant-actions
+      name: '@dsh-enhanced/assistant-actions'

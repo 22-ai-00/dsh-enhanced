@@ -1,5 +1,7 @@
 # 自主智能体目标：跨设备交接
 
+> 有限动作 broker 更新（2026-09-07）：新增实验性 `assistant-actions`，可信 Host 通过短期凭据 lease，只向 operator 精确授权的 GitHub 仓库/分支/文件执行带 expected-head 的原子 commit。持久动作账本保留未知结果、阻止同 key 重放及同目的地/旧 head 的新 key 重试；撤权不承诺撤销已送达的提交。真实 ToolRuntime、Isolation 路由、Policy、受保护凭据文件和本地 HTTP 协议夹具已组合验证；没有调用真实 GitHub mutation。最终全仓与独立结论见落地账本末尾及[动作证据](evidence/action-broker-2026-09-07.json)。完整 18 项继续推进。
+
 > 隔离存储更新（2026-09-07）：schema v5 新增全状态目录观测准入、有限记录数和持久 storage reservation。结果正文清理默认关闭，显式启用后仅处理已确认停止的已知终态，保留原结果摘要、清理标记、幂等记录和累计预算；所有 unknown 正文保留。Host 后台与独立 `dsh-isolation maintain` 共用有界维护，WAL 忙时保留读者，SQLite freelist 不抵扣暂存预留。当前保护不是文件系统硬配额；最新验证与限制见落地账本末尾及[存储证据](evidence/isolation-storage-2026-09-07.json)。全部 18 项仍未完成，按依赖与验证继续，不按人工天/周等待。
 
 > 隔离回收更新（2026-09-07）：schema v4 已接通完整请求回执下的 Host 后台与独立 CLI 配额回收。原 supervisor 退出、同 Docker 代次、三资源精确清理回执及当前 fence/CAS 必须同时成立；保留 unknown 业务结果与已消耗预算，不重放执行。回执缺失、被中断 mutation 和 daemon 换代仍持有配额，systemd 诊断不能替代 containerd/shim 停止证明。真实 Docker、协议异常、冻结全仓检查与独立复核见[最新证据](evidence/isolation-reconciliation-2026-09-07.json)和落地账本末尾；全部 18 项继续推进。

@@ -79,3 +79,10 @@ Grant 绑定 owner lineage、范围、期限和次数/预留时长；请求摘�
 此切片的 Host/容器边界不能替代后续独立动作与凭据 broker、审计保留、生产 bootstrap 或外部补偿。可信 Host 插件仍处于现有 Host 信任域，不能据此声称全部第三方插件已经隔离。
 
 Isolation schema v2 在同一 SQLite 事务中预留 worker memory + workspace capacity + 32 MiB keeper 及工作卷 inode；尚未确认删除全部运行资源的 unknown 保留占用。v1 行迁移后保留，旧活动行用量不明时先恢复清理再接收新预留。资源池只覆盖同一个 stateRoot 的任务，不代表对全机 Docker/kernel 开销的硬约束。
+
+
+## 受限外部提交 broker
+
+`assistant-actions` 是独立 Host bundle，依赖当前 Policy/Delivery/Keychain，不把通用 token 交给模型或 Docker worker。首个动作固定为 GitHub GraphQL expected-head commit：仓库/分支/路径来自 operator grant，内容来自有界工具输入，Keychain 短租约只在 Host 回调使用。Policy 预授权只绑定已注册 broker 的 exact ToolDefinition；单调 deny 仍在原生执行 guard 生效，Isolation 仅为该特定 broker 开放工具路由。Host 插件仍是受信任控制面，此接口不是同进程恶意插件的沙箱。
+
+动作库独立持久化预留、期限、派发意图与结果；跨 Policy/Keychain/动作库没有原子事务，失败保守消耗预算，unknown 不重发。容器继续不出网，不提供通用网络代理。该 bundle 不自动加入安装场景或激活真实用户 profile。
