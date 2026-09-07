@@ -13,6 +13,11 @@ function goalContext(value) {
   if (text) return JSON.parse(text.replaceAll('&#123;', '{').replaceAll('&#125;', '}').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&'))
   if (value && typeof value === 'object') for (const child of Object.values(value)) { const found = goalContext(child); if (found) return found }
 }
+function goalContexts(value) {
+  if (typeof value === 'string') return [...value.matchAll(/<business-goal-data>\s*([\s\S]*?)\s*<\/business-goal-data>/g)]
+    .map(match => JSON.parse(match[1].replaceAll('&#123;', '{').replaceAll('&#125;', '}').replaceAll('&lt;', '<').replaceAll('&gt;', '>').replaceAll('&amp;', '&')))
+  return value && typeof value === 'object' ? Object.values(value).flatMap(goalContexts) : []
+}
 
 const objective = 'Create a shell program that reads two integers and prints their sum'
 
@@ -67,10 +72,15 @@ function installMock() {
         files: [{ path: 'source', content: call === (strategy ? 8 : 5) ? 'printf wrong' : 'read a b; printf "%s" "$((a + b))"' }], artifacts: ['answer.sh'], timeout_ms: 20000 }
     }
     const feedbackObserved = context.includes('isolated-unexpected-stdout')
+    // Serialized history contains older snapshots before the current one.
+    // Preserve all visible assessments instead of mistaking the first for current.
+    const strategyAssessments = goalContexts(body.messages).flatMap(goal => goal.strategies?.records ?? [])
     const secretObserved = ['expectedStdout', 'expectedExitCode', '19 23', '-8 5'].some(value => context.includes(value))
     appendFileSync(process.env.DSH_WEB_E2E_MODEL_LOG, `${JSON.stringify({ call, pid: process.pid, tool: tool ?? null, model: body.model, outputLimit: body.max_tokens,
-      redirect: init.redirect, transport: 'mock-provider-response', feedbackObserved, secretObserved })}\n`, { mode: 0o600 })
+      redirect: init.redirect, transport: 'mock-provider-response', feedbackObserved, strategyAssessments, secretObserved })}\n`, { mode: 0o600 })
     if (call === (strategy ? 10 : 7) && !feedbackObserved) throw new Error('native continuation did not receive independent verifier feedback')
+    if (strategy && call === 10 && !strategyAssessments.some(value => value.parentStep?.status === 'not-achieved'
+      && value.nextAction === 'revise-solution')) throw new Error('native continuation did not receive exact strategy parent failure')
     if (secretObserved) throw new Error('private verifier vectors leaked into the production wire projection')
     const message = { role: 'assistant', content: tool ? null : `Goal setup reply ${call}`, reasoning_content: 'Continue the current task.' }
     if (tool) message.tool_calls = [{ id: `goal-setup-fixture-${call}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }]

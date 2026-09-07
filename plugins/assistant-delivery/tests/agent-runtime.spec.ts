@@ -9905,6 +9905,10 @@ describe('real rc.1 delivery Agent runtime', () => {
     { name: 'rejects a real child scoped tool call', mode: 'scoped-tool', modelCalls: 5, adapterCalls: 5, boundChildren: 2, childCalls: 2 },
     { name: 'cancels an owner-revoked child waiting for its first chunk', mode: 'revoke', modelCalls: 4, adapterCalls: 2, boundChildren: 1, childCalls: 1 },
     { name: 'disposes a real native run returned after its strategy deadline', mode: 'late-start', modelCalls: 4, adapterCalls: 3, boundChildren: 1, childCalls: 1 },
+    { name: 'records an actual adapter stream failure without calling it a budget limit', mode: 'stream-error', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
+    { name: 'records missing model usage and retains the dispatched reservation', mode: 'usage-invalid', modelCalls: 4, adapterCalls: 4, boundChildren: 2, childCalls: 2 },
+    { name: 'does not attribute another request hook error to budget admission', mode: 'request-hook-error', modelCalls: 4, adapterCalls: 3, boundChildren: 2, childCalls: 1 },
+    { name: 'retains a reservation when downstream stream construction fails before an iterator exists', mode: 'stream-setup-error', modelCalls: 4, adapterCalls: 3, boundChildren: 2, childCalls: 2 },
   ] as const)('goal_strategy compare $name', async ({ mode, modelCalls, adapterCalls, boundChildren, childCalls }) => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-strategy-'))
     roots.push(root)
@@ -9963,6 +9967,10 @@ describe('real rc.1 delivery Agent runtime', () => {
     fixture.ctx.on('agent/created', ({ agent }) => {
       if (agent.session.header.origin !== 'subagent') return
       childAgents.push(agent)
+      if (mode === 'request-hook-error' && childAgents.length === 1) agent.ctx.on('agent/request', async (_payload, next) => {
+        await next()
+        throw new Error('other request hook fixture failed')
+      })
       agent.ctx.tools.register(defineTool({ name: 'strategy_scoped_probe', description: 'Actual child scoped tool fixture', parameters: {},
         output: { schema: { type: 'object', additionalProperties: false, properties: {} }, render: () => [] },
         execute: scopedEffect,
@@ -9972,6 +9980,14 @@ describe('real rc.1 delivery Agent runtime', () => {
     let attackSent = false
     let adapterAborted = false
     let revokedAt = 0
+    let faultInjected = false
+    if (mode === 'stream-setup-error') fixture.ctx.on('llm/stream', (_options, next) => {
+      if (!faultInjected && fixture.ctx.agents.currentInitiator()?.session.header.origin === 'subagent') {
+        faultInjected = true
+        throw new Error('downstream stream construction fixture failed')
+      }
+      return next()
+    })
     let releaseLate: (() => void) | undefined
     if (mode === 'late-start') {
       const gate = new Promise<void>(resolve => { releaseLate = resolve })
@@ -9997,8 +10013,14 @@ describe('real rc.1 delivery Agent runtime', () => {
         return
       }
       const initiator = fixture.ctx.agents.currentInitiator()
+      let omitUsage = false
       if (initiator?.session.header.origin === 'subagent') {
         expect(options.tools ?? []).toEqual([])
+        if (!faultInjected && (mode === 'stream-error' || mode === 'usage-invalid')) {
+          faultInjected = true
+          if (mode === 'stream-error') throw new Error('strategy adapter fixture stream failed')
+          omitUsage = true
+        }
         if (mode === 'revoke') {
           revokedAt = Date.now()
           expect(runtimeStore(fixture.service).revokePrincipal(owner.id, owner.version)).toMatchObject({ status: 'revoked' })
@@ -10024,7 +10046,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       yield { type: 'block-start', index: 0, blockType: 'text' }
       yield { type: 'text-delta', index: 0, text }
       yield { type: 'block-end', index: 0, block: { type: 'text', text } }
-      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } }
+      if (!omitUsage) yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     })
     await fixture.service.acceptInbound(message(`evt-native-strategy-${mode}`, 'Run the native strategy comparison'))
@@ -10045,11 +10067,19 @@ describe('real rc.1 delivery Agent runtime', () => {
     const strategy = new DatabaseSync(join(root, 'goals.sqlite.strategies'), { readOnly: true })
     try {
       const row = strategy.prepare('SELECT state, outcome, children_json FROM goal_strategy_records').get() as { state: string, outcome: string, children_json: string }
-      const bound = JSON.parse(row.children_json) as Array<{ sessionId: string }>
+      const bound = JSON.parse(row.children_json) as Array<{ sessionId: string; diagnostics?: { toolRejections: number; output: string; failure?: { stage: string; dispatched: boolean } } }>
       expect(row.state).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : 'settled')
-      expect(row.outcome, JSON.stringify([...stored.values()].map(s => ({ header: s.meta, events: s.events.filter(e => /error|end/.test(e.type)).slice(-4) })))).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : mode === 'quota' ? 'execution-failed' : 'advice')
+      expect(row.outcome, JSON.stringify([...stored.values()].map(s => ({ header: s.meta, events: s.events.filter(e => /error|end/.test(e.type)).slice(-4) })))).toBe(['revoke', 'late-start'].includes(mode) ? 'unknown' : ['quota', 'stream-error', 'usage-invalid', 'request-hook-error', 'stream-setup-error'].includes(mode) ? 'execution-failed' : 'advice')
       expect(bound).toHaveLength(boundChildren)
       expect(new Set(bound.map(child => child.sessionId)).size).toBe(boundChildren)
+      if (mode === 'quota') expect(bound[1]?.diagnostics?.failure).toEqual({ stage: 'request-limit', dispatched: false })
+      if (mode === 'stream-error' || mode === 'usage-invalid') expect(bound[0]?.diagnostics?.failure).toEqual({ stage: mode === 'stream-error' ? 'stream' : 'usage', dispatched: true })
+      if (mode === 'request-hook-error') expect(bound[0]?.diagnostics).not.toHaveProperty('failure')
+      if (mode === 'stream-setup-error') expect(bound[0]?.diagnostics?.failure).toEqual({ stage: 'stream', dispatched: false })
+      if (mode === 'scoped-tool') expect(bound.map(child => child.diagnostics?.toolRejections)).toEqual([1, 0])
+      if (mode === 'normal') expect(bound.map(child => child.diagnostics)).toEqual([
+        { toolRejections: 0, output: 'accepted' }, { toolRejections: 0, output: 'accepted' },
+      ])
     } finally { strategy.close() }
     const ledger = new DatabaseSync(join(root, 'goals.sqlite.budgets'), { readOnly: true })
     try {
@@ -10057,7 +10087,7 @@ describe('real rc.1 delivery Agent runtime', () => {
       const childRows = ledger.prepare("SELECT DISTINCT run_id FROM goal_budget_reservations WHERE goal_id = ? AND run_id LIKE 'strategy-%'").all(goalId) as Array<{ run_id: string }>
       expect(childRows).toHaveLength(childCalls)
       expect(new Set(childRows.map(row => row.run_id)).size).toBe(childCalls)
-      expect(ledger.prepare("SELECT COUNT(*) AS count FROM goal_budget_reservations WHERE state = 'held'").get()).toMatchObject({ count: mode === 'revoke' ? 1 : 0 })
+      expect(ledger.prepare("SELECT COUNT(*) AS count FROM goal_budget_reservations WHERE state = 'held'").get()).toMatchObject({ count: ['revoke', 'stream-error', 'usage-invalid', 'stream-setup-error'].includes(mode) ? 1 : 0 })
     } finally { ledger.close() }
     if (mode === 'late-start') {
       const before = fixture.llm.requests.length

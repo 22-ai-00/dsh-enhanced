@@ -1,0 +1,1625 @@
+{
+  "schema": "strategy-assessment-evidence/v1",
+  "recordedAt": "2026-09-07T22:38:10.682194+00:00",
+  "baseCommit": "11d294c7bd2be6f81becaf165876a3c3ef732007",
+  "scope": "WP06 observed strategy execution diagnostics and independently revalidated exact parent-step association; full 18-work-package goal remains active (3 verified, 8 implementing, 7 todo). Fixed-budget native strategy benchmark executor remains to implement; no calendar pacing or observation delivery wait.",
+  "sourceHashes": {
+    "docs/agent-autonomy-implementation.md": "2089379cc1547d5363220e79295a7d65469d01f5ec8c8b5a070c84d71e84412b",
+    "docs/autonomy-handoff-2026-09-06.md": "d9e28058d7299e92656901f6bfd271e2f5cf82ecef2980cf5e3f88bb5cade0f9",
+    "docs/goal-strategy-evaluation.md": "1e8f2b7a6605f12848d8e7d35b8b7f478b475ba1fe6328f59f6839b45002b877",
+    "plugins/assistant-delivery/tests/agent-runtime.spec.ts": "3a26ea93194e962810337abdfd31a9a3bcb6caebaac5a50824c9c4c0174477ca",
+    "plugins/assistant-goals/README.md": "6c3f9208476c00fb619f4bc198e16101ac932090142953d33c5decd994914af3",
+    "plugins/assistant-goals/src/budget.ts": "128aa3d8409f85c27eda1ed7e8d13d93da78f65382e3864cc2654d690368b298",
+    "plugins/assistant-goals/src/index.ts": "3b7b6efffe24b0df0a8e1d2f236a549868d5ee1e0fcfe42aac88aa58473722d2",
+    "plugins/assistant-goals/src/service.ts": "25b524f27b24dffcbb79cd49143914b6231d626d1deaeff5fbbdd02aa27fe631",
+    "plugins/assistant-goals/src/strategy-feedback.ts": "6a097d32d688f9ac4157c6532f0dbc3adfdb8f2260f14633b3fe1f6f8928ccef",
+    "plugins/assistant-goals/src/strategy-store.ts": "1384ad69dbe6a7725369967e305aeda1d2de67301e43b685a3edf687d0d41eda",
+    "plugins/assistant-goals/src/strategy.ts": "1d5ba9b54a04b4911eb4479153da785e2ee4fa5bb476d554bf2fd04b55140d9e",
+    "plugins/assistant-goals/tests/strategy-feedback.spec.ts": "e99a089c8c0da2ce274a91520e3168f679b18552eacb750f18502c902ece9e5f",
+    "plugins/assistant-goals/tests/strategy-store.spec.ts": "97c66aaaec939937a3988566bf04c7f2c5534355c4dc75b58965d328013afd95",
+    "scripts/e2e/autonomy-goal-setup-transport.mjs": "c4d254f8bd798631e16081929119d26ea803629a973639c393e3a92c603af0dc",
+    "scripts/e2e/autonomy-goal-setup.spec.mjs": "33102074e0d945ce96d32462cc87c722392633f4c8d9b941dce8e80557f9d98a"
+  },
+  "commands": [
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals exec vitest run tests/strategy-feedback.spec.ts",
+      "log": "/tmp/dsh-strategy-assessment-feedback-v1.log",
+      "exitCode": 1,
+      "sha256": "ec1c4811e8d08cf0916e4607013fd354441c53545d5abcf449ff01400c09d3db",
+      "exitFile": "/tmp/dsh-strategy-assessment-feedback-v1.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-feedback-v1.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-feedback-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals exec vitest run tests/strategy-feedback.spec.ts",
+      "log": "/tmp/dsh-strategy-assessment-feedback-v2.log",
+      "exitCode": 0,
+      "sha256": "c60444411555cfcffc9f81d18d3235adc425db586d5f2cc9b8bd1f7436c3ce13",
+      "exitFile": "/tmp/dsh-strategy-assessment-feedback-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-feedback-v2.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-feedback-v2.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals test",
+      "log": "/tmp/dsh-strategy-assessment-goals-unit-v1.log",
+      "exitCode": 1,
+      "sha256": "5a7c683908201a48f5b9fb3bd183c215bb30846b006517ccd1719af0706cbdcf",
+      "exitFile": "/tmp/dsh-strategy-assessment-goals-unit-v1.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-goals-unit-v1.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-goals-unit-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals test",
+      "log": "/tmp/dsh-strategy-assessment-goals-unit-v2.log",
+      "exitCode": 0,
+      "sha256": "1426d7516128ee48238754a90a013259f617e1746961c875a47d3f4b0dfd3942",
+      "exitFile": "/tmp/dsh-strategy-assessment-goals-unit-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-goals-unit-v2.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-goals-unit-v2.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals build",
+      "log": "/tmp/dsh-strategy-assessment-goals-build-v1.log",
+      "exitCode": 0,
+      "sha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8",
+      "exitFile": "/tmp/dsh-strategy-assessment-goals-build-v1.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-goals-build-v1.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-goals-build-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"goal_strategy compare\"",
+      "log": "/tmp/dsh-strategy-assessment-native-v1.log",
+      "exitCode": 0,
+      "sha256": "e521bf45671af164d406e8a8b9ec4bc42aff2c7b293d9e612c83b771da592f84",
+      "exitFile": "/tmp/dsh-strategy-assessment-native-v1.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-native-v1.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-native-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals build",
+      "log": "/tmp/dsh-strategy-assessment-goals-build-v2.log",
+      "exitCode": 0,
+      "sha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8",
+      "exitFile": "/tmp/dsh-strategy-assessment-goals-build-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-goals-build-v2.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-goals-build-v2.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-delivery exec vitest run tests/agent-runtime.spec.ts -t \"goal_strategy compare\"",
+      "log": "/tmp/dsh-strategy-assessment-native-v2.log",
+      "exitCode": 0,
+      "sha256": "d15c0319a4325f7d5a02922a52675329e6b72bd5e5938d060886ee06bc1bf583",
+      "exitFile": "/tmp/dsh-strategy-assessment-native-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-native-v2.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-native-v2.log.exit"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-strategy-assessment-check-v1.log",
+      "exitCode": 0,
+      "sha256": "9038011ee8438d4de010fc12181664849f59022b0244f022d37c3bef77bd743c",
+      "exitFile": "/tmp/dsh-strategy-assessment-check-v1.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-check-v1.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-check-v1.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:setup --output .cache/strategy-assessment-validation/browser-v1",
+      "log": "/tmp/dsh-strategy-assessment-browser-v1.log",
+      "exitCode": 1,
+      "sha256": "663b583131f6cf9f9a88addbfe8701f30d31bc78ee8563ad7ca92f1367a28fcd",
+      "exitFile": "/tmp/dsh-strategy-assessment-browser-v1.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-browser-v1.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-browser-v1.log.exit"
+    },
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/opt/google/chrome/chrome DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm test:autonomy:setup --grep \"strategy=true\" --output .cache/strategy-assessment-validation/browser-v2",
+      "log": "/tmp/dsh-strategy-assessment-browser-v2.log",
+      "exitCode": 0,
+      "sha256": "0e938dbd66281b8618dcd2bde7d1b1d038023692c3200ec768302571bfca7c4b",
+      "exitFile": "/tmp/dsh-strategy-assessment-browser-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-browser-v2.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-browser-v2.log.exit"
+    },
+    {
+      "command": "CI=true pnpm lint",
+      "log": "/tmp/dsh-strategy-assessment-lint-final.log",
+      "exitCode": 0,
+      "sha256": "decfb35129f4a3eb2629ca3980e9707d043c8162c302770aee3339015da2af54",
+      "exitFile": "/tmp/dsh-strategy-assessment-lint-final.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "workspaceLog": ".cache/strategy-assessment-validation/dsh-strategy-assessment-lint-final.log",
+      "workspaceExit": ".cache/strategy-assessment-validation/dsh-strategy-assessment-lint-final.log.exit"
+    }
+  ],
+  "artifactHashes": {
+    ".cache/strategy-assessment-validation/browser-v2/.last-run.json": "91d1c43004802cd49950d78eb11c8fa7d05da8ffffe219a8b13b2f561bc00903",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/goal-setup-first.log": "ab4f297758b8fda4959d7faf482383092672b155bb4d65149925e5aea825a791",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/goal-setup-second.log": "e6a620c0d6e57ef990fc2d9c1ab55e03f73b660bf950e93d5e09dbc08a802012",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/host-1.log": "0ac9b78c2fd81a3d7921e583ac4b979b74e59d52eaa5612439944ed5460e74ca",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/host-2.log": "5e2550aaaba4af994a732697aae6285357c403257fc5e1eb3af6ac28f7a8ee82",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/host-3.log": "caf31388c216430ae614d908ebdd02e1bbb06a28bff8ec683bae3442332b55f4",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/install.log": "64e6e806ff9e1a19c79213f187106b4965effc27ecc42bdd42741cb534cdefa8",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/installed-profile.yaml": "b1a2d4d0366d6749b96fd800859ec86be9a9da2b93c2428acb19ff707814c27f",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/model.jsonl": "c9db0264e41d7bc0ac643008f54d97a21a244713fe0f95b3d5ec55c0c5e171d3",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/proof.json": "563cca356c7929c75733ccc9d56c7f9bd27948c4ef4f3b67a63e90ba8925b173",
+    ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/transport.json": "22c728d2e58b06f3e1cd9245b60c9050f8fea1ab0d9555ce1a7f677e1864a0b5",
+    ".cache/strategy-assessment-validation/browser-v1/.last-run.json": "6093bf83f35bb5595cff4a248a9d8843996f91135ff7ca0993a260ebfbe1e325",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/goal-setup-first.log": "eddf369484b2488611b9d6190f7e5dbfb00ab7cb38be1267b5b471614cd04f15",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/goal-setup-second.log": "78dc8e9d26b1d78060ed338e84f8928afb160279e1e214687a43b69e1e2848bd",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/host-1.log": "dc89e32432f472872e9d9aea32b1d967fb1ffe7009acaded8f8f242c991a0b91",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/host-2.log": "675258bed243f2dbcc645dcf2ce8e33c61747dbaaafd4ba848688c403eebe1fa",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/host-3.log": "2858ce64193781749ef514945b1a72cc648198abdd1ada2e7224ff925f36706d",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/install.log": "eaad648c783bcb1ee7fb1c54b7cbf22fc64560f0846ee63a03ec23e44b47c88f",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/installed-profile.yaml": "52678298598181605c1f625cc6891c3fbb55e99eee346374ff0dd78e46e4f56f",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/model.jsonl": "be4d415047db603561c2d8d2e7b9dcd98e958d0c14fdc08cf168aacbcd1f61d0",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/proof.json": "e39809a624af3bb74735bf0e96d445210d2f4eccdfb8799b46c347abec2b1bbd",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/transport.json": "59ab16318ae02140f8556846a5f6daf35734c0eb89adb3b7c2008646e0d75404",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/error-context.md": "ae25c0994ffa855783421b5864b9379f8717e111510513ba9ae09a130d20b51f",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/failure-dom.txt": "b0bb37c6d408dd94ed608fafdb02634c173e189a1f556a44c96a2b461bb8f33d",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/goal-setup-first.log": "0b8ac4171eed0b914630e069955a1a65e0bc6272cd7d9a22eac38b5e6613613d",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/goal-setup-second.log": "2c2179d9e28b7c57c8c8a567fd8930838fedabfb8a28848ef6cac5c8b17fb82d",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/host-1.log": "f86bab45e1d9c76cb49a86ecca311e6d6eb457394208dd9b96472b570cd704d4",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/host-2.log": "3057bbc0c8366bdeb50bf98e82405c99a02e1aac5c5fcca7d302a272cc3faafd",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/host-3.log": "60d3cbaac2e8189047e510de8bc5d2393deb583efc4bfd6170a68661552f01ab",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/install.log": "f336068ae05ec27e9fc7aca7fd6b99aae50facd5b7578652ecd9855ff04e9897",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/installed-profile.yaml": "85f6ea1079be68354d681ff1599d9ca9cb16a1cd2c5cca1a22fd3e275e8e9971",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/model.jsonl": "10c20612c6902afa5b509ef549bf1ec4bd5982cfab2a41fcb4ad7212c37542af",
+    ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/transport.json": "cdbbf386ded74b5fb769c925a5cd43e03baf87aa392a35756aa3f098d63577fb"
+  },
+  "installedProofs": [
+    {
+      "path": ".cache/strategy-assessment-validation/browser-v1/autonomy-goal-setup-instal-3b403-red-session-strategy-false-/proof.json",
+      "sha256": "e39809a624af3bb74735bf0e96d445210d2f4eccdfb8799b46c347abec2b1bbd",
+      "native": {
+        "sessionId": "session-0c89524e-b7ae-4c45-bcce-def9403428b5",
+        "goalId": "goal-f53ef5fa-d26f-4c02-b99d-d85ea10d5009",
+        "revision": 4,
+        "objective": "Create a shell program that reads two integers and prints their sum",
+        "phase": "complete",
+        "roundsStarted": 2,
+        "maxGoalRounds": 3,
+        "updatedAt": 1788820287460
+      },
+      "hostProcesses": 3,
+      "wake": "succeeded after actual Host restart",
+      "budgets": [
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "goal-run-9159cc7fd01f7693e3a919e79a4a1a173f8c1b4c4d3a2d84b85f7dcf39a91934"
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "goal-run-9159cc7fd01f7693e3a919e79a4a1a173f8c1b4c4d3a2d84b85f7dcf39a91934"
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "goal-run-17b7031d0e7f12d6c5f51cf85df416d6dd002409ce8f9e8968f478a5e29cab3f"
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "goal-run-17b7031d0e7f12d6c5f51cf85df416d6dd002409ce8f9e8968f478a5e29cab3f"
+        }
+      ],
+      "calls": [
+        {
+          "call": 1,
+          "transport": "preparation-only-fixture",
+          "secretObserved": false
+        },
+        {
+          "call": 2,
+          "pid": 1133811,
+          "tool": "goal_create",
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 3,
+          "pid": 1133811,
+          "tool": "goal_schedule",
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 4,
+          "pid": 1133811,
+          "tool": null,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 5,
+          "pid": 1134412,
+          "tool": "isolation_run",
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 6,
+          "pid": 1134412,
+          "tool": null,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 7,
+          "pid": 1134412,
+          "tool": "isolation_run",
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": true,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 8,
+          "pid": 1134412,
+          "tool": null,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": true,
+          "strategyAssessments": [],
+          "secretObserved": false
+        }
+      ],
+      "approvals": 0,
+      "receipts": [
+        {
+          "id": "verification-acceptance-6be4748dfe870c43fcd37d88055034315545b4d9c9822b6f2edd96c10dc96152-1",
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "d1bbb27d2062c71d9704bbfa6787a3cbe060eb0ed8ff453c1cd72cd20972c7eb",
+              "nativeGoalId": "goal-f53ef5fa-d26f-4c02-b99d-d85ea10d5009",
+              "nativeRevision": 3,
+              "runId": "goal-run-9159cc7fd01f7693e3a919e79a4a1a173f8c1b4c4d3a2d84b85f7dcf39a91934",
+              "sessionId": "session-0c89524e-b7ae-4c45-bcce-def9403428b5",
+              "stepId": "round-1"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-9159cc7fd01f7693e3a919e79a4a1a173f8c1b4c4d3a2d84b85f7dcf39a91934"
+          },
+          "objectiveStatus": "not-achieved"
+        },
+        {
+          "id": "verification-acceptance-f08b4912da31399149d260cdf1ce547406290abab59c52a1663ccd4145c94ab8-1",
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-f6234bfc4f416866ec78388594abfe98d9b2c60711fff0deda66b15bc0ecd00f",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "d1bbb27d2062c71d9704bbfa6787a3cbe060eb0ed8ff453c1cd72cd20972c7eb",
+              "nativeGoalId": "goal-f53ef5fa-d26f-4c02-b99d-d85ea10d5009",
+              "sessionId": "session-0c89524e-b7ae-4c45-bcce-def9403428b5"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-f6234bfc4f416866ec78388594abfe98d9b2c60711fff0deda66b15bc0ecd00f"
+          },
+          "objectiveStatus": "not-achieved"
+        },
+        {
+          "id": "verification-acceptance-f6852b7857f54d416cd1d6c4a2e73f8346eaa90f9dbc9fe2dbe179f67ffa27a5-1",
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "d1bbb27d2062c71d9704bbfa6787a3cbe060eb0ed8ff453c1cd72cd20972c7eb",
+              "nativeGoalId": "goal-f53ef5fa-d26f-4c02-b99d-d85ea10d5009",
+              "nativeRevision": 3,
+              "runId": "goal-run-17b7031d0e7f12d6c5f51cf85df416d6dd002409ce8f9e8968f478a5e29cab3f",
+              "sessionId": "session-0c89524e-b7ae-4c45-bcce-def9403428b5",
+              "stepId": "round-2"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-17b7031d0e7f12d6c5f51cf85df416d6dd002409ce8f9e8968f478a5e29cab3f"
+          },
+          "objectiveStatus": "achieved"
+        },
+        {
+          "id": "verification-acceptance-f9d5137bfbca23f7a984218916626fa4269f33a2a03288a8ec5372cb39336b9a-1",
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-96b3087bbc57bd5ac8c6a4f3346d28fbc5952cd5dbd8fd6c9818771d8011b745",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "d1bbb27d2062c71d9704bbfa6787a3cbe060eb0ed8ff453c1cd72cd20972c7eb",
+              "nativeGoalId": "goal-f53ef5fa-d26f-4c02-b99d-d85ea10d5009",
+              "sessionId": "session-0c89524e-b7ae-4c45-bcce-def9403428b5"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-96b3087bbc57bd5ac8c6a4f3346d28fbc5952cd5dbd8fd6c9818771d8011b745"
+          },
+          "objectiveStatus": "achieved"
+        }
+      ]
+    },
+    {
+      "path": ".cache/strategy-assessment-validation/browser-v2/autonomy-goal-setup-instal-ff6fa-ared-session-strategy-true-/proof.json",
+      "sha256": "563cca356c7929c75733ccc9d56c7f9bd27948c4ef4f3b67a63e90ba8925b173",
+      "native": {
+        "sessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+        "goalId": "goal-0f6cee1b-8209-46e5-924f-1a4f840afd31",
+        "revision": 4,
+        "objective": "Create a shell program that reads two integers and prints their sum",
+        "phase": "complete",
+        "roundsStarted": 2,
+        "maxGoalRounds": 3,
+        "updatedAt": 1788820655014
+      },
+      "hostProcesses": 3,
+      "wake": "succeeded after actual Host restart",
+      "budgets": [
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d"
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "strategy-accb3b87-23e2-4ba7-903c-98ee22de2479"
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "strategy-f299a60a-90f0-47ac-a4e8-affd8c75b6af"
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d"
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d"
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "goal-run-cb671e86f2c1ee33f9dcfad15ae62c497013a1f59460cae07f4441c45d412e17"
+        },
+        {
+          "state": "settled",
+          "input_tokens_reserved": 2097152,
+          "output_tokens_reserved": 1024,
+          "input_tokens_actual": 12,
+          "output_tokens_actual": 8,
+          "run_id": "goal-run-cb671e86f2c1ee33f9dcfad15ae62c497013a1f59460cae07f4441c45d412e17"
+        }
+      ],
+      "calls": [
+        {
+          "call": 1,
+          "transport": "preparation-only-fixture",
+          "secretObserved": false
+        },
+        {
+          "call": 2,
+          "pid": 1198708,
+          "tool": "goal_create",
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 3,
+          "pid": 1198708,
+          "tool": "goal_schedule",
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 4,
+          "pid": 1198708,
+          "tool": null,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 5,
+          "pid": 1199334,
+          "tool": "goal_strategy",
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [],
+          "secretObserved": false
+        },
+        {
+          "call": 6,
+          "pid": 1199334,
+          "strategyChild": true,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "secretObserved": false
+        },
+        {
+          "call": 7,
+          "pid": 1199334,
+          "strategyChild": true,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "secretObserved": false
+        },
+        {
+          "call": 8,
+          "pid": 1199334,
+          "tool": "isolation_run",
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "pending",
+                "execution": null,
+                "criteria": [],
+                "criteriaTruncated": false
+              },
+              "nextAction": "await-parent-verification",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            }
+          ],
+          "secretObserved": false
+        },
+        {
+          "call": 9,
+          "pid": 1199334,
+          "tool": null,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": false,
+          "strategyAssessments": [
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "pending",
+                "execution": null,
+                "criteria": [],
+                "criteriaTruncated": false
+              },
+              "nextAction": "await-parent-verification",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            },
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "pending",
+                "execution": null,
+                "criteria": [],
+                "criteriaTruncated": false
+              },
+              "nextAction": "await-parent-verification",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            }
+          ],
+          "secretObserved": false
+        },
+        {
+          "call": 10,
+          "pid": 1199334,
+          "tool": "isolation_run",
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": true,
+          "strategyAssessments": [
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "pending",
+                "execution": null,
+                "criteria": [],
+                "criteriaTruncated": false
+              },
+              "nextAction": "await-parent-verification",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            },
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "pending",
+                "execution": null,
+                "criteria": [],
+                "criteriaTruncated": false
+              },
+              "nextAction": "await-parent-verification",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            },
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "not-achieved",
+                "execution": {
+                  "status": "succeeded",
+                  "quiescent": true,
+                  "completedAt": 1788820649318,
+                  "executionRef": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d"
+                },
+                "criteria": [
+                  {
+                    "id": "artifact-behavior",
+                    "status": "failed",
+                    "reason": "isolated-unexpected-stdout",
+                    "reasonTruncated": false,
+                    "evidence": [],
+                    "definition": {
+                      "kind": "isolated-process-behavior",
+                      "artifactPath": "answer.sh"
+                    },
+                    "evidenceTruncated": false
+                  }
+                ],
+                "criteriaTruncated": false,
+                "verification": {
+                  "contractId": "acceptance-df91f5ef2aed724650f693dbb4679bdb868c2b2443e18fc78e49ed26d3a5fecf",
+                  "receiptId": "verification-acceptance-df91f5ef2aed724650f693dbb4679bdb868c2b2443e18fc78e49ed26d3a5fecf-1",
+                  "verifiedAt": 1788820650059,
+                  "validUntil": 1788820887320
+                }
+              },
+              "nextAction": "revise-solution",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            }
+          ],
+          "secretObserved": false
+        },
+        {
+          "call": 11,
+          "pid": 1199334,
+          "tool": null,
+          "model": "deepseek-v4-flash",
+          "outputLimit": 1024,
+          "redirect": "error",
+          "transport": "mock-provider-response",
+          "feedbackObserved": true,
+          "strategyAssessments": [
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "pending",
+                "execution": null,
+                "criteria": [],
+                "criteriaTruncated": false
+              },
+              "nextAction": "await-parent-verification",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            },
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "pending",
+                "execution": null,
+                "criteria": [],
+                "criteriaTruncated": false
+              },
+              "nextAction": "await-parent-verification",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            },
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "not-achieved",
+                "execution": {
+                  "status": "succeeded",
+                  "quiescent": true,
+                  "completedAt": 1788820649318,
+                  "executionRef": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d"
+                },
+                "criteria": [
+                  {
+                    "id": "artifact-behavior",
+                    "status": "failed",
+                    "reason": "isolated-unexpected-stdout",
+                    "reasonTruncated": false,
+                    "evidence": [],
+                    "definition": {
+                      "kind": "isolated-process-behavior",
+                      "artifactPath": "answer.sh"
+                    },
+                    "evidenceTruncated": false
+                  }
+                ],
+                "criteriaTruncated": false,
+                "verification": {
+                  "contractId": "acceptance-df91f5ef2aed724650f693dbb4679bdb868c2b2443e18fc78e49ed26d3a5fecf",
+                  "receiptId": "verification-acceptance-df91f5ef2aed724650f693dbb4679bdb868c2b2443e18fc78e49ed26d3a5fecf-1",
+                  "verifiedAt": 1788820650059,
+                  "validUntil": 1788820887320
+                }
+              },
+              "nextAction": "revise-solution",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            },
+            {
+              "id": "strategy-920991f9-2e6b-47b3-afcd-a67f1eba91e2",
+              "kind": "compare",
+              "state": "settled",
+              "outcome": "advice",
+              "terminationReason": "completed",
+              "durationMs": 461,
+              "definitionCurrent": true,
+              "parentRunId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "parentSessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "attribution": "same-parent-step-only",
+              "parentStep": {
+                "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+                "definitionVersion": 1,
+                "status": "not-achieved",
+                "execution": {
+                  "status": "succeeded",
+                  "quiescent": true,
+                  "completedAt": 1788820649318,
+                  "executionRef": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d"
+                },
+                "criteria": [
+                  {
+                    "id": "artifact-behavior",
+                    "status": "failed",
+                    "reason": "isolated-unexpected-stdout",
+                    "reasonTruncated": false,
+                    "evidence": [],
+                    "definition": {
+                      "kind": "isolated-process-behavior",
+                      "artifactPath": "answer.sh"
+                    },
+                    "evidenceTruncated": false
+                  }
+                ],
+                "criteriaTruncated": false,
+                "verification": {
+                  "contractId": "acceptance-df91f5ef2aed724650f693dbb4679bdb868c2b2443e18fc78e49ed26d3a5fecf",
+                  "receiptId": "verification-acceptance-df91f5ef2aed724650f693dbb4679bdb868c2b2443e18fc78e49ed26d3a5fecf-1",
+                  "verifiedAt": 1788820650059,
+                  "validUntil": 1788820887320
+                }
+              },
+              "nextAction": "revise-solution",
+              "children": [
+                {
+                  "sessionId": "accb3b87-23e2-4ba7-903c-98ee22de2479",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                },
+                {
+                  "sessionId": "f299a60a-90f0-47ac-a4e8-affd8c75b6af",
+                  "stopReason": "completed",
+                  "quiescent": true,
+                  "diagnostics": {
+                    "toolRejections": 0,
+                    "output": "accepted"
+                  },
+                  "usage": {
+                    "modelCalls": 1,
+                    "heldCalls": 0,
+                    "inputTokens": 12,
+                    "outputTokens": 8,
+                    "costUsdMicros": null
+                  }
+                }
+              ]
+            }
+          ],
+          "secretObserved": false
+        }
+      ],
+      "approvals": 0,
+      "receipts": [
+        {
+          "id": "verification-acceptance-df91f5ef2aed724650f693dbb4679bdb868c2b2443e18fc78e49ed26d3a5fecf-1",
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "4869f2c3a8e970e84036885d4ea92ee1edf5519ff3e63a268bb1653f396de2ed",
+              "nativeGoalId": "goal-0f6cee1b-8209-46e5-924f-1a4f840afd31",
+              "nativeRevision": 3,
+              "runId": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d",
+              "sessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "stepId": "round-1"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-aac394774ed2d8daf0f6a878758e33784d79a1643a09cf460f29201cfb57002d"
+          },
+          "objectiveStatus": "not-achieved"
+        },
+        {
+          "id": "verification-acceptance-060b18e2284b27a553dbab10d9ba7fbcbc40050c37c644b02dde01d5fd0cc07a-1",
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-354a0f2f76a0633c9fe2060637e2e7f822a56e731f233eb0da63df4a7c2ea87b",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "4869f2c3a8e970e84036885d4ea92ee1edf5519ff3e63a268bb1653f396de2ed",
+              "nativeGoalId": "goal-0f6cee1b-8209-46e5-924f-1a4f840afd31",
+              "sessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-354a0f2f76a0633c9fe2060637e2e7f822a56e731f233eb0da63df4a7c2ea87b"
+          },
+          "objectiveStatus": "not-achieved"
+        },
+        {
+          "id": "verification-acceptance-3ae3edd296df47b1ac27e03f596286eef42094d698dfdbca7dbf557b630a2789-1",
+          "task": {
+            "goal": {
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "4869f2c3a8e970e84036885d4ea92ee1edf5519ff3e63a268bb1653f396de2ed",
+              "nativeGoalId": "goal-0f6cee1b-8209-46e5-924f-1a4f840afd31",
+              "nativeRevision": 3,
+              "runId": "goal-run-cb671e86f2c1ee33f9dcfad15ae62c497013a1f59460cae07f4441c45d412e17",
+              "sessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79",
+              "stepId": "round-2"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-cb671e86f2c1ee33f9dcfad15ae62c497013a1f59460cae07f4441c45d412e17"
+          },
+          "objectiveStatus": "achieved"
+        },
+        {
+          "id": "verification-acceptance-d6ea887fd92144bc3d19df68a0f8b7c37253bdf8535ff16e18864dda59657e59-1",
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-b97f853402252c82c479eedfc0c05b2102a249dc99d98a4d7918d17b8601cb37",
+              "definitionDigest": "56c0116a07ffabac2ccb3dfaa0c0ba7a4adb42f92f21eb6fc52cf119112b3629",
+              "definitionVersion": 1,
+              "id": "4869f2c3a8e970e84036885d4ea92ee1edf5519ff3e63a268bb1653f396de2ed",
+              "nativeGoalId": "goal-0f6cee1b-8209-46e5-924f-1a4f840afd31",
+              "sessionId": "session-1069b618-cfe9-4029-ae4d-cae7f8ee8a79"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-b97f853402252c82c479eedfc0c05b2102a249dc99d98a4d7918d17b8601cb37"
+          },
+          "objectiveStatus": "achieved"
+        }
+      ]
+    }
+  ],
+  "packContents": {
+    "@dsh-enhanced/assistant-goals@0.1.0": [
+      "cordis.patch.yml",
+      "lib/budget-store.d.ts",
+      "lib/budget-store.d.ts.map",
+      "lib/budget-store.js",
+      "lib/budget-store.js.map",
+      "lib/budget.d.ts",
+      "lib/budget.d.ts.map",
+      "lib/budget.js",
+      "lib/budget.js.map",
+      "lib/execution-store.d.ts",
+      "lib/execution-store.d.ts.map",
+      "lib/execution-store.js",
+      "lib/execution-store.js.map",
+      "lib/execution.d.ts",
+      "lib/execution.d.ts.map",
+      "lib/execution.js",
+      "lib/execution.js.map",
+      "lib/feedback.d.ts",
+      "lib/feedback.d.ts.map",
+      "lib/feedback.js",
+      "lib/feedback.js.map",
+      "lib/index.d.ts",
+      "lib/index.d.ts.map",
+      "lib/index.js",
+      "lib/index.js.map",
+      "lib/outcome-store.d.ts",
+      "lib/outcome-store.d.ts.map",
+      "lib/outcome-store.js",
+      "lib/outcome-store.js.map",
+      "lib/outcome.d.ts",
+      "lib/outcome.d.ts.map",
+      "lib/outcome.js",
+      "lib/outcome.js.map",
+      "lib/service.d.ts",
+      "lib/service.d.ts.map",
+      "lib/service.js",
+      "lib/service.js.map",
+      "lib/store.d.ts",
+      "lib/store.d.ts.map",
+      "lib/store.js",
+      "lib/store.js.map",
+      "lib/strategy-feedback.d.ts",
+      "lib/strategy-feedback.d.ts.map",
+      "lib/strategy-feedback.js",
+      "lib/strategy-feedback.js.map",
+      "lib/strategy-identity.d.ts",
+      "lib/strategy-identity.d.ts.map",
+      "lib/strategy-identity.js",
+      "lib/strategy-identity.js.map",
+      "lib/strategy-store.d.ts",
+      "lib/strategy-store.d.ts.map",
+      "lib/strategy-store.js",
+      "lib/strategy-store.js.map",
+      "lib/strategy.d.ts",
+      "lib/strategy.d.ts.map",
+      "lib/strategy.js",
+      "lib/strategy.js.map",
+      "lib/tools.d.ts",
+      "lib/tools.d.ts.map",
+      "lib/tools.js",
+      "lib/tools.js.map",
+      "lib/types.d.ts",
+      "lib/types.d.ts.map",
+      "lib/types.js",
+      "lib/types.js.map",
+      "lib/version.d.ts",
+      "lib/version.d.ts.map",
+      "lib/version.js",
+      "lib/version.js.map",
+      "lib/wake-store.d.ts",
+      "lib/wake-store.d.ts.map",
+      "lib/wake-store.js",
+      "lib/wake-store.js.map",
+      "lib/wake.d.ts",
+      "lib/wake.d.ts.map",
+      "lib/wake.js",
+      "lib/wake.js.map",
+      "LICENSE",
+      "package.json",
+      "README.md"
+    ],
+    "@dsh-enhanced/assistant-delivery@0.1.24": [
+      "cordis.patch.yml",
+      "lib/acceptance.d.ts",
+      "lib/acceptance.d.ts.map",
+      "lib/acceptance.js",
+      "lib/acceptance.js.map",
+      "lib/agent-runtime.d.ts",
+      "lib/agent-runtime.d.ts.map",
+      "lib/agent-runtime.js",
+      "lib/agent-runtime.js.map",
+      "lib/canonical.d.ts",
+      "lib/canonical.d.ts.map",
+      "lib/canonical.js",
+      "lib/canonical.js.map",
+      "lib/coordinator.d.ts",
+      "lib/coordinator.d.ts.map",
+      "lib/coordinator.js",
+      "lib/coordinator.js.map",
+      "lib/feedback-command.d.ts",
+      "lib/feedback-command.d.ts.map",
+      "lib/feedback-command.js",
+      "lib/feedback-command.js.map",
+      "lib/goal-wake-types.d.ts",
+      "lib/goal-wake-types.d.ts.map",
+      "lib/goal-wake-types.js",
+      "lib/goal-wake-types.js.map",
+      "lib/inbound-images.d.ts",
+      "lib/inbound-images.d.ts.map",
+      "lib/inbound-images.js",
+      "lib/inbound-images.js.map",
+      "lib/index.d.ts",
+      "lib/index.d.ts.map",
+      "lib/index.js",
+      "lib/index.js.map",
+      "lib/learning-command.d.ts",
+      "lib/learning-command.d.ts.map",
+      "lib/learning-command.js",
+      "lib/learning-command.js.map",
+      "lib/native-web-owner.d.ts",
+      "lib/native-web-owner.d.ts.map",
+      "lib/native-web-owner.js",
+      "lib/native-web-owner.js.map",
+      "lib/operator-snapshot.d.ts",
+      "lib/operator-snapshot.d.ts.map",
+      "lib/operator-snapshot.js",
+      "lib/operator-snapshot.js.map",
+      "lib/operator.d.ts",
+      "lib/operator.d.ts.map",
+      "lib/operator.js",
+      "lib/operator.js.map",
+      "lib/service.d.ts",
+      "lib/service.d.ts.map",
+      "lib/service.js",
+      "lib/service.js.map",
+      "lib/session-commands.d.ts",
+      "lib/session-commands.d.ts.map",
+      "lib/session-commands.js",
+      "lib/session-commands.js.map",
+      "lib/session-lease-runtime.d.ts",
+      "lib/session-lease-runtime.d.ts.map",
+      "lib/session-lease-runtime.js",
+      "lib/session-lease-runtime.js.map",
+      "lib/session-lease-types.d.ts",
+      "lib/session-lease-types.d.ts.map",
+      "lib/session-lease-types.js",
+      "lib/session-lease-types.js.map",
+      "lib/sqlite.d.ts",
+      "lib/sqlite.d.ts.map",
+      "lib/sqlite.js",
+      "lib/sqlite.js.map",
+      "lib/store.d.ts",
+      "lib/store.d.ts.map",
+      "lib/store.js",
+      "lib/store.js.map",
+      "lib/tools.d.ts",
+      "lib/tools.d.ts.map",
+      "lib/tools.js",
+      "lib/tools.js.map",
+      "lib/types.d.ts",
+      "lib/types.d.ts.map",
+      "lib/types.js",
+      "lib/types.js.map",
+      "lib/version.d.ts",
+      "lib/version.d.ts.map",
+      "lib/version.js",
+      "lib/version.js.map",
+      "lib/workflow-auto-producer.d.ts",
+      "lib/workflow-auto-producer.d.ts.map",
+      "lib/workflow-auto-producer.js",
+      "lib/workflow-auto-producer.js.map",
+      "lib/workflow-command.d.ts",
+      "lib/workflow-command.d.ts.map",
+      "lib/workflow-command.js",
+      "lib/workflow-command.js.map",
+      "LICENSE",
+      "package.json",
+      "README.md"
+    ]
+  },
+  "verification": {
+    "check": {
+      "exitCode": 0,
+      "summaryLines": [
+        " Test Files  288 passed (288)",
+        "      Tests  3724 passed (3724)",
+        "packages/assistant-growth-contract test:  Test Files  1 passed (1)",
+        "packages/assistant-growth-contract test:       Tests  11 passed (11)",
+        "packages/task-acceptance-contract test:  Test Files  1 passed (1)",
+        "packages/task-acceptance-contract test:       Tests  15 passed (15)",
+        "packages/llm-route-capabilities test:  Test Files  1 passed (1)",
+        "packages/llm-route-capabilities test:       Tests  18 passed (18)",
+        "plugins/acp test:  Test Files  5 passed (5)",
+        "plugins/acp test:       Tests  31 passed (31)",
+        "plugins/hello test:  Test Files  1 passed (1)",
+        "plugins/hello test:       Tests  2 passed (2)",
+        "plugins/assistant-policy test:  Test Files  14 passed (14)",
+        "plugins/assistant-policy test:       Tests  196 passed (196)",
+        "plugins/plugin-control-plane test:  Test Files  8 passed (8)",
+        "plugins/plugin-control-plane test:       Tests  155 passed (155)",
+        "plugins/credentials-keychain test:  Test Files  6 passed (6)",
+        "plugins/credentials-keychain test:       Tests  27 passed (27)",
+        "plugins/traex-acp-provider test:  Test Files  8 passed (8)",
+        "plugins/traex-acp-provider test:       Tests  154 passed (154)",
+        "plugins/coding-subscription-provider test:  Test Files  13 passed (13)",
+        "plugins/coding-subscription-provider test:       Tests  384 passed (384)",
+        "plugins/assistant-goals test:  Test Files  13 passed (13)",
+        "plugins/assistant-goals test:       Tests  99 passed (99)",
+        "plugins/assistant-evaluation test:  Test Files  17 passed (17)",
+        "plugins/assistant-evaluation test:       Tests  132 passed (132)",
+        "plugins/personal-memory test:  Test Files  10 passed (10)",
+        "plugins/personal-memory test:       Tests  138 passed (138)",
+        "plugins/assistant-automations test:  Test Files  15 passed (15)",
+        "plugins/assistant-automations test:       Tests  224 passed (224)",
+        "plugins/assistant-verifier test:  Test Files  7 passed (7)",
+        "plugins/assistant-verifier test:       Tests  60 passed (60)",
+        "plugins/assistant-isolation test:  Test Files  22 passed (22)",
+        "plugins/assistant-isolation test:       Tests  102 passed (102)",
+        "plugins/assistant-delivery test:  Test Files  33 passed (33)",
+        "plugins/assistant-delivery test:       Tests  705 passed (705)",
+        "plugins/assistant-deepseek-budget test:  Test Files  1 passed (1)",
+        "plugins/assistant-deepseek-budget test:       Tests  4 passed (4)",
+        "plugins/assistant-heartbeat test:  Test Files  4 passed (4)",
+        "plugins/assistant-heartbeat test:       Tests  22 passed (22)",
+        "plugins/assistant-actions test:  Test Files  5 passed (5)",
+        "plugins/assistant-actions test:       Tests  29 passed (29)",
+        "plugins/event-triggers test:  Test Files  8 passed (8)",
+        "plugins/event-triggers test:       Tests  72 passed (72)",
+        "plugins/personal-wiki test:  Test Files  8 passed (8)",
+        "plugins/personal-wiki test:       Tests  65 passed (65)",
+        "plugins/preference-learning test:  Test Files  4 passed (4)",
+        "plugins/preference-learning test:       Tests  84 passed (84)",
+        "plugins/assistant-growth-experiments test:  Test Files  4 passed (4)",
+        "plugins/assistant-growth-experiments test:       Tests  20 passed (20)",
+        "plugins/assistant-evolution test:  Test Files  10 passed (10)",
+        "plugins/assistant-evolution test:       Tests  162 passed (162)",
+        "plugins/memory-wiki-bridge test:  Test Files  2 passed (2)",
+        "plugins/memory-wiki-bridge test:       Tests  6 passed (6)",
+        "plugins/personal-assistant test:  Test Files  1 passed (1)",
+        "plugins/personal-assistant test:       Tests  4 passed (4)",
+        "plugins/assistant-health test:  Test Files  2 passed (2)",
+        "plugins/assistant-health test:       Tests  45 passed (45)",
+        "plugins/assistant-web-owner test:  Test Files  6 passed (6)",
+        "plugins/assistant-web-owner test:       Tests  30 passed (30)",
+        "plugins/assistant-recovery test:  Test Files  10 passed (10)",
+        "plugins/assistant-recovery test:       Tests  121 passed (121)",
+        "plugins/lark-channel test:  Test Files  24 passed (24)",
+        "plugins/lark-channel test:       Tests  398 passed (398)"
+      ],
+      "packCount": 31,
+      "note": "Final production source covered. A later test-only browser parser fix collects all serialized historical goal snapshots; browser-v2 and final lint validate it."
+    },
+    "nativeFinal": {
+      "label": "native-v2",
+      "passed": 9,
+      "exitCode": 0,
+      "newAssertions": [
+        "Adapter stream failure is stream/true; incomplete usage is usage/true; both retain held reservations.",
+        "Another agent/request hook failure does not invent a budget admission diagnostic.",
+        "Downstream stream construction failure is stream/false, still retains the existing reservation.",
+        "Tool-denied count, quota request-limit/false and normal accepted output diagnostics are persisted."
+      ]
+    },
+    "installedBrowser": {
+      "passed": 2,
+      "runs": {
+        "browser-v1": {
+          "exitCode": 1,
+          "defaultDisabled": "passed",
+          "strategyEnabled": "failed"
+        },
+        "browser-v2": {
+          "exitCode": 0,
+          "strategyEnabled": "passed"
+        }
+      },
+      "assertions": [
+        "Actual next native parent request contains advice associated with the exact failed parent-step receipt and revise-solution.",
+        "Later successful step has a different run ID and cannot replace the earlier failure.",
+        "Default-disabled strategy retains its original installed restart/isolated verification flow."
+      ]
+    },
+    "feedbackAndMigration": [
+      "Exact run/session/definition/scope/admission binding rejects substitutions, duplicates and later success.",
+      "Receipt removal/tampering/expiry and changed definition are reassessed on every context read.",
+      "Schema 1 cold records keep absent diagnostics; invalid old records do not partially upgrade schema."
+    ]
+  },
+  "failuresRetained": {
+    "browser-v1": "Default-disabled scenario passed. Enabled fixture selected only the first historical goal snapshot, missed the newer exact-parent assessment, threw at model call 10 and left native paused. The fixture now collects all serialized goal snapshots and still matches exact failed run/session/receipt plus a different later-success run; production unchanged. Only browser-v2 counts as enabled success.",
+    "feedback-v1": "Two fixture receipts used prose where the protocol requires kebab-case reason; corrected to answer-mismatch.",
+    "goals-unit-v1": "Legacy SQLite fixture initially lacked required private permissions; corrected. Root also fixed migration column ordering and validated schema within one rollback-capable transaction before final full check."
+  },
+  "limitations": [
+    "Deterministic model transport responses; production native runtime, DeepSeek adapter/meter, verifier and Docker run, but no paid API or model-quality/strategy-benefit claim.",
+    "parentStep is same-parent-step-only association, not causal credit, strategy correctness or whole-goal completion.",
+    "failure.dispatched records obtaining a downstream iterator, not confirmed supplier HTTP dispatch; false cannot prove absence of effects or authorize refund.",
+    "Diagnostics record observed boundaries, not root causes; legacy records remain without child diagnostics and with unknown termination reason.",
+    "The fixed-budget strategy executor is designed but not implemented. Existing one-call no-tools research/memory native benchmark cannot stand in for it.",
+    "Full goal remains incomplete; all other work packages and real-model verification remain required."
+  ],
+  "review": {
+    "source": {
+      "status": "PASS",
+      "reviewer": "strategy_design_verify",
+      "mode": "independent read-only; no test/build execution",
+      "fixes": [
+        "Exclude arbitrary downstream request-hook errors from budget attribution.",
+        "Set dispatched only after obtaining downstream iterator; retain reservations on earlier failures.",
+        "Preserve quiescence/unknown semantics and transactionally validate schema migration."
+      ]
+    },
+    "finalEvidence": {
+      "status": "PASS",
+      "reviewer": "strategy_design_verify",
+      "mode": "independent read-only inspection and hash verification; no test/build rerun",
+      "verified": {
+        "sourceHashes": 15,
+        "commandLogsAndExitFiles": 12,
+        "artifactHashes": 33
+      },
+      "findings": [
+        "Full check exited 0: 288 test files and 3724 tests passed with no skips; 31 package checks completed.",
+        "Native v2 exited 0 with 9 targeted tests passing.",
+        "Browser v1 exited 1; only its default-disabled subcase is selected as successful evidence.",
+        "Browser v2 exited 0 with exact failed parent receipt/run/session/definition association and a distinct later successful run.",
+        "Documentation preserves the 3/18 verified status and explicitly excludes real-model quality or paid-provider claims."
+      ]
+    },
+    "codexWithChatgpt": {
+      "task": "c2c_a945",
+      "localRecordsOnly": true,
+      "reason": "Required in-app browser unavailable; no ChatGPT web planning/review claimed."
+    }
+  }
+}
