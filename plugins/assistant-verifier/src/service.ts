@@ -1,16 +1,27 @@
 import { randomUUID } from 'node:crypto'
+import { isAbsolute, normalize, resolve } from 'node:path'
 import { Context, Service } from '@deepseek-ai/cordis'
 import {
   acceptanceCanonicalJson, acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt,
 } from '@dsh-enhanced/task-acceptance-contract'
 import type { CriterionResult, TaskAcceptanceContract, TaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { Config, compileAcceptanceProfiles } from './config.js'
+import type { AcceptanceProfile } from './config.js'
 import { verifyAcceptanceCriteria } from './drivers.js'
 import type { AcceptanceHandle, AcceptanceTask, TaskAcceptanceProducer, TaskAcceptanceRegistration, VerifierEvaluationRegistration } from './host.js'
 import { AcceptanceStore } from './store.js'
 import type { Execution } from './store.js'
 
 export { Config } from './config.js'
+
+/** Exact Host-owned key used to inspect a configured acceptance profile. */
+export interface AcceptanceProfileSelection extends Pick<AcceptanceProfile, 'scope' | 'owner' | 'objective' | 'taskKind'> {}
+
+/** Immutable, configuration-only profile inspection result. */
+export interface AcceptanceProfileInspection {
+  readonly profile: AcceptanceProfile
+  readonly digest: string
+}
 
 declare module '@deepseek-ai/cordis' {
   interface Context { assistantVerifier: AssistantVerifierService }
@@ -22,6 +33,51 @@ const producerTaskKinds: Readonly<Record<ProducerName, readonly TaskAcceptanceCo
   assistantAutomations: ['automation-run'], assistantDelivery: ['foreground-turn'], assistantGoals: ['goal-step', 'goal-outcome'],
 })
 interface Binding { producer: TaskAcceptanceProducer; generation: string; dispose(): void }
+
+const PROFILE_SELECTION_ID = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u
+const PROFILE_SELECTION_PRESET = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u
+
+function record(value: unknown, keys: readonly string[], label: string): Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)
+    || (Object.getPrototypeOf(value) !== Object.prototype && Object.getPrototypeOf(value) !== null)
+    || Reflect.ownKeys(value).some(key => typeof key !== 'string')
+    || Object.getOwnPropertyNames(value).sort().join(',') !== [...keys].sort().join(',')
+    || Object.values(Object.getOwnPropertyDescriptors(value)).some(property => !property.enumerable || !('value' in property))) {
+    throw new Error(`assistant-verifier: invalid ${label} selection`)
+  }
+  return value as Record<string, unknown>
+}
+
+function selectionKey(value: AcceptanceProfileSelection): string {
+  const selection = record(value, ['scope', 'owner', 'objective', 'taskKind'], 'profile')
+  const scope = record(selection.scope, ['workspace', 'preset'], 'profile scope')
+  const owner = record(selection.owner, ['principalRecordId', 'principalVersion'], 'profile owner')
+  if (typeof scope.workspace !== 'string' || scope.workspace.includes('\0') || Buffer.byteLength(scope.workspace) > 4_096
+    || scope.workspace !== scope.workspace.normalize('NFC').trim() || !isAbsolute(scope.workspace)
+    || normalize(scope.workspace) !== scope.workspace || resolve(scope.workspace) !== scope.workspace
+    || typeof scope.preset !== 'string' || !PROFILE_SELECTION_PRESET.test(scope.preset)
+    || typeof owner.principalRecordId !== 'string' || !PROFILE_SELECTION_ID.test(owner.principalRecordId)
+    || typeof owner.principalVersion !== 'number'
+    || !Number.isSafeInteger(owner.principalVersion) || owner.principalVersion < 1
+    || typeof selection.objective !== 'string' || selection.objective === '' || selection.objective.includes('\0') || Buffer.byteLength(selection.objective) > 65_536
+    || (selection.taskKind !== 'automation-run' && selection.taskKind !== 'foreground-turn'
+      && selection.taskKind !== 'goal-step' && selection.taskKind !== 'goal-outcome')) {
+    throw new Error('assistant-verifier: invalid profile selection')
+  }
+  return acceptanceCanonicalJson([scope, owner, selection.taskKind, selection.objective])
+}
+
+function freeze<T>(value: T): T {
+  if (value !== null && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const key of Reflect.ownKeys(value)) freeze((value as Record<PropertyKey, unknown>)[key])
+    Object.freeze(value)
+  }
+  return value
+}
+
+function profileCopy(profile: AcceptanceProfile): AcceptanceProfile {
+  return freeze(structuredClone(profile))
+}
 
 function isProducer(value: unknown): value is TaskAcceptanceProducer {
   const item = value as Partial<TaskAcceptanceProducer> | null
@@ -85,6 +141,21 @@ export class AssistantVerifierService extends Service<Config> {
   }
 
   trustedVerificationProducerGeneration = (): string => { this.#assertActive(); return this.#generation }
+
+  /**
+   * Host-only configuration inspection for preflight. It never creates a
+   * contract, registers a producer, or authorizes/starts execution.
+   */
+  inspectAcceptanceProfile = (selection: AcceptanceProfileSelection): Readonly<AcceptanceProfileInspection> | null => {
+    this.#assertActive()
+    const key = selectionKey(selection)
+    const selected = this.#compiled.profiles.find(({ profile }) => acceptanceCanonicalJson([
+      profile.scope, profile.owner, profile.taskKind, profile.objective,
+    ]) === key)
+    return selected === undefined ? null : Object.freeze({
+      profile: profileCopy(selected.profile), digest: selected.digest,
+    })
+  }
 
   registerTrustedVerifierEvaluationSink = (registration: VerifierEvaluationRegistration): (() => void) => {
     this.#assertActive()

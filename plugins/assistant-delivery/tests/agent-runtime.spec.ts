@@ -8422,7 +8422,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('keeps whole-goal v3 conditions frozen and feeds a failed assessment into the next native round', async () => {
+  test('preflights whole-goal creation, keeps v3 conditions frozen and feeds a failed assessment into the next native round', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-goal-outcome-v3-rounds-'))
     roots.push(root)
     const ownerId = 'lark/bot-1/tenant-a/ou_owner'
@@ -8467,12 +8467,30 @@ describe('real rc.1 delivery Agent runtime', () => {
           criteria: [{ id: 'whole-result', kind: 'document-citations', authority: { id: 'sources', digest },
             artifactPath: 'report.md', requiredText: ['Confirmed result'], quotes: [] }],
         },
+        { id: 'goal-outcome-v3-step-only', version: 1, scope: { workspace: root, preset: 'primary' },
+          owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind: 'goal-step',
+          objective: 'A goal without a whole-goal profile', validityMs: 60_000,
+          bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 },
+          criteria: [{ id: 'step-result', kind: 'document-citations', authority: { id: 'sources', digest },
+            artifactPath: 'step.md', requiredText: ['Step complete'], quotes: [] }],
+        },
       ],
     })
     fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       if (fixture.service.currentPreferenceTurn(agent) !== undefined && nativeGoals(fixture.ctx).get(agent) === undefined) {
+        // Exercise the actual tool / Delivery owner bridge. A configuration
+        // failure must leave no native goal, business row or contract to adopt.
+        const rejected = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-outcome-v3-missing-profile'), name: 'goal_create', agent, signal,
+          arguments: { objective: 'A goal without a whole-goal profile', max_goal_rounds: 3 } })
+        expect(rejected.isError).toBe(true)
+        expect(JSON.stringify(rejected.content)).toContain('configure an exact whole-goal success specification')
+        expect(nativeGoals(fixture.ctx).get(agent)).toBeUndefined()
+        const noContracts = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
+        try { expect(noContracts.prepare('SELECT id FROM acceptance_contracts').all()).toEqual([]) } finally { noContracts.close() }
+        const noGoals = new DatabaseSync(join(root, 'goals.sqlite'), { readOnly: true })
+        try { expect(noGoals.prepare('SELECT id FROM goal_records').all()).toEqual([]) } finally { noGoals.close() }
         const created = await fixture.ctx.tools.execute({ callId: ToolCallId('goal-outcome-v3-create'), name: 'goal_create', agent, signal,
-          arguments: { objective, max_goal_rounds: 3 } })
+          arguments: { objective: `  ${objective}\n`, max_goal_rounds: 3 } })
         if (created.isError) throw new Error(`whole-goal v3 setup rejected: ${JSON.stringify(created.content)}`)
       }
       return await next()

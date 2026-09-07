@@ -22,6 +22,7 @@ export const providerIds = [
   'assistantHeartbeat',
   'larkChannel',
   'assistantVerifier',
+  'assistantGoals',
 ] as const
 
 export type HealthProviderId = typeof providerIds[number]
@@ -51,6 +52,7 @@ const providerServiceNames: Readonly<Record<HealthProviderId, string>> = Object.
   assistantHeartbeat: 'assistantHeartbeat',
   larkChannel: 'larkChannel',
   assistantVerifier: 'assistantVerifier',
+  assistantGoals: 'assistantGoals',
 })
 
 export interface Config {
@@ -199,11 +201,19 @@ const keys: Record<HealthProviderId, Readonly<Record<string, HealthMetricSpecifi
   larkChannel: { state: ['connected', 'connected-with-gap', 'connecting', 'disabled', 'disconnected', 'reconnecting'],
     gapGeneration: 'number' },
   // A dynamic seam keeps assistant-verifier independently installable. Only
-  // its two fixed Host producer ids are public health vocabulary.
+  // its fixed Host producer ids are public health vocabulary.
   assistantVerifier: { ready: 'boolean', profiles: 'number', requireAcceptance: 'boolean',
     hostProducers: 'host-producers', evaluationConnected: 'boolean', awaitingExecution: 'number',
     pendingVerification: 'number', pendingReceipts: 'number', expiredReceipts: 'number',
     needsAttention: 'number' },
+  // Goals is independently installable. Keep this flattened vocabulary to
+  // bounded current-state capability signals; nested provider payloads can
+  // otherwise grow into route, owner, or durable-store disclosures.
+  assistantGoals: { ready: 'boolean', contextReady: 'boolean', executionEnabled: 'boolean',
+    verifierConnected: 'boolean', outcomeEnabled: 'boolean', outcomeConnected: 'boolean',
+    budgetEnabled: 'boolean', registeredBudgetMeters: 'number', activeBudgetCalls: 'number',
+    wakeEnabled: 'boolean', wakeConnected: 'boolean', wakeReconciliationFailures: 'number',
+    observationFailures: 'number' },
 }
 
 interface HealthSummary {
@@ -332,6 +342,25 @@ function operationalAssessments(
       // a lifetime count of historical verification failures.
       add((metric('needsAttention') as number) > 0, 'degraded', 'verification-needs-attention')
       break
+    case 'assistantGoals':
+      // A context-only Goals installation is useful, but it cannot be
+      // advertised as autonomous execution. Disabled optional extensions are
+      // normal; only enabled-but-disconnected extensions are actionable.
+      add(metric('contextReady') === false, 'degraded', 'context-unavailable')
+      add(metric('executionEnabled') === false, 'degraded', 'execution-disabled')
+      add(metric('executionEnabled') === true && metric('verifierConnected') === false,
+        'degraded', 'verified-execution-verifier-disconnected')
+      add(metric('outcomeEnabled') === true && metric('outcomeConnected') === false,
+        'degraded', 'outcome-verifier-disconnected')
+      add(metric('budgetEnabled') === true && (metric('registeredBudgetMeters') as number) === 0,
+        'degraded', 'budget-meter-missing')
+      add(metric('wakeEnabled') === true && metric('wakeConnected') === false,
+        'degraded', 'wake-automations-disconnected')
+      add((metric('wakeReconciliationFailures') as number) > 0,
+        'degraded', 'wake-reconciliation-failures')
+      add((metric('observationFailures') as number) > 0,
+        'degraded', 'observation-failures')
+      break
     default:
       break
   }
@@ -419,8 +448,8 @@ function metrics(id: HealthProviderId, value: unknown): Readonly<Record<string, 
       }
       output[key] = current
     } else if (specification === 'host-producers') {
-      if (!Array.isArray(current) || current.length > 2
-        || Array.from(current).some(item => item !== 'assistantAutomations' && item !== 'assistantDelivery')
+      if (!Array.isArray(current) || current.length > 3
+        || Array.from(current).some(item => item !== 'assistantAutomations' && item !== 'assistantDelivery' && item !== 'assistantGoals')
         || new Set(current).size !== current.length
         || current.some((item, index) => index > 0 && item < current[index - 1])) {
         throw new Error('invalid verifier Host producer health metric')

@@ -28,7 +28,8 @@ export class GoalOutcomeRuntime {
   readonly #fences = new Map<string, { agent: Agent; check(): void }>()
   constructor(private readonly ctx: Context, path: string,
     private readonly current: (agent: Agent) => GoalRecord,
-    private readonly runs: (scope: GoalScope, goalId: string) => readonly GoalExecutionRun[]) {
+    private readonly runs: (scope: GoalScope, goalId: string) => readonly GoalExecutionRun[],
+    private readonly stepMaxDurationMs = 60_000) {
     this.#store = new GoalOutcomeStore(path)
     this.#store.recoverIncomplete()
     ctx.on('agent/disposed', ({ agent }) => {
@@ -67,6 +68,37 @@ export class GoalOutcomeRuntime {
     return { scope: { workspace: record.scope.workspace, preset: record.scope.preset },
       owner: { principalRecordId: record.scope.principalRecordId, principalVersion: record.scope.principalVersion },
       objective: record.definition.objective, task: this.#task(record, assessmentId) }
+  }
+  /** Configuration-only check before the owner bridge mutates a native goal. */
+  preflight(scope: GoalScope, objective: string, record?: GoalRecord): void {
+    this.#ready()
+    const verifier = this.ctx.get('assistantVerifier', false)!
+    const selection = { scope: { workspace: scope.workspace, preset: scope.preset },
+      owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, objective }
+    const step = verifier.inspectAcceptanceProfile({ ...selection, taskKind: 'goal-step' })
+    const whole = verifier.inspectAcceptanceProfile({ ...selection, taskKind: 'goal-outcome' })
+    if (step === null) throw new Error('assistant-goals: configure an exact goal-step acceptance profile before creating or editing this goal')
+    if (whole === null) throw new Error('assistant-goals: configure an exact whole-goal success specification before creating or editing this goal')
+    const stepWindow = this.stepMaxDurationMs + step.profile.bounds.maxDurationMs
+    // Step verification precedes whole-goal verification. This is a minimum
+    // configuration window, not a promise that queueing or later work will fit.
+    const wholeWindow = stepWindow + whole.profile.bounds.maxDurationMs
+    if (step.profile.validityMs <= stepWindow || whole.profile.validityMs <= wholeWindow) {
+      throw new Error('assistant-goals: acceptance validity cannot cover the configured native round and verification')
+    }
+    if (record === undefined || objective !== record.definition.objective) return
+    const existing = this.#store.getDefinition(scope, record.id, record.definition.version)
+    if (existing === undefined) return
+    const template = existing.template
+    if (!same(existing.definition, record.definition) || !same(record.scope, scope)
+      || existing.sessionId !== record.native.sessionId || existing.nativeGoalId !== record.native.goalId) {
+      throw new Error('assistant-goals: whole-goal definition changed')
+    }
+    if (template.profile.id !== whole.profile.id || template.profile.version !== whole.profile.version
+      || template.profile.digest !== whole.digest) throw new Error('assistant-goals: configured whole-goal profile differs from the frozen success specification')
+    if (Date.now() + wholeWindow >= template.expiresAt) {
+      throw new Error('assistant-goals: frozen whole-goal deadline cannot cover another native round and verification')
+    }
   }
   /** Called only while the owner creates/edits the definition, before native work. */
   bind(record: GoalRecord): void {

@@ -8,6 +8,8 @@ import { AssistantAutomationsService } from '../plugins/assistant-automations/sr
 import { AssistantDeliveryService } from '../plugins/assistant-delivery/src/service.ts'
 import { AssistantEvaluationService } from '../plugins/assistant-evaluation/src/service.ts'
 import { AssistantVerifierService } from '../plugins/assistant-verifier/src/service.ts'
+import { AssistantGoalsService } from '../plugins/assistant-goals/src/service.ts'
+import { AssistantHealthService } from '../plugins/assistant-health/src/service.ts'
 
 test('actual Cordis Host services bind the verifier and Evaluation without model authority', async () => {
   const root = await mkdtemp(join(tmpdir(), 'verifier-host-wiring-'))
@@ -29,6 +31,18 @@ test('actual Cordis Host services bind the verifier and Evaluation without model
       generation: ctx.assistantAutomations.trustedAcceptanceProducerGeneration(),
       owner: { ownsTaskAcceptanceRegistration: () => true }, requiresAcceptance: false,
       prepare: () => null, completed: async () => {} })).toThrow('invalid')
+    // Read the real Verifier's three-producer vocabulary through Health, not a
+    // hand-written health fixture that can lag behind runtime registrations.
+    const goals = await ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true })
+    await ctx.plugin(AssistantHealthService, { requiredProviders: ['assistantVerifier'] })
+    expect(ctx.assistantVerifier.health().hostProducers).toEqual(['assistantAutomations', 'assistantDelivery', 'assistantGoals'])
+    expect(ctx.assistantHealth.readiness().ready).toBe(true)
+    expect(ctx.assistantHealth.readiness().warnings).not.toContain('provider-error:assistantVerifier')
+    expect(ctx.assistantHealth.readiness().warnings).not.toContain('provider-error:assistantGoals')
+    expect(ctx.assistantHealth.readiness().warnings).toContain('provider-degraded:assistantGoals:context-unavailable')
+    await goals.dispose()
+    expect(ctx.assistantVerifier.health().hostProducers).toEqual(['assistantAutomations', 'assistantDelivery'])
+    expect(ctx.assistantHealth.readiness().ready).toBe(true)
   } finally {
     await ctx.fiber.restart()
     await rm(root, { recursive: true, force: true })

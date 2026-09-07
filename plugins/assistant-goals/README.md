@@ -133,16 +133,16 @@ executionBudget:
 
 实际回合终态和 Session checkpoint 供 Verifier 独立回读；验收结果进入 Evaluation 的独立 `goal-step` 投影。普通前台仍按原始入站消息验收。原生 complete、步骤运行成功和整个业务目标达成分别记录，单个步骤回执不会自动完成业务目标；历史旧定义成功也不能成为新定义的执行权限。启用步骤验收后，`goal_context` 与每次模型上下文提供 `stepFeedback`：重新验证完整合同、回执、owner/scope、定义和真实执行绑定。当前已结算结果与待验收步骤分列，最多回读当前 owner/目标的最新 50 个执行、展示 3 个历史条目；旧定义和过期证据不能当作当前成功。失败条件用于修订计划，未知执行要求先对账，成功步骤仍要求检查目标剩余条件。模型检查点不能覆盖这些结果，反馈建议不授予权限。Host 可用 `executionRuns(agent, goalId)` 和 Verifier `inspectAcceptedTask(contractId)` 取得完整绑定；带权限检查的 `describeForAgent(agent, goalId)` 与工具使用相同反馈路径。
 
-回合终态持久保存后，运行一次现有 Verifier 的有界检查周期。下个模型上下文组装等待同一 Agent 的上一终态结算，再刷新本插件的上下文；取消信号与期限约束等待。繁忙队列可能仍显示待验收，不承诺一次检查就取得该目标的回执。读取不缓存成功；Verifier 卸载、绑定不匹配或证据无效会明确失去可用验收结果。反馈只能引导后续决策，当前没有独立的调查动作执行器或目标整体成功写入入口。
+回合终态持久保存后，运行一次现有 Verifier 的有界检查周期。下个模型上下文组装等待同一 Agent 的上一终态结算，再刷新本插件的上下文；取消信号与期限约束等待。繁忙队列可能仍显示待验收，不承诺一次检查就取得该目标的回执。读取不缓存成功；Verifier 卸载、绑定不匹配或证据无效会明确失去可用验收结果。步骤反馈只能引导后续决策，当前没有独立的调查动作执行器；可选的整体结果核验见下文。
 
 取消、超时或失去授权后，旧 Agent handle 保留拒绝护栏，迟到工具即使用新 signal 也不能继续执行。支持范围是 Delivery 的实际生命周期：结束后释放旧 handle，下一个 owner 回合从同一 Session 创建新的 handle；不能复用被取消的旧 Agent。停止等待不证明不合作工具、子进程或外部动作已终止，相关回执保持 `unknown / quiescent:false`。重启时已 dispatch 且没有终态的 run 记为 unknown，先查证，绝不自动重放；仅 prepared 的意图也不会恢复提交。`health().execution` 分别报告 enabled、verifierConnected 和 activeRounds。
 
-可信 Host 可读取 `ctx.assistantGoals.health()` 的 `ready`、`goals`、`awaitingVerification`、`observationFailures`。`ready: false` 时先检查必需服务；空目录时检查 Delivery 配对、当前人类 turn、workspace/preset 和上述 Policy 授权。观察失败会计数，原生 goal 自身不会因此被改写。计数仅供 Host 诊断，不向模型提供跨 owner 目录。
+可信 Host 可读取 `ctx.assistantGoals.health()` 的 `ready`、`goals`、`awaitingVerification`、`observationFailures`。`ready` / `contextReady` 仅表示上下文必需服务存在；空目录时检查 Delivery 配对、当前人类 turn、workspace/preset 和上述 Policy 授权。扁平字段分别报告步骤验收、整体结果、预算和唤醒的启用与连接状态，以及已注册 meter 数量；原有 `execution`、`outcome`、`budget`、`wake` 对象继续可用。`assistant-health` 只采集公开的低基数诊断字段，缺少已启用能力的依赖、预算 meter 或仅启用上下文时给出降级原因。拥有 meter 不证明当前模型路由有计量器，组件连接也不证明任意 owner/目标已具备 profile 或授权。观察失败会计数，原生 goal 自身不会因此被改写；诊断不向模型提供跨 owner 目录。
 
 - 原始目标保持不变；原生 edit 更新当前目标投影。笔记和证据引用都是未验证的数据，不获得权限，也不构成 achieved 回执。
 - 每次新上下文/工具访问重查 live Agent、owner record/version 和 Policy。SystemPrompt 已经写入 Session 的历史快照不会被此插件擦除；不能把撤销新读取权限等同于历史清除或跨 owner 复用旧 Session 的隔离保证。
 - Delivery 桥接覆盖创建、业务笔记和 owner 的 edit/pause/resume/clear；没有给模型增加独立验收成功写入入口，native complete 仍由受支持的原生入口或可信 Host 管理。
-- 本包已有可选的原生回合验收绑定、单步骤期限、跨步骤累计预算和一次性计划唤醒；持久多步骤编排、跨日生产运行验证和业务目标整体独立验收仍待完成。
+- 本包已有可选的原生回合与整体结果验收、单步骤期限、跨步骤累计预算和一次性计划唤醒；完整持久多步骤编排、跨日生产运行和生产安装路径仍待完成。
 
 ## 权限与数据
 
@@ -161,7 +161,11 @@ executionBudget:
 
 ## 整体目标验收
 
-可选 `verifyGoalOutcome: true` 要求同时开启 `verifyNativeRounds` 并使用持久数据库。管理员还需配置精确匹配 owner、workspace/preset 和 objective 的 Verifier `taskKind: goal-outcome` profile。创建或编辑目标时冻结 v3 整体成功条件；缺失时不能开始原生自主回合。创建本身与验收账本并非一个事务，工具报告部分失败时应先检查已有原生目标。
+可选 `verifyGoalOutcome: true` 要求同时开启 `verifyNativeRounds` 并使用持久数据库。管理员还需配置精确匹配 owner、workspace/preset 和 objective 的 Verifier `taskKind: goal-step` 与 `goal-outcome` profiles。`goal_create` 和 `goal_control` 的 edit 在修改原生目标前查询两份配置；匹配文本遵循原生目标去掉首尾空白的规则。缺少规格、验证器未连接或有效期不足时拒绝修改，不留下本次新建的原生目标或契约。步骤 profile 的有效期须超过单步骤期限加步骤验证预算；整体 profile 还须覆盖整体验证预算。这是最低配置要求，排队与后续工作仍受原有绝对期限检查。
+
+创建或改变 objective 时冻结 v3 整体成功条件；只改轮数或提交同一 objective 时沿用原条件、profile 摘要与绝对期限。如果当前配置已替换冻结规格，或原截止时间不足以覆盖下一轮和验证，编辑会在原生修改前拒绝，不通过重新冻结来延长期限或放宽标准。预检只读配置，不创建虚构的任务身份，也不授予执行权限；实际绑定与派发仍重新核对。原生修改、业务索引与验收账本并非一个事务，预检之后的写入或身份变化仍可能造成部分失败，此时应先检查已有原生目标。
+
+上述跨轮次冻结针对 v3 整体成功规格。v2 步骤规格在每个实际 run 派发前分别冻结：管理员可更新后续新 run 的步骤 profile，预检会检查当前版本及有效期；该更新既不能重写旧步骤契约，也不能改变已冻结的整体成功条件。
 
 每个真实原生回合有独立的 v2 步骤契约和 v3 整体目标 assessment。后续 assessment 保持初次条件、profile、预算和绝对截止时间不变，且截止时间必须覆盖原生回合及验证。`goalAcceptance` 向模型提供冻结条件、逐项失败与整体结果；步骤通过不能替代整体成功。更换目标定义会隔离旧结果，不能用旧定义的通过结果结束新目标。
 

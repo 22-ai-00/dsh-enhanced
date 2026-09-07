@@ -12,6 +12,8 @@
 
 > 整体目标验收更新（2026-09-07）：可选 v3 `goal-outcome` 已冻结整体成功条件并贯通 Verifier → Evaluation → Evolution。真实驱动两轮测试验证步骤通过但整体失败、下一轮按失败条件修复、整体通过后准确完成原生目标；恢复/释放/迟到验收保持 unknown 或待完成，不重放业务执行。最终根检查 `/tmp/dsh-goal-outcome-check-v5.log` 与 `.exit=0`：主 234 文件/3,320 测试，Delivery 642、Goals 68、Verifier 47，全构建/dry-run pack 及独立复核通过。下文旧 WIP 段落是历史记录；最新证据与限制以落地账本末尾为准。跨库 Session flush/原子提交、真实跨日闭环、生产计量与 Web owner/安装仍未验收；全部 18 项目标保持未完成。
 
+> 创建预检与诊断更新（2026-09-07）：Goals 创建/编辑前已精确检查 step/whole profiles，缺规格或期限不足不会先修改原生目标；同一定义的整体标准与绝对期限保持冻结。Health 已接 Goals，并修复实际三个 Verifier 生产者被旧白名单误拒绝的问题。最终根检查 `/tmp/dsh-goal-readiness-check-v2.log` 与 `.exit=0`：主 234 文件/3,332 测试，Goals 72、Health 45、Verifier 51、Delivery 642，全构建/dry-run pack 及独立复核通过。真实 `web` profile 当前解析到 DSH `0.1.2-rc.1` 且已有浏览器认证，后续应复用现有界面补 Web 到 Delivery owner/权限的关联；不要根据旧 Web 缓存重复实现认证或另建聊天界面。默认自治安装、生产计量和真实跨日验证仍未完成，完整 18 项范围不变。
+
 ## 完整目标
 
 完整落实此前分析和规划，让项目成为高智能、高主动、能长期自主推进任务并持续自我改进的智能体；高权限与可验证的安全边界兼顾，同时安装、配置、升级和通过 Web 对话都方便友好。保留账本全部 18 个工作包，不能把目标缩成当前已实现的切片。
