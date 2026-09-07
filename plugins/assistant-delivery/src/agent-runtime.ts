@@ -66,8 +66,8 @@ import {
   type PermissionDispatchRecovery,
 } from './session-commands.js'
 import { DeliveryStoreError } from './store.js'
-import { DeliverySessionLeases, SessionLeaseUnavailable } from './session-lease-runtime.js'
-import type { SessionLeasePort, SessionExecutionLease } from './session-lease-runtime.js'
+import { SessionLeaseUnavailable } from './session-lease-runtime.js'
+import type { DeliverySessionLeases, SessionExecutionLease } from './session-lease-runtime.js'
 import { isDeliveryGoalWakeDeadline, type DeliveryGoalWakeInput, type DeliveryGoalWakeResult } from './goal-wake-types.js'
 import {
   parseWorkflowCommand,
@@ -102,7 +102,7 @@ declare module '@deepseek-ai/dsh-llm' {
 }
 
 interface DshDeliveryRuntimeOptions {
-  sessionLease: SessionLeasePort
+  sessionLeases: DeliverySessionLeases
   sessionNamespace: string
   workspace: string
   agentPreset: string
@@ -1366,13 +1366,12 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     private readonly ctx: Context,
     private readonly policy: AssistantPolicyService,
     private readonly options: DshDeliveryRuntimeOptions,
-  ) { this.sessionLeases = new DeliverySessionLeases(ctx, options.sessionLease) }
+  ) { this.sessionLeases = options.sessionLeases }
 
   private async resumeAgent(options: Parameters<Context['agents']['resume']>[0]): Promise<AgentHandle> {
     const id = String(options.resumeSessionId)
     this.sessionLeases.assert(id)
-    try { return await this.ctx.agents.resume(options) }
-    catch (error) { this.sessionLeases.failedResume(id); throw error }
+    return this.sessionLeases.resume(this.ctx, options)
   }
 
   async cancelActive(binding: Readonly<ConversationBinding>, command: 'new' | 'stop'): Promise<boolean> {
@@ -1706,7 +1705,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       afterDisposed?.()
       return true
     }
-    const disposal = Promise.resolve().then(() => handle.dispose()).then(() => this.sessionLeases.disposed(handle.agent))
+    const disposal = Promise.resolve().then(() => handle.dispose())
     let clearDeadline: (() => void) | undefined
     const deadline = timeoutMs === undefined
       ? undefined
@@ -1976,7 +1975,6 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   ): Promise<void> {
     const agent = agentCtx.agent
     if (agent === undefined) throw new Error('assistant-delivery: unpublished Agent identity is missing')
-    this.sessionLeases.attach(agent)
     if (agent.session.header.cwd !== workspace || agent.session.header.agentPreset !== presetId) {
       throw new DurableAgentIdentityError(
         'assistant-delivery: durable Agent identity does not match its conversation binding',
@@ -2531,7 +2529,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         adopted = true
       }
       if (handle === undefined) {
-        handle = await agents.create({
+        handle = await this.sessionLeases.create(this.ctx, {
           sessionId: id,
           meta: { cwd: workspace, agentPreset: presetId },
           agentOptions,
@@ -2547,12 +2545,9 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
       return { sessionId: String(id), workspace, agentPreset: presetId,
         policyRef: input.previous?.policyRef ?? this.options.policyRef }
-    } catch (error) {
-      if (handle === undefined) this.sessionLeases.failedResume(String(id))
-      throw error
     } finally {
       try {
-        if (handle !== undefined) { await handle.dispose(); this.sessionLeases.disposed(handle.agent) }
+        if (handle !== undefined) await handle.dispose()
       } finally { lease.close() }
     }
   }
@@ -3461,7 +3456,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         }
         return {
           outcome: 'not-processed', failureCode: `session-lease-${error.kind}`,
-          retryable: error.kind === 'busy', retryAfterMs: this.options.sessionLease.leaseMs,
+          retryable: error.kind === 'busy', retryAfterMs: this.sessionLeases.leaseMs,
         }
       }
       throw error

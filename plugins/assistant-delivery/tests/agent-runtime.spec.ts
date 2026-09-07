@@ -1,6 +1,6 @@
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Agent, AgentHandle, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import AgentPresets from '@deepseek-ai/dsh-agent-presets'
@@ -764,6 +764,40 @@ function runtimeStore(service: AssistantDeliveryService): {
   listOutbox(input?: { bindingId?: string; limit?: number }): OutboxRecord[]
 } {
   return (service as unknown as { deliveryStore: ReturnType<typeof runtimeStore> }).deliveryStore
+}
+
+interface TestSessionLeases {
+  open(target: { kind: 'bound'; binding: ConversationBinding }, signal: AbortSignal): {
+    dispatch(): void
+    close(): void
+  }
+  create(owner: Context, options: CreateAgentOptions): Promise<AgentHandle>
+  resume(owner: Context, options: ResumeAgentOptions): Promise<AgentHandle>
+}
+
+/** Test-only access to the one lease manager installed with the inbound runtime. */
+function runtimeSessionLeases(service: AssistantDeliveryService): TestSessionLeases {
+  return (service as unknown as {
+    runtime: { sessionLeases: TestSessionLeases }
+  }).runtime.sessionLeases
+}
+
+/**
+ * Model the Web controller's isolated `agents` service while retaining the
+ * Host registry's observable surface. The lease manager traces the original
+ * factory itself, so these two delegates must not call the facade again.
+ */
+function scopedLeaseAgents(ctx: Context, leases: TestSessionLeases): Context {
+  const scoped = ctx.isolate('agents')
+  const registry = ctx.agents
+  scoped.provide('agents' as never, {
+    get: registry.get.bind(registry),
+    currentInitiator: registry.currentInitiator.bind(registry),
+    isOwnedBy: registry.isOwnedBy.bind(registry),
+    create: (options: CreateAgentOptions) => leases.create(scoped, options),
+    resume: (options: ResumeAgentOptions) => leases.resume(scoped, options),
+  } as never)
+  return scoped
 }
 
 function registerPreferenceSink(
@@ -2692,6 +2726,252 @@ describe('real rc.1 delivery Agent runtime', () => {
       abort.abort()
       if (promotion !== undefined) await Promise.allSettled([promotion])
       await follower.return?.()
+      await reopened.ctx.fiber.restart()
+    }
+  })
+
+  test('allows a scoped Web follow under an admitted Delivery lease, then drains it on scope unload', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-owned-resume-'))
+    roots.push(root)
+    const stored = new Map<string, DurableStoredSession>()
+    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await first.service.acceptInbound(message('evt-web-owned-seed', 'Persist this Delivery-owned session.'))
+    await drive(first.service)
+    const binding = runtimeStore(first.service).getActiveBinding(conversation)!
+    await first.ctx.fiber.restart()
+
+    const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    let lease: ReturnType<TestSessionLeases['open']> | undefined
+    let controller: SessionController | undefined
+    let controllerCtx: Context | undefined
+    let webFiber: { dispose(): Promise<void> } | undefined
+    let abort: AbortController | undefined
+    let follower: AsyncIterator<unknown> | undefined
+    let promotion: Promise<IteratorResult<unknown>> | undefined
+    try {
+      reopened.ctx.provide('attachments', attachmentFixture().attachments)
+      await reopened.ctx.plugin(AgentDefaultModelConfig, { provider: 'mock', model: 'delivery-model' })
+      await reopened.ctx.plugin(SessionQueryEngine as unknown as new (ctx: Context) => SessionQueryEngine)
+      await reopened.ctx.plugin(TypertRegistry)
+      const fiber = reopened.ctx.plugin({
+        inject: ['agents', 'sessions', 'llm', 'sessionProjections', 'agentDefaultModel', 'sessionQuery', 'typert', 'attachments'],
+        apply(webCtx: Context) {
+          controllerCtx = scopedLeaseAgents(webCtx, runtimeSessionLeases(reopened.service))
+          controller = new SessionController(controllerCtx, {})
+        },
+      })
+      await fiber
+      webFiber = fiber
+      if (controller === undefined || controllerCtx === undefined) throw new Error('Web controller fixture did not start')
+      abort = new AbortController()
+      lease = runtimeSessionLeases(reopened.service).open({ kind: 'bound', binding }, abort.signal)
+      lease.dispatch()
+      const admitted = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      let admittedFence: number
+      try {
+        admittedFence = (admitted.prepare('SELECT fencing_token FROM delivery_session_leases WHERE session_id = ?')
+          .get(binding.sessionId) as { fencing_token: number }).fencing_token
+      } finally { admitted.close() }
+      follower = controller.follow(
+        { address: { kind: 'session', sessionId: binding.sessionId as SessionId } },
+        abort.signal,
+      )[Symbol.asyncIterator]()
+      const opening = await follower.next()
+      expect(opening.value).toMatchObject({ type: 'snapshot', header: { id: binding.sessionId } })
+      promotion = follower.next()
+      await vi.waitFor(() => expect(reopened.ctx.agents.get(binding.sessionId as SessionId)).toBeDefined())
+      const agent = reopened.ctx.agents.get(binding.sessionId as SessionId)!
+
+      // A trusted Host/plugin notice is admissible through the shared factory;
+      // this does not manufacture an owner-human proof for native Web input.
+      const completedBefore = agent.session.snapshotEvents().filter(event => event.type === 'turn/end').length
+      agent.followup(createUserMessage({
+        content: [{ type: 'text', text: 'Run this one Host plugin notice.' }],
+        source: { kind: 'plugin', plugin: 'assistant-delivery-test', form: 'notice', summary: 'Web owner scope regression' },
+      }))
+      await vi.waitFor(() => expect(reopened.llm.requests).toHaveLength(1))
+      await vi.waitFor(() => expect(agent.session.snapshotEvents().filter(event => event.type === 'turn/end'))
+        .toHaveLength(completedBefore + 1))
+      expect(agent.session.snapshotEvents().findLast(event => event.type === 'turn/end'))
+        .toMatchObject({ data: { reason: { kind: 'completed' } } })
+      const cancel = vi.spyOn(agent, 'cancel')
+      await expect(controller.prompt({
+        sessionId: binding.sessionId as SessionId,
+        requestId: 'web-owned-native-user-denied' as never,
+        mode: 'queue',
+        content: [{ type: 'text', text: 'This native Web user message remains untrusted.' }],
+      }, new AbortController().signal)).resolves.toEqual({ accepted: true })
+      await vi.waitFor(() => expect(cancel).toHaveBeenCalledWith(
+        expect.objectContaining({ kind: 'hook', reason: 'assistant-delivery-session-lease-lost' }),
+      ))
+      expect(reopened.llm.requests).toHaveLength(1)
+
+      await webFiber.dispose()
+      webFiber = undefined
+      await vi.waitFor(() => expect(reopened.ctx.agents.get(binding.sessionId as SessionId)).toBeUndefined())
+      const released = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try {
+        expect(released.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?')
+          .get(binding.sessionId)).toMatchObject({ state: 'released' })
+      } finally { released.close() }
+
+      await reopened.service.acceptInbound(message('evt-web-owned-after-unload', 'Delivery may acquire the next fence.'))
+      await drive(reopened.service)
+      expect(reopened.llm.requests).toHaveLength(2)
+      const next = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try {
+        const row = next.prepare('SELECT fencing_token, state FROM delivery_session_leases WHERE session_id = ?')
+          .get(binding.sessionId) as { fencing_token: number; state: string }
+        expect(row).toMatchObject({ state: 'released' })
+        expect(row.fencing_token).toBeGreaterThan(admittedFence)
+      } finally { next.close() }
+    } finally {
+      abort?.abort()
+      if (promotion !== undefined) await Promise.allSettled([promotion])
+      await follower?.return?.()
+      await webFiber?.dispose()
+      lease?.close()
+      await reopened.ctx.fiber.restart()
+    }
+  })
+
+  test.each(['async setup', 'setup commit'] as const)(
+    'rolls back an unpublished leased Web resume when %s fails',
+    async failure => {
+      const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-owned-rollback-'))
+      roots.push(root)
+      const stored = new Map<string, DurableStoredSession>()
+      const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+      const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+      const pairing = first.service.issuePairing('test', principal)
+      first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+      await first.service.acceptInbound(message('evt-web-owned-rollback-seed', 'Persist rollback fixture.'))
+      await drive(first.service)
+      const binding = runtimeStore(first.service).getActiveBinding(conversation)!
+      await first.ctx.fiber.restart()
+
+      const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+      let owner: Context | undefined
+      const ownerFiber = reopened.ctx.plugin(ownerCtx => {
+        owner = ownerCtx.isolate('agents')
+      })
+      await ownerFiber
+      if (owner === undefined) throw new Error('rollback owner fixture did not start')
+      const abort = new AbortController()
+      const lease = runtimeSessionLeases(reopened.service).open({ kind: 'bound', binding }, abort.signal)
+      lease.dispatch()
+      try {
+        await expect(runtimeSessionLeases(reopened.service).resume(owner, {
+          resumeSessionId: binding.sessionId as SessionId,
+          setup: async () => {
+            if (failure === 'async setup') throw new Error('deliberate async setup failure')
+            return { commit: () => { throw new Error('deliberate setup commit failure') } }
+          },
+        })).rejects.toThrow(`deliberate ${failure} failure`)
+        expect(reopened.ctx.agents.get(binding.sessionId as SessionId)).toBeUndefined()
+        lease.close()
+        const released = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+        try {
+          expect(released.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?')
+            .get(binding.sessionId)).toMatchObject({ state: 'released' })
+        } finally { released.close() }
+      } finally {
+        abort.abort()
+        lease.close()
+        await ownerFiber.dispose()
+        await reopened.ctx.fiber.restart()
+      }
+    },
+  )
+
+  test.each(['owner', 'factory'] as const)('keeps an abort-raced cold Web resume unknown after %s unload and late cleanup', async cancellation => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-web-owned-resume-abort-race-'))
+    roots.push(root)
+    const stored = new Map<string, DurableStoredSession>()
+    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const first = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    const pairing = first.service.issuePairing('test', principal)
+    first.service.confirmPairing({ challengeId: pairing.challenge.id, principal, code: pairing.code })
+    await first.service.acceptInbound(message('evt-web-owned-abort-race-seed', 'Persist abort race fixture.'))
+    await drive(first.service)
+    const binding = runtimeStore(first.service).getActiveBinding(conversation)!
+    await first.ctx.fiber.restart()
+
+    const reopened = await persistentRuntimeHarness(root, stored, PersistenceCoordinator)
+    let owner: Context | undefined
+    const ownerFiber = reopened.ctx.plugin(ownerCtx => {
+      owner = ownerCtx.isolate('agents')
+    })
+    await ownerFiber
+    if (owner === undefined) throw new Error('abort-race owner fixture did not start')
+    const persistence = reopened.ctx.get('sessionPersistence') as {
+      prepare(id: SessionId, signal?: AbortSignal): Promise<SessionPreparation>
+    }
+    const originalPrepare = persistence.prepare.bind(persistence)
+    const preparationReady = Promise.withResolvers<void>()
+    const preparationBarrier = Promise.withResolvers<void>()
+    let latePreparation: SessionPreparation | undefined
+    let preparationDisposed = false
+    const prepare = vi.spyOn(persistence, 'prepare').mockImplementation(async (id, signal) => {
+      const preparation = await originalPrepare(id, signal)
+      latePreparation = preparation
+      const dispose = preparation[Symbol.dispose].bind(preparation)
+      vi.spyOn(preparation, Symbol.dispose).mockImplementation(() => {
+        preparationDisposed = true
+        return dispose()
+      })
+      preparationReady.resolve()
+      await preparationBarrier.promise
+      return preparation
+    })
+    const outer = new AbortController()
+    const lease = runtimeSessionLeases(reopened.service).open({ kind: 'bound', binding }, outer.signal)
+    lease.dispatch()
+    let unloading: Promise<void> | undefined
+    try {
+      // Attach a rejection handler before owner teardown races the public resume
+      // promise, so a fast native abort cannot become an unhandled rejection.
+      const resume = runtimeSessionLeases(reopened.service).resume(owner, {
+        resumeSessionId: binding.sessionId as SessionId,
+      })
+      void resume.catch(() => {})
+      await preparationReady.promise
+      const factoryFiber = [...reopened.ctx.registry.get(AgentLoop)!.fibers][0]!
+      unloading = cancellation === 'owner' ? ownerFiber.dispose() : factoryFiber.dispose()
+      await expect(resume).rejects.toThrow()
+      lease.close()
+      expect(preparationDisposed).toBe(false)
+
+      const database = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try {
+        expect(database.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?')
+          .get(binding.sessionId)).toMatchObject({ state: 'unknown' })
+      } finally { database.close() }
+      const secondHost = new DeliveryStore({ path: join(root, 'delivery.sqlite') })
+      try {
+        expect(secondHost.claimSessionLease({ kind: 'bound', binding }, 'abort-race-second-host', 1_000))
+          .toMatchObject({ kind: 'unknown' })
+      } finally { secondHost.close() }
+
+      preparationBarrier.resolve()
+      await unloading
+      await vi.waitFor(() => expect(preparationDisposed).toBe(true))
+      expect(latePreparation).toBeDefined()
+      const retained = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try {
+        expect(retained.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?')
+          .get(binding.sessionId)).toMatchObject({ state: 'unknown' })
+      } finally { retained.close() }
+    } finally {
+      preparationBarrier.resolve()
+      outer.abort()
+      lease.close()
+      prepare.mockRestore()
+      if (unloading !== undefined) await unloading
+      await ownerFiber.dispose()
       await reopened.ctx.fiber.restart()
     }
   })

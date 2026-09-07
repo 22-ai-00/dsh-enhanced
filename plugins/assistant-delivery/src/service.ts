@@ -42,6 +42,7 @@ import {
 } from './coordinator.js'
 import { DeliveryStore, DeliveryStoreError, type OwnerRouteDispatchGuard } from './store.js'
 import { DshDeliveryRuntime } from './agent-runtime.js'
+import { DeliverySessionLeases } from './session-lease-runtime.js'
 import type { DeliveryGoalWakeInput, DeliveryGoalWakeResult } from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptanceHandle, TaskAcceptanceRegistration } from './acceptance.js'
 import { InboundImageMaterializer } from './inbound-images.js'
@@ -926,16 +927,17 @@ export class AssistantDeliveryService extends Service {
       ownerId: this.ownerId, leaseMs: config.leaseMs, maxAttempts: config.maxAttempts,
       maxConcurrency: config.maxConcurrency, retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs })
     ctx.inject(['agents', 'sessions', 'llm'], runtimeCtx => {
+      const sessionLeases = new DeliverySessionLeases(runtimeCtx, {
+        requiresLease: sessionId => this.deliveryStore.requiresSessionLease(sessionId),
+        leaseMs: Math.min(config.leaseMs, 300_000),
+        claim: (target, holderId, leaseMs) => this.deliveryStore.claimSessionLease(target, holderId, leaseMs),
+        dispatch: lease => this.deliveryStore.markSessionLeaseDispatched(lease),
+        valid: lease => this.deliveryStore.hasSessionLease(lease),
+        renew: (lease, leaseMs) => this.deliveryStore.renewSessionLease(lease, leaseMs),
+        finish: (lease, input) => this.deliveryStore.finishSessionLease(lease, input),
+      })
       const unregister = this.registerInboundRuntime(new DshDeliveryRuntime(runtimeCtx, policy, {
-        sessionLease: {
-          requiresLease: sessionId => this.deliveryStore.requiresSessionLease(sessionId),
-          leaseMs: Math.min(config.leaseMs, 300_000),
-          claim: (target, holderId, leaseMs) => this.deliveryStore.claimSessionLease(target, holderId, leaseMs),
-          dispatch: lease => this.deliveryStore.markSessionLeaseDispatched(lease),
-          valid: lease => this.deliveryStore.hasSessionLease(lease),
-          renew: (lease, leaseMs) => this.deliveryStore.renewSessionLease(lease, leaseMs),
-          finish: (lease, input) => this.deliveryStore.finishSessionLease(lease, input),
-        },
+        sessionLeases,
         sessionNamespace: this.deliveryStore.instanceId(),
         workspace: config.defaultWorkspace, agentPreset: config.defaultAgentPreset, policyRef: config.policyRef,
         getAgentPresets: () => runtimeCtx.get('agentPresets'),

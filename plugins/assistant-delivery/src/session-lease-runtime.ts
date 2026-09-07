@@ -1,8 +1,12 @@
 import { randomUUID } from 'node:crypto'
-import type { Context } from '@deepseek-ai/cordis'
-import type { Agent } from '@deepseek-ai/dsh-agent'
+import type { Context, FiberState } from '@deepseek-ai/cordis'
+import type { Agent, AgentHandle, AgentSetup, CreateAgentOptions, ResumeAgentOptions } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, StreamChunk, UserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionLease, SessionLeaseClaim, SessionLeaseTarget } from './session-lease-types.js'
+
+// Cordis publishes this as an erased const enum. Keep the value type-checked
+// against its exact member without requiring a nonexistent runtime export.
+const activeFiberState: FiberState.ACTIVE = 2
 
 export interface SessionLeasePort {
   leaseMs: number
@@ -27,6 +31,7 @@ export class SessionExecutionLease {
   #closed = false
   #released = false
   #pending = 0
+  #unobservedCleanup = false
   #timer: ReturnType<typeof setInterval>
   #removeAbort: () => void
   constructor(readonly token: SessionLease, private readonly port: SessionLeasePort,
@@ -80,9 +85,15 @@ export class SessionExecutionLease {
     this.#removeAbort()
     this.#settle()
   }
+  /** A rejected cold resume can leave an unobservable, abort-raced load behind. */
+  abandonConstruction(): void {
+    this.#unobservedCleanup = true
+    this.cancel()
+    this.close()
+  }
   #settle(): void {
     if (!this.#closed || this.#released) return
-    const quiescent = this.#pending === 0 && [...this.agents.values()].every(Boolean)
+    const quiescent = !this.#unobservedCleanup && this.#pending === 0 && [...this.agents.values()].every(Boolean)
     try {
       if (this.port.finish(this.token, { quiescent }) && quiescent) {
         this.#released = true
@@ -96,8 +107,14 @@ export class SessionExecutionLease {
 export class DeliverySessionLeases {
   readonly #active = new Map<string, SessionExecutionLease>()
   readonly #agents = new WeakMap<Agent, SessionExecutionLease>()
+  #factoryGeneration = 0
   #live = true
   constructor(private readonly ctx: Context, private readonly port: SessionLeasePort) {
+    // Cordis synchronously notifies availability transitions and replacement.
+    // A new live provider must not make an old factory's abort look settled.
+    ctx.on('internal/service', name => {
+      if (name === 'agentLoop') this.#factoryGeneration += 1
+    })
     const nativeInput = ({ agent, message }: { agent: Agent; message: UserMessage }): void => {
       // Web can borrow the exact live Agent, not just resume a second object.
       // Native direct-user ingress is not a Delivery owner admission. Invalidate
@@ -137,6 +154,104 @@ export class DeliverySessionLeases {
       for (const lease of this.#active.values()) { lease.cancel(); lease.close() }
     }, 'assistant-delivery.session-leases')
   }
+  get leaseMs(): number { return this.port.leaseMs }
+
+  /**
+   * Use the host's one factory and the caller's ownership scope. These methods
+   * only consume an already admitted lease; they do not authorize Web input.
+   */
+  create(owner: Context, options: CreateAgentOptions): Promise<AgentHandle> {
+    const agents = owner.reflect.trace(this.ctx.agents)
+    return this.#construct(owner, 'create', String(options.sessionId), options, (setup, signal) =>
+      agents.create({ ...options, setup, signal }))
+  }
+  resume(owner: Context, options: ResumeAgentOptions): Promise<AgentHandle> {
+    const agents = owner.reflect.trace(this.ctx.agents)
+    return this.#construct(owner, 'resume', String(options.resumeSessionId), options, (setup, signal) =>
+      agents.resume({ ...options, setup, signal }))
+  }
+
+  async #construct(owner: Context, kind: 'create' | 'resume', sessionId: string, options: { setup?: AgentSetup; signal?: AbortSignal },
+    factory: (setup: AgentSetup, signal: AbortSignal) => Promise<AgentHandle>): Promise<AgentHandle> {
+    const lease = this.#active.get(sessionId)
+    if (lease === undefined) throw new SessionLeaseUnavailable('denied')
+    lease.assert()
+    options.signal?.throwIfAborted()
+    const ownerAbort = new AbortController()
+    let constructing = true
+    const unwatchOwner = owner.effect(() => () => {
+      if (constructing) ownerAbort.abort(new SessionLeaseUnavailable('denied'))
+    }, 'assistant-delivery.agent-construction')
+    const signal = AbortSignal.any([lease.signal, ownerAbort.signal, ...(options.signal === undefined ? [] : [options.signal])])
+    const factoryGeneration = this.#factoryGeneration
+    const nativeFactory = this.ctx.get('agentLoop' as never) !== undefined
+    // A cold persistence load may not have produced an Agent yet. It still
+    // occupies the lease until the factory settles and native rollback drains.
+    let finishConstruction: (() => void) | undefined
+    let prepared: Agent | undefined
+    let native: AgentHandle | undefined
+    try {
+      finishConstruction = lease.enter()
+      native = await factory(async agentCtx => {
+        const agent = agentCtx.agent
+        if (agent === undefined || String(agent.session.id) !== sessionId) throw new SessionLeaseUnavailable('denied')
+        lease.attach(agent)
+        this.#agents.set(agent, lease)
+        prepared = agent
+        const setup = await options.setup?.(agentCtx)
+        lease.assertAgent(agent)
+        // Preserve the native setup commit and revalidate at publication, not
+        // just before the last async setup operation returns.
+        return { commit: () => {
+          lease.assertAgent(agent)
+          setup?.commit()
+          lease.assertAgent(agent)
+        } }
+      }, signal)
+      if (native.agent !== prepared) throw new SessionLeaseUnavailable('denied')
+      lease.assertAgent(native.agent)
+      const handle = native
+      let disposal: Promise<void> | undefined
+      const drain = (): Promise<void> => disposal ??= Promise.resolve().then(() => handle.dispose())
+        .then(() => lease.disposed(handle.agent))
+      let detached = false
+      // Controller consumers may retain only the Agent. The owner's fiber
+      // must still await the native memoized disposer, not merely observe an
+      // idle status or a registry notification. This also covers concurrent
+      // teardown by the upstream factory's own owner effect.
+      const detachOwner = owner.effect(() => async () => {
+        if (detached) return
+        detached = true
+        lease.cancel()
+        lease.close()
+        await drain()
+      }, 'assistant-delivery.owned-agent')
+      return { agent: handle.agent, dispose: async () => {
+        await drain()
+        if (!detached) { detached = true; await detachOwner() }
+      } }
+    } catch (error) {
+      // rc.1 races prepare against caller, owner and factory cancellation.
+      // Only an unchanged live native factory + live owner + non-aborted
+      // caller rules out all three abort branches. Otherwise the rejected
+      // public Promise says nothing about late preparation cleanup. Error
+      // names/text are deliberately not a settlement or release capability.
+      const loadSettled = nativeFactory && this.#live && !signal.aborted
+        && owner.fiber.state === activeFiberState
+        && factoryGeneration === this.#factoryGeneration
+        && this.ctx.get('agentLoop' as never) !== undefined
+      if (kind === 'resume' && prepared === undefined && !loadSettled) lease.abandonConstruction()
+      // Once setup has received an Agent, rc.1 awaits its native rollback.
+      // Unpublished setup has no agent/disposed event: remember its exact
+      // object rather than marking every Agent with the same Session disposed.
+      if (native !== undefined) await native.dispose()
+      if (prepared !== undefined) lease.disposed(prepared)
+      throw error
+    } finally {
+      constructing = false
+      try { await unwatchOwner() } finally { finishConstruction?.() }
+    }
+  }
   open(target: SessionLeaseTarget, signal: AbortSignal): SessionExecutionLease {
     if (!this.#live) throw new SessionLeaseUnavailable('denied')
     signal.throwIfAborted()
@@ -161,11 +276,6 @@ export class DeliverySessionLeases {
   }
   cancel(sessionId: string, reason: unknown): void { this.#active.get(sessionId)?.cancel(reason) }
   disposed(agent: Agent): void { this.#agents.get(agent)?.disposed(agent) }
-  failedResume(sessionId: string): void {
-    // The supported AgentLoop factory awaits its private teardown before rejecting setup/resume.
-    const lease = this.#active.get(sessionId)
-    if (lease !== undefined) for (const agent of lease.agents.keys()) lease.disposed(agent)
-  }
   async *#stream(_options: GenerateOptions, next: () => AsyncIterable<StreamChunk>): AsyncIterable<StreamChunk> {
     const agent = this.ctx.get('agents')?.currentInitiator()
     const lease = this.#assertAgent(agent)
