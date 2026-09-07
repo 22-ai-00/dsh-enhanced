@@ -139,3 +139,9 @@ With matching Policy and Isolation builds, the exact registered `isolation_run` 
 Only a newly admitted job consumes its grant-operation Policy budget, under stable key `isolation:<jobId>`. Polling and exact idempotency replay evaluate current authority without consuming that budget again. If an operator separately attaches a budget to native `tool:isolation_run`, that is a distinct per-tool-call budget and still charges call attempts, including result retrieval. Omit that additional budget when the intended limit is per job. Grant run/runtime reservations are cumulative and are not refunded on failure.
 
 The default export is the Cordis plugin object with stable name, Config and apply metadata; use the named `AssistantIsolationService` export for programmatic construction. The DSH Loader unwraps default exports, so dropping the plugin name there would prevent trusted tool registration.
+
+### 可信目标产物与独立验收
+
+schema v6 新增可空的 artifact admission 绑定，v1–v5 行迁移后保留且不会被追认为目标产物。Host 在真实 Goals native round 内，于 Docker 派发前固定 step acceptance ID/digest、run、turn 与声明输出路径；相同幂等键不会重新绑定。运行中若原 admission 改变则取消。私有 `readAcceptedArtifact` 只读取同一 v4 step scope/owner/Session 的成功、已静止、有效期内且正文未清理的产物；较新的同路径失败尝试禁止回退旧结果。
+
+Host Verifier 可使用导出的 `IsolatedVerifierRunner` 在独立私有 stateRoot 中验收复制产物。该类没有模型工具入口，固定 authority/镜像/命令、次数、累计预留时长及期限，复用相同 Docker supervisor 和资源边界。验收任务与原产物 job 是不同 ID；验收不在宿主执行模型代码。未知派发仍保留资源占用且不自动重放，重复 setup 或重启也不会重置预算。

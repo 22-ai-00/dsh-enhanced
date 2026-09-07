@@ -63,7 +63,7 @@ function unavailable(run: GoalExecutionRun, status: Extract<GoalFeedbackStatus, 
 function criteria(contract: ReturnType<typeof validateTaskAcceptanceContract>, receipt: ReturnType<typeof validateTaskVerificationReceipt>): { values: readonly GoalFeedbackCriterion[]; truncated: boolean } {
   const values = receipt.results.slice(0, 32).map(result => {
     const criterion = contract.criteria.find(item => item.id === result.criterionId)!
-    const definition = criterion.kind === 'process-behavior' || criterion.kind === 'document-citations'
+    const definition = criterion.kind === 'process-behavior' || criterion.kind === 'isolated-process-behavior' || criterion.kind === 'document-citations'
       ? { kind: criterion.kind, artifactPath: criterion.artifactPath,
         ...(criterion.kind === 'document-citations' ? { requiredText: freeze(criterion.requiredText.slice(0, 3).map(excerpt)), requiredTextTruncated: criterion.requiredText.length > 3 } : {}) }
       : { kind: criterion.kind, objectId: criterion.objectId }
@@ -92,7 +92,7 @@ function assessed(run: GoalExecutionRun, lookup: ((id: string) => unknown) | und
   try {
     const contract = validateTaskAcceptanceContract(item.contract)
     const execution = item.execution as Partial<{ status: unknown; quiescent: unknown; completedAt: unknown; executionRef: unknown }> | null
-    if (contract.protocol !== 'task-acceptance/v2' || contract.id !== run.acceptance.contractId
+    if ((contract.protocol !== 'task-acceptance/v2' && contract.protocol !== 'task-acceptance/v4') || contract.id !== run.acceptance.contractId
       || contract.digest !== run.acceptance.contractDigest || !same(contract.task, run.intent.task)
       || contract.scope.workspace !== run.intent.scope.workspace || contract.scope.preset !== run.intent.scope.preset
       || contract.owner.principalRecordId !== run.intent.scope.principalRecordId || contract.owner.principalVersion !== run.intent.scope.principalVersion

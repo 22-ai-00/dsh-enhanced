@@ -56,7 +56,7 @@ export class AssistantActionsService extends Service {
       const header = execution.agent?.session.header
       if (header && config.grants.some(grant => grant.workspace === header.cwd && grant.agentPreset === header.agentPreset)
         && !['isolation_run', 'goal_context', 'goal_checkpoint'].includes(execution.name)
-        && !(execution.name === 'action_github_commit' && this.ctx.get('assistantPolicy')?.isPreauthorizedTool(execution))) throw new Error('assistant-actions: this scope requires isolated execution or an authorized broker')
+        && !(['action_github_commit', 'goal_create'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool(execution))) throw new Error('assistant-actions: this scope requires isolated execution or an authorized broker')
       return await next()
     }))
     ctx.inject(['tools', 'agents', 'assistantPolicy', 'assistantDelivery', 'credentialsKeychain'], runtime => {

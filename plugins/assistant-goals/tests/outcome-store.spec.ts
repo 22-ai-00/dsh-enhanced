@@ -28,7 +28,19 @@ function acceptance(assessmentId = 'assessment-a', id = `contract-${assessmentId
   if (contract.protocol !== 'task-acceptance/v3') throw new Error('expected v3 fixture')
   return contract
 }
-function input(template = acceptance()): GoalOutcomeDefinition { return { scope, goalId: 'goal-a', definition, sessionId: 'session-a', nativeGoalId: 'native-a', template } }
+function isolatedAcceptance(assessmentId = 'assessment-v4', id = `contract-${assessmentId}`): Extract<TaskAcceptanceContract, { protocol: 'task-acceptance/v4' }> {
+  const contract = createTaskAcceptanceContract({
+    protocol: 'task-acceptance/v4' as const, id,
+    scope: { workspace: '/work', preset: 'primary' }, owner: { principalRecordId: 'owner-row', principalVersion: 1 },
+    task: { kind: 'goal-outcome', ref: assessmentId, goal: { id: 'goal-a', definitionVersion: 3, definitionDigest: definition.digest, assessmentId, sessionId: 'session-a', nativeGoalId: 'native-a' } },
+    objective, profile: { id: 'goal-outcome-profile', version: 1, digest: 'a'.repeat(64) }, issuedAt: 10, expiresAt: 1000,
+    criteria: [{ id: 'isolated', kind: 'isolated-process-behavior', authority: { id: 'isolation-runner', digest: 'b'.repeat(64) }, artifactPath: 'artifacts/result.sh', testSetId: 'private-set' }],
+    bounds: { maxDurationMs: 100, maxEvidenceBytes: 1000 },
+  })
+  if (contract.protocol !== 'task-acceptance/v4') throw new Error('expected v4 fixture')
+  return contract
+}
+function input(template: TaskAcceptanceContract = acceptance()): GoalOutcomeDefinition { return { scope, goalId: 'goal-a', definition, sessionId: 'session-a', nativeGoalId: 'native-a', template } }
 
 describe('GoalOutcomeStore', () => {
   it('binds one immutable v3 whole-goal template and copies its frozen grader policy', () => {
@@ -44,6 +56,20 @@ describe('GoalOutcomeStore', () => {
     expect(() => store.prepare(bound, acceptance('assessment-d', 'contract-assessment-d', 1001))).toThrow(GoalStoreError)
     expect(() => store.bind({ ...input(), nativeGoalId: 'other-native' })).toThrow(GoalStoreError)
     store.close()
+  })
+
+  it('binds, persists, and reloads an immutable v4 isolated whole-goal template', async () => {
+    const path = join(await privateRoot(), 'outcomes.sqlite'); const template = isolatedAcceptance()
+    const definitionInput = input(template); const first = new GoalOutcomeStore(path)
+    try {
+      const bound = first.bind(definitionInput)
+      expect(first.prepare(bound, template)).toMatchObject({ contract: { protocol: 'task-acceptance/v4', criteria: [{ kind: 'isolated-process-behavior', testSetId: 'private-set' }] } })
+    } finally { first.close() }
+    const reopened = new GoalOutcomeStore(path)
+    try {
+      expect(reopened.get('assessment-v4')).toMatchObject({ contract: { protocol: 'task-acceptance/v4', task: { kind: 'goal-outcome', ref: 'assessment-v4' } } })
+      expect(reopened.getDefinition(scope, 'goal-a', 3)?.template.protocol).toBe('task-acceptance/v4')
+    } finally { reopened.close() }
   })
 
   it('migrates v1 assessments without changing frozen definitions or executions', async () => {

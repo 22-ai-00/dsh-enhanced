@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { closeSync, constants, fstatSync, openSync, readSync } from 'node:fs'
+import { closeSync, constants, fstatSync, openSync, readSync, realpathSync, statSync } from 'node:fs'
 import { chmod, lstat, mkdtemp, open, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { extname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path'
@@ -8,6 +8,7 @@ import type {
   AcceptanceCriterion,
   CriterionResult,
   DocumentCitationsCriterion,
+  IsolatedProcessBehaviorCriterion,
   ProcessBehaviorCriterion,
   TargetReadbackCriterion,
   TaskAcceptanceContract,
@@ -18,6 +19,12 @@ const MAX_AUTHORITIES = 64
 const MAX_CONFIG_STRING = 16_384
 const MAX_EXECUTABLE_BYTES = 128 * 1024 * 1024
 const MAX_ARTIFACT_BYTES = 1_048_576
+const MAX_ISOLATED_TEST_SETS = 64
+const MAX_ISOLATED_CASES = 256
+const MAX_ISOLATED_TEST_CASES = 1_024
+const MAX_ISOLATED_TEST_BYTES = 65_536
+const IMAGE = /^sha256:[a-f0-9]{64}$/u
+const STABLE_REF = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$/u
 
 export interface RunnerAuthorityInput {
   readonly kind: 'runner'
@@ -50,7 +57,31 @@ export interface ReadbackAuthorityInput {
   readonly allowHttpLoopback?: boolean
 }
 
-export type VerifierAuthorityInput = RunnerAuthorityInput | DocumentAuthorityInput | ReadbackAuthorityInput
+export interface IsolatedRunnerTestCaseInput {
+  readonly stdin: string
+  readonly expectedStdout: string
+  readonly expectedExitCode: number
+}
+export interface IsolatedRunnerTestSetInput {
+  readonly id: string
+  readonly cases: readonly IsolatedRunnerTestCaseInput[]
+}
+export interface IsolatedRunnerAuthorityInput {
+  readonly kind: 'isolated-runner'
+  readonly id: string
+  readonly stateRoot: string
+  readonly image: string
+  readonly dockerPath: string
+  readonly command: string
+  readonly expiresAt: number
+  readonly maxRuns: number
+  readonly maxTotalDurationMs: number
+  readonly maxDurationMs: number
+  readonly maxOutputBytes: number
+  readonly testSets: readonly IsolatedRunnerTestSetInput[]
+}
+
+export type VerifierAuthorityInput = RunnerAuthorityInput | DocumentAuthorityInput | ReadbackAuthorityInput | IsolatedRunnerAuthorityInput
 export interface VerifierAuthoritiesConfig { readonly authorities: readonly VerifierAuthorityInput[] }
 
 export interface RunnerAuthority extends Omit<RunnerAuthorityInput, 'environment'> {
@@ -67,7 +98,19 @@ export interface ReadbackAuthority extends Omit<ReadbackAuthorityInput, 'allowHt
   readonly allowHttpLoopback: boolean
   readonly digest: string
 }
-export type VerifierAuthority = RunnerAuthority | DocumentAuthority | ReadbackAuthority
+export interface IsolatedRunnerAuthority extends IsolatedRunnerAuthorityInput {
+  readonly digest: string
+}
+export type VerifierAuthority = RunnerAuthority | DocumentAuthority | ReadbackAuthority | IsolatedRunnerAuthority
+
+export interface IsolatedVerificationContext {
+  readArtifact(contract: TaskAcceptanceContract, path: string): Promise<{
+    readonly jobId: string; readonly requestDigest: string; readonly path: string; readonly content: string; readonly sha256: string
+  }>
+  run(authority: IsolatedRunnerAuthority, key: string, artifact: string, stdin: string, signal: AbortSignal): Promise<{
+    readonly jobId: string; readonly status: string; readonly quiescent: boolean; readonly exitCode?: number; readonly stdout: string; readonly stderr: string; readonly reason?: string
+  }>
+}
 
 export class VerifierAuthorityError extends Error {
   constructor(readonly code: 'invalid-authority', message: string) {
@@ -79,6 +122,11 @@ export class VerifierAuthorityError extends Error {
 function fail(message: string): never { throw new VerifierAuthorityError('invalid-authority', message) }
 function object(value: unknown, label: string): Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) fail(`${label} must be an object`)
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') fail(`${label} has unsupported fields`)
+    const descriptor = Object.getOwnPropertyDescriptor(value, key)
+    if (descriptor === undefined || !descriptor.enumerable || !Object.hasOwn(descriptor, 'value')) fail(`${label} has unsupported fields`)
+  }
   return value as Record<string, unknown>
 }
 function exactKeys(value: Record<string, unknown>, keys: readonly string[], label: string): void {
@@ -154,6 +202,56 @@ function shaFile(path: string): string {
     return createHash('sha256').update(bytes).digest('hex')
   } finally { closeSync(fd) }
 }
+function canonicalDirectory(value: unknown, label: string): string {
+  const path = string(value, label)
+  if (!isAbsolute(path) || normalize(path) !== path || resolve(path) !== path || path === sep) fail(`${label} must be a canonical non-root absolute path`)
+  return path
+}
+function canonicalExecutable(value: unknown, label: string): string {
+  const configured = string(value, label)
+  if (!isAbsolute(configured) || normalize(configured) !== configured || resolve(configured) !== configured) fail(`${label} must be a canonical absolute path`)
+  let resolved: string
+  try { resolved = realpathSync(configured) } catch { fail(`${label} is unavailable`) }
+  if (resolved !== configured) fail(`${label} must not traverse a symlink`)
+  try {
+    const stat = statSync(resolved)
+    if (!stat.isFile() || (stat.mode & 0o111) === 0) fail(`${label} must be an executable regular file`)
+  } catch (error) {
+    if (error instanceof VerifierAuthorityError) throw error
+    fail(`${label} is unavailable`)
+  }
+  return resolved
+}
+function strictArray(value: unknown, label: string, minimum: number, maximum: number): unknown[] {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length < minimum || value.length > maximum || Object.getOwnPropertySymbols(value).length > 0) fail(`${label} must be bounded`)
+  const keys = Object.getOwnPropertyNames(value).filter(key => key !== 'length')
+  if (keys.length !== value.length || keys.some((key, index) => key !== String(index) || !Object.hasOwn(Object.getOwnPropertyDescriptor(value, key)!, 'value'))) fail(`${label} has an unsafe shape`)
+  return value
+}
+function isolatedTestSets(value: unknown): readonly IsolatedRunnerTestSetInput[] {
+  const sets = strictArray(value, 'isolated runner testSets', 1, MAX_ISOLATED_TEST_SETS)
+  const ids = new Set<string>(); let cases = 0; let bytes = 0
+  const output = sets.map((entry, index) => {
+    const set = object(entry, `isolated runner testSets[${index}]`); exactKeys(set, ['id', 'cases'], 'isolated runner test set')
+    const id = string(set.id, 'isolated runner test set id')
+    if (ids.has(id)) fail('isolated runner test set ids must be unique'); ids.add(id)
+    const casesInput = strictArray(set.cases, 'isolated runner test cases', 1, MAX_ISOLATED_CASES)
+    const parsed = casesInput.map((candidate, caseIndex) => {
+      cases += 1; if (cases > MAX_ISOLATED_TEST_CASES) fail('isolated runner test cases exceed total bound')
+      const item = object(candidate, `isolated runner testSets[${index}].cases[${caseIndex}]`)
+      exactKeys(item, ['stdin', 'expectedStdout', 'expectedExitCode'], 'isolated runner test case')
+      const stdin = string(item.stdin, 'isolated runner stdin', true)
+      const expectedStdout = string(item.expectedStdout, 'isolated runner expectedStdout', true)
+      bytes += Buffer.byteLength(stdin, 'utf8') + Buffer.byteLength(expectedStdout, 'utf8')
+      if (bytes > MAX_ISOLATED_TEST_BYTES) fail('isolated runner test text exceeds total bound')
+      const expectedExitCode = item.expectedExitCode
+      if (typeof expectedExitCode !== 'number' || !Number.isSafeInteger(expectedExitCode) || expectedExitCode < 0 || expectedExitCode > 255) fail('isolated runner expectedExitCode is invalid')
+      return freeze({ stdin, expectedStdout, expectedExitCode })
+    })
+    return freeze({ id, cases: freeze(parsed) })
+  })
+  return freeze(output)
+}
 
 /** Validates Host-owned driver configuration, captures executable identity, and freezes it. */
 export function createVerifierAuthorities(config: unknown): readonly VerifierAuthority[] {
@@ -200,6 +298,21 @@ export function createVerifierAuthorities(config: unknown): readonly VerifierAut
       const urlTemplate = readbackTemplate(item.urlTemplate, allowHttpLoopback)
       const revisionPointer = item.revisionPointer === undefined ? undefined : validPointer(item.revisionPointer, 'readback revisionPointer')
       const bare = { kind: 'readback' as const, id, urlTemplate, objectIdPointer: validPointer(item.objectIdPointer, 'readback objectIdPointer'), ...(revisionPointer === undefined ? {} : { revisionPointer }), timeoutMs: whole(item.timeoutMs, 'readback timeoutMs'), maxResponseBytes: whole(item.maxResponseBytes, 'readback maxResponseBytes', 1_048_576), allowHttpLoopback }
+      return freeze({ ...bare, digest: digest(bare) })
+    }
+    if (kind === 'isolated-runner') {
+      allowedKeys(item, ['kind', 'id', 'stateRoot', 'image', 'dockerPath', 'command', 'expiresAt', 'maxRuns', 'maxTotalDurationMs', 'maxDurationMs', 'maxOutputBytes', 'testSets'], [], `isolated runner authority ${id}`)
+      const image = string(item.image, 'isolated runner image')
+      if (!IMAGE.test(image)) fail('isolated runner image must be SHA-256 pinned')
+      const expiresAt = item.expiresAt
+      if (typeof expiresAt !== 'number' || !Number.isSafeInteger(expiresAt) || expiresAt < 1) fail('isolated runner expiresAt must be an absolute timestamp')
+      const maxTotalDurationMs = whole(item.maxTotalDurationMs, 'isolated runner maxTotalDurationMs', 86_400_000)
+      const maxDurationMs = whole(item.maxDurationMs, 'isolated runner maxDurationMs', 300_000)
+      if (maxDurationMs > maxTotalDurationMs) fail('isolated runner maxDurationMs must not exceed maxTotalDurationMs')
+      const bare = { kind: 'isolated-runner' as const, id, stateRoot: canonicalDirectory(item.stateRoot, 'isolated runner stateRoot'), image,
+        dockerPath: canonicalExecutable(item.dockerPath, 'isolated runner dockerPath'), command: string(item.command, 'isolated runner command'), expiresAt,
+        maxRuns: whole(item.maxRuns, 'isolated runner maxRuns', 10_000), maxTotalDurationMs, maxDurationMs,
+        maxOutputBytes: whole(item.maxOutputBytes, 'isolated runner maxOutputBytes', 262_144), testSets: isolatedTestSets(item.testSets) }
       return freeze({ ...bare, digest: digest(bare) })
     }
     return fail(`unknown authority kind ${kind}`)
@@ -377,8 +490,73 @@ async function verifyReadback(criterion: TargetReadbackCriterion, authority: Rea
   } catch { return unknown(criterion.id, signal.aborted ? 'verification-aborted' : 'readback-io-failed') } finally { deadline.close() }
 }
 
+type IsolatedArtifact = Awaited<ReturnType<IsolatedVerificationContext['readArtifact']>>
+function snapshotMatches(source: IsolatedArtifact, criterion: IsolatedProcessBehaviorCriterion): boolean {
+  return source.path === criterion.artifactPath
+    && typeof source.jobId === 'string' && STABLE_REF.test(source.jobId)
+    && typeof source.requestDigest === 'string' && /^[a-f0-9]{64}$/u.test(source.requestDigest)
+    && typeof source.content === 'string' && Buffer.byteLength(source.content, 'utf8') <= MAX_ARTIFACT_BYTES
+    && typeof source.sha256 === 'string' && /^[a-f0-9]{64}$/u.test(source.sha256)
+    && createHash('sha256').update(source.content, 'utf8').digest('hex') === source.sha256
+}
+function isolatedKey(contract: TaskAcceptanceContract, criterion: IsolatedProcessBehaviorCriterion, source: IsolatedArtifact, authority: IsolatedRunnerAuthority, caseIndex: number): string {
+  return createHash('sha256').update(acceptanceCanonicalJson([
+    contract.id, contract.digest, criterion.id, source.jobId, source.requestDigest, source.sha256,
+    authority.digest, criterion.testSetId, caseIndex,
+  ])).digest('hex')
+}
+async function verifyIsolated(criterion: IsolatedProcessBehaviorCriterion, authority: IsolatedRunnerAuthority, contract: TaskAcceptanceContract, context: IsolatedVerificationContext | undefined, signal: AbortSignal): Promise<CriterionResult> {
+  if (context === undefined) return unknown(criterion.id, 'isolated-context-unavailable')
+  if (authority.expiresAt <= Date.now()) return unknown(criterion.id, 'isolated-authority-expired')
+  const testSet = authority.testSets.find(entry => entry.id === criterion.testSetId)
+  if (testSet === undefined) return unknown(criterion.id, 'isolated-test-set-unavailable')
+  let initial: IsolatedArtifact
+  try { initial = await context.readArtifact(contract, criterion.artifactPath) } catch { return unknown(criterion.id, 'isolated-artifact-unavailable') }
+  if (!snapshotMatches(initial, criterion)) return unknown(criterion.id, 'isolated-artifact-invalid')
+  const total = withDeadline(signal, Math.min(contract.bounds.maxDurationMs, authority.maxTotalDurationMs))
+  let outcome: CriterionResult | undefined
+  const runs: Array<{ jobId: string; key: string }> = []
+  try {
+    for (let index = 0; index < testSet.cases.length; index += 1) {
+      if (total.signal.aborted) { outcome = unknown(criterion.id, 'verification-aborted', initial.sha256); break }
+      const entry = testSet.cases[index]!
+      const deadline = withDeadline(total.signal, authority.maxDurationMs)
+      const key = isolatedKey(contract, criterion, initial, authority, index)
+      let observed: Awaited<ReturnType<IsolatedVerificationContext['run']>>
+      try { observed = await context.run(authority, key, initial.content, entry.stdin, deadline.signal) } catch {
+        outcome = unknown(criterion.id, deadline.signal.aborted ? 'verification-aborted' : 'isolated-run-unavailable', initial.sha256)
+        deadline.close(); break
+      }
+      deadline.close()
+      if (typeof observed.jobId !== 'string' || !STABLE_REF.test(observed.jobId) || (observed.status !== 'succeeded' && observed.status !== 'failed') || !observed.quiescent) {
+        outcome = unknown(criterion.id, 'isolated-run-unknown', initial.sha256); break
+      }
+      runs.push({ jobId: observed.jobId, key })
+      if (typeof observed.stdout !== 'string' || typeof observed.stderr !== 'string'
+        || Buffer.byteLength(observed.stdout, 'utf8') > authority.maxOutputBytes || Buffer.byteLength(observed.stderr, 'utf8') > authority.maxOutputBytes) {
+        outcome = unknown(criterion.id, 'isolated-output-invalid', initial.sha256); break
+      }
+      if (!Number.isSafeInteger(observed.exitCode)) { outcome = unknown(criterion.id, 'isolated-exit-unavailable', initial.sha256); break }
+      if (observed.exitCode !== entry.expectedExitCode) {
+        outcome = failed(criterion.id, 'isolated-unexpected-exit-code', [], initial.sha256); break
+      }
+      if (observed.stdout !== entry.expectedStdout) {
+        outcome = failed(criterion.id, 'isolated-unexpected-stdout', [], initial.sha256); break
+      }
+    }
+    let final: IsolatedArtifact
+    try { final = await context.readArtifact(contract, criterion.artifactPath) } catch { return unknown(criterion.id, 'isolated-artifact-unavailable', initial.sha256) }
+    if (!snapshotMatches(final, criterion) || final.jobId !== initial.jobId || final.requestDigest !== initial.requestDigest || final.sha256 !== initial.sha256 || final.content !== initial.content) {
+      return unknown(criterion.id, 'isolated-artifact-altered', initial.sha256)
+    }
+    if (total.signal.aborted) return unknown(criterion.id, 'verification-aborted', initial.sha256)
+    return outcome ?? passed(criterion.id, [{ kind: 'isolated-artifact', ref: initial.jobId, digest: initial.sha256 },
+      { kind: 'isolated-verification-jobs', ref: authority.id, digest: digest(runs) }], initial.sha256)
+  } finally { total.close() }
+}
+
 /** Runs every immutable criterion once. It never retries task side effects. */
-export async function verifyAcceptanceCriteria(contract: TaskAcceptanceContract, authorities: readonly VerifierAuthority[], signal: AbortSignal): Promise<readonly CriterionResult[]> {
+export async function verifyAcceptanceCriteria(contract: TaskAcceptanceContract, authorities: readonly VerifierAuthority[], signal: AbortSignal, context?: IsolatedVerificationContext): Promise<readonly CriterionResult[]> {
   const deadline = withDeadline(signal, contract.bounds.maxDurationMs)
   try {
     const results: CriterionResult[] = []
@@ -387,6 +565,7 @@ export async function verifyAcceptanceCriteria(contract: TaskAcceptanceContract,
       const authority = authorityFor(criterion, authorities)
       if (authority === undefined) { results.push(unknown(criterion.id, 'authority-mismatch')); continue }
       if (criterion.kind === 'process-behavior') results.push(authority.kind === 'runner' ? await verifyProcess(criterion, authority, contract.scope.workspace, deadline.signal) : unknown(criterion.id, 'authority-kind-mismatch'))
+      else if (criterion.kind === 'isolated-process-behavior') results.push(authority.kind === 'isolated-runner' ? await verifyIsolated(criterion, authority, contract, context, deadline.signal) : unknown(criterion.id, 'authority-kind-mismatch'))
       else if (criterion.kind === 'document-citations') results.push(authority.kind === 'document' ? await verifyDocument(criterion, authority, contract.scope.workspace, deadline.signal) : unknown(criterion.id, 'authority-kind-mismatch'))
       else results.push(authority.kind === 'readback' ? await verifyReadback(criterion, authority, deadline.signal) : unknown(criterion.id, 'authority-kind-mismatch'))
     }

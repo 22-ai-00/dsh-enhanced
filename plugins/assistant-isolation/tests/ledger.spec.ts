@@ -14,6 +14,7 @@ const grant = (revision = 1): IsolationGrant => ({ ...identity, id: 'grant', rev
 const input = (key = 'key') => ({ identity, sessionId: 'session', grantId: 'grant', idempotencyKey: key, requestDigest: `digest-${key}`, durationMs: 500 })
 const reservation = (memoryMiB = 64, workspaceInodes = 100) => ({ memoryMiB, workspaceInodes, maxMemoryMiB: 100, maxWorkspaceInodes: 200 })
 const unknown = (jobId: string, quiescent = false): IsolationResult => ({ jobId, status: 'unknown', quiescent, stdout: '', stderr: '', artifacts: [] })
+const binding = (paths: readonly string[]) => ({ admission: { protocol: 'goal-artifact-admission/v1' as const, contractId: 'contract-1', contractDigest: 'a'.repeat(64), runId: 'run-1', turn: 1 }, paths })
 function path(): string { const root = mkdtempSync(join(tmpdir(), 'isolation-ledger-')); roots.push(root); chmodSync(root, 0o700); return join(root, 'ledger.sqlite') }
 function error(fn: () => unknown): IsolationLedgerError { try { fn() } catch (caught) { expect(caught).toBeInstanceOf(IsolationLedgerError); return caught as IsolationLedgerError }; throw new Error('expected ledger error') }
 
@@ -24,8 +25,8 @@ describe('IsolationLedger', () => {
     expect((database.prepare('PRAGMA journal_mode').get() as { journal_mode: string }).journal_mode).toBe('wal')
     expect((statSync(file).mode & 0o777)).toBe(0o600)
     expect((statSync(join(file, '..')).mode & 0o777)).toBe(0o700)
-    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('5')
-    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(5)
+    expect((database.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('6')
+    expect((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(6)
     expect((database.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number }).auto_vacuum).toBe(2)
     database.close()
   })
@@ -143,8 +144,8 @@ describe('IsolationLedger', () => {
     expect(error(() => ledger.prepare({ ...input('new'), resourceReservation: reservation() })).code).toBe('unauthorized')
     ledger.close()
     const reopened = new DatabaseSync(file)
-    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(5)
-    expect((reopened.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('5')
+    expect((reopened.prepare('PRAGMA user_version').get() as { user_version: number }).user_version).toBe(6)
+    expect((reopened.prepare("SELECT value FROM schema_meta WHERE key='schema-version'").get() as { value: string }).value).toBe('6')
     expect((reopened.prepare("SELECT COUNT(*) AS count FROM isolation_jobs WHERE id='legacy'").get() as { count: number }).count).toBe(1)
     reopened.close()
   })
@@ -181,7 +182,7 @@ describe('IsolationLedger', () => {
     const legacy = ledger.prepare({ ...input('v2'), resourceReservation: reservation() }).job
     ledger.close()
     const db = new DatabaseSync(file)
-    db.exec("ALTER TABLE isolation_jobs DROP COLUMN creation_witness_json; ALTER TABLE isolation_jobs DROP COLUMN dispatch_attempted; ALTER TABLE isolation_jobs DROP COLUMN reserved_storage_bytes; PRAGMA user_version=2; UPDATE schema_meta SET value='2' WHERE key='schema-version';")
+    db.exec("DROP INDEX isolation_artifact_contract; ALTER TABLE isolation_jobs DROP COLUMN artifact_binding_json; ALTER TABLE isolation_jobs DROP COLUMN creation_witness_json; ALTER TABLE isolation_jobs DROP COLUMN dispatch_attempted; ALTER TABLE isolation_jobs DROP COLUMN reserved_storage_bytes; PRAGMA user_version=2; UPDATE schema_meta SET value='2' WHERE key='schema-version';")
     db.close()
     ledger = new IsolationLedger(file, { now: clock })
     try {
@@ -196,6 +197,38 @@ describe('IsolationLedger', () => {
       ledger = new IsolationLedger(file, { now: clock })
       expect(ledger.get(legacy.id)?.creationWitness).toEqual(witness)
     } finally { ledger.close() }
+  })
+
+  it('migrates v5 binding storage as null and never lets a same-key replay attach a binding', () => {
+    const file = path(); let ledger = new IsolationLedger(file, { now: clock }); ledger.syncGrants([grant()])
+    const legacy = ledger.prepare(input('legacy-v5')).job; ledger.close()
+    const database = new DatabaseSync(file)
+    database.exec("DROP INDEX isolation_artifact_contract; ALTER TABLE isolation_jobs DROP COLUMN artifact_binding_json; PRAGMA user_version=5; UPDATE schema_meta SET value='5' WHERE key='schema-version';")
+    database.close()
+    ledger = new IsolationLedger(file, { now: clock })
+    try {
+      expect(ledger.get(legacy.id)?.artifactBinding).toBeUndefined()
+      const replay = ledger.prepare({ ...input('legacy-v5'), artifactBinding: binding(['report.txt']) })
+      expect(replay).toMatchObject({ created: false, job: { id: legacy.id } })
+      expect(replay.job.artifactBinding).toBeUndefined()
+    } finally { ledger.close() }
+  })
+
+  it('uses the latest declared artifact attempt even when it failed or remains unknown', () => {
+    const ledger = new IsolationLedger(':memory:', { now: clock }); ledger.syncGrants([{ ...grant(), maxRuns: 10, maxTotalDurationMs: 10_000 }])
+    const success = ledger.prepare({ ...input('artifact-success'), artifactBinding: binding(['report.txt']) }).job
+    const succeeded = ledger.settle(success.id, success.version, { jobId: success.id, status: 'succeeded', quiescent: true, exitCode: 0, stdout: '', stderr: '', artifacts: [] })
+    const other = ledger.prepare({ ...input('artifact-other'), artifactBinding: binding(['other.txt']) }).job
+    ledger.settle(other.id, other.version, { jobId: other.id, status: 'succeeded', quiescent: true, exitCode: 0, stdout: '', stderr: '', artifacts: [] })
+    const failed = ledger.prepare({ ...input('artifact-failed'), artifactBinding: binding(['report.txt']) }).job
+    const failedResult = ledger.settle(failed.id, failed.version, { jobId: failed.id, status: 'failed', quiescent: true, stdout: '', stderr: '', artifacts: [], reason: 'expected-failure' })
+    expect(ledger.acceptedArtifactJob('contract-1', 'a'.repeat(64), 'report.txt')?.id).toBe(failedResult.id)
+    expect(ledger.acceptedArtifactJob('contract-1', 'a'.repeat(64), 'other.txt')?.id).toBe(other.id)
+    const latestUnknown = ledger.prepare({ ...input('artifact-unknown'), artifactBinding: binding(['report.txt']) }).job
+    const unknownResult = ledger.settle(latestUnknown.id, latestUnknown.version, unknown(latestUnknown.id))
+    expect(ledger.acceptedArtifactJob('contract-1', 'a'.repeat(64), 'report.txt')?.id).toBe(unknownResult.id)
+    expect(succeeded.status).toBe('succeeded')
+    ledger.close()
   })
 
 })

@@ -222,6 +222,14 @@ export class GoalOutcomeRuntime {
     }
     return Object.freeze({ ...assessment.execution, ...handle(contract), dispatchedAt: assessment.dispatchedAt, executionRef: contract.task.ref })
   }
+  artifactSource = async (input: TaskAcceptanceContract): Promise<AcceptanceHandle | null> => {
+    const contract = validateTaskAcceptanceContract(input)
+    const proof = await this.inspect(contract)
+    if (proof?.status !== 'succeeded' || !proof.quiescent) return null
+    const assessment = this.#store.getByContract(contract.id)!
+    const run = this.runs(assessment.definition.scope, assessment.definition.goalId).find(entry => entry.intent.runId === assessment.triggerRunId)
+    return run?.acceptance ?? null
+  }
   view(record: GoalRecord): GoalOutcomeView {
     const base: GoalOutcomeView = { status: 'unverified', definitionVersion: record.definition.version }
     if (!this.#active) return { ...base, status: 'unavailable' }

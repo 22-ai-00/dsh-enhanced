@@ -1,3 +1,4 @@
+import type { GoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
 import type { CreationWitness } from './runtime-witness.js'
 
 /** Owner identity is attested by the Host, never supplied in a model tool call. */
@@ -77,7 +78,11 @@ export interface IsolationResult {
   retention?: IsolationRetention
 }
 
+export interface IsolationArtifactBinding { admission: GoalArtifactAdmission; paths: readonly string[] }
+
 export interface IsolationJob {
+  /** Host-authored before dispatch; absent on legacy/unverified jobs. */
+  artifactBinding?: IsolationArtifactBinding
   id: string
   grantId: string
   grantRevision: number

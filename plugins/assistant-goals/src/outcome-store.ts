@@ -23,7 +23,7 @@ export interface GoalOutcomeAssessment {
   readonly execution?: { readonly status: 'succeeded' | 'unknown'; readonly quiescent: boolean; readonly completedAt: number }
 }
 
-type Contract = Extract<TaskAcceptanceContract, { protocol: 'task-acceptance/v3' }>
+type Contract = TaskAcceptanceContract & { task: Extract<TaskAcceptanceContract['task'], { kind: 'goal-outcome' }> }
 type DefinitionRow = { scope_key: string; goal_id: string; definition_version: number; definition_json: string }
 type AssessmentRow = { assessment_id: string; definition_json: string; contract_id: string; contract_json: string; trigger_run_id: string | null; dispatched_at: number | null; execution_json: string | null; scope_key: string; goal_id: string; definition_version: number; issued_at: number; created_seq: number }
 
@@ -53,8 +53,8 @@ function scopeKey(value: GoalScope): string { return acceptanceCanonicalJson(sco
 function contract(value: unknown, code: 'invalid-input' | 'schema' = 'invalid-input'): Contract {
   let parsed: TaskAcceptanceContract
   try { parsed = validateTaskAcceptanceContract(value) } catch { return fail(code) }
-  if (parsed.protocol !== 'task-acceptance/v3' || parsed.task.kind !== 'goal-outcome' || parsed.task.ref !== parsed.task.goal.assessmentId) fail(code)
-  return parsed
+  if ((parsed.protocol !== 'task-acceptance/v3' && parsed.protocol !== 'task-acceptance/v4') || parsed.task.kind !== 'goal-outcome' || parsed.task.ref !== parsed.task.goal.assessmentId) fail(code)
+  return parsed as Contract
 }
 function outcomeDefinition(value: unknown): GoalOutcomeDefinition {
   if (!exact(value, ['scope', 'goalId', 'definition', 'sessionId', 'nativeGoalId', 'template']) || !text(value.goalId) || !text(value.sessionId) || !text(value.nativeGoalId)) fail('invalid-input')

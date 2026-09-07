@@ -1,12 +1,13 @@
+import { validateGoalArtifactAdmission } from '@dsh-enhanced/task-acceptance-contract'
 import { chmodSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
-import { dirname, isAbsolute } from 'node:path'
+import { dirname, isAbsolute, normalize } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { processExited, sameDaemonWitness, validateCreationWitness, type CreationWitness, type DaemonWitness } from './runtime-witness.js'
 import type { SystemdBinding } from './daemon-binding.js'
 import { receiptData, type IsolationCleanupReceipt } from './cleanup-receipt.js'
 import { pruneResult, validateRetention } from './storage-policy.js'
-import type { IsolationGrant, IsolationIdentity, IsolationJob, IsolationResult, IsolationStatus, IsolationStorageBudget } from './types.js'
+import type { IsolationArtifactBinding, IsolationGrant, IsolationIdentity, IsolationJob, IsolationResult, IsolationStatus, IsolationStorageBudget } from './types.js'
 
 export type IsolationLedgerErrorCode = 'conflict' | 'invalid-input' | 'invalid-path' | 'invalid-state' | 'not-found' | 'schema' | 'schema-too-new' | 'unauthorized'
 
@@ -15,7 +16,7 @@ export class IsolationLedgerError extends Error {
 }
 export interface IsolationControllerAuthority { ownerId: string; fence: number }
 
-const schemaVersion = 5
+const schemaVersion = 6
 const outputMaximum = 1_048_576
 const artifactMaximum = 128
 const textMaximum = 16_384
@@ -41,6 +42,13 @@ function grant(value: IsolationGrant): IsolationGrant {
   return frozen({ ...identity({ principalDigest: value.principalDigest, principalRecordId: value.principalRecordId, principalVersion: value.principalVersion, workspace: value.workspace, agentPreset: value.agentPreset }), id: value.id, revision: value.revision, expiresAt: value.expiresAt, maxRuns: value.maxRuns, maxTotalDurationMs: value.maxTotalDurationMs })
 }
 
+function artifactBinding(value: IsolationArtifactBinding): IsolationArtifactBinding {
+  if (!value || typeof value !== 'object' || Object.keys(value).length !== 2 || !onlyKeys(value, ['admission', 'paths'])
+    || !Array.isArray(value.paths) || value.paths.length > 128 || new Set(value.paths).size !== value.paths.length
+    || value.paths.some(path => !text(path, 4096) || isAbsolute(path) || normalize(path) !== path || path === '.' || path.split(/[\\/]/u).includes('..') || /[\p{Cc}]/u.test(path))) fail('invalid-input', 'invalid artifact binding')
+  return frozen({ admission: validateGoalArtifactAdmission(value.admission), paths: [...value.paths] })
+}
+
 function grantDigest(value: IsolationGrant): string { return JSON.stringify(value) }
 
 function result(value: IsolationResult, allowRetention = false): IsolationResult {
@@ -56,7 +64,7 @@ function result(value: IsolationResult, allowRetention = false): IsolationResult
 }
 
 type GrantRow = { id: string; digest: string; revision: number; expires_at: number; max_runs: number; max_total_duration_ms: number; revoked: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string }
-type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; reserved_storage_bytes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null }
+type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; reserved_storage_bytes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null; artifact_binding_json: string | null }
 type ResourceReservation = { memoryMiB: number; workspaceInodes: number; maxMemoryMiB: number; maxWorkspaceInodes: number }
 
 function open(path: string): DatabaseSync {
@@ -73,14 +81,14 @@ function open(path: string): DatabaseSync {
     if (version > schemaVersion) fail('schema-too-new')
     if (version === 0) database.exec(`PRAGMA auto_vacuum = INCREMENTAL; VACUUM; BEGIN IMMEDIATE;
       CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '5');
+      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '6');
       CREATE TABLE isolation_grants (id TEXT PRIMARY KEY, digest TEXT NOT NULL, revision INTEGER NOT NULL, expires_at INTEGER NOT NULL, max_runs INTEGER NOT NULL, max_total_duration_ms INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), revoke_reason TEXT, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL) STRICT;
-      CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, reserved_storage_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
+      CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, reserved_storage_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, artifact_binding_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
       CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
       CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
       CREATE TABLE isolation_audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL, action TEXT NOT NULL, job_id TEXT, grant_id TEXT, detail TEXT NOT NULL) STRICT;
       CREATE TABLE isolation_controller (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;
-      PRAGMA user_version = 5; COMMIT;`)
+      PRAGMA user_version = 6; COMMIT;`)
     if (version === 1) database.exec(`BEGIN IMMEDIATE;
       ALTER TABLE isolation_jobs ADD COLUMN reserved_memory_mib INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE isolation_jobs ADD COLUMN reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0;
@@ -94,7 +102,9 @@ function open(path: string): DatabaseSync {
       PRAGMA user_version = 3; COMMIT;`)
     if ([1, 2, 3].includes(version)) database.exec(`BEGIN IMMEDIATE; UPDATE schema_meta SET value='4' WHERE key='schema-version'; PRAGMA user_version=4; COMMIT;`)
     if ([1, 2, 3, 4].includes(version)) database.exec(`BEGIN IMMEDIATE; ALTER TABLE isolation_jobs ADD COLUMN reserved_storage_bytes INTEGER NOT NULL DEFAULT 0; UPDATE schema_meta SET value='5' WHERE key='schema-version'; PRAGMA user_version=5; COMMIT;`)
-    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== schemaVersion) fail('schema')
+    if ([1, 2, 3, 4, 5].includes(version)) database.exec(`BEGIN IMMEDIATE; ALTER TABLE isolation_jobs ADD COLUMN artifact_binding_json TEXT; UPDATE schema_meta SET value='6' WHERE key='schema-version'; PRAGMA user_version=6; COMMIT;`)
+    database.exec("CREATE INDEX IF NOT EXISTS isolation_artifact_contract ON isolation_jobs(json_extract(artifact_binding_json, '$.admission.contractId')) WHERE artifact_binding_json IS NOT NULL")
+    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== schemaVersion) fail('schema')
     if (path !== ':memory:') chmodSync(path, 0o600)
     return database
   } catch (error) { database.close(); throw error }
@@ -129,10 +139,12 @@ export class IsolationLedger {
       try { witness = validateCreationWitness(JSON.parse(row.creation_witness_json)) } catch { fail('schema') }
       if (!row.dispatch_attempted) fail('schema')
     }
+    let binding: IsolationArtifactBinding | undefined
+    if (row.artifact_binding_json !== null) { try { binding = artifactBinding(JSON.parse(row.artifact_binding_json)) } catch { fail('schema') } }
     let parsed: IsolationResult | undefined
     if (row.result_json !== null) { try { parsed = result(JSON.parse(row.result_json) as IsolationResult, true) } catch { fail('schema') }; if (parsed.jobId !== row.id || (row.status === 'prepared' || row.status === 'running') || parsed.status !== row.status) fail('schema') }
     else if (row.status !== 'prepared' && row.status !== 'running') fail('schema')
-    return frozen({ id: row.id, grantId: row.grant_id, grantRevision: row.grant_revision, identity: jobIdentity, sessionId: row.session_id, idempotencyKey: row.idempotency_key, requestDigest: row.request_digest, containerName: row.container_name, deadline: row.deadline, reservedDurationMs: row.reserved_duration_ms, reservedMemoryMiB: row.reserved_memory_mib, reservedWorkspaceInodes: row.reserved_workspace_inodes, reservedStorageBytes: row.reserved_storage_bytes, dispatchAttempted: row.dispatch_attempted === 1, ...(witness ? { creationWitness: witness } : {}), status: row.status, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at, ...(parsed ? { result: parsed } : {}) })
+    return frozen({ ...(binding ? { artifactBinding: binding } : {}), id: row.id, grantId: row.grant_id, grantRevision: row.grant_revision, identity: jobIdentity, sessionId: row.session_id, idempotencyKey: row.idempotency_key, requestDigest: row.request_digest, containerName: row.container_name, deadline: row.deadline, reservedDurationMs: row.reserved_duration_ms, reservedMemoryMiB: row.reserved_memory_mib, reservedWorkspaceInodes: row.reserved_workspace_inodes, reservedStorageBytes: row.reserved_storage_bytes, dispatchAttempted: row.dispatch_attempted === 1, ...(witness ? { creationWitness: witness } : {}), status: row.status, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at, ...(parsed ? { result: parsed } : {}) })
   }
   syncGrants(grants: IsolationGrant[], authority?: IsolationControllerAuthority): void {
     if (!Array.isArray(grants)) fail('invalid-input')
@@ -148,8 +160,9 @@ export class IsolationLedger {
       for (const row of this.#database.prepare('SELECT id, revision, revoked FROM isolation_grants').all() as Array<{ id: string; revision: number; revoked: number }>) if (!seen.has(row.id) && row.revoked === 0) { this.#database.prepare('UPDATE isolation_grants SET revoked=1, revoke_reason=? WHERE id=?').run('removed-from-config', row.id); this.#audit(now, 'grant-revoked', null, row.id, 'removed-from-config') }
     })
   }
-  prepare(input: { identity: IsolationIdentity; sessionId: string; grantId: string; idempotencyKey: string; requestDigest: string; durationMs: number; maxActiveJobs?: number; authority?: IsolationControllerAuthority; resourceReservation?: ResourceReservation; storageBudget?: IsolationStorageBudget }): { job: IsolationJob; created: boolean } {
-    if (!input || typeof input !== 'object' || ![6, 7, 8, 9, 10].includes(Object.keys(input).length) || !onlyKeys(input, ['identity', 'sessionId', 'grantId', 'idempotencyKey', 'requestDigest', 'durationMs', 'maxActiveJobs', 'authority', 'resourceReservation', 'storageBudget']) || !text(input.sessionId) || !text(input.grantId) || !text(input.idempotencyKey) || !text(input.requestDigest) || !safePositive(input.durationMs) || (input.maxActiveJobs !== undefined && !safePositive(input.maxActiveJobs))) fail('invalid-input')
+  prepare(input: { identity: IsolationIdentity; sessionId: string; grantId: string; idempotencyKey: string; requestDigest: string; durationMs: number; maxActiveJobs?: number; authority?: IsolationControllerAuthority; resourceReservation?: ResourceReservation; storageBudget?: IsolationStorageBudget; artifactBinding?: IsolationArtifactBinding }): { job: IsolationJob; created: boolean } {
+    if (!input || typeof input !== 'object' || ![6, 7, 8, 9, 10, 11].includes(Object.keys(input).length) || !onlyKeys(input, ['identity', 'sessionId', 'grantId', 'idempotencyKey', 'requestDigest', 'durationMs', 'maxActiveJobs', 'authority', 'resourceReservation', 'storageBudget', 'artifactBinding']) || !text(input.sessionId) || !text(input.grantId) || !text(input.idempotencyKey) || !text(input.requestDigest) || !safePositive(input.durationMs) || (input.maxActiveJobs !== undefined && !safePositive(input.maxActiveJobs))) fail('invalid-input')
+    const binding = input.artifactBinding === undefined ? undefined : artifactBinding(input.artifactBinding)
     const reservation = input.resourceReservation === undefined ? undefined : input.resourceReservation
     if (reservation !== undefined && (!reservation || typeof reservation !== 'object' || Object.keys(reservation).length !== 4 || !onlyKeys(reservation, ['memoryMiB', 'workspaceInodes', 'maxMemoryMiB', 'maxWorkspaceInodes']) || !safePositive(reservation.memoryMiB) || !safePositive(reservation.workspaceInodes) || !safePositive(reservation.maxMemoryMiB) || !safePositive(reservation.maxWorkspaceInodes) || reservation.memoryMiB > reservation.maxMemoryMiB || reservation.workspaceInodes > reservation.maxWorkspaceInodes)) fail('invalid-input', 'invalid resource reservation')
     const storage = input.storageBudget
@@ -190,6 +203,7 @@ export class IsolationLedger {
       }
       const id = randomUUID(); const deadline = Math.min(now + input.durationMs, current.expires_at)
       this.#database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,dispatch_attempted,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0, 'prepared',1,?,?)").run(id, input.grantId, current.revision, who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.idempotencyKey, input.requestDigest, `dsh-isolation-${id}`, deadline, input.durationMs, reservation?.memoryMiB ?? 0, reservation?.workspaceInodes ?? 0, storage?.reservedBytes ?? 0, now, now)
+      if (binding) this.#database.prepare('UPDATE isolation_jobs SET artifact_binding_json=? WHERE id=?').run(JSON.stringify(binding), id)
       this.#audit(now, 'job-prepared', id, input.grantId, `revision:${current.revision}${reservation ? `;reservation:memoryMiB:${reservation.memoryMiB},workspaceInodes:${reservation.workspaceInodes}` : ''}${storage ? `;storageBytes:${storage.reservedBytes}` : ''}`)
       return { job: this.#job(id)!, created: true }
     })
@@ -366,6 +380,16 @@ export class IsolationLedger {
     this.#requireController(controller, this.#nowValue())
     return frozen({ checkpoint, reclaimMode: auto.auto_vacuum === 2 ? 'incremental' : 'page-reuse' })
   }
+  /** Newer declared output attempts mask older success, including failed/unknown attempts. */
+  acceptedArtifactJob(contractId: string, contractDigest: string, path: string): IsolationJob | undefined {
+    if (!text(contractId) || !/^[0-9a-f]{64}$/.test(contractDigest) || !text(path, 4096)) fail('invalid-input')
+    const row = this.#database.prepare("SELECT * FROM isolation_jobs WHERE artifact_binding_json IS NOT NULL AND json_extract(artifact_binding_json, '$.admission.contractId')=? AND EXISTS (SELECT 1 FROM json_each(artifact_binding_json, '$.paths') WHERE value=?) ORDER BY rowid DESC LIMIT 1").get(contractId, path) as JobRow | undefined
+    if (!row) return undefined
+    const job = this.#decodeJob(row)
+    if (job.artifactBinding?.admission.contractDigest !== contractDigest) fail('conflict', 'artifact contract digest differs')
+    return job
+  }
+
   /** Read-only current grant check for the exact native tool preauthorization. */
   permitsGrant(value: IsolationIdentity, grantId: string): boolean {
     const requested = identity(value)

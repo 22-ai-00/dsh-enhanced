@@ -86,3 +86,9 @@ Isolation schema v2 在同一 SQLite 事务中预留 worker memory + workspace c
 `assistant-actions` 是独立 Host bundle，依赖当前 Policy/Delivery/Keychain，不把通用 token 交给模型或 Docker worker。首个动作固定为 GitHub GraphQL expected-head commit：仓库/分支/路径来自 operator grant，内容来自有界工具输入，Keychain 短租约只在 Host 回调使用。Policy 预授权只绑定已注册 broker 的 exact ToolDefinition；单调 deny 仍在原生执行 guard 生效，Isolation 仅为该特定 broker 开放工具路由。Host 插件仍是受信任控制面，此接口不是同进程恶意插件的沙箱。
 
 动作库独立持久化预留、期限、派发意图与结果；跨 Policy/Keychain/动作库没有原子事务，失败保守消耗预算，unknown 不重发。容器继续不出网，不提供通用网络代理。该 bundle 不自动加入安装场景或激活真实用户 profile。
+
+## 隔离产物的独立验收
+
+任务协议 v4 为 Goals step/outcome 增加只含 testSet 引用的 isolated criterion；具体测试向量属于 Verifier Host authority。Isolation 普通依赖共享任务协议；Verifier 将 Isolation 声明为可选 Host peer，只在隔离验收时使用其私有 runner。Goals 通过共享 admission 值和 Host producer 方法交接来源，Isolation 不反向依赖 Goals 包。引导构建在 Delivery 后、Verifier 前先构建 Isolation，独立发布 bundle 的边界保持不变。
+
+来源 worker 与 verification worker 使用不同持久账本和有限授权。Verifier 从实时 Goals producer 获取 step acceptance，核验精确任务与 scope 后读 Isolation 的不可变产物；全目标验收由持久 trigger run 选取来源。固定验收命令在独立容器读取 artifact/input，Host 保存预期结果并生成 v4 回执。原生 GoalLoop 继续拥有调度；此路径没有新增模型循环，也不授予通用 Host 代码执行权。

@@ -2,13 +2,16 @@ import { describe, expect, test } from 'vitest'
 import {
   AcceptanceContractError,
   acceptanceDigest,
+  acceptanceProtocolForTask,
   createTaskAcceptanceContract,
   createTaskVerificationReceipt,
+  validateGoalArtifactAdmission,
   validateTaskAcceptanceContract,
   validateTaskVerificationReceipt,
   type TaskAcceptanceContractInput,
   type TaskAcceptanceContractV2Input,
   type TaskAcceptanceContractV3Input,
+  type TaskAcceptanceContractV4Input,
 } from '../src/index.ts'
 
 const sha = 'a'.repeat(64)
@@ -32,6 +35,30 @@ const goalStepContractInput = (): TaskAcceptanceContractV2Input => ({
 })
 const goalOutcomeContractInput = (): TaskAcceptanceContractV3Input => ({
   ...contractInput(), protocol: 'task-acceptance/v3', id: 'goal-outcome-acceptance-1',
+  task: { kind: 'goal-outcome', ref: 'assessment-1', goal: {
+    id: 'goal-1', definitionVersion: 2, definitionDigest: sha, assessmentId: 'assessment-1',
+    sessionId: 'session-1', nativeGoalId: 'native-goal-1',
+  } },
+})
+const isolatedCriterion = () => ({
+  id: 'isolated-behavior', kind: 'isolated-process-behavior' as const,
+  authority: { id: 'isolation-runner', digest: sha },
+  artifactPath: 'artifacts/behavior-report.json', testSetId: 'goal-test-set-1',
+})
+const goalStepV4ContractInput = (): TaskAcceptanceContractV4Input => ({
+  protocol: 'task-acceptance/v4', id: 'goal-step-isolated-contract',
+  scope: { workspace: '/workspace/task', preset: 'default' },
+  owner: { principalRecordId: 'principal-1', principalVersion: 1 },
+  task: { kind: 'goal-step', ref: 'run-1', goal: {
+    id: 'goal-1', definitionVersion: 2, definitionDigest: sha, stepId: 'step-1',
+    runId: 'run-1', sessionId: 'session-1', nativeGoalId: 'native-goal-1', nativeRevision: 3,
+  } },
+  objective: 'Verify isolated behavior', profile: { id: 'profile-1', version: 1, digest: sha },
+  issuedAt: 1_000, expiresAt: 2_000, criteria: [isolatedCriterion()],
+  bounds: { maxDurationMs: 30_000, maxEvidenceBytes: 10_000 },
+})
+const goalOutcomeV4ContractInput = (): TaskAcceptanceContractV4Input => ({
+  ...goalStepV4ContractInput(), id: 'goal-outcome-isolated-contract',
   task: { kind: 'goal-outcome', ref: 'assessment-1', goal: {
     id: 'goal-1', definitionVersion: 2, definitionDigest: sha, assessmentId: 'assessment-1',
     sessionId: 'session-1', nativeGoalId: 'native-goal-1',
@@ -110,6 +137,54 @@ describe('task acceptance contract', () => {
     expect(() => createTaskVerificationReceipt(contract, { ...receiptInputV3, protocol: 'task-verification/v2' })).toThrow(/protocol/i)
     expect(() => createTaskVerificationReceipt(contract, { ...receiptInputV3, task: goalStepContractInput().task })).toThrow(/identity|task kind/i)
     expect(() => validateTaskAcceptanceContract({ ...contract, task: { ...outcomeTask, goal: { ...outcomeTask.goal, definitionDigest: 'b'.repeat(64) } } })).toThrow(/digest/i)
+  })
+
+  test('round-trips isolated goal-step and goal-outcome criteria only through v4', () => {
+    for (const input of [goalStepV4ContractInput(), goalOutcomeV4ContractInput()]) {
+      const contract = createTaskAcceptanceContract(input)
+      expect(contract.protocol).toBe('task-acceptance/v4')
+      expect(acceptanceProtocolForTask(contract.task, contract.criteria)).toBe('task-acceptance/v4')
+      const receiptInputV4 = {
+        ...receiptInput(contract), protocol: 'task-verification/v4' as const,
+        results: [{ criterionId: 'isolated-behavior', status: 'passed' as const, reason: 'artifact-matched', evidence: [{ kind: 'isolated-artifact', ref: 'isolated-run-1', digest: sha }] }],
+      }
+      const receipt = createTaskVerificationReceipt(contract, receiptInputV4)
+      expect(receipt.protocol).toBe('task-verification/v4')
+      expect(validateTaskVerificationReceipt(contract, receipt)).toEqual(receipt)
+      expect(() => createTaskVerificationReceipt(contract, { ...receiptInputV4, protocol: 'task-verification/v3' })).toThrow(/protocol/i)
+      expect(() => createTaskVerificationReceipt(contract, { ...receiptInputV4, results: [{ ...receiptInputV4.results[0]!, expected: 'test-vector' }] })).toThrow(/shape/i)
+      const mismatched = contract.task.kind === 'goal-step' ? goalOutcomeV4ContractInput().task : goalStepV4ContractInput().task
+      expect(() => createTaskVerificationReceipt(contract, { ...receiptInputV4, task: mismatched })).toThrow(/identity|task kind/i)
+    }
+  })
+
+  test('rejects isolated criterion leakage into legacy protocols and hidden test content', () => {
+    const isolated = isolatedCriterion()
+    expect(() => createTaskAcceptanceContract({ ...contractInput(), criteria: [isolated] })).toThrow(/incompatible/i)
+    expect(() => createTaskAcceptanceContract({ ...goalStepContractInput(), criteria: [isolated] })).toThrow(/incompatible/i)
+    expect(() => createTaskAcceptanceContract({ ...goalOutcomeContractInput(), criteria: [isolated] })).toThrow(/incompatible/i)
+    expect(() => createTaskAcceptanceContract({ ...contractInput(), criteria: [contractInput().criteria[0]!, isolated] })).toThrow(/incompatible/i)
+    expect(() => createTaskAcceptanceContract({ ...goalStepContractInput(), criteria: [goalStepContractInput().criteria[0]!, isolated] })).toThrow(/incompatible/i)
+    expect(() => createTaskAcceptanceContract({ ...goalOutcomeContractInput(), criteria: [goalOutcomeContractInput().criteria[0]!, isolated] })).toThrow(/incompatible/i)
+    expect(() => createTaskAcceptanceContract({ ...goalStepV4ContractInput(), criteria: [contractInput().criteria[0]!] })).toThrow(/incompatible/i)
+    expect(() => createTaskAcceptanceContract({ ...goalStepV4ContractInput(), task: contractInput().task })).toThrow(/task kind|shape/i)
+    expect(() => createTaskAcceptanceContract({ ...goalStepV4ContractInput(), criteria: [{ ...isolated, artifactPath: '../behavior-report.json' }] })).toThrow(/relative/i)
+    expect(() => createTaskAcceptanceContract({ ...goalStepV4ContractInput(), criteria: [{ ...isolated, stdin: '' }] })).toThrow(/shape/i)
+    expect(() => createTaskAcceptanceContract({ ...goalStepV4ContractInput(), criteria: [{ ...isolated, expected: 'passed' }] })).toThrow(/shape/i)
+    expect(acceptanceProtocolForTask(contractInput().task, contractInput().criteria)).toBe('task-acceptance/v1')
+    expect(acceptanceProtocolForTask(goalStepContractInput().task, goalStepContractInput().criteria)).toBe('task-acceptance/v2')
+    expect(acceptanceProtocolForTask(goalOutcomeContractInput().task, goalOutcomeContractInput().criteria)).toBe('task-acceptance/v3')
+  })
+
+  test('validates and freezes a goal artifact admission linkage', () => {
+    const admission = validateGoalArtifactAdmission({
+      protocol: 'goal-artifact-admission/v1', contractId: 'goal-contract-1', contractDigest: sha,
+      runId: 'isolated-run-1', turn: 1,
+    })
+    expect(Object.isFrozen(admission)).toBe(true)
+    expect(() => validateGoalArtifactAdmission({ ...admission, protocol: 'goal-artifact-admission/v2' })).toThrow(/protocol/i)
+    expect(() => validateGoalArtifactAdmission({ ...admission, turn: 0 })).toThrow(/turn/i)
+    expect(() => validateGoalArtifactAdmission({ ...admission, extra: true })).toThrow(/shape/i)
   })
 
   test('rejects tampering, unsafe input, duplicate criteria, and changed byte expectations', () => {

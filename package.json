@@ -11,7 +11,7 @@
   },
   "scripts": {
     "build": "pnpm run build:bootstrap && pnpm --recursive --if-present run build",
-    "build:bootstrap": "pnpm run build:packages && pnpm --filter @dsh-enhanced/assistant-policy run build && pnpm --filter @dsh-enhanced/assistant-evaluation run build && pnpm --filter @dsh-enhanced/assistant-delivery run build && pnpm --filter @dsh-enhanced/assistant-verifier run build && pnpm --filter @dsh-enhanced/assistant-automations run build && pnpm --filter @dsh-enhanced/assistant-goals run build",
+    "build:bootstrap": "pnpm run build:packages && pnpm --filter @dsh-enhanced/assistant-policy run build && pnpm --filter @dsh-enhanced/assistant-evaluation run build && pnpm --filter @dsh-enhanced/assistant-delivery run build && pnpm --filter @dsh-enhanced/assistant-isolation run build && pnpm --filter @dsh-enhanced/assistant-verifier run build && pnpm --filter @dsh-enhanced/assistant-automations run build && pnpm --filter @dsh-enhanced/assistant-goals run build",
     "build:packages": "pnpm --recursive --filter './packages/*' --if-present run build",
     "check": "pnpm run validate && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run pack:check",
     "create:plugin": "node ./scripts/create-plugin.mjs",

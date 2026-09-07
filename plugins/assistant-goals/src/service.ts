@@ -1,3 +1,4 @@
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GoalView } from '@deepseek-ai/dsh-goal'
@@ -22,9 +23,10 @@ import type { GoalWake } from './wake-store.js'
 import type { DeliveryGoalWakeInput } from '@dsh-enhanced/assistant-delivery'
 import { GoalOutcomeRuntime, type GoalOutcomeView } from './outcome.js'
 
-export interface Config { databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
+export interface Config { preauthorizedCreateMaxRounds?: number; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-goals.sqlite')),
+  preauthorizedCreateMaxRounds: Schema.number().step(1).min(0).max(32).default(0),
   maxContextChars: Schema.number().step(1).min(1024).max(65536).default(12000),
   verifyNativeRounds: Schema.boolean().default(false),
   verifyGoalOutcome: Schema.boolean().default(false),
@@ -72,6 +74,7 @@ export class AssistantGoalsService extends Service {
   #store: GoalStore
   #active = true
   #maxChars: number
+  #createMaxRounds: number
   #observationFailures = 0
   #execution: GoalExecutionRuntime
   #budget: GoalBudgetRuntime | undefined
@@ -80,6 +83,9 @@ export class AssistantGoalsService extends Service {
 
   constructor(ctx: Context, input: Config = {}) {
     super(ctx, 'assistantGoals')
+    this.#createMaxRounds = input.preauthorizedCreateMaxRounds ?? 0
+    if (!Number.isSafeInteger(this.#createMaxRounds) || this.#createMaxRounds < 0 || this.#createMaxRounds > 32
+      || this.#createMaxRounds > 0 && (input.verifyNativeRounds !== true || input.verifyGoalOutcome !== true || input.executionBudget === undefined)) throw new Error('assistant-goals: preauthorized creation requires bounded independently verified goals')
     this.#maxChars = input.maxContextChars ?? 12000
     if (!Number.isSafeInteger(this.#maxChars) || this.#maxChars < 1024 || this.#maxChars > 65536) throw new Error('assistant-goals: invalid context budget')
     const path = input.databasePath ?? join(homedir(), '.dsh', 'assistant-goals.sqlite')
@@ -156,14 +162,15 @@ export class AssistantGoalsService extends Service {
     })
   }
 
-  #scope(agent: Agent | undefined, action: string): GoalScope {
+  #scope(agent: Agent | undefined, action: string, consume = true): GoalScope {
     if (!this.#active) throw new Error('assistant-goals: disposed')
     if (agent === undefined || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-goals: exact live agent required')
     const delivery = this.ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     const policy = this.ctx.get('assistantPolicy') as AssistantPolicyService | undefined
     const owner = delivery?.preferencePrincipalForAgent(agent)
     if (owner === undefined || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-goals: authenticated owner required')
-    if (policy?.authorizeAgent(agent, action, { kind: 'goal', id: 'business-context' }).effect !== 'allow') throw new Error('assistant-goals: policy denied')
+    const decision = consume ? policy?.authorizeAgent(agent, action, { kind: 'goal', id: 'business-context' }) : policy?.evaluateAgent(agent, action, { kind: 'goal', id: 'business-context' })
+    if (decision?.effect !== 'allow') throw new Error('assistant-goals: policy denied')
     return { principalId: owner.principalId, ...owner.principalLineage, workspace: owner.scope.workspace, preset: owner.scope.preset }
   }
 
@@ -223,7 +230,36 @@ export class AssistantGoalsService extends Service {
     } catch { return undefined }
   }
 
+  get preauthorizedCreateEnabled(): boolean { return this.#createMaxRounds > 0 }
+
+  preauthorizeCreate = (execution: ToolExecution): boolean => {
+    try {
+      if (!this.#active || this.#createMaxRounds === 0 || execution.signal.aborted || !execution.arguments || typeof execution.arguments !== 'object' || Array.isArray(execution.arguments)) return false
+      const args = execution.arguments as Record<string, unknown>
+      if (Object.keys(args).some(key => !['objective', 'max_goal_rounds'].includes(key)) || typeof args.objective !== 'string'
+        || args.objective.trim().length === 0 || args.objective.length > 16_384) return false
+      const objective = args.objective.trim()
+      const rounds = args.max_goal_rounds ?? this.#createMaxRounds
+      if (!Number.isSafeInteger(rounds) || (rounds as number) < 1 || (rounds as number) > this.#createMaxRounds) return false
+      if (!execution.agent || !this.#budget?.hasMeter(execution.agent.options)) return false
+      const scope = this.#scope(execution.agent, 'create', false)
+      this.#scope(execution.agent, 'observe', false)
+      this.#requireOwnerTurn(execution.agent!, scope)
+      this.#outcome!.preflight(scope, objective)
+      const verifier = this.ctx.get('assistantVerifier', false)!
+      return (['goal-step', 'goal-outcome'] as const).every(taskKind => {
+        const selected = verifier.inspectAcceptanceProfile({ scope: { workspace: scope.workspace, preset: scope.preset },
+          owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, objective, taskKind })
+        return selected !== null && selected.profile.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')
+      })
+    } catch { return false }
+  }
+
   create = (agent: Agent | undefined, objective: string, maxGoalRounds?: number): GoalRecord => {
+    if (this.#createMaxRounds > 0) {
+      maxGoalRounds ??= this.#createMaxRounds
+      if (!Number.isSafeInteger(maxGoalRounds) || maxGoalRounds < 1 || maxGoalRounds > this.#createMaxRounds) throw new Error('assistant-goals: configured creation round limit exceeded')
+    }
     const scope = this.#scope(agent, 'create')
     this.#scope(agent, 'observe')
     this.#requireOwnerTurn(agent!, scope)
@@ -445,6 +481,9 @@ export class AssistantGoalsService extends Service {
     try { outcome = this.#outcome?.register(registration) } catch (error) { execution(); throw error }
     return () => { outcome?.(); execution() }
   }
+  currentArtifactAdmission = (agent: Agent) => this.#execution.currentArtifactAdmission(agent)
+  inspectAcceptedArtifactSource = (contract: TaskAcceptanceContract) => contract.task.kind === 'goal-outcome'
+    ? this.#outcome?.artifactSource(contract) ?? Promise.resolve(null) : this.#execution.artifactSource(contract)
   inspectAcceptedExecution = (contract: TaskAcceptanceContract) => contract.task.kind === 'goal-outcome'
     ? this.#outcome?.inspect(contract) ?? Promise.resolve(null) : this.#execution.inspect(contract)
   inspectGoalOutcome = (agent: Agent | undefined, goalId: string) => this.#outcome?.view(this.inspect(agent, goalId))

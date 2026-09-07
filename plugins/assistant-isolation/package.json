@@ -94,7 +94,8 @@
     "@deepseek-ai/dsh-user-approval": "catalog:"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "catalog:"
+    "@deepseek-ai/schemastery": "catalog:",
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
   },
   "bin": {
     "dsh-isolation": "./lib/cli.js"

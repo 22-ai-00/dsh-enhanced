@@ -1,5 +1,5 @@
 import Schema from '@deepseek-ai/schemastery'
-import { acceptanceCanonicalJson, acceptanceDigest, createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest, acceptanceProtocolForTask, createTaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import type { AcceptanceTaskIdentity, TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import type { AcceptanceTask } from './host.js'
 import { createVerifierAuthorities } from './drivers.js'
@@ -68,7 +68,7 @@ export function compileAcceptanceProfiles(config: Config): Readonly<{
           sessionId: 'profile-validation-session', nativeGoalId: 'profile-validation-native-goal', nativeRevision: 1,
         } }
       : { kind: input.taskKind, ref: 'profile-validation' }
-    const contract = createTaskAcceptanceContract({ protocol: input.taskKind === 'goal-outcome' ? 'task-acceptance/v3' : input.taskKind === 'goal-step' ? 'task-acceptance/v2' : 'task-acceptance/v1', id: 'profile-validation',
+    const contract = createTaskAcceptanceContract({ protocol: acceptanceProtocolForTask(task, input.criteria), id: 'profile-validation',
       scope: input.scope, owner: input.owner, task,
       objective: input.objective, profile: { id: input.id, version: input.version, digest },
       criteria: input.criteria, issuedAt: 0, expiresAt: input.validityMs, bounds: input.bounds })
@@ -78,8 +78,10 @@ export function compileAcceptanceProfiles(config: Config): Readonly<{
     ids.add(input.id); matches.add(match)
     for (const criterion of contract.criteria) {
       const authority = authorities.find(item => item.id === criterion.authority.id && item.digest === criterion.authority.digest)
-      const expected = criterion.kind === 'process-behavior' ? 'runner' : criterion.kind === 'document-citations' ? 'document' : 'readback'
+      const expected = criterion.kind === 'isolated-process-behavior' ? 'isolated-runner' : criterion.kind === 'process-behavior' ? 'runner' : criterion.kind === 'document-citations' ? 'document' : 'readback'
       if (authority?.kind !== expected) throw new Error('assistant-verifier: acceptance profile authority is unavailable or changed')
+      if (criterion.kind === 'isolated-process-behavior' && authority.kind === 'isolated-runner'
+        && !authority.testSets.some(set => set.id === criterion.testSetId)) throw new Error('assistant-verifier: isolated test set unavailable')
     }
     const profile: AcceptanceProfile = Object.freeze({ id: contract.profile.id, version: contract.profile.version,
       scope: contract.scope, owner: contract.owner, objective: contract.objective, taskKind: contract.task.kind,

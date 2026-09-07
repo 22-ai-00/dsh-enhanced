@@ -36,6 +36,7 @@ export interface TaskAcceptanceRegistration {
 export interface TaskAcceptanceProducer {
   trustedAcceptanceProducerGeneration(): string
   registerTaskAcceptanceSink(registration: TaskAcceptanceRegistration): () => void
+  inspectAcceptedArtifactSource?(contract: TaskAcceptanceContract): Promise<AcceptanceHandle | null>
   inspectAcceptedExecution(contract: TaskAcceptanceContract): Promise<AcceptedExecution | null>
 }
 

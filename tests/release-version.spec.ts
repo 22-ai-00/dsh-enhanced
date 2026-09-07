@@ -728,6 +728,7 @@ describe('release version workflow', () => {
       + ' && pnpm --filter @dsh-enhanced/assistant-policy run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-evaluation run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-delivery run build'
+      + ' && pnpm --filter @dsh-enhanced/assistant-isolation run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-verifier run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-automations run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-goals run build',

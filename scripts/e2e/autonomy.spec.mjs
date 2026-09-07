@@ -66,6 +66,7 @@ test('fresh autonomy installer executes a finite offline grant through native We
     const calls = (await readFile(modelLog, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
     expect(calls).toHaveLength(4)
     expect(calls[0].hasActionTool).toBe(true)
+    expect(calls[0].hasGoalTool).toBe(true)
     expect(calls.filter(call => call.type === 'isolation-tool').every(call => call.hasIsolationTool)).toBe(true)
     expect(await page.getByRole('button', { name: 'Allow once', exact: true }).count()).toBe(0)
     // Inspect native streamed events, including asks that might no longer be visible.
