@@ -108,6 +108,18 @@ scope、situation、producer/evaluator id、证据引用和指标属于本地评
 
 **当前完成范围：** 冻结协议、持久账本、有界协调器、统计计算、原生 AgentLoop 执行器及 `dsh-benchmark` 命令。默认 `research-v1` 保留 8 道公开研究/注入开发题与 persona 比较；`memory-v2` 增加 6 道公开记忆开发题，覆盖条件、反例、分歧、可见性、撤回和注入。每 cell 使用独立 Context/Session/临时数据库，只做一次无工具模型请求。Memory 两臂使用相同任务、persona、模型、种子记忆和预算，均经过真实 Personal Memory 提案与 Host 审批，只有候选允许自动 snapshot 检索。此对照测量检索可用性，不把额外知识带来的结果变化解释为模型本身变聪明；完整跨日任务、规划/复核/成长组合、生产安装和独立留出仍待分别验收。
 
+### 原生策略比较的 Host 接口
+
+`@dsh-enhanced/assistant-evaluation/benchmark/strategy` 提供冻结策略计划、全 cell 计量器和临时 Delivery owner 装配。它们是后续 `strategy-v1` executor 的组成部分；当前 CLI 仍只支持上面的研究/记忆套件，尚未完成策略语料、独立隔离验收、详细证据对象及真实模型比较，不能据此声称策略收益。
+
+`parseStrategyBenchmarkPlan` 固定两个分支 `direct` / `adaptive-strategy`、共同预算、模型调用上限、单次输出和原生 Goal 轮数。共同 persona/工具/Policy/runtime 与策略 guide/tool/Policy/runtime 分别声明摘要，并派生两分支版本；任意额外版本差异会被拒绝。这只验证声明一致，实际 executor 仍须核对挂载的能力。`strategyBenchmarkJournalPlan` 将完整策略契约绑定到既有 journal，修改限额不能复用旧计划 ID。调用 `installStrategyBenchmarkRequestMeter` 会先核对 exact cell/计划/模型，再安装外层限额；executor 还必须把同一 `maxGoalRounds` 交给真实 Goal。
+
+计量器必须在首次入站前安装在专用 Context，覆盖前台、父 Goal 和 child 的全部 `llm/stream` 与工具执行。仅接受可信输入上界和供应商输出上限；estimate/observed 配置显式拒绝。模型流在 dispatch 前共享原子预留，结束后根据完整 usage 结算；取消、缺 usage、异常和提前关闭保留预留，`assertComplete()` 拒绝未结清、空测量或尚在运行的工具。费用为 null 时只约束 token，不声称金额硬限。快照是进程内观察；完整 executor 仍须将它与计划/cell 绑定、持久保存，并与独立验收和资源停止证据核对。取得下游迭代器的 `dispatched` 不是实际付费 HTTP 证明。
+
+`createBenchmarkStrategyOwnerRuntime` 要求全新 Context、两个现存且独立的 canonical 私有目录：候选 workspace 和其外部 stateRoot。它在 stateRoot 独占创建 runtimeRoot，写入 JSONL Session、Delivery/Policy SQLite 及 spool；显式保存空会话头，使原生 Delivery 创建后可以真实恢复。它只配对本地合成 owner、注册本地回复捕获通道；该身份只用于评估，不是对任何真实用户/外部服务的授权，不发现或修改用户 profile，也不发外部通知。只暴露指定工具 allow-list，额外 Policy 规则由可信 Host 提供。模型 adapter 则拥有操作者声明的网络/凭据权限，由调用者安装和销毁。
+
+调用者在返回后、首次 `sendPublicInbound` 前安装 meter、真实 adapter、Goal/Verifier/子任务服务；`pairOwner` 返回真实 Delivery lineage 供验收配置绑定。`waitForQuiescence` 检查 Delivery 无待办/未知状态，不代替目标产物验收。`shutdown` 取消原生 agent、释放服务并保留 runtimeRoot 供取证，不能把卸载成功当作远端请求已停止；有挂起的资源时完整 executor 必须保留 unknown。取证后由调用者移除临时目录。这些私有目录和 allow-list 不构成针对同 UID 任意 Host 代码的 OS 沙箱；候选命令仍须经过后续隔离执行器。新增 JSONL/persistence Host peers 保持可选，不随普通 Evaluation bundle 自动激活。
+
 ### 开发集命令
 
 ```sh

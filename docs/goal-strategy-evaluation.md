@@ -1,6 +1,6 @@
 # 原生目标策略的比较协议
 
-本协议对应落地账本 WP04/06。当前已实现策略子任务、共用 Goal 预算、执行诊断和 exact parent-step 的独立验收关联；下述固定预算比较 executor 尚未实现，不能把已有安装测试或 persona 比较计作策略收益。
+本协议对应落地账本 WP04/06。当前已实现策略子任务、共用 Goal 预算、执行诊断和 exact parent-step 的独立验收关联；已新增冻结策略契约、进程内全 cell meter 与真实临时 Delivery/JSONL owner 装配；下述固定预算比较 executor 尚未实现，不能把已有安装测试或 persona 比较计作策略收益。
 
 ## 可复用入口与需要替换的假设
 
@@ -34,3 +34,9 @@
 ## 实现验收
 
 先补 `strategy-v1` CLI 配置、doctor 依赖集、原生 Goal/subagent peers、executor 与可信 adapter 接口。新 executor 必须实际产生父 Goal 回合、策略工具执行与原生 child Session；比对外层全部 usage 和内层 `strategy-*` 预留，证明协调开销未遗漏。测试必须包含策略未选择、策略报错后直接修订、真实模型故障、共享限额拒绝、错误答案被独立验收拒绝、取消/撤权与迟到子任务停止。最后从已安装 CLI 运行两个分支并保存可核验结果；仅配置校验或内存替身不足以完成 WP06。
+
+## 已落地的执行基础（2026-09-07）
+
+`benchmark/strategy-plan.ts` 是独立严格 parser：冻结共同/策略能力摘要、精确两个分支及 modelCalls/单次输出/Goal轮数，并把契约摘要绑定至既有journal runtime版本。`benchmark/strategy-meter.ts` 在所有模型请求前共享预留，覆盖前台/父/child和实际工具调用，未知预留不退还；当前仅接受 upper-bound/provider，观测模式尚未实现。`benchmark/strategy-owner.ts` 使用真实 Delivery、Policy、原生 Session/AgentLoop 与 JSONL，显式持久化初始空会话头，再恢复执行，回复仅进入本地捕获通道。
+
+这些接口尚未组成 strategy-v1 executor：独立隔离产物语料、原生 Goals/Verifier完整装配、能力实装核对、CLI/doctor、不可变详细证据对象、真实模型公开开发比较及冻结留出仍待完成。进程内 meter 快照不替代完整cell证据，不能仅靠摘要或单测认定比较有效。

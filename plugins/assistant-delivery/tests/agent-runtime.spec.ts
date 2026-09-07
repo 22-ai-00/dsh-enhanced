@@ -43,6 +43,7 @@ import ApprovalService, { setApprovalPolicy } from '@deepseek-ai/dsh-user-approv
 import { approvalReviewerOf, AssistantPolicyService, type PolicyRule, type PolicyBudgetConfig } from '@dsh-enhanced/assistant-policy'
 import { AssistantAutomationsService, type AutomationProposalResult } from '@dsh-enhanced/assistant-automations'
 import { AssistantEvaluationService, TRUSTED_EVALUATION_PRODUCER_PROTOCOL } from '@dsh-enhanced/assistant-evaluation'
+import { installStrategyBenchmarkMeter } from '@dsh-enhanced/assistant-evaluation/benchmark/strategy'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
 import { registerLlmRouteCapability } from '@dsh-enhanced/llm-route-capabilities'
 import AssistantGoalsPlugin, { AssistantGoalsService } from '../../assistant-goals/lib/index.js'
@@ -10049,11 +10050,30 @@ describe('real rc.1 delivery Agent runtime', () => {
       if (!omitUsage) yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2 } }
       yield { type: 'finish', reason: { kind: 'stop' } }
     })
+    // Unlike the inner Goal ledger, this meter is installed before the initial
+    // foreground request and sees the actual parent and child Session streams.
+    const outerMeter = mode === 'normal' ? installStrategyBenchmarkMeter(fixture.ctx, {
+      budget: { durationMs: 15_000, inputTokens: 60, outputTokens: 40, costUsdMicros: null, toolCalls: 3 },
+      modelCalls: 5, maxOutputTokens: 7, signal: new AbortController().signal,
+      model: { provider: 'mock', model: 'delivery-model', temperature: null, maxOutputTokens: 7,
+        inputLimitMode: 'upper-bound', outputLimitMode: 'provider', inputUsdMicrosPerMillionTokens: null,
+        outputUsdMicrosPerMillionTokens: null, adapterDigest: 'a'.repeat(64), tokenCounterDigest: 'b'.repeat(64) },
+      binding: { adapter: fixture.llm, inputTokenUpperBound: () => 10, dispose() {} },
+    }) : undefined
+    if (outerMeter) fixture.ctx.on('agent/request', async (_payload, next) => ({ ...await next(), maxTokens: 7 }))
     await fixture.service.acceptInbound(message(`evt-native-strategy-${mode}`, 'Run the native strategy comparison'))
     await drive(fixture.service)
     await (fixture.ctx.assistantGoals as unknown as { whenIdle(): Promise<void> }).whenIdle()
     expect(goalId).not.toBe('')
     expect(fixture.llm.requests).toHaveLength(adapterCalls + 1)
+    if (outerMeter) {
+      outerMeter.assertComplete()
+      const measured = outerMeter.snapshot()
+      expect(measured).toMatchObject({ modelCalls: 5, toolCalls: 2, inputTokens: 50, outputTokens: 10, heldModelCalls: 0 })
+      const childIds = new Set(childAgents.map(agent => String(agent.session.id)))
+      expect(measured.traces.filter(trace => childIds.has(trace.sessionId ?? ''))).toHaveLength(2)
+      expect(measured.traces.every(trace => trace.phase === 'settled' && trace.sessionId !== null)).toBe(true)
+    }
     expect(scopedEffect).not.toHaveBeenCalled()
     if (mode === 'scoped-tool') {
       expect(scopedResults).toHaveLength(1)

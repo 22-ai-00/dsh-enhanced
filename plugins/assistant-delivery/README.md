@@ -390,3 +390,5 @@ pnpm --dir plugins/assistant-delivery pack --dry-run
 原生 Goal 仍为 `active` 且 `armed` 时，空闲回收保留同一个 Agent 和 Session lease，允许宿主唯一 GoalRoundDriver 在会话保存完成后调度下一轮。目标终态或 disarm 后恢复普通空闲回收；owner 撤权、租约失效、scope 卸载和原有 `maxExecutionMs` 期限仍优先结束执行，不为每轮重置期限。若宿主缺少 GoalRoundDriver，armed 目标最多保持到该期限；此保留检查本身不派发任务。
 
 当前 Web 只支持单已认证控制面的文本交互；图片、完整 queue/steer、跨渠道 owner 别名和子 Agent 历史仍未验收。原生 Web 安装及浏览器验证范围见 [自治实施记录](../../docs/agent-autonomy-implementation.md)，配置、Policy 与权限见 [Web owner 包说明](../assistant-web-owner/README.md)。
+
+Host 编排可从 `@dsh-enhanced/assistant-delivery/types` 读取无服务初始化的公开类型；该入口不激活 Delivery，也不授予消息发送权限。根构建先生成此类型入口，避免 Evaluation benchmark 与 Delivery 服务声明形成构建环。

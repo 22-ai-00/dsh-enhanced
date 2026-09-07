@@ -23,7 +23,11 @@
       "default": "./lib/benchmark/native.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./benchmark/strategy": {
+      "types": "./lib/benchmark/strategy.d.ts",
+      "default": "./lib/benchmark/strategy.js"
+    }
   },
   "files": [
     "bin",
@@ -74,7 +78,9 @@
     "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-evolution": ">0.1.7 <0.2.0",
     "@dsh-enhanced/personal-memory": ">=0.1.24 <0.2.0",
-    "@dsh-enhanced/assistant-policy": ">=0.1.24 <0.2.0"
+    "@dsh-enhanced/assistant-policy": ">=0.1.24 <0.2.0",
+    "@deepseek-ai/dsh-session-persistence-jsonl": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-session-persistence": ">=0.1.2-rc.1 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-agent-loop": {
@@ -118,6 +124,12 @@
     },
     "@dsh-enhanced/assistant-policy": {
       "optional": true
+    },
+    "@deepseek-ai/dsh-session-persistence-jsonl": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session-persistence": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -138,7 +150,9 @@
     "vitest": "catalog:",
     "@dsh-enhanced/assistant-verifier": "workspace:*",
     "@dsh-enhanced/personal-memory": "workspace:*",
-    "@dsh-enhanced/assistant-policy": "workspace:*"
+    "@dsh-enhanced/assistant-policy": "workspace:*",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "catalog:",
+    "@deepseek-ai/dsh-session-persistence": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
