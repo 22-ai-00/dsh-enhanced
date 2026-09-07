@@ -59,3 +59,7 @@ construction 自身的 owner effect 把卸载记入不可复位的组合取消�
 `assistant-web-owner` 的生产边界以 `@deepseek-ai/dsh-api-session-controller@0.1.2-rc.1` 与 Cordis `4.0.2` 实际实现验证：保留原 Controller 的 Remote 原型元数据，在构造入口提供独立 fiber 的受限 Agent facade；`SessionSkillCatalog` 必须在其构造时加 owner gate，`api-session/*` 也必须在全局 ApiRemotes 转发前过滤。不能用简单 Proxy 包装原 registry（Cordis trace 可能还原原始服务），也不能在已运行 Controller 上仅覆盖 prompt。bundle patch 通过禁用原行再插入新行替换，`name` 本身不是可改写字段。
 
 Delivery 的新集成测试显式使用同版本 `dsh-api-gateway` 与 `dsh-api-remotes`，覆盖真实 Gateway 调用和两个 `$events` 消费者；不据此声称浏览器或 HTTP/WS 验收。新增包尚未发布，也未改动本机实际 `web` profile。
+
+Web client 与工作区接线：本包构建期复用 `dsh-api-session-controller@0.1.2-rc.1` 的完整 browser factory，仅替换注册模块 ID，并携带原 MIT 文本；原 Host row 禁用后不会自动提供 client graph row，必须由本包声明 `dsh.client` 和 `./client`。构建校验上游版本、模块格式、依赖元数据，升级后须重新核验 UI 的模块引用。`dsh-workspace` 作为可选 Host peer，使用同版本 `resolveByPath/create/get` 与 canonical `Workspace.path`；不直接改写原生存储。每次创建重查配置中的 workspaceId/path，并交给原生 Controller 完成关联。配置路径与 realpath 不同会报错，不能悄悄改变 Delivery/Policy scope 键。
+
+该版本 `SessionStore.detach` 的 `session/disposed` 仅表示内存释放，Persistence 仍保留记录；Web owner 的空闲回收会抑制由此生成的 `api-session/removed`，避免浏览器误清空会话。没有修改原生持久删除 API。升级必须重跑双事件订阅的空闲回收、真实浏览器文本/审批/Goal，以及 Host 重启后恢复；独立 `pnpm test:web-owner` 验证实际 HTTP/WS 和新浏览器认证，不能由进程内 Gateway 测试代替。

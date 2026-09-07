@@ -1,0 +1,207 @@
+{
+  "schemaVersion": 1,
+  "recordedAt": "2026-09-07T06:47:10.494943+00:00",
+  "baseCommit": "66401bc0e0d3e6176aab6587522d4348a5b02105",
+  "sourceSha256": {
+    "plugins/assistant-web-owner/src/index.ts": "96aef9d8e4bb9fc8a38449ed1bd3dc012d22fb5dc6b8c14ec97c1c2da3ef1d60",
+    "plugins/assistant-web-owner/package.json": "8a333bf2520c6c929221f42ace61866de029bcb16884a7f828aaf72574ce6b9c",
+    "plugins/assistant-web-owner/scripts/build-client.mjs": "3238b8bbef167f009c9add64315bc62aab4e3ab31aeb9121f4ae8eaeb0cd0c13",
+    "scripts/e2e/web-owner.spec.mjs": "2aac3938f141060b3d80b2ad84d700db11d4c1a9e171cc6b784adc77101a58c0",
+    "scripts/e2e/web-owner-model.mjs": "1d0f84db490a2b16c7530d11a7a3e1e4c65f92d3ace00338af5bc43ac866f442",
+    "scripts/e2e/playwright.config.mjs": "11f9df7a77add51aa52eb888893b69b6d1e8a9b3a6dca7fad852ed4b9a430099"
+  },
+  "runtime": {
+    "dsh": "0.1.2-rc.1",
+    "playwright": "1.58.2",
+    "chromium": "146.0.7680.177",
+    "platform": "Linux Debian 12"
+  },
+  "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium pnpm test:web-owner --repeat-each=3",
+  "exitCode": 0,
+  "localLog": "/tmp/dsh-web-owner-e2e-v15.log",
+  "runs": [
+    {
+      "authentication": {
+        "launchRedirect": true,
+        "unauthenticatedStatus": 401,
+        "untrustedOriginStatus": 403
+      },
+      "sessionId": "session-38824ad5-f9ec-4879-97cf-e8e3a4fba948",
+      "bindingId": "binding_eafd43dd-780c-4433-87b3-5c6ff6eb2b51",
+      "goalId": "096a0b83f2d98588f5616c625ad121e04ed603d2835b0847211a40d8b921c7c7",
+      "objective": "Browser owner end-to-end goal",
+      "streams": [
+        "session/control",
+        "workspace/follow",
+        "$events",
+        "session/follow",
+        "session/control",
+        "workspace/follow",
+        "$events",
+        "session/follow"
+      ],
+      "processedPrompts": 2,
+      "finalLease": "released",
+      "hostRestart": true,
+      "freshBrowserContext": true,
+      "goalScope": {
+        "principalId": "web/web/local/operator",
+        "principalRecordId": "principal_b5ef9630-b527-48a2-bc55-f6a4b078e8c0",
+        "principalVersion": 1,
+        "workspace": "/tmp/dsh-web-owner-e2e-B4fQ2b/workspace",
+        "preset": "standard"
+      },
+      "approvedTool": "goal_create",
+      "model": "deterministic browser-e2e/goal-proof; not a real-model autonomy benchmark",
+      "calls": [
+        {
+          "call": 1,
+          "type": "goal-tool",
+          "hasGoalTool": true
+        },
+        {
+          "call": 2,
+          "type": "reply",
+          "hasGoalTool": true
+        },
+        {
+          "call": 3,
+          "type": "reply",
+          "hasGoalTool": true
+        },
+        {
+          "call": 4,
+          "type": "reply",
+          "hasGoalTool": true
+        }
+      ],
+      "callsBeforeRestart": 3,
+      "roundsBeforeRestart": 1,
+      "roundsAfterRestart": 1
+    },
+    {
+      "authentication": {
+        "launchRedirect": true,
+        "unauthenticatedStatus": 401,
+        "untrustedOriginStatus": 403
+      },
+      "sessionId": "session-6eb996f5-9ff6-4c26-9355-ffe9e16eb513",
+      "bindingId": "binding_05045b7c-86d1-4211-98d4-6a6c43452615",
+      "goalId": "8f7f5498e72185d034db4167d0fb164acba6c6cd844190c62eb327400d98d193",
+      "objective": "Browser owner end-to-end goal",
+      "streams": [
+        "session/control",
+        "workspace/follow",
+        "$events",
+        "session/follow",
+        "session/control",
+        "workspace/follow",
+        "$events",
+        "session/follow"
+      ],
+      "processedPrompts": 2,
+      "finalLease": "released",
+      "hostRestart": true,
+      "freshBrowserContext": true,
+      "goalScope": {
+        "principalId": "web/web/local/operator",
+        "principalRecordId": "principal_db45c25c-b12b-465e-8481-c0ed8455cfcf",
+        "principalVersion": 1,
+        "workspace": "/tmp/dsh-web-owner-e2e-9gNO5A/workspace",
+        "preset": "standard"
+      },
+      "approvedTool": "goal_create",
+      "model": "deterministic browser-e2e/goal-proof; not a real-model autonomy benchmark",
+      "calls": [
+        {
+          "call": 1,
+          "type": "goal-tool",
+          "hasGoalTool": true
+        },
+        {
+          "call": 2,
+          "type": "reply",
+          "hasGoalTool": true
+        },
+        {
+          "call": 3,
+          "type": "reply",
+          "hasGoalTool": true
+        },
+        {
+          "call": 4,
+          "type": "reply",
+          "hasGoalTool": true
+        }
+      ],
+      "callsBeforeRestart": 3,
+      "roundsBeforeRestart": 1,
+      "roundsAfterRestart": 1
+    },
+    {
+      "authentication": {
+        "launchRedirect": true,
+        "unauthenticatedStatus": 401,
+        "untrustedOriginStatus": 403
+      },
+      "sessionId": "session-abb4000e-fd12-43ce-ae78-66debcd990a7",
+      "bindingId": "binding_43cd6a32-524a-4b5c-a0a3-81e5444422e7",
+      "goalId": "21e9d7524bb8d69114d5ebc2e2fed6c276f82b5d7ef424752babf204e84ac486",
+      "objective": "Browser owner end-to-end goal",
+      "streams": [
+        "session/control",
+        "workspace/follow",
+        "$events",
+        "session/follow",
+        "session/control",
+        "workspace/follow",
+        "$events",
+        "session/follow"
+      ],
+      "processedPrompts": 2,
+      "finalLease": "released",
+      "hostRestart": true,
+      "freshBrowserContext": true,
+      "goalScope": {
+        "principalId": "web/web/local/operator",
+        "principalRecordId": "principal_e89cc64d-f71d-472f-aa84-641a91c3f0df",
+        "principalVersion": 1,
+        "workspace": "/tmp/dsh-web-owner-e2e-CbOGi7/workspace",
+        "preset": "standard"
+      },
+      "approvedTool": "goal_create",
+      "model": "deterministic browser-e2e/goal-proof; not a real-model autonomy benchmark",
+      "calls": [
+        {
+          "call": 1,
+          "type": "goal-tool",
+          "hasGoalTool": true
+        },
+        {
+          "call": 2,
+          "type": "reply",
+          "hasGoalTool": true
+        },
+        {
+          "call": 3,
+          "type": "reply",
+          "hasGoalTool": true
+        },
+        {
+          "call": 4,
+          "type": "reply",
+          "hasGoalTool": true
+        }
+      ],
+      "callsBeforeRestart": 3,
+      "roundsBeforeRestart": 1,
+      "roundsAfterRestart": 1
+    }
+  ],
+  "limitations": [
+    "Deterministic model fixture, not real-model reasoning quality or measured improvement.",
+    "Goal creation and bounded native continuation are not verified business goal achievement.",
+    "No multi-day observation, OS worker isolation, release, or real-user profile activation.",
+    "This integration command is separate from pnpm check and requires DSH and Chromium."
+  ]
+}
