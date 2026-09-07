@@ -1,0 +1,211 @@
+{
+  "schema": "autonomy-isolation-storage-evidence/v1",
+  "recordedAt": "2026-09-07T15:14:28.813746+00:00",
+  "baseCommit": "8b31916420e93e8c4c5b071dffb826952163015e",
+  "scope": "WP08-10 observed storage admission and explicitly enabled historical result retention; full autonomy goal remains active",
+  "sourceHashes": {
+    "plugins/assistant-isolation/README.md": "907686e9c333e9f81a6922cf30d54f3c8e06e8ca6d20a02c1e0c0dd76bff8ee6",
+    "plugins/assistant-isolation/src/cli.ts": "a03f6e787b14c2c4f255801fe3346b44179361f73d4cc6f14165e734c8b8a9fe",
+    "plugins/assistant-isolation/src/config.ts": "8b55c7e937a4c132f6e94c12981800c04cce8bb7494b1746ffdc5006b8c04600",
+    "plugins/assistant-isolation/src/ledger.ts": "6c70b29073c9610efa4b2f4079d8a3527a8032c378ed2cc79f8a0343286d04b5",
+    "plugins/assistant-isolation/src/service.ts": "48f68b1d0be76e9dc46a6cc69d4e0ac29b3698546e85622fe09536b1fbc5b2bc",
+    "plugins/assistant-isolation/src/storage-policy.ts": "f24af85e97cc671ec1b0f7fde919f7716980806289d6be56ef12c7d0bf43cac2",
+    "plugins/assistant-isolation/src/storage.ts": "b87a36351e38f429aac39ccb9c34c5d266d8d60f8cb0f7e9df6377226ce14e5b",
+    "plugins/assistant-isolation/src/tools.ts": "39f41f2657fdcd33bca76628877deb9c937b46e1a9cdc8a1c003ffee14fc6a63",
+    "plugins/assistant-isolation/src/types.ts": "12f2f58390dea141cc7597021def6a0cdd94f8fac002e3ea003f67fb84677d36",
+    "plugins/assistant-isolation/tests/ledger.spec.ts": "c6b8736a0b15616c519e96592e2f7f6bdc5289d1cf9e27eca2d30f3c161c8310",
+    "plugins/assistant-isolation/tests/service.spec.ts": "4954cad0dbe677ba85c2823bfc3045ae15ab02135af908148995d11d073d1a9d",
+    "plugins/assistant-isolation/tests/storage-ledger.spec.ts": "9e1193304776829ebed78e2954288594fc653dfdf6cbca01f90b4a878a19254c",
+    "plugins/assistant-isolation/tests/storage-policy.spec.ts": "3604023f8955df7ce362d05e3a5b6ee4de800d78b2c439ec549b9c6d69231366",
+    "plugins/assistant-isolation/tests/storage.spec.ts": "5b68f1a1cebc6a872bb734fe9bdf1cb4dfe0f036af25917a85797ca0e9ac41b0"
+  },
+  "commands": [
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "log": "/tmp/dsh-storage-typecheck.log",
+      "exitCode": 2,
+      "sha256": "ee3244ff7b146cfd8d65fba23ad4e3f85359861d49e73f6fd87e98f491aab5fc",
+      "exitFile": "/tmp/dsh-storage-typecheck.log.exit",
+      "exitSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation build && CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/storage-policy.spec.ts tests/storage-ledger.spec.ts tests/storage.spec.ts tests/ledger.spec.ts",
+      "log": "/tmp/dsh-storage-build-focus.log",
+      "exitCode": 1,
+      "sha256": "ffab3a504efe11f7536ea4471bb0849508e2099c383a2bff5d2f2d764889679b",
+      "exitFile": "/tmp/dsh-storage-build-focus.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation build && CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck && CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/storage-policy.spec.ts tests/storage-ledger.spec.ts tests/storage.spec.ts tests/ledger.spec.ts tests/service.spec.ts",
+      "log": "/tmp/dsh-storage-focused-v2.log",
+      "exitCode": 1,
+      "sha256": "f5eb05d6ff96979c9e0a4416813d232262f5a70d98dc6b039407df7896baaac7",
+      "exitFile": "/tmp/dsh-storage-focused-v2.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation build && CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck && CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/storage-policy.spec.ts tests/storage-ledger.spec.ts tests/storage.spec.ts tests/ledger.spec.ts tests/service.spec.ts",
+      "log": "/tmp/dsh-storage-focused-v3.log",
+      "exitCode": 0,
+      "sha256": "7ddf4899d8e14c6993006b9c4b684919cdb9fa4978a9863a40bd7877014190ea",
+      "exitFile": "/tmp/dsh-storage-focused-v3.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-storage-check-v1.log",
+      "exitCode": 0,
+      "sha256": "bfae37405fbcc094c9470e4da2c60ef0ef2a39393aecd0bfa24a2b3902f85911",
+      "exitFile": "/tmp/dsh-storage-check-v1.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "c2cRecordExit": 0
+    },
+    {
+      "command": "CI=true pnpm lint && CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "log": "/tmp/dsh-storage-final-static.log",
+      "exitCode": 0,
+      "sha256": "99734c1aaab434e797864a1d1c79d1b6a6f9801a571f1727dc87a04691d5f2f8",
+      "exitFile": "/tmp/dsh-storage-final-static.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa",
+      "c2cRecordExit": 0
+    }
+  ],
+  "facts": [
+    "Schema v5 preserves job identities, idempotency keys, request digests, diagnostic witnesses and cumulative grant run/duration consumption.",
+    "Production admission observes private state DB/WAL/SHM/staging and retains future allocations for active jobs. Missing or stale observations deny new keys; matching existing keys return first.",
+    "Default policy is 256 MiB observed state, 10000 permanent job records, and zero result-retention age (keep bodies).",
+    "SQLite freelist is reported but cannot offset staging reservations; actual large-result freelist regression verifies refusal near observed high water.",
+    "Pruning affects only known terminal quiescent bodies. Unknown results, including quiescent unknown, remain intact. Small or legacy-incompatible bodies remain intact.",
+    "Pruned results carry outcome, exit code/reason, timestamp, format version, original sorted-JSON and individual UTF-8 body/artifact SHA-256 and byte counts.",
+    "Real Docker service integration verifies one supervisor dispatch, record-ceiling denial, readback when observation fails, CLI maintenance and restored idempotent readback with unchanged consumed duration.",
+    "Actual periodic Host sweep, competing CLI refusal, SQLite reader-pinned WAL busy/release, legacy migration and controller/CAS checks are covered.",
+    "Controller renewal no longer appends heartbeat audit rows. Job and grant lifecycle audits remain."
+  ],
+  "limits": [
+    "Observed admission is not a filesystem hard quota. Snapshot races, WAL growth and unrelated Host activity can exceed an observation.",
+    "Logical bytes removed do not prove physical bytes freed or secure erasure. Incremental vacuum applies to new databases; upgraded databases retain page-reuse mode.",
+    "Permanent row ceiling is finite; no ledger reset or deletion is offered. Cross-root/global disk budgets and lifecycle audit archival remain unfinished.",
+    "Unknown interrupted/missing Docker requests and daemon generation changes still retain reservations; this slice does not release them.",
+    "No real user profile was activated, no image was pulled, no shared daemon was restarted, and no package was released.",
+    "Main full-check tests completed before the last background-maintenance test was added; the later package suite includes it. Final lint/typecheck cover post-start additions.",
+    "The Docker service integration uses controlled Delivery identity and Policy seams; no real cloud model or external account efficacy is established."
+  ],
+  "failureHistory": [
+    "Initial root typecheck failed on unknown metadata bytes; fixed with explicit number narrowing.",
+    "First focused run exposed missing observation rejected before existing-key lookup; validation now permits omission and only new keys reject it explicitly.",
+    "Second focused run exposed a missing AgentLoop fixture factory; fixture loads native AgentLoop/SystemPrompt/ToolRuntime.",
+    "Independent static review rejected freelist credit against staging; admission now reserves the full planned allocation.",
+    "Two worker tsc attempts reported exit 2 and a worker direct Vitest reported exit 0 without saved logs. They are not authoritative test evidence; root recorded reruns cover the changes."
+  ],
+  "verification": {
+    "status": "PASS",
+    "reviewer": "independent quota_verify (read-only instructions)",
+    "scope": "14 hashed files, storage admission/retention, real Docker and periodic Host maintenance, final command artifacts, pack contents and limits",
+    "sourceHashMismatches": 0,
+    "finalDecision": "Main coordinator accepted the scoped implementation after independent review; full 18-work-package goal remains incomplete."
+  },
+  "codexWithChatGPT": {
+    "task": "c2c_8e31",
+    "mode": "local-execution-records-only",
+    "webReview": false,
+    "reason": "Required in-app browser unavailable"
+  },
+  "fullGoal": {
+    "status": "incomplete",
+    "workPackages": 18,
+    "verified": 3,
+    "implementing": 7,
+    "todo": 8,
+    "calendarWaitRequired": false,
+    "twoWorkweekObservationDeliveryGate": false
+  },
+  "checks": {
+    "fullCheck": {
+      "exitCode": 0,
+      "rootTestFiles": 266,
+      "rootTests": 3577,
+      "isolationTestFiles": 20,
+      "isolationTests": 92,
+      "plugins": 26,
+      "sharedPackages": 3
+    },
+    "finalLintAndTypecheck": {
+      "exitCode": 0
+    },
+    "pack": {
+      "packs": 29,
+      "isolationFiles": [
+        "cordis.patch.yml",
+        "lib/cleanup-receipt.d.ts",
+        "lib/cleanup-receipt.d.ts.map",
+        "lib/cleanup-receipt.js",
+        "lib/cleanup-receipt.js.map",
+        "lib/cli.d.ts",
+        "lib/cli.d.ts.map",
+        "lib/cli.js",
+        "lib/cli.js.map",
+        "lib/config.d.ts",
+        "lib/config.d.ts.map",
+        "lib/config.js",
+        "lib/config.js.map",
+        "lib/daemon-binding.d.ts",
+        "lib/daemon-binding.d.ts.map",
+        "lib/daemon-binding.js",
+        "lib/daemon-binding.js.map",
+        "lib/index.d.ts",
+        "lib/index.d.ts.map",
+        "lib/index.js",
+        "lib/index.js.map",
+        "lib/ledger.d.ts",
+        "lib/ledger.d.ts.map",
+        "lib/ledger.js",
+        "lib/ledger.js.map",
+        "lib/reconcile.d.ts",
+        "lib/reconcile.d.ts.map",
+        "lib/reconcile.js",
+        "lib/reconcile.js.map",
+        "lib/runner.d.ts",
+        "lib/runner.d.ts.map",
+        "lib/runner.js",
+        "lib/runner.js.map",
+        "lib/runtime-witness.d.ts",
+        "lib/runtime-witness.d.ts.map",
+        "lib/runtime-witness.js",
+        "lib/runtime-witness.js.map",
+        "lib/service.d.ts",
+        "lib/service.d.ts.map",
+        "lib/service.js",
+        "lib/service.js.map",
+        "lib/storage-policy.d.ts",
+        "lib/storage-policy.d.ts.map",
+        "lib/storage-policy.js",
+        "lib/storage-policy.js.map",
+        "lib/storage.d.ts",
+        "lib/storage.d.ts.map",
+        "lib/storage.js",
+        "lib/storage.js.map",
+        "lib/tools.d.ts",
+        "lib/tools.d.ts.map",
+        "lib/tools.js",
+        "lib/tools.js.map",
+        "lib/types.d.ts",
+        "lib/types.d.ts.map",
+        "lib/types.js",
+        "lib/types.js.map",
+        "lib/version.d.ts",
+        "lib/version.d.ts.map",
+        "lib/version.js",
+        "lib/version.js.map",
+        "lib/workspace.d.ts",
+        "lib/workspace.d.ts.map",
+        "lib/workspace.js",
+        "lib/workspace.js.map",
+        "LICENSE",
+        "package.json",
+        "README.md",
+        "runtime/supervisor.mjs"
+      ]
+    }
+  }
+}

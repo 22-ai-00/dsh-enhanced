@@ -6,7 +6,7 @@ import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -16,6 +16,7 @@ import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { IsolationLedger } from '../src/ledger.ts'
 import { AssistantIsolationService, isolationPrincipalDigest } from '../src/service.ts'
+import { maintainIsolation } from '../src/cli.ts'
 
 const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
 const enabled = process.platform === 'linux' && typeof process.getuid === 'function' && process.getuid() !== 0
@@ -70,6 +71,46 @@ async function marker(stateRoot: string): Promise<void> {
 }
 
 dockerTests('AssistantIsolationService real AgentLoop and Docker integration (opt in)', () => {
+  test('denies new jobs at the record ceiling while returning explicitly pruned historical results without replay', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-isolation-retention-')); roots.push(root)
+    const stateRoot = join(root, 'state'); await mkdirPrivate(stateRoot)
+    const ctx = new Context()
+    let plugin: { dispose(): Promise<void> } | undefined
+    let handle: { agent: Agent, dispose(): Promise<void> } | undefined
+    try {
+      await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
+      await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
+      await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] })
+      ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record-owner', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } }) } as never)
+      ctx.provide('assistantPolicy' as never, { authorizeAgent: () => ({ effect: 'allow' }) } as never)
+      const config = { stateRoot, image, storage: { maxJobRecords: 1 }, grants: [{ id: 'offline', revision: 1,
+        principalDigest: isolationPrincipalDigest('owner'), principalRecordId: 'record-owner', principalVersion: 1,
+        workspace: root, agentPreset: 'primary', expiresAt: Date.now() + 120_000, maxRuns: 2, maxTotalDurationMs: 60_000 }] }
+      plugin = await ctx.plugin(AssistantIsolationService, config) as unknown as { dispose(): Promise<void> }
+      handle = await ctx.agents.create({ sessionId: SessionId('retention-service'), meta: { cwd: root, agentPreset: 'primary' } })
+      const request = { grantId: 'offline', idempotencyKey: 'original', command: 'head -c 10000 /dev/zero | tr "\\000" x', timeoutMs: 20_000 }
+      const signal = new AbortController().signal
+      const first = await ctx.assistantIsolation.run(handle.agent, request, signal)
+      expect(first).toMatchObject({ status: 'succeeded', quiescent: true, stdout: 'x'.repeat(10_000) })
+      expect(first.retention).toBeUndefined()
+      await expect(ctx.assistantIsolation.run(handle.agent, { ...request, idempotencyKey: 'denied' }, signal)).rejects.toThrow(/record/i)
+      await symlink('/tmp', join(stateRoot, 'unobservable'))
+      expect(await ctx.assistantIsolation.run(handle.agent, request, signal)).toEqual(first)
+      await expect(ctx.assistantIsolation.run(handle.agent, { ...request, idempotencyKey: 'observation-denied' }, signal)).rejects.toThrow(/observation unavailable/i)
+      await rm(join(stateRoot, 'unobservable'))
+      await plugin.dispose(); plugin = undefined
+      expect((await maintainIsolation(stateRoot, 1)).pruned).toBe(1)
+      plugin = await ctx.plugin(AssistantIsolationService, config) as unknown as { dispose(): Promise<void> }
+      const replay = await ctx.assistantIsolation.run(handle.agent, request, signal)
+      expect(replay).toMatchObject({ jobId: first.jobId, status: 'succeeded', stdout: '', retention: { kind: 'pruned', stdout: { bytes: 10_000 } } })
+      const database = new DatabaseSync(join(stateRoot, 'ledger.sqlite'))
+      try {
+        expect(database.prepare('SELECT COUNT(*) AS count, SUM(reserved_duration_ms) AS duration FROM isolation_jobs').get()).toMatchObject({ count: 1, duration: 20_000 })
+        expect(database.prepare("SELECT COUNT(*) AS count FROM isolation_audit WHERE action='supervisor-spawn-intent'").get()).toMatchObject({ count: 1 })
+      } finally { database.close() }
+    } finally { await handle?.dispose(); await plugin?.dispose(); await ctx.fiber.dispose() }
+  }, 60_000)
+
   test('runs durable owner-scoped jobs, native tool calls, cancellation, revocation, and recovery without replay', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-isolation-service-'))
     roots.push(root)

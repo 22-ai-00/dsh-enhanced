@@ -13,6 +13,8 @@ import { removeIsolatedContainer, runIsolatedProcess } from './runner.js'
 import { reconcileUnknownJob } from './reconcile.js'
 import { normalizeRequest, stageWorkspace } from './workspace.js'
 import { registerIsolationTools } from './tools.js'
+import { plannedStorageBytes } from './storage-policy.js'
+import { maintainIsolationStorage, observeStorage } from './storage.js'
 import type { IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
 
 export { Config }
@@ -32,6 +34,8 @@ export class AssistantIsolationService extends Service {
   readonly #recoveryAbort = new AbortController()
   #sweep: Promise<void> | undefined
   #cursor = ''
+  #storageCursor = ''
+  #lastMaintenance = 0
   #active = true
   #timer: NodeJS.Timeout
 
@@ -90,6 +94,11 @@ export class AssistantIsolationService extends Service {
           await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true })
         }
       }
+      if (this.#active && Date.now() - this.#lastMaintenance >= 60_000) {
+        this.#lastMaintenance = Date.now()
+        const report = await maintainIsolationStorage(this.#ledger, this.#authority, this.#config.stateRoot, this.#config.storage, this.#storageCursor)
+        this.#storageCursor = report.cursor
+      }
     }).catch(() => { /* Keep reservations and retry only with a live controller. */ }).finally(() => { this.#sweep = undefined })
   }
 
@@ -129,12 +138,16 @@ export class AssistantIsolationService extends Service {
     await this.#ready
     signal.throwIfAborted()
     const request = normalizeRequest(input, this.#config.limits)
+    const observation = await observeStorage(this.#config.stateRoot)
+    signal.throwIfAborted()
     const identity = this.#identity(agent, request.grantId)
     const prepared = this.#ledger.prepare({ identity, sessionId: String(agent!.session.id), grantId: request.grantId,
       idempotencyKey: request.idempotencyKey, requestDigest: digest({ request, image: this.#config.image, limits: this.#config.limits }),
       resourceReservation: { memoryMiB: this.#config.limits.memoryMiB + this.#config.limits.workspaceMiB + 32,
         workspaceInodes: this.#config.limits.workspaceInodes, maxMemoryMiB: this.#config.maxReservedMemoryMiB,
         maxWorkspaceInodes: this.#config.maxReservedWorkspaceInodes },
+      storageBudget: { maxStateBytes: this.#config.storage.maxStateBytes, maxJobRecords: this.#config.storage.maxJobRecords,
+        reservedBytes: plannedStorageBytes(this.#config.limits), ...(observation ? { observation } : {}) },
       durationMs: request.timeoutMs!, maxActiveJobs: this.#config.maxConcurrentJobs, authority: this.#authority })
     if (!prepared.created) {
       const current = this.#jobs.get(prepared.job.id)

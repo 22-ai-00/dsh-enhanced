@@ -1,7 +1,8 @@
 import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
-import type { IsolationGrant, IsolationLimits } from './types.js'
+import { defaultStoragePolicy, plannedStorageBytes, validateStoragePolicy } from './storage-policy.js'
+import type { IsolationGrant, IsolationLimits, IsolationStoragePolicy } from './types.js'
 
 export interface Config {
   stateRoot?: string
@@ -9,6 +10,7 @@ export interface Config {
   dockerPath?: string
   grants?: IsolationGrant[]
   limits?: Partial<IsolationLimits>
+  storage?: Partial<IsolationStoragePolicy>
   maxConcurrentJobs?: number
   maxReservedMemoryMiB?: number
   maxReservedWorkspaceInodes?: number
@@ -29,11 +31,12 @@ export const Config: Schema<Config> = Schema.object({
   limits: Schema.object({ maxDurationMs: integer(300_000), maxInputBytes: integer(1_048_576),
     maxOutputBytes: integer(262_144), maxArtifactBytes: integer(1_048_576), maxFiles: integer(128),
     workspaceMiB: integer(1024), workspaceInodes: integer(65_536), memoryMiB: integer(4096), pidsLimit: integer(512), cpus: Schema.number().min(0.1).max(8) }),
+  storage: Schema.object({ maxStateBytes: integer(16 * 1024 * 1024 * 1024), maxJobRecords: integer(1_000_000), resultRetentionMs: Schema.number().step(1).min(0).max(365 * 24 * 60 * 60 * 1000) }),
   maxConcurrentJobs: integer(16).default(2),
   maxReservedMemoryMiB: integer(65_536).default(2048),
   maxReservedWorkspaceInodes: integer(1_048_576).default(32_768),
 })
-export function validateConfig(input: Config): Required<Config> & { limits: IsolationLimits } {
+export function validateConfig(input: Config): Required<Config> & { limits: IsolationLimits, storage: IsolationStoragePolicy } {
   const stateRoot = input.stateRoot ?? join(homedir(), '.dsh', 'assistant-isolation')
   const dockerPath = input.dockerPath ?? '/usr/bin/docker'
   const grants = structuredClone(input.grants ?? [])
@@ -42,6 +45,7 @@ export function validateConfig(input: Config): Required<Config> & { limits: Isol
     || !isAbsolute(dockerPath) || resolve(dockerPath) !== dockerPath) throw new Error('assistant-isolation: canonical absolute paths required')
   if ((image !== '' && !/^sha256:[0-9a-f]{64}$/.test(image)) || (grants.length > 0 && image === '')) throw new Error('assistant-isolation: grants require an immutable local image ID')
   const limits = { ...defaultLimits, ...input.limits }
+  const storage = validateStoragePolicy({ ...defaultStoragePolicy, ...input.storage })
   const maxima: IsolationLimits = { maxDurationMs: 300_000, maxInputBytes: 1_048_576, maxOutputBytes: 262_144,
     maxArtifactBytes: 1_048_576, maxFiles: 128, memoryMiB: 4096, workspaceMiB: 1024, workspaceInodes: 65_536, pidsLimit: 512, cpus: 8 }
   for (const key of Object.keys(limits) as Array<keyof IsolationLimits>) {
@@ -56,5 +60,6 @@ export function validateConfig(input: Config): Required<Config> & { limits: Isol
     || !Number.isSafeInteger(maxReservedWorkspaceInodes) || maxReservedWorkspaceInodes < limits.workspaceInodes || maxReservedWorkspaceInodes > 1_048_576) throw new Error('assistant-isolation: invalid resource pool')
   for (const grant of grants) if (!isAbsolute(grant.workspace) || resolve(grant.workspace) !== grant.workspace
     || !/^[0-9a-f]{64}$/.test(grant.principalDigest)) throw new Error('assistant-isolation: invalid grant scope')
-  return { stateRoot, dockerPath, image, grants, limits, maxConcurrentJobs, maxReservedMemoryMiB, maxReservedWorkspaceInodes }
+  if (storage.maxStateBytes < plannedStorageBytes(limits)) throw new Error('assistant-isolation: storage budget below planned job allocation')
+  return { stateRoot, dockerPath, image, grants, limits, storage, maxConcurrentJobs, maxReservedMemoryMiB, maxReservedWorkspaceInodes }
 }

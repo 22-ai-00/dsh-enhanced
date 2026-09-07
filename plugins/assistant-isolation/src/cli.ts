@@ -6,6 +6,8 @@ import { isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { IsolationLedger } from './ledger.js'
 import { removeIsolatedContainer } from './runner.js'
+import { defaultStoragePolicy, validateStoragePolicy } from './storage-policy.js'
+import { maintainIsolationStorage, type IsolationStorageMaintenance } from './storage.js'
 
 function privateLedger(stateRoot: string, dockerPath: string): string {
   if (!isAbsolute(stateRoot) || realpathSync(stateRoot) !== stateRoot) throw new Error('canonical state root required')
@@ -70,10 +72,31 @@ export async function reconcileIsolation(stateRoot: string, dockerPath = '/usr/b
   }
 }
 
+/** Operator-only one-page maintenance; positive retention explicitly enables body pruning. */
+export async function maintainIsolation(stateRoot: string, resultRetentionMs = 0, afterId = ''): Promise<IsolationStorageMaintenance> {
+  const policy = validateStoragePolicy({ ...defaultStoragePolicy, resultRetentionMs })
+  const ledger = new IsolationLedger(privateLedger(stateRoot, '/usr/bin/docker'))
+  let authority: ReturnType<IsolationLedger['claimController']> | undefined
+  let timer: NodeJS.Timeout | undefined
+  try {
+    authority = ledger.claimController(randomUUID(), 30_000)
+    const controller = authority
+    timer = setInterval(() => { try { ledger.renewController(controller, 30_000) } catch { /* The maintenance fence fails closed. */ } }, 5000)
+    timer.unref()
+    return await maintainIsolationStorage(ledger, controller, stateRoot, policy, afterId)
+  } finally {
+    if (timer) clearInterval(timer)
+    try { if (authority) ledger.releaseController(authority) } finally { ledger.close() }
+  }
+}
+
 if (process.argv[1] !== undefined && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const [command, stateRoot, grantId, revision, dockerPath, ...extra] = process.argv.slice(2)
   try {
-    if (command === 'reconcile') {
+    if (command === 'maintain') {
+      if (stateRoot === undefined || dockerPath !== undefined || (grantId !== undefined && !/^(0|[1-9][0-9]*)$/.test(grantId))) throw new Error('usage: dsh-isolation maintain /absolute/private/state-root [result-retention-ms [after-job-id]]')
+      process.stdout.write(`${JSON.stringify(await maintainIsolation(stateRoot, grantId === undefined ? 0 : Number(grantId), revision))}\n`)
+    } else if (command === 'reconcile') {
       if (stateRoot === undefined || revision !== undefined) throw new Error('usage: dsh-isolation reconcile /absolute/private/state-root [/absolute/docker]')
       const abort = new AbortController()
       const cancel = (): void => abort.abort()
