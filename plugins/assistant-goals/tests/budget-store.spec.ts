@@ -23,6 +23,19 @@ describe('GoalBudgetStore', () => {
     store.close()
   })
 
+  it('previews candidate limits without configuring them and retains held reservations in an existing view', () => {
+    const store = new GoalBudgetStore(':memory:')
+    expect(store.preview(binding, limits())).toMatchObject({ limits: limits(), modelCalls: 0, toolCalls: 0, heldCalls: 0 })
+    // Preview is used by a Policy predicate: it must not materialize a budget row.
+    expect(() => store.snapshot(binding)).toThrow(GoalStoreError)
+
+    store.configure(binding, limits())
+    store.reserve(binding, request(), 1)
+    expect(store.preview(binding, limits())).toMatchObject({ modelCalls: 1, inputTokens: 6, outputTokens: 4, heldCalls: 1 })
+    expect(() => store.preview(binding, { ...limits(), outputTokens: 11 })).toThrow(GoalStoreError)
+    store.close()
+  })
+
   it('rejects replayed global request ids and over-budget reservations', () => {
     const store = new GoalBudgetStore(':memory:'); store.configure(binding, limits())
     store.reserve(binding, request(), 1)

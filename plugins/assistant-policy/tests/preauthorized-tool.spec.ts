@@ -120,18 +120,18 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test('reserves goal creation preauthorization to its exact plugin and keeps revoked predicates closed', async () => {
+  test.each(['goal_create', 'goal_schedule'])('reserves %s preauthorization to its exact plugin and keeps revoked predicates closed', async name => {
     const current = await fixture()
     let executions = 0
     let active = true
-    const tool = definition('goal_create', () => { executions += 1 })
+    const tool = definition(name, () => { executions += 1 })
     current.ctx.tools.register(tool)
     expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), tool, () => true)).toThrow(/reserved/)
     current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals'), tool, () => active)
-    expect((await execute(current.ctx, current.owner, 'goal_create')).isError).toBe(false)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(false)
     expect(current.asks()).toBe(0)
     active = false
-    expect((await execute(current.ctx, current.owner, 'goal_create')).isError).toBe(true)
+    expect((await execute(current.ctx, current.owner, name)).isError).toBe(true)
     expect(current.asks()).toBe(1)
     expect(executions).toBe(1)
     await current.ctx.fiber.restart()

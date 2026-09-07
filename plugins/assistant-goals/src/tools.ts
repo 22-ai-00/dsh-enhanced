@@ -12,7 +12,7 @@ const output = {
   render: (_args: unknown, value: { context: string }) => [{ type: 'text' as const, text: value.context }],
 } as const
 export function registerGoalTools(ctx: Context, service: AssistantGoalsService): void {
-  ctx.tools.register(defineTool({
+  const scheduleTool = defineTool({
     name: 'goal_schedule',
     description: 'Authorize one delayed resume of this session business goal. Requires the current authenticated owner request, enabled background wake, Policy and budgets. Pauses the goal, checkpoints it, and schedules the original Session via Automations. wake_at is UTC epoch milliseconds. Omitting wake_at only inspects existing schedules. Unknown work is never automatically replayed.',
     parameters: { goal_id: { type: 'string', required: true }, expected_revision: { type: 'integer' }, wake_at: { type: 'integer' } }, output,
@@ -22,7 +22,11 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
       const wake = await service.schedule(exec.agent, args.goal_id, args.expected_revision, args.wake_at, exec.signal)
       return { context: JSON.stringify({ wake: wakeView(wake) }) }
     },
-  }))
+  })
+  ctx.tools.register(scheduleTool)
+  if (service.preauthorizedScheduleEnabled) {
+    ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, scheduleTool, execution => service.preauthorizeSchedule(execution))
+  }
   const createTool = defineTool({
     name: 'goal_create',
     description: 'Create a native DSH goal from the current authenticated owner request and persist its business context. Requires a live owner human turn and explicit Policy permission. The native goal driver, if enabled by the Host, controls continuation.',

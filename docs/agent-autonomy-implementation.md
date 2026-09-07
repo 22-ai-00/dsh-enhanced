@@ -390,3 +390,21 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 本批完整命令（含失败）、最终源码与浏览器 artifact hash 保存在 [结构化证据](evidence/autonomy-doctor-2026-09-07.json)。C2C `c2c_a940` 只有本地执行记录；所需内置浏览器不可用，未取得 ChatGPT 网页规划/评审。
 
 最终根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<证据中的本机镜像> pnpm check` 退出 **0**：主 279 文件 / 3,654 测试，Isolation 22 文件 / 102 项、Web owner 4 文件 / 21 项；manifest、零 lint 警告、typecheck、build 和 30 份 dry-run pack 全部通过。已检查 Isolation 81 个文件包含 `lib/diagnostics.*`，Web owner 29 个文件包含 `bin/dsh-autonomy-doctor.js` 和 `lib/doctor.*`，无源码、测试或数据库。最终两条 `pnpm test:autonomy` 场景退出 **0**；诊断时原有 1 job、20,000ms 预留、19 次/580,000ms 剩余预算及 4 次模型调用均保留，临时撤销后返回 exit 1 且不续权。独立源码复核 PASS；最终命令/artifact 哈希复核记录在结构化证据中。
+
+## 2026-09-07：真实进程重启后的目标验收与有限计划预授权
+
+- WP05 本批以 `5e116b9` 为基线，继续按依赖和证据推进，不设置按天配额或长期观察等待期；完整 18 项状态仍为 **3 已验证 / 7 实现中 / 8 待做**。
+- `preauthorizedSchedule` 默认关闭；显式开启时只预授权精确 `goal_schedule`，要求当前 owner 人类回合、原 Session/Goal/revision、累计预算与精确路由 meter、有效 owner route，以及覆盖唤醒期限的冻结隔离验收条件。只读预算 preview 不创建限制、预留或验收任务；原生 Policy guard 与实际调度 CAS 仍执行。保留原有工具默认注册和省略 `wake_at` 的查询行为，不开放 `goal_control`。
+- 真实安装与独立进程恢复暴露了此前 harness 未捕获的生命周期竞态：末轮先进入原生 `blocked`，后台流程在 step verifier 仍 verifying、whole awaiting 且没有回执时已释放 Agent/报告 wake succeeded。现在 Delivery 必须等待这个 Agent 的步骤和全目标结算，前后重查授权、Session fence、期限和状态；超时或撤权不能把迟到回执变成成功。版本化等待能力拒绝旧 Delivery 的提前释放语义。
+- 末轮可以经过 paused r2 → active r3 → round-limit blocked r4 → 独立全目标验收 complete r5。新增 r+3 例外只接受同 owner、定义、Session、Goal、实际最后一轮执行和 achieved 整体回执的证明，不以较大 revision 或普通模型回答推断达成。
+- 根定向测试通过：52 项（46 项预算/配置/预授权/持久 wake，加 6 项原生恢复）；补充后原生恢复共 8 项通过，其中两个 controlled-verifier gate 验证等待期间 deadline 与 owner revocation 都保持 unknown，释放 gate 后不变成功、不新发模型请求。
+- 根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<本机已有镜像> pnpm check` 退出 **0**：主 279 文件 / 3,663 测试；Goals 82、Delivery 689、Policy 195、Isolation 102、Verifier 60 项包测试通过；manifest、零 lint 警告、typecheck、build 和 30 份 dry-run pack 成功。已检查 Goals 64、Delivery 92、Policy 66、Isolation 81 个文件，Delivery 含更新后的 `lib/goal-wake-types.*`，没有打入源码、测试或数据库。
+- 浏览器测试入口为 `pnpm test:autonomy:wake`：实际 autonomy 安装到临时 profile，配置精确已有会话 owner route，停止进程后由持久 Automations 恢复原 Session。安装后验收条件、后台 Policy 与模型 meter 均为显式测试 overlay，确定性模型不证明生产模型智能或账单上限。撤权使用停止后临时 owner 库种子，并关闭固定 owner Web UI，以单独验证后台拒绝；中断在真实 source job running 后请求 SIGINT（辅助停止器有 10 秒强制终止后备），dispatched/unknown 保持不重放。
+
+最终命令、失败现场、源码与浏览器 artifact 哈希见 [结构化证据](evidence/goal-wake-runtime-2026-09-07.json)。C2C `c2c_a941` 仅为本地执行记录；内置浏览器不可用，没有取得 ChatGPT 网页评审。生产模型计量、默认 owner route/目标配置引导、跨来源主动性收益与其他工作包继续推进。
+
+最终 `pnpm test:autonomy:wake` 退出 **0**，三条真实安装/进程场景通过：正例使用 4 个 Host 进程，原 Session 的单个原生回合得到 step/outcome 两份 achieved v4 回执，1 个 source job 与 4 个独立 verification jobs；paused r2 → active r3 → blocked r4 → complete r5，Session lease fence 从 4 递增至 6，最终 Automations duty fence 为 4，再重启没有新增调用或任务。撤权场景保持 denied、未 dispatch、模型仍为前台的 4 次调用；运行中断场景在再重启后仍为 dispatched 未确认，仅有一次后台工具调用，无自动重放。8 项原生恢复回归和最终静态检查也通过。独立 verifier 已核实源码、实际命令退出码和三条浏览器 artifact，给出本切片 **PASS**；这不是完整 18 项验收。
+
+原有 `pnpm test:autonomy` 两条真实安装前台回归退出 **0**：普通有限离线工具及原生目标“错误产物→独立反馈→修正→整体验收”保持通过。本批共 5 条浏览器场景，最终诊断/定位修改另经仓库实际 Oxlint 检查退出 0；早先误调用未安装的 ESLint 返回 1，也保留在命令证据中。
+
+复核操作记录：verifier 的一次未转义 shell 查询意外执行了未配置 Chromium 路径的浏览器命令，三条用例均在启动浏览器前失败，覆盖了临时 live 输出。此前已单独保存的最终通过证据和源码未变，哈希复核通过；这次额外误执行单独记录，不替代最终通过命令，也不声称复核过程完全只读。

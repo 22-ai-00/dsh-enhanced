@@ -78,7 +78,7 @@ export class AssistantIsolationService extends Service {
       const header = execution.agent?.session.header
       if (header !== undefined && this.#config.grants.some(grant => grant.workspace === header.cwd && grant.agentPreset === header.agentPreset)
         && !['isolation_run', 'goal_context', 'goal_checkpoint'].includes(execution.name)
-        && !(['action_github_commit', 'goal_create'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool?.(execution))) throw new Error('assistant-isolation: this scope requires isolated execution')
+        && !(['action_github_commit', 'goal_create', 'goal_schedule'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool?.(execution))) throw new Error('assistant-isolation: this scope requires isolated execution')
       return await next()
     }))
     ctx.inject(['agents', 'assistantDelivery', 'assistantPolicy', 'tools'], runtime => registerIsolationTools(runtime, this))

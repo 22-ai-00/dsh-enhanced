@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { AssistantGoalsService } from '../src/service.ts'
+import { AssistantGoalsService, type Config as GoalsConfig } from '../src/service.ts'
 import { GoalExecutionStore } from '../src/execution-store.ts'
 import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
@@ -20,7 +20,8 @@ import type { AcceptanceProfile } from '@dsh-enhanced/assistant-verifier'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
-async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false, verifyGoalOutcome = false, stepMaxDurationMs?: number) {
+async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false, verifyGoalOutcome = false, stepMaxDurationMs?: number,
+  options: Pick<GoalsConfig, 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake'> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
@@ -41,7 +42,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   if (duringGoalChange !== undefined) ctx.on('goal/changed', ({ agent }) => duringGoalChange(agent))
   const path = databasePath ?? join(root, 'goals.sqlite')
   const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, verifyNativeRounds, verifyGoalOutcome,
-    ...(maxContextChars === undefined ? {} : { maxContextChars }), ...(stepMaxDurationMs === undefined ? {} : { stepMaxDurationMs }) })
+    ...(maxContextChars === undefined ? {} : { maxContextChars }), ...(stepMaxDurationMs === undefined ? {} : { stepMaxDurationMs }), ...options })
   const create = async (id: string, owner?: string) => {
     const handle = await ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'fixture', model: 'fixture' } })
     if (owner !== undefined) owners.set(handle.agent, owner)
@@ -69,8 +70,42 @@ async function installGoalVerifier(f: Awaited<ReturnType<typeof harness>>, profi
   return { dispose: () => plugin.dispose(), service: f.ctx.assistantVerifier }
 }
 const checkpoint = { nextStep: 'Check repository state', blockers: [], assumptions: [{ statement: 'Latest build was green', expiresAt: 0 }], evidenceRefs: ['run:one'], dependencies: [] }
+const scheduleBudget = { modelCalls: 2, toolCalls: 2, inputTokens: 1_000, outputTokens: 1_000, durationMs: 60_000, maxOutputTokensPerCall: 500 }
+const scheduleWake = { ownerRouteId: 'route-owner', budgetId: 'wake-budget' }
 
 describe('owner-scoped native goal context', () => {
+  it('keeps goal schedule preauthorization disabled by default', async () => {
+    const f = await harness()
+    expect(f.service.preauthorizedCreateEnabled).toBe(false)
+    expect(f.service.preauthorizedScheduleEnabled).toBe(false)
+    expect(Object.getOwnPropertyDescriptor(f.service, 'preauthorizedCreateEnabled')).toMatchObject({ value: false, writable: false, configurable: false })
+    expect(Object.getOwnPropertyDescriptor(f.service, 'preauthorizedScheduleEnabled')).toMatchObject({ value: false, writable: false, configurable: false })
+    expect(Reflect.set(f.service, 'preauthorizedScheduleEnabled', true)).toBe(false)
+    expect(f.service.preauthorizedScheduleEnabled).toBe(false)
+  })
+
+  it('requires every durable prerequisite before enabling schedule preauthorization', async () => {
+    await expect(harness(undefined, undefined, undefined, false, true, undefined, {
+      preauthorizedSchedule: true, executionBudget: scheduleBudget, backgroundWake: scheduleWake,
+    })).rejects.toThrow('execution budget requires verified native rounds')
+    await expect(harness(undefined, undefined, undefined, true, true, undefined, {
+      preauthorizedSchedule: true, executionBudget: scheduleBudget,
+    })).rejects.toThrow('preauthorized schedule requires durable wake')
+    await expect(harness(undefined, undefined, undefined, true, false, undefined, {
+      preauthorizedSchedule: true, executionBudget: scheduleBudget, backgroundWake: scheduleWake,
+    })).rejects.toThrow('preauthorized schedule requires durable wake')
+  })
+
+  it('exposes an immutable enabled schedule gate only for a durable verified configuration', async () => {
+    const f = await harness(undefined, undefined, undefined, true, true, undefined, {
+      preauthorizedSchedule: true, executionBudget: scheduleBudget, backgroundWake: scheduleWake,
+    })
+    expect(f.service.preauthorizedScheduleEnabled).toBe(true)
+    expect(Object.getOwnPropertyDescriptor(f.service, 'preauthorizedScheduleEnabled')).toMatchObject({ value: true, writable: false, configurable: false })
+    expect(Reflect.set(f.service, 'preauthorizedScheduleEnabled', false)).toBe(false)
+    expect(f.service.preauthorizedScheduleEnabled).toBe(true)
+  })
+
   it('returns only the current active owner-scoped task projection and refreshes edits', async () => {
     const f = await harness(); const agent = await f.create('task-context', 'owner'); f.human.add(agent)
     const created = f.service.create(agent, 'Original current objective')

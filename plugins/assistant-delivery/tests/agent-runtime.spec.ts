@@ -1020,6 +1020,37 @@ describe('real rc.1 delivery Agent runtime', () => {
     await restarted.ctx.fiber.restart()
   }, 30_000)
 
+  test.each(['deadline', 'revocation'] as const)('scheduled goal %s during verifier settlement cannot report success', async boundary => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-settle-')); roots.push(root)
+    const fixture = await scheduledGoalHarness(root, new Map<string, SavedSession>(), 2_000, 5_000)
+    const wake = await fixture.schedule()
+    const verifier = fixture.ctx.assistantVerifier
+    const tick = verifier.tick
+    let entered = false
+    let release!: () => void
+    const gate = new Promise<void>(resolve => { release = resolve })
+    const delayed = vi.spyOn(verifier, 'tick').mockImplementation(async () => { entered = true; await gate; await tick() })
+    const running = fixture.runAt(wake.wakeAt)
+    void running.catch(() => {})
+    try {
+      await vi.waitFor(() => expect(entered).toBe(true), { timeout: 5_000 })
+      expect(fixture.readWake(wake.id).state).toBe('dispatched')
+      if (boundary === 'revocation') {
+        const owner = runtimeStore(fixture.service).getPrincipal(principal)!
+        runtimeStore(fixture.service).revokePrincipal(owner.id, owner.version)
+        release()
+      }
+      // The deadline case keeps the verifier blocked until after the wake has
+      // returned unknown, proving the terminal waiter itself remains bounded.
+      await vi.waitFor(() => expect(fixture.readWake(wake.id).state).toBe('unknown'), { timeout: 6_000 })
+    } finally { release(); await running; delayed.mockRestore() }
+    expect(fixture.readWake(wake.id).state).toBe('unknown')
+    expect(fixture.llm.requests).toHaveLength(2) // one owner turn, one native goal round
+    await fixture.ctx.assistantAutomations.tick(); await fixture.ctx.assistantAutomations.whenIdle()
+    expect(fixture.llm.requests).toHaveLength(2)
+    await fixture.ctx.fiber.restart()
+  }, 20_000)
+
   test('scheduled goal revokes before its wake CAS and never starts a model request', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-revoked-')); roots.push(root)
     const saved = new Map<string, SavedSession>()

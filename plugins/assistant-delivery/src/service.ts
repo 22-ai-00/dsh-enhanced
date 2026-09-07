@@ -1571,6 +1571,9 @@ export class AssistantDeliveryService extends Service {
     }
   }
 
+  /** Versioned capability: idle wake Agents remain alive through exact goal settlement. */
+  goalWakeSettlementVersion = (): 1 => { this.assertActive(); return 1 }
+
   /** Only the live Goals service can mint this process-local wake capability. */
   async resumeScheduledGoal(input: DeliveryGoalWakeInput): Promise<DeliveryGoalWakeResult> {
     this.assertActive()
@@ -1604,6 +1607,7 @@ export class AssistantDeliveryService extends Service {
       return binding
     }
     const binding = current()
+    if (typeof input.settle !== 'function') return denied()
     const result = await (runtime as DshDeliveryRuntime).resumeScheduledGoal(binding, Object.freeze({ ...input,
       assertCurrent: (agent: Agent, phase: 'before-resume' | 'running' | 'terminal') => {
         current()
@@ -1613,6 +1617,7 @@ export class AssistantDeliveryService extends Service {
         current()
       },
       beforeResume: (agent: Agent) => { current(); input.beforeResume(agent); current() },
+      settle: async (agent: Agent, signal: AbortSignal) => { current(); signal.throwIfAborted(); await input.settle(agent, signal); signal.throwIfAborted(); current() },
     }))
     if (result.outcome === 'succeeded') current()
     return result

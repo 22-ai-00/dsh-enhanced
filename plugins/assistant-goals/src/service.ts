@@ -23,10 +23,11 @@ import type { GoalWake } from './wake-store.js'
 import type { DeliveryGoalWakeInput } from '@dsh-enhanced/assistant-delivery'
 import { GoalOutcomeRuntime, type GoalOutcomeView } from './outcome.js'
 
-export interface Config { preauthorizedCreateMaxRounds?: number; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
+export interface Config { preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-goals.sqlite')),
   preauthorizedCreateMaxRounds: Schema.number().step(1).min(0).max(32).default(0),
+  preauthorizedSchedule: Schema.boolean().default(false),
   maxContextChars: Schema.number().step(1).min(1024).max(65536).default(12000),
   verifyNativeRounds: Schema.boolean().default(false),
   verifyGoalOutcome: Schema.boolean().default(false),
@@ -75,6 +76,9 @@ export class AssistantGoalsService extends Service {
   #active = true
   #maxChars: number
   #createMaxRounds: number
+  #preauthorizedSchedule = false
+  readonly preauthorizedCreateEnabled!: boolean
+  readonly preauthorizedScheduleEnabled!: boolean
   #observationFailures = 0
   #execution: GoalExecutionRuntime
   #budget: GoalBudgetRuntime | undefined
@@ -86,6 +90,7 @@ export class AssistantGoalsService extends Service {
     this.#createMaxRounds = input.preauthorizedCreateMaxRounds ?? 0
     if (!Number.isSafeInteger(this.#createMaxRounds) || this.#createMaxRounds < 0 || this.#createMaxRounds > 32
       || this.#createMaxRounds > 0 && (input.verifyNativeRounds !== true || input.verifyGoalOutcome !== true || input.executionBudget === undefined)) throw new Error('assistant-goals: preauthorized creation requires bounded independently verified goals')
+    Object.defineProperty(this, 'preauthorizedCreateEnabled', { value: this.#createMaxRounds > 0, enumerable: true, writable: false, configurable: false })
     this.#maxChars = input.maxContextChars ?? 12000
     if (!Number.isSafeInteger(this.#maxChars) || this.#maxChars < 1024 || this.#maxChars > 65536) throw new Error('assistant-goals: invalid context budget')
     const path = input.databasePath ?? join(homedir(), '.dsh', 'assistant-goals.sqlite')
@@ -99,6 +104,12 @@ export class AssistantGoalsService extends Service {
       throw new Error('assistant-goals: whole-goal verification requires durable verified native rounds')
     }
     if (wake !== undefined && (budget === undefined || path === ':memory:')) throw new Error('assistant-goals: background wake requires durable verified execution and budgets')
+    if (input.preauthorizedSchedule !== undefined && typeof input.preauthorizedSchedule !== 'boolean') throw new Error('assistant-goals: preauthorizedSchedule must be boolean')
+    this.#preauthorizedSchedule = input.preauthorizedSchedule === true
+    if (this.#preauthorizedSchedule && (wake === undefined || budget === undefined || input.verifyNativeRounds !== true || input.verifyGoalOutcome !== true || path === ':memory:')) {
+      throw new Error('assistant-goals: preauthorized schedule requires durable wake, verified rounds, outcome verification, and budgets')
+    }
+    Object.defineProperty(this, 'preauthorizedScheduleEnabled', { value: this.#preauthorizedSchedule, enumerable: true, writable: false, configurable: false })
     this.#store = new GoalStore(path)
     ctx.effect(() => () => { this.#active = false; this.#store.close() }, 'assistant-goals.store')
     this.#execution = new GoalExecutionRuntime(ctx, input.verifyNativeRounds === true ? (path === ':memory:' ? path : `${path}.executions`) : undefined, duration, agent => {
@@ -129,7 +140,14 @@ export class AssistantGoalsService extends Service {
         this.#observe(agent, false)
       }
       return this.#store.get(scope, goalId)
-    }, () => this.#execution.health().verifierConnected && this.#budget !== undefined)
+    }, () => this.#execution.health().verifierConnected && this.#budget !== undefined,
+    async (agent, signal) => {
+      if (!this.#active) throw new Error('assistant-goals: disposed')
+      signal.throwIfAborted()
+      await this.#execution.refresh(agent, signal)
+      signal.throwIfAborted()
+      if (!this.#active) throw new Error('assistant-goals: disposed')
+    }, (record, native) => this.#outcome?.verifiedWakeCompletion(record, native) === true)
     ctx.inject(['agents', 'goals', 'assistantDelivery', 'assistantPolicy'], runtime => {
       runtime.on('goal/changed', ({ agent, change }) => {
         try {
@@ -230,7 +248,35 @@ export class AssistantGoalsService extends Service {
     } catch { return undefined }
   }
 
-  get preauthorizedCreateEnabled(): boolean { return this.#createMaxRounds > 0 }
+  preauthorizeSchedule = (execution: ToolExecution): boolean => {
+    try {
+      if (!this.#active || !this.#preauthorizedSchedule || execution.signal.aborted || !execution.agent || !execution.arguments || typeof execution.arguments !== 'object' || Array.isArray(execution.arguments) || Object.getPrototypeOf(execution.arguments) !== Object.prototype || Object.getOwnPropertySymbols(execution.arguments).length !== 0) return false
+      const args = execution.arguments as Record<string, unknown>; const names = Object.getOwnPropertyNames(args)
+      if (names.length !== 3 || !['goal_id', 'expected_revision', 'wake_at'].every(key => names.includes(key)) || Object.values(Object.getOwnPropertyDescriptors(args)).some(value => !value.enumerable || !('value' in value))
+        || typeof args.goal_id !== 'string' || args.goal_id.length === 0 || args.goal_id.length > 512 || !Number.isSafeInteger(args.expected_revision) || (args.expected_revision as number) < 1 || !Number.isSafeInteger(args.wake_at)) return false
+      if (!this.#budget?.hasMeter(execution.agent.options) || this.#wake === undefined || this.#outcome === undefined) return false
+      const scope = this.#scope(execution.agent, 'schedule', false); this.#scope(execution.agent, 'inspect', false); this.#scope(execution.agent, 'observe', false); this.#requireOwnerTurn(execution.agent, scope)
+      const record = this.#store.get(scope, args.goal_id); const native = this.ctx.get('goals')?.get(execution.agent)
+      if (record === undefined || native === undefined || record.native.sessionId !== String(execution.agent.session.id) || record.native.goalId !== String(native.id)
+        || record.native.revision !== args.expected_revision || native.revision !== args.expected_revision || !['active', 'paused'].includes(record.native.phase) || native.phase !== record.native.phase
+        || native.roundsStarted !== record.native.roundsStarted || native.maxGoalRounds !== record.native.maxGoalRounds
+        || record.native.roundsStarted >= record.native.maxGoalRounds || native.roundsStarted >= native.maxGoalRounds) return false
+      if (record.native.phase === 'active') this.#scope(execution.agent, 'pause', false)
+      const now = Date.now(); const at = args.wake_at as number; const budget = this.#budget.preview(record); const requestedDeadline = at + this.#wake.config.runTimeoutMs
+      if (!Number.isSafeInteger(requestedDeadline)) return false
+      const expiresAt = Math.min(requestedDeadline, budget.limits.expiresAt)
+      if (at < now || at - now > this.#wake.config.maxDelayMs || expiresAt - at < 1_000 || budget.modelCalls >= budget.limits.modelCalls || budget.outputTokens >= budget.limits.outputTokens) return false
+      this.#wake.preflight(record); this.#outcome.preflight(scope, record.definition.objective, record)
+      const frozenOutcome = this.#outcome.view(record).conditions
+      if (frozenOutcome === undefined || frozenOutcome.expiresAt <= expiresAt
+        || !frozenOutcome.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')) return false
+      const verifier = this.ctx.get('assistantVerifier', false)
+      return verifier !== undefined && (['goal-step', 'goal-outcome'] as const).every(taskKind => {
+        const selected = verifier.inspectAcceptanceProfile({ scope: { workspace: scope.workspace, preset: scope.preset }, owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, objective: record.definition.objective, taskKind })
+        return selected !== null && selected.profile.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')
+      })
+    } catch { return false }
+  }
 
   preauthorizeCreate = (execution: ToolExecution): boolean => {
     try {
