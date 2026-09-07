@@ -20,14 +20,15 @@ function row(document, id) {
 }
 const modelCalls = async path => (await readFile(path, 'utf8').catch(() => '')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
 
-test('installed Web owner CLI admits one private verified Goal after a stopped prepared session', async ({ page, context }, testInfo) => {
+for (const strategy of [false, true]) {
+test(`installed Web owner CLI admits one private verified Goal after a stopped prepared session (strategy=${strategy})`, async ({ page, context }, testInfo) => {
   const image = process.env.DSH_ISOLATION_TEST_IMAGE
   if (!/^sha256:[0-9a-f]{64}$/.test(image ?? '')) throw new Error('DSH_ISOLATION_TEST_IMAGE must select an existing immutable local Docker image')
   const temp = await mkdtemp(join(tmpdir(), 'dsh-goal-setup-e2e-'))
   const home = join(temp, 'home'); const workspace = join(temp, 'workspace'); const taskPath = join(temp, 'private-goal-admission.json')
   const modelLog = join(temp, 'model.jsonl'); const runtimePort = await port()
   const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_ENHANCED_WEB_PORT: String(runtimePort), DSH_WEB_E2E_MODEL_LOG: modelLog,
-    DSH_AUTONOMY_GOAL_SETUP_TEST: '1', DEEPSEEK_API_KEY: 'test-only-not-a-credential' }
+    DSH_AUTONOMY_GOAL_SETUP_TEST: '1', DSH_AUTONOMY_GOAL_SETUP_STRATEGY: strategy ? '1' : '0', DEEPSEEK_API_KEY: 'test-only-not-a-credential' }
   const http = []; const transport = []; const streams = new Map(); const frames = []; let host; let hostCount = 0; let authenticated = false; let failed = false; let currentPage = page
   const stop = async () => { if (host) { await host.stop(); await writeFile(testInfo.outputPath(`host-${hostCount}.log`), host.log(), { mode: 0o600 }); host = undefined } }
   const open = async activePage => {
@@ -67,10 +68,10 @@ test('installed Web owner CLI admits one private verified Goal after a stopped p
     await stop()
 
     const task = { version: 1, objective, model: 'deepseek-v4-flash', maxGoalRounds: 3, stepMaxDurationMs: 60000,
-      executionBudget: { modelCalls: 6, toolCalls: 3, inputTokens: 2_100_000, outputTokens: 6000, durationMs: 240000, maxOutputTokensPerCall: 1024 },
+      executionBudget: { modelCalls: strategy ? 8 : 6, toolCalls: 3, inputTokens: 2_100_000, outputTokens: 6000, durationMs: 240000, maxOutputTokensPerCall: 1024 },
       verification: { artifactPath: 'answer.sh', command: '/bin/sh /workspace/artifact < /workspace/input', maxRuns: 12, maxTotalDurationMs: 240000,
         maxDurationMs: 20000, maxOutputBytes: 4096, cases: [{ stdin: '19 23', expectedStdout: '42', expectedExitCode: 0 }, { stdin: '-8 5', expectedStdout: '-3', expectedExitCode: 0 }] },
-      wake: { maxDelayMs: 60000, runTimeoutMs: 90000, maxRuns: 3 } }
+      wake: { maxDelayMs: 60000, runTimeoutMs: 90000, maxRuns: 3 }, ...(strategy ? { strategy: { maxRunsPerGoal: 4 } } : {}) }
     await writeFile(taskPath, JSON.stringify(task), { mode: 0o600 })
     expect((await stat(taskPath)).mode & 0o077).toBe(0)
     const setup = join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup')
@@ -85,7 +86,7 @@ test('installed Web owner CLI admits one private verified Goal after a stopped p
     const goals = row(finalProfile, 'dsh-enhanced-assistant-goals').get('config', true).toJSON()
     const verifier = row(finalProfile, 'dsh-enhanced-assistant-verifier').get('config', true).toJSON()
     const delivery = row(finalProfile, 'dsh-enhanced-assistant-delivery').get('config', true).toJSON()
-    expect(goals).toMatchObject({ verifyNativeRounds: true, verifyGoalOutcome: true, preauthorizedCreateMaxRounds: 3, preauthorizedSchedule: true, executionBudget: task.executionBudget })
+    expect(goals).toMatchObject({ verifyNativeRounds: true, verifyGoalOutcome: true, preauthorizedCreateMaxRounds: 3, preauthorizedSchedule: true, executionBudget: task.executionBudget, ...(strategy ? { strategy: task.strategy } : {}) })
     expect(verifier.profiles.some(profile => profile.objective === objective && profile.taskKind === 'goal-step')).toBe(true)
     expect(delivery.ownerRoutes).toEqual(expect.arrayContaining([expect.objectContaining({ conversation: JSON.parse(binding.conversation_json), workspace, minimumGeneration: binding.generation })]))
 
@@ -117,10 +118,18 @@ test('installed Web owner CLI admits one private verified Goal after a stopped p
     const receipts = query(verifierPath, 'SELECT payload FROM acceptance_receipts').map(value => JSON.parse(value.payload))
     expect(receipts.filter(value => value.task.kind === 'goal-step').map(value => value.objectiveStatus).sort()).toEqual(['achieved', 'not-achieved'])
     expect(receipts.filter(value => value.task.kind === 'goal-outcome').map(value => value.objectiveStatus).sort()).toEqual(['achieved', 'not-achieved'])
-    const budgets = query(`${goalsPath}.budgets`, 'SELECT state,input_tokens_reserved,output_tokens_reserved,input_tokens_actual,output_tokens_actual FROM goal_budget_reservations')
-    expect(budgets).toEqual(Array.from({ length: 4 }, () => ({ state: 'settled', input_tokens_reserved: 2_097_152, output_tokens_reserved: 1024, input_tokens_actual: 12, output_tokens_actual: 8 })))
+    const budgets = query(`${goalsPath}.budgets`, 'SELECT state,input_tokens_reserved,output_tokens_reserved,input_tokens_actual,output_tokens_actual,run_id FROM goal_budget_reservations')
+    expect(budgets).toHaveLength(strategy ? 7 : 4)
+    expect(budgets.every(({ run_id: _runId, ...row }) => JSON.stringify(row) === JSON.stringify({ state: 'settled', input_tokens_reserved: 2_097_152, output_tokens_reserved: 1024, input_tokens_actual: 12, output_tokens_actual: 8 }))).toBe(true)
+    expect(budgets.filter(row => String(row.run_id).startsWith('strategy-'))).toHaveLength(strategy ? 2 : 0)
+    if (strategy) {
+      const rows = query(`${goalsPath}.strategies`, 'SELECT state,outcome,children_json,output_digest FROM goal_strategy_records')
+      expect(rows).toHaveLength(1); expect(rows[0]).toMatchObject({ state: 'settled', outcome: 'advice' })
+      expect(JSON.parse(rows[0].children_json)).toHaveLength(2); expect(rows[0].output_digest).toMatch(/^[a-f0-9]{64}$/)
+    }
     const calls = await modelCalls(modelLog)
-    expect(calls).toHaveLength(8); expect(calls[6].feedbackObserved).toBe(true); expect(calls.every(call => !call.secretObserved)).toBe(true)
+    expect(calls).toHaveLength(strategy ? 11 : 8); expect(calls[strategy ? 9 : 6].feedbackObserved).toBe(true); expect(calls.every(call => !call.secretObserved)).toBe(true)
+    expect(calls.filter(call => call.strategyChild)).toHaveLength(strategy ? 2 : 0)
     expect(await resumed.getByRole('button', { name: 'Allow once', exact: true }).count()).toBe(0)
     expect(JSON.stringify(frames)).not.toContain('approval/asked'); expect(JSON.stringify(frames)).not.toContain('policy/ask')
     await expect.poll(() => query(`${goalsPath}.wakes`, 'SELECT state FROM goal_wakes').map(value => value.state)).toEqual(['succeeded'])
@@ -140,3 +149,4 @@ test('installed Web owner CLI admits one private verified Goal after a stopped p
     }
   }
 })
+}

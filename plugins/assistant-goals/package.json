@@ -60,10 +60,13 @@
     "@dsh-enhanced/assistant-delivery": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">0.1.7 <0.2.0",
     "@dsh-enhanced/assistant-verifier": ">0.1.7 <0.2.0",
-    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0"
+    "@deepseek-ai/dsh-llm": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-subagent": ">=0.1.2-rc.1 <0.2.0"
   },
   "peerDependenciesMeta": {
-    "@dsh-enhanced/assistant-automations": { "optional": true },
+    "@dsh-enhanced/assistant-automations": {
+      "optional": true
+    },
     "@deepseek-ai/cordis": {
       "optional": true
     },
@@ -96,6 +99,9 @@
     },
     "@deepseek-ai/dsh-llm": {
       "optional": true
+    },
+    "@deepseek-ai/dsh-subagent": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -117,10 +123,12 @@
     "@deepseek-ai/dsh-goal-round-driver": "catalog:",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
-    "@dsh-enhanced/assistant-verifier": "workspace:*"
+    "@dsh-enhanced/assistant-verifier": "workspace:*",
+    "@deepseek-ai/dsh-subagent": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
-    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*",
+    "@deepseek-ai/dsh-subagent-in-process-driver": "catalog:"
   }
 }

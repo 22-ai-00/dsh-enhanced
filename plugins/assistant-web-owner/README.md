@@ -127,3 +127,5 @@ dsh --profile web --no-open
 发布文件同时包含 `dsh-autonomy-doctor --profile web`。此 CLI 读取有效 profile 和当前 Delivery owner、Isolation grant/累计预算快照，再运行独立的固定 Docker 探测，最后复核配置/授权没有失效；不会开启第二个 Host、配对 owner、迁移数据库、续期 grant 或重置预算。使用 SQLite 只读连接，不读取凭据/业务产物，也不请求模型。缺失或不支持的 schema、owner 版本改变、撤销、过期、耗尽和配置不一致都失败。当前支持 Delivery schema 19、Isolation schema 6 和安装器的单一受管 grant；要求匹配本批源码的 Isolation diagnostics API，缺失该 API 时明确要求升级，不回退到忽略持久授权的探测。新 bundle 尚未发布，正式发布时需保持实际首发版本与 peer 下界一致。
 
 结果只说明有限隔离检查，不能替代动态 Policy、实时资源准入、模型硬预算、Goal 验收或外部 Actions 检查。该 CLI 的临时探测使用现有 Isolation 资源边界和清理规则；未知清理保留证据，不消耗业务 grant。
+
+要为这份目标配置启用原生策略建议，可在私有 admission JSON 中增加 `"strategy": { "maxRunsPerGoal": 4 }`。setup 写入有界策略配置及精确 owner/workspace/preset 的 `goal_strategy`/`delegate` 规则；启用 wake 时同样覆盖该目标的后台路径。父子模型调用共用原来的 `executionBudget`，不会增加预算或延长隔离授权。省略该字段保持默认关闭。重新启动 Host 后生效；策略建议仍需原有独立验收，不能直接作为目标完成依据。

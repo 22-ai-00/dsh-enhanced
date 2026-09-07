@@ -34,28 +34,43 @@ function installMock() {
       throw new Error('production wire request violated the bounded goal-setup route')
     }
     const call = callsSoFar() + 1
-    if (call > 8) throw new Error('goal setup test exceeded eight model requests')
+    const strategy = process.env.DSH_AUTONOMY_GOAL_SETUP_STRATEGY === '1'
+    const context = JSON.stringify(body.messages)
+    // This is the actual child prompt serialized onto the production HTTP
+    // route. It avoids database/state shortcuts and also proves tools vanish.
+    const strategyChild = context.includes('Return analysis only. Do not claim verification or take actions.')
+    if (call > (strategy ? 11 : 8)) throw new Error('goal setup test exceeded its bounded model request count')
+    if (strategyChild) {
+      if (!strategy || (body.tools !== undefined && (!Array.isArray(body.tools) || body.tools.length !== 0))) throw new Error('native strategy child wire request was not no-tools')
+      appendFileSync(process.env.DSH_WEB_E2E_MODEL_LOG, `${JSON.stringify({ call, pid: process.pid, strategyChild: true, model: body.model, outputLimit: body.max_tokens,
+        redirect: init.redirect, transport: 'mock-provider-response', secretObserved: false })}\n`, { mode: 0o600 })
+      const message = { role: 'assistant', content: `Native strategy advice ${call}.`, reasoning_content: 'Independent analysis.' }
+      return new Response(JSON.stringify({ id: `goal-setup-response-${call}`, object: 'chat.completion', model: body.model,
+        choices: [{ index: 0, message, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 12, prompt_cache_hit_tokens: 3, prompt_cache_miss_tokens: 9, completion_tokens: 8, total_tokens: 20, completion_tokens_details: { reasoning_tokens: 2 } },
+      }), { headers: { 'content-type': 'application/json' } })
+    }
     let tool; let args
     // Call one is only the foreground preparation which creates the persisted
     // Web session. The following calls prove that the CLI, rather than this
     // test, admitted the native Goal and its verifier configuration.
     if (call === 2) { tool = 'goal_create'; args = { objective, max_goal_rounds: 3 } }
+    if (strategy && call === 5) { tool = 'goal_strategy'; args = { kind: 'compare', question: 'Compare two implementation approaches.' } }
     if (call === 3) {
       const goal = goalContext(body.messages)
       if (!goal?.id || goal.native.phase !== 'active' || goal.native.roundsStarted !== 0) throw new Error('fresh goal context missing before scheduled restart')
       tool = 'goal_schedule'; args = { goal_id: goal.id, expected_revision: goal.native.revision, wake_at: Date.now() + 15000 }
     }
-    if (call === 5 || call === 7) {
+    if (call === (strategy ? 8 : 5) || call === (strategy ? 10 : 7)) {
       tool = 'isolation_run'
       args = { grant_id: 'autonomy-web', idempotency_key: `goal-setup-artifact-${call}`, command: 'cp source answer.sh',
-        files: [{ path: 'source', content: call === 5 ? 'printf wrong' : 'read a b; printf "%s" "$((a + b))"' }], artifacts: ['answer.sh'], timeout_ms: 20000 }
+        files: [{ path: 'source', content: call === (strategy ? 8 : 5) ? 'printf wrong' : 'read a b; printf "%s" "$((a + b))"' }], artifacts: ['answer.sh'], timeout_ms: 20000 }
     }
-    const context = JSON.stringify(body.messages)
     const feedbackObserved = context.includes('isolated-unexpected-stdout')
     const secretObserved = ['expectedStdout', 'expectedExitCode', '19 23', '-8 5'].some(value => context.includes(value))
     appendFileSync(process.env.DSH_WEB_E2E_MODEL_LOG, `${JSON.stringify({ call, pid: process.pid, tool: tool ?? null, model: body.model, outputLimit: body.max_tokens,
       redirect: init.redirect, transport: 'mock-provider-response', feedbackObserved, secretObserved })}\n`, { mode: 0o600 })
-    if (call === 7 && !feedbackObserved) throw new Error('native continuation did not receive independent verifier feedback')
+    if (call === (strategy ? 10 : 7) && !feedbackObserved) throw new Error('native continuation did not receive independent verifier feedback')
     if (secretObserved) throw new Error('private verifier vectors leaked into the production wire projection')
     const message = { role: 'assistant', content: tool ? null : `Goal setup reply ${call}`, reasoning_content: 'Continue the current task.' }
     if (tool) message.tool_calls = [{ id: `goal-setup-fixture-${call}`, type: 'function', function: { name: tool, arguments: JSON.stringify(args) } }]

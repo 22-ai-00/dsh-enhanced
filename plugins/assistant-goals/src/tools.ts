@@ -12,6 +12,19 @@ const output = {
   render: (_args: unknown, value: { context: string }) => [{ type: 'text' as const, text: value.context }],
 } as const
 export function registerGoalTools(ctx: Context, service: AssistantGoalsService): void {
+  if (service.strategyEnabled) {
+    const strategy = defineTool({
+      name: 'goal_strategy',
+      description: 'Change approach during an active business goal round: ask a fresh no-tools native subagent to investigate supplied evidence or independently review reasoning; compare requests two perspectives. All model calls use the same goal budget and owner authority. Supply the question and relevant non-secret context. Results are unverified advice and never replace independent goal acceptance.',
+      parameters: { kind: { type: 'string', enum: ['investigate', 'review', 'compare'], required: true }, question: { type: 'string', required: true }, context: { type: 'string' } },
+      output,
+      async execute(args, execution) {
+        return { context: JSON.stringify(await service.runStrategy(execution.agent, args, execution.signal)) }
+      },
+    })
+    ctx.tools.register(strategy)
+    ctx.assistantPolicy.registerPreauthorizedTool?.(ctx, strategy, execution => service.preauthorizeStrategy(execution))
+  }
   const scheduleTool = defineTool({
     name: 'goal_schedule',
     description: 'Authorize one delayed resume of this session business goal. Requires the current authenticated owner request, enabled background wake, Policy and budgets. Pauses the goal, checkpoints it, and schedules the original Session via Automations. wake_at is UTC epoch milliseconds. Omitting wake_at only inspects existing schedules. Unknown work is never automatically replayed.',

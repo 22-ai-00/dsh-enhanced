@@ -152,6 +152,16 @@ executionBudget:
 - Delivery 桥接覆盖创建、业务笔记和 owner 的 edit/pause/resume/clear；没有给模型增加独立验收成功写入入口，native complete 仍由受支持的原生入口或可信 Host 管理。
 - 本包已有可选的原生回合与整体结果验收、单步骤期限、跨步骤累计预算和一次性计划唤醒；完整持久多步骤编排、跨日生产运行和生产安装路径仍待完成。
 
+## 原生策略子任务（可选）
+
+配置 `strategy: {}` 后，已准入的原生目标回合可以通过 `goal_strategy` 调整解题方法：`investigate` 分析给定上下文，`review` 检查推理，`compare` 顺序请求两个独立视角。明确的下一步继续直接执行；调查结果只是 `unverified` 建议，不能代替步骤或整个目标的独立验收，也不能把模型的自我评价作为策略收益。
+
+需要持久 `databasePath`、`verifyNativeRounds: true`、`executionBudget`、当前模型路由的可信 meter，以及 Host `subagents` 服务。Policy 还须允许当前 owner/workspace/preset 的 goal `delegate` 和 tool `goal_strategy`；拒绝规则继续优先。默认不开启，不授予子任务文件、网络工具或通用 owner 身份。这里的调查只分析调用方给出的材料，模型请求会发往父目标同一 provider/model。
+
+默认限制为 `maxDurationMs: 30000`、`maxPromptBytes: 32768`、`maxOutputBytes: 16384`、`maxRunsPerGoal: 16`，最多分别为 300000 / 65536 / 65536 / 32。期限同时受父回合和目标累计期限约束。父工具及全部子模型调用共用原目标预算；子调用用独立 run ID 记账，工具结果和后续目标上下文显示调用/token/已知费用及未结算预留。没有为子任务发放新的预算。
+
+使用 DSH 原生 `ctx.subagents.start()` 与 `startInProcessRun()`，不复制 AgentLoop。策略 schema 1 位于 `databasePath + '.strategies'`，保存 intent、父 run/Session、定义摘要、模型路由、子 Session、终态和输出摘要，不保存建议正文；原生 Session 仍保存模型交互。预算与策略账本分别提交，重启将未完成记录标为 unknown，不自动回放，也不退还未知模型预留。未确认停止的子任务不能记录为成功。只读策略建议不是操作系统沙箱承诺；Host 扩展仍属于受信任进程代码。
+
 ## 权限与数据
 
 - **文件系统**：保存目标原文、owner scope、笔记、focus 和追加历史到独立 SQLite；使用 WAL 与 FULL 同步。新建数据库权限为 `0600`，启动前后检查数据库及已有 WAL/SHM 的私有权限、所有权和链接。目录创建为 `0700`，直接父目录须属于当前用户且不可被组或其他用户写入，不修改既有父目录权限；这不是对同 UID 恶意进程或路径替换的 OS 隔离保证。数据库不加密，应置于可信私有目录。启动时重建并核对历史与当前状态，拒绝损坏/截断记录及无效 focus；这不是密码学防篡改日志。当前没有历史自动清理。

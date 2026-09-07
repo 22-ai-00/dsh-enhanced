@@ -3,6 +3,8 @@ packages:
   - packages/*
 
 catalog:
+  '@deepseek-ai/dsh-subagent': 0.1.2-rc.1
+  '@deepseek-ai/dsh-subagent-in-process-driver': 0.1.2-rc.1
   '@deepseek-ai/dsh-api-gateway': 0.1.2-rc.1
   '@deepseek-ai/dsh-api-remotes': 0.1.2-rc.1
   '@agentclientprotocol/sdk': 0.25.1
@@ -74,6 +76,8 @@ allowBuilds:
   protobufjs: false
 
 minimumReleaseAgeExclude:
+  - '@deepseek-ai/dsh-subagent@0.1.2-rc.1'
+  - '@deepseek-ai/dsh-subagent-in-process-driver@0.1.2-rc.1'
   - '@deepseek-ai/dsh-workspace@0.1.2-rc.1'
   - '@deepseek-ai/dsh-api-gateway@0.1.2-rc.1'
   - '@deepseek-ai/dsh-api-remotes@0.1.2-rc.1'

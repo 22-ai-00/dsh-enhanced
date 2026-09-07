@@ -8,6 +8,7 @@ export interface GoalBudgetLimits { modelCalls: number; toolCalls: number; input
 export interface GoalBudgetScope { scope: GoalScope; goalId: string }
 export interface GoalBudgetReservation { id: string; runId: string; inputTokens: number; outputTokens: number; costUsdMicros: number | null; state: 'held' | 'settled'; reservedAt: number; settledAt?: number }
 export interface GoalBudgetSnapshot { limits: GoalBudgetLimits; modelCalls: number; toolCalls: number; inputTokens: number; outputTokens: number; costUsdMicros: number | null; heldCalls: number }
+export interface GoalBudgetRunUsage { modelCalls: number; heldCalls: number; inputTokens: number; outputTokens: number; costUsdMicros: number | null }
 
 type Row = { id: string; run_id: string; input_tokens_reserved: number; output_tokens_reserved: number; cost_usd_micros_reserved: number | null; state: string; reserved_at: number; input_tokens_actual: number | null; output_tokens_actual: number | null; cost_usd_micros_actual: number | null; settled_at: number | null }
 type LimitRow = { model_calls: number; tool_calls: number; input_tokens: number; output_tokens: number; cost_usd_micros: number | null; expires_at: number }
@@ -146,6 +147,22 @@ export class GoalBudgetStore {
     try { this.#database.prepare('INSERT INTO goal_budget_limits(scope_json, goal_id, model_calls, tool_calls, input_tokens, output_tokens, cost_usd_micros, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(key, input.goalId, value.modelCalls, value.toolCalls, value.inputTokens, value.outputTokens, value.costUsdMicros, value.expiresAt) } catch { fail('conflict') }
     return this.#snapshot(key, input.goalId)
   }
+  /** Exact run attribution, including conservative held reservations. */
+  runUsage(binding: GoalBudgetScope, runId: string): Readonly<GoalBudgetRunUsage> {
+    const [input, key] = this.#key(binding)
+    if (!idPattern.test(runId)) fail('invalid-input')
+    const limits = this.#limit(key, input.goalId)
+    if (!limits) fail('not-found')
+    const row = this.#database.prepare(`SELECT COUNT(*) AS calls,
+      COALESCE(SUM(CASE WHEN state = 'held' THEN 1 ELSE 0 END), 0) AS held,
+      COALESCE(SUM(CASE WHEN state = 'held' THEN input_tokens_reserved ELSE input_tokens_actual END), 0) AS input,
+      COALESCE(SUM(CASE WHEN state = 'held' THEN output_tokens_reserved ELSE output_tokens_actual END), 0) AS output,
+      COALESCE(SUM(CASE WHEN state = 'held' THEN cost_usd_micros_reserved ELSE cost_usd_micros_actual END), 0) AS cost
+      FROM goal_budget_reservations WHERE scope_json = ? AND goal_id = ? AND run_id = ?`).get(key, input.goalId, runId) as { calls: number; held: number; input: number; output: number; cost: number }
+    return freeze({ modelCalls: row.calls, heldCalls: row.held, inputTokens: row.input, outputTokens: row.output,
+      costUsdMicros: limits.cost_usd_micros === null ? null : row.cost })
+  }
+
   /** Read-only candidate view. It never inserts limits, requests, or reservations. */
   preview(binding: GoalBudgetScope, limits: GoalBudgetLimits): GoalBudgetSnapshot {
     const [input, key] = this.#key(binding); const candidate = limitsInput(limits); const existing = this.#limit(key, input.goalId)

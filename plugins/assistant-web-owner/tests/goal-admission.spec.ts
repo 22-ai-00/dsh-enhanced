@@ -72,6 +72,7 @@ describe('goal admission planning', () => {
     const personal = config(plan.patch, 'dsh-enhanced-personal-assistant')
     expect(verifier.profiles.filter((profile: { id: string }) => profile.id.startsWith(plan.admissionId))).toHaveLength(2)
     expect(goals.executionBudget).toMatchObject({ inputTokens: 2_097_152, maxOutputTokensPerCall: 8192 })
+    expect(goals.strategy).toBeUndefined()
     expect(goals.backgroundWake).toMatchObject({ ownerRouteId: plan.admissionId, budgetId: `${plan.admissionId}-runs` })
     expect(personal.assistantPolicy.rules.some((rule: { id: string }) => rule.id === `${plan.admissionId}-resume`)).toBe(true)
     expect(personal.assistantPolicy.rules).toEqual(expect.arrayContaining([expect.objectContaining({ id: 'custom-deny', effect: 'deny' })]))
@@ -82,6 +83,25 @@ describe('goal admission planning', () => {
     const second = prepareGoalAdmission(f.input, first.patch, first.patch, task(), f.snapshot, Date.now())
     expect(second.patch).toBe(first.patch)
     expect(inspectAutonomyProfile(second.patch, f.input.profile, f.input.dshHome).grant).toEqual(f.profile.grant)
+  })
+
+  test('optionally admits bounded native strategies without extending the goal budget or isolation grant', async () => {
+    const f = await fixture()
+    const input = task({ strategy: { maxRunsPerGoal: 2 } })
+    const first = prepareGoalAdmission(f.input, f.prepared.patch, f.effective, input, f.snapshot, Date.now())
+    const second = prepareGoalAdmission(f.input, first.patch, first.patch, input, f.snapshot, Date.now())
+    expect(second.patch).toBe(first.patch)
+    const goals = config(first.patch, 'dsh-enhanced-assistant-goals')
+    expect(goals.strategy).toMatchObject({ maxDurationMs: 30000, maxRunsPerGoal: 2 })
+    expect(goals.executionBudget).toMatchObject({ modelCalls: 3, toolCalls: 3 })
+    const rules = config(first.patch, 'dsh-enhanced-personal-assistant').assistantPolicy.rules
+    expect(rules).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: `${first.admissionId}-strategy-goal`, actions: ['delegate'], subject: expect.objectContaining({ workspace: f.input.workspace, id: f.input.preset }), resource: { kind: 'goal', id: 'business-context' } }),
+      expect.objectContaining({ id: `${first.admissionId}-strategy-tool`, actions: ['execute'], resource: { kind: 'tool', id: 'goal_strategy' } }),
+    ]))
+    expect(inspectAutonomyProfile(first.patch, f.input.profile, f.input.dshHome).grant).toEqual(f.profile.grant)
+    expect(() => parseGoalAdmissionTask(task({ strategy: { maxDurationMs: 0 } }))).toThrow()
+    expect(() => parseGoalAdmissionTask(task({ strategy: { maxChildren: 100 } }))).toThrow()
   })
 
   test('rejects unsafe task shapes and leaves the caller source untouched', async () => {

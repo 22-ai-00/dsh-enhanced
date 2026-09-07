@@ -120,7 +120,7 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test.each(['goal_create', 'goal_schedule'])('reserves %s preauthorization to its exact plugin and keeps revoked predicates closed', async name => {
+  test.each(['goal_create', 'goal_schedule', 'goal_strategy'])('reserves %s preauthorization to its exact plugin and keeps revoked predicates closed', async name => {
     const current = await fixture()
     let executions = 0
     let active = true
