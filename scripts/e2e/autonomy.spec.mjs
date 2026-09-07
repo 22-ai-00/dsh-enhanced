@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, readFile, writeFile, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { parseDocument } from 'yaml'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
@@ -72,6 +73,37 @@ test('fresh autonomy installer executes a finite offline grant through native We
     // Inspect native streamed events, including asks that might no longer be visible.
     expect(JSON.stringify(frames)).not.toContain('approval/asked')
     expect(JSON.stringify(frames)).not.toContain('policy/ask')
+    const doctorArgs = ['scripts/install/doctor.sh', '--profile', 'web', '--require-isolation']
+    const originalPatch = await readFile(patchPath, 'utf8')
+    const originalJobs = query(ledger, 'SELECT * FROM isolation_jobs')
+    const controller = query(ledger, 'SELECT owner_id, fence FROM isolation_controller')
+    const checked = await run('/bin/bash', doctorArgs, env)
+    const diagnostic = JSON.parse(checked.split('\n').find(line => line.startsWith('{"scope":"finite-isolation"')))
+    expect(diagnostic).toMatchObject({ owner: { status: 'matched' }, grant: { status: 'available', runsUsed: 1, durationReservedMs: 20_000, remainingRuns: 19, remainingDurationMs: 580_000 }, modelAndGoals: 'not-checked' })
+    expect(checked).toContain('temporary runtime probe passed')
+    expect(query(ledger, 'SELECT * FROM isolation_grants')[0]).toEqual(grant)
+    expect(query(ledger, 'SELECT * FROM isolation_jobs')).toEqual(originalJobs)
+    expect(query(ledger, 'SELECT owner_id, fence FROM isolation_controller')).toEqual(controller)
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    expect((await readFile(modelLog, 'utf8')).trim().split('\n')).toHaveLength(4)
+    await writeFile(testInfo.outputPath('doctor.log'), sanitize(checked), { mode: 0o600 })
+    // Seed an operator revocation in the disposable profile after stopping its Host.
+    // This checks diagnosis of durable revocation, not an external-stop integration.
+    await host.stop()
+    const db = new DatabaseSync(ledger)
+    try { db.prepare("UPDATE isolation_grants SET revoked=1, revoke_reason='doctor regression fixture' WHERE id='autonomy-web'").run() } finally { db.close() }
+    let rejected = ''
+    try { await run('/bin/bash', doctorArgs, env); throw new Error('revoked grant unexpectedly passed doctor') }
+    catch (error) { rejected = String(error) }
+    expect(rejected).toContain('exited 1')
+    expect(rejected).toContain('grant-revoked')
+    expect(rejected).not.toContain('temporary runtime probe passed')
+    expect(query(ledger, 'SELECT * FROM isolation_jobs')).toEqual(originalJobs)
+    expect(query(ledger, 'SELECT revoked, expires_at FROM isolation_grants')[0]).toEqual({ revoked: 1, expires_at: grant.expires_at })
+    expect(await readFile(patchPath, 'utf8')).toBe(originalPatch)
+    await writeFile(testInfo.outputPath('doctor-revoked.log'), sanitize(rejected), { mode: 0o600 })
+    await writeFile(testInfo.outputPath('doctor-proof.json'), JSON.stringify({ diagnostic, liveHostControllerPreserved: true, jobsAndGrantPreserved: true,
+      modelCallsBeforeAndAfter: 4, patchPreserved: true, runtimeProbePassed: true, seededRevocation: { rejected: true, exitCode: 1, persisted: true, expiryPreserved: true } }, null, 2), { mode: 0o600 })
     await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({
       installer: 'actual local installer and repeated shipped setup', image, sessionId,
       nativeTool: 'isolation_run', approvals: 0, jobs: 1, prompts: 2, reservedDurationMs: 20_000,

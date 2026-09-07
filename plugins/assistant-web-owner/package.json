@@ -7,6 +7,7 @@
   "main": "./lib/index.js",
   "types": "./lib/index.d.ts",
   "bin": {
+    "dsh-autonomy-doctor": "./bin/dsh-autonomy-doctor.js",
     "dsh-web-owner-setup": "./bin/dsh-web-owner-setup.js"
   },
   "exports": {
