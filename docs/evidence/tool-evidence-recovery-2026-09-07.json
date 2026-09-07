@@ -1,0 +1,528 @@
+{
+  "schema": "dsh-tool-evidence-recovery/v1",
+  "recordedAt": "2026-09-07T11:02:24.656043+00:00",
+  "baseCommit": "ba8a2da4f200a76621cb80ae359ce133429d3cad",
+  "scope": "WP07 native file-read evidence recovery slice; full 18-package goal remains incomplete",
+  "runtime": {
+    "dsh": "0.1.2-rc.1",
+    "cordis": "4.0.2",
+    "node": "v24.7.0"
+  },
+  "observations": [
+    "Actual AgentLoop with deterministic LlmAdapter; narrow test Delivery owner attestation, no real model/browser/user profile evidence.",
+    "Actual LocalFileSystem and native tool-fs read on public temporary journal files; actual ToolResultPruner and JSONL flush, context disposal, fresh context resume.",
+    "Original journal v2 is absent from the pruned active model history, recoverable by exact reference and middle query after reopen, then explicitly reread as current v3.",
+    "Successful read anchors require a same-live-agent fs/observed event; bind owner namespace/version, workspace/preset/session, original call/result and source path/target identity. No cold-history backfill.",
+    "Historical results do not become verified current facts or approved long-term Memory; metadata index has no original body or raw call arguments."
+  ],
+  "nativeCases": [
+    "current-owner",
+    "changed-owner",
+    "revoked-owner",
+    "denied-tool",
+    "changed-original",
+    "denied-file",
+    "pipeline-deny",
+    "restricted-tool",
+    "unregistered-tool",
+    "missing-file",
+    "missing-anchor",
+    "missing-source",
+    "budgeted-execute",
+    "budgeted-file",
+    "retargeted-file"
+  ],
+  "targeted": {
+    "command": "tests-v5",
+    "exitCode": 0,
+    "files": 11,
+    "tests": 153
+  },
+  "negativeControl": {
+    "command": "origin-negative-v1",
+    "expectedExitCode": 1,
+    "observedFailure": "retargeted-file exposed historical NEEDLE=journal-v2 to the model when both historical file identity checks were removed",
+    "restored": true,
+    "sourceSha256": "e8204d9556fdba713bd8b66b476da2305c4300fa95fa5fcdf4ac457c6c7179a3",
+    "mutation": "Remove both historical source path/target digest checks; retain current read authorization and in-read version/alias checks."
+  },
+  "fullCheck": {
+    "command": "check-v2",
+    "exitCode": 0,
+    "files": 246,
+    "tests": 3486,
+    "personalMemoryPackageTests": 138,
+    "packCount": 28,
+    "personalMemoryPackFiles": [
+      "cordis.patch.yml",
+      "lib/evidence-filesystem.d.ts",
+      "lib/evidence-filesystem.d.ts.map",
+      "lib/evidence-filesystem.js",
+      "lib/evidence-filesystem.js.map",
+      "lib/evidence-ledger.d.ts",
+      "lib/evidence-ledger.d.ts.map",
+      "lib/evidence-ledger.js",
+      "lib/evidence-ledger.js.map",
+      "lib/evidence-runtime.d.ts",
+      "lib/evidence-runtime.d.ts.map",
+      "lib/evidence-runtime.js",
+      "lib/evidence-runtime.js.map",
+      "lib/evidence-service.d.ts",
+      "lib/evidence-service.d.ts.map",
+      "lib/evidence-service.js",
+      "lib/evidence-service.js.map",
+      "lib/index.d.ts",
+      "lib/index.d.ts.map",
+      "lib/index.js",
+      "lib/index.js.map",
+      "lib/knowledge.d.ts",
+      "lib/knowledge.d.ts.map",
+      "lib/knowledge.js",
+      "lib/knowledge.js.map",
+      "lib/promotion.d.ts",
+      "lib/promotion.d.ts.map",
+      "lib/promotion.js",
+      "lib/promotion.js.map",
+      "lib/proposals.d.ts",
+      "lib/proposals.d.ts.map",
+      "lib/proposals.js",
+      "lib/proposals.js.map",
+      "lib/service.d.ts",
+      "lib/service.d.ts.map",
+      "lib/service.js",
+      "lib/service.js.map",
+      "lib/sqlite.d.ts",
+      "lib/sqlite.d.ts.map",
+      "lib/sqlite.js",
+      "lib/sqlite.js.map",
+      "lib/store.d.ts",
+      "lib/store.d.ts.map",
+      "lib/store.js",
+      "lib/store.js.map",
+      "lib/tokenize.d.ts",
+      "lib/tokenize.d.ts.map",
+      "lib/tokenize.js",
+      "lib/tokenize.js.map",
+      "lib/tools.d.ts",
+      "lib/tools.d.ts.map",
+      "lib/tools.js",
+      "lib/tools.js.map",
+      "lib/types.d.ts",
+      "lib/types.d.ts.map",
+      "lib/types.js",
+      "lib/types.js.map",
+      "lib/version.d.ts",
+      "lib/version.d.ts.map",
+      "lib/version.js",
+      "lib/version.js.map",
+      "LICENSE",
+      "package.json",
+      "README.md"
+    ]
+  },
+  "limits": [
+    "Only direct native read results with live filesystem observation provenance are eligible; nested run_code/PTC calls and generic shell/network/image/custom-tool replay are excluded.",
+    "Current exact filesystem resource read permission and original tool availability/pipeline must allow. Budgeted source execution/resource authorization fails closed without a separate reservation, audits but does not charge.",
+    "Digest matched is historical integrity only; freshness is historical-unverified, not an independent semantic truth or model-intelligence claim.",
+    "SQLite anchor and JSONL have no joint atomic transaction. Either side missing is unavailable; cold replay does not adopt old records into a new owner.",
+    "Trusted in-process providers/plugins and same-UID writers are outside the isolation claim. No production deployment, real cloud model, hidden holdout or long-term autonomy acceptance.",
+    "Temporary test directories were removed by test teardown. /tmp command logs are local evidence and may be absent on another device; hashes do not replace rerunning tests there."
+  ],
+  "c2c": {
+    "taskId": "c2c_76d1",
+    "mode": "local-execution-records-only",
+    "chatgptReviewObtained": false,
+    "reason": "No built-in browser tool available in this session; no external-browser fallback or ChatGPT planning/review was claimed.",
+    "localRecordCount": 21
+  },
+  "sources": [
+    {
+      "path": "package.json",
+      "sha256": "4d4de5cf0d46e3c9bf61726b142aedf334ad8f7ecfc3c2f2a3dc3d4432571411"
+    },
+    {
+      "path": "plugins/personal-memory/package.json",
+      "sha256": "77360258965f6d5c74ab2e3bfc73aec1eeb05ec889cae03b370316249a10577f"
+    },
+    {
+      "path": "plugins/personal-memory/src/evidence-filesystem.ts",
+      "sha256": "e8204d9556fdba713bd8b66b476da2305c4300fa95fa5fcdf4ac457c6c7179a3"
+    },
+    {
+      "path": "plugins/personal-memory/src/evidence-ledger.ts",
+      "sha256": "133693f4ae0efc884afc75b720d2d211ab81e9e96d47dacee2820397df5c28df"
+    },
+    {
+      "path": "plugins/personal-memory/src/evidence-runtime.ts",
+      "sha256": "299346c4d937e92b49ade178c63297a831eb72d67a2a4659e9f78d7fd6c8d7ee"
+    },
+    {
+      "path": "plugins/personal-memory/src/evidence-service.ts",
+      "sha256": "7963d09b03b53066341addf47c727c1a312a9ed75d06187e2caabefa83d6f1b1"
+    },
+    {
+      "path": "plugins/personal-memory/src/service.ts",
+      "sha256": "b49dc42c8dbc49f36bbaced80c76a61bbd928f2d8c5e7bac111029f094d8e4e0"
+    },
+    {
+      "path": "plugins/personal-memory/src/sqlite.ts",
+      "sha256": "0b74e4f0ec3263c9e64f6673c0192483740fd61c8fcb096a34962633e40b50fb"
+    },
+    {
+      "path": "plugins/personal-memory/src/store.ts",
+      "sha256": "8a66b0519cf0aa72a09160229f519e0de2060bf10e6bee0a550b1347819d3955"
+    },
+    {
+      "path": "plugins/personal-memory/src/tools.ts",
+      "sha256": "6360f2cb2ac93b2a90867b818ff4ed53f54fe62b149eb36cd837b6e121c61345"
+    },
+    {
+      "path": "plugins/personal-memory/tests/evidence-ledger.spec.ts",
+      "sha256": "cb94138cc75f7420d088a26ef4ffab2d8ffbd00684917b0047449b8ef19c24ce"
+    },
+    {
+      "path": "plugins/personal-memory/tests/evidence-runtime.spec.ts",
+      "sha256": "3f41190ea860cbf69157887cb6c3ed9e802f0ae4fcf899915c48d9399be53821"
+    },
+    {
+      "path": "plugins/personal-memory/tests/proposals.spec.ts",
+      "sha256": "bd13e5d449c965f20ae15a85923fc53977d7c68ce1339758cbfc2e076fa54646"
+    },
+    {
+      "path": "plugins/personal-memory/tests/store.spec.ts",
+      "sha256": "8799e6966c09c39a5eebca9c8def1f84118651134ef3d9a3f592d30a5631a345"
+    },
+    {
+      "path": "plugins/personal-memory/tests/tools.spec.ts",
+      "sha256": "0426c7e5f775ed86bbe40c181bedad365975abdc7620628bf8a3fe41fec42e60"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "sha256": "deac0cc84e01ad27fa63de92522f91d32a58fd9ca18b9c0bf74bafabb850be85"
+    },
+    {
+      "path": "pnpm-workspace.yaml",
+      "sha256": "cc9fb854bea2b69d5d8165efc6705325581ca13fc4664962862ed533956d00ce"
+    },
+    {
+      "path": "tests/memory-evidence-recovery.spec.ts",
+      "sha256": "c332026f719141f25249c1bf50081ea47668b4b93b5e5ac78fa5c41ff31d1afb"
+    }
+  ],
+  "commands": [
+    {
+      "name": "install-v1",
+      "command": "CI=true pnpm install --ignore-scripts",
+      "log": "/tmp/dsh-tool-evidence-install-v1.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "26b8cdb34c50f1c46580ad4d7a3541aa3d8492d88372fe7b1f48abfe83dc2cff",
+      "bytes": 1051,
+      "testSummaries": []
+    },
+    {
+      "name": "install-v2",
+      "command": "CI=true pnpm install --no-frozen-lockfile --ignore-scripts",
+      "log": "/tmp/dsh-tool-evidence-install-v2.log",
+      "exitCode": 0,
+      "c2cRecordExitCode": 0,
+      "sha256": "a70d1b5f065802933218e4bbb530377166b216326e8045617032f8cb4604fe1d",
+      "bytes": 1009,
+      "testSummaries": []
+    },
+    {
+      "name": "install-v3",
+      "command": "CI=true pnpm install --no-frozen-lockfile --ignore-scripts",
+      "log": "/tmp/dsh-tool-evidence-install-v3.log",
+      "exitCode": 0,
+      "c2cRecordExitCode": 0,
+      "sha256": "2fc6717294e5dc83a77288979450c1c804a790a337f926a118b07212c54197b5",
+      "bytes": 1062,
+      "testSummaries": []
+    },
+    {
+      "name": "native-v1",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts",
+      "log": "/tmp/dsh-tool-evidence-native-v1.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "2a4d84f1fce1584a4e00a43e2bd58a9ea99e7661751fbea494838c2f007cc78d",
+      "bytes": 2115,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed (1)",
+        "Tests  5 failed (5)"
+      ]
+    },
+    {
+      "name": "native-v2",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts",
+      "log": "/tmp/dsh-tool-evidence-native-v2.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "9a500d4ad7767d54267740fc8637b2b956ed306e7cdaad104ccd76cb05638521",
+      "bytes": 4241,
+      "testSummaries": [
+        "Test Files  1 failed (1)",
+        "Tests  no tests"
+      ]
+    },
+    {
+      "name": "native-v3",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts",
+      "log": "/tmp/dsh-tool-evidence-native-v3.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "0a1a11faccb223fa335a7a6823b8945098e23419e56ca10d34e00984aa9d2827",
+      "bytes": 7497,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed (1)",
+        "Tests  5 failed (5)"
+      ]
+    },
+    {
+      "name": "native-v4",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts",
+      "log": "/tmp/dsh-tool-evidence-native-v4.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "378dc71a9dc172c38a2d1a4b8faaaf14df00c3068812836f1c3a7a7a884cb315",
+      "bytes": 1678,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed (1)",
+        "Tests  1 failed | 9 passed (10)"
+      ]
+    },
+    {
+      "name": "native-v5",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts -t current-owner",
+      "log": "/tmp/dsh-tool-evidence-native-v5.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "02523d2f3b7f5e6b637efddc0e4c48dab8d9cf34e85222fbe52c4f3823b9f4c3",
+      "bytes": 2223,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed (1)",
+        "Tests  1 failed | 9 skipped (10)"
+      ]
+    },
+    {
+      "name": "native-v6",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts -t current-owner",
+      "log": "/tmp/dsh-tool-evidence-native-v6.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "a42baa3f8b41de659a44da95c431389218fd85d444f663dbd40fbcbfd1b3128e",
+      "bytes": 1677,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed (1)",
+        "Tests  1 failed | 9 skipped (10)"
+      ]
+    },
+    {
+      "name": "native-v7",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts",
+      "log": "/tmp/dsh-tool-evidence-native-v7.log",
+      "exitCode": 0,
+      "c2cRecordExitCode": 0,
+      "sha256": "8a0279ae3a771e88bbdbd3cdba72e8911b4bf3ac95d4774f95485edac72d9dd3",
+      "bytes": 404,
+      "testSummaries": [
+        "Test Files  1 passed (1)",
+        "Tests  10 passed (10)"
+      ]
+    },
+    {
+      "name": "tests-v1",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/personal-memory/tests",
+      "log": "/tmp/dsh-tool-evidence-tests-v1.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "f26de8e717abb0b49ae615b1a658582eca14e6a56de594aecee7a27cc14fe33c",
+      "bytes": 6636,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 4 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  2 failed | 8 passed (10)",
+        "Tests  4 failed | 132 passed (136)"
+      ]
+    },
+    {
+      "name": "tests-v2",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 plugins/personal-memory/tests tests/memory-evidence-recovery.spec.ts",
+      "log": "/tmp/dsh-tool-evidence-tests-v2.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "499ff822b431c99b92f53c3d2d8ff090a30b435f4c681af008268e18f421bb02",
+      "bytes": 3906,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 5 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed | 10 passed (11)",
+        "Tests  5 failed | 136 passed (141)"
+      ]
+    },
+    {
+      "name": "tests-v3",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts plugins/personal-memory/tests",
+      "log": "/tmp/dsh-tool-evidence-tests-v3.log",
+      "exitCode": 1,
+      "c2cRecordExitCode": 0,
+      "sha256": "d4590521c39d67ad547b1748c105deab1b2e5537b2795e39aacbaffc81693456",
+      "bytes": 3780,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 2 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed | 10 passed (11)",
+        "Tests  2 failed | 145 passed (147)"
+      ]
+    },
+    {
+      "name": "tests-v4",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts plugins/personal-memory/tests",
+      "log": "/tmp/dsh-tool-evidence-tests-v4.log",
+      "exitCode": 0,
+      "c2cRecordExitCode": 0,
+      "sha256": "23c475d7cc7b6b499d9778ba155db82f55d494905d799de67cae9794fd3d31b9",
+      "bytes": 1947,
+      "testSummaries": [
+        "Test Files  11 passed (11)",
+        "Tests  151 passed (151)"
+      ]
+    },
+    {
+      "name": "tests-v5",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts plugins/personal-memory/tests",
+      "log": "/tmp/dsh-tool-evidence-tests-v5.log",
+      "exitCode": 0,
+      "c2cRecordExitCode": 0,
+      "sha256": "e6d257f4e48baee914451e8de53521ad9146e746d1b53d088ad2f02e17de1066",
+      "bytes": 1947,
+      "testSummaries": [
+        "Test Files  11 passed (11)",
+        "Tests  153 passed (153)"
+      ]
+    },
+    {
+      "name": "typecheck-v1",
+      "command": "CI=true pnpm --filter @dsh-enhanced/personal-memory typecheck",
+      "log": "/tmp/dsh-tool-evidence-typecheck-v1.log",
+      "exitCode": 2,
+      "c2cRecordExitCode": 0,
+      "sha256": "6b4d2dc63c9e9c6615501a80c36d75cc80747721d464ff2b07f34164192a88d9",
+      "bytes": 658,
+      "testSummaries": []
+    },
+    {
+      "name": "typecheck-v2",
+      "command": "CI=true pnpm --filter @dsh-enhanced/personal-memory typecheck",
+      "log": "/tmp/dsh-tool-evidence-typecheck-v2.log",
+      "exitCode": 0,
+      "c2cRecordExitCode": 0,
+      "sha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630",
+      "bytes": 32,
+      "testSummaries": []
+    },
+    {
+      "name": "check-v1",
+      "command": "CI=true pnpm check",
+      "log": "/tmp/dsh-tool-evidence-check-v1.log",
+      "exitCode": 1,
+      "sha256": "ca5b6ced853f9c719b0a22ab7fbd7af28298e493413a81391e600a2674ea29b8",
+      "bytes": 82564,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed | 245 passed (246)",
+        "Tests  1 failed | 3485 passed (3486)"
+      ]
+    },
+    {
+      "name": "check-v2",
+      "command": "CI=true pnpm check",
+      "log": "/tmp/dsh-tool-evidence-check-v2.log",
+      "exitCode": 0,
+      "sha256": "b19706a2cad303a33e4c256f86d2477a6c646fd342c2628b2ef08ca81a6acaa3",
+      "bytes": 216532,
+      "testSummaries": [
+        "Test Files  246 passed (246)",
+        "Tests  3486 passed (3486)",
+        "packages/task-acceptance-contract test:  Test Files  1 passed (1)",
+        "packages/task-acceptance-contract test:       Tests  12 passed (12)",
+        "packages/llm-route-capabilities test:  Test Files  1 passed (1)",
+        "packages/llm-route-capabilities test:       Tests  18 passed (18)",
+        "packages/assistant-growth-contract test:  Test Files  1 passed (1)",
+        "packages/assistant-growth-contract test:       Tests  11 passed (11)",
+        "plugins/acp test:  Test Files  5 passed (5)",
+        "plugins/acp test:       Tests  31 passed (31)",
+        "plugins/hello test:  Test Files  1 passed (1)",
+        "plugins/hello test:       Tests  2 passed (2)",
+        "plugins/assistant-policy test:  Test Files  13 passed (13)",
+        "plugins/assistant-policy test:       Tests  186 passed (186)",
+        "plugins/plugin-control-plane test:  Test Files  8 passed (8)",
+        "plugins/plugin-control-plane test:       Tests  155 passed (155)",
+        "plugins/credentials-keychain test:  Test Files  6 passed (6)",
+        "plugins/credentials-keychain test:       Tests  27 passed (27)",
+        "plugins/traex-acp-provider test:  Test Files  8 passed (8)",
+        "plugins/traex-acp-provider test:       Tests  154 passed (154)",
+        "plugins/coding-subscription-provider test:  Test Files  13 passed (13)",
+        "plugins/coding-subscription-provider test:       Tests  384 passed (384)",
+        "plugins/assistant-goals test:  Test Files  10 passed (10)",
+        "plugins/assistant-goals test:       Tests  74 passed (74)",
+        "plugins/assistant-automations test:  Test Files  15 passed (15)",
+        "plugins/assistant-automations test:       Tests  224 passed (224)",
+        "plugins/assistant-evaluation test:  Test Files  17 passed (17)",
+        "plugins/assistant-evaluation test:       Tests  132 passed (132)",
+        "plugins/personal-memory test:  Test Files  10 passed (10)",
+        "plugins/personal-memory test:       Tests  138 passed (138)",
+        "plugins/assistant-evolution test:  Test Files  10 passed (10)",
+        "plugins/assistant-evolution test:       Tests  162 passed (162)",
+        "plugins/assistant-delivery test:  Test Files  32 passed (32)",
+        "plugins/assistant-delivery test:       Tests  687 passed (687)",
+        "plugins/assistant-heartbeat test:  Test Files  4 passed (4)",
+        "plugins/assistant-heartbeat test:       Tests  22 passed (22)",
+        "plugins/assistant-web-owner test:  Test Files  2 passed (2)",
+        "plugins/assistant-web-owner test:       Tests  9 passed (9)",
+        "plugins/event-triggers test:  Test Files  8 passed (8)",
+        "plugins/event-triggers test:       Tests  72 passed (72)",
+        "plugins/assistant-verifier test:  Test Files  5 passed (5)",
+        "plugins/assistant-verifier test:       Tests  51 passed (51)",
+        "plugins/personal-wiki test:  Test Files  8 passed (8)",
+        "plugins/personal-wiki test:       Tests  65 passed (65)",
+        "plugins/preference-learning test:  Test Files  4 passed (4)",
+        "plugins/preference-learning test:       Tests  84 passed (84)",
+        "plugins/assistant-growth-experiments test:  Test Files  4 passed (4)",
+        "plugins/assistant-growth-experiments test:       Tests  20 passed (20)",
+        "plugins/memory-wiki-bridge test:  Test Files  2 passed (2)",
+        "plugins/memory-wiki-bridge test:       Tests  6 passed (6)",
+        "plugins/personal-assistant test:  Test Files  1 passed (1)",
+        "plugins/personal-assistant test:       Tests  4 passed (4)",
+        "plugins/assistant-health test:  Test Files  2 passed (2)",
+        "plugins/assistant-health test:       Tests  45 passed (45)",
+        "plugins/assistant-recovery test:  Test Files  10 passed (10)",
+        "plugins/assistant-recovery test:       Tests  121 passed (121)",
+        "plugins/lark-channel test:  Test Files  24 passed (24)",
+        "plugins/lark-channel test:       Tests  398 passed (398)"
+      ]
+    },
+    {
+      "name": "origin-negative-v1",
+      "command": "CI=true pnpm exec vitest run --testTimeout=15000 tests/memory-evidence-recovery.spec.ts -t retargeted-file",
+      "log": "/tmp/dsh-tool-evidence-origin-negative-v1.log",
+      "exitCode": 1,
+      "sha256": "2c700f50bce3d5d7d802edd950fc2f8f746719b011e8ccab508800cf0cb1e0fc",
+      "bytes": 2469,
+      "testSummaries": [
+        "⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯",
+        "Test Files  1 failed (1)",
+        "Tests  1 failed | 14 skipped (15)"
+      ]
+    }
+  ],
+  "review": {
+    "status": "PASS",
+    "kind": "independent-read-only-subagent",
+    "notChatgptReview": true,
+    "evidence": "Verified 18 source/config hashes, 20 command-log hashes, final check exit 0, native recovery modes, negative-control restoration, package files, and scoped authorization boundaries."
+  }
+}

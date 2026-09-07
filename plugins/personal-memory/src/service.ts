@@ -4,6 +4,8 @@ import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-system-prompt'
+import type { ToolExecution } from '@deepseek-ai/dsh-tools'
+import { revalidateFileEvidence } from './evidence-filesystem.js'
 import type {} from '@dsh-enhanced/assistant-goals'
 import type {
   AssistantDeliveryService,
@@ -24,6 +26,8 @@ import {
   preferencePromotionNamespace,
 } from './promotion.js'
 import { registerMemoryTools } from './tools.js'
+import { SessionEvidenceBridge, type EvidenceReadRequest, type EvidenceReadResult } from './evidence-service.js'
+import type { EvidenceScope } from './evidence-ledger.js'
 import type {
   MemoryAgentContext,
   MemoryEntryInput,
@@ -58,6 +62,11 @@ export interface Config {
   snapshotLimit?: number
   snapshotMaxBytes?: number
   snapshotMaxTokens?: number
+  /** Metadata index of original tool results; no automatic long-term knowledge writes. */
+  toolEvidence?: boolean
+  evidenceMaxSourceBytes?: number
+  evidenceManifestMaxBytes?: number
+  evidenceManifestLimit?: number
   defaultProposalTtlMs?: number
   maxImportRecords?: number
   /**
@@ -119,6 +128,10 @@ const configSchema = Schema.object({
   snapshotLimit: Schema.number().step(1).min(1).max(100).default(20),
   snapshotMaxBytes: Schema.number().step(1).min(1).default(8_192),
   snapshotMaxTokens: Schema.number().step(1).min(1).default(2_048),
+  toolEvidence: Schema.boolean().default(true),
+  evidenceMaxSourceBytes: Schema.number().step(1).min(1).max(4_194_304).default(1_048_576),
+  evidenceManifestMaxBytes: Schema.number().step(1).min(1).max(8_192).default(2_048),
+  evidenceManifestLimit: Schema.number().step(1).min(1).max(20).default(8),
   defaultProposalTtlMs: Schema.number().step(1).min(1).default(900_000),
   maxImportRecords: Schema.number().step(1).min(1).max(1_000).default(100),
   reconcileIntervalMs: Schema.number()
@@ -145,6 +158,7 @@ export class PersonalMemoryService extends Service {
   static Config = configSchema
 
   private readonly memoryStore: MemoryStore
+  private readonly evidenceBridge: SessionEvidenceBridge | undefined
   private readonly proposals: MemoryProposalManager
   private readonly policy: AssistantPolicyService
   private delivery: Pick<AssistantDeliveryService,
@@ -173,6 +187,15 @@ export class PersonalMemoryService extends Service {
       maxContentBytes: config.maxContentBytes,
       maxRecordsPerIdentity: config.maxRecordsPerIdentity,
     })
+    this.evidenceBridge = config.toolEvidence ? new SessionEvidenceBridge(ctx, this.memoryStore.evidence, {
+      maxSourceBytes: config.evidenceMaxSourceBytes,
+      manifestMaxBytes: config.evidenceManifestMaxBytes,
+      manifestLimit: Math.min(config.evidenceManifestLimit, config.maxRecordsPerIdentity),
+      scope: (agent, action) => this.evidenceScope(agent, action),
+      allowTool: (agent, name) => name === 'read' && this.ctx.get('tools', false)?.get(name, agent) !== undefined
+        && this.policy.authorizeAgent(agent, 'execute', { kind: 'tool', id: name }).effect === 'allow',
+      revalidate: (exec, source, anchor) => revalidateFileEvidence(this.ctx, this.policy, exec, source, anchor),
+    }) : undefined
     this.proposals = new MemoryProposalManager(
       this.memoryStore,
       policy,
@@ -228,6 +251,10 @@ export class PersonalMemoryService extends Service {
       order: 240,
       text: ({ agent }) => this.taskSnapshot(agent),
     }))
+    ctx.inject(['systemPrompt'], promptCtx => promptCtx.systemPrompt.context({
+      name: 'personal-memory:tool-evidence', order: 241,
+      text: ({ agent }) => this.evidenceBridge?.snapshot(agent) ?? '',
+    }))
     ctx.inject(['tools'], (toolsCtx) => {
       registerMemoryTools(toolsCtx, this)
     })
@@ -252,6 +279,23 @@ export class PersonalMemoryService extends Service {
       query: request.query,
       limit: request.limit ?? this.config.searchLimit,
     })
+  }
+
+  readEvidence(exec: ToolExecution, request: EvidenceReadRequest): Promise<EvidenceReadResult> {
+    this.assertActive()
+    if (this.evidenceBridge === undefined) throw new PersonalMemoryError('not-found', 'tool evidence is disabled')
+    return this.evidenceBridge.read(exec, request)
+  }
+
+  private evidenceScope(agent: Agent | undefined, action: 'snapshot' | 'search'): EvidenceScope {
+    this.assertActive()
+    if (agent === undefined || this.ctx.get('agents', false)?.get(agent.id) !== agent
+      || this.ctx.get('sessions', false)?.get(agent.session.id) !== agent.session
+      || agent.status !== 'running') throw new PersonalMemoryError('missing-identity', 'tool evidence requires the exact running agent and session')
+    const context = this.agentContext(agent)
+    const decision = this.policy.authorizeAgent(agent, action, { kind: 'memory', id: 'tool-evidence' })
+    if (decision.effect !== 'allow') throw decisionError(decision)
+    return { ...context, sessionId: String(agent.session.id) }
   }
 
   /**

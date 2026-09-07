@@ -52,13 +52,23 @@ dsh --profile web --dump-config
 - `ctx.personalMemory.exportJson(agent)`：导出版本化 JSON，不包含哈希、状态、时间戳、token 表或审计表。
 - `ctx.personalMemory.proposeImport(...)`：先验证整个有界文档，再为每条记录创建审批提案；Agent 路径同样由 Delivery 派生审批 authority，未批准前不会写入 memory record。仅在未组合 Delivery 的可信本地/headless 集成中，程序化调用方可以显式传入 principal；一旦 Delivery 可用就不能用该字段覆盖绑定 owner。
 
-安装了原生 `systemPrompt` 服务时，每次模型步骤组装上下文都会重新检查当前 owner、Policy 和记忆状态，并从 Session 当前有效消息中提取最近的用户输入或 Automation 任务（最多 2048 字符）进行关键词召回。任务相关记录优先，再补充用户确认的偏好与约定；工具结果、历史快照和自动补全文本不会替代当前任务。召回合并 user-global、当前 workspace、当前 agent-global 和当前 agent-workspace，受 top-K、字节和粗略 token 三重预算约束；`sensitive` 记录在 top-K 之前排除。每条包含 id、版本、来源、观测时间及可选原始引用、失效时间与替代关系。工具证据压缩仍未实现。
+安装了原生 `systemPrompt` 服务时，每次模型步骤组装上下文都会重新检查当前 owner、Policy 和记忆状态，并从 Session 当前有效消息中提取最近的用户输入或 Automation 任务（最多 2048 字符）进行关键词召回。任务相关记录优先，再补充用户确认的偏好与约定；工具结果、历史快照和自动补全文本不会替代当前任务。召回合并 user-global、当前 workspace、当前 agent-global 和当前 agent-workspace，受 top-K、字节和粗略 token 三重预算约束；`sensitive` 记录在 top-K 之前排除。每条包含 id、版本、来源、观测时间及可选原始引用、失效时间与替代关系。原生工具证据恢复见下节；普通 Memory 召回不自动批准历史工具内容。
 
 同一 Host 安装 `assistant-goals` 时，Memory 还会在每步读取可选 `taskContext()`，按当前步骤 → 最近用户输入 → 目标 objective 的顺序召回并去重，再补确认的偏好和约定。Goals 每次检查 live owner 与 `snapshot` 授权；Memory 再核对 principal record/version/digest、workspace 和 preset，不能由模型选择别人的 namespace。同 owner 的显式 focus 可提供跨会话检索上下文，但不转移原生 Goal 执行权。checkpoint 的 nextStep 仅是规划文本，用作检索关键词，不成为可信事实或新权限。
 
 该组合的可选 peer 为 `@dsh-enhanced/assistant-goals >=0.1.0 <0.2.0`；它不会自动启用 Goals。旧版本未提供 `goal-task-context/v1`、服务缺失/卸载、读取失败或身份不匹配时继续按原用户 query 召回。每个 query 字段最多 2048 字符，合并结果仍共用原有 top-K、字节和 token 预算。原生 AgentLoop 回归覆盖步骤改变和记忆撤回后的下一次模型请求；这证明动态检索接线，不代表已经测得真实模型决策收益。
 
 内容被包在 `<memory_source>` 中并明确标为“不可信数据而非指令”；XML 元字符和模板花括号在预算计算前转义。原生 Host 持久保存发生变化的新快照，用它取代先前快照的有效语义；撤回、过期或权限撤销会影响下一步的当前快照，**不会删除 Session 中已经提供过的历史快照、工具结果或模型输出**。因此不能把本功能当作会话历史的数据擦除或跨 owner 会话迁移保护。没有 `systemPrompt` 的程序化集成保留旧的 `agent/session-start` 一次性冻结快照，不能承诺逐步更新。`memory_search`、`memory_search_confirmed` 与 `memory_manage` 的模型可见结果也使用有界、转义的独立 framing。缺少绝对 cwd、agent preset 或已验证 owner 时不搜索、不提案、不贡献新快照，也不会退化到共享域。
+
+## 压缩后的原始文件证据
+
+默认启用 `toolEvidence` 时，插件只索引当前可信 owner 由模型直接调用的原生成功 `read` 结果；`run_code`/PTC 子调度及其他嵌套调用暂不索引。记录绑定 owner namespace/version、workspace、preset、Session、原始事件序号、call id、原始 FS 观测的规范路径/目标身份摘要和内容摘要；摘要同时覆盖原始参数与模型可见结果。复制的 result、压缩 replacement、Memory 工具、其他自定义工具、shell 和图片均不成为新原始证据。原文只存在于原生 Session，不另存入 Memory，也不自动获得长期记忆审批。
+
+原生 pruner/compaction 把原始结果移出当前上下文后，每步最多注入有界 `<session_tool_evidence>` 引用清单。`memory_read_evidence` 接受精确 `reference`，按 `offset` 分页，或用最长 256 字符的 `query` 定位（两者互斥）；每页最多 4096 UTF-16 code units，保留完整 Unicode 字符。它检查原始事件及摘要，再通过当前 FS provider 解析原路径、校验普通文件及其与原始 FS 观测的身份一致性，以规范绝对 `processPath` 检查 Policy `read / filesystem` 权限，并通过当前 ToolRuntime 嵌套执行只读 `read`。原工具的作用域限制、正常 guard、取消信号均继续生效；返回前再次检查 owner、服务代际、工具注册、路径别名和读取期间的文件版本。需要 Host 提供 `fs` 与 `read`；本包不会自动安装或启用文件系统插件。
+
+`integrity: matched` 仅证明历史观察和原始参数未被修改。输出仍标记 `freshness: historical-unverified`：当前授权检查中的重读不把旧正文变为当前事实；应显式读取当前内容再决策。文件删除、当前资源/工具权限撤销、工具卸载、摘要不符和任一检查失败均不返回历史正文。文件路径授权应显式配置，例如允许 `actions: [read]`、`resource: {kind: filesystem, id: /absolute/workspace/journal.txt}`；只允许工具名称不足以授予历史正文访问。原始 `read` 的 execute 和文件 read 若依赖预算，当前回读因缺少独立预留凭证而保守拒绝，写入授权审计但不预留/消费预算。
+
+JSONL 冷恢复只使用先前 owner 绑定的索引，不按新 owner 回填旧会话。每个 owner/workspace/preset 最多保留 `maxRecordsPerIdentity` 条引用，跨 Session 淘汰最旧观察。索引和 Session 没有跨库原子事务：Session 缺失时引用不可用；索引缺失时不自动从历史补建。索引不是历史数据擦除机制，不支持跨 owner 迁移，不能隔离同进程受信任插件或同 UID 修改两个存储的代码。自定义远端 FS provider 可能执行网络读取；其授权和资源边界由该 provider 与正常工具管线负责。
 
 ## 适用条件、反例与事实分歧
 
@@ -78,7 +88,7 @@ dsh --profile web --dump-config
 
 每次检索与快照的排名、状态和冲突伙伴使用同一 SQLite 读视图，不阻塞其他 WAL writer；并发修改会在下一次读取体现。同一可见 claim key 有不同记录值时，快照会共同呈现来源和条件；预算无法容纳所有相关记录时，只给出分歧提示与有界记录引用，不留下看似无争议的单一正文。显式搜索的 `disagreement` 包含 key、记录数及最多 4 个记录 ID，在 query/top-K 截断前计算。自动补充的分歧信息仅来自当前 owner/scope 内有效、非敏感的记录；撤回、到期和身份变更会在下次读取生效。相同 key 的不同值可能源于不同适用条件，应核对当前系统和原始证据；本功能不解析任意自然语言矛盾，也不自行决定哪个值正确。
 
-带 knowledge 的导出文档使用版本 2，导入仍须逐条批准；没有 knowledge 的导出继续使用版本 1，当前版本同时接受两种格式。旧 reader 会拒绝版本 2，避免悄悄丢掉条件后复用经验。升级到数据库 schema 5 前应停止旧 Host writer；迁移只新增 nullable knowledge 列，保留旧记录、pending 提案和既有回执指纹，不能让旧版本继续写入新库。
+带 knowledge 的导出文档使用版本 2，导入仍须逐条批准；没有 knowledge 的导出继续使用版本 1，当前版本同时接受两种格式。旧 reader 会拒绝版本 2，避免悄悄丢掉条件后复用经验。升级到数据库 schema 6 前应停止旧 Host writer；v4→v5 新增 nullable knowledge 列，v5→v6 新增独立工具证据索引表，保留旧记录、pending 提案和既有回执指纹，不能让旧版本继续写入新库。
 
 ## 数据与一致性
 
@@ -108,6 +118,10 @@ JSON 导入是一组独立、可重放的提案，不承诺跨所有记录的一
 | `snapshotLimit` | 20 | 当前快照记录上限 |
 | `snapshotMaxBytes` | 8192 | 快照最大 UTF-8 字节数 |
 | `snapshotMaxTokens` | 2048 | 快照粗略 token 上限 |
+| `toolEvidence` | `true` | 索引当前成功的原生 `read`，提供压缩后历史原文回读 |
+| `evidenceMaxSourceBytes` | 1048576 | 原始参数与结果总字节上限，最大 4194304 |
+| `evidenceManifestMaxBytes` | 2048 | 引用清单最大 UTF-8 字节数，最大 8192 |
+| `evidenceManifestLimit` | 8 | 清单最多引用数，最大 20，同时受每身份记录上限限制 |
 | `defaultProposalTtlMs` | 900000 | 默认提案有效期（15 分钟） |
 | `maxImportRecords` | 100 | 单次导入最大记录数 |
 | `reconcileIntervalMs` | 15000 | 提交“会话结束后才被批准”的提案的轮询间隔；`0` 关闭定时器，上限为 Node timer 的 `2147483647` ms |
@@ -131,8 +145,8 @@ JSON 导入是一组独立、可重放的提案，不承诺跨所有记录的一
 
 ## 权限与非目标
 
-- 文件系统：只读写配置的 SQLite 数据库及其 WAL/SHM 辅助文件。
-- 网络：本插件本身不发网络请求；组合 Delivery 时只写 durable dispatch，由 channel 插件负责发送审批卡片。
+- 文件系统：读写配置的 SQLite 数据库及其 WAL/SHM 辅助文件；工具证据功能另读取当前 Session 原始事件，并经 Host FS 与原生 `read` 管线重读显式授权文件。它不写用户文件。
+- 网络：本插件不直接发网络请求；工具证据重读可调用 Host 配置的远端 FS provider。组合 Delivery 时只写 durable dispatch，由 channel 插件负责发送审批卡片。
 - 子进程、凭据、浏览器、安装脚本：无。
 - 数据敏感性：`sensitive` 只表示禁止环境快照；显式、已授权的搜索仍可能把内容发送给当前模型。真正的密码/API key 应放在后续 `credentials-keychain`，不要写入 memory。
 - 非目标：向量数据库、自动无审批写入、自动遗忘/dreaming、知识图谱、Wiki 长文、跨设备同步和多用户 ACL。

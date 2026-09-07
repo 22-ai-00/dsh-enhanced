@@ -255,3 +255,17 @@
 
 - 最终 `CI=true pnpm check`（check-v4）退出码 0：25 插件/3 共享库、零 lint 警告、全量类型检查、根 243 文件/3452 测试、全部包测试、构建及 28 个 dry-run pack 通过。已检查 Evaluation 包含新增 Memory corpus/runtime/usage 的 JS 与声明、命令入口、README、LICENSE 和 patch，未包含测试或数据库。失败历史保留：空产物构建暴露 Memory→Goals 类型依赖，沿既有 bootstrap 补 Verifier→Automations→Goals；同步更新发布测试中的构建顺序断言；去掉含真实 SQLite 操作的既有超时回归额外 2 秒墙钟时限，保留 1 秒虚拟业务超时及迟到结果拦截断言，相关 108 项定向测试通过。check-v3 从全部 28 个 lib 清空后的构建已通过，唯一失败是上述测试墙钟时限；最终 check-v4 验证修复后的全套。
 - 独立只读 verifier 最终 **PASS**：复算 16 个源码、10 个真实试验 artifact 和 20 个执行日志的 hash，核对实际退出码、版本内对照、源码边界与打包文件。主协调复核后接受本切片；完整 18 项仍未完成。用户最新执行约束已同步至规划与交接：按依赖和证据连续推进，不为按天/周的人工估算等待；主动性长期观察移至交付后。
+
+
+### 2026-09-07：压缩后的原始文件证据与冷恢复（WP07 切片）
+
+- PersonalMemory schema 6 增加 metadata-only 工具证据索引。成功的原生 `read` 必须与实时 `fs/observed`、exact owner/version、workspace/preset、Session 与 call/result 配对；引用摘要绑定原始参数、模型可见正文及原始 FS 目标身份。正常 AgentLoop 的 append result 可以引用其 `tool/call`，但复制旧 result、replacement、摘要、Memory 工具与未经观察的冷日志不会创建新原始证据。
+- 原生压缩把结果移出当前 surface 后，每步注入有界原始引用。`memory_read_evidence` 支持中间关键词定位与分页；先核对 append 原文和摘要，再经当前 FS 解析、精确文件 Policy 与原生 ToolRuntime `read` 管线重查，返回前复核 owner、服务代际、工具限制、原始文件身份及读取期间的版本。符号链接改指另一份已授权文件也不能授予旧正文访问。
+- 正文仍标记 historical-unverified；digest matched 不等于当前事实，模型需显式重读当前文件再作决定。仅支持原生文件 read，shell、图片、网络及任意自定义工具不通用回放。预算规则缺少独立预留凭证时审计并保守拒绝，不扣减预算。两个存储无原子事务承诺，缺失任一侧都不会伪造匹配或把旧数据归给新 owner。
+- 定向回归 11 文件/153 项通过，其中 15 个真实 AgentLoop + LocalFileSystem/tool-fs + pruner + JSONL 关闭/重建场景覆盖正常旧原文定位后读出当前 v3、owner 换代/撤销、工具/文件 Policy、作用域限制/卸载、正常 pipeline deny、原始正文篡改、文件丢失、索引/Session 半提交、预算拒绝与符号链接改指。模型为确定性适配器，Delivery owner attestation 为限定测试夹具，不冒充真实云模型、实际用户 profile 或 OS 隔离验收。
+- 实现中失败保留在证据清单：类型/夹具/schema 断言修正、JSONL 配置下限、审批 reviewer 的完整三维状态、原生 result 的 call provenance，以及 Cordis 服务查询返回新 trace proxy 导致的误拒绝；不能把这些失败运行计作通过。最终全仓检查、反向测试与独立复核结果附后。
+- WP07 保持实现中，18 项仍为 3 已验证、4 实现中、11 待做。该切片不代表隐藏留出、真实跨日目标闭环、任意来源权限适配、完整自治安装或剩余工作包已完成。按用户要求持续按依赖推进，不为人工天/周排期等待；主动性长期观察在交付后持续打磨。
+
+- 最终工程检查：`CI=true pnpm check`（`/tmp/dsh-tool-evidence-check-v2.log`、`.exit=0`）通过，25 插件/3 共享库，零 lint 警告、全量类型检查、根 246 文件/3486 测试、Memory 包 138 测试、全部包测试与构建，以及 28 个 dry-run pack。Memory 实际 64 个打包文件含四个 evidence 模块的 JS/声明、patch、README 与 LICENSE，不含测试或数据库。首轮全仓唯一失败是新增 4 个 DSH catalog 包漏了对应的 minimumReleaseAgeExclude 精确版本；已补清单并完整重跑，未改弱测试。
+- 受控反向测试：只去除历史 FS source path/target digest 两处绑定检查，保留当前文件授权和读取期间版本复核，实际 `retargeted-file` 场景因模型读到旧 `NEEDLE=journal-v2` 而失败（退出 1）。finally 恢复原始文件字节，恢复 hash 与最终源码一致；最终完整检查覆盖恢复后的正向代码。[证据文件](evidence/tool-evidence-recovery-2026-09-07.json) 保存 18 个源码/配置和 20 个终态命令日志 hash、失败历史、恢复证明及打包清单。Codex with ChatGPT 任务 `c2c_76d1` 保存 21 条本地记录（含一条命令元数据顺序校正）；本会话无内置浏览器，未取得 ChatGPT 规划或评审。
+- 独立只读 verifier 最终 **PASS**：复算全部 18 个源码/配置与 20 个日志 hash，核对真实退出码、原生 provenance、owner/source 身份绑定、当前授权回读、反向失败与恢复以及包文件；主协调据此接受本 WP07 文件证据切片。完整 18 项目标保持未完成。

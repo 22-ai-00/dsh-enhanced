@@ -30,6 +30,8 @@
 
 > 下一步接线位置已确定：在原生 `session-controller` bundle 行的构造入口提供限定作用域的 `agents` facade，复用共享原始 registry；不能改装已构造 Controller 的私有闭包。当前 facade 只存在于真实测试，生产仍缺 service 颁发的固定 owner capability、Web 新 Session binding、当前人类输入与原生 source 的确切关联、Policy 和 idle/wake 生命周期交接。不能公开内部 raw lease manager 当作 Web 授权，也不能把 Web conversation 冒充为现有 Lark owner 的路由；canonical transport identity 与 owner lineage 需要显式处理。完整 18 项目标保持未完成。
 
+> 工具证据恢复更新（2026-09-07）：WP07 已接原生成功 `read` 的 FS 观测/owner 绑定索引、压缩后引用清单和分页原文回读；实际 JSONL 关闭重建、撤权、半提交、原文损坏和符号链接改指已纳入回归。旧正文仍为 historical-unverified，当前授权重读不把历史事实变新；任意工具通用回放、真实长期闭环与其余工作包仍未完成。最新工程证据以落地账本末尾及 `docs/evidence/tool-evidence-recovery-2026-09-07.json` 为准。
+
 ## 完整目标
 
 完整落实此前分析和规划，让项目成为高智能、高主动、能长期自主推进任务并持续自我改进的智能体；高权限与可验证的安全边界兼顾，同时安装、配置、升级和通过 Web 对话都方便友好。保留账本全部 18 个工作包，不能把目标缩成当前已实现的切片。

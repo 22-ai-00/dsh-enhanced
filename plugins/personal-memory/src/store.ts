@@ -8,6 +8,7 @@ import {
 } from '@dsh-enhanced/assistant-growth-contract'
 import { APPROVAL_DISPLAY_BUDGET } from '@dsh-enhanced/assistant-policy'
 import { MemoryDatabaseError, openMemoryDatabase } from './sqlite.js'
+import { MemoryEvidenceLedger } from './evidence-ledger.js'
 import { tokenizeMemory } from './tokenize.js'
 import { memoryKnowledgeText, normalizeMemoryKnowledge } from './knowledge.js'
 import type {
@@ -561,6 +562,7 @@ export class MemoryStore {
   readonly #now: () => number
   #closed = false
   #reading = false
+  readonly evidence: MemoryEvidenceLedger
 
   constructor(options: MemoryStoreOptions) {
     this.#maxContentBytes = options.maxContentBytes ?? 4_096
@@ -574,6 +576,7 @@ export class MemoryStore {
     this.#now = options.now ?? Date.now
     try {
       this.#database = openMemoryDatabase(options.path)
+      this.evidence = new MemoryEvidenceLedger(this.#database, { maxRows: this.#maxRecordsPerIdentity })
     } catch (error) {
       if (error instanceof MemoryDatabaseError) throw new MemoryStoreError(error.code, error.message)
       throw error
