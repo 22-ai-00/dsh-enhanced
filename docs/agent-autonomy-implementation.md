@@ -300,3 +300,16 @@
 - 最终根 `CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=<记录的本地镜像 ID> pnpm check`（`/tmp/dsh-dispatch-check-v2.log` / `.exit`）退出 **0**：26 插件/3 共享库、零 lint 警告、全量类型检查、主 **258 文件 / 3531 测试**、Isolation **12 文件 / 45 测试**、全部递归包测试/构建及 **29 个 dry-run pack** 通过；Isolation 49 个文件包含新增 witness JS/声明、CLI、监督器、patch/README/LICENSE，不含源码/测试/数据库。
 - 全量测试阶段之后，仅纠正 service 撤销回归的旧预期：已派发 unknown 应保留占用，并追加实际持久结果/恢复列表检查。生产文件未再改动。随后单独执行 Isolation typecheck、4 文件/22 测试及全仓 lint 全部退出 0；不把全仓检查冒称为覆盖这次后续测试断言修改。
 - [结构化证据](evidence/isolation-dispatch-2026-09-07.json) 保存 12 个源码/脚本哈希、12 条终态命令日志/退出码、真实反向失败与逐字节恢复、独立 daemon 重启及 systemd 只读观测。C2C `c2c_6671` 已记录逐命令输出；所需内置浏览器不可用，未取得 ChatGPT 网页审查。独立 verifier 最终 **PASS** 限于本批安全修复与诊断基础，主协调复算全部源码/日志哈希与退出码后接受。完整 18 项目标保持未完成，下一步验证 systemd 服务/监听关系能否形成可信绑定，再完成安全释放协议与动作 broker。
+
+
+## 2026-09-07：完整请求回执下的隔离配额回收
+
+WP08–10 的下一切片已接入 Host 后台恢复与独立 `dsh-isolation reconcile` 运维入口。Schema v4 保留旧记录，supervisor 在所有 CLI 关闭后记录 create/start/copy/exec 是否正常结束；缺失、超时、输出溢出和信号中断不能获得已完成请求证明。已完成请求还必须证明原 supervisor 退出、原 Docker 代次不变、三个专属资源删除后复查不存在，随后凭不可伪造的清理回执、原 witness、当前 controller fence 和 job version 原子释放资源。原 unknown 业务结果、输出、已消耗次数与时长继续保留，不重放命令，也不退款累计预算。
+
+真实 Docker 测试通过：包装器只阻止删除，原创建/启动/复制均取得正常回执；阻止期间保持占用，解除后分别由实际编译 CLI 子进程和 live Host 后台完成回收。竞争运维控制器被拒绝，审计保存三个精确资源及删除/缺失观测。真实 supervisor 配合假 Docker 的协议测试覆盖 mutation 非零、spawn 失败、信号、溢出和超时，并补充 artifact exec 的迟到执行风险；这些协议夹具不冒充真实 daemon 故障证明。
+
+全仓检查发现既有 Web Goal checkpoint 测试在正确 teardown 后轮询 live-only `goals.get` 的竞态。原样单测复跑通过；测试改为在释放 checkpoint gate 前保存原生 `goal/changed` 的 detached snapshot，仍断言阻塞期间 registry/lease、终态、实际卸载和持久 lease 释放。未改变 Delivery 产品行为，修复后的单测、类型检查与独立复核通过。另一既有 Lark 并发安装成功用例的 1 秒锁等待在持久事务完成前耗尽；原样复跑通过，仅将该用例等待上限延长到 10 秒，保留并发、屏障与全部归属冲突断言，经独立复核。
+
+最终冻结代码的 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check` 退出 0（`/tmp/dsh-reconcile-check-v4.log` / `.exit`）：主 263 文件/3560 测试、Isolation 17 文件/74 测试通过，26 插件与 3 共享库全部 lint/typecheck/build 和 29 份 dry-run pack 通过。Isolation 包含 61 个发布文件，已检查新清理/诊断/恢复模块均在包内、无源码测试或运行状态。19 份源码哈希及全部 16 条成功/失败执行记录见[结构化证据](evidence/isolation-reconciliation-2026-09-07.json)。临时日志不随 Git 同步；C2C c2c_fc42 只有本地执行记录，没有实际 ChatGPT 网页评审。最终独立 verifier 结论以结构化证据为准。
+
+仍未完成：回执缺失、被中断的 mutation 与 Docker 代次变化均继续占用；systemd InvocationID 只是诊断，不能证明 containerd/shim 或迟到请求已经停止，因此未开放 daemon 重启后的自动释放。动作/凭据 broker、审计与结果 retention、完整自治安装及综合业务闭环继续推进。全部 18 项仍为 **3 项已验证、7 项实现中、8 项待做**；没有按天/周等待，也不以交付后长期观察阻塞当前开发。

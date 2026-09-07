@@ -10,6 +10,7 @@ import type { CreationWitness } from './runtime-witness.js'
 import { Config, validateConfig } from './config.js'
 import { IsolationLedger, type IsolationControllerAuthority } from './ledger.js'
 import { removeIsolatedContainer, runIsolatedProcess } from './runner.js'
+import { reconcileUnknownJob } from './reconcile.js'
 import { normalizeRequest, stageWorkspace } from './workspace.js'
 import { registerIsolationTools } from './tools.js'
 import type { IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
@@ -28,6 +29,9 @@ export class AssistantIsolationService extends Service {
   readonly #authority: IsolationControllerAuthority
   readonly #ready: Promise<void>
   readonly #jobs = new Map<string, { abort: AbortController; done: Promise<IsolationResult> }>()
+  readonly #recoveryAbort = new AbortController()
+  #sweep: Promise<void> | undefined
+  #cursor = ''
   #active = true
   #timer: NodeJS.Timeout
 
@@ -44,8 +48,9 @@ export class AssistantIsolationService extends Service {
       this.#ledger.syncGrants(this.#config.grants, this.#authority)
     } catch (error) { this.#ledger.close(); throw error }
     this.#timer = setInterval(() => {
-      try { if (this.#ledger.renewController(this.#authority, controllerTtlMs)) return } catch { /* Losing the fence stops execution. */ }
+      try { if (this.#ledger.renewController(this.#authority, controllerTtlMs)) { this.#scheduleSweep(); return } } catch { /* Losing the fence stops execution. */ }
       this.#active = false
+      this.#recoveryAbort.abort()
       for (const job of this.#jobs.values()) job.abort.abort()
     }, 5000)
     this.#timer.unref()
@@ -54,8 +59,9 @@ export class AssistantIsolationService extends Service {
     void this.#ready.catch(() => { this.#active = false })
     ctx.effect(() => async () => {
       this.#active = false
+      this.#recoveryAbort.abort()
       for (const job of this.#jobs.values()) job.abort.abort()
-      await Promise.allSettled([this.#ready, ...Array.from(this.#jobs.values(), job => job.done)])
+      await Promise.allSettled([this.#ready, this.#sweep, ...Array.from(this.#jobs.values(), job => job.done)])
       clearInterval(this.#timer)
       try { this.#ledger.releaseController(this.#authority) } finally { this.#ledger.close() }
     }, 'assistant-isolation.controller')
@@ -69,6 +75,22 @@ export class AssistantIsolationService extends Service {
       return await next()
     }))
     ctx.inject(['agents', 'assistantDelivery', 'assistantPolicy', 'tools'], runtime => registerIsolationTools(runtime, this))
+  }
+
+  #scheduleSweep(): void {
+    if (!this.#active || this.#sweep) return
+    this.#sweep = this.#ready.then(async () => {
+      const page = this.#ledger.recoverable(this.#cursor).slice(0, 16)
+      this.#cursor = page.at(-1)?.id ?? ''
+      for (const job of page) {
+        if (!this.#active) break
+        if (this.#jobs.has(job.id)) continue
+        const signal = AbortSignal.any([this.#recoveryAbort.signal, AbortSignal.timeout(30_000)])
+        if (await reconcileUnknownJob(this.#ledger, this.#authority, job, this.#config.dockerPath, signal)) {
+          await rm(join(this.#config.stateRoot, 'workspaces', job.id), { recursive: true, force: true })
+        }
+      }
+    }).catch(() => { /* Keep reservations and retry only with a live controller. */ }).finally(() => { this.#sweep = undefined })
   }
 
   #identity(agent: Agent | undefined, grantId: string): IsolationIdentity {
@@ -88,7 +110,9 @@ export class AssistantIsolationService extends Service {
       if (page.length === 0) break
       cursor = page.at(-1)!.id
       for (const job of page) {
-        const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName)
+        if (!this.#active) return
+        const removed = await removeIsolatedContainer(this.#config.dockerPath, job.containerName, { signal: this.#recoveryAbort.signal })
+        if (!this.#active) return
         // An absent object does not prove a timed-out daemon create request
         // completed. Restart must not erase that uncertainty or free its pool.
         const quiescent = removed && !job.dispatchAttempted && job.result?.reason !== 'docker-creation-unconfirmed'

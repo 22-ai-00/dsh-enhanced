@@ -2,7 +2,9 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { validateCreationWitness, type CreationWitness } from './runtime-witness.js'
+import { processExited, sameDaemonWitness, validateCreationWitness, type CreationWitness, type DaemonWitness } from './runtime-witness.js'
+import type { SystemdBinding } from './daemon-binding.js'
+import { receiptData, type IsolationCleanupReceipt } from './cleanup-receipt.js'
 import type { IsolationGrant, IsolationIdentity, IsolationJob, IsolationResult, IsolationStatus } from './types.js'
 
 export type IsolationLedgerErrorCode = 'conflict' | 'invalid-input' | 'invalid-path' | 'invalid-state' | 'not-found' | 'schema' | 'schema-too-new' | 'unauthorized'
@@ -12,7 +14,7 @@ export class IsolationLedgerError extends Error {
 }
 export interface IsolationControllerAuthority { ownerId: string; fence: number }
 
-const schemaVersion = 3
+const schemaVersion = 4
 const outputMaximum = 1_048_576
 const artifactMaximum = 128
 const textMaximum = 16_384
@@ -68,14 +70,14 @@ function open(path: string): DatabaseSync {
     if (version > schemaVersion) fail('schema-too-new')
     if (version === 0) database.exec(`BEGIN IMMEDIATE;
       CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '3');
+      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '4');
       CREATE TABLE isolation_grants (id TEXT PRIMARY KEY, digest TEXT NOT NULL, revision INTEGER NOT NULL, expires_at INTEGER NOT NULL, max_runs INTEGER NOT NULL, max_total_duration_ms INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), revoke_reason TEXT, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL) STRICT;
       CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
       CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
       CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
       CREATE TABLE isolation_audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL, action TEXT NOT NULL, job_id TEXT, grant_id TEXT, detail TEXT NOT NULL) STRICT;
       CREATE TABLE isolation_controller (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;
-      PRAGMA user_version = 3; COMMIT;`)
+      PRAGMA user_version = 4; COMMIT;`)
     if (version === 1) database.exec(`BEGIN IMMEDIATE;
       ALTER TABLE isolation_jobs ADD COLUMN reserved_memory_mib INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE isolation_jobs ADD COLUMN reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0;
@@ -87,7 +89,8 @@ function open(path: string): DatabaseSync {
       ALTER TABLE isolation_jobs ADD COLUMN creation_witness_json TEXT;
       UPDATE schema_meta SET value='3' WHERE key='schema-version';
       PRAGMA user_version = 3; COMMIT;`)
-    if (version !== 0 && version !== 1 && version !== 2 && version !== schemaVersion) fail('schema')
+    if ([1, 2, 3].includes(version)) database.exec(`BEGIN IMMEDIATE; UPDATE schema_meta SET value='4' WHERE key='schema-version'; PRAGMA user_version=4; COMMIT;`)
+    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== schemaVersion) fail('schema')
     if (path !== ':memory:') chmodSync(path, 0o600)
     return database
   } catch (error) { database.close(); throw error }
@@ -219,6 +222,44 @@ export class IsolationLedger {
       }
       const changed = this.#database.prepare('UPDATE isolation_jobs SET status=?, result_json=?, creation_witness_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status IN (\'prepared\',\'running\')').run(value.status, JSON.stringify(value), witness ? JSON.stringify(witness) : null, now, jobId, expectedVersion)
       if (changed.changes !== 1) fail('conflict'); this.#audit(now, 'job-settled', jobId, job.grantId, value.status); return this.#job(jobId)!
+    })
+  }
+  /** Host-only release after exact cleanup; outcome and origin evidence remain immutable. */
+  settleReconciledUnknown(jobId: string, expectedVersion: number, proof: {
+    original: CreationWitness; current: DaemonWitness; currentBinding?: SystemdBinding; checkedAt: number; cleanup: IsolationCleanupReceipt
+  }, authority: IsolationControllerAuthority): IsolationJob {
+    if (!text(jobId) || !safePositive(expectedVersion) || !proof || !safeTime(proof.checkedAt)) fail('invalid-input')
+    let original: CreationWitness
+    let current: DaemonWitness
+    try {
+      original = validateCreationWitness(proof.original)
+      current = validateCreationWitness({ daemon: proof.current, supervisor: proof.current.process,
+        ...(proof.currentBinding ? { binding: proof.currentBinding } : {}) }).daemon
+    } catch { fail('invalid-input') }
+    const controller = this.#authority(authority)
+    if (!controller) fail('invalid-input')
+    return this.#transaction(() => {
+      const now = this.#nowValue()
+      this.#requireController(controller, now)
+      if (proof.checkedAt > now || now - proof.checkedAt > 5_000) fail('invalid-input', 'cleanup proof expired')
+      const job = this.#job(jobId)
+      if (!job) fail('not-found')
+      if (job.version !== expectedVersion || !equal(job.creationWitness, original)) fail('conflict')
+      if (!job.dispatchAttempted || job.status !== 'unknown' || !job.result || job.result.quiescent
+        || original.requestsSettled !== true || !processExited(original.supervisor)) fail('invalid-state')
+      if (original.daemon.engineId !== current.engineId || original.daemon.dockerPath !== current.dockerPath
+        || original.daemon.socketPath !== current.socketPath || original.daemon.pidFile !== current.pidFile) fail('invalid-state')
+      if (!sameDaemonWitness(original.daemon, current)) fail('invalid-state', 'daemon generation changed')
+      const cleanup = receiptData(proof.cleanup)
+      if (!cleanup || cleanup.containerName !== job.containerName || cleanup.dockerPath !== current.dockerPath
+        || cleanup.socketPath !== current.socketPath || cleanup.checkedAt > now || now - cleanup.checkedAt > 5_000) fail('invalid-input', 'exact resource cleanup receipt required')
+      const mode = 'requests-settled'
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET result_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status='unknown'")
+        .run(JSON.stringify({ ...job.result, quiescent: true }), now, jobId, expectedVersion)
+      if (changed.changes !== 1) fail('conflict')
+      this.#audit(now, 'job-quiesced', jobId, job.grantId, JSON.stringify({ mode, checkedAt: proof.checkedAt, original, current, cleanup,
+        ...(proof.currentBinding ? { currentBinding: proof.currentBinding } : {}) }))
+      return this.#job(jobId)!
     })
   }
   revoke(grantId: string, revision: number, reason: string): void {

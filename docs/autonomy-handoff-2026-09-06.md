@@ -1,5 +1,7 @@
 # 自主智能体目标：跨设备交接
 
+> 隔离回收更新（2026-09-07）：schema v4 已接通完整请求回执下的 Host 后台与独立 CLI 配额回收。原 supervisor 退出、同 Docker 代次、三资源精确清理回执及当前 fence/CAS 必须同时成立；保留 unknown 业务结果与已消耗预算，不重放执行。回执缺失、被中断 mutation 和 daemon 换代仍持有配额，systemd 诊断不能替代 containerd/shim 停止证明。真实 Docker、协议异常、冻结全仓检查与独立复核见[最新证据](evidence/isolation-reconciliation-2026-09-07.json)和落地账本末尾；全部 18 项继续推进。
+
 > 隔离恢复更新（2026-09-07）：schema v3 在 fork 前持久写入派发意图，修复 prepared 状态下 Host 崩溃仍可能晚到 create 的早释窗口；已派发 unknown 与旧版缺证据记录继续占用，不因当前资源不存在而释放。新增私有 daemon/supervisor 诊断及真实独立 rootless 重启探针，但可信 socket 绑定与自动释放协议仍未完成。最新全仓、反向实验和独立复核见落地账本末尾；完整 18 项目标保持未完成。
 
 
