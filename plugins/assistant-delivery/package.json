@@ -153,6 +153,8 @@
     "typescript": "catalog:",
     "vitest": "catalog:",
     "@dsh-enhanced/assistant-verifier": "workspace:*",
-    "@deepseek-ai/dsh-goal": "catalog:"
+    "@deepseek-ai/dsh-goal": "catalog:",
+    "@deepseek-ai/dsh-api-gateway": "catalog:",
+    "@deepseek-ai/dsh-api-remotes": "catalog:"
   }
 }

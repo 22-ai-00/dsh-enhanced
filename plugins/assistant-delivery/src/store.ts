@@ -135,7 +135,13 @@ export type OwnerRouteDispatchValidation =
   | { kind: 'deferred'; failureCode: string }
   | { kind: 'denied'; failureCode: string }
 
-type InboundDispatchBindingSnapshot = Pick<
+/**
+ * Immutable binding evidence required at the Inbox-to-Agent dispatch boundary.
+ *
+ * A Host-native input uses the same snapshot when it atomically admits and
+ * claims its exact Inbox, then again before it crosses `dispatch-started`.
+ */
+export type InboundDispatchBindingSnapshot = Pick<
   ConversationBinding,
   'conversation' | 'generation' | 'id' | 'principal' | 'sessionId' | 'version'
 >
@@ -2245,6 +2251,7 @@ export class DeliveryStore {
     sessionId: string
     policyRef: string
     expectedGeneration?: number
+    constructionLease?: SessionLease
   }): ConversationBinding {
     this.assertOpen()
     const target = canonicalTarget({ conversation: input.conversation, principal: input.principal })
@@ -2264,6 +2271,18 @@ export class DeliveryStore {
     const now = this.now()
     const id = `binding_${randomUUID()}`
     return this.transaction(() => {
+      const construction = input.constructionLease === undefined ? undefined : this.sessionLeaseCurrent(input.constructionLease, true)
+      if (input.constructionLease !== undefined) {
+        const candidate = construction === undefined ? undefined : JSON.parse(construction.target_json) as SessionLeaseTarget
+        const expected: SessionLeaseTarget = { kind: 'construction', sessionId, conversation: target.conversation,
+          principal: target.principal, workspace, agentPreset, generation: input.expectedGeneration ?? 1 }
+        if (construction === undefined || candidate?.kind !== 'construction' || candidate.previous !== undefined
+          || !['prepared', 'dispatched'].includes(construction.state)
+          || leaseSessionIdentity(candidate) !== leaseSessionIdentity(expected)) {
+          throw new DeliveryStoreError('stale-fence', 'binding construction lease is no longer exact')
+        }
+      }
+
       const principalRow = this.database.prepare(`
         SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
         FROM delivery_principals
@@ -2278,6 +2297,7 @@ export class DeliveryStore {
         WHERE conversation_hash = ? AND conversation_json = ? AND status = 'active'
       `).get(hash, canonicalConversationJson) as BindingRow | undefined
       if (existingRow !== undefined) {
+        if (construction !== undefined) throw new DeliveryStoreError('conflict', 'construction already has a binding')
         const existing = bindingFromRow(existingRow)
         if (principalHash(existing.principal) !== canonicalPrincipalHash) {
           throw new DeliveryStoreError('conflict', 'conversation is already bound to another principal')
@@ -2310,7 +2330,14 @@ export class DeliveryStore {
         now,
         now,
       )
-      return this.getBinding(id)!
+      const binding = this.getBinding(id)!
+      if (construction !== undefined) {
+        const promoted = this.database.prepare(`UPDATE delivery_session_leases SET target_json = ?
+          WHERE session_id = ? AND holder_id = ? AND fencing_token = ? AND state IN ('prepared', 'dispatched')`)
+          .run(leaseTargetJson({ kind: 'bound', binding }), construction.session_id, construction.holder_id, construction.fencing_token)
+        if (Number(promoted.changes) !== 1) throw new DeliveryStoreError('stale-fence', 'construction binding promotion lost its lease')
+      }
+      return binding
     })
   }
 
@@ -2805,6 +2832,158 @@ export class DeliveryStore {
       throw error
     }
     return { duplicate: false, record: this.getInbox(id)! }
+  }
+
+  /**
+   * Admit and claim one exact Host-native input under one SQLite write fence.
+   *
+   * The normal Delivery scheduler can only claim queued work.  Publishing a
+   * fresh native input directly as `claimed` therefore prevents it from
+   * observing a moment where the input is in the ordinary queue.  Replays are
+   * read-only: a duplicate never renews, reclaims, or otherwise re-executes
+   * its existing Inbox.
+   */
+  claimNativeInbox(input: {
+    envelope: InboundEnvelope
+    binding: Readonly<InboundDispatchBindingSnapshot>
+    ownerLineage: { principalRecordId: string; principalVersion: number }
+    ownerId: string
+    leaseMs: number
+  }): { duplicate: boolean; record: InboxRecord; fencingToken?: number } {
+    this.assertOpen()
+    const envelope = canonicalEnvelope(input.envelope, this.maxTextBytes)
+    const json = JSON.stringify(envelope)
+    const hash = digest(json)
+    const ownerId = validateBindingText(input.ownerId, 'ownerId', 256)
+    if (!Number.isSafeInteger(input.leaseMs) || input.leaseMs < 1) {
+      throw new DeliveryStoreError('conflict', 'invalid inbox lease')
+    }
+
+    let bindingId: string
+    let sessionId: string
+    let bindingConversationJson: string
+    let bindingPrincipalJson: string
+    try {
+      bindingId = validateBindingText(input.binding.id, 'binding.id', 256)
+      sessionId = validateBindingText(input.binding.sessionId, 'binding.sessionId', 512)
+      bindingConversationJson = conversationJson(input.binding.conversation)
+      bindingPrincipalJson = principalJson(input.binding.principal)
+    } catch {
+      throw new DeliveryStoreError('invalid-binding', 'native Inbox binding snapshot is invalid')
+    }
+    if (!Number.isSafeInteger(input.binding.version) || input.binding.version < 1
+      || !Number.isSafeInteger(input.binding.generation) || input.binding.generation < 1) {
+      throw new DeliveryStoreError('invalid-binding', 'native Inbox binding snapshot is invalid')
+    }
+    if (conversationJson(envelope.conversation) !== bindingConversationJson
+      || principalJson(envelope.principal) !== bindingPrincipalJson) {
+      throw new DeliveryStoreError('invalid-binding', 'native Inbox envelope does not belong to its binding')
+    }
+
+    const now = this.now()
+    const id = `inbox_${randomUUID()}`
+    return this.transaction(() => {
+      const existing = this.database.prepare(`${inboxSelect} WHERE channel = ? AND account = ? AND event_id = ?`)
+        .get(envelope.channel, envelope.account, envelope.eventId) as InboxRow | undefined
+      if (existing !== undefined) {
+        if (existing.envelope_hash !== hash) {
+          throw new DeliveryStoreError('idempotency-conflict', 'provider event id was reused with a different envelope')
+        }
+        return { duplicate: true, record: inboxFromRow(existing) }
+      }
+
+      const binding = this.database.prepare(`${bindingSelect} WHERE id = ?`).get(bindingId) as BindingRow | undefined
+      const bindingPrincipal = this.database.prepare(
+        'SELECT principal_id FROM conversation_bindings WHERE id = ?',
+      ).get(bindingId) as { principal_id: string } | undefined
+      const principal = this.database.prepare(`
+        SELECT id, principal_json, role, status, linked_to_id, created_at, updated_at, version
+        FROM delivery_principals WHERE key_hash = ? AND principal_json = ?
+      `).get(principalHash(input.binding.principal), bindingPrincipalJson) as PrincipalRow | undefined
+      if (binding === undefined || binding.status !== 'active'
+        || binding.version !== input.binding.version || binding.generation !== input.binding.generation
+        || binding.session_id !== sessionId || binding.conversation_json !== bindingConversationJson
+        || binding.principal_json !== bindingPrincipalJson
+        || principal === undefined || principal.id !== bindingPrincipal?.principal_id
+        || principal.id !== input.ownerLineage.principalRecordId || principal.version !== input.ownerLineage.principalVersion
+        || principal.status !== 'active' || principal.role !== 'owner') {
+        throw new DeliveryStoreError('invalid-binding', 'native Inbox binding is no longer an active owner binding')
+      }
+
+      this.database.prepare(`
+        INSERT INTO inbox_messages (
+          id, channel, account, event_id, envelope_hash, envelope_json, status, binding_id,
+          attempt_count, claimed_by, fencing_token, lease_until, received_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, 'received', ?, 0, NULL, NULL, NULL, ?, ?)
+      `).run(id, envelope.channel, envelope.account, envelope.eventId, hash, json, bindingId, now, now)
+      for (const [ordinal, attachment] of (envelope.attachments ?? []).entries()) {
+        const descriptorHash = digest(JSON.stringify(attachment))
+        this.database.prepare(`
+          INSERT INTO delivery_attachments (
+            id, owner_kind, owner_id, ordinal, media_type, size_bytes, sha256, spool_ref,
+            resource_kind, provider_ref, file_name, status, expires_at, created_at
+          ) VALUES (?, 'inbox', ?, ?, ?, ?, ?, NULL, ?, ?, ?, 'metadata', NULL, ?)
+        `).run(
+          `attachment_${digest(`${id}:${ordinal}:${attachment.providerRef}`).slice(0, 40)}`,
+          id,
+          ordinal,
+          attachment.mediaType ?? '',
+          attachment.sizeBytes ?? 0,
+          descriptorHash,
+          attachment.resourceType,
+          attachment.providerRef,
+          attachment.fileName ?? null,
+          now,
+        )
+      }
+
+      const blocked = this.database.prepare(`
+        SELECT 1 FROM inbox_messages AS earlier
+        LEFT JOIN conversation_bindings AS earlier_binding ON earlier_binding.id = earlier.binding_id
+        JOIN delivery_inbox_admissions AS earlier_admission ON earlier_admission.inbox_id = earlier.id
+        JOIN delivery_inbox_admissions AS admitted ON admitted.inbox_id = ?
+        WHERE earlier.id <> ? AND earlier.status NOT IN ('processed', 'dead_letter')
+          AND (
+            (earlier_binding.workspace = ? AND earlier_binding.agent_preset = ?
+              AND earlier_binding.principal_id = ?)
+            OR (earlier.binding_id IS NULL
+              AND json_extract(earlier.envelope_json, '$.conversation') = json(?)
+              AND json_extract(earlier.envelope_json, '$.principal') = json(?))
+          )
+          AND (earlier_admission.admission_sequence < admitted.admission_sequence
+            OR earlier.status = 'claimed')
+        LIMIT 1
+      `).get(
+        id,
+        id,
+        binding.workspace,
+        binding.agent_preset,
+        principal.id,
+        bindingConversationJson,
+        bindingPrincipalJson,
+      )
+      if (blocked !== undefined) {
+        throw new DeliveryStoreError('conflict', 'native Inbox lane has unfinished earlier or active work')
+      }
+
+      const previousFence = this.database.prepare(
+        'SELECT COALESCE(MAX(fencing_token), 0) AS maximum FROM inbox_attempts WHERE inbox_id = ?',
+      ).get(id) as { maximum: number }
+      const fencingToken = previousFence.maximum + 1
+      const claimed = this.database.prepare(`
+        UPDATE inbox_messages SET status = 'claimed', claimed_by = ?, fencing_token = ?, lease_until = ?,
+          attempt_count = 1, failure_code = 'native-admission', updated_at = ?
+        WHERE id = ? AND status = 'received' AND binding_id = ?
+      `).run(ownerId, fencingToken, now + input.leaseMs, now, id, bindingId)
+      if (claimed.changes !== 1) {
+        throw new DeliveryStoreError('conflict', 'native Inbox claim lost its admission fence')
+      }
+      this.database.prepare(`
+        INSERT INTO inbox_attempts (id, inbox_id, attempt_number, owner_id, fencing_token, status, created_at)
+        VALUES (?, ?, 1, ?, ?, 'claimed', ?)
+      `).run(`inbox_attempt_${randomUUID()}`, id, ownerId, fencingToken, now)
+      return { duplicate: false, record: this.getInbox(id)!, fencingToken }
+    })
   }
 
   listAttachments(input: { ownerKind: 'inbox' | 'outbox'; ownerId: string }): DeliveryAttachment[] {
@@ -3559,7 +3738,7 @@ export class DeliveryStore {
     const now = this.now()
     return this.transaction(() => {
       const changed = this.database.prepare(`
-        UPDATE inbox_messages AS inbox SET failure_code = CASE WHEN failure_code IN (
+        UPDATE inbox_messages AS inbox SET failure_code = CASE WHEN failure_code = 'native-admission' THEN 'native-dispatch-started' WHEN failure_code IN (
           'permission-dispatch-recovery',
           'permission-cancelled-recovery',
           'permission-failure-notice-recovery',
@@ -3839,7 +4018,8 @@ export class DeliveryStore {
             ? undefined
             : permissionDispatchRecoveryCode(existingPermissionRecovery)
         const acceptedDispatch = this.database.prepare('SELECT inbox_id FROM delivery_task_acceptance_executions WHERE inbox_id = ?').get(row.id) !== undefined
-        const ambiguous = acceptedDispatch || (row.failure_code === 'dispatch-started'
+        const ambiguous = acceptedDispatch || row.failure_code === 'native-admission' || row.failure_code === 'native-dispatch-started'
+          || (row.failure_code === 'dispatch-started'
           && permissionRecovery === undefined && !feedbackRecovery && !learningRecovery && !workflowRecovery)
         const exhausted = row.attempt_count >= input.maxAttempts
           && permissionRecovery === undefined && !feedbackRecovery && !learningRecovery && !workflowRecovery

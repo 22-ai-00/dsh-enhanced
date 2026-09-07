@@ -43,6 +43,7 @@ import {
 import { DeliveryStore, DeliveryStoreError, type OwnerRouteDispatchGuard } from './store.js'
 import { DshDeliveryRuntime } from './agent-runtime.js'
 import { DeliverySessionLeases } from './session-lease-runtime.js'
+import { NativeWebOwner, type NativeWebOwnerConfig, type NativeWebOwnerAccess } from './native-web-owner.js'
 import type { DeliveryGoalWakeInput, DeliveryGoalWakeResult } from './goal-wake-types.js'
 import type { AcceptanceContract, AcceptanceHandle, TaskAcceptanceRegistration } from './acceptance.js'
 import { InboundImageMaterializer } from './inbound-images.js'
@@ -805,6 +806,8 @@ export class AssistantDeliveryService extends Service {
   private readonly config: Required<Config>
   private readonly ownerRoutes: ReadonlyMap<string, Readonly<OwnerRouteAuthority>>
   private readonly ownerRouteGuard: Readonly<OwnerRouteDispatchGuard>
+  private nativeWebBound = false
+  private nativeWebRuntime: { ctx: Context; leases: DeliverySessionLeases } | undefined
   private readonly ownerId = `assistant-delivery-${randomUUID()}`
   private readonly bindingFlights = new Map<string, Promise<ConversationBinding>>()
   private readonly conversationTransitions = new Map<string, Promise<void>>()
@@ -936,6 +939,9 @@ export class AssistantDeliveryService extends Service {
         renew: (lease, leaseMs) => this.deliveryStore.renewSessionLease(lease, leaseMs),
         finish: (lease, input) => this.deliveryStore.finishSessionLease(lease, input),
       })
+      const webRuntime = { ctx: runtimeCtx, leases: sessionLeases }
+      this.nativeWebRuntime = webRuntime
+      runtimeCtx.effect(() => () => { if (this.nativeWebRuntime === webRuntime) this.nativeWebRuntime = undefined })
       const unregister = this.registerInboundRuntime(new DshDeliveryRuntime(runtimeCtx, policy, {
         sessionLeases,
         sessionNamespace: this.deliveryStore.instanceId(),
@@ -1846,6 +1852,30 @@ export class AssistantDeliveryService extends Service {
       ownerId: owner.id,
       ownerVersion: owner.version,
     } }
+  }
+
+  /** Trusted Host configuration only; the returned capability fixes a pre-paired Web owner and scope. */
+  bindNativeWebOwner(ctx: Context, config: NativeWebOwnerConfig): NativeWebOwnerAccess {
+    this.assertActive()
+    const runtime = this.nativeWebRuntime
+    if (runtime === undefined) throw new AssistantDeliveryError('runtime-conflict', 'native Web runtime is unavailable')
+    if (this.nativeWebBound) throw new AssistantDeliveryError('runtime-conflict', 'native Web owner Controller is already bound')
+    const access = new NativeWebOwner(ctx, this.deliveryStore, runtime.leases, this.policy, {
+      assertActive: () => {
+        this.assertActive()
+        if (this.nativeWebRuntime !== runtime) throw new AssistantDeliveryError('runtime-conflict', 'native Web runtime changed')
+      },
+      released: () => { this.nativeWebBound = false },
+      policyRef: this.config.policyRef,
+      leaseMs: this.config.leaseMs,
+      prepare: (binding, envelope) => this.prepareForegroundTaskAcceptance(binding, envelope),
+      complete: (handle, input) => this.completeForegroundTaskAcceptance(handle, input),
+      claimed: (agent, envelope, turn) => this.capturePreferenceTurn(agent,
+        { kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId }, turn),
+    }, config)
+    this.nativeWebBound = true
+    runtime.ctx.effect(() => () => access.dispose(), 'assistant-delivery.native-web-runtime')
+    return access
   }
 
   currentPreferenceTurn(agent: Agent): Readonly<DeliveryPreferenceTurnAttestation> | undefined {

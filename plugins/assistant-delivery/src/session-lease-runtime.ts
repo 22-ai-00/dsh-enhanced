@@ -107,6 +107,7 @@ export class SessionExecutionLease {
 export class DeliverySessionLeases {
   readonly #active = new Map<string, SessionExecutionLease>()
   readonly #agents = new WeakMap<Agent, SessionExecutionLease>()
+  readonly #nativeInputs = new WeakMap<Agent, { requestId: string; content: string; message: UserMessage | undefined; claimed: boolean; onClaimed(turn: number): void }>()
   #factoryGeneration = 0
   #live = true
   constructor(private readonly ctx: Context, private readonly port: SessionLeasePort) {
@@ -115,14 +116,26 @@ export class DeliverySessionLeases {
     ctx.on('internal/service', name => {
       if (name === 'agentLoop') this.#factoryGeneration += 1
     })
-    const nativeInput = ({ agent, message }: { agent: Agent; message: UserMessage }): void => {
-      // Web can borrow the exact live Agent, not just resume a second object.
-      // Native direct-user ingress is not a Delivery owner admission. Invalidate
-      // the whole lease so a queued/steered turn cannot run after cancellation.
-      if (message.source === undefined || message.source.kind === 'user') this.#agents.get(agent)?.cancel()
+    const nativeInput = (agent: Agent, message: UserMessage, turn?: number): void => {
+      if (message.source !== undefined && message.source.kind !== 'user') return
+      const permit = this.#nativeInputs.get(agent)
+      const source = message.source as { kind?: string; rpcId?: string } | undefined
+      try {
+        this.#agents.get(agent)?.assertAgent(agent)
+        if (permit !== undefined && source?.kind === 'user' && source.rpcId === permit.requestId
+          && JSON.stringify(message.content) === permit.content) {
+          if (turn === undefined && permit.message === undefined) { permit.message = message; return }
+          if (turn !== undefined && permit.message === message && !permit.claimed) {
+            permit.claimed = true
+            permit.onClaimed(turn)
+            return
+          }
+        }
+      } catch { /* A stale or invalid exact admission cancels the whole lane. */ }
+      this.#agents.get(agent)?.cancel()
     }
-    ctx.on('agent/inbox/inserted', nativeInput, { prepend: true })
-    ctx.on('agent/inbox/claimed', nativeInput, { prepend: true })
+    ctx.on('agent/inbox/inserted', ({ agent, message }) => nativeInput(agent, message), { prepend: true })
+    ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => nativeInput(agent, message, turn), { prepend: true })
     ctx.on('agent/request', async ({ agent }, next) => {
       this.#assertAgent(agent)
       const result = await next()
@@ -154,6 +167,20 @@ export class DeliverySessionLeases {
       for (const lease of this.#active.values()) { lease.cancel(); lease.close() }
     }, 'assistant-delivery.session-leases')
   }
+  /** Host-only, one occurrence: a client source tag alone never grants owner authority. */
+  admitNativeInput(agent: Agent, input: { requestId: string; content: readonly unknown[]; onClaimed(turn: number): void }):
+    { inserted(): boolean; dispose(): void } {
+    const lease = this.#agents.get(agent)
+    if (lease === undefined || this.#nativeInputs.has(agent)) throw new SessionLeaseUnavailable('denied')
+    lease.assertAgent(agent)
+    const permit = { requestId: input.requestId, content: JSON.stringify(input.content),
+      claimed: false, onClaimed: input.onClaimed, message: undefined as UserMessage | undefined }
+    this.#nativeInputs.set(agent, permit)
+    return { inserted: () => permit.message !== undefined, dispose: () => {
+      if (this.#nativeInputs.get(agent) === permit) this.#nativeInputs.delete(agent)
+    } }
+  }
+
   get leaseMs(): number { return this.port.leaseMs }
 
   /**

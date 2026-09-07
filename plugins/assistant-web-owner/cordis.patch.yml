@@ -1,0 +1,6 @@
+- id: session-controller
+  name: '@deepseek-ai/dsh-api-session-controller'
+  disabled: true
+- insert:
+    - id: dsh-enhanced-assistant-web-owner
+      name: '@dsh-enhanced/assistant-web-owner'
