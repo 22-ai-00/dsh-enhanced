@@ -1,0 +1,241 @@
+{
+  "schema": "autonomy-action-broker-evidence/v1",
+  "recordedAt": "2026-09-07T15:59:13.317327+00:00",
+  "baseCommit": "5a6f0c306781a17b62eec87fa9e59cf26bf8c599",
+  "scope": "WP08-10 finite owner-authorized GitHub commit broker; full 18-work-package goal remains active",
+  "sourceHashes": {
+    "plugins/README.md": "63a592083727fb1a812726f6998056b175b5e8161e706a3f76e253478e50b9a9",
+    "plugins/assistant-actions/LICENSE": "37f12999eefa6bde963be1da5403c897ecd2736ee99988ff26693335f68606e7",
+    "plugins/assistant-actions/README.md": "7b5847f4cbb5ff471c7c3b1266d3650c6dd3faa55b836db25c07aa56353457d2",
+    "plugins/assistant-actions/cordis.patch.yml": "ca64d38b002fde3ebad47f04588c677e625f94e1f174e78978386b4b21da7c54",
+    "plugins/assistant-actions/package.json": "2a6d6265ae8d744a8085f0c38e5ead7b13f32a5cbd09fe732f42b27bbbea1841",
+    "plugins/assistant-actions/src/cli.ts": "92149707575a192c89edc434714fe85f0da1002b5f08a670c87ca616c3ecaa3b",
+    "plugins/assistant-actions/src/config.ts": "4ea29ff2852e7243229245469d45cb86e224f36600b6024e2467675afc1ffb28",
+    "plugins/assistant-actions/src/github.ts": "66a7d5f2d9780d996e5d1a6b6a7e93055126b8623a4d1320e51fae16ea6ef834",
+    "plugins/assistant-actions/src/index.ts": "19bc8a3e7364730ec2ebe5f8e7e66b4dfea0f8514bc155df73972fc56c315cb4",
+    "plugins/assistant-actions/src/ledger.ts": "90974349a859ea59cd8a90cc671741ca0c46d352602db0c3b0386e0161c66a16",
+    "plugins/assistant-actions/src/service.ts": "6266ecc7cf1f2a97e907ccbd90e029b3f6e7484178d7c4e1dc03f97124781c0e",
+    "plugins/assistant-actions/src/types.ts": "b06a062e971cb588ea5bfc8e81c7dfec9940172aad45e33c100d588d1a03902b",
+    "plugins/assistant-actions/src/version.ts": "e1b18323af74400f9b81251674b87f8732fdc8009bfcad168de2b5e890c22f71",
+    "plugins/assistant-actions/tests/github-http.spec.ts": "185167cade4f1571f07da4e26296cc1e1a8220ee0a8156dd8d786af2be7c1ed8",
+    "plugins/assistant-actions/tests/github.spec.ts": "89f219f1388f6816823e80a4ec14661a388812d96d6f077b82c054cb0e5df919",
+    "plugins/assistant-actions/tests/index.spec.ts": "af07e1beb264b1b4b283092f329d852f6e9282a4cf3a2b0fdb88cd7666f8bd0b",
+    "plugins/assistant-actions/tests/ledger.spec.ts": "1d63b1f085f5648b141722d71a7c2272a65178f4366792c87824a37af820a154",
+    "plugins/assistant-actions/tests/service.spec.ts": "01de355247943a60750469ee7f0b9400130f5121e6c75ad153a1e8a0f6fb95bf",
+    "plugins/assistant-actions/tsconfig.build.json": "b8b6960a9b3403690455e9c7314abc6b86d3832c6342ee43a1faaf1d3af52292",
+    "plugins/assistant-actions/tsconfig.json": "e5d869d2ba42bc4d7e8a136364ae61b919767fceb9e6a3da084342aadc4f132a",
+    "plugins/assistant-isolation/README.md": "a04372970cff2e12161e7f291ad9e9609c5d6625a394df26f24e9049b6c911be",
+    "plugins/assistant-isolation/src/service.ts": "be84ba34d6273df2746ffb03e0422e5b47651de2bc8a2a5d3a7215c2fdf1bf92",
+    "plugins/assistant-policy/README.md": "c30cfb7c501f5fdc3f4d083b1f143ab18472af18848dc09fd93e22eccb998e6a",
+    "plugins/assistant-policy/src/service.ts": "9a9c757744483a7558a713870867b43255ae94bb67d746972fcbaaff86114151",
+    "plugins/assistant-policy/tests/preauthorized-tool.spec.ts": "989e6b7a2eeb627b1330f87e6281ae4593e61339bb689f35cfff6f080c122182",
+    "pnpm-lock.yaml": "57b3a6426fb7d65a813911113c8a2950a38a66e778937d20221e09898cddb9fa"
+  },
+  "commands": [
+    {
+      "command": "CI=true pnpm install --ignore-scripts",
+      "log": "/tmp/dsh-actions-install.log",
+      "exitCode": 1,
+      "sha256": "12f458176c161331a830ea094d3c0f98bc22e92d120f5b4cb7d91287205055de",
+      "exitFile": "/tmp/dsh-actions-install.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true pnpm install --no-frozen-lockfile --ignore-scripts",
+      "log": "/tmp/dsh-actions-install-v2.log",
+      "exitCode": 0,
+      "sha256": "2122b092358a85e36da3e2bc9e2fd1f770a893209621b6913fb22d7480ff0199",
+      "exitFile": "/tmp/dsh-actions-install-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true pnpm install --no-frozen-lockfile --ignore-scripts && CI=true pnpm --filter @dsh-enhanced/assistant-policy build && CI=true pnpm --filter @dsh-enhanced/assistant-actions build && CI=true pnpm --filter @dsh-enhanced/assistant-actions typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-policy exec vitest run tests/preauthorized-tool.spec.ts && CI=true pnpm --filter @dsh-enhanced/assistant-actions test",
+      "log": "/tmp/dsh-actions-focus-v1.log",
+      "exitCode": 2,
+      "sha256": "47d7671c4291637a5655e2f4903201997f10b16747b2332172740ce81f01e013",
+      "exitFile": "/tmp/dsh-actions-focus-v1.log.exit",
+      "exitSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-policy build && CI=true pnpm --filter @dsh-enhanced/assistant-actions build && CI=true pnpm --filter @dsh-enhanced/assistant-actions typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-policy typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-policy exec vitest run tests/preauthorized-tool.spec.ts && CI=true pnpm --filter @dsh-enhanced/assistant-actions test",
+      "log": "/tmp/dsh-actions-focus-v2.log",
+      "exitCode": 2,
+      "sha256": "f1b820b7d8cd381a82657f5d3bd1e388beb537025a0c79d2d8e97d12eb3d258b",
+      "exitFile": "/tmp/dsh-actions-focus-v2.log.exit",
+      "exitSha256": "53c234e5e8472b6ac51c1ae1cab3fe06fad053beb8ebfd8977b010655bfdd3c3"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-policy typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-policy exec vitest run tests/preauthorized-tool.spec.ts && CI=true pnpm --filter @dsh-enhanced/assistant-actions test",
+      "log": "/tmp/dsh-actions-focus-v3.log",
+      "exitCode": 1,
+      "sha256": "9e061e426b18a3eab0310fbc7d343312bef6d1c2694204855939b672b40fa1ed",
+      "exitFile": "/tmp/dsh-actions-focus-v3.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-actions build && CI=true pnpm --filter @dsh-enhanced/assistant-actions typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-actions test",
+      "log": "/tmp/dsh-actions-actions-v1.log",
+      "exitCode": 1,
+      "sha256": "81d94d7eebcd60975ca824d6dafdd8689446130569d432b81622e3e0a73e196b",
+      "exitFile": "/tmp/dsh-actions-actions-v1.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-policy build && CI=true pnpm --filter @dsh-enhanced/assistant-policy typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-policy exec vitest run tests/preauthorized-tool.spec.ts && CI=true pnpm --filter @dsh-enhanced/assistant-actions test",
+      "log": "/tmp/dsh-actions-focus-v4.log",
+      "exitCode": 0,
+      "sha256": "78af3e4a5aceccba1e05fb7de147cceaf5716ac5324d09f8ff74cf1dda3591df",
+      "exitFile": "/tmp/dsh-actions-focus-v4.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-actions exec vitest run tests/service.spec.ts tests/github.spec.ts",
+      "log": "/tmp/dsh-actions-integration-v2.log",
+      "exitCode": 1,
+      "sha256": "ba5ffda64834e8453f1b267ab163351849692dc15761ff11cbc85dc69e8cfe88",
+      "exitFile": "/tmp/dsh-actions-integration-v2.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-actions exec vitest run tests/service.spec.ts tests/github.spec.ts",
+      "log": "/tmp/dsh-actions-integration-v3.log",
+      "exitCode": 0,
+      "sha256": "fdd73dbd9bc6a0aca2281b75e4f6705aee65e3f6958755fc5387ce1f05ab5e48",
+      "exitFile": "/tmp/dsh-actions-integration-v3.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true pnpm install --no-frozen-lockfile --ignore-scripts && CI=true pnpm --filter @dsh-enhanced/assistant-isolation build && CI=true pnpm --filter @dsh-enhanced/assistant-actions exec vitest run tests/service.spec.ts tests/github.spec.ts",
+      "log": "/tmp/dsh-actions-integration-v4.log",
+      "exitCode": 0,
+      "sha256": "0c02a1d904541e2c5b42c0e10f53191134da9e8756f094714f6c239fbbd07c24",
+      "exitFile": "/tmp/dsh-actions-integration-v4.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-actions build && CI=true pnpm --filter @dsh-enhanced/assistant-actions typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-actions test && CI=true pnpm lint",
+      "log": "/tmp/dsh-actions-focused-final.log",
+      "exitCode": 1,
+      "sha256": "21cbae3fe1481bbbb79609d1fc9997d6c336ec43cedfefd4abb92596b995f91d",
+      "exitFile": "/tmp/dsh-actions-focused-final.log.exit",
+      "exitSha256": "4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-actions-check-v1.log",
+      "exitCode": 0,
+      "sha256": "91da70389cafaf6fa61e00e13ddb2c0dc3ed0e9592ddc82b8f11bcf5c3c4d73b",
+      "exitFile": "/tmp/dsh-actions-check-v1.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-actions build && CI=true pnpm --filter @dsh-enhanced/assistant-actions typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-actions test && CI=true pnpm lint && CI=true pnpm --filter @dsh-enhanced/assistant-actions pack --dry-run",
+      "log": "/tmp/dsh-actions-final-v2.log",
+      "exitCode": 0,
+      "sha256": "53f667175a8193960e01f98814567b435aac7434711b06c42f73ff818dc3212c",
+      "exitFile": "/tmp/dsh-actions-final-v2.log.exit",
+      "exitSha256": "9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa"
+    }
+  ],
+  "runtimeEvidence": {
+    "composition": "Real native ToolRuntime, Isolation routing, Policy, protected-file Keychain with synthetic token, and local HTTP sockets mapped from the fixed GitHub URL. No real GitHub mutation or real user token.",
+    "cases": [
+      "Successful expected-head commit; identical key returns persisted result without HTTP",
+      "ACK loss persists unknown across Host disposal/reload; new key at unresolved destination/head denied",
+      "Independent compiled CLI process revokes during an actual HTTP request",
+      "Host bash remains blocked even when native approval returns allowed-once",
+      "Three authorized dispatches consume exactly three budget units, without polling or duplicate-key charges",
+      "Fixed URL/GraphQL, no redirect/retry, bounded reply; raw/hex-shaped credential echo suppressed",
+      "Real SQLite dual controllers, cumulative limits, permanent record cap, damaged JSON and identity/result binding fail closed"
+    ]
+  },
+  "validation": {
+    "fullCheck": {
+      "exitCode": 0,
+      "log": "/tmp/dsh-actions-check-v1.log",
+      "mainTestFiles": 272,
+      "mainTests": 3612,
+      "isolationTestFiles": 20,
+      "isolationTests": 92,
+      "policyTests": 192,
+      "plugins": 27,
+      "sharedPackages": 3,
+      "packCount": 30
+    },
+    "finalDeltaCheck": {
+      "exitCode": 0,
+      "log": "/tmp/dsh-actions-final-v2.log",
+      "actionsTestFiles": 5,
+      "actionsTests": 29,
+      "covers": "Late grant revocation-flag consistency correction, compiled CLI revocation test, latest full lint, Actions build/typecheck/tests and dry-run pack"
+    },
+    "pack": {
+      "files": [
+        "cordis.patch.yml",
+        "lib/cli.d.ts",
+        "lib/cli.d.ts.map",
+        "lib/cli.js",
+        "lib/cli.js.map",
+        "lib/config.d.ts",
+        "lib/config.d.ts.map",
+        "lib/config.js",
+        "lib/config.js.map",
+        "lib/github.d.ts",
+        "lib/github.d.ts.map",
+        "lib/github.js",
+        "lib/github.js.map",
+        "lib/index.d.ts",
+        "lib/index.d.ts.map",
+        "lib/index.js",
+        "lib/index.js.map",
+        "lib/ledger.d.ts",
+        "lib/ledger.d.ts.map",
+        "lib/ledger.js",
+        "lib/ledger.js.map",
+        "lib/service.d.ts",
+        "lib/service.d.ts.map",
+        "lib/service.js",
+        "lib/service.js.map",
+        "lib/types.d.ts",
+        "lib/types.d.ts.map",
+        "lib/types.js",
+        "lib/types.js.map",
+        "lib/version.d.ts",
+        "lib/version.d.ts.map",
+        "lib/version.js",
+        "lib/version.js.map",
+        "LICENSE",
+        "package.json",
+        "README.md"
+      ],
+      "count": 36,
+      "excludes": [
+        "source",
+        "tests",
+        "databases",
+        "credentials"
+      ]
+    },
+    "independentReview": {
+      "status": "PASS",
+      "reviewer": "action_verify",
+      "sourceHashMismatches": 0,
+      "commandEvidenceMismatches": 0,
+      "scope": "Current Actions/Policy/Isolation changes, with final delta validation after full check; full 18-work-package goal remains incomplete",
+      "limits": "Read-only reviewer inspected source and root command evidence; no additional pnpm/test execution, real GitHub or production activation"
+    }
+  },
+  "limitations": [
+    "Same-process trusted Host plugins remain outside OS worker isolation",
+    "No automatic unknown readback/release/retry or compensating commit",
+    "No real GitHub account deployment, profile activation, publication or release",
+    "No hard state-root quota or permanent audit archival policy",
+    "C2C local execution records only; required in-app browser unavailable, no ChatGPT web planning/review",
+    "18 work packages remain 3 verified, 7 implementing, 8 todo; no calendar waiting or two-week observation gate"
+  ],
+  "c2c": {
+    "task": "c2c_a937",
+    "kind": "local-execution-only",
+    "chatgptWebReview": false
+  }
+}

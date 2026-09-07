@@ -136,3 +136,7 @@ DSH 原生 `user-approval` 仍只负责 open turn 内的即时询问；本插件
 ## 兼容性
 
 已针对 DeepSeek Harness `0.1.2-rc.1` 验证。详见仓库[兼容性基线](../../docs/compatibility.md)。
+
+### Finite action broker preauthorization
+
+`evaluateAgent` checks live identity and rules without consuming budgets or recording authorization; the broker charges `authorizeAgent` once before credential acquisition and dispatch with a durable action ID as its idempotency key. Polling must use the read-only method. `registerPreauthorizedTool` is restricted to the trusted `dsh-enhanced-assistant-actions` caller and its exact `action_github_commit` definition. The registration expires with the caller scope; same-name scoped shadows cannot borrow it. This skips native per-call approval only for a currently valid finite grant, while monotonic policy denials and other tool middleware still apply. It is a trusted Host integration contract, not isolation against malicious plugins in the same Host process.

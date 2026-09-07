@@ -331,3 +331,22 @@ Host 后台和独立运维 `dsh-isolation maintain` 共用 controller fence/CAS 
 全量 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check` 退出 0（`/tmp/dsh-storage-check-v1.log` / `.log.exit`）：主 266 文件/3,577 测试、Isolation 20 文件/92 测试通过，26 插件/3 共享库全构建及 29 个 dry-run pack 通过。Isolation 69 个发布文件已检查包含两组新 storage 模块、CLI、README/patch/LICENSE，无测试或状态数据。主测试完成后新增的后台维护用例由后续包级测试覆盖；检查启动后加入的旧格式保护和该用例，另经最终全仓 lint 与 Isolation typecheck 退出 0（`/tmp/dsh-storage-final-static.log` / `.log.exit`）。14 个生产/测试/包文档哈希和 6 条根执行命令的成功失败记录见结构化证据；独立最终复核状态以证据为准。
 
 独立 verifier 最终 **PASS**：14 份源文件哈希无差异，复核最终退出码、后置检查、真实 Docker/后台维护与 pack 清单及限制。主协调接受本存储切片；完整 18 项仍保持未完成。
+
+
+### WP08–10：有限 GitHub 动作与短期凭据 broker（2026-09-07）
+
+本切片基于 `5a6f0c3`，新增独立可安装的实验性 `assistant-actions`。operator 的有限 grant 绑定 Delivery owner lineage、workspace/preset、精确仓库/分支/文件、凭据 handle、过期时间和累计次数/字节；模型不能自授 grant、选择任意 URL 或任意 GraphQL。可信 Host 固定调用 GitHub `createCommitOnBranch`，同时要求 expected head，不提供分支创建、删除文件、合并、发布或 force push。worker 保持无网络、无 Host 凭据挂载；可信同进程 Host 插件不属于此 OS 隔离边界。
+
+新私有 SQLite 动作账本先原子预留，再在凭据回调内写入 dispatched 后发送请求；短期操作最长 30 秒，双连接 controller fence/CAS 防止旧控制器结算。相同身份、Session、grant 和 key 只能读取同一请求；冲突摘要拒绝。dispatched/unknown 对同仓库、分支、expected head 阻止新 key，跨 grant/revision 也不能绕过。unknown 保持占用，最多两个 prepared/dispatched/unknown 和 10,000 条永久动作记录；累计用量不退还。重启把未定动作保留为 unknown，不自动重放、读回或释放。启动及读取校验持久 JSON、身份/授权/目的地绑定、结果和行状态，损坏时拒绝服务；这不是抵抗同 Host 恶意篡改的密码学证明。
+
+Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 action ID 的 `authorizeAgent` 在获取凭据前只计一次，随后再检查当前授权和 fence 才 dispatch。测试中 Keychain 只将合成令牌交给可信回调，产品固定 HTTPS 请求禁用共享全局 agent 的代理配置、不跟随重定向、不重试，响应最多 16 KiB，只返回通过绑定校验的 commit OID 或固定不确定结果。令牌不进入动作账本、模型输出或错误文字。独立 `dsh-actions revoke ROOT GRANT REV` 可撤销当前 revision，但取消 HTTP 不等于远端回滚；已发送结果保守保留 unknown。
+
+预授权只对可信 broker 的精确 `action_github_commit` 工具对象生效，不让同名 scoped shadow 借用。Policy 的强制拒绝和其他中间件继续执行；Isolation 仅开放这个通过验证的 broker 例外，actions 自身也对有 grant 的 scope 拦截通用 Host 命令。测试已实际加载原生 ToolRuntime、Isolation、Policy 与受保护文件 Keychain，用本地 HTTP 服务器验证成功、同 key 重读、ACK 丢失后重启、新 key 拒绝、外部 CLI 撤权与有限预算；Host bash 即使单次审批允许仍无法执行。服务器夹具不等于真实 GitHub 部署；没有读取真实凭据或激活真实用户 profile。
+
+早期类型、测试装配、账本边界和 lint 失败均保留在 [结构化证据](evidence/action-broker-2026-09-07.json)，最终工程验收与独立复核附后。C2C `c2c_a937` 只有本地执行记录；所需内置浏览器不可用，未取得 ChatGPT 网页规划或评审。剩余：可信 GitHub 读回/unknown 对账、版本回滚及不可逆补偿、动作审计保留、更多 provider、完整自治安装、业务及真实模型闭环，以及其他工作包。全部 18 项仍为 **3 已验证 / 7 实现中 / 8 待做**；按依赖与验收证据推进，无按天等待或两周观察门槛。
+
+后续对账设计约束：公开 action marker、相同文件和当前 branch head 只能证明状态等价，不能单独证明原 HTTP mutation 已结束；其他写者重置分支后，晚到请求仍可能产生效果。因此不会仅凭状态等价把 unknown 改成功或释放占用，需另有可信请求完成/停止屏障。只读探索中的 API 字段、权限和分页语义尚待官方资料核实，不计为实现或验收。
+
+最终根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<记录的本地镜像 ID> pnpm check` 退出 **0**（`/tmp/dsh-actions-check-v1.log` / `.log.exit`）：主 272 文件 / 3,612 测试、Policy 192 项、Isolation 20 文件 / 92 项通过，27 插件 / 3 共享库完整构建及 30 份 dry-run pack 通过。主检查后追加撤销标记一致性修复，并补成实际编译 CLI 子进程撤权测试；最终 `/tmp/dsh-actions-final-v2.log` / `.log.exit` 退出 **0**，涵盖最新 Actions build/typecheck、5 文件 / 29 测试、全仓零 lint 警告与新包 dry-run pack。已检查 Actions 的 36 个发布文件含 CLI、broker、ledger、patch/README/LICENSE，不含源码、测试或状态数据。26 份源码/包文件哈希、13 条终态执行记录及独立结论保存在结构化证据中，不把早期失败或主检查后的改动冒称已被先前全仓检查覆盖。
+
+独立 verifier 最终 **PASS**：复算 26 个源码哈希与 13 条日志/退出码均无差异，确认撤销标记一致性、预算先于凭据、原生工具精确预授权、unknown 不重放及后置测试/pack 证据。主协调接受本批变更；完整 18 项目标继续保持未完成。

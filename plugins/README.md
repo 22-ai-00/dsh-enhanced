@@ -57,6 +57,8 @@
 
 | [assistant-isolation](assistant-isolation) | `@dsh-enhanced/assistant-isolation` | 实验性 | 有限 owner 授权的离线 Linux Docker 执行、私有审计与外部撤销；生产磁盘配额及动作代理待补。 |
 
+| [assistant-actions](assistant-actions) | `@dsh-enhanced/assistant-actions` | 实验性 | 有限 owner 授权的 GitHub 提交 broker、短期凭据 lease 与 unknown 不重放；不默认启用。 |
+
 <!-- plugin-catalog:end -->
 
 状态建议使用“实验性 / Beta / 稳定 / 已弃用”。新增、重命名、弃用或移除插件时必须同步维护此表。
