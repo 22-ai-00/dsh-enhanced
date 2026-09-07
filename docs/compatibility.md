@@ -71,3 +71,6 @@ Web client 与工作区接线：本包构建期复用 `dsh-api-session-controlle
 原生 Memory benchmark 的可选开发依赖扩大了 workspace 类型构建环。根 `build:bootstrap` 在 Policy → Evaluation → Delivery 后显式构建 Verifier → Automations → Goals，再启动递归构建，确保空 `lib` 环境下 Memory 的 Goals 类型增强已有声明产物；这只调整仓库构建顺序，不改变发布包或运行时服务激活。
 
 PersonalMemory 工具证据恢复使用 `@deepseek-ai/dsh-fs`、`dsh-fs-local`、`dsh-tool-fs`、`dsh-session-persistence-jsonl@0.1.2-rc.1` 与既有 AgentLoop/ToolRuntime/pruner 基线。FS 是可选 Host peer，Local/Tool/JSONL 仅作为根集成测试依赖，不随 Memory 自动启用。正常 append `tool/result` 的 `sourceEventSeqs` 指向对应 `tool/call`；指向旧 result 的复制与 replacement 不视为原始观察。Cordis 4.0.2 每次服务查询可返回新 trace proxy，代际检查使用公开 `Service.tracker` 的 per-instance 元数据。升级这些契约须重跑实际 JSONL 关闭/重建与文件授权回归。Memory schema 6 从 v5 增加独立 metadata 索引，升级前排空旧 writer。
+
+
+`assistant-isolation` 使用同一 `dsh-agent`、`dsh-tools`、`dsh-session@0.1.2-rc.1` 与 Cordis 4.0.2 的原生 ToolRuntime cancellation/execute waterfall。公开 Service 方法须保持实例绑定，以兼容 Cordis trace proxy；detached Node supervisor 清空继承的 execArgv，避免父进程 `--input-type` 或测试 loader 阻止启动。运行时仅支持非 root Linux Host 与固定本地 Docker Unix socket；测试环境 Docker 29.4.1、cgroup v1/cgroupfs 和预装的不可变本地 bash fixture image，未把镜像 tag 或未验证的远端镜像作为运行时默认。升级应重跑真实 AgentLoop、外部 CLI revoke、进程组 SIGKILL、网络 canary 与打包后的 supervisor 路径验证。该包不改动 DSH 本身的依赖基线，也不自动激活 Delivery/Policy peers。

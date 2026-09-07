@@ -68,3 +68,12 @@ plugins/<name>/
 原生回合累计预算仍属于 `assistant-goals` 独立 bundle：可信 Host 注册精确模型路由的计量声明，插件在现有 `llm/stream` 与 `tools/execute` 管线执行预留和计数。私有 `.budgets` SQLite 以 owner scope + 业务目标 ID 保存不可变上限、绝对期限和 held/settled 记录；不与普通前台或账户级预算混算。它不创建模型循环或持久调度器；未来自动唤醒复用 Automations，并须与 Delivery 前台共享持久 Session 排他和后台 owner 证明，不能直接复用会创建新 Session 的普通 Automation runner。
 
 Delivery 内置运行时通过同一 schema 19 Session lease 表序列化 active binding 的恢复与绑定前 construction，Session ID 是最终排他键。新会话的持久身份在 binding 写入前就固定，released orphan 不允许换主体接管。生命周期由原生 AgentLoop 驱动；lease 不负责调度，过期的 dispatched/unknown 也不授予恢复权限。未来 Goals wake 必须接入同一 gate，与前台共享排他，再按既有 Automations 的持久任务意图派发。
+
+
+## 离线隔离执行
+
+`assistant-isolation` 作为独立 bundle 接入原生 ToolRuntime，Host 仍拥有 AgentLoop、Delivery owner、Policy、SQLite 授权/结果账本及 detached supervisor。模型的离线任意 shell 代码进入 Linux Docker 容器；每任务只挂载新建的输入工作区，不挂载真实项目、Host 状态、Docker socket 或凭据。Host 工具路由在配置的 workspace/preset 内拒绝改走通用代码工具，容器内也没有动作或出网代理。
+
+Grant 绑定 owner lineage、范围、期限和次数/预留时长；请求摘要包含镜像与限制，Session 幂等键禁止未知结果重放。单 Controller 的持久 lease/fence 串行化预算与恢复，外部 CLI 先持久撤销再尝试终止容器。包同时发布 `lib/` 与 Node supervisor 的 `runtime/`，前者相对解析后者，不依赖源码目录。可回滚安装不等于回滚已发生的外部动作。
+
+此切片的 Host/容器边界不能替代后续独立动作与凭据 broker、磁盘配额、审计保留、生产 bootstrap 或外部补偿。可信 Host 插件仍处于现有 Host 信任域，不能据此声称全部第三方插件已经隔离。

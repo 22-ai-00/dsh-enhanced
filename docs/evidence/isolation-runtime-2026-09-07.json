@@ -1,0 +1,355 @@
+{
+  "schema": "dsh-offline-isolation-evidence/v1",
+  "recordedAt": "2026-09-07T12:11:44.370913+00:00",
+  "baseCommit": "4dbee637844976864997c4c6719fe47526235778",
+  "scope": "WP08-10 initial offline isolation slice; full 18-package goal remains active and incomplete",
+  "platform": [
+    {
+      "command": [
+        "node",
+        "--version"
+      ],
+      "exitCode": 0,
+      "stdout": "v24.7.0",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "uname",
+        "-sr"
+      ],
+      "exitCode": 0,
+      "stdout": "Linux 5.15.120.bsk.3-amd64",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "docker",
+        "--host",
+        "unix:///var/run/docker.sock",
+        "info",
+        "--format",
+        "{{.ServerVersion}} {{.OSType}} {{.CgroupVersion}} {{.CgroupDriver}}"
+      ],
+      "exitCode": 0,
+      "stdout": "29.4.1 linux 1 cgroupfs",
+      "stderr": ""
+    },
+    {
+      "command": [
+        "docker",
+        "--host",
+        "unix:///var/run/docker.sock",
+        "image",
+        "inspect",
+        "bash:3.2",
+        "--format",
+        "{{.Id}}"
+      ],
+      "exitCode": 0,
+      "stdout": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "stderr": ""
+    }
+  ],
+  "runtime": {
+    "dsh": "0.1.2-rc.1",
+    "cordis": "4.0.2",
+    "testImageId": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+    "imagePulled": false
+  },
+  "observations": [
+    "Actual native AgentLoop/ToolRuntime, Docker, SQLite, file and HTTP canaries; model and Delivery/Policy identity are focused test fixtures, not real external accounts or model evidence.",
+    "Owner-bound finite grants, request/image/limits digest, quota reservation and durable Session idempotency; changed requests fail, unknown work is not replayed.",
+    "Actual process output and artifacts, native cancellation, external Node CLI revoke, controller reopen with an abandoned prepared job, and Host process-group SIGKILL with setsid descendants.",
+    "Configured Linux Docker namespace/filesystem/network/CPU/memory/PID restrictions inspected; spoofed stdout cannot change actual exit code or supervisor IPC results.",
+    "1001 unresolved jobs paginate; invalid UTF-8 cannot expand output beyond its byte cap; artifact path/symlink/hardlink/socket/size boundaries use actual files.",
+    "Concurrent supervisor/CLI removal uses bounded force-remove plus positive absence confirmation; three focused real-CLI repetitions pass without weakening quiescence assertions."
+  ],
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "primaryFiles": 253,
+    "primaryTests": 3507,
+    "isolationPackageFiles": 7,
+    "isolationPackageTests": 21,
+    "deliveryPackageTests": 687,
+    "pluginCount": 26,
+    "sharedPackageCount": 3,
+    "packCount": 29,
+    "isolationPackFiles": [
+      "cordis.patch.yml",
+      "lib/cli.d.ts",
+      "lib/cli.d.ts.map",
+      "lib/cli.js",
+      "lib/cli.js.map",
+      "lib/config.d.ts",
+      "lib/config.d.ts.map",
+      "lib/config.js",
+      "lib/config.js.map",
+      "lib/index.d.ts",
+      "lib/index.d.ts.map",
+      "lib/index.js",
+      "lib/index.js.map",
+      "lib/ledger.d.ts",
+      "lib/ledger.d.ts.map",
+      "lib/ledger.js",
+      "lib/ledger.js.map",
+      "lib/runner.d.ts",
+      "lib/runner.d.ts.map",
+      "lib/runner.js",
+      "lib/runner.js.map",
+      "lib/service.d.ts",
+      "lib/service.d.ts.map",
+      "lib/service.js",
+      "lib/service.js.map",
+      "lib/tools.d.ts",
+      "lib/tools.d.ts.map",
+      "lib/tools.js",
+      "lib/tools.js.map",
+      "lib/types.d.ts",
+      "lib/types.d.ts.map",
+      "lib/types.js",
+      "lib/types.js.map",
+      "lib/version.d.ts",
+      "lib/version.d.ts.map",
+      "lib/version.js",
+      "lib/version.js.map",
+      "lib/workspace.d.ts",
+      "lib/workspace.d.ts.map",
+      "lib/workspace.js",
+      "lib/workspace.js.map",
+      "LICENSE",
+      "package.json",
+      "README.md",
+      "runtime/supervisor.mjs"
+    ]
+  },
+  "negativeControl": {
+    "id": "network-negative-v1",
+    "expectedExitCode": 1,
+    "observedHostCanaryCalls": 1,
+    "mutation": "Temporarily remove the Docker --network none arguments; normal expectation is zero Host HTTP canary requests.",
+    "restore": {
+      "sha256": "9958da058f25b654d8d0b477f4d4a17c64fb44f751ca615c8a40f26e4c3ff74c",
+      "restored": true
+    },
+    "note": "Control snapshot precedes the later cleanup-race hardening; final normal network tests also pass on the source hashes below."
+  },
+  "independentReview": {
+    "status": "PASS for implemented slice",
+    "writes": false,
+    "ranPnpm": false,
+    "scopeExcludes": [
+      "full WP08-10 completion",
+      "external action broker",
+      "disk quotas",
+      "installer bootstrap"
+    ]
+  },
+  "c2c": {
+    "taskId": "c2c_a91f",
+    "chatgptWebReview": false,
+    "usage": "Local command evidence; no available built-in browser for ChatGPT web review.",
+    "localCommandRecords": 21
+  },
+  "remaining": [
+    "Total scratch disk/inode quotas and production runtime bootstrap.",
+    "Independent external action and credential broker with short leases and no per-action approval for valid preauthorization.",
+    "Ongoing unknown cleanup, audit retention, version rollback and external irreversible-action compensation.",
+    "Real profile/model/account and full end-to-end autonomy evidence; remaining 18-package requirements unchanged."
+  ],
+  "commands": [
+    {
+      "id": "typecheck-v1",
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "exitCode": 2,
+      "outputPath": "/tmp/dsh-isolation-typecheck-v1.log",
+      "outputSha256": "c71a8fca6200539249434f2dfbc30a4942c75242e537623249ae209eb06ef89f"
+    },
+    {
+      "id": "typecheck-v2",
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-typecheck-v2.log",
+      "outputSha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    },
+    {
+      "id": "typecheck-v3",
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "exitCode": 2,
+      "outputPath": "/tmp/dsh-isolation-typecheck-v3.log",
+      "outputSha256": "ad0b7a379f4b2ec0a3788cd5f3451a1f6596f5a932df373049d904233b1d7fd8"
+    },
+    {
+      "id": "typecheck-v4",
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation typecheck",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-typecheck-v4.log",
+      "outputSha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    },
+    {
+      "id": "build-v1",
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation build",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-build-v1.log",
+      "outputSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "id": "build-v2",
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation build",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-build-v2.log",
+      "outputSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "id": "test-v1",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation test",
+      "exitCode": 1,
+      "outputPath": "/tmp/dsh-isolation-test-v1.log",
+      "outputSha256": "14cd328b2cbb62083b1926c1b481255e058675b002e45f06c4d3af95a0ac2bcb"
+    },
+    {
+      "id": "test-v2",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/index.spec.ts tests/ledger.spec.ts tests/workspace.spec.ts tests/runner.spec.ts",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-test-v2.log",
+      "outputSha256": "c1395e65b1dbb9b435396aa7c1b9fed1165d610a005c2731995d6c24840078f7"
+    },
+    {
+      "id": "test-v3",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/service.spec.ts tests/crash.spec.ts tests/runner.spec.ts tests/ledger.spec.ts tests/workspace.spec.ts tests/index.spec.ts --maxWorkers=1",
+      "exitCode": 1,
+      "outputPath": "/tmp/dsh-isolation-test-v3.log",
+      "outputSha256": "4892ab33cb4cae89d0cb1941fea61580bc571c9cbbeca9aa7d335dfcced3fb92"
+    },
+    {
+      "id": "test-v4",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation test --maxWorkers=1",
+      "exitCode": 1,
+      "outputPath": "/tmp/dsh-isolation-test-v4.log",
+      "outputSha256": "43c7dc107ad06868cae14a65b2fa8cd0bcb31c09a82ec6e626e9d55e6c3f9db9"
+    },
+    {
+      "id": "test-v5",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation test --maxWorkers=1",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-test-v5.log",
+      "outputSha256": "fac62a1ce1c825a883cbe391650476f5b606786e9843029a4aaec6e2b58a183b"
+    },
+    {
+      "id": "network-negative-v1",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/security.spec.ts -t \"blocks bridge access\" --maxWorkers=1",
+      "exitCode": 1,
+      "outputPath": "/tmp/dsh-isolation-network-negative-v1.log",
+      "outputSha256": "8d571251eccb656c6217009fda24b707fa93dc824f331fb2bd614c6c2e0c6db5"
+    },
+    {
+      "id": "check-v1",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "exitCode": 1,
+      "outputPath": "/tmp/dsh-isolation-check-v1.log",
+      "outputSha256": "2986157c69214dd8b2eb44f5846236b38109502d73b65802990f2c9768db20fc"
+    },
+    {
+      "id": "check-v2",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "exitCode": 1,
+      "outputPath": "/tmp/dsh-isolation-check-v2.log",
+      "outputSha256": "12b077c3421293282990035ba57a2137a27b5ffb9a318cab85ce892fc020e915"
+    },
+    {
+      "id": "build-v3",
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-isolation build",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-build-v3.log",
+      "outputSha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8"
+    },
+    {
+      "id": "check-v3",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "exitCode": 1,
+      "outputPath": "/tmp/dsh-isolation-check-v3.log",
+      "outputSha256": "7545a0fa7443423750996059175968c392ee51ddb28d37c03806d41dfece0a62"
+    },
+    {
+      "id": "check-v4",
+      "command": "CI=true VITEST_MAX_WORKERS=8 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-check-v4.log",
+      "outputSha256": "e1e76bd693c83a73a608b2e7a12c0a4c677c187ccb4360e0eb0d906944c9defd"
+    },
+    {
+      "id": "wake-regression-v1",
+      "command": "CI=true pnpm exec vitest run plugins/assistant-delivery/tests/agent-runtime.spec.ts -t 'persists a scheduled goal across Host reload' --maxWorkers=1",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-wake-regression-v1.log",
+      "outputSha256": "e552cd249742cc7ae8b5b0b8f824a76ee5c792ff2cb2b007dd13e208817ffd7c"
+    },
+    {
+      "id": "create-v1",
+      "command": "CI=true pnpm create:plugin assistant-isolation",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-create-v1.log",
+      "outputSha256": "62ebadbad68f6088e9bd6eebabdb072ef017e3e3d77050aa29621afe130ef9a0"
+    },
+    {
+      "id": "install-v1",
+      "command": "CI=true pnpm install --no-frozen-lockfile --ignore-scripts",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-install-v1.log",
+      "outputSha256": "0872aea9c22003e51e5ce1bf3aa0e591ada32e8e9f7c824cd91a463327a83d52"
+    },
+    {
+      "id": "revoke-race-v1",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/service.spec.ts --maxWorkers=1",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-revoke-race-v1.log",
+      "outputSha256": "64a690a7749853837b9db513f6a85bbc10fc79e02ef9661408bb42f9c609ff21"
+    },
+    {
+      "id": "revoke-race-v2",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/service.spec.ts --maxWorkers=1",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-revoke-race-v2.log",
+      "outputSha256": "70d4718d9bc260b730078a19f633da544614ea522944bde7e396572685c4d1b5"
+    },
+    {
+      "id": "revoke-race-v3",
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-isolation exec vitest run tests/service.spec.ts --maxWorkers=1",
+      "exitCode": 0,
+      "outputPath": "/tmp/dsh-isolation-revoke-race-v3.log",
+      "outputSha256": "fd5064ccc88ff818158fb805d97cd6c618ee5ddf1c147a777ab1d95dbd23c3f4"
+    }
+  ],
+  "sourceSha256": {
+    "docs/architecture.md": "97ecabaed34fd5005909fbb4c7676ba49094f6e162a05dc07423f47bda23bf41",
+    "docs/compatibility.md": "3d2a620f5ce2e8c690f77003bbda349372a71ca199dc6cb01a9add03428f6801",
+    "plugins/README.md": "4453de8ddc888f26998fc5793285c2c9a359135a0783d72170ea40b3121c6956",
+    "plugins/assistant-delivery/tests/agent-runtime.spec.ts": "74c6cf5c6bf96464c4b1b34785c4ad1eb246189cd23f7b1e1799205673f6e62e",
+    "plugins/assistant-isolation/LICENSE": "37f12999eefa6bde963be1da5403c897ecd2736ee99988ff26693335f68606e7",
+    "plugins/assistant-isolation/README.md": "a85b26f0bf30612620eb3a39265433e4cb731845a43c00bb018c722b99a4a187",
+    "plugins/assistant-isolation/cordis.patch.yml": "41443666c9a519eb69249bd14d0d1387e5d5f1a6cda225848dd1ec7c69aceb54",
+    "plugins/assistant-isolation/package.json": "ab478b9ba4bec9187d21583c483f88ad8ae17b7eb13a2585fb0dd4ee0660128a",
+    "plugins/assistant-isolation/runtime/supervisor.mjs": "fd9e329e71d6835c97d11ac5861046df5187f4c8cd950a76bac8802ef725de74",
+    "plugins/assistant-isolation/src/cli.ts": "3110bbc6b4e667aabad058e60cacf0e53d4929118d742dd0ea1eeab560b11dbb",
+    "plugins/assistant-isolation/src/config.ts": "0d27189059b1ceda3dab8f1322217a78e8a0bef4e33afaa6181a5abc10483132",
+    "plugins/assistant-isolation/src/index.ts": "7b045fcc945400ffef662076e435d7723fd5fd35278efa284336b6976ebf3e30",
+    "plugins/assistant-isolation/src/ledger.ts": "b155118df9eb84c6c725319b3b9831424b2ce2d32bc134f06a6b6e6432fcf777",
+    "plugins/assistant-isolation/src/runner.ts": "e4cee83adcb7dd6049823e28b6a6ec15e84c759acea27430fc755aef401d7043",
+    "plugins/assistant-isolation/src/service.ts": "7814288b05e5af088d16c806c16728aedeb49f01ff562feb957b77165914e529",
+    "plugins/assistant-isolation/src/tools.ts": "d2313e662e5ac662222f7b6cf56c6df108081208c502ff862d4250b97348435e",
+    "plugins/assistant-isolation/src/types.ts": "18afc011ad4284f46fdf1043a860f0ed9f39d21576c18b41c70ff4bbbf5e7a85",
+    "plugins/assistant-isolation/src/version.ts": "e1b18323af74400f9b81251674b87f8732fdc8009bfcad168de2b5e890c22f71",
+    "plugins/assistant-isolation/src/workspace.ts": "473750ac4135d93f8a02eec8e878ed53a793d01c575c633eb8c24a3731323f01",
+    "plugins/assistant-isolation/tests/crash.spec.ts": "39b9e1e89d27cd196fe02ca4522cbcb37698afe4e6fb7c3d4b6378edfd12ee5c",
+    "plugins/assistant-isolation/tests/index.spec.ts": "db070cb32e0bc746b0116fe6a0a0d6aab0c056840b2a5c0591d652936bbba5a8",
+    "plugins/assistant-isolation/tests/ledger.spec.ts": "391eca872af015b0fdbfdfead503ea53d5dedd435f0bd9bb24b1913f09f0cc1a",
+    "plugins/assistant-isolation/tests/runner.spec.ts": "b68371ce4bba3da6c32e39ed2f54e29757f01bc4bc01397a6329c2a5873cee8a",
+    "plugins/assistant-isolation/tests/security.spec.ts": "c962e86ad365966f761173d47096c54e7cb5ce2289ad5e44386bfd2826964be8",
+    "plugins/assistant-isolation/tests/service.spec.ts": "1a167b1527226d6b180fe204cd0b6e6bc49a5515b6bc3ed20a04356b4a11bdd6",
+    "plugins/assistant-isolation/tests/workspace.spec.ts": "84236762de0c8728e960382a8aee4b4e4ff0fc35f1108656d559a70a710ea6de",
+    "plugins/assistant-isolation/tsconfig.build.json": "b8b6960a9b3403690455e9c7314abc6b86d3832c6342ee43a1faaf1d3af52292",
+    "plugins/assistant-isolation/tsconfig.json": "e5d869d2ba42bc4d7e8a136364ae61b919767fceb9e6a3da084342aadc4f132a",
+    "pnpm-lock.yaml": "721c899e1ff91b5d89711f393fc7dbfd3cdd428e962241ce3abbaaf22f19cbf6"
+  }
+}

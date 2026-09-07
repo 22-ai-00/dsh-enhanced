@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-enhanced-assistant-isolation
+      name: '@dsh-enhanced/assistant-isolation'
