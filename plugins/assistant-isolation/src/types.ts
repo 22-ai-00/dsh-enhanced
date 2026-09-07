@@ -42,6 +42,29 @@ export interface IsolationLimits {
 }
 
 export type IsolationStatus = 'prepared' | 'running' | 'succeeded' | 'failed' | 'cancelled' | 'timed-out' | 'unknown'
+export interface IsolationContentDigest { sha256: string; bytes: number }
+export interface IsolationRetention {
+  kind: 'pruned'
+  version: 1
+  prunedAt: number
+  original: IsolationContentDigest
+  stdout: IsolationContentDigest
+  stderr: IsolationContentDigest
+  artifacts: Array<IsolationContentDigest & { path: string }>
+}
+export interface IsolationStoragePolicy {
+  maxStateBytes: number
+  maxJobRecords: number
+  /** Zero preserves all result bodies; positive ages explicitly enable pruning. */
+  resultRetentionMs: number
+}
+export interface IsolationStorageObservation { bytes: number; observedAt: number }
+export interface IsolationStorageBudget {
+  maxStateBytes: number
+  maxJobRecords: number
+  reservedBytes: number
+  observation?: IsolationStorageObservation
+}
 export interface IsolationResult {
   jobId: string
   status: Exclude<IsolationStatus, 'prepared' | 'running'>
@@ -51,6 +74,7 @@ export interface IsolationResult {
   stderr: string
   artifacts: IsolationFile[]
   reason?: string
+  retention?: IsolationRetention
 }
 
 export interface IsolationJob {
@@ -67,6 +91,8 @@ export interface IsolationJob {
   /** Conservative worker + workspace + keeper reservation; zero denotes legacy work. */
   reservedMemoryMiB: number
   reservedWorkspaceInodes: number
+  /** Conservative allowance for result/staging growth; zero denotes legacy work. */
+  reservedStorageBytes: number
   /** Persisted before handing any create authority to a supervisor. */
   dispatchAttempted: boolean
   /** Host-only diagnostic evidence; never an authorization to release resources. */

@@ -5,7 +5,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { processExited, sameDaemonWitness, validateCreationWitness, type CreationWitness, type DaemonWitness } from './runtime-witness.js'
 import type { SystemdBinding } from './daemon-binding.js'
 import { receiptData, type IsolationCleanupReceipt } from './cleanup-receipt.js'
-import type { IsolationGrant, IsolationIdentity, IsolationJob, IsolationResult, IsolationStatus } from './types.js'
+import { pruneResult, validateRetention } from './storage-policy.js'
+import type { IsolationGrant, IsolationIdentity, IsolationJob, IsolationResult, IsolationStatus, IsolationStorageBudget } from './types.js'
 
 export type IsolationLedgerErrorCode = 'conflict' | 'invalid-input' | 'invalid-path' | 'invalid-state' | 'not-found' | 'schema' | 'schema-too-new' | 'unauthorized'
 
@@ -14,7 +15,7 @@ export class IsolationLedgerError extends Error {
 }
 export interface IsolationControllerAuthority { ownerId: string; fence: number }
 
-const schemaVersion = 4
+const schemaVersion = 5
 const outputMaximum = 1_048_576
 const artifactMaximum = 128
 const textMaximum = 16_384
@@ -42,18 +43,20 @@ function grant(value: IsolationGrant): IsolationGrant {
 
 function grantDigest(value: IsolationGrant): string { return JSON.stringify(value) }
 
-function result(value: IsolationResult): IsolationResult {
+function result(value: IsolationResult, allowRetention = false): IsolationResult {
   if (!value || typeof value !== 'object' || !text(value.jobId) || !['succeeded', 'failed', 'cancelled', 'timed-out', 'unknown'].includes(value.status)
     || typeof value.quiescent !== 'boolean' || typeof value.stdout !== 'string' || typeof value.stderr !== 'string'
     || value.stdout.length > outputMaximum || value.stderr.length > outputMaximum || !Array.isArray(value.artifacts) || value.artifacts.length > artifactMaximum
     || (value.exitCode !== undefined && (!Number.isSafeInteger(value.exitCode) || value.exitCode < -1_000_000 || value.exitCode > 1_000_000))
     || (value.reason !== undefined && (typeof value.reason !== 'string' || value.reason.length > textMaximum))
     || !value.artifacts.every(item => item && typeof item === 'object' && typeof item.path === 'string' && item.path.length <= textMaximum && typeof item.content === 'string' && item.content.length <= outputMaximum)) fail('invalid-input', 'invalid isolation result')
-  return frozen({ jobId: value.jobId, status: value.status, quiescent: value.quiescent, ...(value.exitCode === undefined ? {} : { exitCode: value.exitCode }), stdout: value.stdout, stderr: value.stderr, artifacts: value.artifacts.map(item => ({ path: item.path, content: item.content })), ...(value.reason === undefined ? {} : { reason: value.reason }) })
+  const retention = value.retention === undefined ? undefined : validateRetention(value.retention)
+  if (value.retention !== undefined && (!allowRetention || !retention || value.status === 'unknown' || !value.quiescent || value.stdout !== '' || value.stderr !== '' || value.artifacts.length !== 0)) fail('invalid-input', 'invalid pruned isolation result')
+  return frozen({ jobId: value.jobId, status: value.status, quiescent: value.quiescent, ...(value.exitCode === undefined ? {} : { exitCode: value.exitCode }), stdout: value.stdout, stderr: value.stderr, artifacts: value.artifacts.map(item => ({ path: item.path, content: item.content })), ...(value.reason === undefined ? {} : { reason: value.reason }), ...(retention ? { retention } : {}) })
 }
 
 type GrantRow = { id: string; digest: string; revision: number; expires_at: number; max_runs: number; max_total_duration_ms: number; revoked: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string }
-type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null }
+type JobRow = { id: string; grant_id: string; grant_revision: number; principal_digest: string; principal_record_id: string; principal_version: number; workspace: string; agent_preset: string; session_id: string; idempotency_key: string; request_digest: string; container_name: string; deadline: number; reserved_duration_ms: number; reserved_memory_mib: number; reserved_workspace_inodes: number; reserved_storage_bytes: number; status: IsolationStatus; version: number; created_at: number; updated_at: number; result_json: string | null; dispatch_attempted: number; creation_witness_json: string | null }
 type ResourceReservation = { memoryMiB: number; workspaceInodes: number; maxMemoryMiB: number; maxWorkspaceInodes: number }
 
 function open(path: string): DatabaseSync {
@@ -68,16 +71,16 @@ function open(path: string): DatabaseSync {
     }
     const version = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
     if (version > schemaVersion) fail('schema-too-new')
-    if (version === 0) database.exec(`BEGIN IMMEDIATE;
+    if (version === 0) database.exec(`PRAGMA auto_vacuum = INCREMENTAL; VACUUM; BEGIN IMMEDIATE;
       CREATE TABLE schema_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT;
-      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '4');
+      INSERT INTO schema_meta(key, value) VALUES ('schema-version', '5');
       CREATE TABLE isolation_grants (id TEXT PRIMARY KEY, digest TEXT NOT NULL, revision INTEGER NOT NULL, expires_at INTEGER NOT NULL, max_runs INTEGER NOT NULL, max_total_duration_ms INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0,1)), revoke_reason TEXT, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL) STRICT;
-      CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
+      CREATE TABLE isolation_jobs (id TEXT PRIMARY KEY, grant_id TEXT NOT NULL, grant_revision INTEGER NOT NULL, principal_digest TEXT NOT NULL, principal_record_id TEXT NOT NULL, principal_version INTEGER NOT NULL, workspace TEXT NOT NULL, agent_preset TEXT NOT NULL, session_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, request_digest TEXT NOT NULL, container_name TEXT NOT NULL UNIQUE, deadline INTEGER NOT NULL, reserved_duration_ms INTEGER NOT NULL, reserved_memory_mib INTEGER NOT NULL DEFAULT 0, reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0, reserved_storage_bytes INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL CHECK(status IN ('prepared','running','succeeded','failed','cancelled','timed-out','unknown')), version INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, result_json TEXT, dispatch_attempted INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_attempted IN (0,1)), creation_witness_json TEXT, UNIQUE(principal_digest, principal_record_id, principal_version, workspace, agent_preset, session_id, grant_id, idempotency_key)) STRICT;
       CREATE INDEX isolation_jobs_grant ON isolation_jobs(grant_id);
       CREATE INDEX isolation_jobs_recoverable ON isolation_jobs(status, updated_at);
       CREATE TABLE isolation_audit (sequence INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL, action TEXT NOT NULL, job_id TEXT, grant_id TEXT, detail TEXT NOT NULL) STRICT;
       CREATE TABLE isolation_controller (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;
-      PRAGMA user_version = 4; COMMIT;`)
+      PRAGMA user_version = 5; COMMIT;`)
     if (version === 1) database.exec(`BEGIN IMMEDIATE;
       ALTER TABLE isolation_jobs ADD COLUMN reserved_memory_mib INTEGER NOT NULL DEFAULT 0;
       ALTER TABLE isolation_jobs ADD COLUMN reserved_workspace_inodes INTEGER NOT NULL DEFAULT 0;
@@ -90,7 +93,8 @@ function open(path: string): DatabaseSync {
       UPDATE schema_meta SET value='3' WHERE key='schema-version';
       PRAGMA user_version = 3; COMMIT;`)
     if ([1, 2, 3].includes(version)) database.exec(`BEGIN IMMEDIATE; UPDATE schema_meta SET value='4' WHERE key='schema-version'; PRAGMA user_version=4; COMMIT;`)
-    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== schemaVersion) fail('schema')
+    if ([1, 2, 3, 4].includes(version)) database.exec(`BEGIN IMMEDIATE; ALTER TABLE isolation_jobs ADD COLUMN reserved_storage_bytes INTEGER NOT NULL DEFAULT 0; UPDATE schema_meta SET value='5' WHERE key='schema-version'; PRAGMA user_version=5; COMMIT;`)
+    if (version !== 0 && version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== schemaVersion) fail('schema')
     if (path !== ':memory:') chmodSync(path, 0o600)
     return database
   } catch (error) { database.close(); throw error }
@@ -118,7 +122,7 @@ export class IsolationLedger {
   }
   #decodeJob(row: JobRow): IsolationJob {
     const jobIdentity = identity({ principalDigest: row.principal_digest, principalRecordId: row.principal_record_id, principalVersion: row.principal_version, workspace: row.workspace, agentPreset: row.agent_preset })
-    if (!text(row.id) || !text(row.grant_id) || !safePositive(row.grant_revision) || !text(row.session_id) || !text(row.idempotency_key) || !text(row.request_digest) || !text(row.container_name) || !positiveTime(row.deadline) || !safePositive(row.reserved_duration_ms) || !safeTime(row.reserved_memory_mib) || !safeTime(row.reserved_workspace_inodes) || !safePositive(row.version) || !safeTime(row.created_at) || !safeTime(row.updated_at) || row.updated_at < row.created_at || !['prepared', 'running', 'succeeded', 'failed', 'cancelled', 'timed-out', 'unknown'].includes(row.status)) fail('schema')
+    if (!text(row.id) || !text(row.grant_id) || !safePositive(row.grant_revision) || !text(row.session_id) || !text(row.idempotency_key) || !text(row.request_digest) || !text(row.container_name) || !positiveTime(row.deadline) || !safePositive(row.reserved_duration_ms) || !safeTime(row.reserved_memory_mib) || !safeTime(row.reserved_workspace_inodes) || !safeTime(row.reserved_storage_bytes) || !safePositive(row.version) || !safeTime(row.created_at) || !safeTime(row.updated_at) || row.updated_at < row.created_at || !['prepared', 'running', 'succeeded', 'failed', 'cancelled', 'timed-out', 'unknown'].includes(row.status)) fail('schema')
     if (![0, 1].includes(row.dispatch_attempted)) fail('schema')
     let witness: CreationWitness | undefined
     if (row.creation_witness_json !== null) {
@@ -126,9 +130,9 @@ export class IsolationLedger {
       if (!row.dispatch_attempted) fail('schema')
     }
     let parsed: IsolationResult | undefined
-    if (row.result_json !== null) { try { parsed = result(JSON.parse(row.result_json) as IsolationResult) } catch { fail('schema') }; if (parsed.jobId !== row.id || (row.status === 'prepared' || row.status === 'running') || parsed.status !== row.status) fail('schema') }
+    if (row.result_json !== null) { try { parsed = result(JSON.parse(row.result_json) as IsolationResult, true) } catch { fail('schema') }; if (parsed.jobId !== row.id || (row.status === 'prepared' || row.status === 'running') || parsed.status !== row.status) fail('schema') }
     else if (row.status !== 'prepared' && row.status !== 'running') fail('schema')
-    return frozen({ id: row.id, grantId: row.grant_id, grantRevision: row.grant_revision, identity: jobIdentity, sessionId: row.session_id, idempotencyKey: row.idempotency_key, requestDigest: row.request_digest, containerName: row.container_name, deadline: row.deadline, reservedDurationMs: row.reserved_duration_ms, reservedMemoryMiB: row.reserved_memory_mib, reservedWorkspaceInodes: row.reserved_workspace_inodes, dispatchAttempted: row.dispatch_attempted === 1, ...(witness ? { creationWitness: witness } : {}), status: row.status, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at, ...(parsed ? { result: parsed } : {}) })
+    return frozen({ id: row.id, grantId: row.grant_id, grantRevision: row.grant_revision, identity: jobIdentity, sessionId: row.session_id, idempotencyKey: row.idempotency_key, requestDigest: row.request_digest, containerName: row.container_name, deadline: row.deadline, reservedDurationMs: row.reserved_duration_ms, reservedMemoryMiB: row.reserved_memory_mib, reservedWorkspaceInodes: row.reserved_workspace_inodes, reservedStorageBytes: row.reserved_storage_bytes, dispatchAttempted: row.dispatch_attempted === 1, ...(witness ? { creationWitness: witness } : {}), status: row.status, version: row.version, createdAt: row.created_at, updatedAt: row.updated_at, ...(parsed ? { result: parsed } : {}) })
   }
   syncGrants(grants: IsolationGrant[], authority?: IsolationControllerAuthority): void {
     if (!Array.isArray(grants)) fail('invalid-input')
@@ -144,10 +148,12 @@ export class IsolationLedger {
       for (const row of this.#database.prepare('SELECT id, revision, revoked FROM isolation_grants').all() as Array<{ id: string; revision: number; revoked: number }>) if (!seen.has(row.id) && row.revoked === 0) { this.#database.prepare('UPDATE isolation_grants SET revoked=1, revoke_reason=? WHERE id=?').run('removed-from-config', row.id); this.#audit(now, 'grant-revoked', null, row.id, 'removed-from-config') }
     })
   }
-  prepare(input: { identity: IsolationIdentity; sessionId: string; grantId: string; idempotencyKey: string; requestDigest: string; durationMs: number; maxActiveJobs?: number; authority?: IsolationControllerAuthority; resourceReservation?: ResourceReservation }): { job: IsolationJob; created: boolean } {
-    if (!input || typeof input !== 'object' || ![6, 7, 8, 9].includes(Object.keys(input).length) || !onlyKeys(input, ['identity', 'sessionId', 'grantId', 'idempotencyKey', 'requestDigest', 'durationMs', 'maxActiveJobs', 'authority', 'resourceReservation']) || !text(input.sessionId) || !text(input.grantId) || !text(input.idempotencyKey) || !text(input.requestDigest) || !safePositive(input.durationMs) || (input.maxActiveJobs !== undefined && !safePositive(input.maxActiveJobs))) fail('invalid-input')
+  prepare(input: { identity: IsolationIdentity; sessionId: string; grantId: string; idempotencyKey: string; requestDigest: string; durationMs: number; maxActiveJobs?: number; authority?: IsolationControllerAuthority; resourceReservation?: ResourceReservation; storageBudget?: IsolationStorageBudget }): { job: IsolationJob; created: boolean } {
+    if (!input || typeof input !== 'object' || ![6, 7, 8, 9, 10].includes(Object.keys(input).length) || !onlyKeys(input, ['identity', 'sessionId', 'grantId', 'idempotencyKey', 'requestDigest', 'durationMs', 'maxActiveJobs', 'authority', 'resourceReservation', 'storageBudget']) || !text(input.sessionId) || !text(input.grantId) || !text(input.idempotencyKey) || !text(input.requestDigest) || !safePositive(input.durationMs) || (input.maxActiveJobs !== undefined && !safePositive(input.maxActiveJobs))) fail('invalid-input')
     const reservation = input.resourceReservation === undefined ? undefined : input.resourceReservation
     if (reservation !== undefined && (!reservation || typeof reservation !== 'object' || Object.keys(reservation).length !== 4 || !onlyKeys(reservation, ['memoryMiB', 'workspaceInodes', 'maxMemoryMiB', 'maxWorkspaceInodes']) || !safePositive(reservation.memoryMiB) || !safePositive(reservation.workspaceInodes) || !safePositive(reservation.maxMemoryMiB) || !safePositive(reservation.maxWorkspaceInodes) || reservation.memoryMiB > reservation.maxMemoryMiB || reservation.workspaceInodes > reservation.maxWorkspaceInodes)) fail('invalid-input', 'invalid resource reservation')
+    const storage = input.storageBudget
+    if (storage !== undefined && (!storage || typeof storage !== 'object' || !onlyKeys(storage, ['maxStateBytes', 'maxJobRecords', 'reservedBytes', 'observation']) || ![3, 4].includes(Object.keys(storage).length) || !safePositive(storage.maxStateBytes) || !safePositive(storage.maxJobRecords) || !safePositive(storage.reservedBytes) || (storage.observation !== undefined && (!storage.observation || typeof storage.observation !== 'object' || Object.keys(storage.observation).length !== 2 || !onlyKeys(storage.observation, ['bytes', 'observedAt']) || !safeTime(storage.observation.bytes) || !safeTime(storage.observation.observedAt))))) fail('invalid-input', 'invalid storage budget')
     const who = identity(input.identity); const controller = this.#authority(input.authority)
     return this.#transaction(() => { const now = this.#nowValue(); this.#requireController(controller, now); const existing = this.#database.prepare('SELECT * FROM isolation_jobs WHERE principal_digest=? AND principal_record_id=? AND principal_version=? AND workspace=? AND agent_preset=? AND session_id=? AND grant_id=? AND idempotency_key=?').get(who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.grantId, input.idempotencyKey) as JobRow | undefined
       if (existing) { const job = this.#decodeJob(existing); if (job.requestDigest !== input.requestDigest) fail('conflict', 'idempotency key has a different request digest'); return { job, created: false } }
@@ -166,9 +172,25 @@ export class IsolationLedger {
         const resources = this.#database.prepare(`SELECT COALESCE(SUM(reserved_memory_mib), 0) AS memory, COALESCE(SUM(reserved_workspace_inodes), 0) AS inodes FROM isolation_jobs WHERE ${occupied}`).get() as { memory: number; inodes: number }
         if (!safeTime(resources.memory) || !safeTime(resources.inodes) || resources.memory > reservation.maxMemoryMiB - reservation.memoryMiB || resources.inodes > reservation.maxWorkspaceInodes - reservation.workspaceInodes) fail('unauthorized', 'isolation resource pool exhausted')
       }
+      if (storage) {
+        const observation = storage.observation
+        if (!observation) fail('unauthorized', 'storage observation unavailable')
+        if (observation.observedAt > now || now - observation.observedAt > 5_000) fail('invalid-input', 'storage observation is stale')
+        const records = this.#database.prepare('SELECT COUNT(*) AS count FROM isolation_jobs').get() as { count: number }
+        if (!safeTime(records.count) || records.count >= storage.maxJobRecords) fail('unauthorized', 'isolation job record limit reached')
+        const occupied = "status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)"
+        const legacy = this.#database.prepare(`SELECT COUNT(*) AS count FROM isolation_jobs WHERE (${occupied}) AND reserved_storage_bytes = 0`).get() as { count: number }
+        if (!safeTime(legacy.count) || legacy.count > 0) fail('unauthorized', 'active legacy job has no storage reservation')
+        const reservations = this.#database.prepare(`SELECT COALESCE(SUM(reserved_storage_bytes), 0) AS bytes FROM isolation_jobs WHERE ${occupied}`).get() as { bytes: number }
+        if (!safeTime(reservations.bytes)) fail('schema')
+        const reserved = reservations.bytes + storage.reservedBytes
+        // SQLite reusable pages cannot cover staging growth outside the database.
+        // Keep the whole future allocation even when that double-counts reusable space.
+        if (!safeTime(reserved) || observation.bytes > storage.maxStateBytes || reserved > storage.maxStateBytes - observation.bytes) fail('unauthorized', 'isolation storage budget exhausted')
+      }
       const id = randomUUID(); const deadline = Math.min(now + input.durationMs, current.expires_at)
-      this.#database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,dispatch_attempted,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0, 'prepared',1,?,?)").run(id, input.grantId, current.revision, who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.idempotencyKey, input.requestDigest, `dsh-isolation-${id}`, deadline, input.durationMs, reservation?.memoryMiB ?? 0, reservation?.workspaceInodes ?? 0, now, now)
-      this.#audit(now, 'job-prepared', id, input.grantId, `revision:${current.revision}${reservation ? `;reservation:memoryMiB:${reservation.memoryMiB},workspaceInodes:${reservation.workspaceInodes}` : ''}`)
+      this.#database.prepare("INSERT INTO isolation_jobs(id,grant_id,grant_revision,principal_digest,principal_record_id,principal_version,workspace,agent_preset,session_id,idempotency_key,request_digest,container_name,deadline,reserved_duration_ms,reserved_memory_mib,reserved_workspace_inodes,reserved_storage_bytes,dispatch_attempted,status,version,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,0, 'prepared',1,?,?)").run(id, input.grantId, current.revision, who.principalDigest, who.principalRecordId, who.principalVersion, who.workspace, who.agentPreset, input.sessionId, input.idempotencyKey, input.requestDigest, `dsh-isolation-${id}`, deadline, input.durationMs, reservation?.memoryMiB ?? 0, reservation?.workspaceInodes ?? 0, storage?.reservedBytes ?? 0, now, now)
+      this.#audit(now, 'job-prepared', id, input.grantId, `revision:${current.revision}${reservation ? `;reservation:memoryMiB:${reservation.memoryMiB},workspaceInodes:${reservation.workspaceInodes}` : ''}${storage ? `;storageBytes:${storage.reservedBytes}` : ''}`)
       return { job: this.#job(id)!, created: true }
     })
   }
@@ -282,7 +304,7 @@ export class IsolationLedger {
   }
   renewController(authority: IsolationControllerAuthority, ttlMs: number): boolean {
     const controller = this.#authority(authority); if (!controller || !safePositive(ttlMs)) fail('invalid-input')
-    return this.#transaction(() => { const now = this.#nowValue(); const expiresAt = now + ttlMs; if (!safeTime(expiresAt)) fail('invalid-input'); const changed = this.#database.prepare('UPDATE isolation_controller SET expires_at=? WHERE singleton=1 AND owner_id=? AND fence=? AND expires_at>?').run(expiresAt, controller.ownerId, controller.fence, now); if (changed.changes === 1) this.#audit(now, 'controller-renewed', null, null, `fence:${controller.fence}`); return changed.changes === 1 })
+    return this.#transaction(() => { const now = this.#nowValue(); const expiresAt = now + ttlMs; if (!safeTime(expiresAt)) fail('invalid-input'); const changed = this.#database.prepare('UPDATE isolation_controller SET expires_at=? WHERE singleton=1 AND owner_id=? AND fence=? AND expires_at>?').run(expiresAt, controller.ownerId, controller.fence, now); return changed.changes === 1 })
   }
   releaseController(authority: IsolationControllerAuthority): void {
     const controller = this.#authority(authority); if (!controller) fail('invalid-input')
@@ -291,6 +313,59 @@ export class IsolationLedger {
   hasController(authority: IsolationControllerAuthority): boolean { const controller = this.#authority(authority); if (!controller) return false; const row = this.#database.prepare('SELECT owner_id, fence, expires_at FROM isolation_controller WHERE singleton=1').get() as { owner_id: string; fence: number; expires_at: number } | undefined; return !!row && row.owner_id === controller.ownerId && row.fence === controller.fence && safeTime(row.expires_at) && row.expires_at > this.#nowValue() }
   get(jobId: string): IsolationJob | undefined { if (!text(jobId)) fail('invalid-input'); return this.#job(jobId) }
   recoverable(afterId = ''): IsolationJob[] { return (this.#database.prepare("SELECT * FROM isolation_jobs WHERE id > ? AND (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)) ORDER BY id ASC LIMIT 1000").all(afterId) as JobRow[]).map(row => this.#decodeJob(row)).filter(job => job.status === 'prepared' || job.status === 'running' || job.result?.quiescent === false) }
+  retentionCandidates(cutoff: number, afterId = '', limit = 16): Array<{ id: string; version: number }> {
+    if (!safeTime(cutoff) || typeof afterId !== 'string' || afterId.length > textMaximum || !safePositive(limit) || limit > 1_000) fail('invalid-input')
+    const rows = this.#database.prepare("SELECT id, version FROM isolation_jobs WHERE id > ? AND updated_at <= ? AND status IN ('succeeded','failed','cancelled','timed-out') AND result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 1 AND json_extract(result_json, '$.retention') IS NULL ORDER BY id ASC LIMIT ?").all(afterId, cutoff, limit) as Array<{ id: string; version: number }>
+    if (!rows.every(row => text(row.id) && safePositive(row.version))) fail('schema')
+    return rows.map(row => frozen({ id: row.id, version: row.version }))
+  }
+  compactResult(id: string, expectedVersion: number, cutoff: number, authority: IsolationControllerAuthority): { changed: boolean; removedBytes: number } {
+    if (!text(id) || !safePositive(expectedVersion) || !safeTime(cutoff)) fail('invalid-input')
+    const controller = this.#authority(authority); if (!controller) fail('invalid-input')
+    return this.#transaction(() => {
+      const now = this.#nowValue(); this.#requireController(controller, now)
+      const job = this.#job(id)
+      if (!job) fail('not-found')
+      if (job.version !== expectedVersion) fail('conflict')
+      if (job.updatedAt > cutoff || !['succeeded', 'failed', 'cancelled', 'timed-out'].includes(job.status) || !job.result || !job.result.quiescent || job.result.retention) return { changed: false, removedBytes: 0 }
+      // Candidate eligibility is based on the job timestamp; pruning itself is deterministic.
+      const compacted = pruneResult(job.result, now)
+      if (!compacted) return { changed: false, removedBytes: 0 }
+      const before = Buffer.byteLength(JSON.stringify(job.result), 'utf8')
+      const after = Buffer.byteLength(JSON.stringify(compacted), 'utf8')
+      const removedBytes = Math.max(0, before - after)
+      const changed = this.#database.prepare("UPDATE isolation_jobs SET result_json=?, version=version+1, updated_at=? WHERE id=? AND version=? AND status IN ('succeeded','failed','cancelled','timed-out')").run(JSON.stringify(compacted), now, id, expectedVersion)
+      if (changed.changes !== 1) fail('conflict')
+      this.#audit(now, 'job-result-pruned', id, job.grantId, JSON.stringify({ original: compacted.retention!.original, prunedAt: compacted.retention!.prunedAt, version: expectedVersion }))
+      return { changed: true, removedBytes }
+    })
+  }
+  storageStats(): { jobRecords: number; reusableBytes: number; activeReservedBytes: number; legacyActiveJobs: number } {
+    const counts = this.#database.prepare("SELECT COUNT(*) AS jobRecords, COALESCE(SUM(CASE WHEN status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0) THEN reserved_storage_bytes ELSE 0 END), 0) AS activeReservedBytes, COUNT(CASE WHEN (status IN ('prepared','running') OR (result_json IS NOT NULL AND json_extract(result_json, '$.quiescent') = 0)) AND reserved_storage_bytes = 0 THEN 1 END) AS legacyActiveJobs FROM isolation_jobs").get() as { jobRecords: number; activeReservedBytes: number; legacyActiveJobs: number }
+    const pages = this.#database.prepare('PRAGMA page_size').get() as { page_size: number }
+    const free = this.#database.prepare('PRAGMA freelist_count').get() as { freelist_count: number }
+    if (!safeTime(counts.jobRecords) || !safeTime(counts.activeReservedBytes) || !safeTime(counts.legacyActiveJobs) || !safePositive(pages.page_size) || !safeTime(free.freelist_count) || free.freelist_count > Math.floor(Number.MAX_SAFE_INTEGER / pages.page_size)) fail('schema')
+    return frozen({ jobRecords: counts.jobRecords, reusableBytes: free.freelist_count * pages.page_size, activeReservedBytes: counts.activeReservedBytes, legacyActiveJobs: counts.legacyActiveJobs })
+  }
+  maintainStorage(authority: IsolationControllerAuthority): { checkpoint: 'complete' | 'busy'; reclaimMode: 'incremental' | 'page-reuse' } {
+    const controller = this.#authority(authority); if (!controller) fail('invalid-input')
+    const now = this.#nowValue(); this.#requireController(controller, now)
+    const auto = this.#database.prepare('PRAGMA auto_vacuum').get() as { auto_vacuum: number }
+    if (auto.auto_vacuum !== 0 && auto.auto_vacuum !== 2) fail('schema')
+    let checkpoint: 'complete' | 'busy' = 'complete'
+    try {
+      this.#database.exec('PRAGMA busy_timeout = 0')
+      const initial = this.#database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy?: number } | undefined
+      if (!initial || initial.busy !== 0) checkpoint = 'busy'
+      else if (auto.auto_vacuum === 2) {
+        this.#database.exec('PRAGMA incremental_vacuum(64)')
+        const final = this.#database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get() as { busy?: number } | undefined
+        if (!final || final.busy !== 0) checkpoint = 'busy'
+      }
+    } finally { this.#database.exec('PRAGMA busy_timeout = 5000') }
+    this.#requireController(controller, this.#nowValue())
+    return frozen({ checkpoint, reclaimMode: auto.auto_vacuum === 2 ? 'incremental' : 'page-reuse' })
+  }
   usable(jobId: string): boolean { const job = this.#job(jobId); if (!job || !['prepared', 'running'].includes(job.status) || job.deadline <= this.#nowValue()) return false; const current = this.#grant(job.grantId); return !!current && !current.revoked && current.revision === job.grantRevision && current.expires_at > this.#nowValue() && current.principal_digest === job.identity.principalDigest && current.principal_record_id === job.identity.principalRecordId && current.principal_version === job.identity.principalVersion && current.workspace === job.identity.workspace && current.agent_preset === job.identity.agentPreset }
   close(): void { this.#database.close() }
 }

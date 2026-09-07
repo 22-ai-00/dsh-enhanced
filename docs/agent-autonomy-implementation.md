@@ -313,3 +313,21 @@ WP08–10 的下一切片已接入 Host 后台恢复与独立 `dsh-isolation rec
 最终冻结代码的 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check` 退出 0（`/tmp/dsh-reconcile-check-v4.log` / `.exit`）：主 263 文件/3560 测试、Isolation 17 文件/74 测试通过，26 插件与 3 共享库全部 lint/typecheck/build 和 29 份 dry-run pack 通过。Isolation 包含 61 个发布文件，已检查新清理/诊断/恢复模块均在包内、无源码测试或运行状态。19 份源码哈希及全部 16 条成功/失败执行记录见[结构化证据](evidence/isolation-reconciliation-2026-09-07.json)。临时日志不随 Git 同步；C2C c2c_fc42 只有本地执行记录，没有实际 ChatGPT 网页评审。最终独立 verifier 结论以结构化证据为准。
 
 仍未完成：回执缺失、被中断的 mutation 与 Docker 代次变化均继续占用；systemd InvocationID 只是诊断，不能证明 containerd/shim 或迟到请求已经停止，因此未开放 daemon 重启后的自动释放。动作/凭据 broker、审计与结果 retention、完整自治安装及综合业务闭环继续推进。全部 18 项仍为 **3 项已验证、7 项实现中、8 项待做**；没有按天/周等待，也不以交付后长期观察阻塞当前开发。
+
+
+### WP08–10：隔离结果保留与存储准入（2026-09-07）
+
+本切片基于 `8b31916`：schema v5 保留 v1–v4 的 job、身份、请求摘要、witness 和累计 grant 用量，增加每任务存储预留。新请求先观测私有状态目录的 DB/WAL/SHM/staging 等占用，再在事务中核对记录数与活动预留；观测缺失、过期、异常路径或超过上限时拒绝新 key，旧 key 仍能读取。默认 256 MiB / 10,000 条记录；这是实际占用的准入保护，不能声称对整个文件系统实现硬配额。SQLite freelist 仅报告，不抵扣数据库外的暂存增长。
+
+正文清理默认关闭（`resultRetentionMs=0`），显式正年龄启用后，每次最多处理 16 个已确认停止的已知终态；unknown 即使 quiescent 也保留。清理保留状态、exit code、reason 和原正文/各 artifact 的 SHA-256、UTF-8 字节数及明确的 `retention.kind=pruned`，不伪装原始空输出，不重新执行命令，也不删除幂等凭证或退款。较小正文及旧格式 artifact 元数据无法安全转换时保留原文。周期续租不再无限追加心跳审计，生命周期审计继续保留。
+
+Host 后台和独立运维 `dsh-isolation maintain` 共用 controller fence/CAS 和有限页维护；活跃 Host 拒绝竞争 CLI。只清理已知停止 job 的精确暂存路径，保留 unknown/live/orphan；新库 incremental vacuum、旧库 page reuse，WAL reader pin 返回 busy 而不打断读者。逻辑正文减少不等于物理空间已释放，无法据此声称安全擦除。
+
+定向验证包含真实 Docker→持久结果→记录数拒绝→停止 Host→CLI 剪裁→恢复同请求的完整路径，实际只出现一次 supervisor 派发且累计次数/时长不变；观测失败时原请求仍可回读。另有真实 WAL pinned reader、跨连接存储预留、旧库迁移、过期 fence、CAS、forged retention 和大 freelist 不抵扣的回归。最终全仓结果和独立结论记录于 [结构化证据](evidence/isolation-storage-2026-09-07.json)。早期失败与修复保留，不计为通过。
+
+剩余范围：硬状态根配额、历史审计归档策略、被中断/缺失回执的 unknown 与 daemon 换代对账、独立动作/凭据 broker、补偿/回滚、完整自治安装及真实综合闭环。全部 18 项仍为 **3 已验证 / 7 实现中 / 8 待做**，不受按天/周估算或已取消的两周观察门槛限制。Codex with ChatGPT 本轮任务 `c2c_8e31` 只有本地执行记录；内置浏览器不可用，未取得 ChatGPT 网页规划或评审。
+
+
+全量 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check` 退出 0（`/tmp/dsh-storage-check-v1.log` / `.log.exit`）：主 266 文件/3,577 测试、Isolation 20 文件/92 测试通过，26 插件/3 共享库全构建及 29 个 dry-run pack 通过。Isolation 69 个发布文件已检查包含两组新 storage 模块、CLI、README/patch/LICENSE，无测试或状态数据。主测试完成后新增的后台维护用例由后续包级测试覆盖；检查启动后加入的旧格式保护和该用例，另经最终全仓 lint 与 Isolation typecheck 退出 0（`/tmp/dsh-storage-final-static.log` / `.log.exit`）。14 个生产/测试/包文档哈希和 6 条根执行命令的成功失败记录见结构化证据；独立最终复核状态以证据为准。
+
+独立 verifier 最终 **PASS**：14 份源文件哈希无差异，复核最终退出码、后置检查、真实 Docker/后台维护与 pack 清单及限制。主协调接受本存储切片；完整 18 项仍保持未完成。
