@@ -4,7 +4,7 @@
 
 ## 安装与启用
 
-本包目前是开发中的独立 bundle，尚未加入标准助手安装场景。正式发布后可安装到已有 profile：
+本包目前是开发中的独立 bundle，已接入显式 `web` 安装场景的目标上下文组合；步骤验收、整体结果与累计预算仍需配置。正式发布后也可安装到已有 profile：
 
 ```sh
 dsh plugin --profile web add @dsh-enhanced/assistant-goals
@@ -13,7 +13,7 @@ dsh --profile web --dump-config
 
 Host 须提供 `0.1.2-rc.1` 的 AgentRegistry、GoalService、SessionProjectionRegistry，以及本仓库当前版本的 `assistant-delivery` 和 `assistant-policy`。工具需要 ToolRuntime，动态上下文需要启用 runtime context 的 SystemPrompt。缺少必需服务时插件保持未就绪，不从模型参数推断身份。安装本包不会安装或启用原生 goal-round-driver，不会启动新的模型循环。
 
-**仅有 Web 对话不构成 Delivery owner 证明。** 当前入口要求已有 Delivery 配对和实际 owner 会话；独立 Web owner 配对及一键自治安装尚在开发。使用全局旧版 DSH 或只复用 Web 模型线路，也不能代替 Host 兼容性验证。
+**仅有 Web 对话不构成 Delivery owner 证明。** 当前入口要求已有 Delivery 配对和实际 owner 会话；`assistant-web-owner` 与 Web setup 已提供固定本地 owner 的入口。完整自治验收、生产计量和隔离安装仍在开发。使用全局旧版 DSH 或只复用 Web 模型线路，也不能代替 Host 兼容性验证。
 
 可覆盖 bundle 配置：
 

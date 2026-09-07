@@ -24,6 +24,7 @@
     "release:supersede": "node ./scripts/release-version.mjs supersede",
     "test": "pnpm run build && vitest run --testTimeout=15000 tests && pnpm --recursive --if-present run test",
     "test:web-owner": "playwright test --config scripts/e2e/playwright.config.mjs",
+    "test:web-owner:real": "playwright test --config scripts/e2e/playwright-real.config.mjs",
     "typecheck": "pnpm run build && pnpm --recursive --if-present run typecheck",
     "validate": "node ./scripts/validate-workspace.mjs"
   },

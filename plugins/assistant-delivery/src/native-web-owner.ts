@@ -50,6 +50,7 @@ interface Execution {
     admitting: boolean
   }
 }
+type NativeGoalLookup = { get(agent: Agent): { phase: string, activation: string } | undefined }
 
 /** Fixed single-owner Host capability. No RPC payload may choose its principal or scope. */
 export class NativeWebOwner implements NativeWebOwnerAccess {
@@ -87,7 +88,8 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
             ownerId: this.#ownerId, fencingToken: entry.input.fencingToken, leaseMs: port.leaseMs })) {
             throw new SessionLeaseUnavailable('denied')
           }
-          if (entry.input?.admitting !== true && entry.handle.agent.status === 'idle' && !entry.handle.agent.inbox.hasPending) void this.#close(id, entry)
+          if (entry.input?.admitting !== true && entry.handle.agent.status === 'idle' && !entry.handle.agent.inbox.hasPending
+            && !this.#awaitingNativeGoal(entry.handle.agent)) void this.#close(id, entry)
         } catch { entry.lease.cancel(); void this.#close(id, entry) }
       }
     }, Math.max(1, Math.min(100, Math.floor(port.leaseMs / 3))))
@@ -110,6 +112,13 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
       throw new SessionLeaseUnavailable('denied')
     }
     return binding
+  }
+  /** An armed active Goal is owned by the native round driver after this turn's idle edge. */
+  #awaitingNativeGoal(agent: Agent): boolean {
+    const goals = this.ownerCtx.get('goals' as never) as unknown as NativeGoalLookup | undefined
+    if (goals === undefined) return false
+    const goal = goals.get(agent)
+    return goal?.phase === 'active' && goal.activation === 'armed'
   }
   assertSession(sessionId: string): void { this.#binding(sessionId) }
   ownsSession(sessionId: string): boolean { try { this.assertSession(sessionId); return true } catch { return false } }

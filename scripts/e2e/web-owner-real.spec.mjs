@@ -1,0 +1,162 @@
+import { test, expect } from '@playwright/test'
+import { mkdtemp, mkdir, readFile, writeFile, rm, copyFile } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { createHash } from 'node:crypto'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { parseDocument, isMap, isSeq } from 'yaml'
+import { isExperimentToolAllowed } from './web-owner-real-guard.mjs'
+import { readSessionAudit } from './web-owner-real-audit.mjs'
+import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+
+const root = fileURLToPath(new URL('../../', import.meta.url))
+const objective = 'Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.'
+const criteria = [
+  { id: 'two-currencies', stdin: '[{"currency":"USD","amountCents":100},{"currency":"EUR","amountCents":250},{"currency":"USD","amountCents":75}]\n', expectedStdout: '{"EUR":250,"USD":175}\n' },
+  { id: 'cancelled-and-negative', stdin: '[{"currency":"USD","amountCents":100},{"currency":"USD","amountCents":50,"status":"cancelled"},{"currency":"EUR","amountCents":-25},{"currency":"EUR","amountCents":5}]\n', expectedStdout: '{"EUR":-20,"USD":100}\n' },
+  { id: 'empty', stdin: '[]\n', expectedStdout: '{}\n' },
+]
+function patchRow(doc, id, name) { if (!isSeq(doc.contents)) throw new Error('profile patch is not a sequence'); let row = doc.contents.items.find(item => isMap(item) && item.get('id') === id); if (!row) { row = doc.createNode({ id, name }); doc.contents.add(row) } if (!isMap(row)) throw new Error(`invalid patch row ${id}`); return row }
+function setConfig(doc, id, name, config) {
+  const row = patchRow(doc, id, name)
+  if (!row.has('config')) row.set('config', doc.createNode({}))
+  const destination = row.get('config', true)
+  if (!isMap(destination)) throw new Error('profile config must be a mapping')
+  for (const [field, value] of Object.entries(config)) destination.set(field, doc.createNode(value))
+}
+function contracts(path, kind) { return query(path, 'SELECT id, payload FROM acceptance_contracts WHERE task_kind = ? ORDER BY rowid ASC', kind).map(row => ({ ...row, contract: JSON.parse(row.payload) })) }
+function jobs(path, ids) { return ids.map(id => query(path, 'SELECT state, execution, receipt, reason FROM acceptance_jobs WHERE contract_id = ?', id)[0]).map(row => ({ ...row, execution: row.execution ? JSON.parse(row.execution) : null, receipt: row.receipt ? JSON.parse(row.receipt) : null })) }
+async function waitForVerifiedGoal(page, goalsPath, verifierPath, approved, frames, sessionId, workspace) {
+  const deadline = Date.now() + 300_000
+  while (Date.now() < deadline) {
+    const goal = existsSync(goalsPath) ? query(goalsPath, 'SELECT * FROM goal_records')[0] : undefined
+    if (goal && existsSync(verifierPath)) {
+      const outcomes = contracts(verifierPath, 'goal-outcome')
+      const outcomeJob = outcomes.length ? jobs(verifierPath, outcomes.map(row => row.id)).at(-1) : undefined
+      const receipt = outcomeJob?.receipt
+      if (JSON.parse(goal.native_json).phase === 'paused' && outcomeJob?.state === 'needs-attention') throw new Error('Native goal paused with an unresolved independent outcome; inspect the experiment evidence')
+      if (receipt?.objectiveStatus === 'achieved' && JSON.parse(goal.native_json).phase === 'complete') return
+    }
+    const button = page.getByRole('button', { name: 'Allow once', exact: true })
+    if (await button.count()) {
+      const pending = new Map()
+      for (const frame of frames) {
+        const value = frame.type === 'item' ? frame.value : undefined
+        if (value?.type === 'waterfall' && value.event === 'approval/request') pending.set(value.eventId, value)
+        if (value?.type === 'cancel') pending.delete(value.eventId)
+      }
+      const requests = [...pending.values()].filter(value => !approved.some(item => item.eventId === value.eventId))
+      if (requests.length === 0) { await button.waitFor({ state: 'hidden', timeout: 1_000 }).catch(() => {}); continue }
+      const request = requests[0]
+      const calls = frames.flatMap(frame => frame.value?.type === 'event' && frame.value.event?.type === 'tool/call' ? [frame.value.event.data] : [])
+      const call = calls.findLast(item => item.callId === request.request?.callId)
+      let args
+      try { args = typeof call?.arguments === 'string' ? JSON.parse(call.arguments) : call?.arguments } catch {}
+      if (requests.length !== 1 || request.agentId !== sessionId || call?.name !== request.request?.toolName
+        || !isExperimentToolAllowed(call.name, args, workspace)) {
+        throw new Error(`unexpected approval request: ${sanitize(JSON.stringify(request)).slice(0, 500)}`)
+      }
+      if (approved.length >= 20) throw new Error('Too many approvals in real-model experiment')
+      approved.push({ eventId: request.eventId, agentId: request.agentId, toolName: request.request.toolName, callId: request.request.callId })
+      await button.click()
+    } else {
+      await button.waitFor({ state: 'visible', timeout: 1_000 }).catch(() => {})
+    }
+  }
+  throw new Error('Independent whole-goal verification did not complete within the experiment deadline')
+}
+
+test('real codex Responses completes a browser-owned verified native goal', async ({ page }, testInfo) => {
+  const temp = await mkdtemp(join(tmpdir(), 'dsh-web-owner-real-'))
+  const home = join(temp, 'home'), workspace = join(temp, 'workspace'), modelLog = join(temp, 'model.jsonl')
+  const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_WEB_REAL_LOG: modelLog, DSH_WEB_REAL_WORKSPACE: workspace }
+  let host; let authenticated = false; let failed = false
+  const approved = []
+  const http = [], transport = [], streams = new Map(), frames = []
+  observePage(page, http, transport, streams, frames)
+  try {
+    await mkdir(workspace)
+    await run('zstd', ['--version'], env)
+    const installed = await run('dsh', ['plugin', '--profile', 'web', 'add', ...['personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-verifier', 'assistant-evaluation', 'coding-subscription-provider'].map(name => resolve(root, 'plugins', name))], env)
+    await writeFile(testInfo.outputPath('install.log'), sanitize(installed), { mode: 0o600 })
+    await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace], env)
+    const deliveryPath = join(home, 'assistant-delivery/state.sqlite'), goalsPath = join(home, 'assistant-goals/web.sqlite'), verifierPath = join(home, 'assistant-verifier/verification.sqlite')
+    const owner = query(deliveryPath, "SELECT id, version, principal_json FROM delivery_principals WHERE role = 'owner' AND status = 'active'")[0]
+    if (!owner) throw new Error('setup did not create the Web owner principal')
+    expect(JSON.parse(owner.principal_json)).toEqual({ channel: 'web', account: 'web', tenant: 'local', user: 'operator' })
+    const { createVerifierAuthorities } = await import(pathToFileURL(join(home, 'profiles/web/node_modules/@dsh-enhanced/assistant-verifier/lib/index.js')).href)
+    const authority = { kind: 'runner', id: 'node', executable: process.execPath, fixedArgs: [], timeoutMs: 5_000, maxOutputBytes: 16_384 }
+    const [runner] = createVerifierAuthorities({ authorities: [authority] })
+    const profile = taskKind => ({ id: `real-${taskKind}`, version: 1, scope: { workspace, preset: 'standard' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind, objective, validityMs: 600_000, bounds: { maxDurationMs: 15_000, maxEvidenceBytes: 16_384 }, criteria: (taskKind === 'goal-step' ? criteria.slice(0, 1) : criteria).map(entry => ({ id: entry.id, kind: 'process-behavior', authority: { id: runner.id, digest: runner.digest }, artifactPath: 'summarize.mjs', stdin: entry.stdin, expectedStdout: entry.expectedStdout, expectedExitCode: 0 })) })
+    const patchPath = join(home, 'profiles/web/cordis.patch.yml'), patch = parseDocument(await readFile(patchPath, 'utf8'))
+    setConfig(patch, 'dsh-enhanced-assistant-goals', '@dsh-enhanced/assistant-goals', { databasePath: goalsPath, verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 120_000 })
+    setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300_000 })
+    setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority], profiles: [profile('goal-step'), profile('goal-outcome')] })
+    setConfig(patch, 'dsh-enhanced-coding-subscription-provider', '@dsh-enhanced/coding-subscription-provider', { cwd: workspace, timeoutMs: 120_000, codex: { enabled: true, transport: 'direct-responses', directModel: process.env.DSH_WEB_REAL_MODEL || 'gpt-5.6-terra' }, claude: { enabled: false }, cursor: { enabled: false }, grok: { enabled: false } })
+    patch.contents.add(patch.createNode({ id: 'agent-default-model', config: { provider: 'codex-subscription', model: 'default' } }))
+    patch.contents.add(patch.createNode({ id: 'session-title-llm', disabled: true }))
+    patch.contents.add(patch.createNode({ insert: [{ id: 'web-owner-real-guard', name: resolve(root, 'scripts/e2e/web-owner-real-guard.mjs') }] }))
+    expect(String(patch)).not.toContain('web-owner-model')
+    await writeFile(patchPath, String(patch), { mode: 0o600 })
+    host = await startHost(env)
+    const origin = new URL(host.url).origin
+    try { await page.goto(host.url) } catch { throw new Error('Browser launch authentication failed (URL redacted)') }
+    await expect(page).toHaveURL(`${origin}/`); authenticated = true
+    await page.getByRole('dialog', { name: 'Internal Testing Notice' }).getByRole('button', { name: 'Continue', exact: true }).click()
+    await expect.poll(() => http.find(response => new URL(response.url()).pathname === '/api/session/create')).toBeTruthy()
+    const created = http.find(response => new URL(response.url()).pathname === '/api/session/create'); expect(created.status()).toBe(200)
+    const sessionId = (await created.json()).result.value.sessionId
+    const composer = page.getByLabel(/Describe what you want to build|Message or run a task/)
+    await composer.fill(`Create a goal with objective exactly: '${objective}' amountCents is an integer; combine entries by currency, ignore orders whose status is 'cancelled', and output currency keys in dictionary order. Use goal_create with max_goal_rounds 2, then end this turn. Do not implement code in this turn. For the subsequent goal round: the workspace is empty; use the write tool to create summarize.mjs directly. Shell, other files and permission escalation are outside this experiment. Skip todo/plan and inspection tools. End the round after writing the artifact: the configured independent verifier will validate and complete the goal. Keep the entire experiment within ten model calls.`)
+    const prompt = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/prompt')
+    await page.getByRole('button', { name: 'Send message', exact: true }).click(); expect((await prompt).status()).toBe(200)
+    await waitForVerifiedGoal(page, goalsPath, verifierPath, approved, frames, sessionId, workspace)
+    const goal = query(goalsPath, 'SELECT * FROM goal_records')[0], native = JSON.parse(goal.native_json), scope = JSON.parse(goal.scope_json)
+    const stepContracts = contracts(verifierPath, 'goal-step'), outcomeContracts = contracts(verifierPath, 'goal-outcome')
+    const stepJobs = jobs(verifierPath, stepContracts.map(row => row.id)), outcomeJobs = jobs(verifierPath, outcomeContracts.map(row => row.id))
+    expect(goal.original_objective).toBe(objective); expect(scope).toMatchObject({ workspace, preset: 'standard', principalRecordId: owner.id, principalVersion: owner.version })
+    expect(stepContracts[0].contract).toMatchObject({ protocol: 'task-acceptance/v2', scope: { workspace, preset: 'standard' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, task: { kind: 'goal-step', goal: { sessionId, nativeGoalId: native.goalId } } })
+    expect(stepJobs.some((row, index) => stepContracts[index].contract.task.goal.nativeGoalId === native.goalId && stepContracts[index].contract.task.goal.sessionId === sessionId && row.state === 'done' && row.execution?.status === 'succeeded' && row.receipt?.objectiveStatus === 'achieved')).toBe(true)
+    expect(outcomeContracts.at(-1).contract).toMatchObject({ protocol: 'task-acceptance/v3', scope: { workspace, preset: 'standard' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, task: { kind: 'goal-outcome', goal: { sessionId, nativeGoalId: native.goalId } } })
+    expect(outcomeJobs.at(-1)).toMatchObject({ state: 'done', execution: { status: 'succeeded' }, receipt: { objectiveStatus: 'achieved' } })
+    expect(native.phase).toBe('complete')
+    const modelCalls = (await readFile(modelLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
+    expect(modelCalls.filter(entry => entry.event === 'dispatch')).not.toHaveLength(0)
+    expect(modelCalls.filter(entry => entry.event === 'dispatch').length).toBeLessThanOrEqual(10)
+    expect(modelCalls.some(entry => entry.event === 'settled' && entry.usage !== null)).toBe(true)
+    await expect.poll(() => query(deliveryPath, 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state).toBe('released')
+    await host.stop()
+    const audit = await readSessionAudit(home, workspace, sessionId)
+    expect(audit.reviewer).toBe('user')
+    expect(audit.events).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: 'permission/preset', data: { preset: 'workspace-write' } }),
+      expect.objectContaining({ type: 'sandbox/mode', data: { mode: 'workspace-write' } }),
+      expect.objectContaining({ type: 'approval/policy', data: { policy: 'ask' } }),
+    ]))
+    const goalCall = audit.events.find(event => event.type === 'tool/call' && event.data.name === 'goal_create')
+    expect(goalCall?.data.arguments).toEqual({ objective, max_goal_rounds: 2 })
+    const asked = audit.events.find(event => event.type === 'approval/asked' && event.data.callId === goalCall?.data.callId)
+    expect(asked?.data.toolName).toBe('goal_create')
+    expect(audit.events).toContainEqual(expect.objectContaining({ type: 'approval/decided', data: expect.objectContaining({ id: asked.data.id, outcome: 'allowed-once' }) }))
+    expect(approved).toContainEqual(expect.objectContaining({ toolName: 'goal_create', callId: goalCall.data.callId, agentId: sessionId }))
+    for (const granted of approved) {
+      const linkedCall = audit.events.find(event => event.type === 'tool/call' && event.data.callId === granted.callId)
+      expect(linkedCall?.data.name).toBe(granted.toolName)
+      const linkedAsk = audit.events.find(event => event.type === 'approval/asked' && event.data.callId === granted.callId)
+      expect(linkedAsk?.data.toolName).toBe(granted.toolName)
+      expect(audit.events).toContainEqual(expect.objectContaining({ type: 'approval/decided', data: expect.objectContaining({ id: linkedAsk.data.id, outcome: 'allowed-once' }) }))
+    }
+    await writeFile(testInfo.outputPath('session-audit.json'), JSON.stringify(audit, null, 2), { mode: 0o600 })
+    await copyFile(join(workspace, 'summarize.mjs'), testInfo.outputPath('summarize.mjs'))
+    await writeFile(testInfo.outputPath('source.sha256'), createHash('sha256').update(await readFile(join(workspace, 'summarize.mjs'))).digest('hex') + '  summarize.mjs\n', { mode: 0o600 })
+    await copyFile(modelLog, testInfo.outputPath('model.jsonl'))
+    await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ objective, sourceArtifact: 'summarize.mjs', noFixture: true, provider: 'codex-subscription', directModel: process.env.DSH_WEB_REAL_MODEL || 'gpt-5.6-terra', dispatchLimit: 10, approvalReviewer: audit.reviewer, finalLease: 'released', sessionId, goalId: goal.id, scope, native, runner: { id: runner.id, digest: runner.digest }, approved, modelCalls, stepContracts: stepContracts.map(({ id, contract }) => ({ id, protocol: contract.protocol, task: contract.task, criteria: contract.criteria })), stepJobs, outcomeContracts: outcomeContracts.map(({ id, contract }) => ({ id, protocol: contract.protocol, task: contract.task, criteria: contract.criteria })), outcomeJobs, streams: [...streams.values()] }, null, 2), { mode: 0o600 })
+  } catch (error) { failed = true; throw error } finally {
+    try {
+      await writeFile(testInfo.outputPath('approvals.json'), JSON.stringify(approved, null, 2), { mode: 0o600 })
+      if (existsSync(modelLog)) await copyFile(modelLog, testInfo.outputPath('model.jsonl'))
+      if (existsSync(join(workspace, 'summarize.mjs'))) await copyFile(join(workspace, 'summarize.mjs'), testInfo.outputPath('summarize.mjs'))
+      if (authenticated && failed && !new URL(page.url()).searchParams.has('token')) { await page.screenshot({ path: testInfo.outputPath('failure.png') }).catch(() => {}); await writeFile(testInfo.outputPath('failure-dom.txt'), sanitize(await page.locator('body').innerText().catch(() => '')), { mode: 0o600 }) }; await writeFile(testInfo.outputPath('transport.json'), JSON.stringify(transport, null, 2), { mode: 0o600 }) } finally { try { if (host) { await host.stop(); await writeFile(testInfo.outputPath('host.log'), host.log(), { mode: 0o600 }) } } finally { await rm(temp, { recursive: true, force: true }) } }
+  }
+})

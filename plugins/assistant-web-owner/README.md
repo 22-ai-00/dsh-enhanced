@@ -32,6 +32,8 @@ Web principal 必须是 `channel: web`，其 account、tenant、user 由可信�
 
 `workspace` 必须是绝对路径，`preset` 必须与实际原生 preset 一致。`maxExecutionMs` 为每次 Agent 激活的最大时间，范围 1–300000 毫秒，默认 300000。原生 factory 的冷加载也使用这一取消期限。空闲 Agent 清理后释放 Session 给 Delivery/Automations；未证明完成清理的执行保持 unknown。
 
+原生 Goal 仍为 `active` 且 `armed` 时，即使 Agent 暂时 idle，也会保留它和原 Session lease，等待宿主 GoalRoundDriver 完成保存并续跑。目标终态或 disarm 后再释放；执行期限、撤权和卸载仍优先生效，不因新目标轮重置。缺少 GoalRoundDriver 时最多保持到原执行期限，此检查不另行调度任务。
+
 Policy 至少需要显式允许该 `web/account/tenant/user` 的 `ingest`，以及该 principal、workspace、preset 下需要的 Agent `reply`、工具执行和 Goals/Memory 操作。配对不会自动放宽 Policy。
 
 ## 当前行为与限制
@@ -54,3 +56,5 @@ Web client 在构建时复用 DSH `0.1.2-rc.1` Session Controller 的浏览器 b
 Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租约；原生 Session 保存实际对话。返回的固定 capability 只给受信 Host 配置使用，并非对同进程插件或同 UID 进程的 OS 隔离边界。
 
 单元与组合测试覆盖实际 AgentLoop、SessionController、Typert Gateway、双事件订阅、SQLite、业务 Goal 及空闲后恢复。另有独立浏览器命令 `CI=true pnpm test:web-owner`：全新临时 profile 安装、真实认证/HTTP/WS、原生审批、Goal 落库、Host 重启后新浏览器上下文恢复同一会话，详见仓库 `scripts/e2e/README.md`。模型仍为确定性 adapter；这些证据不证明真实模型收益、可信目标达成或长期自治。该命令需要本地 DSH 与 Chromium，不包含在普通 `pnpm check` 中。
+
+可选的 `CI=true pnpm test:web-owner:real` 使用现有 Codex subscription 登录，验证真实模型生成程序、原生目标续跑、独立步骤/整体回执以及最终释放。它有精确工具范围和模型调用/时间上限，属于有引导的小任务实验，不证明长期自治、生产 token/费用硬预算或 OS 隔离；前置条件与证据边界见同一浏览器说明。

@@ -195,6 +195,7 @@ async function nativeGoalPlugins(): Promise<Readonly<{
 
 function nativeGoals(ctx: Context): Readonly<{
   complete(agent: Agent, ref: { id: string, revision: number }): unknown
+  disarm(agent: Agent): unknown
   get(agent: Agent): { id: string, revision: number, phase: string, activation: string, roundsStarted: number, maxGoalRounds: number } | undefined
 }> {
   return (ctx as unknown as { goals: ReturnType<typeof nativeGoals> }).goals
@@ -2822,6 +2823,10 @@ describe('real rc.1 delivery Agent runtime', () => {
         if (result.isError) throw new Error(JSON.stringify(result.content))
         goalCreated = true
         expect(fixture.ctx.assistantGoals.list(agent)).toHaveLength(1)
+        // This regression intentionally omits the native round driver. Its
+        // armed Goal cannot progress, so disarm it before asserting that the
+        // ordinary idle owner yields its lane.
+        nativeGoals(fixture.ctx).disarm(agent)
         return await next()
       })
       await expect(gateway.invoke({ namespace: 'session', method: 'prompt', args: { request: { sessionId: created.sessionId, requestId: 'native-owner-message',
@@ -2861,6 +2866,74 @@ describe('real rc.1 delivery Agent runtime', () => {
       // its next frame from crossing the previously opened read boundary.
       await expect(ownerHistory.next()).rejects.toThrow('denied')
     } finally { eventAbort.abort(); await ownerHistory?.return?.(); await Promise.all(eventStreams); await webFiber?.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
+  test('keeps a Web-owned Agent leased while the real native Goal driver waits for its durable checkpoint', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-goal-flush-')); roots.push(root)
+    const PersistenceCoordinator = await persistenceCoordinatorConstructor()
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const subject = { kind: 'agent' as const, id: 'primary', workspace: root, principal: 'web/browser/local/owner' }
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [
+        { id: 'web-ingest', effect: 'allow', subject: { kind: 'external', id: 'web/browser/local/owner' }, actions: ['ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'web-reply', effect: 'allow', subject, actions: ['reply'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } },
+        { id: 'web-goal', effect: 'allow', subject, actions: ['create', 'observe', 'inspect', 'snapshot'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
+        { id: 'web-tool', effect: 'allow', subject, actions: ['execute'], resource: { kind: 'tool', id: 'goal_create' }, context: { initiators: ['external'] } },
+      ], presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false, leaseMs: 1_000,
+    }, realPersistence(PersistenceCoordinator, new Map()))
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
+    const native = await nativeGoalPlugins()
+    await fixture.ctx.plugin(native.GoalService as never, {} as never)
+    await fixture.ctx.plugin(native.goalTools as never, {} as never)
+    // The production Web bundle mounts the business-goal bridge too.  It
+    // binds native goal changes to this authenticated Delivery owner before
+    // the round driver observes the idle edge.
+    await fixture.ctx.plugin(AssistantGoalsService, { databasePath: join(root, 'goals.sqlite') })
+    await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions', 'goals'], apply(ctx: Context) {
+      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary', maxExecutionMs: 10_000 })
+    } })
+    let releaseFlush: (() => void) | undefined; let flushStarted = 0; let gate = false
+    const checkpointGate = new Promise<void>(resolve => { releaseFlush = resolve })
+    const originalFlush = fixture.ctx.sessions.flush.bind(fixture.ctx.sessions)
+    const flush = vi.spyOn(fixture.ctx.sessions, 'flush').mockImplementation(async session => {
+      if (gate && String(session.id) === 'native-goal-flush') { flushStarted += 1; await checkpointGate }
+      return await originalFlush(session)
+    })
+    try {
+      await fiber
+      const handle = await access!.create({ sessionId: 'native-goal-flush' as SessionId, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      fixture.ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
+        if (agent !== handle.agent || nativeGoals(fixture.ctx).get(agent) !== undefined) return await next()
+        const created = await fixture.ctx.tools.execute({ callId: ToolCallId('native-goal-flush-create'), name: 'goal_create', agent, signal,
+          arguments: { objective: 'Durably checkpoint before my native round', max_goal_rounds: 1 } })
+        if (created.isError) throw new Error(JSON.stringify(created.content))
+        gate = true
+        return await next()
+      })
+      const content = [{ type: 'text' as const, text: 'Create the checkpointed goal.' }]
+      await access!.prompt({ sessionId: 'native-goal-flush', requestId: 'native-goal-flush-message', text: content[0]!.text, content }, async () => {
+        handle.agent.followup(createUserMessage({ content, source: { kind: 'user', rpcId: 'native-goal-flush-message' as never } }))
+        return { accepted: true }
+      }, new AbortController().signal)
+      await vi.waitFor(() => expect(flushStarted).toBeGreaterThan(0), { timeout: 5_000 })
+      await new Promise(resolve => setTimeout(resolve, 250))
+      expect(fixture.ctx.agents.get(handle.agent.id) === handle.agent).toBe(true)
+      const leased = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try { expect(leased.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'dispatched' }) } finally { leased.close() }
+      expect(fixture.llm.requests).toHaveLength(1)
+      releaseFlush?.()
+      await vi.waitFor(() => expect(fixture.llm.requests).toHaveLength(2), { timeout: 5_000 })
+      await vi.waitFor(() => {
+        const terminal = nativeGoals(fixture.ctx).get(handle.agent)
+        expect(terminal?.activation).toBe('disarmed')
+        expect(['blocked', 'complete']).toContain(terminal?.phase)
+      }, { timeout: 5_000 })
+      await vi.waitFor(() => expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined(), { timeout: 5_000 })
+      const released = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+      try { expect(released.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'released' }) } finally { released.close() }
+    } finally { releaseFlush?.(); flush.mockRestore(); await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
   test.each(['revoke', 'timeout', 'unload', 'forged-user'] as const)('native Web owner drains an active input on %s without replay', async reason => {
