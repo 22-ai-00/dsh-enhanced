@@ -109,7 +109,7 @@ export class AssistantGoalsService extends Service {
       const record = this.#observe(agent, false)
       if (record === undefined) throw new Error('assistant-goals: current whole-goal definition required')
       return record
-    }, this.#execution.list)
+    }, this.#execution.list, duration)
     if (this.#outcome !== undefined) ctx.on('agent/pre-step', async ({ agent, signal }, next) => {
       signal.throwIfAborted()
       try { this.#outcome?.reconcileCompletion(agent) } catch { /* Missing authority leaves completion visibly pending. */ }
@@ -214,6 +214,8 @@ export class AssistantGoalsService extends Service {
     if (maxGoalRounds !== undefined && (!Number.isSafeInteger(maxGoalRounds) || maxGoalRounds < 1)) throw new Error('assistant-goals: invalid round limit')
     const native = this.ctx.get('goals')
     if (native === undefined) throw new Error('assistant-goals: native goal service unavailable')
+    // Match the native domain's normalization before looking up exact profiles.
+    this.#outcome?.preflight(scope, objective.trim())
     // Delivery retains its real source kind. Its current owner-turn proof is the
     // Host authority for this bridge; never forge a native direct-user event.
     native.create(agent!, { objective, ...(maxGoalRounds === undefined ? {} : { maxGoalRounds }) })
@@ -240,6 +242,7 @@ export class AssistantGoalsService extends Service {
       || record.native.sessionId !== String(agent!.session.id)
       || record.native.goalId !== String(current.id)) throw new Error('assistant-goals: current session native goal binding required')
     const ref = { id: current.id, revision: input.expectedRevision }
+    if (input.operation === 'edit') this.#outcome?.preflight(scope, input.objective?.trim() ?? current.objective, record)
     switch (input.operation) {
       case 'edit': native.edit(agent!, ref, {
         ...(input.objective === undefined ? {} : { objective: input.objective }),
@@ -432,6 +435,19 @@ export class AssistantGoalsService extends Service {
   whenIdle = () => this.#execution.whenIdle()
   health = () => {
     if (!this.#active) throw new Error('assistant-goals: disposed')
-    return { ready: ['agents', 'goals', 'assistantDelivery', 'assistantPolicy'].every(name => this.ctx.get(name as never) !== undefined), ...this.#store.health(), observationFailures: this.#observationFailures, execution: this.#execution.health(), outcome: this.#outcome?.health() ?? { enabled: false }, budget: this.#budget?.health() ?? { enabled: false }, wake: this.#wake?.health() ?? { enabled: false } }
+    const contextReady = ['agents', 'goals', 'assistantDelivery', 'assistantPolicy'].every(name => this.ctx.get(name as never, false) !== undefined)
+    const execution = this.#execution.health()
+    const outcome = this.#outcome?.health()
+    const budget = this.#budget?.health()
+    const wake = this.#wake?.health()
+    // These are capability diagnostics, not an attestation that an arbitrary
+    // owner/goal/route has a valid profile, budget or execution authorization.
+    return { ready: contextReady, contextReady, ...this.#store.health(), observationFailures: this.#observationFailures,
+      executionEnabled: execution.enabled, verifierConnected: execution.verifierConnected,
+      outcomeEnabled: outcome?.enabled ?? false, outcomeConnected: outcome?.connected ?? false,
+      budgetEnabled: budget?.enabled ?? false, registeredBudgetMeters: budget?.registeredMeters ?? 0,
+      activeBudgetCalls: budget?.activeCalls ?? 0, wakeEnabled: wake?.enabled ?? false,
+      wakeConnected: wake?.connected ?? false, wakeReconciliationFailures: wake?.reconciliationFailures ?? 0,
+      execution, outcome: outcome ?? { enabled: false }, budget: budget ?? { enabled: false }, wake: wake ?? { enabled: false } }
   }
 }

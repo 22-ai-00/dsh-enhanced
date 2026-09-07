@@ -1,4 +1,5 @@
 import { Context } from '@deepseek-ai/cordis'
+import { DatabaseSync } from 'node:sqlite'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -34,7 +35,7 @@ class Producer implements TaskAcceptanceProducer {
   async inspectAcceptedExecution(_contract: TaskAcceptanceContract) { this.inspected++; return this.proof }
 }
 
-async function harness(kind: 'automation-run' | 'foreground-turn' | 'goal-step' = 'automation-run', required = false) {
+async function harness(kind: 'automation-run' | 'foreground-turn' | 'goal-step' | 'goal-outcome' = 'automation-run', required = false) {
   const root = await mkdtemp(join(tmpdir(), 'task-verifier-service-')); roots.push(root)
   await writeFile(join(root, 'report.md'), 'Confirmed result\n')
   const ctx = new Context(); contexts.push(ctx)
@@ -43,7 +44,9 @@ async function harness(kind: 'automation-run' | 'foreground-turn' | 'goal-step' 
   const authority: DocumentAuthorityInput = { kind: 'document', id: 'sources', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 1_024 }
   const authorities = createVerifierAuthorities({ authorities: [authority] })
   const task: AcceptanceTask = { scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'owner-1', principalVersion: 1 },
-    task: kind === 'goal-step' ? { kind, ref: 'run-1', goal: { id: 'goal-1', definitionVersion: 1, definitionDigest: 'a'.repeat(64), stepId: 'step-1', runId: 'run-1', sessionId: 'session-1', nativeGoalId: 'native-1', nativeRevision: 1 } } : { kind, ref: 'run-1' }, objective: '  Keep original objective\n' }
+    task: kind === 'goal-step' ? { kind, ref: 'run-1', goal: { id: 'goal-1', definitionVersion: 1, definitionDigest: 'a'.repeat(64), stepId: 'step-1', runId: 'run-1', sessionId: 'session-1', nativeGoalId: 'native-1', nativeRevision: 1 } }
+      : kind === 'goal-outcome' ? { kind, ref: 'assessment-1', goal: { id: 'goal-1', definitionVersion: 1, definitionDigest: 'a'.repeat(64), assessmentId: 'assessment-1', sessionId: 'session-1', nativeGoalId: 'native-1' } }
+        : { kind, ref: 'run-1' }, objective: '  Keep original objective\n' }
   let now = 1_000
   const config = { databasePath: join(root, 'verifier.sqlite'), tickIntervalMs: 0, requireAcceptance: required, authorities: [authority],
     profiles: [{ id: 'report', version: 1, scope: task.scope, owner: task.owner, taskKind: kind, objective: task.objective,
@@ -59,6 +62,48 @@ async function harness(kind: 'automation-run' | 'foreground-turn' | 'goal-step' 
 }
 
 describe('Host acceptance service', () => {
+  it.each(['automation-run', 'foreground-turn', 'goal-step', 'goal-outcome'] as const)(
+    'inspects the immutable configured %s profile without creating a contract',
+    async (kind) => {
+      const { ctx, producer, service, task, config } = await harness(kind)
+      const selection = {
+        scope: { ...task.scope }, owner: { ...task.owner }, objective: task.objective, taskKind: kind,
+      }
+
+      const database = new DatabaseSync(config.databasePath, { readOnly: true })
+      try {
+        const count = () => (database.prepare('SELECT count(*) AS count FROM acceptance_contracts').get() as { count: number }).count
+        expect(count()).toBe(0)
+        const result = service.inspectAcceptanceProfile(selection)
+        expect(result).toMatchObject({ profile: { taskKind: kind, scope: task.scope, owner: task.owner }, digest: expect.any(String) })
+        expect(Object.isFrozen(result)).toBe(true)
+        expect(Object.isFrozen(result!.profile)).toBe(true)
+        expect(Object.isFrozen(result!.profile.criteria)).toBe(true)
+        expect(Object.isFrozen(result!.profile.bounds)).toBe(true)
+        expect(() => { (result!.profile.bounds as { maxDurationMs: number }).maxDurationMs = 9 }).toThrow()
+        expect(service.health()).toMatchObject({ awaitingExecution: 0, pendingVerification: 0, pendingReceipts: 0 })
+        expect(producer.inspected).toBe(0)
+        expect(count()).toBe(0)
+        expect(service.inspectAcceptanceProfile({ ...selection, scope: { ...selection.scope, workspace: `${selection.scope.workspace}-foreign` } })).toBeNull()
+        expect(service.inspectAcceptanceProfile({ ...selection, owner: { ...selection.owner, principalRecordId: 'owner-foreign' } })).toBeNull()
+        expect(service.inspectAcceptanceProfile({ ...selection, objective: `${selection.objective} ` })).toBeNull()
+        expect(() => service.inspectAcceptanceProfile({ scope: selection.scope, owner: selection.owner,
+          taskKind: kind } as never)).toThrow('invalid profile selection')
+        expect(() => service.inspectAcceptanceProfile({ ...selection, extra: true } as never)).toThrow('invalid profile selection')
+        const getter = { ...selection }
+        Object.defineProperty(getter, 'objective', { enumerable: true, get: () => selection.objective })
+        expect(() => service.inspectAcceptanceProfile(getter as never)).toThrow('invalid profile selection')
+        expect(() => service.inspectAcceptanceProfile({ ...selection, taskKind: 'unknown' } as never)).toThrow('invalid profile selection')
+        expect(() => service.inspectAcceptanceProfile({ ...selection, scope: { ...selection.scope, workspace: 'relative' } })).toThrow('invalid profile selection')
+        expect(() => service.inspectAcceptanceProfile({ ...selection, owner: { ...selection.owner, principalVersion: 0 } })).toThrow('invalid profile selection')
+        expect(() => service.inspectAcceptanceProfile({ ...selection, owner: { ...selection.owner, principalVersion: '1' } } as never)).toThrow('invalid profile selection')
+      } finally { database.close() }
+
+      await ctx.fiber.restart()
+      expect(() => service.inspectAcceptanceProfile(selection)).toThrow('disposed')
+    },
+  )
+
   it('does not persist a verdict when disposal interrupts verification, even if the driver later returns success', async () => {
     const { ctx, producer, task, service, complete, config } = await harness()
     const handle = producer.registration!.prepare(task)!

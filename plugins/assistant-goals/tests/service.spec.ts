@@ -10,14 +10,17 @@ import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { afterEach, describe, expect, it } from 'vitest'
+import { DatabaseSync } from 'node:sqlite'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantGoalsService } from '../src/service.ts'
 import { GoalExecutionStore } from '../src/execution-store.ts'
 import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
+import type { AcceptanceProfile } from '@dsh-enhanced/assistant-verifier'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
-async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false) {
+async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false, verifyGoalOutcome = false, stepMaxDurationMs?: number) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
@@ -37,7 +40,8 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }) } as never)
   if (duringGoalChange !== undefined) ctx.on('goal/changed', ({ agent }) => duringGoalChange(agent))
   const path = databasePath ?? join(root, 'goals.sqlite')
-  const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, verifyNativeRounds, ...(maxContextChars === undefined ? {} : { maxContextChars }) })
+  const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, verifyNativeRounds, verifyGoalOutcome,
+    ...(maxContextChars === undefined ? {} : { maxContextChars }), ...(stepMaxDurationMs === undefined ? {} : { stepMaxDurationMs }) })
   const create = async (id: string, owner?: string) => {
     const handle = await ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'fixture', model: 'fixture' } })
     if (owner !== undefined) owners.set(handle.agent, owner)
@@ -45,6 +49,24 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
     return handle.agent
   }
   return { ctx, root, path, plugin, owners, human, create, deny() { allowed = false }, denyAction(action: string) { deniedActions.add(action) }, service: ctx.assistantGoals }
+}
+const documentAuthority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 1_024 }
+const [compiledDocumentAuthority] = createVerifierAuthorities({ authorities: [documentAuthority] })
+function goalProfiles(root: string, objective: string, options: { version?: number; validityMs?: number; wholeRequiredText?: string; scope?: AcceptanceProfile['scope']; owner?: AcceptanceProfile['owner'] } = {}) {
+  const criteria = (id: string, requiredText: string) => [{ id, kind: 'document-citations' as const,
+    authority: { id: 'sources', digest: compiledDocumentAuthority!.digest }, artifactPath: 'report.md', requiredText: [requiredText], quotes: [] }]
+  const profiles: AcceptanceProfile[] = [
+    { id: 'goal-step-profile', version: options.version ?? 1, scope: options.scope ?? { workspace: root, preset: 'primary' }, owner: options.owner ?? { principalRecordId: 'record-owner', principalVersion: 1 },
+      taskKind: 'goal-step', objective, validityMs: options.validityMs ?? 10_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: criteria('step', 'Step verified') },
+    { id: 'goal-outcome-profile', version: options.version ?? 1, scope: options.scope ?? { workspace: root, preset: 'primary' }, owner: options.owner ?? { principalRecordId: 'record-owner', principalVersion: 1 },
+      taskKind: 'goal-outcome', objective, validityMs: options.validityMs ?? 10_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: criteria('whole', options.wholeRequiredText ?? 'Goal verified') },
+  ]
+  return profiles
+}
+async function installGoalVerifier(f: Awaited<ReturnType<typeof harness>>, profiles: AcceptanceProfile[]) {
+  const plugin = await f.ctx.plugin(AssistantVerifierService, { databasePath: `${f.path}.verifier`, tickIntervalMs: 0, requireAcceptance: true,
+    authorities: [documentAuthority], profiles })
+  return { dispose: () => plugin.dispose(), service: f.ctx.assistantVerifier }
 }
 const checkpoint = { nextStep: 'Check repository state', blockers: [], assumptions: [{ statement: 'Latest build was green', expiresAt: 0 }], evidenceRefs: ['run:one'], dependencies: [] }
 
@@ -298,5 +320,109 @@ describe('owner-scoped native goal context', () => {
     const paused = f.service.control(agent, input)
     expect(paused.native).toMatchObject({ phase: 'paused', revision: record.native.revision + 1 })
     expect(input.expectedRevision).toBe(999)
+  })
+
+  it('rejects goal creation before native, business, or verifier state exists when whole-goal preflight is incomplete or mismatched', async () => {
+    const assertUnchanged = (f: Awaited<ReturnType<typeof harness>>, agent: Agent, verifier?: { service: AssistantVerifierService }) => {
+      expect(f.ctx.goals.get(agent)).toBeUndefined()
+      expect(f.service.list(agent)).toEqual([])
+      if (verifier !== undefined) {
+        expect(verifier.service.health()).toMatchObject({ awaitingExecution: 0, pendingVerification: 0, pendingReceipts: 0 })
+        const db = new DatabaseSync(`${f.path}.verifier`, { readOnly: true })
+        try { expect(db.prepare('SELECT id FROM acceptance_contracts').all()).toEqual([]) } finally { db.close() }
+      }
+    }
+    const absent = await harness(undefined, undefined, undefined, true, true, 1_000)
+    const absentAgent = await absent.create('preflight-absent', 'owner'); absent.human.add(absentAgent)
+    expect(() => absent.service.create(absentAgent, 'No verifier')).toThrow('whole-goal verifier unavailable')
+    assertUnchanged(absent, absentAgent)
+
+    for (const [id, profiles, objective] of [
+      ['missing-step', goalProfiles('', 'Missing step').filter(profile => profile.taskKind === 'goal-outcome'), 'Missing step'],
+      ['missing-whole', goalProfiles('', 'Missing whole').filter(profile => profile.taskKind === 'goal-step'), 'Missing whole'],
+      ['wrong-owner', goalProfiles('', 'Wrong owner', { owner: { principalRecordId: 'record-other', principalVersion: 1 } }), 'Wrong owner'],
+      ['wrong-scope', goalProfiles('', 'Wrong scope', { scope: { workspace: '/tmp/foreign-goal-scope', preset: 'primary' } }), 'Wrong scope'],
+      ['wrong-objective', goalProfiles('', 'Other objective'), 'Wanted objective'],
+    ] as const) {
+      const f = await harness(undefined, undefined, undefined, true, true, 1_000)
+      const agent = await f.create(id, 'owner'); f.human.add(agent)
+      const bound = profiles.map(profile => ({ ...profile, scope: profile.scope.workspace === '' ? { ...profile.scope, workspace: f.root } : profile.scope }))
+      const verifier = await installGoalVerifier(f, bound)
+      expect(() => f.service.create(agent, objective)).toThrow(/exact goal-step|whole-goal success specification/)
+      assertUnchanged(f, agent, verifier)
+    }
+  })
+
+  it('trims an objective for exact preflight selection and freezes whole-goal conditions before create returns', async () => {
+    const f = await harness(undefined, undefined, undefined, true, true, 1_000)
+    const agent = await f.create('preflight-trim', 'owner'); f.human.add(agent)
+    await installGoalVerifier(f, goalProfiles(f.root, 'Trimmed objective'))
+    const record = f.service.create(agent, '  Trimmed objective  ')
+    expect(record.native.objective).toBe('Trimmed objective')
+    expect(f.service.inspectGoalOutcome(agent, record.id)).toMatchObject({ definitionVersion: record.definition.version,
+      conditions: { profileId: 'goal-outcome-profile', profileVersion: 1, criteria: expect.any(Array), expiresAt: expect.any(Number) } })
+  })
+
+  it('preflights objective edits without changing the old native revision or frozen definition, then freezes exact replacement profiles', async () => {
+    const f = await harness(undefined, undefined, undefined, true, true, 1_000)
+    const agent = await f.create('preflight-edit', 'owner'); f.human.add(agent)
+    let verifier = await installGoalVerifier(f, goalProfiles(f.root, 'Initial objective'))
+    const original = f.service.create(agent, 'Initial objective')
+    const originalOutcome = f.service.inspectGoalOutcome(agent, original.id)!
+    expect(() => f.service.control(agent, { goalId: original.id, expectedRevision: original.native.revision, operation: 'edit', objective: 'Unconfigured objective' }))
+      .toThrow('exact goal-step')
+    expect(f.ctx.goals.get(agent)).toMatchObject({ objective: 'Initial objective', revision: original.native.revision })
+    expect(f.service.inspect(agent, original.id).definition).toEqual(original.definition)
+    expect(f.service.inspectGoalOutcome(agent, original.id)?.conditions).toEqual(originalOutcome.conditions)
+
+    await verifier.dispose()
+    verifier = await installGoalVerifier(f, [...goalProfiles(f.root, 'Initial objective'), ...goalProfiles(f.root, 'Configured replacement', { version: 2 }).map(profile => ({ ...profile, id: `replacement-${profile.id}` }))])
+    const updated = f.service.control(agent, { goalId: original.id, expectedRevision: original.native.revision, operation: 'edit', objective: 'Configured replacement' })
+    expect(updated).toMatchObject({ native: { objective: 'Configured replacement', revision: original.native.revision + 1 }, definition: { version: original.definition.version + 1 } })
+    expect(f.service.inspectGoalOutcome(agent, original.id)).toMatchObject({ definitionVersion: updated.definition.version,
+      conditions: { profileId: 'replacement-goal-outcome-profile', profileVersion: 2 } })
+    await verifier.dispose()
+  })
+
+  it('keeps frozen conditions for max-round edits and rejects reconfigured or expired conditions before native mutation', async () => {
+    const f = await harness(undefined, undefined, undefined, true, true, 1_000)
+    const agent = await f.create('preflight-frozen', 'owner'); f.human.add(agent)
+    let verifier = await installGoalVerifier(f, goalProfiles(f.root, 'Frozen objective'))
+    const created = f.service.create(agent, 'Frozen objective', 2)
+    const frozen = f.service.inspectGoalOutcome(agent, created.id)!.conditions!
+    let rounds = f.service.control(agent, { goalId: created.id, expectedRevision: created.native.revision, operation: 'edit', maxGoalRounds: 3 })
+    expect(f.service.inspectGoalOutcome(agent, created.id)?.conditions).toEqual(frozen)
+
+    // A new run can use a newly configured step profile; the whole-goal
+    // specification and its absolute deadline remain the original template.
+    await verifier.dispose()
+    verifier = await installGoalVerifier(f, goalProfiles(f.root, 'Frozen objective').map(profile => profile.taskKind === 'goal-step'
+      ? { ...profile, version: 2 } : profile))
+    rounds = f.service.control(agent, { goalId: created.id, expectedRevision: rounds.native.revision, operation: 'edit', maxGoalRounds: 3 })
+    expect(f.service.inspectGoalOutcome(agent, created.id)?.conditions).toEqual(frozen)
+
+    await verifier.dispose()
+    verifier = await installGoalVerifier(f, goalProfiles(f.root, 'Frozen objective', { version: 2, wholeRequiredText: 'Changed condition' }))
+    expect(() => f.service.control(agent, { goalId: created.id, expectedRevision: rounds.native.revision, operation: 'edit', maxGoalRounds: 4 }))
+      .toThrow('frozen success specification')
+    expect(f.ctx.goals.get(agent)).toMatchObject({ revision: rounds.native.revision, maxGoalRounds: 3 })
+
+    await verifier.dispose()
+    verifier = await installGoalVerifier(f, goalProfiles(f.root, 'Frozen objective'))
+    const now = vi.spyOn(Date, 'now').mockReturnValue(frozen.expiresAt - 3_000)
+    try {
+      expect(() => f.service.control(agent, { goalId: created.id, expectedRevision: rounds.native.revision, operation: 'edit', maxGoalRounds: 4 }))
+        .toThrow('frozen whole-goal deadline')
+    } finally { now.mockRestore() }
+    expect(f.ctx.goals.get(agent)).toMatchObject({ revision: rounds.native.revision, maxGoalRounds: 3 })
+    await verifier.dispose()
+
+    const short = await harness(undefined, undefined, undefined, true, true, 1_000)
+    const shortAgent = await short.create('preflight-short', 'owner'); short.human.add(shortAgent)
+    const shortVerifier = await installGoalVerifier(short, goalProfiles(short.root, 'Short validity', { validityMs: 3_000 }))
+    expect(() => short.service.create(shortAgent, 'Short validity')).toThrow('acceptance validity')
+    expect(short.ctx.goals.get(shortAgent)).toBeUndefined()
+    expect(short.service.list(shortAgent)).toEqual([])
+    expect(shortVerifier.service.health()).toMatchObject({ awaitingExecution: 0, pendingVerification: 0, pendingReceipts: 0 })
   })
 })

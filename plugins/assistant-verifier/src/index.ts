@@ -1,9 +1,11 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { AssistantVerifierService, Config } from './service.js'
+import type { AcceptanceProfileInspection, AcceptanceProfileSelection } from './service.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-verifier'
 export { AssistantVerifierService, Config, version }
+export type { AcceptanceProfileInspection, AcceptanceProfileSelection }
 export * from './drivers.js'
 export * from './host.js'
 export * from './config.js'

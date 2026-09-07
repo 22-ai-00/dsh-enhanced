@@ -23,6 +23,8 @@ scope 的动作依据。
 
 Verifier 也是可选 provider，Health 通过动态 `assistantVerifier.health()` seam 聚合其固定公开字段，不引入运行时包依赖。报告只包含 profile 数、是否要求验收、固定 Host producer id、Evaluation 是否已连接以及等待/回执计数；不会包含任务正文、owner、契约、路径或证据。无 profile 时报告 `acceptance-disabled`，表明默认安装并不具备验收能力。只有已有待投递回执而 Evaluation 未连接时才报告 `evaluation-disconnected-with-pending-receipts`；过期未确认回执与 durable unknown/过期 continuation 分别报告 `expired-receipt-backlog` 与 `verification-needs-attention`。这些均为 degraded 诊断；Verifier 被列为 required 时，缺失或 health seam 异常才会阻断 readiness。
 
+Goals 同样通过动态 `assistantGoals.health()` seam 接入，且只接受扁平、低基数的当前能力指标：上下文是否就绪、受验证执行是否启用且连到 Verifier、目标结果验收是否连通、预算 meter/在途调用，以及 durable wake 是否连到 Automations 和其 reconciliation/观察失败计数。Health 不引入 Goals 的运行时依赖，也不输出 owner、目标正文、路由或数据库信息。已安装但仅有 context 的 Goals 会报告 `execution-disabled`，因此不会被当作自治执行就绪；预算或 wake 未启用本身不是故障。已启用的执行缺 Verifier、outcome 未连、无 budget meter、wake 未连或 reconciliation/观察失败会产生对应的 degraded 诊断。Goals 仍是可选 provider；旧安装缺少它不会影响 core readiness。
+
 Delivery v9 的死信与 unknown 状态按 `actionable*` 指标判断；已经写入不可变 operator resolution
 receipt 的 terminal 历史仍可审计，但不会永久污染健康。滚动升级期间若 Delivery 尚未提供这些新
 指标，Health 会保守回退到原始 terminal 计数。Delivery v10 还原子投影

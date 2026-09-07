@@ -77,9 +77,10 @@ function harness(options: {
   failedLeases?: number
   preferenceEnabled?: boolean
   verifierHealth?: unknown
+  goalsHealth?: unknown
   requiredProviders?: Array<'assistantPolicy' | 'personalMemory' | 'personalWiki' | 'assistantAutomations'
     | 'assistantEvaluation' | 'preferenceLearning' | 'assistantEvolution' | 'assistantRecovery'
-    | 'assistantGrowthExperiments' | 'pluginControlPlane' | 'larkChannel' | 'assistantVerifier'>
+    | 'assistantGrowthExperiments' | 'pluginControlPlane' | 'larkChannel' | 'assistantVerifier' | 'assistantGoals'>
 } = {}) {
   const ctx = new Context(); contexts.push(ctx)
   const policy = new FakePolicy(ctx); policy.allow = options.allow ?? true
@@ -137,6 +138,7 @@ function harness(options: {
   new Provider(ctx, 'eventTriggers', { pendingEvents: 1, deliveredEvents: 9, triggersObserved: 2 })
   new Provider(ctx, 'assistantHeartbeat', { active: 1, paused: 1, empty: 1 })
   if (options.verifierHealth !== undefined) new Provider(ctx, 'assistantVerifier', options.verifierHealth)
+  if (options.goalsHealth !== undefined) new Provider(ctx, 'assistantGoals', options.goalsHealth)
   if (options.recoveryHealth !== undefined) new Provider(ctx, 'assistantRecovery', options.recoveryHealth)
   if (options.growthExperimentsHealth !== undefined) {
     new Provider(ctx, 'assistantGrowthExperiments', options.growthExperimentsHealth)
@@ -668,6 +670,73 @@ describe('assistant health service', () => {
     expect(JSON.stringify(fixture.service.report(agent()))).not.toMatch(/SENTINEL|databasePath/iu)
   })
 
+  test('projects bounded Goals capability health without importing its runtime package', () => {
+    const fixture = harness({ goalsHealth: {
+      ready: true, contextReady: true, executionEnabled: true, verifierConnected: true,
+      outcomeEnabled: true, outcomeConnected: true, budgetEnabled: true,
+      registeredBudgetMeters: 2, activeBudgetCalls: 1, wakeEnabled: true,
+      wakeConnected: true, wakeReconciliationFailures: 0, observationFailures: 0,
+      owner: 'SENTINEL-OWNER', objective: 'SENTINEL-OBJECTIVE', route: '/secret/goals.sqlite',
+    } })
+
+    expect(fixture.service.readiness()).toEqual({ ready: true, warnings: [] })
+    const report = fixture.service.report(agent())
+    expect(report).toMatchObject({
+      severity: 'healthy',
+      providers: expect.arrayContaining([{
+        id: 'assistantGoals', status: 'ready', metrics: {
+          ready: true, contextReady: true, executionEnabled: true, verifierConnected: true,
+          outcomeEnabled: true, outcomeConnected: true, budgetEnabled: true,
+          registeredBudgetMeters: 2, activeBudgetCalls: 1, wakeEnabled: true,
+          wakeConnected: true, wakeReconciliationFailures: 0, observationFailures: 0,
+        },
+      }]),
+    })
+    expect(JSON.stringify(report)).not.toMatch(/SENTINEL|objective|route|sqlite/iu)
+  })
+
+  test('does not claim a context-only Goals provider is autonomous and diagnoses enabled dependency failures', () => {
+    const fixture = harness({ goalsHealth: {
+      ready: false, contextReady: false, executionEnabled: false, verifierConnected: false,
+      outcomeEnabled: true, outcomeConnected: false, budgetEnabled: true,
+      registeredBudgetMeters: 0, activeBudgetCalls: 0, wakeEnabled: true,
+      wakeConnected: false, wakeReconciliationFailures: 2, observationFailures: 3,
+    } })
+
+    expect(fixture.service.readiness()).toEqual({ ready: true, warnings: [
+      'provider-degraded:assistantGoals:context-unavailable',
+      'provider-degraded:assistantGoals:execution-disabled',
+      'provider-degraded:assistantGoals:outcome-verifier-disconnected',
+      'provider-degraded:assistantGoals:budget-meter-missing',
+      'provider-degraded:assistantGoals:wake-automations-disconnected',
+      'provider-degraded:assistantGoals:wake-reconciliation-failures',
+      'provider-degraded:assistantGoals:observation-failures',
+    ] })
+    expect(fixture.service.report(agent()).assessments).toEqual(expect.arrayContaining([
+      { providerId: 'assistantGoals', severity: 'degraded', code: 'context-unavailable' },
+      { providerId: 'assistantGoals', severity: 'degraded', code: 'execution-disabled' },
+      { providerId: 'assistantGoals', severity: 'degraded', code: 'outcome-verifier-disconnected' },
+      { providerId: 'assistantGoals', severity: 'degraded', code: 'budget-meter-missing' },
+      { providerId: 'assistantGoals', severity: 'degraded', code: 'wake-automations-disconnected' },
+      { providerId: 'assistantGoals', severity: 'degraded', code: 'wake-reconciliation-failures' },
+      { providerId: 'assistantGoals', severity: 'degraded', code: 'observation-failures' },
+    ]))
+  })
+
+  test('keeps a legacy installation without Goals optional and rejects malformed Goals metrics when required', () => {
+    expect(harness().service.readiness()).toEqual({ ready: true, warnings: [] })
+    const fixture = harness({ requiredProviders: ['assistantGoals'], goalsHealth: {
+      ready: true, contextReady: true, executionEnabled: true, verifierConnected: true,
+      outcomeEnabled: false, outcomeConnected: false, budgetEnabled: false,
+      registeredBudgetMeters: -1, activeBudgetCalls: 0, wakeEnabled: false,
+      wakeConnected: false, wakeReconciliationFailures: 0, observationFailures: 0,
+    } })
+    expect(fixture.service.readiness()).toEqual({ ready: false, warnings: ['provider-error:assistantGoals'] })
+    expect(fixture.service.report(agent()).providers).toContainEqual({
+      id: 'assistantGoals', status: 'error', metrics: {},
+    })
+  })
+
   test('reports an installed verifier with no profiles as disabled, without blocking optional readiness', () => {
     const fixture = harness({ verifierHealth: {
       ready: true, profiles: 0, requireAcceptance: false, hostProducers: [], evaluationConnected: false,
@@ -705,6 +774,7 @@ describe('assistant health service', () => {
   sparseProducerIds.length = 1
   test.each([
     ['unknown producer', ['assistantAutomations', 'foreign-host']],
+    ['duplicate goal producer', ['assistantGoals', 'assistantGoals']],
     ['unsorted producer ids', ['assistantDelivery', 'assistantAutomations']],
     ['sparse producer ids', sparseProducerIds],
   ])('fails closed on verifier %s health payloads', (_label, hostProducers) => {
