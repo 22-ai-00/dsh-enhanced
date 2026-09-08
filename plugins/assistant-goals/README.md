@@ -167,6 +167,10 @@ executionBudget:
 
 **原 trigger 的 automation 仍正常执行。** 目标等待是 owner 额外授权的一次恢复，配置 automation 时应考虑两者的作用。目标上下文只提供不含正文的事件摘要，模型仍须按现有权限重新读取业务数据；事件本身不代表任务达成，也不授予新权限。等待记录的 `materialized` 仅代表已交给调度器，`terminal` 及其原因须结合原生目标和独立验收结果判断。
 
+若等待选择的 `assistant-proactive` profile 为 `mode: prepare`，默认仍只持久保存事件的 metadata。只有该 profile 明确配置 `preparation { provider, model, budgetId, maxOutputTokens, timeoutMs }`，才会由 Automations 为该事件请求一次真实模型草稿。它使用独立 Session，固定 `tools: []` 与 `maxToolCalls: 0`，原目标继续保持 `paused`，不会写业务文件、发送消息或恢复目标。`proactive_status` 中的结果是 `unverified-draft`（`verified: false`），未经独立验收，不能证明目标完成或替代本节的 wake/验收流程。
+
+准备请求在运行前和运行中重查等待目标、来源版本/事件摘要、owner route、期限和 `background:assistant-proactive/v1` 的 `prepare` Policy；撤权、目标停止或修改、来源变化、静默截止（quiet deadline）、目标 deadline 或主人拒绝都会阻断请求。准备队列在 Proactive 私有 SQLite 中持久化；重启发现 `running` 请求时记为 `unknown`，不自动重试。已经完成的草稿不会因后续 feedback 删除。该次模型调用使用固定 `assistant-proactive-v1-preparation` 预算主体和 `automation-runs` 单次运行预算；`maxOutputTokens`、`timeoutMs` 只是本次模型 turn 的界限，不是累计 token 或金额上限。
+
 ## 诊断与边界
 
 `verifyNativeRounds: true` 为已经启用的原生 goal-round-driver 接入独立步骤验收。它还需要 Delivery 的 `agentGoalContinuationTimeoutMs` 为正、上述 goal Policy 额外允许 `execute`，以及同一 Host 的 `assistant-verifier`。Verifier profile 使用 `taskKind: goal-step`，精确匹配实际 owner record/version、workspace/preset 和当前目标 objective；成功条件与 authority 按 Verifier README 配置。没有匹配 profile 时，即使 Verifier 设置 `requireAcceptance: false`，该目标回合也会在模型调用前停止。默认不开启此行为，也不自动挂载 driver。
@@ -207,6 +211,7 @@ executionBudget:
 - **步骤账本**：开启验收时另写 `databasePath + '.executions'` 及其 WAL/SHM，保存目标原文、scope、定义/原生身份、期限、授权摘要、契约绑定及执行终态，使用同样的私有文件要求。执行账本 schema 2 在事务中迁移旧记录并添加 owner/目标/时间查询索引，每次读取核对派生键与原意图。两套 SQLite 与 Session 不是一个原子事务；dispatch 标记后的未知窗口不自动重放。卸载保留两套数据文件。
 - **预算账本**：启用累计预算时另写 `databasePath + '.budgets'` 及其 WAL/SHM，保存 owner scope、业务目标 ID、不可变上限/期限、run/request ID、预留和结算 token/费用、工具次数；不保存请求正文。沿用私有文件、WAL/FULL、启动完整性检查要求，卸载保留文件。预算库、执行库与 Session 分别提交，未知预留保持占额，没有自动清理或退款入口。
 - **唤醒账本与后台执行**：启用 `backgroundWake` 后另写 `databasePath + '.wakes'` 及 WAL/SHM，保存原始目标、owner/binding 身份、原 Session/GoalId/revision、定义 hash、时间和派发状态，沿用私有权限及 WAL/FULL。还会通过 Automations 写入持久 at 定义、occurrence 与执行记录，通过 Delivery 重新加载原 Session；后台模型和获准工具使用当前 Host 的 preset、Policy 与预算权限，可能产生模型费用及外部动作。卸载保留这些数据库和调度记录，但注销执行器、撤销当前 wake capability；不能以卸载推断在途外部动作已终止。
+- **可选准备草稿**：事件等待启用带 `preparation` 的 Proactive profile 时，Proactive 另保存其私有 `.preparations` SQLite、WAL/SHM，其中包含目标文本、事件/owner 范围、独立 Session ID、有限 usage、状态和未验收草稿；Automations 通过配置的模型 provider 发送该目标文本。Goals 自身不直接调用模型、工具或网络来生成草稿；模型网络、草稿数据与相关 `prepare` Policy/`automation-runs` 预算依赖由 Proactive 和 Automations 管理。
 - **子进程与验收网络**：本插件不直接启动进程或请求外部目标；启用步骤验收后会调用 Host Verifier 的检查周期，由它按已批准的 profile/authority 执行程序验证、文档获取或目标回读，沿用其期限、证据预算和权限范围，见 [Verifier 权限说明](../assistant-verifier/README.md)。
 - **凭据、浏览器、安装脚本**：无直接访问。
 - **卸载**：移除 bundle 后注册和数据库连接随 Cordis 生命周期释放，数据保留；停用所有使用该库的 Host 后可手工删除数据库及其 WAL/SHM。插件不写自定义 Session event，原生目标仍由 DSH 管理。

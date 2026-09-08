@@ -52,6 +52,8 @@
 
 ## 当前证据与后续动作
 
+- 2026-09-08，真实模型静默准备（基线 `21ccaf9`）：显式配置现有模型路线、准备预算与期限后，目标事件可生成独立 Session 的无工具草稿；固定预算主体、一次模型请求、撤权/来源变化/期限/静默边界和迟到结果拒收均已接线，进程中断保持 unknown 不重试。真实 Web 实验经过 5 个 Host、7 次模型请求，在隔离容器内通过三个代码检查，并验证重启/重复事件无新增准备、原会话完整回读。草稿仍标为 unverified，不等于通用独立验收或原目标执行；最终全检、失败尝试和独立复核见[证据](evidence/proactive-preparation-2026-09-08.json)。完整 18 项维持 3 已验证 / 10 实现中 / 5 待做；下一步沿实际成功流程接 typed skill/workflow 复用，机会智能排序与其余规划继续保留，不设日历等待。
+
 - 2026-09-08，现有网关真实模型闭环（基线 `ea107bf`）：新增显式 `goal_create(start_native_rounds: true)`，在成功结果上结束 owner turn 并交给原生 Goal driver，默认仍允许在当前 owner turn 继续 `goal_wait_event` / `goal_schedule`。既有 Web 实验入口可读取选定网关路线与内存凭据；真实 `alwaysday1` 3 请求完成原生产物工具执行、v2 step/v3 outcome achieved，实际 Host 重启后原 Session/Goal、产物和完整回复不变且没有新模型调用。最终源码/日志哈希与全检、独立复核见[结构化证据](evidence/real-gateway-goal-2026-09-08.json)。没有扩大任务权限，未激活日常 profile。该证据不等于真实未完成事件恢复或生产 token/cost 预算；网关尚缺可信输入 token 上界与精确 meter，TraeX 已登录但其 ACP usage 尚未映射为 DSH 预算 usage。不能再以“没有 DeepSeek 凭据”泛指所有真实模型验证不可做。
 
 - 起点：`dev`，工作区干净，基线 `1b65852`。已有 22 个插件和 2 个共享库（本轮以实际 package 清单复核，修正此前的 23 个误计）；安装器已有场景组合、真实 Host 激活检查和服务诊断，应该继续扩展这些入口。

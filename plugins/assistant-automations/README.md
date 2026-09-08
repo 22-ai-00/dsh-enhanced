@@ -146,10 +146,17 @@ Growth 的 operation 与 paused artifact 账本。部署必须先停止所有旧
 
 `automation_pending` 用于列出仍在等待审批的提案（仅有界元数据，不含 prompt、principal 或主机路径），避免对同一变更重复提案。
 
+## Proactive 的可选草稿运行
+
+`assistant-proactive` 的 `mode: prepare` 只有 profile 显式提供 `preparation { provider, model, budgetId, maxOutputTokens, timeoutMs }` 时，才经由本插件执行一次真实模型草稿；省略该对象仍是 Proactive 的 metadata-only 记录。该运行不创建 AutomationStore 的 definition、occurrence 或可投递 run，而是为这条准备记录创建独立 Session。它固定 `allowedTools: []`、`maxToolCalls: 0`、`retrySafety: never` 和零重试；原 Goals 目标仍为 `paused`。输出由 Proactive 标为 `unverified-draft`，不代表业务文件被修改、目标执行或独立验收。
+
+这类请求只允许当前、未过期的 Goals 等待和 owner route，并持续重查 `background:assistant-proactive/v1` 对 goal 的 `prepare` Policy 授权。其 Policy **授权主体**是 `assistant-proactive/v1`，而 `automation-runs` 预算的固定 **预算主体**是 `assistant-proactive-v1-preparation`；两者不可用决策 ID、goal ID 或输入文本替换。预算按单次模型运行预留并结算 `budgetAmount: 1`，不是累计 token 或金额预算；`maxOutputTokens` 和 `timeoutMs` 分别只是这一模型 turn 的输出和时长上限。重启时未确认的准备 `running` 记录由 Proactive 标为 `unknown`，不自动重试。撤权、owner route 变化、静默截止（quiet deadline） 或目标 deadline、以及主人拒绝都会阻断尚未完成的请求；已经产生的 draft 保留给状态读取，不会被反馈删除。
+
 ## 权限与数据
 
 - 文件系统：只读写显式 `databasePath`、SQLite WAL/SHM 和 `runsPath`；目录 `0700`，数据库/artifact `0600`。automation 的 workspace 只作为 DSH session 身份，本插件不自行扫描工作区。
 - 网络：插件不直接发网络请求；Agent automation 会通过宿主 DSH LLM provider 调用已批准的模型，Host automation 则调用已注册插件执行器。执行器和白名单工具各自声明的网络权限仍独立生效。
+- Proactive 草稿：显式开启的准备会把目标文本发送给其配置的宿主模型 provider，并保存独立 Session ID、有限 usage 和未验收草稿；它不获取工具、文件、浏览器或消息发送权限。该模型网络依赖和上述持久数据仅在 `assistant-proactive` 显式开启 `preparation` 后存在。
 - 消息投递：`assistant-delivery` 是可选 peer；只有 automation 固定了 `deliveryBindingId` 且后台 send 策略允许时才会 enqueue。该服务不存在时，run 保持 `deliveryStatus: pending`，完整结果仍可从本地 artifact 获取。
 - 子进程、凭据、浏览器、安装脚本：本插件自身无。白名单工具的独立权限仍然生效，assistant-policy 只能进一步拒绝，不能替代 OS/container 隔离。
 - 模型成本：每个 occurrence 可产生一个或多个 LLM step。默认要求 immutable `budgetId`/`budgetAmount`，并在 Agent 创建前预留 Policy budget；只有显式设置 `allowUnbudgetedExecution: true` 才能绕过。runner 会通过 Policy 的只读配置接口证明该 budget 的 metric 精确为 `automation-runs`，其他单位在 reserve 和 Agent 创建前 fail closed。reservation 幂等键同时绑定 automation、occurrence、definition hash、metric 和 budget；唯一允许读取 finalized receipt 的 Recovery 恢复路径不会再次结算预算，executor 自身以同一 operation key 返回已有 terminal result。
@@ -167,3 +174,5 @@ P0 是单机 scheduler，不支持共享网络文件系统、多主共识、DAG�
 Growth 的 canary 检查只接受 Evaluation 按 exact run 返回的 ready canonical learning projection：必须是 upsert，可信执行成功且目标 achieved。原始 append-only 成功不构成 promotion 证明。schema v11 保存 canonical revision、digest、scope watermark 与完整 scope/run 证明；promotion 重新读取当前证明，并在当前 scope watermark 的 Evaluation writer fence 内提交激活。canary 证据冲突、撤回、scope 不匹配或未完成投影都拒绝激活；同 scope 的无关 canonical 进展会刷新 fence watermark，不会改变已检查 canary 的身份。旧版保存的成功证明不会自动升级为新授权，须重新进行实验；已完成的 promotion 操作仍可幂等重放。Evaluation 未提供 exact canonical lookup 时检查保持 pending。
 
 Promoted Growth automations retain their exact canary run identity. Owner correction or withdrawal rechecks canonical eligibility immediately, on restart, and before every coordinator dispatch tick (including timer/internal ticks). Unknown, conflicting, partial or failed canonical objectives pause the exact deployed definition by version/digest CAS and retain a durable rollback receipt; unrelated definitions remain untouched. A newer positive owner judgement does not revoke an already successful deployment. Activation with a lost acknowledgement is recovered from the exact active version before rollback. Failed rollback remains retryable and prevents dispatch of a still-unsafe exact deployment.
+
+准备运行使用 Host-only `modelOnly` 投影：仅允许空工具契约，解析预设身份但不装载该预设的工具与 persona；原生 Agent loop、选定 provider/model、Policy 和会话持久化照常使用。每份准备最多分派一次模型请求；失败保存稳定诊断，不保存异常原文，也不自动重试。

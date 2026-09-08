@@ -20,7 +20,7 @@ import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contr
 import type { TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 import { GoalWakeRuntime, validateGoalWakeConfig, type GoalWakeConfig } from './wake.js'
 import type { GoalWake, GoalWakeIntent } from './wake-store.js'
-import { GoalEventWaitRuntime } from './event-wait.js'
+import { GoalEventWaitRuntime, type PreparationAuthority } from './event-wait.js'
 import type { GoalEventSourceSnapshot, GoalEventWaitIntent } from './event-wait-store.js'
 import type { DeliveryGoalWakeInput } from '@dsh-enhanced/assistant-delivery'
 import { GoalOutcomeRuntime, type GoalOutcomeView } from './outcome.js'
@@ -546,6 +546,11 @@ export class AssistantGoalsService extends Service {
     } catch {
       throw new Error('assistant-goals: goal is paused but event wait could not be confirmed; inspect the goal and waits before retrying')
     }
+  }
+
+  assertPreparationCurrent = (input: PreparationAuthority): void => {
+    if (!this.#active || this.#eventWait === undefined) throw new Error('assistant-goals: event preparation authority unavailable')
+    this.#eventWait.assertPreparationCurrent(input)
   }
 
   eventWaitsForGoal = (agent: Agent | undefined, goalId: string) => {

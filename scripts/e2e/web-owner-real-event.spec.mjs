@@ -14,8 +14,9 @@ import { observePage, query, run, sanitize, startHost } from './web-owner-helper
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const sourceAutomationId = 'web-owner-real-event-source'
+const preparationMode = process.env.DSH_WEB_REAL_OPPORTUNITY === 'prepare'
 const reminderMode = process.env.DSH_WEB_REAL_OPPORTUNITY === 'remind'
-const opportunityProfile = ['1', 'remind'].includes(process.env.DSH_WEB_REAL_OPPORTUNITY) ? 'real-event-opportunity' : undefined
+const opportunityProfile = ['1', 'remind', 'prepare'].includes(process.env.DSH_WEB_REAL_OPPORTUNITY) ? 'real-event-opportunity' : undefined
 
 function row(doc, id) {
   const value = doc.contents.items.find(item => isMap(item) && item.get('id') === id)
@@ -98,6 +99,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     expect((await response).status()).toBe(200)
   }
   try {
+    if (preparationMode) await run('docker', ['run', '--rm', '--pull', 'never', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--memory', '128m', '--cpus', '1', '--pids-limit', '32', '--user', '65534:65534', '--entrypoint', 'node', process.env.DSH_PREPARATION_TEST_IMAGE || 'node:22-alpine', '--version'], env, 10_000)
     await mkdir(workspace); await writeFile(watched, '{"revision":0}\n', { mode: 0o600 })
     const route = await prepareRealRoute({ env, home, workspace })
     env.DSH_WEB_REAL_PROVIDER = route.provider; env.DSH_WEB_REAL_MODEL = route.model
@@ -128,6 +130,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     // native revision observed immediately before the browser clicks Allow once.
     // The generic guard intentionally cannot know this runtime-generated ID.
     const allowedEventApproval = (name, args, allowedWorkspace) => {
+      if (preparationMode && name === 'proactive_status') return args && Object.keys(args).length === 1 && args.goal_id === query(goalsPath, 'SELECT id FROM goal_records')[0]?.id
       if (!isEventExperimentToolAllowed(name, args, allowedWorkspace, opportunityProfile)) return false
       if (name !== 'goal_wait_event') return true
       const current = query(goalsPath, 'SELECT id, native_json FROM goal_records')[0]
@@ -145,7 +148,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     })
     if (opportunityProfile) setConfig(patch, 'dsh-enhanced-assistant-proactive', '@dsh-enhanced/assistant-proactive', {
       databasePath: join(home, 'assistant-proactive/opportunities.sqlite'),
-      profiles: [{ id: opportunityProfile, mode: reminderMode ? 'remind' : 'execute', expectedBenefit: 100, successPpm: 900_000, executionCost: 10, interruptionCost: 5, possibleLoss: 5, minimumUtility: 1, mergeWindowMs: 2000, cooldownMs: 1000, rejectionCooldownMs: 60_000, maxDecisionsPerGoal: 4, maxExecutionsPerGoal: reminderMode ? 0 : 1, maxRemindersPerGoal: reminderMode ? 1 : 0 }],
+      profiles: [{ id: opportunityProfile, mode: preparationMode ? 'prepare' : reminderMode ? 'remind' : 'execute', expectedBenefit: 100, successPpm: 900_000, executionCost: 10, interruptionCost: 5, possibleLoss: 5, minimumUtility: 1, mergeWindowMs: 2000, cooldownMs: 1000, rejectionCooldownMs: 60_000, ...(preparationMode ? { preparation: { provider: route.provider, model: route.model, budgetId: 'real-preparation-runs', maxOutputTokens: 2048, timeoutMs: 120_000 } } : {}), maxDecisionsPerGoal: preparationMode ? 1 : 4, maxExecutionsPerGoal: reminderMode ? 0 : 1, maxRemindersPerGoal: reminderMode ? 1 : 0 }],
     })
     setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300_000 })
     setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', {
@@ -160,8 +163,9 @@ test('real configured route wakes one browser-owned verified goal from a durable
       databasePath: eventsPath, allowedFileRoots: [temp], pollerEnabled: true, pollIntervalMs: 1_000,
       triggers: [{ id: 'file', automationId: sourceAutomationId, kind: 'file', path: watched, fireWhen: 'changed', mode: 'content-hash', debounceMs: 0, maxFires: 10 }],
     })
-    appendNestedConfig(patch, 'dsh-enhanced-personal-assistant', 'assistantPolicy', 'budgets', [{ id: 'real-event-source-runs', metric: 'automation-runs', limit: 2, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }, { id: 'real-event-goal-runs', metric: 'automation-runs', limit: 3, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
+    appendNestedConfig(patch, 'dsh-enhanced-personal-assistant', 'assistantPolicy', 'budgets', [{ id: 'real-preparation-runs', metric: 'automation-runs', limit: 1, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }, { id: 'real-event-source-runs', metric: 'automation-runs', limit: 2, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }, { id: 'real-event-goal-runs', metric: 'automation-runs', limit: 3, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
     appendNestedConfig(patch, 'dsh-enhanced-personal-assistant', 'assistantPolicy', 'rules', [
+      { id: 'real-event-opportunity-prepare', effect: 'allow', subject: { kind: 'background', id: 'assistant-proactive/v1', workspace, principal: 'web/web/local/operator' }, actions: ['prepare'], resource: { kind: 'goal', id: '*' }, context: { initiators: ['background'] } },
       { id: 'real-event-opportunity-reminder', effect: 'allow', subject: { kind: 'background', id: 'assistant-proactive/v1', workspace, principal: 'web/web/local/operator' }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } },
       { id: 'real-event-owner-wait', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['wait-for-event'], resource: { kind: 'automation', id: sourceAutomationId }, context: { initiators: ['external'] } },
       { id: 'real-event-background-wait', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace, principal: 'web/web/local/operator' }, actions: ['wait-for-event'], resource: { kind: 'automation', id: sourceAutomationId }, context: { initiators: ['background'] } },
@@ -224,6 +228,68 @@ test('real configured route wakes one browser-owned verified goal from a durable
     const observationAfterRestart = Date.now()
     await expect.poll(() => query(eventsPath, "SELECT last_observed_at FROM trigger_state WHERE trigger_id = 'file'")[0]?.last_observed_at).toBeGreaterThan(observationAfterRestart)
     await writeFile(watched, '{"revision":1}\n', { mode: 0o600 })
+    if (preparationMode) {
+      const path = join(home, 'assistant-proactive/opportunities.sqlite.preparations')
+      const prepared = () => query(path, 'SELECT payload_json FROM proactive_preparations').map(row => JSON.parse(row.payload_json))
+      await expect.poll(() => String(prepared()[0]?.state), { timeout: 120_000 }).not.toMatch(/^(?:queued|running|undefined)$/u)
+      expect(prepared()[0], 'Preparation must produce a draft; persisted diagnostic explains failures').toMatchObject({ state: 'draft' })
+      const record = prepared()[0]
+      expect(record.result.sessionId).not.toBe(sessionId)
+      expect(record.result.quiescent).toBe(true)
+      expect(record.reason).toBe('unverified-draft')
+      expect(JSON.parse(query(goalsPath, 'SELECT native_json FROM goal_records')[0].native_json)).toMatchObject({ phase: 'paused', roundsStarted: 0, sessionId })
+      expect(existsSync(join(workspace, 'summarize.mjs'))).toBe(false)
+      expect(query(`${goalsPath}.wakes`, 'SELECT * FROM goal_wakes')).toHaveLength(0)
+      expect(query(deliveryPath, "SELECT id FROM outbox_messages WHERE idempotency_key LIKE 'proactive-reminder:%'")).toHaveLength(0)
+      const callsAfterPreparation = await modelCalls(modelLog)
+      expect(callsAfterPreparation.filter(row => row.event === 'dispatch').length).toBe(beforeWakeCalls.filter(row => row.event === 'dispatch').length + 1)
+      expect(callsAfterPreparation.filter(row => row.event === 'preparation-assembly')).toEqual([expect.objectContaining({ toolNames: [] })])
+      await writeFile(testInfo.outputPath('draft.md'), record.result.output, { mode: 0o600 })
+      // Independent validation of this generated example; the product still
+      // labels arbitrary drafts unverified and never applies them to the goal.
+      const blocks = [...record.result.output.matchAll(/```(?:javascript|js|mjs|node|typescript)?[^\n]*\n([\s\S]*?)```/gu)]
+      const code = blocks.find(block => /JSON\.parse|process\.stdin/u.test(block[1]))?.[1]
+      expect(code).toBeTruthy()
+      const checkDir = join(temp, 'draft-check'); await mkdir(checkDir, { mode: 0o700 })
+      await writeFile(join(checkDir, 'summarize.mjs'), code, { mode: 0o644 }); await import('node:fs/promises').then(fs => fs.chmod(checkDir, 0o755))
+      const checks = []
+      const image = process.env.DSH_PREPARATION_TEST_IMAGE || 'node:22-alpine'
+      for (const criterion of criteria) {
+        await writeFile(join(checkDir, 'input.json'), criterion.stdin, { mode: 0o644 })
+        const container = `dsh-preparation-${process.pid}-${checks.length}`
+        let result
+        try {
+          result = await run('docker', ['run', '--name', container, '--rm', '--pull', 'never', '--entrypoint', 'sh', '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--memory', '128m', '--cpus', '1', '--pids-limit', '32', '--user', '65534:65534', '--mount', `type=bind,src=${checkDir},dst=/draft,readonly`, image, '-c', 'exec node /draft/summarize.mjs < /draft/input.json'], env, 10_000)
+        } finally { await run('docker', ['rm', '-f', container], env, 5_000).catch(() => {}) }
+        expect(result.trim()).toBe(criterion.expectedStdout.trim()); checks.push({ id: criterion.id, passed: true })
+      }
+      await stop(); await open(true); await selectOwnerSession(activePage)
+      expect(prepared()[0].result).toEqual(record.result)
+      expect((await modelCalls(modelLog)).filter(row => row.event === 'dispatch')).toEqual(callsAfterPreparation.filter(row => row.event === 'dispatch'))
+      const observedAfterRestore = Date.now()
+      await expect.poll(() => query(eventsPath, "SELECT last_observed_at FROM trigger_state WHERE trigger_id = 'file'")[0]?.last_observed_at).toBeGreaterThan(observedAfterRestore)
+      await writeFile(watched, '{"revision":2}\n', { mode: 0o600 })
+      await expect.poll(() => readEvents(eventsPath).length).toBeGreaterThanOrEqual(2)
+      await expect.poll(() => query(join(home, 'assistant-automations/events.sqlite'), "SELECT status FROM automation_runs WHERE automation_id = ?", sourceAutomationId).filter(row => row.status === 'succeeded').length).toBeGreaterThanOrEqual(2)
+      expect(prepared()).toHaveLength(1)
+      expect((await modelCalls(modelLog)).filter(row => row.event === 'dispatch')).toEqual(callsAfterPreparation.filter(row => row.event === 'dispatch'))
+      await stop()
+      env.DSH_WEB_REAL_PREPARATION_INSPECT = '1'
+      await open(true); await selectOwnerSession(activePage)
+      const inspectionAt = Date.now()
+      await prompt(`Use proactive_status with goal_id ${before.id} and show the complete saved draft verbatim. Do not execute or resume the goal.`)
+      await waitForVerifiedGoal(activePage, goalsPath, verifierPath, deliveryPath, approved, frames, sessionId, workspace, { isToolAllowed: allowedEventApproval, rejected,
+        until: () => query(deliveryPath, "SELECT status FROM inbox_messages WHERE received_at >= ? AND status = 'processed'", inspectionAt).length > 0 })
+      await expect(activePage.getByText('[unverified-draft]', { exact: false }).last()).toBeVisible({ timeout: 15_000 })
+      const readback = await readSessionAudit(home, workspace, sessionId)
+      expect(readback.events.some(row => row.type === 'tool/call' && row.data.name === 'proactive_status')).toBe(true)
+      expect(readback.assistantReplies.some(reply => reply.text.includes(code.trim()))).toBe(true)
+      await writeFile(testInfo.outputPath('session-audit.json'), JSON.stringify(readback, null, 2), { mode: 0o600 })
+      expect(existsSync(join(workspace, 'summarize.mjs'))).toBe(false)
+      await stop()
+      await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ capability: 'durable-model-preparation', ownerReadbackViaWeb: true, ...route.proof, hostStarts, sessionId, goalId: before.id, preparation: record, preparationCalls: 1, originalGoalExecuted: false, businessFilesWritten: false, draftChecks: checks, draftCheckImage: image, restoredWithoutModelCall: true, duplicateDidNotGenerate: true, modelCalls: await modelCalls(modelLog), approved, rejected }, null, 2), { mode: 0o600 })
+      return
+    }
     if (reminderMode) {
       const notices = () => query(deliveryPath, "SELECT id, status, intent_json FROM outbox_messages WHERE idempotency_key LIKE 'proactive-reminder:%'")
       await expect.poll(() => notices().map(row => row.status), { timeout: 30000 }).toEqual(['accepted'])

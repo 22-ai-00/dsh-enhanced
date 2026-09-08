@@ -1219,9 +1219,15 @@ importers:
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.1.2-rc.1(de5e1ff2d608fbe22667925341ad1dfc)
+      '@dsh-enhanced/assistant-automations':
+        specifier: workspace:^
+        version: link:../assistant-automations
       '@dsh-enhanced/assistant-delivery':
         specifier: workspace:^
         version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-goals':
+        specifier: workspace:^
+        version: link:../assistant-goals
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:^
         version: link:../assistant-policy

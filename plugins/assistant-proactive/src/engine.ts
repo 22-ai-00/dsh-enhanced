@@ -7,11 +7,11 @@ import type { OpportunityDecision, OpportunityEvaluation, OpportunityInput, Oppo
 const max = 1_000_000_000
 const integer = (value: unknown, limit = max): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= limit
 const text = (value: unknown, limit = 4096): value is string => typeof value === 'string' && value.length > 0 && value.length <= limit && !/[\s\p{Cc}]/u.test(value)
-const content = (value: unknown, limit = 65_536): value is string => typeof value === 'string' && value.length > 0 && value.length <= limit && !/[\p{Cc}]/u.test(value)
+const content = (value: unknown, limit = 65_536): value is string => typeof value === 'string' && value.length > 0 && value.length <= limit && !/[\p{Cc}]/u.test(value.replace(/[\r\n]/gu, ''))
 const freeze = <T>(value: T): Readonly<T> => Object.freeze(JSON.parse(JSON.stringify(value)) as T)
 function fail(message = 'assistant-proactive: invalid opportunity input'): never { throw new Error(message) }
 
-function privatePath(path: string): void {
+export function privatePath(path: string): void {
   if (!isAbsolute(path)) fail('assistant-proactive: databasePath must be absolute')
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 })
   const directory = lstatSync(dirname(path)); if (!directory.isDirectory() || directory.isSymbolicLink() || (directory.mode & 0o022) !== 0) fail('assistant-proactive: unsafe database directory')
@@ -27,13 +27,20 @@ function privatePath(path: string): void {
 }
 
 export function validateProfile(input: OpportunityProfile): Readonly<OpportunityProfile> {
-  if (!input || typeof input !== 'object' || Object.keys(input).some(key => !['id', 'mode', 'expectedBenefit', 'successPpm', 'executionCost', 'interruptionCost', 'possibleLoss', 'minimumUtility', 'mergeWindowMs', 'cooldownMs', 'rejectionCooldownMs', 'quietHours', 'maxDecisionsPerGoal', 'maxExecutionsPerGoal', 'maxRemindersPerGoal'].includes(key))
+  if (!input || typeof input !== 'object' || Object.keys(input).some(key => !['preparation', 'id', 'mode', 'expectedBenefit', 'successPpm', 'executionCost', 'interruptionCost', 'possibleLoss', 'minimumUtility', 'mergeWindowMs', 'cooldownMs', 'rejectionCooldownMs', 'quietHours', 'maxDecisionsPerGoal', 'maxExecutionsPerGoal', 'maxRemindersPerGoal'].includes(key))
     || !text(input.id) || !['prepare', 'remind', 'execute'].includes(input.mode) || input.successPpm > 1_000_000
     || ![input.expectedBenefit, input.successPpm, input.executionCost, input.interruptionCost, input.possibleLoss, input.minimumUtility, input.mergeWindowMs, input.cooldownMs, input.rejectionCooldownMs, input.maxDecisionsPerGoal, input.maxExecutionsPerGoal, input.maxRemindersPerGoal].every(value => integer(value))) fail('assistant-proactive: invalid profile')
   if (input.quietHours !== undefined) {
     const quiet = input.quietHours
     if (!quiet || typeof quiet !== 'object' || Object.keys(quiet).length !== 3 || typeof quiet.timezone !== 'string' || quiet.timezone.length > 128 || !integer(quiet.startMinute, 1439) || !integer(quiet.endMinute, 1439) || quiet.startMinute === quiet.endMinute) fail('assistant-proactive: invalid quiet hours')
     try { Intl.DateTimeFormat('en-US', { timeZone: quiet.timezone }).format() } catch { fail('assistant-proactive: invalid quiet hours') }
+  }
+  if (input.preparation !== undefined) {
+    const p = input.preparation
+    if (input.mode !== 'prepare' || !p || typeof p !== 'object' || Object.keys(p).length !== 5
+      || ![p.provider, p.model, p.budgetId].every(value => text(value, 512))
+      || !integer(p.maxOutputTokens, 32_768) || p.maxOutputTokens < 1
+      || !integer(p.timeoutMs, 300_000) || p.timeoutMs < 1_000) fail('assistant-proactive: invalid preparation settings')
   }
   // BigInt makes the product exact before the bounded public number conversion.
   const utility = BigInt(input.expectedBenefit) * BigInt(input.successPpm) / 1_000_000n - BigInt(input.executionCost) - BigInt(input.interruptionCost) - BigInt(input.possibleLoss)

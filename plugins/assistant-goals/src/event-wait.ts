@@ -6,6 +6,11 @@ import type { GoalWakeIntent } from './wake-store.js'
 import type { GoalWakeRuntime } from './wake.js'
 import { GoalEventWaitStore, type GoalEventSourceSnapshot, type GoalEventWait, type GoalEventWaitIntent } from './event-wait-store.js'
 
+export interface PreparationAuthority {
+  waitId: string; profileId: string; scope: GoalScope; goalId: string; sessionId: string
+  definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string
+  sourceDigest: string; sourceId: string; eventId: string; eventSequence: number; eventDigest: string; expiresAt: number
+}
 type SourceEvent = { sequence: number; envelope: Readonly<ExternalEventEnvelope> }
 type SourceReader = {
   sourceSnapshot(triggerId: string): Readonly<GoalEventSourceSnapshot>
@@ -180,6 +185,24 @@ export class GoalEventWaitRuntime {
   #onSourceChanged(): void {
     // This is only a prompt to reconcile; a source notification has no authority itself.
     this.reconcile()
+  }
+  /** Read-only authority for preparing an artifact while the original goal stays paused. */
+  assertPreparationCurrent(input: PreparationAuthority): void {
+    const wait = this.#store.get(input.waitId)
+    if (!this.#live || !wait || wait.state !== 'waiting' || Date.now() >= wait.intent.expiresAt
+      || wait.intent.opportunityProfile !== input.profileId || !same(wait.intent.wake.scope, input.scope)
+      || wait.intent.wake.goalId !== input.goalId || wait.intent.wake.native.sessionId !== input.sessionId
+      || wait.intent.wake.native.goalId !== input.nativeGoalId || wait.intent.wake.native.revision !== input.nativeRevision
+      || wait.intent.wake.definition.digest !== input.definitionDigest || wait.intent.wake.ownerRouteId !== input.ownerRouteId
+      || wait.intent.source.sourceId !== input.sourceId || wait.intent.source.configDigest !== input.sourceDigest
+      || wait.intent.expiresAt !== input.expiresAt || !Number.isSafeInteger(input.eventSequence)
+      || input.eventSequence <= wait.intent.source.highWaterSequence || !this.#sourceCurrent(wait.intent)) fail()
+    const record = this.#recordCurrent(wait.intent)
+    if (!record || record.native.objective !== input.objective) fail()
+    this.wake.preflight(record)
+    const source = this.#source?.firstEventAfter(wait.intent.source, input.eventSequence - 1, input.expiresAt)
+    if (!source || source.sequence !== input.eventSequence || source.envelope.event.id !== input.eventId
+      || externalEventDigest(source.envelope) !== input.eventDigest) fail()
   }
   /** Called by GoalWakeRuntime before native resume. Scheduled wakes remain unaffected. */
   assertWakeCurrent(wakeIntent: GoalWakeIntent): void {
