@@ -18,6 +18,9 @@ export { Config } from './config.js'
 /** Exact Host-owned key used to inspect a configured acceptance profile. */
 export interface AcceptanceProfileSelection extends Pick<AcceptanceProfile, 'scope' | 'owner' | 'objective' | 'taskKind'> {}
 
+/** Exact Host-owned boundary used to discover configured objective text. */
+export type AcceptanceObjectivesSelection = Omit<AcceptanceProfileSelection, 'objective'>
+
 /** Immutable, configuration-only profile inspection result. */
 export interface AcceptanceProfileInspection {
   readonly profile: AcceptanceProfile
@@ -66,6 +69,24 @@ function selectionKey(value: AcceptanceProfileSelection): string {
     throw new Error('assistant-verifier: invalid profile selection')
   }
   return acceptanceCanonicalJson([scope, owner, selection.taskKind, selection.objective])
+}
+
+function objectivesSelectionKey(value: AcceptanceObjectivesSelection): string {
+  const selection = record(value, ['scope', 'owner', 'taskKind'], 'profile')
+  const scope = record(selection.scope, ['workspace', 'preset'], 'profile scope')
+  const owner = record(selection.owner, ['principalRecordId', 'principalVersion'], 'profile owner')
+  if (typeof scope.workspace !== 'string' || scope.workspace.includes('\0') || Buffer.byteLength(scope.workspace) > 4_096
+    || scope.workspace !== scope.workspace.normalize('NFC').trim() || !isAbsolute(scope.workspace)
+    || normalize(scope.workspace) !== scope.workspace || resolve(scope.workspace) !== scope.workspace
+    || typeof scope.preset !== 'string' || !PROFILE_SELECTION_PRESET.test(scope.preset)
+    || typeof owner.principalRecordId !== 'string' || !PROFILE_SELECTION_ID.test(owner.principalRecordId)
+    || typeof owner.principalVersion !== 'number'
+    || !Number.isSafeInteger(owner.principalVersion) || owner.principalVersion < 1
+    || (selection.taskKind !== 'automation-run' && selection.taskKind !== 'foreground-turn'
+      && selection.taskKind !== 'goal-step' && selection.taskKind !== 'goal-outcome')) {
+    throw new Error('assistant-verifier: invalid profile selection')
+  }
+  return acceptanceCanonicalJson([scope, owner, selection.taskKind])
 }
 
 function freeze<T>(value: T): T {
@@ -158,6 +179,17 @@ export class AssistantVerifierService extends Service<Config> {
     return selected === undefined ? null : Object.freeze({
       profile: profileCopy(selected.profile), digest: selected.digest,
     })
+  }
+
+  /**
+   * Host-only objective discovery for preflight. It only returns configured
+   * objective text within the exact scope, owner, and task-kind boundary.
+   */
+  inspectAcceptanceObjectives = (selection: AcceptanceObjectivesSelection): readonly string[] => {
+    this.#assertActive()
+    const key = objectivesSelectionKey(selection)
+    return Object.freeze([...new Set(this.#compiled.profiles.flatMap(({ profile }) =>
+      acceptanceCanonicalJson([profile.scope, profile.owner, profile.taskKind]) === key ? [profile.objective] : []))])
   }
 
   registerTrustedVerifierEvaluationSink = (registration: VerifierEvaluationRegistration): (() => void) => {

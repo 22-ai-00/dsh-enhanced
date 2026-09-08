@@ -139,7 +139,12 @@ llm-pi-ai:
     const goals = config(plan.patch, 'dsh-enhanced-assistant-goals')
     const verifier = config(plan.patch, 'dsh-enhanced-assistant-verifier')
     const personal = config(plan.patch, 'dsh-enhanced-personal-assistant')
-    expect(verifier.profiles.filter((profile: { id: string }) => profile.id.startsWith(plan.admissionId))).toHaveLength(2)
+    const profiles = verifier.profiles.filter((profile: { id: string }) => profile.id.startsWith(plan.admissionId))
+    expect(profiles).toHaveLength(2)
+    expect(profiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ taskKind: 'goal-step', validityMs: 120_000, bounds: { maxDurationMs: 20_000, maxEvidenceBytes: 8192 } }),
+      expect.objectContaining({ taskKind: 'goal-outcome', validityMs: 120_000, bounds: { maxDurationMs: 20_000, maxEvidenceBytes: 8192 } }),
+    ]))
     expect(goals.executionBudget).toMatchObject({ inputTokens: 2_097_152, maxOutputTokensPerCall: 8192 })
     expect(goals.strategy).toBeUndefined()
     expect(goals.backgroundWake).toMatchObject({ ownerRouteId: plan.admissionId, budgetId: `${plan.admissionId}-runs` })
@@ -240,5 +245,27 @@ llm-pi-ai:
     expect(parsed.version === 1 && parsed.model).toBe('deepseek-v4-flash')
     expect(() => parseGoalAdmissionTask('{"version":1}')).toThrow(/fields/)
     expect(() => parseGoalAdmissionTask(`${task()} trailing`)).toThrow(/JSON/)
+  })
+
+  test('requires an execution budget strictly larger than the native round plus both verification windows', () => {
+    const executionBudget = { modelCalls: 3, toolCalls: 3, inputTokens: 2_097_152, outputTokens: 8192, maxOutputTokensPerCall: 8192 }
+    expect(() => parseGoalAdmissionTask(task({ executionBudget: { ...executionBudget, durationMs: 100_000 } }))).toThrow(/cannot cover/)
+    expect(() => parseGoalAdmissionTask(task({ executionBudget: { ...executionBudget, durationMs: 99_999 } }))).toThrow(/cannot cover/)
+    expect(parseGoalAdmissionTask(task({ executionBudget: { ...executionBudget, durationMs: 100_001 } }))).toMatchObject({ executionBudget: { durationMs: 100_001 } })
+  })
+
+  test('admits a longer native round when each verification window remains short', async () => {
+    const f = await fixture()
+    const executionBudget = { modelCalls: 3, toolCalls: 3, inputTokens: 2_097_152, outputTokens: 8192, maxOutputTokensPerCall: 8192, durationMs: 210_000 }
+    const verification = { artifactPath: 'result.txt', command: 'node verify.mjs', maxRuns: 4, maxTotalDurationMs: 100_000, maxDurationMs: 20_000, maxOutputBytes: 4096,
+      cases: [{ stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }] }
+    const plan = prepareGoalAdmission(f.input, f.prepared.patch, f.effective,
+      task({ stepMaxDurationMs: 120_000, executionBudget, verification }), f.snapshot)
+    const profiles = config(plan.patch, 'dsh-enhanced-assistant-verifier').profiles.filter((profile: { id: string }) => profile.id.startsWith(plan.admissionId))
+    expect(profiles).toHaveLength(2)
+    expect(profiles).toEqual(expect.arrayContaining([
+      expect.objectContaining({ validityMs: 210_000, bounds: { maxDurationMs: 40_000, maxEvidenceBytes: 8192 } }),
+      expect.objectContaining({ validityMs: 210_000, bounds: { maxDurationMs: 40_000, maxEvidenceBytes: 8192 } }),
+    ]))
   })
 })

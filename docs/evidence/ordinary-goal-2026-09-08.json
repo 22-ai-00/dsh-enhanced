@@ -1,0 +1,158 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "22b04e6d6d25e73f908975a1f67cebdf86997834",
+  "status": "ordinary-isolated-task-validated",
+  "completeWorkPackage": false,
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "path": "/tmp/dsh-native-ordinary-final-check.log",
+    "sha256": "f56e8fef8a9927c4f960b038fa1f9c3ea031357a2a7f60b6d5a9b1bd13eaf2f6",
+    "files": 332,
+    "tests": 4018,
+    "packs": 33,
+    "skipped": false
+  },
+  "realRun": {
+    "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs",
+    "exitCode": 0,
+    "result": "1 passed (2.5m)",
+    "path": "/tmp/dsh-repo-codex-visible-restart-1.log",
+    "sha256": "36b675fb90dedd94e091019a74444b54399e2de490ce605d72fa36c23e850db2",
+    "route": {
+      "provider": "codex-subscription",
+      "model": "gpt-5.6-terra",
+      "api": "direct-responses"
+    },
+    "agentRouteModel": "default",
+    "dispatches": 7,
+    "settledWithUsage": 6,
+    "auxiliaryTitleCall": {
+      "call": 2,
+      "finish": "error",
+      "usage": null
+    },
+    "native": {
+      "sessionId": "session-83535b8f-238b-4c98-85a2-93aa085278da",
+      "goalId": "goal-a570e446-e72e-49fe-ba3e-0fee860d4fa6",
+      "revision": 2,
+      "objective": "Fix summarize.mjs: read a JSON order array from stdin, ignore orders whose status is \"cancelled\", sum integer amountCents by currency, and print one JSON object with currency keys in dictionary order followed by a newline.",
+      "phase": "complete",
+      "roundsStarted": 1,
+      "maxGoalRounds": 3,
+      "updatedAt": 1788872060006
+    },
+    "sourceJobs": 2,
+    "receipts": [
+      {
+        "kind": "goal-step",
+        "objectiveStatus": "achieved",
+        "digest": "b1c99fcdabf8e96c90131db723918990d2851d7f62d841a88d01da1fa082f74f",
+        "artifactDigest": "fb5362331d199c63885c742e226cbb335f8dc47b84c1a698d58476e9a1b49b8b"
+      },
+      {
+        "kind": "goal-outcome",
+        "objectiveStatus": "achieved",
+        "digest": "96c69018821d2f77517f040228a4774eba039c276d45fbc924cb5b7d0789c252",
+        "artifactDigest": "fb5362331d199c63885c742e226cbb335f8dc47b84c1a698d58476e9a1b49b8b"
+      }
+    ],
+    "approvals": 2,
+    "resultFeedback": {
+      "turn": 2,
+      "visibleReply": "Implemented and exported summarize.mjs."
+    },
+    "restart": {
+      "sameGoal": true,
+      "sameSourceJobEvidence": true,
+      "replyVisible": true
+    },
+    "artifacts": [
+      {
+        "path": ".cache/repo-autonomy-real-codex-subscription-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/proof.json",
+        "sha256": "1c7dab43b49354a74cf4e5c610119036e52c909e5b86147aea21f1dab2603291"
+      },
+      {
+        "path": ".cache/repo-autonomy-real-codex-subscription-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/verifier-controls.json",
+        "sha256": "b4e8cc0be75ae00b0e55f9ba823de49b80cbadd9ee0e0370f9b4a7ece7d419b3"
+      },
+      {
+        "path": ".cache/repo-autonomy-real-codex-subscription-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/tool-events.json",
+        "sha256": "a1f6faca0f55b552a4fa996757030cdd929969888efcdb167b39a9fbc4f31c6a"
+      },
+      {
+        "path": ".cache/repo-autonomy-real-codex-subscription-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/observer.jsonl",
+        "sha256": "ef8de93ab7771984dd7dacf1531a56d354d90d13f947edd86fe19cdbf74f187d"
+      }
+    ]
+  },
+  "independentReview": {
+    "productionChanges": "PASS",
+    "actualRunEvidence": "PASS",
+    "method": "Read-only source and actual artifacts review; targeted production tests/typechecks. No second real Host run.",
+    "futureTestImprovement": "Explicitly assert receipt goal/session/owner/scope/definition fields in the E2E; actual fresh-home receipts were independently checked for exact binding."
+  },
+  "earlierRuns": [
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-repo-codex-enabled-1.log",
+      "sha256": "26e0a1709c31030aced45b43f205d359049ac9d4bd75604f2c2120dc4240160e",
+      "finding": "goal objective expanded beyond exact configured text"
+    },
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-repo-codex-exact-objective-1.log",
+      "sha256": "5d898c2d4dd9a581b1cc0f47e6bf3c208e5f4d34dd6d9138e666e39911c84b52",
+      "finding": "native Goal ran without exported artifacts"
+    },
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-repo-codex-artifact-export-1.log",
+      "sha256": "62507a854470ef7fe0e433ba21b9f0895bf1c88e6072f78d6a194618901492de",
+      "finding": "goal admission rejected by inconsistent verification windows"
+    },
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-repo-codex-plain-objective-1.log",
+      "sha256": "9a43e9973b1ddaf2ceb1afc0fea6ecd75428606fb0d51b23b4a3edd98ccf7aad",
+      "finding": "same window defect; parsed tool objective was exact, disproving quote-escaping hypothesis"
+    },
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-repo-codex-admission-window-1.log",
+      "sha256": "a2637b9eeb15b9d17b3a93a0f60076e0da484e8311e46a163d32e7ee547086f8",
+      "finding": "verifier command omitted stdin redirection"
+    },
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-repo-codex-verifier-input-1.log",
+      "sha256": "a4f989a23bcdd3c78c58c5a514267192ce634f39fc42cbb280b07efe5ae168d3",
+      "finding": "Goal and receipts passed; restarted browser did not select original Session"
+    }
+  ],
+  "limitations": [
+    "One bounded task does not establish general model reliability or complete WP18.",
+    "Restart occurs after task completion, not during execution.",
+    "Native reply visible and persistent; no proof of proactive final independent-verdict notification.",
+    "No real GitHub PR/CI lifecycle.",
+    "Call/tool/deadline limits do not establish token/USD hard caps.",
+    "No automatic skill improvement gains or full autonomous growth lifecycle.",
+    "No ChatGPT web review obtained in this batch."
+  ],
+  "sourceSha256": {
+    "plugins/assistant-goals/README.md": "7ca40f4f2bcfa1825031ab14809fe25129c3a12cf88ad5aefb3b61d51d451ee5",
+    "plugins/assistant-goals/src/service.ts": "166cdbae79a2a13b3943306347f16e576803d43c82c2f55414df26e1e54381ab",
+    "plugins/assistant-goals/tests/service.spec.ts": "47ba786b0326ff5b087f7c107a8ad9e5884d3ee3df446b70b3bcf5f9bda8eaf8",
+    "plugins/assistant-isolation/src/tools.ts": "bfc17444ebd9c040ebb15bdef207114f589a397c7d9f4f4c5d3c0802bb6dedfe",
+    "plugins/assistant-verifier/README.md": "20a1706472829807e667301e2b9474eeef7f303446dcb29085bd0260ef0a9189",
+    "plugins/assistant-verifier/src/index.ts": "87445ce1ec0f1a5369ab92a676da55b137f8c5549d07028a4c41b85d44540c30",
+    "plugins/assistant-verifier/src/service.ts": "9e38db7b6fee8943f7e408c6a30bd32855f19e7d3394da4b69f951aa94711bce",
+    "plugins/assistant-verifier/tests/service.spec.ts": "39405d9d028251533cad71ecdb17ef40b497f77854f515d9ed16efd648eda649",
+    "plugins/assistant-web-owner/README.md": "6cfe4f97b84b6718cdf7a51d29199bfb9a59e419214540d79587a143e8655a35",
+    "plugins/assistant-web-owner/src/goal-admission.ts": "373e41c34b6b463b882718f9598b3efce0fb3ef4d9c7469caacd5418cc4439d9",
+    "plugins/assistant-web-owner/tests/goal-admission.spec.ts": "8ce8514f75437559d6002bd81b7f3c8c506ef889ae32cf97ba0d4be1404b0859",
+    "scripts/e2e/playwright-repo-real.config.mjs": "64dfa6669b04b3dbdbe7243851532321fb556ed2ca3206d4b2f4202539f74851",
+    "scripts/e2e/repo-autonomy-real.spec.mjs": "6c1372bbd0f8c41edfca7151a818007ee335418acbfe43e6310b39bfb8a736de"
+  }
+}

@@ -104,6 +104,38 @@ describe('Host acceptance service', () => {
     },
   )
 
+  it('discovers only frozen objectives within the exact Host-owned boundary', async () => {
+    const { ctx, producer, task, config } = await harness('goal-step')
+    const profile = config.profiles[0]!
+    config.profiles.push(
+      { ...profile, id: 'another-goal-step', objective: 'Approved whole step objective' },
+      { ...profile, id: 'foreign-owner', owner: { ...task.owner, principalRecordId: 'owner-foreign' }, objective: 'Foreign owner objective' },
+      { ...profile, id: 'other-kind', taskKind: 'goal-outcome', objective: 'Other kind objective' },
+      { ...profile, id: 'foreign-workspace', scope: { ...task.scope, workspace: `${task.scope.workspace}-foreign` }, objective: 'Foreign workspace objective' },
+    )
+    await ctx.fiber.restart()
+    const configured = new AssistantVerifierService(ctx, config)
+    const selection = { scope: { ...task.scope }, owner: { ...task.owner }, taskKind: 'goal-step' as const }
+
+    const objectives = configured.inspectAcceptanceObjectives(selection)
+    expect(objectives).toEqual([task.objective, 'Approved whole step objective'])
+    expect(Object.isFrozen(objectives)).toBe(true)
+    expect(() => { (objectives as string[]).push('mutated') }).toThrow()
+    expect(producer.inspected).toBe(0)
+    expect(configured.inspectAcceptanceObjectives({ ...selection, owner: { ...selection.owner, principalRecordId: 'owner-foreign' } })).toEqual(['Foreign owner objective'])
+    expect(configured.inspectAcceptanceObjectives({ ...selection, scope: { ...selection.scope, workspace: `${selection.scope.workspace}-foreign` } })).toEqual(['Foreign workspace objective'])
+    expect(configured.inspectAcceptanceObjectives({ ...selection, taskKind: 'goal-outcome' })).toEqual(['Other kind objective'])
+    expect(() => configured.inspectAcceptanceObjectives({ ...selection, objective: task.objective } as never)).toThrow('invalid profile selection')
+    expect(() => configured.inspectAcceptanceObjectives({ scope: selection.scope, owner: selection.owner } as never)).toThrow('invalid profile selection')
+    const getter = { ...selection }
+    Object.defineProperty(getter, 'taskKind', { enumerable: true, get: () => selection.taskKind })
+    expect(() => configured.inspectAcceptanceObjectives(getter as never)).toThrow('invalid profile selection')
+    expect(() => configured.inspectAcceptanceObjectives({ ...selection, owner: { ...selection.owner, principalVersion: 0 } })).toThrow('invalid profile selection')
+
+    await ctx.fiber.restart()
+    expect(() => configured.inspectAcceptanceObjectives(selection)).toThrow('disposed')
+  })
+
   it('does not persist a verdict when disposal interrupts verification, even if the driver later returns success', async () => {
     const { ctx, producer, task, service, complete, config } = await harness()
     const handle = producer.registration!.prepare(task)!

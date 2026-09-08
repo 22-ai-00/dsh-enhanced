@@ -88,7 +88,7 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
   else shape(input.executionBudget, ['mode', 'modelCalls', 'toolCalls', 'durationMs', 'maxOutputTokensPerCall', 'routes'])
   const budget = input.executionBudget
   for (const name of input.version === 1 ? ['modelCalls', 'toolCalls', 'inputTokens', 'outputTokens'] : ['modelCalls', 'toolCalls']) integer(budget[name], 1, 1_000_000_000)
-  integer(budget.durationMs, input.stepMaxDurationMs + 1, 31 * 86_400_000)
+  integer(budget.durationMs, 1, 31 * 86_400_000)
   integer(budget.maxOutputTokensPerCall, 1, 32768)
   if (input.version === 1 && ((budget.inputTokens as number) < 2_097_152 || (budget.outputTokens as number) < budget.maxOutputTokensPerCall)) fail('budget cannot admit the fixed model route')
   if (input.version === 2) {
@@ -108,7 +108,9 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
   integer(verification.maxRuns, 1, 10000); integer(verification.maxDurationMs, 1000, 300000)
   integer(verification.maxTotalDurationMs, verification.maxDurationMs, 86_400_000)
   integer(verification.maxOutputBytes, 1, 1024 * 1024)
-  if (verification.maxDurationMs * verification.cases.length >= input.stepMaxDurationMs) fail('verification needs time within the step deadline')
+  const verificationWindow = verification.maxDurationMs * verification.cases.length
+  if (verificationWindow >= input.stepMaxDurationMs) fail('verification needs time within the step deadline')
+  if (budget.durationMs <= input.stepMaxDurationMs + 2 * verificationWindow) fail('execution budget cannot cover the configured native round and verification')
   if (input.wake !== undefined) {
     shape(input.wake, ['maxDelayMs', 'runTimeoutMs', 'maxRuns'])
     integer(input.wake.maxDelayMs, 1, budget.durationMs - 1); integer(input.wake.runTimeoutMs, 1000, 300000); integer(input.wake.maxRuns, 1, 10000)
@@ -193,9 +195,10 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     maxRuns: task.verification.maxRuns, maxTotalDurationMs: task.verification.maxTotalDurationMs, maxDurationMs: task.verification.maxDurationMs,
     maxOutputBytes: task.verification.maxOutputBytes, testSets: [{ id: 'cases', cases: task.verification.cases }] }
   const compiled = createVerifierAuthorities({ authorities: [authority] })[0]!
+  const verificationWindow = task.verification.maxDurationMs * task.verification.cases.length
   const profiles: AcceptanceProfile[] = (['goal-step', 'goal-outcome'] as const).map(taskKind => ({ id: `${admissionId}-${taskKind}`, version: 1, taskKind,
     objective: task.objective, scope: { workspace: input.workspace, preset: input.preset }, owner: { principalRecordId: owner.id, principalVersion: owner.version },
-    validityMs: task.executionBudget.durationMs, bounds: { maxDurationMs: task.stepMaxDurationMs, maxEvidenceBytes: 8192 },
+    validityMs: task.executionBudget.durationMs, bounds: { maxDurationMs: verificationWindow, maxEvidenceBytes: 8192 },
     criteria: [{ id: 'artifact-behavior', kind: 'isolated-process-behavior', authority: { id: compiled.id, digest: compiled.digest }, artifactPath: task.verification.artifactPath, testSetId: 'cases' }] }))
   append(verifier, 'authorities', [authority]); append(verifier, 'profiles', profiles)
   // Compile all effective authorities/profiles, detecting conflicting exact task matches too.

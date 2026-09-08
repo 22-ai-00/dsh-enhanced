@@ -144,6 +144,8 @@ v2 可使用安装器已经配置且实际出现在 `agent-default-model` 的任
 
 v2 的硬限制是模型请求数、工具请求数、总时长和每次输出上限；若 adapter 提供 usage，会作为记录使用，但不是 token 或 USD 硬限制。重复相同 admission 不改变 patch 字节、不会续期 Isolation grant、不会重置已用次数或扩大预算。与本次任务要求冲突的已有受管配置或同 ID 条目会拒绝，而不是被覆盖。
 
+每个验收 profile 的验证窗口为 `verification.maxDurationMs × verification.cases.length`，必须小于 `stepMaxDurationMs`。两个 profile 都使用该窗口；因此 `executionBudget.durationMs` 必须严格大于 `stepMaxDurationMs + 2 × 验证窗口`，以覆盖 native round、step 验收和 whole-goal 验收。setup 会拒绝不足的明确预算，不会自动扩大时长或权限。
+
 该精确 Session 仅用于核验 owner 和可选 wake route；生成的 profiles 绑定 owner、scope 和 objective。setup 只写入并复核本地配置、已有 owner snapshot 与持久 grant；它不发 DeepSeek 请求、不创建 Goal、不证明凭据可用、网络连通、模型质量、隔离验收成功或完整 WP17/长期自治已经完成。grant 已过期、撤销、耗尽，owner/version 改变，或 Session 有 pending/dispatched/unknown lease 时必须先按正常运维流程处理，不能靠重跑此命令续权。
 
 发布文件同时包含 `dsh-autonomy-doctor --profile web`。此 CLI 读取有效 profile 和当前 Delivery owner、Isolation grant/累计预算快照，再运行独立的固定 Docker 探测，最后复核配置/授权没有失效；不会开启第二个 Host、配对 owner、迁移数据库、续期 grant 或重置预算。使用 SQLite 只读连接，不读取凭据/业务产物，也不请求模型。缺失或不支持的 schema、owner 版本改变、撤销、过期、耗尽和配置不一致都失败。当前支持 Delivery schema 19、Isolation schema 6 和安装器的单一受管 grant；要求匹配本批源码的 Isolation diagnostics API，缺失该 API 时明确要求升级，不回退到忽略持久授权的探测。新 bundle 尚未发布，正式发布时需保持实际首发版本与 peer 下界一致。
