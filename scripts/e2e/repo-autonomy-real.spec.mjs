@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto'
 import { parseDocument, isMap } from 'yaml'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
-import { configureVerifiedDelivery } from './repo-verified-delivery-fixture.mjs'
+import { prepareRepositoryFixture } from './repo-verified-delivery-fixture.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const image = 'sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8'
@@ -117,16 +117,17 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     const sessionId = (await create.json()).result.value.sessionId
     await host.stop(); await writeFile(testInfo.outputPath('host-initial.log'), host.log(), { mode: 0o600 })
 
+    const repository = verifiedDelivery ? await prepareRepositoryFixture(home, patchPath, env) : undefined
     const admission = { version: 2, objective, route: configuredRoute, maxGoalRounds: 3, stepMaxDurationMs: 120_000,
       executionBudget: { mode: 'calls', modelCalls: 12, toolCalls: 16, durationMs: 300_000, maxOutputTokensPerCall: 1024, routes: [configuredRoute] },
       verification: { artifactPath: 'summarize.mjs', command: verificationCommand, maxRuns: 12, maxTotalDurationMs: 240_000, maxDurationMs: 5_000, maxOutputBytes: 4096, cases },
-      ...(verifiedDelivery ? { wake: { maxDelayMs: 60000, runTimeoutMs: 60000, maxRuns: 3 } } : {}) }
+      ...(repository ? { repositoryDelivery: repository } : {}) }
     await writeFile(taskPath, JSON.stringify(admission), { mode: 0o600 })
     // Deliberately omit --session-id: this exercises the shipped real binding discovery.
     const setup = await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace, '--goal-admission', taskPath], env)
     await writeFile(testInfo.outputPath('goal-setup.log'), sanitize(setup), { mode: 0o600 })
     expect(setup).toContain(`Session: ${sessionId}`)
-    if (verifiedDelivery) await configureVerifiedDelivery(home, patchPath, env)
+    if (verifiedDelivery) expect(setup).toContain('Repository: fixture/orders; branch: automation/fix')
 
     host = await startHost(env)
     await activePage.goto(host.url)
@@ -158,7 +159,7 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     expect(calls.some(item => item.event === 'settled')).toBe(true)
     let repositoryDelivery
     if (verifiedDelivery) {
-      const path = join(home, 'assistant-actions/verified-delivery.sqlite')
+      const path = join(home, 'assistant-actions/web/verified-delivery.sqlite')
       expect(query(path, 'SELECT state FROM deliveries').length, 'completed artifact goal did not register a repository delivery intent').toBeGreaterThan(0)
       await expect.poll(() => query(path, 'SELECT state FROM deliveries')[0]?.state, { timeout: 65000 }).toBe('succeeded')
       const records = (await readFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
@@ -201,7 +202,7 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     expect({ native: JSON.parse(restored.native_json), scope: JSON.parse(restored.scope_json) }).toEqual({ native, scope })
     expect(createHash('sha256').update(JSON.stringify(query(ledger, "SELECT id, status, artifact_binding_json FROM isolation_jobs WHERE status = 'succeeded' AND artifact_binding_json IS NOT NULL ORDER BY id"))).digest('hex')).toBe(sourceDigest)
     if (verifiedDelivery) {
-      expect(query(join(home, 'assistant-actions/verified-delivery.sqlite'), 'SELECT id,state,result FROM deliveries')).toEqual(repositoryDelivery.state)
+      expect(query(join(home, 'assistant-actions/web/verified-delivery.sqlite'), 'SELECT id,state,result FROM deliveries')).toEqual(repositoryDelivery.state)
       expect((await readFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, 'utf8')).trim().split('\n')).toHaveLength(2)
       await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(repositoryDelivery.noticeText)
       expect(query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-actions-verified-delivery/v1'")).toEqual(repositoryDelivery.notices)

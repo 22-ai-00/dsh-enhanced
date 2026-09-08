@@ -178,7 +178,7 @@ export async function configureWebOwner(input: WebOwnerSetupInput, effectiveSour
 
 export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<void> {
   if (argv.includes('--help') || argv.includes('-h')) {
-    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-image sha256:<id> --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nGoal setup: use --list-goal-sessions to show real idle owner Sessions, or --goal-admission <private-absolute-task.json> [--session-id <existing-idle-session>]. Without --session-id, setup selects the sole matching idle Session and otherwise prints candidates.\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup; configuration changes require restart.\n')
+    process.stdout.write('Usage: dsh-web-owner-setup --profile <name> --workspace <absolute-path> [--preset standard] [--dsh-home <absolute-path>] [--isolation-image sha256:<id> --isolation-max-runs 20 --isolation-lease-ms 3600000 --isolation-runtime-ms 600000]\nGoal setup: use --list-goal-sessions to show real idle owner Sessions, or --goal-admission <private-absolute-task.json> [--session-id <existing-idle-session>]. Without --session-id, setup selects the sole matching idle Session and otherwise prints candidates.\nA v2 task may include repositoryDelivery with repository, baseBranch, branch, paths, credentialHandle, expiresAt, maxActions, maxTotalBytes and openPullRequest. Setup binds these to the existing owner and creates finite background delivery and result notification authorization. The credential handle and destination branch must already exist.\nInitializes one local Web owner without replacing existing owner authority. Stop the target Host before setup; configuration changes require restart.\n')
     return
   }
   const input: WebOwnerSetupInput = { dshHome: process.env.DSH_HOME ?? join(homedir(), '.dsh'), profile: 'web', workspace: '', preset: 'standard' }
@@ -205,13 +205,13 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
   validate(input)
   if (listGoalSessions && (goalAdmission !== undefined || sessionId !== undefined || isolated)) fail('--list-goal-sessions cannot be combined with setup, goal admission, or isolation options')
   if (sessionId !== undefined && goalAdmission === undefined) fail('--session-id requires --goal-admission')
-  let effective: string
-  try {
+  const readEffectiveSource = async (): Promise<string> => { try {
     const result = await promisify(execFile)('dsh', ['--profile', input.profile, '--dump-config'], {
       env: { ...process.env, DSH_HOME: input.dshHome }, timeout: 30_000, maxBuffer: 8 * 1024 * 1024,
     })
-    effective = result.stdout
-  } catch { fail('could not read the effective DSH profile; check installed bundles and dsh --dump-config') }
+    return result.stdout
+  } catch { fail('could not read the effective DSH profile; check installed bundles and dsh --dump-config') } }
+  const effective = await readEffectiveSource()
   if (listGoalSessions) {
     const { listGoalAdmissionSessions } = await import('./goal-setup.js')
     const sessions = await listGoalAdmissionSessions(input, effective)
@@ -220,7 +220,8 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
   }
   if (goalAdmission !== undefined) {
     const { configureGoalAdmission } = await import('./goal-setup.js')
-    const result = await configureGoalAdmission(input, effective, goalAdmission, sessionId)
+    const result = await configureGoalAdmission(input, effective, goalAdmission, sessionId, readEffectiveSource)
+    if (result.repositoryDelivery) process.stdout.write(`Repository: ${result.repositoryDelivery.repository}; branch: ${result.repositoryDelivery.branch}. Authorized paths: ${result.repositoryDelivery.paths.join(', ')}. Delivery requires independent acceptance. Credential availability and remote GitHub access have not been tested.\n`)
     process.stdout.write(`Goal configuration written: ${result.path}\nAdmission: ${result.admissionId}; Session: ${result.sessionId}. Existing authority and budget are preserved. Restart the target Host. v2 uses the already configured exact provider/model route; v1 retains deepseek-goal-metered. Model connectivity and runtime admission have not been tested.\n`)
     return
   }

@@ -144,6 +144,16 @@ v2 可使用安装器已经配置且实际出现在 `agent-default-model` 的任
 
 v2 的硬限制是模型请求数、工具请求数、总时长和每次输出上限；若 adapter 提供 usage，会作为记录使用，但不是 token 或 USD 硬限制。重复相同 admission 不改变 patch 字节、不会续期 Isolation grant、不会重置已用次数或扩大预算。与本次任务要求冲突的已有受管配置或同 ID 条目会拒绝，而不是被覆盖。
 
+### 验收后仓库交付
+
+v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admission` 命令。字段为 `repository`（例如 `owner/project`）、`baseBranch`、`branch`、`paths`、`credentialHandle`、`expiresAt`（明确的 Unix 毫秒到期时间）、`maxActions`、`maxTotalBytes` 和 `openPullRequest`。当前 `paths` 只允许包含本任务的 `verification.artifactPath`，因为只有该文件具备配置的独立验收。目标分支必须已存在，PR 基准分支必须与它不同。
+
+`credentialHandle` 引用已配置在 Keychain 中的凭据；该 handle 必须使用可静态读取的无标签配置，允许 `dsh-enhanced-assistant-actions` 消费者与 `github.commit` 用途，且 `maxLeaseMs` 不小于 30,000。任务文件不接受 token，也不会创建或修改 handle。`expiresAt` 必须覆盖配置时刻后的整个目标执行预算并额外预留 60 秒交付时间，同时不超过当前隔离授权期限；重复设置不会续期。`maxActions` 同时计入仓库读取与提交、PR 操作：仅提交至少 2 次，创建 PR 至少 3 次；额外调查需要更多次数。
+
+设置命令从已有主人和空闲 Session 派生 Actions grant、owner route、有限调度预算及精确 Policy 规则，包含后台提交与原会话通知；无需用户填写内部身份、路由或规则 ID。未提供 `wake` 时自动配置至多一次后台运行；已有合法 `wake` 配置继续使用。已有同 ID 配置冲突会拒绝整次配置，而不会覆盖。正式 CLI 在取得配置锁后及写入前重读有效配置，发现下层凭据或插件配置变化时拒绝；多文件配置与数据库仍不构成一个跨进程原子事务。所需 Actions、Keychain、Goals、Automations 与 Delivery 必须来自匹配的安装集合。
+
+重启 Host 后，在原会话提交与配置一致的目标，并说明需要交付到已授权仓库。模型可查询可用授权、读取目标分支 head、修复隔离产物并登记交付；独立步骤和整体验收通过后由后台提交准确产物、按授权创建 PR，并主动显示最终结果。设置命令只证明配置和当前身份匹配；凭据是否可用、远端仓库访问和真实 GitHub 提交仍须实际运行验证。本机端到端测试的 GitHub 传输是明确替身，不能视为真实 GitHub 认证成功。
+
 每个验收 profile 的验证窗口为 `verification.maxDurationMs × verification.cases.length`，必须小于 `stepMaxDurationMs`。两个 profile 都使用该窗口；因此 `executionBudget.durationMs` 必须严格大于 `stepMaxDurationMs + 2 × 验证窗口`，以覆盖 native round、step 验收和 whole-goal 验收。setup 会拒绝不足的明确预算，不会自动扩大时长或权限。
 
 该精确 Session 仅用于核验 owner 和可选 wake route；生成的 profiles 绑定 owner、scope 和 objective。setup 只写入并复核本地配置、已有 owner snapshot 与持久 grant；它不发 DeepSeek 请求、不创建 Goal、不证明凭据可用、网络连通、模型质量、隔离验收成功或完整 WP17/长期自治已经完成。grant 已过期、撤销、耗尽，owner/version 改变，或 Session 有 pending/dispatched/unknown lease 时必须先按正常运维流程处理，不能靠重跑此命令续权。

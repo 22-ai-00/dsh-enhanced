@@ -663,3 +663,13 @@ WP13 保持实现中；完整 18 项为 **3 已验证 / 11 实现中 / 4 待做*
 集成期间修复了测试夹具的配置层级、私有凭据目录及不正确的预检调用身份。凭据文件约束现在先经真实 provider 检查，再调用模型；实际 Actions 仍独立执行 Policy 和租约检查。最终浏览器通过后仅细化通知文案，区分 PR failed 与 unknown；该分支由定向用例及最终全检验证。命令、失败记录和最终工程验收见[本批证据](evidence/verified-artifact-delivery-2026-09-08.json)。完整 18 项状态仍为 **3 已验证 / 12 实现中 / 3 待做**。
 
 最终根 `pnpm check` 退出 **0**：335 文件 / 4,035 项测试全部通过，无跳过；manifest、零 lint 警告、类型检查、最终构建和 33 份 dry-run pack 成功。首次全检在 lint 阶段发现无用 iterable 展开并退出；定向修复后第二次完整通过。已检查新增 Actions/Goals Host 文件进入发布清单。独立只读审查及真实浏览器结论见本批证据。
+
+## 2026-09-08：正式仓库授权配置入口
+
+基线 `92abccf`。现有 `dsh-web-owner-setup --goal-admission` 的 v2 任务支持 `repositoryDelivery` 业务字段，依据真实主人和空闲 Session 派生已有 Actions grant、有限后台调度与结果通知权限，不要求手写内部 ID。设置检查独立验收路径、目标与交付总期限、最少动作次数、已配置 handle 的消费者/用途/租约上限，拒绝冲突与带标签的授权节点；不写凭据、不续期或重置使用账本。正式 CLI 在锁内与写入前重查有效配置，避免覆盖观察到的并发变更。
+
+真实安装、CLI、Codex 订阅模型和 Chromium 已通过同一修复、独立验收、后台提交、通知与重启去重场景（`1 passed (2.9m)`）。测试只准备假凭据与 GitHub 传输替身，Actions grant/Policy 改由正式 CLI 创建。环境变量、macOS Keychain、Linux Secret Service 的配置兼容由定向用例验证，未调用这些真实凭据。完整命令、摘要和最终全检结果见[本批证据](evidence/repository-admission-2026-09-08.json)。
+
+当前仍不证明真实 GitHub、事件或 CI/评审跟进。下一步须先处理[步骤交付与整目标完成的生命周期前置关系](autonomy-delivery-path-review-2026-09-08.md)，再接已有事件来源，避免恢复已完成 Goal 的语义错误。完整 18 项状态仍为 **3 已验证 / 12 实现中 / 3 待做**，全部验收要求保留。
+
+冻结后根 `pnpm check` 一次通过，退出 **0**：335 文件 / 4,040 项测试，无跳过；manifest、零 lint 警告、类型检查、最终构建和 33 份 dry-run pack 成功。独立只读复核核验正式 CLI、权限配置、真实浏览器产物及测试边界。

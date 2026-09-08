@@ -7,6 +7,7 @@ import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptancePr
 import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
 import type { ActiveWebOwnerBindingSnapshot } from '@dsh-enhanced/assistant-delivery'
 import { inspectAutonomyProfile, type AutonomyDoctorProfile } from './doctor.js'
+import * as Actions from '@dsh-enhanced/assistant-actions'
 
 interface GoalAdmissionTaskBase {
   objective: string
@@ -19,6 +20,7 @@ interface GoalAdmissionTaskBase {
     cases: Array<{ stdin: string; expectedStdout: string; expectedExitCode: number }>
   }
   wake?: { maxDelayMs: number; runTimeoutMs: number; maxRuns: number }
+  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean }
 }
 /** Legacy v1 fixed DeepSeek route. Kept for existing private admission files. */
 export interface GoalAdmissionTaskV1 extends GoalAdmissionTaskBase {
@@ -75,7 +77,7 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
   try { input = JSON.parse(source) } catch { fail('task file must be JSON') }
   const version = input !== null && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>).version : undefined
   if (version === 1) shape(input, ['version', 'objective', 'model', 'maxGoalRounds', 'stepMaxDurationMs', 'executionBudget', 'verification'], ['apiKeyEnv', 'wake', 'strategy'])
-  else if (version === 2) shape(input, ['version', 'objective', 'route', 'maxGoalRounds', 'stepMaxDurationMs', 'executionBudget', 'verification'], ['wake', 'strategy'])
+  else if (version === 2) shape(input, ['version', 'objective', 'route', 'maxGoalRounds', 'stepMaxDurationMs', 'executionBudget', 'verification'], ['wake', 'strategy', 'repositoryDelivery'])
   else fail('unsupported task version')
   if (typeof input.objective !== 'string' || input.objective.length === 0 || input.objective.trim() !== input.objective
     || Buffer.byteLength(input.objective) > 8192 || /[\p{Cc}]/u.test(input.objective)) fail('invalid objective')
@@ -115,10 +117,38 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
     shape(input.wake, ['maxDelayMs', 'runTimeoutMs', 'maxRuns'])
     integer(input.wake.maxDelayMs, 1, budget.durationMs - 1); integer(input.wake.runTimeoutMs, 1000, 300000); integer(input.wake.maxRuns, 1, 10000)
   }
+  if (input.repositoryDelivery !== undefined) {
+    if (input.version !== 2) fail('repository delivery requires task version 2')
+    shape(input.repositoryDelivery, ['repository', 'baseBranch', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'openPullRequest'])
+    const value = input.repositoryDelivery as NonNullable<GoalAdmissionTaskBase['repositoryDelivery']>
+    for (const key of ['repository', 'baseBranch', 'branch', 'credentialHandle'] as const) if (typeof value[key] !== 'string' || value[key].length === 0 || value[key].length > 256) fail('invalid repository delivery')
+    if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.repository) || !Array.isArray(value.paths) || value.paths.length !== 1 || value.paths[0] !== verification.artifactPath
+      || value.baseBranch === value.branch || !Number.isSafeInteger(value.expiresAt) || typeof value.openPullRequest !== 'boolean') fail('invalid repository delivery')
+    integer(value.maxActions, value.openPullRequest ? 3 : 2, 10_000); integer(value.maxTotalBytes, 1, 64 * 1024 * 1024)
+  }
   return input as unknown as GoalAdmissionTask
 }
 function map(value: unknown): YAMLMap { if (!isMap(value)) fail('profile config must be a mapping'); return value }
 function sequence(value: unknown): YAMLSeq { if (!isSeq(value)) fail('expected profile list'); return value }
+function untagged(value: unknown, label: string): void {
+  if (isScalar(value)) { if (value.tag !== undefined) fail(`tagged ${label}`); return }
+  if (isSeq(value)) { if (value.tag !== undefined) fail(`tagged ${label}`); for (const item of value.items) untagged(item, label); return }
+  if (isMap(value)) {
+    if (value.tag !== undefined) fail(`tagged ${label}`)
+    for (const pair of value.items) {
+      if (!isScalar(pair.key) || pair.key.tag !== undefined || typeof pair.key.value !== 'string' || pair.value === null) fail(`invalid ${label}`)
+      untagged(pair.value, label)
+    }
+    return
+  }
+  fail(`invalid ${label}`)
+}
+function literalString(value: unknown): string | undefined {
+  return isScalar(value) && value.tag === undefined && typeof value.value === 'string' ? value.value : undefined
+}
+function literalInteger(value: unknown): number | undefined {
+  return isScalar(value) && value.tag === undefined && typeof value.value === 'number' && Number.isSafeInteger(value.value) ? value.value : undefined
+}
 function parse(source: string) {
   const document = parseDocument(source.trim() || '[]', { customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }] })
   if (document.errors.length || !isSeq(document.contents)) fail('profile must be an unambiguous YAML sequence')
@@ -135,7 +165,7 @@ function merge(base: YAMLMap, overlay: YAMLMap): YAMLMap {
 }
 /** Compose a complete candidate, preserving custom siblings and rejecting modified managed settings. */
 export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, effectiveSource: string,
-  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now(), settingsSource?: string): { patch: string; admissionId: string; profile: AutonomyDoctorProfile } {
+  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now(), settingsSource?: string): { patch: string; admissionId: string; profile: AutonomyDoctorProfile; repositoryDelivery?: { repository: string; branch: string; paths: string[] } } {
   const task = parseGoalAdmissionTask(taskSource)
   for (const value of [input.dshHome, input.workspace]) if (!isAbsolute(value) || normalize(value) !== value) fail('home and workspace must be canonical paths')
   if (!Number.isFinite(now) || task.version === 1 && now >= Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt)) fail('model contract expired')
@@ -149,17 +179,20 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     if (item.get('id') !== id || item.has('name') && item.get('name') !== name || item.has('disabled') && item.get('disabled') !== false) fail(`disabled or shadowed ${slug}`)
     return item
   }
-  const config = (slug: string): YAMLMap => {
+  const config = (slug: string, materialize = true): YAMLMap => {
     const inherited = row(effective.rows, slug, true)!; const existing = row(target.rows, slug, false)
     const base = inherited.has('config') ? map(inherited.get('config', true)) : target.document.createNode({}) as YAMLMap
     const value = existing?.has('config') ? merge(base, map(existing.get('config', true))) : map(base.clone())
-    const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${slug}`, name: `@dsh-enhanced/${slug}` }) as YAMLMap
-    destination.set('config', value); if (!existing) target.rows.add(destination)
+    if (materialize) {
+      const destination = existing ?? target.document.createNode({ id: `dsh-enhanced-${slug}`, name: `@dsh-enhanced/${slug}` }) as YAMLMap
+      destination.set('config', value); if (!existing) target.rows.add(destination)
+    }
     return value
   }
   // Include complete required rows in the candidate before inspecting its inherited isolation scope.
   for (const slug of ['assistant-isolation', 'assistant-web-owner']) config(slug)
   const delivery = config('assistant-delivery'); const goals = config('assistant-goals'); const verifier = config('assistant-verifier')
+  const actions = task.repositoryDelivery ? config('assistant-actions') : undefined; const keychain = task.repositoryDelivery ? config('credentials-keychain', false) : undefined
   const provider = task.version === 1 ? config('assistant-deepseek-budget') : undefined; const personal = config('personal-assistant')
   const policy = map(personal.get('assistantPolicy', true))
   const principalId = `web/${input.profile}/local/operator`
@@ -170,6 +203,8 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     || !isDeepStrictEqual(owner.principal, profile.principal) || owner.role !== 'owner' || owner.status !== 'active'
     || now + task.executionBudget.durationMs > profile.grant.expiresAt) fail('owner, scope or remaining grant deadline mismatch')
   const admissionId = `goal-${createHash('sha256').update(JSON.stringify([input.profile, binding.id, owner.id, owner.version, task.objective])).digest('hex').slice(0,24)}`
+  const wake = task.wake ?? (task.repositoryDelivery ? { maxDelayMs: Math.min(60_000, task.executionBudget.durationMs - 1), runTimeoutMs: Math.min(60_000, task.executionBudget.durationMs), maxRuns: 1 } : undefined)
+  if (task.repositoryDelivery && (task.repositoryDelivery.expiresAt <= now + task.executionBudget.durationMs + 60_000 || task.repositoryDelivery.expiresAt > profile.grant.expiresAt)) fail('repository delivery deadline mismatch')
   const managed = isSeq(verifier.get('profiles', true)) && sequence(verifier.get('profiles', true)).items.some(value => isMap(value) && String(value.get('id')).startsWith('goal-'))
   const set = (config: YAMLMap, field: string, desired: unknown, defaults: unknown[] = []) => {
     if (config.has(field)) {
@@ -184,6 +219,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     let values: unknown = config.get(field, true)
     if (values === undefined) { values = target.document.createNode([]); config.set(field, values) }
     if (!isSeq(values)) fail(`invalid ${field}`)
+    untagged(values, field)
     for (const entry of entries) {
       const matches = values.items.filter(value => isMap(value) && value.get('id') === entry.id) as YAMLMap[]
       if (matches.length > 1 || matches.length === 1 && !isDeepStrictEqual(matches[0]!.toJSON(), entry)) fail(`existing ${field} entry differs`)
@@ -209,8 +245,8 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   if (task.strategy !== undefined) {
     set(goals, 'strategy', task.strategy)
     append(policy, 'rules', [
-      { id: `${admissionId}-strategy-goal`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['delegate'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: task.wake === undefined ? ['external'] : ['external', 'background'] } },
-      { id: `${admissionId}-strategy-tool`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: 'goal_strategy' }, context: { initiators: task.wake === undefined ? ['external'] : ['external', 'background'] } },
+      { id: `${admissionId}-strategy-goal`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['delegate'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: wake === undefined ? ['external'] : ['external', 'background'] } },
+      { id: `${admissionId}-strategy-tool`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: 'goal_strategy' }, context: { initiators: wake === undefined ? ['external'] : ['external', 'background'] } },
     ])
   }
   const defaults = effective.rows.items.filter(value => isMap(value) && value.get('id') === 'agent-default-model') as YAMLMap[]
@@ -238,15 +274,15 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     // v2 never writes model or credential configuration. The exact configured
     // route is admitted into the calls budget and rechecked by runtime.
   }
-  if (task.wake) {
+  if (wake) {
     append(delivery, 'ownerRoutes', [{ id: admissionId, conversation: binding.conversation, principal: binding.principal, workspace: binding.workspace,
       agentPreset: binding.agentPreset, policyRef: binding.policyRef, minimumGeneration: binding.generation }])
     const budgetId = `${admissionId}-runs`
-    set(goals, 'backgroundWake', { ownerRouteId: admissionId, budgetId, maxDelayMs: task.wake.maxDelayMs, runTimeoutMs: task.wake.runTimeoutMs })
+    set(goals, 'backgroundWake', { ownerRouteId: admissionId, budgetId, maxDelayMs: wake.maxDelayMs, runTimeoutMs: wake.runTimeoutMs })
     set(goals, 'preauthorizedSchedule', true, [false])
     const automation = map(personal.get('assistantAutomations', true))
     set(automation, 'schedulerEnabled', true, [false])
-    append(policy, 'budgets', [{ id: budgetId, metric: 'automation-runs', limit: task.wake.maxRuns, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
+    append(policy, 'budgets', [{ id: budgetId, metric: 'automation-runs', limit: wake.maxRuns, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
     append(policy, 'rules', [
       { id: `${admissionId}-goal`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['observe', 'inspect', 'snapshot', 'execute'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
       ...['isolation_run', 'isolation_grants', 'goal_context'].map(tool => ({ id: `${admissionId}-${tool}`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: tool }, context: { initiators: ['background'] } })),
@@ -255,7 +291,33 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
       { id: `${admissionId}-automation`, effect: 'allow', subject: { kind: 'background', id: '*', workspace: input.workspace, principal: principalId }, actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: 'goal-wake-*' }, context: { initiators: ['background'] } },
       { id: `${admissionId}-resume`, effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: input.workspace, principal: principalId }, actions: ['wake'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
     ])
+    if (task.repositoryDelivery) {
+      const repository = task.repositoryDelivery; const handles = keychain!.get('handles', true)
+      if (!isSeq(handles)) fail('credential handle is unavailable')
+      untagged(handles, 'credential handles')
+      const matching = handles.items.filter(item => isMap(item) && literalString(item.get('id', true)) === repository.credentialHandle) as YAMLMap[]
+      if (matching.length !== 1) fail('credential handle is unavailable')
+      const consumers = matching[0]!.get('consumers', true); const purposes = matching[0]!.get('purposes', true)
+      if (!isSeq(consumers) || !isSeq(purposes)
+        || literalString(matching[0]!.get('provider', true)) === undefined
+        || (literalInteger(matching[0]!.get('maxLeaseMs', true)) ?? 0) < 30_000
+        || !consumers.items.some(item => literalString(item) === 'dsh-enhanced-assistant-actions')
+        || !purposes.items.some(item => literalString(item) === 'github.commit')) fail('credential handle is unavailable')
+      const grant = { id: `${admissionId}-repository`, revision: 1, principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version, workspace: input.workspace, agentPreset: input.preset, repository: repository.repository, branch: repository.branch, paths: repository.paths, credentialHandle: repository.credentialHandle, expiresAt: repository.expiresAt, maxActions: repository.maxActions, maxTotalBytes: repository.maxTotalBytes, repoWorkflow: { baseBranch: repository.baseBranch, allowBranchCreate: false, allowPullRequest: repository.openPullRequest }, verifiedDelivery: { ownerRouteId: admissionId, budgetId } }
+      append(actions!, 'grants', [grant])
+      if (typeof Actions.validateActionConfig !== 'function') fail('install matching @dsh-enhanced/assistant-actions first')
+      Actions.validateActionConfig(actions!.toJSON())
+      append(policy, 'rules', [
+        { id: `${admissionId}-repository-agent`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: `action:github:${grant.id}` }, context: { initiators: ['external', 'background'] } },
+        ...['action_github_grants', 'action_github_inspect', 'action_github_deliver', 'action_github_delivery_status'].map(tool => ({ id: `${admissionId}-repository-${tool}`, effect: 'allow' as const, subject: { kind: 'agent' as const, id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool' as const, id: tool }, context: { initiators: ['external', 'background'] } })),
+        { id: `${admissionId}-repository-background`, effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions', workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: `action:github:${grant.id}` }, context: { initiators: ['background'] } },
+        { id: `${admissionId}-repository-credential`, effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: repository.credentialHandle }, context: { initiators: ['background'] } },
+        { id: `${admissionId}-repository-automation`, effect: 'allow', subject: { kind: 'background', id: '*', workspace: input.workspace, principal: principalId }, actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: 'verified-delivery-*' }, context: { initiators: ['background'] } },
+        { id: `${admissionId}-repository-notice`, effect: 'allow', subject: { kind: 'background', id: 'assistant-actions-verified-delivery/v1', workspace: input.workspace, principal: principalId }, actions: ['send'], resource: { kind: 'message', id: binding.id }, context: { initiators: ['background'] } },
+      ])
+    }
   }
   GoalsConfig(goals.toJSON())
-  return { patch: target.document.toString({ lineWidth: 0 }), admissionId, profile }
+  return { patch: target.document.toString({ lineWidth: 0 }), admissionId, profile,
+    ...(task.repositoryDelivery ? { repositoryDelivery: { repository: task.repositoryDelivery.repository, branch: task.repositoryDelivery.branch, paths: [...task.repositoryDelivery.paths] } } : {}) }
 }
