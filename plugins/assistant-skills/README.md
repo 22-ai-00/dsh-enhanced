@@ -42,9 +42,16 @@ Policy must separately allow `draft`, `trial`, `activate`, `reject` and `rollbac
 
 This delivers owner-reviewed version changes after a verified trial. It does not claim automatic improvement: same-budget baseline comparisons, held-out evaluation, automated candidate generation and regression-triggered rollback remain separate requirements. Trial success is specific to its tested inputs and acceptance profile.
 
+## Actual parent/candidate comparisons
+
+`skill_compare(candidate_id, profile_id, invocation_id)` executes the parent and pending candidate on the same operator-configured inputs and limits. Each arm uses native read/write/edit tools in a private temporary workspace and a separate isolated artifact runner; the Host compares actual behavior against its expected output. Results persist and can be read with `skill_comparison_status` after restart. Failed/unknown attempts are not automatically repeated, and current owner/Policy/parent/expiry are checked during execution.
+
+This optional capability needs the Evaluation and Isolation packages plus an explicit finite comparison profile and Policy `compare` permission. See [comparison configuration and limits](../../docs/skill-comparison-profiles.md). Reports separate evaluation gains from critical regressions; a complete run with zero gain is not an improvement. They never grant promotion permission and do not claim a sealed holdout. The candidate stays pending until a separately authorized lifecycle action changes it.
+
 ## Authority and privacy
 
 - Filesystem: creates a private SQLite database (0600), WAL/SHM and new parent directory (0700). The store contains owner-scoped historical tool arguments, input defaults, acceptance references and invocation receipts. These may contain private task content; do not put the database in a shared or public directory. Symlink/nonregular database files are rejected.
+- Comparison authority: finite operator-configured offline Docker verification, private benchmark journals and temporary file workspaces; native read/write/edit only. The calling Agent receives no general verifier runner handle or expected-answer payload.
 - Filesystem/network/subprocess effects during reuse: only through saved, Host-allowlisted native tools with their current approvals, Policy, cancellation and Goal budget. No direct shell, filesystem writer, network client or subprocess runner is supplied by this bundle.
 - Credential/browser authority: none added. It neither reads credential stores nor drives a browser. Native tools retain their own requirements.
 - Install scripts: no runtime install/postinstall scripts. Build/prepack scripts compile the independently publishable bundle.

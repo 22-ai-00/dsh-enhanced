@@ -121,4 +121,29 @@ describe('SkillStore', () => {
     expect(store.rollback(scope, 'read-report', 4, 3)).toMatchObject({ version: 5, restoredFromVersion: 3 })
     store.close()
   })
+
+  it('persists bounded candidate comparisons without replaying interrupted work', async () => {
+    const path = await database(); const first = new SkillStore(path); const parent = first.save(scope, definition())
+    const candidate = first.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Compare.', trigger: 'owner', expiresAt: Date.now() + 60000 })
+    const identity = { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'compare-1' }
+    const claim = first.claimComparison(scope, identity, 1); expect(claim.claimed).toBe(true); first.close()
+    const reopened = new SkillStore(path); expect(reopened.getComparison(scope, claim.comparison.id)).toMatchObject({ state: 'unknown' })
+    expect(reopened.claimComparison(scope, identity, 1)).toMatchObject({ claimed: false, comparison: { state: 'unknown' } })
+    expect(reopened.getComparison(otherScope, claim.comparison.id)).toBeUndefined(); reopened.close()
+    expect(parent.version).toBe(1)
+  })
+
+  it('fences comparison identity, budget, parent changes and finish CAS', () => {
+    const store = new SkillStore(':memory:'); store.save(scope, definition())
+    const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Compare.', trigger: 'owner', expiresAt: Date.now() + 60000 })
+    const identity = { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'one' }
+    const first = store.claimComparison(scope, identity, 1); expect(() => store.claimComparison(scope, { ...identity, candidateId: 'other' }, 1)).toThrow(/comparison conflict|candidate unavailable/u)
+    expect(store.finishComparison(scope, first.comparison.id, 'complete', { winner: 'parent' })).toMatchObject({ state: 'complete', result: { winner: 'parent' } })
+    expect(() => store.finishComparison(scope, first.comparison.id, 'unknown', null)).toThrow(/comparison state conflict/u)
+    expect(() => store.claimComparison(scope, { ...identity, invocationId: 'two', profileDigest: 'e'.repeat(64) }, 1)).toThrow(/budget exhausted/u)
+    const secondCandidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Other.', trigger: 'owner', expiresAt: Date.now() + 60000 })
+    store.save(scope, definition(), 1)
+    expect(() => store.claimComparison(scope, { ...identity, candidateId: secondCandidate.id, invocationId: 'three' }, 2)).toThrow(/candidate unavailable/u)
+    store.close()
+  })
 })

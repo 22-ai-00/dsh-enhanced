@@ -32,6 +32,7 @@ export function allowedSkillExperimentTool(name, args, workspace, phase) {
   if (name === 'skill_run') return typeof args.goal_id === 'string' && args.goal_id.length > 0
     && args.name === 'verified-summary' && args.version === 1 && args.inputs_json === '{}' && args.invocation_id === 'reuse-1'
     && Object.keys(args).every(key => ['goal_id', 'name', 'version', 'inputs_json', 'invocation_id'].includes(key))
+  if (name === 'skill_compare') return typeof args.candidate_id === 'string' && args.profile_id === 'summary-comparison' && args.invocation_id === 'compare-1' && Object.keys(args).every(key => ['candidate_id', 'profile_id', 'invocation_id'].includes(key))
   if (name === 'skill_candidate') return typeof args.goal_id === 'string' && args.name === 'verified-summary' && args.description === 'Trial candidate of the independently verified order-summary artifact.' && args.bindings_json === '[]' && args.parent_version === 1 && args.reason === 'Verify candidate lifecycle' && args.trigger === 'owner-request' && Object.keys(args).every(key => ['goal_id', 'name', 'description', 'bindings_json', 'parent_version', 'reason', 'trigger'].includes(key))
   if (name === 'skill_trial') return typeof args.candidate_id === 'string' && typeof args.goal_id === 'string' && args.inputs_json === '{}' && args.invocation_id === 'trial-1' && Object.keys(args).every(key => ['candidate_id', 'goal_id', 'inputs_json', 'invocation_id'].includes(key))
   if (name === 'skill_activate') return typeof args.candidate_id === 'string' && typeof args.trial_run_id === 'string' && Object.keys(args).every(key => ['candidate_id', 'trial_run_id'].includes(key))
@@ -55,11 +56,13 @@ function phaseFor(agent, completedCurrentTurn = false, claimedNative = false) {
   if (created === 0) return 'source-create'
   if (saved === 0) return 'save'
   if (candidateMode && staged === 0) return 'draft'
+  if (candidateMode && process.env.DSH_WEB_REAL_SKILL_COMPARE === '1' && calls(agent, 'skill_compare').length === 0) return 'compare'
   if (candidateMode && calls(agent, 'skill_trial').length) return calls(agent, 'skill_activate').length ? 'rollback' : 'activate'
   return loaded === 0 ? 'native-load' : 'replay-create'
 }
 
 function names(phase) {
+  if (phase === 'compare') return ['skill_compare']
   if (phase === 'draft') return ['skill_candidate']
   if (phase === 'trial') return ['skill_trial']
   if (phase === 'activate') return ['skill_activate']
@@ -136,7 +139,7 @@ export function apply(ctx) {
     const input = claimed.get(agent)
     const phase = phaseFor(agent, true, input?.turn === start?.data.turn && input.native === true); const toolNames = names(phase)
     record({ event: 'assembly', phase, availableToolNames: assembly.tools.map(tool => tool.name), toolNames })
-    const lifecycleDirections = { draft: 'Use only skill_candidate with the exact owner requested arguments; keep the active skill unchanged.', trial: 'Call skill_trial exactly once as requested with the new business goal id. The independent verifier completes this Goal. Do not write the artifact yourself.', activate: 'Use only skill_activate with the exact owner provided candidate_id and trial_run_id.', rollback: 'Use only skill_rollback as requested to restore version 1 as new version 3.' }
+    const lifecycleDirections = { compare: 'Use only skill_compare with the exact requested candidate_id, profile_id summary-comparison and invocation_id compare-1. Do not report improvement when the measured gain is zero.', draft: 'Use only skill_candidate with the exact owner requested arguments; keep the active skill unchanged.', trial: 'Call skill_trial exactly once as requested with the new business goal id. The independent verifier completes this Goal. Do not write the artifact yourself.', activate: 'Use only skill_activate with the exact owner provided candidate_id and trial_run_id.', rollback: 'Use only skill_rollback as requested to restore version 1 as new version 3.' }
     const directions = lifecycleDirections[phase] ?? (phase === 'source-create' ? 'Create the exact requested goal and end this turn.'
       : phase === 'source' ? 'Call write exactly once with file_path set to summarize.mjs and content set to the complete program. Do not use path or file arguments. After that write succeeds, reply in plain text and end the round; do not test, inspect, or call another tool. The independent verifier completes the goal.'
         : phase === 'save' ? 'Save the exact independently verified completed goal with skill_save. Do not use any other tool.'

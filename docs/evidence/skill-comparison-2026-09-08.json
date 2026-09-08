@@ -1,0 +1,241 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "117eca95d64e5381f30ed798174b2dde0d9d0ba9",
+  "capability": "Owner-requested paired native skill replay and isolated artifact quality comparison",
+  "status": "validated",
+  "completeWorkPackage": false,
+  "scope": {
+    "implemented": [
+      "Same input snapshots and budgets across baseline/candidate, repeats and persistent Benchmark results",
+      "Native read/write/edit replay in private fresh workspaces and real isolated artifact execution",
+      "Evaluation gains and critical regressions reported separately; no automatic promotion",
+      "Owner/Policy/parent/expiry revalidation, finite durable comparison reservations, restart readback and no unknown replay"
+    ],
+    "remaining": [
+      "Independent historical input provenance",
+      "Sealed heldout evaluation inaccessible to the generating Agent",
+      "Automatic bounded canary promotion and deployed quality regression rollback",
+      "Automatic candidate generation and multiple workflow classes"
+    ]
+  },
+  "targeted": {
+    "path": "/tmp/dsh-comparison-skills-2.log",
+    "sha256": "f9607db43f93c434ca6e27914670f3b9bfe6712cd10f858558ff328aa8cefc55",
+    "exitCode": 0,
+    "command": "DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --dir plugins/assistant-skills exec vitest run",
+    "files": 6,
+    "tests": 29,
+    "includes": "real native FS/Docker comparisons, positive gain, critical regression failure, authority cancellation, service/store idempotency and restart"
+  },
+  "realWeb": {
+    "path": "/tmp/dsh-comparison-real-2.log",
+    "sha256": "3b8c952c8e56785771d29ebad6cd139592444e8a24a7b68cff720d2beade89c1",
+    "exitCode": 0,
+    "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=super-relay DSH_WEB_REAL_MODEL=auto_model/alwaysday1 DSH_WEB_REAL_SOURCE_HOME=/home/jiataorui/.dsh DSH_WEB_REAL_SKILL_CANDIDATE=1 DSH_WEB_REAL_SKILL_COMPARE=1 DSH_WEB_REAL_COMPARISON_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm test:web-owner:real-skill",
+    "proof": {
+      "path": ".cache/web-owner-real-comparison-e2e/web-owner-real-skill-real--3127f-aired-isolated-verification/proof.json",
+      "sha256": "9fc35681f56d82539e444c10d77c5d0e230f7b649f81b5a4ffd94e1e35011e11"
+    },
+    "provider": "super-relay",
+    "model": "auto_model/alwaysday1",
+    "api": "openai-responses",
+    "hostStarts": 2,
+    "modelRequests": 16,
+    "comparisonId": "skill-comparison-18750cefaae047a6fb691618f8c2cf1b017a0cfbc7a98c1a5ea3b08082dc62a5",
+    "cells": [
+      {
+        "id": "41d7ab81203a4e8f1e84aed674e1fb64dad6fa27ccfbb658a6118285a6e99906",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "751c7b12-9e0d-4a11-b4b7-a310d6277c4b",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "ea0e9773e5c697b95a89a04a2c79730ce388b252c9657c59920ac3cc8772104c",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "2dc35e1b-06b1-4a0f-950c-1b6893eb4b1e",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "df28a92731cbb6c94f0258a6ba7f0f4a8dd2495edfa7d4e27e93616df0528bf6",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "6cbaf882-7f3b-4642-9381-38d1a22bbca2",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "e6a38b65eace11ad2faee17723b61c66e8ec33d52ac6c1d4b90aa91d2fb5b3ee",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "1b48dd59-5a9e-4957-bb08-fb69ce435a91",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "10956bcb4b3298626c875b26c5c60a45c9c5ae00dc420c9eedf8a60c391a1348",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "e8fc43f5-97a8-480f-a0d2-6d572d53f9f2",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "79171fc08d5e208f1ca7a5498136edd4d0d5b73c93ba26af67e1f4034f631921",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "a52c93dc-5728-4edc-b8c7-e5877f73ea20",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "65e8abc06f6f4d07beaf7ea0892a554f3b8681be3151f1c48cfc8699a7ee260b",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "ef7b714a-a87d-4c6d-9dcb-3dc2b2e3f5e2",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "a709b84f52832f3e86d6cee181df573710871027a3addd78283e42d395d26969",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "123787a4-64a7-45ff-b302-1b4d37d1b4e8",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "ca07bceec1d110f93736187c76aac799da9489bd117c4f8a7038e7393c2a18cb",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "09b1bcce-c5d2-4576-9466-324a82a9cf93",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "96f0ea1fff33edfbb5302b3c4c3c50f3ec44c9accd1db3b70e780f72e9937c84",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "459524da-8fce-4b33-bd5f-c5187a8caf2f",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "a7dde9a68155e597392a9dc7f943711dc07620baa8a87bf74aa28a5f95efe23d",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "ca781ff4-c89a-4f6d-9d8f-35bfc971d352",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      },
+      {
+        "id": "03dc3106e26230bfd4b2364cf35316dfb6d618dc61b9c2d02782f00abe900cf1",
+        "artifactDigest": "59fe68740b3e3ad81144f3b7b62c2c51e8cf88f47694d6280e43bae5b6afb043",
+        "jobId": "62043c16-9865-414e-a42f-6a8231ef93ac",
+        "verdict": "achieved",
+        "quiescent": true,
+        "toolCalls": 1
+      }
+    ],
+    "quality": {
+      "candidateChecksPassed": true,
+      "evaluationGain": 0,
+      "evaluationGainObserved": false,
+      "criticalRegressionsPassed": true,
+      "heldoutIndependence": "unproven"
+    },
+    "promotionAuthorized": false,
+    "sourceOutcome": "achieved",
+    "trialOutcome": "achieved",
+    "differentReceipts": true,
+    "ownerReadbackAfterReload": true
+  },
+  "runtimeImage": {
+    "digest": "sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8",
+    "sourceDigests": [
+      "sha256:397c042706244e4d69f3779dbddb27d8e6cdd9fefed655b7d4281e6c9476e27b",
+      "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
+    ],
+    "build": "Local already-installed Node base plus existing BusyBox and musl loader/libraries; DOCKER_BUILDKIT=0 docker build --pull=false --network=none",
+    "dockerfile": {
+      "path": "/tmp/dsh-skill-comparison-image/Dockerfile",
+      "sha256": "1e1d4eac4e36bc98dec0c9075033ed06d91a45858269e3e8b2c9da2b48f4384b"
+    },
+    "noImagePulled": true
+  },
+  "fullCheck": {
+    "path": "/tmp/dsh-comparison-final-check.log",
+    "sha256": "b80094722968a349bbdb8b129c1e6f4c1f0d2dd3b9eae5e4c31aadc2efaa1fb2",
+    "exitCode": 0,
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "files": 329,
+    "tests": 3984,
+    "skippedTests": 0,
+    "dryRunPacks": 33,
+    "skillsPackageContentsInspected": true
+  },
+  "resolvedFailures": [
+    {
+      "path": "/tmp/dsh-comparison-skills.log",
+      "sha256": "0e1a61715a04141c10f51ef5754d20afafeea4b1748efa60fbc9d9dd9b439499",
+      "exitCode": 1,
+      "reason": "Test fixture regenerated immutable acceptance timestamps on every read; fixed to persistent source receipt times without weakening production TOCTOU checks"
+    },
+    {
+      "path": "/tmp/dsh-comparison-real-1.log",
+      "sha256": "7d21ee147deebd93be6d96a3cb5b89851a0abe23b7aa40a24d08468ad1db3c37",
+      "exitCode": 1,
+      "reason": "Test expected an explicit top-level isolation row before Host start; replaced with normal DSH patch override to disable unused service"
+    },
+    {
+      "reason": "Initial local Node/BusyBox image lacked musl loader; copied existing loader and libc, final real IsolatedVerifierRunner Node probe and Web suite passed"
+    }
+  ],
+  "limitations": [
+    "Real Web candidate changes only description: measured gain is zero, no model-quality gain claimed",
+    "Configured replay/evaluation/regression cases are development inputs; heldout independence remains unproven",
+    "Fixed native tool trace makes no model requests inside comparison; zero model cost excludes infrastructure/development",
+    "Real Web scenario is guided to exact tools; not general autonomous model reliability",
+    "Comparisons use real Docker; existing source/trial Goal verification uses configured Host Node authority",
+    "Service tests use explicit owner/Goals/Policy seams; real Web separately checks production wiring",
+    "No ChatGPT web review: required in-app browser unavailable"
+  ],
+  "independentReview": {
+    "status": "PASS",
+    "role": "verifier",
+    "readOnly": true,
+    "sandboxEnforced": false,
+    "sourceHashesVerified": 19,
+    "realAndFullCheckHashesVerified": true,
+    "testsIndependentlyRerun": false
+  },
+  "sourceHashes": {
+    "docs/agent-autonomy-implementation.md": "74d2454d7c10a0862e587d85b9bb5b884f4deaf70a1a60295241aab400d51764",
+    "docs/architecture.md": "1715c7b027c2a820c054210f022e2b588c90c0d8258fc44daf96cdfec070b80b",
+    "docs/compatibility.md": "0a93b6f4956ba0159ce3c29f1158e667c319d54ef241c93e733f7f6b6fbadedb",
+    "docs/skill-comparison-profiles.md": "8e1e3c50e543ad7679823fc149af87f716f7546e4067d76a1d37a387ab477c4f",
+    "plugins/assistant-skills/README.md": "bac6de8a57e9ca2b5bae89f7c93a5c0db4bcbeb77006fcf9d51cc2a7267822c1",
+    "plugins/assistant-skills/package.json": "01fb9d145ebc27976421a4f7be9e176ddce4f11ed93776872834520d584aa81c",
+    "plugins/assistant-skills/src/comparison.ts": "5f93be2f4a98befb64d10dc81fd8c37d27f8af7df221d8b1b05f084f0c1766d7",
+    "plugins/assistant-skills/src/index.ts": "873775995c14db133e2d29af074ed3939639c855adc7c7b176f766dc71ef0504",
+    "plugins/assistant-skills/src/replay.ts": "36e93422fa5b0b57375a11937ccc1efd608932430bb4fd0b1ef11ef0a6faa6d1",
+    "plugins/assistant-skills/src/service.ts": "cbfa20c3cb3202ccf3ed7b8a74f48f6f0a219a7c1b230de96018d5a70a900838",
+    "plugins/assistant-skills/src/store.ts": "fc39bf7f01c761fd150fd707588ca73ab2fd60d64ff569b4c5c5cd9f4589e1e3",
+    "plugins/assistant-skills/tests/comparison.spec.ts": "36b00ef3faee169f8d24cc53512b36aa0b1d86d7655b7ccfc40536236f32bd9e",
+    "plugins/assistant-skills/tests/replay.spec.ts": "4703bf76fd7ebba34678530a2564197e7f6679bbda14066b61e40a1ae627266f",
+    "plugins/assistant-skills/tests/service.spec.ts": "d886008ebaaf4f722d8c768f1c371d868f71827efbb0e877bcb9246e5c998e0a",
+    "plugins/assistant-skills/tests/store.spec.ts": "b380a4ec6c6e1c3715dbb75530a7a5b886ebc89b142c19264bf6030223a67eeb",
+    "pnpm-lock.yaml": "806f939483d49f014c68e1411cd9210878f8a70d188ba7ec1f340c479fa85f78",
+    "scripts/e2e/playwright-real-skill.config.mjs": "e7aada2a4e144981799f3a408a3940b2dc7fe3067ef2659f5063f4177c55e79f",
+    "scripts/e2e/web-owner-real-skill-guard.mjs": "a611c097bb134eb9b5c389b9ac1f11398657bb9ac8e9026814acedaaaf2edf0c",
+    "scripts/e2e/web-owner-real-skill.spec.mjs": "8b35916675ad473b9b6743132e44ec466a1f52a08bd814e65459c39040991796"
+  },
+  "codexWithChatgpt": {
+    "localExecutionRecord": "c2c_skill_reuse iterations 5 and 6",
+    "chatgptWebReview": false
+  }
+}

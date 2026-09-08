@@ -41,6 +41,8 @@ export interface SkillCandidate {
   trialRunId?: string
   acceptanceDigest?: string
 }
+export interface SkillComparisonIdentity { sessionId: string; candidateId: string; parentDigest: string; profileId: string; profileDigest: string; invocationId: string }
+export interface SkillComparison extends SkillComparisonIdentity { id: string; state: 'running' | 'complete' | 'unknown'; result: unknown | null; createdAt: number; updatedAt: number }
 
 function fail(message = 'assistant-skills: store operation rejected'): never { throw new Error(message) }
 function json(value: unknown): boolean {
@@ -66,6 +68,7 @@ function name(value: unknown): value is string { return typeof value === 'string
 function version(value: unknown, allowZero = false): value is number { return typeof value === 'number' && Number.isSafeInteger(value) && value >= (allowZero ? 0 : 1) && value <= 1_000_000_000 }
 function text(value: unknown, maximum = 512): value is string { return typeof value === 'string' && value.length > 0 && value.length <= maximum && !/[\p{Cc}]/u.test(value) }
 function runId(scope: unknown, sessionId: string, invocationId: string): string { return `skill-run-${acceptanceDigest([scope, sessionId, invocationId])}` }
+function comparisonId(scope: unknown, sessionId: string, invocationId: string): string { return `skill-comparison-${acceptanceDigest([scope, sessionId, invocationId])}` }
 function definitionValid(definition: unknown): definition is SkillDefinition { return !!definition && typeof definition === 'object' && (definition as SkillDefinition).protocol === 'assistant-skills/definition/v1' && name((definition as SkillDefinition).name) && json(definition) }
 
 function privatePath(path: string): void {
@@ -94,11 +97,14 @@ export class SkillStore {
       CREATE TABLE IF NOT EXISTS skill_definitions(scope_key TEXT NOT NULL, name TEXT NOT NULL, version INTEGER NOT NULL, retired INTEGER NOT NULL, definition_json TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, PRIMARY KEY(scope_key,name,version)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_runs(id TEXT PRIMARY KEY, scope_key TEXT NOT NULL, identity_json TEXT NOT NULL, run_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('running','succeeded','failed','unknown'))) STRICT;
       CREATE TABLE IF NOT EXISTS skill_candidates(scope_key TEXT NOT NULL, id TEXT NOT NULL, candidate_json TEXT NOT NULL, PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS skill_comparisons(scope_key TEXT NOT NULL,id TEXT NOT NULL,profile_id TEXT NOT NULL,identity_json TEXT NOT NULL,comparison_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('running','complete','unknown')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS skill_definitions_current ON skill_definitions(scope_key,name,version DESC);
       CREATE INDEX IF NOT EXISTS skill_runs_scope ON skill_runs(scope_key,id);
 `)
     this.#db.prepare("UPDATE skill_runs SET state='unknown', run_json=json_set(run_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
+    this.#db.prepare("UPDATE skill_comparisons SET state='unknown', comparison_json=json_set(comparison_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
     this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS skill_runs_one_active ON skill_runs(scope_key,json_extract(identity_json,'$.sessionId'),json_extract(identity_json,'$.goalId')) WHERE state='running'")
+    this.#db.exec("CREATE UNIQUE INDEX IF NOT EXISTS skill_comparisons_one_active ON skill_comparisons(scope_key) WHERE state='running'")
   }
   close(): void { this.#db.close() }
   save(scope: object, definition: SkillDefinition, expectedVersion = 0): StoredSkillDefinition {
@@ -255,6 +261,23 @@ export class SkillStore {
     const row = this.#db.prepare('SELECT run_json FROM skill_runs WHERE id=? AND scope_key=?').get(id, key) as { run_json: string } | undefined
     return row === undefined ? undefined : clone(JSON.parse(row.run_json) as SkillRun)
   }
+  claimComparison(scope: object, identity: SkillComparisonIdentity, maxComparisons: number): { claimed: boolean; comparison: SkillComparison } {
+    const key = scopeKey(scope)
+    if (!identity || !text(identity.sessionId) || !text(identity.candidateId, 128) || !/^[a-f0-9]{64}$/u.test(identity.parentDigest) || !text(identity.profileId) || !/^[a-f0-9]{64}$/u.test(identity.profileDigest) || !text(identity.invocationId) || !Number.isSafeInteger(maxComparisons) || maxComparisons < 1 || maxComparisons > 100) fail('assistant-skills: invalid comparison')
+    const id = comparisonId(scope, identity.sessionId, identity.invocationId); this.#db.exec('BEGIN IMMEDIATE')
+    try {
+      const existing = this.#db.prepare('SELECT identity_json,comparison_json FROM skill_comparisons WHERE scope_key=? AND id=?').get(key, id) as { identity_json: string; comparison_json: string } | undefined
+      if (existing) { if (acceptanceDigest(JSON.parse(existing.identity_json)) !== acceptanceDigest(identity)) fail('assistant-skills: comparison conflict'); this.#db.exec('COMMIT'); return { claimed: false, comparison: clone(JSON.parse(existing.comparison_json) as SkillComparison) } }
+      const candidate = this.#candidate(key, identity.candidateId); const current = candidate && this.#latest(key, candidate.definition.name)
+      if (!candidate || candidate.state !== 'pending' || candidate.expiresAt <= Date.now() || candidate.parentVersion <= 0 || candidate.parentDigest !== identity.parentDigest || !current || current.retired || current.version !== candidate.parentVersion || acceptanceDigest(current) !== candidate.parentDigest) fail('assistant-skills: candidate unavailable')
+      const used = (this.#db.prepare('SELECT count(*) AS count FROM skill_comparisons WHERE scope_key=? AND profile_id=?').get(key, identity.profileId) as { count: number }).count
+      if (used >= maxComparisons) fail('assistant-skills: comparison budget exhausted')
+      const now = Date.now(); const comparison: SkillComparison = { id, ...clone(identity), state: 'running', result: null, createdAt: now, updatedAt: now }
+      this.#db.prepare('INSERT INTO skill_comparisons VALUES(?,?,?,?,?,?)').run(key,id,identity.profileId,JSON.stringify(identity),JSON.stringify(comparison),'running'); this.#db.exec('COMMIT'); return { claimed: true, comparison: clone(comparison) }
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  getComparison(scope: object, id: string): SkillComparison | undefined { const key = scopeKey(scope); if (!text(id, 128)) fail('assistant-skills: invalid comparison reference'); const row = this.#db.prepare('SELECT comparison_json FROM skill_comparisons WHERE scope_key=? AND id=?').get(key,id) as { comparison_json: string } | undefined; return row ? clone(JSON.parse(row.comparison_json) as SkillComparison) : undefined }
+  finishComparison(scope: object, id: string, state: 'complete' | 'unknown', result: unknown): SkillComparison { const key = scopeKey(scope); if (!text(id,128) || !['complete','unknown'].includes(state) || !json(result)) fail('assistant-skills: invalid comparison'); const current = this.getComparison(scope,id); if (!current || current.state !== 'running') fail('assistant-skills: comparison state conflict'); const saved = { ...current, state, result: clone(result), updatedAt: Date.now() }; if (this.#db.prepare("UPDATE skill_comparisons SET state=?,comparison_json=? WHERE scope_key=? AND id=? AND state='running'").run(state,JSON.stringify(saved),key,id).changes !== 1) fail('assistant-skills: comparison state conflict'); return clone(saved) }
   #latest(key: string, skillName: string): StoredSkillDefinition | undefined {
     const row = this.#db.prepare('SELECT definition_json FROM skill_definitions WHERE scope_key=? AND name=? ORDER BY version DESC LIMIT 1').get(key, skillName) as { definition_json: string } | undefined
     return row === undefined ? undefined : JSON.parse(row.definition_json) as StoredSkillDefinition
