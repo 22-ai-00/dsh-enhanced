@@ -222,7 +222,7 @@ llm-pi-ai:
     const source = config(plan.patch, 'dsh-enhanced-event-triggers'), trigger = source.triggers[0]
     expect(source.databasePath).toBe("dshHomePath('event-triggers/state.sqlite')")
     expect(source).toMatchObject({ pollerEnabled: true, pollIntervalMs: 5000, requestTimeoutMs: 10000 })
-    expect(trigger).toMatchObject({ kind: 'github-repository', repository: 'octo/example', branch: 'automation/result', maxFires: 2,
+    expect(trigger).toMatchObject({ kind: 'github-repository', observerLifetime: 'goal', repository: 'octo/example', branch: 'automation/result', maxFires: 2,
       observer: { principalRecordId: f.snapshot.owner.id, principalVersion: f.snapshot.owner.version, ownerRouteId: plan.admissionId, expiresAt: now + 300_000 } })
     expect(config(plan.patch, 'dsh-enhanced-assistant-goals')).toMatchObject({ eventWaits: true, preauthorizedSchedule: true })
     const policy = config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy

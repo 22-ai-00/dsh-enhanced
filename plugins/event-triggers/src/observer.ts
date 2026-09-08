@@ -10,6 +10,8 @@ import type {
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { OwnerRouteValidationReceipt } from '@dsh-enhanced/assistant-delivery'
+import type { GoalSourceClaim, EventTriggerStore } from './store.js'
+import type { ObserverLifetime } from './config.js'
 
 export interface EventObserverConfig {
   workspace: string
@@ -33,7 +35,11 @@ type Binding = Readonly<{
   automationId: string
   configDigest: string
   owner: EventObserverConfig
+  lifetime: ObserverLifetime
 }>
+
+type GoalLifecycle = Readonly<{ scope: GoalSourceClaim['scope']; id: string; definition: { version: number; digest: string }; native: { sessionId: string; goalId: string; revision: number; phase: string } }>
+type GoalLifecycleReader = { inspectGoalLifecycle(input: { scope: GoalSourceClaim['scope']; goalId: string }): GoalLifecycle | undefined }
 
 function digest(value: unknown): string {
   const canonical = (input: unknown): string => {
@@ -48,6 +54,9 @@ function digest(value: unknown): string {
 function scopeDigest(owner: EventObserverConfig): string {
   return digest([resolve(owner.workspace), owner.preset])
 }
+const sameScope = (left: GoalSourceClaim['scope'], right: GoalSourceClaim['scope']) => left.principalId === right.principalId
+  && left.principalRecordId === right.principalRecordId && left.principalVersion === right.principalVersion
+  && resolve(left.workspace) === resolve(right.workspace) && left.preset === right.preset
 
 function catalogDigest(): string {
   return digest({ executor: EVENT_OBSERVER_EXECUTOR, contractVersion: 1, runbook: RUNBOOK_ID, version: RUNBOOK_VERSION })
@@ -70,13 +79,13 @@ export class EventSourceObservers {
   private injection: { dispose(): Promise<void> } | undefined
   private active = true
 
-  constructor(ctx: Context, bindings: readonly Binding[]) {
+  constructor(private readonly ctx: Context, bindings: readonly Binding[], private readonly store: EventTriggerStore) {
     const automationIds = new Set<string>()
     for (const binding of bindings) {
       if (this.bindings.has(binding.triggerId)) throw new Error(`event-triggers: duplicate observer trigger ${binding.triggerId}`)
       if (automationIds.has(binding.automationId)) throw new Error(`event-triggers: duplicate observer automation ${binding.automationId}`)
       automationIds.add(binding.automationId)
-      this.bindings.set(binding.triggerId, Object.freeze({ ...binding, owner: Object.freeze({ ...binding.owner }) }))
+      this.bindings.set(binding.triggerId, Object.freeze({ ...binding, lifetime: binding.lifetime, owner: Object.freeze({ ...binding.owner }) }))
     }
     const activate = (runtime: Context): (() => void) | undefined => {
       if (!this.active) return
@@ -110,6 +119,7 @@ export class EventSourceObservers {
   assertCurrent = (triggerId: string): void => {
     const binding = this.bindings.get(triggerId)
     if (binding === undefined) return
+    if (!this.assertGoalClaimCurrent(binding)) throw new Error('event-triggers: observer goal binding is retired or changed')
     const receipt = this.assertBinding(binding), automations = this.requireAutomations()
     const activation = automations.inspectSystemOwnedActivation({ owner: SYSTEM_OWNER, automationId: binding.automationId })
     const current = automations.inspectSystemOwned({ owner: SYSTEM_OWNER, automationId: binding.automationId })
@@ -118,6 +128,36 @@ export class EventSourceObservers {
       this.pauseCurrent(binding.automationId, 'source-changed')
       throw new Error('event-triggers: observer source is paused or changed')
     }
+  }
+
+  claimGoalSource(input: GoalSourceClaim): boolean {
+    const binding = this.bindings.get(input.triggerId)
+    if (binding === undefined || binding.lifetime === 'shared') return false
+    if (!this.claimMatches(binding, input)) throw new Error('event-triggers: observer goal binding does not match source configuration')
+    this.assertBinding(binding)
+    this.store.claimGoalSource(input)
+    return true
+  }
+
+  retireGoalSource(input: GoalSourceClaim): boolean {
+    const binding = this.bindings.get(input.triggerId)
+    if (binding === undefined || binding.lifetime === 'shared') return false
+    if (!this.claimMatches(binding, input) || !this.trustedComplete(input)) throw new Error('event-triggers: observer goal completion is not trusted')
+    this.store.retireGoalSource(input)
+    this.pauseCurrent(binding.automationId, 'goal-complete')
+    return true
+  }
+
+  /** Read-only terminal settlement guard for an already retired dedicated source. */
+  canSettleGoalSource(input: GoalSourceClaim): boolean {
+    try {
+      const binding = this.bindings.get(input.triggerId)
+      if (binding === undefined || binding.lifetime !== 'goal' || !this.claimMatches(binding, input)) return false
+      const claim = this.store.goalSourceClaim(input.triggerId)
+      if (claim === undefined || claim.retiredAt === undefined || !this.sameClaimIdentity(claim, input)) return false
+      this.assertBinding(binding)
+      return this.trustedComplete(input)
+    } catch { return false }
   }
 
   private accepts(spec: HostAutomationExecutionSpec): boolean {
@@ -161,6 +201,7 @@ export class EventSourceObservers {
       this.pause(current.automationId, current.definitionHash, current.definitionVersion, 'remove')
     }
     for (const binding of this.bindings.values()) {
+      if (!this.assertGoalClaimCurrent(binding)) continue
       let receipt: Readonly<OwnerRouteValidationReceipt>
       try {
         receipt = this.assertBinding(binding)
@@ -178,8 +219,11 @@ export class EventSourceObservers {
         this.pauseCurrent(binding.automationId, 'persistent-route-mismatch')
         continue
       }
+      const bindingIdentity = binding.lifetime === 'shared'
+        ? { triggerId: binding.triggerId, automationId: binding.automationId, configDigest: binding.configDigest, owner: binding.owner }
+        : binding
       const reconciled = automations.reconcileSystem({ owner: SYSTEM_OWNER, automationId: binding.automationId,
-        idempotencyKey: `event-observer:v1:${digest({ binding, definition })}`, desiredStatus: 'active', definition })
+        idempotencyKey: `event-observer:v1:${digest({ binding: bindingIdentity, definition })}`, desiredStatus: 'active', definition })
       // Reconcile returns the original normalized definition on idempotent
       // replay, including after another controller changes the current row.
       this.definitionHashes.set(binding.triggerId, createHash('sha256').update(JSON.stringify(reconciled.definition)).digest('hex'))
@@ -239,6 +283,48 @@ export class EventSourceObservers {
     })
     if (decision.effect !== 'allow') throw new Error('event-triggers: observer policy denied')
     return receipt
+  }
+
+  private claimMatches(binding: Binding, input: GoalSourceClaim): boolean {
+    const owner = binding.owner
+    return input.automationId === binding.automationId && input.configDigest === binding.configDigest
+      && input.scope.principalId === owner.principalId && input.scope.principalRecordId === owner.principalRecordId
+      && input.scope.principalVersion === owner.principalVersion && resolve(input.scope.workspace) === resolve(owner.workspace)
+      && input.scope.preset === owner.preset
+  }
+
+  private trustedComplete(input: GoalSourceClaim): boolean {
+    const goal = this.goalReader()?.inspectGoalLifecycle({ scope: input.scope, goalId: input.goalId })
+    return goal !== undefined && sameScope(goal.scope, input.scope) && goal.id === input.goalId
+      && goal.definition.version === input.definition.version && goal.definition.digest === input.definition.digest
+      && goal.native.sessionId === input.native.sessionId && goal.native.goalId === input.native.goalId
+      && goal.native.revision >= input.native.revision && goal.native.phase === 'complete'
+  }
+
+  private sameClaimIdentity(claim: GoalSourceClaim, input: GoalSourceClaim): boolean {
+    return sameScope(claim.scope, input.scope) && claim.goalId === input.goalId
+      && claim.definition.version === input.definition.version && claim.definition.digest === input.definition.digest
+      && claim.native.sessionId === input.native.sessionId && claim.native.goalId === input.native.goalId
+      && input.native.revision >= claim.native.revision && claim.configDigest === input.configDigest
+      && claim.automationId === input.automationId
+  }
+
+  private assertGoalClaimCurrent(binding: Binding): boolean {
+    if (binding.lifetime === 'shared') return true
+    const claim = this.store.goalSourceClaim(binding.triggerId)
+    if (!claim) return true
+    if (claim.retiredAt !== undefined || !this.claimMatches(binding, claim)) { this.pauseCurrent(binding.automationId, 'goal-binding-changed'); return false }
+    const goal = this.goalReader()?.inspectGoalLifecycle({ scope: claim.scope, goalId: claim.goalId })
+    if (!goal || !sameScope(goal.scope, claim.scope) || goal.id !== claim.goalId
+      || goal.definition.version !== claim.definition.version || goal.definition.digest !== claim.definition.digest
+      || goal.native.sessionId !== claim.native.sessionId || goal.native.goalId !== claim.native.goalId
+      || goal.native.revision < claim.native.revision) { this.pauseCurrent(binding.automationId, 'goal-binding-changed'); return false }
+    if (goal.native.phase === 'complete') { this.store.retireGoalSource(claim); this.pauseCurrent(binding.automationId, 'goal-complete'); return false }
+    return true
+  }
+
+  private goalReader(): GoalLifecycleReader | undefined {
+    return this.ctx.get('assistantGoals', false) as GoalLifecycleReader | undefined
   }
 
   private routeReceipt(binding: Binding) {

@@ -125,7 +125,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
       ? pinFileRoots(this.config.allowedFileRoots)
       : []
     this.store = new EventTriggerStore({ path: this.config.databasePath, now: this.now })
-    this.observers = new EventSourceObservers(ctx, this.config.triggers.filter(trigger => trigger.observer !== undefined).map(trigger => ({ triggerId: trigger.id, automationId: trigger.automationId, configDigest: this.triggerConfigDigest(trigger), owner: trigger.observer! })))
+    this.observers = new EventSourceObservers(ctx, this.config.triggers.filter(trigger => trigger.observer !== undefined).map(trigger => ({ triggerId: trigger.id, automationId: trigger.automationId, configDigest: this.triggerConfigDigest(trigger), owner: trigger.observer!, lifetime: trigger.observerLifetime })), this.store)
     this.flushTimer = setInterval(() => void this.flushPending().catch(() => {}), this.config.pollIntervalMs)
     this.flushTimer.unref?.()
     void this.flushPending().catch(() => {})
@@ -512,6 +512,14 @@ export class EventTriggersService extends Service implements EventSourceReader {
     }
   }
 
+  claimGoalSource = (input: import('./store.js').GoalSourceClaim): boolean => this.observers.claimGoalSource(input)
+  retireGoalSource = (input: import('./store.js').GoalSourceClaim): boolean => this.observers.retireGoalSource(input)
+  canSettleGoalSource = (input: import('./store.js').GoalSourceClaim): boolean => {
+    this.assertActive()
+    const trigger = this.triggers.get(input.triggerId)
+    return trigger !== undefined && trigger.enabled && this.observers.canSettleGoalSource(input)
+  }
+
   private sourceTrigger(triggerId: string): NormalizedTrigger {
     const trigger = this.triggers.get(triggerId)
     if (trigger === undefined || !trigger.enabled) {
@@ -589,7 +597,8 @@ export class EventTriggersService extends Service implements EventSourceReader {
   }
 
   private triggerConfigDigest(trigger: NormalizedTrigger): string {
-    return createHash('sha256').update(stableJson(trigger)).digest('hex')
+    const { observerLifetime, ...legacy } = trigger
+    return createHash('sha256').update(stableJson(observerLifetime === 'shared' ? legacy : trigger)).digest('hex')
   }
 
   private envelope(input: {

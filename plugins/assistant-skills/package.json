@@ -12,7 +12,15 @@
       "default": "./lib/index.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./holdout-authority": {
+      "types": "./lib/holdout-authority.d.ts",
+      "default": "./lib/holdout-authority.js"
+    },
+    "./holdout-qualification": {
+      "types": "./lib/holdout-qualification.d.ts",
+      "default": "./lib/holdout-qualification.js"
+    }
   },
   "files": [
     "lib",
@@ -122,5 +130,8 @@
     "@deepseek-ai/dsh-fs": "catalog:",
     "@deepseek-ai/dsh-fs-local": "catalog:",
     "@deepseek-ai/dsh-tool-fs": "catalog:"
+  },
+  "bin": {
+    "dsh-skill-holdout": "./lib/holdout-cli.js"
   }
 }

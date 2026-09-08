@@ -207,10 +207,10 @@ export class AssistantGoalsService extends Service {
       await this.#execution.refresh(agent, signal)
       signal.throwIfAborted()
       if (!this.#active) throw new Error('assistant-goals: disposed')
-    }, (record, native) => this.#outcome?.verifiedWakeCompletion(record, native) === true, intent => {
+    }, (record, native) => this.#outcome?.verifiedWakeCompletion(record, native) === true, (intent, phase) => {
       if (intent.id.startsWith('goal-event-wake-')) {
         if (this.#eventWait === undefined) throw new Error('assistant-goals: event wait authority unavailable')
-        this.#eventWait.assertWakeCurrent(intent)
+        this.#eventWait.assertWakeCurrent(intent, phase)
       }
     }, (record, agent) => this.#eventWait?.acceptsPausedRecord(record) === true
       && this.#execution.acceptsPausedEventWaitSettlement(record, agent))
@@ -662,6 +662,16 @@ export class AssistantGoalsService extends Service {
     const record = this.#store.get(scope, goalId)
     if (record === undefined) throw new Error('assistant-goals: goal not found')
     return record
+  }
+
+  /** Minimal read-only lifecycle projection for exact host-owned source bindings. */
+  inspectGoalLifecycle = (input: { scope: GoalScope; goalId: string }) => {
+    const record = this.#store.get(input.scope, input.goalId)
+    if (record === undefined) return undefined
+    return Object.freeze({ scope: Object.freeze({ ...record.scope }), id: record.id,
+      definition: Object.freeze({ version: record.definition.version, digest: record.definition.digest }),
+      native: Object.freeze({ sessionId: record.native.sessionId, goalId: record.native.goalId,
+        revision: record.native.revision, phase: record.native.phase }) })
   }
 
   focus = (agent: Agent | undefined, goalId: string): GoalRecord => {

@@ -17,7 +17,9 @@ dsh --profile web --dump-config
 
 该来源必须配置 `observer`：准确 workspace/preset、principalId/principalRecordId/principalVersion、ownerRouteId、绝对 expiresAt 和 budgetId。它复用 Automations 的有限 Host 执行器，不调用模型；另需 Delivery 验证 owner route，Policy 授权观测、凭据、来源执行和下游 ingest。Web Owner 的 `repositoryDelivery.events` 可生成这些配置及有限轮询/执行预算。原有未配置 observer 的来源保持既有行为。
 
-来源摘要和序号先持久化，独立于下游 observer 执行回执，Goals 可以用它们等待变化；事件本身不证明 CI/评审成功，最终必须重新核验实际提交。重启复用来源与授权，不延长期限；来源暂停、授权过期、route 或已协调定义变化后，停止观测并拒绝来源查询/投递。当前以明确期限和预算结束观察，尚不提供目标完成即自动退订。
+来源摘要和序号先持久化，独立于下游 observer 执行回执，Goals 可以用它们等待变化；事件本身不证明 CI/评审成功，最终必须重新核验实际提交。重启复用来源与授权，不延长期限；来源暂停、授权过期、route 或已协调定义变化后，停止观测并拒绝来源查询/投递。默认 `observerLifetime: shared` 保持既有共享来源行为与配置摘要。显式 `observerLifetime: goal` 将来源限定为一个目标：首次合法 `goal_wait_event` 持久绑定准确 owner/scope、业务目标定义、Session 和原生 Goal；同一目标的后续等待可增加 revision，其他目标不能接管。Goals 的可信只读快照确认该目标 complete 后，来源在等待协调或下一次观测/投递检查时持久退役并暂停对应 observer，重启不再启用；晚到的观测结果不能新增事件。已派发的合法 wake 仍可正常结算并反馈结果。共享来源不会因为某个目标完成而停止。
+
+Web Owner 的新 `repositoryDelivery.events` 配置使用 `observerLifetime: goal`，不要求用户预先填写尚未创建的 Goal ID。退役的来源不转移给新目标；新目标需要新的有限来源配置和授权。缺失可信 Goals 状态、定义变化、owner 或来源配置变化都拒绝继续观察，外部事件正文不能自行声明目标完成。
 
 HTTP 网络权限使用精确 HTTPS origin：
 

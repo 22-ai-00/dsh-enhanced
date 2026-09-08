@@ -1,6 +1,7 @@
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Context } from '@deepseek-ai/cordis'
 import { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
@@ -23,11 +24,13 @@ afterEach(async () => {
 
 function response(body: unknown): Response { return new Response(JSON.stringify(body), { status: 200 }) }
 
-async function fixture(requestTimeoutMs = 1_000) {
+async function fixture(requestTimeoutMs = 1_000, lifetime: 'shared' | 'goal' = 'shared') {
   const root = await mkdtemp(join(tmpdir(), 'event-triggers-repository-service-'))
   roots.push(root)
   const ctx = new Context()
   contexts.push(ctx)
+  let goal = { scope: { principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, workspace: root, preset: 'primary' }, id: 'goal-one', definition: { version: 1, digest: 'c'.repeat(64) }, native: { sessionId: 'session-one', goalId: 'native-one', revision: 2, phase: 'paused' } }
+  ctx.provide('assistantGoals' as never, { inspectGoalLifecycle: ({ scope, goalId }: { scope: unknown; goalId: string }) => JSON.stringify(scope) === JSON.stringify(goal.scope) && goalId === goal.id ? Object.freeze(goal) : undefined } as never)
   let routeGeneration = 1
   const route = () => Object.freeze({ authorityId: 'route', authorityHash: 'a'.repeat(64), receiptVersion: 2 as const,
     principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', bindingVersion: 1, generation: routeGeneration })
@@ -44,22 +47,25 @@ async function fixture(requestTimeoutMs = 1_000) {
   } })
   let conclusion = 'success'
   let reviewState = 'APPROVED'
-  let hang = false
+  let hang = false; let release: (() => void) | undefined
   const fetcher = vi.fn(async (url: string, init: RequestInit) => {
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer repository-fixture-token')
-    if (hang) return await new Promise<Response>((_resolve, reject) => init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true }))
     const path = new URL(url).pathname
-    if (path.includes('/check-runs')) return response({ total_count: 1, check_runs: [{ id: 1, name: 'CI', app: { id: 7 }, head_sha: head, status: 'completed', conclusion }] })
-    if (path.endsWith('/pulls')) return response([{ number: 7, state: 'open', head: { ref: branch, sha: head, repo: { full_name: repository } }, base: { ref: baseBranch, repo: { full_name: repository } } }])
-    return response([{ id: 1, user: { id: 42 }, commit_id: head, state: reviewState }])
+    const result = () => {
+      if (path.includes('/check-runs')) return response({ total_count: 1, check_runs: [{ id: 1, name: 'CI', app: { id: 7 }, head_sha: head, status: 'completed', conclusion }] })
+      if (path.endsWith('/pulls')) return response([{ number: 7, state: 'open', head: { ref: branch, sha: head, repo: { full_name: repository } }, base: { ref: baseBranch, repo: { full_name: repository } } }])
+      return response([{ id: 1, user: { id: 42 }, commit_id: head, state: reviewState }])
+    }
+    if (hang) return await new Promise<Response>((resolve, reject) => { release = () => { hang = false; resolve(result()) }; init.signal?.addEventListener('abort', () => reject(init.signal?.reason), { once: true }) })
+    return result()
   })
-  const config = { databasePath: join(root, 'events.sqlite'), pollerEnabled: false, pollIntervalMs: 1_000, requestTimeoutMs, maxBodyBytes: 16_384, triggers: [{ id: 'repository', kind: 'github-repository' as const, automationId: 'repository-target', repository, branch, baseBranch, credentialHandle: 'github', fireWhen: 'changed' as const, debounceMs: 0, cooldownMs: 0, maxFires: 10, observer: { workspace: root, preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: Date.now() + 60_000, budgetId: 'repository-observations' } }] }
+  const config = { databasePath: join(root, 'events.sqlite'), pollerEnabled: false, pollIntervalMs: 1_000, requestTimeoutMs, maxBodyBytes: 16_384, triggers: [{ id: 'repository', kind: 'github-repository' as const, automationId: 'repository-target', repository, branch, baseBranch, credentialHandle: 'github', fireWhen: 'changed' as const, debounceMs: 0, cooldownMs: 0, maxFires: 10, observerLifetime: lifetime, observer: { workspace: root, preset: 'primary', principalId: 'owner:one', principalRecordId: 'record', principalVersion: 1, ownerRouteId: 'route', expiresAt: Date.now() + 60_000, budgetId: 'repository-observations' } }] }
   const install = async () => {
     let service!: EventTriggersService
     const fiber = await ctx.plugin({ name: 'dsh-enhanced-event-triggers', apply(runtime: Context) { service = new EventTriggersService(runtime, config, { fetcher, lookup: async () => [{ address: '93.184.216.34', family: 4 }] }) } })
     return { service, fiber }
   }
-  return { ctx, root, fetcher, install, change: () => { conclusion = 'failure' }, changeReview: () => { reviewState = 'CHANGES_REQUESTED' }, revokeRoute: () => { routeGeneration = 2 }, hang: () => { hang = true } }
+  return { ctx, root, fetcher, install, change: () => { conclusion = 'failure' }, changeReview: () => { reviewState = 'CHANGES_REQUESTED' }, revokeRoute: () => { routeGeneration = 2 }, hang: () => { hang = true }, release: () => release?.(), hasRelease: () => release !== undefined, completeGoal: () => { goal = { ...goal, native: { ...goal.native, revision: 5, phase: 'complete' } } }, goal }
 }
 
 describe('GitHub repository trigger service composition', () => {
@@ -124,5 +130,27 @@ describe('GitHub repository trigger service composition', () => {
     await expect(polling).rejects.toThrow(/owner route|unavailable|abort/i)
     expect(installed.service.health()).toMatchObject({ pendingEvents: 0, retryingEvents: 0, deliveredEvents: 0 })
     expect(JSON.stringify(installed.service.health())).not.toContain('repository-fixture-token')
+  })
+
+  it('drops an observation that finishes after its claimed goal completes, and stays stopped after service restart', async () => {
+    const f = await fixture(1_000, 'goal')
+    let installed = await f.install()
+    const snapshot = installed.service.sourceSnapshot('repository')
+    const claim = { triggerId: 'repository', scope: f.goal.scope, goalId: f.goal.id, definition: f.goal.definition,
+      native: { sessionId: f.goal.native.sessionId, goalId: f.goal.native.goalId, revision: f.goal.native.revision },
+      configDigest: snapshot.configDigest, automationId: snapshot.target.automationId }
+    expect(installed.service.claimGoalSource(claim)).toBe(true)
+    f.change(); f.hang()
+    const polling = installed.service.pollOnce()
+    await vi.waitFor(() => expect(f.hasRelease()).toBe(true))
+    f.completeGoal(); f.release()
+    await expect(polling).rejects.toThrow()
+    const database = new DatabaseSync(join(f.root, 'events.sqlite'), { readOnly: true })
+    expect(database.prepare('SELECT COUNT(*) AS count FROM event_outbox').get()).toEqual({ count: 0 })
+    database.close()
+    expect(() => installed.service.sourceSnapshot('repository')).toThrow(/retired|changed/)
+    await installed.fiber.dispose()
+    installed = await f.install()
+    expect(() => installed.service.sourceSnapshot('repository')).toThrow(/retired|changed/)
   })
 })

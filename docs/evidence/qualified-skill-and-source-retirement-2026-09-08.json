@@ -1,0 +1,144 @@
+{
+  "capability": "installed external skill qualification and goal-bound source retirement",
+  "baseline": "5bc609c27e42216d99b5b3a033d29e7196187a19",
+  "status": "engineering-verified",
+  "implementedBehaviors": [
+    "The installed skill_qualify tool uses frozen public Host profiles and one external operator process; private cases and keys remain outside candidate workers.",
+    "Authority pins bind exact dataset, owner scope, immutable parent/candidate, initial files/inputs and common execution ceilings.",
+    "Public qualification results persist in the existing Skills comparison journal; completion requires process closure and current authorization; unknown work never restarts.",
+    "Goal-specific event sources bind the first authorized wait, tolerate later revisions of the same goal, and persist retirement on trusted completion; shared sources retain their old identity.",
+    "New Web Owner repository event admissions configure goal-specific lifetime; source retirement rejects late observations and survives restart."
+  ],
+  "targeted": {
+    "command": "pnpm --filter @dsh-enhanced/assistant-skills typecheck && DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-skills exec vitest run tests/external-holdout-service.spec.ts tests/holdout-qualification.spec.ts",
+    "log": "/tmp/dsh-holdout-final-targeted.log",
+    "sha256": "7a6d37771d173b35d9927a882f1a65255d53117b1ff67f49e5fcbba604652f50",
+    "exitCode": 0
+  },
+  "sourceRegression": {
+    "command": "pnpm --filter @dsh-enhanced/assistant-goals build && pnpm exec vitest run tests/autonomy-event-goal.spec.ts plugins/assistant-goals/tests/event-wait.spec.ts plugins/event-triggers/tests/repository-service.spec.ts plugins/assistant-web-owner/tests/goal-admission.spec.ts",
+    "log": "/tmp/dsh-source-retirement-regression.log",
+    "sha256": "6f0254056ec9777cb8a343b1e5d48ec7c675e7ad0089339ed041df2045e31eaa",
+    "exitCode": 0
+  },
+  "runtime": {
+    "command": "pnpm --filter @dsh-enhanced/assistant-skills build && DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm --filter @dsh-enhanced/assistant-skills exec vitest run tests/holdout-cli.spec.ts tests/holdout-authority.spec.ts tests/external-holdout.spec.ts tests/holdout-qualification.spec.ts tests/external-holdout-service.spec.ts",
+    "log": "/tmp/dsh-holdout-production-runtime.log",
+    "sha256": "f318793fb1b448348e4e48c3a37992ce8ce111beb0cf0f110cf901cd1334c3f4",
+    "exitCode": 0,
+    "proof": "/tmp/dsh-holdout-production-proof.json",
+    "proofSha256": "fac15cf029cc966b05f809ae766cad544f4dd1ce5b13334aa7f6a7ee5f2ede4a"
+  },
+  "resolvedFailures": [
+    "Independent review found initial replay inputs/files absent from the authority signed budget binding; their stable digests are now included and a changed-files/old-plan negative test rejects reuse.",
+    "Integration review found exact native revision matching rejected later waits for the same goal; claims now preserve the initial revision as a lower bound.",
+    "Source claims now precede wait persistence and are rechecked on recovery, preventing a competing goal from leaving an executable wait.",
+    "Default shared lifetime is excluded from legacy configuration and reconciliation digests to preserve existing source identity.",
+    "The first full check exposed policy revocation bypassing the new early lifecycle-read catch: an old wait stayed waiting. The early read now terminalizes the same precise denial, and the failing integration regression passes.",
+    "The first new real-model browser run completed the native goal but retired its event source before the dispatched wake settled, leaving unknown/source-changed. Retirement now preserves only terminal settlement for the exact dispatched completed goal, with current Policy/route/configuration and durable retired claim; it grants no new observation or execution. The original unknown result was retained without replay.",
+    "The second browser run passed native completion, both wake settlements and source retirement, then an existing UI regex incorrectly removed the literal # in PR #17. The locator now strips heading markers only at the beginning. Two cold restarts of the retained session confirmed the corrected exact reply is visible, the old locator is absent, source retirement persists and zero additional model dispatches occurred."
+  ],
+  "limitations": [
+    "Qualification runtime programs, source acceptance and echo dataset are explicit synthetic fixtures. Evaluation gain of 1 in that test is not a measured model intelligence gain.",
+    "A signature and separate mounts do not establish historical dataset independence. heldoutIndependence remains unproven; promotionAuthorized remains false.",
+    "No automatic candidate promotion, signed production publication, independently governed production dataset, live GitHub lifecycle or second real event source is claimed.",
+    "Real repository E2E uses the existing actual Codex model route, real Host/isolated execution, and explicit GitHub action/observation transport fixtures.",
+    "Dedicated source retirement begins with its first legal goal wait and takes effect on lifecycle reconciliation or the next observation/delivery check; already dispatched legal wake settlement is retained.",
+    "Full 18-work-package scope remains incomplete; fixed calendar observation waits stay cancelled.",
+    "Independent review is by local agents; no ChatGPT web review was available."
+  ],
+  "sourceSettlement": {
+    "command": "pnpm --filter @dsh-enhanced/assistant-goals typecheck && pnpm --filter @dsh-enhanced/assistant-goals build && pnpm --filter @dsh-enhanced/event-triggers build && pnpm exec vitest run plugins/event-triggers/tests/observer.spec.ts plugins/event-triggers/tests/repository-service.spec.ts plugins/assistant-goals/tests/event-wait.spec.ts plugins/assistant-goals/tests/wake.spec.ts tests/autonomy-event-goal.spec.ts",
+    "log": "/tmp/dsh-source-settlement-targeted.log",
+    "sha256": "402bf2f52ddbc0c5fb73eccd1cc77b11f79ed3ce229d0fee9c21c47b486d89e4",
+    "exitCode": 0,
+    "testFiles": 5,
+    "tests": 43
+  },
+  "failedChecks": [
+    {
+      "log": "/tmp/dsh-holdout-source-check.log",
+      "sha256": "6b020b525de57812eebb4c37d8e344fbeba56dffb77df8448fddcdba50b8f7a9",
+      "exitCode": 1,
+      "reason": "Revoked wait Policy regression, subsequently fixed and targeted regression passed."
+    },
+    {
+      "log": "/tmp/dsh-source-retirement-real.log",
+      "sha256": "4605301789549dec8b900009f557f6376a0d2d7355b801a1932c02fc61df9c23",
+      "exitCode": 1,
+      "reason": "Source retired before final dispatched wake settlement; original failed profile retained."
+    },
+    {
+      "log": "/tmp/dsh-source-retirement-real-v2.log",
+      "sha256": "77a65a3a3e7edd032f7ecf68a7360d9266a86ed57963cbf800f38b56a9237dea",
+      "exitCode": 1,
+      "reason": "Existing visible-reply sanitizer removed the literal # from PR #17; failed exact text lookup, not missing user feedback."
+    }
+  ],
+  "retainedUiRegression": {
+    "command": "node .cache/source-retirement-ui-repro.mjs",
+    "scriptSha256": "0aa707913a37e3ed0a07aea0b9b036753791f8252cdaaad462a864413bee4e55",
+    "log": "/tmp/dsh-source-retirement-ui-repro.log",
+    "sha256": "e9dade7b2e8f2b1b6686de2d11dcc6bb688896b6b5d405b402c9529d643925bb",
+    "exitCode": 0,
+    "coldRestarts": 2,
+    "additionalModelDispatches": 0
+  },
+  "realBrowser": {
+    "command": "CI=true DSH_REPO_RETAIN_FAILURE=1 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs",
+    "log": "/tmp/dsh-source-retirement-real-v3.log",
+    "sha256": "74438e10168d68c0ba83e7cf50364674ed98a594d8d8eea39a00f9f8bf075a8e",
+    "exitCode": 0,
+    "passed": 1,
+    "duration": "4.0m",
+    "attempt": 3,
+    "proof": ".cache/repo-autonomy-real-codex-subscription-delivery-fixture-event-fixture-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/proof.json",
+    "proofSha256": "71bbd16922ea09f8efdcbe02645444cdef368de510d1c76438cf1f7f40debf1b",
+    "modelDispatches": 16,
+    "nativePhase": "complete",
+    "nativeRoundsStarted": 3,
+    "successfulWakes": 2,
+    "retirement": {
+      "claim": {
+        "trigger_id": "goal-ded26e61f99a3e3efda00e46-repository-events",
+        "goal_id": "261d2fec0c64b7d056c71097978281e211a0528265793f08c568c54808655e18",
+        "session_id": "session-1fe0daa3-2b10-4e02-b2fc-6b4c8505063a",
+        "native_goal_id": "goal-ac1542fa-ebc4-462c-bd00-bc809b5685f8",
+        "retired_at": 1788907730679
+      },
+      "lastObservedAt": 1788907730162,
+      "automationStatus": "paused"
+    },
+    "restart": {
+      "sameGoal": true,
+      "sameSourceJobEvidence": true,
+      "replyVisible": true,
+      "waitedThenRestarted": true
+    }
+  },
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+    "log": "/tmp/dsh-holdout-source-check-v2.log",
+    "sha256": "5196dcb7c95a2a4ce11dbbf1ae2a050ef88453f0da26ab8e9e64d378dbe35303",
+    "exitCode": 0,
+    "testFiles": 346,
+    "tests": 4204,
+    "skipped": 0,
+    "dryRunPacks": 33,
+    "packInspection": "New external-holdout, holdout-authority, holdout-cli and holdout-qualification lib files are present; private data/key/state and tests are absent from package contents."
+  },
+  "independentReview": {
+    "result": "PASS",
+    "skills": {
+      "agent": "capture_e2e_handoff",
+      "scope": "Skills authority, CLI, qualifier, production process and service; public pins, recovery, cancellation, current authorization and pack boundaries",
+      "evidence": "Read final source diff, targeted process/container logs and the actual frozen root check log/exit; no independent test rerun."
+    },
+    "eventLifecycle": {
+      "agent": "skills_external_service",
+      "scope": "EventTriggers, Goals, Web Owner, terminal-only settlement and real-model browser source-retirement flow",
+      "evidence": "Read exact terminal/source binding paths, v2 failure DOM, zero-model two-restart UI regression, v3 browser proof and frozen root check log/exit."
+    },
+    "limits": "Agents reviewed code they did not implement for this batch. Reviews were kept read-only by instruction; the live unrestricted session does not enforce a read-only sandbox. No ChatGPT web review was available."
+  }
+}

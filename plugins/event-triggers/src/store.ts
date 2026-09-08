@@ -38,6 +38,18 @@ export interface EventSourceCandidate {
   digest: string
 }
 
+export interface GoalSourceClaim {
+  triggerId: string
+  scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }
+  goalId: string
+  definition: { version: number; digest: string }
+  native: { sessionId: string; goalId: string; revision: number }
+  configDigest: string
+  automationId: string
+}
+
+export interface StoredGoalSourceClaim extends GoalSourceClaim { retiredAt?: number }
+
 export type WebhookAcceptance =
   | { accepted: true; event: TriggerOutboxEvent }
   | { accepted: false; event?: TriggerOutboxEvent; reason: 'cooldown' | 'limit' | 'replay' | 'ttl' }
@@ -119,6 +131,25 @@ function stableEventId(triggerId: string, key: string): string {
 
 function validTime(value: number, field: string): void {
   if (!Number.isSafeInteger(value) || value < 0) throw new EventTriggerStoreError('invalid-input', `${field} is invalid`)
+}
+
+const identifier = (value: unknown, max = 512): value is string => typeof value === 'string' && value.length > 0 && value.length <= max
+const sha256 = (value: unknown): value is string => typeof value === 'string' && /^[a-f0-9]{64}$/u.test(value)
+function validClaim(value: unknown): value is GoalSourceClaim {
+  if (!value || typeof value !== 'object') return false
+  const claim = value as GoalSourceClaim
+  const scope = claim.scope
+  return identifier(claim.triggerId, 200) && identifier(claim.goalId) && Number.isSafeInteger(claim.definition?.version) && claim.definition.version > 0
+    && sha256(claim.definition?.digest) && identifier(claim.native?.sessionId) && identifier(claim.native?.goalId)
+    && Number.isSafeInteger(claim.native?.revision) && claim.native.revision >= 0 && sha256(claim.configDigest)
+    && identifier(claim.automationId, 200) && !!scope && identifier(scope.principalId) && identifier(scope.principalRecordId)
+    && Number.isSafeInteger(scope.principalVersion) && scope.principalVersion > 0 && identifier(scope.workspace, 4_096) && identifier(scope.preset)
+}
+function sameClaim(left: GoalSourceClaim, right: GoalSourceClaim): boolean {
+  const key = (value: GoalSourceClaim) => [value.triggerId, value.scope.principalId, value.scope.principalRecordId,
+    value.scope.principalVersion, value.scope.workspace, value.scope.preset, value.goalId, value.definition.version,
+    value.definition.digest, value.native.sessionId, value.native.goalId, value.configDigest, value.automationId]
+  return JSON.stringify(key(left)) === JSON.stringify(key(right)) && right.native.revision >= left.native.revision
 }
 
 function errorText(value: unknown): string {
@@ -304,6 +335,58 @@ export class EventTriggerStore {
     return (this.database.prepare(`
       SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'event_sequence'), 0) AS sequence
     `).get() as { sequence: number }).sequence
+  }
+
+  claimGoalSource(input: GoalSourceClaim): StoredGoalSourceClaim {
+    if (!validClaim(input)) throw new EventTriggerStoreError('invalid-input', 'event goal source claim is invalid')
+    return this.transaction(() => {
+      const prior = this.goalSourceClaim(input.triggerId)
+      if (prior !== undefined) {
+        if (!sameClaim(prior, input)) throw new EventTriggerStoreError('invalid-input', 'event goal source is already claimed by another goal')
+        return prior
+      }
+      this.database.prepare(`INSERT INTO goal_source_claims(
+        trigger_id, scope_json, goal_id, definition_version, definition_digest, session_id, native_goal_id,
+        native_revision, config_digest, automation_id, retired_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`).run(
+        input.triggerId, JSON.stringify(input.scope), input.goalId, input.definition.version, input.definition.digest,
+        input.native.sessionId, input.native.goalId, input.native.revision, input.configDigest, input.automationId,
+      )
+      return this.goalSourceClaim(input.triggerId)!
+    })
+  }
+
+  goalSourceClaim(triggerId: string): StoredGoalSourceClaim | undefined {
+    const row = this.database.prepare(`SELECT trigger_id, scope_json, goal_id, definition_version, definition_digest,
+      session_id, native_goal_id, native_revision, config_digest, automation_id, retired_at
+      FROM goal_source_claims WHERE trigger_id = ?`).get(triggerId) as {
+        trigger_id: string; scope_json: string; goal_id: string; definition_version: number; definition_digest: string
+        session_id: string; native_goal_id: string; native_revision: number; config_digest: string; automation_id: string; retired_at: number | null
+      } | undefined
+    if (!row) return undefined
+    let scope: GoalSourceClaim['scope']
+    try { scope = JSON.parse(row.scope_json) as GoalSourceClaim['scope'] } catch { throw new EventTriggerStoreError('invalid-schema', 'event goal source claim is malformed') }
+    const value: StoredGoalSourceClaim = { triggerId: row.trigger_id, scope, goalId: row.goal_id,
+      definition: { version: row.definition_version, digest: row.definition_digest },
+      native: { sessionId: row.session_id, goalId: row.native_goal_id, revision: row.native_revision },
+      configDigest: row.config_digest, automationId: row.automation_id,
+      ...(row.retired_at === null ? {} : { retiredAt: row.retired_at }) }
+    if (!validClaim(value) || (value.retiredAt !== undefined && (!Number.isSafeInteger(value.retiredAt) || value.retiredAt < 0))) {
+      throw new EventTriggerStoreError('invalid-schema', 'event goal source claim is invalid')
+    }
+    return Object.freeze(value)
+  }
+
+  retireGoalSource(input: GoalSourceClaim): StoredGoalSourceClaim {
+    if (!validClaim(input)) throw new EventTriggerStoreError('invalid-input', 'event goal source claim is invalid')
+    return this.transaction(() => {
+      const prior = this.goalSourceClaim(input.triggerId)
+      if (!prior || !sameClaim(prior, input)) throw new EventTriggerStoreError('invalid-input', 'event goal source claim does not match')
+      if (prior.retiredAt !== undefined) return prior
+      this.database.prepare('UPDATE goal_source_claims SET retired_at = ? WHERE trigger_id = ? AND retired_at IS NULL')
+        .run(this.now(), input.triggerId)
+      return this.goalSourceClaim(input.triggerId)!
+    })
   }
 
   markAttempt(id: string): void {

@@ -6,6 +6,7 @@ export { version, AssistantSkillsService, Config }
 export type * from './definition.js'
 export type { SkillComparisonProfile } from './comparison.js'
 export type { SealedSkillHoldoutProvider } from './sealed-holdout.js'
+export type { ExternalHoldoutProfile } from './external-holdout.js'
 export type { SkillComparison, SkillComparisonIdentity, SkillCandidate, SkillRun, StoredSkillDefinition } from './store.js'
 export function apply(ctx: Context, config: Config = {}): void { new AssistantSkillsService(ctx, config) }
 export default { name, Config, apply }

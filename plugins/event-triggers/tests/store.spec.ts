@@ -21,11 +21,11 @@ describe('event trigger state store', () => {
     expect((await stat(join(value.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(value.path)).mode & 0o777).toBe(0o600)
     const db = new DatabaseSync(value.path, { readOnly: true })
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 })
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
     expect(db.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     db.close(); value.store.close()
 
-    for (const version of [5, 99]) {
+    for (const version of [6, 99]) {
       const future = join(value.root, `future-${version}.sqlite`)
       const newer = new DatabaseSync(future); newer.exec(`PRAGMA user_version = ${version}`); newer.close(); await chmod(future, 0o600)
       expect(() => new EventTriggerStore({ path: future }))
@@ -161,7 +161,7 @@ describe('event trigger state store', () => {
     expect(migrated.health()).toMatchObject({ pendingEvents: 1, retryingEvents: 1, quarantinedEvents: 0 })
     migrated.close()
     const inspected = new DatabaseSync(path, { readOnly: true })
-    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 })
+    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 5 })
     inspected.close()
   })
 

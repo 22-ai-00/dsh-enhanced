@@ -4,6 +4,7 @@ import type { EventObserverConfig } from './observer.js'
 
 export type FireWhen = 'changed' | 'truthy'
 export type Ipv6Mode = 'deny' | 'native-only'
+export type ObserverLifetime = 'shared' | 'goal'
 
 interface TriggerBase {
   id: string
@@ -13,6 +14,8 @@ interface TriggerBase {
   maxFires?: number
   ttlMs?: number
   observer?: EventObserverConfig
+  /** A goal lifetime is claimed by the first exact owner-authorized event wait. */
+  observerLifetime?: ObserverLifetime
 }
 
 export interface FileTriggerConfig extends TriggerBase {
@@ -103,6 +106,7 @@ const base = {
   maxFires: Schema.number().step(1).min(1).max(1_000_000).default(100),
   ttlMs: Schema.number().step(1).min(1_000).max(31_536_000_000),
   observer: Schema.any(),
+  observerLifetime: Schema.union(['shared', 'goal'] as const).default('shared'),
 }
 
 const triggerSchema = Schema.union([
@@ -205,6 +209,9 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
       if (!isAbsolute(owner.workspace) || !Number.isSafeInteger(owner.principalVersion) || !Number.isSafeInteger(owner.expiresAt)
         || [owner.preset, owner.principalId, owner.principalRecordId, owner.ownerRouteId, owner.budgetId].some(value => value.length === 0 || value.length > 256 || value.trim() !== value || /[\p{Cc}]/u.test(value))) throw new Error('event-triggers: invalid observer owner')
       Object.freeze(owner)
+    }
+    if (trigger.observerLifetime === 'goal' && trigger.observer === undefined) {
+      throw new Error('event-triggers: goal observer lifetime requires an observer owner')
     }
     if (trigger.kind === 'github-repository') {
       if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(trigger.repository)

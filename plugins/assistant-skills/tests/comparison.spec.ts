@@ -9,7 +9,10 @@ const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 async function root() { const value = await mkdtemp(join(tmpdir(), 'skills-comparison-')); roots.push(value); return value }
-function skill(workspace: string, script: string) { const scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }; return createDefinition({ protocol: 'assistant-goals/verified-workflow-source/v1', scope, goal: { id: 'source', definition: { version: 1, digest: 'a'.repeat(64), objective: 'script' }, sessionId: 'session', nativeGoalId: 'native' }, runId: 'run', turn: 1, acceptance: { contractId: 'contract', contractDigest: 'b'.repeat(64), receiptDigest: 'c'.repeat(64), verifiedAt: 1, validUntil: 2 }, steps: [{ id: 'write', toolName: 'write', arguments: { file_path: 'result.sh', content: script } }] }, { name: 'script-result', description: 'Write result script.', bindings: [{ name: 'path', stepId: 'write', path: '/file_path' }] }, ['write']) }
+function skill(workspace: string, script: string, observations = false) { const scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }; const steps = observations
+  ? [{ id: 'glob', toolName: 'glob', arguments: { path: workspace, pattern: '**/*.sh' } }, { id: 'write', toolName: 'write', arguments: { file_path: 'result.sh', content: script } }, { id: 'read', toolName: 'read', arguments: { file_path: 'result.sh' } }, { id: 'goal', toolName: 'get_goal', arguments: {} }]
+  : [{ id: 'write', toolName: 'write', arguments: { file_path: 'result.sh', content: script } }]
+  return createDefinition({ protocol: 'assistant-goals/verified-workflow-source/v1', scope, goal: { id: 'source', definition: { version: 1, digest: 'a'.repeat(64), objective: 'script' }, sessionId: 'session', nativeGoalId: 'native' }, runId: 'run', turn: 1, acceptance: { contractId: 'contract', contractDigest: 'b'.repeat(64), receiptDigest: 'c'.repeat(64), verifiedAt: 1, validUntil: 2 }, steps }, { name: 'script-result', description: 'Write result script.', bindings: [{ name: 'path', stepId: 'write', path: '/file_path' }] }, observations ? ['glob', 'write', 'read', 'get_goal'] : ['write']) }
 function profile(workspace: string, stateRoot: string): SkillComparisonProfile { const cases = [['replay', 'one'], ['evaluation', 'two'], ['regression', 'three']] as const; return { id: 'synthetic', version: 1, scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }, stateRoot, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 2, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: cases.map(([kind, stdin]) => ({ id: kind, kind, inputs: { path: 'result.sh' }, files: [], stdin: `${stdin}\n`, expectedStdout: `${stdin}\n`, expectedExitCode: 0 })) } }
 
 const dockerTests = /^sha256:[0-9a-f]{64}$/u.test(image) ? describe.sequential : describe.skip
@@ -27,6 +30,16 @@ dockerTests('synthetic native skill comparison', () => {
     const workspace = await root(), stateRoot = await root(); await chmod(stateRoot, 0o700); const comparator = new SkillComparator(profile(workspace, stateRoot))
     try { const result = await comparator.compare('regression-gate', skill(workspace, '#!/bin/sh\nread x\nprintf wrong'), skill(workspace, '#!/bin/sh\nread x\nif [ "$x" = three ]; then printf wrong; else printf "%s\\n" "$x"; fi'), new AbortController().signal, () => {})
       expect(result.quality).toMatchObject({ evaluationGainObserved: true, criticalRegressionsPassed: false, candidateChecksPassed: false }); expect(result.promotionAuthorized).toBe(false)
+    } finally { await comparator.close() }
+  }, 120000)
+
+  test('compares traces with bounded provenance observations without treating them as native execution', async () => {
+    const workspace = await root(), stateRoot = await root(); await chmod(stateRoot, 0o700)
+    const comparator = new SkillComparator({ ...profile(workspace, stateRoot), maxToolCalls: 4 })
+    try {
+      const result = await comparator.compare('observations', skill(workspace, '#!/bin/sh\nread x\nprintf wrong', true), skill(workspace, '#!/bin/sh\ncat', true), new AbortController().signal, () => {})
+      expect(result.cells).toHaveLength(12)
+      expect(result.cells.every(cell => cell.toolCalls === 4 && cell.executedToolCalls === 2 && cell.omittedObservations === 2)).toBe(true)
     } finally { await comparator.close() }
   }, 120000)
 
