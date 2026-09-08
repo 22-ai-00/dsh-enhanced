@@ -636,6 +636,12 @@ describe('approval-gated automation proposals', () => {
         updated_at INTEGER NOT NULL,
         version INTEGER NOT NULL DEFAULT 1
       ) STRICT;
+      CREATE TABLE automation_occurrences (
+        id TEXT PRIMARY KEY, automation_id TEXT NOT NULL, trigger_kind TEXT NOT NULL,
+        trigger_key TEXT NOT NULL, scheduled_at INTEGER NOT NULL, status TEXT NOT NULL,
+        reason TEXT, dry_run INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE (automation_id, trigger_kind, trigger_key)
+      ) STRICT;
       PRAGMA user_version = 3;
     `)
     database.prepare(`
@@ -661,7 +667,7 @@ describe('approval-gated automation proposals', () => {
     expect('dispatch' in legacy).toBe(false)
     proposals.close()
     const migrated = new DatabaseSync(path, { readOnly: true })
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
     expect(migrated.prepare('SELECT dispatch_json, ttl_ms FROM automation_proposals WHERE id = ?')
       .get('legacy-intent')).toEqual({ dispatch_json: null, ttl_ms: 60_000 })
     migrated.close()

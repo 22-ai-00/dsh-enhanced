@@ -1,0 +1,43 @@
+{
+  "suite": "strategy-v1",
+  "id": "strategy-deepseek-development",
+  "cases": [
+    "integer-sum",
+    "merge-touching-intervals",
+    "word-frequency-lexical-ties",
+    "dependency-topological-order"
+  ],
+  "persona": "Build the requested artifact carefully and verify its behavior before finishing.",
+  "model": {
+    "provider": "deepseek-goal-metered",
+    "model": "deepseek-v4-flash",
+    "temperature": null,
+    "inputLimitMode": "upper-bound",
+    "outputLimitMode": "provider",
+    "maxOutputTokens": 4096,
+    "inputUsdMicrosPerMillionTokens": null,
+    "outputUsdMicrosPerMillionTokens": null,
+    "adapterDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tokenCounterDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "budget": {
+    "durationMs": 300000,
+    "inputTokens": 33554432,
+    "outputTokens": 65536,
+    "costUsdMicros": null,
+    "toolCalls": 32
+  },
+  "execution": {
+    "modelCalls": 16,
+    "maxOutputTokensPerCall": 4096,
+    "maxGoalRounds": 4
+  },
+  "repeats": 2,
+  "seed": 7,
+  "image": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "dockerPath": "/usr/bin/docker",
+  "stepMaxDurationMs": 60000,
+  "stopTimeoutMs": 5000,
+  "workspaceDirectory": "/absolute/private/strategy-workspaces",
+  "stateDirectory": "/absolute/private/strategy-state"
+}

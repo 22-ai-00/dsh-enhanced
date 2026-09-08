@@ -1,5 +1,10 @@
 # 自主智能体目标：跨设备交接
 
+> 2026-09-08 当前批次（基线 `b8cba5b`）：事件 envelope 已贯通 file/HTTPS JSON/HMAC webhook → Automations，来源与投递目标持久绑定；改配置及缺少来源证明的旧 pending 事件进入 quarantine。原生任务集成分别覆盖独立验收成功/失败和一次替身接受的投递，未验证出站内容承载验收结论；报告预写、模型与出站为替身。DeepSeek 生产工厂已通过全新安装后的 CLI 替身验证，真实模型效果待凭据。完整 18 项为 **3 已验证 / 9 实现中 / 6 待做**；WP11 的事件等待/目标关联和真实日历等来源仍待完成。见[当前账本](agent-autonomy-implementation.md)与[本批证据](evidence/strategy-deepseek-2026-09-08.json)，下列更新按历史保留。
+
+
+> 2026-09-08 最新推进（基线 `b8cba5b`）：交付可选 DeepSeek 生产 strategy-v1 工厂与配置模板，保持供应商输出上限和派发前保守输入预留，并把模型适配器/credentials 源码加入双方计划。最终检查与安装运行证据见 [本批证据](evidence/strategy-deepseek-2026-09-08.json)。真实供应商响应和策略收益仍待可用凭据与实际调用验证；完整 18 项状态不变，继续按依赖和证据推进。
+
 > 2026-09-08 最新推进（基线 `13ef450`）：strategy-v1 完整 executor/journal、setup 全流程期限、持久失败证据、实际工具/persona/Policy/源码核对及 CLI/doctor 已接通。独立安装的四题×两臂×两次重复 16 cell 全部完成失败修订后通过，120 次明确夹具请求和 64 份独立验收回执可回读；重开 run/report 不增加请求。源码、全仓最终状态与独立复核见 [本批证据](evidence/strategy-executor-2026-09-08.json)，用法见[策略协议](goal-strategy-evaluation.md)。真实模型收益仍未证明，完整 18 项继续保持 3 已验证 / 8 实现中 / 7 待做；下一步接兼容限额的实际模型比较及其他工作包，不为日历排期或长期观察等待。以下旧交接段落按历史保留。
 
 > 2026-09-07 策略诊断与验收关联（基线 `11d294c`）：schema 2 策略账本保存观测到的执行阶段和终止原因，旧诊断保持未知。后续目标上下文重验 exact parent run 的独立回执，不用后来成功覆盖早先策略对应的失败；关联不是因果收益。9 条真实原生场景覆盖额度、工具拒绝、撤权、迟到 start、模型流/usage/请求钩子/流构造失败，预留与 unknown 语义保留。最终全仓和安装浏览器证据见 [本批证据](evidence/strategy-assessment-2026-09-07.json)。完整 18 项仍 3 已验证 / 8 实现中 / 7 待做；下一步沿[固定预算比较协议](goal-strategy-evaluation.md)接实际 executor，真实模型收益尚未证明。

@@ -128,11 +128,16 @@ test('a correction committed immediately before the writer fence wins over promo
 test('v10 saved proofs migrate without granting legacy success activation authority', () => {
   const h = harness(); h.append('achieved')
   h.service.inspectWorkflowCanary(inspect)
-  h.db.exec('ALTER TABLE automation_growth_artifacts DROP COLUMN canary_evaluation_proof_json; PRAGMA user_version = 10')
+  h.db.exec(`
+    ALTER TABLE automation_growth_artifacts DROP COLUMN canary_evaluation_proof_json;
+    ALTER TABLE automation_occurrences DROP COLUMN external_event_digest;
+    ALTER TABLE automation_occurrences DROP COLUMN external_event_json;
+    PRAGMA user_version = 10;
+  `)
   const reopened = new GrowthAutomationStore(h.path)
   cleanup.push(() => reopened.close())
   Object.assign(h.service, { growthStore: reopened })
-  expect(h.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 })
+  expect(h.db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
   expect(() => h.service.inspectWorkflowCanary(inspect)).toThrow(/evidence/)
   expect(() => h.service.promoteWorkflowAutomation(request)).toThrow(/evidence/)
   expect(h.activate).not.toHaveBeenCalled()

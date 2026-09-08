@@ -1210,64 +1210,62 @@ describe('assistant evolution settlement validation', () => {
     expect(restarted.service.listRules(agent(), 'active')).toEqual([])
   })
 
-  test('durably conflicts every immutable snapshot-field mismatch during reconciliation without applying a rule', async () => {
-    const tamperCases: Array<[
-      string,
-      (snapshot: ApprovalProposalSnapshot) => ApprovalProposalSnapshot,
-    ]> = [
-      ['proposalId', snapshot => ({ ...snapshot, proposalId: `${snapshot.proposalId}-forged` })],
-      ['requester', snapshot => ({ ...snapshot, requester: 'agent:attacker' })],
-      ['principal', snapshot => ({ ...snapshot, principal: 'owner:attacker' })],
-      ['action', snapshot => ({ ...snapshot, action: 'evolution.retire' })],
-      ['resource kind', snapshot => ({
-        ...snapshot,
-        resource: { ...snapshot.resource, kind: 'memory' },
-      })],
-      ['resource id', snapshot => ({
-        ...snapshot,
-        resource: { ...snapshot.resource, id: 'rule:forged' },
-      })],
-      ['summary', snapshot => ({ ...snapshot, summary: 'Retire unrelated guidance' })],
-      ['diffHash', snapshot => ({ ...snapshot, diffHash: '0'.repeat(64) })],
-      ['expiresAt', snapshot => ({ ...snapshot, expiresAt: snapshot.expiresAt + 1 })],
-      ['version', snapshot => ({ ...snapshot, version: snapshot.version + 1 })],
-      ['decidedBy', snapshot => ({ ...snapshot, decidedBy: 'owner:attacker' })],
-    ]
+  const tamperCases: Array<[
+    string,
+    (snapshot: ApprovalProposalSnapshot) => ApprovalProposalSnapshot,
+  ]> = [
+    ['proposalId', snapshot => ({ ...snapshot, proposalId: `${snapshot.proposalId}-forged` })],
+    ['requester', snapshot => ({ ...snapshot, requester: 'agent:attacker' })],
+    ['principal', snapshot => ({ ...snapshot, principal: 'owner:attacker' })],
+    ['action', snapshot => ({ ...snapshot, action: 'evolution.retire' })],
+    ['resource kind', snapshot => ({
+      ...snapshot,
+      resource: { ...snapshot.resource, kind: 'memory' },
+    })],
+    ['resource id', snapshot => ({
+      ...snapshot,
+      resource: { ...snapshot.resource, id: 'rule:forged' },
+    })],
+    ['summary', snapshot => ({ ...snapshot, summary: 'Retire unrelated guidance' })],
+    ['diffHash', snapshot => ({ ...snapshot, diffHash: '0'.repeat(64) })],
+    ['expiresAt', snapshot => ({ ...snapshot, expiresAt: snapshot.expiresAt + 1 })],
+    ['version', snapshot => ({ ...snapshot, version: snapshot.version + 1 })],
+    ['decidedBy', snapshot => ({ ...snapshot, decidedBy: 'owner:attacker' })],
+  ]
 
-    for (const [field, tamper] of tamperCases) {
-      const fixture = await openHarness()
-      const target = agent()
-      const situation = `tamper-${field.replaceAll(' ', '-')}`
-      await seedCandidate(fixture, situation)
-      const request = { mutation: adoptMutation(situation), principal: OWNER }
-      const proposed = fixture.service.propose(target, request)
-      fixture.policy.decideProposal({
-        proposalId: proposed.policyProposalId,
-        principal: OWNER,
-        expectedVersion: 1,
-        decision: 'approved',
-        reason: 'owner approved the exact guidance',
-      })
-      const originalGetProposal = fixture.policy.getProposal.bind(fixture.policy)
-      const getProposal = vi.spyOn(fixture.policy, 'getProposal').mockImplementation((proposalId) => {
-        const snapshot = originalGetProposal(proposalId)
-        return snapshot === undefined ? undefined : tamper(snapshot)
-      })
+  test.each(tamperCases)('durably conflicts immutable %s mismatch during reconciliation without applying a rule', async (field, tamper) => {
+    const fixture = await openHarness()
+    const target = agent()
+    const situation = `tamper-${field.replaceAll(' ', '-')}`
+    await seedCandidate(fixture, situation)
+    const request = { mutation: adoptMutation(situation), principal: OWNER }
+    const proposed = fixture.service.propose(target, request)
+    fixture.policy.decideProposal({
+      proposalId: proposed.policyProposalId,
+      principal: OWNER,
+      expectedVersion: 1,
+      decision: 'approved',
+      reason: 'owner approved the exact guidance',
+    })
+    const originalGetProposal = fixture.policy.getProposal.bind(fixture.policy)
+    const getProposal = vi.spyOn(fixture.policy, 'getProposal').mockImplementation((proposalId) => {
+      const snapshot = originalGetProposal(proposalId)
+      return snapshot === undefined ? undefined : tamper(snapshot)
+    })
 
-      const settled = fixture.service.reconcileProposals()
+    const settled = fixture.service.reconcileProposals()
 
-      expect(settled, field).toHaveLength(1)
-      expect(settled[0], field).toMatchObject({ status: 'conflicted', version: 2, rule: undefined })
-      expect(fixture.service.listRules(target, 'active'), field).toEqual([])
-      getProposal.mockRestore()
-      await closeHarness(fixture)
+    expect(settled, field).toHaveLength(1)
+    expect(settled[0], field).toMatchObject({ status: 'conflicted', version: 2, rule: undefined })
+    expect(fixture.service.listRules(target, 'active'), field).toEqual([])
+    getProposal.mockRestore()
+    await closeHarness(fixture)
 
-      const restarted = await openHarness({ root: fixture.root })
-      const replay = restarted.service.propose(agent(), request)
-      expect(replay, field).toMatchObject({ status: 'conflicted', version: 2, replayed: true, rule: undefined })
-      expect(restarted.service.listRules(agent(), 'active'), field).toEqual([])
-      expect(restarted.service.reconcileProposals(), field).toEqual([])
-      await closeHarness(restarted)
-    }
+    const restarted = await openHarness({ root: fixture.root })
+    const replay = restarted.service.propose(agent(), request)
+    expect(replay, field).toMatchObject({ status: 'conflicted', version: 2, replayed: true, rule: undefined })
+    expect(restarted.service.listRules(agent(), 'active'), field).toEqual([])
+    expect(restarted.service.reconcileProposals(), field).toEqual([])
+    await closeHarness(restarted)
   })
 })

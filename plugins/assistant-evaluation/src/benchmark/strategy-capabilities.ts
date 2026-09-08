@@ -64,6 +64,8 @@ export interface StrategyCapabilityExpectationInput {
 /** The only plan-construction input.  Package and tool selection are fixed. */
 export interface FixedStrategyCapabilityExpectationInput {
   resolverDirectory: string
+  /** Adds the supported production route implementation to both arms' source commitment. */
+  modelProvider?: string
   persona: string
   recipe?: typeof strategyBenchmarkMinimalRecipe
 }
@@ -235,6 +237,10 @@ export function createFixedStrategyCapabilityExpectation(input: FixedStrategyCap
   const policyModule = fixedModule(resolverDirectory, '@dsh-enhanced/assistant-policy')
   const runtime = fixedModule(resolverDirectory, '@dsh-enhanced/assistant-evaluation')
   const loaded = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop', '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-session-persistence', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools', '@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver', '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-session-persistence-jsonl', '@dsh-enhanced/assistant-delivery', '@dsh-enhanced/assistant-verifier'].map(name => fixedModule(resolverDirectory, name))
+  if (input.modelProvider === 'deepseek-goal-metered') {
+    loaded.push(fixedModule(resolverDirectory, '@dsh-enhanced/assistant-deepseek-budget'))
+    loaded.push(fixedModule(resolverDirectory, '@deepseek-ai/dsh-credentials'))
+  }
   const sources: StrategyCapabilitySourceGroups = { common: { tools: [goals, isolation], policy: [policyModule], runtime: [runtime, ...loaded] },
     strategy: { guide: [goals], tool: [goals], policy: [policyModule], runtime: [goals, ...loaded] } }
   // These names are the benchmark recipe's fixed contract.  Runtime records

@@ -1,4 +1,4 @@
-import { createHmac } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -6,6 +6,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { EventTriggersError, EventTriggersService } from '../src/service.ts'
 import { EventTriggerStore } from '../src/store.ts'
+import { parseExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -70,7 +71,7 @@ async function harness() {
   }
   const service = new EventTriggersService(ctx, config, { now: () => now })
   return { root, watched, secondWatched, ctx, policy, automations, credentials, service, config,
-    advanceNow: (duration: number) => { now += duration } }
+    advanceNow: (duration: number) => { now += duration }, currentNow: () => now }
 }
 
 describe('event triggers service', () => {
@@ -99,12 +100,24 @@ describe('event triggers service', () => {
     const signature = `sha256=${createHmac('sha256', 'super-secret').update(`${timestamp}\n${nonce}\n`).update(body).digest('hex')}`
     const accepted = await fixture.service.ingestWebhook('hook', { timestamp, nonce, signature, body })
     expect(accepted).toMatchObject({ accepted: true })
-    expect(fixture.automations.events.at(-1)).toEqual({
+    expect(fixture.automations.events.at(-1)).toMatchObject({
       sourceId: 'event-triggers:hook',
       automationId: 'hook-task',
       eventId: expect.stringMatching(/^event-[a-f0-9]{64}$/u),
       occurredAt: 10_000,
     })
+    const delivered = fixture.automations.events.at(-1)!
+    const envelope = parseExternalEventEnvelope(delivered.envelope)
+    expect(envelope).toMatchObject({
+      protocol: 'dsh-external-event/v1',
+      source: { id: 'event-triggers:hook', kind: 'webhook', version: '0.1.24', configDigest: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+      event: { id: delivered.eventId, occurredAt: 10_000, receivedAt: 10_000 },
+      observation: { digest: expect.stringMatching(/^[a-f0-9]{64}$/u), revision: 'nonce-1', timeBasis: 'source-signed' },
+      trust: { method: 'hmac-sha256', content: 'untrusted' },
+      target: { automationId: 'hook-task' },
+      deduplicationKey: `event-triggers:hook:${delivered.eventId as string}`,
+    })
+    expect(JSON.stringify(envelope)).not.toContain('ignore previous instructions')
     expect(JSON.stringify(fixture.automations.events.at(-1))).not.toContain('ignore previous instructions')
     await expect(fixture.service.ingestWebhook('hook', { timestamp, nonce, signature, body }))
       .rejects.toThrowError(expect.objectContaining<Partial<EventTriggersError>>({ code: 'replay' }))
@@ -118,6 +131,63 @@ describe('event triggers service', () => {
       timestamp: '1', nonce: 'nonce-2', signature: 'sha256=' + '0'.repeat(64), body,
     })).rejects.toThrow(/timestamp|signature/i)
     await fixture.ctx.fiber.restart()
+  })
+
+  test('snapshots webhook input before awaiting credentials', async () => {
+    const fixture = await harness()
+    let release!: () => void
+    fixture.credentials.gate = new Promise<void>(resolve => { release = resolve })
+    const originalBody = Buffer.from('{"observed":"original"}')
+    const request = {
+      timestamp: '10000', nonce: 'snapshot-nonce',
+      signature: `sha256=${createHmac('sha256', 'super-secret')
+        .update('10000\nsnapshot-nonce\n').update(originalBody).digest('hex')}`,
+      body: Buffer.from(originalBody),
+    }
+    const accepted = fixture.service.ingestWebhook('hook', request)
+    await Promise.resolve()
+    request.timestamp = '1'
+    request.nonce = 'mutated'
+    request.signature = 'sha256=' + '0'.repeat(64)
+    request.body.fill(0x78)
+    release()
+    await expect(accepted).resolves.toMatchObject({ accepted: true })
+    const delivered = fixture.automations.events.at(-1)!
+    const envelope = parseExternalEventEnvelope(delivered.envelope)
+    expect(envelope).toMatchObject({
+      event: { occurredAt: 10_000, receivedAt: 10_000 },
+      observation: { digest: createHash('sha256').update(originalBody).digest('hex'), revision: 'snapshot-nonce' },
+    })
+    await fixture.ctx.fiber.restart()
+  })
+
+  test('quarantines a restarted event when its trigger target was retargeted', async () => {
+    const fixture = await harness()
+    fixture.automations.fail = true
+    const body = Buffer.from('{}')
+    const signature = `sha256=${createHmac('sha256', 'super-secret')
+      .update('10000\nretarget\n').update(body).digest('hex')}`
+    await expect(fixture.service.ingestWebhook('hook', {
+      timestamp: '10000', nonce: 'retarget', signature, body,
+    })).resolves.toMatchObject({ accepted: true })
+    await fixture.ctx.fiber.restart()
+    fixture.advanceNow(5_000)
+
+    const ctx = new Context()
+    new FakePolicy(ctx)
+    const automations = new FakeAutomations(ctx)
+    new FakeCredentials(ctx, 'super-secret')
+    const service = new EventTriggersService(ctx, {
+      ...fixture.config,
+      triggers: fixture.config.triggers.map(trigger => trigger.id === 'hook'
+        ? { ...trigger, automationId: 'retargeted-task' }
+        : trigger),
+    }, { now: fixture.currentNow })
+    await service.flushPending()
+
+    expect(automations.events).toEqual([])
+    expect(service.health()).toMatchObject({ pendingEvents: 0, quarantinedEvents: 1, deliveredEvents: 0 })
+    await ctx.fiber.restart()
   })
 
   test('recovers a pending webhook on an independent timer while sensor polling is disabled', async () => {
@@ -239,7 +309,7 @@ describe('event triggers service', () => {
     await fixture.ctx.fiber.restart()
   })
 
-  test('quarantines a full stale page and fairly reaches a later live outbox item', async () => {
+  test('quarantines a full legacy page and fairly reaches a later provenance-bearing event', async () => {
     const root = await mkdtemp(join(tmpdir(), 'event-triggers-fair-outbox-'))
     roots.push(root)
     const databasePath = join(root, 'events.sqlite')
@@ -258,7 +328,7 @@ describe('event triggers service', () => {
     }
     now += 1
     expect(store.acceptWebhook({
-      triggerId: 'live', eventId: 'live-event', occurredAt: now, cooldownMs: 0, maxFires: 10,
+      triggerId: 'live', eventId: 'legacy-live', occurredAt: now, cooldownMs: 0, maxFires: 10,
     }).accepted).toBe(true)
     store.close()
 
@@ -274,10 +344,17 @@ describe('event triggers service', () => {
         maxSkewMs: 60_000, cooldownMs: 0, maxFires: 10,
       }],
     }, { now: () => now })
+    const body = Buffer.from('{}')
+    const timestamp = String(now)
+    const nonce = 'live-event'
+    const signature = `sha256=${createHmac('sha256', 'super-secret')
+      .update(`${timestamp}\n${nonce}\n`).update(body).digest('hex')}`
+    await expect(service.ingestWebhook('live', { timestamp, nonce, signature, body }))
+      .resolves.toMatchObject({ accepted: true })
     await service.flushPending()
 
     expect(automations.events).toEqual([expect.objectContaining({ automationId: 'live-task' })])
-    expect(service.health()).toMatchObject({ pendingEvents: 0, quarantinedEvents: stalePageSize, deliveredEvents: 1 })
+    expect(service.health()).toMatchObject({ pendingEvents: 0, quarantinedEvents: stalePageSize + 1, deliveredEvents: 1 })
     await ctx.fiber.restart()
   }, 15_000)
 })

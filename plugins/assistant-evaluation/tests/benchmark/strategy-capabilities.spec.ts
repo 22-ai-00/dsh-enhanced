@@ -40,6 +40,19 @@ describe('strategy capability attestation', () => {
     expect(expected().capabilities.strategy.tool).toMatch(/^[a-f0-9]{64}$/)
   })
 
+  test('commits the production DeepSeek adapter and credentials sources when its route is selected', () => {
+    const ordinary = expected()
+    const deepseek = createFixedStrategyCapabilityExpectation({ resolverDirectory: root, persona: 'benchmark persona', modelProvider: 'deepseek-goal-metered' })
+    for (const group of ['common.runtime', 'strategy.runtime'] as const) {
+      const modules = deepseek.sourceIdentity[group]
+      expect(modules.find(item => item.packageName === '@dsh-enhanced/assistant-deepseek-budget')?.files.map(item => item.path)).toContain('lib/adapter.js')
+      expect(modules.some(item => item.packageName === '@deepseek-ai/dsh-credentials')).toBe(true)
+      expect(ordinary.sourceIdentity[group].some(item => item.packageName === '@dsh-enhanced/assistant-deepseek-budget')).toBe(false)
+    }
+    expect(deepseek.capabilities.common.runtime).not.toBe(ordinary.capabilities.common.runtime)
+    expect(deepseek.capabilities.common.tools).toBe(ordinary.capabilities.common.tools)
+  })
+
   test('rejects a copied plan hash when the mounted tool or Policy probe drifts', () => {
     const expectation = expected()
     const definitions = new Map<string, StrategyCapabilityToolDefinition>(parentTools.map(value => [value.name, value]))

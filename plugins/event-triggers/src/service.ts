@@ -1,6 +1,12 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
+import {
+  canonicalExternalEventEnvelope,
+  externalEventDigest,
+  parseExternalEventEnvelope,
+  type ExternalEventEnvelope,
+} from '@dsh-enhanced/assistant-automations/external-event'
 import type { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import type { CredentialsKeychainService } from '@dsh-enhanced/credentials-keychain'
 import {
@@ -22,6 +28,7 @@ import {
   type SensorObservation,
 } from './sensors.js'
 import { EventTriggerStore } from './store.js'
+import { version } from './version.js'
 
 export type EventTriggersErrorCode =
   | 'cooldown'
@@ -53,6 +60,13 @@ interface PendingObservation {
   promise: Promise<SensorObservation>
   operations: Set<Promise<unknown>>
   wrapperSettled: boolean
+}
+
+function stableJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
+  const object = value as Record<string, unknown>
+  return `{${Object.keys(object).sort().map(key => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(',')}}`
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -189,6 +203,10 @@ export class EventTriggersService extends Service {
       triggerId: trigger.id, ...observation, occurredAt, fireWhen: trigger.fireWhen,
       debounceMs: trigger.debounceMs, cooldownMs: trigger.cooldownMs,
       maxFires: trigger.maxFires, ...(trigger.ttlMs === undefined ? {} : { ttlMs: trigger.ttlMs }),
+      envelope: (eventId, revision) => this.envelope({
+        trigger, eventId, occurredAt, receivedAt: occurredAt, fingerprint: observation.fingerprint,
+        revision, timeBasis: 'observed', method: trigger.kind === 'file' ? 'local-observation' : 'https-observation',
+      }),
     })
     this.store.markTriggerSuccess(trigger.id, occurredAt)
   }
@@ -286,13 +304,28 @@ export class EventTriggersService extends Service {
           this.store.quarantine(item.id, 'trigger is no longer configured or enabled')
           continue
         }
+        if (item.envelope === undefined) {
+          this.store.quarantine(item.id, 'legacy event has no provenance; operator must verify its historical target')
+          continue
+        }
         this.store.markAttempt(item.id)
         try {
+          const envelope = parseExternalEventEnvelope(JSON.parse(item.envelope.canonical))
+          if (externalEventDigest(envelope) !== item.envelope.digest
+            || envelope.source.id !== `event-triggers:${trigger.id}`
+            || envelope.source.version !== version
+            || envelope.source.configDigest !== this.triggerConfigDigest(trigger)
+            || envelope.target.automationId !== trigger.automationId
+            || envelope.event.id !== item.eventId) {
+            this.store.quarantine(item.id, 'event provenance no longer matches the configured trigger')
+            continue
+          }
           this.automations.ingestExternal({
             sourceId: `event-triggers:${trigger.id}`,
             automationId: trigger.automationId,
             eventId: item.eventId,
             occurredAt: item.occurredAt,
+            envelope,
           })
           this.store.markDelivered(item.id)
         } catch (error) {
@@ -311,7 +344,16 @@ export class EventTriggersService extends Service {
     body: Buffer
   }): Promise<{ accepted: true; eventId: string }> {
     this.assertActive()
-    return this.track(Promise.resolve().then(() => this.performIngestWebhook(triggerId, input)))
+    if (!Buffer.isBuffer(input.body) || input.body.byteLength > this.config.maxBodyBytes) {
+      throw new Error('event-triggers: webhook body exceeds limit')
+    }
+    const snapshot = Object.freeze({
+      timestamp: input.timestamp,
+      nonce: input.nonce,
+      signature: input.signature,
+      body: Buffer.from(input.body),
+    })
+    return this.track(Promise.resolve().then(() => this.performIngestWebhook(triggerId, snapshot)))
   }
 
   private async performIngestWebhook(triggerId: string, input: {
@@ -322,7 +364,6 @@ export class EventTriggersService extends Service {
   }): Promise<{ accepted: true; eventId: string }> {
     const trigger = this.triggers.get(triggerId)
     if (trigger?.kind !== 'webhook' || !trigger.enabled) throw new EventTriggersError('not-found', 'webhook trigger was not found')
-    if (input.body.byteLength > this.config.maxBodyBytes) throw new Error('event-triggers: webhook body exceeds limit')
     const receivedAt = this.now()
     const timestamp = Number(input.timestamp)
     if (!Number.isSafeInteger(timestamp) || Math.abs(receivedAt - timestamp) > trigger.maxSkewMs) {
@@ -343,6 +384,10 @@ export class EventTriggersService extends Service {
       triggerId: trigger.id, eventId: input.nonce, occurredAt: timestamp, acceptedAt: receivedAt,
       cooldownMs: trigger.cooldownMs, maxFires: trigger.maxFires,
       ...(trigger.ttlMs === undefined ? {} : { ttlMs: trigger.ttlMs }),
+      envelope: (eventId, revision) => this.envelope({
+        trigger, eventId, occurredAt: timestamp, receivedAt, fingerprint: createHash('sha256').update(input.body).digest('hex'),
+        revision: revision.slice('webhook:'.length), timeBasis: 'source-signed', method: 'hmac-sha256',
+      }),
     })
     if (!accepted.accepted) {
       throw new EventTriggersError(accepted.reason, `event-triggers: webhook event was rejected by ${accepted.reason}`)
@@ -369,6 +414,43 @@ export class EventTriggersService extends Service {
         throw new EventTriggersError('invalid-signature', 'event-triggers: webhook signature is invalid')
       }
     })
+  }
+
+  private triggerConfigDigest(trigger: NormalizedTrigger): string {
+    return createHash('sha256').update(stableJson(trigger)).digest('hex')
+  }
+
+  private envelope(input: {
+    trigger: NormalizedTrigger
+    eventId: string
+    occurredAt: number
+    receivedAt: number
+    fingerprint: string
+    revision: string
+    timeBasis: 'observed' | 'source-signed'
+    method: 'local-observation' | 'https-observation' | 'hmac-sha256'
+  }): Readonly<{ canonical: string; digest: string }> {
+    const observationDigest = /^[a-f0-9]{64}$/u.test(input.fingerprint)
+      ? input.fingerprint
+      : /^sha256:[a-f0-9]{64}$/u.test(input.fingerprint)
+        ? input.fingerprint.slice('sha256:'.length)
+        : createHash('sha256').update(input.fingerprint).digest('hex')
+    const envelope: ExternalEventEnvelope = {
+      protocol: 'dsh-external-event/v1',
+      source: {
+        id: `event-triggers:${input.trigger.id}`,
+        kind: input.trigger.kind,
+        version,
+        configDigest: this.triggerConfigDigest(input.trigger),
+      },
+      event: { id: input.eventId, occurredAt: input.occurredAt, receivedAt: input.receivedAt },
+      observation: { digest: observationDigest, revision: input.revision, timeBasis: input.timeBasis },
+      trust: { method: input.method, content: 'untrusted' },
+      target: { automationId: input.trigger.automationId },
+      deduplicationKey: `event-triggers:${input.trigger.id}:${input.eventId}`,
+    }
+    const parsed = parseExternalEventEnvelope(envelope)
+    return Object.freeze({ canonical: canonicalExternalEventEnvelope(parsed), digest: externalEventDigest(parsed) })
   }
 
   private assertActive(): void {

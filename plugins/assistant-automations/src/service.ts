@@ -95,6 +95,7 @@ import type {
   SystemOwnedAutomationPauseReceipt,
   HostAutomationExecutor,
 } from './types.js'
+import { parseExternalEventEnvelope } from './external-event.js'
 import { isHostAutomationDefinition } from './types.js'
 
 export interface AutomationProposalDefaults {
@@ -1712,8 +1713,14 @@ export class AssistantAutomationsService extends Service implements
     automationId: string
     eventId: string
     occurredAt: number
+    envelope?: unknown
   }): AutomationOccurrence {
     this.assertActive()
+    const envelope = input.envelope === undefined ? undefined : parseExternalEventEnvelope(input.envelope)
+    if (envelope !== undefined && (envelope.source.id !== input.sourceId || envelope.event.id !== input.eventId
+      || envelope.event.occurredAt !== input.occurredAt || envelope.target.automationId !== input.automationId)) {
+      throw new AssistantAutomationsError('invalid-input', 'external event envelope does not bind this ingest input')
+    }
     const automation = this.store.get(input.automationId)
     const decision = this.policy.authorize({
       subject: {
@@ -1730,6 +1737,7 @@ export class AssistantAutomationsService extends Service implements
       automationId: input.automationId,
       externalEventId: `${input.sourceId}:${input.eventId}`,
       occurredAt: input.occurredAt,
+      ...(envelope === undefined ? {} : { envelope }),
     })
   }
 

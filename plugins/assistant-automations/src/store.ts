@@ -9,6 +9,7 @@ import {
   type AutomationSchedule,
 } from './schedule.js'
 import { AutomationDatabaseError, openAutomationDatabase } from './sqlite.js'
+import { canonicalExternalEventEnvelope, externalEventDigest, parseExternalEventEnvelope, type ExternalEventEnvelope } from './external-event.js'
 import { isHostAutomationDefinition, legacyAutomationExecutionDiagnostic } from './types.js'
 import type { AcceptanceContract, AcceptedExecution } from './acceptance.js'
 import type {
@@ -90,6 +91,8 @@ interface OccurrenceRow {
   status: OccurrenceStatus
   reason: string | null
   dry_run: number
+  external_event_json: string | null
+  external_event_digest: string | null
   created_at: number
   updated_at: number
 }
@@ -815,6 +818,22 @@ function parseEvidence(row: RunRow): AutomationOutcomeEvidence | undefined {
 }
 
 function occurrence(row: OccurrenceRow): AutomationOccurrence {
+  let externalEvent: ExternalEventEnvelope | undefined
+  if ((row.external_event_json === null) !== (row.external_event_digest === null)) {
+    throw new AutomationStoreError('invalid-state', 'external event provenance columns must be paired')
+  }
+  if (row.external_event_json !== null && row.external_event_digest !== null) {
+    try { externalEvent = parseExternalEventEnvelope(JSON.parse(row.external_event_json)) } catch {
+      throw new AutomationStoreError('invalid-state', 'external event provenance is invalid')
+    }
+    if (externalEventDigest(externalEvent) !== row.external_event_digest) {
+      throw new AutomationStoreError('invalid-state', 'external event provenance digest does not match')
+    }
+    if (row.trigger_kind !== 'external' || externalEvent.deduplicationKey !== row.trigger_key
+      || externalEvent.target.automationId !== row.automation_id || externalEvent.event.occurredAt !== row.scheduled_at) {
+      throw new AutomationStoreError('invalid-state', 'external event provenance does not bind its occurrence')
+    }
+  }
   return Object.freeze({
     id: row.id,
     automationId: row.automation_id,
@@ -826,6 +845,7 @@ function occurrence(row: OccurrenceRow): AutomationOccurrence {
     dryRun: row.dry_run === 1,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    ...(externalEvent === undefined ? {} : { externalEvent, externalEventDigest: row.external_event_digest! }),
   })
 }
 
@@ -2271,11 +2291,17 @@ export class AutomationStore {
     })
   }
 
-  ingestExternal(input: { automationId: string; externalEventId: string; occurredAt: number }): AutomationOccurrence {
+  ingestExternal(input: { automationId: string; externalEventId: string; occurredAt: number; envelope?: unknown }): AutomationOccurrence {
     const eventId = text(input.externalEventId, 'externalEventId', 1_000)
-    if (!Number.isSafeInteger(input.occurredAt)) {
-      throw new AutomationStoreError('invalid-definition', 'occurredAt must be a safe integer')
+    if (!Number.isSafeInteger(input.occurredAt) || input.occurredAt < 0) {
+      throw new AutomationStoreError('invalid-definition', 'occurredAt must be a non-negative safe integer')
     }
+    const envelope = input.envelope === undefined ? undefined : parseExternalEventEnvelope(input.envelope)
+    if (envelope !== undefined && (envelope.deduplicationKey !== eventId
+      || envelope.target.automationId !== input.automationId || envelope.event.occurredAt !== input.occurredAt)) {
+      throw new AutomationStoreError('invalid-definition', 'external event envelope does not bind this ingest input')
+    }
+    const envelopeDigest = envelope === undefined ? undefined : externalEventDigest(envelope)
     return this.transaction(() => {
       const automation = this.get(input.automationId)
       if (automation === undefined) throw new AutomationStoreError('not-found', 'automation was not found')
@@ -2287,8 +2313,10 @@ export class AutomationStore {
         scheduledAt: input.occurredAt,
         status: 'pending',
         dryRun: false,
+        ...(envelope === undefined ? {} : { externalEvent: envelope, externalEventDigest: envelopeDigest! }),
       })
-      if (!inserted.created && inserted.value.scheduledAt !== input.occurredAt) {
+      if (!inserted.created && (inserted.value.scheduledAt !== input.occurredAt
+        || inserted.value.externalEventDigest !== envelopeDigest)) {
         throw new AutomationStoreError('idempotency-conflict', 'external event id was reused with another timestamp')
       }
       return inserted.value
@@ -4018,6 +4046,8 @@ export class AutomationStore {
     status: 'pending' | 'skipped'
     reason?: string
     dryRun: boolean
+    externalEvent?: ExternalEventEnvelope
+    externalEventDigest?: string
   }): { value: AutomationOccurrence; created: boolean } {
     const id = stableOccurrenceId(input.automationId, input.triggerKind, input.triggerKey)
     const existing = this.database.prepare('SELECT * FROM automation_occurrences WHERE id = ?').get(id) as OccurrenceRow | undefined
@@ -4025,11 +4055,14 @@ export class AutomationStore {
     const now = this.now()
     this.database.prepare(`
       INSERT INTO automation_occurrences(
-        id, automation_id, trigger_kind, trigger_key, scheduled_at, status, reason, dry_run, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        id, automation_id, trigger_kind, trigger_key, scheduled_at, status, reason, dry_run, external_event_json, external_event_digest, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id, input.automationId, input.triggerKind, input.triggerKey, input.scheduledAt,
-      input.status, input.reason ?? null, input.dryRun ? 1 : 0, now, now,
+      input.status, input.reason ?? null, input.dryRun ? 1 : 0,
+      input.externalEvent === undefined ? null : canonicalExternalEventEnvelope(input.externalEvent),
+      input.externalEventDigest ?? null,
+      now, now,
     )
     if (input.status === 'pending') {
       this.database.prepare(`

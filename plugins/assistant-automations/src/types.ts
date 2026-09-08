@@ -120,6 +120,9 @@ export interface AutomationOccurrence {
   dryRun: boolean
   createdAt: number
   updatedAt: number
+  /** Host-observed, untrusted event provenance. It grants no task authority. */
+  externalEvent?: import('./external-event.js').ExternalEventEnvelope
+  externalEventDigest?: string
 }
 
 export type AutomationTaskStatus =

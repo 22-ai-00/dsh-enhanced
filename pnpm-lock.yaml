@@ -818,6 +818,9 @@ importers:
       '@dsh-enhanced/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
+      '@dsh-enhanced/assistant-deepseek-budget':
+        specifier: workspace:*
+        version: link:../assistant-deepseek-budget
       '@dsh-enhanced/assistant-delivery':
         specifier: workspace:*
         version: link:../assistant-delivery

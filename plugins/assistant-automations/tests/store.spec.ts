@@ -48,7 +48,7 @@ describe('automation SQLite store', () => {
     expect((await stat(join(fixture.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(fixture.path)).mode & 0o777).toBe(0o600)
     const database = new DatabaseSync(fixture.path, { readOnly: true })
-    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 })
+    expect(database.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
     expect(database.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all())
       .toEqual(expect.arrayContaining([
@@ -102,13 +102,19 @@ describe('automation SQLite store', () => {
         ('incident-resolved', 'auto-resolved', '${'b'.repeat(64)}', 'terminal', 'resolved', 'configuration',
           'host-execution', 'catalog-mismatch', 'none', 'after-intervention', 'owner-route',
           'enqueued', 'legacy-outbox-resolved', 'run-resolved', 1000, 1200, 1200, 5);
+      CREATE TABLE automation_occurrences (
+        id TEXT PRIMARY KEY, automation_id TEXT NOT NULL, trigger_kind TEXT NOT NULL,
+        trigger_key TEXT NOT NULL, scheduled_at INTEGER NOT NULL, status TEXT NOT NULL,
+        reason TEXT, dry_run INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE (automation_id, trigger_kind, trigger_key)
+      ) STRICT;
       PRAGMA user_version = 8;
     `)
     legacy.close()
     await chmod(path, 0o600)
 
     const migrated = openAutomationDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
     expect(migrated.prepare(`
       SELECT id, lifecycle_generation, presentation_revision, alert_status, alert_ref
       FROM automation_incidents ORDER BY id
@@ -127,7 +133,10 @@ describe('automation SQLite store', () => {
     const path = join(root, 'legacy.sqlite')
     const legacy = new DatabaseSync(path)
     legacy.exec(`
-      CREATE TABLE automation_runs (id TEXT PRIMARY KEY) STRICT;
+      CREATE TABLE automation_runs (
+        id TEXT PRIMARY KEY, occurrence_id TEXT, evidence_status TEXT,
+        evidence_json TEXT, delivery_ref TEXT, delivery_status TEXT
+      ) STRICT;
       CREATE TABLE automation_attempts (id TEXT PRIMARY KEY) STRICT;
       ${version === 5 ? `
       CREATE TABLE automation_evaluation_outbox (
@@ -144,13 +153,19 @@ describe('automation SQLite store', () => {
         'legacy-evaluation', 'legacy-run', 'terminal', 'pending', '{}', 1000, 1000
       );
       ` : ''}
+      CREATE TABLE automation_occurrences (
+        id TEXT PRIMARY KEY, automation_id TEXT NOT NULL, trigger_kind TEXT NOT NULL,
+        trigger_key TEXT NOT NULL, scheduled_at INTEGER NOT NULL, status TEXT NOT NULL,
+        reason TEXT, dry_run INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE (automation_id, trigger_kind, trigger_key)
+      ) STRICT;
       PRAGMA user_version = ${version};
     `)
     legacy.close()
     await chmod(path, 0o600)
 
     const migrated = openAutomationDatabase(path)
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
     const rows = migrated.prepare(`
       SELECT status, attempt_count, last_error_code FROM automation_evaluation_outbox ORDER BY id
     `).all()
@@ -205,7 +220,7 @@ describe('automation SQLite store', () => {
         delivery_status: 'pending', delivery_ref: null, failure_class: 'unknown',
       },
     ])
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
     migrated.close()
   })
 
@@ -229,6 +244,12 @@ describe('automation SQLite store', () => {
         'legacy-open', '${'a'.repeat(64)}', 'open', 'configuration', 'preflight',
         'legacy-config', 100, 100, 7
       );
+      CREATE TABLE automation_occurrences (
+        id TEXT PRIMARY KEY, automation_id TEXT NOT NULL, trigger_kind TEXT NOT NULL,
+        trigger_key TEXT NOT NULL, scheduled_at INTEGER NOT NULL, status TEXT NOT NULL,
+        reason TEXT, dry_run INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE (automation_id, trigger_kind, trigger_key)
+      ) STRICT;
       PRAGMA user_version = 7;
     `)
     legacy.close()
@@ -247,7 +268,7 @@ describe('automation SQLite store', () => {
     `).get()).toEqual({
       state: 'open', probe_token: null, probe_lease_until: null, probe_task_id: null, version: 7,
     })
-    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 14 })
+    expect(migrated.prepare('PRAGMA user_version').get()).toEqual({ user_version: 15 })
     expect(migrated.prepare(`
       SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'automation_incidents'
     `).get()).toEqual({ name: 'automation_incidents' })
