@@ -11,7 +11,7 @@ export function experimentToolNames(nativeGoalRound, goalExists = false, eventWa
   return nativeGoalRound ? ['read', 'write', 'edit', 'get_goal'] : goalExists ? [] : ['goal_create']
 }
 
-export function isEventExperimentToolAllowed(name, args, workspace) {
+export function isEventExperimentToolAllowed(name, args, workspace, opportunityProfile) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return false
   if (name === 'goal_create') return args.objective === objective && args.max_goal_rounds === 2
     && (args.start_native_rounds === undefined || args.start_native_rounds === false)
@@ -21,7 +21,8 @@ export function isEventExperimentToolAllowed(name, args, workspace) {
     && Number.isSafeInteger(args.expected_revision) && args.expected_revision >= 0
     && args.trigger_id === 'file' && Number.isSafeInteger(args.expires_at)
     && args.expires_at > Date.now() && args.expires_at <= Date.now() + 600_000
-    && Object.keys(args).every(key => ['goal_id', 'expected_revision', 'trigger_id', 'expires_at'].includes(key))
+    && args.opportunity_profile === opportunityProfile
+    && Object.keys(args).every(key => ['goal_id', 'expected_revision', 'trigger_id', 'expires_at', ...(opportunityProfile ? ['opportunity_profile'] : [])].includes(key))
   return isExperimentToolAllowed(name, args, workspace)
 }
 
@@ -129,7 +130,7 @@ export function apply(ctx) {
   const guard = createRunGuard({ provider: process.env.DSH_WEB_REAL_PROVIDER || 'codex-subscription', initialCalls, record })
   const eventWait = process.env.DSH_WEB_REAL_EVENT === '1'
   const bootstrap = process.env.DSH_WEB_REAL_BOOTSTRAP === '1'
-  const allowed = eventWait ? isEventExperimentToolAllowed : isExperimentToolAllowed
+  const allowed = eventWait ? (name, args, workspace) => isEventExperimentToolAllowed(name, args, workspace, process.env.DSH_WEB_REAL_OPPORTUNITY === '1' ? 'real-event-opportunity' : undefined) : isExperimentToolAllowed
   ctx.on('agent/request', async (_input, next) => {
     const request = await next()
     return { ...request, maxTokens: Math.min(request.maxTokens ?? 2048, bootstrap ? 512 : 2048) }

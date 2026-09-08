@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-enhanced-assistant-proactive
+      name: '@dsh-enhanced/assistant-proactive'

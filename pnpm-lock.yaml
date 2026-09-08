@@ -1192,6 +1192,40 @@ importers:
         specifier: 'catalog:'
         version: 4.1.8(@types/node@22.20.0)(vite@8.2.1(@types/node@22.20.0)(yaml@2.9.0))
 
+  plugins/assistant-proactive:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: 'catalog:'
+        version: 3.18.2
+      '@dsh-enhanced/task-acceptance-contract':
+        specifier: workspace:^
+        version: link:../../packages/task-acceptance-contract
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: 'catalog:'
+        version: 4.0.2(@deepseek-ai/cordis-plugin-include@1.0.7)(@deepseek-ai/cordis-plugin-loader@1.0.3)
+      '@deepseek-ai/dsh-agent':
+        specifier: 'catalog:'
+        version: 0.1.2-rc.1(6f833cf90b9dd3f0d529840b1aebfb48)
+      '@deepseek-ai/dsh-tools':
+        specifier: 'catalog:'
+        version: 0.1.2-rc.1(de5e1ff2d608fbe22667925341ad1dfc)
+      '@dsh-enhanced/assistant-delivery':
+        specifier: workspace:^
+        version: link:../assistant-delivery
+      '@dsh-enhanced/assistant-policy':
+        specifier: workspace:^
+        version: link:../assistant-policy
+      '@types/node':
+        specifier: 'catalog:'
+        version: 22.20.0
+      typescript:
+        specifier: 'catalog:'
+        version: 6.0.3
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.8(@types/node@22.20.0)(vite@8.2.1(@types/node@22.20.0)(yaml@2.9.0))
+
   plugins/assistant-recovery:
     dependencies:
       '@deepseek-ai/schemastery':

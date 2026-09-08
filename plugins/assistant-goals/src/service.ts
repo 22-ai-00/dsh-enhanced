@@ -212,7 +212,7 @@ export class AssistantGoalsService extends Service {
       if (!this.#active) throw new Error('assistant-goals: disposed')
       this.#eventWaitPolicy(intent)
       return this.#store.get(intent.wake.scope, intent.wake.goalId)
-    })
+    }, () => this.ctx.get('assistantProactive' as never, false) as unknown as { evaluate: (input: { waitId: string; profileId: string; scope: GoalScope; goalId: string; sessionId: string; definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string; sourceDigest: string; sourceId: string; event: { id: string; sequence: number; digest: string; occurredAt: number }; expiresAt: number }) => { disposition: 'defer' | 'consume' | 'execute'; decision: { eventSequence: number } } } | undefined)
     ctx.inject(['agents', 'goals', 'assistantDelivery', 'assistantPolicy'], runtime => {
       runtime.on('goal/changed', ({ agent, change }) => {
         try {
@@ -513,12 +513,17 @@ export class AssistantGoalsService extends Service {
     if (decision?.effect !== 'allow') throw new Error('assistant-goals: event wait policy denied')
   }
 
-  waitForEvent = async (agent: Agent | undefined, goalId: string, expectedRevision: number, triggerId: string, expiresAt: number, signal: AbortSignal) => {
+  waitForEvent = async (agent: Agent | undefined, goalId: string, expectedRevision: number, triggerId: string, expiresAt: number, signal: AbortSignal, opportunityProfile?: string) => {
     const runtime = this.#eventWait
     if (runtime === undefined || this.#wake === undefined || this.#budget === undefined) throw new Error('assistant-goals: event waits are not enabled')
     if (this.ctx.get('assistantDelivery')?.goalWakeResultVersion?.() !== 1) throw new Error('assistant-goals: event waits require goal result delivery support')
     const scope = this.#scope(agent, 'wait')
     this.#requireOwnerTurn(agent!, scope)
+    if (opportunityProfile !== undefined) {
+      const proactive = this.ctx.get('assistantProactive' as never, false) as { assertProfile?: (profileId: string) => void } | undefined
+      if (!proactive || typeof proactive.assertProfile !== 'function') throw new Error('assistant-goals: opportunity profile service is unavailable')
+      proactive.assertProfile(opportunityProfile)
+    }
     const record = this.inspect(agent, goalId)
     const budget = this.#budget.inspect(record)
     const createdAt = Date.now()
@@ -534,7 +539,7 @@ export class AssistantGoalsService extends Service {
       const identity = (value: GoalEventSourceSnapshot) => ({ ...value, highWaterSequence: 0 })
       if (acceptanceDigest(identity(latest)) !== acceptanceDigest(identity(source))) throw new Error('event source changed during checkpoint')
       const { id: _id, at: _at, expiresAt: _expiresAt, ...wake } = paused
-      const body = { wake, source, createdAt, expiresAt, runTimeoutMs: this.#wake.config.runTimeoutMs }
+      const body = { wake, source, createdAt, expiresAt, runTimeoutMs: this.#wake.config.runTimeoutMs, ...(opportunityProfile === undefined ? {} : { opportunityProfile }) }
       const intent = { id: `goal-event-wait-${acceptanceDigest(body)}`, ...body }
       this.#eventWaitPolicy(intent)
       return runtime.prepare(intent)
@@ -552,9 +557,9 @@ export class AssistantGoalsService extends Service {
     try {
       if (this.#eventWait === undefined || !execution.arguments || typeof execution.arguments !== 'object') return false
       const args = execution.arguments as Record<string, unknown>
-      if (Object.keys(args).length !== 4 || !['goal_id', 'expected_revision', 'trigger_id', 'expires_at'].every(key => Object.hasOwn(args, key))
+      if (!([4, 5].includes(Object.keys(args).length)) || !['goal_id', 'expected_revision', 'trigger_id', 'expires_at', ...(Object.hasOwn(args, 'opportunity_profile') ? ['opportunity_profile'] : [])].every(key => Object.hasOwn(args, key))
         || Object.getOwnPropertySymbols(args).length !== 0 || Object.values(Object.getOwnPropertyDescriptors(args)).some(value => !value.enumerable || !('value' in value))
-        || typeof args['trigger_id'] !== 'string' || !Number.isSafeInteger(args['expires_at'])) return false
+        || typeof args['trigger_id'] !== 'string' || !Number.isSafeInteger(args['expires_at']) || (args['opportunity_profile'] !== undefined && typeof args['opportunity_profile'] !== 'string')) return false
       this.#scope(execution.agent, 'wait', false)
       this.#eventSourcePolicy(execution.agent, this.#eventWait.snapshot(args['trigger_id']))
       return this.preauthorizeSchedule({ ...execution, arguments: { goal_id: args['goal_id'], expected_revision: args['expected_revision'], wake_at: (args['expires_at'] as number) - 1_000 } })
