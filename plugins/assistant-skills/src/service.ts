@@ -12,18 +12,20 @@ import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createDefinition, instantiate, type SkillBinding } from './definition.js'
-import { SkillStore, type SkillRunStep, type StoredSkillDefinition } from './store.js'
+import { SkillStore, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition } from './store.js'
 
-export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number }
+export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-skills.sqlite')),
   allowedTools: Schema.array(Schema.string()).default(['read', 'write', 'edit']),
+  candidateTtlMs: Schema.number().step(1).min(1000).max(604800000).default(86400000),
   maxDurationMs: Schema.number().step(1).min(1000).max(300000).default(60000),
 })
 declare module '@deepseek-ai/cordis' { interface Context { assistantSkills: AssistantSkillsService } }
 
 const output = { schema: { type: 'object' as const, additionalProperties: false, properties: { context: { type: 'string' as const, required: true } } },
   render: (_args: unknown, value: { context: string }) => [{ type: 'text' as const, text: value.context }] } as const
+type Action = 'inspect' | 'save' | 'run' | 'retire' | 'draft' | 'trial' | 'activate' | 'reject' | 'rollback'
 const resource = { kind: 'evolution' as const, id: 'verified-workflows' }
 function parse(value: string, array = false): any {
   if (typeof value !== 'string' || Buffer.byteLength(value) > 262144) throw new Error('assistant-skills: bounded JSON required')
@@ -38,6 +40,7 @@ export class AssistantSkillsService extends Service {
   readonly #store: SkillStore
   readonly #allowed: readonly string[]
   readonly #duration: number
+  readonly #candidateTtl: number
   readonly #lifecycle = new AbortController()
   readonly #providers = new Set<SkillProviderControl>()
   #active = true
@@ -45,7 +48,9 @@ export class AssistantSkillsService extends Service {
     super(ctx, 'assistantSkills')
     this.#allowed = Object.freeze([...(config.allowedTools ?? ['read', 'write', 'edit'])])
     this.#duration = config.maxDurationMs ?? 60000
+    this.#candidateTtl = config.candidateTtlMs ?? 86400000
     if (!Number.isSafeInteger(this.#duration) || this.#duration < 1000 || this.#duration > 300000
+      || !Number.isSafeInteger(this.#candidateTtl) || this.#candidateTtl < 1000 || this.#candidateTtl > 604800000
       || this.#allowed.length > 32 || this.#allowed.some(name => typeof name !== 'string' || !/^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/u.test(name))) throw new Error('assistant-skills: invalid configuration')
     this.#store = new SkillStore(config.databasePath ?? join(homedir(), '.dsh', 'assistant-skills.sqlite'))
     ctx.effect(() => () => { this.#active = false; this.#lifecycle.abort(); this.#store.close() }, 'assistant-skills.store')
@@ -60,6 +65,24 @@ export class AssistantSkillsService extends Service {
         execute: async (args, exec) => ({ context: JSON.stringify(this.inspect(exec.agent, args.run_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_retire', description: 'Retire the current saved skill version following the current authenticated owner request. Pending steps recheck retirement; past effects remain and require explicit repair.', parameters: { name: { type: 'string', required: true }, expected_version: { type: 'integer', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.retire(exec.agent, args.name, args.expected_version)) }) }))
+    })
+    ctx.inject(['tools', 'agents', 'assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
+      runtime.tools.register(defineTool({ name: 'skill_candidate', description: 'Draft a private candidate from an independently achieved Goal following the current owner request. The current active skill stays unchanged. Review the stored trace and structural delta; no performance gain is inferred.',
+        parameters: { goal_id: { type: 'string', required: true }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true }, reason: { type: 'string', required: true }, trigger: { type: 'string', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.stage(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[] }, args.parent_version, args.reason, args.trigger)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_candidates', description: 'Inspect private candidate definitions, expiry, structural differences and trial references. Pending candidates are not active native skills.', parameters: { candidate_id: { type: 'string' } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.candidates(exec.agent, args.candidate_id)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_trial', description: 'Run a pending candidate in a fresh native Goal using the ordinary tool permissions and budgets. This can have real effects. It never changes the active skill. Use one stable invocation_id. Independent Goal acceptance and a current owner request are required for later activation.',
+        parameters: { candidate_id: { type: 'string', required: true }, goal_id: { type: 'string', required: true }, inputs_json: { type: 'string' }, invocation_id: { type: 'string', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(await this.trial(exec, args.candidate_id, args.goal_id, parse(args.inputs_json ?? '{}'), args.invocation_id)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_activate', description: 'Activate a candidate following the current owner request, only after its exact sole trial call has independently achieved its fresh Goal. This is owner-approved activation, not automatic promotion or proof of improvement.',
+        parameters: { candidate_id: { type: 'string', required: true }, trial_run_id: { type: 'string', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.activate(exec.agent, args.candidate_id, args.trial_run_id)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_reject', description: 'Reject a pending candidate following the current owner request; the active skill stays unchanged.', parameters: { candidate_id: { type: 'string', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.reject(exec.agent, args.candidate_id)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_rollback', description: 'Restore the current skill’s immediate parent as a new immutable version following the current owner request. Historical runs and effects remain recorded.',
+        parameters: { name: { type: 'string', required: true }, expected_version: { type: 'integer', required: true }, target_version: { type: 'integer', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.rollback(exec.agent, args.name, args.expected_version, args.target_version)) }) }))
     })
     ctx.inject(['skills', 'agents'], runtime => {
       const registered = new WeakSet<Agent>()
@@ -94,13 +117,13 @@ export class AssistantSkillsService extends Service {
   #body(value: StoredSkillDefinition): string {
     return `# ${value.name}\n${value.description}\n\nSaved tool workflow, version ${value.version}. Source acceptance is historical; it grants no future authority. Run only in a new native Goal with its own independent acceptance conditions. Call skill_run with goal_id, name, version, inputs_json and a stable invocation_id. Do not regenerate the stored tool steps or replay an unknown invocation. Failure stops remaining steps; compensation is explicit owner-directed repair.\n\n${JSON.stringify({ name: value.name, version: value.version, inputs: value.inputs, tools: value.steps.map(step => step.toolName), source: value.source.acceptance })}`
   }
-  #scope(agent: Agent | undefined, action: 'inspect' | 'save' | 'run' | 'retire'): GoalScope {
+  #scope(agent: Agent | undefined, action: Action): GoalScope {
     if (!this.#active || !agent || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-skills: exact live agent required')
     const delivery = this.ctx.get('assistantDelivery', false) as AssistantDeliveryService | undefined
     const owner = delivery?.preferencePrincipalForAgent(agent)
     if (!owner || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-skills: authenticated owner required')
     const scope = { principalId: owner.principalId, ...owner.principalLineage, workspace: owner.scope.workspace, preset: owner.scope.preset }
-    if (action === 'save' || action === 'retire') {
+    if (['save', 'retire', 'draft', 'activate', 'reject', 'rollback'].includes(action)) {
       const current = delivery?.currentPreferenceTurn(agent)
       if (!current || acceptanceDigest({ principalId: current.principalId, ...current.principalLineage, workspace: current.scope.workspace, preset: current.scope.preset }) !== acceptanceDigest(scope)) throw new Error('assistant-skills: current owner request required')
     }
@@ -113,7 +136,7 @@ export class AssistantSkillsService extends Service {
     if (!goals) throw new Error('assistant-skills: Goals unavailable')
     return goals
   }
-  #authorize(agent: Agent | undefined, action: 'save' | 'run' | 'retire', key: unknown): void {
+  #authorize(agent: Agent | undefined, action: Exclude<Action, 'inspect'>, key: unknown): void {
     const policy = this.ctx.get('assistantPolicy', false) as AssistantPolicyService | undefined
     if (policy?.authorizeAgent(agent, action, resource, { idempotencyKey: `skill-${acceptanceDigest([action, key])}` }).effect !== 'allow') throw new Error('assistant-skills: policy authorization denied')
   }
@@ -137,15 +160,91 @@ export class AssistantSkillsService extends Service {
     const result = this.#store.retire(scope, name, expectedVersion)
     this.#changed(); return result
   }
+  stage(agent: Agent | undefined, goalId: string, options: { name: string; description: string; bindings?: readonly SkillBinding[] }, parentVersion: number, reason: string, trigger: string) {
+    const scope = this.#scope(agent, 'draft')
+    const source = this.#goals().inspectVerifiedWorkflowSource(agent, goalId)
+    if (acceptanceDigest(source.scope) !== acceptanceDigest(scope)) throw new Error('assistant-skills: source owner mismatch')
+    const definition = createDefinition(source, options, this.#allowed)
+    this.#authorize(agent, 'draft', [scope, definition, parentVersion, reason, trigger])
+    return this.#preview(scope, this.#store.stageCandidate(scope, definition, { expectedVersion: parentVersion, reason, trigger, expiresAt: Date.now() + this.#candidateTtl }))
+  }
+  #preview(scope: GoalScope, candidate: SkillCandidate) {
+    const parent = candidate.parentVersion ? this.#store.get(scope, candidate.definition.name, candidate.parentVersion) : undefined
+    const before = new Set(parent?.steps.map(step => step.toolName) ?? [])
+    const after = new Set(candidate.definition.steps.map(step => step.toolName))
+    return { ...candidate, comparison: { kind: 'structural-only', improvement: 'unmeasured',
+      toolsAdded: [...after].filter(tool => !before.has(tool)), toolsRemoved: [...before].filter(tool => !after.has(tool)),
+      inputsChanged: acceptanceDigest(parent?.inputs ?? []) !== acceptanceDigest(candidate.definition.inputs),
+      changedSteps: Array.from({ length: Math.max(parent?.steps.length ?? 0, candidate.definition.steps.length) }, (_, index) => ({ index,
+        before: parent?.steps[index] ? acceptanceDigest(parent.steps[index]) : null,
+        after: candidate.definition.steps[index] ? acceptanceDigest(candidate.definition.steps[index]) : null })).filter(step => step.before !== step.after) } }
+  }
+  candidates(agent: Agent | undefined, id?: string) {
+    const scope = this.#scope(agent, 'inspect')
+    if (!id) return this.#store.listCandidates(scope).map(candidate => this.#preview(scope, candidate))
+    const candidate = this.#store.getCandidate(scope, id)
+    return candidate ? this.#preview(scope, candidate) : null
+  }
+  #pending(scope: GoalScope, id: string): SkillCandidate {
+    const candidate = this.#store.getCandidate(scope, id)
+    if (!candidate || candidate.state !== 'pending' || candidate.expiresAt <= Date.now()) throw new Error('assistant-skills: candidate unavailable')
+    const current = this.#store.get(scope, candidate.definition.name)
+    if ((current?.version ?? 0) !== candidate.parentVersion || (current ? acceptanceDigest(current) : null) !== candidate.parentDigest) throw new Error('assistant-skills: candidate parent changed')
+    return candidate
+  }
+  async trial(exec: ToolRunContext, candidateId: string, goalId: string, inputs: Record<string, unknown>, invocationId: string) {
+    const scope = this.#scope(exec.agent, 'trial'), candidate = this.#pending(scope, candidateId)
+    return this.#run(exec, goalId, { ...candidate.definition, version: candidate.parentVersion + 1, parentVersion: candidate.parentVersion || null, retired: false, createdAt: candidate.createdAt, updatedAt: candidate.updatedAt }, inputs, invocationId, candidateId)
+  }
+  activate(agent: Agent | undefined, candidateId: string, trialRunId: string) {
+    const scope = this.#scope(agent, 'activate')
+    const candidate = this.#store.getCandidate(scope, candidateId), run = this.#store.getRun(scope, trialRunId)
+    if (!candidate || !run || run.candidateId !== candidateId || run.state !== 'succeeded' || !run.goalExecutionRunId || run.sessionId !== String(agent!.session.id)) throw new Error('assistant-skills: successful exact trial required')
+    // A lost activation response can be recovered without renewing proof or changing a later version.
+    if (candidate.state === 'activated' && candidate.trialRunId === trialRunId && candidate.acceptanceDigest) {
+      return { activated: this.#store.activateCandidate(scope, candidateId, trialRunId, candidate.acceptanceDigest), activeVersion: this.#store.get(scope, candidate.definition.name)?.version ?? null, replayed: false, improvement: 'unmeasured' }
+    }
+    this.#pending(scope, candidateId)
+    const verify = () => {
+      const proof = this.#goals().inspectVerifiedWorkflowRun(agent, run.goalId, run.goalExecutionRunId!)
+      const step = proof.steps[0], args = step?.arguments as Record<string, unknown> | undefined
+      if (acceptanceDigest(proof.scope) !== acceptanceDigest(scope) || proof.goal.sessionId !== run.sessionId || proof.runId !== run.goalExecutionRunId
+        || proof.steps.length !== 1 || step?.toolName !== 'skill_trial' || !args || args.candidate_id !== candidateId || args.goal_id !== run.goalId || args.invocation_id !== run.invocationId
+        || acceptanceDigest(parse(args.inputs_json === undefined ? '{}' : args.inputs_json as string)) !== acceptanceDigest(run.inputs)) throw new Error('assistant-skills: independent exact trial acceptance required')
+      return acceptanceDigest(proof.acceptance)
+    }
+    const receipt = verify()
+    this.#authorize(agent, 'activate', [scope, candidateId, trialRunId])
+    if (acceptanceDigest(this.#scope(agent, 'activate')) !== acceptanceDigest(scope) || verify() !== receipt) throw new Error('assistant-skills: trial authority changed')
+    const activated = this.#store.activateCandidate(scope, candidateId, trialRunId, receipt)
+    this.#changed()
+    return { activated, activeVersion: activated.version, replayed: false, improvement: 'unmeasured' }
+  }
+  reject(agent: Agent | undefined, candidateId: string) {
+    const scope = this.#scope(agent, 'reject')
+    this.#authorize(agent, 'reject', [scope, candidateId])
+    return this.#store.rejectCandidate(scope, candidateId)
+  }
+  rollback(agent: Agent | undefined, name: string, expectedVersion: number, targetVersion: number) {
+    const scope = this.#scope(agent, 'rollback')
+    this.#authorize(agent, 'rollback', [scope, name, expectedVersion, targetVersion])
+    const restored = this.#store.rollback(scope, name, expectedVersion, targetVersion)
+    this.#changed(); return restored
+  }
   async run(exec: ToolRunContext, goalId: string, name: string, version: number, inputs: Record<string, unknown>, invocationId: string) {
     const scope = this.#scope(exec.agent, 'run')
     const skill = this.#store.get(scope, name)
     if (!skill || skill.retired || skill.version !== version) throw new Error('assistant-skills: active skill version required')
+    return this.#run(exec, goalId, skill, inputs, invocationId)
+  }
+  async #run(exec: ToolRunContext, goalId: string, skill: StoredSkillDefinition, inputs: Record<string, unknown>, invocationId: string, candidateId?: string) {
+    const action = candidateId ? 'trial' : 'run'
+    const scope = this.#scope(exec.agent, action), { name, version } = skill
     const steps = instantiate(skill, inputs).steps
     const current = this.#goals().inspectWorkflowRunContext(exec.agent, goalId)
     if (acceptanceDigest(scope) !== acceptanceDigest(current.scope) || goalId === skill.source.goal.id) throw new Error('assistant-skills: fresh owner Goal required')
     const identity = acceptanceDigest(current)
-    const claim = this.#store.claim(scope, { invocationId, goalId, sessionId: current.sessionId, skillName: name, version, inputs })
+    const claim = this.#store.claim(scope, { invocationId, goalId, sessionId: current.sessionId, skillName: name, version, inputs, ...(candidateId ? { candidateId, goalExecutionRunId: current.goalExecutionRunId } : {}) })
     if (!claim.claimed) {
       if (claim.run.state !== 'succeeded') throw new Error(`assistant-skills: invocation ${claim.run.id} is ${claim.run.state}; inspect skill_status, do not replay`)
       return { ...claim.run, replayed: false, acceptance: 'requires-fresh-goal-verification' }
@@ -158,14 +257,17 @@ export class AssistantSkillsService extends Service {
     let dispatched = false
     const revalidate = () => {
       signal.throwIfAborted()
-      if (acceptanceDigest(this.#scope(exec.agent, 'run')) !== acceptanceDigest(scope)
+      if (acceptanceDigest(this.#scope(exec.agent, action)) !== acceptanceDigest(scope)
         || acceptanceDigest(this.#goals().inspectWorkflowRunContext(exec.agent, goalId)) !== identity) throw new Error('assistant-skills: current authority changed')
       if (this.#store.getRun(scope, claim.run.id)?.state !== 'running') throw new Error('assistant-skills: invocation no longer owns dispatch')
-      const live = this.#store.get(scope, name)
-      if (!live || live.retired || live.version !== version) throw new Error('assistant-skills: skill retired or superseded')
+      if (candidateId) this.#pending(scope, candidateId)
+      else {
+        const live = this.#store.get(scope, name)
+        if (!live || live.retired || live.version !== version) throw new Error('assistant-skills: skill retired or superseded')
+      }
     }
     try {
-      this.#authorize(exec.agent, 'run', claim.run.id)
+      this.#authorize(exec.agent, action, claim.run.id)
       for (const [index, step] of steps.entries()) {
         revalidate()
         if (!this.#allowed.includes(step.toolName)) throw new Error('assistant-skills: current tool allowlist denied')

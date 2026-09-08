@@ -2,7 +2,7 @@ import { lstat, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDefinition, type VerifiedWorkflowSource } from '../src/definition.ts'
 import { SkillStore } from '../src/store.ts'
 
@@ -70,5 +70,55 @@ describe('SkillStore', () => {
     const target = join(root, 'target.sqlite'); const link = join(root, 'link.sqlite')
     await writeFile(target, 'not a database'); await symlink(target, link)
     expect(() => new SkillStore(link)).toThrow(/unsafe database file/)
+  })
+
+  it('keeps candidates out of the active directory and enforces their parent and expiry', () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+    try {
+      const store = new SkillStore(':memory:')
+      const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 0, reason: 'Improve wording.', trigger: 'owner request', expiresAt: Date.now() + 1000 })
+      expect(store.list(scope)).toEqual([]); expect(store.get(scope, candidate.definition.name)).toBeUndefined(); expect(store.listCandidates(scope)).toMatchObject([{ id: candidate.id, state: 'pending' }]); expect(store.getCandidate(otherScope, candidate.id)).toBeUndefined()
+      expect(store.stageCandidate(scope, definition(), { expectedVersion: 0, reason: 'Improve wording.', trigger: 'owner request', expiresAt: Date.now() + 2000 })).toEqual(candidate)
+      const rejected = store.stageCandidate(scope, definition(), { expectedVersion: 0, reason: 'Do not use.', trigger: 'owner request', expiresAt: Date.now() + 2000 })
+      expect(store.rejectCandidate(scope, rejected.id).state).toBe('rejected'); expect(store.rejectCandidate(scope, rejected.id).state).toBe('rejected')
+      expect(() => store.claim(scope, { invocationId: 'trial', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {}, candidateId: candidate.id })).toThrow(/invalid invocation/)
+      vi.advanceTimersByTime(1500)
+      expect(store.stageCandidate(scope, definition(), { expectedVersion: 0, reason: 'Improve wording.', trigger: 'owner request', expiresAt: Date.now() + 2000 })).toEqual(candidate)
+      expect(() => store.claim(scope, { invocationId: 'trial', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {}, candidateId: candidate.id, goalExecutionRunId: 'goal-run' })).toThrow(/candidate unavailable/)
+      store.close()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('claims candidate trials without an active definition and activates atomically only after success', () => {
+    const store = new SkillStore(':memory:')
+    const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 0, reason: 'New workflow.', trigger: 'owner request', expiresAt: Date.now() + 60000 })
+    const trial = store.claim(scope, { invocationId: 'trial', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {}, candidateId: candidate.id, goalExecutionRunId: 'goal-run' })
+    expect(trial.claimed).toBe(true); expect(store.get(scope, 'read-report')).toBeUndefined()
+    expect(() => store.activateCandidate(scope, candidate.id, trial.run.id, 'receipt')).toThrow(/trial acceptance required/)
+    store.finish(scope, trial.run.id, 'succeeded', [])
+    const activated = store.activateCandidate(scope, candidate.id, trial.run.id, 'receipt')
+    expect(activated).toMatchObject({ version: 1, parentVersion: null })
+    expect(store.activateCandidate(scope, candidate.id, trial.run.id, 'receipt')).toEqual(activated)
+    expect(() => store.activateCandidate(scope, candidate.id, trial.run.id, 'other-receipt')).toThrow(/candidate conflict/)
+    expect(() => store.rejectCandidate(scope, candidate.id)).toThrow(/candidate conflict/)
+    store.close()
+  })
+
+  it('does not activate unknown trials and rolls back by appending an immutable version', () => {
+    const store = new SkillStore(':memory:'); const first = store.save(scope, definition())
+    const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Revise workflow.', trigger: 'owner request', expiresAt: Date.now() + 60000 })
+    const trial = store.claim(scope, { invocationId: 'trial', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, candidateId: candidate.id, goalExecutionRunId: 'goal-run' })
+    store.finish(scope, trial.run.id, 'unknown', [])
+    expect(() => store.activateCandidate(scope, candidate.id, trial.run.id, 'receipt')).toThrow(/trial acceptance required/)
+    const second = store.save(scope, definition(), 1)
+    const restored = store.rollback(scope, 'read-report', 2, 1)
+    expect(restored).toMatchObject({ version: 3, parentVersion: 2, restoredFromVersion: 1 })
+    expect(store.get(scope, 'read-report', first.version)).toMatchObject({ version: 1, retired: false })
+    expect(store.get(scope, 'read-report', second.version)).toMatchObject({ version: 2, retired: false })
+    expect(store.rollback(scope, 'read-report', 2, 1)).toEqual(restored)
+    expect(store.get(scope, 'read-report', 4)).toBeUndefined()
+    store.save(scope, definition(), 3)
+    expect(store.rollback(scope, 'read-report', 4, 3)).toMatchObject({ version: 5, restoredFromVersion: 3 })
+    store.close()
   })
 })

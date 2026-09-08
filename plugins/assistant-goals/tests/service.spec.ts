@@ -578,6 +578,9 @@ describe('owner-scoped native goal context', () => {
     const sourceResults = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
     expect(sourceResults.some(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError === true)), JSON.stringify(sourceResults)).toBe(false)
     const exported = f.service.inspectVerifiedWorkflowSource(agent, record.id)
+    const historical = f.service.inspectVerifiedWorkflowRun(agent, record.id, exported.runId)
+    expect(historical).toEqual(exported)
+    expect(() => f.service.inspectVerifiedWorkflowRun(agent, record.id, `${exported.runId}-wrong`)).toThrow(/achieved whole-goal outcome|exact achieved historical run/u)
     expect(exported).toMatchObject({ protocol: 'assistant-goals/verified-workflow-source/v1', scope: complete.scope,
       goal: { id: record.id, definition: complete.definition, sessionId: String(agent.session.id), nativeGoalId: complete.native.goalId },
       acceptance: { contractId: expect.any(String), contractDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), receiptDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), validUntil: expect.any(Number) },
@@ -588,6 +591,9 @@ describe('owner-scoped native goal context', () => {
     expect(events.some(event => event.type === 'user/message' && event.data.source.kind === 'goal' && event.data.source.round === 1)).toBe(true)
     expect(events.some(event => event.type === 'turn/end' && event.data.turn === exported.turn)).toBe(true)
     expect(requests).toBe(3)
+    f.ctx.goals.create(agent, { objective: 'A different current goal after the accepted workflow' })
+    expect(() => f.service.inspectVerifiedWorkflowSource(agent, record.id)).toThrow('exact completed native goal')
+    expect(f.service.inspectVerifiedWorkflowRun(agent, record.id, exported.runId)).toEqual(exported)
   })
 
   it('rejects historical workflow export when ownership scope changes or the accepted receipt expires', async () => {
@@ -626,13 +632,18 @@ describe('owner-scoped native goal context', () => {
     await agent.whenIdle(); await f.service.whenIdle()
     const sourceResults = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
     expect(sourceResults.some(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError === true)), JSON.stringify(sourceResults)).toBe(false)
-    expect(f.service.inspectVerifiedWorkflowSource(agent, record.id).steps).toHaveLength(1)
+    const historical = f.service.inspectVerifiedWorkflowSource(agent, record.id)
+    expect(historical.steps).toHaveLength(1)
     f.owners.set(agent, 'other')
     expect(() => f.service.inspectVerifiedWorkflowSource(agent, record.id)).toThrow('exact completed native goal')
+    expect(() => f.service.inspectVerifiedWorkflowRun(agent, record.id, historical.runId)).toThrow(/exact completed native goal|owner|scope|authenticated/u)
     f.owners.set(agent, 'owner')
     const future = Date.now() + 20_000
     const now = vi.spyOn(Date, 'now').mockReturnValue(future)
-    try { expect(() => f.service.inspectVerifiedWorkflowSource(agent, record.id)).toThrow(/achieved whole-goal outcome|current accepted outcome/u) }
+    try {
+      expect(() => f.service.inspectVerifiedWorkflowSource(agent, record.id)).toThrow(/achieved whole-goal outcome|current accepted outcome/u)
+      expect(() => f.service.inspectVerifiedWorkflowRun(agent, record.id, historical.runId)).toThrow(/achieved whole-goal outcome|current accepted outcome/u)
+    }
     finally { now.mockRestore() }
   })
 })

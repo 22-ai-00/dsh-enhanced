@@ -16,6 +16,7 @@ import { observePage, query, run, sanitize, startHost } from './web-owner-helper
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const exec = promisify(execFile)
+const candidateMode = process.env.DSH_WEB_REAL_SKILL_CANDIDATE === '1'
 
 function row(doc, id) {
   const value = doc.contents.items.find(item => isMap(item) && item.get('id') === id)
@@ -93,7 +94,7 @@ async function waitForGoal({ page, goalsPath, verifierPath, deliveryPath, goalId
   throw new Error(`independent verification did not complete for ${goalId}`)
 }
 
-test('real browser persists and reuses an independently verified skill after Host restart', async ({ page, context }, testInfo) => {
+test(candidateMode ? 'real browser trials activates and rolls back a skill candidate after Host restart' : 'real browser persists and reuses an independently verified skill after Host restart', async ({ page, context }, testInfo) => {
   const temp = await mkdtemp(join(tmpdir(), 'dsh-web-owner-real-skill-'))
   const home = join(temp, 'home'), workspace = join(temp, 'workspace'), modelLog = join(temp, 'model.jsonl')
   const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_WEB_REAL_LOG: modelLog, DSH_WEB_REAL_WORKSPACE: workspace }
@@ -136,7 +137,7 @@ test('real browser persists and reuses an independently verified skill after Hos
     setConfig(patch, 'dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', { databasePath: skillsPath, allowedTools: ['write'], maxDurationMs: 60_000 })
     setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300_000 })
     setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority], profiles: [profile('goal-step'), profile('goal-outcome')] })
-    appendPolicy(patch, [{ id: 'real-skill-evolution', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['inspect', 'save', 'run', 'retire'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: { initiators: ['external'] } }])
+    appendPolicy(patch, [{ id: 'real-skill-evolution', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['inspect', 'save', 'run', 'retire', 'draft', 'trial', 'activate', 'rollback'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: { initiators: ['external'] } }])
     route.configurePatch(patch, setConfig)
     patch.contents.add(patch.createNode({ id: 'session-title-llm', disabled: true }))
     patch.contents.add(patch.createNode({ insert: [{ id: 'web-owner-real-skill-guard', name: resolve(root, 'scripts/e2e/web-owner-real-skill-guard.mjs') }] }))
@@ -150,6 +151,14 @@ test('real browser persists and reuses an independently verified skill after Hos
     const processedBeforeSave = query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length
     await prompt(`Use skill_save with goal_id ${firstId}, name verified-summary, description exactly 'Replay the independently verified order-summary artifact.', bindings_json [], and expected_version 0. Do not use other tools.`)
     await waitFor({ predicate: () => existsSync(skillsPath) && query(skillsPath, 'SELECT COUNT(*) AS count FROM skill_definitions')[0]?.count === 1 && query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length > processedBeforeSave, page: activePage, frames, approved, workspace, description: 'skill save' })
+    let candidateId
+    if (candidateMode) {
+      const before = query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length
+      await prompt(`Use only skill_candidate with goal_id ${firstId}, name verified-summary, description exactly 'Trial candidate of the independently verified order-summary artifact.', bindings_json [], parent_version 1, reason exactly 'Verify candidate lifecycle', trigger exactly 'owner-request'.`)
+      await waitFor({ predicate: () => query(skillsPath, 'SELECT id FROM skill_candidates').length === 1 && query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length > before, page: activePage, frames, approved, workspace, description: 'candidate staging' })
+      candidateId = query(skillsPath, 'SELECT id FROM skill_candidates')[0].id
+      expect(query(skillsPath, 'SELECT version FROM skill_definitions').map(row => row.version)).toEqual([1])
+    }
     await stop()
     await rm(join(workspace, 'summarize.mjs'))
     expect(existsSync(join(workspace, 'summarize.mjs'))).toBe(false)
@@ -160,7 +169,8 @@ test('real browser persists and reuses an independently verified skill after Hos
     const processedBeforeLoad = query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length
     await prompt('Load the native skill named verified-summary with the skill tool. Do not create a goal or execute the workflow in this turn.')
     await waitFor({ predicate: () => query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length > processedBeforeLoad, page: activePage, frames, approved, workspace, description: 'native skill load' })
-    await prompt(`Create a new goal with objective exactly: '${objective}' Use goal_create with max_goal_rounds 2 and start_native_rounds true. Do not use a write tool yourself. In the next native goal round, use the returned business goal id in exactly skill_run with name verified-summary, version 1, inputs_json {}, and invocation_id reuse-1. Do not use any other tool.`)
+    const replayInstruction = candidateMode ? `skill_trial with candidate_id ${candidateId}, inputs_json {}, and invocation_id trial-1` : 'skill_run with name verified-summary, version 1, inputs_json {}, and invocation_id reuse-1'
+    await prompt(`Create a new goal with objective exactly: '${objective}' Use goal_create with max_goal_rounds 2 and start_native_rounds true. Do not use a write tool yourself. In the next native goal round, use the returned business goal id in exactly ${replayInstruction}. Do not use any other tool.`)
     await waitFor({ predicate: () => query(goalsPath, 'SELECT id FROM goal_records').length === 2, page: activePage, frames, approved, workspace, description: 'replay goal creation' })
     const secondId = query(goalsPath, 'SELECT id FROM goal_records ORDER BY rowid DESC LIMIT 1')[0].id
     const second = await waitForGoal({ page: activePage, goalsPath, verifierPath, deliveryPath, goalId: secondId, frames, approved, workspace })
@@ -174,16 +184,39 @@ test('real browser persists and reuses an independently verified skill after Hos
     const bottom = activePage.getByRole('button', { name: 'Back to bottom', exact: true })
     if (await bottom.isVisible()) await bottom.click()
     for (const group of await activePage.getByRole('button', { name: /^\d+ tool calls?$/ }).all()) await group.click()
-    await activePage.getByRole('button', { name: /^Tool call skill_run/ }).last().click()
+    await activePage.getByRole('button', { name: candidateMode ? /^Tool call skill_trial/ : /^Tool call skill_run/ }).last().click()
     await expect(activePage.getByText('requires-fresh-goal-verification', { exact: false }).last()).toBeVisible()
     const replayHash = createHash('sha256').update(await readFile(join(workspace, 'summarize.mjs'))).digest('hex')
     expect(replayHash).toBe(sourceHash)
+    let lifecycle
+    if (candidateMode) {
+      const trial = JSON.parse(query(skillsPath, 'SELECT run_json FROM skill_runs')[0].run_json)
+      expect(trial.candidateId).toBe(candidateId)
+      expect(query(skillsPath, 'SELECT version FROM skill_definitions').map(row => row.version)).toEqual([1])
+      let before = query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length
+      await prompt(`Use only skill_activate with candidate_id ${candidateId} and trial_run_id ${trial.id}.`)
+      await waitFor({ predicate: () => query(skillsPath, 'SELECT version FROM skill_definitions').length === 2 && query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length > before, page: activePage, frames, approved, workspace, description: 'independently accepted activation' })
+      const activated = JSON.parse(query(skillsPath, 'SELECT candidate_json FROM skill_candidates')[0].candidate_json)
+      expect(activated).toMatchObject({ state: 'activated', activatedVersion: 2, trialRunId: trial.id })
+      expect(activated.acceptanceDigest).toBeTruthy()
+      before = query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length
+      await prompt('Use only skill_rollback with name verified-summary, expected_version 2, target_version 1.')
+      await waitFor({ predicate: () => query(skillsPath, 'SELECT version FROM skill_definitions').length === 3 && query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length > before, page: activePage, frames, approved, workspace, description: 'immutable rollback' })
+      const versions = query(skillsPath, 'SELECT definition_json FROM skill_definitions ORDER BY version').map(row => JSON.parse(row.definition_json))
+      expect(versions[2]).toMatchObject({ version: 3, parentVersion: 2, restoredFromVersion: 1, description: versions[0].description, steps: versions[0].steps })
+      await activePage.reload(); await selectOriginalSession(activePage)
+      const bottom = activePage.getByRole('button', { name: 'Back to bottom', exact: true }); if (await bottom.isVisible()) await bottom.click()
+      for (const group of await activePage.getByRole('button', { name: /^\d+ tool calls?$/ }).all()) await group.click()
+      await activePage.getByRole('button', { name: /^Tool call skill_rollback/ }).last().click()
+      await expect(activePage.getByText('restoredFromVersion', { exact: false }).last()).toBeVisible()
+      lifecycle = { candidate: activated, trial, versions, ownerRollbackReadback: true, improvement: 'unmeasured', activation: 'owner-request-after-independent-trial' }
+    }
     await stop()
     const audit = await readSessionAudit(home, workspace, firstSession)
     const sourceOutcome = first.outcome.contract, replayOutcome = second.outcome.contract
     const sourceReceiptDigest = createHash('sha256').update(JSON.stringify(first.job.receipt)).digest('hex')
     const replayReceiptDigest = createHash('sha256').update(JSON.stringify(second.job.receipt)).digest('hex')
-    const saves = eventsFor(audit, 'skill_save'), loads = eventsFor(audit, 'skill'), runs = eventsFor(audit, 'skill_run'), writes = eventsFor(audit, 'write')
+    const saves = eventsFor(audit, 'skill_save'), loads = eventsFor(audit, 'skill'), runs = eventsFor(audit, candidateMode ? 'skill_trial' : 'skill_run'), writes = eventsFor(audit, 'write')
     const storedRun = query(skillsPath, 'SELECT run_json FROM skill_runs')[0]
     const rawEvents = await sessionEvents(home, workspace, firstSession)
     const loadResult = rawEvents.find(event => event.type === 'tool/result' && event.data?.message?.source?.callId === loads[0]?.data.callId)
@@ -192,17 +225,17 @@ test('real browser persists and reuses an independently verified skill after Hos
     expect(JSON.stringify(loadResult?.data?.message?.content)).toContain('verified-summary')
     expect(sourceOutcome.task.goal.id).toBe(firstId); expect(replayOutcome.task.goal.id).toBe(secondId)
     expect(sourceReceiptDigest).not.toBe(replayReceiptDigest)
-    expect(JSON.parse(storedRun.run_json)).toMatchObject({ goalId: secondId, skillName: 'verified-summary', version: 1, invocationId: 'reuse-1', inputs: {}, state: 'succeeded', steps: [{ state: 'succeeded' }] })
+    expect(JSON.parse(storedRun.run_json)).toMatchObject({ goalId: secondId, skillName: 'verified-summary', version: candidateMode ? 2 : 1, invocationId: candidateMode ? 'trial-1' : 'reuse-1', inputs: {}, state: 'succeeded', steps: [{ state: 'succeeded' }] })
     const assemblies = (await modelCalls(modelLog)).filter(row => row.event === 'assembly')
     const guardedExecutions = (await modelCalls(modelLog)).filter(row => row.event === 'tool-execute')
     expect(assemblies.some(row => row.phase === 'native-load' && row.availableToolNames.includes('skill'))).toBe(true)
-    expect(assemblies.some(row => row.phase === 'replay' && row.availableToolNames.includes('skill_run'))).toBe(true)
+    expect(assemblies.some(row => row.phase === (candidateMode ? 'trial' : 'replay') && row.availableToolNames.includes(candidateMode ? 'skill_trial' : 'skill_run'))).toBe(true)
     await copyFile(join(workspace, 'summarize.mjs'), testInfo.outputPath('summarize.mjs'))
     await writeFile(testInfo.outputPath('session-audit.json'), JSON.stringify(audit, null, 2), { mode: 0o600 })
     await copyFile(modelLog, testInfo.outputPath('model.jsonl'))
     expect(guardedExecutions.filter(row => row.phase === 'source' && row.name === 'write')).toHaveLength(1)
-    expect(guardedExecutions.filter(row => row.phase === 'replay' && row.name === 'write')).toHaveLength(1)
-    await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ capability: 'verified-skill-reuse', ...route.proof, hostStarts: starts, sourceGoal: { id: firstId, receipt: first.job.receipt, receiptDigest: sourceReceiptDigest }, replayGoal: { id: secondId, receipt: second.job.receipt, receiptDigest: replayReceiptDigest }, sourceReceiptDiffersFromReplay: sourceReceiptDigest !== replayReceiptDigest, artifact: { path: 'summarize.mjs', sourceHash, replayHash, restoredAfterRemoval: true }, ownerReadbackAfterReload: true, nativeCatalogLoadedAfterRestart: assemblies.some(row => row.phase === 'native-load' && row.availableToolNames.includes('skill')), toolCalls: { saved: saves, loaded: loads, replayed: runs, sourceSessionWrite: writes.length, nestedReplayWrite: guardedExecutions.filter(row => row.phase === 'replay' && row.name === 'write').length }, modelCalls: await modelCalls(modelLog), approved }, null, 2), { mode: 0o600 })
+    expect(guardedExecutions.filter(row => row.phase === (candidateMode ? 'trial' : 'replay') && row.name === 'write')).toHaveLength(1)
+    await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ capability: candidateMode ? 'verified-skill-candidate-lifecycle' : 'verified-skill-reuse', lifecycle, ...route.proof, hostStarts: starts, sourceGoal: { id: firstId, receipt: first.job.receipt, receiptDigest: sourceReceiptDigest }, replayGoal: { id: secondId, receipt: second.job.receipt, receiptDigest: replayReceiptDigest }, sourceReceiptDiffersFromReplay: sourceReceiptDigest !== replayReceiptDigest, artifact: { path: 'summarize.mjs', sourceHash, replayHash, restoredAfterRemoval: true }, ownerReadbackAfterReload: true, nativeCatalogLoadedAfterRestart: assemblies.some(row => row.phase === 'native-load' && row.availableToolNames.includes('skill')), toolCalls: { saved: saves, loaded: loads, replayed: runs, sourceSessionWrite: writes.length, nestedReplayWrite: guardedExecutions.filter(row => row.phase === (candidateMode ? 'trial' : 'replay') && row.name === 'write').length }, modelCalls: await modelCalls(modelLog), approved }, null, 2), { mode: 0o600 })
   } catch (error) { failed = true; throw error } finally {
     try { if (existsSync(modelLog)) await copyFile(modelLog, testInfo.outputPath('model.jsonl')) } catch {}
     try { if (authenticated && failed && !new URL(activePage.url()).searchParams.has('token')) await activePage.screenshot({ path: testInfo.outputPath('failure.png') }).catch(() => {}) } finally {
