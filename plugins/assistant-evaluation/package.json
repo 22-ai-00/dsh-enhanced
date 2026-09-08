@@ -80,7 +80,14 @@
     "@dsh-enhanced/personal-memory": ">=0.1.24 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.24 <0.2.0",
     "@deepseek-ai/dsh-session-persistence-jsonl": ">=0.1.2-rc.1 <0.2.0",
-    "@deepseek-ai/dsh-session-persistence": ">=0.1.2-rc.1 <0.2.0"
+    "@deepseek-ai/dsh-session-persistence": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-goal": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-tool-goal": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-goal-round-driver": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-subagent": ">=0.1.2-rc.1 <0.2.0",
+    "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-isolation": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-agent-loop": {
@@ -130,6 +137,27 @@
     },
     "@deepseek-ai/dsh-session-persistence": {
       "optional": true
+    },
+    "@deepseek-ai/dsh-goal": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-goal": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-goal-round-driver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-subagent": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-goals": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-isolation": {
+      "optional": true
+    },
+    "@dsh-enhanced/assistant-verifier": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -152,7 +180,13 @@
     "@dsh-enhanced/personal-memory": "workspace:*",
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@deepseek-ai/dsh-session-persistence-jsonl": "catalog:",
-    "@deepseek-ai/dsh-session-persistence": "catalog:"
+    "@deepseek-ai/dsh-session-persistence": "catalog:",
+    "@deepseek-ai/dsh-goal": "catalog:",
+    "@deepseek-ai/dsh-tool-goal": "catalog:",
+    "@deepseek-ai/dsh-goal-round-driver": "catalog:",
+    "@deepseek-ai/dsh-subagent": "catalog:",
+    "@dsh-enhanced/assistant-goals": "workspace:*",
+    "@dsh-enhanced/assistant-isolation": "workspace:*"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

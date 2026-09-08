@@ -79,6 +79,8 @@ export interface BenchmarkStrategyOwnerOptions {
   /** Global tools visible to this Delivery owner.  Defaults to the two Goal tools. */
   allowedToolNames?: readonly string[]
   agentPreset?: string
+  /** Bounded wait for the native goal driver, disabled for plain owner runtimes. */
+  goalContinuationTimeoutMs?: number
 }
 
 export interface BenchmarkStrategyOwnerScope {
@@ -95,6 +97,9 @@ export interface BenchmarkStrategyOwnerRuntime {
   readonly stateRoot: string
   /** Fresh, private state directory for this exact runtime; retained for evidence after shutdown. */
   readonly runtimeRoot: string
+  /** Configured local identity; route validity still requires ownerScope after inbound. */
+  readonly principalId: string
+  readonly ownerRouteId: string
   readonly principal: Readonly<InboundEnvelope['principal']>
   readonly conversation: Readonly<InboundEnvelope['conversation']>
   readonly outbound: readonly Readonly<OutboundIntent>[]
@@ -140,6 +145,7 @@ export async function createBenchmarkStrategyOwnerRuntime(
   const policyRules = benchmarkSnapshot(input.policyRules)
   const allowedToolNames = Object.freeze([...(input.allowedToolNames ?? ['goal_create', 'goal_strategy'])].map(value => safeId(value, 'allowed tool name')))
   if (new Set(allowedToolNames).size !== allowedToolNames.length) throw new Error('duplicate allowed tool name')
+  const goalContinuationTimeoutMs = input.goalContinuationTimeoutMs === undefined ? 0 : positive(input.goalContinuationTimeoutMs, 'goal continuation timeout', 300_000)
   const fingerprint = createHash('sha256').update(`${cellId}\0${workspace}\0${stateRoot}`).digest('hex').slice(0, 24)
   const channel = `benchmark-${fingerprint.slice(0, 12)}`
   const account = `cell-${fingerprint.slice(12)}`
@@ -195,7 +201,7 @@ export async function createBenchmarkStrategyOwnerRuntime(
     await ctx.plugin(Delivery, {
       databasePath: join(runtimeRoot, 'delivery.sqlite'), spoolPath: join(runtimeRoot, 'spool'), schedulerEnabled: false,
       defaultWorkspace: workspace, defaultAgentPreset: preset, policyRef: 'benchmark-owner', agentProvider: provider, agentModel: model,
-      agentMaxOutputTokens: maxOutputTokens, agentMaxAutoContinuationTurns: 0,
+      agentMaxOutputTokens: maxOutputTokens, agentMaxAutoContinuationTurns: 0, agentGoalContinuationTimeoutMs: goalContinuationTimeoutMs,
       ownerRoutes: [{ id: authorityId, conversation, principal, workspace, agentPreset: preset, policyRef: 'benchmark-owner', minimumGeneration: 1 }],
     })
     delivery = ctx.get('assistantDelivery' as never) as unknown as OwnerDelivery
@@ -248,7 +254,7 @@ export async function createBenchmarkStrategyOwnerRuntime(
     throw error
   }
   return Object.freeze({
-    ctx, workspace, stateRoot, runtimeRoot, principal, conversation,
+    ctx, workspace, stateRoot, runtimeRoot, principal, principalId, ownerRouteId: authorityId, conversation,
     get outbound() { return snapshotOutbound() },
     async installModel(modelAdapter: LlmAdapter): Promise<void> {
       assertOpen()

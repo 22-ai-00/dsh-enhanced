@@ -779,6 +779,12 @@ importers:
       '@deepseek-ai/dsh-agent-loop':
         specifier: 'catalog:'
         version: 0.1.2-rc.1(b439f35cbe316bcb469bc5c5afd8b06f)
+      '@deepseek-ai/dsh-goal':
+        specifier: 'catalog:'
+        version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-agent@0.1.2-rc.1(6f833cf90b9dd3f0d529840b1aebfb48))(@deepseek-ai/dsh-brand@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))(@deepseek-ai/dsh-llm@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))(@deepseek-ai/dsh-scope@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)))(@deepseek-ai/dsh-session-projection@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-session@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-scope@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)))))(@deepseek-ai/dsh-session@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-scope@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))))(@deepseek-ai/dsh-typert-protocol@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))
+      '@deepseek-ai/dsh-goal-round-driver':
+        specifier: 'catalog:'
+        version: 0.1.2-rc.1(bf26b34cf1132cc19026df20148fe9bd)
       '@deepseek-ai/dsh-llm':
         specifier: 'catalog:'
         version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)
@@ -797,9 +803,15 @@ importers:
       '@deepseek-ai/dsh-skill':
         specifier: 'catalog:'
         version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-llm@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))(@deepseek-ai/dsh-scope@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)))
+      '@deepseek-ai/dsh-subagent':
+        specifier: 'catalog:'
+        version: 0.1.2-rc.1(c24f151a1303b0e01834b59a41b861fd)
       '@deepseek-ai/dsh-system-prompt':
         specifier: 'catalog:'
         version: 0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))(@deepseek-ai/dsh-llm@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2))(@deepseek-ai/dsh-scope@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)(@deepseek-ai/dsh-invariants@0.1.2-rc.1(@deepseek-ai/cordis@4.0.2)))
+      '@deepseek-ai/dsh-tool-goal':
+        specifier: 'catalog:'
+        version: 0.1.2-rc.1(e1cb56cc70102d4ca9e2be69b193b94a)
       '@deepseek-ai/dsh-tools':
         specifier: 'catalog:'
         version: 0.1.2-rc.1(de5e1ff2d608fbe22667925341ad1dfc)
@@ -812,6 +824,12 @@ importers:
       '@dsh-enhanced/assistant-evolution':
         specifier: workspace:*
         version: link:../assistant-evolution
+      '@dsh-enhanced/assistant-goals':
+        specifier: workspace:*
+        version: link:../assistant-goals
+      '@dsh-enhanced/assistant-isolation':
+        specifier: workspace:*
+        version: link:../assistant-isolation
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy

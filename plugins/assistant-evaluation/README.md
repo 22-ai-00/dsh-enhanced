@@ -110,7 +110,7 @@ scope、situation、producer/evaluator id、证据引用和指标属于本地评
 
 ### 原生策略比较的 Host 接口
 
-`@dsh-enhanced/assistant-evaluation/benchmark/strategy` 提供冻结策略计划、全 cell 计量器和临时 Delivery owner 装配。它们是后续 `strategy-v1` executor 的组成部分；当前 CLI 仍只支持上面的研究/记忆套件，尚未完成策略语料、独立隔离验收、详细证据对象及真实模型比较，不能据此声称策略收益。
+`@dsh-enhanced/assistant-evaluation/benchmark/strategy` 提供冻结策略计划、全 cell 计量器、临时 Delivery owner，以及下文的原生 Goal/独立隔离验收与详细证据对象。它们是后续 `strategy-v1` executor 的组成部分；当前 CLI 仍只支持上面的研究/记忆套件，尚未完成完整策略比较调度、策略语料、实际能力核对及真实模型比较，不能据此声称策略收益。
 
 `parseStrategyBenchmarkPlan` 固定两个分支 `direct` / `adaptive-strategy`、共同预算、模型调用上限、单次输出和原生 Goal 轮数。共同 persona/工具/Policy/runtime 与策略 guide/tool/Policy/runtime 分别声明摘要，并派生两分支版本；任意额外版本差异会被拒绝。这只验证声明一致，实际 executor 仍须核对挂载的能力。`strategyBenchmarkJournalPlan` 将完整策略契约绑定到既有 journal，修改限额不能复用旧计划 ID。调用 `installStrategyBenchmarkRequestMeter` 会先核对 exact cell/计划/模型，再安装外层限额；executor 还必须把同一 `maxGoalRounds` 交给真实 Goal。
 
@@ -160,3 +160,9 @@ Legacy schema 7 owner rows are adopted lazily through the exact Host delivery ca
 
 
 `memory-v1` 保留首轮公开试验的原始题目与判定，可按原计划复现。`memory-v2` 是单独版本，明确当前资料 ID、Memory provenance URI 与 `claim:<key>` 的引用约定；改进题目说明后必须建立新计划，不会重写 v1 的失败结果。
+
+策略 Host 接口新增 `createStrategyGoalRuntime`、`strategyGoalTaskDigests` 和 `StrategyEvidenceStore`。单 cell 真实装配原生 Goal/driver/subagents、Goals、Delivery、Isolation 与 Verifier；模型通过真实工具创建目标并导出隔离产物，独立验证向后续轮次提供反馈。运行结束后读取当前 owner 路由授权的持久目标快照，等待资源清理成功，再保存内容寻址的私有证据；证据包含每轮 step/outcome 的独立回执、真实 triggerRunId、策略子会话和外层计量，读取时重验 plan/cell/digest。清理超时保留 unknown，不能据此重放或启动下一 cell。
+
+此接口运行本机 Docker 和离线任意候选 shell：输入复制入容器，验证向量只供独立 runner，Host 持久状态保存在候选工作区之外。调用方必须提供受信任 adapter factory、已有私有目录、固定本机镜像及明确限额；不查找或修改用户 profile，不发送真实渠道消息。`execute`/`close` 清理有等待上限，但不合作资源可能仍未停止。adapter factory 与初始装配仍由调用方的整体期限控制，不能把本接口计量窗口视为完整比较墙钟期限。目录权限不隔离同 UID 的可信 Host 代码。
+
+计划中的能力摘要仍是声明，完整 executor 必须核对实际挂载工具、persona、Policy、运行时与 adapter，并把全流程期限/故障证据接入 journal。当前没有 strategy-v1 比较器/CLI/doctor、冻结语料或真实模型收益结论；普通 Evaluation bundle 不自动激活上述可选 Host peers。

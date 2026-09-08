@@ -497,3 +497,13 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 后续依序组装 strategy-v1 原生 Goal/Verifier/隔离产物 executor、真实能力版本核对、CLI/doctor、计划与 cell 绑定的不可变详细证据，再执行公开真实模型开发比较及冻结留出。没有人工日历等待期；没有付费调用或真实策略收益证据。C2C 沿用 `c2c_a945` 的本地执行记录（iteration 2），内置浏览器仍不可用，未声称 ChatGPT 网页规划或复核。
 
 最终根 `CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=<证据中的本机固定镜像> pnpm check` v2 退出 **0**：主 291 文件 / 3,750 项通过，无跳过；递归 Delivery 705、Evaluation 158、Goals 99、Isolation 102、Web owner 30 项通过，manifest、零 lint 警告、typecheck/build 和 31 份 dry-run pack 完成。已检查新增 `lib/benchmark/strategy*` 与 Delivery `lib/types.*` 发布文件，无源码、测试或状态数据库。专项 26 项通过，清空两包生成目录后的 bootstrap 与构建后的公开入口导入均成功。v1 仅因 release-version 测试仍期待旧 bootstrap 字符串而失败；更新预期后完整重跑 v2。命令、失败记录和源码哈希见 [本批证据](evidence/strategy-foundation-2026-09-07.json)。
+
+### WP04/06：原生 Goal 比较 cell 与完整验收证据（2026-09-07，基线 `eb106bb`）
+
+18 项保持 **3 已验证 / 8 实现中 / 7 待做**。本批装配真实单 cell 的 Goal、driver、策略子会话、Isolation 与 Verifier；模型实际生成隔离产物并按独立失败反馈修订。结束后通过当前 owner route 的只读快照收集 step/outcome 两类合同及其真实触发轮次，清理成功才保存内容寻址证据。保留完整策略账本，不复用模型上下文的3条截断视图。
+
+实际 direct/strategy 两分支分别为外层6/9、内层4/7次请求，候选2个原生 child；均经历错误隔离产物→两类验收失败→修订→两类验收通过，每分支保留4份真实回执。取消保留未知预留，不合作资源清理期限不产生停止成功。没有付费供应商调用或智能增益结论；完整 executor、实际配置核对、CLI/doctor、开发/留出比较继续按依赖与证据推进，不等待人工日/周。
+
+最终验收（2026-09-08）：根 `CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT=<本地归档目录> DSH_ISOLATION_TEST_IMAGE=<证据中的固定镜像> pnpm check` v2 退出 **0**，主 294 文件 / 3,763 项全通过，无跳过；递归 Evaluation 168、Goals 102、Delivery 705、Isolation 102、Web owner 30 项通过。manifest、零 lint 警告、typecheck/build 和 31 份 dry-run pack 完成；Evaluation 105 个发布文件含新增 runtime/evidence 模块，Goals 80 个，无源码、测试或状态数据库。构建后的公开入口导入 v2 成功；v1 从根目录解析未声明的 Goals 依赖失败，修正检查脚本从 Evaluation 的实际依赖位置解析，生产代码未变。
+
+完整命令、早期失败、最终源码和两分支真实复制对象摘要见 [本批证据](evidence/strategy-goal-cell-2026-09-08.json)。首轮根检查也通过，但期间加强成功证据的全部父子停止/会话归属及序列化输入守卫，因此冻结代码后完整重跑 v2。初始装配/factory 的整体期限、失败 cell 的完整持久证据和能力实装核对仍由后续完整 executor 补齐。C2C `c2c_a945` iteration 3 仅有本地执行记录；所需内置浏览器不可用，未取得 ChatGPT 网页规划或复核。完整 18 项仍未完成。

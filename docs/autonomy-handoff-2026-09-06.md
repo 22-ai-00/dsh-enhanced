@@ -95,3 +95,7 @@
 2026-09-07 后续推进（基线 `bc67ce3`）：固定预算策略比较新增严格冻结契约、全 cell 外层 meter 和真实临时 Delivery/JSONL owner 装配。正常原生 compare 证明外层 5 请求包含内层 Goal 4 请求及 2 child；空 Session 头已通过 ensureMaterialized 真实持久化后恢复。完整 executor、隔离验收、CLI/doctor、持久详细证据与真实模型比较仍待接线；18项仍3已验证。详见落地账本最新 WP04/06 条目与 `docs/goal-strategy-evaluation.md`，继续按成果推进，不按天/周等待。
 
 本批完整根检查已退出 0：291 文件 / 3,750 项，无跳过，31 份 dry-run pack 通过；新增公开接口与两包清空生成目录后的 bootstrap 均已验证。证据见 [strategy foundation](evidence/strategy-foundation-2026-09-07.json)，仍不把执行基础当作完整 executor 或真实策略收益。
+
+2026-09-07 后续（基线 `eb106bb`）：已接通单 cell 的真实 Goal/Isolation/Verifier 与关闭后完整证据保存。当前 owner 路由允许在原生 Agent 释放后读取持久执行快照；step 和 outcome 合同通过真实 triggerRunId 分开关联，完整策略记录不截断。确定性 direct/strategy 两分支实际 Docker 错误产物→独立失败→修订→成功；完整比较 executor/CLI/实际能力核对与真实模型收益仍未完成。最新验收以落地账本和本批证据为准。
+
+本批最终根检查（2026-09-08）已退出 0：294 文件 / 3,763 项，无跳过，31 份 dry-run pack 通过，公开入口导入成功；真实复制对象和完整命令哈希见 [strategy Goal cell 证据](evidence/strategy-goal-cell-2026-09-08.json)。继续接完整比较 executor/journal、setup 全局期限、失败持久证据、实际能力核对、CLI/doctor 与真实模型比较，再推进其余工作包。18 项仍为 3 已验证 / 8 实现中 / 7 待做；按依赖与证据连续推进，日/周安排和两周观察均不是交付等待条件。

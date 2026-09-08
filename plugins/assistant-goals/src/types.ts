@@ -74,6 +74,16 @@ export interface GoalExecutionRun {
   execution?: { status: 'succeeded' | 'unknown'; quiescent: boolean; completedAt: number }
 }
 
+/** Exact Host route input for a post-quiescence evidence read; never model-visible. */
+export interface OwnerGoalExecutionSnapshotInput {
+  ownerRouteId: string
+  principalId: string
+  workspace: string
+  preset: string
+  sessionId: string
+  goalId: string
+}
+
 /** Owner-authorized lifecycle change for the currently bound native goal. */
 export interface GoalControlInput {
   goalId: string

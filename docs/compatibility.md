@@ -91,3 +91,5 @@ Web owner 的 Goal admission CLI 要求同批 Delivery 只读 snapshot API、Iso
 
 
 策略 benchmark owner 的可选 Host 接口使用 `dsh-session-persistence-jsonl` / `dsh-session-persistence@0.1.2-rc.1` 的 `ensureMaterialized`：普通 flush 不保证空会话头已落盘，Delivery 初次创建后 dispose/resume 前必须显式 materialize。依赖作为 Evaluation optional peers，普通 bundle 不自动激活。Delivery 增加不加载服务的 `./types` 子路径，Evaluation owner 动态载入同仓 Delivery 服务并使用该类型接口，避免 Evaluation → Delivery → Evaluation 服务声明构建环。根 bootstrap 在 Policy 后先生成 Delivery 的无服务类型入口，再构建 Evaluation 和完整 Delivery，支持两包 lib 均为空的构建；升级必须验证实际 JSONL 创建/恢复、临时 owner 和策略父子预算对账。
+
+策略原生 cell 装配使用 `dsh-goal`、`dsh-tool-goal`、`dsh-goal-round-driver`、`dsh-subagent@0.1.2-rc.1`，以及同批 Goals/Isolation/Verifier 可选 peers。必须以 Isolation 的具名默认插件入口挂载，保留 Policy 对插件身份的预授权核验；直接挂载其 Service class 会使工具注册失败。Goals 新增当前 owner route 校验的结束后快照，区分模型上下文截断视图与完整策略记录；每个 native run 的 step contract 和 whole-goal assessment contract 分开保存，后者通过持久 triggerRunId 关联。动态加载避免服务声明循环，发布前应运行完整 bootstrap 与原生隔离回归。
