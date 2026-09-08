@@ -2,7 +2,12 @@ export interface OpportunityScope {
   principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string
 }
 /** Operator estimates in utility units; neither probabilities nor money are independently verified. */
+export interface PreparationSettings {
+  provider: string; model: string; budgetId: string; maxOutputTokens: number; timeoutMs: number
+}
 export interface OpportunityProfile {
+  /** Explicit opt-in to paid, tool-free generation; omitted prepare keeps metadata-only behavior. */
+  preparation?: PreparationSettings
   id: string
   mode: 'prepare' | 'remind' | 'execute'
   expectedBenefit: number; successPpm: number; executionCost: number; interruptionCost: number; possibleLoss: number; minimumUtility: number

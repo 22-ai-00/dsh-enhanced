@@ -1,0 +1,164 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "21ccaf9ea5a7fae072d71006f53500b7f354dfaf",
+  "capability": "Explicitly authorized event preparation produces a durable model draft retrievable in the original Web session",
+  "completeWorkPackage": false,
+  "scope": {
+    "implemented": [
+      "opt-in real model preparation on the existing configured route",
+      "durable preparation claim, output and stable failure diagnostics",
+      "separate model-only Session with zero tools and one model dispatch",
+      "current goal, owner, route, source, deadline and Policy checks",
+      "stable subject automation-runs budget across decisions",
+      "no automatic replay of interrupted model calls",
+      "owner Web retrieval after restart and event deduplication"
+    ],
+    "remaining": [
+      "intelligent ranking across opportunities",
+      "generic independent draft quality acceptance",
+      "typed executable skill reuse and measured improvement"
+    ]
+  },
+  "realScenario": {
+    "command": "DSH_WEB_REAL_OPPORTUNITY=prepare DSH_PREPARATION_TEST_IMAGE=sha256:397c042706244e4d69f3779dbddb27d8e6cdd9fefed655b7d4281e6c9476e27b CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=super-relay DSH_WEB_REAL_MODEL=auto_model/alwaysday1 DSH_WEB_REAL_SOURCE_HOME=/home/jiataorui/.dsh pnpm test:web-owner:real-event",
+    "exitCode": 0,
+    "logPath": "/tmp/dsh-real-event-preparation-fourth.log",
+    "logSha256": "dcd915c6a4474a4a21953f76708a1ac450d1586b3477fa0966007d64b869b18f",
+    "proofPath": ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/proof.json",
+    "proofSha256": "3eaa67396d20012e18d00259bbe5d094da611866bd0ab8c6bed592f0aef26ff3",
+    "sessionAuditSha256": "5bc2112d4c607de41bf734cc2a8b23ec1611e54762550e04e34ae05bd8d46964",
+    "draftSha256": "6e45ce13a8accabc57fb2d9ff3df1d1ca623c4ff9dfacdbd304384827ef9898c",
+    "provider": "super-relay",
+    "model": "auto_model/alwaysday1",
+    "api": "openai-responses",
+    "hostStarts": 5,
+    "sessionId": "session-fa29dfbb-967b-4d3b-b4c1-860617eaec49",
+    "goalId": "074192736ad8980ae93ffcea73e5bf2f58451e4318c851afbc8ee71d65293c1a",
+    "preparationCalls": 1,
+    "originalGoalExecuted": false,
+    "businessFilesWritten": false,
+    "draftChecks": [
+      {
+        "id": "two-currencies",
+        "passed": true
+      },
+      {
+        "id": "cancelled-and-negative",
+        "passed": true
+      },
+      {
+        "id": "empty",
+        "passed": true
+      }
+    ],
+    "draftCheckImage": "sha256:397c042706244e4d69f3779dbddb27d8e6cdd9fefed655b7d4281e6c9476e27b",
+    "restoredWithoutModelCall": true,
+    "duplicateDidNotGenerate": true,
+    "ownerReadbackViaWeb": true,
+    "rejected": [],
+    "totalModelCalls": 7,
+    "foregroundAuthorizationCalls": 4,
+    "ownerReadbackCalls": 2
+  },
+  "failedAttempts": [
+    {
+      "logPath": "/tmp/dsh-real-event-preparation-first.log",
+      "exitCode": 1,
+      "logSha256": "189189cad0a4c112dfea7f2a46b242943a521b5c1a3fcda9e6d36dce63059e88",
+      "cause": "Preparation stopped before model dispatch without retained diagnostics; targeted reproduction identified scoped preset tools that restrict cannot hide; model-only execution and typed diagnostic retention added"
+    },
+    {
+      "logPath": "/tmp/dsh-real-event-preparation-second.log",
+      "exitCode": 1,
+      "logSha256": "bafa6462d4187394efa78a09cc0ebfbaae4863534e19d80891325e328513e52d",
+      "cause": "Foreground bootstrap hit the experimental 512 output-token cap before preparation; experimental cap aligned to 2048"
+    },
+    {
+      "logPath": "/tmp/dsh-real-event-preparation-third.log",
+      "exitCode": 1,
+      "logSha256": "fa6920354bf4594b391d212b9058f9e8667213e6e5fe0e8b0f5dff4b62ca18f0",
+      "cause": "Real model draft was saved, but the shell-only Docker test image lacked Node; added preflight and selected an available pinned Node runtime image"
+    }
+  ],
+  "limitations": [
+    "Draft is explicitly unverified; the three offline code checks validate only this generated example, not arbitrary draft quality",
+    "Model-only preparation resolves preset identity but does not mount its tools or persona",
+    "automation-runs budget plus one request, output and duration limits do not guarantee cumulative token or monetary spending",
+    "A concurrent store opener conservatively marks running preparation unknown; no distributed exactly-once execution claim",
+    "Failed or interrupted requests are not automatically retried, and budget reservations may be conservatively finalized",
+    "Draft retrieval is via proactive_status; silent preparation does not automatically notify or resume the original goal",
+    "Only a file event source was exercised in this real scenario",
+    "C2C has local execution records only; no ChatGPT web review",
+    "Compacted session audit omits proactive_status goal_id; exact runtime approval arguments are enforced by the E2E frame guard, not recoverable from that compact field"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 10,
+    "todo": 5
+  },
+  "sourceSha256": {
+    "plugins/assistant-automations/README.md": "ae558cf832e25c40a786cff01d04d60cefb34652ee65098fd593fe5d243bbf92",
+    "plugins/assistant-automations/src/index.ts": "15efd1fa54956407cd13f6420e2dc2f88d6145bba7cf6478ac3bf1d23b6a4931",
+    "plugins/assistant-automations/src/preparation.ts": "1c3f56f634e768e8d1bdea531afc1d6958f0e06d9e916ed8e96878659c6ecbb6",
+    "plugins/assistant-automations/src/runner.ts": "be5554e9c87e7322cf7122b2c4462bb9e3bb51cb51ddac028d633b191f3084f9",
+    "plugins/assistant-automations/src/service.ts": "756ad6202146549a50cfc15efeb99404dd7a3ff5c7912f6055d1cd17ec7b9de3",
+    "plugins/assistant-automations/tests/preparation.spec.ts": "434ad0247e71649db9e5a09d6b7ac6e2ddbe60d896705831c2fc48d83a011a9d",
+    "plugins/assistant-goals/README.md": "cb17c8a196e9940b48b42f11629e79f64ddc66179b57e871523edce5f1cd7320",
+    "plugins/assistant-goals/src/event-wait.ts": "d26a8a0f81488d20e7e42bf90b7e0123ef0dd2554e3d51778e7d13fc2fb120c4",
+    "plugins/assistant-goals/src/service.ts": "2746cc17cdbeac55c6141d918a9fd8a7ecc64614a2fc58ebd8fb222cf4186885",
+    "plugins/assistant-goals/tests/event-wait.spec.ts": "db926ab8d0a73ca6174d0562b3ec92e34d1aa052e57ff80d30d4a283aacdf896",
+    "plugins/assistant-proactive/README.md": "80c7ea0aa1dd9e3cd0703fa75c6650141f62005eb075a38e678af75eb7781ff5",
+    "plugins/assistant-proactive/package.json": "e2b3c177e0fa69515184b039d4d8df2ad3fc610bcdf898fed4f83c65540a1d04",
+    "plugins/assistant-proactive/src/engine.ts": "f67e3b94e7ba0a663c55e98507d102b5be566ffc345864b22ef65ba598367996",
+    "plugins/assistant-proactive/src/index.ts": "5d560a55500490cb4d8d664d72a0d041a39d39f2542ae236297770981de0f902",
+    "plugins/assistant-proactive/src/preparation-store.ts": "e33f0e165a0660ccfc9acfb870cd4d71c7bab3188a9e8e6211da540a21d6a7c2",
+    "plugins/assistant-proactive/src/preparation.ts": "c122a81db8dac58f34b6eed2c1eb468591f0e99e436560035be52d6acb2554db",
+    "plugins/assistant-proactive/src/types.ts": "f261cbbd610ddb412105d0eff28382526919efa68d5446ce91b190e6a9a6789d",
+    "plugins/assistant-proactive/tests/preparation.spec.ts": "479df03be302af8c84e3d262ef32084f88b14f2e1fb5590fb57f0cdddf20f6d0",
+    "scripts/e2e/web-owner-real-event.spec.mjs": "f4bfec7f14027f627bb95de3070244d82ea94ea3e3c1e867e8fb03799c4e7914",
+    "scripts/e2e/web-owner-real-guard.mjs": "60ed6e10f10857e9d5a4bc2f4da7d99048f0f9d3f301a78faea166146546ebf1"
+  },
+  "lockfileSha256": "754d8bd295f8a43fafbc2121adbee5434771017709e802ad779a24229a596c9f",
+  "engineeringVerification": {
+    "command": "pnpm check",
+    "exitCode": 0,
+    "logPath": "/tmp/dsh-preparation-final-check.log",
+    "logSha256": "36d43215a8edac2239ef888936bc07f0950c6078c6bf589e10de5d611137c307",
+    "mainTestFiles": 322,
+    "mainTests": 3940,
+    "deliveryTests": 712,
+    "automationTests": 234,
+    "goalsTests": 130,
+    "proactiveTests": 21,
+    "dryRunPacks": 32,
+    "manifestValidation": true,
+    "lintWarnings": 0,
+    "typecheck": true,
+    "build": true,
+    "inspectedNewPackFiles": {
+      "assistant-automations": [
+        "lib/preparation.js",
+        "lib/preparation.d.ts"
+      ],
+      "assistant-proactive": [
+        "lib/preparation-store.js",
+        "lib/preparation-store.d.ts",
+        "lib/preparation.js",
+        "lib/preparation.d.ts"
+      ]
+    }
+  },
+  "independentReview": {
+    "reviewer": "native verifier /root/real_web_verify",
+    "verdict": "PASS",
+    "readOnly": true,
+    "verifiedSourceHashes": 20,
+    "scope": "model-only runner, current authority and durable preparation lifecycle, real Web proof, final pnpm check and source/artifact hashes",
+    "limitations": [
+      "not full WP12 acceptance",
+      "generic drafts remain unverified",
+      "compacted audit omits proactive_status goal_id; exact argument checked by runtime approval guard"
+    ]
+  }
+}

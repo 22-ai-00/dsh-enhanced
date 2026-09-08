@@ -6,7 +6,7 @@ import {
   type AgentHandle,
 } from '@deepseek-ai/dsh-agent'
 import type { AgentPresets } from '@deepseek-ai/dsh-agent-presets'
-import { createUserMessage, type LlmRuntime } from '@deepseek-ai/dsh-llm'
+import { createUserMessage, type GenerateOptions, type LlmRuntime, type StreamChunk } from '@deepseek-ai/dsh-llm'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import type { AssistantDeliveryService } from '@dsh-enhanced/assistant-delivery'
 import type { AssistantPolicyService, PolicyBudgetConfig } from '@dsh-enhanced/assistant-policy'
@@ -234,6 +234,12 @@ export interface DshAutomationRunnerOptions {
     binding?: { id: string; version: number; generation: number }
   }) => void
   readonly acceptanceEnabled?: () => boolean
+  /** Host-only synchronous fence after setup and before the first model prompt. */
+  readonly beforePrompt?: () => void
+  /** Optional hard cap on DSH model stream dispatches for one runner invocation. */
+  readonly maxModelCalls?: number
+  /** Host-only model turn: no preset mount and no executable tool surface. */
+  readonly modelOnly?: boolean
 }
 
 function requireAdapterToolCallProtocol(
@@ -255,6 +261,9 @@ export class DshAutomationRunner implements AutomationRunner {
   private readonly allowUnbudgetedExecution: boolean
   private readonly prepareAcceptance: DshAutomationRunnerOptions['prepareAcceptance']
   private readonly acceptanceEnabled: DshAutomationRunnerOptions['acceptanceEnabled']
+  private readonly beforePrompt: DshAutomationRunnerOptions['beforePrompt']
+  private readonly maxModelCalls: DshAutomationRunnerOptions['maxModelCalls']
+  private readonly modelOnly: boolean
 
   constructor(
     private readonly ctx: Context,
@@ -264,6 +273,12 @@ export class DshAutomationRunner implements AutomationRunner {
     this.allowUnbudgetedExecution = options.allowUnbudgetedExecution ?? false
     this.prepareAcceptance = options.prepareAcceptance
     this.acceptanceEnabled = options.acceptanceEnabled
+    this.beforePrompt = options.beforePrompt
+    if (options.maxModelCalls !== undefined && (!Number.isSafeInteger(options.maxModelCalls) || options.maxModelCalls < 1)) {
+      throw new Error('assistant-automations: maxModelCalls must be a positive safe integer')
+    }
+    this.maxModelCalls = options.maxModelCalls
+    this.modelOnly = options.modelOnly ?? false
   }
 
   async run(input: AutomationRunnerInput): Promise<AutomationRunnerResult> {
@@ -278,6 +293,13 @@ export class DshAutomationRunner implements AutomationRunner {
             ? 'not-required'
             : 'not-reserved',
         }),
+      )
+    }
+    if (this.modelOnly && (definition.allowedTools.length !== 0 || definition.maxToolCalls !== 0)) {
+      throw new AutomationRunnerFailureError(
+        'assistant-automations: modelOnly runner requires an empty immutable tool contract',
+        diagnostic({ failureClass: 'configuration', failurePhase: 'preflight', failureCode: 'model-only-tool-contract-invalid',
+          promptSubmissionState: 'not-submitted', sideEffectState: 'none', budgetSettlementState: definition.budgetId === undefined ? 'not-required' : 'not-reserved' }),
       )
     }
     const budgetId = definition.budgetId
@@ -368,6 +390,17 @@ export class DshAutomationRunner implements AutomationRunner {
             throw new Error('assistant-automations: background Agent identity does not match the immutable definition')
           }
           agentCtx.provide('assistantAutomationExecution', execution)
+          let modelCalls = 0
+          const maxModelCalls = this.maxModelCalls
+          const beforePrompt = this.beforePrompt
+          agentCtx.on('llm/stream', async function* (_options: GenerateOptions, next: () => AsyncIterable<StreamChunk>) {
+            if (maxModelCalls !== undefined && modelCalls >= maxModelCalls) {
+              throw new Error('assistant-automations: immutable model-call budget exhausted')
+            }
+            beforePrompt?.()
+            modelCalls += 1
+            yield* next()
+          })
           const unbindInitiator = this.policy.bindInitiator(agentCtx.agent, 'background')
           agentCtx.effect(() => unbindInitiator, 'assistant-automations.background-initiator')
           const delivery = this.ctx.get('assistantDelivery') as
@@ -387,13 +420,16 @@ export class DshAutomationRunner implements AutomationRunner {
             },
             assembled: undefined,
           })
-          await agentPresets?.mount(agentCtx, presetId)
+          if (!this.modelOnly) await agentPresets?.mount(agentCtx, presetId)
           const mountedNames = agentCtx.tools.schemas(agentCtx.agent).map(schema => schema.name)
           for (const name of allowed) {
             if (!mountedNames.includes(name)) {
               throw new Error(`assistant-automations: unknown allowlist tool after preset mount: ${name}`)
             }
           }
+          // Scoped preset tools cannot be removed by DSH restrictions. Mask
+          // inherited global tools here and let the final immutable allowlist
+          // assertion fail closed for any scoped tool outside the contract.
           const denied = globalNames.filter(name => !allowed.has(name))
           if (denied.length > 0) agentCtx.tools.restrict({ deny: denied })
           const finalSchemas = agentCtx.tools.schemas(agentCtx.agent)
@@ -468,6 +504,7 @@ export class DshAutomationRunner implements AutomationRunner {
       const abort = () => agent.cancel({ kind: 'hook', reason: 'assistant-automations-signal' })
       input.signal.addEventListener('abort', abort, { once: true })
       removeAbort = () => input.signal.removeEventListener('abort', abort)
+      this.beforePrompt?.()
       phase = 'prompt-submission'
       promptSubmissionState = 'unknown'
       agent.followup(createUserMessage({

@@ -10,6 +10,8 @@ import { join } from 'node:path'
 import { OpportunityEngine, validateProfile } from './engine.js'
 import type { OpportunityInput, OpportunityProfile, OpportunityScope } from './types.js'
 import { reminderText, reminderExpiresAt } from './reminder.js'
+import { PreparationRuntime } from './preparation.js'
+import { PreparationStore } from './preparation-store.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-proactive'
@@ -21,6 +23,7 @@ const integer = (max = 1_000_000_000) => Schema.number().step(1).min(0).max(max)
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-proactive.sqlite')),
   profiles: Schema.array(Schema.object({
+    preparation: Schema.union([Schema.object({ provider: Schema.string().required(), model: Schema.string().required(), budgetId: Schema.string().required(), maxOutputTokens: Schema.number().step(1).min(1).max(32_768).required(), timeoutMs: Schema.number().step(1).min(1_000).max(300_000).required() })]),
     id: Schema.string().required(), mode: Schema.union(['prepare', 'remind', 'execute']).required(),
     expectedBenefit: integer(), successPpm: integer(1_000_000), executionCost: integer(), interruptionCost: integer(), possibleLoss: integer(),
     minimumUtility: integer(),
@@ -34,6 +37,7 @@ declare module '@deepseek-ai/cordis' { interface Context { assistantProactive: A
 /** This optional decision gate cannot resume a goal or grant tool/route authority. */
 export class AssistantProactiveService extends Service {
   static Config = Config
+  readonly #preparations: PreparationRuntime
   readonly #engine: OpportunityEngine
   readonly #profiles = new Map<string, OpportunityProfile>()
   #active = true
@@ -46,6 +50,8 @@ export class AssistantProactiveService extends Service {
     }
     this.#engine = new OpportunityEngine(config.databasePath ?? join(homedir(), '.dsh', 'assistant-proactive.sqlite'), [...this.#profiles.values()])
     ctx.effect(() => () => { this.#active = false; this.#engine.close() }, 'assistant-proactive.store')
+    const preparationPath = config.databasePath === ':memory:' ? ':memory:' : `${config.databasePath ?? join(homedir(), '.dsh', 'assistant-proactive.sqlite')}.preparations`
+    this.#preparations = new PreparationRuntime(ctx, new PreparationStore(preparationPath))
     ctx.inject(['tools', 'agents', 'assistantDelivery', 'assistantPolicy'], runtime => {
       const output = {
         schema: { type: 'object' as const, additionalProperties: false, properties: { context: { type: 'string' as const, required: true } } },
@@ -53,7 +59,7 @@ export class AssistantProactiveService extends Service {
       } as const
       runtime.tools.register(defineTool({
         name: 'proactive_status',
-        description: 'Inspect owner-scoped event opportunity decisions and operator utility estimates. Prepared records are event metadata, not completed work or verified model assessments.',
+        description: 'Inspect owner-scoped event opportunity decisions and operator utility estimates. Preparation may include a persisted model draft when explicitly configured. Drafts are unverified and do not mean the original goal was executed.',
         parameters: { goal_id: { type: 'string' } }, output,
         execute: async (args, execution) => { return { context: JSON.stringify(this.inspect(execution.agent, args.goal_id)) } },
       }))
@@ -67,6 +73,7 @@ export class AssistantProactiveService extends Service {
   }
   assertProfile = (profileId: string): void => {
     if (!this.#active || !this.#profiles.has(profileId)) throw new Error('assistant-proactive: configured active opportunity profile required')
+    if (this.#profiles.get(profileId)!.preparation && !this.#preparations.available()) throw new Error('assistant-proactive: preparation services unavailable')
     if (this.#profiles.get(profileId)!.mode === 'remind' && !this.#notificationPort()) throw new Error('assistant-proactive: reminder delivery service unavailable')
   }
   evaluate = (input: OpportunityInput) => {
@@ -80,6 +87,13 @@ export class AssistantProactiveService extends Service {
       const expiresAt = reminderExpiresAt(decision, profile)
       if (Date.now() < expiresAt) delivery.enqueueOwnerNotification({ sourceId: 'assistant-proactive/v1', ownerRouteId: decision.ownerRouteId, scope: decision.scope, sessionId: decision.sessionId, idempotencyKey: `proactive-reminder:${decision.id}`, text: reminderText(decision, profile), expiresAt })
     }
+    if (evaluation.disposition === 'consume' && decision.mode === 'prepare' && decision.state === 'decided') {
+      const profile = this.#engine.profileSnapshot(decision.scope, decision.goalId, decision.profileId)
+      if (profile.preparation) {
+        this.#preparations.store.enqueue(decision, profile.preparation, reminderExpiresAt(decision, profile))
+        void this.#preparations.tick().catch(() => {})
+      }
+    }
     return evaluation
   }
   #notificationPort(): NotificationPort | undefined {
@@ -89,6 +103,7 @@ export class AssistantProactiveService extends Service {
   closeWait = (waitId: string, scope: OpportunityScope, reason: 'expired' | 'cancelled'): void => {
     if (!this.#active) throw new Error('assistant-proactive: disposed')
     this.#engine.closeWait(waitId, scope, reason)
+    this.#preparations.store.cancelWait(waitId, scope)
   }
   #scope(agent: Agent | undefined, feedback: boolean): OpportunityScope {
     if (!this.#active) throw new Error('assistant-proactive: disposed')
@@ -105,8 +120,15 @@ export class AssistantProactiveService extends Service {
     if (policy?.authorizeAgent(agent, feedback ? 'feedback' : 'inspect', { kind: 'goal', id: 'proactive-opportunities' }).effect !== 'allow') throw new Error('assistant-proactive: policy denied')
     return scope
   }
-  inspect = (agent: Agent | undefined, goalId?: string) => { return this.#engine.list(this.#scope(agent, false), goalId) }
-  feedback = (agent: Agent | undefined, id: string, feedback: 'accepted' | 'rejected') => { return this.#engine.feedback(id, this.#scope(agent, true), feedback) }
+  inspect = (agent: Agent | undefined, goalId?: string) => {
+    return this.#engine.list(this.#scope(agent, false), goalId).map(decision => {
+      const preparation = this.#preparations.store.get(decision.id)
+      return preparation ? { ...decision, preparation: { state: preparation.state, reason: preparation.reason, updatedAt: preparation.updatedAt,
+        ...(preparation.result ? { output: preparation.result.output, sessionId: preparation.result.sessionId, usage: preparation.result.usage, diagnostic: preparation.result.diagnostic, verified: false } : {}) } } : decision
+    })
+  }
+  reconcilePreparations = (): Promise<void> => this.#preparations.tick()
+  feedback = (agent: Agent | undefined, id: string, feedback: 'accepted' | 'rejected') => { const decision = this.#engine.feedback(id, this.#scope(agent, true), feedback); if (feedback === 'rejected') this.#preparations.store.cancel(id); return decision }
 }
 export function apply(ctx: Context, config: Config = {}): void { new AssistantProactiveService(ctx, config) }
 export default { name, Config, apply }

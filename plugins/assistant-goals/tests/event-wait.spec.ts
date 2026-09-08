@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
+import { externalEventDigest } from '@dsh-enhanced/assistant-automations/external-event'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { GoalEventWaitRuntime } from '../src/event-wait.ts'
 import type { GoalEventWaitIntent } from '../src/event-wait-store.ts'
@@ -17,16 +18,42 @@ function fixture(path = ':memory:', prior?: GoalRecord, proactive?: { evaluate: 
   const now = Date.now(); const objective = 'resume after an event'
   const scope = { principalId: 'owner', principalRecordId: 'row', principalVersion: 1, workspace: '/tmp/event-wait', preset: 'primary' }
   let record: GoalRecord = prior ?? { id: 'goal', scope, originalObjective: objective, definition: { version: 1, digest: acceptanceDigest({ objective }), objective }, native: { sessionId: 'session', goalId: 'native', revision: 2, objective, phase: 'paused', roundsStarted: 1, maxGoalRounds: 3, updatedAt: now }, checkpoint: { nextStep: '', blockers: [], assumptions: [], evidenceRefs: [], dependencies: [] }, version: 1, createdAt: now, updatedAt: now }
-  let policyAllowed = true; let changed = false; let emitted = true; let wakeState: 'scheduled' | 'dispatched' | 'succeeded' | 'unknown' | 'denied' = 'scheduled'; let materializations = 0; let failure: Error | undefined; let materialized: GoalWakeIntent | undefined
+  let policyAllowed = true; let changed = false; let sourceVersion = '1'; let emitted = true; let wakeState: 'scheduled' | 'dispatched' | 'succeeded' | 'unknown' | 'denied' = 'scheduled'; let materializations = 0; let failure: Error | undefined; let materialized: GoalWakeIntent | undefined
   const listeners = new Set<() => void>(); const disposers: Array<() => void> = []
-  const snapshot = () => ({ protocol: 'dsh-event-source/v1' as const, sourceId: 'event-triggers:file', kind: 'file' as const, version: '1', configDigest: changed ? 'c'.repeat(64) : 'a'.repeat(64), target: { automationId: 'automation' }, highWaterSequence: 7 })
+  const snapshot = () => ({ protocol: 'dsh-event-source/v1' as const, sourceId: 'event-triggers:file', kind: 'file' as const, version: sourceVersion, configDigest: changed ? 'c'.repeat(64) : 'a'.repeat(64), target: { automationId: 'automation' }, highWaterSequence: 7 })
   let lastAfter = -1
-  const source = { sourceSnapshot: () => snapshot(), firstEventAfter: (_snapshot: unknown, after: number) => { lastAfter = after; return emitted && after < 8 ? ({ sequence: 8, envelope: { protocol: 'dsh-external-event/v1' as const, source: { id: 'event-triggers:file', kind: 'file' as const, version: '1', configDigest: 'a'.repeat(64) }, event: { id: 'event', occurredAt: now, receivedAt: now }, observation: { digest: 'b'.repeat(64), revision: '1', timeBasis: 'observed' as const }, trust: { method: 'local-observation' as const, content: 'untrusted' as const }, target: { automationId: 'automation' }, deduplicationKey: 'event-triggers:file:event' } }) : undefined }, subscribeSourceChanges: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener) } }
+  const event = { protocol: 'dsh-external-event/v1' as const, source: { id: 'event-triggers:file', kind: 'file' as const, version: '1', configDigest: 'a'.repeat(64) }, event: { id: 'event', occurredAt: now, receivedAt: now }, observation: { digest: 'b'.repeat(64), revision: '1', timeBasis: 'observed' as const }, trust: { method: 'local-observation' as const, content: 'untrusted' as const }, target: { automationId: 'automation' }, deduplicationKey: 'event-triggers:file:event' }
+  const source = { sourceSnapshot: () => snapshot(), firstEventAfter: (_snapshot: unknown, after: number) => { lastAfter = after; return emitted && after < 8 ? ({ sequence: 8, envelope: event }) : undefined }, subscribeSourceChanges: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener) } }
   const wake = { preflight: () => {}, materialize: (input: GoalWakeIntent) => { materializations++; materialized = input; if (failure) throw failure }, inspect: () => materialized === undefined ? [] : [{ intent: materialized, state: wakeState }] } as unknown as GoalWakeRuntime
   const ctx = { inject: (_keys: readonly string[], callback: (value: unknown) => () => void) => { callback({ eventTriggers: source }) }, effect: (setup: () => () => void) => { disposers.push(setup()) } } as unknown as Context
   const runtime = new GoalEventWaitRuntime(ctx, path, wake, () => { if (!policyAllowed) throw new Error('assistant-goals: event wait policy denied'); return record }, () => proactive)
   const intent = (): GoalEventWaitIntent => ({ id: 'event-wait', wake: { scope, goalId: record.id, definition: record.definition, native: record.native, attestation: { scope: { workspace: scope.workspace, preset: scope.preset }, principalId: scope.principalId, principalLineage: { principalRecordId: scope.principalRecordId, principalVersion: 1 }, bindingId: 'binding', bindingVersion: 1, bindingGeneration: 1, sessionId: 'session' }, ownerRouteId: 'route', budgetId: 'budget' }, source: snapshot(), createdAt: now - 1, expiresAt: now + 10_000, runTimeoutMs: 1_000 })
-  return { runtime, intent, scope, close: () => { for (const dispose of disposers) dispose() }, emitChange: () => { for (const listener of listeners) listener() }, get materializations() { return materializations }, get materialized() { return materialized }, get lastAfter() { return lastAfter }, set policyAllowed(value: boolean) { policyAllowed = value }, set changed(value: boolean) { changed = value }, set emitted(value: boolean) { emitted = value }, set wakeState(value: typeof wakeState) { wakeState = value }, set failure(value: Error | undefined) { failure = value }, set record(value: GoalRecord) { record = value }, get record() { return record } }
+  return { runtime, intent, scope, event, close: () => { for (const dispose of disposers) dispose() }, emitChange: () => { for (const listener of listeners) listener() }, get materializations() { return materializations }, get materialized() { return materialized }, get lastAfter() { return lastAfter }, set policyAllowed(value: boolean) { policyAllowed = value }, set changed(value: boolean) { changed = value }, set sourceVersion(value: string) { sourceVersion = value }, set emitted(value: boolean) { emitted = value }, set wakeState(value: typeof wakeState) { wakeState = value }, set failure(value: Error | undefined) { failure = value }, set record(value: GoalRecord) { record = value }, get record() { return record } }
+}
+
+function preparationFixture() {
+  const proactive = { evaluate: () => ({ disposition: 'consume' as const, decision: { eventSequence: 8 } }) }
+  const f = fixture(':memory:', undefined, proactive)
+  const prepared = f.runtime.prepare({ ...f.intent(), opportunityProfile: 'prepare-profile' })
+  const authority = {
+    waitId: prepared.intent.id,
+    profileId: prepared.intent.opportunityProfile!,
+    scope: prepared.intent.wake.scope,
+    goalId: prepared.intent.wake.goalId,
+    sessionId: prepared.intent.wake.native.sessionId,
+    definitionDigest: prepared.intent.wake.definition.digest,
+    objective: f.record.native.objective,
+    nativeGoalId: prepared.intent.wake.native.goalId,
+    nativeRevision: prepared.intent.wake.native.revision,
+    ownerRouteId: prepared.intent.wake.ownerRouteId,
+    sourceDigest: prepared.intent.source.configDigest,
+    sourceId: prepared.intent.source.sourceId,
+    eventId: f.event.event.id,
+    eventSequence: 8,
+    eventDigest: externalEventDigest(f.event),
+    expiresAt: prepared.intent.expiresAt,
+  }
+  return { f, prepared, authority }
 }
 
 describe('durable event wait lifecycle', () => {
@@ -77,6 +104,44 @@ describe('durable event wait lifecycle', () => {
     const prepared = f.runtime.prepare({ ...wait, opportunityProfile: 'prepare-profile' })
     expect(prepared.state).toBe('waiting'); expect(f.materializations).toBe(0)
     f.runtime.reconcile(); expect(f.lastAfter).toBe(8); expect(proactive.evaluate).toHaveBeenCalledTimes(1); f.close()
+  })
+  it('authorizes a current selected event for read-only preparation without waking or changing the native goal', () => {
+    const { f, prepared, authority } = preparationFixture()
+    const phase = f.record.native.phase
+    expect(prepared.state).toBe('waiting')
+    expect(() => f.runtime.assertPreparationCurrent(authority)).not.toThrow()
+    expect(f.materializations).toBe(0)
+    expect(f.record.native.phase).toBe(phase)
+    expect(f.runtime.inspect(f.scope, 'goal')).toMatchObject([{ state: 'waiting' }])
+    f.close()
+  })
+  it('rejects stale or forged preparation authority without waking or changing the native goal', () => {
+    const assertRejectedReadOnly = (mutate: (f: ReturnType<typeof fixture>, authority: ReturnType<typeof preparationFixture>['authority']) => void) => {
+      const prepared = preparationFixture(); const { f, authority } = prepared
+      mutate(f, authority)
+      const phase = f.record.native.phase
+      expect(() => f.runtime.assertPreparationCurrent(authority)).toThrow()
+      expect(f.materializations).toBe(0)
+      expect(f.record.native.phase).toBe(phase)
+      expect(f.runtime.inspect(f.scope, 'goal')).toMatchObject([{ state: 'waiting' }])
+      f.close()
+    }
+    assertRejectedReadOnly((f, authority) => { f.record = { ...f.record, native: { ...f.record.native, revision: authority.nativeRevision + 1 } } })
+    assertRejectedReadOnly(f => { f.record = { ...f.record, native: { ...f.record.native, phase: 'complete' } } })
+    assertRejectedReadOnly(f => { f.sourceVersion = '2' })
+    assertRejectedReadOnly((_f, authority) => { authority.eventDigest = '0'.repeat(64) })
+    assertRejectedReadOnly((_f, authority) => { authority.scope = { ...authority.scope, workspace: '/tmp/other-event-wait' } })
+  })
+  it('rejects expired preparation authority without waking or changing the native goal', () => {
+    vi.useFakeTimers({ toFake: ['Date'] })
+    const { f, authority } = preparationFixture()
+    vi.setSystemTime(authority.expiresAt)
+    const phase = f.record.native.phase
+    expect(() => f.runtime.assertPreparationCurrent(authority)).toThrow()
+    expect(f.materializations).toBe(0)
+    expect(f.record.native.phase).toBe(phase)
+    expect(f.runtime.inspect(f.scope, 'goal')).toMatchObject([{ state: 'waiting' }])
+    f.close()
   })
   it('does not wake while a selected profile defers an event', () => {
     const f = fixture(':memory:', undefined, { evaluate: () => ({ disposition: 'defer', decision: { eventSequence: 8 } }) })

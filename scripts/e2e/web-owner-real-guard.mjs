@@ -130,10 +130,11 @@ export function apply(ctx) {
   const guard = createRunGuard({ provider: process.env.DSH_WEB_REAL_PROVIDER || 'codex-subscription', initialCalls, record })
   const eventWait = process.env.DSH_WEB_REAL_EVENT === '1'
   const bootstrap = process.env.DSH_WEB_REAL_BOOTSTRAP === '1'
-  const allowed = eventWait ? (name, args, workspace) => isEventExperimentToolAllowed(name, args, workspace, ['1', 'remind'].includes(process.env.DSH_WEB_REAL_OPPORTUNITY) ? 'real-event-opportunity' : undefined) : isExperimentToolAllowed
+  const inspectPreparation = process.env.DSH_WEB_REAL_PREPARATION_INSPECT === '1'
+  const allowed = inspectPreparation ? (name, args) => name === 'proactive_status' && typeof args?.goal_id === 'string' && Object.keys(args).length === 1 : eventWait ? (name, args, workspace) => isEventExperimentToolAllowed(name, args, workspace, ['1', 'remind', 'prepare'].includes(process.env.DSH_WEB_REAL_OPPORTUNITY) ? 'real-event-opportunity' : undefined) : isExperimentToolAllowed
   ctx.on('agent/request', async (_input, next) => {
     const request = await next()
-    return { ...request, maxTokens: Math.min(request.maxTokens ?? 2048, bootstrap ? 512 : 2048) }
+    return { ...request, maxTokens: Math.min(request.maxTokens ?? 2048, 2048) }
   })
   const claimed = new WeakMap()
   ctx.on('agent/inbox/claimed', ({ agent, message, turn }) => {
@@ -147,6 +148,12 @@ export function apply(ctx) {
     const assembly = await next()
     const agent = context.agent
     if (!agent) return assembly
+    const preparation = process.env.DSH_WEB_REAL_OPPORTUNITY === 'prepare' && String(agent.session.id).startsWith('preparation-')
+    if (preparation) {
+      record({ event: 'preparation-assembly', sessionId: String(agent.session.id), toolNames: assembly.tools.map(tool => tool.name) })
+      return assembly
+    }
+    if (inspectPreparation) return { ...assembly, tools: assembly.tools.filter(tool => tool.name === 'proactive_status'), sections: [...assembly.sections, { name: 'real-preparation-readback', text: 'The owner requests the existing saved draft. Call proactive_status for the requested goal, then show its stored draft verbatim. Do not generate a new draft, resume the goal, or use other tools.' }] }
     const start = agent.session.snapshotEvents().findLast(event => event.type === 'turn/start')
     const input = claimed.get(agent)
     const native = input?.turn === start?.data.turn && input?.native === true

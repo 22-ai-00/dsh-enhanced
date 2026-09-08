@@ -36,14 +36,36 @@ profiles:
     maxDecisionsPerGoal: 20
     maxExecutionsPerGoal: 2
     maxRemindersPerGoal: 0
+  - id: useful-draft
+    mode: prepare
+    preparation:
+      provider: configured-provider
+      model: configured-model
+      budgetId: preparation-runs
+      maxOutputTokens: 2048
+      timeoutMs: 120000
+    expectedBenefit: 100
+    successPpm: 900000
+    executionCost: 10
+    interruptionCost: 5
+    possibleLoss: 5
+    minimumUtility: 1
+    mergeWindowMs: 2000
+    cooldownMs: 60000
+    rejectionCooldownMs: 3600000
+    maxDecisionsPerGoal: 20
+    maxExecutionsPerGoal: 0
+    maxRemindersPerGoal: 0
 ```
+
+`useful-draft` 还需要在 Policy 的 `budgets` 中配置 `id: preparation-runs`、`metric: automation-runs`、例如 `limit: 5`、`periodMs: 86400000`、`scope: subject`，并为 `background:assistant-proactive/v1` 授予目标资源的 `prepare`。subject 预算固定统计 `assistant-proactive-v1-preparation`，不会随事件或目标变更另开额度。将 provider/model 替换为当前实际可用线路。
 
 对话示例：`为当前目标等待 report-file 触发器，使用 useful-report 机会策略，截止时间为一小时后。` 模型在当前主人请求中调用 `goal_wait_event`，显式提供 `opportunity_profile: useful-report`，以及实际目标 ID、native revision、触发器 ID 和毫秒时间戳。未知策略在暂停前被拒绝；省略策略保留 Goals 原有行为。
 
 - `execute`：达到条件后返回执行候选；Goals 再次核验当前目标和授权，才能恢复。
 - `remind`：向冻结的主人会话投递一条持久提醒，包含目标、事件标识与配置估值；不调用模型，不执行目标。要求 Delivery 支持 `enqueueOwnerNotification`、已配置主人路由，并为背景主体 `assistant-proactive/v1` 授予该会话消息的 `send` 权限。设置 `maxRemindersPerGoal` 为正数；重复处理同一决定复用相同投递键。Web 在原会话输入区显示“主动提醒”，重启后可继续读取；其他渠道通过已有适配器发送。
-- `prepare`：只保存目标、事件标识与判断理由，供 `proactive_status` 查询；不生成模型草稿、不修改业务文件。目标继续等待后续事件，直到截止或主人控制。
-- `proactive_feedback`：当前已认证主人可以接受或拒绝指定决定；拒绝为该目标/策略的后续决定设置持久冷却。反馈不会撤销已经分派的工作，也不会创建执行授权。
+- `prepare`：默认只保存目标、事件标识与判断理由，供 `proactive_status` 查询；省略 `preparation` 时不生成模型草稿、不修改业务文件。显式配置 `preparation { provider, model, budgetId, maxOutputTokens, timeoutMs }` 后，才会排入持久准备队列并请求一次真实模型草稿。该草稿使用独立 Session、最多一次模型请求、`tools: []`、`maxToolCalls: 0`；准备运行只解析预设身份，不装载预设工具和 persona，原目标保持 `paused`；运行器禁止工具执行；提示要求只提供草稿、不声称完成或验收。模型文本本身不构成执行或验收证据。`proactive_status` 返回的草稿始终是 `verified: false` / `unverified-draft`，不是验收结果。目标继续等待后续事件，直到截止或主人控制。
+- `proactive_feedback`：当前已认证主人可以接受或拒绝指定决定；拒绝为该目标/策略的后续决定设置持久冷却。反馈不会撤销已经执行的业务动作，也不会创建执行授权；对准备任务，拒绝会取消排队、请求在途运行停止并拒收迟到结果。
 
 收益值为操作者配置的同一抽象单位，公式为 `floor(expectedBenefit * successPpm / 1000000) - executionCost - interruptionCost - possibleLoss`。它们不是独立测得的成功概率、货币成本或真实效果。策略首次用于目标时冻结；改变部署配置不会放宽该目标已冻结的策略。预算统计覆盖同一主人和目标下的所有策略；执行预算仍由 Goals 单独强制执行。
 
@@ -51,15 +73,15 @@ profiles:
 
 ## 权限与数据
 
-- 文件系统：仅保存配置数据库及 SQLite WAL/SHM；其中含主人身份范围、目标文本、事件标识、判断和反馈。数据库要求私有普通文件及不可由组/其他用户写入的父目录；不读取事件正文或业务文件。
-- 网络、子进程、凭据、浏览器、安装脚本：本插件均不直接使用。
+- 文件系统：保存配置数据库及 SQLite WAL/SHM；其中含主人身份范围、目标文本、事件标识、判断和反馈。另保存 `databasePath + '.preparations'` 及 WAL/SHM，其中含准备请求、模型草稿、有限 usage、独立 Session ID、状态和原因。数据库要求私有普通文件及不可由组/其他用户写入的父目录；不读取事件正文或业务文件。
+- 网络：本插件本身不直接联网；显式开启准备后，`assistant-automations` 通过宿主已配置的模型 provider 发送草稿请求，目标文本和草稿会进入该请求和本地准备账本。子进程、凭据、浏览器、安装脚本：本插件均不直接使用。
 - 工具：注册 `proactive_status` 和 `proactive_feedback`，均要求真实 Agent、Delivery 主人身份及 Policy；反馈还要求当前主人请求。Policy 资源为 `goal:proactive-opportunities`，动作分别为 `inspect`、`feedback`；通用工具审批仍由宿主处理。
-- 执行：本插件不执行模型调用、不恢复目标；提醒通过 Delivery 的有类型接口持久入队。真正业务操作及消息发送的权限由 Goals、Delivery 与具体工具负责。
+- 执行：未配置 `preparation` 时本插件不执行模型调用、不恢复目标；提醒通过 Delivery 的有类型接口持久入队。配置准备后还要求 Automations、Goals、Delivery 和 Policy 都可用，且 `background:assistant-proactive/v1` 对该 goal 的 `prepare` 被允许。真正业务操作及消息发送的权限由 Goals、Delivery 与具体工具负责。
 - 卸载释放数据库和工具；保留历史数据库，重新安装可继续读取。删除历史数据库会丢失本插件计数和反馈，不应在活跃目标期间清空。
 
 ## 当前边界
 
-主动提醒为结构化文本，不生成模型内容；Web 读取继承固定主人会话能力，并重查当前发送权限，不另设独立的消息读取 Policy 动作。静默准备目前是结构化记录，尚不是模型生成的可用草稿。当前提供配置估值的事件筛选，未证明长期主动性收益；长期观察可在交付后的使用中进行。
+提醒为结构化文本；Web 读取继承固定主人会话能力，并重查当前发送权限，不另设独立的消息读取 Policy 动作。`prepare` 只有显式 `preparation` 配置才生成模型草稿。准备队列持久化：重启发现 `running` 记录时标为 `unknown` 且不自动重试；撤销授权、目标/来源变化、静默截止或目标截止、主人拒绝都会阻止排队或在途准备。已经写成的 draft 不会因后续 feedback 删除。草稿未经独立验收，不能作为原目标完成、业务事实或主动性效果的证明。当前提供配置估值的事件筛选，未证明长期主动性收益；长期观察可在交付后的使用中进行。
 
 ## 兼容性
 

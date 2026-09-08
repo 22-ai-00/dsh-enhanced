@@ -70,6 +70,7 @@ import {
 } from './coordinator.js'
 import { AutomationProposalManager, AutomationProposalStore } from './proposals.js'
 import { DshAutomationRunner, HostAutomationRunner, RoutedAutomationRunner } from './runner.js'
+import { AutomationPreparationRunner, type PreparationInput, type PreparationResult } from './preparation.js'
 import { AutomationStore } from './store.js'
 import type { AcceptanceContract, AcceptedExecution, TaskAcceptanceRegistration } from './acceptance.js'
 import { registerAutomationTools } from './tools.js'
@@ -390,6 +391,7 @@ export class AssistantAutomationsService extends Service implements
   private readonly growthStore: GrowthAutomationStore
   private readonly proposals: AutomationProposalManager
   private readonly policy: AssistantPolicyService
+  private readonly preparationRunner: AutomationPreparationRunner
   private readonly coordinator: AutomationCoordinator
   private readonly hostExecutors = new HostAutomationExecutorRegistry()
   private readonly config: Required<Config>
@@ -429,6 +431,7 @@ export class AssistantAutomationsService extends Service implements
     if (policy === undefined) throw new Error('assistant-automations: assistantPolicy service is required')
     this.config = config
     this.policy = policy
+    this.preparationRunner = new AutomationPreparationRunner(ctx, policy)
     const initialDelivery = ctx.get('assistantDelivery') as AssistantDeliveryService | undefined
     this.approvalDelivery = initialDelivery
     this.workflowTemplateResolver = initialDelivery
@@ -534,6 +537,15 @@ export class AssistantAutomationsService extends Service implements
   trustedEvaluationProducerGeneration(): string {
     this.assertActive()
     return this.evaluationProducerGeneration
+  }
+
+  /**
+   * Generate a bounded, unverified Proactive draft in a fresh Session. The
+   * caller owns the durable decision claim and result persistence.
+   */
+  runPreparation(input: PreparationInput, signal: AbortSignal, assertCurrent: () => void): Promise<PreparationResult> {
+    this.assertActive()
+    return this.preparationRunner.run(input, signal, assertCurrent)
   }
 
   trustedDeliveryPresentationProducerGeneration(): string {
