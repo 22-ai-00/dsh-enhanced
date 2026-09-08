@@ -1,0 +1,74 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "e4044f5fcf95a0c6b8555473c38c6dabd1a7d483",
+  "status": "repository-readback-and-finite-skill-rollback-engineering-validated",
+  "completeWorkPackage": false,
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "path": "/tmp/dsh-repository-watch-check.log",
+    "sha256": "55abb8a44b1850f5ef4c60b6d511fcb9e0c05ba1afbc0c7aa2e8c591240aef82",
+    "files": 337,
+    "tests": 4102,
+    "packs": 33,
+    "skipped": false
+  },
+  "sourceSha256": {
+    "plugins/assistant-actions/package.json": "e2f9f6cbbe43a6bb993c00dc29b466d543af1dc08638f7b1c0cc42f357fd9bb0",
+    "plugins/assistant-actions/src/repository-readback.ts": "98757bb281e18addc07c784fca6b507ee852604ec0135539ac0f9372f9d0d0a3",
+    "plugins/assistant-actions/src/service.ts": "897a990c2ce994676101e7c9792cac33579512e99d455aa77f98f3e81b28a35f",
+    "plugins/assistant-actions/src/verified-delivery.ts": "20bdaef85ab7e16d6bb2466ccf4b360ed886872c39d50fa1eaeedb171757d2f7",
+    "plugins/assistant-actions/tests/repository-readback.spec.ts": "81575e5e70806a6b029e475e1e6c4a796fc0cecb93ccb9df5cd2b1093f2f62c8",
+    "plugins/assistant-actions/tests/verified-delivery-service.spec.ts": "7486a283267a0fca7257ff9b8216b8442851026ee252a3a33ea173ceadfe5d49",
+    "plugins/assistant-actions/tests/verified-delivery.spec.ts": "368c4f0f86095776e94cea1db3d6ae1daa404277847b0869d81cde9994e8d6ef",
+    "plugins/assistant-goals/src/outcome.ts": "db11afc219e1abb2d12b5569715375850590783230fc577afe81179e102f7f43",
+    "plugins/assistant-goals/src/service.ts": "7ac9cb98cdccffea818fc33cc2b998b7d42d1f10e1579595f0d766962e8e54ce",
+    "plugins/assistant-goals/tests/outcome-runtime.spec.ts": "1993fbfc02cc6246449ff83d58a289229442bac1345acf082bdddcdac67833b2",
+    "plugins/assistant-goals/tests/service.spec.ts": "b5a2d64cfa2eb0ef09c14d2a1f1c5534e90d21d5b606cc07b6275670cdf340ca",
+    "plugins/assistant-skills/src/service.ts": "ec05a7e0715328487cc2848efa5888c899349dfd65922f0b2b493eb8bc8e922e",
+    "plugins/assistant-skills/src/store.ts": "833ff5bbe79ed0486068c85c9b2711ca2d5b67a4e51bc99600699f88969f978a",
+    "plugins/assistant-skills/src/watch-proof.ts": "b61d07f20f3c4ad4ffc00273a667e0ef0c6f80580a700f41dcc942e1f7430918",
+    "plugins/assistant-skills/tests/service.spec.ts": "3e4819302aed3cde73682f5646d88cf10799000befeb498013eafb4d5cab42bf",
+    "plugins/assistant-verifier/package.json": "d089d9769fcbc41c3844d4f972766e366ea6e0c07b4fed89b98c8d88451041a9",
+    "plugins/assistant-verifier/src/config.ts": "3ef451ad833c23f61354393e35eb308aac5eddee1cdc997866b5d1acd324e69c",
+    "plugins/assistant-verifier/src/drivers.ts": "40a62809a405c5bd9e8d03df0b23454bc49e4808e4e4657f8394258b50a91749",
+    "plugins/assistant-verifier/src/service.ts": "c22c1483c703a4cffd215c58f7e334aed03450ea2d85c369894bf22ac2255c2e",
+    "plugins/assistant-verifier/tests/repository.spec.ts": "b7d9f8cd65901e39f7b9d17077f93855889b22c6c8a2adf38b18111f7e56f554",
+    "plugins/assistant-web-owner/src/goal-admission.ts": "090a5a91435373a2d53394fd7a6d1b7c2f4e3f5a5ca51b8c9da8ffd86bdd06fb",
+    "plugins/assistant-web-owner/tests/goal-admission.spec.ts": "869a45f17d874fe3c169f88d0dc4cc03711592cebfc68c17ffe80d73363ae030"
+  },
+  "verifiedBehaviors": [
+    "Real Verifier tick calls Actions through Cordis and signs a repository outcome receipt; authenticated GitHub transport is a fixture.",
+    "Exact owner/session/native Goal/definition, assessment and independently accepted source run bind actual succeeded commit/PR ledger records; later assessment can verify an earlier source round.",
+    "Four fresh reads each consume an action and recheck authorization/source; wrong head, truncation, pending/unknown or exhausted authority cannot yield achieved.",
+    "Formal WebOwner setup optionally compiles repository outcome authority and preserves isolated step acceptance; absent option preserves local outcome.",
+    "Goals reconciles durable outcome receipt nudges against current fences without completing paused goals from stale receipts.",
+    "Owner-authorized skill watches record later run watermark, require exact independently verified fresh Goal outcomes and current route/background Policy, and append the exact parent fallback atomically once.",
+    "Skills tests cover restart, duplicate receipts, wrong run/native identity, unknown execution, expired/future/tampered proof, route rebind/revoke, policy denial and finite positive exhaustion."
+  ],
+  "independentReview": {
+    "reviewer": "delivery_path_audit",
+    "role": "read-only independent reviewer; no implementation writes",
+    "decision": "PASS for local source and targeted evidence, conditional on final root check; root check subsequently exited 0",
+    "limitations": [
+      "No real GitHub transport verification",
+      "No complete repository event lifecycle",
+      "Skill watch Goals/Policy/Delivery snapshots are explicit fixtures; ToolRuntime/Skills/SQLite/filesystem are actual components"
+    ]
+  },
+  "limitations": [
+    "No real model/browser run in this batch; earlier delivered real-model scenarios are separate evidence.",
+    "Formal repository event observer remains unimplemented; maxActions 7 funds one readback only, later attempts each need 4 additional actions.",
+    "Automatic candidate generation, sealed independent holdout and automatic promotion remain incomplete.",
+    "Rollback watches do not prove the skill caused a failed Goal and do not undo external effects.",
+    "No ChatGPT web review: required in-app browser unavailable."
+  ],
+  "resolvedFailures": [
+    "Initial Actions source contract fixture used a 1970 issuedAt with current expiry and failed validity checks; corrected bounded timestamps, final 36 targeted tests passed.",
+    "Direct Actions method calls hid a Cordis receiver-binding failure; changed public broker to retain instance binding and kept the real Verifier tick regression test."
+  ],
+  "packageInspection": [
+    "33 dry-run pack listings inspected; new repository-readback and watch-proof JS/declarations are present with patch/README/LICENSE/package.json; no source tests or database in their lists."
+  ]
+}

@@ -112,3 +112,6 @@ Event Triggers 的版本化来源依赖同批 Automations 新增的纯 `./extern
 
 
 中间步骤交付需同批 Goals 的 `inspectOwnerAcceptedStepArtifacts`、Verifier 的持久回执通知和 Actions 的显式 `verifiedDelivery.acceptance` 支持。Actions 将 Verifier 声明为可选 Host peer，仅验收后交付运行时等待该服务；普通直接动作不因此自动启用 Verifier。旧 grant 省略模式仍为整体验收，已保存 intent 也按旧模式解释；同 revision 不允许更改授权模式。该变更不改变 DSH/Cordis 基线或创建新的调度器，升级应成套安装。
+
+
+Verifier 的 `repository-readback` 使用可选 Actions Host peer，沿用现有 v3 `target-readback` 协议；缺少当前 `readRepositoryGoalOutcome` / `repositoryReadbackGeneration` 时保持 unknown。Actions 普通依赖共享任务契约校验器，Verifier 不静态导入 Actions 运行时，避免增加初始化环。公开 Actions 方法保持实例绑定，升级须重跑真实 Verifier→Cordis→Actions 调用，而不只测试直接对象方法。Skills 有限 watch 使用 Goals 当前 `inspectWorkflowRunContext` 的 `nativeGoalId` 和 owner-scoped execution snapshot；旧调用记录缺少完整 native/run 绑定时不参与回滚。新增 watch 表保留历史版本/运行，不回填旧记录为可信观察。

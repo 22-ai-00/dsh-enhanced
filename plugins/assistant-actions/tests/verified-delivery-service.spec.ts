@@ -14,6 +14,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantActionsService } from '../src/service.ts'
+import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
+import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import type { ActionGrant } from '../src/types.ts'
 
 const cleanups: Array<() => Promise<void>> = []
@@ -25,11 +27,12 @@ async function fixture(acceptance?: 'goal-step') {
   const session = Session.create(id, [], { version: SESSION_FORMAT_VERSION, id, createdAt: 1, isSeeded: false, cwd: root, agentPreset: 'primary' })
   const agent: Agent = { id, options: { provider: 'test', model: 'test' }, session, inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }), ctx: undefined as unknown as Context, status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(agent as any).ctx = createScope(ctx, agent).ctx; session.append('turn/start', { turn: 1 }); session.append('approval/policy', { policy: 'ask' })
-  const grant: ActionGrant = { id: 'verified', revision: 1, principalDigest: createHash('sha256').update('owner').digest('hex'), principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', repository: 'owner/repository', branch: 'fix', paths: ['artifacts/release.txt'], credentialHandle: 'github', expiresAt: Date.now() + 60_000, maxActions: 4, maxTotalBytes: 100_000, repoWorkflow: { baseBranch: 'main', allowBranchCreate: true, allowPullRequest: true }, verifiedDelivery: { ownerRouteId: 'route', budgetId: 'budget', ...(acceptance ? { acceptance } : {}) } }
+  const grant: ActionGrant = { id: 'verified', revision: 1, principalDigest: createHash('sha256').update('owner').digest('hex'), principalRecordId: 'record', principalVersion: 1, workspace: root, agentPreset: 'primary', repository: 'owner/repository', branch: 'fix', paths: ['artifacts/release.txt'], credentialHandle: 'github', expiresAt: Date.now() + 60_000, maxActions: 12, maxTotalBytes: 100_000, repoWorkflow: { baseBranch: 'main', allowBranchCreate: true, allowPullRequest: true }, verifiedDelivery: { ownerRouteId: 'route', budgetId: 'budget', ...(acceptance ? { acceptance } : {}) } }
   const agents = new Map<string, Agent>([[id, agent]]); let route = { principalRecordId: 'record', principalVersion: 1, bindingVersion: 1, generation: 1 }; let receiptVersion = 1
   const verifiedSnapshot = { protocol: 'assistant-goals/verified-artifacts/v1', acceptance: { validUntil: Date.now() + 30_000 }, files: [{ path: 'artifacts/release.txt', content: 'verified source', sha256: 'b'.repeat(64), jobId: 'job' }] }
   const snapshot = () => structuredClone(verifiedSnapshot)
-  const goals = { taskContext: () => ({ goal: { id: 'goal' } }), inspectWorkflowRunContext: () => ({ goalId: 'goal', goalExecutionRunId: 'run', definition: { digest: 'd'.repeat(64), version: 1 } }), inspectOwnerGoalExecution: vi.fn((): any => ({ storedGoal: { definition: { digest: 'd'.repeat(64), version: 1 }, nativeAtLastObservation: { phase: 'complete' } }, outcome: { status: 'achieved' } })), inspectOwnerVerifiedArtifacts: vi.fn(() => snapshot()), inspectOwnerAcceptedStepArtifacts: vi.fn(() => ({ ...snapshot(), protocol: 'assistant-goals/accepted-step-artifacts/v1' })) }
+  let registration: any; let proof: any = null
+  const goals = { trustedAcceptanceProducerGeneration: () => 'goals', registerTaskAcceptanceSink: (value: any) => { registration = value; return () => { registration = undefined } }, inspectAcceptedExecution: async () => proof, taskContext: () => ({ goal: { id: 'goal' } }), inspectWorkflowRunContext: vi.fn(() => ({ goalId: 'goal', nativeGoalId: 'native-goal', goalExecutionRunId: 'run', definition: { digest: 'd'.repeat(64), version: 1 } })), inspectOwnerGoalExecution: vi.fn((): any => ({ storedGoal: { definition: { digest: 'd'.repeat(64), version: 1 }, nativeAtLastObservation: { phase: 'complete', sessionId: 'owner-session', goalId: 'native-goal' } }, outcome: { status: 'achieved' } })), inspectOwnerVerifiedArtifacts: vi.fn(() => snapshot()), inspectOwnerAcceptedStepArtifacts: vi.fn(() => ({ ...snapshot(), protocol: 'assistant-goals/accepted-step-artifacts/v1' })) }
   const executors: any[] = [], reconciles: any[] = []; const automations = { registerHostExecutor: (executor: any) => { executors.push(executor); return () => {} }, reconcileSystem: (input: any) => { reconciles.push(input); return { definition: input.definition } } }
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(ApprovalService, { policy: 'ask' })
   await ctx.plugin(AssistantPolicyService, { databasePath: join(root, 'policy.sqlite'), toolDefaultEffect: 'allow', rules: [
@@ -41,17 +44,32 @@ async function fixture(acceptance?: 'goal-step') {
   ctx.provide('agents' as never, { get: (key: string) => agents.get(key) } as never)
   const notifications = vi.fn()
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: () => ({ principalId: 'owner', principalLineage: { principalRecordId: 'record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' }, bindingVersion: 1, bindingGeneration: 1 }), validateOwnerRoute: () => ({ ...route, receiptVersion }), enqueueOwnerNotification: notifications } as never)
-  ctx.provide('assistantVerifier' as never, {} as never); ctx.provide('assistantGoals' as never, goals as never); ctx.provide('assistantAutomations' as never, automations as never)
+  ctx.provide('assistantGoals' as never, goals as never);
+  const repositoryAuthority = { kind: 'repository-readback' as const, id: 'repository', grantId: 'verified', grantRevision: 1, repository: 'owner/repository', branch: 'fix', baseBranch: 'main', requiredChecks: [{ name: 'CI', appId: 7 }], reviewerIds: [42], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 1_000 }
+  const compiledAuthority = createVerifierAuthorities({ authorities: [repositoryAuthority] })[0]!
+  const repositoryCriterion = { id: 'repository', kind: 'target-readback' as const, authority: { id: compiledAuthority.id, digest: compiledAuthority.digest }, objectId: 'owner/repository:fix', expected: [{ pointer: '/ready', value: true }] }
+  const verifier = new AssistantVerifierService(ctx, { databasePath: join(root, 'verifier.sqlite'), authorities: [repositoryAuthority], tickIntervalMs: 0, requireAcceptance: true, profiles: [{ id: 'repository-profile', version: 1, scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'record', principalVersion: 1 }, taskKind: 'goal-outcome', objective: 'Repository delivery', validityMs: 30_000, bounds: { maxDurationMs: 5_000, maxEvidenceBytes: 4_096 }, criteria: [repositoryCriterion] }] })
+  ctx.provide('assistantAutomations' as never, automations as never)
   const commit = vi.fn(async input => ({ actionId: input.actionId, status: 'succeeded' as const, commitOid: 'c'.repeat(40) })); const pullRequest = vi.fn(async input => ({ actionId: input.actionId, status: 'succeeded' as const, pullRequestNumber: 7 }))
+  const remotePullRequest = { id: 7, number: 7, state: 'open', merged: false, head: { ref: 'fix', sha: 'c'.repeat(40), repo: { full_name: 'owner/repository' } }, base: { ref: 'main', repo: { full_name: 'owner/repository' } } }
+  const inspect = vi.fn(async ({ kind }: any) => ({ observed: kind === 'branch' ? { name: 'fix', commit: { sha: 'c'.repeat(40) } }
+    : kind === 'pull-request' ? remotePullRequest
+      : { pullRequest: remotePullRequest, headOid: 'c'.repeat(40), items: kind === 'checks' ? [{ id: 1, name: 'CI', app: { id: 7 }, head_sha: 'c'.repeat(40), status: 'completed', conclusion: 'success' }]
+        : [{ id: 1, user: { id: 42 }, commit_id: 'c'.repeat(40), state: 'APPROVED', submitted_at: '2025-01-01T00:00:00Z' }], truncated: false, untrusted: true } }))
   let service!: AssistantActionsService
-  const plugin = await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) { service = new AssistantActionsService(runtime, { stateRoot: join(root, 'actions'), grants: [grant] }, commit, { branch: vi.fn(), pullRequest, inspect: vi.fn() } as any) } })
+  const plugin = await ctx.plugin({ name: 'dsh-enhanced-assistant-actions', apply(runtime: Context) { service = new AssistantActionsService(runtime, { stateRoot: join(root, 'actions'), grants: [grant] }, commit, { branch: vi.fn(), pullRequest, inspect } as any) } })
   const execute = (name: string, args: any) => ctx.tools.execute({ callId: ToolCallId(`${name}-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
-  const activate = async (event = 'goal/changed') => { (ctx.emit as any)(event, { taskKind: 'goal-step' }); await new Promise(resolve => setTimeout(resolve, 0)); const active = reconciles.find(entry => entry.desiredStatus === 'active'); return executors[0].execute({ occurrenceId: 'o', automationId: active.automationId, definitionHash: createHash('sha256').update(JSON.stringify(active.definition)).digest('hex'), executionMode: 'production', targetScope: { workspace: root, preset: 'primary' }, principal: 'owner', ownerRouteId: 'route', activationNonce: active.automationId, catalogDigest: executors[0].descriptor.catalogDigest, signal: new AbortController().signal }) }
+  const activate = async (event = 'goal/changed') => { (ctx.emit as any)(event, { taskKind: 'goal-step' }); await new Promise(resolve => setTimeout(resolve, 0)); const active = reconciles.filter(entry => entry.desiredStatus === 'active').at(-1)!; return executors[0].execute({ occurrenceId: 'o', automationId: active.automationId, definitionHash: createHash('sha256').update(JSON.stringify(active.definition)).digest('hex'), executionMode: 'production', targetScope: { workspace: root, preset: 'primary' }, principal: 'owner', ownerRouteId: 'route', activationNonce: active.automationId, catalogDigest: executors[0].descriptor.catalogDigest, signal: new AbortController().signal }) }
   cleanups.push(async () => { await plugin.dispose(); await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
-  return { ctx, agent, agents, goals, executors, reconciles, grant, commit, pullRequest, notifications, execute, activate, prepare: (input: any) => service.prepareVerifiedDelivery(agent, input), revokeRoute: () => { route = { ...route, bindingVersion: 2 } }, changeReceipt: () => { receiptVersion++ } }
+  return { ctx, agent, agents, goals, registration: () => registration, setProof: (value: any) => { proof = value }, repositoryAuthority: compiledAuthority, executors, reconciles, grant, commit, pullRequest, inspect, verifier, notifications, execute, activate, read: (input: any) => service.readRepositoryGoalOutcome(input, new AbortController().signal), prepare: (input: any) => service.prepareVerifiedDelivery(agent, input), revokeRoute: () => { route = { ...route, bindingVersion: 2 } }, changeReceipt: () => { receiptVersion++ } }
 }
 
 describe('verified delivery Actions service', () => {
+  it('keeps legacy whole-goal delivery capture available when an older Goals service has no nativeGoalId', async () => {
+    const f = await fixture()
+    f.goals.inspectWorkflowRunContext.mockReturnValue({ goalId: 'goal', goalExecutionRunId: 'run', definition: { digest: 'd'.repeat(64), version: 1 } } as never)
+    expect(f.prepare({ grantId: 'verified', idempotencyKey: 'legacy', expectedHeadOid: oid, headline: 'Legacy', paths: ['artifacts/release.txt'] })).toMatchObject({ status: 'awaiting-verification' })
+  })
   it('registers through the real tool/ledger, then host commits and opens a PR after the Agent disappears', async () => {
     const f = await fixture(); const delivery = { grantId: 'verified', idempotencyKey: 'delivery', expectedHeadOid: oid, headline: 'Deliver verified', paths: ['artifacts/release.txt'], pullRequest: { title: 'PR', body: 'body' } }
     const queued: any = await f.execute('action_github_deliver', delivery)
@@ -123,4 +141,86 @@ describe('verified delivery Actions service', () => {
     const pending = f.activate(); await entered.promise; f.changeReceipt(); release.resolve()
     expect((await pending).outcome).not.toBe('succeeded'); expect(f.commit).not.toHaveBeenCalled()
   })
+
+  const bindRepository = (f: any, nativeGoalId = 'native-goal') => {
+    const task = { kind: 'goal-outcome' as const, ref: 'assessment', goal: { id: 'goal', sessionId: 'owner-session', nativeGoalId, definitionVersion: 1, definitionDigest: 'd'.repeat(64), assessmentId: 'assessment' } }
+    const handle = f.registration().prepare({ scope: { workspace: f.grant.workspace, preset: 'primary' }, owner: { principalRecordId: 'record', principalVersion: 1 }, objective: 'Repository delivery', task })
+    expect(handle).not.toBeNull()
+    const inspected = f.verifier.inspectRepositoryReadbackAuthority(handle!.contractId, f.repositoryAuthority.id, f.repositoryAuthority.digest)
+    const run = (runId: string, round: number) => ({ intent: { runId, scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: f.grant.workspace, preset: 'primary' }, objective: 'Repository delivery', admission: { issuedAt: 1, expiresAt: 60_000, maxGoalRounds: 2, round, authorizationDigest: 'a'.repeat(64) }, task: { kind: 'goal-step', ref: runId, goal: { id: 'goal', definitionVersion: 1, definitionDigest: 'd'.repeat(64), stepId: `step-${runId}`, runId, sessionId: 'owner-session', nativeGoalId: 'native-goal', nativeRevision: 1 } } }, dispatchedAt: 1, execution: { status: 'succeeded', quiescent: true, completedAt: 2 } })
+    const source = run('run', 1), trigger = run('assessment-run', 2), sourceIssuedAt = Date.now() - 1000
+    const sourceContract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v2', id: 'source-step', scope: inspected.contract.scope, owner: inspected.contract.owner,
+      task: source.intent.task as never, objective: 'Repository delivery', profile: { id: 'step', version: 1, digest: 'a'.repeat(64) }, issuedAt: sourceIssuedAt, expiresAt: sourceIssuedAt + 30_000,
+      criteria: [{ id: 'source', kind: 'document-citations', authority: { id: 'docs', digest: 'a'.repeat(64) }, artifactPath: 'artifacts/release.txt', requiredText: ['verified source'], quotes: [] }], bounds: { maxDurationMs: 1000, maxEvidenceBytes: 4096 } })
+    const receipt = createTaskVerificationReceipt(sourceContract, { protocol: 'task-verification/v2', id: 'source-receipt', contractId: sourceContract.id, contractDigest: sourceContract.digest,
+      scope: sourceContract.scope, owner: sourceContract.owner, task: sourceContract.task, startedAt: sourceIssuedAt + 1, completedAt: sourceIssuedAt + 2, validUntil: sourceContract.expiresAt,
+      results: [{ criterionId: 'source', status: 'passed', reason: 'verified', evidence: [] }] })
+    const evidence = { storedGoal: { definition: { digest: 'd'.repeat(64), version: 1 }, nativeAtLastObservation: { phase: 'blocked', sessionId: 'owner-session', goalId: 'native-goal' } },
+      executionRuns: [{ ...source, acceptance: { contractId: sourceContract.id, contractDigest: sourceContract.digest } }, trigger],
+      acceptedTasks: [{ contractId: sourceContract.id, state: 'done', contract: sourceContract, receipt }],
+      outcomeAssessments: [{ contract: inspected.contract, triggerRunId: 'assessment-run', dispatchedAt: 1, execution: { status: 'succeeded', quiescent: true, completedAt: 2 } }] }
+    f.goals.inspectOwnerGoalExecution.mockReturnValue(evidence)
+    return { authority: f.repositoryAuthority, contract: { id: handle!.contractId }, handle, evidence }
+  }
+  const stepEvidence = () => ({ storedGoal: { definition: { digest: 'd'.repeat(64), version: 1 }, nativeAtLastObservation: { phase: 'paused', sessionId: 'owner-session', goalId: 'native-goal' } }, outcome: { status: 'not-achieved' },
+    executionRuns: [{ intent: { runId: 'run' }, acceptance: { contractId: 'step' }, execution: { status: 'succeeded', quiescent: true } }], acceptedTasks: [{ contractId: 'step', state: 'done' }] })
+
+  const completeStepDelivery = async (f: any, key = 'repository', outcome: 'succeeded' | 'unknown' = 'succeeded') => {
+    f.goals.inspectOwnerGoalExecution.mockReturnValue(stepEvidence())
+    await f.execute('action_github_deliver', { grantId: 'verified', idempotencyKey: key, expectedHeadOid: oid, headline: 'Deliver', paths: ['artifacts/release.txt'], pullRequest: { title: 'PR', body: 'body' } })
+    expect((await f.activate('assistant-verifier/receipt')).outcome).toBe(outcome)
+  }
+
+  it('uses the fenced Host ledger and four independently charged reads for a fresh exact repository outcome', async () => {
+    const f = await fixture('goal-step'); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
+    await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).resolves.toEqual({ objectId: 'owner/repository:fix', headOid: 'c'.repeat(40), ci: 'passed', review: 'approved', pullRequest: 'open', ready: true })
+    expect(f.inspect).toHaveBeenCalledTimes(4); expect(f.inspect.mock.calls.map((call: any[]) => call[0].kind)).toEqual(['checks', 'reviews', 'pull-request', 'branch'])
+  })
+
+  it('a real Verifier tick reaches Actions through the Cordis service and issues a fresh achieved receipt', async () => {
+    const f = await fixture('goal-step'); await completeStepDelivery(f); const { handle } = bindRepository(f)
+    f.setProof({ ...handle, dispatchedAt: Date.now(), completedAt: Date.now(), status: 'succeeded', quiescent: true, executionRef: 'assessment' })
+    await f.registration().completed(handle); await f.verifier.tick()
+    expect(f.verifier.inspectAcceptedTask(handle.contractId)).toMatchObject({ state: 'done', receipt: { objectiveStatus: 'achieved' } })
+    expect(f.inspect).toHaveBeenCalledTimes(4)
+  })
+
+  it('does not reuse an older success once a newer exact delivery is pending or unknown', async () => {
+    const f = await fixture('goal-step'); await completeStepDelivery(f, 'old'); const { authority, contract } = bindRepository(f)
+    await f.execute('action_github_deliver', { grantId: 'verified', idempotencyKey: 'new', expectedHeadOid: oid, headline: 'New', paths: ['artifacts/release.txt'], pullRequest: { title: 'PR', body: 'body' } })
+    await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).rejects.toThrow('not settled')
+    const unknown = await fixture('goal-step'); await completeStepDelivery(unknown, 'old'); const binding = bindRepository(unknown)
+    unknown.goals.inspectOwnerGoalExecution.mockReturnValue(stepEvidence())
+    ;(unknown.commit as any).mockResolvedValueOnce({ actionId: 'ignored', status: 'unknown', reason: 'unconfirmed' })
+    await unknown.execute('action_github_deliver', { grantId: 'verified', idempotencyKey: 'later-failed-source', expectedHeadOid: oid, headline: 'Later', paths: ['artifacts/release.txt'], pullRequest: { title: 'PR', body: 'body' } })
+    expect((await unknown.activate('assistant-verifier/receipt')).outcome).toBe('unknown')
+    await expect(unknown.read({ contractId: binding.contract.id, authorityId: binding.authority.id, authorityDigest: binding.authority.digest })).rejects.toThrow('not settled')
+  })
+
+  it.each(['later-source', 'unknown-source', 'changed-assessment', 'failed-source-proof'] as const)('rejects %s substitution before remote I/O', async change => {
+    const f = await fixture('goal-step'); await completeStepDelivery(f); const binding = bindRepository(f)
+    const evidence = structuredClone(binding.evidence)
+    if (change === 'later-source') evidence.executionRuns[0]!.intent.admission.round = 3
+    if (change === 'unknown-source') evidence.executionRuns[0]!.execution.quiescent = false
+    if (change === 'changed-assessment') evidence.outcomeAssessments[0]!.triggerRunId = 'foreign'
+    if (change === 'failed-source-proof') evidence.acceptedTasks[0]!.state = 'needs-attention'
+    f.goals.inspectOwnerGoalExecution.mockReturnValue(evidence)
+    await expect(f.read({ contractId: binding.contract.id, authorityId: binding.authority.id, authorityDigest: binding.authority.digest })).rejects.toThrow()
+    expect(f.inspect).not.toHaveBeenCalled()
+  })
+
+  it('does not read back after route revocation or a contract native-goal mismatch', async () => {
+    const f = await fixture('goal-step'); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
+    f.changeReceipt(); await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).rejects.toThrow('authority changed')
+    const fresh = await fixture('goal-step'); await completeStepDelivery(fresh); const wrong = bindRepository(fresh, 'other-native')
+    await expect(fresh.read({ contractId: wrong.contract.id, authorityId: wrong.authority.id, authorityDigest: wrong.authority.digest })).rejects.toThrow('not settled')
+  })
+
+  it('does not mark a remote outcome ready when the current branch head differs from the settled commit', async () => {
+    const f = await fixture('goal-step'); await completeStepDelivery(f); const { authority, contract } = bindRepository(f)
+    const original = f.inspect.getMockImplementation()
+    f.inspect.mockImplementation(async (input: any) => input.kind === 'branch' ? { observed: { name: 'fix', commit: { sha: oid } } } : await original!(input))
+    await expect(f.read({ contractId: contract.id, authorityId: authority.id, authorityDigest: authority.digest })).resolves.toEqual(expect.objectContaining({ headOid: '', ci: 'unknown', review: 'unknown', pullRequest: 'open', ready: false }))
+  })
+
 })

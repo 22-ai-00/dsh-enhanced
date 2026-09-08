@@ -3,7 +3,7 @@ import { isAbsolute, join, normalize } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
 import { Config as GoalsConfig, validateGoalStrategyConfig, type GoalCallsBudgetConfig, type GoalTokenBudgetConfig, type GoalStrategyConfig } from '@dsh-enhanced/assistant-goals'
-import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptanceProfile, type VerifierAuthorityInput } from '@dsh-enhanced/assistant-verifier'
+import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptanceProfile, type VerifierAuthorityInput, type RepositoryReadbackAuthorityInput } from '@dsh-enhanced/assistant-verifier'
 import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
 import type { ActiveWebOwnerBindingSnapshot } from '@dsh-enhanced/assistant-delivery'
 import { inspectAutonomyProfile, type AutonomyDoctorProfile } from './doctor.js'
@@ -20,7 +20,7 @@ interface GoalAdmissionTaskBase {
     cases: Array<{ stdin: string; expectedStdout: string; expectedExitCode: number }>
   }
   wake?: { maxDelayMs: number; runTimeoutMs: number; maxRuns: number }
-  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step' }
+  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step'; outcome?: Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> }
 }
 /** Legacy v1 fixed DeepSeek route. Kept for existing private admission files. */
 export interface GoalAdmissionTaskV1 extends GoalAdmissionTaskBase {
@@ -119,13 +119,20 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
   }
   if (input.repositoryDelivery !== undefined) {
     if (input.version !== 2) fail('repository delivery requires task version 2')
-    shape(input.repositoryDelivery, ['repository', 'baseBranch', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'openPullRequest'], ['acceptance'])
+    shape(input.repositoryDelivery, ['repository', 'baseBranch', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'openPullRequest'], ['acceptance', 'outcome'])
     const value = input.repositoryDelivery as NonNullable<GoalAdmissionTaskBase['repositoryDelivery']>
     if (value.acceptance !== undefined && !['goal-outcome', 'goal-step'].includes(value.acceptance)) fail('invalid repository acceptance')
     for (const key of ['repository', 'baseBranch', 'branch', 'credentialHandle'] as const) if (typeof value[key] !== 'string' || value[key].length === 0 || value[key].length > 256) fail('invalid repository delivery')
     if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.repository) || !Array.isArray(value.paths) || value.paths.length !== 1 || value.paths[0] !== verification.artifactPath
       || value.baseBranch === value.branch || !Number.isSafeInteger(value.expiresAt) || typeof value.openPullRequest !== 'boolean') fail('invalid repository delivery')
     integer(value.maxActions, value.openPullRequest ? 3 : 2, 10_000); integer(value.maxTotalBytes, 1, 64 * 1024 * 1024)
+    if (value.outcome !== undefined) {
+      shape(value.outcome, ['requiredChecks', 'reviewerIds', 'minApprovals', 'timeoutMs', 'freshnessMs'])
+      if (value.acceptance !== 'goal-step' || !value.openPullRequest) fail('repository outcome requires explicit goal-step delivery and a pull request')
+      createVerifierAuthorities({ authorities: [{ ...value.outcome, kind: 'repository-readback', id: 'repository-validation', grantId: 'repository-validation', grantRevision: 1, repository: value.repository, branch: value.branch, baseBranch: value.baseBranch }] })
+      integer(value.maxActions, 7, 10_000)
+      if (budget.durationMs <= input.stepMaxDurationMs + verificationWindow + value.outcome.timeoutMs) fail('execution budget cannot cover repository verification')
+    }
   }
   return input as unknown as GoalAdmissionTask
 }
@@ -231,13 +238,21 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     image: profile.image, dockerPath: profile.dockerPath, command: task.verification.command, expiresAt: profile.grant.expiresAt,
     maxRuns: task.verification.maxRuns, maxTotalDurationMs: task.verification.maxTotalDurationMs, maxDurationMs: task.verification.maxDurationMs,
     maxOutputBytes: task.verification.maxOutputBytes, testSets: [{ id: 'cases', cases: task.verification.cases }] }
-  const compiled = createVerifierAuthorities({ authorities: [authority] })[0]!
+  const repository = task.repositoryDelivery
+  const remoteAuthority: RepositoryReadbackAuthorityInput | undefined = repository?.outcome === undefined ? undefined : {
+    ...repository.outcome, kind: 'repository-readback', id: `${admissionId}-repository-verify`, grantId: `${admissionId}-repository`, grantRevision: 1,
+    repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch,
+  }
+  const authorities: VerifierAuthorityInput[] = remoteAuthority ? [authority, remoteAuthority] : [authority]
+  const compiled = createVerifierAuthorities({ authorities })
   const verificationWindow = task.verification.maxDurationMs * task.verification.cases.length
   const profiles: AcceptanceProfile[] = (['goal-step', 'goal-outcome'] as const).map(taskKind => ({ id: `${admissionId}-${taskKind}`, version: 1, taskKind,
     objective: task.objective, scope: { workspace: input.workspace, preset: input.preset }, owner: { principalRecordId: owner.id, principalVersion: owner.version },
-    validityMs: task.executionBudget.durationMs, bounds: { maxDurationMs: verificationWindow, maxEvidenceBytes: 8192 },
-    criteria: [{ id: 'artifact-behavior', kind: 'isolated-process-behavior', authority: { id: compiled.id, digest: compiled.digest }, artifactPath: task.verification.artifactPath, testSetId: 'cases' }] }))
-  append(verifier, 'authorities', [authority]); append(verifier, 'profiles', profiles)
+    validityMs: task.executionBudget.durationMs, bounds: { maxDurationMs: taskKind === 'goal-outcome' && remoteAuthority ? remoteAuthority.timeoutMs : verificationWindow, maxEvidenceBytes: 8192 },
+    criteria: taskKind === 'goal-outcome' && remoteAuthority
+      ? [{ id: 'repository-ready', kind: 'target-readback', authority: { id: compiled[1]!.id, digest: compiled[1]!.digest }, objectId: `${remoteAuthority.repository}:${remoteAuthority.branch}`, expected: [{ pointer: '/ready', value: true }] }]
+      : [{ id: 'artifact-behavior', kind: 'isolated-process-behavior', authority: { id: compiled[0]!.id, digest: compiled[0]!.digest }, artifactPath: task.verification.artifactPath, testSetId: 'cases' }] }))
+  append(verifier, 'authorities', authorities); append(verifier, 'profiles', profiles)
   // Compile all effective authorities/profiles, detecting conflicting exact task matches too.
   compileAcceptanceProfiles({ databasePath: 'validation-only', authorities: sequence(verifier.get('authorities', true)).toJSON() as VerifierAuthorityInput[], profiles: sequence(verifier.get('profiles', true)).toJSON() as AcceptanceProfile[] })
   set(goals, 'verifyNativeRounds', true, [false]); set(goals, 'verifyGoalOutcome', true, [false])

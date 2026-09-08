@@ -152,9 +152,21 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 
 设置命令从已有主人和空闲 Session 派生 Actions grant、owner route、有限调度预算及精确 Policy 规则，包含后台提交与原会话通知；无需用户填写内部身份、路由或规则 ID。未提供 `wake` 时自动配置至多一次后台运行；已有合法 `wake` 配置继续使用。已有同 ID 配置冲突会拒绝整次配置，而不会覆盖。正式 CLI 在取得配置锁后及写入前重读有效配置，发现下层凭据或插件配置变化时拒绝；多文件配置与数据库仍不构成一个跨进程原子事务。所需 Actions、Keychain、Goals、Automations 与 Delivery 必须来自匹配的安装集合。
 
-重启 Host 后，在原会话提交与配置一致的目标，并说明需要交付到已授权仓库。模型可查询可用授权、读取目标分支 head、修复隔离产物并登记交付；独立步骤和整体验收通过后由后台提交准确产物、按授权创建 PR，并主动显示最终结果。步骤模式允许原目标保持 active 或 paused，但不会自动增加 CI/评审验收条件；当前配置入口仍只生成本地隔离产物的验收条件，不能据此声称已具备完整 CI 跟进。设置命令只证明配置和当前身份匹配；凭据是否可用、远端仓库访问和真实 GitHub 提交仍须实际运行验证。本机端到端测试的 GitHub 传输是明确替身，不能视为真实 GitHub 认证成功。
+重启 Host 后，在原会话提交与配置一致的目标，并说明需要交付到已授权仓库。模型可查询可用授权、读取目标分支 head、修复隔离产物并登记交付；独立步骤和整体验收通过后由后台提交准确产物、按授权创建 PR，并主动显示最终结果。步骤模式允许原目标保持 active 或 paused。可选 `repositoryDelivery.outcome` 将整体验收绑定到实际提交的 CI/评审新鲜回读；省略时仍使用本地隔离产物条件。设置命令只证明配置和当前身份匹配；凭据是否可用、远端仓库访问和真实 GitHub 提交仍须实际运行验证。本机端到端测试的 GitHub 传输是明确替身，不能视为真实 GitHub 认证成功。
 
-每个验收 profile 的验证窗口为 `verification.maxDurationMs × verification.cases.length`，必须小于 `stepMaxDurationMs`。两个 profile 都使用该窗口；因此 `executionBudget.durationMs` 必须严格大于 `stepMaxDurationMs + 2 × 验证窗口`，以覆盖 native round、step 验收和 whole-goal 验收。setup 会拒绝不足的明确预算，不会自动扩大时长或权限。
+需要仓库整体验收时，在 `repositoryDelivery` 中设置 `acceptance: "goal-step"`、`openPullRequest: true`，并增加：
+
+```json
+"outcome": {
+  "requiredChecks": [{ "name": "tests", "appId": 12345 }],
+  "reviewerIds": [67890], "minApprovals": 1,
+  "timeoutMs": 10000, "freshnessMs": 30000
+}
+```
+
+上述名称和数字应替换为目标仓库实际要求的 check 名称、GitHub App ID 和 reviewer ID。每次验收重新读取 checks、reviews、PR 和 branch，要求同一提交 head、全部指定 checks 成功及足够当前评审通过；pending 或截断结果不能完成目标。至少配置 `maxActions: 7`（读取初始 head、commit、PR、四次验收读取），重试与后续事件需要额外有限次数。总目标时长还须覆盖步骤执行、本地验收和 `outcome.timeoutMs`。配置器不会扩大授权，也尚不创建仓库事件 observer；此选项本身不构成重启后持续跟进的完整入口。
+
+每个验收 profile 的验证窗口为 `verification.maxDurationMs × verification.cases.length`，必须小于 `stepMaxDurationMs`。未配置仓库 outcome 时两个 profile 都使用该窗口；因此 `executionBudget.durationMs` 必须严格大于 `stepMaxDurationMs + 2 × 验证窗口`，以覆盖 native round、step 验收和 whole-goal 验收。setup 会拒绝不足的明确预算，不会自动扩大时长或权限。
 
 该精确 Session 仅用于核验 owner 和可选 wake route；生成的 profiles 绑定 owner、scope 和 objective。setup 只写入并复核本地配置、已有 owner snapshot 与持久 grant；它不发 DeepSeek 请求、不创建 Goal、不证明凭据可用、网络连通、模型质量、隔离验收成功或完整 WP17/长期自治已经完成。grant 已过期、撤销、耗尽，owner/version 改变，或 Session 有 pending/dispatched/unknown lease 时必须先按正常运维流程处理，不能靠重跑此命令续权。
 

@@ -4,12 +4,15 @@ import { defineTool, type ToolExecution } from '@deepseek-ai/dsh-tools'
 import type {} from '@dsh-enhanced/assistant-delivery'
 import type {} from '@dsh-enhanced/assistant-policy'
 import type {} from '@dsh-enhanced/credentials-keychain'
-import type {} from '@dsh-enhanced/assistant-goals'
+import type { GoalExecutionRun } from '@dsh-enhanced/assistant-goals'
+import type { RepositoryReadbackAuthority } from '@dsh-enhanced/assistant-verifier'
+import { validateTaskAcceptanceContract, validateTaskVerificationReceipt, type TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { Config, commitBytes, normalizeCommit, normalizeVerifiedDelivery, validateConfig } from './config.js'
-import { VerifiedDeliveryRuntime, type DeliveryIntent, type DeliverySecurity, type VerifiedFiles } from './verified-delivery.js'
+import { VerifiedDeliveryRuntime, type DeliveryIntent, type DeliveryOutcome, type DeliverySecurity, type VerifiedFiles } from './verified-delivery.js'
+import { normalizeRepositoryReadback, validateRepositoryReadbackRequirements, type RepositoryReadback, type RepositoryReadbackRequirements } from './repository-readback.js'
 import { ActionLedger, normalizeWorkflow } from './ledger.js'
 import { commitOnGitHub, createBranchOnGitHub, createPullRequestOnGitHub, inspectGitHub } from './github.js'
 import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, BranchRequest, CommitRequest, InspectRequest, PullRequestRequest, VerifiedDeliveryRequest, WorkflowRequest } from './types.js'
@@ -19,6 +22,10 @@ const digest = (value: unknown): string => createHash('sha256').update(JSON.stri
 const principalDigest = (value: string): string => createHash('sha256').update(value).digest('hex')
 interface Authorization { identity(): ActionIdentity; authorize(record: ActionRecord): boolean; sessionId: string }
 type Operation = (actionId: string, grant: ActionGrant, token: string, signal: AbortSignal) => Promise<ActionResult>
+interface RepositoryReadbackContext {
+  authority: { grantId: string; grantRevision: number; repository: string; branch: string; baseBranch: string; timeoutMs: number; freshnessMs: number }
+  evidenceDigest: string; requirements: RepositoryReadbackRequirements; security: DeliverySecurity; intent: DeliveryIntent; commitOid: string; pullRequestNumber: number
+}
 const workflowTransport = { branch: createBranchOnGitHub, pullRequest: createPullRequestOnGitHub, inspect: inspectGitHub }
 
 declare module '@deepseek-ai/cordis' { interface Context { assistantActions: AssistantActionsService } }
@@ -137,6 +144,109 @@ export class AssistantActionsService extends Service {
     return this.#verified.prepare(agent, normalizeVerifiedDelivery(input))
   }
 
+  /** Stable only while this fenced broker remains active; used by Verifier around an untrusted remote read. */
+  repositoryReadbackGeneration = (): string => this.#active && this.#ledger.hasController(this.#authority) ? digest(this.#authority) : ''
+
+  readRepositoryGoalOutcome = async (input: { contractId: string; authorityId: string; authorityDigest: string }, signal: AbortSignal): Promise<RepositoryReadback & { ready: boolean }> => {
+    signal.throwIfAborted()
+    const verifier = this.ctx.get('assistantVerifier', false)
+    if (!verifier) throw new Error('assistant-actions: repository readback authority unavailable')
+    const binding = verifier.inspectRepositoryReadbackAuthority(input.contractId, input.authorityId, input.authorityDigest)
+    const bindingDigest = digest(binding)
+    const context = () => {
+      const currentVerifier = this.ctx.get('assistantVerifier', false)
+      if (!currentVerifier) throw new Error('assistant-actions: repository readback authority unavailable')
+      const current = currentVerifier.inspectRepositoryReadbackAuthority(input.contractId, input.authorityId, input.authorityDigest)
+      if (digest(current) !== bindingDigest) throw new Error('assistant-actions: repository readback authority changed')
+      return this.#repositoryReadbackContext(current.contract, current.authority)
+    }
+    const initial = context()
+    if (!Number.isSafeInteger(initial.authority.timeoutMs) || initial.authority.timeoutMs <= 0 || !Number.isSafeInteger(initial.authority.freshnessMs) || initial.authority.freshnessMs <= 0) throw new Error('assistant-actions: repository readback bounds invalid')
+    const observedAt = Date.now()
+    const deadline = AbortSignal.any([signal, AbortSignal.timeout(initial.authority.timeoutMs)])
+    const pullRequestNumber = initial.pullRequestNumber
+    const [checks, reviews, pullRequest, branchSnapshot] = [
+      await this.#readRepositoryInspection(context, 'checks', pullRequestNumber, deadline),
+      await this.#readRepositoryInspection(context, 'reviews', pullRequestNumber, deadline),
+      await this.#readRepositoryInspection(context, 'pull-request', pullRequestNumber, deadline),
+      await this.#readRepositoryInspection(context, 'branch', undefined, deadline),
+    ]
+    const final = context()
+    if (digest(initial) !== digest(final) || Date.now() - observedAt > final.authority.freshnessMs) throw new Error('assistant-actions: repository readback authority changed')
+    const normalized = normalizeRepositoryReadback({ repository: final.authority.repository, branch: final.authority.branch, baseBranch: final.authority.baseBranch,
+      commitOid: final.commitOid, pullRequestNumber: final.pullRequestNumber, requirements: final.requirements, checks, reviews, pullRequest, branchSnapshot })
+    const headConfirmed = normalized.headOid === final.commitOid
+    const ci = !headConfirmed ? 'unknown' : normalized.ci
+    const review = !headConfirmed ? 'unknown' : normalized.review
+    return Object.freeze({ objectId: normalized.objectId, headOid: normalized.headOid, ci, review, pullRequest: normalized.pullRequest,
+      ready: ci === 'passed' && review === 'approved' && (normalized.pullRequest === 'open' || normalized.pullRequest === 'merged') })
+  }
+
+  #repositoryReadbackContext(contract: TaskAcceptanceContract, authority: RepositoryReadbackAuthority): RepositoryReadbackContext {
+    if (!this.#active || !this.#verified || contract.expiresAt <= Date.now() || contract.task.kind !== 'goal-outcome' || authority.kind !== 'repository-readback') throw new Error('assistant-actions: repository readback binding invalid')
+    const goal = contract.task.goal
+    const latest = this.#verified.latestForGoal({ id: goal.id, sessionId: goal.sessionId, nativeGoalId: goal.nativeGoalId, definitionVersion: goal.definitionVersion, definitionDigest: goal.definitionDigest }, authority.grantId, contract.owner, contract.scope)
+    if (!latest || latest.state !== 'succeeded' || latest.intent.security.acceptance !== 'goal-step' || !latest.outcome) throw new Error('assistant-actions: repository delivery not settled')
+    const security = latest.intent.security
+    if (security.goalId !== goal.id || security.nativeGoalId === undefined || security.nativeGoalId !== goal.nativeGoalId || security.sessionId !== goal.sessionId || security.definitionVersion !== goal.definitionVersion || security.definitionDigest !== goal.definitionDigest
+      || security.grantId !== authority.grantId || security.grantRevision !== authority.grantRevision || security.identity.principalRecordId !== contract.owner.principalRecordId || security.identity.principalVersion !== contract.owner.principalVersion
+      || security.identity.workspace !== contract.scope.workspace || security.identity.agentPreset !== contract.scope.preset) throw new Error('assistant-actions: repository delivery binding changed')
+    const grant = this.#ledger.grant(authority.grantId)
+    if (!grant || grant.revision !== authority.grantRevision || grant.repository !== authority.repository || grant.branch !== authority.branch || grant.repoWorkflow?.baseBranch !== authority.baseBranch) throw new Error('assistant-actions: repository grant changed')
+    const outcome = latest.outcome as DeliveryOutcome
+    const commitOid = outcome.commit.commitOid, pullRequestOutcome = outcome.pullRequest, pullRequestNumber = pullRequestOutcome?.pullRequestNumber
+    const commit = this.#ledger.get(outcome.commit.actionId)
+    const pullRequest = pullRequestOutcome && this.#ledger.get(pullRequestOutcome.actionId)
+    if (outcome.commit.status !== 'succeeded' || !commitOid || !commit || commit.kind !== 'commit' || commit.status !== 'succeeded' || digest(commit.result) !== digest(outcome.commit)
+      || commit.grantId !== grant.id || commit.grantRevision !== grant.revision || commit.sessionId !== security.sessionId || digest(commit.identity) !== digest(security.identity)
+      || !pullRequestOutcome || pullRequestOutcome.status !== 'succeeded' || !pullRequestNumber || !pullRequest || pullRequest.kind !== 'pull-request' || pullRequest.status !== 'succeeded' || digest(pullRequest.result) !== digest(pullRequestOutcome)
+      || pullRequest.grantId !== grant.id || pullRequest.grantRevision !== grant.revision || pullRequest.sessionId !== security.sessionId || digest(pullRequest.identity) !== digest(security.identity)) throw new Error('assistant-actions: repository delivery receipt invalid')
+    this.#deliveryIdentity(security)
+    type OwnerEvidence = { storedGoal?: { definition?: { version?: number; digest?: string }; nativeAtLastObservation?: { phase?: string; sessionId?: string; goalId?: string } }; acceptedTasks?: readonly { contractId: string; state: string; contract: unknown; receipt: unknown }[]; executionRuns?: readonly GoalExecutionRun[]; outcomeAssessments?: readonly { contract: TaskAcceptanceContract; triggerRunId: string | null; execution: { status: 'succeeded' | 'unknown'; quiescent: boolean } | null }[] }
+    const goals = this.ctx.get('assistantGoals', false) as { inspectOwnerGoalExecution?: (input: { ownerRouteId: string; principalId: string; workspace: string; preset: string; sessionId: string; goalId: string }) => OwnerEvidence } | undefined
+    const evidence = goals?.inspectOwnerGoalExecution?.({ ownerRouteId: security.ownerRouteId, principalId: security.principalId, workspace: security.identity.workspace, preset: security.identity.agentPreset, sessionId: security.sessionId, goalId: security.goalId })
+    const phase = evidence?.storedGoal?.nativeAtLastObservation?.phase
+    if (!evidence || phase === undefined || !['active', 'paused', 'complete', 'blocked'].includes(phase) || evidence.storedGoal?.definition?.version !== goal.definitionVersion || evidence.storedGoal?.definition?.digest !== goal.definitionDigest
+      || evidence.storedGoal?.nativeAtLastObservation?.sessionId !== goal.sessionId || evidence.storedGoal?.nativeAtLastObservation?.goalId !== goal.nativeGoalId) throw new Error('assistant-actions: repository goal changed')
+    const assessment = evidence.outcomeAssessments?.find(item => item.contract.id === contract.id && item.contract.digest === contract.digest)
+    const source = evidence.executionRuns?.find(run => run.intent.runId === security.runId)
+    const assessmentRun = assessment?.triggerRunId === null || assessment?.triggerRunId === undefined ? undefined : evidence.executionRuns?.find(run => run.intent.runId === assessment.triggerRunId)
+    const exactRun = (run: GoalExecutionRun | undefined) => run !== undefined && run.intent.scope.workspace === contract.scope.workspace && run.intent.scope.preset === contract.scope.preset
+      && run.intent.scope.principalId === security.principalId && run.dispatchedAt !== undefined && run.intent.scope.principalRecordId === contract.owner.principalRecordId && run.intent.scope.principalVersion === contract.owner.principalVersion
+      && run.intent.task.goal.id === goal.id && run.intent.task.goal.definitionVersion === goal.definitionVersion && run.intent.task.goal.definitionDigest === goal.definitionDigest
+      && run.intent.task.goal.sessionId === goal.sessionId && run.intent.task.goal.nativeGoalId === goal.nativeGoalId && run.execution?.status === 'succeeded' && run.execution.quiescent
+    if (!assessment || !source || !assessmentRun || assessment.execution?.status !== 'succeeded' || !assessment.execution.quiescent || !exactRun(source) || !exactRun(assessmentRun)) throw new Error('assistant-actions: repository goal execution changed')
+    if (source.intent.admission.round > assessmentRun.intent.admission.round) throw new Error('assistant-actions: repository goal execution changed')
+    const acceptedSource = evidence.acceptedTasks?.find(value => value.contractId === source.acceptance?.contractId && value.state === 'done')
+    if (!acceptedSource) throw new Error('assistant-actions: repository source acceptance unavailable')
+    const sourceContract = validateTaskAcceptanceContract(acceptedSource.contract)
+    const sourceReceipt = validateTaskVerificationReceipt(sourceContract, acceptedSource.receipt)
+    if (sourceContract.digest !== source.acceptance?.contractDigest || digest(sourceContract.task) !== digest(source.intent.task)
+      || sourceContract.owner.principalRecordId !== contract.owner.principalRecordId || sourceContract.owner.principalVersion !== contract.owner.principalVersion
+      || digest(sourceContract.scope) !== digest(contract.scope) || sourceReceipt.objectiveStatus !== 'achieved') throw new Error('assistant-actions: repository source acceptance changed')
+    const evidenceDigest = digest({ source, assessment, assessmentRun, acceptedSource })
+    return Object.freeze({ authority: Object.freeze({ grantId: authority.grantId, grantRevision: authority.grantRevision, repository: authority.repository, branch: authority.branch, baseBranch: authority.baseBranch, timeoutMs: authority.timeoutMs, freshnessMs: authority.freshnessMs }),
+      evidenceDigest, requirements: validateRepositoryReadbackRequirements({ requiredChecks: authority.requiredChecks, reviewerIds: authority.reviewerIds, minApprovals: authority.minApprovals }), security, intent: latest.intent, commitOid, pullRequestNumber })
+  }
+
+  async #readRepositoryInspection(context: () => RepositoryReadbackContext, kind: InspectRequest['kind'], pullRequestNumber: number | undefined, signal: AbortSignal): Promise<unknown> {
+    let observed: unknown
+    const start = context()
+    const request = normalizeWorkflow({ grantId: start.authority.grantId, operation: 'inspect', idempotencyKey: randomUUID(), kind, ...(pullRequestNumber === undefined ? {} : { pullRequestNumber }) })
+    if (!('operation' in request)) throw new Error('assistant-actions: repository inspection invalid')
+    const authorization: Authorization = { sessionId: start.security.sessionId,
+      identity: () => { const current = context(); if (digest(current) !== digest(start)) throw new Error('assistant-actions: repository readback changed'); return current.security.identity },
+      authorize: record => this.ctx.get('assistantPolicy')?.authorize(this.#deliveryPolicy(start.security), { idempotencyKey: `action:${record.id}` }).effect === 'allow' }
+    const result = await this.#runAuthorized(authorization, request, signal, async (actionId, grant, token, combined) => {
+      const reply = await this.workflow.inspect({ grant, kind: request.kind, ...(request.pullRequestNumber === undefined ? {} : { pullRequestNumber: request.pullRequestNumber }), token, signal: combined })
+      observed = reply?.observed
+      return reply ? { actionId, status: 'succeeded' } : { actionId, status: 'failed', reason: 'github-inspect-failed' }
+    })
+    if (result.status !== 'succeeded' || observed === undefined) throw new Error('assistant-actions: repository inspection unavailable')
+    context()
+    return observed
+  }
+
   #captureDelivery(agent: Agent | undefined, request: VerifiedDeliveryRequest): DeliverySecurity {
     const identity = this.#identity(agent, request.grantId)
     const grant = this.#ledger.grant(request.grantId)
@@ -147,12 +257,13 @@ export class AssistantActionsService extends Service {
     const goals = this.ctx.get('assistantGoals', false)
     const context = goals?.taskContext(agent)
     const current = context ? goals!.inspectWorkflowRunContext(agent, context.goal.id) : undefined
+    const nativeGoalId = current?.nativeGoalId
     if (!current) throw new Error('assistant-actions: admitted native goal round required')
     const routeReceipt = delivery.validateOwnerRoute({ authorityId: grant.verifiedDelivery.ownerRouteId, principalId: owner.principalId, workspace: identity.workspace, agentPreset: identity.agentPreset })
     if (routeReceipt.principalRecordId !== identity.principalRecordId || routeReceipt.principalVersion !== identity.principalVersion
       || routeReceipt.bindingVersion !== owner.bindingVersion || routeReceipt.generation !== owner.bindingGeneration) throw new Error('assistant-actions: current owner route mismatch')
     const security: DeliverySecurity = { principalId: owner.principalId, identity, sessionId: String(agent!.session.id),
-      goalId: current.goalId, runId: current.goalExecutionRunId, definitionDigest: current.definition.digest, definitionVersion: current.definition.version,
+      goalId: current.goalId, ...(typeof nativeGoalId === 'string' && nativeGoalId.length > 0 ? { nativeGoalId } : {}), runId: current.goalExecutionRunId, definitionDigest: current.definition.digest, definitionVersion: current.definition.version,
       grantId: grant.id, grantRevision: grant.revision, ownerRouteId: grant.verifiedDelivery.ownerRouteId, budgetId: grant.verifiedDelivery.budgetId,
       expiresAt: grant.expiresAt, routeReceipt, ...(grant.verifiedDelivery.acceptance ? { acceptance: grant.verifiedDelivery.acceptance } : {}) }
     this.#deliveryIdentity(security)

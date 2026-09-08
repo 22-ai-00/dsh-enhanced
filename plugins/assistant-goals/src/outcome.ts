@@ -27,12 +27,26 @@ export class GoalOutcomeRuntime {
   #active = true
   readonly #handles = new Map<string, { accepted: AcceptanceHandle; agent: Agent }>()
   readonly #fences = new Map<string, { agent: Agent; check(): void }>()
+  readonly #settling = new Set<string>()
   constructor(private readonly ctx: Context, path: string,
     private readonly current: (agent: Agent) => GoalRecord,
     private readonly runs: (scope: GoalScope, goalId: string) => readonly GoalExecutionRun[],
     private readonly stepMaxDurationMs = 60_000) {
     this.#store = new GoalOutcomeStore(path)
     this.#store.recoverIncomplete()
+    ctx.on('assistant-verifier/receipt', notice => {
+      if (notice.taskKind !== 'goal-outcome' || this.#settling.has(notice.contractId)) return
+      queueMicrotask(() => {
+        if (!this.#active || this.#settling.has(notice.contractId)) return
+        try {
+          const fence = this.#fences.get(notice.contractId)
+          const assessment = this.#store.getByContract(notice.contractId)
+          if (!fence || assessment?.contract.digest !== notice.contractDigest) return
+          fence.check()
+          this.reconcileCompletion(fence.agent)
+        } catch { /* A nudge grants no authority; changed or disposed runs stay unchanged. */ }
+      })
+    })
     ctx.on('agent/disposed', ({ agent }) => {
       if (!this.#active) return
       for (const [runId, entry] of this.#handles) {
@@ -138,6 +152,12 @@ export class GoalOutcomeRuntime {
     this.#handles.set(run.intent.runId, { accepted, agent })
   }
   async settled(agent: Agent, run: GoalExecutionRun, assertCurrent: () => void): Promise<void> {
+    const id = this.#handles.get(run.intent.runId)?.accepted.contractId
+    if (id !== undefined) this.#settling.add(id)
+    try { await this.#settle(agent, run, assertCurrent) }
+    finally { if (id !== undefined) this.#settling.delete(id) }
+  }
+  async #settle(agent: Agent, run: GoalExecutionRun, assertCurrent: () => void): Promise<void> {
     if (!this.#active) return
     const registration = this.#ready()
     const accepted = this.#handles.get(run.intent.runId)?.accepted
