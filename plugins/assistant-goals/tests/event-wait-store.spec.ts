@@ -1,9 +1,9 @@
-import { mkdtemp, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it } from 'vitest'
-import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { acceptanceCanonicalJson, acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { GoalEventWaitStore, type GoalEventWaitIntent } from '../src/event-wait-store.ts'
 
 const roots: string[] = []
@@ -34,6 +34,21 @@ describe('goal event wait ledger', () => {
   it('allows only one wait for the immutable native goal revision', () => {
     const store = new GoalEventWaitStore(':memory:'); store.prepare(intent())
     expect(() => store.prepare(intent('event-wait-b'))).toThrow(); store.close()
+  })
+  it('persists a consumed source cursor across restart without changing the frozen intent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'event-wait-cursor-')); roots.push(root); const path = join(root, 'waits.sqlite')
+    const first = new GoalEventWaitStore(path); const value = intent(); first.prepare(value); first.advanceCursor(value.id, 9); first.close()
+    const reopened = new GoalEventWaitStore(path)
+    expect(reopened.cursor(value.id)).toBe(9); expect(reopened.get(value.id)!.intent).toEqual(value); reopened.close()
+  })
+  it('migrates a populated v1 ledger to the cursor schema without changing its intent', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'event-wait-v1-')); roots.push(root); const path = join(root, 'waits.sqlite'); const value = intent()
+    const database = new DatabaseSync(path)
+    database.exec("CREATE TABLE goal_event_waits (id TEXT PRIMARY KEY, intent_json TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('waiting','matched','materialized','terminal')), reason TEXT, sequence INTEGER, envelope_canonical TEXT, envelope_digest TEXT, wake_json TEXT, scope_key TEXT NOT NULL, goal_id TEXT NOT NULL, session_id TEXT NOT NULL, native_goal_id TEXT NOT NULL, native_revision INTEGER NOT NULL) STRICT; CREATE UNIQUE INDEX goal_event_wait_native_once ON goal_event_waits(scope_key, session_id, native_goal_id, native_revision); CREATE INDEX goal_event_wait_pending ON goal_event_waits(state, id); PRAGMA user_version = 1;")
+    database.prepare("INSERT INTO goal_event_waits(id, intent_json, state, scope_key, goal_id, session_id, native_goal_id, native_revision) VALUES (?, ?, 'waiting', ?, ?, ?, ?, ?)").run(value.id, JSON.stringify(value), acceptanceCanonicalJson(value.wake.scope), value.wake.goalId, value.wake.native.sessionId, value.wake.native.goalId, value.wake.native.revision)
+    database.close(); await chmod(path, 0o600)
+    const migrated = new GoalEventWaitStore(path)
+    expect(migrated.cursor(value.id)).toBe(value.source.highWaterSequence); expect(migrated.get(value.id)!.intent).toEqual(value); migrated.close()
   })
   it('refuses a reopened ledger whose one-wait-per-revision constraint is missing', async () => {
     const root = await mkdtemp(join(tmpdir(), 'event-wait-schema-')); roots.push(root)

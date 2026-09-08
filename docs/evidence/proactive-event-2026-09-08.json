@@ -1,0 +1,145 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "93905e5861da9a5586eb747d84c50b9463071c8e",
+  "capability": "Owner-authorized event opportunity filtering before original goal wake",
+  "completeWorkPackage": false,
+  "scope": {
+    "implemented": [
+      "execute/prepare decision gate",
+      "durable utility estimates, merge, quiet hours, cooldown, owner feedback and budgets",
+      "legacy wait cursor migration and periodic reconciliation",
+      "original Session/Goal execution, independent acceptance and native Web feedback"
+    ],
+    "remaining": [
+      "reminder transport",
+      "model-produced useful preparation",
+      "intelligent ranking across opportunities",
+      "observed long-term benefit"
+    ]
+  },
+  "realScenario": {
+    "command": "DSH_WEB_REAL_OPPORTUNITY=1 CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=super-relay DSH_WEB_REAL_MODEL=auto_model/alwaysday1 DSH_WEB_REAL_SOURCE_HOME=/home/jiataorui/.dsh pnpm test:web-owner:real-event",
+    "exitCode": 0,
+    "logPath": "/tmp/dsh-real-event-proactive-first.log",
+    "logSha256": "6cec97ba91c074580b5c76b4977103baee9600e788b8c18713359294701770b1",
+    "proofPath": ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/proof.json",
+    "proofSha256": "b6addf55d4e67d4ab93ef9580230cfeed3a4cee07b0faf515333ffecce8776d2",
+    "hostStarts": 3,
+    "modelCalls": 7,
+    "opportunities": [
+      {
+        "id": "opportunity-08d56b17-fc50-4237-8f7e-bce5fca2b020",
+        "waitId": "goal-event-wait-37947cc515a9dd776bc4d46f4a36feb32d42c456601ea1b8b778e040561a6867",
+        "profileId": "real-event-opportunity",
+        "scope": {
+          "principalId": "web/web/local/operator",
+          "principalRecordId": "principal_b1781f38-be15-4777-8e4c-6a666982ef4f",
+          "principalVersion": 1,
+          "workspace": "/tmp/dsh-web-owner-real-event-AljVG8/workspace",
+          "preset": "standard"
+        },
+        "goalId": "727f47dbe2421fd2f2dbc3d049d30d8dd356bd3aa490caecdcf93e34fbbc9efb",
+        "sessionId": "session-a5b9831e-694d-490c-83ae-369a16f5fad5",
+        "ownerRouteId": "real-event-owner",
+        "sourceId": "event-triggers:file",
+        "eventId": "event-ec040360d3756122f489499afd95197f2f532e5e2ac1388a4d9d0866762f8ffb",
+        "eventSequence": 1,
+        "eventDigest": "5d65e6c4040083c1eed01479f2ae56802a7fb582ac70bf8a50ff4e12b021b96e",
+        "sourceDigest": "31423c7208ccbe750487a017757c9d1fe51026dd9cc986d8dd5f3c84c3c073a8",
+        "objective": "Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.",
+        "definitionDigest": "b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f",
+        "nativeGoalId": "goal-222a2cc1-d3a8-4dda-94c4-457b72e60b6a",
+        "nativeRevision": 2,
+        "mode": "execute",
+        "state": "decided",
+        "reason": "execution",
+        "utility": 70,
+        "firstObservedAt": 1788850158270,
+        "updatedAt": 1788850160281,
+        "eligibleAt": 1788850160270,
+        "expiresAt": 1788850642958,
+        "observations": 1
+      }
+    ],
+    "native": {
+      "sessionId": "session-a5b9831e-694d-490c-83ae-369a16f5fad5",
+      "goalId": "goal-222a2cc1-d3a8-4dda-94c4-457b72e60b6a",
+      "revision": 4,
+      "objective": "Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.",
+      "phase": "complete",
+      "roundsStarted": 1,
+      "maxGoalRounds": 2,
+      "updatedAt": 1788850186713
+    },
+    "goalId": "727f47dbe2421fd2f2dbc3d049d30d8dd356bd3aa490caecdcf93e34fbbc9efb",
+    "sessionId": "session-a5b9831e-694d-490c-83ae-369a16f5fad5",
+    "approvalCount": 3,
+    "rejectedTools": 0,
+    "wakeStates": [
+      "succeeded"
+    ],
+    "outboxCount": 0,
+    "stepObjectiveStatuses": [
+      "achieved"
+    ],
+    "outcomeObjectiveStatuses": [
+      "achieved"
+    ],
+    "artifactSha256": "a2552ea2aecd434a22770a2c40f274242700205cd334923975be415212f33c8a",
+    "ordinarySourceAutomation": "test-noop-host-executor",
+    "resultDelivery": "durable-native-session"
+  },
+  "sourceHashes": {
+    "plugins/README.md": "b36f4f09b3a02a1de5d078d68aad2ce80db09bc197caae73a457ef410c358144",
+    "plugins/assistant-goals/src/event-wait-store.ts": "3d6135bc041937e34257e02fd04cbbcb92036e8edb2c273f8f5f021d98288af1",
+    "plugins/assistant-goals/src/event-wait.ts": "525c612ff576c51dd8a545ba8cc5dc1ba16fd44b37b3f1cffcf4eb30e201b5e5",
+    "plugins/assistant-goals/src/service.ts": "33b4df7495e62af5e7ebaae70662508d4f3c5a0960de795ac124831c26ce4b9e",
+    "plugins/assistant-goals/src/tools.ts": "93c556a9a3e91b8447d7d0d42c95acb747542e23fb3c004e396c662cd0536931",
+    "plugins/assistant-goals/tests/event-wait-store.spec.ts": "32d65dd34c331660382522a9e058fa8ff52b355bcffd524548347a7e8ddbe499",
+    "plugins/assistant-goals/tests/event-wait.spec.ts": "7cebb6b4ab1df8dff727c285809289bbe742a563d1cf6b63f8707938532ec521",
+    "plugins/assistant-proactive/LICENSE": "37f12999eefa6bde963be1da5403c897ecd2736ee99988ff26693335f68606e7",
+    "plugins/assistant-proactive/README.md": "88ddf5e591eb3daaa8c918e564b308e5c600af5209d74f0f9ea3536d0883ce92",
+    "plugins/assistant-proactive/cordis.patch.yml": "c7d396b64f6e6f12351061fafafadf314e6c66e6edc55c2f8772717846694e2f",
+    "plugins/assistant-proactive/package.json": "81b3ed338cb77297efa41f87305aadee4efe175f2ebf03f0b415c84406aee443",
+    "plugins/assistant-proactive/src/engine.ts": "2f16c2436a05edc52af345410b49ec49bf5f7dea4e028abc6806603a2484323c",
+    "plugins/assistant-proactive/src/index.ts": "0bf4c61058fd248241bdd7f33a1946d6f1194d9bf89dcfafc8fbea67ef85ff53",
+    "plugins/assistant-proactive/src/types.ts": "984add0d59ae21805bd04505ed311523a8d43cf196082df02529bea702e313ea",
+    "plugins/assistant-proactive/src/version.ts": "3d767d675f0275fa362677cfd526c653e9ab27ba0e01b7f42429a561790d1e5e",
+    "plugins/assistant-proactive/tests/engine.spec.ts": "b13e8f1af609d963df7a37a4a72d917385c298b086f60818ffa54639853e28aa",
+    "plugins/assistant-proactive/tests/index.spec.ts": "5c8152f5864237c55c4f518d2287c49436be5d2ffac9bd084faebca7beec52fe",
+    "plugins/assistant-proactive/tsconfig.build.json": "b8b6960a9b3403690455e9c7314abc6b86d3832c6342ee43a1faaf1d3af52292",
+    "plugins/assistant-proactive/tsconfig.json": "e5d869d2ba42bc4d7e8a136364ae61b919767fceb9e6a3da084342aadc4f132a",
+    "pnpm-lock.yaml": "f9dfd27b6ea0f4cddb7eb094107b4e51a53dfe506854e52735d1466488d87560",
+    "scripts/e2e/web-owner-real-event.spec.mjs": "df32e6539f097f8afcd4197d1f4bd039cc02ab160dbd5be9af414514ef1e1a7a",
+    "scripts/e2e/web-owner-real-guard.mjs": "542d0b184055cebea8f8d72a475ced4e92ebc9b3fb64e246c8227dd34bb92ff8",
+    "tests/proactive-goal-runtime.spec.ts": "55d380ddea96e0be6fcd8b3f15871f669720e685203aef843929863429fb661d"
+  },
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "logPath": "/tmp/dsh-proactive-final-check.log",
+    "logSha256": "040ad6fff4d85214ac158c3f42252c48f44b26d490d9e4f406be23e263c99327",
+    "rootTestFiles": 317,
+    "rootTests": 3912,
+    "proactiveTests": 14,
+    "goalsTests": 127,
+    "dryRunPacks": 32,
+    "stages": [
+      "manifest validation",
+      "zero lint warnings",
+      "typecheck",
+      "root and package tests",
+      "build",
+      "dry-run pack"
+    ]
+  },
+  "independentReview": {
+    "verdict": "PASS",
+    "reviewer": "separate read-only verifier",
+    "sourceHashesChecked": 23,
+    "logAndProofHashesMatched": true,
+    "fullCheckExitCodeVerified": 0,
+    "scope": "This delivery only; full WP12 remains incomplete."
+  }
+}

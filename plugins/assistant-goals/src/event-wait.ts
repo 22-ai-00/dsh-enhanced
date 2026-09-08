@@ -1,6 +1,6 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { parseExternalEventEnvelope, type ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
+import { externalEventDigest, parseExternalEventEnvelope, type ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
 import type { GoalRecord, GoalScope } from './types.js'
 import type { GoalWakeIntent } from './wake-store.js'
 import type { GoalWakeRuntime } from './wake.js'
@@ -11,6 +11,11 @@ type SourceReader = {
   sourceSnapshot(triggerId: string): Readonly<GoalEventSourceSnapshot>
   firstEventAfter(snapshot: Readonly<GoalEventSourceSnapshot>, afterSequence: number, deadlineAt: number): Readonly<SourceEvent> | undefined
   subscribeSourceChanges(listener: () => void): () => void
+}
+type OpportunityEvaluation = { disposition: 'defer' | 'consume' | 'execute'; decision: { eventSequence: number } }
+type OpportunityService = {
+  closeWait?(waitId: string, scope: GoalScope, reason: 'expired' | 'cancelled'): void
+  evaluate(input: { waitId: string; profileId: string; scope: GoalScope; goalId: string; sessionId: string; definitionDigest: string; objective: string; nativeGoalId: string; nativeRevision: number; ownerRouteId: string; sourceDigest: string; sourceId: string; event: { id: string; sequence: number; digest: string; occurredAt: number }; expiresAt: number }): OpportunityEvaluation
 }
 const same = (a: unknown, b: unknown) => acceptanceDigest(a) === acceptanceDigest(b)
 function fail(): never { throw new Error('assistant-goals: event wait authority is unavailable, changed or expired') }
@@ -32,7 +37,8 @@ export class GoalEventWaitRuntime {
   #failures = 0
   #cursor = ''
   constructor(ctx: Context, path: string, private readonly wake: GoalWakeRuntime,
-    private readonly current: (intent: GoalEventWaitIntent) => GoalRecord | undefined) {
+    private readonly current: (intent: GoalEventWaitIntent) => GoalRecord | undefined,
+    private readonly proactive: () => OpportunityService | undefined = () => undefined) {
     this.#store = new GoalEventWaitStore(path)
     // Do not import EventTriggers: goals remains installable without that optional plugin.
     ;(ctx as unknown as { inject(keys: readonly string[], callback: (runtime: unknown) => () => void): void }).inject(['eventTriggers'], runtime => {
@@ -43,7 +49,13 @@ export class GoalEventWaitRuntime {
       this.reconcile()
       return () => { this.#unsubscribe?.(); this.#unsubscribe = undefined; if (this.#source === candidate) this.#source = undefined }
     })
-    ctx.effect(() => () => { this.#live = false; this.#unsubscribe?.(); this.#store.close() }, 'assistant-goals.event-waits')
+    ctx.effect(() => {
+      // Reconciliation only revisits already owner-authorized waits. It never creates
+      // a wait or changes an event into wake authority without the frozen intent.
+      const timer = setInterval(() => { this.reconcile() }, 1_000)
+      timer.unref?.()
+      return () => { clearInterval(timer); this.#live = false; this.#unsubscribe?.(); this.#store.close() }
+    }, 'assistant-goals.event-waits')
   }
   snapshot(triggerId: string): GoalEventSourceSnapshot {
     const source = this.#source
@@ -87,38 +99,71 @@ export class GoalEventWaitRuntime {
   #reconcile(wait: GoalEventWait): void {
     if (wait.state === 'terminal') return
     const now = Date.now()
-    if ((wait.state === 'waiting' || wait.state === 'matched') && now >= (wait.match?.wake.expiresAt ?? wait.intent.expiresAt)) { this.#store.terminal(wait.intent.id, 'expired'); return }
+    if ((wait.state === 'waiting' || wait.state === 'matched') && now >= (wait.match?.wake.expiresAt ?? wait.intent.expiresAt)) { this.#terminal(wait, 'expired'); return }
     const source = this.#source
     if (!source) return // service loss is recoverable; no timer or implicit authority is created.
     const actual = this.#sourceCurrent(wait.intent)
-    if (!actual) { this.#store.terminal(wait.intent.id, 'source-changed'); return }
+    if (!actual) { this.#terminal(wait, 'source-changed'); return }
     if (wait.state === 'materialized') {
       const state = this.wake.inspect(wait.intent.wake.scope, wait.intent.wake.goalId)
         .find(item => item.intent.id === wait.match!.wake.id)?.state
-      if (state === 'succeeded' || state === 'unknown' || state === 'denied') { this.#store.terminal(wait.intent.id, 'settled'); return }
+      if (state === 'succeeded' || state === 'unknown' || state === 'denied') { this.#terminal(wait, 'settled'); return }
       // GoalWake owns the native phase transition while a dispatch is in flight.
       // In particular, complete is observed before its settle/finish CAS.
       if (state === 'dispatched') return
     }
     let record: GoalRecord | undefined
     try { record = this.#recordCurrent(wait.intent, wait.state !== 'materialized') } catch (error) {
-      if (error instanceof Error && /event wait policy denied/u.test(error.message)) this.#store.terminal(wait.intent.id, 'denied')
+      if (error instanceof Error && /event wait policy denied/u.test(error.message)) this.#terminal(wait, 'denied')
       else throw error
       return
     }
-    if (!record || (wait.state === 'materialized' && ['blocked', 'complete', 'cleared'].includes(record.native.phase))) { this.#store.terminal(wait.intent.id, 'invalid-current'); return }
+    if (!record || (wait.state === 'materialized' && ['blocked', 'complete', 'cleared'].includes(record.native.phase))) { this.#terminal(wait, 'invalid-current'); return }
     if (wait.state === 'waiting') {
       this.wake.preflight(record)
-      const found = source.firstEventAfter(wait.intent.source, wait.intent.source.highWaterSequence, wait.intent.expiresAt)
+      let found = source.firstEventAfter(wait.intent.source, this.#store.cursor(wait.intent.id), wait.intent.expiresAt)
       if (!found) return
-      const envelope = parseExternalEventEnvelope(found.envelope)
-      if (!Number.isSafeInteger(found.sequence) || found.sequence <= wait.intent.source.highWaterSequence
-        || envelope.source.id !== wait.intent.source.sourceId || envelope.source.kind !== wait.intent.source.kind
-        || envelope.source.version !== wait.intent.source.version || envelope.source.configDigest !== wait.intent.source.configDigest
-        || envelope.target.automationId !== wait.intent.source.target.automationId) return
+      let envelope = parseExternalEventEnvelope(found.envelope)
+      const valid = (candidate: SourceEvent, value: ExternalEventEnvelope): boolean => Number.isSafeInteger(candidate.sequence) && candidate.sequence > wait.intent.source.highWaterSequence
+        && value.source.id === wait.intent.source.sourceId && value.source.kind === wait.intent.source.kind
+        && value.source.version === wait.intent.source.version && value.source.configDigest === wait.intent.source.configDigest
+        && value.target.automationId === wait.intent.source.target.automationId
+      if (!valid(found, envelope)) return
+      if (wait.intent.opportunityProfile !== undefined) {
+        const proactive = this.proactive()
+        if (!proactive) { this.#terminal(wait, 'denied'); return }
+        let executable = false
+        for (let observed = 0; observed < 32; observed++) {
+          const evaluation = proactive.evaluate({
+            waitId: wait.intent.id, profileId: wait.intent.opportunityProfile, scope: wait.intent.wake.scope,
+            goalId: wait.intent.wake.goalId, sessionId: wait.intent.wake.native.sessionId,
+            definitionDigest: wait.intent.wake.definition.digest, objective: record.native.objective,
+            nativeGoalId: wait.intent.wake.native.goalId, nativeRevision: wait.intent.wake.native.revision,
+            ownerRouteId: wait.intent.wake.ownerRouteId, sourceDigest: wait.intent.source.configDigest,
+            sourceId: wait.intent.source.sourceId,
+            event: { id: envelope.event.id, sequence: found.sequence, digest: externalEventDigest(envelope), occurredAt: envelope.event.occurredAt },
+            expiresAt: wait.intent.expiresAt,
+          })
+          if (evaluation.disposition === 'consume') { this.#store.advanceCursor(wait.intent.id, found.sequence); return }
+          if (evaluation.disposition === 'execute') {
+            if (!Number.isSafeInteger(evaluation.decision.eventSequence) || evaluation.decision.eventSequence < found.sequence) throw new Error('assistant-goals: opportunity execution does not bind the observed event')
+            if (evaluation.decision.eventSequence === found.sequence) { executable = true; break }
+          }
+          if (evaluation.disposition !== 'defer' && evaluation.disposition !== 'execute') throw new Error('assistant-goals: invalid opportunity evaluation')
+          const next = source.firstEventAfter(wait.intent.source, found.sequence, wait.intent.expiresAt)
+          if (!next) return
+          const nextEnvelope = parseExternalEventEnvelope(next.envelope)
+          if (!valid(next, nextEnvelope)) return
+          found = next; envelope = nextEnvelope
+          continue
+        }
+        // A full deferred page intentionally keeps the durable cursor unchanged.
+        // The next source hint revalidates the same bounded evidence before it can wake.
+        if (!executable) return
+      }
       const at = now
       const expiresAt = Math.min(wait.intent.expiresAt, at + wait.intent.runTimeoutMs)
-      if (expiresAt - at < 1_000) { this.#store.terminal(wait.intent.id, 'expired'); return }
+      if (expiresAt - at < 1_000) { this.#terminal(wait, 'expired'); return }
       const wake: GoalWakeIntent = { ...wait.intent.wake, id: `goal-event-wake-${wait.intent.id}`, at, expiresAt }
       // Commit the exact wake before scheduling it; restart can only retry this identity.
       wait = this.#store.match(wait.intent.id, { sequence: found.sequence, envelope, wake })
@@ -127,6 +172,10 @@ export class GoalEventWaitRuntime {
       this.wake.materialize(wait.match!.wake)
       this.#store.materialized(wait.intent.id)
     }
+  }
+  #terminal(wait: GoalEventWait, reason: NonNullable<GoalEventWait['reason']>): void {
+    if (wait.intent.opportunityProfile !== undefined) this.proactive()?.closeWait?.(wait.intent.id, wait.intent.wake.scope, reason === 'expired' ? 'expired' : 'cancelled')
+    this.#store.terminal(wait.intent.id, reason)
   }
   #onSourceChanged(): void {
     // This is only a prompt to reconcile; a source notification has no authority itself.

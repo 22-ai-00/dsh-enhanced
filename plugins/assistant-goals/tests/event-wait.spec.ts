@@ -13,19 +13,20 @@ import type { GoalWakeRuntime } from '../src/wake.ts'
 const roots: string[] = []
 afterEach(async () => { vi.useRealTimers(); await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-function fixture(path = ':memory:', prior?: GoalRecord) {
+function fixture(path = ':memory:', prior?: GoalRecord, proactive?: { evaluate: (input: unknown) => { disposition: 'defer' | 'consume' | 'execute'; decision: { eventSequence: number } } }) {
   const now = Date.now(); const objective = 'resume after an event'
   const scope = { principalId: 'owner', principalRecordId: 'row', principalVersion: 1, workspace: '/tmp/event-wait', preset: 'primary' }
   let record: GoalRecord = prior ?? { id: 'goal', scope, originalObjective: objective, definition: { version: 1, digest: acceptanceDigest({ objective }), objective }, native: { sessionId: 'session', goalId: 'native', revision: 2, objective, phase: 'paused', roundsStarted: 1, maxGoalRounds: 3, updatedAt: now }, checkpoint: { nextStep: '', blockers: [], assumptions: [], evidenceRefs: [], dependencies: [] }, version: 1, createdAt: now, updatedAt: now }
   let policyAllowed = true; let changed = false; let emitted = true; let wakeState: 'scheduled' | 'dispatched' | 'succeeded' | 'unknown' | 'denied' = 'scheduled'; let materializations = 0; let failure: Error | undefined; let materialized: GoalWakeIntent | undefined
   const listeners = new Set<() => void>(); const disposers: Array<() => void> = []
   const snapshot = () => ({ protocol: 'dsh-event-source/v1' as const, sourceId: 'event-triggers:file', kind: 'file' as const, version: '1', configDigest: changed ? 'c'.repeat(64) : 'a'.repeat(64), target: { automationId: 'automation' }, highWaterSequence: 7 })
-  const source = { sourceSnapshot: () => snapshot(), firstEventAfter: () => emitted ? ({ sequence: 8, envelope: { protocol: 'dsh-external-event/v1' as const, source: { id: 'event-triggers:file', kind: 'file' as const, version: '1', configDigest: 'a'.repeat(64) }, event: { id: 'event', occurredAt: now, receivedAt: now }, observation: { digest: 'b'.repeat(64), revision: '1', timeBasis: 'observed' as const }, trust: { method: 'local-observation' as const, content: 'untrusted' as const }, target: { automationId: 'automation' }, deduplicationKey: 'event-triggers:file:event' } }) : undefined, subscribeSourceChanges: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener) } }
+  let lastAfter = -1
+  const source = { sourceSnapshot: () => snapshot(), firstEventAfter: (_snapshot: unknown, after: number) => { lastAfter = after; return emitted && after < 8 ? ({ sequence: 8, envelope: { protocol: 'dsh-external-event/v1' as const, source: { id: 'event-triggers:file', kind: 'file' as const, version: '1', configDigest: 'a'.repeat(64) }, event: { id: 'event', occurredAt: now, receivedAt: now }, observation: { digest: 'b'.repeat(64), revision: '1', timeBasis: 'observed' as const }, trust: { method: 'local-observation' as const, content: 'untrusted' as const }, target: { automationId: 'automation' }, deduplicationKey: 'event-triggers:file:event' } }) : undefined }, subscribeSourceChanges: (listener: () => void) => { listeners.add(listener); return () => listeners.delete(listener) } }
   const wake = { preflight: () => {}, materialize: (input: GoalWakeIntent) => { materializations++; materialized = input; if (failure) throw failure }, inspect: () => materialized === undefined ? [] : [{ intent: materialized, state: wakeState }] } as unknown as GoalWakeRuntime
   const ctx = { inject: (_keys: readonly string[], callback: (value: unknown) => () => void) => { callback({ eventTriggers: source }) }, effect: (setup: () => () => void) => { disposers.push(setup()) } } as unknown as Context
-  const runtime = new GoalEventWaitRuntime(ctx, path, wake, () => { if (!policyAllowed) throw new Error('assistant-goals: event wait policy denied'); return record })
+  const runtime = new GoalEventWaitRuntime(ctx, path, wake, () => { if (!policyAllowed) throw new Error('assistant-goals: event wait policy denied'); return record }, () => proactive)
   const intent = (): GoalEventWaitIntent => ({ id: 'event-wait', wake: { scope, goalId: record.id, definition: record.definition, native: record.native, attestation: { scope: { workspace: scope.workspace, preset: scope.preset }, principalId: scope.principalId, principalLineage: { principalRecordId: scope.principalRecordId, principalVersion: 1 }, bindingId: 'binding', bindingVersion: 1, bindingGeneration: 1, sessionId: 'session' }, ownerRouteId: 'route', budgetId: 'budget' }, source: snapshot(), createdAt: now - 1, expiresAt: now + 10_000, runTimeoutMs: 1_000 })
-  return { runtime, intent, scope, close: () => { for (const dispose of disposers) dispose() }, emitChange: () => { for (const listener of listeners) listener() }, get materializations() { return materializations }, get materialized() { return materialized }, set policyAllowed(value: boolean) { policyAllowed = value }, set changed(value: boolean) { changed = value }, set emitted(value: boolean) { emitted = value }, set wakeState(value: typeof wakeState) { wakeState = value }, set failure(value: Error | undefined) { failure = value }, set record(value: GoalRecord) { record = value }, get record() { return record } }
+  return { runtime, intent, scope, close: () => { for (const dispose of disposers) dispose() }, emitChange: () => { for (const listener of listeners) listener() }, get materializations() { return materializations }, get materialized() { return materialized }, get lastAfter() { return lastAfter }, set policyAllowed(value: boolean) { policyAllowed = value }, set changed(value: boolean) { changed = value }, set emitted(value: boolean) { emitted = value }, set wakeState(value: typeof wakeState) { wakeState = value }, set failure(value: Error | undefined) { failure = value }, set record(value: GoalRecord) { record = value }, get record() { return record } }
 }
 
 describe('durable event wait lifecycle', () => {
@@ -69,5 +70,29 @@ describe('durable event wait lifecycle', () => {
     f.runtime.reconcile()
     expect(f.runtime.inspect(f.scope, 'goal')).toMatchObject([{ state: 'materialized' }])
     expect(() => f.runtime.assertWakeCurrent(f.materialized!)).not.toThrow()
+  })
+  it('lets a selected profile prepare without waking and persists its consumed event cursor', () => {
+    const proactive = { evaluate: vi.fn(() => ({ disposition: 'consume' as const, decision: { eventSequence: 8 } })) }
+    const f = fixture(':memory:', undefined, proactive); const wait = f.intent()
+    const prepared = f.runtime.prepare({ ...wait, opportunityProfile: 'prepare-profile' })
+    expect(prepared.state).toBe('waiting'); expect(f.materializations).toBe(0)
+    f.runtime.reconcile(); expect(f.lastAfter).toBe(8); expect(proactive.evaluate).toHaveBeenCalledTimes(1); f.close()
+  })
+  it('does not wake while a selected profile defers an event', () => {
+    const f = fixture(':memory:', undefined, { evaluate: () => ({ disposition: 'defer', decision: { eventSequence: 8 } }) })
+    expect(f.runtime.prepare({ ...f.intent(), opportunityProfile: 'execute-profile' }).state).toBe('waiting')
+    expect(f.materializations).toBe(0); f.close()
+  })
+  it('matures a deferred selected profile on the durable runtime timer without a new source hint', () => {
+    vi.useFakeTimers()
+    let calls = 0
+    const f = fixture(':memory:', undefined, { evaluate: () => ({ disposition: ++calls === 1 ? 'defer' : 'execute', decision: { eventSequence: 8 } }) })
+    expect(f.runtime.prepare({ ...f.intent(), opportunityProfile: 'execute-profile' }).state).toBe('waiting')
+    expect(f.materializations).toBe(0); vi.advanceTimersByTime(1_000)
+    expect(f.materializations).toBe(1); expect(f.runtime.inspect(f.scope, 'goal')).toMatchObject([{ state: 'materialized', match: { sequence: 8 } }]); f.close()
+  })
+  it('denies a selected profile if its service disappears before observation', () => {
+    const f = fixture(); const wait = f.runtime.prepare({ ...f.intent(), opportunityProfile: 'execute-profile' })
+    expect(wait).toMatchObject({ state: 'terminal', reason: 'denied' }); expect(f.materializations).toBe(0); f.close()
   })
 })

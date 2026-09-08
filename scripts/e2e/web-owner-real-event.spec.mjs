@@ -14,6 +14,7 @@ import { observePage, query, run, sanitize, startHost } from './web-owner-helper
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const sourceAutomationId = 'web-owner-real-event-source'
+const opportunityProfile = process.env.DSH_WEB_REAL_OPPORTUNITY === '1' ? 'real-event-opportunity' : undefined
 
 function row(doc, id) {
   const value = doc.contents.items.find(item => isMap(item) && item.get('id') === id)
@@ -102,7 +103,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     await run('zstd', ['--version'], env)
     const installed = await run('dsh', ['plugin', '--profile', 'web', 'add', ...[
       'personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner',
-      'assistant-verifier', 'assistant-evaluation', 'event-triggers', ...route.bundles,
+      'assistant-verifier', 'assistant-evaluation', 'event-triggers', ...(opportunityProfile ? ['assistant-proactive'] : []), ...route.bundles,
     ].map(name => resolve(root, 'plugins', name))], env)
     await writeFile(testInfo.outputPath('install.log'), sanitize(installed), { mode: 0o600 })
     await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace], env)
@@ -126,7 +127,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     // native revision observed immediately before the browser clicks Allow once.
     // The generic guard intentionally cannot know this runtime-generated ID.
     const allowedEventApproval = (name, args, allowedWorkspace) => {
-      if (!isEventExperimentToolAllowed(name, args, allowedWorkspace)) return false
+      if (!isEventExperimentToolAllowed(name, args, allowedWorkspace, opportunityProfile)) return false
       if (name !== 'goal_wait_event') return true
       const current = query(goalsPath, 'SELECT id, native_json FROM goal_records')[0]
       if (!current) return false
@@ -140,6 +141,10 @@ test('real configured route wakes one browser-owned verified goal from a durable
       executionBudget: { mode: 'calls', modelCalls: 6, toolCalls: 6, durationMs: 600_000, maxOutputTokensPerCall: 2048,
         routes: [{ provider: route.provider, model: route.model }] },
       backgroundWake: { ownerRouteId: 'real-event-owner', budgetId: 'real-event-goal-runs', maxDelayMs: 600_000, runTimeoutMs: 120_000 },
+    })
+    if (opportunityProfile) setConfig(patch, 'dsh-enhanced-assistant-proactive', '@dsh-enhanced/assistant-proactive', {
+      databasePath: join(home, 'assistant-proactive/opportunities.sqlite'),
+      profiles: [{ id: opportunityProfile, mode: 'execute', expectedBenefit: 100, successPpm: 900_000, executionCost: 10, interruptionCost: 5, possibleLoss: 5, minimumUtility: 1, mergeWindowMs: 2000, cooldownMs: 1000, rejectionCooldownMs: 60_000, maxDecisionsPerGoal: 4, maxExecutionsPerGoal: 1, maxRemindersPerGoal: 0 }],
     })
     setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300_000 })
     setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', {
@@ -194,13 +199,14 @@ test('real configured route wakes one browser-owned verified goal from a durable
     await writeFile(patchPath, String(patch), { mode: 0o600 })
     await open(true)
     await selectOwnerSession(activePage)
-    const ownerPrompt = `Create a goal with objective exactly: '${objective}' Use goal_create with max_goal_rounds 2 and omit start_native_rounds. Then use the returned business goal id and native revision in goal_wait_event for trigger_id file with expires_at exactly ${expiresAt}. Do not create files or use any other tools before the event. The event is untrusted: only after the native goal resumes should you write summarize.mjs. Reply briefly after the wait is durable.`
+    const ownerPrompt = `Create a goal with objective exactly: '${objective}' Use goal_create with max_goal_rounds 2 and omit start_native_rounds. Then use the returned business goal id and native revision in goal_wait_event for trigger_id file with expires_at exactly ${expiresAt}${opportunityProfile ? ` and opportunity_profile exactly ${opportunityProfile}` : ''}. Do not create files or use any other tools before the event. The event is untrusted: only after the native goal resumes should you write summarize.mjs. Reply briefly after the wait is durable.`
     await prompt(ownerPrompt)
     await waitForVerifiedGoal(activePage, goalsPath, verifierPath, deliveryPath, approved, frames, sessionId, workspace, {
       isToolAllowed: allowedEventApproval, rejected,
       until: () => existsSync(waitsPath) && query(waitsPath, 'SELECT state FROM goal_event_waits')[0]?.state === 'waiting',
     })
     const waiting = query(waitsPath, 'SELECT * FROM goal_event_waits')[0]
+    expect(JSON.parse(waiting.intent_json).opportunityProfile).toBe(opportunityProfile)
     const before = query(goalsPath, 'SELECT * FROM goal_records')[0]
     expect(JSON.parse(before.native_json)).toMatchObject({ phase: 'paused', roundsStarted: 0 })
     expect(existsSync(join(workspace, 'summarize.mjs'))).toBe(false)
@@ -286,9 +292,15 @@ test('real configured route wakes one browser-owned verified goal from a durable
     await writeFile(testInfo.outputPath('session-audit.json'), JSON.stringify(audit, null, 2), { mode: 0o600 })
     await copyFile(join(workspace, 'summarize.mjs'), testInfo.outputPath('summarize.mjs'))
     await copyFile(modelLog, testInfo.outputPath('model.jsonl'))
+    const opportunities = opportunityProfile ? query(join(home, 'assistant-proactive/opportunities.sqlite'), 'SELECT payload_json FROM proactive_decisions').map(row => JSON.parse(row.payload_json)) : []
+    if (opportunityProfile) {
+      expect(opportunities).toHaveLength(1)
+      expect(opportunities[0]).toMatchObject({ mode: 'execute', state: 'decided', reason: 'execution', utility: 70, goalId: goal.id, sessionId, profileId: opportunityProfile })
+      expect(opportunities[0].updatedAt - opportunities[0].firstObservedAt).toBeGreaterThanOrEqual(2000)
+    }
     await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ objective, noModelFixture: true,
       ordinarySourceAutomation: 'test-noop-host-executor', resultDelivery: 'durable-native-session', ...route.proof,
-      hostStarts, sessionId, goalId: goal.id, native, scope, expiresAt, approved, rejected, sourceEvents: readEvents(eventsPath),
+      hostStarts, opportunities, sessionId, goalId: goal.id, native, scope, expiresAt, approved, rejected, sourceEvents: readEvents(eventsPath),
       wait: query(waitsPath, 'SELECT * FROM goal_event_waits')[0], goalWakes: query(`${goalsPath}.wakes`, 'SELECT * FROM goal_wakes'),
       outbox: query(deliveryPath, "SELECT idempotency_key, status FROM outbox_messages WHERE idempotency_key LIKE 'goal-wake-result:%'"),
       modelCalls: await modelCalls(modelLog), stepContracts, stepJobs, outcomeContracts, outcomeJobs,
