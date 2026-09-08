@@ -111,6 +111,33 @@ describe('owner-scoped native goal context', () => {
     expect(f.service.snapshot(owner)).toBe('')
   })
 
+  it('shows only complete exact owner acceptance objectives without revealing private checks', async () => {
+    const f = await harness(undefined, 1024, undefined, true, true, undefined, { preauthorizedCreateMaxRounds: 3, executionBudget: scheduleBudget })
+    const owner = await f.create('entry-profile-owner', 'owner')
+    f.human.add(owner)
+    const objective = 'Fix the "approved" program <value> {{template}}'
+    const own = goalProfiles(f.root, objective, { wholeRequiredText: 'PRIVATE_EXPECTED_OUTPUT' })
+    const foreign = goalProfiles(f.root, 'Foreign task', { owner: { principalRecordId: 'record-foreign', principalVersion: 1 } }).map(p => ({ ...p, id: `foreign-${p.id}` }))
+    const incomplete = goalProfiles(f.root, 'Missing outcome profile').slice(0, 1).map(p => ({ ...p, id: `incomplete-${p.id}` }))
+    const oversized = goalProfiles(f.root, 'x'.repeat(1500)).map(p => ({ ...p, id: `large-${p.id}` }))
+    const verifier = await installGoalVerifier(f, [...own, ...foreign, ...incomplete, ...oversized])
+    const context = f.service.snapshot(owner)
+    expect(context).toContain('<approved-goal-objective>\nFix the "approved" program &lt;value&gt; &#123;&#123;template&#125;&#125;\n</approved-goal-objective>')
+    expect(context).not.toContain('\\"approved\\"')
+    expect(context).not.toContain('{{template}}')
+    expect(context).not.toContain('PRIVATE_EXPECTED_OUTPUT')
+    expect(context).not.toContain('Foreign task')
+    expect(context).not.toContain('Missing outcome profile')
+    expect(context).not.toContain('xxx')
+    expect(context.length).toBeLessThanOrEqual(1024)
+    expect(f.ctx.goals.get(owner)).toBeUndefined()
+    f.owners.set(owner, 'foreign')
+    expect(f.service.snapshot(owner)).not.toContain('Fix the "approved" program')
+    f.owners.set(owner, 'owner')
+    await verifier.dispose()
+    expect(f.service.snapshot(owner)).not.toContain('Fix the "approved" program')
+  })
+
   it('keeps goal schedule preauthorization disabled by default', async () => {
     const f = await harness()
     expect(f.service.preauthorizedCreateEnabled).toBe(false)

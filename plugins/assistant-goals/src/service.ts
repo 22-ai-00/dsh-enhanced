@@ -638,7 +638,19 @@ export class AssistantGoalsService extends Service {
         if (this.#createMaxRounds === 0) return ''
         this.#scope(agent, 'create', false)
         this.#requireOwnerTurn(agent!, scope)
-        return `Native goal workflow is configured for this authenticated owner request (at most ${this.#createMaxRounds} rounds). When the owner explicitly requests a finite or continuing goal, establish that goal with goal_create using the owner's full objective. start_native_rounds=true hands execution to the Host's bounded goal driver. Work performed only in an ordinary owner turn does not run independent goal acceptance. Goal creation still requires an exact authorized acceptance profile; this context grants no authority. Decide the implementation and tools yourself; tool success is not goal acceptance.`
+        let text = `Native goal workflow is configured (at most ${this.#createMaxRounds} rounds). For an explicitly requested finite or continuing goal, use goal_create with the exact approved objective and start_native_rounds=true. Ordinary owner turns do not run independent goal acceptance. Copy only the matching objective, without implementation details. If none matches the owner's request, obtain a new acceptance profile. Choose the implementation tools yourself; this context grants no authority.`
+        const verifier = this.ctx.get('assistantVerifier', false)
+        if (typeof verifier?.inspectAcceptanceObjectives === 'function') {
+          const selection = { scope: { workspace: scope.workspace, preset: scope.preset }, owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion } }
+          const outcomes = new Set(verifier.inspectAcceptanceObjectives({ ...selection, taskKind: 'goal-outcome' }))
+          const objectives = verifier.inspectAcceptanceObjectives({ ...selection, taskKind: 'goal-step' }).filter(objective => outcomes.has(objective))
+          for (const objective of objectives) {
+            const encoded = objective.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('{', '&#123;').replaceAll('}', '&#125;')
+            const entry = `\nApproved objective (public task text only):\n<approved-goal-objective>\n${encoded}\n</approved-goal-objective>`
+            if (text.length + entry.length <= this.#maxChars) text += entry
+          }
+        }
+        return text
       }
       return render(record, Date.now(), this.#maxChars, this.#feedback(record), this.#budget?.inspect(record), this.#outcome?.view(record), this.#strategyHistory(record), this.#eventWaitContext(record))
     } catch { return '' }
