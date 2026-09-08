@@ -87,6 +87,8 @@ Isolation schema v2 在同一 SQLite 事务中预留 worker memory + workspace c
 
 动作库独立持久化预留、期限、派发意图与结果；跨 Policy/Keychain/动作库没有原子事务，失败保守消耗预算，unknown 不重发。容器继续不出网，不提供通用网络代理。该 bundle 不自动加入安装场景或激活真实用户 profile。
 
+可选 `verifiedDelivery` grant 将提交改为验收后的 Host 交付：模型只登记路径、预期分支 head 和交付意图；Goals 从同一准确原生回合的步骤及整体验收中回读、重验隔离产物。Actions 在原授权与当前 owner route 内，通过已有 Automations 一次性执行器交给同一动作账本和 Keychain，再将实际终态送入现有 Delivery 主人通知。该组合不增加 AgentLoop 或调度器，不向模型开放验收私有数据；Goals、Automations 和 Delivery 仍是独立 Host bundle。
+
 ## 隔离产物的独立验收
 
 任务协议 v4 为 Goals step/outcome 增加只含 testSet 引用的 isolated criterion；具体测试向量属于 Verifier Host authority。Isolation 普通依赖共享任务协议；Verifier 将 Isolation 声明为可选 Host peer，只在隔离验收时使用其私有 runner。Goals 通过共享 admission 值和 Host producer 方法交接来源，Isolation 不反向依赖 Goals 包。引导构建在 Delivery 后、Verifier 前先构建 Isolation，独立发布 bundle 的边界保持不变。

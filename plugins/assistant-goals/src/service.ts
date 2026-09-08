@@ -28,6 +28,7 @@ import type { GoalOutcomeAssessment } from './outcome-store.js'
 import { GoalStrategyRuntime, validateGoalStrategyConfig, validateGoalStrategyInput, type GoalStrategyConfig } from './strategy.js'
 import { buildGoalStrategyHistory, type GoalStrategyHistory } from './strategy-feedback.js'
 import { successfulToolSteps, verifiedRunId, type VerifiedWorkflowSource } from './verified-workflow.js'
+import { buildOwnerVerifiedArtifacts, validateOwnerVerifiedArtifactsInput, type OwnerVerifiedArtifactsInput } from './verified-artifact.js'
 
 export interface Config { eventWaits?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
 export const Config: Schema<Config> = Schema.object({
@@ -771,6 +772,23 @@ export class AssistantGoalsService extends Service {
     return detached({ protocol: 'assistant-goals/owner-execution-snapshot/v1' as const, ownerRoute: receipt,
       storedGoal, executionRuns: runs, ...(budget === undefined ? {} : { budget }), ...(strategy === undefined ? {} : { strategy }),
       strategyRecords, ...(outcome === undefined ? {} : { outcome }), ...(feedback === undefined ? {} : { feedback }), outcomeAssessments: outcomeEvidence, acceptedTasks })
+  }
+
+  /** Host-only accepted artifact handoff. It never creates a model tool or Agent. */
+  inspectOwnerVerifiedArtifacts = (value: OwnerVerifiedArtifactsInput) => {
+    const input = validateOwnerVerifiedArtifactsInput(value)
+    const ownerInput: OwnerGoalExecutionSnapshotInput = { ownerRouteId: input.ownerRouteId, principalId: input.principalId,
+      workspace: input.workspace, preset: input.preset, sessionId: input.sessionId, goalId: input.goalId }
+    const source = this.inspectOwnerGoalExecution(ownerInput)
+    const isolation = this.ctx.get('assistantIsolation' as never, false) as { readAcceptedArtifact?: (contract: unknown, path: string) => unknown } | undefined
+    if (typeof isolation?.readAcceptedArtifact !== 'function') throw new Error('assistant-goals: verified artifact evidence is unavailable')
+    const step = source.acceptedTasks.find(item => item.contract?.task?.kind === 'goal-step' && item.contract?.task?.ref === input.runId)
+    if (step?.contract === null || step?.contract === undefined) throw new Error('assistant-goals: verified artifact evidence is unavailable')
+    const artifacts = input.paths.map(path => isolation.readAcceptedArtifact!(step.contract, path))
+    // Re-read the full durable evidence and owner route after Isolation's Host-only reads.
+    const current = this.inspectOwnerGoalExecution(ownerInput)
+    let cursor = 0
+    return buildOwnerVerifiedArtifacts(source, current, input, { readAcceptedArtifact: () => artifacts[cursor++] }, Date.now())
   }
 
   #ownerAcceptedTask(record: GoalRecord, runs: readonly GoalExecutionRun[], verifier: { inspectAcceptedTask(id: string): unknown } | undefined, contractId: string, outcomeAssessments: readonly GoalOutcomeAssessment[]) {

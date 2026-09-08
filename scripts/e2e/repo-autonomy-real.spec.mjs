@@ -9,9 +9,11 @@ import { createHash } from 'node:crypto'
 import { parseDocument, isMap } from 'yaml'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
+import { configureVerifiedDelivery } from './repo-verified-delivery-fixture.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const image = 'sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8'
+const verifiedDelivery = process.env.DSH_REPO_VERIFIED_DELIVERY === 'fixture'
 const objective = 'Fix summarize.mjs: read a JSON order array from stdin, ignore orders whose status is "cancelled", sum integer amountCents by currency, and print one JSON object with currency keys in dictionary order followed by a newline.'
 const cases = [
   { stdin: '[{"currency":"USD","amountCents":100},{"currency":"EUR","amountCents":250},{"currency":"USD","amountCents":75}]\n', expectedStdout: '{"EUR":250,"USD":175}\n', expectedExitCode: 0 },
@@ -117,12 +119,14 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
 
     const admission = { version: 2, objective, route: configuredRoute, maxGoalRounds: 3, stepMaxDurationMs: 120_000,
       executionBudget: { mode: 'calls', modelCalls: 12, toolCalls: 16, durationMs: 300_000, maxOutputTokensPerCall: 1024, routes: [configuredRoute] },
-      verification: { artifactPath: 'summarize.mjs', command: verificationCommand, maxRuns: 12, maxTotalDurationMs: 240_000, maxDurationMs: 5_000, maxOutputBytes: 4096, cases } }
+      verification: { artifactPath: 'summarize.mjs', command: verificationCommand, maxRuns: 12, maxTotalDurationMs: 240_000, maxDurationMs: 5_000, maxOutputBytes: 4096, cases },
+      ...(verifiedDelivery ? { wake: { maxDelayMs: 60000, runTimeoutMs: 60000, maxRuns: 3 } } : {}) }
     await writeFile(taskPath, JSON.stringify(admission), { mode: 0o600 })
     // Deliberately omit --session-id: this exercises the shipped real binding discovery.
     const setup = await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace, '--goal-admission', taskPath], env)
     await writeFile(testInfo.outputPath('goal-setup.log'), sanitize(setup), { mode: 0o600 })
     expect(setup).toContain(`Session: ${sessionId}`)
+    if (verifiedDelivery) await configureVerifiedDelivery(home, patchPath, env)
 
     host = await startHost(env)
     await activePage.goto(host.url)
@@ -132,7 +136,7 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     await activePage.getByRole('treeitem').filter({ hasText: 'New conversation' }).first().click().catch(() => {})
     // The owner supplies the failing source as ordinary request content. An
     // isolation job receives only its own inline files, never this Host path.
-    const prompt = `Here is the failing starting program:\n\n${buggySource}\n\n${objective} Please work on this as a finite goal. You may investigate and test as needed. The acceptance conditions are the objective above; independent verification is configured separately.`
+    const prompt = `Here is the failing starting program:\n\n${buggySource}\n\n${objective} Please work on this as a finite goal. You may investigate and test as needed. The acceptance conditions are the objective above; independent verification is configured separately.${verifiedDelivery ? ' Arrange delivery of the independently accepted repair to the authorized repository branch and open a pull request. Use the available repository authorization and inspect the current branch before preparing delivery.' : ''}`
     await activePage.getByLabel(/Describe what you want to build|Message or run a task/).fill(prompt)
     const sent = activePage.waitForResponse(response => new URL(response.url()).pathname === '/api/session/prompt')
     await activePage.getByRole('button', { name: 'Send message', exact: true }).click(); expect((await sent).status()).toBe(200)
@@ -152,6 +156,27 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     const calls = (await readFile(observerLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))
     expect(calls.filter(item => item.event === 'dispatch').length).toBeLessThanOrEqual(14)
     expect(calls.some(item => item.event === 'settled')).toBe(true)
+    let repositoryDelivery
+    if (verifiedDelivery) {
+      const path = join(home, 'assistant-actions/verified-delivery.sqlite')
+      expect(query(path, 'SELECT state FROM deliveries').length, 'completed artifact goal did not register a repository delivery intent').toBeGreaterThan(0)
+      await expect.poll(() => query(path, 'SELECT state FROM deliveries')[0]?.state, { timeout: 65000 }).toBe('succeeded')
+      const records = (await readFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, 'utf8')).trim().split('\n').map(line => JSON.parse(line))
+      expect(records.map(item => item.kind)).toEqual(['commit', 'pr'])
+      const commit = records[0], pr = records[1]
+      const digest = createHash('sha256').update(commit.files[0].content).digest('hex')
+      expect(commit.files[0].path).toBe('summarize.mjs')
+      expect(receipts.every(receipt => receipt.results.some(result => result.artifactDigest === digest))).toBe(true)
+      expect(commit.at).toBeGreaterThanOrEqual(Math.max(...receipts.map(receipt => receipt.completedAt)))
+      expect(pr.headOid).toBe(commit.commitOid)
+      const notices = () => query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-actions-verified-delivery/v1'")
+      await expect.poll(() => notices().map(row => row.status)).toEqual(['accepted'])
+      const noticeText = JSON.parse(notices()[0].intent_json).text
+      expect(noticeText).toContain(commit.commitOid)
+      expect(noticeText).toContain(String(pr.number))
+      await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(noticeText)
+      repositoryDelivery = { transport: 'explicit-fixture-not-live-github', records, state: query(path, 'SELECT id,state,result FROM deliveries'), notices: notices(), noticeText }
+    }
     await expect.poll(() => query(join(home, 'assistant-delivery/state.sqlite'), 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state).toBe('released')
     const response = frames.flatMap(frame => frame.value?.type === 'event' && frame.value.event?.type === 'assistant/message'
       ? [frame.value.event.data] : []).findLast(data => data.turn > 1 && data.message.content.some(block => block.type === 'text' && block.text.trim()))
@@ -175,12 +200,19 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     const restored = query(join(home, 'assistant-goals/web.sqlite'), 'SELECT * FROM goal_records WHERE id = ?', goal.id)[0]
     expect({ native: JSON.parse(restored.native_json), scope: JSON.parse(restored.scope_json) }).toEqual({ native, scope })
     expect(createHash('sha256').update(JSON.stringify(query(ledger, "SELECT id, status, artifact_binding_json FROM isolation_jobs WHERE status = 'succeeded' AND artifact_binding_json IS NOT NULL ORDER BY id"))).digest('hex')).toBe(sourceDigest)
+    if (verifiedDelivery) {
+      expect(query(join(home, 'assistant-actions/verified-delivery.sqlite'), 'SELECT id,state,result FROM deliveries')).toEqual(repositoryDelivery.state)
+      expect((await readFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, 'utf8')).trim().split('\n')).toHaveLength(2)
+      await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(repositoryDelivery.noticeText)
+      expect(query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-actions-verified-delivery/v1'")).toEqual(repositoryDelivery.notices)
+    }
     await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ route: route.proof, sessionId, goalId: goal.id, scope, native,
-      calls, approvals: approvals.length, sourceJobs, receipts, resultFeedback: { turn: response.turn, visibleReply }, restart: { sameGoal: true, sameSourceJobEvidence: true, replyVisible: true },
+      calls, approvals: approvals.length, sourceJobs, receipts, ...(repositoryDelivery ? { repositoryDelivery } : {}), resultFeedback: { turn: response.turn, visibleReply }, restart: { sameGoal: true, sameSourceJobEvidence: true, replyVisible: true },
       limitation: 'Real gateway integration evidence only; it does not establish a GitHub PR lifecycle, token/USD hard limits, or long-running autonomy.' }, null, 2), { mode: 0o600 })
   } catch (error) { failed = true; throw error } finally {
     try {
       if (existsSync(observerLog)) await copyFile(observerLog, testInfo.outputPath('observer.jsonl'))
+      if (env.DSH_REPO_DELIVERY_FIXTURE_LOG && existsSync(env.DSH_REPO_DELIVERY_FIXTURE_LOG)) await copyFile(env.DSH_REPO_DELIVERY_FIXTURE_LOG, testInfo.outputPath('github-fixture.jsonl'))
       await writeFile(testInfo.outputPath('approvals.json'), JSON.stringify(approvals), { mode: 0o600 })
       await writeFile(testInfo.outputPath('transport.json'), JSON.stringify(transport, null, 2), { mode: 0o600 })
       // This fixed, credential-free task can retain its visible tool evidence.

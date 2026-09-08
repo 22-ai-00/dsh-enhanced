@@ -1,7 +1,7 @@
 import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { isAbsolute, join, resolve } from 'node:path'
-import type { ActionGrant, CommitRequest } from './types.js'
+import type { ActionGrant, CommitRequest, VerifiedDeliveryRequest } from './types.js'
 
 export interface Config { stateRoot?: string; grants?: ActionGrant[] }
 const positive = (max: number) => Schema.number().step(1).min(1).max(max)
@@ -14,6 +14,7 @@ export const Config: Schema<Config> = Schema.object({
     paths: Schema.array(Schema.string()).required(), credentialHandle: Schema.string().required(), expiresAt: positive(Number.MAX_SAFE_INTEGER).required(),
     maxActions: positive(10_000).required(), maxTotalBytes: positive(64 * 1024 * 1024).required(),
     repoWorkflow: Schema.union([Schema.object({ baseBranch: Schema.string().required(), allowBranchCreate: Schema.boolean().required(), allowPullRequest: Schema.boolean().required() })]),
+    verifiedDelivery: Schema.union([Schema.object({ ownerRouteId: Schema.string().required(), budgetId: Schema.string().required() })]),
   })).default([]),
 })
 const text = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\p{Cc}]/u.test(value)
@@ -26,7 +27,10 @@ export function validateConfig(input: Config): Required<Config> {
   const grants = structuredClone(input.grants ?? [])
   if (!Array.isArray(grants) || grants.length > 1000 || new Set(grants.map(grant => grant.id)).size !== grants.length) throw new Error('assistant-actions: invalid grants')
   for (const grant of grants) {
-    if (!grant || ![14, 15].includes(Object.keys(grant).length) || !text(grant.id) || !Number.isSafeInteger(grant.revision) || grant.revision < 1
+    if (!grant || ![14, 15, 16].includes(Object.keys(grant).length)
+      || Object.keys(grant).some(key => !['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'repository', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'repoWorkflow', 'verifiedDelivery'].includes(key))
+      || grant.verifiedDelivery !== undefined && (!grant.verifiedDelivery || Object.keys(grant.verifiedDelivery).length !== 2 || !text(grant.verifiedDelivery.ownerRouteId, 200) || !text(grant.verifiedDelivery.budgetId, 200))
+      || !text(grant.id) || !Number.isSafeInteger(grant.revision) || grant.revision < 1
       || !/^[0-9a-f]{64}$/.test(grant.principalDigest) || !text(grant.principalRecordId) || !Number.isSafeInteger(grant.principalVersion) || grant.principalVersion < 1
       || !isAbsolute(grant.workspace) || resolve(grant.workspace) !== grant.workspace || !text(grant.agentPreset)
       || !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(grant.repository) || grant.repository.length > 256
@@ -53,3 +57,14 @@ export function normalizeCommit(value: CommitRequest): CommitRequest {
   return structuredClone(value)
 }
 export const commitBytes = (request: CommitRequest): number => Buffer.byteLength(request.headline) + request.files.reduce((sum, file) => sum + Buffer.byteLength(file.path) + Buffer.byteLength(file.content), 0)
+
+export function normalizeVerifiedDelivery(input: VerifiedDeliveryRequest): VerifiedDeliveryRequest {
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || Object.keys(input).some(key => !['grantId', 'idempotencyKey', 'expectedHeadOid', 'headline', 'paths', 'pullRequest'].includes(key))
+    || !Array.isArray(input.paths) || input.paths.length < 1 || input.paths.length > 32 || !input.paths.every(validPath)
+    || new Set(input.paths).size !== input.paths.length) throw new Error('assistant-actions: invalid verified delivery')
+  normalizeCommit({ grantId: input.grantId, idempotencyKey: input.idempotencyKey, expectedHeadOid: input.expectedHeadOid, headline: input.headline, files: input.paths.map(path => ({ path, content: '' })) })
+  if (input.pullRequest !== undefined && (!input.pullRequest || Object.keys(input.pullRequest).length !== 2
+    || !text(input.pullRequest.title, 200) || typeof input.pullRequest.body !== 'string' || Buffer.byteLength(input.pullRequest.body) > 65536)) throw new Error('assistant-actions: invalid verified pull request')
+  return structuredClone(input)
+}

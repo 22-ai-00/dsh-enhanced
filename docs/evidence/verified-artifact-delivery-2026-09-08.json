@@ -1,0 +1,149 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "ec743bea5ea48e2083d7f3a555d2b85e695d068d",
+  "status": "verified-artifact-delivery-and-owner-notice-validated-with-github-transport-fixture",
+  "completeWorkPackage": false,
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "path": "/tmp/dsh-verified-delivery-final-check-2.log",
+    "sha256": "0322bd1e36a3d1e871dad44cd1b8cabeee6187c0846841629a5a6774acaf7730",
+    "files": 335,
+    "tests": 4035,
+    "packs": 33,
+    "skipped": false
+  },
+  "realRun": {
+    "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_REPO_VERIFIED_DELIVERY=fixture pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs",
+    "exitCode": 0,
+    "result": "1 passed (2.6m)",
+    "path": "/tmp/dsh-verified-delivery-real-final.log",
+    "sha256": "7471e760799ac391af4bf68d7916c7359a655a4238c95743ca09007ac3019baf",
+    "route": {
+      "provider": "codex-subscription",
+      "model": "gpt-5.6-terra",
+      "api": "direct-responses"
+    },
+    "dispatches": 9,
+    "settledWithUsage": 8,
+    "auxiliaryFailures": [
+      {
+        "event": "settled",
+        "call": 2,
+        "drained": true,
+        "finish": "error",
+        "usage": null
+      }
+    ],
+    "goalPhase": "complete",
+    "acceptance": [
+      {
+        "kind": "goal-step",
+        "objectiveStatus": "achieved",
+        "completedAt": 1788875674043
+      },
+      {
+        "kind": "goal-outcome",
+        "objectiveStatus": "achieved",
+        "completedAt": 1788875676304
+      }
+    ],
+    "delivery": [
+      {
+        "id": "verified-delivery-96f2147f48accdfa53a561d1e5d0bdc1f9d370388e6c3f540c5822d4ede90c1c",
+        "state": "succeeded",
+        "result": "{\"commit\":{\"actionId\":\"975b2467-c3b3-4408-82a8-2589b1529007\",\"status\":\"succeeded\",\"commitOid\":\"a311dee58cd710b011dc1e184112d29d4130676e\"},\"pullRequest\":{\"actionId\":\"95d1a118-5563-4961-a5c2-e6e5731b5ace\",\"status\":\"succeeded\",\"pullRequestNumber\":17}}"
+      }
+    ],
+    "notificationCount": 1,
+    "notificationStatus": "accepted",
+    "visibleBeforeAndAfterRestart": true,
+    "duplicateCommitOrNotice": false,
+    "proof": {
+      "path": ".cache/repo-autonomy-real-codex-subscription-delivery-fixture-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/proof.json",
+      "sha256": "ce2650ede4fcd38589f115b65045a10eaf9f3735c62ede63a11123ae0b5e1041"
+    },
+    "artifacts": [
+      {
+        "path": ".cache/repo-autonomy-real-codex-subscription-delivery-fixture-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/tool-events.json",
+        "sha256": "5cfdfd8b0707e1abb5a056ceec0c22bb40ab47d7e5c758b20901038a95155141"
+      },
+      {
+        "path": ".cache/repo-autonomy-real-codex-subscription-delivery-fixture-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/github-fixture.jsonl",
+        "sha256": "33f4d67e2f9db2b46ab4448c6225e1e3c4f23307034b8318dab7198588c8b477"
+      },
+      {
+        "path": ".cache/repo-autonomy-real-codex-subscription-delivery-fixture-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/verifier-controls.json",
+        "sha256": "99a1eb1ecefd96fab0e705781a8d271168568e89721d6ad9b69856016c2dd136"
+      }
+    ]
+  },
+  "failedRuns": [
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-verified-delivery-real-1.log",
+      "sha256": "78bd3defcdc68de4744f661b4beb408d96d992d1f5e49588a3d5433aeb325091",
+      "finding": "fixture configuration row was not the nested personal-assistant policy"
+    },
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-verified-delivery-real-2.log",
+      "sha256": "1a136fdaf2306976ff54b14e8a39260a07833912213a2f71f135de5e1f5ca9b2",
+      "finding": "repository inspect failed during preparation; private credential directory fixed before next model run"
+    },
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-verified-delivery-real-3.log",
+      "sha256": "85809981d81f0eb1b67d44c0369915111a8c74b32fbfcf1ee91b6b8a30ff581b",
+      "finding": "fixture preflight omitted credentialsKeychain injection"
+    },
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-verified-delivery-real-4.log",
+      "sha256": "b662c55556c5d6912c184e4ce4d19c554d42a6b3e325b0265ba34f0324f82e23",
+      "finding": "fixture preflight had a different consumer identity; replaced with provider file validation"
+    },
+    {
+      "exitCode": 1,
+      "path": "/tmp/dsh-verified-delivery-final-check.log",
+      "sha256": "2e857e69290eab3d3ca469cb46b31fdac8f030c7a9089e1dbe5f3f55efc0b28e",
+      "finding": "lint rejected unnecessary Promise iterable spread"
+    }
+  ],
+  "postBrowserChanges": [
+    "Notification wording now distinguishes PR unknown from failed and preserves individual known outcomes; corresponding unknown regression and final full check passed.",
+    "Equivalent Promise iterable lint correction; final full check passed."
+  ],
+  "limitations": [
+    "GitHub inspect/commit/PR transport is an explicit fixture; no live GitHub repository, CI, review or event follow-up was verified.",
+    "One ordinary bounded task does not establish general model reliability or the full 18-work-package goal.",
+    "Real browser restart occurs after completion; interrupted execution is covered by targeted lifecycle tests, not this model run.",
+    "Notification accepted/visible does not establish that a human read it; expired pending notification rows are retained and scanned, without further delivery.",
+    "Repository grant configuration still requires explicit operator configuration; convenient repository setup remains follow-up work.",
+    "No token/USD hard-cap claim, autonomous skill improvement gain, or ChatGPT web review."
+  ],
+  "sourceSha256": {
+    "plugins/assistant-actions/README.md": "6f9c59b9c9f261043f9c9c708c348c9720fe25a3b10304584d3b749f76091ef1",
+    "plugins/assistant-actions/package.json": "c9116f57d36a017f0bc3adcb6b93ae2776a02c819336b5ff2e5ebca4232633f8",
+    "plugins/assistant-actions/src/config.ts": "db40508e8907fdbca1f522b5a3a7b02acfafdc20ab5e875281d37dc8cd405a4d",
+    "plugins/assistant-actions/src/ledger.ts": "0a987de8c7c910b5d39ecea2e78afab74ee50010dc13180eca549adb1003b8b1",
+    "plugins/assistant-actions/src/service.ts": "7062ec67f5545364a7ce416029d2504aa9385e94e9176ff4abc3ee8ff898d1d5",
+    "plugins/assistant-actions/src/types.ts": "c4fa59e7e950560b7a8f598cc046bfca8f76cff10c111c8227bd8d4275510ba9",
+    "plugins/assistant-actions/src/verified-delivery.ts": "bd37b8d3cf1ded8c1b302bf739fa7122d3cd3381c2bba437ebced4089beb87a3",
+    "plugins/assistant-actions/tests/verified-delivery-service.spec.ts": "2f7b844ef46d43139714c1fbdd23dddffd1ed65ed3f4610ede8a9c6acb8df1ea",
+    "plugins/assistant-actions/tests/verified-delivery.spec.ts": "4aa85d3c2b49c4f7f0b15ec8c98c95edb9ec261bcf1513807bc404e0ba9b76e2",
+    "plugins/assistant-goals/README.md": "c6a5e7070f3b67f6b1cd09f78f3cdc41bd535f8438af849b48b81b432daafcd9",
+    "plugins/assistant-goals/src/index.ts": "1d0500b560aa51cad8eabb3e40b71aa7124b40a43475204c2475fa85f537a775",
+    "plugins/assistant-goals/src/service.ts": "3644eda375092d48f8ff6340bd14d76f1a046184f87598113655f7aeddaa65f7",
+    "plugins/assistant-goals/src/verified-artifact.ts": "1ac8de4c21b21854dec9d2f47acbdea64517c2519a1d8911e163d87bd6fa3616",
+    "plugins/assistant-goals/tests/service.spec.ts": "c51e3d87e09888bf4d481a0b5a7a35e762fe2e8db977146b2bc0428356b1f0b2",
+    "plugins/assistant-goals/tests/verified-artifact.spec.ts": "ec955b6f2cdcecd2979a56830c9b38aab9492d87010fae57cc8ba6a39b558ff1",
+    "plugins/assistant-isolation/src/service.ts": "87fa9cf151acb7a00237e5f9ea537a2123b983a3e964c2e4b4e4a23c56e8d335",
+    "plugins/assistant-policy/src/service.ts": "5af05c751322091c21858b541d17db25b04e9050ed8ad3885b9d58ccf5dadf9d",
+    "pnpm-lock.yaml": "5b8a469f97db4db5a50eb595f89d70bfd6a11d41313b314c5944c08c86da8996",
+    "scripts/e2e/playwright-repo-real.config.mjs": "caf857fb18c4f834f3aa2f0a5d97dda7a64c43e7587479949850338b6dcad812",
+    "scripts/e2e/repo-autonomy-real.spec.mjs": "12282c6312f5d06ed30b2a3b6d61e21f4f3eeb0ab0fc9b4d7966672da469f349",
+    "scripts/e2e/repo-verified-delivery-fixture.mjs": "58cf2554cca086e2097e546bac62c30e54d8f42306445179f5fd8f50d7d1b818"
+  }
+}

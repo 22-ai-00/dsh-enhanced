@@ -9,6 +9,7 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createRequire } from 'node:module'
@@ -685,5 +686,37 @@ describe('owner-scoped native goal context', () => {
       expect(() => f.service.inspectVerifiedWorkflowRun(agent, record.id, historical.runId)).toThrow(/achieved whole-goal outcome|current accepted outcome/u)
     }
     finally { now.mockRestore() }
+  })
+})
+
+describe('owner verified artifact Host boundary', () => {
+  it('reads Isolation between two owner snapshots and rejects route or receipt changes during that read', async () => {
+    const f = await harness()
+    const definition = { version: 1, digest: acceptanceDigest({ objective: 'deliver' }), objective: 'deliver' }
+    const scope = { principalId: 'owner', principalRecordId: 'record-owner', principalVersion: 1, workspace: '/workspace', preset: 'primary' }
+    const stepTask = { kind: 'goal-step' as const, ref: 'run', goal: { id: 'goal', definitionVersion: 1, definitionDigest: definition.digest, stepId: 'round-1', runId: 'run', sessionId: 'session', nativeGoalId: 'native', nativeRevision: 1 } }
+    const isolated = (id: string) => ({ id, kind: 'isolated-process-behavior' as const, authority: { id: 'runner', digest: 'a'.repeat(64) }, artifactPath: 'artifacts/release.txt', testSetId: 'set' })
+    const make = (task: any, id: string, criterionId: string) => createTaskAcceptanceContract({ protocol: 'task-acceptance/v4', id, scope: { workspace: scope.workspace, preset: scope.preset }, owner: { principalRecordId: scope.principalRecordId, principalVersion: 1 }, task, objective: definition.objective, profile: { id: `${id}-profile`, version: 1, digest: 'b'.repeat(64) }, issuedAt: Date.now() - 1, expiresAt: Date.now() + 60_000, criteria: [isolated(criterionId)], bounds: { maxDurationMs: 1000, maxEvidenceBytes: 4096 } })
+    const step = make(stepTask, 'step', 'step-file')
+    const outcomeTask = { kind: 'goal-outcome' as const, ref: 'assessment', goal: { id: 'goal', definitionVersion: 1, definitionDigest: definition.digest, assessmentId: 'assessment', sessionId: 'session', nativeGoalId: 'native' } }
+    const outcome = make(outcomeTask, 'outcome', 'outcome-file')
+    const content = 'artifact'; const sha256 = createHash('sha256').update(content).digest('hex'); const observedAt = Date.now()
+    const receipt = (contract: any, id: string, criterionId: string) => createTaskVerificationReceipt(contract, { protocol: 'task-verification/v4', id, contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task: contract.task, results: [{ criterionId, status: 'passed', reason: 'verified', artifactDigest: sha256, evidence: [{ kind: 'isolated-artifact', ref: 'job', digest: sha256 }] }], startedAt: observedAt, completedAt: observedAt, validUntil: observedAt + 30_000 })
+    const snapshot = () => ({ ownerRoute: { route: 1 }, storedGoal: { id: 'goal', scope, definition, nativeAtLastObservation: { sessionId: 'session', goalId: 'native', revision: 2, phase: 'complete' } }, executionRuns: [{ intent: { runId: 'run', task: stepTask }, acceptance: { contractId: step.id, contractDigest: step.digest }, execution: { status: 'succeeded', quiescent: true, completedAt: observedAt } }], outcomeAssessments: [{ contract: outcome, triggerRunId: 'run', execution: { status: 'succeeded', quiescent: true, completedAt: observedAt } }], acceptedTasks: [{ state: 'done', contract: step, receipt: receipt(step, 'step-receipt', 'step-file'), verifierExecutionObservation: { status: 'succeeded', quiescent: true, completedAt: observedAt, executionRef: 'run' } }, { state: 'done', contract: outcome, receipt: receipt(outcome, 'outcome-receipt', 'outcome-file'), verifierExecutionObservation: { status: 'succeeded', quiescent: true, completedAt: observedAt, executionRef: 'assessment' } }] })
+    const reads = [snapshot(), snapshot()]; const ownerRead = vi.fn(() => reads.shift()!)
+    Object.defineProperty(f.service, 'inspectOwnerGoalExecution', { value: ownerRead })
+    await f.ctx.plugin((ctx: Context) => { ctx.provide('assistantIsolation' as never, { readAcceptedArtifact: vi.fn(() => ({ path: 'artifacts/release.txt', content, sha256, jobId: 'job' })) } as never) })
+    const input = { ownerRouteId: 'route', principalId: 'owner', workspace: '/workspace', preset: 'primary', sessionId: 'session', goalId: 'goal', runId: 'run', paths: ['artifacts/release.txt'] }
+    expect(f.service.inspectOwnerVerifiedArtifacts(input)).toMatchObject({ protocol: 'assistant-goals/verified-artifacts/v1', files: [{ sha256 }] })
+    expect(ownerRead).toHaveBeenCalledTimes(2)
+    expect(ownerRead).toHaveBeenNthCalledWith(1, { ownerRouteId: 'route', principalId: 'owner', workspace: '/workspace', preset: 'primary', sessionId: 'session', goalId: 'goal' })
+    const changed = snapshot(); const stale = changed.acceptedTasks[1]!
+    changed.acceptedTasks[1] = { ...stale, receipt: { ...stale.receipt, validUntil: observedAt + 29_999 } } as typeof stale
+    reads.push(snapshot(), changed)
+    expect(() => f.service.inspectOwnerVerifiedArtifacts(input)).toThrow('unavailable')
+    const routeChanged = snapshot(); routeChanged.ownerRoute = { route: 2 }
+    reads.push(snapshot(), routeChanged)
+    expect(() => f.service.inspectOwnerVerifiedArtifacts(input)).toThrow('unavailable')
+    expect(ownerRead).toHaveBeenCalledTimes(6)
   })
 })
