@@ -64,14 +64,14 @@ export function registerGoalTools(ctx: Context, service: AssistantGoalsService):
   }
   const createTool = defineTool({
     name: 'goal_create',
-    description: 'Create a native DSH goal from the current authenticated owner request and persist its business context. Requires a live owner human turn and explicit Policy permission. By default creation leaves this owner turn open for goal_schedule or goal_wait_event. Set start_native_rounds true only to conclude a successful owner turn so the Host native goal driver, if enabled, can start the next goal round.',
+    description: 'Create a native DSH goal from the current authenticated owner request and persist its business context. Requires a live owner human turn and explicit Policy permission. By default creation leaves this owner turn open for goal_schedule, goal_wait_event, or an authorized skill_capture registration in the same owner turn. Set start_native_rounds true only to conclude a successful owner turn so the Host native goal driver, if enabled, can start the next goal round.',
     parameters: { objective: { type: 'string', required: true }, max_goal_rounds: { type: 'integer' }, start_native_rounds: { type: 'boolean' } }, output,
     async execute(args, exec) {
       const created = service.create(exec.agent, args.objective, args.max_goal_rounds)
       if (args.start_native_rounds === true) exec.concludeTurn()
       return { context: (args.start_native_rounds === true
         ? 'Goal created. This successful call concludes the owner request turn; the Host native goal driver must start the next goal round before goal-round work can begin.\n'
-        : 'Goal created. You are still in the owner request turn, not a native goal round; you may continue with goal_schedule or goal_wait_event.\n')
+        : 'Goal created. You are still in the owner request turn, not a native goal round; you may continue with goal_schedule, goal_wait_event, or an authorized skill_capture registration.\n')
         + service.describe(created) }
     },
   })

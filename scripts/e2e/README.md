@@ -104,3 +104,18 @@ The installed profile receives an ordinary repair-and-delivery request. The mode
 GitHub DNS/HTTPS and commit/PR responses are explicit transport substitutes, including the non-production Keychain token. The model route, installer, Policy, Keychain lease, EventTriggers observer/cursor, Goals, Automations, Delivery and Docker verifier run as actual components. This is not live GitHub authentication or remote CI/review evidence. The event experiment allows at most 26 model dispatches with a 300-second task budget; installer and cleanup have a separate test timeout. It needs the exact local Docker image configured in the spec. No ordinary profile is modified, and no provider credential is retained in artifacts.
 
 For a failed integration that needs local diagnosis, set `DSH_REPO_RETAIN_FAILURE=1`. The Host and browser still stop, but `retained-environment.json` points to the private temporary profile and original Session so a restart/UI check can reuse it without repeating model work. The default deletes this environment; remove a retained directory after diagnosis because it includes the private test configuration. Startup diagnostics retain only session/header/workspace identifiers, not credentials or model request headers.
+
+## Automatic workflow capture and reuse
+
+`pnpm test:web-owner:real-capture` exercises an isolated fresh Web profile with the existing real model route. The owner asks for a finite task and preauthorizes a pending skill candidate in the same request. The test requires independent source acceptance, automatic capture without a later save request, a Host/browser restart, candidate replay in a fresh Goal after removal of the original artifact, fresh independent acceptance, explicit owner activation, and persistent readback without duplicate capture or replay.
+
+```sh
+CI=true DSH_CAPTURE_RETAIN_FAILURE=1 \
+PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
+DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra \
+pnpm test:web-owner:real-capture
+```
+
+The observer bounds the entire experiment to 24 model dispatches; each Goal has an explicit eight-call/twelve-tool budget. It does not replace prompts, filter the model's tool catalog, prescribe tool arguments/order, or force round completion. Browser approvals permit only the task's file tools, owner Goal/skill controls, and session-local todo updates. The configured reusable tool allowlist is read/write/edit/glob/grep/todo_write/get_goal. The verifier runs the exported program on independent fixed cases; this is not an OS-sealed holdout or measured improvement experiment. Automatic activation is not exercised or authorized.
+
+Artifacts are written under `.cache/web-owner-real-capture-e2e/`. With `DSH_CAPTURE_RETAIN_FAILURE=1`, failure stops the Host/browser and retains its private temporary home; `retained-environment.json` identifies the directory for local diagnosis without another model task. Delete that directory after diagnosis. With the option absent, private temporary data is removed on success and failure. Never publish the private home or raw session contents.

@@ -1,0 +1,103 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "b5ff425a3c21cc04f99cbb26b122632f4eade675",
+  "status": "automatic-capture-and-verified-reuse-validated",
+  "completeWorkPackage": false,
+  "realModelE2e": {
+    "command": "CI=true DSH_CAPTURE_RETAIN_FAILURE=1 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra pnpm exec playwright test --config scripts/e2e/playwright-real-capture.config.mjs",
+    "exitCode": 0,
+    "result": "1 passed (1.8m)",
+    "attempt": 15,
+    "log": "/tmp/dsh-real-capture-attempt-15.log",
+    "logSha256": "c82abd516896cb6b5121ac133e837f5766c92ed995e3e4cbe8db887ee2bfeda8",
+    "proof": ".cache/web-owner-real-capture-e2e/web-owner-real-capture-ord-4853a-and-reuses-it-after-restart/proof.json",
+    "proofSha256": "3324f7259aad682f0628474bdf67a92688afd51f97d304e8589efe9b987edbab",
+    "auditSha256": "98f1993e071de7244ebcc71528e9663477b3515fd38e2a974e40c3f4988527c9",
+    "modelSha256": "2050990c9917fa9d4166fc534a01e731b12989cdf34b9973142074095cd54077",
+    "modelDispatches": 17,
+    "hostStarts": 4,
+    "route": {
+      "provider": "codex-subscription",
+      "model": "gpt-5.6-terra",
+      "api": "direct-responses"
+    },
+    "captureId": "skill-capture-5307a2cd901fbe39ba1b7eca25097060d99bb8e447cb866782fe5029d89d3bbb",
+    "candidateId": "skill-candidate-f8bfa0a9216c4055822891d3a6b48a6fd4af95a455d772f220065f5bcff0062c",
+    "sourceGoalId": "78a00b80ae17970e66bb5ff2c1f9885e2741d673867a51e91f1d52951860b8af",
+    "trialGoalId": "877cab9b2fb3495c5da5a8574ef63aabdfd812413ff9700313a970bca176db58",
+    "trialRunId": "skill-run-ea69ec6dec044a19961ff04610173272cb88c9740923eb9ac23623a43be36765",
+    "sourceAcceptance": "achieved",
+    "trialAcceptance": "achieved",
+    "artifactSha256": "08ebc999cd9547d14795223d58d0fb4330c7da640fb5b46aed3eecb44fb643e1",
+    "activation": "explicit-owner-after-independent-trial",
+    "restartNoReplay": true,
+    "ordinaryRequests": true,
+    "forcedToolOrder": false
+  },
+  "focusedRegression": {
+    "command": "pnpm --filter @dsh-enhanced/assistant-skills test && pnpm --filter @dsh-enhanced/assistant-skills typecheck && pnpm --filter @dsh-enhanced/assistant-skills build",
+    "exitCode": 0,
+    "testsPassed": 54,
+    "testsSkipped": 7,
+    "log": "/tmp/dsh-capture-planning-test.log",
+    "logSha256": "f0e23a56cbc3bf5ba5685528db7b27b861a76c3631060710fa4e025285ebf996"
+  },
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "log": "/tmp/dsh-capture-check.log",
+    "exitCode": 0,
+    "sha256": "d686e5aa084c1d3036e29bd8556faacd4353f5afd8796aca7b1f7b1bd0f0bd8c",
+    "files": 341,
+    "tests": 4167,
+    "packs": 33,
+    "skipped": false
+  },
+  "failuresAndFixes": [
+    "Preserved real failures before retry; source bridge now selects newest exact assessment, validates all contiguous successful native rounds and reads cold Session without an execution Agent.",
+    "Owner capture and reuse handoffs conclude only after exact authority checks; awaiting-native-round claims no invocation, charges no execution authorization and performs no work.",
+    "Failed readonly probes remain provenance; successful exact source-Goal planning checkpoints remain in source and are never replayed. Unknown effects and other controls remain rejected.",
+    "Nested browser approvals now bind exact parent trial, durable running invocation and instantiated step; unresolved runs fence changed invocation keys.",
+    "Activation permits only one exact trial plus constrained metadata inspection; unrelated execution cannot be attributed to the trial.",
+    "Attempt14 exited 1 due to successful planning checkpoint trace rejection, despite achieved source acceptance; fixed by provenance-only projection with positive and negative regressions.",
+    "Attempt12 was deliberately interrupted (exit130) after actual trial acceptance exposed the old sole-tool attribution restriction; it was not a full pass."
+  ],
+  "independentReview": {
+    "sourceReview": "PASS",
+    "realE2e": "PASS: independent review of final proof, native session audit, exact trial and acceptance bindings, owner activation and restart readback",
+    "engineeringCheck": "PASS: independent log/exit-code, source and artifact digest, package contents and staged diff review",
+    "reviewer": "local read-only verifier subagent",
+    "status": "PASS"
+  },
+  "limitations": [
+    "One order-summary workflow; no claim of broad task reliability or 3–5 skill classes.",
+    "Fixed independent process-behavior acceptance uses real Node, not an OS-sealed holdout or improvement comparison.",
+    "Successful final E2E source is single-round and uses direct goal_create handoff; multiround repair, owner trial handoff and planning-note projection are covered by targeted regressions and retained-trace analysis, not all exercised by this final run.",
+    "No automatic promotion, measured intelligence gain, signed production publication, live GitHub or second real event source verified in this batch.",
+    "ChatGPT in-app browser unavailable; independent review is by local read-only subagent.",
+    "Full 18 work packages remain 3 verified, 13 implementing, 2 todo."
+  ],
+  "sourceSha256": {
+    "package.json": "91f92aefe059348457e12f36d51fc19fd533bc7055c9a7af8e3d6a74d76679b7",
+    "plugins/assistant-goals/README.md": "46c6bb618a4eda0dc27edbeb49ea9d5e8682854f0c8c535e0eb2937a57338e1b",
+    "plugins/assistant-goals/package.json": "67624a21f3bdad249107225ce037b21ab24b0c43b2c9527a4746ed192a27ceb3",
+    "plugins/assistant-goals/src/index.ts": "c7bf006208508c75da12b7dbfb4cb92f850e0d9ddd625d15f3ea77bf0d2c14f3",
+    "plugins/assistant-goals/src/service.ts": "e14d050e42617457165ad76c801f5ae12f89ba45cfa904e2b32691086a2862cf",
+    "plugins/assistant-goals/src/tools.ts": "d8d613c02dc31478619194b74cb1dcdd446fcea10796d0d4179b51a95cec8858",
+    "plugins/assistant-goals/src/verified-workflow.ts": "d63acbb21ca26cfeeb4587499525e2a02a596789d45cf28fa0161bf1dd874a40",
+    "plugins/assistant-goals/tests/service.spec.ts": "e4e45ce002dc91f5667ad1b8f407f21ed92f99ccd3faff0c9a0460f2e6994e8f",
+    "plugins/assistant-goals/tests/verified-workflow.spec.ts": "57e379a1f6d06cb66e591f5356bfa3f783823271867200b643dbecdd2a5e2eb0",
+    "plugins/assistant-skills/README.md": "c03cd1f14a4a02b2861551a28ac6014472b3a7d2175f836cfdb5c5fdfa068c46",
+    "plugins/assistant-skills/src/definition.ts": "ae88cfd9ebd763cc790f4b0c58729a1b9b55ab4a6901c8b763527cbe60fd4a75",
+    "plugins/assistant-skills/src/service.ts": "9220cbf7745cdc7c5b04ca615e08a317d8f82ae9eed7e22ea9515e902c935c0a",
+    "plugins/assistant-skills/src/store.ts": "c3a55e21dd415534a659a936070b36b196832c139040eccd05e29d336c186f81",
+    "plugins/assistant-skills/tests/definition.spec.ts": "41271f621d4fcc183884367d8b9e6a38e49e6749646a427b29b323a119ce16c9",
+    "plugins/assistant-skills/tests/service.spec.ts": "1eb99d4a677e743d9efa6c9c6ba7e34c4cb79977da9e773326b104303b022967",
+    "plugins/assistant-skills/tests/store.spec.ts": "60d3af9970886a0e415adb5de973846eb0c72a305fdb6bbb57916f41d5351795",
+    "pnpm-lock.yaml": "cbaba6e56968886c0394c0fdd2cc45748f2794ebaf29dcab8fe4561ac951d43b",
+    "scripts/e2e/README.md": "6c38470d1f3d7b98c041d76a444fda1b70f6e4755dc563afd4ca63ca1c1bd60a",
+    "scripts/e2e/web-owner-real-audit.mjs": "861e1b1e7221f4cc32b821ca7abd6b4847d6cc78ae8c8bf66d3b2e70301845c4",
+    "scripts/e2e/playwright-real-capture.config.mjs": "3584acccb4efb0e5ee64f003ec5d82fb487df465fb23f17cf910fddb8289eee5",
+    "scripts/e2e/web-owner-real-capture.spec.mjs": "11cfb371e889c69a74be20578a374e7c5c3b2fa8f528be19fb1e29371438fa53"
+  }
+}

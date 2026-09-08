@@ -1,5 +1,7 @@
 # 兼容性基线
 
+Goals 的自动技能提取桥使用可选 Host peer `dsh-session-query@0.1.2-rc.1` 的 `observeSession(..., { projectionMode: 'none' })`，读取完成会话后释放 observation，不创建执行 Agent。缺少服务时返回 `unavailable`；Skills 在服务就绪后重新核验待处理授权。`verified-workflow-source/v1` 可附带只作来源记录、永不重放的 `failedObservations`，成功步骤语义不变。新 owner bridge 的多回合来源以可选 `segments` 保留连续执行记录，v1 顶层仍指向最终验收回合；既有手动单回合 API 不返回该字段。自动提取需成套升级 Goals 与 Skills；`skill_capture(start_native_rounds: true)` 仅在登记成功后使用原生 `concludeTurn()` 交接，默认仍允许同一 owner 回合组合授权。升级验证包括冷会话读取、授权撤销、失败观察隔离和真实目标交接后重启复用。
+
 仓库当前对齐以下上游发布状态：
 
 - DeepSeek Harness 运行时与 npm 测试依赖：`0.1.2-rc.1`。该版本移除了 `dsh-llm` 的非稳定 `deepFreeze` 导出，并以 `Session.snapshotEvents()` 取代公开 `Session.events`；本仓库的兼容层不得继续依赖这些 rc.8 实现细节。
