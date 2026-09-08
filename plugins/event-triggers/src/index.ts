@@ -7,6 +7,7 @@ export const name = 'dsh-enhanced-event-triggers'
 export { Config, EventTriggersService, version }
 export * from './config.js'
 export * from './service.js'
+export * from './source.js'
 
 export function apply(ctx: Context, config: import('./config.js').Config): void {
   const normalized = normalizeEventTriggersConfig(config)

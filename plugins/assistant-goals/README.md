@@ -133,6 +133,24 @@ executionBudget:
 
 协议依次持久化 Automations 的 **paused** 定义、Goals 的不可变 definition-hash 绑定、再激活定义。Delivery 在恢复前重读 owner route、目标和期限；紧邻原生恢复前 Goals 用 occurrence CAS 写入 dispatch。已派发后的退出、lease 到期、撤权、期限或 teardown 都不证明执行停止，因而 unknown 不自动重放；进程崩溃留下的 dispatched 记录同样禁止重放，保持未确认状态等待对账；没有 dispatch CAS 的 scheduler 终态只收敛为 denied。Session 忙碌或前置授权失败会拒绝本次 wake，不自动延期；由 owner 检查后决定下一步。Automations、Goals、Delivery 与 Session 不是原子事务。
 
+## 等待事件后继续原目标（可选）
+
+配置 `eventWaits: true`，并启用持久 `backgroundWake`、`executionBudget`、`verifyNativeRounds` 和 `verifyGoalOutcome`。还须连接本仓库当前版本的 `event-triggers`，配置已有 trigger、对应 automation 和正常的来源观测权限。此功能复用原生 Goal、Session、累计预算及独立验收；不会另起模型循环。
+
+在当前认证 owner 的人类回合中调用：
+
+```json
+{"goal_id":"业务目标 ID","expected_revision":1,"trigger_id":"report-file","expires_at":1790000000000}
+```
+
+这是 `goal_wait_event` 的参数。`expires_at` 是 UTC epoch 毫秒，请使用将来的实际期限，且不能超过 `backgroundWake.maxDelayMs` 和目标预算期限。省略它时只查看当前目标的等待记录。创建等待还需 goal 的 `wait`、`pause`、`observe`、`inspect` 权限和该工具的执行权限；当前 agent 以及 `background:assistant-goals-wake/v1` 都必须对来源目标 automation 获得 `wait-for-event` 权限。后台恢复仍需原有 owner route、`wake`、执行与预算规则；结果投递另需 `background:assistant-goals-wake/v1` 对原 binding 的 message `send` 权限。启用 `preauthorizedSchedule` 时，精确的四参数调用还须通过已有隔离验收和有限预算预检。
+
+授权时冻结来源配置与持久序号，暂停原目标并 flush 原 Session；只匹配快照之后的首个有效事件。私有 `databasePath + '.event-waits'` 日志先保存匹配与固定 wake 身份，再交给已有调度器恢复原 Session/Goal。消费者重开会扫描持久事件；来源通知只是扫描提示。目标版本、owner、来源配置、Policy 或期限不再有效时拒绝恢复。派发后的未知执行不自动重放。
+
+完成本次原生执行与独立验收等待、释放 Agent 后，事件 wake 将本次目标回合的完整最终文本放入原 owner binding 的持久消息队列。入队前重查来源、目标和精确 owner/binding generation/Session；稳定 key 防止重复结果入队。缺少结果能力、空白/截断/超限文本、撤权或入队失败不会伪报交付成功，也不重跑已派发目标。队列实际送达仍按 Delivery 的渠道确认和 unknown 规则处理；wake 成功仅证明结果已入队。仅配置旧的单次计划 wake 不自动增加消息投递。
+
+**原 trigger 的 automation 仍正常执行。** 目标等待是 owner 额外授权的一次恢复，配置 automation 时应考虑两者的作用。目标上下文只提供不含正文的事件摘要，模型仍须按现有权限重新读取业务数据；事件本身不代表任务达成，也不授予新权限。等待记录的 `materialized` 仅代表已交给调度器，`terminal` 及其原因须结合原生目标和独立验收结果判断。
+
 ## 诊断与边界
 
 `verifyNativeRounds: true` 为已经启用的原生 goal-round-driver 接入独立步骤验收。它还需要 Delivery 的 `agentGoalContinuationTimeoutMs` 为正、上述 goal Policy 额外允许 `execute`，以及同一 Host 的 `assistant-verifier`。Verifier profile 使用 `taskKind: goal-step`，精确匹配实际 owner record/version、workspace/preset 和当前目标 objective；成功条件与 authority 按 Verifier README 配置。没有匹配 profile 时，即使 Verifier 设置 `requireAcceptance: false`，该目标回合也会在模型调用前停止。默认不开启此行为，也不自动挂载 driver。

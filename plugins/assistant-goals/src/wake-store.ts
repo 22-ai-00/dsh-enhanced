@@ -25,7 +25,7 @@ const routeText = (value: unknown, max = 512): value is string => typeof value =
 const plain = (value: unknown): value is Record<string, unknown> => value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
 const exact = (value: unknown, keys: readonly string[]): value is Record<string, unknown> => plain(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key))
 
-function intentInput(value: GoalWakeIntent): GoalWakeIntent {
+export function validateGoalWakeIntent(value: GoalWakeIntent): GoalWakeIntent {
   if (!exact(value, ['id', 'scope', 'goalId', 'definition', 'native', 'attestation', 'at', 'expiresAt', 'ownerRouteId', 'budgetId']) || !text(value.id) || !text(value.goalId) || !routeText(value.ownerRouteId) || !routeText(value.budgetId)
     || !exact(value.scope, ['principalId', 'principalRecordId', 'principalVersion', 'workspace', 'preset']) || !routeText(value.scope.principalId) || !text(value.scope.principalRecordId) || !integer(value.scope.principalVersion, 1) || typeof value.scope.workspace !== 'string' || !value.scope.workspace.startsWith('/') || !text(value.scope.preset)
     || !exact(value.definition, ['version', 'digest', 'objective']) || !integer(value.definition.version, 1) || !/^[a-f0-9]{64}$/u.test(value.definition.digest) || typeof value.definition.objective !== 'string' || value.definition.objective.length < 1 || value.definition.objective.length > 16384 || value.definition.digest !== acceptanceDigest({ objective: value.definition.objective })
@@ -42,7 +42,7 @@ function scopeKey(value: GoalScope): string {
   return acceptanceCanonicalJson({ principalId: value.principalId, principalRecordId: value.principalRecordId, principalVersion: value.principalVersion, workspace: value.workspace, preset: value.preset })
 }
 function wake(row: Row): GoalWake {
-  const intent = intentInput(parse(row.intent_json) as GoalWakeIntent)
+  const intent = validateGoalWakeIntent(parse(row.intent_json) as GoalWakeIntent)
   if (row.id !== intent.id || row.scope_key !== acceptanceCanonicalJson(intent.scope) || row.goal_id !== intent.goalId) fail('schema')
   if (!['prepared', 'scheduled', 'dispatched', 'succeeded', 'unknown', 'denied'].includes(row.state)) fail('schema')
   const hashValid = /^[a-f0-9]{64}$/u.test(row.definition_hash ?? '')
@@ -84,7 +84,7 @@ export class GoalWakeStore {
   #get(id: string): GoalWake | undefined { const row = this.#database.prepare('SELECT id, intent_json, state, definition_hash, occurrence_id, dispatched_at, completed_at, scope_key, goal_id FROM goal_wakes WHERE id = ?').get(id) as Row | undefined; return row === undefined ? undefined : wake(row) }
   get(id: string): GoalWake | undefined { return text(id) ? this.#get(id) : fail('invalid-input') }
   prepare(input: GoalWakeIntent): GoalWake {
-    const intent = intentInput(input)
+    const intent = validateGoalWakeIntent(input)
     return this.#transaction(() => {
       const current = this.#get(intent.id)
       if (current !== undefined) { if (!same(current.intent, intent)) fail('conflict'); return current }

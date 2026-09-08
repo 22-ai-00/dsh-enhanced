@@ -2580,6 +2580,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
     let dispatched = false
     let terminal = false
     let disposed = false
+    let goalOutput: string | undefined
     try {
       signal.throwIfAborted()
       const persisted = this.options.getModelSelection(binding.conversation)
@@ -2638,8 +2639,26 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // longer retry-safe regardless of the result of `goals.resume()`.
       dispatched = true
       this.assertScheduledGoal(input, agent, 'before-resume')
+      const beforeSequence = agent.session.snapshotEvents().at(-1)?.seq ?? 0
       goals.resume(agent, { id: current.id, revision: current.revision })
       terminal = await this.waitForScheduledGoalTerminal(agent, input, control.controller.signal)
+      if (terminal && input.includeOutput === true) {
+        this.assertScheduledGoal(input, agent, 'terminal')
+        const events = agent.session.snapshotEvents().filter(event => event.seq > beforeSequence)
+        const message = events.findLast(event => event.type === 'user/message'
+          && event.data.source.kind === 'goal' && String(event.data.source.goalId) === input.native.goalId
+          && event.data.source.revision === input.native.revision + 1)
+        const start = message === undefined ? undefined : events.findLast(event => event.type === 'turn/start' && event.seq < message.seq)
+        const turn = start?.type === 'turn/start' ? start.data.turn : undefined
+        const end = events.find(event => event.type === 'turn/end' && event.data.turn === turn)
+        const inputs = start === undefined || end === undefined ? [] : events.filter(event => event.seq > start.seq && event.seq < end.seq
+          && event.type === 'user/message' && !(event.data.source.kind === 'plugin'
+            && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt' && event.data.source.form === 'snapshot'))
+        const output = finalAssistant(events, 0, inputs.length === 1 && inputs[0]?.seq === message?.seq ? turn : undefined)
+        if (output.completed && !output.truncated && !output.stopped && !output.hasUnpairedToolCall
+          && output.failureCode === undefined && output.text.trim() !== ''
+          && Buffer.byteLength(output.text, 'utf8') <= this.options.maxTextBytes) goalOutput = output.text
+      }
     } catch (error) {
       if (!(error instanceof SessionLeaseUnavailable) && !signal.aborted) {
         this.ctx.logger.warn(`assistant-delivery: scheduled goal wake failed: ${String(error)}`)
@@ -2672,7 +2691,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       }
     }
     const quiescent = terminal && disposed && !signal.aborted
-    return { outcome: quiescent ? 'succeeded' : 'unknown', dispatched, quiescent }
+    return { outcome: quiescent ? 'succeeded' : 'unknown', dispatched, quiescent,
+      ...(quiescent && goalOutput !== undefined ? { output: goalOutput } : {}) }
   }
 
   private validGoalWakeInput(
@@ -2682,7 +2702,8 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       || typeof input.signal.aborted !== 'boolean' || typeof input.signal.addEventListener !== 'function'
       || typeof input.signal.removeEventListener !== 'function' || input.signal.aborted
       || !isDeliveryGoalWakeDeadline(input.deadlineAt, now) || typeof input.assertCurrent !== 'function'
-      || typeof input.beforeResume !== 'function' || typeof input.settle !== 'function' || typeof input.native?.goalId !== 'string'
+      || typeof input.beforeResume !== 'function' || typeof input.settle !== 'function'
+      || (input.includeOutput !== undefined && typeof input.includeOutput !== 'boolean') || typeof input.native?.goalId !== 'string'
       || input.native.goalId.length === 0 || input.native.goalId.length > 512
       || !Number.isSafeInteger(input.native.revision) || input.native.revision < 1) return false
     const attestation = input.attestation

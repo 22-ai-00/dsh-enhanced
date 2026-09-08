@@ -13,6 +13,8 @@ export interface DeliveryGoalWakeInput {
   readonly native: Readonly<{ goalId: string; revision: number }>
   readonly deadlineAt: number
   readonly signal: AbortSignal
+  /** Request the final visible output for the caller's separately authorized result delivery. */
+  readonly includeOutput?: boolean
   /** Re-read the host-owned goal/owner fence at each execution boundary. */
   assertCurrent(agent: Agent, phase: 'before-resume' | 'running' | 'terminal'): void
   /** Persist the caller's exact wake-dispatch CAS immediately before native resume. */
@@ -26,6 +28,8 @@ export interface DeliveryGoalWakeResult {
   readonly outcome: 'succeeded' | 'busy' | 'unknown' | 'denied'
   readonly dispatched: boolean
   readonly quiescent: boolean
+  /** Final visible text from this resumed goal's completed turn, only after settlement and teardown. */
+  readonly output?: string
 }
 
 /** Validate the allowed absolute deadline window. */

@@ -1,0 +1,164 @@
+{
+  "date": "2026-09-08",
+  "baseline": "1592f52b1100fea5c38f49224f2180cf8e85946d",
+  "capability": "Owner-authorized durable event wait resumes the original native Session/Goal, produces a report, independently verifies it and queues the actual result to the owner.",
+  "full18": {
+    "verified": 3,
+    "implementing": 9,
+    "todo": 6,
+    "status": "active"
+  },
+  "verification": {
+    "independentReview": "PASS; production, native five-scenario integration and final root check reviewed separately",
+    "nativeIntegration": {
+      "command": "pnpm exec vitest run tests/autonomy-event-goal.spec.ts",
+      "exitCode": 0,
+      "log": "/tmp/dsh-event-native-v23.log",
+      "sha256": "65d185980042ac58dcdc9d12fefbed00b411ef0a40a08170a2d93676381cdcad"
+    },
+    "commands": [
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals build && CI=true pnpm --filter @dsh-enhanced/assistant-goals typecheck",
+        "log": "/tmp/dsh-event-wait-goals-static-v1.log",
+        "exitCode": 1,
+        "sha256": "5b4c72b12d0d056cee95d63904aedb303bdbac99c23eb25e9f30c7c5cdacab11"
+      },
+      {
+        "command": "CI=true pnpm install --offline --ignore-scripts --no-frozen-lockfile",
+        "log": "/tmp/dsh-event-wait-install-v1.log",
+        "exitCode": 0,
+        "sha256": "c0cb53621714fbc6b86a67d39efbc317356da0594805d89ee47b6ad40cdfb1b5"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals build && CI=true pnpm --filter @dsh-enhanced/assistant-goals typecheck",
+        "log": "/tmp/dsh-event-wait-goals-static-v2.log",
+        "exitCode": 2,
+        "sha256": "038131dd87c458f5ea7ecf11aefe66e7119d07b49626d2da5de6dc0a2c76846d"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/event-triggers build && CI=true pnpm --filter @dsh-enhanced/event-triggers typecheck && CI=true VITEST_MAX_WORKERS=4 pnpm --filter @dsh-enhanced/event-triggers test",
+        "log": "/tmp/dsh-event-wait-source-focused-v1.log",
+        "exitCode": 1,
+        "sha256": "f3cdb127cd433fc927f62a3da18700a0fef826a9aa9be155429e97cb3ff6072d"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals build && CI=true pnpm --filter @dsh-enhanced/assistant-goals typecheck && CI=true VITEST_MAX_WORKERS=4 pnpm --filter @dsh-enhanced/assistant-goals exec vitest run tests/event-wait-store.spec.ts tests/event-wait.spec.ts tests/wake-store.spec.ts tests/wake.spec.ts tests/service.spec.ts",
+        "log": "/tmp/dsh-event-wait-goals-focused-v1.log",
+        "exitCode": 0,
+        "sha256": "f63023cb5856ec90a4f91ea98ab65eab19be5e46a891b062ebe178f1a89866a1"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/event-triggers build && CI=true pnpm --filter @dsh-enhanced/assistant-goals build",
+        "log": "/tmp/dsh-event-wait-latest-build-v1.log",
+        "exitCode": 0,
+        "sha256": "d89dd2925155a828e605702963a90580232d7e0fdeff2cbbb79d780bb93c48d9"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals build && CI=true pnpm --filter @dsh-enhanced/assistant-goals typecheck && CI=true VITEST_MAX_WORKERS=4 pnpm --filter @dsh-enhanced/assistant-goals exec vitest run tests/event-wait-store.spec.ts tests/event-wait.spec.ts tests/wake-store.spec.ts tests/wake.spec.ts tests/service.spec.ts && CI=true pnpm --filter @dsh-enhanced/event-triggers typecheck && CI=true VITEST_MAX_WORKERS=4 pnpm --filter @dsh-enhanced/event-triggers test",
+        "log": "/tmp/dsh-event-wait-focused-v2.log",
+        "exitCode": 0,
+        "sha256": "6dae88b203db7cdf6fe2f4d804f987e62cdf10ef36d64cdec4288c5ba09e8414"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals exec vitest run tests/event-wait.spec.ts",
+        "log": "/tmp/dsh-event-wait-runtime-v3.log",
+        "exitCode": 0,
+        "sha256": "2dcae8699a5db612e87320c36d15d15b37f24e1ff37096719da5236b2ea673db"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-delivery build && CI=true pnpm --filter @dsh-enhanced/assistant-goals build",
+        "log": "/tmp/dsh-event-wait-delivery-build-v1.log",
+        "exitCode": 2,
+        "sha256": "219368776c2296376696ba3b915f5cf02dc057b542f6cb739c0f045859df42d5"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-delivery build && CI=true pnpm --filter @dsh-enhanced/assistant-goals build",
+        "log": "/tmp/dsh-event-wait-delivery-build-v2.log",
+        "exitCode": 2,
+        "sha256": "71a0f446e1d521c940f3b2c0e913e36049c21126da90711cea6277dd82dcb432"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-delivery build && CI=true pnpm --filter @dsh-enhanced/assistant-goals build",
+        "log": "/tmp/dsh-event-wait-delivery-build-v3.log",
+        "exitCode": 0,
+        "sha256": "619afbaf52ced75c1cdd0fac2776ec9f896a5e005f7468e15fdd5cb510c230be"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-delivery build && CI=true pnpm --filter @dsh-enhanced/assistant-delivery typecheck && CI=true pnpm --filter @dsh-enhanced/assistant-goals typecheck",
+        "log": "/tmp/dsh-event-wait-delivery-build-v4.log",
+        "exitCode": 0,
+        "sha256": "6ad71fc69c359d82ecbb0b1d0706d9348625d1f191e7b49d584d8b3243c3856c"
+      },
+      {
+        "command": "pnpm exec vitest run tests/autonomy-event-goal.spec.ts",
+        "exitCode": 0,
+        "log": "/tmp/dsh-event-native-v23.log",
+        "sha256": "65d185980042ac58dcdc9d12fefbed00b411ef0a40a08170a2d93676381cdcad"
+      },
+      {
+        "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+        "log": "/tmp/dsh-event-wait-check-v1.log",
+        "exitCode": 0,
+        "sha256": "61ce0e442c8d4bab066a2f2cbd51f95ab69f023b5356147af21c6587628c620b"
+      }
+    ],
+    "finalCounts": {
+      "rootFiles": 311,
+      "rootTests": 3867,
+      "deliveryTests": 705,
+      "goalsTests": 112,
+      "eventTriggerTests": 81,
+      "dryRunPacks": 31
+    }
+  },
+  "proven": [
+    "Source schema v4 durable monotonic sequence and immutable snapshot matching",
+    "Goal wait CAS and exact wake identity persist across SQLite reopen; repeated notifications do not rematerialize",
+    "Distinct Node processes reopen the same JSONL Session and native Goal before a new file event",
+    "Resumed fixture model calls a real tool to create report.md; actual Verifier receipt is achieved",
+    "Distinct goal-wake-result outbound contains the resumed result; no prewritten artifact substitutes for work",
+    "Changed native goal definition and removed Host source-wait Policy prevent resume",
+    "Expiry, changed source and matched recovery deadline fail closed; dispatched unknown is not replayed"
+  ],
+  "limitations": [
+    "LLM and outbound adapter are explicit deterministic fixtures; no paid model or real channel message was used",
+    "The process test uses actual Node processes with the repository Host service graph; it is not a newly installed user profile",
+    "File event source is exercised end to end; actual repository/task/calendar connectors and proactive ranking remain",
+    "A successful wake means result queued, not provider delivery confirmation",
+    "No two-week observation or day/week pacing gate; long-term effects continue after delivery",
+    "C2C local records only; no in-app browser ChatGPT review available"
+  ],
+  "fixedDuringIntegration": [
+    "Source SQL event_id/eventId mapping mismatch",
+    "Matched wait expiry and schema uniqueness validation",
+    "Native wake previously returned no deliverable result; result capture and exact owner binding publication added",
+    "Test fixture owner/background policies, paused revisions and actual result attribution corrected"
+  ],
+  "sourceSha256": {
+    "plugins/assistant-delivery/README.md": "53bfe2d049c7e43f1034e90c4cf3f2ae80125d20ac2c9d31a2d49259b64e3f34",
+    "plugins/assistant-delivery/src/agent-runtime.ts": "0b210529cbf65114b7b7ab831bbd344e1dfe646341beb9b0d7ee1abc6e43613b",
+    "plugins/assistant-delivery/src/goal-wake-types.ts": "a1062e54e304f45ab066e405b6ec221e00f1eae655ff40e99c9081a57ef17609",
+    "plugins/assistant-delivery/src/service.ts": "b6ee18dff81da99af1a9a9ad8e8fefa260c008364434ae975cf1a036db51a80a",
+    "plugins/assistant-goals/README.md": "75002a7e1a287d74ed84897c74dbd7dc1287fb349a29ea178b44d21ea69c4e63",
+    "plugins/assistant-goals/package.json": "569b48bfe266967b9a616f549756db549b0828809caa0b2370fca5039fca1d8a",
+    "plugins/assistant-goals/src/event-wait-store.ts": "9f2758fd29451d54b793289c707bdfbbb84611a047a0deaa77bdc250818ff7ba",
+    "plugins/assistant-goals/src/event-wait.ts": "cdf1175c9cca125f747c18427b8ff9ec2bc3a4ae8264aa06793a3d50ae221b3b",
+    "plugins/assistant-goals/src/index.ts": "d58cb5d600cce0c74df00cec532b4e04242c084c4623c2aa6688bab6e00a4d8e",
+    "plugins/assistant-goals/src/service.ts": "0601acf969631a2c797c958c456dde836fa1764d3061059019e2437e6570c6d8",
+    "plugins/assistant-goals/src/tools.ts": "af11cfbdc83091e17adb8b5cac4848c602dca119c6bfdf58b13f2d9251b45d33",
+    "plugins/assistant-goals/src/wake-store.ts": "841d829feb45f78f14b957336d551347e7cd0ea38c1fddb0e313086e46a264ce",
+    "plugins/assistant-goals/src/wake.ts": "de3d9add2e080161ba611edf90a4f4f2a3e4720b3b5a1be4fe49d65f39a54b06",
+    "plugins/assistant-goals/tests/event-wait-store.spec.ts": "eee7115c90794b97b5f34794cb6b6c271ab277307abec147ff804ca4c9229646",
+    "plugins/assistant-goals/tests/event-wait.spec.ts": "22036add02c159fc9d7d88b8cfd9676b6e3bd3931074d35b172fa0dfe2adc008",
+    "plugins/assistant-goals/tests/service.spec.ts": "9d660dedf860be63a52e4e98da36abc125abcc121637d8a5ee4d338bf3785c34",
+    "plugins/event-triggers/README.md": "8d7550896e9454caccae2205705490c6964a305c1f73249ce695579315631259",
+    "plugins/event-triggers/src/index.ts": "83781bc3f771371b43b9f9a60885e2a95a374c26b63ce80f2a8ea8fbe8168680",
+    "plugins/event-triggers/src/service.ts": "ef04b049b0526d17ea27882fb524f8b704d8107f15fb8afdab780dd6b53f08f7",
+    "plugins/event-triggers/src/source.ts": "3fb5ea5a0e826c3911fb40528800b65a2bd41d4f74594e3f68b79687fd256937",
+    "plugins/event-triggers/src/sqlite.ts": "98baddbeab2c8dec2012218a480df944896e00953974969f6074f84710d19e55",
+    "plugins/event-triggers/src/store.ts": "ee4a34df58227fe4108d4ed9e40b7664d14c073d558c7682e3c4d716f633073d",
+    "plugins/event-triggers/tests/source.spec.ts": "96c81e13e05ced60f0f79024d5af145ac1603b14707962995806048a98891324",
+    "plugins/event-triggers/tests/store.spec.ts": "d4cbd47462974ea581232bbe875dad325ac61b9533bf7f93ec492cd68c5bcb65",
+    "tests/autonomy-event-goal.spec.ts": "3539948e2914996475a65cefa738f4db73d85548fa52ca834c257171f7992c08"
+  }
+}

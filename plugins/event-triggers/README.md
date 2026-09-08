@@ -39,7 +39,13 @@ sha256=HMAC_SHA256(secret, timestamp + "\n" + nonce + "\n" + rawBody)
 - 子进程、浏览器、任意 shell、安装脚本：无。
 - 外部 body：验签后也不会成为 Agent prompt；只生成不含正文的 occurrence。
 
-`health()` 会返回 pending/retrying/quarantined/delivered 数、失败 trigger 数以及最近的有界错误摘要。SQLite schema v2 会从 v1 原位迁移并保留已有 pending event；poller 即使关闭，独立 outbox flush 仍会运行。每轮 flush 分页处理并对失败项持久退避，因此 poison/stale 事件不会造成队头永久阻塞。
+`health()` 会返回 pending/retrying/quarantined/delivered 数、失败 trigger 数以及最近的有界错误摘要。SQLite 当前 schema v4 沿既有版本链迁移；没有 provenance 的历史 pending event 按上述规则隔离。poller 即使关闭，独立 outbox flush 仍会运行。每轮 flush 分页处理并对失败项持久退避，因此 poison/stale 事件不会造成队头永久阻塞。
+
+## Host 事件读取
+
+可信 Host 可调用 `sourceSnapshot(triggerId)` 冻结来源标识、配置摘要、automation target 和 `highWaterSequence`，再以 `firstEventAfter(snapshot, sequence, deadlineAt)` 读取快照后的首个匹配事件。返回值包含持久序号及不含正文的 envelope；来源禁用或配置改变会拒绝旧快照。`subscribeSourceChanges(listener)` 返回 disposer，通知只提示重新扫描，不携带执行权限。可选的 [assistant-goals](../assistant-goals/README.md) 使用此接口等待事件后恢复 owner 授权的原目标。
+
+SQLite schema v4 为 outbox 增加持久单调序号，从 v3 原位迁移并保留已投递的 provenance 日志。序号高水位不因删除最高事件或 VACUUM 回退；没有来源证明的旧行不参与匹配。读取事件不消费、重定向或禁用已有 automation 投递。进程重启后的消费者从已保存快照扫描，不能仅依靠内存通知。
 
 ## 限制
 
