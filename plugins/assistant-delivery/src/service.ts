@@ -1039,6 +1039,10 @@ export class AssistantDeliveryService extends Service {
     if (config.schedulerEnabled) this.start()
     ctx.effect(() => async () => {
       this.active = false
+      // The isolated Web owner may already be unwinding concurrently. Await
+      // its memoized drain while the delivery Store is still available so a
+      // successfully disposed Agent can record its quiescent lease release.
+      await this.nativeWebOwner?.dispose()
       trustedDeliveryPreferenceProducers.delete(this)
       this.preferenceFeedbackSink = undefined
       this.acceptanceSink = undefined

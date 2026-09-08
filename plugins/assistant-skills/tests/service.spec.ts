@@ -421,6 +421,44 @@ async function watchedFixture(failureThreshold = 1, maxRuns = 2) {
   return { ...f, watch, expiresAt, use, watches, nudge }
 }
 
+test.each(['route', 'policy', 'budget', 'late-route', 'late-policy', 'expired'] as const)('watched activation leaves the parent active when %s blocks the commit', async failure => {
+  const f = await fixture(); result(await f.save())
+  const candidate = result(await f.candidate(1)), trial = result(await f.trial(candidate.id))
+  f.setVerifiedTrial('trial-goal', 'goal-execution-trial-goal', { candidate_id: candidate.id, goal_id: 'trial-goal', inputs_json: '{"message":"candidate"}', invocation_id: 'trial-invocation' })
+  if (failure === 'route') f.revokeRoute()
+  if (failure === 'policy') f.denyBackground()
+  if (failure === 'budget') f.denyBudget()
+  if (failure.startsWith('late-')) {
+    const policy = f.ctx.get('assistantPolicy')!, original = policy.authorizeAgent.bind(policy)
+    policy.authorizeAgent = (...args) => { const result = original(...args); if (args[1] === 'watch') { if (failure === 'late-route') f.rebindRoute(); else f.denyBackground() }; return result }
+  }
+  expect((await f.execute('skill_activate_watched', { candidate_id: candidate.id, trial_run_id: trial.id, owner_route_id: 'owner-route', expires_at: Date.now() + (failure === 'expired' ? -1 : 60000), max_runs: 2, failure_threshold: 1 })).isError).toBe(true)
+  expect(result(await f.execute('skill_status', {}))[0].version).toBe(1)
+  expect(result(await f.execute('skill_watches', {}))).toEqual([])
+  expect(result(await f.execute('skill_candidates', { candidate_id: candidate.id })).state).toBe('pending')
+})
+
+test('watched activation from the registered tool survives restart and rolls back the exact new version once', async () => {
+  const f = await fixture(); result(await f.save())
+  const candidate = result(await f.candidate(1)), trial = result(await f.trial(candidate.id))
+  const args = { candidate_id: candidate.id, trial_run_id: trial.id, owner_route_id: 'owner-route', expires_at: Date.now() + 60000, max_runs: 2, failure_threshold: 1 }
+  expect((await f.execute('skill_activate_watched', args)).isError).toBe(true)
+  expect(result(await f.execute('skill_status', {}))[0].version).toBe(1)
+  expect(result(await f.execute('skill_watches', {}))).toEqual([])
+  f.setVerifiedTrial('trial-goal', 'goal-execution-trial-goal', { candidate_id: candidate.id, goal_id: 'trial-goal', inputs_json: '{"message":"candidate"}', invocation_id: 'trial-invocation' })
+  const active = result(await f.execute('skill_activate_watched', args))
+  expect(active).toMatchObject({ activated: { version: 2 }, watch: { version: 2, fallbackVersion: 1, state: 'watching' }, improvement: 'unmeasured' })
+  await f.restart(); f.clearVerifiedTrial()
+  expect(result(await f.execute('skill_activate_watched', args))).toEqual(active)
+  expect(result(await f.execute('skill_watches', {}))).toHaveLength(1)
+  const run = result(await f.execute('skill_run', { goal_id: 'watched-after-activation', name: 'saved-write', version: 2, inputs_json: '{"message":"observed"}', invocation_id: 'after-activation' }))
+  f.setSnapshot(run.goalId, run.goalExecutionRunId, 'not-achieved'); await f.restart()
+  await expect.poll(async () => result(await f.execute('skill_watches', {}))[0].state).toBe('rolled-back')
+  const replay = result(await f.execute('skill_activate_watched', args))
+  expect(replay).toMatchObject({ activated: { version: 2 }, activeVersion: 3, watch: { state: 'rolled-back' } })
+  expect(result(await f.execute('skill_status', {}))[0]).toMatchObject({ version: 3, restoredFromVersion: 1 })
+})
+
 test('finite watch rolls back exactly once after a later independent failure, including restart and duplicate nudges', async () => {
   const f = await watchedFixture(); f.human(false)
   const run = await f.use('watched-goal')

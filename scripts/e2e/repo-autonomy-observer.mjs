@@ -52,6 +52,10 @@ export function apply(ctx) {
       deliveryContinuationTimeoutMs: ctx.get('assistantDelivery', false)?.config?.agentGoalContinuationTimeoutMs ?? null })
   })
   ctx.on('llm/stream', async function* (options, next) {
+    if (process.env.DSH_REPO_AUTONOMY_NO_MODEL === '1') {
+      record({ event: 'model-blocked' })
+      throw new Error('model requests are forbidden during the setup-only probe')
+    }
     const agent = ctx.agents.currentInitiator()
     if (Date.now() - startedAt >= durationMs || calls >= limit) {
       agent?.cancel({ kind: 'hook', reason: 'repo-autonomy-real-observer-limit' })

@@ -42,6 +42,8 @@ export interface SkillCandidate {
   activatedVersion?: number
   trialRunId?: string
   acceptanceDigest?: string
+  activationWatchDigest?: string
+  activationWatchId?: string
 }
 export interface SkillComparisonIdentity { sessionId: string; candidateId: string; parentDigest: string; profileId: string; profileDigest: string; invocationId: string }
 export interface SkillComparison extends SkillComparisonIdentity { id: string; state: 'running' | 'complete' | 'unknown'; result: unknown | null; createdAt: number; updatedAt: number }
@@ -237,14 +239,16 @@ export class SkillStore {
       this.#db.exec('COMMIT'); return clone(candidate)
     } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
   }
-  activateCandidate(scope: object, id: string, trialRunId: string, receipt: string): StoredSkillDefinition {
+  activateCandidate(scope: object, id: string, trialRunId: string, receipt: string, watch?: { input: SkillWatchInput; routeReceipt: unknown }): StoredSkillDefinition {
     const key = scopeKey(scope)
+    const watchDigest = watch === undefined ? undefined : acceptanceDigest(clone(watch))
     if (!text(id, 128) || !text(trialRunId, 128) || !text(receipt, 1024)) fail('assistant-skills: invalid candidate activation')
     this.#db.exec('BEGIN IMMEDIATE')
     try {
       const candidate = this.#candidate(key, id); if (!candidate) fail('assistant-skills: candidate missing')
       if (candidate.state === 'activated') {
-        if (candidate.trialRunId !== trialRunId || candidate.acceptanceDigest !== receipt || !candidate.activatedVersion) fail('assistant-skills: candidate conflict')
+        if (candidate.trialRunId !== trialRunId || candidate.acceptanceDigest !== receipt || !candidate.activatedVersion
+          || candidate.activationWatchDigest !== watchDigest) fail('assistant-skills: candidate conflict')
         const activated = this.get(scope, candidate.definition.name, candidate.activatedVersion)
         if (!activated) fail('assistant-skills: candidate conflict')
         this.#db.exec('COMMIT'); return activated
@@ -256,7 +260,12 @@ export class SkillStore {
       if (!run || run.state !== 'succeeded' || run.candidateId !== id || !run.goalExecutionRunId) fail('assistant-skills: trial acceptance required')
       const activated = this.#newDefinition(candidate.definition, candidate.parentVersion + 1, candidate.parentVersion || null)
       this.#insertDefinition(key, activated)
-      const saved: SkillCandidate = { ...candidate, state: 'activated', activatedVersion: activated.version, trialRunId, acceptanceDigest: receipt, updatedAt: Date.now() }
+      if (watch && (watch.input.skillName !== activated.name || watch.input.version !== activated.version || watch.input.fallbackVersion !== candidate.parentVersion)) fail('assistant-skills: activation watch conflict')
+      // The definition, candidate and exact-version watch share this writer
+      // transaction. A failed watch cannot leave an unobserved active version.
+      const createdWatch = watch && this.#createWatch(scope, watch.input, watch.routeReceipt)
+      const saved: SkillCandidate = { ...candidate, state: 'activated', activatedVersion: activated.version, trialRunId, acceptanceDigest: receipt, updatedAt: Date.now(),
+        ...(createdWatch ? { activationWatchDigest: watchDigest!, activationWatchId: createdWatch.id } : {}) }
       this.#putCandidate(key, saved); this.#db.exec('COMMIT'); return clone(activated)
     } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
   }
@@ -276,20 +285,22 @@ export class SkillStore {
     } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
   }
   createWatch(scope: object, input: SkillWatchInput, routeReceipt: unknown): SkillWatch {
+    this.#db.exec('BEGIN IMMEDIATE')
+    try { const watch = this.#createWatch(scope, input, routeReceipt); this.#db.exec('COMMIT'); return watch }
+    catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  #createWatch(scope: object, input: SkillWatchInput, routeReceipt: unknown): SkillWatch {
     const key = scopeKey(scope)
     if (!input || !routeReceipt || !json(routeReceipt) || !text(input.ownerRouteId, 128) || !name(input.skillName) || !version(input.version) || !version(input.fallbackVersion)
       || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > Date.now() + 7 * 24 * 60 * 60 * 1000
       || !Number.isSafeInteger(input.maxRuns) || input.maxRuns < 1 || input.maxRuns > 100 || !Number.isSafeInteger(input.failureThreshold) || input.failureThreshold < 1 || input.failureThreshold > input.maxRuns) fail('assistant-skills: invalid watch')
-    this.#db.exec('BEGIN IMMEDIATE')
-    try {
-      const active = this.#latest(key, input.skillName), fallback = this.get(scope, input.skillName, input.fallbackVersion)
-      if (!active || active.retired || active.version !== input.version || active.parentVersion !== input.fallbackVersion || !fallback || fallback.retired) fail('assistant-skills: watch version conflict')
-      const id = watchId(scope, input), existing = this.#watch(key, id)
-      if (existing) { this.#db.exec('COMMIT'); return clone(existing) }
-      const now = Date.now(); const afterRunRowId = (this.#db.prepare('SELECT coalesce(max(rowid),0) AS rowId FROM skill_runs').get() as { rowId: number }).rowId
-      const watch: SkillWatch = { id, scope: clone(scope), routeReceipt: clone(routeReceipt), afterRunRowId, ownerRouteId: input.ownerRouteId, skillName: input.skillName, version: input.version, definitionDigest: acceptanceDigest(active), fallbackVersion: input.fallbackVersion, fallbackDigest: acceptanceDigest(fallback), expiresAt: input.expiresAt, maxRuns: input.maxRuns, failureThreshold: input.failureThreshold, state: 'watching', runIds: [], observations: [], createdAt: now, updatedAt: now }
-      this.#putWatch(key, watch); this.#db.exec('COMMIT'); return clone(watch)
-    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+    const active = this.#latest(key, input.skillName), fallback = this.get(scope, input.skillName, input.fallbackVersion)
+    if (!active || active.retired || active.version !== input.version || active.parentVersion !== input.fallbackVersion || !fallback || fallback.retired) fail('assistant-skills: watch version conflict')
+    const id = watchId(scope, input), existing = this.#watch(key, id)
+    if (existing) return clone(existing)
+    const now = Date.now(); const afterRunRowId = (this.#db.prepare('SELECT coalesce(max(rowid),0) AS rowId FROM skill_runs').get() as { rowId: number }).rowId
+    const watch: SkillWatch = { id, scope: clone(scope), routeReceipt: clone(routeReceipt), afterRunRowId, ownerRouteId: input.ownerRouteId, skillName: input.skillName, version: input.version, definitionDigest: acceptanceDigest(active), fallbackVersion: input.fallbackVersion, fallbackDigest: acceptanceDigest(fallback), expiresAt: input.expiresAt, maxRuns: input.maxRuns, failureThreshold: input.failureThreshold, state: 'watching', runIds: [], observations: [], createdAt: now, updatedAt: now }
+    this.#putWatch(key, watch); return clone(watch)
   }
   listWatches(scope?: object): SkillWatch[] {
     const rows = scope === undefined ? this.#db.prepare('SELECT watch_json FROM skill_watches WHERE state=\'watching\' ORDER BY id').all() : this.#db.prepare('SELECT watch_json FROM skill_watches WHERE scope_key=? ORDER BY id').all(scopeKey(scope))

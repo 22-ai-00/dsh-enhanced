@@ -1,0 +1,128 @@
+{
+  "baseline": "f8129fc363c52fcc467b6da80443a4a8ff3ed819",
+  "status": "engineering-and-fixture-browser-verified",
+  "capabilities": [
+    "Owner-requested skill activation atomically persists its exact-version rollback watch; failure preserves the parent, retries cannot resurrect rolled-back versions.",
+    "Concurrent native Web owner disposals share their real drain; Delivery stops admission immediately and awaits owner cleanup before closing its lease store.",
+    "Opt-in live GitHub descriptor is validated against production admission and credential contracts. A separate setup-only mode forbids model requests."
+  ],
+  "targeted": {
+    "skillsAndLiveInput": {
+      "log": "/tmp/dsh-watched-live-integration.log",
+      "sha256": "0a71c1d5ea482f8d0ee4a1b1e812ee4269247131271454ac6b0679c0ecb70c3c",
+      "exitCode": 0
+    },
+    "liveInputFinal": {
+      "log": "/tmp/dsh-live-input-final.log",
+      "sha256": "0e2976b30e5ceba0ac96b1e49a66196d238cb0871e63c3a094180a8867b6a7f0",
+      "exitCode": 0
+    },
+    "ownerDrain": {
+      "log": "/tmp/dsh-owner-drain-targeted.log",
+      "sha256": "d8a5d44a10f5d49b77f7ba69cfaeaec09fa5ce8c47eb0b7c02e5c6bd1e1ffd0f",
+      "exitCode": 0
+    },
+    "ownerDrainTypes": {
+      "log": "/tmp/dsh-owner-drain-types-v2.log",
+      "sha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630",
+      "exitCode": 0
+    }
+  },
+  "negativeControls": [
+    {
+      "log": "/tmp/dsh-owner-drain-before-fix.log",
+      "sha256": "62c78288ec2d942f2fe99f27d9336fdd52b0b2c2bb74195fa316fc9d669e7637",
+      "exitCode": 1,
+      "expectedExitCode": 1,
+      "result": "Old owner disposal returns the concurrent call before the gated real Agent disposer completes."
+    },
+    {
+      "log": "/tmp/dsh-owner-drain-before-store-fix.log",
+      "sha256": "efa014433773c20dd79cd95914e9f2531390ae136a99b989d23a4147a49edcd5",
+      "exitCode": 1,
+      "expectedExitCode": 1,
+      "result": "With shared owner disposal but old service teardown, the actual Store closes before the gated Agent disposer completes."
+    }
+  ],
+  "failures": [
+    {
+      "log": "/tmp/dsh-watched-live-browser.log",
+      "sha256": "3340d69b274d942c386318ad4f37efa7829af5ba1abed555c0b9a82545da5e52",
+      "exitCode": 1,
+      "result": "Initial setup reported no idle owner session; retained lease unknown before task execution. Exact cause of this original intermittent failure remains unproven."
+    },
+    {
+      "log": "/tmp/dsh-owner-drain-types.log",
+      "sha256": "198e80f4ebd9eff83429fc7b2fb47ce0b66ad0de969e4fafab724219e761ae2f",
+      "exitCode": 2,
+      "result": "New test accessed protected service ctx; fixed with an explicit test-only typed inspection cast, final typecheck and whole check passed."
+    }
+  ],
+  "fullCheck": {
+    "log": "/tmp/dsh-watched-live-check.log",
+    "sha256": "c4ee9d37caef8feffe1c14ca8f5c849f8cf937938f19c65579c99e77d732bd3b",
+    "exitCode": 0,
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+    "testFiles": 347,
+    "tests": 4216,
+    "skipped": 0,
+    "dryRunPacks": 33
+  },
+  "setupProbe": {
+    "log": "/tmp/dsh-session-setup-probe-final.log",
+    "sha256": "027329fac8d2d1f3d4a4aacd9a30b02794da687b39e34b41e1766209543436e6",
+    "exitCode": 0,
+    "proof": ".cache/repo-autonomy-real-codex-subscription-setup-only-e2e/repo-autonomy-real-formal--7ae94-sion-without-model-requests/setup-proof.json",
+    "result": {
+      "scope": "installation-and-idle-session-discovery-only",
+      "sessionId": "session-1970863d-bfe7-42eb-8852-d00f68bf22a6",
+      "modelCalls": 0,
+      "taskExecuted": false
+    },
+    "duration": "1.1m",
+    "mode": "DSH_REPO_SETUP_ONLY=1; same repository Playwright config without fixture/live flags"
+  },
+  "realModelFixtureBrowser": {
+    "log": "/tmp/dsh-watched-live-browser-v2.log",
+    "sha256": "2975e2c8b6a2b8b721244d6a46d5d1c0d554078bb56f0b71730b8bbd7677d521",
+    "exitCode": 0,
+    "command": "CI=true DSH_REPO_RETAIN_FAILURE=1 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs",
+    "proof": ".cache/repo-autonomy-real-codex-subscription-delivery-fixture-event-fixture-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/proof.json",
+    "proofSha256": "2d18cd14ce9d124cf76c1b1c8f7c37a751df606cb1c352fc1be8b53720e3aaeb",
+    "duration": "3.6m",
+    "modelDispatches": 15,
+    "nativePhase": "complete",
+    "nativeRoundsStarted": 3,
+    "successfulWakes": 2,
+    "restart": {
+      "sameGoal": true,
+      "sameSourceJobEvidence": true,
+      "replyVisible": true,
+      "waitedThenRestarted": true
+    },
+    "retirement": {
+      "claim": {
+        "trigger_id": "goal-e2d57dc24b267ed84f059b31-repository-events",
+        "goal_id": "b8affa20b2b9073a884956f3401d7ce2589b7b01f0ed2c9d633f171db8157d14",
+        "session_id": "session-19145d8e-315c-4011-9b8f-0763db69e23e",
+        "native_goal_id": "goal-dabac9e5-41fc-4aeb-997c-b83facf790ef",
+        "retired_at": 1788911505787
+      },
+      "lastObservedAt": 1788911505427,
+      "automationStatus": "paused"
+    }
+  },
+  "independentReview": {
+    "skills": "capture_e2e_handoff: final source, actual full-check log/exit and pack review PASS",
+    "deliveryAndHarness": "skills_external_service: final source, both failing old-code controls, actual full-check logs, setup proof and 15-dispatch browser fixture proof PASS",
+    "limits": "Read-only by instruction; current unrestricted session does not enforce a read-only sandbox. No ChatGPT web review."
+  },
+  "limitations": [
+    "The new watched activation is verified through registered runtime-tool, SQLite restart/rollback and real isolation tests; this browser regression does not invoke the new tool.",
+    "A finite rollback watch bounds observation, not skill lifetime or execution count; this is explicit-owner activation, not automatic promotion.",
+    "Live GitHub credentials, authorized repository writes, CI/review and remote readback have not been exercised; the real-model browser uses explicit GitHub action/observer transport fixtures.",
+    "No independently governed production holdout, measured model gain, three-gate automatic promotion or signed production release is claimed.",
+    "The setup-only result proves installation and idle-owner discovery only. Negative controls prove two teardown defects, not the precise cause of the earlier intermittent browser failure.",
+    "Full 18-work-package scope remains 3 verified / 13 implementing / 2 todo; no calendar waiting requirement."
+  ]
+}

@@ -142,6 +142,10 @@ export class AssistantSkillsService extends Service {
       runtime.tools.register(defineTool({ name: 'skill_activate', description: 'Activate a candidate following the current owner request only after a fresh independently accepted Goal has one exact successful skill_trial as its sole business execution. The accepted round may also contain only validated read-only metadata inspection. This is owner-approved activation, not automatic promotion or proof of improvement.',
         parameters: { candidate_id: { type: 'string', required: true }, trial_run_id: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.activate(exec.agent, args.candidate_id, args.trial_run_id)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_activate_watched', description: 'Following the current owner request, activate an independently accepted candidate and register its finite exact-version rollback watch in one atomic commit. Requires an existing parent and current activation, watch and background rollback authority. Failure leaves the parent active. This is owner-approved activation, not automatic promotion or evidence of improvement.',
+        parameters: { candidate_id: { type: 'string', required: true }, trial_run_id: { type: 'string', required: true }, owner_route_id: { type: 'string', required: true }, expires_at: { type: 'integer', required: true }, max_runs: { type: 'integer', required: true }, failure_threshold: { type: 'integer', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.activate(exec.agent, args.candidate_id, args.trial_run_id,
+          { ownerRouteId: args.owner_route_id, expiresAt: args.expires_at, maxRuns: args.max_runs, failureThreshold: args.failure_threshold })) }) }))
       runtime.tools.register(defineTool({ name: 'skill_reject', description: 'Reject a pending candidate following the current owner request; the active skill stays unchanged.', parameters: { candidate_id: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.reject(exec.agent, args.candidate_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_rollback', description: 'Restore the current skill’s immediate parent as a new immutable version following the current owner request. Historical runs and effects remain recorded.',
@@ -400,13 +404,24 @@ export class AssistantSkillsService extends Service {
     const scope = this.#scope(exec.agent, 'trial'), candidate = this.#pending(scope, candidateId)
     return this.#run(exec, goalId, { ...candidate.definition, version: candidate.parentVersion + 1, parentVersion: candidate.parentVersion || null, retired: false, createdAt: candidate.createdAt, updatedAt: candidate.updatedAt }, inputs, invocationId, candidateId)
   }
-  activate(agent: Agent | undefined, candidateId: string, trialRunId: string) {
+  activate(agent: Agent | undefined, candidateId: string, trialRunId: string, observation?: { ownerRouteId: string; expiresAt: number; maxRuns: number; failureThreshold: number }) {
     const scope = this.#scope(agent, 'activate')
     const candidate = this.#store.getCandidate(scope, candidateId), run = this.#store.getRun(scope, trialRunId)
     if (!candidate || !run || run.candidateId !== candidateId || run.state !== 'succeeded' || !run.goalExecutionRunId || run.sessionId !== String(agent!.session.id)) throw new Error('assistant-skills: successful exact trial required')
+    const watch = observation && { input: { ...observation, skillName: candidate.definition.name, version: candidate.parentVersion + 1, fallbackVersion: candidate.parentVersion }, routeReceipt: this.#watchRoute(scope, observation.ownerRouteId) }
+    const watchAuthority = () => {
+      if (!watch) return
+      const policy = this.ctx.get('assistantPolicy', false)
+      if (candidate.parentVersion < 1 || acceptanceDigest(this.#scope(agent, 'watch')) !== acceptanceDigest(scope) || !policy
+        || ['watch', 'rollback'].some(action => policy.evaluate(this.#watchPolicy(scope, action as 'watch' | 'rollback')).effect !== 'allow')) throw new Error('assistant-skills: current activation watch authority required')
+      this.#watchRoute(scope, watch.input.ownerRouteId, watch.routeReceipt)
+    }
+    const result = (activated: ReturnType<SkillStore['activateCandidate']>, activeVersion: number | null) => ({ activated, activeVersion, replayed: false, improvement: 'unmeasured',
+      ...(watch ? { watch: this.#store.listWatches(scope).find(value => value.id === this.#store.getCandidate(scope, candidateId)?.activationWatchId) } : {}) })
+    watchAuthority()
     // A lost activation response can be recovered without renewing proof or changing a later version.
     if (candidate.state === 'activated' && candidate.trialRunId === trialRunId && candidate.acceptanceDigest) {
-      return { activated: this.#store.activateCandidate(scope, candidateId, trialRunId, candidate.acceptanceDigest), activeVersion: this.#store.get(scope, candidate.definition.name)?.version ?? null, replayed: false, improvement: 'unmeasured' }
+      return result(this.#store.activateCandidate(scope, candidateId, trialRunId, candidate.acceptanceDigest, watch), this.#store.get(scope, candidate.definition.name)?.version ?? null)
     }
     this.#pending(scope, candidateId)
     const verify = () => {
@@ -417,10 +432,12 @@ export class AssistantSkillsService extends Service {
     }
     const receipt = verify()
     this.#authorize(agent, 'activate', [scope, candidateId, trialRunId])
+    if (watch) this.#authorize(agent, 'watch', [scope, candidateId, trialRunId, watch.input])
     if (acceptanceDigest(this.#scope(agent, 'activate')) !== acceptanceDigest(scope) || verify() !== receipt) throw new Error('assistant-skills: trial authority changed')
-    const activated = this.#store.activateCandidate(scope, candidateId, trialRunId, receipt)
+    watchAuthority()
+    const activated = this.#store.activateCandidate(scope, candidateId, trialRunId, receipt, watch)
     this.#changed()
-    return { activated, activeVersion: activated.version, replayed: false, improvement: 'unmeasured' }
+    return result(activated, activated.version)
   }
   reject(agent: Agent | undefined, candidateId: string) {
     const scope = this.#scope(agent, 'reject')
