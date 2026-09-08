@@ -13,7 +13,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createDefinition, instantiate, type SkillBinding } from './definition.js'
 import { validateComparisonProfiles, type SkillComparisonProfile, type SkillComparator } from './comparison.js'
-import { SkillStore, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition } from './store.js'
+import { watchObservation } from './watch-proof.js'
+import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition } from './store.js'
 
 export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[] }
 export const Config: Schema<Config> = Schema.object({
@@ -27,7 +28,7 @@ declare module '@deepseek-ai/cordis' { interface Context { assistantSkills: Assi
 
 const output = { schema: { type: 'object' as const, additionalProperties: false, properties: { context: { type: 'string' as const, required: true } } },
   render: (_args: unknown, value: { context: string }) => [{ type: 'text' as const, text: value.context }] } as const
-type Action = 'inspect' | 'save' | 'run' | 'retire' | 'draft' | 'trial' | 'activate' | 'reject' | 'rollback' | 'compare'
+type Action = 'inspect' | 'save' | 'run' | 'retire' | 'draft' | 'trial' | 'activate' | 'reject' | 'rollback' | 'compare' | 'watch'
 const resource = { kind: 'evolution' as const, id: 'verified-workflows' }
 function parse(value: string, array = false): any {
   if (typeof value !== 'string' || Buffer.byteLength(value) > 262144) throw new Error('assistant-skills: bounded JSON required')
@@ -48,6 +49,7 @@ export class AssistantSkillsService extends Service {
   readonly #comparing = new Set<Promise<unknown>>()
   readonly #lifecycle = new AbortController()
   readonly #providers = new Set<SkillProviderControl>()
+  #reconcileQueued = false
   #active = true
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'assistantSkills')
@@ -94,7 +96,14 @@ export class AssistantSkillsService extends Service {
       runtime.tools.register(defineTool({ name: 'skill_rollback', description: 'Restore the current skill’s immediate parent as a new immutable version following the current owner request. Historical runs and effects remain recorded.',
         parameters: { name: { type: 'string', required: true }, expected_version: { type: 'integer', required: true }, target_version: { type: 'integer', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.rollback(exec.agent, args.name, args.expected_version, args.target_version)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_watch', description: 'Explicitly authorize a finite rollback watch for one exact active skill version. It observes only later successful skill_run calls bound to independently verified native Goal outcomes. Reaching the not-achieved threshold appends the named immediate-parent fallback once; it never promotes a candidate.',
+        parameters: { owner_route_id: { type: 'string', required: true }, name: { type: 'string', required: true }, version: { type: 'integer', required: true }, fallback_version: { type: 'integer', required: true }, expires_at: { type: 'integer', required: true }, max_runs: { type: 'integer', required: true }, failure_threshold: { type: 'integer', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.watch(exec.agent, { ownerRouteId: args.owner_route_id, skillName: args.name, version: args.version, fallbackVersion: args.fallback_version, expiresAt: args.expires_at, maxRuns: args.max_runs, failureThreshold: args.failure_threshold })) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_watches', description: 'Inspect this owner’s finite rollback watches and their independently verified outcome observations.', parameters: {}, output,
+        execute: async (_args, exec) => ({ context: JSON.stringify(this.#store.listWatches(this.#scope(exec.agent, 'inspect'))) }) }))
     })
+    ctx.inject(['assistantGoals', 'assistantPolicy', 'assistantDelivery', 'assistantVerifier'], () => { this.#queueReconcile() })
+    ctx.on('assistant-verifier/receipt', notice => { if (notice.taskKind === 'goal-outcome') this.#queueReconcile() })
     ctx.inject(['skills', 'agents'], runtime => {
       const registered = new WeakSet<Agent>()
       const install = (agent: Agent) => {
@@ -134,7 +143,7 @@ export class AssistantSkillsService extends Service {
     const owner = delivery?.preferencePrincipalForAgent(agent)
     if (!owner || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-skills: authenticated owner required')
     const scope = { principalId: owner.principalId, ...owner.principalLineage, workspace: owner.scope.workspace, preset: owner.scope.preset }
-    if (['save', 'retire', 'draft', 'activate', 'reject', 'rollback', 'compare'].includes(action)) {
+    if (['save', 'retire', 'draft', 'activate', 'reject', 'rollback', 'compare', 'watch'].includes(action)) {
       const current = delivery?.currentPreferenceTurn(agent)
       if (!current || acceptanceDigest({ principalId: current.principalId, ...current.principalLineage, workspace: current.scope.workspace, preset: current.scope.preset }) !== acceptanceDigest(scope)) throw new Error('assistant-skills: current owner request required')
     }
@@ -278,6 +287,68 @@ export class AssistantSkillsService extends Service {
     const restored = this.#store.rollback(scope, name, expectedVersion, targetVersion)
     this.#changed(); return restored
   }
+  #watchPolicy(scope: GoalScope, action: 'watch' | 'rollback') {
+    return { subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId },
+      action, resource, context: { initiator: 'background' as const } }
+  }
+  #watchRoute(scope: GoalScope, ownerRouteId: string, expected?: unknown) {
+    const route = this.ctx.get('assistantDelivery', false)?.validateOwnerRoute({ authorityId: ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, agentPreset: scope.preset })
+    if (!route || route.principalRecordId !== scope.principalRecordId || route.principalVersion !== scope.principalVersion
+      || expected !== undefined && acceptanceDigest(route) !== acceptanceDigest(expected)) throw new Error('assistant-skills: owner route changed')
+    return route
+  }
+  #watchAuthorized(watch: SkillWatch): void {
+    const scope = watch.scope as GoalScope
+    this.#watchRoute(scope, watch.ownerRouteId, watch.routeReceipt)
+    const policy = this.ctx.get('assistantPolicy', false)
+    if (!watch.routeReceipt || !this.#active || Date.now() >= watch.expiresAt || !policy
+      || ['watch', 'rollback'].some(action => policy.evaluate(this.#watchPolicy(scope, action as 'watch' | 'rollback')).effect !== 'allow')) throw new Error('assistant-skills: watch authority ended')
+  }
+  watch(agent: Agent | undefined, input: { ownerRouteId: string; skillName: string; version: number; fallbackVersion: number; expiresAt: number; maxRuns: number; failureThreshold: number }) {
+    const scope = this.#scope(agent, 'watch'), route = this.#watchRoute(scope, input.ownerRouteId)
+    const policy = this.ctx.get('assistantPolicy', false)
+    if (!policy || ['watch', 'rollback'].some(action => policy.evaluate(this.#watchPolicy(scope, action as 'watch' | 'rollback')).effect !== 'allow')) throw new Error('assistant-skills: configure finite background watch and rollback permission')
+    this.#authorize(agent, 'watch', [scope, input])
+    this.#watchRoute(scope, input.ownerRouteId, route)
+    return this.#store.createWatch(scope, input, route)
+  }
+  #queueReconcile(): void {
+    if (!this.#active || this.#reconcileQueued) return
+    this.#reconcileQueued = true
+    queueMicrotask(() => { this.#reconcileQueued = false; if (!this.#active) return; try { this.#reconcile() } catch { /* Durable watches are retried on the next nudge or dependency activation. */ } })
+  }
+  #reconcile(): void {
+    if (!this.#active || !this.ctx.get('assistantGoals', false) || !this.ctx.get('assistantPolicy', false)
+      || !this.ctx.get('assistantDelivery', false) || !this.ctx.get('assistantVerifier', false)) return
+    for (const watch of this.#store.listWatches()) {
+      const scope = watch.scope as GoalScope
+      if (watch.expiresAt <= Date.now()) { this.#store.stopWatch(scope, watch.id, 'expired'); continue }
+      const current = this.#store.get(scope, watch.skillName)
+      if (!current || current.version !== watch.version || acceptanceDigest(current) !== watch.definitionDigest) { this.#store.stopWatch(scope, watch.id, 'superseded'); continue }
+      try { this.#watchAuthorized(watch) } catch { this.#store.stopWatch(scope, watch.id, 'revoked'); continue }
+      for (const runId of watch.runIds) {
+        const run = this.#store.getRun(scope, runId)
+        if (!run || run.skillName !== watch.skillName || run.version !== watch.version) continue
+        try {
+          const read = () => this.#goals().inspectOwnerGoalExecution({ ownerRouteId: watch.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: run.sessionId, goalId: run.goalId })
+          const observation = watchObservation(read(), scope, run, Date.now())
+          if (!observation) continue
+          this.#watchAuthorized(watch)
+          if (acceptanceDigest(watchObservation(read(), scope, run, Date.now()) ?? null) !== acceptanceDigest(observation)) continue
+          const observed = this.#store.observeWatch(scope, watch.id, observation)
+          if (observed?.state !== 'watching') continue
+          if (observed.observations.filter(value => value.objectiveStatus === 'not-achieved').length >= observed.failureThreshold) {
+            const policy = this.ctx.get('assistantPolicy', false)!
+            if (policy.authorize(this.#watchPolicy(scope, 'rollback'), { idempotencyKey: `${watch.id}:rollback` }).effect !== 'allow') { this.#store.stopWatch(scope, watch.id, 'revoked'); break }
+            this.#watchAuthorized(watch)
+            if (this.#store.rollbackWatch(scope, watch.id)?.state === 'rolled-back') this.#changed()
+            break
+          }
+          if (observed.observations.length >= observed.maxRuns) { this.#store.stopWatch(scope, watch.id, 'exhausted'); break }
+        } catch { /* Changed or unavailable evidence supplies no rollback authority. */ }
+      }
+    }
+  }
   async run(exec: ToolRunContext, goalId: string, name: string, version: number, inputs: Record<string, unknown>, invocationId: string) {
     const scope = this.#scope(exec.agent, 'run')
     const skill = this.#store.get(scope, name)
@@ -291,7 +362,8 @@ export class AssistantSkillsService extends Service {
     const current = this.#goals().inspectWorkflowRunContext(exec.agent, goalId)
     if (acceptanceDigest(scope) !== acceptanceDigest(current.scope) || goalId === skill.source.goal.id) throw new Error('assistant-skills: fresh owner Goal required')
     const identity = acceptanceDigest(current)
-    const claim = this.#store.claim(scope, { invocationId, goalId, sessionId: current.sessionId, skillName: name, version, inputs, ...(candidateId ? { candidateId, goalExecutionRunId: current.goalExecutionRunId } : {}) })
+    const goalContext = current as typeof current & { nativeGoalId?: string }
+    const claim = this.#store.claim(scope, { invocationId, goalId, sessionId: current.sessionId, skillName: name, version, inputs, goalExecutionRunId: current.goalExecutionRunId, goalDefinitionDigest: current.definition.digest, ...(typeof goalContext.nativeGoalId === 'string' ? { nativeGoalId: goalContext.nativeGoalId } : {}), ...(candidateId ? { candidateId } : {}) })
     if (!claim.claimed) {
       if (claim.run.state !== 'succeeded') throw new Error(`assistant-skills: invocation ${claim.run.id} is ${claim.run.state}; inspect skill_status, do not replay`)
       return { ...claim.run, replayed: false, acceptance: 'requires-fresh-goal-verification' }
@@ -335,6 +407,7 @@ export class AssistantSkillsService extends Service {
     if (!this.#active) throw new Error('assistant-skills: runtime disposed; invocation will recover as unknown')
     const saved = this.#store.finish(scope, claim.run.id, state, completed)
     if (saved.state !== 'succeeded') throw new Error(`assistant-skills: invocation ${saved.id} is ${saved.state}; inspect skill_status, do not replay`)
+    this.#queueReconcile()
     return { ...saved, replayed: false, acceptance: 'requires-fresh-goal-verification' }
   }
 }

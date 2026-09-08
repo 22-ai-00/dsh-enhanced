@@ -336,12 +336,13 @@ export class AssistantGoalsService extends Service {
       if (at < now || at - now > this.#wake.config.maxDelayMs || expiresAt - at < 1_000 || budget.modelCalls >= budget.limits.modelCalls || (budget.limits.mode === 'tokens' && budget.outputTokens! >= budget.limits.outputTokens!)) return false
       this.#wake.preflight(record); this.#outcome.preflight(scope, record.definition.objective, record)
       const frozenOutcome = this.#outcome.view(record).conditions
-      if (frozenOutcome === undefined || frozenOutcome.expiresAt <= expiresAt
-        || !frozenOutcome.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')) return false
+      if (frozenOutcome === undefined || frozenOutcome.expiresAt <= expiresAt) return false
       const verifier = this.ctx.get('assistantVerifier', false)
       return verifier !== undefined && (['goal-step', 'goal-outcome'] as const).every(taskKind => {
         const selected = verifier.inspectAcceptanceProfile({ scope: { workspace: scope.workspace, preset: scope.preset }, owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, objective: record.definition.objective, taskKind })
-        return selected !== null && selected.profile.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')
+        return selected !== null && (typeof verifier.supportsPreauthorizedGoalAcceptance === 'function'
+          ? verifier.supportsPreauthorizedGoalAcceptance({ scope: selected.profile.scope, owner: selected.profile.owner, objective: selected.profile.objective, taskKind })
+          : selected.profile.criteria.every(criterion => criterion.kind === 'isolated-process-behavior'))
       })
     } catch { return false }
   }
@@ -365,7 +366,9 @@ export class AssistantGoalsService extends Service {
       return (['goal-step', 'goal-outcome'] as const).every(taskKind => {
         const selected = verifier.inspectAcceptanceProfile({ scope: { workspace: scope.workspace, preset: scope.preset },
           owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, objective, taskKind })
-        return selected !== null && selected.profile.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')
+        return selected !== null && (typeof verifier.supportsPreauthorizedGoalAcceptance === 'function'
+          ? verifier.supportsPreauthorizedGoalAcceptance({ scope: selected.profile.scope, owner: selected.profile.owner, objective: selected.profile.objective, taskKind })
+          : selected.profile.criteria.every(criterion => criterion.kind === 'isolated-process-behavior'))
       })
     } catch { return false }
   }
@@ -600,12 +603,13 @@ export class AssistantGoalsService extends Service {
           || budget.modelCalls >= budget.limits.modelCalls || (budget.limits.mode === 'tokens' && budget.outputTokens! >= budget.limits.outputTokens!)) return false
         this.#wake.preflight(record); this.#outcome.preflight(scope, record.definition.objective, record)
         const frozenOutcome = this.#outcome.view(record).conditions
-        if (frozenOutcome === undefined || frozenOutcome.expiresAt <= expiresAt
-          || !frozenOutcome.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')) return false
+        if (frozenOutcome === undefined || frozenOutcome.expiresAt <= expiresAt) return false
         const verifier = this.ctx.get('assistantVerifier', false)
         return verifier !== undefined && (['goal-step', 'goal-outcome'] as const).every(taskKind => {
           const selected = verifier.inspectAcceptanceProfile({ scope: { workspace: scope.workspace, preset: scope.preset }, owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, objective: record.definition.objective, taskKind })
-          return selected !== null && selected.profile.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')
+          return selected !== null && (typeof verifier.supportsPreauthorizedGoalAcceptance === 'function'
+          ? verifier.supportsPreauthorizedGoalAcceptance({ scope: selected.profile.scope, owner: selected.profile.owner, objective: selected.profile.objective, taskKind })
+          : selected.profile.criteria.every(criterion => criterion.kind === 'isolated-process-behavior'))
         })
       }
       return this.preauthorizeSchedule({ ...execution, arguments: { goal_id: args['goal_id'], expected_revision: args['expected_revision'], wake_at: (args['expires_at'] as number) - 1_000 } })
@@ -898,7 +902,7 @@ export class AssistantGoalsService extends Service {
     if (current === undefined || current.id !== goalId || native === undefined || current.native.phase !== 'active'
       || current.native.sessionId !== String(agent!.session.id) || current.native.goalId !== String(native.id)
       || native.phase !== 'active' || current.native.revision !== native.revision) throw new Error('assistant-goals: exact active workflow goal round is required')
-    return Object.freeze({ scope: Object.freeze({ ...scope }), goalId: current.id, sessionId: current.native.sessionId,
+    return Object.freeze({ scope: Object.freeze({ ...scope }), goalId: current.id, sessionId: current.native.sessionId, nativeGoalId: current.native.goalId,
       definition: Object.freeze({ ...current.definition }), goalExecutionRunId: budget!.run.intent.runId })
   }
   inspectVerifiedWorkflowSource = (agent: Agent | undefined, goalId: string): VerifiedWorkflowSource => this.#verifiedWorkflow(agent, goalId)

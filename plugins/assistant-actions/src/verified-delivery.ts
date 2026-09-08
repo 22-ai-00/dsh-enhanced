@@ -13,7 +13,7 @@ export const verifiedDeliveryOwner = 'assistant-actions-verified-delivery/v1'
 const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const catalogDigest = hash({ owner: verifiedDeliveryOwner, version: 1 })
 export interface DeliverySecurity {
-  principalId: string; identity: ActionIdentity; sessionId: string; goalId: string; runId: string
+  principalId: string; identity: ActionIdentity; sessionId: string; goalId: string; nativeGoalId?: string; runId: string
   definitionDigest: string; definitionVersion: number; grantId: string; grantRevision: number
   ownerRouteId: string; budgetId: string; acceptance?: 'goal-outcome' | 'goal-step'; expiresAt: number; routeReceipt: unknown
 }
@@ -84,6 +84,20 @@ export class VerifiedDeliveryRuntime {
     const row = this.#row(key(sessionId, grantId, idempotencyKey))
     if (row && identity && hash((JSON.parse(row.intent) as DeliveryIntent).security.identity) !== hash(identity)) return undefined
     return row ? this.#public(row) : undefined
+  }
+  /** Latest intent fences older successes while a newer repair is pending or unknown. Host-only. */
+  latestForGoal(goal: { id: string; sessionId: string; nativeGoalId: string; definitionVersion: number; definitionDigest: string }, grantId: string, owner: { principalRecordId: string; principalVersion: number }, scope: { workspace: string; preset: string }): { intent: DeliveryIntent; state: State; outcome?: DeliveryOutcome } | undefined {
+    if (!this.#active) throw new Error('assistant-actions: delivery unavailable')
+    const rows = this.#db.prepare('SELECT * FROM deliveries ORDER BY rowid DESC LIMIT 10001').all() as unknown as Row[]
+    for (const row of rows) {
+      const intent = JSON.parse(row.intent) as DeliveryIntent, security = intent.security
+      if (security.goalId !== goal.id || security.sessionId !== goal.sessionId || security.nativeGoalId !== goal.nativeGoalId || security.grantId !== grantId
+        || security.definitionVersion !== goal.definitionVersion || security.definitionDigest !== goal.definitionDigest
+        || security.identity.principalRecordId !== owner.principalRecordId || security.identity.principalVersion !== owner.principalVersion
+        || security.identity.workspace !== scope.workspace || security.identity.agentPreset !== scope.preset) continue
+      return { intent: structuredClone(intent), state: row.state, ...(row.result === null ? {} : { outcome: JSON.parse(row.result) as DeliveryOutcome }) }
+    }
+    return undefined
   }
   prepare(agent: Agent | undefined, request: VerifiedDeliveryRequest) {
     if (!this.#active || !this.#automations) throw new Error('assistant-actions: verified delivery requires Automations and Goals')

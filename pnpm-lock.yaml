@@ -519,6 +519,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.2
+      '@dsh-enhanced/task-acceptance-contract':
+        specifier: workspace:*
+        version: link:../../packages/task-acceptance-contract
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: 'catalog:'
@@ -1371,6 +1374,9 @@ importers:
       '@deepseek-ai/schemastery':
         specifier: 'catalog:'
         version: 3.18.2
+      '@dsh-enhanced/assistant-actions':
+        specifier: '>=0.1.0 <0.2.0'
+        version: link:../assistant-actions
       '@dsh-enhanced/task-acceptance-contract':
         specifier: workspace:*
         version: link:../../packages/task-acceptance-contract

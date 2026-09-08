@@ -22,7 +22,7 @@ function fixture(options: { inspect?: () => any; deliver?: (signal: AbortSignal)
     ctx.provide('assistantVerifier' as never, {} as never); ctx.provide('assistantGoals' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never); ctx.provide('assistantPolicy' as never, {} as never)
     const inspect = vi.fn(options.inspect ?? (() => undefined)); const notify = vi.fn((intent, value) => options.notify?.({ intent, value })); const deliver = vi.fn(async (_intent, _files, signal) => options.deliver ? await options.deliver(signal) : { commit: { actionId: 'commit', status: 'succeeded', commitOid: 'b'.repeat(40) } })
     const runtime = new VerifiedDeliveryRuntime(ctx, root, {
-      capture: () => ({ principalId: 'owner', identity: { principalDigest: 'p'.repeat(64), principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', agentPreset: 'primary' }, sessionId: 'session', goalId: 'goal', runId: 'run', definitionDigest: 'd'.repeat(64), definitionVersion: 1, grantId: 'grant', grantRevision: 1, ownerRouteId: 'route', budgetId: 'budget', expiresAt: options.expiresAt ?? Date.now() + 60_000, routeReceipt: { route: 1 } }),
+      capture: () => ({ principalId: 'owner', identity: { principalDigest: 'p'.repeat(64), principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', agentPreset: 'primary' }, sessionId: 'session', goalId: 'goal', nativeGoalId: 'native-goal', runId: 'run', definitionDigest: 'd'.repeat(64), definitionVersion: 1, grantId: 'grant', grantRevision: 1, ownerRouteId: 'route', budgetId: 'budget', expiresAt: options.expiresAt ?? Date.now() + 60_000, routeReceipt: { route: 1 } }),
       inspect, deliver, notify,
     })
     let closed = false

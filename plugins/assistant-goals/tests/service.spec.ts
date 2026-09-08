@@ -9,6 +9,7 @@ import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { realpathSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -142,6 +143,29 @@ describe('owner-scoped native goal context', () => {
     f.owners.set(owner, 'owner')
     await verifier.dispose()
     expect(f.service.snapshot(owner)).not.toContain('Fix the "approved" program')
+  })
+
+  it.each(['repository-readback', 'readback'] as const)('preauthorizes only compiled safe outcome authority (%s)', async kind => {
+    const route = { provider: 'fixture', model: 'fixture' }
+    const f = await harness(undefined, undefined, undefined, true, true, 1_000, { preauthorizedCreateMaxRounds: 2,
+      executionBudget: { mode: 'calls', modelCalls: 4, toolCalls: 4, durationMs: 120_000, maxOutputTokensPerCall: 500, routes: [route] } })
+    const agent = await f.create(`preauth-${kind}`, 'owner'); f.human.add(agent)
+    const objective = 'Verify repository outcome'
+    const isolated = { kind: 'isolated-runner' as const, id: 'isolated', stateRoot: join(f.root, 'verification'), image: `sha256:${'a'.repeat(64)}`,
+      dockerPath: realpathSync(process.execPath), command: 'cat /workspace/artifact', expiresAt: Date.now() + 300_000,
+      maxRuns: 4, maxTotalDurationMs: 10_000, maxDurationMs: 1_000, maxOutputBytes: 1024, testSets: [{ id: 'cases', cases: [{ stdin: '', expectedStdout: 'ok', expectedExitCode: 0 }] }] }
+    const remote = kind === 'repository-readback'
+      ? { kind, id: 'remote', grantId: 'repository', grantRevision: 1, repository: 'octo/example', branch: 'automation/fix', baseBranch: 'main',
+          requiredChecks: [{ name: 'tests', appId: 42 }], reviewerIds: [], minApprovals: 0, timeoutMs: 1_000, freshnessMs: 5_000 }
+      : { kind, id: 'remote', urlTemplate: 'https://example.org/{id}', objectIdPointer: '/id', timeoutMs: 1_000, maxResponseBytes: 1024 }
+    const authorities = createVerifierAuthorities({ authorities: [isolated, remote] })
+    const profiles = goalProfiles(f.root, objective, { validityMs: 120_000 }).map(profile => ({ ...profile, criteria: profile.taskKind === 'goal-step'
+      ? [{ id: 'step', kind: 'isolated-process-behavior' as const, authority: { id: authorities[0]!.id, digest: authorities[0]!.digest }, artifactPath: 'result.txt', testSetId: 'cases' }]
+      : [{ id: 'whole', kind: 'target-readback' as const, authority: { id: authorities[1]!.id, digest: authorities[1]!.digest }, objectId: 'octo/example:automation/fix', expected: [{ pointer: '/ready', value: true }] }] }))
+    await f.ctx.plugin(AssistantVerifierService, { databasePath: `${f.path}.verifier`, tickIntervalMs: 0, requireAcceptance: true, authorities: [isolated, remote], profiles })
+    const execution = { agent, arguments: { objective, max_goal_rounds: 2 }, signal: new AbortController().signal } as never
+    expect(f.service.preauthorizeCreate(execution)).toBe(kind === 'repository-readback')
+    f.denyAction('create'); expect(f.service.preauthorizeCreate(execution)).toBe(false)
   })
 
   it('keeps goal schedule preauthorization disabled by default', async () => {

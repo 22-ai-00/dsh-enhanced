@@ -114,7 +114,8 @@
     "@dsh-enhanced/assistant-verifier": "workspace:*"
   },
   "dependencies": {
-    "@deepseek-ai/schemastery": "catalog:"
+    "@deepseek-ai/schemastery": "catalog:",
+    "@dsh-enhanced/task-acceptance-contract": "workspace:*"
   },
   "bin": {
     "dsh-actions": "./lib/cli.js"

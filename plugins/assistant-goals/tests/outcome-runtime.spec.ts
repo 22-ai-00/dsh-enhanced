@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
-import { afterEach, describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import type { TaskAcceptanceContract } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
@@ -19,6 +19,7 @@ const roots: string[] = []
 const contexts: Context[] = []
 const servers: Server[] = []
 afterEach(async () => {
+  vi.restoreAllMocks()
   for (const context of contexts.splice(0)) await context.fiber.restart()
   await Promise.all(servers.splice(0).map(server => new Promise<void>(resolve => server.close(() => resolve()))))
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
@@ -37,8 +38,8 @@ class GoalsBridge implements TaskAcceptanceProducer {
   inspectAcceptedExecution = (contract: TaskAcceptanceContract) => this.runtime.inspect(contract)
 }
 
-async function proofServer(): Promise<string> {
-  const server = createServer((_request, response) => { response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ id: 'proof', state: { ready: true } })) })
+async function proofServer(ready: () => boolean = () => true): Promise<string> {
+  const server = createServer((_request, response) => { response.statusCode = ready() ? 200 : 503; response.setHeader('content-type', 'application/json'); response.end(JSON.stringify({ id: 'proof', state: { ready: true } })) })
   server.listen(0, '127.0.0.1'); await once(server, 'listening'); servers.push(server)
   const address = server.address(); if (address === null || typeof address === 'string') throw new Error('missing proof server address')
   return `http://127.0.0.1:${address.port}/objects/{id}`
@@ -63,8 +64,8 @@ function run(value: GoalRecord, now: number): GoalExecutionRun {
       authorizationDigest: acceptanceDigest({ scope, action: 'execute', resource: { kind: 'goal', id: 'business-context' } }) } } }
 }
 
-async function runtimeHarness(paths: { verifier: string; outcome: string }, current: () => GoalRecord, runs: () => readonly GoalExecutionRun[]) {
-  const url = await proofServer()
+async function runtimeHarness(paths: { verifier: string; outcome: string }, current: () => GoalRecord, runs: () => readonly GoalExecutionRun[], ready: () => boolean = () => true) {
+  const url = await proofServer(ready)
   const authorityInput = { kind: 'readback' as const, id: 'target', urlTemplate: url, objectIdPointer: '/id', timeoutMs: 1_000, maxResponseBytes: 1_024, allowHttpLoopback: true }
   const [authority] = createVerifierAuthorities({ authorities: [authorityInput] }); if (authority === undefined) throw new Error('missing readback authority')
   const ctx = new Context(); contexts.push(ctx)
@@ -81,6 +82,27 @@ async function runtimeHarness(paths: { verifier: string; outcome: string }, curr
 }
 
 describe('GoalOutcomeRuntime durable crash recovery', () => {
+  it.each(['active', 'paused'] as const)('late verification nudge completes only an eligible live goal (%s)', async phase => {
+    const root = await mkdtemp(join(tmpdir(), 'goal-outcome-late-receipt-')); roots.push(root)
+    let clock = Date.now(); vi.spyOn(Date, 'now').mockImplementation(() => clock)
+    let current = record(root); const initial = run(current, clock), agent = {} as Agent
+    let nativeRuns: readonly GoalExecutionRun[] = [], ready = false, completions = 0
+    const f = await runtimeHarness({ verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcome.sqlite') }, () => current, () => nativeRuns, () => ready)
+    f.ctx.provide('goals' as never, { get: () => ({ id: current.native.goalId, revision: current.native.revision }), complete: () => {
+      completions++; current = { ...current, native: { ...current.native, phase: 'complete', revision: current.native.revision + 1 } }
+    } } as never)
+    f.runtime.bind(current); f.runtime.prepare(agent, initial)
+    const durable = { ...initial, dispatchedAt: clock, execution: { status: 'succeeded' as const, quiescent: true, completedAt: clock } }
+    nativeRuns = [durable]
+    await f.runtime.settled(agent, durable, () => {})
+    expect(f.runtime.view(current).status).toBe('unknown'); expect(completions).toBe(0)
+    if (phase === 'paused') current = { ...current, native: { ...current.native, phase: 'paused', revision: current.native.revision + 1 } }
+    ready = true; clock += 5_001
+    await f.verifier.tick(); await new Promise<void>(resolve => setImmediate(resolve))
+    expect(completions).toBe(phase === 'active' ? 1 : 0)
+    await f.verifier.tick(); expect(completions).toBe(phase === 'active' ? 1 : 0)
+  })
+
   it('downgrades a sidecar-only success to durable verifier unknown after a reload', async () => {
     const root = await mkdtemp(join(tmpdir(), 'goal-outcome-runtime-')); roots.push(root)
     const paths = { verifier: join(root, 'verifier.sqlite'), outcome: join(root, 'outcomes.sqlite') }

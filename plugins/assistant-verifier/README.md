@@ -30,6 +30,7 @@ Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和
 | `runner` | 固定程序、固定参数、明确环境变量、workspace 产物和有限 stdin/stdout | 指定输入的实际输出和退出码同时符合预期 |
 | `document` | workspace 文档、配置的 HTTPS 来源 | 指定文字存在；直接引文、来源 URI 与字节摘要匹配 |
 | `readback` | 固定 HTTPS 模板，仅替换一个路径段的对象 ID | 目标 ID、可选版本和指定 JSON Pointer 字段符合预期 |
+| `repository-readback` | 通过当前 Actions grant 与 Keychain 读取实际提交的 checks、reviews、PR、branch | 准确 head 的指定 checks/评审符合配置条件 |
 
 通过 `createVerifierAuthorities({ authorities })` 得到冻结配置和每个资源的 `digest`，将 `{ id, digest }` 填入条件的 `authority`。profile 类型为包导出的 `AcceptanceProfile`，条件格式来自 `@dsh-enhanced/task-acceptance-contract`。资源变更会改变摘要，旧契约不能悄悄使用新资源。
 
@@ -46,7 +47,7 @@ Goals 原生回合使用显式 `task-acceptance/v2` / `task-verification/v2` 和
 - **文件系统**：读 workspace 下指定普通文件，拒绝符号链接与越界产物，限制大小并核对读前后身份。写独立 SQLite 主文件、WAL、SHM。账本包含目标、预期字段与证据引用，应按私有任务数据保存。
 - **网络**：获取配置来源或精确目标，不跟随重定向，不接受 URL 凭据。HTTPS 默认；`allowHttpLoopback` 仅显式允许本机 HTTP。它不是进程级网络隔离。
 - **子进程**：固定程序和参数，末尾追加私有只读产物快照路径，工作目录保持原 workspace；不用 shell，不继承环境凭据。快照只涵盖指定文件，按产物自身路径解析的相对 import 不再指向原目录，因此该驱动适用于明确的单文件输入检查。时间和输出有上限，超时尝试终止所建 POSIX 进程组并关闭本方管道，有界返回 unknown；逃离进程组的后代不保证已停止。可执行文件 SHA 检查与实际 spawn 仍是两个操作，不提供原子执行身份保证。
-- **凭据、浏览器、安装脚本**：没有通用凭据或浏览器接口，没有额外安装脚本。认证动作需后续受保护 broker，不应把密钥写入 profile。
+- **凭据、浏览器、安装脚本**：没有通用凭据或浏览器接口，没有额外安装脚本。仓库认证回读通过 Actions 的受保护 broker 与短凭据租约完成，不应把密钥写入 profile。
 
 执行产物代码仍使用 Host 的 OS 用户；进程组、摘要和进程内 capability 不能防止同 UID 恶意代码修改授权器、期望、数据库或读取其他文件。插件也不证明所有程序输入正确、未列出的文档陈述属实或一般性的目标完成。高权限代码隔离与受保护评测须完成工作包 08–10。
 
@@ -71,3 +72,11 @@ Goals Host 的 `prepareGoalAssessment(input, template)` 从已持久化的初始
 此能力需要同一 Host 中已启用的 `assistant-isolation`，它是可选 peer；普通验收不自动安装或激活 Isolation。Verifier 通过当前 Goals producer 找回真实 step acceptance，再核对 owner、workspace、preset、Session、原生目标、定义与 run。产物只能来自该次 admitted native round 派发前绑定的 Isolation job；新的失败/unknown 产物尝试会遮蔽旧成功，已清理正文或缺少 provenance 时返回 unknown。whole-goal 使用其持久 `triggerRunId`，不能换成上下文 focus 的目标。
 
 独立验收使用另一私有 stateRoot 和 Isolation 持久控制器、资源池与预算，不使用模型 Agent 身份，也不在 Host 上执行产物。每测试用例的幂等键绑定契约、criterion、源 job、内容摘要、authority、testSet 和序号。相同 key 重读已知结果；派发不明的任务保留 unknown 和占用，重启不重放。更改配置不会自动扩额或续期；需要 operator 明确处置私有账本和未确认的运行资源。Docker 文件系统、网络、子进程和凭据边界与 Isolation 一致；Host 插件和同 UID 管理者仍属于可信控制面。
+
+## 仓库整体验收
+
+`repository-readback` authority 固定 `grantId`、`grantRevision`、`repository`、`branch`、`baseBranch`、`requiredChecks: [{ name, appId }]`、`reviewerIds`、`minApprovals`、`timeoutMs`（最多 30 秒）及 `freshnessMs`（最多 60 秒）。使用现有 v3 `goal-outcome` 的 `target-readback`，`objectId` 必须为准确的 `repository:branch`；以 `/ready` 等于 `true` 作为目标条件。正式配置入口见 WebOwner README。
+
+此路径需要当前 Actions 可选 Host peer。Actions 从已验收步骤的持久交付结果选择实际 commit/PR，绑定原 Goal/Session、owner、定义及当前 assessment；允许后续回合验收较早步骤的交付。每次验证通过既有动作账本分别消耗四次读取额度，逐次重查授权与来源；不会从旧成功结果绕过新的 pending/unknown 交付。没有当前成功且 quiescent 的执行证明不签发成功。
+
+待运行 CI、待评审、截断数据或无法认证返回 unknown；失败 CI/请求修改不能通过 `/ready`。回执有效期从读取开始计时，最多为 `freshnessMs` 且不晚于契约到期。回执仅描述这次观察，不能证明远端之后不变，也不自动配置事件订阅。测试覆盖真实 Verifier→Actions Host 调用，GitHub 传输为替身；真实远端认证与完整事件跟进仍需验证。

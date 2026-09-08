@@ -174,6 +174,27 @@ export class AssistantVerifierService extends Service<Config> {
    * Host-only configuration inspection for preflight. It never creates a
    * contract, registers a producer, or authorizes/starts execution.
    */
+  supportsPreauthorizedGoalAcceptance = (selection: AcceptanceProfileSelection): boolean => {
+    const selected = this.inspectAcceptanceProfile(selection)
+    return selected !== null && ['goal-step', 'goal-outcome'].includes(selection.taskKind) && selected.profile.criteria.every(criterion => {
+      if (criterion.kind === 'isolated-process-behavior') return true
+      return selection.taskKind === 'goal-outcome' && criterion.kind === 'target-readback'
+        && criterion.expected.some(value => value.pointer === '/ready' && value.value === true)
+        && this.#compiled.authorities.some(authority => authority.kind === 'repository-readback' && authority.id === criterion.authority.id && authority.digest === criterion.authority.digest && criterion.objectId === `${authority.repository}:${authority.branch}`)
+    })
+  }
+
+  /** Host-only binding: the caller cannot supply a contract, grant or replacement target. */
+  inspectRepositoryReadbackAuthority = (contractId: string, authorityId: string, authorityDigest: string) => {
+    this.#assertActive()
+    const contract = this.#store.getContract(contractId)
+    const authority = this.#compiled.authorities.find(item => item.id === authorityId && item.digest === authorityDigest)
+    if (!contract || contract.task.kind !== 'goal-outcome' || authority?.kind !== 'repository-readback'
+      || !contract.criteria.some(item => item.kind === 'target-readback' && item.authority.id === authorityId && item.authority.digest === authorityDigest && item.objectId === `${authority.repository}:${authority.branch}`)
+      || contract.expiresAt <= this.#now()) throw new Error('assistant-verifier: repository acceptance binding unavailable')
+    return freeze({ contract, authority })
+  }
+
   inspectAcceptanceProfile = (selection: AcceptanceProfileSelection): Readonly<AcceptanceProfileInspection> | null => {
     this.#assertActive()
     const key = selectionKey(selection)
@@ -466,7 +487,16 @@ export class AssistantVerifierService extends Service<Config> {
       let results: readonly CriterionResult[] = unknown('verification-unavailable')
       if (!execution.quiescent) results = unknown('execution-not-quiescent')
       else {
-        try { results = await this.#bounded(verifyAcceptanceCriteria(contract, this.#compiled.authorities, this.#controller.signal, this.#isolatedContext(outcomeBinding)), contract.bounds.maxDurationMs) }
+        try { results = await this.#bounded(verifyAcceptanceCriteria(contract, this.#compiled.authorities, this.#controller.signal, this.#isolatedContext(outcomeBinding), { read: async (accepted, authority, signal) => {
+          type RepositoryReader = { repositoryReadbackGeneration(): string; readRepositoryGoalOutcome(input: { contractId: string; authorityId: string; authorityDigest: string }, signal: AbortSignal): Promise<unknown> }
+          const reader = this.ctx.get('assistantActions' as never, false) as RepositoryReader | undefined
+          if (typeof reader?.readRepositoryGoalOutcome !== 'function' || typeof reader.repositoryReadbackGeneration !== 'function') throw new Error('repository broker unavailable')
+          const generation = reader.repositoryReadbackGeneration()
+          const result = await reader.readRepositoryGoalOutcome({ contractId: accepted.id, authorityId: authority.id, authorityDigest: authority.digest }, signal)
+          const current = this.ctx.get('assistantActions' as never, false) as RepositoryReader | undefined
+          if (current?.repositoryReadbackGeneration() !== generation) throw new Error('repository broker changed')
+          return result
+        } }), contract.bounds.maxDurationMs) }
         catch { results = unknown('verification-unavailable') }
       }
       if (requiresLiveGoal && execution.quiescent) {
@@ -488,7 +518,10 @@ export class AssistantVerifierService extends Service<Config> {
       if (now < contract.expiresAt && now >= startedAt) {
         const payload = { protocol: contract.protocol === 'task-acceptance/v4' ? 'task-verification/v4' as const : contract.protocol === 'task-acceptance/v3' ? 'task-verification/v3' as const : contract.protocol === 'task-acceptance/v2' ? 'task-verification/v2' as const : 'task-verification/v1' as const, id: `verification-${contract.id}-${job.fencingToken}`,
           contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner,
-          task: contract.task, results, startedAt, completedAt: now, validUntil: contract.expiresAt }
+          task: contract.task, results, startedAt, completedAt: now, validUntil: Math.min(contract.expiresAt, ...contract.criteria.flatMap(criterion => {
+            const authority = this.#compiled.authorities.find(item => item.id === criterion.authority.id && item.digest === criterion.authority.digest)
+            return authority?.kind === 'repository-readback' ? [startedAt + authority.freshnessMs] : []
+          })) }
         try { receipt = createTaskVerificationReceipt(contract, payload) }
         catch {
           try { receipt = createTaskVerificationReceipt(contract, { ...payload, results: unknown('evidence-invalid-or-oversize') }) }

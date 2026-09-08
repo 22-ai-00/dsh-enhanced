@@ -203,6 +203,23 @@ llm-pi-ai:
     expect(() => parseGoalAdmissionTask(repositoryTask({ acceptance: 'model-says-done' }))).toThrow('invalid repository acceptance')
   })
 
+  test('formal repository outcome binds the granted target and leaves artifact checks on the step', async () => {
+    const now = Date.now(), f = await fixture(now)
+    const outcome = { requiredChecks: [{ name: 'tests', appId: 42 }], reviewerIds: [7], minApprovals: 1, timeoutMs: 10_000, freshnessMs: 30_000 }
+    const value = repositoryTask({ expiresAt: now + 300_000, acceptance: 'goal-step', maxActions: 20, outcome })
+    const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), repositoryEffective(f.effective), value, f.snapshot, now)
+    const verifier = config(plan.patch, 'dsh-enhanced-assistant-verifier')
+    expect(verifier.authorities).toContainEqual(expect.objectContaining({ ...outcome, kind: 'repository-readback', grantId: `${plan.admissionId}-repository`, grantRevision: 1 }))
+    expect(verifier.profiles.find((p: { taskKind: string }) => p.taskKind === 'goal-step').criteria[0].kind).toBe('isolated-process-behavior')
+    expect(verifier.profiles.find((p: { taskKind: string }) => p.taskKind === 'goal-outcome').criteria).toMatchObject([
+      { kind: 'target-readback', objectId: 'octo/example:automation/result', expected: [{ pointer: '/ready', value: true }] },
+    ])
+    expect(prepareGoalAdmission(f.input, plan.patch, repositoryEffective(f.effective), value, f.snapshot, now).patch).toBe(plan.patch)
+    expect(() => parseGoalAdmissionTask(repositoryTask({ outcome, maxActions: 20 }))).toThrow('explicit goal-step')
+    expect(() => parseGoalAdmissionTask(repositoryTask({ outcome, acceptance: 'goal-step', maxActions: 6 }))).toThrow('task limit')
+    expect(() => parseGoalAdmissionTask(repositoryTask({ outcome: { ...outcome, minApprovals: 2 }, acceptance: 'goal-step', maxActions: 20 }))).toThrow('approvals')
+  })
+
   test('repository delivery rejects absent credentials, foreign owners, paths, deadlines, and conflicting reruns', async () => {
     const now = Date.now(); const f = await fixture(now); const effective = repositoryEffective(f.effective); const source = withoutKeychain(f.prepared.patch)
     expect(() => parseGoalAdmissionTask(repositoryTask({ paths: ['other.txt'] }))).toThrow(/repository delivery/)

@@ -57,6 +57,19 @@ export interface ReadbackAuthorityInput {
   readonly allowHttpLoopback?: boolean
 }
 
+/** Fixed repository requirements; credentials and delivered head come only from Actions' Host ledger. */
+export interface RepositoryReadbackAuthorityInput {
+  readonly kind: 'repository-readback'; readonly id: string
+  readonly grantId: string; readonly grantRevision: number; readonly repository: string; readonly branch: string; readonly baseBranch: string
+  readonly requiredChecks: readonly { readonly name: string; readonly appId: number }[]
+  readonly reviewerIds: readonly number[]; readonly minApprovals: number
+  readonly timeoutMs: number; readonly freshnessMs: number
+}
+export interface RepositoryReadbackAuthority extends RepositoryReadbackAuthorityInput { readonly digest: string }
+export interface RepositoryVerificationContext {
+  read(contract: TaskAcceptanceContract, authority: RepositoryReadbackAuthority, signal: AbortSignal): Promise<unknown>
+}
+
 export interface IsolatedRunnerTestCaseInput {
   readonly stdin: string
   readonly expectedStdout: string
@@ -81,7 +94,7 @@ export interface IsolatedRunnerAuthorityInput {
   readonly testSets: readonly IsolatedRunnerTestSetInput[]
 }
 
-export type VerifierAuthorityInput = RunnerAuthorityInput | DocumentAuthorityInput | ReadbackAuthorityInput | IsolatedRunnerAuthorityInput
+export type VerifierAuthorityInput = RunnerAuthorityInput | DocumentAuthorityInput | ReadbackAuthorityInput | IsolatedRunnerAuthorityInput | RepositoryReadbackAuthorityInput
 export interface VerifierAuthoritiesConfig { readonly authorities: readonly VerifierAuthorityInput[] }
 
 export interface RunnerAuthority extends Omit<RunnerAuthorityInput, 'environment'> {
@@ -101,7 +114,7 @@ export interface ReadbackAuthority extends Omit<ReadbackAuthorityInput, 'allowHt
 export interface IsolatedRunnerAuthority extends IsolatedRunnerAuthorityInput {
   readonly digest: string
 }
-export type VerifierAuthority = RunnerAuthority | DocumentAuthority | ReadbackAuthority | IsolatedRunnerAuthority
+export type VerifierAuthority = RunnerAuthority | DocumentAuthority | ReadbackAuthority | IsolatedRunnerAuthority | RepositoryReadbackAuthority
 
 export interface IsolatedVerificationContext {
   readArtifact(contract: TaskAcceptanceContract, path: string): Promise<{
@@ -298,6 +311,23 @@ export function createVerifierAuthorities(config: unknown): readonly VerifierAut
       const urlTemplate = readbackTemplate(item.urlTemplate, allowHttpLoopback)
       const revisionPointer = item.revisionPointer === undefined ? undefined : validPointer(item.revisionPointer, 'readback revisionPointer')
       const bare = { kind: 'readback' as const, id, urlTemplate, objectIdPointer: validPointer(item.objectIdPointer, 'readback objectIdPointer'), ...(revisionPointer === undefined ? {} : { revisionPointer }), timeoutMs: whole(item.timeoutMs, 'readback timeoutMs'), maxResponseBytes: whole(item.maxResponseBytes, 'readback maxResponseBytes', 1_048_576), allowHttpLoopback }
+      return freeze({ ...bare, digest: digest(bare) })
+    }
+    if (kind === 'repository-readback') {
+      exactKeys(item, ['kind', 'id', 'grantId', 'grantRevision', 'repository', 'branch', 'baseBranch', 'requiredChecks', 'reviewerIds', 'minApprovals', 'timeoutMs', 'freshnessMs'], 'repository readback authority')
+      const checks = strictArray(item.requiredChecks, 'required checks', 1, 20).map(value => {
+        const check = object(value, 'required check'); exactKeys(check, ['name', 'appId'], 'required check')
+        const name = string(check.name, 'check name')
+        if (name.length > 256 || name.trim() !== name || /[\p{Cc}]/u.test(name)) fail('invalid check name')
+        return { name, appId: whole(check.appId, 'check app id', Number.MAX_SAFE_INTEGER) }
+      })
+      if (new Set(checks.map(check => JSON.stringify(check))).size !== checks.length) fail('duplicate required check')
+      const reviewerIds = strictArray(item.reviewerIds, 'reviewer ids', 0, 30).map(value => whole(value, 'reviewer id', Number.MAX_SAFE_INTEGER))
+      if (new Set(reviewerIds).size !== reviewerIds.length || !Number.isSafeInteger(item.minApprovals) || (item.minApprovals as number) < 0 || (item.minApprovals as number) > reviewerIds.length) fail('invalid required approvals')
+      const repository = string(item.repository, 'repository'), branch = string(item.branch, 'branch'), baseBranch = string(item.baseBranch, 'baseBranch')
+      if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(repository) || branch === baseBranch
+        || `${repository}:${branch}`.length > 256 || [branch, baseBranch].some(value => value.length > 256 || value.trim() !== value || /[\p{Cc}]/u.test(value))) fail('invalid repository target')
+      const bare = { kind: 'repository-readback' as const, id, grantId: string(item.grantId, 'grantId'), grantRevision: whole(item.grantRevision, 'grant revision', Number.MAX_SAFE_INTEGER), repository, branch, baseBranch, requiredChecks: checks, reviewerIds, minApprovals: item.minApprovals as number, timeoutMs: whole(item.timeoutMs, 'repository timeout', 30_000), freshnessMs: whole(item.freshnessMs, 'repository freshness', 60_000) }
       return freeze({ ...bare, digest: digest(bare) })
     }
     if (kind === 'isolated-runner') {
@@ -555,8 +585,27 @@ async function verifyIsolated(criterion: IsolatedProcessBehaviorCriterion, autho
   } finally { total.close() }
 }
 
+async function verifyRepository(criterion: TargetReadbackCriterion, authority: RepositoryReadbackAuthority, contract: TaskAcceptanceContract, context: RepositoryVerificationContext | undefined, signal: AbortSignal): Promise<CriterionResult> {
+  if (contract.task.kind !== 'goal-outcome' || criterion.objectId !== `${authority.repository}:${authority.branch}` || context === undefined) return unknown(criterion.id, 'repository-context-unavailable')
+  const deadline = withDeadline(signal, authority.timeoutMs)
+  try {
+    const value = await context.read(contract, authority, deadline.signal)
+    const document = object(value, 'repository readback')
+    exactKeys(document, ['objectId', 'headOid', 'ci', 'review', 'pullRequest', 'ready'], 'repository readback')
+    if (deadline.signal.aborted || document.objectId !== criterion.objectId || typeof document.headOid !== 'string' || !/^[a-f0-9]{40}$/u.test(document.headOid)
+      || !['passed', 'pending', 'failed'].includes(document.ci as string) || !['approved', 'pending', 'changes-requested'].includes(document.review as string)
+      || !['open', 'closed', 'merged'].includes(document.pullRequest as string)
+      || document.ready !== (document.ci === 'passed' && document.review === 'approved' && ['open', 'merged'].includes(document.pullRequest as string))) return unknown(criterion.id, 'repository-readback-unconfirmed')
+    if (document.ci === 'pending' || document.review === 'pending') return unknown(criterion.id, 'repository-requirements-pending')
+    if (criterion.expectedRevision !== undefined && criterion.expectedRevision !== document.headOid) return failed(criterion.id, 'repository-head-mismatch')
+    const evidence = [{ kind: 'repository-readback', ref: criterion.objectId, digest: digest(document) }]
+    for (const expected of criterion.expected) if (acceptanceCanonicalJson(pointer(document, expected.pointer)) !== acceptanceCanonicalJson(expected.value)) return failed(criterion.id, 'repository-requirements-not-met', evidence)
+    return passed(criterion.id, evidence)
+  } catch { return unknown(criterion.id, 'repository-readback-unavailable') } finally { deadline.close() }
+}
+
 /** Runs every immutable criterion once. It never retries task side effects. */
-export async function verifyAcceptanceCriteria(contract: TaskAcceptanceContract, authorities: readonly VerifierAuthority[], signal: AbortSignal, context?: IsolatedVerificationContext): Promise<readonly CriterionResult[]> {
+export async function verifyAcceptanceCriteria(contract: TaskAcceptanceContract, authorities: readonly VerifierAuthority[], signal: AbortSignal, context?: IsolatedVerificationContext, repository?: RepositoryVerificationContext): Promise<readonly CriterionResult[]> {
   const deadline = withDeadline(signal, contract.bounds.maxDurationMs)
   try {
     const results: CriterionResult[] = []
@@ -567,6 +616,7 @@ export async function verifyAcceptanceCriteria(contract: TaskAcceptanceContract,
       if (criterion.kind === 'process-behavior') results.push(authority.kind === 'runner' ? await verifyProcess(criterion, authority, contract.scope.workspace, deadline.signal) : unknown(criterion.id, 'authority-kind-mismatch'))
       else if (criterion.kind === 'isolated-process-behavior') results.push(authority.kind === 'isolated-runner' ? await verifyIsolated(criterion, authority, contract, context, deadline.signal) : unknown(criterion.id, 'authority-kind-mismatch'))
       else if (criterion.kind === 'document-citations') results.push(authority.kind === 'document' ? await verifyDocument(criterion, authority, contract.scope.workspace, deadline.signal) : unknown(criterion.id, 'authority-kind-mismatch'))
+      else if (authority.kind === 'repository-readback') results.push(await verifyRepository(criterion, authority, contract, repository, deadline.signal))
       else results.push(authority.kind === 'readback' ? await verifyReadback(criterion, authority, deadline.signal) : unknown(criterion.id, 'authority-kind-mismatch'))
     }
     return freeze(results)
