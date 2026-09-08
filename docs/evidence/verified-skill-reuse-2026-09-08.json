@@ -1,0 +1,434 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "96e6bf3bbacf121d08e15a7a4cbadb342c06229b",
+  "capability": "Save an independently achieved Goal tool trace as a private versioned native skill and reuse it in a fresh Goal after Host restart",
+  "completeWorkPackage": false,
+  "status": "validated",
+  "scope": {
+    "implemented": [
+      "exact successful native source turn and current independent acceptance",
+      "private owner-scoped immutable versions, typed scalar inputs and native catalog discovery",
+      "current admitted Goal ToolRuntime composition with native lineage and authority",
+      "durable idempotency, interrupted unknown state, retirement and stop-on-failure",
+      "mutation Policy budget authorization and one active invocation per owner/session/Goal"
+    ],
+    "remaining": [
+      "3–5 workflow classes",
+      "automatic candidate generation from repeated or failed work",
+      "permission delta comparison and bounded trials",
+      "measured promotion and regression rollback"
+    ]
+  },
+  "targetedChecks": [
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-skills test",
+      "exitCode": 0,
+      "files": 4,
+      "tests": 14,
+      "logPath": "/tmp/dsh-skill-unit.log",
+      "logSha256": "098a09a02b0b62d334608f20855aa4ce086a1b995c65ee38d9db362e3f282907"
+    },
+    {
+      "command": "pnpm --dir plugins/assistant-goals exec vitest run tests/service.spec.ts tests/verified-workflow.spec.ts",
+      "exitCode": 0,
+      "files": 2,
+      "tests": 39,
+      "logPath": "/tmp/dsh-skill-source.log",
+      "logSha256": "5c6030b6d273ed46508121b65b798158944e5f5ca55990704ba410a935297784"
+    }
+  ],
+  "checkDeduplication": {
+    "beforeFiles": 322,
+    "afterRootFiles": 29,
+    "afterWorkspaceFiles": 293,
+    "unionFiles": 322,
+    "sameFileSet": true,
+    "setDigest": "871c7b8daf0b416bc3c3b57e0084eb2f2491692832fec355f1c858fdaa67612d"
+  },
+  "limitations": [
+    "The real model scenario is explicitly guided and uses test-only native turn conclusion after one successful artifact step; it is not proof of general model reliability.",
+    "The Web acceptance runner executes Node on the test Host; this scenario does not prove container isolation.",
+    "Source producer tests use real native driving and JSONL persistence, with explicit owner-turn and attestation test seams.",
+    "Historical source acceptance never substitutes for fresh Goal acceptance.",
+    "Codex with ChatGPT has local execution records only; no ChatGPT web review was obtained.",
+    "Owner-visible receipt was inspected after page reload in native tool details; unsolicited live acceptance notification is not established by this test."
+  ],
+  "correctedValidationDefects": [
+    "Native tool errors are read from the sole matching tool-result content block, including optional success isError; malformed result shapes are rejected.",
+    "The first native source fixture used a rejected checkpoint call. It now performs a real read_report filesystem read and asserts the actual tool result before source export."
+  ],
+  "failedRealAttempts": [
+    {
+      "attempt": 1,
+      "logPath": "/tmp/dsh-skill-real-1.log",
+      "logSha256": "9969e3613793172bdab13c4c56a29a4dc8dd73498b2a340ad749e73c76e67f9d",
+      "exitCode": 1,
+      "cause": "Missing approval handling in the browser harness; source Goal never created."
+    },
+    {
+      "attempt": 2,
+      "logPath": "/tmp/dsh-skill-real-2.log",
+      "logSha256": "a96cc76a580850cc6991fb91fc2b2559fc863f843b23e32a963726085960a4d3",
+      "exitCode": 143,
+      "cause": "Incorrect expected write argument shape and blocked source attempt; manually terminated."
+    },
+    {
+      "attempt": 3,
+      "logPath": "/tmp/dsh-skill-real-3.log",
+      "logSha256": "06c6fe76b023b1ff309842ba69abd49e841f78d1b49e1a760c3e74975e1dc74a",
+      "exitCode": 1,
+      "cause": "Native assembly phase omitted inbox-claimed timing and checked blocked status before verifier settlement."
+    },
+    {
+      "attempt": 4,
+      "logPath": "/tmp/dsh-skill-real-4.log",
+      "logSha256": "a683e67528806f7dbc5a697e4c820b23539a8bbe5ce95d5aeee4fb05eb223856",
+      "exitCode": 143,
+      "cause": "Run stopped because the known premature blocked-state check had not yet been corrected."
+    },
+    {
+      "attempt": 5,
+      "logPath": "/tmp/dsh-skill-real-5.log",
+      "logSha256": "d43f8531a6340b19741bd930609556d4ba8858373552ffeebc5878fcd45a0a9c",
+      "exitCode": 1,
+      "cause": "Model supplied file instead of the native file_path write argument; test rejected it."
+    },
+    {
+      "attempt": 6,
+      "logPath": "/tmp/dsh-skill-real-6.log",
+      "logSha256": "90dd49f5a0bfd94c863921144547b561f68a1032d0197b03faad7450a4f65f0e",
+      "exitCode": 1,
+      "cause": "Source write was followed by disallowed model tool calls, preventing capture of a clean successful trace."
+    },
+    {
+      "attempt": 7,
+      "logPath": "/tmp/dsh-skill-real-7.log",
+      "logSha256": "900aa0b75e97c6ca7a45f9438b397e767d0b60d2e15603d36d9669a6b8f9f2f8",
+      "exitCode": 1,
+      "cause": "After restart the browser used a new Session rather than the original Session."
+    },
+    {
+      "attempt": 8,
+      "logPath": "/tmp/dsh-skill-real-8.log",
+      "logSha256": "94c5de2929338ead4aa9c52b09c358ec29a04301b1480c68b22b4ddc7fc970dc",
+      "exitCode": 143,
+      "cause": "Source write succeeded but subsequent rejected calls made the trace ineligible for saving; manually terminated."
+    },
+    {
+      "attempt": 9,
+      "logPath": "/tmp/dsh-skill-real-9.log",
+      "logSha256": "52e4d34604d9932af098d28b0b5250b12d7880417b8e7cad8e15752b11c354b7",
+      "exitCode": 143,
+      "cause": "Stopped before replay to supply the fixed invocation ID required by the test guard."
+    },
+    {
+      "attempt": 10,
+      "logPath": "/tmp/dsh-skill-real-10.log",
+      "logSha256": "5d81e45ea150ee67aaf69cf630884b1867b2c9e3552c922dc30936f22a60ea26",
+      "exitCode": 1,
+      "cause": "Both original-session Goals completed with distinct achieved receipts and skill_run restored the artifact. The UI assertion searched for a collapsed tool result without reopening the persisted conversation/details panel."
+    }
+  ],
+  "failedFinalCheck": {
+    "logPath": "/tmp/dsh-skill-check-source-fixture-failure.log",
+    "logSha256": "f1ee19ff2a2465c6e31b62f79f9919ae41f38e16058a2138b00bbc641271b1d2",
+    "exitCode": 1,
+    "cause": "Correct native tool-result parsing exposed the rejected checkpoint source fixture; replaced with actual successful read_report and result assertions."
+  },
+  "nativeConclusionProbe": {
+    "exitCode": 0,
+    "logPath": "/tmp/dsh-skill-conclusion-probe.log",
+    "logSha256": "6315506530a7d55872e789ba232652d7728082a95c2f1e0b74e0d6bceb9ebe76",
+    "nativeToolRuntime": true,
+    "toolSucceeded": true,
+    "concludesTurn": true,
+    "version": "0.1.2-rc.1",
+    "note": "Test guard uses the current runtime dispatch execution conclusion method before next(); this internal around-dispatch capability is version-bound."
+  },
+  "additionalRuntimeChecks": [
+    {
+      "package": "assistant-isolation",
+      "files": 10,
+      "tests": 27,
+      "exitCode": 0,
+      "image": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "logPath": "/tmp/dsh-skill-isolation-runtime.log",
+      "logSha256": "6745f31bdb9135080e7290ba73f00872d235a76c5cc26d017b2cb8bbf5e6d7a5"
+    },
+    {
+      "package": "assistant-evaluation",
+      "files": 3,
+      "tests": 8,
+      "exitCode": 0,
+      "image": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+      "logPath": "/tmp/dsh-skill-evaluation-runtime.log",
+      "logSha256": "9a1f5806664a4900a4d66a6b0bb127b95e86a678a8e25af7cbc8b32f4f8f08b3"
+    }
+  ],
+  "checkResourceFailure": {
+    "exitCode": 1,
+    "logPath": "/tmp/dsh-skill-check-memory-timeout.log",
+    "logSha256": "e9a5789a7b1bb2a1ff417424a363dbed41119346685fadcfa4188e65cb6f78d1",
+    "cause": "Existing personal-memory proposal reconciliation test exceeded 5 seconds under unrestricted parallel test load.",
+    "targetedCommand": "CI=true VITEST_MAX_WORKERS=4 pnpm --dir plugins/personal-memory exec vitest run tests/proposals.spec.ts",
+    "targetedExitCode": 0,
+    "targetedTests": 29,
+    "targetedLogSha256": "6c26d0d64484d3bf09321f3932d4f5a5e88b9489a9a9d241f33247c81722d88e",
+    "testTimeoutChanged": false
+  },
+  "intermediateRuntimeProof": {
+    "path": "/tmp/dsh-skill-real-10-runtime.json",
+    "sha256": "6cc93ceef07a5e186e122425091a1d48f11584f31d3f4860a3995b415cee159c",
+    "bothGoalOutcomes": "achieved",
+    "sameSession": true,
+    "browserResultVisibilityVerified": false
+  },
+  "realScenario": {
+    "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=super-relay DSH_WEB_REAL_MODEL=auto_model/alwaysday1 DSH_WEB_REAL_SOURCE_HOME=/home/jiataorui/.dsh pnpm test:web-owner:real-skill",
+    "exitCode": 0,
+    "logPath": "/tmp/dsh-skill-real-11.log",
+    "logSha256": "3fe6cab9c6b499f19d04a1f1315201851224cf18d656d610fe631e2b3939f923",
+    "proofPath": ".cache/web-owner-real-skill-e2e/web-owner-real-skill-real--11789-ed-skill-after-Host-restart/proof.json",
+    "proofSha256": "614f4f3a33dc4db988ae8f16f1ff4cb32d6e3ee6f73d6dc16d01deb7ee6741c9",
+    "sessionAuditSha256": "89f58b5c041de937c9dff8d9fa51c4aa8fe9e400af96b3d4d1c4ce6754acc635",
+    "modelLogSha256": "36794e0e88dbe70fea59105f07871d3244fb62fd9acb82cb945de6e2d0df7cf4",
+    "provider": "super-relay",
+    "model": "auto_model/alwaysday1",
+    "api": "openai-responses",
+    "hostStarts": 2,
+    "sessionId": "session-b48438b8-3f60-42a9-971d-92c882a23790",
+    "sourceGoal": {
+      "id": "b0dac2aa0206ffe7d1a980e8d073df06b2ebf569c10f2d36e36ef55bbc805373",
+      "receipt": {
+        "completedAt": 1788860691214,
+        "contractDigest": "d18c23a0f65aef3e1d0222c63395cff9f58edba8780625c76c3e4dd94117727d",
+        "contractId": "acceptance-6e48d9ce8f49043d930d7584570f34e9e19a42627f1fae99aa77de3fcd3c5b5b",
+        "digest": "93ac0618f869bd9d63fe73e99f92dd391c844ca9089021e82dbbf74f9033602b",
+        "id": "verification-acceptance-6e48d9ce8f49043d930d7584570f34e9e19a42627f1fae99aa77de3fcd3c5b5b-1",
+        "objectiveStatus": "achieved",
+        "owner": {
+          "principalRecordId": "principal_f00952d5-ab5a-4bec-b611-b8da2f57a5b4",
+          "principalVersion": 1
+        },
+        "protocol": "task-verification/v3",
+        "results": [
+          {
+            "artifactDigest": "12542c9b8252ad5246e68adc36960936c07ae99748ef34a9df6ef572de89b17b",
+            "criterionId": "two-currencies",
+            "evidence": [
+              {
+                "digest": "daaf562fa2d6ad159970fc922e6f5088ef36ef6dd0b2cdd8934caf488469e0e9",
+                "kind": "process-output",
+                "ref": "summarize.mjs"
+              }
+            ],
+            "reason": "verified",
+            "status": "passed"
+          },
+          {
+            "artifactDigest": "12542c9b8252ad5246e68adc36960936c07ae99748ef34a9df6ef572de89b17b",
+            "criterionId": "cancelled-and-negative",
+            "evidence": [
+              {
+                "digest": "5d13df47ede56c8c318a79185cd43305801d8fb8333c4440b0984a4bd01b4d24",
+                "kind": "process-output",
+                "ref": "summarize.mjs"
+              }
+            ],
+            "reason": "verified",
+            "status": "passed"
+          },
+          {
+            "artifactDigest": "12542c9b8252ad5246e68adc36960936c07ae99748ef34a9df6ef572de89b17b",
+            "criterionId": "empty",
+            "evidence": [
+              {
+                "digest": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                "kind": "process-output",
+                "ref": "summarize.mjs"
+              }
+            ],
+            "reason": "verified",
+            "status": "passed"
+          }
+        ],
+        "scope": {
+          "preset": "standard",
+          "workspace": "/tmp/dsh-web-owner-real-skill-Royt3A/workspace"
+        },
+        "startedAt": 1788860690532,
+        "task": {
+          "goal": {
+            "assessmentId": "goal-assessment-1054b4501f9ae7242f22824c23842339c22f41f3fc58ac254556037c9d1154fe",
+            "definitionDigest": "b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f",
+            "definitionVersion": 1,
+            "id": "b0dac2aa0206ffe7d1a980e8d073df06b2ebf569c10f2d36e36ef55bbc805373",
+            "nativeGoalId": "goal-89b0e2c5-1f37-4485-bf00-073da3f48d1f",
+            "sessionId": "session-b48438b8-3f60-42a9-971d-92c882a23790"
+          },
+          "kind": "goal-outcome",
+          "ref": "goal-assessment-1054b4501f9ae7242f22824c23842339c22f41f3fc58ac254556037c9d1154fe"
+        },
+        "validUntil": 1788861285986
+      },
+      "receiptDigest": "7acd545d2f86ab8babdd3d82cfae09a1d63a1e3c7eba6071b2ec2e2f0217f465"
+    },
+    "replayGoal": {
+      "id": "b6827face0f223eaf2f11b9393d14a4e1680204fbdf91b3f34415972d8c616c7",
+      "receipt": {
+        "completedAt": 1788860723941,
+        "contractDigest": "1f62c606f40fb93a4802ae4d9aea3f5c658d73034b9c491a3c17ad921f30eae4",
+        "contractId": "acceptance-371f0d569d01b3251c3a4128b4b2ce86249d3aae3477295ac38a996736428345",
+        "digest": "f836ef32d51a874a501f26d470a6285a944a5899e17c8d83898a52ffeaf3f6db",
+        "id": "verification-acceptance-371f0d569d01b3251c3a4128b4b2ce86249d3aae3477295ac38a996736428345-1",
+        "objectiveStatus": "achieved",
+        "owner": {
+          "principalRecordId": "principal_f00952d5-ab5a-4bec-b611-b8da2f57a5b4",
+          "principalVersion": 1
+        },
+        "protocol": "task-verification/v3",
+        "results": [
+          {
+            "artifactDigest": "12542c9b8252ad5246e68adc36960936c07ae99748ef34a9df6ef572de89b17b",
+            "criterionId": "two-currencies",
+            "evidence": [
+              {
+                "digest": "daaf562fa2d6ad159970fc922e6f5088ef36ef6dd0b2cdd8934caf488469e0e9",
+                "kind": "process-output",
+                "ref": "summarize.mjs"
+              }
+            ],
+            "reason": "verified",
+            "status": "passed"
+          },
+          {
+            "artifactDigest": "12542c9b8252ad5246e68adc36960936c07ae99748ef34a9df6ef572de89b17b",
+            "criterionId": "cancelled-and-negative",
+            "evidence": [
+              {
+                "digest": "5d13df47ede56c8c318a79185cd43305801d8fb8333c4440b0984a4bd01b4d24",
+                "kind": "process-output",
+                "ref": "summarize.mjs"
+              }
+            ],
+            "reason": "verified",
+            "status": "passed"
+          },
+          {
+            "artifactDigest": "12542c9b8252ad5246e68adc36960936c07ae99748ef34a9df6ef572de89b17b",
+            "criterionId": "empty",
+            "evidence": [
+              {
+                "digest": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                "kind": "process-output",
+                "ref": "summarize.mjs"
+              }
+            ],
+            "reason": "verified",
+            "status": "passed"
+          }
+        ],
+        "scope": {
+          "preset": "standard",
+          "workspace": "/tmp/dsh-web-owner-real-skill-Royt3A/workspace"
+        },
+        "startedAt": 1788860723248,
+        "task": {
+          "goal": {
+            "assessmentId": "goal-assessment-8d52447ec278d8409f5cd25bbdb3e50bf98e8873eca888511d62214efc40e301",
+            "definitionDigest": "b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f",
+            "definitionVersion": 1,
+            "id": "b6827face0f223eaf2f11b9393d14a4e1680204fbdf91b3f34415972d8c616c7",
+            "nativeGoalId": "goal-c07f6d47-266a-4510-9a2f-aa533157d563",
+            "sessionId": "session-b48438b8-3f60-42a9-971d-92c882a23790"
+          },
+          "kind": "goal-outcome",
+          "ref": "goal-assessment-8d52447ec278d8409f5cd25bbdb3e50bf98e8873eca888511d62214efc40e301"
+        },
+        "validUntil": 1788861318792
+      },
+      "receiptDigest": "b374aa84f4eb1eecd22d1e2e1a3c6eb8a782ec5345e8f968fe6dc94f84f6f368"
+    },
+    "artifact": {
+      "path": "summarize.mjs",
+      "sourceHash": "12542c9b8252ad5246e68adc36960936c07ae99748ef34a9df6ef572de89b17b",
+      "replayHash": "12542c9b8252ad5246e68adc36960936c07ae99748ef34a9df6ef572de89b17b",
+      "restoredAfterRemoval": true
+    },
+    "sourceReceiptDiffersFromReplay": true,
+    "nativeCatalogLoadedAfterRestart": true,
+    "ownerReadbackAfterReload": true,
+    "totalModelCalls": 8,
+    "toolCalls": {
+      "saved": 1,
+      "loaded": 1,
+      "replayed": 1,
+      "sourceSessionWrite": 1,
+      "nestedReplayWrite": 1
+    },
+    "rejections": 0
+  },
+  "sourceHashes": {
+    "package.json": "16d01436208183595ce704f4f7f3a74c9bf98d12ab80203b9b5f70ea73c4287a",
+    "plugins/README.md": "03412abb058d55f02b800fc639e3d08da9854d899e9232374da6aee6c4e394d7",
+    "plugins/assistant-goals/package.json": "e2e2d65b182317008629ccc4ae0659adac65ed526fc45390cd7b9fbcbfc949b5",
+    "plugins/assistant-goals/src/index.ts": "248d7133f25d38ed45c780b6b5f874cf1968dfff9702c3cd03d800fdd02cfe7b",
+    "plugins/assistant-goals/src/service.ts": "a71ce2d548c3e69655b29f679d76ba701383106e2fa23ac203b0fd83f5df457a",
+    "plugins/assistant-goals/src/verified-workflow.ts": "199fa8e7478994e443fc85468e4c4b9ce875a5da0e2b58511aa404625acee3e1",
+    "plugins/assistant-goals/tests/service.spec.ts": "dfcf86f6714347e1d63c3f6d7a0922ce9369b1889d03dfe13171f29e801c6ca9",
+    "plugins/assistant-goals/tests/verified-workflow.spec.ts": "b61e16163ab5956a1decae805b5d04298a7683ee81487535616655ed8ebded26",
+    "plugins/assistant-skills/LICENSE": "37f12999eefa6bde963be1da5403c897ecd2736ee99988ff26693335f68606e7",
+    "plugins/assistant-skills/README.md": "d7eb524a0eb67bf7e454130c167fbd9982f58b6695d93c2e178b353ab8a4cd78",
+    "plugins/assistant-skills/cordis.patch.yml": "29948987fc9a74a847975b7d06a9dcc90952b10645973719a20f5dbaddb23082",
+    "plugins/assistant-skills/package.json": "b35205d4b36e67879dde7f86ab0bd1f3665166d5cc60792d5fb4b49e90e7540f",
+    "plugins/assistant-skills/src/definition.ts": "71b43049385a02be1a9599ef35e1a7a7e5f6c778672c8d88eed31184019dfd61",
+    "plugins/assistant-skills/src/index.ts": "5a08af6a7e69411f2d977f462bb9bc46d8395b79d4a8e04c38fe708d5033ff0a",
+    "plugins/assistant-skills/src/service.ts": "502263b8a65bba655be83aa734506d0dfd392ca8c075c61a4a2d00964fa4fdc3",
+    "plugins/assistant-skills/src/store.ts": "e46a601b29ac8710cc527ab21417076581df74ec46a45ddaf47be1862e2a8a15",
+    "plugins/assistant-skills/src/version.ts": "e1b18323af74400f9b81251674b87f8732fdc8009bfcad168de2b5e890c22f71",
+    "plugins/assistant-skills/tests/definition.spec.ts": "932b85d51d662fa683fc949cc1a7e7ed5c8eb7956bccd8f74fd09f790c3cc67c",
+    "plugins/assistant-skills/tests/index.spec.ts": "c0054722965154ffaae7aeea0c580a0708cb26519c1be2c0fe1b84cd67eaba4a",
+    "plugins/assistant-skills/tests/service.spec.ts": "103730ee34824c035e618781269901e63e964d8514190fe78eda1e53ac9049cc",
+    "plugins/assistant-skills/tests/store.spec.ts": "0964fd8adffa639847aeb580cd7bccffce1ca1bdce7e25ea26d723974dccd73e",
+    "plugins/assistant-skills/tsconfig.build.json": "b8b6960a9b3403690455e9c7314abc6b86d3832c6342ee43a1faaf1d3af52292",
+    "plugins/assistant-skills/tsconfig.json": "e5d869d2ba42bc4d7e8a136364ae61b919767fceb9e6a3da084342aadc4f132a",
+    "pnpm-lock.yaml": "d3ab50f45f2a53ad527345830ca718980955c0fe250b3f8b9124d8ebf4c22c7e",
+    "scripts/e2e/playwright-real-skill.config.mjs": "4e7c4618826945ac21206d383e036922cfbabdfd7ba6c092441e089d4f86fcf2",
+    "scripts/e2e/web-owner-real-skill-guard.mjs": "453b644169cdc2b130e368be9a71b7d3fb7d2ec47f6f67d87421794ddefb12a1",
+    "scripts/e2e/web-owner-real-skill.spec.mjs": "9c9f3216c49635552465c6164cd4a8a54ffba820311df966b89230b327cbd450",
+    "tests/release-version.spec.ts": "9249b9b88eb4c4af8f67e3ca987bc24d4408e484be2f476fb4c84307d39b965a"
+  },
+  "finalCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "logPath": "/tmp/dsh-skill-final-check.log",
+    "logSha256": "4341be7457c0a212e26053c6e3635d464959ae8f8d885dbf39b0254316396621",
+    "testFiles": 327,
+    "tests": 3969,
+    "skippedTests": 0,
+    "dryRunPacks": 33,
+    "manifestValidation": true,
+    "zeroLintWarnings": true,
+    "typecheck": true,
+    "build": true
+  },
+  "independentReview": {
+    "role": "verifier",
+    "verdict": "PASS",
+    "reviewed": [
+      "current production and test sources",
+      "all 28 source hashes",
+      "actual real Web proof and session audit",
+      "final check exit and pack contents"
+    ],
+    "scope": "Read-only review; no separate OS sandbox claim."
+  },
+  "codexWithChatGPT": {
+    "task": "c2c_skill_reuse",
+    "iteration": 2,
+    "localExecutionRecordExitCode": 0,
+    "chatGPTWebReview": false,
+    "reason": "Required in-app browser capability unavailable; local execution record retained without claiming ChatGPT review."
+  }
+}

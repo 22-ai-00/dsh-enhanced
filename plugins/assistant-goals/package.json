@@ -129,7 +129,8 @@
     "@dsh-enhanced/assistant-policy": "workspace:*",
     "@dsh-enhanced/assistant-verifier": "workspace:*",
     "@deepseek-ai/dsh-subagent": "catalog:",
-    "@dsh-enhanced/event-triggers": "workspace:*"
+    "@dsh-enhanced/event-triggers": "workspace:*",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

@@ -63,6 +63,8 @@
 
 | [assistant-proactive](assistant-proactive) | `@dsh-enhanced/assistant-proactive` | 实验性 | 已授权目标事件的收益筛选、静默记录、合并、冷却和持久预算；实际执行仍经 Goals 验收。 |
 
+| [assistant-skills](assistant-skills) | `@dsh-enhanced/assistant-skills` | 实验性 | 独立验收任务的私有版本化工具技能、原生发现与新目标复用。 |
+
 <!-- plugin-catalog:end -->
 
 状态建议使用“实验性 / Beta / 稳定 / 已弃用”。新增、重命名、弃用或移除插件时必须同步维护此表。

@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-enhanced-assistant-skills
+      name: '@dsh-enhanced/assistant-skills'

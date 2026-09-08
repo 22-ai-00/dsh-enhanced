@@ -2,14 +2,17 @@ import { Context } from '@deepseek-ai/cordis'
 import { AgentRegistry, type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import GoalService from '@deepseek-ai/dsh-goal'
-import { LlmRuntime, LlmAdapter, createUserMessage, type StreamChunk, type GenerateOptions } from '@deepseek-ai/dsh-llm'
+import { LlmRuntime, LlmAdapter, ToolCallId, createUserMessage, type StreamChunk, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
+import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime from '@deepseek-ai/dsh-tools'
-import { mkdtemp, rm } from 'node:fs/promises'
+import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantGoalsService, type Config as GoalsConfig } from '../src/service.ts'
@@ -26,6 +29,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
   await ctx.plugin(LlmRuntime); await ctx.plugin(SessionStore); new SessionProjectionRegistry(ctx)
+  await ctx.plugin(JsonlSessionPersistence, { root: join(root, 'sessions'), compression: 'none', packChunks: false, writeBatchMaxDelayMs: 1 })
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
   await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
   const owners = new Map<Agent, string>(); const human = new Set<Agent>(); let allowed = true; const deniedActions = new Set<string>()
@@ -38,7 +42,8 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   // in assistant-delivery's real runtime integration test.
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: attestation,
     currentPreferenceTurn: (agent: Agent) => human.has(agent) ? attestation(agent) : undefined } as never)
-  ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }) } as never)
+  ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }),
+    evaluateAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }) } as never)
   if (duringGoalChange !== undefined) ctx.on('goal/changed', ({ agent }) => duringGoalChange(agent))
   const path = databasePath ?? join(root, 'goals.sqlite')
   const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, verifyNativeRounds, verifyGoalOutcome,
@@ -53,6 +58,25 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
 }
 const documentAuthority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 1_024 }
 const [compiledDocumentAuthority] = createVerifierAuthorities({ authorities: [documentAuthority] })
+async function installNativeGoalRoundDriver(ctx: Context): Promise<void> {
+  const requireFromGoals = createRequire(new URL('../package.json', import.meta.url))
+  const entry = requireFromGoals.resolve('@deepseek-ai/dsh-goal-round-driver')
+  const driver = await import(pathToFileURL(entry).href) as { inject: readonly string[]; apply(ctx: Context): void }
+  await ctx.plugin({ inject: driver.inject, apply: driver.apply } as never, {} as never)
+}
+function registerReadReportTool(ctx: Context, root: string): void {
+  ctx.tools.register(defineTool({
+    name: 'read_report',
+    description: 'Read the independently verified report artifact.',
+    parameters: {},
+    output: {
+      schema: { type: 'object', additionalProperties: false, properties: { content: { type: 'string', required: true } } },
+      render: (_args, value) => [{ type: 'text', text: value.content }],
+    },
+    async execute() { return { content: await readFile(join(root, 'report.md'), 'utf8') } },
+  }))
+}
+
 function goalProfiles(root: string, objective: string, options: { version?: number; validityMs?: number; wholeRequiredText?: string; scope?: AcceptanceProfile['scope']; owner?: AcceptanceProfile['owner'] } = {}) {
   const criteria = (id: string, requiredText: string) => [{ id, kind: 'document-citations' as const,
     authority: { id: 'sources', digest: compiledDocumentAuthority!.digest }, artifactPath: 'report.md', requiredText: [requiredText], quotes: [] }]
@@ -498,5 +522,117 @@ describe('owner-scoped native goal context', () => {
     expect(short.ctx.goals.get(shortAgent)).toBeUndefined()
     expect(short.service.list(shortAgent)).toEqual([])
     expect(shortVerifier.service.health()).toMatchObject({ awaitingExecution: 0, pendingVerification: 0, pendingReceipts: 0 })
+  })
+
+  it('exports only the exact successful native goal round after independent whole-goal acceptance', async () => {
+    const f = await harness(undefined, undefined, undefined, true, true, 2_000)
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('verified-workflow-source', 'owner'); f.human.add(agent)
+    const objective = 'Produce the independently verified workflow report'
+    await writeFile(join(f.root, 'report.md'), 'Step verified\nGoal verified\n')
+    registerReadReportTool(f.ctx, f.root)
+    await installGoalVerifier(f, goalProfiles(f.root, objective))
+    let record!: ReturnType<AssistantGoalsService['create']>
+    let requests = 0
+    class Adapter extends LlmAdapter {
+      async *stream(_options: GenerateOptions): AsyncIterable<StreamChunk> {
+        requests++
+        if (requests === 1) {
+          yield { type: 'block-start', index: 0, blockType: 'text' }
+          yield { type: 'text-delta', index: 0, text: 'ready' }
+          yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }
+          yield { type: 'finish', reason: { kind: 'stop' } }
+          return
+        }
+        if (requests === 2) {
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('read-source'), name: 'read_report', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('read-source'), name: 'read_report', arguments: '{}' } }
+          yield { type: 'finish', reason: { kind: 'tool-calls' } }
+          return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }
+        yield { type: 'text-delta', index: 0, text: 'The report is ready for independent verification.' }
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: 'The report is ready for independent verification.' } }
+        yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+    f.ctx.llm.registerAdapter(['fixture'], new Adapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare the native goal driver.' }] }))
+    await vi.waitFor(() => expect(requests).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    expect(f.ctx.fiber.state).toBe(2)
+    record = f.service.create(agent, objective, 1)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(requests).toBe(3), { timeout: 2_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+    const complete = f.service.inspect(agent, record.id)
+    const durable = await f.ctx.sessionPersistence.readRaw(agent.session.id)
+    expect(durable?.content).toContain('read-source')
+    expect(requests).toBe(3)
+    expect(complete.native).toMatchObject({ phase: 'complete', roundsStarted: 1, revision: record.native.revision + 2 })
+    expect(f.service.inspectGoalOutcome(agent, record.id)).toMatchObject({ status: 'achieved', nativeCompletion: 'complete' })
+
+    // The harness keeps its owner-turn seam asserted; capture happens only after
+    // the autonomous source turn has completed and been independently accepted.
+    const sourceResults = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
+    expect(sourceResults.some(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError === true)), JSON.stringify(sourceResults)).toBe(false)
+    const exported = f.service.inspectVerifiedWorkflowSource(agent, record.id)
+    expect(exported).toMatchObject({ protocol: 'assistant-goals/verified-workflow-source/v1', scope: complete.scope,
+      goal: { id: record.id, definition: complete.definition, sessionId: String(agent.session.id), nativeGoalId: complete.native.goalId },
+      acceptance: { contractId: expect.any(String), contractDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), receiptDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), validUntil: expect.any(Number) },
+      steps: [{ id: 'read-source', toolName: 'read_report', arguments: {} }],
+    })
+    expect(exported.runId).toMatch(/^goal-run-[a-f0-9]{64}$/u)
+    const events = agent.session.snapshotEvents()
+    expect(events.some(event => event.type === 'user/message' && event.data.source.kind === 'goal' && event.data.source.round === 1)).toBe(true)
+    expect(events.some(event => event.type === 'turn/end' && event.data.turn === exported.turn)).toBe(true)
+    expect(requests).toBe(3)
+  })
+
+  it('rejects historical workflow export when ownership scope changes or the accepted receipt expires', async () => {
+    // The positive integration above owns the native run setup. Here use its
+    // service-level guards with a completed goal fixture so the failure is at
+    // the owner scope/receipt boundary rather than a helper parser.
+    const f = await harness(undefined, undefined, undefined, true, true, 2_000)
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('verified-workflow-guards', 'owner'); f.human.add(agent)
+    await writeFile(join(f.root, 'report.md'), 'Step verified\nGoal verified\n')
+    registerReadReportTool(f.ctx, f.root)
+    const objective = 'Reject stale workflow source evidence'
+    await installGoalVerifier(f, goalProfiles(f.root, objective, { validityMs: 10_000 }))
+    let record!: ReturnType<AssistantGoalsService['create']>
+    let calls = 0
+    class Adapter extends LlmAdapter {
+      async *stream(): AsyncIterable<StreamChunk> {
+        calls++
+        if (calls === 1) {
+          yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text: 'ready' }; yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }; yield { type: 'finish', reason: { kind: 'stop' } }; return
+        }
+        if (calls === 2) {
+          yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: ToolCallId('read-guard'), name: 'read_report', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('read-guard'), name: 'read_report', arguments: '{}' } }; yield { type: 'finish', reason: { kind: 'tool-calls' } }; return
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'text-delta', index: 0, text: 'done' }; yield { type: 'block-end', index: 0, block: { type: 'text', text: 'done' } }; yield { type: 'finish', reason: { kind: 'stop' } }
+      }
+    }
+    f.ctx.llm.registerAdapter(['fixture'], new Adapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'Prepare the native goal driver.' }] }))
+    await vi.waitFor(() => expect(calls).toBe(1), { timeout: 2_000 })
+    await agent.whenIdle()
+    record = f.service.create(agent, objective, 1)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    await vi.waitFor(() => expect(calls).toBe(3), { timeout: 2_000 })
+    await agent.whenIdle(); await f.service.whenIdle()
+    const sourceResults = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
+    expect(sourceResults.some(event => event.data.message.content.some(block => block.type === 'tool-result' && block.isError === true)), JSON.stringify(sourceResults)).toBe(false)
+    expect(f.service.inspectVerifiedWorkflowSource(agent, record.id).steps).toHaveLength(1)
+    f.owners.set(agent, 'other')
+    expect(() => f.service.inspectVerifiedWorkflowSource(agent, record.id)).toThrow('exact completed native goal')
+    f.owners.set(agent, 'owner')
+    const future = Date.now() + 20_000
+    const now = vi.spyOn(Date, 'now').mockReturnValue(future)
+    try { expect(() => f.service.inspectVerifiedWorkflowSource(agent, record.id)).toThrow(/achieved whole-goal outcome|current accepted outcome/u) }
+    finally { now.mockRestore() }
   })
 })

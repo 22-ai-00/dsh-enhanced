@@ -27,6 +27,7 @@ import { GoalOutcomeRuntime, type GoalOutcomeView } from './outcome.js'
 import type { GoalOutcomeAssessment } from './outcome-store.js'
 import { GoalStrategyRuntime, validateGoalStrategyConfig, validateGoalStrategyInput, type GoalStrategyConfig } from './strategy.js'
 import { buildGoalStrategyHistory, type GoalStrategyHistory } from './strategy-feedback.js'
+import { successfulToolSteps, verifiedRunId, type VerifiedWorkflowSource } from './verified-workflow.js'
 
 export interface Config { eventWaits?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
 export const Config: Schema<Config> = Schema.object({
@@ -807,6 +808,61 @@ export class AssistantGoalsService extends Service {
   inspectAcceptedExecution = (contract: TaskAcceptanceContract) => contract.task.kind === 'goal-outcome'
     ? this.#outcome?.inspect(contract) ?? Promise.resolve(null) : this.#execution.inspect(contract)
   inspectGoalOutcome = (agent: Agent | undefined, goalId: string) => this.#outcome?.view(this.inspect(agent, goalId))
+  inspectWorkflowRunContext = (agent: Agent | undefined, goalId: string) => {
+    const scope = this.#scope(agent, 'inspect', false)
+    const current = this.#execution.budgetState(agent!)?.record
+    const native = this.ctx.get('goals')?.get(agent!)
+    if (current === undefined || current.id !== goalId || native === undefined || current.native.phase !== 'active'
+      || current.native.sessionId !== String(agent!.session.id) || current.native.goalId !== String(native.id)
+      || native.phase !== 'active' || current.native.revision !== native.revision) throw new Error('assistant-goals: exact active workflow goal round is required')
+    return Object.freeze({ scope: Object.freeze({ ...scope }), goalId: current.id, sessionId: current.native.sessionId,
+      definition: Object.freeze({ ...current.definition }) })
+  }
+  inspectVerifiedWorkflowSource = (agent: Agent | undefined, goalId: string): VerifiedWorkflowSource => {
+    const scope = this.#scope(agent, 'inspect', false)
+    this.#requireOwnerTurn(agent!, scope)
+    const record = this.#store.get(scope, goalId)
+    const native = this.ctx.get('goals')?.get(agent!)
+    if (record === undefined || native === undefined || record.native.sessionId !== String(agent!.session.id)
+      || record.native.goalId !== String(native.id) || record.native.revision !== native.revision || native.phase !== 'complete') {
+      throw new Error('assistant-goals: exact completed native goal is required')
+    }
+    const outcome = this.#outcome?.view(record)
+    const assessment = this.#outcome?.inspectAssessments(record).at(-1)
+    if (outcome?.status !== 'achieved' || assessment === undefined || assessment.execution?.status !== 'succeeded' || !assessment.execution.quiescent
+      || assessment.triggerRunId === undefined) throw new Error('assistant-goals: achieved whole-goal outcome is required')
+    const verifier = this.ctx.get('assistantVerifier', false) as { inspectAcceptedTask(id: string): unknown } | undefined
+    const accepted = this.#ownerAcceptedTask(record, this.#execution.list(scope, record.id), verifier, assessment.contract.id, [assessment])
+    const receipt = accepted.receipt as { objectiveStatus?: unknown; validUntil?: unknown; completedAt?: unknown; digest?: unknown } | null
+    if (accepted.state !== 'done' || accepted.contract === null || receipt === null || receipt.objectiveStatus !== 'achieved'
+      || !Number.isSafeInteger(receipt.validUntil) || !(typeof receipt.validUntil === 'number' && receipt.validUntil > Date.now()) || !Number.isSafeInteger(receipt.completedAt)
+      ) {
+      throw new Error('assistant-goals: current accepted outcome is unavailable')
+    }
+    const validUntil = receipt.validUntil as number
+    const verifiedAt = receipt.completedAt as number
+    const run = this.#execution.list(scope, record.id).find(item => item.intent.runId === assessment.triggerRunId)
+    if (run?.execution?.status !== 'succeeded' || !run.execution.quiescent || run.intent.task.goal.id !== record.id
+      || run.intent.task.goal.definitionVersion !== record.definition.version || run.intent.task.goal.definitionDigest !== record.definition.digest) throw new Error('assistant-goals: exact successful trigger run is required')
+    const events = agent!.session.snapshotEvents()
+    const turn = events.filter(event => event.type === 'turn/start' && Number.isSafeInteger(event.data.turn))
+      .map(event => event.type === 'turn/start' ? event.data.turn : undefined)
+      .find(value => value !== undefined && assessment.triggerRunId === verifiedRunId(scope, record.id, String(agent!.session.id), value))
+    if (turn === undefined) throw new Error('assistant-goals: trigger run has no source turn')
+    const start = events.find(event => event.type === 'turn/start' && event.data.turn === turn)
+    const end = events.find(event => event.type === 'turn/end' && event.data.turn === turn)
+    const source = events.filter(event => event.type === 'user/message' && start !== undefined && end !== undefined && event.seq > start.seq && event.seq < end.seq && event.data.source.kind === 'goal'
+      && event.data.source.goalId === record.native.goalId && event.data.source.revision === run.intent.task.goal.nativeRevision && event.data.source.round === run.intent.admission.round)
+    if (source.length !== 1) throw new Error('assistant-goals: trigger run goal source is invalid')
+    if (end?.type !== 'turn/end' || end.data.reason?.kind !== 'completed') throw new Error('assistant-goals: completed source turn is required')
+    const steps = successfulToolSteps(events, turn)
+    if (steps.length === 0 || steps.length > 32 || Buffer.byteLength(JSON.stringify(steps.map(step => step.arguments)), 'utf8') > 256 * 1024) throw new Error('assistant-goals: bounded successful tool trace is required')
+    return Object.freeze({ protocol: 'assistant-goals/verified-workflow-source/v1', scope: Object.freeze({ ...scope }),
+      goal: Object.freeze({ id: record.id, definition: Object.freeze({ ...record.definition }), sessionId: record.native.sessionId, nativeGoalId: record.native.goalId }),
+      runId: run.intent.runId, turn, acceptance: Object.freeze({ contractId: accepted.contract.id, contractDigest: accepted.contract.digest,
+        receiptDigest: typeof receipt.digest === 'string' ? receipt.digest : acceptanceDigest(receipt), verifiedAt, validUntil }),
+      steps: Object.freeze(steps.map(step => Object.freeze({ ...step }))) })
+  }
   executionRuns = (agent: Agent | undefined, goalId: string) => this.#execution.list(this.#scope(agent, 'inspect'), goalId)
   whenIdle = () => this.#execution.whenIdle()
   health = () => {

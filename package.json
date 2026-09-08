@@ -13,7 +13,7 @@
     "build": "pnpm run build:bootstrap && pnpm --recursive --if-present run build",
     "build:bootstrap": "pnpm run build:packages && pnpm --filter @dsh-enhanced/assistant-policy run build && pnpm --filter @dsh-enhanced/assistant-delivery run build:types && pnpm --filter @dsh-enhanced/assistant-evaluation run build && pnpm --filter @dsh-enhanced/assistant-delivery run build && pnpm --filter @dsh-enhanced/assistant-isolation run build && pnpm --filter @dsh-enhanced/assistant-verifier run build && pnpm --filter @dsh-enhanced/assistant-automations run build && pnpm --filter @dsh-enhanced/assistant-goals run build",
     "build:packages": "pnpm --recursive --filter './packages/*' --if-present run build",
-    "check": "pnpm run validate && pnpm run lint && pnpm run typecheck && pnpm run test && pnpm run build && pnpm run pack:check",
+    "check": "pnpm run validate && pnpm run lint && pnpm run typecheck && pnpm run test:built && pnpm run build && pnpm run pack:check",
     "create:plugin": "node ./scripts/create-plugin.mjs",
     "lint": "oxlint --deny-warnings .",
     "pack:check": "pnpm --recursive --filter './plugins/*' --filter './packages/*' pack --dry-run",
@@ -22,7 +22,9 @@
     "release:record": "node ./scripts/release-version.mjs record",
     "release:status": "node ./scripts/release-version.mjs status",
     "release:supersede": "node ./scripts/release-version.mjs supersede",
-    "test": "pnpm run build && vitest run --testTimeout=15000 tests && pnpm --recursive --if-present run test",
+    "test": "pnpm run build && pnpm run test:built",
+    "test:built": "pnpm run test:root && pnpm --recursive --if-present run test",
+    "test:root": "vitest run --testTimeout=15000 --dir tests",
     "test:autonomy": "playwright test --config scripts/e2e/playwright-autonomy.config.mjs",
     "test:autonomy:wake": "playwright test --config scripts/e2e/playwright-wake.config.mjs",
     "test:web-owner": "playwright test --config scripts/e2e/playwright.config.mjs",
@@ -31,7 +33,8 @@
     "typecheck": "pnpm run build && pnpm --recursive --if-present run typecheck",
     "validate": "node ./scripts/validate-workspace.mjs",
     "test:autonomy:deepseek": "playwright test --config scripts/e2e/playwright-deepseek.config.mjs",
-    "test:autonomy:setup": "playwright test --config scripts/e2e/playwright-goal-setup.config.mjs"
+    "test:autonomy:setup": "playwright test --config scripts/e2e/playwright-goal-setup.config.mjs",
+    "test:web-owner:real-skill": "playwright test --config scripts/e2e/playwright-real-skill.config.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",
