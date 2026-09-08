@@ -341,7 +341,8 @@ export class AssistantGoalsService extends Service {
     try {
       if (!this.#active || this.#createMaxRounds === 0 || execution.signal.aborted || !execution.arguments || typeof execution.arguments !== 'object' || Array.isArray(execution.arguments)) return false
       const args = execution.arguments as Record<string, unknown>
-      if (Object.keys(args).some(key => !['objective', 'max_goal_rounds'].includes(key)) || typeof args.objective !== 'string'
+      if (Object.keys(args).some(key => !['objective', 'max_goal_rounds', 'start_native_rounds'].includes(key)) || typeof args.objective !== 'string'
+        || args.start_native_rounds !== undefined && typeof args.start_native_rounds !== 'boolean'
         || args.objective.trim().length === 0 || args.objective.length > 16_384) return false
       const objective = args.objective.trim()
       const rounds = args.max_goal_rounds ?? this.#createMaxRounds

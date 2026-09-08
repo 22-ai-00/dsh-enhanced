@@ -161,6 +161,14 @@ async function drain(ctx: Context) {
   for (let index = 0; index < 4; index += 1) { await ctx.assistantAutomations.tick(); await ctx.assistantAutomations.whenIdle(); await ctx.assistantDelivery.tick(); await ctx.assistantDelivery.whenIdle(); await ctx.assistantGoals.whenIdle() }
 }
 
+async function drainUntil(ctx: Context, settled: () => boolean): Promise<void> {
+  await expect.poll(async () => {
+    await ctx.assistantAutomations.tick(); await ctx.assistantAutomations.whenIdle()
+    await ctx.assistantDelivery.tick(); await ctx.assistantDelivery.whenIdle(); await ctx.assistantGoals.whenIdle()
+    return settled()
+  }, { timeout: 10_000, intervals: [10, 25, 50, 100] }).toBe(true)
+}
+
 function readWait(root: string): { state: string; reason: string | null; intent: { source: { highWaterSequence: number }; wake: { native: { revision: number; sessionId: string; goalId: string } } }; wake: { id: string; native: { revision: number; sessionId: string; goalId: string } } | null } {
   const database = new DatabaseSync(join(root, 'goals.sqlite.event-waits'), { readOnly: true })
   try {
@@ -260,10 +268,17 @@ if (phase === undefined) describe('native event-goal wake', () => {
     const before = fixture.model.requests.length
     fixture.model.writeReportOnNextRequest = true
     await fixture.ctx.eventTriggers.pollOnce(); await writeFile(fixture.watched, 'changed')
-    await fixture.ctx.eventTriggers.pollOnce(); await drain(fixture.ctx)
-    // Source notifications materialize the Host-owned wake asynchronously;
-    // drain its newly registered at-job before inspecting native state.
-    await drain(fixture.ctx)
+    await fixture.ctx.eventTriggers.pollOnce()
+    // The event consumer materializes the Host-owned wake after the source
+    // notifier settles. Drive those queues until the actual wake lifecycle,
+    // native completion, and each exact externally visible result agree.
+    await drainUntil(fixture.ctx, () => {
+      const wait = readWait(root)
+      const native = readNative(root, goalId)
+      return wait.wake !== null && ['materialized', 'terminal'].includes(wait.state)
+        && native.phase === 'complete' && native.roundsStarted === 1
+        && fixture.model.requests.length === before + 3 && fixture.sends.length === 3
+    })
     const waits = readWait(root)
     expect(['materialized', 'terminal']).toContain(waits.state)
     expect(waits).toMatchObject({ wake: { native: { revision: revision + 1, sessionId: expect.any(String) } } })

@@ -1,14 +1,38 @@
 import { describe, expect, test, vi } from 'vitest'
 
-const { createRunGuard, isExperimentToolAllowed, objective } = await import('../scripts/e2e/web-owner-real-guard.mjs')
+const { createRunGuard, isExperimentToolAllowed, experimentToolNames, objective } = await import('../scripts/e2e/web-owner-real-guard.mjs')
 
 describe('real-model browser experiment guard', () => {
+  test('exposes artifact tools only in the native goal round and never exposes shell', () => {
+    expect(experimentToolNames(false)).toEqual(['goal_create'])
+    expect(experimentToolNames(false, true)).toEqual([])
+    expect(experimentToolNames(true)).toEqual(['read', 'write', 'edit', 'get_goal'])
+  })
+  test('permits only the explicitly selected existing provider', async () => {
+    const records: unknown[] = []
+    const guard = createRunGuard({ provider: 'super-relay', record: (entry: unknown) => records.push(entry) })
+    const agent = { cancel: vi.fn() }
+    const next = vi.fn(async function* () {
+      yield { type: 'usage', usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    })
+    try {
+      await expect(guard.stream({ provider: 'codex-subscription', model: 'default' }, agent, next).next()).rejects.toThrow('route')
+      expect(next).not.toHaveBeenCalled()
+      for await (const _chunk of guard.stream({ provider: 'super-relay', model: 'selected-model' }, agent, next)) { /* drain */ }
+      expect(records).toEqual([
+        { event: 'dispatch', call: 1, provider: 'super-relay', model: 'selected-model' },
+        { event: 'settled', call: 1, drained: true, finish: 'stop', usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12 } },
+      ])
+    } finally { guard.stop() }
+  })
   test('limits tools to the exact goal and artifact without shell or escalation approval', () => {
-    expect(isExperimentToolAllowed('goal_create', { objective, max_goal_rounds: 2 }, '/workspace')).toBe(true)
+    expect(isExperimentToolAllowed('goal_create', { objective, max_goal_rounds: 2, start_native_rounds: true }, '/workspace')).toBe(true)
     expect(isExperimentToolAllowed('goal_create', { objective, max_goal_rounds: 3 }, '/workspace')).toBe(false)
     expect(isExperimentToolAllowed('write', { file_path: 'summarize.mjs', content: 'code' }, '/workspace')).toBe(true)
     expect(isExperimentToolAllowed('write', { file_path: '../summarize.mjs', content: 'code' }, '/workspace')).toBe(false)
     expect(isExperimentToolAllowed('write', { file_path: 'summarize.mjs', content: 'code', sandbox_permissions: 'require_escalated' }, '/workspace')).toBe(false)
+    expect(isExperimentToolAllowed('todo_write', { todos: [] }, '/workspace')).toBe(false)
     expect(isExperimentToolAllowed('bash', { command: 'echo unsafe' }, '/workspace')).toBe(false)
     expect(isExperimentToolAllowed('update_goal', { status: 'complete' }, '/workspace')).toBe(false)
   })

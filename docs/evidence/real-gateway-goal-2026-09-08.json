@@ -1,0 +1,265 @@
+{
+  "date": "2026-09-08",
+  "baseline": "ea107bf9a1781e8504b0ab2525877b36f4227666",
+  "delivery": "Explicit native goal handoff and a real configured-gateway Web task with independent acceptance and completed-session reload",
+  "sources": {
+    "plugins/assistant-goals/src/service.ts": "acc2aeab7677564346253f89d29d14c94bb0ce74d4c7f73ca44b2ac731907ed3",
+    "plugins/assistant-goals/src/tools.ts": "cbada13d32d973543557df3e26a6d48ad28a61ab035e0c91609ad720fd121512",
+    "scripts/e2e/web-owner-real-audit.mjs": "34d059c375f9a48a8d207a749e5a009c4db5718aef7b4afdcfb5f290b9119c8e",
+    "scripts/e2e/web-owner-real-guard.mjs": "8e3d1b4691f36e01c549aae37defcdc0eaef14e82ee9c54bc6ef1eed460c97c4",
+    "scripts/e2e/web-owner-real-route.mjs": "1e33086a21e416bb2e5582f6ca56c34e6442a9ca871787bfb8b4dc819ebce80a",
+    "scripts/e2e/web-owner-real.spec.mjs": "0093e180d204ab558eaef7914666852f13496deee82bab67f9ce23dac2b4eaf3",
+    "tests/autonomy-event-goal.spec.ts": "5250c5a5a67f1d97d163e20253d091f832bd32c6a40a261741006fc1be8d3c3d",
+    "tests/goal-create-handoff.spec.ts": "dd9790f6696fcb4e8d93ebb9d4ed165a748d20eb3ca9067b941a68982da67797",
+    "tests/web-owner-real-guard.spec.ts": "4e864b3c76c52eda5fe70e39a0269cfb22d7f9658385d530d9e7fd8ba773598f",
+    "tests/web-owner-real-route.spec.ts": "4e18f1f2d581e11d0d422165f7b9f071ccab0239e43f0a3fa945952515f19e44"
+  },
+  "commands": [
+    {
+      "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=super-relay DSH_WEB_REAL_MODEL=auto_model/alwaysday1 DSH_WEB_REAL_SOURCE_HOME=/home/jiataorui/.dsh pnpm test:web-owner:real",
+      "exitCode": 0,
+      "log": "/tmp/dsh-web-real-relay-final.log",
+      "sha256": "c82da53ade8fd62dac4636a56aeaee5eac74ab8df861d2f4c6eb54d3d17a2628"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "exitCode": 0,
+      "log": "/tmp/dsh-real-final-check.log",
+      "sha256": "ed4529b43cf86a725081e84349d24b85a454ba3d9b4c0a221d7d14fafc556a5c"
+    }
+  ],
+  "observed": {
+    "route": {
+      "provider": "super-relay",
+      "model": "auto_model/alwaysday1",
+      "api": "openai-responses"
+    },
+    "realModelDispatches": 3,
+    "usage": [
+      {
+        "inputTokens": 7166,
+        "outputTokens": 145,
+        "totalTokens": 7311
+      },
+      {
+        "inputTokens": 11513,
+        "outputTokens": 362,
+        "totalTokens": 11875
+      },
+      {
+        "inputTokens": 2486,
+        "outputTokens": 159,
+        "cacheReadTokens": 11512,
+        "totalTokens": 14157
+      }
+    ],
+    "native": {
+      "sessionId": "session-875fdc29-297e-43d3-b8b4-5f106f50627e",
+      "goalId": "goal-5c45ab50-904d-433e-8680-fd937e44122c",
+      "revision": 2,
+      "objective": "Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.",
+      "phase": "complete",
+      "roundsStarted": 1,
+      "maxGoalRounds": 2,
+      "updatedAt": 1788842922614
+    },
+    "restart": {
+      "hostStarts": 2,
+      "sameCompletedGoal": true,
+      "artifactUnchanged": true,
+      "noExtraModelDispatch": true,
+      "exactReplyRestored": true,
+      "visibleReplyAbsentFromUserPrompt": true
+    },
+    "approvals": [
+      "goal_create"
+    ],
+    "stepJobs": [
+      {
+        "state": "done",
+        "execution": {
+          "completedAt": 1788842921600,
+          "executionRef": "goal-run-b0c6db540df8b2b5b98f27ec6016a42aa5cb03462488f9bc71f20f05c3c0d63e",
+          "quiescent": true,
+          "status": "succeeded"
+        },
+        "receipt": {
+          "completedAt": 1788842921854,
+          "contractDigest": "14e61ba7b0175c37d01502f59b94095308f16b6afff908082f355274b72afec6",
+          "contractId": "acceptance-d5e3818be7370c647ee068c75f63ec580575388d70cf2848844c036882c74357",
+          "digest": "058250b7acf8d266f7987543306cc223250adda47ba3592a6795e9e3efe95589",
+          "id": "verification-acceptance-d5e3818be7370c647ee068c75f63ec580575388d70cf2848844c036882c74357-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_74e45d8d-910a-4ab4-a6da-dccbe2c30987",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v2",
+          "results": [
+            {
+              "artifactDigest": "f7c649641e721f3e2a1db5876acbbfbb48e5860fde7f7b8d59251209235febaa",
+              "criterionId": "two-currencies",
+              "evidence": [
+                {
+                  "digest": "daaf562fa2d6ad159970fc922e6f5088ef36ef6dd0b2cdd8934caf488469e0e9",
+                  "kind": "process-output",
+                  "ref": "summarize.mjs"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-web-owner-real-G9YSy3/workspace"
+          },
+          "startedAt": 1788842921608,
+          "task": {
+            "goal": {
+              "definitionDigest": "b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f",
+              "definitionVersion": 1,
+              "id": "1f6bce9aa76f688b89991a1c65f51c186421d70826cac61f85fd2915084ed139",
+              "nativeGoalId": "goal-5c45ab50-904d-433e-8680-fd937e44122c",
+              "nativeRevision": 1,
+              "runId": "goal-run-b0c6db540df8b2b5b98f27ec6016a42aa5cb03462488f9bc71f20f05c3c0d63e",
+              "sessionId": "session-875fdc29-297e-43d3-b8b4-5f106f50627e",
+              "stepId": "round-1"
+            },
+            "kind": "goal-step",
+            "ref": "goal-run-b0c6db540df8b2b5b98f27ec6016a42aa5cb03462488f9bc71f20f05c3c0d63e"
+          },
+          "validUntil": 1788843513289
+        },
+        "reason": "verified"
+      }
+    ],
+    "outcomeJobs": [
+      {
+        "state": "done",
+        "execution": {
+          "completedAt": 1788842921879,
+          "executionRef": "goal-assessment-410b4381754850bb7f84fc9cd8a7f6d7e28c6768e17ebb0cb74c1b8599313575",
+          "quiescent": true,
+          "status": "succeeded"
+        },
+        "receipt": {
+          "completedAt": 1788842922580,
+          "contractDigest": "82a7cba2182fcc1fec8c2be1e2284002e8a3be1199a06eff34d2f3865019d6b3",
+          "contractId": "acceptance-8385fb68a6932965e8586fa0e8a29aec7a22703cdadbe415cd4b8a7ef91f707a",
+          "digest": "5f4a6e9d9db440ff615cc6d6883b9db889481cada85600c96e28fe0987105481",
+          "id": "verification-acceptance-8385fb68a6932965e8586fa0e8a29aec7a22703cdadbe415cd4b8a7ef91f707a-1",
+          "objectiveStatus": "achieved",
+          "owner": {
+            "principalRecordId": "principal_74e45d8d-910a-4ab4-a6da-dccbe2c30987",
+            "principalVersion": 1
+          },
+          "protocol": "task-verification/v3",
+          "results": [
+            {
+              "artifactDigest": "f7c649641e721f3e2a1db5876acbbfbb48e5860fde7f7b8d59251209235febaa",
+              "criterionId": "two-currencies",
+              "evidence": [
+                {
+                  "digest": "daaf562fa2d6ad159970fc922e6f5088ef36ef6dd0b2cdd8934caf488469e0e9",
+                  "kind": "process-output",
+                  "ref": "summarize.mjs"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            },
+            {
+              "artifactDigest": "f7c649641e721f3e2a1db5876acbbfbb48e5860fde7f7b8d59251209235febaa",
+              "criterionId": "cancelled-and-negative",
+              "evidence": [
+                {
+                  "digest": "5d13df47ede56c8c318a79185cd43305801d8fb8333c4440b0984a4bd01b4d24",
+                  "kind": "process-output",
+                  "ref": "summarize.mjs"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            },
+            {
+              "artifactDigest": "f7c649641e721f3e2a1db5876acbbfbb48e5860fde7f7b8d59251209235febaa",
+              "criterionId": "empty",
+              "evidence": [
+                {
+                  "digest": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+                  "kind": "process-output",
+                  "ref": "summarize.mjs"
+                }
+              ],
+              "reason": "verified",
+              "status": "passed"
+            }
+          ],
+          "scope": {
+            "preset": "standard",
+            "workspace": "/tmp/dsh-web-owner-real-G9YSy3/workspace"
+          },
+          "startedAt": 1788842921896,
+          "task": {
+            "goal": {
+              "assessmentId": "goal-assessment-410b4381754850bb7f84fc9cd8a7f6d7e28c6768e17ebb0cb74c1b8599313575",
+              "definitionDigest": "b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f",
+              "definitionVersion": 1,
+              "id": "1f6bce9aa76f688b89991a1c65f51c186421d70826cac61f85fd2915084ed139",
+              "nativeGoalId": "goal-5c45ab50-904d-433e-8680-fd937e44122c",
+              "sessionId": "session-875fdc29-297e-43d3-b8b4-5f106f50627e"
+            },
+            "kind": "goal-outcome",
+            "ref": "goal-assessment-410b4381754850bb7f84fc9cd8a7f6d7e28c6768e17ebb0cb74c1b8599313575"
+          },
+          "validUntil": 1788843513225
+        },
+        "reason": "verified"
+      }
+    ]
+  },
+  "artifacts": {
+    ".cache/web-owner-real-e2e/web-owner-real-real-config-94a61-ve-goal-across-Host-restart/proof.json": "0d7046c0838cd91e96d17bb5cc73ec3f476c1ccad0cc9e0399f68a30059867ac",
+    ".cache/web-owner-real-e2e/web-owner-real-real-config-94a61-ve-goal-across-Host-restart/session-audit.json": "0f9b6497022733e9669dc088522d3413bfcce72809c7c011526eae1613cd8bb4",
+    ".cache/web-owner-real-e2e/web-owner-real-real-config-94a61-ve-goal-across-Host-restart/summarize.mjs": "f7c649641e721f3e2a1db5876acbbfbb48e5860fde7f7b8d59251209235febaa",
+    ".cache/web-owner-real-e2e/web-owner-real-real-config-94a61-ve-goal-across-Host-restart/model.jsonl": "fad3e1300908caa67f4f8c438b7f8350fb2211b673941326e30a72ee7a670c02"
+  },
+  "limitations": [
+    "Guided real-model runtime smoke test, not comparative intelligence or success-rate measurement. Exploratory failed runs are not discarded from local logs.",
+    "Restart evidence reloads an already completed goal; real-model unfinished event-wake recovery remains separate.",
+    "Existing gateway lacks a trusted input-token upper bound and exact Goal meter; experiment call/time guard is not a production cumulative token/cost budget.",
+    "TraeX readiness and upstream gateway tool/usage probe were checked separately; this browser run uses the production PiAi gateway route.",
+    "Verifier runner shares the current OS user; no isolated worker/credential broker or production-profile activation is claimed.",
+    "Full18 remains active: 3 verified / 9 implementing / 6 todo."
+  ],
+  "independentReview": {
+    "status": "PASS",
+    "reviewer": "independent read-only verifier agent",
+    "scope": "Final changed source, exact UI evidence, native handoff and actual command/artifact hashes; completed-goal reload only",
+    "limitations": "No production gateway token/cost meter or real-model unfinished event-wake claim"
+  },
+  "checkSummary": {
+    "rootFiles": 313,
+    "rootTests": 3876,
+    "skipped": 0,
+    "goalPackageTests": 112,
+    "deliveryPackageTests": 705,
+    "dryRunPacks": 31,
+    "manifestLintTypecheckBuild": "passed"
+  },
+  "previousFailures": [
+    {
+      "kind": "Full-check test synchronization failure before condition-based drain fix",
+      "log": "/tmp/dsh-real-check-initial.log",
+      "exitCode": 1,
+      "sha256": "838ce9baf97d34821ba4dd9bf2f59302524193d6420699ef526a0b9e1adffc5e"
+    },
+    {
+      "kind": "Browser UI SlotAssemblyError during overlapping source-linked plugin build; final browser run performed after all builds completed",
+      "log": "/tmp/dsh-web-real-build-overlap.log",
+      "exitCode": 1,
+      "sha256": "c6b40705261133224a692b1e999f7e50567eef34684b60d81418a6d87872aa56"
+    }
+  ]
+}
