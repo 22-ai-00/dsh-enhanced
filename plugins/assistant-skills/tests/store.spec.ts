@@ -40,11 +40,25 @@ describe('SkillStore', () => {
     const reopened = new SkillStore(path)
     expect(reopened.getRun(scope, claimed.run.id)).toMatchObject({ state: 'unknown' })
     expect(() => reopened.finish(scope, claimed.run.id, 'succeeded', [])).toThrow(/run state conflict/)
-    const later = reopened.claim(scope, { invocationId: 'later', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {} })
+    expect(() => reopened.claim(scope, { invocationId: 'later', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {} })).toThrow(/unresolved invocation/u)
+    const later = reopened.claim(scope, { invocationId: 'later', goalId: 'other-goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {} })
     expect(reopened.checkpoint(scope, later.run.id, [{ id: 'read', state: 'succeeded' }])).toMatchObject({ state: 'running', steps: [{ id: 'read', state: 'succeeded' }] })
     expect(reopened.finish(scope, later.run.id, 'succeeded', [{ id: 'read', state: 'succeeded' }])).toMatchObject({ state: 'succeeded' })
     expect(() => reopened.finish(scope, later.run.id, 'failed', [])).toThrow(/run state conflict/)
     expect(reopened.getRun(otherScope, later.run.id)).toBeUndefined(); reopened.close()
+  })
+
+  it('fences replacement invocation IDs for running or unknown work in the same skill Goal, including candidate trials', () => {
+    const store = new SkillStore(':memory:'); store.save(scope, definition())
+    const running = store.claim(scope, { invocationId: 'running-first', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {} })
+    expect(() => store.claim(scope, { invocationId: 'running-second', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {} })).toThrow(/unresolved invocation/u)
+    store.finish(scope, running.run.id, 'unknown', [])
+    expect(() => store.claim(scope, { invocationId: 'unknown-second', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {} })).toThrow(/unresolved invocation/u)
+    expect(store.claim(scope, { invocationId: 'separate-goal', goalId: 'other-goal', sessionId: 'session', skillName: 'read-report', version: 1, inputs: {} }).claimed).toBe(true)
+    const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Trial.', trigger: 'owner request', expiresAt: Date.now() + 60000 })
+    const trial = store.claim(scope, { invocationId: 'trial-first', goalId: 'trial-goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, candidateId: candidate.id, goalExecutionRunId: 'goal-run' })
+    expect(() => store.claim(scope, { invocationId: 'trial-second', goalId: 'trial-goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, candidateId: candidate.id, goalExecutionRunId: 'goal-run' })).toThrow(/unresolved invocation/u)
+    store.finish(scope, trial.run.id, 'unknown', []); store.close()
   })
 
   it('recovers multiple legacy running invocations before adding the per-goal index', async () => {

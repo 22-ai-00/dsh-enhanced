@@ -15,7 +15,7 @@ import { createDefinition, instantiate, type SkillBinding } from './definition.j
 import { validateComparisonProfiles, SkillComparator, type SkillComparisonProfile } from './comparison.js'
 import { watchObservation } from './watch-proof.js'
 import { sealedPlan, type SealedSkillHoldoutProvider } from './sealed-holdout.js'
-import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition } from './store.js'
+import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition, type SkillCapture } from './store.js'
 
 export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[] }
 export const Config: Schema<Config> = Schema.object({
@@ -29,13 +29,50 @@ declare module '@deepseek-ai/cordis' { interface Context { assistantSkills: Assi
 
 const output = { schema: { type: 'object' as const, additionalProperties: false, properties: { context: { type: 'string' as const, required: true } } },
   render: (_args: unknown, value: { context: string }) => [{ type: 'text' as const, text: value.context }] } as const
-type Action = 'inspect' | 'save' | 'run' | 'retire' | 'draft' | 'trial' | 'activate' | 'reject' | 'rollback' | 'compare' | 'watch'
+const businessGoalId = 'Business Goal ID returned by goal_create or goal_context (the goal_id label), not the native get_goal ID.'
+type Action = 'inspect' | 'save' | 'run' | 'retire' | 'draft' | 'trial' | 'activate' | 'reject' | 'rollback' | 'compare' | 'watch' | 'capture'
 const resource = { kind: 'evolution' as const, id: 'verified-workflows' }
 function parse(value: string, array = false): any {
   if (typeof value !== 'string' || Buffer.byteLength(value) > 262144) throw new Error('assistant-skills: bounded JSON required')
   const parsed: unknown = JSON.parse(value)
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) !== array) throw new Error('assistant-skills: invalid JSON shape')
   return parsed
+}
+function plainArguments(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype || Object.getOwnPropertySymbols(value).length !== 0) return undefined
+  const descriptors = Object.getOwnPropertyDescriptors(value)
+  if (!Object.values(descriptors).every(descriptor => descriptor.enumerable && 'value' in descriptor)) return undefined
+  return value as Record<string, unknown>
+}
+function exactArguments(value: unknown, allowed: readonly string[]): Record<string, unknown> | undefined {
+  const args = plainArguments(value); if (!args || Object.keys(args).some(key => !allowed.includes(key))) return undefined
+  return args
+}
+function trialProofSteps(steps: readonly { toolName: string; arguments: unknown }[], candidateId: string, trialRunId: string, goalId: string, invocationId: string, inputs: Record<string, unknown>): boolean {
+  let trials = 0
+  for (const step of steps) {
+    const args = plainArguments(step.arguments)
+    if (!args) return false
+    if (step.toolName === 'skill_trial') {
+      trials++
+      const trial = exactArguments(args, ['candidate_id', 'goal_id', 'inputs_json', 'invocation_id'])
+      if (!trial || trials !== 1 || trial.candidate_id !== candidateId || trial.goal_id !== goalId || trial.invocation_id !== invocationId
+        || acceptanceDigest(parse(trial.inputs_json === undefined ? '{}' : trial.inputs_json as string)) !== acceptanceDigest(inputs)) return false
+      continue
+    }
+    if (step.toolName === 'get_goal' && exactArguments(args, [])) continue
+    if (step.toolName === 'skill_candidates') {
+      const candidate = exactArguments(args, ['candidate_id']); if (candidate && (Object.keys(candidate).length === 0 || candidate.candidate_id === candidateId)) continue
+    }
+    if (step.toolName === 'skill_status') {
+      const status = exactArguments(args, ['run_id']); if (status && (Object.keys(status).length === 0 || status.run_id === trialRunId)) continue
+    }
+    if (step.toolName === 'goal_context') {
+      const context = exactArguments(args, ['goal_id', 'focus']); if (context && (Object.keys(context).length === 0 || context.goal_id === goalId && (context.focus === undefined || context.focus === false))) continue
+    }
+    return false
+  }
+  return trials === 1
 }
 
 /** Fixed tool compositions run in the original native Goal; no new AgentLoop or scheduler. */
@@ -53,6 +90,9 @@ export class AssistantSkillsService extends Service {
   #sealedHoldout: SealedSkillHoldoutProvider | undefined
   #sealedGeneration: string | undefined
   #reconcileQueued = false
+  readonly #captureInflight = new Set<string>()
+  readonly #captureDirty = new Set<string>()
+  readonly #captureTasks = new Set<Promise<void>>()
   #active = true
   constructor(ctx: Context, config: Config = {}) {
     super(ctx, 'assistantSkills')
@@ -64,13 +104,13 @@ export class AssistantSkillsService extends Service {
       || this.#allowed.length > 32 || this.#allowed.some(name => typeof name !== 'string' || !/^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/u.test(name))) throw new Error('assistant-skills: invalid configuration')
     this.#comparisons = validateComparisonProfiles(config.comparisons ?? [])
     this.#store = new SkillStore(config.databasePath ?? join(homedir(), '.dsh', 'assistant-skills.sqlite'))
-    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); await Promise.allSettled(this.#comparing); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
+    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
     ctx.inject(['tools', 'agents', 'assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
       runtime.tools.register(defineTool({ name: 'skill_save', description: 'Save the exact successful tool trace of this owner session’s independently achieved Goal as a private versioned skill. Requires the current human request. Historical acceptance is provenance, never permission or acceptance for a future run.',
-        parameters: { goal_id: { type: 'string', required: true }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string', description: 'JSON array of {name,stepId,path}; path is a scalar argument JSON pointer. Empty array keeps the original arguments.' }, expected_version: { type: 'integer' } }, output,
+        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string', description: 'JSON array of {name,stepId,path}; path is a scalar argument JSON pointer. Empty array keeps the original arguments.' }, expected_version: { type: 'integer' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.save(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[] }, args.expected_version ?? 0)) }) }))
-      runtime.tools.register(defineTool({ name: 'skill_run', description: 'Replay a saved skill’s fixed tool steps in the current newly admitted native Goal. Every nested call retains native permissions, approvals, cancellation and budgets. Use one stable invocation_id; interrupted or duplicate invocations never replay. Tool success still requires fresh independent Goal acceptance.',
-        parameters: { goal_id: { type: 'string', required: true }, name: { type: 'string', required: true }, version: { type: 'integer', required: true }, inputs_json: { type: 'string', description: 'JSON object with only declared typed input parameters.' }, invocation_id: { type: 'string', required: true } }, output,
+      runtime.tools.register(defineTool({ name: 'skill_run', description: 'Replay a saved skill’s fixed tool steps in a fresh native Goal. If the current owner Goal is active but has no admitted native round, this returns awaiting-native-round with no steps or durable run, ends the turn, and the next native round must repeat the same invocation_id. Every nested call retains native permissions, approvals, cancellation and budgets. Tool success still requires fresh independent Goal acceptance.',
+        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, version: { type: 'integer', required: true }, inputs_json: { type: 'string', description: 'JSON object with only declared typed input parameters.' }, invocation_id: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(await this.run(exec, args.goal_id, args.name, args.version, parse(args.inputs_json ?? '{}'), args.invocation_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_status', description: 'Read this owner’s active saved skill definitions, typed inputs and source acceptance, or inspect a specific durable invocation. Success means steps executed, not Goal achievement.', parameters: { run_id: { type: 'string' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.inspect(exec.agent, args.run_id)) }) }))
@@ -84,14 +124,14 @@ export class AssistantSkillsService extends Service {
       runtime.tools.register(defineTool({ name: 'skill_comparison_status', description: 'Read a private comparison receipt or available comparison profile summaries. Test inputs and expected answers are not included.', parameters: { comparison_id: { type: 'string' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.comparisonStatus(exec.agent, args.comparison_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_candidate', description: 'Draft a private candidate from an independently achieved Goal following the current owner request. The current active skill stays unchanged. Review the stored trace and structural delta; no performance gain is inferred.',
-        parameters: { goal_id: { type: 'string', required: true }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true }, reason: { type: 'string', required: true }, trigger: { type: 'string', required: true } }, output,
+        parameters: { goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true }, reason: { type: 'string', required: true }, trigger: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.stage(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[] }, args.parent_version, args.reason, args.trigger)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_candidates', description: 'Inspect private candidate definitions, expiry, structural differences and trial references. Pending candidates are not active native skills.', parameters: { candidate_id: { type: 'string' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.candidates(exec.agent, args.candidate_id)) }) }))
-      runtime.tools.register(defineTool({ name: 'skill_trial', description: 'Run a pending candidate in a fresh native Goal using the ordinary tool permissions and budgets. This can have real effects. It never changes the active skill. Use one stable invocation_id. Independent Goal acceptance and a current owner request are required for later activation.',
-        parameters: { candidate_id: { type: 'string', required: true }, goal_id: { type: 'string', required: true }, inputs_json: { type: 'string' }, invocation_id: { type: 'string', required: true } }, output,
+      runtime.tools.register(defineTool({ name: 'skill_trial', description: 'Run a pending candidate in a fresh native Goal using ordinary tool permissions and budgets. If the current owner Goal has no admitted native round, it returns awaiting-native-round without steps or durable work and the next native round must repeat the same invocation_id. This can have real effects once admitted and never changes the active skill. Independent Goal acceptance and a current owner request are required for later activation.',
+        parameters: { candidate_id: { type: 'string', required: true }, goal_id: { type: 'string', required: true, description: businessGoalId }, inputs_json: { type: 'string' }, invocation_id: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(await this.trial(exec, args.candidate_id, args.goal_id, parse(args.inputs_json ?? '{}'), args.invocation_id)) }) }))
-      runtime.tools.register(defineTool({ name: 'skill_activate', description: 'Activate a candidate following the current owner request, only after its exact sole trial call has independently achieved its fresh Goal. This is owner-approved activation, not automatic promotion or proof of improvement.',
+      runtime.tools.register(defineTool({ name: 'skill_activate', description: 'Activate a candidate following the current owner request only after a fresh independently accepted Goal has one exact successful skill_trial as its sole business execution. The accepted round may also contain only validated read-only metadata inspection. This is owner-approved activation, not automatic promotion or proof of improvement.',
         parameters: { candidate_id: { type: 'string', required: true }, trial_run_id: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.activate(exec.agent, args.candidate_id, args.trial_run_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_reject', description: 'Reject a pending candidate following the current owner request; the active skill stays unchanged.', parameters: { candidate_id: { type: 'string', required: true } }, output,
@@ -102,11 +142,23 @@ export class AssistantSkillsService extends Service {
       runtime.tools.register(defineTool({ name: 'skill_watch', description: 'Explicitly authorize a finite rollback watch for one exact active skill version. It observes only later successful skill_run calls bound to independently verified native Goal outcomes. Reaching the not-achieved threshold appends the named immediate-parent fallback once; it never promotes a candidate.',
         parameters: { owner_route_id: { type: 'string', required: true }, name: { type: 'string', required: true }, version: { type: 'integer', required: true }, fallback_version: { type: 'integer', required: true }, expires_at: { type: 'integer', required: true }, max_runs: { type: 'integer', required: true }, failure_threshold: { type: 'integer', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.watch(exec.agent, { ownerRouteId: args.owner_route_id, skillName: args.name, version: args.version, fallbackVersion: args.fallback_version, expiresAt: args.expires_at, maxRuns: args.max_runs, failureThreshold: args.failure_threshold })) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_capture', description: 'During the owner turn that created the current active Goal, preauthorize one finite automatic pending candidate after that Goal independently achieves and naturally ends. Supply the configured public owner_route_id, business Goal ID, name and expiry. Set start_native_rounds=true only when capture should immediately hand the Goal to Host-native execution and extraction; after successful registration the owner turn must not continue business work. Leave it false to continue composing authorized schedule or wait work. If registration fails, correct the ID and retry while still in the owner turn; failure is not authorization. It never activates, compares, runs, or expands a skill.',
+        parameters: { owner_route_id: { type: 'string', required: true }, goal_id: { type: 'string', required: true, description: businessGoalId }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, parent_version: { type: 'integer', required: true }, expires_at: { type: 'integer', required: true }, start_native_rounds: { type: 'boolean', description: 'When explicitly true and registration succeeds, conclude this owner turn so the Host may start native Goal rounds.' } }, output,
+        execute: async (args, exec) => { const saved = this.capture(exec.agent, { ownerRouteId: args.owner_route_id, goalId: args.goal_id, name: args.name, description: args.description, parentVersion: args.parent_version, expiresAt: args.expires_at }); if (args.start_native_rounds === true) exec.concludeTurn(); return { context: JSON.stringify(saved) } } }))
+      runtime.tools.register(defineTool({ name: 'skill_captures', description: 'Inspect owner-preauthorized automatic capture records and their pending, captured, revoked, expired, unsupported, or unknown terminal state.', parameters: {}, output,
+        execute: async (_args, exec) => ({ context: JSON.stringify(this.#store.listCaptures(this.#scope(exec.agent, 'inspect'))) }) }))
       runtime.tools.register(defineTool({ name: 'skill_watches', description: 'Inspect this owner’s finite rollback watches and their independently verified outcome observations.', parameters: {}, output,
         execute: async (_args, exec) => ({ context: JSON.stringify(this.#store.listWatches(this.#scope(exec.agent, 'inspect'))) }) }))
     })
     ctx.inject(['assistantGoals', 'assistantPolicy', 'assistantDelivery', 'assistantVerifier'], () => { this.#queueReconcile() })
+    // SessionQuery is optional for ordinary manual skills. When it becomes
+    // available, retry durable preauthorized captures that previously received
+    // the typed `unavailable` bridge result.
+    ctx.inject(['sessionQuery' as never], () => { this.#queueReconcile() })
     ctx.on('assistant-verifier/receipt', notice => { if (notice.taskKind === 'goal-outcome') this.#queueReconcile() })
+    // A native goal change is only a durable-evidence reread nudge. It carries no
+    // authority and capture still revalidates route, Policy, parent and definition.
+    ;(ctx as unknown as { on: (event: string, listener: () => void) => unknown }).on('goal/changed', () => this.#queueReconcile())
     ctx.inject(['skills', 'agents'], runtime => {
       const registered = new WeakSet<Agent>()
       const install = (agent: Agent) => {
@@ -146,7 +198,7 @@ export class AssistantSkillsService extends Service {
     const owner = delivery?.preferencePrincipalForAgent(agent)
     if (!owner || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-skills: authenticated owner required')
     const scope = { principalId: owner.principalId, ...owner.principalLineage, workspace: owner.scope.workspace, preset: owner.scope.preset }
-    if (['save', 'retire', 'draft', 'activate', 'reject', 'rollback', 'compare', 'watch'].includes(action)) {
+    if (['save', 'retire', 'draft', 'activate', 'reject', 'rollback', 'compare', 'watch', 'capture'].includes(action)) {
       const current = delivery?.currentPreferenceTurn(agent)
       if (!current || acceptanceDigest({ principalId: current.principalId, ...current.principalLineage, workspace: current.scope.workspace, preset: current.scope.preset }) !== acceptanceDigest(scope)) throw new Error('assistant-skills: current owner request required')
     }
@@ -304,10 +356,8 @@ export class AssistantSkillsService extends Service {
     this.#pending(scope, candidateId)
     const verify = () => {
       const proof = this.#goals().inspectVerifiedWorkflowRun(agent, run.goalId, run.goalExecutionRunId!)
-      const step = proof.steps[0], args = step?.arguments as Record<string, unknown> | undefined
       if (acceptanceDigest(proof.scope) !== acceptanceDigest(scope) || proof.goal.sessionId !== run.sessionId || proof.runId !== run.goalExecutionRunId
-        || proof.steps.length !== 1 || step?.toolName !== 'skill_trial' || !args || args.candidate_id !== candidateId || args.goal_id !== run.goalId || args.invocation_id !== run.invocationId
-        || acceptanceDigest(parse(args.inputs_json === undefined ? '{}' : args.inputs_json as string)) !== acceptanceDigest(run.inputs)) throw new Error('assistant-skills: independent exact trial acceptance required')
+        || !trialProofSteps(proof.steps, candidateId, trialRunId, run.goalId, run.invocationId, run.inputs)) throw new Error('assistant-skills: independent exact trial acceptance required')
       return acceptanceDigest(proof.acceptance)
     }
     const receipt = verify()
@@ -353,6 +403,50 @@ export class AssistantSkillsService extends Service {
     this.#watchRoute(scope, input.ownerRouteId, route)
     return this.#store.createWatch(scope, input, route)
   }
+  capture(agent: Agent | undefined, input: { ownerRouteId: string; goalId: string; name: string; description: string; parentVersion: number; expiresAt: number }) {
+    const scope = this.#scope(agent, 'capture'), route = this.#watchRoute(scope, input.ownerRouteId)
+    if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > Date.now() + 7 * 86400000) throw new Error('assistant-skills: invalid capture expiry')
+    const policy = this.ctx.get('assistantPolicy', false)
+    if (!policy || policy.evaluate(this.#capturePolicy(scope)).effect !== 'allow') throw new Error('assistant-skills: configure background capture permission')
+    this.#authorize(agent, 'capture', [scope, input]); this.#watchRoute(scope, input.ownerRouteId, route)
+    const goals = this.#goals() as AssistantGoalsService & { inspectActiveWorkflowCaptureContext?: (agent: Agent | undefined, goalId: string) => { scope: GoalScope; goalId: string; sessionId: string; nativeGoalId: string; definition: { digest: string } } }
+    if (typeof goals.inspectActiveWorkflowCaptureContext !== 'function') throw new Error('assistant-skills: Goals active capture bridge unavailable')
+    const active = goals.inspectActiveWorkflowCaptureContext(agent, input.goalId)
+    const sessionId = String(agent!.session.id)
+    const goal = goals.inspectOwnerGoalExecution({ ownerRouteId: input.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId, goalId: input.goalId }) as { storedGoal?: { definition?: { digest?: string }; nativeAtLastObservation?: { sessionId?: string; goalId?: string; phase?: string } } }
+    const digest = goal.storedGoal?.definition?.digest, native = goal.storedGoal?.nativeAtLastObservation
+    if (acceptanceDigest(active.scope) !== acceptanceDigest(scope) || active.goalId !== input.goalId || active.sessionId !== sessionId
+      || typeof active.nativeGoalId !== 'string' || typeof digest !== 'string' || !/^[a-f0-9]{64}$/u.test(digest)
+      || active.definition.digest !== digest || native?.phase !== 'active' || native.sessionId !== active.sessionId || native.goalId !== active.nativeGoalId) throw new Error('assistant-skills: exact active goal required')
+    this.#watchRoute(scope, input.ownerRouteId, route)
+    const saved = this.#store.createCapture(scope, { ...input, sessionId, nativeGoalId: active.nativeGoalId }, route, digest); this.#queueReconcile(); return saved
+  }
+  #capturePolicy(scope: GoalScope) { return { subject: { kind: 'background' as const, id: 'dsh-enhanced-assistant-skills', workspace: scope.workspace, principal: scope.principalId }, action: 'capture', resource, context: { initiator: 'background' as const } } }
+  #captureAuthorized(capture: SkillCapture): void {
+    const scope = capture.scope as GoalScope; this.#watchRoute(scope, capture.ownerRouteId, capture.routeReceipt)
+    const policy = this.ctx.get('assistantPolicy', false)
+    if (!this.#active || Date.now() >= capture.expiresAt || !policy || policy.evaluate(this.#capturePolicy(scope)).effect !== 'allow'
+      || policy.authorize(this.#capturePolicy(scope), { idempotencyKey: `${capture.id}:capture` }).effect !== 'allow') throw new Error('assistant-skills: capture authority ended')
+  }
+  #captureCurrent(capture: SkillCapture): void {
+    const scope = capture.scope as GoalScope
+    this.#captureAuthorized(capture)
+    const parent = this.#store.get(scope, capture.name)
+    if ((parent?.version ?? 0) !== capture.parentVersion || (parent ? acceptanceDigest(parent) : null) !== capture.parentDigest) throw new Error('assistant-skills: capture changed')
+    const snapshot = this.#goals().inspectOwnerGoalExecution({ ownerRouteId: capture.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: capture.sessionId, goalId: capture.goalId }) as { storedGoal?: { definition?: { digest?: string }; nativeAtLastObservation?: { sessionId?: string; goalId?: string } } }
+    const goal = snapshot.storedGoal
+    if (goal?.definition?.digest !== capture.definitionDigest || goal.nativeAtLastObservation?.sessionId !== capture.sessionId || goal.nativeAtLastObservation?.goalId !== capture.nativeGoalId) throw new Error('assistant-skills: capture changed')
+  }
+  #captureBridgeFailure(capture: SkillCapture, error: unknown): void {
+    const code = error && typeof error === 'object' && 'code' in error ? (error as { code?: unknown }).code : undefined
+    if (code === 'pending' || code === 'unavailable') return
+    const message = error instanceof Error ? error.message : ''
+    const detail = typeof code === 'string' ? code : 'GOAL_CAPTURE_UNKNOWN'
+    // Exact internal terminal outcomes are deliberately mapped without parsing
+    // a foreign Host error message. All other failures become unknown once.
+    const state = message === 'assistant-skills: owner route changed' || message === 'assistant-skills: capture authority ended' || message === 'assistant-skills: capture changed' ? 'revoked' : 'unknown'
+    this.#store.finishCapture(capture.scope, capture.id, state, detail)
+  }
   #queueReconcile(): void {
     if (!this.#active || this.#reconcileQueued) return
     this.#reconcileQueued = true
@@ -389,6 +483,22 @@ export class AssistantSkillsService extends Service {
         } catch { /* Changed or unavailable evidence supplies no rollback authority. */ }
       }
     }
+    for (const capture of this.#store.listCaptures()) {
+      const scope = capture.scope as GoalScope
+      if (capture.expiresAt <= Date.now()) { this.#store.finishCapture(scope, capture.id, 'expired'); continue }
+      try {
+        this.#captureCurrent(capture)
+        const goals = this.#goals() as AssistantGoalsService & { inspectOwnerVerifiedWorkflowSource?: (input: { ownerRouteId: string; principalId: string; workspace: string; preset: string; sessionId: string; goalId: string }, signal?: AbortSignal) => Promise<import('./definition.js').VerifiedWorkflowSource> }
+        if (typeof goals.inspectOwnerVerifiedWorkflowSource !== 'function') { this.#store.finishCapture(scope, capture.id, 'unsupported', 'Goals Host capture bridge unavailable'); continue }
+        if (this.#captureInflight.has(capture.id)) { this.#captureDirty.add(capture.id); continue }
+        this.#captureInflight.add(capture.id)
+        const task = goals.inspectOwnerVerifiedWorkflowSource({ ownerRouteId: capture.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: capture.sessionId, goalId: capture.goalId }, this.#lifecycle.signal).then(source => {
+          try { this.#captureCurrent(capture); const definition = createDefinition(source, { name: capture.name, description: capture.description }, this.#allowed); this.#captureCurrent(capture); this.#store.captureCandidate(scope, capture.id, definition); this.#changed() } catch (error) { this.#captureBridgeFailure(capture, error) }
+        }).catch(error => this.#captureBridgeFailure(capture, error)).then(() => undefined)
+        this.#captureTasks.add(task)
+        void task.finally(() => { this.#captureTasks.delete(task); this.#captureInflight.delete(capture.id); if (this.#captureDirty.delete(capture.id) && this.#active) this.#queueReconcile() })
+      } catch (error) { this.#captureBridgeFailure(capture, error) }
+    }
   }
   async run(exec: ToolRunContext, goalId: string, name: string, version: number, inputs: Record<string, unknown>, invocationId: string) {
     const scope = this.#scope(exec.agent, 'run')
@@ -400,7 +510,23 @@ export class AssistantSkillsService extends Service {
     const action = candidateId ? 'trial' : 'run'
     const scope = this.#scope(exec.agent, action), { name, version } = skill
     const steps = instantiate(skill, inputs).steps
-    const current = this.#goals().inspectWorkflowRunContext(exec.agent, goalId)
+    const goals = this.#goals() as AssistantGoalsService & { inspectActiveWorkflowCaptureContext?: (agent: Agent | undefined, goalId: string) => { scope: GoalScope; goalId: string; sessionId: string; nativeGoalId: string; definition: { digest: string } } }
+    let current: ReturnType<AssistantGoalsService['inspectWorkflowRunContext']>
+    try { current = goals.inspectWorkflowRunContext(exec.agent, goalId) } catch (roundError) {
+      // This is a handoff only: no durable invocation is claimed and no action
+      // authorization budget is consumed until the next admitted native round.
+      const invocationValid = typeof invocationId === 'string' && invocationId.length > 0 && invocationId.length <= 256 && !/[\p{Cc}]/u.test(invocationId)
+      if (!invocationValid || typeof goals.inspectActiveWorkflowCaptureContext !== 'function') throw roundError
+      let active: { scope: GoalScope; goalId: string; sessionId: string; nativeGoalId: string; definition: { digest: string } }
+      try { active = goals.inspectActiveWorkflowCaptureContext(exec.agent, goalId) } catch { throw roundError }
+      if (acceptanceDigest(active.scope) !== acceptanceDigest(scope) || active.goalId !== goalId || active.sessionId !== String(exec.agent!.session.id)
+        || goalId === skill.source.goal.id || typeof active.nativeGoalId !== 'string' || typeof active.definition.digest !== 'string') throw roundError
+      exec.signal.throwIfAborted(); this.#lifecycle.signal.throwIfAborted()
+      if (acceptanceDigest(this.#scope(exec.agent, action)) !== acceptanceDigest(scope)) throw roundError
+      exec.concludeTurn()
+      const tool = candidateId ? 'skill_trial' : 'skill_run'
+      return { state: 'awaiting-native-round' as const, performed: false, context: 'No skill step or durable invocation has been claimed or executed; this is not a queued background task.', next: `After the Host starts this Goal's native round, call ${tool} again with this same goal, skill or candidate, inputs, and invocation_id.`, goalId, ...(candidateId ? { candidateId } : {}), skillName: name, version, invocationId, inputs }
+    }
     if (acceptanceDigest(scope) !== acceptanceDigest(current.scope) || goalId === skill.source.goal.id) throw new Error('assistant-skills: fresh owner Goal required')
     const identity = acceptanceDigest(current)
     const goalContext = current as typeof current & { nativeGoalId?: string }

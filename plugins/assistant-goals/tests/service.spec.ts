@@ -4,6 +4,7 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import GoalService from '@deepseek-ai/dsh-goal'
 import { LlmRuntime, LlmAdapter, ToolCallId, createUserMessage, type StreamChunk, type GenerateOptions } from '@deepseek-ai/dsh-llm'
 import { SessionStore, SessionId } from '@deepseek-ai/dsh-session'
+import SessionQueryEngine from '@deepseek-ai/dsh-session-query'
 import { SessionProjectionRegistry } from '@deepseek-ai/dsh-session-projection'
 import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
@@ -36,7 +37,7 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
     ...(productionPersistence ? {} : { compression: 'none' as const, packChunks: false, writeBatchMaxDelayMs: 1 }) })
   await ctx.plugin(SystemPrompt, { includeHarnessIdentity: false, includeRuntimeContext: true, persona: '' })
   await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(AgentRegistry); await ctx.plugin(AgentLoop, { agents: [] }); await ctx.plugin(GoalService)
-  const owners = new Map<Agent, string>(); const human = new Set<Agent>(); let allowed = true; const deniedActions = new Set<string>()
+  const owners = new Map<Agent, string>(); const handles = new Map<Agent, { dispose(): Promise<void> }>(); const human = new Set<Agent>(); let allowed = true; let routeAvailable = true; const deniedActions = new Set<string>()
   const attestation = (agent: Agent) => {
     const principalId = owners.get(agent)
     return principalId === undefined ? undefined : { scope: { workspace: root, preset: 'primary' }, principalId,
@@ -47,7 +48,10 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: attestation,
     currentPreferenceTurn: (agent: Agent) => human.has(agent) ? attestation(agent) : undefined,
     goalWakeResultVersion: () => 1, goalWakeSettlementVersion: () => 1,
-    validateOwnerRoute: ({ principalId, workspace, agentPreset }: { principalId: string; workspace: string; agentPreset: string }) => ({ principalRecordId: `record-${principalId}`, principalVersion: 1, workspace, agentPreset }) } as never)
+    validateOwnerRoute: ({ authorityId, principalId, workspace, agentPreset }: { authorityId: string; principalId: string; workspace: string; agentPreset: string }) => {
+      if (!routeAvailable) throw new Error('owner route revoked')
+      return { authorityId, principalId, principalRecordId: `record-${principalId}`, principalVersion: 1, workspace, agentPreset }
+    } } as never)
   ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }),
     evaluateAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }), evaluate: () => ({ effect: allowed ? 'allow' : 'deny' }), getBudgetConfig: () => ({ metric: 'automation-runs' }) } as never)
   ctx.provide('assistantAutomations' as never, { registerHostExecutor: () => () => {} } as never)
@@ -59,10 +63,11 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   const create = async (id: string, owner?: string) => {
     const handle = await ctx.agents.create({ sessionId: SessionId(id), meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'fixture', model: 'fixture' } })
     if (owner !== undefined) owners.set(handle.agent, owner)
+    handles.set(handle.agent, handle)
     cleanups.push(() => handle.dispose())
     return handle.agent
   }
-  return { ctx, root, path, plugin, owners, human, create, deny() { allowed = false }, denyAction(action: string) { deniedActions.add(action) }, service: ctx.assistantGoals }
+  return { ctx, root, path, plugin, owners, human, create, async dispose(agent: Agent) { await handles.get(agent)?.dispose() }, revokeRoute() { routeAvailable = false }, restoreRoute() { routeAvailable = true }, deny() { allowed = false }, denyAction(action: string) { deniedActions.add(action) }, service: ctx.assistantGoals }
 }
 const documentAuthority = { kind: 'document' as const, id: 'sources', sources: [{ id: 'source', url: 'https://example.org/source' }], timeoutMs: 1_000, maxResponseBytes: 1_024 }
 const [compiledDocumentAuthority] = createVerifierAuthorities({ authorities: [documentAuthority] })
@@ -111,8 +116,10 @@ describe('owner-scoped native goal context', () => {
     const owner = await f.create('entry-owner', 'owner'), other = await f.create('entry-other')
     expect(f.service.snapshot(owner)).toBe('')
     f.human.add(owner)
-    expect(f.service.snapshot(owner)).toContain('start_native_rounds=true')
-    expect(f.service.snapshot(owner)).toContain('this context grants no authority')
+    expect(f.service.snapshot(owner)).toContain('Only for an explicitly requested finite or continuing goal')
+    expect(f.service.snapshot(owner)).toContain('Do not start a goal for greetings or readiness checks')
+    expect(f.service.snapshot(owner)).toContain('when the owner requested capture, scheduling, or waiting, omit it or use false')
+    expect(f.service.snapshot(owner).toLowerCase()).toContain('this context grants no authority')
     expect(f.service.snapshot(other)).toBe('')
     expect(f.ctx.goals.get(owner)).toBeUndefined()
     f.denyAction('create')
@@ -325,6 +332,9 @@ describe('owner-scoped native goal context', () => {
   it('returns only the current active owner-scoped task projection and refreshes edits', async () => {
     const f = await harness(); const agent = await f.create('task-context', 'owner'); f.human.add(agent)
     const created = f.service.create(agent, 'Original current objective')
+    expect(f.service.inspectActiveWorkflowCaptureContext(agent, created.id)).toMatchObject({ scope: created.scope, goalId: created.id,
+      sessionId: String(agent.session.id), nativeGoalId: created.native.goalId, definition: created.definition })
+    expect(() => f.service.inspectActiveWorkflowCaptureContext(agent, created.native.goalId)).toThrow(`Use business goal_id ${created.id} returned by goal_create/goal_context`)
     expect(f.service.taskContext(agent)).toMatchObject({ protocol: 'goal-task-context/v1', active: true,
       scope: created.scope, goal: { id: created.id, definition: { version: created.definition.version, digest: created.definition.digest }, native: { goalId: created.native.goalId }, objective: 'Original current objective' }, checkpoint: { nextStep: '' } })
     const checkpointed = f.service.checkpoint(agent, created.id, created.version, { ...checkpoint, nextStep: 'Inspect the changed source' })
@@ -705,12 +715,12 @@ describe('owner-scoped native goal context', () => {
     expect(shortVerifier.service.health()).toMatchObject({ awaitingExecution: 0, pendingVerification: 0, pendingReceipts: 0 })
   })
 
-  it('exports only the exact successful native goal round after independent whole-goal acceptance', async () => {
+  it('exports a contiguous two-round owner workflow after the final independent whole-goal acceptance', async () => {
     const f = await harness(undefined, undefined, undefined, true, true, 2_000)
     await installNativeGoalRoundDriver(f.ctx)
     const agent = await f.create('verified-workflow-source', 'owner'); f.human.add(agent)
     const objective = 'Produce the independently verified workflow report'
-    await writeFile(join(f.root, 'report.md'), 'Step verified\nGoal verified\n')
+    await writeFile(join(f.root, 'report.md'), 'Step verified\n')
     registerReadReportTool(f.ctx, f.root)
     await installGoalVerifier(f, goalProfiles(f.root, objective))
     let record!: ReturnType<AssistantGoalsService['create']>
@@ -725,10 +735,12 @@ describe('owner-scoped native goal context', () => {
           yield { type: 'finish', reason: { kind: 'stop' } }
           return
         }
-        if (requests === 2) {
+        if (requests === 2 || requests === 4) {
+          if (requests === 4) await writeFile(join(f.root, 'report.md'), 'Step verified\nGoal verified\n')
+          const id = requests === 2 ? 'read-source-first' : 'read-source-final'
           yield { type: 'block-start', index: 0, blockType: 'tool-call' }
-          yield { type: 'tool-call-delta', index: 0, id: ToolCallId('read-source'), name: 'read_report', argumentsDelta: '{}' }
-          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('read-source'), name: 'read_report', arguments: '{}' } }
+          yield { type: 'tool-call-delta', index: 0, id: ToolCallId(id), name: 'read_report', argumentsDelta: '{}' }
+          yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId(id), name: 'read_report', arguments: '{}' } }
           yield { type: 'finish', reason: { kind: 'tool-calls' } }
           return
         }
@@ -743,15 +755,15 @@ describe('owner-scoped native goal context', () => {
     await vi.waitFor(() => expect(requests).toBe(1), { timeout: 2_000 })
     await agent.whenIdle()
     expect(f.ctx.fiber.state).toBe(2)
-    record = f.service.create(agent, objective, 1)
+    record = f.service.create(agent, objective, 2)
     await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
-    await vi.waitFor(() => expect(requests).toBe(3), { timeout: 2_000 })
+    await vi.waitFor(() => expect(requests).toBe(5), { timeout: 2_000 })
     await agent.whenIdle(); await f.service.whenIdle()
     const complete = f.service.inspect(agent, record.id)
     const durable = await f.ctx.sessionPersistence.readRaw(agent.session.id)
     expect(durable?.content).toContain('read-source')
-    expect(requests).toBe(3)
-    expect(complete.native).toMatchObject({ phase: 'complete', roundsStarted: 1, revision: record.native.revision + 2 })
+    expect(requests).toBe(5)
+    expect(complete.native).toMatchObject({ phase: 'complete', roundsStarted: 2, revision: record.native.revision + 2 })
     expect(f.service.inspectGoalOutcome(agent, record.id)).toMatchObject({ status: 'achieved', nativeCompletion: 'complete' })
 
     // The harness keeps its owner-turn seam asserted; capture happens only after
@@ -761,20 +773,56 @@ describe('owner-scoped native goal context', () => {
     const exported = f.service.inspectVerifiedWorkflowSource(agent, record.id)
     const historical = f.service.inspectVerifiedWorkflowRun(agent, record.id, exported.runId)
     expect(historical).toEqual(exported)
+    await f.ctx.plugin(SessionQueryEngine, [])
+    const ownerInput = { ownerRouteId: 'owner-route', principalId: 'owner', workspace: f.root,
+      preset: 'primary', sessionId: String(agent.session.id), goalId: record.id }
+    // This Host read has no Agent argument; it only observes the existing
+    // Session log and does not create or activate an Agent.
+    const ownerSource = await f.service.inspectOwnerVerifiedWorkflowSource(ownerInput)
+    expect(ownerSource).toMatchObject({ ...exported, segments: [{ round: 1, turn: expect.any(Number), runId: expect.any(String), nativeRevision: expect.any(Number), steps: [{ id: 'read-source-first' }] },
+      { round: 2, turn: exported.turn, runId: exported.runId, nativeRevision: expect.any(Number), steps: exported.steps }] })
+    f.human.delete(agent)
+    expect(() => f.service.inspectVerifiedWorkflowSource(agent, record.id)).toThrow('current authenticated owner turn required')
+    f.human.add(agent)
+    const controller = new AbortController(); controller.abort()
+    await expect(f.service.inspectOwnerVerifiedWorkflowSource(ownerInput, controller.signal)).rejects.toMatchObject({ code: 'unavailable' })
+    const query = f.ctx.sessionQuery
+    const nativeObserve = query.observeSession.bind(query)
+    let disposed = false
+    const routeRead = vi.spyOn(query, 'observeSession').mockImplementation(async (...args) => {
+      const observed = await nativeObserve(...args); const dispose = observed[Symbol.dispose].bind(observed)
+      f.revokeRoute()
+      return { ...observed, [Symbol.dispose]() { disposed = true; dispose() } }
+    })
+    try {
+      await expect(f.service.inspectOwnerVerifiedWorkflowSource(ownerInput)).rejects.toMatchObject({ code: 'rejected' })
+      expect(disposed).toBe(true)
+    } finally { routeRead.mockRestore(); f.restoreRoute() }
+    const headerRead = vi.spyOn(query, 'observeSession').mockImplementation(async (...args) => {
+      const observed = await nativeObserve(...args)
+      return { ...observed, header: { ...observed.header, cwd: `${f.root}-wrong` } }
+    })
+    try { await expect(f.service.inspectOwnerVerifiedWorkflowSource(ownerInput)).rejects.toMatchObject({ code: 'rejected' }) }
+    finally { headerRead.mockRestore() }
     expect(() => f.service.inspectVerifiedWorkflowRun(agent, record.id, `${exported.runId}-wrong`)).toThrow(/achieved whole-goal outcome|exact achieved historical run/u)
     expect(exported).toMatchObject({ protocol: 'assistant-goals/verified-workflow-source/v1', scope: complete.scope,
       goal: { id: record.id, definition: complete.definition, sessionId: String(agent.session.id), nativeGoalId: complete.native.goalId },
       acceptance: { contractId: expect.any(String), contractDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), receiptDigest: expect.stringMatching(/^[a-f0-9]{64}$/u), validUntil: expect.any(Number) },
-      steps: [{ id: 'read-source', toolName: 'read_report', arguments: {} }],
+      steps: [{ id: 'read-source-final', toolName: 'read_report', arguments: {} }],
     })
     expect(exported.runId).toMatch(/^goal-run-[a-f0-9]{64}$/u)
     const events = agent.session.snapshotEvents()
     expect(events.some(event => event.type === 'user/message' && event.data.source.kind === 'goal' && event.data.source.round === 1)).toBe(true)
+    expect(events.some(event => event.type === 'user/message' && event.data.source.kind === 'goal' && event.data.source.round === 2)).toBe(true)
     expect(events.some(event => event.type === 'turn/end' && event.data.turn === exported.turn)).toBe(true)
-    expect(requests).toBe(3)
+    expect(requests).toBe(5)
     f.ctx.goals.create(agent, { objective: 'A different current goal after the accepted workflow' })
     expect(() => f.service.inspectVerifiedWorkflowSource(agent, record.id)).toThrow('exact completed native goal')
     expect(f.service.inspectVerifiedWorkflowRun(agent, record.id, exported.runId)).toEqual(exported)
+    await f.dispose(agent)
+    expect(f.ctx.sessions.get(agent.session.id)).toBeUndefined()
+    await expect(f.service.inspectOwnerVerifiedWorkflowSource({ ownerRouteId: 'owner-route', principalId: 'owner', workspace: f.root,
+      preset: 'primary', sessionId: String(agent.session.id), goalId: record.id })).resolves.toEqual(ownerSource)
   })
 
   it('rejects historical workflow export when ownership scope changes or the accepted receipt expires', async () => {

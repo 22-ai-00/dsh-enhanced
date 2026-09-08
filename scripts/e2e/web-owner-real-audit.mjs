@@ -25,12 +25,20 @@ function compact(event) {
     if (typeof data.arguments === 'string') try { argumentsValue = JSON.parse(data.arguments) } catch { return null }
     const selected = data.name === 'goal_create' && argumentsValue.objective === objective ? { objective, max_goal_rounds: argumentsValue.max_goal_rounds, start_native_rounds: argumentsValue.start_native_rounds }
       : data.name === 'goal_wait_event' ? { goal_id: argumentsValue.goal_id, expected_revision: argumentsValue.expected_revision, trigger_id: argumentsValue.trigger_id, expires_at: argumentsValue.expires_at }
+        : data.name === 'skill_capture' ? { goal_id: argumentsValue.goal_id, name: argumentsValue.name, start_native_rounds: argumentsValue.start_native_rounds }
         : { file_path: argumentsValue.file_path }
     return { seq: event.seq, type: event.type, data: { turn: data.turn, callId: data.callId, name: data.name, arguments: selected } }
   }
+  if (event.type === 'tool/result') {
+    const message = data.message && typeof data.message === 'object' && !Array.isArray(data.message) ? data.message : {}
+    const source = message.source && typeof message.source === 'object' && !Array.isArray(message.source) ? message.source : {}
+    const result = Array.isArray(message.content) && message.content.length === 1 && message.content[0]?.type === 'tool-result' ? message.content[0] : {}
+    return { seq: event.seq, type: event.type, data: { turn: data.turn, callId: source.callId, isError: result.toolCallId !== source.callId || typeof source.callId !== 'string' || message.isError === true || result.isError === true } }
+  }
   if (event.type === 'turn/start') return { seq: event.seq, type: event.type, data: { turn: data.turn } }
+  if (event.type === 'turn/end') return { seq: event.seq, type: event.type, data: { turn: data.turn, reason: data.reason?.kind } }
   if (event.type === 'user/message' && data.source?.kind === 'goal') return { seq: event.seq, type: event.type,
-    data: { source: { kind: 'goal', round: data.source.round } } }
+    data: { source: { kind: 'goal', goalId: data.source.goalId, revision: data.source.revision, round: data.source.round } } }
   if (event.type === 'approval/asked' || event.type === 'approval/decided') return { seq: event.seq, type: event.type, data: { id: data.id, callId: data.callId, toolName: data.toolName, outcome: data.outcome } }
   if (event.type.startsWith('goal/')) return { seq: event.seq, type: event.type, data: Object.fromEntries(Object.entries(data).filter(([, value]) => value === null || ['string', 'number', 'boolean'].includes(typeof value))) }
   if (['permission/preset', 'sandbox/mode', 'approval/policy', 'assistant-policy/approval-reviewer'].includes(event.type)) return { seq: event.seq, type: event.type, data: event.type === 'permission/preset' ? { preset: data.preset } : event.type === 'sandbox/mode' ? { mode: data.mode } : event.type === 'approval/policy' ? { policy: data.policy } : { reviewer: data.reviewer } }

@@ -1,4 +1,5 @@
 import type { VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
+import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 export type { VerifiedWorkflowSource } from '@dsh-enhanced/assistant-goals'
 
 export type SkillScalar = string | number | boolean
@@ -88,10 +89,55 @@ function inputType(value: SkillScalar): SkillInputType {
   if (typeof value === 'number') return 'number'
   return 'boolean'
 }
-function controlTool(name: string): boolean {
+function controlTool(name: string, arguments_: unknown): boolean {
   const normalized = name.toLowerCase()
+  // Native get_goal is a parameterless read of the current Goal. It is only
+  // reusable when the Host explicitly allowlists it; all other goal controls
+  // remain excluded from captured tool compositions.
+  if (normalized === 'get_goal') return !arguments_ || typeof arguments_ !== 'object' || Array.isArray(arguments_)
+    || Object.getPrototypeOf(arguments_) !== Object.prototype || Object.getOwnPropertySymbols(arguments_).length !== 0 || Object.keys(arguments_).length !== 0
   return normalized.startsWith('goal_') || normalized.startsWith('skill') || normalized.includes('workflow') || normalized.includes('subagent')
-    || ['create_goal', 'update_goal', 'get_goal', 'run_code', 'javascript'].includes(normalized)
+    || ['create_goal', 'update_goal', 'run_code', 'javascript'].includes(normalized)
+}
+function failedProbe(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return false
+  const observation = value as { id?: unknown; toolName?: unknown; arguments?: unknown; outcome?: unknown }
+  if (!text(observation.id, 256) || !text(observation.toolName, 256) || observation.outcome !== 'failed' || !json(observation.arguments)) return false
+  if (observation.toolName === 'read' || observation.toolName === 'glob' || observation.toolName === 'grep') return true
+  return observation.toolName === 'get_goal' && !controlTool('get_goal', observation.arguments)
+}
+
+/** Successful source-Goal planning notes are provenance, never reusable authority. */
+function sourceCheckpoint(value: unknown, goalId: string): boolean {
+  if (!json(value) || !value || typeof value !== 'object' || Array.isArray(value)) return false
+  const args = value as Record<string, unknown>
+  const keys = ['goal_id', 'expected_version', 'next_step', 'blockers', 'assumptions', 'evidence_refs', 'dependencies']
+  const strings = (items: unknown) => Array.isArray(items) && items.every(item => typeof item === 'string')
+  return Object.keys(args).length === keys.length && Object.keys(args).every(key => keys.includes(key))
+    && args.goal_id === goalId && Number.isSafeInteger(args.expected_version) && (args.expected_version as number) > 0
+    && typeof args.next_step === 'string' && strings(args.blockers) && strings(args.evidence_refs) && strings(args.dependencies)
+    && Array.isArray(args.assumptions) && args.assumptions.every(item => item && typeof item === 'object' && !Array.isArray(item)
+      && Object.keys(item).length === 2 && Object.keys(item).every(key => ['statement', 'expires_at'].includes(key))
+      && typeof item.statement === 'string' && Number.isSafeInteger(item.expires_at) && item.expires_at > 0)
+}
+
+/** Multi-round provenance is explicit; the v1 top-level still names the final accepted run. */
+function sourceProjection(source: VerifiedWorkflowSource) {
+  if (source.segments === undefined) return { steps: source.steps, observations: source.failedObservations ?? [] }
+  const segments = source.segments
+  if (!Array.isArray(segments) || segments.length < 2 || segments.length > 32) fail('assistant-skills: invalid source segments')
+  const runs = new Set<string>()
+  for (const [index, segment] of segments.entries()) {
+    if (!segment || !text(segment.runId, 256) || runs.has(segment.runId) || segment.round !== index + 1
+      || !Number.isSafeInteger(segment.turn) || segment.turn < 1 || index > 0 && segment.turn <= segments[index - 1]!.turn
+      || !Number.isSafeInteger(segment.nativeRevision) || segment.nativeRevision < 0 || !Array.isArray(segment.steps)
+      || segment.failedObservations !== undefined && !Array.isArray(segment.failedObservations)) fail('assistant-skills: invalid source segment')
+    runs.add(segment.runId)
+  }
+  const final = segments.at(-1)!
+  if (final.runId !== source.runId || final.turn !== source.turn || acceptanceDigest(final.steps) !== acceptanceDigest(source.steps)
+    || acceptanceDigest(final.failedObservations ?? []) !== acceptanceDigest(source.failedObservations ?? [])) fail('assistant-skills: final source segment mismatch')
+  return { steps: segments.flatMap(segment => segment.steps), observations: segments.flatMap(segment => segment.failedObservations ?? []) }
 }
 
 /** Derive a bounded, parameterizable skill only from an independently verified tool trace. */
@@ -101,11 +147,18 @@ export function createDefinition(source: VerifiedWorkflowSource, options: Create
     || !Array.isArray(allowedTools) || allowedTools.some(tool => !text(tool, 256))) fail()
   const allow = new Set(allowedTools)
   if (allow.size !== allowedTools.length) fail('assistant-skills: duplicate allowed tool')
-  const steps = source.steps.map((step, index) => {
-    if (!step || !text(step.id, 256) || !text(step.toolName, 256) || !allow.has(step.toolName) || controlTool(step.toolName) || !json(step.arguments)) fail('assistant-skills: untrusted tool trace')
-    return { id: step.id, toolName: step.toolName, arguments: clone(step.arguments), dependsOn: index === 0 ? [] : [source.steps[index - 1]!.id] }
+  const { steps: sourceSteps, observations } = sourceProjection(source)
+  if (!Array.isArray(observations) || sourceSteps.length + observations.length > 32 || observations.some(value => !failedProbe(value))) fail('assistant-skills: invalid failed observation')
+  const executable = sourceSteps.filter(step => {
+    if (!step || !text(step.id, 256) || !text(step.toolName, 256) || !json(step.arguments)) fail('assistant-skills: untrusted tool trace')
+    if (step.toolName === 'goal_checkpoint' && sourceCheckpoint(step.arguments, source.goal.id)) return false
+    if (!allow.has(step.toolName) || controlTool(step.toolName, step.arguments)) fail('assistant-skills: untrusted tool trace')
+    return true
   })
-  if (new Set(steps.map(step => step.id)).size !== steps.length || Buffer.byteLength(JSON.stringify(steps.map(step => step.arguments)), 'utf8') > maximumArgumentsBytes) fail('assistant-skills: bounded tool trace is required')
+  if (executable.length === 0) fail('assistant-skills: executable tool trace required')
+  const steps = executable.map((step, index) => ({ id: step.id, toolName: step.toolName, arguments: clone(step.arguments), dependsOn: index === 0 ? [] : [executable[index - 1]!.id] }))
+  if (new Set([...sourceSteps.map(step => step.id), ...observations.map(value => value.id)]).size !== sourceSteps.length + observations.length
+    || Buffer.byteLength(JSON.stringify([...sourceSteps.map(step => step.arguments), ...observations.map(value => value.arguments)]), 'utf8') > maximumArgumentsBytes) fail('assistant-skills: bounded tool trace is required')
   const bindings = options.bindings ?? []
   if (!Array.isArray(bindings) || bindings.length > 8) fail('assistant-skills: too many bindings')
   const names = new Set<string>(); const locations = new Set<string>()

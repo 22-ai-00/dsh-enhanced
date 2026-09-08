@@ -52,6 +52,12 @@ export interface SkillWatch {
   runIds: readonly string[]; observations: readonly SkillWatchObservation[]; createdAt: number; updatedAt: number; rollbackVersion?: number
 }
 export interface SkillWatchInput { ownerRouteId: string; skillName: string; version: number; fallbackVersion: number; expiresAt: number; maxRuns: number; failureThreshold: number }
+export interface SkillCapture {
+  id: string; scope: object; routeReceipt: unknown; ownerRouteId: string; goalId: string; sessionId: string
+  nativeGoalId: string; name: string; description: string; parentVersion: number; parentDigest: string | null; definitionDigest: string
+  expiresAt: number; state: 'pending' | 'captured' | 'revoked' | 'expired' | 'unsupported' | 'unknown'; candidateId?: string; detail?: string; createdAt: number; updatedAt: number
+}
+export interface SkillCaptureInput { ownerRouteId: string; goalId: string; sessionId: string; nativeGoalId: string; name: string; description: string; parentVersion: number; expiresAt: number }
 
 function fail(message = 'assistant-skills: store operation rejected'): never { throw new Error(message) }
 function json(value: unknown): boolean {
@@ -109,9 +115,11 @@ export class SkillStore {
       CREATE TABLE IF NOT EXISTS skill_candidates(scope_key TEXT NOT NULL, id TEXT NOT NULL, candidate_json TEXT NOT NULL, PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_comparisons(scope_key TEXT NOT NULL,id TEXT NOT NULL,profile_id TEXT NOT NULL,identity_json TEXT NOT NULL,comparison_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('running','complete','unknown')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE TABLE IF NOT EXISTS skill_watches(scope_key TEXT NOT NULL,id TEXT NOT NULL,watch_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('watching','rolled-back','expired','revoked','superseded','exhausted')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
+      CREATE TABLE IF NOT EXISTS skill_captures(scope_key TEXT NOT NULL,id TEXT NOT NULL,capture_json TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('pending','captured','revoked','expired','unsupported','unknown')),PRIMARY KEY(scope_key,id)) STRICT, WITHOUT ROWID;
       CREATE INDEX IF NOT EXISTS skill_definitions_current ON skill_definitions(scope_key,name,version DESC);
       CREATE INDEX IF NOT EXISTS skill_runs_scope ON skill_runs(scope_key,id);
       CREATE INDEX IF NOT EXISTS skill_watches_scope_state ON skill_watches(scope_key,state);
+      CREATE INDEX IF NOT EXISTS skill_captures_scope_state ON skill_captures(scope_key,state);
 `)
     this.#db.prepare("UPDATE skill_runs SET state='unknown', run_json=json_set(run_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
     this.#db.prepare("UPDATE skill_comparisons SET state='unknown', comparison_json=json_set(comparison_json, '$.state', 'unknown', '$.updatedAt', ?) WHERE state='running'").run(Date.now())
@@ -183,6 +191,41 @@ export class SkillStore {
   listCandidates(scope: object): SkillCandidate[] {
     const key = scopeKey(scope)
     return (this.#db.prepare('SELECT candidate_json FROM skill_candidates WHERE scope_key=? ORDER BY id').all(key) as { candidate_json: string }[]).map(row => clone(JSON.parse(row.candidate_json) as SkillCandidate))
+  }
+  createCapture(scope: object, input: SkillCaptureInput, routeReceipt: unknown, definitionDigest: string): SkillCapture {
+    const key = scopeKey(scope)
+    if (!input || !text(input.ownerRouteId, 256) || !text(input.goalId, 256) || !text(input.sessionId, 256) || !text(input.nativeGoalId, 256) || !name(input.name) || !text(input.description, 512)
+      || !version(input.parentVersion, true) || !Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || input.expiresAt > Date.now() + 7 * 86400000 || !/^[a-f0-9]{64}$/u.test(definitionDigest)) fail('assistant-skills: invalid capture')
+    this.#db.exec('BEGIN IMMEDIATE'); try {
+      const current = this.#latest(key, input.name), parentDigest = current ? acceptanceDigest(current) : null
+      if (current?.retired || (current?.version ?? 0) !== input.parentVersion || (input.parentVersion === 0 && current) || parentDigest !== (input.parentVersion ? parentDigest : null)) fail('assistant-skills: version conflict')
+      const id = `skill-capture-${acceptanceDigest([scope, input, parentDigest, definitionDigest])}`, existing = this.#capture(key, id)
+      if (existing) { this.#db.exec('COMMIT'); return clone(existing) }
+      const now = Date.now(), capture: SkillCapture = { id, scope: clone(scope), routeReceipt: clone(routeReceipt), ownerRouteId: input.ownerRouteId, goalId: input.goalId, sessionId: input.sessionId, nativeGoalId: input.nativeGoalId, name: input.name, description: input.description, parentVersion: input.parentVersion, parentDigest, definitionDigest, expiresAt: input.expiresAt, state: 'pending', createdAt: now, updatedAt: now }
+      this.#putCapture(key, capture); this.#db.exec('COMMIT'); return clone(capture)
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  listCaptures(scope?: object): SkillCapture[] {
+    const rows = scope === undefined ? this.#db.prepare("SELECT capture_json FROM skill_captures WHERE state='pending' ORDER BY id").all() : this.#db.prepare('SELECT capture_json FROM skill_captures WHERE scope_key=? ORDER BY id').all(scopeKey(scope))
+    return (rows as { capture_json: string }[]).map(row => clone(JSON.parse(row.capture_json) as SkillCapture))
+  }
+  finishCapture(scope: object, id: string, state: Exclude<SkillCapture['state'], 'pending' | 'captured'>, detail?: string): SkillCapture {
+    const key = scopeKey(scope); this.#db.exec('BEGIN IMMEDIATE'); try { const capture = this.#capture(key, id); if (!capture) fail('assistant-skills: capture missing'); if (capture.state === 'pending') this.#putCapture(key, { ...capture, state, ...(detail ? { detail } : {}), updatedAt: Date.now() }); this.#db.exec('COMMIT'); return clone(this.#capture(key, id)!) } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
+  }
+  captureCandidate(scope: object, id: string, definition: SkillDefinition): SkillCapture {
+    const key = scopeKey(scope); if (!definitionValid(definition)) fail('assistant-skills: invalid capture definition')
+    this.#db.exec('BEGIN IMMEDIATE'); try {
+      const capture = this.#capture(key, id); if (!capture) fail('assistant-skills: capture missing'); if (capture.state === 'captured') { this.#db.exec('COMMIT'); return clone(capture) }
+      if (capture.state !== 'pending' || capture.expiresAt <= Date.now()) fail('assistant-skills: capture unavailable')
+      const current = this.#latest(key, capture.name)
+      if (current?.retired || (current?.version ?? 0) !== capture.parentVersion || (current ? acceptanceDigest(current) : null) !== capture.parentDigest || definition.source.goal.id !== capture.goalId || definition.source.goal.sessionId !== capture.sessionId || definition.source.goal.nativeGoalId !== capture.nativeGoalId || definition.source.goal.definition.digest !== capture.definitionDigest) fail('assistant-skills: capture changed')
+      const reason = 'Owner-preauthorized automatic capture.', trigger = `owner-route:${capture.ownerRouteId}`
+      const candidateId = `skill-candidate-${acceptanceDigest([scope, definition, capture.parentVersion, capture.parentDigest, reason, trigger])}`
+      const candidate = this.#candidate(key, candidateId) ?? { id: candidateId, definition: clone(definition), parentVersion: capture.parentVersion, parentDigest: capture.parentDigest, reason, trigger, expiresAt: capture.expiresAt, state: 'pending' as const, createdAt: Date.now(), updatedAt: Date.now() }
+      if (candidate.state !== 'pending') fail('assistant-skills: candidate conflict')
+      this.#putCandidate(key, candidate)
+      const saved = { ...capture, state: 'captured' as const, candidateId: candidate.id, updatedAt: Date.now() }; this.#putCapture(key, saved); this.#db.exec('COMMIT'); return clone(saved)
+    } catch (error) { try { this.#db.exec('ROLLBACK') } catch {} throw error }
   }
   rejectCandidate(scope: object, id: string): SkillCandidate {
     const key = scopeKey(scope); if (!text(id, 128)) fail('assistant-skills: invalid candidate reference')
@@ -297,6 +340,9 @@ export class SkillStore {
         if (acceptanceDigest(identity) !== acceptanceDigest(JSON.parse(existing.identity_json))) fail('assistant-skills: invocation conflict')
         this.#db.exec('COMMIT'); return { claimed: false, run: clone(JSON.parse(existing.run_json) as SkillRun) }
       }
+      const unresolved = this.#db.prepare("SELECT run_json FROM skill_runs WHERE scope_key=? AND json_extract(identity_json,'$.sessionId')=? AND json_extract(identity_json,'$.goalId')=? AND json_extract(identity_json,'$.skillName')=? AND json_extract(identity_json,'$.version')=? AND coalesce(json_extract(identity_json,'$.candidateId'),'')=coalesce(?, '') AND state IN ('running','unknown') LIMIT 1")
+        .get(key, input.sessionId, input.goalId, input.skillName, input.version, input.candidateId ?? null) as { run_json: string } | undefined
+      if (unresolved) fail('assistant-skills: unresolved invocation for this Goal; inspect skill_status, do not replay')
       const now = Date.now(); const run: SkillRun = { id, ...identity, state: 'running', steps: [], createdAt: now, updatedAt: now }
       this.#db.prepare('INSERT INTO skill_runs VALUES(?,?,?,?,?)').run(id, key, JSON.stringify(identity), JSON.stringify(run), run.state)
       this.#db.exec('COMMIT'); return { claimed: true, run: clone(run) }
@@ -364,12 +410,14 @@ export class SkillStore {
     const row = this.#db.prepare('SELECT candidate_json FROM skill_candidates WHERE scope_key=? AND id=?').get(key, id) as { candidate_json: string } | undefined
     return row === undefined ? undefined : JSON.parse(row.candidate_json) as SkillCandidate
   }
+  #capture(key: string, id: string): SkillCapture | undefined { const row = this.#db.prepare('SELECT capture_json FROM skill_captures WHERE scope_key=? AND id=?').get(key, id) as { capture_json: string } | undefined; return row ? JSON.parse(row.capture_json) as SkillCapture : undefined }
   #watch(key: string, id: string): SkillWatch | undefined { const row = this.#db.prepare('SELECT watch_json FROM skill_watches WHERE scope_key=? AND id=?').get(key, id) as { watch_json: string } | undefined; return row ? JSON.parse(row.watch_json) as SkillWatch : undefined }
   #watches(key: string, state: SkillWatch['state']): SkillWatch[] { return (this.#db.prepare('SELECT watch_json FROM skill_watches WHERE scope_key=? AND state=?').all(key, state) as { watch_json: string }[]).map(row => JSON.parse(row.watch_json) as SkillWatch) }
   #putWatch(key: string, watch: SkillWatch): void { this.#db.prepare('INSERT INTO skill_watches(scope_key,id,watch_json,state) VALUES(?,?,?,?) ON CONFLICT(scope_key,id) DO UPDATE SET watch_json=excluded.watch_json,state=excluded.state').run(key, watch.id, JSON.stringify(watch), watch.state) }
   #putCandidate(key: string, candidate: SkillCandidate): void {
     this.#db.prepare('INSERT INTO skill_candidates(scope_key,id,candidate_json) VALUES(?,?,?) ON CONFLICT(scope_key,id) DO UPDATE SET candidate_json=excluded.candidate_json').run(key, candidate.id, JSON.stringify(candidate))
   }
+  #putCapture(key: string, capture: SkillCapture): void { this.#db.prepare('INSERT INTO skill_captures(scope_key,id,capture_json,state) VALUES(?,?,?,?) ON CONFLICT(scope_key,id) DO UPDATE SET capture_json=excluded.capture_json,state=excluded.state').run(key, capture.id, JSON.stringify(capture), capture.state) }
   #run(key: string, id: string): SkillRun | undefined {
     const row = this.#db.prepare('SELECT run_json FROM skill_runs WHERE scope_key=? AND id=?').get(key, id) as { run_json: string } | undefined
     return row === undefined ? undefined : JSON.parse(row.run_json) as SkillRun

@@ -7,6 +7,7 @@ import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test, vi } from 'vitest'
@@ -18,22 +19,24 @@ const cleanups: (() => Promise<void>)[] = []
 const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
 const dockerAvailable = /^sha256:[0-9a-f]{64}$/u.test(image)
 afterEach(async () => { vi.restoreAllMocks(); for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
-function makeAgent(ctx: Context, workspace: string, id: string): Agent {
-  const sid = SessionId(id), session = Session.create(sid, [], { version: SESSION_FORMAT_VERSION, id: sid, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
-  const value: Agent = { id: sid, options: { provider: 'fixture', model: 'fixture' }, session,
+function runRows(root: string): number { const database = new DatabaseSync(join(root, 'skills.sqlite')); try { return (database.prepare('SELECT count(*) AS count FROM skill_runs').get() as { count: number }).count } finally { database.close() } }
+function makeAgent(ctx: Context, workspace: string, id: string, sessionId = id): Agent {
+  const sid = SessionId(sessionId), session = Session.create(sid, [], { version: SESSION_FORMAT_VERSION, id: sid, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
+  const value: Agent = { id: SessionId(id), options: { provider: 'fixture', model: 'fixture' }, session,
     inbox: new Inbox(session, { inserted() {}, discarded() {}, claimed() {} }), ctx: undefined as unknown as Context,
     status: 'idle', cancel() {}, whenIdle: async () => {}, runMaintenance: task => task(new AbortController().signal), send() {}, followup() {}, steer() {}, inject() {} }
   ;(value as unknown as { ctx: Context }).ctx = createScope(ctx, value).ctx
   session.append('turn/start', { turn: 1 })
   return value
 }
-async function fixture(twoSteps = false, comparison = false) {
+async function fixture(twoSteps = false, comparison = false, ownerAgentId = 'owner-session', ownerSessionId = ownerAgentId) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-skills-service-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
   const comparisonRoot = comparison ? await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-')) : undefined
   if (comparisonRoot) { await chmod(comparisonRoot, 0o700); cleanups.push(() => rm(comparisonRoot, { recursive: true, force: true })) }
   const ctx = new Context(); cleanups.push(() => ctx.fiber.restart())
-  const owner = makeAgent(ctx, root, 'owner-session'), foreign = makeAgent(ctx, root, 'other-session')
+  const owner = makeAgent(ctx, root, ownerAgentId, ownerSessionId), foreign = makeAgent(ctx, root, 'other-session')
+  const ownerSession = String(owner.session.id)
   let live = true, routeLive = true, routeVersion = 1, backgroundAllowed = true, human = true, admitted = true, deniedTool = false, revokeAfterWrite = false, budgetDenied = false, count = 0
   const scope = { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: root, preset: 'primary' }
   const principal = (agent: Agent) => live ? { principalId: agent === owner ? 'owner' : 'foreign', principalLineage: { principalRecordId: agent === owner ? 'owner-record' : 'foreign-record', principalVersion: 1 }, scope: { workspace: root, preset: 'primary' } } : undefined
@@ -43,17 +46,22 @@ async function fixture(twoSteps = false, comparison = false) {
   const charges: string[] = []
   ctx.provide('assistantVerifier' as never, {} as never)
   ctx.provide('assistantPolicy' as never, { evaluate: () => ({ effect: backgroundAllowed ? 'allow' : 'deny' }), authorize: () => ({ effect: backgroundAllowed && !budgetDenied ? 'allow' : 'deny' }), evaluateAgent: () => ({ effect: live ? 'allow' : 'deny' }), authorizeAgent: (_agent: Agent, _action: string, _resource: unknown, options: { idempotencyKey: string }) => { charges.push(options.idempotencyKey); return { effect: live && !budgetDenied ? 'allow' : 'deny' } } } as never)
-  const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope, goal: { id: 'source-goal', definition: { version: 1, digest: 'a'.repeat(64), objective: 'Write a source artifact' }, sessionId: String(owner.id), nativeGoalId: 'native-source' },
+  const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope, goal: { id: 'source-goal', definition: { version: 1, digest: 'a'.repeat(64), objective: 'Write a source artifact' }, sessionId: ownerSession, nativeGoalId: 'native-source-goal' },
     runId: 'verified-run', turn: 1, acceptance: { contractId: 'contract', contractDigest: 'b'.repeat(64), receiptDigest: 'c'.repeat(64), verifiedAt: Date.now(), validUntil: Date.now() + 60000 },
-    steps: [{ id: 'step-1', toolName: 'write', arguments: comparison ? { file_path: 'result.sh', content: '#!/bin/sh\nread x\nprintf wrong' } : { file: 'output.txt', data: 'original' } }, ...(twoSteps ? [{ id: 'step-2', toolName: 'write', arguments: { file: 'second.txt', data: 'second' } }] : [])] }
+    steps: [{ id: 'step-1', toolName: 'write', arguments: comparison ? { file_path: 'result.sh', content: '#!/bin/sh\nread x\nprintf wrong' } : { file: 'output.txt', data: 'original' } }, ...(twoSteps ? [{ id: 'step-2', toolName: 'write', arguments: { file: 'second.txt', data: 'second' } }] : [])], failedObservations: [] as { id: string; toolName: string; arguments: unknown; outcome: 'failed' }[] }
   let verified: { goalId: string; runId: string; steps: unknown[] } | Error | undefined
   // These are Host source/admission seams, not independent acceptance fixtures.
   // Goals tests and the real Web scenario validate the provenance producer.
   const snapshots = new Map<string, unknown>()
+  let automaticSource: typeof source | Error | undefined, automaticDefinitionDigest = 'd'.repeat(64)
+  let bridgeRequiresSessionQuery = false, sessionQueryReady = false
+  let automaticGate: Promise<void> | undefined, releaseAutomaticGate: (() => void) | undefined
   ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source,
-    inspectWorkflowRunContext: (_agent: Agent, goalId: string) => { if (!admitted) throw new Error('round not admitted'); return { scope, goalId, sessionId: String(owner.id), goalExecutionRunId: `goal-execution-${goalId}`, nativeGoalId: `native-${goalId}`, definition: { version: 1, digest: 'd'.repeat(64) } } },
-    inspectOwnerGoalExecution: (input: { goalId: string }) => snapshots.get(input.goalId) ?? { storedGoal: { definition: { digest: 'd'.repeat(64) } }, outcomeAssessments: [], acceptedTasks: [] },
-    inspectVerifiedWorkflowRun: (_agent: Agent, goalId: string, runId: string) => { if (verified instanceof Error) throw verified; const proof = verified; return { scope, goal: { id: proof?.goalId ?? goalId, sessionId: String(owner.id), definition: { version: 1, digest: 'd'.repeat(64) } }, runId: proof?.runId ?? runId,
+    inspectOwnerVerifiedWorkflowSource: async () => { await automaticGate; if (bridgeRequiresSessionQuery && !sessionQueryReady) throw Object.assign(new Error('session query unavailable'), { code: 'unavailable' }); if (automaticSource instanceof Error) throw automaticSource; if (!automaticSource) throw Object.assign(new Error('not completed'), { code: 'pending' }); return automaticSource },
+    inspectActiveWorkflowCaptureContext: (agent: Agent, goalId: string) => { if (!human || agent !== owner) throw new Error('active owner Goal unavailable'); return { scope, goalId, sessionId: ownerSession, nativeGoalId: `native-${goalId}`, definition: { digest: 'd'.repeat(64) } } },
+    inspectWorkflowRunContext: (_agent: Agent, goalId: string) => { if (!admitted) throw new Error('round not admitted'); return { scope, goalId, sessionId: ownerSession, goalExecutionRunId: `goal-execution-${goalId}`, nativeGoalId: `native-${goalId}`, definition: { version: 1, digest: 'd'.repeat(64) } } },
+    inspectOwnerGoalExecution: (input: { goalId: string }) => snapshots.get(input.goalId) ?? { storedGoal: { definition: { digest: 'd'.repeat(64) }, nativeAtLastObservation: { sessionId: ownerSession, goalId: `native-${input.goalId}`, phase: 'active' } }, outcomeAssessments: [], acceptedTasks: [] },
+    inspectVerifiedWorkflowRun: (_agent: Agent, goalId: string, runId: string) => { if (verified instanceof Error) throw verified; const proof = verified; return { scope, goal: { id: proof?.goalId ?? goalId, sessionId: ownerSession, definition: { version: 1, digest: 'd'.repeat(64) } }, runId: proof?.runId ?? runId,
       acceptance: { contractId: 'trial-contract', contractDigest: 'e'.repeat(64), receiptDigest: 'f'.repeat(64), verifiedAt: source.acceptance.verifiedAt, validUntil: source.acceptance.validUntil }, steps: proof?.steps ?? [] } } } as never)
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
   ctx.tools.register(defineTool({ name: 'write', description: 'Fixture filesystem writer', parameters: comparison ? { file_path: { type: 'string', required: true }, content: { type: 'string', required: true } } : { file: { type: 'string', required: true }, data: { type: 'string', required: true } },
@@ -77,8 +85,8 @@ async function fixture(twoSteps = false, comparison = false) {
   const activate = (candidateId: string, trialRunId: string, agent = owner) => execute('skill_activate', { candidate_id: candidateId, trial_run_id: trialRunId }, agent)
   const rollback = (expectedVersion: number, targetVersion: number) => execute('skill_rollback', { name: 'saved-write', expected_version: expectedVersion, target_version: targetVersion })
   return { root, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true },
-    source, candidate, trial, activate, rollback, setVerifiedTrial: (goalId: string, runId: string, args: unknown, extraSteps: unknown[] = []) => { verified = { goalId, runId, steps: [{ toolName: 'skill_trial', arguments: args }, ...extraSteps] } }, clearVerifiedTrial: () => { verified = undefined }, failVerifiedTrial: () => { verified = new Error('fixture acceptance proof expired') }, setSnapshot: (goalId: string, runId: string, status: 'achieved' | 'not-achieved', options: { expired?: boolean; wrongRun?: boolean; wrongNative?: boolean; unknownExecution?: boolean; future?: boolean; tampered?: boolean } = {}) => {
-      const now = Date.now(), goal = { id: goalId, definitionVersion: 1, definitionDigest: 'd'.repeat(64), sessionId: String(owner.id), nativeGoalId: options.wrongNative ? 'foreign-native' : `native-${goalId}` }
+    source, candidate, trial, activate, rollback, enableAutomaticSource: () => { automaticSource = { ...source, goal: { ...source.goal, definition: { ...source.goal.definition, digest: automaticDefinitionDigest } } } }, addFailedReadObservation: () => { source.failedObservations.push({ id: 'missing-read', toolName: 'read', arguments: { file: 'missing.txt' }, outcome: 'failed' }) }, requireSessionQuery: () => { bridgeRequiresSessionQuery = true }, provideSessionQuery: () => { sessionQueryReady = true; ctx.provide('sessionQuery' as never, {} as never) }, changeAutomaticDefinition: () => { automaticDefinitionDigest = 'e'.repeat(64) }, holdAutomaticSource: () => { automaticGate = new Promise(resolve => { releaseAutomaticGate = resolve }) }, releaseAutomaticSource: () => { releaseAutomaticGate?.(); automaticGate = undefined; releaseAutomaticGate = undefined }, setAutomaticSourceError: () => { automaticSource = Object.assign(new Error('unknown outcome'), { code: 'unknown' }) }, setVerifiedTrial: (goalId: string, runId: string, args: unknown, extraSteps: unknown[] = []) => { verified = { goalId, runId, steps: [{ toolName: 'skill_trial', arguments: args }, ...extraSteps] } }, setVerifiedTrialSteps: (goalId: string, runId: string, steps: unknown[]) => { verified = { goalId, runId, steps } }, clearVerifiedTrial: () => { verified = undefined }, failVerifiedTrial: () => { verified = new Error('fixture acceptance proof expired') }, setSnapshot: (goalId: string, runId: string, status: 'achieved' | 'not-achieved', options: { expired?: boolean; wrongRun?: boolean; wrongNative?: boolean; unknownExecution?: boolean; future?: boolean; tampered?: boolean } = {}) => {
+      const now = Date.now(), goal = { id: goalId, definitionVersion: 1, definitionDigest: 'd'.repeat(64), sessionId: ownerSession, nativeGoalId: options.wrongNative ? 'foreign-native' : `native-${goalId}` }
       const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v3', id: `outcome-${goalId}`, task: { kind: 'goal-outcome', ref: `assessment-${goalId}`, goal: { ...goal, assessmentId: `assessment-${goalId}` } },
         scope: { workspace: root, preset: 'primary' }, owner: { principalRecordId: 'owner-record', principalVersion: 1 }, objective: 'Check reused skill result', profile: { id: 'profile', version: 1, digest: 'a'.repeat(64) },
         criteria: [{ id: 'result', kind: 'target-readback', authority: { id: 'check', digest: 'a'.repeat(64) }, objectId: 'output', expected: [{ pointer: '/ready', value: true }] }], issuedAt: now - 1000, expiresAt: now + 60_000, bounds: { maxDurationMs: 1000, maxEvidenceBytes: 4096 } })
@@ -86,7 +94,7 @@ async function fixture(twoSteps = false, comparison = false) {
       const receipt = createTaskVerificationReceipt(contract, { protocol: 'task-verification/v3', id: `receipt-${goalId}`, contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task: contract.task,
         results: [{ criterionId: 'result', status: status === 'achieved' ? 'passed' : 'failed', reason: 'independent-fixture-check', evidence: [] }], startedAt: completedAt, completedAt, validUntil: options.expired ? now - 1 : now + 60_000 })
       const execution = { status: options.unknownExecution ? 'unknown' : 'succeeded', quiescent: !options.unknownExecution, completedAt: now }
-      snapshots.set(goalId, { storedGoal: { id: goalId, scope, definition: { version: 1, digest: 'd'.repeat(64) }, nativeAtLastObservation: { sessionId: String(owner.id), goalId: `native-${goalId}` } },
+      snapshots.set(goalId, { storedGoal: { id: goalId, scope, definition: { version: 1, digest: 'd'.repeat(64) }, nativeAtLastObservation: { sessionId: ownerSession, goalId: `native-${goalId}` } },
         executionRuns: [{ intent: { runId, scope, task: { kind: 'goal-step', goal } }, dispatchedAt: now - 1000, execution }],
         outcomeAssessments: [{ triggerRunId: options.wrongRun ? 'wrong-run' : runId, contract, dispatchedAt: now - 1000, execution }],
         acceptedTasks: [{ contractId: contract.id, state: 'done', contract, receipt: options.tampered ? { ...receipt, digest: 'f'.repeat(64) } : receipt, verifierExecutionObservation: { ...execution, executionRef: contract.task.ref } }] })
@@ -114,13 +122,120 @@ test('native tool composition writes parameterized artifacts, persists across re
   expect(result(await f.run('new-invocation')).state).toBe('succeeded'); expect(f.count()).toBe(2)
 })
 
-test('requires a human save request, exact owner and an admitted new Goal', async () => {
+test('requires a human save request, and hands an active owner Goal to its first native round without claiming work', async () => {
   const f = await fixture(); f.human(false); expect((await f.save()).isError).toBe(true)
   f.human(true); result(await f.save())
   expect(result(await f.execute('skill_status', {}, f.foreign))).toEqual([])
-  f.admitted(false); expect((await f.run()).isError).toBe(true); expect(f.count()).toBe(0)
+  const runCharges = f.charges.length
+  f.admitted(false); const handoff = await f.run(); expect(handoff.isError).toBe(false); expect(handoff.concludesTurn).toBe(true)
+  expect(JSON.parse((handoff.value as { context: string }).context)).toMatchObject({ state: 'awaiting-native-round', performed: false, goalId: 'new-goal', invocationId: 'first' }); expect(f.count()).toBe(0)
+  expect(runRows(f.root)).toBe(0); expect(f.charges).toHaveLength(runCharges)
   f.admitted(true)
+  expect(result(await f.run())).toMatchObject({ state: 'succeeded' }); expect(f.count()).toBe(1)
   expect((await f.execute('skill_run', { goal_id: 'source-goal', name: 'saved-write', version: 1, invocation_id: 'bad' })).isError).toBe(true)
+})
+
+test('trial handoff concludes only for a current owner fresh Goal and later executes once in its native round', async () => {
+  const f = await fixture(); const candidate = result(await f.candidate())
+  const trialCharges = f.charges.length
+  f.admitted(false); const handoff = await f.trial(candidate.id, 'trial-goal', 'handoff-trial')
+  expect(handoff).toMatchObject({ isError: false, concludesTurn: true }); expect(JSON.parse((handoff.value as { context: string }).context)).toMatchObject({ state: 'awaiting-native-round', candidateId: candidate.id, invocationId: 'handoff-trial' }); expect(f.count()).toBe(0)
+  expect(runRows(f.root)).toBe(0); expect(f.charges).toHaveLength(trialCharges)
+  f.admitted(true); expect(result(await f.trial(candidate.id, 'trial-goal', 'handoff-trial'))).toMatchObject({ state: 'succeeded' }); expect(f.count()).toBe(1)
+  const noOwner = await fixture(); result(await noOwner.save()); noOwner.admitted(false); noOwner.human(false)
+  const denied = await noOwner.run(); expect(denied.isError).toBe(true); expect(denied.concludesTurn).not.toBe(true)
+  const oldSource = await f.execute('skill_trial', { candidate_id: candidate.id, goal_id: 'source-goal', inputs_json: '{"message":"candidate"}', invocation_id: 'old-source' })
+  expect(oldSource.isError).toBe(true); expect(oldSource.concludesTurn).not.toBe(true)
+})
+
+test('owner-preauthorized capture remains pending before achievement, then atomically creates one pending candidate after a cold Host source read', async () => {
+  const f = await fixture()
+  const capture = result(await f.execute('skill_capture', { owner_route_id: 'owner-route', goal_id: 'source-goal', name: 'captured-write', description: 'Captured successful writer.', parent_version: 0, expires_at: Date.now() + 60000 }))
+  await Promise.resolve(); await Promise.resolve()
+  expect(result(await f.execute('skill_captures', {}))).toMatchObject([{ id: capture.id, state: 'pending' }])
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([])
+  f.enableAutomaticSource(); (f.ctx.emit as (event: string, value: unknown) => void)('goal/changed', { agent: f.owner })
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+  const captures = result(await f.execute('skill_captures', {})); expect(captures).toMatchObject([{ id: capture.id, state: 'captured' }])
+  const candidates = result(await f.execute('skill_candidates', {})); expect(candidates).toHaveLength(1); expect(candidates[0]).toMatchObject({ state: 'pending', parentVersion: 0, definition: { name: 'captured-write' } })
+  await f.restart(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await f.execute('skill_candidates', {}))).toHaveLength(1)
+  expect(result(await f.execute('skill_status', {}))).toEqual([])
+})
+
+test('capture registration uses the active Goal bridge and does not require an admitted execution run', async () => {
+  const f = await fixture(); f.admitted(false)
+  expect(result(await f.execute('skill_capture', { owner_route_id: 'owner-route', goal_id: 'source-goal', name: 'pre-run-capture', description: 'Register before native execution.', parent_version: 0, expires_at: Date.now() + 60000 }))).toMatchObject({ state: 'pending' })
+})
+
+test('capture concludes the owner turn only after successful explicit native-round handoff', async () => {
+  const args = (name: string, start_native_rounds?: boolean) => ({ owner_route_id: 'owner-route', goal_id: 'source-goal', name, description: 'Capture handoff.', parent_version: 0, expires_at: Date.now() + 60000, ...(start_native_rounds === undefined ? {} : { start_native_rounds }) })
+  const immediate = await fixture(); const success = await immediate.execute('skill_capture', args('handoff-true', true)) as { isError: boolean; concludesTurn?: boolean }
+  expect(success.isError).toBe(false); expect(success.concludesTurn).toBe(true)
+  const defaultValue = await fixture(); const defaultResult = await defaultValue.execute('skill_capture', args('handoff-default')) as { isError: boolean; concludesTurn?: boolean }
+  expect(defaultResult.isError).toBe(false); expect(defaultResult.concludesTurn).not.toBe(true)
+  const explicitFalse = await fixture(); const falseResult = await explicitFalse.execute('skill_capture', args('handoff-false', false)) as { isError: boolean; concludesTurn?: boolean }
+  expect(falseResult.isError).toBe(false); expect(falseResult.concludesTurn).not.toBe(true)
+  const failed = await fixture(); const failedResult = await failed.execute('skill_capture', { ...args('handoff-error', true), owner_route_id: 'bad-route' }) as { isError: boolean; concludesTurn?: boolean }
+  expect(failedResult.isError).toBe(true); expect(failedResult.concludesTurn).not.toBe(true)
+})
+
+test('capture binds the Session identifier when the Agent identifier differs', async () => {
+  const f = await fixture(false, false, 'owner-agent-id', 'owner-session-id')
+  expect(result(await f.execute('skill_capture', { owner_route_id: 'owner-route', goal_id: 'source-goal', name: 'session-bound-capture', description: 'Bind the exact session.', parent_version: 0, expires_at: Date.now() + 60000 }))).toMatchObject({ sessionId: 'owner-session-id', state: 'pending' })
+})
+
+test('automatic capture records an explicit unknown Goal outcome without creating a candidate', async () => {
+  const f = await fixture()
+  const capture = result(await f.execute('skill_capture', { owner_route_id: 'owner-route', goal_id: 'source-goal', name: 'unknown-write', description: 'Unknown capture.', parent_version: 0, expires_at: Date.now() + 60000 }))
+  f.setAutomaticSourceError(); await f.restart(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await f.execute('skill_captures', {}))).toMatchObject([{ id: capture.id, state: 'unknown' }])
+  expect(result(await f.execute('skill_candidates', {}))).toEqual([])
+})
+
+test('a late optional SessionQuery dependency nudges an unavailable cold capture without making manual skills depend on it', async () => {
+  const f = await fixture(); f.requireSessionQuery(); f.enableAutomaticSource()
+  const capture = result(await f.execute('skill_capture', { owner_route_id: 'owner-route', goal_id: 'source-goal', name: 'cold-query-capture', description: 'Capture after cold query startup.', parent_version: 0, expires_at: Date.now() + 60000 }))
+  await Promise.resolve(); await Promise.resolve()
+  expect(result(await f.execute('skill_captures', {}))).toMatchObject([{ id: capture.id, state: 'pending' }])
+  f.provideSessionQuery(); await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await f.execute('skill_captures', {}))).toMatchObject([{ id: capture.id, state: 'captured' }])
+  expect(result(await f.execute('skill_candidates', {}))).toHaveLength(1)
+})
+
+test('a captured candidate retains a failed read observation as provenance but replays only confirmed successful steps', async () => {
+  const f = await fixture(); f.addFailedReadObservation()
+  const capture = result(await f.execute('skill_capture', { owner_route_id: 'owner-route', goal_id: 'source-goal', name: 'mixed-trace-write', description: 'Write after a failed read probe.', parent_version: 0, expires_at: Date.now() + 60000 }))
+  f.enableAutomaticSource(); (f.ctx.emit as (event: string, value: unknown) => void)('goal/changed', { agent: f.owner })
+  await Promise.resolve(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await f.execute('skill_captures', {}))).toMatchObject([{ id: capture.id, state: 'captured' }])
+  const candidate = result(await f.execute('skill_candidates', {}))[0]
+  expect(candidate.definition.source.failedObservations).toEqual([{ id: 'missing-read', toolName: 'read', arguments: { file: 'missing.txt' }, outcome: 'failed' }])
+  expect(candidate.definition.steps.map((step: { toolName: string }) => step.toolName)).toEqual(['write'])
+  result(await f.trial(candidate.id, 'mixed-trace-trial', 'mixed-trace-once', '{}'))
+  expect(f.dispatches.filter(name => name === 'read')).toEqual([])
+  expect(f.count()).toBe(1)
+})
+
+test('automatic capture stops on frozen native identity, parent, route, and expiry changes', async () => {
+  const create = (f: Awaited<ReturnType<typeof fixture>>, name: string) => f.execute('skill_capture', { owner_route_id: 'owner-route', goal_id: 'source-goal', name, description: 'Finite capture.', parent_version: 0, expires_at: Date.now() + 60000 })
+  const native = await fixture(); result(await create(native, 'native-change')); native.source.goal.nativeGoalId = 'changed-native'; native.enableAutomaticSource(); await native.restart(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await native.execute('skill_captures', {}))).toMatchObject([{ state: 'revoked' }]); expect(result(await native.execute('skill_candidates', {}))).toEqual([])
+
+  const definition = await fixture(); result(await create(definition, 'definition-change')); definition.changeAutomaticDefinition(); definition.enableAutomaticSource(); await definition.restart(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await definition.execute('skill_captures', {}))).toMatchObject([{ state: 'revoked' }]); expect(result(await definition.execute('skill_candidates', {}))).toEqual([])
+
+  const parent = await fixture(); result(await create(parent, 'parent-change')); result(await parent.execute('skill_save', { goal_id: 'source-goal', name: 'parent-change', description: 'Parent change.', bindings_json: '[]', expected_version: 0 })); parent.enableAutomaticSource(); await parent.restart(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await parent.execute('skill_captures', {}))).toMatchObject([{ state: 'revoked' }]); expect(result(await parent.execute('skill_candidates', {}))).toEqual([])
+
+  const route = await fixture(); result(await create(route, 'route-change')); route.enableAutomaticSource(); route.revokeRoute(); await route.restart(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await route.execute('skill_captures', {}))).toMatchObject([{ state: 'revoked' }]); expect(result(await route.execute('skill_candidates', {}))).toEqual([])
+
+  const duringRead = await fixture(); result(await create(duringRead, 'route-during-read')); duringRead.enableAutomaticSource(); duringRead.holdAutomaticSource(); await duringRead.restart(); await Promise.resolve(); duringRead.revokeRoute(); duringRead.releaseAutomaticSource(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await duringRead.execute('skill_captures', {}))).toMatchObject([{ state: 'revoked' }]); expect(result(await duringRead.execute('skill_candidates', {}))).toEqual([])
+
+  const expiry = await fixture(); const clock = vi.spyOn(Date, 'now'); const now = Date.now(); clock.mockReturnValue(now); result(await expiry.execute('skill_capture', { owner_route_id: 'owner-route', goal_id: 'source-goal', name: 'expired-change', description: 'Expired capture.', parent_version: 0, expires_at: now + 1000 })); clock.mockReturnValue(now + 1001); await expiry.restart(); await Promise.resolve(); await Promise.resolve()
+  expect(result(await expiry.execute('skill_captures', {}))).toMatchObject([{ state: 'expired' }]); expect(result(await expiry.execute('skill_candidates', {}))).toEqual([])
 })
 
 test('rechecks current native tool guards and owner permission between saved steps', async () => {
@@ -191,6 +306,34 @@ test('activation rejects non-exact, expired, failed, unauthorized, and supersede
   const failed = await h.trial(failedCandidate.id); expect(failed.isError).toBe(true)
   const failedRun = /invocation (skill-run-[a-f0-9]+) is failed/u.exec(failed.error?.message ?? '')?.[1]
   expect(failedRun).toBeDefined(); expect((await h.activate(failedCandidate.id, failedRun!)).isError).toBe(true)
+})
+
+test('activation permits only read-only metadata around one exact independently accepted trial', async () => {
+  const f = await fixture(); const candidate = result(await f.candidate()); const trial = result(await f.trial(candidate.id))
+  const args = { candidate_id: candidate.id, goal_id: 'trial-goal', inputs_json: '{"message":"candidate"}', invocation_id: 'trial-invocation' }
+  f.setVerifiedTrialSteps('trial-goal', 'goal-execution-trial-goal', [
+    { toolName: 'skill_candidates', arguments: {} }, { toolName: 'get_goal', arguments: {} },
+    { toolName: 'skill_trial', arguments: args }, { toolName: 'goal_context', arguments: { goal_id: 'trial-goal', focus: false } },
+    { toolName: 'skill_status', arguments: { run_id: trial.id } },
+  ])
+  expect(result(await f.activate(candidate.id, trial.id))).toMatchObject({ activeVersion: 1, activated: { version: 1 } })
+})
+
+test('activation rejects business, repeated, foreign, and getter metadata proof steps', async () => {
+  const cases: ((candidateId: string, trialId: string, args: object) => unknown[])[] = [
+    (_candidateId, _trialId, args) => [{ toolName: 'skill_trial', arguments: args }, { toolName: 'write', arguments: { file: 'x', data: 'x' } }],
+    (_candidateId, _trialId, args) => [{ toolName: 'skill_trial', arguments: args }, { toolName: 'skill_trial', arguments: args }],
+    (_candidateId, _trialId, args) => [{ toolName: 'skill_trial', arguments: { ...args, unexpected: true } }],
+    (_candidateId, _trialId, args) => [{ toolName: 'skill_trial', arguments: args }, { toolName: 'skill_candidates', arguments: { candidate_id: 'foreign' } }],
+    (_candidateId, _trialId, args) => [{ toolName: 'skill_trial', arguments: args }, { toolName: 'goal_context', arguments: { goal_id: 'trial-goal', focus: true } }],
+    (_candidateId, _trialId, args) => [{ toolName: 'skill_trial', arguments: args }, { toolName: 'skill_status', arguments: Object.create(Object.prototype, { run_id: { enumerable: true, get: () => 'trial' } }) }],
+  ]
+  for (const steps of cases) {
+    const f = await fixture(); const candidate = result(await f.candidate()); const trial = result(await f.trial(candidate.id))
+    const args = { candidate_id: candidate.id, goal_id: 'trial-goal', inputs_json: '{"message":"candidate"}', invocation_id: 'trial-invocation' }
+    f.setVerifiedTrialSteps('trial-goal', 'goal-execution-trial-goal', steps(candidate.id, trial.id, args))
+    expect((await f.activate(candidate.id, trial.id)).isError).toBe(true)
+  }
 })
 
 const dockerTest = dockerAvailable ? test : test.skip
