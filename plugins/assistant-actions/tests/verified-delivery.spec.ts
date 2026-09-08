@@ -19,7 +19,7 @@ function fixture(options: { inspect?: () => any; deliver?: (signal: AbortSignal)
       reconcileSystem: vi.fn((input: any) => { reconciles.push(input); return { definition: input.definition } }),
     }
     ctx.provide('assistantAutomations' as never, automations as never)
-    ctx.provide('assistantGoals' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never); ctx.provide('assistantPolicy' as never, {} as never)
+    ctx.provide('assistantVerifier' as never, {} as never); ctx.provide('assistantGoals' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never); ctx.provide('assistantPolicy' as never, {} as never)
     const inspect = vi.fn(options.inspect ?? (() => undefined)); const notify = vi.fn((intent, value) => options.notify?.({ intent, value })); const deliver = vi.fn(async (_intent, _files, signal) => options.deliver ? await options.deliver(signal) : { commit: { actionId: 'commit', status: 'succeeded', commitOid: 'b'.repeat(40) } })
     const runtime = new VerifiedDeliveryRuntime(ctx, root, {
       capture: () => ({ principalId: 'owner', identity: { principalDigest: 'p'.repeat(64), principalRecordId: 'record', principalVersion: 1, workspace: '/workspace', agentPreset: 'primary' }, sessionId: 'session', goalId: 'goal', runId: 'run', definitionDigest: 'd'.repeat(64), definitionVersion: 1, grantId: 'grant', grantRevision: 1, ownerRouteId: 'route', budgetId: 'budget', expiresAt: options.expiresAt ?? Date.now() + 60_000, routeReceipt: { route: 1 } }),
@@ -86,8 +86,15 @@ describe('verified delivery runtime', () => {
     const f = await fixture(); f.runtime.prepare(undefined, request); await f.runtime.close()
     const ctx = new Context(), automations = { registerHostExecutor: () => () => {}, reconcileSystem: vi.fn((value: any) => ({ definition: value.definition })) }
     ctx.provide('assistantAutomations' as never, automations as never); ctx.provide('assistantGoals' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never); ctx.provide('assistantPolicy' as never, {} as never)
-    const restored = new VerifiedDeliveryRuntime(ctx, f.root, { capture: () => { throw new Error('unused') }, inspect: () => undefined, deliver: async () => { throw new Error('unused') }, notify: () => {} })
+    let available = false
+    const restored = new VerifiedDeliveryRuntime(ctx, f.root, { capture: () => { throw new Error('unused') }, inspect: () => available ? snapshot() : undefined, deliver: async () => { throw new Error('unused') }, notify: () => {} })
     expect(restored.get('session', 'grant', 'key')).toMatchObject({ status: 'awaiting-verification' }); expect(automations.reconcileSystem).not.toHaveBeenCalled()
+    ctx.provide('assistantVerifier' as never, {} as never)
+    expect(restored.get('session', 'grant', 'key')).toMatchObject({ status: 'awaiting-verification' })
+    available = true
+    ;(ctx.emit as any)('assistant-verifier/receipt', { taskKind: 'goal-step' })
+    await new Promise(resolve => setTimeout(resolve, 0))
+    expect(restored.get('session', 'grant', 'key')).toMatchObject({ status: 'scheduled' })
     await restored.close(); await ctx.fiber.dispose()
   })
 
@@ -95,12 +102,12 @@ describe('verified delivery runtime', () => {
     const f = await fixture({ inspect: snapshot }); f.runtime.prepare(undefined, request); f.runtime.reconcile(); await f.runtime.close()
     const pendingDb = new DatabaseSync(join(f.root, 'verified-delivery.sqlite')); expect((pendingDb.prepare('SELECT state FROM deliveries').get() as any).state).toBe('scheduled'); pendingDb.close()
     const ctx = new Context(), automations = { registerHostExecutor: () => () => {}, reconcileSystem: (value: any) => ({ definition: value.definition }) }
-    ctx.provide('assistantAutomations' as never, automations as never); ctx.provide('assistantGoals' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never); ctx.provide('assistantPolicy' as never, {} as never)
+    ctx.provide('assistantAutomations' as never, automations as never); ctx.provide('assistantVerifier' as never, {} as never); ctx.provide('assistantGoals' as never, {} as never); ctx.provide('assistantDelivery' as never, {} as never); ctx.provide('assistantPolicy' as never, {} as never)
     const restored = new VerifiedDeliveryRuntime(ctx, f.root, { capture: () => { throw new Error('unused') }, inspect: () => undefined, deliver: async () => { throw new Error('unused') }, notify: () => {} }); restored.reconcile()
     expect(restored.get('session', 'grant', 'key')).toMatchObject({ status: 'scheduled' })
     await restored.close(); await ctx.fiber.dispose()
     const db = new DatabaseSync(join(f.root, 'verified-delivery.sqlite')); db.prepare("UPDATE deliveries SET state='executing'").run(); db.close()
-    const ctx2 = new Context(); ctx2.provide('assistantAutomations' as never, automations as never); ctx2.provide('assistantGoals' as never, {} as never); ctx2.provide('assistantDelivery' as never, {} as never); ctx2.provide('assistantPolicy' as never, {} as never)
+    const ctx2 = new Context(); ctx2.provide('assistantAutomations' as never, automations as never); ctx2.provide('assistantVerifier' as never, {} as never); ctx2.provide('assistantGoals' as never, {} as never); ctx2.provide('assistantDelivery' as never, {} as never); ctx2.provide('assistantPolicy' as never, {} as never)
     const interrupted = new VerifiedDeliveryRuntime(ctx2, f.root, { capture: () => { throw new Error('unused') }, inspect: () => undefined, deliver: async () => { throw new Error('unused') }, notify: () => {} })
     expect(interrupted.get('session', 'grant', 'key')).toMatchObject({ status: 'unknown', result: { reason: 'interrupted-delivery-no-replay' } })
     await interrupted.close(); await ctx2.fiber.dispose()

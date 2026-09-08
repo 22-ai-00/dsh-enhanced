@@ -162,7 +162,7 @@ llm-pi-ai:
   test('v2 repository delivery derives one bounded Actions grant, a finite wake, and exact policy permissions', async () => {
     const now = Date.now(); const f = await fixture(now); const effective = repositoryEffective(f.effective); const source = withoutKeychain(f.prepared.patch)
     const plan = prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)
-    expect(plan.repositoryDelivery).toEqual({ repository: 'octo/example', branch: 'automation/result', paths: ['result.txt'] })
+    expect(plan.repositoryDelivery).toEqual({ repository: 'octo/example', branch: 'automation/result', paths: ['result.txt'], acceptance: 'goal-outcome' })
     expect((parseDocument(plan.patch).toJS() as Array<{ id: string }>).some(row => row.id === 'dsh-enhanced-credentials-keychain')).toBe(false)
     expect(config(plan.patch, 'dsh-enhanced-assistant-goals').backgroundWake).toMatchObject({ ownerRouteId: plan.admissionId, budgetId: `${plan.admissionId}-runs`, maxDelayMs: 60_000, runTimeoutMs: 60_000 })
     const grant = config(plan.patch, 'dsh-enhanced-assistant-actions').grants.find((entry: { id: string }) => entry.id === `${plan.admissionId}-repository`)
@@ -192,6 +192,15 @@ llm-pi-ai:
     const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), repositoryEffective(f.effective, [handle]), repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)
     expect((parseDocument(plan.patch).toJS() as Array<{ id: string }>).some(row => row.id === 'dsh-enhanced-credentials-keychain')).toBe(false)
     expect(config(plan.patch, 'dsh-enhanced-assistant-actions').grants).toEqual(expect.arrayContaining([expect.objectContaining({ credentialHandle: 'github' })]))
+  })
+
+  test('intermediate repository delivery requires an explicit accepted-step choice', async () => {
+    const now = Date.now(), f = await fixture(now)
+    const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), repositoryEffective(f.effective), repositoryTask({ expiresAt: now + 300_000, acceptance: 'goal-step' }), f.snapshot, now)
+    expect(plan.repositoryDelivery?.acceptance).toBe('goal-step')
+    const grants = config(plan.patch, 'dsh-enhanced-assistant-actions').grants
+    expect(grants.find((entry: { id: string }) => entry.id === `${plan.admissionId}-repository`).verifiedDelivery.acceptance).toBe('goal-step')
+    expect(() => parseGoalAdmissionTask(repositoryTask({ acceptance: 'model-says-done' }))).toThrow('invalid repository acceptance')
   })
 
   test('repository delivery rejects absent credentials, foreign owners, paths, deadlines, and conflicting reruns', async () => {

@@ -28,7 +28,7 @@ import type { GoalOutcomeAssessment } from './outcome-store.js'
 import { GoalStrategyRuntime, validateGoalStrategyConfig, validateGoalStrategyInput, type GoalStrategyConfig } from './strategy.js'
 import { buildGoalStrategyHistory, type GoalStrategyHistory } from './strategy-feedback.js'
 import { successfulToolSteps, verifiedRunId, type VerifiedWorkflowSource } from './verified-workflow.js'
-import { buildOwnerVerifiedArtifacts, validateOwnerVerifiedArtifactsInput, type OwnerVerifiedArtifactsInput } from './verified-artifact.js'
+import { buildOwnerAcceptedStepArtifacts, buildOwnerVerifiedArtifacts, validateOwnerVerifiedArtifactsInput, type OwnerVerifiedArtifactsInput } from './verified-artifact.js'
 
 export interface Config { eventWaits?: boolean; strategy?: Partial<GoalStrategyConfig>; preauthorizedCreateMaxRounds?: number; preauthorizedSchedule?: boolean; databasePath?: string; maxContextChars?: number; verifyNativeRounds?: boolean; verifyGoalOutcome?: boolean; stepMaxDurationMs?: number; executionBudget?: GoalBudgetConfig; backgroundWake?: GoalWakeConfig }
 export const Config: Schema<Config> = Schema.object({
@@ -444,17 +444,18 @@ export class AssistantGoalsService extends Service {
 
   /** Explicit owner authorization for one delayed resume, never an autonomous human-turn substitute. */
   schedule = async (agent: Agent | undefined, goalId: string, expectedRevision: number, at: number, signal: AbortSignal): Promise<GoalWake> => {
-    const intent = await this.#preparePausedWake(agent, goalId, expectedRevision, at, signal, 'schedule')
-    try { return this.#wake!.materialize(intent) } catch {
+    const prepared = await this.#preparePausedWake(agent, goalId, expectedRevision, at, signal, 'schedule')
+    try { return this.#wake!.materialize(prepared.intent) } catch {
       throw new Error('assistant-goals: goal is paused but wake scheduling could not be confirmed; inspect the goal and schedule before retrying')
     }
   }
 
-  #preparePausedWake = async (agent: Agent | undefined, goalId: string, expectedRevision: number, at: number | undefined, signal: AbortSignal, action: 'schedule' | 'wait'): Promise<GoalWakeIntent> => {
+  #preparePausedWake = async (agent: Agent | undefined, goalId: string, expectedRevision: number, at: number | undefined, signal: AbortSignal, action: 'schedule' | 'wait'): Promise<{ intent: GoalWakeIntent; nativeWait: boolean }> => {
     const wake = this.#wake
     if (wake === undefined) throw new Error('assistant-goals: background wake is not enabled')
     const scope = this.#scope(agent, action)
-    this.#requireOwnerTurn(agent!, scope)
+    const nativeWait = action === 'wait' && agent !== undefined && this.#nativeWaitCurrent(agent, goalId, expectedRevision, scope)
+    if (!nativeWait) this.#requireOwnerTurn(agent!, scope)
     let record = this.inspect(agent, goalId)
     wake.preflight(record)
     const now = Date.now()
@@ -469,7 +470,11 @@ export class AssistantGoalsService extends Service {
       throw new Error('assistant-goals: invalid or exhausted scheduled goal')
     }
     signal.throwIfAborted()
-    if (record.native.phase === 'active') record = this.control(agent, { goalId, expectedRevision, operation: 'pause' })
+    if (record.native.phase === 'active') {
+      this.#scope(agent, 'pause')
+      record = nativeWait ? this.#execution.pauseForEventWait(agent!, goalId, expectedRevision)
+        : this.control(agent, { goalId, expectedRevision, operation: 'pause' })
+    }
     // Pausing and flushing the native Session precedes publication of any active wake.
     // Failure here leaves the goal paused; the caller must inspect rather than assume scheduling succeeded.
     try {
@@ -486,19 +491,30 @@ export class AssistantGoalsService extends Service {
       })
       signal.throwIfAborted()
       const currentScope = this.#scope(agent, action)
-      this.#requireOwnerTurn(agent!, currentScope)
+      if (!nativeWait) this.#requireOwnerTurn(agent!, currentScope)
       const current = this.inspect(agent, goalId)
       if (acceptanceDigest(currentScope) !== acceptanceDigest(scope)
         || acceptanceDigest(current.native) !== acceptanceDigest(record.native)
         || acceptanceDigest(current.definition) !== acceptanceDigest(record.definition)) throw new Error('scheduled goal changed')
       const attestation = this.ctx.get('assistantDelivery')!.preferencePrincipalForAgent(agent!)
-      if (attestation === undefined) throw new Error('owner binding lost')
+      if (attestation === undefined || acceptanceDigest({ principalId: attestation.principalId, ...attestation.principalLineage, workspace: attestation.scope.workspace, preset: attestation.scope.preset }) !== acceptanceDigest(scope)) throw new Error('owner binding lost')
       const identity = { scope, goalId, definition: record.definition, native: record.native,
         attestation, at, expiresAt, ownerRouteId: wake.config.ownerRouteId, budgetId: wake.config.budgetId }
-      return { id: `goal-wake-${acceptanceDigest(identity)}`, ...identity }
+      return { intent: { id: `goal-wake-${acceptanceDigest(identity)}`, ...identity }, nativeWait }
     } catch {
       throw new Error('assistant-goals: goal is paused but wake scheduling could not be confirmed; inspect the goal and schedule before retrying')
     }
+  }
+
+  #nativeWaitCurrent(agent: Agent, goalId: string, expectedRevision: number, scope: GoalScope): boolean {
+    const current = this.#execution.budgetState(agent)
+    const native = this.ctx.get('goals')?.get(agent)
+    return current !== undefined && acceptanceDigest(current.record.scope) === acceptanceDigest(scope)
+      && current.record.id === goalId && current.record.native.phase === 'active' && current.record.native.revision === expectedRevision
+      && current.run.intent.task.kind === 'goal-step' && current.run.intent.task.goal.id === goalId
+      && current.run.intent.task.goal.nativeRevision === expectedRevision && current.run.intent.task.goal.definitionVersion === current.record.definition.version
+      && current.run.intent.task.goal.definitionDigest === current.record.definition.digest
+      && native !== undefined && String(native.id) === current.record.native.goalId && native.revision === expectedRevision && native.phase === 'active'
   }
   #eventSourcePolicy(agent: Agent | undefined, source: GoalEventSourceSnapshot): void {
     const decision = this.ctx.get('assistantPolicy')?.evaluateAgent(agent, 'wait-for-event', { kind: 'automation', id: source.target.automationId })
@@ -520,7 +536,8 @@ export class AssistantGoalsService extends Service {
     if (runtime === undefined || this.#wake === undefined || this.#budget === undefined) throw new Error('assistant-goals: event waits are not enabled')
     if (this.ctx.get('assistantDelivery')?.goalWakeResultVersion?.() !== 1) throw new Error('assistant-goals: event waits require goal result delivery support')
     const scope = this.#scope(agent, 'wait')
-    this.#requireOwnerTurn(agent!, scope)
+    const nativeWait = agent !== undefined && this.#nativeWaitCurrent(agent, goalId, expectedRevision, scope)
+    if (!nativeWait) this.#requireOwnerTurn(agent!, scope)
     if (opportunityProfile !== undefined) {
       const proactive = this.ctx.get('assistantProactive' as never, false) as { assertProfile?: (profileId: string) => void } | undefined
       if (!proactive || typeof proactive.assertProfile !== 'function') throw new Error('assistant-goals: opportunity profile service is unavailable')
@@ -540,11 +557,13 @@ export class AssistantGoalsService extends Service {
       const latest = runtime.snapshot(triggerId)
       const identity = (value: GoalEventSourceSnapshot) => ({ ...value, highWaterSequence: 0 })
       if (acceptanceDigest(identity(latest)) !== acceptanceDigest(identity(source))) throw new Error('event source changed during checkpoint')
-      const { id: _id, at: _at, expiresAt: _expiresAt, ...wake } = paused
+      const { id: _id, at: _at, expiresAt: _expiresAt, ...wake } = paused.intent
       const body = { wake, source, createdAt, expiresAt, runTimeoutMs: this.#wake.config.runTimeoutMs, ...(opportunityProfile === undefined ? {} : { opportunityProfile }) }
       const intent = { id: `goal-event-wait-${acceptanceDigest(body)}`, ...body }
       this.#eventWaitPolicy(intent)
-      return runtime.prepare(intent)
+      const result = runtime.prepare(intent)
+      if (paused.nativeWait) this.#execution.acceptPausedEventWait(agent!, goalId, paused.intent.native.revision)
+      return result
     } catch {
       throw new Error('assistant-goals: goal is paused but event wait could not be confirmed; inspect the goal and waits before retrying')
     }
@@ -560,15 +579,35 @@ export class AssistantGoalsService extends Service {
     return this.#eventWait?.inspect(record.scope, goalId) ?? []
   }
 
+  concludeNativeEventWait = (agent: Agent | undefined): boolean => this.#execution.hasAcceptedPausedEventWait(agent)
+
   preauthorizeEventWait = (execution: ToolExecution): boolean => {
     try {
-      if (this.#eventWait === undefined || !execution.arguments || typeof execution.arguments !== 'object') return false
+      if (execution.signal.aborted || this.#eventWait === undefined || !execution.arguments || typeof execution.arguments !== 'object') return false
       const args = execution.arguments as Record<string, unknown>
       if (!([4, 5].includes(Object.keys(args).length)) || !['goal_id', 'expected_revision', 'trigger_id', 'expires_at', ...(Object.hasOwn(args, 'opportunity_profile') ? ['opportunity_profile'] : [])].every(key => Object.hasOwn(args, key))
         || Object.getOwnPropertySymbols(args).length !== 0 || Object.values(Object.getOwnPropertyDescriptors(args)).some(value => !value.enumerable || !('value' in value))
         || typeof args['trigger_id'] !== 'string' || !Number.isSafeInteger(args['expires_at']) || (args['opportunity_profile'] !== undefined && typeof args['opportunity_profile'] !== 'string')) return false
-      this.#scope(execution.agent, 'wait', false)
+      const scope = this.#scope(execution.agent, 'wait', false)
       this.#eventSourcePolicy(execution.agent, this.#eventWait.snapshot(args['trigger_id']))
+      if (execution.agent !== undefined && this.#nativeWaitCurrent(execution.agent, args['goal_id'] as string, args['expected_revision'] as number, scope)) {
+        this.#scope(execution.agent, 'pause', false)
+        const record = this.#execution.budgetState(execution.agent)!.record
+        const budget = this.#budget?.preview(record)
+        if (budget === undefined || this.#wake === undefined || this.#outcome === undefined) return false
+        const expiresAt = args['expires_at'] as number; const now = Date.now()
+        if (expiresAt - now < 1_000 || expiresAt - now > this.#wake.config.maxDelayMs || expiresAt > budget.limits.expiresAt
+          || budget.modelCalls >= budget.limits.modelCalls || (budget.limits.mode === 'tokens' && budget.outputTokens! >= budget.limits.outputTokens!)) return false
+        this.#wake.preflight(record); this.#outcome.preflight(scope, record.definition.objective, record)
+        const frozenOutcome = this.#outcome.view(record).conditions
+        if (frozenOutcome === undefined || frozenOutcome.expiresAt <= expiresAt
+          || !frozenOutcome.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')) return false
+        const verifier = this.ctx.get('assistantVerifier', false)
+        return verifier !== undefined && (['goal-step', 'goal-outcome'] as const).every(taskKind => {
+          const selected = verifier.inspectAcceptanceProfile({ scope: { workspace: scope.workspace, preset: scope.preset }, owner: { principalRecordId: scope.principalRecordId, principalVersion: scope.principalVersion }, objective: record.definition.objective, taskKind })
+          return selected !== null && selected.profile.criteria.every(criterion => criterion.kind === 'isolated-process-behavior')
+        })
+      }
       return this.preauthorizeSchedule({ ...execution, arguments: { goal_id: args['goal_id'], expected_revision: args['expected_revision'], wake_at: (args['expires_at'] as number) - 1_000 } })
     } catch { return false }
   }
@@ -775,7 +814,8 @@ export class AssistantGoalsService extends Service {
   }
 
   /** Host-only accepted artifact handoff. It never creates a model tool or Agent. */
-  inspectOwnerVerifiedArtifacts = (value: OwnerVerifiedArtifactsInput) => {
+  #inspectOwnerArtifacts = <T>(value: OwnerVerifiedArtifactsInput, build: (first: unknown, last: unknown, input: OwnerVerifiedArtifactsInput,
+    isolation: { readAcceptedArtifact(contract: unknown, path: string): unknown }, now: number) => T): T => {
     const input = validateOwnerVerifiedArtifactsInput(value)
     const ownerInput: OwnerGoalExecutionSnapshotInput = { ownerRouteId: input.ownerRouteId, principalId: input.principalId,
       workspace: input.workspace, preset: input.preset, sessionId: input.sessionId, goalId: input.goalId }
@@ -788,8 +828,14 @@ export class AssistantGoalsService extends Service {
     // Re-read the full durable evidence and owner route after Isolation's Host-only reads.
     const current = this.inspectOwnerGoalExecution(ownerInput)
     let cursor = 0
-    return buildOwnerVerifiedArtifacts(source, current, input, { readAcceptedArtifact: () => artifacts[cursor++] }, Date.now())
+    return build(source, current, input, { readAcceptedArtifact: () => artifacts[cursor++] }, Date.now())
   }
+
+  /** Host-only final outcome artifact handoff. It never creates a model tool or Agent. */
+  inspectOwnerVerifiedArtifacts = (value: OwnerVerifiedArtifactsInput) => this.#inspectOwnerArtifacts(value, buildOwnerVerifiedArtifacts)
+
+  /** Host-only accepted step artifact handoff for explicitly authorized intermediate delivery. */
+  inspectOwnerAcceptedStepArtifacts = (value: OwnerVerifiedArtifactsInput) => this.#inspectOwnerArtifacts(value, buildOwnerAcceptedStepArtifacts)
 
   #ownerAcceptedTask(record: GoalRecord, runs: readonly GoalExecutionRun[], verifier: { inspectAcceptedTask(id: string): unknown } | undefined, contractId: string, outcomeAssessments: readonly GoalOutcomeAssessment[]) {
     const unavailable = { contractId, state: 'unavailable' as const, attempts: 0, reason: null, contract: null, receipt: null, verifierExecutionObservation: null }

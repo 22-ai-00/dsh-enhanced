@@ -159,6 +159,8 @@ executionBudget:
 {"goal_id":"业务目标 ID","expected_revision":1,"trigger_id":"report-file","expires_at":1790000000000}
 ```
 
+原生已准入目标回合也可登记事件等待，无需伪造人类回合。它必须仍是准确的 active run、目标定义与原生 revision，并具备 wait、pause、执行与来源策略权限。只有原生暂停读回、Session flush 和等待落盘均成功，工具才结束当前回合并允许该步骤成为 succeeded/quiescent；目标仍为 paused。存储失败保持 unknown，暂停许可不允许继续派发模型请求或同批后续工具。普通 `goal_control` 的 owner 限制保持不变。
+
 这是 `goal_wait_event` 的参数。`expires_at` 是 UTC epoch 毫秒，请使用将来的实际期限，且不能超过 `backgroundWake.maxDelayMs` 和目标预算期限。省略它时只查看当前目标的等待记录。创建等待还需 goal 的 `wait`、`pause`、`observe`、`inspect` 权限和该工具的执行权限；当前 agent 以及 `background:assistant-goals-wake/v1` 都必须对来源目标 automation 获得 `wait-for-event` 权限。后台恢复仍需原有 owner route、`wake`、执行与预算规则；结果投递另需 `background:assistant-goals-wake/v1` 对原 binding 的 message `send` 权限。启用 `preauthorizedSchedule` 时，精确的四参数调用还须通过已有隔离验收和有限预算预检。
 
 授权时冻结来源配置与持久序号，暂停原目标并 flush 原 Session；只匹配快照之后的首个有效事件。私有 `databasePath + '.event-waits'` 日志先保存匹配与固定 wake 身份，再交给已有调度器恢复原 Session/Goal。消费者重开会扫描持久事件；来源通知只是扫描提示。目标版本、owner、来源配置、Policy 或期限不再有效时拒绝恢复。派发后的未知执行不自动重放。

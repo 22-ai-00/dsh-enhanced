@@ -14,7 +14,7 @@ export const Config: Schema<Config> = Schema.object({
     paths: Schema.array(Schema.string()).required(), credentialHandle: Schema.string().required(), expiresAt: positive(Number.MAX_SAFE_INTEGER).required(),
     maxActions: positive(10_000).required(), maxTotalBytes: positive(64 * 1024 * 1024).required(),
     repoWorkflow: Schema.union([Schema.object({ baseBranch: Schema.string().required(), allowBranchCreate: Schema.boolean().required(), allowPullRequest: Schema.boolean().required() })]),
-    verifiedDelivery: Schema.union([Schema.object({ ownerRouteId: Schema.string().required(), budgetId: Schema.string().required() })]),
+    verifiedDelivery: Schema.union([Schema.object({ ownerRouteId: Schema.string().required(), budgetId: Schema.string().required(), acceptance: Schema.union(['goal-outcome', 'goal-step']) })]),
   })).default([]),
 })
 const text = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\p{Cc}]/u.test(value)
@@ -29,7 +29,7 @@ export function validateConfig(input: Config): Required<Config> {
   for (const grant of grants) {
     if (!grant || ![14, 15, 16].includes(Object.keys(grant).length)
       || Object.keys(grant).some(key => !['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'repository', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'repoWorkflow', 'verifiedDelivery'].includes(key))
-      || grant.verifiedDelivery !== undefined && (!grant.verifiedDelivery || Object.keys(grant.verifiedDelivery).length !== 2 || !text(grant.verifiedDelivery.ownerRouteId, 200) || !text(grant.verifiedDelivery.budgetId, 200))
+      || grant.verifiedDelivery !== undefined && (!grant.verifiedDelivery || ![2, 3].includes(Object.keys(grant.verifiedDelivery).length) || Object.keys(grant.verifiedDelivery).some(key => !['ownerRouteId', 'budgetId', 'acceptance'].includes(key)) || grant.verifiedDelivery.acceptance !== undefined && !['goal-outcome', 'goal-step'].includes(grant.verifiedDelivery.acceptance) || !text(grant.verifiedDelivery.ownerRouteId, 200) || !text(grant.verifiedDelivery.budgetId, 200))
       || !text(grant.id) || !Number.isSafeInteger(grant.revision) || grant.revision < 1
       || !/^[0-9a-f]{64}$/.test(grant.principalDigest) || !text(grant.principalRecordId) || !Number.isSafeInteger(grant.principalVersion) || grant.principalVersion < 1
       || !isAbsolute(grant.workspace) || resolve(grant.workspace) !== grant.workspace || !text(grant.agentPreset)

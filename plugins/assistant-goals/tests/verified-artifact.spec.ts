@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
-import { buildOwnerVerifiedArtifacts, validateOwnerVerifiedArtifactsInput } from '../src/verified-artifact.ts'
+import { buildOwnerAcceptedStepArtifacts, buildOwnerVerifiedArtifacts, validateOwnerVerifiedArtifactsInput } from '../src/verified-artifact.ts'
 
 const now = 1_800_000_000_000
 const scope = { principalId: 'owner', principalRecordId: 'record-owner', principalVersion: 1, workspace: '/workspace', preset: 'primary' }
@@ -15,7 +15,7 @@ const content = 'approved artifact\n'; const sha256 = createHash('sha256').updat
 const receipt = (contract: typeof step, id: string, criterionId: string) => createTaskVerificationReceipt(contract, { protocol: 'task-verification/v4', id, contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task: contract.task, results: [{ criterionId, status: 'passed', reason: 'verified', artifactDigest: sha256, evidence: [{ kind: 'isolated-artifact', ref: 'job', digest: sha256 }] }], startedAt: now - 5, completedAt: now - 1, validUntil: now + 8_000 })
 function snapshot() {
   const execution = { status: 'succeeded', quiescent: true, completedAt: now - 1, executionRef: 'run' }
-  return { ownerRoute: { route: 1 }, storedGoal: { ...goal, scope }, executionRuns: [{ intent: { runId: 'run', task }, acceptance: { contractId: step.id, contractDigest: step.digest }, execution: { status: 'succeeded', quiescent: true, completedAt: now - 1 } }], outcomeAssessments: [{ contract: outcome, triggerRunId: 'run', execution: { status: 'succeeded', quiescent: true, completedAt: now - 1 } }], acceptedTasks: [{ state: 'done', contract: step, receipt: receipt(step, 'step-receipt', 'step-file'), verifierExecutionObservation: execution }, { state: 'done', contract: outcome, receipt: receipt(outcome, 'outcome-receipt', 'outcome-file'), verifierExecutionObservation: { ...execution, executionRef: 'assessment' } }] }
+  return structuredClone({ ownerRoute: { route: 1 }, storedGoal: { ...goal, scope }, executionRuns: [{ intent: { runId: 'run', task }, acceptance: { contractId: step.id, contractDigest: step.digest }, execution: { status: 'succeeded', quiescent: true, completedAt: now - 1 } }], outcomeAssessments: [{ contract: outcome, triggerRunId: 'run', execution: { status: 'succeeded', quiescent: true, completedAt: now - 1 } }], acceptedTasks: [{ state: 'done', contract: step, receipt: receipt(step, 'step-receipt', 'step-file'), verifierExecutionObservation: execution }, { state: 'done', contract: outcome, receipt: receipt(outcome, 'outcome-receipt', 'outcome-file'), verifierExecutionObservation: { ...execution, executionRef: 'assessment' } }] })
 }
 
 describe('verified artifact source', () => {
@@ -50,5 +50,43 @@ describe('verified artifact source', () => {
     expect(() => buildOwnerVerifiedArtifacts(snapshot(), snapshot(), input, artifact, now + 8_001)).toThrow('unavailable')
     const unaccepted = validateOwnerVerifiedArtifactsInput({ ...input, paths: ['artifacts/not-accepted.txt'] })
     expect(() => buildOwnerVerifiedArtifacts(snapshot(), snapshot(), unaccepted, artifact, now)).toThrow('unavailable')
+  })
+})
+
+
+describe('accepted step artifact source', () => {
+  const input = validateOwnerVerifiedArtifactsInput({ ownerRouteId: 'route', principalId: 'owner', workspace: '/workspace', preset: 'primary', sessionId: 'session', goalId: 'goal', runId: 'run', paths: ['artifacts/release.txt'] })
+  const artifact = { readAcceptedArtifact: () => ({ path: input.paths[0], content, sha256, jobId: 'job' }) }
+  function waiting() {
+    const value = snapshot(); value.storedGoal.nativeAtLastObservation = { ...value.storedGoal.nativeAtLastObservation, phase: 'paused' }
+    value.outcomeAssessments = []; value.acceptedTasks = value.acceptedTasks.slice(0, 1)
+    return value
+  }
+  it('proves an accepted step while the original goal waits, without asserting its outcome', () => {
+    const value = waiting()
+    const result = buildOwnerAcceptedStepArtifacts(value, value, input, artifact, now)
+    expect(result).toMatchObject({ protocol: 'assistant-goals/accepted-step-artifacts/v1', runId: 'run', acceptance: { stepContractId: 'step', stepReceiptDigest: value.acceptedTasks[0]!.receipt.digest }, files: [{ content, sha256 }] })
+    expect(result.acceptance).not.toHaveProperty('outcomeContractId'); expect(Object.isFrozen(result.files[0])).toBe(true)
+    expect(() => buildOwnerVerifiedArtifacts(value, value, input, artifact, now)).toThrow('unavailable')
+    value.storedGoal.nativeAtLastObservation.phase = 'active'
+    expect(() => buildOwnerVerifiedArtifacts(value, value, input, artifact, now)).toThrow('unavailable')
+  })
+  it('rejects changed authority, unsafe lifecycle, unfinished or mismatched step evidence and bytes', () => {
+    const cases: Array<(value: any) => void> = [
+      value => { value.storedGoal.nativeAtLastObservation.phase = 'blocked' },
+      value => { value.storedGoal.scope = { ...scope, principalId: 'other' } },
+      value => { value.executionRuns[0].execution.quiescent = false },
+      value => { value.executionRuns[0].acceptance.contractDigest = 'f'.repeat(64) },
+      value => { value.acceptedTasks[0].state = 'pending' },
+      value => { value.acceptedTasks[0].verifierExecutionObservation.quiescent = false },
+      value => { value.storedGoal.definition = { ...goal.definition, version: 2 } },
+    ]
+    for (const mutate of cases) { const value = waiting(); mutate(value); expect(() => buildOwnerAcceptedStepArtifacts(value, value, input, artifact, now)).toThrow('unavailable') }
+    const value = waiting(), changed = waiting(); changed.ownerRoute = { route: 2 }
+    expect(() => buildOwnerAcceptedStepArtifacts(value, changed, input, artifact, now)).toThrow('unavailable')
+    expect(() => buildOwnerAcceptedStepArtifacts(value, value, input, artifact, now + 8_001)).toThrow('unavailable')
+    for (const override of [{ content: 'changed' }, { jobId: 'another-job' }, { sha256: 'e'.repeat(64) }]) {
+      expect(() => buildOwnerAcceptedStepArtifacts(value, value, input, { readAcceptedArtifact: () => ({ ...artifact.readAcceptedArtifact(), ...override }) }, now)).toThrow('unavailable')
+    }
   })
 })

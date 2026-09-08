@@ -35,6 +35,20 @@ describe('ActionLedger', () => {
     reopened.close()
   })
 
+  it('preserves explicit step acceptance across restart and requires a new grant revision to change it', async () => {
+    const first = await ledger(), path = join(roots[0]!, 'ledger.sqlite'), authority = first.claimController('owner')
+    const configured = grant(1, { verifiedDelivery: { ownerRouteId: 'route', budgetId: 'budget', acceptance: 'goal-step' } })
+    first.syncGrants([configured], authority); first.close()
+    const reopened = new ActionLedger(path, { now: () => now })
+    try {
+      expect(reopened.grant('grant')?.verifiedDelivery).toEqual(configured.verifiedDelivery)
+      expect(() => reopened.syncGrants([grant(1, { verifiedDelivery: { ownerRouteId: 'route', budgetId: 'budget' } })], authority)).toThrow('conflict')
+      expect(() => reopened.syncGrants([grant(2, { verifiedDelivery: { ownerRouteId: 'route', budgetId: 'budget', acceptance: 'model' as never } })], authority)).toThrow('invalid-input')
+      reopened.syncGrants([grant(2, { verifiedDelivery: { ownerRouteId: 'route', budgetId: 'budget' } })], authority)
+      expect(reopened.grant('grant')?.verifiedDelivery).toEqual({ ownerRouteId: 'route', budgetId: 'budget' })
+    } finally { reopened.close() }
+  })
+
   it('uses a version compare-and-swap and fences a second controller connection', async () => {
     const { ledger: first, authority } = await authorised(); const root = roots[0]!; const second = new ActionLedger(join(root, 'ledger.sqlite'), { now: () => now })
     const preparedRequest = request(); const prepared = first.prepare({ identity, sessionId: 'session', request: preparedRequest, bytes: commitBytes(preparedRequest), authority }).record

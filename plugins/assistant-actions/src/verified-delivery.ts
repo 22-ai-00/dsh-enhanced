@@ -1,6 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-goal'
+import type {} from '@dsh-enhanced/assistant-verifier'
 import type { AssistantAutomationsService, HostAutomationDefinition, HostAutomationExecutorInput, HostAutomationExecutorResult } from '@dsh-enhanced/assistant-automations'
 import { createHash } from 'node:crypto'
 import { chmodSync, existsSync } from 'node:fs'
@@ -14,7 +15,7 @@ const catalogDigest = hash({ owner: verifiedDeliveryOwner, version: 1 })
 export interface DeliverySecurity {
   principalId: string; identity: ActionIdentity; sessionId: string; goalId: string; runId: string
   definitionDigest: string; definitionVersion: number; grantId: string; grantRevision: number
-  ownerRouteId: string; budgetId: string; expiresAt: number; routeReceipt: unknown
+  ownerRouteId: string; budgetId: string; acceptance?: 'goal-outcome' | 'goal-step'; expiresAt: number; routeReceipt: unknown
 }
 export interface VerifiedFiles {
   acceptance: { validUntil: number }
@@ -49,7 +50,7 @@ export class VerifiedDeliveryRuntime {
     if (!columns.some(column => column.name === 'notification_state')) this.#db.exec("ALTER TABLE deliveries ADD COLUMN notification_state TEXT NOT NULL DEFAULT 'pending'")
     for (const suffix of ['', '-wal', '-shm']) if (existsSync(path + suffix)) chmodSync(path + suffix, 0o600)
     this.#db.prepare("UPDATE deliveries SET state='unknown', result=? WHERE state='executing'").run(JSON.stringify({ reason: 'interrupted-delivery-no-replay' }))
-    ctx.inject(['assistantAutomations', 'assistantGoals', 'assistantDelivery', 'assistantPolicy'], runtime => {
+    ctx.inject(['assistantAutomations', 'assistantGoals', 'assistantDelivery', 'assistantPolicy', 'assistantVerifier'], runtime => {
       const automations = runtime.assistantAutomations
       this.#automations = automations
       const dispose = automations.registerHostExecutor({
@@ -66,13 +67,15 @@ export class VerifiedDeliveryRuntime {
       this.reconcile()
       return () => { dispose(); if (this.#automations === automations) this.#automations = undefined }
     })
-    // Completion is emitted after the independent receipt settles. Defer past
-    // all Goal projection listeners; startup also reconciles durable intents.
-    ctx.on('goal/changed', () => {
+    // These are nudges only: inspect rereads authoritative evidence. Startup
+    // also reconciles durable intents if a notification was lost.
+    const nudge = () => {
       if (this.#queued) return
       this.#queued = true
       queueMicrotask(() => { this.#queued = false; if (this.#active) this.reconcile() })
-    })
+    }
+    ctx.on('goal/changed', nudge)
+    ctx.on('assistant-verifier/receipt', notice => { if (notice.taskKind === 'goal-step' || notice.taskKind === 'goal-outcome') nudge() })
   }
   #row(id: string): Row | undefined { return this.#db.prepare('SELECT * FROM deliveries WHERE id=?').get(id) as unknown as Row | undefined }
   #public(row: Row) { return { deliveryId: row.id, status: row.state, ...(row.result === null ? {} : { result: JSON.parse(row.result) as unknown }) } }

@@ -673,3 +673,10 @@ WP13 保持实现中；完整 18 项为 **3 已验证 / 11 实现中 / 4 待做*
 当前仍不证明真实 GitHub、事件或 CI/评审跟进。下一步须先处理[步骤交付与整目标完成的生命周期前置关系](autonomy-delivery-path-review-2026-09-08.md)，再接已有事件来源，避免恢复已完成 Goal 的语义错误。完整 18 项状态仍为 **3 已验证 / 12 实现中 / 3 待做**，全部验收要求保留。
 
 冻结后根 `pnpm check` 一次通过，退出 **0**：335 文件 / 4,040 项测试，无跳过；manifest、零 lint 警告、类型检查、最终构建和 33 份 dry-run pack 成功。独立只读复核核验正式 CLI、权限配置、真实浏览器产物及测试边界。
+
+
+## 原目标中间交付与等待（2026-09-08）
+
+基线 `fc60b2e`。正式仓库配置可显式授权 `goal-step` 中间交付，默认整体验收保持；模式贯通持久 grant/intent，源步骤成功且 quiescent、独立回执和实际产物均重验后，复用原 Automations/Actions/Keychain 执行与通知。Verifier durable receipt 只触发重新核验，未接通的依赖或暂不可用的 step evidence 不会误终结交付。
+
+原生已准入回合可在准确目标/定义/revision、wait/pause/source Policy、owner route 与预算边界内暂停并保存等待。只有成功保存后才结束回合并产生 succeeded/quiescent 步骤；保存失败为 unknown，同批后续工具不执行。新增行为测试使用真实 AgentLoop、native driver、工具与 JSONL，模型和 Delivery/Policy/event source 为测试替身；Actions 的 GitHub transport 也是替身。当前未证明同一真实模型会话完成 PR→CI/评审→最终验收，也未做真实 GitHub 请求。全部工作包状态仍为 3 已验证 / 12 实现中 / 3 待做。验证命令及边界见 `docs/evidence/intermediate-delivery-2026-09-08.json`。

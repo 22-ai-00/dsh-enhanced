@@ -17,6 +17,7 @@ import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { AssistantGoalsService, type Config as GoalsConfig } from '../src/service.ts'
+import { GoalEventWaitStore } from '../src/event-wait-store.ts'
 import { GoalExecutionStore } from '../src/execution-store.ts'
 import { acceptanceDigest, createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { AssistantVerifierService, createVerifierAuthorities } from '@dsh-enhanced/assistant-verifier'
@@ -37,14 +38,18 @@ async function harness(databasePath?: string, maxContextChars?: number, duringGo
   const attestation = (agent: Agent) => {
     const principalId = owners.get(agent)
     return principalId === undefined ? undefined : { scope: { workspace: root, preset: 'primary' }, principalId,
-      principalLineage: { principalRecordId: `record-${principalId}`, principalVersion: 1 }, sessionId: String(agent.session.id) }
+      principalLineage: { principalRecordId: `record-${principalId}`, principalVersion: 1 }, bindingId: `binding-${agent.session.id}`, bindingVersion: 1, bindingGeneration: 1, sessionId: String(agent.session.id) }
   }
   // Unit seam only. Actual Delivery owner/turn handling is covered separately
   // in assistant-delivery's real runtime integration test.
   ctx.provide('assistantDelivery' as never, { preferencePrincipalForAgent: attestation,
-    currentPreferenceTurn: (agent: Agent) => human.has(agent) ? attestation(agent) : undefined } as never)
+    currentPreferenceTurn: (agent: Agent) => human.has(agent) ? attestation(agent) : undefined,
+    goalWakeResultVersion: () => 1, goalWakeSettlementVersion: () => 1,
+    validateOwnerRoute: ({ principalId, workspace, agentPreset }: { principalId: string; workspace: string; agentPreset: string }) => ({ principalRecordId: `record-${principalId}`, principalVersion: 1, workspace, agentPreset }) } as never)
   ctx.provide('assistantPolicy' as never, { authorizeAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }),
-    evaluateAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }) } as never)
+    evaluateAgent: (_agent: Agent, action: string) => ({ effect: allowed && !deniedActions.has(action) ? 'allow' : 'deny' }), evaluate: () => ({ effect: allowed ? 'allow' : 'deny' }), getBudgetConfig: () => ({ metric: 'automation-runs' }) } as never)
+  ctx.provide('assistantAutomations' as never, { registerHostExecutor: () => () => {} } as never)
+  ctx.provide('eventTriggers' as never, { sourceSnapshot: () => ({ protocol: 'dsh-event-source/v1', sourceId: 'event-triggers:file', kind: 'file', version: '1', configDigest: 'a'.repeat(64), target: { automationId: 'automation' }, highWaterSequence: 0 }), firstEventAfter: () => undefined, subscribeSourceChanges: () => () => {} } as never)
   if (duringGoalChange !== undefined) ctx.on('goal/changed', ({ agent }) => duringGoalChange(agent))
   const path = databasePath ?? join(root, 'goals.sqlite')
   const plugin = await ctx.plugin(AssistantGoalsService, { databasePath: path, verifyNativeRounds, verifyGoalOutcome,
@@ -170,6 +175,57 @@ describe('owner-scoped native goal context', () => {
     await expect(harness(undefined, undefined, undefined, true, true, undefined, {
       eventWaits: true, executionBudget: scheduleBudget,
     })).rejects.toThrow('event waits require durable wake, budgets and verified outcomes')
+  })
+
+  it.each(['success', 'storage-failure', 'trailing-tool'] as const)('drives an admitted native event wait without an owner turn: %s', async scenario => {
+    const nativeBudget = { mode: 'calls' as const, modelCalls: 2, toolCalls: 2, durationMs: 60_000, maxOutputTokensPerCall: 500, routes: [{ provider: 'fixture', model: 'fixture' }] }
+    const f = await harness(undefined, undefined, undefined, true, true, 2_000, { eventWaits: true, executionBudget: nativeBudget, backgroundWake: scheduleWake })
+    await installNativeGoalRoundDriver(f.ctx)
+    const agent = await f.create('native-event-wait', 'owner'); f.human.add(agent)
+    const objective = 'Pause the admitted goal for an event'; await installGoalVerifier(f, goalProfiles(f.root, objective))
+    const lateTool = vi.fn(async () => ({ result: 'must not execute' }))
+    f.ctx.tools.register(defineTool({ name: 'late_probe', description: 'Test paused-round fence', parameters: {}, output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, value) => [{ type: 'text', text: value.result }] }, execute: lateTool }))
+    if (scenario === 'storage-failure') {
+      const spy = vi.spyOn(GoalEventWaitStore.prototype, 'prepare').mockImplementation(() => { throw new Error('unavailable wait storage') })
+      cleanups.push(async () => { spy.mockRestore() })
+    }
+    let calls = 0; let record!: ReturnType<AssistantGoalsService['create']>
+    class Adapter extends LlmAdapter { async *stream(): AsyncIterable<StreamChunk> {
+      calls++
+      if (calls === 1) { yield { type: 'block-start', index: 0, blockType: 'text' }; yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ready' } }; yield { type: 'finish', reason: { kind: 'stop' } }; return }
+      f.human.delete(agent)
+      const argumentsText = JSON.stringify({ goal_id: record.id, expected_revision: record.native.revision, trigger_id: 'file', expires_at: Date.now() + 10_000 })
+      yield { type: 'block-start', index: 0, blockType: 'tool-call' }; yield { type: 'tool-call-delta', index: 0, id: ToolCallId('wait-event'), name: 'goal_wait_event', argumentsDelta: argumentsText }
+      yield { type: 'block-end', index: 0, block: { type: 'tool-call', id: ToolCallId('wait-event'), name: 'goal_wait_event', arguments: argumentsText } }
+      if (scenario === 'trailing-tool') {
+        yield { type: 'block-start', index: 1, blockType: 'tool-call' }
+        yield { type: 'tool-call-delta', index: 1, id: ToolCallId('late-probe'), name: 'late_probe', argumentsDelta: '{}' }
+        yield { type: 'block-end', index: 1, block: { type: 'tool-call', id: ToolCallId('late-probe'), name: 'late_probe', arguments: '{}' } }
+      }
+      yield { type: 'finish', reason: { kind: 'tool-calls' } }
+    } }
+    f.ctx.llm.registerAdapter(['fixture'], new Adapter())
+    agent.followup(createUserMessage({ source: { kind: 'user' }, content: [{ type: 'text', text: 'prepare goal' }] }))
+    await vi.waitFor(() => expect(calls).toBe(1), { timeout: 2_000 }); await agent.whenIdle()
+    record = f.service.create(agent, objective, 2)
+    await vi.waitFor(() => expect(f.ctx.goals.get(agent)?.roundsStarted).toBe(1), { timeout: 2_000 })
+    try { await vi.waitFor(() => expect(calls).toBe(2), { timeout: 2_000 }) } catch {
+      throw new Error(JSON.stringify({ native: f.ctx.goals.get(agent), runs: f.service.executionRuns(agent, record.id), events: agent.session.snapshotEvents().map(event => ({ type: event.type, data: event.data })) }))
+    }
+    await agent.whenIdle(); await f.service.whenIdle()
+    expect(f.service.inspect(agent, record.id).native).toMatchObject({ phase: 'paused', revision: record.native.revision + 1 })
+    const results = agent.session.snapshotEvents().filter(event => event.type === 'tool/result')
+    const waitResults = results.flatMap(event => event.data.message.content).filter(block => block.type === 'tool-result' && block.toolCallId === 'wait-event')
+    expect(waitResults).toHaveLength(1)
+    expect(waitResults[0], JSON.stringify(results)).toMatchObject({ isError: scenario === 'storage-failure' })
+    expect(f.human.has(agent)).toBe(false); expect(calls).toBe(2); expect(lateTool).not.toHaveBeenCalled()
+    if (scenario === 'storage-failure') {
+      expect(f.service.eventWaitsForGoal(agent, record.id)).toEqual([])
+      expect(f.service.executionRuns(agent, record.id)).toMatchObject([{ execution: { status: 'unknown', quiescent: false } }])
+    } else {
+      expect(f.service.eventWaitsForGoal(agent, record.id)).toMatchObject([{ state: 'waiting' }])
+      expect(f.service.executionRuns(agent, record.id)).toMatchObject([{ execution: { status: 'succeeded', quiescent: true } }])
+    }
   })
 
   it('exposes an immutable enabled schedule gate only for a durable verified configuration', async () => {
