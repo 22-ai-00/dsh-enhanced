@@ -11,6 +11,7 @@ export type { GoalStrategyConfig, GoalStrategyInput, GoalStrategyResult } from '
 export { validateGoalStrategyConfig } from './strategy.js'
 export type { GoalBudgetRunUsage } from './budget-store.js'
 export type { GoalStrategyAssessment, GoalStrategyHistory } from './strategy-feedback.js'
+export type { GoalOutcomeAssessment, GoalOutcomeDefinition } from './outcome-store.js'
 export type { StrategyChildDiagnostics, StrategyTerminationReason } from './strategy-store.js'
 export function apply(ctx: Context, config: Config = {}): void { new AssistantGoalsService(ctx, config) }
 export default { name, Config, apply }

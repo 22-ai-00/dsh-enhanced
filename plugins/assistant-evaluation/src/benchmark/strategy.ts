@@ -9,6 +9,8 @@ import { strategyBenchmarkRequestLimits, type StrategyBenchmarkPlan } from './st
 export * from './strategy-plan.js'
 export * from './strategy-meter.js'
 export * from './strategy-owner.js'
+export * from './strategy-goal-runtime.js'
+export * from './strategy-evidence.js'
 
 /** Request identity and call/output budgets are checked before installing the cell meter. */
 export function installStrategyBenchmarkRequestMeter(ctx: Context, plan: StrategyBenchmarkPlan,

@@ -5,6 +5,7 @@ import type { TaskAcceptanceContract, AcceptanceTaskIdentity, AcceptanceCriterio
 import type { AcceptanceHandle, AcceptedExecution, TaskAcceptanceRegistration } from '@dsh-enhanced/assistant-verifier'
 import { GoalOutcomeStore } from './outcome-store.js'
 import type { GoalExecutionRun, GoalRecord, GoalScope } from './types.js'
+import type { GoalOutcomeAssessment } from './outcome-store.js'
 
 export interface GoalOutcomeView {
   status: 'unverified' | 'pending' | 'achieved' | 'not-achieved' | 'unknown' | 'expired' | 'unavailable'
@@ -283,6 +284,14 @@ export class GoalOutcomeRuntime {
         ...(receipt.objectiveStatus === 'achieved' ? { nativeCompletion: record.native.phase === 'complete' ? 'complete' as const : 'pending' as const } : {}),
         criteria: receipt.results.map(result => ({ id: result.criterionId, status: result.status, reason: result.reason.slice(0, 256) })) }
     } catch { return { ...base, status: 'unavailable' } }
+  }
+  /** Durable Host evidence only. Returned entries are constrained to the current semantic definition. */
+  inspectAssessments(record: GoalRecord): readonly GoalOutcomeAssessment[] {
+    if (!this.#active) return Object.freeze([])
+    return Object.freeze(this.#store.list(record.scope, record.id, 100).filter(item =>
+      same(item.definition.scope, record.scope) && item.definition.goalId === record.id
+      && same(item.definition.definition, record.definition) && item.definition.sessionId === record.native.sessionId
+      && item.definition.nativeGoalId === record.native.goalId).map(item => Object.freeze({ ...item })))
   }
   health = () => ({ enabled: true, connected: this.#registration !== undefined })
 }

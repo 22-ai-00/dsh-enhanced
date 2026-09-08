@@ -1,0 +1,482 @@
+{
+  "schemaVersion": 1,
+  "milestone": "WP04/06 native Goal comparison cell and durable complete acceptance evidence",
+  "date": "2026-09-08",
+  "baseCommit": "eb106bb66590c377f931e8ee3e9cddfcd1dc74f2",
+  "goalStatus": {
+    "verified": 3,
+    "implementing": 8,
+    "todo": 7,
+    "fullObjectiveComplete": false
+  },
+  "implemented": [
+    "Actual native Goal/round-driver/strategy/Isolation/Verifier single-cell assembly; adapter creates artifacts through real tools.",
+    "Current-owner-route Host snapshot after Agent disposal, full strategy records and actual outcome triggerRunIds with validated step/outcome receipts.",
+    "Content-addressed immutable detailed evidence after successful cleanup, full-cell measurement and strict plan/cell/version binding.",
+    "Cancellation retains reservations; independent cleanup deadline preserves unknown and does not upgrade late cleanup to success."
+  ],
+  "limits": [
+    "No complete strategy BenchmarkExecutor/journal comparator, capability attestation, installed CLI/doctor, public development corpus/frozen holdout or real-model efficacy results.",
+    "Deterministic adapter fixtures, actual native services and Docker; no paid provider requests or intelligence improvement claim. One fixture cell per arm is not a full repeated comparison run.",
+    "Factory/setup still require an enclosing executor deadline. Failed execution does not yet persist a complete failure-cell object; outer meter remains readable in process.",
+    "Evidence structurally validates trusted Host observations; it does not authenticate arbitrary Host-supplied objects or create an OS sandbox against same-UID Host code.",
+    "Temporary logs and copied runtime objects are local ignored artifacts. Hashes travel in Git; absence on another machine is not fresh validation."
+  ],
+  "validation": {
+    "fullCheck": {
+      "status": "PASS",
+      "exitCode": 0,
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-check-v2.log",
+      "sha256": "a8bfceddc6d99bacc1ec493980161eaf2b949c2395438b919abdadc706fbf446",
+      "main": {
+        "filesPassed": 294,
+        "testsPassed": 3763,
+        "testsSkipped": 0
+      },
+      "recursive": {
+        "assistant-evaluation": 168,
+        "assistant-goals": 102,
+        "assistant-delivery": 705,
+        "assistant-isolation": 102,
+        "assistant-web-owner": 30
+      },
+      "dryRunPacks": 31,
+      "packInspection": {
+        "@dsh-enhanced/assistant-evaluation@0.1.24": {
+          "files": 105,
+          "entries": [
+            "lib/benchmark/strategy-evidence.d.ts",
+            "lib/benchmark/strategy-evidence.d.ts.map",
+            "lib/benchmark/strategy-evidence.js",
+            "lib/benchmark/strategy-evidence.js.map",
+            "lib/benchmark/strategy-goal-runtime.d.ts",
+            "lib/benchmark/strategy-goal-runtime.d.ts.map",
+            "lib/benchmark/strategy-goal-runtime.js",
+            "lib/benchmark/strategy-goal-runtime.js.map",
+            "lib/service.js"
+          ]
+        },
+        "@dsh-enhanced/assistant-goals@0.1.0": {
+          "files": 80,
+          "entries": [
+            "lib/service.js"
+          ]
+        }
+      }
+    },
+    "nativeFixtures": {
+      "direct": {
+        "contentDigest": "bc4b2e048e75934d2fa659fddff862f7c3f6717c9bcd616f4207ab6e7ea926ed",
+        "outerModelCalls": 6,
+        "innerGoalModelCalls": 4,
+        "actualChildSessions": 0,
+        "receiptCount": 4,
+        "outcomeAssessmentCount": 2,
+        "receipts": [
+          {
+            "kind": "goal-outcome",
+            "status": "not-achieved",
+            "runId": "goal-run-4f1eb3b007a62ce445e3cff6d18a68a20d84c81febe6094c64da692a12b77ac8"
+          },
+          {
+            "kind": "goal-step",
+            "status": "not-achieved",
+            "runId": "goal-run-4f1eb3b007a62ce445e3cff6d18a68a20d84c81febe6094c64da692a12b77ac8"
+          },
+          {
+            "kind": "goal-outcome",
+            "status": "achieved",
+            "runId": "goal-run-2078da73b3ef0f56357ac697475349ee8a66b70bc43a7412c7e8fc6581d195e4"
+          },
+          {
+            "kind": "goal-step",
+            "status": "achieved",
+            "runId": "goal-run-2078da73b3ef0f56357ac697475349ee8a66b70bc43a7412c7e8fc6581d195e4"
+          }
+        ],
+        "heldModelCalls": 0,
+        "result": {
+          "quiescent": true,
+          "status": "completed",
+          "verdict": "achieved"
+        }
+      },
+      "adaptive-strategy": {
+        "contentDigest": "407e313d92f0d262e03550fec9289184aef6051468f811707574ef5f86d78247",
+        "outerModelCalls": 9,
+        "innerGoalModelCalls": 7,
+        "actualChildSessions": 2,
+        "receiptCount": 4,
+        "outcomeAssessmentCount": 2,
+        "receipts": [
+          {
+            "kind": "goal-step",
+            "status": "not-achieved",
+            "runId": "goal-run-8c4daa332288ca8623b158a051107a756ef6411109bd5740ff75834975869ac8"
+          },
+          {
+            "kind": "goal-step",
+            "status": "achieved",
+            "runId": "goal-run-8fd53cbd910f18b1fa082a11d9489914c7e7df9e605a0a5330883039095bbebb"
+          },
+          {
+            "kind": "goal-outcome",
+            "status": "not-achieved",
+            "runId": "goal-run-8c4daa332288ca8623b158a051107a756ef6411109bd5740ff75834975869ac8"
+          },
+          {
+            "kind": "goal-outcome",
+            "status": "achieved",
+            "runId": "goal-run-8fd53cbd910f18b1fa082a11d9489914c7e7df9e605a0a5330883039095bbebb"
+          }
+        ],
+        "heldModelCalls": 0,
+        "result": {
+          "quiescent": true,
+          "status": "completed",
+          "verdict": "achieved"
+        }
+      }
+    },
+    "fullComparisonRun": false,
+    "dockerImage": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89",
+    "focused": {
+      "filesPassed": 3,
+      "testsPassed": 13,
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-focused-v2.log",
+      "scope": "Earlier focused run; final guard additions covered by full check-v2."
+    },
+    "regressions": [
+      "Actual first-chunk cancellation",
+      "Non-cooperative cleanup deadline",
+      "Old outcome selection rejection",
+      "Unattributed outer trace and non-quiescent native run rejection",
+      "300-trace evidence aggregate, accessor/cycle/path/tamper rejection",
+      "Owner route revocation/rotation and detached post-disposal snapshot"
+    ]
+  },
+  "review": {
+    "source": {
+      "status": "PASS",
+      "reviewer": "strategy_goal_verify",
+      "mode": "Independent read-only source review, no test/build rerun"
+    },
+    "finalEvidence": {
+      "status": "PASS",
+      "reviewer": "strategy_goal_verify",
+      "mode": "Independent read-only source/evidence review; reviewer did not rerun pnpm, Docker or builds",
+      "verified": [
+        "19 source hashes and exact set, 24 command log hashes and exits, 5 artifact hashes match.",
+        "Final check-v2 exit0:294 files/3763 tests with no skips, package regression counts and31 dry-run packs verified.",
+        "Both saved object digests and4 receipts per arm verified; achieved stop/session/meter gates checked.",
+        "Incomplete comparator/journal/CLI/capability attestation/corpus/real-model and local-only C2C scope documented."
+      ],
+      "rootAcceptance": "PASS for this native single-cell runtime and durable acceptance evidence milestone only; complete18-work-package objective remains active."
+    },
+    "codexWithChatgpt": {
+      "task": "c2c_a945",
+      "iteration": 3,
+      "localRecordsOnly": true,
+      "reason": "Required in-app browser unavailable; no ChatGPT web planning/review claimed."
+    }
+  },
+  "sources": [
+    {
+      "path": "docs/agent-autonomy-implementation.md",
+      "sha256": "77a92fecaa5a5b8945b248c29be75b1024beeb894a59042623f2eaec1fd528fb"
+    },
+    {
+      "path": "docs/autonomy-handoff-2026-09-06.md",
+      "sha256": "d02ff3ada676b8357d634c70f86fb1f4c51e511706b238c3c36da7007598f362"
+    },
+    {
+      "path": "docs/compatibility.md",
+      "sha256": "6ab308c44819658afc03adc7b75266598a83dd313a8c1814c953184d615328e5"
+    },
+    {
+      "path": "docs/goal-strategy-evaluation.md",
+      "sha256": "7bdd7e8ca55620d0540f0d542329c8d90bb08607e26c199b244c0d0b2df942da"
+    },
+    {
+      "path": "plugins/assistant-evaluation/README.md",
+      "sha256": "3a4962044b3780f9cdbfc73a3a61d6f0a341e9b40fcb2377be51b565056c9f05"
+    },
+    {
+      "path": "plugins/assistant-evaluation/package.json",
+      "sha256": "87c20b5aa7d851e4081aed1872904c9488b531bc8744356f79aab3a0d555fac7"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-evidence.ts",
+      "sha256": "6f12ecb2c466c678acd20b761fe9affbef1aee4fedb8b83a162762f3879f08af"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-goal-runtime.ts",
+      "sha256": "1adeb94a9c00b1d4c7480ef2e5a069b35f69c287d1252f02774b98eb93aac8c9"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-owner.ts",
+      "sha256": "0480d52bc942df21ec376a95186ba5bee1827253b5cb8840458def8be57ad89f"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy.ts",
+      "sha256": "7aeeef7965eee53504175a2b63b721e93fe32b6a85b4fc6d0fb9077dd3729414"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-evidence.spec.ts",
+      "sha256": "647a40d8fc53f5f990247ccf91bc6fa3e5125471b77752263ca56c981f0d97c0"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-goal-runtime.spec.ts",
+      "sha256": "f857d068127c2a6ec2e6143a07045e830db75e9098669ef4d0d7d0c70fa99fe9"
+    },
+    {
+      "path": "plugins/assistant-goals/README.md",
+      "sha256": "885a76899069bd7c4a755222545008b2e2fa7f6077ff20d81911e6f7d78c5b9d"
+    },
+    {
+      "path": "plugins/assistant-goals/src/index.ts",
+      "sha256": "68001a2e45913a6130147352233c2b2ebe204e8b590db24f019eb7920b91b63f"
+    },
+    {
+      "path": "plugins/assistant-goals/src/outcome.ts",
+      "sha256": "e7e5deed99c7fca5edbeb101feb299f61eeca5c3ec0321345778620b1131f2d1"
+    },
+    {
+      "path": "plugins/assistant-goals/src/service.ts",
+      "sha256": "d1c23c6c72c43ea851dbbef82abc523d35c95d2b4cdb6ecce5b80a838ee02cd5"
+    },
+    {
+      "path": "plugins/assistant-goals/src/types.ts",
+      "sha256": "d63d19caab8d107b4222576278feac25877b139398c821d0b9aff4375a08cbc0"
+    },
+    {
+      "path": "plugins/assistant-goals/tests/host-snapshot.spec.ts",
+      "sha256": "781f07e02ecdb693e7ea91b3f867b4a78e9cf4ff6385e03af66ed78a2432d6f3"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "sha256": "eea0f3ecd0576a111168235734124f8177a9cac816a37549ae797a1e4c31c12e"
+    }
+  ],
+  "commands": [
+    {
+      "command": "CI=true pnpm run build:bootstrap",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-bootstrap-v2.log",
+      "exitCode": 2,
+      "sha256": "48905fbb878456b59853371ce021a3fa309179c2b0dcd63ab22bf30caac0276c",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-bootstrap-v2.log.exit",
+      "interpretation": "Raw strategy store list was called with three arguments instead of two; corrected production call."
+    },
+    {
+      "command": "CI=true DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-goal-validation DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-goal-runtime.spec.ts tests/benchmark/strategy-evidence.spec.ts tests/benchmark/strategy-owner.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-focused-v1.log",
+      "exitCode": 1,
+      "sha256": "6fbf83e724a3c3b930c70f1d9554738d6ddaa55d2737c51b2640226ae6d215fb",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-focused-v1.log.exit",
+      "interpretation": "11 tests passed; unknown-receipt fixture used a relative workspace rejected by original contract validation. Fixed fixture to an absolute workspace."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-evidence.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-evidence-v1.log",
+      "exitCode": 0,
+      "sha256": "32b9bd5adf4488c3d8015d7a043f0ccb4e991b4487ffef1f0303175c5af16251",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-evidence-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm run build:bootstrap",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-bootstrap-v3.log",
+      "exitCode": 0,
+      "sha256": "4f2ae76711163a3bc15e42a6be62fdbc00df3f8df53d9aee8b1ea3fadac584c3",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-bootstrap-v3.log.exit"
+    },
+    {
+      "command": "CI=true DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-goal-validation DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-goal-runtime.spec.ts tests/benchmark/strategy-evidence.spec.ts tests/benchmark/strategy-owner.spec.ts && CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-focused-v2.log",
+      "exitCode": 0,
+      "sha256": "f39560fa55c1296b7e0aceb0d02b380f05f2650a6f93c3e0cf017983dced475c",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-focused-v2.log.exit"
+    },
+    {
+      "command": "CI=true pnpm install --offline --ignore-scripts --no-frozen-lockfile",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-install.log",
+      "exitCode": 0,
+      "sha256": "d0d9fdfcfffffb9a91bf7eb18c61669dad5b19d6878be8e0832ea73b09c18440",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-install.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals exec vitest run tests/host-snapshot.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-host-snapshot-v1.log",
+      "exitCode": 0,
+      "sha256": "164543ff444050adcd49989c76393218690d42799dde6fcd2435de02859613b7",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-host-snapshot-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm run build:bootstrap",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-bootstrap-v1.log",
+      "exitCode": 2,
+      "sha256": "6223ed7359729a8d768833d0fe41403ff96f096adc7a54ff48f288002a2d60c3",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-bootstrap-v1.log.exit",
+      "interpretation": "Retained failed command; corrected implementation/fixture and later passing runs are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-types-v1.log",
+      "exitCode": 2,
+      "sha256": "face3b03280f051b1c9a8b3de3c3b452eda57dce9cbe356ba2740fd8b977d2db",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-types-v1.log.exit",
+      "interpretation": "Retained failed command; corrected implementation/fixture and later passing runs are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-types-v2.log",
+      "exitCode": 2,
+      "sha256": "c05bf2a2625b8ec4a5470090f1e331ce4d9d05bdda0c3680fa94936bf2c63cb8",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-types-v2.log.exit",
+      "interpretation": "Retained failed command; corrected implementation/fixture and later passing runs are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-types-v3.log",
+      "exitCode": 2,
+      "sha256": "ad8012497fd22372b23bfed34a942289166be353860f7e880244b0ac3d3f735a",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-types-v3.log.exit",
+      "interpretation": "Retained failed command; corrected implementation/fixture and later passing runs are separate entries."
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals run build",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-goals-build-v1.log",
+      "exitCode": 0,
+      "sha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-goals-build-v1.log.exit"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-goals run build",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-goals-build-v2.log",
+      "exitCode": 0,
+      "sha256": "24c42b76aecef2c39c8a5639a3536efb936b03bdac9a8f8be50c0e71ffbc7af8",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-goals-build-v2.log.exit"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-goal-runtime.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v1.log",
+      "exitCode": 1,
+      "sha256": "904ed15f8309531c06d780869fbef1a6db2f5bf4bb4be749db60165ce062b9c8",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v1.log.exit",
+      "interpretation": "Fixture repeated-count 1 violated the plan minimum 2; corrected the fixture plan, not the parser."
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-goal-runtime.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v2.log",
+      "exitCode": 1,
+      "sha256": "f2ced74d5b42c364f2215dc80b8787c49e2ef61ef1d625727d422772aa36f6c2",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v2.log.exit",
+      "interpretation": "Owner scope was requested before inbound created its binding; use configured lineage during setup and validate actual route after inbound."
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-goal-runtime.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v3.log",
+      "exitCode": 1,
+      "sha256": "2a204992fba208890677eeb8eec7a0956cdd06ee57c0476212882ada4dedae60",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v3.log.exit",
+      "interpretation": "Actual isolation tool was unavailable: mounting the service class lost named-plugin Policy identity; later runs use the default plugin."
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-goal-runtime.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v4.log",
+      "exitCode": 1,
+      "sha256": "c0765cdc4d19e19650fd628de01916185fc8404412488ca0f185ffebf02f6f73",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v4.log.exit",
+      "interpretation": "Actual isolation tool remained excluded by the owner allowlist; later runs use the default plugin and the explicit allowed tool."
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-goal-runtime.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v5.log",
+      "exitCode": 0,
+      "sha256": "498ab281c88102b824e8e2d08ebdb39b8473ad35dc33459d4136ccae1b95e1bb",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v5.log.exit"
+    },
+    {
+      "command": "CI=true DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-goal-validation DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-goal-runtime.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v6.log",
+      "exitCode": 1,
+      "sha256": "d14e7789d51f2e213c3a160a2c5c355ca7f8e053b9e28f3eb30763cbde0fe6a8",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v6.log.exit",
+      "interpretation": "Root abort-helper edit had a missing closing brace; compilation failed and no runtime test passed in this command."
+    },
+    {
+      "command": "CI=true DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-goal-validation DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-goal-runtime.spec.ts",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v7.log",
+      "exitCode": 0,
+      "sha256": "43a8cc8eac04c0089666b0cf6c0b0e68ae3cefe7b29201cbb8eff9896b2a65f3",
+      "exitEvidence": "Root observed terminal exec session; exit sidecar archived afterward.",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-runtime-v7.log.exit"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-check-v1.log",
+      "exitCode": 0,
+      "sha256": "50b4a325bfaedc797c872670fc0a0122e97d51d67ba01fc448a81eb514ac2fd3",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-check-v1.log.exit",
+      "interpretation": "Passed, but final achieved/serializer guards changed during the run; check-v2 repeats the complete check on frozen source."
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-goal-validation DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-check-v2.log",
+      "exitCode": 0,
+      "sha256": "a8bfceddc6d99bacc1ec493980161eaf2b949c2395438b919abdadc706fbf446",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-check-v2.log.exit"
+    },
+    {
+      "command": "CI=true node .cache/strategy-goal-validation/public-api.mjs",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-public-api-v1.log",
+      "exitCode": 1,
+      "sha256": "4f98800a4c35c3cc821abd70066fa685fe4973a8036c33feb1ef048c38a1a18d",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-public-api-v1.log.exit",
+      "interpretation": "Smoke imported Goals from the repository root where it is not declared. Script now resolves the real Goals dependency from Evaluation; production source and dependencies unchanged."
+    },
+    {
+      "command": "CI=true node .cache/strategy-goal-validation/public-api.mjs",
+      "log": ".cache/strategy-goal-validation/dsh-strategy-goal-public-api-v2.log",
+      "exitCode": 0,
+      "sha256": "a790509ba831d0b98765c34785600c826348ea9a3b805d95b423ac53d5e784ac",
+      "exitFile": ".cache/strategy-goal-validation/dsh-strategy-goal-public-api-v2.log.exit"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": ".cache/strategy-goal-validation/arm-false.json",
+      "sha256": "d6e67030f85409198d3632c3ace74b00ceba7852fb7289501dc2f5d82d1ca412"
+    },
+    {
+      "path": ".cache/strategy-goal-validation/arm-true.json",
+      "sha256": "9b8314b166051e1c28d072e3663e3d0ec092affbd5a6459a4c371bf1e78cdd72"
+    },
+    {
+      "path": ".cache/strategy-goal-validation/object-false.json",
+      "sha256": "8d1620990f7749319719e2725cdb428f5064362df5a46c4d502203012997254a"
+    },
+    {
+      "path": ".cache/strategy-goal-validation/object-true.json",
+      "sha256": "79de71e709334a39a6e526b23a37fcc8f325d2bdcd989ca8b151cadf4b48dbdd"
+    },
+    {
+      "path": ".cache/strategy-goal-validation/public-api.mjs",
+      "sha256": "46e35d8e427fcc35f0f2ff391bc5a7c371c51c8f7fc609defea0c36790c4dc37",
+      "scope": "Built workspace public-entry smoke, not an independently installed CLI."
+    }
+  ]
+}
