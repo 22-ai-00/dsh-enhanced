@@ -394,3 +394,9 @@ pnpm --dir plugins/assistant-delivery pack --dry-run
 当前 Web 只支持单已认证控制面的文本交互；图片、完整 queue/steer、跨渠道 owner 别名和子 Agent 历史仍未验收。原生 Web 安装及浏览器验证范围见 [自治实施记录](../../docs/agent-autonomy-implementation.md)，配置、Policy 与权限见 [Web owner 包说明](../assistant-web-owner/README.md)。
 
 Host 编排可从 `@dsh-enhanced/assistant-delivery/types` 读取无服务初始化的公开类型；该入口不激活 Delivery，也不授予消息发送权限。根构建先生成此类型入口，避免 Evaluation benchmark 与 Delivery 服务声明形成构建环。
+
+## 持久主人提醒
+
+`enqueueOwnerNotification` 为可信 Host 插件提供限定主人路由、原会话、身份版本和有效期的提醒入队接口。普通 `enqueueBackground` 不能写入保留的 `dsh.native-notice*` 元数据。投递前重查当前主人、绑定版本与代次、路由、期限及背景 `send` Policy；过期、撤权或换代的队列不会发送。
+
+原生 Web 使用本地适配器将通知标为可读取，并由 `assistant-web-owner` 的会话输入区展示。通知不写入 Session 历史，不触发模型，也不表示目标已完成；`accepted` 不表示用户已阅读。读取沿用固定 Web 主人能力，并再次核验上述边界；不另设消息 `read` Policy。其他渠道复用已有适配器。对于已发生但结果未知的外部发送，重启恢复仅通过适配器查询结果；查到过去已发送不表示再次发送，也不会为重发授予权限。

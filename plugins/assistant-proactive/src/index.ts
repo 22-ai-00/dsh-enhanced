@@ -9,17 +9,19 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { OpportunityEngine, validateProfile } from './engine.js'
 import type { OpportunityInput, OpportunityProfile, OpportunityScope } from './types.js'
+import { reminderText, reminderExpiresAt } from './reminder.js'
 import { version } from './version.js'
 
 export const name = 'dsh-enhanced-assistant-proactive'
 export { version, OpportunityEngine, validateProfile }
 export type * from './types.js'
-export interface Config { databasePath?: string; profiles?: Array<OpportunityProfile & { mode: 'prepare' | 'execute' }> }
+interface NotificationPort { enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: OpportunityScope; sessionId: string; idempotencyKey: string; text: string; expiresAt: number }): unknown }
+export interface Config { databasePath?: string; profiles?: OpportunityProfile[] }
 const integer = (max = 1_000_000_000) => Schema.number().step(1).min(0).max(max).required()
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-proactive.sqlite')),
   profiles: Schema.array(Schema.object({
-    id: Schema.string().required(), mode: Schema.union(['prepare', 'execute']).required(),
+    id: Schema.string().required(), mode: Schema.union(['prepare', 'remind', 'execute']).required(),
     expectedBenefit: integer(), successPpm: integer(1_000_000), executionCost: integer(), interruptionCost: integer(), possibleLoss: integer(),
     minimumUtility: integer(),
     mergeWindowMs: integer(), cooldownMs: integer(), rejectionCooldownMs: integer(),
@@ -39,7 +41,6 @@ export class AssistantProactiveService extends Service {
     super(ctx, 'assistantProactive')
     for (const input of config.profiles ?? []) {
       const profile = validateProfile(input)
-      if (profile.mode === 'remind') throw new Error('assistant-proactive: reminder delivery is not supported; use prepare or execute')
       if (this.#profiles.has(profile.id)) throw new Error('assistant-proactive: duplicate profile')
       this.#profiles.set(profile.id, profile)
     }
@@ -66,10 +67,24 @@ export class AssistantProactiveService extends Service {
   }
   assertProfile = (profileId: string): void => {
     if (!this.#active || !this.#profiles.has(profileId)) throw new Error('assistant-proactive: configured active opportunity profile required')
+    if (this.#profiles.get(profileId)!.mode === 'remind' && !this.#notificationPort()) throw new Error('assistant-proactive: reminder delivery service unavailable')
   }
   evaluate = (input: OpportunityInput) => {
     this.assertProfile(input.profileId)
-    return this.#engine.evaluate(input)
+    const evaluation = this.#engine.evaluate(input)
+    const decision = evaluation.decision
+    if (evaluation.disposition === 'consume' && decision.mode === 'remind' && decision.state === 'decided') {
+      const delivery = this.#notificationPort()
+      if (!delivery) throw new Error('assistant-proactive: reminder delivery service unavailable')
+      const profile = this.#engine.profileSnapshot(decision.scope, decision.goalId, decision.profileId)
+      const expiresAt = reminderExpiresAt(decision, profile)
+      if (Date.now() < expiresAt) delivery.enqueueOwnerNotification({ sourceId: 'assistant-proactive/v1', ownerRouteId: decision.ownerRouteId, scope: decision.scope, sessionId: decision.sessionId, idempotencyKey: `proactive-reminder:${decision.id}`, text: reminderText(decision, profile), expiresAt })
+    }
+    return evaluation
+  }
+  #notificationPort(): NotificationPort | undefined {
+    const delivery = this.ctx.get('assistantDelivery') as unknown as Partial<NotificationPort> | undefined
+    return typeof delivery?.enqueueOwnerNotification === 'function' ? delivery as NotificationPort : undefined
   }
   closeWait = (waitId: string, scope: OpportunityScope, reason: 'expired' | 'cancelled'): void => {
     if (!this.#active) throw new Error('assistant-proactive: disposed')

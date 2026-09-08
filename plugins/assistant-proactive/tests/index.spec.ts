@@ -43,8 +43,8 @@ describe('assistant-proactive bundle and owner access', () => {
     expect(f.service.feedback(f.agent, first.decision.id, 'rejected')).toMatchObject({ feedback: 'rejected' })
     expect(f.service.evaluate({ ...input, event: { ...input.event, id: 'second', sequence: 2, digest: 'second-digest' } })).toMatchObject({ disposition: 'consume', decision: { reason: 'rejected-cooldown' } })
   })
-  it('configuration rejects unsupported reminder delivery and invalid probability estimates', () => {
-    expect(() => Config({ profiles: [{ ...profile, mode: 'remind' }] } as never)).toThrow()
+  it('configuration accepts bounded reminders and rejects invalid probability estimates', () => {
+    expect(Config({ profiles: [{ ...profile, mode: 'remind' }] }).profiles?.[0]?.mode).toBe('remind')
     expect(() => Config({ profiles: [{ ...profile, successPpm: 1_000_001 }] })).toThrow()
   })
 })

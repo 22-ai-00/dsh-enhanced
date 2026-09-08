@@ -47,6 +47,8 @@ Policy 至少需要显式允许该 `web/account/tenant/user` 的 `ingest`，以�
 
 Web client 在构建时复用 DSH `0.1.2-rc.1` Session Controller 的浏览器 bundle，只将 ModuleLoader 注册 id 改为本包 id；不会重新实现 session RPC 或 UI 状态。构建脚本会验证上游版本、完整 `dsh.client` 元数据、MIT 许可证、单一注册 id 和无自引用 require，格式变化时失败。生成产物携带上游完整 MIT 文本于 `lib/THIRD_PARTY_LICENSES`，并保留 client 文件的版权 notice；该方案依赖当前 DSH UI bundles 不通过 ModuleLoader require 原 Controller client id。其他 UI manifest 的旧 inject 边在该版本只影响 graph 到达顺序，Cordis client service injection 仍等待本 clone 提供 `sessions`。
 
+当 Delivery 接受了同一 owner Session 的主动提醒时，输入框上方会显示只读“主动提醒”区域。该区域通过严格 Typert `deliveryNotices.list(sessionId)` 读取，并在每次读取结束后约两秒发起下一次读取；切换会话、断开连接、撤权或读取失败会清空旧内容。提醒保持独立于聊天记录，不会伪装成用户或模型消息，也不会触发模型、创建 Session 或改变提醒状态。Host 每次读取重新校验固定 Web owner 能力、owner lineage 和期限；提醒只会在 Delivery 已通过实时背景 `send` Policy 后被接受，不属于该主人的 Session 请求会被拒绝。
+
 ## 权限与数据
 
 运行时不创建监听端口、凭证或浏览器认证，复用已有的已认证单 owner Web 控制面。离线 setup CLI 调用本机 `dsh --dump-config` 读取配置，不执行任意 YAML JS；写入目标 profile patch、Delivery owner 数据库和所选工作区目录，使用安装锁与原子文件替换。配对与 YAML 不能跨库原子提交，写文件失败可能留下尚未启用的首次身份；同身份重试不会轮换权限。CLI 不读取凭证存储、不发模型请求，也无安装生命周期脚本。

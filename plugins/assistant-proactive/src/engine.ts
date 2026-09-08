@@ -129,6 +129,11 @@ export class OpportunityEngine {
     const rows = this.#db.prepare(`SELECT payload_json FROM proactive_decisions WHERE scope_json = ? ${goalId === undefined ? '' : 'AND goal_id = ?'} ORDER BY json_extract(payload_json, '$.firstObservedAt'), id`).all(...(goalId === undefined ? [scope] : [scope, goalId])) as Array<{ payload_json: string }>
     return freeze(rows.map(row => this.#parse(row.payload_json))) as readonly OpportunityDecision[]
   }
+  profileSnapshot(scope: OpportunityScope, goalId: string, profileId: string): Readonly<OpportunityProfile> {
+    const row = this.#db.prepare('SELECT profile_json FROM proactive_profiles WHERE scope_json = ? AND goal_id = ? AND profile_id = ?').get(scopeKey(scope), goalId, profileId) as { profile_json: string } | undefined
+    if (!row) fail('assistant-proactive: frozen goal profile unavailable')
+    return validateProfile(JSON.parse(row.profile_json) as OpportunityProfile)
+  }
   closeWait(waitId: string, scope: OpportunityScope, reason: 'expired' | 'cancelled'): void {
     if (!text(waitId) || !['expired', 'cancelled'].includes(reason)) fail()
     this.#db.exec('BEGIN IMMEDIATE')

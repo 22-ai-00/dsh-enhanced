@@ -56,7 +56,11 @@
     "client": {
       "platform": "web",
       "external": ["@deepseek-ai/dsh-api-gateway/client"],
-      "inject": ["@deepseek-ai/dsh-api-gateway"]
+      "inject": [
+        "@deepseek-ai/dsh-api-gateway",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ]
     },
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -66,7 +70,11 @@
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-api-gateway": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-typert-registry": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-typert-protocol": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-api-session-controller": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-client-ui-conversation": ">=0.1.2-rc.1 <0.2.0",
+    "@deepseek-ai/dsh-client-ui-renderer": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-attachment": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-session": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-workspace": ">=0.1.2-rc.1 <0.2.0",
@@ -80,7 +88,11 @@
     "@deepseek-ai/cordis": { "optional": true },
     "@deepseek-ai/dsh-agent": { "optional": true },
     "@deepseek-ai/dsh-api-gateway": { "optional": true },
+    "@deepseek-ai/dsh-typert-registry": { "optional": true },
+    "@deepseek-ai/dsh-typert-protocol": { "optional": true },
     "@deepseek-ai/dsh-api-session-controller": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-conversation": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-renderer": { "optional": true },
     "@deepseek-ai/dsh-attachment": { "optional": true },
     "@deepseek-ai/dsh-session": { "optional": true },
     "@deepseek-ai/dsh-workspace": { "optional": true },
@@ -94,12 +106,19 @@
     "@deepseek-ai/cordis": "catalog:",
     "@deepseek-ai/dsh-agent": "catalog:",
     "@deepseek-ai/dsh-api-gateway": "catalog:",
+    "@deepseek-ai/dsh-typert-registry": "catalog:",
+    "@deepseek-ai/dsh-typert-protocol": "catalog:",
     "@deepseek-ai/dsh-api-session-controller": "catalog:",
+    "@deepseek-ai/dsh-client-ui-conversation": "catalog:",
+    "@deepseek-ai/dsh-client-ui-renderer": "catalog:",
     "@deepseek-ai/dsh-attachment": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
     "@deepseek-ai/dsh-workspace": "catalog:",
     "@dsh-enhanced/assistant-delivery": "workspace:*",
     "@types/node": "catalog:",
+    "@types/react": "~18.3.1",
+    "esbuild": "^0.27.0",
+    "react": "^18.2.0",
     "typescript": "catalog:",
     "vitest": "catalog:",
     "@dsh-enhanced/assistant-isolation": "workspace:*",
@@ -109,6 +128,7 @@
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",
+    "zod": "catalog:",
     "yaml": "2.9.0"
   }
 }

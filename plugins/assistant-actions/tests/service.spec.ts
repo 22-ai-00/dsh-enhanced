@@ -16,7 +16,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import { expect, test } from 'vitest'
+import { expect, test, vi } from 'vitest'
 import { AssistantActionsService } from '../src/service.ts'
 import { commitOnGitHub } from '../src/github.ts'
 import { execFile } from 'node:child_process'
@@ -38,6 +38,10 @@ function agent(ctx: Context, workspace: string): Agent {
 
 test('real ToolRuntime, Keychain and HTTP execute a finite commit, preserve unknown after ACK loss and honor external revocation', async () => {
   const root = await mkdtemp(join(tmpdir(), 'action-service-'))
+  // The Policy ledger uses fixed wall-clock windows. Keep all four budget
+  // reservations in one window; a real minute rollover made this assertion flaky.
+  const policyNow = Date.now()
+  const clock = vi.spyOn(Date, 'now').mockReturnValue(policyNow)
   const stateRoot = join(root, 'actions'); const secretRoot = join(root, 'secret')
   await mkdir(secretRoot, { mode: 0o700 }); await writeFile(join(secretRoot, 'token'), secret, { mode: 0o600 })
   let head = 'a'.repeat(40); let received = 0; let mode: 'success' | 'drop' | 'hang' = 'success'
@@ -116,7 +120,9 @@ test('real ToolRuntime, Keychain and HTTP execute a finite commit, preserve unkn
     expect((await readFile(join(stateRoot, 'ledger.sqlite'))).includes(Buffer.from(secret))).toBe(false)
     expect(JSON.stringify([first, lostResult, ctx.credentialsKeychain.listLeases()])).not.toContain(secret)
   } finally {
-    await plugin?.dispose(); await ctx.fiber.dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()))
-    await rm(root, { recursive: true, force: true })
+    try {
+      await plugin?.dispose(); await ctx.fiber.dispose(); server.closeAllConnections(); await new Promise<void>(resolve => server.close(() => resolve()))
+      await rm(root, { recursive: true, force: true })
+    } finally { clock.mockRestore() }
   }
 }, 30_000)

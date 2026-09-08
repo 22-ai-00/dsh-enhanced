@@ -7,10 +7,18 @@ import type { SessionId } from '@deepseek-ai/dsh-session'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { realpath } from 'node:fs/promises'
 import { version } from './version.js'
+import { TYPERT } from './typert.js'
+import { DeliveryNoticesService } from './notices.js'
 
 export const name = 'dsh-enhanced-assistant-web-owner'
 export { version }
-export const inject = [...SessionController.inject, 'assistantDelivery']
+export const inject = [...SessionController.inject, 'assistantDelivery', 'typert']
+
+export interface DeliveryNotice {
+  readonly id: string
+  readonly text: string
+  readonly createdAt: number
+}
 
 export interface Config {
   readonly principal: Readonly<{ readonly account: string, readonly tenant: string, readonly user: string }>
@@ -26,6 +34,7 @@ export interface NativeWebOwnerAccess {
   get(sessionId: SessionId): Agent | undefined
   assertSession(sessionId: SessionId): void
   ownsSession(sessionId: SessionId): boolean
+  notifications(sessionId: SessionId): readonly DeliveryNotice[]
   prompt<T>(input: { readonly sessionId: SessionId, readonly requestId: string, readonly text: string, readonly content: readonly unknown[] }, invoke: () => Promise<T>, signal: AbortSignal): Promise<T>
   dispose(): Promise<void>
 }
@@ -187,6 +196,10 @@ export async function apply(ctx: Context, input: Config): Promise<void> {
     const access = delivery.bindNativeWebOwner(owner, { principal: { channel: 'web', ...config.principal }, workspace: config.workspace, preset: config.preset, ...(config.maxExecutionMs === undefined ? {} : { maxExecutionMs: config.maxExecutionMs }) })
     try {
       const workspace = await resolveOwnedWorkspace(owner, config)
+      // This service only closes over the fixed Web-owner capability. The
+      // capability checks lineage, expiry and current send policy on every call.
+      new DeliveryNoticesService(owner, access)
+      owner.typert.register(TYPERT)
       wrapController(owner, config, access, originalRegistry, workspace)
     } catch (error) {
       await access.dispose()
