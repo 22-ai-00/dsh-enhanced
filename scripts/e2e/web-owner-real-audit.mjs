@@ -23,7 +23,9 @@ function compact(event) {
   if (event.type === 'tool/call') {
     let argumentsValue = data.arguments && typeof data.arguments === 'object' ? data.arguments : {}
     if (typeof data.arguments === 'string') try { argumentsValue = JSON.parse(data.arguments) } catch { return null }
-    const selected = data.name === 'goal_create' && argumentsValue.objective === objective ? { objective, max_goal_rounds: argumentsValue.max_goal_rounds, start_native_rounds: argumentsValue.start_native_rounds } : { file_path: argumentsValue.file_path }
+    const selected = data.name === 'goal_create' && argumentsValue.objective === objective ? { objective, max_goal_rounds: argumentsValue.max_goal_rounds, start_native_rounds: argumentsValue.start_native_rounds }
+      : data.name === 'goal_wait_event' ? { goal_id: argumentsValue.goal_id, expected_revision: argumentsValue.expected_revision, trigger_id: argumentsValue.trigger_id, expires_at: argumentsValue.expires_at }
+        : { file_path: argumentsValue.file_path }
     return { seq: event.seq, type: event.type, data: { turn: data.turn, callId: data.callId, name: data.name, arguments: selected } }
   }
   if (event.type === 'turn/start') return { seq: event.seq, type: event.type, data: { turn: data.turn } }
@@ -35,7 +37,7 @@ function compact(event) {
   return null
 }
 
-/** Read a bounded persisted Web session without returning its arbitrary conversation history. */
+/** Read the bounded synthetic Web test session: selected tool metadata and assistant replies. */
 export async function readSessionAudit(home, workspace, sessionId) {
   if (typeof home !== 'string' || typeof sessionId !== 'string' || !/^[A-Za-z0-9-]+$/u.test(sessionId)) throw new Error('home and sessionId are invalid')
   const path = join(home, 'sessions', projectKey(workspace), sessionId.startsWith('session-') ? sessionId : `session-${sessionId}`, 'session.jsonl.zstd')
@@ -45,5 +47,8 @@ export async function readSessionAudit(home, workspace, sessionId) {
   const events = stdout.split('\n').filter(Boolean).map(line => JSON.parse(line))
   const policy = await import(pathToFileURL(join(home, 'profiles', 'web', 'node_modules', '@dsh-enhanced', 'assistant-policy', 'lib', 'index.js')).href)
   const selected = events.map(compact).filter(Boolean)
-  return Object.freeze({ sessionId, projectKey: projectKey(workspace), reviewer: policy.approvalReviewerOf(events), events: selected })
+  const assistantReplies = events.filter(event => event.type === 'assistant/message').map(event => ({
+    seq: event.seq, turn: event.data.turn, text: event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(''),
+  }))
+  return Object.freeze({ sessionId, assistantReplies, projectKey: projectKey(workspace), reviewer: policy.approvalReviewerOf(events), events: selected })
 }

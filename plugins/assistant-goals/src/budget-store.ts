@@ -4,16 +4,20 @@ import { GoalStoreError } from './types.js'
 import type { GoalScope } from './types.js'
 import { prepareGoalStoreDatabaseFile } from './store.js'
 
-export interface GoalBudgetLimits { modelCalls: number; toolCalls: number; inputTokens: number; outputTokens: number; costUsdMicros: number | null; expiresAt: number }
+export type GoalBudgetMode = 'tokens' | 'calls'
+export interface GoalBudgetRoute { provider: string; model: string }
+/** Limits are written once for a business goal. Calls mode intentionally has no token/cost authority. */
+export interface GoalBudgetLimits { mode?: GoalBudgetMode; routes?: readonly GoalBudgetRoute[]; modelCalls: number; toolCalls: number; inputTokens: number | null; outputTokens: number | null; costUsdMicros: number | null; expiresAt: number }
 export interface GoalBudgetScope { scope: GoalScope; goalId: string }
 export interface GoalBudgetReservation { id: string; runId: string; inputTokens: number; outputTokens: number; costUsdMicros: number | null; state: 'held' | 'settled'; reservedAt: number; settledAt?: number }
-export interface GoalBudgetSnapshot { limits: GoalBudgetLimits; modelCalls: number; toolCalls: number; inputTokens: number; outputTokens: number; costUsdMicros: number | null; heldCalls: number }
-export interface GoalBudgetRunUsage { modelCalls: number; heldCalls: number; inputTokens: number; outputTokens: number; costUsdMicros: number | null }
+export interface GoalBudgetSnapshot { limits: GoalBudgetLimits; modelCalls: number; toolCalls: number; inputTokens: number | null; outputTokens: number | null; costUsdMicros: number | null; heldCalls: number }
+export interface GoalBudgetRunUsage { modelCalls: number; heldCalls: number; inputTokens: number | null; outputTokens: number | null; costUsdMicros: number | null }
 
 type Row = { id: string; run_id: string; input_tokens_reserved: number; output_tokens_reserved: number; cost_usd_micros_reserved: number | null; state: string; reserved_at: number; input_tokens_actual: number | null; output_tokens_actual: number | null; cost_usd_micros_actual: number | null; settled_at: number | null }
-type LimitRow = { model_calls: number; tool_calls: number; input_tokens: number; output_tokens: number; cost_usd_micros: number | null; expires_at: number }
+type LimitRow = { mode: GoalBudgetMode; routes_json: string; model_calls: number; tool_calls: number; input_tokens: number | null; output_tokens: number | null; cost_usd_micros: number | null; expires_at: number }
 const max = 1_000_000_000
 const idPattern = /^[A-Za-z0-9_.:-]{1,512}$/u
+const routeText = (value: unknown): value is string => typeof value === 'string' && value.length > 0 && value.length <= 512 && !/[\s\p{Cc}]/u.test(value)
 function fail(code: ConstructorParameters<typeof GoalStoreError>[0]): never { throw new GoalStoreError(code) }
 const freeze = <T>(value: T): T => { if (value && typeof value === 'object') { for (const item of Object.values(value as Record<string, unknown>)) freeze(item); Object.freeze(value) }; return value }
 const equal = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right)
@@ -29,9 +33,19 @@ function scopeInput(value: GoalBudgetScope): GoalBudgetScope {
 }
 
 function limitsInput(value: GoalBudgetLimits): GoalBudgetLimits {
-  if (!value || typeof value !== 'object' || Object.keys(value).length !== 6 || !integer(value.modelCalls) || !integer(value.toolCalls) || !integer(value.inputTokens) || !integer(value.outputTokens)
-    || !(value.costUsdMicros === null || integer(value.costUsdMicros)) || !time(value.expiresAt)) fail('invalid-input')
-  return freeze({ modelCalls: value.modelCalls, toolCalls: value.toolCalls, inputTokens: value.inputTokens, outputTokens: value.outputTokens, costUsdMicros: value.costUsdMicros, expiresAt: value.expiresAt })
+  if (!value || typeof value !== 'object') fail('invalid-input')
+  const mode = value.mode ?? 'tokens'; const inputRoutes = value.routes ?? []
+  if (![6, 8].includes(Object.keys(value).length) || !['tokens', 'calls'].includes(mode) || !Array.isArray(inputRoutes)
+    || !integer(value.modelCalls) || !integer(value.toolCalls) || !(value.costUsdMicros === null || integer(value.costUsdMicros)) || !time(value.expiresAt)) fail('invalid-input')
+  const routes = inputRoutes.map(route => {
+    if (!route || typeof route !== 'object' || Object.keys(route).length !== 2 || ![route.provider, route.model].every(routeText)) fail('invalid-input')
+    return { provider: route.provider, model: route.model }
+  })
+  if (new Set(routes.map(route => JSON.stringify([route.provider, route.model]))).size !== routes.length) fail('invalid-input')
+  if (mode === 'tokens') {
+    if (!integer(value.inputTokens) || !integer(value.outputTokens)) fail('invalid-input')
+  } else if (value.inputTokens !== null || value.outputTokens !== null || value.costUsdMicros !== null || routes.length === 0) fail('invalid-input')
+  return freeze({ mode, routes, modelCalls: value.modelCalls, toolCalls: value.toolCalls, inputTokens: value.inputTokens, outputTokens: value.outputTokens, costUsdMicros: value.costUsdMicros, expiresAt: value.expiresAt })
 }
 
 function requestInput(value: { id: string; runId: string; inputTokens: number; outputTokens: number; costUsdMicros: number | null }) {
@@ -62,34 +76,42 @@ export class GoalBudgetStore {
       const version = (this.#database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
       const tables = (this.#database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map(row => row.name)
       if (version === 0 && tables.length === 0) this.#database.exec(`BEGIN IMMEDIATE;
-        CREATE TABLE goal_budget_limits (scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, model_calls INTEGER NOT NULL, tool_calls INTEGER NOT NULL, input_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL, cost_usd_micros INTEGER, expires_at INTEGER NOT NULL, PRIMARY KEY(scope_json, goal_id)) STRICT, WITHOUT ROWID;
+        CREATE TABLE goal_budget_limits (scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, mode TEXT NOT NULL CHECK(mode IN ('tokens','calls')), routes_json TEXT NOT NULL, model_calls INTEGER NOT NULL, tool_calls INTEGER NOT NULL, input_tokens INTEGER, output_tokens INTEGER, cost_usd_micros INTEGER, expires_at INTEGER NOT NULL, PRIMARY KEY(scope_json, goal_id)) STRICT, WITHOUT ROWID;
         CREATE TABLE goal_budget_reservations (id TEXT PRIMARY KEY, scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, run_id TEXT NOT NULL, input_tokens_reserved INTEGER NOT NULL, output_tokens_reserved INTEGER NOT NULL, cost_usd_micros_reserved INTEGER, state TEXT NOT NULL CHECK(state IN ('held','settled')), reserved_at INTEGER NOT NULL, input_tokens_actual INTEGER, output_tokens_actual INTEGER, cost_usd_micros_actual INTEGER, settled_at INTEGER, FOREIGN KEY(scope_json, goal_id) REFERENCES goal_budget_limits(scope_json, goal_id)) STRICT;
         CREATE TABLE goal_budget_tools (id TEXT PRIMARY KEY, scope_json TEXT NOT NULL, goal_id TEXT NOT NULL, consumed_at INTEGER NOT NULL, FOREIGN KEY(scope_json, goal_id) REFERENCES goal_budget_limits(scope_json, goal_id)) STRICT;
         CREATE TABLE goal_budget_request_ids (id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK(kind IN ('reserve','tool'))) STRICT;
         CREATE INDEX goal_budget_reservations_scope_goal ON goal_budget_reservations(scope_json, goal_id);
         CREATE INDEX goal_budget_tools_scope_goal ON goal_budget_tools(scope_json, goal_id);
-        PRAGMA user_version = 1; COMMIT;`)
-      else if (version !== 1 || !equal(tables, ['goal_budget_limits', 'goal_budget_request_ids', 'goal_budget_reservations', 'goal_budget_tools'])) fail('schema')
+        PRAGMA user_version = 2; COMMIT;`)
+      else if (version === 1 && equal(tables, ['goal_budget_limits', 'goal_budget_request_ids', 'goal_budget_reservations', 'goal_budget_tools'])) this.#database.exec(`BEGIN IMMEDIATE;
+        ALTER TABLE goal_budget_limits ADD COLUMN mode TEXT NOT NULL DEFAULT 'tokens';
+        ALTER TABLE goal_budget_limits ADD COLUMN routes_json TEXT NOT NULL DEFAULT '[]';
+        PRAGMA user_version = 2; COMMIT;`)
+      else if (version !== 2 || !equal(tables, ['goal_budget_limits', 'goal_budget_request_ids', 'goal_budget_reservations', 'goal_budget_tools'])) fail('schema')
       this.#validate()
       if (path !== ':memory:') prepareGoalStoreDatabaseFile(path)
     } catch (error) { this.#database.close(); throw error }
   }
   #key(binding: GoalBudgetScope): [GoalBudgetScope, string] { const result = scopeInput(binding); return [result, acceptanceCanonicalJson(result.scope)] }
-  #limit(key: string, goalId: string): LimitRow | undefined { return this.#database.prepare('SELECT model_calls, tool_calls, input_tokens, output_tokens, cost_usd_micros, expires_at FROM goal_budget_limits WHERE scope_json = ? AND goal_id = ?').get(key, goalId) as LimitRow | undefined }
-  #limits(row: LimitRow): GoalBudgetLimits { return limitsInput({ modelCalls: row.model_calls, toolCalls: row.tool_calls, inputTokens: row.input_tokens, outputTokens: row.output_tokens, costUsdMicros: row.cost_usd_micros, expiresAt: row.expires_at }) }
+  #limit(key: string, goalId: string): LimitRow | undefined { return this.#database.prepare('SELECT mode, routes_json, model_calls, tool_calls, input_tokens, output_tokens, cost_usd_micros, expires_at FROM goal_budget_limits WHERE scope_json = ? AND goal_id = ?').get(key, goalId) as LimitRow | undefined }
+  #limits(row: LimitRow): GoalBudgetLimits {
+    let routes: unknown; try { routes = JSON.parse(row.routes_json) } catch { fail('schema') }
+    return limitsInput({ mode: row.mode, routes: routes as GoalBudgetRoute[], modelCalls: row.model_calls, toolCalls: row.tool_calls, inputTokens: row.mode === 'calls' ? null : row.input_tokens, outputTokens: row.mode === 'calls' ? null : row.output_tokens, costUsdMicros: row.cost_usd_micros, expiresAt: row.expires_at })
+  }
   #snapshot(key: string, goalId: string): GoalBudgetSnapshot {
     const limits = this.#limit(key, goalId); if (!limits) fail('not-found'); const parsed = this.#limits(limits)
     const count = this.#database.prepare("SELECT COUNT(*) AS model_calls, COALESCE(SUM(CASE WHEN state = 'held' THEN 1 ELSE 0 END), 0) AS held_calls, COALESCE(SUM(CASE WHEN state = 'held' THEN input_tokens_reserved ELSE input_tokens_actual END), 0) AS input_tokens, COALESCE(SUM(CASE WHEN state = 'held' THEN output_tokens_reserved ELSE output_tokens_actual END), 0) AS output_tokens, COALESCE(SUM(CASE WHEN state = 'held' THEN COALESCE(cost_usd_micros_reserved, 0) ELSE COALESCE(cost_usd_micros_actual, 0) END), 0) AS cost_usd_micros FROM goal_budget_reservations WHERE scope_json = ? AND goal_id = ?").get(key, goalId) as { model_calls: number; held_calls: number; input_tokens: number; output_tokens: number; cost_usd_micros: number }
     const tool = this.#database.prepare('SELECT COUNT(*) AS tool_calls FROM goal_budget_tools WHERE scope_json = ? AND goal_id = ?').get(key, goalId) as { tool_calls: number }
     if (![count.model_calls, count.held_calls, count.input_tokens, count.output_tokens, count.cost_usd_micros, tool.tool_calls].every(integer)) fail('schema')
-    return freeze({ limits: parsed, modelCalls: count.model_calls, toolCalls: tool.tool_calls, inputTokens: count.input_tokens, outputTokens: count.output_tokens, costUsdMicros: parsed.costUsdMicros === null ? null : count.cost_usd_micros, heldCalls: count.held_calls })
+    return freeze({ limits: parsed, modelCalls: count.model_calls, toolCalls: tool.tool_calls, inputTokens: parsed.mode === 'calls' ? null : count.input_tokens, outputTokens: parsed.mode === 'calls' ? null : count.output_tokens, costUsdMicros: parsed.mode === 'calls' || parsed.costUsdMicros === null ? null : count.cost_usd_micros, heldCalls: count.held_calls })
   }
   #validate(): void {
-    const expected: Record<string, readonly string[]> = { goal_budget_limits: ['scope_json', 'goal_id', 'model_calls', 'tool_calls', 'input_tokens', 'output_tokens', 'cost_usd_micros', 'expires_at'], goal_budget_reservations: ['id', 'scope_json', 'goal_id', 'run_id', 'input_tokens_reserved', 'output_tokens_reserved', 'cost_usd_micros_reserved', 'state', 'reserved_at', 'input_tokens_actual', 'output_tokens_actual', 'cost_usd_micros_actual', 'settled_at'], goal_budget_tools: ['id', 'scope_json', 'goal_id', 'consumed_at'], goal_budget_request_ids: ['id', 'kind'] }
+    const expected: Record<string, readonly string[]> = { goal_budget_limits: ['scope_json', 'goal_id', 'mode', 'routes_json', 'model_calls', 'tool_calls', 'input_tokens', 'output_tokens', 'cost_usd_micros', 'expires_at'], goal_budget_reservations: ['id', 'scope_json', 'goal_id', 'run_id', 'input_tokens_reserved', 'output_tokens_reserved', 'cost_usd_micros_reserved', 'state', 'reserved_at', 'input_tokens_actual', 'output_tokens_actual', 'cost_usd_micros_actual', 'settled_at'], goal_budget_tools: ['id', 'scope_json', 'goal_id', 'consumed_at'], goal_budget_request_ids: ['id', 'kind'] }
     for (const [table, columns] of Object.entries(expected)) {
       const actual = (this.#database.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(row => row.name)
       const schema = this.#database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?").get(table) as { sql: string } | undefined
-      if (!schema || !equal(actual, columns) || !/\bSTRICT\b/u.test(schema.sql)) fail('schema')
+      const legacyMigratedLimits = table === 'goal_budget_limits' && equal(actual, ['scope_json', 'goal_id', 'model_calls', 'tool_calls', 'input_tokens', 'output_tokens', 'cost_usd_micros', 'expires_at', 'mode', 'routes_json'])
+      if (!schema || (!equal(actual, columns) && !legacyMigratedLimits) || !/\bSTRICT\b/u.test(schema.sql)) fail('schema')
     }
     const limitSql = (this.#database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = 'goal_budget_limits'").get() as { sql: string }).sql
     if (!/WITHOUT\s+ROWID/iu.test(limitSql) || !/PRIMARY\s+KEY\s*\(\s*scope_json\s*,\s*goal_id\s*\)/iu.test(limitSql)) fail('schema')
@@ -138,13 +160,17 @@ export class GoalBudgetStore {
     }
     for (const row of limitRows) {
       const snapshot = this.#snapshot(row.scope_json, row.goal_id)
-      if (snapshot.modelCalls > snapshot.limits.modelCalls || snapshot.toolCalls > snapshot.limits.toolCalls || snapshot.inputTokens > snapshot.limits.inputTokens || snapshot.outputTokens > snapshot.limits.outputTokens || (snapshot.limits.costUsdMicros !== null && snapshot.costUsdMicros! > snapshot.limits.costUsdMicros)) fail('schema')
+      if (snapshot.modelCalls > snapshot.limits.modelCalls || snapshot.toolCalls > snapshot.limits.toolCalls
+        || (snapshot.limits.mode === 'tokens' && (snapshot.inputTokens! > snapshot.limits.inputTokens! || snapshot.outputTokens! > snapshot.limits.outputTokens! || (snapshot.limits.costUsdMicros !== null && snapshot.costUsdMicros! > snapshot.limits.costUsdMicros)))) fail('schema')
     }
   }
   configure(binding: GoalBudgetScope, limits: GoalBudgetLimits): GoalBudgetSnapshot {
     const [input, key] = this.#key(binding); const value = limitsInput(limits); const existing = this.#limit(key, input.goalId)
     if (existing) { if (!equal(this.#limits(existing), value)) fail('conflict'); return this.#snapshot(key, input.goalId) }
-    try { this.#database.prepare('INSERT INTO goal_budget_limits(scope_json, goal_id, model_calls, tool_calls, input_tokens, output_tokens, cost_usd_micros, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)').run(key, input.goalId, value.modelCalls, value.toolCalls, value.inputTokens, value.outputTokens, value.costUsdMicros, value.expiresAt) } catch { fail('conflict') }
+    const calls = value.mode === 'calls'
+    // v1 migration cannot relax the old NOT NULL token columns. Zero is a private
+    // sentinel only for calls mode; #limits always projects it back to unknown/null.
+    try { this.#database.prepare('INSERT INTO goal_budget_limits(scope_json, goal_id, mode, routes_json, model_calls, tool_calls, input_tokens, output_tokens, cost_usd_micros, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)').run(key, input.goalId, value.mode ?? 'tokens', acceptanceCanonicalJson(value.routes ?? []), value.modelCalls, value.toolCalls, calls ? 0 : value.inputTokens, calls ? 0 : value.outputTokens, value.costUsdMicros, value.expiresAt) } catch { fail('conflict') }
     return this.#snapshot(key, input.goalId)
   }
   /** Exact run attribution, including conservative held reservations. */
@@ -159,14 +185,15 @@ export class GoalBudgetStore {
       COALESCE(SUM(CASE WHEN state = 'held' THEN output_tokens_reserved ELSE output_tokens_actual END), 0) AS output,
       COALESCE(SUM(CASE WHEN state = 'held' THEN cost_usd_micros_reserved ELSE cost_usd_micros_actual END), 0) AS cost
       FROM goal_budget_reservations WHERE scope_json = ? AND goal_id = ? AND run_id = ?`).get(key, input.goalId, runId) as { calls: number; held: number; input: number; output: number; cost: number }
-    return freeze({ modelCalls: row.calls, heldCalls: row.held, inputTokens: row.input, outputTokens: row.output,
-      costUsdMicros: limits.cost_usd_micros === null ? null : row.cost })
+    const parsed = this.#limits(limits)
+    return freeze({ modelCalls: row.calls, heldCalls: row.held, inputTokens: parsed.mode === 'calls' ? null : row.input, outputTokens: parsed.mode === 'calls' ? null : row.output,
+      costUsdMicros: parsed.mode === 'calls' || limits.cost_usd_micros === null ? null : row.cost })
   }
 
   /** Read-only candidate view. It never inserts limits, requests, or reservations. */
   preview(binding: GoalBudgetScope, limits: GoalBudgetLimits): GoalBudgetSnapshot {
     const [input, key] = this.#key(binding); const candidate = limitsInput(limits); const existing = this.#limit(key, input.goalId)
-    if (existing === undefined) return freeze({ limits: candidate, modelCalls: 0, toolCalls: 0, inputTokens: 0, outputTokens: 0, costUsdMicros: candidate.costUsdMicros === null ? null : 0, heldCalls: 0 })
+    if (existing === undefined) return freeze({ limits: candidate, modelCalls: 0, toolCalls: 0, inputTokens: candidate.mode === 'calls' ? null : 0, outputTokens: candidate.mode === 'calls' ? null : 0, costUsdMicros: candidate.mode === 'calls' || candidate.costUsdMicros === null ? null : 0, heldCalls: 0 })
     if (!equal(this.#limits(existing), candidate)) fail('conflict')
     return this.#snapshot(key, input.goalId)
   }
@@ -180,9 +207,9 @@ export class GoalBudgetStore {
       if (now >= snapshot.limits.expiresAt
         || (snapshot.limits.costUsdMicros !== null && value.costUsdMicros === null)
         || snapshot.modelCalls + 1 > snapshot.limits.modelCalls
-        || snapshot.inputTokens + value.inputTokens > snapshot.limits.inputTokens
-        || snapshot.outputTokens + value.outputTokens > snapshot.limits.outputTokens
-        || (snapshot.limits.costUsdMicros !== null && snapshot.costUsdMicros! + value.costUsdMicros! > snapshot.limits.costUsdMicros)) fail('conflict')
+        || (snapshot.limits.mode === 'tokens' && (snapshot.inputTokens! + value.inputTokens > snapshot.limits.inputTokens!
+          || snapshot.outputTokens! + value.outputTokens > snapshot.limits.outputTokens!
+          || (snapshot.limits.costUsdMicros !== null && snapshot.costUsdMicros! + value.costUsdMicros! > snapshot.limits.costUsdMicros)))) fail('conflict')
       this.#database.prepare("INSERT INTO goal_budget_request_ids(id, kind) VALUES (?, 'reserve')").run(value.id)
       this.#database.prepare("INSERT INTO goal_budget_reservations(id, scope_json, goal_id, run_id, input_tokens_reserved, output_tokens_reserved, cost_usd_micros_reserved, state, reserved_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'held', ?)")
         .run(value.id, key, input.goalId, value.runId, value.inputTokens, value.outputTokens, value.costUsdMicros, now)

@@ -4,7 +4,7 @@ import { version } from './version.js'
 export const name = 'dsh-enhanced-assistant-goals'
 export { AssistantGoalsService, Config, version }
 export type * from './types.js'
-export type { GoalBudgetConfig, GoalBudgetMeter, GoalBudgetFailure } from './budget.js'
+export type { GoalBudgetConfig, GoalTokenBudgetConfig, GoalCallsBudgetConfig, GoalBudgetMeter, GoalBudgetFailure } from './budget.js'
 export type { GoalBudgetLimits, GoalBudgetSnapshot } from './budget-store.js'
 export type { GoalWakeConfig } from './wake.js'
 export type { GoalEventWait, GoalEventWaitIntent, GoalEventSourceSnapshot } from './event-wait-store.js'

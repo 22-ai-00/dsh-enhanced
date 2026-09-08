@@ -47,6 +47,26 @@ After verified completion and lease release, the test stops the actual Host, sta
 
 Artifacts under `.cache/web-owner-real-e2e/` retain model-call metadata, the generated source, independent receipts and redacted Host/browser evidence. The profile and its Host are removed on completion or failure. The local checker runs under the same OS user; this experiment is not proof of the planned isolated worker/credential broker or hidden-evaluation boundary, long-term autonomy, or comparative model gains.
 
+For real file-event recovery, use the same route environment with `pnpm test:web-owner:real-event`.
+This creates a disposable owner Session, lets the real model call `goal_create` and
+`goal_wait_event`, restarts the Host, then changes a watched file. The original
+Goal must resume, write the artifact, pass independent step/outcome verification,
+and preserve its visible reply in the original Web Session without a duplicate
+outbox message. The test rereads the persisted Session after shutdown. Reobserving identical bytes
+and a subsequent new file event must not replay the completed wait.
+
+The Goal uses explicit `executionBudget.mode: calls`: six native model calls,
+six tool calls, a ten-minute absolute lifetime and an exact configured route.
+This provides no token or monetary ceiling. The experiment separately caps ten
+DSH model invocations including owner setup, retaining the count across Host
+restarts, and sends finite output-limit hints. Unexpected tool approvals are
+rejected through the real UI (at most three); only exact authorized calls can be
+approved. No model, event or goal state is
+fabricated. A test-only no-op Host executor consumes the watched source's ordinary
+automation lane; that executor does not implement a product workflow. Artifacts
+are under `.cache/web-owner-real-event-e2e/`. Existing strict token budgets remain
+separate and still require a trustworthy meter.
+
 ## Finite offline autonomy installation
 
 ```sh

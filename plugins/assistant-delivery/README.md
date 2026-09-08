@@ -218,7 +218,7 @@ Agent Loop 以 `max-tokens` 结束、正常结束却没有正文，或完整正�
 
 Goals 的单次计划恢复使用单独的 Host capability。`goalWakeSettlementVersion()` 返回 1 时，`resumeScheduledGoal()` 要求 capability 提供 `settle(agent, signal)`，在原生终态和 idle 后等待当前 Agent 的独立验收，再重查 owner、Session、期限和最终状态后释放租约。缺少等待协议、结算失败或取消都不能报告成功；该能力版本不表示业务目标已经达成。
 
-`goalWakeResultVersion()` 返回 1 表示支持显式 `includeOutput`：只回读本次恢复中 exact Goal/revision 原生回合的完整最终文本，不返回历史回复、reasoning、截断或未完成工具调用。Goals 的可选事件等待在结算后调用 `enqueueScheduledGoalResult(capability)`，由 Delivery 使用自身保存的输出并在入队边界复核原 owner、binding version/generation 和 Session；调用者不能指定替代正文或收件人。投递使用现有持久 Outbox、稳定身份 key，以及 `background:assistant-goals-wake/v1` 的 message `send` 权限。入队成功不等于渠道送达，未知发送仍不盲目重放。
+`goalWakeResultVersion()` 返回 1 表示支持显式 `includeOutput`：只回读本次恢复中 exact Goal/revision 原生回合的完整最终文本，不返回历史回复、reasoning、截断或未完成工具调用。Goals 的可选事件等待在结算后调用 `enqueueScheduledGoalResult(capability)`，由 Delivery 使用自身保存的输出并在入队边界复核原 owner、binding version/generation 和 Session；调用者不能指定替代正文或收件人。Web 原生会话已在真实 teardown 前持久保存回复；当前 Web owner capability 再次确认同一 Session 后返回 `native-session`，不追加重复回复或生成 Outbox，也不声称用户已读。缺少当前 Web owner 或其身份不匹配时拒绝。外部渠道投递使用现有持久 Outbox、稳定身份 key，以及 `background:assistant-goals-wake/v1` 的 message `send` 权限。入队成功不等于渠道送达，未知发送仍不盲目重放。
 
 `/feedback` 的完整固定语法如下；不接受附件或额外自由文本：
 

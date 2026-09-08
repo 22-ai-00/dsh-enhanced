@@ -57,6 +57,13 @@ export const Config: Schema<Config> = Schema.object({
     costUsdMicros: Schema.number().step(1).min(0).max(1_000_000_000),
     durationMs: Schema.number().step(1).min(1).max(31 * 86_400_000).required(),
     maxOutputTokensPerCall: Schema.number().step(1).min(1).max(1_000_000_000).required(),
+  }), Schema.object({
+    mode: Schema.const('calls').required(),
+    modelCalls: Schema.number().step(1).min(0).max(1_000_000_000).required(),
+    toolCalls: Schema.number().step(1).min(0).max(1_000_000_000).required(),
+    durationMs: Schema.number().step(1).min(1).max(31 * 86_400_000).required(),
+    maxOutputTokensPerCall: Schema.number().step(1).min(1).max(1_000_000_000).required(),
+    routes: Schema.array(Schema.object({ provider: Schema.string().required(), model: Schema.string().required() })).min(1).required(),
   })]),
 })
 
@@ -324,7 +331,7 @@ export class AssistantGoalsService extends Service {
       const now = Date.now(); const at = args.wake_at as number; const budget = this.#budget.preview(record); const requestedDeadline = at + this.#wake.config.runTimeoutMs
       if (!Number.isSafeInteger(requestedDeadline)) return false
       const expiresAt = Math.min(requestedDeadline, budget.limits.expiresAt)
-      if (at < now || at - now > this.#wake.config.maxDelayMs || expiresAt - at < 1_000 || budget.modelCalls >= budget.limits.modelCalls || budget.outputTokens >= budget.limits.outputTokens) return false
+      if (at < now || at - now > this.#wake.config.maxDelayMs || expiresAt - at < 1_000 || budget.modelCalls >= budget.limits.modelCalls || (budget.limits.mode === 'tokens' && budget.outputTokens! >= budget.limits.outputTokens!)) return false
       this.#wake.preflight(record); this.#outcome.preflight(scope, record.definition.objective, record)
       const frozenOutcome = this.#outcome.view(record).conditions
       if (frozenOutcome === undefined || frozenOutcome.expiresAt <= expiresAt
@@ -456,7 +463,7 @@ export class AssistantGoalsService extends Service {
       || !Number.isSafeInteger(expectedRevision) || record.native.revision !== expectedRevision
       || record.native.sessionId !== String(agent!.session.id) || !['active', 'paused'].includes(record.native.phase)
       || record.native.roundsStarted >= record.native.maxGoalRounds || expiresAt - at < 1_000
-      || budget.modelCalls >= budget.limits.modelCalls || budget.outputTokens >= budget.limits.outputTokens) {
+      || budget.modelCalls >= budget.limits.modelCalls || (budget.limits.mode === 'tokens' && budget.outputTokens! >= budget.limits.outputTokens!)) {
       throw new Error('assistant-goals: invalid or exhausted scheduled goal')
     }
     signal.throwIfAborted()

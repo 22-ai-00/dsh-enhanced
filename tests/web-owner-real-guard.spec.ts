@@ -1,8 +1,27 @@
 import { describe, expect, test, vi } from 'vitest'
 
-const { createRunGuard, isExperimentToolAllowed, experimentToolNames, objective } = await import('../scripts/e2e/web-owner-real-guard.mjs')
+const { createRunGuard, isExperimentToolAllowed, isEventExperimentToolAllowed, experimentToolNames, objective } = await import('../scripts/e2e/web-owner-real-guard.mjs')
 
 describe('real-model browser experiment guard', () => {
+  test('allows owner event arming but forbids immediate handoff and arbitrary triggers', () => {
+    const args = { goal_id: 'goal-test', expected_revision: 1, trigger_id: 'file', expires_at: Date.now() + 60_000 }
+    expect(isEventExperimentToolAllowed('goal_wait_event', args, '/workspace')).toBe(true)
+    expect(isEventExperimentToolAllowed('goal_wait_event', { ...args, trigger_id: 'other' }, '/workspace')).toBe(false)
+    expect(isEventExperimentToolAllowed('goal_wait_event', { ...args, expires_at: 1 }, '/workspace')).toBe(false)
+    expect(isEventExperimentToolAllowed('goal_create', { objective, max_goal_rounds: 2, start_native_rounds: false }, '/workspace')).toBe(true)
+    expect(isEventExperimentToolAllowed('goal_create', { objective, max_goal_rounds: 2, start_native_rounds: true }, '/workspace')).toBe(false)
+    expect(experimentToolNames(false, true, true, false)).toContain('goal_wait_event')
+    expect(experimentToolNames(false, true, true, true)).toEqual([])
+    expect(experimentToolNames(true, true, true, false)).toEqual(['read', 'write', 'edit', 'get_goal'])
+  })
+  test('restoring prior experiment dispatch count does not reset the call limit', async () => {
+    const guard = createRunGuard({ record: () => {}, initialCalls: 10 })
+    const next = vi.fn()
+    try {
+      await expect(guard.stream({ provider: 'codex-subscription', model: 'default' }, { cancel: vi.fn() }, next).next()).rejects.toThrow('limit rejected')
+      expect(next).not.toHaveBeenCalled()
+    } finally { guard.stop() }
+  })
   test('exposes artifact tools only in the native goal round and never exposes shell', () => {
     expect(experimentToolNames(false)).toEqual(['goal_create'])
     expect(experimentToolNames(false, true)).toEqual([])
