@@ -6,13 +6,16 @@ import { createScope } from '@deepseek-ai/dsh-scope'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, expect, test } from 'vitest'
+import type { SkillComparisonProfile } from '../src/comparison.ts'
 import { AssistantSkillsService } from '../src/service.ts'
 
 const cleanups: (() => Promise<void>)[] = []
+const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
+const dockerAvailable = /^sha256:[0-9a-f]{64}$/u.test(image)
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 function makeAgent(ctx: Context, workspace: string, id: string): Agent {
   const sid = SessionId(id), session = Session.create(sid, [], { version: SESSION_FORMAT_VERSION, id: sid, createdAt: 1, isSeeded: false, cwd: workspace, agentPreset: 'primary' })
@@ -23,9 +26,11 @@ function makeAgent(ctx: Context, workspace: string, id: string): Agent {
   session.append('turn/start', { turn: 1 })
   return value
 }
-async function fixture(twoSteps = false) {
+async function fixture(twoSteps = false, comparison = false) {
   const root = await mkdtemp(join(tmpdir(), 'assistant-skills-service-'))
   cleanups.push(() => rm(root, { recursive: true, force: true }))
+  const comparisonRoot = comparison ? await mkdtemp(join(tmpdir(), 'assistant-skills-comparison-service-')) : undefined
+  if (comparisonRoot) { await chmod(comparisonRoot, 0o700); cleanups.push(() => rm(comparisonRoot, { recursive: true, force: true })) }
   const ctx = new Context(); cleanups.push(() => ctx.fiber.restart())
   const owner = makeAgent(ctx, root, 'owner-session'), foreign = makeAgent(ctx, root, 'other-session')
   let live = true, human = true, admitted = true, deniedTool = false, revokeAfterWrite = false, budgetDenied = false, count = 0
@@ -37,21 +42,26 @@ async function fixture(twoSteps = false) {
   ctx.provide('assistantPolicy' as never, { evaluateAgent: () => ({ effect: live ? 'allow' : 'deny' }), authorizeAgent: (_agent: Agent, _action: string, _resource: unknown, options: { idempotencyKey: string }) => { charges.push(options.idempotencyKey); return { effect: live && !budgetDenied ? 'allow' : 'deny' } } } as never)
   const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope, goal: { id: 'source-goal', definition: { version: 1, digest: 'a'.repeat(64), objective: 'Write a source artifact' }, sessionId: String(owner.id), nativeGoalId: 'native-source' },
     runId: 'verified-run', turn: 1, acceptance: { contractId: 'contract', contractDigest: 'b'.repeat(64), receiptDigest: 'c'.repeat(64), verifiedAt: Date.now(), validUntil: Date.now() + 60000 },
-    steps: [{ id: 'step-1', toolName: 'write', arguments: { file: 'output.txt', data: 'original' } }, ...(twoSteps ? [{ id: 'step-2', toolName: 'write', arguments: { file: 'second.txt', data: 'second' } }] : [])] }
+    steps: [{ id: 'step-1', toolName: 'write', arguments: comparison ? { file_path: 'result.sh', content: '#!/bin/sh\nread x\nprintf wrong' } : { file: 'output.txt', data: 'original' } }, ...(twoSteps ? [{ id: 'step-2', toolName: 'write', arguments: { file: 'second.txt', data: 'second' } }] : [])] }
   let verified: { goalId: string; runId: string; steps: unknown[] } | Error | undefined
   // These are Host source/admission seams, not independent acceptance fixtures.
   // Goals tests and the real Web scenario validate the provenance producer.
   ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source,
     inspectWorkflowRunContext: (_agent: Agent, goalId: string) => { if (!admitted) throw new Error('round not admitted'); return { scope, goalId, sessionId: String(owner.id), goalExecutionRunId: `goal-execution-${goalId}`, definition: { version: 1, digest: 'd'.repeat(64) } } },
     inspectVerifiedWorkflowRun: (_agent: Agent, goalId: string, runId: string) => { if (verified instanceof Error) throw verified; const proof = verified; return { scope, goal: { id: proof?.goalId ?? goalId, sessionId: String(owner.id), definition: { version: 1, digest: 'd'.repeat(64) } }, runId: proof?.runId ?? runId,
-      acceptance: { contractId: 'trial-contract', contractDigest: 'e'.repeat(64), receiptDigest: 'f'.repeat(64), verifiedAt: Date.now(), validUntil: Date.now() + 60000 }, steps: proof?.steps ?? [] } } } as never)
+      acceptance: { contractId: 'trial-contract', contractDigest: 'e'.repeat(64), receiptDigest: 'f'.repeat(64), verifiedAt: source.acceptance.verifiedAt, validUntil: source.acceptance.validUntil }, steps: proof?.steps ?? [] } } } as never)
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
-  ctx.tools.register(defineTool({ name: 'write', description: 'Fixture filesystem writer', parameters: { file: { type: 'string', required: true }, data: { type: 'string', required: true } },
-    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async args => { count++; await writeFile(join(root, args.file), args.data); if (revokeAfterWrite) live = false; return 'written' } }))
+  ctx.tools.register(defineTool({ name: 'write', description: 'Fixture filesystem writer', parameters: comparison ? { file_path: { type: 'string', required: true }, content: { type: 'string', required: true } } : { file: { type: 'string', required: true }, data: { type: 'string', required: true } },
+    output: { schema: { type: 'string' }, render: (_args, value) => [{ type: 'text', text: value }] }, execute: async args => { count++; await writeFile(join(root, comparison ? args.file_path as string : args.file as string), comparison ? args.content as string : args.data as string); if (revokeAfterWrite) live = false; return 'written' } }))
   const dispatches: string[] = []; const lineage: { name: string; root: string; nested: boolean }[] = []
   ctx.on('tools/execute', async (exec, next) => { dispatches.push(exec.name); lineage.push({ name: exec.name, root: exec.rootCallId, nested: exec.parent !== undefined }); return next() })
   ctx.on('tools/pre-execute', async (exec, next) => exec.name === 'write' && deniedTool ? { kind: 'deny', reason: 'fixture current permission revoked' } : next())
-  const config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'] }
+  const comparisons: SkillComparisonProfile[] | undefined = comparison ? [{ id: 'service-comparison', version: 1, scope, stateRoot: comparisonRoot!, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
+    { id: 'replay', kind: 'replay', inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 },
+    { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 },
+    { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
+  ] }] : undefined
+  const config = comparison ? { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], comparisons: comparisons! } : { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'] }
   let plugin = await ctx.plugin(AssistantSkillsService, config)
   await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined()
   const execute = (name: string, args: unknown, agent = owner) => agent.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: args, signal: new AbortController().signal, agent })
@@ -61,7 +71,7 @@ async function fixture(twoSteps = false) {
   const trial = (candidateId: string, goalId = 'trial-goal', invocationId = 'trial-invocation', inputsJson = '{"message":"candidate"}') => execute('skill_trial', { candidate_id: candidateId, goal_id: goalId, inputs_json: inputsJson, invocation_id: invocationId })
   const activate = (candidateId: string, trialRunId: string, agent = owner) => execute('skill_activate', { candidate_id: candidateId, trial_run_id: trialRunId }, agent)
   const rollback = (expectedVersion: number, targetVersion: number) => execute('skill_rollback', { name: 'saved-write', expected_version: expectedVersion, target_version: targetVersion })
-  return { root, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true },
+  return { root, comparisonRoot, ctx, owner, foreign, save, run, execute, dispatches, lineage, charges, denyBudget: () => { budgetDenied = true }, count: () => count, human: (value: boolean) => { human = value }, admitted: (value: boolean) => { admitted = value }, deny: () => { deniedTool = true }, revokeAfterWrite: () => { revokeAfterWrite = true },
     source, candidate, trial, activate, rollback, setVerifiedTrial: (goalId: string, runId: string, args: unknown, extraSteps: unknown[] = []) => { verified = { goalId, runId, steps: [{ toolName: 'skill_trial', arguments: args }, ...extraSteps] } }, clearVerifiedTrial: () => { verified = undefined }, failVerifiedTrial: () => { verified = new Error('fixture acceptance proof expired') },
     restart: async () => { await plugin.dispose(); plugin = await ctx.plugin(AssistantSkillsService, config); await expect.poll(() => ctx.tools.get('skill_save')).toBeDefined() } }
 }
@@ -159,3 +169,33 @@ test('activation rejects non-exact, expired, failed, unauthorized, and supersede
   const failedRun = /invocation (skill-run-[a-f0-9]+) is failed/u.exec(failed.error?.message ?? '')?.[1]
   expect(failedRun).toBeDefined(); expect((await h.activate(failedCandidate.id, failedRun!)).isError).toBe(true)
 })
+
+const dockerTest = dockerAvailable ? test : test.skip
+dockerTest('compares a pending native-file candidate through isolated verification without changing the active skill', async () => {
+  // Source and fresh-Goal admission below are Host seams. This test exercises the real
+  // ToolRuntime -> SkillComparator -> native replay -> Docker verifier path.
+  const f = await fixture(false, true)
+  const saved = result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write the result script.', bindings_json: '[]', expected_version: 0 }))
+  expect(saved).toMatchObject({ name: 'saved-write', version: 1 })
+  f.source.steps[0]!.arguments = { file_path: 'result.sh', content: '#!/bin/sh\ncat' }
+  const candidate = result(await f.execute('skill_candidate', { goal_id: 'source-goal', name: 'saved-write', description: 'Write the result script with cat.', bindings_json: '[]', parent_version: 1, reason: 'Measured candidate.', trigger: 'owner review' }))
+  expect(candidate).toMatchObject({ state: 'pending', parentVersion: 1 })
+
+  const compared = result(await f.execute('skill_compare', { candidate_id: candidate.id, profile_id: 'service-comparison', invocation_id: 'compare-once' }))
+  expect(compared).toMatchObject({ state: 'complete', candidateId: candidate.id, profileId: 'service-comparison' })
+  const report = compared.result as { execution: string; modelCalls: number; cells: { toolCalls: number; quiescent: boolean }[]; quality: { evaluationGain: number; evaluationGainObserved: boolean; candidateChecksPassed: boolean; criticalRegressionsPassed: boolean }; promotionAuthorized: boolean }
+  expect(report).toMatchObject({ execution: 'native-file-tools-and-isolated-artifact', modelCalls: 0, quality: { evaluationGain: 1, evaluationGainObserved: true, candidateChecksPassed: true, criticalRegressionsPassed: true }, promotionAuthorized: false })
+  expect(report.cells).toHaveLength(12)
+  expect(report.cells.every(cell => cell.toolCalls === 1 && cell.quiescent)).toBe(true)
+  expect(result(await f.execute('skill_status', {}))).toMatchObject([{ name: 'saved-write', version: 1 }])
+  expect(result(await f.execute('skill_candidates', { candidate_id: candidate.id }))).toMatchObject({ state: 'pending', id: candidate.id })
+
+  const duplicate = result(await f.execute('skill_compare', { candidate_id: candidate.id, profile_id: 'service-comparison', invocation_id: 'compare-once' }))
+  expect(duplicate).toEqual(compared)
+  await f.restart()
+  expect(result(await f.execute('skill_comparison_status', { comparison_id: compared.id }))).toEqual(compared)
+  expect(result(await f.execute('skill_comparison_status', {}, f.foreign))).toEqual([])
+  expect(result(await f.execute('skill_comparison_status', { comparison_id: compared.id }, f.foreign))).toBeNull()
+  const exhausted = await f.execute('skill_compare', { candidate_id: candidate.id, profile_id: 'service-comparison', invocation_id: 'comparison-budget-exhausted' })
+  expect(exhausted.isError).toBe(true)
+}, 120000)

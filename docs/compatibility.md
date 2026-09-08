@@ -103,3 +103,5 @@ Evaluation 的 `./benchmark/deepseek` 通过可选 Host peer 使用同批 `assis
 
 
 Event Triggers 的版本化来源依赖同批 Automations 新增的纯 `./external-event` 子入口，peer 下界为 `>=0.1.24 <0.2.0`，两包须同步安装；旧 Automations 不提供该导出。Automations schema 15 与 Event schema 3 保留旧记录的空来源，不将旧 pending 自动补证或投到现配置目标。升级后应核对 quarantine；事件来源元数据不是目标唤醒权限，原有 Policy 准入继续生效。
+
+- Skills comparison uses `dsh-tool-fs`, `dsh-fs-local` and native ToolRuntime at `0.1.2-rc.1` in a private Context, with explicit path containment and no inherited model tools. LocalFileSystem `cwd` alone is not containment. Evaluation `/benchmark` and Isolation `IsolatedVerifierRunner` are optional Host peer APIs loaded for configured comparisons; the native filesystem libraries travel as dependencies for the private replay runtime. Upgrade checks cover actual native edit/write behavior, artifact execution in Docker, unknown no-replay, profile budgets and cancellation.

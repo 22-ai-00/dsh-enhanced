@@ -12,12 +12,14 @@ import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createDefinition, instantiate, type SkillBinding } from './definition.js'
+import { validateComparisonProfiles, type SkillComparisonProfile, type SkillComparator } from './comparison.js'
 import { SkillStore, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition } from './store.js'
 
-export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number }
+export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[] }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-skills.sqlite')),
   allowedTools: Schema.array(Schema.string()).default(['read', 'write', 'edit']),
+  comparisons: Schema.array(Schema.any()).default([]),
   candidateTtlMs: Schema.number().step(1).min(1000).max(604800000).default(86400000),
   maxDurationMs: Schema.number().step(1).min(1000).max(300000).default(60000),
 })
@@ -25,7 +27,7 @@ declare module '@deepseek-ai/cordis' { interface Context { assistantSkills: Assi
 
 const output = { schema: { type: 'object' as const, additionalProperties: false, properties: { context: { type: 'string' as const, required: true } } },
   render: (_args: unknown, value: { context: string }) => [{ type: 'text' as const, text: value.context }] } as const
-type Action = 'inspect' | 'save' | 'run' | 'retire' | 'draft' | 'trial' | 'activate' | 'reject' | 'rollback'
+type Action = 'inspect' | 'save' | 'run' | 'retire' | 'draft' | 'trial' | 'activate' | 'reject' | 'rollback' | 'compare'
 const resource = { kind: 'evolution' as const, id: 'verified-workflows' }
 function parse(value: string, array = false): any {
   if (typeof value !== 'string' || Buffer.byteLength(value) > 262144) throw new Error('assistant-skills: bounded JSON required')
@@ -41,6 +43,9 @@ export class AssistantSkillsService extends Service {
   readonly #allowed: readonly string[]
   readonly #duration: number
   readonly #candidateTtl: number
+  readonly #comparisons: readonly SkillComparisonProfile[]
+  readonly #comparators = new Map<string, Promise<SkillComparator>>()
+  readonly #comparing = new Set<Promise<unknown>>()
   readonly #lifecycle = new AbortController()
   readonly #providers = new Set<SkillProviderControl>()
   #active = true
@@ -52,8 +57,9 @@ export class AssistantSkillsService extends Service {
     if (!Number.isSafeInteger(this.#duration) || this.#duration < 1000 || this.#duration > 300000
       || !Number.isSafeInteger(this.#candidateTtl) || this.#candidateTtl < 1000 || this.#candidateTtl > 604800000
       || this.#allowed.length > 32 || this.#allowed.some(name => typeof name !== 'string' || !/^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/u.test(name))) throw new Error('assistant-skills: invalid configuration')
+    this.#comparisons = validateComparisonProfiles(config.comparisons ?? [])
     this.#store = new SkillStore(config.databasePath ?? join(homedir(), '.dsh', 'assistant-skills.sqlite'))
-    ctx.effect(() => () => { this.#active = false; this.#lifecycle.abort(); this.#store.close() }, 'assistant-skills.store')
+    ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); await Promise.allSettled(this.#comparing); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
     ctx.inject(['tools', 'agents', 'assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
       runtime.tools.register(defineTool({ name: 'skill_save', description: 'Save the exact successful tool trace of this owner session’s independently achieved Goal as a private versioned skill. Requires the current human request. Historical acceptance is provenance, never permission or acceptance for a future run.',
         parameters: { goal_id: { type: 'string', required: true }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string', description: 'JSON array of {name,stepId,path}; path is a scalar argument JSON pointer. Empty array keeps the original arguments.' }, expected_version: { type: 'integer' } }, output,
@@ -67,6 +73,11 @@ export class AssistantSkillsService extends Service {
         execute: async (args, exec) => ({ context: JSON.stringify(this.retire(exec.agent, args.name, args.expected_version)) }) }))
     })
     ctx.inject(['tools', 'agents', 'assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
+      runtime.tools.register(defineTool({ name: 'skill_compare', description: 'Compare this pending candidate with its current parent by executing the same configured inputs through native file tools and independent isolated artifact checks. Requires the current owner request and a configured finite comparison profile. Stable invocation_id never repeats unknown work. Returns measured quality, never promotion permission.',
+        parameters: { candidate_id: { type: 'string', required: true }, profile_id: { type: 'string', required: true }, invocation_id: { type: 'string', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(await this.compare(exec, args.candidate_id, args.profile_id, args.invocation_id)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_comparison_status', description: 'Read a private comparison receipt or available comparison profile summaries. Test inputs and expected answers are not included.', parameters: { comparison_id: { type: 'string' } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(this.comparisonStatus(exec.agent, args.comparison_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_candidate', description: 'Draft a private candidate from an independently achieved Goal following the current owner request. The current active skill stays unchanged. Review the stored trace and structural delta; no performance gain is inferred.',
         parameters: { goal_id: { type: 'string', required: true }, name: { type: 'string', required: true }, description: { type: 'string', required: true }, bindings_json: { type: 'string' }, parent_version: { type: 'integer', required: true }, reason: { type: 'string', required: true }, trigger: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.stage(exec.agent, args.goal_id, { name: args.name, description: args.description, bindings: parse(args.bindings_json ?? '[]', true) as SkillBinding[] }, args.parent_version, args.reason, args.trigger)) }) }))
@@ -123,7 +134,7 @@ export class AssistantSkillsService extends Service {
     const owner = delivery?.preferencePrincipalForAgent(agent)
     if (!owner || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-skills: authenticated owner required')
     const scope = { principalId: owner.principalId, ...owner.principalLineage, workspace: owner.scope.workspace, preset: owner.scope.preset }
-    if (['save', 'retire', 'draft', 'activate', 'reject', 'rollback'].includes(action)) {
+    if (['save', 'retire', 'draft', 'activate', 'reject', 'rollback', 'compare'].includes(action)) {
       const current = delivery?.currentPreferenceTurn(agent)
       if (!current || acceptanceDigest({ principalId: current.principalId, ...current.principalLineage, workspace: current.scope.workspace, preset: current.scope.preset }) !== acceptanceDigest(scope)) throw new Error('assistant-skills: current owner request required')
     }
@@ -159,6 +170,42 @@ export class AssistantSkillsService extends Service {
     this.#authorize(agent, 'retire', [scope, name, expectedVersion])
     const result = this.#store.retire(scope, name, expectedVersion)
     this.#changed(); return result
+  }
+  comparisonStatus(agent: Agent | undefined, id?: string) {
+    const scope = this.#scope(agent, 'inspect')
+    return id ? this.#store.getComparison(scope, id) ?? null : this.#comparisons.filter(profile => acceptanceDigest(profile.scope) === acceptanceDigest(scope)).map(profile => ({ id: profile.id, version: profile.version, expiresAt: profile.expiresAt, cases: profile.cases.length, repeats: profile.repeats, maxComparisons: profile.maxComparisons }))
+  }
+  async compare(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string) {
+    const scope = this.#scope(exec.agent, 'compare')
+    const profile = this.#comparisons.find(value => value.id === profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+    if (!profile || profile.expiresAt <= Date.now()) throw new Error('assistant-skills: current comparison profile required')
+    const candidate = this.#store.getCandidate(scope, candidateId)
+    if (!candidate?.parentDigest) throw new Error('assistant-skills: comparison requires an existing parent')
+    const claim = this.#store.claimComparison(scope, { sessionId: String(exec.agent!.session.id), candidateId, parentDigest: candidate.parentDigest, profileId, profileDigest: acceptanceDigest(profile), invocationId }, profile.maxComparisons)
+    if (!claim.claimed) return claim.comparison
+    const operation = (async () => {
+      try {
+        this.#authorize(exec.agent, 'compare', claim.comparison.id)
+        const current = () => {
+          exec.signal.throwIfAborted(); this.#lifecycle.signal.throwIfAborted()
+          if (Date.now() >= profile.expiresAt || acceptanceDigest(this.#scope(exec.agent, 'compare')) !== acceptanceDigest(scope)
+            || this.#store.getComparison(scope, claim.comparison.id)?.state !== 'running') throw new Error('assistant-skills: comparison authority changed')
+          this.#pending(scope, candidateId)
+        }
+        current()
+        const baseline = this.#store.get(scope, candidate.definition.name, candidate.parentVersion)!
+        let pending = this.#comparators.get(profile.id)
+        if (!pending) { pending = import('./comparison.js').then(({ SkillComparator }) => new SkillComparator(profile)); this.#comparators.set(profile.id, pending) }
+        const result = await (await pending).compare(claim.comparison.id, baseline, candidate.definition, AbortSignal.any([exec.signal, this.#lifecycle.signal]), current)
+        current()
+        return this.#store.finishComparison(scope, claim.comparison.id, result.report.complete && result.report.variants.every(value => value.unknown === 0) ? 'complete' : 'unknown', result)
+      } catch {
+        this.#store.finishComparison(scope, claim.comparison.id, 'unknown', { reason: 'comparison-failed-or-authority-changed', promotionAuthorized: false })
+        throw new Error(`assistant-skills: comparison ${claim.comparison.id} is unknown; inspect status, do not replay`)
+      }
+    })()
+    this.#comparing.add(operation)
+    try { return await operation } finally { this.#comparing.delete(operation) }
   }
   stage(agent: Agent | undefined, goalId: string, options: { name: string; description: string; bindings?: readonly SkillBinding[] }, parentVersion: number, reason: string, trigger: string) {
     const scope = this.#scope(agent, 'draft')

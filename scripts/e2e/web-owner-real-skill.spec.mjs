@@ -16,6 +16,7 @@ import { observePage, query, run, sanitize, startHost } from './web-owner-helper
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const exec = promisify(execFile)
+const comparisonMode = process.env.DSH_WEB_REAL_SKILL_COMPARE === '1'
 const candidateMode = process.env.DSH_WEB_REAL_SKILL_CANDIDATE === '1'
 
 function row(doc, id) {
@@ -94,7 +95,7 @@ async function waitForGoal({ page, goalsPath, verifierPath, deliveryPath, goalId
   throw new Error(`independent verification did not complete for ${goalId}`)
 }
 
-test(candidateMode ? 'real browser trials activates and rolls back a skill candidate after Host restart' : 'real browser persists and reuses an independently verified skill after Host restart', async ({ page, context }, testInfo) => {
+test(comparisonMode ? 'real browser compares a skill candidate with paired isolated verification' : candidateMode ? 'real browser trials activates and rolls back a skill candidate after Host restart' : 'real browser persists and reuses an independently verified skill after Host restart', async ({ page, context }, testInfo) => {
   const temp = await mkdtemp(join(tmpdir(), 'dsh-web-owner-real-skill-'))
   const home = join(temp, 'home'), workspace = join(temp, 'workspace'), modelLog = join(temp, 'model.jsonl')
   const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_WEB_REAL_LOG: modelLog, DSH_WEB_REAL_WORKSPACE: workspace }
@@ -121,7 +122,7 @@ test(candidateMode ? 'real browser trials activates and rolls back a skill candi
     const route = await prepareRealRoute({ env, home, workspace }); env.DSH_WEB_REAL_PROVIDER = route.provider; env.DSH_WEB_REAL_MODEL = route.model
     await run('zstd', ['--version'], env)
     const installed = await run('dsh', ['plugin', '--profile', 'web', 'add', ...[
-      'personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-skills', 'assistant-web-owner', 'assistant-verifier', 'assistant-evaluation', ...route.bundles,
+      'personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-skills', 'assistant-web-owner', 'assistant-verifier', 'assistant-evaluation', ...(comparisonMode ? ['assistant-isolation'] : []), ...route.bundles,
     ].map(name => resolve(root, 'plugins', name))], env)
     await writeFile(testInfo.outputPath('install.log'), sanitize(installed), { mode: 0o600 })
     await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace], env)
@@ -132,12 +133,14 @@ test(candidateMode ? 'real browser trials activates and rolls back a skill candi
     const authority = { kind: 'runner', id: 'node', executable: process.execPath, fixedArgs: [], timeoutMs: 5_000, maxOutputBytes: 16_384 }
     const [runner] = createVerifierAuthorities({ authorities: [authority] })
     const profile = taskKind => ({ id: `real-skill-${taskKind}`, version: 1, scope: { workspace, preset: 'standard' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind, objective, validityMs: 600_000, bounds: { maxDurationMs: 15_000, maxEvidenceBytes: 16_384 }, criteria: (taskKind === 'goal-step' ? criteria.slice(0, 1) : criteria).map(entry => ({ id: entry.id, kind: 'process-behavior', authority: { id: runner.id, digest: runner.digest }, artifactPath: 'summarize.mjs', stdin: entry.stdin, expectedStdout: entry.expectedStdout, expectedExitCode: 0 })) })
+    if (comparisonMode && !/^sha256:[0-9a-f]{64}$/.test(process.env.DSH_WEB_REAL_COMPARISON_IMAGE ?? '')) throw new Error('comparison requires an immutable already installed Node/BusyBox image')
     const patchPath = join(home, 'profiles/web/cordis.patch.yml'), patch = parseDocument(await readFile(patchPath, 'utf8'))
     setConfig(patch, 'dsh-enhanced-assistant-goals', '@dsh-enhanced/assistant-goals', { databasePath: goalsPath, verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 120_000 })
-    setConfig(patch, 'dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', { databasePath: skillsPath, allowedTools: ['write'], maxDurationMs: 60_000 })
+    setConfig(patch, 'dsh-enhanced-assistant-skills', '@dsh-enhanced/assistant-skills', { databasePath: skillsPath, allowedTools: ['write'], maxDurationMs: 60_000, ...(comparisonMode ? { comparisons: [{ id: 'summary-comparison', version: 1, scope: { principalId: 'web/web/local/operator', principalRecordId: owner.id, principalVersion: owner.version, workspace, preset: 'standard' }, stateRoot: join(home, 'skill-comparison'), image: process.env.DSH_WEB_REAL_COMPARISON_IMAGE, dockerPath: '/usr/bin/docker', command: '/bin/busybox cp /workspace/artifact /workspace/program.mjs && /usr/local/bin/node /workspace/program.mjs < /workspace/input', artifactPath: 'summarize.mjs', expiresAt: Date.now() + 600000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 16384, minimumEvaluationGain: 0.1, cases: criteria.map((entry, index) => ({ id: entry.id, kind: ['replay', 'evaluation', 'regression'][index], inputs: {}, files: [], stdin: entry.stdin, expectedStdout: entry.expectedStdout, expectedExitCode: 0 })) }] } : {}) })
     setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300_000 })
     setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority], profiles: [profile('goal-step'), profile('goal-outcome')] })
-    appendPolicy(patch, [{ id: 'real-skill-evolution', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['inspect', 'save', 'run', 'retire', 'draft', 'trial', 'activate', 'rollback'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: { initiators: ['external'] } }])
+    appendPolicy(patch, [{ id: 'real-skill-evolution', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['inspect', 'save', 'run', 'retire', 'draft', 'trial', 'activate', 'rollback', 'compare'], resource: { kind: 'evolution', id: 'verified-workflows' }, context: { initiators: ['external'] } }])
+    if (comparisonMode) patch.contents.add(patch.createNode({ id: 'dsh-enhanced-assistant-isolation', disabled: true }))
     route.configurePatch(patch, setConfig)
     patch.contents.add(patch.createNode({ id: 'session-title-llm', disabled: true }))
     patch.contents.add(patch.createNode({ insert: [{ id: 'web-owner-real-skill-guard', name: resolve(root, 'scripts/e2e/web-owner-real-skill-guard.mjs') }] }))
@@ -151,13 +154,26 @@ test(candidateMode ? 'real browser trials activates and rolls back a skill candi
     const processedBeforeSave = query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length
     await prompt(`Use skill_save with goal_id ${firstId}, name verified-summary, description exactly 'Replay the independently verified order-summary artifact.', bindings_json [], and expected_version 0. Do not use other tools.`)
     await waitFor({ predicate: () => existsSync(skillsPath) && query(skillsPath, 'SELECT COUNT(*) AS count FROM skill_definitions')[0]?.count === 1 && query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length > processedBeforeSave, page: activePage, frames, approved, workspace, description: 'skill save' })
-    let candidateId
+    let candidateId, comparisonProof
     if (candidateMode) {
       const before = query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length
       await prompt(`Use only skill_candidate with goal_id ${firstId}, name verified-summary, description exactly 'Trial candidate of the independently verified order-summary artifact.', bindings_json [], parent_version 1, reason exactly 'Verify candidate lifecycle', trigger exactly 'owner-request'.`)
       await waitFor({ predicate: () => query(skillsPath, 'SELECT id FROM skill_candidates').length === 1 && query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length > before, page: activePage, frames, approved, workspace, description: 'candidate staging' })
       candidateId = query(skillsPath, 'SELECT id FROM skill_candidates')[0].id
       expect(query(skillsPath, 'SELECT version FROM skill_definitions').map(row => row.version)).toEqual([1])
+    }
+    if (comparisonMode) {
+      const before = query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length
+      await prompt(`Use only skill_compare with candidate_id ${candidateId}, profile_id summary-comparison, invocation_id compare-1.`)
+      await waitFor({ predicate: () => query(skillsPath, 'SELECT state FROM skill_comparisons')[0]?.state === 'complete' && query(deliveryPath, "SELECT id FROM inbox_messages WHERE status = 'processed'").length > before, page: activePage, frames, approved, workspace, description: 'paired isolated comparison' })
+      comparisonProof = JSON.parse(query(skillsPath, 'SELECT comparison_json FROM skill_comparisons')[0].comparison_json)
+      expect(comparisonProof.result.cells).toHaveLength(12)
+      expect(comparisonProof.result.report.variants.every(value => value.achieved === 6 && value.unknown === 0)).toBe(true)
+      expect(comparisonProof.result.quality).toMatchObject({ candidateChecksPassed: true, evaluationGain: 0, evaluationGainObserved: false, criticalRegressionsPassed: true, heldoutIndependence: 'unproven' })
+      expect(comparisonProof.result.promotionAuthorized).toBe(false)
+      expect(query(skillsPath, 'SELECT version FROM skill_definitions').map(row => row.version)).toEqual([1])
+      expect(JSON.parse(query(skillsPath, 'SELECT candidate_json FROM skill_candidates')[0].candidate_json).state).toBe('pending')
+      expect(createHash('sha256').update(await readFile(join(workspace, 'summarize.mjs'))).digest('hex')).toBe(sourceHash)
     }
     await stop()
     await rm(join(workspace, 'summarize.mjs'))
@@ -235,7 +251,7 @@ test(candidateMode ? 'real browser trials activates and rolls back a skill candi
     await copyFile(modelLog, testInfo.outputPath('model.jsonl'))
     expect(guardedExecutions.filter(row => row.phase === 'source' && row.name === 'write')).toHaveLength(1)
     expect(guardedExecutions.filter(row => row.phase === (candidateMode ? 'trial' : 'replay') && row.name === 'write')).toHaveLength(1)
-    await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ capability: candidateMode ? 'verified-skill-candidate-lifecycle' : 'verified-skill-reuse', lifecycle, ...route.proof, hostStarts: starts, sourceGoal: { id: firstId, receipt: first.job.receipt, receiptDigest: sourceReceiptDigest }, replayGoal: { id: secondId, receipt: second.job.receipt, receiptDigest: replayReceiptDigest }, sourceReceiptDiffersFromReplay: sourceReceiptDigest !== replayReceiptDigest, artifact: { path: 'summarize.mjs', sourceHash, replayHash, restoredAfterRemoval: true }, ownerReadbackAfterReload: true, nativeCatalogLoadedAfterRestart: assemblies.some(row => row.phase === 'native-load' && row.availableToolNames.includes('skill')), toolCalls: { saved: saves, loaded: loads, replayed: runs, sourceSessionWrite: writes.length, nestedReplayWrite: guardedExecutions.filter(row => row.phase === (candidateMode ? 'trial' : 'replay') && row.name === 'write').length }, modelCalls: await modelCalls(modelLog), approved }, null, 2), { mode: 0o600 })
+    await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ capability: comparisonMode ? 'paired-isolated-skill-comparison' : candidateMode ? 'verified-skill-candidate-lifecycle' : 'verified-skill-reuse', lifecycle, comparison: comparisonProof, ...route.proof, hostStarts: starts, sourceGoal: { id: firstId, receipt: first.job.receipt, receiptDigest: sourceReceiptDigest }, replayGoal: { id: secondId, receipt: second.job.receipt, receiptDigest: replayReceiptDigest }, sourceReceiptDiffersFromReplay: sourceReceiptDigest !== replayReceiptDigest, artifact: { path: 'summarize.mjs', sourceHash, replayHash, restoredAfterRemoval: true }, ownerReadbackAfterReload: true, nativeCatalogLoadedAfterRestart: assemblies.some(row => row.phase === 'native-load' && row.availableToolNames.includes('skill')), toolCalls: { saved: saves, loaded: loads, replayed: runs, sourceSessionWrite: writes.length, nestedReplayWrite: guardedExecutions.filter(row => row.phase === (candidateMode ? 'trial' : 'replay') && row.name === 'write').length }, modelCalls: await modelCalls(modelLog), approved }, null, 2), { mode: 0o600 })
   } catch (error) { failed = true; throw error } finally {
     try { if (existsSync(modelLog)) await copyFile(modelLog, testInfo.outputPath('model.jsonl')) } catch {}
     try { if (authenticated && failed && !new URL(activePage.url()).searchParams.has('token')) await activePage.screenshot({ path: testInfo.outputPath('failure.png') }).catch(() => {}) } finally {
