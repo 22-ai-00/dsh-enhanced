@@ -39,7 +39,7 @@ export class GoalWakeRuntime {
     private readonly ready: () => boolean,
     private readonly settleExecution: (agent: Agent, signal: AbortSignal) => Promise<void>,
     private readonly verifiedCompletion: (record: GoalRecord, wake: GoalWakeIntent['native']) => boolean,
-    private readonly assertEventWait: (intent: GoalWakeIntent) => void = () => {},
+    private readonly assertEventWait: (intent: GoalWakeIntent, phase: 'before-resume' | 'running' | 'terminal') => void = () => {},
     private readonly acceptedEventPause: (record: GoalRecord, agent?: Agent) => boolean = () => false) {
     this.#store = new GoalWakeStore(path)
     ctx.inject(['assistantAutomations', 'assistantDelivery', 'assistantPolicy'], runtime => {
@@ -100,7 +100,7 @@ export class GoalWakeRuntime {
     if (!this.#live || !this.ready() || Date.now() >= intent.expiresAt) reject()
     this.#requireSettlementCapability()
     if (intent.id.startsWith('goal-event-wake-') && this.ctx.get('assistantDelivery')?.goalWakeResultVersion?.() !== 1) reject()
-    this.assertEventWait(intent)
+    this.assertEventWait(intent, phase)
     const record = this.record(intent.scope, intent.goalId, agent)
     if (record === undefined || !same(record.scope, intent.scope) || !same(record.definition, intent.definition)
       || record.native.sessionId !== intent.native.sessionId || record.native.goalId !== intent.native.goalId

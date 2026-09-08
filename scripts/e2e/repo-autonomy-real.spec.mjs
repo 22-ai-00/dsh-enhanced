@@ -424,7 +424,13 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
           && receipt.results.some(result => result.status === 'passed' && result.evidence?.some(evidence => evidence.kind === 'repository-readback' && evidence.ref === 'fixture/orders:automation/fix')))
         if (!repositoryOutcome) throw new Error('no achieved fresh repository-readback outcome receipt after the event source resumed the Goal')
         expect(readbacks.some(row => row.ready === true && row.headOid === commit.commitOid && row.at >= waitRestart.readyAt && row.at <= repositoryOutcome.completedAt)).toBe(true)
-        repositoryDelivery.eventSource = { waitRestart, snapshotHighWaterSequence: sourceSnapshot.highWaterSequence, resumedEvent, events: sourceEvents(), wakes: query(`${join(home, 'assistant-goals/web.sqlite')}.wakes`, 'SELECT id,state FROM goal_wakes'), sourceRuns: sourceRuns(), readbacks, repositoryOutcome }
+        const claim = () => query(eventsPath, "SELECT trigger_id,goal_id,session_id,native_goal_id,retired_at FROM goal_source_claims WHERE trigger_id LIKE '%repository-events'")[0]
+        await expect.poll(() => claim()?.retired_at, { timeout: 15000 }).toBeGreaterThan(0)
+        expect(claim()).toMatchObject({ goal_id: goal.id, session_id: sessionId, native_goal_id: native.goalId })
+        await expect.poll(() => query(join(home, 'assistant-automations/state.sqlite'), "SELECT status FROM automation_definitions WHERE id LIKE '%repository-events-source'")).toEqual([{ status: 'paused' }])
+        const lastObservedAt = query(eventsPath, "SELECT last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events' LIMIT 1")[0]?.last_observed_at
+        expect(lastObservedAt).toBeGreaterThan(0)
+        repositoryDelivery.eventSource = { waitRestart, snapshotHighWaterSequence: sourceSnapshot.highWaterSequence, resumedEvent, events: sourceEvents(), wakes: query(`${join(home, 'assistant-goals/web.sqlite')}.wakes`, 'SELECT id,state FROM goal_wakes'), sourceRuns: sourceRuns(), readbacks, repositoryOutcome, retirement: { claim: claim(), lastObservedAt, automationStatus: 'paused' } }
       }
     }
     await expect.poll(() => query(join(home, 'assistant-delivery/state.sqlite'), 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state).toBe('released')
@@ -432,7 +438,7 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
       ? [frame.value.event.data] : []).findLast(data => data.turn > 1 && data.message.content.some(block => block.type === 'text' && block.text.trim()))
     const responseText = response?.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
     expect(responseText?.trim().length).toBeGreaterThan(0)
-    const visibleReply = responseText.split(/\n\s*\n/u)[0].replace(/[`*_#]/gu, '').replace(/\s+/gu, ' ').trim()
+    const visibleReply = responseText.split(/\n\s*\n/u)[0].replace(/^#{1,6}\s+/u, '').replace(/[`*_]/gu, '').replace(/\s+/gu, ' ').trim()
     expect(prompt.replace(/\s+/gu, ' ')).not.toContain(visibleReply)
     await expect(activePage.getByText(visibleReply, { exact: true })).toBeVisible()
     const sessionTitle = await activePage.getByRole('navigation', { name: 'Session hierarchy' }).getByRole('button').first().innerText()
@@ -454,8 +460,9 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
       await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(repositoryDelivery.noticeText)
       expect(query(join(home, 'assistant-delivery/state.sqlite'), "SELECT id,status,intent_json FROM outbox_messages WHERE json_extract(intent_json, '$.metadata.\"dsh.native-notice.sourceId\"') = 'assistant-actions-verified-delivery/v1'")).toEqual(repositoryDelivery.notices)
       if (repositoryEvents) {
-        const observedAfterFinalRestart = Date.now()
-        await expect.poll(() => query(join(home, 'event-triggers/state.sqlite'), "SELECT last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events' LIMIT 1")[0]?.last_observed_at).toBeGreaterThan(observedAfterFinalRestart)
+        expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT trigger_id,goal_id,session_id,native_goal_id,retired_at FROM goal_source_claims WHERE trigger_id LIKE '%repository-events'")[0]).toEqual(repositoryDelivery.eventSource.retirement.claim)
+        await expect.poll(() => query(join(home, 'assistant-automations/state.sqlite'), "SELECT status FROM automation_definitions WHERE id LIKE '%repository-events-source'")).toEqual([{ status: 'paused' }])
+        expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events' LIMIT 1")[0]?.last_observed_at).toBe(repositoryDelivery.eventSource.retirement.lastObservedAt)
         expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT sequence,event_id,occurred_at,status FROM event_outbox WHERE trigger_id LIKE '%repository-events' ORDER BY sequence")).toEqual(repositoryDelivery.eventSource.events)
       }
     }

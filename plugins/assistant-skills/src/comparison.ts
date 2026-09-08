@@ -7,7 +7,7 @@ import type { IsolatedVerifierRunner } from '@dsh-enhanced/assistant-isolation'
 import type { BenchmarkObservation, BenchmarkPlan } from '@dsh-enhanced/assistant-evaluation/benchmark'
 import type { SkillDefinition } from './definition.js'
 import { instantiate } from './definition.js'
-import { replaySkill } from './replay.js'
+import { replaySkill, validateReplayTrace } from './replay.js'
 
 export interface SkillComparisonProfile {
   id: string
@@ -110,7 +110,7 @@ export class SkillComparator {
     const arms = JSON.parse(JSON.stringify({ baseline, candidate })) as { baseline: SkillDefinition; candidate: SkillDefinition }
     for (const arm of Object.values(arms)) for (const entry of p.cases) {
       const definition = instantiate(arm, entry.inputs)
-      if (definition.steps.length > p.maxToolCalls || definition.steps.some(step => !['read', 'write', 'edit'].includes(step.toolName))) throw new Error('assistant-skills: incomparable tool trace')
+      try { validateReplayTrace(definition, p.maxToolCalls, p.maxBytes) } catch { throw new Error('assistant-skills: incomparable tool trace') }
     }
     const local = new AbortController(), combined = AbortSignal.any([signal, this.#abort.signal, local.signal])
     const revalidate = () => { combined.throwIfAborted(); if (Date.now() >= p.expiresAt) throw new Error('assistant-skills: comparison expired'); authorize() }
@@ -123,7 +123,7 @@ export class SkillComparator {
       variants: (['baseline', 'candidate'] as const).map(role => ({ id: role, role, versions: { ...common, skills: acceptanceDigest(arms[role]) }, features: { memory: false, planning: false, review: false, growth: false } })),
       budget: { durationMs: p.cellDurationMs, toolCalls: p.maxToolCalls, inputTokens: 0, outputTokens: 0, costUsdMicros: 0 }, repeats: p.repeats, seed: 0 })
     const store = new BenchmarkStore(join(root, 'benchmark.sqlite'))
-    const cells: { id: string; artifactDigest: string; jobId: string; verdict: string; quiescent: boolean; toolCalls: number }[] = []
+    const cells: { id: string; artifactDigest: string; jobId: string; verdict: string; quiescent: boolean; toolCalls: number; executedToolCalls: number; omittedObservations: number }[] = []
     const active = new Set<Promise<BenchmarkObservation>>()
     const timer = setInterval(() => { try { revalidate() } catch { local.abort() } }, 100); timer.unref()
     const operation = (async () => {
@@ -141,7 +141,8 @@ export class SkillComparator {
             revalidate()
             const verdict = !observed.quiescent || observed.status === 'unknown' || observed.status === 'cancelled' || observed.status === 'timed-out' ? 'unknown'
               : observed.exitCode !== undefined && observed.exitCode === entry.expectedExitCode && observed.stdout === entry.expectedStdout ? 'achieved' : 'not-achieved'
-            const evidence = { id: request.cell.id, artifactDigest: acceptanceDigest(replay.artifact), jobId: observed.jobId, verdict, quiescent: observed.quiescent, toolCalls: replay.toolCalls }
+            const evidence = { id: request.cell.id, artifactDigest: acceptanceDigest(replay.artifact), jobId: observed.jobId, verdict, quiescent: observed.quiescent,
+              toolCalls: replay.toolCalls, executedToolCalls: replay.executedToolCalls, omittedObservations: replay.omittedObservations }
             cells.push(evidence)
             return { versions: { ...common, skills: acceptanceDigest(arm) }, inputDigest: request.task.inputDigest, acceptanceDigest: request.task.acceptanceDigest,
               verdict, metrics: { inputTokens: 0, outputTokens: 0, costUsdMicros: 0, toolCalls: replay.toolCalls, rework: 0, interventions: 0, latencyMs: null },

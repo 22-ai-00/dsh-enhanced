@@ -361,7 +361,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
         if (!isSeq(eventConsumers) || !isSeq(eventPurposes) || (literalInteger(eventHandle[0]!.get('maxLeaseMs', true)) ?? 0) < events.requestTimeoutMs
           || !eventConsumers.items.some(item => literalString(item) === 'dsh-enhanced-event-triggers') || !eventPurposes.items.some(item => literalString(item) === 'github.observe')) fail('repository observation handle must authorize event-triggers and github.observe')
         const observer = { workspace: input.workspace, preset: input.preset, principalId, principalRecordId: owner.id, principalVersion: owner.version, ownerRouteId: admissionId, expiresAt: repository.expiresAt, budgetId: eventBudgetId }
-        append(eventTriggers!, 'triggers', [{ id: triggerId, automationId, kind: 'github-repository', repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch, credentialHandle: events.credentialHandle,
+        append(eventTriggers!, 'triggers', [{ id: triggerId, automationId, kind: 'github-repository', observerLifetime: 'goal', repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch, credentialHandle: events.credentialHandle,
           fireWhen: 'changed', debounceMs: 0, cooldownMs: 0, maxFires: events.maxFires, observer }])
         set(eventTriggers!, 'pollerEnabled', true, [false]); set(eventTriggers!, 'pollIntervalMs', events.pollIntervalMs, [5000]); set(eventTriggers!, 'requestTimeoutMs', events.requestTimeoutMs, [10000])
         set(goals, 'eventWaits', true, [false])

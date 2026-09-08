@@ -7,6 +7,7 @@ import { AssistantAutomationsService, type AutomationDefinition } from '@dsh-enh
 import { AssistantPolicyService } from '@dsh-enhanced/assistant-policy'
 import { afterEach, describe, expect, test, vi } from 'vitest'
 import { EventSourceObservers, EVENT_OBSERVER_EXECUTOR, type EventObserverConfig } from '../src/observer.ts'
+import { EventTriggerStore } from '../src/store.ts'
 
 const roots: string[] = []
 const contexts: Context[] = []
@@ -15,7 +16,7 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })))
 })
 
-async function fixture(expiresAt = Date.now() + 60_000) {
+async function fixture(expiresAt = Date.now() + 60_000, lifetime: 'shared' | 'goal' = 'shared') {
   const root = await mkdtemp(join(tmpdir(), 'event-observer-'))
   roots.push(root)
   const ctx = new Context(); contexts.push(ctx)
@@ -41,9 +42,15 @@ async function fixture(expiresAt = Date.now() + 60_000) {
   const owner: EventObserverConfig = { workspace: root, preset: 'primary', principalId: 'owner:one',
     principalRecordId: 'record-1', principalVersion: 3, ownerRouteId: 'route-1', expiresAt, budgetId: 'event-runs' }
   let observer!: EventSourceObservers
-  const mount = async () => ctx.plugin(runtime => { observer = new EventSourceObservers(runtime, [{ triggerId: 'github', automationId: 'github-source', configDigest: 'b'.repeat(64), owner }]) })
+  let goal = { scope: { principalId: owner.principalId, principalRecordId: owner.principalRecordId, principalVersion: owner.principalVersion, workspace: root, preset: owner.preset }, id: 'goal-one', definition: { version: 1, digest: 'c'.repeat(64) }, native: { sessionId: 'session-one', goalId: 'native-one', revision: 2, phase: 'paused' } }
+  ctx.provide('assistantGoals' as never, { inspectGoalLifecycle: ({ scope, goalId }: { scope: unknown; goalId: string }) => JSON.stringify(scope) === JSON.stringify(goal.scope) && goalId === goal.id ? Object.freeze(goal) : undefined } as never)
+  const store = new EventTriggerStore({ path: join(root, 'events.sqlite') })
+  const mount = async () => ctx.plugin(runtime => { observer = new EventSourceObservers(runtime, [{ triggerId: 'github', automationId: 'github-source', configDigest: 'b'.repeat(64), owner, lifetime }], store) })
   const observerFiber = await mount()
-  return { ctx, root, observer, observerFiber, mount, route, validateOwnerRoute }
+  const claim = () => ({ triggerId: 'github', scope: goal.scope, goalId: goal.id, definition: goal.definition, native: { sessionId: goal.native.sessionId, goalId: goal.native.goalId, revision: 2 }, configDigest: 'b'.repeat(64), automationId: 'github-source' })
+  return { ctx, root, observer, observerFiber, mount, route, validateOwnerRoute, claim,
+    completeGoal: () => { goal = { ...goal, native: { ...goal.native, revision: 5, phase: 'complete' } } },
+    setGoal: (value: typeof goal) => { goal = value } }
 }
 
 describe('EventSourceObservers', () => {
@@ -111,5 +118,58 @@ describe('EventSourceObservers', () => {
     await f.observerFiber.restart()
     expect(f.ctx.assistantAutomations.inspectSystemOwned({ owner: EVENT_OBSERVER_EXECUTOR, automationId: 'github-source' }))
       .toMatchObject({ automationStatus: 'paused' })
+  })
+
+  test('retires only an explicitly claimed goal observer after its trusted completed lifecycle, including restart', async () => {
+    const f = await fixture(Date.now() + 60_000, 'goal')
+    const claim = f.claim()
+    expect(f.observer.claimGoalSource(claim)).toBe(true)
+    expect(() => f.observer.retireGoalSource(claim)).toThrow(/not trusted/)
+    f.completeGoal()
+    expect(f.observer.retireGoalSource(claim)).toBe(true)
+    expect(() => f.observer.assertCurrent('github')).toThrow(/retired|changed/)
+    expect(f.ctx.assistantAutomations.inspectSystemOwned({ owner: EVENT_OBSERVER_EXECUTOR, automationId: 'github-source' }))
+      .toMatchObject({ automationStatus: 'paused' })
+    await f.observerFiber.restart()
+    expect(f.ctx.assistantAutomations.inspectSystemOwned({ owner: EVENT_OBSERVER_EXECUTOR, automationId: 'github-source' }))
+      .toMatchObject({ automationStatus: 'paused' })
+  })
+
+  test('rejects a different goal or owner claim and leaves a shared source active', async () => {
+    const dedicated = await fixture(Date.now() + 60_000, 'goal')
+    const claimed = dedicated.claim()
+    dedicated.observer.claimGoalSource(claimed)
+    expect(dedicated.observer.claimGoalSource({ ...claimed, native: { ...claimed.native, revision: claimed.native.revision + 3 } })).toBe(true)
+    expect(() => dedicated.observer.claimGoalSource({ ...claimed, goalId: 'other-goal' })).toThrow(/already claimed/)
+    expect(() => dedicated.observer.claimGoalSource({ ...claimed, scope: { ...claimed.scope, principalId: 'other-owner' } })).toThrow(/does not match/)
+    expect(dedicated.ctx.assistantAutomations.inspectSystemOwned({ owner: EVENT_OBSERVER_EXECUTOR, automationId: 'github-source' }))
+      .toMatchObject({ automationStatus: 'active' })
+
+    const shared = await fixture()
+    expect(shared.observer.claimGoalSource(shared.claim())).toBe(false)
+    shared.completeGoal()
+    expect(shared.observer.retireGoalSource(shared.claim())).toBe(false)
+    expect(shared.ctx.assistantAutomations.inspectSystemOwned({ owner: EVENT_OBSERVER_EXECUTOR, automationId: 'github-source' }))
+      .toMatchObject({ automationStatus: 'active' })
+  })
+
+  test('allows settlement only for the retired exact completed claim and rechecks current authority', async () => {
+    const ready = await fixture(Date.now() + 60_000, 'goal'); const claim = ready.claim()
+    ready.observer.claimGoalSource(claim); ready.completeGoal(); ready.observer.retireGoalSource(claim)
+    expect(ready.observer.canSettleGoalSource(claim)).toBe(true)
+    expect(ready.observer.canSettleGoalSource({ ...claim, goalId: 'other-goal' })).toBe(false)
+    expect(ready.observer.canSettleGoalSource({ ...claim, configDigest: 'd'.repeat(64) })).toBe(false)
+
+    const revoked = await fixture(Date.now() + 60_000, 'goal'); const revokedClaim = revoked.claim()
+    revoked.observer.claimGoalSource(revokedClaim); revoked.completeGoal(); revoked.observer.retireGoalSource(revokedClaim)
+    revoked.validateOwnerRoute.mockReturnValue({ ...revoked.route, generation: 2 })
+    expect(revoked.observer.canSettleGoalSource(revokedClaim)).toBe(false)
+
+    const denied = await fixture(Date.now() + 60_000, 'goal'); const deniedClaim = denied.claim()
+    denied.observer.claimGoalSource(deniedClaim); denied.completeGoal(); denied.observer.retireGoalSource(deniedClaim)
+    denied.ctx.assistantPolicy.setEmergencyStop({ enabled: true, actor: 'test', reason: 'deny settlement' })
+    expect(denied.observer.canSettleGoalSource(deniedClaim)).toBe(false)
+
+    const shared = await fixture(); expect(shared.observer.canSettleGoalSource(shared.claim())).toBe(false)
   })
 })

@@ -16,6 +16,13 @@ type SourceReader = {
   sourceSnapshot(triggerId: string): Readonly<GoalEventSourceSnapshot>
   firstEventAfter(snapshot: Readonly<GoalEventSourceSnapshot>, afterSequence: number, deadlineAt: number): Readonly<SourceEvent> | undefined
   subscribeSourceChanges(listener: () => void): () => void
+  claimGoalSource?(claim: GoalSourceClaim): boolean
+  retireGoalSource?(claim: GoalSourceClaim): boolean
+  canSettleGoalSource?(claim: GoalSourceClaim): boolean
+}
+type GoalSourceClaim = {
+  triggerId: string; scope: GoalScope; goalId: string; definition: { version: number; digest: string }
+  native: { sessionId: string; goalId: string; revision: number }; configDigest: string; automationId: string
 }
 type OpportunityEvaluation = { disposition: 'defer' | 'consume' | 'execute'; decision: { eventSequence: number } }
 type OpportunityService = {
@@ -69,6 +76,9 @@ export class GoalEventWaitRuntime {
   }
   prepare(intent: GoalEventWaitIntent): GoalEventWait {
     if (!this.#live) fail()
+    // A dedicated source is claimed before this wait becomes durable. A
+    // competing goal therefore cannot leave a recoverable waiting row.
+    this.#source?.claimGoalSource?.(this.#claim(intent))
     const wait = this.#store.prepare(intent)
     // Catch events committed after the source snapshot but before the owner checkpoint.
     this.#reconcile(wait)
@@ -116,12 +126,32 @@ export class GoalEventWaitRuntime {
     if ((wait.state === 'waiting' || wait.state === 'matched') && now >= (wait.match?.wake.expiresAt ?? wait.intent.expiresAt)) { this.#terminal(wait, 'expired'); return }
     const source = this.#source
     if (!source) return // service loss is recoverable; no timer or implicit authority is created.
-    const actual = this.#sourceCurrent(wait.intent)
-    if (!actual) { this.#terminal(wait, 'source-changed'); return }
+    let completed: GoalRecord | undefined
+    try { completed = this.#recordCurrent(wait.intent, false) } catch (error) {
+      if (error instanceof Error && /event wait policy denied/u.test(error.message)) this.#terminal(wait, 'denied')
+      else throw error
+      return
+    }
+    if (completed?.native.phase === 'complete' && wait.state !== 'materialized') {
+      source.retireGoalSource?.(this.#claim(wait.intent))
+      this.#terminal(wait, 'settled')
+      return
+    }
     if (wait.state === 'materialized') {
       const state = this.wake.inspect(wait.intent.wake.scope, wait.intent.wake.goalId)
         .find(item => item.intent.id === wait.match!.wake.id)?.state
       if (state === 'succeeded' || state === 'unknown' || state === 'denied') { this.#terminal(wait, 'settled'); return }
+      if (state === 'dispatched' && completed?.native.phase === 'complete') source.retireGoalSource?.(this.#claim(wait.intent))
+      if (state === 'dispatched' && completed?.native.phase === 'complete' && source.canSettleGoalSource?.(this.#claim(wait.intent)) === true) return
+    }
+    const actual = this.#sourceCurrent(wait.intent)
+    if (!actual) { this.#terminal(wait, 'source-changed'); return }
+    // Revalidate on recovery too: a legacy or interrupted row must never
+    // regain wake authority if another goal owns this dedicated source.
+    try { source.claimGoalSource?.(this.#claim(wait.intent)) } catch { this.#terminal(wait, 'denied'); return }
+    if (wait.state === 'materialized') {
+      const state = this.wake.inspect(wait.intent.wake.scope, wait.intent.wake.goalId)
+        .find(item => item.intent.id === wait.match!.wake.id)?.state
       // GoalWake owns the native phase transition while a dispatch is in flight.
       // In particular, complete is observed before its settle/finish CAS.
       if (state === 'dispatched') return
@@ -195,6 +225,14 @@ export class GoalEventWaitRuntime {
     // This is only a prompt to reconcile; a source notification has no authority itself.
     this.reconcile()
   }
+  #claim(intent: GoalEventWaitIntent): GoalSourceClaim {
+    const prefix = 'event-triggers:'
+    if (!intent.source.sourceId.startsWith(prefix) || intent.source.sourceId.length === prefix.length) fail()
+    return { triggerId: intent.source.sourceId.slice(prefix.length), scope: intent.wake.scope, goalId: intent.wake.goalId,
+      definition: { version: intent.wake.definition.version, digest: intent.wake.definition.digest },
+      native: { sessionId: intent.wake.native.sessionId, goalId: intent.wake.native.goalId, revision: intent.wake.native.revision },
+      configDigest: intent.source.configDigest, automationId: intent.source.target.automationId }
+  }
   /** Read-only authority for preparing an artifact while the original goal stays paused. */
   assertPreparationCurrent(input: PreparationAuthority): void {
     const wait = this.#store.get(input.waitId)
@@ -214,11 +252,21 @@ export class GoalEventWaitRuntime {
       || externalEventDigest(source.envelope) !== input.eventDigest) fail()
   }
   /** Called by GoalWakeRuntime before native resume. Scheduled wakes remain unaffected. */
-  assertWakeCurrent(wakeIntent: GoalWakeIntent): void {
+  assertWakeCurrent(wakeIntent: GoalWakeIntent, phase: 'before-resume' | 'running' | 'terminal' = 'before-resume'): void {
     if (!wakeIntent.id.startsWith('goal-event-wake-')) return
     const waitId = wakeIntent.id.slice('goal-event-wake-'.length)
     const wait = this.#store.get(waitId)
     if (!wait || (wait.state !== 'matched' && wait.state !== 'materialized') || !wait.match || !same(wait.match.wake, wakeIntent)
-      || Date.now() >= wakeIntent.expiresAt || !this.#sourceCurrent(wait.intent) || !this.#recordCurrent(wait.intent, false)) fail()
+      || Date.now() >= wakeIntent.expiresAt) fail()
+    const record = this.#recordCurrent(wait.intent, false)
+    if (!record) fail()
+    // Retirement stops new observation/execution, but does not revoke the
+    // already dispatched wake's right to settle its exact completed Goal.
+    if (phase === 'terminal' && wait.state === 'materialized' && record.native.phase === 'complete'
+      && this.wake.inspect(wait.intent.wake.scope, wait.intent.wake.goalId).some(wake => wake.intent.id === wakeIntent.id && wake.state === 'dispatched')) {
+      this.#source?.retireGoalSource?.(this.#claim(wait.intent))
+      if (this.#source?.canSettleGoalSource?.(this.#claim(wait.intent)) === true) return
+    }
+    if (!this.#sourceCurrent(wait.intent)) fail()
   }
 }

@@ -15,13 +15,16 @@ import { createDefinition, instantiate, type SkillBinding } from './definition.j
 import { validateComparisonProfiles, SkillComparator, type SkillComparisonProfile } from './comparison.js'
 import { watchObservation } from './watch-proof.js'
 import { sealedPlan, type SealedSkillHoldoutProvider } from './sealed-holdout.js'
+import { openHoldoutProcess, validateExternalHoldoutProfiles, type ExternalHoldoutProfile } from './external-holdout.js'
+import { qualifyHoldout } from './holdout-qualification.js'
 import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition, type SkillCapture } from './store.js'
 
-export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[] }
+export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[]; externalHoldouts?: ExternalHoldoutProfile[] }
 export const Config: Schema<Config> = Schema.object({
   databasePath: Schema.string().default(join(homedir(), '.dsh', 'assistant-skills.sqlite')),
   allowedTools: Schema.array(Schema.string()).default(['read', 'write', 'edit']),
   comparisons: Schema.array(Schema.any()).default([]),
+  externalHoldouts: Schema.array(Schema.any()).default([]),
   candidateTtlMs: Schema.number().step(1).min(1000).max(604800000).default(86400000),
   maxDurationMs: Schema.number().step(1).min(1000).max(300000).default(60000),
 })
@@ -83,6 +86,7 @@ export class AssistantSkillsService extends Service {
   readonly #duration: number
   readonly #candidateTtl: number
   readonly #comparisons: readonly SkillComparisonProfile[]
+  readonly #externalHoldouts: readonly ExternalHoldoutProfile[]
   readonly #comparators = new Map<string, Promise<SkillComparator>>()
   readonly #comparing = new Set<Promise<unknown>>()
   readonly #lifecycle = new AbortController()
@@ -103,6 +107,7 @@ export class AssistantSkillsService extends Service {
       || !Number.isSafeInteger(this.#candidateTtl) || this.#candidateTtl < 1000 || this.#candidateTtl > 604800000
       || this.#allowed.length > 32 || this.#allowed.some(name => typeof name !== 'string' || !/^[a-zA-Z][a-zA-Z0-9_-]{0,127}$/u.test(name))) throw new Error('assistant-skills: invalid configuration')
     this.#comparisons = validateComparisonProfiles(config.comparisons ?? [])
+    this.#externalHoldouts = validateExternalHoldoutProfiles(config.externalHoldouts ?? [])
     this.#store = new SkillStore(config.databasePath ?? join(homedir(), '.dsh', 'assistant-skills.sqlite'))
     ctx.effect(() => async () => { this.#active = false; this.#lifecycle.abort(); await Promise.allSettled(this.#comparing); await Promise.allSettled(this.#captureTasks); await Promise.allSettled([...this.#comparators.values()].map(async value => (await value).close())); this.#store.close() }, 'assistant-skills.store')
     ctx.inject(['tools', 'agents', 'assistantGoals', 'assistantPolicy', 'assistantDelivery'], runtime => {
@@ -121,6 +126,9 @@ export class AssistantSkillsService extends Service {
       runtime.tools.register(defineTool({ name: 'skill_compare', description: 'Compare this pending candidate with its current parent by executing the same configured inputs through native file tools and independent isolated artifact checks. Requires the current owner request and a configured finite comparison profile. Stable invocation_id never repeats unknown work. Returns measured quality, never promotion permission.',
         parameters: { candidate_id: { type: 'string', required: true }, profile_id: { type: 'string', required: true }, invocation_id: { type: 'string', required: true } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(await this.compare(exec, args.candidate_id, args.profile_id, args.invocation_id)) }) }))
+      runtime.tools.register(defineTool({ name: 'skill_qualify', description: 'Submit a pending candidate and its current parent to one configured external independent holdout authority. The authority keeps holdout questions and keys private. Requires the current owner request. A stable invocation_id never repeats an unknown or completed qualification. It returns measurement only and never activates or promotes a skill.',
+        parameters: { candidate_id: { type: 'string', required: true }, profile_id: { type: 'string', required: true }, invocation_id: { type: 'string', required: true } }, output,
+        execute: async (args, exec) => ({ context: JSON.stringify(await this.qualifyExternalHoldout(exec, args.candidate_id, args.profile_id, args.invocation_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_comparison_status', description: 'Read a private comparison receipt or available comparison profile summaries. Test inputs and expected answers are not included.', parameters: { comparison_id: { type: 'string' } }, output,
         execute: async (args, exec) => ({ context: JSON.stringify(this.comparisonStatus(exec.agent, args.comparison_id)) }) }))
       runtime.tools.register(defineTool({ name: 'skill_candidate', description: 'Draft a private candidate from an independently achieved Goal following the current owner request. The current active skill stays unchanged. Review the stored trace and structural delta; no performance gain is inferred.',
@@ -275,7 +283,54 @@ export class AssistantSkillsService extends Service {
   }
   comparisonStatus(agent: Agent | undefined, id?: string) {
     const scope = this.#scope(agent, 'inspect')
-    return id ? this.#store.getComparison(scope, id) ?? null : this.#comparisons.filter(profile => acceptanceDigest(profile.scope) === acceptanceDigest(scope)).map(profile => ({ id: profile.id, version: profile.version, expiresAt: profile.expiresAt, cases: profile.cases.length, repeats: profile.repeats, maxComparisons: profile.maxComparisons }))
+    return id ? this.#store.getComparison(scope, id) ?? null : [
+      ...this.#comparisons.filter(profile => acceptanceDigest(profile.scope) === acceptanceDigest(scope)).map(profile => ({ id: profile.id, version: profile.version, expiresAt: profile.expiresAt, cases: profile.cases.length, repeats: profile.repeats, maxComparisons: profile.maxComparisons })),
+      ...this.#externalHoldouts.filter(profile => acceptanceDigest(profile.scope) === acceptanceDigest(scope)).map(profile => ({ id: profile.id, version: profile.version, expiresAt: profile.execution.expiresAt, maxComparisons: profile.maxComparisons })),
+    ]
+  }
+  /** Fixed external authority qualification. Private cells, authority keys and operator configuration never become tool arguments or status data. */
+  async qualifyExternalHoldout(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string) {
+    const scope = this.#scope(exec.agent, 'compare')
+    const profile = this.#externalHoldouts.find(value => value.id === profileId && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+    if (!profile || profile.execution.expiresAt <= Date.now()) throw new Error('assistant-skills: current external holdout profile required')
+    const profileDigest = acceptanceDigest(profile)
+    const candidate = this.#store.getCandidate(scope, candidateId)
+    if (!candidate?.parentDigest) throw new Error('assistant-skills: external qualification requires an existing parent')
+    const candidateDigest = acceptanceDigest(candidate)
+    const claim = this.#store.claimComparison(scope, { sessionId: String(exec.agent!.session.id), candidateId, parentDigest: candidate.parentDigest, profileId: `external:${profile.id}:${profile.version}`, profileDigest, invocationId }, 1)
+    const current = (running = true) => {
+      exec.signal.throwIfAborted(); this.#lifecycle.signal.throwIfAborted()
+      const fresh = this.#externalHoldouts.find(value => value.id === profile.id && value.version === profile.version && acceptanceDigest(value.scope) === acceptanceDigest(scope))
+      if (!fresh || acceptanceDigest(fresh) !== profileDigest || Date.now() >= profile.execution.expiresAt
+        || acceptanceDigest(this.#scope(exec.agent, 'compare')) !== acceptanceDigest(scope)
+        || acceptanceDigest(this.#store.getCandidate(scope, candidateId)) !== candidateDigest
+        || running && this.#store.getComparison(scope, claim.comparison.id)?.state !== 'running') throw new Error('assistant-skills: external qualification authority changed')
+      this.#pending(scope, candidateId)
+    }
+    if (!claim.claimed) { current(false); return claim.comparison }
+    const operation = (async () => {
+      try {
+        this.#authorize(exec.agent, 'compare', claim.comparison.id)
+        current()
+        const baseline = this.#store.get(scope, candidate.definition.name, candidate.parentVersion)
+        if (!baseline || acceptanceDigest(baseline) !== candidate.parentDigest) throw new Error('assistant-skills: candidate parent changed')
+        const opened = await openHoldoutProcess(profile.authority, AbortSignal.any([exec.signal, this.#lifecycle.signal]))
+        let result: Awaited<ReturnType<typeof qualifyHoldout>>
+        try {
+          result = await qualifyHoldout({ baseline, candidate: candidate.definition, scope,
+            execution: { ...profile.execution, stateRoot: join(profile.execution.stateRoot, claim.comparison.id) }, ...(profile.inputs === undefined ? {} : { inputs: profile.inputs }), ...(profile.files === undefined ? {} : { files: profile.files }),
+            pinnedPublicKey: profile.authority.publicKey, expectedDatasetDigest: profile.authority.datasetDigest, transport: opened.transport,
+            signal: AbortSignal.any([exec.signal, this.#lifecycle.signal]), authorize: current })
+        } finally { await opened.close() }
+        current()
+        return this.#store.finishComparison(scope, claim.comparison.id, result.receipt.complete && result.receipt.cellVerdicts.every(value => value.verdict !== 'unknown') ? 'complete' : 'unknown', result)
+      } catch {
+        this.#store.finishComparison(scope, claim.comparison.id, 'unknown', { reason: 'external-qualification-failed-or-authority-changed', promotionAuthorized: false })
+        throw new Error(`assistant-skills: external qualification ${claim.comparison.id} is unknown; inspect status, do not replay`)
+      }
+    })()
+    this.#comparing.add(operation)
+    try { return await operation } finally { this.#comparing.delete(operation) }
   }
   async compare(exec: ToolRunContext, candidateId: string, profileId: string, invocationId: string) {
     const scope = this.#scope(exec.agent, 'compare')
