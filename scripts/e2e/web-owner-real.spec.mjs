@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseDocument, isMap, isSeq } from 'yaml'
 import { isExperimentToolAllowed } from './web-owner-real-guard.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
+import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
@@ -27,9 +28,11 @@ function setConfig(doc, id, name, config) {
 }
 function contracts(path, kind) { return query(path, 'SELECT id, payload FROM acceptance_contracts WHERE task_kind = ? ORDER BY rowid ASC', kind).map(row => ({ ...row, contract: JSON.parse(row.payload) })) }
 function jobs(path, ids) { return ids.map(id => query(path, 'SELECT state, execution, receipt, reason FROM acceptance_jobs WHERE contract_id = ?', id)[0]).map(row => ({ ...row, execution: row.execution ? JSON.parse(row.execution) : null, receipt: row.receipt ? JSON.parse(row.receipt) : null })) }
-async function waitForVerifiedGoal(page, goalsPath, verifierPath, approved, frames, sessionId, workspace) {
+async function waitForVerifiedGoal(page, goalsPath, verifierPath, deliveryPath, approved, frames, sessionId, workspace) {
   const deadline = Date.now() + 300_000
   while (Date.now() < deadline) {
+    const failedInput = query(deliveryPath, "SELECT failure_code FROM inbox_messages WHERE status = 'dead_letter'")[0]
+    if (failedInput) throw new Error(`Real-model foreground input failed: ${failedInput.failure_code}`)
     const goal = existsSync(goalsPath) ? query(goalsPath, 'SELECT * FROM goal_records')[0] : undefined
     if (goal && existsSync(verifierPath)) {
       const outcomes = contracts(verifierPath, 'goal-outcome')
@@ -49,6 +52,11 @@ async function waitForVerifiedGoal(page, goalsPath, verifierPath, approved, fram
       const requests = [...pending.values()].filter(value => !approved.some(item => item.eventId === value.eventId))
       if (requests.length === 0) { await button.waitFor({ state: 'hidden', timeout: 1_000 }).catch(() => {}); continue }
       const request = requests[0]
+      // Approval and Session-follow streams are independent. Wait for the
+      // exact call evidence before validating or clicking its approval.
+      await expect.poll(() => frames.some(frame => frame.value?.type === 'event'
+        && frame.value.event?.type === 'tool/call'
+        && frame.value.event.data.callId === request.request?.callId), { timeout: 5_000 }).toBe(true)
       const calls = frames.flatMap(frame => frame.value?.type === 'event' && frame.value.event?.type === 'tool/call' ? [frame.value.event.data] : [])
       const call = calls.findLast(item => item.callId === request.request?.callId)
       let args
@@ -67,18 +75,21 @@ async function waitForVerifiedGoal(page, goalsPath, verifierPath, approved, fram
   throw new Error('Independent whole-goal verification did not complete within the experiment deadline')
 }
 
-test('real codex Responses completes a browser-owned verified native goal', async ({ page }, testInfo) => {
+test('real configured route completes a browser-owned verified native goal across Host restart', async ({ page, context }, testInfo) => {
   const temp = await mkdtemp(join(tmpdir(), 'dsh-web-owner-real-'))
   const home = join(temp, 'home'), workspace = join(temp, 'workspace'), modelLog = join(temp, 'model.jsonl')
   const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_WEB_REAL_LOG: modelLog, DSH_WEB_REAL_WORKSPACE: workspace }
-  let host; let authenticated = false; let failed = false
+  let host; let restartedContext; let activePage = page; let authenticated = false; let failed = false
   const approved = []
   const http = [], transport = [], streams = new Map(), frames = []
   observePage(page, http, transport, streams, frames)
   try {
     await mkdir(workspace)
+    const route = await prepareRealRoute({ env, home, workspace })
+    env.DSH_WEB_REAL_PROVIDER = route.provider
+    env.DSH_WEB_REAL_MODEL = route.model
     await run('zstd', ['--version'], env)
-    const installed = await run('dsh', ['plugin', '--profile', 'web', 'add', ...['personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-verifier', 'assistant-evaluation', 'coding-subscription-provider'].map(name => resolve(root, 'plugins', name))], env)
+    const installed = await run('dsh', ['plugin', '--profile', 'web', 'add', ...['personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-verifier', 'assistant-evaluation', ...route.bundles].map(name => resolve(root, 'plugins', name))], env)
     await writeFile(testInfo.outputPath('install.log'), sanitize(installed), { mode: 0o600 })
     await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace], env)
     const deliveryPath = join(home, 'assistant-delivery/state.sqlite'), goalsPath = join(home, 'assistant-goals/web.sqlite'), verifierPath = join(home, 'assistant-verifier/verification.sqlite')
@@ -93,8 +104,7 @@ test('real codex Responses completes a browser-owned verified native goal', asyn
     setConfig(patch, 'dsh-enhanced-assistant-goals', '@dsh-enhanced/assistant-goals', { databasePath: goalsPath, verifyNativeRounds: true, verifyGoalOutcome: true, stepMaxDurationMs: 120_000 })
     setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300_000 })
     setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', { databasePath: verifierPath, tickIntervalMs: 500, requireAcceptance: false, authorities: [authority], profiles: [profile('goal-step'), profile('goal-outcome')] })
-    setConfig(patch, 'dsh-enhanced-coding-subscription-provider', '@dsh-enhanced/coding-subscription-provider', { cwd: workspace, timeoutMs: 120_000, codex: { enabled: true, transport: 'direct-responses', directModel: process.env.DSH_WEB_REAL_MODEL || 'gpt-5.6-terra' }, claude: { enabled: false }, cursor: { enabled: false }, grok: { enabled: false } })
-    patch.contents.add(patch.createNode({ id: 'agent-default-model', config: { provider: 'codex-subscription', model: 'default' } }))
+    route.configurePatch(patch, setConfig)
     patch.contents.add(patch.createNode({ id: 'session-title-llm', disabled: true }))
     patch.contents.add(patch.createNode({ insert: [{ id: 'web-owner-real-guard', name: resolve(root, 'scripts/e2e/web-owner-real-guard.mjs') }] }))
     expect(String(patch)).not.toContain('web-owner-model')
@@ -108,10 +118,11 @@ test('real codex Responses completes a browser-owned verified native goal', asyn
     const created = http.find(response => new URL(response.url()).pathname === '/api/session/create'); expect(created.status()).toBe(200)
     const sessionId = (await created.json()).result.value.sessionId
     const composer = page.getByLabel(/Describe what you want to build|Message or run a task/)
-    await composer.fill(`Create a goal with objective exactly: '${objective}' amountCents is an integer; combine entries by currency, ignore orders whose status is 'cancelled', and output currency keys in dictionary order. Use goal_create with max_goal_rounds 2, then end this turn. Do not implement code in this turn. For the subsequent goal round: the workspace is empty; use the write tool to create summarize.mjs directly. Shell, other files and permission escalation are outside this experiment. Skip todo/plan and inspection tools. End the round after writing the artifact: the configured independent verifier will validate and complete the goal. Keep the entire experiment within ten model calls.`)
+    const submittedPrompt = `Create a goal with objective exactly: '${objective}' amountCents is an integer; combine entries by currency, ignore orders whose status is 'cancelled', and output currency keys in dictionary order. Use goal_create with max_goal_rounds 2 and start_native_rounds true to hand off this turn to the native goal driver. Do not implement code in this turn. For the subsequent goal round: the workspace is empty; use the write tool to create summarize.mjs directly. Shell, other files and permission escalation are outside this experiment. Skip todo/plan and inspection tools. End the round after writing the artifact: the configured independent verifier will validate and complete the goal. After writing, reply with plain text (no Markdown), describing the result. Keep the entire experiment within ten model calls.`
+    await composer.fill(submittedPrompt)
     const prompt = page.waitForResponse(response => new URL(response.url()).pathname === '/api/session/prompt')
     await page.getByRole('button', { name: 'Send message', exact: true }).click(); expect((await prompt).status()).toBe(200)
-    await waitForVerifiedGoal(page, goalsPath, verifierPath, approved, frames, sessionId, workspace)
+    await waitForVerifiedGoal(page, goalsPath, verifierPath, deliveryPath, approved, frames, sessionId, workspace)
     const goal = query(goalsPath, 'SELECT * FROM goal_records')[0], native = JSON.parse(goal.native_json), scope = JSON.parse(goal.scope_json)
     const stepContracts = contracts(verifierPath, 'goal-step'), outcomeContracts = contracts(verifierPath, 'goal-outcome')
     const stepJobs = jobs(verifierPath, stepContracts.map(row => row.id)), outcomeJobs = jobs(verifierPath, outcomeContracts.map(row => row.id))
@@ -126,6 +137,41 @@ test('real codex Responses completes a browser-owned verified native goal', asyn
     expect(modelCalls.filter(entry => entry.event === 'dispatch').length).toBeLessThanOrEqual(10)
     expect(modelCalls.some(entry => entry.event === 'settled' && entry.usage !== null)).toBe(true)
     await expect.poll(() => query(deliveryPath, 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state).toBe('released')
+    const response = frames.flatMap(frame => frame.value?.type === 'event' && frame.value.event?.type === 'assistant/message'
+      ? [frame.value.event.data] : []).findLast(data => data.message.content.some(block => block.type === 'text' && block.text.trim()))
+    const responseText = response?.message.content.filter(block => block.type === 'text').map(block => block.text).join('')
+    expect(responseText?.trim().length).toBeGreaterThan(0)
+    // Match actual model output, rather than the user prompt containing the filename.
+    // Check the actual reply's prose paragraph; Markdown list markers below
+    // it are intentionally absent from rendered browser text.
+    const visibleReply = responseText.split(/\n\s*\n/u)[0].replace(/[`*_]/gu, '').replace(/\s+/gu, ' ').trim()
+    expect(visibleReply.length).toBeGreaterThan(20)
+    expect(submittedPrompt.replace(/\s+/gu, ' ')).not.toContain(visibleReply)
+    await expect(page.getByText(visibleReply, { exact: true })).toBeVisible()
+    await host.stop()
+    await writeFile(testInfo.outputPath('host-first.log'), host.log(), { mode: 0o600 })
+    const beforeRestart = { id: goal.id, native, scope, sourceDigest: createHash('sha256').update(await readFile(join(workspace, 'summarize.mjs'))).digest('hex') }
+    const restartFrameStart = frames.length
+    host = await startHost(env)
+    restartedContext = await context.browser().newContext()
+    activePage = await restartedContext.newPage()
+    observePage(activePage, http, transport, streams, frames)
+    try { await activePage.goto(host.url) } catch { throw new Error('Restarted browser authentication failed (URL redacted)') }
+    await expect(activePage).toHaveURL(`${new URL(host.url).origin}/`)
+    const workspaceRow = activePage.getByRole('treeitem', { name: 'workspace', exact: true })
+    await expect(workspaceRow).toBeVisible()
+    if (await workspaceRow.getAttribute('aria-expanded') === 'false') await workspaceRow.click()
+    await activePage.getByRole('treeitem', { name: /Create a goal with objective/ }).click()
+    // Reading the persisted completed Session must not rerun its model or artifact.
+    await expect(activePage.getByText(visibleReply, { exact: true })).toBeVisible()
+    await expect.poll(() => frames.slice(restartFrameStart)
+      .flatMap(frame => frame.value?.type === 'snapshot' ? frame.value.records : frame.value?.type === 'event' ? [frame.value] : [])
+      .some(record => record.type === 'event' && record.event?.type === 'assistant/message'
+        && record.event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join('') === responseText)).toBe(true)
+    const restored = query(goalsPath, 'SELECT * FROM goal_records')[0]
+    expect({ id: restored.id, native: JSON.parse(restored.native_json), scope: JSON.parse(restored.scope_json),
+      sourceDigest: createHash('sha256').update(await readFile(join(workspace, 'summarize.mjs'))).digest('hex') }).toEqual(beforeRestart)
+    expect((await readFile(modelLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line))).toEqual(modelCalls)
     await host.stop()
     const audit = await readSessionAudit(home, workspace, sessionId)
     expect(audit.reviewer).toBe('user')
@@ -135,7 +181,15 @@ test('real codex Responses completes a browser-owned verified native goal', asyn
       expect.objectContaining({ type: 'approval/policy', data: { policy: 'ask' } }),
     ]))
     const goalCall = audit.events.find(event => event.type === 'tool/call' && event.data.name === 'goal_create')
-    expect(goalCall?.data.arguments).toEqual({ objective, max_goal_rounds: 2 })
+    expect(goalCall?.data.arguments).toEqual({ objective, max_goal_rounds: 2, start_native_rounds: true })
+    const writes = audit.events.filter(event => event.type === 'tool/call' && ['write', 'edit'].includes(event.data.name))
+    expect(writes.length).toBeGreaterThan(0)
+    for (const write of writes) {
+      const start = audit.events.findLast(event => event.type === 'turn/start' && event.seq < write.seq)
+      expect(start?.data.turn).toBe(write.data.turn)
+      expect(audit.events.some(event => event.seq > start.seq && event.seq < write.seq
+        && event.type === 'user/message' && event.data.source?.kind === 'goal' && event.data.source.round > 0)).toBe(true)
+    }
     const asked = audit.events.find(event => event.type === 'approval/asked' && event.data.callId === goalCall?.data.callId)
     expect(asked?.data.toolName).toBe('goal_create')
     expect(audit.events).toContainEqual(expect.objectContaining({ type: 'approval/decided', data: expect.objectContaining({ id: asked.data.id, outcome: 'allowed-once' }) }))
@@ -151,12 +205,12 @@ test('real codex Responses completes a browser-owned verified native goal', asyn
     await copyFile(join(workspace, 'summarize.mjs'), testInfo.outputPath('summarize.mjs'))
     await writeFile(testInfo.outputPath('source.sha256'), createHash('sha256').update(await readFile(join(workspace, 'summarize.mjs'))).digest('hex') + '  summarize.mjs\n', { mode: 0o600 })
     await copyFile(modelLog, testInfo.outputPath('model.jsonl'))
-    await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ objective, sourceArtifact: 'summarize.mjs', noFixture: true, provider: 'codex-subscription', directModel: process.env.DSH_WEB_REAL_MODEL || 'gpt-5.6-terra', dispatchLimit: 10, approvalReviewer: audit.reviewer, finalLease: 'released', sessionId, goalId: goal.id, scope, native, runner: { id: runner.id, digest: runner.digest }, approved, modelCalls, stepContracts: stepContracts.map(({ id, contract }) => ({ id, protocol: contract.protocol, task: contract.task, criteria: contract.criteria })), stepJobs, outcomeContracts: outcomeContracts.map(({ id, contract }) => ({ id, protocol: contract.protocol, task: contract.task, criteria: contract.criteria })), outcomeJobs, streams: [...streams.values()] }, null, 2), { mode: 0o600 })
+    await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ objective, sourceArtifact: 'summarize.mjs', noFixture: true, ...route.proof, restart: { hostStarts: 2, sameCompletedGoal: true, artifactUnchanged: true, noExtraModelDispatch: true, exactReplyRestored: true, visibleReplyAbsentFromUserPrompt: true }, dispatchLimit: 10, approvalReviewer: audit.reviewer, finalLease: 'released', sessionId, goalId: goal.id, scope, native, runner: { id: runner.id, digest: runner.digest }, approved, modelCalls, stepContracts: stepContracts.map(({ id, contract }) => ({ id, protocol: contract.protocol, task: contract.task, criteria: contract.criteria })), stepJobs, outcomeContracts: outcomeContracts.map(({ id, contract }) => ({ id, protocol: contract.protocol, task: contract.task, criteria: contract.criteria })), outcomeJobs, streams: [...streams.values()] }, null, 2), { mode: 0o600 })
   } catch (error) { failed = true; throw error } finally {
     try {
       await writeFile(testInfo.outputPath('approvals.json'), JSON.stringify(approved, null, 2), { mode: 0o600 })
       if (existsSync(modelLog)) await copyFile(modelLog, testInfo.outputPath('model.jsonl'))
       if (existsSync(join(workspace, 'summarize.mjs'))) await copyFile(join(workspace, 'summarize.mjs'), testInfo.outputPath('summarize.mjs'))
-      if (authenticated && failed && !new URL(page.url()).searchParams.has('token')) { await page.screenshot({ path: testInfo.outputPath('failure.png') }).catch(() => {}); await writeFile(testInfo.outputPath('failure-dom.txt'), sanitize(await page.locator('body').innerText().catch(() => '')), { mode: 0o600 }) }; await writeFile(testInfo.outputPath('transport.json'), JSON.stringify(transport, null, 2), { mode: 0o600 }) } finally { try { if (host) { await host.stop(); await writeFile(testInfo.outputPath('host.log'), host.log(), { mode: 0o600 }) } } finally { await rm(temp, { recursive: true, force: true }) } }
+      if (authenticated && failed && !new URL(activePage.url()).searchParams.has('token')) { await activePage.screenshot({ path: testInfo.outputPath('failure.png') }).catch(() => {}); await writeFile(testInfo.outputPath('failure-dom.txt'), sanitize(await activePage.locator('body').innerText().catch(() => '')), { mode: 0o600 }) }; await writeFile(testInfo.outputPath('transport.json'), JSON.stringify(transport, null, 2), { mode: 0o600 }) } finally { try { if (host) { await host.stop(); await writeFile(testInfo.outputPath('host.log'), host.log(), { mode: 0o600 }) } } finally { if (restartedContext) await restartedContext.close(); await rm(temp, { recursive: true, force: true }) } }
   }
 })

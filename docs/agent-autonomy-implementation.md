@@ -52,6 +52,8 @@
 
 ## 当前证据与后续动作
 
+- 2026-09-08，现有网关真实模型闭环（基线 `ea107bf`）：新增显式 `goal_create(start_native_rounds: true)`，在成功结果上结束 owner turn 并交给原生 Goal driver，默认仍允许在当前 owner turn 继续 `goal_wait_event` / `goal_schedule`。既有 Web 实验入口可读取选定网关路线与内存凭据；真实 `alwaysday1` 3 请求完成原生产物工具执行、v2 step/v3 outcome achieved，实际 Host 重启后原 Session/Goal、产物和完整回复不变且没有新模型调用。最终源码/日志哈希与全检、独立复核见[结构化证据](evidence/real-gateway-goal-2026-09-08.json)。没有扩大任务权限，未激活日常 profile。该证据不等于真实未完成事件恢复或生产 token/cost 预算；网关尚缺可信输入 token 上界与精确 meter，TraeX 已登录但其 ACP usage 尚未映射为 DSH 预算 usage。不能再以“没有 DeepSeek 凭据”泛指所有真实模型验证不可做。
+
 - 起点：`dev`，工作区干净，基线 `1b65852`。已有 22 个插件和 2 个共享库（本轮以实际 package 清单复核，修正此前的 23 个误计）；安装器已有场景组合、真实 Host 激活检查和服务诊断，应该继续扩展这些入口。
 - 01 已验证，提交 `6b82214`、`0c6e850`：exact-run canonical 查询，schema v11 保存任务版本/digest/inspection watermark，晋升在 Evaluation 写锁内复核并激活。保持任务身份不变时使用当前 scope watermark，避免其他任务的新证据卡住候选；与 Evolution 共用同一证据校验和锁，只由依赖 Evolution 投递的消费者等待其 outbox。历史 v10 proof 不授予晋升权限。
 - 01 行为覆盖：owner 冲突、inspection 后纠正、取锁前纠正、持锁期间竞争写、旧成功冷恢复、合法回执重放、真实 promotion 版本迁移、旧 schema 升级、错误 scope/run、独立组合没有 Evolution、同 scope 的无关任务进展。Automations 209、Evaluation 36、Growth 14 项包测试通过；两轮独立审查修复了 promotion 后 replay 失效问题，最终规格与质量均通过。

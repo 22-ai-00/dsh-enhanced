@@ -23,9 +23,12 @@ function compact(event) {
   if (event.type === 'tool/call') {
     let argumentsValue = data.arguments && typeof data.arguments === 'object' ? data.arguments : {}
     if (typeof data.arguments === 'string') try { argumentsValue = JSON.parse(data.arguments) } catch { return null }
-    const selected = data.name === 'goal_create' && argumentsValue.objective === objective ? { objective, max_goal_rounds: argumentsValue.max_goal_rounds } : { file_path: argumentsValue.file_path }
-    return { seq: event.seq, type: event.type, data: { callId: data.callId, name: data.name, arguments: selected } }
+    const selected = data.name === 'goal_create' && argumentsValue.objective === objective ? { objective, max_goal_rounds: argumentsValue.max_goal_rounds, start_native_rounds: argumentsValue.start_native_rounds } : { file_path: argumentsValue.file_path }
+    return { seq: event.seq, type: event.type, data: { turn: data.turn, callId: data.callId, name: data.name, arguments: selected } }
   }
+  if (event.type === 'turn/start') return { seq: event.seq, type: event.type, data: { turn: data.turn } }
+  if (event.type === 'user/message' && data.source?.kind === 'goal') return { seq: event.seq, type: event.type,
+    data: { source: { kind: 'goal', round: data.source.round } } }
   if (event.type === 'approval/asked' || event.type === 'approval/decided') return { seq: event.seq, type: event.type, data: { id: data.id, callId: data.callId, toolName: data.toolName, outcome: data.outcome } }
   if (event.type.startsWith('goal/')) return { seq: event.seq, type: event.type, data: Object.fromEntries(Object.entries(data).filter(([, value]) => value === null || ['string', 'number', 'boolean'].includes(typeof value))) }
   if (['permission/preset', 'sandbox/mode', 'approval/policy', 'assistant-policy/approval-reviewer'].includes(event.type)) return { seq: event.seq, type: event.type, data: event.type === 'permission/preset' ? { preset: data.preset } : event.type === 'sandbox/mode' ? { mode: data.mode } : event.type === 'approval/policy' ? { policy: data.policy } : { reviewer: data.reviewer } }
