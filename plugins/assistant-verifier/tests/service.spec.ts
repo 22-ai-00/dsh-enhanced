@@ -247,6 +247,24 @@ describe('Host acceptance service', () => {
     expect(service.inspect(handle.contractId)).toMatchObject({ state: 'done', attempts: 1, receipt: { objectiveStatus: 'not-achieved' } })
   })
 
+  it('emits a receipt nudge only after durable verification, without requiring an Evaluation sink', async () => {
+    const { ctx, producer, task, service, complete, config } = await harness('goal-step')
+    const notices: unknown[] = []
+    ctx.on('assistant-verifier/receipt', notice => {
+      const durable = new AcceptanceStore(config.databasePath)
+      try {
+        expect(durable.getState(notice.contractId)).toMatchObject({ state: 'done', receipt: { id: notice.receiptId, digest: notice.receiptDigest } })
+        notices.push(notice)
+      } finally { durable.close() }
+    })
+    ctx.on('assistant-verifier/receipt', () => { throw new Error('unavailable observer') })
+    const handle = producer.registration!.prepare(task)!
+    expect(notices).toEqual([]); complete(handle); await producer.registration!.completed(handle); await service.tick()
+    expect(notices).toEqual([expect.objectContaining({ contractId: handle.contractId, contractDigest: handle.contractDigest, taskKind: 'goal-step' })])
+    expect(service.health()).toMatchObject({ pendingReceipts: 1, evaluationConnected: false })
+    await service.tick(); expect(notices).toHaveLength(1)
+  })
+
   it('freezes and reconciles a trusted goal-step v2 contract and receipt', async () => {
     const { producer, task, service, complete, config } = await harness('goal-step')
     const registration = producer.registration!

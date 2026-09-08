@@ -20,7 +20,7 @@ interface GoalAdmissionTaskBase {
     cases: Array<{ stdin: string; expectedStdout: string; expectedExitCode: number }>
   }
   wake?: { maxDelayMs: number; runTimeoutMs: number; maxRuns: number }
-  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean }
+  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step' }
 }
 /** Legacy v1 fixed DeepSeek route. Kept for existing private admission files. */
 export interface GoalAdmissionTaskV1 extends GoalAdmissionTaskBase {
@@ -119,8 +119,9 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
   }
   if (input.repositoryDelivery !== undefined) {
     if (input.version !== 2) fail('repository delivery requires task version 2')
-    shape(input.repositoryDelivery, ['repository', 'baseBranch', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'openPullRequest'])
+    shape(input.repositoryDelivery, ['repository', 'baseBranch', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'openPullRequest'], ['acceptance'])
     const value = input.repositoryDelivery as NonNullable<GoalAdmissionTaskBase['repositoryDelivery']>
+    if (value.acceptance !== undefined && !['goal-outcome', 'goal-step'].includes(value.acceptance)) fail('invalid repository acceptance')
     for (const key of ['repository', 'baseBranch', 'branch', 'credentialHandle'] as const) if (typeof value[key] !== 'string' || value[key].length === 0 || value[key].length > 256) fail('invalid repository delivery')
     if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.repository) || !Array.isArray(value.paths) || value.paths.length !== 1 || value.paths[0] !== verification.artifactPath
       || value.baseBranch === value.branch || !Number.isSafeInteger(value.expiresAt) || typeof value.openPullRequest !== 'boolean') fail('invalid repository delivery')
@@ -165,7 +166,7 @@ function merge(base: YAMLMap, overlay: YAMLMap): YAMLMap {
 }
 /** Compose a complete candidate, preserving custom siblings and rejecting modified managed settings. */
 export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, effectiveSource: string,
-  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now(), settingsSource?: string): { patch: string; admissionId: string; profile: AutonomyDoctorProfile; repositoryDelivery?: { repository: string; branch: string; paths: string[] } } {
+  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now(), settingsSource?: string): { patch: string; admissionId: string; profile: AutonomyDoctorProfile; repositoryDelivery?: { repository: string; branch: string; paths: string[]; acceptance: 'goal-outcome' | 'goal-step' } } {
   const task = parseGoalAdmissionTask(taskSource)
   for (const value of [input.dshHome, input.workspace]) if (!isAbsolute(value) || normalize(value) !== value) fail('home and workspace must be canonical paths')
   if (!Number.isFinite(now) || task.version === 1 && now >= Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt)) fail('model contract expired')
@@ -303,7 +304,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
         || (literalInteger(matching[0]!.get('maxLeaseMs', true)) ?? 0) < 30_000
         || !consumers.items.some(item => literalString(item) === 'dsh-enhanced-assistant-actions')
         || !purposes.items.some(item => literalString(item) === 'github.commit')) fail('credential handle is unavailable')
-      const grant = { id: `${admissionId}-repository`, revision: 1, principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version, workspace: input.workspace, agentPreset: input.preset, repository: repository.repository, branch: repository.branch, paths: repository.paths, credentialHandle: repository.credentialHandle, expiresAt: repository.expiresAt, maxActions: repository.maxActions, maxTotalBytes: repository.maxTotalBytes, repoWorkflow: { baseBranch: repository.baseBranch, allowBranchCreate: false, allowPullRequest: repository.openPullRequest }, verifiedDelivery: { ownerRouteId: admissionId, budgetId } }
+      const grant = { id: `${admissionId}-repository`, revision: 1, principalDigest: createHash('sha256').update(principalId).digest('hex'), principalRecordId: owner.id, principalVersion: owner.version, workspace: input.workspace, agentPreset: input.preset, repository: repository.repository, branch: repository.branch, paths: repository.paths, credentialHandle: repository.credentialHandle, expiresAt: repository.expiresAt, maxActions: repository.maxActions, maxTotalBytes: repository.maxTotalBytes, repoWorkflow: { baseBranch: repository.baseBranch, allowBranchCreate: false, allowPullRequest: repository.openPullRequest }, verifiedDelivery: { ownerRouteId: admissionId, budgetId, ...(repository.acceptance ? { acceptance: repository.acceptance } : {}) } }
       append(actions!, 'grants', [grant])
       if (typeof Actions.validateActionConfig !== 'function') fail('install matching @dsh-enhanced/assistant-actions first')
       Actions.validateActionConfig(actions!.toJSON())
@@ -319,5 +320,5 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   }
   GoalsConfig(goals.toJSON())
   return { patch: target.document.toString({ lineWidth: 0 }), admissionId, profile,
-    ...(task.repositoryDelivery ? { repositoryDelivery: { repository: task.repositoryDelivery.repository, branch: task.repositoryDelivery.branch, paths: [...task.repositoryDelivery.paths] } } : {}) }
+    ...(task.repositoryDelivery ? { repositoryDelivery: { repository: task.repositoryDelivery.repository, branch: task.repositoryDelivery.branch, paths: [...task.repositoryDelivery.paths], acceptance: task.repositoryDelivery.acceptance ?? 'goal-outcome' } } : {}) }
 }

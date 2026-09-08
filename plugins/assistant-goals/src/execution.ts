@@ -20,6 +20,7 @@ interface ActiveRound {
   removeAbort(): void
   finishing: boolean
   finish?: Promise<void>
+  eventWaitPause?: { goalId: string; revision: number; materialized: boolean }
 }
 
 /** Observes actual admitted native rounds; never queues prompts or accepts model verdicts. */
@@ -63,6 +64,7 @@ export class GoalExecutionRuntime {
         if (agent !== undefined && this.#revoked.has(agent)) return { kind: 'deny' as const, reason: 'assistant-goals: execution cancelled' }
         const round = agent === undefined ? undefined : this.#rounds.get(agent)
         if (round !== undefined) {
+          if (round.eventWaitPause !== undefined) return { kind: 'deny' as const, reason: 'assistant-goals: paused event wait concludes this turn' }
           try { this.#assertRound(round) } catch {
             this.#cancel(round)
             return { kind: 'deny' as const, reason: 'assistant-goals: step authorization changed' }
@@ -74,6 +76,7 @@ export class GoalExecutionRuntime {
         if (execution.agent !== undefined && this.#revoked.has(execution.agent)) return 'assistant-goals: execution cancelled'
         const round = execution.agent === undefined ? undefined : this.#rounds.get(execution.agent)
         if (round === undefined) return undefined
+        if (round.eventWaitPause !== undefined) return 'assistant-goals: paused event wait concludes this turn'
         try { this.#assertRound(round); return undefined } catch {
           this.#cancel(round)
           return 'assistant-goals: step authorization changed'
@@ -170,6 +173,46 @@ export class GoalExecutionRuntime {
     return { record: this.current(agent).record, run: round.run, signal: round.signal }
   }
 
+  /** Pause only the exact admitted native round; terminal success remains gated on materialization. */
+  pauseForEventWait = (agent: Agent, goalId: string, expectedRevision: number): GoalRecord => {
+    const round = this.#rounds.get(agent)
+    if (round === undefined || round.eventWaitPause !== undefined) throw new Error('assistant-goals: admitted native goal round required')
+    this.#assertRound(round)
+    const current = this.current(agent).record
+    const task = round.run.intent.task.goal
+    const native = this.ctx.get('goals')?.get(agent)
+    if (current.id !== goalId || task.id !== goalId || task.nativeRevision !== expectedRevision || current.native.revision !== expectedRevision
+      || native === undefined || String(native.id) !== task.nativeGoalId || native.revision !== expectedRevision || native.phase !== 'active') {
+      throw new Error('assistant-goals: admitted native goal round changed')
+    }
+    this.ctx.get('goals')!.pause(agent, { id: native.id, revision: expectedRevision })
+    const paused = this.current(agent).record
+    if (paused.id !== goalId || paused.native.phase !== 'paused' || paused.native.revision !== expectedRevision + 1
+      || paused.native.goalId !== task.nativeGoalId || paused.native.sessionId !== task.sessionId) {
+      throw new Error('assistant-goals: native event wait pause was not confirmed')
+    }
+    round.eventWaitPause = { goalId, revision: paused.native.revision, materialized: false }
+    return paused
+  }
+
+  acceptPausedEventWait = (agent: Agent, goalId: string, revision: number): void => {
+    const round = this.#rounds.get(agent)
+    const permit = round?.eventWaitPause
+    if (round === undefined || permit === undefined || permit.materialized || permit.goalId !== goalId || permit.revision !== revision) {
+      throw new Error('assistant-goals: native event wait pause is unavailable')
+    }
+    this.#assertRound(round)
+    permit.materialized = true
+  }
+
+  hasAcceptedPausedEventWait = (agent: Agent | undefined): boolean => {
+    if (agent === undefined) return false
+    const round = this.#rounds.get(agent)
+    const permit = round?.eventWaitPause
+    if (round === undefined || permit?.materialized !== true) return false
+    try { this.#assertRound(round); return true } catch { return false }
+  }
+
   #isGoalTurn(agent: Agent, turn: number): boolean {
     const events = agent.session.snapshotEvents()
     const start = events.findLast(event => event.type === 'turn/start')
@@ -183,6 +226,7 @@ export class GoalExecutionRuntime {
     const existing = this.#rounds.get(agent)
     if (existing !== undefined) {
       if (existing.turn === turn) {
+        if (existing.eventWaitPause !== undefined) throw new Error('assistant-goals: paused event wait concludes this turn')
         if (existing.finishing) throw new Error('assistant-goals: round has already ended')
         this.#assertRound(existing)
         return
@@ -248,13 +292,17 @@ export class GoalExecutionRuntime {
     const terminalTransition = terminal && record.native.revision === round.run.intent.task.goal.nativeRevision + 1
       && (record.native.phase === 'complete'
         || (record.native.phase === 'blocked' && record.native.roundsStarted === round.run.intent.admission.maxGoalRounds))
+    const eventWaitPause = round.eventWaitPause
+    const pausedForEventWait = eventWaitPause !== undefined && eventWaitPause.goalId === record.id
+      && record.native.revision === eventWaitPause.revision && record.native.phase === 'paused'
+      && (!terminal || eventWaitPause.materialized)
     if (acceptanceDigest(scope) !== acceptanceDigest(round.run.intent.scope)
       || record.id !== round.run.intent.task.goal.id || record.definition.version !== round.run.intent.task.goal.definitionVersion
       || record.definition.digest !== round.run.intent.task.goal.definitionDigest
       || record.native.goalId !== round.run.intent.task.goal.nativeGoalId
       || record.native.sessionId !== round.run.intent.task.goal.sessionId
       || record.native.maxGoalRounds !== round.run.intent.admission.maxGoalRounds
-      || !(exactRevision && record.native.phase === 'active' || terminalTransition)) throw new Error('assistant-goals: goal definition or authority changed')
+      || !(exactRevision && record.native.phase === 'active' || terminalTransition || pausedForEventWait)) throw new Error('assistant-goals: goal definition or authority changed')
   }
 
   #cancel(round: ActiveRound): void {

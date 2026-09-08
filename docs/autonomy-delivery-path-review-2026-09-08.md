@@ -83,3 +83,12 @@ pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs
 另一个需随真实事件场景补齐的入口是来源 automation：EventTriggers 目标必须真实存在且 active，原事件测试使用了明确的测试观察执行器。生产接入应复用现有 Host executor 和调度预算提供无模型的来源观察能力；当前不存在的入口不能被测试替身掩盖。上述要求均保留在完整仓库维护验收中。
 
 后续实施还须处理三个已有约束：原生目标回合的等待只能对准确已准入 run 开放受限 pause，不能直接移除 owner 检查；步骤回执持久化后需要一个仅用于重新核验的通知信号，不能挪用 Evaluation 的唯一回执消费者；现有无认证、固定对象的 `target-readback` 不足以独立验收私有 GitHub CI/评审，需认证且绑定实际提交的新鲜回读，截断结果必须保持 unknown。中间步骤交付应单独显式授权，旧 `verifiedDelivery` 的整目标验收要求保持不变；所有期限与预算须覆盖多次等待及最终验收。
+
+
+### 中间交付与原生等待的接线结果
+
+显式 `repositoryDelivery.acceptance: goal-step` 已经贯通正式配置、持久授权、模型授权发现和后台交付；省略时仍要求整体验收。新的 step artifact Host API 只证明准确已结束且 quiescent 的源步骤、当前 owner 与逐文件验收，不声称整个目标完成。Verifier 回执持久化后触发重新核验，启动时等待服务接通；暂时缺少验收读回不会提前把合法交付写成失败。
+
+原生 admitted round 的 `goal_wait_event` 已接通受限暂停：没有人类回合也可在准确 run/revision 与已有权限下保存等待，成功才 conclude；存储失败记录 unknown，暂停后不能执行同批后续工具或继续模型请求。新增真实 AgentLoop/goal-round-driver/JSONL 测试覆盖这三个行为，Delivery、Policy、事件来源及模型仍是明确的测试替身。定向测试另证明 active 捕获交付意图后，原目标 paused、整体验收未达成时可按显式授权提交，并抑制重复执行。
+
+下一步仍是同一仓库维护主线：把正式事件来源和认证的 CI/评审回读接入原目标，最终成功绑定实际提交 head 的新鲜结果。当前 WebOwner 配置只生成本地隔离产物验收；既有无认证固定对象 `target-readback` 不能冒充私有 GitHub 验收。上述接线不计为完整仓库维护或完整成长链完成，18 项范围保持不变。

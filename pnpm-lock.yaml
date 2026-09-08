@@ -562,6 +562,9 @@ importers:
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy
+      '@dsh-enhanced/assistant-verifier':
+        specifier: workspace:*
+        version: link:../assistant-verifier
       '@dsh-enhanced/credentials-keychain':
         specifier: workspace:*
         version: link:../credentials-keychain

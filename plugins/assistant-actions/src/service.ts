@@ -76,6 +76,7 @@ export class AssistantActionsService extends Service {
           if (!this.#allows(grant, identity, { grantId: grant!.id, operation: 'inspect', idempotencyKey: 'discovery', kind: 'repository' })) return []
           return [{ grantId: grant!.id, repository: grant!.repository, branch: grant!.branch, paths: grant!.paths,
             expiresAt: grant!.expiresAt, maxActions: grant!.maxActions, verifiedDelivery: !!grant!.verifiedDelivery,
+            ...(grant!.verifiedDelivery ? { acceptance: grant!.verifiedDelivery.acceptance ?? 'goal-outcome' } : {}),
             ...(grant!.repoWorkflow ? { workflow: grant!.repoWorkflow } : {}) }]
         } catch { return [] }
       })
@@ -102,7 +103,7 @@ export class AssistantActionsService extends Service {
       ]) { runtime.tools.register(definition); runtime.assistantPolicy.registerPreauthorizedTool(runtime, definition, execution => this.#preauthorizedWorkflow(execution)) }
       if (config.grants.some(grant => grant.verifiedDelivery)) {
         const output = { schema: { type: 'object' as const, additionalProperties: false as const, properties: { result: { type: 'string' as const, required: true as const } } }, render: (_args: unknown, value: { result: string }) => [{ type: 'text' as const, text: value.result }] }
-        const deliver = defineTool({ name: 'action_github_deliver', description: 'During the current native artifact goal round, register a finite GitHub delivery intent. Export all listed paths with isolation_run. Host submits the exact independently accepted artifacts after step and whole-goal verification; this call only queues intent. Never supply file content. Optional pullRequest opens the grant-fixed branch-to-base PR after the commit. Query action_github_delivery_status for the actual result; unknown must not be resent.',
+        const deliver = defineTool({ name: 'action_github_deliver', description: 'During the current native artifact goal round, register a finite GitHub delivery intent. Export all listed paths with isolation_run. Host submits exact independently accepted artifacts after the grant acceptance mode: goal-outcome requires step and whole-goal verification (default); goal-step allows intermediate delivery after step verification while the original goal waits. This call only queues intent and never proves whole-goal completion. Never supply file content. Optional pullRequest opens the grant-fixed branch-to-base PR after the commit. Query action_github_delivery_status for the actual result; unknown must not be resent.',
           parameters: { grantId: { type: 'string', required: true }, idempotencyKey: { type: 'string', required: true }, expectedHeadOid: { type: 'string', required: true }, headline: { type: 'string', required: true }, paths: { type: 'array', required: true, items: { type: 'string' } }, pullRequest: { type: 'object', additionalProperties: false, properties: { title: { type: 'string', required: true }, body: { type: 'string', required: true } } } }, output,
           execute: async (args, execution) => ({ result: JSON.stringify(this.prepareVerifiedDelivery(execution.agent, args)) }),
         })
@@ -153,7 +154,7 @@ export class AssistantActionsService extends Service {
     const security: DeliverySecurity = { principalId: owner.principalId, identity, sessionId: String(agent!.session.id),
       goalId: current.goalId, runId: current.goalExecutionRunId, definitionDigest: current.definition.digest, definitionVersion: current.definition.version,
       grantId: grant.id, grantRevision: grant.revision, ownerRouteId: grant.verifiedDelivery.ownerRouteId, budgetId: grant.verifiedDelivery.budgetId,
-      expiresAt: grant.expiresAt, routeReceipt }
+      expiresAt: grant.expiresAt, routeReceipt, ...(grant.verifiedDelivery.acceptance ? { acceptance: grant.verifiedDelivery.acceptance } : {}) }
     this.#deliveryIdentity(security)
     return security
   }
@@ -166,7 +167,7 @@ export class AssistantActionsService extends Service {
     if (!this.#active || !this.#ledger.hasController(this.#authority)) throw new Error('assistant-actions: controller unavailable')
     const grant = this.#ledger.grant(security.grantId)
     if (!grant?.verifiedDelivery || grant.revision !== security.grantRevision || grant.expiresAt <= Date.now()
-      || Date.now() >= security.expiresAt) throw new Error('assistant-actions: delivery grant ended')
+      || Date.now() >= security.expiresAt || (grant.verifiedDelivery.acceptance ?? 'goal-outcome') !== (security.acceptance ?? 'goal-outcome')) throw new Error('assistant-actions: delivery grant ended')
     const route = this.ctx.get('assistantDelivery')?.validateOwnerRoute({ authorityId: security.ownerRouteId, principalId: security.principalId,
       workspace: security.identity.workspace, agentPreset: security.identity.agentPreset })
     if (digest(route) !== digest(security.routeReceipt) || this.ctx.get('assistantPolicy')?.evaluate(this.#deliveryPolicy(security)).effect !== 'allow') throw new Error('assistant-actions: delivery authority changed')
@@ -180,8 +181,20 @@ export class AssistantActionsService extends Service {
     const input = { ownerRouteId: security.ownerRouteId, principalId: security.principalId, workspace: security.identity.workspace,
       preset: security.identity.agentPreset, sessionId: security.sessionId, goalId: security.goalId }
     const evidence = goals.inspectOwnerGoalExecution(input)
+    const intermediate = security.acceptance === 'goal-step'
     if (evidence.storedGoal.definition.digest !== security.definitionDigest || evidence.storedGoal.definition.version !== security.definitionVersion
-      || !['active', 'complete'].includes(evidence.storedGoal.nativeAtLastObservation.phase)) throw new Error('assistant-actions: delivery goal changed')
+      || !(intermediate ? ['active', 'paused', 'complete'] : ['active', 'complete']).includes(evidence.storedGoal.nativeAtLastObservation.phase)) throw new Error('assistant-actions: delivery goal changed')
+    if (intermediate) {
+      if (typeof goals.inspectOwnerAcceptedStepArtifacts !== 'function') throw new Error('assistant-actions: upgrade Goals for accepted step delivery')
+      const run = evidence.executionRuns.find(item => item.intent.runId === security.runId)
+      if (!run?.acceptance) throw new Error('assistant-actions: delivery step missing')
+      if (run.execution !== undefined && (run.execution.status !== 'succeeded' || !run.execution.quiescent)) throw new Error('assistant-actions: delivery step execution invalid')
+      const step = evidence.acceptedTasks.find(item => item.contractId === run.acceptance!.contractId)
+      if (run.execution === undefined || step === undefined || step.state === 'unavailable' || step.state === 'pending' || step?.state === 'verifying' || step?.state === 'awaiting-execution') return undefined
+      const snapshot = goals.inspectOwnerAcceptedStepArtifacts({ ...input, runId: security.runId, paths: intent.request.paths })
+      this.#deliveryIdentity(security)
+      return snapshot
+    }
     if (evidence.outcome?.status !== 'achieved') {
       if (evidence.storedGoal.nativeAtLastObservation.phase === 'complete') throw new Error('assistant-actions: current acceptance missing')
       return undefined

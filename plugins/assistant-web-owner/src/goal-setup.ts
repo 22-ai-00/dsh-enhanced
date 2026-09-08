@@ -43,7 +43,7 @@ export async function listGoalAdmissionSessions(input: WebOwnerSetupInput, effec
 }
 
 export async function configureGoalAdmission(input: WebOwnerSetupInput, effectiveSource: string, taskPath: string, sessionId?: string,
-  readEffectiveSource?: () => Promise<string>): Promise<{ path: string; admissionId: string; sessionId: string; repositoryDelivery?: { repository: string; branch: string; paths: string[] } }> {
+  readEffectiveSource?: () => Promise<string>): Promise<{ path: string; admissionId: string; sessionId: string; repositoryDelivery?: { repository: string; branch: string; paths: string[]; acceptance: 'goal-outcome' | 'goal-step' } }> {
   const inspectActiveWebOwnerBindingLocally = Delivery.inspectActiveWebOwnerBindingLocally
   if (typeof inspectActiveWebOwnerBindingLocally !== 'function') fail('upgrade assistant-delivery with the matching autonomy bundle set; readonly owner snapshot API is unavailable')
   if (input.isolation) fail('initial isolation setup and goal setup are separate operations')

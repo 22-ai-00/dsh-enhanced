@@ -221,7 +221,7 @@ export async function runWebOwnerSetup(argv = process.argv.slice(2)): Promise<vo
   if (goalAdmission !== undefined) {
     const { configureGoalAdmission } = await import('./goal-setup.js')
     const result = await configureGoalAdmission(input, effective, goalAdmission, sessionId, readEffectiveSource)
-    if (result.repositoryDelivery) process.stdout.write(`Repository: ${result.repositoryDelivery.repository}; branch: ${result.repositoryDelivery.branch}. Authorized paths: ${result.repositoryDelivery.paths.join(', ')}. Delivery requires independent acceptance. Credential availability and remote GitHub access have not been tested.\n`)
+    if (result.repositoryDelivery) process.stdout.write(`Repository: ${result.repositoryDelivery.repository}; branch: ${result.repositoryDelivery.branch}. Authorized paths: ${result.repositoryDelivery.paths.join(', ')}. Independent acceptance: ${result.repositoryDelivery.acceptance}. Credential availability and remote GitHub access have not been tested.\n`)
     process.stdout.write(`Goal configuration written: ${result.path}\nAdmission: ${result.admissionId}; Session: ${result.sessionId}. Existing authority and budget are preserved. Restart the target Host. v2 uses the already configured exact provider/model route; v1 retains deepseek-goal-metered. Model connectivity and runtime admission have not been tested.\n`)
     return
   }

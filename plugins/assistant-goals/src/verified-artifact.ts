@@ -71,13 +71,13 @@ function artifactEvidence(receipt: ReturnType<typeof validateTaskVerificationRec
     && result.evidence.some(item => item.kind === 'isolated-artifact' && item.ref === artifact.jobId && item.digest === artifact.sha256)
 }
 
-/** Builds a delivery-safe artifact snapshot from two independently read owner snapshots. */
-export function buildOwnerVerifiedArtifacts(first: unknown, last: unknown, input: OwnerVerifiedArtifactsInput, isolation: Isolation, now = Date.now()) {
+function acceptedStep(first: unknown, last: unknown, input: OwnerVerifiedArtifactsInput, now: number, phases: readonly string[]) {
   const before = first as Snapshot; const after = last as Snapshot
   if (!before || !after || !same(before.ownerRoute, after.ownerRoute) || !same(before.storedGoal, after.storedGoal) || !same(before.executionRuns, after.executionRuns)
     || !same(before.outcomeAssessments, after.outcomeAssessments) || !same(before.acceptedTasks, after.acceptedTasks)) failed()
   const goal = before.storedGoal
-  if (goal.id !== input.goalId || goal.nativeAtLastObservation.sessionId !== input.sessionId || !['active', 'complete'].includes(goal.nativeAtLastObservation.phase)) failed()
+  if (goal.id !== input.goalId || goal.nativeAtLastObservation.sessionId !== input.sessionId || !phases.includes(goal.nativeAtLastObservation.phase)
+    || goal.scope.principalId !== input.principalId || goal.scope.workspace !== input.workspace || goal.scope.preset !== input.preset) failed()
   const run = (before.executionRuns as readonly any[]).find(entry => entry?.intent?.runId === input.runId)
   if (!run || run.intent?.task?.kind !== 'goal-step' || run.intent.task.ref !== input.runId || run.intent.task.goal?.id !== goal.id
     || run.intent.task.goal.definitionVersion !== goal.definition.version || run.intent.task.goal.definitionDigest !== goal.definition.digest
@@ -87,6 +87,12 @@ export function buildOwnerVerifiedArtifacts(first: unknown, last: unknown, input
   if (step.contract.digest !== run.acceptance.contractDigest || !same(step.contract.task, run.intent.task)
     || step.contract.scope.workspace !== goal.scope.workspace || step.contract.scope.preset !== goal.scope.preset
     || step.contract.owner.principalRecordId !== goal.scope.principalRecordId || step.contract.owner.principalVersion !== goal.scope.principalVersion) failed()
+  return { before, goal, step }
+}
+
+/** Builds a delivery-safe artifact snapshot from two independently read owner snapshots. */
+export function buildOwnerVerifiedArtifacts(first: unknown, last: unknown, input: OwnerVerifiedArtifactsInput, isolation: Isolation, now = Date.now()) {
+  const { before, goal, step } = acceptedStep(first, last, input, now, ['active', 'complete'])
   const assessment = before.outcomeAssessments[0]
   if (assessment === undefined || assessment.triggerRunId !== input.runId || assessment.execution === null) return failed()
   const outcomeContract = validateTaskAcceptanceContract(assessment.contract)
@@ -96,21 +102,35 @@ export function buildOwnerVerifiedArtifacts(first: unknown, last: unknown, input
   const outcome = accepted(before, outcomeContract.id, 'goal-outcome', now)
   if (!same(outcome.contract, outcomeContract) || outcome.contract.scope.workspace !== goal.scope.workspace || outcome.contract.scope.preset !== goal.scope.preset
     || outcome.contract.owner.principalRecordId !== goal.scope.principalRecordId || outcome.contract.owner.principalVersion !== goal.scope.principalVersion) failed()
-  const files: Artifact[] = []; let bytes = 0
-  for (const path of input.paths) {
-    const stepCriteria = step.contract.criteria.filter(item => item.kind === 'isolated-process-behavior' && item.artifactPath === path)
-    const outcomeCriteria = outcome.contract.criteria.filter(item => item.kind === 'isolated-process-behavior' && item.artifactPath === path)
-    if (stepCriteria.length === 0 || outcomeCriteria.length === 0) failed()
-    const raw = isolation.readAcceptedArtifact(step.contract, path) as Partial<Artifact>
-    if (!raw || raw.path !== path || typeof raw.content !== 'string' || typeof raw.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.sha256) || typeof raw.jobId !== 'string' || raw.jobId.length === 0) failed()
-    const artifact: Artifact = { path, content: raw.content as string, sha256: raw.sha256 as string, jobId: raw.jobId as string }
-    if (createHash('sha256').update(artifact.content).digest('hex') !== artifact.sha256 || !stepCriteria.every(item => artifactEvidence(step.receipt, item.id, artifact))
-      || !outcomeCriteria.every(item => artifactEvidence(outcome.receipt, item.id, artifact))) failed()
-    bytes += Buffer.byteLength(artifact.content, 'utf8'); if (bytes > 1_048_576) failed()
-    files.push(artifact)
-  }
+  const files = readArtifacts(input, isolation, step, outcome)
   return freeze({ protocol: 'assistant-goals/verified-artifacts/v1' as const, scope: goal.scope,
     goal: { id: goal.id, definition: goal.definition, sessionId: goal.nativeAtLastObservation.sessionId, nativeGoalId: goal.nativeAtLastObservation.goalId }, runId: input.runId,
     acceptance: { stepContractId: step.contract.id, stepContractDigest: step.contract.digest, outcomeContractId: outcome.contract.id, outcomeContractDigest: outcome.contract.digest,
       stepReceiptDigest: step.receipt.digest, outcomeReceiptDigest: outcome.receipt.digest, validUntil: Math.min(step.receipt.validUntil, outcome.receipt.validUntil) }, files })
+}
+
+function readArtifacts(input: OwnerVerifiedArtifactsInput, isolation: Isolation, step: ReturnType<typeof accepted>, outcome?: ReturnType<typeof accepted>): Artifact[] {
+  const files: Artifact[] = []; let bytes = 0
+  for (const path of input.paths) {
+    const stepCriteria = step.contract.criteria.filter(item => item.kind === 'isolated-process-behavior' && item.artifactPath === path)
+    const outcomeCriteria = outcome?.contract.criteria.filter(item => item.kind === 'isolated-process-behavior' && item.artifactPath === path)
+    if (stepCriteria.length === 0 || outcomeCriteria?.length === 0) failed()
+    const raw = isolation.readAcceptedArtifact(step.contract, path) as Partial<Artifact>
+    if (!raw || raw.path !== path || typeof raw.content !== 'string' || typeof raw.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(raw.sha256) || typeof raw.jobId !== 'string' || raw.jobId.length === 0) failed()
+    const artifact: Artifact = { path, content: raw.content as string, sha256: raw.sha256 as string, jobId: raw.jobId as string }
+    if (createHash('sha256').update(artifact.content).digest('hex') !== artifact.sha256 || !stepCriteria.every(item => artifactEvidence(step.receipt, item.id, artifact))
+      || outcome !== undefined && !outcomeCriteria!.every(item => artifactEvidence(outcome.receipt, item.id, artifact))) failed()
+    bytes += Buffer.byteLength(artifact.content, 'utf8'); if (bytes > 1_048_576) failed()
+    files.push(artifact)
+  }
+  return files
+}
+
+/** Step acceptance permits explicitly authorized intermediate delivery, not whole-goal completion. */
+export function buildOwnerAcceptedStepArtifacts(first: unknown, last: unknown, input: OwnerVerifiedArtifactsInput, isolation: Isolation, now = Date.now()) {
+  const { goal, step } = acceptedStep(first, last, input, now, ['active', 'paused', 'complete'])
+  const files = readArtifacts(input, isolation, step)
+  return freeze({ protocol: 'assistant-goals/accepted-step-artifacts/v1' as const, scope: goal.scope,
+    goal: { id: goal.id, definition: goal.definition, sessionId: goal.nativeAtLastObservation.sessionId, nativeGoalId: goal.nativeAtLastObservation.goalId }, runId: input.runId,
+    acceptance: { stepContractId: step.contract.id, stepContractDigest: step.contract.digest, stepReceiptDigest: step.receipt.digest, validUntil: step.receipt.validUntil }, files })
 }

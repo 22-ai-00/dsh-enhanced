@@ -29,6 +29,10 @@ export interface AcceptanceProfileInspection {
 
 declare module '@deepseek-ai/cordis' {
   interface Context { assistantVerifier: AssistantVerifierService }
+  interface Events {
+    /** Post-commit nudge only; consumers must reread current evidence and authority. */
+    'assistant-verifier/receipt'(notice: Readonly<{ contractId: string; contractDigest: string; receiptId: string; receiptDigest: string; taskKind: TaskAcceptanceContract['task']['kind'] }>): void
+  }
 }
 
 const producerNames = ['assistantAutomations', 'assistantDelivery', 'assistantGoals'] as const
@@ -494,6 +498,10 @@ export class AssistantVerifierService extends Service<Config> {
       this.#store.finish({ contractId: contract.id, workerId: this.#workerId, fencingToken: job.fencingToken,
         now, receipt, reason: receipt?.objectiveStatus === 'achieved' ? 'verified' : receipt?.objectiveStatus ?? 'contract-expired',
         ...(execution.quiescent && (receipt === null || receipt.objectiveStatus === 'unknown') ? { retryAt: now + 5_000 * job.attempt } : {}) })
+      if (receipt !== null) {
+        try { this.ctx.emit('assistant-verifier/receipt', Object.freeze({ contractId: contract.id, contractDigest: contract.digest, receiptId: receipt.id, receiptDigest: receipt.digest, taskKind: contract.task.kind })) }
+        catch { /* A best-effort nudge must not interrupt the durable Evaluation outbox. */ }
+      }
     }
     let pendingReceipts = this.#store.pendingReceipts(100, this.#outboxCursor)
     if (pendingReceipts.length === 0 && this.#outboxCursor !== '') {

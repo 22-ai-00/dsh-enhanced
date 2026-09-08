@@ -109,3 +109,6 @@ Evaluation 的 `./benchmark/deepseek` 通过可选 Host peer 使用同批 `assis
 Event Triggers 的版本化来源依赖同批 Automations 新增的纯 `./external-event` 子入口，peer 下界为 `>=0.1.24 <0.2.0`，两包须同步安装；旧 Automations 不提供该导出。Automations schema 15 与 Event schema 3 保留旧记录的空来源，不将旧 pending 自动补证或投到现配置目标。升级后应核对 quarantine；事件来源元数据不是目标唤醒权限，原有 Policy 准入继续生效。
 
 - Skills comparison uses `dsh-tool-fs`, `dsh-fs-local` and native ToolRuntime at `0.1.2-rc.1` in a private Context, with explicit path containment and no inherited model tools. LocalFileSystem `cwd` alone is not containment. Evaluation `/benchmark` and Isolation `IsolatedVerifierRunner` are optional Host peer APIs loaded for configured comparisons; the native filesystem libraries travel as dependencies for the private replay runtime. Upgrade checks cover actual native edit/write behavior, artifact execution in Docker, unknown no-replay, profile budgets and cancellation.
+
+
+中间步骤交付需同批 Goals 的 `inspectOwnerAcceptedStepArtifacts`、Verifier 的持久回执通知和 Actions 的显式 `verifiedDelivery.acceptance` 支持。Actions 将 Verifier 声明为可选 Host peer，仅验收后交付运行时等待该服务；普通直接动作不因此自动启用 Verifier。旧 grant 省略模式仍为整体验收，已保存 intent 也按旧模式解释；同 revision 不允许更改授权模式。该变更不改变 DSH/Cordis 基线或创建新的调度器，升级应成套安装。

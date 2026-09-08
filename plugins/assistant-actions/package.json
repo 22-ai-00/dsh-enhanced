@@ -57,7 +57,8 @@
     "@dsh-enhanced/credentials-keychain": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-automations": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0",
-    "@deepseek-ai/dsh-goal": ">=0.1.2-rc.1 <0.2.0"
+    "@deepseek-ai/dsh-goal": ">=0.1.2-rc.1 <0.2.0",
+    "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/cordis": {
@@ -86,6 +87,9 @@
     },
     "@deepseek-ai/dsh-goal": {
       "optional": true
+    },
+    "@dsh-enhanced/assistant-verifier": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -106,7 +110,8 @@
     "@dsh-enhanced/assistant-isolation": "workspace:*",
     "@dsh-enhanced/assistant-automations": "workspace:*",
     "@dsh-enhanced/assistant-goals": "workspace:*",
-    "@deepseek-ai/dsh-goal": "catalog:"
+    "@deepseek-ai/dsh-goal": "catalog:",
+    "@dsh-enhanced/assistant-verifier": "workspace:*"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:"

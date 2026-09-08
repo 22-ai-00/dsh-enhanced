@@ -1,0 +1,176 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "fc60b2e1fc0b01b97f291f1fac2c79a9befc8b21",
+  "status": "accepted-step-delivery-and-native-event-wait-validated",
+  "completeWorkPackage": false,
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "path": "/tmp/dsh-intermediate-delivery-check.log",
+    "sha256": "4d33099d36e8e9eab4019baf852fc3e66a946df528c2d9f8396bdca27616165f",
+    "files": 335,
+    "tests": 4051,
+    "packs": 33,
+    "skipped": false
+  },
+  "targeted": [
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-goals exec vitest run tests/service.spec.ts tests/event-wait.spec.ts tests/verified-artifact.spec.ts",
+      "path": "/tmp/dsh-native-wait-final.log",
+      "sha256": "b4cb07db37a3968858f523c16a0bb18d305af97127391db37e409e124446909d",
+      "exitCode": 0
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-actions exec vitest run tests/verified-delivery-service.spec.ts tests/verified-delivery.spec.ts tests/ledger.spec.ts",
+      "path": "/tmp/dsh-step-actions-final.log",
+      "sha256": "514a888e3e49d08f3610939c1f520f24a37cf226159c9c6ca194aa82bd0be62f",
+      "exitCode": 0
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-verifier exec vitest run tests/service.spec.ts",
+      "path": "/tmp/dsh-step-receipt-tests-final.log",
+      "sha256": "786542243e73259695e8f87cee751e64443522eb34d9542295c9fdca35807263",
+      "exitCode": 0
+    },
+    {
+      "command": "pnpm --filter @dsh-enhanced/assistant-web-owner exec vitest run tests/goal-admission.spec.ts",
+      "path": "/tmp/dsh-step-admission-final.log",
+      "sha256": "92df2f12dc8ab99179024ccdeefcf6f87edb3ee6d95a78978fdbe572112db4d1",
+      "exitCode": 0
+    }
+  ],
+  "verifiedBehaviors": [
+    "Explicit goal-step acceptance survives ActionLedger reopen and same-revision changes are rejected; omitted mode retains whole-goal acceptance.",
+    "Active admitted run captures intent; after source execution ends successfully and quiescently, paused original Goal may deliver independently accepted step bytes while outcome is not-achieved.",
+    "Receipt nudges are emitted after durable finish, preserve the Evaluation outbox, and only trigger authoritative rereads. Unavailable/pending step evidence waits; lost nudges reconcile at restart after Verifier dependency is ready.",
+    "Actual native AgentLoop, goal-round-driver, ToolRuntime, JSONL and Verifier exercise a no-owner-turn wait: successful pause and wait storage concludes the turn and settles succeeded/quiescent; storage failure leaves no wait and unknown/non-quiescent execution; a trailing tool in the same batch does not execute.",
+    "Step artifact proof fences owner/route/definition/run/receipt/execution/path/job digest and independently rehashes bytes; source step acceptance does not claim whole-goal completion."
+  ],
+  "limitations": [
+    "Native integration uses a deterministic model adapter and explicit Delivery, Policy and event-source unit seams. No new real-model browser run in this batch.",
+    "Actions integration uses GitHub transport and Goals evidence seams, with separate tests of the authoritative Goals artifact builder. This is not a single real-model PR/CI end-to-end proof.",
+    "No real GitHub credential, remote PR, authenticated CI/review outcome or production webhook ingress has been validated.",
+    "WebOwner still generates local isolated-artifact criteria only; step mode does not add remote acceptance conditions.",
+    "18 work packages remain 3 verified, 12 implementing, 3 todo; full scope and remaining growth-chain work are unchanged."
+  ],
+  "review": {
+    "agent": "post_acceptance_lifecycle",
+    "status": "PASS",
+    "kind": "independent read-only final source review"
+  },
+  "debugging": [
+    {
+      "path": "/tmp/dsh-native-wait-root-debug.log",
+      "sha256": "c6c45337bf7318e6f24eefff081c42530b401507d4a6b5d9dba6f9443a77c51b",
+      "result": "failed: wait could not be materialized"
+    },
+    {
+      "path": "/tmp/dsh-native-wait-cause.log",
+      "sha256": "8c7dd95925eae6a63f2f8137af987bafcd9064322e66f0233b7470477f594266",
+      "result": "wake-store invalid-input from test attestation missing binding fields; fixture corrected without relaxing the production validator"
+    }
+  ],
+  "sources": [
+    {
+      "path": "plugins/assistant-actions/README.md",
+      "sha256": "a95d15aa3616620488d7c699ef508e5b43652b1d0fbc8ffe6562897b55ca8af5"
+    },
+    {
+      "path": "plugins/assistant-actions/package.json",
+      "sha256": "92424324fe95b88deec72f0011b0f4fcb45e14b06cd58fbd2bdb3183eb5ea4f8"
+    },
+    {
+      "path": "plugins/assistant-actions/src/config.ts",
+      "sha256": "77b61b77849b1d6f78228586ffe1ad7152e4b6583083cfa7fda7d31f1b91a33f"
+    },
+    {
+      "path": "plugins/assistant-actions/src/ledger.ts",
+      "sha256": "f762e5108caea4c80c3bf7824185aa230f3fadc233c67b7b90b8e8c8203d0a08"
+    },
+    {
+      "path": "plugins/assistant-actions/src/service.ts",
+      "sha256": "3b33ef559c1a7bf1ffb69d103e167c14024e3e70a1bc175214eb67e705a8dadd"
+    },
+    {
+      "path": "plugins/assistant-actions/src/types.ts",
+      "sha256": "388e32f84d1075a192d63db83509bbdc620cc089963995ec72a44b8d4fc97e51"
+    },
+    {
+      "path": "plugins/assistant-actions/src/verified-delivery.ts",
+      "sha256": "8d2c67841e47129858ea3b391b918c316d3c34665ae1877f001a2f10d3032397"
+    },
+    {
+      "path": "plugins/assistant-actions/tests/ledger.spec.ts",
+      "sha256": "3078ec4d61c83b8ca14c694f77b47bfadbe0f398f78c90bfbacd48503b8ac5ab"
+    },
+    {
+      "path": "plugins/assistant-actions/tests/verified-delivery-service.spec.ts",
+      "sha256": "02c3549ec6807b5f60e86cb44514f1901d2c4615f3a6c0d2f5f7b0be179de55e"
+    },
+    {
+      "path": "plugins/assistant-actions/tests/verified-delivery.spec.ts",
+      "sha256": "19aba95dd94f9a957cf1d743480d4ad08ba8fbce642bcad89fc00e76fc28c42f"
+    },
+    {
+      "path": "plugins/assistant-goals/README.md",
+      "sha256": "28580f023a50296692cf1905667aa870f61bd51d1ea9d82179d96ee9cc243cf1"
+    },
+    {
+      "path": "plugins/assistant-goals/src/execution.ts",
+      "sha256": "b34044538c99f295d7b2b5eacb232c516631cd16e824b11e12eec75af891043c"
+    },
+    {
+      "path": "plugins/assistant-goals/src/service.ts",
+      "sha256": "a7837a3dfcd4401d8679dd29a4eeda1b0661612e815effde55a6981c9082e309"
+    },
+    {
+      "path": "plugins/assistant-goals/src/tools.ts",
+      "sha256": "2d21c044ba28229ba9259b8421b9fda956094a2dcdb05ecaf719c949d4ec8fa7"
+    },
+    {
+      "path": "plugins/assistant-goals/src/verified-artifact.ts",
+      "sha256": "99a4bbe951502f67470720841cd35446aa8c196df3fbba021acf4d3fa8e3bf8b"
+    },
+    {
+      "path": "plugins/assistant-goals/tests/service.spec.ts",
+      "sha256": "9698728d9dc3d04fdc7d2af1b314d7283fa843fa56f34d00b523da7a5a68c5f5"
+    },
+    {
+      "path": "plugins/assistant-goals/tests/verified-artifact.spec.ts",
+      "sha256": "26b853e072d873fb7b0bb748e188d839091bbf8751794749409aa96f4eb967b6"
+    },
+    {
+      "path": "plugins/assistant-verifier/src/service.ts",
+      "sha256": "2a28943cc2f84048aed22b2a120bda09012891180e14815238106d7ce4e7987e"
+    },
+    {
+      "path": "plugins/assistant-verifier/tests/service.spec.ts",
+      "sha256": "ac6bc4851a523361fcf649489c1d1aa35dfbb34da1304e839723346655ed67c6"
+    },
+    {
+      "path": "plugins/assistant-web-owner/README.md",
+      "sha256": "47b40f07d4d30e974b003693eee702b610421827b907b22f7190c67422ff7045"
+    },
+    {
+      "path": "plugins/assistant-web-owner/src/goal-admission.ts",
+      "sha256": "7d3070bac7e34463f7406da382033f7103b006d46d43d380dd0e5a79208f5158"
+    },
+    {
+      "path": "plugins/assistant-web-owner/src/goal-setup.ts",
+      "sha256": "9269861774f8bafb7b91b89e221ffbe4f4c31aab094e07884f9b114077ef38ea"
+    },
+    {
+      "path": "plugins/assistant-web-owner/src/setup.ts",
+      "sha256": "92c9f3767fee8a2239edc26f2074602fb74dff6f8a0eef6d04b64efc63233097"
+    },
+    {
+      "path": "plugins/assistant-web-owner/tests/goal-admission.spec.ts",
+      "sha256": "f975d95b695e3ea00d632f0c943305ac381d8056e11bb5de24d3a5d28042265a"
+    },
+    {
+      "path": "pnpm-lock.yaml",
+      "sha256": "f40c6f36dd453cace844b47537ebaf30fe6fda59d90c1fd450ccda1687920345"
+    }
+  ]
+}
