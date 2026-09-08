@@ -30,7 +30,7 @@ export interface IsolationGrantDiscovery {
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 // Keep prompt visibility and the Host execution guard on the exact same named surface.
 const isolatedScopeTools = new Set(['isolation_run', 'isolation_grants', 'goal_context', 'goal_checkpoint'])
-const preauthorizedScopedTools = new Set(['action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'])
+const preauthorizedScopedTools = new Set(['action_github_grants', 'action_github_deliver', 'action_github_delivery_status', 'action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'])
 const isolatedPromptTools = new Set([...isolatedScopeTools, ...preauthorizedScopedTools])
 const restrictedScopeSection = 'Environment capability constraint: this authenticated workspace uses isolated execution. Host filesystem and shell tools are unavailable. The user request and explicitly supplied inline files are the only starting material; do not look for a Host project, pre-existing task file, or Host path. isolation_run starts a fresh scratch workspace with no Host project mount and no network. isolation_grants can show an existing finite grant; it cannot create or extend one.'
 const controllerTtlMs = 30_000

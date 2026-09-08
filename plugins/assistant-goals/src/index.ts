@@ -4,6 +4,7 @@ import { version } from './version.js'
 export const name = 'dsh-enhanced-assistant-goals'
 export { AssistantGoalsService, Config, version }
 export type { VerifiedWorkflowSource } from './verified-workflow.js'
+export type { OwnerVerifiedArtifactsInput } from './verified-artifact.js'
 export type * from './types.js'
 export type { GoalBudgetConfig, GoalTokenBudgetConfig, GoalCallsBudgetConfig, GoalBudgetMeter, GoalBudgetFailure } from './budget.js'
 export type { GoalBudgetLimits, GoalBudgetSnapshot } from './budget-store.js'

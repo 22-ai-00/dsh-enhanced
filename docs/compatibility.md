@@ -38,6 +38,8 @@
 
 DSH 尚处于预发布阶段，插件机制可能发生破坏性变化。`pnpm-workspace.yaml` 的 catalog 和各插件 `peerDependencies` 是实际依赖范围的源；本页记录人工验证过的 DSH 基线。
 
+Actions 的可选 `verifiedDelivery` 模式要求同一发行集合中的 Goals 与 Automations Host 服务，以及 `dsh-goal@0.1.2-rc.1` 的目标完成事件。它消费 Goals 的 Host-only 已验收产物快照，再通过已有 Automations Host executor 执行；声明可选 peer 不会自动启用 bundle。新增交付意图数据库与旧 Actions 动作账本共同保留重启去重；启用此模式的 grant 不能交给不识别该配置的旧 Actions writer，升级时应停止旧 Host。
+
 升级基线时：
 
 1. 阅读上游插件打包、profile、Cordis 生命周期和相关 subsystem 文档。

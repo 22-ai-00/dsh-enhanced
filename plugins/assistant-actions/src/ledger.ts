@@ -96,13 +96,14 @@ function identityInput(value: unknown): ActionIdentity {
 }
 
 function grantInput(value: unknown): ActionGrant {
-  const input = object(value, ['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'repository', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes'], ['repoWorkflow'])
+  const input = object(value, ['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'repository', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes'], ['repoWorkflow', 'verifiedDelivery'])
   const identity = identityInput({ principalDigest: input.principalDigest, principalRecordId: input.principalRecordId, principalVersion: input.principalVersion, workspace: input.workspace, agentPreset: input.agentPreset })
   const paths = array(input.paths, 1_000).map(validPath)
   if (paths.length === 0 || new Set(paths).size !== paths.length) fail('invalid-input')
   const workflow = input.repoWorkflow === undefined ? undefined : object(input.repoWorkflow, ['baseBranch', 'allowBranchCreate', 'allowPullRequest'])
   if (workflow && (typeof workflow.allowBranchCreate !== 'boolean' || typeof workflow.allowPullRequest !== 'boolean')) fail('invalid-input')
-  return Object.freeze({ ...identity, id: text(input.id), revision: integer(input.revision, 1), repository: text(input.repository), branch: text(input.branch), paths, credentialHandle: text(input.credentialHandle), expiresAt: integer(input.expiresAt, 0), maxActions: integer(input.maxActions, 1, maxRecords), maxTotalBytes: integer(input.maxTotalBytes, 0), ...(workflow ? { repoWorkflow: Object.freeze({ baseBranch: text(workflow.baseBranch), allowBranchCreate: workflow.allowBranchCreate as boolean, allowPullRequest: workflow.allowPullRequest as boolean }) } : {}) })
+  const delivery = input.verifiedDelivery === undefined ? undefined : object(input.verifiedDelivery, ['ownerRouteId', 'budgetId'])
+  return Object.freeze({ ...identity, id: text(input.id), revision: integer(input.revision, 1), repository: text(input.repository), branch: text(input.branch), paths, credentialHandle: text(input.credentialHandle), expiresAt: integer(input.expiresAt, 0), maxActions: integer(input.maxActions, 1, maxRecords), maxTotalBytes: integer(input.maxTotalBytes, 0), ...(workflow ? { repoWorkflow: Object.freeze({ baseBranch: text(workflow.baseBranch), allowBranchCreate: workflow.allowBranchCreate as boolean, allowPullRequest: workflow.allowPullRequest as boolean }) } : {}), ...(delivery ? { verifiedDelivery: Object.freeze({ ownerRouteId: text(delivery.ownerRouteId, 200), budgetId: text(delivery.budgetId, 200) }) } : {}) })
 }
 
 export function normalizeWorkflow(value: unknown): WorkflowRequest {

@@ -16,6 +16,15 @@ export interface ActionGrant extends ActionIdentity {
   maxActions: number
   maxTotalBytes: number
   repoWorkflow?: { baseBranch: string; allowBranchCreate: boolean; allowPullRequest: boolean }
+  verifiedDelivery?: { ownerRouteId: string; budgetId: string }
+}
+export interface VerifiedDeliveryRequest {
+  grantId: string
+  idempotencyKey: string
+  expectedHeadOid: string
+  headline: string
+  paths: string[]
+  pullRequest?: { title: string; body: string }
 }
 export interface CommitRequest {
   grantId: string
