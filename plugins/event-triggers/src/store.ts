@@ -4,7 +4,7 @@ import { externalEventDigest, parseExternalEventEnvelope } from '@dsh-enhanced/a
 import { EventTriggerDatabaseError, openEventTriggerDatabase } from './sqlite.js'
 import type { FireWhen } from './config.js'
 
-export type EventTriggerStoreErrorCode = 'invalid-input' | 'invalid-path' | 'schema-too-new'
+export type EventTriggerStoreErrorCode = 'invalid-input' | 'invalid-path' | 'invalid-schema' | 'schema-too-new'
 export class EventTriggerStoreError extends Error {
   constructor(readonly code: EventTriggerStoreErrorCode, message: string) {
     super(message)
@@ -14,6 +14,8 @@ export class EventTriggerStoreError extends Error {
 
 export interface TriggerOutboxEvent {
   id: string
+  /** Durable, never-reused event-source cursor. */
+  sequence: number
   triggerId: string
   eventId: string
   occurredAt: number
@@ -26,6 +28,14 @@ export interface TriggerOutboxEvent {
   createdAt: number
   /** Undefined only for rows written before provenance envelopes were introduced. */
   envelope?: Readonly<{ canonical: string; digest: string }>
+}
+
+/** Internal raw source row. Provenance parsing remains at the host boundary. */
+export interface EventSourceCandidate {
+  sequence: number
+  eventId: string
+  canonical: string
+  digest: string
 }
 
 export type WebhookAcceptance =
@@ -48,6 +58,7 @@ interface StateRow {
 
 interface OutboxRow {
   id: string
+  sequence: number
   trigger_id: string
   event_id: string
   occurred_at: number
@@ -91,7 +102,7 @@ function event(row: OutboxRow): TriggerOutboxEvent {
     })
   }
   return Object.freeze({
-    id: row.id, triggerId: row.trigger_id, eventId: row.event_id, occurredAt: row.occurred_at,
+    id: row.id, sequence: row.sequence, triggerId: row.trigger_id, eventId: row.event_id, occurredAt: row.occurred_at,
     status: row.status, attempts: row.attempts,
     ...(row.delivered_at === null ? {} : { deliveredAt: row.delivered_at }),
     nextAttemptAt: row.next_attempt_at,
@@ -252,6 +263,49 @@ export class EventTriggerStore {
     `).all(this.now(), limit) as unknown as OutboxRow[]).map(event)
   }
 
+  /** Returns a bounded raw page; malformed provenance is validated by the reader. */
+  sourceCandidatesAfter(input: {
+    triggerId: string
+    afterSequence: number
+    throughSequence: number
+    deadlineAt: number
+    sourceId: string
+    kind: 'file' | 'http-json' | 'webhook'
+    version: string
+    configDigest: string
+    automationId: string
+  }, limit = 100): EventSourceCandidate[] {
+    validTime(input.afterSequence, 'afterSequence')
+    validTime(input.throughSequence, 'throughSequence')
+    validTime(input.deadlineAt, 'deadlineAt')
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
+      throw new EventTriggerStoreError('invalid-input', 'source candidate limit is invalid')
+    }
+    const rows = this.database.prepare(`
+      SELECT sequence, event_id AS eventId, envelope_canonical AS canonical, envelope_digest AS digest
+      FROM event_outbox
+      WHERE trigger_id = ? AND sequence > ? AND sequence <= ?
+        AND envelope_canonical IS NOT NULL AND envelope_digest IS NOT NULL
+        AND CASE WHEN json_valid(envelope_canonical) THEN json_extract(envelope_canonical, '$.source.id') END = ?
+        AND CASE WHEN json_valid(envelope_canonical) THEN json_extract(envelope_canonical, '$.source.kind') END = ?
+        AND CASE WHEN json_valid(envelope_canonical) THEN json_extract(envelope_canonical, '$.source.version') END = ?
+        AND CASE WHEN json_valid(envelope_canonical) THEN json_extract(envelope_canonical, '$.source.configDigest') END = ?
+        AND CASE WHEN json_valid(envelope_canonical) THEN json_extract(envelope_canonical, '$.target.automationId') END = ?
+        AND CASE WHEN json_valid(envelope_canonical) THEN json_extract(envelope_canonical, '$.event.receivedAt') END <= ?
+      ORDER BY sequence LIMIT ?
+    `).all(
+      input.triggerId, input.afterSequence, input.throughSequence, input.sourceId, input.kind, input.version,
+      input.configDigest, input.automationId, input.deadlineAt, limit,
+    ) as unknown as EventSourceCandidate[]
+    return rows
+  }
+
+  sourceHighWaterSequence(): number {
+    return (this.database.prepare(`
+      SELECT COALESCE((SELECT seq FROM sqlite_sequence WHERE name = 'event_sequence'), 0) AS sequence
+    `).get() as { sequence: number }).sequence
+  }
+
   markAttempt(id: string): void {
     this.database.prepare(`
       UPDATE event_outbox SET attempts = attempts + 1, last_attempt_at = ?
@@ -361,12 +415,17 @@ export class EventTriggerStore {
     if (envelope !== undefined) {
       validateEnvelope(envelope.canonical, envelope.digest, { triggerId, eventId, occurredAt })
     }
+    const allocation = this.database.prepare('INSERT INTO event_sequence DEFAULT VALUES').run()
+    const sequence = Number(allocation.lastInsertRowid)
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      throw new EventTriggerStoreError('invalid-input', 'event sequence allocation is invalid')
+    }
     const result = this.database.prepare(`
       INSERT OR IGNORE INTO event_outbox(
-        id, trigger_id, event_id, occurred_at, status, attempts, delivered_at, created_at,
+        id, sequence, trigger_id, event_id, occurred_at, status, attempts, delivered_at, created_at,
         next_attempt_at, last_attempt_at, last_error, envelope_canonical, envelope_digest
-      ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, ?, ?, NULL, NULL, ?, ?)
-    `).run(id, triggerId, eventId, occurredAt, this.now(), this.now(), envelope?.canonical ?? null, envelope?.digest ?? null)
+      ) VALUES (?, ?, ?, ?, ?, 'pending', 0, NULL, ?, ?, NULL, NULL, ?, ?)
+    `).run(id, sequence, triggerId, eventId, occurredAt, this.now(), this.now(), envelope?.canonical ?? null, envelope?.digest ?? null)
     if (result.changes === 0) return undefined
     return this.byEventId(eventId)
   }

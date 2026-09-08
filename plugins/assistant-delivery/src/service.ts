@@ -835,6 +835,7 @@ export class AssistantDeliveryService extends Service {
   /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
   private acceptanceRequired = false
   private readonly preferenceTurns = new WeakMap<Agent, Readonly<DeliveryPreferenceTurnAttestation>>()
+  private readonly goalWakeResults = new WeakMap<DeliveryGoalWakeInput, () => OutboxRecord>()
   private modelSelectionFlight: Promise<void> | undefined
   private presentationFlight: Promise<void> | undefined
   private workflowTraceFlight: Promise<void> | undefined
@@ -1573,6 +1574,7 @@ export class AssistantDeliveryService extends Service {
 
   /** Versioned capability: idle wake Agents remain alive through exact goal settlement. */
   goalWakeSettlementVersion = (): 1 => { this.assertActive(); return 1 }
+  goalWakeResultVersion = (): 1 => { this.assertActive(); return 1 }
 
   /** Only the live Goals service can mint this process-local wake capability. */
   async resumeScheduledGoal(input: DeliveryGoalWakeInput): Promise<DeliveryGoalWakeResult> {
@@ -1619,8 +1621,29 @@ export class AssistantDeliveryService extends Service {
       beforeResume: (agent: Agent) => { current(); input.beforeResume(agent); current() },
       settle: async (agent: Agent, signal: AbortSignal) => { current(); signal.throwIfAborted(); await input.settle(agent, signal); signal.throwIfAborted(); current() },
     }))
-    if (result.outcome === 'succeeded') current()
+    if (result.outcome === 'succeeded') {
+      current()
+      if (input.includeOutput === true && result.quiescent && result.output?.trim()) {
+        const text = result.output
+        this.goalWakeResults.set(input, () => {
+          // Re-read the exact owner, binding generation and Session at enqueue,
+          // after the caller has rechecked its Goal/source authority.
+          const target = current()
+          const key = createHash('sha256').update(JSON.stringify({ attestation: input.attestation, native: input.native })).digest('hex')
+          return this.enqueueBackground({ sourceId: 'assistant-goals-wake/v1', workspace: target.workspace,
+            bindingId: target.id, idempotencyKey: `goal-wake-result:${key}`, text, format: 'markdown' })
+        })
+      }
+    }
     return result
+  }
+
+  /** Publish only the native output captured for this still-owned wake capability. */
+  enqueueScheduledGoalResult(input: DeliveryGoalWakeInput): OutboxRecord {
+    this.assertActive()
+    const publish = this.goalWakeResults.get(input)
+    if (publish === undefined) throw new AssistantDeliveryError('policy-denied', 'scheduled goal result is unavailable')
+    return publish()
   }
 
   /** Private verifier producer generation; invalidated with this service. */

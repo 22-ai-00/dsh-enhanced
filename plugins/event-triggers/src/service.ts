@@ -28,6 +28,7 @@ import {
   type SensorObservation,
 } from './sensors.js'
 import { EventTriggerStore } from './store.js'
+import type { EventSourceReader, EventSourceSnapshot, SourceEvent } from './source.js'
 import { version } from './version.js'
 
 export type EventTriggersErrorCode =
@@ -38,6 +39,7 @@ export type EventTriggersErrorCode =
   | 'not-found'
   | 'policy-denied'
   | 'replay'
+  | 'source-changed'
   | 'timestamp'
   | 'ttl'
 
@@ -73,7 +75,7 @@ declare module '@deepseek-ai/cordis' {
   interface Context { eventTriggers: EventTriggersService }
 }
 
-export class EventTriggersService extends Service {
+export class EventTriggersService extends Service implements EventSourceReader {
   static Config = ConfigSchema
   private readonly config: NormalizedConfig
   private readonly store: EventTriggerStore
@@ -94,6 +96,7 @@ export class EventTriggersService extends Service {
   private pollCursor = 0
   private readonly inFlight = new Set<Promise<unknown>>()
   private readonly pendingObservations = new Map<string, PendingObservation>()
+  private readonly sourceChangeListeners = new Set<() => void>()
   private active = true
 
   constructor(ctx: Context, input: Config, options: EventTriggersServiceOptions = {}) {
@@ -133,6 +136,7 @@ export class EventTriggersService extends Service {
       if (this.flushTimer !== undefined) clearInterval(this.flushTimer)
       this.shutdown.abort(new EventTriggersError('disposed', 'event-triggers service is disposed'))
       await Promise.allSettled(this.inFlight)
+      this.sourceChangeListeners.clear()
       this.store.close()
     }, 'event-triggers.runtime')
   }
@@ -199,7 +203,7 @@ export class EventTriggersService extends Service {
     if (observation === undefined) return
     if (this.shutdown.signal.aborted) throw this.shutdown.signal.reason
     const occurredAt = this.now()
-    this.store.observe({
+    const produced = this.store.observe({
       triggerId: trigger.id, ...observation, occurredAt, fireWhen: trigger.fireWhen,
       debounceMs: trigger.debounceMs, cooldownMs: trigger.cooldownMs,
       maxFires: trigger.maxFires, ...(trigger.ttlMs === undefined ? {} : { ttlMs: trigger.ttlMs }),
@@ -208,6 +212,7 @@ export class EventTriggersService extends Service {
         revision, timeBasis: 'observed', method: trigger.kind === 'file' ? 'local-observation' : 'https-observation',
       }),
     })
+    if (produced.length > 0) this.notifySourceChanges()
     this.store.markTriggerSuccess(trigger.id, occurredAt)
   }
 
@@ -294,46 +299,50 @@ export class EventTriggersService extends Service {
   private async performFlushPending(): Promise<void> {
     const maximum = 2_000
     let processed = 0
-    while (processed < maximum) {
-      const items = this.store.pending(Math.min(100, maximum - processed))
-      if (items.length === 0) return
-      for (const item of items) {
-        processed += 1
-        const trigger = this.triggers.get(item.triggerId)
-        if (trigger === undefined || !trigger.enabled) {
-          this.store.quarantine(item.id, 'trigger is no longer configured or enabled')
-          continue
-        }
-        if (item.envelope === undefined) {
-          this.store.quarantine(item.id, 'legacy event has no provenance; operator must verify its historical target')
-          continue
-        }
-        this.store.markAttempt(item.id)
-        try {
-          const envelope = parseExternalEventEnvelope(JSON.parse(item.envelope.canonical))
-          if (externalEventDigest(envelope) !== item.envelope.digest
-            || envelope.source.id !== `event-triggers:${trigger.id}`
-            || envelope.source.version !== version
-            || envelope.source.configDigest !== this.triggerConfigDigest(trigger)
-            || envelope.target.automationId !== trigger.automationId
-            || envelope.event.id !== item.eventId) {
-            this.store.quarantine(item.id, 'event provenance no longer matches the configured trigger')
+    try {
+      while (processed < maximum) {
+        const items = this.store.pending(Math.min(100, maximum - processed))
+        if (items.length === 0) return
+        for (const item of items) {
+          processed += 1
+          const trigger = this.triggers.get(item.triggerId)
+          if (trigger === undefined || !trigger.enabled) {
+            this.store.quarantine(item.id, 'trigger is no longer configured or enabled')
             continue
           }
-          this.automations.ingestExternal({
-            sourceId: `event-triggers:${trigger.id}`,
-            automationId: trigger.automationId,
-            eventId: item.eventId,
-            occurredAt: item.occurredAt,
-            envelope,
-          })
-          this.store.markDelivered(item.id)
-        } catch (error) {
-          const exponent = Math.min(item.attempts, 10)
-          const delay = Math.min(3_600_000, this.config.pollIntervalMs * (2 ** exponent))
-          this.store.markRetry(item.id, error, this.now() + delay)
+          if (item.envelope === undefined) {
+            this.store.quarantine(item.id, 'legacy event has no provenance; operator must verify its historical target')
+            continue
+          }
+          this.store.markAttempt(item.id)
+          try {
+            const envelope = parseExternalEventEnvelope(JSON.parse(item.envelope.canonical))
+            if (externalEventDigest(envelope) !== item.envelope.digest
+              || envelope.source.id !== `event-triggers:${trigger.id}`
+              || envelope.source.version !== version
+              || envelope.source.configDigest !== this.triggerConfigDigest(trigger)
+              || envelope.target.automationId !== trigger.automationId
+              || envelope.event.id !== item.eventId) {
+              this.store.quarantine(item.id, 'event provenance no longer matches the configured trigger')
+              continue
+            }
+            this.automations.ingestExternal({
+              sourceId: `event-triggers:${trigger.id}`,
+              automationId: trigger.automationId,
+              eventId: item.eventId,
+              occurredAt: item.occurredAt,
+              envelope,
+            })
+            this.store.markDelivered(item.id)
+          } catch (error) {
+            const exponent = Math.min(item.attempts, 10)
+            const delay = Math.min(3_600_000, this.config.pollIntervalMs * (2 ** exponent))
+            this.store.markRetry(item.id, error, this.now() + delay)
+          }
         }
       }
+    } finally {
+      this.notifySourceChanges()
     }
   }
 
@@ -392,11 +401,129 @@ export class EventTriggersService extends Service {
     if (!accepted.accepted) {
       throw new EventTriggersError(accepted.reason, `event-triggers: webhook event was rejected by ${accepted.reason}`)
     }
+    this.notifySourceChanges()
     await this.startFlush()
     return { accepted: true, eventId: accepted.event.eventId }
   }
 
   health(): ReturnType<EventTriggerStore['health']> { this.assertActive(); return this.store.health() }
+
+  sourceSnapshot(triggerId: string): Readonly<EventSourceSnapshot> {
+    this.assertActive()
+    const trigger = this.sourceTrigger(triggerId)
+    return Object.freeze({
+      protocol: 'dsh-event-source/v1' as const,
+      sourceId: `event-triggers:${trigger.id}`,
+      kind: trigger.kind,
+      version,
+      configDigest: this.triggerConfigDigest(trigger),
+      target: Object.freeze({ automationId: trigger.automationId }),
+      highWaterSequence: this.store.sourceHighWaterSequence(),
+    })
+  }
+
+  firstEventAfter(
+    snapshot: Readonly<EventSourceSnapshot>, afterSequence: number, deadlineAt: number,
+  ): Readonly<SourceEvent> | undefined {
+    this.assertActive()
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < snapshot.highWaterSequence
+      || !Number.isSafeInteger(deadlineAt) || deadlineAt < 0) {
+      throw new EventTriggersError('source-changed', 'event-triggers: event source cursor or deadline is invalid')
+    }
+    const triggerId = this.assertSnapshotCurrent(snapshot)
+    const throughSequence = this.store.sourceHighWaterSequence()
+    let cursor = afterSequence
+    while (true) {
+      const candidates = this.store.sourceCandidatesAfter({
+        triggerId, afterSequence: cursor, throughSequence, deadlineAt, sourceId: snapshot.sourceId,
+        kind: snapshot.kind, version: snapshot.version, configDigest: snapshot.configDigest,
+        automationId: snapshot.target.automationId,
+      })
+      if (candidates.length === 0) return undefined
+      for (const item of candidates) {
+        cursor = item.sequence
+        try {
+          const envelope = parseExternalEventEnvelope(JSON.parse(item.canonical))
+          if (externalEventDigest(envelope) !== item.digest
+            || !this.matchesSnapshot(envelope, snapshot, item.eventId)
+            || envelope.event.receivedAt > deadlineAt
+            || this.isSourceSignedOutsideSkew(triggerId, envelope)) continue
+          return Object.freeze({ sequence: item.sequence, envelope })
+        } catch {
+          // A malformed or non-provenance row has no authority for source reads.
+        }
+      }
+      if (candidates.length < 100) return undefined
+    }
+  }
+
+  subscribeSourceChanges(listener: () => void): () => void {
+    this.assertActive()
+    this.sourceChangeListeners.add(listener)
+    let subscribed = true
+    return () => {
+      if (!subscribed) return
+      subscribed = false
+      this.sourceChangeListeners.delete(listener)
+    }
+  }
+
+  private sourceTrigger(triggerId: string): NormalizedTrigger {
+    const trigger = this.triggers.get(triggerId)
+    if (trigger === undefined || !trigger.enabled) {
+      throw new EventTriggersError('source-changed', 'event-triggers: event source is no longer configured or enabled')
+    }
+    return trigger
+  }
+
+  private assertSnapshotCurrent(snapshot: Readonly<EventSourceSnapshot>): string {
+    if (snapshot.protocol !== 'dsh-event-source/v1'
+      || typeof snapshot.sourceId !== 'string'
+      || !Number.isSafeInteger(snapshot.highWaterSequence) || snapshot.highWaterSequence < 0
+      || !/^[a-f0-9]{64}$/u.test(snapshot.configDigest)
+      || typeof snapshot.version !== 'string'
+      || typeof snapshot.target?.automationId !== 'string') {
+      throw new EventTriggersError('source-changed', 'event-triggers: event source snapshot is invalid')
+    }
+    const prefix = 'event-triggers:'
+    if (!snapshot.sourceId.startsWith(prefix)) {
+      throw new EventTriggersError('source-changed', 'event-triggers: event source snapshot is invalid')
+    }
+    const triggerId = snapshot.sourceId.slice(prefix.length)
+    const trigger = this.sourceTrigger(triggerId)
+    if (snapshot.kind !== trigger.kind || snapshot.version !== version
+      || snapshot.configDigest !== this.triggerConfigDigest(trigger)
+      || snapshot.target.automationId !== trigger.automationId) {
+      throw new EventTriggersError('source-changed', 'event-triggers: event source configuration changed')
+    }
+    return triggerId
+  }
+
+  private matchesSnapshot(
+    envelope: Readonly<ExternalEventEnvelope>, snapshot: Readonly<EventSourceSnapshot>, eventId: string,
+  ): boolean {
+    return envelope.source.id === snapshot.sourceId
+      && envelope.source.kind === snapshot.kind
+      && envelope.source.version === snapshot.version
+      && envelope.source.configDigest === snapshot.configDigest
+      && envelope.target.automationId === snapshot.target.automationId
+      && envelope.event.id === eventId
+  }
+
+  private isSourceSignedOutsideSkew(triggerId: string, envelope: Readonly<ExternalEventEnvelope>): boolean {
+    const trigger = this.triggers.get(triggerId)
+    return trigger?.kind === 'webhook'
+      && (envelope.observation.timeBasis !== 'source-signed'
+        || Math.abs(envelope.event.receivedAt - envelope.event.occurredAt) > trigger.maxSkewMs)
+  }
+
+  private notifySourceChanges(): void {
+    // Snapshot once so a callback cannot extend this notification by subscribing again.
+    const listeners = [...this.sourceChangeListeners]
+    for (const listener of listeners) {
+      try { listener() } catch {}
+    }
+  }
 
   private async verifySignature(
     trigger: Extract<NormalizedTrigger, WebhookTriggerConfig>,

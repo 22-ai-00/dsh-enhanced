@@ -21,7 +21,7 @@ import type { AcceptanceProfile } from '@dsh-enhanced/assistant-verifier'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false, verifyGoalOutcome = false, stepMaxDurationMs?: number,
-  options: Pick<GoalsConfig, 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake'> = {}) {
+  options: Pick<GoalsConfig, 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits'> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
@@ -78,6 +78,8 @@ describe('owner-scoped native goal context', () => {
     const f = await harness()
     expect(f.service.preauthorizedCreateEnabled).toBe(false)
     expect(f.service.preauthorizedScheduleEnabled).toBe(false)
+    expect(f.service.eventWaitsEnabled).toBe(false)
+    expect(Reflect.set(f.service, 'eventWaitsEnabled', true)).toBe(false)
     expect(Object.getOwnPropertyDescriptor(f.service, 'preauthorizedCreateEnabled')).toMatchObject({ value: false, writable: false, configurable: false })
     expect(Object.getOwnPropertyDescriptor(f.service, 'preauthorizedScheduleEnabled')).toMatchObject({ value: false, writable: false, configurable: false })
     expect(Reflect.set(f.service, 'preauthorizedScheduleEnabled', true)).toBe(false)
@@ -94,6 +96,15 @@ describe('owner-scoped native goal context', () => {
     await expect(harness(undefined, undefined, undefined, true, false, undefined, {
       preauthorizedSchedule: true, executionBudget: scheduleBudget, backgroundWake: scheduleWake,
     })).rejects.toThrow('preauthorized schedule requires durable wake')
+  })
+
+  it('requires durable verified outcome and wake prerequisites for event waits', async () => {
+    await expect(harness(undefined, undefined, undefined, true, false, undefined, {
+      eventWaits: true, executionBudget: scheduleBudget, backgroundWake: scheduleWake,
+    })).rejects.toThrow('event waits require durable wake, budgets and verified outcomes')
+    await expect(harness(undefined, undefined, undefined, true, true, undefined, {
+      eventWaits: true, executionBudget: scheduleBudget,
+    })).rejects.toThrow('event waits require durable wake, budgets and verified outcomes')
   })
 
   it('exposes an immutable enabled schedule gate only for a durable verified configuration', async () => {

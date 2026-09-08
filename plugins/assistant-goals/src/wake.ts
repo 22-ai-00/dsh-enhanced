@@ -38,7 +38,8 @@ export class GoalWakeRuntime {
     private readonly record: (scope: GoalScope, goalId: string, agent?: Agent) => GoalRecord | undefined,
     private readonly ready: () => boolean,
     private readonly settleExecution: (agent: Agent, signal: AbortSignal) => Promise<void>,
-    private readonly verifiedCompletion: (record: GoalRecord, wake: GoalWakeIntent['native']) => boolean) {
+    private readonly verifiedCompletion: (record: GoalRecord, wake: GoalWakeIntent['native']) => boolean,
+    private readonly assertEventWait: (intent: GoalWakeIntent) => void = () => {}) {
     this.#store = new GoalWakeStore(path)
     ctx.inject(['assistantAutomations', 'assistantDelivery', 'assistantPolicy'], runtime => {
       const automations = runtime.assistantAutomations
@@ -97,6 +98,8 @@ export class GoalWakeRuntime {
   #current(intent: GoalWakeIntent, phase: 'before-resume' | 'running' | 'terminal', agent?: Agent): GoalRecord {
     if (!this.#live || !this.ready() || Date.now() >= intent.expiresAt) reject()
     this.#requireSettlementCapability()
+    if (intent.id.startsWith('goal-event-wake-') && this.ctx.get('assistantDelivery')?.goalWakeResultVersion?.() !== 1) reject()
+    this.assertEventWait(intent)
     const record = this.record(intent.scope, intent.goalId, agent)
     if (record === undefined || !same(record.scope, intent.scope) || !same(record.definition, intent.definition)
       || record.native.sessionId !== intent.native.sessionId || record.native.goalId !== intent.native.goalId
@@ -162,6 +165,7 @@ export class GoalWakeRuntime {
     const signal = AbortSignal.any([input.signal, this.#lifecycle.signal])
     const capability: DeliveryGoalWakeInput = Object.freeze({ attestation: intent.attestation,
       native: { goalId: intent.native.goalId, revision: intent.native.revision }, deadlineAt: intent.expiresAt, signal,
+      ...(intent.id.startsWith('goal-event-wake-') ? { includeOutput: true } : {}),
       assertCurrent: (agent: Agent, phase: 'before-resume' | 'running' | 'terminal') => {
         signal.throwIfAborted()
         this.#current(intent, phase, agent)
@@ -194,6 +198,9 @@ export class GoalWakeRuntime {
       if (result.dispatched !== dispatched) throw new Error('assistant-goals: wake dispatch disagreement')
       const succeeded = result.outcome === 'succeeded' && result.quiescent && dispatched && !signal.aborted
       if (succeeded) this.#current(intent, 'terminal')
+      if (succeeded && intent.id.startsWith('goal-event-wake-')) {
+        delivery.enqueueScheduledGoalResult(capability)
+      }
       this.#store.finish(intent.id, succeeded ? 'succeeded' : dispatched ? 'unknown' : 'denied', Date.now())
       return this.#result(succeeded ? 'succeeded' : dispatched ? 'unknown' : 'failed', `goal-wake-${result.outcome}`, dispatched)
     } catch {

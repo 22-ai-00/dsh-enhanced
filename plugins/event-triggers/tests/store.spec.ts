@@ -21,16 +21,26 @@ describe('event trigger state store', () => {
     expect((await stat(join(value.root, 'state'))).mode & 0o777).toBe(0o700)
     expect((await stat(value.path)).mode & 0o777).toBe(0o600)
     const db = new DatabaseSync(value.path, { readOnly: true })
-    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 3 })
+    expect(db.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 })
     expect(db.prepare('PRAGMA journal_mode').get()).toEqual({ journal_mode: 'wal' })
     db.close(); value.store.close()
 
-    for (const version of [4, 99]) {
+    for (const version of [5, 99]) {
       const future = join(value.root, `future-${version}.sqlite`)
       const newer = new DatabaseSync(future); newer.exec(`PRAGMA user_version = ${version}`); newer.close(); await chmod(future, 0o600)
       expect(() => new EventTriggerStore({ path: future }))
         .toThrowError(expect.objectContaining<Partial<EventTriggerStoreError>>({ code: 'schema-too-new' }))
     }
+  })
+
+  test('rejects a database claiming the current version without its source allocator schema', async () => {
+    const value = await fixture()
+    value.store.close()
+    const corrupted = new DatabaseSync(value.path)
+    corrupted.exec('DROP INDEX event_outbox_source')
+    corrupted.close()
+    expect(() => new EventTriggerStore({ path: value.path }))
+      .toThrowError(expect.objectContaining<Partial<EventTriggerStoreError>>({ code: 'invalid-schema' }))
   })
 
   test('uses baseline, debounce, cooldown and stable edge outbox ids', async () => {
@@ -146,10 +156,12 @@ describe('event trigger state store', () => {
     const [pending] = migrated.pending()
     expect(pending).toEqual(expect.objectContaining({ id: 'outbox-v1', attempts: 2, status: 'pending' }))
     expect(pending?.envelope).toBeUndefined()
+    expect(pending?.sequence).toBe(1)
+    expect(migrated.sourceHighWaterSequence()).toBe(1)
     expect(migrated.health()).toMatchObject({ pendingEvents: 1, retryingEvents: 1, quarantinedEvents: 0 })
     migrated.close()
     const inspected = new DatabaseSync(path, { readOnly: true })
-    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 3 })
+    expect(inspected.prepare('PRAGMA user_version').get()).toEqual({ user_version: 4 })
     inspected.close()
   })
 
