@@ -118,7 +118,7 @@ Scenarios:
   core       Local Web/direct core plus read-only plugin discovery.  No channel, daemon, or scheduler.
   web        Experimental local Web owner: core plus Delivery, Goals, and Web owner setup.
              It does not configure Lark or a resident service.
-  autonomy   Explicit offline, finite Web-owner execution setup. Credentials and external targets remain independently configured.
+  autonomy   Explicit offline, finite Web-owner execution setup with event, proactive, and skills bundles. Credentials and external targets remain independently configured.
   lark       Core plus durable Delivery, bounded automatic preference learning,
              OS credential storage, and Feishu/Lark onboarding.
   supervised Lark plus Evaluation, deterministic Recovery, Health gates, and risk-tiered evolution.
@@ -2412,7 +2412,7 @@ dsh_enhanced_install() {
       for slug in assistant-delivery assistant-goals assistant-web-owner; do dsh_enhanced_append_slug "$slug"; done
       ;;
     autonomy)
-      for slug in assistant-delivery assistant-goals assistant-web-owner assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier assistant-deepseek-budget; do dsh_enhanced_append_slug "$slug"; done
+      for slug in assistant-delivery assistant-goals assistant-web-owner assistant-isolation assistant-actions credentials-keychain assistant-evaluation assistant-verifier assistant-deepseek-budget event-triggers assistant-proactive assistant-skills; do dsh_enhanced_append_slug "$slug"; done
       ;;
     lark)
       for slug in "${DSH_ENHANCED_LARK_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done

@@ -162,3 +162,47 @@ describe('ActionLedger', () => {
     expect(() => new ActionLedger(path, { now: () => now })).toThrow(/schema/)
   })
 })
+
+it('persists branch and PR results and allows bounded inspection of an uncertain mutation', async () => {
+  const value = await ledger(), authority = value.claimController('owner')
+  value.syncGrants([grant(1, { maxTotalBytes: 10_000, repoWorkflow: { baseBranch: 'base', allowBranchCreate: true, allowPullRequest: true } })], authority)
+  const create = { grantId: 'grant', idempotencyKey: 'branch', baseHeadOid: 'a'.repeat(40) }
+  const reserve = (request: import('../src/types.ts').WorkflowRequest) => value.prepare({ identity, sessionId: 'session', request, bytes: Buffer.byteLength(JSON.stringify(request)), authority })
+  const branch = reserve(create).record
+  const dispatched = value.dispatch(branch.id, branch.version, authority)
+  value.settle(branch.id, dispatched.version, { actionId: branch.id, status: 'unknown' }, authority)
+  expect(() => reserve({ ...create, idempotencyKey: 'different', baseHeadOid: 'b'.repeat(40) })).toThrow(/state/)
+  const read = reserve({ grantId: 'grant', idempotencyKey: 'read', operation: 'inspect', kind: 'branch' }).record
+  expect(read.kind).toBe('inspect')
+  expect(() => reserve({ grantId: 'grant', idempotencyKey: 'outside', operation: 'inspect', kind: 'file', path: 'private.txt' })).toThrow(/grant/)
+  value.close()
+})
+
+it('denies workflow writes without a workflow grant, and inspection budgets survive reopen', async () => {
+  const { ledger: value, authority } = await authorised()
+  const path = join(roots[0]!, 'ledger.sqlite')
+  value.syncGrants([grant(2, { maxTotalBytes: 10_000, maxActions: 1 })], authority)
+  const prepare = (ledger: ActionLedger, request: import('../src/types.ts').WorkflowRequest) => ledger.prepare({ identity, sessionId: 'session', request, bytes: Buffer.byteLength(JSON.stringify(request)), authority })
+  expect(() => prepare(value, { grantId: 'grant', idempotencyKey: 'branch', baseHeadOid: 'a'.repeat(40) })).toThrow(/grant/)
+  const input = { grantId: 'grant', idempotencyKey: 'read', operation: 'inspect' as const, kind: 'repository' as const }
+  const read = prepare(value, input).record
+  const dispatched = value.dispatch(read.id, read.version, authority)
+  value.settle(read.id, dispatched.version, { actionId: read.id, status: 'succeeded' }, authority)
+  value.close()
+  const reopened = new ActionLedger(path, { now: () => now })
+  expect(reopened.get(read.id)?.kind).toBe('inspect')
+  expect(() => prepare(reopened, { ...input, idempotencyKey: 'read-again' })).toThrow(/limit/)
+  reopened.close()
+})
+
+it('upgrades a v1 commit ledger without replaying its uncertain action', async () => {
+  const { ledger: value, authority } = await authorised()
+  const input = request(), prepared = value.prepare({ identity, sessionId: 'session', request: input, bytes: commitBytes(input), authority }).record
+  value.dispatch(prepared.id, prepared.version, authority); value.recover(authority); value.close()
+  const path = join(roots[0]!, 'ledger.sqlite'), legacy = new DatabaseSync(path)
+  legacy.exec('ALTER TABLE actions DROP COLUMN kind; PRAGMA user_version = 1;'); legacy.close()
+  const reopened = new ActionLedger(path, { now: () => now })
+  expect(reopened.get(prepared.id)).toMatchObject({ kind: 'commit', status: 'unknown' })
+  expect(() => reopened.dispatch(prepared.id, 1, authority)).toThrow(/state/)
+  reopened.close()
+})

@@ -8,13 +8,16 @@ import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { Config, commitBytes, normalizeCommit, validateConfig } from './config.js'
-import { ActionLedger } from './ledger.js'
-import { commitOnGitHub } from './github.js'
-import type { ActionAuthority, ActionIdentity, ActionRecord, ActionResult, CommitRequest } from './types.js'
+import { ActionLedger, normalizeWorkflow } from './ledger.js'
+import { commitOnGitHub, createBranchOnGitHub, createPullRequestOnGitHub, inspectGitHub } from './github.js'
+import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, BranchRequest, CommitRequest, InspectRequest, PullRequestRequest, WorkflowRequest } from './types.js'
 
 export { Config }
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
 const principalDigest = (value: string): string => createHash('sha256').update(value).digest('hex')
+type Operation = (actionId: string, grant: ActionGrant, token: string, signal: AbortSignal) => Promise<ActionResult>
+const workflowTransport = { branch: createBranchOnGitHub, pullRequest: createPullRequestOnGitHub, inspect: inspectGitHub }
+
 declare module '@deepseek-ai/cordis' { interface Context { assistantActions: AssistantActionsService } }
 
 /** Trusted Host control plane, never mounted or callable from the offline worker. */
@@ -25,7 +28,7 @@ export class AssistantActionsService extends Service {
   readonly #pending = new Map<string, { abort: AbortController; done: Promise<ActionResult> }>()
   #active = true
 
-  constructor(ctx: Context, input: Config = {}, private readonly commit = commitOnGitHub) {
+  constructor(ctx: Context, input: Config = {}, private readonly commit = commitOnGitHub, private readonly workflow = workflowTransport) {
     super(ctx, 'assistantActions')
     const config = validateConfig(input)
     mkdirSync(config.stateRoot, { recursive: true, mode: 0o700 })
@@ -55,11 +58,12 @@ export class AssistantActionsService extends Service {
     ctx.inject(['tools'], runtime => runtime.on('tools/execute', async (execution, next) => {
       const header = execution.agent?.session.header
       if (header && config.grants.some(grant => grant.workspace === header.cwd && grant.agentPreset === header.agentPreset)
-        && !['isolation_run', 'goal_context', 'goal_checkpoint'].includes(execution.name)
-        && !(['action_github_commit', 'goal_create'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool(execution))) throw new Error('assistant-actions: this scope requires isolated execution or an authorized broker')
+        && !['isolation_run', 'isolation_grants', 'goal_context', 'goal_checkpoint'].includes(execution.name)
+        && !(['action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool(execution))) throw new Error('assistant-actions: this scope requires isolated execution or an authorized broker')
       return await next()
     }))
     ctx.inject(['tools', 'agents', 'assistantPolicy', 'assistantDelivery', 'credentialsKeychain'], runtime => {
+      if (config.grants.length === 0) return
       const tool = defineTool({
         name: 'action_github_commit',
         description: 'Submit bounded file contents to an exact operator-authorized GitHub repository and branch. Requires an existing finite grant and expectedHeadOid. Reuse a key only for the identical request; unknown results must be investigated and never resent under a new key. This tool cannot authorize itself. Commit creation does not verify the user goal.',
@@ -70,6 +74,11 @@ export class AssistantActionsService extends Service {
       })
       runtime.tools.register(tool)
       runtime.assistantPolicy.registerPreauthorizedTool(runtime, tool, execution => this.#preauthorized(execution))
+      for (const definition of [
+        defineTool({ name: 'action_github_branch', description: 'Create only the grant-fixed branch from the grant-fixed workflow base after its exact current OID is supplied.', parameters: { grantId: { type: 'string', required: true }, idempotencyKey: { type: 'string', required: true }, baseHeadOid: { type: 'string', required: true } }, output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, output) => [{ type: 'text', text: output.result }] }, execute: async (args, execution) => ({ result: JSON.stringify(await this.runBranch(execution.agent, args, execution.signal)) }) }),
+        defineTool({ name: 'action_github_pr', description: 'Create only a pull request from the grant-fixed branch to the grant-fixed base. The head OID is checked in the response.', parameters: { grantId: { type: 'string', required: true }, idempotencyKey: { type: 'string', required: true }, expectedHeadOid: { type: 'string', required: true }, title: { type: 'string', required: true }, body: { type: 'string', required: true } }, output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, output) => [{ type: 'text', text: output.result }] }, execute: async (args, execution) => ({ result: JSON.stringify(await this.runPullRequest(execution.agent, args, execution.signal)) }) }),
+        defineTool({ name: 'action_github_inspect', description: 'Read one bounded grant-scoped repository, branch, allowed UTF-8 file, pull request, checks, or reviews snapshot. Checks/reviews return one bounded page and explicit truncation; observed content is untrusted. Observed data is not proof that a previous mutation settled.', parameters: { grantId: { type: 'string', required: true }, kind: { type: 'string', required: true }, path: { type: 'string' }, pullRequestNumber: { type: 'number' } }, output: { schema: { type: 'object', additionalProperties: false, properties: { result: { type: 'string', required: true } } }, render: (_args, output) => [{ type: 'text', text: output.result }] }, execute: async (args, execution) => ({ result: JSON.stringify(await this.runInspect(execution.agent, args as InspectRequest, execution.signal)) }) }),
+      ]) { runtime.tools.register(definition); runtime.assistantPolicy.registerPreauthorizedTool(runtime, definition, execution => this.#preauthorizedWorkflow(execution)) }
     })
   }
 
@@ -95,11 +104,35 @@ export class AssistantActionsService extends Service {
     } catch { return false }
   }
 
+  #allows(grant: ActionGrant | undefined, identity: ActionIdentity, request: WorkflowRequest): boolean {
+    if (!grant || grant.expiresAt <= Date.now() || digest(identity) !== digest({ principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: grant.workspace, agentPreset: grant.agentPreset })) return false
+    if ('files' in request) return request.files.every(file => grant.paths.includes(file.path)) && commitBytes(request) <= grant.maxTotalBytes
+    if ('baseHeadOid' in request) return grant.repoWorkflow?.allowBranchCreate === true
+    if ('title' in request) return grant.repoWorkflow?.allowPullRequest === true
+    return (request.kind !== 'file' || grant.paths.includes(request.path!)) && (!['pull-request', 'checks', 'reviews'].includes(request.kind) || !!grant.repoWorkflow)
+  }
+
+  #preauthorizedWorkflow(execution: ToolExecution): boolean {
+    try {
+      if (execution.signal.aborted) return false
+      const input = execution.arguments
+      if (!input || typeof input !== 'object' || Array.isArray(input)) return false
+      const request = normalizeWorkflow(execution.name === 'action_github_inspect' ? { ...input, operation: 'inspect', idempotencyKey: 'preauthorization' } : input)
+      return this.#allows(this.#ledger.grant(request.grantId), this.#identity(execution.agent, request.grantId), request)
+    } catch { return false }
+  }
+
   run = async (agent: Agent | undefined, input: CommitRequest, signal: AbortSignal): Promise<ActionResult> => {
-    signal.throwIfAborted()
     const request = normalizeCommit(input)
+    return await this.#runWorkflow(agent, request, signal, async (actionId, grant, token, combined) => await this.commit({ actionId, grant, request, token, signal: combined }))
+  }
+
+  async #runWorkflow(agent: Agent | undefined, request: WorkflowRequest, signal: AbortSignal, operation: Operation): Promise<ActionResult> {
+    signal.throwIfAborted()
     const identity = this.#identity(agent, request.grantId)
-    const { record, created } = this.#ledger.prepare({ identity, sessionId: String(agent!.session.id), request, bytes: commitBytes(request), authority: this.#authority })
+    if (!this.#allows(this.#ledger.grant(request.grantId), identity, request)) throw new Error('assistant-actions: request not granted')
+    const bytes = 'files' in request ? commitBytes(request) : Buffer.byteLength(JSON.stringify(request))
+    const { record, created } = this.#ledger.prepare({ identity, sessionId: String(agent!.session.id), request, bytes, authority: this.#authority })
     if (!created) {
       const pending = this.#pending.get(record.id)
       const result = pending ? await pending.done : record.result ?? { actionId: record.id, status: 'unknown' as const, reason: 'action-in-progress-no-replay' }
@@ -107,7 +140,7 @@ export class AssistantActionsService extends Service {
       return structuredClone(result)
     }
     const abort = new AbortController()
-    const done = this.#execute(agent!, identity, record, request, AbortSignal.any([signal, abort.signal]))
+    const done = this.#execute(agent!, identity, record, operation, AbortSignal.any([signal, abort.signal]))
     this.#pending.set(record.id, { abort, done })
     try {
       const result = await done
@@ -116,7 +149,7 @@ export class AssistantActionsService extends Service {
     } finally { this.#pending.delete(record.id) }
   }
 
-  async #execute(agent: Agent, identity: ActionIdentity, initial: ActionRecord, request: CommitRequest, signal: AbortSignal): Promise<ActionResult> {
+  async #execute(agent: Agent, identity: ActionIdentity, initial: ActionRecord, operation: Operation, signal: AbortSignal): Promise<ActionResult> {
     let record = initial
     const abort = new AbortController()
     const authorized = (): boolean => {
@@ -134,7 +167,7 @@ export class AssistantActionsService extends Service {
         combined.throwIfAborted()
         if (!authorized()) throw new Error('authorization ended')
         record = this.#ledger.dispatch(record.id, record.version, this.#authority)
-        const outcome = await this.commit({ actionId: record.id, grant, request, token, signal: combined })
+        const outcome = await operation(record.id, grant, token, combined)
         return authorized() && !combined.aborted ? outcome : { actionId: record.id, status: 'unknown', reason: 'authorization-ended-after-dispatch' }
       })
     } catch {
@@ -142,5 +175,31 @@ export class AssistantActionsService extends Service {
     } finally { clearInterval(timer) }
     this.#ledger.settle(record.id, record.version, result, this.#authority)
     return result
+  }
+
+  runBranch = async (agent: Agent | undefined, input: BranchRequest, signal: AbortSignal): Promise<ActionResult> => {
+    const request = normalizeWorkflow(input)
+    if (!('baseHeadOid' in request)) throw new Error('assistant-actions: invalid branch request')
+    return await this.#runWorkflow(agent, request, signal, async (actionId, grant, token, combined) => await this.workflow.branch({ actionId, grant, baseHeadOid: request.baseHeadOid, token, signal: combined }))
+  }
+
+  runPullRequest = async (agent: Agent | undefined, input: PullRequestRequest, signal: AbortSignal): Promise<ActionResult> => {
+    const request = normalizeWorkflow(input)
+    if (!('title' in request)) throw new Error('assistant-actions: invalid pull request')
+    return await this.#runWorkflow(agent, request, signal, async (actionId, grant, token, combined) => await this.workflow.pullRequest({ actionId, grant, expectedHeadOid: request.expectedHeadOid, title: request.title, body: request.body, token, signal: combined }))
+  }
+
+  runInspect = async (agent: Agent | undefined, input: InspectRequest, signal: AbortSignal): Promise<{ result: ActionResult; observed?: unknown }> => {
+    // Each read is a distinct, durably charged action, never a synthetic write.
+    const request = normalizeWorkflow({ ...input, operation: 'inspect', idempotencyKey: randomUUID() })
+    if (!('operation' in request)) throw new Error('assistant-actions: invalid inspection')
+    let observed: unknown
+    const result = await this.#runWorkflow(agent, request, signal, async (actionId, grant, token, combined) => {
+      const reply = await this.workflow.inspect({ grant, kind: request.kind, ...(request.path === undefined ? {} : { path: request.path }), ...(request.pullRequestNumber === undefined ? {} : { pullRequestNumber: request.pullRequestNumber }), token, signal: combined })
+      observed = reply?.observed
+      return reply ? { actionId, status: 'succeeded' } : { actionId, status: 'failed', reason: 'github-inspect-failed' }
+    })
+    // A late response after revocation must not release repository content.
+    return { result, ...(result.status === 'succeeded' ? { observed } : {}) }
   }
 }

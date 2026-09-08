@@ -137,10 +137,10 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test('executes an exact granted tool without asking, while ungranted calls still ask and fail closed', async () => {
+  test.each(['action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect'])('executes exact granted %s without asking, while ungranted calls fail closed', async name => {
     const current = await fixture()
     let executions = 0
-    const trusted = definition('action_github_commit', () => { executions += 1 })
+    const trusted = definition(name, () => { executions += 1 })
     current.ctx.tools.register(trusted)
     current.ctx.assistantPolicy.registerPreauthorizedTool(
       trustedActionsCaller(current.ctx),
@@ -148,7 +148,8 @@ describe('trusted Host tool preauthorization', () => {
       execution => execution.arguments !== null,
     )
 
-    const granted = await execute(current.ctx, current.owner)
+    expect(() => current.ctx.assistantPolicy.registerPreauthorizedTool(current.ctx, trusted, () => true)).toThrow(/reserved/)
+    const granted = await execute(current.ctx, current.owner, name)
     expect(granted.isError, JSON.stringify(granted)).toBe(false)
     expect(executions).toBe(1)
     expect(current.asks()).toBe(0)

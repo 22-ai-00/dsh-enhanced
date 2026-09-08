@@ -7,16 +7,16 @@ import { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import { IsolationLedger } from '../../assistant-isolation/lib/ledger.js'
 import { compilePolicy, evaluatePolicy } from '../../assistant-policy/lib/evaluator.js'
 import type { PolicyRule } from '../../assistant-policy/lib/types.js'
-import { configureGoalAdmission } from '../src/goal-setup.ts'
+import { configureGoalAdmission, listGoalAdmissionSessions } from '../src/goal-setup.ts'
 import { prepareAutonomyProfile } from '../src/autonomy.ts'
 import { inspectAutonomyProfile } from '../src/doctor.ts'
-import { parseGoalAdmissionTask, prepareGoalAdmission } from '../src/goal-admission.ts'
-import { prepareWebOwnerProfile, type WebOwnerSetupInput } from '../src/setup.ts'
+import { parseGoalAdmissionTask, parseSettingsDefaultModelRoute, prepareGoalAdmission } from '../src/goal-admission.ts'
+import { prepareWebOwnerProfile, runWebOwnerSetup, type WebOwnerSetupInput } from '../src/setup.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-async function fixture() {
+async function fixture(now = Date.now()) {
   const dshHome = await mkdtemp(join(tmpdir(), 'web-owner-goal-admission-')); roots.push(dshHome)
   const input: WebOwnerSetupInput = { dshHome, profile: 'web', workspace: join(dshHome, 'workspace'), preset: 'standard' }
   const slugs = ['personal-assistant', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-isolation', 'assistant-actions', 'credentials-keychain', 'assistant-verifier', 'assistant-deepseek-budget']
@@ -36,7 +36,7 @@ async function fixture() {
   const realOwner = delivery.ensureOwner(initial.principal)
   const realBinding = delivery.createBinding({ conversation: { channel: 'web', account: 'web', tenant: 'local', kind: 'dm', chat: 'session-a' }, principal: initial.principal, workspace: input.workspace, agentPreset: input.preset, sessionId: 'session-a', policyRef: 'owner-dm' })
   delivery.close()
-  const prepared = { ...initial, patch: prepareAutonomyProfile({ ...input, isolation: { image: `sha256:${'a'.repeat(64)}`, maxRuns: 20, leaseMs: 3600000, maxTotalDurationMs: 600000 } }, initial.patch, effective, realOwner) }
+  const prepared = { ...initial, patch: prepareAutonomyProfile({ ...input, isolation: { image: `sha256:${'a'.repeat(64)}`, maxRuns: 20, leaseMs: 3600000, maxTotalDurationMs: 600000 } }, initial.patch, effective, realOwner, now) }
   const profile = inspectAutonomyProfile(prepared.patch, input.profile, input.dshHome)
   const snapshot = { binding: realBinding, owner: realOwner }
   await mkdir(profile.stateRoot, { recursive: true, mode: 0o700 })
@@ -49,16 +49,85 @@ async function fixture() {
 }
 
 function task(overrides: Record<string, unknown> = {}): string {
-  return JSON.stringify({ version: 1, objective: 'Verify the generated artifact', model: 'deepseek-v4-flash', maxGoalRounds: 2, stepMaxDurationMs: 60_000,
+  const value = { version: 1, objective: 'Verify the generated artifact', model: 'deepseek-v4-flash', maxGoalRounds: 2, stepMaxDurationMs: 60_000,
     executionBudget: { modelCalls: 3, toolCalls: 3, inputTokens: 2_097_152, outputTokens: 8192, durationMs: 120_000, maxOutputTokensPerCall: 8192 },
     verification: { artifactPath: 'result.txt', command: 'node verify.mjs', maxRuns: 4, maxTotalDurationMs: 100_000, maxDurationMs: 20_000, maxOutputBytes: 4096, cases: [{ stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }] },
-    wake: { maxDelayMs: 60_000, runTimeoutMs: 30_000, maxRuns: 5 }, ...overrides })
+    wake: { maxDelayMs: 60_000, runTimeoutMs: 30_000, maxRuns: 5 }, ...overrides } as Record<string, unknown>
+  if (value.model === undefined) delete value.model
+  return JSON.stringify(value)
 }
 function config(source: string, id: string): Record<string, any> {
   return (parseDocument(source).toJS() as Array<{ id: string; config: Record<string, any> }>).find(row => row.id === id)!.config
 }
 
 describe('goal admission planning', () => {
+  test('v2 uses the DSH settings overlay during formal setup and rejects malformed public routes', async () => {
+    const f = await fixture(); const taskPath = join(f.input.dshHome, 'v2-task.json')
+    const route = { provider: 'super-relay', model: 'auto_model' }
+    const v2Task = task({ version: 2, route, model: undefined,
+      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [route] } })
+    await writeFile(taskPath, v2Task, { mode: 0o600 })
+    await writeFile(join(f.input.dshHome, 'settings.yaml'), `agent-default-model:
+  provider: super-relay
+  model: auto_model
+llm-pi-ai:
+  providers:
+    super-relay:
+      apiKeyEnv: PRIVATE_DO_NOT_READ
+`, { mode: 0o600 })
+    await expect(configureGoalAdmission(f.input, f.effective, taskPath)).resolves.toMatchObject({ sessionId: 'session-a' })
+    const configured = await readFile(f.patchPath, 'utf8')
+    expect(config(configured, 'dsh-enhanced-assistant-goals').executionBudget).toMatchObject({ mode: 'calls', routes: [route] })
+    expect(configured).not.toContain('PRIVATE_DO_NOT_READ')
+    expect(parseSettingsDefaultModelRoute('{ agent-default-model: { provider: super-relay, model: auto_model } }')).toEqual(route)
+    for (const source of ['[]', 'agent-default-model: super-relay', 'agent-default-model: { provider: super-relay }', 'agent-default-model: { provider: 3, model: auto_model }']) {
+      expect(() => parseSettingsDefaultModelRoute(source)).toThrow(/settings/)
+    }
+
+    const cli = await fixture(); const cliTaskPath = join(cli.input.dshHome, 'v2-cli-task.json'); const bin = join(cli.input.dshHome, 'bin')
+    await writeFile(cliTaskPath, v2Task, { mode: 0o600 }); await mkdir(bin)
+    const effectivePath = join(cli.input.dshHome, 'effective.yaml'); const dshPath = join(bin, 'dsh')
+    await writeFile(effectivePath, cli.effective, { mode: 0o600 })
+    await writeFile(dshPath, '#!/bin/sh\ncat "$DSH_WEB_OWNER_EFFECTIVE"\n', { mode: 0o700 })
+    await writeFile(join(cli.input.dshHome, 'settings.yaml'), 'agent-default-model: { provider: super-relay, model: auto_model }\n', { mode: 0o600 })
+    const previousPath = process.env.PATH; const previousEffective = process.env.DSH_WEB_OWNER_EFFECTIVE
+    process.env.PATH = `${bin}:${previousPath ?? ''}`; process.env.DSH_WEB_OWNER_EFFECTIVE = effectivePath
+    try {
+      await expect(runWebOwnerSetup(['--dsh-home', cli.input.dshHome, '--profile', cli.input.profile, '--workspace', cli.input.workspace, '--preset', cli.input.preset, '--goal-admission', cliTaskPath])).resolves.toBeUndefined()
+    } finally {
+      process.env.PATH = previousPath
+      if (previousEffective === undefined) delete process.env.DSH_WEB_OWNER_EFFECTIVE
+      else process.env.DSH_WEB_OWNER_EFFECTIVE = previousEffective
+    }
+    expect(config(await readFile(cli.patchPath, 'utf8'), 'dsh-enhanced-assistant-goals').executionBudget).toMatchObject({ mode: 'calls', routes: [route] })
+  })
+
+  test('v2 admits only the exact already configured route and calls budget without writing a credential', async () => {
+    const f = await fixture()
+    const effective = parseDocument(f.effective); effective.add({ id: 'agent-default-model', config: { provider: 'super-relay', model: 'relay-v2' } })
+    const configured = effective.toString()
+    const input = task({ version: 2, route: { provider: 'super-relay', model: 'relay-v2' }, model: undefined,
+      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'relay-v2' }] } })
+    const plan = prepareGoalAdmission(f.input, f.prepared.patch, configured, input, f.snapshot)
+    expect(config(plan.patch, 'dsh-enhanced-assistant-goals').executionBudget).toEqual({ mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'relay-v2' }] })
+    expect(config(plan.patch, 'dsh-enhanced-assistant-delivery').agentProvider).not.toBe('super-relay')
+    expect(() => parseGoalAdmissionTask(task({ version: 2, route: { provider: 'super-relay', model: 'wrong' }, model: undefined,
+      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'relay-v2' }] } }))).toThrow(/budget route/)
+    expect(() => prepareGoalAdmission(f.input, f.prepared.patch, configured, task({ version: 2, route: { provider: 'super-relay', model: 'wrong' }, model: undefined,
+      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'wrong' }] } }), f.snapshot)).toThrow(/configured default/)
+  })
+
+  test('v2 is not bound to the expired DeepSeek contract while v1 remains protected', async () => {
+    const contractExpiry = Date.parse('2026-10-08T00:00:00.000Z')
+    const f = await fixture(contractExpiry)
+    const effective = parseDocument(f.effective); effective.add({ id: 'agent-default-model', config: { provider: 'super-relay', model: 'auto_model' } })
+    const route = { provider: 'super-relay', model: 'auto_model' }
+    const v2Task = task({ version: 2, route, model: undefined,
+      executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [route] } })
+    expect(() => prepareGoalAdmission(f.input, f.prepared.patch, effective.toString(), v2Task, f.snapshot, contractExpiry)).not.toThrow()
+    expect(() => prepareGoalAdmission(f.input, f.prepared.patch, effective.toString(), task(), f.snapshot, contractExpiry)).toThrow(/model contract expired/)
+  })
+
   test('compiles two exact acceptance profiles and the fixed wake route while preserving custom denies', async () => {
     const f = await fixture()
     const document = parseDocument(f.prepared.patch)
@@ -151,8 +220,24 @@ describe('goal admission planning', () => {
     expect(await readFile(f.patchPath, 'utf8')).toBe(configured)
   })
 
+  test('discovers only real idle owner Sessions, auto-selects one, and rejects ambiguity without changing the patch', async () => {
+    const f = await fixture(); const path = join(f.input.dshHome, 'task.json')
+    await writeFile(path, task(), { mode: 0o600 })
+    await expect(listGoalAdmissionSessions(f.input, f.effective)).resolves.toEqual(['session-a'])
+    await expect(configureGoalAdmission(f.input, f.effective, path)).resolves.toMatchObject({ sessionId: 'session-a' })
+    const configured = await readFile(f.patchPath, 'utf8')
+    const store = new DeliveryStore({ path: f.prepared.databasePath })
+    store.createBinding({ conversation: { channel: 'web', account: 'web', tenant: 'local', kind: 'dm', chat: 'session-b' }, principal: f.snapshot.binding.principal,
+      workspace: f.input.workspace, agentPreset: f.input.preset, sessionId: 'session-b', policyRef: 'owner-dm' })
+    store.close()
+    await expect(listGoalAdmissionSessions(f.input, configured)).resolves.toEqual(['session-a', 'session-b'])
+    await expect(configureGoalAdmission(f.input, configured, path)).rejects.toThrow(/multiple idle owner sessions; choose --session-id from: session-a, session-b/)
+    expect(await readFile(f.patchPath, 'utf8')).toBe(configured)
+  })
+
   test('parses only complete bounded JSON task data', () => {
-    expect(parseGoalAdmissionTask(task()).model).toBe('deepseek-v4-flash')
+    const parsed = parseGoalAdmissionTask(task())
+    expect(parsed.version === 1 && parsed.model).toBe('deepseek-v4-flash')
     expect(() => parseGoalAdmissionTask('{"version":1}')).toThrow(/fields/)
     expect(() => parseGoalAdmissionTask(`${task()} trailing`)).toThrow(/JSON/)
   })

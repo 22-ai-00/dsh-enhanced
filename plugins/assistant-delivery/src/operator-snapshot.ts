@@ -51,6 +51,25 @@ function number(value: unknown, min = 0): value is number { return typeof value 
 function equal(left: unknown, right: unknown): boolean { return JSON.stringify(left) === JSON.stringify(right) }
 function identifier(value: unknown, prefix: string): value is string { return typeof value === 'string' && new RegExp(`^${prefix}[0-9a-f-]{8,}$`, 'u').test(value) }
 
+function inspectRow(input: ActiveWebOwnerBindingQuery, expected: ExternalPrincipalKey, row: Row): ActiveWebOwnerBindingInspection {
+  if (row.lease_state !== null && row.lease_state !== 'released') return Object.freeze({ status: 'busy' })
+  const conversation = canonicalConversation(JSON.parse(row.conversation_json))
+  const bindingPrincipal = canonicalPrincipal(JSON.parse(row.binding_principal_json))
+  const ownerPrincipal = canonicalPrincipal(JSON.parse(row.owner_principal_json))
+  const expectedConversation = { channel: 'web', account: expected.account, tenant: expected.tenant, kind: 'dm' as const, chat: input.sessionId }
+  if (row.conversation_json !== JSON.stringify(conversation) || row.binding_principal_json !== JSON.stringify(bindingPrincipal) || row.owner_principal_json !== JSON.stringify(ownerPrincipal)
+    || !equal(conversation, expectedConversation) || row.session_id !== input.sessionId || !identifier(row.binding_id, 'binding_') || !identifier(row.owner_id, 'principal_')
+    || bindingPrincipal.channel !== 'web' || !equal(bindingPrincipal, expected) || !equal(ownerPrincipal, expected)
+    || row.binding_status !== 'active' || row.owner_role !== 'owner' || row.owner_status !== 'active' || row.linked_to_id !== null
+    || row.workspace !== input.workspace || row.agent_preset !== input.agentPreset || !policyRef(row.policy_ref)
+    || ![row.generation, row.binding_version, row.owner_version].every(value => number(value, 1))
+    || ![row.binding_created_at, row.binding_updated_at, row.owner_created_at, row.owner_updated_at].every(value => number(value))) return mismatch()
+  const binding: ConversationBinding = Object.freeze({ id: row.binding_id, conversation: Object.freeze(conversation), principal: Object.freeze(bindingPrincipal), workspace: row.workspace,
+    agentPreset: row.agent_preset, sessionId: row.session_id, generation: row.generation, policyRef: row.policy_ref, status: 'active', createdAt: row.binding_created_at, updatedAt: row.binding_updated_at, version: row.binding_version })
+  const owner: DeliveryPrincipal = Object.freeze({ id: row.owner_id, principal: Object.freeze(ownerPrincipal), role: 'owner', status: 'active', createdAt: row.owner_created_at, updatedAt: row.owner_updated_at, version: row.owner_version })
+  return Object.freeze({ status: 'matched', snapshot: Object.freeze({ binding, owner }) })
+}
+
 /**
  * Opens an already-existing Delivery database read-only. It never invokes the Delivery migrator,
  * creates a database, pairs an owner, reads message content, or acquires a Session lease.
@@ -85,22 +104,7 @@ export function inspectActiveWebOwnerBindingLocally(input: ActiveWebOwnerBinding
     `).all(input.sessionId) as Row[]
     if (rows.length !== 1) return mismatch()
     const row = rows[0]!
-    if (row.lease_state !== null && row.lease_state !== 'released') return Object.freeze({ status: 'busy' })
-    const conversation = canonicalConversation(JSON.parse(row.conversation_json))
-    const bindingPrincipal = canonicalPrincipal(JSON.parse(row.binding_principal_json))
-    const ownerPrincipal = canonicalPrincipal(JSON.parse(row.owner_principal_json))
-    const expectedConversation = { channel: 'web', account: expected.account, tenant: expected.tenant, kind: 'dm' as const, chat: input.sessionId }
-    if (row.conversation_json !== JSON.stringify(conversation) || row.binding_principal_json !== JSON.stringify(bindingPrincipal) || row.owner_principal_json !== JSON.stringify(ownerPrincipal)
-      || !equal(conversation, expectedConversation) || row.session_id !== input.sessionId || !identifier(row.binding_id, 'binding_') || !identifier(row.owner_id, 'principal_')
-      || bindingPrincipal.channel !== 'web' || !equal(bindingPrincipal, expected) || !equal(ownerPrincipal, expected)
-      || row.binding_status !== 'active' || row.owner_role !== 'owner' || row.owner_status !== 'active' || row.linked_to_id !== null
-      || row.workspace !== input.workspace || row.agent_preset !== input.agentPreset || !policyRef(row.policy_ref)
-      || ![row.generation, row.binding_version, row.owner_version].every(value => number(value, 1))
-      || ![row.binding_created_at, row.binding_updated_at, row.owner_created_at, row.owner_updated_at].every(value => number(value))) return mismatch()
-    const binding: ConversationBinding = Object.freeze({ id: row.binding_id, conversation: Object.freeze(conversation), principal: Object.freeze(bindingPrincipal), workspace: row.workspace,
-      agentPreset: row.agent_preset, sessionId: row.session_id, generation: row.generation, policyRef: row.policy_ref, status: 'active', createdAt: row.binding_created_at, updatedAt: row.binding_updated_at, version: row.binding_version })
-    const owner: DeliveryPrincipal = Object.freeze({ id: row.owner_id, principal: Object.freeze(ownerPrincipal), role: 'owner', status: 'active', createdAt: row.owner_created_at, updatedAt: row.owner_updated_at, version: row.owner_version })
-    return Object.freeze({ status: 'matched', snapshot: Object.freeze({ binding, owner }) })
+    return inspectRow(input, expected, row)
   } catch (error) {
     if (error instanceof Error && /(?:busy|locked)/iu.test(error.message)) return Object.freeze({ status: 'busy' })
     return unavailable()
@@ -108,4 +112,52 @@ export function inspectActiveWebOwnerBindingLocally(input: ActiveWebOwnerBinding
     try { database?.exec('ROLLBACK') } catch {}
     try { database?.close() } catch {}
   }
+}
+
+
+export type ActiveIdleWebOwnerBindingsInspection =
+  | Readonly<{ status: 'matched'; snapshots: readonly ActiveWebOwnerBindingSnapshot[] }>
+  | Readonly<{ status: 'unavailable'; reason: 'invalid-scope' | 'snapshot-unavailable' | 'too-many-sessions' }>
+
+/** Bounded operator discovery in one read-only snapshot; it creates no sessions or bindings. */
+export function listActiveIdleWebOwnerBindingsLocally(input: Omit<ActiveWebOwnerBindingQuery, 'sessionId'>): ActiveIdleWebOwnerBindingsInspection {
+  let expected: ExternalPrincipalKey
+  try {
+    expected = canonicalPrincipal(input.expectedPrincipal)
+    if (expected.channel !== 'web' || !isAbsolute(input.workspace) || typeof input.agentPreset !== 'string' || !input.agentPreset) return { status: 'unavailable', reason: 'invalid-scope' }
+  } catch { return { status: 'unavailable', reason: 'invalid-scope' } }
+  const path = privateDatabase(input.databasePath)
+  if (!path) return { status: 'unavailable', reason: 'snapshot-unavailable' }
+  let database: DatabaseSync | undefined
+  try {
+    database = new DatabaseSync(path, { readOnly: true })
+    database.exec('PRAGMA query_only = ON; PRAGMA busy_timeout = 100; BEGIN')
+    if ((database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version !== deliverySchemaVersion) return { status: 'unavailable', reason: 'snapshot-unavailable' }
+    const rows = database.prepare(`
+      SELECT binding.id AS binding_id, binding.conversation_json, binding.principal_json AS binding_principal_json,
+        binding.workspace, binding.agent_preset, binding.session_id, binding.generation, binding.policy_ref,
+        binding.status AS binding_status, binding.created_at AS binding_created_at, binding.updated_at AS binding_updated_at, binding.version AS binding_version,
+        owner.id AS owner_id, owner.principal_json AS owner_principal_json, owner.role AS owner_role, owner.status AS owner_status,
+        owner.linked_to_id, owner.created_at AS owner_created_at, owner.updated_at AS owner_updated_at, owner.version AS owner_version,
+        lease.state AS lease_state
+      FROM conversation_bindings AS binding
+      JOIN delivery_principals AS owner ON owner.id = binding.principal_id
+      LEFT JOIN delivery_session_leases AS lease ON lease.session_id = binding.session_id
+      WHERE owner.principal_json = ? AND binding.workspace = ? AND binding.agent_preset = ?
+        AND owner.role = 'owner' AND owner.status = 'active' AND binding.status = 'active'
+        AND (lease.state IS NULL OR lease.state = 'released')
+      ORDER BY binding.session_id LIMIT 101
+    `).all(JSON.stringify(expected), input.workspace, input.agentPreset) as Row[]
+    if (rows.length > 100) return { status: 'unavailable', reason: 'too-many-sessions' }
+    const snapshots: ActiveWebOwnerBindingSnapshot[] = []
+    const seen = new Set<string>()
+    for (const row of rows) {
+      if (seen.has(row.session_id)) return { status: 'unavailable', reason: 'snapshot-unavailable' }
+      const checked = inspectRow({ ...input, sessionId: row.session_id }, expected, row)
+      if (checked.status !== 'matched') return { status: 'unavailable', reason: 'snapshot-unavailable' }
+      seen.add(row.session_id); snapshots.push(checked.snapshot)
+    }
+    return Object.freeze({ status: 'matched', snapshots: Object.freeze(snapshots) })
+  } catch { return { status: 'unavailable', reason: 'snapshot-unavailable' } }
+  finally { try { database?.exec('ROLLBACK') } catch {} try { database?.close() } catch {} }
 }

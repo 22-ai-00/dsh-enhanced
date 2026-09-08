@@ -36,7 +36,7 @@
 
 `web` 是实验入口：它安装 core、Delivery、Goals 与 Web owner，并在第一次配置组合/activation probe 前运行 profile 内的 `dsh-web-owner-setup`，使用 `web/account=<profile>/tenant=local/user=operator` 的固定本机 owner。它不接入 Lark、不启动常驻服务，也不提高原生权限默认值。该入口尚不代表完整自治或真实模型验收；仍应按部署的模型、权限和工作区边界单独验证。Web owner 复用有效的 Delivery databasePath（默认是 `$DSH_HOME/assistant-delivery/state.sqlite`），不会替换或复活已有 owner；若另一 profile 的 Lark 也共享该数据库，setup 会拒绝，需使用独立的 `DSH_HOME`。为避免同一 profile 的 owner 语义混杂，已有启用 Lark channel、`--lark configure|keep`，或 `--agent-tools` 非 `preserve` 时会被拒绝。
 
-`autonomy` 是显式选择的实验性离线执行入口，安装 Web 场景以及 Isolation、Actions、Keychain、Evaluation 和 Verifier。当前使用本仓库本地安装器；这些新增能力尚未作为完整自治产品发布。
+`autonomy` 是显式选择的实验性离线执行入口，安装 Web 场景以及 Isolation、Actions、Keychain、Evaluation、Verifier、Event Triggers、Proactive 和 Skills。后面三者没有匹配授权时保持静默：不会自动创建任务、续期或发起网络请求。当前使用本仓库本地安装器；这些新增能力尚未作为完整自治产品发布。
 
 ```sh
 ./scripts/install/install-local.sh --scenario autonomy --workspace "$PWD" \
@@ -57,9 +57,9 @@ autonomy 安装在 Host 激活检查后还会执行有限隔离诊断；已撤�
 
 ## 为已有 Web Session 配置有限 Goal admission
 
-`autonomy` 安装完成后，`dsh-web-owner-setup` 可通过 `--goal-admission <private-json>` 和 `--session-id "$existingSessionId"` 写入一个有限目标 admission。先停止目标 Host，任务 JSON 必须是工作区外的绝对路径、当前用户所有并为 `0600`；随后重启 Host 才会读取新 patch。该 CLI 当前没有专用 Session ID 发现命令，也不保证 Web UI 显示它；操作者必须已持有准确的既有 idle Web owner Session ID。
+`autonomy` 安装完成后，`dsh-web-owner-setup` 可通过 `--goal-admission <private-json> [--session-id "$existingSessionId"]` 写入一个有限目标 admission。先停止目标 Host，任务 JSON 必须是工作区外的绝对路径、当前用户所有并为 `0600`；随后重启 Host 才会读取新 patch。先运行 `--list-goal-sessions` 查看当前 owner、workspace 和 preset 下的真实 idle Web Session；省略 `--session-id` 时仅在唯一候选时自动选择，多候选会打印可选 ID 并失败。它从不创建或伪造 Session/binding；新 profile 请先从原生 Web UI 打开一次。
 
-任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次调用预留至少 `2097152` input tokens；没有 USD 硬预算，也不接受 `costUsdMicros`。它固定 provider endpoint，使用 credential reference（如 `DEEPSEEK_API_KEY`），不接受明文 key。任务还必须提供有限的 isolated verification cases；可选 wake 也有独立次数、延迟和运行期限。重启后需在已有 Session 中选择 `deepseek-goal-metered` 下的任务模型；已有 Session/settings 模型选择不会被 CLI 自动迁移。
+v1 任务只能选 `deepseek-v4-flash` 或 `deepseek-v4-pro`，并需为每次调用预留至少 `2097152` input tokens；没有 USD 硬预算，也不接受 `costUsdMicros`。它固定 provider endpoint，使用 credential reference（如 `DEEPSEEK_API_KEY`），不接受明文 key。v2 任务使用 `{ "route": { "provider", "model" } }` 和 `{ "mode": "calls", "routes": [同一精确 route] }`；route 必须与实际配置的 `agent-default-model` 完全相同，setup 不会复制 secret 或修改模型配置。v2 硬限制为模型/工具请求数、时长和单次输出上限；usage 若由 adapter 提供仅作记录，不是 token/USD 硬限。任务还必须提供有限的 isolated verification cases；可选 wake 也有独立次数、延迟和运行期限。重启后 v1 需在已有 Session 中选择 `deepseek-goal-metered` 下的任务模型；v2 沿用已配置 route。
 
 此操作不会续期或重置 installer-managed Isolation grant；与本次任务要求冲突的已有受管配置或同 ID 条目会拒绝，不被覆盖。该精确 Session 只用于核验 owner 和可选 wake route，profiles 绑定 owner、scope 和 objective。成功只表示本地配置、已有 Web owner snapshot 和持久 grant 在写入时一致；不代表真实模型/网络调用、业务 Goal 完成、独立验收成功或完整自治功能已交付。详见 [Web owner Goal admission](../../plugins/assistant-web-owner/README.md#有限-goal-admission实验性)。
 

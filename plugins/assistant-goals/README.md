@@ -252,3 +252,5 @@ v4 的 step / whole-goal profile 可引用 Verifier 的 `isolated-process-behavi
 预授权绑定 shipped Goals 插件注册的 exact `goal_create` 工具，不授予 `goal_control`、其他 shell 或跨 owner 操作权限。其可选 `start_native_rounds` 只接受 boolean：默认 false，创建成功后当前 owner 回合仍可调用 `goal_schedule` 或 `goal_wait_event`；true 仅在成功创建后结束当前 owner 回合，让 Host 的原生 goal driver 接续下一回合，不扩展任何权限。Isolation 管理的 scope 仅为这个已通过预授权的创建调用开放路由。生产计量器与任务验收 profile 仍须由 Host 配置，安装场景不会从任意自然语言自动产生可信成功条件。
 
 Host 可以调用 `inspectOwnerGoalExecution`，按当前 Delivery owner route、principal lineage、workspace/preset 和精确 Session/业务 goal 读取结束后的持久执行证据。它不要求旧 Agent 仍在线，不创建或恢复 Agent；读前后都重验路由。快照明确把 native 状态标成历史观测，返回完整策略账本、每轮 outcome assessment 的 triggerRunId 以及重新验证后的 contract/receipt。无法匹配的验收项显示 unavailable，不能替代当前可信成功；该入口不注册为模型工具。
+
+When bounded preauthorized creation is configured but no Goal exists, the current authenticated owner turn receives a short native-goal entry explanation. Snapshot/create Policy and live owner-turn checks still apply; the explanation neither creates a Goal nor authorizes an objective, and does not prescribe implementation tools.

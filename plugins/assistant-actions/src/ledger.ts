@@ -2,9 +2,9 @@ import { createHash, randomUUID } from 'node:crypto'
 import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
-import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, CommitRequest } from './types.js'
+import type { ActionAuthority, ActionGrant, ActionIdentity, ActionRecord, ActionResult, WorkflowRequest } from './types.js'
 
-const schemaVersion = 1
+const schemaVersion = 2
 const maxRecords = 10_000
 const maxActiveActions = 2
 
@@ -17,7 +17,7 @@ export class ActionLedgerError extends Error {
 
 type GrantRow = { id: string; revision: number; grant_json: string; revoked: number }
 type RecordRow = {
-  id: string; identity_json: string; session_id: string; grant_id: string; idempotency_digest: string; grant_revision: number; repository: string; branch: string; expected_head_oid: string; request_digest: string
+  kind: ActionRecord['kind']; id: string; identity_json: string; session_id: string; grant_id: string; idempotency_digest: string; grant_revision: number; repository: string; branch: string; expected_head_oid: string; request_digest: string
   bytes: number; expires_at: number; status: ActionRecord['status']; version: number; result_json: string | null
 }
 
@@ -96,14 +96,34 @@ function identityInput(value: unknown): ActionIdentity {
 }
 
 function grantInput(value: unknown): ActionGrant {
-  const input = object(value, ['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'repository', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes'])
+  const input = object(value, ['id', 'revision', 'principalDigest', 'principalRecordId', 'principalVersion', 'workspace', 'agentPreset', 'repository', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes'], ['repoWorkflow'])
   const identity = identityInput({ principalDigest: input.principalDigest, principalRecordId: input.principalRecordId, principalVersion: input.principalVersion, workspace: input.workspace, agentPreset: input.agentPreset })
   const paths = array(input.paths, 1_000).map(validPath)
   if (paths.length === 0 || new Set(paths).size !== paths.length) fail('invalid-input')
-  return Object.freeze({ ...identity, id: text(input.id), revision: integer(input.revision, 1), repository: text(input.repository), branch: text(input.branch), paths, credentialHandle: text(input.credentialHandle), expiresAt: integer(input.expiresAt, 0), maxActions: integer(input.maxActions, 1, maxRecords), maxTotalBytes: integer(input.maxTotalBytes, 0) })
+  const workflow = input.repoWorkflow === undefined ? undefined : object(input.repoWorkflow, ['baseBranch', 'allowBranchCreate', 'allowPullRequest'])
+  if (workflow && (typeof workflow.allowBranchCreate !== 'boolean' || typeof workflow.allowPullRequest !== 'boolean')) fail('invalid-input')
+  return Object.freeze({ ...identity, id: text(input.id), revision: integer(input.revision, 1), repository: text(input.repository), branch: text(input.branch), paths, credentialHandle: text(input.credentialHandle), expiresAt: integer(input.expiresAt, 0), maxActions: integer(input.maxActions, 1, maxRecords), maxTotalBytes: integer(input.maxTotalBytes, 0), ...(workflow ? { repoWorkflow: Object.freeze({ baseBranch: text(workflow.baseBranch), allowBranchCreate: workflow.allowBranchCreate as boolean, allowPullRequest: workflow.allowPullRequest as boolean }) } : {}) })
 }
 
-function requestInput(value: unknown): CommitRequest {
+export function normalizeWorkflow(value: unknown): WorkflowRequest {
+  if (plain(value) && own(value, 'operation')) {
+    const input = object(value, ['operation', 'grantId', 'idempotencyKey', 'kind'], ['path', 'pullRequestNumber'])
+    if (input.operation !== 'inspect' || !['repository', 'branch', 'file', 'pull-request', 'checks', 'reviews'].includes(String(input.kind))) fail('invalid-input')
+    const needsPr = ['pull-request', 'checks', 'reviews'].includes(String(input.kind))
+    if (own(input, 'path') !== (input.kind === 'file') || own(input, 'pullRequestNumber') !== needsPr) fail('invalid-input')
+    return Object.freeze({ operation: 'inspect', grantId: text(input.grantId), idempotencyKey: text(input.idempotencyKey), kind: input.kind as import('./types.js').InspectRequest['kind'],
+      ...(input.kind === 'file' ? { path: validPath(input.path) } : {}), ...(needsPr ? { pullRequestNumber: integer(input.pullRequestNumber, 1) } : {}) })
+  }
+  if (plain(value) && Object.prototype.hasOwnProperty.call(value, 'baseHeadOid')) {
+    const input = object(value, ['grantId', 'idempotencyKey', 'baseHeadOid']); const baseHeadOid = text(input.baseHeadOid, 40)
+    if (!/^[0-9a-f]{40}$/iu.test(baseHeadOid)) fail('invalid-input')
+    return Object.freeze({ grantId: text(input.grantId), idempotencyKey: text(input.idempotencyKey), baseHeadOid })
+  }
+  if (plain(value) && Object.prototype.hasOwnProperty.call(value, 'title')) {
+    const input = object(value, ['grantId', 'idempotencyKey', 'expectedHeadOid', 'title', 'body']); const expectedHeadOid = text(input.expectedHeadOid, 40)
+    if (!/^[0-9a-f]{40}$/iu.test(expectedHeadOid)) fail('invalid-input')
+    return Object.freeze({ grantId: text(input.grantId), idempotencyKey: text(input.idempotencyKey), expectedHeadOid, title: text(input.title, 200), body: text(input.body, 65_536, 0) })
+  }
   const input = object(value, ['grantId', 'idempotencyKey', 'expectedHeadOid', 'headline', 'files'])
   const files = array(input.files, 1_000).map(item => {
     const file = object(item, ['path', 'content'])
@@ -116,11 +136,13 @@ function requestInput(value: unknown): CommitRequest {
 }
 
 function resultInput(value: unknown): ActionResult {
-  const input = object(value, ['actionId', 'status'], ['commitOid', 'reason'])
+  const input = object(value, ['actionId', 'status'], ['commitOid', 'reason', 'branch', 'pullRequestNumber'])
   if (typeof input.status !== 'string' || !['succeeded', 'failed', 'unknown'].includes(input.status)) fail('invalid-input')
   if (own(input, 'commitOid')) text(input.commitOid)
   if (own(input, 'reason')) text(input.reason, 4_096)
-  return Object.freeze({ actionId: text(input.actionId), status: input.status as ActionResult['status'], ...(own(input, 'commitOid') ? { commitOid: input.commitOid as string } : {}), ...(own(input, 'reason') ? { reason: input.reason as string } : {}) })
+  if (own(input, 'branch')) text(input.branch, 256)
+  if (own(input, 'pullRequestNumber')) integer(input.pullRequestNumber, 1)
+  return Object.freeze({ actionId: text(input.actionId), status: input.status as ActionResult['status'], ...(own(input, 'commitOid') ? { commitOid: input.commitOid as string } : {}), ...(own(input, 'reason') ? { reason: input.reason as string } : {}), ...(own(input, 'branch') ? { branch: input.branch as string } : {}), ...(own(input, 'pullRequestNumber') ? { pullRequestNumber: input.pullRequestNumber as number } : {}) })
 }
 
 function authorityInput(value: unknown): ActionAuthority {
@@ -161,14 +183,15 @@ function open(path: string): DatabaseSync {
       BEGIN IMMEDIATE;
       CREATE TABLE grants (id TEXT NOT NULL, revision INTEGER NOT NULL, grant_json TEXT NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0, 1)), PRIMARY KEY(id, revision)) STRICT, WITHOUT ROWID;
       CREATE TABLE grant_heads (id TEXT PRIMARY KEY, revision INTEGER NOT NULL, revoked INTEGER NOT NULL CHECK(revoked IN (0, 1)), FOREIGN KEY(id, revision) REFERENCES grants(id, revision)) STRICT;
-      CREATE TABLE actions (id TEXT PRIMARY KEY, identity_json TEXT NOT NULL, session_id TEXT NOT NULL, grant_id TEXT NOT NULL, idempotency_digest TEXT NOT NULL, grant_revision INTEGER NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, expected_head_oid TEXT NOT NULL, request_digest TEXT NOT NULL, bytes INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('prepared', 'dispatched', 'succeeded', 'failed', 'unknown')), version INTEGER NOT NULL, result_json TEXT, UNIQUE(identity_json, session_id, grant_id, idempotency_digest), FOREIGN KEY(grant_id, grant_revision) REFERENCES grants(id, revision)) STRICT;
+      CREATE TABLE actions (kind TEXT NOT NULL DEFAULT 'commit' CHECK(kind IN ('commit', 'branch', 'pull-request', 'inspect')), id TEXT PRIMARY KEY, identity_json TEXT NOT NULL, session_id TEXT NOT NULL, grant_id TEXT NOT NULL, idempotency_digest TEXT NOT NULL, grant_revision INTEGER NOT NULL, repository TEXT NOT NULL, branch TEXT NOT NULL, expected_head_oid TEXT NOT NULL, request_digest TEXT NOT NULL, bytes INTEGER NOT NULL, expires_at INTEGER NOT NULL, status TEXT NOT NULL CHECK(status IN ('prepared', 'dispatched', 'succeeded', 'failed', 'unknown')), version INTEGER NOT NULL, result_json TEXT, UNIQUE(identity_json, session_id, grant_id, idempotency_digest), FOREIGN KEY(grant_id, grant_revision) REFERENCES grants(id, revision)) STRICT;
       CREATE TABLE controller (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), owner_id TEXT NOT NULL, fence INTEGER NOT NULL, expires_at INTEGER NOT NULL) STRICT;
       CREATE TABLE audit (sequence INTEGER PRIMARY KEY, kind TEXT NOT NULL, subject_id TEXT NOT NULL, revision INTEGER, recorded_at INTEGER NOT NULL) STRICT;
       CREATE INDEX actions_grant ON actions(grant_id, grant_revision);
       CREATE INDEX actions_destination_head ON actions(repository, branch, expected_head_oid, status);
-      PRAGMA user_version = 1;
+      PRAGMA user_version = 2;
       COMMIT;`)
-    if (version !== 0 && version !== schemaVersion) fail('schema')
+    if (version === 1) database.exec("BEGIN IMMEDIATE; ALTER TABLE actions ADD COLUMN kind TEXT NOT NULL DEFAULT 'commit' CHECK(kind IN ('commit', 'branch', 'pull-request', 'inspect')); PRAGMA user_version = 2; COMMIT;")
+    if (![0, 1, schemaVersion].includes(version)) fail('schema')
     const tables = (database.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name").all() as Array<{ name: string }>).map(row => row.name)
     if (!equal(tables, ['actions', 'audit', 'controller', 'grant_heads', 'grants'])) fail('schema')
     const strict = database.prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%'").all() as Array<{ sql: string }>
@@ -227,6 +250,7 @@ export class ActionLedger {
     try {
       const id = text(row.id); const identity = identityInput(storedJson(row.identity_json)); const sessionId = text(row.session_id); const grantId = text(row.grant_id)
       const grantRevision = integer(row.grant_revision, 1); digest(row.idempotency_digest); const requestDigest = digest(row.request_digest); const bytes = integer(row.bytes, 0); const expiresAt = integer(row.expires_at, 0); const version = integer(row.version, 1)
+      if (!['commit', 'branch', 'pull-request', 'inspect'].includes(row.kind)) fail('schema')
       if (!['prepared', 'dispatched', 'succeeded', 'failed', 'unknown'].includes(row.status)) fail('schema')
       const status = row.status as ActionRecord['status']; const terminal = ['succeeded', 'failed', 'unknown'].includes(status)
       if (terminal !== (row.result_json !== null)) fail('schema')
@@ -234,8 +258,8 @@ export class ActionLedger {
       if (result && (result.actionId !== id || result.status !== status)) fail('schema')
       const grant = this.#grantRevision(grantId, grantRevision)
       const grantIdentity: ActionIdentity = { principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: grant.workspace, agentPreset: grant.agentPreset }
-      if (!equal(identity, grantIdentity) || grant.repository !== text(row.repository) || grant.branch !== text(row.branch) || text(row.expected_head_oid, 40) !== row.expected_head_oid || !/^[0-9a-f]{40}$/iu.test(row.expected_head_oid)) fail('schema')
-      return Object.freeze({ id, identity, sessionId, grantId, grantRevision, requestDigest, bytes, expiresAt, status, version, ...(result ? { result } : {}) })
+      if (!equal(identity, grantIdentity) || grant.repository !== text(row.repository) || grant.branch !== text(row.branch) || (row.kind === 'inspect' ? row.expected_head_oid !== '' : !/^[0-9a-f]{40}$/iu.test(row.expected_head_oid))) fail('schema')
+      return Object.freeze({ kind: row.kind, id, identity, sessionId, grantId, grantRevision, requestDigest, bytes, expiresAt, status, version, ...(result ? { result } : {}) })
     } catch { return fail('schema') }
   }
   #currentGrant(id: string): GrantRow | undefined {
@@ -312,10 +336,10 @@ export class ActionLedger {
   }
   grant(id: string): ActionGrant | undefined { const row = this.#currentGrant(text(id)); return !row || row.revoked ? undefined : this.#grantRow(row) }
 
-  prepare(input: Readonly<{ identity: ActionIdentity; sessionId: string; request: CommitRequest; bytes: number; authority: ActionAuthority; leaseMs?: number }>): { record: ActionRecord; created: boolean } {
+  prepare(input: Readonly<{ identity: ActionIdentity; sessionId: string; request: WorkflowRequest; bytes: number; authority: ActionAuthority; leaseMs?: number }>): { record: ActionRecord; created: boolean } {
     const args = object(input, ['identity', 'sessionId', 'request', 'bytes', 'authority'], ['leaseMs'])
-    const identity = identityInput(args.identity); const sessionId = text(args.sessionId); const request = requestInput(args.request); const bytes = integer(args.bytes, 0); const lease = own(args, 'leaseMs') ? integer(args.leaseMs, 1, 30_000) : 30_000
-    const calculated = Buffer.byteLength(request.headline, 'utf8') + request.files.reduce((total, file) => total + Buffer.byteLength(file.path, 'utf8') + Buffer.byteLength(file.content, 'utf8'), 0); if (calculated !== bytes) fail('invalid-input')
+    const identity = identityInput(args.identity); const sessionId = text(args.sessionId); const request = normalizeWorkflow(args.request); const bytes = integer(args.bytes, 0); const lease = own(args, 'leaseMs') ? integer(args.leaseMs, 1, 30_000) : 30_000
+    const calculated = 'files' in request ? Buffer.byteLength(request.headline, 'utf8') + request.files.reduce((total, file) => total + Buffer.byteLength(file.path, 'utf8') + Buffer.byteLength(file.content, 'utf8'), 0) : Buffer.byteLength(stableJson(request), 'utf8'); if (calculated !== bytes) fail('invalid-input')
     const digest = createHash('sha256').update(stableJson(request)).digest('hex'); const idempotencyDigest = createHash('sha256').update(request.idempotencyKey).digest('hex'); const now = this.#time()
     this.#database.exec('BEGIN IMMEDIATE')
     try {
@@ -327,16 +351,24 @@ export class ActionLedger {
       }
       const grantRow = this.#currentGrant(request.grantId); if (!grantRow || grantRow.revoked) fail('grant')
       const grant = this.#grantRow(grantRow)
-      if (!equal(identity, { principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: grant.workspace, agentPreset: grant.agentPreset }) || grant.expiresAt <= now || !request.files.every(file => grant.paths.includes(file.path))) fail('grant')
-      const uncertain = this.#database.prepare("SELECT 1 FROM actions WHERE repository = ? AND branch = ? AND expected_head_oid = ? AND status IN ('dispatched', 'unknown') LIMIT 1").get(grant.repository, grant.branch, request.expectedHeadOid)
-      if (uncertain) fail('state')
-      const active = (this.#database.prepare("SELECT COUNT(*) AS count FROM actions WHERE status IN ('prepared', 'dispatched', 'unknown')").get() as { count: number }).count
+      if (!equal(identity, { principalDigest: grant.principalDigest, principalRecordId: grant.principalRecordId, principalVersion: grant.principalVersion, workspace: grant.workspace, agentPreset: grant.agentPreset }) || grant.expiresAt <= now || ('files' in request && !request.files.every(file => grant.paths.includes(file.path)))) fail('grant')
+      const kind = 'operation' in request ? 'inspect' : 'files' in request ? 'commit' : 'baseHeadOid' in request ? 'branch' : 'pull-request'
+      if ((kind === 'branch' && !grant.repoWorkflow?.allowBranchCreate) || (kind === 'pull-request' && !grant.repoWorkflow?.allowPullRequest)
+        || ('operation' in request && ((request.kind === 'file' && !grant.paths.includes(request.path!)) || (['pull-request', 'checks', 'reviews'].includes(request.kind) && !grant.repoWorkflow)))) fail('grant')
+      const head = 'operation' in request ? '' : 'baseHeadOid' in request ? request.baseHeadOid : request.expectedHeadOid
+      // An uncertain branch/PR creation must not be repeated with a new key or
+      // head OID. Reads remain available to investigate uncertain mutations.
+      if (kind !== 'inspect') {
+        const uncertain = this.#database.prepare("SELECT 1 FROM actions WHERE repository = ? AND branch = ? AND kind != 'inspect' AND status IN ('dispatched', 'unknown') AND (expected_head_oid = ? OR kind = 'branch' OR (kind = 'pull-request' AND ? = 'pull-request')) LIMIT 1").get(grant.repository, grant.branch, head, kind)
+        if (uncertain) fail('state')
+      }
+      const active = (this.#database.prepare("SELECT COUNT(*) AS count FROM actions WHERE status IN ('prepared', 'dispatched') OR (status = 'unknown' AND kind != 'inspect' AND ? != 'inspect')").get(kind) as { count: number }).count
       if (active >= maxActiveActions) fail('limit')
       const used = this.#database.prepare('SELECT COUNT(*) AS count, COALESCE(SUM(bytes), 0) AS bytes FROM actions WHERE grant_id = ?').get(grant.id) as { count: number; bytes: number }
       const records = (this.#database.prepare('SELECT COUNT(*) AS count FROM actions').get() as { count: number }).count
       if (records >= maxRecords || used.count >= grant.maxActions || used.bytes + bytes > grant.maxTotalBytes) fail('limit')
       const expiresAt = Math.min(after(now, lease), grant.expiresAt); const id = randomUUID()
-      this.#database.prepare('INSERT INTO actions(id, identity_json, session_id, grant_id, idempotency_digest, grant_revision, repository, branch, expected_head_oid, request_digest, bytes, expires_at, status, version, result_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'prepared\', 1, NULL)').run(id, stableJson(identity), sessionId, grant.id, idempotencyDigest, grant.revision, grant.repository, grant.branch, request.expectedHeadOid, digest, bytes, expiresAt)
+      this.#database.prepare('INSERT INTO actions(kind, id, identity_json, session_id, grant_id, idempotency_digest, grant_revision, repository, branch, expected_head_oid, request_digest, bytes, expires_at, status, version, result_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, \'prepared\', 1, NULL)').run(kind, id, stableJson(identity), sessionId, grant.id, idempotencyDigest, grant.revision, grant.repository, grant.branch, head, digest, bytes, expiresAt)
       this.#audit('action-prepared', id, 1, now)
       const row = this.#database.prepare('SELECT * FROM actions WHERE id = ?').get(id) as RecordRow
       this.#database.exec('COMMIT'); return { record: this.#row(row), created: true }
