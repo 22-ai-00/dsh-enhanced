@@ -106,19 +106,19 @@ scope、situation、producer/evaluator id、证据引用和指标属于本地评
 
 报告保留所有计划 cell 作为已验证成功率分母，unknown 和缺测单列，缺失费用/token/返工/人工介入量不会补成零。提供配对胜负、差值和均值/中位数/P95；区间按任务聚类 bootstrap，同题重复不当作独立任务。任一比较臂有缺测或 unknown 就不报告收益差值与区间，不能把基线的未知结果当作失败来制造增益；单臂有 unknown 也不报告其成功率区间。少于两个任务不提供区间。小样本或同质任务仍不足以证明泛化收益，报告始终 `promotionAuthorized: false`。
 
-**当前完成范围：** 冻结协议、持久账本、有界协调器、统计计算、原生 AgentLoop 执行器及 `dsh-benchmark` 命令。默认 `research-v1` 保留 8 道公开研究/注入开发题与 persona 比较；`memory-v2` 增加 6 道公开记忆开发题，覆盖条件、反例、分歧、可见性、撤回和注入。每 cell 使用独立 Context/Session/临时数据库，只做一次无工具模型请求。Memory 两臂使用相同任务、persona、模型、种子记忆和预算，均经过真实 Personal Memory 提案与 Host 审批，只有候选允许自动 snapshot 检索。此对照测量检索可用性，不把额外知识带来的结果变化解释为模型本身变聪明；完整跨日任务、规划/复核/成长组合、生产安装和独立留出仍待分别验收。
+**当前完成范围：** 冻结协议、持久账本、有界协调器、统计计算、原生 AgentLoop 执行器及 `dsh-benchmark` 命令。默认 `research-v1` 保留 8 道公开研究/注入开发题；`memory-v2` 增加 6 道公开记忆开发题。`strategy-v1` 增加 4 道公开合成 shell 开发题：整数汇总、接触区间合并、按频次/字典序词频和依赖拓扑排序。它们是开发语料，不是 holdout，也没有真实模型收益证据。
 
 ### 原生策略比较的 Host 接口
 
-`@dsh-enhanced/assistant-evaluation/benchmark/strategy` 提供冻结策略计划、全 cell 计量器、临时 Delivery owner，以及下文的原生 Goal/独立隔离验收与详细证据对象。它们是后续 `strategy-v1` executor 的组成部分；当前 CLI 仍只支持上面的研究/记忆套件，尚未完成完整策略比较调度、策略语料、实际能力核对及真实模型比较，不能据此声称策略收益。
+`strategy-v1` 已由 `dsh-benchmark corpus|doctor|plan|run|report` 支持。它冻结 `direct` 和 `adaptive-strategy` 两分支、策略执行限额、已安装能力来源与任务/验收摘要；每个 cell 在私有 state 目录保存可重读的详细观察和摘要。模型只能收到公开 objective、提示和示例；独立 verifier 的向量不进入 prompt。
 
-`parseStrategyBenchmarkPlan` 固定两个分支 `direct` / `adaptive-strategy`、共同预算、模型调用上限、单次输出和原生 Goal 轮数。共同 persona/工具/Policy/runtime 与策略 guide/tool/Policy/runtime 分别声明摘要，并派生两分支版本；任意额外版本差异会被拒绝。这只验证声明一致，实际 executor 仍须核对挂载的能力。`strategyBenchmarkJournalPlan` 将完整策略契约绑定到既有 journal，修改限额不能复用旧计划 ID。调用 `installStrategyBenchmarkRequestMeter` 会先核对 exact cell/计划/模型，再安装外层限额；executor 还必须把同一 `maxGoalRounds` 交给真实 Goal。
+`parseStrategyBenchmarkPlan` 固定两个分支 `direct` / `adaptive-strategy`、共同预算、模型调用上限、单次输出和原生 Goal 轮数。共同 persona/工具/Policy/runtime 与策略 guide/tool/Policy/runtime 分别声明摘要，并派生两分支版本；任意额外版本差异会被拒绝。parser 验证声明一致，实际 executor 另外核对挂载的能力。`strategyBenchmarkJournalPlan` 将完整策略契约绑定到既有 journal，修改限额不能复用旧计划 ID。调用 `installStrategyBenchmarkRequestMeter` 会先核对 exact cell/计划/模型，再安装外层限额；executor 将同一 `maxGoalRounds` 交给真实 Goal。
 
-计量器必须在首次入站前安装在专用 Context，覆盖前台、父 Goal 和 child 的全部 `llm/stream` 与工具执行。仅接受可信输入上界和供应商输出上限；estimate/observed 配置显式拒绝。模型流在 dispatch 前共享原子预留，结束后根据完整 usage 结算；取消、缺 usage、异常和提前关闭保留预留，`assertComplete()` 拒绝未结清、空测量或尚在运行的工具。费用为 null 时只约束 token，不声称金额硬限。快照是进程内观察；完整 executor 仍须将它与计划/cell 绑定、持久保存，并与独立验收和资源停止证据核对。取得下游迭代器的 `dispatched` 不是实际付费 HTTP 证明。
+计量器必须在首次入站前安装在专用 Context，覆盖前台、父 Goal 和 child 的全部 `llm/stream` 与工具执行。仅接受可信输入上界和供应商输出上限；estimate/observed 配置显式拒绝。模型流在 dispatch 前共享原子预留，结束后根据完整 usage 结算；取消、缺 usage、异常和提前关闭保留预留，`assertComplete()` 拒绝未结清、空测量或尚在运行的工具。费用为 null 时只约束 token，不声称金额硬限。快照是进程内观察；executor 将它与计划/cell 绑定、持久保存，并与独立验收和资源停止证据核对。取得下游迭代器的 `dispatched` 不是实际付费 HTTP 证明。
 
 `createBenchmarkStrategyOwnerRuntime` 要求全新 Context、两个现存且独立的 canonical 私有目录：候选 workspace 和其外部 stateRoot。它在 stateRoot 独占创建 runtimeRoot，写入 JSONL Session、Delivery/Policy SQLite 及 spool；显式保存空会话头，使原生 Delivery 创建后可以真实恢复。它只配对本地合成 owner、注册本地回复捕获通道；该身份只用于评估，不是对任何真实用户/外部服务的授权，不发现或修改用户 profile，也不发外部通知。只暴露指定工具 allow-list，额外 Policy 规则由可信 Host 提供。模型 adapter 则拥有操作者声明的网络/凭据权限，由调用者安装和销毁。
 
-调用者在返回后、首次 `sendPublicInbound` 前安装 meter、真实 adapter、Goal/Verifier/子任务服务；`pairOwner` 返回真实 Delivery lineage 供验收配置绑定。`waitForQuiescence` 检查 Delivery 无待办/未知状态，不代替目标产物验收。`shutdown` 取消原生 agent、释放服务并保留 runtimeRoot 供取证，不能把卸载成功当作远端请求已停止；有挂起的资源时完整 executor 必须保留 unknown。取证后由调用者移除临时目录。这些私有目录和 allow-list 不构成针对同 UID 任意 Host 代码的 OS 沙箱；候选命令仍须经过后续隔离执行器。新增 JSONL/persistence Host peers 保持可选，不随普通 Evaluation bundle 自动激活。
+executor 在实际每个父请求上比较完整 persona、每个实际工具 schema，并通过 `assistantPolicy.inspectHostConfiguration()` 比较完整 Policy 配置；同时记录已解析安装源码的身份摘要。该检查发现计划与运行时的普通漂移，但不构成对同进程恶意 Host 代码或远端 provider 实现的形式证明。全流程 deadline 覆盖装配、调用、验证和关闭；不能证明停止、usage 或证据完整性时结果保持 `unknown`，不会重放 cell 或启动后续 cell。
 
 ### 开发集命令
 
@@ -127,16 +127,18 @@ dsh-benchmark doctor
 dsh-benchmark corpus
 dsh-benchmark doctor --suite memory-v2
 dsh-benchmark corpus --suite memory-v2
-dsh-benchmark plan --config ./benchmark.json --output ./plan.json
-dsh-benchmark run --config ./benchmark.json --adapter /absolute/trusted-adapter.mjs --database ./private/results.sqlite --output ./report.json
-dsh-benchmark report --database ./private/results.sqlite --plan my-plan --output ./report-copy.json
+dsh-benchmark corpus --suite strategy-v1
+dsh-benchmark doctor --suite strategy-v1 --config ./docs/examples/strategy-benchmark.config.json
+dsh-benchmark plan --config ./docs/examples/strategy-benchmark.config.json --output ./private/strategy-plan.json
+dsh-benchmark run --config ./docs/examples/strategy-benchmark.config.json --adapter /absolute/trusted-adapter.mjs --database ./private/strategy.sqlite --output ./private/strategy-report.json
+dsh-benchmark report --database ./private/strategy.sqlite --plan strategy-public-development --config ./docs/examples/strategy-benchmark.config.json --output ./private/strategy-report-copy.json
 ```
 
-`doctor` 检查所需 Host 包可解析，不证明模型或凭据可用。`plan` 不调用模型，并分别显示整组可保证上限与观测阈值；无法保证的 maximum 字段为 null。`run` 读取配置、冻结计划，再载入操作者指定的可信模块；模块须导出 `createNativeAdapter(model, { ctx, workspace })`，返回 `LlmAdapter`、输入计数函数和 `dispose()`；工厂调用时 live SessionStore/AgentRegistry 已存在，现有只接收 model 的工厂可继续使用。默认计数函数为 `inputTokenUpperBound(options)`；显式 estimate 模式使用 `inputTokenEstimate(options)`，入口 SHA-256 必须同时匹配 `adapterDigest` 与 `tokenCounterDigest`。这是有宿主权限的扩展，不能执行候选生成的不受信任模块；摘要不覆盖传递依赖，也不是同 UID 文件系统攻击防护。原生依赖保持 optional peer，通过 `./benchmark/native` 单独导入；轻量 SDK 不强制加载 AgentLoop。Memory suite 另外要求 `personal-memory` 与 `assistant-policy >=0.1.24 <0.2.0`，只在选择该 suite 后加载，不改日常 bundle 激活。先停止 agent，再释放 Context/SQLite 和 adapter，最后移除临时目录。
+`doctor --suite strategy-v1 --config` 会在不安装依赖、不拉取镜像的前提下检查 Host packages，并执行有界的离线 Docker/image probe；ready 不证明模型凭据或 provider 可用。`plan` 不调用模型。`run` 只装载操作者指定的 trusted adapter，费用和 token 限额来自配置；adapter 入口的 SHA-256 必须同时匹配 `adapterDigest` 与 `tokenCounterDigest`。策略 suite 固定 `inputLimitMode: "upper-bound"` 和 `outputLimitMode: "provider"`；现有 Codex 订阅 adapter 的 estimate/observed 模式不兼容策略运行。`report` 重新打开已保存的 cell 观察和摘要，并从 `--config` 重建当前 plan 进行比对；它不重新激活已关闭 runtime 或重放模型调用。
 
 配置示例、计量协议和限制见 [评测实施文档](../../docs/benchmark-implementation.md)。预算为每 cell 上限；金额单位为美元的百万分之一，计价为每百万 tokens 对应的该单位。`costUsdMicros: null` 明确选择仅 token 预算，模型输入/输出价格也可同时为 null；报告中的未知费用不会填成零。声明金额上限时必须提供非缓存输入、cache read、cache write、输出四类费率，且必须使用输入上界和提供商输出上限；输入预留采用三类输入的最高费率。DSH 的非缓存 input 与两类 cache 相加为实际输入，reasoning 已包含在 output 中，不重复计费。实际使用了缺价的 cache 时，费用保持 null。可信适配器须关闭隐藏自动重试。
 
-某些订阅线路不支持温度或远端输出上限：可以明确设置 `temperature: null`、`inputLimitMode: "estimate"`、`outputLimitMode: "observed"`，且只使用 token 预算。此时输入估算用于调用前筛选，实际 usage 用于调用后核验；超额、缺 usage 或 unknown 会停止后续 cell，不能追回远端消费。计划将不可保证的 maximum token 字段标为 null。仓库提供 [Codex 适配器](../../scripts/benchmark/codex-subscription-adapter.mjs)，复用现有登录与 live Session 身份，仅由操作者显式选择；可选 `DSH_BENCHMARK_TRACE` 将公开开发集输入、输出和 usage 记录到本地指定文件，请仅在需要诊断时启用。
+非策略原生 suite 仍可使用 estimate/observed 的 token-only 配置；这不扩展到 strategy-v1。策略运行创建私有 workspace/state 根并持久化证据，日常 profile 不会安装、启用或加载这些可选 Host peers。
 
 命令使用网络/凭据的权限由可信模型适配器决定；自身读取配置和模块，写独立私有 SQLite 与独占新建的 JSON 报告，创建并清理临时工作目录，不安装提供商、不修改日常 profile。报告不包含模型原始答案，判定绑定答案哈希与开发集验收摘要。`split: holdout` 只声明用途，同 UID 文件或公开仓库中的题目/答案不属于安全隐藏留出。
 
@@ -165,4 +167,4 @@ Legacy schema 7 owner rows are adopted lazily through the exact Host delivery ca
 
 此接口运行本机 Docker 和离线任意候选 shell：输入复制入容器，验证向量只供独立 runner，Host 持久状态保存在候选工作区之外。调用方必须提供受信任 adapter factory、已有私有目录、固定本机镜像及明确限额；不查找或修改用户 profile，不发送真实渠道消息。`execute`/`close` 清理有等待上限，但不合作资源可能仍未停止。adapter factory 与初始装配仍由调用方的整体期限控制，不能把本接口计量窗口视为完整比较墙钟期限。目录权限不隔离同 UID 的可信 Host 代码。
 
-计划中的能力摘要仍是声明，完整 executor 必须核对实际挂载工具、persona、Policy、运行时与 adapter，并把全流程期限/故障证据接入 journal。当前没有 strategy-v1 比较器/CLI/doctor、冻结语料或真实模型收益结论；普通 Evaluation bundle 不自动激活上述可选 Host peers。
+策略 executor 会核对实际挂载工具、完整 persona、完整 Policy 配置、运行时来源和 adapter；这些观察连同全流程故障证据写入 journal 外的私有证据目录。普通 Evaluation bundle 不自动激活上述可选 Host peers，且尚无真实模型收益结论。

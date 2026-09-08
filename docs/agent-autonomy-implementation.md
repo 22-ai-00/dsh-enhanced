@@ -507,3 +507,14 @@ Policy 的 `evaluateAgent` 供授权轮询，只读且不扣预算；稳定 acti
 最终验收（2026-09-08）：根 `CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT=<本地归档目录> DSH_ISOLATION_TEST_IMAGE=<证据中的固定镜像> pnpm check` v2 退出 **0**，主 294 文件 / 3,763 项全通过，无跳过；递归 Evaluation 168、Goals 102、Delivery 705、Isolation 102、Web owner 30 项通过。manifest、零 lint 警告、typecheck/build 和 31 份 dry-run pack 完成；Evaluation 105 个发布文件含新增 runtime/evidence 模块，Goals 80 个，无源码、测试或状态数据库。构建后的公开入口导入 v2 成功；v1 从根目录解析未声明的 Goals 依赖失败，修正检查脚本从 Evaluation 的实际依赖位置解析，生产代码未变。
 
 完整命令、早期失败、最终源码和两分支真实复制对象摘要见 [本批证据](evidence/strategy-goal-cell-2026-09-08.json)。首轮根检查也通过，但期间加强成功证据的全部父子停止/会话归属及序列化输入守卫，因此冻结代码后完整重跑 v2。初始装配/factory 的整体期限、失败 cell 的完整持久证据和能力实装核对仍由后续完整 executor 补齐。C2C `c2c_a945` iteration 3 仅有本地执行记录；所需内置浏览器不可用，未取得 ChatGPT 网页规划或复核。完整 18 项仍未完成。
+
+
+## 2026-09-08：WP04/06 完整策略比较与安装 CLI（基线 `13ef450`）
+
+固定 `strategy-v1` 现在接入串行 BenchmarkExecutor/journal、四道公开开发题和严格 operator 配置，两个比较臂共享模型、总预算和原生 Goal 轮次。每个实际父请求前比对完整 persona、模型工具定义与 scoped registry、真实 Policy 配置/决策及选定安装包源码；Policy 新增只读有效配置接口。全流程 deadline 包含 setup/factory，失败保存当前快照和明确标注的历史观察，保留未结算预留与 unknown，迟到清理不会升级结果或重放执行。
+
+安装后的 `corpus/doctor/plan/run/report` 已跑通。独立打包安装暴露并修正 Goals 的 Verifier peer 下界；四题×两臂×两次重复共 16 cell，经真实原生 Goal/Delivery/Isolation/Verifier 完成错误产物→独立失败→修订→通过。120 次确定性模型请求含 16 次 child，64 份独立回执可回读；同计划再次 run 和 report 均没有新增模型请求。验证脚本曾将 v4 回执字段误写为 verdict，修正为 objectiveStatus 后重读同一份已完成证据通过，未重跑覆盖原记录。
+
+并行包测试进一步暴露：原每向量 1 秒期限包含 Docker 装配，mutation 未确认时保留 unknown，却被比较器错误映射为 completed 并继续。已将公开开发集的完整验证作业期限统一设为 5 秒（仍小于冻结 step/总预算），将所有 whole-goal assessment 纳入停止检查，并在 native outcome unknown 时持久记录 failure、阻止后续 cell。无 artifact 的真实原生回归验证此边界。
+
+完整命令、先前失败、源码/安装包/详细对象哈希与最终独立结论见 [本批证据](evidence/strategy-executor-2026-09-08.json)。模板与使用方式见 [策略比较协议](goal-strategy-evaluation.md)。四题是公开开发集，adapter 是明确夹具；没有真实模型策略收益、付费 API 调用、自动升级或生产推广证明。策略执行只接 upper-bound/provider 限额，现有 Codex 订阅 estimate/observed adapter 不兼容；返工/人工介入/未知价格不填零。下一步验证可兼容实际线路的模型比较，再推进其余工作包；完整 18 项仍为 3 已验证 / 8 实现中 / 7 待做，按依赖与证据连续推进，日/周安排与两周观察均不设等待门槛。

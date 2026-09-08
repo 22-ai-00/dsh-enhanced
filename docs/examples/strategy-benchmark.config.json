@@ -1,0 +1,19 @@
+{
+  "suite": "strategy-v1",
+  "id": "strategy-public-development",
+  "cases": ["integer-sum", "merge-touching-intervals", "word-frequency-lexical-ties", "dependency-topological-order"],
+  "persona": "Build the requested artifact carefully and verify its behavior before finishing.",
+  "model": {
+    "provider": "replace-provider", "model": "replace-model", "temperature": null,
+    "inputLimitMode": "upper-bound", "outputLimitMode": "provider", "maxOutputTokens": 256,
+    "inputUsdMicrosPerMillionTokens": null, "outputUsdMicrosPerMillionTokens": null,
+    "adapterDigest": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tokenCounterDigest": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "budget": { "durationMs": 90000, "inputTokens": 12000, "outputTokens": 4000, "costUsdMicros": null, "toolCalls": 32 },
+  "execution": { "modelCalls": 12, "maxOutputTokensPerCall": 256, "maxGoalRounds": 4 },
+  "repeats": 2, "seed": 7,
+  "image": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "dockerPath": "/usr/bin/docker", "stepMaxDurationMs": 20000, "stopTimeoutMs": 5000,
+  "workspaceDirectory": "/absolute/private/strategy-workspaces", "stateDirectory": "/absolute/private/strategy-state"
+}

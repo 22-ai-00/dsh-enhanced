@@ -5,7 +5,7 @@ import { afterEach, describe, expect, test } from 'vitest'
 import { createTaskAcceptanceContract, createTaskVerificationReceipt } from '@dsh-enhanced/task-acceptance-contract'
 import { benchmarkSchedule } from '../../src/benchmark/schema.ts'
 import { strategyBenchmarkCapabilityVersions, strategyBenchmarkJournalPlan, strategyBenchmarkProtocol, type StrategyBenchmarkPlan } from '../../src/benchmark/strategy-plan.ts'
-import { StrategyEvidenceStore, strategyEvidenceProtocol, type StrategyEvidenceWrite } from '../../src/benchmark/strategy-evidence.ts'
+import { StrategyEvidenceStore, strategyEvidenceProtocol, strategyFailureProtocol, type StrategyEvidenceWrite } from '../../src/benchmark/strategy-evidence.ts'
 
 const roots: string[] = []
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }) })
@@ -32,11 +32,24 @@ function unknownOutcome(): StrategyEvidenceWrite {
   const value = evidence(); const goal = value.native.parent
   const contract = createTaskAcceptanceContract({ protocol: 'task-acceptance/v3', id: 'outcome-contract', scope: { workspace: '/workspace', preset: 'benchmark' }, owner: { principalRecordId: 'owner', principalVersion: 1 }, task: { kind: 'goal-outcome', ref: 'assessment', goal: { id: goal.goalId, definitionVersion: goal.definitionVersion, definitionDigest: goal.definitionDigest, assessmentId: 'assessment', sessionId: goal.sessionId, nativeGoalId: goal.nativeGoalId } }, objective: 'verify goal outcome', profile: { id: 'profile', version: 1, digest: hash('f') }, issuedAt: 1, expiresAt: 10, criteria: [{ id: 'criterion', kind: 'process-behavior', authority: { id: 'authority', digest: hash('e') }, artifactPath: 'result.txt', stdin: '', expectedStdout: '', expectedExitCode: 0 }], bounds: { maxDurationMs: 1, maxEvidenceBytes: 1024 } })
   const receipt = createTaskVerificationReceipt(contract, { protocol: 'task-verification/v3', id: 'outcome-receipt', contractId: contract.id, contractDigest: contract.digest, scope: contract.scope, owner: contract.owner, task: contract.task, results: [{ criterionId: 'criterion', status: 'unknown', reason: 'not-run', evidence: [] }], startedAt: 1, completedAt: 2, validUntil: 10 })
-  value.native = { ...value.native, runs: [{ runId: 'run', executionStatus: 'unknown', quiescent: false }], outcomeAssessments: [{ contract, triggerRunId: 'run', dispatchedAt: 1, execution: { status: 'unknown', quiescent: false, completedAt: 2 } }], selectedOutcomeContractId: contract.id, receipts: [{ runId: 'run', taskKind: 'goal-outcome', contract, receipt, quiescent: false }] }
+  value.outcome = { ...value.outcome, quiescent: false }
+  value.native = { ...value.native, parent: { ...value.native.parent, quiescent: false }, runs: [{ runId: 'run', executionStatus: 'unknown', quiescent: false }], outcomeAssessments: [{ contract, triggerRunId: 'run', dispatchedAt: 1, execution: { status: 'unknown', quiescent: false, completedAt: 2 } }], selectedOutcomeContractId: contract.id, receipts: [{ runId: 'run', taskKind: 'goal-outcome', contract, receipt, quiescent: false }] }
   return value
 }
 
 describe('StrategyEvidenceStore', () => {
+  test('failure objects bind the exact request and preserve unknown observations without becoming acceptance', () => {
+    const value = evidence(); const target = store(root())
+    const input = { protocol: strategyFailureProtocol as typeof strategyFailureProtocol, version: 1 as const, plan: value.plan, request: value.request,
+      reason: 'timeout' as const, observedAt: 10, snapshot: { runtimeRoot: null, stage: 'setup' as const, cleanup: 'unknown' as const, meter: null, goalSnapshot: null, lastGoalObservation: null, failureStage: null } }
+    const saved = target.writeFailure(input)
+    expect(target.readFailure(value.plan, value.request.cell, saved.digest)).toMatchObject({ reason: 'timeout', snapshot: input.snapshot })
+    expect(() => target.read(value.plan, value.request.cell, saved.digest)).toThrow('envelope')
+    expect(() => target.readFailure(value.plan, benchmarkSchedule(strategyBenchmarkJournalPlan(value.plan))[1]!, saved.digest)).toThrow('binding')
+    expect(() => target.writeFailure({ ...input, snapshot: { ...input.snapshot, meter: { ...value.meter, budget: { ...value.meter.budget, inputTokens: 999 } } } })).toThrow('budget drift')
+    const captured = target.writeFailure({ ...input, snapshot: { ...input.snapshot, meter: value.meter, goalSnapshot: { historical: 'not a completion receipt' } } })
+    expect(target.readFailure(value.plan, value.request.cell, captured.digest).snapshot.meter?.traces).toHaveLength(1)
+  })
   test('publishes canonical immutable evidence and exact duplicate writes are idempotent', () => {
     const base = root(); const value = evidence(); const target = store(base); let accessed = false
     const accessor = { ...value }
@@ -66,6 +79,12 @@ describe('StrategyEvidenceStore', () => {
     expect(() => target.read(value.plan, value.request.cell, saved.digest)).toThrow('private')
     const forged = evidence(); forged.meter = { ...forged.meter, modelCalls: 0 }
     expect(() => store(root()).write(forged)).toThrow('aggregate')
+  })
+  test('rejects quiescence that ignores an unsettled whole-goal assessment', () => {
+    const value = unknownOutcome()
+    value.native = { ...value.native, runs: [{ runId: 'run', executionStatus: 'succeeded', quiescent: true }], parent: { ...value.native.parent, quiescent: true } }
+    value.outcome = { ...value.outcome, quiescent: true }
+    expect(() => store(root()).write(value)).toThrow('quiescence')
   })
   test('retains unknown native receipts and unpriced numeric reservations', () => {
     const value = unknownOutcome(); value.meter = { ...value.meter, traces: [{ ...value.meter.traces[0]!, reservedCostUsdMicros: 9 }] }

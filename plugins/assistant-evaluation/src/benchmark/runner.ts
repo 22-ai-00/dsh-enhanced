@@ -26,6 +26,8 @@ export interface BenchmarkExecutionRequest {
  */
 export interface BenchmarkExecutor {
   execute(request: BenchmarkExecutionRequest): Promise<BenchmarkObservation>
+  /** Synchronous Host snapshot after cancellation. Must never wait for possibly live work. */
+  failure?(request: BenchmarkExecutionRequest, reason: Exclude<BenchmarkResult['reason'], 'verified'>): BenchmarkObservation | undefined
 }
 
 export const emptyBenchmarkMetrics = (): BenchmarkMetrics => ({
@@ -113,6 +115,17 @@ export async function runBenchmark(
     } finally {
       if (timer !== undefined) clearTimeout(timer)
       removeAbort?.()
+    }
+    if (result.status === 'unknown') {
+      controller.abort()
+      try {
+        const captured = executor.failure?.(request, result.reason as Exclude<BenchmarkResult['reason'], 'verified'>)
+        if (captured !== undefined) {
+          const value = observation(captured, request)
+          benchmarkAssert(value.verdict === 'unknown', 'failure snapshot cannot upgrade a result')
+          result = { ...result, metrics: { ...value.metrics, latencyMs: result.metrics.latencyMs }, evidenceDigest: value.evidenceDigest }
+        }
+      } catch { /* The original unknown result remains authoritative if diagnostics cannot be saved. */ }
     }
     store.finish(plan.id, result)
     if (result.status === 'unknown') break

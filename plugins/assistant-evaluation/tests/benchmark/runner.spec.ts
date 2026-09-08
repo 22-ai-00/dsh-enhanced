@@ -109,4 +109,34 @@ describe('durable benchmark controller', () => {
       expect((await running)[0]!.reason).toBe('interrupted')
     } finally { store.close() }
   })
+  it('binds a synchronous failure snapshot without awaiting or accepting late success', async () => {
+    const store = new BenchmarkStore(':memory:')
+    const input = plan(); input.budget.durationMs = 10
+    let calls = 0
+    try {
+      const results = await runBenchmark(store, input, {
+        execute() { calls++; return new Promise(() => {}) },
+        failure(request, reason) {
+          expect(request.signal.aborted).toBe(true); expect(reason).toBe('timeout')
+          return { ...observed(request), verdict: 'unknown', metrics: emptyBenchmarkMetrics(), quiescent: false }
+        },
+      })
+      expect(calls).toBe(1)
+      expect(results[0]).toMatchObject({ status: 'unknown', verdict: 'unknown', evidenceDigest: '4'.repeat(64), reason: 'timeout' })
+    } finally { store.close() }
+  })
+  it.each(['upgrade', 'drift', 'throw'] as const)('keeps original unknown when failure diagnostics %s', async defect => {
+    const store = new BenchmarkStore(':memory:')
+    try {
+      const results = await runBenchmark(store, plan(), {
+        async execute() { throw new Error('provider failed') },
+        failure(request) {
+          if (defect === 'throw') throw new Error('diagnostics unavailable')
+          return { ...observed(request), verdict: defect === 'upgrade' ? 'achieved' : 'unknown',
+            inputDigest: defect === 'drift' ? '9'.repeat(64) : request.task.inputDigest }
+        },
+      })
+      expect(results[0]).toMatchObject({ status: 'unknown', verdict: 'unknown', evidenceDigest: null, reason: 'adapter-error' })
+    } finally { store.close() }
+  })
 })

@@ -79,6 +79,14 @@ export interface AssistantPolicyServiceOptions {
   now?: () => number
 }
 
+/** Read-only, Host-only record of the active policy configuration. */
+export interface PolicyHostConfiguration {
+  readonly rules: readonly PolicyRule[]
+  readonly toolDefaultEffect: 'deny' | 'allow'
+  readonly budgets: readonly PolicyBudgetConfig[]
+  readonly autoReview: Readonly<AutoReviewConfig> | null
+}
+
 const subjectKindSchema = Schema.union(['agent', 'background', 'external', '*'] as const)
 const resourceKindSchema = Schema.union([
   'automation',
@@ -218,6 +226,21 @@ function compileBudgets(configs: readonly PolicyBudgetConfig[]): ReadonlyMap<str
   return budgets
 }
 
+function freezeDeep<T>(value: T): T {
+  if (value === null || typeof value !== 'object') return value
+  for (const child of Object.values(value as object)) freezeDeep(child)
+  return Object.freeze(value) as T
+}
+
+function hostConfiguration(input: {
+  rules: readonly PolicyRule[]
+  toolDefaultEffect: 'deny' | 'allow'
+  budgets: readonly PolicyBudgetConfig[]
+  autoReview: Readonly<AutoReviewConfig> | null
+}): PolicyHostConfiguration {
+  return freezeDeep(structuredClone(input)) as PolicyHostConfiguration
+}
+
 export class AssistantPolicyService extends Service {
   static Config = configSchema
 
@@ -225,6 +248,7 @@ export class AssistantPolicyService extends Service {
   private readonly ledger: PolicyLedger
   private readonly budgets: ReadonlyMap<string, PolicyBudgetConfig>
   private readonly toolDefaultEffect: 'deny' | 'allow'
+  private readonly configuration: PolicyHostConfiguration
   private readonly initiators = new WeakMap<Agent, BoundInitiator>()
   private readonly nativeFullAdoptions = sharedNativeFullAdoptions()
   private readonly nativeFullUnsettled = sharedNativeFullUnsettled()
@@ -243,14 +267,16 @@ export class AssistantPolicyService extends Service {
     } catch (error) {
       throw new Error(`assistant-policy: invalid configuration: ${String(error)}`, { cause: error })
     }
-    this.policy = compilePolicy(config.rules ?? [])
-    this.budgets = compileBudgets(config.budgets ?? [])
-    this.toolDefaultEffect = config.toolDefaultEffect ?? 'deny'
+    this.configuration = hostConfiguration({ rules: config.rules ?? [], budgets: config.budgets ?? [],
+      toolDefaultEffect: config.toolDefaultEffect ?? 'deny', autoReview: config.autoReview ?? null })
+    this.policy = compilePolicy(this.configuration.rules)
+    this.budgets = compileBudgets(this.configuration.budgets)
+    this.toolDefaultEffect = this.configuration.toolDefaultEffect
     this.ledger = new PolicyLedger({
       path: config.databasePath,
       ...(options.now === undefined ? {} : { now: options.now }),
     })
-    registerAutoReviewAnswerer(ctx, config.autoReview)
+    registerAutoReviewAnswerer(ctx, this.configuration.autoReview ?? undefined)
 
     // PermissionPresetService predates AssistantPolicy's third permission
     // dimension. Repair exact legacy native-full sessions at creation/resume,
@@ -542,6 +568,12 @@ export class AssistantPolicyService extends Service {
 
   private assertActive(): void {
     if (!this.active) throw new Error('assistant-policy service is disposed')
+  }
+
+  /** Returns a detached Host snapshot; it never exposes ledger or maintenance configuration. */
+  inspectHostConfiguration(): Readonly<PolicyHostConfiguration> {
+    this.assertActive()
+    return hostConfiguration(this.configuration)
   }
 
   evaluate(request: PolicyRequest): PolicyDecision {

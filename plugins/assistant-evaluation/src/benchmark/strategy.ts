@@ -11,6 +11,10 @@ export * from './strategy-meter.js'
 export * from './strategy-owner.js'
 export * from './strategy-goal-runtime.js'
 export * from './strategy-evidence.js'
+export * from './strategy-capabilities.js'
+export * from './strategy-config.js'
+export * from './strategy-corpus.js'
+export * from './strategy-executor.js'
 
 /** Request identity and call/output budgets are checked before installing the cell meter. */
 export function installStrategyBenchmarkRequestMeter(ctx: Context, plan: StrategyBenchmarkPlan,

@@ -7,6 +7,7 @@ import { benchmarkHash, benchmarkObject, benchmarkSchedule } from './schema.js'
 import { parseStrategyBenchmarkPlan, strategyBenchmarkJournalPlan, strategyBenchmarkPlanDigest } from './strategy-plan.js'
 import type { StrategyBenchmarkMeterSnapshot } from './strategy-meter.js'
 import type { BenchmarkBudget, BenchmarkCase, BenchmarkCell, BenchmarkPlan, BenchmarkVariant, BenchmarkVersions } from './types.js'
+import { assertStrategyPolicyConfiguration } from './strategy-policy.js'
 import type { StrategyBenchmarkPlan } from './strategy-plan.js'
 
 export const strategyEvidenceProtocol = 'dsh-native-goal-strategy-evidence/v1'
@@ -26,7 +27,37 @@ export interface StrategyEvidenceWrite {
   outcome: { status: 'completed' | 'unknown'; verdict: 'achieved' | 'not-achieved' | 'unknown'; quiescent: boolean }
 }
 export interface StrategyEvidenceObject extends Omit<StrategyEvidenceWrite, 'plan'> { planDigest: string }
-export interface StrategyEvidenceStoreOptions { stateDirectory: string; candidateWorkspace: string }
+export interface StrategyEvidenceStoreOptions { stateDirectory: string; candidateWorkspace: string; createDirectories?: boolean }
+
+export const strategyFailureProtocol = 'dsh-native-goal-strategy-failure/v1'
+export interface StrategyFailureSnapshot {
+  runtimeRoot: string | null
+  stage: 'setup' | 'executing' | 'cleanup' | 'evidence' | 'closed'
+  cleanup: 'pending' | 'succeeded' | 'unknown'
+  meter: StrategyBenchmarkMeterSnapshot | null
+  /** Current-authority Host observation, or null when no authorized snapshot is available. */
+  goalSnapshot: unknown | null
+  lastGoalObservation: { observedAt: number; value: Readonly<Record<string, unknown>> } | null
+  failureStage: 'setup' | 'executing' | 'cleanup' | 'evidence' | null
+}
+export interface StrategyFailureWrite {
+  protocol: typeof strategyFailureProtocol; version: 1; plan: StrategyBenchmarkPlan; request: StrategyEvidenceRequest
+  reason: 'adapter-error' | 'interrupted' | 'timeout' | 'invalid-observation' | 'budget-exceeded' | 'not-quiescent'
+  observedAt: number
+  snapshot: StrategyFailureSnapshot
+}
+export interface StrategyFailureObject extends Omit<StrategyFailureWrite, 'plan'> { planDigest: string }
+export const strategyCellProtocol = 'dsh-native-goal-strategy-cell/v1'
+export interface StrategyCellWrite {
+  protocol: typeof strategyCellProtocol; version: 1; plan: StrategyBenchmarkPlan; request: StrategyEvidenceRequest
+  nativeEvidenceDigest: string
+  capabilities: {
+    sourceIdentity: unknown
+    runtimeCommitment: { source: string; sourceIdentityDigest: string; image: string; dockerPath: string; stepMaxDurationMs: number; stopTimeoutMs: number }
+    requests: readonly { sessionId: string; kind: 'parent' | 'child'; observation: unknown | null }[]
+  }
+}
+export interface StrategyCellObject extends Omit<StrategyCellWrite, 'plan'> { planDigest: string }
 
 // A cell aggregates many individually bounded contracts and model traces.
 // Keep their canonical encoding while using an independent aggregate bound.
@@ -173,7 +204,9 @@ function parse(input: unknown): StrategyEvidenceObject {
   const attributedSessions = new Set([native.parent.sessionId, ...native.strategies.flatMap(strategy => strategy.children.map(child => child.sessionId))])
   const knownNativeStop = native.runs.length > 0 && native.runs.every(run => run.executionStatus === 'succeeded' && run.quiescent)
     && native.strategies.every(strategy => strategy.outcome !== 'unknown' && strategy.children.every(child => child.quiescent))
+    && native.outcomeAssessments.every(assessment => assessment.execution?.status === 'succeeded' && assessment.execution.quiescent)
     && meter.traces.every(trace => trace.sessionId !== null && attributedSessions.has(trace.sessionId))
+  if ((native.parent.quiescent || outcome.quiescent) && !knownNativeStop) fail('native quiescence is not established')
   const versions = keys(raw.versions, ['model', 'prompt', 'skills', 'tools', 'policy', 'runtime']); Object.values(versions).forEach(benchmarkHash)
   const trustedOutcome = native.selectedOutcomeContractId !== null && native.receipts.some(item => {
     if (item.taskKind !== 'goal-outcome' || item.contract.id !== native.selectedOutcomeContractId || item.receipt.objectiveStatus !== result || !item.quiescent) return false
@@ -191,9 +224,9 @@ export class StrategyEvidenceStore {
   constructor(input: StrategyEvidenceStoreOptions) {
     if (!isAbsolute(input.candidateWorkspace) || !isAbsolute(input.stateDirectory)) fail('workspace and state directory must be absolute')
     const workspace = privateDirectory(input.candidateWorkspace, 'candidate workspace', false)
-    const state = privateDirectory(input.stateDirectory, 'evidence state directory', true)
+    const state = privateDirectory(input.stateDirectory, 'evidence state directory', input.createDirectories !== false)
     if (nested(workspace, state) || nested(state, workspace)) fail('evidence state must be outside candidate workspace')
-    this.#directory = privateDirectory(resolve(state, 'strategy-evidence-v1'), 'evidence object directory', true)
+    this.#directory = privateDirectory(resolve(state, 'strategy-evidence-v1'), 'evidence object directory', input.createDirectories !== false)
   }
   #path(digest: string): string { benchmarkHash(digest); return resolve(this.#directory, `${digest}.json`) }
   write(input: StrategyEvidenceWrite): Readonly<{ digest: string; path: string }> {
@@ -203,7 +236,10 @@ export class StrategyEvidenceStore {
     const object = parse({ ...unbound, planDigest: strategyBenchmarkPlanDigest(plan) })
     if (!identical(object.request, expected) || !identical(object.meter.budget, expected.budget) || object.input.digest !== expected.task.inputDigest || object.acceptance.digest !== expected.task.acceptanceDigest || !identical(object.versions, expected.variant.versions)) fail('request identity drift')
     validateMeterBounds(object.meter, plan, expected.budget)
-    const digest = evidenceDigest(object); const content = evidenceJson({ protocol: strategyEvidenceProtocol, version: 1, digest, evidence: object }); const path = this.#path(digest)
+    return this.#publish(strategyEvidenceProtocol, object)
+  }
+  #publish(protocol: string, object: unknown): Readonly<{ digest: string; path: string }> {
+    const digest = evidenceDigest(object); const content = evidenceJson({ protocol, version: 1, digest, evidence: object }); const path = this.#path(digest)
     try { privateFile(path); if (readFileSync(path, 'utf8') !== content) fail('digest collision or conflicting evidence'); return Object.freeze({ digest, path }) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error }
     const temporary = resolve(this.#directory, `.${digest}.${randomUUID()}.tmp`); let fd: number | undefined
     try {
@@ -213,14 +249,105 @@ export class StrategyEvidenceStore {
     } finally { if (fd !== undefined) closeSync(fd); try { unlinkSync(temporary) } catch {} }
   }
   read(planInput: StrategyBenchmarkPlan, cell: BenchmarkCell, digest: string): Readonly<StrategyEvidenceObject> {
-    const plan = parseStrategyBenchmarkPlan(planInput); const expected = requestFor(plan, cell); const path = this.#path(digest); privateFile(path)
-    let serialized: string; let fd: number | undefined
-    try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); privateOpenedFile(fd, path); serialized = readFileSync(fd, 'utf8'); privateOpenedFile(fd, path) } catch (error) { if ((error as NodeJS.ErrnoException).message?.startsWith('strategy evidence:')) throw error; fail('invalid evidence object') } finally { if (fd !== undefined) closeSync(fd) }
-    let value: unknown; try { value = JSON.parse(serialized!) } catch { fail('invalid evidence JSON') }
-    const envelope = keys(value, ['protocol', 'version', 'digest', 'evidence']); if (envelope.protocol !== strategyEvidenceProtocol || envelope.version !== 1 || envelope.digest !== digest) fail('invalid evidence envelope')
-    const evidence = parse(envelope.evidence); if (evidenceDigest(evidence) !== digest || evidence.planDigest !== strategyBenchmarkPlanDigest(plan) || !identical(evidence.request, expected) || !identical(evidence.meter.budget, expected.budget)
+    const plan = parseStrategyBenchmarkPlan(planInput); const expected = requestFor(plan, cell)
+    const evidence = parse(this.#readEnvelope(strategyEvidenceProtocol, digest))
+    if (evidenceDigest(evidence) !== digest || evidence.planDigest !== strategyBenchmarkPlanDigest(plan) || !identical(evidence.request, expected) || !identical(evidence.meter.budget, expected.budget)
       || evidence.input.digest !== expected.task.inputDigest || evidence.acceptance.digest !== expected.task.acceptanceDigest || !identical(evidence.versions, expected.variant.versions)) fail('evidence binding differs')
     validateMeterBounds(evidence.meter, plan, expected.budget)
     return evidence
   }
+  #readEnvelope(protocol: string, digest: string): unknown {
+    const path = this.#path(digest); privateFile(path)
+    let serialized: string; let fd: number | undefined
+    try { fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW); privateOpenedFile(fd, path); serialized = readFileSync(fd, 'utf8'); privateOpenedFile(fd, path) } catch (error) { if ((error as NodeJS.ErrnoException).message?.startsWith('strategy evidence:')) throw error; fail('invalid evidence object') } finally { if (fd !== undefined) closeSync(fd) }
+    let value: unknown; try { value = JSON.parse(serialized!) } catch { fail('invalid evidence JSON') }
+    const envelope = keys(value, ['protocol', 'version', 'digest', 'evidence']); if (envelope.protocol !== protocol || envelope.version !== 1 || envelope.digest !== digest || evidenceDigest(envelope.evidence) !== digest) fail('invalid evidence envelope')
+    return envelope.evidence
+  }
+  /** A failure observation is terminal evidence of uncertainty, never an acceptance receipt. */
+  writeFailure(input: StrategyFailureWrite): Readonly<{ digest: string; path: string }> {
+    const copy = evidenceSnapshot(input); const plan = parseStrategyBenchmarkPlan(copy.plan)
+    const { plan: _plan, ...body } = copy
+    const evidence = parseFailure({ ...body, planDigest: strategyBenchmarkPlanDigest(plan) }, plan, copy.request.cell)
+    return this.#publish(strategyFailureProtocol, evidence)
+  }
+  readFailure(planInput: StrategyBenchmarkPlan, cell: BenchmarkCell, digest: string): Readonly<StrategyFailureObject> {
+    return parseFailure(this.#readEnvelope(strategyFailureProtocol, digest), parseStrategyBenchmarkPlan(planInput), cell)
+  }
+  writeCell(input: StrategyCellWrite): Readonly<{ digest: string; path: string }> {
+    const copy = evidenceSnapshot(input); const plan = parseStrategyBenchmarkPlan(copy.plan)
+    const { plan: _plan, ...body } = copy
+    const evidence = this.#parseCell({ ...body, planDigest: strategyBenchmarkPlanDigest(plan) }, plan, copy.request.cell)
+    return this.#publish(strategyCellProtocol, evidence)
+  }
+  readCell(planInput: StrategyBenchmarkPlan, cell: BenchmarkCell, digest: string): Readonly<StrategyCellObject> {
+    return this.#parseCell(this.#readEnvelope(strategyCellProtocol, digest), parseStrategyBenchmarkPlan(planInput), cell)
+  }
+  #parseCell(value: unknown, plan: StrategyBenchmarkPlan, cell: BenchmarkCell): Readonly<StrategyCellObject> {
+    const raw = keys(evidenceSnapshot(value), ['protocol', 'version', 'planDigest', 'request', 'nativeEvidenceDigest', 'capabilities'])
+    if (raw.protocol !== strategyCellProtocol || raw.version !== 1 || raw.planDigest !== strategyBenchmarkPlanDigest(plan)
+      || !identical(raw.request, requestFor(plan, cell))) fail('invalid cell binding')
+    benchmarkHash(raw.nativeEvidenceDigest)
+    const native = this.read(plan, cell, raw.nativeEvidenceDigest)
+    if (native.outcome.status !== 'completed' || native.outcome.verdict === 'unknown' || !native.outcome.quiescent) fail('cell outcome remains unknown')
+    const capability = keys(raw.capabilities, ['sourceIdentity', 'runtimeCommitment', 'requests'])
+    const commitment = keys(capability.runtimeCommitment, ['source', 'sourceIdentityDigest', 'image', 'dockerPath', 'stepMaxDurationMs', 'stopTimeoutMs'])
+    const sourceDigest = evidenceDigest(capability.sourceIdentity)
+    if (commitment.sourceIdentityDigest !== sourceDigest || evidenceDigest(commitment) !== plan.capabilities.common.runtime) fail('runtime source commitment drift')
+    if (!Array.isArray(capability.requests) || capability.requests.length !== native.meter.traces.length || capability.requests.length === 0) fail('incomplete capability observations')
+    const expectedCounts = new Map<string, number>()
+    for (const trace of native.meter.traces) {
+      if (trace.sessionId === null || trace.phase !== 'settled') fail('cell meter remains unknown')
+      expectedCounts.set(trace.sessionId, (expectedCounts.get(trace.sessionId) ?? 0) + 1)
+    }
+    const children = new Set(native.native.strategies.flatMap(strategy => strategy.children.map(child => child.sessionId)))
+    const enabled = cell.variantId === 'adaptive-strategy'
+    const toolNames = ['goal_create', 'goal_context', 'goal_checkpoint', 'isolation_run', ...(enabled ? ['goal_strategy'] : [])].sort()
+    for (const input of capability.requests) {
+      const request = keys(input, ['sessionId', 'kind', 'observation'])
+      const sessionId = id(request.sessionId, 'capability Session')
+      const count = expectedCounts.get(sessionId) ?? 0
+      if (count === 0) fail('capability request is not metered')
+      expectedCounts.set(sessionId, count - 1)
+      if (request.kind === 'child') {
+        if (!children.has(sessionId) || request.observation !== null) fail('unattributed capability child')
+      } else {
+        if (request.kind !== 'parent' || sessionId !== native.native.parent.sessionId) fail('unattributed capability parent')
+        const observation = keys(request.observation, ['sourceDigest', 'services', 'parentTools', 'policy', 'personaDigest', 'dynamicGoalContext'])
+        if (observation.sourceDigest !== sourceDigest || observation.personaDigest !== plan.capabilities.common.persona
+          || !identical(observation.services, { goals: true, assistantPolicy: true, tools: true }) || observation.dynamicGoalContext !== 'not-attested') fail('capability probe differs')
+        const policy = keys(observation.policy, ['common', 'strategy', 'configuration', 'configDigest'])
+        if (policy.common !== 'allow' || policy.strategy !== (enabled ? 'allow' : 'deny') || policy.configDigest !== evidenceDigest(policy.configuration)) fail('capability policy drift')
+        assertStrategyPolicyConfiguration(policy.configuration, enabled)
+        if (!Array.isArray(observation.parentTools) || !identical(observation.parentTools.map(tool => keys(tool, ['name', 'description', 'parameters', 'output']).name).sort(), toolNames)) fail('capability tool set differs')
+      }
+    }
+    if ([...expectedCounts.values()].some(count => count !== 0)) fail('incomplete metered request observations')
+    return raw as unknown as StrategyCellObject
+  }
+}
+
+function parseFailure(value: unknown, plan: StrategyBenchmarkPlan, cell: BenchmarkCell): Readonly<StrategyFailureObject> {
+  const raw = keys(evidenceSnapshot(value), ['protocol', 'version', 'planDigest', 'request', 'reason', 'observedAt', 'snapshot'])
+  const expected = requestFor(plan, cell)
+  if (raw.protocol !== strategyFailureProtocol || raw.version !== 1 || raw.planDigest !== strategyBenchmarkPlanDigest(plan)
+    || !identical(raw.request, expected) || !['adapter-error', 'interrupted', 'timeout', 'invalid-observation', 'budget-exceeded', 'not-quiescent'].includes(raw.reason as string)
+    || !Number.isSafeInteger(raw.observedAt) || (raw.observedAt as number) < 0) fail('invalid failure binding')
+  const snapshot = keys(raw.snapshot, ['runtimeRoot', 'stage', 'cleanup', 'meter', 'goalSnapshot', 'lastGoalObservation', 'failureStage'])
+  if (!(snapshot.runtimeRoot === null || typeof snapshot.runtimeRoot === 'string' && isAbsolute(snapshot.runtimeRoot))
+    || !['setup', 'executing', 'cleanup', 'evidence', 'closed'].includes(snapshot.stage as string)
+    || !['pending', 'succeeded', 'unknown'].includes(snapshot.cleanup as string)
+    || !(snapshot.goalSnapshot === null || typeof snapshot.goalSnapshot === 'object' && !Array.isArray(snapshot.goalSnapshot))
+    || !(snapshot.failureStage === null || ['setup', 'executing', 'cleanup', 'evidence'].includes(snapshot.failureStage as string))) fail('invalid failure snapshot')
+  if (snapshot.lastGoalObservation !== null) {
+    const history = keys(snapshot.lastGoalObservation, ['observedAt', 'value'])
+    if (!Number.isSafeInteger(history.observedAt) || (history.observedAt as number) < 0 || (history.observedAt as number) > (raw.observedAt as number)
+      || history.value === null || typeof history.value !== 'object' || Array.isArray(history.value)) fail('invalid historical goal observation')
+  }
+  if (snapshot.meter !== null) {
+    const meter = parseMeter(snapshot.meter)
+    if (!identical(meter.budget, expected.budget)) fail('failure meter budget drift')
+    validateMeterBounds(meter, plan, expected.budget)
+  }
+  return raw as unknown as StrategyFailureObject
 }
