@@ -19,6 +19,31 @@ function definition() {
 async function database() { const root = await mkdtemp(join(tmpdir(), 'assistant-skills-')); roots.push(root); return join(root, 'skills.sqlite') }
 
 describe('SkillStore', () => {
+  it('commits watched activation atomically and never renews it after lost response and restart', async () => {
+    const path = await database(), store = new SkillStore(path)
+    store.save(scope, definition())
+    const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Revise.', trigger: 'owner', expiresAt: Date.now() + 60000 })
+    const trial = store.claim(scope, { invocationId: 'trial', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, candidateId: candidate.id, goalExecutionRunId: 'goal-run' })
+    store.finish(scope, trial.run.id, 'succeeded', [])
+    const watch = { input: { ownerRouteId: 'route', skillName: 'read-report', version: 2, fallbackVersion: 1, expiresAt: Date.now() + 60000, maxRuns: 2, failureThreshold: 1 }, routeReceipt: { generation: 1 } }
+    const writer = new DatabaseSync(path)
+    writer.exec("CREATE TRIGGER reject_watch BEFORE INSERT ON skill_watches BEGIN SELECT RAISE(ABORT, 'watch storage unavailable'); END")
+    expect(() => store.activateCandidate(scope, candidate.id, trial.run.id, 'receipt', watch)).toThrow(/watch storage unavailable/)
+    expect(store.get(scope, 'read-report')?.version).toBe(1)
+    expect(store.getCandidate(scope, candidate.id)?.state).toBe('pending')
+    expect(store.listWatches(scope)).toEqual([])
+    writer.exec('DROP TRIGGER reject_watch'); writer.close()
+    const active = store.activateCandidate(scope, candidate.id, trial.run.id, 'receipt', watch)
+    const watches = store.listWatches(scope); expect(watches).toHaveLength(1)
+    expect(watches[0]).toMatchObject({ version: 2, fallbackVersion: 1, state: 'watching', runIds: [] })
+    store.close()
+    const restored = new SkillStore(path)
+    expect(restored.activateCandidate(scope, candidate.id, trial.run.id, 'receipt', watch)).toEqual(active)
+    expect(restored.listWatches(scope)).toEqual(watches)
+    expect(() => restored.activateCandidate(scope, candidate.id, trial.run.id, 'receipt', { ...watch, input: { ...watch.input, maxRuns: 3 } })).toThrow(/candidate conflict/)
+    expect(() => restored.activateCandidate(scope, candidate.id, trial.run.id, 'receipt')).toThrow(/candidate conflict/)
+    restored.close()
+  })
   it('uses immutable version CAS and owner-scoped reads', () => {
     const store = new SkillStore(':memory:'); const first = store.save(scope, definition())
     expect(first.version).toBe(1); expect(store.list(scope)).toHaveLength(1); expect(store.get(otherScope, first.name)).toBeUndefined()

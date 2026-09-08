@@ -2799,6 +2799,48 @@ describe('real rc.1 delivery Agent runtime', () => {
     }
   })
 
+  test('awaits concurrent native owner teardown before closing its lease store', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-owner-drain-')); roots.push(root)
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const fixture = await runtimeHarness(root, new Map())
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions'], apply(ctx: Context) {
+      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary' })
+    } })
+    const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>()
+    let shutdown: Promise<unknown> | undefined
+    try {
+      await fiber
+      const handle = await access!.create({ sessionId: 'owner-delayed-drain' as SessionId,
+        meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      handle.agent.ctx.effect(() => async () => { entered.resolve(); await release.promise }, 'test.owner-delayed-drain')
+      const store = (fixture.service as unknown as { deliveryStore: DeliveryStore }).deliveryStore
+      const close = vi.spyOn(store, 'close')
+      const first = access!.dispose()
+      await entered.promise
+      let secondFinished = false
+      const second = access!.dispose().then(() => { secondFinished = true })
+      // Unload Delivery while its separately owned Web fiber is already draining.
+      shutdown = (fixture.service as unknown as { ctx: Context }).ctx.fiber.dispose()
+      await new Promise(resolve => setTimeout(resolve, 30))
+      expect(secondFinished).toBe(false)
+      expect(close).not.toHaveBeenCalled()
+      const leaseState = () => {
+        const db = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
+        try { return db.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get('owner-delayed-drain') } finally { db.close() }
+      }
+      expect(leaseState()).toMatchObject({ state: 'unknown' })
+      release.resolve()
+      await Promise.all([first, second, shutdown])
+      expect(close).toHaveBeenCalledOnce()
+      expect(leaseState()).toMatchObject({ state: 'released' })
+      expect(fixture.llm.requests).toHaveLength(0)
+    } finally {
+      release.resolve(); await shutdown; await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart()
+    }
+  })
+
   test('production Web owner admits a real native human turn, creates a business Goal and releases its idle Session', async () => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-owner-')); roots.push(root)
     const PersistenceCoordinator = await persistenceCoordinatorConstructor()

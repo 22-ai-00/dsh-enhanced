@@ -11,11 +11,18 @@ import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { prepareRepositoryFixture } from './repo-verified-delivery-fixture.mjs'
+import { loadLiveRepositoryInput, mergeLiveCredentialHandles } from './repo-live-input.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const image = 'sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8'
 const verifiedDelivery = process.env.DSH_REPO_VERIFIED_DELIVERY === 'fixture'
-const repositoryEvents = verifiedDelivery && process.env.DSH_REPO_EVENT_SOURCE === 'fixture'
+const setupOnly = process.env.DSH_REPO_SETUP_ONLY === '1'
+const liveInputPath = process.env.DSH_REPO_LIVE_INPUT
+const liveRepositoryEnabled = process.env.DSH_REPO_LIVE_GITHUB === '1' || typeof liveInputPath === 'string'
+if (liveRepositoryEnabled && (typeof liveInputPath !== 'string' || liveInputPath.length === 0)) throw new Error('live repository E2E requires DSH_REPO_LIVE_INPUT')
+if (liveRepositoryEnabled && (verifiedDelivery || process.env.DSH_REPO_EVENT_SOURCE !== undefined)) throw new Error('live repository E2E cannot use fixture transports')
+if (liveRepositoryEnabled && setupOnly) throw new Error('setup-only probe does not validate live repository access')
+const repositoryEvents = (verifiedDelivery && process.env.DSH_REPO_EVENT_SOURCE === 'fixture') || liveRepositoryEnabled
 const objective = 'Fix summarize.mjs: read a JSON order array from stdin, ignore orders whose status is "cancelled", sum integer amountCents by currency, and print one JSON object with currency keys in dictionary order followed by a newline.'
 const cases = [
   { stdin: '[{"currency":"USD","amountCents":100},{"currency":"EUR","amountCents":250},{"currency":"USD","amountCents":75}]\n', expectedStdout: '{"EUR":250,"USD":175}\n', expectedExitCode: 0 },
@@ -56,6 +63,16 @@ function patchRow(document, id) {
   const row = visit(document.contents)
   if (!row || !isMap(row)) throw new Error(`missing profile row ${id}`)
   return row
+}
+
+function installLiveCredentialReference(source, live) {
+  const patch = parseDocument(source)
+  const keychain = patchRow(patch, 'dsh-enhanced-credentials-keychain')
+  const config = keychain.get('config', true)
+  const handles = config.get('handles', true)
+  const current = handles?.toJSON?.() ?? []
+  config.set('handles', patch.createNode(mergeLiveCredentialHandles(current, live)))
+  return String(patch)
 }
 
 function parseJson(value) {
@@ -205,7 +222,10 @@ async function waitForCompletion(getPage, home, sessionId, approvals, options = 
   throw new Error(`real repository task did not independently complete for Session ${sessionId}`)
 }
 
-test('formal autonomy install independently verifies an ordinary isolated repository task', async ({ page, context }, testInfo) => {
+test(setupOnly ? 'formal autonomy install discovers an idle owner session without model requests' : 'formal autonomy install independently verifies an ordinary isolated repository task', async ({ page, context }, testInfo) => {
+  // Reject invalid external authorization before install, model work, patch
+  // writes, or any possible remote operation.
+  const liveRepository = liveRepositoryEnabled ? await loadLiveRepositoryInput(liveInputPath) : undefined
   const temp = await mkdtemp(join(tmpdir(), 'dsh-repo-autonomy-real-'))
   const home = join(temp, 'home'), workspace = join(temp, 'workspace'), taskPath = join(temp, 'private-goal.json'), observerLog = join(temp, 'observer.jsonl')
   const port = await new Promise((resolvePort, reject) => {
@@ -213,6 +233,7 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     server.listen(0, '127.0.0.1', () => { const address = server.address(); server.close(error => error ? reject(error) : resolvePort(address.port)) })
   })
   const env = { ...process.env, CI: 'true', DSH_HOME: home, DSH_ENHANCED_WEB_PORT: String(port), DSH_REPO_AUTONOMY_OBSERVER_LOG: observerLog,
+    DSH_REPO_AUTONOMY_NO_MODEL: setupOnly ? '1' : '0',
     DSH_REPO_AUTONOMY_MAX_CALLS: repositoryEvents ? '26' : '14', DSH_REPO_AUTONOMY_DURATION_MS: '300000' }
   let host; let restarted; let activePage = page; let failed = false; let sessionId
   const http = [], transport = [], streams = new Map(), frames = [], approvals = []
@@ -239,6 +260,7 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
       patchSource = String(patch)
       configuredRoute.model = 'default'
     }
+    if (liveRepository) patchSource = installLiveCredentialReference(patchSource, liveRepository)
     await writeFile(patchPath, addObserver(patchSource), { mode: 0o600 })
 
     // The native Web UI, not the test, creates the first durable Session.
@@ -249,7 +271,7 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     sessionId = (await create.json()).result.value.sessionId
     await host.stop(); await writeFile(testInfo.outputPath('host-initial.log'), host.log(), { mode: 0o600 })
 
-    const repository = verifiedDelivery ? await prepareRepositoryFixture(home, patchPath, env) : undefined
+    const repository = verifiedDelivery ? await prepareRepositoryFixture(home, patchPath, env) : liveRepository?.repositoryDelivery
     const admission = { version: 2, objective, route: configuredRoute, maxGoalRounds: repositoryEvents ? 6 : 3, stepMaxDurationMs: 120_000,
       executionBudget: { mode: 'calls', modelCalls: repositoryEvents ? 24 : 12, toolCalls: repositoryEvents ? 40 : 16, durationMs: 300_000, maxOutputTokensPerCall: 1024, routes: [configuredRoute] },
       verification: { artifactPath: 'summarize.mjs', command: verificationCommand, maxRuns: 12, maxTotalDurationMs: 240_000, maxDurationMs: 5_000, maxOutputBytes: 4096, cases },
@@ -259,8 +281,16 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     const setup = await run(join(home, 'profiles/web/node_modules/.bin/dsh-web-owner-setup'), ['--profile', 'web', '--workspace', workspace, '--goal-admission', taskPath], env)
     await writeFile(testInfo.outputPath('goal-setup.log'), sanitize(setup), { mode: 0o600 })
     expect(setup).toContain(`Session: ${sessionId}`)
+    if (setupOnly) {
+      const events = existsSync(observerLog) ? (await readFile(observerLog, 'utf8')).trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
+      expect(events.some(event => event.event === 'startup-session-index'), 'setup probe requires its installed observer').toBe(true)
+      expect(events.filter(event => ['dispatch', 'model-blocked'].includes(event.event))).toEqual([])
+      await writeFile(testInfo.outputPath('setup-proof.json'), JSON.stringify({ scope: 'installation-and-idle-session-discovery-only', sessionId, modelCalls: 0, taskExecuted: false }), { mode: 0o600 })
+      return
+    }
     if (verifiedDelivery) expect(setup).toContain('Repository: fixture/orders; branch: automation/fix')
-    if (repositoryEvents) {
+    if (liveRepository) expect(setup).toContain(`Repository: ${repository.repository}; branch: ${repository.branch}`)
+    if (verifiedDelivery && repositoryEvents) {
       // Admission writes the production config.  Only the HTTPS/DNS edge is
       // replaced here; EventTriggers, Keychain, Policy, observer and durable
       // source store remain the installed components.
@@ -276,11 +306,17 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
 
     host = await startHost(env)
     if (repositoryEvents) {
-      // Fail installation/credential wiring before spending model calls.
-      await expect.poll(() => ({ sources: query(join(home, 'event-triggers/state.sqlite'),
-        "SELECT trigger_id FROM trigger_state WHERE trigger_id LIKE '%repository-events'").length,
-      health: query(join(home, 'event-triggers/state.sqlite'), 'SELECT last_error FROM trigger_health') }),
-      { message: 'installed GitHub source must complete an authenticated baseline observation', timeout: 30_000 }).toMatchObject({ sources: 1 })
+      // This is the live credential and repository/branch preflight. The
+      // installed observer obtains the handle through its configured consumer
+      // and purpose, then reads the exact repository source before any model
+      // request or mutation is allowed.
+      await expect.poll(() => {
+        const state = query(join(home, 'event-triggers/state.sqlite'), "SELECT trigger_id,last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events'")
+        const health = query(join(home, 'event-triggers/state.sqlite'), "SELECT trigger_id,consecutive_failures,last_error,last_success_at FROM trigger_health WHERE trigger_id LIKE '%repository-events'")
+        return { sources: state.length, observed: state[0]?.last_observed_at, health }
+      }, { message: 'installed GitHub source must complete an authenticated, error-free repository/branch baseline observation', timeout: 30_000 }).toMatchObject({
+        sources: 1, observed: expect.any(Number), health: [{ consecutive_failures: 0, last_error: null, last_success_at: expect.any(Number) }],
+      })
     }
     await activePage.goto(host.url)
     const workspaceRow = activePage.getByRole('treeitem', { name: 'workspace', exact: true })
@@ -289,7 +325,10 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     await activePage.getByRole('treeitem').filter({ hasText: 'New conversation' }).first().click().catch(() => {})
     // The owner supplies the failing source as ordinary request content. An
     // isolation job receives only its own inline files, never this Host path.
-    const prompt = `Here is the failing starting program:\n\n${buggySource}\n\n${objective} Please work on this as a finite goal. You may investigate and test as needed. The acceptance conditions are the objective above; independent verification is configured separately.${verifiedDelivery ? ' Arrange delivery of the independently accepted repair to the authorized repository branch and open a pull request. Use the available repository authorization and inspect the current branch before preparing delivery.' : ''}${repositoryEvents ? ' The authorized repository delivery can remain pending while external CI and review finish. Continue the original goal when its configured event source reports a change, and independently inspect the current repository state before deciding whether the result is complete.' : ''}`
+    const deliveryInstruction = liveRepository
+      ? ` Deliver the independently accepted repair to the authorized repository ${repository.repository}, branch ${repository.branch}, changing only ${repository.paths.join(', ')} and opening its authorized pull request. Inspect the current authorized branch before delivery.`
+      : verifiedDelivery ? ' Arrange delivery of the independently accepted repair to the authorized repository branch and open a pull request. Use the available repository authorization and inspect the current branch before preparing delivery.' : ''
+    const prompt = `Here is the failing starting program:\n\n${buggySource}\n\n${objective} Please work on this as a finite goal. You may investigate and test as needed. The acceptance conditions are the objective above; independent verification is configured separately.${deliveryInstruction}${repositoryEvents ? ' The authorized repository delivery can remain pending while external CI and review finish. Continue the original goal when its configured event source reports a change, and independently inspect the current repository state before deciding whether the result is complete.' : ''}`
     await activePage.getByLabel(/Describe what you want to build|Message or run a task/).fill(prompt)
     const sent = activePage.waitForResponse(response => new URL(response.url()).pathname === '/api/session/prompt')
     await activePage.getByRole('button', { name: 'Send message', exact: true }).click(); expect((await sent).status()).toBe(200)
@@ -300,10 +339,9 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
     const fixtureRecords = () => readJsonLines(env.DSH_REPO_DELIVERY_FIXTURE_LOG)
     const sourceObservations = () => readJsonLines(env.DSH_REPO_EVENT_SOURCE_LOG)
     const readyForRestart = async ({ goal: currentGoal, native: currentNative, wait }) => {
-      const records = await fixtureRecords(), commit = records.find(item => item.kind === 'commit'), pullRequest = records.find(item => item.kind === 'pr')
-      if (!commit || !pullRequest || pullRequest.headOid !== commit.commitOid || wait.goal_id !== currentGoal.id || currentNative.phase !== 'paused') return false
+      if (wait.goal_id !== currentGoal.id || currentNative.phase !== 'paused') return false
       const intent = JSON.parse(wait.intent_json)
-      if (intent.wake?.goalId !== currentGoal.id || intent.wake?.native?.revision !== currentNative.revision || intent.source?.kind !== 'github-repository') return false
+      if (intent.wake?.goalId !== currentGoal.id || intent.source?.kind !== 'github-repository') return false
       // A saved wait can precede the source round's async flush/verification.
       // Restart only after its exact execution and owner lane have settled.
       const runs = query(`${join(home, 'assistant-goals/web.sqlite')}.executions`, 'SELECT intent_json,execution_json FROM goal_execution_runs WHERE goal_id = ?', currentGoal.id)
@@ -315,6 +353,11 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
       })) return false
       if (query(join(home, 'assistant-delivery/state.sqlite'), 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state !== 'released') return false
       if (query(`${join(home, 'assistant-goals/web.sqlite')}.wakes`, 'SELECT state FROM goal_wakes WHERE goal_id = ?', currentGoal.id).some(wake => wake.state !== 'succeeded')) return false
+      if (liveRepository) {
+        return query(join(home, 'event-triggers/state.sqlite'), "SELECT trigger_id FROM trigger_state WHERE trigger_id LIKE '%repository-events'").length === 1
+      }
+      const records = await fixtureRecords(), commit = records.find(item => item.kind === 'commit'), pullRequest = records.find(item => item.kind === 'pr')
+      if (!commit || !pullRequest || pullRequest.headOid !== commit.commitOid || intent.wake?.native?.revision !== currentNative.revision) return false
       const eventDb = join(home, 'event-triggers/state.sqlite')
       const state = query(eventDb, "SELECT last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events' LIMIT 1")[0]
       const latest = query(eventDb, "SELECT MAX(sequence) AS sequence FROM event_outbox WHERE trigger_id LIKE '%repository-events'")[0]?.sequence ?? 0
@@ -331,6 +374,21 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
       repositoryFixtureLog: env.DSH_REPO_DELIVERY_FIXTURE_LOG,
       readyForRestart,
       onWaiting: async ({ goal: waitingGoal, native: waitingNative, wait }) => {
+        if (liveRepository) {
+          expect(JSON.parse(wait.intent_json).source.kind).toBe('github-repository')
+          expect(waitingNative).toMatchObject({ phase: 'paused', sessionId })
+          const sessionTitle = await activePage.getByRole('navigation', { name: 'Session hierarchy' }).getByRole('button').first().innerText()
+          const restartedAt = Date.now()
+          await host.stop(); await writeFile(testInfo.outputPath('host-waiting.log'), host.log(), { mode: 0o600 })
+          host = await startHost(env); restarted = await context.browser().newContext(); activePage = await restarted.newPage()
+          observePage(activePage, http, transport, streams, frames); await activePage.goto(host.url)
+          await selectRestoredSession(activePage, sessionTitle)
+          const restoredWait = query(`${join(home, 'assistant-goals/web.sqlite')}.event-waits`, 'SELECT * FROM goal_event_waits WHERE id = ?', wait.id)[0]
+          expect(restoredWait.state).toBe('waiting')
+          waitRestart = { waitId: wait.id, goalId: waitingGoal.id, sessionTitle, sourceStateBefore: wait.state, sourceStateAfterRestart: restoredWait.state,
+            restartedAt, sourceSnapshot: JSON.parse(wait.intent_json).source }
+          return
+        }
         const records = await fixtureRecords()
         expect(records.map(item => item.kind)).toEqual(['commit', 'pr'])
         expect(await readyForRestart({ goal: waitingGoal, native: waitingNative, wait })).toBe(true)
@@ -433,6 +491,47 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
         repositoryDelivery.eventSource = { waitRestart, snapshotHighWaterSequence: sourceSnapshot.highWaterSequence, resumedEvent, events: sourceEvents(), wakes: query(`${join(home, 'assistant-goals/web.sqlite')}.wakes`, 'SELECT id,state FROM goal_wakes'), sourceRuns: sourceRuns(), readbacks, repositoryOutcome, retirement: { claim: claim(), lastObservedAt, automationStatus: 'paused' } }
       }
     }
+    if (liveRepository) {
+      const path = join(home, 'assistant-actions/web/verified-delivery.sqlite')
+      expect(query(path, 'SELECT state FROM deliveries').length, 'completed artifact goal did not register a live repository delivery intent').toBeGreaterThan(0)
+      await expect.poll(() => query(path, 'SELECT state FROM deliveries')[0]?.state, { timeout: 65_000 }).toBe('succeeded')
+      const delivery = query(path, 'SELECT intent,result FROM deliveries')[0]
+      const deliveryIntent = parseJson(delivery?.intent), result = parseJson(delivery?.result)
+      expect(result?.commit?.commitOid).toMatch(/^[a-f0-9]{40}$/)
+      expect(result?.pullRequest?.pullRequestNumber).toEqual(expect.any(Number))
+      expect(waitRestart).toMatchObject({ goalId: goal.id, sourceStateBefore: 'waiting', sourceStateAfterRestart: 'waiting' })
+      expect(deliveryIntent?.security).toMatchObject({ goalId: goal.id, sessionId, nativeGoalId: native.goalId })
+      expect(deliveryIntent?.security?.definitionDigest).toMatch(/^[a-f0-9]{64}$/)
+      const eventsPath = join(home, 'event-triggers/state.sqlite')
+      const sourceEvents = () => query(eventsPath, "SELECT sequence,event_id,occurred_at,status FROM event_outbox WHERE trigger_id LIKE '%repository-events' ORDER BY sequence")
+      await expect.poll(() => sourceEvents().filter(row => row.sequence > waitRestart.sourceSnapshot.highWaterSequence
+        && row.occurred_at >= waitRestart.restartedAt && row.status === 'delivered').length, { timeout: 300_000 }).toBeGreaterThan(0)
+      await expect.poll(() => query(`${join(home, 'assistant-goals/web.sqlite')}.event-waits`, 'SELECT state,reason FROM goal_event_waits WHERE id = ?', waitRestart.waitId)[0]?.state, { timeout: 30_000 }).toBe('terminal')
+      expect(query(`${join(home, 'assistant-goals/web.sqlite')}.event-waits`, 'SELECT state,reason FROM goal_event_waits WHERE id = ?', waitRestart.waitId)[0]).toEqual({ state: 'terminal', reason: 'settled' })
+      expect(query(`${join(home, 'assistant-goals/web.sqlite')}.wakes`, 'SELECT state FROM goal_wakes WHERE id = ?', `goal-event-wake-${waitRestart.waitId}`)[0]?.state).toBe('succeeded')
+      const resumedEvent = sourceEvents().find(row => row.sequence > waitRestart.sourceSnapshot.highWaterSequence
+        && row.occurred_at >= waitRestart.restartedAt && row.status === 'delivered')
+      if (!resumedEvent) throw new Error('no live GitHub event matched the durable wait snapshot')
+      const sourceRuns = () => query(join(home, 'assistant-automations/state.sqlite'), `SELECT run.status FROM automation_runs AS run
+        JOIN automation_occurrences AS occurrence ON occurrence.id = run.occurrence_id
+        WHERE run.automation_id LIKE '%repository-events-source'
+          AND json_extract(occurrence.external_event_json, '$.event.id') = ?
+        ORDER BY run.created_at`, resumedEvent.event_id)
+      await expect.poll(() => sourceRuns(), { timeout: 30_000 }).toMatchObject([{ status: 'succeeded' }])
+      const receipt = achievedOutcomes.find(item => item.completedAt >= resumedEvent.occurred_at
+        && item.results.some(result => result.status === 'passed' && result.evidence?.some(evidence => evidence.kind === 'repository-readback'
+          && evidence.ref === `${repository.repository}:${repository.branch}`)))
+      if (!receipt) throw new Error('no achieved repository-readback outcome receipt followed the live GitHub event')
+      const retirement = query(eventsPath, "SELECT trigger_id,goal_id,session_id,native_goal_id,retired_at FROM goal_source_claims WHERE trigger_id LIKE '%repository-events'")[0]
+      expect(retirement).toMatchObject({ goal_id: goal.id, session_id: sessionId, retired_at: expect.any(Number) })
+      await expect.poll(() => query(join(home, 'assistant-automations/state.sqlite'), "SELECT status FROM automation_definitions WHERE id LIKE '%repository-events-source'")).toEqual([{ status: 'paused' }])
+      const lastObservedAt = query(eventsPath, "SELECT last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events' LIMIT 1")[0]?.last_observed_at
+      expect(lastObservedAt).toBeGreaterThan(0)
+      repositoryDelivery = { transport: 'live-github', state: query(path, 'SELECT id,state,result FROM deliveries'), eventSource: {
+        waitRestart, resumedEvent, events: sourceEvents(), wakes: query(`${join(home, 'assistant-goals/web.sqlite')}.wakes`, 'SELECT id,state FROM goal_wakes'), sourceRuns: sourceRuns(),
+        repositoryOutcome: receipt, retirement: { claim: retirement, lastObservedAt, automationStatus: 'paused' },
+      } }
+    }
     await expect.poll(() => query(join(home, 'assistant-delivery/state.sqlite'), 'SELECT state FROM delivery_session_leases WHERE session_id = ?', sessionId)[0]?.state).toBe('released')
     const response = frames.flatMap(frame => frame.value?.type === 'event' && frame.value.event?.type === 'assistant/message'
       ? [frame.value.event.data] : []).findLast(data => data.turn > 1 && data.message.content.some(block => block.type === 'text' && block.text.trim()))
@@ -465,6 +564,13 @@ test('formal autonomy install independently verifies an ordinary isolated reposi
         expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events' LIMIT 1")[0]?.last_observed_at).toBe(repositoryDelivery.eventSource.retirement.lastObservedAt)
         expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT sequence,event_id,occurred_at,status FROM event_outbox WHERE trigger_id LIKE '%repository-events' ORDER BY sequence")).toEqual(repositoryDelivery.eventSource.events)
       }
+    }
+    if (liveRepository) {
+      expect(query(join(home, 'assistant-actions/web/verified-delivery.sqlite'), 'SELECT id,state,result FROM deliveries')).toEqual(repositoryDelivery.state)
+      expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT trigger_id,goal_id,session_id,native_goal_id,retired_at FROM goal_source_claims WHERE trigger_id LIKE '%repository-events'")[0]).toEqual(repositoryDelivery.eventSource.retirement.claim)
+      await expect.poll(() => query(join(home, 'assistant-automations/state.sqlite'), "SELECT status FROM automation_definitions WHERE id LIKE '%repository-events-source'")).toEqual([{ status: 'paused' }])
+      expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT last_observed_at FROM trigger_state WHERE trigger_id LIKE '%repository-events' LIMIT 1")[0]?.last_observed_at).toBe(repositoryDelivery.eventSource.retirement.lastObservedAt)
+      expect(query(join(home, 'event-triggers/state.sqlite'), "SELECT sequence,event_id,occurred_at,status FROM event_outbox WHERE trigger_id LIKE '%repository-events' ORDER BY sequence")).toEqual(repositoryDelivery.eventSource.events)
     }
     await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ route: route.proof, sessionId, goalId: goal.id, scope, native,
       calls, approvals: approvals.length, sourceJobs, receipts, ...(repositoryDelivery ? { repositoryDelivery } : {}), resultFeedback: { turn: response.turn, visibleReply }, restart: { sameGoal: true, sameSourceJobEvidence: true, replyVisible: true, ...(repositoryEvents ? { waitedThenRestarted: true } : {}) },

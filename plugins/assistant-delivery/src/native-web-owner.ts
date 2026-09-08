@@ -66,6 +66,7 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
   readonly #ownerId = `native-web-${randomUUID()}`
   readonly #timer: ReturnType<typeof setInterval>
   #disposed = false
+  #disposing: Promise<void> | undefined
   constructor(private readonly ownerCtx: Context,
     private readonly store: DeliveryStore, private readonly leases: DeliverySessionLeases,
     private readonly policy: AssistantPolicyService, private readonly port: OwnerPort, config: NativeWebOwnerConfig) {
@@ -281,6 +282,9 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
     if (this.#entries.get(id) === entry) this.#entries.delete(id)
   }
   async dispose(): Promise<void> {
+    return await (this.#disposing ??= this.#dispose())
+  }
+  async #dispose(): Promise<void> {
     if (this.#disposed) return
     this.#disposed = true
     clearInterval(this.#timer)
