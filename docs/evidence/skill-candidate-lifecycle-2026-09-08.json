@@ -1,0 +1,190 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "574cb4828d3f54f457d5ac8936a7822603a955e2",
+  "capability": "Private skill candidates, native trials, owner-requested activation after exact independent Goal acceptance, and immutable rollback",
+  "status": "validated",
+  "completeWorkPackage": false,
+  "scope": {
+    "implemented": [
+      "Pending candidates are separate from active native catalog",
+      "Immutable parent CAS, fixed expiry, no revival on duplicate draft",
+      "Trial binds exact native execution run and reuses native ToolRuntime authority",
+      "Only one successful matching outer trial call may establish activation provenance",
+      "Current owner request and Policy authorization for activation, rejection and rollback",
+      "Exact activation/rollback retries preserve later versions and never repeat effects"
+    ],
+    "remaining": [
+      "Automatic candidate generation from repeated or failed tasks",
+      "3–5 distinct workflow classes",
+      "Same-budget baseline and candidate execution comparison",
+      "Held-out quality gates and automatic promotion",
+      "Quality regression monitoring and automatic rollback"
+    ]
+  },
+  "targetedChecks": [
+    {
+      "command": "pnpm --dir plugins/assistant-skills exec vitest run",
+      "exitCode": 0,
+      "files": 4,
+      "tests": 19,
+      "path": "/tmp/dsh-candidate-skills.log",
+      "sha256": "d9cf453d43a96f6ed3a94887a6db4cbe2529b1da727d5c1ce2ee06750b53b026"
+    },
+    {
+      "command": "pnpm --dir plugins/assistant-goals exec vitest run tests/service.spec.ts",
+      "exitCode": 0,
+      "files": 1,
+      "tests": 26,
+      "path": "/tmp/dsh-candidate-goals.log",
+      "sha256": "2e372c5b4e96bbc57adabf4759e702ab08fdb7675db894f980b5a0570097175c"
+    }
+  ],
+  "realWeb": {
+    "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=super-relay DSH_WEB_REAL_MODEL=auto_model/alwaysday1 DSH_WEB_REAL_SOURCE_HOME=/home/jiataorui/.dsh DSH_WEB_REAL_SKILL_CANDIDATE=1 pnpm test:web-owner:real-skill",
+    "exitCode": 0,
+    "path": "/tmp/dsh-candidate-real-1.log",
+    "sha256": "cf674a2614e9b7caf7b7614482a7cf980f6e4d3505a48559c512e1d1cb451933",
+    "proof": {
+      "path": ".cache/web-owner-real-candidate-e2e/web-owner-real-skill-real--08b0e-andidate-after-Host-restart/proof.json",
+      "sha256": "5762bbd613d589c08f5f48debbd44c47eec07d0394d582c64c4966b723962ce6"
+    },
+    "provider": "super-relay",
+    "model": "auto_model/alwaysday1",
+    "api": "openai-responses",
+    "modelRequests": 14,
+    "hostStarts": 2,
+    "sourceGoalId": "3f51b2bad6c26e449c3c025a5f9765c679fb297c871875328e4de5248b84fa8d",
+    "trialGoalId": "e72303eda8be18e0e1c8274d0075b06bfa9a266332448ec8beaaaeb4c61bdf1f",
+    "sourceOutcome": "achieved",
+    "trialOutcome": "achieved",
+    "differentReceipts": true,
+    "trial": {
+      "id": "skill-run-c260851f71cc29921251c626aa2ade878f5f1c41cc9f486d065c533eb7621105",
+      "invocationId": "trial-1",
+      "goalId": "e72303eda8be18e0e1c8274d0075b06bfa9a266332448ec8beaaaeb4c61bdf1f",
+      "sessionId": "session-de6db2e5-aacf-4c2f-bdb9-6689e31e9aa8",
+      "skillName": "verified-summary",
+      "version": 2,
+      "inputs": {},
+      "candidateId": "skill-candidate-e0b93945594e6b07672e0acb71349edad4d3a6a9bbf94977466b45b092bff418",
+      "goalExecutionRunId": "goal-run-1d6a3a9bfe43e44b35b4e34bccc6533f12a18fc343140fda34ae3fc7852c3493",
+      "state": "succeeded",
+      "steps": [
+        {
+          "id": "call_tbaot2gb2gqkitm5oyekygw8|fc_8eaa88fded5e2179d00e6b6c",
+          "state": "succeeded",
+          "detail": "result:7f8a7aae9dec7ffb6a889249586e4a85914fad5451e58ff412bedeff6d9c3e61"
+        }
+      ],
+      "createdAt": 1788861981490,
+      "updatedAt": 1788861981523
+    },
+    "candidateState": "activated",
+    "activationReceiptDigest": "c39941e769d997f75528d1587d499c85aac40a7b735768c0670ccfaeeca3abf7",
+    "versions": [
+      {
+        "version": 1,
+        "parentVersion": null
+      },
+      {
+        "version": 2,
+        "parentVersion": 1
+      },
+      {
+        "version": 3,
+        "parentVersion": 2,
+        "restoredFromVersion": 1
+      }
+    ],
+    "artifact": {
+      "path": "summarize.mjs",
+      "sourceHash": "1f8f9fb0f78ffa5da025411d166a8d4eee61770d1fb01f71b87a000bfa198d04",
+      "replayHash": "1f8f9fb0f78ffa5da025411d166a8d4eee61770d1fb01f71b87a000bfa198d04",
+      "restoredAfterRemoval": true
+    },
+    "nativeCatalogLoadedAfterRestart": true,
+    "rollbackOwnerReadback": true,
+    "artifacts": [
+      {
+        "path": ".cache/web-owner-real-candidate-e2e/web-owner-real-skill-real--08b0e-andidate-after-Host-restart/host-1.log",
+        "sha256": "38fbb5696ef066600fd6ac73f015254d646c5599e1addc8a37ad90deab0fafaf"
+      },
+      {
+        "path": ".cache/web-owner-real-candidate-e2e/web-owner-real-skill-real--08b0e-andidate-after-Host-restart/host-2.log",
+        "sha256": "7a7a326dddaf96205d6ccd7c2661841b1837d4d830dafb2a8514be13545165fe"
+      },
+      {
+        "path": ".cache/web-owner-real-candidate-e2e/web-owner-real-skill-real--08b0e-andidate-after-Host-restart/install.log",
+        "sha256": "ae8367db5351ca9445d887fa5bf05cb17d708266e774f6619eb36125f1647579"
+      },
+      {
+        "path": ".cache/web-owner-real-candidate-e2e/web-owner-real-skill-real--08b0e-andidate-after-Host-restart/model.jsonl",
+        "sha256": "d9e5196b6e7e37d829cfba3f148beb9c5326b392f97cdd4ab0ea4c9db32bbf24"
+      },
+      {
+        "path": ".cache/web-owner-real-candidate-e2e/web-owner-real-skill-real--08b0e-andidate-after-Host-restart/proof.json",
+        "sha256": "5762bbd613d589c08f5f48debbd44c47eec07d0394d582c64c4966b723962ce6"
+      },
+      {
+        "path": ".cache/web-owner-real-candidate-e2e/web-owner-real-skill-real--08b0e-andidate-after-Host-restart/session-audit.json",
+        "sha256": "979e68872ae466a5fd1d2d656a160a0c5689b6e960ecbfe9ffba308cc5001137"
+      },
+      {
+        "path": ".cache/web-owner-real-candidate-e2e/web-owner-real-skill-real--08b0e-andidate-after-Host-restart/summarize.mjs",
+        "sha256": "1f8f9fb0f78ffa5da025411d166a8d4eee61770d1fb01f71b87a000bfa198d04"
+      }
+    ]
+  },
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "files": 327,
+    "tests": 3974,
+    "path": "/tmp/dsh-candidate-final-check.log",
+    "sha256": "6aef08da712662d1b36b4bf4cc4dc62ff98a422825247dc2c3dee1bde30e86ca",
+    "dryRunPacks": 33,
+    "skippedTests": 0,
+    "skillsPackageContentsInspected": true
+  },
+  "independentReview": {
+    "status": "PASS",
+    "role": "verifier",
+    "readOnly": true,
+    "sandboxEnforced": false,
+    "sourceHashesVerified": 12,
+    "realAndFullCheckHashesVerified": true
+  },
+  "limitations": [
+    "Candidate lifecycle E2E deliberately reuses one accepted trace with a changed description; no quality gain is measured",
+    "Model is guided to one business call per native round; not a general model reliability comparison",
+    "Independent verifier is a Host Node runner, not container isolation",
+    "Browser readback after reload; no live push or user-read guarantee",
+    "Service unit tests use explicit Goals/Policy seams; Goals integration and real Web validate actual acceptance producer",
+    "No ChatGPT web review: required in-app browser unavailable; C2C local execution record only"
+  ],
+  "resolvedDuringDevelopment": [
+    "Repeated candidate draft incorrectly renewed TTL; fixed and fake-clock regression added before real verification",
+    "Historical verification duplicated current source checks; consolidated into one private verifier",
+    "Registry test initially referenced nonpublic locator; changed to native get content assertions and passed typecheck"
+  ],
+  "sourceHashes": {
+    "docs/agent-autonomy-implementation.md": "60c3ba9905502845517b6e0922ea90617bb73788ebfb91a0d1247cee7bb9e8e1",
+    "plugins/assistant-goals/src/service.ts": "f65c0113e8b446d550dec1e71064e7f853702a8af2378ee24d396177a300a568",
+    "plugins/assistant-goals/tests/service.spec.ts": "9c027c3fd1230ca53d651ff2bf15b9d0e74e55ff7099d6fdcfb0a15cb7e3209c",
+    "plugins/assistant-skills/README.md": "db17befd78f81f1e9875a8089e69158b1f895cdae14caf55ea3b204511ab7a4d",
+    "plugins/assistant-skills/src/index.ts": "d5996ec20c05c48756c57fd3bfda75aaa1be0ce57b22787f9ca1d250c689bb3e",
+    "plugins/assistant-skills/src/service.ts": "6f19aa18bf180e5cd6e799be19e52175e150f1dd0769d58e6d9347776361d0af",
+    "plugins/assistant-skills/src/store.ts": "0efb6472096f20da235d16073e5f534eb2d5c1275fe215ad1da92ac8d22e3c3d",
+    "plugins/assistant-skills/tests/service.spec.ts": "397f8bc1f8e65a9bf78f44c85b7602bc4fc08f09bb775bcc13756dcceb8dbeab",
+    "plugins/assistant-skills/tests/store.spec.ts": "ce1edf06fd2c68af74cea1b329976cf4946ca28e16f034bd2289174c84c1012c",
+    "scripts/e2e/playwright-real-skill.config.mjs": "9b38a907fda76e85e2d756faad744673196dbf0453f7eb5021593a3383a41cfd",
+    "scripts/e2e/web-owner-real-skill-guard.mjs": "78331c945993fc2f8a7693da3209bb678cf443b796998c399cdece127de71e02",
+    "scripts/e2e/web-owner-real-skill.spec.mjs": "d8da435f1ede20e79496f1e61e0ac3df7a016afda7872428ede12ed8c686cc90"
+  },
+  "codexWithChatgpt": {
+    "localExecutionRecord": "c2c_skill_reuse iterations 3 and 4",
+    "exitCode": 0,
+    "chatgptWebReview": false
+  }
+}

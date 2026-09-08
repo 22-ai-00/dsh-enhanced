@@ -810,27 +810,34 @@ export class AssistantGoalsService extends Service {
   inspectGoalOutcome = (agent: Agent | undefined, goalId: string) => this.#outcome?.view(this.inspect(agent, goalId))
   inspectWorkflowRunContext = (agent: Agent | undefined, goalId: string) => {
     const scope = this.#scope(agent, 'inspect', false)
-    const current = this.#execution.budgetState(agent!)?.record
+    const budget = this.#execution.budgetState(agent!)
+    const current = budget?.record
     const native = this.ctx.get('goals')?.get(agent!)
     if (current === undefined || current.id !== goalId || native === undefined || current.native.phase !== 'active'
       || current.native.sessionId !== String(agent!.session.id) || current.native.goalId !== String(native.id)
       || native.phase !== 'active' || current.native.revision !== native.revision) throw new Error('assistant-goals: exact active workflow goal round is required')
     return Object.freeze({ scope: Object.freeze({ ...scope }), goalId: current.id, sessionId: current.native.sessionId,
-      definition: Object.freeze({ ...current.definition }) })
+      definition: Object.freeze({ ...current.definition }), goalExecutionRunId: budget!.run.intent.runId })
   }
-  inspectVerifiedWorkflowSource = (agent: Agent | undefined, goalId: string): VerifiedWorkflowSource => {
+  inspectVerifiedWorkflowSource = (agent: Agent | undefined, goalId: string): VerifiedWorkflowSource => this.#verifiedWorkflow(agent, goalId)
+  /** Read an exact independently accepted run, even after this Session starts another Goal. */
+  inspectVerifiedWorkflowRun = (agent: Agent | undefined, goalId: string, goalExecutionRunId: string): VerifiedWorkflowSource => {
+    if (typeof goalExecutionRunId !== 'string' || !goalExecutionRunId) throw new Error('assistant-goals: exact accepted run id required')
+    return this.#verifiedWorkflow(agent, goalId, goalExecutionRunId)
+  }
+  #verifiedWorkflow(agent: Agent | undefined, goalId: string, historicalRunId?: string): VerifiedWorkflowSource {
     const scope = this.#scope(agent, 'inspect', false)
     this.#requireOwnerTurn(agent!, scope)
     const record = this.#store.get(scope, goalId)
     const native = this.ctx.get('goals')?.get(agent!)
-    if (record === undefined || native === undefined || record.native.sessionId !== String(agent!.session.id)
-      || record.native.goalId !== String(native.id) || record.native.revision !== native.revision || native.phase !== 'complete') {
+    if (record === undefined || record.native.phase !== 'complete' || record.native.sessionId !== String(agent!.session.id)
+      || historicalRunId === undefined && (native === undefined || record.native.goalId !== String(native.id) || record.native.revision !== native.revision || native.phase !== 'complete')) {
       throw new Error('assistant-goals: exact completed native goal is required')
     }
     const outcome = this.#outcome?.view(record)
     const assessment = this.#outcome?.inspectAssessments(record).at(-1)
     if (outcome?.status !== 'achieved' || assessment === undefined || assessment.execution?.status !== 'succeeded' || !assessment.execution.quiescent
-      || assessment.triggerRunId === undefined) throw new Error('assistant-goals: achieved whole-goal outcome is required')
+      || assessment.triggerRunId === undefined || historicalRunId !== undefined && assessment.triggerRunId !== historicalRunId) throw new Error('assistant-goals: achieved whole-goal outcome is required')
     const verifier = this.ctx.get('assistantVerifier', false) as { inspectAcceptedTask(id: string): unknown } | undefined
     const accepted = this.#ownerAcceptedTask(record, this.#execution.list(scope, record.id), verifier, assessment.contract.id, [assessment])
     const receipt = accepted.receipt as { objectiveStatus?: unknown; validUntil?: unknown; completedAt?: unknown; digest?: unknown } | null
