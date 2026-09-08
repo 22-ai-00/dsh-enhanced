@@ -27,6 +27,10 @@
     "./benchmark/strategy": {
       "types": "./lib/benchmark/strategy.d.ts",
       "default": "./lib/benchmark/strategy.js"
+    },
+    "./benchmark/deepseek": {
+      "types": "./lib/benchmark/deepseek.d.ts",
+      "default": "./lib/benchmark/deepseek.js"
     }
   },
   "files": [
@@ -87,7 +91,8 @@
     "@deepseek-ai/dsh-subagent": ">=0.1.2-rc.1 <0.2.0",
     "@dsh-enhanced/assistant-goals": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/assistant-isolation": ">=0.1.0 <0.2.0",
-    "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0"
+    "@dsh-enhanced/assistant-verifier": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-deepseek-budget": ">=0.1.0 <0.2.0"
   },
   "peerDependenciesMeta": {
     "@deepseek-ai/dsh-agent-loop": {
@@ -158,6 +163,9 @@
     },
     "@dsh-enhanced/assistant-verifier": {
       "optional": true
+    },
+    "@dsh-enhanced/assistant-deepseek-budget": {
+      "optional": true
     }
   },
   "devDependencies": {
@@ -186,7 +194,8 @@
     "@deepseek-ai/dsh-goal-round-driver": "catalog:",
     "@deepseek-ai/dsh-subagent": "catalog:",
     "@dsh-enhanced/assistant-goals": "workspace:*",
-    "@dsh-enhanced/assistant-isolation": "workspace:*"
+    "@dsh-enhanced/assistant-isolation": "workspace:*",
+    "@dsh-enhanced/assistant-deepseek-budget": "workspace:*"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

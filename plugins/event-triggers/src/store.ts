@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import type { DatabaseSync } from 'node:sqlite'
+import { externalEventDigest, parseExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/external-event'
 import { EventTriggerDatabaseError, openEventTriggerDatabase } from './sqlite.js'
 import type { FireWhen } from './config.js'
 
@@ -23,6 +24,8 @@ export interface TriggerOutboxEvent {
   lastAttemptAt?: number
   lastError?: string
   createdAt: number
+  /** Undefined only for rows written before provenance envelopes were introduced. */
+  envelope?: Readonly<{ canonical: string; digest: string }>
 }
 
 export type WebhookAcceptance =
@@ -55,9 +58,38 @@ interface OutboxRow {
   next_attempt_at: number
   last_attempt_at: number | null
   last_error: string | null
+  envelope_canonical: string | null
+  envelope_digest: string | null
+}
+
+function validateEnvelope(
+  canonical: string,
+  digest: string,
+  binding: Pick<TriggerOutboxEvent, 'triggerId' | 'eventId' | 'occurredAt'>,
+): void {
+  try {
+    const envelope = parseExternalEventEnvelope(JSON.parse(canonical))
+    if (externalEventDigest(envelope) !== digest
+      || envelope.source.id !== `event-triggers:${binding.triggerId}`
+      || envelope.event.id !== binding.eventId
+      || envelope.event.occurredAt !== binding.occurredAt) {
+      throw new Error('mismatch')
+    }
+  } catch {
+    throw new EventTriggerStoreError('invalid-input', 'event outbox provenance is invalid or does not bind its row')
+  }
 }
 
 function event(row: OutboxRow): TriggerOutboxEvent {
+  const hasEnvelope = row.envelope_canonical !== null || row.envelope_digest !== null
+  if (hasEnvelope) {
+    if (row.envelope_canonical === null || row.envelope_digest === null) {
+      throw new EventTriggerStoreError('invalid-input', 'event outbox provenance is invalid or does not bind its row')
+    }
+    validateEnvelope(row.envelope_canonical, row.envelope_digest, {
+      triggerId: row.trigger_id, eventId: row.event_id, occurredAt: row.occurred_at,
+    })
+  }
   return Object.freeze({
     id: row.id, triggerId: row.trigger_id, eventId: row.event_id, occurredAt: row.occurred_at,
     status: row.status, attempts: row.attempts,
@@ -66,6 +98,7 @@ function event(row: OutboxRow): TriggerOutboxEvent {
     ...(row.last_attempt_at === null ? {} : { lastAttemptAt: row.last_attempt_at }),
     ...(row.last_error === null ? {} : { lastError: row.last_error }),
     createdAt: row.created_at,
+    ...(hasEnvelope ? { envelope: Object.freeze({ canonical: row.envelope_canonical!, digest: row.envelope_digest! }) } : {}),
   })
 }
 
@@ -116,6 +149,8 @@ export class EventTriggerStore {
     cooldownMs: number
     maxFires: number
     ttlMs?: number
+    /** Creates an immutable provenance snapshot after the stable outbox event id is known. */
+    envelope?: (eventId: string, revision: string) => Readonly<{ canonical: string; digest: string }>
   }): TriggerOutboxEvent[] {
     validTime(input.occurredAt, 'occurredAt')
     return this.transaction(() => {
@@ -152,7 +187,7 @@ export class EventTriggerStore {
       if (state.pending_revision === null || state.pending_since === null) return []
       if (input.occurredAt < state.pending_since + input.debounceMs) return []
       if (state.last_fire_at !== null && input.occurredAt < state.last_fire_at + input.cooldownMs) return []
-      const created = this.insertOutbox(input.triggerId, `edge:${state.pending_revision}`, input.occurredAt)
+      const created = this.insertOutbox(input.triggerId, `edge:${state.pending_revision}`, input.occurredAt, input.envelope)
       this.database.prepare(`
         UPDATE trigger_state SET pending_fingerprint = NULL, pending_since = NULL, pending_revision = NULL,
           last_fire_at = ?, fire_count = fire_count + 1 WHERE trigger_id = ?
@@ -170,6 +205,7 @@ export class EventTriggerStore {
     cooldownMs?: number
     maxFires: number
     ttlMs?: number
+    envelope?: (eventId: string, revision: string) => Readonly<{ canonical: string; digest: string }>
   }): WebhookAcceptance {
     validTime(input.occurredAt, 'occurredAt')
     const acceptedAt = input.acceptedAt ?? input.occurredAt
@@ -194,7 +230,7 @@ export class EventTriggerStore {
       if (state.last_fire_at !== null && acceptedAt < state.last_fire_at + (input.cooldownMs ?? 0)) {
         return { accepted: false, reason: 'cooldown' }
       }
-      const created = this.insertOutbox(input.triggerId, `webhook:${input.eventId}`, input.occurredAt)
+      const created = this.insertOutbox(input.triggerId, `webhook:${input.eventId}`, input.occurredAt, input.envelope)
       if (created === undefined) return { accepted: false, reason: 'replay' }
       this.database.prepare(`
         UPDATE trigger_state SET last_observed_at = ?, last_fire_at = ?, fire_count = fire_count + 1
@@ -313,15 +349,24 @@ export class EventTriggerStore {
     return row === undefined ? undefined : event(row)
   }
 
-  private insertOutbox(triggerId: string, key: string, occurredAt: number): TriggerOutboxEvent | undefined {
+  private insertOutbox(
+    triggerId: string,
+    key: string,
+    occurredAt: number,
+    provenance?: (eventId: string, revision: string) => Readonly<{ canonical: string; digest: string }>,
+  ): TriggerOutboxEvent | undefined {
     const eventId = stableEventId(triggerId, key)
     const id = `outbox-${eventId.slice('event-'.length)}`
+    const envelope = provenance?.(eventId, key)
+    if (envelope !== undefined) {
+      validateEnvelope(envelope.canonical, envelope.digest, { triggerId, eventId, occurredAt })
+    }
     const result = this.database.prepare(`
       INSERT OR IGNORE INTO event_outbox(
         id, trigger_id, event_id, occurred_at, status, attempts, delivered_at, created_at,
-        next_attempt_at, last_attempt_at, last_error
-      ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, ?, ?, NULL, NULL)
-    `).run(id, triggerId, eventId, occurredAt, this.now(), this.now())
+        next_attempt_at, last_attempt_at, last_error, envelope_canonical, envelope_digest
+      ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, ?, ?, NULL, NULL, ?, ?)
+    `).run(id, triggerId, eventId, occurredAt, this.now(), this.now(), envelope?.canonical ?? null, envelope?.digest ?? null)
     if (result.changes === 0) return undefined
     return this.byEventId(eventId)
   }

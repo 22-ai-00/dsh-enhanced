@@ -168,3 +168,9 @@ Legacy schema 7 owner rows are adopted lazily through the exact Host delivery ca
 此接口运行本机 Docker 和离线任意候选 shell：输入复制入容器，验证向量只供独立 runner，Host 持久状态保存在候选工作区之外。调用方必须提供受信任 adapter factory、已有私有目录、固定本机镜像及明确限额；不查找或修改用户 profile，不发送真实渠道消息。`execute`/`close` 清理有等待上限，但不合作资源可能仍未停止。adapter factory 与初始装配仍由调用方的整体期限控制，不能把本接口计量窗口视为完整比较墙钟期限。目录权限不隔离同 UID 的可信 Host 代码。
 
 策略 executor 会核对实际挂载工具、完整 persona、完整 Policy 配置、运行时来源和 adapter；这些观察连同全流程故障证据写入 journal 外的私有证据目录。普通 Evaluation bundle 不自动激活上述可选 Host peers，且尚无真实模型收益结论。
+
+### DeepSeek strategy adapter
+
+The optional `./benchmark/deepseek` export supplies the trusted `createNativeAdapter` entry for strategy-v1. Explicitly install the matching `assistant-deepseek-budget` Host peer and provide the `DEEPSEEK_API_KEY` credential reference in the current credentials service or process environment. The factory registers no services or profile configuration; disposal shuts down its adapter. It uses the existing fixed HTTPS production transport and sends public task context and tool messages to that provider. No subprocess, credential file scan, model-generated adapter or automatic retry is added.
+
+The input reserve is the production contract's conservative 2,097,152-token upper bound per request; prices remain unknown. Use the [DeepSeek example and instructions](../../docs/goal-strategy-evaluation.md#deepseek-生产模型入口), rather than the small generic fixture budget. Source commitments include the selected DeepSeek and credentials packages. Runtime readiness, online model access and measured strategy benefit remain separate evidence.

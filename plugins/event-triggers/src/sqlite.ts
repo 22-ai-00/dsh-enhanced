@@ -13,8 +13,8 @@ function migrate(database: DatabaseSync): void {
   database.exec('BEGIN IMMEDIATE')
   try {
     const version = (database.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
-    if (version > 2) throw new EventTriggerDatabaseError('schema-too-new', `event trigger schema ${version} is too new`)
-    if (version === 2) { database.exec('COMMIT'); return }
+    if (version > 3) throw new EventTriggerDatabaseError('schema-too-new', `event trigger schema ${version} is too new`)
+    if (version === 3) { database.exec('COMMIT'); return }
     if (version === 0) database.exec(`
       CREATE TABLE trigger_state (
       trigger_id TEXT PRIMARY KEY,
@@ -40,7 +40,11 @@ function migrate(database: DatabaseSync): void {
       created_at INTEGER NOT NULL,
       next_attempt_at INTEGER NOT NULL,
       last_attempt_at INTEGER,
-      last_error TEXT
+      last_error TEXT,
+      envelope_canonical TEXT,
+      envelope_digest TEXT,
+      CHECK ((envelope_canonical IS NULL AND envelope_digest IS NULL)
+        OR (envelope_canonical IS NOT NULL AND envelope_digest IS NOT NULL))
       ) STRICT;
       CREATE TABLE trigger_health (
         trigger_id TEXT PRIMARY KEY,
@@ -83,7 +87,11 @@ function migrate(database: DatabaseSync): void {
       ) STRICT;
       CREATE INDEX event_outbox_pending ON event_outbox(status, next_attempt_at, created_at, id);
     `)
-    database.exec('PRAGMA user_version = 2')
+    if (version === 1 || version === 2) database.exec(`
+      ALTER TABLE event_outbox ADD COLUMN envelope_canonical TEXT;
+      ALTER TABLE event_outbox ADD COLUMN envelope_digest TEXT;
+    `)
+    database.exec('PRAGMA user_version = 3')
     database.exec('COMMIT')
   } catch (error) {
     try { database.exec('ROLLBACK') } catch {}

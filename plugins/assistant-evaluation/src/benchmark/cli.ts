@@ -38,11 +38,11 @@ function options(args: readonly string[], allowed: readonly string[], required: 
   return result
 }
 
-async function boundedFile(path: string, limit: number): Promise<{ text: string; digest: string }> {
+async function boundedFile(path: string, limit: number, allowHardlinks = false): Promise<{ text: string; digest: string }> {
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK)
   try {
     const before = await handle.stat()
-    if (!before.isFile() || before.nlink !== 1 || before.size > limit) throw new BenchmarkError('benchmark input must be a bounded regular file')
+    if (!before.isFile() || (!allowHardlinks && before.nlink !== 1) || before.size > limit) throw new BenchmarkError('benchmark input must be a bounded regular file')
     const bytes = Buffer.alloc(limit + 1)
     let total = 0
     while (total < bytes.length) {
@@ -74,12 +74,13 @@ async function config(path: string): Promise<unknown> {
 /** Loads only an operator-selected Host module, not code produced by a benchmark candidate. */
 async function adapter(path: string, input: Readonly<{ model: NativeModelConfig }>): Promise<NativeAdapterFactory> {
   if (!isAbsolute(path)) throw new BenchmarkError('adapter module path must be absolute')
-  const captured = await boundedFile(path, 1_048_576)
+  const captured = await boundedFile(path, 1_048_576, true)
   if (captured.digest !== input.model.adapterDigest || captured.digest !== input.model.tokenCounterDigest) throw new BenchmarkError('adapter module does not match frozen adapter/token-counter digests')
+  // Trusted installed adapters may be pnpm hardlinks. Config/output files still require one link.
   // Digest and post-load check detect ordinary replacement; same-UID filesystem attacks and
   // transitive module imports are outside this trusted Host extension boundary.
   const imported: unknown = await import(`${pathToFileURL(path).href}?benchmark=${captured.digest}`)
-  if ((await boundedFile(path, 1_048_576)).digest !== captured.digest) throw new BenchmarkError('adapter module changed during import')
+  if ((await boundedFile(path, 1_048_576, true)).digest !== captured.digest) throw new BenchmarkError('adapter module changed during import')
   if (!imported || typeof imported !== 'object' || !('createNativeAdapter' in imported) || typeof imported.createNativeAdapter !== 'function') throw new BenchmarkError('adapter module must export createNativeAdapter')
   return imported.createNativeAdapter as NativeAdapterFactory
 }
@@ -136,10 +137,13 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
     const suite = args.get('--suite') ?? 'research-v1'
     const require = createRequire(import.meta.url)
     if (suite === 'strategy-v1') {
-      const packages = strategyRuntimePackages.map(name => {
+      const configPath = args.get('--config')
+      const configured = configPath === undefined ? undefined : await config(configPath)
+      const provider = (configured as { model?: { provider?: unknown } } | undefined)?.model?.provider
+      const selectedPackages = [...strategyRuntimePackages, ...(provider === 'deepseek-goal-metered' ? ['@dsh-enhanced/assistant-deepseek-budget', '@deepseek-ai/dsh-credentials'] : [])]
+      const packages = selectedPackages.map(name => {
         try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }
       })
-      const configPath = args.get('--config')
       if (configPath === undefined) {
         result = { ready: false, packages, isolation: { ready: false }, next: 'Provide --config to probe the immutable local image and Docker runtime. Dependencies alone do not establish strategy readiness.' }
         exitCode = 2
@@ -147,10 +151,11 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
         result = { ready: false, packages, isolation: { ready: false }, next: 'Install the unavailable strategy runtime packages before probing Docker or the configured image.' }
         exitCode = 2
       } else {
-        const input = await strategyConfig(await config(configPath))
+        const input = await strategyConfig(configured)
         let isolationReady = false
         try {
-          const isolation = await import('@dsh-enhanced/assistant-isolation')
+          const isolationPackage = '@dsh-enhanced/assistant-isolation'
+          const isolation = await import(isolationPackage) as { probeIsolationRuntime(image: string, dockerPath: string): Promise<void> }
           await isolation.probeIsolationRuntime(input.image, input.dockerPath)
           isolationReady = true
         } catch { /* Keep diagnostics non-sensitive and do not attempt installation or image pulls. */ }

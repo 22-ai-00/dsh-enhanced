@@ -95,3 +95,8 @@ Web owner 的 Goal admission CLI 要求同批 Delivery 只读 snapshot API、Iso
 策略原生 cell 装配使用 `dsh-goal`、`dsh-tool-goal`、`dsh-goal-round-driver`、`dsh-subagent@0.1.2-rc.1`，以及同批 Goals/Isolation/Verifier 可选 peers。必须以 Isolation 的具名默认插件入口挂载，保留 Policy 对插件身份的预授权核验；直接挂载其 Service class 会使工具注册失败。Goals 新增当前 owner route 校验的结束后快照，区分模型上下文截断视图与完整策略记录；每个 native run 的 step contract 和 whole-goal assessment contract 分开保存，后者通过持久 triggerRunId 关联。动态加载避免服务声明循环，发布前应运行完整 bootstrap 与原生隔离回归。
 
 strategy-v1 比较要求同批 Policy 的 `inspectHostConfiguration()`，在模型派发前核对真实有效 rules/default/budgets/autoReview；缺少 API 时拒绝执行。Goals 的可选 Verifier peer 下界对齐本仓 Verifier 首发包版本 `>=0.1.0 <0.2.0`，不再错误要求不存在的较高版本。范围本身不是能力证明，升级必须配套本批构建与安装后 CLI 验证。
+
+Evaluation 的 `./benchmark/deepseek` 通过可选 Host peer 使用同批 `assistant-deepseek-budget` 公共 adapter/契约；仅显式选择入口时动态加载，不新增上游 API 或模型协议。固定策略源清单在 `deepseek-goal-metered` 路线额外绑定 DeepSeek 和 credentials 的实际部署 JS/manifest，doctor 同步检查依赖。动态加载避免 Evaluation → DeepSeek → Goals 的声明构建环。升级须验证空产物 bootstrap、生产 serializer/预算/停止回归和安装后公开导出，不以模板可解析证明实际模型可用。
+
+
+Event Triggers 的版本化来源依赖同批 Automations 新增的纯 `./external-event` 子入口，peer 下界为 `>=0.1.24 <0.2.0`，两包须同步安装；旧 Automations 不提供该导出。Automations schema 15 与 Event schema 3 保留旧记录的空来源，不将旧 pending 自动补证或投到现配置目标。升级后应核对 quarantine；事件来源元数据不是目标唤醒权限，原有 Policy 准入继续生效。

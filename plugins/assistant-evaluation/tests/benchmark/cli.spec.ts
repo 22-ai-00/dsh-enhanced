@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { link, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -63,11 +63,12 @@ describe('benchmark operator commands', () => {
     await writeFile(file, JSON.stringify(configuration('b'.repeat(64))))
     await expect(benchmarkCli(['run', '--config', file, '--adapter', module, '--database', join(root, 'bench.sqlite')], capture().io)).rejects.toThrow('digests')
   })
-  it('persists unknown on Host adapter failure and reports it without echoing exception content', async () => {
+  it('loads a content-bound package hardlink and records adapter failure without echoing exception content', async () => {
     const root = await workspace(); const module = join(root, 'adapter.mjs'); const file = join(root, 'config.json'); const database = join(root, 'bench.sqlite')
     const code = 'export function createNativeAdapter() { throw new Error("SECRET_SENTINEL"); }'
     const digest = createHash('sha256').update(code).digest('hex')
-    await writeFile(module, code); await writeFile(file, JSON.stringify(configuration(digest)))
+    await writeFile(module, code); await link(module, join(root, 'package-store-copy.mjs'))
+    await writeFile(file, JSON.stringify(configuration(digest)))
     const output = capture()
     expect(await benchmarkCli(['run', '--config', file, '--adapter', module, '--database', database], output.io)).toBe(2)
     expect(output.chunks.join('')).not.toContain('SECRET_SENTINEL')
@@ -76,6 +77,12 @@ describe('benchmark operator commands', () => {
     output.chunks.length = 0
     expect(await benchmarkCli(['report', '--database', database, '--plan', 'cli-trial'], output.io)).toBe(0)
     expect(JSON.parse(output.chunks.join(''))).toEqual(result)
+  })
+  it('continues to reject hardlinked configuration inputs', async () => {
+    const root = await workspace(); const file = join(root, 'config.json')
+    await writeFile(file, JSON.stringify(configuration('a'.repeat(64))))
+    await link(file, join(root, 'config-alias.json'))
+    await expect(benchmarkCli(['plan', '--config', file], capture().io)).rejects.toThrow('bounded regular file')
   })
   it('rejects duplicate/unrecognized flags and does not create a database for report typos', async () => {
     const root = await workspace(); const missing = join(root, 'absent.sqlite')

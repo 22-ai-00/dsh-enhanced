@@ -53,7 +53,7 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "^4.0.1",
-    "@dsh-enhanced/assistant-automations": ">=0.1.0 <0.2.0",
+    "@dsh-enhanced/assistant-automations": ">=0.1.24 <0.2.0",
     "@dsh-enhanced/assistant-policy": ">=0.1.0 <0.2.0",
     "@dsh-enhanced/credentials-keychain": ">=0.1.0 <0.2.0"
   },

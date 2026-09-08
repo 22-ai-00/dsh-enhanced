@@ -2,6 +2,8 @@
 
 把受限 file、HTTPS/JSON 和 HMAC webhook 边缘条件转换成 `assistant-automations` 的稳定 external occurrence。插件先在自己的 SQLite outbox 持久化 fire，再调用 Automations；下游失败或重启时重放相同 event id，不直接创建 Agent 或发送消息。失败项采用持久退避重试，已删除或禁用 trigger 的遗留事件进入 quarantine，不会阻塞后续事件。
 
+每个新 outbox 行同时保存不可变 `dsh-external-event/v1` provenance envelope 和摘要：它绑定 trigger 配置摘要、冻结的 automation target、稳定 event id、观测摘要/edge revision 和信任方式，但不包含 file 内容、HTTP 响应、webhook body 或凭据值。重放时会复核摘要与当前 trigger 配置；任何 retarget 或配置变化都会 quarantine 旧行，不会将它投递给新目标。schema v1/v2 的旧 outbox 行没有 provenance，会 quarantine 并要求操作员核对历史目标；它们不会自动重放，也不能被解释为具有新来源证明。
+
 ## 安装与默认状态
 
 ```sh

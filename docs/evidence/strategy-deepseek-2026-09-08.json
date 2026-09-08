@@ -1,0 +1,534 @@
+{
+  "schemaVersion": 1,
+  "date": "2026-09-08",
+  "baseline": "b8cba5beafb3b7cd69a1e11041ce50a9cb1e4535",
+  "scope": [
+    "WP11 immutable external event provenance and native automation verification/delivery integration",
+    "WP04/06 production DeepSeek strategy binding and installed CLI"
+  ],
+  "fullGoal": {
+    "verified": 3,
+    "implementing": 9,
+    "todo": 6,
+    "complete": false
+  },
+  "validation": {
+    "fullCheck": {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": "/tmp/dsh-events-check-v3.log",
+      "exitCode": 0,
+      "sha256": "dbe654341a5d738b65694101653df21569da6b6d90e73ac0947ab64a92ad65b0"
+    },
+    "commands": [
+      {
+        "command": "CI=true pnpm install --offline --ignore-scripts --no-frozen-lockfile",
+        "log": "/tmp/dsh-strategy-deepseek-install-v2.log",
+        "exitCode": 0,
+        "sha256": "e00ec1a72538a697822ad8225a02771a9e5359d07f0a902d2332413ae6610abe"
+      },
+      {
+        "command": "CI=true pnpm run build",
+        "log": "/tmp/dsh-strategy-deepseek-clean-build-v1.log",
+        "exitCode": 2,
+        "sha256": "8d2da758cde3c6794b987dbe4a0e93cfdace3ed2df3506ecd58cf69907ae733b"
+      },
+      {
+        "command": "CI=true pnpm run build",
+        "log": "/tmp/dsh-strategy-deepseek-clean-build-v2.log",
+        "exitCode": 0,
+        "sha256": "2e5fa9ca5daa7ad22047125cfd4b1a8f75d5bb1044d60220aedd129683278b08"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation typecheck && CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_DEEPSEEK_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-focused DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm exec vitest run plugins/assistant-evaluation/tests/benchmark/deepseek.spec.ts plugins/assistant-evaluation/tests/benchmark/strategy-deepseek-runtime.spec.ts plugins/assistant-evaluation/tests/benchmark/strategy-capabilities.spec.ts plugins/assistant-evaluation/tests/benchmark/strategy-cli.spec.ts",
+        "log": "/tmp/dsh-strategy-deepseek-focused-v1.log",
+        "exitCode": 2,
+        "sha256": "967ee8c6af79ccc04963cbe75890b4c4303819a6ecfbbee4922e6d0ac6a00d01"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation typecheck && CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_DEEPSEEK_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-focused DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm exec vitest run plugins/assistant-evaluation/tests/benchmark/deepseek.spec.ts plugins/assistant-evaluation/tests/benchmark/strategy-deepseek-runtime.spec.ts plugins/assistant-evaluation/tests/benchmark/strategy-capabilities.spec.ts plugins/assistant-evaluation/tests/benchmark/strategy-cli.spec.ts",
+        "log": "/tmp/dsh-strategy-deepseek-focused-v2.log",
+        "exitCode": 0,
+        "sha256": "39fc5b52b1f5a1d45ce8290a0aee8af207a622f02536f8c0b1cb954187603bce"
+      },
+      {
+        "command": "CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_DEEPSEEK_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-fullcheck DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+        "log": "/tmp/dsh-strategy-deepseek-check-v1.log",
+        "exitCode": 1,
+        "sha256": "0589749628b40372dc77447548b99c6d697c5a483d299fc3e14f71a3c6adf24b"
+      },
+      {
+        "command": "CI=true pnpm --recursive --fail-if-no-match --filter './packages/*' --filter @dsh-enhanced/assistant-evaluation --filter @dsh-enhanced/assistant-goals --filter @dsh-enhanced/assistant-isolation --filter @dsh-enhanced/assistant-policy --filter @dsh-enhanced/assistant-delivery --filter @dsh-enhanced/assistant-verifier --filter @dsh-enhanced/assistant-deepseek-budget pack --pack-destination /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed/packs",
+        "log": "/tmp/dsh-strategy-deepseek-pack-v1.log",
+        "exitCode": 0,
+        "sha256": "7af1305bb652b443cb3eaf13803760c032b1416f2651a29706aab07fb21c5723"
+      },
+      {
+        "command": "CI=true pnpm --dir /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed/installed install --offline --ignore-scripts --no-frozen-lockfile",
+        "log": "/tmp/dsh-strategy-deepseek-installed-deps-v1.log",
+        "exitCode": 1,
+        "sha256": "8723d672eb4008be64b09548f3800d9ad66971fa4c8b235a3ea9f2962660b961"
+      },
+      {
+        "command": "CI=true pnpm --dir /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed/installed install --ignore-scripts --no-frozen-lockfile",
+        "log": "/tmp/dsh-strategy-deepseek-installed-deps-v2.log",
+        "exitCode": 0,
+        "sha256": "8560a4c09f57700f94e1261219ebeebc86064214184b7414afb977e9b1792a30"
+      },
+      {
+        "command": "CI=true node .cache/strategy-deepseek-validation/installed-cli.mjs",
+        "log": "/tmp/dsh-strategy-deepseek-installed-cli-v1.log",
+        "exitCode": 1,
+        "sha256": "2d7fde65ad4ecb34b987e4d409058c49c9e076091fdaf6ace4fa48cff88d3c46"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation pack --pack-destination /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/packs",
+        "log": "/tmp/dsh-strategy-deepseek-pack-v2.log",
+        "exitCode": 0,
+        "sha256": "e0076bacb12dc9d4de9d8b36b35e66f37523cd347f096ead6b3d6a935c9def1c"
+      },
+      {
+        "command": "CI=true pnpm --dir /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/installed install --offline --ignore-scripts --no-frozen-lockfile",
+        "log": "/tmp/dsh-strategy-deepseek-installed-deps-v3.log",
+        "exitCode": 0,
+        "sha256": "870ae7d52775a094a0cfc15700558b78d2c7fc2061b85f249b86df0cd014e881"
+      },
+      {
+        "command": "CI=true node .cache/strategy-deepseek-validation/installed-cli-v2.mjs",
+        "log": "/tmp/dsh-strategy-deepseek-installed-cli-v2.log",
+        "exitCode": 0,
+        "sha256": "76215141f7be588d580bce6af51cac0a068d0231ddcaa6a16af8ede30bb54e5b"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-automations build && CI=true pnpm --filter @dsh-enhanced/event-triggers build && CI=true pnpm --filter @dsh-enhanced/assistant-automations typecheck && CI=true pnpm --filter @dsh-enhanced/event-triggers typecheck && CI=true VITEST_MAX_WORKERS=4 pnpm exec vitest run plugins/assistant-automations/tests plugins/event-triggers/tests tests/autonomy-event-pipeline.spec.ts tests/personal-assistant-p1.spec.ts",
+        "log": "/tmp/dsh-events-focused-v1.log",
+        "exitCode": 1,
+        "sha256": "f5e904b4823070aae9544d65d07130b2ae6befc1667701deac9e14684953e125"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-automations build && CI=true pnpm --filter @dsh-enhanced/event-triggers build && CI=true pnpm --filter @dsh-enhanced/assistant-automations typecheck && CI=true pnpm --filter @dsh-enhanced/event-triggers typecheck && CI=true VITEST_MAX_WORKERS=4 pnpm exec vitest run plugins/assistant-automations/tests plugins/event-triggers/tests tests/autonomy-event-pipeline.spec.ts tests/personal-assistant-p1.spec.ts plugins/assistant-evaluation/tests/benchmark/cli.spec.ts",
+        "log": "/tmp/dsh-events-focused-v2.log",
+        "exitCode": 1,
+        "sha256": "83e179f5353b13a1353d341dbabec89d81c7e540b42d869aa6e789da915009a2"
+      },
+      {
+        "command": "CI=true VITEST_MAX_WORKERS=4 pnpm exec vitest run plugins/assistant-automations/tests/store.spec.ts",
+        "log": "/tmp/dsh-events-migrations-v1.log",
+        "exitCode": 1,
+        "sha256": "e74dee12896149212d811360b3bd4296dd0303fa170f99e3136238c86a896cec"
+      },
+      {
+        "command": "CI=true pnpm exec vitest run plugins/assistant-automations/tests/store.spec.ts --maxWorkers=4",
+        "log": "/tmp/dsh-events-migrations-v2.log",
+        "exitCode": 0,
+        "sha256": "caf8f05c76afac86c6946a15017949a3d507bf8dd219f78c0b6a02e2c3c50268"
+      },
+      {
+        "command": "CI=true pnpm install --offline --ignore-scripts --frozen-lockfile && pnpm validate",
+        "log": "/tmp/dsh-events-manifests-v1.log",
+        "exitCode": 0,
+        "sha256": "2ee78cedc1680a274434036eb29c0710c2d269e451cfc940fc0d3556ef7176cc"
+      },
+      {
+        "command": "CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT=.cache/autonomy-event-finalcheck DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+        "log": "/tmp/dsh-events-check-v1.log",
+        "exitCode": 1,
+        "sha256": "480987488c571e067c8eaf0d76814164e4afddec7ea61ccef424b1e6368b8f37"
+      },
+      {
+        "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+        "log": "/tmp/dsh-events-check-v2.log",
+        "exitCode": 1,
+        "sha256": "d8b6c2d584564d069bb0d3497b56abb5f5f4a7345548e6128b6125ec27cedf2d"
+      },
+      {
+        "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evolution exec vitest run tests/approval-bridge.spec.ts --maxWorkers=4",
+        "log": "/tmp/dsh-events-evolution-timeout-v1.log",
+        "exitCode": 0,
+        "sha256": "34361b1d6506deea4b59fd7ad0af5585705b8ee4d4a67f6b076b5a2659499940"
+      },
+      {
+        "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+        "log": "/tmp/dsh-events-check-v3.log",
+        "exitCode": 0,
+        "sha256": "dbe654341a5d738b65694101653df21569da6b6d90e73ac0947ab64a92ad65b0"
+      }
+    ],
+    "review": {
+      "status": "PASS",
+      "agent": "deepseek_binding_verify",
+      "mode": "independent read-only instructions; no enforced sandbox",
+      "verified": [
+        "final pnpm check exit 0 and log SHA-256",
+        "source hashes agree with evidence",
+        "31 dry-run pack lists and new public exports",
+        "producer/consumer provenance and legacy/retarget quarantine",
+        "production DeepSeek factory and installed CLI fixture validation",
+        "Evolution parameterized tests preserve all original assertions and limits"
+      ],
+      "limits": "No online DeepSeek response, actual model benefit, model-generated pipeline report, real outbound account verification contents, or complete event-to-goal resume proven."
+    },
+    "summary": {
+      "rootFiles": 307,
+      "rootTests": 3847,
+      "skipped": 0,
+      "automationsTests": 227,
+      "eventTriggersTests": 76,
+      "evaluationTests": 230,
+      "evolutionTests": 172,
+      "dryRunPackages": 31,
+      "newExportsPresent": true,
+      "lintWarnings": 0,
+      "manifestTypecheckTestsBuildPack": "passed"
+    }
+  },
+  "eventPipeline": {
+    "test": "tests/autonomy-event-pipeline.spec.ts",
+    "scenarios": [
+      "achieved",
+      "not-achieved"
+    ],
+    "productionServices": [
+      "EventTriggers",
+      "Policy",
+      "Automations",
+      "AgentLoop",
+      "Verifier",
+      "Evaluation",
+      "Delivery"
+    ],
+    "substitutes": [
+      "LLM stream",
+      "outbound delivery adapter",
+      "in-memory Session persistence and runtime test dependencies"
+    ],
+    "artifact": "prewritten report file; no model artifact generation proven",
+    "assertions": [
+      "event provenance persisted and bound to exact occurrence",
+      "untrusted file text absent from model instructions",
+      "independent receipt differentiates artifact result",
+      "duplicate observation does not repeat execution or delivery"
+    ],
+    "additionalRegressions": [
+      "producer restart with changed target quarantines old event",
+      "legacy pending provenance absent stays quarantined",
+      "HMAC bytes frozen before async verification",
+      "schema migrations retain unknown legacy provenance"
+    ]
+  },
+  "installedDeepSeek": {
+    "commands": [
+      {
+        "label": "corpus",
+        "command": [
+          "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._13a8f36b44279667c7a6938df8691d9c/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+          "corpus",
+          "--suite",
+          "strategy-v1"
+        ],
+        "exitCode": 0,
+        "stdoutSha256": "55a48ab71517b4cce9d84cccc3ae9b048c0f674c45ed2e445419d8b8ab8e3942",
+        "stderrSha256": "6ab429ff9855de7cb8cd32b640b91f563dd1b98fe559715432241f56aa5d05ab"
+      },
+      {
+        "label": "doctor",
+        "command": [
+          "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._13a8f36b44279667c7a6938df8691d9c/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+          "doctor",
+          "--suite",
+          "strategy-v1",
+          "--config",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/config.json"
+        ],
+        "exitCode": 0,
+        "stdoutSha256": "77027cb5e9f7da2d8dc8a962724a760022a86fad17c9897049358ebf5112cf2e",
+        "stderrSha256": "c7b5de5e9474a95bfef056505bb231dc29c07c810ae80ed594b9cacc722b34c8"
+      },
+      {
+        "label": "plan",
+        "command": [
+          "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._13a8f36b44279667c7a6938df8691d9c/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+          "plan",
+          "--config",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/config.json"
+        ],
+        "exitCode": 0,
+        "stdoutSha256": "05064e93959144ec92afeda75c03ca100168f224cfed32b49de4ac76fda4d7f2",
+        "stderrSha256": "1d0db7d10ee1bbd74f5e28d23035d56654550a685a86c3ce1f8a889fdd3251f6"
+      },
+      {
+        "label": "run",
+        "command": [
+          "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+          "--import",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-validation/installed-transport.mjs",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._13a8f36b44279667c7a6938df8691d9c/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+          "run",
+          "--config",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/config.json",
+          "--adapter",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._13a8f36b44279667c7a6938df8691d9c/node_modules/@dsh-enhanced/assistant-evaluation/lib/benchmark/deepseek.js",
+          "--database",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/journal.sqlite"
+        ],
+        "exitCode": 0,
+        "stdoutSha256": "bb398440d09ea70431b312f5d1be3f32650df8203ee95e2ecab83401f9bd85be",
+        "stderrSha256": "c549fc58ab8c5cc468fb14ca2e1ca61d0e8e1d0c75087e6655aafba4b56f25ac"
+      },
+      {
+        "label": "rerun",
+        "command": [
+          "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+          "--import",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-validation/installed-transport.mjs",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._13a8f36b44279667c7a6938df8691d9c/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+          "run",
+          "--config",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/config.json",
+          "--adapter",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._13a8f36b44279667c7a6938df8691d9c/node_modules/@dsh-enhanced/assistant-evaluation/lib/benchmark/deepseek.js",
+          "--database",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/journal.sqlite"
+        ],
+        "exitCode": 0,
+        "stdoutSha256": "bb398440d09ea70431b312f5d1be3f32650df8203ee95e2ecab83401f9bd85be",
+        "stderrSha256": "b6567ecdc4ab18f0114e737e7345e1b56c697b53e9478161bd25ae36addd12cd"
+      },
+      {
+        "label": "report",
+        "command": [
+          "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._13a8f36b44279667c7a6938df8691d9c/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+          "report",
+          "--config",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/config.json",
+          "--database",
+          "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-deepseek-installed-v2/journal.sqlite",
+          "--plan",
+          "strategy-installed-development"
+        ],
+        "exitCode": 0,
+        "stdoutSha256": "bb398440d09ea70431b312f5d1be3f32650df8203ee95e2ecab83401f9bd85be",
+        "stderrSha256": "8092d5bca749fb0eb0a465bd12560d5f3f98cf423aa154f79b9a24550d046750"
+      }
+    ],
+    "cells": 4,
+    "requests": 30,
+    "childRequests": 4,
+    "rerunAndReportNoReplay": true,
+    "report": {
+      "schemaVersion": 1,
+      "planDigest": "d27c8643f2d938c3199ae6204b52bb7bdb6ee185faa8fa5a6df854691e5e972b",
+      "complete": true,
+      "expectedCells": 4,
+      "recordedCells": 4,
+      "variants": [
+        {
+          "id": "direct",
+          "expected": 2,
+          "recorded": 2,
+          "achieved": 2,
+          "notAchieved": 0,
+          "unknown": 0,
+          "successRate": 1,
+          "successInterval95": null,
+          "metrics": {
+            "inputTokens": {
+              "measured": 2,
+              "missing": 0,
+              "mean": 72,
+              "median": 72,
+              "p95": 72
+            },
+            "outputTokens": {
+              "measured": 2,
+              "missing": 0,
+              "mean": 48,
+              "median": 48,
+              "p95": 48
+            },
+            "costUsdMicros": {
+              "measured": 0,
+              "missing": 2,
+              "mean": null,
+              "median": null,
+              "p95": null
+            },
+            "toolCalls": {
+              "measured": 2,
+              "missing": 0,
+              "mean": 3,
+              "median": 3,
+              "p95": 3
+            },
+            "rework": {
+              "measured": 0,
+              "missing": 2,
+              "mean": null,
+              "median": null,
+              "p95": null
+            },
+            "interventions": {
+              "measured": 0,
+              "missing": 2,
+              "mean": null,
+              "median": null,
+              "p95": null
+            },
+            "latencyMs": {
+              "measured": 2,
+              "missing": 0,
+              "mean": 9228,
+              "median": 9228,
+              "p95": 9563
+            }
+          }
+        },
+        {
+          "id": "adaptive-strategy",
+          "expected": 2,
+          "recorded": 2,
+          "achieved": 2,
+          "notAchieved": 0,
+          "unknown": 0,
+          "successRate": 1,
+          "successInterval95": null,
+          "metrics": {
+            "inputTokens": {
+              "measured": 2,
+              "missing": 0,
+              "mean": 108,
+              "median": 108,
+              "p95": 108
+            },
+            "outputTokens": {
+              "measured": 2,
+              "missing": 0,
+              "mean": 72,
+              "median": 72,
+              "p95": 72
+            },
+            "costUsdMicros": {
+              "measured": 0,
+              "missing": 2,
+              "mean": null,
+              "median": null,
+              "p95": null
+            },
+            "toolCalls": {
+              "measured": 2,
+              "missing": 0,
+              "mean": 4,
+              "median": 4,
+              "p95": 4
+            },
+            "rework": {
+              "measured": 0,
+              "missing": 2,
+              "mean": null,
+              "median": null,
+              "p95": null
+            },
+            "interventions": {
+              "measured": 0,
+              "missing": 2,
+              "mean": null,
+              "median": null,
+              "p95": null
+            },
+            "latencyMs": {
+              "measured": 2,
+              "missing": 0,
+              "mean": 9674,
+              "median": 9674,
+              "p95": 9791
+            }
+          }
+        }
+      ],
+      "comparisons": [
+        {
+          "baselineId": "direct",
+          "variantId": "adaptive-strategy",
+          "paired": 2,
+          "missingPairs": 0,
+          "wins": 0,
+          "losses": 0,
+          "ties": 2,
+          "unknownPairs": 0,
+          "successRateDelta": 0,
+          "taskBootstrapInterval95": null
+        }
+      ],
+      "promotionAuthorized": false
+    },
+    "artifacts": {
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-assistant-deepseek-budget-0.1.0.tgz": "3cb85b5e2f6d4db050e669123991288e0120153a47676d450a96d796bebd57f6",
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-assistant-delivery-0.1.24.tgz": "cfd41a8a3c9bc66ecba54329d35800153af2afcd1a2b291da79f29070cebe396",
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-assistant-evaluation-0.1.24.tgz": "57580b1fc6c1961be27f48ac948bc82dc0358e0d1099adc1cf26efcf2ca6bc31",
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-assistant-goals-0.1.0.tgz": "e0fa887799e942607e51104be5a44151dedf4e0ad92d07635b85278a8f0d3b78",
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-assistant-growth-contract-0.1.24.tgz": "bbdc12673c6b1b0067068d2d9ee122c92e1505178b148de7f97a8fc4162b92ad",
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-assistant-isolation-0.1.0.tgz": "1a0856ba8975614099e2312e6677fa388b52350a75336a1764cd279f0404a342",
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-assistant-policy-0.1.24.tgz": "db7eaf93b95f172e06cba3a12c50c45a0025489122a447744c3a4a02c725022a",
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-assistant-verifier-0.1.0.tgz": "39a179aa48abea51150ba207fa17956f7fa6223eb8b5882d217a4df9fb1fe4e4",
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-llm-route-capabilities-0.1.24.tgz": "ddcc0e04069c73549b99b8fa98763e71995d8cedaf7c36ba44ed81ea5bd8b4d6",
+      ".cache/strategy-deepseek-installed-v2/packs/dsh-enhanced-task-acceptance-contract-0.1.0.tgz": "39968deeaed1d62a8bb39aeb09756f54131fa36a7d791d454d3a85862f338591"
+    },
+    "transport": "explicit deterministic fetch replacement; production adapter serializer and meter used; no online model call"
+  },
+  "failuresAndCorrections": [
+    "Final check v1 failed only because an optional evidence export directory was not created; v2 removes this unnecessary export setting.",
+    "Check v2 root tests passed; recursive Evolution test hit its 5-second timeout for 11 serial cases. Parameterized into independent cases with identical assertions and unchanged per-test timeout.",
+    "Initial frozen lockfile install required workspace dev dependency update.",
+    "Clean bootstrap exposed static Isolation declaration dependency; switched CLI runtime import.",
+    "Focused DeepSeek typecheck exposed unavailable RequestRedirect global; uses RequestInit redirect type.",
+    "Nested scratch worktree under repository cache contaminated Vitest discovery; moved worktree outside repo. Failed full run is retained, not counted as passing.",
+    "Fresh CLI install rejected pnpm hardlinked adapter; allow hardlinks only for trusted adapter with before/after content checks, config retains single-link rule.",
+    "Envelope descriptor parsing and historical migration fixture schemas corrected; producer signed-body fixture and native runtime setup ordering corrected."
+  ],
+  "sourceSha256": {
+    "plugins/assistant-automations/package.json": "ece64aba5169f903c050ef000a405e7793ae242f5734ff27920aa230eb81ef64",
+    "plugins/assistant-automations/src/external-event.ts": "0a5f42798272a191f97be9c4afbdba11ee1bf88c5a8a48843107330bfa917fb4",
+    "plugins/assistant-automations/src/index.ts": "84bc04dbe7bc1626e0260f94a05d80161f1071504e05c557fac8d6a99567c30a",
+    "plugins/assistant-automations/src/service.ts": "8ca54f819511e748071d913f9b5ef9fbbc48ac2a4bfe8bcb656c2f19d15cf7c4",
+    "plugins/assistant-automations/src/sqlite.ts": "5bb6b96f3b6acd14e28ea866c8e4d73442e4dedca8d4438255dc02feb7ce7b22",
+    "plugins/assistant-automations/src/store.ts": "ce8b55de1dde4aba0b245e548933b4f69dd018439857af138841f5d46c662bdd",
+    "plugins/assistant-automations/src/types.ts": "91025868aa24b2314dd92368d329b8ae098706aa6b7c40204788c0ebe080d808",
+    "plugins/assistant-automations/tests/canary-proof.spec.ts": "f9135f5989cf7ac61e2295e3aca910990cc1244a02233eec646e266e592be077",
+    "plugins/assistant-automations/tests/external-event.spec.ts": "10a82512e2d4e7b8de245d9e444f904981b165e8d19923b7e40dbe1a748daa24",
+    "plugins/assistant-automations/tests/proposals.spec.ts": "213c2c51d8dc6ef6aa896f210aefd9e4cefaf928bdea6055d017faf1dda9b6d0",
+    "plugins/assistant-automations/tests/state-machine.spec.ts": "70c8f223bf6eb53790fcb556d82173c6155093a03d4fa596610d365685d1f227",
+    "plugins/assistant-automations/tests/store.spec.ts": "7ac213120a05fd67d49ecbf06f29801205bf587150f7c939e7678beab8109283",
+    "plugins/assistant-evaluation/README.md": "8d4169c721483289ee3cdcbfdea3002b6012ee5018e33073944ede1b382f40a4",
+    "plugins/assistant-evaluation/package.json": "90eaca437719677be8cc99a3de96a8c382bba5306a097890aecbc0e04b77bec8",
+    "plugins/assistant-evaluation/src/benchmark/cli.ts": "b9dc9401b8d1a256e88283fd6f9a41833cabd71a3f69644a9d64d19651f43d3c",
+    "plugins/assistant-evaluation/src/benchmark/deepseek.ts": "a5e58f2fcf5ccb78c630562b4a8d979a122eeeb50aadd7e2ca0ce8f57a5ea235",
+    "plugins/assistant-evaluation/src/benchmark/strategy-capabilities.ts": "ac314b7151ee8caac5a9c6642cdd168e659e69533dae0eccd66f2ca1969d71e3",
+    "plugins/assistant-evaluation/src/benchmark/strategy-executor.ts": "97901806f305bafd618487c72dcc7e0d657a104f9f3a15ad6bab85a2a1a4f1a0",
+    "plugins/assistant-evaluation/tests/benchmark/cli.spec.ts": "75bef46efaf5b5222acfbe0b0f69a14481f4230d316d26fc5a3e64d32085d093",
+    "plugins/assistant-evaluation/tests/benchmark/deepseek.spec.ts": "ad295347aa4b5469eb1914b3c27654b4181172b24c511972356648f2e8ee6347",
+    "plugins/assistant-evaluation/tests/benchmark/strategy-capabilities.spec.ts": "5aa12e5fae198c08e7624aa35ada69031d9ed53e08d28015c02df5658f0f4c16",
+    "plugins/assistant-evaluation/tests/benchmark/strategy-deepseek-runtime.spec.ts": "10ac070b988ee0eda191ac80deffe0028ae6245aaaa29379c35105d450916b63",
+    "plugins/assistant-evolution/tests/approval-bridge.spec.ts": "e0b0c6e0e7dde0c9e0a8ca361c7610e4e0ddf21a84d9e394872c7a7521146794",
+    "plugins/event-triggers/README.md": "6368002c6a4f01cb5c31d8c78f3a075fa32a34333450306379a6da1710a05399",
+    "plugins/event-triggers/package.json": "0c1b8d82864189af1ef1f2b296c2460b5d2282b025abbf9202e4b08b2cbb25dc",
+    "plugins/event-triggers/src/service.ts": "2274336d12caca37705a1fc04ce6938ba2161d5dad3a93c8149670d4d12c3cd9",
+    "plugins/event-triggers/src/sqlite.ts": "2e8cbcde5a05b1ff86cbe877ce6c9fbbd269b0f3d34d21c070c295a2c06fbfa2",
+    "plugins/event-triggers/src/store.ts": "d823ef43ed5be961dc489dd2e2fcc0f0618c56f50ece8adeaceceda3170fdee8",
+    "plugins/event-triggers/tests/envelope.spec.ts": "9351acf7e7e2aafcaf9cdd087393fe3e4148108b7bcbf47e74feaafe634eaff3",
+    "plugins/event-triggers/tests/service.spec.ts": "4eca6df4110cc6c9eb2dbb48acedab3f4183badf93e495062cb424a5d0411d2a",
+    "plugins/event-triggers/tests/store.spec.ts": "496ffabfa6225781ea2e4baa0c1e636da3a0a922c824959eab0e4ca5689035be",
+    "pnpm-lock.yaml": "dbed1f2dd8a187fd015cc49b372cfed0385528e5e2c40bb75f54afdbfc472c25",
+    "tests/autonomy-event-pipeline.spec.ts": "f529ad4b77ede0d80f7948965636f1538d73da7083b7f1986e6e1027582fc29c"
+  },
+  "limitations": [
+    "No actual DeepSeek credential in current process; online supplier behavior and strategy benefit unverified.",
+    "No event-to-goal wait/resume, goal completion unsubscribe, real calendar connector, or complete WP11 verification.",
+    "Pipeline test does not demonstrate whole-process restart, model-produced artifacts, or delivery content carrying verification conclusions.",
+    "No live account outbound delivery, publishing, profile activation, or production promotion.",
+    "C2C execution records are local only; in-app ChatGPT browser review unavailable.",
+    "Logs and installed artifacts are machine-local; this file retains command, digest, result and scope summaries."
+  ]
+}

@@ -953,6 +953,12 @@ describe('task recovery and overlap', () => {
         usage_json TEXT NOT NULL, delivery_status TEXT, delivery_ref TEXT,
         created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
       ) STRICT;
+      CREATE TABLE automation_occurrences (
+        id TEXT PRIMARY KEY, automation_id TEXT NOT NULL, trigger_kind TEXT NOT NULL,
+        trigger_key TEXT NOT NULL, scheduled_at INTEGER NOT NULL, status TEXT NOT NULL,
+        reason TEXT, dry_run INTEGER NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+        UNIQUE (automation_id, trigger_kind, trigger_key)
+      ) STRICT;
       INSERT INTO automation_definitions(id, definition_json) VALUES
         ('legacy-auto', '{"name":"Legacy name","workspace":"/work/legacy","agentPreset":"legacy"}'),
         ('legacy-oversized', json_object(

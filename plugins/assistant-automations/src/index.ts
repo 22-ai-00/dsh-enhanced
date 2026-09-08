@@ -6,6 +6,8 @@ export const name = 'dsh-enhanced-assistant-automations'
 export { AssistantAutomationsService, Config, version }
 export type { PendingAutomationProposal, SystemAutomationReconcileInput } from './service.js'
 export * from './types.js'
+export { externalEventDigest, parseExternalEventEnvelope } from './external-event.js'
+export type { ExternalEventEnvelope } from './external-event.js'
 export type {
   AcceptanceContract,
   AcceptedExecution,

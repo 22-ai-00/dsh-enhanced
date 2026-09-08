@@ -2,7 +2,7 @@ import { chmodSync, mkdirSync } from 'node:fs'
 import { dirname, isAbsolute } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 
-export const automationSchemaVersion = 14
+export const automationSchemaVersion = 15
 
 const growthTablesV10 = `
   CREATE TABLE automation_growth_operations (
@@ -236,6 +236,8 @@ function migrate(database: DatabaseSync): void {
       status TEXT NOT NULL CHECK (status IN ('pending', 'skipped', 'succeeded', 'failed', 'timed_out', 'cancelled', 'unknown')),
       reason TEXT,
       dry_run INTEGER NOT NULL CHECK (dry_run IN (0, 1)),
+      external_event_json TEXT CHECK (external_event_json IS NULL OR json_valid(external_event_json)),
+      external_event_digest TEXT CHECK (external_event_digest IS NULL OR length(external_event_digest) = 64),
       created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       UNIQUE (automation_id, trigger_kind, trigger_key),
@@ -395,7 +397,7 @@ function migrate(database: DatabaseSync): void {
       binding_id TEXT NOT NULL, binding_version INTEGER NOT NULL CHECK(binding_version >= 1), binding_generation INTEGER NOT NULL CHECK(binding_generation >= 1),
       dispatched_at INTEGER NOT NULL, submitted INTEGER NOT NULL DEFAULT 0 CHECK(submitted IN (0, 1)), quiescent INTEGER NOT NULL DEFAULT 0 CHECK(quiescent IN (0, 1))
     ) STRICT;
-    PRAGMA user_version = 14;
+    PRAGMA user_version = 15;
     COMMIT;
     `)
     return
@@ -760,6 +762,18 @@ function migrate(database: DatabaseSync): void {
       BEGIN IMMEDIATE;
       ALTER TABLE automation_task_acceptance ADD COLUMN quiescent INTEGER NOT NULL DEFAULT 0 CHECK(quiescent IN (0, 1));
       PRAGMA user_version = 14;
+      COMMIT;
+    `)
+    version = 14
+  }
+  if (version === 14) {
+    database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE automation_occurrences ADD COLUMN external_event_json TEXT
+        CHECK (external_event_json IS NULL OR json_valid(external_event_json));
+      ALTER TABLE automation_occurrences ADD COLUMN external_event_digest TEXT
+        CHECK (external_event_digest IS NULL OR length(external_event_digest) = 64);
+      PRAGMA user_version = 15;
       COMMIT;
     `)
   }

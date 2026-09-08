@@ -41,8 +41,8 @@ const contains = (a: string, b: string): boolean => { const path = relative(a, b
 const same = (a: unknown, b: unknown): boolean => acceptanceCanonicalJson(a) === acceptanceCanonicalJson(b)
 const resolverDirectory = fileURLToPath(new URL('.', import.meta.url))
 const noSkills = acceptanceDigest('strategy-no-skills-v1')
-function actualCapabilities(input: Pick<StrategyBenchmarkExecutorOptions, 'persona' | 'image' | 'dockerPath' | 'stepMaxDurationMs' | 'stopTimeoutMs'>) {
-  const expectation = createFixedStrategyCapabilityExpectation({ resolverDirectory, persona: input.persona })
+function actualCapabilities(input: Pick<StrategyBenchmarkExecutorOptions, 'persona' | 'model' | 'image' | 'dockerPath' | 'stepMaxDurationMs' | 'stopTimeoutMs'>) {
+  const expectation = createFixedStrategyCapabilityExpectation({ resolverDirectory, persona: input.persona, modelProvider: input.model.provider })
   const runtimeCommitment = { source: expectation.capabilities.common.runtime, sourceIdentityDigest: acceptanceDigest(expectation.sourceIdentity), image: input.image, dockerPath: input.dockerPath,
     stepMaxDurationMs: input.stepMaxDurationMs, stopTimeoutMs: input.stopTimeoutMs ?? 10000 }
   return { expectation, runtimeCommitment, capabilities: { ...expectation.capabilities, common: { ...expectation.capabilities.common, runtime: acceptanceDigest(runtimeCommitment) } } }
