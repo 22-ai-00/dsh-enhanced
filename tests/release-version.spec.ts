@@ -734,9 +734,11 @@ describe('release version workflow', () => {
       + ' && pnpm --filter @dsh-enhanced/assistant-automations run build'
       + ' && pnpm --filter @dsh-enhanced/assistant-goals run build',
     )
-    expect(manifest.scripts.test).toMatch(/^pnpm run build &&/)
-    expect(manifest.scripts.test).toContain('vitest run --testTimeout=15000 tests')
+    expect(manifest.scripts.test).toBe('pnpm run build && pnpm run test:built')
+    expect(manifest.scripts['test:root']).toBe('vitest run --testTimeout=15000 --dir tests')
+    expect(manifest.scripts['test:built']).toBe('pnpm run test:root && pnpm --recursive --if-present run test')
     expect(manifest.scripts.typecheck).toMatch(/^pnpm run build &&/)
+    expect(manifest.scripts.check).toBe('pnpm run validate && pnpm run lint && pnpm run typecheck && pnpm run test:built && pnpm run build && pnpm run pack:check')
     expect(releaseWorkflow).toContain('- name: Verify Linux E2E prerequisites')
     expect(releaseWorkflow).toContain('- name: Install native pnpm test runtime')
     expect(releaseWorkflow).toContain("@pnpm/exe@11.7.0")
