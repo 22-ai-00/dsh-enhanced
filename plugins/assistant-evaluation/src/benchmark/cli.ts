@@ -10,16 +10,16 @@ import { benchmarkReport } from './report.js'
 import { benchmarkPlanDigest, benchmarkSchedule, BenchmarkError } from './schema.js'
 import { BenchmarkStore } from './store.js'
 import { runBenchmark } from './runner.js'
-import type { NativeAdapterFactory, NativeBenchmarkConfig } from './native.js'
+import type { NativeAdapterFactory, NativeBenchmarkConfig, NativeModelConfig } from './native.js'
 
 const runtimePackages = ['@deepseek-ai/cordis', '@deepseek-ai/dsh-agent', '@deepseek-ai/dsh-agent-loop',
   '@deepseek-ai/dsh-llm', '@deepseek-ai/dsh-session', '@deepseek-ai/dsh-session-projection', '@deepseek-ai/dsh-system-prompt', '@deepseek-ai/dsh-tools'] as const
 const help = `dsh-benchmark: public development benchmarks through the native DSH AgentLoop
-  corpus [--suite research-v1|memory-v1|memory-v2]
-  doctor [--suite research-v1|memory-v1|memory-v2]
+  corpus [--suite research-v1|memory-v1|memory-v2|strategy-v1]
+  doctor [--suite research-v1|memory-v1|memory-v2|strategy-v1] [--config FILE]
   plan --config FILE [--output FILE]
   run --config FILE --adapter ABSOLUTE_MODULE --database FILE [--output FILE]
-  report --database FILE --plan ID [--output FILE]
+  report --database FILE --plan ID [--config FILE] [--output FILE]
 
 plan never invokes a model. run invokes the explicitly supplied trusted Host adapter.
 The adapter module must export createNativeAdapter and match both configured SHA-256 digests.
@@ -66,13 +66,13 @@ async function nativeModule(): Promise<typeof import('./native.js')> {
   }
 }
 
-async function config(path: string): Promise<NativeBenchmarkConfig> {
+async function config(path: string): Promise<unknown> {
   const file = await boundedFile(resolve(path), 131_072)
   try { return JSON.parse(file.text) as NativeBenchmarkConfig } catch { throw new BenchmarkError('benchmark config must be valid JSON') }
 }
 
 /** Loads only an operator-selected Host module, not code produced by a benchmark candidate. */
-async function adapter(path: string, input: NativeBenchmarkConfig): Promise<NativeAdapterFactory> {
+async function adapter(path: string, input: Readonly<{ model: NativeModelConfig }>): Promise<NativeAdapterFactory> {
   if (!isAbsolute(path)) throw new BenchmarkError('adapter module path must be absolute')
   const captured = await boundedFile(path, 1_048_576)
   if (captured.digest !== input.model.adapterDigest || captured.digest !== input.model.tokenCounterDigest) throw new BenchmarkError('adapter module does not match frozen adapter/token-counter digests')
@@ -82,6 +82,25 @@ async function adapter(path: string, input: NativeBenchmarkConfig): Promise<Nati
   if ((await boundedFile(path, 1_048_576)).digest !== captured.digest) throw new BenchmarkError('adapter module changed during import')
   if (!imported || typeof imported !== 'object' || !('createNativeAdapter' in imported) || typeof imported.createNativeAdapter !== 'function') throw new BenchmarkError('adapter module must export createNativeAdapter')
   return imported.createNativeAdapter as NativeAdapterFactory
+}
+
+const strategyRuntimePackages = [...runtimePackages, '@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver',
+  '@deepseek-ai/dsh-subagent', '@deepseek-ai/dsh-session-persistence', '@deepseek-ai/dsh-session-persistence-jsonl', '@dsh-enhanced/assistant-delivery',
+  '@dsh-enhanced/assistant-policy', '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-verifier'] as const
+
+async function strategyModules() {
+  try { return await Promise.all([import('./strategy-config.js'), import('./strategy-corpus.js'), import('./strategy-executor.js'), import('./strategy-plan.js')]) } catch {
+    throw new BenchmarkError('strategy benchmark runtime dependencies are missing; run dsh-benchmark doctor and install the reported host packages')
+  }
+}
+
+async function strategyConfig(value: unknown) {
+  const [module] = await strategyModules()
+  return module.parseStrategyBenchmarkConfig(value)
+}
+
+function isStrategyConfig(value: unknown): boolean {
+  return value !== null && typeof value === 'object' && (value as { suite?: unknown }).suite === 'strategy-v1'
 }
 
 async function ensureNewOutput(path: string | undefined): Promise<void> {
@@ -105,55 +124,129 @@ export async function benchmarkCli(argv: readonly string[], io: BenchmarkCliOutp
   if (command === 'corpus') {
     const args = options(argv.slice(1), ['--suite'], [])
     const suite = args.get('--suite') ?? 'research-v1'
-    if (!['research-v1', 'memory-v1', 'memory-v2'].includes(suite)) throw new BenchmarkError('invalid native suite')
-    result = { dataset: suite === 'memory-v2' ? memoryDevelopmentDatasetV2 : suite === 'memory-v1' ? memoryDevelopmentDataset : developmentDataset, tasks: (suite === 'memory-v2' ? memoryDevelopmentCorpusV2 : suite === 'memory-v1' ? memoryDevelopmentCorpus : developmentCorpus).map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
+    if (suite === 'strategy-v1') {
+      const [, corpus] = await strategyModules()
+      result = { dataset: corpus.strategyDevelopmentDataset, tasks: corpus.strategyDevelopmentCorpus.map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
+    } else {
+      if (!['research-v1', 'memory-v1', 'memory-v2'].includes(suite)) throw new BenchmarkError('invalid native suite')
+      result = { dataset: suite === 'memory-v2' ? memoryDevelopmentDatasetV2 : suite === 'memory-v1' ? memoryDevelopmentDataset : developmentDataset, tasks: (suite === 'memory-v2' ? memoryDevelopmentCorpusV2 : suite === 'memory-v1' ? memoryDevelopmentCorpus : developmentCorpus).map(task => ({ id: task.id, domain: task.domain, objective: task.objective })) }
+    }
   } else if (command === 'doctor') {
-    const args = options(argv.slice(1), ['--suite'], [])
+    const args = options(argv.slice(1), ['--suite', '--config'], [])
     const suite = args.get('--suite') ?? 'research-v1'
-    if (!['research-v1', 'memory-v1', 'memory-v2'].includes(suite)) throw new BenchmarkError('invalid native suite')
     const require = createRequire(import.meta.url)
-    const names = [...runtimePackages, ...(suite !== 'research-v1' ? ['@dsh-enhanced/personal-memory', '@dsh-enhanced/assistant-policy'] : [])]
-    const packages = names.map(name => {
-      try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }
-    })
-    result = { ready: packages.every(entry => entry.available), packages, next: 'Configure a trusted adapter, model token counter and per-cell budget. A ready runtime does not prove model access.' }
-    exitCode = packages.every(entry => entry.available) ? 0 : 2
+    if (suite === 'strategy-v1') {
+      const packages = strategyRuntimePackages.map(name => {
+        try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }
+      })
+      const configPath = args.get('--config')
+      if (configPath === undefined) {
+        result = { ready: false, packages, isolation: { ready: false }, next: 'Provide --config to probe the immutable local image and Docker runtime. Dependencies alone do not establish strategy readiness.' }
+        exitCode = 2
+      } else if (!packages.every(entry => entry.available)) {
+        result = { ready: false, packages, isolation: { ready: false }, next: 'Install the unavailable strategy runtime packages before probing Docker or the configured image.' }
+        exitCode = 2
+      } else {
+        const input = await strategyConfig(await config(configPath))
+        let isolationReady = false
+        try {
+          const isolation = await import('@dsh-enhanced/assistant-isolation')
+          await isolation.probeIsolationRuntime(input.image, input.dockerPath)
+          isolationReady = true
+        } catch { /* Keep diagnostics non-sensitive and do not attempt installation or image pulls. */ }
+        result = { ready: packages.every(entry => entry.available) && isolationReady, packages, isolation: { ready: isolationReady },
+          next: 'A ready runtime does not prove model access. Configure a trusted adapter, token counter and frozen strategy limits.' }
+        exitCode = (result as { ready: boolean }).ready ? 0 : 2
+      }
+    } else {
+      if (!['research-v1', 'memory-v1', 'memory-v2'].includes(suite)) throw new BenchmarkError('invalid native suite')
+      const names = [...runtimePackages, ...(suite !== 'research-v1' ? ['@dsh-enhanced/personal-memory', '@dsh-enhanced/assistant-policy'] : [])]
+      const packages = names.map(name => {
+        try { require.resolve(name); return { name, available: true } } catch { return { name, available: false } }
+      })
+      result = { ready: packages.every(entry => entry.available), packages, next: 'Configure a trusted adapter, model token counter and per-cell budget. A ready runtime does not prove model access.' }
+      exitCode = packages.every(entry => entry.available) ? 0 : 2
+    }
   } else if (command === 'plan' || command === 'run') {
     const fields = options(argv.slice(1), ['--config', '--adapter', '--database', '--output'], command === 'run' ? ['--config', '--adapter', '--database'] : ['--config'])
     if (command === 'plan' && (fields.has('--adapter') || fields.has('--database'))) throw new BenchmarkError('plan accepts only --config and --output')
     output = fields.get('--output')
     await ensureNewOutput(output)
-    const input = await config(fields.get('--config')!)
-    const native = await nativeModule()
-    const plan = native.nativeBenchmarkPlan(input)
-    if (command === 'plan') {
-      result = { plan, planDigest: benchmarkPlanDigest(plan), plannedCells: benchmarkSchedule(plan).length,
-        maximumCostUsdMicros: plan.budget.costUsdMicros === null ? null : (BigInt(benchmarkSchedule(plan).length) * BigInt(plan.budget.costUsdMicros)).toString(),
-        inputLimitMode: input.model.inputLimitMode ?? 'upper-bound', outputLimitMode: input.model.outputLimitMode ?? 'provider',
-        maximumInputTokens: input.model.inputLimitMode === 'estimate' ? null : benchmarkSchedule(plan).length * plan.budget.inputTokens,
-        maximumOutputTokens: input.model.outputLimitMode === 'observed' ? null : benchmarkSchedule(plan).length * plan.budget.outputTokens,
-        observedInputTokenLimit: benchmarkSchedule(plan).length * plan.budget.inputTokens,
-        observedOutputTokenLimit: benchmarkSchedule(plan).length * plan.budget.outputTokens }
+    const raw = await config(fields.get('--config')!)
+    if (isStrategyConfig(raw)) {
+      const input = await strategyConfig(raw)
+      const [, corpus, executor, strategyPlan] = await strategyModules()
+      const plan = executor.createStrategyBenchmarkPlan(input)
+      const journal = strategyPlan.strategyBenchmarkJournalPlan(plan)
+      const cells = benchmarkSchedule(journal)
+      if (command === 'plan') {
+        result = { plan, journalPlan: journal, planDigest: benchmarkPlanDigest(journal), plannedCells: cells.length,
+          maximumCostUsdMicros: journal.budget.costUsdMicros === null ? null : (BigInt(cells.length) * BigInt(journal.budget.costUsdMicros)).toString(),
+          inputLimitMode: 'upper-bound', outputLimitMode: 'provider', maximumInputTokens: cells.length * journal.budget.inputTokens,
+          maximumOutputTokens: cells.length * journal.budget.outputTokens, observedInputTokenLimit: cells.length * journal.budget.inputTokens,
+          observedOutputTokenLimit: cells.length * journal.budget.outputTokens }
+      } else {
+        const store = new BenchmarkStore(resolve(fields.get('--database')!))
+        try {
+          store.create(journal)
+          const factory = await adapter(fields.get('--adapter')!, input)
+          const tasks = Object.fromEntries(input.cases.map(caseId => [caseId, corpus.strategyDevelopmentTask(caseId)]))
+          const strategyExecutor = executor.createStrategyBenchmarkExecutor({ plan, tasks, persona: input.persona, model: input.model, factory,
+            workspaceDirectory: input.workspaceDirectory, stateDirectory: input.stateDirectory, image: input.image, dockerPath: input.dockerPath,
+            stepMaxDurationMs: input.stepMaxDurationMs, ...(input.stopTimeoutMs === undefined ? {} : { stopTimeoutMs: input.stopTimeoutMs }) })
+          const results = await runBenchmark(store, journal, strategyExecutor, signal)
+          executor.verifyStrategyBenchmarkResults(plan, results, input.stateDirectory, input.workspaceDirectory)
+          const report = benchmarkReport(journal, store.results(journal.id))
+          result = report
+          exitCode = report.complete && report.variants.every(variant => variant.unknown === 0) ? 0 : 2
+        } finally { store.close() }
+      }
     } else {
-      const store = new BenchmarkStore(resolve(fields.get('--database')!))
-      try {
-        // Validate/freeze the plan before loading the Host adapter (which may initialize credentials).
-        store.create(plan)
-        const factory = await adapter(fields.get('--adapter')!, input)
-        await runBenchmark(store, plan, native.createNativeBenchmarkExecutor(input, factory), signal)
-        const report = benchmarkReport(plan, store.results(plan.id))
-        result = report
-        exitCode = report.complete && report.variants.every(variant => variant.unknown === 0) ? 0 : 2
-      } finally { store.close() }
+      const input = raw as NativeBenchmarkConfig
+      const native = await nativeModule()
+      const plan = native.nativeBenchmarkPlan(input)
+      if (command === 'plan') {
+        result = { plan, planDigest: benchmarkPlanDigest(plan), plannedCells: benchmarkSchedule(plan).length,
+          maximumCostUsdMicros: plan.budget.costUsdMicros === null ? null : (BigInt(benchmarkSchedule(plan).length) * BigInt(plan.budget.costUsdMicros)).toString(),
+          inputLimitMode: input.model.inputLimitMode ?? 'upper-bound', outputLimitMode: input.model.outputLimitMode ?? 'provider',
+          maximumInputTokens: input.model.inputLimitMode === 'estimate' ? null : benchmarkSchedule(plan).length * plan.budget.inputTokens,
+          maximumOutputTokens: input.model.outputLimitMode === 'observed' ? null : benchmarkSchedule(plan).length * plan.budget.outputTokens,
+          observedInputTokenLimit: benchmarkSchedule(plan).length * plan.budget.inputTokens,
+          observedOutputTokenLimit: benchmarkSchedule(plan).length * plan.budget.outputTokens }
+      } else {
+        const store = new BenchmarkStore(resolve(fields.get('--database')!))
+        try {
+          // Validate/freeze the plan before loading the Host adapter (which may initialize credentials).
+          store.create(plan)
+          const factory = await adapter(fields.get('--adapter')!, input)
+          await runBenchmark(store, plan, native.createNativeBenchmarkExecutor(input, factory), signal)
+          const report = benchmarkReport(plan, store.results(plan.id))
+          result = report
+          exitCode = report.complete && report.variants.every(variant => variant.unknown === 0) ? 0 : 2
+        } finally { store.close() }
+      }
     }
   } else if (command === 'report') {
-    const fields = options(argv.slice(1), ['--database', '--plan', '--output'], ['--database', '--plan'])
+    const fields = options(argv.slice(1), ['--database', '--plan', '--config', '--output'], ['--database', '--plan'])
     output = fields.get('--output'); await ensureNewOutput(output)
     // Reporting must not silently create an empty database when the path is wrong.
     const database = resolve(fields.get('--database')!)
     if (!(await lstat(database)).isFile()) throw new BenchmarkError('report requires an existing regular database')
     const store = new BenchmarkStore(database)
-    try { result = benchmarkReport(store.plan(fields.get('--plan')!), store.results(fields.get('--plan')!)) } finally { store.close() }
+    try {
+      const plan = store.plan(fields.get('--plan')!)
+      if (plan.dataset.id === 'dsh-strategy-development') {
+        const configPath = fields.get('--config')
+        if (configPath === undefined) throw new BenchmarkError('strategy report requires --config to reconstruct and verify evidence')
+        const input = await strategyConfig(await config(configPath))
+        const [, , executor, strategyPlan] = await strategyModules()
+        const strategy = executor.createStrategyBenchmarkPlan(input)
+        const journal = strategyPlan.strategyBenchmarkJournalPlan(strategy)
+        if (benchmarkPlanDigest(journal) !== benchmarkPlanDigest(plan)) throw new BenchmarkError('strategy report config does not match the stored plan')
+        executor.verifyStrategyBenchmarkResults(strategy, store.results(plan.id), input.stateDirectory, input.workspaceDirectory)
+      }
+      result = benchmarkReport(plan, store.results(plan.id))
+    } finally { store.close() }
   } else throw new BenchmarkError('unknown benchmark command; use --help')
   const text = `${JSON.stringify(result, null, 2)}\n`
   if (output === undefined) io.stdout(text)

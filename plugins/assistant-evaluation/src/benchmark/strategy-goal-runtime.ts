@@ -53,6 +53,21 @@ export interface StrategyGoalRuntimeOptions {
   stepMaxDurationMs: number
   /** Failure to stop within this window remains unknown; never retry the cell. */
   stopTimeoutMs?: number
+  lifecycle?: (control: Readonly<StrategyGoalRuntimeControl>) => void
+}
+export interface StrategyGoalRuntimeLifecycleSnapshot {
+  runtimeRoot: string | null
+  stage: 'setup' | 'executing' | 'cleanup' | 'evidence' | 'closed'
+  meter: ReturnType<StrategyBenchmarkMeter['snapshot']> | null
+  goalSnapshot: Readonly<Record<string, unknown>> | null
+  /** Explicit history when current authorization or services are no longer available. */
+  lastGoalObservation: { observedAt: number; value: Readonly<Record<string, unknown>> } | null
+  failureStage: 'setup' | 'executing' | 'cleanup' | 'evidence' | null
+  cleanup: 'pending' | 'succeeded' | 'unknown'
+}
+export interface StrategyGoalRuntimeControl {
+  close(): Promise<void>
+  snapshot(): Readonly<StrategyGoalRuntimeLifecycleSnapshot>
 }
 interface GoalsHost {
   list(agent: Agent): readonly { id: string; native: { sessionId: string; objective: string } }[]
@@ -84,12 +99,13 @@ function nativeEvidence(source: GoalSourceSnapshot): StrategyEvidenceNative {
     benchmarkAssert(contract.task.kind === 'goal-step' || contract.task.kind === 'goal-outcome', 'unexpected native acceptance kind')
     const runId = contract.task.kind === 'goal-step' ? contract.task.goal.runId : source.outcomeAssessments.find(item => item.contract.id === contract.id)?.triggerRunId
     benchmarkAssert(typeof runId === 'string', 'missing native receipt trigger')
-    receipts.push({ runId, taskKind: contract.task.kind, contract, receipt, quiescent: runs.find(run => run.runId === runId)?.quiescent ?? false })
+    receipts.push({ runId, taskKind: contract.task.kind, contract, receipt, quiescent: contract.task.kind === 'goal-outcome' ? source.outcomeAssessments.find(item => item.contract.id === contract.id)?.execution?.quiescent ?? false : runs.find(run => run.runId === runId)?.quiescent ?? false })
   }
   return { parent: { sessionId: record.nativeAtLastObservation.sessionId, goalId: record.id, nativeGoalId: record.nativeAtLastObservation.goalId,
     definitionVersion: record.definition.version, definitionDigest: record.definition.digest,
     lifecycle: record.nativeAtLastObservation.phase === 'complete' ? 'completed' : 'unknown',
-    quiescent: runs.every(run => run.quiescent) && strategies.every(strategy => strategy.outcome !== 'unknown' && strategy.children.every(child => child.quiescent)) },
+    quiescent: runs.every(run => run.executionStatus === 'succeeded' && run.quiescent) && strategies.every(strategy => strategy.outcome !== 'unknown' && strategy.children.every(child => child.quiescent))
+      && source.outcomeAssessments.every(assessment => assessment.execution?.status === 'succeeded' && assessment.execution.quiescent) },
     runs, strategies, outcomeAssessments: source.outcomeAssessments, receipts,
     selectedOutcomeContractId: source.outcomeAssessments.find(item => item.contract.task.ref === source.outcome?.assessmentId)?.contract.id ?? null }
 }
@@ -141,24 +157,67 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
   let goal: { id: string; sessionId: string } | undefined
   let executed = false
   let closed = false
+  let stage: StrategyGoalRuntimeLifecycleSnapshot['stage'] = 'setup'
+  let cleanupState: StrategyGoalRuntimeLifecycleSnapshot['cleanup'] = 'pending'
+  let acceptLateBinding = true
+  let goalsHost: GoalsHost | undefined
+  let ownerRoute: { id: string; principalId: string } | undefined
+  let factoryPending: Promise<void> | undefined
+  let bindingDisposeFlight: Promise<void> | undefined
   let closeFlight: Promise<void> | undefined
+  // A caller may close the control while an uncooperative setup operation is
+  // still outstanding. Disposing the Context cannot prove that operation has
+  // stopped, so that observation must remain unknown.
+  let setupSettled = false
+  let lastGoalObservation: StrategyGoalRuntimeLifecycleSnapshot['lastGoalObservation'] = null
+  let failureStage: StrategyGoalRuntimeLifecycleSnapshot['failureStage'] = null
+  const disposeBinding = (candidate: NativeAdapterBinding | undefined): Promise<void> => {
+    if (candidate === undefined) return Promise.resolve()
+    if (bindingDisposeFlight === undefined) bindingDisposeFlight = Promise.resolve().then(() => candidate.dispose())
+    return bindingDisposeFlight
+  }
+  const snapshot = (): Readonly<StrategyGoalRuntimeLifecycleSnapshot> => {
+    let currentGoalSnapshot: Readonly<Record<string, unknown>> | null = null
+    if (goal !== undefined && owner && ownerRoute && goalsHost) {
+      try { currentGoalSnapshot = goalsHost.inspectOwnerGoalExecution({ ownerRouteId: ownerRoute.id, principalId: ownerRoute.principalId,
+        workspace: owner.workspace, preset, sessionId: goal.sessionId, goalId: goal.id })
+        lastGoalObservation = Object.freeze({ observedAt: Date.now(), value: currentGoalSnapshot })
+      } catch { /* Current Host evidence is unavailable; explicitly labelled history remains history. */ }
+    }
+    return Object.freeze({ runtimeRoot: owner?.runtimeRoot ?? null, stage, meter: meter?.snapshot() ?? null, goalSnapshot: currentGoalSnapshot,
+      lastGoalObservation, failureStage, cleanup: cleanupState })
+  }
   const close = (): Promise<void> => {
     if (closeFlight) return closeFlight
+    snapshot()
     closed = true
+    acceptLateBinding = false; stage = 'cleanup'
     meter?.dispose()
     const cleanup = (async () => {
       const results = await Promise.allSettled([
-        owner?.shutdown() ?? ctx.fiber.dispose(), Promise.resolve().then(() => binding?.dispose()),
+        owner?.shutdown() ?? ctx.fiber.dispose(), disposeBinding(binding),
+        factoryPending ?? Promise.resolve(),
       ])
       const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected').map(result => result.reason)
       if (errors.length) throw new AggregateError(errors, 'strategy runtime cleanup failed')
+      // Let a raced setup continuation record its terminal cancellation before
+      // deciding whether an operation remains unobservable.
+      await Promise.resolve()
+      if (!setupSettled) throw new Error('strategy runtime stop is unknown: setup remains pending')
     })()
     closeFlight = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('strategy runtime stop is unknown: cleanup deadline exceeded')), stopTimeoutMs)
-      cleanup.then(() => { clearTimeout(timer); resolve() }, error => { clearTimeout(timer); reject(error) })
+      const timer = setTimeout(() => { cleanupState = 'unknown'; failureStage ??= 'cleanup'; reject(new Error('strategy runtime stop is unknown: cleanup deadline exceeded')) }, stopTimeoutMs)
+      cleanup.then(() => { clearTimeout(timer); if (cleanupState !== 'unknown') { cleanupState = 'succeeded'; stage = 'closed' }; resolve() }, error => { clearTimeout(timer); cleanupState = 'unknown'; failureStage ??= 'cleanup'; reject(error) })
     })
     return closeFlight
   }
+  try { input.lifecycle?.(Object.freeze({ close, snapshot })) } catch (error) {
+    failureStage = 'setup'
+    setupSettled = true
+    try { await close() } catch { /* The observer failure remains the setup failure. */ }
+    throw error
+  }
+  const assertLive = (): void => { signal.throwIfAborted(); if (closed) throw new Error('strategy native execution cancelled or closed') }
   try {
     owner = await createBenchmarkStrategyOwnerRuntime({ ctx, workspace, stateRoot,
       cellId, provider: model.provider, model: model.model, maxOutputTokens: limits.maxOutputTokensPerCall,
@@ -166,29 +225,43 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
       policyRules: [{ id: 'benchmark-goal', effect: 'allow', subject, actions: goalActions, resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['external'] } },
         ...[...toolNames, 'isolation:benchmark-work'].map(id => ({ id: `allow-${id.replace(':', '-')}`, effect: 'allow' as const, subject,
           actions: ['execute'], resource: { kind: 'tool' as const, id }, context: { initiators: ['external' as const] } }))] })
+    if (closed || signal.aborted) {
+      await owner.shutdown()
+      assertLive()
+    }
+    assertLive()
     // Literal package names with dynamic loading keep service declarations out of
     // the Evaluation ↔ Goals/Verifier/Delivery bootstrap dependency cycle.
     const names = ['@deepseek-ai/dsh-goal', '@deepseek-ai/dsh-tool-goal', '@deepseek-ai/dsh-goal-round-driver', '@deepseek-ai/dsh-subagent',
       '@dsh-enhanced/assistant-goals', '@dsh-enhanced/assistant-isolation', '@dsh-enhanced/assistant-verifier']
     const [native, tools, driver, subagents, goalsModule, isolationModule, verifierModule] = await Promise.all(names.map(name => import(name)))
+    assertLive()
     await plugin(ctx, native.default)
+    assertLive()
     await plugin(ctx, { inject: tools.inject, apply: tools.apply })
+    assertLive()
     await plugin(ctx, { inject: driver.inject, apply: driver.apply })
+    assertLive()
     await plugin(ctx, subagents.SubagentRuntime)
+    assertLive()
     await plugin(ctx, goalsModule.default, { databasePath: join(owner.runtimeRoot, 'goals.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true,
       preauthorizedCreateMaxRounds: limits.maxGoalRounds, stepMaxDurationMs: stepDuration,
       ...(enabled ? { strategy: { maxDurationMs: Math.min(stepDuration, 30000) } } : {}),
       executionBudget: { ...budget, costUsdMicros: budget.costUsdMicros ?? undefined, modelCalls: limits.modelCalls, maxOutputTokensPerCall: limits.maxOutputTokensPerCall } })
+    assertLive()
     const goals = ctx.get('assistantGoals' as never) as unknown as GoalsHost
+    goalsHost = goals
     benchmarkAssert(typeof goals?.inspectOwnerGoalExecution === 'function', 'upgrade Goals: owner execution snapshot API required')
     const lineage = owner.pairOwner()
     const principalId = owner.principalId
     const ownerRouteId = owner.ownerRouteId
+    ownerRoute = { id: ownerRouteId, principalId }
     const expiresAt = Date.now() + budget.durationMs
     await plugin(ctx, isolationModule.default, { stateRoot: join(owner.runtimeRoot, 'isolation'), image, dockerPath,
       limits: { maxDurationMs: Math.min(stepDuration, 300000) }, grants: [{ id: 'benchmark-work', revision: 1,
         principalDigest: isolationModule.isolationPrincipalDigest(principalId), ...lineage, workspace: owner.workspace, agentPreset: preset,
         expiresAt, maxRuns: Math.max(1, budget.toolCalls), maxTotalDurationMs: budget.durationMs }] })
+    assertLive()
     const authority = { kind: 'isolated-runner', id: 'benchmark-verification', stateRoot: join(owner.runtimeRoot, 'verification-jobs'),
       image, dockerPath, command: task.verification.command, expiresAt,
       maxRuns: Math.min(10000, (limits.maxGoalRounds * 2 + 2) * task.verification.cases.length), maxTotalDurationMs: budget.durationMs,
@@ -200,8 +273,13 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
         objective: task.objective, scope: { workspace: owner!.workspace, preset }, owner: lineage, validityMs: budget.durationMs,
         bounds: { maxDurationMs: stepDuration, maxEvidenceBytes: 8192 }, criteria: [{ id: 'artifact-behavior', kind: 'isolated-process-behavior',
           authority: { id: compiled.id, digest: compiled.digest }, artifactPath: task.artifactPath, testSetId: 'cases' }] })) })
-    binding = await factory(model, { ctx, workspace: owner.workspace })
-    signal.throwIfAborted()
+    assertLive()
+    const factoryPromise = Promise.resolve().then(() => factory(model, { ctx, workspace: owner!.workspace }))
+    factoryPending = factoryPromise.then(async late => {
+      if (!acceptLateBinding || signal.aborted) await disposeBinding(late)
+    }, () => {})
+    binding = await untilAbort(factoryPromise, signal)
+    assertLive()
     meter = installStrategyBenchmarkMeter(ctx, { budget, modelCalls: limits.modelCalls, maxOutputTokens: limits.maxOutputTokensPerCall,
       model, binding, signal })
     goals.registerBudgetMeter({ id: 'benchmark-model', provider: model.provider, model: model.model, inputTokenUpperBound: binding.inputTokenUpperBound?.bind(binding),
@@ -215,15 +293,17 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
       if (records.length === 1) goal = { id: records[0]!.id, sessionId: records[0]!.native.sessionId }
     })
     await owner.installModel(binding.adapter)
+    assertLive()
     const runtime = owner
     const accounting = meter
+    setupSettled = true
     return Object.freeze({ runtimeRoot: owner.runtimeRoot, close, snapshotMeter: () => accounting.snapshot(),
       async execute() {
         benchmarkAssert(!executed && !closed, 'strategy runtime may execute only once')
         executed = true
         let result: { snapshot: Readonly<Record<string, unknown>>; meter: ReturnType<StrategyBenchmarkMeter['snapshot']>; outbound: BenchmarkStrategyOwnerRuntime['outbound'] }
         try {
-          signal.throwIfAborted()
+          stage = 'executing'; assertLive()
           await untilAbort(runtime.sendPublicInbound(task.publicPrompt), accounting.signal)
           await untilAbort(runtime.waitForQuiescence(goals), accounting.signal)
           accounting.assertComplete()
@@ -231,18 +311,23 @@ export async function createStrategyGoalRuntime(input: StrategyGoalRuntimeOption
           const snapshot = goals.inspectOwnerGoalExecution({ ownerRouteId, principalId,
             workspace: runtime.workspace, preset, sessionId: goal.sessionId, goalId: goal.id })
           result = { snapshot, meter: accounting.snapshot(), outbound: runtime.outbound }
-        } finally { await close() }
+        } catch (error) { failureStage = 'executing'; throw error } finally { await close() }
+        stage = 'evidence'
         const native = nativeEvidence(result.snapshot as unknown as GoalSourceSnapshot)
         const status = (result.snapshot as unknown as GoalSourceSnapshot).outcome?.status
         const verdict = status === 'achieved' || status === 'not-achieved' ? status : 'unknown'
         const store = new StrategyEvidenceStore({ stateDirectory: stateRoot, candidateWorkspace: workspace })
-        const evidence = store.write({ protocol: strategyEvidenceProtocol, version: 1, plan, request,
-          input: { digest: digests.inputDigest }, acceptance: { digest: digests.acceptanceDigest, verdict }, versions: request.variant.versions,
-          meter: result.meter, native, outcome: { status: verdict === 'unknown' ? 'unknown' : 'completed', verdict, quiescent: native.parent.quiescent } })
-        return Object.freeze({ ...result, evidence })
+        try {
+          const evidence = store.write({ protocol: strategyEvidenceProtocol, version: 1, plan, request,
+            input: { digest: digests.inputDigest }, acceptance: { digest: digests.acceptanceDigest, verdict }, versions: request.variant.versions,
+            meter: result.meter, native, outcome: { status: verdict === 'unknown' ? 'unknown' : 'completed', verdict, quiescent: native.parent.quiescent } })
+          return Object.freeze({ ...result, evidence })
+        } catch (error) { failureStage = 'evidence'; throw error }
       },
     })
   } catch (error) {
+    failureStage ??= 'setup'
+    setupSettled = true
     try { await close() } catch (cleanup) { throw new AggregateError([error, cleanup], 'strategy runtime setup failed') }
     throw error
   }

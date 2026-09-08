@@ -82,8 +82,8 @@ for (const strategy of [false, true]) test.skipIf(!process.env.DSH_ISOLATION_TES
   const stale = saved.native.outcomeAssessments.find(item => item.contract.id !== saved.native.selectedOutcomeContractId)!
   const { planDigest: _planDigest, ...body } = saved
   expect(() => evidenceStore.write({ ...body, plan: source, native: { ...saved.native, selectedOutcomeContractId: stale.contract.id } })).toThrow('selected outcome')
-  expect(() => evidenceStore.write({ ...body, plan: source, native: { ...saved.native, runs: saved.native.runs.map((run, index) => index === 0 ? { ...run, quiescent: false } : run) } })).toThrow('incomplete')
-  expect(() => evidenceStore.write({ ...body, plan: source, meter: { ...saved.meter, traces: saved.meter.traces.map((trace, index) => index === 0 ? { ...trace, sessionId: 'unrelated-session' } : trace) } })).toThrow('incomplete')
+  expect(() => evidenceStore.write({ ...body, plan: source, native: { ...saved.native, runs: saved.native.runs.map((run, index) => index === 0 ? { ...run, quiescent: false } : run) } })).toThrow('quiescence')
+  expect(() => evidenceStore.write({ ...body, plan: source, meter: { ...saved.meter, traces: saved.meter.traces.map((trace, index) => index === 0 ? { ...trace, sessionId: 'unrelated-session' } : trace) } })).toThrow('quiescence')
   if (process.env.DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT) await writeFile(join(process.env.DSH_STRATEGY_RUNTIME_EVIDENCE_ROOT, `object-${strategy}.json`), await readFile(result.evidence.path), { mode: 0o600 })
   expect(snapshot.executionRuns.length).toBeGreaterThanOrEqual(2)
   expect(result.meter.modelCalls - snapshot.budget!.modelCalls).toBe(2)

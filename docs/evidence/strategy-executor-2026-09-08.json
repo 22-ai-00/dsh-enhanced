@@ -1,0 +1,1067 @@
+{
+  "schemaVersion": 1,
+  "milestone": "WP04/06 serial native strategy comparison executor, full deadline, durable failure evidence and installed CLI",
+  "date": "2026-09-08",
+  "baseCommit": "13ef45042d24eb197c2c7b57ab95264d2b3f7d3f",
+  "goalStatus": {
+    "verified": 3,
+    "implementing": 8,
+    "todo": 7,
+    "fullObjectiveComplete": false
+  },
+  "implemented": [
+    "Frozen public development corpus and strict operator config; fixed direct/adaptive arms share model and budgets.",
+    "Real native Goal/Isolation/Verifier serial executor and persistent journal, with setup-inclusive deadline and immutable failure observations.",
+    "Every parent request checks actual persona, scoped tool definitions, effective Policy config/probes and selected installed source contents; report reopens detailed evidence and CLI reconstructs current source plan.",
+    "Policy Host configuration inspection returns actual effective detached immutable values. Goals Verifier peer range corrected to its 0.1.0 package baseline."
+  ],
+  "limits": [
+    "Deterministic model fixture: actual native services, Docker and installed CLI; no paid provider call or measured intelligence benefit. Four public synthetic development tasks are not a holdout or production efficacy sample.",
+    "Strategy requires upper-bound input/provider output limits; current Codex subscription estimate/observed adapter is incompatible. Rework/interventions and unknown cost remain null.",
+    "Trusts the operator Host and its adapter. Source commitments cover selected deployed packages, not malicious same-process Host, kernel, Docker implementation or remote provider. Reports verify immutable historical observations without reenacting closed runtime.",
+    "In-app browser unavailable; Codex with ChatGPT used for local execution records only, no ChatGPT review claimed.",
+    "Local logs/runtime objects stay ignored. Git hashes preserve provenance; missing local files on another device do not establish a fresh test result."
+  ],
+  "validation": {
+    "fullCheck": {
+      "status": "PASS",
+      "exitCode": 0,
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-check-v4.log",
+      "sha256": "e511477983e45aacbdfe9d96688172255ef080b97867e66811aea0068915105a",
+      "main": {
+        "filesPassed": 302,
+        "testsPassed": 3811,
+        "testsSkipped": 0
+      },
+      "dryRunPacks": 31
+    },
+    "installedCli": {
+      "status": "PASS",
+      "cells": 16,
+      "cases": 4,
+      "repeats": 2,
+      "arms": 2,
+      "modelRequests": 120,
+      "childRequests": 16,
+      "detailedReceipts": 64,
+      "noReplay": true,
+      "commands": [
+        {
+          "label": "corpus",
+          "command": [
+            "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._518d7d6b05f9345182624671e14e8c2b/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+            "corpus",
+            "--suite",
+            "strategy-v1"
+          ],
+          "exitCode": 0,
+          "stdoutSha256": "55a48ab71517b4cce9d84cccc3ae9b048c0f674c45ed2e445419d8b8ab8e3942",
+          "stderrSha256": "feaad1aa5f3dabf5ca69d884ee2d3d7abc00d1fafe92de101594f73b31a0d804"
+        },
+        {
+          "label": "doctor",
+          "command": [
+            "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._518d7d6b05f9345182624671e14e8c2b/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+            "doctor",
+            "--suite",
+            "strategy-v1",
+            "--config",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/config.json"
+          ],
+          "exitCode": 0,
+          "stdoutSha256": "270472c2e65125664382e15af717b3a75bde4109a8c3f28ce983553a3686a38e",
+          "stderrSha256": "e7b166215a0a52d18c5e19daba4c7331c9fcbd2b2544352528503d8e8dade2bb"
+        },
+        {
+          "label": "plan",
+          "command": [
+            "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._518d7d6b05f9345182624671e14e8c2b/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+            "plan",
+            "--config",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/config.json"
+          ],
+          "exitCode": 0,
+          "stdoutSha256": "e8cd8e5d6eb3d1d8ac53f095318a31620a4433d79765e018e0c9976c2a78c013",
+          "stderrSha256": "0a7229fd2f838da86a2ad62b1d4b87c237727901564caec2dd14d163b95793a1"
+        },
+        {
+          "label": "run",
+          "command": [
+            "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._518d7d6b05f9345182624671e14e8c2b/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+            "run",
+            "--config",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/config.json",
+            "--adapter",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/installed/adapter.mjs",
+            "--database",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/journal.sqlite"
+          ],
+          "exitCode": 0,
+          "stdoutSha256": "a4ce0c634804ba327ea9bab590ca5eaf4ad0deb4436e72bfc5c384b46564354a",
+          "stderrSha256": "3fd76a181e1fef904a0552454b0947b83934c8978df61d69af43566fa7bdf69a"
+        },
+        {
+          "label": "rerun",
+          "command": [
+            "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._518d7d6b05f9345182624671e14e8c2b/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+            "run",
+            "--config",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/config.json",
+            "--adapter",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/installed/adapter.mjs",
+            "--database",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/journal.sqlite"
+          ],
+          "exitCode": 0,
+          "stdoutSha256": "a4ce0c634804ba327ea9bab590ca5eaf4ad0deb4436e72bfc5c384b46564354a",
+          "stderrSha256": "6b32cba1ded80f966b7453b0c2afdaba92e24b6cfa6c10e6743148ffda620373"
+        },
+        {
+          "label": "report",
+          "command": [
+            "/data00/home/jiataorui/.local/share/pnpm/nodejs/24.7.0/bin/node",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/installed/node_modules/.pnpm/@dsh-enhanced+assistant-evaluation@file+..+packs+dsh-enhanced-assistant-evaluation-0.1._518d7d6b05f9345182624671e14e8c2b/node_modules/@dsh-enhanced/assistant-evaluation/bin/dsh-benchmark.js",
+            "report",
+            "--config",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/config.json",
+            "--database",
+            "/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/journal.sqlite",
+            "--plan",
+            "strategy-installed-development"
+          ],
+          "exitCode": 0,
+          "stdoutSha256": "a4ce0c634804ba327ea9bab590ca5eaf4ad0deb4436e72bfc5c384b46564354a",
+          "stderrSha256": "d60dedcf54d228fb61b3e8ff518e840f41043f7faff6c8a47b30a1d44e07b557"
+        }
+      ],
+      "packs": [
+        {
+          "name": "@dsh-enhanced/assistant-delivery",
+          "version": "0.1.24",
+          "path": ".cache/strategy-executor-checked/packs/dsh-enhanced-assistant-delivery-0.1.24.tgz",
+          "sha256": "456cb40ba30967042634822536ffc7980deec9530b91e01b61f426af28311b4a",
+          "files": 96
+        },
+        {
+          "name": "@dsh-enhanced/assistant-evaluation",
+          "version": "0.1.24",
+          "path": ".cache/strategy-executor-checked/packs/dsh-enhanced-assistant-evaluation-0.1.24.tgz",
+          "sha256": "a6aeb6088c87f53f72ed365a5efe0c3a9defec16a929c46f2f5c81ab1df98552",
+          "files": 125
+        },
+        {
+          "name": "@dsh-enhanced/assistant-goals",
+          "version": "0.1.0",
+          "path": ".cache/strategy-executor-checked/packs/dsh-enhanced-assistant-goals-0.1.0.tgz",
+          "sha256": "e073964cf4d50040d00e7b34a3413e3f0bd7874134aea23ae519b9ec434ec0d7",
+          "files": 80
+        },
+        {
+          "name": "@dsh-enhanced/assistant-growth-contract",
+          "version": "0.1.24",
+          "path": ".cache/strategy-executor-checked/packs/dsh-enhanced-assistant-growth-contract-0.1.24.tgz",
+          "sha256": "bbdc12673c6b1b0067068d2d9ee122c92e1505178b148de7f97a8fc4162b92ad",
+          "files": 31
+        },
+        {
+          "name": "@dsh-enhanced/assistant-isolation",
+          "version": "0.1.0",
+          "path": ".cache/strategy-executor-checked/packs/dsh-enhanced-assistant-isolation-0.1.0.tgz",
+          "sha256": "ff9225075af9f9bb6b35ef2c51e868cd994f4a1f3839e0e782a2bdfb3d81070e",
+          "files": 81
+        },
+        {
+          "name": "@dsh-enhanced/assistant-policy",
+          "version": "0.1.24",
+          "path": ".cache/strategy-executor-checked/packs/dsh-enhanced-assistant-policy-0.1.24.tgz",
+          "sha256": "db7eaf93b95f172e06cba3a12c50c45a0025489122a447744c3a4a02c725022a",
+          "files": 66
+        },
+        {
+          "name": "@dsh-enhanced/assistant-verifier",
+          "version": "0.1.0",
+          "path": ".cache/strategy-executor-checked/packs/dsh-enhanced-assistant-verifier-0.1.0.tgz",
+          "sha256": "c528d3143788fd82a784b2c4c4cb445a9ef3b21086a12e3713b305a8d26c64c0",
+          "files": 32
+        },
+        {
+          "name": "@dsh-enhanced/llm-route-capabilities",
+          "version": "0.1.24",
+          "path": ".cache/strategy-executor-checked/packs/dsh-enhanced-llm-route-capabilities-0.1.24.tgz",
+          "sha256": "ddcc0e04069c73549b99b8fa98763e71995d8cedaf7c36ba44ed81ea5bd8b4d6",
+          "files": 11
+        },
+        {
+          "name": "@dsh-enhanced/task-acceptance-contract",
+          "version": "0.1.0",
+          "path": ".cache/strategy-executor-checked/packs/dsh-enhanced-task-acceptance-contract-0.1.0.tgz",
+          "sha256": "39968deeaed1d62a8bb39aeb09756f54131fa36a7d791d454d3a85862f338591",
+          "files": 19
+        }
+      ]
+    },
+    "independentReview": {
+      "status": "PASS",
+      "reviewer": "strategy_executor_verify",
+      "scope": "Read-only source, runtime evidence, installed CLI and validation-log review; final numeric correction independently confirmed.",
+      "findings": [
+        "Final check-v4 exited 0: 302 files, 3811 tests, zero skipped and 31 dry-run packs; log hash matches.",
+        "Fresh installed CLI: all six commands exited 0; 16 achieved cells, 120 total requests (104 parent and 16 child), 64 receipts, 32 immutable objects; rerun/report do not replay requests.",
+        "Concurrent diagnostic v3: Evaluation 211 and Delivery 705 tests passed. Final check-v4: Evaluation 213 and Delivery 705 tests passed.",
+        "Unknown outcomes persist failure evidence and block successors; report reopens immutable evidence without creating directories; Policy wildcard rejection is tested."
+      ],
+      "limits": [
+        "Deterministic fixture with actual native services and Docker; no real-model efficacy, holdout or production benefit claim.",
+        "Read-only review was instructed, not enforced by a separate filesystem sandbox; trusts the operator Host, adapter, Docker and provider.",
+        "The full 18-work-package objective remains incomplete (3 verified / 8 implementing / 7 todo)."
+      ]
+    }
+  },
+  "failedAttempts": [
+    "bootstrap-v1: TypeScript never-function narrowing fixed.",
+    "focused-v2: old capability fixture lacked full Policy defaults; corrected fixture, negative assertions retained.",
+    "pack-v1: unquoted shell filter selected no projects; fail-if-no-match and quoting added.",
+    "install-v1: offline metadata unavailable; install-v2 fetched native dependencies; fresh final install-v3 succeeded offline with corrected Verifier peer.",
+    "installed-cli-v1: fixture could not match JSON-escaped quoted objective; failed cell retained unknown and later cells blocked. Fresh full plan uses corrected fixture.",
+    "check-v1/v2: unreachable/require-yield fixture lint fixed with normal throwing stream override.",
+    "check-v3/concurrent-diagnostic-v1: 1s verification job expired during Docker setup, leaving unknown mutation and no verified correct artifact. Fixed corpus whole-job deadline to 5s equally for both arms; also fixed missing outcome-assessment quiescence and unknown outcome incorrectly permitting successor cells. Native no-artifact regression added.",
+    "concurrent-diagnostic-v2: stricter quiescence check correctly rejected tampered evidence earlier; two assertions updated to the precise new error, without weakening their rejection expectations.",
+    "installed-cli-v2: actual installed run exited 0, then verification script read nonexistent receipt.verdict instead of v4 objectiveStatus. Corrected recheck reread all completed evidence and verified no-replay/report without rerunning cells."
+  ],
+  "commands": [
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/runner.spec.ts tests/benchmark/strategy-evidence.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-base-tests-v1.log",
+      "exitCode": 0,
+      "sha256": "d58f001371572982a822427823189aaf049bdfefc74a051333ed9d189720b0e3"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-runtime-lifecycle.spec.ts tests/benchmark/strategy-goal-runtime.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-lifecycle-v1.log",
+      "exitCode": 0,
+      "sha256": "e7a4e195d3cf502827b7b7853b64b4b4989ef3b8eb5a5ac6c7be607babee37b2"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-types-v1.log",
+      "exitCode": 2,
+      "sha256": "7856e5d92ea2a75ffb771e4642995e89d4ba1ff5395802906aa90904b66d50a4"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-capabilities.spec.ts tests/benchmark/strategy-config.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-capabilities-v1.log",
+      "exitCode": 1,
+      "sha256": "7f37cc465bb17ab0a9bf0d90840bb1d793f34c345422c89b1bfdafbb4646e11d"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-types-v2.log",
+      "exitCode": 2,
+      "sha256": "2433ce9f7e95e1be0c211d7b9f31b6aa6ba517bc9e90baa9b35294a20825f94b"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-executor.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-executor-v1.log",
+      "exitCode": 0,
+      "sha256": "6de2890488f85b481e17d389ae482a187090ceb74252eb1c42b0cc42c970402b"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-types-v3.log",
+      "exitCode": 2,
+      "sha256": "0d9631e6bfbebe33c6325086cbb5c5f49550816379383de3283ed46ed772411d"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation run typecheck",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-types-v4.log",
+      "exitCode": 0,
+      "sha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-executor.spec.ts tests/benchmark/strategy-capabilities.spec.ts tests/benchmark/strategy-config.spec.ts tests/benchmark/strategy-cli.spec.ts tests/benchmark/strategy-runtime-lifecycle.spec.ts tests/benchmark/strategy-goal-runtime.spec.ts tests/benchmark/strategy-evidence.spec.ts tests/benchmark/runner.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-focused-v1.log",
+      "exitCode": 0,
+      "sha256": "6861ec58b1cd9c0c92f94a974e689c1fb6f7e88f866ad811939528d2284208c0"
+    },
+    {
+      "command": "CI=true pnpm run build:bootstrap",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-bootstrap-v1.log",
+      "exitCode": 2,
+      "sha256": "7ae654a89493d922d7ecb87f88805b8fdfa084b7227af3b081935b51434bba67"
+    },
+    {
+      "command": "CI=true pnpm run build:bootstrap",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-bootstrap-v2.log",
+      "exitCode": 0,
+      "sha256": "6885574c8287290c7b1ded2e092b7acbd01cbd5c3bdbe480db3a3f3704d8fa39"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-executor.spec.ts tests/benchmark/strategy-capabilities.spec.ts tests/benchmark/strategy-policy.spec.ts tests/benchmark/strategy-config.spec.ts tests/benchmark/strategy-cli.spec.ts tests/benchmark/strategy-runtime-lifecycle.spec.ts tests/benchmark/strategy-goal-runtime.spec.ts tests/benchmark/strategy-evidence.spec.ts tests/benchmark/runner.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-focused-v2.log",
+      "exitCode": 1,
+      "sha256": "8b9b35146218c4ef07d22cf0b010660ae1bf668b827cacd6cefe83dbbd018383"
+    },
+    {
+      "command": "CI=true DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-executor.spec.ts tests/benchmark/strategy-capabilities.spec.ts tests/benchmark/strategy-policy.spec.ts tests/benchmark/strategy-config.spec.ts tests/benchmark/strategy-cli.spec.ts tests/benchmark/strategy-runtime-lifecycle.spec.ts tests/benchmark/strategy-goal-runtime.spec.ts tests/benchmark/strategy-evidence.spec.ts tests/benchmark/runner.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-focused-v3.log",
+      "exitCode": 0,
+      "sha256": "ed473dbfcbd56cad715a331259cff352c23f6e9f92fc9dad40df175d9ebb2b8e"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-policy exec vitest run tests/host-configuration.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-policy-v1.log",
+      "exitCode": 0,
+      "sha256": "e010606735bd31ae78b818d4f85c7d41041a8ea22e98bc42de191df4a0b83de1"
+    },
+    {
+      "command": "CI=true pnpm --recursive --filter ./packages/* --filter @dsh-enhanced/assistant-evaluation --filter @dsh-enhanced/assistant-goals --filter @dsh-enhanced/assistant-isolation --filter @dsh-enhanced/assistant-policy --filter @dsh-enhanced/assistant-delivery --filter @dsh-enhanced/assistant-verifier pack --pack-destination /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-validation/packs",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-pack-v1.log",
+      "exitCode": 0,
+      "sha256": "6d11fcb178f5f0f0231146624080eab1efc6fd4efb068224ddde2bcfd21cf3f3"
+    },
+    {
+      "command": "CI=true pnpm --recursive --fail-if-no-match --filter './packages/*' --filter @dsh-enhanced/assistant-evaluation --filter @dsh-enhanced/assistant-goals --filter @dsh-enhanced/assistant-isolation --filter @dsh-enhanced/assistant-policy --filter @dsh-enhanced/assistant-delivery --filter @dsh-enhanced/assistant-verifier pack --pack-destination /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-validation/packs",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-pack-v2.log",
+      "exitCode": 0,
+      "sha256": "f1642e0c3f15da281c8c18516d3646c8ac1607313eb9bd42a8e8e6f78d634979"
+    },
+    {
+      "command": "CI=true pnpm --dir /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-validation/installed install --offline --ignore-scripts --no-frozen-lockfile",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-install-v1.log",
+      "exitCode": 1,
+      "sha256": "01949dfe162cf11793ad378a909dce8f3d87135c89f2461f71c8c385e5b1fc40"
+    },
+    {
+      "command": "CI=true pnpm --dir /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-validation/installed install --ignore-scripts --no-frozen-lockfile",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-install-v2.log",
+      "exitCode": 0,
+      "sha256": "511af2be5e20d0e5ee1a523670077003108b144126f6d9cc6bdc1d99dcd7a0f7"
+    },
+    {
+      "command": "CI=true node .cache/strategy-executor-validation/installed-cli.mjs",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-installed-cli-v1.log",
+      "exitCode": 1,
+      "sha256": "75607a381566e5da30b661260056808e50de94bc34a07b95c28c8a083f38591b"
+    },
+    {
+      "command": "CI=true pnpm install --offline --ignore-scripts --no-frozen-lockfile",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-lock-v1.log",
+      "exitCode": 0,
+      "sha256": "cd86bfec553a5b0dd9f05c38c4ad093a707fb6107e71a9296e0f43ddb29ea316"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-check-v1.log",
+      "exitCode": 1,
+      "sha256": "3484c7927eb31650a89c4ed0fb208a1a81396283c61b350169f066e03db511d8"
+    },
+    {
+      "command": "CI=true pnpm --recursive --fail-if-no-match --filter './packages/*' --filter @dsh-enhanced/assistant-evaluation --filter @dsh-enhanced/assistant-goals --filter @dsh-enhanced/assistant-isolation --filter @dsh-enhanced/assistant-policy --filter @dsh-enhanced/assistant-delivery --filter @dsh-enhanced/assistant-verifier pack --pack-destination /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-final/packs",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-pack-v3.log",
+      "exitCode": 0,
+      "sha256": "73f33db9c50b1f7ca503ed1fdbe126dd6bfbf8abd81418d5afeee534de8fc21b"
+    },
+    {
+      "command": "CI=true pnpm --dir /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-final/installed install --offline --ignore-scripts --no-frozen-lockfile",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-install-v3.log",
+      "exitCode": 0,
+      "sha256": "96293cd557108075da230d899331c07d12a374de213a3f57575241319c01e3e5"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-check-v2.log",
+      "exitCode": 1,
+      "sha256": "30cd9ceb647e3025ad3b014b6f759c759fe0558958df75b9b0b5edd1343f752c"
+    },
+    {
+      "command": "CI=true node .cache/strategy-executor-validation/installed-cli-final.mjs",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-installed-cli-v2.log",
+      "exitCode": 1,
+      "sha256": "3df3c51696255ade810f02d71545f1749d2e151a1a706a0b042c38fbdb7fa7db"
+    },
+    {
+      "command": "CI=true node .cache/strategy-executor-validation/installed-cli-recheck.mjs",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-installed-cli-recheck-v1.log",
+      "exitCode": 0,
+      "sha256": "d23a8e33735d4a5eb268db818c6881775e8c0e1a330b5e038ee1f60e7fd4bf3d"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-check-v3.log",
+      "exitCode": 1,
+      "sha256": "0ad780a227f502f3e021307b72638804df4cfec88f19ed38f0feb532250e62ad"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_EXECUTOR_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-diagnostic DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --recursive --filter @dsh-enhanced/assistant-evaluation --filter @dsh-enhanced/assistant-delivery run test",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-concurrent-diagnostic-v1.log",
+      "exitCode": 1,
+      "sha256": "f9f34d7c51d8e449865a3bc0e3a63250331949aaf97c8038acdeedbf185d1f21"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-executor-unknown.spec.ts tests/benchmark/strategy-evidence.spec.ts tests/benchmark/strategy-config.spec.ts tests/benchmark/strategy-cli.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-unknown-boundary-v1.log",
+      "exitCode": 0,
+      "sha256": "a1ccf8bba4fa6f0c216b015a0fcc7410279baefd0d203b64c2939012cb39f9b5"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_EXECUTOR_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-diagnostic-fixed DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --recursive --filter @dsh-enhanced/assistant-evaluation --filter @dsh-enhanced/assistant-delivery run test",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-concurrent-diagnostic-v2.log",
+      "exitCode": 1,
+      "sha256": "82eea741702146e2273aba4ba752fe30db7d2087aed19ce441e8e8e4520987f1"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_EXECUTOR_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-diagnostic-fixed-v3 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm --recursive --filter @dsh-enhanced/assistant-evaluation --filter @dsh-enhanced/assistant-delivery run test",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-concurrent-diagnostic-v3.log",
+      "exitCode": 0,
+      "sha256": "2b5df7fe9024bac86ec6fbfb7f18b00b17c76e15bcd6d51c774adfe9f9ed26cb"
+    },
+    {
+      "command": "CI=true pnpm --filter @dsh-enhanced/assistant-evaluation exec vitest run tests/benchmark/strategy-policy.spec.ts tests/benchmark/strategy-capabilities.spec.ts",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-policy-pattern-v1.log",
+      "exitCode": 0,
+      "sha256": "b8f4001bca497e7056ef7bd56e2980e3c6d3e58e466a9511948407a0f72c6d69"
+    },
+    {
+      "command": "CI=true pnpm --recursive --fail-if-no-match --filter './packages/*' --filter @dsh-enhanced/assistant-evaluation --filter @dsh-enhanced/assistant-goals --filter @dsh-enhanced/assistant-isolation --filter @dsh-enhanced/assistant-policy --filter @dsh-enhanced/assistant-delivery --filter @dsh-enhanced/assistant-verifier pack --pack-destination /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/packs",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-pack-v4.log",
+      "exitCode": 0,
+      "sha256": "f476e4a23541b1768e323bc93358d86af55fdb69d899d08167ae5310f676feb4"
+    },
+    {
+      "command": "CI=true pnpm --dir /data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-checked/installed install --offline --ignore-scripts --no-frozen-lockfile",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-install-v4.log",
+      "exitCode": 0,
+      "sha256": "92e8cd53335c527ab7c40f2f259011974c76dff9d39624dd393d95496916a363"
+    },
+    {
+      "command": "CI=true node .cache/strategy-executor-validation/unknown-diagnostic.mjs",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-unknown-diagnostic-read-v1.log",
+      "exitCode": 0,
+      "sha256": "e0dc147e94b78fb340dd35f9211353f9b3350c63b7da89b08790b4b967a6b1a9"
+    },
+    {
+      "command": "CI=true node .cache/strategy-executor-validation/installed-cli-checked.mjs",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-installed-cli-v3.log",
+      "exitCode": 0,
+      "sha256": "6ad49307da0e30b1ec9bad9e27b47ca993479379ab095138230c48821ec72f4a"
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=4 DSH_STRATEGY_EXECUTOR_EVIDENCE_ROOT=/data00/home/jiataorui/work/github/dsh-enhanced/.cache/strategy-executor-fullcheck DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+      "log": ".cache/strategy-executor-validation/dsh-strategy-executor-check-v4.log",
+      "exitCode": 0,
+      "sha256": "e511477983e45aacbdfe9d96688172255ef080b97867e66811aea0068915105a"
+    }
+  ],
+  "sourceHashes": [
+    {
+      "path": "docs/agent-autonomy-implementation.md",
+      "sha256": "b1876b38cdcc4577e7126e245d32441133d20363a8ea277c9cff80d0a9f47db3"
+    },
+    {
+      "path": "docs/autonomy-handoff-2026-09-06.md",
+      "sha256": "7709403caed4cd5a90c9e79fc27088ab1bef8f937c86b954daaba374e560bf8f"
+    },
+    {
+      "path": "docs/compatibility.md",
+      "sha256": "49bfe98b97b4c70d875a1bbee0c29d99a267907ed0ba7938f9e2b260015e264d"
+    },
+    {
+      "path": "docs/examples/strategy-benchmark.config.json",
+      "sha256": "769251d609698c3c192d3fe22c4177d6c12be38d3c8a3e59269ade05be0bd404"
+    },
+    {
+      "path": "docs/goal-strategy-evaluation.md",
+      "sha256": "5d11d177cd792317755df27ff800f5b0a96f445a97622582e789943da7fcbde3"
+    },
+    {
+      "path": "plugins/assistant-evaluation/README.md",
+      "sha256": "d50204c5dea30f0c2042d58bd06026325d3bffd1540a0061b95b764b507db519"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/cli.ts",
+      "sha256": "53c1698c6d0c6328f804ebe6196dc4290f78d1aa668b73eca6497ad741417144"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/runner.ts",
+      "sha256": "628bf054469f1639b93ec83382dfc45e6f57a10f60535d114d34a7074320e8ae"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-capabilities.ts",
+      "sha256": "1d649053df3507b8a06b68bae38fc58f25a5c637dfa357ab842811f6288a931e"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-config.ts",
+      "sha256": "680ba4e19a843e696a65014ae5f56946bc6c09fc8d0e3c80e109bd4be67e3e05"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-corpus.ts",
+      "sha256": "19629cb42a1df8804a45024466d151ebccca88a57688861408c31ae96fe69a58"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-evidence.ts",
+      "sha256": "6ca92b0785b0272d90ef7b02700afae8ccb45964d3379d9d886745408c239827"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-executor.ts",
+      "sha256": "d1b30b9502b65f8eada5f7feaa6f654201466d88968d562f2cfdf583a15a5b9b"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-goal-runtime.ts",
+      "sha256": "9647df54640f02d7752b1a03f8f6ae7b556c1e7210e8f175adf9e376be1de3d7"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy-policy.ts",
+      "sha256": "58b3bae5d84c329858278475991ea795bdf0554aa4e112a8ae91f4ba67e05fcf"
+    },
+    {
+      "path": "plugins/assistant-evaluation/src/benchmark/strategy.ts",
+      "sha256": "de5c590b2b4a7f782fa348f68cfdfaf762d8a6386ca0e7ff967269b35a9dbc15"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/runner.spec.ts",
+      "sha256": "d5eb01fc1b91d55460a6bca15f7edd8a2adfeeeced63a5ae0aa4e832855305e2"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-capabilities.spec.ts",
+      "sha256": "c7e6ab9a1b7c3b9dc4b92914ed64683d03712932313bd8240001ac1b50381c65"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-cli.spec.ts",
+      "sha256": "36d50009734651bd41977495b65489c518300df6c75ed75b3eb335112e2e6754"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-config.spec.ts",
+      "sha256": "2d02f6e80716fc659a98dd0d2c5a06739cc1df14c3decd71dc962de20165db6e"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-evidence.spec.ts",
+      "sha256": "ae6a110a0a62b6ed4fc60ea5c3921c2d5d88206a5ee1a01f66d9bfe66511ddd6"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-executor-unknown.spec.ts",
+      "sha256": "750c23437d39096bedd786262868416c8be902e13ebb1f325e497961bf10c6a7"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-executor.spec.ts",
+      "sha256": "516e37ad320ebdaa34e23ba35d187a93d38a640363b9d3d66b3c46dddf648b35"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-goal-runtime.spec.ts",
+      "sha256": "220a19598f8b1adb1df86f45f1afc0672e0c551bcb38e11350b88cd822133023"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-policy.spec.ts",
+      "sha256": "867e7eea106130fa8c0c0df5abfaa5dc8fcab0f868891a477aa7b08284a22bc0"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/benchmark/strategy-runtime-lifecycle.spec.ts",
+      "sha256": "018acff07b751223042b4473017ab2991d8429c1bc4984f6fb6a305ee5469cb5"
+    },
+    {
+      "path": "plugins/assistant-evaluation/tests/fixtures/strategy-cli-adapter.mjs",
+      "sha256": "315e9d56398f3a916e5c4ca3c30c2d6757c94bcb39e868c82321b04d484fd13e"
+    },
+    {
+      "path": "plugins/assistant-goals/package.json",
+      "sha256": "4e15fb361b0464c4db2ee53ac4df0b3928fcafef97799c8023c1ba2bb4d86356"
+    },
+    {
+      "path": "plugins/assistant-policy/README.md",
+      "sha256": "63078c2c7f3744ee375a134197e1714a17f2bf83334d1bfad970ac5814a4a636"
+    },
+    {
+      "path": "plugins/assistant-policy/src/index.ts",
+      "sha256": "867993623eaae0dcb6dd53eeb6eacaf812ada671cef63219151c0ff760285fcf"
+    },
+    {
+      "path": "plugins/assistant-policy/src/service.ts",
+      "sha256": "baa836e29f1efe38992bf8a5caeff4081cf4b7437ba66ca82bc30036146afa2e"
+    },
+    {
+      "path": "plugins/assistant-policy/tests/host-configuration.spec.ts",
+      "sha256": "451361b0f98a77ab2c2ce5ba19fa4b552f69152a9bd69a956a1b72bebf524e26"
+    }
+  ],
+  "diagnosticArtifacts": [
+    {
+      "path": ".cache/strategy-executor-validation/unknown-diagnostic.json",
+      "sha256": "c2c0ef7791df38ea849705420e59b8c0d61f59093f0aabf951572fecd0922dcc"
+    },
+    {
+      "path": ".cache/strategy-executor-validation/unknown-diagnostic.mjs",
+      "sha256": "d39cce7bf5485f4588fbb3e1ff0798d67e3ac12c06b85de2d4e044992c29affb"
+    }
+  ],
+  "installedEvidenceObjects": [
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/02560ea9a97344f468c076db98fa5f442a269b4db340e42e8913f66bc3e603f1.json",
+      "sha256": "b2a1f2ec974d2e694d4d9213e6f32fa40889d610ce863e05f1228968981e72c9",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "02560ea9a97344f468c076db98fa5f442a269b4db340e42e8913f66bc3e603f1",
+      "cell": {
+        "caseId": "integer-sum",
+        "id": "9d50232508ccaa6327f873b4c46a9e71bc9383daae3f9a6739752975eb6fb97e",
+        "repeat": 1,
+        "seed": 2865694578,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/088e206def0f364724f25b1050c5b8e6497d2639d6a3466ac1db7a813563715e.json",
+      "sha256": "85f265778f12a2ce45c462c8d4db9ad530b837f3c8ff3e82164b93e277904c52",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "088e206def0f364724f25b1050c5b8e6497d2639d6a3466ac1db7a813563715e",
+      "cell": {
+        "caseId": "word-frequency-lexical-ties",
+        "id": "6e5c94431c2a15b9a27af51eb50c542caaf8a8ec3b976b3c04c0e6d79609bf54",
+        "repeat": 0,
+        "seed": 4004886201,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/0bd20f0c002ce9ff3a1d8a51fae02025ad0ddf3b74da92ed2e4a88fea584d9fb.json",
+      "sha256": "0f8d87cca404c4860e0f15b8d058a8f794f173223f051808c8ac50ed20b1b917",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "0bd20f0c002ce9ff3a1d8a51fae02025ad0ddf3b74da92ed2e4a88fea584d9fb",
+      "cell": {
+        "caseId": "dependency-topological-order",
+        "id": "8eba4060049b893212c490e6aa560088b6f1e2e7aeefab6c917938aa1b166f18",
+        "repeat": 0,
+        "seed": 525717910,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/10e5be00337b8814e4e73413b91c4fbfce6ec18c023d1727a499d6bfa9add7e3.json",
+      "sha256": "8fe024fb242e9c7f9d67d1d07fb6e91a3464325035d7cfe2ec450e0e8fd5566f",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "10e5be00337b8814e4e73413b91c4fbfce6ec18c023d1727a499d6bfa9add7e3",
+      "cell": {
+        "caseId": "merge-touching-intervals",
+        "id": "64adb3b2eb0bfc58955e2a03074a52e234b8d39a58bb7248c356db76b62a6f46",
+        "repeat": 1,
+        "seed": 2534879035,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/26dcba95d73c9e41313dba63954debd8454e3b48c7400ca20522a60bb1ee146c.json",
+      "sha256": "cbfe0a81c22b260bddd9f01aeecdbf74139aeae6c90b48a8722b74d59b2db815",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "26dcba95d73c9e41313dba63954debd8454e3b48c7400ca20522a60bb1ee146c",
+      "cell": {
+        "caseId": "merge-touching-intervals",
+        "id": "64adb3b2eb0bfc58955e2a03074a52e234b8d39a58bb7248c356db76b62a6f46",
+        "repeat": 1,
+        "seed": 2534879035,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/27cc2f9c910a9c9f972805be99fa759957f117d5455f1bce0261437fca6ffd41.json",
+      "sha256": "11a1e4acbcd3e7db942dbd653b337d3b71cf912d2f1b3a81fc05746674931e46",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "27cc2f9c910a9c9f972805be99fa759957f117d5455f1bce0261437fca6ffd41",
+      "cell": {
+        "caseId": "merge-touching-intervals",
+        "id": "3dbe28092b00f26fe42a258fb4b03d2e9c8e386467d52abae23003001460bd3b",
+        "repeat": 1,
+        "seed": 2534879035,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/2f51313ab4271a5db1fc98789580f5165c4739ccd985ed24f75d1076b54fe0ba.json",
+      "sha256": "41548f183701441333c7f992dc47a6e2e3caef0995ebb0ec78f6a88acbcab24c",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "2f51313ab4271a5db1fc98789580f5165c4739ccd985ed24f75d1076b54fe0ba",
+      "cell": {
+        "caseId": "dependency-topological-order",
+        "id": "8c2b4cc6009c37e9abbf9e7284e15a0b7e0570b6d6eb5aed038d18a9f6a58e19",
+        "repeat": 1,
+        "seed": 3611937869,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/326c35e1d65bafc071eca74db324f8f467d024253a99585e63545b70d94d5183.json",
+      "sha256": "575b611d95a6a2a6203d3c406e2dd045047cc76ec7f623c3b5dda887479a436b",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "326c35e1d65bafc071eca74db324f8f467d024253a99585e63545b70d94d5183",
+      "cell": {
+        "caseId": "integer-sum",
+        "id": "e9959d497c46936b0c1dd3bd87b3eeaeaa58f4489097443f697259b4ec8d0c9e",
+        "repeat": 1,
+        "seed": 2865694578,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/3681881bc6bc24d2711a0b4db45cee6cd00e457765accf45d8efda01b4148860.json",
+      "sha256": "3d449af6487817a7084a01d6bf166a869c78a0ff6e28d848cea600438d5f21ca",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "3681881bc6bc24d2711a0b4db45cee6cd00e457765accf45d8efda01b4148860",
+      "cell": {
+        "caseId": "integer-sum",
+        "id": "531b4e4fe8144279875722c56feafa11328d6c8eee498c08e122c48b14f649e1",
+        "repeat": 0,
+        "seed": 3466782471,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/3ed596651ee681fcaa36744f3bdb081b4468d1a52199549d7a1086690502fe2d.json",
+      "sha256": "cbb24d5b408f6ba3bad17a5e2de143ed673925361951898310b3b3e17b4aa8a4",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "3ed596651ee681fcaa36744f3bdb081b4468d1a52199549d7a1086690502fe2d",
+      "cell": {
+        "caseId": "word-frequency-lexical-ties",
+        "id": "5b0be31955b925a5807e38cb427cc722e8e5da68cd92efdfce8faa3bd521f5fb",
+        "repeat": 1,
+        "seed": 3754558050,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/4aeb10b21ad5b628406d8cb761ac7092e2a4c081f229c2c1cd038e2d8b921ccc.json",
+      "sha256": "6d68c05909a3b1c4434d77204b7ef269107ad3a3ad663d6b832cae753d83e6c2",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "4aeb10b21ad5b628406d8cb761ac7092e2a4c081f229c2c1cd038e2d8b921ccc",
+      "cell": {
+        "caseId": "word-frequency-lexical-ties",
+        "id": "f6771fbb0172ed19afe9b1235552571c6bf507c46ca458587cb1ea8d88df9dcd",
+        "repeat": 1,
+        "seed": 3754558050,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/504d57ecd33cefff698db36d1acf2923372f2e7f60f2456617896540f78ab7bd.json",
+      "sha256": "221af71af9de9e4bf9af5aba9ef04ef86cd1776811c34642cf6530b623261a16",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "504d57ecd33cefff698db36d1acf2923372f2e7f60f2456617896540f78ab7bd",
+      "cell": {
+        "caseId": "integer-sum",
+        "id": "e3d2868324139350cb1b37443b4cdaf88584d27f852646f0d0103dd1bc44fca1",
+        "repeat": 0,
+        "seed": 3466782471,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/5a72ed542400d275e1c25a5afe1cc222ef9a5edd998f4cd2773d6fe3232c1c4a.json",
+      "sha256": "4d63761bb06d8ded09b4628a4ef06f090942f337959e9582470a3bb95aecbd68",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "5a72ed542400d275e1c25a5afe1cc222ef9a5edd998f4cd2773d6fe3232c1c4a",
+      "cell": {
+        "caseId": "integer-sum",
+        "id": "e3d2868324139350cb1b37443b4cdaf88584d27f852646f0d0103dd1bc44fca1",
+        "repeat": 0,
+        "seed": 3466782471,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/63856148a353ff302175380a014ecc8839ac39653000aba975eff25af3e9f8d2.json",
+      "sha256": "40adb5e82131ccfbc4389239af5e9f9ff08bd69f93d12214d9945157acfe8c17",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "63856148a353ff302175380a014ecc8839ac39653000aba975eff25af3e9f8d2",
+      "cell": {
+        "caseId": "word-frequency-lexical-ties",
+        "id": "5b0be31955b925a5807e38cb427cc722e8e5da68cd92efdfce8faa3bd521f5fb",
+        "repeat": 1,
+        "seed": 3754558050,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/6d56adf61850bff5c1bbb3a63fb332f763cabda6e84934e5009356097b08762b.json",
+      "sha256": "1b614c5e67ca82a1663a9e28b7986896e430f491228172005605217a77ca7e87",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "6d56adf61850bff5c1bbb3a63fb332f763cabda6e84934e5009356097b08762b",
+      "cell": {
+        "caseId": "word-frequency-lexical-ties",
+        "id": "129a4cf7028c868631c4b4fc35a08b67adbdcd8be0f869f2e64e81d87884407b",
+        "repeat": 0,
+        "seed": 4004886201,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/87487a0079c3bda4a43eac9cfbafbe6a6ecf7b5b7e3c6e44a1d6f11dcd19077f.json",
+      "sha256": "d6d5ff009629b250399e3afe0098733d1187799678cd026803793d170fd82469",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "87487a0079c3bda4a43eac9cfbafbe6a6ecf7b5b7e3c6e44a1d6f11dcd19077f",
+      "cell": {
+        "caseId": "word-frequency-lexical-ties",
+        "id": "129a4cf7028c868631c4b4fc35a08b67adbdcd8be0f869f2e64e81d87884407b",
+        "repeat": 0,
+        "seed": 4004886201,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/92526a6c78bef06aef90c67472b0788fad0f8a5cdd9747b8b23b15e30095105e.json",
+      "sha256": "f16757a2996f1a06cc5c2f969981437ec114257b799f1861c8010962f5ae0fe7",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "92526a6c78bef06aef90c67472b0788fad0f8a5cdd9747b8b23b15e30095105e",
+      "cell": {
+        "caseId": "dependency-topological-order",
+        "id": "7f656b2d5f633821a30da39c5a4262cb083fe4cf83b225dd16b96f7d32a347e8",
+        "repeat": 1,
+        "seed": 3611937869,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/9af638a9cb01bb75abb8d69c0dd01fda7ecad81f411b17a42d370d474146773b.json",
+      "sha256": "ce87604e63d76d28cb8b2cf1380079ba9bf38d80429ba6e811382ac428d219ac",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "9af638a9cb01bb75abb8d69c0dd01fda7ecad81f411b17a42d370d474146773b",
+      "cell": {
+        "caseId": "integer-sum",
+        "id": "531b4e4fe8144279875722c56feafa11328d6c8eee498c08e122c48b14f649e1",
+        "repeat": 0,
+        "seed": 3466782471,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/9b84271a474f6db63f231569215b714f25d6fa01873927b3fbd7de5b9cb5edd2.json",
+      "sha256": "6c5a741946cbda549471fe03433e40527082700d852a2fd06b9aa13712448c2d",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "9b84271a474f6db63f231569215b714f25d6fa01873927b3fbd7de5b9cb5edd2",
+      "cell": {
+        "caseId": "integer-sum",
+        "id": "e9959d497c46936b0c1dd3bd87b3eeaeaa58f4489097443f697259b4ec8d0c9e",
+        "repeat": 1,
+        "seed": 2865694578,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/a02ed3cfeb248ef08af4bbc29804b8e7f4cb8aeba64737f9b7301cc414a1e203.json",
+      "sha256": "1acf9a6bf8ab356b158190f95e2282eb9ff10c4d15c0f4cac446936f715c655d",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "a02ed3cfeb248ef08af4bbc29804b8e7f4cb8aeba64737f9b7301cc414a1e203",
+      "cell": {
+        "caseId": "word-frequency-lexical-ties",
+        "id": "6e5c94431c2a15b9a27af51eb50c542caaf8a8ec3b976b3c04c0e6d79609bf54",
+        "repeat": 0,
+        "seed": 4004886201,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/a3639fddb4e8d170e5bf3688394907e15b6604f38a4f4fcf9d510a2edd8fe7ab.json",
+      "sha256": "303d0f52240da8ee4f23c0bc77b15d6df569586ddf251424ceebacce75a10a57",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "a3639fddb4e8d170e5bf3688394907e15b6604f38a4f4fcf9d510a2edd8fe7ab",
+      "cell": {
+        "caseId": "dependency-topological-order",
+        "id": "0d0e4d042275ade2336dd626c4c936bcae09f918edcda065692735727e8d469a",
+        "repeat": 0,
+        "seed": 525717910,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/a52d44791b096e13d45e3708b21d166a839e62cee9363c3064b983c7be5bf985.json",
+      "sha256": "9bc14ae3e2b7044f868a20a3f9ef8b9deb689172ac09c9fe6b539c6100687f0f",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "a52d44791b096e13d45e3708b21d166a839e62cee9363c3064b983c7be5bf985",
+      "cell": {
+        "caseId": "dependency-topological-order",
+        "id": "8eba4060049b893212c490e6aa560088b6f1e2e7aeefab6c917938aa1b166f18",
+        "repeat": 0,
+        "seed": 525717910,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/aa9c9e1ea2027f7b9d71738703638e2c7c68784a8588603f24cb09a7839c7878.json",
+      "sha256": "f1b703ef1c67ae21aa28bd25eed890dbf3ef953b0e35dc539d7fbc58468fc285",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "aa9c9e1ea2027f7b9d71738703638e2c7c68784a8588603f24cb09a7839c7878",
+      "cell": {
+        "caseId": "merge-touching-intervals",
+        "id": "19264260f530bdd9ceeb0154ee2956da97287cce19e70488b93052a9d3f29fdb",
+        "repeat": 0,
+        "seed": 3455237817,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/b1ec10df3755d5a0df86ddd773e263f5ace27f127a87e683cf56c62b3da57397.json",
+      "sha256": "17baf54f3ce41f84b1bd6bd5d4d2f6d66bed092e5cdf5339ab30fe167c611ec2",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "b1ec10df3755d5a0df86ddd773e263f5ace27f127a87e683cf56c62b3da57397",
+      "cell": {
+        "caseId": "dependency-topological-order",
+        "id": "8c2b4cc6009c37e9abbf9e7284e15a0b7e0570b6d6eb5aed038d18a9f6a58e19",
+        "repeat": 1,
+        "seed": 3611937869,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/c8124f371d16c8827fa72c962edc426e075f68f4476de9b0ab3141b2e026e9ac.json",
+      "sha256": "327e4ee593e398bb25633ed757051125656b15bd0a957829e96c7f76ff905f2c",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "c8124f371d16c8827fa72c962edc426e075f68f4476de9b0ab3141b2e026e9ac",
+      "cell": {
+        "caseId": "dependency-topological-order",
+        "id": "7f656b2d5f633821a30da39c5a4262cb083fe4cf83b225dd16b96f7d32a347e8",
+        "repeat": 1,
+        "seed": 3611937869,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/c8f814ec43cb8c5205924ac879f67184b71278d92eb88fe4dc0a5a313441cadb.json",
+      "sha256": "618a8a695218c0ae762656ca70f6520754f02fcf3ebb31822ae2ac9944b2d803",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "c8f814ec43cb8c5205924ac879f67184b71278d92eb88fe4dc0a5a313441cadb",
+      "cell": {
+        "caseId": "merge-touching-intervals",
+        "id": "19264260f530bdd9ceeb0154ee2956da97287cce19e70488b93052a9d3f29fdb",
+        "repeat": 0,
+        "seed": 3455237817,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/cb8d21e23717bf848b382e21545fff92ba2f211fcf470d41f45200a6c555d42c.json",
+      "sha256": "245e83cc5e24eeaccb30cfeb14a6d8e5a8cffacaa21bf6767d0559fadbc3efa5",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "cb8d21e23717bf848b382e21545fff92ba2f211fcf470d41f45200a6c555d42c",
+      "cell": {
+        "caseId": "merge-touching-intervals",
+        "id": "9233a255885ca7e17507e05e1d1a0b679c02b423da4cfb1162bff6c48dbeee8c",
+        "repeat": 0,
+        "seed": 3455237817,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/e553d043cae152bad68e92c18b579ccf20d0ddaf4359ca350b153e28a4b5feea.json",
+      "sha256": "172b741764c67126bceecb6c1c01ed416accff99f5e278d228430debfe538c92",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "e553d043cae152bad68e92c18b579ccf20d0ddaf4359ca350b153e28a4b5feea",
+      "cell": {
+        "caseId": "merge-touching-intervals",
+        "id": "3dbe28092b00f26fe42a258fb4b03d2e9c8e386467d52abae23003001460bd3b",
+        "repeat": 1,
+        "seed": 2534879035,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/f16fa4ea277adad6382c3251776aabf7acd298aa6a187cbfa5a64fbc6984c162.json",
+      "sha256": "38413e56e40e3e008f36ad91e4dbf8c260524c95b0c3143ad75c434d2fa50aa4",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "f16fa4ea277adad6382c3251776aabf7acd298aa6a187cbfa5a64fbc6984c162",
+      "cell": {
+        "caseId": "merge-touching-intervals",
+        "id": "9233a255885ca7e17507e05e1d1a0b679c02b423da4cfb1162bff6c48dbeee8c",
+        "repeat": 0,
+        "seed": 3455237817,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/f276673b3e76e6a816aad30bdbabb49ff499c259fe83e129b2999a5032ab30d8.json",
+      "sha256": "9215c6656f5ade859c957b47f332c8b5edcbc549f58770e13f2ecff60d2fcb8a",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "f276673b3e76e6a816aad30bdbabb49ff499c259fe83e129b2999a5032ab30d8",
+      "cell": {
+        "caseId": "word-frequency-lexical-ties",
+        "id": "f6771fbb0172ed19afe9b1235552571c6bf507c46ca458587cb1ea8d88df9dcd",
+        "repeat": 1,
+        "seed": 3754558050,
+        "variantId": "direct"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/f7346f745b9d4534d9bc57caedffc6d3184bdd674c409d763c438f58bfb2a8db.json",
+      "sha256": "724567fb589bfb00565c2b485c8701f6b1569b6f785a3811dcf051217c3d08c6",
+      "protocol": "dsh-native-goal-strategy-cell/v1",
+      "contentDigest": "f7346f745b9d4534d9bc57caedffc6d3184bdd674c409d763c438f58bfb2a8db",
+      "cell": {
+        "caseId": "integer-sum",
+        "id": "9d50232508ccaa6327f873b4c46a9e71bc9383daae3f9a6739752975eb6fb97e",
+        "repeat": 1,
+        "seed": 2865694578,
+        "variantId": "adaptive-strategy"
+      }
+    },
+    {
+      "path": ".cache/strategy-executor-checked/state/strategy-evidence-v1/fc73dd3135c197ce8c88a6e59068c4ca184f23343d8368f873e4c1da0f7dd068.json",
+      "sha256": "b57eb7f8e10879e6607ff5a7efdb0b0e47e2f666b5cc13f6a15970e3da1f272e",
+      "protocol": "dsh-native-goal-strategy-evidence/v1",
+      "contentDigest": "fc73dd3135c197ce8c88a6e59068c4ca184f23343d8368f873e4c1da0f7dd068",
+      "cell": {
+        "caseId": "dependency-topological-order",
+        "id": "0d0e4d042275ade2336dd626c4c936bcae09f918edcda065692735727e8d469a",
+        "repeat": 0,
+        "seed": 525717910,
+        "variantId": "direct"
+      }
+    }
+  ],
+  "retainedFailedRunObjects": [
+    {
+      "path": ".cache/strategy-executor-validation/state/strategy-evidence-v1/060347797be22edb61d8063c9925084a5ced0d565c5e60bb17975d807edaf079.json",
+      "sha256": "e787377cb55151244dc0179c0294824926d6988393902c6c2b8f573dc4a2d4df",
+      "protocol": "dsh-native-goal-strategy-evidence/v1"
+    },
+    {
+      "path": ".cache/strategy-executor-validation/state/strategy-evidence-v1/2cad2e20cf9b4824af8817d114c406bd5354b71eec5097e12c89e8dd3e744c4e.json",
+      "sha256": "b01fc74409451304fb762450950bcc8e4d275d5b391e9f99808a25ae926828c6",
+      "protocol": "dsh-native-goal-strategy-evidence/v1"
+    },
+    {
+      "path": ".cache/strategy-executor-validation/state/strategy-evidence-v1/6a284dbcb6a5bb60339dcc6f85f83895fbbe1985a396875d11f8ceb412cb0a29.json",
+      "sha256": "9b4698d9b4bbd7787c089b3b94140eb01e8485a784f2147af3bd6df35ba91379",
+      "protocol": "dsh-native-goal-strategy-failure/v1"
+    },
+    {
+      "path": ".cache/strategy-executor-validation/state/strategy-evidence-v1/8b5e390dee5f7b2c9d6f8147ce5bfa84545104dbd173212346350447284a786a.json",
+      "sha256": "d93939d886ba075bacad8d7677c939f834b1218ddf9359aff0f1c6ec4e0f7f70",
+      "protocol": "dsh-native-goal-strategy-cell/v1"
+    },
+    {
+      "path": ".cache/strategy-executor-validation/state/strategy-evidence-v1/8f3e425317b8a981bc6b7a923f12010f96188d20a7a31c4ced65d9019789d348.json",
+      "sha256": "67185afb15521f8f2428c78486acc41d4df4f522473bf7fe907f2ea4b0f80202",
+      "protocol": "dsh-native-goal-strategy-cell/v1"
+    }
+  ],
+  "validationScripts": [
+    {
+      "path": ".cache/strategy-executor-validation/prepare-checked.mjs",
+      "sha256": "1473b37c07ec3ef37a4b4822f005599fd87f43b7113d4fb0150267b2d0d0335f"
+    },
+    {
+      "path": ".cache/strategy-executor-validation/installed-cli-checked.mjs",
+      "sha256": "860788751af4b3f90639346b052e044a062005936d564033c48d50f284fd99c4"
+    },
+    {
+      "path": ".cache/strategy-executor-validation/installed-cli-final-before-receipt-field-fix.mjs",
+      "sha256": "8a366934b0cfe55467e4239e17bb2dd87c095f7966427d95d64eaad9f1680325"
+    },
+    {
+      "path": ".cache/strategy-executor-validation/installed-cli-recheck.mjs",
+      "sha256": "0d40f01127e1fdea467c3800135a8bb595436a8fed7a3039ee699f12378033b3"
+    },
+    {
+      "path": ".cache/strategy-executor-checked/installed/adapter.mjs",
+      "sha256": "315e9d56398f3a916e5c4ca3c30c2d6757c94bcb39e868c82321b04d484fd13e"
+    }
+  ]
+}

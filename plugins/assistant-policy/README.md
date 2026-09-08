@@ -109,6 +109,7 @@ budgets:
 
 - `evaluate(request)`：只评估，不写审计；紧急停止优先于所有规则。
 - `getEmergencyStop()`：只读返回当前硬门状态，不做 authorize、不写审计且不消耗预算；Delivery 等最终授权方可在提交外部批准前再次复核。
+- `inspectHostConfiguration()`：仅供受信 Host 的只读快照，返回当前 rules、tool default effect、budgets 与 auto-review 配置，用于将实际装载的完整 Policy 配置和冻结计划核对；不暴露账本、审计、维护配置或任何授权凭据，也不授予调用者额外权限。
 - `authorize(request, options)`：执行预算检查并追加脱敏审计。
 - `reserve` / `finalize` / `release`：策略配置约束下的可变成本预算。
 - `propose` / `decideProposal`：绑定 principal、版本 CAS、TTL 与幂等键的持久审批提案。所有提案永久保存 diff SHA-256；只有携带 `dispatch` 的 pending 提案会临时保存 immutable diff 原文，路由与提案在同一个 SQLite 事务中落盘。路由 principal 必须与提案 principal 完全一致、workspace 必须为绝对路径。无路由提案和 v1 legacy 提案只凭 hash 安全重放，绝不会在重放时补建路由。
