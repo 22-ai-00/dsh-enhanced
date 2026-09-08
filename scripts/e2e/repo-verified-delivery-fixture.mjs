@@ -41,7 +41,7 @@ export function apply(ctx) {
   }
 }
 
-export async function configureVerifiedDelivery(home, patchPath, env) {
+export async function prepareRepositoryFixture(home, patchPath, env) {
   const patch = parseDocument(await readFile(patchPath, 'utf8'))
   const find = (node, id) => {
     if (isMap(node)) {
@@ -55,14 +55,7 @@ export async function configureVerifiedDelivery(home, patchPath, env) {
     if (!row.has('config')) row.set('config', patch.createNode({}))
     return row.get('config', true)
   }
-  const policy = config('dsh-enhanced-personal-assistant').get('assistantPolicy', true)
   const isolation = config('dsh-enhanced-assistant-isolation').toJSON().grants[0]
-  const wake = config('dsh-enhanced-assistant-goals').toJSON().backgroundWake
-  const rules = policy.get('rules', true)
-  const principalId = rules.toJSON().find(rule => rule.subject?.kind === 'agent' && rule.subject.principal)?.subject.principal
-  if (!principalId || !wake) throw new Error('fixture owner route missing')
-  const replyResource = rules.toJSON().find(rule => rule.id === `${wake.ownerRouteId}-reply`)?.resource
-  if (replyResource?.kind !== 'message' || !replyResource.id) throw new Error('fixture notification binding missing')
   const secretDirectory = join(home, 'repo-fixture-secrets')
   await mkdir(secretDirectory, { mode: 0o700 })
   const secretPath = join(secretDirectory, 'github')
@@ -75,23 +68,10 @@ export async function configureVerifiedDelivery(home, patchPath, env) {
   if (secret !== 'non-production-github-fixture') throw new Error('fixture credential mismatch')
   config('dsh-enhanced-credentials-keychain').set('handles', patch.createNode([{ id: 'repo-fixture', provider: 'linux-protected-file', path: secretPath,
     consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30000 }]))
-  const actions = config('dsh-enhanced-assistant-actions')
-  actions.set('stateRoot', join(home, 'assistant-actions'))
-  actions.set('grants', patch.createNode([{ id: 'repo-delivery', revision: 1,
-    principalDigest: isolation.principalDigest, principalRecordId: isolation.principalRecordId, principalVersion: isolation.principalVersion,
-    workspace: isolation.workspace, agentPreset: isolation.agentPreset, repository: 'fixture/orders', branch: 'automation/fix', paths: ['summarize.mjs'],
-    credentialHandle: 'repo-fixture', expiresAt: Date.now() + 300000, maxActions: 8, maxTotalBytes: 1048576,
-    repoWorkflow: { baseBranch: 'main', allowBranchCreate: false, allowPullRequest: true },
-    verifiedDelivery: { ownerRouteId: wake.ownerRouteId, budgetId: wake.budgetId } }]))
-  const agent = { kind: 'agent', id: isolation.agentPreset, workspace: isolation.workspace, principal: principalId }
-  for (const rule of [
-    ...['action_github_grants', 'action_github_inspect', 'action_github_deliver', 'action_github_delivery_status', 'action:github:repo-delivery'].map((id, i) => ({ id: `repo-fixture-agent-${i}`, effect: 'allow', subject: agent, actions: ['execute'], resource: { kind: 'tool', id } })),
-    { id: 'repo-fixture-background', effect: 'allow', subject: { ...agent, kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['execute'], resource: { kind: 'tool', id: 'action:github:repo-delivery' } },
-    { id: 'repo-fixture-credential', effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, actions: ['credential.use'], resource: { kind: 'credential', id: 'repo-fixture' } },
-    { id: 'repo-fixture-automation', effect: 'allow', subject: { ...agent, kind: 'background', id: '*' }, actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: 'verified-delivery-*' } },
-    { id: 'repo-fixture-notification', effect: 'allow', subject: { ...agent, kind: 'background', id: 'assistant-actions-verified-delivery/v1' }, actions: ['send'], resource: replyResource, context: { initiators: ['background'] } },
-  ]) rules.add(patch.createNode(rule))
   patch.contents.add(patch.createNode({ insert: [{ id: name, name: fileURLToPath(import.meta.url) }] }))
   env.DSH_REPO_DELIVERY_FIXTURE_LOG = join(home, 'github-fixture.jsonl')
   await writeFile(patchPath, String(patch), { mode: 0o600 })
+  return { repository: 'fixture/orders', baseBranch: 'main', branch: 'automation/fix', paths: ['summarize.mjs'],
+    credentialHandle: 'repo-fixture', expiresAt: Math.min(isolation.expiresAt, Date.now() + 420000),
+    maxActions: 8, maxTotalBytes: 1048576, openPullRequest: true }
 }

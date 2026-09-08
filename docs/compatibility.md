@@ -40,6 +40,8 @@ DSH 尚处于预发布阶段，插件机制可能发生破坏性变化。`pnpm-w
 
 Actions 的可选 `verifiedDelivery` 模式要求同一发行集合中的 Goals 与 Automations Host 服务，以及 `dsh-goal@0.1.2-rc.1` 的目标完成事件。它消费 Goals 的 Host-only 已验收产物快照，再通过已有 Automations Host executor 执行；声明可选 peer 不会自动启用 bundle。新增交付意图数据库与旧 Actions 动作账本共同保留重启去重；启用此模式的 grant 不能交给不识别该配置的旧 Actions writer，升级时应停止旧 Host。
 
+Web Owner 的 v2 `repositoryDelivery` 设置消费 Actions 的公开、无副作用 `validateActionConfig`，缺少该接口时提示安装匹配发行集合。该校验不会启动 Actions Host 或读取凭据；已有 Keychain provider 继续由其运行时校验和租约接口执行。正式 CLI 在配置锁内和提交前重新读取 DSH 的完整有效配置，拒绝将观察到已变化的配置覆盖回去。
+
 升级基线时：
 
 1. 阅读上游插件打包、profile、Cordis 生命周期和相关 subsystem 文档。

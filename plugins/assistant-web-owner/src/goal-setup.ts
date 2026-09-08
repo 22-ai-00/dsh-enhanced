@@ -42,7 +42,8 @@ export async function listGoalAdmissionSessions(input: WebOwnerSetupInput, effec
   return await idleOwnerSessions(input, prepared.databasePath, prepared.principal)
 }
 
-export async function configureGoalAdmission(input: WebOwnerSetupInput, effectiveSource: string, taskPath: string, sessionId?: string): Promise<{ path: string; admissionId: string; sessionId: string }> {
+export async function configureGoalAdmission(input: WebOwnerSetupInput, effectiveSource: string, taskPath: string, sessionId?: string,
+  readEffectiveSource?: () => Promise<string>): Promise<{ path: string; admissionId: string; sessionId: string; repositoryDelivery?: { repository: string; branch: string; paths: string[] } }> {
   const inspectActiveWebOwnerBindingLocally = Delivery.inspectActiveWebOwnerBindingLocally
   if (typeof inspectActiveWebOwnerBindingLocally !== 'function') fail('upgrade assistant-delivery with the matching autonomy bundle set; readonly owner snapshot API is unavailable')
   if (input.isolation) fail('initial isolation setup and goal setup are separate operations')
@@ -72,6 +73,7 @@ export async function configureGoalAdmission(input: WebOwnerSetupInput, effectiv
   try { await mkdir(lock, { mode: 0o700 }) } catch { fail('another setup holds the profile lock') }
   const path = join(directory, 'cordis.patch.yml'); const temporary = `${path}.${randomUUID()}.tmp`
   try {
+    if (readEffectiveSource && await readEffectiveSource() !== effectiveSource) fail('effective configuration changed before setup; no patch committed')
     const before = await patch(path)
     const settingsSource = await defaultModelSettings(input.dshHome)
     const prepared = prepareWebOwnerProfile(input, before, effectiveSource)
@@ -88,14 +90,16 @@ export async function configureGoalAdmission(input: WebOwnerSetupInput, effectiv
     const plan = prepareGoalAdmission(input, prepared.patch, effectiveSource, taskSource, observed.snapshot, Date.now(), settingsSource)
     const recheck = async () => {
       if (await patch(path) !== before || !isDeepStrictEqual(await defaultModelSettings(input.dshHome), settingsSource)
+        || readEffectiveSource && await readEffectiveSource() !== effectiveSource
         || !isDeepStrictEqual(inspectActiveWebOwnerBindingLocally(query), observed) || inspectGrant().status !== 'available') fail('profile, session or grant changed during setup; no patch committed')
     }
-    if (plan.patch === before) { await recheck(); return { path, admissionId: plan.admissionId, sessionId: selectedSessionId } }
+    const result = { path, admissionId: plan.admissionId, sessionId: selectedSessionId, ...(plan.repositoryDelivery ? { repositoryDelivery: plan.repositoryDelivery } : {}) }
+    if (plan.patch === before) { await recheck(); return result }
     await writeFile(temporary, plan.patch, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
     await recheck()
     await rename(temporary, path)
     // A DB snapshot and file rename are not one transaction. Runtime admission rechecks authority.
     if (!isDeepStrictEqual(inspectActiveWebOwnerBindingLocally(query), observed) || inspectGrant().status !== 'available') fail('patch written, but authority changed; runtime readiness is not established')
-    return { path, admissionId: plan.admissionId, sessionId: selectedSessionId }
+    return result
   } finally { await rm(temporary, { force: true }); await rm(lock, { recursive: true, force: true }) }
 }

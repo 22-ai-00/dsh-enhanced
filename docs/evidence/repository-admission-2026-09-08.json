@@ -1,0 +1,127 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "92abccf8b054a1ac9626ed77e1a7cdf9ae3de52b",
+  "status": "formal-repository-admission-validated-with-github-transport-fixture",
+  "completeWorkPackage": false,
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "path": "/tmp/dsh-repository-setup-final-check.log",
+    "sha256": "43ff1da2bee6df70ba7293861b86a789221dcc3620d416d72bc2bc5a8da56c3d",
+    "files": 335,
+    "tests": 4040,
+    "packs": 33,
+    "skipped": false
+  },
+  "realRun": {
+    "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_REPO_VERIFIED_DELIVERY=fixture pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs",
+    "exitCode": 0,
+    "result": "1 passed (2.9m)",
+    "path": "/tmp/dsh-repository-setup-real.log",
+    "sha256": "698aa7aa9fa40e6f67552f59f5711520b41a61213d308489782a8d5aadbecae8",
+    "route": {
+      "provider": "codex-subscription",
+      "model": "gpt-5.6-terra",
+      "api": "direct-responses"
+    },
+    "dispatches": 11,
+    "settledWithUsage": 10,
+    "auxiliaryFailures": [
+      {
+        "event": "settled",
+        "call": 2,
+        "drained": true,
+        "finish": "error",
+        "usage": null
+      }
+    ],
+    "formalRepositorySetup": true,
+    "fixtureWritesActionsGrantsOrPolicy": false,
+    "goalPhase": "complete",
+    "acceptance": [
+      {
+        "kind": "goal-step",
+        "status": "achieved"
+      },
+      {
+        "kind": "goal-outcome",
+        "status": "achieved"
+      }
+    ],
+    "delivery": [
+      {
+        "id": "verified-delivery-2e94b7d68eb63c99523c1cc708024fe00a5778edee2c8ec74a99bac28eb5d508",
+        "state": "succeeded",
+        "result": "{\"commit\":{\"actionId\":\"6f2bbb43-fbf4-43d7-ad0e-04f3d10ca138\",\"status\":\"succeeded\",\"commitOid\":\"6edc4b0828dbe62af5794af363046a3d5954901c\"},\"pullRequest\":{\"actionId\":\"a67a9626-8f91-4a41-a4b8-ecf4269f0ed4\",\"status\":\"succeeded\",\"pullRequestNumber\":17}}"
+      }
+    ],
+    "notificationCount": 1,
+    "notificationStatus": "accepted",
+    "visibleBeforeAndAfterRestart": true,
+    "duplicateCommitOrNotice": false,
+    "proof": {
+      "path": "/tmp/dsh-repository-setup-real-proof/repo-autonomy-real-formal--92374-ry-isolated-repository-task/proof.json",
+      "sha256": "0400fd0768af94fc377d41c50cd893352ad1a226340bfd488944a51ac6ffbd2a"
+    },
+    "artifacts": [
+      {
+        "path": "/tmp/dsh-repository-setup-real-proof/repo-autonomy-real-formal--92374-ry-isolated-repository-task/goal-setup.log",
+        "sha256": "f37f6133c9a326f8b86c5dce20cc688dd2ff80b015fb63a35e6746a0529cb89c"
+      },
+      {
+        "path": "/tmp/dsh-repository-setup-real-proof/repo-autonomy-real-formal--92374-ry-isolated-repository-task/tool-events.json",
+        "sha256": "aae9de06767b7e65f2f1afdaf0e013eccccdf3fc334bbd1f2d7ffabc13c1c35b"
+      },
+      {
+        "path": "/tmp/dsh-repository-setup-real-proof/repo-autonomy-real-formal--92374-ry-isolated-repository-task/github-fixture.jsonl",
+        "sha256": "1c9e3e953e79cfed5328954b81d232cb2c2ef807658fb1c8e571c91df0748736"
+      },
+      {
+        "path": "/tmp/dsh-repository-setup-real-proof/repo-autonomy-real-formal--92374-ry-isolated-repository-task/verifier-controls.json",
+        "sha256": "461c8dbd5bd091883b5ea6f7c03bca0897439d11cc7c01b2e3023eed18cae1a1"
+      }
+    ]
+  },
+  "configurationTests": {
+    "command": "pnpm --filter @dsh-enhanced/assistant-web-owner exec vitest run tests/goal-admission.spec.ts",
+    "exitCode": 0,
+    "tests": 19,
+    "path": "/tmp/dsh-repository-admission-targeted.log",
+    "sha256": "d6595e7992addcc3e28334b62507082bb2ee7a11fb6aa5e0874943c521bde6be",
+    "coverage": [
+      "exact compiled Policy decisions",
+      "real owner and session binding",
+      "same input preserves patch and grants",
+      "foreign owner, path, deadline and conflicting config rejection",
+      "tagged handles and managed lists rejected",
+      "sufficient lease and action count required",
+      "effective configuration changes reject writes",
+      "Keychain handles are not copied into a new target row",
+      "environment, macOS Keychain and Linux Secret Service configuration accepted without path"
+    ]
+  },
+  "postBrowserChanges": [
+    "Removed an incorrect credential path-field requirement for providers that do not use filesystem paths. Three provider configuration regressions and final full check passed; the browser run used the unchanged linux-protected-file path."
+  ],
+  "limitations": [
+    "GitHub transport is an explicit fixture; no live GitHub credential, PR, CI, review or repository event was validated.",
+    "Non-file credential providers were tested for configuration compatibility, not live credential access.",
+    "The current whole-goal acceptance precedes PR creation; continued CI/review work in the same Goal requires a separately authorized intermediate-step delivery lifecycle.",
+    "File locks and repeated effective-config snapshots do not establish a cross-process transaction across all configuration files and databases.",
+    "One bounded task is not the complete 18-work-package objective or general model reliability.",
+    "No token/USD hard cap, autonomous skill gain, or ChatGPT web review claim."
+  ],
+  "sourceSha256": {
+    "plugins/assistant-actions/src/index.ts": "107cf93f1932575ff7180c0ccca7df3a989f57b18623e7346fab82be52b73a0d",
+    "plugins/assistant-web-owner/README.md": "3091b8057f136af3ac17afaa61b385c07885d5d4d73df736ff92158c8270fc5d",
+    "plugins/assistant-web-owner/package.json": "bd967c958a84f87fc5868637be76d531436e4e598df8872f1e5224e32ea0690c",
+    "plugins/assistant-web-owner/src/goal-admission.ts": "de5a3ff1dd3605a33660c2ee4e03e5f25f27c4651c1376118be633ff17c6f5d3",
+    "plugins/assistant-web-owner/src/goal-setup.ts": "433e8dc4f8db0b3eb2585bcb4e1c5bcd2dcd163739de139c172cdeb3c9e03844",
+    "plugins/assistant-web-owner/src/setup.ts": "1ae2f46b7055354277c7bb6f044ca83575d26926110ec5e1afa9c13c207adbbe",
+    "plugins/assistant-web-owner/tests/goal-admission.spec.ts": "de95ce4ca5da9be960b6f3de6b13f5d89d5b413efcc59a5b086116df4fe965c0",
+    "pnpm-lock.yaml": "cefc4a0f9cb1ad1d162319de822e1f705dbb51788bc99817eab488832cad970a",
+    "scripts/e2e/repo-autonomy-real.spec.mjs": "4d6277186ae2ad9fda8ee9cf1c646efc0224ed5fa58e3bf5c2bae2b6cb2027ab",
+    "scripts/e2e/repo-verified-delivery-fixture.mjs": "14742434583202c3a56842d7e3509d85cc7aebddd1b166d1246dd608f65efa22"
+  }
+}

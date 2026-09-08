@@ -4,6 +4,7 @@ import { version } from './version.js'
 export const name = 'dsh-enhanced-assistant-actions'
 export const inject = ['assistantPolicy', 'credentialsKeychain', 'assistantDelivery']
 export { AssistantActionsService, Config, version }
+export { validateConfig as validateActionConfig } from './config.js'
 export type * from './types.js'
 export function apply(ctx: Context, config: Config = {}): void { new AssistantActionsService(ctx, config) }
 // Loader unwraps the default export; preserve the trusted plugin identity there.

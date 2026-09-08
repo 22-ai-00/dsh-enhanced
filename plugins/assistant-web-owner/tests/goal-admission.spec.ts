@@ -1,8 +1,8 @@
 import { mkdtemp, readFile, rm, mkdir, writeFile, chmod } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, describe, expect, test } from 'vitest'
-import { parseDocument, isSeq, isMap } from 'yaml'
+import { afterEach, describe, expect, it, test } from 'vitest'
+import { parseDocument, isSeq, isMap, isScalar, type YAMLMap } from 'yaml'
 import { DeliveryStore } from '../../assistant-delivery/lib/store.js'
 import { IsolationLedger } from '../../assistant-isolation/lib/ledger.js'
 import { compilePolicy, evaluatePolicy } from '../../assistant-policy/lib/evaluator.js'
@@ -58,6 +58,48 @@ function task(overrides: Record<string, unknown> = {}): string {
 }
 function config(source: string, id: string): Record<string, any> {
   return (parseDocument(source).toJS() as Array<{ id: string; config: Record<string, any> }>).find(row => row.id === id)!.config
+}
+function yamlId(row: unknown): string | undefined {
+  const id = isMap(row) ? row.get('id', true) : undefined
+  return isScalar(id) && typeof id.value === 'string' ? id.value : undefined
+}
+const repositoryRoute = { provider: 'super-relay', model: 'relay-v2' }
+function repositoryTask(repositoryDelivery: Record<string, unknown> = {}): string {
+  const value = JSON.parse(task({ version: 2, route: repositoryRoute, model: undefined,
+    executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [repositoryRoute] } })) as Record<string, unknown>
+  delete value.wake
+  value.repositoryDelivery = { repository: 'octo/example', baseBranch: 'main', branch: 'automation/result', paths: ['result.txt'], credentialHandle: 'github', expiresAt: Date.now() + 300_000, maxActions: 3, maxTotalBytes: 4096, openPullRequest: true, ...repositoryDelivery }
+  return JSON.stringify(value)
+}
+function repositoryEffective(source: string, handles: unknown[] = [{ id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }]): string {
+  const rows = parseDocument(source).toJS() as Array<{ id: string; config: Record<string, unknown> }>
+  rows.push({ id: 'agent-default-model', config: repositoryRoute })
+  const keychain = rows.find(row => row.id === 'dsh-enhanced-credentials-keychain')
+  if (!keychain) throw new Error('fixture expected keychain')
+  keychain.config.handles = handles
+  return JSON.stringify(rows)
+}
+function repositorySource(source: string, handles: unknown[] = [{ id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }]): string {
+  const document = parseDocument(source)
+  if (!isSeq(document.contents)) throw new Error('fixture expected source rows')
+  let keychain: YAMLMap | undefined
+  for (const row of document.contents.items) {
+    const id = isMap(row) ? row.get('id', true) : undefined
+    if (isMap(row) && isScalar(id) && typeof id.value === 'string' && id.value === 'dsh-enhanced-credentials-keychain') { keychain = row; break }
+  }
+  if (!isMap(keychain)) throw new Error('fixture expected keychain')
+  const keychainConfig = keychain.get('config', true)
+  if (!isMap(keychainConfig)) throw new Error('fixture expected keychain config')
+  keychainConfig.set('handles', document.createNode(handles))
+  return document.toString()
+}
+function withoutKeychain(source: string): string {
+  const document = parseDocument(source)
+  if (!isSeq(document.contents)) throw new Error('fixture expected source rows')
+  const index = document.contents.items.findIndex(row => yamlId(row) === 'dsh-enhanced-credentials-keychain')
+  if (index < 0) throw new Error('fixture expected keychain')
+  document.contents.items.splice(index, 1)
+  return document.toString()
 }
 
 describe('goal admission planning', () => {
@@ -115,6 +157,75 @@ llm-pi-ai:
       executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'relay-v2' }] } }))).toThrow(/budget route/)
     expect(() => prepareGoalAdmission(f.input, f.prepared.patch, configured, task({ version: 2, route: { provider: 'super-relay', model: 'wrong' }, model: undefined,
       executionBudget: { mode: 'calls', modelCalls: 3, toolCalls: 3, durationMs: 120_000, maxOutputTokensPerCall: 8192, routes: [{ provider: 'super-relay', model: 'wrong' }] } }), f.snapshot)).toThrow(/configured default/)
+  })
+
+  test('v2 repository delivery derives one bounded Actions grant, a finite wake, and exact policy permissions', async () => {
+    const now = Date.now(); const f = await fixture(now); const effective = repositoryEffective(f.effective); const source = withoutKeychain(f.prepared.patch)
+    const plan = prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)
+    expect(plan.repositoryDelivery).toEqual({ repository: 'octo/example', branch: 'automation/result', paths: ['result.txt'] })
+    expect((parseDocument(plan.patch).toJS() as Array<{ id: string }>).some(row => row.id === 'dsh-enhanced-credentials-keychain')).toBe(false)
+    expect(config(plan.patch, 'dsh-enhanced-assistant-goals').backgroundWake).toMatchObject({ ownerRouteId: plan.admissionId, budgetId: `${plan.admissionId}-runs`, maxDelayMs: 60_000, runTimeoutMs: 60_000 })
+    const grant = config(plan.patch, 'dsh-enhanced-assistant-actions').grants.find((entry: { id: string }) => entry.id === `${plan.admissionId}-repository`)
+    expect(grant).toMatchObject({ revision: 1, principalRecordId: f.snapshot.owner.id, principalVersion: f.snapshot.owner.version, workspace: f.input.workspace, agentPreset: f.input.preset,
+      repository: 'octo/example', branch: 'automation/result', paths: ['result.txt'], credentialHandle: 'github', maxActions: 3, maxTotalBytes: 4096,
+      repoWorkflow: { baseBranch: 'main', allowBranchCreate: false, allowPullRequest: true }, verifiedDelivery: { ownerRouteId: plan.admissionId, budgetId: `${plan.admissionId}-runs` } })
+    const rules = config(plan.patch, 'dsh-enhanced-personal-assistant').assistantPolicy.rules as PolicyRule[]
+    const policy = compilePolicy(rules)
+    const agent = { kind: 'agent' as const, id: f.input.preset, workspace: f.input.workspace, principal: 'web/web/local/operator' }
+    for (const initiator of ['external', 'background'] as const) {
+      for (const id of ['action_github_grants', 'action_github_inspect', 'action_github_deliver', 'action_github_delivery_status', `action:github:${grant.id}`]) {
+        expect(evaluatePolicy(policy, { subject: agent, action: 'execute', resource: { kind: 'tool', id }, context: { initiator } }).effect).toBe('allow')
+      }
+    }
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions', workspace: f.input.workspace, principal: 'web/web/local/operator' }, action: 'execute', resource: { kind: 'tool', id: `action:github:${grant.id}` }, context: { initiator: 'background' } }).effect).toBe('allow')
+    expect(evaluatePolicy(policy, { subject: { kind: 'background', id: 'dsh-enhanced-assistant-actions' }, action: 'credential.use', resource: { kind: 'credential', id: 'github' }, context: { initiator: 'background' } }).effect).toBe('allow')
+    expect(rules.find(rule => rule.id === `${plan.admissionId}-repository-credential`)?.subject).toEqual({ kind: 'background', id: 'dsh-enhanced-assistant-actions' })
+  })
+
+  it.each([
+    { provider: 'environment', environmentName: 'GITHUB_TOKEN' },
+    { provider: 'macos-keychain', service: 'dsh/github', account: 'operator' },
+    { provider: 'linux-secret-service', service: 'dsh/github', account: 'operator' },
+  ])('accepts an existing literal $provider credential handle without copying it to the target', async handleShape => {
+    const now = Date.now(); const f = await fixture(now)
+    const handle = { id: 'github', ...handleShape, consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30_000 }
+    const plan = prepareGoalAdmission(f.input, withoutKeychain(f.prepared.patch), repositoryEffective(f.effective, [handle]), repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)
+    expect((parseDocument(plan.patch).toJS() as Array<{ id: string }>).some(row => row.id === 'dsh-enhanced-credentials-keychain')).toBe(false)
+    expect(config(plan.patch, 'dsh-enhanced-assistant-actions').grants).toEqual(expect.arrayContaining([expect.objectContaining({ credentialHandle: 'github' })]))
+  })
+
+  test('repository delivery rejects absent credentials, foreign owners, paths, deadlines, and conflicting reruns', async () => {
+    const now = Date.now(); const f = await fixture(now); const effective = repositoryEffective(f.effective); const source = withoutKeychain(f.prepared.patch)
+    expect(() => parseGoalAdmissionTask(repositoryTask({ paths: ['other.txt'] }))).toThrow(/repository delivery/)
+    expect(() => parseGoalAdmissionTask(repositoryTask({ maxActions: 2 }))).toThrow(/task limit/)
+    expect(() => parseGoalAdmissionTask(repositoryTask({ openPullRequest: false, maxActions: 1 }))).toThrow(/task limit/)
+    expect(() => parseGoalAdmissionTask(task({ repositoryDelivery: {} }))).toThrow(/fields|repository delivery/)
+    expect(() => prepareGoalAdmission(f.input, f.prepared.patch, repositoryEffective(f.effective, []), repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)).toThrow(/credential handle/)
+    expect(() => prepareGoalAdmission(f.input, repositorySource(f.prepared.patch, [{ id: 'github', provider: 'linux-protected-file', path: '/tmp/github-token', consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 29_999 }]), effective, repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)).toThrow(/credential handle/)
+    expect(() => prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: now + 120_000 }), f.snapshot, now)).toThrow(/deadline/)
+    expect(() => prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: now + 180_000 }), f.snapshot, now)).toThrow(/deadline/)
+    expect(() => prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: f.profile.grant.expiresAt + 1 }), f.snapshot, now)).toThrow(/deadline/)
+    expect(() => prepareGoalAdmission(f.input, source, effective, repositoryTask({ expiresAt: now + 300_000 }), { ...f.snapshot, owner: { ...f.snapshot.owner, version: f.snapshot.owner.version + 1 } }, now)).toThrow(/owner/)
+    expect(() => prepareGoalAdmission(f.input, repositorySource(f.prepared.patch).replace('id: github', 'id: !!str github'), effective, repositoryTask({ expiresAt: now + 300_000 }), f.snapshot, now)).toThrow(/tagged credential handles/)
+    const input = repositoryTask({ expiresAt: now + 300_000 })
+    const first = prepareGoalAdmission(f.input, source, effective, input, f.snapshot, now)
+    const second = prepareGoalAdmission(f.input, first.patch, effective, input, f.snapshot, now)
+    expect(second.patch).toBe(first.patch)
+    const conflicting = parseDocument(first.patch)
+    if (!isSeq(conflicting.contents)) throw new Error('fixture expected rows')
+    const personal = conflicting.contents.items.find(row => yamlId(row) === 'dsh-enhanced-personal-assistant')
+    if (!isMap(personal)) throw new Error('fixture expected personal assistant')
+    const personalConfig = personal.get('config', true)
+    if (!isMap(personalConfig)) throw new Error('fixture expected personal config')
+    const assistantPolicy = personalConfig.get('assistantPolicy', true)
+    const rules = isMap(assistantPolicy) ? assistantPolicy.get('rules', true) : undefined
+    if (!isSeq(rules)) throw new Error('fixture expected rules')
+    const agentRule = rules.items.find(rule => yamlId(rule) === `${first.admissionId}-repository-agent`)
+    const resource = isMap(agentRule) ? agentRule.get('resource', true) : undefined
+    if (!isMap(resource)) throw new Error('fixture expected repository rule')
+    resource.set('id', 'action:github:other')
+    expect(() => prepareGoalAdmission(f.input, conflicting.toString(), effective, input, f.snapshot, now)).toThrow(/existing rules entry differs/)
+    expect(() => prepareGoalAdmission(f.input, first.patch.replace(`id: ${first.admissionId}-repository-agent`, `id: !!str ${first.admissionId}-repository-agent`), effective, input, f.snapshot, now)).toThrow(/tagged rules/)
   })
 
   test('v2 is not bound to the expired DeepSeek contract while v1 remains protected', async () => {
@@ -208,6 +319,8 @@ llm-pi-ai:
     const f = await fixture(); const path = join(f.input.dshHome, 'task.json')
     await writeFile(path, task(), { mode: 0o600 })
     const database = await readFile(f.prepared.databasePath); const isolation = await readFile(join(f.profile.stateRoot, 'ledger.sqlite'))
+    await expect(configureGoalAdmission(f.input, f.effective, path, 'session-a', async () => `${f.effective}\n# changed`)).rejects.toThrow(/effective configuration changed/)
+    expect(await readFile(f.patchPath, 'utf8')).toBe(f.prepared.patch)
     await configureGoalAdmission(f.input, f.effective, path, 'session-a')
     const configured = await readFile(f.patchPath, 'utf8')
     await configureGoalAdmission(f.input, configured, path, 'session-a')
