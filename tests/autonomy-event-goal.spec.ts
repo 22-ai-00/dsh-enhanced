@@ -71,7 +71,7 @@ async function nativeGoalPlugins() {
 
 async function assistantGoalsPlugin() {
   return await import(pathToFileURL(join(process.cwd(), 'plugins/assistant-goals/lib/index.js')).href) as {
-    AssistantGoalsService: new (ctx: Context, config: object) => unknown
+    default: { name: string; apply: (ctx: Context, config: object) => void }
   }
 }
 
@@ -148,7 +148,7 @@ async function open(root: string, options: { provision?: boolean; model?: EventG
   const verificationProfile = (id: string, taskKind: 'goal-step' | 'goal-outcome', profileObjective = objective) => ({ id, version: 1, scope: { workspace, preset: 'primary' }, owner: { principalRecordId: owner.id, principalVersion: owner.version }, taskKind, objective: profileObjective, validityMs: 60_000, bounds: { maxDurationMs: 1_000, maxEvidenceBytes: 4_096 }, criteria: [{ id: 'report', kind: 'document-citations' as const, authority: { id: 'report-source', digest }, artifactPath: 'report.md', requiredText: ['Event goal report verified'], quotes: [] }] })
   await ctx.plugin(AssistantVerifierService, { databasePath: join(root, 'verification.sqlite'), tickIntervalMs: 0, requireAcceptance: false, authorities: [authority], profiles: [verificationProfile('event-goal-step', 'goal-step'), verificationProfile('event-goal-outcome', 'goal-outcome'), verificationProfile('event-goal-step-revised', 'goal-step', revisedObjective), verificationProfile('event-goal-outcome-revised', 'goal-outcome', revisedObjective)] })
   const goals = await assistantGoalsPlugin()
-  const goalsFiber = await ctx.plugin(goals.AssistantGoalsService as never, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true, eventWaits: true, stepMaxDurationMs: 10_000, executionBudget: { modelCalls: 5, toolCalls: 5, inputTokens: 500, outputTokens: 500, durationMs: 60_000, maxOutputTokensPerCall: 128 }, backgroundWake: { ownerRouteId: 'event-goal-owner', budgetId: 'event-wake-runs', maxDelayMs: 30_000, runTimeoutMs: 5_000 } })
+  const goalsFiber = await ctx.plugin(goals.default as never, { databasePath: join(root, 'goals.sqlite'), verifyNativeRounds: true, verifyGoalOutcome: true, eventWaits: true, preauthorizedSchedule: true, stepMaxDurationMs: 10_000, executionBudget: { modelCalls: 5, toolCalls: 5, inputTokens: 500, outputTokens: 500, durationMs: 60_000, maxOutputTokensPerCall: 128 }, backgroundWake: { ownerRouteId: 'event-goal-owner', budgetId: 'event-wake-runs', maxDelayMs: 30_000, runTimeoutMs: 5_000 } })
   const assistantGoals = (ctx as Context & { assistantGoals: { registerBudgetMeter: (meter: object) => void } }).assistantGoals
   assistantGoals.registerBudgetMeter({ id: 'event-goal-meter', provider: 'event-goal-model', model: 'fixture', inputTokenUpperBound: () => 10, inputUsdMicrosPerMillionTokens: null, outputUsdMicrosPerMillionTokens: null })
   ctx.assistantAutomations.reconcileSystem({ owner: 'event-test', automationId: 'file-report', idempotencyKey: 'file-report-v1', definition: { name: 'Normal file delivery', prompt: 'This ordinary automation remains enabled.', schedule: { kind: 'at', at: '2099-01-01T00:00:00.000Z' }, workspace, agentPreset: 'primary', provider: 'event-goal-model', model: 'fixture', allowedTools: [], timeoutMs: 10_000, maxOutputTokens: 128, maxToolCalls: 0, misfire: { kind: 'latest' }, overlap: 'skip', retrySafety: 'never', maxRetries: 0, principal: principalId, deliveryBindingId: binding.id, budgetId: 'event-wake-runs', budgetAmount: 1 } })

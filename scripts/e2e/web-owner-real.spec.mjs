@@ -5,76 +5,13 @@ import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { parseDocument, isMap, isSeq } from 'yaml'
-import { isExperimentToolAllowed } from './web-owner-real-guard.mjs'
+import { parseDocument } from 'yaml'
+import { objective, criteria, setConfig, contracts, jobs, waitForVerifiedGoal } from './web-owner-real-helpers.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
-const objective = 'Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.'
-const criteria = [
-  { id: 'two-currencies', stdin: '[{"currency":"USD","amountCents":100},{"currency":"EUR","amountCents":250},{"currency":"USD","amountCents":75}]\n', expectedStdout: '{"EUR":250,"USD":175}\n' },
-  { id: 'cancelled-and-negative', stdin: '[{"currency":"USD","amountCents":100},{"currency":"USD","amountCents":50,"status":"cancelled"},{"currency":"EUR","amountCents":-25},{"currency":"EUR","amountCents":5}]\n', expectedStdout: '{"EUR":-20,"USD":100}\n' },
-  { id: 'empty', stdin: '[]\n', expectedStdout: '{}\n' },
-]
-function patchRow(doc, id, name) { if (!isSeq(doc.contents)) throw new Error('profile patch is not a sequence'); let row = doc.contents.items.find(item => isMap(item) && item.get('id') === id); if (!row) { row = doc.createNode({ id, name }); doc.contents.add(row) } if (!isMap(row)) throw new Error(`invalid patch row ${id}`); return row }
-function setConfig(doc, id, name, config) {
-  const row = patchRow(doc, id, name)
-  if (!row.has('config')) row.set('config', doc.createNode({}))
-  const destination = row.get('config', true)
-  if (!isMap(destination)) throw new Error('profile config must be a mapping')
-  for (const [field, value] of Object.entries(config)) destination.set(field, doc.createNode(value))
-}
-function contracts(path, kind) { return query(path, 'SELECT id, payload FROM acceptance_contracts WHERE task_kind = ? ORDER BY rowid ASC', kind).map(row => ({ ...row, contract: JSON.parse(row.payload) })) }
-function jobs(path, ids) { return ids.map(id => query(path, 'SELECT state, execution, receipt, reason FROM acceptance_jobs WHERE contract_id = ?', id)[0]).map(row => ({ ...row, execution: row.execution ? JSON.parse(row.execution) : null, receipt: row.receipt ? JSON.parse(row.receipt) : null })) }
-async function waitForVerifiedGoal(page, goalsPath, verifierPath, deliveryPath, approved, frames, sessionId, workspace) {
-  const deadline = Date.now() + 300_000
-  while (Date.now() < deadline) {
-    const failedInput = query(deliveryPath, "SELECT failure_code FROM inbox_messages WHERE status = 'dead_letter'")[0]
-    if (failedInput) throw new Error(`Real-model foreground input failed: ${failedInput.failure_code}`)
-    const goal = existsSync(goalsPath) ? query(goalsPath, 'SELECT * FROM goal_records')[0] : undefined
-    if (goal && existsSync(verifierPath)) {
-      const outcomes = contracts(verifierPath, 'goal-outcome')
-      const outcomeJob = outcomes.length ? jobs(verifierPath, outcomes.map(row => row.id)).at(-1) : undefined
-      const receipt = outcomeJob?.receipt
-      if (JSON.parse(goal.native_json).phase === 'paused' && outcomeJob?.state === 'needs-attention') throw new Error('Native goal paused with an unresolved independent outcome; inspect the experiment evidence')
-      if (receipt?.objectiveStatus === 'achieved' && JSON.parse(goal.native_json).phase === 'complete') return
-    }
-    const button = page.getByRole('button', { name: 'Allow once', exact: true })
-    if (await button.count()) {
-      const pending = new Map()
-      for (const frame of frames) {
-        const value = frame.type === 'item' ? frame.value : undefined
-        if (value?.type === 'waterfall' && value.event === 'approval/request') pending.set(value.eventId, value)
-        if (value?.type === 'cancel') pending.delete(value.eventId)
-      }
-      const requests = [...pending.values()].filter(value => !approved.some(item => item.eventId === value.eventId))
-      if (requests.length === 0) { await button.waitFor({ state: 'hidden', timeout: 1_000 }).catch(() => {}); continue }
-      const request = requests[0]
-      // Approval and Session-follow streams are independent. Wait for the
-      // exact call evidence before validating or clicking its approval.
-      await expect.poll(() => frames.some(frame => frame.value?.type === 'event'
-        && frame.value.event?.type === 'tool/call'
-        && frame.value.event.data.callId === request.request?.callId), { timeout: 5_000 }).toBe(true)
-      const calls = frames.flatMap(frame => frame.value?.type === 'event' && frame.value.event?.type === 'tool/call' ? [frame.value.event.data] : [])
-      const call = calls.findLast(item => item.callId === request.request?.callId)
-      let args
-      try { args = typeof call?.arguments === 'string' ? JSON.parse(call.arguments) : call?.arguments } catch {}
-      if (requests.length !== 1 || request.agentId !== sessionId || call?.name !== request.request?.toolName
-        || !isExperimentToolAllowed(call.name, args, workspace)) {
-        throw new Error(`unexpected approval request: ${sanitize(JSON.stringify(request)).slice(0, 500)}`)
-      }
-      if (approved.length >= 20) throw new Error('Too many approvals in real-model experiment')
-      approved.push({ eventId: request.eventId, agentId: request.agentId, toolName: request.request.toolName, callId: request.request.callId })
-      await button.click()
-    } else {
-      await button.waitFor({ state: 'visible', timeout: 1_000 }).catch(() => {})
-    }
-  }
-  throw new Error('Independent whole-goal verification did not complete within the experiment deadline')
-}
-
 test('real configured route completes a browser-owned verified native goal across Host restart', async ({ page, context }, testInfo) => {
   const temp = await mkdtemp(join(tmpdir(), 'dsh-web-owner-real-'))
   const home = join(temp, 'home'), workspace = join(temp, 'workspace'), modelLog = join(temp, 'model.jsonl')

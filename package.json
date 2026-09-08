@@ -27,6 +27,7 @@
     "test:autonomy:wake": "playwright test --config scripts/e2e/playwright-wake.config.mjs",
     "test:web-owner": "playwright test --config scripts/e2e/playwright.config.mjs",
     "test:web-owner:real": "playwright test --config scripts/e2e/playwright-real.config.mjs",
+    "test:web-owner:real-event": "playwright test --config scripts/e2e/playwright-real-event.config.mjs",
     "typecheck": "pnpm run build && pnpm --recursive --if-present run typecheck",
     "validate": "node ./scripts/validate-workspace.mjs",
     "test:autonomy:deepseek": "playwright test --config scripts/e2e/playwright-deepseek.config.mjs",

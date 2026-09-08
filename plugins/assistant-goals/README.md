@@ -111,11 +111,27 @@ executionBudget:
 
 次数、token 和可选费用上限为 0–1,000,000,000 的整数；费用单位是百万分之一美元。`durationMs` 为 1ms–31 天，从业务目标创建时间起算；`maxOutputTokensPerCall` 为 1–1,000,000,000。暂停、恢复、修改目标定义或插件重启不会重置已保存的上限、计数和期限；已有目标的配置变更会拒绝冲突，不自动扩额。新建且重新获 owner 授权的业务目标拥有独立预算，本功能不是账户级总预算。
 
-启用前，可信 Host 必须调用 `ctx.assistantGoals.registerBudgetMeter()`，为实际 `provider` / `model` 精确路由注册 `GoalBudgetMeter`。`inputTokenUpperBound(options)` 必须给出实际完整请求（包括消息、工具、多模态及提供商封装）的输入 token 上界；两个 `*UsdMicrosPerMillionTokens` 费率必须保守覆盖输入/缓存和输出/推理的全部收费类别。此 API 没有模型工具入口，返回的 disposer 应纳入 Host 的 Cordis 生命周期。包内不预装通用计量器或生产路由价格；缺少计量器拒绝调用，配置了费用上限但任一费率未知也拒绝调用。未配置费用时可将两个费率都设为 `null`，只约束次数与 token。可信计量声明和适配器遵守输出上限是保证的前提，不能把估算或未知价格称为提供商账单硬限。
+严格 token 模式启用前，可信 Host 必须调用 `ctx.assistantGoals.registerBudgetMeter()`，为实际 `provider` / `model` 精确路由注册 `GoalBudgetMeter`。`inputTokenUpperBound(options)` 必须给出实际完整请求（包括消息、工具、多模态及提供商封装）的输入 token 上界；两个 `*UsdMicrosPerMillionTokens` 费率必须保守覆盖输入/缓存和输出/推理的全部收费类别。此 API 没有模型工具入口，返回的 disposer 应纳入 Host 的 Cordis 生命周期。包内不预装通用计量器或生产路由价格；缺少计量器拒绝调用，配置了费用上限但任一费率未知也拒绝调用。未配置费用时可将两个费率都设为 `null`，只约束次数与 token。可信计量声明和适配器遵守输出上限是保证的前提，不能把估算或未知价格称为提供商账单硬限。
+
+无法为完整请求提供可信输入 token 上界的已知网关，可以显式选用 calls-only 模式；它不会自动从严格模式降级：
+
+```yaml
+executionBudget:
+  mode: calls
+  modelCalls: 3
+  toolCalls: 8
+  durationMs: 300000
+  maxOutputTokensPerCall: 1024
+  routes:
+    - provider: super-relay
+      model: auto_model/alwaysday1
+```
+
+该模式只能含上述字段，`inputTokens`、`outputTokens` 和 `costUsdMicros` 会被拒绝。`routes` 是精确的 provider/model allowlist，并和 `mode` 一起在每个业务目标首次运行时写入预算账本；重启、编辑目标或之后修改 Host 配置均不能放宽它。每次 DSH `llm/stream` 调用仍在分派前原子占用一次 `modelCalls`，失败、中断、DSH 重试和崩溃保留占额；任意适配器内部的 HTTP 重试不是可由此账本观察或限制的次数。工具和绝对期限照常硬限制。`maxOutputTokensPerCall` 只是发送给提供商的最佳努力提示，不能当作已验证的输出或账单上限。流可以没有 usage；如果有 usage 会校验其内部一致性，但 calls-only 的 `executionBudget` 和 `runUsage` 将 token 与费用显示为 `null`（未知），绝不伪装为零。calls-only 路线不需要注册 meter；严格 token 模式的 meter、预留和缺失/超额 usage 拒绝行为保持不变。
 
 可选的 [assistant-deepseek-budget](../assistant-deepseek-budget/README.md) 同时提供固定 `deepseek-goal-metered` adapter 和两个 DeepSeek v4 路由 meter，使用保守输入预留、实际输出限制及完整 usage 结算。该插件默认关闭、有明确契约到期时间，不提供金额上限；真实付费 API 兼容性仍待验证。它不替代任务验收 profile 或 owner 授权配置。
 
-每次实际模型请求在提供商调用前，用 SQLite 事务预留一次调用、完整输入上界和输出上限；请求的 `maxTokens` 同时限制为每次上限与剩余额度。只有流完整结束且 usage 有效、不超过预留时才结算。输入按 uncached + cacheRead + cacheWrite 累计，reasoning 属于 output 不重复累计；若有 `totalTokens`，必须等于完整输入与输出之和。取消、异常、缺失/无效 usage 或崩溃保留全额预留，不自动退款或重放。工具执行体进入前计一次工具额度，失败也不退还；没有预算的工具不会进入执行体。
+严格 token 模式的每次实际模型请求在提供商调用前，用 SQLite 事务预留一次调用、完整输入上界和输出上限；请求的 `maxTokens` 同时限制为每次上限与剩余额度。只有流完整结束且 usage 有效、不超过预留时才结算。输入按 uncached + cacheRead + cacheWrite 累计，reasoning 属于 output 不重复累计；若有 `totalTokens`，必须等于完整输入与输出之和。取消、异常、缺失/无效 usage 或崩溃保留全额预留，不自动退款或重放。工具执行体进入前计一次工具额度，失败也不退还；没有预算的工具不会进入执行体。
 
 计量等待、流读取与目标回合受同一绝对期限和取消信号约束；计量器撤销会取消使用它的在途调用。期限取消和停止等待不证明提供商、第三方工具或 OS 进程已经停止，未知执行仍保持待对账。`goal_context` / 新模型上下文的 `executionBudget` 展示累计与 held 预留；可信 Host 可用 `inspectBudget(agent, goalId)` 和 `health().budget` 查看状态。
 

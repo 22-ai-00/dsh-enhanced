@@ -119,6 +119,9 @@ import type {
 const trustedDeliveryPreferenceProducers = new WeakSet<object>()
 const deliveryPreferenceProducerProbe = Symbol('assistant-delivery.preference-producer-probe')
 
+/** A wake finalizes an already-flushed native Web reply, or creates one external outbox intent. */
+export type DeliveryGoalWakeResultPublication = OutboxRecord | Readonly<{ kind: 'native-session'; sessionId: string }>
+
 /**
  * Process-local authenticity against accidental service-slot collisions. The
  * private symbol is never exported, so copying the public method shape is not
@@ -807,6 +810,7 @@ export class AssistantDeliveryService extends Service {
   private readonly ownerRoutes: ReadonlyMap<string, Readonly<OwnerRouteAuthority>>
   private readonly ownerRouteGuard: Readonly<OwnerRouteDispatchGuard>
   private nativeWebBound = false
+  private nativeWebOwner: NativeWebOwnerAccess | undefined
   private nativeWebRuntime: { ctx: Context; leases: DeliverySessionLeases } | undefined
   private readonly ownerId = `assistant-delivery-${randomUUID()}`
   private readonly bindingFlights = new Map<string, Promise<ConversationBinding>>()
@@ -835,7 +839,7 @@ export class AssistantDeliveryService extends Service {
   /** Once a live verifier required acceptance, loss of that verifier must not silently bypass it. */
   private acceptanceRequired = false
   private readonly preferenceTurns = new WeakMap<Agent, Readonly<DeliveryPreferenceTurnAttestation>>()
-  private readonly goalWakeResults = new WeakMap<DeliveryGoalWakeInput, () => OutboxRecord>()
+  private readonly goalWakeResults = new WeakMap<DeliveryGoalWakeInput, () => DeliveryGoalWakeResultPublication>()
   private modelSelectionFlight: Promise<void> | undefined
   private presentationFlight: Promise<void> | undefined
   private workflowTraceFlight: Promise<void> | undefined
@@ -1629,6 +1633,14 @@ export class AssistantDeliveryService extends Service {
           // Re-read the exact owner, binding generation and Session at enqueue,
           // after the caller has rechecked its Goal/source authority.
           const target = current()
+          if (target.conversation.channel === 'web') {
+            const owner = this.nativeWebOwner
+            // This finalizes the existing, flushed native Session reply. It does
+            // not create a second send or claim that the reply was read.
+            if (!this.nativeWebBound || owner === undefined) return denied()
+            try { owner.assertSession(target.sessionId) } catch { return denied() }
+            return Object.freeze({ kind: 'native-session' as const, sessionId: target.sessionId })
+          }
           const key = createHash('sha256').update(JSON.stringify({ attestation: input.attestation, native: input.native })).digest('hex')
           return this.enqueueBackground({ sourceId: 'assistant-goals-wake/v1', workspace: target.workspace,
             bindingId: target.id, idempotencyKey: `goal-wake-result:${key}`, text, format: 'markdown' })
@@ -1638,8 +1650,8 @@ export class AssistantDeliveryService extends Service {
     return result
   }
 
-  /** Publish only the native output captured for this still-owned wake capability. */
-  enqueueScheduledGoalResult(input: DeliveryGoalWakeInput): OutboxRecord {
+  /** Finalize the captured native reply, or publish it only for a still-owned external channel. */
+  enqueueScheduledGoalResult(input: DeliveryGoalWakeInput): DeliveryGoalWakeResultPublication {
     this.assertActive()
     const publish = this.goalWakeResults.get(input)
     if (publish === undefined) throw new AssistantDeliveryError('policy-denied', 'scheduled goal result is unavailable')
@@ -1888,12 +1900,13 @@ export class AssistantDeliveryService extends Service {
     const runtime = this.nativeWebRuntime
     if (runtime === undefined) throw new AssistantDeliveryError('runtime-conflict', 'native Web runtime is unavailable')
     if (this.nativeWebBound) throw new AssistantDeliveryError('runtime-conflict', 'native Web owner Controller is already bound')
-    const access = new NativeWebOwner(ctx, this.deliveryStore, runtime.leases, this.policy, {
+    let access: NativeWebOwnerAccess | undefined
+    access = new NativeWebOwner(ctx, this.deliveryStore, runtime.leases, this.policy, {
       assertActive: () => {
         this.assertActive()
         if (this.nativeWebRuntime !== runtime) throw new AssistantDeliveryError('runtime-conflict', 'native Web runtime changed')
       },
-      released: () => { this.nativeWebBound = false },
+      released: () => { if (this.nativeWebOwner === access) { this.nativeWebOwner = undefined; this.nativeWebBound = false } },
       policyRef: this.config.policyRef,
       leaseMs: this.config.leaseMs,
       prepare: (binding, envelope) => this.prepareForegroundTaskAcceptance(binding, envelope),
@@ -1901,6 +1914,7 @@ export class AssistantDeliveryService extends Service {
       claimed: (agent, envelope, turn) => this.capturePreferenceTurn(agent,
         { kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId }, turn),
     }, config)
+    this.nativeWebOwner = access
     this.nativeWebBound = true
     runtime.ctx.effect(() => () => access.dispose(), 'assistant-delivery.native-web-runtime')
     return access

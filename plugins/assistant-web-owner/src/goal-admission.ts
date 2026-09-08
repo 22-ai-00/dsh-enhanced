@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 import { isAbsolute, join, normalize } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
-import { Config as GoalsConfig, validateGoalStrategyConfig, type GoalBudgetConfig, type GoalStrategyConfig } from '@dsh-enhanced/assistant-goals'
+import { Config as GoalsConfig, validateGoalStrategyConfig, type GoalTokenBudgetConfig, type GoalStrategyConfig } from '@dsh-enhanced/assistant-goals'
 import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptanceProfile, type VerifierAuthorityInput } from '@dsh-enhanced/assistant-verifier'
 import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
 import type { ActiveWebOwnerBindingSnapshot } from '@dsh-enhanced/assistant-delivery'
@@ -15,7 +15,7 @@ export interface GoalAdmissionTask {
   apiKeyEnv?: string
   maxGoalRounds: number
   stepMaxDurationMs: number
-  executionBudget: Omit<GoalBudgetConfig, 'costUsdMicros'>
+  executionBudget: Omit<GoalTokenBudgetConfig, 'costUsdMicros'>
   strategy?: Partial<GoalStrategyConfig>
   verification: {
     artifactPath: string; command: string; maxRuns: number; maxTotalDurationMs: number

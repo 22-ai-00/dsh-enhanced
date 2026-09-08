@@ -552,3 +552,16 @@ Event schema 3 与 Automations schema 15 增加可空来源列，旧记录不补
 - 实际集成揭示并修复“恢复执行完成但没有结果消息”的缺口。结果从本次原生回合取出，经独立验收等待和真实 teardown 后，以进程内 capability 重查原 owner/binding generation/Session，再入持久消息队列。
 - 五项集成包括不同 Node 进程恢复同一 Session/Goal、恢复后工具实际写报告与独立验收、按独立 result key 投递正文、目标修改与来源权限撤销。来源迁移/去重和等待过期/匹配恢复边界另由定向行为测试覆盖。模型及渠道是明确替身，不证明线上智能效果；入队不等于送达。
 - 最终检查命令、源码摘要和限制见[本批证据](evidence/event-goal-wait-2026-09-08.json)。完整 WP11 仍需真实代码库及任务/日历来源；完整 18 项状态保持 3 已验证 / 9 实现中 / 6 待做。后续按主动处理、技能复用、持续改进顺序集中交付，相关安装/权限要求随使用流程补齐。
+
+
+### 2026-09-08：现有真实线路的事件恢复与 Web 结果交付（基线 `5923a44`）
+
+显式 `executionBudget.mode: calls` 为缺少可信输入 token 上界的既有线路提供持久模型调用次数、工具次数和绝对期限约束；精确 provider/model 白名单随目标冻结，失败与不确定调用不返还额度。token/金额保持 unknown，不把输出提示或调用次数冒充 token/账单硬限。旧严格 token 配置与 v1 数据库迁移保留原语义。
+
+真实 Web 链路揭示并修复两处生产缺口：Policy 预授权遗漏 `goal_wait_event` 会导致整组 Goals 工具注册失败；Web 原生回复已经在原 Session 中展示和持久保存，却又被重复投向没有 adapter 的 Outbox。现在 Web 按当前 owner capability 重验原 Session 后完成结果交付，外部渠道继续走 Outbox。
+
+验收入口为 `pnpm test:web-owner:real-event`：独立临时 profile、现有真实网关、owner 创建并授权等待、Host 重启后文件变化、同一原生目标恢复并写产物、独立步骤/全目标验收、原回复可见且关闭 Host 后持久回读。重复观察与后续事件不重放已完成等待。测试仅允许指定产物工具，越界审批通过真实界面拒绝；普通来源 automation 使用明确的测试 no-op Host executor，目标恢复与模型不是替身。完整命令和最终结论见[本批证据](evidence/real-event-goal-2026-09-08.json)。
+
+这是受引导的真实模型运行验收，不是策略智能收益或完整 18 项完成证明。完整账本仍为 **3 已验证 / 9 实现中 / 6 待做**；后续按主动处理、技能复用、持续改进的完整流程交付，不设置人工日历等待。
+
+最终交付检查：`pnpm check` 退出 0，主 314 文件 / 3,888 项测试、Goals 121、Policy 200、Delivery 705 项通过，manifest、零 lint 警告、类型检查、构建及 31 份 dry-run pack 完成。真实事件浏览器与原有真实目标浏览器分别退出 0，独立只读复核 PASS。C2C iteration 8 保存本地执行记录，未取得 ChatGPT 网页复核。

@@ -1,0 +1,967 @@
+{
+  "date": "2026-09-08",
+  "baseline": "5923a445f26aa332eb8cc3fefd42976c7f034929",
+  "delivery": "Durable calls-only route budgets and real file-event recovery with native Web Session result delivery",
+  "commands": [
+    {
+      "command": "pnpm test:web-owner:real-event",
+      "exitCode": 0,
+      "log": "/tmp/dsh-real-event-final.log",
+      "sha256": "26d87ce5eef22e01769378fbc7003817b93c39ba4ba1ffea9ab3734ca5876d9e"
+    },
+    {
+      "command": "pnpm check",
+      "exitCode": 0,
+      "log": "/tmp/dsh-event-final-check.log",
+      "sha256": "e44b714a93c2df06bdb50279d29067eace581ea8561085d0c44688e0463be7a5"
+    },
+    {
+      "command": "pnpm test:web-owner:real",
+      "exitCode": 0,
+      "log": "/tmp/dsh-real-goal-regression-final.log",
+      "sha256": "af04d7f839a757bfe823a8a96018df3cdba85c4509368988ae987b1ef6b95e8a"
+    }
+  ],
+  "environment": {
+    "CI": "true",
+    "VITEST_MAX_WORKERS": "4",
+    "PLAYWRIGHT_CHROMIUM_EXECUTABLE": "/usr/bin/chromium",
+    "DSH_WEB_REAL_PROVIDER": "super-relay",
+    "DSH_WEB_REAL_MODEL": "auto_model/alwaysday1",
+    "DSH_WEB_REAL_SOURCE_HOME": "/home/jiataorui/.dsh",
+    "DSH_ISOLATION_TEST_IMAGE": "sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89"
+  },
+  "checkSummary": {
+    "rootFiles": 314,
+    "rootTests": 3888,
+    "skipped": 0,
+    "goalPackageTests": 121,
+    "policyPackageTests": 200,
+    "deliveryPackageTests": 705,
+    "dryRunPacks": 31,
+    "manifestLintTypecheckBuild": "passed"
+  },
+  "sources": {
+    "package.json": "6aed47a7e6dad16959af7718a6bc849e45104a7c56c1cb88c318106592d27ebe",
+    "plugins/assistant-delivery/src/service.ts": "31d3623ce52ae96745663606e15996176b0f0a565d2011a1eb2ef7766e8e13a0",
+    "plugins/assistant-goals/src/budget-store.ts": "459dce116e8ef944346e21cd2053326342d2a680856a74cac2e7f970571752a6",
+    "plugins/assistant-goals/src/budget.ts": "147f652a74d40d82dd29dcc9a0cfa63049523b5ee5827780676d266c52a22559",
+    "plugins/assistant-goals/src/index.ts": "4b4573fb7c6765cdbef318cb46112b801f73a8180d67f51a8b525c5025520e43",
+    "plugins/assistant-goals/src/service.ts": "47fe1228bbc5e71613ee37a926b4adf58d8f673d0ebbdcb4195515525b3966ca",
+    "plugins/assistant-goals/tests/budget-runtime.spec.ts": "a0c294c2312af8425c7fb4d153ac942ab13ba175fd53f2c92b14e64aa99dd960",
+    "plugins/assistant-goals/tests/budget-store.spec.ts": "9bd14c21f831b849cc6d97c037bec01bcd2f2fed4c9258cd42c142953dd372be",
+    "plugins/assistant-policy/src/service.ts": "32955a588ee21e3d77f14c7e52c96d69dbfa2875688aefb2be81f13d6746ef45",
+    "plugins/assistant-policy/tests/preauthorized-tool.spec.ts": "ed89864680a00ec35200aff247dbf4efd456d0e17a07793acddea430e4f8c3fa",
+    "plugins/assistant-web-owner/src/goal-admission.ts": "63250d8886120b06f0fc35677435599310954d4b2c00beb91f9039dc6a18ad0a",
+    "scripts/e2e/playwright-real-event.config.mjs": "7b9afcbf710d89b4a75b6d99f295124333241ed75136cce26746e54129a3c5c2",
+    "scripts/e2e/web-owner-real-audit.mjs": "c92b5ceca377584e696afe22232df163220e01c131f3fefb29e89c491219a784",
+    "scripts/e2e/web-owner-real-event-bootstrap.mjs": "8fdd8b93a0d71af4a61773fb703401ce6ada9b7ccfb94edd14235d910f716c8a",
+    "scripts/e2e/web-owner-real-event.spec.mjs": "27c76786727f0dd8b975a03d8c779fb73845403919a57234727ab62b6c56e066",
+    "scripts/e2e/web-owner-real-guard.mjs": "9fe512d98f38d2653d50972df1032d458e7d68a43e09b811dfc3e249c0cad1d0",
+    "scripts/e2e/web-owner-real-helpers.mjs": "fbe8b6b554038cf6a138123bf43b87fe284cafa21dc65931f9614c34884d4e2e",
+    "scripts/e2e/web-owner-real.spec.mjs": "1d59699da7d4424309af8e82c91783e7905d327874dae0cce2b24267e6c3fe11",
+    "tests/autonomy-event-goal.spec.ts": "78220667e85549e236f8ed2db6c06f0f5327e21f3f446074a75bca4877c70d96",
+    "tests/web-owner-real-guard.spec.ts": "f01b89d3cde46a78edaabaa54c56dd79863af062c332a5df1b4368f46d396fbb"
+  },
+  "observed": {
+    "noModelFixture": true,
+    "ordinarySourceAutomation": "test-noop-host-executor",
+    "resultDelivery": "durable-native-session",
+    "hostStarts": 3,
+    "sessionId": "session-73b5f1b2-0660-42e1-a89b-0953efe4e9df",
+    "goalId": "9fd80fbbf7b62136ca681eab6af1038b5076aec33ea393b39a8b1719bb230821",
+    "native": {
+      "sessionId": "session-73b5f1b2-0660-42e1-a89b-0953efe4e9df",
+      "goalId": "goal-0be1cf9c-2b4a-48fb-9d52-3e255f825983",
+      "revision": 4,
+      "objective": "Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.",
+      "phase": "complete",
+      "roundsStarted": 1,
+      "maxGoalRounds": 2,
+      "updatedAt": 1788847669337
+    },
+    "wait": {
+      "id": "goal-event-wait-2636d8101c660405ab6ba5895ec3333d260aeee3c8691d84c147db4e842af67e",
+      "intent_json": "{\"id\":\"goal-event-wait-2636d8101c660405ab6ba5895ec3333d260aeee3c8691d84c147db4e842af67e\",\"wake\":{\"scope\":{\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_05d63a20-8fcb-4410-a2bb-76bb479a5ce8\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-web-owner-real-event-mimTz9/workspace\",\"preset\":\"standard\"},\"goalId\":\"9fd80fbbf7b62136ca681eab6af1038b5076aec33ea393b39a8b1719bb230821\",\"definition\":{\"version\":1,\"digest\":\"b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f\",\"objective\":\"Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.\"},\"native\":{\"sessionId\":\"session-73b5f1b2-0660-42e1-a89b-0953efe4e9df\",\"goalId\":\"goal-0be1cf9c-2b4a-48fb-9d52-3e255f825983\",\"revision\":2,\"objective\":\"Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.\",\"phase\":\"paused\",\"roundsStarted\":0,\"maxGoalRounds\":2,\"updatedAt\":1788847599797},\"attestation\":{\"scope\":{\"workspace\":\"/tmp/dsh-web-owner-real-event-mimTz9/workspace\",\"preset\":\"standard\"},\"principalId\":\"web/web/local/operator\",\"principalLineage\":{\"principalRecordId\":\"principal_05d63a20-8fcb-4410-a2bb-76bb479a5ce8\",\"principalVersion\":1},\"bindingId\":\"binding_a40f0406-70d6-4933-b7b8-5efa4b216cb1\",\"bindingVersion\":1,\"bindingGeneration\":1,\"sessionId\":\"session-73b5f1b2-0660-42e1-a89b-0953efe4e9df\"},\"ownerRouteId\":\"real-event-owner\",\"budgetId\":\"real-event-goal-runs\"},\"source\":{\"protocol\":\"dsh-event-source/v1\",\"sourceId\":\"event-triggers:file\",\"kind\":\"file\",\"version\":\"0.1.24\",\"configDigest\":\"f589c2bb343e06b9a1abae7a1f4ce8e01e5a811152c97cb39786b02934cb1fde\",\"target\":{\"automationId\":\"web-owner-real-event-source\"},\"highWaterSequence\":0},\"createdAt\":1788847599784,\"expiresAt\":1788848120157,\"runTimeoutMs\":120000}",
+      "state": "terminal",
+      "reason": "settled",
+      "sequence": 1,
+      "envelope_canonical": "{\"deduplicationKey\":\"event-triggers:file:event-ec040360d3756122f489499afd95197f2f532e5e2ac1388a4d9d0866762f8ffb\",\"event\":{\"id\":\"event-ec040360d3756122f489499afd95197f2f532e5e2ac1388a4d9d0866762f8ffb\",\"occurredAt\":1788847608232,\"receivedAt\":1788847608232},\"observation\":{\"digest\":\"62a92cd956a686a92c788388dd8078640c027860b121f9a6d591a6f392bfb2ac\",\"revision\":\"edge:1\",\"timeBasis\":\"observed\"},\"protocol\":\"dsh-external-event/v1\",\"source\":{\"configDigest\":\"f589c2bb343e06b9a1abae7a1f4ce8e01e5a811152c97cb39786b02934cb1fde\",\"id\":\"event-triggers:file\",\"kind\":\"file\",\"version\":\"0.1.24\"},\"target\":{\"automationId\":\"web-owner-real-event-source\"},\"trust\":{\"content\":\"untrusted\",\"method\":\"local-observation\"}}",
+      "envelope_digest": "45b79a47ad86dbe575c67ee73677271bbff6174b1ccfd39ae1405cdd68121f01",
+      "wake_json": "{\"scope\":{\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_05d63a20-8fcb-4410-a2bb-76bb479a5ce8\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-web-owner-real-event-mimTz9/workspace\",\"preset\":\"standard\"},\"goalId\":\"9fd80fbbf7b62136ca681eab6af1038b5076aec33ea393b39a8b1719bb230821\",\"definition\":{\"version\":1,\"digest\":\"b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f\",\"objective\":\"Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.\"},\"native\":{\"sessionId\":\"session-73b5f1b2-0660-42e1-a89b-0953efe4e9df\",\"goalId\":\"goal-0be1cf9c-2b4a-48fb-9d52-3e255f825983\",\"revision\":2,\"objective\":\"Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.\",\"phase\":\"paused\",\"roundsStarted\":0,\"maxGoalRounds\":2,\"updatedAt\":1788847599797},\"attestation\":{\"scope\":{\"workspace\":\"/tmp/dsh-web-owner-real-event-mimTz9/workspace\",\"preset\":\"standard\"},\"principalId\":\"web/web/local/operator\",\"principalLineage\":{\"principalRecordId\":\"principal_05d63a20-8fcb-4410-a2bb-76bb479a5ce8\",\"principalVersion\":1},\"bindingId\":\"binding_a40f0406-70d6-4933-b7b8-5efa4b216cb1\",\"bindingVersion\":1,\"bindingGeneration\":1,\"sessionId\":\"session-73b5f1b2-0660-42e1-a89b-0953efe4e9df\"},\"ownerRouteId\":\"real-event-owner\",\"budgetId\":\"real-event-goal-runs\",\"id\":\"goal-event-wake-goal-event-wait-2636d8101c660405ab6ba5895ec3333d260aeee3c8691d84c147db4e842af67e\",\"at\":1788847608236,\"expiresAt\":1788847728236}",
+      "scope_key": "{\"preset\":\"standard\",\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_05d63a20-8fcb-4410-a2bb-76bb479a5ce8\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-web-owner-real-event-mimTz9/workspace\"}",
+      "goal_id": "9fd80fbbf7b62136ca681eab6af1038b5076aec33ea393b39a8b1719bb230821",
+      "session_id": "session-73b5f1b2-0660-42e1-a89b-0953efe4e9df",
+      "native_goal_id": "goal-0be1cf9c-2b4a-48fb-9d52-3e255f825983",
+      "native_revision": 2
+    },
+    "goalWakes": [
+      {
+        "id": "goal-event-wake-goal-event-wait-2636d8101c660405ab6ba5895ec3333d260aeee3c8691d84c147db4e842af67e",
+        "intent_json": "{\"scope\":{\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_05d63a20-8fcb-4410-a2bb-76bb479a5ce8\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-web-owner-real-event-mimTz9/workspace\",\"preset\":\"standard\"},\"goalId\":\"9fd80fbbf7b62136ca681eab6af1038b5076aec33ea393b39a8b1719bb230821\",\"definition\":{\"version\":1,\"digest\":\"b07980c088b4a430140bd995e46a44a9def392a5aaef32692fabee9e2975cd5f\",\"objective\":\"Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.\"},\"native\":{\"sessionId\":\"session-73b5f1b2-0660-42e1-a89b-0953efe4e9df\",\"goalId\":\"goal-0be1cf9c-2b4a-48fb-9d52-3e255f825983\",\"revision\":2,\"objective\":\"Implement summarize.mjs: read a JSON array of orders from stdin, ignore cancelled orders, sum integer amountCents by currency, and print one JSON object with sorted currency keys followed by a newline.\",\"phase\":\"paused\",\"roundsStarted\":0,\"maxGoalRounds\":2,\"updatedAt\":1788847599797},\"attestation\":{\"scope\":{\"workspace\":\"/tmp/dsh-web-owner-real-event-mimTz9/workspace\",\"preset\":\"standard\"},\"principalId\":\"web/web/local/operator\",\"principalLineage\":{\"principalRecordId\":\"principal_05d63a20-8fcb-4410-a2bb-76bb479a5ce8\",\"principalVersion\":1},\"bindingId\":\"binding_a40f0406-70d6-4933-b7b8-5efa4b216cb1\",\"bindingVersion\":1,\"bindingGeneration\":1,\"sessionId\":\"session-73b5f1b2-0660-42e1-a89b-0953efe4e9df\"},\"ownerRouteId\":\"real-event-owner\",\"budgetId\":\"real-event-goal-runs\",\"id\":\"goal-event-wake-goal-event-wait-2636d8101c660405ab6ba5895ec3333d260aeee3c8691d84c147db4e842af67e\",\"at\":1788847608236,\"expiresAt\":1788847728236}",
+        "state": "succeeded",
+        "definition_hash": "4b91abf3969f3338b4a1465f13b7cd971bbc92a042c291c6e61653d708a029fd",
+        "occurrence_id": "occ-789a14f742248e499b2138c9e1e28c1a031f08d079411c71e70ce0535ccdc3d8",
+        "dispatched_at": 1788847610308,
+        "completed_at": 1788847669404,
+        "scope_key": "{\"preset\":\"standard\",\"principalId\":\"web/web/local/operator\",\"principalRecordId\":\"principal_05d63a20-8fcb-4410-a2bb-76bb479a5ce8\",\"principalVersion\":1,\"workspace\":\"/tmp/dsh-web-owner-real-event-mimTz9/workspace\"}",
+        "goal_id": "9fd80fbbf7b62136ca681eab6af1038b5076aec33ea393b39a8b1719bb230821"
+      }
+    ],
+    "outbox": [],
+    "modelCalls": [
+      {
+        "event": "assembly",
+        "bootstrap": true,
+        "eventWait": true,
+        "nativeGoalRound": false,
+        "goalExists": false,
+        "availableToolNames": [
+          "ask_user_question",
+          "automation_create",
+          "automation_history",
+          "automation_list",
+          "automation_manage",
+          "automation_pending",
+          "automation_run",
+          "bash",
+          "create_goal",
+          "delivery_reply",
+          "delivery_status",
+          "edit",
+          "evaluation_review",
+          "evaluation_self_assess",
+          "exit_plan_mode",
+          "get_goal",
+          "glob",
+          "goal_checkpoint",
+          "goal_context",
+          "goal_control",
+          "goal_create",
+          "goal_schedule",
+          "goal_wait_event",
+          "grep",
+          "interrupt_agent",
+          "job_kill",
+          "job_list",
+          "job_output",
+          "list_agents",
+          "memory_manage",
+          "memory_read_evidence",
+          "memory_search",
+          "memory_search_confirmed",
+          "plugin_activation_plan",
+          "plugin_capability_gap",
+          "plugin_discover",
+          "plugin_gap_rankings",
+          "ralph",
+          "read",
+          "read_image",
+          "send_message",
+          "skill",
+          "subagent",
+          "subagent_fork",
+          "todo_write",
+          "update_goal",
+          "web_fetch",
+          "web_search",
+          "wiki_lint",
+          "wiki_read",
+          "wiki_search",
+          "wiki_upsert",
+          "workflow",
+          "write"
+        ],
+        "toolNames": []
+      },
+      {
+        "event": "request-tools",
+        "maxTokens": 512,
+        "toolNames": []
+      },
+      {
+        "event": "dispatch",
+        "call": 1,
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1"
+      },
+      {
+        "event": "settled",
+        "call": 1,
+        "drained": true,
+        "finish": "stop",
+        "usage": {
+          "inputTokens": 6583,
+          "outputTokens": 60,
+          "totalTokens": 6643
+        }
+      },
+      {
+        "event": "assembly",
+        "bootstrap": false,
+        "eventWait": true,
+        "nativeGoalRound": false,
+        "goalExists": false,
+        "availableToolNames": [
+          "ask_user_question",
+          "automation_create",
+          "automation_history",
+          "automation_list",
+          "automation_manage",
+          "automation_pending",
+          "automation_run",
+          "bash",
+          "create_goal",
+          "delivery_reply",
+          "delivery_status",
+          "edit",
+          "evaluation_review",
+          "evaluation_self_assess",
+          "exit_plan_mode",
+          "get_goal",
+          "glob",
+          "goal_checkpoint",
+          "goal_context",
+          "goal_control",
+          "goal_create",
+          "goal_schedule",
+          "goal_wait_event",
+          "grep",
+          "interrupt_agent",
+          "job_kill",
+          "job_list",
+          "job_output",
+          "list_agents",
+          "memory_manage",
+          "memory_read_evidence",
+          "memory_search",
+          "memory_search_confirmed",
+          "plugin_activation_plan",
+          "plugin_capability_gap",
+          "plugin_discover",
+          "plugin_gap_rankings",
+          "ralph",
+          "read",
+          "read_image",
+          "send_message",
+          "skill",
+          "subagent",
+          "subagent_fork",
+          "todo_write",
+          "update_goal",
+          "web_fetch",
+          "web_search",
+          "wiki_lint",
+          "wiki_read",
+          "wiki_search",
+          "wiki_upsert",
+          "workflow",
+          "write"
+        ],
+        "toolNames": [
+          "goal_create"
+        ]
+      },
+      {
+        "event": "request-tools",
+        "maxTokens": 2048,
+        "toolNames": [
+          "goal_create"
+        ]
+      },
+      {
+        "event": "dispatch",
+        "call": 2,
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1"
+      },
+      {
+        "event": "settled",
+        "call": 2,
+        "drained": true,
+        "finish": "tool-calls",
+        "usage": {
+          "inputTokens": 7238,
+          "outputTokens": 281,
+          "totalTokens": 7519
+        }
+      },
+      {
+        "event": "assembly",
+        "bootstrap": false,
+        "eventWait": true,
+        "nativeGoalRound": false,
+        "goalExists": true,
+        "availableToolNames": [
+          "ask_user_question",
+          "automation_create",
+          "automation_history",
+          "automation_list",
+          "automation_manage",
+          "automation_pending",
+          "automation_run",
+          "bash",
+          "create_goal",
+          "delivery_reply",
+          "delivery_status",
+          "edit",
+          "evaluation_review",
+          "evaluation_self_assess",
+          "exit_plan_mode",
+          "get_goal",
+          "glob",
+          "goal_checkpoint",
+          "goal_context",
+          "goal_control",
+          "goal_create",
+          "goal_schedule",
+          "goal_wait_event",
+          "grep",
+          "interrupt_agent",
+          "job_kill",
+          "job_list",
+          "job_output",
+          "list_agents",
+          "memory_manage",
+          "memory_read_evidence",
+          "memory_search",
+          "memory_search_confirmed",
+          "plugin_activation_plan",
+          "plugin_capability_gap",
+          "plugin_discover",
+          "plugin_gap_rankings",
+          "ralph",
+          "read",
+          "read_image",
+          "send_message",
+          "skill",
+          "subagent",
+          "subagent_fork",
+          "todo_write",
+          "update_goal",
+          "web_fetch",
+          "web_search",
+          "wiki_lint",
+          "wiki_read",
+          "wiki_search",
+          "wiki_upsert",
+          "workflow",
+          "write"
+        ],
+        "toolNames": [
+          "get_goal",
+          "goal_wait_event"
+        ]
+      },
+      {
+        "event": "request-tools",
+        "maxTokens": 2048,
+        "toolNames": [
+          "get_goal",
+          "goal_wait_event"
+        ]
+      },
+      {
+        "event": "dispatch",
+        "call": 3,
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1"
+      },
+      {
+        "event": "settled",
+        "call": 3,
+        "drained": true,
+        "finish": "tool-calls",
+        "usage": {
+          "inputTokens": 11480,
+          "outputTokens": 283,
+          "totalTokens": 11763
+        }
+      },
+      {
+        "event": "assembly",
+        "bootstrap": false,
+        "eventWait": true,
+        "nativeGoalRound": false,
+        "goalExists": true,
+        "availableToolNames": [
+          "ask_user_question",
+          "automation_create",
+          "automation_history",
+          "automation_list",
+          "automation_manage",
+          "automation_pending",
+          "automation_run",
+          "bash",
+          "create_goal",
+          "delivery_reply",
+          "delivery_status",
+          "edit",
+          "evaluation_review",
+          "evaluation_self_assess",
+          "exit_plan_mode",
+          "get_goal",
+          "glob",
+          "goal_checkpoint",
+          "goal_context",
+          "goal_control",
+          "goal_create",
+          "goal_schedule",
+          "goal_wait_event",
+          "grep",
+          "interrupt_agent",
+          "job_kill",
+          "job_list",
+          "job_output",
+          "list_agents",
+          "memory_manage",
+          "memory_read_evidence",
+          "memory_search",
+          "memory_search_confirmed",
+          "plugin_activation_plan",
+          "plugin_capability_gap",
+          "plugin_discover",
+          "plugin_gap_rankings",
+          "ralph",
+          "read",
+          "read_image",
+          "send_message",
+          "skill",
+          "subagent",
+          "subagent_fork",
+          "todo_write",
+          "update_goal",
+          "web_fetch",
+          "web_search",
+          "wiki_lint",
+          "wiki_read",
+          "wiki_search",
+          "wiki_upsert",
+          "workflow",
+          "write"
+        ],
+        "toolNames": []
+      },
+      {
+        "event": "request-tools",
+        "maxTokens": 2048,
+        "toolNames": []
+      },
+      {
+        "event": "dispatch",
+        "call": 4,
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1"
+      },
+      {
+        "event": "settled",
+        "call": 4,
+        "drained": true,
+        "finish": "stop",
+        "usage": {
+          "inputTokens": 13492,
+          "outputTokens": 129,
+          "totalTokens": 13621
+        }
+      },
+      {
+        "event": "assembly",
+        "bootstrap": false,
+        "eventWait": true,
+        "nativeGoalRound": true,
+        "goalExists": true,
+        "availableToolNames": [
+          "ask_user_question",
+          "automation_create",
+          "automation_history",
+          "automation_list",
+          "automation_manage",
+          "automation_pending",
+          "automation_run",
+          "bash",
+          "create_goal",
+          "delivery_reply",
+          "delivery_status",
+          "edit",
+          "evaluation_review",
+          "evaluation_self_assess",
+          "exit_plan_mode",
+          "get_goal",
+          "glob",
+          "goal_checkpoint",
+          "goal_context",
+          "goal_control",
+          "goal_create",
+          "goal_schedule",
+          "goal_wait_event",
+          "grep",
+          "interrupt_agent",
+          "job_kill",
+          "job_list",
+          "job_output",
+          "list_agents",
+          "memory_manage",
+          "memory_read_evidence",
+          "memory_search",
+          "memory_search_confirmed",
+          "plugin_activation_plan",
+          "plugin_capability_gap",
+          "plugin_discover",
+          "plugin_gap_rankings",
+          "ralph",
+          "read",
+          "read_image",
+          "send_message",
+          "skill",
+          "subagent",
+          "subagent_fork",
+          "todo_write",
+          "update_goal",
+          "web_fetch",
+          "web_search",
+          "wiki_lint",
+          "wiki_read",
+          "wiki_search",
+          "wiki_upsert",
+          "workflow",
+          "write"
+        ],
+        "toolNames": [
+          "edit",
+          "get_goal",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "event": "request-tools",
+        "maxTokens": 2048,
+        "toolNames": [
+          "edit",
+          "get_goal",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "event": "dispatch",
+        "call": 5,
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1"
+      },
+      {
+        "event": "settled",
+        "call": 5,
+        "drained": true,
+        "finish": "tool-calls",
+        "usage": {
+          "inputTokens": 16993,
+          "outputTokens": 797,
+          "totalTokens": 17790
+        }
+      },
+      {
+        "event": "assembly",
+        "bootstrap": false,
+        "eventWait": true,
+        "nativeGoalRound": true,
+        "goalExists": true,
+        "availableToolNames": [
+          "ask_user_question",
+          "automation_create",
+          "automation_history",
+          "automation_list",
+          "automation_manage",
+          "automation_pending",
+          "automation_run",
+          "bash",
+          "create_goal",
+          "delivery_reply",
+          "delivery_status",
+          "edit",
+          "evaluation_review",
+          "evaluation_self_assess",
+          "exit_plan_mode",
+          "get_goal",
+          "glob",
+          "goal_checkpoint",
+          "goal_context",
+          "goal_control",
+          "goal_create",
+          "goal_schedule",
+          "goal_wait_event",
+          "grep",
+          "interrupt_agent",
+          "job_kill",
+          "job_list",
+          "job_output",
+          "list_agents",
+          "memory_manage",
+          "memory_read_evidence",
+          "memory_search",
+          "memory_search_confirmed",
+          "plugin_activation_plan",
+          "plugin_capability_gap",
+          "plugin_discover",
+          "plugin_gap_rankings",
+          "ralph",
+          "read",
+          "read_image",
+          "send_message",
+          "skill",
+          "subagent",
+          "subagent_fork",
+          "todo_write",
+          "update_goal",
+          "web_fetch",
+          "web_search",
+          "wiki_lint",
+          "wiki_read",
+          "wiki_search",
+          "wiki_upsert",
+          "workflow",
+          "write"
+        ],
+        "toolNames": [
+          "edit",
+          "get_goal",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "event": "request-tools",
+        "maxTokens": 2048,
+        "toolNames": [
+          "edit",
+          "get_goal",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "event": "dispatch",
+        "call": 6,
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1"
+      },
+      {
+        "event": "settled",
+        "call": 6,
+        "drained": true,
+        "finish": "tool-calls",
+        "usage": {
+          "inputTokens": 3432,
+          "outputTokens": 1028,
+          "cacheReadTokens": 16992,
+          "totalTokens": 21452
+        }
+      },
+      {
+        "event": "assembly",
+        "bootstrap": false,
+        "eventWait": true,
+        "nativeGoalRound": true,
+        "goalExists": true,
+        "availableToolNames": [
+          "ask_user_question",
+          "automation_create",
+          "automation_history",
+          "automation_list",
+          "automation_manage",
+          "automation_pending",
+          "automation_run",
+          "bash",
+          "create_goal",
+          "delivery_reply",
+          "delivery_status",
+          "edit",
+          "evaluation_review",
+          "evaluation_self_assess",
+          "exit_plan_mode",
+          "get_goal",
+          "glob",
+          "goal_checkpoint",
+          "goal_context",
+          "goal_control",
+          "goal_create",
+          "goal_schedule",
+          "goal_wait_event",
+          "grep",
+          "interrupt_agent",
+          "job_kill",
+          "job_list",
+          "job_output",
+          "list_agents",
+          "memory_manage",
+          "memory_read_evidence",
+          "memory_search",
+          "memory_search_confirmed",
+          "plugin_activation_plan",
+          "plugin_capability_gap",
+          "plugin_discover",
+          "plugin_gap_rankings",
+          "ralph",
+          "read",
+          "read_image",
+          "send_message",
+          "skill",
+          "subagent",
+          "subagent_fork",
+          "todo_write",
+          "update_goal",
+          "web_fetch",
+          "web_search",
+          "wiki_lint",
+          "wiki_read",
+          "wiki_search",
+          "wiki_upsert",
+          "workflow",
+          "write"
+        ],
+        "toolNames": [
+          "edit",
+          "get_goal",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "event": "request-tools",
+        "maxTokens": 2048,
+        "toolNames": [
+          "edit",
+          "get_goal",
+          "read",
+          "write"
+        ]
+      },
+      {
+        "event": "dispatch",
+        "call": 7,
+        "provider": "super-relay",
+        "model": "auto_model/alwaysday1"
+      },
+      {
+        "event": "settled",
+        "call": 7,
+        "drained": true,
+        "finish": "stop",
+        "usage": {
+          "inputTokens": 3728,
+          "outputTokens": 1995,
+          "cacheReadTokens": 20423,
+          "totalTokens": 26146
+        }
+      },
+      {
+        "event": "assembly",
+        "bootstrap": false,
+        "eventWait": true,
+        "nativeGoalRound": true,
+        "goalExists": true,
+        "availableToolNames": [
+          "ask_user_question",
+          "automation_create",
+          "automation_history",
+          "automation_list",
+          "automation_manage",
+          "automation_pending",
+          "automation_run",
+          "bash",
+          "create_goal",
+          "delivery_reply",
+          "delivery_status",
+          "edit",
+          "evaluation_review",
+          "evaluation_self_assess",
+          "exit_plan_mode",
+          "get_goal",
+          "glob",
+          "goal_checkpoint",
+          "goal_context",
+          "goal_control",
+          "goal_create",
+          "goal_schedule",
+          "goal_wait_event",
+          "grep",
+          "interrupt_agent",
+          "job_kill",
+          "job_list",
+          "job_output",
+          "list_agents",
+          "memory_manage",
+          "memory_read_evidence",
+          "memory_search",
+          "memory_search_confirmed",
+          "plugin_activation_plan",
+          "plugin_capability_gap",
+          "plugin_discover",
+          "plugin_gap_rankings",
+          "ralph",
+          "read",
+          "read_image",
+          "send_message",
+          "skill",
+          "subagent",
+          "subagent_fork",
+          "todo_write",
+          "update_goal",
+          "web_fetch",
+          "web_search",
+          "wiki_lint",
+          "wiki_read",
+          "wiki_search",
+          "wiki_upsert",
+          "workflow",
+          "write"
+        ],
+        "toolNames": [
+          "edit",
+          "get_goal",
+          "read",
+          "write"
+        ]
+      }
+    ],
+    "artifactSha256": "e3d815026bd0080f1544f7148150859a438362b34f37fd1559371e527477743e",
+    "approved": [
+      {
+        "eventId": "1ce960a4-e0be-4d1f-99cd-07bde7dd6520",
+        "agentId": "session-73b5f1b2-0660-42e1-a89b-0953efe4e9df",
+        "toolName": "goal_create",
+        "callId": "call_a90aekw5jiid0k5uqfu3fdsq|fc_e2c3a7d1384fb0d277e6dcc0"
+      },
+      {
+        "eventId": "d8b1fce2-a652-45ef-9542-6afc13c99294",
+        "agentId": "session-73b5f1b2-0660-42e1-a89b-0953efe4e9df",
+        "toolName": "goal_wait_event",
+        "callId": "call_4utadsodu3v76dxac9bdcxsv|fc_f3d99327d2b6c1fc3c4891f3"
+      },
+      {
+        "eventId": "8a1bafe3-989e-4301-b95c-8e63988370ec",
+        "agentId": "session-73b5f1b2-0660-42e1-a89b-0953efe4e9df",
+        "toolName": "get_goal",
+        "callId": "call_rxmcmarr29h0ftr2v1h39f12|fc_c1c9bc01b80a889032008416"
+      }
+    ],
+    "rejected": []
+  },
+  "verification": {
+    "step": [
+      "achieved"
+    ],
+    "outcome": [
+      "achieved"
+    ]
+  },
+  "artifacts": {
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/install.log": "13c0477236072953efd4736eb896e8eedd59ce38cb2d6360a6e921eaae53babb",
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/model.jsonl": "1f41685aae2b30a76e6f2575ba859ed66a69bae3da51afcc20a2b1782f28d7dd",
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/approvals.json": "aad7d6b1b5089af9d6e95dfc57869cc47ed45f5d29c782ac82307596de435fe4",
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/summarize.mjs": "e3d815026bd0080f1544f7148150859a438362b34f37fd1559371e527477743e",
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/session-audit.json": "4bd4aa26a96c631d8fbf29fbacf618f0d4c9480c0075ee9592bbaf27119dd7fb",
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/transport.json": "108d3c75899fb5cc3818219dfa6af48904b29501e6124b567e73c9e8af0d818b",
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/proof.json": "c5d5bcc4c7e2831e381569a4cd9c6a6e4a14df6fa09205ffd9c15deaf3b747c5",
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/host-2.log": "5571b4bfdf49fbbca3eb3d12c19a7a8a8e13bfbd7629c9bbb0437602a2815024",
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/host-3.log": "24a43f7f83b05d50d3493bc5efd37a067f94adb76b76ec0fc0fff9edca047050",
+    ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/host-1.log": "d93de8c3f1da1be22f508521de23a14da163c4bd7145a4d087fa2575056b9e3e"
+  },
+  "previousAttempts": [
+    {
+      "log": "/tmp/dsh-real-event-first.log",
+      "exitCode": 1,
+      "sha256": "3a6c3677353f8c4015dde89c75442807ef04676bc88c12ae710484c8706c94ad"
+    },
+    {
+      "log": "/tmp/dsh-real-event-second.log",
+      "exitCode": 1,
+      "sha256": "d19317ad03e149597436ab71fa81c5eb25e200c5b035010002b372e61b46573f"
+    },
+    {
+      "log": "/tmp/dsh-real-event-third.log",
+      "exitCode": 1,
+      "sha256": "079e1b8df3198b8c002d4e09345d3769a008d912e90ac4da53b9f14ffb2b176b"
+    },
+    {
+      "log": "/tmp/dsh-real-event-fourth.log",
+      "exitCode": 130,
+      "sha256": "3dd38b98ad0d1ed311d49a37aa3cc0a51cb7a949146efcac79e8880900b84e09"
+    },
+    {
+      "log": "/tmp/dsh-real-event-fifth.log",
+      "exitCode": 1,
+      "sha256": "060a7b3778db204cf6049af6812a7e02bf0b40c370a1f0b12a164b9ab5c57645"
+    },
+    {
+      "log": "/tmp/dsh-real-event-sixth.log",
+      "exitCode": 1,
+      "sha256": "9d1216c18bc31eeadff37908b619c11b43efef3a95de9678f1107c29643c4eb2"
+    },
+    {
+      "log": "/tmp/dsh-real-event-seventh.log",
+      "exitCode": 1,
+      "sha256": "ae9bac2974f27026e1b24aa03ffd4d8a3e4102f4227420ce64238d4d167406c8"
+    },
+    {
+      "log": "/tmp/dsh-real-event-eighth.log",
+      "exitCode": 1,
+      "sha256": "2e106d86cbd8bcb01db541274accf61ae81f41941f2830cedbeec86117f0657f"
+    },
+    {
+      "log": "/tmp/dsh-real-event-ninth.log",
+      "exitCode": 1,
+      "sha256": "a5309517bdd82334fdbaffc58b4a2b59708e57ef6e4e6b42f08273c3bc88e32f"
+    },
+    {
+      "log": "/tmp/dsh-real-event-tenth.log",
+      "exitCode": 1,
+      "sha256": "859d81be37ae3b3d80b21f2492d0897bd1ca2e8205e2dc87077a66353eee3c1a"
+    },
+    {
+      "log": "/tmp/dsh-real-event-eleventh.log",
+      "exitCode": 1,
+      "sha256": "d8ad0f842d1e9db0892ecfb2bdd153fab3b47c2c764ac416a3a9e3013247c54f"
+    },
+    {
+      "log": "/tmp/dsh-real-event-twelfth.log",
+      "exitCode": 1,
+      "sha256": "0879e0a51a95e97612b4ad2d4a0f4db4843d0e0c1a9804abd31691c55bc61925"
+    },
+    {
+      "log": "/tmp/dsh-real-event-thirteenth.log",
+      "exitCode": 1,
+      "sha256": "de030cba8ea05dae67e455460f964f222bc4655945d68d2c1ba652dd9a268ea1"
+    },
+    {
+      "log": "/tmp/dsh-real-event-fourteenth.log",
+      "exitCode": 1,
+      "sha256": "d861e3b8c85fa65ea7a895b392b7a0b794225b3d420669692e7b2bdd93e5b08e"
+    },
+    {
+      "log": "/tmp/dsh-real-event-fifteenth.log",
+      "exitCode": 1,
+      "sha256": "e105403269a6cd8edc107faa341cb9f6ee45ade5554c26e53b2aa5c15b9672eb"
+    },
+    {
+      "log": "/tmp/dsh-real-event-sixteenth.log",
+      "exitCode": 1,
+      "sha256": "c8f68d921c3cd960ced505c0ed52b60ebeccac20276a67443655d52762baa26c"
+    }
+  ],
+  "limitations": [
+    "Guided real-model smoke test; no comparative intelligence or success-rate claim. Exploratory failures are retained.",
+    "Explicit calls mode bounds DSH model/tool invocations and lifetime, not tokens or money; output limits remain provider hints.",
+    "The ordinary source automation uses a test-only no-op Host executor; model, file event, Goal recovery, artifact and independent acceptance are real.",
+    "Web result is the existing durable native Session reply, independently checked visible and reread after shutdown; no duplicate outbox or user-read receipt is claimed. External channels retain outbox delivery.",
+    "Checker runs as the same OS user; this run does not establish worker/credential isolation.",
+    "Full18 remains 3 verified / 9 implementing / 6 todo. C2C records local execution only; no ChatGPT web review was obtained."
+  ],
+  "independentReview": {
+    "status": "PASS",
+    "reviewer": "independent read-only verifier agent",
+    "scope": "Calls-only budget runtime, real event Goal recovery and native Web result delivery, existing real Web Goal regression",
+    "evidence": "20 source hashes, 3 command hashes and 10 artifact hashes matched current files; git diff --check exit 0.",
+    "limitations": "No token/cost ceiling, user-read receipt, isolated worker or full18 completion claim."
+  }
+}

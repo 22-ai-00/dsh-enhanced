@@ -3,16 +3,24 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, TokenUsage, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { GoalBudgetStore } from './budget-store.js'
-import type { GoalBudgetLimits, GoalBudgetScope } from './budget-store.js'
+import type { GoalBudgetLimits, GoalBudgetScope, GoalBudgetRoute } from './budget-store.js'
 import type { GoalExecutionRun, GoalRecord } from './types.js'
 import { isStrategyChild } from './strategy-identity.js'
 
 export type GoalBudgetDelegateResolver = (agent: Agent) => { parent: Agent; runId: string; signal: AbortSignal; provider: string; model: string; accountingRunId: string } | undefined
 
-export interface GoalBudgetConfig {
+export interface GoalTokenBudgetConfig {
+  mode?: 'tokens'
   modelCalls: number; toolCalls: number; inputTokens: number; outputTokens: number
   costUsdMicros?: number; durationMs: number; maxOutputTokensPerCall: number
 }
+export interface GoalCallsBudgetConfig {
+  mode: 'calls'
+  modelCalls: number; toolCalls: number; durationMs: number; maxOutputTokensPerCall: number
+  /** Exact host routes allowed to run without a trustworthy input-token bound. */
+  routes: readonly GoalBudgetRoute[]
+}
+export type GoalBudgetConfig = GoalTokenBudgetConfig | GoalCallsBudgetConfig
 
 /** Host-only metering declaration for one exact route. Never supplied by a model tool. */
 export interface GoalBudgetMeter {
@@ -27,13 +35,20 @@ export type GoalBudgetFailure = Readonly<{ stage: 'admission' | 'request-limit' 
 function fail(): never { throw new Error('assistant-goals: execution budget unavailable or exhausted') }
 const integer = (value: unknown, max = 1_000_000_000): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 && value <= max
 export function validateGoalBudgetConfig(input: GoalBudgetConfig): Readonly<GoalBudgetConfig> {
-  if (input === null || typeof input !== 'object' || Array.isArray(input)
-    || Object.keys(input).some(key => !['modelCalls', 'toolCalls', 'inputTokens', 'outputTokens', 'costUsdMicros', 'durationMs', 'maxOutputTokensPerCall'].includes(key))
-    || ![input.modelCalls, input.toolCalls, input.inputTokens, input.outputTokens].every(value => integer(value))
-    || (input.costUsdMicros !== undefined && !integer(input.costUsdMicros))
-    || !integer(input.durationMs, 31 * 86_400_000) || input.durationMs < 1
-    || !integer(input.maxOutputTokensPerCall) || input.maxOutputTokensPerCall < 1) fail()
-  return Object.freeze({ ...input })
+  if (input === null || typeof input !== 'object' || Array.isArray(input) || !integer(input.modelCalls) || !integer(input.toolCalls)
+    || !integer(input.durationMs, 31 * 86_400_000) || input.durationMs < 1 || !integer(input.maxOutputTokensPerCall) || input.maxOutputTokensPerCall < 1) fail()
+  if (input.mode === 'calls') {
+    if (Object.keys(input).some(key => !['mode', 'modelCalls', 'toolCalls', 'durationMs', 'maxOutputTokensPerCall', 'routes'].includes(key)) || !Array.isArray(input.routes) || input.routes.length === 0) fail()
+    const routes = input.routes.map(route => {
+      if (!route || typeof route !== 'object' || Object.keys(route).length !== 2 || ![route.provider, route.model].every(item => typeof item === 'string' && item.length > 0 && item.length <= 512 && !/[\s\p{Cc}]/u.test(item))) fail()
+      return Object.freeze({ provider: route.provider, model: route.model })
+    })
+    if (new Set(routes.map(route => JSON.stringify([route.provider, route.model]))).size !== routes.length) fail()
+    return Object.freeze({ mode: 'calls' as const, modelCalls: input.modelCalls, toolCalls: input.toolCalls, durationMs: input.durationMs, maxOutputTokensPerCall: input.maxOutputTokensPerCall, routes: Object.freeze(routes) })
+  }
+  if ((input.mode !== undefined && input.mode !== 'tokens') || Object.keys(input).some(key => !['mode', 'modelCalls', 'toolCalls', 'inputTokens', 'outputTokens', 'costUsdMicros', 'durationMs', 'maxOutputTokensPerCall'].includes(key))
+    || ![input.inputTokens, input.outputTokens].every(value => integer(value)) || (input.costUsdMicros !== undefined && !integer(input.costUsdMicros))) fail()
+  return Object.freeze({ modelCalls: input.modelCalls, toolCalls: input.toolCalls, inputTokens: input.inputTokens, outputTokens: input.outputTokens, ...(input.costUsdMicros === undefined ? {} : { costUsdMicros: input.costUsdMicros }), durationMs: input.durationMs, maxOutputTokensPerCall: input.maxOutputTokensPerCall })
 }
 
 function cost(input: number, output: number, meter: GoalBudgetMeter): number | null {
@@ -72,7 +87,7 @@ function bounded<T>(operation: Promise<T>, signal: AbortSignal, deadline: number
 export class GoalBudgetRuntime {
   readonly #store: GoalBudgetStore
   readonly #meters = new Map<string, Readonly<GoalBudgetMeter>>()
-  readonly #inflight = new Map<Agent, Readonly<GoalBudgetMeter>>()
+  readonly #inflight = new Map<Agent, Readonly<GoalBudgetMeter> | undefined>()
   readonly #deadlines = new Map<Agent, { runId: string; timer: ReturnType<typeof setTimeout> }>()
   /** Host-only, per-child observation. It deliberately excludes error text. */
   readonly #lastFailures = new WeakMap<Agent, GoalBudgetFailure>()
@@ -91,7 +106,7 @@ export class GoalBudgetRuntime {
         const bound = this.#current(agent)
         if (bound === undefined) return request
         const budget = this.inspect(bound.record)
-        if (budget.modelCalls >= budget.limits.modelCalls || budget.outputTokens >= budget.limits.outputTokens) { if (diagnostic) this.#note(agent, 'request-limit', false); fail() }
+        if (budget.modelCalls >= budget.limits.modelCalls || (budget.limits.mode === 'tokens' && budget.outputTokens! >= budget.limits.outputTokens!)) { if (diagnostic) this.#note(agent, 'request-limit', false); fail() }
         if (this.#deadlines.get(agent)?.runId !== bound.run.intent.runId) {
           this.#clearDeadline(agent)
           const deadline = Math.min(bound.record.createdAt + config.durationMs, bound.run.intent.admission.expiresAt)
@@ -100,7 +115,7 @@ export class GoalBudgetRuntime {
           this.#deadlines.set(agent, { runId: bound.run.intent.runId, timer })
         }
         return { ...request, maxTokens: Math.min(request.maxTokens ?? config.maxOutputTokensPerCall,
-          config.maxOutputTokensPerCall, budget.limits.outputTokens - budget.outputTokens) }
+          config.maxOutputTokensPerCall, ...(budget.limits.mode === 'tokens' ? [budget.limits.outputTokens! - budget.outputTokens!] : [])) }
       } catch (error) {
         if (diagnostic && this.#lastFailures.get(agent) === undefined) this.#note(agent, 'admission', false)
         throw error
@@ -148,29 +163,29 @@ export class GoalBudgetRuntime {
     let dispatched = false
     try {
       stage = 'meter'
-      if (meter === undefined || this.#inflight.has(agent)) fail()
+      if (this.#inflight.has(agent) || (this.config.mode !== 'calls' && meter === undefined)) fail()
+      if (this.config.mode === 'calls' && !this.#routeAllowed(options)) fail()
       stage = 'admission'
       if (bound.delegateRoute && (options.provider !== bound.delegateRoute.provider || options.model !== bound.delegateRoute.model || (options.tools?.length ?? 0) !== 0)) fail()
-      this.#assert(agent, bound.run, meter)
+      this.#assert(agent, bound.run, meter, options)
       stage = 'request-limit'
       if (!integer(options.maxTokens) || options.maxTokens < 1 || options.maxTokens > this.config.maxOutputTokensPerCall) fail()
       stage = 'admission'
       this.#inflight.set(agent, meter)
       ownsMeter = true
       const identity = requestIdentity(options)
-      stage = 'meter'
-      const upper = await bounded(Promise.resolve(meter.inputTokenUpperBound(options)), bound.signal, deadline)
+      const upper = this.config.mode === 'calls' ? 0 : await bounded(Promise.resolve(meter!.inputTokenUpperBound(options)), bound.signal, deadline)
       stage = 'admission'
-      this.#assert(agent, bound.run, meter)
+      this.#assert(agent, bound.run, meter, options)
       if (requestIdentity(options) !== identity) fail()
       stage = 'meter'
       if (!integer(upper)) fail()
-      const reservedCost = this.config.costUsdMicros === undefined ? null : cost(upper, options.maxTokens, meter)
-      if (this.config.costUsdMicros !== undefined && reservedCost === null) fail()
+      const reservedCost = this.config.mode === 'calls' || this.config.costUsdMicros === undefined ? null : cost(upper, options.maxTokens, meter!)
+      if (this.config.mode !== 'calls' && this.config.costUsdMicros !== undefined && reservedCost === null) fail()
       const id = `goal-budget-${randomUUID()}`
       stage = 'reserve'
       this.#store.reserve(binding, { id, runId: bound.accountingRunId ?? bound.run.intent.runId, inputTokens: upper,
-        outputTokens: options.maxTokens, costUsdMicros: this.config.costUsdMicros === undefined ? null : reservedCost }, Date.now())
+        outputTokens: this.config.mode === 'calls' ? 0 : options.maxTokens, costUsdMicros: reservedCost }, Date.now())
       // No refunds on dispatch uncertainty. A process crash leaves this full reservation occupied.
       let observed: TokenUsage | undefined
       let finished = false
@@ -186,7 +201,7 @@ export class GoalBudgetRuntime {
           if (item.done) break
           const chunk = item.value
           stage = 'admission'
-          this.#assert(agent, bound.run, meter)
+          this.#assert(agent, bound.run, meter, options)
           stage = 'stream'
           if (chunk.type === 'usage') observed = { ...chunk.usage }
           if (chunk.type === 'finish') {
@@ -197,15 +212,15 @@ export class GoalBudgetRuntime {
         }
       } finally { try { void iterator.return?.().catch(() => {}) } catch {} }
       stage = 'admission'
-      this.#assert(agent, bound.run, meter)
+      this.#assert(agent, bound.run, meter, options)
       stage = 'stream'
       if (!finished) fail()
       stage = 'usage'
-      const measured = usage(observed)
-      if (measured.inputTokens > upper || measured.outputTokens > options.maxTokens) fail()
+      const measured = this.config.mode === 'calls' ? observed === undefined ? undefined : usage(observed) : usage(observed)
+      if (measured !== undefined && this.config.mode !== 'calls' && (measured.inputTokens > upper || measured.outputTokens > options.maxTokens)) fail()
       stage = 'settlement'
-      this.#store.settle(id, { ...measured, costUsdMicros: this.config.costUsdMicros === undefined
-        ? null : cost(measured.inputTokens, measured.outputTokens, meter) }, Date.now())
+      this.#store.settle(id, this.config.mode === 'calls' ? { inputTokens: 0, outputTokens: 0, costUsdMicros: null } : { ...measured!, costUsdMicros: this.config.costUsdMicros === undefined
+        ? null : cost(measured!.inputTokens, measured!.outputTokens, meter!) }, Date.now())
     } catch (error) {
       if (isStrategyChild(agent)) this.#note(agent, stage, dispatched)
       agent.cancel({ kind: 'hook', reason: 'assistant-goals-budget-rejected' })
@@ -236,6 +251,7 @@ export class GoalBudgetRuntime {
   }
 
   hasMeter = (route: { provider?: string; model?: string }): boolean => {
+    if (this.config.mode === 'calls') return this.#active && this.#routeAllowed(route)
     const meter = this.#meters.get(JSON.stringify([route.provider, route.model]))
     return this.#active && meter !== undefined && (this.config.costUsdMicros === undefined
       || meter.inputUsdMicrosPerMillionTokens !== null && meter.outputUsdMicrosPerMillionTokens !== null)
@@ -278,14 +294,15 @@ export class GoalBudgetRuntime {
   }
   #limits(record: GoalRecord): GoalBudgetLimits {
     if (!this.#active) fail()
-    return { modelCalls: this.config.modelCalls, toolCalls: this.config.toolCalls,
-      inputTokens: this.config.inputTokens, outputTokens: this.config.outputTokens,
-      costUsdMicros: this.config.costUsdMicros ?? null, expiresAt: record.createdAt + this.config.durationMs }
+    return this.config.mode === 'calls'
+      ? { mode: 'calls', routes: this.config.routes, modelCalls: this.config.modelCalls, toolCalls: this.config.toolCalls, inputTokens: null, outputTokens: null, costUsdMicros: null, expiresAt: record.createdAt + this.config.durationMs }
+      : { mode: 'tokens', routes: [], modelCalls: this.config.modelCalls, toolCalls: this.config.toolCalls, inputTokens: this.config.inputTokens, outputTokens: this.config.outputTokens, costUsdMicros: this.config.costUsdMicros ?? null, expiresAt: record.createdAt + this.config.durationMs }
   }
-  #assert(agent: Agent, run: GoalExecutionRun, meter: Readonly<GoalBudgetMeter>): void {
+  #routeAllowed(route: { provider?: string; model?: string }): boolean { return this.config.mode === 'calls' && this.config.routes.some(item => item.provider === route.provider && item.model === route.model) }
+  #assert(agent: Agent, run: GoalExecutionRun, meter: Readonly<GoalBudgetMeter> | undefined, options: GenerateOptions): void {
     const bound = this.#current(agent)
     if (!this.#active || this.ctx.get('agents')?.get(agent.id) !== agent
-      || this.#meters.get(JSON.stringify([meter.provider, meter.model])) !== meter
+      || (this.config.mode === 'calls' ? !this.#routeAllowed(options) : meter === undefined || this.#meters.get(JSON.stringify([meter.provider, meter.model])) !== meter)
       || bound?.run.intent.runId !== run.intent.runId
       || Date.now() >= bound.record.createdAt + this.config.durationMs) fail()
   }

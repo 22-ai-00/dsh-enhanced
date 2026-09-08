@@ -120,7 +120,7 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test.each(['goal_create', 'goal_schedule', 'goal_strategy'])('reserves %s preauthorization to its exact plugin and keeps revoked predicates closed', async name => {
+  test.each(['goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'])('reserves %s preauthorization to its exact plugin and keeps revoked predicates closed', async name => {
     const current = await fixture()
     let executions = 0
     let active = true
@@ -162,20 +162,20 @@ describe('trusted Host tool preauthorization', () => {
     await current.ctx.fiber.restart()
   })
 
-  test('does not let a same-name scoped shadow borrow a global definition grant', async () => {
+  test('does not let a same-name scoped goal_wait_event shadow borrow a global definition grant', async () => {
     const current = await fixture()
     let globalExecutions = 0
     let shadowExecutions = 0
-    const global = definition('action_github_commit', () => { globalExecutions += 1 })
-    const shadow = definition('action_github_commit', () => { shadowExecutions += 1 })
+    const global = definition('goal_wait_event', () => { globalExecutions += 1 })
+    const shadow = definition('goal_wait_event', () => { shadowExecutions += 1 })
     current.ctx.tools.register(global)
-    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx), global, () => true)
+    current.ctx.assistantPolicy.registerPreauthorizedTool(trustedActionsCaller(current.ctx, 'dsh-enhanced-assistant-goals'), global, () => true)
     await current.owner.ctx.inject(['tools'], scope => {
       scope.tools.register(shadow)
     })
 
-    expect(current.ctx.tools.get('action_github_commit', current.owner)).toBe(shadow)
-    const shadowResult = await execute(current.ctx, current.owner)
+    expect(current.ctx.tools.get('goal_wait_event', current.owner)).toBe(shadow)
+    const shadowResult = await execute(current.ctx, current.owner, 'goal_wait_event')
     expect(shadowResult.isError, JSON.stringify(shadowResult)).toBe(true)
     expect(current.asks()).toBe(1)
     expect(globalExecutions).toBe(0)
