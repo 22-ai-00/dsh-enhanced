@@ -18,7 +18,7 @@ describe('autonomy installer scenario', () => {
     const dshHome = await home(); const workspace = join(dshHome, 'workspace')
     const result = run(['--dry-run', '--scenario', 'autonomy', '--workspace', workspace, '--isolation-image', image, '--isolation-max-runs', '7', '--isolation-lease-minutes', '30', '--isolation-runtime-minutes', '5', '--yes'], dshHome)
     expect(result.status, result.stderr).toBe(0)
-    for (const slug of ['personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-isolation', 'assistant-actions', 'credentials-keychain', 'assistant-evaluation', 'assistant-verifier', 'assistant-deepseek-budget']) expect(result.stdout).toContain(join(root, 'plugins', slug))
+    for (const slug of ['personal-assistant', 'plugin-control-plane', 'assistant-delivery', 'assistant-goals', 'assistant-web-owner', 'assistant-isolation', 'assistant-actions', 'credentials-keychain', 'assistant-evaluation', 'assistant-verifier', 'assistant-deepseek-budget', 'event-triggers', 'assistant-proactive', 'assistant-skills']) expect(result.stdout).toContain(join(root, 'plugins', slug))
     const setup = `dsh-web-owner-setup --dsh-home ${dshHome} --profile web --workspace ${workspace} --preset standard --isolation-image ${image} --isolation-max-runs 7 --isolation-lease-ms 1800000 --isolation-runtime-ms 300000`
     expect(result.stdout).toContain(setup)
     expect(result.stdout.indexOf(setup)).toBeLessThan(result.stdout.indexOf('dsh --profile web --dump-config'))

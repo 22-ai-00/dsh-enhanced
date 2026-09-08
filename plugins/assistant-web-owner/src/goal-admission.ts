@@ -2,20 +2,16 @@ import { createHash } from 'node:crypto'
 import { isAbsolute, join, normalize } from 'node:path'
 import { isDeepStrictEqual } from 'node:util'
 import { isMap, isScalar, isSeq, parseDocument, type Node, type YAMLMap, type YAMLSeq } from 'yaml'
-import { Config as GoalsConfig, validateGoalStrategyConfig, type GoalTokenBudgetConfig, type GoalStrategyConfig } from '@dsh-enhanced/assistant-goals'
+import { Config as GoalsConfig, validateGoalStrategyConfig, type GoalCallsBudgetConfig, type GoalTokenBudgetConfig, type GoalStrategyConfig } from '@dsh-enhanced/assistant-goals'
 import { compileAcceptanceProfiles, createVerifierAuthorities, type AcceptanceProfile, type VerifierAuthorityInput } from '@dsh-enhanced/assistant-verifier'
 import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER } from '@dsh-enhanced/assistant-deepseek-budget'
 import type { ActiveWebOwnerBindingSnapshot } from '@dsh-enhanced/assistant-delivery'
 import { inspectAutonomyProfile, type AutonomyDoctorProfile } from './doctor.js'
 
-export interface GoalAdmissionTask {
-  version: 1
+interface GoalAdmissionTaskBase {
   objective: string
-  model: 'deepseek-v4-flash' | 'deepseek-v4-pro'
-  apiKeyEnv?: string
   maxGoalRounds: number
   stepMaxDurationMs: number
-  executionBudget: Omit<GoalTokenBudgetConfig, 'costUsdMicros'>
   strategy?: Partial<GoalStrategyConfig>
   verification: {
     artifactPath: string; command: string; maxRuns: number; maxTotalDurationMs: number
@@ -24,7 +20,22 @@ export interface GoalAdmissionTask {
   }
   wake?: { maxDelayMs: number; runTimeoutMs: number; maxRuns: number }
 }
+/** Legacy v1 fixed DeepSeek route. Kept for existing private admission files. */
+export interface GoalAdmissionTaskV1 extends GoalAdmissionTaskBase {
+  version: 1
+  model: 'deepseek-v4-flash' | 'deepseek-v4-pro'
+  apiKeyEnv?: string
+  executionBudget: Omit<GoalTokenBudgetConfig, 'costUsdMicros'>
+}
+/** v2 uses the deployment's already configured exact provider/model route. */
+export interface GoalAdmissionTaskV2 extends GoalAdmissionTaskBase {
+  version: 2
+  route: { provider: string; model: string }
+  executionBudget: GoalCallsBudgetConfig
+}
+export type GoalAdmissionTask = GoalAdmissionTaskV1 | GoalAdmissionTaskV2
 export interface GoalAdmissionInput { dshHome: string; profile: string; workspace: string; preset: string }
+export interface ConfiguredDefaultModelRoute { provider: string; model: string }
 function fail(reason: string): never { throw new Error(`goal setup: ${reason}`) }
 function shape(value: unknown, required: string[], optional: string[] = []): asserts value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)
@@ -33,24 +44,58 @@ function shape(value: unknown, required: string[], optional: string[] = []): ass
 function integer(value: unknown, min: number, max: number): asserts value is number {
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < min || value > max) fail('invalid task limit')
 }
+function route(value: unknown): asserts value is ConfiguredDefaultModelRoute {
+  shape(value, ['provider', 'model'])
+  for (const field of ['provider', 'model']) {
+    const item = value[field]
+    if (typeof item !== 'string' || item.length === 0 || item.length > 200 || item.trim() !== item || /[\p{Cc}]/u.test(item)) fail('invalid model route')
+  }
+}
+/** Read only the public, effective default-route fields from DSH's user settings layer. */
+export function parseSettingsDefaultModelRoute(source: string): ConfiguredDefaultModelRoute | undefined {
+  if (Buffer.byteLength(source, 'utf8') > 1024 * 1024) fail('settings.yaml exceeds 1 MiB')
+  const document = parseDocument(source)
+  if (document.errors.length > 0 || !isMap(document.contents) || document.contents.tag !== undefined) fail('settings.yaml must be an untagged YAML mapping')
+  const selected = document.contents.get('agent-default-model', true)
+  if (selected === undefined) return undefined
+  if (!isMap(selected) || selected.tag !== undefined) fail('settings.agent-default-model must be an untagged YAML mapping')
+  const fields: Record<string, unknown> = {}
+  for (const key of ['provider', 'model']) {
+    const value = selected.get(key, true)
+    if (!isScalar(value) || value.tag !== undefined || typeof value.value !== 'string') fail('settings.agent-default-model must contain public provider and model strings')
+    fields[key] = value.value
+  }
+  route(fields)
+  return fields
+}
 /** Parse bounded local operator data. No tagged YAML, scripts, credentials, or arbitrary model routes. */
 export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
   if (Buffer.byteLength(source, 'utf8') > 1024 * 1024) fail('task file exceeds 1 MiB')
   let input: unknown
   try { input = JSON.parse(source) } catch { fail('task file must be JSON') }
-  shape(input, ['version', 'objective', 'model', 'maxGoalRounds', 'stepMaxDurationMs', 'executionBudget', 'verification'], ['apiKeyEnv', 'wake', 'strategy'])
-  if (input.version !== 1 || typeof input.objective !== 'string' || input.objective.length === 0 || input.objective.trim() !== input.objective
-    || Buffer.byteLength(input.objective) > 8192 || /[\p{Cc}]/u.test(input.objective)
-    || !DEEPSEEK_MODELS.includes(input.model as GoalAdmissionTask['model'])) fail('invalid objective or model')
-  if (input.apiKeyEnv !== undefined && (typeof input.apiKeyEnv !== 'string' || !/^[A-Z_][A-Z0-9_]{0,127}$/u.test(input.apiKeyEnv))) fail('use a credential reference, not a key')
+  const version = input !== null && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>).version : undefined
+  if (version === 1) shape(input, ['version', 'objective', 'model', 'maxGoalRounds', 'stepMaxDurationMs', 'executionBudget', 'verification'], ['apiKeyEnv', 'wake', 'strategy'])
+  else if (version === 2) shape(input, ['version', 'objective', 'route', 'maxGoalRounds', 'stepMaxDurationMs', 'executionBudget', 'verification'], ['wake', 'strategy'])
+  else fail('unsupported task version')
+  if (typeof input.objective !== 'string' || input.objective.length === 0 || input.objective.trim() !== input.objective
+    || Buffer.byteLength(input.objective) > 8192 || /[\p{Cc}]/u.test(input.objective)) fail('invalid objective')
+  if (input.version === 1 && (!DEEPSEEK_MODELS.includes(input.model as GoalAdmissionTaskV1['model'])
+    || input.apiKeyEnv !== undefined && (typeof input.apiKeyEnv !== 'string' || !/^[A-Z_][A-Z0-9_]{0,127}$/u.test(input.apiKeyEnv)))) fail('invalid DeepSeek model or credential reference')
+  if (input.version === 2) route(input.route)
   integer(input.maxGoalRounds, 1, 32); integer(input.stepMaxDurationMs, 1000, 300000)
   if (input.strategy !== undefined) input.strategy = validateGoalStrategyConfig(input.strategy as Partial<GoalStrategyConfig>)
-  shape(input.executionBudget, ['modelCalls', 'toolCalls', 'inputTokens', 'outputTokens', 'durationMs', 'maxOutputTokensPerCall'])
+  if (input.version === 1) shape(input.executionBudget, ['modelCalls', 'toolCalls', 'inputTokens', 'outputTokens', 'durationMs', 'maxOutputTokensPerCall'])
+  else shape(input.executionBudget, ['mode', 'modelCalls', 'toolCalls', 'durationMs', 'maxOutputTokensPerCall', 'routes'])
   const budget = input.executionBudget
-  for (const name of ['modelCalls', 'toolCalls', 'inputTokens', 'outputTokens']) integer(budget[name], 1, 1_000_000_000)
+  for (const name of input.version === 1 ? ['modelCalls', 'toolCalls', 'inputTokens', 'outputTokens'] : ['modelCalls', 'toolCalls']) integer(budget[name], 1, 1_000_000_000)
   integer(budget.durationMs, input.stepMaxDurationMs + 1, 31 * 86_400_000)
   integer(budget.maxOutputTokensPerCall, 1, 32768)
-  if ((budget.inputTokens as number) < 2_097_152 || (budget.outputTokens as number) < budget.maxOutputTokensPerCall) fail('budget cannot admit the fixed model route')
+  if (input.version === 1 && ((budget.inputTokens as number) < 2_097_152 || (budget.outputTokens as number) < budget.maxOutputTokensPerCall)) fail('budget cannot admit the fixed model route')
+  if (input.version === 2) {
+    if (budget.mode !== 'calls' || !Array.isArray(budget.routes) || budget.routes.length !== 1) fail('v2 calls budget needs one exact route')
+    route(budget.routes[0])
+    if (!isDeepStrictEqual(budget.routes[0], input.route)) fail('budget route must equal task route')
+  }
   shape(input.verification, ['artifactPath', 'command', 'cases', 'maxRuns', 'maxTotalDurationMs', 'maxDurationMs', 'maxOutputBytes'])
   const verification = input.verification
   for (const name of ['artifactPath', 'command']) if (typeof verification[name] !== 'string' || verification[name].length === 0) fail('invalid verification input')
@@ -88,10 +133,10 @@ function merge(base: YAMLMap, overlay: YAMLMap): YAMLMap {
 }
 /** Compose a complete candidate, preserving custom siblings and rejecting modified managed settings. */
 export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, effectiveSource: string,
-  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now()): { patch: string; admissionId: string; profile: AutonomyDoctorProfile } {
+  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now(), settingsSource?: string): { patch: string; admissionId: string; profile: AutonomyDoctorProfile } {
   const task = parseGoalAdmissionTask(taskSource)
   for (const value of [input.dshHome, input.workspace]) if (!isAbsolute(value) || normalize(value) !== value) fail('home and workspace must be canonical paths')
-  if (!Number.isFinite(now) || now >= Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt)) fail('model contract expired')
+  if (!Number.isFinite(now) || task.version === 1 && now >= Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt)) fail('model contract expired')
   const target = parse(source); const effective = parse(effectiveSource)
   const row = (rows: YAMLSeq, slug: string, required: boolean): YAMLMap | undefined => {
     const id = `dsh-enhanced-${slug}`; const name = `@dsh-enhanced/${slug}`
@@ -113,7 +158,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   // Include complete required rows in the candidate before inspecting its inherited isolation scope.
   for (const slug of ['assistant-isolation', 'assistant-web-owner']) config(slug)
   const delivery = config('assistant-delivery'); const goals = config('assistant-goals'); const verifier = config('assistant-verifier')
-  const provider = config('assistant-deepseek-budget'); const personal = config('personal-assistant')
+  const provider = task.version === 1 ? config('assistant-deepseek-budget') : undefined; const personal = config('personal-assistant')
   const policy = map(personal.get('assistantPolicy', true))
   const principalId = `web/${input.profile}/local/operator`
   const profile = inspectAutonomyProfile(target.document.toString(), input.profile, input.dshHome)
@@ -165,20 +210,31 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
       { id: `${admissionId}-strategy-tool`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: 'goal_strategy' }, context: { initiators: task.wake === undefined ? ['external'] : ['external', 'background'] } },
     ])
   }
-  set(provider, 'enabled', true, [false]); set(provider, 'apiKeyEnv', task.apiKeyEnv ?? 'DEEPSEEK_API_KEY', ['DEEPSEEK_API_KEY'])
-  set(provider, 'defaultMaxTokens', task.executionBudget.maxOutputTokensPerCall, [8192])
-  if (!managed) {
-    delivery.set('agentProvider', DEEPSEEK_PROVIDER); delivery.set('agentModel', task.model); delivery.set('agentMaxOutputTokens', task.executionBudget.maxOutputTokensPerCall)
-  } else {
-    set(delivery, 'agentProvider', DEEPSEEK_PROVIDER); set(delivery, 'agentModel', task.model); set(delivery, 'agentMaxOutputTokens', task.executionBudget.maxOutputTokensPerCall)
-  }
   const defaults = effective.rows.items.filter(value => isMap(value) && value.get('id') === 'agent-default-model') as YAMLMap[]
   const overrides = target.rows.items.filter(value => isMap(value) && value.get('id') === 'agent-default-model') as YAMLMap[]
   if (defaults.length > 1 || overrides.length > 1) fail('ambiguous default model')
-  const modelRow = overrides[0] ?? target.document.createNode({ id: 'agent-default-model' }) as YAMLMap
-  if (modelRow.has('disabled') && modelRow.get('disabled') !== false) fail('default model plugin is disabled')
-  if (managed && modelRow.has('config') && !isDeepStrictEqual(map(modelRow.get('config', true)).toJSON(), { provider: DEEPSEEK_PROVIDER, model: task.model })) fail('existing default model differs')
-  modelRow.set('config', target.document.createNode({ provider: DEEPSEEK_PROVIDER, model: task.model })); if (!overrides.length) target.rows.add(modelRow)
+  if (task.version === 1) {
+    if (!provider) fail('DeepSeek provider configuration is unavailable')
+    set(provider, 'enabled', true, [false]); set(provider, 'apiKeyEnv', task.apiKeyEnv ?? 'DEEPSEEK_API_KEY', ['DEEPSEEK_API_KEY'])
+    set(provider, 'defaultMaxTokens', task.executionBudget.maxOutputTokensPerCall, [8192])
+    if (!managed) {
+      delivery.set('agentProvider', DEEPSEEK_PROVIDER); delivery.set('agentModel', task.model); delivery.set('agentMaxOutputTokens', task.executionBudget.maxOutputTokensPerCall)
+    } else {
+      set(delivery, 'agentProvider', DEEPSEEK_PROVIDER); set(delivery, 'agentModel', task.model); set(delivery, 'agentMaxOutputTokens', task.executionBudget.maxOutputTokensPerCall)
+    }
+    const modelRow = overrides[0] ?? target.document.createNode({ id: 'agent-default-model' }) as YAMLMap
+    if (modelRow.has('disabled') && modelRow.get('disabled') !== false) fail('default model plugin is disabled')
+    if (managed && modelRow.has('config') && !isDeepStrictEqual(map(modelRow.get('config', true)).toJSON(), { provider: DEEPSEEK_PROVIDER, model: task.model })) fail('existing default model differs')
+    modelRow.set('config', target.document.createNode({ provider: DEEPSEEK_PROVIDER, model: task.model })); if (!overrides.length) target.rows.add(modelRow)
+  } else {
+    const settingsRoute = settingsSource === undefined ? undefined : parseSettingsDefaultModelRoute(settingsSource)
+    const modelRow = defaults[0]
+    if (settingsRoute === undefined && (!modelRow || modelRow.has('disabled') && modelRow.get('disabled') !== false || !modelRow.has('config'))) fail('configured default model route is unavailable')
+    const configured = settingsRoute ?? map(modelRow!.get('config', true)).toJSON()
+    if (!isDeepStrictEqual(configured, task.route)) fail('task route is not the configured default provider/model')
+    // v2 never writes model or credential configuration. The exact configured
+    // route is admitted into the calls budget and rechecked by runtime.
+  }
   if (task.wake) {
     append(delivery, 'ownerRoutes', [{ id: admissionId, conversation: binding.conversation, principal: binding.principal, workspace: binding.workspace,
       agentPreset: binding.agentPreset, policyRef: binding.policyRef, minimumGeneration: binding.generation }])
@@ -190,7 +246,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     append(policy, 'budgets', [{ id: budgetId, metric: 'automation-runs', limit: task.wake.maxRuns, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
     append(policy, 'rules', [
       { id: `${admissionId}-goal`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['observe', 'inspect', 'snapshot', 'execute'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
-      ...['isolation_run', 'goal_context'].map(tool => ({ id: `${admissionId}-${tool}`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: tool }, context: { initiators: ['background'] } })),
+      ...['isolation_run', 'isolation_grants', 'goal_context'].map(tool => ({ id: `${admissionId}-${tool}`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: tool }, context: { initiators: ['background'] } })),
       { id: `${admissionId}-isolation-grant`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: `isolation:${profile.grant.id}` }, context: { initiators: ['background'] } },
       { id: `${admissionId}-reply`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['reply'], resource: { kind: 'message', id: binding.id }, context: { initiators: ['background'] } },
       { id: `${admissionId}-automation`, effect: 'allow', subject: { kind: 'background', id: '*', workspace: input.workspace, principal: principalId }, actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: 'goal-wake-*' }, context: { initiators: ['background'] } },

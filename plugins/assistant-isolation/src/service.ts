@@ -2,6 +2,7 @@ import { validateGoalArtifactAdmission, validateTaskAcceptanceContract, type Goa
 import { Service, type Context } from '@deepseek-ai/cordis'
 import type { ToolExecution } from '@deepseek-ai/dsh-tools'
 import type { Agent } from '@deepseek-ai/dsh-agent'
+import type {} from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@dsh-enhanced/assistant-delivery'
 import type {} from '@dsh-enhanced/assistant-policy'
 import { createHash, randomUUID } from 'node:crypto'
@@ -18,10 +19,20 @@ import { registerIsolationTools } from './tools.js'
 import { plannedStorageBytes } from './storage-policy.js'
 import { maintainIsolationStorage, observeStorage } from './storage.js'
 import type { IsolationIdentity, IsolationJob, IsolationRequest, IsolationResult } from './types.js'
+import { inspectIsolationGrant } from './diagnostics.js'
 
 export { Config }
 export const isolationPrincipalDigest = (principal: string): string => createHash('sha256').update(principal).digest('hex')
+export interface IsolationGrantDiscovery {
+  readonly id: string; readonly expiresAt: number; readonly remainingRuns: number; readonly remainingDurationMs: number
+  readonly limits: Readonly<{ maxDurationMs: number; maxInputBytes: number; maxOutputBytes: number; maxArtifactBytes: number; maxFiles: number }>
+}
 const digest = (value: unknown): string => createHash('sha256').update(JSON.stringify(value)).digest('hex')
+// Keep prompt visibility and the Host execution guard on the exact same named surface.
+const isolatedScopeTools = new Set(['isolation_run', 'isolation_grants', 'goal_context', 'goal_checkpoint'])
+const preauthorizedScopedTools = new Set(['action_github_commit', 'action_github_branch', 'action_github_pr', 'action_github_inspect', 'goal_create', 'goal_schedule', 'goal_strategy', 'goal_wait_event'])
+const isolatedPromptTools = new Set([...isolatedScopeTools, ...preauthorizedScopedTools])
+const restrictedScopeSection = 'Environment capability constraint: this authenticated workspace uses isolated execution. Host filesystem and shell tools are unavailable. The user request and explicitly supplied inline files are the only starting material; do not look for a Host project, pre-existing task file, or Host path. isolation_run starts a fresh scratch workspace with no Host project mount and no network. isolation_grants can show an existing finite grant; it cannot create or extend one.'
 const controllerTtlMs = 30_000
 declare module '@deepseek-ai/cordis' { interface Context { assistantIsolation: AssistantIsolationService } }
 
@@ -77,9 +88,19 @@ export class AssistantIsolationService extends Service {
     ctx.inject(['tools'], runtime => runtime.on('tools/execute', async (execution, next) => {
       const header = execution.agent?.session.header
       if (header !== undefined && this.#config.grants.some(grant => grant.workspace === header.cwd && grant.agentPreset === header.agentPreset)
-        && !['isolation_run', 'goal_context', 'goal_checkpoint'].includes(execution.name)
-        && !(['action_github_commit', 'goal_create', 'goal_schedule', 'goal_strategy'].includes(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool?.(execution))) throw new Error('assistant-isolation: this scope requires isolated execution')
+        && !isolatedScopeTools.has(execution.name)
+        && !(preauthorizedScopedTools.has(execution.name) && this.ctx.get('assistantPolicy')?.isPreauthorizedTool?.(execution))) throw new Error('assistant-isolation: this scope requires isolated execution')
       return await next()
+    }))
+    ctx.inject(['systemPrompt'], runtime => runtime.on('system-prompt/assemble', async (_assembly, { agent }, next) => {
+      const assembly = await next()
+      if (!this.#configuredOwnerScope(agent)) return assembly
+      return { ...assembly,
+        tools: assembly.tools.filter(tool => isolatedPromptTools.has(tool.name)),
+        // Append a capability fact without replacing deployment persona or safety sections.
+        sections: [...assembly.sections.filter(section => !section.name.startsWith('tools:') || isolatedPromptTools.has(section.name.slice('tools:'.length))),
+          { name: 'assistant-isolation:restricted-scope', text: restrictedScopeSection }],
+      }
     }))
     ctx.inject(['agents', 'assistantDelivery', 'assistantPolicy', 'tools'], runtime => registerIsolationTools(runtime, this))
   }
@@ -105,14 +126,46 @@ export class AssistantIsolationService extends Service {
     }).catch(() => { /* Keep reservations and retry only with a live controller. */ }).finally(() => { this.#sweep = undefined })
   }
 
-  #identity(agent: Agent | undefined, grantId: string): IsolationIdentity {
+  #ownerIdentity(agent: Agent | undefined): IsolationIdentity {
     if (!this.#active || !this.#ledger.hasController(this.#authority)) throw new Error('assistant-isolation: controller unavailable')
     if (agent === undefined || this.ctx.get('agents')?.get(agent.id) !== agent) throw new Error('assistant-isolation: exact live agent required')
     const owner = this.ctx.get('assistantDelivery')?.preferencePrincipalForAgent(agent)
     if (owner === undefined || owner.scope.workspace !== agent.session.header.cwd || owner.scope.preset !== agent.session.header.agentPreset) throw new Error('assistant-isolation: authenticated owner required')
-    if (this.ctx.get('assistantPolicy')?.evaluateAgent(agent, 'execute', { kind: 'tool', id: `isolation:${grantId}` }).effect !== 'allow') throw new Error('assistant-isolation: policy denied')
     return { principalDigest: isolationPrincipalDigest(owner.principalId), ...owner.principalLineage,
       workspace: owner.scope.workspace, agentPreset: owner.scope.preset }
+  }
+  /** Presentation is scoped only after live owner authentication, but remains restricted after grant revoke/expiry. */
+  #configuredOwnerScope(agent: Agent | undefined): boolean {
+    try {
+      const identity = this.#ownerIdentity(agent)
+      return this.#config.grants.some(grant => grant.workspace === identity.workspace && grant.agentPreset === identity.agentPreset)
+    } catch { return false }
+  }
+
+  #identity(agent: Agent | undefined, grantId: string): IsolationIdentity {
+    const identity = this.#ownerIdentity(agent)
+    if (this.ctx.get('assistantPolicy')?.evaluateAgent(agent, 'execute', { kind: 'tool', id: `isolation:${grantId}` }).effect !== 'allow') throw new Error('assistant-isolation: policy denied')
+    return identity
+  }
+
+  /** Model-visible read-only discovery for grants already authorized to this exact live owner scope. */
+  discover = async (agent: Agent | undefined): Promise<readonly IsolationGrantDiscovery[]> => {
+    await this.#ready
+    const identity = this.#ownerIdentity(agent)
+    if (this.ctx.get('assistantPolicy')?.evaluateAgent(agent!, 'execute', { kind: 'tool', id: 'isolation_grants' }).effect !== 'allow') throw new Error('assistant-isolation: policy denied')
+    const now = Date.now()
+    const grants: IsolationGrantDiscovery[] = []
+    for (const grant of this.#config.grants) {
+      if (!this.#ledger.permitsGrant(identity, grant.id)
+        || this.ctx.get('assistantPolicy')?.evaluateAgent(agent!, 'execute', { kind: 'tool', id: `isolation:${grant.id}` }).effect !== 'allow') continue
+      const diagnostic = inspectIsolationGrant({ stateRoot: this.#config.stateRoot, grant, now })
+      if (diagnostic.status !== 'available' || diagnostic.remainingRuns === null || diagnostic.remainingDurationMs === null) continue
+      grants.push(Object.freeze({ id: grant.id, expiresAt: grant.expiresAt, remainingRuns: diagnostic.remainingRuns,
+        remainingDurationMs: diagnostic.remainingDurationMs, limits: Object.freeze({ maxDurationMs: this.#config.limits.maxDurationMs,
+          maxInputBytes: this.#config.limits.maxInputBytes, maxOutputBytes: this.#config.limits.maxOutputBytes,
+          maxArtifactBytes: this.#config.limits.maxArtifactBytes, maxFiles: this.#config.limits.maxFiles }) }))
+    }
+    return Object.freeze(grants)
   }
 
   async #recover(): Promise<void> {

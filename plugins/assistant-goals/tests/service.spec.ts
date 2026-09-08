@@ -24,7 +24,7 @@ import type { AcceptanceProfile } from '@dsh-enhanced/assistant-verifier'
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup() })
 async function harness(databasePath?: string, maxContextChars?: number, duringGoalChange?: (agent: Agent) => void, verifyNativeRounds = false, verifyGoalOutcome = false, stepMaxDurationMs?: number,
-  options: Pick<GoalsConfig, 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits'> = {}) {
+  options: Pick<GoalsConfig, 'preauthorizedCreateMaxRounds' | 'preauthorizedSchedule' | 'executionBudget' | 'backgroundWake' | 'eventWaits'> = {}) {
   const root = await mkdtemp(join(tmpdir(), 'business-goals-'))
   const ctx = new Context()
   cleanups.push(async () => { await ctx.fiber.dispose(); await rm(root, { recursive: true, force: true }) })
@@ -98,6 +98,19 @@ const scheduleBudget = { modelCalls: 2, toolCalls: 2, inputTokens: 1_000, output
 const scheduleWake = { ownerRouteId: 'route-owner', budgetId: 'wake-budget' }
 
 describe('owner-scoped native goal context', () => {
+  it('explains the configured native goal entry only to a live authorized owner turn', async () => {
+    const f = await harness(undefined, undefined, undefined, true, true, undefined, { preauthorizedCreateMaxRounds: 3, executionBudget: scheduleBudget })
+    const owner = await f.create('entry-owner', 'owner'), other = await f.create('entry-other')
+    expect(f.service.snapshot(owner)).toBe('')
+    f.human.add(owner)
+    expect(f.service.snapshot(owner)).toContain('start_native_rounds=true')
+    expect(f.service.snapshot(owner)).toContain('this context grants no authority')
+    expect(f.service.snapshot(other)).toBe('')
+    expect(f.ctx.goals.get(owner)).toBeUndefined()
+    f.denyAction('create')
+    expect(f.service.snapshot(owner)).toBe('')
+  })
+
   it('keeps goal schedule preauthorization disabled by default', async () => {
     const f = await harness()
     expect(f.service.preauthorizedCreateEnabled).toBe(false)

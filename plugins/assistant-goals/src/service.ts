@@ -634,7 +634,13 @@ export class AssistantGoalsService extends Service {
       const scope = this.#scope(agent, 'snapshot')
       const current = this.#observe(agent!, false)
       const record = this.#store.focused(scope, String(agent!.session.id)) ?? current
-      return record === undefined ? '' : render(record, Date.now(), this.#maxChars, this.#feedback(record), this.#budget?.inspect(record), this.#outcome?.view(record), this.#strategyHistory(record), this.#eventWaitContext(record))
+      if (record === undefined) {
+        if (this.#createMaxRounds === 0) return ''
+        this.#scope(agent, 'create', false)
+        this.#requireOwnerTurn(agent!, scope)
+        return `Native goal workflow is configured for this authenticated owner request (at most ${this.#createMaxRounds} rounds). When the owner explicitly requests a finite or continuing goal, establish that goal with goal_create using the owner's full objective. start_native_rounds=true hands execution to the Host's bounded goal driver. Work performed only in an ordinary owner turn does not run independent goal acceptance. Goal creation still requires an exact authorized acceptance profile; this context grants no authority. Decide the implementation and tools yourself; tool success is not goal acceptance.`
+      }
+      return render(record, Date.now(), this.#maxChars, this.#feedback(record), this.#budget?.inspect(record), this.#outcome?.view(record), this.#strategyHistory(record), this.#eventWaitContext(record))
     } catch { return '' }
   }
 

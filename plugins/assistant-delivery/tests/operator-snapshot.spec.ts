@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
-import { inspectActiveWebOwnerBindingLocally } from '../src/operator-snapshot.ts'
+import { inspectActiveWebOwnerBindingLocally, listActiveIdleWebOwnerBindingsLocally } from '../src/operator-snapshot.ts'
 import { DeliveryStore } from '../src/store.ts'
 
 const roots: string[] = []
@@ -22,6 +22,48 @@ async function seeded() {
 }
 
 describe('local active Web owner snapshot', () => {
+  test('discovers only exact owner idle sessions without changing the database or hiding ambiguity', async () => {
+    const fixture = await seeded()
+    const query = { databasePath: fixture.path, expectedPrincipal: fixture.principal, workspace: '/work/a', agentPreset: 'primary' }
+    const list = () => listActiveIdleWebOwnerBindingsLocally(query)
+    const create = (sessionId: string, workspace = '/work/a') => fixture.store.createBinding({
+      conversation: { ...fixture.binding.conversation, chat: sessionId }, principal: fixture.principal,
+      workspace, agentPreset: 'primary', sessionId, policyRef: 'owner-dm',
+    })
+    expect(list()).toMatchObject({ status: 'matched', snapshots: [{ binding: { sessionId: 'session-a' } }] })
+    const second = create('session-b'); create('foreign-workspace', '/work/b')
+    const before = createHash('sha256').update(await readFile(fixture.path)).digest('hex')
+    const multiple = list()
+    expect(multiple.status === 'matched' && multiple.snapshots.map(value => value.binding.sessionId)).toEqual(['session-a', 'session-b'])
+    expect(createHash('sha256').update(await readFile(fixture.path)).digest('hex')).toBe(before)
+    const lease = fixture.store.claimSessionLease({ kind: 'bound', binding: second }, 'holder', 10_000)
+    expect(list()).toMatchObject({ status: 'matched', snapshots: [{ binding: { sessionId: 'session-a' } }] })
+    expect(listActiveIdleWebOwnerBindingsLocally({ ...query, expectedPrincipal: { ...fixture.principal, user: 'other' } })).toEqual({ status: 'matched', snapshots: [] })
+    if (lease.kind === 'claimed') fixture.store.finishSessionLease(lease.lease, { quiescent: false })
+    const owner = fixture.store.getPrincipal(fixture.principal)!
+    fixture.store.revokePrincipal(owner.id, owner.version)
+    expect(list()).toEqual({ status: 'matched', snapshots: [] })
+    fixture.store.close()
+  })
+
+  test('fails discovery closed for missing/private/schema-invalid databases and too many sessions', async () => {
+    const fixture = await seeded()
+    const query = { databasePath: fixture.path, expectedPrincipal: fixture.principal, workspace: '/work/a', agentPreset: 'primary' }
+    expect(listActiveIdleWebOwnerBindingsLocally({ ...query, databasePath: `${fixture.path}.missing` }).status).toBe('unavailable')
+    await chmod(fixture.path, 0o644)
+    expect(listActiveIdleWebOwnerBindingsLocally(query).status).toBe('unavailable')
+    await chmod(fixture.path, 0o600)
+    for (let index = 0; index < 100; index++) fixture.store.createBinding({
+      conversation: { ...fixture.binding.conversation, chat: `session-${index}` }, principal: fixture.principal,
+      workspace: '/work/a', agentPreset: 'primary', sessionId: `session-${index}`, policyRef: 'owner-dm',
+    })
+    expect(listActiveIdleWebOwnerBindingsLocally(query)).toEqual({ status: 'unavailable', reason: 'too-many-sessions' })
+    fixture.store.close()
+    const database = new DatabaseSync(fixture.path); database.exec('PRAGMA user_version = 18'); database.close()
+    expect(listActiveIdleWebOwnerBindingsLocally(query).status).toBe('unavailable')
+    const old = new DatabaseSync(fixture.path, { readOnly: true })
+    expect(old.prepare('PRAGMA user_version').get()).toMatchObject({ user_version: 18 }); old.close()
+  })
   test('reads an exact active owner binding without changing the database', async () => {
     const fixture = await seeded()
     const before = createHash('sha256').update(await readFile(fixture.path)).digest('hex')

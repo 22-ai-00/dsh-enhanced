@@ -15,6 +15,7 @@ export interface ActionGrant extends ActionIdentity {
   expiresAt: number
   maxActions: number
   maxTotalBytes: number
+  repoWorkflow?: { baseBranch: string; allowBranchCreate: boolean; allowPullRequest: boolean }
 }
 export interface CommitRequest {
   grantId: string
@@ -28,8 +29,17 @@ export interface ActionResult {
   status: 'succeeded' | 'failed' | 'unknown'
   commitOid?: string
   reason?: string
+  branch?: string
+  pullRequestNumber?: number
 }
+export interface BranchRequest { grantId: string; idempotencyKey: string; baseHeadOid: string }
+export interface PullRequestRequest { grantId: string; idempotencyKey: string; expectedHeadOid: string; title: string; body: string }
+export interface InspectRequest { grantId: string; kind: 'repository' | 'branch' | 'file' | 'pull-request' | 'checks' | 'reviews'; path?: string; pullRequestNumber?: number }
+export interface InspectOperation extends InspectRequest { operation: 'inspect'; idempotencyKey: string }
+export type WorkflowRequest = CommitRequest | BranchRequest | PullRequestRequest | InspectOperation
+export type ActionKind = 'commit' | 'branch' | 'pull-request' | 'inspect'
 export interface ActionRecord {
+  kind: ActionKind
   id: string
   identity: ActionIdentity
   sessionId: string

@@ -1,0 +1,82 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "172c70fa1ad9098e09ed99aed8f0266444843769",
+  "status": "local-fixes-validated-real-task-failed",
+  "completeWorkPackage": false,
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "path": "/tmp/dsh-repo-final-check.log",
+    "sha256": "d412ec80f412f544d95ef6125f8024333e807d35f489035f3d901128c48ff6e3",
+    "files": 332,
+    "tests": 4014,
+    "skipped": false,
+    "packs": 33
+  },
+  "independentReview": {
+    "localProductionFixes": "PASS",
+    "completeRealTask": "FAIL",
+    "targetedTests": {
+      "actions": 45,
+      "isolationDiscoveryAndPresentation": 4,
+      "goalsService": 27
+    }
+  },
+  "realRuns": [
+    {
+      "path": "/tmp/dsh-repo-autonomy-real-6.log",
+      "sha256": "ed17417bd7f0befbdd892386d4e36d8b26b85de5d28c2c0b37d081acbb14eaf6",
+      "exitCode": 1,
+      "outcome": "alwaysday1: real requests, no Goal or accepted artifact"
+    },
+    {
+      "path": "/tmp/dsh-repo-autonomy-codex-1.log",
+      "sha256": "12907193eec68555d608a5ba719380ec06010fd315c05140a25853512d2eda74",
+      "exitCode": 1,
+      "outcome": "codex-subscription: Web model unavailable, no task model request"
+    }
+  ],
+  "limitations": [
+    "Ordinary real-model task did not establish and complete a Goal",
+    "Codex subscription route unavailable in isolated Web profile; no task request dispatched",
+    "No real GitHub PR/CI lifecycle validation",
+    "No executing-goal restart or final result UI success assertion from new blackbox test"
+  ],
+  "sourceSha256": {
+    "plugins/assistant-actions/README.md": "a7895f294bd3386d7f6201bd97d95fa5efd2aa7342575cb97c40a4b55f6d3559",
+    "plugins/assistant-actions/src/config.ts": "34100d73c79cfabb7841e80cbdc84b30aca42dd4551d1d558b7e27c48dd41239",
+    "plugins/assistant-actions/src/github.ts": "372366206bc9d587539bd60f2aac92e792e1c8b3bbd1ce8f94e2fbdd9bcacc96",
+    "plugins/assistant-actions/src/ledger.ts": "95ad27c2de7bc1fbfd47e0a99291a8e65f0edea5baf371f1758c48d5a4cc3600",
+    "plugins/assistant-actions/src/service.ts": "1693a080c122e8c60260ce70508f1fb210c8c8915b20d25e27034567315a6b28",
+    "plugins/assistant-actions/src/types.ts": "2af2f70a622ba3a893b9dd273ea112f7538d2bdd761b6617be7cc6cf54cfb168",
+    "plugins/assistant-actions/tests/github-http.spec.ts": "cfea597049e7c40b79a386011ac51017ff9d7d99fd65d17e2f1fc0b6ebb63f60",
+    "plugins/assistant-actions/tests/ledger.spec.ts": "ed1ffac0fb117bb75ea4a6e354a19fa1b025341fa0c2c5023c0fd953563531c4",
+    "plugins/assistant-delivery/src/index.ts": "10c9e1fa2e3070fe69660df0bfd2b14c66414b7945e60757691d91856ee060c7",
+    "plugins/assistant-delivery/src/operator-snapshot.ts": "15d96a2496fbde3d47c5da4fc8956212d4534d993c766d7cf1678341c43a87ce",
+    "plugins/assistant-delivery/tests/operator-snapshot.spec.ts": "7bbbd5a64428650e14014a8fc24814e2c815c11632174729fbbb1f497dd02335",
+    "plugins/assistant-goals/README.md": "d1c6de7e89802896eaf0cdc1d0c5cacd251224ac244c205364ca79e79efb986c",
+    "plugins/assistant-goals/src/service.ts": "899e7e9a0ea3643ab03583b206c152a5666a722ec6f7dce5aa2d313e5ccb3c41",
+    "plugins/assistant-goals/tests/service.spec.ts": "18d62eae918aa71b22c6a807a5462d83c95ad37df2d07cde9c1eb9a0a0ca9e3a",
+    "plugins/assistant-isolation/README.md": "761c388802dc954b9be3c23c09c92803e9fec31cc27ec5f7568b744841eee6ef",
+    "plugins/assistant-isolation/package.json": "b7b0c8460ffb0f143b6562747a7f139329e5e784dce27c7cf661cd6596da0bde",
+    "plugins/assistant-isolation/src/service.ts": "dee02b22a3ab7806fab163371b68af61ac7430bc90300384c54091c2d88f7926",
+    "plugins/assistant-isolation/src/tools.ts": "2b29e784b498ab53206a7991f5c31e2831a0ff1f9f5084f0b5e67dddea0e1683",
+    "plugins/assistant-policy/src/service.ts": "de2a891ebad4680ee781ed9765ff42481bacedd60ce720c99860c105567e9c80",
+    "plugins/assistant-policy/tests/preauthorized-tool.spec.ts": "63458b7083837364a74ab5279d738a574bfc3660db97db099e124012f929a6ab",
+    "plugins/assistant-web-owner/README.md": "203ea6b7a5d232bccac49c1f2c33ee90112753459dd1f387e2bff8a00f2e61b6",
+    "plugins/assistant-web-owner/src/goal-admission.ts": "5fc8b819c693ab36eba9f6ec403dfb6b0faafa9deaaa8a0494eebf566e87666a",
+    "plugins/assistant-web-owner/src/goal-setup.ts": "a4453520596d5a973306e02862750f876ab482a15fba7d8f9237c258e76a938c",
+    "plugins/assistant-web-owner/src/setup.ts": "8ae4fedf8f7e03b18eee9c4b81fc0aa7449a26eece8b835cedcf5d30f72d74ca",
+    "plugins/assistant-web-owner/tests/goal-admission.spec.ts": "7f2f90eb91603b63fb99386d1bf72753dbc1e0ea857b3deba1e1580783f59943",
+    "scripts/install/README.md": "6067808a99681269b72100c6f77458b8c60ed77818834f0fe4a43312d630399a",
+    "scripts/install/common.sh": "82ff2f299972078386a82b46be8c9fda82f21a5c6a371412dd9b0d32ee616ad8",
+    "tests/installers-autonomy.spec.ts": "e180278a4d9e974f43176d29384b24761c2f762978803042aa3557698b2cb57a",
+    "plugins/assistant-actions/tests/workflow-service.spec.ts": "7ab9caf224b869f324d67e873e1550a0220054e4a4212d53ac6b99435cf95dec",
+    "plugins/assistant-isolation/tests/grant-discovery.spec.ts": "547522e5fde337a050b5b1659cf35bfa57e7567bd31d3d6907c0afdbb087ed44",
+    "plugins/assistant-isolation/tests/scoped-presentation.spec.ts": "8962270b4107ea6596e74d6bc735ca32a5a65ac7a28c323650a832d8332e381b",
+    "scripts/e2e/playwright-repo-real.config.mjs": "e16c88b32fff4c2204a6d2642c233160400b10acdf0dbd736eff2eda8008f5fe",
+    "scripts/e2e/repo-autonomy-observer.mjs": "d7a58f33f0df10c1f19dc30c062398939e2ca6f017e611a88911ad565fec2051",
+    "scripts/e2e/repo-autonomy-real.spec.mjs": "8a1df66e176021ccf5a7c83323d1142a195eb0eeaeeb4cdb5154366f0c327908"
+  }
+}

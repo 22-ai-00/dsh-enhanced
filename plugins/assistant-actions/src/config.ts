@@ -13,6 +13,7 @@ export const Config: Schema<Config> = Schema.object({
     workspace: Schema.string().required(), agentPreset: Schema.string().required(), repository: Schema.string().required(), branch: Schema.string().required(),
     paths: Schema.array(Schema.string()).required(), credentialHandle: Schema.string().required(), expiresAt: positive(Number.MAX_SAFE_INTEGER).required(),
     maxActions: positive(10_000).required(), maxTotalBytes: positive(64 * 1024 * 1024).required(),
+    repoWorkflow: Schema.union([Schema.object({ baseBranch: Schema.string().required(), allowBranchCreate: Schema.boolean().required(), allowPullRequest: Schema.boolean().required() })]),
   })).default([]),
 })
 const text = (value: unknown, max = 256): value is string => typeof value === 'string' && value.length > 0 && value.length <= max && !/[\p{Cc}]/u.test(value)
@@ -25,7 +26,7 @@ export function validateConfig(input: Config): Required<Config> {
   const grants = structuredClone(input.grants ?? [])
   if (!Array.isArray(grants) || grants.length > 1000 || new Set(grants.map(grant => grant.id)).size !== grants.length) throw new Error('assistant-actions: invalid grants')
   for (const grant of grants) {
-    if (!grant || Object.keys(grant).length !== 14 || !text(grant.id) || !Number.isSafeInteger(grant.revision) || grant.revision < 1
+    if (!grant || ![14, 15].includes(Object.keys(grant).length) || !text(grant.id) || !Number.isSafeInteger(grant.revision) || grant.revision < 1
       || !/^[0-9a-f]{64}$/.test(grant.principalDigest) || !text(grant.principalRecordId) || !Number.isSafeInteger(grant.principalVersion) || grant.principalVersion < 1
       || !isAbsolute(grant.workspace) || resolve(grant.workspace) !== grant.workspace || !text(grant.agentPreset)
       || !/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(grant.repository) || grant.repository.length > 256
@@ -34,7 +35,11 @@ export function validateConfig(input: Config): Required<Config> {
       || !Array.isArray(grant.paths) || grant.paths.length < 1 || grant.paths.length > 128 || !grant.paths.every(validPath) || new Set(grant.paths).size !== grant.paths.length
       || !text(grant.credentialHandle) || !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt < 1
       || !Number.isSafeInteger(grant.maxActions) || grant.maxActions < 1 || grant.maxActions > 10_000
-      || !Number.isSafeInteger(grant.maxTotalBytes) || grant.maxTotalBytes < 1 || grant.maxTotalBytes > 64 * 1024 * 1024) throw new Error('assistant-actions: invalid grant')
+      || !Number.isSafeInteger(grant.maxTotalBytes) || grant.maxTotalBytes < 1 || grant.maxTotalBytes > 64 * 1024 * 1024
+      || (grant.repoWorkflow !== undefined && (!grant.repoWorkflow || Object.keys(grant.repoWorkflow).length !== 3 || !text(grant.repoWorkflow.baseBranch)
+        || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(grant.repoWorkflow.baseBranch) || grant.repoWorkflow.baseBranch.includes('..') || grant.repoWorkflow.baseBranch.startsWith('refs/')
+        || grant.repoWorkflow.baseBranch === grant.branch || grant.repoWorkflow.baseBranch.split('/').some(part => !part || part.startsWith('.') || part.endsWith('.') || part.endsWith('.lock'))
+        || typeof grant.repoWorkflow.allowBranchCreate !== 'boolean' || typeof grant.repoWorkflow.allowPullRequest !== 'boolean'))) throw new Error('assistant-actions: invalid grant')
   }
   return { stateRoot, grants }
 }

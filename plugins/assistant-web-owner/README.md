@@ -73,14 +73,14 @@ Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租�
 
 在已完成 `autonomy` 安装后，可用一次离线 setup 把**一个已有、空闲的 Web owner Session**配置为固定 DeepSeek 路由、有限 Goals 预算、独立隔离验收条件和可选 wake route。先停止目标 Host；准备工作区之外、当前用户所有且权限为 `0600` 的 JSON 任务文件。不要把 API key 写进文件，`apiKeyEnv` 只是 credential reference。
 
-当前没有专用的 Session ID 发现命令，也不保证 Web UI 会显示它。此操作要求操作者已持有准确的既有 Web owner Session ID；不要猜测、伪造或把其他渠道 Session 当作 Web owner Session。
+先用正式 setup 入口列出当前 owner 的真实空闲 Session；它只读取匹配当前 Web principal、workspace 和 preset 的 Delivery binding，绝不创建或伪造原生 Session。新 profile 需要先从原生 Web UI 打开一次，让 DSH 创建 Session。`--session-id` 可显式选择；省略时只有一个合法空闲 binding 才会自动选择，多个候选会原样列出并拒绝继续。
 
 ```sh
 # 已完成 autonomy 安装；Host 停止后执行
 chmod 600 /private/goal-admission.json
-existingSessionId='实际的既有空闲 Web owner Session ID'
+dsh-web-owner-setup --profile web --workspace /absolute/workspace --list-goal-sessions
 dsh-web-owner-setup --profile web --workspace /absolute/workspace \
-  --goal-admission /private/goal-admission.json --session-id "$existingSessionId"
+  --goal-admission /private/goal-admission.json
 
 # 应用 patch 后才重启目标 Host
 dsh --profile web --no-open
@@ -122,7 +122,27 @@ dsh --profile web --no-open
 }
 ```
 
-模型固定为 `deepseek-v4-flash` 或 `deepseek-v4-pro`，endpoint 不可配置。每次目标模型调用会保守预留至少 `2,097,152` 输入 tokens；当前没有 USD 硬预算，任务不得添加 `costUsdMicros`。重复相同 admission 不改变 patch 字节、不会续期 Isolation grant、不会重置已用次数或扩大预算。与本次任务要求冲突的已有受管配置或同 ID 条目会拒绝，而不是被覆盖。
+该 v1 格式保留固定 `deepseek-v4-flash` 或 `deepseek-v4-pro` 路径，endpoint 不可配置。每次目标模型调用会保守预留至少 `2,097,152` 输入 tokens；当前没有 USD 硬预算，任务不得添加 `costUsdMicros`。
+
+v2 可使用安装器已经配置且实际出现在 `agent-default-model` 的任意精确 provider/model，例如 `super-relay`、`auto_model` 或 `alwaysday1`。它不会写入模型、endpoint 或 secret 配置：`route` 必须与已配置默认 route 完全相等，且 calls budget 的唯一 `routes` 项必须与它相同。
+
+```json
+{
+  "version": 2,
+  "objective": "Verify the generated artifact",
+  "route": { "provider": "super-relay", "model": "relay-v2" },
+  "maxGoalRounds": 2,
+  "stepMaxDurationMs": 60000,
+  "executionBudget": {
+    "mode": "calls", "modelCalls": 3, "toolCalls": 3,
+    "durationMs": 120000, "maxOutputTokensPerCall": 8192,
+    "routes": [{ "provider": "super-relay", "model": "relay-v2" }]
+  },
+  "verification": { "artifactPath": "result.txt", "command": "node verify.mjs", "maxRuns": 4, "maxTotalDurationMs": 100000, "maxDurationMs": 20000, "maxOutputBytes": 4096, "cases": [{ "stdin": "one\n", "expectedStdout": "one\n", "expectedExitCode": 0 }] }
+}
+```
+
+v2 的硬限制是模型请求数、工具请求数、总时长和每次输出上限；若 adapter 提供 usage，会作为记录使用，但不是 token 或 USD 硬限制。重复相同 admission 不改变 patch 字节、不会续期 Isolation grant、不会重置已用次数或扩大预算。与本次任务要求冲突的已有受管配置或同 ID 条目会拒绝，而不是被覆盖。
 
 该精确 Session 仅用于核验 owner 和可选 wake route；生成的 profiles 绑定 owner、scope 和 objective。setup 只写入并复核本地配置、已有 owner snapshot 与持久 grant；它不发 DeepSeek 请求、不创建 Goal、不证明凭据可用、网络连通、模型质量、隔离验收成功或完整 WP17/长期自治已经完成。grant 已过期、撤销、耗尽，owner/version 改变，或 Session 有 pending/dispatched/unknown lease 时必须先按正常运维流程处理，不能靠重跑此命令续权。
 
