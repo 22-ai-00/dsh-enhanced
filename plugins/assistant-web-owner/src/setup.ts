@@ -58,7 +58,7 @@ function merge(base: YAMLMap, overlay: YAMLMap): YAMLMap {
   }
   return result
 }
-function literalPath(node: unknown, input: WebOwnerSetupInput, label: string): string {
+export function literalPath(node: unknown, input: WebOwnerSetupInput, label: string): string {
   if (!isScalar(node) || typeof node.value !== 'string') fail(`${label} must be an absolute path`)
   let value = node.value
   if (node.tag === 'tag:yaml.org,2002:js') {

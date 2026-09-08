@@ -12,8 +12,9 @@ import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createDefinition, instantiate, type SkillBinding } from './definition.js'
-import { validateComparisonProfiles, type SkillComparisonProfile, type SkillComparator } from './comparison.js'
+import { validateComparisonProfiles, SkillComparator, type SkillComparisonProfile } from './comparison.js'
 import { watchObservation } from './watch-proof.js'
+import { sealedPlan, type SealedSkillHoldoutProvider } from './sealed-holdout.js'
 import { SkillStore, type SkillWatch, type SkillCandidate, type SkillRunStep, type StoredSkillDefinition } from './store.js'
 
 export interface Config { databasePath?: string; allowedTools?: string[]; maxDurationMs?: number; candidateTtlMs?: number; comparisons?: SkillComparisonProfile[] }
@@ -49,6 +50,8 @@ export class AssistantSkillsService extends Service {
   readonly #comparing = new Set<Promise<unknown>>()
   readonly #lifecycle = new AbortController()
   readonly #providers = new Set<SkillProviderControl>()
+  #sealedHoldout: SealedSkillHoldoutProvider | undefined
+  #sealedGeneration: string | undefined
   #reconcileQueued = false
   #active = true
   constructor(ctx: Context, config: Config = {}) {
@@ -161,6 +164,44 @@ export class AssistantSkillsService extends Service {
     if (policy?.authorizeAgent(agent, action, resource, { idempotencyKey: `skill-${acceptanceDigest([action, key])}` }).effect !== 'allow') throw new Error('assistant-skills: policy authorization denied')
   }
   #changed(): void { for (const control of this.#providers) control.invalidate() }
+  /** Host-only registration; there is intentionally no model tool for sealed inputs or attestations. */
+  registerSealedHoldoutProvider = (provider: SealedSkillHoldoutProvider): (() => void) => {
+    if (!this.#active || this.#sealedHoldout !== undefined || !provider || typeof provider.read !== 'function' || typeof provider.generation !== 'string' || !provider.generation) throw new Error('assistant-skills: sealed holdout provider unavailable')
+    this.#sealedHoldout = provider; this.#sealedGeneration = provider.generation
+    return () => { if (this.#sealedHoldout === provider) { this.#sealedHoldout = undefined; this.#sealedGeneration = undefined } }
+  }
+  inspectSealedHoldout = (planId: string, scope: GoalScope) => {
+    if (!this.#active || !this.#sealedHoldout) throw new Error('assistant-skills: sealed holdout provider unavailable')
+    const plan = sealedPlan(this.#sealedHoldout, planId, scope)
+    // The opaque plan is deliberately not returned. This is only a Host-attested binding.
+    return Object.freeze({ protocol: 'assistant-skills/sealed-holdout-binding/v1' as const, planId, bindingDigest: plan.bindingDigest, attestationDigest: plan.attestationDigest })
+  }
+  /** Host entrypoint: consumes opaque provider cases through the same native replay and isolated verifier as compare. */
+  qualifySealedHoldout = async (exec: ToolRunContext, candidateId: string, planId: string, invocationId: string) => {
+    const scope = this.#scope(exec.agent, 'compare'), provider = this.#sealedHoldout, generation = this.#sealedGeneration, plan = provider && generation === provider.generation && sealedPlan(provider, planId, scope)
+    if (!plan || plan.profile.expiresAt <= Date.now() || acceptanceDigest(plan.profile.scope) !== acceptanceDigest(scope)) throw new Error('assistant-skills: sealed holdout plan unavailable')
+    const candidate = this.#store.getCandidate(scope, candidateId)
+    if (!candidate?.parentDigest) throw new Error('assistant-skills: sealed qualification requires an existing parent')
+    const claim = this.#store.claimComparison(scope, { sessionId: String(exec.agent!.session.id), candidateId, parentDigest: candidate.parentDigest, profileId: `sealed-${planId}`, profileDigest: plan.bindingDigest, invocationId }, plan.profile.maxComparisons)
+    const current = (running = true) => {
+      exec.signal.throwIfAborted(); this.#lifecycle.signal.throwIfAborted()
+      const fresh = this.#sealedHoldout === provider && this.#sealedGeneration === generation && provider?.generation === generation ? sealedPlan(provider, planId, scope) : undefined
+      if (!fresh || fresh.bindingDigest !== plan.bindingDigest || Date.now() >= plan.profile.expiresAt || acceptanceDigest(this.#scope(exec.agent, 'compare')) !== acceptanceDigest(scope) || running && this.#store.getComparison(scope, claim.comparison.id)?.state !== 'running') throw new Error('assistant-skills: sealed qualification authority changed')
+      this.#pending(scope, candidateId)
+    }
+    if (!claim.claimed) { current(false); return claim.comparison }
+    const operation = (async () => {
+    try {
+      this.#authorize(exec.agent, 'compare', claim.comparison.id)
+      current(); const baseline = this.#store.get(scope, candidate.definition.name, candidate.parentVersion)!
+      const comparator = new SkillComparator(plan.profile)
+      try { const result = await comparator.compare(claim.comparison.id, baseline, candidate.definition, AbortSignal.any([exec.signal, this.#lifecycle.signal]), current); current(); return this.#store.finishComparison(scope, claim.comparison.id, result.report.complete && result.report.variants.every(value => value.unknown === 0) ? 'complete' : 'unknown', { ...result, hostAttestedHoldout: { bindingDigest: plan.bindingDigest }, promotionAuthorized: false }) } finally { await comparator.close() }
+    } catch {
+      this.#store.finishComparison(scope, claim.comparison.id, 'unknown', { reason: 'sealed-qualification-failed-or-authority-changed', promotionAuthorized: false }); throw new Error(`assistant-skills: sealed qualification ${claim.comparison.id} is unknown; inspect status, do not replay`)
+    } })()
+    this.#comparing.add(operation)
+    try { return await operation } finally { this.#comparing.delete(operation) }
+  }
   save(agent: Agent | undefined, goalId: string, options: { name: string; description: string; bindings?: readonly SkillBinding[] }, expectedVersion = 0) {
     const scope = this.#scope(agent, 'save')
     const source = this.#goals().inspectVerifiedWorkflowSource(agent, goalId)

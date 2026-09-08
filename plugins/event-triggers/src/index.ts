@@ -8,11 +8,15 @@ export { Config, EventTriggersService, version }
 export * from './config.js'
 export * from './service.js'
 export * from './source.js'
+export * from './observer.js'
 
 export function apply(ctx: Context, config: import('./config.js').Config): void {
   const normalized = normalizeEventTriggersConfig(config)
-  if (normalized.triggers.some(trigger => trigger.kind === 'webhook')) {
-    ctx.inject(['credentialsKeychain'], (credentialsCtx) => {
+  const dependencies: string[] = []
+  if (normalized.triggers.some(trigger => trigger.kind === 'webhook' || trigger.kind === 'github-repository')) dependencies.push('credentialsKeychain')
+  if (normalized.triggers.some(trigger => trigger.observer !== undefined)) dependencies.push('assistantDelivery')
+  if (dependencies.length) {
+    ctx.inject(dependencies as never, (credentialsCtx) => {
       new EventTriggersService(credentialsCtx, config)
     })
     return
@@ -20,4 +24,6 @@ export function apply(ctx: Context, config: import('./config.js').Config): void 
   new EventTriggersService(ctx, config)
 }
 
-export default EventTriggersService
+// DSH unwraps default exports. Keep the consumer identity and conditional
+// credential/owner-route injection on the object actually mounted by it.
+export default { name, Config, apply }

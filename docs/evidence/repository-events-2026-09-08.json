@@ -1,0 +1,259 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "f7e76a1c859c82cfc933740feef87d0cedb5461e",
+  "status": "repository-event-fixture-lifecycle-validated",
+  "completeWorkPackage": false,
+  "fullCheck": {
+    "command": "CI=true VITEST_MAX_WORKERS=4 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 pnpm check",
+    "exitCode": 0,
+    "path": "/tmp/dsh-repository-event-check.log",
+    "sha256": "837016b835a442507db11a8985ab0dbd63a87f902fc9c8e67c8af89219439fd0",
+    "files": 341,
+    "tests": 4138,
+    "packs": 33,
+    "skipped": false
+  },
+  "sourceSha256": {
+    "plugins/README.md": "beb86558803c845a0081ed494d701303b17655dad81682aa1df22fc283c3b0d1",
+    "plugins/assistant-automations/src/external-event.ts": "baa7a1be614f4f3c3e47786ab52c0d62e83e1a039ebf7f3fa4f7a3fd9dede9a6",
+    "plugins/assistant-automations/src/service.ts": "382e2aadc6f69235f1b7ae909651cb10f0a81249bedfc207ca179da25b6edb3b",
+    "plugins/assistant-delivery/src/agent-runtime.ts": "d8c5dfc691f89125ac67f2eb5c6ba52b2affa1722a6ff67970a2e06b75a798cf",
+    "plugins/assistant-delivery/src/native-web-owner.ts": "51b83c25fe1a83191bb3a6a65175c2496ec4387d75a8459e6f5f47fdfb012bc5",
+    "plugins/assistant-delivery/tests/agent-runtime.spec.ts": "f00c89baea76714eca6fbfbda3de7b2b1063947c71dc34f60e7b95cefd6f7f56",
+    "plugins/assistant-goals/src/event-wait-store.ts": "f494b77609adbf638f3a6e2d4a038d3e550dceb01b71bbcc20ae74b8daeaee00",
+    "plugins/assistant-goals/src/event-wait.ts": "0169381136cd88dcfec0d43a523893976d7bd66b640fad3fdc8ca1f682692ea5",
+    "plugins/assistant-goals/src/execution.ts": "cc7de24ea0e753551ff57c66990270e72c605584293ac163b05fa4a26cd8ac95",
+    "plugins/assistant-goals/src/service.ts": "5cc1070468224a056f86f065745f210f685ccd37f90e4923170140934c808473",
+    "plugins/assistant-goals/src/tools.ts": "3b2e71d96877998768fd64217c3c8e5d242e25a373e9ed3c9cf43a524f333850",
+    "plugins/assistant-goals/src/wake.ts": "8e1fcde9ba0831f4e81c8dbf458e101bb5275c13f9bced644f7994611d6f0c37",
+    "plugins/assistant-goals/tests/event-wait.spec.ts": "da0beaf6b8c1d0a94e7b71c20487e9f039186236ebfdfccfdeeea7efe9e436b5",
+    "plugins/assistant-goals/tests/service.spec.ts": "9df06424a1a04ba4044104c2977656c339a6abbec21a83b622f240f9464b6c51",
+    "plugins/assistant-goals/tests/wake.spec.ts": "2c3a8593224c92db2c5b2f8dbff89f765e101f679db222f4ff536c623ae26b74",
+    "plugins/assistant-skills/README.md": "fdbbc659d84f24aec44b3e0dabf45ab2416b7169ed57d8c97fbf3f6ca141ee9b",
+    "plugins/assistant-skills/src/index.ts": "de1d2fe90e8556a2959d95343c7a0be4c9371befa3a0cf0d0a78e399ef11fc5d",
+    "plugins/assistant-skills/src/sealed-holdout.ts": "899ebf0e49041e0394e4e451fab6354b5ab3c690e667d8ddae85494ecb3ac779",
+    "plugins/assistant-skills/src/service.ts": "de14768c7faf0ecddf85f8b7540b4ab56e5042098ec0df69f9cd58a7a8d5776e",
+    "plugins/assistant-skills/tests/sealed-holdout.spec.ts": "ed5acc5f657cca4b2be2fe36d5c66a5a71e212ad42a8b379c2a6be000648df5c",
+    "plugins/assistant-skills/tests/service.spec.ts": "f4ca4f1efd2f2176a1d5a9d17a98273ddacaf5c51056f189f7ec78ea58378f47",
+    "plugins/assistant-web-owner/README.md": "e4aa9e53d0404677d4470da76d40f19b48ab87a95679a617e3d8dcd80be2c8bd",
+    "plugins/assistant-web-owner/package.json": "d83c5e4251e2bfda0752d778da6c46ea8c9f14553566ad3fff1c1794967e0767",
+    "plugins/assistant-web-owner/src/goal-admission.ts": "e71a7a1fa52ccafae1c9db410edd56434c59f9ab377c80faf5178186a39f2302",
+    "plugins/assistant-web-owner/src/goal-setup.ts": "e092edc594bd78fcbee4af09c2b0f69e35806239fd904213d6f35a8adf4a68da",
+    "plugins/assistant-web-owner/src/setup.ts": "3e79e009e258c5e8f7e79fb156fe73eff51b09911b833a8a29c714b2db4f1952",
+    "plugins/assistant-web-owner/tests/goal-admission.spec.ts": "e2b0d1e56eb018180e47f85d5788c472e970f26af17dc09dc8c9c1de882ef3dc",
+    "plugins/event-triggers/README.md": "72fdc29eb870687276e2fc4ddedfffd808693c52f2985f0ee38ad851c6280ff2",
+    "plugins/event-triggers/package.json": "fa8b616ed5e4645f2ec16ce433505ea1c7a8c5fa85f3d38bdd6f3206df1e987f",
+    "plugins/event-triggers/src/config.ts": "4d4c6e91b74c1822019f70391a137132e1e6d056ada05936ccb67994d69b8d39",
+    "plugins/event-triggers/src/github-sensor.ts": "5c78a0dc128724a99b9136ea955161e79ece23e56e581451b71aec927049076e",
+    "plugins/event-triggers/src/index.ts": "18dc36f82ca1fa37cfe04393aa17c84c5570ac99045fef587d74b0d1aee5b76c",
+    "plugins/event-triggers/src/observer.ts": "383c8baad3fdcf2ed5e919a4025d625878a3edc27e5a07a60091fa738a3b45f7",
+    "plugins/event-triggers/src/sensors.ts": "2fa5484ff66fc87ae3f4b55101823edff82b7cc098e099839b94eb9c2d526832",
+    "plugins/event-triggers/src/service.ts": "21a4dda07aa49f403bc37b88b70656b12779ff3d75f3954be0cbea3226d4ebab",
+    "plugins/event-triggers/src/source.ts": "590e0a99d2b6f2005c09f889c640c6a05047b97e24db0c2656a39f53f0909020",
+    "plugins/event-triggers/src/store.ts": "c3ea2ab49522c6908d7269d73929eff7afed0824090c823f6f5b19d5e99bc9e0",
+    "plugins/event-triggers/tests/github-sensor.spec.ts": "b22ea802575c4d0fcb0bdb68d2ce7f0c1be67aae7d4434d9dd3e42ab266925e4",
+    "plugins/event-triggers/tests/index.spec.ts": "a21fd05f8864866a3c46e33d183c34880631ea01c8c74025732c1181a9cb4ee9",
+    "plugins/event-triggers/tests/observer.spec.ts": "2267a8d236070b8ea19c07725f273e83d96b27adab0f08bd186aff63aa9521ce",
+    "plugins/event-triggers/tests/repository-service.spec.ts": "600e50e1ac97918f1a911f47b9fd160fb7430daef164de0c42bab7fdc3b6f917",
+    "scripts/e2e/README.md": "9221ec9fadbc21a7a17e96b319bab8f3c32f4c21ce958991a305c96aa41eeeac",
+    "scripts/e2e/playwright-repo-real.config.mjs": "f3ffb4f70c2014c7a34bae8d9a4b9a59fd4c7c6fe8f5b025f7c55cd0bb7f5c17",
+    "scripts/e2e/repo-autonomy-observer.mjs": "2c54eed76acfcc8bd83a951736892405223eb7f1d67caf2fde0c0b8f7262cd3d",
+    "scripts/e2e/repo-autonomy-real.spec.mjs": "df178687c7f8ccb6db5cb3fc17444a4dbbce8cfa93a25e63e6bd808b8efd64f6",
+    "scripts/e2e/repo-event-transport-fixture.mjs": "cb1c0eaf9fafb0b48dcc89481fb22a44cbbdb97d71848f5b406b4bcc9cf5ca1c",
+    "scripts/e2e/repo-session-navigation.mjs": "03e9c4972c1902d78eb3ace36b2f5e5b1acec591130a8f41fc4ba68b0a9c17a1",
+    "scripts/e2e/repo-verified-delivery-fixture.mjs": "fdf8d6fcafaaf4982f129dfd7785ccdb002c930014596a28c8d32cce368d835a"
+  },
+  "verifiedBehaviors": [
+    "Installed authenticated GitHub observation uses the real EventTriggers/Automations Host executor, Keychain and Policy. Repository HTTP transport is an explicit fixture.",
+    "Exact original Goal/Session resumes after a durable wait and Host restart; a resumed round may register another authorized wait. Native catalog context is admitted without accepting arbitrary input.",
+    "Foreground and scheduled execution use the same already authorized model route. Source-run budget scopes do not collide with the wake budget.",
+    "Native WebOwner retains the exact Agent through pending execution settlement; owner revocation and lease expiry still stop work.",
+    "Events only trigger inspection. Independent repository acceptance binds the delivered head, fresh checks and review; events do not establish success.",
+    "Skills Host comparison plans bind frozen provider/profile/generation and exact plan digest with current owner/Policy and durable replay protections; this extension does not establish held-out independence or authorize promotion."
+  ],
+  "limitations": [
+    "No live GitHub API/PR/CI/review scenario; both repository action and observation transports are fixtures.",
+    "One finite ordinary task does not establish general task reliability or long-running benefit.",
+    "Goal completion does not automatically retire the source; it remains bounded by its finite authorization expiry and observation/event budgets.",
+    "Skills heldoutIndependence remains unproven and promotionAuthorized remains false; no production independent holdout provider or automatic growth delivery is claimed.",
+    "No ChatGPT web review because the skill-required in-app browser capability was unavailable.",
+    "Full 18-work-package scope remains 3 verified, 13 implementing, 2 todo."
+  ],
+  "resolvedFailures": [
+    "Actual native skill-catalog input was rejected by the scheduled wake fence; allow only the native catalog and system prompt snapshots alongside the exact Goal input.",
+    "Scheduled Delivery previously chose its default provider rather than the authorized Web route; the admission now pins the already configured route.",
+    "WebOwner could release a paused Agent before its native execution flush settled; exact per-Agent pending settlement now retains its existing bounded owner lease.",
+    "Global source and wake automation-runs budgets collided in the Policy scope/metric/period bucket; source budgets now use stable subject scopes.",
+    "Resumed event rounds lacked business Goal wait/pause Policy actions; the event-specific background rule now admits the existing exact-run guarded wait.",
+    "Model context now distinguishes business Goal IDs from native IDs, durable waiting from merely ending an active round, and external waiting from ending a ready round for independent acceptance.",
+    "Keychain lease TTL respects its 1000ms minimum while the observation HTTP deadline may remain 100ms.",
+    "Attempts16-18 completed the business chain but failed final fresh-browser session navigation. A retained environment showed correct persistent headers, workspace membership and nonblank/unarchived server summaries. Hover adds action-button names to the workspace treeitem accessible name, invalidating the exact-name locator; matching a stable child control fixes the local reproduction."
+  ],
+  "packageInspection": [
+    "All 33 dry-run lists inspected; new github-sensor and sealed-holdout JS/declarations, patch, README and LICENSE are included; tests, coverage and SQLite data are absent."
+  ],
+  "coldNavigationRegression": {
+    "log": "/tmp/dsh-event-cold-navigation-regression.log",
+    "sha256": "748ce1a4c263332266e2d2c082dee95bec5905bd9e1d3af6988db04d761ac30b",
+    "exitCode": 0,
+    "hostBrowserRestarts": 3,
+    "newModelDispatches": 0,
+    "usesShippedE2eHelper": true
+  },
+  "afterFullCheckChanges": {
+    "scope": "E2E navigation and diagnostic scripts plus documentation; no production source changes",
+    "targetedLintExitCode": 0
+  },
+  "independentReview": {
+    "reviewer": "repository_event_review",
+    "role": "independent read-only verifier",
+    "engineering": "PASS",
+    "fullE2e": "PASS: final attempt19 proof independently reviewed after successful run",
+    "limitations": [
+      "GitHub action/observation transports and test credential are fixtures; no live GitHub production credential or remote lifecycle verified.",
+      "Navigation identifies the single isolated test session by title; it is not a general same-title disambiguation test."
+    ]
+  },
+  "realModelE2e": {
+    "command": "CI=true DSH_REPO_RETAIN_FAILURE=1 PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs",
+    "exitCode": 0,
+    "result": "1 passed (3.6m)",
+    "log": "/tmp/dsh-repository-event-real-attempt-19.log",
+    "logSha256": "77db463f3027737cf0e269ff28366bfbfd507b6fd2b2b7ce6572782a4da58375",
+    "proof": ".cache/repo-autonomy-real-codex-subscription-delivery-fixture-event-fixture-e2e/repo-autonomy-real-formal--92374-ry-isolated-repository-task/proof.json",
+    "proofSha256": "1b9441c96ee876e36e48ec330743f5c47a7f1f7e732a295181c15a2a9e7c8b44",
+    "diagnosticsSha256": "c9889a744655524bcd2d85105f3aed21332acebe0b3aa32797dae842849d2f08",
+    "provider": "codex-subscription",
+    "model": "gpt-5.6-terra",
+    "modelDispatches": 14,
+    "goalId": "d3be518ef8ee6fe1688f58b772479a973e042df38c410b8eb380f7c005b14542",
+    "sessionId": "session-03bec49b-ecb0-471d-a70f-2144f98b428d",
+    "native": {
+      "phase": "complete",
+      "revision": 6,
+      "roundsStarted": 3
+    },
+    "executionRuns": [
+      {
+        "round": 1,
+        "runId": "goal-run-dffad34cbf76a67067016db7863d384918af3aaff71897086152d9fbcc00e664",
+        "goalId": "d3be518ef8ee6fe1688f58b772479a973e042df38c410b8eb380f7c005b14542",
+        "admissionAt": 1788895339574,
+        "dispatchedAt": 1788895339607,
+        "status": "succeeded",
+        "quiescent": true,
+        "completedAt": 1788895379399
+      },
+      {
+        "round": 2,
+        "runId": "goal-run-9870c8dcc62758f0d12d73f2813a68e9afe113edd7816c0cfb909c75028f32fe",
+        "goalId": "d3be518ef8ee6fe1688f58b772479a973e042df38c410b8eb380f7c005b14542",
+        "admissionAt": 1788895394585,
+        "dispatchedAt": 1788895394615,
+        "status": "succeeded",
+        "quiescent": true,
+        "completedAt": 1788895415086
+      },
+      {
+        "round": 3,
+        "runId": "goal-run-7bb4584423740bfdc08044a5e997a8641208710c5ca98cda977a7e0fd05ddaf4",
+        "goalId": "d3be518ef8ee6fe1688f58b772479a973e042df38c410b8eb380f7c005b14542",
+        "admissionAt": 1788895432620,
+        "dispatchedAt": 1788895432656,
+        "status": "succeeded",
+        "quiescent": true,
+        "completedAt": 1788895445913
+      }
+    ],
+    "waits": [
+      {
+        "id": "goal-event-wait-324f333529a3d2295d8004af0a72c49d544eb9c111fec36fd958b29f5eb3cb8b",
+        "state": "terminal",
+        "reason": "settled",
+        "nativeRevision": 2
+      },
+      {
+        "id": "goal-event-wait-93e8744ee02900c91bbaa1662294512a4cda3a73243ce166c7eb168b1255c5c1",
+        "state": "terminal",
+        "reason": "settled",
+        "nativeRevision": 4
+      }
+    ],
+    "wakes": [
+      {
+        "id": "goal-event-wake-goal-event-wait-324f333529a3d2295d8004af0a72c49d544eb9c111fec36fd958b29f5eb3cb8b",
+        "state": "succeeded"
+      },
+      {
+        "id": "goal-event-wake-goal-event-wait-93e8744ee02900c91bbaa1662294512a4cda3a73243ce166c7eb168b1255c5c1",
+        "state": "succeeded"
+      }
+    ],
+    "sourceRuns": [
+      {
+        "status": "succeeded"
+      }
+    ],
+    "repositoryOutcome": {
+      "completedAt": 1788895446740,
+      "contractDigest": "aed70aef5487feceb7e103c1cb1dff4ee11a4dba99abd28b513428f483921926",
+      "contractId": "acceptance-7f1ca87947f78ee5bef5f5d9a2f7cf17c67ad12a312ae0133179a20a9e703cce",
+      "digest": "ed595ecabca88e30cf6bf605946b7bb6979e3d99d32ead49b099985297559962",
+      "id": "verification-acceptance-7f1ca87947f78ee5bef5f5d9a2f7cf17c67ad12a312ae0133179a20a9e703cce-1",
+      "objectiveStatus": "achieved",
+      "owner": {
+        "principalRecordId": "principal_ef990ed7-54e9-42ca-80bc-1e3e66b0d8f4",
+        "principalVersion": 1
+      },
+      "protocol": "task-verification/v3",
+      "results": [
+        {
+          "criterionId": "repository-ready",
+          "evidence": [
+            {
+              "digest": "5d161f2173315287aee0ec32d36dbee1bad52b00ecdc063b686ef2b02916ce32",
+              "kind": "repository-readback",
+              "ref": "fixture/orders:automation/fix"
+            }
+          ],
+          "reason": "verified",
+          "status": "passed"
+        }
+      ],
+      "scope": {
+        "preset": "standard",
+        "workspace": "/tmp/dsh-repo-autonomy-real-6AxeD4/workspace"
+      },
+      "startedAt": 1788895445955,
+      "task": {
+        "goal": {
+          "assessmentId": "goal-assessment-2285666fa75ac54ed72544488fa24fe3c11c59c465bcfeecc5018c4760742c28",
+          "definitionDigest": "caf298d081f42ecbe97acd3a20f4af0051ed05de223832efbfaa59a64728552c",
+          "definitionVersion": 1,
+          "id": "d3be518ef8ee6fe1688f58b772479a973e042df38c410b8eb380f7c005b14542",
+          "nativeGoalId": "goal-b19d1fd5-4b43-4ee7-9d9f-4199f64ad0f5",
+          "sessionId": "session-03bec49b-ecb0-471d-a70f-2144f98b428d"
+        },
+        "kind": "goal-outcome",
+        "ref": "goal-assessment-2285666fa75ac54ed72544488fa24fe3c11c59c465bcfeecc5018c4760742c28"
+      },
+      "validUntil": 1788895475955
+    },
+    "deliveryKinds": [
+      "commit",
+      "pr"
+    ],
+    "resultFeedback": {
+      "turn": 4,
+      "visibleReply": "Implemented and independently verified the summarize.mjs repair."
+    },
+    "restart": {
+      "sameGoal": true,
+      "sameSourceJobEvidence": true,
+      "replyVisible": true,
+      "waitedThenRestarted": true
+    },
+    "transport": "explicit GitHub action and observation fixtures; not live GitHub"
+  }
+}

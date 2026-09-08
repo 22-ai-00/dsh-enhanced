@@ -10,6 +10,19 @@ export const name = 'repo-verified-delivery-transport-fixture'
 export const inject = ['assistantActions']
 const initialOid = '1'.repeat(40)
 
+/** Shared REST-shaped remote state for the event/acceptance transport fixtures. */
+export function repositoryFixtureSnapshot() {
+  const file = process.env.DSH_REPO_DELIVERY_FIXTURE_LOG
+  const rows = file && existsSync(file) ? readFileSync(file, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line)) : []
+  const commit = rows.find(row => row.kind === 'commit'), created = rows.find(row => row.kind === 'pr')
+  const ready = !!(process.env.DSH_REPO_EVENT_STATE && existsSync(process.env.DSH_REPO_EVENT_STATE) && JSON.parse(readFileSync(process.env.DSH_REPO_EVENT_STATE, 'utf8')).ready)
+  const headOid = commit?.commitOid ?? initialOid
+  const pullRequest = created ? { number: 17, state: 'open', merged: false, head: { ref: 'automation/fix', sha: headOid, repo: { full_name: 'fixture/orders' } }, base: { ref: 'main', repo: { full_name: 'fixture/orders' } } } : null
+  const checks = [{ id: 1, name: 'tests', app: { id: 7 }, head_sha: headOid, status: ready ? 'completed' : 'in_progress', conclusion: ready ? 'success' : null }]
+  const reviews = ready && pullRequest ? [{ id: 1, user: { id: 42 }, commit_id: headOid, state: 'APPROVED' }] : []
+  return { ready, headOid, pullRequest, checks, reviews }
+}
+
 /** Explicit GitHub transport substitute; the model, broker, credentials,
  * acceptance, isolation and scheduling remain their production components. */
 export function apply(ctx) {
@@ -28,6 +41,14 @@ export function apply(ctx) {
   actions.workflow = { ...actions.workflow,
     inspect: async input => {
       input.signal.throwIfAborted()
+      if (process.env.DSH_REPO_EVENT_STATE) {
+        const state = repositoryFixtureSnapshot()
+        const observed = input.kind === 'branch' ? { name: input.grant.branch, commit: { sha: state.headOid }, untrusted: true }
+          : input.kind === 'pull-request' ? state.pullRequest
+          : { pullRequest: state.pullRequest, headOid: state.headOid, items: input.kind === 'checks' ? state.checks : state.reviews, truncated: false, untrusted: true }
+        appendFileSync(`${file}.readbacks`, `${JSON.stringify({ kind: input.kind, ready: state.ready, headOid: state.headOid, at: Date.now() })}\n`, { mode: 0o600 })
+        return { observed }
+      }
       return { observed: input.kind === 'branch' ? { name: input.grant.branch, commit: { sha: initialOid }, untrusted: true }
         : { full_name: input.grant.repository, untrusted: true } }
     },
@@ -67,11 +88,13 @@ export async function prepareRepositoryFixture(home, patchPath, env) {
   })
   if (secret !== 'non-production-github-fixture') throw new Error('fixture credential mismatch')
   config('dsh-enhanced-credentials-keychain').set('handles', patch.createNode([{ id: 'repo-fixture', provider: 'linux-protected-file', path: secretPath,
-    consumers: ['dsh-enhanced-assistant-actions'], purposes: ['github.commit'], maxLeaseMs: 30000 }]))
+    consumers: ['dsh-enhanced-assistant-actions', ...(process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? ['dsh-enhanced-event-triggers'] : [])], purposes: ['github.commit', ...(process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? ['github.observe'] : [])], maxLeaseMs: 30000 }]))
   patch.contents.add(patch.createNode({ insert: [{ id: name, name: fileURLToPath(import.meta.url) }] }))
   env.DSH_REPO_DELIVERY_FIXTURE_LOG = join(home, 'github-fixture.jsonl')
+  if (process.env.DSH_REPO_EVENT_SOURCE === 'fixture') { env.DSH_REPO_EVENT_STATE = join(home, 'repository-event-fixture.json'); env.DSH_REPO_EVENT_SOURCE_LOG = join(home, 'repository-event-source.jsonl'); await writeFile(env.DSH_REPO_EVENT_STATE, '{"ready":false}', { mode: 0o600 }) }
   await writeFile(patchPath, String(patch), { mode: 0o600 })
   return { repository: 'fixture/orders', baseBranch: 'main', branch: 'automation/fix', paths: ['summarize.mjs'],
     credentialHandle: 'repo-fixture', expiresAt: Math.min(isolation.expiresAt, Date.now() + 420000),
-    maxActions: 8, maxTotalBytes: 1048576, openPullRequest: true }
+    maxActions: process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? 100 : 8, maxTotalBytes: 1048576, openPullRequest: true,
+    ...(process.env.DSH_REPO_EVENT_SOURCE === 'fixture' ? { acceptance: 'goal-step', outcome: { requiredChecks: [{ name: 'tests', appId: 7 }], reviewerIds: [42], minApprovals: 1, timeoutMs: 10000, freshnessMs: 30000 }, events: { credentialHandle: 'repo-fixture', maxPolls: 180, maxFires: 4, pollIntervalMs: 2000, requestTimeoutMs: 10000 } } : {}) }
 }

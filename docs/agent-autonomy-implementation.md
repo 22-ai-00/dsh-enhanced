@@ -691,3 +691,14 @@ Skills 新增主人明确授权的有限 `skill_watch`：只观察创建后准�
 冻结后根 `pnpm check` 一次通过，退出 **0**：337 文件 / 4,102 项测试，无跳过；manifest、零 lint 警告、类型检查、最终构建与 33 份 dry-run pack 成功。独立只读源码复核 PASS；最终根全检由主协调确认。新模块已进入对应发布清单。命令、摘要、修复过的失败和明确测试边界见[本批证据](evidence/repository-watch-2026-09-08.json)。
 
 本批 GitHub 传输以及 Skills 的 Goal/Policy/Delivery 证明来源仍有明确测试替身，未运行新的真实模型或浏览器场景，不能宣称真实 GitHub/完整成长链通过。下一交付固定正式单一仓库事件 observer 与 pending→重启→恢复→准确 head 最终验收→原会话反馈，按每次四读核算有限额度；唯一辅助线继续候选生成与独立比较/受限启用。全部范围保留，不设置按天或两周等待。
+
+
+### 仓库事件闭环与本批交付（2026-09-08，基线 `f7e76a1`）
+
+正式配置接入有限、认证的 GitHub 状态观察器，复用 EventTriggers 来源序号、Automations Host 执行器、Keychain、Policy 与 Goals 原会话恢复。真实集成暴露并修复原生 catalog 输入误拒绝、后台模型路线偏离授权、来源/唤醒预算桶冲突、后台重复等待权限，以及暂停后 WebOwner 早于原生结算释放的问题。事件只表示需要检查；最终成功仍绑定实际交付 head 的独立新鲜 CI/评审回读。
+
+全新安装后的真实 `codex-subscription / gpt-5.6-terra` 浏览器场景退出 **0**（1 passed，3.6 分钟）：模型自行创建目标、生成隔离产物、准备中间交付，经过两次等待/唤醒和 Host 重启，在原 Goal/Session 完成第三轮，独立验收 achieved；页面显示结果，再次重启保留同一目标、证据和结果，未重复来源事件、commit/PR 或交付通知。GitHub 动作/观察 HTTPS 是显式替身，不声称真实远端验收或普遍任务可靠性。完成目标后的来源自动退订仍待补齐，当前仅受有限期限和预算约束。
+
+本批辅助 Skills 改动提供 Host 比较计划/provider/profile 的冻结绑定、当前权限重查与持久重放保护。它仍报告 `heldoutIndependence: unproven`、`promotionAuthorized: false`；没有独立留出生产 provider，也不计为成长链完成。
+
+根 `pnpm check` 退出 **0**：341 文件、4,138 项测试，无测试跳过，manifest/lint/typecheck/build 与 33 份 dry-run pack 通过。之后仅修正 E2E 导航和诊断：保留失败环境发现 hover 改变行名称导致精确定位失效，稳定子控件定位通过三次零模型冷重启及最终完整真实场景；追加脚本 lint 通过。真实 GitHub、第二来源、独立成长比较/受限发布及完整安装升级等要求保持，18 项状态仍为 **3 已验证 / 13 实现中 / 2 待做**。详细命令、摘要与限制见[本批证据](evidence/repository-events-2026-09-08.json)。

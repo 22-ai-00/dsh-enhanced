@@ -270,7 +270,7 @@ export class EventTriggerStore {
     throughSequence: number
     deadlineAt: number
     sourceId: string
-    kind: 'file' | 'http-json' | 'webhook'
+    kind: 'file' | 'http-json' | 'webhook' | 'github-repository'
     version: string
     configDigest: string
     automationId: string

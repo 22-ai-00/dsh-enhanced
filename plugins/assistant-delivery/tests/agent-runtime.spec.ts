@@ -5,6 +5,8 @@ import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { mountAgentLoopTestDependencies } from '@deepseek-ai/dsh-agent-loop-testkit'
 import AgentPresets, { agentPresetProjectionDefinition } from '@deepseek-ai/dsh-agent-presets'
 import AgentDefaultModelConfig from '@deepseek-ai/dsh-agent-default-model'
+import SkillRegistry from '@deepseek-ai/dsh-skill'
+import * as ToolSkill from '@deepseek-ai/dsh-tool-skill'
 import { SubagentRuntime } from '@deepseek-ai/dsh-subagent'
 import TypertGatewayService from '@deepseek-ai/dsh-api-gateway'
 import * as ApiRemotes from '@deepseek-ai/dsh-api-remotes'
@@ -666,7 +668,7 @@ async function drive(service: AssistantDeliveryService): Promise<void> {
   await service.whenIdle()
 }
 
-async function scheduledGoalHarness(root: string, saved: Map<string, SavedSession>, runTimeoutMs = 5_000, verificationTimeoutMs = 1_000) {
+async function scheduledGoalHarness(root: string, saved: Map<string, SavedSession>, runTimeoutMs = 5_000, verificationTimeoutMs = 1_000, withSkills = false) {
   const ownerId = 'lark/bot-1/tenant-a/ou_owner'
   const fixture = await runtimeHarness(root, saved, undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
     presets: canonicalPermissionPresets, seedDefaultPreset: 'danger-full-access', provideApproval: false,
@@ -686,6 +688,11 @@ async function scheduledGoalHarness(root: string, saved: Map<string, SavedSessio
     ],
   })
   const native = await nativeGoalPlugins()
+  if (withSkills) {
+    await fixture.ctx.plugin(SkillRegistry)
+    fixture.ctx.skills.register({ name: 'repository-work', description: 'Inspect and repair a repository.', content: 'Use repository evidence.', source: 'runtime' })
+    await fixture.ctx.plugin(ToolSkill, {})
+  }
   await fixture.ctx.plugin(native.GoalService as never, {} as never)
   await fixture.ctx.plugin(native.goalTools as never, {} as never)
   await fixture.ctx.plugin(native.goalRoundDriver as never, {} as never)
@@ -995,7 +1002,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     expect(first.llm.requests).toHaveLength(1)
     expect(before.native).toMatchObject({ phase: 'paused', roundsStarted: 0, maxGoalRounds: 1 })
     await first.ctx.fiber.restart()
-    const restarted = await scheduledGoalHarness(root, saved, 15_000, 5_000)
+    const restarted = await scheduledGoalHarness(root, saved, 15_000, 5_000, true)
     const observations: Array<{ session: string; human: boolean }> = []
     restarted.ctx.on('agent/pre-step', async ({ agent }, next) => {
       observations.push({ session: String(agent.session.id), human: restarted.service.currentPreferenceTurn(agent) !== undefined })
@@ -1005,11 +1012,25 @@ describe('real rc.1 delivery Agent runtime', () => {
       return await next()
     })
     await restarted.runAt(wake.wakeAt)
-    expect(restarted.llm.requests).toHaveLength(1)
     expect(observations).toEqual([{ session: before.native.sessionId, human: false }])
-    expect(restarted.readWake(wake.id)).toMatchObject({ state: 'succeeded', dispatched_at: expect.any(Number) })
     const persisted = saved.get(before.native.sessionId)!
-    expect(persisted.events.filter(event => event.type === 'user/message' && event.data.source.kind === 'goal')).toHaveLength(1)
+    const goalMessage = persisted.events.findLast(event => event.type === 'user/message' && event.data.source.kind === 'goal')
+    const catalog = persisted.events.findLast(event => event.type === 'user/message'
+      && (event.data.source as { kind?: unknown; form?: unknown }).kind === 'skill-catalog'
+      && (event.data.source as { form?: unknown }).form === 'catalog')
+    expect(goalMessage).toBeDefined()
+    expect(catalog).toBeDefined()
+    expect(Number(catalog!.seq)).toBeGreaterThan(Number(goalMessage!.seq))
+    expect(restarted.llm.requests).toHaveLength(1)
+    expect(restarted.llm.requests[0]!.messages.some(message => {
+      const source = message.source as { kind?: unknown; form?: unknown }
+      return source.kind === 'skill-catalog' && source.form === 'catalog'
+    })).toBe(true)
+    expect(persisted.events.some(event => event.type === 'assistant/message'
+      && event.data.message.content.some(block => block.type === 'text' && block.text === 'reply-1'))).toBe(true)
+    expect(restarted.readWake(wake.id)).toMatchObject({ state: 'succeeded', dispatched_at: expect.any(Number) })
+    expect(persisted.events.some(event => event.type === 'assistant/message'
+      && event.data.message.content.some(block => block.type === 'text' && block.text === 'reply-1'))).toBe(true)
     const verification = new DatabaseSync(join(root, 'verification.sqlite'), { readOnly: true })
     let contracts: Array<{ id: string }>
     try { contracts = verification.prepare('SELECT id FROM acceptance_contracts').all() as Array<{ id: string }> }
@@ -1131,7 +1152,7 @@ describe('real rc.1 delivery Agent runtime', () => {
     }
   }, 15_000)
 
-  test.each(['non-goal', 'foreign-goal'] as const)('scheduled goal restore rejects a persisted %s Inbox message before dispatch', async kind => {
+  test.each(['non-goal', 'user', 'foreign-goal'] as const)('scheduled goal restore rejects a persisted %s Inbox message before dispatch', async kind => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-goal-wake-persisted-inbox-')); roots.push(root)
     const saved = new Map<string, SavedSession>()
     const first = await scheduledGoalHarness(root, saved)
@@ -1141,7 +1162,9 @@ describe('real rc.1 delivery Agent runtime', () => {
     const persisted = saved.get(sessionId)!
     const source = kind === 'non-goal'
       ? { kind: 'plugin' as const, plugin: '@dsh-enhanced/test', form: 'notice' as const, summary: 'retained stale inbox item' }
-      : { kind: 'goal' as const, goalId: JSON.parse(first.readWake(wake.id).intent_json).native.goalId, revision: 999, round: 999 }
+      : kind === 'user'
+        ? { kind: 'user' as const }
+        : { kind: 'goal' as const, goalId: JSON.parse(first.readWake(wake.id).intent_json).native.goalId, revision: 999, round: 999 }
     // The real SessionPreparation and native Inbox projection replay this
     // serialized event on reload; no publication-time injection substitutes it.
     saved.set(sessionId, { ...persisted, events: [...persisted.events, {
@@ -2982,6 +3005,38 @@ describe('real rc.1 delivery Agent runtime', () => {
       const released = new DatabaseSync(join(root, 'delivery.sqlite'), { readOnly: true })
       try { expect(released.prepare('SELECT state FROM delivery_session_leases WHERE session_id = ?').get(handle.agent.id)).toMatchObject({ state: 'released' }) } finally { released.close() }
     } finally { releaseFlush?.(); flush.mockRestore(); await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
+  })
+
+  test.each(['release', 'revocation', 'expiry'] as const)('keeps a non-armed pending native settlement leased until %s', async outcome => {
+    const root = await mkdtemp(join(tmpdir(), 'assistant-delivery-native-pending-settlement-')); roots.push(root)
+    const webPrincipal = { channel: 'web', account: 'browser', tenant: 'local', user: 'owner' }
+    const fixture = await runtimeHarness(root, new Map(), undefined, undefined, root, undefined, 'primary', true, 'probe', undefined, {
+      policyRules: [{ id: 'web-ingest', effect: 'allow', subject: { kind: 'external', id: 'web/browser/local/owner' }, actions: ['ingest'], resource: { kind: 'message', id: '*' }, context: { initiators: ['external'] } }],
+      leaseMs: 1_000,
+    })
+    const operator = new DeliveryStore({ path: join(root, 'delivery.sqlite') }); operator.handoffOwner(webPrincipal)
+    let held = true; let heldAgent: Agent | undefined
+    fixture.ctx.provide('goals' as never, {
+      // Deliberately non-armed: only the narrow settlement read proves retention.
+      get: () => ({ phase: 'paused', activation: 'disarmed' }),
+    } as never)
+    fixture.ctx.provide('assistantGoals' as never, {
+      hasPendingExecutionSettlement: (agent: Agent) => held && agent === heldAgent,
+    } as never)
+    let access: ReturnType<AssistantDeliveryService['bindNativeWebOwner']> | undefined
+    const fiber = fixture.ctx.plugin({ inject: ['assistantDelivery', 'agents', 'sessions'], apply(ctx: Context) {
+      access = ctx.assistantDelivery.bindNativeWebOwner(ctx, { principal: webPrincipal, workspace: root, preset: 'primary', maxExecutionMs: outcome === 'expiry' ? 500 : 10_000 })
+    } })
+    try {
+      await fiber
+      const handle = await access!.create({ sessionId: `native-pending-${outcome}` as SessionId, meta: { cwd: root, agentPreset: 'primary' }, agentOptions: { provider: 'mock', model: 'delivery-model' } })
+      heldAgent = handle.agent
+      await new Promise(resolve => setTimeout(resolve, 250))
+      expect(fixture.ctx.agents.get(handle.agent.id)).toBe(handle.agent)
+      if (outcome === 'release') held = false
+      if (outcome === 'revocation') { const owner = operator.getPrincipal(webPrincipal)!; operator.revokePrincipal(owner.id, owner.version) }
+      await vi.waitFor(() => expect(fixture.ctx.agents.get(handle.agent.id)).toBeUndefined(), { timeout: 2_000 })
+    } finally { await fiber.dispose(); operator.close(); await fixture.ctx.fiber.restart() }
   })
 
   test.each([{ withdraw: false, conflict: false }, { withdraw: true, conflict: false }, { withdraw: false, conflict: true }])('native Goal rounds refresh task memory after a checkpoint change (%j)', async ({ withdraw, conflict }) => {

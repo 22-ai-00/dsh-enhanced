@@ -124,7 +124,7 @@ dsh --profile web --no-open
 
 该 v1 格式保留固定 `deepseek-v4-flash` 或 `deepseek-v4-pro` 路径，endpoint 不可配置。每次目标模型调用会保守预留至少 `2,097,152` 输入 tokens；当前没有 USD 硬预算，任务不得添加 `costUsdMicros`。
 
-v2 可使用安装器已经配置且实际出现在 `agent-default-model` 的任意精确 provider/model，例如 `super-relay`、`auto_model` 或 `alwaysday1`。它不会写入模型、endpoint 或 secret 配置：`route` 必须与已配置默认 route 完全相等，且 calls budget 的唯一 `routes` 项必须与它相同。
+v2 可使用安装器已经配置且实际出现在 `agent-default-model` 的任意精确 provider/model，例如 `super-relay`、`auto_model` 或 `alwaysday1`。它不会写入 provider、endpoint 或 secret 配置：`route` 必须与已配置默认 route 完全相等，且 calls budget 的唯一 `routes` 项必须与它相同。启用后台唤醒时，setup 同时将 Delivery 的默认 provider/model 和输出上限设为这条已授权线路，保证恢复使用相同线路；运行时仍逐次检查预算。
 
 ```json
 {
@@ -164,7 +164,19 @@ v2 任务可增加 `repositoryDelivery`，继续使用同一个 `--goal-admissio
 }
 ```
 
-上述名称和数字应替换为目标仓库实际要求的 check 名称、GitHub App ID 和 reviewer ID。每次验收重新读取 checks、reviews、PR 和 branch，要求同一提交 head、全部指定 checks 成功及足够当前评审通过；pending 或截断结果不能完成目标。至少配置 `maxActions: 7`（读取初始 head、commit、PR、四次验收读取），重试与后续事件需要额外有限次数。总目标时长还须覆盖步骤执行、本地验收和 `outcome.timeoutMs`。配置器不会扩大授权，也尚不创建仓库事件 observer；此选项本身不构成重启后持续跟进的完整入口。
+上述名称和数字应替换为目标仓库实际要求的 check 名称、GitHub App ID 和 reviewer ID。每次验收重新读取 checks、reviews、PR 和 branch，要求同一提交 head、全部指定 checks 成功及足够当前评审通过；pending 或截断结果不能完成目标。至少配置 `maxActions: 7`（读取初始 head、commit、PR、四次验收读取），重试与后续事件需要额外有限次数。总目标时长还须覆盖步骤执行、本地验收和 `outcome.timeoutMs`。
+
+需要等待 CI/评审变化时，同一 `repositoryDelivery` 可显式增加 `events`：
+
+```json
+"events": {
+  "credentialHandle": "github-observe",
+  "maxPolls": 180, "maxFires": 4,
+  "pollIntervalMs": 2000, "requestTimeoutMs": 10000
+}
+```
+
+须安装匹配版本的 EventTriggers，且上述 Keychain handle 已允许 `dsh-enhanced-event-triggers` / `github.observe`。CLI 创建绑定当前 owner、仓库及分支的正式来源、有限无模型 observer 和 Goals 等待权限；Goals 向模型公开当前授权范围内的来源 ID。设置不会验证远端连通性。`maxPolls` 必须大于 `maxFires`，`maxGoalRounds` 至少为 2；`maxActions` 须覆盖 `3 + 12 × maxGoalRounds`（每轮最多三次四读验收），显式 wake 的 `maxRuns` 至少为 `maxFires + 1`。不足时拒绝配置，不自动扩额。观察期限沿用明确的 `repositoryDelivery.expiresAt`，重复设置不续期。完整真实 GitHub 生命周期仍须实际验证。
 
 每个验收 profile 的验证窗口为 `verification.maxDurationMs × verification.cases.length`，必须小于 `stepMaxDurationMs`。未配置仓库 outcome 时两个 profile 都使用该窗口；因此 `executionBudget.durationMs` 必须严格大于 `stepMaxDurationMs + 2 × 验证窗口`，以覆盖 native round、step 验收和 whole-goal 验收。setup 会拒绝不足的明确预算，不会自动扩大时长或权限。
 

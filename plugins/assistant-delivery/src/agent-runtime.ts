@@ -1357,6 +1357,11 @@ function finalAssistant(
   }
 }
 
+function isScheduledGoalRuntimeContext(source: { kind?: unknown; plugin?: unknown; form?: unknown }): boolean {
+  return (source.kind === 'plugin' && source.plugin === '@deepseek-ai/dsh-system-prompt' && source.form === 'snapshot')
+    || (source.kind === 'skill-catalog' && source.form === 'catalog')
+}
+
 export class DshDeliveryRuntime implements DeliveryInboundRuntime {
   readonly dispatchControl = 'explicit' as const
   private readonly activeSessionControls = new Map<string, ActiveSessionControl>()
@@ -2652,8 +2657,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
         const turn = start?.type === 'turn/start' ? start.data.turn : undefined
         const end = events.find(event => event.type === 'turn/end' && event.data.turn === turn)
         const inputs = start === undefined || end === undefined ? [] : events.filter(event => event.seq > start.seq && event.seq < end.seq
-          && event.type === 'user/message' && !(event.data.source.kind === 'plugin'
-            && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt' && event.data.source.form === 'snapshot'))
+          && event.type === 'user/message' && !isScheduledGoalRuntimeContext(event.data.source))
         const output = finalAssistant(events, 0, inputs.length === 1 && inputs[0]?.seq === message?.seq ? turn : undefined)
         if (output.completed && !output.truncated && !output.stopped && !output.hasUnpairedToolCall
           && output.failureCode === undefined && output.text.trim() !== ''
@@ -2733,8 +2737,7 @@ export class DshDeliveryRuntime implements DeliveryInboundRuntime {
       // DSH persists runtime context snapshots as user/message too; they are
       // context for this turn, never a second input or a grant of authority.
       const messages = start === undefined ? [] : events.filter(event => event.seq > start.seq && event.type === 'user/message'
-        && !(event.data.source.kind === 'plugin' && event.data.source.plugin === '@deepseek-ai/dsh-system-prompt'
-          && event.data.source.form === 'snapshot'))
+        && !isScheduledGoalRuntimeContext(event.data.source))
       if (start === undefined || events.some(event => event.seq > start.seq && event.type === 'turn/end')
         || messages.length !== 1 || messages[0]?.type !== 'user/message') throw new Error('assistant-delivery: exact native goal turn required')
       const source = messages[0].data.source

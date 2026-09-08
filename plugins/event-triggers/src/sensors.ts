@@ -382,6 +382,45 @@ async function pinnedHttpsFetch(urlValue: string, init: RequestInit, route: Vali
   })
 }
 
+export async function readHttpJsonValue(input: {
+  url: string
+  maxBodyBytes: number
+  timeoutMs: number
+  allowedHosts?: ReadonlySet<string>
+  allowedOrigins?: ReadonlySet<string>
+  allowIpv6?: boolean
+  fetcher?: Fetcher
+  lookup?: Lookup
+  trackOperation?: OperationTracker
+  signal?: AbortSignal
+  headers?: RequestInit['headers']
+  rejectPagination?: boolean
+}): Promise<unknown> {
+  const url = new URL(input.url)
+  if (url.protocol !== 'https:') throw new Error('event-triggers: HTTP sensor requires HTTPS')
+  const legacyAllowed = (url.port === '' || url.port === '443') && (input.allowedHosts?.has(url.hostname.toLowerCase()) ?? false)
+  if (url.username !== '' || url.password !== '' || (!legacyAllowed && !(input.allowedOrigins?.has(url.origin) ?? false))) throw new Error('event-triggers: HTTP sensor host/origin is not allowlisted')
+  const controller = new AbortController()
+  const forwardAbort = () => controller.abort(input.signal?.reason ?? new Error('event-triggers: HTTP sensor was aborted'))
+  if (input.signal?.aborted) forwardAbort(); else input.signal?.addEventListener('abort', forwardAbort, { once: true })
+  const timer = setTimeout(() => controller.abort(new Error('event-triggers: HTTP sensor timeout')), input.timeoutMs)
+  timer.unref?.()
+  try {
+    const address = hostname(url), family = isIP(address)
+    const resolving = family === 0 ? (input.lookup ?? defaultLookup)(address) : Promise.resolve([{ address, family }])
+    const resolved = await raceWithAbort(tracked(resolving, input.trackOperation), controller.signal)
+    const addresses = validatedAddresses(resolved, input.allowIpv6 ?? false)
+    const fetching = (input.fetcher ?? pinnedHttpsFetch)(url.toString(), { method: 'GET', redirect: 'manual', signal: controller.signal,
+      headers: input.headers ?? { accept: 'application/json' } }, { addresses })
+    const response = await raceWithAbort(tracked(fetching, input.trackOperation), controller.signal)
+    if (response.status >= 300 && response.status < 400) { await cancelBody(response, controller.signal, input.trackOperation); throw new Error('event-triggers: HTTP redirects are not allowed') }
+    if (!response.ok) { await cancelBody(response, controller.signal, input.trackOperation); throw new Error(`event-triggers: HTTP sensor returned ${response.status}`) }
+    if (input.rejectPagination && /(?:^|[;,\s])rel="?next"?/iu.test(response.headers.get('link') ?? '')) { await cancelBody(response, controller.signal, input.trackOperation); throw new Error('event-triggers: HTTP response is paginated') }
+    const body = await boundedBody(response, input.maxBodyBytes, controller.signal, input.trackOperation)
+    try { return JSON.parse(body.toString('utf8')) } catch { throw new Error('event-triggers: HTTP body is not valid JSON') }
+  } finally { clearTimeout(timer); input.signal?.removeEventListener('abort', forwardAbort) }
+}
+
 export async function readHttpJsonObservation(input: {
   url: string
   pointer: string
@@ -395,49 +434,8 @@ export async function readHttpJsonObservation(input: {
   trackOperation?: OperationTracker
   signal?: AbortSignal
 }): Promise<SensorObservation> {
-  const url = new URL(input.url)
-  if (url.protocol !== 'https:') throw new Error('event-triggers: HTTP sensor requires HTTPS')
-  const legacyAllowed = (url.port === '' || url.port === '443')
-    && (input.allowedHosts?.has(url.hostname.toLowerCase()) ?? false)
-  if (url.username !== '' || url.password !== '' || (!legacyAllowed && !(input.allowedOrigins?.has(url.origin) ?? false))) {
-    throw new Error('event-triggers: HTTP sensor host/origin is not allowlisted')
-  }
-  const controller = new AbortController()
-  const forwardAbort = () => controller.abort(input.signal?.reason ?? new Error('event-triggers: HTTP sensor was aborted'))
-  if (input.signal?.aborted) forwardAbort()
-  else input.signal?.addEventListener('abort', forwardAbort, { once: true })
-  const timer = setTimeout(() => controller.abort(new Error('event-triggers: HTTP sensor timeout')), input.timeoutMs)
-  timer.unref?.()
-  try {
-    const address = hostname(url)
-    const family = isIP(address)
-    const resolving = family === 0
-      ? (input.lookup ?? defaultLookup)(address)
-      : Promise.resolve([{ address, family }])
-    const resolved = await raceWithAbort(tracked(resolving, input.trackOperation), controller.signal)
-    const addresses = validatedAddresses(resolved, input.allowIpv6 ?? false)
-    const fetching = (input.fetcher ?? pinnedHttpsFetch)(url.toString(), {
-      method: 'GET', redirect: 'manual', signal: controller.signal,
-      headers: { accept: 'application/json' },
-    }, { addresses })
-    const response = await raceWithAbort(tracked(fetching, input.trackOperation), controller.signal)
-    if (response.status >= 300 && response.status < 400) {
-      await cancelBody(response, controller.signal, input.trackOperation)
-      throw new Error('event-triggers: HTTP redirects are not allowed')
-    }
-    if (!response.ok) {
-      await cancelBody(response, controller.signal, input.trackOperation)
-      throw new Error(`event-triggers: HTTP sensor returned ${response.status}`)
-    }
-    const body = await boundedBody(response, input.maxBodyBytes, controller.signal, input.trackOperation)
-    let document: unknown
-    try { document = JSON.parse(body.toString('utf8')) } catch { throw new Error('event-triggers: HTTP body is not valid JSON') }
-    const selected = pointer(document, input.pointer)
-    const serialized = JSON.stringify(selected)
-    if (serialized === undefined) throw new Error('event-triggers: JSON pointer selected an unsupported value')
-    return { fingerprint: `sha256:${hash(serialized)}`, truthy: Boolean(selected) }
-  } finally {
-    clearTimeout(timer)
-    input.signal?.removeEventListener('abort', forwardAbort)
-  }
+  const selected = pointer(await readHttpJsonValue(input), input.pointer)
+  const serialized = JSON.stringify(selected)
+  if (serialized === undefined) throw new Error('event-triggers: JSON pointer selected an unsupported value')
+  return { fingerprint: `sha256:${hash(serialized)}`, truthy: Boolean(selected) }
 }

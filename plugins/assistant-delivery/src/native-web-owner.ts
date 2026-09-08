@@ -52,7 +52,10 @@ interface Execution {
     admitting: boolean
   }
 }
-type NativeGoalLookup = { get(agent: Agent): { phase: string, activation: string } | undefined }
+type NativeGoalLookup = {
+  get(agent: Agent): { phase: string, activation: string } | undefined
+}
+type AssistantGoalsLifecycleLookup = { hasPendingExecutionSettlement?(agent: Agent): boolean }
 
 /** Fixed single-owner Host capability. No RPC payload may choose its principal or scope. */
 export class NativeWebOwner implements NativeWebOwnerAccess {
@@ -121,6 +124,8 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
     if (goals === undefined) return false
     const goal = goals.get(agent)
     return goal?.phase === 'active' && goal.activation === 'armed'
+      || (this.ownerCtx.get('assistantGoals' as never) as unknown as AssistantGoalsLifecycleLookup | undefined)
+        ?.hasPendingExecutionSettlement?.(agent) === true
   }
   assertSession(sessionId: string): void { this.#binding(sessionId) }
   ownsSession(sessionId: string): boolean { try { this.assertSession(sessionId); return true } catch { return false } }

@@ -88,3 +88,19 @@ CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
 This scenario installs autonomy, prepares a real Web owner Session, stops its Host, then invokes the shipped `dsh-web-owner-setup --goal-admission ... --session-id ...` twice with a private task file outside the workspace. The CLI owns all Goal, verifier, budget and wake configuration; repeated setup must preserve patch bytes. After restart, the browser selects the admitted model using the native model menu because DSH preserves the old Session's model selection.
 
 The foreground schedules a wake and the test restarts the actual Host again. Assertions require two native rounds on the same Session, a failing artifact followed by a corrected artifact, separate step/outcome receipts, four settled production budget reservations and a succeeded persisted wake without per-action approvals. One preparation-only adapter reply and seven mocked paid HTTP responses make execution deterministic; production DeepSeek serialization/metering, Goals, verification and Docker execution remain real. This is not a paid DeepSeek request or a model-quality benchmark. Artifacts are under ignored `.cache/autonomy-goal-setup-e2e/` with the same authentication redaction and cleanup rules.
+
+
+## Real model repository event continuation
+
+```sh
+CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium \
+  DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra \
+  DSH_REPO_VERIFIED_DELIVERY=fixture DSH_REPO_EVENT_SOURCE=fixture \
+  pnpm exec playwright test --config scripts/e2e/playwright-repo-real.config.mjs
+```
+
+The installed profile receives an ordinary repair-and-delivery request. The model chooses tools and creates its own finite Goal; the test does not supply trigger IDs, invoke Goal tools or select tool order. After an independently accepted intermediate PR and a durable event wait, it restarts the real Host while CI/review remain pending, returns to the original Session, and changes only the remote fixture state. Assertions bind the resumed Goal and source execution to an event after the saved cursor, require fresh repository outcome evidence for the actual committed head and visible feedback, then check that another restart and unchanged observation create no duplicate event or commit/PR.
+
+GitHub DNS/HTTPS and commit/PR responses are explicit transport substitutes, including the non-production Keychain token. The model route, installer, Policy, Keychain lease, EventTriggers observer/cursor, Goals, Automations, Delivery and Docker verifier run as actual components. This is not live GitHub authentication or remote CI/review evidence. The event experiment allows at most 26 model dispatches with a 300-second task budget; installer and cleanup have a separate test timeout. It needs the exact local Docker image configured in the spec. No ordinary profile is modified, and no provider credential is retained in artifacts.
+
+For a failed integration that needs local diagnosis, set `DSH_REPO_RETAIN_FAILURE=1`. The Host and browser still stop, but `retained-environment.json` points to the private temporary profile and original Session so a restart/UI check can reuse it without repeating model work. The default deletes this environment; remove a retained directory after diagnosis because it includes the private test configuration. Startup diagnostics retain only session/header/workspace identifiers, not credentials or model request headers.

@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { AssistantAutomationsService } from '@dsh-enhanced/assistant-automations'
 import {
@@ -30,6 +30,8 @@ import {
 import { EventTriggerStore } from './store.js'
 import type { EventSourceReader, EventSourceSnapshot, SourceEvent } from './source.js'
 import { version } from './version.js'
+import { EventSourceObservers } from './observer.js'
+import { readGitHubRepositoryObservation } from './github-sensor.js'
 
 export type EventTriggersErrorCode =
   | 'cooldown'
@@ -97,6 +99,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
   private readonly inFlight = new Set<Promise<unknown>>()
   private readonly pendingObservations = new Map<string, PendingObservation>()
   private readonly sourceChangeListeners = new Set<() => void>()
+  private readonly observers: EventSourceObservers
   private active = true
 
   constructor(ctx: Context, input: Config, options: EventTriggersServiceOptions = {}) {
@@ -110,8 +113,8 @@ export class EventTriggersService extends Service implements EventSourceReader {
     this.policy = policy
     this.automations = automations
     this.credentials = ctx.get('credentialsKeychain') as CredentialsKeychainService | undefined
-    if (this.config.triggers.some(trigger => trigger.kind === 'webhook') && this.credentials === undefined) {
-      throw new Error('event-triggers: credentialsKeychain is required when webhook triggers are configured')
+    if (this.config.triggers.some(trigger => (trigger.kind === 'webhook' || trigger.kind === 'github-repository')) && this.credentials === undefined) {
+      throw new Error('event-triggers: credentialsKeychain is required for authenticated triggers')
     }
     this.triggers = new Map(this.config.triggers.map(trigger => [trigger.id, trigger]))
     this.now = options.now ?? Date.now
@@ -122,6 +125,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
       ? pinFileRoots(this.config.allowedFileRoots)
       : []
     this.store = new EventTriggerStore({ path: this.config.databasePath, now: this.now })
+    this.observers = new EventSourceObservers(ctx, this.config.triggers.filter(trigger => trigger.observer !== undefined).map(trigger => ({ triggerId: trigger.id, automationId: trigger.automationId, configDigest: this.triggerConfigDigest(trigger), owner: trigger.observer! })))
     this.flushTimer = setInterval(() => void this.flushPending().catch(() => {}), this.config.pollIntervalMs)
     this.flushTimer.unref?.()
     void this.flushPending().catch(() => {})
@@ -191,17 +195,19 @@ export class EventTriggersService extends Service implements EventSourceReader {
   private async observeTrigger(trigger: Exclude<NormalizedTrigger, WebhookTriggerConfig>): Promise<void> {
     const resource = trigger.kind === 'file'
       ? { kind: 'filesystem' as const, id: trigger.path }
-      : { kind: 'network' as const, id: trigger.url }
+      : { kind: 'network' as const, id: trigger.kind === 'github-repository' ? `https://api.github.com/repos/${trigger.repository}` : trigger.url }
+    this.observers.assertCurrent(trigger.id)
     const decision = this.policy.authorize({
-      subject: { kind: 'background', id: `event-triggers:${trigger.id}` },
+      subject: { kind: 'background', id: `event-triggers:${trigger.id}`, ...(trigger.observer ? { workspace: trigger.observer.workspace, principal: trigger.observer.principalId } : {}) },
       action: 'observe', resource, context: { initiator: 'background' },
-    }, { idempotencyKey: `event-observe:${trigger.id}:${this.now()}` })
+    }, { idempotencyKey: `event-observe:${trigger.id}:${randomUUID()}` })
     if (decision.effect !== 'allow') {
       throw new EventTriggersError('policy-denied', `event-triggers policy denied observation: ${decision.reasonCode}`)
     }
     const observation = await this.startObservation(trigger)
     if (observation === undefined) return
     if (this.shutdown.signal.aborted) throw this.shutdown.signal.reason
+    this.observers.assertCurrent(trigger.id)
     const occurredAt = this.now()
     const produced = this.store.observe({
       triggerId: trigger.id, ...observation, occurredAt, fireWhen: trigger.fireWhen,
@@ -243,6 +249,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
     const promise = Promise.resolve().then(() => trigger.kind === 'file'
       ? this.fileObserver({ path: trigger.path, roots: this.config.allowedFileRoots,
           mode: trigger.mode, maxBytes: this.config.maxBodyBytes, pinnedRoots: this.pinnedFileRoots })
+      : trigger.kind === 'github-repository' ? this.readGitHubObservation(trigger, controller, trackOperation)
       : readHttpJsonObservation({ url: trigger.url, pointer: trigger.pointer,
           maxBodyBytes: this.config.maxBodyBytes, timeoutMs: this.config.requestTimeoutMs,
           allowedOrigins: new Set(this.config.allowedHttpOrigins), lookup: this.lookup, signal: controller.signal,
@@ -267,6 +274,29 @@ export class EventTriggersService extends Service implements EventSourceReader {
       clearTimeout(timer)
       this.shutdown.signal.removeEventListener('abort', forwardShutdown)
     }
+  }
+
+  private async readGitHubObservation(trigger: Extract<NormalizedTrigger, { kind: 'github-repository' }>, controller: AbortController, trackOperation: import('./sensors.js').OperationTracker): Promise<SensorObservation> {
+    const guard = () => {
+      if (controller.signal.aborted) throw controller.signal.reason
+      this.assertActive(); this.observers.assertCurrent(trigger.id)
+      const decision = this.policy.evaluate({ subject: { kind: 'background', id: `event-triggers:${trigger.id}`, workspace: trigger.observer.workspace, principal: trigger.observer.principalId },
+        action: 'observe', resource: { kind: 'network', id: `https://api.github.com/repos/${trigger.repository}` }, context: { initiator: 'background' } })
+      if (decision.effect !== 'allow') throw new EventTriggersError('policy-denied', 'GitHub observation permission ended')
+    }
+    guard()
+    const timer = setInterval(() => { try { guard() } catch (error) { controller.abort(error) } }, 25)
+    timer.unref?.()
+    try {
+      return await this.credentials!.withSecret(this.ctx, { handleId: trigger.credentialHandle, purpose: 'github.observe',
+        ttlMs: Math.max(1_000, Math.min(30_000, this.config.requestTimeoutMs)), idempotencyKey: `event-github:${trigger.id}:${randomUUID()}` }, async (token, leaseSignal) => {
+        guard()
+        const result = await readGitHubRepositoryObservation({ repository: trigger.repository, branch: trigger.branch, baseBranch: trigger.baseBranch, token,
+          maxBodyBytes: this.config.maxBodyBytes, timeoutMs: Math.min(30_000, this.config.requestTimeoutMs), signal: AbortSignal.any([controller.signal, leaseSignal]),
+          lookup: this.lookup, ...(this.fetcher ? { fetcher: this.fetcher } : {}), allowIpv6: this.config.ipv6Mode === 'native-only', trackOperation, beforeRequest: guard })
+        guard(); return result
+      })
+    } finally { clearInterval(timer) }
   }
 
   private async raceObservation<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
@@ -316,6 +346,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
           }
           this.store.markAttempt(item.id)
           try {
+            this.observers.assertCurrent(trigger.id)
             const envelope = parseExternalEventEnvelope(JSON.parse(item.envelope.canonical))
             if (externalEventDigest(envelope) !== item.envelope.digest
               || envelope.source.id !== `event-triggers:${trigger.id}`
@@ -408,6 +439,19 @@ export class EventTriggersService extends Service implements EventSourceReader {
 
   health(): ReturnType<EventTriggerStore['health']> { this.assertActive(); return this.store.health() }
 
+  /** Public task metadata for exact owner/scope discovery; never returns credentials or read payloads. */
+  inspectOwnerSources = (scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }) => {
+    this.assertActive()
+    return Object.freeze(this.config.triggers.flatMap(trigger => {
+      const owner = trigger.observer
+      if (!owner || !trigger.enabled || owner.principalId !== scope.principalId || owner.principalRecordId !== scope.principalRecordId
+        || owner.principalVersion !== scope.principalVersion || owner.workspace !== scope.workspace || owner.preset !== scope.preset) return []
+      try { this.observers.assertCurrent(trigger.id) } catch { return [] }
+      return [Object.freeze({ triggerId: trigger.id, automationId: trigger.automationId, kind: trigger.kind, expiresAt: owner.expiresAt,
+        ...(trigger.kind === 'github-repository' ? { repository: trigger.repository, branch: trigger.branch } : {}) })]
+    }))
+  }
+
   sourceSnapshot(triggerId: string): Readonly<EventSourceSnapshot> {
     this.assertActive()
     const trigger = this.sourceTrigger(triggerId)
@@ -473,6 +517,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
     if (trigger === undefined || !trigger.enabled) {
       throw new EventTriggersError('source-changed', 'event-triggers: event source is no longer configured or enabled')
     }
+    this.observers.assertCurrent(trigger.id)
     return trigger
   }
 

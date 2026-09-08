@@ -97,6 +97,11 @@ function result(value: Awaited<ReturnType<Awaited<ReturnType<typeof fixture>>['r
   expect(value.isError, JSON.stringify(value)).toBe(false)
   return JSON.parse((value.value as { context: string }).context)
 }
+function sealedProfile(f: Awaited<ReturnType<typeof fixture>>) {
+  return { id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
+    { id: 'replay', kind: 'replay' as const, inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation' as const, inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }, { id: 'regression', kind: 'regression' as const, inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
+  ] }
+}
 
 test('native tool composition writes parameterized artifacts, persists across restart and never repeats a duplicate invocation', async () => {
   const f = await fixture(); result(await f.save()); f.human(false)
@@ -216,6 +221,50 @@ dockerTest('compares a pending native-file candidate through isolated verificati
   expect(result(await f.execute('skill_comparison_status', { comparison_id: compared.id }, f.foreign))).toBeNull()
   const exhausted = await f.execute('skill_compare', { candidate_id: candidate.id, profile_id: 'service-comparison', invocation_id: 'comparison-budget-exhausted' })
   expect(exhausted.isError).toBe(true)
+}, 120000)
+
+dockerTest('consumes a Host-attested plan through native replay while independence remains unproven', async () => {
+  const f = await fixture(false, true)
+  result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write result.', bindings_json: '[]', expected_version: 0 }))
+  f.source.steps[0]!.arguments = { file_path: 'result.sh', content: '#!/bin/sh\ncat' }
+  const candidate = result(await f.execute('skill_candidate', { goal_id: 'source-goal', name: 'saved-write', description: 'Candidate result.', bindings_json: '[]', parent_version: 1, reason: 'sealed host qualification', trigger: 'owner review' }))
+  const service = f.ctx.assistantSkills
+  const configured = [{ id: 'sealed-profile', version: 1, scope: { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' }, stateRoot: f.comparisonRoot!, image, dockerPath: process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, maxComparisons: 1, repeats: 2, cellDurationMs: 30000, verificationDurationMs: 10000, maxToolCalls: 2, maxBytes: 65536, maxOutputBytes: 65536, minimumEvaluationGain: 0.1, cases: [
+    { id: 'replay', kind: 'replay', inputs: {}, files: [], stdin: 'one\n', expectedStdout: 'one\n', expectedExitCode: 0 }, { id: 'evaluation', kind: 'evaluation', inputs: {}, files: [], stdin: 'two\n', expectedStdout: 'two\n', expectedExitCode: 0 }, { id: 'regression', kind: 'regression', inputs: {}, files: [], stdin: 'three\n', expectedStdout: 'three\n', expectedExitCode: 0 },
+  ] }] as const
+  service.registerSealedHoldoutProvider({ generation: 'host', read: ({ planId }) => planId === 'sealed' ? { profile: configured[0] as never, attestationDigest: '8'.repeat(64) } : undefined })
+  const binding = service.inspectSealedHoldout('sealed', { principalId: 'owner', principalRecordId: 'owner-record', principalVersion: 1, workspace: f.root, preset: 'primary' })
+  const receipt = await service.qualifySealedHoldout({ agent: f.owner, signal: new AbortController().signal } as never, candidate.id, 'sealed', 'sealed-once')
+  expect(receipt).toMatchObject({ state: 'complete', result: { hostAttestedHoldout: { bindingDigest: binding.bindingDigest }, promotionAuthorized: false, quality: { heldoutIndependence: 'unproven' } } })
+  expect((receipt.result as { quality: Record<string, unknown> }).quality.hostAttestedHoldout).toBeUndefined()
+  expect(JSON.stringify(receipt)).not.toContain('expectedStdout')
+  expect(result(await f.execute('skill_status', {}))).toMatchObject([{ version: 1 }])
+  expect(await service.qualifySealedHoldout({ agent: f.owner, signal: new AbortController().signal } as never, candidate.id, 'sealed', 'sealed-once')).toEqual(receipt)
+}, 120000)
+
+dockerTest('sealed qualification rejects provider revocation or profile drift before replay and preserves the active version', async () => {
+  for (const mode of ['revoked', 'drifted'] as const) {
+    const f = await fixture(false, true)
+    result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write result.', bindings_json: '[]', expected_version: 0 }))
+    f.source.steps[0]!.arguments = { file_path: 'result.sh', content: '#!/bin/sh\ncat' }
+    const candidate = result(await f.execute('skill_candidate', { goal_id: 'source-goal', name: 'saved-write', description: 'Candidate result.', bindings_json: '[]', parent_version: 1, reason: 'sealed host qualification', trigger: 'owner review' }))
+    const service = f.ctx.assistantSkills, profile = sealedProfile(f); let reads = 0
+    service.registerSealedHoldoutProvider({ generation: 'host', read: () => { reads++; if (mode === 'revoked' && reads > 1) return undefined; if (mode === 'drifted' && reads > 1) return { profile: { ...profile, minimumEvaluationGain: 0.2 }, attestationDigest: '8'.repeat(64) }; return { profile, attestationDigest: '8'.repeat(64) } } })
+    await expect(service.qualifySealedHoldout({ agent: f.owner, signal: new AbortController().signal } as never, candidate.id, 'sealed', `sealed-${mode}`)).rejects.toThrow(/unknown/)
+    expect(result(await f.execute('skill_status', {}))).toMatchObject([{ version: 1 }])
+    expect(f.count()).toBe(0)
+  }
+}, 120000)
+
+dockerTest('sealed qualification turns unknown when the candidate parent changes during the comparison', async () => {
+  const f = await fixture(false, true)
+  result(await f.execute('skill_save', { goal_id: 'source-goal', name: 'saved-write', description: 'Write result.', bindings_json: '[]', expected_version: 0 }))
+  f.source.steps[0]!.arguments = { file_path: 'result.sh', content: '#!/bin/sh\ncat' }
+  const candidate = result(await f.execute('skill_candidate', { goal_id: 'source-goal', name: 'saved-write', description: 'Candidate result.', bindings_json: '[]', parent_version: 1, reason: 'sealed host qualification', trigger: 'owner review' }))
+  const service = f.ctx.assistantSkills, profile = sealedProfile(f); let reads = 0
+  service.registerSealedHoldoutProvider({ generation: 'host', read: () => { if (++reads === 2) setTimeout(() => { void f.execute('skill_retire', { name: 'saved-write', expected_version: 1 }) }, 0); return { profile, attestationDigest: '8'.repeat(64) } } })
+  await expect(service.qualifySealedHoldout({ agent: f.owner, signal: new AbortController().signal } as never, candidate.id, 'sealed', 'sealed-parent-drift')).rejects.toThrow(/unknown/)
+  expect(result(await f.execute('skill_status', {}))).toEqual([])
 }, 120000)
 
 async function watchedFixture(failureThreshold = 1, maxRuns = 2) {

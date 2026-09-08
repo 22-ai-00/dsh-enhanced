@@ -1,5 +1,6 @@
 import { isAbsolute, relative, resolve } from 'node:path'
 import Schema from '@deepseek-ai/schemastery'
+import type { EventObserverConfig } from './observer.js'
 
 export type FireWhen = 'changed' | 'truthy'
 export type Ipv6Mode = 'deny' | 'native-only'
@@ -11,6 +12,7 @@ interface TriggerBase {
   cooldownMs?: number
   maxFires?: number
   ttlMs?: number
+  observer?: EventObserverConfig
 }
 
 export interface FileTriggerConfig extends TriggerBase {
@@ -35,7 +37,18 @@ export interface WebhookTriggerConfig extends TriggerBase {
   maxSkewMs?: number
 }
 
-export type EventTriggerConfig = FileTriggerConfig | HttpJsonTriggerConfig | WebhookTriggerConfig
+export interface GitHubRepositoryTriggerConfig extends TriggerBase {
+  kind: 'github-repository'
+  repository: string
+  branch: string
+  baseBranch: string
+  credentialHandle: string
+  fireWhen?: FireWhen
+  debounceMs?: number
+  observer: EventObserverConfig
+}
+
+export type EventTriggerConfig = FileTriggerConfig | HttpJsonTriggerConfig | WebhookTriggerConfig | GitHubRepositoryTriggerConfig
 
 export interface Config {
   databasePath: string
@@ -57,9 +70,10 @@ export interface Config {
 }
 
 export type NormalizedTrigger =
-  | (Required<Omit<FileTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
-  | (Required<Omit<HttpJsonTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
-  | (Required<Omit<WebhookTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
+  | (Required<Omit<FileTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
+  | (Required<Omit<HttpJsonTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
+  | (Required<Omit<WebhookTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
+  | (Required<Omit<GitHubRepositoryTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
 
 export interface NormalizedConfig {
   databasePath: string
@@ -75,6 +89,12 @@ export interface NormalizedConfig {
   ipv6Mode: Ipv6Mode
 }
 
+const observerSchema = () => Schema.object({
+  workspace: Schema.string().required(), preset: Schema.string().required(), principalId: Schema.string().required(),
+  principalRecordId: Schema.string().required(), principalVersion: Schema.number().step(1).min(1).required(),
+  ownerRouteId: Schema.string().required(), expiresAt: Schema.number().step(1).min(1).required(), budgetId: Schema.string().required(),
+})
+
 const base = {
   id: Schema.string().required(),
   automationId: Schema.string().required(),
@@ -82,9 +102,13 @@ const base = {
   cooldownMs: Schema.number().step(1).min(0).max(86_400_000).default(0),
   maxFires: Schema.number().step(1).min(1).max(1_000_000).default(100),
   ttlMs: Schema.number().step(1).min(1_000).max(31_536_000_000),
+  observer: Schema.any(),
 }
 
 const triggerSchema = Schema.union([
+  Schema.object({ ...base, kind: Schema.const('github-repository').required(), repository: Schema.string().required(),
+    branch: Schema.string().required(), baseBranch: Schema.string().required(), credentialHandle: Schema.string().required(),
+    fireWhen: Schema.union(['changed', 'truthy'] as const).default('changed'), debounceMs: Schema.number().step(1).min(0).max(86_400_000).default(0), observer: observerSchema().required() }),
   Schema.object({
     ...base,
     kind: Schema.const('file').required(),
@@ -174,6 +198,19 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
   ])]
   const triggers = parsed.triggers.map(raw => {
     const trigger = { ...raw, id: id(raw.id, 'trigger id'), automationId: id(raw.automationId, 'automationId') }
+    if (trigger.observer !== undefined) {
+      const owner = observerSchema()(trigger.observer) as EventObserverConfig
+      if (Object.keys(owner).some(key => !['workspace', 'preset', 'principalId', 'principalRecordId', 'principalVersion', 'ownerRouteId', 'expiresAt', 'budgetId'].includes(key))) throw new Error('event-triggers: invalid observer fields')
+      trigger.observer = owner
+      if (!isAbsolute(owner.workspace) || !Number.isSafeInteger(owner.principalVersion) || !Number.isSafeInteger(owner.expiresAt)
+        || [owner.preset, owner.principalId, owner.principalRecordId, owner.ownerRouteId, owner.budgetId].some(value => value.length === 0 || value.length > 256 || value.trim() !== value || /[\p{Cc}]/u.test(value))) throw new Error('event-triggers: invalid observer owner')
+      Object.freeze(owner)
+    }
+    if (trigger.kind === 'github-repository') {
+      if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(trigger.repository)
+        || trigger.baseBranch === trigger.branch || [trigger.branch, trigger.baseBranch].some(value => value.length === 0 || value.length > 256 || value.trim() !== value || /[\p{Cc}]/u.test(value))) throw new Error('event-triggers: invalid GitHub repository scope')
+      return Object.freeze({ ...trigger, credentialHandle: id(trigger.credentialHandle, 'credentialHandle') })
+    }
     if (trigger.kind === 'file') {
       if (!isAbsolute(trigger.path) || !contained(trigger.path, roots)) {
         throw new Error('event-triggers: file path is outside allowedFileRoots')

@@ -10,7 +10,7 @@ describe('dsh-enhanced-event-triggers entrypoint', () => {
   test('exports stable identity, service, and validated config', () => {
     expect(name).toBe('dsh-enhanced-event-triggers')
     expect(version).toBe(manifest.version)
-    expect(plugin).toBe(EventTriggersService)
+    expect(plugin).toEqual({ name, Config, apply })
     expect(Config).toBe(EventTriggersService.Config)
   })
 

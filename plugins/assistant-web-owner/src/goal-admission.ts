@@ -8,6 +8,7 @@ import { DEEPSEEK_CHAT_COMPLETIONS_CONTRACT, DEEPSEEK_MODELS, DEEPSEEK_PROVIDER 
 import type { ActiveWebOwnerBindingSnapshot } from '@dsh-enhanced/assistant-delivery'
 import { inspectAutonomyProfile, type AutonomyDoctorProfile } from './doctor.js'
 import * as Actions from '@dsh-enhanced/assistant-actions'
+import { literalPath } from './setup.js'
 
 interface GoalAdmissionTaskBase {
   objective: string
@@ -20,7 +21,7 @@ interface GoalAdmissionTaskBase {
     cases: Array<{ stdin: string; expectedStdout: string; expectedExitCode: number }>
   }
   wake?: { maxDelayMs: number; runTimeoutMs: number; maxRuns: number }
-  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step'; outcome?: Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> }
+  repositoryDelivery?: { repository: string; baseBranch: string; branch: string; paths: string[]; credentialHandle: string; expiresAt: number; maxActions: number; maxTotalBytes: number; openPullRequest: boolean; acceptance?: 'goal-outcome' | 'goal-step'; events?: { credentialHandle: string; maxPolls: number; maxFires: number; pollIntervalMs: number; requestTimeoutMs: number }; outcome?: Pick<RepositoryReadbackAuthorityInput, 'requiredChecks' | 'reviewerIds' | 'minApprovals' | 'timeoutMs' | 'freshnessMs'> }
 }
 /** Legacy v1 fixed DeepSeek route. Kept for existing private admission files. */
 export interface GoalAdmissionTaskV1 extends GoalAdmissionTaskBase {
@@ -119,13 +120,23 @@ export function parseGoalAdmissionTask(source: string): GoalAdmissionTask {
   }
   if (input.repositoryDelivery !== undefined) {
     if (input.version !== 2) fail('repository delivery requires task version 2')
-    shape(input.repositoryDelivery, ['repository', 'baseBranch', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'openPullRequest'], ['acceptance', 'outcome'])
+    shape(input.repositoryDelivery, ['repository', 'baseBranch', 'branch', 'paths', 'credentialHandle', 'expiresAt', 'maxActions', 'maxTotalBytes', 'openPullRequest'], ['acceptance', 'outcome', 'events'])
     const value = input.repositoryDelivery as NonNullable<GoalAdmissionTaskBase['repositoryDelivery']>
     if (value.acceptance !== undefined && !['goal-outcome', 'goal-step'].includes(value.acceptance)) fail('invalid repository acceptance')
     for (const key of ['repository', 'baseBranch', 'branch', 'credentialHandle'] as const) if (typeof value[key] !== 'string' || value[key].length === 0 || value[key].length > 256) fail('invalid repository delivery')
     if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value.repository) || !Array.isArray(value.paths) || value.paths.length !== 1 || value.paths[0] !== verification.artifactPath
       || value.baseBranch === value.branch || !Number.isSafeInteger(value.expiresAt) || typeof value.openPullRequest !== 'boolean') fail('invalid repository delivery')
     integer(value.maxActions, value.openPullRequest ? 3 : 2, 10_000); integer(value.maxTotalBytes, 1, 64 * 1024 * 1024)
+    if (value.events !== undefined) {
+      shape(value.events, ['credentialHandle', 'maxPolls', 'maxFires', 'pollIntervalMs', 'requestTimeoutMs'])
+      if (!value.outcome || typeof value.events.credentialHandle !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,199}$/u.test(value.events.credentialHandle)) fail('repository events require outcome and an existing observation credential')
+      integer(value.events.maxPolls, 2, 10000); integer(value.events.maxFires, 1, 100)
+      integer(value.events.pollIntervalMs, 1000, 3600000); integer(value.events.requestTimeoutMs, 100, 30000)
+      if (value.events.maxPolls <= value.events.maxFires || input.maxGoalRounds < 2) fail('repository event budget cannot cover observation and continuation')
+      // Each native round may create one outcome assessment with up to three verifier attempts.
+      integer(value.maxActions, 3 + 12 * input.maxGoalRounds, 10000)
+      if (input.wake && (input.wake as { maxRuns: number }).maxRuns < value.events.maxFires + 1) fail('wake budget must cover delivery and allowed event continuations')
+    }
     if (value.outcome !== undefined) {
       shape(value.outcome, ['requiredChecks', 'reviewerIds', 'minApprovals', 'timeoutMs', 'freshnessMs'])
       if (value.acceptance !== 'goal-step' || !value.openPullRequest) fail('repository outcome requires explicit goal-step delivery and a pull request')
@@ -173,7 +184,7 @@ function merge(base: YAMLMap, overlay: YAMLMap): YAMLMap {
 }
 /** Compose a complete candidate, preserving custom siblings and rejecting modified managed settings. */
 export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, effectiveSource: string,
-  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now(), settingsSource?: string): { patch: string; admissionId: string; profile: AutonomyDoctorProfile; repositoryDelivery?: { repository: string; branch: string; paths: string[]; acceptance: 'goal-outcome' | 'goal-step' } } {
+  taskSource: string, snapshot: ActiveWebOwnerBindingSnapshot, now = Date.now(), settingsSource?: string, eventSupport?: typeof import('@dsh-enhanced/event-triggers')): { patch: string; admissionId: string; profile: AutonomyDoctorProfile; repositoryDelivery?: { repository: string; branch: string; paths: string[]; acceptance: 'goal-outcome' | 'goal-step' } } {
   const task = parseGoalAdmissionTask(taskSource)
   for (const value of [input.dshHome, input.workspace]) if (!isAbsolute(value) || normalize(value) !== value) fail('home and workspace must be canonical paths')
   if (!Number.isFinite(now) || task.version === 1 && now >= Date.parse(DEEPSEEK_CHAT_COMPLETIONS_CONTRACT.expiresAt)) fail('model contract expired')
@@ -201,6 +212,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
   for (const slug of ['assistant-isolation', 'assistant-web-owner']) config(slug)
   const delivery = config('assistant-delivery'); const goals = config('assistant-goals'); const verifier = config('assistant-verifier')
   const actions = task.repositoryDelivery ? config('assistant-actions') : undefined; const keychain = task.repositoryDelivery ? config('credentials-keychain', false) : undefined
+  const eventTriggers = task.repositoryDelivery?.events ? config('event-triggers') : undefined
   const provider = task.version === 1 ? config('assistant-deepseek-budget') : undefined; const personal = config('personal-assistant')
   const policy = map(personal.get('assistantPolicy', true))
   const principalId = `web/${input.profile}/local/operator`
@@ -211,7 +223,7 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     || !isDeepStrictEqual(owner.principal, profile.principal) || owner.role !== 'owner' || owner.status !== 'active'
     || now + task.executionBudget.durationMs > profile.grant.expiresAt) fail('owner, scope or remaining grant deadline mismatch')
   const admissionId = `goal-${createHash('sha256').update(JSON.stringify([input.profile, binding.id, owner.id, owner.version, task.objective])).digest('hex').slice(0,24)}`
-  const wake = task.wake ?? (task.repositoryDelivery ? { maxDelayMs: Math.min(60_000, task.executionBudget.durationMs - 1), runTimeoutMs: Math.min(60_000, task.executionBudget.durationMs), maxRuns: 1 } : undefined)
+  const wake = task.wake ?? (task.repositoryDelivery ? { maxDelayMs: task.repositoryDelivery.events ? task.executionBudget.durationMs - 1 : Math.min(60_000, task.executionBudget.durationMs - 1), runTimeoutMs: Math.min(task.repositoryDelivery.events ? 300_000 : 60_000, task.executionBudget.durationMs), maxRuns: (task.repositoryDelivery.events?.maxFires ?? 0) + 1 } : undefined)
   if (task.repositoryDelivery && (task.repositoryDelivery.expiresAt <= now + task.executionBudget.durationMs + 60_000 || task.repositoryDelivery.expiresAt > profile.grant.expiresAt)) fail('repository delivery deadline mismatch')
   const managed = isSeq(verifier.get('profiles', true)) && sequence(verifier.get('profiles', true)).items.some(value => isMap(value) && String(value.get('id')).startsWith('goal-'))
   const set = (config: YAMLMap, field: string, desired: unknown, defaults: unknown[] = []) => {
@@ -287,8 +299,16 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
     if (settingsRoute === undefined && (!modelRow || modelRow.has('disabled') && modelRow.get('disabled') !== false || !modelRow.has('config'))) fail('configured default model route is unavailable')
     const configured = settingsRoute ?? map(modelRow!.get('config', true)).toJSON()
     if (!isDeepStrictEqual(configured, task.route)) fail('task route is not the configured default provider/model')
-    // v2 never writes model or credential configuration. The exact configured
-    // route is admitted into the calls budget and rechecked by runtime.
+    // Scheduled Delivery does not read Web's default-model settings. Pin its
+    // fallback to the already configured and admitted public route as well.
+    // Credentials/provider configuration remains owned by the existing route.
+    if (wake) {
+      if (!managed) {
+        delivery.set('agentProvider', task.route.provider); delivery.set('agentModel', task.route.model); delivery.set('agentMaxOutputTokens', task.executionBudget.maxOutputTokensPerCall)
+      } else {
+        set(delivery, 'agentProvider', task.route.provider); set(delivery, 'agentModel', task.route.model); set(delivery, 'agentMaxOutputTokens', task.executionBudget.maxOutputTokensPerCall)
+      }
+    }
   }
   if (wake) {
     append(delivery, 'ownerRoutes', [{ id: admissionId, conversation: binding.conversation, principal: binding.principal, workspace: binding.workspace,
@@ -331,6 +351,37 @@ export function prepareGoalAdmission(input: GoalAdmissionInput, source: string, 
         { id: `${admissionId}-repository-automation`, effect: 'allow', subject: { kind: 'background', id: '*', workspace: input.workspace, principal: principalId }, actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: 'verified-delivery-*' }, context: { initiators: ['background'] } },
         { id: `${admissionId}-repository-notice`, effect: 'allow', subject: { kind: 'background', id: 'assistant-actions-verified-delivery/v1', workspace: input.workspace, principal: principalId }, actions: ['send'], resource: { kind: 'message', id: binding.id }, context: { initiators: ['background'] } },
       ])
+      if (repository.events) {
+        if (typeof eventSupport?.normalizeEventTriggersConfig !== 'function' || typeof eventSupport.EVENT_OBSERVER_EXECUTOR !== 'string') fail('install matching event-triggers support for repository events')
+        const { normalizeEventTriggersConfig, EVENT_OBSERVER_EXECUTOR } = eventSupport
+        const events = repository.events, triggerId = `${admissionId}-repository-events`, automationId = `${triggerId}-source`, pollBudgetId = `${triggerId}-polls`, eventBudgetId = `${triggerId}-runs`
+        const eventHandle = handles.items.filter(item => isMap(item) && literalString(item.get('id', true)) === events.credentialHandle) as YAMLMap[]
+        if (eventHandle.length !== 1) fail('repository observation credential handle is unavailable')
+        const eventConsumers = eventHandle[0]!.get('consumers', true), eventPurposes = eventHandle[0]!.get('purposes', true)
+        if (!isSeq(eventConsumers) || !isSeq(eventPurposes) || (literalInteger(eventHandle[0]!.get('maxLeaseMs', true)) ?? 0) < events.requestTimeoutMs
+          || !eventConsumers.items.some(item => literalString(item) === 'dsh-enhanced-event-triggers') || !eventPurposes.items.some(item => literalString(item) === 'github.observe')) fail('repository observation handle must authorize event-triggers and github.observe')
+        const observer = { workspace: input.workspace, preset: input.preset, principalId, principalRecordId: owner.id, principalVersion: owner.version, ownerRouteId: admissionId, expiresAt: repository.expiresAt, budgetId: eventBudgetId }
+        append(eventTriggers!, 'triggers', [{ id: triggerId, automationId, kind: 'github-repository', repository: repository.repository, branch: repository.branch, baseBranch: repository.baseBranch, credentialHandle: events.credentialHandle,
+          fireWhen: 'changed', debounceMs: 0, cooldownMs: 0, maxFires: events.maxFires, observer }])
+        set(eventTriggers!, 'pollerEnabled', true, [false]); set(eventTriggers!, 'pollIntervalMs', events.pollIntervalMs, [5000]); set(eventTriggers!, 'requestTimeoutMs', events.requestTimeoutMs, [10000])
+        set(goals, 'eventWaits', true, [false])
+        append(policy, 'budgets', [{ id: pollBudgetId, metric: 'repository-observations', limit: events.maxPolls, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' },
+          { id: eventBudgetId, metric: 'automation-runs', limit: events.maxFires, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }])
+        append(policy, 'rules', [
+          { id: `${triggerId}-observe`, effect: 'allow', subject: { kind: 'background', id: `event-triggers:${triggerId}`, workspace: input.workspace, principal: principalId }, actions: ['observe'], resource: { kind: 'network', id: `https://api.github.com/repos/${repository.repository}` }, context: { initiators: ['background'] }, budget: { id: pollBudgetId, amount: 1 } },
+          { id: `${triggerId}-credential`, effect: 'allow', subject: { kind: 'background', id: 'dsh-enhanced-event-triggers' }, actions: ['credential.use'], resource: { kind: 'credential', id: events.credentialHandle }, context: { initiators: ['background'] } },
+          { id: `${triggerId}-ingest`, effect: 'allow', subject: { kind: 'external', id: `event-triggers:${triggerId}`, workspace: input.workspace }, actions: ['ingest'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['external'] } },
+          { id: `${triggerId}-host`, effect: 'allow', subject: { kind: 'background', id: EVENT_OBSERVER_EXECUTOR, workspace: input.workspace, principal: principalId }, actions: ['observe', 'reconcile', 'execute', 'pause'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['background'] } },
+          { id: `${triggerId}-execute`, effect: 'allow', subject: { kind: 'background', id: automationId, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['background'] } },
+          { id: `${triggerId}-wait`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['wait-for-event'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['external', 'background'] } },
+          { id: `${triggerId}-background-wait`, effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace: input.workspace, principal: principalId }, actions: ['wait-for-event'], resource: { kind: 'automation', id: automationId }, context: { initiators: ['background'] } },
+          { id: `${triggerId}-wake`, effect: 'allow', subject: { kind: 'background', id: '*', workspace: input.workspace, principal: principalId }, actions: ['reconcile', 'execute'], resource: { kind: 'automation', id: 'goal-event-wake-*' }, context: { initiators: ['background'] } },
+          { id: `${triggerId}-native-wait`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['wait', 'pause'], resource: { kind: 'goal', id: 'business-context' }, context: { initiators: ['background'] } },
+          { id: `${triggerId}-wait-tool`, effect: 'allow', subject: { kind: 'agent', id: input.preset, workspace: input.workspace, principal: principalId }, actions: ['execute'], resource: { kind: 'tool', id: 'goal_wait_event' }, context: { initiators: ['external', 'background'] } },
+        ])
+        normalizeEventTriggersConfig({ ...eventTriggers!.toJSON(), databasePath: literalPath(eventTriggers!.get('databasePath', true), input, 'EventTriggers databasePath') })
+      }
+
     }
   }
   GoalsConfig(goals.toJSON())
