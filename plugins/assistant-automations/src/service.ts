@@ -1797,6 +1797,17 @@ export class AssistantAutomationsService extends Service implements
     return this.store.inspectSystemOwned(input)
   }
 
+  /** Host-only binding metadata for exact restart reconciliation; no prompt or task content. */
+  inspectSystemOwnedActivation = (input: { owner: string; automationId: string }): Readonly<{ definitionHash: string; activationNonce: string; ownerRouteId: string }> | undefined => {
+    this.assertActive()
+    const current = this.store.get(input.automationId)
+    if (!current) return undefined
+    if (current.owner !== input.owner || current.definition.execution?.kind !== 'host') throw new AssistantAutomationsError('not-found', 'exact system-owned Host automation was not found')
+    const definitionHash = this.store.getDefinitionHash(input.automationId)
+    if (!definitionHash) throw new AssistantAutomationsError('not-found', 'system-owned definition hash is unavailable')
+    return Object.freeze({ definitionHash, activationNonce: current.definition.execution.activationNonce, ownerRouteId: current.definition.execution.ownerRouteId })
+  }
+
   /** Host-only bounded identity inventory; definitions and scopes never leave the store. */
   listSystemOwned(input: {
     owner: string

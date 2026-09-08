@@ -29,7 +29,7 @@
 | [assistant-delivery](assistant-delivery) | `@dsh-enhanced/assistant-delivery` | 实验性 | 不含厂商 SDK 的持久消息核心：配对、会话绑定、inbox/outbox、receipt、重试与未知发送对账。 |
 | [lark-channel](lark-channel) | `@dsh-enhanced/lark-channel` | 实验性 | 飞书/Lark 长连接薄适配器：持久化后应答、`Get`/`DONE` 状态、脱敏执行进度、模型/审批卡片、安全 onboarding 与 launchd/systemd/Windows Task 常驻。 |
 | [assistant-heartbeat](assistant-heartbeat) | `@dsh-enhanced/assistant-heartbeat` | 实验性 | 复用 Automations 的 active-hours 主动巡检、scratch CAS、busy coalescing 与成本硬界限。 |
-| [event-triggers](event-triggers) | `@dsh-enhanced/event-triggers` | 实验性 | 持久化 file、HTTPS/JSON 与 HMAC webhook 边缘事件，再以稳定 id 交给 Automations。 |
+| [event-triggers](event-triggers) | `@dsh-enhanced/event-triggers` | 实验性 | 持久化 file、HTTPS/JSON、GitHub 仓库状态与 HMAC webhook 事件，支持有限 owner 授权观察与目标等待来源。 |
 
 ## 安全、治理与运维
 

@@ -57,6 +57,17 @@ function preparationFixture() {
 }
 
 describe('durable event wait lifecycle', () => {
+  it('accepts a paused checkpoint only while its exact wait, source and owner remain current', () => {
+    const f = fixture(); f.emitted = false
+    expect(f.runtime.acceptsPausedRecord(f.record)).toBe(false)
+    f.runtime.prepare(f.intent())
+    expect(f.runtime.acceptsPausedRecord(f.record)).toBe(true)
+    expect(f.runtime.acceptsPausedRecord({ ...f.record, native: { ...f.record.native, revision: 4 } })).toBe(false)
+    f.policyAllowed = false; expect(f.runtime.acceptsPausedRecord(f.record)).toBe(false)
+    f.policyAllowed = true; f.changed = true; expect(f.runtime.acceptsPausedRecord(f.record)).toBe(false)
+    f.changed = false; vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(f.intent().expiresAt)
+    expect(f.runtime.acceptsPausedRecord(f.record)).toBe(false); f.close()
+  })
   it('captures an already committed event during prepare and does not rematerialize on repeated hints', () => {
     const f = fixture(); const wait = f.runtime.prepare(f.intent())
     expect(wait).toMatchObject({ state: 'materialized', match: { sequence: 8 } }); expect(f.materializations).toBe(1)

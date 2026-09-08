@@ -75,6 +75,15 @@ export class GoalEventWaitRuntime {
     return this.#store.get(wait.intent.id)!
   }
   inspect(scope: GoalScope, goalId: string): readonly GoalEventWait[] { return this.#store.list(scope, goalId) }
+  /** A fresh durable wait for this exact paused revision, still under source and owner authority. */
+  acceptsPausedRecord(record: GoalRecord): boolean {
+    if (!this.#live || record.native.phase !== 'paused') return false
+    return this.#store.list(record.scope, record.id).some(wait => {
+      if (wait.state === 'terminal' || Date.now() >= wait.intent.expiresAt
+        || !same(wait.intent.wake.native, record.native)) return false
+      try { return this.#sourceCurrent(wait.intent) !== undefined && this.#recordCurrent(wait.intent) !== undefined } catch { return false }
+    })
+  }
   health = () => ({ enabled: true, connected: this.#source !== undefined, reconciliationFailures: this.#failures })
   reconcile(): void {
     if (!this.#live) return

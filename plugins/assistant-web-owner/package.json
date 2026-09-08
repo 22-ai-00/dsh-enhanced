@@ -67,6 +67,7 @@
     }
   },
   "peerDependencies": {
+    "@dsh-enhanced/event-triggers": ">=0.1.24 <0.2.0",
     "@deepseek-ai/cordis": "^4.0.1",
     "@deepseek-ai/dsh-agent": ">=0.1.2-rc.1 <0.2.0",
     "@deepseek-ai/dsh-api-gateway": ">=0.1.2-rc.1 <0.2.0",
@@ -86,6 +87,7 @@
     "@dsh-enhanced/assistant-actions": ">=0.1.24 <0.2.0"
   },
   "peerDependenciesMeta": {
+    "@dsh-enhanced/event-triggers": { "optional": true },
     "@deepseek-ai/cordis": { "optional": true },
     "@deepseek-ai/dsh-agent": { "optional": true },
     "@deepseek-ai/dsh-api-gateway": { "optional": true },
@@ -105,6 +107,7 @@
     "@dsh-enhanced/assistant-actions": { "optional": true }
   },
   "devDependencies": {
+    "@dsh-enhanced/event-triggers": "workspace:*",
     "@deepseek-ai/cordis": "catalog:",
     "@deepseek-ai/dsh-agent": "catalog:",
     "@deepseek-ai/dsh-api-gateway": "catalog:",

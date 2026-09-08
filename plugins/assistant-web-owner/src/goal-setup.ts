@@ -6,7 +6,7 @@ import { isDeepStrictEqual } from 'node:util'
 import * as Delivery from '@dsh-enhanced/assistant-delivery'
 import { inspectIsolationGrant } from '@dsh-enhanced/assistant-isolation'
 import { prepareWebOwnerProfile, type WebOwnerSetupInput } from './setup.js'
-import { prepareGoalAdmission } from './goal-admission.js'
+import { prepareGoalAdmission, parseGoalAdmissionTask } from './goal-admission.js'
 import { inspectAutonomyProfile } from './doctor.js'
 
 function fail(reason: string): never { throw new Error(`goal setup: ${reason}`) }
@@ -87,7 +87,9 @@ export async function configureGoalAdmission(input: WebOwnerSetupInput, effectiv
     if (observed.status !== 'matched') fail(`session owner snapshot ${observed.status}; use an existing idle owner session`)
     const inspectGrant = () => inspectIsolationGrant({ stateRoot: profile.stateRoot, grant: profile.grant })
     if (inspectGrant().status !== 'available') fail('persisted isolation grant unavailable; setup does not renew grants')
-    const plan = prepareGoalAdmission(input, prepared.patch, effectiveSource, taskSource, observed.snapshot, Date.now(), settingsSource)
+    const eventSupport = parseGoalAdmissionTask(taskSource).repositoryDelivery?.events
+      ? await import('@dsh-enhanced/event-triggers').catch(() => fail('install matching event-triggers support for repository events')) : undefined
+    const plan = prepareGoalAdmission(input, prepared.patch, effectiveSource, taskSource, observed.snapshot, Date.now(), settingsSource, eventSupport)
     const recheck = async () => {
       if (await patch(path) !== before || !isDeepStrictEqual(await defaultModelSettings(input.dshHome), settingsSource)
         || readEffectiveSource && await readEffectiveSource() !== effectiveSource

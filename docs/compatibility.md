@@ -108,6 +108,8 @@ Evaluation 的 `./benchmark/deepseek` 通过可选 Host peer 使用同批 `assis
 
 Event Triggers 的版本化来源依赖同批 Automations 新增的纯 `./external-event` 子入口，peer 下界为 `>=0.1.24 <0.2.0`，两包须同步安装；旧 Automations 不提供该导出。Automations schema 15 与 Event schema 3 保留旧记录的空来源，不将旧 pending 自动补证或投到现配置目标。升级后应核对 quarantine；事件来源元数据不是目标唤醒权限，原有 Policy 准入继续生效。
 
+GitHub 仓库来源新增 `github-repository` kind，沿用现有来源/envelope v1 并保持 HTTPS 观测信任语义；旧 reader 不能消费该新 kind。正式 observer 依赖同批 Automations 的 `inspectSystemOwnedActivation` 与幂等 `reconcileSystem` 原始规范化回执，以及 Delivery owner-route receipt。其定义摘要使用 Automations 当前规范化 JSON 的 SHA-256，升级时须保留定义改写与重启回放回归。Delivery 是 EventTriggers 的可选 Host peer，仅配置 observer 时注入；原有来源无需该依赖。Web Owner 配置入口通过 EventTriggers 公开 normalizer 校验新事件配置，需安装同批包。Goals 对可选 `inspectOwnerSources` 采用结构化能力探测，不静态导入 EventTriggers，不把来源元数据当成授权。
+
 - Skills comparison uses `dsh-tool-fs`, `dsh-fs-local` and native ToolRuntime at `0.1.2-rc.1` in a private Context, with explicit path containment and no inherited model tools. LocalFileSystem `cwd` alone is not containment. Evaluation `/benchmark` and Isolation `IsolatedVerifierRunner` are optional Host peer APIs loaded for configured comparisons; the native filesystem libraries travel as dependencies for the private replay runtime. Upgrade checks cover actual native edit/write behavior, artifact execution in Docker, unknown no-replay, profile budgets and cancellation.
 
 

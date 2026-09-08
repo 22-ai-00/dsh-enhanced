@@ -20,11 +20,37 @@ export function apply(ctx) {
     .map(line => JSON.parse(line)).filter(entry => entry.event === 'dispatch').length : 0
   const startedAt = Date.now()
   const record = entry => appendFileSync(path, `${JSON.stringify(entry)}\n`, { encoding: 'utf8', mode: 0o600 })
+  ctx.inject(['sessionPersistence', 'workspaceRegistry'], async scope => {
+    try {
+      const headers = await scope.sessionPersistence.list()
+      const workspaces = scope.workspaceRegistry.list()
+      record({ event: 'startup-session-index', at: Date.now(),
+        headers: headers?.map(header => ({ id: header.id, cwd: header.cwd, origin: header.origin })),
+        workspaces: workspaces?.map(workspace => ({ id: workspace.id, path: workspace.path, sessionIds: workspace.sessionIds })) })
+    } catch { record({ event: 'startup-session-index-unavailable' }) }
+  })
   const active = new Set()
   const stop = () => {
     for (const agent of active) agent.cancel({ kind: 'hook', reason: 'repo-autonomy-real-observer-expired' })
   }
   const timer = setTimeout(stop, durationMs); timer.unref?.()
+  ctx.on('session/event', (session, event) => {
+    if (event.type !== 'turn/end') return
+    const cause = event.data.reason?.reason
+    const knownCauses = ['assistant-delivery-goal-continuation-timeout', 'assistant-delivery-goal-continuation-cancelled',
+      'assistant-delivery-goal-continuation-authorization-revoked', 'assistant-goals-step-cancelled',
+      'assistant-goals-step-admission-failed', 'assistant-goals-budget-expired', 'assistant-goals-budget-rejected', 'assistant-goals-tool-budget-rejected', 'assistant-goals-budget-unloaded', 'assistant-delivery-session-lease-lost', 'assistant-delivery-session-lease-required',
+      'assistant-delivery-scheduled-goal-wake-revoked', 'assistant-delivery-scheduled-goal-wake-cancelled',
+      'assistant-delivery-scheduled-goal-settlement-failed',
+      'repo-autonomy-real-observer-expired', 'repo-autonomy-real-observer-limit']
+    // Keep only framework settlement data.  In particular, do not retain the
+    // model response, tool arguments, or an Error message here.
+    record({ event: 'turn-end', sessionId: String(session.id), turn: event.data.turn,
+      reason: typeof event.data.reason?.kind === 'string' ? event.data.reason.kind : 'unknown',
+      causeKind: ['hook', 'user', 'parent', 'disposed', 'legacy'].includes(cause?.kind) ? cause.kind : null,
+      cause: cause?.kind === 'hook' && knownCauses.includes(cause.reason) ? cause.reason : null,
+      deliveryContinuationTimeoutMs: ctx.get('assistantDelivery', false)?.config?.agentGoalContinuationTimeoutMs ?? null })
+  })
   ctx.on('llm/stream', async function* (options, next) {
     const agent = ctx.agents.currentInitiator()
     if (Date.now() - startedAt >= durationMs || calls >= limit) {

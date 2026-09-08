@@ -1469,6 +1469,9 @@ importers:
       '@dsh-enhanced/assistant-verifier':
         specifier: workspace:*
         version: link:../assistant-verifier
+      '@dsh-enhanced/event-triggers':
+        specifier: workspace:*
+        version: link:../event-triggers
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0
@@ -1556,6 +1559,9 @@ importers:
       '@dsh-enhanced/assistant-automations':
         specifier: workspace:*
         version: link:../assistant-automations
+      '@dsh-enhanced/assistant-delivery':
+        specifier: workspace:*
+        version: link:../assistant-delivery
       '@dsh-enhanced/assistant-policy':
         specifier: workspace:*
         version: link:../assistant-policy

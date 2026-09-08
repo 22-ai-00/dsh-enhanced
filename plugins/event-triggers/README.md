@@ -13,6 +13,12 @@ dsh --profile web --dump-config
 
 默认 `triggers: []`、`pollerEnabled: false`。File/HTTP 需要给 `background:event-triggers:<id>` 的 filesystem/network `observe` 明确 Policy 规则；Webhook 还需要 `external:webhook:<id>` 的 automation `accept` 规则，Automations 本身会再次验证 external `ingest`。
 
+`github-repository` 来源只读固定 `api.github.com` 的分支 check-runs、目标 PR 和 reviews，以结构化状态摘要产生变化事件；响应内容不进入模型上下文。配置绑定 `repository`、`branch`、`baseBranch` 和 `credentialHandle`。Keychain handle 须允许 consumer `dsh-enhanced-event-triggers`、purpose `github.observe`；每次请求受租约、固定 HTTPS 出口、正文上限和共同 deadline 约束，截断或不一致的提交状态拒绝生成事件。
+
+该来源必须配置 `observer`：准确 workspace/preset、principalId/principalRecordId/principalVersion、ownerRouteId、绝对 expiresAt 和 budgetId。它复用 Automations 的有限 Host 执行器，不调用模型；另需 Delivery 验证 owner route，Policy 授权观测、凭据、来源执行和下游 ingest。Web Owner 的 `repositoryDelivery.events` 可生成这些配置及有限轮询/执行预算。原有未配置 observer 的来源保持既有行为。
+
+来源摘要和序号先持久化，独立于下游 observer 执行回执，Goals 可以用它们等待变化；事件本身不证明 CI/评审成功，最终必须重新核验实际提交。重启复用来源与授权，不延长期限；来源暂停、授权过期、route 或已协调定义变化后，停止观测并拒绝来源查询/投递。当前以明确期限和预算结束观察，尚不提供目标完成即自动退订。
+
 HTTP 网络权限使用精确 HTTPS origin：
 
 ```yaml

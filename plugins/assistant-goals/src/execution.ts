@@ -163,6 +163,9 @@ export class GoalExecutionRuntime {
     const pending = agent === undefined ? undefined : this.#settlements.get(agent)
     if (pending !== undefined) await this.#bounded(pending, signal ?? new AbortController().signal)
   }
+  /** Host lifecycle read: only this exact Agent's admitted round or settlement. */
+  hasPendingSettlement = (agent: Agent | undefined): boolean => agent !== undefined
+    && (this.#rounds.has(agent) || this.#settlements.has(agent))
   whenIdle = async (): Promise<void> => { while (this.#pending.size) await Promise.all(this.#pending) }
   health = () => ({ enabled: this.#store !== undefined, verifierConnected: this.#sink !== undefined, activeRounds: this.#rounds.size })
   budgetState = (agent: Agent): { record: GoalRecord; run: GoalExecutionRun; signal: AbortSignal } | undefined => {
@@ -211,6 +214,17 @@ export class GoalExecutionRuntime {
     const permit = round?.eventWaitPause
     if (round === undefined || permit?.materialized !== true) return false
     try { this.#assertRound(round); return true } catch { return false }
+  }
+
+  /** Terminal wake checks can run on either side of the asynchronous settlement. */
+  acceptsPausedEventWaitSettlement = (record: GoalRecord, agent?: Agent): boolean => {
+    if (!this.#active || record.native.phase !== 'paused') return false
+    if (agent !== undefined && this.#rounds.has(agent)) return this.hasAcceptedPausedEventWait(agent)
+    const runs = this.#store?.listForGoal(record.scope, record.id) ?? []
+    return runs.some(run => run.execution?.status === 'succeeded' && run.execution.quiescent
+      && run.intent.task.goal.nativeGoalId === record.native.goalId && run.intent.task.goal.sessionId === record.native.sessionId
+      && run.intent.task.goal.nativeRevision + 1 === record.native.revision && run.intent.admission.round === record.native.roundsStarted
+      && run.intent.task.goal.definitionVersion === record.definition.version && run.intent.task.goal.definitionDigest === record.definition.digest)
   }
 
   #isGoalTurn(agent: Agent, turn: number): boolean {
@@ -323,14 +337,31 @@ export class GoalExecutionRuntime {
 
   async #settle(round: ActiveRound, completed: boolean): Promise<void> {
     let succeeded = completed
+    let stage = 'terminal'
+    let failure: string | undefined
     try {
       if (succeeded) {
+        stage = 'before-flush'
         this.#assertRound(round, true)
+        stage = 'flush'
         succeeded = await this.#bounded(this.ctx.get('sessions')!.flush(round.agent.session), round.signal)
+        if (!succeeded) failure = 'checkpoint-unconfirmed'
+        stage = 'after-flush'
         this.#assertRound(round, true)
       }
-    } catch { succeeded = false }
-    if (!succeeded) this.#cancel(round)
+    } catch (error) {
+      succeeded = false
+      // Only fixed framework categories survive; never log a provider error,
+      // tool payload, session content, or arbitrary AbortSignal reason.
+      const known = ['step admission expired', 'goal definition or authority changed', 'authenticated owner required',
+        'exact live agent required', 'policy denied', 'current bound goal required', 'step operation cancelled']
+      failure = known.find(reason => error instanceof Error && error.message === `assistant-goals: ${reason}`) ?? 'unclassified'
+    }
+    if (!succeeded) {
+      this.ctx.logger.warn(`assistant-goals: step settled unknown ${JSON.stringify({ runId: round.run.intent.runId, turn: round.turn,
+        stage, failure, completed, terminal: round.terminal?.data.reason?.kind ?? 'unobserved', signalAborted: round.signal.aborted })}`)
+      this.#cancel(round)
+    }
     try {
       const saved = this.#store!.get(round.run.intent.runId)!
       if (saved.dispatchedAt !== undefined) {

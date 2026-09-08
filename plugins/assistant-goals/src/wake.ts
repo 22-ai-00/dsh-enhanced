@@ -39,7 +39,8 @@ export class GoalWakeRuntime {
     private readonly ready: () => boolean,
     private readonly settleExecution: (agent: Agent, signal: AbortSignal) => Promise<void>,
     private readonly verifiedCompletion: (record: GoalRecord, wake: GoalWakeIntent['native']) => boolean,
-    private readonly assertEventWait: (intent: GoalWakeIntent) => void = () => {}) {
+    private readonly assertEventWait: (intent: GoalWakeIntent) => void = () => {},
+    private readonly acceptedEventPause: (record: GoalRecord, agent?: Agent) => boolean = () => false) {
     this.#store = new GoalWakeStore(path)
     ctx.inject(['assistantAutomations', 'assistantDelivery', 'assistantPolicy'], runtime => {
       const automations = runtime.assistantAutomations
@@ -112,7 +113,9 @@ export class GoalWakeRuntime {
       && native.revision === intent.native.revision + 2
     const verifiedCompletion = native.phase === 'complete' && native.revision === intent.native.revision + 3
       && this.verifiedCompletion(record, intent.native)
-    if (!(phase === 'before-resume' ? before : running || phase === 'terminal' && (terminal || verifiedCompletion))) reject()
+    const waitingAgain = phase === 'terminal' && native.phase === 'paused' && native.revision === intent.native.revision + 2
+      && native.roundsStarted > intent.native.roundsStarted && this.acceptedEventPause(record, agent)
+    if (!(phase === 'before-resume' ? before : running || phase === 'terminal' && (terminal || verifiedCompletion || waitingAgain))) reject()
     this.#route(intent.scope, intent.ownerRouteId)
     return record
   }
@@ -197,8 +200,8 @@ export class GoalWakeRuntime {
       const result = await delivery.resumeScheduledGoal(capability)
       if (result.dispatched !== dispatched) throw new Error('assistant-goals: wake dispatch disagreement')
       const succeeded = result.outcome === 'succeeded' && result.quiescent && dispatched && !signal.aborted
-      if (succeeded) this.#current(intent, 'terminal')
-      if (succeeded && intent.id.startsWith('goal-event-wake-')) {
+      const settled = succeeded ? this.#current(intent, 'terminal') : undefined
+      if (succeeded && settled?.native.phase !== 'paused' && intent.id.startsWith('goal-event-wake-')) {
         delivery.enqueueScheduledGoalResult(capability)
       }
       this.#store.finish(intent.id, succeeded ? 'succeeded' : dispatched ? 'unknown' : 'denied', Date.now())
