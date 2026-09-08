@@ -23,6 +23,7 @@ export interface NativeWebOwnerAccess {
   ownsSession(sessionId: string): boolean
   prompt<T>(input: { sessionId: string; requestId: string; text: string; content: readonly unknown[] },
     invoke: () => Promise<T>, signal: AbortSignal): Promise<T>
+  notifications(sessionId: string): ReadonlyArray<{ id: string; text: string; createdAt: number }>
   dispose(): Promise<void>
 }
 interface OwnerPort {
@@ -33,6 +34,7 @@ interface OwnerPort {
   complete(handle: AcceptanceHandle, input: { status: 'succeeded' | 'failed' | 'cancelled' | 'unknown'; quiescent: boolean }): Promise<void>
   claimed(agent: Agent, envelope: InboundEnvelope, turn: number): void
   released(): void
+  notifications(binding: ConversationBinding): ReadonlyArray<{ id: string; text: string; createdAt: number }>
 }
 interface Execution {
   handle: AgentHandle
@@ -122,6 +124,7 @@ export class NativeWebOwner implements NativeWebOwnerAccess {
   }
   assertSession(sessionId: string): void { this.#binding(sessionId) }
   ownsSession(sessionId: string): boolean { try { this.assertSession(sessionId); return true } catch { return false } }
+  notifications(sessionId: string): ReadonlyArray<{ id: string; text: string; createdAt: number }> { return this.port.notifications(this.#binding(sessionId)) }
   get(sessionId: string): Agent | undefined {
     this.#assertOwner()
     const entry = this.#entries.get(sessionId)

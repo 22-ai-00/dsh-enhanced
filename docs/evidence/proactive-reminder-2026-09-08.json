@@ -1,0 +1,155 @@
+{
+  "protocol": "autonomy-delivery-evidence/v1",
+  "date": "2026-09-08",
+  "baseCommit": "a5ea259b272d5d360323ea05b30ef12da536ff09",
+  "capability": "Durable owner reminders in the original Web session without goal execution or additional model calls",
+  "completeWorkPackage": false,
+  "scope": {
+    "implemented": [
+      "typed owner-scoped durable reminder enqueue",
+      "idempotent opportunity retry without extra reminder reservation",
+      "current send authority, owner lineage, binding generation and expiry checks",
+      "strict owner Web RPC and session notification dock",
+      "same-session notification reload after Host restart"
+    ],
+    "remaining": [
+      "model-produced useful preparation",
+      "intelligent ranking across opportunities",
+      "observed long-term benefit"
+    ]
+  },
+  "realScenario": {
+    "command": "DSH_WEB_REAL_OPPORTUNITY=remind CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=super-relay DSH_WEB_REAL_MODEL=auto_model/alwaysday1 DSH_WEB_REAL_SOURCE_HOME=/home/jiataorui/.dsh pnpm test:web-owner:real-event",
+    "exitCode": 0,
+    "logPath": "/tmp/dsh-real-event-reminder-third.log",
+    "logSha256": "8331a3cbe2a2803617630cfdb2ef821015aad49cda75950977e6a6a01736d067",
+    "proofPath": ".cache/web-owner-real-event-e2e/web-owner-real-event-real--84236-l-from-a-durable-file-event/proof.json",
+    "proofSha256": "bd1fb0514af2dee4838f3b9b7ec4b3b2c9191fe35d66799e084c4f39dc07d13c",
+    "hostStarts": 4,
+    "foregroundModelCalls": 4,
+    "reminderModelCalls": 0,
+    "noGoalExecution": true,
+    "visibleBeforeAndAfterRestart": true,
+    "duplicateDidNotCreateNotice": true,
+    "rejectedApprovals": [],
+    "sessionId": "session-0d4037d7-8bf9-43b3-8467-d39363700bfa",
+    "goalId": "9d5aed890d8ad2ef975c02e1a50c3643fc6e70e13bc5c26f2b8993bc7d25b1a8",
+    "acceptedNotices": 1
+  },
+  "failedAttempts": [
+    {
+      "logPath": "/tmp/dsh-real-event-reminder-first.log",
+      "exitCode": 1,
+      "logSha256": "22b0ab60c38dfee5c55f24890779ffe86dfbde644354d220246c5be9cbab9c0e",
+      "cause": "client slots service was not injected"
+    },
+    {
+      "logPath": "/tmp/dsh-real-event-reminder-second.log",
+      "exitCode": 1,
+      "logSha256": "0e7dd25eb014cdaf26a23b341bf30d55ac7c509875b7f890ad40e900b762e8c0",
+      "cause": "client dynamically mounted remote namespace was read without injection"
+    }
+  ],
+  "limitations": [
+    "Web accepted means available to read, not user read",
+    "Web reads use the fixed native owner capability plus current background send checks; no distinct read Policy action",
+    "External adapter tests use a fake transport; no real external messages sent",
+    "Unknown external sends are reconciled by querying previous results, not resending",
+    "Utility values are operator estimates, not measured model benefit",
+    "C2C has local execution records only; no ChatGPT web review"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 10,
+    "todo": 5
+  },
+  "failedChecks": [
+    {
+      "command": "pnpm check",
+      "exitCode": 2,
+      "logPath": "/tmp/dsh-reminder-check-before-test-type-fix.log",
+      "logSha256": "70ac9c44ece9133549cc102806efebd3995e69629b0e80d2ad68a44d4ba837ae",
+      "cause": "new client runtime regression required a structural type cast for the dynamically mounted Remote namespace; targeted types/test/lint passed after correction"
+    },
+    {
+      "command": "pnpm check",
+      "exitCode": 1,
+      "logPath": "/tmp/dsh-reminder-check-before-catalog-clock-fix.log",
+      "logSha256": "71c0a7f2562da210cda82f0938e76834bc852070f663ed00d7dfebf23bc1df75",
+      "results": {
+        "testFilesPassed": 318,
+        "testFilesFailed": 2,
+        "testsPassed": 3924,
+        "testsFailed": 2
+      },
+      "causes": [
+        "three direct DSH development dependencies were literal versions instead of required catalog references",
+        "existing Actions budget test could span fixed wall-clock budget windows; the test now freezes Date.now while retaining real HTTP/timers/CLI and all assertions"
+      ]
+    }
+  ],
+  "sourceSha256": {
+    "plugins/assistant-actions/tests/service.spec.ts": "fff628103c12ddbebecb0b444d559c35beb479d0623bf309c69b6207f5124d36",
+    "plugins/assistant-delivery/README.md": "472193da95bed6153709aff716152a10b8696bd39da3c316154dc34d1f7b948a",
+    "plugins/assistant-delivery/src/coordinator.ts": "28ffa96937c28e842662b5fa56675e5fac527d1431542f55ad215a39372d17fc",
+    "plugins/assistant-delivery/src/native-web-owner.ts": "537128bdc8142b8bf5f8d6c85edc5f28e84267bfe7f7791e9cb568bc091f075e",
+    "plugins/assistant-delivery/src/service.ts": "4315cf63f9da743e61c33b7b800ef39ecf6f372e8a62d36d9900b7ff1691b933",
+    "plugins/assistant-delivery/tests/notifications.spec.ts": "1da99ce59558045471591f077db8675b41e01d6fdbb6422787e90cb2ae5e525c",
+    "plugins/assistant-proactive/README.md": "ae85d3bb1c6d8625232b331bdbf964b8d86b15cbbca0c817d4a1f25ca4ebf14e",
+    "plugins/assistant-proactive/src/engine.ts": "5e70e375c0e88e18f931fa999a6b1af0ce66d352a373b8eb364d83d02de29fdf",
+    "plugins/assistant-proactive/src/index.ts": "4df8e90e6fbe970007e1eec922b9172fbb558ccdaa2517373c543a0ecb892e38",
+    "plugins/assistant-proactive/src/reminder.ts": "14cf95dbd91b1e887c8f58d5c26eed5371d0c5658a6279a8bb908025022b43ce",
+    "plugins/assistant-proactive/tests/index.spec.ts": "7ccd5cca8ec5a2325d70fd8705c7debefd42f66c5858c7f55774c07246755c80",
+    "plugins/assistant-proactive/tests/reminder.spec.ts": "9617ce48a3eff346b9d902003dab482e4fe6ddc84bac4b9ece7e6cee5184a69b",
+    "plugins/assistant-web-owner/README.md": "a06b0d74e6bc77acde31643eda05d106d945e27f7f2d423e0a383af886b6b986",
+    "plugins/assistant-web-owner/package.json": "621a6d88dcf3cdc50e8c0ca98195c7d808b0067ac653dace674667c2840b1571",
+    "plugins/assistant-web-owner/scripts/build-client.mjs": "c07fc20b4359afa7aa353a6c0e45e4840134747eb0c21162afcd091d183cd0ba",
+    "plugins/assistant-web-owner/src/client.ts": "78d7994edbb53217b0f3b5cae496b29cc7d49aaf612ce8f54f09031c745f29df",
+    "plugins/assistant-web-owner/src/index.ts": "2ef815cc97ff74dc28d567e05c1069db15afbae5fe3805f819feae79e288072e",
+    "plugins/assistant-web-owner/src/notices.ts": "0de7b777549521b88e4f869b68a458fb6545ab624dd94aba41ef4af8a2c752eb",
+    "plugins/assistant-web-owner/src/typert.ts": "a93a06285bdf92c25a14029408494edf45d6d8962b16e498c9c70db21432f890",
+    "plugins/assistant-web-owner/tests/client-runtime.spec.ts": "ac75ea4aa4d097274b029e7286166efd777e585721a59b660f98ab13c4b81451",
+    "plugins/assistant-web-owner/tests/index.spec.ts": "a521e09594aa463f6f1f0e0d44921459a76cb2bcb2428240fa7ee2f2c349c4e5",
+    "scripts/e2e/web-owner-real-event.spec.mjs": "b4ab6f72f3dae4c780c50a5dfc8d6ad81a33b95f8441baa161e1928323939173",
+    "scripts/e2e/web-owner-real-guard.mjs": "11da27244056237d89218b663ff73644b1c16f33acace52e3044541a1a2d3a56"
+  },
+  "lockfileSha256": "78e06574befdcc090033942751a1000dc52695bdac3bd6900f5455597d3378e4",
+  "workspaceConfigSha256": "7d3a490f11c9aba160dd4483511367e3f1f4c55f73b642bdb51967463c7679d8",
+  "engineeringVerification": {
+    "command": "pnpm check",
+    "exitCode": 0,
+    "logPath": "/tmp/dsh-reminder-final-check.log",
+    "logSha256": "8d836e639844f8072d9cfc8fee91a3d7017373af77c848a35a4bf0f634fe7120",
+    "mainTestFiles": 320,
+    "mainTests": 3926,
+    "deliveryTests": 712,
+    "proactiveTests": 17,
+    "webOwnerTests": 34,
+    "dryRunPacks": 32,
+    "manifestValidation": true,
+    "lintWarnings": 0,
+    "typecheck": true,
+    "build": true,
+    "inspectedWebPackFiles": [
+      "lib/client.js",
+      "lib/notices.js",
+      "lib/typert.js",
+      "lib/THIRD_PARTY_LICENSES",
+      "cordis.patch.yml",
+      "README.md",
+      "LICENSE"
+    ]
+  },
+  "independentReview": {
+    "reviewer": "native verifier /root/real_web_verify",
+    "verdict": "PASS",
+    "readOnly": true,
+    "verifiedSourceHashes": 23,
+    "scope": "production authority and RPC wiring, real browser proof, final pnpm check and artifact hashes",
+    "limitations": [
+      "no real external-channel send",
+      "no ChatGPT web review",
+      "not full WP12 acceptance"
+    ]
+  }
+}

@@ -930,6 +930,7 @@ export class AssistantDeliveryService extends Service {
       ownerId: this.ownerId, leaseMs: config.leaseMs, maxAttempts: config.maxAttempts,
       maxConcurrency: config.maxConcurrency, retryBaseMs: config.retryBaseMs, retryMaxMs: config.retryMaxMs,
       ownerRouteGuard: this.ownerRouteGuard,
+      notificationGuard: record => this.#notificationGuard(record),
     })
     this.inbound = new InboundCoordinator({ store: this.deliveryStore, processor: () => this.runtime,
       ownerId: this.ownerId, leaseMs: config.leaseMs, maxAttempts: config.maxAttempts,
@@ -1895,7 +1896,7 @@ export class AssistantDeliveryService extends Service {
   }
 
   /** Trusted Host configuration only; the returned capability fixes a pre-paired Web owner and scope. */
-  bindNativeWebOwner(ctx: Context, config: NativeWebOwnerConfig): NativeWebOwnerAccess {
+  bindNativeWebOwner = (ctx: Context, config: NativeWebOwnerConfig): NativeWebOwnerAccess => {
     this.assertActive()
     const runtime = this.nativeWebRuntime
     if (runtime === undefined) throw new AssistantDeliveryError('runtime-conflict', 'native Web runtime is unavailable')
@@ -1913,9 +1914,29 @@ export class AssistantDeliveryService extends Service {
       complete: (handle, input) => this.completeForegroundTaskAcceptance(handle, input),
       claimed: (agent, envelope, turn) => this.capturePreferenceTurn(agent,
         { kind: 'delivery', channel: envelope.channel, account: envelope.account, eventId: envelope.eventId }, turn),
+      notifications: binding => this.deliveryStore.listOutbox({ bindingId: binding.id, limit: 50 }).filter(record => record.status === 'accepted'
+        && record.intent.metadata?.['dsh.native-notice'] === 'v1' && this.#notificationGuard(record) === undefined)
+        .map(record => ({ id: record.id, text: record.intent.text, createdAt: record.createdAt })),
     }, config)
     this.nativeWebOwner = access
     this.nativeWebBound = true
+    const noticeAdapter: DeliveryAdapter = {
+      channel: 'web', account: config.principal.account,
+      capabilities: Object.freeze({ reconcileUnknownSend: true, receipts: [], formats: ['plain'] as const }),
+      async start() {},
+      send: async (intent) => {
+        if (intent.metadata?.['dsh.native-notice'] !== 'v1' || this.#notificationGuard({ intent } as OutboxRecord) !== undefined) return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+        return { outcome: 'accepted', providerMessageId: this.#notificationProviderId(intent) }
+      },
+      reconcileUnknownSend: async (record) => { return record.intent.metadata?.['dsh.native-notice'] === 'v1' && this.#notificationGuard(record) === undefined ? { outcome: 'accepted', providerMessageId: this.#notificationProviderId(record.intent) } : { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false } },
+    }
+    ctx.effect(() => {
+      const registration = this.registry.register(noticeAdapter)
+      void registration.catch(() => { ctx.logger.warn('assistant-delivery: native Web notification adapter registration failed') })
+      return async () => {
+        try { const remove = await registration; await remove() } catch { /* Registration failure is already reported; there is no adapter to remove. */ }
+      }
+    }, 'assistant-delivery.native-web-notices')
     runtime.ctx.effect(() => () => access.dispose(), 'assistant-delivery.native-web-runtime')
     return access
   }
@@ -3546,12 +3567,16 @@ export class AssistantDeliveryService extends Service {
     metadata?: Readonly<Record<string, string>>
   }): OutboxRecord {
     this.assertActive()
-    if (containsReservedLearningMetadata(input.metadata)) {
+    if (containsReservedLearningMetadata(input.metadata) || Object.keys(input.metadata ?? {}).some(key => key.startsWith('dsh.native-notice'))) {
       throw new AssistantDeliveryError(
         'runtime-conflict',
-        'reserved learning metadata requires the typed Automation result seam',
+        'reserved metadata requires its typed delivery interface',
       )
     }
+    return this.enqueueBackgroundAuthorized(input)
+  }
+
+  private enqueueBackgroundAuthorized(input: { sourceId: string; workspace: string; bindingId: string; idempotencyKey: string; text: string; format?: 'markdown' | 'plain'; metadata?: Readonly<Record<string, string>> }): OutboxRecord {
     const binding = this.deliveryStore.getBinding(input.bindingId)
     if (binding === undefined || binding.status !== 'active' || !this.hasActivePrincipal(binding)) {
       throw new AssistantDeliveryError('missing-binding', 'delivery binding does not exist or is revoked')
@@ -3571,6 +3596,41 @@ export class AssistantDeliveryService extends Service {
       target: { conversation: binding.conversation, principal: binding.principal }, text: input.text,
       format: input.format ?? 'plain',
       ...(input.metadata === undefined ? {} : { metadata: input.metadata }) })
+  }
+
+  #notificationGuard(record: Readonly<OutboxRecord>): Extract<import('./types.js').AdapterSendResult, { outcome: 'not-sent' }> | undefined {
+    const metadata = record.intent.metadata
+    const nativeKeys = Object.keys(metadata ?? {}).filter(key => key.startsWith('dsh.native-notice'))
+    if (nativeKeys.length === 0) return undefined
+    if (metadata?.['dsh.native-notice'] !== 'v1') return { outcome: 'not-sent', failureCode: 'native-notice-invalid', retryable: false }
+    const expiresAt = Number(metadata['dsh.native-notice.expiresAt']); const binding = this.deliveryStore.getBinding(record.intent.bindingId)
+    const owner = binding === undefined ? undefined : this.deliveryStore.getPrincipal(binding.principal)
+    if (!Number.isSafeInteger(expiresAt) || Date.now() >= expiresAt || binding?.status !== 'active' || owner?.status !== 'active' || owner.role !== 'owner'
+      || owner.id !== metadata['dsh.native-notice.ownerRecordId'] || String(owner.version) !== metadata['dsh.native-notice.ownerVersion']
+      || String(binding.version) !== metadata['dsh.native-notice.bindingVersion'] || String(binding.generation) !== metadata['dsh.native-notice.bindingGeneration'] || binding.sessionId !== metadata['dsh.native-notice.sessionId']) return { outcome: 'not-sent', failureCode: 'native-notice-authority-expired', retryable: false }
+    try {
+      const sourceId = canonicalBackgroundSourceId(metadata['dsh.native-notice.sourceId']!)
+      const current = this.resolveOwnerRoute(metadata['dsh.native-notice.ownerRouteId']!).binding
+      if (current.id !== binding.id || current.version !== binding.version || current.generation !== binding.generation || current.sessionId !== binding.sessionId) throw new Error('route changed')
+      const permission = this.policy.evaluate({ subject: { kind: 'background', id: sourceId, workspace: binding.workspace, principal: externalPrincipalId(binding.principal) }, action: 'send', resource: { kind: 'message', id: binding.id }, context: { initiator: 'background' } })
+      if (permission.effect !== 'allow') throw new Error('send denied')
+    } catch { return { outcome: 'not-sent', failureCode: 'native-notice-policy-revoked', retryable: false } }
+    return undefined
+  }
+  #notificationProviderId(intent: Readonly<OutboundIntent>): string { return `native-notice:${createHash('sha256').update(intent.idempotencyKey).update('\u0000').update(intent.bindingId).update('\u0000').update(intent.text).digest('hex')}` }
+
+  /** Queue a typed owner notice. Accepted means queued; it never asserts user read. */
+  enqueueOwnerNotification(input: { sourceId: string; ownerRouteId: string; scope: { principalId: string; principalRecordId: string; principalVersion: number; workspace: string; preset: string }; sessionId: string; idempotencyKey: string; text: string; expiresAt: number }): OutboxRecord {
+    this.assertActive()
+    if (!Number.isSafeInteger(input.expiresAt) || input.expiresAt <= Date.now() || typeof input.text !== 'string' || input.text.length === 0 || input.text.length > 16_384) throw new AssistantDeliveryError('policy-denied', 'owner notification is invalid or expired')
+    const resolved = this.resolveOwnerRoute(input.ownerRouteId)
+    const binding = resolved.binding; const owner = this.deliveryStore.getPrincipal(binding.principal)
+    if (binding.sessionId !== input.sessionId || binding.workspace !== input.scope.workspace || binding.agentPreset !== input.scope.preset
+      || externalPrincipalId(binding.principal) !== input.scope.principalId || owner?.id !== input.scope.principalRecordId || owner.version !== input.scope.principalVersion) throw new AssistantDeliveryError('policy-denied', 'owner notification authority is no longer current')
+    return this.enqueueBackgroundAuthorized({ sourceId: input.sourceId, workspace: binding.workspace, bindingId: binding.id, idempotencyKey: input.idempotencyKey, text: input.text, format: 'plain', metadata: {
+      'dsh.native-notice': 'v1', 'dsh.native-notice.sourceId': input.sourceId, 'dsh.native-notice.ownerRouteId': input.ownerRouteId, 'dsh.native-notice.expiresAt': String(input.expiresAt), 'dsh.native-notice.ownerRecordId': owner.id,
+      'dsh.native-notice.ownerVersion': String(owner.version), 'dsh.native-notice.bindingVersion': String(binding.version), 'dsh.native-notice.bindingGeneration': String(binding.generation), 'dsh.native-notice.sessionId': binding.sessionId,
+    } })
   }
 
   /**

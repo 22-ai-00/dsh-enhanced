@@ -130,7 +130,7 @@ export function apply(ctx) {
   const guard = createRunGuard({ provider: process.env.DSH_WEB_REAL_PROVIDER || 'codex-subscription', initialCalls, record })
   const eventWait = process.env.DSH_WEB_REAL_EVENT === '1'
   const bootstrap = process.env.DSH_WEB_REAL_BOOTSTRAP === '1'
-  const allowed = eventWait ? (name, args, workspace) => isEventExperimentToolAllowed(name, args, workspace, process.env.DSH_WEB_REAL_OPPORTUNITY === '1' ? 'real-event-opportunity' : undefined) : isExperimentToolAllowed
+  const allowed = eventWait ? (name, args, workspace) => isEventExperimentToolAllowed(name, args, workspace, ['1', 'remind'].includes(process.env.DSH_WEB_REAL_OPPORTUNITY) ? 'real-event-opportunity' : undefined) : isExperimentToolAllowed
   ctx.on('agent/request', async (_input, next) => {
     const request = await next()
     return { ...request, maxTokens: Math.min(request.maxTokens ?? 2048, bootstrap ? 512 : 2048) }

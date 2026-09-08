@@ -253,6 +253,7 @@ interface DeliveryCoordinatorOptions {
   retryMaxMs: number
   /** Host-owned route authority and exact Policy recheck used at claim and immediately before send. */
   ownerRouteGuard?: Readonly<OwnerRouteDispatchGuard>
+  notificationGuard?: (record: Readonly<OutboxRecord>) => Extract<AdapterSendResult, { outcome: 'not-sent' }> | undefined
   tickIntervalMs?: number
   now?: () => number
   random?: () => number
@@ -417,6 +418,8 @@ export class DeliveryCoordinator {
         return
       }
     }
+    const notice = this.options.notificationGuard?.(record)
+    if (notice !== undefined) { this.finish(record, fencingToken, notice); return }
     try {
       const result = await adapter.send(record.intent, signal)
       if (signal.aborted) return

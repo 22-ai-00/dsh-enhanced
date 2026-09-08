@@ -14,7 +14,8 @@ import { observePage, query, run, sanitize, startHost } from './web-owner-helper
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
 const sourceAutomationId = 'web-owner-real-event-source'
-const opportunityProfile = process.env.DSH_WEB_REAL_OPPORTUNITY === '1' ? 'real-event-opportunity' : undefined
+const reminderMode = process.env.DSH_WEB_REAL_OPPORTUNITY === 'remind'
+const opportunityProfile = ['1', 'remind'].includes(process.env.DSH_WEB_REAL_OPPORTUNITY) ? 'real-event-opportunity' : undefined
 
 function row(doc, id) {
   const value = doc.contents.items.find(item => isMap(item) && item.get('id') === id)
@@ -144,7 +145,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     })
     if (opportunityProfile) setConfig(patch, 'dsh-enhanced-assistant-proactive', '@dsh-enhanced/assistant-proactive', {
       databasePath: join(home, 'assistant-proactive/opportunities.sqlite'),
-      profiles: [{ id: opportunityProfile, mode: 'execute', expectedBenefit: 100, successPpm: 900_000, executionCost: 10, interruptionCost: 5, possibleLoss: 5, minimumUtility: 1, mergeWindowMs: 2000, cooldownMs: 1000, rejectionCooldownMs: 60_000, maxDecisionsPerGoal: 4, maxExecutionsPerGoal: 1, maxRemindersPerGoal: 0 }],
+      profiles: [{ id: opportunityProfile, mode: reminderMode ? 'remind' : 'execute', expectedBenefit: 100, successPpm: 900_000, executionCost: 10, interruptionCost: 5, possibleLoss: 5, minimumUtility: 1, mergeWindowMs: 2000, cooldownMs: 1000, rejectionCooldownMs: 60_000, maxDecisionsPerGoal: 4, maxExecutionsPerGoal: reminderMode ? 0 : 1, maxRemindersPerGoal: reminderMode ? 1 : 0 }],
     })
     setConfig(patch, 'dsh-enhanced-assistant-web-owner', '@dsh-enhanced/assistant-web-owner', { maxExecutionMs: 300_000 })
     setConfig(patch, 'dsh-enhanced-assistant-verifier', '@dsh-enhanced/assistant-verifier', {
@@ -161,6 +162,7 @@ test('real configured route wakes one browser-owned verified goal from a durable
     })
     appendNestedConfig(patch, 'dsh-enhanced-personal-assistant', 'assistantPolicy', 'budgets', [{ id: 'real-event-source-runs', metric: 'automation-runs', limit: 2, periodMs: Number.MAX_SAFE_INTEGER, scope: 'subject' }, { id: 'real-event-goal-runs', metric: 'automation-runs', limit: 3, periodMs: Number.MAX_SAFE_INTEGER, scope: 'global' }])
     appendNestedConfig(patch, 'dsh-enhanced-personal-assistant', 'assistantPolicy', 'rules', [
+      { id: 'real-event-opportunity-reminder', effect: 'allow', subject: { kind: 'background', id: 'assistant-proactive/v1', workspace, principal: 'web/web/local/operator' }, actions: ['send'], resource: { kind: 'message', id: '*' }, context: { initiators: ['background'] } },
       { id: 'real-event-owner-wait', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['wait-for-event'], resource: { kind: 'automation', id: sourceAutomationId }, context: { initiators: ['external'] } },
       { id: 'real-event-background-wait', effect: 'allow', subject: { kind: 'background', id: 'assistant-goals-wake/v1', workspace, principal: 'web/web/local/operator' }, actions: ['wait-for-event'], resource: { kind: 'automation', id: sourceAutomationId }, context: { initiators: ['background'] } },
       { id: 'real-event-background-goal', effect: 'allow', subject: { kind: 'agent', id: 'standard', workspace, principal: 'web/web/local/operator' }, actions: ['observe', 'inspect', 'snapshot', 'execute', 'reply'], resource: { kind: '*', id: '*' }, context: { initiators: ['background'] } },
@@ -222,6 +224,39 @@ test('real configured route wakes one browser-owned verified goal from a durable
     const observationAfterRestart = Date.now()
     await expect.poll(() => query(eventsPath, "SELECT last_observed_at FROM trigger_state WHERE trigger_id = 'file'")[0]?.last_observed_at).toBeGreaterThan(observationAfterRestart)
     await writeFile(watched, '{"revision":1}\n', { mode: 0o600 })
+    if (reminderMode) {
+      const notices = () => query(deliveryPath, "SELECT id, status, intent_json FROM outbox_messages WHERE idempotency_key LIKE 'proactive-reminder:%'")
+      await expect.poll(() => notices().map(row => row.status), { timeout: 30000 }).toEqual(['accepted'])
+      const reminder = activePage.getByLabel('主动提醒', { exact: true })
+      await expect(reminder).toBeVisible({ timeout: 10_000 })
+      await expect(reminder).toContainText('目标仍在等待。本次仅提醒，未执行目标任务。')
+      await expect(reminder).toContainText('净收益分值 70')
+      const notification = notices()[0]
+      const paused = query(goalsPath, 'SELECT * FROM goal_records')[0]
+      expect(JSON.parse(paused.native_json)).toMatchObject({ phase: 'paused', roundsStarted: 0, sessionId })
+      expect(existsSync(join(workspace, 'summarize.mjs'))).toBe(false)
+      expect(query(`${goalsPath}.wakes`, 'SELECT * FROM goal_wakes')).toHaveLength(0)
+      expect((await modelCalls(modelLog)).filter(row => row.event === 'dispatch')).toEqual(beforeWakeCalls.filter(row => row.event === 'dispatch'))
+      const reminderText = JSON.parse(notification.intent_json).text
+      await stop(); await open(true); await selectOwnerSession(activePage)
+      await expect(activePage.getByLabel('主动提醒', { exact: true })).toContainText(reminderText)
+      const observedAfterRestore = Date.now()
+      await expect.poll(() => query(eventsPath, "SELECT last_observed_at FROM trigger_state WHERE trigger_id = 'file'")[0]?.last_observed_at).toBeGreaterThan(observedAfterRestore)
+      await writeFile(watched, '{"revision":2}\n', { mode: 0o600 })
+      await expect.poll(() => readEvents(eventsPath).length, { timeout: 30000 }).toBeGreaterThanOrEqual(2)
+      await expect.poll(() => query(join(home, 'assistant-automations/events.sqlite'), "SELECT status FROM automation_runs WHERE automation_id = ?", sourceAutomationId).filter(row => row.status === 'succeeded').length, { timeout: 30000 }).toBeGreaterThanOrEqual(2)
+      expect(notices()).toHaveLength(1)
+      expect((await modelCalls(modelLog)).filter(row => row.event === 'dispatch')).toEqual(beforeWakeCalls.filter(row => row.event === 'dispatch'))
+      await stop()
+      const audit = await readSessionAudit(home, workspace, sessionId)
+      expect(audit.events.filter(row => row.type === 'tool/call' && ['write', 'edit'].includes(row.data.name))).toHaveLength(0)
+      const decisions = query(join(home, 'assistant-proactive/opportunities.sqlite'), 'SELECT payload_json FROM proactive_decisions').map(row => JSON.parse(row.payload_json))
+      expect(decisions).toMatchObject([{ mode: 'remind', state: 'decided', utility: 70 }])
+      await writeFile(testInfo.outputPath('proof.json'), JSON.stringify({ capability: 'durable-owner-web-reminder', ...route.proof, hostStarts, sessionId, goalId: paused.id, native: JSON.parse(paused.native_json), decisions, notices: notices(), modelCalls: await modelCalls(modelLog), approved, rejected, noModelCallsForReminder: true, noGoalExecution: true, visibleBeforeAndAfterRestart: true, duplicateDidNotCreateNotice: true, sourceEvents: readEvents(eventsPath) }, null, 2), { mode: 0o600 })
+      await writeFile(testInfo.outputPath('session-audit.json'), JSON.stringify(audit, null, 2), { mode: 0o600 })
+      await copyFile(modelLog, testInfo.outputPath('model.jsonl'))
+      return
+    }
     await waitForVerifiedGoal(activePage, goalsPath, verifierPath, deliveryPath, approved, frames, sessionId, workspace, { isToolAllowed: allowedEventApproval, rejected,
       failure: () => query(`${goalsPath}.wakes`, 'SELECT state FROM goal_wakes').some(row => ['unknown', 'denied'].includes(row.state))
         ? 'Event goal wake terminated without confirmed execution' : undefined,
