@@ -2,7 +2,7 @@
 
 本账本落实 [2026-09-06 路线图](agent-intelligence-autonomy-roadmap-2026-09-06.md) 和 [成长专项审计](agent-growth-gap-evidence-2026-09-06.md)。目标是完整实现可验证的目标经营、任务上下文、独立验收、主动行动、高权限隔离和自主技能进化，并提供容易安装、诊断和升级的产品入口。实现起点为 `1b65852`。历史分析保留原始结论；当前进度与新证据记录在这里。
 
-> 最新实施批次（2026-09-09，基线 `bf04c89`）：Skills 新捕获的标准写入声明当前文件观察，保存并通过原生权限、预算与检查点执行；同一目标中精确成功的技能复用可展开为新候选的固定步骤，原调用与证明保留，旧版本语义不变。TraeX 测试入口已接通，参数兼容仅允许一次 JSON 解码后为对象；真实 TraeX 到达目标创建、捕获登记和文件写入，后续未授权 bash 请求在执行前阻断，完整 canary 仍未通过。工程检查、运行尝试和原生工具证据见[本批记录](evidence/skill-runtime-traex-2026-09-09.json)。全部 18 项仍为 **3 已验证 / 13 实现中 / 2 待做**；Calendar/v2 已交付于 `bf04c89`，真实 Calendar/GitHub 和安装升级等剩余要求不等待技能比较收益。
+> 最新实施批次（2026-09-09，基线 `ca02c0d`）：WP17 新增 Linux 本地仓库的离线 `upgrade` / `uninstall`。整个 `DSH_HOME` 停止后，安装器在 home 外持有经过 inode 验证的非阻塞内核锁，在无网络 bubblewrap 中复制、更新、结构化复验并实际激活副本；通过后才用同文件系统 rename 提交。事务 manifest 绑定路径、profile、操作、原/新目录 inode 与 package 摘要，覆盖中断恢复；第三方 bundle、外置状态路径、symlink/hardlink/mount/special-file 风险均 fail closed。真实临时 profile 的 upgrade/uninstall 和故障恢复已通过。Autonomy setup 同时把 Isolation、Actions、Credentials、Skills、Proactive 及 Skills 嵌套 stateRoot 规范化到真实 DSH_HOME，旧默认 SQLite 存在时要求显式离线迁移。工程验证、失败修复与边界见[本批证据](evidence/offline-lifecycle-2026-09-09.json)。当前仍未发布 npm 生命周期资产，也不管理 Lark/supervised 常驻服务，因此 WP17 保持实现中；全部 18 项仍为 **3 已验证 / 13 实现中 / 2 待做**。
 
 ## 全局约束
 

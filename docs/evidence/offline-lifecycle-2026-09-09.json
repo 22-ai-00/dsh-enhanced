@@ -1,0 +1,77 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-09",
+  "baseline": "ca02c0da8cd19e5f8a394982226456ec99413b03",
+  "scope": [
+    "Linux local-checkout offline upgrade and uninstall for existing web/autonomy profiles",
+    "Whole-DSH_HOME snapshot, sandbox validation, atomic replacement, and bound crash recovery",
+    "Canonical DSH_HOME state paths for autonomy-installed Isolation, Actions, Credentials, Skills, and Proactive bundles"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2,
+    "note": "WP17 remains implementing because npm release assets and Lark/supervised resident-service lifecycle are not delivered."
+  },
+  "engineeringValidation": {
+    "fullCheck": {
+      "state": "passed",
+      "log": "/tmp/dsh-wp17-final-ci-check.log",
+      "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+      "exit": 0,
+      "testFiles": 352,
+      "tests": 4329,
+      "skippedTests": 0,
+      "skippedFiles": 0,
+      "packCount": 33,
+      "sha256": "17a95dc236142eea09212fe1213c7c1e9e55aeaf8d9af0a48d2f7b7acfa21276"
+    },
+    "targeted": [
+      {
+        "command": "pnpm exec vitest run tests/installers.spec.ts",
+        "exit": 0,
+        "scope": "93 installer tests including bound crash recovery, external lock ordering, real bwrap mounting, SQLite migration, package failure, symlink/hardlink rejection, third-party bundle rejection, and exact upgrade targets"
+      },
+      {
+        "command": "pnpm --filter @dsh-enhanced/assistant-web-owner exec vitest run tests/autonomy.spec.ts tests/goal-admission.spec.ts",
+        "exit": 0,
+        "scope": "35 Web owner tests including canonical state paths, safe ancestor aliases, legacy-state refusal, nested Skills state roots, and Goal admission regression"
+      },
+      {
+        "command": "pnpm --filter @dsh-enhanced/assistant-web-owner run typecheck",
+        "exit": 0
+      },
+      {
+        "command": "dsh --profile web --dump-config | node scripts/install/lifecycle-config.mjs ...",
+        "exit": 0,
+        "scope": "current real web profile structural validation including DSH !!js path expressions"
+      }
+    ]
+  },
+  "realLifecycle": {
+    "log": "/tmp/dsh-wp17-real-installer.log",
+    "sha256": "2fdca6f2cf7f6785fcf0f874bbeee20b2149d9e0a5af5809c60c17c67f893561",
+    "exit": 0,
+    "operations": [
+      "fresh real DSH web profile initialized with a local hello bundle",
+      "public install-local.sh upgrade completed through offline frozen repository build, verified kernel locks, real network-isolated bubblewrap, staged config checks, real Host activation, and atomic commit",
+      "public install-local.sh uninstall archived the original profile, preserved the home, activated a clean web profile, and completed atomically",
+      "a separate successful upgrade used the /home alias for a /data00/home physical path and verified canonical lock/mount handling"
+    ],
+    "limitations": [
+      "The real lifecycle smoke uses the local hello bundle and no external credentials, network service, or model call.",
+      "A copied pre-existing multi-plugin home was not counted as a valid smoke because its relative link dependencies intentionally refer to the original logical DSH_HOME."
+    ]
+  },
+  "securityReview": {
+    "statePathReview": "PASS after canonical ancestor-alias serialization, old SQLite state protection, and recursive nested stateRoot checks",
+    "crashRecoveryReview": "PASS after dual fd locks, inode/digest binding, cleanup-started state, durable rename ordering, mount/hardlink/symlink checks, and post-activation rescan",
+    "crossFileReview": "PASS after rejecting enabled non-first-party composed rows while preserving inactive ordinary dependencies"
+  },
+  "failedAttempts": [
+    "The first real upgrade redirected pnpm to an empty staged store and failed with ERR_PNPM_UNEXPECTED_STORE; the original home was unchanged and the bound residue was recovered before retry.",
+    "The first bwrap layout mounted the staged home before a /tmp tmpfs, which hid temporary homes; bind-fd after tmpfs fixed the ordering and a real bwrap test now covers it.",
+    "An initial lock wrapper used ambiguous flock fd-and-command syntax and created files named 3 and 4; trace identified the cause, the wrapper now locks fds before exec, and the artifacts were removed.",
+    "A broad third-party dependency rejection was narrowed to active composed third-party rows so inactive library dependencies remain preserved."
+  ]
+}

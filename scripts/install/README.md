@@ -6,6 +6,19 @@
 ./scripts/install/install-local.sh --yes
 ```
 
+现有无常驻服务的 `web` / `autonomy` profile 可显式执行离线升级或卸载：
+
+```sh
+./scripts/install/install-local.sh --operation upgrade --scenario web \
+  --confirm-dsh-home-stopped --yes
+./scripts/install/install-local.sh --operation uninstall --scenario web \
+  --confirm-dsh-home-stopped --yes
+```
+
+两种操作都要求先停止所有使用同一 `DSH_HOME` 的进程，且都会拒绝活动的第三方顶层 bundle，因为安装器无法穷举其私有状态路径；未作为 bundle 激活的普通第三方依赖会原样保留。安装器持有 home 外的独占锁，在无网络隔离环境中对私有副本更新 package/lockfile、组合配置和实际激活；只有副本通过才提交。成功升级只更新当前已安装的 `@dsh-enhanced/*` 顶层依赖，不新增场景能力，并保留自定义 patch、凭据、Session、Goal 与其它任务状态。卸载把完整旧 profile 归档到 `$DSH_HOME/uninstalled-profiles/`，创建干净的同名 DSH 基础 profile，并保留外置状态。归档配置不会继续激活；再次卸载已无受管依赖的基础 profile 是幂等 no-op。
+
+当前事务入口只由 Linux 上的完整本地仓库安装器提供，并要求 Node.js、`flock`、Perl 和 bubblewrap；upgrade 会先用本机 pnpm store 做 `--offline --frozen-lockfile` 安装并构建当前 checkout，缺缓存时在触碰 DSH_HOME 前失败。它不管理 Lark/supervised 常驻服务，也不修改权限、模型或 Agent 工具配置，这些组合会在变更前明确拒绝。事务会拒绝 home 内的外部状态链接、外部硬链接、挂载点、特殊文件及无法证明归属的旧事务残留；失败证据保留在同级 transaction 目录供人工排查。`--confirm-dsh-home-stopped` 是操作者对整个 home 离线状态的确认，不是进程探测或强制停机命令。
+
 交互运行不传参数会选择场景；自动化可显式指定：
 
 ```sh
