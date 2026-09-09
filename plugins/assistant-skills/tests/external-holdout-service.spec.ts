@@ -50,6 +50,17 @@ test('skill_qualify uses one external process attempt, persists unknown, and exp
   cleanups.push(() => plugin.dispose())
   const execute = (name: string, toolArguments: object, signal = new AbortController().signal) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: toolArguments, signal, agent: owner })
   const json = async (name: string, toolArguments: object) => JSON.parse(((await execute(name, toolArguments)).value as { context: string }).context)
+  const profileIdDescription = (name: string) => {
+    const parameters = ctx.tools.get(name)!.parameters as Record<string, unknown>
+    const properties = parameters.properties as Record<string, unknown> | undefined
+    const profileId = parameters.profile_id ?? properties?.profile_id
+    if (!profileId || typeof profileId !== 'object') throw new Error(`missing profile_id schema for ${name}`)
+    return (profileId as { description?: string }).description
+  }
+  expect(ctx.tools.get('skill_comparison_status')!.description).toContain('call without comparison_id to discover exact owner-scoped configured profile IDs')
+  expect(profileIdDescription('skill_compare')).toContain('executionTool=skill_compare')
+  expect(profileIdDescription('skill_qualify')).toContain('executionTool=skill_qualify')
+  expect(profileIdDescription('skill_canary')).toContain('never infer it from generator, task, or version labels')
   await json('skill_save', { goal_id: 'goal', name: 'saved', description: 'save', bindings_json: '[]', expected_version: 0 })
   source.steps[0]!.arguments = { file_path: 'result.sh', content: 'cat' }
   const candidate = await json('skill_candidate', { goal_id: 'goal', name: 'saved', description: 'candidate', bindings_json: '[]', parent_version: 1, reason: 'test', trigger: 'test' })
