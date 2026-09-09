@@ -9,11 +9,13 @@ export * from './config.js'
 export * from './service.js'
 export * from './source.js'
 export * from './observer.js'
+export * from './lark-calendar-sensor.js'
 
 export function apply(ctx: Context, config: import('./config.js').Config): void {
   const normalized = normalizeEventTriggersConfig(config)
   const dependencies: string[] = []
   if (normalized.triggers.some(trigger => trigger.kind === 'webhook' || trigger.kind === 'github-repository')) dependencies.push('credentialsKeychain')
+  if (normalized.triggers.some(trigger => trigger.kind === 'lark-calendar')) dependencies.push('larkChannel')
   if (normalized.triggers.some(trigger => trigger.observer !== undefined)) dependencies.push('assistantDelivery')
   if (dependencies.length) {
     ctx.inject(dependencies as never, (credentialsCtx) => {

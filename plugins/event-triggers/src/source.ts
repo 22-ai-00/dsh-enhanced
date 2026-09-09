@@ -4,7 +4,7 @@ import type { ExternalEventEnvelope } from '@dsh-enhanced/assistant-automations/
 export interface EventSourceSnapshot {
   readonly protocol: 'dsh-event-source/v1'
   readonly sourceId: string
-  readonly kind: 'file' | 'http-json' | 'webhook' | 'github-repository'
+  readonly kind: 'file' | 'http-json' | 'webhook' | 'github-repository' | 'lark-calendar'
   readonly version: string
   readonly configDigest: string
   readonly target: Readonly<{ automationId: string }>

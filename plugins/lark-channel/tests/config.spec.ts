@@ -15,12 +15,19 @@ describe('lark-channel bundle contract', () => {
       .toMatchObject({ appSecretEnv: 'LARK_APP_SECRET', enabled: false, requireMentionInGroups: true,
         showProgress: true, progressDetails: 'direct', statusReactions: true, imageDownloadTimeoutMs: 30_000,
         requestTimeoutMs: 30_000,
-        userQuestionTtlMs: 86_400_000 })
+        userQuestionTtlMs: 86_400_000, allowedCalendarIds: [] })
     expect(() => Config({ account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'not-valid' }))
       .toThrow()
     expect(() => Config({
       account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET', appSecret: 'plaintext',
     } as never)).toThrow()
+  })
+
+  test('defaults Calendar access to empty and accepts only unique stable explicit IDs', () => {
+    const base = { account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET' }
+    expect(Config({ ...base, allowedCalendarIds: ['cal_one', 'cal/two'] })).toMatchObject({ allowedCalendarIds: ['cal_one', 'cal/two'] })
+    expect(() => Config({ ...base, allowedCalendarIds: ['cal_one', 'cal_one'] })).toThrow(/allowedCalendarIds/u)
+    expect(() => Config({ ...base, allowedCalendarIds: [' cal_one'] })).toThrow(/allowedCalendarIds/u)
   })
 
   test('shows detailed progress only in direct messages', () => {

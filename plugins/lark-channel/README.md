@@ -75,6 +75,8 @@ config:
   credentialHandle: lark-app-secret
   credentialPurpose: connect
   credentialLeaseMs: 86400000
+  # Calendar API stays unavailable unless every ID is explicitly listed.
+  allowedCalendarIds: []
   domain: feishu
   requireMentionInGroups: true
   showProgress: true
@@ -85,6 +87,8 @@ config:
 ```
 
 `credentialHandle` 应由 `@dsh-enhanced/credentials-keychain` 提供，并只允许 consumer `dsh-enhanced-lark-channel`、purpose `connect`。兼容部署可改用 `appSecretEnv`，两者只能选一个；配置不接受 `appSecret` 等明文字段。
+
+Calendar v4 读取默认关闭；每页响应上限为 1 MiB，超限请求失败且不推进事件游标。只有同时满足以下条件时，连接器才会读取一个页面：该 ID 位于 `allowedCalendarIds`、应用已被授予并发布 `calendar:calendar:readonly`、调用方已通过自身的 owner/Policy 授权。`event-triggers` 使用此窄桥观察一个预先选定的日历；它不能列出日历，不能取得 app secret 或 tenant token，也不能凭 `credentialPurpose: connect` 自动取得 Calendar 范围。使用官方向导更新应用范围时运行 `dsh-lark-setup --create-app --calendar-readonly`，然后由操作员把实际授权的 exact Calendar ID 填入 `allowedCalendarIds`。
 
 `userQuestionTtlMs` 默认 24 小时，范围为 1 分钟至 7 天；它限制当前进程内等待飞书回答的时长。过期、取消、Host 已在其他端结算或 adapter 注销都会撤销这次即时等待，不会把后到消息变成新的问题回答；短暂 WebSocket 重连不会主动丢弃仍有效的卡片。
 

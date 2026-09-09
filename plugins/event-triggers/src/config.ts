@@ -51,7 +51,25 @@ export interface GitHubRepositoryTriggerConfig extends TriggerBase {
   observer: EventObserverConfig
 }
 
-export type EventTriggerConfig = FileTriggerConfig | HttpJsonTriggerConfig | WebhookTriggerConfig | GitHubRepositoryTriggerConfig
+/**
+ * An exact, owner-selected Lark calendar.  The channel service owns the app
+ * credential and token cache; this trigger never receives either value.
+ */
+export interface LarkCalendarTriggerConfig extends TriggerBase {
+  kind: 'lark-calendar'
+  calendarId: string
+  /** Inclusive Unix-second bounds sent to Lark's Calendar v4 list API. */
+  startTime: number
+  endTime: number
+  pageSize?: number
+  maxPages?: number
+  maxEvents?: number
+  fireWhen?: FireWhen
+  debounceMs?: number
+  observer: EventObserverConfig
+}
+
+export type EventTriggerConfig = FileTriggerConfig | HttpJsonTriggerConfig | WebhookTriggerConfig | GitHubRepositoryTriggerConfig | LarkCalendarTriggerConfig
 
 export interface Config {
   databasePath: string
@@ -77,6 +95,7 @@ export type NormalizedTrigger =
   | (Required<Omit<HttpJsonTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
   | (Required<Omit<WebhookTriggerConfig, 'ttlMs' | 'observer'>> & { ttlMs?: number; observer?: EventObserverConfig })
   | (Required<Omit<GitHubRepositoryTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
+  | (Required<Omit<LarkCalendarTriggerConfig, 'ttlMs'>> & { ttlMs?: number })
 
 export interface NormalizedConfig {
   databasePath: string
@@ -112,6 +131,11 @@ const base = {
 const triggerSchema = Schema.union([
   Schema.object({ ...base, kind: Schema.const('github-repository').required(), repository: Schema.string().required(),
     branch: Schema.string().required(), baseBranch: Schema.string().required(), credentialHandle: Schema.string().required(),
+    fireWhen: Schema.union(['changed', 'truthy'] as const).default('changed'), debounceMs: Schema.number().step(1).min(0).max(86_400_000).default(0), observer: observerSchema().required() }),
+  Schema.object({ ...base, kind: Schema.const('lark-calendar').required(), calendarId: Schema.string().required(),
+    startTime: Schema.number().step(1).min(0).required(), endTime: Schema.number().step(1).min(1).required(),
+    pageSize: Schema.number().step(1).min(1).max(1_000).default(100), maxPages: Schema.number().step(1).min(1).max(100).default(10),
+    maxEvents: Schema.number().step(1).min(1).max(10_000).default(1_000),
     fireWhen: Schema.union(['changed', 'truthy'] as const).default('changed'), debounceMs: Schema.number().step(1).min(0).max(86_400_000).default(0), observer: observerSchema().required() }),
   Schema.object({
     ...base,
@@ -217,6 +241,14 @@ export function normalizeEventTriggersConfig(input: Config): NormalizedConfig {
       if (!/^[A-Za-z0-9][A-Za-z0-9-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(trigger.repository)
         || trigger.baseBranch === trigger.branch || [trigger.branch, trigger.baseBranch].some(value => value.length === 0 || value.length > 256 || value.trim() !== value || /[\p{Cc}]/u.test(value))) throw new Error('event-triggers: invalid GitHub repository scope')
       return Object.freeze({ ...trigger, credentialHandle: id(trigger.credentialHandle, 'credentialHandle') })
+    }
+    if (trigger.kind === 'lark-calendar') {
+      if (!Number.isSafeInteger(trigger.startTime) || !Number.isSafeInteger(trigger.endTime)
+        || trigger.calendarId.length === 0 || trigger.calendarId.length > 512 || trigger.calendarId.trim() !== trigger.calendarId || /[\p{Cc}]/u.test(trigger.calendarId)
+        || trigger.endTime <= trigger.startTime || trigger.endTime - trigger.startTime > 31_536_000) {
+        throw new Error('event-triggers: invalid Lark calendar scope')
+      }
+      return Object.freeze(trigger)
     }
     if (trigger.kind === 'file') {
       if (!isAbsolute(trigger.path) || !contained(trigger.path, roots)) {

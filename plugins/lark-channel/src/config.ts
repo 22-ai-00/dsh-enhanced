@@ -20,6 +20,8 @@ export interface Config {
   requestTimeoutMs?: number
   imageDownloadTimeoutMs?: number
   userQuestionTtlMs?: number
+  /** Exact Calendar IDs that this connector may read; empty means no Calendar API access. */
+  allowedCalendarIds?: string[]
 }
 
 const schema = Schema.object({
@@ -43,10 +45,12 @@ const schema = Schema.object({
   imageDownloadTimeoutMs: Schema.number().step(1).min(1_000).max(120_000).default(30_000),
   userQuestionTtlMs: Schema.number().step(1).min(60_000).max(7 * 24 * 60 * 60 * 1_000)
     .default(24 * 60 * 60 * 1_000),
+  allowedCalendarIds: Schema.array(Schema.string().min(1).max(512)).default([]),
 }) as Schema<Config>
 
 const fields = new Set([
   'account',
+  'allowedCalendarIds',
   'appId',
   'appSecretEnv',
   'credentialHandle',
@@ -80,6 +84,10 @@ export const Config = new Proxy(schema, {
     }
     if (parsed.enabled && parsed.appSecretEnv === undefined && parsed.credentialHandle === undefined) {
       throw new Error('lark-channel: enabled channel requires credentialHandle or appSecretEnv')
+    }
+    if (new Set(parsed.allowedCalendarIds ?? []).size !== (parsed.allowedCalendarIds ?? []).length
+      || (parsed.allowedCalendarIds ?? []).some(value => value.trim() !== value || /[\p{Cc}]/u.test(value))) {
+      throw new Error('lark-channel: allowedCalendarIds must be unique stable Calendar IDs')
     }
     return parsed
   },

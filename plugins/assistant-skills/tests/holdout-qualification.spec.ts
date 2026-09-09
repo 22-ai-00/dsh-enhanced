@@ -6,7 +6,7 @@ import { afterEach, expect, test } from 'vitest'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { createDefinition } from '../src/definition.ts'
 import { HoldoutAuthority, type HoldoutDataset } from '../src/holdout-authority.ts'
-import { createProspectiveCertificate, generatorDigest } from '../src/prospective-holdout.ts'
+import { createProspectiveCertificate, generateProspectiveDataset, prospectiveGeneratorDigest } from '../src/prospective-holdout.ts'
 import { inspectProspectiveQualification, qualifyHoldout, type HoldoutQualificationInput } from '../src/holdout-qualification.ts'
 
 const roots: string[] = []
@@ -83,7 +83,8 @@ test('the authority binding changes with actual initial files and rejects an old
   } } })).rejects.toThrow(/begin binding/)
 })
 
-test('prospective inspection recomputes signed quality and rejects a changed pin, arm, budget, certificate, or receipt', async () => {
+test.each(['order-summary/v1', 'order-summary/v2'] as const)('prospective inspection recomputes signed quality and rejects a changed pin, arm, budget, certificate, or receipt (%s)', async generator => {
+  const dataset = generateProspectiveDataset(generator)
   const workspace = await stateRoot(), root = await stateRoot(), keys = generateKeyPairSync('ed25519')
   const scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }
   const baseline = skill(workspace, 'printf bad'), candidate = skill(workspace, 'cat')
@@ -94,10 +95,10 @@ test('prospective inspection recomputes signed quality and rejects a changed pin
   authority.begin(binding)
   while (true) {
     const cell = authority.next(); if (!cell) break
-    authority.record({ cellId: cell.cellId, armDigest: cell.armDigest, stdout: cell.armDigest === binding.baselineDigest ? cell.stdin : 'wrong', exitCode: 0, quiescent: true, status: 'completed', artifactDigest: digest('e'), toolCalls: [] })
+    authority.record({ cellId: cell.cellId, armDigest: cell.armDigest, stdout: cell.armDigest === binding.baselineDigest ? dataset.cases.find(entry => entry.stdin === cell.stdin)!.expectedStdout : 'wrong', exitCode: 0, quiescent: true, status: 'completed', artifactDigest: digest('e'), toolCalls: [] })
   }
   const result = { receipt: authority.finish(), quality: { candidateChecksPassed: true, evaluationGain: 99, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'proven' }, modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact', prospectiveHoldout: 'authority-attested-after-freeze' } as unknown
-  const context = { scope, baseline, candidate, execution, pinnedPublicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), expectedGeneratorDigest: generatorDigest }
+  const context = { scope, baseline, candidate, execution, pinnedPublicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), expectedGeneratorDigest: prospectiveGeneratorDigest(generator) }
   const inspected = inspectProspectiveQualification(result, context)
   expect(inspected).toMatchObject({ prospectiveHoldout: 'authority-attested-after-freeze', quality: { candidateChecksPassed: false, evaluationGain: -1, evaluationGainObserved: false, criticalRegressionsPassed: false, heldoutIndependence: 'unproven' } })
   expect(inspectProspectiveQualification(result, { ...context, pinnedPublicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString() })).toBeUndefined()

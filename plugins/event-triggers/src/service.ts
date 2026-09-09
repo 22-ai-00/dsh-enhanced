@@ -32,6 +32,7 @@ import type { EventSourceReader, EventSourceSnapshot, SourceEvent } from './sour
 import { version } from './version.js'
 import { EventSourceObservers } from './observer.js'
 import { readGitHubRepositoryObservation } from './github-sensor.js'
+import { readLarkCalendarObservation, type LarkCalendarPageReader } from './lark-calendar-sensor.js'
 
 export type EventTriggersErrorCode =
   | 'cooldown'
@@ -57,7 +58,10 @@ export interface EventTriggersServiceOptions {
   fetcher?: Fetcher
   lookup?: Lookup
   fileObserver?: typeof readFileObservation
+  larkCalendarReader?: LarkCalendarPageReader
 }
+
+interface LarkChannelCalendarService extends LarkCalendarPageReader {}
 
 interface PendingObservation {
   controller: AbortController
@@ -89,6 +93,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
   private readonly fetcher: Fetcher | undefined
   private readonly lookup: Lookup
   private readonly fileObserver: typeof readFileObservation
+  private readonly larkCalendarReader: LarkCalendarPageReader | undefined
   private readonly pinnedFileRoots: readonly PinnedFileRoot[]
   private readonly shutdown = new AbortController()
   private pollTimer: ReturnType<typeof setInterval> | undefined
@@ -115,6 +120,10 @@ export class EventTriggersService extends Service implements EventSourceReader {
     this.credentials = ctx.get('credentialsKeychain') as CredentialsKeychainService | undefined
     if (this.config.triggers.some(trigger => (trigger.kind === 'webhook' || trigger.kind === 'github-repository')) && this.credentials === undefined) {
       throw new Error('event-triggers: credentialsKeychain is required for authenticated triggers')
+    }
+    this.larkCalendarReader = options.larkCalendarReader ?? ctx.get('larkChannel') as LarkChannelCalendarService | undefined
+    if (this.config.triggers.some(trigger => trigger.kind === 'lark-calendar') && this.larkCalendarReader === undefined) {
+      throw new Error('event-triggers: larkChannel is required for Lark calendar triggers')
     }
     this.triggers = new Map(this.config.triggers.map(trigger => [trigger.id, trigger]))
     this.now = options.now ?? Date.now
@@ -195,7 +204,8 @@ export class EventTriggersService extends Service implements EventSourceReader {
   private async observeTrigger(trigger: Exclude<NormalizedTrigger, WebhookTriggerConfig>): Promise<void> {
     const resource = trigger.kind === 'file'
       ? { kind: 'filesystem' as const, id: trigger.path }
-      : { kind: 'network' as const, id: trigger.kind === 'github-repository' ? `https://api.github.com/repos/${trigger.repository}` : trigger.url }
+      : { kind: 'network' as const, id: trigger.kind === 'github-repository' ? `https://api.github.com/repos/${trigger.repository}`
+        : trigger.kind === 'lark-calendar' ? `lark-calendar:${trigger.calendarId}` : trigger.url }
     this.observers.assertCurrent(trigger.id)
     const decision = this.policy.authorize({
       subject: { kind: 'background', id: `event-triggers:${trigger.id}`, ...(trigger.observer ? { workspace: trigger.observer.workspace, principal: trigger.observer.principalId } : {}) },
@@ -250,6 +260,7 @@ export class EventTriggersService extends Service implements EventSourceReader {
       ? this.fileObserver({ path: trigger.path, roots: this.config.allowedFileRoots,
           mode: trigger.mode, maxBytes: this.config.maxBodyBytes, pinnedRoots: this.pinnedFileRoots })
       : trigger.kind === 'github-repository' ? this.readGitHubObservation(trigger, controller, trackOperation)
+      : trigger.kind === 'lark-calendar' ? this.readLarkCalendarObservation(trigger, controller)
       : readHttpJsonObservation({ url: trigger.url, pointer: trigger.pointer,
           maxBodyBytes: this.config.maxBodyBytes, timeoutMs: this.config.requestTimeoutMs,
           allowedOrigins: new Set(this.config.allowedHttpOrigins), lookup: this.lookup, signal: controller.signal,
@@ -296,6 +307,28 @@ export class EventTriggersService extends Service implements EventSourceReader {
           lookup: this.lookup, ...(this.fetcher ? { fetcher: this.fetcher } : {}), allowIpv6: this.config.ipv6Mode === 'native-only', trackOperation, beforeRequest: guard })
         guard(); return result
       })
+    } finally { clearInterval(timer) }
+  }
+
+  private async readLarkCalendarObservation(trigger: Extract<NormalizedTrigger, { kind: 'lark-calendar' }>, controller: AbortController): Promise<SensorObservation> {
+    const guard = () => {
+      if (controller.signal.aborted) throw controller.signal.reason
+      this.assertActive(); this.observers.assertCurrent(trigger.id)
+      const decision = this.policy.evaluate({ subject: { kind: 'background', id: `event-triggers:${trigger.id}`, workspace: trigger.observer.workspace, principal: trigger.observer.principalId },
+        action: 'observe', resource: { kind: 'network', id: `lark-calendar:${trigger.calendarId}` }, context: { initiator: 'background' } })
+      if (decision.effect !== 'allow') throw new EventTriggersError('policy-denied', 'Lark calendar observation permission ended')
+    }
+    guard()
+    const timer = setInterval(() => { try { guard() } catch (error) { controller.abort(error) } }, 25)
+    timer.unref?.()
+    try {
+      const result = await readLarkCalendarObservation(this.larkCalendarReader!, {
+        calendarId: trigger.calendarId, startTime: trigger.startTime, endTime: trigger.endTime,
+        pageSize: trigger.pageSize, maxPages: trigger.maxPages, maxEvents: trigger.maxEvents,
+        signal: controller.signal, beforeRequest: guard,
+      })
+      guard()
+      return result
     } finally { clearInterval(timer) }
   }
 

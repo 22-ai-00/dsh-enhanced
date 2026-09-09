@@ -301,7 +301,7 @@ export class EventTriggerStore {
     throughSequence: number
     deadlineAt: number
     sourceId: string
-    kind: 'file' | 'http-json' | 'webhook' | 'github-repository'
+    kind: 'file' | 'http-json' | 'webhook' | 'github-repository' | 'lark-calendar'
     version: string
     configDigest: string
     automationId: string

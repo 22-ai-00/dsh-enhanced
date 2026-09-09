@@ -152,6 +152,10 @@ export function createDefinition(source: VerifiedWorkflowSource, options: Create
   const executable = sourceSteps.filter(step => {
     if (!step || !text(step.id, 256) || !text(step.toolName, 256) || !json(step.arguments)) fail('assistant-skills: untrusted tool trace')
     if (step.toolName === 'goal_checkpoint' && sourceCheckpoint(step.arguments, source.goal.id)) return false
+    // The current owner's parameterless catalog inspection informs the source
+    // task but is not executable workflow authority. Retain it in provenance.
+    if (step.toolName === 'skill_status' && step.arguments !== null && typeof step.arguments === 'object'
+      && !Array.isArray(step.arguments) && Object.keys(step.arguments).length === 0) return false
     if (!allow.has(step.toolName) || controlTool(step.toolName, step.arguments)) fail('assistant-skills: untrusted tool trace')
     return true
   })

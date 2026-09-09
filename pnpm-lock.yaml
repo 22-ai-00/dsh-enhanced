@@ -1571,6 +1571,9 @@ importers:
       '@dsh-enhanced/credentials-keychain':
         specifier: workspace:*
         version: link:../credentials-keychain
+      '@dsh-enhanced/lark-channel':
+        specifier: workspace:*
+        version: link:../lark-channel
       '@types/node':
         specifier: 'catalog:'
         version: 22.20.0

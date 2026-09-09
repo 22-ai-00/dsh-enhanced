@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto'
 
 export interface ExternalEventEnvelope {
   protocol: 'dsh-external-event/v1'
-  source: Readonly<{ id: string; kind: 'file' | 'http-json' | 'webhook' | 'github-repository'; version: string; configDigest: string }>
+  source: Readonly<{ id: string; kind: 'file' | 'http-json' | 'webhook' | 'github-repository' | 'lark-calendar'; version: string; configDigest: string }>
   event: Readonly<{ id: string; occurredAt: number; receivedAt: number }>
   observation: Readonly<{ digest: string; revision: string; timeBasis: 'observed' | 'source-signed' }>
   trust: Readonly<{ method: 'local-observation' | 'https-observation' | 'hmac-sha256'; content: 'untrusted' }>
@@ -75,7 +75,7 @@ export function parseExternalEventEnvelope(value: unknown): Readonly<ExternalEve
   const source = exact(root['source'], 'source', ['id', 'kind', 'version', 'configDigest'])
   const sourceId = string(source['id'], 'source.id', 500)
   const kind = source['kind']
-  if (kind !== 'file' && kind !== 'http-json' && kind !== 'webhook' && kind !== 'github-repository') fail('source.kind is unsupported')
+  if (kind !== 'file' && kind !== 'http-json' && kind !== 'webhook' && kind !== 'github-repository' && kind !== 'lark-calendar') fail('source.kind is unsupported')
   const event = exact(root['event'], 'event', ['id', 'occurredAt', 'receivedAt'])
   const eventId = string(event['id'], 'event.id', 500)
   const occurredAt = time(event['occurredAt'], 'event.occurredAt')
@@ -93,7 +93,7 @@ export function parseExternalEventEnvelope(value: unknown): Readonly<ExternalEve
   if (deduplicationKey !== `${sourceId}:${eventId}`) fail('deduplicationKey does not bind source and event')
   const expected = kind === 'file'
     ? ['local-observation', 'observed']
-    : (kind === 'http-json' || kind === 'github-repository') ? ['https-observation', 'observed'] : ['hmac-sha256', 'source-signed']
+    : (kind === 'http-json' || kind === 'github-repository' || kind === 'lark-calendar') ? ['https-observation', 'observed'] : ['hmac-sha256', 'source-signed']
   if (method !== expected[0] || timeBasis !== expected[1]) fail('source, trust method, and time basis are inconsistent')
   if (timeBasis === 'observed' && occurredAt > receivedAt) fail('observed event time cannot exceed receipt time')
   const parsed: ExternalEventEnvelope = {

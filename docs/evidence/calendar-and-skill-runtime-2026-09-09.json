@@ -1,0 +1,196 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-09",
+  "baseline": "09b45022d3e1113d8672cefebd4f09eed9839698",
+  "scope": [
+    "Lark Calendar exact-ID read-only observation and finite event source integration",
+    "order-summary/v2 amountCents independent prospective generator with legacy v1 continuity",
+    "installed symlink holdout CLI entry and parameterless skill_status provenance compatibility",
+    "real model canary validation entry; incomplete scenario retained as regression target"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2
+  },
+  "engineeringValidation": {
+    "fullCheck": {
+      "state": "passed",
+      "log": "/tmp/dsh-calendar-canary-check-serial-workers.log",
+      "environmentChange": "VITEST_MAX_WORKERS=1, down from 4; assertions and timeouts unchanged",
+      "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+      "exit": 0,
+      "sha256": "f95e265b5ecd881f3ad17aa48e3e7b95523cac78be7ebb521c30ccd2b7b45ffe",
+      "testFiles": 350,
+      "tests": 4257,
+      "skipped": 0,
+      "packCount": 33,
+      "sourceHashRecheck": "33 source/test/manifest hashes unchanged",
+      "packInspection": [
+        "event-triggers/lib/lark-calendar-sensor.js and declarations included",
+        "assistant-skills/lib/holdout-cli.js included",
+        "lark-channel lib/ and existing package bundle files included"
+      ]
+    },
+    "targetedAndPriorFailures": [
+      {
+        "log": "/tmp/dsh-v2-typecheck-final.log",
+        "sha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630",
+        "exit": 0
+      },
+      {
+        "log": "/tmp/dsh-v2-lint.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "exit": 0
+      },
+      {
+        "log": "/tmp/dsh-v2-qualification.log",
+        "sha256": "1347be9c965a2daef3476c1e2424638b4578f3f300d6414b54aad5b6d51d200e",
+        "exit": 0
+      },
+      {
+        "log": "/tmp/dsh-calendar-sdk-bounded.log",
+        "sha256": "7c75c561f5a16d9b63a389d3b55f7b5fdb4b7bd20145ea1f858b478118d676b4",
+        "exit": 0
+      },
+      {
+        "log": "/tmp/dsh-calendar-event-final.log",
+        "sha256": "d32b285d78d425c7266cdc20495bb6dd005fbac04759eafdce1320a1700e1435",
+        "exit": 0
+      },
+      {
+        "log": "/tmp/dsh-calendar-event-final-types.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "exit": 0
+      },
+      {
+        "log": "/tmp/dsh-calendar-lark-types.log",
+        "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "exit": 0
+      },
+      {
+        "log": "/tmp/dsh-calendar-envelope-targeted.log",
+        "sha256": "aa6cf9ee02f092a093f68da076ce2c4cfa2661c7d0c60582f7f1ce45e1f3c1f6",
+        "exit": 0
+      },
+      {
+        "log": "/tmp/dsh-canary-catalog-targeted.log",
+        "sha256": "42b584c5f00d419f89ea4ab8a1b7098725413c7309466d8355ec1a21c482a4c0",
+        "exit": 0
+      },
+      {
+        "log": "/tmp/dsh-calendar-canary-check.log",
+        "sha256": "731589d68ac947ab530936f599cb1045c79ee223d9731bf10ed1606376b071c4",
+        "exit": 2
+      },
+      {
+        "log": "/tmp/dsh-calendar-canary-check-final.log",
+        "exit": 1,
+        "sha256": "9edf731db104c29fb7b0bcba2536f12d1cc7f9fb6ab1d6813e52bde5f5f58590",
+        "failure": "Unchanged assistant-evolution service rule-limit test exceeded 5000ms under concurrent full suite; isolated diagnostic passed in 889ms. Resource contention is an inference, not a proven root cause."
+      },
+      {
+        "log": "/tmp/dsh-evolution-timeout-diagnostic.log",
+        "sha256": "6cd24a6bb049ece1c77ebdbea95a05d78458f5ab1a6dbd7d922548cc98960371",
+        "exit": 0,
+        "passed": 1,
+        "skipped": 39,
+        "reason": "Selected one exact failing test for diagnosis; not a full suite claim."
+      }
+    ],
+    "independentReview": {
+      "status": "PASS",
+      "reviewer": "progress_plan_verify_sep09",
+      "scope": "This engineering batch only; not complete real canary or the 18-work-package objective.",
+      "verified": [
+        "full-check exit 0, log hash and totals",
+        "33 pack manifests with new Calendar JS/declarations and holdout CLI",
+        "33 source/test/manifest hashes with no mismatch",
+        "git diff --check",
+        "real-model failure and external validation limits reported accurately"
+      ]
+    }
+  },
+  "realModel": {
+    "provider": "codex-subscription",
+    "model": "gpt-5.6-terra",
+    "browser": "/usr/bin/chromium",
+    "overall": "failed-before-prospective-comparison",
+    "attempts": [
+      {
+        "attempt": 1,
+        "log": "/tmp/dsh-real-canary-attempt1.log",
+        "sha256": "8739360cb45d987bbb308035e2a7656ad3816f0f5e6cc3aa0c20d80c05e3f2ef",
+        "exit": 1,
+        "detail": "Host startup refused noncanonical default isolation stateRoot; fixed isolated profile stateRoot before model execution."
+      },
+      {
+        "attempt": 2,
+        "log": "/tmp/dsh-real-canary-attempt2.log",
+        "sha256": "84b50f0fe8112707137ace5b558c3d9c60c57543605836e098bc490aaeea3450",
+        "exit": 1,
+        "detail": "Initial capture/reuse/activation passed; later review capture rejected parameterless skill_status as control. Fixed source-only status compatibility."
+      },
+      {
+        "attempt": 3,
+        "log": "/tmp/dsh-real-canary-attempt3.log",
+        "sha256": "ccc01bce0d864cef6211760cdaea793786c07986191c3f72ab5c1859ced14979",
+        "exit": 1,
+        "detail": "Initial capture, independent acceptance, trial after removed artifact and explicit activation passed. Review of existing artifact invoked active skill: todo_write and get_goal passed, saved write failed FS_NOT_OBSERVED because the execution context had no observation of the current existing file. Not a failure of the initial candidate trial."
+      }
+    ],
+    "attempt3State": {
+      "retainedEnvironment": "/tmp/dsh-real-capture-DdLNif",
+      "candidateId": "skill-candidate-b61d4eb611efe785c28349e2f8411e7a557a8d6369d5ddcf86be02b406868ed9",
+      "successfulTrialId": "skill-run-d0027f3d99f1f7ad8a89d6976274acd3c09d30612ddb3efd1c91b0c1d39b7008",
+      "failedReviewRunId": "skill-run-9c9f4c994086ae3f6c2bf5563fc48a81af1440d52d951d15d08647e779d29263",
+      "failedStepTool": "write",
+      "errorCode": "FS_NOT_OBSERVED"
+    },
+    "command": "CI=true PLAYWRIGHT_CHROMIUM_EXECUTABLE=/usr/bin/chromium DSH_WEB_REAL_PROVIDER=codex-subscription DSH_WEB_REAL_MODEL=gpt-5.6-terra DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 DSH_CAPTURE_RETAIN_FAILURE=1 pnpm exec playwright test --config scripts/e2e/playwright-real-canary.config.mjs"
+  },
+  "limitations": [
+    "No real Lark Calendar API request; Calendar transport/service tests use explicit fixtures.",
+    "No new real GitHub repository execution or publication/signing/activation acceptance.",
+    "No completed ordinary-owner prospective comparison, real canary promotion or measurable quality gain.",
+    "Actual captured todo_write planning calls are not currently accepted by isolated replay; this is a remaining consumer contract gap.",
+    "Failed native skill invocation remains failed; no reset, replay or retrospective promotion.",
+    "Independent review is a local read-only subagent, not ChatGPT web review; required in-app browser is unavailable."
+  ],
+  "nextDependency": "Explicit fresh native file observation preconditions for write/edit with same-path binding, finite accounting, audit, permission/abort checks and unchanged historical definition identity.",
+  "sourceSha256": {
+    "package.json": "c0bf6be48c029925d27a461c75510d47c708fc916f40f7426b2e815baaf0c635",
+    "plugins/assistant-automations/src/external-event.ts": "0031d4fd1a34063113f70b57c147709e5e4d34447ba4a1acdafd08320991d4cd",
+    "plugins/assistant-automations/tests/external-event.spec.ts": "f1bd59b4a2e1f5a048426e035707e57a090d6de0a395252a22bc68ea948711ab",
+    "plugins/assistant-skills/src/definition.ts": "521ab9a2af9e940b5785c7ab14024fe50c4d2ab04c915c3eeb6b4d80bf47daec",
+    "plugins/assistant-skills/src/holdout-authority.ts": "5dc9b0dab6f95f87b76db7f0b57025136405220d8dd41af88b463e77a22b46ac",
+    "plugins/assistant-skills/src/holdout-cli.ts": "9c7e634ce8346f9c035c9d78b04b6fde8298db73b9b6861f41333afb2e51c529",
+    "plugins/assistant-skills/src/prospective-holdout.ts": "db2fcc80b3c41a2e7109b7b7add601f1e4814f9a61b26edff98ec3616c31ea93",
+    "plugins/assistant-skills/tests/definition.spec.ts": "ae22986b71747e42a76b331ba0949be0bf90add56e59420e16c4c5334561953f",
+    "plugins/assistant-skills/tests/holdout-authority.spec.ts": "70247bd0805692c45554cf39cbfde37c9d3936970e9a90e11943f9f71ca574cd",
+    "plugins/assistant-skills/tests/holdout-cli.spec.ts": "1d042f967da74aeea626d84e501568fd7ad6dda92626b36efc618ef455261650",
+    "plugins/assistant-skills/tests/holdout-qualification.spec.ts": "e5a60cad01208d7e2e5e3eceb19c3b949988fe4abcc17344af7e5f80b31067f3",
+    "plugins/event-triggers/package.json": "f982e20ac6b9103c12433786c8254f7c5c980dd75b23245e8926bf3d187c84a6",
+    "plugins/event-triggers/src/config.ts": "fca5d4786d9fa7e5e3422882560dd94e9e9ef4f03a23c71c8ab88993493f1dba",
+    "plugins/event-triggers/src/index.ts": "138b49c6734e8415c53633874a446e9239b081f1b5838a3e5a3f753ef0ce9b0c",
+    "plugins/event-triggers/src/lark-calendar-sensor.ts": "1118ca3955aa6732ad9729cd5fd3e29010d61f4c6ba8da70582e7ac904ee7aad",
+    "plugins/event-triggers/src/service.ts": "ae4b55e36225a7ac78bc3c18d10cc3b94860c05dbd9a888b06aaba8c0d90bb29",
+    "plugins/event-triggers/src/source.ts": "a80a8a94baccf02895216b8be0d81c17a12b75bd822b3bc018d26a4620e1ccf6",
+    "plugins/event-triggers/src/store.ts": "f74c68824b2f16e3c3708eca66b009b52abd805c6508860563fd53138fa5273e",
+    "plugins/event-triggers/tests/lark-calendar-sensor.spec.ts": "32850e9e5a5282500c6f2b907d0ebb9c29e00df8e0cd0af427299c49e5ef0002",
+    "plugins/event-triggers/tests/lark-calendar-service.spec.ts": "e02eac99c04569be5a25e5a0d458cc0e2e568b8d96ecf852237f88b985cddeea",
+    "plugins/lark-channel/src/config.ts": "1f74af4cb349dc908a2782cc8f591fd0fc8528919099f67680b4fe0e55377d3f",
+    "plugins/lark-channel/src/sdk.ts": "f92ffac80b845eb2cd2597585b1cbc71f3a7e43564a7cfd5b3adf53356b564f4",
+    "plugins/lark-channel/src/service.ts": "360f85642869600923b18bb721fd80705926ffa08ab82d9cba175d9a552127dd",
+    "plugins/lark-channel/src/setup.ts": "173ce7ded9669c81ec9474750ef7f8ad2dc308d602e3fdc5c0ef593ebbaae1cf",
+    "plugins/lark-channel/src/types.ts": "3c425d6d5f350cee1a15a4077267722a06dd7e3b0008c1a652f73ac1130e3169",
+    "plugins/lark-channel/tests/config.spec.ts": "81186a98c9964d9af59dda7857f9969f9c5c1e548bf1872970ccbc940168c4a6",
+    "plugins/lark-channel/tests/sdk.spec.ts": "9cb6321686fd008150dbdf4480eaf513fd51123818ce216a27c57d30107bfd73",
+    "plugins/lark-channel/tests/service.spec.ts": "1fa825c60eeef0436277bc6d9da2244896cf28c0005ece8cc25353e96aa34842",
+    "plugins/lark-channel/tests/setup.spec.ts": "87007c8b0ee503a4cbb9be42f5e042a4bc8e59fadc4e8d2a323be82734a48d01",
+    "pnpm-lock.yaml": "3d96d911806025558d9e024c2a0d46edf6d5dec566472a6c682b617c1b834af6",
+    "scripts/e2e/playwright-real-canary.config.mjs": "bdee0973a2230802f9342e855d4ea80f14b3506667f170b71978021c84dc4339",
+    "scripts/e2e/real-canary-helpers.mjs": "f177a4a20c78b830c72de24c3fb118443520cdd82898f5fbb37a95f70f8a4d18",
+    "scripts/e2e/web-owner-real-capture.spec.mjs": "bd398fab966a1e1c6cc0a81cf0bbfa2df733bfaec34362a00add4cb96dea1d46"
+  }
+}

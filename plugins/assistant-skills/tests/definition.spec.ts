@@ -81,6 +81,22 @@ describe('skill definitions', () => {
     expect(() => createDefinition({ ...source([write]), failedObservations: [{ ...note, outcome: 'failed' }] }, options, ['write'])).toThrow(/observation/u)
   })
 
+  it('retains owner skill catalog inspection as provenance without replaying control tools', () => {
+    const read = { id: 'read', toolName: 'read', arguments: { file_path: 'summarize.mjs' } }
+    const inspection = { id: 'status', toolName: 'skill_status', arguments: {} }
+    const goal = { id: 'goal', toolName: 'get_goal', arguments: {} }
+    const options = { name: 'review-summary', description: 'Review existing summary.' }
+    const derive = (steps: VerifiedWorkflowSource['steps']) => createDefinition(source(steps), options, ['read', 'get_goal'])
+    const definition = derive([read, inspection, goal])
+    expect(definition.source.steps).toEqual([read, inspection, goal])
+    expect(instantiate(definition).steps).toEqual([{ ...read, dependsOn: [] }, { ...goal, dependsOn: ['read'] }])
+    expect(() => derive([inspection])).toThrow(/executable/u)
+    for (const step of [{ ...inspection, arguments: { run_id: 'other-run' } }, { ...inspection, arguments: { operation: 'activate' } }, { ...inspection, toolName: 'skill_activate' }]) {
+      expect(() => derive([read, step])).toThrow(/untrusted/u)
+    }
+    expect(() => createDefinition(source([read, inspection]), { ...options, bindings: [{ name: 'catalog', stepId: 'status', path: '/run_id' }] }, ['read'])).toThrow(/binding step/u)
+  })
+
   it('keeps the complete write-then-repair sequence and excludes observations across native rounds', () => {
     const write = { id: 'initial-write', toolName: 'write', arguments: { file_path: 'report.txt', content: 'draft' } }
     const repair = { id: 'repair', toolName: 'edit', arguments: { file_path: 'report.txt', old_string: 'draft', new_string: 'verified' } }
