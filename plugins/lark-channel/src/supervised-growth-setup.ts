@@ -13,7 +13,7 @@ import type {
 } from '@dsh-enhanced/assistant-recovery'
 import { isMap, isSeq, parseDocument, type Node, type YAMLMap } from 'yaml'
 import { installDshResidentService, residentServiceKind, type InstalledResidentService } from './resident.js'
-import { isMainEntry } from './setup.js'
+import { isMainEntry, withDshHomeLifecycleLock } from './setup.js'
 import {
   assertEffectiveSupervisedGrowthConfig,
   configureSupervisedGrowthProfilePatch,
@@ -717,6 +717,7 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
   }
   const dshHome = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
   if (!isAbsolute(dshHome)) throw new Error('supervised-growth setup: DSH_HOME must be absolute')
+  return withDshHomeLifecycleLock(dshHome, async () => {
   const patchPath = join(dshHome, 'profiles', args.profile, 'cordis.patch.yml')
   const originalPatch = await readFile(patchPath, 'utf8')
   const effectiveBefore = dumpProfile(args.profile)
@@ -808,6 +809,7 @@ export async function runSupervisedGrowthSetup(argv: readonly string[] = process
   if (service === undefined) throw new Error('supervised-growth setup: resident restart did not return a service')
   process.stdout.write(`supervised-growth/v2 Recovery 已启用：owner binding ${binding.id}，Recovery 每日上限 7；独立 adoption analyst 每日上限 1。\n`
   + `DSH Host 已由 ${service.kind} 重启并通过健康检查。状态：${service.statusCommand}\n日志：${service.logCommand}\n`)
+  })
 }
 
 if (process.argv[1] !== undefined && isMainEntry(import.meta.url, process.argv[1])) {

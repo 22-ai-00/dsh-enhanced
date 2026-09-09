@@ -1385,6 +1385,70 @@ export interface ProfileSetupLockOptions {
   heartbeatMs?: number
 }
 
+export function dshHomeLifecycleRendezvousPath(dshHome: string, uid = process.getuid?.()): string {
+  if (!isAbsolute(dshHome)) throw new Error('lark-channel setup: DSH_HOME must be absolute')
+  if (!Number.isSafeInteger(uid) || uid === undefined || uid < 0) {
+    throw new Error('lark-channel setup: cannot determine the Linux user id for lifecycle locking')
+  }
+  const canonicalHome = normalizeSetupResourcePath(dshHome)
+  return `/tmp/.dsh-enhanced-lifecycle-${uid}-${textSha256(canonicalHome)}.lock`
+}
+
+async function assertDshHomeLifecycleLockIdentity(
+  descriptor: Awaited<ReturnType<typeof open>>,
+  lockPath: string,
+  uid: number,
+): Promise<void> {
+  const [opened, linked] = await Promise.all([descriptor.stat(), lstat(lockPath)])
+  if (!opened.isFile() || !linked.isFile() || linked.isSymbolicLink()
+    || opened.uid !== uid || linked.uid !== uid
+    || opened.nlink !== 1 || linked.nlink !== 1
+    || (opened.mode & 0o777) !== 0o600 || (linked.mode & 0o777) !== 0o600
+    || opened.dev !== linked.dev || opened.ino !== linked.ino) {
+    throw new Error(`lark-channel setup: lifecycle rendezvous lock is unsafe: ${lockPath}`)
+  }
+}
+
+export async function withDshHomeLifecycleLock<T>(
+  dshHome: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  if (process.platform !== 'linux') return operation()
+  const uid = process.getuid?.()
+  if (!Number.isSafeInteger(uid) || uid === undefined || uid < 0) {
+    throw new Error('lark-channel setup: cannot determine the Linux user id for lifecycle locking')
+  }
+  const temporaryDirectory = await lstat('/tmp')
+  if (!temporaryDirectory.isDirectory() || temporaryDirectory.isSymbolicLink()
+    || temporaryDirectory.uid !== 0 || (temporaryDirectory.mode & 0o7777) !== 0o1777) {
+    throw new Error('lark-channel setup: lifecycle rendezvous lock requires a safe root-owned sticky /tmp')
+  }
+  const lockPath = dshHomeLifecycleRendezvousPath(dshHome, uid)
+  let descriptor: Awaited<ReturnType<typeof open>> | undefined
+  try {
+    descriptor = await open(lockPath, constants.O_RDWR | constants.O_CREAT | constants.O_NOFOLLOW, 0o600)
+    await assertDshHomeLifecycleLockIdentity(descriptor, lockPath, uid)
+    const acquired = spawnSync('/usr/bin/flock', ['-n', '-E', '75', '3'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'ignore', 'pipe', descriptor.fd],
+    })
+    if (acquired.status === 75) throw new Error(`lark-channel setup: DSH_HOME lifecycle is busy: ${lockPath}`)
+    if (acquired.status !== 0) {
+      const detail = typeof acquired.stderr === 'string' ? acquired.stderr.trim().slice(0, 1_000) : ''
+      throw new Error(`lark-channel setup: cannot acquire DSH_HOME lifecycle lock${detail === '' ? '' : `: ${detail}`}`)
+    }
+    await assertDshHomeLifecycleLockIdentity(descriptor, lockPath, uid)
+    return await operation()
+  } catch (error) {
+    if (fileSystemErrorCode(error) === 'ELOOP') {
+      throw new Error(`lark-channel setup: lifecycle rendezvous lock is unsafe: ${lockPath}`)
+    }
+    throw error
+  } finally {
+    await descriptor?.close()
+  }
+}
+
 const defaultProfileSetupLockOptions = {
   timeoutMs: 30_000,
   pollMs: 100,
@@ -3194,6 +3258,7 @@ export async function runLarkSetup(
   }
   const dshHome = process.env.DSH_HOME?.trim() || join(homedir(), '.dsh')
   if (!isAbsolute(dshHome)) throw new Error('lark-channel setup: DSH_HOME must be absolute')
+  return withDshHomeLifecycleLock(dshHome, async () => {
   const patchPath = join(dshHome, 'profiles', args.profile, 'cordis.patch.yml')
   const validate = runtime.validateProfile ?? validateProfile
   const readEffectiveProfile = runtime.readEffectiveProfile ?? dumpProfile
@@ -3479,6 +3544,7 @@ export async function runLarkSetup(
       + `本次跳过常驻服务；手动启动：dsh --profile ${args.profile} --no-open\n`
       + `健康检查：在 Web 会话中调用 assistant_health。\n`)
   }
+  })
 }
 
 if (process.argv[1] !== undefined && isMainEntry(import.meta.url, process.argv[1])) {

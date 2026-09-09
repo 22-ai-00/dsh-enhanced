@@ -1,5 +1,5 @@
-import { chmod, link, mkdtemp, mkdir, open, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
-import { readFileSync } from 'node:fs'
+import { chmod, cp, link, lstat, mkdtemp, mkdir, open, readFile, readdir, readlink, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -9,6 +9,8 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
 import { RECOVERY_CATALOG_DIGEST } from '@dsh-enhanced/assistant-recovery'
+import { createSystemdUserUnit, systemdServicePaths } from '../plugins/lark-channel/src/systemd.ts'
+import { classifyLifecycleScenario } from '../scripts/install/lifecycle-config.mjs'
 import {
   assertEffectiveSupervisedGrowthConfig,
   configureSupervisedGrowthProfilePatch,
@@ -59,7 +61,8 @@ function runInstaller(
   platform?: string,
   extraEnvironment: Record<string, string | undefined> = {},
 ) {
-  return spawnSync('/bin/bash', [script, ...args], {
+  const fixtureScript = join(dirname(dshHome), 'install', basename(script))
+  return spawnSync('/bin/bash', [existsSync(fixtureScript) ? fixtureScript : script, ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
     env: {
@@ -245,22 +248,63 @@ function runRemoteNpmBootstrap(
 
 interface LifecycleFixtureOptions {
   activationFails?: boolean
+  effectiveScenario?: 'autonomy' | 'lark' | 'supervised' | 'web'
   managedDependencies?: readonly string[]
+  systemd?: LifecycleSystemdFixtureOptions
   thirdParty?: boolean
   thirdPartyDependency?: boolean
 }
 
+interface LifecycleSystemdUnitOptions {
+  active: boolean
+  enabled?: boolean
+  dshHome?: string
+  dropIn?: 'keyring' | 'unknown' | 'unsafe-keyring'
+  fragment?: 'managed' | 'foreign'
+  profile: string
+  runtimeMasked?: boolean
+}
+
+interface LifecycleSystemdFixtureOptions {
+  units?: readonly LifecycleSystemdUnitOptions[]
+}
+
 interface LifecycleRunOptions {
   activationMarker?: string
+  canonicalCleanupFails?: boolean
+  configAfterActivation?: string
   configAfterUpgrade?: string
+  expectedScenario?: 'autonomy' | 'lark' | 'unsupported' | 'web'
+  guardianDisconnectAfterStart?: boolean
+  killLifecycleAfterOriginalRename?: boolean
   npmBlock?: boolean
   npmVersion?: string
   packageBlock?: boolean
+  packageExternalStartProfile?: string
   packageFails?: boolean
   packageSymlinkRelative?: string
   packageSymlinkTarget?: string
   packageWriteRelative?: string
+  processAncestorReference?: 'cwd' | 'fd'
   storeFails?: boolean
+  systemdDropInMutation?: 'hash' | 'identity'
+  systemdCrashBeforeStartProfile?: string
+  systemdDynamicProfile?: string
+  systemdGuardianListUnitFilesFailureBudget?: number
+  systemdGuardianListUnitsFailureBudget?: number
+  systemdGuardianOwnershipShowFailureBudget?: number
+  systemdGuardianOwnershipShowFailsProfile?: string
+  systemdJournal?: 'fail' | 'missing' | 'ready' | 'stale'
+  systemdKillLifecycleDuringStartProfile?: string
+  systemdPidStuckProfile?: string
+  systemdProcPids?: readonly number[]
+  systemdQuiescenceDriftProfile?: string
+  systemdReadinessFailsProfile?: string
+  systemdReplaceControlMaskOnUnmaskProfile?: string
+  systemdRestartLoopProfile?: string
+  systemdStartFailsProfile?: string
+  systemdStopFailsProfile?: string
+  systemdSupervisedProfile?: string
 }
 
 async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
@@ -268,8 +312,63 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   const dshHome = join(root, 'home')
   const profileDirectory = join(dshHome, 'profiles', 'web')
   const fakeBin = join(root, 'bin')
+  const fixtureInstallDirectory = join(root, 'install')
+  const fixtureInstallerLibrary = join(fixtureInstallDirectory, 'common.sh')
   await mkdir(profileDirectory, { recursive: true })
   await mkdir(fakeBin)
+  await mkdir(fixtureInstallDirectory)
+  await writeFile(fixtureInstallerLibrary, await readFile(installerLibrary))
+  await writeFile(join(fixtureInstallDirectory, 'lifecycle-config.mjs'),
+    await readFile(join(installDirectory, 'lifecycle-config.mjs')))
+  const lifecycleSource = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
+  const trustCheck = "  const entry = await lstat(canonical)\n"
+  const systemTrustFunction = "async function trustedSystemExecutable(path, name) {\n"
+  const procLoop = "  const proc = await opendir('/proc')\n  for await (const entry of proc) {"
+  const guardianReady = "  try {\n    const result = await operation()"
+  const guardianCompletion = '  const completion = new Promise((resolveCompletion, rejectCompletion) => {\n'
+  const originalRenamed = "    manifest = await writeManifest(physicalTransactionRoot, manifest, 'original-renamed')\n"
+  const canonicalCleanup = 'async function removeCommittedTransaction({ physicalTransactionRoot, transactionRoot, manifest, backupHome }) {\n'
+  expect(lifecycleSource).toContain(trustCheck)
+  expect(lifecycleSource).toContain(systemTrustFunction)
+  expect(lifecycleSource).toContain(procLoop)
+  expect(lifecycleSource).toContain(guardianReady)
+  expect(lifecycleSource).toContain(guardianCompletion)
+  expect(lifecycleSource).toContain(originalRenamed)
+  expect(lifecycleSource).toContain(canonicalCleanup)
+  await writeFile(join(fixtureInstallDirectory, 'lifecycle-profile.mjs'), lifecycleSource.replace(
+    trustCheck,
+    trustCheck + `  if (process.env.DSH_ENHANCED_TEST_SERVICE_TOOLS === '1'\n`
+      + `    && dirname(canonical) === ${JSON.stringify(fakeBin)}) return canonical\n`,
+  ).replace(
+    systemTrustFunction,
+    systemTrustFunction + `  if (process.env.DSH_ENHANCED_TEST_SERVICE_TOOLS === '1') return await realpath(path)\n`,
+  ).replace(
+    procLoop,
+    "  const procNames = (process.env.DSH_ENHANCED_TEST_PROC_PIDS ?? '').split(',').filter(Boolean)\n"
+      + "  if (process.env.DSH_ENHANCED_TEST_INCLUDE_ANCESTORS === '1') procNames.push(...await processAncestorIds())\n"
+      + "  const proc = [...new Set(procNames.map(String))].map(name => ({ name }))\n  for (const entry of proc) {",
+  ).replace(
+    guardianCompletion,
+    "  if (process.env.DSH_ENHANCED_TEST_GUARDIAN_PID_FILE) await writeFile(process.env.DSH_ENHANCED_TEST_GUARDIAN_PID_FILE, String(guardian.pid))\n"
+      + guardianCompletion,
+  ).replace(
+    guardianReady,
+    "  if (process.env.DSH_ENHANCED_TEST_KILL_PARENT_AFTER_GUARDIAN_START === '1') process.kill(process.pid, 'SIGKILL')\n"
+      + "  if (process.env.DSH_ENHANCED_TEST_DISCONNECT_GUARDIAN_AFTER_START === '1') { guardian.stdin.end(); await completion }\n"
+      + guardianReady,
+  ).replace(
+    originalRenamed,
+    originalRenamed
+      + "    if (process.env.DSH_ENHANCED_TEST_KILL_AFTER_ORIGINAL_RENAME === '1') process.kill(process.pid, 'SIGKILL')\n",
+  ).replace(
+    canonicalCleanup,
+    canonicalCleanup
+      + "  if (process.env.DSH_ENHANCED_TEST_FAIL_CANONICAL_CLEANUP === '1') fail('injected canonical cleanup failure')\n",
+  ))
+  await writeFile(join(fixtureInstallDirectory, 'install-local.sh'),
+    `#!/bin/bash\nset -euo pipefail\nsource ${JSON.stringify(fixtureInstallerLibrary)}\ndsh_enhanced_install local ${JSON.stringify(repoRoot)} "$@"\n`)
+  await writeFile(join(fixtureInstallDirectory, 'install-npm.sh'),
+    `#!/bin/bash\nset -euo pipefail\nsource ${JSON.stringify(fixtureInstallerLibrary)}\ndsh_enhanced_install npm '' "$@"\n`)
   await symlink(join(repoRoot, 'node_modules'), join(root, 'node_modules'), 'dir')
   const thirdParty = options.thirdParty ?? false
   const managedDependencies = options.managedDependencies ?? ['personal-assistant']
@@ -291,6 +390,29 @@ async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
   await writeFile(join(profileDirectory, 'cordis.patch.yml'), '- id: owner-custom\n  config: { value: keep }\n')
   await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
   await writeFile(join(profileDirectory, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+  const effectiveScenario = options.effectiveScenario ?? (options.systemd === undefined ? 'web' : 'lark')
+  const effectiveRows = effectiveScenario === 'lark'
+    ? [{
+        id: 'dsh-enhanced-lark-channel',
+        name: '@dsh-enhanced/lark-channel',
+        config: { enabled: true },
+      }]
+    : effectiveScenario === 'supervised'
+      ? [
+          {
+            id: 'dsh-enhanced-lark-channel',
+            name: '@dsh-enhanced/lark-channel',
+            config: { enabled: true },
+          },
+          { id: 'dsh-enhanced-assistant-recovery', name: '@dsh-enhanced/assistant-recovery' },
+        ]
+      : [
+          { id: 'dsh-enhanced-assistant-web-owner', name: '@dsh-enhanced/assistant-web-owner' },
+          ...(effectiveScenario === 'autonomy'
+            ? [{ id: 'dsh-enhanced-assistant-isolation', name: '@dsh-enhanced/assistant-isolation' }]
+            : []),
+        ]
+  await writeFile(join(dshHome, '.lifecycle-dump-config'), stringify(effectiveRows))
   await mkdir(join(dshHome, 'assistant-goals'), { recursive: true })
   const databasePath = join(dshHome, 'assistant-goals', 'web.sqlite')
   const database = new DatabaseSync(databasePath)
@@ -314,6 +436,9 @@ const database = new DatabaseSync(process.argv[2])
 database.exec("PRAGMA user_version = 2; INSERT INTO goals VALUES ('migrated-during-activation');")
 database.close()
 NODE
+if [[ -n "$LIFECYCLE_CONFIG_AFTER_ACTIVATION" ]]; then
+  printf '%s\n' "$LIFECYCLE_CONFIG_AFTER_ACTIVATION" > "$DSH_HOME/.lifecycle-dump-config"
+fi
 ${options.activationFails ? "printf 'activation failed\\n' >&2; exit 23" : "printf 'dsh web: http://127.0.0.1:43210\\n'; exit 0"}`
   await writeExecutable(join(fakeBin, 'dsh'), String.raw`#!/bin/bash
 set -euo pipefail
@@ -327,6 +452,18 @@ if [[ " $* " == *' plugin '* && " $* " == *' add '* ]]; then
   if [[ "$LIFECYCLE_PACKAGE_BLOCK" == '1' ]]; then
     : > "$DSH_HOME/.package-preparation-started"
     while [[ ! -f "$DSH_HOME/.package-preparation-release" ]]; do sleep 0.05; done
+  fi
+  if [[ -n "$LIFECYCLE_PACKAGE_EXTERNAL_START_PROFILE" ]]; then
+    systemctl --user start "dsh-profile-$LIFECYCLE_PACKAGE_EXTERNAL_START_PROFILE.service" || true
+  fi
+  if [[ -n "$LIFECYCLE_SYSTEMD_QUIESCENCE_DRIFT_PROFILE" ]]; then
+    "${process.execPath}" --input-type=module - "$LIFECYCLE_SYSTEMD_STATE" "$LIFECYCLE_SYSTEMD_QUIESCENCE_DRIFT_PROFILE" <<'NODE'
+import { readFileSync, writeFileSync } from 'node:fs'
+const state = JSON.parse(readFileSync(process.argv[2], 'utf8'))
+const unit = Object.values(state.units).find(value => value.profile === process.argv[3])
+if (unit) { unit.activeState = 'active'; unit.subState = 'running'; unit.mainPid = 49999 }
+writeFileSync(process.argv[2], JSON.stringify(state) + '\n')
+NODE
   fi
   if [[ -n "$LIFECYCLE_CONFIG_AFTER_UPGRADE" ]]; then
     printf '%s\n' "$LIFECYCLE_CONFIG_AFTER_UPGRADE" > "$DSH_HOME/.lifecycle-dump-config"
@@ -347,10 +484,21 @@ if [[ " $* " == *' plugin '* && " $* " == *' list '* ]]; then
   printf '%s\n' '{"name":"dsh-profile-web","private":true,"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}' > "$DSH_HOME/profiles/web/package.json"
   printf '%s\n' '[]' > "$DSH_HOME/profiles/web/cordis.yml"
   printf '%s\n' '[]' > "$DSH_HOME/profiles/web/cordis.patch.yml"
+  printf '%s\n' '[]' > "$DSH_HOME/.lifecycle-dump-config"
   exit 0
 fi
 if [[ " $* " == *' --dump-config '* ]]; then
-  if [[ -f "$DSH_HOME/.lifecycle-dump-config" ]]; then cat "$DSH_HOME/.lifecycle-dump-config"; else printf '[]\n'; fi
+  requested_profile=''
+  for ((index = 1; index <= $#; index += 1)); do
+    if [[ "${'$'}{!index}" == '--profile' ]]; then next=$((index + 1)); requested_profile="${'$'}{!next}"; break; fi
+  done
+  if [[ -n "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE" && "$requested_profile" == "$LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE" ]]; then
+    printf '%s\n' "- id: dsh-enhanced-assistant-recovery" "  name: '@dsh-enhanced/assistant-recovery'"
+  elif [[ -d "$DSH_HOME/uninstalled-profiles" ]] \
+    && [[ -f "$DSH_HOME/profiles/$requested_profile/package.json" ]] \
+    && ! grep -q '"@dsh-enhanced/' "$DSH_HOME/profiles/$requested_profile/package.json"; then
+    printf '[]\n'
+  elif [[ -f "$DSH_HOME/.lifecycle-dump-config" ]]; then cat "$DSH_HOME/.lifecycle-dump-config"; else printf '[]\n'; fi
   exit 0
 fi
 if [[ " $* " == *' --host 127.0.0.1 --no-open --port 0 '* ]]; then
@@ -387,6 +535,338 @@ if [[ " \${1:-} \${2:-} " == ' store add ' ]]; then
 fi
 printf 'unexpected fake pnpm invocation: %s\n' "$*" >&2
 exit 92
+`)
+  const systemdHome = join(root, 'systemd-home')
+  const systemdState = join(root, 'systemd-state.json')
+  const systemdLog = join(root, 'systemd.log')
+  const journalLog = join(root, 'journal.log')
+  if (options.systemd !== undefined) {
+    const unitDirectory = join(systemdHome, '.config', 'systemd', 'user')
+    await mkdir(unitDirectory, { recursive: true, mode: 0o700 })
+    const wantsDirectory = join(unitDirectory, 'default.target.wants')
+    await mkdir(wantsDirectory, { mode: 0o700 })
+    const configuredUnits = options.systemd.units ?? [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ]
+    const units: Record<string, {
+      activeState: string
+      controlPid: number
+      dropIns: string[]
+      fragmentPath: string
+      invocationId: string
+      mainPid: number
+      nRestarts: number
+      pathEnvironment: string
+      profile: string
+      serviceHome: string
+      starts: number
+      subState: string
+      unitFileState: string
+      unitFileStateBeforeMask?: string
+    }> = {}
+    for (const configured of configuredUnits) {
+      const serviceHome = configured.dshHome === '__other__' ? join(root, 'other-home') : configured.dshHome ?? dshHome
+      const serviceProfileDirectory = join(serviceHome, 'profiles', configured.profile)
+      await mkdir(serviceProfileDirectory, { recursive: true, mode: 0o700 })
+      const paths = systemdServicePaths({ home: systemdHome, dshHome: serviceHome, profile: configured.profile })
+      const source = configured.fragment === 'foreign'
+        ? `[Service]\nEnvironment=DSH_HOME=${serviceHome}\nExecStart=/usr/bin/false\n`
+        : createSystemdUserUnit({
+          ...paths,
+          dshHome: serviceHome,
+          profile: configured.profile,
+          profileDirectory: serviceProfileDirectory,
+          nodePath: process.execPath,
+          dshPath: join(fakeBin, 'dsh'),
+          path: `${dirname(process.execPath)}:${fakeBin}:/usr/bin:/bin`,
+        })
+      await writeFile(paths.unitPath, source, { mode: 0o600 })
+      if (!configured.runtimeMasked && configured.enabled !== false) {
+        await symlink(paths.unitPath, join(wantsDirectory, paths.unitName))
+      }
+      const dropIns: string[] = []
+      if (configured.dropIn !== undefined) {
+        const dropInDirectory = `${paths.unitPath}.d`
+        await mkdir(dropInDirectory, { mode: 0o700 })
+        const knownKeyring = configured.dropIn === 'keyring' || configured.dropIn === 'unsafe-keyring'
+        const dropIn = join(dropInDirectory, knownKeyring ? 'keyring.conf' : 'owner.conf')
+        await writeFile(dropIn, knownKeyring
+          ? '[Unit]\nRequires=gnome-keyring-daemon.service\nAfter=gnome-keyring-daemon.service\n'
+          : '[Service]\nEnvironment=OWNER_OVERRIDE=1\n', { mode: configured.dropIn === 'unsafe-keyring' ? 0o666 : 0o600 })
+        if (configured.dropIn === 'unsafe-keyring') await chmod(dropIn, 0o666)
+        dropIns.push(dropIn)
+      }
+      const unit = paths.unitName
+      units[unit] = {
+        activeState: configured.active ? 'active' : 'inactive',
+        controlPid: 0,
+        dropIns,
+        fragmentPath: paths.unitPath,
+        invocationId: configured.active ? `original-${configured.profile}` : '',
+        mainPid: configured.active ? 20_000 + Object.keys(units).length : 0,
+        nRestarts: 0,
+        pathEnvironment: `${dirname(process.execPath)}:${fakeBin}:/usr/bin:/bin`,
+        profile: configured.profile,
+        serviceHome,
+        starts: 0,
+        subState: configured.active ? 'running' : 'dead',
+        unitFileState: configured.runtimeMasked ? 'masked-runtime' : configured.enabled === false ? 'disabled' : 'enabled',
+        unitFileStateBeforeMask: 'enabled',
+      }
+    }
+    await writeFile(systemdState, `${JSON.stringify({ controls: {}, nextPid: 30_000, units }, null, 2)}\n`, { mode: 0o600 })
+    await writeFile(systemdLog, '')
+    await writeFile(journalLog, '')
+  }
+  await writeExecutable(join(fakeBin, 'systemctl'), `#!${process.execPath}
+const { appendFileSync, existsSync, lstatSync, readFileSync, renameSync, symlinkSync, unlinkSync, writeFileSync } = require('node:fs')
+const args = process.argv.slice(2)
+const logPath = ${JSON.stringify(systemdLog)}
+const statePath = ${JSON.stringify(systemdState)}
+const controlRoot = ${JSON.stringify(join(systemdHome, '.config', 'systemd', 'user.control'))}
+const journalExecutable = ${JSON.stringify(join(fakeBin, 'journalctl'))}
+const dshExecutable = ${JSON.stringify(join(fakeBin, 'dsh'))}
+appendFileSync(logPath, JSON.stringify(args) + '\\n')
+const state = JSON.parse(readFileSync(statePath, 'utf8'))
+const persist = () => writeFileSync(statePath, JSON.stringify(state) + '\\n')
+if (state.firstCommandHomeExists === undefined) {
+  state.firstCommandHomeExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME)
+  state.firstCommandBackupExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-enhanced-transaction/original-home')
+  state.firstCommandTransactionExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-enhanced-transaction')
+  persist()
+}
+if (state.firstCommandHomeExists === undefined) {
+  state.firstCommandHomeExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME)
+  state.firstCommandBackupExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME + '.dsh-enhanced-transaction/original-home')
+  persist()
+}
+if (args[0] !== '--user') process.exit(90)
+if (args[1] === 'list-unit-files') {
+  if (state.controls.guardianListUnitFilesFailuresRemaining > 0
+    && Object.values(state.units).some(unit => unit.starts > 0)) {
+    state.controls.guardianListUnitFilesFailuresRemaining -= 1
+    persist()
+    process.exit(7)
+  }
+  for (const [name, unit] of Object.entries(state.units)) process.stdout.write(name + ' ' + unit.unitFileState + ' enabled\\n')
+  process.exit(0)
+}
+if (args[1] === 'list-units') {
+  if (state.controls.guardianListUnitsFailuresRemaining > 0
+    && Object.values(state.units).some(unit => unit.starts > 0)) {
+    state.controls.guardianListUnitsFailuresRemaining -= 1
+    persist()
+    process.exit(7)
+  }
+  for (const [name, unit] of Object.entries(state.units)) {
+    process.stdout.write(name + ' loaded ' + unit.activeState + ' ' + unit.subState + ' DSH profile ' + unit.profile + '\\n')
+  }
+  process.exit(0)
+}
+if (args[1] === 'daemon-reload') {
+  for (const [name, unit] of Object.entries(state.units)) {
+    if (unit.unitFileState === 'masked-runtime') continue
+    const wants = process.env.HOME + '/.config/systemd/user/default.target.wants/' + name
+    unit.unitFileState = existsSync(wants) ? 'enabled' : 'disabled'
+  }
+  persist()
+  const profile = state.controls.replaceControlMaskOnUnmaskProfile
+  const started = Object.values(state.units).some(unit => unit.starts > 0)
+  if (profile && started && !state.controls.controlMaskReplaced) {
+    const name = 'dsh-profile-' + profile + '.service'
+    const maskPath = controlRoot + '/' + name
+    try { renameSync(maskPath, maskPath + '.superseded') } catch {}
+    symlinkSync('/dev/null', maskPath)
+    const replacement = lstatSync(maskPath)
+    state.units[name].replacementMaskIdentity = { dev: String(replacement.dev), ino: String(replacement.ino) }
+    state.controls.controlMaskReplaced = true
+    persist()
+  }
+  process.exit(0)
+}
+if (args[1] === 'show') {
+  const unit = state.units[args[2]]
+  if (!unit) process.exit(4)
+  if (state.controls.guardianOwnershipShowFailsProfile === unit.profile && unit.starts > 0
+    && args.includes('--property=Environment') && args.includes('--property=WorkingDirectory')
+    && state.controls.guardianOwnershipShowFailuresRemaining > 0) {
+    state.controls.guardianOwnershipShowFailuresRemaining -= 1
+    persist()
+    process.exit(7)
+  }
+  const controlMaskPath = controlRoot + '/' + args[2]
+  const lifecycleGuardPath = controlRoot + '/' + args[2] + '.d/dsh-enhanced-lifecycle.conf'
+  let controlMasked = false
+  try { controlMasked = lstatSync(controlMaskPath).isSymbolicLink() } catch {}
+  const dropIns = [...unit.dropIns]
+  try { if (lstatSync(lifecycleGuardPath).isFile()) dropIns.unshift(lifecycleGuardPath) } catch {}
+  if (state.controls.restartLoopProfile === unit.profile && unit.starts > 0 && unit.activeState === 'active') {
+    unit.nRestarts += 1
+    unit.invocationId = 'loop-' + unit.profile + '-' + unit.nRestarts
+    unit.mainPid += 1
+    persist()
+  }
+  const properties = [
+    ['Id', args[2]],
+    ['LoadState', controlMasked || unit.unitFileState === 'masked-runtime' ? 'masked' : 'loaded'],
+    ['FragmentPath', unit.fragmentPath],
+    ['DropInPaths', dropIns.join(' ')],
+    ['ActiveState', unit.activeState],
+    ['SubState', unit.subState],
+    ['MainPID', unit.mainPid],
+    ['ControlPID', unit.controlPid],
+    ['InvocationID', unit.invocationId],
+    ['NRestarts', unit.nRestarts],
+    ['UnitFileState', controlMasked ? 'masked' : unit.unitFileState],
+    ['WorkingDirectory', unit.serviceHome + '/profiles/' + unit.profile],
+    ['Environment', 'DSH_HOME=' + unit.serviceHome + ' PATH=' + unit.pathEnvironment
+      + ' DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/' + process.getuid() + '/bus'
+      + ' XDG_RUNTIME_DIR=/run/user/' + process.getuid()],
+    ['ExecStart', '{ path=' + process.execPath + ' ; argv[]=' + process.execPath + ' '
+      + '--disable-warning=ExperimentalWarning ' + dshExecutable + ' --profile ' + unit.profile + ' --no-open ; ignore_errors=no ; }'],
+  ]
+  const requested = new Set(args.filter(value => value.startsWith('--property='))
+    .map(value => value.slice('--property='.length)))
+  process.stdout.write(properties
+    .filter(([name]) => requested.size === 0 || requested.has(name))
+    .map(([name, value]) => name + '=' + value).join('\\n') + '\\n')
+  process.exit(0)
+}
+if (args[1] === 'mask' && args[2] === '--runtime') {
+  for (const name of args.slice(3)) {
+    const unit = state.units[name]
+    if (!unit) continue
+    if (unit.unitFileState !== 'masked-runtime') unit.unitFileStateBeforeMask = unit.unitFileState
+    unit.unitFileState = 'masked-runtime'
+  }
+  persist()
+  process.exit(0)
+}
+if (args[1] === 'unmask' && args[2] === '--runtime') {
+  for (const name of args.slice(3)) {
+    const unit = state.units[name]
+    if (!unit) continue
+    unit.unitFileState = unit.unitFileStateBeforeMask ?? 'enabled'
+    if (state.controls.replaceControlMaskOnUnmaskProfile === unit.profile) {
+      const maskPath = controlRoot + '/' + name
+      renameSync(maskPath, maskPath + '.superseded')
+      symlinkSync('/dev/null', maskPath)
+      const replacement = lstatSync(maskPath)
+      unit.replacementMaskIdentity = { dev: String(replacement.dev), ino: String(replacement.ino) }
+    }
+  }
+  persist()
+  process.exit(0)
+}
+if (args[1] === 'disable' || args[1] === 'enable') {
+  for (const name of args.slice(2)) {
+    const unit = state.units[name]
+    if (unit) unit.unitFileState = args[1] === 'disable' ? 'disabled' : 'enabled'
+  }
+  persist()
+  process.exit(0)
+}
+if (args[1] === 'stop') {
+  if (state.stopLegacyMarkerExists === undefined) {
+    state.stopLegacyMarkerExists = existsSync(process.env.LIFECYCLE_ORIGINAL_HOME
+      + '.dsh-enhanced-transaction/legacy-v1-marker')
+  }
+  for (const name of args.slice(2)) {
+    const unit = state.units[name]
+    if (!unit) continue
+    const maskPath = process.env.HOME + '/.config/systemd/user.control/' + name
+    try { unit.maskPresentWhenStopped = lstatSync(maskPath).isSymbolicLink() } catch { unit.maskPresentWhenStopped = false }
+    state.stopObservations = [...(state.stopObservations ?? []), {
+      unit: name, maskPresent: unit.maskPresentWhenStopped, unitFileState: unit.unitFileState,
+    }]
+    if (state.controls.stopFailsProfile === unit.profile) { persist(); process.exit(5) }
+    unit.activeState = 'inactive'
+    unit.subState = 'dead'
+    if (state.controls.pidStuckProfile !== unit.profile) unit.mainPid = 0
+  }
+  persist()
+  const mutation = state.controls.dropInMutation
+  if (mutation) {
+    const dropIn = Object.values(state.units).flatMap(unit => unit.dropIns)[0]
+    if (dropIn) {
+      if (mutation === 'identity') { writeFileSync(dropIn + '.replacement', '[Unit]\\nAfter=changed.service\\n'); renameSync(dropIn + '.replacement', dropIn) }
+      else appendFileSync(dropIn, '# changed\\n')
+    }
+  }
+  if (state.controls.journal === 'missing') unlinkSync(journalExecutable)
+  process.exit(0)
+}
+if (args[1] === 'start' || args[1] === 'restart') {
+  const starting = args.slice(2).map(name => state.units[name]).filter(Boolean)
+  if (!state.controls.crashTriggered
+    && starting.some(unit => state.controls.crashBeforeStartProfile === unit.profile)) {
+    state.controls.crashTriggered = true
+    persist()
+    process.kill(process.ppid, 'SIGKILL')
+    process.exit(99)
+  }
+  for (const name of args.slice(2)) {
+    const unit = state.units[name]
+    if (!unit) continue
+    try { if (lstatSync(controlRoot + '/' + name).isSymbolicLink()) process.exit(8) } catch {}
+    if (unit.unitFileState === 'masked-runtime') process.exit(8)
+    if (state.controls.startFailsProfile === unit.profile) { persist(); process.exit(6) }
+    unit.starts += 1
+    if (state.controls.readinessFailsProfile === unit.profile) {
+      unit.activeState = 'failed'; unit.subState = 'failed'; unit.mainPid = 0
+    } else {
+      state.nextPid += 1
+      unit.activeState = 'active'; unit.subState = 'running'; unit.mainPid = state.nextPid
+      unit.invocationId = 'fresh-' + unit.profile + '-' + state.nextPid
+    }
+    if (!state.controls.lifecycleParentKilled
+      && state.controls.killLifecycleDuringStartProfile === unit.profile) {
+      let lifecyclePid = process.ppid
+      for (let depth = 0; depth < 8 && lifecyclePid > 1; depth += 1) {
+        const command = readFileSync('/proc/' + lifecyclePid + '/cmdline', 'utf8')
+        if (command.includes('lifecycle-profile.mjs')) break
+        const parentLine = readFileSync('/proc/' + lifecyclePid + '/status', 'utf8')
+          .split(String.fromCharCode(10)).find(line => line.startsWith('PPid:'))
+        lifecyclePid = Number(parentLine?.trim().split(' ').filter(Boolean)[1])
+      }
+      state.controls.lifecycleParentKilled = true
+      state.controls.killedLifecyclePid = lifecyclePid
+      persist()
+      if (Number.isSafeInteger(lifecyclePid) && lifecyclePid > 1) process.kill(lifecyclePid, 'SIGKILL')
+    }
+  }
+  if (state.controls.dynamicProfile && !state.controls.dynamicAdded) {
+    const source = starting[0]
+    const profile = state.controls.dynamicProfile
+    const name = 'dsh-profile-' + profile + '.service'
+    const fragmentPath = source.fragmentPath.replace(source.unit ?? args[2], name)
+    writeFileSync(fragmentPath, readFileSync(source.fragmentPath, 'utf8').replaceAll(source.profile, profile))
+    state.units[name] = {
+      ...source, profile, activeState: 'active', subState: 'running', mainPid: ++state.nextPid,
+      invocationId: 'dynamic-' + profile + '-' + state.nextPid, starts: 1,
+      fragmentPath, unitFileState: 'enabled', unitFileStateBeforeMask: 'enabled', dropIns: [],
+    }
+    state.controls.dynamicAdded = true
+  }
+  persist()
+  process.exit(0)
+}
+process.exit(91)
+`)
+  await writeExecutable(join(fakeBin, 'journalctl'), `#!${process.execPath}
+const { appendFileSync } = require('node:fs')
+const args = process.argv.slice(2)
+const state = require(${JSON.stringify(systemdState)})
+appendFileSync(${JSON.stringify(journalLog)}, JSON.stringify(args) + '\\n')
+if (state.controls.journal === 'fail') process.exit(7)
+const invocation = args.find(value => value.startsWith('_SYSTEMD_INVOCATION_ID='))?.slice('_SYSTEMD_INVOCATION_ID='.length)
+if (state.controls.journal !== 'stale' && invocation?.startsWith('fresh-')) {
+  process.stdout.write('dsh web: http://127.0.0.1:43210\\n')
+} else {
+  process.stdout.write('old invocation did not become ready\\n')
+}
 `)
   await writeExecutable(join(fakeBin, 'bwrap'), `#!${process.execPath}
 const { appendFileSync, realpathSync } = require('node:fs')
@@ -442,16 +922,20 @@ process.exit(result.status ?? 99)
   return {
     root, dshHome, profileDirectory, fakeBin, databasePath, dshLog, bwrapLog, operationLog, lifecycleTarget,
     activationMarker: join(dshHome, '.activation-ran'),
+    fixtureInstallDirectory, fixtureInstallerLibrary, journalLog, systemdHome, systemdLog, systemdState,
   }
 }
 
 function lifecycleEnvironment(dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
   return {
-    PATH: `${fakeBin}:${process.env.PATH ?? ''}`, DSH_HOME: dshHome,
+    PATH: `${fakeBin}:${process.env.PATH ?? ''}`, DSH_HOME: dshHome, NODE_ENV: 'test',
+    DSH_ENHANCED_TEST_SERVICE_TOOLS: '1',
     LIFECYCLE_ACTIVATION_MARKER: options.activationMarker ?? join(dshHome, '.activation-ran'),
     LIFECYCLE_BWRAP_LOG: join(dirname(dshHome), 'bwrap.log'),
+    LIFECYCLE_CONFIG_AFTER_ACTIVATION: options.configAfterActivation ?? '',
     LIFECYCLE_CONFIG_AFTER_UPGRADE: options.configAfterUpgrade ?? '',
     LIFECYCLE_DSH_LOG: join(dirname(dshHome), 'dsh.log'),
+    LIFECYCLE_DSH_EXECUTABLE: join(fakeBin, 'dsh'),
     LIFECYCLE_NPM_BLOCK: options.npmBlock ? '1' : '0',
     LIFECYCLE_NPM_BLOCK_RELEASE: join(dirname(dshHome), 'npm-block-release'),
     LIFECYCLE_NPM_BLOCK_STARTED: join(dirname(dshHome), 'npm-block-started'),
@@ -459,21 +943,101 @@ function lifecycleEnvironment(dshHome: string, fakeBin: string, options: Lifecyc
     LIFECYCLE_OPERATION_LOG: join(dirname(dshHome), 'lifecycle-operations.log'),
     LIFECYCLE_ORIGINAL_HOME: dshHome,
     LIFECYCLE_PACKAGE_FAILS: options.packageFails ? '1' : '0',
+    LIFECYCLE_PACKAGE_EXTERNAL_START_PROFILE: options.packageExternalStartProfile ?? '',
     LIFECYCLE_PACKAGE_BLOCK: options.packageBlock ? '1' : '0',
     LIFECYCLE_PACKAGE_SYMLINK_RELATIVE: options.packageSymlinkRelative ?? '',
     LIFECYCLE_PACKAGE_SYMLINK_TARGET: options.packageSymlinkTarget ?? '',
     LIFECYCLE_PACKAGE_WRITE_RELATIVE: options.packageWriteRelative ?? '',
     LIFECYCLE_STORE_FAILS: options.storeFails ? '1' : '0',
+    LIFECYCLE_SYSTEMD_CRASH_BEFORE_START_PROFILE: options.systemdCrashBeforeStartProfile ?? '',
+    LIFECYCLE_SYSTEMD_DROPIN_MUTATION: options.systemdDropInMutation ?? '',
+    LIFECYCLE_SYSTEMD_DYNAMIC_PROFILE: options.systemdDynamicProfile ?? '',
+    LIFECYCLE_JOURNAL_LOG: join(dirname(dshHome), 'journal.log'),
+    LIFECYCLE_JOURNAL_EXECUTABLE: join(fakeBin, 'journalctl'),
+    LIFECYCLE_SYSTEMD_JOURNAL: options.systemdJournal ?? 'ready',
+    LIFECYCLE_SYSTEMD_KILL_LIFECYCLE_DURING_START_PROFILE: options.systemdKillLifecycleDuringStartProfile ?? '',
+    DSH_ENHANCED_TEST_DISCONNECT_GUARDIAN_AFTER_START: options.guardianDisconnectAfterStart ? '1' : '',
+    DSH_ENHANCED_TEST_GUARDIAN_PID_FILE: join(dirname(dshHome), 'guardian.pid'),
+    DSH_ENHANCED_TEST_FAIL_CANONICAL_CLEANUP: options.canonicalCleanupFails ? '1' : '',
+    DSH_ENHANCED_TEST_KILL_PARENT_AFTER_GUARDIAN_START: options.systemdKillLifecycleDuringStartProfile === undefined ? '' : '1',
+    DSH_ENHANCED_TEST_KILL_AFTER_ORIGINAL_RENAME: options.killLifecycleAfterOriginalRename ? '1' : '',
+    LIFECYCLE_SYSTEMD_LOG: join(dirname(dshHome), 'systemd.log'),
+    LIFECYCLE_SYSTEMD_PID_STUCK_PROFILE: options.systemdPidStuckProfile ?? '',
+    DSH_ENHANCED_TEST_PROC_PIDS: options.systemdProcPids?.join(',') ?? '',
+    DSH_ENHANCED_TEST_INCLUDE_ANCESTORS: options.processAncestorReference === undefined ? '' : '1',
+    LIFECYCLE_SYSTEMD_QUIESCENCE_DRIFT_PROFILE: options.systemdQuiescenceDriftProfile ?? '',
+    LIFECYCLE_SYSTEMD_READINESS_FAILS_PROFILE: options.systemdReadinessFailsProfile ?? '',
+    LIFECYCLE_SYSTEMD_REPLACE_CONTROL_MASK_ON_UNMASK_PROFILE: options.systemdReplaceControlMaskOnUnmaskProfile ?? '',
+    LIFECYCLE_SYSTEMD_RESTART_LOOP_PROFILE: options.systemdRestartLoopProfile ?? '',
+    LIFECYCLE_SYSTEMD_START_FAILS_PROFILE: options.systemdStartFailsProfile ?? '',
+    LIFECYCLE_SYSTEMD_STATE: join(dirname(dshHome), 'systemd-state.json'),
+    LIFECYCLE_SYSTEMD_STOP_FAILS_PROFILE: options.systemdStopFailsProfile ?? '',
+    LIFECYCLE_SYSTEMD_SUPERVISED_PROFILE: options.systemdSupervisedProfile ?? '',
+    DSH_ENHANCED_SERVICE_READY_TIMEOUT_MS: '1000',
+    DSH_ENHANCED_SERVICE_STABILITY_MS: '0',
+    DSH_ENHANCED_SERVICE_STOP_TIMEOUT_MS: '1000',
+    HOME: join(dirname(dshHome), 'systemd-home'),
   }
 }
 
 function runLifecycle(args: readonly string[], dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
+  const lifecycleInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
+  const [operation, profile, homePath, dryRun, ...targets] = args
   return spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_profile_lifecycle "$@"',
-    'lifecycle-test', installerLibrary, ...args], {
+    'lifecycle-test', lifecycleInstallerLibrary, operation!, profile!, homePath!, dryRun!,
+    options.expectedScenario ?? 'web', ...targets], {
     cwd: repoRoot,
     encoding: 'utf8',
     env: lifecycleEnvironment(dshHome, fakeBin, options),
   })
+}
+
+function runServiceLifecycle(
+  args: readonly string[],
+  dshHome: string,
+  fakeBin: string,
+  options: LifecycleRunOptions = {},
+) {
+  const [profile, homePath, _dryRun, ...targets] = args
+  const statePath = join(dirname(dshHome), 'systemd-state.json')
+  const serviceInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
+  setLifecycleSystemdControls(statePath, options)
+  return spawnSync('/bin/bash', [
+    '-c', `${options.processAncestorReference === 'fd' ? 'exec 9<"$DSH_HOME"; ' : ''}source "$1"; shift; dsh_enhanced_run_lifecycle_executor service-upgrade "$@"`,
+    'service-lifecycle-test', serviceInstallerLibrary, profile!, homePath!, options.expectedScenario ?? 'lark', ...targets,
+  ], {
+    cwd: options.processAncestorReference === 'cwd' ? dshHome : repoRoot,
+    encoding: 'utf8',
+    env: lifecycleEnvironment(dshHome, fakeBin, options),
+  })
+}
+
+function startServiceLifecycle(
+  args: readonly string[],
+  dshHome: string,
+  fakeBin: string,
+  options: LifecycleRunOptions = {},
+) {
+  const [profile, homePath, _dryRun, ...targets] = args
+  const statePath = join(dirname(dshHome), 'systemd-state.json')
+  const serviceInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
+  setLifecycleSystemdControls(statePath, options)
+  const child = spawn('/bin/bash', [
+    '-c', 'source "$1"; shift; dsh_enhanced_run_lifecycle_executor service-upgrade "$@"',
+    'service-lifecycle-test', serviceInstallerLibrary, profile!, homePath!, options.expectedScenario ?? 'lark', ...targets,
+  ], {
+    cwd: repoRoot, detached: true, env: lifecycleEnvironment(dshHome, fakeBin, options),
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += String(chunk) })
+  child.stderr.on('data', chunk => { stderr += String(chunk) })
+  return {
+    child,
+    done: new Promise<{ status: number | null; stdout: string; stderr: string }>(resolveDone => {
+      child.once('close', status => resolveDone({ status, stdout, stderr }))
+    }),
+  }
 }
 
 function startInstaller(
@@ -483,7 +1047,8 @@ function startInstaller(
   fakeBin: string,
   options: LifecycleRunOptions = {},
 ) {
-  const child = spawn('/bin/bash', [script, ...args], {
+  const fixtureScript = join(dirname(dshHome), 'install', basename(script))
+  const child = spawn('/bin/bash', [existsSync(fixtureScript) ? fixtureScript : script, ...args], {
     cwd: repoRoot, env: lifecycleEnvironment(dshHome, fakeBin, options),
   })
   let stdout = ''
@@ -499,8 +1064,11 @@ function startInstaller(
 }
 
 function startLifecycle(args: readonly string[], dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
+  const lifecycleInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
+  const [operation, profile, homePath, dryRun, ...targets] = args
   const child = spawn('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_profile_lifecycle "$@"',
-    'lifecycle-test', installerLibrary, ...args], {
+    'lifecycle-test', lifecycleInstallerLibrary, operation!, profile!, homePath!, dryRun!,
+    options.expectedScenario ?? 'web', ...targets], {
     cwd: repoRoot, env: lifecycleEnvironment(dshHome, fakeBin, options),
   })
   let stdout = ''
@@ -515,15 +1083,17 @@ function startLifecycle(args: readonly string[], dshHome: string, fakeBin: strin
 }
 
 function runRecovery(profile: string, dshHome: string, fakeBin: string) {
+  const lifecycleInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
   return spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_recover_profile_lifecycle "$2" "$3" 0',
-    'recovery-test', installerLibrary, profile, dshHome], {
+    'recovery-test', lifecycleInstallerLibrary, profile, dshHome], {
     cwd: repoRoot, encoding: 'utf8', env: lifecycleEnvironment(dshHome, fakeBin),
   })
 }
 
 function startRecovery(profile: string, dshHome: string, fakeBin: string) {
+  const lifecycleInstallerLibrary = join(dirname(dshHome), 'install', 'common.sh')
   const child = spawn('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_recover_profile_lifecycle "$2" "$3" 0',
-    'recovery-test', installerLibrary, profile, dshHome], {
+    'recovery-test', lifecycleInstallerLibrary, profile, dshHome], {
     cwd: repoRoot, env: lifecycleEnvironment(dshHome, fakeBin),
   })
   let stdout = ''
@@ -611,6 +1181,84 @@ async function readJsonLines(path: string): Promise<unknown[][]> {
   return source.trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as unknown[])
 }
 
+interface LifecycleSystemdState {
+  controls: {
+    crashBeforeStartProfile?: string
+    crashTriggered?: boolean
+    controlMaskReplaced?: boolean
+    dynamicAdded?: boolean
+    dynamicProfile?: string
+    dropInMutation?: 'hash' | 'identity'
+    guardianListUnitFilesFailuresRemaining?: number
+    guardianListUnitsFailuresRemaining?: number
+    guardianOwnershipShowFailuresRemaining?: number
+    guardianOwnershipShowFailsProfile?: string
+    journal?: 'fail' | 'missing' | 'ready' | 'stale'
+    pidStuckProfile?: string
+    quiescenceDriftProfile?: string
+    readinessFailsProfile?: string
+    replaceControlMaskOnUnmaskProfile?: string
+    restartLoopProfile?: string
+    startFailsProfile?: string
+    stopFailsProfile?: string
+  }
+  firstCommandBackupExists?: boolean
+  firstCommandHomeExists?: boolean
+  firstCommandTransactionExists?: boolean
+  stopLegacyMarkerExists?: boolean
+  nextPid: number
+  stopObservations?: Array<{ maskPresent: boolean; unit: string; unitFileState: string }>
+  units: Record<string, {
+    activeState: string
+    controlPid: number
+    dropIns: string[]
+    fragmentPath: string
+    invocationId: string
+    mainPid: number
+    maskPresentWhenStopped?: boolean
+    nRestarts: number
+    pathEnvironment: string
+    profile: string
+    serviceHome: string
+    starts: number
+    subState: string
+    unitFileState: string
+    unitFileStateBeforeMask?: string
+    replacementMaskIdentity?: LifecycleIdentity
+  }>
+}
+
+async function readLifecycleSystemdState(path: string): Promise<LifecycleSystemdState> {
+  return JSON.parse(await readFile(path, 'utf8')) as LifecycleSystemdState
+}
+
+function setLifecycleSystemdControls(path: string, options: LifecycleRunOptions): void {
+  const state = JSON.parse(readFileSync(path, 'utf8')) as LifecycleSystemdState
+  state.controls = {
+    dropInMutation: options.systemdDropInMutation,
+    crashBeforeStartProfile: options.systemdCrashBeforeStartProfile,
+    dynamicProfile: options.systemdDynamicProfile,
+    guardianListUnitFilesFailuresRemaining: options.systemdGuardianListUnitFilesFailureBudget ?? 0,
+    guardianListUnitsFailuresRemaining: options.systemdGuardianListUnitsFailureBudget ?? 0,
+    guardianOwnershipShowFailuresRemaining: options.systemdGuardianOwnershipShowFailureBudget ?? 0,
+    guardianOwnershipShowFailsProfile: options.systemdGuardianOwnershipShowFailsProfile,
+    journal: options.systemdJournal ?? 'ready',
+    killLifecycleDuringStartProfile: options.systemdKillLifecycleDuringStartProfile,
+    pidStuckProfile: options.systemdPidStuckProfile,
+    quiescenceDriftProfile: options.systemdQuiescenceDriftProfile,
+    readinessFailsProfile: options.systemdReadinessFailsProfile,
+    replaceControlMaskOnUnmaskProfile: options.systemdReplaceControlMaskOnUnmaskProfile,
+    restartLoopProfile: options.systemdRestartLoopProfile,
+    startFailsProfile: options.systemdStartFailsProfile,
+    stopFailsProfile: options.systemdStopFailsProfile,
+  }
+  writeFileSync(path, `${JSON.stringify(state)}\n`, { mode: 0o600 })
+}
+
+async function readLifecycleSystemdLog(path: string): Promise<string[][]> {
+  return (await readJsonLines(path)) as string[][]
+}
+
 type RecoveryState = 'preparing' | 'prepared' | 'validated' | 'original-renamed' | 'swapped' | 'committed' | 'cleanup-started' | 'failed'
 
 interface LifecycleIdentity {
@@ -624,12 +1272,15 @@ interface BoundLifecycleManifest {
   homePath: string
   canonicalHome: string
   transactionPath: string
+  transactionIdentity?: LifecycleIdentity
   profile: string
   operation: 'upgrade' | 'uninstall'
   originalIdentity: LifecycleIdentity
   originalProfileDigest: string
   stagedIdentity?: LifecycleIdentity
   stagedProfileDigest?: string
+  expectedScenario?: 'autonomy' | 'lark' | 'web'
+  stagedScenario?: 'autonomy' | 'lark' | 'unsupported' | 'web'
   createdAt: string
   state: RecoveryState
   updatedAt: string
@@ -648,19 +1299,54 @@ function lifecycleBinding(manifest: Omit<BoundLifecycleManifest, 'bindingDigest'
     homePath: manifest.homePath,
     canonicalHome: manifest.canonicalHome,
     transactionPath: manifest.transactionPath,
+    transactionIdentity: manifest.transactionIdentity,
     profile: manifest.profile,
     operation: manifest.operation,
     originalIdentity: manifest.originalIdentity,
     originalProfileDigest: manifest.originalProfileDigest,
     stagedIdentity: manifest.stagedIdentity,
     stagedProfileDigest: manifest.stagedProfileDigest,
+    expectedScenario: manifest.expectedScenario,
+    stagedScenario: manifest.stagedScenario,
     createdAt: manifest.createdAt,
     state: manifest.state,
   }
 }
 
+function serviceLifecycleBinding(manifest: Record<string, unknown>) {
+  return {
+    version: manifest.version,
+    id: manifest.id,
+    homePath: manifest.homePath,
+    canonicalHome: manifest.canonicalHome,
+    transactionPath: manifest.transactionPath,
+    transactionIdentity: manifest.transactionIdentity,
+    profile: manifest.profile,
+    operation: manifest.operation,
+    originalIdentity: manifest.originalIdentity,
+    originalProfileDigest: manifest.originalProfileDigest,
+    stagedIdentity: manifest.stagedIdentity,
+    stagedProfileDigest: manifest.stagedProfileDigest,
+    expectedScenario: manifest.expectedScenario,
+    stagedScenario: manifest.stagedScenario,
+    createdAt: manifest.createdAt,
+    state: manifest.state,
+    services: manifest.services,
+    servicePhase: manifest.servicePhase,
+    serviceFailure: manifest.serviceFailure,
+    serviceAcceptance: manifest.serviceAcceptance,
+    unitUniverse: manifest.unitUniverse,
+    serviceMasks: manifest.serviceMasks,
+    containmentMasks: manifest.containmentMasks,
+    containmentMaskIntents: manifest.containmentMaskIntents,
+    serviceStartBarriers: manifest.serviceStartBarriers,
+    containmentStartBarriers: manifest.containmentStartBarriers,
+  }
+}
+
 async function writeBoundLifecycleManifest(options: {
   dshHome: string
+  includeTransactionIdentity?: boolean
   originalHome: string
   stagedHome?: string
   state: RecoveryState
@@ -679,6 +1365,7 @@ async function writeBoundLifecycleManifest(options: {
     homePath: options.dshHome,
     canonicalHome: await realpath(options.dshHome).catch(() => options.dshHome),
     transactionPath,
+    ...(options.includeTransactionIdentity === false ? {} : { transactionIdentity: await lifecycleIdentity(transactionPath) }),
     profile: 'web',
     operation: 'upgrade' as const,
     originalIdentity: options.originalIdentity ?? await lifecycleIdentity(options.originalHome),
@@ -841,7 +1528,9 @@ describe('one-click installers', () => {
     expect(archived.dependencies).toMatchObject({ '@dsh-enhanced/personal-assistant': '0.1.0' })
     expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 2, values: ['durable-goal-state', 'migrated-during-activation'] })
     expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe('durable-session')
-    const repeated = runLifecycle(['uninstall', 'web', f.dshHome, '0'], f.dshHome, f.fakeBin)
+    const repeated = runLifecycle(
+      ['uninstall', 'web', f.dshHome, '0'], f.dshHome, f.fakeBin, { expectedScenario: 'unsupported' },
+    )
     expect(repeated.status, repeated.stderr).toBe(0)
     expect(repeated.stdout).toContain('没有 @dsh-enhanced/* 顶层依赖')
     expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archives)
@@ -898,8 +1587,8 @@ describe('one-click installers', () => {
     expect(result.status).not.toBe(0)
     expect(result.stderr).toMatch(/third-party|第三方/u)
     expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
-    await expect(readFile(f.dshLog, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+    expect(await readFile(f.dshLog, 'utf8')).toContain('CALL\t--profile\tweb\t--dump-config\n')
+    expect(await preservedLifecycleTransactions(f.dshHome), result.stderr).toEqual([])
   })
 
   test('upgrade rejects an ordinary dependency activated as a third-party composed row', async () => {
@@ -995,7 +1684,9 @@ describe('one-click installers', () => {
     await rename(f.dshHome, backupHome)
     await mkdir(stagedHome)
     await mkdir(join(stagedHome, 'profiles', 'web'), { recursive: true })
-    await writeFile(join(stagedHome, 'profiles', 'web', 'package.json'), '{"staged":true}\n')
+    await writeFile(join(stagedHome, '.lifecycle-dump-config'), stringify([
+      { id: 'dsh-enhanced-assistant-web-owner', name: '@dsh-enhanced/assistant-web-owner' },
+    ]))
     await writeFile(join(stagedHome, 'staged-marker'), 'failed staged home')
     const stagedIdentity = await lifecycleIdentity(stagedHome)
     await writeBoundLifecycleManifest({
@@ -1014,7 +1705,7 @@ describe('one-click installers', () => {
     expect(await readFile(join(preserved[0]!, 'failed-home', 'staged-marker'), 'utf8')).toBe('failed staged home')
   })
 
-  test('bound committed recovery removes its original backup and transaction without changing the staged live home', async () => {
+  test('bound v1 committed recovery without transactionIdentity removes its backup and transaction', async () => {
     const f = await lifecycleFixture({ thirdParty: false })
     const transaction = `${f.dshHome}.dsh-enhanced-transaction`
     const backupHome = join(transaction, 'original-home')
@@ -1022,8 +1713,7 @@ describe('one-click installers', () => {
     const originalIdentity = await lifecycleIdentity(f.dshHome)
     await mkdir(transaction, { mode: 0o700 })
     await rename(f.dshHome, backupHome)
-    await mkdir(join(stagedHome, 'profiles', 'web'), { recursive: true })
-    await writeFile(join(stagedHome, 'profiles', 'web', 'package.json'), '{"staged":true}\n')
+    await cp(backupHome, stagedHome, { recursive: true })
     await writeFile(join(stagedHome, 'committed-marker'), 'keep live')
     const stagedIdentity = await lifecycleIdentity(stagedHome)
     const stagedProfileDigest = createHash('sha256')
@@ -1031,9 +1721,14 @@ describe('one-click installers', () => {
       .digest('hex')
     await writeBoundLifecycleManifest({
       dshHome: f.dshHome, originalHome: backupHome, stagedHome, state: 'committed',
-      originalIdentity, stagedIdentity, stagedProfileDigest,
+      includeTransactionIdentity: false, originalIdentity, stagedIdentity, stagedProfileDigest,
     })
+    const committedManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(committedManifest).not.toHaveProperty('transactionIdentity')
     await rename(stagedHome, f.dshHome)
+    expect(await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')).toContain(
+      'dsh-enhanced-assistant-web-owner',
+    )
 
     const result = runRecovery('web', f.dshHome, f.fakeBin)
 
@@ -1041,7 +1736,7 @@ describe('one-click installers', () => {
     expect(result.stdout).toContain('已完成上次提交后的绑定清理')
     expect(await lifecycleIdentity(f.dshHome)).toEqual(stagedIdentity)
     expect(await readFile(join(f.dshHome, 'committed-marker'), 'utf8')).toBe('keep live')
-    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+    expect(await preservedLifecycleTransactions(f.dshHome), result.stderr).toEqual([])
   })
 
   test.each([
@@ -1127,7 +1822,7 @@ describe('one-click installers', () => {
     const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
 
     const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, {
-      configAfterUpgrade: "- id: newly-installed-state\n  name: '@dsh-enhanced/personal-assistant'\n  config:\n    statePath: /srv/newly-installed/state.json",
+      configAfterUpgrade: "- id: dsh-enhanced-assistant-web-owner\n  name: '@dsh-enhanced/assistant-web-owner'\n- id: newly-installed-state\n  name: '@dsh-enhanced/personal-assistant'\n  config:\n    statePath: /srv/newly-installed/state.json",
     })
 
     expect(result.status).toBe(1)
@@ -1154,7 +1849,7 @@ describe('one-click installers', () => {
     expect(result.status).toBe(1)
     expect(result.stderr).toMatch(/symbolic|symlink|符号链接/iu)
     await expect(readFile(outsideWrite, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+    expect(await preservedLifecycleTransactions(f.dshHome), result.stderr).toEqual([])
   })
 
   test.each([
@@ -1218,7 +1913,7 @@ describe('one-click installers', () => {
     expect(result.stderr).toMatch(/hardlink|硬链接|连接到快照外部/iu)
     expect(await readFile(outsideFile, 'utf8')).toBe('outside must remain unchanged')
     expect(await readFile(insideLink, 'utf8')).toBe('outside must remain unchanged')
-    await expect(readFile(f.dshLog, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(f.dshLog, 'utf8')).toContain('CALL\t--profile\tweb\t--dump-config\n')
     expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
   })
 
@@ -1452,7 +2147,7 @@ describe('one-click installers', () => {
     ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin))
 
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('本次未访问 npm registry')
+    expect(result.stderr).toMatch(/未.*(?:package|registry|store).*mutation|未访问 npm registry/iu)
     expect(await readFile(f.operationLog, 'utf8')).toBe('')
     const preserved = await preservedLifecycleTransactions(f.dshHome)
     expect(preserved).toHaveLength(1)
@@ -1477,7 +2172,7 @@ describe('one-click installers', () => {
     ], homeAlias, undefined, lifecycleEnvironment(homeAlias, f.fakeBin))
 
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('本次未访问 npm registry')
+    expect(result.stderr).toMatch(/本次未访问 npm registry|本次未开始新的 package、registry、store/iu)
     expect(await readFile(f.operationLog, 'utf8')).toBe('')
     const preserved = await preservedLifecycleTransactions(f.dshHome)
     expect(preserved).toHaveLength(1)
@@ -1496,7 +2191,7 @@ describe('one-click installers', () => {
     expect(await readFile(f.operationLog, 'utf8')).toBe('')
   })
 
-  test('upgrade and uninstall require an existing stopped web or autonomy profile', async () => {
+  test('upgrade and uninstall require explicit supported lifecycle scenarios and stopped-home confirmation', async () => {
     const dshHome = await temporaryDshHome()
     const profile = join(dshHome, 'profiles', 'web')
     await mkdir(profile, { recursive: true })
@@ -1505,13 +2200,1219 @@ describe('one-click installers', () => {
     const missingConfirmation = runInstaller(localInstaller, ['--operation', 'upgrade', '--scenario', 'web', '--dry-run'], dshHome)
     expect(missingConfirmation.status).toBe(2)
     expect(missingConfirmation.stderr).toContain('--confirm-dsh-home-stopped')
-    const lark = runInstaller(localInstaller, ['--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped', '--dry-run'], dshHome)
-    expect(lark.status).toBe(2)
-    expect(lark.stderr).toContain('显式 --scenario web 或 --scenario autonomy')
+    const supervised = runInstaller(localInstaller, ['--operation', 'upgrade', '--scenario', 'supervised', '--confirm-dsh-home-stopped', '--dry-run'], dshHome)
+    expect(supervised.status).toBe(2)
+    expect(supervised.stderr).toMatch(/supervised.*upgrade|upgrade.*supervised|尚未支持/iu)
     const hostChange = runInstaller(localInstaller, ['--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--dsh-version', '0.1.2-rc.1', '--dry-run'], dshHome)
     expect(hostChange.status).toBe(2)
     expect(hostChange.stderr).toContain('不会修改全局 DSH')
   })
+
+  test('Linux service lifecycle admits only Lark upgrade while keeping supervised and Lark uninstall fail closed', async () => {
+    const f = await lifecycleFixture({ systemd: {} })
+    const commonArgs = ['--confirm-dsh-home-stopped', '--dry-run']
+
+    const larkUpgrade = runInstaller(localInstaller, [
+      '--operation', 'upgrade', '--scenario', 'lark', ...commonArgs,
+    ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin))
+    const supervisedUpgrade = runInstaller(localInstaller, [
+      '--operation', 'upgrade', '--scenario', 'supervised', ...commonArgs,
+    ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin))
+    const larkUninstall = runInstaller(localInstaller, [
+      '--operation', 'uninstall', '--scenario', 'lark', ...commonArgs,
+    ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(larkUpgrade.status, larkUpgrade.stderr).toBe(0)
+    expect(larkUpgrade.stdout).toContain('Lark service-aware upgrade (Linux systemd --user)')
+    expect(larkUpgrade.stdout).toContain('canonical DSH_HOME, runtime-mask them, stop them, and verify PID quiescence')
+    expect(larkUpgrade.stdout).toContain('fresh InvocationID journal readiness and stability before backup cleanup')
+    expect(larkUpgrade.stdout).toContain('preserve both homes plus the bound manifest without automatic rollback')
+    expect(supervisedUpgrade.status).toBe(2)
+    expect(supervisedUpgrade.stderr).toMatch(/supervised.*upgrade|upgrade.*supervised|尚未支持/iu)
+    expect(larkUninstall.status).toBe(2)
+    expect(larkUninstall.stderr).toMatch(/lark.*uninstall|uninstall.*lark|尚未支持/iu)
+  })
+
+  test.each(['local', 'npm'] as const)(
+    '%s lifecycle entry rejects unsupported service modes before systemd, transaction, or registry work',
+    async source => {
+      for (const dryRun of [false, true]) {
+        for (const rejected of [
+          { operation: 'upgrade', scenario: 'supervised', extra: [] as string[], platform: 'Linux' },
+          { operation: 'uninstall', scenario: 'supervised', extra: [] as string[], platform: 'Linux' },
+          { operation: 'uninstall', scenario: 'lark', extra: [] as string[], platform: 'Linux' },
+          { operation: 'upgrade', scenario: 'lark', extra: ['--no-service'], platform: 'Linux' },
+          { operation: 'upgrade', scenario: 'lark', extra: [] as string[], platform: 'Darwin' },
+        ]) {
+          const f = await lifecycleFixture({ systemd: {} })
+          const script = source === 'local' ? localInstaller : npmInstaller
+          const result = runInstaller(script, [
+            '--operation', rejected.operation, '--scenario', rejected.scenario,
+            '--confirm-dsh-home-stopped', '--yes', ...rejected.extra, ...(dryRun ? ['--dry-run'] : []),
+          ], f.dshHome, rejected.platform, lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+          expect(result.status, `${source} ${dryRun ? 'dry' : 'live'} ${rejected.scenario} ${rejected.operation}: ${result.stderr}`).toBe(2)
+          expect(await readFile(f.operationLog, 'utf8')).toBe('')
+          expect(await readFile(f.systemdLog, 'utf8')).toBe('')
+          await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+        }
+      }
+    },
+    15_000,
+  )
+
+  test.each(['local', 'npm'] as const)(
+    'public %s Lark upgrade recovers original-renamed v2 residue through a now-dangling DSH_HOME symlink',
+    async source => {
+      const f = await lifecycleFixture({ systemd: { units: [
+        { profile: 'web', active: true },
+        { profile: 'worker', active: true },
+        { profile: 'dormant', active: false },
+      ] } })
+      const homeAlias = join(f.root, 'home-alias')
+      await symlink(f.dshHome, homeAlias)
+      const originalIdentity = await lifecycleIdentity(f.dshHome)
+      const crashed = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { killLifecycleAfterOriginalRename: true },
+      )
+      expect(crashed.status).not.toBe(0)
+      await expect(stat(homeAlias)).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((await lstat(homeAlias)).isSymbolicLink()).toBe(true)
+      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+      expect(crashManifest).toMatchObject({ version: 2, state: 'original-renamed', expectedScenario: 'lark' })
+      const operationsBeforeRecovery = await readFile(f.operationLog, 'utf8')
+      expect(operationsBeforeRecovery.match(/^dsh-add\t/gmu)).toHaveLength(1)
+
+      const script = source === 'local' ? localInstaller : npmInstaller
+      const recovered = runInstaller(script, [
+        '--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped', '--yes',
+        ...(source === 'npm' ? ['--plugin-version', '1.4.0'] : []),
+      ], homeAlias, 'Linux', lifecycleEnvironment(homeAlias, f.fakeBin))
+
+      expect(recovered.status).not.toBe(0)
+      expect(recovered.stderr).toMatch(/恢复|recovery|重试/iu)
+      expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+      expect(await realpath(homeAlias)).toBe(f.dshHome)
+      expect(await readFile(f.operationLog, 'utf8')).toBe(operationsBeforeRecovery)
+      expect(operationsBeforeRecovery).not.toMatch(/^npm-view|^pnpm-store-add/mu)
+      await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+      const preserved = await preservedLifecycleTransactions(f.dshHome)
+      expect(preserved).toHaveLength(1)
+      expect(JSON.parse(await readFile(join(preserved[0]!, 'manifest.json'), 'utf8')))
+        .toMatchObject({ version: 2, id: crashManifest.id, state: 'original-renamed' })
+      const state = await readLifecycleSystemdState(f.systemdState)
+      expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 1 })
+      expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
+      expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', mainPid: 0, starts: 0 })
+    },
+    15_000,
+  )
+
+  test.each([
+    { actual: 'lark', declared: 'web', source: 'local' },
+    { actual: 'lark', declared: 'web', source: 'npm' },
+    { actual: 'supervised', declared: 'web', source: 'local' },
+    { actual: 'supervised', declared: 'web', source: 'npm' },
+    { actual: 'autonomy', declared: 'web', source: 'local' },
+    { actual: 'web', declared: 'autonomy', source: 'local' },
+    { actual: 'web', declared: 'lark', source: 'local' },
+    { actual: 'web', declared: 'lark', source: 'npm' },
+  ] as const)(
+    '$source lifecycle rejects actual $actual profile spoofed as $declared before external work',
+    async ({ actual, declared, source }) => {
+      const f = await lifecycleFixture({
+        effectiveScenario: actual,
+        systemd: { units: [{ profile: 'web', active: true }] },
+      })
+      const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+      const script = source === 'local' ? localInstaller : npmInstaller
+      const result = runInstaller(script, [
+        '--operation', 'upgrade', '--scenario', declared, '--confirm-dsh-home-stopped', '--yes',
+        ...(source === 'npm' ? ['--plugin-version', '1.4.0'] : []),
+      ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+      expect(result.status).not.toBe(0)
+      if (actual === 'supervised') expect(result.stderr).toMatch(/supervised|recovery|attestation/iu)
+      else expect(result.stderr).toMatch(/scenario|场景|service-aware/iu)
+      expect(await readFile(f.dshLog, 'utf8')).toContain('CALL\t--profile\tweb\t--dump-config\n')
+      expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+      expect(await readFile(f.operationLog, 'utf8')).toBe('')
+      expect(await readFile(f.systemdLog, 'utf8')).toBe('')
+      await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+      await expect(stat(f.activationMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+    },
+  )
+
+  test('scenario classifier treats a config-disabled Lark row beside web as web', async () => {
+    const scenario = await classifyLifecycleScenario(`
+- id: dsh-enhanced-assistant-web-owner
+  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-enhanced-lark-channel
+  name: '@dsh-enhanced/lark-channel'
+  config:
+    enabled: false
+`)
+
+    expect(scenario).toBe('web')
+  })
+
+  test.each([
+    ['duplicate enabled Lark rows', `
+- id: dsh-enhanced-lark-channel
+  name: '@dsh-enhanced/lark-channel'
+  config: { enabled: true }
+- id: lark-owner-alias
+  name: '@dsh-enhanced/lark-channel'
+  config: { enabled: true }
+`],
+    ['duplicate config-disabled and enabled Lark rows', `
+- id: dsh-enhanced-lark-channel
+  name: '@dsh-enhanced/lark-channel'
+  config: { enabled: false }
+- id: lark-owner-alias
+  name: '@dsh-enhanced/lark-channel'
+  config: { enabled: true }
+`],
+    ['malformed top-level disabled boolean', `
+- id: dsh-enhanced-lark-channel
+  name: '@dsh-enhanced/lark-channel'
+  disabled: 'false'
+  config: { enabled: true }
+`],
+    ['malformed Lark enabled boolean', `
+- id: dsh-enhanced-lark-channel
+  name: '@dsh-enhanced/lark-channel'
+  config: { enabled: 'false' }
+`],
+    ['mixed enabled Lark and web rows', `
+- id: dsh-enhanced-assistant-web-owner
+  name: '@dsh-enhanced/assistant-web-owner'
+- id: dsh-enhanced-lark-channel
+  name: '@dsh-enhanced/lark-channel'
+  config: { enabled: true }
+`],
+  ])('scenario classifier fails closed for %s', async (_label, source) => {
+    await expect(classifyLifecycleScenario(source)).rejects.toThrow()
+  })
+
+  test('npm Lark upgrade dry-run describes service safety without registry or systemd access', async () => {
+    const f = await lifecycleFixture({
+      effectiveScenario: 'lark',
+      systemd: { units: [{ profile: 'web', active: true }] },
+    })
+
+    const result = runInstaller(npmInstaller, [
+      '--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped',
+      '--plugin-version', 'latest', '--dry-run',
+    ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('Lark service-aware upgrade (Linux systemd --user)')
+    expect(result.stdout).toContain('runtime-mask')
+    expect(result.stdout).toContain('fresh InvocationID journal readiness')
+    expect(result.stdout).toContain('preserve both homes plus the bound manifest')
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    expect(await readFile(f.systemdLog, 'utf8')).toBe('')
+  })
+
+  test('local and npm Lark upgrade entry points dispatch the service-aware executor', async () => {
+    const local = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const localResult = runInstaller(join(local.fixtureInstallDirectory, 'install-local.sh'), [
+      '--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped', '--yes',
+    ], local.dshHome, 'Linux', lifecycleEnvironment(local.dshHome, local.fakeBin))
+
+    expect(localResult.status, localResult.stderr).toBe(0)
+    expect((await readLifecycleSystemdLog(local.systemdLog)).some(command => command[1] === 'stop')).toBe(true)
+
+    const npm = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const npmResult = runInstaller(join(npm.fixtureInstallDirectory, 'install-npm.sh'), [
+      '--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped', '--plugin-version', '1.4.0', '--yes',
+    ], npm.dshHome, 'Linux', lifecycleEnvironment(npm.dshHome, npm.fakeBin))
+
+    expect(npmResult.status, npmResult.stderr).toBe(0)
+    expect((await readLifecycleSystemdLog(npm.systemdLog)).some(command => command[1] === 'stop')).toBe(true)
+    expect(await readFile(npm.operationLog, 'utf8')).toContain('npm-view')
+  }, 15_000)
+
+  test.each(['web', 'autonomy'] as const)('keeps the %s lifecycle on the stopped-home path', async scenario => {
+    const f = await lifecycleFixture({ effectiveScenario: scenario, systemd: {} })
+
+    const result = runInstaller(localInstaller, [
+      '--operation', 'upgrade', '--scenario', scenario, '--confirm-dsh-home-stopped', '--dry-run',
+    ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('profile 生命周期事务（upgrade）')
+    expect(result.stdout).not.toMatch(/systemctl|journalctl/iu)
+  })
+
+  test('service-aware upgrade quiesces every profile in the canonical DSH_HOME and restores only the active set', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true, dropIn: 'keyring' },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ] } })
+    const keyringPath = join(f.systemdHome, '.config', 'systemd', 'user', 'dsh-profile-web.service.d', 'keyring.conf')
+    const keyringBefore = await readFile(keyringPath, 'utf8')
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    expect(commands).toContainEqual([
+      '--user', 'list-unit-files', '--type=service', '--no-legend', '--no-pager', 'dsh-profile-*.service',
+    ])
+    expect(commands).toContainEqual([
+      '--user', 'list-units', '--all', '--type=service', '--plain', '--no-legend', '--no-pager',
+      'dsh-profile-*.service',
+    ])
+    const stopIndex = commands.findIndex(command => command[1] === 'stop')
+    const stop = commands.find(command => command[1] === 'stop')
+    expect(new Set(stop?.slice(2))).toEqual(new Set([
+      'dsh-profile-web.service', 'dsh-profile-worker.service', 'dsh-profile-dormant.service',
+    ]))
+    const starts = commands.filter(command => command[1] === 'start')
+    expect(starts).toHaveLength(1)
+    expect(new Set(starts[0]?.slice(2))).toEqual(new Set(['dsh-profile-web.service', 'dsh-profile-worker.service']))
+    expect(starts.flat()).not.toContain('dsh-profile-dormant.service')
+    expect(commands.some(command => command[1] === 'disable' || command[1] === 'enable')).toBe(false)
+    expect(stopIndex).toBeLessThan(commands.findIndex(command => command[1] === 'start'))
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({
+      activeState: 'active', subState: 'running', starts: 1, nRestarts: 0,
+    })
+    expect(state.units['dsh-profile-worker.service']).toMatchObject({
+      activeState: 'active', subState: 'running', starts: 1, nRestarts: 0,
+    })
+    expect(state.units['dsh-profile-dormant.service']).toMatchObject({
+      activeState: 'inactive', subState: 'dead', starts: 0, mainPid: 0, unitFileState: 'enabled',
+    })
+    expect(state.units['dsh-profile-web.service']?.invocationId).toMatch(/^fresh-web-/u)
+    expect(state.units['dsh-profile-worker.service']?.invocationId).toMatch(/^fresh-worker-/u)
+    expect(await readFile(keyringPath, 'utf8')).toBe(keyringBefore)
+    expect(await preservedLifecycleTransactions(f.dshHome), result.stderr).toEqual([])
+
+    const journals = await readLifecycleSystemdLog(f.journalLog)
+    for (const profile of ['web', 'worker']) {
+      expect(journals).toEqual(expect.arrayContaining([expect.arrayContaining([
+        '--unit', `dsh-profile-${profile}.service`,
+        expect.stringMatching(new RegExp(`^_SYSTEMD_INVOCATION_ID=fresh-${profile}-`, 'u')),
+        '--output=cat', '--no-pager',
+      ])]))
+    }
+  }, 15_000)
+
+  test('service-aware upgrade treats a canonical home alias as the same service home', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const aliasHome = join(f.root, 'home-alias')
+    await symlink(f.dshHome, aliasHome, 'dir')
+    const unitName = 'dsh-profile-web.service'
+    const state = await readLifecycleSystemdState(f.systemdState)
+    const unit = state.units[unitName]!
+    unit.serviceHome = aliasHome
+    await writeFile(unit.fragmentPath, createSystemdUserUnit({
+      unitName,
+      unitPath: unit.fragmentPath,
+      dshHome: aliasHome,
+      profile: 'web',
+      profileDirectory: join(aliasHome, 'profiles', 'web'),
+      nodePath: process.execPath,
+      dshPath: join(f.fakeBin, 'dsh'),
+      path: `${dirname(process.execPath)}:${f.fakeBin}:/usr/bin:/bin`,
+    }), { mode: 0o600 })
+    await writeFile(f.systemdState, `${JSON.stringify(state)}\n`, { mode: 0o600 })
+
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    expect(commands.some(command => command[1] === 'stop' && command.includes('dsh-profile-web.service'))).toBe(true)
+    expect(commands.some(command => command[1] === 'start' && command.includes('dsh-profile-web.service'))).toBe(true)
+  }, 15_000)
+
+  test.each([
+    ['missing target unit', []],
+    ['same unit name for another home', [{ profile: 'web', active: true, dshHome: '__other__' }]],
+    ['foreign fragment', [{ profile: 'web', active: true, fragment: 'foreign' }]],
+    ['unknown drop-in', [{ profile: 'web', active: true, dropIn: 'unknown' }]],
+    ['unsafe keyring drop-in', [{ profile: 'web', active: true, dropIn: 'unsafe-keyring' }]],
+  ] as const)('service-aware upgrade rejects %s before stopping or creating a transaction', async (_label, units) => {
+    const f = await lifecycleFixture({ systemd: { units } })
+
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/service|systemd|unit|drop-in|fragment|DSH_HOME|受管|安全|权限/iu)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    expect(commands.some(command => command[1] === 'stop')).toBe(false)
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('a supervised sibling makes a Lark upgrade fail before mask, stop, or transaction creation', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+    ] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdSupervisedProfile: 'worker' },
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/supervised|recovery|attestation/iu)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    expect(commands.some(command => command[1] === 'mask' || command[1] === 'stop')).toBe(false)
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test.each([
+    ['stop failure', { systemdStopFailsProfile: 'worker' }],
+    ['residual PID', { systemdPidStuckProfile: 'worker' }],
+  ] as const)('service-aware upgrade handles %s before package preparation and restores the original active set', async (_label, failure) => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, failure,
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/stop|停止|PID|quiesc|静止|service|systemd|systemctl/iu)
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', subState: 'running' })
+    expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', subState: 'running' })
+    expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', starts: 0 })
+  }, 15_000)
+
+  test('service-aware package failure keeps the old home and restores only the original active services', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ] } })
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { packageFails: true },
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 1 })
+    expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
+    expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', starts: 0 })
+  }, 15_000)
+
+  test('runtime masks prevent an external start during package preparation', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { packageExternalStartProfile: 'worker' },
+    )
+
+    expect(result.status, result.stderr).toBe(0)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    const stopIndex = commands.findIndex(command => command[1] === 'stop')
+    const attemptedStartIndexes = commands.map((command, index) => ({ command, index }))
+      .filter(({ command }) => command[1] === 'start' && command.includes('dsh-profile-worker.service'))
+      .map(({ index }) => index)
+    expect(attemptedStartIndexes.some(index => index > stopIndex)).toBe(true)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-worker.service'])
+      .toMatchObject({ activeState: 'active', starts: 1 })
+  }, 15_000)
+
+  test('filesystem mask and persistent disable barrier are established before stop', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: false },
+    ] } })
+
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    const stopIndex = commands.findIndex(command => command[1] === 'stop')
+    const startIndex = commands.findIndex(command => command[1] === 'start')
+    expect(commands.some(command => command[1] === 'disable' || command[1] === 'enable')).toBe(false)
+    expect(stopIndex).toBeLessThan(startIndex)
+  }, 15_000)
+
+  test('restores an originally disabled active unit without enabling it', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true, enabled: false }] } })
+    const wantsPath = join(
+      f.systemdHome, '.config', 'systemd', 'user', 'default.target.wants', 'dsh-profile-web.service',
+    )
+
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
+      .toMatchObject({ activeState: 'active', unitFileState: 'disabled', starts: 1 })
+    await expect(lstat(wantsPath)).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test('refuses a pre-existing user.control mask without stopping or unlinking it', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const controlDirectory = join(f.systemdHome, '.config', 'systemd', 'user.control')
+    const maskPath = join(controlDirectory, 'dsh-profile-web.service')
+    await mkdir(controlDirectory, { recursive: true, mode: 0o700 })
+    await symlink('/dev/null', maskPath)
+    const maskBefore = await lstat(maskPath)
+    const homeBefore = await lifecycleIdentity(f.dshHome)
+
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/mask|systemd|绑定|身份/iu)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    expect(commands.some(command => command[1] === 'stop' || command[1] === 'unmask')).toBe(false)
+    expect(await readlink(maskPath)).toBe('/dev/null')
+    const maskAfter = await lstat(maskPath)
+    expect({ dev: maskAfter.dev, ino: maskAfter.ino }).toEqual({ dev: maskBefore.dev, ino: maskBefore.ino })
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(homeBefore)
+    await expect(stat(join(f.dshHome, 'profiles', 'web', 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test('refuses to unlink a user.control mask whose dev/ino was replaced after ownership was recorded', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const maskPath = join(f.systemdHome, '.config', 'systemd', 'user.control', 'dsh-profile-web.service')
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { systemdReplaceControlMaskOnUnmaskProfile: 'web' },
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/mask|identity|身份|绑定/iu)
+    expect(await readlink(maskPath)).toBe('/dev/null')
+    const state = await readLifecycleSystemdState(f.systemdState)
+    const replacement = await lstat(maskPath)
+    expect({ dev: String(replacement.dev), ino: String(replacement.ino) })
+      .toEqual(state.units['dsh-profile-web.service'].replacementMaskIdentity)
+  }, 15_000)
+
+  test('a pre-existing runtime mask is never unmasked or converted into lifecycle-owned state', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: false, runtimeMasked: true }] } })
+
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status).not.toBe(0)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'].unitFileState)
+      .toBe('masked-runtime')
+    expect((await readLifecycleSystemdLog(f.systemdLog)).some(command => command[1] === 'unmask')).toBe(false)
+    await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('post-swap start-intent crash recovery contains the unit before restarting it', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { systemdCrashBeforeStartProfile: 'web' },
+    )
+
+    expect(first.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    expect(JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8')))
+      .toMatchObject({ version: 2, state: 'swapped', servicePhase: 'starting' })
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
+      .toMatchObject({ activeState: 'inactive', unitFileState: 'disabled' })
+    const observationsBeforeRecovery = (await readLifecycleSystemdState(f.systemdState)).stopObservations?.length ?? 0
+    const beforeRecovery = (await readLifecycleSystemdLog(f.systemdLog)).length
+
+    const recovered = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    const recoveryCommands = (await readLifecycleSystemdLog(f.systemdLog)).slice(beforeRecovery)
+    const stopIndex = recoveryCommands.findIndex(command => command[1] === 'stop')
+    const startIndex = recoveryCommands.findIndex(command => command[1] === 'start')
+    expect(stopIndex).toBeGreaterThanOrEqual(0)
+    expect(stopIndex).toBeLessThan(startIndex)
+    const recoveryStops = (await readLifecycleSystemdState(f.systemdState)).stopObservations?.slice(observationsBeforeRecovery) ?? []
+    expect(recoveryStops[0]).toMatchObject({ unit: 'dsh-profile-web.service', maskPresent: true })
+  }, 15_000)
+
+  test('guardian stops a started unit when the lifecycle parent dies after start', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { systemdKillLifecycleDuringStartProfile: 'web' },
+    )
+
+    let state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.controls.lifecycleParentKilled).toBe(true)
+    expect(result.status).not.toBe(0)
+    const deadline = Date.now() + 5_000
+    while ((state.units['dsh-profile-web.service']?.activeState !== 'inactive'
+      || state.units['dsh-profile-web.service']?.mainPid !== 0) && Date.now() < deadline) {
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
+      state = await readLifecycleSystemdState(f.systemdState)
+    }
+    expect(state.units['dsh-profile-web.service']).toMatchObject({
+      activeState: 'inactive', subState: 'dead', mainPid: 0, controlPid: 0,
+    })
+  }, 15_000)
+
+  test('guardian exits nonzero after parent disconnect even when containment succeeds', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { guardianDisconnectAfterStart: true },
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/service crash guardian failed with exit 1/u)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']).toMatchObject({
+      activeState: 'inactive', subState: 'dead', mainPid: 0, controlPid: 0,
+    })
+  }, 15_000)
+
+  test('guardian retries transient census failures through two complete censuses and contains only same-home units', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'foreign', active: true, dshHome: '__other__' },
+    ] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      {
+        guardianDisconnectAfterStart: true,
+        systemdDynamicProfile: 'late',
+        systemdGuardianListUnitFilesFailureBudget: 1,
+        systemdGuardianListUnitsFailureBudget: 1,
+        systemdGuardianOwnershipShowFailureBudget: 1,
+        systemdGuardianOwnershipShowFailsProfile: 'late',
+      },
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/service crash guardian failed with exit 1/u)
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({
+      activeState: 'inactive', subState: 'dead', mainPid: 0, controlPid: 0,
+    })
+    expect(state.units['dsh-profile-late.service']).toMatchObject({
+      activeState: 'inactive', subState: 'dead', mainPid: 0, controlPid: 0,
+    })
+    expect(state.units['dsh-profile-foreign.service']).toMatchObject({
+      activeState: 'active', subState: 'running',
+    })
+    expect(state.controls).toMatchObject({
+      guardianListUnitFilesFailuresRemaining: 0,
+      guardianListUnitsFailuresRemaining: 0,
+      guardianOwnershipShowFailuresRemaining: 0,
+    })
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    const lastStartIndex = commands.findLastIndex(command => command[1] === 'start')
+    const firstCensusIndex = commands.findIndex((command, index) => index > lastStartIndex
+      && command[1] === 'list-unit-files')
+    const firstGuardianStopIndex = commands.findIndex((command, index) => index > lastStartIndex
+      && command[1] === 'stop' && command.includes('dsh-profile-web.service'))
+    expect(firstGuardianStopIndex).toBeGreaterThanOrEqual(0)
+    expect(firstGuardianStopIndex).toBeLessThan(firstCensusIndex)
+    const dynamicShowIndex = commands.findIndex(command => command[1] === 'show'
+      && command[2] === 'dsh-profile-late.service'
+      && command.includes('--property=Environment') && command.includes('--property=WorkingDirectory'))
+    expect(dynamicShowIndex).toBeGreaterThanOrEqual(0)
+    const ownershipShows = commands.filter(command => command[1] === 'show'
+      && command[2] === 'dsh-profile-late.service'
+      && command.includes('--property=Environment') && command.includes('--property=WorkingDirectory'))
+    expect(ownershipShows.length).toBeGreaterThanOrEqual(3)
+    expect(commands.filter(command => command[1] === 'list-unit-files').length).toBeGreaterThanOrEqual(4)
+    expect(commands.filter(command => command[1] === 'list-units').length).toBeGreaterThanOrEqual(4)
+    expect(commands.filter(command => command[1] === 'stop'
+      && command.includes('dsh-profile-late.service')).length).toBeGreaterThanOrEqual(2)
+    expect(commands.some(command => command[1] === 'stop'
+      && command.includes('dsh-profile-foreign.service'))).toBe(false)
+  }, 15_000)
+
+  test('guardian keeps retrying persistent ownership failures until it is explicitly killed', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const lifecycle = startServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      {
+        guardianDisconnectAfterStart: true,
+        systemdDynamicProfile: 'late',
+        systemdGuardianOwnershipShowFailureBudget: 100,
+        systemdGuardianOwnershipShowFailsProfile: 'late',
+      },
+    )
+
+    try {
+      const deadline = Date.now() + 6_000
+      let retryCount = 0
+      while (Date.now() < deadline) {
+        const commands = await readLifecycleSystemdLog(f.systemdLog)
+        retryCount = commands.filter(command => command[1] === 'show'
+          && command[2] === 'dsh-profile-late.service'
+          && command.includes('--property=Environment') && command.includes('--property=WorkingDirectory')).length
+        if (retryCount >= 2) break
+        await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
+      }
+      expect(retryCount).toBeGreaterThanOrEqual(2)
+      expect(lifecycle.child.exitCode).toBeNull()
+      expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service']).toMatchObject({
+        activeState: 'inactive', subState: 'dead', mainPid: 0, controlPid: 0,
+      })
+      if (lifecycle.child.pid === undefined) throw new Error('lifecycle test process has no pid')
+      process.kill(-lifecycle.child.pid, 'SIGKILL')
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 100))
+      const contender = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      )
+      expect(contender.status).not.toBe(0)
+      expect(contender.stderr).toMatch(/busy|lock|正在|并发|占用/iu)
+    } finally {
+      const guardianPid = Number(await readFile(join(f.root, 'guardian.pid'), 'utf8').catch(() => '0'))
+      if (Number.isSafeInteger(guardianPid) && guardianPid > 1) {
+        try { process.kill(-guardianPid, 'SIGKILL') } catch {}
+      }
+      if (lifecycle.child.pid !== undefined && lifecycle.child.exitCode === null) {
+        try { process.kill(-lifecycle.child.pid, 'SIGKILL') } catch {}
+      }
+      await lifecycle.done
+    }
+  }, 15_000)
+
+  test('guardian also stops a dynamic same-home unit when the lifecycle parent dies', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { systemdDynamicProfile: 'late', systemdKillLifecycleDuringStartProfile: 'web' },
+    )
+
+    expect(result.status).not.toBe(0)
+    let state = await readLifecycleSystemdState(f.systemdState)
+    const deadline = Date.now() + 5_000
+    while ((state.units['dsh-profile-late.service']?.activeState !== 'inactive'
+      || state.units['dsh-profile-late.service']?.mainPid !== 0) && Date.now() < deadline) {
+      await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
+      state = await readLifecycleSystemdState(f.systemdState)
+    }
+    expect(state.controls.lifecycleParentKilled).toBe(true)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'inactive', mainPid: 0 })
+    expect(state.units['dsh-profile-late.service']).toMatchObject({ activeState: 'inactive', mainPid: 0 })
+  }, 15_000)
+
+  test('dynamic same-home containment persists a bound mask ledger and reuses it on retry', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { systemdDynamicProfile: 'late' },
+    )
+
+    expect(first.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const firstManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    const containment = firstManifest.containmentMasks.find((mask: { unit: string }) => (
+      mask.unit === 'dsh-profile-late.service'
+    ))
+    expect(containment).toMatchObject({ target: '/dev/null' })
+    const installed = await lstat(containment.path)
+    expect({ dev: String(installed.dev), ino: String(installed.ino), uid: installed.uid, mode: installed.mode })
+      .toEqual(containment.identity)
+
+    const second = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(second.status).not.toBe(0)
+    expect(second.stderr).toMatch(/inventory|universe|发生变化/iu)
+    expect(second.stderr).not.toMatch(/接管既有|身份不匹配|mask.*冲突/iu)
+    const secondManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(secondManifest.containmentMasks).toEqual(firstManifest.containmentMasks)
+    expect(await readlink(containment.path)).toBe('/dev/null')
+  }, 15_000)
+
+  test('production lifecycle source cannot enable fake service tools through environment variables', async () => {
+    const source = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
+
+    expect(source).not.toContain('DSH_ENHANCED_TEST_SERVICE_TOOLS')
+    expect(source).not.toContain('LIFECYCLE_SYSTEMD_STATE')
+    expect(source).toMatch(/entry\.uid !== 0/u)
+    expect(source).toMatch(/\['\/usr\/bin', '\/bin'\]\.includes\(dirname\(canonical\)\)/u)
+  })
+
+  test('production guardian is detached from the lifecycle process group and contains on terminal signals', async () => {
+    const source = await readFile(join(installDirectory, 'lifecycle-profile.mjs'), 'utf8')
+
+    expect(source).toMatch(/const guardian = spawn\(process\.execPath,[\s\S]*?detached: true/du)
+    expect(source).toContain("stdio: ['pipe', 'pipe', 'inherit', 3, 4, 5]")
+    expect(source).toContain(
+      "for (const signal of ['SIGHUP', 'SIGINT', 'SIGTERM']) process.on(signal, beginContainment)",
+    )
+  })
+
+  test('service-aware upgrade handles v1 residue before any transaction rename or deletion', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const stagedHome = join(transaction, 'staged-home')
+    await mkdir(stagedHome, { recursive: true })
+    await writeFile(join(stagedHome, 'legacy-v1-marker'), 'preserve')
+    await writeBoundLifecycleManifest({
+      dshHome: f.dshHome, originalHome: f.dshHome, stagedHome, state: 'failed',
+    })
+    await writeFile(join(transaction, 'legacy-v1-marker'), 'present-before-stop')
+
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+    const state = await readLifecycleSystemdState(f.systemdState)
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+
+    if (commands.some(command => command[1] === 'stop')) {
+      expect(state.stopLegacyMarkerExists).toBe(true)
+      expect(state.units['dsh-profile-web.service'].maskPresentWhenStopped).toBe(true)
+    } else {
+      expect(result.status).not.toBe(0)
+      expect(await readFile(join(transaction, 'legacy-v1-marker'), 'utf8')).toBe('present-before-stop')
+    }
+  }, 15_000)
+
+  test('unreadable proc views fail closed for a same-UID process that is not dsh-like', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const opaque = spawn('/usr/bin/python3', ['-c', [
+      'import ctypes, time',
+      'ctypes.CDLL(None).prctl(4, 0, 0, 0, 0)',
+      "print('ready', flush=True)",
+      'time.sleep(30)',
+    ].join(';')], { cwd: f.root, stdio: ['ignore', 'pipe', 'ignore'] })
+    await new Promise<void>((resolveReady, rejectReady) => {
+      opaque.once('error', rejectReady)
+      opaque.stdout.once('data', () => resolveReady())
+    })
+    try {
+      const result = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { systemdProcPids: [opaque.pid!] },
+      )
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/无法.*进程|cannot.*process|proc/iu)
+      expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    } finally {
+      opaque.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test.each([
+    ['cwd', 'import time; print("ready", flush=True); time.sleep(30)'],
+    ['fd', 'import os,time; handle=os.open(".", os.O_RDONLY|os.O_DIRECTORY); os.chdir(".."); print("ready", flush=True); time.sleep(30)'],
+  ] as const)('a same-UID unmanaged process with %s inside DSH_HOME blocks package work and restores services', async (_reference, source) => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ] } })
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+    const unmanaged = spawn('/usr/bin/python3', ['-c', source], {
+      cwd: f.dshHome, stdio: ['ignore', 'pipe', 'ignore'],
+    })
+    await new Promise<void>((resolveReady, rejectReady) => {
+      unmanaged.once('error', rejectReady)
+      unmanaged.stdout.once('data', () => resolveReady())
+    })
+    try {
+      const result = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { systemdProcPids: [unmanaged.pid!] },
+      )
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/inventory.*outside|unmanaged|进程.*引用|拒绝继续/iu)
+      expect(await readFile(f.operationLog, 'utf8')).toBe('')
+      expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+      await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+      const state = await readLifecycleSystemdState(f.systemdState)
+      expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 1 })
+      expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
+      expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', mainPid: 0, starts: 0 })
+    } finally {
+      unmanaged.kill('SIGKILL')
+    }
+  }, 15_000)
+
+  test.each(['cwd', 'fd'] as const)('a lifecycle process ancestor with %s inside DSH_HOME is still a strong reference', async reference => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { processAncestorReference: reference },
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/inventory.*outside|unmanaged|进程.*引用|拒绝继续/iu)
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+  }, 15_000)
+
+  test('a PID appearing before rename prevents the home swap', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+    ] } })
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdQuiescenceDriftProfile: 'worker' },
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/inactive|PID0|quiesc|静止|systemd/iu)
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+    await expect(stat(join(f.dshHome, 'profiles', 'web', 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+  }, 15_000)
+
+  test('an originally inactive target upgrades without being started and is unmasked afterward', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: false },
+      { profile: 'worker', active: true },
+    ] } })
+
+    const result = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({
+      activeState: 'inactive', mainPid: 0, starts: 0, unitFileState: 'enabled',
+    })
+    expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
+    const commands = await readLifecycleSystemdLog(f.systemdLog)
+    expect(commands.find(command => command[1] === 'start')).not.toContain('dsh-profile-web.service')
+    expect(commands.some(command => command[1] === 'enable' || command[1] === 'disable')).toBe(false)
+    await expect(readlink(join(
+      f.systemdHome, '.config', 'systemd', 'user', 'default.target.wants', 'dsh-profile-web.service',
+    ))).resolves.toBe(join(f.systemdHome, '.config', 'systemd', 'user', 'dsh-profile-web.service'))
+  }, 15_000)
+
+  test.each([
+    ['start failure', { systemdStartFailsProfile: 'web' }],
+    ['start success followed by an immediate failed state', { systemdReadinessFailsProfile: 'web' }],
+    ['fresh invocation without readiness', { systemdJournal: 'stale' as const }],
+    ['journal query failure', { systemdJournal: 'fail' as const }],
+    ['journal command disappearance', { systemdJournal: 'missing' as const }],
+    ['restart loop', { systemdRestartLoopProfile: 'web' }],
+  ])('service-aware upgrade preserves both homes and bound evidence after %s', async (_label, failure) => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ] } })
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, failure,
+    )
+
+    expect(result.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(manifest).toMatchObject({ version: 2, operation: 'upgrade', profile: 'web', servicePhase: 'service-failed' })
+    expect(manifest.services).toHaveLength(3)
+    expect(await lifecycleIdentity(join(transaction, 'original-home'))).toEqual(originalIdentity)
+    expect(await readFile(join(f.dshHome, 'profiles', 'web', 'upgraded'), 'utf8')).toBe('upgraded\n')
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(Object.values(state.units)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ profile: 'web', activeState: 'inactive', mainPid: 0 }),
+      expect.objectContaining({ profile: 'worker', activeState: 'inactive', mainPid: 0 }),
+      expect.objectContaining({ profile: 'dormant', activeState: 'inactive', mainPid: 0 }),
+    ]))
+  }, 15_000)
+
+  test('service-failed recovery reaccepts the swapped home without repeating package preparation', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ] } })
+
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdJournal: 'stale' },
+    )
+
+    expect(first.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    expect(JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8')))
+      .toMatchObject({ version: 2, state: 'service-failed', servicePhase: 'service-failed' })
+    expect((await readFile(f.operationLog, 'utf8')).match(/^dsh-add\t/gmu)).toHaveLength(1)
+
+    const second = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdJournal: 'ready' },
+    )
+
+    expect(second.status, second.stderr).toBe(0)
+    expect(second.stdout).toMatch(/重新验收|恢复|完成/iu)
+    expect((await readFile(f.operationLog, 'utf8')).match(/^dsh-add\t/gmu)).toHaveLength(1)
+    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 2 })
+    expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 2 })
+    expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', starts: 0 })
+  }, 15_000)
+
+  test('service-failed recovery that fails again preserves both homes and does not repeat package work', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ] } })
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdJournal: 'stale' },
+    )
+
+    expect(first.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const firstManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(firstManifest).toMatchObject({ version: 2, state: 'service-failed', servicePhase: 'service-failed' })
+    const stagedIdentity = await lifecycleIdentity(f.dshHome)
+    expect(await lifecycleIdentity(join(transaction, 'original-home'))).toEqual(originalIdentity)
+    expect((await readFile(f.operationLog, 'utf8')).match(/^dsh-add\t/gmu)).toHaveLength(1)
+
+    const second = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { systemdReadinessFailsProfile: 'web' },
+    )
+
+    expect(second.status).not.toBe(0)
+    expect(second.stderr).toMatch(/readiness|failed|验收|失败/iu)
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(stagedIdentity)
+    expect(await lifecycleIdentity(join(transaction, 'original-home'))).toEqual(originalIdentity)
+    const secondManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(secondManifest).toMatchObject({
+      version: 2, id: firstManifest.id, state: 'service-failed', servicePhase: 'service-failed',
+    })
+    expect((await readFile(f.operationLog, 'utf8')).match(/^dsh-add\t/gmu)).toHaveLength(1)
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(Object.values(state.units)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ profile: 'web', activeState: 'inactive', mainPid: 0, controlPid: 0 }),
+      expect.objectContaining({ profile: 'worker', activeState: 'inactive', mainPid: 0, controlPid: 0 }),
+      expect.objectContaining({ profile: 'dormant', activeState: 'inactive', mainPid: 0, controlPid: 0 }),
+    ]))
+  }, 15_000)
+
+  test('v2 original-renamed crash recovery restores the original home and active service set', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [
+      { profile: 'web', active: true },
+      { profile: 'worker', active: true },
+      { profile: 'dormant', active: false },
+    ] } })
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+
+    const crashed = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { killLifecycleAfterOriginalRename: true },
+    )
+
+    expect(crashed.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    await expect(stat(f.dshHome)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await lifecycleIdentity(join(transaction, 'original-home'))).toEqual(originalIdentity)
+    const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(crashManifest).toMatchObject({
+      version: 2, state: 'original-renamed', servicePhase: 'stopped', originalIdentity,
+    })
+    expect((await readFile(f.operationLog, 'utf8')).match(/^dsh-add\t/gmu)).toHaveLength(1)
+
+    const recovered = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(recovered.stderr).toMatch(/original-renamed|原 home.*active service set/iu)
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+    await expect(stat(join(f.dshHome, 'profiles', 'web', 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await readFile(f.operationLog, 'utf8')).match(/^dsh-add\t/gmu)).toHaveLength(1)
+    const preserved = await preservedLifecycleTransactions(f.dshHome)
+    expect(preserved).toHaveLength(1)
+    expect(JSON.parse(await readFile(join(preserved[0]!, 'manifest.json'), 'utf8')))
+      .toMatchObject({ version: 2, id: crashManifest.id, state: 'original-renamed', servicePhase: 'stopped' })
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 1 })
+    expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
+    expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', mainPid: 0, starts: 0 })
+  }, 15_000)
+
+  test.each(['local', 'npm'] as const)(
+    'public %s Lark upgrade recovers real original-renamed v2 residue before new work and requires retry',
+    async source => {
+      const f = await lifecycleFixture({ systemd: { units: [
+        { profile: 'web', active: true },
+        { profile: 'worker', active: true },
+        { profile: 'dormant', active: false },
+      ] } })
+      const originalIdentity = await lifecycleIdentity(f.dshHome)
+      const crashed = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+        { killLifecycleAfterOriginalRename: true },
+      )
+      expect(crashed.status).not.toBe(0)
+      const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+      const crashManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+      expect(crashManifest).toMatchObject({ version: 2, state: 'original-renamed', expectedScenario: 'lark' })
+      const operationsBeforeRecovery = await readFile(f.operationLog, 'utf8')
+      expect(operationsBeforeRecovery.match(/^dsh-add\t/gmu)).toHaveLength(1)
+
+      const script = source === 'local' ? localInstaller : npmInstaller
+      const recovered = runInstaller(script, [
+        '--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped', '--yes',
+        ...(source === 'npm' ? ['--plugin-version', '1.4.0'] : []),
+      ], f.dshHome, 'Linux', lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+      expect(recovered.status).not.toBe(0)
+      expect(recovered.stderr).toMatch(/恢复|recovery|重试/iu)
+      expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+      await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect(await readFile(f.operationLog, 'utf8')).toBe(operationsBeforeRecovery)
+      expect(operationsBeforeRecovery).not.toMatch(/^npm-view|^pnpm-store-add/mu)
+      await expect(stat(transaction)).rejects.toMatchObject({ code: 'ENOENT' })
+      const preserved = await preservedLifecycleTransactions(f.dshHome)
+      expect(preserved).toHaveLength(1)
+      expect(JSON.parse(await readFile(join(preserved[0]!, 'manifest.json'), 'utf8')))
+        .toMatchObject({ version: 2, id: crashManifest.id, state: 'original-renamed' })
+      const state = await readLifecycleSystemdState(f.systemdState)
+      expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 1 })
+      expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
+      expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', mainPid: 0, starts: 0 })
+    },
+    15_000,
+  )
+
+  test.each([
+    ['post-package', { configAfterUpgrade: `- id: dsh-enhanced-assistant-web-owner\n  name: '@dsh-enhanced/assistant-web-owner'` }],
+    ['post-activation', { configAfterActivation: `- id: dsh-enhanced-assistant-web-owner\n  name: '@dsh-enhanced/assistant-web-owner'` }],
+  ] as const)('service-aware upgrade rejects %s scenario drift before swap and restores the original active set',
+    async (phase, drift) => {
+      const f = await lifecycleFixture({ systemd: { units: [
+        { profile: 'web', active: true },
+        { profile: 'worker', active: true },
+        { profile: 'dormant', active: false },
+      ] } })
+      const originalIdentity = await lifecycleIdentity(f.dshHome)
+      const originalConfig = await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')
+      const originalManifest = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+      const result = runServiceLifecycle(
+        ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, drift,
+      )
+
+      expect(result.status).not.toBe(0)
+      expect(result.stderr).toMatch(/scenario|场景|lark|web/iu)
+      expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+      expect(await readFile(join(f.dshHome, '.lifecycle-dump-config'), 'utf8')).toBe(originalConfig)
+      expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(originalManifest)
+      expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+      await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+      expect((await readFile(f.operationLog, 'utf8')).match(/^dsh-add\t/gmu)).toHaveLength(1)
+      const state = await readLifecycleSystemdState(f.systemdState)
+      expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'active', starts: 1 })
+      expect(state.units['dsh-profile-worker.service']).toMatchObject({ activeState: 'active', starts: 1 })
+      expect(state.units['dsh-profile-dormant.service']).toMatchObject({ activeState: 'inactive', mainPid: 0, starts: 0 })
+      await expect(stat(`${f.dshHome}.dsh-enhanced-transaction`)).rejects.toMatchObject({ code: 'ENOENT' })
+      const preserved = await preservedLifecycleTransactions(f.dshHome)
+      expect(preserved).toHaveLength(1)
+      const stagedActivationMarker = join(preserved[0]!, 'staged-home', '.activation-ran')
+      if (phase === 'post-activation') expect(await readFile(stagedActivationMarker, 'utf8')).toBe('')
+      else await expect(stat(stagedActivationMarker)).rejects.toMatchObject({ code: 'ENOENT' })
+    },
+    15_000,
+  )
+
+  test('cleanup-started recovery without original-home freshly reaccepts and does not repeat package work', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdJournal: 'stale' },
+    )
+    expect(first.status).not.toBe(0)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const manifestPath = join(transaction, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8')) as Record<string, unknown>
+    await rm(join(transaction, 'original-home'), { recursive: true })
+    const cleanupStarted = { ...manifest, state: 'cleanup-started', servicePhase: 'service-accepted' }
+    const rebound = {
+      ...cleanupStarted,
+      updatedAt: '2026-09-09T12:00:00.000Z',
+      bindingDigest: createHash('sha256').update(JSON.stringify(serviceLifecycleBinding(cleanupStarted))).digest('hex'),
+    }
+    await writeFile(manifestPath, `${JSON.stringify(rebound, null, 2)}\n`, { mode: 0o600 })
+    const before = await readFile(f.operationLog, 'utf8')
+    setLifecycleSystemdControls(f.systemdState, { systemdJournal: 'ready' })
+
+    const recovered = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(recovered.stdout).toMatch(/重新验收|恢复|完成/iu)
+    expect(await readFile(f.operationLog, 'utf8')).toBe(before)
+    expect(await preservedLifecycleTransactions(f.dshHome), recovered.stderr).toEqual([])
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
+      .toMatchObject({ activeState: 'active', starts: 2 })
+  }, 15_000)
+
+  test('canonical cleanup failure preserves a bound transaction and the next run cleans it without repeating package work', async () => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true }] } })
+
+    const first = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin,
+      { canonicalCleanupFails: true },
+    )
+
+    expect(first.status).not.toBe(0)
+    expect(first.stderr).toMatch(/canonical.*cleanup|清理失败|residue/iu)
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const firstManifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(firstManifest).toMatchObject({
+      version: 2, state: 'cleanup-started', servicePhase: 'service-accepted',
+    })
+    expect(firstManifest.transactionIdentity).toMatchObject(await lifecycleIdentity(transaction))
+    expect(firstManifest.originalIdentity).toMatchObject(await lifecycleIdentity(join(transaction, 'original-home')))
+    const operationsBeforeRecovery = await readFile(f.operationLog, 'utf8')
+    expect(operationsBeforeRecovery.match(/^dsh-add\t/gmu)).toHaveLength(1)
+
+    const recovered = runServiceLifecycle(['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(recovered.status, recovered.stderr).toBe(0)
+    expect(recovered.stdout).toMatch(/重新验收|恢复|完成/iu)
+    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+    expect(await readFile(f.operationLog, 'utf8')).toBe(operationsBeforeRecovery)
+    expect((await readLifecycleSystemdState(f.systemdState)).units['dsh-profile-web.service'])
+      .toMatchObject({ activeState: 'active', starts: 2 })
+  }, 15_000)
+
+  test.each(['hash', 'identity'] as const)('service-aware upgrade rejects keyring drop-in %s drift before swap', async mutation => {
+    const f = await lifecycleFixture({ systemd: { units: [{ profile: 'web', active: true, dropIn: 'keyring' }] } })
+
+    const result = runServiceLifecycle(
+      ['web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { systemdDropInMutation: mutation },
+    )
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/drop-in|identity|hash|摘要|身份|变化/iu)
+    await expect(stat(join(f.profileDirectory, 'upgraded'))).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(f.operationLog, 'utf8')).toBe('')
+    const state = await readLifecycleSystemdState(f.systemdState)
+    expect(state.units['dsh-profile-web.service']).toMatchObject({ activeState: 'inactive', subState: 'dead' })
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    expect(await lifecycleIdentity(f.dshHome)).toBeDefined()
+    const manifest = JSON.parse(await readFile(join(transaction, 'manifest.json'), 'utf8'))
+    expect(manifest).toMatchObject({ version: 2, operation: 'upgrade', profile: 'web' })
+  }, 15_000)
 
   test('lifecycle transactions reject state paths outside the snapshotted DSH_HOME', async () => {
     const root = await temporaryDshHome()

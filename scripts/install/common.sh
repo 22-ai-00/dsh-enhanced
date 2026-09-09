@@ -64,7 +64,7 @@ Install a minimal, runnable dsh-enhanced personal-assistant scenario.
 Options:
   --profile <name>          DSH profile (default: web)
   --operation <name>        install, upgrade, or uninstall (default: install)
-  --confirm-dsh-home-stopped Required for upgrade/uninstall after stopping every process using this DSH_HOME
+  --confirm-dsh-home-stopped Required for lifecycle; Lark upgrade stops managed units, you stop other DSH_HOME users
   --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto)
   --workspace <absolute>    Web owner workspace (web/autonomy; default: current directory)
   --agent-preset <id>       Web owner Agent preset (web/autonomy; default: standard)
@@ -2033,6 +2033,77 @@ dsh_enhanced_validate_lifecycle_state_paths() {
   [[ -z "$temporary" ]] || rm -f -- "$temporary"
 }
 
+# Lifecycle scenario selection is an assertion about an already composed
+# profile, not authority to reinterpret that profile.  Classify the effective
+# tree before package resolution, registry access, store prefetch, or lifecycle
+# mutation so a caller cannot route an enabled resident profile through the
+# stopped-home web/autonomy path. The same structural helper is used by the
+# locked executor.
+dsh_enhanced_effective_lifecycle_scenario() {
+  local profile="$1"
+  local dsh_home="$2"
+  local lifecycle_directory="$3"
+  local dsh_executable=''
+  local composed_path=''
+  local effective_scenario=''
+  dsh_executable="$(command -v dsh 2>/dev/null)" || {
+    dsh_enhanced_fail 1 '找不到现有 dsh executable；无法验证 lifecycle scenario。'
+    return $?
+  }
+  composed_path="$(mktemp "${TMPDIR:-/tmp}/dsh-enhanced-lifecycle-scenario.XXXXXX")" || {
+    dsh_enhanced_fail 1 '无法创建 lifecycle scenario 的私有临时文件。'
+    return $?
+  }
+  if ! DSH_HOME="$dsh_home" "$dsh_executable" --profile "$profile" --dump-config > "$composed_path" 2>/dev/null; then
+    rm -f -- "$composed_path"
+    dsh_enhanced_fail 1 "现有 profile $profile 无法组合；尚未开始 lifecycle 操作。"
+    return $?
+  fi
+  if ! dsh_enhanced_validate_lifecycle_state_paths "$profile" "$dsh_home" "$composed_path"; then
+    rm -f -- "$composed_path"
+    return 1
+  fi
+  if ! effective_scenario="$(node "$lifecycle_directory/lifecycle-config.mjs" \
+    classify "$composed_path" "$dsh_executable")"; then
+    rm -f -- "$composed_path"
+    dsh_enhanced_fail 1 '无法安全判定实际 effective/composed profile 的 lifecycle scenario。'
+    return $?
+  fi
+  rm -f -- "$composed_path"
+  printf '%s' "$effective_scenario"
+}
+
+dsh_enhanced_canonical_lifecycle_home() {
+  node --input-type=module - "$1" <<'NODE'
+import { lstat, readlink, realpath } from 'node:fs/promises'
+import { dirname, isAbsolute, resolve } from 'node:path'
+
+let cursor = resolve(process.argv[2])
+const suffix = []
+const visited = new Set()
+for (;;) {
+  if (visited.has(cursor)) throw new Error('DSH_HOME symlink cycle')
+  visited.add(cursor)
+  try {
+    const entry = await lstat(cursor)
+    if (entry.isSymbolicLink()) {
+      const target = await readlink(cursor)
+      cursor = isAbsolute(target) ? resolve(target) : resolve(dirname(cursor), target)
+      continue
+    }
+    process.stdout.write(resolve(await realpath(cursor), ...suffix))
+    break
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+    const parent = dirname(cursor)
+    if (parent === cursor) throw error
+    suffix.unshift(cursor.slice(parent.length + (parent === '/' ? 0 : 1)))
+    cursor = parent
+  }
+}
+NODE
+}
+
 dsh_enhanced_recover_profile_lifecycle() {
   local profile="$1"
   local dsh_home="$2"
@@ -2059,22 +2130,36 @@ dsh_enhanced_run_lifecycle_executor() {
   local flock_executable=''
   local npm_executable=''
   local pnpm_executable=''
+  local systemctl_executable=''
+  local journalctl_executable=''
   if [[ ! -x /usr/bin/perl ]]; then
     dsh_enhanced_fail 1 '安全生命周期事务需要 /usr/bin/perl 验证继承的内核锁。'
     return $?
   fi
   local lock_path="${dsh_home}.dsh-enhanced-lifecycle.lock"
-  if [[ "$operation" == 'recover' ]]; then
-    dsh_executable='/nonexistent/dsh-not-required-for-recovery'
+  if [[ "$operation" == 'recover' || "$operation" == 'service-recover' ]]; then
+    dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_enhanced_fail 1 'lifecycle recovery 需要现有 dsh executable 复检绑定配置。'; return $?; }
     bwrap_executable='/nonexistent/bwrap-not-required-for-recovery'
   else
     dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_enhanced_fail 1 '找不到现有 dsh executable。'; return $?; }
     bwrap_executable="$(command -v bwrap 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 bubblewrap（bwrap）。'; return $?; }
   fi
-  if [[ "$operation" == 'npm-upgrade' ]]; then
+  if [[ "$operation" == 'service-upgrade' || "$operation" == 'npm-service-upgrade' || "$operation" == 'service-recover' ]]; then
+    systemctl_executable="$(command -v systemctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark service upgrade 需要 systemctl。'; return $?; }
+    journalctl_executable="$(command -v journalctl 2>/dev/null)" || { dsh_enhanced_fail 1 'Lark service upgrade 需要 journalctl 验证 fresh InvocationID readiness。'; return $?; }
+    set -- "$systemctl_executable" "$journalctl_executable" "$@"
+  fi
+  if [[ "$operation" == 'npm-upgrade' || "$operation" == 'npm-service-upgrade' ]]; then
     npm_executable="$(command -v npm 2>/dev/null)" || { dsh_enhanced_fail 1 'npm upgrade 生命周期事务需要已安装的 npm。'; return $?; }
     pnpm_executable="$(command -v pnpm 2>/dev/null)" || { dsh_enhanced_fail 1 'npm upgrade 生命周期事务需要已安装的 pnpm。'; return $?; }
-    set -- "$npm_executable" "$pnpm_executable" "$@"
+    if [[ "$operation" == 'npm-service-upgrade' ]]; then
+      local service_systemctl="$1"
+      local service_journalctl="$2"
+      shift 2
+      set -- "$service_systemctl" "$service_journalctl" "$npm_executable" "$pnpm_executable" "$@"
+    else
+      set -- "$npm_executable" "$pnpm_executable" "$@"
+    fi
   fi
   flock_executable="$(command -v flock 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 flock。'; return $?; }
   if [[ ! -f "$executor" ]]; then dsh_enhanced_fail 1 "缺少生命周期执行器：$executor"; return $?; fi
@@ -2092,7 +2177,8 @@ dsh_enhanced_profile_lifecycle() {
   local profile="$2"
   local dsh_home="$3"
   local dry_run="$4"
-  shift 4
+  local expected_scenario="$5"
+  shift 5
   if [[ "$dry_run" == '1' ]]; then
     printf '\nprofile 生命周期事务（%s）：\n' "$operation"
     printf '  - 持有 DSH_HOME 外部非阻塞锁，在无网络 bwrap 中复制、更新、组合并实际激活私有副本。\n'
@@ -2106,7 +2192,7 @@ dsh_enhanced_profile_lifecycle() {
     dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
     return 0
   fi
-  dsh_enhanced_run_lifecycle_executor "$operation" "$profile" "$dsh_home" "$@"
+  dsh_enhanced_run_lifecycle_executor "$operation" "$profile" "$dsh_home" "$expected_scenario" "$@"
 }
 
 dsh_enhanced_install() {
@@ -2405,12 +2491,36 @@ dsh_enhanced_install() {
         return $?
       fi
     done
+    dsh_home="$(dsh_enhanced_canonical_lifecycle_home "$dsh_home")" || {
+      dsh_enhanced_fail 1 '无法解析 lifecycle DSH_HOME 的 canonical 路径。'
+      return $?
+    }
     if [[ "$confirm_dsh_home_stopped" != '1' ]]; then
-      dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；复制 SQLite/WAL 前必须停止所有使用该 DSH_HOME 的进程。"
+      dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；Lark upgrade 会自行停止受管 systemd units，该确认表示其它外部/手工进程均已停止。"
       return $?
     fi
-    if [[ "$scenario_explicit" != '1' || ( "$scenario" != 'web' && "$scenario" != 'autonomy' ) ]]; then
-      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前需要显式 --scenario web 或 --scenario autonomy。'
+    if [[ "$scenario_explicit" != '1' ]]; then
+      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前需要显式 --scenario。'
+      return $?
+    fi
+    if [[ "$scenario" == 'supervised' ]]; then
+      dsh_enhanced_fail 2 "supervised $operation 尚缺少只读 generation/attestation 验证接口；本切片拒绝执行。"
+      return $?
+    fi
+    if [[ "$operation" == 'uninstall' && ( "$scenario" == 'lark' || "$scenario" == 'supervised' ) ]]; then
+      dsh_enhanced_fail 2 'Lark/supervised service-aware uninstall 尚未开放；拒绝停止或修改服务。'
+      return $?
+    fi
+    if [[ "$scenario" != 'web' && "$scenario" != 'autonomy' && "$scenario" != 'lark' ]]; then
+      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前只支持显式 --scenario web、autonomy 或 lark upgrade。'
+      return $?
+    fi
+    if [[ "$scenario" == 'lark' && "$operation" == 'upgrade' && "$manage_service" != '1' ]]; then
+      dsh_enhanced_fail 2 'Lark upgrade 必须由 systemd user service-aware 生命周期执行；不能使用 --no-service。'
+      return $?
+    fi
+    if [[ "$scenario" == 'lark' && "$operation" == 'upgrade' && "${DSH_ENHANCED_PLATFORM_OVERRIDE:-$(uname -s)}" != 'Linux' ]]; then
+      dsh_enhanced_fail 2 'Lark service-aware upgrade 当前仅支持 Linux systemd --user。'
       return $?
     fi
     if [[ "$dry_run" == '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
@@ -2438,10 +2548,37 @@ dsh_enhanced_install() {
       dsh_enhanced_fail 2 'profile 生命周期事务不会修改全局 DSH；请先单独完成 Host 升级，再执行本操作。'
       return $?
     fi
+    if [[ "$dry_run" != '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
+      if [[ "$scenario" == 'lark' ]]; then
+        dsh_enhanced_run_lifecycle_executor service-recover "$profile" "$dsh_home" "$scenario" || return $?
+      else
+        dsh_enhanced_run_lifecycle_executor recover "$profile" "$dsh_home" "$scenario" || return $?
+      fi
+      dsh_enhanced_fail 1 '已恢复或隔离上次生命周期事务；本次未开始新的 package、registry、store 或 service mutation。请检查恢复结果后重试。'
+      return $?
+    fi
+    local effective_lifecycle_scenario=''
+    if ! effective_lifecycle_scenario="$(dsh_enhanced_effective_lifecycle_scenario \
+      "$profile" "$dsh_home" "$lifecycle_directory")"; then
+      return 1
+    fi
+    if [[ "$effective_lifecycle_scenario" == 'supervised' ]]; then
+      dsh_enhanced_fail 1 '检测到实际 effective/composed profile 含 active supervised/recovery/automation markers；缺少只读 generation/attestation API，拒绝在 mutation 或 npm registry/store 前继续。'
+      return $?
+    fi
+    if [[ "$effective_lifecycle_scenario" == 'unsupported' && "$operation" != 'uninstall' ]]; then
+      dsh_enhanced_fail 1 '实际 effective/composed profile 无法安全归类为 web、autonomy 或已启用 Lark；拒绝 lifecycle 操作。'
+      return $?
+    fi
+    if [[ "$effective_lifecycle_scenario" != "$scenario"
+      && !( "$operation" == 'uninstall' && "$effective_lifecycle_scenario" == 'unsupported' ) ]]; then
+      dsh_enhanced_fail 2 "声明的 --scenario $scenario 与实际 effective/composed profile 场景 $effective_lifecycle_scenario 不一致；拒绝 lifecycle 操作。"
+      return $?
+    fi
     model_mode='skip'
     model_route_mode='skip'
     lark_mode='skip'
-    if [[ "$dry_run" != '1' && ( "$source_mode" != 'npm' || "$operation" != 'upgrade' ) ]]; then
+    if [[ "$dry_run" != '1' && "$scenario" != 'lark' && ( "$source_mode" != 'npm' || "$operation" != 'upgrade' ) ]]; then
       dsh_enhanced_recover_profile_lifecycle "$profile" "$dsh_home" "$dry_run" || return $?
       if [[ ! -f "$dsh_home/profiles/$profile/package.json" ]]; then
         dsh_enhanced_fail 1 "--operation $operation 需要已存在的 profile：$dsh_home/profiles/$profile"
@@ -2451,7 +2588,11 @@ dsh_enhanced_install() {
     if [[ "$source_mode" == 'npm' && "$operation" == 'upgrade' && "$dry_run" != '1' ]]; then
       dsh_enhanced_require_node || return $?
       dsh_enhanced_require_existing_runtime "$ack_unverified_host" || return $?
-      dsh_enhanced_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$plugin_version"
+      if [[ "$scenario" == 'lark' ]]; then
+        dsh_enhanced_run_lifecycle_executor npm-service-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version"
+      else
+        dsh_enhanced_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$scenario" "$plugin_version"
+      fi
       return $?
     fi
   fi
@@ -2585,7 +2726,7 @@ dsh_enhanced_install() {
     dsh_enhanced_ensure_pnpm "$dry_run" || return $?
   fi
   if [[ "$operation" == 'uninstall' ]]; then
-    dsh_enhanced_profile_lifecycle uninstall "$profile" "$dsh_home" "$dry_run"
+    dsh_enhanced_profile_lifecycle uninstall "$profile" "$dsh_home" "$dry_run" "$effective_lifecycle_scenario"
     return $?
   fi
 
@@ -2756,7 +2897,20 @@ NODE
   done
 
   if [[ "$operation" == 'upgrade' ]]; then
-    dsh_enhanced_profile_lifecycle upgrade "$profile" "$dsh_home" "$dry_run" "${targets[@]}"
+    if [[ "$scenario" == 'lark' ]]; then
+      if [[ "$dry_run" == '1' ]]; then
+        printf '\nLark service-aware upgrade (Linux systemd --user):\n'
+        printf '  - Inventory the installer-managed units for the canonical DSH_HOME, runtime-mask them, stop them, and verify PID quiescence.\n'
+        printf '  - Update and activate the offline bwrap copy, rechecking the mask and quiescence before each rename.\n'
+        printf '  - Restart only the previously active units; require fresh InvocationID journal readiness and stability before backup cleanup.\n'
+        printf '  - On readiness failure, keep services stopped and preserve both homes plus the bound manifest without automatic rollback.\n'
+        dsh_enhanced_print_command dsh plugin --profile "$profile" add "${targets[@]}"
+      else
+        dsh_enhanced_run_lifecycle_executor service-upgrade "$profile" "$dsh_home" "$scenario" "${targets[@]}"
+      fi
+    else
+      dsh_enhanced_profile_lifecycle upgrade "$profile" "$dsh_home" "$dry_run" "$scenario" "${targets[@]}"
+    fi
     return $?
   fi
 
