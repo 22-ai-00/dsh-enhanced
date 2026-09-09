@@ -245,3 +245,20 @@ describe('SkillStore', () => {
     store.close()
   })
 })
+
+
+it('preserves declared file observations through persistence and rollback without rewriting legacy versions', async () => {
+  const path = await database(), old = definition(), source = { ...old.source, steps: [{ id: 'write', toolName: 'write', arguments: { file_path: 'artifact.txt', content: 'new' } }] }
+  const next = createDefinition(source, { name: old.name, description: 'Write with observation.' }, ['write'])
+  let store = new SkillStore(path)
+  const legacy = store.save(scope, old), saved = store.save(scope, next, 1)
+  expect(saved.fileObservations).toEqual(next.fileObservations)
+  store.close(); store = new SkillStore(path)
+  try {
+    expect(store.get(scope, old.name, 1)).toEqual(legacy)
+    expect(store.get(scope, old.name, 2)).toEqual(saved)
+    expect(store.rollback(scope, old.name, 2, 1).fileObservations).toBeUndefined()
+    expect(store.rollback(scope, old.name, 3, 2).fileObservations).toEqual(next.fileObservations)
+    expect(store.get(scope, old.name, 1)).toEqual(legacy)
+  } finally { store.close() }
+})

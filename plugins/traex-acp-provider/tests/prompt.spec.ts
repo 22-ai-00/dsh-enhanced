@@ -124,9 +124,12 @@ describe('DSH request serialization', () => {
     expect(prompt).toContain('do not invoke TraeX-native tools')
     expect(prompt).toContain('The first output character must be {')
     expect(prompt).toContain('request the required tool now')
+    expect(prompt).toContain('never a JSON-encoded string')
     expect(prompt).toContain('"name":"read"')
     expect(prompt).toContain('"description":"Read a workspace file."')
     expect(prompt).toContain('"required":["path"]')
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { constraints: { tools: { responseFormat: { calls: Array<{ arguments: unknown }> } } } }
+    expect(payload.constraints.tools.responseFormat.calls[0]!.arguments).toEqual({ '<parameter name>': '<value matching that parameter schema>' })
   })
 
   it('recovers a valid tool envelope accidentally wrapped in a progress preamble', () => {
@@ -137,6 +140,26 @@ describe('DSH request serialization', () => {
     expect(parseDelegatedToolCalls(response, tools)).toEqual([
       { name: 'read', arguments: '{"path":"README.md"}' },
     ])
+  })
+
+  it('accepts one JSON-encoded object for a delegated tool call', () => {
+    const tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const response = '{"protocol":"dsh-tool-calls/v1","calls":[{"name":"read","arguments":"{\\"path\\":\\"README.md\\"}"}]}'
+    expect(parseDelegatedToolCalls(response, tools)).toEqual([
+      { name: 'read', arguments: '{"path":"README.md"}' },
+    ])
+  })
+
+  it.each([
+    ['null', null],
+    ['array', []],
+    ['malformed string', '{not-json}'],
+    ['double-encoded object', '"{}"'],
+    ['decoded scalar', '42'],
+  ])('rejects a delegated tool call with %s arguments', (_name, argumentsValue) => {
+    const tools = [{ name: 'read', description: 'Read a file.', parameters: { type: 'object' } }]
+    const response = JSON.stringify({ protocol: 'dsh-tool-calls/v1', calls: [{ name: 'read', arguments: argumentsValue }] })
+    expect(() => parseDelegatedToolCalls(response, tools)).toThrow(/invalid or unavailable DSH tool/u)
   })
 
   it('does not reinterpret ordinary prose containing unrelated JSON as a tool request', () => {

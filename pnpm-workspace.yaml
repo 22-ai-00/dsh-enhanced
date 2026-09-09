@@ -46,6 +46,7 @@ catalog:
   '@deepseek-ai/dsh-session-persistence-jsonl': 0.1.2-rc.1
   '@deepseek-ai/dsh-fs': 0.1.2-rc.1
   '@deepseek-ai/dsh-fs-local': 0.1.2-rc.1
+  '@deepseek-ai/dsh-fs-observation-policy': 0.1.2-rc.1
   '@deepseek-ai/dsh-tool-fs': 0.1.2-rc.1
   '@deepseek-ai/dsh-session-projection': 0.1.2-rc.1
   '@deepseek-ai/dsh-session-title': 0.1.2-rc.1
@@ -120,6 +121,7 @@ minimumReleaseAgeExclude:
   - '@deepseek-ai/dsh-session-persistence-jsonl@0.1.2-rc.1'
   - '@deepseek-ai/dsh-fs@0.1.2-rc.1'
   - '@deepseek-ai/dsh-fs-local@0.1.2-rc.1'
+  - '@deepseek-ai/dsh-fs-observation-policy@0.1.2-rc.1'
   - '@deepseek-ai/dsh-tool-fs@0.1.2-rc.1'
   - '@deepseek-ai/dsh-session-projection@0.1.2-rc.1'
   - '@deepseek-ai/dsh-session-title@0.1.2-rc.1'

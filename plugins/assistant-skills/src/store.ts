@@ -503,7 +503,9 @@ export class SkillStore {
   #newDefinition(definition: SkillDefinition, savedVersion: number, parentVersion: number | null, restoredFromVersion?: number): StoredSkillDefinition {
     const now = Date.now()
     const clean: SkillDefinition = { protocol: definition.protocol, name: definition.name, description: definition.description, source: definition.source, inputs: definition.inputs, steps: definition.steps,
-      preconditions: definition.preconditions, compensation: definition.compensation }
+      preconditions: definition.preconditions, compensation: definition.compensation,
+      ...(definition.fileObservations === undefined ? {} : { fileObservations: definition.fileObservations }),
+      ...(definition.runExpansions === undefined ? {} : { runExpansions: definition.runExpansions }) }
     return { ...clone(clean), version: savedVersion, parentVersion, retired: false, createdAt: now, updatedAt: now, ...(restoredFromVersion === undefined ? {} : { restoredFromVersion }) }
   }
   #insertDefinition(key: string, saved: StoredSkillDefinition): void {

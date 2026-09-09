@@ -21,7 +21,7 @@ dockerTests('synthetic native skill comparison', () => {
     const workspace = await root(), stateRoot = await root(); await chmod(stateRoot, 0o700)
     const comparator = new SkillComparator(profile(workspace, stateRoot))
     try { const result = await comparator.compare('synthetic-run', skill(workspace, '#!/bin/sh\nread x\nprintf wrong'), skill(workspace, '#!/bin/sh\ncat'), new AbortController().signal, () => {})
-      expect(result.cells).toHaveLength(12); expect(result.cells.every(cell => cell.toolCalls === 1 && cell.quiescent)).toBe(true)
+      expect(result.cells).toHaveLength(12); expect(result.cells.every(cell => cell.toolCalls === 2 && cell.quiescent)).toBe(true)
       expect(result.quality).toMatchObject({ candidateChecksPassed: true, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'unproven' }); expect(result.promotionAuthorized).toBe(false)
     } finally { await comparator.close() }
   }, 120000)
@@ -35,11 +35,11 @@ dockerTests('synthetic native skill comparison', () => {
 
   test('compares traces with bounded provenance observations without treating them as native execution', async () => {
     const workspace = await root(), stateRoot = await root(); await chmod(stateRoot, 0o700)
-    const comparator = new SkillComparator({ ...profile(workspace, stateRoot), maxToolCalls: 4 })
+    const comparator = new SkillComparator({ ...profile(workspace, stateRoot), maxToolCalls: 5 })
     try {
       const result = await comparator.compare('observations', skill(workspace, '#!/bin/sh\nread x\nprintf wrong', true), skill(workspace, '#!/bin/sh\ncat', true), new AbortController().signal, () => {})
       expect(result.cells).toHaveLength(12)
-      expect(result.cells.every(cell => cell.toolCalls === 4 && cell.executedToolCalls === 2 && cell.omittedObservations === 2)).toBe(true)
+      expect(result.cells.every(cell => cell.toolCalls === 5 && cell.executedToolCalls === 3 && cell.omittedObservations === 2)).toBe(true)
     } finally { await comparator.close() }
   }, 120000)
 

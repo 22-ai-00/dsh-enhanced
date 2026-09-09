@@ -20,13 +20,13 @@ const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 const cli = fileURLToPath(new URL('../lib/holdout-cli.js', import.meta.url))
 const dataset = { id: 'operator-echo-cases', version: '1', cases: ['replay', 'evaluation', 'regression'].map((kind, index) => ({ id: `case-${index}`, kind, stdin: `${kind}\n`, expectedStdout: `${kind}\n`, expectedExitCode: 0 })) }
 afterEach(async () => { for (const close of closes.splice(0)) await close(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
-async function setup(container = false, prospective = false, generator: 'order-summary/v1' | 'order-summary/v2' = 'order-summary/v1') {
+async function setup(container = false, prospective = false, generator: 'order-summary/v1' | 'order-summary/v2' = 'order-summary/v1', maxToolCalls = 4) {
   const root = await mkdtemp(join(tmpdir(), 'holdout-cli-')); roots.push(root)
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const prefix = container ? '/authority' : root
   await writeFile(join(root, 'key.pem'), privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
   if (!prospective) await writeFile(join(root, 'dataset.json'), JSON.stringify(dataset), { mode: 0o600 })
-  await writeFile(join(root, 'config.json'), JSON.stringify({ ...(prospective ? { prospective: { generator } } : { datasetPath: join(prefix, 'dataset.json') }), privateKeyPath: join(prefix, 'key.pem'), statePath: join(prefix, 'state.sqlite'), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } }), { mode: 0o600 })
+  await writeFile(join(root, 'config.json'), JSON.stringify({ ...(prospective ? { prospective: { generator } } : { datasetPath: join(prefix, 'dataset.json') }), privateKeyPath: join(prefix, 'key.pem'), statePath: join(prefix, 'state.sqlite'), limits: { maxToolCalls, maxOutputBytes: 16384 } }), { mode: 0o600 })
   return { root, publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() }
 }
 function connect(command: string, args: string[]) {
@@ -199,7 +199,7 @@ test.each(['next', 'record'] as const)('recovers a durable %s whose acknowledgem
 const image = process.env.DSH_ISOLATION_TEST_IMAGE ?? ''
 const authorityImage = process.env.DSH_HOLDOUT_TEST_IMAGE ?? ''
 test.skipIf(![image, authorityImage].every(value => /^sha256:[a-f0-9]{64}$/u.test(value)))('separate authority and candidate containers judge real outputs without mounting answers or keys into the candidate', async () => {
-  const config = await setup(true), docker = process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', name = `dsh-holdout-test-${randomUUID()}`
+  const config = await setup(true, false, 'order-summary/v1', 5), docker = process.env.DSH_ISOLATION_TEST_DOCKER ?? '/usr/bin/docker', name = `dsh-holdout-test-${randomUUID()}`
   const client = await openHoldoutProcess({ executable: docker, publicKey: config.publicKey, datasetDigest: acceptanceDigest(dataset), args: ['run', '--rm', '-i', '--name', name, '--network', 'none', '--read-only', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges', '--user', `${process.getuid!()}:${process.getgid!()}`, '--pids-limit', '32', '--memory', '128m', '--cpus', '1', '--mount', `type=bind,source=${resolve(cli, '..')},target=/runtime,readonly`, '--mount', `type=bind,source=${config.root},target=/authority`, '--entrypoint', '/usr/local/bin/node', authorityImage, '/runtime/holdout-cli.js', '--config', '/authority/config.json'] }, new AbortController().signal)
   const stateRoot = await mkdtemp(join(tmpdir(), 'holdout-candidates-')); roots.push(stateRoot)
   const scope = { principalId: 'operator', principalRecordId: 'owner', principalVersion: 1, workspace: '/author-workspace', preset: 'primary' }
@@ -213,7 +213,7 @@ test.skipIf(![image, authorityImage].every(value => /^sha256:[a-f0-9]{64}$/u.tes
   const operations: string[] = []
   try {
     const result = await qualifyHoldout({ baseline: skill('printf wrong'), candidate: skill('[ ! -e /authority/dataset.json ] && [ ! -e /authority/key.pem ] && [ ! -S /var/run/docker.sock ] && cat'), scope,
-      execution: { image, dockerPath: docker, stateRoot, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'artifact.sh', expiresAt: Date.now() + 180000, repeats: 2, maxToolCalls: 4, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 20000, verificationDurationMs: 10000 },
+      execution: { image, dockerPath: docker, stateRoot, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'artifact.sh', expiresAt: Date.now() + 180000, repeats: 2, maxToolCalls: 5, maxBytes: 65536, maxOutputBytes: 16384, cellDurationMs: 20000, verificationDurationMs: 10000 },
       expectedDatasetDigest: acceptanceDigest(dataset), pinnedPublicKey: config.publicKey, signal: new AbortController().signal, authorize() {}, transport: { async request(operation, value, signal) { operations.push(operation); return client.transport.request(operation, value, signal) } } })
     expect(result.receipt.complete).toBe(true)
     expect(verifyHoldoutSignature(result.receipt as unknown as Record<string, unknown>, config.publicKey)).toBe(true)

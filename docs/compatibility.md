@@ -119,3 +119,6 @@ GitHub 仓库来源新增 `github-repository` kind，沿用现有来源/envelope
 
 
 Verifier 的 `repository-readback` 使用可选 Actions Host peer，沿用现有 v3 `target-readback` 协议；缺少当前 `readRepositoryGoalOutcome` / `repositoryReadbackGeneration` 时保持 unknown。Actions 普通依赖共享任务契约校验器，Verifier 不静态导入 Actions 运行时，避免增加初始化环。公开 Actions 方法保持实例绑定，升级须重跑真实 Verifier→Cordis→Actions 调用，而不只测试直接对象方法。Skills 有限 watch 使用 Goals 当前 `inspectWorkflowRunContext` 的 `nativeGoalId` 和 owner-scoped execution snapshot；旧调用记录缺少完整 native/run 绑定时不参与回滚。新增 watch 表保留历史版本/运行，不回填旧记录为可信观察。
+
+
+Skills 的显式文件观察契约使用现有 `dsh-tools` 嵌套调用与 `dsh-tool-fs@0.1.2-rc.1` 的结构化 `FS_NOT_FOUND`。确定性运行时测试新增同版本 `dsh-fs-observation-policy` 开发依赖，实际检查读取后的版本保护与外部修改拒绝；不随 Skills 安装或自动启用该 Host policy。新定义可携带 `assistant-skills/file-observations/v1` 声明，旧定义不改写，已有候选/部署摘要不迁移。升级需同时检查额外读取的权限、调用/字节预算、审计、同路径参数绑定与失败不重放。有效 `todo_write` 为源会话规划记录，不能重放到后续目标。

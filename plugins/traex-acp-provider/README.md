@@ -125,7 +125,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 - 只接受 ACP protocol v1 和 `traex-acp` agent identity；版本或 identity 不符时 fail closed。
 - SDK 前的 wire guard 会追踪 JSON-RPC request id；非法 envelope、未知/重复 response id、未声明的 filesystem/terminal request 和未知 notification 都会终止该轮，不交给 SDK 宽松处理。
 - 只消费当前 session 的文本 `agent_message_chunk`；普通文本直接成为最终回复，严格匹配 `dsh-tool-calls/v1` 的信封会转换为 DSH tool call。thought、plan 和 TraeX 自己的 tool update 不会伪装成 DSH 输出。
-- 工具信封只允许调用本次 `GenerateOptions.tools` 中存在的精确名称，参数必须是 JSON 对象；未知工具、空调用或畸形信封以 `ACP_PROTOCOL_ERROR` fail closed。截断终态不会执行工具信封。若模型误在合法信封前附加一小段进度说明，插件会只提取并隐藏该信封，避免原始 JSON 泄漏到对话界面；不含协议标记的普通 JSON 仍按文本处理。
+- 工具信封只允许调用本次 `GenerateOptions.tools` 中存在的精确名称，参数必须是 JSON 对象。兼容模型把参数编码成 JSON 字符串的情况，但只解码一次，结果仍须是对象；数组、null、畸形文本和再次编码的字符串均拒绝。未知工具、空调用或畸形信封以 `ACP_PROTOCOL_ERROR` fail closed。参数继续交给原生工具校验和权限检查。截断终态不会执行工具信封。若模型误在合法信封前附加一小段进度说明，插件会只提取并隐藏该信封，避免原始 JSON 泄漏到对话界面；不含协议标记的普通 JSON 仍按文本处理。
 - `end_turn` 是正常完成终态；`max_tokens`、`max_turn_requests` 都映射为 DSH `max-tokens` 截断终态，供上层决定是否创建新的补全 turn。`refusal`、`cancelled`、断连、畸形/超限 NDJSON、无文本或缺少终态都会失败。
 - TraeX 可能仍在 stderr 记录 `unsupported call` 一类内部工具路由告警；这是其内部工具未向本兼容层开放，不等同于 DSH 工具失败。插件会要求模型只返回 `dsh-tool-calls/v1` 信封；若调用仍失败，生命周期日志会同时给出 phase、terminal、exitCode 和 signal，便于区分终态缺失、协议校验与进程退出。
 - 已保存的 effort 可能在切换模型、账号权益变化或目录更新后失效。此时插件在 `session/prompt` 前丢弃该陈旧值，使用本次 ACP session 返回的当前默认档位继续执行；不会重放 prompt 或重复计费，生命周期日志会标记 `reasoningFallback=true`。下次打开模型选择器会显示新目录。

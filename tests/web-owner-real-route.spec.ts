@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'vitest'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { parse } from 'yaml'
 import { prepareRealRoute } from '../scripts/e2e/web-owner-real-route.mjs'
 
@@ -61,5 +61,19 @@ describe('web owner real route preparation', () => {
     expect(prepared).toMatchObject({ provider: 'codex-subscription', model: 'gpt-5.6-terra', bundles: ['coding-subscription-provider'], proof: { provider: 'codex-subscription', model: 'gpt-5.6-terra', api: 'direct-responses' } })
     expect(calls).toContainEqual([patch, 'dsh-enhanced-coding-subscription-provider', '@dsh-enhanced/coding-subscription-provider', expect.objectContaining({ codex: { enabled: true, transport: 'direct-responses', directModel: 'gpt-5.6-terra' } })])
     expect(calls).toContainEqual({ id: 'agent-default-model', config: { provider: 'codex-subscription', model: 'default' } })
+  })
+
+  test.each([
+    ['default model', undefined, 'default'],
+    ['requested model', 'gpt-5.6-terra', 'gpt-5.6-terra'],
+  ])('prepares TraeX ACP with an isolated workspace and %s', async (_name, requested, model) => {
+    const { home, workspace } = await fixture()
+    const prepared = await prepareRealRoute({ env: { DSH_WEB_REAL_PROVIDER: 'traex-agent', ...(requested === undefined ? {} : { DSH_WEB_REAL_MODEL: requested }) }, home, workspace })
+    const calls: unknown[] = []
+    const patch: any = { contents: { add: (node: unknown) => calls.push(node) }, createNode: (node: unknown) => node }
+    prepared.configurePatch(patch, (...args: unknown[]) => calls.push(args))
+    expect(prepared).toMatchObject({ provider: 'traex-agent', model, bundles: ['traex-acp-provider'], proof: { provider: 'traex-agent', model, api: 'acp', command: 'traex', cwd: resolve(workspace) } })
+    expect(calls).toContainEqual([patch, 'dsh-enhanced-traex-acp-provider', '@dsh-enhanced/traex-acp-provider', { enabled: true, cwd: resolve(workspace), models: [model] }])
+    expect(calls).toContainEqual({ id: 'agent-default-model', config: { provider: 'traex-agent', model } })
   })
 })
