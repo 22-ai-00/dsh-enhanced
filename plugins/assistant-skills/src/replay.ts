@@ -7,7 +7,7 @@ import * as FileTools from '@deepseek-ai/dsh-tool-fs'
 import { lstat, mkdir, mkdtemp, realpath, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
-import { instantiate, type SkillDefinition } from './definition.js'
+import { fileObservationSteps, instantiate, type SkillDefinition, type SkillStep } from './definition.js'
 
 export interface ReplayInput { definition: SkillDefinition; inputs: Readonly<Record<string, unknown>>; files: readonly { path: string; content: string }[]; artifactPath: string; stateRoot: string; maxToolCalls: number; maxBytes: number; signal: AbortSignal; authorize: () => void }
 export type ReplayStep =
@@ -68,12 +68,26 @@ function checkedStep(step: { toolName: string; arguments: unknown }, workspace: 
   if (step.toolName === 'read' && (args.offset !== undefined && (typeof args.offset !== 'number' || !Number.isSafeInteger(args.offset) || args.offset < 1) || args.limit !== undefined && (typeof args.limit !== 'number' || !Number.isSafeInteger(args.limit) || args.limit < 1))) fail('invalid tool arguments')
   return { ...args, file_path: pathIn(args.file_path, workspace, root) }
 }
+type ReplayDispatchStep = SkillStep & { observationAllowsAbsent?: boolean }
+function dispatchSteps(definition: SkillDefinition): readonly ReplayDispatchStep[] {
+  const observations = new Map(fileObservationSteps(definition).map(value => [value.beforeStepId, value]))
+  return definition.steps.flatMap(step => {
+    const observation = observations.get(step.id)
+    return observation ? [
+      { id: observation.id, toolName: 'read', arguments: { file_path: observation.filePath, limit: 1 }, dependsOn: [], observationAllowsAbsent: observation.allowAbsent },
+      step,
+    ] : [step]
+  })
+}
+
 /** Validate the fixed captured trace without granting its observations executable authority. */
 export function validateReplayTrace(definition: SkillDefinition, maxToolCalls: number, maxBytes: number): readonly ReplayStep[] {
   if (!Number.isSafeInteger(maxToolCalls) || maxToolCalls < 0 || !Number.isSafeInteger(maxBytes) || maxBytes < 0 || !definition || !Array.isArray(definition.steps)
     || definition.steps.length > 32 || definition.steps.length > maxToolCalls || typeof definition.source?.scope?.workspace !== 'string' || !isAbsolute(definition.source.scope.workspace)) fail('invalid trace')
+  const expanded = dispatchSteps(definition)
+  if (expanded.length > 32 || expanded.length > maxToolCalls) fail('tool-call limit')
   const ids = new Set<string>(); let parameterBytes = 0
-  return definition.steps.map(step => {
+  return expanded.map(step => {
     if (!record(step) || !stepId(step.id) || !text(step.toolName) || !record(step.arguments) || ids.has(step.id)) fail('invalid trace')
     ids.add(step.id); parameterBytes += bytes(JSON.stringify(step.arguments))
     if (parameterBytes > maxBytes) fail('byte limit')
@@ -103,8 +117,9 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayResult> {
   let outcome: ReplayResult | undefined, failure: unknown, cleanup: unknown; let failed = false
   try {
     const trace = validateReplayTrace(definition, input.maxToolCalls, input.maxBytes)
-    const steps = definition.steps.map((step, index) => trace[index]!.outcome === 'executed' ? { ...step, arguments: checkedStep(step, workspace, root), trace: trace[index]! } : { ...step, trace: trace[index]! })
-    const parameterBytes = definition.steps.reduce((sum, step) => sum + bytes(JSON.stringify(step.arguments)), 0)
+    const expanded = dispatchSteps(definition)
+    const steps = expanded.map((step, index) => trace[index]!.outcome === 'executed' ? { ...step, arguments: checkedStep(step, workspace, root), trace: trace[index]! } : { ...step, trace: trace[index]! })
+    const parameterBytes = expanded.reduce((sum, step) => sum + bytes(JSON.stringify(step.arguments)), 0)
     const files = input.files.map(file => { if (!file || typeof file.content !== 'string') fail('invalid file'); return { path: pathIn(file.path, workspace, root), content: file.content } })
     if (parameterBytes + files.reduce((sum, file) => sum + bytes(file.content), 0) > input.maxBytes) fail('byte limit')
     for (const file of files) { input.signal.throwIfAborted(); input.authorize(); await mkdir(resolve(file.path, '..'), { recursive: true }); await writeFile(file.path, file.content, { flag: 'wx' }) }
@@ -115,7 +130,9 @@ export async function replaySkill(input: ReplayInput): Promise<ReplayResult> {
       input.signal.throwIfAborted(); input.authorize()
       if (step.trace.outcome === 'omitted-observation') { done.push(step.trace); continue }
       const result = await ctx.tools.execute({ callId: ToolCallId(`skill-replay-${done.length + 1}`), name: step.toolName as 'read' | 'write' | 'edit', arguments: step.arguments, signal: input.signal })
-      input.signal.throwIfAborted(); input.authorize(); if (result.isError) throw new Error(`assistant-skills: replay ${step.toolName} failed`)
+      input.signal.throwIfAborted(); input.authorize()
+      const observedAbsent = step.observationAllowsAbsent === true && result.isError && result.error.info?.code === 'FS_NOT_FOUND'
+      if (result.isError && !observedAbsent) throw new Error(`assistant-skills: replay ${step.toolName} failed`)
       if (parameterBytes + await total(root) > input.maxBytes) fail('byte limit')
       done.push({ id: step.id, toolName: step.toolName as 'read' | 'write' | 'edit', outcome: 'executed', resultDigest: acceptanceDigest(result.content) })
     }

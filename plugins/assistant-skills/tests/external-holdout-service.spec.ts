@@ -1,3 +1,6 @@
+import LocalFileSystem from '@deepseek-ai/dsh-fs-local'
+import * as FileTools from '@deepseek-ai/dsh-tool-fs'
+import * as FsPolicy from '@deepseek-ai/dsh-fs-observation-policy'
 import { Context } from '@deepseek-ai/cordis'
 import { Inbox, type Agent } from '@deepseek-ai/dsh-agent'
 import { ToolCallId } from '@deepseek-ai/dsh-llm/brand'
@@ -5,7 +8,7 @@ import { Session, SessionId, SESSION_FORMAT_VERSION } from '@deepseek-ai/dsh-ses
 import { createScope } from '@deepseek-ai/dsh-scope'
 import SkillRegistry from '@deepseek-ai/dsh-skill'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
-import ToolRuntime, { defineTool } from '@deepseek-ai/dsh-tools'
+import ToolRuntime from '@deepseek-ai/dsh-tools'
 import { generateKeyPairSync, createHash } from 'node:crypto'
 import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -40,7 +43,7 @@ test('skill_qualify uses one external process attempt, persists unknown, and doe
   const source = { protocol: 'assistant-goals/verified-workflow-source/v1' as const, scope, goal: { id: 'goal', definition: { version: 1, digest: digest('goal'), objective: 'write' }, sessionId: String(owner.session.id), nativeGoalId: 'native' }, runId: 'run', turn: 1, acceptance: { contractId: 'contract', contractDigest: digest('contract'), receiptDigest: digest('receipt'), verifiedAt: Date.now(), validUntil: Date.now() + 60000 }, steps: [{ id: 'write', toolName: 'write', arguments: { file_path: 'result.sh', content: 'printf bad' } }], failedObservations: [] }
   ctx.provide('assistantGoals' as never, { inspectVerifiedWorkflowSource: () => source } as never)
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
-  ctx.tools.register(defineTool({ name: 'write', description: 'fixture', parameters: { file_path: { type: 'string', required: true }, content: { type: 'string', required: true } }, output: { schema: { type: 'string' }, render: () => [] }, execute: async () => 'ok' }))
+  await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(FsPolicy); await ctx.plugin(FileTools)
   const keys = generateKeyPairSync('ed25519')
   const execution = { image: `sha256:${'a'.repeat(64)}`, dockerPath: '/usr/bin/docker', command: '/bin/sh /workspace/artifact', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 1000, verificationDurationMs: 1 }
   const plugin = await ctx.plugin(AssistantSkillsService, { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], externalHoldouts: [{ id: 'external', version: 1, scope, execution: { ...execution, stateRoot }, authority: { executable: process.execPath, args: [script, marker], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), datasetDigest: digest('dataset') }, maxComparisons: 1 }, { id: 'cancelled', version: 1, scope, execution: { ...execution, stateRoot: cancelledStateRoot }, authority: { executable: process.execPath, args: [script, marker, 'hold'], publicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), datasetDigest: digest('dataset') }, maxComparisons: 1 }] })
@@ -99,8 +102,8 @@ test.skipIf(!/^sha256:[a-f0-9]{64}$/u.test(candidateImage))('real prospective CL
   }
 
   await ctx.plugin(SystemPrompt); await ctx.plugin(ToolRuntime, { mode: 'native' }); await ctx.plugin(SkillRegistry)
-  ctx.tools.register(defineTool({ name: 'write', description: 'fixture', parameters: { file_path: { type: 'string', required: true }, content: { type: 'string', required: true } }, output: { schema: { type: 'string' }, render: () => [] }, execute: async args => { await writeFile(join(root, args.file_path as string), args.content as string); return 'written' } }))
-  const config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['write'], externalHoldouts: [{ id: 'positive', version: 1, scope, execution: { image: candidateImage, dockerPath: '/usr/bin/docker', stateRoot, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 20000, verificationDurationMs: 10000 }, authority: { executable: process.execPath, args: ['--import', hook, cli, '--config', authorityConfig], publicKey: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest }, maxComparisons: 1 as const }] }
+  await ctx.plugin(LocalFileSystem, { cwd: root }); await ctx.plugin(FsPolicy); await ctx.plugin(FileTools)
+  const config = { databasePath: join(root, 'skills.sqlite'), allowedTools: ['read', 'write'], externalHoldouts: [{ id: 'positive', version: 1, scope, execution: { image: candidateImage, dockerPath: '/usr/bin/docker', stateRoot, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 120000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 20000, verificationDurationMs: 10000 }, authority: { executable: process.execPath, args: ['--import', hook, cli, '--config', authorityConfig], publicKey: keyPair.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest }, maxComparisons: 1 as const }] }
   let plugin = await ctx.plugin(AssistantSkillsService, config); cleanups.push(() => plugin.dispose())
   const execute = (name: string, toolArguments: object) => owner.ctx.get('tools')!.execute({ callId: ToolCallId(`call-${Math.random()}`), name, arguments: toolArguments, signal: new AbortController().signal, agent: owner })
   const json = async (name: string, toolArguments: object) => JSON.parse(((await execute(name, toolArguments)).value as { context: string }).context)

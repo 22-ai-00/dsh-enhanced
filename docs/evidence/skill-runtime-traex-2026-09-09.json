@@ -1,0 +1,318 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-09",
+  "baseline": "bf04c89b6c90aa54341641499b8d6f105df5006f",
+  "scope": [
+    "Persist explicit native file observations for new write/edit skills and count them in execution, checkpoints and comparison budgets",
+    "Capture an exact successful active skill invocation as fixed bound native steps with unchanged source provenance",
+    "Treat validated todo planning as source-only provenance",
+    "Use TraeX in independent real Web test profiles and accept single-encoded JSON object tool arguments"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2
+  },
+  "engineeringValidation": {
+    "fullCheck": {
+      "state": "passed",
+      "log": "/tmp/dsh-skill-traex-delivery-check.log",
+      "command": "CI=true VITEST_MAX_WORKERS=1 DSH_ISOLATION_TEST_IMAGE=sha256:3a13e5da38baa575985778cd09ce8ac736d4b4dafc91a430e71271f6e5311b89 DSH_HOLDOUT_TEST_IMAGE=sha256:321f72f637710ad1a69425cd0915a7a8a6101f325080ab5eefc19f244eeaefc8 pnpm check",
+      "exit": 0,
+      "sha256": "762c2f0590cf8ef584311975ce05d76c91cc923df1480d4fc6e4ee8d9411090a",
+      "testFiles": 352,
+      "tests": 4294,
+      "skipped": 0,
+      "packCount": 33,
+      "sourceHashRecheck": "28 changed source/test/doc/manifest hashes unchanged",
+      "packInspection": [
+        "Skills lib/capture-expansion.js and declarations included with existing lib, patch, README and LICENSE",
+        "Native filesystem observation policy remains a devDependency; no bundle is auto-enabled by the test dependency"
+      ]
+    },
+    "targeted": [
+      {
+        "log": "/tmp/dsh-skill-expansion-integrated.log",
+        "sha256": "5e43da955143a9fbbc3f1e63ae6704db51b7616b5ca9951048a03179c2883eb5",
+        "exit": 0,
+        "scope": "10 files / 130 tests: Skills service, native filesystem policy, store, replay, qualification, CLI; before final native Goal identity tightening"
+      },
+      {
+        "log": "/tmp/dsh-capture-expansion-native-goal.log",
+        "sha256": "bbe91d4685db90ecc2ca8718072180422619e0f2ae978fa21bfc2e160984f848",
+        "exit": 0,
+        "scope": "13 tests: exact successful capture proof, missing/wrong native Goal, duplicate source, failed/unknown/retired rejection"
+      },
+      {
+        "log": "/tmp/dsh-skill-expansion-service-final.log",
+        "sha256": "e5b9c64755d029038be1514c0d82c4db1a54d6bfc2398f202169709230ebd8e9",
+        "exit": 0,
+        "scope": "1 selected service integration test: reuse expands to fixed bound steps; other 45 excluded by name filter"
+      },
+      {
+        "log": "/tmp/dsh-file-observation-runtime-final.log",
+        "sha256": "8886a2307d32c52fc10c29189dc723bc4a81b7553fd2f1e319df9b584cd066f3",
+        "exit": 0,
+        "scope": "6 native FsPolicy cases: absent/create, existing/CAS, denied read, missing allowlist, stale version, abort/no replay"
+      },
+      {
+        "log": "/tmp/dsh-web-owner-real-route-traex-vitest.log",
+        "sha256": "9210b5e2d5e962d39d71d29832adf070fca453b03824a7a3a6ca94952d56173d",
+        "exit": 0,
+        "scope": "6 route tests: TraeX, existing Codex/gateway configurations"
+      },
+      {
+        "log": "/tmp/dsh-traex-string-arguments-prompt.log",
+        "sha256": "23f6f5bc5f26e3b9fbe2604110c89923f1f3a95496eaad3267c85f79ece71f77",
+        "exit": 0,
+        "scope": "16 prompt tests: JSON object / one encoded object and rejection cases"
+      },
+      {
+        "log": "/tmp/dsh-traex-string-arguments-typecheck.log",
+        "sha256": "38ac890c60e7f38d59ddfb410325cdfb5fca83c9411765c5481754e01c021630",
+        "exit": 0,
+        "scope": "TraeX package typecheck"
+      },
+      {
+        "log": "/tmp/dsh-traex-captured-response-regression-final.log",
+        "sha256": "7cfa54ba93e8bd18353827335ad01420f8c1177ad3928e389ba55ba90886ef14",
+        "exit": 0,
+        "scope": "zero-model replay of the actual TraeX response; exact name allowed, other declared tool denied, no-tools does not delegate"
+      }
+    ]
+  },
+  "realModel": {
+    "overall": "incomplete-before-prospective-comparison",
+    "userRoutePreference": "Use TraeX for further real model experiments; do not fall back to Codex subscription",
+    "attempts": [
+      {
+        "attempt": 4,
+        "retainedEnvironment": "/tmp/dsh-real-capture-OkvMW1",
+        "modelLogSha256": "209b8520e2cff508f8f15ce831d3802ec39f0c3856caa7e8542a18e12a4f9f84",
+        "modelDispatches": 19,
+        "providers": [
+          "codex-subscription"
+        ],
+        "toolsDispatched": [
+          "goal_create",
+          "skill_capture",
+          "get_goal",
+          "read",
+          "write",
+          "get_goal",
+          "goal_create",
+          "skill_candidates",
+          "skill_trial",
+          "skill_trial",
+          "get_goal",
+          "read",
+          "write",
+          "get_goal",
+          "get_goal",
+          "skill_activate",
+          "goal_create",
+          "skill_capture",
+          "read",
+          "get_goal",
+          "skill_status"
+        ],
+        "projections": {
+          "skill_captures": [
+            {
+              "id": "skill-capture-3034a1db66c343154c824594cca5b750b9eaf58e9c9c747a81c935fb3cf8178f",
+              "state": "captured",
+              "parentVersion": 1
+            },
+            {
+              "id": "skill-capture-356f333d3296b73074dedbc564897c2b7aafb4fff7938f578dc5e822bc82506e",
+              "state": "captured",
+              "parentVersion": 0
+            }
+          ],
+          "skill_runs": [
+            {
+              "id": "skill-run-65ea93dd0490cc594cfb136a56c1e206852dd504d96e60aa31182533ab4ce72d",
+              "state": "succeeded",
+              "steps": [
+                {
+                  "id": "call_aVwzm4iNE7KV9ViNwXth2V3V",
+                  "state": "succeeded",
+                  "detail": "result:88996417b5361e6968da735245cbd9c0fdbeb87fc57bb1eeef2be65528b04984"
+                },
+                {
+                  "id": "file-observation:1",
+                  "state": "succeeded",
+                  "detail": "absence:FS_NOT_FOUND"
+                },
+                {
+                  "id": "call_10tSnY40AjkpCF1GlG8G8X41",
+                  "state": "succeeded",
+                  "detail": "result:c9144ace6f2192a3e39b33e318584fc739ee8179ff2485e5ae46ca47c4f60577"
+                },
+                {
+                  "id": "call_rL5z8Ex9g9URCP2QP9hOhpXm",
+                  "state": "succeeded",
+                  "detail": "result:88996417b5361e6968da735245cbd9c0fdbeb87fc57bb1eeef2be65528b04984"
+                }
+              ]
+            }
+          ],
+          "skill_candidates": [
+            {
+              "id": "skill-candidate-133b9c4c5c26e1a44f4127407e3da81517c38304b2a233083175f6fa8edbef27",
+              "state": "activated",
+              "parentVersion": 0
+            },
+            {
+              "id": "skill-candidate-9bc51d8019a7116f40a3b3995beecb5adbfe97b2eb1791b94a0668bc3561d4d7",
+              "state": "pending",
+              "parentVersion": 1
+            }
+          ],
+          "skill_comparisons": []
+        },
+        "log": "/tmp/dsh-real-canary-attempt4.log",
+        "sha256": "4a0736f304ebf5fb5c67fa7848b85fdbe6df55693a54c9f2f9d03aa6dbe34d0e",
+        "exit": 1,
+        "result": "Initial accepted capture, absent-file trial and activation, followed by an accepted review candidate. Test selected the old candidate due to unordered SQL rows; fixed by prior-ID set difference. No prospective comparison was reached."
+      },
+      {
+        "attempt": 5,
+        "retainedEnvironment": "/tmp/dsh-real-capture-TSY225",
+        "modelLogSha256": "3012a7c4cd73c69dc2d267e0eadfcca5a38b0df01b1a7d15a86a3f75168d091b",
+        "modelDispatches": 3,
+        "providers": [
+          "traex-agent"
+        ],
+        "toolsDispatched": [
+          "goal_create"
+        ],
+        "projections": {
+          "skill_captures": [],
+          "skill_runs": [],
+          "skill_candidates": [],
+          "skill_comparisons": []
+        },
+        "log": "/tmp/dsh-real-canary-traex-attempt5.log",
+        "sha256": "403381131c7cf11a7124be0bf4bfcc6c162f7e017ea41d036ed8f35a251067b1",
+        "exit": 1,
+        "result": "TraeX conversation and goal_create succeeded; subsequent ACP_PROTOCOL_ERROR stopped native input. A separate bounded diagnostic reproduced the error with JSON-encoded object arguments after a valid transport end_turn."
+      },
+      {
+        "attempt": 6,
+        "retainedEnvironment": "/tmp/dsh-real-capture-aXcOat",
+        "modelLogSha256": "3b3057c5792d699f81bcef381043ffe7e46c674e4907f9406dc507309df8893c",
+        "modelDispatches": 1,
+        "providers": [
+          "traex-agent"
+        ],
+        "toolsDispatched": [],
+        "projections": {
+          "skill_captures": [],
+          "skill_runs": [],
+          "skill_candidates": [],
+          "skill_comparisons": []
+        },
+        "log": "/tmp/dsh-real-canary-traex-attempt6.log",
+        "sha256": "1d5b190339cbf8a98fbb8af16711447ce1216d5b2d685ccd2ff4f742d8043c71",
+        "exit": 1,
+        "result": "After parameter compatibility, the readiness-only turn requested goal_create. Approval was not granted and no DSH tool executed. The test now permits one exact rejection and requires zero readiness goals/captures."
+      },
+      {
+        "attempt": 7,
+        "retainedEnvironment": "/tmp/dsh-real-capture-kmp0lQ",
+        "modelLogSha256": "cd28ded650e07dae023a966ffb0f9a2ea847799047136c157f28d701aaf11260",
+        "modelDispatches": 6,
+        "providers": [
+          "traex-agent"
+        ],
+        "toolsDispatched": [
+          "goal_create",
+          "skill_capture",
+          "get_goal",
+          "glob",
+          "write"
+        ],
+        "projections": {
+          "skill_captures": [
+            {
+              "id": "skill-capture-98959b22b358a64e2fbdf163ae38f0343cf0b42eec6015cfc1093191b3d9af0a",
+              "state": "pending",
+              "parentVersion": 0
+            }
+          ],
+          "skill_runs": [],
+          "skill_candidates": [],
+          "skill_comparisons": []
+        },
+        "log": "/tmp/dsh-real-canary-traex-attempt7.log",
+        "sha256": "5a316730736afdbe8509142f48637b1b39180e01b80e048cd5acbf8f4b073871",
+        "exit": 1,
+        "result": "TraeX created the goal, registered capture and wrote the artifact; its next bash request was outside the explicit no-shell authorization. Test stopped before approving or executing bash. Capture remains pending; no skill_run or prospective comparison."
+      }
+    ],
+    "diagnostic": {
+      "log": "/tmp/dsh-traex-protocol-diagnostic.log",
+      "sha256": "2d8312f6b9e5b85f8b8e69c092d6693b3426d467e173699fb570e1545bbea139",
+      "exit": 1,
+      "modelRequests": 1,
+      "executedDshTools": 0,
+      "provider": "traex-agent",
+      "model": "gpt-5.6-terra",
+      "transport": "end_turn / teardown completed",
+      "result": "Known protocol parse failure reproduced: valid tool name, arguments encoded as one JSON object string. This diagnostic did not execute or resume the original business invocation."
+    },
+    "readiness": {
+      "log": "/tmp/dsh-traex-canary-readiness.log",
+      "sha256": "986158385fc73970970b7a2273b0cce71582adf2e1e01baf9473028677691cbc",
+      "exit": 0,
+      "modelRequests": 0,
+      "selectedModelAvailable": "gpt-5.6-terra"
+    },
+    "finalGuardDelta": "After attempt7, bootstrap rejection narrowed to exact goal_create plus nonempty call ID. Attempt7 had no bootstrap rejection; final branch is statically reviewed, not a new passing E2E."
+  },
+  "limitations": [
+    "No complete real TraeX capture/reuse/canary, promotion, rollback or measured improvement claim",
+    "Native file-observation and capture-expansion integration evidence is deterministic; real attempt4 did not run an active skill against an existing file",
+    "Current Calendar/GitHub actual resources remain unverified; no new external business operations were performed",
+    "Installation upgrade/uninstall remains unimplemented; plugin add and activation do not provide general rollback",
+    "TraeX does not provide a verified DSH token or monetary cap; test call/deadline limits are separate",
+    "Legacy definitions and failed/unknown invocations are not migrated or replayed"
+  ],
+  "review": {
+    "scope": "Independent read-only native subagent review; engineering scope only",
+    "state": "PASS-engineering-scope",
+    "conclusion": "Independent review accepts this engineering delivery after the successful full check and source-hash verification; the real TraeX canary remains incomplete.",
+    "chatgptWebReview": false
+  },
+  "sourceFiles": {
+    "docs/agent-autonomy-implementation.md": "526d0c8e62f90c189f45c3d7f351186f90e2475917f0484d3adfeffff78bfbcb",
+    "docs/autonomy-delivery-path-review-2026-09-08.md": "ee3a7425fba51172417e9df205d6823d260473abf0a8635d73a3bc55db9f8711",
+    "docs/compatibility.md": "9358cabc40a42a12d6fb9cd90a22f6898fbf98088439fb8da051bc2ef9d06c3a",
+    "plugins/assistant-skills/README.md": "dbb6d52d40fe4bfbf86c5a005624801136d0ee4b97c7d8d383997408d3e0c3c8",
+    "plugins/assistant-skills/package.json": "5c2b0a8be510b3c49690153fe3469c9c82ecfdd1d3e915c86fbe67349b6230a9",
+    "plugins/assistant-skills/src/definition.ts": "5377ba75704743b638acfac08dfc2f01253a8ec8d9c6cff96e7effdaf3f2f248",
+    "plugins/assistant-skills/src/holdout-qualification.ts": "38a04920ee8b4c6c13fb7bc3b02dfc5c35a99a498bc08f6aa98479fe55de5bf5",
+    "plugins/assistant-skills/src/replay.ts": "7dad7479bcb7081382a81b6bf7be521cb5e30b0bb75e6d84c03794a05b2d39fc",
+    "plugins/assistant-skills/src/service.ts": "36aeeea0bcf9fe7f2a2acf4f4d0cff5989183532e7c9255db50ea5dc497c108f",
+    "plugins/assistant-skills/src/store.ts": "7d045560aade8bc08b4936d561511766840566d0973cb3cde2ed77fb02b739b2",
+    "plugins/assistant-skills/tests/comparison.spec.ts": "1efc6d03c761a1e2dc8d4d45313edc066441f26e9c252be96bdd518f79b99a2a",
+    "plugins/assistant-skills/tests/definition.spec.ts": "4278a2eeaef5dabf7524f042fd2eb3102545b82ca97aee443ae88050120256ba",
+    "plugins/assistant-skills/tests/external-holdout-service.spec.ts": "22413c7223c0956d4e21ced77cb5b7c8e4428711f852c198dc256ef3c3ab9109",
+    "plugins/assistant-skills/tests/holdout-cli.spec.ts": "e8e38f5e765901b541cf6679e6f94d3ed7b75430cc7045a54daf4cb5719e8951",
+    "plugins/assistant-skills/tests/replay.spec.ts": "0186445dee878046039882a7b5afcb7d2fe5441345446130f9d9a067189f44c1",
+    "plugins/assistant-skills/tests/service.spec.ts": "b6015ef83e34c31fbe6ffaedd7ffa74ba2025a47076503a230ffcf99cfe3ee41",
+    "plugins/assistant-skills/tests/store.spec.ts": "67ebbc493a1f1675e7362462c8aec925e5d7d5862404242b728239d13c866d1d",
+    "plugins/traex-acp-provider/README.md": "ac151981d5cfa68c1026ff40cfc17fca3de93b29a7f6c0a70530b01bce9bd6a5",
+    "plugins/traex-acp-provider/src/prompt.ts": "c5fc9f347bdff0fe2197e0ba18d3588dc3088280f29e8ea4a818518f6c6e3fbb",
+    "plugins/traex-acp-provider/tests/prompt.spec.ts": "c7f9db1335bafba8fb51925837e975c176d61a3329ed6ef4755aee8cf9bb9863",
+    "pnpm-lock.yaml": "59365b26526ff71e22dbd5bf891318d5b92c5b4eb4772301b678ce1d23a50192",
+    "pnpm-workspace.yaml": "b642cdd524bdb96d538d081d485a4146bf57104cf85336e1d5663c058fc7c44e",
+    "scripts/e2e/web-owner-real-capture.spec.mjs": "5744033a570f19a5aeab517fa7d69d215aebf31218fe4e5df8d3aa1172258dd2",
+    "scripts/e2e/web-owner-real-route.mjs": "c757e0bdd4055873bb33f189a97cf42a10afb51c6e099ff90de34135adf2aa1b",
+    "tests/web-owner-real-route.spec.ts": "d888c5c774c90c56490e36eb7b2dea263885ae9b32a8763bec1c92662302d119",
+    "plugins/assistant-skills/src/capture-expansion.ts": "b1be9261390107a401cc2237263e86db236467278cc6077abe883d4ecdbbe25b",
+    "plugins/assistant-skills/tests/capture-expansion.spec.ts": "4f47635a53bcd62bcc6ce9adc033691927c829210c1b23a7db8a6933b5c4a5d9",
+    "plugins/assistant-skills/tests/file-observation-runtime.spec.ts": "882f5fe655afa1ad311b06feff6959563188fcaa68389fbf14866e547c785b22"
+  }
+}

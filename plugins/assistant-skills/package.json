@@ -122,7 +122,8 @@
     "@deepseek-ai/dsh-system-prompt": "catalog:",
     "@deepseek-ai/dsh-agent-loop": "catalog:",
     "@dsh-enhanced/assistant-evaluation": "workspace:*",
-    "@dsh-enhanced/assistant-isolation": "workspace:*"
+    "@dsh-enhanced/assistant-isolation": "workspace:*",
+    "@deepseek-ai/dsh-fs-observation-policy": "catalog:"
   },
   "dependencies": {
     "@deepseek-ai/schemastery": "catalog:",

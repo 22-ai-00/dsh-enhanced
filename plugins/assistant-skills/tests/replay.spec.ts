@@ -16,7 +16,7 @@ async function replay(definitionValue: ReturnType<typeof definition>, stateRoot:
 
 test('replays native write, read, and edit in a temporary workspace with bound input', async () => {
   const stateRoot = await root(); const value = definition([{ id: 'write', toolName: 'write', arguments: { file_path: 'artifact.txt', content: 'original' } }, { id: 'read', toolName: 'read', arguments: { file_path: 'artifact.txt' } }, { id: 'edit', toolName: 'edit', arguments: { file_path: 'artifact.txt', old_string: 'bound', new_string: 'edited' } }])
-  await expect(replay(value, stateRoot)).resolves.toMatchObject({ artifact: 'edited', toolCalls: 3, quiescent: true, steps: [{ toolName: 'write' }, { toolName: 'read' }, { toolName: 'edit' }] })
+  await expect(replay(value, stateRoot)).resolves.toMatchObject({ artifact: 'edited', toolCalls: 5, quiescent: true, steps: [{ toolName: 'read' }, { toolName: 'write' }, { toolName: 'read' }, { toolName: 'read' }, { toolName: 'edit' }] })
   expect(await readdir(stateRoot)).toEqual([])
 })
 
@@ -28,9 +28,10 @@ test('omits bounded provenance observations while preserving their trace positio
     { id: 'read', toolName: 'read', arguments: { file_path: 'artifact.txt' } },
     { id: 'goal', toolName: 'get_goal', arguments: {} },
   ], ['glob', 'write', 'read', 'get_goal'])
-  await expect(replay(value, stateRoot)).resolves.toMatchObject({ artifact: 'captured', toolCalls: 4, executedToolCalls: 2, omittedObservations: 2,
+  await expect(replay(value, stateRoot)).resolves.toMatchObject({ artifact: 'captured', toolCalls: 5, executedToolCalls: 3, omittedObservations: 2,
     steps: [
       { id: 'glob', outcome: 'omitted-observation', observation: 'provenance-only' },
+      { id: 'file-observation:1', toolName: 'read', outcome: 'executed' },
       { id: 'write', outcome: 'executed' }, { id: 'read', outcome: 'executed' },
       { id: 'goal', outcome: 'omitted-observation', observation: 'provenance-only' },
     ] })
@@ -42,8 +43,8 @@ test('accepts a bounded same-workspace grep as a provenance-only observation', a
     { id: 'grep', toolName: 'grep', arguments: { path: '/source-workspace/src', pattern: 'TODO', include: '**/*.ts' } },
     { id: 'write', toolName: 'write', arguments: { file_path: 'artifact.txt', content: 'captured' } },
   ], ['grep', 'write'])
-  await expect(replay(value, stateRoot)).resolves.toMatchObject({ artifact: 'captured', toolCalls: 2, executedToolCalls: 1, omittedObservations: 1,
-    steps: [{ id: 'grep', outcome: 'omitted-observation', observation: 'provenance-only' }, { id: 'write', outcome: 'executed' }] })
+  await expect(replay(value, stateRoot)).resolves.toMatchObject({ artifact: 'captured', toolCalls: 3, executedToolCalls: 2, omittedObservations: 1,
+    steps: [{ id: 'grep', outcome: 'omitted-observation', observation: 'provenance-only' }, { id: 'file-observation:1', toolName: 'read', outcome: 'executed' }, { id: 'write', outcome: 'executed' }] })
 })
 
 test('rejects external paths, limits, failed edits, and revocation', async () => {
@@ -76,4 +77,19 @@ test('honors abort before dispatch and removes the private workspace', async () 
   const value = definition([{ id: 'write', toolName: 'write', arguments: { file_path: 'artifact.txt', content: 'x' } }])
   await expect(replay(value, stateRoot, { signal: controller.signal })).rejects.toThrow()
   expect(await readdir(stateRoot)).toEqual([])
+})
+
+
+test('counts declared file observations against the comparison budget before dispatch', async () => {
+  const stateRoot = await root()
+  const value = definition([{ id: 'write', toolName: 'write', arguments: { file_path: 'artifact.txt', content: 'original' } }])
+  await expect(replay(value, stateRoot, { maxToolCalls: 1 })).rejects.toThrow(/tool-call limit/)
+  expect(await readdir(stateRoot)).toEqual([])
+  await expect(replay(value, stateRoot, { maxToolCalls: 2 })).resolves.toMatchObject({ artifact: 'bound', toolCalls: 2, executedToolCalls: 2,
+    steps: [{ id: 'file-observation:1', toolName: 'read' }, { id: 'write', toolName: 'write' }] })
+  await expect(replay(value, stateRoot, { files: [{ path: 'artifact.txt', content: 'existing' }], maxToolCalls: 2 })).resolves.toMatchObject({ artifact: 'bound', toolCalls: 2 })
+  const edit = definition([{ id: 'edit', toolName: 'edit', arguments: { file_path: 'artifact.txt', old_string: 'a', new_string: 'b' } }])
+  await expect(replay(edit, stateRoot)).rejects.toThrow(/read failed/)
+  const legacy = { ...value }; delete legacy.fileObservations
+  await expect(replay(legacy, stateRoot, { maxToolCalls: 1 })).resolves.toMatchObject({ artifact: 'bound', toolCalls: 1 })
 })

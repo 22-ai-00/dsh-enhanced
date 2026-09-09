@@ -1,3 +1,4 @@
+import { fileObservationSteps } from './definition.js'
 import { mkdirSync, lstatSync, realpathSync } from 'node:fs'
 import { isAbsolute, join, relative } from 'node:path'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
@@ -98,8 +99,9 @@ function validCell(value: unknown, begin: BeginResult, seen: ReadonlyMap<string,
   return verifyHoldoutSignature(value, begin.publicKey)
 }
 function toolCalls(replay: ReplayResult, definition: SkillDefinition) {
+  const observations = fileObservationSteps(definition).map(value => ({ id: value.id, toolName: 'read', arguments: { file_path: value.filePath, limit: 1 } }))
   return replay.steps.map(step => {
-    const source = definition.steps.find(value => value.id === step.id)
+    const source = [...definition.steps, ...observations].find(value => value.id === step.id)
     if (source === undefined) return fail('replay step is not in immutable trace')
     const inputDigest = digest({ id: source.id, toolName: source.toolName, arguments: source.arguments })
     return step.outcome === 'executed' ? { name: step.toolName, inputDigest, outputDigest: step.resultDigest } : { name: step.toolName, inputDigest }

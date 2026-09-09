@@ -111,7 +111,7 @@ export function buildPrompt(options: GenerateOptions, maxPromptBytes: number): s
     protocol: 'dsh-traex-acp-provider/v1',
     instruction: tools.length === 0
       ? 'Continue the conversation as the assistant. Return only the next assistant response. Do not modify files or execute commands.'
-      : `Continue the conversation as the assistant. Do not modify files or execute commands inside TraeX and do not invoke TraeX-native tools; they are unavailable in this backend session. Tools can only be used through DSH. If the task requires a tool, request the required tool now instead of merely describing a plan, claiming future work, asking for confirmation, or stopping early. For a tool request, return exactly one JSON object matching constraints.tools.responseFormat. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. When no tool is needed and the task is complete, return only the final assistant response as normal text.`,
+      : `Continue the conversation as the assistant. Do not modify files or execute commands inside TraeX and do not invoke TraeX-native tools; they are unavailable in this backend session. Tools can only be used through DSH. If the task requires a tool, request the required tool now instead of merely describing a plan, claiming future work, asking for confirmation, or stopping early. For a tool request, return exactly one JSON object matching constraints.tools.responseFormat. Each call.arguments value must be a JSON object matching that tool's parameter schema, never a JSON-encoded string. The first output character must be { and the last must be }; do not add a preamble, progress update, explanation, Markdown fence, or any other text before or after the object. When no tool is needed and the task is complete, return only the final assistant response as normal text.`,
     system: options.system ?? null,
     conversation: options.messages.map(serializeMessage),
     constraints: {
@@ -121,7 +121,7 @@ export function buildPrompt(options: GenerateOptions, maxPromptBytes: number): s
             responseProtocol: DSH_TOOL_CALL_PROTOCOL,
             responseFormat: {
               protocol: DSH_TOOL_CALL_PROTOCOL,
-              calls: [{ name: '<exact available tool name>', arguments: '<JSON object matching that tool parameters schema>' }],
+              calls: [{ name: '<exact available tool name>', arguments: { '<parameter name>': '<value matching that parameter schema>' } }],
             },
             available: tools,
           },
@@ -148,6 +148,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
+function toolArguments(value: unknown): Record<string, unknown> | undefined {
+  if (isRecord(value)) return value
+  if (typeof value !== 'string') return undefined
+  try {
+    const decoded = JSON.parse(value) as unknown
+    return isRecord(decoded) ? decoded : undefined
+  } catch {
+    return undefined
+  }
+}
+
 function jsonPayload(value: string): string {
   const trimmed = value.trim()
   const fenced = /^```(?:json)?\s*\n([\s\S]*?)\n```$/i.exec(trimmed)
@@ -170,10 +181,11 @@ function parsedToolEnvelope(
   }
   const names = new Set(tools.map(tool => tool.name))
   return value.calls.map((call): DelegatedToolCall => {
-    if (!isRecord(call) || typeof call.name !== 'string' || !names.has(call.name) || !isRecord(call.arguments)) {
+    const argumentsObject = isRecord(call) ? toolArguments(call.arguments) : undefined
+    if (!isRecord(call) || typeof call.name !== 'string' || !names.has(call.name) || argumentsObject === undefined) {
       throw new Error('TraeX returned an invalid or unavailable DSH tool call', { cause: 'protocol' })
     }
-    return { name: call.name, arguments: JSON.stringify(call.arguments) }
+    return { name: call.name, arguments: JSON.stringify(argumentsObject) }
   })
 }
 

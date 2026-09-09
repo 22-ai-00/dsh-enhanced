@@ -11,7 +11,8 @@ import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import Schema from '@deepseek-ai/schemastery'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { createDefinition, instantiate, type SkillBinding } from './definition.js'
+import { createDefinition, fileObservationSteps, instantiate, type SkillBinding } from './definition.js'
+import { captureRunExpansions } from './capture-expansion.js'
 import { validateComparisonProfiles, SkillComparator, type SkillComparisonProfile } from './comparison.js'
 import { watchObservation } from './watch-proof.js'
 import { sealedPlan, type SealedSkillHoldoutProvider } from './sealed-holdout.js'
@@ -275,10 +276,13 @@ export class AssistantSkillsService extends Service {
     const scope = this.#scope(agent, 'save')
     const source = this.#goals().inspectVerifiedWorkflowSource(agent, goalId)
     if (acceptanceDigest(source.scope) !== acceptanceDigest(scope)) throw new Error('assistant-skills: source owner mismatch')
-    const definition = createDefinition(source, options, this.#allowed)
+    const definition = this.#capturedDefinition(source, options, scope)
     this.#authorize(agent, 'save', [scope, definition, expectedVersion])
     const saved = this.#store.save(scope, definition, expectedVersion)
     this.#changed(); return saved
+  }
+  #capturedDefinition(source: import('./definition.js').VerifiedWorkflowSource, options: { name: string; description: string; bindings?: readonly SkillBinding[] }, scope: GoalScope) {
+    return createDefinition(source, options, this.#allowed, captureRunExpansions(source, scope, this.#store))
   }
   inspect(agent: Agent | undefined, runId?: string) {
     const scope = this.#scope(agent, 'inspect')
@@ -448,7 +452,7 @@ export class AssistantSkillsService extends Service {
     const scope = this.#scope(agent, 'draft')
     const source = this.#goals().inspectVerifiedWorkflowSource(agent, goalId)
     if (acceptanceDigest(source.scope) !== acceptanceDigest(scope)) throw new Error('assistant-skills: source owner mismatch')
-    const definition = createDefinition(source, options, this.#allowed)
+    const definition = this.#capturedDefinition(source, options, scope)
     this.#authorize(agent, 'draft', [scope, definition, parentVersion, reason, trigger])
     return this.#preview(scope, this.#store.stageCandidate(scope, definition, { expectedVersion: parentVersion, reason, trigger, expiresAt: Date.now() + this.#candidateTtl }))
   }
@@ -665,7 +669,7 @@ export class AssistantSkillsService extends Service {
         if (this.#captureInflight.has(capture.id)) { this.#captureDirty.add(capture.id); continue }
         this.#captureInflight.add(capture.id)
         const task = goals.inspectOwnerVerifiedWorkflowSource({ ownerRouteId: capture.ownerRouteId, principalId: scope.principalId, workspace: scope.workspace, preset: scope.preset, sessionId: capture.sessionId, goalId: capture.goalId }, this.#lifecycle.signal).then(source => {
-          try { this.#captureCurrent(capture); const definition = createDefinition(source, { name: capture.name, description: capture.description }, this.#allowed); this.#captureCurrent(capture); this.#store.captureCandidate(scope, capture.id, definition); this.#changed() } catch (error) { this.#captureBridgeFailure(capture, error) }
+          try { this.#captureCurrent(capture); const definition = this.#capturedDefinition(source, { name: capture.name, description: capture.description }, scope); this.#captureCurrent(capture); this.#store.captureCandidate(scope, capture.id, definition); this.#changed() } catch (error) { this.#captureBridgeFailure(capture, error) }
         }).catch(error => this.#captureBridgeFailure(capture, error)).then(() => undefined)
         this.#captureTasks.add(task)
         void task.finally(() => { this.#captureTasks.delete(task); this.#captureInflight.delete(capture.id); if (this.#captureDirty.delete(capture.id) && this.#active) this.#queueReconcile() })
@@ -681,7 +685,13 @@ export class AssistantSkillsService extends Service {
   async #run(exec: ToolRunContext, goalId: string, skill: StoredSkillDefinition, inputs: Record<string, unknown>, invocationId: string, candidateId?: string) {
     const action = candidateId ? 'trial' : 'run'
     const scope = this.#scope(exec.agent, action), { name, version } = skill
-    const steps = instantiate(skill, inputs).steps
+    const definition = instantiate(skill, inputs)
+    const steps = definition.steps
+    // These declarations are part of the immutable saved definition, rather
+    // than an observation cache.  Resolve them after input materialization so
+    // a bound target is observed at the exact path that will be written.
+    const observations = fileObservationSteps(definition)
+    if (steps.length + observations.length > 32) throw new Error('assistant-skills: invalid file observation budget')
     const goals = this.#goals() as AssistantGoalsService & { inspectActiveWorkflowCaptureContext?: (agent: Agent | undefined, goalId: string) => { scope: GoalScope; goalId: string; sessionId: string; nativeGoalId: string; definition: { digest: string } } }
     let current: ReturnType<AssistantGoalsService['inspectWorkflowRunContext']>
     try { current = goals.inspectWorkflowRunContext(exec.agent, goalId) } catch (roundError) {
@@ -752,7 +762,38 @@ export class AssistantSkillsService extends Service {
     }
     try {
       this.#authorize(exec.agent, action, claim.run.id)
-      for (const [index, step] of steps.entries()) {
+      stepsLoop: for (const [index, step] of steps.entries()) {
+        for (const observation of observations) {
+          if (observation.beforeStepId !== step.id) continue
+          revalidate()
+          if (!this.#allowed.includes('read')) throw new Error('assistant-skills: current tool allowlist denied required file observation')
+          dispatched = true
+          const observed = await exec.agent!.ctx.get('tools')!.execute({
+            callId: ToolCallId(`${exec.callId}:skill-observation:${index + 1}`),
+            rootCallId: exec.rootCallId,
+            parent: exec.token,
+            agent: exec.agent!,
+            name: 'read',
+            arguments: { file_path: observation.filePath, limit: 1 },
+            signal,
+          })
+          revalidate()
+          for (const context of observed.additionalContexts ?? []) exec.deferContext(context)
+          const code = observed.isError ? observed.error.info?.code ?? 'tool-rejected' : undefined
+          const interrupted = signal.aborted || code === 'ABORTED' || code === 'ABORTED_BEFORE_DISPATCH'
+          const absent = observation.allowAbsent && step.toolName === 'write' && code === 'FS_NOT_FOUND'
+          const detail = absent ? 'absence:FS_NOT_FOUND' : observed.isError ? code : `result:${acceptanceDigest(observed.content)}`
+          completed.push({
+            id: observation.id,
+            state: interrupted ? 'unknown' : observed.isError && !absent ? 'failed' : 'succeeded',
+            ...(detail === undefined ? {} : { detail }),
+          })
+          this.#store.checkpoint(scope, claim.run.id, completed)
+          if (interrupted) { state = 'unknown'; break stepsLoop }
+          if (observed.isError && !absent) { state = 'failed'; break stepsLoop }
+          revalidate()
+          dispatched = false
+        }
         revalidate()
         if (!this.#allowed.includes(step.toolName)) throw new Error('assistant-skills: current tool allowlist denied')
         dispatched = true

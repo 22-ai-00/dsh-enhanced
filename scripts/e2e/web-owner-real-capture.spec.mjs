@@ -11,7 +11,7 @@ import { selectRestoredSession } from './repo-session-navigation.mjs'
 import { readSessionAudit } from './web-owner-real-audit.mjs'
 import { prepareRealRoute } from './web-owner-real-route.mjs'
 import { observePage, query, run, sanitize, startHost } from './web-owner-helpers.mjs'
-import { instantiate } from '../../plugins/assistant-skills/lib/definition.js'
+import { fileObservationSteps, instantiate } from '../../plugins/assistant-skills/lib/definition.js'
 import { canaryPolicy, createProspectiveCanaryAuthority } from './real-canary-helpers.mjs'
 
 const root = fileURLToPath(new URL('../../', import.meta.url))
@@ -64,7 +64,7 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
     DSH_REPO_AUTONOMY_MAX_CALLS: prospectiveCanary ? '32' : '24', DSH_REPO_AUTONOMY_DURATION_MS: prospectiveCanary ? '600000' : '360000' }
   const deliveryPath = join(home, 'assistant-delivery/state.sqlite'), goalsPath = join(home, 'assistant-goals/web.sqlite')
   const verifierPath = join(home, 'assistant-verifier/verification.sqlite'), skillsPath = join(home, 'assistant-skills/skills.sqlite')
-  const frames = [], approved = new Set(), contexts = [], transport = []
+  const frames = [], approved = new Set(), bootstrapRejected = new Set(), contexts = [], transport = []
   let host, activePage = page, starts = 0, failed = false, sessionId, sourceAudit, sourceArtifact
   const stop = async () => { if (host) { await host.stop(); await writeFile(testInfo.outputPath(`host-${starts}.log`), host.log(), { mode: 0o600 }); await writeFile(join(temp, `host-${starts}.log`), host.log(), { mode: 0o600 }); host = undefined } }
   const open = async () => {
@@ -93,10 +93,21 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
     }
     const request = [...pending.values()].find(value => !approved.has(value.eventId))
     if (!request) return
+    if (sessionId === undefined) {
+      // The readiness message authorizes no work. Respond to an unsolicited
+      // approval as the owner would, without granting a setup-time action.
+      const bindings = query(deliveryPath, 'SELECT session_id FROM conversation_bindings WHERE session_id = ?', request.agentId)
+      if (bindings.length !== 1 || bootstrapRejected.size >= 1 || request.request?.toolName !== 'goal_create'
+        || typeof request.request?.callId !== 'string' || request.request.callId.length === 0) throw new Error('unexpected repeated, foreign or unsupported bootstrap approval')
+      bootstrapRejected.add(request.eventId); approved.add(request.eventId)
+      transport.push({ kind: 'bootstrap-approval-rejected', toolName: request.request?.toolName })
+      await activePage.getByRole('button', { name: 'Reject', exact: true }).click()
+      return
+    }
     let event = frames.findLast(frame => frame.value?.event?.type === 'tool/call' && frame.value.event.data.callId === request.request?.callId)?.value.event
     let nested
     if (!event) {
-      const match = /^(.*):skill:([1-9][0-9]*)$/u.exec(request.request?.callId ?? '')
+      const match = /^(.*):skill(-observation)?:([1-9][0-9]*)$/u.exec(request.request?.callId ?? '')
       const parent = match && frames.findLast(frame => frame.value?.event?.type === 'tool/call' && frame.value.event.data.callId === match[1])?.value.event
       if (!parent || !['skill_trial', 'skill_run'].includes(parent.data.name)) throw new Error('approval has no matching direct call or skill parent')
       const args = JSON.parse(parent.data.arguments)
@@ -109,7 +120,10 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
         ? (() => { const row = query(skillsPath, 'SELECT candidate_json FROM skill_candidates WHERE id = ?', args.candidate_id)[0]; const candidate = row && JSON.parse(row.candidate_json); if (!candidate || candidate.state !== 'pending') throw new Error('nested approval candidate is not current'); return candidate.definition })()
         : (() => { const row = query(skillsPath, 'SELECT definition_json FROM skill_definitions WHERE name = ? AND version = ?', args.name, args.version)[0]; if (!row) throw new Error('nested approval definition is not exact active version'); return JSON.parse(row.definition_json) })()
       if (definition.retired || definition.source.scope.workspace !== workspace || definition.source.scope.preset !== 'standard') throw new Error('nested approval definition is retired or outside the exact owner scope')
-      const step = instantiate(definition, active[0].inputs).steps[Number(match[2]) - 1]
+      const materialized = instantiate(definition, active[0].inputs)
+      const savedStep = materialized.steps[Number(match[3]) - 1]
+      const observation = match[2] && savedStep && fileObservationSteps(materialized).find(value => value.beforeStepId === savedStep.id)
+      const step = match[2] ? observation && { id: observation.id, toolName: 'read', arguments: { file_path: observation.filePath, limit: 1 } } : savedStep
       if (!step || step.toolName !== request.request.toolName) throw new Error('nested approval does not match its stored skill step')
       event = { data: { name: step.toolName, arguments: JSON.stringify(step.arguments) } }
       nested = { parentCallId: parent.data.callId, runId: active[0].id, stepId: step.id }
@@ -181,6 +195,8 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
     await open()
     await prompt('Confirm this session is ready for a later authorized task. No work is needed yet.')
     await wait(idle, 'bootstrap settlement')
+    expect(query(goalsPath, 'SELECT id FROM goal_records'), 'readiness grants no goal work').toHaveLength(0)
+    expect(captured(), 'readiness grants no capture').toHaveLength(0)
     const binding = query(deliveryPath, 'SELECT * FROM conversation_bindings ORDER BY created_at DESC LIMIT 1')[0]
     sessionId = binding.session_id
     await stop()
@@ -228,10 +244,11 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
     const activeBaseline = query(skillsPath, 'SELECT definition_json FROM skill_definitions')[0].definition_json
     let canary
     if (prospectiveCanary) {
-      const beforeImprove = captured().length
+      const beforeImprove = new Set(captured().map(value => value.id))
+      const newCaptures = () => captured().filter(value => !beforeImprove.has(value.id))
       await prompt(`${objective} Start one finite review goal for the same order-summary task. I authorize automatic capture of one pending candidate named order-summary with parent version 1 using owner route capture-owner for ten minutes. Make only a real improvement if one is warranted; preserve the same schema and accepted task, and do not activate it manually.`)
-      await wait(() => captured().length === beforeImprove + 1 && captured().at(-1)?.state === 'captured' && idle(), 'independently accepted improvement capture')
-      const improvement = captured().at(-1), candidate2 = JSON.parse(query(skillsPath, 'SELECT candidate_json FROM skill_candidates WHERE id = ?', improvement.candidateId)[0].candidate_json)
+      await wait(() => newCaptures().length === 1 && newCaptures()[0]?.state === 'captured' && idle(), 'independently accepted improvement capture')
+      const improvement = newCaptures()[0], candidate2 = JSON.parse(query(skillsPath, 'SELECT candidate_json FROM skill_candidates WHERE id = ?', improvement.candidateId)[0].candidate_json)
       expect(candidate2).toMatchObject({ state: 'pending', parentVersion: 1 })
       await stop()
       const canaryAuthority = await createProspectiveCanaryAuthority({ root: temp, home, workspace })
@@ -294,7 +311,7 @@ test('ordinary owner request captures an accepted workflow and reuses it after r
     const audit = await readSessionAudit(home, workspace, sessionId)
     const calls = audit.events.filter(event => event.type === 'tool/call')
     expect(captured()).toHaveLength(prospectiveCanary ? 2 : 1)
-    expect(captured()[0]).toMatchObject({ id: capture.id, state: 'captured', candidateId: capture.candidateId })
+    expect(captured().find(value => value.id === capture.id)).toMatchObject({ id: capture.id, state: 'captured', candidateId: capture.candidateId })
     expect(query(skillsPath, 'SELECT candidate_json FROM skill_candidates WHERE id = ?', capture.candidateId)).toHaveLength(1)
     const finalHandoff = assertCaptureHandoff(audit, capture)
     expect(calls.filter(event => ['skill_save', 'skill_candidate'].includes(event.data.name))).toHaveLength(0)

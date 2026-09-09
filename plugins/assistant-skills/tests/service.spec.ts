@@ -382,7 +382,7 @@ dockerTest('compares a pending native-file candidate through isolated verificati
   const report = compared.result as { execution: string; modelCalls: number; cells: { toolCalls: number; quiescent: boolean }[]; quality: { evaluationGain: number; evaluationGainObserved: boolean; candidateChecksPassed: boolean; criticalRegressionsPassed: boolean }; promotionAuthorized: boolean }
   expect(report).toMatchObject({ execution: 'native-file-tools-and-isolated-artifact', modelCalls: 0, quality: { evaluationGain: 1, evaluationGainObserved: true, candidateChecksPassed: true, criticalRegressionsPassed: true }, promotionAuthorized: false })
   expect(report.cells).toHaveLength(12)
-  expect(report.cells.every(cell => cell.toolCalls === 1 && cell.quiescent)).toBe(true)
+  expect(report.cells.every(cell => cell.toolCalls === 2 && cell.quiescent)).toBe(true)
   expect(result(await f.execute('skill_status', {}))).toMatchObject([{ name: 'saved-write', version: 1 }])
   expect(result(await f.execute('skill_candidates', { candidate_id: candidate.id }))).toMatchObject({ state: 'pending', id: candidate.id })
 
@@ -529,4 +529,24 @@ test('positive observations exhaust a finite watch without rollback and one fail
   f.setSnapshot(second.goalId, second.goalExecutionRunId, 'achieved'); await f.nudge()
   expect((await f.watches())[0]).toMatchObject({ state: 'exhausted', observations: [expect.anything(), expect.anything()] })
   expect(result(await f.execute('skill_status', {}))[0].version).toBe(2)
+})
+
+
+test('captures an exact successful skill reuse as fixed bound steps while retaining the original source call', async () => {
+  const f = await fixture()
+  await f.save()
+  const first = await f.run('reuse-for-capture')
+  expect(first.isError).toBe(false)
+  const run = JSON.parse((first.value as { context: string }).context)
+  f.source.goal.id = 'new-goal'; f.source.goal.nativeGoalId = run.nativeGoalId
+  f.source.goal.definition.digest = run.goalDefinitionDigest
+  f.source.runId = run.goalExecutionRunId
+  f.source.steps = [{ id: 'reused-call', toolName: 'skill_run', arguments: { goal_id: 'new-goal', name: 'saved-write', version: 1, inputs_json: '{"message":"reused"}', invocation_id: 'reuse-for-capture' } }] as never
+  const staged = await f.execute('skill_candidate', { goal_id: 'new-goal', name: 'saved-write', description: 'Capture actual reuse.', bindings_json: '[]', parent_version: 1, reason: 'Owner review.', trigger: 'repeat' })
+  expect(staged.isError).toBe(false)
+  const candidate = JSON.parse((staged.value as { context: string }).context)
+  expect(candidate.definition.source.steps).toEqual(f.source.steps)
+  expect(candidate.definition.runExpansions).toMatchObject([{ protocol: 'assistant-skills/run-expansion/v1', callId: 'reused-call', runId: run.id }])
+  expect(candidate.definition.steps).toEqual([{ id: expect.stringMatching(/^expanded:[a-f0-9]{64}$/u), toolName: 'write', arguments: { file: 'output.txt', data: 'reused' }, dependsOn: [] }])
+  expect(f.count()).toBe(1)
 })

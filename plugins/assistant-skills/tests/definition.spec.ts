@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createDefinition, instantiate, type VerifiedWorkflowSource } from '../src/definition.ts'
+import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
+import { createDefinition, fileObservationSteps, instantiate, type SkillRunExpansion, type VerifiedWorkflowSource } from '../src/definition.ts'
 
 function source(steps: VerifiedWorkflowSource['steps'] = [{ id: 'call-1', toolName: 'files_read', arguments: { path: '/tmp/report.txt', retry: false, limit: 10 } }]): VerifiedWorkflowSource {
   return { protocol: 'assistant-goals/verified-workflow-source/v1', scope: { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace: '/tmp/workspace', preset: 'primary' },
@@ -54,6 +55,93 @@ describe('skill definitions', () => {
     expect(definition.steps).toEqual([{ id: 'write', toolName: 'write', arguments: { file: 'result.txt', data: 'done' }, dependsOn: [] }])
     expect(() => createDefinition({ ...enriched, failedObservations: [{ id: 'failed-write', toolName: 'write', arguments: {}, outcome: 'failed' }] }, { name: 'bad-observation', description: 'x' }, ['write'])).toThrow()
     expect(() => createDefinition({ ...enriched, failedObservations: [{ id: 'failed-read', toolName: 'read', arguments: {}, outcome: 'unknown' as never }] }, { name: 'unknown-observation', description: 'x' }, ['write'])).toThrow()
+  })
+
+  it('expands an exact successful skill_run into fixed bound steps while preserving source provenance', () => {
+    const call = { id: 'active-run', toolName: 'skill_run', arguments: { goal_id: 'goal', name: 'active', version: 1, inputs_json: '{"path":"result.md"}', invocation_id: 'review' } }
+    const proof: SkillRunExpansion = { protocol: 'assistant-skills/run-expansion/v1', callId: call.id, runId: 'skill-run-id', runDigest: 'a'.repeat(64), definitionDigest: 'b'.repeat(64), inputsDigest: 'c'.repeat(64),
+      steps: [{ id: 'write-result', toolName: 'write', arguments: { file_path: 'result.md', content: 'done' } }] }
+    expect(() => createDefinition(source([call]), { name: 'without-proof', description: 'A control call cannot be replayed.' }, ['write'])).toThrow(/untrusted tool trace/u)
+    const expandedId = `expanded:${acceptanceDigest([call.id, proof.steps[0]!.id])}`
+    const definition = createDefinition(source([call]), { name: 'expanded-run', description: 'Use the fixed successful active run.', bindings: [{ name: 'path', stepId: expandedId, path: '/file_path' }] }, ['read', 'write'], [proof])
+    expect(definition.source.steps).toEqual([call])
+    expect(definition.runExpansions).toEqual([proof])
+    expect(definition.steps).toEqual([{ id: expandedId, toolName: 'write', arguments: { file_path: 'result.md', content: 'done' }, dependsOn: [] }])
+    expect(definition.fileObservations).toEqual({ protocol: 'assistant-skills/file-observations/v1', beforeSteps: [expandedId] })
+    expect(fileObservationSteps(instantiate(definition, { path: 'bound.md' }))).toEqual([{ id: 'file-observation:1', beforeStepId: expandedId, filePath: 'bound.md', allowAbsent: true }])
+  })
+
+  it('rejects forged, uncontrolled, duplicate, and oversized skill-run expansions', () => {
+    const call = { id: 'active-run', toolName: 'skill_run', arguments: { goal_id: 'goal', name: 'active', version: 1, inputs_json: '{}', invocation_id: 'review' } }
+    const proof = (): SkillRunExpansion => ({ protocol: 'assistant-skills/run-expansion/v1', callId: call.id, runId: 'skill-run-id', runDigest: 'a'.repeat(64), definitionDigest: 'b'.repeat(64), inputsDigest: 'c'.repeat(64),
+      steps: [{ id: 'write-result', toolName: 'write', arguments: { file_path: 'result.md', content: 'done' } }] })
+    const derive = (expansions: readonly SkillRunExpansion[]) => createDefinition(source([call]), { name: 'expanded-guard', description: 'Reject untrusted expansion proofs.' }, ['write'], expansions)
+    expect(() => derive([{ ...proof(), callId: 'other-call' }])).toThrow(/run expansion/u)
+    expect(() => derive([{ ...proof(), runDigest: 'bad' }])).toThrow(/run expansion/u)
+    expect(() => derive([proof(), proof()])).toThrow(/run expansion/u)
+    expect(() => derive([{ ...proof(), steps: [] }])).toThrow(/run expansion/u)
+    expect(() => derive([{ ...proof(), steps: [{ ...proof().steps[0]! }, { ...proof().steps[0]! }] }])).toThrow(/run expansion/u)
+    expect(() => derive([{ ...proof(), steps: [{ ...proof().steps[0]!, toolName: 'skill_run' }] }])).toThrow(/untrusted tool trace/u)
+    expect(() => derive([{ ...proof(), steps: [{ ...proof().steps[0]!, toolName: 'unknown' }] }])).toThrow(/untrusted tool trace/u)
+    expect(() => createDefinition(source([call]), { name: 'expanded-extra', description: 'Reject extra proof fields.' }, ['write'], [{ ...proof(), extra: true } as unknown as SkillRunExpansion])).toThrow(/run expansion/u)
+    const writes = Array.from({ length: 17 }, (_, index) => ({ id: `write-${index}`, toolName: 'write', arguments: { file_path: `${index}.md`, content: 'x' } }))
+    expect(() => derive([{ ...proof(), steps: writes }])).toThrow(/bounded tool trace/u)
+  })
+
+  it('declares bounded same-path native file observations and applies path bindings before use', () => {
+    const definition = createDefinition(source([
+      { id: 'write', toolName: 'write', arguments: { file_path: 'draft.md', content: 'draft' } },
+      { id: 'edit', toolName: 'edit', arguments: { file_path: 'draft.md', old_string: 'draft', new_string: 'done' } },
+    ]), { name: 'guarded-file', description: 'Write and edit one guarded file.', bindings: [{ name: 'path', stepId: 'write', path: '/file_path' }, { name: 'edit_path', stepId: 'edit', path: '/file_path' }] }, ['read', 'write', 'edit'])
+    expect(definition.fileObservations).toEqual({ protocol: 'assistant-skills/file-observations/v1', beforeSteps: ['write', 'edit'] })
+    expect(fileObservationSteps(instantiate(definition, { path: 'created.md', edit_path: 'created.md' }))).toEqual([
+      { id: 'file-observation:1', beforeStepId: 'write', filePath: 'created.md', allowAbsent: true },
+      { id: 'file-observation:2', beforeStepId: 'edit', filePath: 'created.md', allowAbsent: false },
+    ])
+  })
+
+  it('rejects forged file-observation declarations and preserves legacy definitions without inference', () => {
+    const definition = createDefinition(source([
+      { id: 'write', toolName: 'write', arguments: { file_path: 'draft.md', content: 'draft' } },
+      { id: 'edit', toolName: 'edit', arguments: { file_path: 'draft.md', old_string: 'draft', new_string: 'done' } },
+    ]), { name: 'guarded-file', description: 'Write and edit one guarded file.' }, ['read', 'write', 'edit'])
+    const forged = (change: (value: any) => void) => { const value = JSON.parse(JSON.stringify(definition)); change(value); return value }
+    expect(() => instantiate(forged(value => { value.fileObservations.beforeSteps = ['edit', 'write'] }))).toThrow(/file observations/u)
+    expect(() => instantiate(forged(value => { value.fileObservations.protocol = 'forged' }))).toThrow(/file observations/u)
+    expect(() => instantiate(forged(value => { value.fileObservations.beforeSteps = ['write'] }))).toThrow(/file observations/u)
+    expect(() => fileObservationSteps(forged(value => { value.steps[0].id = 'file-observation:1'; value.fileObservations.beforeSteps[0] = 'file-observation:1' }))).toThrow(/file observations/u)
+    expect(() => createDefinition(source([{ id: 'file-observation:1', toolName: 'write', arguments: { file_path: 'draft.md', content: 'draft' } }]), { name: 'captured-collision', description: 'Reject generated observation ID collisions.' }, ['read', 'write'])).toThrow(/file observations/u)
+    const legacy = forged(value => { delete value.fileObservations })
+    expect(fileObservationSteps(instantiate(legacy))).toEqual([])
+  })
+
+  it('bounds generated observations with their standard file mutators', () => {
+    const writes = (count: number) => Array.from({ length: count }, (_, index) => ({ id: `write-${index}`, toolName: 'write', arguments: { file_path: `${index}.md`, content: 'x' } }))
+    expect(createDefinition(source(writes(16)), { name: 'sixteen-writes', description: 'Bounded native writes.' }, ['read', 'write']).fileObservations?.beforeSteps).toHaveLength(16)
+    expect(() => createDefinition(source(writes(17)), { name: 'seventeen-writes', description: 'Over the combined bound.' }, ['read', 'write'])).toThrow(/bounded/u)
+  })
+
+  it('counts generated preflight read arguments toward the capture byte limit even without read permission', () => {
+    const empty = Buffer.byteLength(JSON.stringify([{ file_path: 'x', content: '' }]), 'utf8')
+    expect(() => createDefinition(source([{ id: 'write', toolName: 'write', arguments: { file_path: 'x', content: 'x'.repeat(256 * 1024 - empty) } }]),
+      { name: 'preflight-bytes', description: 'Reject synthetic reads above the argument bound.' }, ['write'])).toThrow(/file observations exceed argument limit/u)
+  })
+
+  it('retains only exact valid todo_write planning provenance', () => {
+    const todo = { id: 'todo', toolName: 'todo_write', arguments: { todos: [{ content: 'Capture result', status: 'completed' }] } }
+    const write = { id: 'write', toolName: 'write', arguments: { file_path: 'result.md', content: 'done' } }
+    const definition = createDefinition(source([todo, write]), { name: 'todo-provenance', description: 'Keep planning provenance.' }, ['write'])
+    expect(definition.source.steps).toEqual([todo, write])
+    expect(definition.steps).toEqual([{ ...write, dependsOn: [] }])
+    expect(definition.fileObservations).toEqual({ protocol: 'assistant-skills/file-observations/v1', beforeSteps: ['write'] })
+    expect(() => createDefinition(source([todo, write]), { name: 'todo-binding', description: 'Reject omitted bindings.', bindings: [{ name: 'todos', stepId: 'todo', path: '/todos' }] }, ['write'])).toThrow(/binding step/u)
+    for (const arguments_ of [
+      { todos: [{ content: 'x', status: 'completed', extra: true }] },
+      { todos: [{ content: '', status: 'completed' }] },
+      { todos: [{ content: 'x', status: 'invalid' }] },
+      { todos: [{ content: 'x', status: 'completed' }, { content: ' x ', status: 'pending' }] },
+      { todos: [], other: true },
+    ]) expect(() => createDefinition(source([{ ...todo, arguments: arguments_ }, write]), { name: 'invalid-todo', description: 'Reject invalid planning provenance.' }, ['write'])).toThrow(/todo provenance/u)
   })
 
   it('bounds steps and serialized arguments', () => {
