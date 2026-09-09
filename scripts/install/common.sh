@@ -809,7 +809,27 @@ dsh_enhanced_is_agent_route() {
 # that exact version.  Tags stay supported for callers that deliberately use a
 # release channel; ranges are rejected because they cannot describe one cohort.
 dsh_enhanced_is_exact_plugin_version() {
-  [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?(\+[0-9A-Za-z]+([.-][0-9A-Za-z]+)*)?$ ]]
+  local value="$1"
+  local without_build="$value"
+  local build=''
+  local core prerelease='' identifier
+  if [[ "$value" == *+* ]]; then
+    without_build="${value%%+*}"
+    build="${value#*+}"
+    [[ "$build" != *+* && "$build" =~ ^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$ ]] || return 1
+  fi
+  core="$without_build"
+  if [[ "$without_build" == *-* ]]; then
+    core="${without_build%%-*}"
+    prerelease="${without_build#*-}"
+    [[ "$prerelease" =~ ^[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*$ ]] || return 1
+    local identifiers=()
+    IFS=. read -r -a identifiers <<< "$prerelease"
+    for identifier in "${identifiers[@]}"; do
+      if [[ "$identifier" =~ ^[0-9]+$ && "$identifier" != '0' && "$identifier" == 0* ]]; then return 1; fi
+    done
+  fi
+  [[ "$core" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
 }
 
 dsh_enhanced_validate_plugin_selector() {
@@ -2037,6 +2057,8 @@ dsh_enhanced_run_lifecycle_executor() {
   local dsh_executable=''
   local bwrap_executable=''
   local flock_executable=''
+  local npm_executable=''
+  local pnpm_executable=''
   if [[ ! -x /usr/bin/perl ]]; then
     dsh_enhanced_fail 1 '安全生命周期事务需要 /usr/bin/perl 验证继承的内核锁。'
     return $?
@@ -2048,6 +2070,11 @@ dsh_enhanced_run_lifecycle_executor() {
   else
     dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_enhanced_fail 1 '找不到现有 dsh executable。'; return $?; }
     bwrap_executable="$(command -v bwrap 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 bubblewrap（bwrap）。'; return $?; }
+  fi
+  if [[ "$operation" == 'npm-upgrade' ]]; then
+    npm_executable="$(command -v npm 2>/dev/null)" || { dsh_enhanced_fail 1 'npm upgrade 生命周期事务需要已安装的 npm。'; return $?; }
+    pnpm_executable="$(command -v pnpm 2>/dev/null)" || { dsh_enhanced_fail 1 'npm upgrade 生命周期事务需要已安装的 pnpm。'; return $?; }
+    set -- "$npm_executable" "$pnpm_executable" "$@"
   fi
   flock_executable="$(command -v flock 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 flock。'; return $?; }
   if [[ ! -f "$executor" ]]; then dsh_enhanced_fail 1 "缺少生命周期执行器：$executor"; return $?; fi
@@ -2370,10 +2397,14 @@ dsh_enhanced_install() {
     fi
   fi
   if [[ "$operation" != 'install' ]]; then
-    if [[ "$source_mode" != 'local' ]]; then
-      dsh_enhanced_fail 2 'profile 生命周期事务当前只由完整本地仓库安装器提供；发布资产尚未包含配套验证器。'
-      return $?
-    fi
+    local lifecycle_directory
+    lifecycle_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 1
+    for lifecycle_asset in lifecycle-config.mjs lifecycle-profile.mjs; do
+      if [[ ! -f "$lifecycle_directory/$lifecycle_asset" || -L "$lifecycle_directory/$lifecycle_asset" ]]; then
+        dsh_enhanced_fail 1 "缺少可信的生命周期资产：$lifecycle_directory/$lifecycle_asset"
+        return $?
+      fi
+    done
     if [[ "$confirm_dsh_home_stopped" != '1' ]]; then
       dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；复制 SQLite/WAL 前必须停止所有使用该 DSH_HOME 的进程。"
       return $?
@@ -2410,12 +2441,18 @@ dsh_enhanced_install() {
     model_mode='skip'
     model_route_mode='skip'
     lark_mode='skip'
-    if [[ "$dry_run" != '1' ]]; then
+    if [[ "$dry_run" != '1' && ( "$source_mode" != 'npm' || "$operation" != 'upgrade' ) ]]; then
       dsh_enhanced_recover_profile_lifecycle "$profile" "$dsh_home" "$dry_run" || return $?
       if [[ ! -f "$dsh_home/profiles/$profile/package.json" ]]; then
         dsh_enhanced_fail 1 "--operation $operation 需要已存在的 profile：$dsh_home/profiles/$profile"
         return $?
       fi
+    fi
+    if [[ "$source_mode" == 'npm' && "$operation" == 'upgrade' && "$dry_run" != '1' ]]; then
+      dsh_enhanced_require_node || return $?
+      dsh_enhanced_require_existing_runtime "$ack_unverified_host" || return $?
+      dsh_enhanced_run_lifecycle_executor npm-upgrade "$profile" "$dsh_home" "$plugin_version"
+      return $?
     fi
   fi
 

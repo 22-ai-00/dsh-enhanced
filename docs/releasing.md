@@ -22,7 +22,7 @@ pnpm release:prepare
 pnpm release:prepare 0.2.0
 ```
 
-`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。
+`release:prepare` 会统一修改根包、所有 `plugins/*` / `packages/*` 的 `package.json` 和运行时 `src/version.ts`，并写入 `pending`，但不会把尚未发布的版本标记为成功。它还会把同一发布标签、已验证 Host 范围，以及 `common.sh`、`lifecycle-config.mjs`、`lifecycle-profile.mjs` 三个远端安装资产的独立 SHA-256 同步写入 `install-npm.sh`；`release:verify-tag` 和 `release:record` 会重新计算并逐项核验这些值。
 
 ## 校验、合入与创建标签
 
@@ -79,6 +79,8 @@ pnpm release:supersede 0.1.9
 workflow 的多次远端检查会缩小竞态窗口，但不能从技术上完全消除“最后一次检查结束后、npm 请求发出前 `main` 又前进”的 TOCTOU。发版期间应冻结 `main` 合入，或让所有能更新 `main` 的流程共享一个会实际阻塞写入的互斥机制。
 
 protected environment 的审批只控制发布 job 和 secret 的使用，不能单独锁定 `main`。若 `origin/main` 已前进或版本一致性校验失败，workflow 会拒绝继续；不得移动原 tag 来绕过。
+
+远端 `install-npm.sh` 本身仍从 mutable `main` 获取；其内嵌摘要把随后执行的三个资产绑定到不可变发布 tag，但不能认证最外层引导器本身。仓库管理员权限和 immutable tag ruleset 因此仍属于发布信任根。
 
 ## npm 凭据
 
