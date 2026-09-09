@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createDefinition, type VerifiedWorkflowSource } from '../src/definition.ts'
 import { SkillStore } from '../src/store.ts'
+import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -19,6 +20,64 @@ function definition() {
 async function database() { const root = await mkdtemp(join(tmpdir(), 'assistant-skills-')); roots.push(root); return join(root, 'skills.sqlite') }
 
 describe('SkillStore', () => {
+  it('atomically deploys only a completed exact qualification and promotes after fresh successful canary evidence', () => {
+    const store = new SkillStore(':memory:'); store.save(scope, definition())
+    const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Improve.', trigger: 'owner', expiresAt: Date.now() + 60000 })
+    const comparison = store.claimComparison(scope, { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'qualified' }, 1).comparison
+    const result = { qualified: true, gates: ['quality'] }; store.finishComparison(scope, comparison.id, 'complete', result)
+    const input = { ownerRouteId: 'route', expiresAt: Date.now() + 60000, maxRuns: 2, canaryRuns: 1 }, receipt = { route: 'receipt' }
+    expect(() => store.activateQualifiedCandidate(scope, candidate.id, comparison.id, 'e'.repeat(64), input, receipt)).toThrow(/qualification unavailable/)
+    const active = store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), input, receipt)
+    expect(active).toMatchObject({ definition: { version: 2, parentVersion: 1 }, deployment: { state: 'canary', runIds: [] } })
+    expect(store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), input, receipt)).toEqual(active)
+    const run = store.claim(scope, { invocationId: 'canary', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'goal-run' })
+    expect(store.claim(scope, { invocationId: 'canary', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'goal-run' }).claimed).toBe(false)
+    store.finish(scope, run.run.id, 'succeeded', [])
+    expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('canary')
+    store.observeWatch(scope, active.deployment.watchId, { runId: run.run.id, receiptDigest: 'f'.repeat(64), objectiveStatus: 'achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000 })
+    expect(store.reconcileDeployment(scope, active.deployment.id)).toMatchObject({ state: 'promoted' })
+    expect(store.assertDeploymentRun(scope, run.run.id)).toMatchObject({ id: active.deployment.id, state: 'promoted' })
+    const second = store.claim(scope, { invocationId: 'promoted', goalId: 'second-goal', sessionId: 'second-session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'second-goal-run' })
+    store.finish(scope, second.run.id, 'succeeded', [])
+    expect(() => store.claim(scope, { invocationId: 'over-quota', goalId: 'third-goal', sessionId: 'third-session', skillName: 'read-report', version: 2, inputs: {} })).toThrow(/quota exhausted/)
+    store.observeWatch(scope, active.deployment.watchId, { runId: second.run.id, receiptDigest: 'a'.repeat(64), objectiveStatus: 'not-achieved', verifiedAt: Date.now(), validUntil: Date.now() + 60000 })
+    expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('blocked')
+    expect(store.rollbackWatch(scope, active.deployment.watchId)?.state).toBe('rolled-back')
+    expect(store.reconcileDeployment(scope, active.deployment.id)?.state).toBe('rolled-back')
+    expect(store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), input, receipt).deployment.state).toBe('rolled-back')
+    expect(store.get(scope, 'read-report')?.version).toBe(3)
+    store.close()
+  })
+
+  it.each(['failed', 'unknown', 'running'] as const)('keeps a deployed run debit across restart and blocks %s deployed work', async state => {
+    const path = await database(), first = new SkillStore(path); first.save(scope, definition())
+    const candidate = first.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Improve.', trigger: 'owner', expiresAt: Date.now() + 60000 })
+    const comparison = first.claimComparison(scope, { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'qualified' }, 1).comparison
+    const result = { qualified: true }; first.finishComparison(scope, comparison.id, 'complete', result)
+    const deployed = first.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), { ownerRouteId: 'route', expiresAt: Date.now() + 60000, maxRuns: 2, canaryRuns: 2 }, { route: 'receipt' })
+    const run = first.claim(scope, { invocationId: 'debit', goalId: 'goal', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'goal-run' })
+    if (state !== 'running') first.finish(scope, run.run.id, state, [])
+    first.close()
+    const restored = new SkillStore(path)
+    expect(restored.getDeployment(scope, deployed.deployment.id)).toMatchObject({ runIds: [run.run.id], state: 'blocked' })
+    expect(() => restored.claim(scope, { invocationId: 'later', goalId: 'other', sessionId: 'session', skillName: 'read-report', version: 2, inputs: {}, goalExecutionRunId: 'goal-run' })).toThrow(/deployment unavailable/)
+    expect(() => restored.assertDeploymentRun(scope, run.run.id)).toThrow(/deployment unavailable/)
+    restored.close()
+  })
+
+  it('rolls back a qualified activation when the deployment record cannot be inserted', async () => {
+    const path = await database(), store = new SkillStore(path); store.save(scope, definition())
+    const candidate = store.stageCandidate(scope, definition(), { expectedVersion: 1, reason: 'Improve.', trigger: 'owner', expiresAt: Date.now() + 60000 })
+    const comparison = store.claimComparison(scope, { sessionId: 'session', candidateId: candidate.id, parentDigest: candidate.parentDigest!, profileId: 'profile', profileDigest: 'd'.repeat(64), invocationId: 'qualified' }, 1).comparison
+    const result = { qualified: true }; store.finishComparison(scope, comparison.id, 'complete', result)
+    const writer = new DatabaseSync(path)
+    writer.exec("CREATE TRIGGER reject_deployment BEFORE INSERT ON skill_deployments BEGIN SELECT RAISE(ABORT, 'deployment storage unavailable'); END")
+    expect(() => store.activateQualifiedCandidate(scope, candidate.id, comparison.id, acceptanceDigest(result), { ownerRouteId: 'route', expiresAt: Date.now() + 60000, maxRuns: 2, canaryRuns: 1 }, { route: 'receipt' })).toThrow(/deployment storage unavailable/)
+    expect(store.get(scope, 'read-report')).toMatchObject({ version: 1 })
+    expect(store.getCandidate(scope, candidate.id)).toMatchObject({ state: 'pending' })
+    expect(store.listWatches(scope)).toEqual([]); expect(store.listDeployments(scope)).toEqual([])
+    writer.close(); store.close()
+  })
   it('commits watched activation atomically and never renews it after lost response and restart', async () => {
     const path = await database(), store = new SkillStore(path)
     store.save(scope, definition())

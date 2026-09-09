@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { StringDecoder } from 'node:string_decoder'
 import { HoldoutAuthority, type AuthorityOptions, type QualificationBinding, type CellObservation } from './holdout-authority.js'
+import { createProspectiveCertificate, generateProspectiveDataset, generatorDigest, type ProspectiveHoldoutCertificate } from './prospective-holdout.js'
 
 function privateParent(path: string): void {
   if (!isAbsolute(path) || realpathSync(dirname(path)) !== dirname(path)) throw new Error('private-path-required')
@@ -24,35 +25,69 @@ function privateRead(path: string, limit: number): string {
   } finally { closeSync(fd) }
 }
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value) }
+interface ProspectiveRecord { readonly phase: 'frozen' | 'generated' | 'complete'; readonly freezeId: string; readonly binding: QualificationBinding; readonly dataset?: AuthorityOptions['dataset']; readonly certificate?: ProspectiveHoldoutCertificate }
 
 /** Private operator process. Its stdin belongs to a trusted executor, never a model tool. */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (argv.length !== 2 || !['--config', '--inspect-config'].includes(argv[0]!) || typeof process.getuid !== 'function') throw new Error('usage: dsh-skill-holdout --config|--inspect-config /private/config.json')
   const config: unknown = JSON.parse(privateRead(argv[1]!, 16384))
-  if (!object(config) || Object.keys(config).some(key => !['datasetPath', 'privateKeyPath', 'statePath', 'limits'].includes(key))
-    || !['datasetPath', 'privateKeyPath', 'statePath'].every(key => typeof config[key] === 'string') || !object(config.limits)) throw new Error('invalid-operator-config')
-  const options: AuthorityOptions = { dataset: JSON.parse(privateRead(config.datasetPath as string, 262144)), privateKey: privateRead(config.privateKeyPath as string, 16384), limits: config.limits as unknown as AuthorityOptions['limits'] }
-  if (argv[0] === '--inspect-config') { process.stdout.write(JSON.stringify(HoldoutAuthority.create(options).metadata()) + '\n'); return }
+  const hasDataset = object(config) && Object.hasOwn(config, 'datasetPath'), hasProspective = object(config) && Object.hasOwn(config, 'prospective')
+  if (!object(config) || Object.keys(config).some(key => !['datasetPath', 'prospective', 'privateKeyPath', 'statePath', 'limits'].includes(key))
+    || !['privateKeyPath', 'statePath'].every(key => typeof config[key] === 'string') || !object(config.limits)
+    || hasDataset === hasProspective || hasDataset && typeof config.datasetPath !== 'string'
+    || hasProspective && (!object(config.prospective) || Object.keys(config.prospective).length !== 1 || config.prospective.generator !== 'order-summary/v1')) throw new Error('invalid-operator-config')
+  const privateKey = privateRead(config.privateKeyPath as string, 16384), prospective = hasProspective
+  const fixedOptions = (): AuthorityOptions => ({ dataset: JSON.parse(privateRead(config.datasetPath as string, 262144)), privateKey, limits: config.limits as unknown as AuthorityOptions['limits'] })
+  if (argv[0] === '--inspect-config') {
+    if (prospective) { const publicKey = HoldoutAuthority.create({ dataset: { id: 'inspect', version: '1', cases: [{ id: 'r', kind: 'replay', stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'e', kind: 'evaluation', stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'g', kind: 'regression', stdin: '', expectedStdout: '', expectedExitCode: 0 }] }, privateKey, limits: config.limits as unknown as AuthorityOptions['limits'] }).metadata().publicKey; process.stdout.write(JSON.stringify({ publicKey, generatorDigest, limits: config.limits }) + '\n'); return }
+    process.stdout.write(JSON.stringify(HoldoutAuthority.create(fixedOptions()).metadata()) + '\n'); return
+  }
   const path = config.statePath as string
   privateParent(path)
   process.umask(0o077)
   try { const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600); closeSync(fd) } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; privateRead(path, 4194304) }
   const db = new DatabaseSync(path); chmodSync(path, 0o600)
-  db.exec('PRAGMA busy_timeout=1000; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS authority (id INTEGER PRIMARY KEY CHECK(id=1), controller TEXT NOT NULL, lease_until INTEGER NOT NULL, state TEXT) STRICT')
+  db.exec('PRAGMA busy_timeout=1000; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; CREATE TABLE IF NOT EXISTS authority (id INTEGER PRIMARY KEY CHECK(id=1), controller TEXT NOT NULL, lease_until INTEGER NOT NULL, state TEXT, prospective TEXT) STRICT')
+  if (!(db.prepare("SELECT 1 FROM pragma_table_info('authority') WHERE name='prospective'").get())) db.exec('ALTER TABLE authority ADD COLUMN prospective TEXT')
   const controller = randomUUID(), leaseMs = 8000
-  let authority: HoldoutAuthority, active = false, timer: ReturnType<typeof setInterval> | undefined
+  let authority: HoldoutAuthority | undefined, active = false, timer: ReturnType<typeof setInterval> | undefined
   const transaction = <T>(operation: () => T): T => { db.exec('BEGIN IMMEDIATE'); try { const value = operation(); db.exec('COMMIT'); return value } catch (error) { db.exec('ROLLBACK'); throw error } }
   const persist = () => {
+    if (!authority) throw new Error('authority-not-begun')
     const result = db.prepare('UPDATE authority SET state=?, lease_until=? WHERE id=1 AND controller=? AND lease_until>?').run(authority.serialize(), Date.now() + leaseMs, controller, Date.now())
     if (result.changes !== 1) throw new Error('authority-controller-lost')
   }
+  const beginProspective = (binding: QualificationBinding): unknown => {
+    if (authority) throw new Error('authority-already-begun')
+    const freezeId = randomUUID()
+    transaction(() => {
+      const result = db.prepare('UPDATE authority SET prospective=? WHERE id=1 AND controller=? AND lease_until>?').run(JSON.stringify({ phase: 'frozen', freezeId, binding } satisfies ProspectiveRecord), controller, Date.now())
+      if (result.changes !== 1) throw new Error('authority-controller-lost')
+    })
+    const dataset = generateProspectiveDataset(), certificate = createProspectiveCertificate(binding, dataset, privateKey, freezeId)
+    return transaction(() => {
+      const result = db.prepare('UPDATE authority SET prospective=? WHERE id=1 AND controller=? AND lease_until>?').run(JSON.stringify({ phase: 'generated', freezeId, binding, dataset, certificate } satisfies ProspectiveRecord), controller, Date.now())
+      if (result.changes !== 1) throw new Error('authority-controller-lost')
+      authority = HoldoutAuthority.create({ dataset, privateKey, limits: config.limits as unknown as AuthorityOptions['limits'], prospective: certificate })
+      const begun = authority.begin(binding)
+      const completed = db.prepare('UPDATE authority SET state=?, prospective=?, lease_until=? WHERE id=1 AND controller=? AND lease_until>?').run(authority.serialize(), JSON.stringify({ phase: 'complete', freezeId, binding, dataset, certificate } satisfies ProspectiveRecord), Date.now() + leaseMs, controller, Date.now())
+      if (completed.changes !== 1) throw new Error('authority-controller-lost')
+      return begun
+    })
+  }
   try {
-    authority = transaction(() => {
-      const row = db.prepare('SELECT * FROM authority WHERE id=1').get() as { controller: string; lease_until: number; state: string | null } | undefined
+    transaction(() => {
+      const row = db.prepare('SELECT * FROM authority WHERE id=1').get() as { controller: string; lease_until: number; state: string | null; prospective: string | null } | undefined
       if (row && row.lease_until > Date.now()) throw new Error('authority-controller-busy')
-      const value = row?.state ? HoldoutAuthority.restore(row.state, options) : HoldoutAuthority.create(options)
-      db.prepare('INSERT INTO authority (id,controller,lease_until,state) VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET controller=excluded.controller,lease_until=excluded.lease_until,state=excluded.state').run(controller, Date.now() + leaseMs, row?.state ? value.serialize() : null)
-      return value
+      if (row && (row.state !== null || row.prospective !== null) && Boolean(row.prospective) !== prospective) throw new Error('authority-mode-changed')
+      if (prospective) {
+        if (row?.prospective) {
+          const record = JSON.parse(row.prospective) as ProspectiveRecord
+          if (record.phase !== 'complete' || !row.state || !record.dataset || !record.certificate) throw new Error('prospective-authority-poisoned')
+          authority = HoldoutAuthority.restore(row.state, { dataset: record.dataset, privateKey, limits: config.limits as unknown as AuthorityOptions['limits'], prospective: record.certificate })
+        }
+      } else authority = row?.state ? HoldoutAuthority.restore(row.state, fixedOptions()) : HoldoutAuthority.create(fixedOptions())
+      db.prepare('INSERT INTO authority (id,controller,lease_until,state,prospective) VALUES (1,?,?,?,?) ON CONFLICT(id) DO UPDATE SET controller=excluded.controller,lease_until=excluded.lease_until,state=excluded.state,prospective=excluded.prospective').run(controller, Date.now() + leaseMs, authority?.serialize() ?? null, row?.prospective ?? null)
     })
     active = true
     timer = setInterval(() => {
@@ -74,14 +109,14 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
           if (!active || !object(request) || typeof request.id !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/u.test(request.id)
             || Object.keys(request).some(key => !['id', 'operation', 'value'].includes(key))) throw new Error('invalid-request')
           id = request.id
-          const value = transaction(() => {
+          const value = request.operation === 'begin' && prospective && !authority ? beginProspective(request.value as QualificationBinding) : transaction(() => {
             const row = db.prepare('SELECT controller,lease_until FROM authority WHERE id=1').get() as { controller: string; lease_until: number }
             if (row.controller !== controller || row.lease_until <= Date.now()) throw new Error('authority-controller-lost')
             let result: unknown
-            if (request.operation === 'begin') result = authority.begin(request.value as QualificationBinding)
-            else if (request.operation === 'next' && request.value === undefined) result = authority.next() ?? null
-            else if (request.operation === 'record') result = authority.record(request.value as CellObservation)
-            else if (request.operation === 'finish' && request.value === undefined) result = authority.finish()
+            if (request.operation === 'begin' && authority) result = authority.begin(request.value as QualificationBinding)
+            else if (request.operation === 'next' && request.value === undefined && authority) result = authority.next() ?? null
+            else if (request.operation === 'record' && authority) result = authority.record(request.value as CellObservation)
+            else if (request.operation === 'finish' && request.value === undefined && authority) result = authority.finish()
             else throw new Error('invalid-operation')
             persist(); return result
           })

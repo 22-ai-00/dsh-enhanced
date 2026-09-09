@@ -22,6 +22,13 @@ describe('external authority configuration', () => {
     expect(() => validateExternalHoldoutProfiles([{ ...profile(), execution: { ...profile().execution, stateRoot: '/tmp/workspace/private' } }])).toThrow(/invalid external/)
     expect(() => validateExternalHoldoutProfiles([{ ...profile(), expectedStdout: 'answer' } as ExternalHoldoutProfile])).toThrow(/invalid external/)
   })
+
+  test('requires exactly one public holdout identity digest', () => {
+    const prospective = { ...profile(), authority: { executable: process.execPath, args: [], publicKey, generatorDigest: 'c'.repeat(64) } }
+    expect(validateExternalHoldoutProfiles([prospective])).toHaveLength(1)
+    expect(() => validateExternalHoldoutProfiles([{ ...prospective, authority: { ...prospective.authority, datasetDigest: 'd'.repeat(64) } }])).toThrow(/invalid external/)
+    expect(() => validateExternalHoldoutProfiles([{ ...prospective, authority: { executable: prospective.authority.executable, args: prospective.authority.args, publicKey } }])).toThrow(/invalid external/)
+  })
 })
 
 test('production pipe decodes split UTF-8 and correlates replies without returning operator stderr', async () => {

@@ -7,24 +7,26 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 import { setTimeout as delay } from 'node:timers/promises'
 import { afterEach, expect, test } from 'vitest'
+import { DatabaseSync } from 'node:sqlite'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { createDefinition } from '../src/definition.ts'
 import { qualifyHoldout } from '../src/holdout-qualification.ts'
 import { openHoldoutProcess } from '../src/external-holdout.ts'
 import { verifyHoldoutSignature, type BeginResult, type HoldoutReceipt, type SignedCell } from '../src/holdout-authority.ts'
+import { generatorDigest, verifyProspectiveCertificate } from '../src/prospective-holdout.ts'
 
 const exec = promisify(execFile), roots: string[] = [], closes: (() => Promise<void>)[] = []
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 const cli = fileURLToPath(new URL('../lib/holdout-cli.js', import.meta.url))
 const dataset = { id: 'operator-echo-cases', version: '1', cases: ['replay', 'evaluation', 'regression'].map((kind, index) => ({ id: `case-${index}`, kind, stdin: `${kind}\n`, expectedStdout: `${kind}\n`, expectedExitCode: 0 })) }
 afterEach(async () => { for (const close of closes.splice(0)) await close(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
-async function setup(container = false) {
+async function setup(container = false, prospective = false) {
   const root = await mkdtemp(join(tmpdir(), 'holdout-cli-')); roots.push(root)
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const prefix = container ? '/authority' : root
   await writeFile(join(root, 'key.pem'), privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
-  await writeFile(join(root, 'dataset.json'), JSON.stringify(dataset), { mode: 0o600 })
-  await writeFile(join(root, 'config.json'), JSON.stringify({ datasetPath: join(prefix, 'dataset.json'), privateKeyPath: join(prefix, 'key.pem'), statePath: join(prefix, 'state.sqlite'), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } }), { mode: 0o600 })
+  if (!prospective) await writeFile(join(root, 'dataset.json'), JSON.stringify(dataset), { mode: 0o600 })
+  await writeFile(join(root, 'config.json'), JSON.stringify({ ...(prospective ? { prospective: { generator: 'order-summary/v1' } } : { datasetPath: join(prefix, 'dataset.json') }), privateKeyPath: join(prefix, 'key.pem'), statePath: join(prefix, 'state.sqlite'), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } }), { mode: 0o600 })
   return { root, publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() }
 }
 function connect(command: string, args: string[]) {
@@ -48,6 +50,47 @@ test('operator inspection returns public pins without consuming qualification st
   expect(JSON.parse(stdout)).toEqual({ publicKey: config.publicKey, datasetDigest: acceptanceDigest(dataset), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } })
   await expect(stat(join(config.root, 'state.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
   expect(stdout).not.toMatch(/PRIVATE KEY|expectedStdout|stdin/u)
+})
+
+test('prospective inspection does not generate a dataset and begin returns a binding certificate', async () => {
+  const config = await setup(false, true)
+  const { stdout } = await exec(process.execPath, [cli, '--inspect-config', join(config.root, 'config.json')])
+  expect(JSON.parse(stdout)).toEqual({ publicKey: config.publicKey, generatorDigest, limits: { maxToolCalls: 4, maxOutputBytes: 16384 } })
+  await expect(stat(join(config.root, 'state.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
+  const client = connect(process.execPath, [cli, '--config', join(config.root, 'config.json')]); await client.read()
+  const frozen = binding(), begin = (await client.request('begin', frozen)).value as BeginResult
+  expect(begin.prospective).toBeDefined()
+  expect(verifyProspectiveCertificate(begin.prospective, frozen, config.publicKey, generatorDigest)).toBe(true)
+  expect(begin.datasetDigest).toBe(begin.prospective!.datasetDigest)
+  expect(JSON.stringify(begin)).not.toMatch(/expectedStdout|stdin/u)
+})
+
+test.each([false, true])('switching authority mode cannot reset durable qualification (prospective=%s)', async prospective => {
+  const config = await setup(false, prospective), path = join(config.root, 'config.json')
+  const client = connect(process.execPath, [cli, '--config', path]); await client.read(); await client.request('begin', binding()); await client.close()
+  await writeFile(join(config.root, 'dataset.json'), JSON.stringify(dataset), { mode: 0o600 })
+  await writeFile(path, JSON.stringify({ ...(prospective ? { datasetPath: join(config.root, 'dataset.json') } : { prospective: { generator: 'order-summary/v1' } }),
+    privateKeyPath: join(config.root, 'key.pem'), statePath: join(config.root, 'state.sqlite'), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } }), { mode: 0o600 })
+  const before = new DatabaseSync(join(config.root, 'state.sqlite'))
+  const state = before.prepare('SELECT state,prospective FROM authority').get(); before.close()
+  const restarted = connect(process.execPath, [cli, '--config', path]); expect(await restarted.exit).toBe(1)
+  const after = new DatabaseSync(join(config.root, 'state.sqlite'))
+  expect(after.prepare('SELECT state,prospective FROM authority').get()).toEqual(state); after.close()
+})
+
+test('failure after durable freeze poisons the prospective plan instead of regenerating samples', async () => {
+  const config = await setup(false, true), path = join(config.root, 'config.json')
+  const client = connect(process.execPath, [cli, '--config', path]); await client.read()
+  const db = new DatabaseSync(join(config.root, 'state.sqlite'))
+  db.exec("CREATE TRIGGER fail_generated BEFORE UPDATE OF prospective ON authority WHEN json_extract(NEW.prospective, '$.phase')='generated' BEGIN SELECT RAISE(ABORT, 'injected write failure after freeze'); END")
+  expect((await client.request('begin', binding())).ok).toBe(false); expect(await client.exit).toBe(1)
+  const frozen = db.prepare('SELECT state,prospective FROM authority').get() as { state: null; prospective: string }
+  expect(frozen.state).toBeNull(); expect(JSON.parse(frozen.prospective)).toMatchObject({ phase: 'frozen' })
+  // Trusted test fixture expires the dead controller lease; it never alters the frozen binding.
+  db.exec('UPDATE authority SET lease_until=0; DROP TRIGGER fail_generated'); db.close()
+  const restarted = connect(process.execPath, [cli, '--config', path]); expect(await restarted.exit).toBe(1)
+  const recovered = new DatabaseSync(join(config.root, 'state.sqlite'))
+  expect(recovered.prepare('SELECT state,prospective FROM authority').get()).toEqual(frozen); recovered.close()
 })
 
 test('private CLI persists before replies and signs an independently judged complete report', async () => {

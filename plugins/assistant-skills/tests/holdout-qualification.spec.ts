@@ -6,7 +6,8 @@ import { afterEach, expect, test } from 'vitest'
 import { acceptanceDigest } from '@dsh-enhanced/task-acceptance-contract'
 import { createDefinition } from '../src/definition.ts'
 import { HoldoutAuthority, type HoldoutDataset } from '../src/holdout-authority.ts'
-import { qualifyHoldout, type HoldoutQualificationInput } from '../src/holdout-qualification.ts'
+import { createProspectiveCertificate, generatorDigest } from '../src/prospective-holdout.ts'
+import { inspectProspectiveQualification, qualifyHoldout, type HoldoutQualificationInput } from '../src/holdout-qualification.ts'
 
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
@@ -80,4 +81,32 @@ test('the authority binding changes with actual initial files and rejects an old
     if (operation !== 'begin') throw new Error('must not execute')
     return previous
   } } })).rejects.toThrow(/begin binding/)
+})
+
+test('prospective inspection recomputes signed quality and rejects a changed pin, arm, budget, certificate, or receipt', async () => {
+  const workspace = await stateRoot(), root = await stateRoot(), keys = generateKeyPairSync('ed25519')
+  const scope = { principalId: 'owner', principalRecordId: 'record', principalVersion: 1, workspace, preset: 'primary' }
+  const baseline = skill(workspace, 'printf bad'), candidate = skill(workspace, 'cat')
+  const execution = { image: `sha256:${digest('d')}`, dockerPath: '/usr/bin/docker', stateRoot: root, command: '/bin/sh /workspace/artifact < /workspace/input', artifactPath: 'result.sh', expiresAt: Date.now() + 60000, repeats: 2, maxToolCalls: 2, maxBytes: 4096, maxOutputBytes: 1024, cellDurationMs: 2000, verificationDurationMs: 1000 }
+  const binding = { scopeDigest: acceptanceDigest(scope), baselineDigest: acceptanceDigest(baseline), candidateDigest: acceptanceDigest(candidate), budgetDigest: acceptanceDigest({ inputsDigest: acceptanceDigest({}), filesDigest: acceptanceDigest([]), image: execution.image, dockerPath: execution.dockerPath, command: execution.command, artifactPath: execution.artifactPath, expiresAt: execution.expiresAt, repeats: execution.repeats, maxToolCalls: execution.maxToolCalls, maxBytes: execution.maxBytes, maxOutputBytes: execution.maxOutputBytes, cellDurationMs: execution.cellDurationMs, verificationDurationMs: execution.verificationDurationMs }), expiresAt: execution.expiresAt, repeats: execution.repeats }
+  const prospective = createProspectiveCertificate(binding, dataset, keys.privateKey, '123e4567-e89b-42d3-a456-826614174000')
+  const authority = HoldoutAuthority.create({ dataset, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 }, prospective })
+  authority.begin(binding)
+  while (true) {
+    const cell = authority.next(); if (!cell) break
+    authority.record({ cellId: cell.cellId, armDigest: cell.armDigest, stdout: cell.armDigest === binding.baselineDigest ? cell.stdin : 'wrong', exitCode: 0, quiescent: true, status: 'completed', artifactDigest: digest('e'), toolCalls: [] })
+  }
+  const result = { receipt: authority.finish(), quality: { candidateChecksPassed: true, evaluationGain: 99, evaluationGainObserved: true, criticalRegressionsPassed: true, heldoutIndependence: 'proven' }, modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact', prospectiveHoldout: 'authority-attested-after-freeze' } as unknown
+  const context = { scope, baseline, candidate, execution, pinnedPublicKey: keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), expectedGeneratorDigest: generatorDigest }
+  const inspected = inspectProspectiveQualification(result, context)
+  expect(inspected).toMatchObject({ prospectiveHoldout: 'authority-attested-after-freeze', quality: { candidateChecksPassed: false, evaluationGain: -1, evaluationGainObserved: false, criticalRegressionsPassed: false, heldoutIndependence: 'unproven' } })
+  expect(inspectProspectiveQualification(result, { ...context, pinnedPublicKey: generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString() })).toBeUndefined()
+  expect(inspectProspectiveQualification(result, { ...context, candidate: skill(workspace, 'printf other') })).toBeUndefined()
+  expect(inspectProspectiveQualification(result, { ...context, execution: { ...execution, maxBytes: execution.maxBytes + 1 } })).toBeUndefined()
+  const certificateTampered = structuredClone(result) as { receipt: { prospective: { generatorDigest: string } } }
+  certificateTampered.receipt.prospective.generatorDigest = digest('z')
+  expect(inspectProspectiveQualification(certificateTampered, context)).toBeUndefined()
+  const receiptTampered = structuredClone(result) as { receipt: { signature: string } }
+  receiptTampered.receipt.signature = 'tampered'
+  expect(inspectProspectiveQualification(receiptTampered, context)).toBeUndefined()
 })

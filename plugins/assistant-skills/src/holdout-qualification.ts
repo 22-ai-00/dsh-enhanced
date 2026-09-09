@@ -6,6 +6,7 @@ import type { SkillDefinition } from './definition.js'
 import { instantiate } from './definition.js'
 import { replaySkill, validateReplayTrace, type ReplayResult } from './replay.js'
 import { verifyHoldoutSignature, type BeginResult, type HoldoutReceipt, type SignedCell } from './holdout-authority.js'
+import { verifyProspectiveCertificate } from './prospective-holdout.js'
 
 export interface HoldoutExecutionConfig {
   readonly image: string
@@ -30,7 +31,8 @@ export interface HoldoutQualificationInput {
   readonly inputs?: Readonly<Record<string, unknown>>
   readonly files?: readonly { path: string; content: string }[]
   readonly pinnedPublicKey: string
-  readonly expectedDatasetDigest: string
+  readonly expectedDatasetDigest?: string
+  readonly expectedGeneratorDigest?: string
   readonly transport: { request(operation: 'begin' | 'next' | 'record' | 'finish', value?: unknown, signal?: AbortSignal): Promise<unknown> }
   readonly signal: AbortSignal
   readonly authorize: () => void
@@ -42,6 +44,7 @@ export interface HoldoutQualificationResult {
   readonly modelCalls: 0
   readonly promotionAuthorized: false
   readonly execution: 'native-file-tools-and-isolated-artifact'
+  readonly prospectiveHoldout?: 'authority-attested-after-freeze'
 }
 
 const digest = (value: unknown) => acceptanceDigest(value)
@@ -108,6 +111,7 @@ function validReceipt(value: unknown, begin: BeginResult, seen: ReadonlyMap<stri
   if (!verifyHoldoutSignature(data as unknown as Record<string, unknown>, begin.publicKey) || data.sessionId !== begin.sessionId || data.planDigest !== begin.planDigest || data.datasetDigest !== begin.datasetDigest || data.publicKey !== begin.publicKey
     || data.scopeDigest !== begin.scopeDigest || data.baselineDigest !== begin.baselineDigest || data.candidateDigest !== begin.candidateDigest || data.budgetDigest !== begin.budgetDigest
     || data.expiresAt !== begin.expiresAt || data.repeats !== begin.repeats || !same(data.limits, begin.limits) || data.cellCount !== begin.cellCount || typeof data.complete !== 'boolean'
+    || !same(data.prospective ?? null, begin.prospective ?? null)
     || !Array.isArray(data.cellVerdicts) || data.cellVerdicts.length !== begin.cellCount || !hex(data.observationDigest) || typeof data.signature !== 'string') return false
   const ids = new Set<string>(), pairs = new Map<string, Set<string>>(), kinds = new Set<string>()
   return data.cellVerdicts.every(cell => {
@@ -130,11 +134,41 @@ function quality(receipt: HoldoutReceipt): HoldoutQualificationResult['quality']
     evaluationGainObserved: evaluationGain !== null && evaluationGain > 0, criticalRegressionsPassed: complete && receipt.cellVerdicts.filter(cell => cell.kind === 'regression' && cell.armDigest === receipt.candidateDigest).every(cell => cell.verdict === 'achieved'), heldoutIndependence: 'unproven' }
 }
 
+export type ProspectiveQualificationContext = Pick<HoldoutQualificationInput, 'scope' | 'baseline' | 'candidate' | 'execution' | 'inputs' | 'files' | 'pinnedPublicKey'> & { readonly expectedGeneratorDigest: string }
+
+function prospectiveBinding(begin: BeginResult, frozen: ReturnType<typeof binding>, key: string, generator: string): boolean {
+  const { limits: _limits, ...expected } = frozen
+  return verifyProspectiveCertificate(begin.prospective, expected, key, generator) && begin.prospective.datasetDigest === begin.datasetDigest
+}
+
+/** Reinspect a privately persisted qualification against the current exact profile and definitions.
+ * The caller must obtain the result from its trusted comparison store, never model arguments.
+ * Quality is recomputed from signed verdicts; the certificate attests generation order, not training history.
+ */
+export function inspectProspectiveQualification(value: unknown, input: ProspectiveQualificationContext): HoldoutQualificationResult | undefined {
+  try {
+    if (!plain(value) || value.modelCalls !== 0 || value.promotionAuthorized !== false || value.execution !== 'native-file-tools-and-isolated-artifact'
+      || !hex(input.expectedGeneratorDigest)) return undefined
+    validateHoldoutExecution(input.execution)
+    if (input.execution.expiresAt <= Date.now() || digest(input.baseline.source.scope) !== digest(input.scope) || digest(input.candidate.source.scope) !== digest(input.scope)) return undefined
+    const frozen = binding(input.scope, input.baseline, input.candidate, input.execution, input.inputs ?? {}, input.files ?? [])
+    const receipt = value.receipt
+    if (!validBegin(receipt, frozen, input.pinnedPublicKey) || !prospectiveBinding(receipt, frozen, input.pinnedPublicKey, input.expectedGeneratorDigest)
+      || !Array.isArray((receipt as HoldoutReceipt).cellVerdicts)) return undefined
+    const saved = receipt as HoldoutReceipt
+    const seen = new Map(saved.cellVerdicts.map(cell => [cell.cellId, cell.armDigest]))
+    if (!validReceipt(saved, receipt, seen)) return undefined
+    return { receipt: clone(saved), quality: quality(saved), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact', prospectiveHoldout: 'authority-attested-after-freeze' }
+  } catch { return undefined }
+}
+
 /** Host-only coordinator: the authority supplies signed private inputs and judges every submitted observation. */
 export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<HoldoutQualificationResult> {
-  if (!input || !input.signal || typeof input.authorize !== 'function' || !input.transport || typeof input.transport.request !== 'function' || typeof input.pinnedPublicKey !== 'string' || input.pinnedPublicKey.length === 0 || !hex(input.expectedDatasetDigest)) fail('invalid input')
+  if (!input || !input.signal || typeof input.authorize !== 'function' || !input.transport || typeof input.transport.request !== 'function' || typeof input.pinnedPublicKey !== 'string' || input.pinnedPublicKey.length === 0
+    || (input.expectedDatasetDigest === undefined) === (input.expectedGeneratorDigest === undefined) || !hex(input.expectedDatasetDigest ?? input.expectedGeneratorDigest)) fail('invalid input')
   const pinnedPublicKey = input.pinnedPublicKey
   const expectedDatasetDigest = input.expectedDatasetDigest
+  const expectedGeneratorDigest = input.expectedGeneratorDigest
   const execution = clone(input.execution); const scope = clone(input.scope); const inputs = clone(input.inputs ?? {}); const files = clone(input.files ?? [])
   if (!plain(scope) || typeof scope.principalId !== 'string' || typeof scope.principalRecordId !== 'string' || !Number.isSafeInteger(scope.principalVersion) || scope.principalVersion < 1 || typeof scope.workspace !== 'string' || !isAbsolute(scope.workspace) || typeof scope.preset !== 'string') fail('invalid qualification scope')
   validateHoldoutExecution(execution); if (execution.expiresAt <= Date.now()) fail('qualification expired')
@@ -151,7 +185,9 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
   const beginValue = await request<unknown>(input.transport, 'begin', authorityBinding, input.signal, execution.expiresAt, execution.cellDurationMs)
   if (!validBegin(beginValue, frozen, pinnedPublicKey)) fail('begin binding or pinned key is invalid')
   const begin = beginValue as BeginResult
-  if (begin.datasetDigest !== expectedDatasetDigest) fail('dataset does not match the pinned plan')
+  if (expectedDatasetDigest !== undefined && begin.datasetDigest !== expectedDatasetDigest) fail('dataset does not match the pinned plan')
+  if (expectedGeneratorDigest !== undefined && !prospectiveBinding(begin, frozen, pinnedPublicKey, expectedGeneratorDigest)) fail('prospective certificate does not match the frozen plan')
+  revalidate()
   const { IsolatedVerifierRunner } = await import('@dsh-enhanced/assistant-isolation')
   const runner = new IsolatedVerifierRunner({ stateRoot: join(execution.stateRoot, 'verification'), image: execution.image, dockerPath: execution.dockerPath,
     authorityDigest: digest({ protocol: 'assistant-skills/holdout-qualification/v1', binding: frozen }), command: execution.command, expiresAt: execution.expiresAt,
@@ -180,6 +216,7 @@ export async function qualifyHoldout(input: HoldoutQualificationInput): Promise<
     revalidate(); const receiptValue = await request<unknown>(input.transport, 'finish', undefined, input.signal, execution.expiresAt, execution.cellDurationMs)
     if (!validReceipt(receiptValue, begin, seen)) fail('receipt signature or binding is invalid')
     const receipt = receiptValue as HoldoutReceipt
-    return { receipt, quality: quality(receipt), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact' }
+    return { receipt, quality: quality(receipt), modelCalls: 0, promotionAuthorized: false, execution: 'native-file-tools-and-isolated-artifact',
+      ...(expectedGeneratorDigest === undefined ? {} : { prospectiveHoldout: 'authority-attested-after-freeze' as const }) }
   } finally { await runner.close() }
 }

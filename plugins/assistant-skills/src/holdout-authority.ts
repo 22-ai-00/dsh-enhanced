@@ -1,4 +1,5 @@
 import { createHash, createPrivateKey, createPublicKey, KeyObject, randomUUID, sign, verify } from 'node:crypto'
+import { generatorDigest, verifyProspectiveCertificate, type ProspectiveHoldoutCertificate } from './prospective-holdout.js'
 
 export type HoldoutCaseKind = 'replay' | 'evaluation' | 'regression'
 export type CellVerdict = 'achieved' | 'not-achieved' | 'unknown'
@@ -63,6 +64,8 @@ export interface BeginResult {
   readonly repeats: number
   readonly limits: HoldoutLimits
   readonly cellCount: number
+  /** Present only for a prospective dataset generated after the binding was frozen. */
+  readonly prospective?: ProspectiveHoldoutCertificate
 }
 
 export interface SignedCell {
@@ -97,6 +100,7 @@ export interface AuthorityOptions {
   readonly dataset: HoldoutDataset
   readonly privateKey: KeyObject | string | Buffer
   readonly limits: HoldoutLimits
+  readonly prospective?: ProspectiveHoldoutCertificate
   /** Deterministic clock hook for tests; production callers should omit it. */
   readonly now?: () => number
 }
@@ -192,6 +196,7 @@ export class HoldoutAuthority {
   readonly #privateKey: KeyObject
   readonly #publicKey: string
   readonly #limits: HoldoutLimits
+  readonly #prospective?: ProspectiveHoldoutCertificate
   readonly #now: () => number
   #createdAt: number
   #begin?: BeginResult
@@ -207,6 +212,11 @@ export class HoldoutAuthority {
     assert(this.#privateKey.type === 'private' && this.#privateKey.asymmetricKeyType === 'ed25519', 'private key must be Ed25519')
     this.#publicKey = createPublicKey(this.#privateKey).export({ format: 'pem', type: 'spki' }).toString()
     this.#limits = Object.freeze({ ...options.limits })
+    if (options.prospective !== undefined) {
+      assert(verifyProspectiveCertificate(options.prospective, options.prospective.binding, this.#publicKey, generatorDigest), 'prospective certificate is invalid')
+      assert(options.prospective.datasetDigest === this.#datasetDigest, 'prospective certificate dataset does not match')
+      this.#prospective = Object.freeze(structuredClone(options.prospective))
+    }
     this.#now = options.now ?? Date.now
     this.#createdAt = this.#now()
   }
@@ -253,7 +263,8 @@ export class HoldoutAuthority {
     }
     assert(binding.baselineDigest !== binding.candidateDigest, 'baseline and candidate digests must differ')
     const planDigest = sha256({ sessionId, datasetDigest: this.#datasetDigest, binding, limits: this.#limits, cells: cells.map(({ cellId, armDigest, caseId, kind, repeat }) => ({ cellId, armDigest, caseId, kind, repeat })) })
-    this.#begin = Object.freeze({ sessionId, planDigest, datasetDigest: this.#datasetDigest, publicKey: this.#publicKey, ...binding, limits: this.#limits, cellCount: cells.length })
+    if (this.#prospective) assert(verifyProspectiveCertificate(this.#prospective, binding, this.#publicKey, generatorDigest), 'prospective certificate binding does not match')
+    this.#begin = Object.freeze({ sessionId, planDigest, datasetDigest: this.#datasetDigest, publicKey: this.#publicKey, ...binding, limits: this.#limits, cellCount: cells.length, ...(this.#prospective ? { prospective: this.#prospective } : {}) })
     this.#cells = cells
     return { ...this.#begin }
   }
@@ -305,6 +316,8 @@ export class HoldoutAuthority {
     if (!this.#begin) { assert(this.#cells.length === 0 && !this.#stopped && !this.#stoppedReason, 'unbegun serialized state is inconsistent'); return }
     validateBinding({ scopeDigest: this.#begin.scopeDigest, baselineDigest: this.#begin.baselineDigest, candidateDigest: this.#begin.candidateDigest, budgetDigest: this.#begin.budgetDigest, expiresAt: this.#begin.expiresAt, repeats: this.#begin.repeats }, this.#createdAt)
     assert(this.#begin.baselineDigest !== this.#begin.candidateDigest && this.#begin.datasetDigest === this.#datasetDigest && this.#begin.publicKey === this.#publicKey && canonical(this.#begin.limits) === canonical(this.#limits), 'restored qualification binding is invalid')
+    if (this.#prospective) assert(this.#begin.prospective && verifyProspectiveCertificate(this.#begin.prospective, { scopeDigest: this.#begin.scopeDigest, baselineDigest: this.#begin.baselineDigest, candidateDigest: this.#begin.candidateDigest, budgetDigest: this.#begin.budgetDigest, expiresAt: this.#begin.expiresAt, repeats: this.#begin.repeats }, this.#publicKey, generatorDigest), 'restored prospective certificate is invalid')
+    else assert(this.#begin.prospective === undefined, 'restored prospective certificate is inconsistent')
     const expectedCount = this.#dataset.cases.length * this.#begin.repeats * 2
     assert(this.#cells.length === expectedCount && this.#begin.cellCount === expectedCount, 'restored cell count is invalid')
     const seen = new Set<string>()
