@@ -106,7 +106,7 @@ describe('DSH request serialization', () => {
     expect(() => buildPrompt(options, 100_000)).toThrow(/text-only DSH requests/)
   })
 
-  it('delegates DSH tool schemas and requires an immediate tool-call envelope', () => {
+  it('delegates DSH tool schemas without treating availability as authorization', () => {
     const options = request()
     options.tools = [{
       name: 'read',
@@ -123,13 +123,68 @@ describe('DSH request serialization', () => {
     expect(prompt).toContain('dsh-tool-calls/v1')
     expect(prompt).toContain('do not invoke TraeX-native tools')
     expect(prompt).toContain('The first output character must be {')
-    expect(prompt).toContain('request the required tool now')
+    expect(prompt).toContain('Declared tools describe availability, not authorization')
+    expect(prompt).toContain('do not retry it, bypass the rejection')
+    expect(prompt).toContain('later authorized user or system instruction explicitly permits it')
+    expect(prompt).toContain('honestly report that the requested work is blocked')
+    expect(prompt).toContain('request it now instead of merely describing future work')
     expect(prompt).toContain('never a JSON-encoded string')
     expect(prompt).toContain('"name":"read"')
     expect(prompt).toContain('"description":"Read a workspace file."')
     expect(prompt).toContain('"required":["path"]')
     const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as { constraints: { tools: { responseFormat: { calls: Array<{ arguments: unknown }> } } } }
     expect(payload.constraints.tools.responseFormat.calls[0]!.arguments).toEqual({ '<parameter name>': '<value matching that parameter schema>' })
+  })
+
+  it('preserves denied tool history and later user instructions across serialization', () => {
+    const options = request()
+    const callId = 'call-bash-denied' as never
+    options.tools = [{ name: 'bash', description: 'Run a shell command.', parameters: { type: 'object' } }]
+    options.messages = [
+      createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Run `bash` to inspect the repository.' }],
+      }),
+      createMessage({
+        role: 'assistant',
+        source: { kind: 'model', provider: 'traex-agent', model: 'default' },
+        content: [{ type: 'tool-call', id: callId, name: 'bash', arguments: '{"command":"pwd"}' }],
+      }),
+      createMessage({
+        role: 'user',
+        source: { kind: 'tool', callId },
+        content: [{
+          type: 'tool-result',
+          toolCallId: callId,
+          isError: true,
+          content: [{ type: 'text', text: 'Denied by policy: shell access is not authorized.' }],
+        }],
+      }),
+      createMessage({
+        role: 'user',
+        source: { kind: 'user' },
+        content: [{ type: 'text', text: 'Do not retry it; summarize the blocker and continue permitted analysis.' }],
+      }),
+    ]
+
+    const prompt = buildPrompt(options, 100_000)
+    const payload = JSON.parse(prompt.slice(prompt.indexOf('{'))) as {
+      conversation: Array<{ role: string; content: unknown[] }>
+    }
+
+    expect(payload.conversation).toEqual([
+      { role: 'user', content: [{ type: 'text', text: 'Run `bash` to inspect the repository.' }] },
+      { role: 'assistant', content: [{ type: 'tool-call', id: callId, name: 'bash', arguments: '{"command":"pwd"}' }] },
+      {
+        role: 'user',
+        content: [{
+          type: 'tool-result', toolCallId: callId, isError: true,
+          content: [{ type: 'text', text: 'Denied by policy: shell access is not authorized.' }],
+        }],
+      },
+      { role: 'user', content: [{ type: 'text', text: 'Do not retry it; summarize the blocker and continue permitted analysis.' }] },
+    ])
   })
 
   it('recovers a valid tool envelope accidentally wrapped in a progress preamble', () => {

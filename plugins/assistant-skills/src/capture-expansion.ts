@@ -89,6 +89,7 @@ export function captureRunExpansions(source: VerifiedWorkflowSource, scope: Goal
   if (acceptanceDigest(source.scope) !== acceptanceDigest(scope) || !text(source.goal.sessionId, 256) || !text(source.goal.nativeGoalId, 256)) fail('source expansion scope mismatch')
   const expanded: SkillRunExpansion[] = []
   const calls = new Set<string>()
+  const runs = new Set<string>()
   for (const segment of sourceSegments(source)) {
     if (!text(segment.runId, 256) || !Array.isArray(segment.steps)) fail('invalid source expansion segment')
     for (const step of segment.steps) {
@@ -100,6 +101,8 @@ export function captureRunExpansions(source: VerifiedWorkflowSource, scope: Goal
       const input = skillRunInput(step.arguments)
       if (!input || input.goalId !== source.goal.id) fail('source skill_run expansion input is invalid')
       const runId = durableRunId(scope, source.goal.sessionId, input.invocationId)
+      if (runs.has(runId)) fail('duplicate source skill_run execution')
+      runs.add(runId)
       const run = store.getRun(scope, runId)
       const definition = exactDefinition(store, scope, input)
       if (!run || !definition || run.state !== 'succeeded' || run.id !== runId || run.goalId !== source.goal.id || run.sessionId !== source.goal.sessionId
