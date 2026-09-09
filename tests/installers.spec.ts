@@ -1,10 +1,11 @@
-import { chmod, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, link, mkdtemp, mkdir, open, readFile, readdir, realpath, rename, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
 import { afterEach, describe, expect, test } from 'vitest'
 import { parse, stringify } from 'yaml'
 import { RECOVERY_CATALOG_DIGEST } from '@dsh-enhanced/assistant-recovery'
@@ -28,6 +29,10 @@ const pinnedRemoteCommon = pinnedReleaseRef === undefined ? undefined : spawnSyn
   cwd: repoRoot,
   encoding: 'buffer',
 })
+const realBwrapProbe = spawnSync('/usr/bin/bwrap', [
+  '--unshare-all', '--die-with-parent', '--ro-bind', '/', '/', '--proc', '/proc', '--dev', '/dev', '--', '/bin/true',
+], { encoding: 'utf8', timeout: 5_000 })
+const realBwrapUsable = realBwrapProbe.status === 0
 
 /**
  * Run an installer entry point.
@@ -37,7 +42,13 @@ const pinnedRemoteCommon = pinnedReleaseRef === undefined ? undefined : spawnSyn
  * Linux, launchd on macOS) stay deterministic on any development host instead
  * of only passing on the CI runner's operating system.
  */
-function runInstaller(script: string, args: readonly string[], dshHome: string, platform?: string) {
+function runInstaller(
+  script: string,
+  args: readonly string[],
+  dshHome: string,
+  platform?: string,
+  extraEnvironment: Record<string, string | undefined> = {},
+) {
   return spawnSync('/bin/bash', [script, ...args], {
     cwd: repoRoot,
     encoding: 'utf8',
@@ -45,6 +56,7 @@ function runInstaller(script: string, args: readonly string[], dshHome: string, 
       PATH: process.env.PATH ?? '',
       DSH_HOME: dshHome,
       ...(platform === undefined ? {} : { DSH_ENHANCED_PLATFORM_OVERRIDE: platform }),
+      ...extraEnvironment,
     },
   })
 }
@@ -83,6 +95,381 @@ async function writeExecutable(path: string, content: string): Promise<void> {
   await chmod(path, 0o755)
 }
 
+interface LifecycleFixtureOptions {
+  activationFails?: boolean
+  managedDependencies?: readonly string[]
+  thirdParty?: boolean
+  thirdPartyDependency?: boolean
+}
+
+interface LifecycleRunOptions {
+  activationMarker?: string
+  configAfterUpgrade?: string
+  packageBlock?: boolean
+  packageFails?: boolean
+  packageWriteRelative?: string
+}
+
+async function lifecycleFixture(options: LifecycleFixtureOptions = {}) {
+  const root = await temporaryDshHome()
+  const dshHome = join(root, 'home')
+  const profileDirectory = join(dshHome, 'profiles', 'web')
+  const fakeBin = join(root, 'bin')
+  await mkdir(profileDirectory, { recursive: true })
+  await mkdir(fakeBin)
+  const thirdParty = options.thirdParty ?? false
+  const managedDependencies = options.managedDependencies ?? ['personal-assistant']
+  const dependencies = Object.fromEntries(managedDependencies.map(name => [`@dsh-enhanced/${name}`, '0.1.0']))
+  const managedBundles = managedDependencies.map(name => `@dsh-enhanced/${name}`)
+  await writeFile(join(profileDirectory, 'package.json'), JSON.stringify({
+    name: 'dsh-profile-web', private: true,
+    dependencies: {
+      ...dependencies,
+      ...(options.thirdPartyDependency ? { 'owner-library': '1.0.0' } : {}),
+      ...(thirdParty ? { 'owner-plugin': '1.0.0' } : {}),
+    },
+    dsh: { profile: { bundles: [
+      '@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app', ...managedBundles,
+      ...(thirdParty ? ['owner-plugin'] : []),
+    ] } },
+  }, null, 2))
+  await writeFile(join(profileDirectory, 'cordis.yml'), '[]\n')
+  await writeFile(join(profileDirectory, 'cordis.patch.yml'), '- id: owner-custom\n  config: { value: keep }\n')
+  await writeFile(join(profileDirectory, 'pnpm-workspace.yaml'), 'packages:\n  - .\n')
+  await writeFile(join(profileDirectory, 'pnpm-lock.yaml'), 'lockfileVersion: 9\n')
+  await mkdir(join(dshHome, 'assistant-goals'), { recursive: true })
+  const databasePath = join(dshHome, 'assistant-goals', 'web.sqlite')
+  const database = new DatabaseSync(databasePath)
+  database.exec("PRAGMA user_version = 1; CREATE TABLE goals (value TEXT NOT NULL); INSERT INTO goals VALUES ('durable-goal-state');")
+  database.close()
+  await mkdir(join(dshHome, 'sessions'), { recursive: true })
+  await writeFile(join(dshHome, 'sessions', 'owner-session.jsonl'), 'durable-session')
+  const dshLog = join(root, 'dsh.log')
+  const bwrapLog = join(root, 'bwrap.log')
+  const lifecycleTarget = join(root, 'managed-target')
+  await mkdir(lifecycleTarget)
+  await writeFile(join(lifecycleTarget, 'package.json'), JSON.stringify({
+    name: `@dsh-enhanced/${managedDependencies[0] ?? 'personal-assistant'}`,
+    version: '0.1.0',
+  }))
+  const activation = `"${process.execPath}" --input-type=module - "$DSH_HOME/assistant-goals/web.sqlite" <<'NODE'
+import { DatabaseSync } from 'node:sqlite'
+const database = new DatabaseSync(process.argv[2])
+database.exec("PRAGMA user_version = 2; INSERT INTO goals VALUES ('migrated-during-activation');")
+database.close()
+NODE
+${options.activationFails ? "printf 'activation failed\\n' >&2; exit 23" : "printf 'dsh web: http://127.0.0.1:43210\\n'; exit 0"}`
+  await writeExecutable(join(fakeBin, 'dsh'), String.raw`#!/bin/bash
+set -euo pipefail
+{ printf 'CALL'; printf '\t%s' "$@"; printf '\n'; } >> "$LIFECYCLE_DSH_LOG"
+if [[ " ${'$'}{1:-} " == ' --version ' ]]; then printf '0.1.2-rc.1\n'; exit 0; fi
+if [[ " $* " == *' plugin '* && " $* " == *' add '* ]]; then
+  if [[ "$LIFECYCLE_PACKAGE_FAILS" == '1' ]]; then printf 'package update failed\n' >&2; exit 42; fi
+  if [[ "$LIFECYCLE_PACKAGE_BLOCK" == '1' ]]; then
+    : > "$DSH_HOME/.package-preparation-started"
+    while [[ ! -f "$DSH_HOME/.package-preparation-release" ]]; do sleep 0.05; done
+  fi
+  if [[ -n "$LIFECYCLE_CONFIG_AFTER_UPGRADE" ]]; then
+    printf '%s\n' "$LIFECYCLE_CONFIG_AFTER_UPGRADE" > "$DSH_HOME/.lifecycle-dump-config"
+  fi
+  if [[ -n "$LIFECYCLE_PACKAGE_WRITE_RELATIVE" ]]; then
+    printf 'outside-write\n' > "$DSH_HOME/$LIFECYCLE_PACKAGE_WRITE_RELATIVE"
+  fi
+  printf 'upgraded\n' > "$DSH_HOME/profiles/web/upgraded"
+  exit 0
+fi
+if [[ " $* " == *' plugin '* && " $* " == *' list '* ]]; then
+  mkdir -p "$DSH_HOME/profiles/web"
+  printf '%s\n' '{"name":"dsh-profile-web","private":true,"dsh":{"profile":{"bundles":["@deepseek-ai/dsh-base","@deepseek-ai/dsh-web-app"]}}}' > "$DSH_HOME/profiles/web/package.json"
+  printf '%s\n' '[]' > "$DSH_HOME/profiles/web/cordis.yml"
+  printf '%s\n' '[]' > "$DSH_HOME/profiles/web/cordis.patch.yml"
+  exit 0
+fi
+if [[ " $* " == *' --dump-config '* ]]; then
+  if [[ -f "$DSH_HOME/.lifecycle-dump-config" ]]; then cat "$DSH_HOME/.lifecycle-dump-config"; else printf '[]\n'; fi
+  exit 0
+fi
+if [[ " $* " == *' --host 127.0.0.1 --no-open --port 0 '* ]]; then
+  : > "$LIFECYCLE_ACTIVATION_MARKER"
+  __ACTIVATION__
+fi
+exit 2
+`.replace('__ACTIVATION__', activation))
+  await writeExecutable(join(fakeBin, 'pnpm'), `#!/bin/bash
+set -euo pipefail
+if [[ " \${1:-} " == ' --version ' ]]; then printf '10.0.0\n'; fi
+exit 0
+`)
+  await writeExecutable(join(fakeBin, 'bwrap'), `#!${process.execPath}
+const { appendFileSync } = require('node:fs')
+const { realpathSync } = require('node:fs')
+const { spawnSync } = require('node:child_process')
+const args = process.argv.slice(2)
+const separator = args.indexOf('--')
+const environment = {}
+const controls = Object.fromEntries(Object.entries(process.env).filter(([key]) => key.startsWith('LIFECYCLE_')))
+let stageHome
+let logicalHome
+for (let index = 0; index < separator; index += 1) {
+  if (args[index] === '--setenv') { environment[args[index + 1]] = args[index + 2]; index += 2; continue }
+  if (args[index] === '--bind') { stageHome = args[index + 1]; logicalHome = args[index + 2]; index += 2; continue }
+  if (args[index] === '--bind-fd') { stageHome = realpathSync('/proc/self/fd/' + args[index + 1]); logicalHome = args[index + 2]; index += 2; continue }
+  if (args[index] === '--ro-bind') { index += 2; continue }
+  if (args[index] === '--tmpfs' || args[index] === '--proc' || args[index] === '--dev') { index += 1 }
+}
+if (controls.LIFECYCLE_BWRAP_LOG) appendFileSync(controls.LIFECYCLE_BWRAP_LOG, JSON.stringify(args) + '\\n')
+if (separator < 0 || !args.includes('--unshare-all') || args.includes('--share-net') || !stageHome || !logicalHome) {
+  process.stderr.write('fake bwrap rejected unsafe or incomplete sandbox arguments\\n')
+  process.exit(97)
+}
+for (const [key, value] of Object.entries(environment)) {
+  if (value === logicalHome || value.startsWith(logicalHome + '/')) environment[key] = stageHome + value.slice(logicalHome.length)
+}
+Object.assign(environment, controls)
+for (const key of ['LIFECYCLE_ACTIVATION_MARKER']) {
+  const value = environment[key]
+  if (value === logicalHome || value.startsWith(logicalHome + '/')) environment[key] = stageHome + value.slice(logicalHome.length)
+}
+const command = args.slice(separator + 1)
+for (let index = 0; index < command.length; index += 1) {
+  const value = command[index]
+  if (value === logicalHome || value.startsWith(logicalHome + '/')) command[index] = stageHome + value.slice(logicalHome.length)
+}
+const result = spawnSync(command[0], command.slice(1), { env: environment, encoding: 'buffer' })
+if (result.stdout) process.stdout.write(result.stdout)
+if (result.stderr) process.stderr.write(result.stderr)
+if (result.error) { process.stderr.write(String(result.error) + '\\n'); process.exit(98) }
+process.exit(result.status ?? 99)
+`)
+  return {
+    root, dshHome, profileDirectory, fakeBin, databasePath, dshLog, bwrapLog, lifecycleTarget,
+    activationMarker: join(dshHome, '.activation-ran'),
+  }
+}
+
+function lifecycleEnvironment(dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
+  return {
+    PATH: `${fakeBin}:${process.env.PATH ?? ''}`, DSH_HOME: dshHome,
+    LIFECYCLE_ACTIVATION_MARKER: options.activationMarker ?? join(dshHome, '.activation-ran'),
+    LIFECYCLE_BWRAP_LOG: join(dirname(dshHome), 'bwrap.log'),
+    LIFECYCLE_CONFIG_AFTER_UPGRADE: options.configAfterUpgrade ?? '',
+    LIFECYCLE_DSH_LOG: join(dirname(dshHome), 'dsh.log'),
+    LIFECYCLE_PACKAGE_FAILS: options.packageFails ? '1' : '0',
+    LIFECYCLE_PACKAGE_BLOCK: options.packageBlock ? '1' : '0',
+    LIFECYCLE_PACKAGE_WRITE_RELATIVE: options.packageWriteRelative ?? '',
+  }
+}
+
+function runLifecycle(args: readonly string[], dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
+  return spawnSync('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_profile_lifecycle "$@"',
+    'lifecycle-test', installerLibrary, ...args], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: lifecycleEnvironment(dshHome, fakeBin, options),
+  })
+}
+
+function startLifecycle(args: readonly string[], dshHome: string, fakeBin: string, options: LifecycleRunOptions = {}) {
+  const child = spawn('/bin/bash', ['-c', 'source "$1"; shift; dsh_enhanced_profile_lifecycle "$@"',
+    'lifecycle-test', installerLibrary, ...args], {
+    cwd: repoRoot, env: lifecycleEnvironment(dshHome, fakeBin, options),
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += String(chunk) })
+  child.stderr.on('data', chunk => { stderr += String(chunk) })
+  return { child,
+    done: new Promise<{ status: number | null; stdout: string; stderr: string }>(resolveDone => {
+      child.once('close', status => resolveDone({ status, stdout, stderr }))
+    }),
+  }
+}
+
+function runRecovery(profile: string, dshHome: string, fakeBin: string) {
+  return spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_recover_profile_lifecycle "$2" "$3" 0',
+    'recovery-test', installerLibrary, profile, dshHome], {
+    cwd: repoRoot, encoding: 'utf8', env: lifecycleEnvironment(dshHome, fakeBin),
+  })
+}
+
+function startRecovery(profile: string, dshHome: string, fakeBin: string) {
+  const child = spawn('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_recover_profile_lifecycle "$2" "$3" 0',
+    'recovery-test', installerLibrary, profile, dshHome], {
+    cwd: repoRoot, env: lifecycleEnvironment(dshHome, fakeBin),
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += String(chunk) })
+  child.stderr.on('data', chunk => { stderr += String(chunk) })
+  return {
+    child,
+    done: new Promise<{ status: number | null; stdout: string; stderr: string }>(resolveDone => {
+      child.once('close', status => resolveDone({ status, stdout, stderr }))
+    }),
+  }
+}
+
+async function holdExternalLifecycleLock(path: string) {
+  const child = spawn('/usr/bin/python3', ['-c', [
+    'import fcntl, os, sys',
+    'handle = os.open(sys.argv[1], os.O_RDWR | os.O_CREAT, 0o600)',
+    'fcntl.flock(handle, fcntl.LOCK_EX)',
+    'sys.stdout.write("LOCKED\\n")',
+    'sys.stdout.flush()',
+    'sys.stdin.buffer.read()',
+  ].join('\n'), path], { stdio: ['pipe', 'pipe', 'pipe'] })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.on('data', chunk => { stdout += String(chunk) })
+  child.stderr.on('data', chunk => { stderr += String(chunk) })
+  await new Promise<void>((resolveReady, rejectReady) => {
+    const timeout = setTimeout(() => rejectReady(new Error(`external lock did not become ready: ${stderr}`)), 5_000)
+    const inspect = () => {
+      if (!stdout.includes('LOCKED\n')) return
+      clearTimeout(timeout)
+      child.stdout.off('data', inspect)
+      resolveReady()
+    }
+    child.stdout.on('data', inspect)
+    child.once('exit', status => {
+      if (!stdout.includes('LOCKED\n')) {
+        clearTimeout(timeout)
+        rejectReady(new Error(`external lock exited with ${status}: ${stderr}`))
+      }
+    })
+  })
+  return {
+    async release() {
+      child.stdin.end()
+      await new Promise<void>(resolveClose => child.once('close', () => resolveClose()))
+    },
+  }
+}
+
+async function waitForFile(path: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      await readFile(path)
+      return
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+    await new Promise(resolveDelay => setTimeout(resolveDelay, 25))
+  }
+  throw new Error(`Timed out waiting for ${path}`)
+}
+
+function readLifecycleDatabase(path: string) {
+  const database = new DatabaseSync(path, { readOnly: true })
+  const userVersion = database.prepare('PRAGMA user_version').get() as { user_version: number }
+  const values = database.prepare('SELECT value FROM goals ORDER BY rowid').all() as Array<{ value: string }>
+  database.close()
+  return { userVersion: userVersion.user_version, values: values.map(({ value }) => value) }
+}
+
+async function preservedLifecycleTransactions(dshHome: string): Promise<string[]> {
+  const parent = dirname(dshHome)
+  const prefix = `${basename(dshHome)}.dsh-enhanced-transaction`
+  return (await readdir(parent))
+    .filter(name => name === prefix || name.startsWith(`${prefix}.`))
+    .map(name => join(parent, name))
+    .sort()
+}
+
+async function readJsonLines(path: string): Promise<unknown[][]> {
+  const source = await readFile(path, 'utf8')
+  return source.trim().split('\n').filter(Boolean).map(line => JSON.parse(line) as unknown[])
+}
+
+type RecoveryState = 'preparing' | 'prepared' | 'validated' | 'original-renamed' | 'swapped' | 'committed' | 'cleanup-started' | 'failed'
+
+interface LifecycleIdentity {
+  dev: string
+  ino: string
+}
+
+interface BoundLifecycleManifest {
+  version: 1
+  id: string
+  homePath: string
+  canonicalHome: string
+  transactionPath: string
+  profile: string
+  operation: 'upgrade' | 'uninstall'
+  originalIdentity: LifecycleIdentity
+  originalProfileDigest: string
+  stagedIdentity?: LifecycleIdentity
+  stagedProfileDigest?: string
+  createdAt: string
+  state: RecoveryState
+  updatedAt: string
+  bindingDigest: string
+}
+
+async function lifecycleIdentity(path: string): Promise<LifecycleIdentity> {
+  const entry = await stat(path)
+  return { dev: String(entry.dev), ino: String(entry.ino) }
+}
+
+function lifecycleBinding(manifest: Omit<BoundLifecycleManifest, 'bindingDigest' | 'updatedAt'>) {
+  return {
+    version: manifest.version,
+    id: manifest.id,
+    homePath: manifest.homePath,
+    canonicalHome: manifest.canonicalHome,
+    transactionPath: manifest.transactionPath,
+    profile: manifest.profile,
+    operation: manifest.operation,
+    originalIdentity: manifest.originalIdentity,
+    originalProfileDigest: manifest.originalProfileDigest,
+    stagedIdentity: manifest.stagedIdentity,
+    stagedProfileDigest: manifest.stagedProfileDigest,
+    createdAt: manifest.createdAt,
+    state: manifest.state,
+  }
+}
+
+async function writeBoundLifecycleManifest(options: {
+  dshHome: string
+  originalHome: string
+  stagedHome?: string
+  state: RecoveryState
+  originalProfileDigest?: string
+  originalIdentity?: LifecycleIdentity
+  stagedIdentity?: LifecycleIdentity
+  stagedProfileDigest?: string
+}): Promise<BoundLifecycleManifest> {
+  const transactionPath = `${options.dshHome}.dsh-enhanced-transaction`
+  await mkdir(transactionPath, { recursive: true, mode: 0o700 })
+  await chmod(transactionPath, 0o700)
+  const createdAt = '2026-09-09T00:00:00.000Z'
+  const base = {
+    version: 1 as const,
+    id: `recovery-${options.state}`,
+    homePath: options.dshHome,
+    canonicalHome: await realpath(options.dshHome).catch(() => options.dshHome),
+    transactionPath,
+    profile: 'web',
+    operation: 'upgrade' as const,
+    originalIdentity: options.originalIdentity ?? await lifecycleIdentity(options.originalHome),
+    originalProfileDigest: options.originalProfileDigest ?? createHash('sha256')
+      .update(await readFile(join(options.originalHome, 'profiles', 'web', 'package.json')))
+      .digest('hex'),
+    stagedIdentity: options.stagedIdentity ?? (options.stagedHome === undefined ? undefined : await lifecycleIdentity(options.stagedHome)),
+    stagedProfileDigest: options.stagedProfileDigest,
+    createdAt,
+    state: options.state,
+  }
+  const manifest: BoundLifecycleManifest = {
+    ...base,
+    updatedAt: createdAt,
+    bindingDigest: createHash('sha256').update(JSON.stringify(lifecycleBinding(base))).digest('hex'),
+  }
+  await writeFile(join(transactionPath, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, { mode: 0o600 })
+  return manifest
+}
+
 const yamlOptions = {
   customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: (value: string) => value }],
 } as const
@@ -106,6 +493,526 @@ afterEach(async () => {
 })
 
 describe('one-click installers', () => {
+  test('offline upgrade swaps one validated home while preserving custom configuration and durable task state', async () => {
+    const f = await lifecycleFixture()
+    const patchBefore = await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(await readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).toBe('upgraded\n')
+    expect(await readFile(join(f.profileDirectory, 'cordis.patch.yml'), 'utf8')).toBe(patchBefore)
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({
+      userVersion: 2, values: ['durable-goal-state', 'migrated-during-activation'],
+    })
+    expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe('durable-session')
+    expect(result.stdout).toContain('profile 生命周期事务完成：upgrade')
+    await expect(readFile(`${f.dshHome}.dsh-enhanced-transaction/state`, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    const sandboxInvocations = await readJsonLines(f.bwrapLog)
+    expect(sandboxInvocations).toHaveLength(8)
+    for (const invocation of sandboxInvocations) {
+      expect(invocation).toContain('--unshare-all')
+      expect(invocation).not.toContain('--share-net')
+      expect(invocation).toContain('--die-with-parent')
+      expect(invocation).toContain('--new-session')
+      expect(invocation).toEqual(expect.arrayContaining(['--ro-bind', '/', '/', '--tmpfs', '/tmp']))
+      const bind = invocation.indexOf('--bind-fd')
+      expect(invocation.slice(bind, bind + 3)).toEqual(['--bind-fd', '3', f.dshHome])
+      const dshHomeVariable = invocation.findIndex((value, index) => value === 'DSH_HOME' && invocation[index - 1] === '--setenv')
+      expect(invocation[dshHomeVariable + 1]).toBe(f.dshHome)
+    }
+  })
+
+  test('offline upgrade leaves original home untouched after isolated activation fails', async () => {
+    const f = await lifecycleFixture({ activationFails: true })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('原 DSH_HOME 未修改')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    await expect(readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+    const preserved = await preservedLifecycleTransactions(f.dshHome)
+    expect(preserved).toHaveLength(1)
+    expect(preserved[0]).toBe(`${f.dshHome}.dsh-enhanced-transaction`)
+    const preservedManifest = JSON.parse(await readFile(join(preserved[0]!, 'manifest.json'), 'utf8'))
+    expect(preservedManifest).toMatchObject({ operation: 'upgrade', profile: 'web', state: 'failed' })
+    expect(preservedManifest.failure).toContain('隔离 Host 激活失败')
+    const stagedDatabase = join(preserved[0]!, 'staged-home', 'assistant-goals', 'web.sqlite')
+    expect(readLifecycleDatabase(stagedDatabase)).toEqual({
+      userVersion: 2, values: ['durable-goal-state', 'migrated-during-activation'],
+    })
+    await expect(readFile(f.activationMarker, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await readFile(join(preserved[0]!, 'staged-home', '.activation-ran'), 'utf8')).toBe('')
+  })
+
+  test('offline upgrade leaves the original home untouched when package preparation fails before swap', async () => {
+    const f = await lifecycleFixture()
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, {
+      activationMarker: f.activationMarker, packageFails: true,
+    })
+
+    expect(result.status).toBe(42)
+    expect(result.stderr).toContain('原 DSH_HOME 未修改')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    await expect(readFile(join(f.profileDirectory, 'upgraded'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(f.activationMarker, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+  })
+
+  test('offline uninstall archives the complete old profile and preserves all external durable state', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+
+    const result = runLifecycle(['uninstall', 'web', f.dshHome, '0'], f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    const current = JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))
+    expect(current.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app'])
+    const archives = await readdir(join(f.dshHome, 'uninstalled-profiles'))
+    expect(archives).toHaveLength(1)
+    const archived = JSON.parse(await readFile(join(f.dshHome, 'uninstalled-profiles', archives[0]!, 'package.json'), 'utf8'))
+    expect(archived.dependencies).toMatchObject({ '@dsh-enhanced/personal-assistant': '0.1.0' })
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 2, values: ['durable-goal-state', 'migrated-during-activation'] })
+    expect(await readFile(join(f.dshHome, 'sessions', 'owner-session.jsonl'), 'utf8')).toBe('durable-session')
+    const repeated = runLifecycle(['uninstall', 'web', f.dshHome, '0'], f.dshHome, f.fakeBin)
+    expect(repeated.status, repeated.stderr).toBe(0)
+    expect(repeated.stdout).toContain('没有 @dsh-enhanced/* 顶层依赖')
+    expect(await readdir(join(f.dshHome, 'uninstalled-profiles'))).toEqual(archives)
+  })
+
+  test('uninstall fails closed without changing a profile that has third-party bundles', async () => {
+    const f = await lifecycleFixture({ thirdParty: true })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+    const result = runLifecycle(['uninstall', 'web', f.dshHome, '0'], f.dshHome, f.fakeBin)
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/third-party|第三方/u)
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+  })
+
+  test('upgrade fails closed without changing a profile that has a third-party bundle', async () => {
+    const f = await lifecycleFixture({ thirdParty: true })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/third-party|第三方/u)
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    await expect(readFile(f.dshLog, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+  })
+
+  test('upgrade rejects an ordinary dependency activated as a third-party composed row', async () => {
+    const f = await lifecycleFixture({ thirdPartyDependency: true })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, {
+      configAfterUpgrade: '- id: owner-local-plugin\n  name: owner-library\n  config:\n    dataDir: /srv/owner-state',
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('rejects enabled non-first-party row owner-local-plugin')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    await expect(readFile(f.activationMarker, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('refuses unbound legacy transaction residue without renaming or deleting unknown homes', async () => {
+    const f = await lifecycleFixture()
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    await mkdir(transaction, { mode: 0o700 })
+    await writeFile(join(transaction, 'state'), 'swapped\n')
+    await rename(f.dshHome, join(transaction, 'original-home'))
+    await mkdir(f.dshHome)
+    await writeFile(join(f.dshHome, 'failed-new-home'), 'partial')
+
+    const result = runRecovery('web', f.dshHome, f.fakeBin)
+
+    expect(result.status).not.toBe(0)
+    expect(result.stderr).toMatch(/unbound|绑定|未知|manifest/iu)
+    expect(await readFile(join(f.dshHome, 'failed-new-home'), 'utf8')).toBe('partial')
+    expect(readLifecycleDatabase(join(transaction, 'original-home', 'assistant-goals', 'web.sqlite'))).toEqual({
+      userVersion: 1, values: ['durable-goal-state'],
+    })
+  })
+
+  test.each(['preparing', 'failed'] as const)('bound %s recovery preserves evidence while leaving the original home intact', async state => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+    const originalManifest = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const stagedHome = join(transaction, 'staged-home')
+    await mkdir(stagedHome, { recursive: true })
+    await writeFile(join(stagedHome, 'failed-stage-marker'), state)
+    await writeBoundLifecycleManifest({ dshHome: f.dshHome, originalHome: f.dshHome, stagedHome, state })
+
+    const result = runRecovery('web', f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('原 DSH_HOME 未修改')
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(originalManifest)
+    const preserved = await preservedLifecycleTransactions(f.dshHome)
+    expect(preserved).toHaveLength(1)
+    expect(preserved[0]).not.toBe(transaction)
+    expect(await readFile(join(preserved[0]!, 'staged-home', 'failed-stage-marker'), 'utf8')).toBe(state)
+    const manifest = JSON.parse(await readFile(join(preserved[0]!, 'manifest.json'), 'utf8'))
+    expect(manifest).toMatchObject({ state, originalIdentity })
+  })
+
+  test('bound original-renamed recovery restores an absent home from the original backup', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const backupHome = join(transaction, 'original-home')
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+    const originalManifest = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    await mkdir(transaction, { mode: 0o700 })
+    await rename(f.dshHome, backupHome)
+    await writeBoundLifecycleManifest({
+      dshHome: f.dshHome, originalHome: backupHome, state: 'original-renamed', originalIdentity,
+    })
+
+    const result = runRecovery('web', f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('已恢复原 DSH_HOME')
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(originalManifest)
+    const preserved = await preservedLifecycleTransactions(f.dshHome)
+    expect(preserved).toHaveLength(1)
+    expect(preserved[0]).not.toBe(transaction)
+    await expect(readFile(join(preserved[0]!, 'original-home', 'profiles', 'web', 'package.json'), 'utf8'))
+      .rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
+  test('bound swapped recovery restores the original and keeps the failed staged home as evidence', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const backupHome = join(transaction, 'original-home')
+    const stagedHome = join(transaction, 'staged-home')
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+    const originalManifest = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    await mkdir(transaction, { mode: 0o700 })
+    await rename(f.dshHome, backupHome)
+    await mkdir(stagedHome)
+    await mkdir(join(stagedHome, 'profiles', 'web'), { recursive: true })
+    await writeFile(join(stagedHome, 'profiles', 'web', 'package.json'), '{"staged":true}\n')
+    await writeFile(join(stagedHome, 'staged-marker'), 'failed staged home')
+    const stagedIdentity = await lifecycleIdentity(stagedHome)
+    await writeBoundLifecycleManifest({
+      dshHome: f.dshHome, originalHome: backupHome, stagedHome, state: 'swapped', originalIdentity, stagedIdentity,
+    })
+    await rename(stagedHome, f.dshHome)
+
+    const result = runRecovery('web', f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toContain('原 DSH_HOME 已恢复')
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(originalIdentity)
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(originalManifest)
+    const preserved = await preservedLifecycleTransactions(f.dshHome)
+    expect(preserved).toHaveLength(1)
+    expect(await readFile(join(preserved[0]!, 'failed-home', 'staged-marker'), 'utf8')).toBe('failed staged home')
+  })
+
+  test('bound committed recovery removes its original backup and transaction without changing the staged live home', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const backupHome = join(transaction, 'original-home')
+    const stagedHome = join(transaction, 'staged-home')
+    const originalIdentity = await lifecycleIdentity(f.dshHome)
+    await mkdir(transaction, { mode: 0o700 })
+    await rename(f.dshHome, backupHome)
+    await mkdir(join(stagedHome, 'profiles', 'web'), { recursive: true })
+    await writeFile(join(stagedHome, 'profiles', 'web', 'package.json'), '{"staged":true}\n')
+    await writeFile(join(stagedHome, 'committed-marker'), 'keep live')
+    const stagedIdentity = await lifecycleIdentity(stagedHome)
+    const stagedProfileDigest = createHash('sha256')
+      .update(await readFile(join(stagedHome, 'profiles', 'web', 'package.json')))
+      .digest('hex')
+    await writeBoundLifecycleManifest({
+      dshHome: f.dshHome, originalHome: backupHome, stagedHome, state: 'committed',
+      originalIdentity, stagedIdentity, stagedProfileDigest,
+    })
+    await rename(stagedHome, f.dshHome)
+
+    const result = runRecovery('web', f.dshHome, f.fakeBin)
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('已完成上次提交后的绑定清理')
+    expect(await lifecycleIdentity(f.dshHome)).toEqual(stagedIdentity)
+    expect(await readFile(join(f.dshHome, 'committed-marker'), 'utf8')).toBe('keep live')
+    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+  })
+
+  test.each([
+    ['inode', { inode: true, digest: false }],
+    ['digest', { inode: false, digest: true }],
+  ] as const)('bound recovery fails closed on an original %s mismatch', async (_kind, mismatch) => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const markerPath = join(transaction, 'staged-home', 'evidence')
+    await mkdir(dirname(markerPath), { recursive: true })
+    await writeFile(markerPath, 'untouched evidence')
+    const actualIdentity = await lifecycleIdentity(f.dshHome)
+    const originalIdentity = mismatch.inode ? { ...actualIdentity, ino: String(BigInt(actualIdentity.ino) + 1n) } : actualIdentity
+    await writeBoundLifecycleManifest({
+      dshHome: f.dshHome,
+      originalHome: f.dshHome,
+      stagedHome: dirname(markerPath),
+      state: 'failed',
+      originalIdentity,
+      originalProfileDigest: mismatch.digest ? '0'.repeat(64) : undefined,
+    })
+
+    const result = runRecovery('web', f.dshHome, f.fakeBin)
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toMatch(mismatch.inode ? /身份未知|拒绝重命名|inode/iu : /摘要不匹配|digest/iu)
+    expect(await readFile(markerPath, 'utf8')).toBe('untouched evidence')
+    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([transaction])
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+  })
+
+  test('a concurrent lifecycle operation is refused while preparation holds the home lock and leaves the original untouched', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+    const first = startLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, { packageBlock: true })
+    const stagedHome = join(`${f.dshHome}.dsh-enhanced-transaction`, 'staged-home')
+    await waitForFile(join(stagedHome, '.package-preparation-started'))
+
+    const second = startLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+    const observedSecond = await Promise.race([
+      second.done,
+      new Promise<undefined>(resolveDelay => setTimeout(resolveDelay, 1_000)),
+    ])
+    await writeFile(join(stagedHome, '.package-preparation-release'), '')
+    const secondResult = observedSecond ?? await second.done
+    expect(observedSecond, 'the contender must fail immediately rather than wait for the lock').toBeDefined()
+    expect(secondResult.status).not.toBe(0)
+    expect(secondResult.stderr).toMatch(/busy|lock|正在|并发|占用/iu)
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+
+    const firstResult = await first.done
+    expect(firstResult.status, firstResult.stderr).toBe(0)
+  })
+
+  test('an externally held lifecycle lock is nonblocking and covers recovery before any residue is moved', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const transaction = `${f.dshHome}.dsh-enhanced-transaction`
+    const residueMarker = join(transaction, 'legacy-residue')
+    await mkdir(transaction, { mode: 0o700 })
+    await writeFile(residueMarker, 'must-not-move')
+    const lock = await holdExternalLifecycleLock(`${f.dshHome}.dsh-enhanced-lifecycle.lock`)
+
+    try {
+      const recovery = startRecovery('web', f.dshHome, f.fakeBin)
+      const result = await Promise.race([
+        recovery.done,
+        new Promise<undefined>(resolveDelay => setTimeout(resolveDelay, 1_000)),
+      ])
+
+      expect(result, 'recovery must fail rather than wait for an externally owned lock').toBeDefined()
+      expect(result!.status).not.toBe(0)
+      expect(result!.stderr).toMatch(/busy|lock|正在|并发|占用/iu)
+      expect(await readFile(residueMarker, 'utf8')).toBe('must-not-move')
+      expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([transaction])
+    } finally {
+      await lock.release()
+    }
+  })
+
+  test('post-upgrade structural validation rejects a newly introduced external state path before activation or swap', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const manifestBefore = await readFile(join(f.profileDirectory, 'package.json'), 'utf8')
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, {
+      configAfterUpgrade: "- id: newly-installed-state\n  name: '@dsh-enhanced/personal-assistant'\n  config:\n    statePath: /srv/newly-installed/state.json",
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('lifecycle configuration rejects newly-installed-state.statePath: resolves outside canonical DSH_HOME')
+    expect(await readFile(join(f.profileDirectory, 'package.json'), 'utf8')).toBe(manifestBefore)
+    await expect(readFile(f.activationMarker, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(readLifecycleDatabase(f.databasePath)).toEqual({ userVersion: 1, values: ['durable-goal-state'] })
+    const preserved = await preservedLifecycleTransactions(f.dshHome)
+    expect(preserved).toHaveLength(1)
+    expect(await readFile(join(preserved[0]!, 'staged-home', '.lifecycle-dump-config'), 'utf8')).toContain('/srv/newly-installed/state.json')
+  })
+
+  test('rejects a descendant symlink escape before a staged package command can write outside DSH_HOME', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const outsideDirectory = join(f.root, 'outside')
+    const outsideWrite = join(outsideDirectory, 'escape.txt')
+    await mkdir(outsideDirectory)
+    await symlink(outsideDirectory, join(f.dshHome, 'escape-link'))
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin, {
+      packageWriteRelative: 'escape-link/escape.txt',
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toMatch(/symbolic|symlink|符号链接/iu)
+    await expect(readFile(outsideWrite, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+  })
+
+  test('rejects a hardlink with a directory entry outside DSH_HOME before the staged package command', async () => {
+    const f = await lifecycleFixture({ thirdParty: false })
+    const outsideFile = join(f.root, 'outside-state')
+    const insideLink = join(f.dshHome, 'linked-state')
+    await writeFile(outsideFile, 'outside must remain unchanged')
+    await link(outsideFile, insideLink)
+
+    const result = runLifecycle(['upgrade', 'web', f.dshHome, '0', f.lifecycleTarget], f.dshHome, f.fakeBin)
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toMatch(/hardlink|硬链接|连接到快照外部/iu)
+    expect(await readFile(outsideFile, 'utf8')).toBe('outside must remain unchanged')
+    expect(await readFile(insideLink, 'utf8')).toBe('outside must remain unchanged')
+    await expect(readFile(f.dshLog, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await preservedLifecycleTransactions(f.dshHome)).toEqual([])
+  })
+
+  test.skipIf(!realBwrapUsable)('real bwrap mounts a /tmp staged home by fd at the logical DSH_HOME after /tmp isolation', async () => {
+    const root = await temporaryDshHome()
+    const logicalHome = join(root, 'logical-home')
+    const stagedHome = join(root, 'staged-home')
+    await mkdir(stagedHome)
+    await writeFile(join(stagedHome, 'mounted-marker'), 'staged')
+    const stagedHandle = await open(stagedHome, 'r')
+
+    try {
+      const result = spawnSync('/usr/bin/bwrap', [
+        '--unshare-all', '--die-with-parent', '--new-session',
+        '--ro-bind', '/', '/',
+        '--tmpfs', '/tmp', '--tmpfs', '/run',
+        '--dir', logicalHome,
+        '--bind-fd', '3', logicalHome,
+        '--proc', '/proc', '--dev', '/dev',
+        '--chdir', '/tmp', '--clearenv',
+        '--setenv', 'PATH', '/usr/bin:/bin',
+        '--setenv', 'HOME', '/tmp',
+        '--setenv', 'TMPDIR', '/tmp',
+        '--setenv', 'DSH_HOME', logicalHome,
+        '--', '/bin/sh', '-c', 'test "$DSH_HOME" = "$1" && test "$(cat "$DSH_HOME/mounted-marker")" = staged && printf "%s\n" "$DSH_HOME"',
+        'bwrap-smoke', logicalHome,
+      ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe', stagedHandle.fd], timeout: 5_000 })
+
+      expect(result.status, result.stderr).toBe(0)
+      expect(result.stdout).toBe(`${logicalHome}\n`)
+    } finally {
+      await stagedHandle.close()
+    }
+  })
+
+  test('installer upgrade targets only existing managed dependencies and preserves third-party dependencies', async () => {
+    const f = await lifecycleFixture({
+      managedDependencies: ['personal-assistant', 'assistant-goals'],
+      thirdParty: false,
+      thirdPartyDependency: true,
+    })
+    const manifestBefore = JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))
+
+    const result = runInstaller(localInstaller, [
+      '--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--dry-run',
+    ], f.dshHome, undefined, lifecycleEnvironment(f.dshHome, f.fakeBin))
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stdout).toContain('pnpm --dir')
+    expect(result.stdout).toContain('install --offline --frozen-lockfile')
+    expect(result.stdout).toContain('dsh plugin --profile web add')
+    for (const target of [
+      join(repoRoot, 'plugins', 'personal-assistant'),
+      join(repoRoot, 'plugins', 'assistant-goals'),
+    ]) expect(result.stdout).toContain(target)
+    for (const absent of ['plugin-control-plane', 'assistant-delivery', 'assistant-web-owner']) {
+      expect(result.stdout).not.toContain(join(repoRoot, 'plugins', absent))
+    }
+    expect(JSON.parse(await readFile(join(f.profileDirectory, 'package.json'), 'utf8'))).toEqual(manifestBefore)
+  })
+
+  test('upgrade and uninstall require an existing stopped web or autonomy profile', async () => {
+    const dshHome = await temporaryDshHome()
+    const profile = join(dshHome, 'profiles', 'web')
+    await mkdir(profile, { recursive: true })
+    await writeFile(join(profile, 'package.json'), '{}')
+
+    const missingConfirmation = runInstaller(localInstaller, ['--operation', 'upgrade', '--scenario', 'web', '--dry-run'], dshHome)
+    expect(missingConfirmation.status).toBe(2)
+    expect(missingConfirmation.stderr).toContain('--confirm-dsh-home-stopped')
+    const lark = runInstaller(localInstaller, ['--operation', 'upgrade', '--scenario', 'lark', '--confirm-dsh-home-stopped', '--dry-run'], dshHome)
+    expect(lark.status).toBe(2)
+    expect(lark.stderr).toContain('显式 --scenario web 或 --scenario autonomy')
+    const hostChange = runInstaller(localInstaller, ['--operation', 'upgrade', '--scenario', 'web', '--confirm-dsh-home-stopped', '--dsh-version', '0.1.2-rc.1', '--dry-run'], dshHome)
+    expect(hostChange.status).toBe(2)
+    expect(hostChange.stderr).toContain('不会修改全局 DSH')
+  })
+
+  test('lifecycle transactions reject state paths outside the snapshotted DSH_HOME', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const fakeBin = join(root, 'bin')
+    await mkdir(dshHome)
+    await mkdir(fakeBin)
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" '  config:' '    databasePath: /srv/shared/state.sqlite'
+`)
+
+    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_validate_lifecycle_state_paths web "$2"',
+      'state-path-test', installerLibrary, dshHome], {
+      cwd: repoRoot, encoding: 'utf8', env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('lifecycle configuration rejects custom-state.databasePath: resolves outside canonical DSH_HOME')
+  })
+
+  test('lifecycle state-path validation fails closed for escaping dshHomePath expressions', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const fakeBin = join(root, 'bin')
+    await mkdir(dshHome)
+    await mkdir(fakeBin)
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" '  config:' "    databasePath: !!js dshHomePath('../shared/state.sqlite')"
+`)
+
+    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_validate_lifecycle_state_paths web "$2"',
+      'state-path-test', installerLibrary, dshHome], {
+      cwd: repoRoot, encoding: 'utf8', env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('lifecycle configuration rejects custom-state.databasePath: only a non-empty relative dshHomePath expression is allowed')
+  })
+
+  test('lifecycle state-path validation fails closed for default dshHomePath expressions', async () => {
+    const root = await temporaryDshHome()
+    const dshHome = join(root, 'home')
+    const fakeBin = join(root, 'bin')
+    await mkdir(dshHome)
+    await mkdir(fakeBin)
+    await writeExecutable(join(fakeBin, 'dsh'), `#!/bin/bash
+printf '%s\n' '- id: custom-state' "  name: '@dsh-enhanced/personal-assistant'" '  config:' '    databasePath: !!js dshHomePath()'
+`)
+
+    const result = spawnSync('/bin/bash', ['-c', 'source "$1"; dsh_enhanced_validate_lifecycle_state_paths web "$2"',
+      'state-path-test', installerLibrary, dshHome], {
+      cwd: repoRoot, encoding: 'utf8', env: { PATH: `${fakeBin}:${process.env.PATH ?? ''}` },
+    })
+
+    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('lifecycle configuration rejects custom-state.databasePath: only a non-empty relative dshHomePath expression is allowed')
+  })
+
   test('keeps the shared installer compatible with macOS Bash 3.2 empty-array semantics', async () => {
     const source = await readFile(installerLibrary, 'utf8')
 

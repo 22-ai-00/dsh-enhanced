@@ -63,6 +63,8 @@ Install a minimal, runnable dsh-enhanced personal-assistant scenario.
 
 Options:
   --profile <name>          DSH profile (default: web)
+  --operation <name>        install, upgrade, or uninstall (default: install)
+  --confirm-dsh-home-stopped Required for upgrade/uninstall after stopping every process using this DSH_HOME
   --scenario <name>         auto, core, web, autonomy, lark, supervised, or full (default: auto)
   --workspace <absolute>    Web owner workspace (web/autonomy; default: current directory)
   --agent-preset <id>       Web owner Agent preset (web/autonomy; default: standard)
@@ -407,6 +409,32 @@ dsh_enhanced_ensure_pnpm() {
     dsh_enhanced_fail 1 "pnpm 版本校验失败：得到 ${current_version:-unknown}，期望 $DSH_ENHANCED_DEFAULT_PNPM_VERSION。"
     return $?
   fi
+}
+
+dsh_enhanced_require_existing_runtime() {
+  local ack_unverified_host="$1"
+  if ! command -v dsh >/dev/null 2>&1; then
+    dsh_enhanced_fail 1 'profile 生命周期事务需要已安装的 DSH；不会在事务外安装或升级全局 Host。'
+    return $?
+  fi
+  if ! command -v pnpm >/dev/null 2>&1; then
+    dsh_enhanced_fail 1 'profile 生命周期事务需要已安装的 pnpm；不会在事务外修改全局工具链。'
+    return $?
+  fi
+  local current_version
+  current_version="$(dsh --version 2>/dev/null || true)"
+  if ! dsh_enhanced_is_host_version "$current_version"; then
+    dsh_enhanced_fail 1 '无法读取当前 DSH 版本；尚未开始 profile 生命周期事务。'
+    return $?
+  fi
+  if ! dsh_enhanced_version_in_range "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE"; then
+    printf '警告：DSH %s 超出 dsh-enhanced 已验证范围 %s。\n' "$current_version" "$DSH_ENHANCED_VERIFIED_HOST_RANGE" >&2
+    if [[ "$ack_unverified_host" != '1' ]]; then
+      dsh_enhanced_fail 2 '如需继续，请显式传入 --ack-unverified-host。'
+      return $?
+    fi
+  fi
+  printf '生命周期事务使用现有 DSH：%s；不会修改全局 DSH/pnpm。\n' "$current_version"
 }
 
 # Prints the Lark fields explicitly supplied by one patch layer as
@@ -1957,12 +1985,111 @@ dsh_enhanced_apply_web_owner() {
   dsh_enhanced_run "$dry_run" "$setup_bin" "${args[@]}"
 }
 
+dsh_enhanced_validate_lifecycle_state_paths() {
+  local profile="$1"
+  local dsh_home="$2"
+  local composed_path="${3:-}"
+  local dsh_executable=''
+  dsh_executable="$(command -v dsh 2>/dev/null)" || {
+    dsh_enhanced_fail 1 '找不到现有 dsh executable；尚未开始生命周期事务。'
+    return $?
+  }
+  local temporary=''
+  if [[ -z "$composed_path" ]]; then
+    temporary="$(mktemp "${TMPDIR:-/tmp}/dsh-enhanced-lifecycle-config.XXXXXX")" || return 1
+    composed_path="$temporary"
+  fi
+  if [[ ! -s "$composed_path" ]] && ! DSH_HOME="$dsh_home" dsh --profile "$profile" --dump-config > "$composed_path" 2>/dev/null; then
+    [[ -z "$temporary" ]] || rm -f -- "$temporary"
+    dsh_enhanced_fail 1 '现有 profile 无法组合；尚未开始生命周期事务。'
+    return $?
+  fi
+  local validator="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)/lifecycle-config.mjs"
+  if [[ ! -f "$validator" ]] || ! node "$validator" "$composed_path" "$dsh_home" "$dsh_executable"; then
+    [[ -z "$temporary" ]] || rm -f -- "$temporary"
+    dsh_enhanced_fail 1 'profile 生命周期状态路径未通过结构化校验。'
+    return $?
+  fi
+  [[ -z "$temporary" ]] || rm -f -- "$temporary"
+}
+
+dsh_enhanced_recover_profile_lifecycle() {
+  local profile="$1"
+  local dsh_home="$2"
+  local dry_run="$3"
+  local transaction_root="${dsh_home}.dsh-enhanced-transaction"
+  if [[ "$dry_run" == '1' ]]; then
+    [[ -e "$transaction_root" ]] || return 0
+    dsh_enhanced_fail 1 "检测到未完成的 profile 生命周期事务；请非 dry-run 重试以恢复：$transaction_root"
+    return $?
+  fi
+  dsh_enhanced_run_lifecycle_executor recover "$profile" "$dsh_home"
+}
+
+dsh_enhanced_run_lifecycle_executor() {
+  local operation="$1"
+  local profile="$2"
+  local dsh_home="$3"
+  shift 3
+  local install_directory
+  install_directory="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)" || return 1
+  local executor="$install_directory/lifecycle-profile.mjs"
+  local dsh_executable=''
+  local bwrap_executable=''
+  local flock_executable=''
+  if [[ ! -x /usr/bin/perl ]]; then
+    dsh_enhanced_fail 1 '安全生命周期事务需要 /usr/bin/perl 验证继承的内核锁。'
+    return $?
+  fi
+  local lock_path="${dsh_home}.dsh-enhanced-lifecycle.lock"
+  if [[ "$operation" == 'recover' ]]; then
+    dsh_executable='/nonexistent/dsh-not-required-for-recovery'
+    bwrap_executable='/nonexistent/bwrap-not-required-for-recovery'
+  else
+    dsh_executable="$(command -v dsh 2>/dev/null)" || { dsh_enhanced_fail 1 '找不到现有 dsh executable。'; return $?; }
+    bwrap_executable="$(command -v bwrap 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 bubblewrap（bwrap）。'; return $?; }
+  fi
+  flock_executable="$(command -v flock 2>/dev/null)" || { dsh_enhanced_fail 1 '安全生命周期事务需要 flock。'; return $?; }
+  if [[ ! -f "$executor" ]]; then dsh_enhanced_fail 1 "缺少生命周期执行器：$executor"; return $?; fi
+  DSH_ENHANCED_LIFECYCLE_FLOCK="$flock_executable" node "$executor" "$operation" "$profile" "$dsh_home" "$dsh_executable" "$bwrap_executable" "$@"
+  local status=$?
+  if [[ "$status" == '75' ]]; then
+    dsh_enhanced_fail 1 "DSH_HOME 生命周期锁正在占用，拒绝并发操作：$lock_path"
+    return $?
+  fi
+  return "$status"
+}
+
+dsh_enhanced_profile_lifecycle() {
+  local operation="$1"
+  local profile="$2"
+  local dsh_home="$3"
+  local dry_run="$4"
+  shift 4
+  if [[ "$dry_run" == '1' ]]; then
+    printf '\nprofile 生命周期事务（%s）：\n' "$operation"
+    printf '  - 持有 DSH_HOME 外部非阻塞锁，在无网络 bwrap 中复制、更新、组合并实际激活私有副本。\n'
+    printf '  - 仅当副本全部通过后，以同文件系统 rename 原子切换；故障现场保持绑定并可恢复。\n'
+    if [[ "$operation" == 'upgrade' ]]; then
+      dsh_enhanced_print_command dsh plugin --profile "$profile" add "$@"
+    else
+      printf '  - 卸载会归档完整旧 profile；检测到第三方顶层 bundle 时拒绝操作。\n'
+    fi
+    dsh_enhanced_print_command dsh --profile "$profile" --dump-config
+    dsh_enhanced_print_command dsh --profile "$profile" --host 127.0.0.1 --no-open --port 0
+    return 0
+  fi
+  dsh_enhanced_run_lifecycle_executor "$operation" "$profile" "$dsh_home" "$@"
+}
+
 dsh_enhanced_install() {
   local source_mode="$1"
   local repo_root="$2"
   shift 2
 
   local profile="${DSH_ENHANCED_PROFILE:-web}"
+  local operation='install'
+  local confirm_dsh_home_stopped='0'
   local scenario='auto'
   local scenario_explicit='0'
   local deployment_mode='standard'
@@ -1989,6 +2116,7 @@ dsh_enhanced_install() {
   local isolation_lease_minutes='60'
   local isolation_runtime_minutes='10'
   local dsh_version="${DSH_VERSION:-$DSH_ENHANCED_DEFAULT_DSH_VERSION}"
+  local dsh_version_explicit='0'
   local plugin_version="${DSH_ENHANCED_VERSION:-latest}"
   local manage_service='1'
   local ack_existing_automations='0'
@@ -2003,6 +2131,15 @@ dsh_enhanced_install() {
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--profile 需要一个值。'; return $?; }
         profile="$2"
         shift 2
+        ;;
+      --operation)
+        [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--operation 需要一个值。'; return $?; }
+        operation="$2"
+        shift 2
+        ;;
+      --confirm-dsh-home-stopped)
+        confirm_dsh_home_stopped='1'
+        shift
         ;;
       --scenario)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--scenario 需要一个值。'; return $?; }
@@ -2102,6 +2239,7 @@ dsh_enhanced_install() {
       --dsh-version)
         [[ $# -ge 2 ]] || { dsh_enhanced_fail 2 '--dsh-version 需要一个值。'; return $?; }
         dsh_version="$2"
+        dsh_version_explicit='1'
         shift 2
         ;;
       --plugin-version)
@@ -2148,6 +2286,10 @@ dsh_enhanced_install() {
     dsh_enhanced_fail 2 'profile 名称不合法；只能包含字母、数字、点、下划线和连字符。'
     return $?
   fi
+  case "$operation" in install|upgrade|uninstall) ;; *)
+    dsh_enhanced_fail 2 '--operation 只能是 install、upgrade 或 uninstall。'
+    return $?
+  esac
   case "$lark_mode" in auto|keep|configure|skip) ;; *)
     dsh_enhanced_fail 2 '--lark 只能是 auto、keep、configure 或 skip。'
     return $?
@@ -2227,6 +2369,55 @@ dsh_enhanced_install() {
       return $?
     fi
   fi
+  if [[ "$operation" != 'install' ]]; then
+    if [[ "$source_mode" != 'local' ]]; then
+      dsh_enhanced_fail 2 'profile 生命周期事务当前只由完整本地仓库安装器提供；发布资产尚未包含配套验证器。'
+      return $?
+    fi
+    if [[ "$confirm_dsh_home_stopped" != '1' ]]; then
+      dsh_enhanced_fail 2 "--operation $operation 需要 --confirm-dsh-home-stopped；复制 SQLite/WAL 前必须停止所有使用该 DSH_HOME 的进程。"
+      return $?
+    fi
+    if [[ "$scenario_explicit" != '1' || ( "$scenario" != 'web' && "$scenario" != 'autonomy' ) ]]; then
+      dsh_enhanced_fail 2 '--operation upgrade/uninstall 当前需要显式 --scenario web 或 --scenario autonomy。'
+      return $?
+    fi
+    if [[ "$dry_run" == '1' && -e "${dsh_home}.dsh-enhanced-transaction" ]]; then
+      dsh_enhanced_fail 1 "检测到未完成的 profile 生命周期事务；请非 dry-run 重试以持锁恢复：${dsh_home}.dsh-enhanced-transaction"
+      return $?
+    fi
+    if [[ "$dry_run" == '1' && ! -f "$dsh_home/profiles/$profile/package.json" ]]; then
+      dsh_enhanced_fail 1 "--operation $operation 需要已存在的 profile：$dsh_home/profiles/$profile"
+      return $?
+    fi
+    if [[ "$permission_preset" != 'preserve' || "$agent_tools_mode" != 'preserve'
+      || "$model_mode" == 'configure' || -n "$model_provider" || "$lark_mode" == 'configure' || "$lark_mode" == 'keep' ]]; then
+      dsh_enhanced_fail 2 'profile 生命周期事务只更新安装包；权限、Agent 工具、模型和 Lark 配置必须保持 preserve/skip。'
+      return $?
+    fi
+    if [[ "$isolation_option_explicit" == '1' ]]; then
+      dsh_enhanced_fail 2 'profile 生命周期事务保留现有 Isolation 配置和预算；不得重新传入 --isolation-*。'
+      return $?
+    fi
+    if [[ -n "${add_ons[0]+set}" ]]; then
+      dsh_enhanced_fail 2 'profile 生命周期事务不会扩展能力；升级期间不能使用 --with。'
+      return $?
+    fi
+    if [[ "$dsh_version_explicit" == '1' ]]; then
+      dsh_enhanced_fail 2 'profile 生命周期事务不会修改全局 DSH；请先单独完成 Host 升级，再执行本操作。'
+      return $?
+    fi
+    model_mode='skip'
+    model_route_mode='skip'
+    lark_mode='skip'
+    if [[ "$dry_run" != '1' ]]; then
+      dsh_enhanced_recover_profile_lifecycle "$profile" "$dsh_home" "$dry_run" || return $?
+      if [[ ! -f "$dsh_home/profiles/$profile/package.json" ]]; then
+        dsh_enhanced_fail 1 "--operation $operation 需要已存在的 profile：$dsh_home/profiles/$profile"
+        return $?
+      fi
+    fi
+  fi
 
   if [[ ! -d "$dsh_home/profiles/$profile" ]]; then
     printf '\n安装前诊断：\n'
@@ -2275,7 +2466,7 @@ dsh_enhanced_install() {
     fi
     deployment_mode='supervised-growth'
   fi
-  if [[ "$scenario" == 'autonomy' ]]; then
+  if [[ "$scenario" == 'autonomy' && "$operation" == 'install' ]]; then
     if [[ ! "$isolation_image" =~ ^sha256:[0-9a-f]{64}$ ]]; then dsh_enhanced_fail 2 '--scenario autonomy 需要 --isolation-image sha256:<64位小写hex>。'; return $?; fi
     local value_limit value maximum label
     for value_limit in "$isolation_max_runs:10000:--isolation-max-runs" "$isolation_lease_minutes:10080:--isolation-lease-minutes" "$isolation_runtime_minutes:1440:--isolation-runtime-minutes"; do
@@ -2335,6 +2526,7 @@ dsh_enhanced_install() {
   fi
 
   printf '安装来源：%s\n' "$source_mode"
+  printf '生命周期操作：%s\n' "$operation"
   printf '目标 profile：%s\n' "$profile"
   printf '部署场景：%s\n' "$scenario"
   if [[ "$deployment_mode" != 'standard' ]]; then
@@ -2345,14 +2537,32 @@ dsh_enhanced_install() {
   if [[ "$dry_run" != '1' ]]; then
     dsh_enhanced_require_node || return $?
   fi
-  dsh_enhanced_ensure_dsh "$dsh_version" "$dry_run" "$ack_unverified_host" || return $?
-
-  if [[ "$source_mode" == 'local' ]]; then
+  if [[ "$operation" == 'install' ]]; then
+    dsh_enhanced_ensure_dsh "$dsh_version" "$dry_run" "$ack_unverified_host" || return $?
+  elif [[ "$dry_run" == '1' ]]; then
+    printf '生命周期事务：将使用现有 DSH/pnpm，不修改全局工具链。\n'
+  else
+    dsh_enhanced_require_existing_runtime "$ack_unverified_host" || return $?
+  fi
+  if [[ "$source_mode" == 'local' && "$operation" == 'install' ]]; then
     dsh_enhanced_ensure_pnpm "$dry_run" || return $?
+  fi
+  if [[ "$operation" == 'uninstall' ]]; then
+    dsh_enhanced_profile_lifecycle uninstall "$profile" "$dsh_home" "$dry_run"
+    return $?
+  fi
+
+  if [[ "$source_mode" == 'local' && "$operation" != 'uninstall' ]]; then
     printf '\n准备并构建当前仓库：\n'
     if [[ "$dry_run" == '1' ]]; then
-      dsh_enhanced_print_command pnpm --dir "$repo_root" install
+      if [[ "$operation" == 'upgrade' ]]; then
+        dsh_enhanced_print_command pnpm --dir "$repo_root" install --offline --frozen-lockfile
+      else
+        dsh_enhanced_print_command pnpm --dir "$repo_root" install
+      fi
       dsh_enhanced_print_command pnpm --dir "$repo_root" build
+    elif [[ "$operation" == 'upgrade' ]]; then
+      pnpm --dir "$repo_root" install --offline --frozen-lockfile && pnpm --dir "$repo_root" build
     else
       (cd "$repo_root" && pnpm install && pnpm build)
     fi
@@ -2406,8 +2616,30 @@ dsh_enhanced_install() {
     fi
     selected_slugs+=("$candidate")
   }
-  for slug in "${DSH_ENHANCED_CORE_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
-  case "$scenario" in
+  if [[ "$operation" == 'upgrade' ]]; then
+    local existing_slugs=''
+    if ! existing_slugs="$(node --input-type=module - "$dsh_home/profiles/$profile/package.json" <<'NODE'
+import { readFileSync } from 'node:fs'
+const manifest = JSON.parse(readFileSync(process.argv[2], 'utf8'))
+for (const name of Object.keys(manifest.dependencies ?? {})) {
+  const match = /^@dsh-enhanced\/([a-z0-9-]+)$/.exec(name)
+  if (match) process.stdout.write(match[1] + '\n')
+}
+NODE
+    )"; then
+      dsh_enhanced_fail 1 '现有 profile manifest 无法读取；尚未开始升级。'
+      return $?
+    fi
+    while IFS= read -r slug; do
+      [[ -n "$slug" ]] && dsh_enhanced_append_slug "$slug"
+    done <<< "$existing_slugs"
+    if [[ -z "${selected_slugs[0]+set}" ]]; then
+      dsh_enhanced_fail 1 '当前 profile 没有可升级的 @dsh-enhanced/* 顶层依赖。'
+      return $?
+    fi
+  else
+    for slug in "${DSH_ENHANCED_CORE_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
+    case "$scenario" in
     web)
       for slug in assistant-delivery assistant-goals assistant-web-owner; do dsh_enhanced_append_slug "$slug"; done
       ;;
@@ -2427,8 +2659,9 @@ dsh_enhanced_install() {
       # installer.
       for slug in "${DSH_ENHANCED_LEGACY_FULL_PLUGIN_SLUGS[@]}"; do dsh_enhanced_append_slug "$slug"; done
       ;;
-  esac
-  if [[ -n "${add_ons[0]+set}" ]]; then
+    esac
+  fi
+  if [[ "$operation" == 'install' && -n "${add_ons[0]+set}" ]]; then
     for slug in "${add_ons[@]}"; do
       case "$slug" in
         coding) dsh_enhanced_append_slug 'coding-subscription-provider' ;;
@@ -2447,7 +2680,7 @@ dsh_enhanced_install() {
   # Selecting the TraeX agent route as the default model pulls in its provider
   # bundle so the route can be enabled and resolve in the same run.  Interactive
   # selection happens after install and is handled on the spot in apply_model.
-  if dsh_enhanced_is_agent_route "$model_provider"; then
+  if [[ "$operation" == 'install' ]] && dsh_enhanced_is_agent_route "$model_provider"; then
     dsh_enhanced_append_slug 'traex-acp-provider'
   fi
 
@@ -2457,7 +2690,7 @@ dsh_enhanced_install() {
   # to start.  Keep the repair precise: do not enable Evolution for a normal
   # Lark profile and do not remove any user-selected bundle.
   local profile_manifest="$dsh_home/profiles/$profile/package.json"
-  if dsh_enhanced_profile_mentions_bundle "$profile_manifest" '@dsh-enhanced/assistant-evolution' \
+  if [[ "$operation" == 'install' ]] && dsh_enhanced_profile_mentions_bundle "$profile_manifest" '@dsh-enhanced/assistant-evolution' \
     && ! dsh_enhanced_profile_mentions_bundle "$profile_manifest" '@dsh-enhanced/assistant-evaluation'; then
     printf '兼容性修复：检测到旧 profile 含 assistant-evolution 但缺少 assistant-evaluation；本次将自动补齐其运行时 provider。\n'
     dsh_enhanced_append_slug 'assistant-evaluation'
@@ -2484,6 +2717,11 @@ dsh_enhanced_install() {
       targets+=("@dsh-enhanced/$slug@$resolved_plugin_version")
     fi
   done
+
+  if [[ "$operation" == 'upgrade' ]]; then
+    dsh_enhanced_profile_lifecycle upgrade "$profile" "$dsh_home" "$dry_run" "${targets[@]}"
+    return $?
+  fi
 
   printf '\n将安装以下顶层 bundle：\n'
   printf '  - %s\n' "${targets[@]}"

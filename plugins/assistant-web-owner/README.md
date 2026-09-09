@@ -65,7 +65,7 @@ Delivery 保存 Web owner/binding、Inbox 文本、内容摘要、尝试与租�
 
 仓库安装器 `--scenario autonomy` 调用本包 setup 的可选 `--isolation-image`、`--isolation-max-runs`、`--isolation-lease-ms`、`--isolation-runtime-ms`。普通 Web setup 不加载 Isolation；显式选择时需安装匹配版本的 Isolation、Actions 和 Keychain。
 
-该路径先验证最终合并配置，再使用实际配置的 Docker executable 和生产 supervisor 做固定任务探测，成功后初始化本机 owner 并原子写入有限 grant。重复执行不延长 grant、不重置账本、不替换或复活 owner；冲突配置拒绝并要求明确迁移。支持每 profile 独立状态路径，保留合法自定义 literal 路径；不执行自定义 YAML JS 路径表达式。setup 在失败前可能创建工作区目录，owner 数据库与 patch 也不能跨库原子提交。
+该路径先验证最终合并配置，再使用实际配置的 Docker executable 和生产 supervisor 做固定任务探测，成功后初始化本机 owner 并原子写入有限 grant。重复执行不延长 grant、不重置账本、不替换或复活 owner；冲突配置拒绝并要求明确迁移。Isolation、Actions、Keychain、Skills 与 Proactive 的可变状态路径均规范化到真实 `DSH_HOME` 内，Skills 的嵌套比较/留出 `stateRoot` 也受同一约束；已有祖先 symlink 逃逸会拒绝。旧 Skills/Proactive published-default SQLite 或 sidecar 若已有数据，不会静默切换位置，必须先停 Host 并显式离线迁移。setup 在失败前可能创建工作区目录，owner 数据库与 patch 也不能跨库原子提交。
 
 此选项额外使用本机 Docker、子进程和私有临时 staging；不拉取镜像或配置外部凭据。未知清理状态的探测目录保留以供排查。具体参数、前置条件和未完成的自治能力见[安装说明](../../scripts/install/README.md)。
 
