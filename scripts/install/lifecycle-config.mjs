@@ -6,6 +6,20 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const repositoryRequire = createRequire(import.meta.url)
 const storageFields = new Set(['databasePath', 'statePath', 'stateRoot', 'vaultRoot', 'spoolPath', 'runsPath', 'catalogPath', 'trustPath', 'scratchPath'])
 const trustedBundleName = /^@(?:deepseek-ai|dsh-enhanced)\/[a-z0-9][a-z0-9._-]*(?:\/[a-z0-9][a-z0-9._-]*)*$/u
+const lifecycleMarkers = new Map([
+  ['dsh-enhanced-assistant-web-owner', 'web'],
+  ['@dsh-enhanced/assistant-web-owner', 'web'],
+  ['dsh-enhanced-assistant-isolation', 'isolation'],
+  ['@dsh-enhanced/assistant-isolation', 'isolation'],
+  ['dsh-enhanced-lark-channel', 'lark'],
+  ['@dsh-enhanced/lark-channel', 'lark'],
+  ['dsh-enhanced-assistant-recovery', 'supervised'],
+  ['@dsh-enhanced/assistant-recovery', 'supervised'],
+  ['dsh-enhanced-assistant-automations', 'supervised'],
+  ['@dsh-enhanced/assistant-automations', 'supervised'],
+  ['dsh-enhanced-assistant-evolution', 'supervised'],
+  ['@dsh-enhanced/assistant-evolution', 'supervised'],
+])
 
 async function yamlModule(dshExecutable) {
   let resolved
@@ -132,11 +146,78 @@ export async function validateLifecycleConfig(source, { dshHome, dshExecutable }
   }
 }
 
+export async function classifyLifecycleScenario(source, { dshExecutable } = {}) {
+  const yaml = await yamlModule(dshExecutable)
+  const document = yaml.parseDocument(source, {
+    customTags: [{ tag: 'tag:yaml.org,2002:js', resolve: value => value }],
+    uniqueKeys: true,
+  })
+  if (document.errors.length > 0 || document.warnings.length > 0 || !yaml.isSeq(document.contents)) {
+    throw new Error('lifecycle configuration is not structurally valid YAML')
+  }
+  const active = { web: new Set(), isolation: new Set(), lark: new Set(), supervised: new Set() }
+  let larkRowCount = 0
+  for (const item of document.contents.items) {
+    if (!yaml.isMap(item)) throw new Error('lifecycle scenario configuration rows must be mappings')
+    const disabled = item.get('disabled')
+    if (disabled !== undefined && typeof disabled !== 'boolean') {
+      throw new Error('lifecycle scenario row disabled field must be boolean')
+    }
+    if (disabled === true) continue
+    const id = item.get('id')
+    const name = item.get('name')
+    if (typeof id !== 'string' || typeof name !== 'string') {
+      throw new Error('active lifecycle scenario rows must have string id and name fields')
+    }
+    const idKind = lifecycleMarkers.get(id)
+    const nameKind = lifecycleMarkers.get(name)
+    if (idKind !== undefined && nameKind !== undefined && idKind !== nameKind) {
+      throw new Error('lifecycle scenario row has conflicting id and name markers')
+    }
+    const kind = idKind ?? nameKind
+    if (kind === undefined) continue
+    const marker = `${id}\0${name}`
+    if (active[kind].has(marker)) throw new Error(`lifecycle scenario contains a duplicate active ${kind} row`)
+    if (kind === 'lark') {
+      larkRowCount += 1
+      if (larkRowCount > 1) throw new Error('lifecycle scenario contains ambiguous Lark rows')
+      const config = item.get('config')
+      if (!yaml.isMap(config) || typeof config.get('enabled') !== 'boolean') {
+        throw new Error('active Lark lifecycle row must have a structural boolean config.enabled field')
+      }
+      if (config.get('enabled') === false) continue
+    }
+    active[kind].add(marker)
+  }
+  if (active.web.size > 1 || active.isolation.size > 1 || active.lark.size > 1) {
+    throw new Error('lifecycle scenario contains duplicate active scenario rows')
+  }
+  const web = active.web.size === 1
+  const isolation = active.isolation.size === 1
+  const lark = active.lark.size === 1
+  if (lark && (web || isolation)) throw new Error('lifecycle scenario mixes active Lark and web/isolation rows')
+  if (isolation && !web) throw new Error('lifecycle autonomy scenario requires an active web owner row')
+  if (active.supervised.size > 0) return 'supervised'
+  if (lark) return 'lark'
+  if (isolation) return 'autonomy'
+  if (web) return 'web'
+  return 'unsupported'
+}
+
 if (process.argv[1] !== undefined && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const [sourcePath, dshHome, dshExecutable] = process.argv.slice(2)
-  if (sourcePath === undefined || dshHome === undefined || dshExecutable === undefined) {
-    process.stderr.write('usage: lifecycle-config.mjs <dump-config.yml> <dsh-home> <dsh-executable>\n')
+  const args = process.argv.slice(2)
+  const classify = args[0] === 'classify'
+  const [sourcePath, dshHome, dshExecutable] = classify ? [args[1], undefined, args[2]] : args
+  if (sourcePath === undefined || dshExecutable === undefined || (!classify && dshHome === undefined)) {
+    process.stderr.write('usage: lifecycle-config.mjs [classify] <dump-config.yml> [<dsh-home>] <dsh-executable>\n')
     process.exitCode = 2
+  } else if (classify) {
+    classifyLifecycleScenario(await readFile(sourcePath, 'utf8'), { dshExecutable }).then(scenario => {
+      process.stdout.write(`${scenario}\n`)
+    }).catch(error => {
+      process.stderr.write(`${error instanceof Error ? error.message : 'lifecycle scenario classification failed'}\n`)
+      process.exitCode = 1
+    })
   } else {
     validateLifecycleConfig(await readFile(sourcePath, 'utf8'), { dshHome, dshExecutable }).catch(error => {
       process.stderr.write(`${error instanceof Error ? error.message : 'lifecycle configuration validation failed'}\n`)

@@ -1,13 +1,84 @@
 import { describe, expect, test } from 'vitest'
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { readFileSync, writeFileSync } from 'node:fs'
-import { chmod, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { PassThrough } from 'node:stream'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import * as lark from '../src/index.ts'
+
+const lifecycleProfilePath = fileURLToPath(new URL('../../../scripts/install/lifecycle-profile.mjs', import.meta.url))
+
+async function startProductionLifecycleLockHolder(root: string, dshHome: string): Promise<{
+  release: () => Promise<void>
+  stop: () => Promise<void>
+}> {
+  const gatePath = join(root, 'lifecycle-lock-gate')
+  const flockWrapper = join(root, 'flock-with-ready-marker')
+  const fifo = spawnSync('/usr/bin/mkfifo', [gatePath], { encoding: 'utf8' })
+  if (fifo.status !== 0) throw new Error(`mkfifo failed: ${fifo.stderr}`)
+  await writeFile(flockWrapper, [
+    '#!/bin/sh',
+    '/usr/bin/flock "$@" || exit $?',
+    'last=',
+    'for argument in "$@"; do last=$argument; done',
+    'if [ "$last" = 5 ]; then',
+    "  printf 'rendezvous-ready\\n'",
+    '  /bin/cat "$DSH_ENHANCED_TEST_LOCK_GATE" >/dev/null',
+    'fi',
+    '',
+  ].join('\n'), { mode: 0o700 })
+  const child = spawn(process.execPath, [
+    lifecycleProfilePath, 'recover', 'web', dshHome, '/bin/true', '/bin/true',
+  ], {
+    env: {
+      ...process.env,
+      DSH_ENHANCED_LIFECYCLE_FLOCK: flockWrapper,
+      DSH_ENHANCED_TEST_LOCK_GATE: gatePath,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
+    child.once('error', reject)
+    child.once('close', (code, signal) => resolveExit({ code, signal }))
+  })
+  await Promise.race([
+    new Promise<void>(resolveReady => {
+      const inspect = (): void => {
+        if (stdout.includes('rendezvous-ready\n')) resolveReady()
+      }
+      child.stdout.on('data', inspect)
+      inspect()
+    }),
+    exited.then(result => {
+      throw new Error(`lifecycle holder exited before readiness (${JSON.stringify(result)}): ${stderr}`)
+    }),
+  ])
+  let finished = false
+  return {
+    async release() {
+      if (finished) return
+      finished = true
+      await writeFile(gatePath, 'release\n', 'utf8')
+      const result = await exited
+      expect(result).toEqual({ code: 0, signal: null })
+    },
+    async stop() {
+      if (finished) return
+      finished = true
+      child.kill('SIGKILL')
+      await exited
+    },
+  }
+}
 
 const directMessage = {
   messageId: 'om_1',
@@ -154,6 +225,86 @@ describe('Lark onboarding wizard inputs', () => {
     expect(JSON.stringify(lark.createLarkRegistrationOptions(base))).not.toContain('calendar:calendar:readonly')
     expect(JSON.stringify(lark.createLarkRegistrationOptions({ ...base, calendarReadonly: true }))).toContain('calendar:calendar:readonly')
   })
+
+  test.runIf(process.platform === 'linux')('blocks the production lifecycle entry through a canonical home alias', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-setup-lifecycle-entry-lock-'))
+    const dshHome = join(root, 'canonical-home')
+    const dshHomeAlias = join(root, 'home-alias')
+    await mkdir(dshHome)
+    await symlink(dshHome, dshHomeAlias)
+    const { dshHomeLifecycleRendezvousPath, withDshHomeLifecycleLock } = await import('../src/setup.ts')
+    const lockPath = dshHomeLifecycleRendezvousPath(dshHome)
+    try {
+      await withDshHomeLifecycleLock(dshHomeAlias, async () => {
+        const contender = spawnSync(process.execPath, [
+          lifecycleProfilePath, 'recover', 'web', dshHomeAlias, '/bin/true', '/bin/true',
+        ], { encoding: 'utf8' })
+        expect(contender.status).not.toBe(0)
+        expect(contender.stderr).toMatch(/DSH_HOME .*lock.*busy|DSH_HOME .*锁正在占用/iu)
+      })
+      const afterRelease = spawnSync(process.execPath, [
+        lifecycleProfilePath, 'recover', 'web', dshHomeAlias, '/bin/true', '/bin/true',
+      ], { encoding: 'utf8' })
+      expect(afterRelease).toMatchObject({ status: 0, signal: null })
+    } finally {
+      await rm(lockPath, { force: true })
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test.runIf(process.platform === 'linux')('rejects Lark setup before profile access while production lifecycle holds the canonical home lock', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'lark-lifecycle-holder-lock-'))
+    const dshHome = join(root, 'canonical-home')
+    const dshHomeAlias = join(root, 'home-alias')
+    const profileDirectory = join(dshHome, 'profiles', 'web')
+    const patchPath = join(profileDirectory, 'cordis.patch.yml')
+    await mkdir(profileDirectory, { recursive: true })
+    await writeFile(patchPath, 'profile-must-remain-untouched\n', 'utf8')
+    await symlink(dshHome, dshHomeAlias)
+    const holder = await startProductionLifecycleLockHolder(root, dshHomeAlias)
+    const { dshHomeLifecycleRendezvousPath } = await import('../src/setup.ts')
+    const lockPath = dshHomeLifecycleRendezvousPath(dshHome)
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHomeAlias
+    let profileReads = 0
+    try {
+      await expect(lark.runLarkSetup(['--profile', 'web', '--refresh-agent-policy', '--disable-agent-tools'], {
+        readEffectiveProfile() {
+          profileReads += 1
+          throw new Error('profile access must remain behind the home lock')
+        },
+      })).rejects.toThrow(/DSH_HOME lifecycle is busy/iu)
+      expect(profileReads).toBe(0)
+      expect(await readFile(patchPath, 'utf8')).toBe('profile-must-remain-untouched\n')
+      await holder.release()
+    } finally {
+      await holder.stop()
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      await rm(lockPath, { force: true })
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  test.runIf(process.platform === 'linux')('rejects an unsafe lifecycle rendezvous file', async () => {
+    const dshHome = await mkdtemp(join(tmpdir(), 'lark-home-lifecycle-unsafe-'))
+    const { dshHomeLifecycleRendezvousPath } = await import('../src/setup.ts')
+    const lockPath = dshHomeLifecycleRendezvousPath(dshHome)
+    await writeFile(lockPath, '', { mode: 0o600 })
+    await chmod(lockPath, 0o644)
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    try {
+      await expect(lark.runLarkSetup(['--refresh-agent-policy', '--disable-agent-tools'], {
+        readEffectiveProfile() { throw new Error('profile access must remain behind the home lock') },
+      })).rejects.toThrow(/lock is unsafe/iu)
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      await rm(lockPath, { force: true })
+    }
+  })
+
   test('serializes the complete profile setup transaction with a crash-safe SQLite lock', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lark-setup-lock-'))
     const patchPath = join(root, 'cordis.patch.yml')

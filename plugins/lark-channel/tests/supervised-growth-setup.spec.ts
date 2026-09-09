@@ -1,5 +1,5 @@
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
-import { spawnSync } from 'node:child_process'
+import { chmod, mkdtemp, mkdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,12 +20,84 @@ import {
   parseSupervisedGrowthSetupArgs,
   sameSupervisedGrowthBinding,
   selectUniqueOwnerBinding,
+  runSupervisedGrowthSetup,
   verifySupervisedGrowthResidentService,
   verifySupervisedGrowthRecoveryStage,
 } from '../src/supervised-growth-setup.ts'
+import { dshHomeLifecycleRendezvousPath } from '../src/setup.ts'
 
 const roots: string[] = []
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const lifecycleProfilePath = join(repoRoot, 'scripts/install/lifecycle-profile.mjs')
+
+async function startProductionLifecycleLockHolder(root: string, dshHome: string): Promise<{
+  release: () => Promise<void>
+  stop: () => Promise<void>
+}> {
+  const gatePath = join(root, 'lifecycle-lock-gate')
+  const flockWrapper = join(root, 'flock-with-ready-marker')
+  const fifo = spawnSync('/usr/bin/mkfifo', [gatePath], { encoding: 'utf8' })
+  if (fifo.status !== 0) throw new Error(`mkfifo failed: ${fifo.stderr}`)
+  await writeFile(flockWrapper, [
+    '#!/bin/sh',
+    '/usr/bin/flock "$@" || exit $?',
+    'last=',
+    'for argument in "$@"; do last=$argument; done',
+    'if [ "$last" = 5 ]; then',
+    "  printf 'rendezvous-ready\\n'",
+    '  /bin/cat "$DSH_ENHANCED_TEST_LOCK_GATE" >/dev/null',
+    'fi',
+    '',
+  ].join('\n'), { mode: 0o700 })
+  const child = spawn(process.execPath, [
+    lifecycleProfilePath, 'recover', 'web', dshHome, '/bin/true', '/bin/true',
+  ], {
+    env: {
+      ...process.env,
+      DSH_ENHANCED_LIFECYCLE_FLOCK: flockWrapper,
+      DSH_ENHANCED_TEST_LOCK_GATE: gatePath,
+    },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  let stdout = ''
+  let stderr = ''
+  child.stdout.setEncoding('utf8')
+  child.stderr.setEncoding('utf8')
+  child.stdout.on('data', chunk => { stdout += chunk })
+  child.stderr.on('data', chunk => { stderr += chunk })
+  const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveExit, reject) => {
+    child.once('error', reject)
+    child.once('close', (code, signal) => resolveExit({ code, signal }))
+  })
+  await Promise.race([
+    new Promise<void>(resolveReady => {
+      const inspect = (): void => {
+        if (stdout.includes('rendezvous-ready\n')) resolveReady()
+      }
+      child.stdout.on('data', inspect)
+      inspect()
+    }),
+    exited.then(result => {
+      throw new Error(`lifecycle holder exited before readiness (${JSON.stringify(result)}): ${stderr}`)
+    }),
+  ])
+  let finished = false
+  return {
+    async release() {
+      if (finished) return
+      finished = true
+      await writeFile(gatePath, 'release\n', 'utf8')
+      const result = await exited
+      expect(result).toEqual({ code: 0, signal: null })
+    },
+    async stop() {
+      if (finished) return
+      finished = true
+      child.kill('SIGKILL')
+      await exited
+    },
+  }
+}
 
 function bootstrapExpectation(
   input: readonly RecoveryBootstrapAttestation[],
@@ -97,6 +169,48 @@ const binding = {
 } as const
 
 describe('supervised-growth setup guards', () => {
+  test.runIf(process.platform === 'linux')('rejects supervised setup before profile access while production lifecycle holds the canonical home lock', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'supervised-lifecycle-holder-lock-'))
+    roots.push(root)
+    const dshHome = join(root, 'canonical-home')
+    const dshHomeAlias = join(root, 'home-alias')
+    await mkdir(join(dshHome, 'profiles', 'web'), { recursive: true })
+    await symlink(dshHome, dshHomeAlias)
+    const holder = await startProductionLifecycleLockHolder(root, dshHomeAlias)
+    const lockPath = dshHomeLifecycleRendezvousPath(dshHome)
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHomeAlias
+    try {
+      await expect(runSupervisedGrowthSetup(['--profile', 'web']))
+        .rejects.toThrow(/DSH_HOME lifecycle is busy/iu)
+      await expect(readFile(join(dshHome, 'profiles', 'web', 'cordis.patch.yml'), 'utf8'))
+        .rejects.toMatchObject({ code: 'ENOENT' })
+      await holder.release()
+    } finally {
+      await holder.stop()
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      await rm(lockPath, { force: true })
+    }
+  })
+
+  test.runIf(process.platform === 'linux')('takes the home lifecycle lock before reading or mutating the profile', async () => {
+    const dshHome = await mkdtemp(join(tmpdir(), 'supervised-home-lifecycle-lock-'))
+    roots.push(dshHome)
+    const lockPath = dshHomeLifecycleRendezvousPath(dshHome)
+    await writeFile(lockPath, '', { mode: 0o600 })
+    await chmod(lockPath, 0o644)
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = dshHome
+    try {
+      await expect(runSupervisedGrowthSetup()).rejects.toThrow(/lifecycle rendezvous lock is unsafe/iu)
+    } finally {
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+      await rm(lockPath, { force: true })
+    }
+  })
+
   test('requires an explicit acknowledgement before every existing active job can coexist', () => {
     expect(() => assertSupervisedGrowthAutomationGuard([
       { id: 'owner-created-job', status: 'active' },

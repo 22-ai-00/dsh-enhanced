@@ -1,0 +1,117 @@
+{
+  "schema": "dsh/autonomy-delivery-evidence/v1",
+  "date": "2026-09-09",
+  "baseline": "559c3783cf2356acdaa4275b60e3bd2cb8ddeafe",
+  "scope": [
+    "WP17 Linux systemd --user service-aware upgrade for an existing standard Lark profile",
+    "Canonical DSH_HOME serialization shared by installer lifecycle, Lark setup, and supervised setup",
+    "Crash-safe service inventory, stop, mask, activation, readiness, cleanup, and recovery"
+  ],
+  "workPackages": {
+    "verified": 3,
+    "implementing": 13,
+    "todo": 2,
+    "wp17": "implementing"
+  },
+  "supportedBoundary": {
+    "platform": "Linux",
+    "serviceManager": "systemd --user",
+    "operation": "upgrade",
+    "scenario": "lark",
+    "profileShape": "exactly one enabled standard Lark row and no supervised marker",
+    "packageScope": "only already-installed @dsh-enhanced/* top-level dependencies"
+  },
+  "implementation": [
+    "All setup and lifecycle entry points serialize on the canonical DSH_HOME rendezvous lock; the lifecycle executor additionally holds a parent-anchored per-home lock.",
+    "The public entry resolves canonical homes even through a dangling symlink and runs bound transaction recovery before composed-profile classification, npm registry/store access, package work, or new service mutation.",
+    "A single structural lifecycle scenario classifier rejects malformed, duplicate, mixed, spoofed, and supervised configurations; expected source and staged scenarios are integrity-bound in the transaction manifest and checked before, after package mutation, and after activation.",
+    "The v2 transaction binds the original/staged directory identities and profile digests, complete service inventory, masks, enablement barriers, dynamic containment state, and service acceptance evidence.",
+    "User-control masks and no-replace enablement barriers are persisted before stopping services; readiness requires fresh InvocationID journal evidence and a stability check before old-home cleanup.",
+    "The crash guardian is detached, handles SIGHUP/SIGINT/SIGTERM, inherits the parent directory and both locked file descriptions as fd 3/4/5, stops known units immediately, and repeatedly performs strict dual census plus fresh ownership classification for dynamic units.",
+    "Unknown dynamic ownership never authorizes stopping a foreign unit and never permits containment completion; the guardian keeps the locks and retries until the control plane can prove a terminal state.",
+    "Unmanaged same-UID process checks include ancestor cwd/root/fd/maps strong references; only expected argv and inherited DSH_HOME weak references are exempt for ancestor wrappers.",
+    "Canonical cleanup is fd-anchored, deletes the manifest last, propagates failure, and leaves a discoverable retryable residue. Legacy v1 committed cleanup without transactionIdentity derives and rechecks the opened transaction identity.",
+    "Web/autonomy uninstall separately binds its clean staged destination as unsupported and remains idempotent once no managed dependencies remain."
+  ],
+  "targetedValidation": [
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=8 pnpm exec vitest run tests/installers.spec.ts",
+      "exitCode": 0,
+      "testsPassed": 203,
+      "testsSkipped": 1,
+      "testsTotal": 204,
+      "log": "/tmp/dsh-wp17-installers-final11.log",
+      "logSha256": "6140d2dce28ecf8b107c55ecd504fc173e7ac52cbcab181a67452e417e1ff037",
+      "skipReason": "The published v0.1.24 lifecycle-helper asset comparison is conditionally skipped because the release intentionally carries zero sentinel hashes."
+    },
+    {
+      "command": "CI=true VITEST_MAX_WORKERS=8 pnpm exec vitest run plugins/lark-channel/tests/setup.spec.ts plugins/lark-channel/tests/supervised-growth-setup.spec.ts",
+      "exitCode": 0,
+      "testsPassed": 123,
+      "testsSkipped": 0,
+      "log": "/tmp/dsh-wp17-setup-final5.log",
+      "logSha256": "cad4756226177e6288f39a31fb521204b58c7490c06d96e9c6d0f62633e4a973"
+    }
+  ],
+  "engineeringValidation": {
+    "command": "CI=true VITEST_MAX_WORKERS=8 pnpm check",
+    "exitCode": 0,
+    "log": "/tmp/dsh-wp17-service-final-check.log",
+    "logSha256": "a26cc226e197deee1bdc7cd88fbaa47f28fbfd45c62ebd51294adc6e7e4a9147",
+    "testFilesPassed": 340,
+    "testFilesSkipped": 12,
+    "testsPassed": 4434,
+    "testsSkipped": 43,
+    "packCount": 33,
+    "note": "Aggregate counts include root and per-package Vitest summaries. Conditional skips are existing environment/release-gated tests; the installer suite itself passed 203 and skipped only the zero-sentinel published-asset comparison."
+  },
+  "realSystemdPrimitiveValidation": {
+    "uuid": "22ff6b8f-a379-4f07-973a-9eae36e34aa3",
+    "unit": "dsh-profile-svclc-22ff6b8fa3794f07973a9eae36e34aa3.service",
+    "maskResult": "LoadState=masked and UnitFileState=masked; start returned nonzero while masked",
+    "freshInvocationId": "1c89436d4791491284e1b439119fbe9d",
+    "journalMarkerInvocationId": "d80040eae4144174a36a021eed557105",
+    "systemdDirectoryHashBeforeAndAfter": "00397fc75410287d9aafd85f3b8afb1b4b10a628749f9d9b786c1752c6882248",
+    "cleanup": "temporary unit and mask absent after validation",
+    "existingWebUnit": {
+      "state": "active/running",
+      "mainPid": 2218494,
+      "invocationId": "9c22900a91014ebda4b1d14e99398656",
+      "unchanged": true
+    },
+    "scopeNote": "This proves real systemd mask/start/readiness primitives and cleanup, not a complete real DSH_HOME upgrade transaction."
+  },
+  "securityReview": {
+    "status": "PASS",
+    "independent": true,
+    "findings": {
+      "blocker": 0,
+      "high": 0,
+      "medium": 0
+    },
+    "residualBoundary": "SIGKILL against the guardian, machine loss, or permanent systemd control-plane failure cannot complete containment. The canonical transaction remains, and normal lifecycle entry recovers first. During unknown ownership the guardian retains both lifecycle locks and retries indefinitely rather than stopping an unproven foreign unit or allowing another mutator to enter."
+  },
+  "releaseBoundary": {
+    "currentRelease": "v0.1.24",
+    "state": "zero-sentinel",
+    "behavior": "Remote upgrade and uninstall remain fail closed because the released lifecycle helper hashes are zero sentinels. This checkout-local implementation is not yet a published lifecycle capability."
+  },
+  "sourceHashes": {
+    "plugins/lark-channel/src/setup.ts": "8fbfe8f3a37bbcbb40e78d567fba3ae13cf530e83c25e7dc7674423d2b465a0e",
+    "plugins/lark-channel/src/supervised-growth-setup.ts": "9f908a92fc85caac31f0666e360d43be0ded8b23b1e181bc4e3eca638214510e",
+    "plugins/lark-channel/tests/setup.spec.ts": "36dc401c72f234318a89cb9e91bea07bb43683aef3b743630c2c85e47cf38a37",
+    "plugins/lark-channel/tests/supervised-growth-setup.spec.ts": "3c544f75ee32ae6404fa4b97e2fd113389d2fa66ec04a193f2fa899df32167f3",
+    "scripts/install/README.md": "b6eab29e264e4350bc247bd60151ed632ee95c951bdccb9171a8a4d647a41446",
+    "scripts/install/common.sh": "2908e21c2dd040a5d9475466b3683ec120982ce5ad64eaf781e37d1daa5d49e8",
+    "scripts/install/lifecycle-config.mjs": "5d059f83b846b6efb51cb9e0eebc4f8aba414c792468243b7bfd2295b78df31b",
+    "scripts/install/lifecycle-profile.mjs": "b6bd37d418944f939a147dae5648ba6fa7feda746127e3d644174f355385db0d",
+    "tests/installers.spec.ts": "d68db31a8c7dad18c2d936e9bb75298497d6345f8070e2b9ab8a125aa05efb0f"
+  },
+  "limitations": [
+    "Lark uninstall is not supported.",
+    "Supervised upgrade and uninstall remain fail closed because a stable, side-effect-free cross-version Recovery/Automations attestation API is not available.",
+    "Non-Linux service-aware lifecycle is not supported.",
+    "No complete real DSH_HOME swap was run; the independent real systemd check covers the underlying unit/mask/readiness primitives only.",
+    "No cloud app, credentials, owner binding, Session, Goal, linger setting, or external supervisor was deleted."
+  ]
+}
