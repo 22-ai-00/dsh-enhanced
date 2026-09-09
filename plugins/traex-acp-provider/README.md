@@ -116,7 +116,7 @@ traex --sandbox read-only --ask-for-approval never acp serve
 | 凭据 | 不读取 TraeX auth 文件、不实现登录、不刷新或上传 token；只让 TraeX 在本机用户配置目录中使用自己的缓存凭据。 |
 | 浏览器 | 插件不会打开浏览器；用户在插件外执行 TraeX login 时可能打开。 |
 | ACP 权限 | 所有 permission request 均拒绝；不暴露 client-side FS、terminal 或 MCP server。 |
-| DSH 工具 | 请求中的 tool schema 会进入模型隐藏的兼容协议；只接受本次实际声明的精确工具名和对象参数，随后映射为 DSH tool call。真正的读写、网络、子进程或外部服务权限仍由对应 DSH 工具及 Harness 策略控制。 |
+| DSH 工具 | 请求中的 tool schema 会进入模型隐藏的兼容协议；只接受本次实际声明的精确工具名和对象参数，随后映射为 DSH tool call。工具声明只表示可用性，不构成授权；模型须遵循序列化的 DSH system/user 指令和先前 tool result。某项操作被拒绝后，除非后续经授权的 user 或 system 指令明确允许，模型不得重试、绕过或以等效操作替代；可以继续独立获准的工作，或如实说明阻塞，不能把未发生的工作称为完成。真正的读写、网络、子进程或外部服务权限仍由对应 DSH 工具及 Harness 策略控制。 |
 | 日志 | 不主动记录 prompt；stderr 有界且默认不输出内容。每次请求结算记录一条无凭据生命周期诊断（阶段/提交状态/结果分类/teardown、可测得的毫秒级延迟指标，以及 ACP 返回时的纯数值 usage 快照），并在观测目录时只记录模型数量。均不含 prompt、stderr 原文、认证凭据或 model id 原文；usage 快照可能包含 ACP 报告的 token 数量。 |
 | 安装脚本 | 包内没有 install/postinstall 脚本，也不会安装或更新 TraeX。 |
 

@@ -148,14 +148,13 @@ function validExpansion(value: unknown): value is SkillRunExpansion {
 }
 function expandSkillRuns(sourceSteps: readonly TraceStep[], observations: readonly unknown[], expansions: readonly SkillRunExpansion[]): readonly TraceStep[] {
   if (!Array.isArray(expansions) || expansions.length > 32 || expansions.some(value => !validExpansion(value))) fail('assistant-skills: invalid run expansion')
-  const calls = new Map<string, SkillRunExpansion>(); const stepIds = new Set<string>()
+  const calls = new Map<string, SkillRunExpansion>(); const runs = new Set<string>()
   for (const expansion of expansions) {
-    if (calls.has(expansion.callId)) fail('assistant-skills: invalid run expansion')
+    if (calls.has(expansion.callId) || runs.has(expansion.runId)) fail('assistant-skills: invalid run expansion')
     calls.set(expansion.callId, expansion)
-    for (const step of expansion.steps) {
-      if (stepIds.has(step.id)) fail('assistant-skills: invalid run expansion')
-      stepIds.add(step.id)
-    }
+    // Stored step IDs belong to a definition and repeat across distinct runs.
+    // An idempotent response for the same run is not another execution.
+    runs.add(expansion.runId)
   }
   const sourceCalls = new Set(sourceSteps.filter(step => step?.toolName === 'skill_run' && typeof step.id === 'string').map(step => step.id))
   if ([...calls.keys()].some(callId => !sourceCalls.has(callId))) fail('assistant-skills: invalid run expansion')

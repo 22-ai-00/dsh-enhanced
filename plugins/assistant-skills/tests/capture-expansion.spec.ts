@@ -45,6 +45,40 @@ test('expands only a successful exact stored skill run with its native checkpoin
   expect(proof!.inputsDigest).toMatch(/^[a-f0-9]{64}$/u)
 })
 
+test('captures two distinct executions of the same skill with their own bound inputs', async () => {
+  const f = await fixture()
+  const inputs = { message: 'second' }
+  const claim = f.store.claim(f.scope, { invocationId: 'reuse-twice', goalId: f.sourceGoal.id, sessionId: f.sourceGoal.sessionId,
+    skillName: f.saved.name, version: f.saved.version, inputs, goalExecutionRunId: f.sourceRunId,
+    goalDefinitionDigest: f.sourceGoal.definition.digest, nativeGoalId: f.sourceGoal.nativeGoalId })
+  f.store.finish(f.scope, claim.run.id, 'succeeded', [
+    { id: 'file-observation:1', state: 'succeeded', detail: `result:${digest('e')}` },
+    { id: 'write', state: 'succeeded', detail: `result:${digest('f')}` },
+  ])
+  const source = { ...f.source, steps: [...f.source.steps, { ...f.source.steps[0]!, id: 'second-outer-call',
+    arguments: { ...f.source.steps[0]!.arguments, invocation_id: 'reuse-twice', inputs_json: JSON.stringify(inputs) } }] }
+  const proofs = captureRunExpansions(source, f.scope, f.store)
+  const definition = createDefinition(source, { name: 'combined', description: 'Two actual writes.' }, ['read', 'write'], proofs)
+  const saved = f.store.save(f.scope, definition, 0)
+  const restored = f.store.get(f.scope, saved.name)!
+  expect(restored.steps.map(step => step.arguments)).toEqual([
+    { file_path: 'artifact.txt', content: 'bound' }, { file_path: 'artifact.txt', content: 'second' },
+  ])
+  expect(new Set(restored.steps.map(step => step.id)).size).toBe(2)
+  expect(restored.steps[1]!.dependsOn).toEqual([restored.steps[0]!.id])
+  expect(restored.fileObservations?.beforeSteps).toEqual(restored.steps.map(step => step.id))
+  expect(restored.runExpansions).toEqual(proofs)
+})
+
+test('never turns an idempotent response for one invocation into two executions', async () => {
+  const f = await fixture()
+  const source = { ...f.source, steps: [...f.source.steps, { ...f.source.steps[0]!, id: 'retry-outer-call' }] }
+  expect(() => captureRunExpansions(source, f.scope, f.store)).toThrow(/duplicate source skill_run execution/u)
+  const [proof] = captureRunExpansions(f.source, f.scope, f.store)
+  expect(() => createDefinition(source, { name: 'duplicate-run', description: 'Reject duplicate execution proof.' }, ['read', 'write'],
+    [proof!, { ...proof!, callId: 'retry-outer-call' }])).toThrow(/invalid run expansion/u)
+})
+
 test.each([
   ['wrong goal', (f: Awaited<ReturnType<typeof fixture>>) => ({ ...f.source, steps: [{ ...f.source.steps[0]!, arguments: { ...(f.source.steps[0]!.arguments as object), goal_id: 'other-goal' } }] })],
   ['wrong session', (f: Awaited<ReturnType<typeof fixture>>) => ({ ...f.source, goal: { ...f.source.goal, sessionId: 'other-session' } })],
