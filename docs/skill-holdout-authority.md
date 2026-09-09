@@ -57,6 +57,8 @@ The exported `qualifyHoldout` Host coordinator is also available to trusted inte
 
 ## Prospective qualification and finite canary
 
+Choose `order-summary/v2` for the ordinary Web example: it sums integer `amountCents`, including negatives, excludes cancelled orders and accepts empty input. Evaluation values are privately randomized after freeze; empty input is an explicit replay boundary. `order-summary/v1` retains its original nonnegative `cents` semantics and pin. Inspect the configured version to obtain its distinct generator digest. Existing v1 state remains resumable with its consumed cells intact; switching versions cannot start another qualification. Both versions cover the same task family.
+
 For the supported order-summary task, replace `datasetPath` in the private operator configuration with:
 
 ```json

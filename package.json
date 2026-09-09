@@ -35,7 +35,8 @@
     "test:autonomy:deepseek": "playwright test --config scripts/e2e/playwright-deepseek.config.mjs",
     "test:autonomy:setup": "playwright test --config scripts/e2e/playwright-goal-setup.config.mjs",
     "test:web-owner:real-skill": "playwright test --config scripts/e2e/playwright-real-skill.config.mjs",
-    "test:web-owner:real-capture": "playwright test --config scripts/e2e/playwright-real-capture.config.mjs"
+    "test:web-owner:real-capture": "playwright test --config scripts/e2e/playwright-real-capture.config.mjs",
+    "test:web-owner:real-canary": "playwright test --config scripts/e2e/playwright-real-canary.config.mjs"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "catalog:",

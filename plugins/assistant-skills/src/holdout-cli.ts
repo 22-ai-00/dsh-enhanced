@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { StringDecoder } from 'node:string_decoder'
 import { HoldoutAuthority, type AuthorityOptions, type QualificationBinding, type CellObservation } from './holdout-authority.js'
-import { createProspectiveCertificate, generateProspectiveDataset, generatorDigest, type ProspectiveHoldoutCertificate } from './prospective-holdout.js'
+import { createProspectiveCertificate, generateProspectiveDataset, prospectiveGeneratorDigest, type ProspectiveGeneratorName, type ProspectiveHoldoutCertificate } from './prospective-holdout.js'
 
 function privateParent(path: string): void {
   if (!isAbsolute(path) || realpathSync(dirname(path)) !== dirname(path)) throw new Error('private-path-required')
@@ -25,7 +25,7 @@ function privateRead(path: string, limit: number): string {
   } finally { closeSync(fd) }
 }
 function object(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value) }
-interface ProspectiveRecord { readonly phase: 'frozen' | 'generated' | 'complete'; readonly freezeId: string; readonly binding: QualificationBinding; readonly dataset?: AuthorityOptions['dataset']; readonly certificate?: ProspectiveHoldoutCertificate }
+interface ProspectiveRecord { readonly phase: 'frozen' | 'generated' | 'complete'; readonly generator: ProspectiveGeneratorName; readonly freezeId: string; readonly binding: QualificationBinding; readonly dataset?: AuthorityOptions['dataset']; readonly certificate?: ProspectiveHoldoutCertificate }
 
 /** Private operator process. Its stdin belongs to a trusted executor, never a model tool. */
 export async function main(argv = process.argv.slice(2)): Promise<void> {
@@ -35,11 +35,11 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   if (!object(config) || Object.keys(config).some(key => !['datasetPath', 'prospective', 'privateKeyPath', 'statePath', 'limits'].includes(key))
     || !['privateKeyPath', 'statePath'].every(key => typeof config[key] === 'string') || !object(config.limits)
     || hasDataset === hasProspective || hasDataset && typeof config.datasetPath !== 'string'
-    || hasProspective && (!object(config.prospective) || Object.keys(config.prospective).length !== 1 || config.prospective.generator !== 'order-summary/v1')) throw new Error('invalid-operator-config')
-  const privateKey = privateRead(config.privateKeyPath as string, 16384), prospective = hasProspective
+    || hasProspective && (!object(config.prospective) || Object.keys(config.prospective).length !== 1 || !['order-summary/v1', 'order-summary/v2'].includes(String(config.prospective.generator)))) throw new Error('invalid-operator-config')
+  const privateKey = privateRead(config.privateKeyPath as string, 16384), prospective = hasProspective, generator = prospective ? (config.prospective as { generator: ProspectiveGeneratorName }).generator : undefined
   const fixedOptions = (): AuthorityOptions => ({ dataset: JSON.parse(privateRead(config.datasetPath as string, 262144)), privateKey, limits: config.limits as unknown as AuthorityOptions['limits'] })
   if (argv[0] === '--inspect-config') {
-    if (prospective) { const publicKey = HoldoutAuthority.create({ dataset: { id: 'inspect', version: '1', cases: [{ id: 'r', kind: 'replay', stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'e', kind: 'evaluation', stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'g', kind: 'regression', stdin: '', expectedStdout: '', expectedExitCode: 0 }] }, privateKey, limits: config.limits as unknown as AuthorityOptions['limits'] }).metadata().publicKey; process.stdout.write(JSON.stringify({ publicKey, generatorDigest, limits: config.limits }) + '\n'); return }
+    if (prospective) { const publicKey = HoldoutAuthority.create({ dataset: { id: 'inspect', version: '1', cases: [{ id: 'r', kind: 'replay', stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'e', kind: 'evaluation', stdin: '', expectedStdout: '', expectedExitCode: 0 }, { id: 'g', kind: 'regression', stdin: '', expectedStdout: '', expectedExitCode: 0 }] }, privateKey, limits: config.limits as unknown as AuthorityOptions['limits'] }).metadata().publicKey; process.stdout.write(JSON.stringify({ publicKey, generatorDigest: prospectiveGeneratorDigest(generator!), limits: config.limits }) + '\n'); return }
     process.stdout.write(JSON.stringify(HoldoutAuthority.create(fixedOptions()).metadata()) + '\n'); return
   }
   const path = config.statePath as string
@@ -61,16 +61,16 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (authority) throw new Error('authority-already-begun')
     const freezeId = randomUUID()
     transaction(() => {
-      const result = db.prepare('UPDATE authority SET prospective=? WHERE id=1 AND controller=? AND lease_until>?').run(JSON.stringify({ phase: 'frozen', freezeId, binding } satisfies ProspectiveRecord), controller, Date.now())
+      const result = db.prepare('UPDATE authority SET prospective=? WHERE id=1 AND controller=? AND lease_until>?').run(JSON.stringify({ phase: 'frozen', generator: generator!, freezeId, binding } satisfies ProspectiveRecord), controller, Date.now())
       if (result.changes !== 1) throw new Error('authority-controller-lost')
     })
-    const dataset = generateProspectiveDataset(), certificate = createProspectiveCertificate(binding, dataset, privateKey, freezeId)
+    const dataset = generateProspectiveDataset(generator!), certificate = createProspectiveCertificate(binding, dataset, privateKey, freezeId)
     return transaction(() => {
-      const result = db.prepare('UPDATE authority SET prospective=? WHERE id=1 AND controller=? AND lease_until>?').run(JSON.stringify({ phase: 'generated', freezeId, binding, dataset, certificate } satisfies ProspectiveRecord), controller, Date.now())
+      const result = db.prepare('UPDATE authority SET prospective=? WHERE id=1 AND controller=? AND lease_until>?').run(JSON.stringify({ phase: 'generated', generator: generator!, freezeId, binding, dataset, certificate } satisfies ProspectiveRecord), controller, Date.now())
       if (result.changes !== 1) throw new Error('authority-controller-lost')
       authority = HoldoutAuthority.create({ dataset, privateKey, limits: config.limits as unknown as AuthorityOptions['limits'], prospective: certificate })
       const begun = authority.begin(binding)
-      const completed = db.prepare('UPDATE authority SET state=?, prospective=?, lease_until=? WHERE id=1 AND controller=? AND lease_until>?').run(authority.serialize(), JSON.stringify({ phase: 'complete', freezeId, binding, dataset, certificate } satisfies ProspectiveRecord), Date.now() + leaseMs, controller, Date.now())
+      const completed = db.prepare('UPDATE authority SET state=?, prospective=?, lease_until=? WHERE id=1 AND controller=? AND lease_until>?').run(authority.serialize(), JSON.stringify({ phase: 'complete', generator: generator!, freezeId, binding, dataset, certificate } satisfies ProspectiveRecord), Date.now() + leaseMs, controller, Date.now())
       if (completed.changes !== 1) throw new Error('authority-controller-lost')
       return begun
     })
@@ -83,7 +83,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       if (prospective) {
         if (row?.prospective) {
           const record = JSON.parse(row.prospective) as ProspectiveRecord
-          if (record.phase !== 'complete' || !row.state || !record.dataset || !record.certificate) throw new Error('prospective-authority-poisoned')
+          if (record.phase !== 'complete' || (record.generator ?? 'order-summary/v1') !== generator || !row.state || !record.dataset || record.dataset.version !== generator || !record.certificate || record.certificate.generatorDigest !== prospectiveGeneratorDigest(generator!)) throw new Error('prospective-authority-poisoned')
           authority = HoldoutAuthority.restore(row.state, { dataset: record.dataset, privateKey, limits: config.limits as unknown as AuthorityOptions['limits'], prospective: record.certificate })
         }
       } else authority = row?.state ? HoldoutAuthority.restore(row.state, fixedOptions()) : HoldoutAuthority.create(fixedOptions())
@@ -136,6 +136,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     db.close()
   }
 }
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+let isMain = false
+try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href } catch { /* Importing modules need not have a filesystem entry point. */ }
+if (isMain) {
   main().catch(() => { process.stderr.write('holdout authority unavailable; verify private operator configuration and controller lease\n'); process.exitCode = 1 })
 }

@@ -34,6 +34,7 @@ export interface LarkSetupArgs {
   tenant: string
   appId?: string
   createApp: boolean
+  calendarReadonly: boolean
   appName: string
   timeoutMs: number
   installServiceOnly: boolean
@@ -61,6 +62,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     accountProvided: false,
     tenant: 'personal',
     createApp: false,
+    calendarReadonly: false,
     appName: 'DSH Personal Assistant',
     timeoutMs: 300_000,
     installServiceOnly: false,
@@ -86,6 +88,7 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
     else if (option === '--tenant') result.tenant = argumentValue(argv, index++, option)
     else if (option === '--app-id') result.appId = argumentValue(argv, index++, option)
     else if (option === '--create-app') result.createApp = true
+    else if (option === '--calendar-readonly') result.calendarReadonly = true
     else if (option === '--install-service') result.installServiceOnly = true
     else if (option === '--refresh-agent-policy') result.refreshAgentPolicy = true
     else if (option === '--no-service') result.manageService = false
@@ -123,6 +126,9 @@ export function parseLarkSetupArgs(argv: readonly string[]): LarkSetupArgs {
   if (result.installServiceOnly && !result.manageService) {
     throw new Error('lark-channel setup: --install-service and --no-service cannot be used together')
   }
+  if (result.calendarReadonly && !result.createApp) {
+    throw new Error('lark-channel setup: --calendar-readonly requires --create-app so the application scope can be updated')
+  }
   if (result.installServiceOnly && (result.createApp || result.appId !== undefined)) {
     throw new Error('lark-channel setup: --install-service cannot be combined with application setup options')
   }
@@ -151,6 +157,7 @@ export interface LarkRegistrationOptionsInput {
   domain: 'feishu' | 'lark'
   appName: string
   appId?: string
+  calendarReadonly?: boolean
   signal: AbortSignal
   onQRCodeReady: RegisterAppOptions['onQRCodeReady']
   onStatusChange: NonNullable<RegisterAppOptions['onStatusChange']>
@@ -176,6 +183,7 @@ export function createLarkRegistrationOptions(input: LarkRegistrationOptionsInpu
         'im:message.reactions:write_only',
         'im:message:send_as_bot',
         'im:resource',
+        ...(input.calendarReadonly ? ['calendar:calendar:readonly'] : []),
       ] },
       events: { items: { tenant: ['im.message.receive_v1'] } },
       callbacks: { items: ['card.action.trigger'] },
@@ -346,6 +354,7 @@ Options:
   --account <id>         Local channel account id (default: primary)
   --tenant <id>          Local tenant namespace (default: personal)
   --create-app            Select, create, or officially update an app
+  --calendar-readonly      With --create-app, add Calendar read-only permission for exact calendar triggers
   --app-name <name>       New app name (default: DSH Personal Assistant)
   --app-id <cli_...>      Existing app id; combine with --create-app to update it
   --install-service       Only install/restart the profile's resident service
@@ -1309,6 +1318,7 @@ async function registerLarkApplication(args: LarkSetupArgs): Promise<RegisterApp
       domain: args.domain,
       appName: args.appName,
       ...(args.appId === undefined ? {} : { appId: args.appId }),
+      ...(args.calendarReadonly ? { calendarReadonly: true } : {}),
       signal: abortController.signal,
       onQRCodeReady(info) {
         process.stdout.write(`\n请在飞书中打开以下链接，选择已有应用或创建新应用（${info.expireIn} 秒内有效）：\n${info.url}\n\n`)

@@ -78,7 +78,7 @@ Configure a finite `externalHoldouts` profile with the exact owner scope, candid
 
 ### Finite automatic canary
 
-An operator can instead configure `prospective: { generator: 'order-summary/v1' }` in the private authority and pin the inspected `generatorDigest` in the Host profile, omitting `datasetDigest`. The authority freezes the candidate/baseline/budget before generating private random cases. This currently covers order-summary program behavior, not arbitrary task domains or historical training independence.
+An operator can instead configure `prospective: { generator: 'order-summary/v1' }` in the private authority and pin the inspected `generatorDigest` in the Host profile, omitting `datasetDigest`. The authority freezes the candidate/baseline/budget before generating private random cases. Use `order-summary/v2` for tasks with integer `amountCents`, including negative values, cancelled orders and empty input. The existing `order-summary/v1` retains its nonnegative `cents` contract and digest. Each version has a distinct inspected pin; changing versions cannot reset a consumed authority. This covers one order-summary task family, not arbitrary task domains or historical training independence.
 
 With a current owner request, `canary`/`compare`/`watch` Policy permissions and current background `promote`/`watch`/`rollback` authority, `skill_canary(candidate_id, profile_id, invocation_id, owner_route_id, expires_at, max_runs, canary_runs)` compares and admits a candidate only when its signed prospective receipt passes candidate checks, positive evaluation gain and critical regressions. Exact version activation, the execution quota and rollback watch commit atomically. Standalone qualification receipts do not grant permission.
 

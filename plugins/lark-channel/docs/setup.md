@@ -59,6 +59,8 @@ pnpm --filter @dsh-enhanced/lark-channel run onboard --profile web --create-app 
 - `im.message.receive_v1`：消息事件；
 - `card.action.trigger`：审批卡片、模型级联选择和最终确认按钮。
 
+Calendar 不在默认范围内。只有需要精确日历变更触发器时，才用 `--create-app --calendar-readonly` 更新应用，确认新增的 `calendar:calendar:readonly` 并发布版本；随后在 Lark Channel profile 配置的 `allowedCalendarIds` 填入已授权的 exact Calendar ID。此范围只允许读取，且不会让机器人自动枚举用户日历或让任意 Host 调用 Calendar API。
+
 事件与回调由官方流程预置为 WebSocket 长连接，不需要公网 callback URL。实现依据见飞书的[一键创建智能体应用](https://open.larkoffice.com/document/mcp_open_tools/integrating-agents-with-feishu/overview)和 Node SDK 的 [`registerApp` 文档](https://github.com/larksuite/node-sdk/blob/main/README.zh.md#%E4%B8%80%E9%94%AE%E5%88%9B%E5%BB%BA%E5%BA%94%E7%94%A8)。
 
 ### 复用已有应用
@@ -257,6 +259,7 @@ OAuth 前的 canary 不读取、写入或显示 App Secret。出现钥匙环解�
 1. 在[飞书开放平台](https://open.feishu.cn/app)创建“企业自建应用”，复制 `App ID` 与 `App Secret`；
 2. 在“添加应用能力”中开启“机器人”；
 3. 在“权限管理”中开通接收/发送单聊和群聊消息、`im:message.reactions:write_only` 和图片所需 `im:resource`；控制台若为接收事件提示额外权限，也按最小范围开通；
+   如要启用精确 Calendar 变更触发器，额外开通 `calendar:calendar:readonly`，并仅向应用共享操作员指定的 Calendar；
 4. 在“事件与回调/事件订阅”选择长连接，添加 [`im.message.receive_v1`](https://open.feishu.cn/document/server-docs/im-v1/message/events/receive)；使用审批卡或 `/model` 时，还需把回调订阅方式设为长连接并添加 `card.action.trigger`；
 5. 创建并发布应用版本，把可用范围至少包含自己。未发布或不在范围内时，客户端可能搜索不到机器人或不投递事件。
 

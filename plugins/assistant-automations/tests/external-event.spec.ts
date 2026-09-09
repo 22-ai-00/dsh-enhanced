@@ -11,13 +11,13 @@ import { AutomationStore, AutomationStoreError } from '../src/store.ts'
 const roots: string[] = []
 afterEach(async () => { await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true }))) })
 
-function envelope() {
+function envelope(kind: 'webhook' | 'lark-calendar' = 'webhook') {
   return {
     protocol: 'dsh-external-event/v1' as const,
-    source: { id: 'event-test', kind: 'webhook' as const, version: '1', configDigest: 'a'.repeat(64) },
+    source: { id: 'event-test', kind, version: '1', configDigest: 'a'.repeat(64) },
     event: { id: 'event-1', occurredAt: 1_000, receivedAt: 1_001 },
-    observation: { digest: 'b'.repeat(64), revision: '1', timeBasis: 'source-signed' as const },
-    trust: { method: 'hmac-sha256' as const, content: 'untrusted' as const },
+    observation: { digest: 'b'.repeat(64), revision: '1', timeBasis: kind === 'webhook' ? 'source-signed' as const : 'observed' as const },
+    trust: { method: kind === 'webhook' ? 'hmac-sha256' as const : 'https-observation' as const, content: 'untrusted' as const },
     target: { automationId: 'auto-event' }, deduplicationKey: 'event-test:event-1',
   }
 }
@@ -45,13 +45,13 @@ describe('external event envelope', () => {
       .toMatchObject({ event: { occurredAt: 3_600_001, receivedAt: 1 } })
   })
 
-  test('persists exact provenance, preserves it across restart, and rejects a changed duplicate', async () => {
+  test.each(['webhook', 'lark-calendar'] as const)('persists exact %s provenance across restart and rejects a changed duplicate', async kind => {
     const root = await mkdtemp(join(tmpdir(), 'assistant-automations-event-'))
     roots.push(root)
     const path = join(root, 'automations.sqlite')
     const firstStore = new AutomationStore({ path, now: () => 2_000 })
     firstStore.createApproved({ automationId: 'auto-event', idempotencyKey: 'create-event', definition })
-    const input = envelope()
+    const input = envelope(kind)
     const first = firstStore.ingestExternal({ automationId: 'auto-event', externalEventId: input.deduplicationKey,
       occurredAt: input.event.occurredAt, envelope: input })
     input.observation.revision = 'mutated-after-ingest'
@@ -59,9 +59,9 @@ describe('external event envelope', () => {
     firstStore.close()
     const restarted = new AutomationStore({ path, now: () => 2_001 })
     expect(restarted.getOccurrence(first.id)).toMatchObject({ externalEvent: { observation: { revision: '1' } } })
-    expect(restarted.ingestExternal({ automationId: 'auto-event', externalEventId: envelope().deduplicationKey,
-      occurredAt: 1_000, envelope: envelope() }).id).toBe(first.id)
-    const changed = envelope(); changed.observation.revision = '2'
+    expect(restarted.ingestExternal({ automationId: 'auto-event', externalEventId: envelope(kind).deduplicationKey,
+      occurredAt: 1_000, envelope: envelope(kind) }).id).toBe(first.id)
+    const changed = envelope(kind); changed.observation.revision = '2'
     expect(() => restarted.ingestExternal({ automationId: 'auto-event', externalEventId: changed.deduplicationKey,
       occurredAt: changed.event.occurredAt, envelope: changed }))
       .toThrowError(expect.objectContaining<Partial<AutomationStoreError>>({ code: 'idempotency-conflict' }))

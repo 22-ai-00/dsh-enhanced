@@ -271,6 +271,13 @@ export interface LarkTransport {
     fileKey: string,
     options: { maxBytes: number; signal: AbortSignal },
   ): Promise<LarkInboundImage>
+  /**
+   * Narrow Calendar v4 read bridge.  The transport retains the app credential
+   * and tenant-token cache; callers receive only the selected response page.
+   */
+  readCalendarEventPage?(
+    input: Readonly<{ calendarId: string; startTime: number; endTime: number; pageSize: number; pageToken?: string; signal: AbortSignal }>,
+  ): Promise<unknown>
   send(chatId: string, input: LarkSendInput, options?: LarkSendOptions): Promise<LarkSendResult>
 }
 

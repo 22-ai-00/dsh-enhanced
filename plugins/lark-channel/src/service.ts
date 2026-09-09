@@ -61,6 +61,16 @@ function waitForAbort(signals: readonly AbortSignal[]): Promise<void> {
   })
 }
 
+async function awaitWithAbort<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) throw signal.reason
+  return await new Promise<T>((resolve, reject) => {
+    const aborted = () => { cleanup(); reject(signal.reason) }
+    const cleanup = () => signal.removeEventListener('abort', aborted)
+    signal.addEventListener('abort', aborted, { once: true })
+    void operation.then(value => { cleanup(); resolve(value) }, error => { cleanup(); reject(error) })
+  })
+}
+
 export class LarkChannelService extends Service {
   static Config = Config
 
@@ -68,6 +78,9 @@ export class LarkChannelService extends Service {
   private readonly stopController = new AbortController()
   private readonly lifecycle: Promise<void>
   private adapter: LarkDeliveryAdapter | undefined
+  private transport: LarkTransport | undefined
+  private transportSignal: AbortSignal | undefined
+  private readonly allowedCalendarIds: ReadonlySet<string>
   private disabled = false
   private active = true
 
@@ -77,6 +90,7 @@ export class LarkChannelService extends Service {
     if (delivery === undefined) throw new Error('lark-channel: assistantDelivery service is required')
     const config = Config(input) as Required<Omit<import('./config.js').Config, 'appSecretEnv' | 'credentialHandle'>>
       & Pick<import('./config.js').Config, 'appSecretEnv' | 'credentialHandle'>
+    this.allowedCalendarIds = new Set(config.allowedCalendarIds)
     if (!config.enabled) {
       this.disabled = true
       this.lifecycle = Promise.resolve()
@@ -120,6 +134,36 @@ export class LarkChannelService extends Service {
     }
   }
 
+  /** Read one exact Calendar v4 page without disclosing the app credential. */
+  async readCalendarEventPage(input: Readonly<{
+    calendarId: string
+    startTime: number
+    endTime: number
+    pageSize: number
+    pageToken?: string
+    signal: AbortSignal
+  }>): Promise<unknown> {
+    this.assertActive()
+    this.assertCalendarAccess(input.calendarId)
+    await awaitWithAbort(this.ready.promise, AbortSignal.any([input.signal, this.stopController.signal]))
+    this.assertActive()
+    this.assertCalendarAccess(input.calendarId)
+    if (input.signal.aborted) throw input.signal.reason
+    const transport = this.transport, transportSignal = this.transportSignal
+    if (transport?.readCalendarEventPage === undefined || transportSignal === undefined) {
+      throw new Error('lark-channel: Calendar v4 read capability is unavailable')
+    }
+    const signal = AbortSignal.any([input.signal, this.stopController.signal, transportSignal])
+    signal.throwIfAborted()
+    const result = await transport.readCalendarEventPage({ ...input, signal })
+    signal.throwIfAborted()
+    if (this.transport !== transport || this.transportSignal !== transportSignal) throw new Error('lark-channel: Calendar credential generation ended')
+    this.assertActive()
+    this.assertCalendarAccess(input.calendarId)
+    if (input.signal.aborted) throw input.signal.reason
+    return result
+  }
+
   private async runAdapter(
     delivery: AssistantDeliveryService,
     config: Required<Omit<import('./config.js').Config, 'appSecretEnv' | 'credentialHandle'>>
@@ -136,6 +180,9 @@ export class LarkChannelService extends Service {
       requestTimeoutMs: config.requestTimeoutMs,
       imageDownloadTimeoutMs: config.imageDownloadTimeoutMs,
     })
+    const generation = new AbortController()
+    this.transportSignal = AbortSignal.any([generation.signal, this.stopController.signal, ...(credentialSignal ? [credentialSignal] : [])])
+    this.transport = transport
     const adapter = new LarkDeliveryAdapter({
       account: config.account,
       tenant: config.tenant,
@@ -177,6 +224,8 @@ export class LarkChannelService extends Service {
       this.ready.reject(error)
       throw error
     } finally {
+      generation.abort(new Error('lark-channel credential generation ended'))
+      if (this.transport === transport) { this.transport = undefined; this.transportSignal = undefined }
       await unregister?.()
     }
   }
@@ -206,6 +255,12 @@ export class LarkChannelService extends Service {
 
   private assertActive(): void {
     if (!this.active) throw new Error('lark-channel service is disposed')
+  }
+
+  private assertCalendarAccess(calendarId: string): void {
+    if (!this.allowedCalendarIds.has(calendarId)) {
+      throw new Error('lark-channel: Calendar ID is not explicitly authorized')
+    }
   }
 }
 

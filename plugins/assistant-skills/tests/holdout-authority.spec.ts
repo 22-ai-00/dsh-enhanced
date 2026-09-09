@@ -1,7 +1,7 @@
 import { generateKeyPairSync } from 'node:crypto'
 import { describe, expect, test } from 'vitest'
 import { HoldoutAuthority, verifyHoldoutSignature, type CellObservation, type HoldoutDataset } from '../src/holdout-authority.ts'
-import { createProspectiveCertificate, generateProspectiveDataset, generatorDigest, prospectiveDatasetDigest, verifyProspectiveCertificate } from '../src/prospective-holdout.ts'
+import { createProspectiveCertificate, generateProspectiveDataset, generatorDigest, prospectiveDatasetDigest, prospectiveGeneratorDigest, verifyProspectiveCertificate } from '../src/prospective-holdout.ts'
 
 const hex = (letter: string) => letter.repeat(64)
 const dataset: HoldoutDataset = {
@@ -28,6 +28,26 @@ describe('independent holdout authority', () => {
     expect(verifyProspectiveCertificate(certificate, binding, generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest)).toBe(false)
     const authority = HoldoutAuthority.create({ dataset: prospectiveDataset, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 }, prospective: certificate, now: () => 1 })
     expect(authority.begin(binding).prospective).toEqual(certificate)
+  })
+
+  test('supports amountCents v2 with negative and empty cases under its own generator pin', () => {
+    const v2 = generateProspectiveDataset('order-summary/v2'), freezeId = '123e4567-e89b-42d3-a456-426614174001'
+    const certificate = createProspectiveCertificate(binding, v2, keys.privateKey, freezeId), pin = prospectiveGeneratorDigest('order-summary/v2')
+    expect(v2.version).toBe('order-summary/v2')
+    expect(v2.cases.find(value => value.kind === 'replay')?.expectedStdout).toBe('{}\n')
+    const sample = v2.cases.find(value => value.kind === 'evaluation')!
+    const orders = JSON.parse(sample.stdin) as { currency: string; amountCents: number; status: string }[]
+    const currencies = [...new Set(orders.filter(order => order.status !== 'cancelled').map(order => order.currency))].sort()
+    const totals = Object.fromEntries(currencies.map(currency => [currency, orders.filter(order => order.status !== 'cancelled' && order.currency === currency).reduce((sum, order) => sum + order.amountCents, 0)]))
+    expect(sample.expectedStdout).toBe(JSON.stringify(totals) + '\n')
+    expect(Object.values(totals).every(total => total < 0)).toBe(true)
+    expect(orders.some(order => order.status === 'cancelled' && order.amountCents > 0)).toBe(true)
+    expect(orders.every(order => !Object.hasOwn(order, 'cents'))).toBe(true)
+    expect(certificate.generatorDigest).toBe(pin)
+    expect(verifyProspectiveCertificate(certificate, binding, keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), pin)).toBe(true)
+    expect(verifyProspectiveCertificate(certificate, binding, keys.publicKey.export({ type: 'spki', format: 'pem' }).toString(), generatorDigest)).toBe(false)
+    const authority = HoldoutAuthority.create({ dataset: v2, privateKey: keys.privateKey, limits: { maxToolCalls: 2, maxOutputBytes: 1024 }, prospective: certificate, now: () => 1 })
+    expect(authority.begin(binding).prospective?.generatorDigest).toBe(pin)
   })
 
   test('binds a plan and signs cells and receipts without exposing expected answers', () => {

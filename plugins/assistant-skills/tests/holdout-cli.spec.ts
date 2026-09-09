@@ -1,6 +1,6 @@
 import { spawn, execFile } from 'node:child_process'
 import { generateKeyPairSync, createHash, randomUUID } from 'node:crypto'
-import { mkdtemp, writeFile, rm, chmod, stat } from 'node:fs/promises'
+import { mkdtemp, writeFile, rm, chmod, stat, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -13,20 +13,20 @@ import { createDefinition } from '../src/definition.ts'
 import { qualifyHoldout } from '../src/holdout-qualification.ts'
 import { openHoldoutProcess } from '../src/external-holdout.ts'
 import { verifyHoldoutSignature, type BeginResult, type HoldoutReceipt, type SignedCell } from '../src/holdout-authority.ts'
-import { generatorDigest, verifyProspectiveCertificate } from '../src/prospective-holdout.ts'
+import { generatorDigest, prospectiveGeneratorDigest, verifyProspectiveCertificate } from '../src/prospective-holdout.ts'
 
 const exec = promisify(execFile), roots: string[] = [], closes: (() => Promise<void>)[] = []
 const sha = (text: string) => createHash('sha256').update(text).digest('hex')
 const cli = fileURLToPath(new URL('../lib/holdout-cli.js', import.meta.url))
 const dataset = { id: 'operator-echo-cases', version: '1', cases: ['replay', 'evaluation', 'regression'].map((kind, index) => ({ id: `case-${index}`, kind, stdin: `${kind}\n`, expectedStdout: `${kind}\n`, expectedExitCode: 0 })) }
 afterEach(async () => { for (const close of closes.splice(0)) await close(); for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true }) })
-async function setup(container = false, prospective = false) {
+async function setup(container = false, prospective = false, generator: 'order-summary/v1' | 'order-summary/v2' = 'order-summary/v1') {
   const root = await mkdtemp(join(tmpdir(), 'holdout-cli-')); roots.push(root)
   const { privateKey, publicKey } = generateKeyPairSync('ed25519')
   const prefix = container ? '/authority' : root
   await writeFile(join(root, 'key.pem'), privateKey.export({ type: 'pkcs8', format: 'pem' }), { mode: 0o600 })
   if (!prospective) await writeFile(join(root, 'dataset.json'), JSON.stringify(dataset), { mode: 0o600 })
-  await writeFile(join(root, 'config.json'), JSON.stringify({ ...(prospective ? { prospective: { generator: 'order-summary/v1' } } : { datasetPath: join(prefix, 'dataset.json') }), privateKeyPath: join(prefix, 'key.pem'), statePath: join(prefix, 'state.sqlite'), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } }), { mode: 0o600 })
+  await writeFile(join(root, 'config.json'), JSON.stringify({ ...(prospective ? { prospective: { generator } } : { datasetPath: join(prefix, 'dataset.json') }), privateKeyPath: join(prefix, 'key.pem'), statePath: join(prefix, 'state.sqlite'), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } }), { mode: 0o600 })
   return { root, publicKey: publicKey.export({ type: 'spki', format: 'pem' }).toString() }
 }
 function connect(command: string, args: string[]) {
@@ -52,6 +52,14 @@ test('operator inspection returns public pins without consuming qualification st
   expect(stdout).not.toMatch(/PRIVATE KEY|expectedStdout|stdin/u)
 })
 
+test('installed symbolic-link CLI invokes the operator instead of silently exiting', async () => {
+  const config = await setup(false, true, 'order-summary/v2'), link = join(config.root, 'dsh-skill-holdout')
+  await symlink(cli, link)
+  const { stdout } = await exec(process.execPath, [link, '--inspect-config', join(config.root, 'config.json')])
+  expect(JSON.parse(stdout)).toMatchObject({ publicKey: config.publicKey, generatorDigest: prospectiveGeneratorDigest('order-summary/v2') })
+  await expect(stat(join(config.root, 'state.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
+})
+
 test('prospective inspection does not generate a dataset and begin returns a binding certificate', async () => {
   const config = await setup(false, true)
   const { stdout } = await exec(process.execPath, [cli, '--inspect-config', join(config.root, 'config.json')])
@@ -63,6 +71,38 @@ test('prospective inspection does not generate a dataset and begin returns a bin
   expect(verifyProspectiveCertificate(begin.prospective, frozen, config.publicKey, generatorDigest)).toBe(true)
   expect(begin.datasetDigest).toBe(begin.prospective!.datasetDigest)
   expect(JSON.stringify(begin)).not.toMatch(/expectedStdout|stdin/u)
+})
+
+test('v2 inspection pins its generator without consuming state and rejects generator changes on restore', async () => {
+  const config = await setup(false, true, 'order-summary/v2'), path = join(config.root, 'config.json')
+  const { stdout } = await exec(process.execPath, [cli, '--inspect-config', path])
+  expect(JSON.parse(stdout)).toMatchObject({ publicKey: config.publicKey, generatorDigest: prospectiveGeneratorDigest('order-summary/v2') })
+  await expect(stat(join(config.root, 'state.sqlite'))).rejects.toMatchObject({ code: 'ENOENT' })
+  const client = connect(process.execPath, [cli, '--config', path]); await client.read()
+  const frozen = binding(), begin = (await client.request('begin', frozen)).value as BeginResult
+  expect(begin.prospective?.generatorDigest).toBe(prospectiveGeneratorDigest('order-summary/v2'))
+  expect(verifyProspectiveCertificate(begin.prospective, frozen, config.publicKey, prospectiveGeneratorDigest('order-summary/v2'))).toBe(true)
+  await client.close()
+  await writeFile(path, JSON.stringify({ prospective: { generator: 'order-summary/v1' }, privateKeyPath: join(config.root, 'key.pem'), statePath: join(config.root, 'state.sqlite'), limits: { maxToolCalls: 4, maxOutputBytes: 16384 } }), { mode: 0o600 })
+  const restarted = connect(process.execPath, [cli, '--config', path]); expect(await restarted.exit).toBe(1)
+})
+
+test('legacy v1 frozen state resumes without regenerating or losing consumed cells', async () => {
+  const config = await setup(false, true), path = join(config.root, 'config.json')
+  const client = connect(process.execPath, [cli, '--config', path]); await client.read()
+  const begin = (await client.request('begin', binding())).value as BeginResult
+  const first = (await client.request('next')).value as SignedCell
+  await client.request('record', observation(first, 'intentionally-wrong'))
+  await client.close()
+  const db = new DatabaseSync(join(config.root, 'state.sqlite'))
+  // Version cdf2455 persisted this exact record shape without a generator field.
+  db.exec("UPDATE authority SET prospective=json_remove(prospective, '$.generator')")
+  db.close()
+  const restarted = connect(process.execPath, [cli, '--config', path]); await restarted.read()
+  const next = (await restarted.request('next')).value as SignedCell
+  expect(next.cellId).toBe('cell-2')
+  expect(next.planDigest).toBe(begin.planDigest)
+  expect(next.stdin).toBe(first.stdin)
 })
 
 test.each([false, true])('switching authority mode cannot reset durable qualification (prospective=%s)', async prospective => {

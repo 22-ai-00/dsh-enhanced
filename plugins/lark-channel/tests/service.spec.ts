@@ -18,6 +18,38 @@ function transport(): LarkTransport {
 }
 
 describe('Lark Cordis service', () => {
+  test('rejects a late successful Calendar page after its credential lease is revoked', async () => {
+    const ctx = new Context(), lease = new AbortController()
+    ctx.provide('assistantDelivery', { registerAdapter: async (adapter: DeliveryAdapter) => { const dispose = await adapter.start({ accept: vi.fn(), receipt: vi.fn() } as unknown as DeliveryAdapterContext); return async () => { await dispose?.() } } })
+    let resolveRead!: (value: unknown) => void, seenSignal: AbortSignal | undefined
+    const channel = transport(); channel.readCalendarEventPage = vi.fn(input => new Promise(resolve => { seenSignal = input.signal; resolveRead = resolve }))
+    ctx.provide('credentialsKeychain', { withSecret: async (_ctx: Context, _request: unknown, callback: (secret: string, signal: AbortSignal) => Promise<unknown>) => await callback('leased-secret', lease.signal) })
+    const service = new LarkChannelService(ctx, { enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', credentialHandle: 'lark-app-secret', allowedCalendarIds: ['cal'] }, { createTransport: () => channel })
+    await service.whenReady()
+    const pending = service.readCalendarEventPage({ calendarId: 'cal', startTime: 1, endTime: 2, pageSize: 1, signal: new AbortController().signal })
+    await vi.waitFor(() => expect(channel.readCalendarEventPage).toHaveBeenCalledOnce())
+    lease.abort(new Error('credential revoked'))
+    await vi.waitFor(() => expect(seenSignal?.aborted).toBe(true))
+    resolveRead({ items: ['late-success'] })
+    await expect(pending).rejects.toThrow(/credential revoked|aborted|cancelled/u)
+    await ctx.fiber.restart()
+  })
+  test('Calendar read is default-denied before transport and honors ready, abort, and disposal fences', async () => {
+    const ctx = new Context(), registerAdapter = vi.fn(async () => async () => {})
+    ctx.provide('assistantDelivery', { registerAdapter })
+    const channel = transport(); const read = vi.fn(async () => ({ items: ['event'] })); channel.readCalendarEventPage = read
+    const service = new LarkChannelService(ctx, { enabled: true, account: 'primary', tenant: 'tenant-a', appId: 'cli_0123456789abcdef', appSecretEnv: 'LARK_APP_SECRET', allowedCalendarIds: ['cal/one'] }, { env: { LARK_APP_SECRET: 'secret' }, createTransport: () => channel })
+    await expect(service.readCalendarEventPage({ calendarId: 'other', startTime: 1, endTime: 2, pageSize: 1, signal: new AbortController().signal })).rejects.toThrow(/explicitly authorized/u)
+    expect(read).not.toHaveBeenCalled()
+    const aborted = new AbortController(); aborted.abort(new Error('cancelled'))
+    await expect(service.readCalendarEventPage({ calendarId: 'cal/one', startTime: 1, endTime: 2, pageSize: 1, signal: aborted.signal })).rejects.toThrow(/cancelled/u)
+    expect(read).not.toHaveBeenCalled()
+    await service.whenReady()
+    await expect(service.readCalendarEventPage({ calendarId: 'cal/one', startTime: 1, endTime: 2, pageSize: 1, signal: new AbortController().signal })).resolves.toEqual({ items: ['event'] })
+    expect(read).toHaveBeenCalledOnce()
+    await ctx.fiber.restart()
+    await expect(service.readCalendarEventPage({ calendarId: 'cal/one', startTime: 1, endTime: 2, pageSize: 1, signal: new AbortController().signal })).rejects.toThrow(/disposed/u)
+  })
   test('resolves a named environment secret once and registers the thin adapter', async () => {
     const ctx = new Context()
     const unregister = vi.fn(async () => {})

@@ -39,6 +39,19 @@ async function settleBeforeTestDeadline<T>(promise: Promise<T>, timeoutMs = 250)
 }
 
 describe('Lark SDK boundary', () => {
+  test('reads one encoded Calendar v4 page with fixed query fields and maps cancellation and provider errors', async () => {
+    const request = vi.spyOn(Client.prototype, 'request').mockResolvedValue({ code: 0, data: { items: [] } })
+    const transport = new OfficialLarkTransport({ appId: 'cli_0123456789abcdef', appSecret: 'secret', domain: 'feishu', handshakeTimeoutMs: 1_000, imageDownloadTimeoutMs: 1_000 })
+    try {
+      await expect(transport.readCalendarEventPage({ calendarId: 'cal/a b', startTime: 10, endTime: 20, pageSize: 50, pageToken: 'next+/=', signal: new AbortController().signal })).resolves.toEqual({ items: [] })
+      expect((request.mock.calls[0]![0] as { url: string; method: string }).url).toBe('/open-apis/calendar/v4/calendars/cal%2Fa%20b/events?page_size=50&start_time=10&end_time=20&page_token=next%2B%2F%3D')
+      expect(request.mock.calls[0]![0]).toMatchObject({ maxContentLength: 1_048_576, maxBodyLength: 1_048_576 })
+      request.mockResolvedValueOnce({ code: 999, msg: 'denied' })
+      await expect(transport.readCalendarEventPage({ calendarId: 'cal', startTime: 1, endTime: 2, pageSize: 1, signal: new AbortController().signal })).rejects.toThrow()
+      const aborted = new AbortController(); aborted.abort()
+      await expect(transport.readCalendarEventPage({ calendarId: 'cal', startTime: 1, endTime: 2, pageSize: 1, signal: aborted.signal })).rejects.toThrow()
+    } finally { await transport.disconnect(); request.mockRestore() }
+  })
   test('removes provider image keys emitted by the real SDK normalizer', async () => {
     const imageKey = 'img_v3_secret-provider-capability'
     const raw: RawMessageEvent = {

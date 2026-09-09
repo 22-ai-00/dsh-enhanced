@@ -146,6 +146,14 @@ function linuxSecretServiceUnavailable(): unknown {
 }
 
 describe('Lark onboarding wizard inputs', () => {
+  test('adds Calendar readonly scope only through explicit create-app opt-in', () => {
+    expect(() => lark.parseLarkSetupArgs(['--calendar-readonly'])).toThrow(/requires --create-app/u)
+    const args = lark.parseLarkSetupArgs(['--create-app', '--calendar-readonly'])
+    expect(args.calendarReadonly).toBe(true)
+    const base = { domain: 'feishu' as const, appName: 'Test', signal: new AbortController().signal, onQRCodeReady() {}, onStatusChange() {} }
+    expect(JSON.stringify(lark.createLarkRegistrationOptions(base))).not.toContain('calendar:calendar:readonly')
+    expect(JSON.stringify(lark.createLarkRegistrationOptions({ ...base, calendarReadonly: true }))).toContain('calendar:calendar:readonly')
+  })
   test('serializes the complete profile setup transaction with a crash-safe SQLite lock', async () => {
     const root = await mkdtemp(join(tmpdir(), 'lark-setup-lock-'))
     const patchPath = join(root, 'cordis.patch.yml')

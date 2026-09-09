@@ -1433,6 +1433,42 @@ export class OfficialLarkTransport implements LarkTransport {
     }
   }
 
+  async readCalendarEventPage(input: Readonly<{
+    calendarId: string
+    startTime: number
+    endTime: number
+    pageSize: number
+    pageToken?: string
+    signal: AbortSignal
+  }>): Promise<unknown> {
+    if (!/^[\s\S]{1,512}$/u.test(input.calendarId) || input.calendarId.trim() !== input.calendarId || /[\p{Cc}]/u.test(input.calendarId)
+      || !Number.isSafeInteger(input.startTime) || !Number.isSafeInteger(input.endTime) || input.startTime < 0 || input.endTime <= input.startTime
+      || !Number.isSafeInteger(input.pageSize) || input.pageSize < 1 || input.pageSize > 1_000
+      || (input.pageToken !== undefined && (input.pageToken.length === 0 || input.pageToken.length > 4_096 || /[\p{Cc}]/u.test(input.pageToken)))) {
+      throw new LarkTransportError('format_error', 'Lark calendar request is invalid')
+    }
+    if (input.signal.aborted || this.lifecycleController.signal.aborted) {
+      throw new LarkTransportError('not_connected', 'Lark calendar request was cancelled')
+    }
+    return await this.boundedSdkRequest(async deadlineSignal => {
+      const params = new URLSearchParams({ page_size: String(input.pageSize), start_time: String(input.startTime), end_time: String(input.endTime) })
+      if (input.pageToken !== undefined) params.set('page_token', input.pageToken)
+      const response = await this.client.request<unknown>({
+        url: `/open-apis/calendar/v4/calendars/${encodeURIComponent(input.calendarId)}/events?${params.toString()}`,
+        method: 'GET', signal: deadlineSignal,
+        maxContentLength: 1_048_576, maxBodyLength: 1_048_576,
+      })
+      if (response !== null && typeof response === 'object' && 'code' in response) {
+        const code = (response as { code?: unknown }).code
+        if (code !== undefined && code !== 0) throw providerError({ code: typeof code === 'number' ? code : undefined, msg: undefined })
+      }
+      const data = response !== null && typeof response === 'object' && 'data' in response
+        ? (response as { data?: unknown }).data : undefined
+      if (data === undefined) throw new LarkTransportError('unknown', 'Lark calendar response omitted data')
+      return data
+    }, 'Lark calendar request', input.signal)
+  }
+
   async addReaction(messageId: string, emojiType: string): Promise<string> {
     return await this.boundedSdkRequest(async deadlineSignal => {
       const response = await this.client.request<{
